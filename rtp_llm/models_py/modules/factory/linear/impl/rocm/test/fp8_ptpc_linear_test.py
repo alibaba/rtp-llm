@@ -73,13 +73,9 @@ class RocmFp8PTPCLinearTest(unittest.TestCase):
 
         weight_shuffle = shuffle_weight(weight_q, layout=(16, 16))  # [N, K]
 
-        weight_for_init = weight_shuffle.T.contiguous()  # [K, N]
-
-        weight_scales_for_init = weight_scales.T.contiguous()  # [1, N]
-
         ptpc_linear = RocmFp8PTPCLinear(
-            weight=weight_for_init,  # [K, N]
-            weight_scales=weight_scales_for_init,  # [1, N]
+            weight=weight_shuffle,  # [N, K]
+            weight_scales=weight_scales,  # [N, 1]
             bias=None,
         )
 

@@ -3,8 +3,7 @@ from typing import Any, Dict
 
 import torch
 
-from rtp_llm.config.model_config import VitParameters
-from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.model_config import ModelConfig, VitParameters
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight
@@ -21,7 +20,6 @@ from rtp_llm.utils.model_weight import (
     slopes,
     trans_qkv,
     trans_qkv_b,
-    transpose,
 )
 from rtp_llm.utils.util import get_config_from_path
 
@@ -118,7 +116,7 @@ class BloomWeightInfo(ModelDeployWeightInfo):
                 AttnAtomicWeight(
                     W.attn_o_w,
                     [CkptWeightInfo("h.{i}.self_attention.dense.weight", identity)],
-                    transpose,
+                    identity,
                     config=attn_config,
                 ),
                 AttnAtomicWeight(
@@ -130,7 +128,7 @@ class BloomWeightInfo(ModelDeployWeightInfo):
                 FfnAtomicWeight(
                     W.ffn_w3,
                     [CkptWeightInfo("h.{i}.mlp.dense_h_to_4h.weight", identity)],
-                    transpose,
+                    identity,
                     config=ffn_config,
                 ),
                 FfnAtomicWeight(
@@ -142,7 +140,7 @@ class BloomWeightInfo(ModelDeployWeightInfo):
                 FfnAtomicWeight(
                     W.ffn_w2,
                     [CkptWeightInfo("h.{i}.mlp.dense_4h_to_h.weight", identity)],
-                    transpose,
+                    identity,
                     config=ffn_config,
                 ),
                 FfnAtomicWeight(
@@ -201,7 +199,9 @@ class Bloom(BaseModel):
         )
         config.attn_config.kv_head_num = config.attn_config.head_num
         config.hidden_size = config_json.get("n_embed", config_json.get("hidden_size"))
-        config.attn_config.size_per_head = config.hidden_size // config.attn_config.head_num
+        config.attn_config.size_per_head = (
+            config.hidden_size // config.attn_config.head_num
+        )
         config.num_layers = config_json["n_layer"]
         config.max_seq_len = config_json.get("seq_length", 2048)
         config.vocab_size = config_json["vocab_size"]

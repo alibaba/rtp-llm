@@ -14,11 +14,11 @@ def get_pad_size(size: int, align_size: int) -> int:
 
 
 def w_half1_t(ts: List[torch.Tensor], inter_size: int):
-    return ts[0][:inter_size, ...].T.contiguous()
+    return ts[0][:inter_size, ...].contiguous()
 
 
 def w_half2_t(ts: List[torch.Tensor], inter_size: int):
-    return ts[0][inter_size:, ...].T.contiguous()
+    return ts[0][inter_size:, ...].contiguous()
 
 
 def w_half1(ts: List[torch.Tensor], inter_size: int):
@@ -106,35 +106,6 @@ def pad(ts: List[torch.Tensor], align_size: int, dim: int):
     return torch.cat((ts[0], z), dim).to(ts[0].device).contiguous()
 
 
-def transpose_pad(ts: List[torch.Tensor], align_size: int, dim: int):
-    """Pad tensor to align_size along the specified dimension, then transpose.
-
-    Args:
-        ts: List containing the tensor to pad
-        align_size: Alignment size for padding (0 means no padding needed)
-        dim: Dimension to pad (0 or 1)
-    """
-    if align_size == 0:
-        return ts[0].T.contiguous()
-
-    # Calculate padding size based on tensor shape and align_size
-    size_to_align = ts[0].shape[dim]
-    pad_size = get_pad_size(size_to_align, align_size)
-
-    if pad_size == 0:
-        return ts[0].T.contiguous()
-
-    if dim == 0:
-        pad_shape = [pad_size, ts[0].shape[1]]
-    elif dim == 1:
-        pad_shape = [ts[0].shape[0], pad_size]
-    else:
-        raise Exception("unknown padding dim: " + str(dim))
-
-    z = torch.zeros(pad_shape, device=ts[0].device).to(ts[0].dtype)
-    return torch.cat((ts[0], z), dim).T.to(ts[0].device).contiguous()
-
-
 def b_half_merge(ts: List[torch.Tensor]):
     n_ts_1 = []
     n_ts_2 = []
@@ -153,10 +124,6 @@ def ones(ts: List[torch.Tensor], shape: List[int] = [1]) -> torch.Tensor:
     return torch.ones(shape, dtype=torch.half).contiguous()
 
 
-def transpose(ts: List[torch.Tensor]) -> torch.Tensor:
-    return ts[0].t().contiguous()
-
-
 def identity(ts: List[torch.Tensor], allow_empty: bool = False) -> torch.Tensor:
     if len(ts) == 0:
         if allow_empty:
@@ -164,6 +131,13 @@ def identity(ts: List[torch.Tensor], allow_empty: bool = False) -> torch.Tensor:
         else:
             raise Exception("ts is empty")
     return ts[0].contiguous()
+
+
+def transpose(ts: List[torch.Tensor]) -> torch.Tensor:
+    return ts[0].T.contiguous()
+
+
+t = transpose
 
 
 def multipy_identity(ts: List[torch.Tensor], scale: float) -> torch.Tensor:
@@ -283,11 +257,10 @@ def sp_neg1_part_by_head(
     size_per_head: int,
     **kwargs: Any,
 ) -> torch.Tensor:
-    t_0 = torch.split(
-        t[:, : head_num * size_per_head], head_num * size_per_head // tp, dim=-1
-    )[tp_rank]
-    t_1 = t[:, head_num * size_per_head :]
-    return torch.concat([t_0, t_1], dim=-1)
+    head_dim = head_num * size_per_head
+    t_0 = torch.split(t[:head_dim, :], head_dim // tp, dim=0)[tp_rank]
+    t_1 = t[head_dim:, :]
+    return torch.concat([t_0, t_1], dim=0)
 
 
 def sp_id(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> torch.Tensor:
@@ -334,10 +307,6 @@ def sp_moe_w1(
 
 def stack_(ts: List[torch.Tensor]):
     return stack_0(ts)
-
-
-def transpose_stack(ts: List[torch.Tensor]):
-    return stack_0(ts).transpose(-1, -2).contiguous()
 
 
 def stack_pad(ts: List[torch.Tensor], moe_align_size: int, dim: int):
@@ -451,18 +420,29 @@ def get_sp_tensor(
     tp_rank: int,
     **kwargs,
 ):
-    t = t.reshape([-1, (head_num + head_num_kv * 2) * size_per_head])
+    n_total = (head_num + head_num_kv * 2) * size_per_head
+    is_1d = t.dim() == 1
+    if is_1d:
+        t = t.reshape([n_total])
+        q_hidden = head_num * size_per_head
+        kv_hidden = head_num_kv * size_per_head
+        qs = sp_0(t[:q_hidden], tp, tp_rank)
+        if head_num_kv == 1:
+            ks = t[q_hidden : q_hidden + kv_hidden]
+            vs = t[q_hidden + kv_hidden :]
+        else:
+            ks = sp_0(t[q_hidden : q_hidden + kv_hidden], tp, tp_rank)
+            vs = sp_0(t[q_hidden + kv_hidden :], tp, tp_rank)
+        return torch.concat([qs, ks, vs], dim=0).contiguous()
+    t = t.reshape([n_total, -1])
     q_hidden = head_num * size_per_head
     kv_hidden = head_num_kv * size_per_head
-    if len(t.shape) == 1:
-        t = t.unsqueeze(0)
-    qs = sp_neg1(t[:, :q_hidden], tp, tp_rank)
-
+    qs = sp_0(t[:q_hidden, :], tp, tp_rank)
     _kv_tp = math.gcd(head_num_kv, tp)
     _kv_rank = tp_rank // (tp // _kv_tp)
-    ks = sp_neg1(t[:, q_hidden : q_hidden + kv_hidden], _kv_tp, _kv_rank)
-    vs = sp_neg1(t[:, q_hidden + kv_hidden :], _kv_tp, _kv_rank)
-    return torch.concat([qs, ks, vs], dim=1).contiguous()
+    ks = sp_0(t[q_hidden : q_hidden + kv_hidden, :], _kv_tp, _kv_rank)
+    vs = sp_0(t[q_hidden + kv_hidden :, :], _kv_tp, _kv_rank)
+    return torch.concat([qs, ks, vs], dim=0).contiguous()
 
 
 # MHA layout: [D, head*size_per_head, head*size_per_head, head*size_per_head] == [D, 3, D] (sp_neg)
@@ -479,10 +459,10 @@ def sp_head(
     # quant
     if len(t.shape) == 2 and t.dtype == torch.int32:
         nums = 32 // bits
-        # awq
+        # awq: weight is (N_total, K_packed) in new convention
         if (
-            t.shape[0] == hidden_size
-            and t.shape[1] == ((head_num + head_num_kv * 2) * size_per_head) // nums
+            t.shape[0] == (head_num + head_num_kv * 2) * size_per_head
+            and t.shape[1] == hidden_size // nums
         ):
             size_per_head = size_per_head // nums
     return get_sp_tensor(
@@ -514,13 +494,12 @@ def sp_head_qk_norm(
     t: torch.Tensor, tp, tp_rank, head_num, head_num_kv, size_per_head, **kwargs: Any
 ) -> torch.Tensor:
     q_hidden = head_num * size_per_head
-    t = t.reshape(1, -1)
-    qs = sp_neg1(t[:, :q_hidden], tp, tp_rank)
-
+    t = t.reshape(-1)
+    qs = sp_0(t[:q_hidden], tp, tp_rank)
     _kv_tp = math.gcd(head_num_kv, tp)
     _kv_rank = tp_rank // (tp // _kv_tp)
-    ks = sp_neg1(t[:, q_hidden:], _kv_tp, _kv_rank)
-    return torch.concat([qs, ks], dim=1).contiguous()
+    ks = sp_0(t[q_hidden:], _kv_tp, _kv_rank)
+    return torch.concat([qs, ks], dim=0).contiguous()
 
 
 def sp_head_lora(t: torch.Tensor, hidden_size, **kwargs: Any) -> torch.Tensor:
@@ -529,7 +508,7 @@ def sp_head_lora(t: torch.Tensor, hidden_size, **kwargs: Any) -> torch.Tensor:
 
 
 def sp_head_gemm_a8(t: torch.Tensor, **kwargs: Any) -> torch.Tensor:
-    return get_sp_tensor(t.reshape([t.shape[0], -1]).T, **kwargs).T
+    return get_sp_tensor(t.reshape([-1, t.shape[-1]]), **kwargs)
 
 
 def get_sp_tensor_blocked(
@@ -546,26 +525,24 @@ def get_sp_tensor_blocked(
         (head_num + head_num_kv * 2) * size_per_head % block_size == 0,
         "illegal head_num or size_per_head",
     )
-    t = t.reshape([-1, (head_num + head_num_kv * 2) * size_per_head // block_size])
+    n_blocks = (head_num + head_num_kv * 2) * size_per_head // block_size
+    t = t.reshape([n_blocks, -1])
     q_hidden = head_num * size_per_head // block_size
     kv_hidden = head_num_kv * size_per_head // block_size
-    if len(t.shape) == 1:
-        t = t.unsqueeze(0)
-
-    qs = sp_neg1(t[:, :q_hidden], tp, tp_rank)
+    qs = sp_0(t[:q_hidden, :], tp, tp_rank)
     _kv_tp = math.gcd(head_num_kv, tp)
     _kv_rank = tp_rank // (tp // _kv_tp)
-    ks = sp_neg1(t[:, q_hidden : q_hidden + kv_hidden], _kv_tp, _kv_rank)
-    vs = sp_neg1(t[:, q_hidden + kv_hidden :], _kv_tp, _kv_rank)
-    return torch.concat([qs, ks, vs], dim=1).contiguous()
+    ks = sp_0(t[q_hidden : q_hidden + kv_hidden, :], _kv_tp, _kv_rank)
+    vs = sp_0(t[q_hidden + kv_hidden :, :], _kv_tp, _kv_rank)
+    return torch.concat([qs, ks, vs], dim=0).contiguous()
 
 
 def sp_head_s_gemm_a8_block(t: torch.Tensor, **kwargs: Any) -> torch.Tensor:
-    return get_sp_tensor_blocked(t.T, **kwargs).T
+    return get_sp_tensor_blocked(t, **kwargs)
 
 
 def sp_head_s_gemm_a8_channel(t: torch.Tensor, **kwargs: Any) -> torch.Tensor:
-    return sp_head_s(t.T, **kwargs).T
+    return sp_head_s(t, **kwargs)
 
 
 def sp_head_s_gemm_a8(t: torch.Tensor, **kwargs: Any) -> torch.Tensor:
@@ -573,11 +550,11 @@ def sp_head_s_gemm_a8(t: torch.Tensor, **kwargs: Any) -> torch.Tensor:
 
 
 def sp_head_s_gemm_a4(t: torch.Tensor, **kwargs: Any) -> torch.Tensor:
-    return sp_head_s(t.T, **kwargs).T
+    return sp_head_s(t, **kwargs)
 
 
 def sp_head_s_gemm_a4_group(t: torch.Tensor, **kwargs: Any) -> torch.Tensor:
-    return sp_head_s(t.T, **kwargs).T
+    return sp_head_s(t, **kwargs)
 
 
 def sp_attn_gate(
@@ -592,7 +569,7 @@ def sp_attn_gate(
     local_head_num = head_num // tp
     start_idx = local_head_num * tp_rank
     end_idx = local_head_num * (tp_rank + 1)
-    t = t[:, start_idx * size_per_head : end_idx * size_per_head]
+    t = t[start_idx * size_per_head : end_idx * size_per_head, :]
     return t
 
 
@@ -603,14 +580,14 @@ def trans_qkv(
         size_per_head = hidden_size // head_num
     return (
         ts[0]
-        .T.reshape(hidden_size, head_num, 3, size_per_head)
-        .permute(0, 2, 1, 3)
-        .reshape(hidden_size, 3 * head_num * size_per_head)
+        .reshape(head_num, 3, size_per_head, hidden_size)
+        .permute(1, 0, 2, 3)
+        .reshape(3 * head_num * size_per_head, hidden_size)
         .contiguous()
     )
 
 
-def qkv_transpose(ts, hidden_size):
+def qkv_reshape(ts, hidden_size):
     return ts[0].reshape(hidden_size, -1)
 
 
@@ -626,10 +603,6 @@ def trans_qkv_b(
     )
 
 
-def qkv_transpose(ts, hidden_size):
-    return ts[0].reshape(hidden_size, -1)
-
-
 def qkv_gather(
     ts: List[torch.Tensor],
     dim0: int,
@@ -637,9 +610,9 @@ def qkv_gather(
     head_num_kv: int,
     size_per_head: int = -1,
 ) -> torch.Tensor:
-    t = ts[0].t().contiguous().reshape(dim0, -1)
+    t = ts[0]
     if size_per_head == -1:
-        size_per_head = t.shape[1] // (head_num + head_num_kv * 2)
+        size_per_head = t.shape[0] // (head_num + head_num_kv * 2)
     new_idxs: List[int] = []
     q2kv_ratio = head_num // head_num_kv
     for q2kv_idx in range(head_num_kv):
@@ -649,9 +622,11 @@ def qkv_gather(
         new_idxs.append((q2kv_ratio + 2) * q2kv_idx + q2kv_ratio)
     for q2kv_idx in range(head_num_kv):
         new_idxs.append((q2kv_ratio + 2) * q2kv_idx + q2kv_ratio + 1)
-    return t.reshape(dim0, head_num + head_num_kv * 2, size_per_head)[
-        :, new_idxs, :
-    ].reshape(dim0, -1)
+    return (
+        t.reshape(head_num + head_num_kv * 2, size_per_head, dim0)[new_idxs, :, :]
+        .reshape(-1, dim0)
+        .contiguous()
+    )
 
 
 def sp_0_pad8(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> torch.Tensor:
@@ -685,13 +660,19 @@ def sp_0_pad8(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> torch.Te
 
 def merge_qkv_hf(ts: List[torch.Tensor]):
     q, k, v = ts
-    qkv_weight = torch.concat([q.T, k.T, v.T], dim=1).contiguous()
+    qkv_weight = torch.concat([q, k, v], dim=0).contiguous()
     return qkv_weight
 
 
-def merge_qkv_transpose_concat0(ts: List[torch.Tensor]):
+def merge_qkv_hf_col(ts: List[torch.Tensor]):
     q, k, v = ts
-    qkv_weight = torch.concat([q.T, k.T, v.T], dim=0).contiguous()
+    qkv_weight = torch.concat([q, k, v], dim=-1).contiguous()
+    return qkv_weight
+
+
+def merge_qkv_concat0(ts: List[torch.Tensor]):
+    q, k, v = ts
+    qkv_weight = torch.concat([q, k, v], dim=0).contiguous()
     return qkv_weight
 
 
@@ -742,7 +723,7 @@ def merge_qkv_lora_A(
             logging.info("lora_B  is empty, use zeros instead")
 
     try:
-        qkv_weight = torch.concat([q.T, k.T, v.T], dim=1).contiguous()
+        qkv_weight = torch.concat([q, k, v], dim=0).contiguous()
         return qkv_weight
     except:
         raise Exception(
@@ -784,7 +765,7 @@ def merge_qkv_lora_B(
             torch.cat((t_k, k, t_k), dim=1),
             torch.cat((t_v, t_v, v), dim=1),
         )
-    ).T.contiguous()
+    ).contiguous()
 
 
 def merge_te_qkv(ts: List[torch.Tensor]):
@@ -878,17 +859,6 @@ def mla_pad(
     return t.contiguous()
 
 
-def mla_pad_t(
-    ts: List[torch.Tensor], head_num: int, nope_head_dim: int, rope_head_dim: int
-) -> torch.Tensor:
-    t = ts[0]
-    t = t.reshape(-1, head_num, nope_head_dim)
-    z = torch.zeros(t.shape[0], head_num, rope_head_dim, device=t.device).to(t.dtype)
-    t = torch.cat([t, z], dim=-1)
-    t = t.reshape(-1, head_num * (nope_head_dim + rope_head_dim))
-    return t.T.contiguous()
-
-
 def transpose_slice_k(
     ts: List[torch.Tensor],
     head_num: int,
@@ -930,10 +900,6 @@ def mla_pad_scale(
     return t.contiguous()
 
 
-def concat_0_tranpose(ts: List[torch.Tensor]):
-    return torch.concat(ts, dim=0).transpose(0, 1).contiguous()
-
-
 # for w1 w3
 def pad_w13(ts: List[torch.Tensor], align_size: int, dim: int):
     """Pad w1 and w3 tensors to align_size and concatenate them.
@@ -960,20 +926,8 @@ def pad_w13(ts: List[torch.Tensor], align_size: int, dim: int):
         return torch.concat([w1, w3], dim=dim).contiguous()
 
 
-def transpose_w13(ts: List[torch.Tensor]):
-    w1 = transpose([ts[0]])
-    w3 = transpose([ts[1]])
-    return torch.concat([w1, w3], dim=-1).contiguous()
-
-
-def transpose_w13_2(ts: List[torch.Tensor]):
-    w1 = transpose([ts[0]])
-    w3 = transpose([ts[1]])
-    return torch.concat([w1, w3], dim=0).contiguous()
-
-
 def concat_w13(ts: List[torch.Tensor]):
-    return torch.concat(ts, dim=-1).contiguous()
+    return torch.concat(ts, dim=0).contiguous()
 
 
 def concat_w13_2(ts: List[torch.Tensor]):
@@ -1003,14 +957,14 @@ def ffn_sp_neg1_w13(
     ffn_tp_size: int,
     **kwargs: Any,
 ) -> torch.Tensor:
-    w1, w3 = torch.chunk(t, 2, dim=-1)
+    w1, w3 = torch.chunk(t, 2, dim=0)
     w1 = ffn_sp_neg1(
         w1, tp, tp_rank, ep, ep_rank, dp, dp_rank, ffn_tp_rank, ffn_tp_size, **kwargs
     )
     w3 = ffn_sp_neg1(
         w3, tp, tp_rank, ep, ep_rank, dp, dp_rank, ffn_tp_rank, ffn_tp_size, **kwargs
     )
-    return concat_w13([w1, w3])
+    return concat_w13_2([w1, w3])
 
 
 def ffn_sp_0_w13(
@@ -1025,14 +979,14 @@ def ffn_sp_0_w13(
     ffn_tp_size: int,
     **kwargs: Any,
 ) -> torch.Tensor:
-    w1, w3 = torch.chunk(t, 2, dim=-1)
+    w1, w3 = torch.chunk(t, 2, dim=0)
     w1 = ffn_sp_0(
         w1, tp, tp_rank, ep, ep_rank, dp, dp_rank, ffn_tp_rank, ffn_tp_size, **kwargs
     )
     w3 = ffn_sp_0(
         w3, tp, tp_rank, ep, ep_rank, dp, dp_rank, ffn_tp_rank, ffn_tp_size, **kwargs
     )
-    return concat_w13([w1, w3])
+    return concat_w13_2([w1, w3])
 
 
 def sp_0_w13(
@@ -1086,21 +1040,23 @@ def merge_qkvz_transpose_reorder(
 ):
     """Merge and reorder qkv and z tensors for Qwen3.5Moe.
 
-    Merges qkv (shape: [token, head_num_k * dim_q + head_num_k * dim_k + head_num_v * dim_v])
-    and z (shape: [token, head_num_v, dim_v * group_v]) into a single transposed tensor.
+    Merges qkv (shape: [head_num_k * dim_q + head_num_k * dim_k + head_num_v * dim_v, hidden_size])
+    and z (shape: [head_num_v * dim_v * group_v, hidden_size]) into a single tensor.
     """
     qkv = ts[0]
     z = ts[1]
-    return torch.cat([qkv, z], dim=0).T
+    return torch.cat([qkv, z], dim=0)
+
 
 
 def merge_ba_transpose_reorder(
     ts: List[torch.Tensor],
 ):
-    """Merge and reorder b and a tensors, then transpose."""
+    """Merge and reorder b and a tensors."""
     b = ts[0]
     a = ts[1]
-    return torch.cat([b, a], dim=0).T
+    return torch.cat([b, a], dim=0)
+
 
 
 def split_q_gate(ts: List[torch.Tensor], head_num: int, head_dim: int, part: int):
@@ -1400,27 +1356,27 @@ class W:
         attn_qkv_z: sp_head_z,
         attn_qkv_s: sp_head_s,
         attn_qkv_b: sp_head_b,
-        attn_o_w: sp_0,
-        attn_o_z: sp_0,
-        attn_o_s: sp_0,
+        attn_o_w: sp_neg1,
+        attn_o_z: sp_neg1,
+        attn_o_s: sp_neg1,
         attn_o_b: sp_id,
         attn_i_smoother: sp_0,
         attn_o_smoother: sp_0,
         attn_o_shift: sp_0,
         attn_gate_w: sp_attn_gate,
         # mla
-        mla_q_b_w: sp_neg1,
+        mla_q_b_w: sp_0,
         mla_fusedqkrope_w: sp_id,
         mla_fusedqkrope_s: sp_id,
         mla_fusedqkrope_no_lora_w: sp_neg1_part_by_head,
         mla_fusedqkrope_no_lora_s: sp_neg1_part_by_head,
-        mla_kv_b_w: sp_neg1,
-        mla_kv_b_s: sp_neg1,
+        mla_kv_b_w: sp_0,
+        mla_kv_b_s: sp_0,
         mla_q_a_ln_gamma: sp_id,
         mla_q_a_ln_beta: sp_id,
         mla_kv_a_ln_gamma: sp_id,
         mla_kv_a_ln_beta: sp_id,
-        mla_q_b_s: sp_neg1,
+        mla_q_b_s: sp_0,
         mla_fusedqkrope_s: sp_id,
         mla_kc: sp_0,
         mla_vc: sp_0,
@@ -1430,26 +1386,26 @@ class W:
         cross_attn_pre_ln_beta: sp_id,
         cross_attn_qkv_w: sp_head,
         cross_attn_qkv_b: sp_head_b,
-        cross_attn_o_w: sp_0,
+        cross_attn_o_w: sp_neg1,
         cross_attn_o_b: sp_id,
-        ffn_w1: ffn_sp_neg1,
-        ffn_z1: ffn_sp_neg1,
-        ffn_s1: ffn_sp_neg1,
-        ffn_b1: ffn_sp_neg1,
-        ffn_w3: ffn_sp_neg1,
-        ffn_z3: ffn_sp_neg1,
-        ffn_s3: ffn_sp_neg1,
-        ffn_b3: ffn_sp_neg1,
-        ffn_w13: ffn_sp_neg1_w13,
-        ffn_z13: ffn_sp_neg1_w13,
-        ffn_s13: ffn_sp_neg1_w13,
-        ffn_b13: ffn_sp_neg1_w13,
-        ffn_w2: ffn_sp_0,
-        ffn_z2: ffn_sp_0,
-        ffn_s2: ffn_sp_0,
+        ffn_w1: ffn_sp_0,
+        ffn_z1: ffn_sp_0,
+        ffn_s1: ffn_sp_0,
+        ffn_b1: ffn_sp_0,
+        ffn_w3: ffn_sp_0,
+        ffn_z3: ffn_sp_0,
+        ffn_s3: ffn_sp_0,
+        ffn_b3: ffn_sp_0,
+        ffn_w13: ffn_sp_0_w13,
+        ffn_z13: ffn_sp_0_w13,
+        ffn_s13: ffn_sp_0_w13,
+        ffn_b13: ffn_sp_0_w13,
+        ffn_w2: ffn_sp_neg1,
+        ffn_z2: ffn_sp_neg1,
+        ffn_s2: ffn_sp_neg1,
         ffn_b2: sp_id,
-        ffn_act_s: ffn_sp_0,
-        ffn_smoother: ffn_sp_0,
+        ffn_act_s: ffn_sp_neg1,
+        ffn_smoother: ffn_sp_neg1,
         moe_w1: sp_moe_w1,
         moe_z1: sp_moe_w1,
         moe_s1: sp_moe_w1,
@@ -1468,13 +1424,13 @@ class W:
         positional_embedding: sp_neg1,
         attn_qkv_w_lora_a: sp_id,
         attn_qkv_w_lora_b: sp_head_lora,
-        attn_o_w_lora_a: sp_0,
+        attn_o_w_lora_a: sp_neg1,
         attn_o_w_lora_b: sp_id,
         ffn_w1_lora_a: sp_id,
-        ffn_w1_lora_b: sp_neg1,
+        ffn_w1_lora_b: sp_0,
         ffn_w3_lora_a: sp_id,
-        ffn_w3_lora_b: sp_neg1,
-        ffn_w2_lora_a: sp_0,
+        ffn_w3_lora_b: sp_0,
+        ffn_w2_lora_a: sp_neg1,
         ffn_w2_lora_b: sp_id,
         moe_gate: sp_id,
         shared_expert_gate: sp_id,

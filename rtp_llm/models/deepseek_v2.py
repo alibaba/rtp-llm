@@ -31,13 +31,13 @@ from rtp_llm.ops import MlaOpsType
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
-    concat_0_tranpose,
+    concat_0,
     identity,
-    mla_pad_t,
+    mla_pad,
+    pad,
     stack_,
     stack_moe_w1,
-    transpose,
-    transpose_pad,
+    t,
     transpose_slice_k,
     transpose_slice_v,
     yarn_get_mscale,
@@ -82,7 +82,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                 W.attn_o_w,
                 [CkptWeightInfo("model.layers.{i}.self_attn.o_proj.weight", identity)],
                 functools.partial(
-                    mla_pad_t,
+                    mla_pad,
                     head_num=self._head_num,
                     nope_head_dim=self.v_head_dim,
                     rope_head_dim=0,
@@ -107,7 +107,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                         "model.layers.{i}.self_attn.kv_b_proj.weight", identity
                     )
                 ],
-                transpose,
+                identity,
                 config=attn_config,
             ),
             MlaAttnAtomicWeight(
@@ -133,7 +133,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                                 identity,
                             )
                         ],
-                        transpose,
+                        identity,
                         config=attn_config,
                     ),
                     MlaAttnAtomicWeight(
@@ -160,7 +160,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                             identity,
                         ),
                     ],
-                    concat_0_tranpose,
+                    concat_0,
                     config=attn_config,
                 )
             )
@@ -177,7 +177,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                             identity,
                         ),
                     ],
-                    concat_0_tranpose,
+                    concat_0,
                     config=attn_config,
                 )
             )
@@ -194,7 +194,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                                 identity,
                             )
                         ],
-                        transpose,
+                        identity,
                     ),
                     MlaAttnAtomicWeight(
                         W.mla_indexer_k_w,
@@ -203,7 +203,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                                 "model.layers.{i}.self_attn.indexer.wk.weight", identity
                             )
                         ],
-                        transpose,
+                        identity,
                     ),
                     AtomicWeight(
                         W.mla_indexer_k_norm_w,
@@ -233,7 +233,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                                 identity,
                             )
                         ],
-                        transpose,
+                        identity,
                         data_type=torch.float32,
                     ),
                 ]
@@ -310,7 +310,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                                 )
                             ],
                             functools.partial(
-                                transpose_pad,
+                                pad,
                                 align_size=align_size,
                                 dim=0,
                             ),
@@ -325,7 +325,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                                 )
                             ],
                             functools.partial(
-                                transpose_pad,
+                                pad,
                                 align_size=align_size,
                                 dim=1,
                             ),
@@ -340,7 +340,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                                 )
                             ],
                             functools.partial(
-                                transpose_pad,
+                                pad,
                                 align_size=align_size,
                                 dim=0,
                             ),
@@ -358,7 +358,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                                     "model.layers.{i}.mlp.gate.weight", identity
                                 )
                             ],
-                            transpose,
+                            identity,
                             config=moe_config,
                         ),
                         MoeAtomicWeight(
@@ -421,7 +421,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                                 )
                             ],
                             functools.partial(
-                                transpose_pad,
+                                pad,
                                 align_size=align_size,
                                 dim=0,
                             ),
@@ -435,7 +435,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                                 )
                             ],
                             functools.partial(
-                                transpose_pad,
+                                pad,
                                 align_size=align_size,
                                 dim=1,
                             ),
@@ -449,7 +449,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                                 )
                             ],
                             functools.partial(
-                                transpose_pad,
+                                pad,
                                 align_size=align_size,
                                 dim=0,
                             ),
@@ -786,7 +786,7 @@ class DeepSeekV3MtpWeight(DeepSeekV2Weight):
                     AtomicWeight(
                         W.multi_tokens_predict_eh_proj,
                         [CkptWeightInfo("model.layers.{i}.eh_proj.weight", identity)],
-                        transpose,
+                        t,
                     ),
                 ]
             )

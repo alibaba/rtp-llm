@@ -282,10 +282,10 @@ class MLATest(TestCase):
         weights = {}
         weights[W.mla_fusedqkrope_no_lora_w] = torch.randn(
             [
-                config.hidden_size,
                 config.attn_config.size_per_head * config.attn_config.head_num
                 + config.attn_config.kv_lora_rank
                 + config.attn_config.rope_head_dim,
+                config.hidden_size,
             ],
             dtype=torch.bfloat16,
             device=device,
@@ -317,30 +317,28 @@ class MLATest(TestCase):
 
         weights[W.mla_kv_b_w] = torch.randn(
             [
-                config.attn_config.kv_lora_rank,
                 config.attn_config.head_num
                 * (config.attn_config.nope_head_dim + config.attn_config.v_head_dim),
+                config.attn_config.kv_lora_rank,
             ],
             dtype=torch.bfloat16,
             device=device,
         )
 
         kv_b = weights[W.mla_kv_b_w].view(
-            config.attn_config.kv_lora_rank,
             config.attn_config.head_num,
             config.attn_config.nope_head_dim + config.attn_config.v_head_dim,
+            config.attn_config.kv_lora_rank,
         )
-        weights[W.mla_kc] = (
-            kv_b[:, :, : config.attn_config.nope_head_dim].permute(1, 2, 0).contiguous()
-        )
+        weights[W.mla_kc] = kv_b[:, : config.attn_config.nope_head_dim, :].contiguous()
         weights[W.mla_vc] = (
-            kv_b[:, :, config.attn_config.nope_head_dim :].transpose(0, 1).contiguous()
+            kv_b[:, config.attn_config.nope_head_dim :, :].permute(0, 2, 1).contiguous()
         )
 
         weights[W.attn_o_w] = torch.randn(
             [
-                config.attn_config.head_num * config.attn_config.v_head_dim,
                 config.hidden_size,
+                config.attn_config.head_num * config.attn_config.v_head_dim,
             ],
             dtype=torch.bfloat16,
             device=device,

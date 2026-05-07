@@ -180,7 +180,6 @@ class LoadQuantDynamicPerTensorFp8Weight(CompositeWeight, QuantWeight):
 
         else:
             quant_kernel, scale = quantize_weight_to_fp8(kernel.get(self.kernel.name))
-            quant_kernel = quant_kernel.T
 
         res = {}
         res = {

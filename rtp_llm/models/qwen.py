@@ -17,12 +17,11 @@ from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
     identity,
+    pad,
     sp_0,
     sp_head_lora,
     sp_id,
     sp_neg1,
-    transpose,
-    transpose_pad,
     zeros,
 )
 
@@ -32,7 +31,7 @@ def hidden_to_inter(hidden_size):
     return int((int(4 * 2 / 3 * hidden_size) * 2 + ffn_m - 1) // ffn_m * ffn_m / 2)
 
 
-def qkv_transpose(ts, hidden_size):
+def qkv_reshape(ts, hidden_size):
     return ts[0].reshape(hidden_size, -1)
 
 
@@ -83,10 +82,10 @@ class QWenWeight(ModelDeployWeightInfo):
             AttnAtomicWeight(
                 W.attn_qkv_w,
                 [CkptWeightInfo("transformer.h.{i}.attn.c_attn.weight", identity)],
-                transpose,
+                identity,
                 config=attn_config,
-                lora_a_process_func=transpose,
-                lora_b_process_func=transpose,
+                lora_a_process_func=identity,
+                lora_b_process_func=identity,
                 lora_a_split_func=sp_id,
                 lora_b_split_func=sp_head_lora,
             ),
@@ -99,11 +98,11 @@ class QWenWeight(ModelDeployWeightInfo):
             AttnAtomicWeight(
                 W.attn_o_w,
                 [CkptWeightInfo("transformer.h.{i}.attn.c_proj.weight", identity)],
-                transpose,
+                identity,
                 config=attn_config,
-                lora_a_process_func=transpose,
-                lora_b_process_func=transpose,
-                lora_a_split_func=sp_0,
+                lora_a_process_func=identity,
+                lora_b_process_func=identity,
+                lora_a_split_func=sp_neg1,
                 lora_b_split_func=sp_id,
             ),
             FfnWeight(
@@ -111,26 +110,26 @@ class QWenWeight(ModelDeployWeightInfo):
                     FfnAtomicWeight(
                         W.ffn_w1,
                         [CkptWeightInfo("transformer.h.{i}.mlp.w2.weight", identity)],
-                        functools.partial(transpose_pad, align_size=align_size, dim=0),
+                        functools.partial(pad, align_size=align_size, dim=0),
                         config=ffn_config,
-                        lora_a_process_func=transpose,
+                        lora_a_process_func=identity,
                         lora_b_process_func=functools.partial(
-                            transpose_pad, align_size=align_size, dim=0
+                            pad, align_size=align_size, dim=0
                         ),
                         lora_a_split_func=sp_id,
-                        lora_b_split_func=sp_neg1,
+                        lora_b_split_func=sp_0,
                     ),
                     FfnAtomicWeight(
                         W.ffn_w3,
                         [CkptWeightInfo("transformer.h.{i}.mlp.w1.weight", identity)],
-                        functools.partial(transpose_pad, align_size=align_size, dim=0),
+                        functools.partial(pad, align_size=align_size, dim=0),
                         config=ffn_config,
-                        lora_a_process_func=transpose,
+                        lora_a_process_func=identity,
                         lora_b_process_func=functools.partial(
-                            transpose_pad, align_size=align_size, dim=0
+                            pad, align_size=align_size, dim=0
                         ),
                         lora_a_split_func=sp_id,
-                        lora_b_split_func=sp_neg1,
+                        lora_b_split_func=sp_0,
                     ),
                     FfnAtomicWeight(
                         W.ffn_w2,
@@ -139,13 +138,13 @@ class QWenWeight(ModelDeployWeightInfo):
                                 "transformer.h.{i}.mlp.c_proj.weight", identity
                             )
                         ],
-                        functools.partial(transpose_pad, align_size=align_size, dim=1),
+                        functools.partial(pad, align_size=align_size, dim=1),
                         config=ffn_config,
                         lora_a_process_func=functools.partial(
-                            transpose_pad, align_size=align_size, dim=0
+                            pad, align_size=align_size, dim=0
                         ),
-                        lora_b_process_func=transpose,
-                        lora_a_split_func=sp_0,
+                        lora_b_process_func=identity,
+                        lora_a_split_func=sp_neg1,
                         lora_b_split_func=sp_id,
                     ),
                 ],

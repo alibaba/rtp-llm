@@ -7,7 +7,7 @@ from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
 from rtp_llm.models.qwen3_next.qwen3_next import Qwen3Next, Qwen35Moe
 from rtp_llm.models.qwen3_next.qwen3_next_weight import Qwen3NextWeight, plus_one
 from rtp_llm.ops import HybridAttentionType
-from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity, transpose
+from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity
 
 
 class Qwen3NextMTPWeight(Qwen3NextWeight):
@@ -45,7 +45,7 @@ class Qwen3NextMTPWeight(Qwen3NextWeight):
             AtomicWeight(
                 W.multi_tokens_predict_eh_proj,
                 [CkptWeightInfo(self.prefix + "fc.weight", identity)],
-                transpose,
+                identity,
             ),
             AtomicWeight(
                 W.final_ln_gamma,

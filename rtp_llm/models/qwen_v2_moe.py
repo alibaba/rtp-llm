@@ -13,14 +13,7 @@ from rtp_llm.model_loader.ffn_weight import (
 )
 from rtp_llm.model_loader.weight_module import AtomicWeight
 from rtp_llm.models.qwen_v2 import QWenV2, QWenV2Weight
-from rtp_llm.utils.model_weight import (
-    CkptWeightInfo,
-    W,
-    identity,
-    stack_,
-    stack_moe_w1,
-    transpose,
-)
+from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity, stack_, stack_moe_w1
 
 
 class QWenV2MoeWeight(QWenV2Weight):
@@ -51,7 +44,7 @@ class QWenV2MoeWeight(QWenV2Weight):
                                 identity,
                             )
                         ],
-                        transpose,
+                        identity,
                         config=ffn_config,
                     ),
                     FfnAtomicWeight(
@@ -62,7 +55,7 @@ class QWenV2MoeWeight(QWenV2Weight):
                                 identity,
                             )
                         ],
-                        transpose,
+                        identity,
                         config=ffn_config,
                     ),
                     FfnAtomicWeight(
@@ -73,7 +66,7 @@ class QWenV2MoeWeight(QWenV2Weight):
                                 identity,
                             )
                         ],
-                        transpose,
+                        identity,
                         config=ffn_config,
                     ),
                 ],
@@ -84,7 +77,7 @@ class QWenV2MoeWeight(QWenV2Weight):
                     MoeAtomicWeight(
                         W.moe_gate,
                         [CkptWeightInfo("model.layers.{i}.mlp.gate.weight", identity)],
-                        transpose,
+                        identity,
                         config=moe_config,
                     ),
                     MoeAtomicWeight(
@@ -126,7 +119,7 @@ class QWenV2MoeWeight(QWenV2Weight):
                         identity,
                     )
                 ],
-                transpose,
+                identity,
             ),
         ]
 

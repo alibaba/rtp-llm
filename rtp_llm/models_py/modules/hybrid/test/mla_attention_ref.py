@@ -378,7 +378,7 @@ class MlaAttentionRef(nn.Module):
 
         kv_b_weight = self.weights.get(W.mla_kv_b_w, None)
 
-        kv = compressed_kv @ kv_b_weight
+        kv = F.linear(compressed_kv, kv_b_weight)
         kv = kv.view(-1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
         k_nope = kv[:, :, : self.qk_nope_head_dim].contiguous()
         value_states = kv[:, :, self.qk_nope_head_dim :].contiguous()

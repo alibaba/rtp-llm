@@ -18,13 +18,12 @@ from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
     concat_w13,
+    concat_w13_2,
     identity,
     merge_qkv_hf,
     ones,
     stack_,
     stack_moe_w1,
-    transpose,
-    transpose_w13_2,
 )
 
 QW_SUFFIX = ".qweight"
@@ -99,7 +98,7 @@ def get_qkv_quant_weight_info(
                 src_weight,
                 W.attn_qkv_w,
                 [CkptWeightInfo(qkv_name + QW_SUFFIX)],
-                transpose,
+                identity,
                 data_type=torch.int8,
                 config=src_weight.config,
             ),
@@ -147,7 +146,7 @@ def get_ffn_quant_weight_info(
             create_w8a8_int8_weight(
                 src_weight,
                 w,
-                [CkptWeightInfo(name + QW_SUFFIX, transpose) for name in w_name],
+                [CkptWeightInfo(name + QW_SUFFIX, identity) for name in w_name],
                 stack,
                 data_type=torch.int8,
                 config=src_weight.config,
@@ -178,7 +177,7 @@ def get_ffn_quant_weight_info(
                 src_weight,
                 w,
                 [CkptWeightInfo(w_name + QW_SUFFIX, identity)],
-                transpose,
+                identity,
                 data_type=torch.int8,
                 config=src_weight.config,
             ),
@@ -204,7 +203,7 @@ def get_ffn_quant_weight_info(
                     CkptWeightInfo(w1_name + QW_SUFFIX, identity),
                     CkptWeightInfo(w3_name + QW_SUFFIX, identity),
                 ],
-                transpose_w13_2,
+                concat_w13_2,
                 data_type=torch.int8,
                 config=src_weight.config,
             ),
@@ -245,7 +244,7 @@ def get_ffn_quant_weight_info(
                 src_weight,
                 w,
                 [CkptWeightInfo(w_name + QW_SUFFIX, identity)],
-                transpose,
+                identity,
                 data_type=torch.int8,
                 config=src_weight.config,
             ),
@@ -314,7 +313,7 @@ class OmniQuantWeightInfo(CompositeWeight, QuantWeight):
                 src_weight_info,
                 W.attn_o_w,
                 [CkptWeightInfo(w_name + QW_SUFFIX, identity)],
-                transpose,
+                identity,
                 data_type=torch.int8,
                 config=src_weight_info.config,
             )
@@ -365,9 +364,7 @@ class OmniQuantWeightInfo(CompositeWeight, QuantWeight):
                     src_weight_info,
                     W.ffn_smoother,
                     [],
-                    functools.partial(
-                        ones, shape=src_weight_info.config.align_size
-                    ),
+                    functools.partial(ones, shape=src_weight_info.config.align_size),
                     data_type=torch.float32,
                     config=src_weight_info.config,
                 )
@@ -417,10 +414,5 @@ class OmniQuantWeightInfo(CompositeWeight, QuantWeight):
         device: str,
         load_config: LoadConfig,
     ):
-        # need reshape for kernel weight
         processed_res = super()._postprocess(tensor, device, load_config)
-        kernel_weight = processed_res[self.kernel.name]
-        kernel_weight = kernel_weight.reshape(kernel_weight.shape[-1], -1)
-        processed_res[self.kernel.name] = kernel_weight
-
         return processed_res

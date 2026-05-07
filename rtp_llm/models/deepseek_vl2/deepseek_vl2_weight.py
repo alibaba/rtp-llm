@@ -26,10 +26,9 @@ from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
     identity,
+    pad,
     stack_,
     stack_moe_w1,
-    transpose,
-    transpose_pad,
     zeros,
 )
 
@@ -98,7 +97,7 @@ class DeepSeekVLV2Weight(ModelDeployWeightInfo, BaseMultiModalWeightInfo):
                         "language.model.layers.{i}.self_attn.o_proj.weight", identity
                     )
                 ],
-                transpose,
+                identity,
                 config=attn_config,
             ),
             AttnAtomicWeight(
@@ -141,7 +140,7 @@ class DeepSeekVLV2Weight(ModelDeployWeightInfo, BaseMultiModalWeightInfo):
                                 )
                             ],
                             functools.partial(
-                                transpose_pad,
+                                pad,
                                 align_size=align_size,
                                 dim=0,
                             ),
@@ -156,7 +155,7 @@ class DeepSeekVLV2Weight(ModelDeployWeightInfo, BaseMultiModalWeightInfo):
                                 )
                             ],
                             functools.partial(
-                                transpose_pad,
+                                pad,
                                 align_size=align_size,
                                 dim=1,
                             ),
@@ -171,7 +170,7 @@ class DeepSeekVLV2Weight(ModelDeployWeightInfo, BaseMultiModalWeightInfo):
                                 )
                             ],
                             functools.partial(
-                                transpose_pad,
+                                pad,
                                 align_size=align_size,
                                 dim=0,
                             ),
@@ -190,7 +189,7 @@ class DeepSeekVLV2Weight(ModelDeployWeightInfo, BaseMultiModalWeightInfo):
                                     identity,
                                 )
                             ],
-                            transpose,
+                            identity,
                             config=moe_config,
                         ),
                         MoeAtomicWeight(
@@ -254,7 +253,7 @@ class DeepSeekVLV2Weight(ModelDeployWeightInfo, BaseMultiModalWeightInfo):
                                 )
                             ],
                             functools.partial(
-                                transpose_pad,
+                                pad,
                                 align_size=align_size,
                                 dim=0,
                             ),
@@ -269,7 +268,7 @@ class DeepSeekVLV2Weight(ModelDeployWeightInfo, BaseMultiModalWeightInfo):
                                 )
                             ],
                             functools.partial(
-                                transpose_pad,
+                                pad,
                                 align_size=align_size,
                                 dim=1,
                             ),
@@ -284,7 +283,7 @@ class DeepSeekVLV2Weight(ModelDeployWeightInfo, BaseMultiModalWeightInfo):
                                 )
                             ],
                             functools.partial(
-                                transpose_pad,
+                                pad,
                                 align_size=align_size,
                                 dim=0,
                             ),

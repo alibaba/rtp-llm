@@ -14,14 +14,7 @@ from rtp_llm.model_loader.model_weight_info import (
 )
 from rtp_llm.model_loader.weight_module import AtomicWeight
 from rtp_llm.models.base_model import BaseModel
-from rtp_llm.utils.model_weight import (
-    CkptWeightInfo,
-    W,
-    identity,
-    slopes,
-    transpose,
-    zeros,
-)
+from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity, slopes, zeros
 
 
 class MptWeightInfo(ModelDeployWeightInfo):
@@ -72,7 +65,7 @@ class MptWeightInfo(ModelDeployWeightInfo):
                             "transformer.blocks.{i}.attn.Wqkv.weight", identity
                         )
                     ],
-                    transpose,
+                    identity,
                     config=attn_config,
                 ),
                 AttnAtomicWeight(
@@ -82,7 +75,7 @@ class MptWeightInfo(ModelDeployWeightInfo):
                             "transformer.blocks.{i}.attn.out_proj.weight", identity
                         )
                     ],
-                    transpose,
+                    identity,
                     config=attn_config,
                 ),
                 AtomicWeight(
@@ -105,7 +98,7 @@ class MptWeightInfo(ModelDeployWeightInfo):
                                     identity,
                                 )
                             ],
-                            transpose,
+                            identity,
                             config=ffn_config,
                         ),
                         FfnAtomicWeight(
@@ -116,7 +109,7 @@ class MptWeightInfo(ModelDeployWeightInfo):
                                     identity,
                                 )
                             ],
-                            transpose,
+                            identity,
                             config=ffn_config,
                         ),
                     ],

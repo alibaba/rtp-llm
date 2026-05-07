@@ -5,14 +5,9 @@ from typing import Optional
 
 import torch
 
-from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
-    fp8_gemm_nt,
-    has_deep_gemm,
-    is_deep_gemm_e8m0_used,
-)
+from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import fp8_gemm_nt, has_deep_gemm
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     create_per_token_group_quant_fp8_output_scale,
-    requant_weight_ue8m0,
     sgl_per_token_group_quant_fp8,
 )
 from rtp_llm.models_py.modules.factory.linear import LinearBase
@@ -78,16 +73,8 @@ class CudaFp8DeepGEMMLinear(LinearBase):
             error_msg = f"Weight and weight scale must be 2D tensors, but got weight dim: {self.weight.dim()} and weight scale dim: {self.weight_scales.dim()}"
             logger.error(error_msg)
             raise ValueError(error_msg)
-        # e8m0 load not need reshape
-        if is_deep_gemm_e8m0_used():
-            self.N, self.K = self.weight.shape
-            self.scale_N, self.scale_K = self.weight_scales.shape
-        else:
-            # Reshape weight and weight scale
-            self.K, self.N = self.weight.shape
-            self.scale_K, self.scale_N = self.weight_scales.shape
-            self.weight = self.weight.reshape(self.N, self.K)
-            self.weight_scales = self.weight_scales.reshape(self.scale_N, self.scale_K)
+        self.N, self.K = self.weight.shape
+        self.scale_N, self.scale_K = self.weight_scales.shape
         # Check weight scale sizes
         if self.weight_scales.dtype is torch.float32 and (
             (self.N + 127) // 128 != self.scale_N

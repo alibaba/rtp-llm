@@ -5,8 +5,7 @@ from typing import List
 
 import torch
 
-from rtp_llm.config.model_config import VitParameters
-from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.model_config import ModelConfig, VitParameters
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, AttnConfig
 from rtp_llm.model_loader.ffn_weight import MoeAtomicWeight, MoeConfig, MoeWeight
@@ -30,14 +29,13 @@ from rtp_llm.utils.model_weight import (
     sp_neg1,
     stack_,
     stack_moe_w1,
-    transpose,
     zeros,
 )
 
 
 def merge_qkv_hf(ts: List[torch.Tensor]):
     q, k, v = ts
-    qkv_weight = torch.concat([q.T, k.T, v.T], dim=1).contiguous()
+    qkv_weight = torch.concat([q, k, v], dim=0).contiguous()
     return qkv_weight
 
 
@@ -86,11 +84,11 @@ class MixtralWeightInfo(ModelDeployWeightInfo):
             AttnAtomicWeight(
                 W.attn_o_w,
                 [CkptWeightInfo("model.layers.{i}.self_attn.o_proj.weight", concat_1)],
-                transpose,
+                identity,
                 config=attn_config,
-                lora_a_process_func=transpose,
-                lora_b_process_func=transpose,
-                lora_a_split_func=sp_0,
+                lora_a_process_func=identity,
+                lora_b_process_func=identity,
+                lora_a_split_func=sp_neg1,
                 lora_b_split_func=sp_id,
             ),
             AtomicWeight(
@@ -172,12 +170,12 @@ class MixtralWeightInfo(ModelDeployWeightInfo):
                                 concat_0,
                             )
                         ],
-                        transpose,
+                        identity,
                         config=moe_config,
-                        lora_a_process_func=transpose,
-                        lora_b_process_func=transpose,
+                        lora_a_process_func=identity,
+                        lora_b_process_func=identity,
                         lora_a_split_func=sp_id,
-                        lora_b_split_func=sp_neg1,
+                        lora_b_split_func=sp_0,
                     ),
                     MoeAtomicWeight(
                         W.moe_w1,
@@ -187,7 +185,7 @@ class MixtralWeightInfo(ModelDeployWeightInfo):
                         lora_a_process_func=stack_moe_w1,
                         lora_b_process_func=stack_moe_w1,
                         lora_a_split_func=sp_id,
-                        lora_b_split_func=sp_neg1,
+                        lora_b_split_func=sp_0,
                     ),
                     MoeAtomicWeight(
                         W.moe_w2,
@@ -196,7 +194,7 @@ class MixtralWeightInfo(ModelDeployWeightInfo):
                         config=moe_config,
                         lora_a_process_func=stack_,
                         lora_b_process_func=stack_,
-                        lora_a_split_func=sp_0,
+                        lora_a_split_func=sp_neg1,
                         lora_b_split_func=sp_id,
                     ),
                 ],

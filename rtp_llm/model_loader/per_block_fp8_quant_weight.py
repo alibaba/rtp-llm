@@ -743,7 +743,6 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         device: str,
         load_config: LoadConfig,
     ):
-        # need reshape for kernel weight
         processed_res = super()._postprocess(tensor, device, load_config)
         kernel_weight = processed_res[self.kernel.name]
         from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
@@ -751,30 +750,14 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         )
         from rtp_llm.models_py.kernels.cuda.fp8_kernel import requant_weight_ue8m0
 
-        # e8m0 not reshape, weight scale need be non contiguous
-        # TODO: rm reshape all time
-        if not is_deep_gemm_e8m0_used():
-            kernel_weight = (
-                kernel_weight.reshape(kernel_weight.shape[-1], -1)
-                if kernel_weight.dim() == 2
-                else kernel_weight
-            )
-        processed_res[self.kernel.name] = kernel_weight
         if self.scale is not None:
             scale_weight = processed_res[self.scale.name]
-            if not is_deep_gemm_e8m0_used():
-                scale_weight = (
-                    scale_weight.reshape(scale_weight.shape[-1], -1)
-                    if scale_weight.dim() == 2
-                    else scale_weight
-                )
             kernel_weight = load_config.exported_device.maybe_rewrite_weight_by_key(
                 "weight", kernel_weight
             )
             scale_weight = load_config.exported_device.maybe_rewrite_weight_by_key(
                 "scale", scale_weight
             )
-            # kernel_weight, scale_weight = load_config.exported_device.convert_fp8_weight_params(kernel_weight, scale_weight)
 
             if is_deep_gemm_e8m0_used():
                 kernel_weight, scale_weight = requant_weight_ue8m0(
@@ -852,14 +835,8 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
         else:
             quant_kernel = cast_to_fp8(kernel.get(self.kernel.name))
 
-        if self.kernel.name == W.moe_w1 or self.kernel.name == W.moe_w2:
-            pass
-        elif quant_kernel.dim() == 2:
-            quant_kernel = quant_kernel.T
-
         res = {self.kernel.name: quant_kernel.contiguous().to(device)}
         if self.scale:
-            scale = scale.T if scale.dim() == 2 else scale
             res.update({self.scale.name: scale.contiguous().to(device)})
 
         return res

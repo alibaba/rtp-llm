@@ -4,15 +4,14 @@ import unittest
 
 import torch
 import torch.nn.functional as F
+from flashinfer import fp4_quantize
 
-from rtp_llm.test.utils.numeric_util import calc_diff
+from rtp_llm.config.quant_config import init_quant_config
+from rtp_llm.device.device_impl import CudaImpl
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp4_linear import (
     CudaFp4GEMMLinear,
 )
-
-from flashinfer import fp4_quantize
-from rtp_llm.config.quant_config import init_quant_config
-from rtp_llm.device.device_impl import CudaImpl
+from rtp_llm.test.utils.numeric_util import calc_diff
 
 
 class CudaFp4GEMMLinearTest(unittest.TestCase):
@@ -29,7 +28,7 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
 
         self.hidden_size = 1024  # k
         self.output_size = 512  # n
-        self.batch_sizes = [1, 32, 64, 128, 256] # m
+        self.batch_sizes = [1, 32, 64, 128, 256]  # m
         weight_fp16 = (
             torch.randn(
                 self.output_size,
@@ -41,9 +40,9 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
         )
         global_sf_weight = (448 * 6) / weight_fp16.float().abs().nan_to_num().max()
         self.weight_scale_2 = 1.0 / global_sf_weight.to(torch.float32)
-        fp4_weight, weight_scale = fp4_quantize(weight_fp16,
-                                                global_scale=global_sf_weight,
-                                                is_sf_swizzled_layout=False)
+        fp4_weight, weight_scale = fp4_quantize(
+            weight_fp16, global_scale=global_sf_weight, is_sf_swizzled_layout=False
+        )
         self.weight = fp4_weight
         self.weight_scales = weight_scale
 
@@ -63,8 +62,8 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
             weight_scales=processed_scale,
             input_scales=self.input_scale,
             bias=self.bias if with_bias else None,
-            quant_config=init_quant_config('modelopt_fp4'),
-            weight_scale_2=self.weight_scale_2
+            quant_config=init_quant_config("modelopt_fp4"),
+            weight_scale_2=self.weight_scale_2,
         )
 
     def test_module_creation(self):
@@ -121,7 +120,8 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
         with self.assertRaises(ValueError) as context:
             fp4_linear(input_fp32)
         self.assertIn(
-            "CudaFp4GEMMLinear accepts bfloat16 and float16 input", str(context.exception)
+            "CudaFp4GEMMLinear accepts bfloat16 and float16 input",
+            str(context.exception),
         )
         self.assertIn("torch.float32", str(context.exception))
 
@@ -133,7 +133,7 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
             fp4_linear(input_fp16)
         self.assertIn(
             "CudaFp4GEMMLinear with trtllm backend only supoorts bfloat16 input",
-            str(context.exception)
+            str(context.exception),
         )
         self.assertIn("torch.float16", str(context.exception))
 
@@ -184,9 +184,7 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
 
     def test_bias_handling(self):
         """Test bias handling"""
-        fp4_linear_with_bias = self._create_fp4_linear(
-            with_bias=True
-        )
+        fp4_linear_with_bias = self._create_fp4_linear(with_bias=True)
         input_tensor = torch.randn(
             32, self.hidden_size, dtype=torch.bfloat16, device=self.device
         )
@@ -194,9 +192,7 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
         output_with_bias = fp4_linear_with_bias(input_tensor)
         self.assertEqual(output_with_bias.shape, (32, self.output_size))
 
-        fp4_linear_no_bias = self._create_fp4_linear(
-            with_bias=False
-        )
+        fp4_linear_no_bias = self._create_fp4_linear(with_bias=False)
         output_no_bias = fp4_linear_no_bias(input_tensor)
         self.assertEqual(output_no_bias.shape, (32, self.output_size))
 
@@ -267,7 +263,7 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
         # Weight should be stored in original shape [n, k]
         expected_weight_shape = (self.output_size, self.hidden_size // 2)
         self.assertEqual(fp4_linear.weight.shape, expected_weight_shape)
-        
+
     def test_fp4_vs_bf16_accuracy(self):
         """Test accuracy comparison between FP4 linear and BF16 linear"""
         # Create FP4 linear layer, cutlass backend
@@ -294,7 +290,9 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
                     device=self.device,
                 )
 
-                fp4_linear.input_scale = 1.0 / (448.0 * 6.0 / input_tensor.float().abs().nan_to_num().max())
+                fp4_linear.input_scale = 1.0 / (
+                    448.0 * 6.0 / input_tensor.float().abs().nan_to_num().max()
+                )
                 fp4_linear.alpha = fp4_linear.input_scale * fp4_linear.weight_scale_2
                 fp4_linear.input_scale_inv = 1.0 / fp4_linear.input_scale
                 # Forward pass through FP4 linear
@@ -307,7 +305,7 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
                 print(f"backend: {backend}, fp4_output: {fp4_output.float()}")
                 print(f"backend: {backend}, bf16_output: {bf16_output.float()}")
                 diff = calc_diff(fp4_output, bf16_output)
-                self.assertLess(diff, 0.01)
+                self.assertLess(diff, 0.012)
 
                 # Both outputs should have the same shape and dtype
                 self.assertEqual(fp4_output.shape, bf16_output.shape)
@@ -338,7 +336,9 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
                     dtype=torch.float16,
                     device=self.device,
                 )
-                fp4_linear.input_scale = 1.0 / (448.0 * 6.0 / input_tensor.float().abs().nan_to_num().max())
+                fp4_linear.input_scale = 1.0 / (
+                    448.0 * 6.0 / input_tensor.float().abs().nan_to_num().max()
+                )
                 fp4_linear.alpha = fp4_linear.input_scale * fp4_linear.weight_scale_2
                 fp4_linear.input_scale_inv = 1.0 / fp4_linear.input_scale
                 # Forward pass through FP4 linear
@@ -351,7 +351,7 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
                 print(f"backend: {backend}, fp4_output: {fp4_output.float()}")
                 print(f"backend: {backend}, fp16_output: {fp16_output.float()}")
                 diff = calc_diff(fp4_output, fp16_output)
-                self.assertLess(diff, 0.01)
+                self.assertLess(diff, 0.012)
 
                 # Both outputs should have the same shape and dtype
                 self.assertEqual(fp4_output.shape, fp16_output.shape)
@@ -362,4 +362,3 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

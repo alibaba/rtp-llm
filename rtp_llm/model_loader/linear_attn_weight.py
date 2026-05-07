@@ -16,7 +16,7 @@ class LinearAttnConfig(object):
         self.linear_value_head_dim = linear_attention_config.linear_value_head_dim
 
 
-# qkvz layout: [hidden_size, head_k, xx] -> [hidden, local_head_k, xx]
+# qkvz layout: [head_k * xx, hidden_size] -> [local_head_k * xx, hidden_size]
 def split_qkvz(
     t: torch.Tensor, load_config: LoadConfig, linear_config: LinearAttnConfig
 ) -> torch.Tensor:
@@ -25,7 +25,7 @@ def split_qkvz(
         linear_config.linear_key_head_dim * linear_config.linear_num_key_heads
         + linear_config.linear_value_head_dim * linear_config.linear_num_value_heads
     ) * 2
-    if t.shape[1] == origin_qkvz_size:
+    if t.shape[0] == origin_qkvz_size:
         q, k, v, z = torch.split(
             t,
             [
@@ -36,9 +36,9 @@ def split_qkvz(
                 linear_config.linear_value_head_dim
                 * linear_config.linear_num_value_heads,
             ],
-            dim=1,
+            dim=0,
         )
-    elif t.shape[1] == origin_qkvz_size // BLOCK_SIZE:
+    elif t.shape[0] == origin_qkvz_size // BLOCK_SIZE:
         q, k, v, z = torch.split(
             t,
             [
@@ -55,25 +55,25 @@ def split_qkvz(
                 // BLOCK_SIZE
                 * linear_config.linear_num_value_heads,
             ],
-            dim=1,
+            dim=0,
         )
     else:
         raise ValueError(
             f"Invalid input shape 0 for scale / weight: {t.shape}, expected: {origin_qkvz_size} or {origin_qkvz_size // BLOCK_SIZE}"
         )
-    q = torch.split(q, q.shape[1] // load_config.tp_size, dim=1)[
+    q = torch.split(q, q.shape[0] // load_config.tp_size, dim=0)[
         load_config.tp_rank
     ].contiguous()
-    k = torch.split(k, k.shape[1] // load_config.tp_size, dim=1)[
+    k = torch.split(k, k.shape[0] // load_config.tp_size, dim=0)[
         load_config.tp_rank
     ].contiguous()
-    v = torch.split(v, v.shape[1] // load_config.tp_size, dim=1)[
+    v = torch.split(v, v.shape[0] // load_config.tp_size, dim=0)[
         load_config.tp_rank
     ].contiguous()
-    z = torch.split(z, z.shape[1] // load_config.tp_size, dim=1)[
+    z = torch.split(z, z.shape[0] // load_config.tp_size, dim=0)[
         load_config.tp_rank
     ].contiguous()
-    return torch.cat([q, k, v, z], dim=1)
+    return torch.cat([q, k, v, z], dim=0)
 
 
 def split_qkvz_t(
@@ -83,20 +83,20 @@ def split_qkvz_t(
     return t.transpose(0, 1).contiguous()
 
 
-# ba layout: [hidden_size, head_v + head_v]
+# ba layout: [head_v + head_v, hidden_size]
 def split_ba(
     t: torch.Tensor, load_config: LoadConfig, linear_config: LinearAttnConfig
 ) -> torch.Tensor:
-    pack_head_num = t.shape[1]
+    pack_head_num = t.shape[0]
     assert pack_head_num % 2 == 0, "pack_head_num must be even"
-    b, a = torch.split(t, [pack_head_num // 2, pack_head_num // 2], dim=1)
-    b = b.split(b.shape[1] // load_config.tp_size, dim=1)[
+    b, a = torch.split(t, [pack_head_num // 2, pack_head_num // 2], dim=0)
+    b = b.split(b.shape[0] // load_config.tp_size, dim=0)[
         load_config.tp_rank
     ].contiguous()
-    a = a.split(a.shape[1] // load_config.tp_size, dim=1)[
+    a = a.split(a.shape[0] // load_config.tp_size, dim=0)[
         load_config.tp_rank
     ].contiguous()
-    return torch.cat([b, a], dim=1)
+    return torch.cat([b, a], dim=0)
 
 
 # layout [head_num_v]
@@ -136,16 +136,16 @@ def split_conv1d(
     return torch.cat([q, k, v], dim=0)
 
 
-# weight: [head_num_v * head_size_v, hidden_size] -> [local_head_v * head_size_v, hidden_size]
+# weight: [hidden_size, head_num_v * head_size_v] -> [hidden_size, local_head_v * head_size_v]
 def split_out_linear(
     t: torch.Tensor, load_config: LoadConfig, linear_config: LinearAttnConfig
 ) -> torch.Tensor:
-    _, n = t.shape
-    t = t.view(linear_config.linear_num_value_heads, -1, n)
+    m, _ = t.shape
+    t = t.view(m, linear_config.linear_num_value_heads, -1)
     local_head_num_v = linear_config.linear_num_value_heads // load_config.tp_size
     start_head_num_v = local_head_num_v * load_config.tp_rank
     end_head_num_v = start_head_num_v + local_head_num_v
-    return t[start_head_num_v:end_head_num_v, :, :].reshape(-1, n)
+    return t[:, start_head_num_v:end_head_num_v, :].reshape(m, -1).contiguous()
 
 
 def split_out_linear_t(
@@ -224,10 +224,10 @@ _linear_attn_split_stratey = {
 
 
 _linear_attn_w8a8_per_block_split_strategy = {
-    W.linear_attn_qkvz_w: split_qkvz_t,
-    W.linear_attn_qkvz_s: split_qkvz_t,
-    W.linear_attn_out_w: split_out_linear_t,
-    W.linear_attn_out_s: split_out_linear_t,
+    W.linear_attn_qkvz_w: split_qkvz,
+    W.linear_attn_qkvz_s: split_qkvz,
+    W.linear_attn_out_w: split_out_linear,
+    W.linear_attn_out_s: split_out_linear,
 }
 
 

@@ -43,9 +43,10 @@ class FfnAtomicWeight(AtomicWeight):
 
     @property
     def need_padding(self) -> bool:
-        if isinstance(
-            self.process_fun, functools.partial
-        ) and self.process_fun.func.__name__ in ["transpose_pad", "pad"]:
+        if (
+            isinstance(self.process_fun, functools.partial)
+            and self.process_fun.func.__name__ == "pad"
+        ):
             return True
         else:
             return False
@@ -63,47 +64,47 @@ def w13_func_wrap(ts: List[torch.Tensor], origin_w1, origin_w3):
     assert len(ts) == w1_size + w3_size
     w1 = origin_w1.process_fun(ts[:w1_size])
     w3 = origin_w3.process_fun(ts[w1_size:])
-    return torch.concat([w1, w3], dim=-1).contiguous()
+    return torch.concat([w1, w3], dim=0).contiguous()
 
 
 def w13_lora_a_func_wrap(
     ts: torch.Tensor, origin_w1: FfnAtomicWeight, origin_w3: FfnAtomicWeight
 ):
     assert origin_w1.lora_a_process_func and origin_w3.lora_a_process_func
-    w1, w3 = torch.chunk(ts, 2, dim=-1)
+    w1, w3 = torch.chunk(ts, 2, dim=0)
     w1 = origin_w1.lora_a_process_func(w1)
     w3 = origin_w3.lora_a_process_func(w3)
-    return torch.concat([w1, w3], dim=-1).contiguous()
+    return torch.concat([w1, w3], dim=0).contiguous()
 
 
 def w13_lora_b_func_wrap(
     ts: torch.Tensor, origin_w1: FfnAtomicWeight, origin_w3: FfnAtomicWeight
 ):
     assert origin_w1.lora_b_process_func and origin_w3.lora_b_process_func
-    w1, w3 = torch.chunk(ts, 2, dim=-1)
+    w1, w3 = torch.chunk(ts, 2, dim=0)
     w1 = origin_w1.lora_b_process_func(w1)
     w3 = origin_w3.lora_b_process_func(w3)
-    return torch.concat([w1, w3], dim=-1).contiguous()
+    return torch.concat([w1, w3], dim=0).contiguous()
 
 
 def w13_lora_a_split_func_wrap(
     ts: torch.Tensor, origin_w1: FfnAtomicWeight, origin_w3: FfnAtomicWeight
 ):
     assert origin_w1.lora_a_split_func and origin_w3.lora_a_split_func
-    w1, w3 = torch.chunk(ts, 2, dim=-1)
+    w1, w3 = torch.chunk(ts, 2, dim=0)
     w1 = origin_w1.lora_a_split_func(w1)
     w3 = origin_w3.lora_a_split_func(w3)
-    return torch.concat([w1, w3], dim=-1).contiguous()
+    return torch.concat([w1, w3], dim=0).contiguous()
 
 
 def w13_lora_b_split_func_wrap(
     ts: torch.Tensor, origin_w1: FfnAtomicWeight, origin_w3: FfnAtomicWeight
 ):
     assert origin_w1.lora_b_split_func and origin_w3.lora_b_split_func
-    w1, w3 = torch.chunk(ts, 2, dim=-1)
+    w1, w3 = torch.chunk(ts, 2, dim=0)
     w1 = origin_w1.lora_b_split_func(w1)
     w3 = origin_w3.lora_b_split_func(w3)
-    return torch.concat([w1, w3], dim=-1).contiguous()
+    return torch.concat([w1, w3], dim=0).contiguous()
 
 
 def fix_merge_w13(sub_weight_dict: Dict[str, FfnAtomicWeight]):

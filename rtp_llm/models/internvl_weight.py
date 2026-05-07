@@ -20,7 +20,6 @@ from rtp_llm.utils.model_weight import (
     concat_1,
     identity,
     merge_qkv_b,
-    transpose,
     zeros,
 )
 
@@ -124,26 +123,26 @@ class InternVLWeightInfo(ModelDeployWeightInfo, BaseMultiModalWeightInfo):
                     identity,
                 ),
                 AttnAtomicWeight(
-                    W.attn_o_w, [CkptWeightInfo(self._names.WO, concat_1)], transpose
+                    W.attn_o_w, [CkptWeightInfo(self._names.WO, concat_1)], identity
                 ),
                 FfnWeight(
                     sub_weights=[
                         FfnAtomicWeight(
                             W.ffn_w1,
                             [CkptWeightInfo(self._names.FFW1, concat_0)],
-                            transpose,
+                            identity,
                             config=ffn_config,
                         ),
                         FfnAtomicWeight(
                             W.ffn_w3,
                             [CkptWeightInfo(self._names.FFW3, concat_0)],
-                            transpose,
+                            identity,
                             config=ffn_config,
                         ),
                         FfnAtomicWeight(
                             W.ffn_w2,
                             [CkptWeightInfo(self._names.FFW2, concat_1)],
-                            transpose,
+                            identity,
                             config=ffn_config,
                         ),
                     ],
