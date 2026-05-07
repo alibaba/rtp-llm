@@ -139,21 +139,42 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
                             const KvCacheInfo&          kv_cache,
                             bool                        mla_kvcache,
                             std::shared_ptr<CacheStore> cache_store) {
-    auto& param = cache_store_inputs;
-    if (param.warmup) {
+    if (cache_store_inputs.warmup) {
         RTP_LLM_LOG_DEBUG("is warmup, so ignore writeCacheStore");
         return;
     }
-    if (!param.pd_separation || param.context_batch_size == 0) {
+    if (!cache_store_inputs.pd_separation || cache_store_inputs.context_batch_size == 0) {
         RTP_LLM_LOG_DEBUG("pd_separation = %d, context_batch_size = %d, so ignore writeCacheStore",
-                          param.pd_separation,
-                          param.context_batch_size);
+                          cache_store_inputs.pd_separation,
+                          cache_store_inputs.context_batch_size);
         return;
     }
     if (!cache_store) {
         RTP_LLM_LOG_DEBUG("cache_store is null, skip writeCacheStore");
         return;
     }
+
+    // The legacy host code path below dereferences these tensors via data_ptr<>() +
+    // pointer arithmetic. If callers passed device tensors, do an explicit D2H
+    // stream copy + sync here so the host-side reads stay valid.
+    // TODO(async): rewrite this path to consume device tensors directly.
+    auto to_cpu_sync = [](const torch::Tensor& t) -> torch::Tensor {
+        if (!t.defined() || t.device().is_cpu()) {
+            return t;
+        }
+        return t.cpu();
+    };
+
+    CacheStoreInputs local             = cache_store_inputs;
+    local.host_kv_cache_offset         = to_cpu_sync(local.host_kv_cache_offset);
+    local.prefix_lengths_host          = to_cpu_sync(local.prefix_lengths_host);
+    local.input_lengths_host           = to_cpu_sync(local.input_lengths_host);
+    local.kv_cache_layer_to_group_host = to_cpu_sync(local.kv_cache_layer_to_group_host);
+    local.kv_cache_group_types_host    = to_cpu_sync(local.kv_cache_group_types_host);
+    local.request_id                   = to_cpu_sync(local.request_id);
+    local.request_pd_separation        = to_cpu_sync(local.request_pd_separation);
+
+    auto& param = local;
 
     RTP_LLM_CHECK_WITH_INFO(param.host_kv_cache_offset.defined(), "failed to get host_kv_cache_offset");
     const int32_t* offset_addr          = nullptr;

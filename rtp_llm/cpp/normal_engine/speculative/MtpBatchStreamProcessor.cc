@@ -17,8 +17,8 @@ namespace {
 // Fallback-hit counters. Each counter is incremented when a hot-path
 // gather/prepare function falls through to the legacy CPU/GPU mixed path.
 // The counters are read by the rate-limited log emitter below; production
-// monitoring should prefer the kmonitor metric `executor.mtp.async_fallback.reason` once it is wired, but this in-process counter provides
-// immediate visibility today without requiring a metrics-schema change.
+// monitoring should prefer the kmonitor metric `executor.mtp.async_fallback.reason` once it is wired, but this
+// in-process counter provides immediate visibility today without requiring a metrics-schema change.
 std::atomic<uint64_t> g_mtp_device_state_fallback_count{0};
 std::atomic<uint64_t> g_mtp_device_state_success_count{0};
 
@@ -228,10 +228,17 @@ void MtpBatchStreamProcessor::updateProposeTokens(const StreamGroups&           
             spec_update_infos[stream_idx].draft_token_gpu = propose_token_ids.narrow(0, batch_idx_out, next_batch_size);
         }
 
-        // Legacy int field. Filled only when GPU tensor is unavailable (PD
-        // disaggregate decode-side already on CPU). PDFUSION path can leave it
-        // as -1 because consumers prefer draft_token_gpu when defined.
-        if (!on_gpu) {
+        // Legacy int field. Required when the GPU tensor isn't usable downstream:
+        //   - on_gpu == false: propose tensor is already CPU, just read it.
+        //   - stream->queryPdSep(): PD-disagg prefill ships propose_token_ over
+        //     gRPC (PrefillRpcServer.cc), and the receiver only sees the int
+        //     vector — leaving -1 here would propagate -1 as the draft token
+        //     to the decode side and corrupt the first verify step.
+        // Pure PDFUSION decode path keeps -1 because consumers prefer
+        // draft_token_gpu when defined; ensure_cpu_mirror() stays lazy so we
+        // only pay the D2H when at least one stream actually needs it.
+        const bool need_cpu_int = !on_gpu || stream->queryPdSep();
+        if (need_cpu_int) {
             const auto& cpu_ids = ensure_cpu_mirror();
             int         propose_token =
                 (dtype == torch::kLong) ?
@@ -287,12 +294,35 @@ void MtpBatchStreamProcessor::prepareDecodeDraftModelInput(const StreamGroups& s
         sequence_lengths_gpu.reserve(batch_size);
         bool stream_async_eligible = !all_streams.empty();
         for (const auto& stream : all_streams) {
-            // DROP_BROAD_SYNC race: the bookkeeping worker may call
-            // clearMtpAsyncDeviceState between a defined() check and a later
-            // select(). Snapshot by value (refcount bump) and validate inside
-            // the same iteration that consumes the tensor.
+            // Snapshot by value (refcount bump) and validate inside the same
+            // iteration that consumes the tensor. State is expected to stay
+            // alive until the next publish overwrites it.
             torch::Tensor gpu_t = stream->getProposeTokensGpu();
             if (!gpu_t.defined() || !gpu_t.is_cuda()) {
+                const auto&  mtp_state           = stream->getMtpAsyncDeviceState();
+                const auto&  next_seq_len_gpu    = mtp_state.next_seq_len_gpu;
+                const auto&  accept_len_gpu      = mtp_state.accept_len_gpu;
+                auto         sp_output_buffer    = stream->getSPOutputBuffer();
+                const bool   sp_propose_defined  = sp_output_buffer && sp_output_buffer->propose_tokens_gpu.defined();
+                const bool   sp_propose_cuda     = sp_propose_defined && sp_output_buffer->propose_tokens_gpu.is_cuda();
+                const size_t tensors_holder_size = sp_output_buffer ? sp_output_buffer->tensors_holder.size() : 0;
+                RTP_LLM_LOG_WARNING(
+                    "stream_async_eligible = false, stream_id = %ld, epoch = %lu, propose_defined = %d, "
+                    "propose_cuda = %d, next_seq_len_defined = %d, next_seq_len_cuda = %d, "
+                    "accept_len_defined = %d, accept_len_cuda = %d, sp_propose_defined = %d, "
+                    "sp_propose_cuda = %d, tensors_holder_size = %zu, seq_len = %d",
+                    stream->streamId(),
+                    mtp_state.epoch,
+                    gpu_t.defined(),
+                    gpu_t.defined() && gpu_t.is_cuda(),
+                    next_seq_len_gpu.defined(),
+                    next_seq_len_gpu.defined() && next_seq_len_gpu.is_cuda(),
+                    accept_len_gpu.defined(),
+                    accept_len_gpu.defined() && accept_len_gpu.is_cuda(),
+                    sp_propose_defined,
+                    sp_propose_cuda,
+                    tensors_holder_size,
+                    stream->seqLength());
                 stream_async_eligible = false;
                 break;
             }
@@ -879,11 +909,9 @@ void MtpBatchStreamProcessor::gatherHiddenStates(const StreamGroups& stream_grou
     // MtpExecutor::dispatchDecodeAsync on the main thread, epoch-guarded).
     // This bypasses the worker-thread write to sp_output_buffer->hidden_states
     // which races the next step's main thread when DROP_BROAD_SYNC=1.
-    // Device-state may be cleared by the worker (epoch-guarded clear);
-    // when cleared, we fall back to sp_output_buffer->hidden_states which
-    // is guaranteed populated by then because the worker writes it BEFORE
-    // calling clearMtpAsyncDeviceState (see GenerateStream::specUpdate
-    // and the worker lambda in MtpExecutor::dispatchDecodeAsync).
+    // Device-state is expected to stay alive until the next publish overwrites
+    // it; the fallback only protects older streams or first-step streams that
+    // have not published device hidden states yet.
     auto pick_hidden_states = [](const GenerateStreamPtr& stream) -> const torch::Tensor& {
         const auto& dev = stream->getLastHiddenStatesGpu();
         if (dev.defined()) {

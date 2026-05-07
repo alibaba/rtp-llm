@@ -145,6 +145,12 @@ protected:
                                      std::shared_ptr<torch::Event>                rejection_event,
                                      std::shared_ptr<torch::Event>                draft_event);
 
+    // Synchronous dispatch also publishes the same per-stream device state as
+    // the async path, using the host seqLength after specUpdate as truth.
+    void publishSyncMtpDeviceState(const StreamGroups&                          stream_groups,
+                                   const speculative::SpeculativeSamplerOutput& spec_decode_output,
+                                   const MergedOutput&                          draft_prefill_output);
+
 private:
     std::unique_ptr<ModelBase>               model_;
     std::unique_ptr<Sampler>                 sampler_;
