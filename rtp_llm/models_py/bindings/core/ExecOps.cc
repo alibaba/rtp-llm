@@ -475,23 +475,52 @@ void execChainSpeculativeSampling(const SpeculativeSamplingParams& params) {
 // === Communication ops (Python callbacks via pybind11) ===
 
 namespace {
-std::mutex   g_comm_mutex;
-py::function g_broadcast_fn;  // (tensors: list[Tensor], root: int, mode: int) -> None
-py::function g_allreduce_fn;  // (tensor: Tensor, op: int, mode: int, dest: Optional[Tensor]) -> Tensor
-py::function
-    g_allgather_fn;  // (recv_buffers: list[Tensor], mode: int, send_buffers: list[Tensor], inplace: bool) -> None
+std::mutex g_comm_mutex;
+
+// These callbacks are Python objects. Do not store them as static py::function
+// values: their C++ static destructors may run after Python has started
+// finalizing, which aborts in pybind11::function::~function() without a GIL.
+// Keep raw pointers instead; normal shutdown deletes them under the GIL via
+// clearCommOpsUnlocked(), and abnormal process exit intentionally leaks them.
+py::function* g_broadcast_fn = nullptr;  // (tensors: list[Tensor], root: int, mode: int) -> None
+py::function* g_allreduce_fn = nullptr;  // (tensor: Tensor, op: int, mode: int, dest: Optional[Tensor]) -> Tensor
+py::function* g_allgather_fn =
+    nullptr;  // (recv_buffers: list[Tensor], mode: int, send_buffers: list[Tensor], inplace: bool) -> None
+
+void clearCommOpsUnlocked() {
+    py::function broadcast_fn;
+    py::function allreduce_fn;
+    py::function allgather_fn;
+    if (g_broadcast_fn != nullptr) {
+        broadcast_fn = std::move(*g_broadcast_fn);
+        delete g_broadcast_fn;
+        g_broadcast_fn = nullptr;
+    }
+    if (g_allreduce_fn != nullptr) {
+        allreduce_fn = std::move(*g_allreduce_fn);
+        delete g_allreduce_fn;
+        g_allreduce_fn = nullptr;
+    }
+    if (g_allgather_fn != nullptr) {
+        allgather_fn = std::move(*g_allgather_fn);
+        delete g_allgather_fn;
+        g_allgather_fn = nullptr;
+    }
+}
 }  // anonymous namespace
 
 void execBroadcast(const BroadcastParams& params) {
     py::function fn;
+    py::gil_scoped_acquire gil;
     {
         std::lock_guard<std::mutex> lock(g_comm_mutex);
-        fn = g_broadcast_fn;
+        if (g_broadcast_fn != nullptr) {
+            fn = *g_broadcast_fn;
+        }
     }
     RTP_LLM_CHECK_WITH_INFO(static_cast<bool>(fn),
                             "execBroadcast called but broadcast callback not registered via register_comm_ops");
-    py::gil_scoped_acquire gil;
-    py::list               tensors;
+    py::list tensors;
     for (auto& t : params.buffers)
         tensors.append(t);
     fn(tensors, params.root, static_cast<int>(params.mode));
@@ -499,14 +528,16 @@ void execBroadcast(const BroadcastParams& params) {
 
 AllReduceOutput execAllReduce(const AllReduceParams& params) {
     py::function fn;
+    py::gil_scoped_acquire gil;
     {
         std::lock_guard<std::mutex> lock(g_comm_mutex);
-        fn = g_allreduce_fn;
+        if (g_allreduce_fn != nullptr) {
+            fn = *g_allreduce_fn;
+        }
     }
     RTP_LLM_CHECK_WITH_INFO(static_cast<bool>(fn),
                             "execAllReduce called but allreduce callback not registered via register_comm_ops");
-    py::gil_scoped_acquire gil;
-    auto                   result = fn(params.buffer,
+    auto result = fn(params.buffer,
                      static_cast<int>(params.op),
                      static_cast<int>(params.mode),
                      params.dest.defined() ? py::cast(params.dest) : py::none());
@@ -515,14 +546,16 @@ AllReduceOutput execAllReduce(const AllReduceParams& params) {
 
 void execAllGather(const AllGatherParams& params) {
     py::function fn;
+    py::gil_scoped_acquire gil;
     {
         std::lock_guard<std::mutex> lock(g_comm_mutex);
-        fn = g_allgather_fn;
+        if (g_allgather_fn != nullptr) {
+            fn = *g_allgather_fn;
+        }
     }
     RTP_LLM_CHECK_WITH_INFO(static_cast<bool>(fn),
                             "execAllGather called but allgather callback not registered via register_comm_ops");
-    py::gil_scoped_acquire gil;
-    py::list               recv_list, send_list;
+    py::list recv_list, send_list;
     for (auto& t : params.recv_buffers)
         recv_list.append(t);
     for (auto& t : params.send_buffers)
@@ -636,9 +669,10 @@ void registerExecCtxOps(pybind11::module& m) {
         "register_comm_ops",
         [](py::function broadcast_fn, py::function allreduce_fn, py::function allgather_fn) {
             std::lock_guard<std::mutex> lock(g_comm_mutex);
-            g_broadcast_fn = std::move(broadcast_fn);
-            g_allreduce_fn = std::move(allreduce_fn);
-            g_allgather_fn = std::move(allgather_fn);
+            clearCommOpsUnlocked();
+            g_broadcast_fn = new py::function(std::move(broadcast_fn));
+            g_allreduce_fn = new py::function(std::move(allreduce_fn));
+            g_allgather_fn = new py::function(std::move(allgather_fn));
         },
         py::arg("broadcast_fn"),
         py::arg("allreduce_fn"),
@@ -649,9 +683,7 @@ void registerExecCtxOps(pybind11::module& m) {
         "clear_comm_ops",
         []() {
             std::lock_guard<std::mutex> lock(g_comm_mutex);
-            g_broadcast_fn = py::function();
-            g_allreduce_fn = py::function();
-            g_allgather_fn = py::function();
+            clearCommOpsUnlocked();
         },
         "Clear registered Python communication callbacks.");
 }
