@@ -1,6 +1,102 @@
 """DSV4 Indexer top-k correctness tests."""
 
+from rtp_llm.models_py.modules.dsv4.indexer import Indexer as OurIndexer
 from rtp_llm.models_py.modules.dsv4.test.dsv4_test_utils import *
+
+
+def _init_official_indexer_weights(official: OfficialIndexer):
+    with torch.no_grad():
+        nn.init.normal_(official.wq_b.weight, std=0.02)
+        nn.init.normal_(official.weights_proj.weight, std=0.02)
+    _init_official_compressor_weights(official.compressor)
+
+
+def _bind_standalone_indexer_pools(
+    indexer: OurIndexer,
+    bsz: int,
+    kv_cache_size: int,
+    device: torch.device,
+    dtype: torch.dtype = torch.bfloat16,
+    sequence_lengths=None,
+):
+    comp = indexer.compressor
+    if KV_TOKENS_PER_BLOCK % comp.compress_ratio != 0:
+        raise ValueError(
+            f"KV_TOKENS_PER_BLOCK={KV_TOKENS_PER_BLOCK} must be divisible by "
+            f"compress_ratio={comp.compress_ratio}"
+        )
+    if sequence_lengths is None:
+        seq_lens = [int(kv_cache_size) * int(comp.compress_ratio)] * bsz
+    elif isinstance(sequence_lengths, torch.Tensor):
+        seq_lens = [int(v) for v in sequence_lengths.detach().cpu().reshape(-1)]
+    elif isinstance(sequence_lengths, int):
+        seq_lens = [int(sequence_lengths)] * bsz
+    else:
+        seq_lens = [int(v) for v in sequence_lengths]
+    if len(seq_lens) == 1 and bsz > 1:
+        seq_lens = seq_lens * bsz
+    if len(seq_lens) != bsz:
+        raise ValueError(f"sequence_lengths must have 1 or {bsz} values")
+
+    kv_eb = KV_TOKENS_PER_BLOCK // comp.compress_ratio
+    blocks_per_batch = [
+        max(1, int(math.ceil(max(seq_len, 0) / KV_TOKENS_PER_BLOCK)))
+        for seq_len in seq_lens
+    ]
+    max_blocks = max(blocks_per_batch)
+    kv_block_table = torch.full((bsz, max_blocks), -1, device=device, dtype=torch.long)
+    next_kv_block_id = 1
+    for b, block_count in enumerate(blocks_per_batch):
+        block_ids = torch.arange(
+            next_kv_block_id,
+            next_kv_block_id + block_count,
+            device=device,
+            dtype=torch.long,
+        )
+        kv_block_table[b, :block_count] = block_ids
+        next_kv_block_id += block_count
+    kv_pool = torch.zeros(
+        next_kv_block_id * kv_eb,
+        indexer.head_dim,
+        dtype=dtype,
+        device=device,
+    )
+
+    state_eb = comp._state_rows
+    state_block_table = torch.full(
+        (bsz, max_blocks), -1, device=device, dtype=torch.long
+    )
+    next_state_block_id = 1
+    for b, block_count in enumerate(blocks_per_batch):
+        first_tail_block = max(0, block_count - 2)
+        tail_count = block_count - first_tail_block
+        block_ids = torch.arange(
+            next_state_block_id,
+            next_state_block_id + tail_count,
+            device=device,
+            dtype=torch.long,
+        )
+        state_block_table[b, first_tail_block:block_count] = block_ids
+        next_state_block_id += tail_count
+    state_pool = torch.zeros(
+        next_state_block_id * state_eb,
+        2 * comp._state_dim,
+        dtype=torch.float32,
+        device=device,
+    )
+    indexer.set_pool_context(
+        kv_pool, kv_block_table, kv_eb, state_pool, state_block_table, state_eb
+    )
+    return types.SimpleNamespace(
+        kv_pool=kv_pool,
+        kv_block_table=kv_block_table,
+        kv_eb=kv_eb,
+        state_pool=state_pool,
+        state_block_table=state_block_table,
+        state_eb=state_eb,
+        bsz=bsz,
+        device=device,
+    )
 
 
 class TestIndexerTopk(unittest.TestCase):
@@ -74,9 +170,9 @@ class TestIndexerTopk(unittest.TestCase):
         offset = S
 
         our_topk = our_idx(x, qr, start_pos=0, offset=offset)
-        official_topk = official_idx(
-            x.cpu(), qr.cpu(), start_pos=0, offset=offset
-        ).to(our_topk.device)
+        official_topk = official_idx(x.cpu(), qr.cpu(), start_pos=0, offset=offset).to(
+            our_topk.device
+        )
 
         assert our_topk.shape == official_topk.shape
         match_rate = (our_topk == official_topk).float().mean().item()
