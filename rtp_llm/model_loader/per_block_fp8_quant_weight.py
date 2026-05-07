@@ -179,6 +179,8 @@ def gemm_block_fp8_gpt_style_tp_strategy():
         W.v4_shared_w2_s: sp_id,
         W.v4_shared_w3_w: sp_id,
         W.v4_shared_w3_s: sp_id,
+        W.v4_shared_w13_w: sp_id,
+        W.v4_shared_w13_s: sp_id,
     }
     tp_strategy = copy.deepcopy(W.gpt_style_tp_strategy)
     tp_strategy.update(gemm_block_fp8_weight_tp_strategy)
@@ -921,6 +923,7 @@ _V4_FP8_WEIGHT_LIST: Dict[str, str] = {
     W.v4_shared_w1_w: W.v4_shared_w1_s,
     W.v4_shared_w2_w: W.v4_shared_w2_s,
     W.v4_shared_w3_w: W.v4_shared_w3_s,
+    W.v4_shared_w13_w: W.v4_shared_w13_s,
 }
 
 # Register V4 names into the base class whitelist so support() and the
@@ -1000,31 +1003,36 @@ class V4PerBlockFp8Weight(PerBlockFp8Weight):
         """Build kernel + scale ``W8A8Fp8PerBlock*AtomicWeight`` pair from a
         V4 ``.weight`` / ``.scale`` ckpt suffix convention.  Mirrors the base
         ``_get_quant_weight_default`` but uses ``self.V4_S_SUFFIX``."""
-        # Strip the ".weight" suffix from the underlying ckpt key, then
-        # append ".weight" / ".scale" respectively.  This lets V4 descriptors
-        # declare the *kernel* CkptWeightInfo with name "...weight" and have
-        # the scale auto-derived.
-        base_ckpt = src_weight_info.weights[0].name
-        assert base_ckpt.endswith(self.V4_W_SUFFIX), (
-            f"expected V4 FP8 weight ckpt key to end with '{self.V4_W_SUFFIX}', "
-            f"got {base_ckpt}"
-        )
-        stem = base_ckpt[: -len(self.V4_W_SUFFIX)]
-        merge = src_weight_info.weights[0].merge_fun
+        # Strip the ".weight" suffix from every underlying ckpt key, then
+        # append ".weight" / ".scale" respectively.  Most V4 FP8 weights have
+        # one ckpt key.  DSV4 shared expert w13 intentionally has two
+        # (w1.weight + w3.weight) and relies on src_weight_info.process_fun to
+        # merge them at load time.
+        weight_infos = []
+        scale_infos = []
+        for ckpt in src_weight_info.weights:
+            base_ckpt = ckpt.name
+            assert base_ckpt.endswith(self.V4_W_SUFFIX), (
+                f"expected V4 FP8 weight ckpt key to end with '{self.V4_W_SUFFIX}', "
+                f"got {base_ckpt}"
+            )
+            stem = base_ckpt[: -len(self.V4_W_SUFFIX)]
+            weight_infos.append(CkptWeightInfo(stem + self.V4_W_SUFFIX, ckpt.merge_fun))
+            scale_infos.append(CkptWeightInfo(stem + self.V4_S_SUFFIX, ckpt.merge_fun))
 
         kernel = create_w8a8_fp8_per_block_weight(
             src_weight_info,
             weight_key,
-            [CkptWeightInfo(stem + self.V4_W_SUFFIX, merge)],
-            identity,
+            weight_infos,
+            src_weight_info.process_fun,
             data_type=torch.float8_e4m3fn,
             config=getattr(src_weight_info, "config", None),
         )
         scale = create_w8a8_fp8_per_block_weight(
             src_weight_info,
             scale_key,
-            [CkptWeightInfo(stem + self.V4_S_SUFFIX, merge)],
-            identity,
+            scale_infos,
+            src_weight_info.process_fun,
             data_type=torch.float8_e8m0fnu,
             config=getattr(src_weight_info, "config", None),
         )

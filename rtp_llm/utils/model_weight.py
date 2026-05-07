@@ -45,6 +45,7 @@ def concat_0(ts: List[torch.Tensor]) -> torch.Tensor:
         torch.float8_e4m3fnuz,
         torch.float8_e5m2,
         torch.float8_e5m2fnuz,
+        torch.float8_e8m0fnu,
     ]:
         dtype = ts[0].dtype
         out_u8 = torch.concat([x.view(torch.uint8) for x in ts], dim=0).contiguous()
@@ -62,6 +63,7 @@ def concat_1(ts: List[torch.Tensor]) -> torch.Tensor:
         torch.float8_e4m3fnuz,
         torch.float8_e5m2,
         torch.float8_e5m2fnuz,
+        torch.float8_e8m0fnu,
     ]:
         dtype = ts[0].dtype
         out_u8 = torch.concat([x.view(torch.uint8) for x in ts], dim=1).contiguous()
@@ -411,6 +413,7 @@ def stack_0(ts: List[torch.Tensor]) -> torch.Tensor:
         torch.float8_e4m3fnuz,
         torch.float8_e5m2,
         torch.float8_e5m2fnuz,
+        torch.float8_e8m0fnu,
     ]:
         dtype = ts[0].dtype
         out_u8 = torch.concat(
@@ -950,6 +953,7 @@ def pad_w13(ts: List[torch.Tensor], align_size: int, dim: int):
         torch.float8_e4m3fnuz,
         torch.float8_e5m2,
         torch.float8_e5m2fnuz,
+        torch.float8_e8m0fnu,
     ]:
         dtype = w1.dtype
         out_u8 = torch.concat(
@@ -1425,6 +1429,8 @@ class W:
     v4_shared_w2_s = "v4.shared.w2.scale"
     v4_shared_w3_w = "v4.shared.w3.weight"
     v4_shared_w3_s = "v4.shared.w3.scale"
+    v4_shared_w13_w = "v4.shared.w13.weight"
+    v4_shared_w13_s = "v4.shared.w13.scale"
     # routed experts (FP4 packed int8 + UE8M0 group=32 scale, per-expert)
     v4_routed_w1_w = "v4.routed.w1.weight"
     v4_routed_w1_s = "v4.routed.w1.scale"
@@ -1595,6 +1601,8 @@ class W:
         v4_shared_w2_s: sp_id,
         v4_shared_w3_w: sp_id,
         v4_shared_w3_s: sp_id,
+        v4_shared_w13_w: sp_id,
+        v4_shared_w13_s: sp_id,
         v4_routed_w1_w: sp_id,
         v4_routed_w1_s: sp_id,
         v4_routed_w2_w: sp_id,

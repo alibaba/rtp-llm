@@ -12,14 +12,17 @@ from unittest.mock import MagicMock
 
 import torch
 
+from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
+from rtp_llm.model_loader.attn_weight import AttnAtomicWeight
 from rtp_llm.model_loader.ffn_weight import (
     MoeAtomicWeight,
     MoeConfig,
     MoeWeight,
     iter_stacked_moe_weights,
 )
+from rtp_llm.model_loader.per_block_fp8_quant_weight import V4PerBlockFp8Weight
 from rtp_llm.model_loader.tensor_source import StackSplitTensorSource, TensorSource
-from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity
+from rtp_llm.utils.model_weight import CkptWeightInfo, W, concat_0, identity
 
 
 class FakeTensorSource(TensorSource):
@@ -38,6 +41,40 @@ class FakeTensorSource(TensorSource):
 
     def get_database(self):
         return None
+
+
+class TestV4SharedExpertW13Weight(unittest.TestCase):
+    def test_v4_shared_w13_derives_weight_and_scale_inputs(self):
+        src = AttnAtomicWeight(
+            W.v4_shared_w13_w,
+            [
+                CkptWeightInfo("layers.{i}.ffn.shared_experts.w1.weight", identity),
+                CkptWeightInfo("layers.{i}.ffn.shared_experts.w3.weight", identity),
+            ],
+            concat_0,
+        )
+
+        wrapped = src.create(src, Fp8BlockWiseQuantConfig(is_quanted=True))
+
+        self.assertIsInstance(wrapped, V4PerBlockFp8Weight)
+        self.assertEqual(wrapped.kernel.name, W.v4_shared_w13_w)
+        self.assertEqual(wrapped.scale.name, W.v4_shared_w13_s)
+        self.assertEqual(
+            [w.name for w in wrapped.kernel.weights],
+            [
+                "layers.{i}.ffn.shared_experts.w1.weight",
+                "layers.{i}.ffn.shared_experts.w3.weight",
+            ],
+        )
+        self.assertEqual(
+            [w.name for w in wrapped.scale.weights],
+            [
+                "layers.{i}.ffn.shared_experts.w1.scale",
+                "layers.{i}.ffn.shared_experts.w3.scale",
+            ],
+        )
+        self.assertIs(wrapped.kernel.process_fun, concat_0)
+        self.assertIs(wrapped.scale.process_fun, concat_0)
 
 
 class TestStackSplitTensorSource(unittest.TestCase):
