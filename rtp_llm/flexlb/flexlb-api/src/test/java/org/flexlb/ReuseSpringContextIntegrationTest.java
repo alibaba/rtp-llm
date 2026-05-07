@@ -5,7 +5,9 @@ import org.flexlb.balance.scheduler.QueueManager;
 import org.flexlb.cases.QueueStressTest;
 import org.flexlb.cases.RequestCancelTest;
 import org.flexlb.config.ConfigService;
+import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.service.RouteService;
+import org.flexlb.sync.status.EngineWorkerStatus;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -15,11 +17,14 @@ import org.springframework.boot.test.autoconfigure.web.reactive.AutoConfigureWeb
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.mock.mockito.SpyBean;
+import org.springframework.http.MediaType;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.reactive.server.WebTestClient;
 import uk.org.webcompere.systemstubs.environment.EnvironmentVariables;
 import uk.org.webcompere.systemstubs.jupiter.SystemStub;
 import uk.org.webcompere.systemstubs.jupiter.SystemStubsExtension;
+
+import java.util.Map;
 
 /**
  * Integration test with reusable Spring context
@@ -101,5 +106,67 @@ public class ReuseSpringContextIntegrationTest {
         QueueStressTest.init(createWebClient(), environmentVariables, configService)
                 .resetQueue(queueManager, 500)
                 .testConcurrentEnqueue();
+    }
+
+    @Test
+    @DisplayName("select_workers: requestId=0 returns INVALID_REQUEST")
+    public void selectWorkersInvalidRequestTest() {
+        String body = "{\"role\":\"PDFUSION\",\"count\":4,\"request_id\":0,\"request_time_ms\":0}";
+        createWebClient().post().uri("/rtp_llm/select_workers")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(body)
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.success").isEqualTo(false)
+                .jsonPath("$.code").isEqualTo(8406);
+    }
+
+    @Test
+    @DisplayName("select_workers: empty pool returns NO_PDFUSION_WORKER")
+    public void selectWorkersNoWorkerTest() {
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().clear();
+        String body = "{\"role\":\"PDFUSION\",\"count\":4,\"request_id\":1,\"request_time_ms\":1}";
+        createWebClient().post().uri("/rtp_llm/select_workers")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(body)
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.success").isEqualTo(false)
+                .jsonPath("$.code").isEqualTo(8404);
+    }
+
+    @Test
+    @DisplayName("select_workers: returns 4 of 8 healthy workers")
+    public void selectWorkersSuccessTest() {
+        Map<String, WorkerStatus> pool =
+                EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap();
+        pool.clear();
+        try {
+            for (int i = 1; i <= 8; i++) {
+                WorkerStatus w = new WorkerStatus();
+                w.setIp("10.0.0." + i);
+                w.setPort(28100);
+                w.setAlive(true);
+                w.setAvailableConcurrency((long) i);
+                pool.put("10.0.0." + i + ":28100", w);
+            }
+            String body = "{\"role\":\"PDFUSION\",\"count\":4,\"request_id\":2,\"request_time_ms\":2}";
+            createWebClient().post().uri("/rtp_llm/select_workers")
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .bodyValue(body)
+                    .exchange()
+                    .expectStatus().isOk()
+                    .expectBody()
+                    .jsonPath("$.success").isEqualTo(true)
+                    .jsonPath("$.code").isEqualTo(200)
+                    .jsonPath("$.server_status.length()").isEqualTo(4)
+                    .jsonPath("$.total_workers").isEqualTo(8)
+                    .jsonPath("$.ttl_ms").isEqualTo(1000)
+                    .jsonPath("$.version").isEqualTo(0);
+        } finally {
+            pool.clear();
+        }
     }
 }

@@ -28,6 +28,15 @@ public class Response {
     @JsonProperty("queue_length")
     private Integer queueLength;
 
+    @JsonProperty("ttl_ms")
+    private Long ttlMs;
+
+    @JsonProperty("version")
+    private Long version;
+
+    @JsonProperty("total_workers")
+    private Integer totalWorkers;
+
     public static Response error(StrategyErrorType strategyErrorType) {
         Response result = new Response();
         result.setSuccess(false);

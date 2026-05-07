@@ -19,7 +19,10 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.lang.reflect.Field;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -99,6 +102,17 @@ class DefaultRouterTest {
         // Mock balance context
         lenient().when(balanceContext.getRequest()).thenReturn(request);
         lenient().when(balanceContext.getRequestId()).thenReturn(12345L);
+
+        lenient().when(loadBalanceConfig.getSelectWorkersTtlMs()).thenReturn(1000L);
+    }
+
+    private static org.flexlb.dao.master.WorkerStatus worker(String ip, int port, boolean alive, Long concurrency) {
+        org.flexlb.dao.master.WorkerStatus w = new org.flexlb.dao.master.WorkerStatus();
+        w.setIp(ip);
+        w.setPort(port);
+        w.setAlive(alive);
+        w.setAvailableConcurrency(concurrency);
+        return w;
     }
 
     @org.junit.jupiter.api.AfterEach
@@ -532,5 +546,142 @@ class DefaultRouterTest {
         assertTrue(response.isSuccess(), "Response should be successful");
         assertNotNull(response.getServerStatus(), "Server status list should not be null");
         assertEquals(3, response.getServerStatus().size(), "Should have 3 server statuses");
+    }
+
+    // ============== selectNWorkers tests ==============
+
+    @Test
+    void testSelectNWorkers_normal() {
+        Map<String, org.flexlb.dao.master.WorkerStatus> map =
+                EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap();
+        for (int i = 1; i <= 8; i++) {
+            map.put("10.0.0." + i + ":28100", worker("10.0.0." + i, 28100, true, (long) i));
+        }
+
+        Response resp = defaultRouter.selectNWorkers(balanceContext, RoleType.PDFUSION, 4);
+
+        assertTrue(resp.isSuccess(), "Should succeed");
+        assertNotNull(resp.getServerStatus());
+        assertEquals(4, resp.getServerStatus().size(), "Should return 4 ServerStatus");
+        assertEquals(8, resp.getTotalWorkers(), "totalWorkers should reflect healthy pool size");
+        assertEquals(1000L, resp.getTtlMs(), "ttlMs from config");
+        assertEquals(0L, resp.getVersion(), "D1 stub version returns 0");
+        for (ServerStatus s : resp.getServerStatus()) {
+            assertEquals(RoleType.PDFUSION, s.getRole());
+            assertEquals(28100, s.getHttpPort());
+            assertTrue(s.getGrpcPort() > 0, "grpc_port should be derived");
+        }
+    }
+
+    @Test
+    void testSelectNWorkers_countMinusOne() {
+        Map<String, org.flexlb.dao.master.WorkerStatus> map =
+                EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap();
+        for (int i = 1; i <= 5; i++) {
+            map.put("10.0.0." + i + ":28100", worker("10.0.0." + i, 28100, true, 100L));
+        }
+
+        Response resp = defaultRouter.selectNWorkers(balanceContext, RoleType.PDFUSION, -1);
+
+        assertTrue(resp.isSuccess());
+        assertEquals(5, resp.getServerStatus().size(), "count=-1 returns all healthy");
+        assertEquals(5, resp.getTotalWorkers());
+    }
+
+    @Test
+    void testSelectNWorkers_invalidCount() {
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap()
+                .put("10.0.0.1:28100", worker("10.0.0.1", 28100, true, 1L));
+
+        Response zeroResp = defaultRouter.selectNWorkers(balanceContext, RoleType.PDFUSION, 0);
+        assertFalse(zeroResp.isSuccess());
+        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), zeroResp.getCode());
+
+        Response negResp = defaultRouter.selectNWorkers(balanceContext, RoleType.PDFUSION, -2);
+        assertFalse(negResp.isSuccess());
+        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), negResp.getCode());
+
+        Response nullRoleResp = defaultRouter.selectNWorkers(balanceContext, null, 4);
+        assertFalse(nullRoleResp.isSuccess());
+        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), nullRoleResp.getCode());
+    }
+
+    @Test
+    void testSelectNWorkers_noHealthy() {
+        Response emptyResp = defaultRouter.selectNWorkers(balanceContext, RoleType.PDFUSION, 4);
+        assertFalse(emptyResp.isSuccess());
+        assertEquals(StrategyErrorType.NO_PDFUSION_WORKER.getErrorCode(), emptyResp.getCode());
+
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap()
+                .put("10.0.0.1:28100", worker("10.0.0.1", 28100, false, 100L));
+        Response deadResp = defaultRouter.selectNWorkers(balanceContext, RoleType.PDFUSION, 4);
+        assertFalse(deadResp.isSuccess());
+        assertEquals(StrategyErrorType.NO_PDFUSION_WORKER.getErrorCode(), deadResp.getCode());
+    }
+
+    @Test
+    void testSelectNWorkers_sortByConcurrency() {
+        Map<String, org.flexlb.dao.master.WorkerStatus> map =
+                EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap();
+        map.put("10.0.0.1:28100", worker("10.0.0.1", 28100, true, 5L));
+        map.put("10.0.0.2:28100", worker("10.0.0.2", 28100, true, 10L));
+        map.put("10.0.0.3:28100", worker("10.0.0.3", 28100, true, 3L));
+
+        Response resp = defaultRouter.selectNWorkers(balanceContext, RoleType.PDFUSION, 2);
+
+        assertTrue(resp.isSuccess());
+        assertEquals(2, resp.getServerStatus().size());
+        Set<String> ips = new HashSet<>();
+        for (ServerStatus s : resp.getServerStatus()) {
+            ips.add(s.getServerIp());
+        }
+        assertTrue(ips.contains("10.0.0.2"), "highest concurrency 10 must be selected");
+        assertTrue(ips.contains("10.0.0.1"), "second-highest concurrency 5 must be selected");
+        assertFalse(ips.contains("10.0.0.3"), "lowest concurrency 3 must be dropped");
+    }
+
+    @Test
+    void testSelectNWorkers_shuffleRandomness() {
+        Map<String, org.flexlb.dao.master.WorkerStatus> map =
+                EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap();
+        for (int i = 1; i <= 10; i++) {
+            map.put("10.0.0." + i + ":28100", worker("10.0.0." + i, 28100, true, 100L));
+        }
+
+        Set<String> firstIps = new HashSet<>();
+        for (int trial = 0; trial < 20; trial++) {
+            Response resp = defaultRouter.selectNWorkers(balanceContext, RoleType.PDFUSION, 10);
+            firstIps.add(resp.getServerStatus().get(0).getServerIp());
+        }
+        assertTrue(firstIps.size() >= 2,
+                "shuffle should yield different head element across 20 trials, got " + firstIps);
+    }
+
+    @Test
+    void testSelectNWorkers_versionStub() {
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap()
+                .put("10.0.0.1:28100", worker("10.0.0.1", 28100, true, 1L));
+
+        Response resp = defaultRouter.selectNWorkers(balanceContext, RoleType.PDFUSION, 1);
+
+        assertTrue(resp.isSuccess());
+        assertEquals(0L, resp.getVersion(), "D1 stub: version always 0");
+    }
+
+    @Test
+    void testSelectNWorkers_maxCountClamp() {
+        Map<String, org.flexlb.dao.master.WorkerStatus> map =
+                EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap();
+        for (int i = 0; i < 1500; i++) {
+            String ip = "10." + (i / 256) + "." + ((i / 16) % 16) + "." + (i % 256);
+            map.put(ip + ":28100", worker(ip, 28100, true, (long) i));
+        }
+
+        Response resp = defaultRouter.selectNWorkers(balanceContext, RoleType.PDFUSION, 2000);
+
+        assertTrue(resp.isSuccess());
+        List<ServerStatus> selected = resp.getServerStatus();
+        assertEquals(1000, selected.size(), "MAX_SELECT_COUNT clamps to 1000");
+        assertEquals(1500, resp.getTotalWorkers(), "totalWorkers reports actual healthy count");
     }
 }

@@ -8,7 +8,9 @@ import org.flexlb.dao.loadbalance.LogLevelUpdateRequest;
 import org.flexlb.dao.loadbalance.QueueSnapshotResponse;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.SelectWorkersRequest;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.dao.pv.PvLogData;
 import org.flexlb.domain.consistency.MasterChangeNotifyReq;
 import org.flexlb.domain.consistency.MasterChangeNotifyResp;
@@ -74,9 +76,59 @@ public class HttpLoadBalanceServer {
                         this::notifyParticipant)
                 .POST("/rtp_llm/update_log_level", accept(MediaType.APPLICATION_JSON),
                         this::debugMode)
+                .POST("/rtp_llm/select_workers", accept(MediaType.APPLICATION_JSON),
+                        this::selectWorkersRequest)
                 .GET("/rtp_llm/queue_snapshot", accept(MediaType.APPLICATION_JSON),
                         this::queueSnapshot)
                 .build();
+    }
+
+    /**
+     * Returns up to N healthy workers of the requested role.
+     * Read-only query: no in-flight registration, no rollback.
+     */
+    public Mono<ServerResponse> selectWorkersRequest(ServerRequest request) {
+        return request.bodyToMono(SelectWorkersRequest.class)
+                .flatMap(req -> {
+                    if (req.getRequestId() == 0) {
+                        return respondJson(Response.error(StrategyErrorType.INVALID_REQUEST));
+                    }
+                    RoleType role = parseRole(req.getRole());
+                    if (role == null) {
+                        return respondJson(Response.error(StrategyErrorType.INVALID_REQUEST));
+                    }
+                    BalanceContext ctx = new BalanceContext();
+                    Response resp = routeService.selectNWorkers(ctx, role, req.getCount());
+                    resp.setRealMasterHost(lbStatusConsistencyService.getMasterHostIpPort());
+                    return respondJson(resp);
+                })
+                .onErrorResume(e -> {
+                    Logger.error("selectWorkersRequest error", e);
+                    Response err = new Response();
+                    err.setSuccess(false);
+                    err.setCode(500);
+                    err.setErrorMessage(e.getMessage());
+                    return ServerResponse.status(500)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .body(Mono.just(err), Response.class);
+                });
+    }
+
+    private static RoleType parseRole(String name) {
+        if (name == null || name.isEmpty()) {
+            return null;
+        }
+        try {
+            return RoleType.valueOf(name.toUpperCase());
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    private static Mono<ServerResponse> respondJson(Response body) {
+        return ServerResponse.ok()
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Mono.just(body), Response.class);
     }
 
     /**

@@ -128,6 +128,13 @@ public class FlexlbConfig {
      */
     private int nettyWorkerThreadMultiplier = 2;
 
+    // ========== Select Workers Endpoint Configuration ==========
+
+    /**
+     * Suggested cache TTL (ms) returned in /rtp_llm/select_workers response
+     */
+    private long selectWorkersTtlMs = 1000;
+
     /**
      * Get load balancing strategy for a role type
      * This method handles the logic of selecting the appropriate strategy based on role type and configuration

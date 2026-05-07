@@ -10,18 +10,23 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.RoutingResult;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.sync.status.ModelWorkerStatus;
+import org.flexlb.util.CommonUtils;
 import org.flexlb.util.Logger;
 import org.springframework.context.annotation.DependsOn;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 import static org.flexlb.dao.loadbalance.StrategyErrorType.NO_AVAILABLE_WORKER;
 
@@ -29,9 +34,13 @@ import static org.flexlb.dao.loadbalance.StrategyErrorType.NO_AVAILABLE_WORKER;
 @DependsOn({"randomStrategy", "weightedCacheStrategy", "shortestTTFTStrategy"})
 public class DefaultRouter implements Router {
 
+    private static final int MAX_SELECT_COUNT = 1000;
+
+    private final ConfigService configService;
     private final Map<RoleType, LoadBalancer> loadBalancerMap;
 
     public DefaultRouter(ConfigService configService) {
+        this.configService = configService;
         FlexlbConfig config = configService.loadBalanceConfig();
         this.loadBalancerMap = new EnumMap<>(RoleType.class);
 
@@ -176,5 +185,71 @@ public class DefaultRouter implements Router {
         response.setCode(errorType.getErrorCode());
         response.setErrorMessage(errorType.getErrorMsg() + ": " + detailMessage);
         return response;
+    }
+
+    /**
+     * Select up to N healthy workers of the given role, sorted by available concurrency.
+     *
+     * <p>Read-only query; does not register in-flight or update load balancer state.
+     * Returned list is shuffled so multiple callers don't all hit list[0] for the same worker.
+     *
+     * @param balanceContext routing context (used for audit/logging only)
+     * @param role           target role
+     * @param count          desired count; -1 means "all healthy" (capped at MAX_SELECT_COUNT)
+     * @return Response carrying selected ServerStatus list, ttlMs, version, totalWorkers
+     */
+    public Response selectNWorkers(BalanceContext balanceContext, RoleType role, int count) {
+        if (count == 0 || count < -1) {
+            return Response.error(StrategyErrorType.INVALID_REQUEST);
+        }
+        if (role == null) {
+            return Response.error(StrategyErrorType.INVALID_REQUEST);
+        }
+
+        ModelWorkerStatus mws = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS;
+        Map<String, WorkerStatus> roleMap = mws.getRoleStatusMap(role);
+        if (roleMap == null || roleMap.isEmpty()) {
+            return Response.error(role.getErrorType());
+        }
+
+        long totalHealthy = roleMap.values().stream()
+                .filter(WorkerStatus::isAlive)
+                .count();
+        if (totalHealthy == 0) {
+            return Response.error(role.getErrorType());
+        }
+
+        int effectiveCount = (count == -1)
+                ? Math.min((int) totalHealthy, MAX_SELECT_COUNT)
+                : Math.min(count, MAX_SELECT_COUNT);
+
+        List<ServerStatus> selected = roleMap.values().stream()
+                .filter(WorkerStatus::isAlive)
+                .sorted(Comparator.comparingLong((WorkerStatus ws) ->
+                        ws.getAvailableConcurrency() == null ? 0L : ws.getAvailableConcurrency()
+                ).reversed())
+                .limit(effectiveCount)
+                .map(ws -> toServerStatus(ws, role))
+                .collect(Collectors.toList());
+
+        Collections.shuffle(selected);
+
+        Response resp = new Response();
+        resp.setSuccess(true);
+        resp.setServerStatus(selected);
+        resp.setTtlMs(configService.loadBalanceConfig().getSelectWorkersTtlMs());
+        resp.setVersion(0L);
+        resp.setTotalWorkers((int) totalHealthy);
+        return resp;
+    }
+
+    private ServerStatus toServerStatus(WorkerStatus ws, RoleType role) {
+        ServerStatus s = new ServerStatus();
+        s.setRole(role);
+        s.setServerIp(ws.getIp());
+        s.setHttpPort(ws.getPort());
+        s.setGrpcPort(CommonUtils.toGrpcPort(ws.getPort()));
+        s.setSuccess(true);
+        return s;
     }
 }

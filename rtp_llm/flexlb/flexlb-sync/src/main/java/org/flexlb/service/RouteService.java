@@ -10,6 +10,7 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.route.RoleType;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Mono;
 
@@ -18,6 +19,7 @@ public class RouteService {
 
     private final ConfigService configService;
     private final Router router;
+    private final DefaultRouter defaultRouter;
     private final QueueManager queueManager;
 
     public RouteService(ConfigService configService,
@@ -25,7 +27,15 @@ public class RouteService {
                         QueueManager queueManager) {
         this.configService = configService;
         this.router = defaultScheduler;
+        this.defaultRouter = defaultScheduler;
         this.queueManager = queueManager;
+    }
+
+    /**
+     * Select up to N healthy workers of the given role.
+     */
+    public Response selectNWorkers(BalanceContext balanceContext, RoleType role, int count) {
+        return defaultRouter.selectNWorkers(balanceContext, role, count);
     }
 
     /**
