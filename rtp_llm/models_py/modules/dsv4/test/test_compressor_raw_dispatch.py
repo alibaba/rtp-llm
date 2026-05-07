@@ -1,16 +1,21 @@
 """UT for ``run_fused_compress_kv_write`` raw-vs-cache dispatch.
 
-The state pool is a 2-block * 256-entry = 512-slot **cyclic** ring per request.
-For a prefill launch with ``N > 512``, ``_save_partial_states`` overwrites the
-earliest ``N - 512`` slots within the same launch, so the fused kernel cannot
-read those overlap-window positions from the state cache. The dispatch logic
-inside the kernel is::
+The state pool keeps the last ``fixed_blocks_per_req`` (=2) page-aligned
+blocks per request — NOT a cyclic 512-slot ring. For a prefill launch with
+``seq_len > page_size``, the actual cache window is::
+
+    cache_window = page_size + ((seq_len-1) % page_size + 1)
+                 = page_size + tail_of_current_block
+
+(or ``seq_len`` when shorter than a single page). Earlier in-batch positions
+whose logical block has rolled out are evicted from cache and must come from
+raw kv_flat / score_flat. The dispatch inside the kernel is::
 
     flat_idx  = pos - seq_start
     use_raw   = (0 <= flat_idx < n_batch) & (flat_idx < n_batch - CACHE_WINDOW)
     use_cache = mask_pos & ~use_raw
 
-with ``CACHE_WINDOW == 512``.
+with ``CACHE_WINDOW`` computed per-launch by the wrapper.
 
 This UT verifies the dispatch via a **differential-against-ground-truth** check:
 
@@ -109,13 +114,18 @@ def _alloc_kv_cache(head_dim: int, num_slots: int) -> torch.Tensor:
     return cache
 
 
-def _build_block_table(num_blocks: int) -> torch.Tensor:
-    """Single-request block table mapping logical block i → physical
-    block (i + 1). Physical block 0 is reserved as the kernel's
-    ``unallocated`` sentinel (block_table value > 0 is the valid check)."""
-    return (torch.arange(num_blocks, dtype=torch.int32, device="cuda") + 1).view(
-        1, num_blocks
-    )
+def _build_block_table(seq_len: int, fixed_blocks_per_req: int) -> torch.Tensor:
+    """Single-request block table sized to cover all logical blocks of the
+    request. Only the LAST ``fixed_blocks_per_req`` entries point at real
+    physical blocks (1, 2, ...); earlier logical blocks are -1 (evicted).
+    Physical block 0 is reserved as the kernel's ``unallocated`` sentinel
+    (``block_table value > 0`` is the valid check)."""
+    n_logical = max((seq_len + STATE_BLOCK_SIZE - 1) // STATE_BLOCK_SIZE, 1)
+    bt = torch.full((1, n_logical), -1, dtype=torch.int32, device="cuda")
+    n_kept = min(fixed_blocks_per_req, n_logical)
+    phys = torch.arange(n_kept, dtype=torch.int32, device="cuda") + 1
+    bt[0, n_logical - n_kept :] = phys
+    return bt
 
 
 def _build_kv_block_table(num_blocks: int) -> torch.Tensor:
@@ -124,18 +134,44 @@ def _build_kv_block_table(num_blocks: int) -> torch.Tensor:
     )
 
 
-def _build_meta(N: int, sp: int, num_state_blocks: int):
+def _build_meta(N: int, sp: int, fixed_blocks_per_req: int):
     """Construct positions / token_to_req / state_slots / kv_slots for a
-    single-request launch starting at absolute position ``sp``."""
+    single-request launch starting at absolute position ``sp``.
+
+    State pool semantics (page-aligned, NOT cyclic ring):
+      * Each request keeps the last ``fixed_blocks_per_req`` page-aligned
+        logical blocks, allocated to physical blocks 1..fixed_blocks_per_req.
+      * For a token at absolute pos, its logical block is ``pos // page``;
+        the corresponding physical block id is the one stored at
+        ``block_table[req, pos // page]`` (which is -1 if that logical
+        block has been evicted).
+      * The save kernel writes via ``slot_mapping[token]`` which encodes
+        ``physical_block * page + (pos % page)``. So we mirror the
+        block_table allocation: most-recent ``fixed_blocks_per_req`` logical
+        blocks → physical 1, 2, ...
+    """
     positions = torch.arange(sp, sp + N, dtype=torch.int64, device="cuda")
     token_to_req = torch.zeros(N, dtype=torch.int32, device="cuda")
 
-    # State slot — cyclic over (num_state_blocks * STATE_BLOCK_SIZE) ring.
-    # Physical block 0 in state_cache is the unallocated-sentinel reservoir
-    # (block_table starts at physical id 1), so slot offsets are biased by
-    # one block worth of entries.
-    ring_size = num_state_blocks * STATE_BLOCK_SIZE
-    state_slots = ((positions % ring_size) + STATE_BLOCK_SIZE).to(torch.int64)
+    seq_len = sp + N
+    n_logical = max((seq_len + STATE_BLOCK_SIZE - 1) // STATE_BLOCK_SIZE, 1)
+    n_kept = min(fixed_blocks_per_req, n_logical)
+    first_kept_logical = n_logical - n_kept
+
+    logical_block = (positions // STATE_BLOCK_SIZE).to(torch.int64)
+    in_window = logical_block >= first_kept_logical
+    # Map kept logical block i → physical block (i - first_kept_logical + 1)
+    # (offset 1 because physical 0 is the unallocated sentinel).
+    phys_block = (logical_block - first_kept_logical + 1).clamp(min=1)
+    state_slots = (phys_block * STATE_BLOCK_SIZE + (positions % STATE_BLOCK_SIZE)).to(
+        torch.int64
+    )
+    # Tokens whose logical block is evicted: save_partial_states must skip
+    # them (slot_mapping=-1) — in production those slots also wouldn't be
+    # written. (For the differential test the boundary we inspect always
+    # falls inside the eviction zone for raw_off, so its overlap reads from
+    # cache return -1/0 → zero data.)
+    state_slots = torch.where(in_window, state_slots, torch.full_like(state_slots, -1))
 
     # KV slot: one per boundary (where (pos+1) % ratio == 0); -1 otherwise.
     is_boundary = ((positions + 1) % COMPRESS_RATIO) == 0
@@ -147,6 +183,10 @@ def _build_meta(N: int, sp: int, num_state_blocks: int):
 def _make_inputs(N: int, sp: int, head_dim: int, *, seed: int):
     """Build a self-contained launch context."""
     g = torch.Generator(device="cuda").manual_seed(seed)
+    # Independent generator for ``ape`` so its values don't depend on N
+    # (otherwise gt's N=8 and full's N=612 launches would draw different
+    # ape values from the shared stream).
+    g_ape = torch.Generator(device="cuda").manual_seed(seed + 1000)
 
     # Raw kv/score: [N, COFF*head_dim] fp32. Use small magnitudes so
     # softmax+RMSNorm produce numerically stable results.
@@ -159,7 +199,11 @@ def _make_inputs(N: int, sp: int, head_dim: int, *, seed: int):
     )
     ape = (
         torch.randn(
-            COMPRESS_RATIO, width, dtype=torch.float32, device="cuda", generator=g
+            COMPRESS_RATIO,
+            width,
+            dtype=torch.float32,
+            device="cuda",
+            generator=g_ape,
         )
         * 0.1
     )
@@ -175,7 +219,7 @@ def _make_inputs(N: int, sp: int, head_dim: int, *, seed: int):
 
     # State pool sized for 2 blocks per request.
     state_cache = _alloc_state_cache(head_dim, FIXED_BLOCKS_PER_REQ)
-    state_block_table = _build_block_table(FIXED_BLOCKS_PER_REQ)
+    state_block_table = _build_block_table(sp + N, FIXED_BLOCKS_PER_REQ)
 
     # KV pool sized for all boundaries in this launch (single block).
     n_boundaries = ((sp + N) // COMPRESS_RATIO) - (sp // COMPRESS_RATIO)
@@ -338,10 +382,10 @@ def _run_invalid_block_id(head_dim: int, *, tag: str):
     # cache read; we replace the table entry with -1 to verify the guard).
     N = 64
     ctx = _make_inputs(N=N, sp=sp, head_dim=head_dim, seed=1)
-    # Poison block_table: mark the second logical block as unallocated.
-    # block_indices in [0, 1]; we set [0, 1] = -1 so that any cache-read
-    # for ring_pos >= STATE_BLOCK_SIZE would land on -1.
-    ctx["state_block_table"][0, 1] = -1
+    # Poison block_table: mark the most-recent kept logical block as -1
+    # (mirrors the early-prefill "framework hasn't allocated all blocks
+    # yet" case). The kernel must not OOB and must skip those reads.
+    ctx["state_block_table"][0, -1] = -1
 
     # Should not crash / OOB / produce NaN bytes.
     _launch(ctx, head_dim, disable_raw_path=False)
