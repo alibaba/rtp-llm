@@ -16,140 +16,6 @@ namespace {
 
 #ifndef USE_ROCM
 template <int TopK>
-__global__ void stabilize_topk_indices_kernel(const float* __restrict__ logits,
-                                              const int32_t* __restrict__ lengths,
-                                              int32_t* __restrict__ output,
-                                              int64_t num_rows,
-                                              int64_t stride) {
-  const int64_t row = blockIdx.x;
-  if (row >= num_rows) {
-    return;
-  }
-
-  using BlockScanInt = cub::BlockScan<int, 1024>;
-
-  __shared__ typename BlockScanInt::TempStorage scan_storage;
-  __shared__ float reduce_float_storage[1024];
-  __shared__ int reduce_int_storage[1024];
-  __shared__ float threshold_score;
-  __shared__ int target_count;
-  __shared__ int greater_count;
-  __shared__ int equal_seen;
-  __shared__ int output_seen;
-
-  const int tx = threadIdx.x;
-  const int64_t row_stride = row * stride;
-  int32_t* row_output = output + row * TopK;
-  const int row_len = static_cast<int>(lengths[row]);
-  const int stride_i = static_cast<int>(stride);
-  const int valid_len =
-      row_len <= 0 ? 0 : (row_len < stride_i ? row_len : stride_i);
-  const float inf = __int_as_float(0x7f800000);
-
-  float local_min = inf;
-  for (int i = tx; i < TopK; i += blockDim.x) {
-    const int32_t idx = row_output[i];
-    if (idx >= 0 && idx < valid_len) {
-      local_min = fminf(local_min, logits[row_stride + idx]);
-    }
-  }
-  reduce_float_storage[tx] = local_min;
-  __syncthreads();
-  for (int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
-    if (tx < offset) {
-      reduce_float_storage[tx] =
-          fminf(reduce_float_storage[tx], reduce_float_storage[tx + offset]);
-    }
-    __syncthreads();
-  }
-  if (tx == 0) {
-    threshold_score = reduce_float_storage[0];
-    target_count = TopK < valid_len ? TopK : valid_len;
-  }
-  __syncthreads();
-
-  for (int i = tx; i < TopK; i += blockDim.x) {
-    row_output[i] = -1;
-  }
-  if (target_count == 0) {
-    return;
-  }
-  __syncthreads();
-
-  int local_gt = 0;
-  const float threshold = threshold_score;
-  for (int i = tx; i < valid_len; i += blockDim.x) {
-    local_gt += logits[row_stride + i] > threshold;
-  }
-  reduce_int_storage[tx] = local_gt;
-  __syncthreads();
-  for (int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
-    if (tx < offset) {
-      reduce_int_storage[tx] += reduce_int_storage[tx + offset];
-    }
-    __syncthreads();
-  }
-  if (tx == 0) {
-    greater_count = reduce_int_storage[0];
-    equal_seen = 0;
-    output_seen = 0;
-  }
-  __syncthreads();
-
-  const int needed_eq =
-      target_count > greater_count ? target_count - greater_count : 0;
-  for (int chunk = 0; chunk < valid_len; chunk += blockDim.x) {
-    const int idx = chunk + tx;
-    const bool in_range = idx < valid_len;
-    const float value = in_range ? logits[row_stride + idx] : -inf;
-    const int is_gt = in_range && value > threshold;
-    const int is_eq = in_range && value == threshold;
-
-    int eq_prefix = 0;
-    int eq_total = 0;
-    BlockScanInt(scan_storage).ExclusiveSum(is_eq, eq_prefix, eq_total);
-    __syncthreads();
-
-    const int include_eq = is_eq && (equal_seen + eq_prefix < needed_eq);
-    const int is_candidate = is_gt || include_eq;
-
-    int candidate_prefix = 0;
-    int candidate_total = 0;
-    BlockScanInt(scan_storage).ExclusiveSum(
-        is_candidate, candidate_prefix, candidate_total);
-    if (is_candidate) {
-      const int out_pos = output_seen + candidate_prefix;
-      if (out_pos < target_count) {
-        row_output[out_pos] = idx;
-      }
-    }
-    __syncthreads();
-
-    if (tx == 0) {
-      equal_seen += eq_total;
-      const int next_output_seen = output_seen + candidate_total;
-      output_seen = next_output_seen < target_count ? next_output_seen : target_count;
-    }
-    __syncthreads();
-  }
-}
-
-template <int TopK>
-void launch_stabilize_topk_indices(const torch::Tensor& logits,
-                                   const torch::Tensor& lengths,
-                                   torch::Tensor&       output,
-                                   int64_t              num_rows,
-                                   int64_t              stride,
-                                   cudaStream_t         stream) {
-  if (num_rows == 0) {
-    return;
-  }
-  stabilize_topk_indices_kernel<TopK><<<num_rows, 1024, 0, stream>>>(
-      logits.data_ptr<float>(), lengths.data_ptr<int32_t>(),
-      output.data_ptr<int32_t>(), num_rows, stride);
-}
-
-template <int TopK>
 void launch_persistent_topk(const torch::Tensor& logits,
                             const torch::Tensor& lengths, torch::Tensor& output,
                             torch::Tensor& workspace, int64_t max_seq_len) {
@@ -282,8 +148,6 @@ void launch_persistent_topk(const torch::Tensor& logits,
               stream);
       TORCH_CHECK(status == cudaSuccess,
                   "FilteredTopK fallback failed: ", cudaGetErrorString(status));
-      launch_stabilize_topk_indices<TopK>(
-          logits, lengths, output, num_rows, stride, stream);
       return;
     }
 
@@ -291,14 +155,23 @@ void launch_persistent_topk(const torch::Tensor& logits,
     TORCH_CHECK(workspace.size(0) >= static_cast<int64_t>(state_bytes),
                 "workspace too small, need ", state_bytes, " bytes");
 
-    // Zero the per-group RadixRowState region before launch — only when the
-    // radix path will actually run (max_seq_len > RADIX_THRESHOLD). The
-    // RadixRowState fields (arrival_counter, histograms) are only touched by
-    // radix_topk; the decode/medium paths inside the persistent kernel
-    // operate purely in shared memory and never read these globals, so a
-    // stale workspace is harmless for them.
+    // Zero the per-group RadixRowState region before launch.
     //
-    // Why we need the memset (when needs_cooperative is true):
+    // Issued UNCONDITIONALLY so the memset is captured as its own node in
+    // the cudagraph (a separate cudaMemsetAsync node, sequenced before the
+    // persistent_topk_kernel launch on the same stream). The previous
+    // host-side guard `if (needs_cooperative)` was evaluated at capture time;
+    // when capture-time max_seq_len <= RADIX_THRESHOLD (always true under
+    // FULL_DECODE_ONLY with max_model_len < 32 K) the memset would NOT be
+    // captured, leaving the workspace state to accumulate across replays.
+    // That's a latent correctness bug if the runtime data ever takes the
+    // radix path, and removes one variable while debugging hangs in the
+    // decode/medium paths.
+    //
+    // Cost is sub-microsecond: state_bytes = num_groups * sizeof(RadixRowState)
+    // is ~3 KB per group, ~100 KB for the largest grids on this hardware.
+    //
+    // Why the memset is required (regardless of which path the kernel takes):
     //   1. arrival_counter accumulates within a launch and is never reset,
     //      so a prior call leaves it at a large positive value. Without this
     //      reset, the very first wait_ge in the next call sees counter >>
@@ -307,7 +180,7 @@ void launch_persistent_topk(const torch::Tensor& logits,
     //      __syncthreads(), so it had no happens-before edge to CTA-1+'s
     //      first red_release. cudaMemsetAsync is stream-ordered: the zero
     //      is globally visible before any CTA runs.
-    if (needs_cooperative) {
+    {
       cudaError_t mz_err = cudaMemsetAsync(workspace.data_ptr<uint8_t>(), 0,
                                            state_bytes, stream);
       TORCH_CHECK(mz_err == cudaSuccess,
@@ -346,9 +219,6 @@ void launch_persistent_topk(const torch::Tensor& logits,
     }
   #undef LAUNCH_PERSISTENT
   }
-
-  launch_stabilize_topk_indices<TopK>(
-      logits, lengths, output, num_rows, stride, stream);
 
   cudaError_t err = cudaGetLastError();
   TORCH_CHECK(err == cudaSuccess,

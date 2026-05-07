@@ -75,7 +75,8 @@ class IndexerTopKBackend(ABC):
 
     Implementations must return int32 indices, use ``-1`` for rows with fewer
     than ``topk`` valid entries, and preserve the current DSV4 semantics where
-    offset is only added to non-negative indices.
+    offset is only added to non-negative indices.  Index order is not part of
+    the contract; sparse attention consumes the selected set.
     """
 
     name: str
