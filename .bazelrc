@@ -222,8 +222,8 @@ test --test_env LOG_LEVEL="INFO"
 test --test_env NCCL_DEBUG="INFO"
 # for dp scatter add stable result
 test --test_env TZ=Asia/Shanghai
-# for flashinfer find cuda
-test --test_env CUDA_HOME=/usr/local/cuda
+# for flashinfer find cuda; scope to CUDA-specific test runs
+test:cuda --test_env CUDA_HOME=/usr/local/cuda
 # compat for low driver < 535
 test:compat --test_env LD_LIBRARY_PATH="/opt/rocm/lib:/opt/conda310/lib/:/usr/local/cuda/compat/:/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64:/opt/amdgpu/lib64:/usr/local/cuda/extras/CUPTI/lib64:/usr/local/cuda/lib64/stubs"
 
