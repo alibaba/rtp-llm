@@ -282,13 +282,17 @@ class IndexerFP8(PoolBackedModule):
 
             compressed_len = ((start_pos + 1) // ratio).to(torch.int64).view(bsz, 1, 1)
 
-            # Always use DeepGEMM (FP8 path).
+            # Always use DeepGEMM (FP8 path).  Eager decode trims the
+            # scored context length from the live max position. During CUDA
+            # graph capture that D2H scalar read is illegal, so capture with
+            # a static upper bound; replay updates block tables and lengths
+            # in-place before the captured kernels run.
             T_cache = self._kv_block_table.shape[1] * self._kv_eb
             # Capture-aware: under cuda graph capture we can't D2H sync via
             # ``.item()`` (operation-not-permitted on captured stream), so
             # fall back to the static upper bound. Eager keeps the dynamic
             # clamp to avoid overshoot.
-            if x.is_cuda and torch.cuda.is_current_stream_capturing():
+            if q.is_cuda and torch.cuda.is_current_stream_capturing():
                 T_static = self._kv_cache_t if self._kv_cache_t > 0 else T_cache
                 T_max = max(32, min(T_cache, T_static))
             else:

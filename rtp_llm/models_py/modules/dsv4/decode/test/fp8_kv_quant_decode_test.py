@@ -39,6 +39,7 @@ from rtp_llm.models_py.modules.dsv4.decode.fp8_kv_quant_decode_op import (
     _ue8m0_byte_to_scale,
     _ue8m0_scale_byte,
     dequantize_v4_kv_slot,
+    read_model1_kv_slot_bytes,
     reference_quantize_v4_kv_decode,
 )
 
@@ -92,7 +93,7 @@ class TestReferenceQuantize(unittest.TestCase):
         reference_quantize_v4_kv_decode(k, slots, cache, block_size=block_size)
 
         for i, slot in enumerate(slots.tolist()):
-            slot_view = cache[0, slot]  # [584]
+            slot_view = read_model1_kv_slot_bytes(cache, 0, slot, block_size)
             rope_bytes = slot_view[NOPE_BYTES : NOPE_BYTES + ROPE_BYTES]
             expected = k[i, NOPE_DIM:].contiguous().view(torch.uint8)
             self.assertTrue(
@@ -111,10 +112,12 @@ class TestReferenceQuantize(unittest.TestCase):
         # Slot 0 (would have been the -1 token): should be all zero
         # (no mapping wrote there). slot 1 should be populated.
         self.assertTrue(
-            bool((cache[0, 0] == 0).all()), "slot 0 should remain zero (skipped)"
+            bool((read_model1_kv_slot_bytes(cache, 0, 0, block_size) == 0).all()),
+            "slot 0 should remain zero (skipped)",
         )
         self.assertTrue(
-            bool((cache[0, 1] != 0).any()), "slot 1 should have non-zero data"
+            bool((read_model1_kv_slot_bytes(cache, 0, 1, block_size) != 0).any()),
+            "slot 1 should have non-zero data",
         )
 
     def test_round_trip_within_fp8_precision(self):
@@ -133,7 +136,7 @@ class TestReferenceQuantize(unittest.TestCase):
         reference_quantize_v4_kv_decode(k, slots, cache, block_size=block_size)
 
         for i, slot in enumerate(slots.tolist()):
-            recovered = dequantize_v4_kv_slot(cache[0, slot])
+            recovered = dequantize_v4_kv_slot(cache, 0, slot, block_size)
             # NoPE: per-tile rel diff
             for tile_idx in range(NOPE_TILES):
                 a = k[i, tile_idx * TILE_SIZE : (tile_idx + 1) * TILE_SIZE].float()
@@ -167,7 +170,7 @@ class TestReferenceQuantize(unittest.TestCase):
 
         reference_quantize_v4_kv_decode(k, slots, cache, block_size=block_size)
 
-        slot_view = cache[0, 0]
+        slot_view = read_model1_kv_slot_bytes(cache, 0, 0, block_size)
         first_tile_codes = slot_view[:TILE_SIZE].tolist()
         # All 64 elements should share the same fp8_e4m3 byte code.
         self.assertEqual(
@@ -192,7 +195,7 @@ class TestReferenceQuantize(unittest.TestCase):
             b = slot // block_size
             o = slot % block_size
             self.assertTrue(
-                bool((cache[b, o] != 0).any()),
+                bool((read_model1_kv_slot_bytes(cache, b, o, block_size) != 0).any()),
                 f"slot={slot} (block={b}, offset={o}) is empty",
             )
 
@@ -200,7 +203,7 @@ class TestReferenceQuantize(unittest.TestCase):
         unwritten = [(0, 1), (1, 0), (2, 0)]
         for b, o in unwritten:
             self.assertTrue(
-                bool((cache[b, o] == 0).all()),
+                bool((read_model1_kv_slot_bytes(cache, b, o, block_size) == 0).all()),
                 f"unwritten cell (block={b}, offset={o}) was modified",
             )
 

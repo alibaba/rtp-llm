@@ -331,6 +331,12 @@ class CompressorFP8(nn.Module):
           block_in_seq = pos // TOKENS_PER_BLOCK              # token -> block
           in_block     = (pos % TOKENS_PER_BLOCK) // ratio    # compressed offset
           slot         = block_id * kv_eb + in_block
+
+        Also masks out any slot that would land past the pool's row count
+        (same overflow guard upstream 2184f972 added to the legacy
+        ``_compute_pool_slots`` — a malformed block_table can otherwise
+        produce a slot above ``pool_view.shape[0]`` and silently corrupt
+        an unrelated pool entry).
         """
         bt = self._kv_block_table
         kv_eb = self._kv_eb
@@ -351,8 +357,11 @@ class CompressorFP8(nn.Module):
         in_capacity = block_in_seq < max_blocks
         safe_block_in_seq = block_in_seq.clamp(min=0, max=max_blocks - 1)
         block_id = bt_long[b_idx, safe_block_in_seq]
-        valid = boundary & in_capacity & (block_id > 0)
         slot = block_id * kv_eb + in_block
+        valid = boundary & in_capacity & (block_id > 0)
+        if self._kv_pool_3d is not None:
+            pool_rows = int(self._kv_pool_3d.numel() // self._kv_pool_3d.shape[-1])
+            valid = valid & (slot < pool_rows)
         return torch.where(valid, slot, torch.full_like(slot, -1))
 
     def _launch(

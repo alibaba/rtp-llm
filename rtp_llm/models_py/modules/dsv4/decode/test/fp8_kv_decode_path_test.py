@@ -69,6 +69,11 @@ def _make_attention(
     window_size: int = 8,
     index_head_dim: int = 16,
 ) -> Attention:
+    if _is_fp8_kv_cache_dtype(kv_cache_dtype) and compress_ratio:
+        # CompressorFP8 is intentionally locked to the production layouts:
+        # 512-dim DS MLA KV slots and 128-dim indexer slots.
+        head_dim = 512
+        index_head_dim = 128
     prev_dtype = torch.get_default_dtype()
     torch.set_default_dtype(torch.bfloat16)
     try:
