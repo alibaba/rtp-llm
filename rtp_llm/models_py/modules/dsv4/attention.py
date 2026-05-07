@@ -1212,7 +1212,7 @@ class Attention(nn.Module):
         if self._kv_cache_is_fp8:
             # FP8 SWA pool: 584B per slot (fp8 NoPE 448 + bf16 RoPE 128 +
             # ue8m0 scale 8). 3D view honoring TMA per-block padding.
-            from rtp_llm.models_py.modules.dsv4._swa_fp8_kv_insert_triton import (
+            from rtp_llm.models_py.modules.dsv4.fp8._swa_kv_insert_triton import (
                 quantize_and_insert_k_cache,
             )
 
@@ -2048,7 +2048,7 @@ class Attention(nn.Module):
                 if swa_view_3d_fp8 is not None and cmp_view_3d_fp8 is not None:
                     # FP8 dual-pool: per-slot dequant via existing kernel
                     # then concat → bf16 packed buffer for sparse_attn.
-                    from rtp_llm.models_py.modules.dsv4._swa_fp8_dequant_triton import (
+                    from rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton import (
                         dequantize_slots_to_bf16,
                     )
 
