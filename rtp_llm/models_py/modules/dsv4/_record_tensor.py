@@ -40,6 +40,16 @@ _DBG_MAX_SEQ = int(os.environ.get("MOEDBG_MAX_SEQ", "0"))
 _DBG_NAME_REGEX = os.environ.get("MOEDBG_NAME_REGEX", "")
 _DBG_NAME_RE = re.compile(_DBG_NAME_REGEX) if _DBG_NAME_REGEX else None
 _DBG_GLOBAL_POS = int(os.environ.get("MOEDBG_GLOBAL_POS", "-1"))
+# CSA-vs-vLLM bisection: when set, every record() also writes a single
+# stat line to stdout so per-tensor numerics can be eyeballed against the
+# matching vLLM-side line without diffing two .pt dumps.  Zero overhead
+# when unset (record() returns early on the ENABLED check first).
+_PRINT_STATS = os.environ.get("MOEDBG_PRINT_STATS", "0") not in (
+    "0",
+    "",
+    "false",
+    "False",
+)
 
 
 def _parse_layer_slice(spec: str) -> Optional[Tuple[int, int]]:
@@ -129,6 +139,36 @@ def begin(seqlen: Optional[int] = None) -> None:
     _local.buf = []
 
 
+def _print_stats_line(name: str, tensor: torch.Tensor) -> None:
+    """Single-line stat dump for vs-vLLM eyeball comparison.  Same metric
+    set as ``_snapshot_cpu``'s stats dict (mean / std / abs_max / sum /
+    n_nan / n_inf) so the printed line and the .pt dump agree.  Includes
+    rank+pid so multi-process logs interleave cleanly."""
+    try:
+        cpu_t = tensor.detach().to(torch.float32).cpu()
+        n = cpu_t.numel()
+        if n == 0:
+            print(
+                f"[MOEDBG-PRINT pid={os.getpid()}] {name}: shape={tuple(cpu_t.shape)} "
+                f"dtype={tensor.dtype} EMPTY",
+                flush=True,
+            )
+            return
+        print(
+            f"[MOEDBG-PRINT pid={os.getpid()}] {name}: "
+            f"shape={tuple(cpu_t.shape)} dtype={tensor.dtype} "
+            f"mean={cpu_t.mean().item():+.6e} "
+            f"std={(cpu_t.std().item() if n > 1 else 0.0):+.6e} "
+            f"abs_max={cpu_t.abs().max().item():+.6e} "
+            f"sum={cpu_t.sum().item():+.6e} "
+            f"n_nan={int(torch.isnan(cpu_t).sum().item())} "
+            f"n_inf={int(torch.isinf(cpu_t).sum().item())}",
+            flush=True,
+        )
+    except Exception as e:
+        print(f"[MOEDBG-PRINT pid={os.getpid()}] {name}: STAT_ERR {e}", flush=True)
+
+
 def record(name: str, tensor: torch.Tensor) -> None:
     """Snapshot a tensor for this forward. No-op if MOEDBG=0 or no active buf."""
     if not ENABLED:
@@ -139,6 +179,8 @@ def record(name: str, tensor: torch.Tensor) -> None:
     if buf is None:
         return
     tensor = _trim_tensor(tensor)
+    if _PRINT_STATS:
+        _print_stats_line(name, tensor)
     if _STREAM:
         buf.append((name, _snapshot_cpu(tensor)))
     else:

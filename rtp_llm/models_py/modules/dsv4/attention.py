@@ -31,6 +31,7 @@ from deep_gemm.utils.layout import (  # noqa: E402
 )
 
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
+from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv4._fused_inv_rope_fp8_quant_triton import (
     fused_inv_rope_fp8_quant,
 )
@@ -2192,22 +2193,41 @@ class Attention(nn.Module):
             "_forward_prefill is FP8-only; BF16 KV-cache prefill is no "
             "longer supported on this branch"
         )
-        common = self._prefill_common_setup(x, positions)
-        qkv = self._prefill_compute_qkv(x, common)
+        tag = f"L{self.layer_id:02d}/r{self.compress_ratio}/prefill"
+        _dbg = _rt.should_record_layer(self.layer_id)
+        if _dbg:
+            _rt.record(f"L{self.layer_id:02d}_attn_x_in", x)
+            _rt.record(f"L{self.layer_id:02d}_attn_positions", positions)
+        with torch.profiler.record_function(f"{tag}/build_meta"):
+            common = self._prefill_common_setup(x, positions)
+        with torch.profiler.record_function(f"{tag}/compute_qkv"):
+            qkv = self._prefill_compute_qkv(x, common)
+        if _dbg:
+            _rt.record(f"L{self.layer_id:02d}_attn_q", qkv.q)
+            _rt.record(f"L{self.layer_id:02d}_attn_qr", qkv.qr)
+            _rt.record(f"L{self.layer_id:02d}_attn_kv_full", qkv.kv_full)
 
         # SWA pool write — every FP8 layer populates the SWA pool for
         # downstream decode. Safe to do before attention because new K
         # (abs pos [sp, sp+S)) and any cont-prefill prefix tail
         # (abs pos [sp-P, sp)) target disjoint slots.
-        self._prefill_write_swa_fp8_paged(common, qkv.kv_full)
+        with torch.profiler.record_function(f"{tag}/swa_pool_write"):
+            self._prefill_write_swa_fp8_paged(common, qkv.kv_full)
 
         if self.compress_ratio == 0:
-            return self._forward_prefill_swa_only(qkv, common)
-        if self.compress_ratio == 4:
-            return self._forward_prefill_csa(x, qkv, common)
-        if self.compress_ratio == 128:
-            return self._forward_prefill_hca(x, qkv, common)
-        raise AssertionError(f"unknown compress_ratio={self.compress_ratio}")
+            with torch.profiler.record_function(f"{tag}/swa_only_path"):
+                out = self._forward_prefill_swa_only(qkv, common)
+        elif self.compress_ratio == 4:
+            with torch.profiler.record_function(f"{tag}/csa_path"):
+                out = self._forward_prefill_csa(x, qkv, common)
+        elif self.compress_ratio == 128:
+            with torch.profiler.record_function(f"{tag}/hca_path"):
+                out = self._forward_prefill_hca(x, qkv, common)
+        else:
+            raise AssertionError(f"unknown compress_ratio={self.compress_ratio}")
+        if _dbg:
+            _rt.record(f"L{self.layer_id:02d}_attn_out_final", out)
+        return out
 
     # ------------------------------------------------------------------
     # Per-path prefill bodies
@@ -2246,12 +2266,17 @@ class Attention(nn.Module):
             "CSA prefill requires common.csa_meta — built by " "_build_csa_prefill_meta"
         )
 
+        tag = f"L{self.layer_id:02d}/csa"
+        _dbg = _rt.should_record_layer(self.layer_id)
         # IndexerFP8._compute_indexer_q feeds q to apply_rotary_emb which
         # only handles the 4D q layout correctly; pass 3D ``[1, T, dim]``
         # so q ends up ``[1, T, H, D]``.
-        raw = self.indexer(
-            x.unsqueeze(0), qkv.qr.unsqueeze(0), common.csa_meta.indexer_meta
-        )
+        with torch.profiler.record_function(f"{tag}/indexer"):
+            raw = self.indexer(
+                x.unsqueeze(0), qkv.qr.unsqueeze(0), common.csa_meta.indexer_meta
+            )
+        if _dbg:
+            _rt.record(f"L{self.layer_id:02d}_csa_indexer_raw_topk", raw)
 
         return self._forward_prefill_compressed(
             x,
@@ -2298,18 +2323,26 @@ class Attention(nn.Module):
         (with hoisted ``compressor_meta``), then run the workspace-path
         attention. Falls back to ``_attn_fp8_swa_via_kv_full`` on warmup
         when ``workspace_meta`` is None (pool context unbound)."""
+        ratio_tag = "csa" if self.compress_ratio == 4 else "hca"
+        tag = f"L{self.layer_id:02d}/{ratio_tag}"
         # Compressor write (return value is unused — compressor handles its
         # own pool dual-write; the workspace path re-reads the just-written
         # tail via dequantize_and_gather_k_cache, with BF16 overlay on top).
-        self.compressor(x.unsqueeze(0), common.sp_int, meta=compressor_meta)
+        with torch.profiler.record_function(f"{tag}/compressor_write"):
+            self.compressor(x.unsqueeze(0), common.sp_int, meta=compressor_meta)
 
         if workspace_meta is None:
             # Warmup forward: pool not bound. Fall back to BF16 ``kv_full``
             # SWA-only attention so framework shape inference still runs.
-            o = self._attn_fp8_swa_via_kv_full(qkv, common)
+            with torch.profiler.record_function(f"{tag}/warmup_kv_full"):
+                o = self._attn_fp8_swa_via_kv_full(qkv, common)
         else:
-            o = self._attn_via_workspace(qkv, common, workspace_meta, cmp_topk_runtime)
-        out_3d = self._prefill_output_proj(o, common)
+            with torch.profiler.record_function(f"{tag}/attn_workspace"):
+                o = self._attn_via_workspace(
+                    qkv, common, workspace_meta, cmp_topk_runtime
+                )
+        with torch.profiler.record_function(f"{tag}/output_proj"):
+            out_3d = self._prefill_output_proj(o, common)
         return out_3d.squeeze(0)
 
     def _attn_via_workspace(
@@ -2350,6 +2383,9 @@ class Attention(nn.Module):
         assert not common.cp_on, "workspace path does not support CP"
 
         ratio = self.compress_ratio
+        ratio_tag = "csa" if ratio == 4 else "hca"
+        tag = f"L{self.layer_id:02d}/{ratio_tag}/ws"
+        _dbg = _rt.should_record_layer(self.layer_id)
         cmp_at = CSA_KV if ratio == 4 else HCA_KV
         swa_pool_3d = self._pool_view_3d_fp8(SWA_KV)
         cmp_pool_3d = self._pool_view_3d_fp8(cmp_at)
@@ -2361,36 +2397,40 @@ class Attention(nn.Module):
         S = common.seqlen
         D = self.head_dim
         wm = workspace_meta
-        workspace = torch.zeros(
-            (bsz, wm.M, D), dtype=torch.bfloat16, device=qkv.q.device
-        )
+        with torch.profiler.record_function(f"{tag}/alloc"):
+            workspace = torch.zeros(
+                (bsz, wm.M, D), dtype=torch.bfloat16, device=qkv.q.device
+            )
 
         if wm.N > 0:
-            _swa_dq.dequantize_and_gather_k_cache(
-                out=workspace,
-                k_cache=cmp_pool_3d,
-                seq_lens=wm.cmp_seq_lens,
-                gather_lens=None,
-                block_table=wm.cmp_bt_int32,
-                block_size=wm.cmp_eb,
-                offset=0,
-            )
+            with torch.profiler.record_function(f"{tag}/cmp_dequant"):
+                _swa_dq.dequantize_and_gather_k_cache(
+                    out=workspace,
+                    k_cache=cmp_pool_3d,
+                    seq_lens=wm.cmp_seq_lens,
+                    gather_lens=None,
+                    block_table=wm.cmp_bt_int32,
+                    block_size=wm.cmp_eb,
+                    offset=0,
+                )
         if wm.gather_len > 0:
-            _swa_dq.dequantize_and_gather_k_cache(
-                out=workspace,
-                k_cache=swa_pool_3d,
-                seq_lens=wm.swa_seq_lens,
-                gather_lens=wm.swa_gather_lens,
-                block_table=wm.swa_bt_int32,
-                block_size=wm.swa_eb,
-                offset=wm.N,
-            )
+            with torch.profiler.record_function(f"{tag}/swa_dequant"):
+                _swa_dq.dequantize_and_gather_k_cache(
+                    out=workspace,
+                    k_cache=swa_pool_3d,
+                    seq_lens=wm.swa_seq_lens,
+                    gather_lens=wm.swa_gather_lens,
+                    block_table=wm.swa_bt_int32,
+                    block_size=wm.swa_eb,
+                    offset=wm.N,
+                )
 
         # BF16 overlay of freshly computed new K — avoids FP8 round-trip
         # loss on the just-written suffix.
-        workspace[:, wm.new_k_offset : wm.new_k_offset + S, :].copy_(
-            qkv.kv_full.to(torch.bfloat16).unsqueeze(0)
-        )
+        with torch.profiler.record_function(f"{tag}/bf16_overlay"):
+            workspace[:, wm.new_k_offset : wm.new_k_offset + S, :].copy_(
+                qkv.kv_full.to(torch.bfloat16).unsqueeze(0)
+            )
 
         # combine_topk: HCA uses precomputed dense arange(N); CSA uses the
         # runtime indexer output (raw compressed-pool offsets in [0, N)).
@@ -2407,26 +2447,40 @@ class Attention(nn.Module):
                 cmp_topk = cmp_topk.to(torch.int32)
             cmp_topk = cmp_topk.contiguous()
 
-        combined_indices, combined_lens = combine_topk_swa_indices(
-            topk_indices=cmp_topk,
-            query_start_loc=wm.qsl,
-            seq_lens=wm.swa_seq_lens,
-            gather_lens=wm.swa_gather_lens,
-            window_size=self.window_size,
-            compress_ratio=ratio,
-            topk=int(cmp_topk.shape[-1]),
-            M=wm.M,
-            N=wm.N,
-        )
+        with torch.profiler.record_function(f"{tag}/combine_topk"):
+            combined_indices, combined_lens = combine_topk_swa_indices(
+                topk_indices=cmp_topk,
+                query_start_loc=wm.qsl,
+                seq_lens=wm.swa_seq_lens,
+                gather_lens=wm.swa_gather_lens,
+                window_size=self.window_size,
+                compress_ratio=ratio,
+                topk=int(cmp_topk.shape[-1]),
+                M=wm.M,
+                N=wm.N,
+            )
 
-        o3, _, _ = flash_mla_sparse_fwd(
-            q=qkv.q,
-            kv=workspace.view(-1, 1, D),
-            indices=combined_indices.unsqueeze(1),
-            sm_scale=self.softmax_scale,
-            attn_sink=self.attn_sink,
-            topk_length=combined_lens,
-        )
+        if _dbg:
+            _rt.record(f"L{self.layer_id:02d}_{ratio_tag}_ws_kv_workspace", workspace)
+            _rt.record(
+                f"L{self.layer_id:02d}_{ratio_tag}_ws_combined_indices",
+                combined_indices,
+            )
+            _rt.record(
+                f"L{self.layer_id:02d}_{ratio_tag}_ws_combined_lens", combined_lens
+            )
+
+        with torch.profiler.record_function(f"{tag}/flash_mla_sparse_fwd"):
+            o3, _, _ = flash_mla_sparse_fwd(
+                q=qkv.q,
+                kv=workspace.view(-1, 1, D),
+                indices=combined_indices.unsqueeze(1),
+                sm_scale=self.softmax_scale,
+                attn_sink=self.attn_sink,
+                topk_length=combined_lens,
+            )
+        if _dbg:
+            _rt.record(f"L{self.layer_id:02d}_{ratio_tag}_ws_sparse_out", o3)
         return o3.unsqueeze(0)
 
     # ------------------------------------------------------------------
@@ -2913,20 +2967,25 @@ class Attention(nn.Module):
         """
         from flash_mla import flash_mla_sparse_fwd  # type: ignore[import-not-found]
 
+        tag = f"L{self.layer_id:02d}/swa/kv_full"
+        _dbg = _rt.should_record_layer(self.layer_id)
         meta = common.swa_meta
         assert meta is not None and meta.topk_length_kv_full is not None, (
             "FP8 SWA prefill requires common.swa_meta.topk_length_kv_full; "
             "built in _prefill_common_setup for FP8 SWA-only layers."
         )
 
-        o3, _, _ = flash_mla_sparse_fwd(
-            q=qkv.q,
-            kv=qkv.kv_full.unsqueeze(1),
-            indices=common.topk_idxs.squeeze(0).unsqueeze(1).to(torch.int32),
-            sm_scale=self.softmax_scale,
-            attn_sink=self.attn_sink,
-            topk_length=meta.topk_length_kv_full,
-        )
+        with torch.profiler.record_function(f"{tag}/flash_mla_sparse_fwd"):
+            o3, _, _ = flash_mla_sparse_fwd(
+                q=qkv.q,
+                kv=qkv.kv_full.unsqueeze(1),
+                indices=common.topk_idxs.squeeze(0).unsqueeze(1).to(torch.int32),
+                sm_scale=self.softmax_scale,
+                attn_sink=self.attn_sink,
+                topk_length=meta.topk_length_kv_full,
+            )
+        if _dbg:
+            _rt.record(f"L{self.layer_id:02d}_swa_kv_full_sparse_out", o3)
         return o3.unsqueeze(0)
 
     def _attn_fp8_swa_via_concat(
@@ -2960,8 +3019,8 @@ class Attention(nn.Module):
         from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
         from rtp_llm.models_py.modules.dsv4.fp8 import _swa_dequant_triton as _swa_dq
 
-        # Inline ``_record_tensor`` debug gate — production runs with MOEDBG off.
-        _dbg = False
+        tag = f"L{self.layer_id:02d}/swa/concat"
+        _dbg = _rt.should_record_layer(self.layer_id)
 
         meta = common.swa_meta
         assert (
@@ -2983,35 +3042,46 @@ class Attention(nn.Module):
         D = self.head_dim
         S = common.seqlen
         P = meta.prefix_len_max
-        workspace = torch.zeros(
-            (bsz, meta.M, D),
-            dtype=torch.bfloat16,
-            device=qkv.q.device,
-        )
+        with torch.profiler.record_function(f"{tag}/alloc"):
+            workspace = torch.zeros(
+                (bsz, meta.M, D),
+                dtype=torch.bfloat16,
+                device=qkv.q.device,
+            )
         bt_swa = bt.to(dtype=torch.int32)
 
         if P > 0:
-            _swa_dq.dequantize_and_gather_k_cache(
-                out=workspace,
-                k_cache=packed_3d,
-                seq_lens=meta.cache_seq_lens,
-                gather_lens=meta.cache_gather_lens,
-                block_table=bt_swa,
-                block_size=eb,
-                offset=0,
+            with torch.profiler.record_function(f"{tag}/swa_dequant"):
+                _swa_dq.dequantize_and_gather_k_cache(
+                    out=workspace,
+                    k_cache=packed_3d,
+                    seq_lens=meta.cache_seq_lens,
+                    gather_lens=meta.cache_gather_lens,
+                    block_table=bt_swa,
+                    block_size=eb,
+                    offset=0,
+                )
+
+        with torch.profiler.record_function(f"{tag}/bf16_overlay"):
+            # B==1: kv_full is [T, D]; copy into workspace[0, P:P+S, :].
+            workspace[:, P : P + S, :].copy_(
+                qkv.kv_full.to(torch.bfloat16).unsqueeze(0)
             )
 
-        # B==1: kv_full is [T, D]; copy into workspace[0, P:P+S, :].
-        workspace[:, P : P + S, :].copy_(qkv.kv_full.to(torch.bfloat16).unsqueeze(0))
+        if _dbg:
+            _rt.record(f"L{self.layer_id:02d}_swa_concat_workspace", workspace)
 
-        o3, _, _ = flash_mla_sparse_fwd(
-            q=qkv.q,
-            kv=workspace.view(-1, 1, D),
-            indices=meta.combined_indices.unsqueeze(1),
-            sm_scale=self.softmax_scale,
-            attn_sink=self.attn_sink,
-            topk_length=meta.combined_lens,
-        )
+        with torch.profiler.record_function(f"{tag}/flash_mla_sparse_fwd"):
+            o3, _, _ = flash_mla_sparse_fwd(
+                q=qkv.q,
+                kv=workspace.view(-1, 1, D),
+                indices=meta.combined_indices.unsqueeze(1),
+                sm_scale=self.softmax_scale,
+                attn_sink=self.attn_sink,
+                topk_length=meta.combined_lens,
+            )
+        if _dbg:
+            _rt.record(f"L{self.layer_id:02d}_swa_concat_sparse_out", o3)
         return o3.unsqueeze(0)
 
     # ------------------------------------------------------------------
