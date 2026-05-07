@@ -82,6 +82,15 @@ py_library(
     visibility = ["//visibility:public"],
 )
 
+py_library(
+    name = "dsv4_fused_kernel_sources",
+    srcs = [
+        "modules/dsv4/_fused_inv_rope_fp8_quant_triton.py",
+        "modules/dsv4/moe/_mega_input_pack_triton.py",
+    ],
+    visibility = ["//visibility:public"],
+)
+
 # Export sitecustomize.py for test targets to fix nvidia-cutlass-dsl import
 exports_files(["modules/factory/sitecustomize.py"])
 

@@ -122,3 +122,24 @@ py_test(
     tags = ["SM100_ARM"],
     exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
 )
+
+py_test(
+    name = "test_mega_moe_input_packer_perf",
+    srcs = ["test_mega_moe_input_packer_perf.py"],
+    deps = ["//rtp_llm/models_py:dsv4_fused_kernel_sources"],
+)
+
+py_test(
+    name = "test_fused_inv_rope_fp8_quant",
+    srcs = ["test_fused_inv_rope_fp8_quant.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+)
+
+py_test(
+    name = "test_fused_inv_rope_fp8_quant_perf",
+    srcs = ["test_fused_inv_rope_fp8_quant_perf.py"],
+    deps = ["//rtp_llm/models_py:dsv4_fused_kernel_sources"],
+)
