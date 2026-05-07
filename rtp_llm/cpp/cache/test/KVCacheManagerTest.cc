@@ -415,6 +415,57 @@ TEST_F(KVCacheManagerTest, DSV4MallocIncrFreeExposesSevenTypedRegions) {
     EXPECT_EQ(manager->freeBlocksNum(), free_before);
 }
 
+TEST_F(KVCacheManagerTest, DSV4LayerRegionBlockTablesMatchInferenceAccessPattern) {
+    auto manager_config = makeCompactDSV4ManagerConfig(/*block_num=*/16);
+    auto manager        = std::make_shared<KVCacheManager>(manager_config, /*warmup=*/false);
+    ASSERT_TRUE(manager->init());
+
+    const int spb      = static_cast<int>(manager_config.seq_size_per_block);
+    auto      resource = makeDSV4BatchResource(manager_config);
+    auto      tokens   = makeDSV4CompleteTokenIds(/*initial_seq_len=*/3 * spb + 17,
+                                           /*max_seq_len=*/4 * spb + 32,
+                                           spb);
+
+    MallocInfo malloc_info{resource, tokens};
+    malloc_info.reuse_cache         = false;
+    malloc_info.enable_device_cache = false;
+    ASSERT_TRUE(manager->malloc(malloc_info).success);
+
+    auto expectRegionGroup = [&](int layer_id, KVCacheRegionName region_name, int expected_gid) {
+        EXPECT_EQ(resource->groupId(layer_id, region_name), expected_gid)
+            << "layer=" << layer_id << " region=" << static_cast<int>(region_name);
+        EXPECT_EQ(resource->blocks(layer_id, region_name), resource->blocks(0, expected_gid))
+            << "layer=" << layer_id << " region=" << static_cast<int>(region_name);
+        EXPECT_EQ(resource->kernelBlocks(layer_id, region_name), resource->kernelBlocks(0, expected_gid))
+            << "layer=" << layer_id << " region=" << static_cast<int>(region_name);
+    };
+
+    // Flash DSV4 layers 0/1 are SWA-only. Even though layer_to_group_id defaults
+    // to SWA, inference resolves typed block tables by KVCacheRegionName.
+    expectRegionGroup(/*layer_id=*/0, KVCacheRegionName::SWA_KV, /*expected_gid=*/6);
+    EXPECT_ANY_THROW((void)resource->blocks(/*layer_id=*/0, KVCacheRegionName::CSA_KV));
+    EXPECT_ANY_THROW((void)resource->blocks(/*layer_id=*/0, KVCacheRegionName::HCA_KV));
+
+    // Layer 2 is CSA: CSA_KV + INDEXER_KV + INDEXER_STATE + CSA_STATE + SWA_KV.
+    const int csa_layer = manager_config.global_layer_ids[0][0];
+    expectRegionGroup(csa_layer, KVCacheRegionName::CSA_KV, /*expected_gid=*/0);
+    expectRegionGroup(csa_layer, KVCacheRegionName::INDEXER_KV, /*expected_gid=*/2);
+    expectRegionGroup(csa_layer, KVCacheRegionName::INDEXER_STATE, /*expected_gid=*/3);
+    expectRegionGroup(csa_layer, KVCacheRegionName::CSA_STATE, /*expected_gid=*/4);
+    expectRegionGroup(csa_layer, KVCacheRegionName::SWA_KV, /*expected_gid=*/6);
+    EXPECT_ANY_THROW((void)resource->blocks(csa_layer, KVCacheRegionName::HCA_KV));
+
+    // Layer 3 is HCA: HCA_KV + HCA_STATE + SWA_KV.
+    const int hca_layer = manager_config.global_layer_ids[1][0];
+    expectRegionGroup(hca_layer, KVCacheRegionName::HCA_KV, /*expected_gid=*/1);
+    expectRegionGroup(hca_layer, KVCacheRegionName::HCA_STATE, /*expected_gid=*/5);
+    expectRegionGroup(hca_layer, KVCacheRegionName::SWA_KV, /*expected_gid=*/6);
+    EXPECT_ANY_THROW((void)resource->blocks(hca_layer, KVCacheRegionName::CSA_KV));
+
+    FreeInfo free_info{resource, tokens};
+    manager->free(free_info);
+}
+
 TEST_F(KVCacheManagerTest, DSV4BlockCopyPreservesTypedRegionBytes) {
     auto manager_config = makeCompactDSV4ManagerConfig(/*block_num=*/8);
     auto manager        = std::make_shared<KVCacheManager>(manager_config, /*warmup=*/false);
