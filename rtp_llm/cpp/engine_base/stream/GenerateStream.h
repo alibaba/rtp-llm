@@ -486,9 +486,10 @@ public:
         pending_swap_done_event_.reset();
     }
 
-    // Stream-async state for the next decode step. These per-stream GPU handles
-    // let prepare build combo_tokens / sequence_lengths without waiting for
-    // host bookkeeping (D2H + specUpdate + KV release).
+    // Per-step MTP device state for the next decode step. These per-stream GPU
+    // handles let prepare build combo_tokens / sequence_lengths uniformly. In
+    // async dispatch they bridge unfinished host bookkeeping; in sync dispatch
+    // they mirror the freshly committed host/specUpdate state.
     //
     // Shapes (per stream slice):
     //   accept_len_gpu     : [1] int32          number of accepted tokens
@@ -499,11 +500,10 @@ public:
     // The tensors above are grouped into MtpAsyncDeviceState with an epoch counter:
     //   setMtpAsyncDeviceState(state) -> epoch  // bumps counter, stores, returns epoch
     //   getMtpAsyncDeviceState()                // borrow current state (may be empty)
-    //   clearMtpAsyncDeviceState(epoch)         // clears only when current epoch matches
+    //   clearMtpAsyncDeviceState(epoch)         // legacy/testing escape hatch
     // The old setSpecDecodeDeviceState / getAcceptLenGpu / ... helpers stay as
-    // thin wrappers on top so existing call sites compile unchanged. The
-    // epoch guard prevents stale workers from clearing state published by a
-    // newer step.
+    // thin wrappers on top so existing call sites compile unchanged. Active
+    // decode paths publish/overwrite state instead of clearing it.
     struct MtpAsyncDeviceState {
         uint64_t      epoch = 0;
         torch::Tensor accept_len_gpu;
@@ -532,11 +532,8 @@ public:
         return mtp_async_state_;
     }
     bool clearMtpAsyncDeviceState(uint64_t epoch) {
-        // Stale-epoch reject: a slow worker from step N must not clear
-        // device tensors that step N+1 just published (which would race the
-        // next step's prepare reading getNextSeqLenGpu() / etc.). Returning
-        // false lets the caller log/metric the stale clear without
-        // mutating state.
+        // Legacy/testing escape hatch. Active MTP decode paths should keep
+        // device tensors alive and overwrite them on the next publish.
         if (mtp_async_state_.epoch != epoch) {
             return false;
         }
@@ -574,10 +571,8 @@ public:
         return mtp_async_state_.draft_all_probs_gpu;
     }
     void clearSpecDecodeDeviceState() {
-        // Unconditional clear (no epoch check). Kept for the existing
-        // synchronous worker which always clears the latest state it just
-        // installed. Async paths added by later commits should prefer
-        // clearMtpAsyncDeviceState(epoch).
+        // Unconditional legacy/testing escape hatch. Active MTP decode paths
+        // should publish/overwrite MtpAsyncDeviceState instead of clearing it.
         mtp_async_state_ = MtpAsyncDeviceState{};
     }
 

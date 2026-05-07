@@ -10,6 +10,7 @@
 #include "rtp_llm/models_py/bindings/common/kernels/vocab_prune/mapping.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "3rdparty/flashinfer/flashinfer.h"
+#include "pybind11/pybind11.h"
 #include <cstddef>
 #include <random>
 #include <memory>
@@ -24,6 +25,35 @@ namespace rtp_llm {
 using SamplerT = float;
 
 namespace {
+
+// Cached handles to flashinfer.sampling Python entry points. The static
+// initialization is guarded by C++17 thread-safe statics + GIL, and the
+// caller must hold the GIL when invoking these helpers.
+pybind11::object& pyTopKRenormFn() {
+    static pybind11::object fn = pybind11::module_::import("flashinfer.sampling").attr("top_k_renorm_probs");
+    return fn;
+}
+
+pybind11::object& pyTopPRenormFn() {
+    static pybind11::object fn = pybind11::module_::import("flashinfer.sampling").attr("top_p_renorm_probs");
+    return fn;
+}
+
+// Wrappers around flashinfer.sampling.top_{k,p}_renorm_probs Python API.
+// The Python kernel returns a freshly allocated tensor; we copy back into
+// renorm_probs to preserve the in-place output contract of the original
+// C++ kernel.
+void pyTopKRenormProbs(const torch::Tensor& probs, torch::Tensor& renorm_probs, const torch::Tensor& top_k) {
+    pybind11::gil_scoped_acquire gil;
+    auto                         result = pyTopKRenormFn()(probs, top_k).cast<torch::Tensor>();
+    renorm_probs.copy_(result, /*non_blocking=*/true);
+}
+
+void pyTopPRenormProbs(const torch::Tensor& probs, torch::Tensor& renorm_probs, const torch::Tensor& top_p) {
+    pybind11::gil_scoped_acquire gil;
+    auto                         result = pyTopPRenormFn()(probs, top_p).cast<torch::Tensor>();
+    renorm_probs.copy_(result, /*non_blocking=*/true);
+}
 
 void processLogits(const GreedyParams&  params,
                    const torch::Tensor& device_tokens,
@@ -170,20 +200,20 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
         samples_t.copy_(selected_tokens, true);
         success = torch::Tensor();  // mark as undefined — all succeeded
         if (output_all_probs_t.defined()) {
-            top_k_renorm_probs(probs_t, output_all_probs_t, top_k_t, 0, (int64_t)cur_stream);
+            pyTopKRenormProbs(probs_t, output_all_probs_t, top_k_t);
         }
     } else if (std::all_of(top_k_ptr, top_k_ptr + batch_size, [&](auto t) { return t <= 0; })) {
         top_p_sampling_from_probs(
             probs_t, uniform_samples, samples_t, success_t, top_p_t, 1.0, deterministic, (int64_t)cur_stream);
         if (output_all_probs_t.defined()) {
-            top_p_renorm_probs(probs_t, output_all_probs_t, top_p_t, 1.0, (int64_t)cur_stream);
+            pyTopPRenormProbs(probs_t, output_all_probs_t, top_p_t);
         }
     } else if (std::all_of(top_p_ptr, top_p_ptr + batch_size, [&](auto t) { return std::abs(t - 1.0f) < 1e-7; })) {
         std::transform(top_k_ptr, top_k_ptr + batch_size, top_k_ptr, [&](auto t) { return t <= 0 ? 1 << 30 : t; });
         top_k_sampling_from_probs(
             probs_t, uniform_samples, samples_t, success_t, top_k_t, 0, deterministic, (int64_t)cur_stream);
         if (output_all_probs_t.defined()) {
-            top_k_renorm_probs(probs_t, output_all_probs_t, top_k_t, 0, (int64_t)cur_stream);
+            pyTopKRenormProbs(probs_t, output_all_probs_t, top_k_t);
         }
     } else {
         std::transform(top_k_ptr, top_k_ptr + batch_size, top_k_ptr, [&](auto t) { return t <= 0 ? 1 << 30 : t; });
@@ -199,8 +229,8 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
                                         (int64_t)cur_stream);
         if (output_all_probs_t.defined()) {
             torch::Tensor temp_t = torch::zeros_like(output_all_probs_t);
-            top_k_renorm_probs(probs_t, temp_t, top_k_t, 1.0, (int64_t)cur_stream);
-            top_p_renorm_probs(temp_t, output_all_probs_t, top_p_t, 1.0, (int64_t)cur_stream);
+            pyTopKRenormProbs(probs_t, temp_t, top_k_t);
+            pyTopPRenormProbs(temp_t, output_all_probs_t, top_p_t);
         }
     }
 
