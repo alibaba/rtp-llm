@@ -5,35 +5,31 @@ A SwiGLU MLP with optional clamping, used both for V4's *shared* expert
 (``storage="fp4"``, packed int8 + UE8M0 32-block scale, kept for the
 LocalLoopStrategy / DeepEPStrategy fallback paths).
 
-The ``_use_silu_mul_split`` helper controls the fused SiLU+clamp+mul Triton
-fast path (env var ``DSV4_EXPERT_SILU_FUSED``, default ON).
+The fused SiLU+clamp+mul Triton path is mandatory for DSV4 expert forward.
 """
 
-import os
 from typing import Dict, Optional
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 
 # Fused SiLU + (optional clamp) + element-wise mul replacement for the
-# Expert.forward chain.  Default ON via DSV4_EXPERT_SILU_FUSED=1.  See
-# _silu_mul_split_triton.py module docstring.
+# Expert.forward chain.  See _silu_mul_split_triton.py module docstring.
 try:
     from rtp_llm.models_py.modules.dsv4._silu_mul_split_triton import silu_mul_split
+
     _SILU_MUL_SPLIT_OK = True
 except Exception:  # pragma: no cover — keep V4 importable without Triton
     silu_mul_split = None
     _SILU_MUL_SPLIT_OK = False
 
 
-def _use_silu_mul_split() -> bool:
-    enabled = os.environ.get("DSV4_EXPERT_SILU_FUSED", "1") != "0"
-    if enabled and not _SILU_MUL_SPLIT_OK:
-        raise RuntimeError("DSV4 fused Expert SiLU path is enabled by default but unavailable")
-    return enabled
+def require_silu_mul_split():
+    if not _SILU_MUL_SPLIT_OK:
+        raise RuntimeError("DSV4 fused Expert SiLU path is required but unavailable")
+    return silu_mul_split
 
 
 from rtp_llm.models_py.modules.dsv4.qlinear import QuantizedLinear
@@ -117,19 +113,13 @@ class Expert(nn.Module):
             gate = self._apply_layer(self.w1, x).float()
             up = self._apply_layer(self.w3, x).float()
         with record_function_range("dsv4.expert.silu_mul"):
-            if _use_silu_mul_split():
-                # Fused SiLU + optional SwiGLU clamp + multiply (1 launch).
-                # Replaces 2 clamp launches (when swiglu_limit>0) + silu + mul.
-                x = silu_mul_split(
-                    gate.contiguous(),
-                    up.contiguous(),
-                    clamp_limit=self.swiglu_limit,
-                )
-            else:
-                if self.swiglu_limit > 0:
-                    up = torch.clamp(up, min=-self.swiglu_limit, max=self.swiglu_limit)
-                    gate = torch.clamp(gate, max=self.swiglu_limit)
-                x = F.silu(gate) * up
+            # Fused SiLU + optional SwiGLU clamp + multiply (1 launch).
+            # Replaces 2 clamp launches (when swiglu_limit>0) + silu + mul.
+            x = require_silu_mul_split()(
+                gate.contiguous(),
+                up.contiguous(),
+                clamp_limit=self.swiglu_limit,
+            )
         if weights is not None:
             x = weights * x
         with record_function_range("dsv4.expert.w2"):
