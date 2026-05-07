@@ -1145,12 +1145,19 @@ class AiterPrefillImplPaged(FMHAImplBase):
 
         fmha_params.prefix_lengths = prefix_lengths
 
-        fmha_params.max_seq_len = int(q_lengths.max().item()) if expected_batch > 0 else 0
+        q_lens = input_lengths
+        pl_src = getattr(attn_inputs, "prefix_lengths", None)
+        if pl_src is not None and pl_src.numel() >= expected_batch:
+            p_lens = pl_src[:expected_batch]
+        else:
+            p_lens = torch.zeros_like(q_lens)
+        kv_lens = q_lens + p_lens.to(dtype=q_lens.dtype)
+        fmha_params.max_seq_len = int(q_lens.max()) if expected_batch > 0 else 0
         fmha_params.max_seqlen_q = fmha_params.max_seq_len
-        current_max_k = int(kv_lengths.max().item()) if expected_batch > 0 else 0
-        fmha_params.max_seqlen_k = current_max_k
-        fmha_params.token_q_num = int(q_lengths.sum().item())
-        fmha_params.token_kv_num = int(kv_lengths.sum().item())
+        fmha_params.max_seqlen_k = int(kv_lens.max()) if expected_batch > 0 else 0
+        fmha_params.token_q_num = int(q_lens.sum())
+        fmha_params.token_kv_num = int(kv_lens.sum())
+        fmha_params.max_prefix_len = int(p_lens.max()) if expected_batch > 0 and p_lens.numel() > 0 else 0
 
         kv_block_id = getattr(attn_inputs, "kv_cache_kernel_block_id_device", None)
         if kv_block_id is None:
@@ -1172,18 +1179,13 @@ class AiterPrefillImplPaged(FMHAImplBase):
             prefix_lengths = self.fmha_params.prefix_lengths
             if prefix_lengths is None:
                 prefix_lengths = torch.zeros_like(attn_inputs.input_lengths, dtype=torch.int32)
-            input_lengths = self.fmha_params.cu_seqlens_q[1:] - self.fmha_params.cu_seqlens_q[:-1]
-            max_prefix_len = max(
-                0,
-                int(self.fmha_params.max_seqlen_k) - int(self.fmha_params.max_seqlen_q),
-            )
             update_prefill_runtime(
-                input_lengths,
+                attn_inputs.input_lengths,
                 self.fmha_params.cu_seqlens_q,
                 self.fmha_params.cu_seqlens_k,
                 prefix_lengths,
                 int(self.fmha_params.max_seqlen_q),
-                max_prefix_len,
+                getattr(self.fmha_params, "max_prefix_len", 0),
             )
 
         update_kv_cache_offset = getattr(self.rope_params, "update_kv_cache_offset", None)

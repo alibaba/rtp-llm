@@ -37,6 +37,7 @@ except ImportError:
 try:
     from rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter import (
         AiterPrefillAttnOp,
+        AiterPrefillImplPaged,
         FMHAParams,
     )
     from rtp_llm.ops import AttentionConfigs, PyAttentionInputs
@@ -290,6 +291,191 @@ class TestAiterPrefillAttnOp(unittest.TestCase):
         # Batch=1 is a common shape in microbenchmarks; the vectorized unpad
         # must still produce contiguous output even with no concat work to do.
         self._check_varlen_with_padded_kv([24], head_num=8, head_num_kv=8, head_dim=64)
+
+
+@unittest.skipUnless(_OPS_IMPORTABLE, "Requires AiterPrefillImplPaged module")
+class TestAiterPrefillImplPagedSupport(unittest.TestCase):
+    """Unit tests for AiterPrefillImplPaged.support() classmethod.
+
+    Validates draft-prefill-cuda-graph flag and prefix_lengths boundary logic.
+    Does NOT require GPU — only exercises the static support() decision.
+    """
+
+    def _make_attn_inputs(self, prefix_lengths, is_draft_capture=False):
+        from types import SimpleNamespace
+        inputs = SimpleNamespace(
+            prefix_lengths=prefix_lengths,
+            is_draft_prefill_cuda_graph_capture=is_draft_capture,
+            is_cuda_graph=False,
+            is_prefill=True,
+            input_lengths=torch.tensor([4], dtype=torch.int32),
+        )
+        return inputs
+
+    def test_support_true_for_draft_capture_flag_with_zero_prefix(self):
+        """MTP draft flag set + prefix_lengths all zeros => support() returns True."""
+        pl = torch.zeros(4, dtype=torch.int32)
+        inputs = self._make_attn_inputs(pl, is_draft_capture=True)
+        self.assertTrue(AiterPrefillImplPaged.support(None, inputs))
+
+    def test_support_true_for_real_prefix(self):
+        """prefix_lengths.max() > 0 => support() returns True (no draft flag needed)."""
+        pl = torch.tensor([0, 128, 0, 64], dtype=torch.int32)
+        inputs = self._make_attn_inputs(pl, is_draft_capture=False)
+        self.assertTrue(AiterPrefillImplPaged.support(None, inputs))
+
+    def test_support_false_without_prefix_or_flag(self):
+        """No prefix and no draft flag => support() returns False."""
+        pl = torch.zeros(4, dtype=torch.int32)
+        inputs = self._make_attn_inputs(pl, is_draft_capture=False)
+        self.assertFalse(AiterPrefillImplPaged.support(None, inputs))
+
+    def test_support_false_for_empty_prefix_lengths(self):
+        """Empty prefix_lengths tensor and no draft flag => support() returns False."""
+        pl = torch.empty(0, dtype=torch.int32)
+        inputs = self._make_attn_inputs(pl, is_draft_capture=False)
+        self.assertFalse(AiterPrefillImplPaged.support(None, inputs))
+
+    def test_support_true_for_empty_prefix_with_draft_flag(self):
+        """Empty prefix_lengths but draft flag set => support() returns True."""
+        pl = torch.empty(0, dtype=torch.int32)
+        inputs = self._make_attn_inputs(pl, is_draft_capture=True)
+        self.assertTrue(AiterPrefillImplPaged.support(None, inputs))
+
+
+@unittest.skipUnless(_OPS_IMPORTABLE, "Requires AiterPrefillImplPaged module")
+class TestUpdatePrefillParamsForCudaGraph(unittest.TestCase):
+    """Unit tests for AiterPrefillImplPaged._update_prefill_params_for_cuda_graph.
+
+    Uses a lightweight stub to bypass the heavy __init__ chain (aiter, RoPE, etc.).
+    Only exercises the cu_seqlens/prefix/scalar reconstruction logic.
+    """
+
+    def _make_stub(self, batch_size):
+        """Build a minimal object with fmha_params matching capture-time batch_size."""
+        from types import SimpleNamespace
+        fmha_params = SimpleNamespace(
+            cu_seqlens_q=torch.zeros(batch_size + 1, dtype=torch.int32),
+            cu_seqlens_k=torch.zeros(batch_size + 1, dtype=torch.int32),
+            prefix_lengths=None,
+            max_seq_len=0,
+            max_seqlen_q=0,
+            max_seqlen_k=0,
+            token_q_num=0,
+            token_kv_num=0,
+            kv_cache_block_id_device=None,
+        )
+        stub = SimpleNamespace(fmha_params=fmha_params)
+        return stub
+
+    def _make_attn_inputs(self, input_lengths, prefix_lengths=None,
+                          cu_seqlens=None, cu_kv_seqlens=None,
+                          kv_block_id=None):
+        from types import SimpleNamespace
+        batch_size = len(input_lengths)
+        if kv_block_id is None:
+            kv_block_id = torch.zeros(batch_size, 4, dtype=torch.int32)
+        inputs = SimpleNamespace(
+            input_lengths=torch.tensor(input_lengths, dtype=torch.int32),
+            prefix_lengths=prefix_lengths,
+            cu_seqlens=cu_seqlens,
+            cu_kv_seqlens=cu_kv_seqlens,
+            kv_cache_kernel_block_id_device=kv_block_id,
+        )
+        return inputs
+
+    def _call_update(self, stub, attn_inputs):
+        AiterPrefillImplPaged._update_prefill_params_for_cuda_graph(stub, attn_inputs)
+
+    def test_rebuild_from_input_lengths_no_prefix(self):
+        """Rebuild cu_seqlens from input_lengths, no prefix."""
+        stub = self._make_stub(batch_size=4)
+        inputs = self._make_attn_inputs([5, 5, 5, 5])
+        self._call_update(stub, inputs)
+
+        p = stub.fmha_params
+        self.assertEqual(p.cu_seqlens_q.tolist(), [0, 5, 10, 15, 20])
+        self.assertEqual(p.cu_seqlens_k.tolist(), [0, 5, 10, 15, 20])
+        self.assertEqual(p.max_seq_len, 5)
+        self.assertEqual(p.max_seqlen_q, 5)
+        self.assertEqual(p.max_seqlen_k, 5)
+        self.assertEqual(p.token_q_num, 20)
+        self.assertEqual(p.token_kv_num, 20)
+
+    def test_rebuild_with_prefix(self):
+        """Rebuild cu_seqlens from input_lengths + prefix_lengths."""
+        stub = self._make_stub(batch_size=3)
+        inputs = self._make_attn_inputs(
+            [5, 3, 5],
+            prefix_lengths=torch.tensor([100, 200, 0], dtype=torch.int32),
+        )
+        self._call_update(stub, inputs)
+
+        p = stub.fmha_params
+        self.assertEqual(p.cu_seqlens_q.tolist(), [0, 5, 8, 13])
+        self.assertEqual(p.cu_seqlens_k.tolist(), [0, 105, 308, 313])
+        self.assertEqual(p.max_seq_len, 5)
+        self.assertEqual(p.max_seqlen_k, 203)
+        self.assertEqual(p.token_q_num, 13)
+        self.assertEqual(p.token_kv_num, 313)
+
+    def test_active_and_inactive_batches(self):
+        """MTP draft: active batches have tokens, inactive batches have 0."""
+        stub = self._make_stub(batch_size=4)
+        inputs = self._make_attn_inputs(
+            [5, 5, 3, 0],
+            prefix_lengths=torch.tensor([100, 100, 100, 100], dtype=torch.int32),
+        )
+        self._call_update(stub, inputs)
+
+        p = stub.fmha_params
+        self.assertEqual(p.cu_seqlens_q.tolist(), [0, 5, 10, 13, 13])
+        self.assertEqual(p.max_seq_len, 5)
+        self.assertEqual(p.token_q_num, 13)
+
+    def test_live_cu_seqlens_path(self):
+        """When live cu_seqlens are provided, use them directly."""
+        stub = self._make_stub(batch_size=2)
+        cu_q = torch.tensor([0, 5, 10], dtype=torch.int32)
+        cu_k = torch.tensor([0, 105, 210], dtype=torch.int32)
+        inputs = self._make_attn_inputs(
+            [5, 5],
+            prefix_lengths=torch.tensor([100, 100], dtype=torch.int32),
+            cu_seqlens=cu_q,
+            cu_kv_seqlens=cu_k,
+        )
+        self._call_update(stub, inputs)
+
+        p = stub.fmha_params
+        self.assertEqual(p.cu_seqlens_q.tolist(), [0, 5, 10])
+        self.assertEqual(p.cu_seqlens_k.tolist(), [0, 105, 210])
+        self.assertEqual(p.prefix_lengths.tolist(), [100, 100])
+        self.assertEqual(p.max_seqlen_k, 105)
+
+    def test_prefix_batch_size_mismatch_raises(self):
+        """prefix_lengths batch size != expected_batch raises ValueError."""
+        stub = self._make_stub(batch_size=4)
+        inputs = self._make_attn_inputs(
+            [5, 5, 5, 5],
+            prefix_lengths=torch.tensor([10, 10], dtype=torch.int32),
+        )
+        with self.assertRaises(ValueError):
+            self._call_update(stub, inputs)
+
+    def test_missing_kv_block_id_raises(self):
+        """Missing kv_cache block ids raises ValueError."""
+        from types import SimpleNamespace
+        stub = self._make_stub(batch_size=2)
+        inputs = SimpleNamespace(
+            input_lengths=torch.tensor([5, 5], dtype=torch.int32),
+            prefix_lengths=None,
+            cu_seqlens=None,
+            cu_kv_seqlens=None,
+            kv_cache_kernel_block_id_device=None,
+            kv_cache_block_id_device=None,
+        )
+        with self.assertRaises(ValueError):
+            self._call_update(stub, inputs)
 
 
 if __name__ == "__main__":

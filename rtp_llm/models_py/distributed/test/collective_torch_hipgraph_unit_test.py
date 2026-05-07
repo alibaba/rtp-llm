@@ -1,5 +1,7 @@
 import ctypes
+import sys
 import unittest
+import unittest.mock
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -33,11 +35,12 @@ class TestCollectiveTorchHipGraphUnit(unittest.TestCase):
             self.assertTrue(hr.should_use_hipgraph_capture_rccl(True))
             self.assertFalse(hr.should_use_hipgraph_capture_rccl(False))
 
-    def test_should_not_use_hipgraph_capture_rccl_without_comm(self):
+    def test_should_use_hipgraph_capture_rccl_even_without_comm(self):
+        """Comm check is deferred to _get_rccl_runtime; should_use only checks runtime+capture+tp."""
         hr._is_rocm_runtime = True
         hr._rccl_comm = None
         with patch.object(hr, "_is_hipgraph_capture_active", return_value=True):
-            self.assertFalse(hr.should_use_hipgraph_capture_rccl(True))
+            self.assertTrue(hr.should_use_hipgraph_capture_rccl(True))
 
     def test_get_nccl_dtype_map_and_error(self):
         fp16_tensor = torch.zeros(1, dtype=torch.float16)
@@ -62,14 +65,16 @@ class TestCollectiveTorchHipGraphUnit(unittest.TestCase):
         self.assertEqual(out1.device, src.device)
         self.assertEqual(len(hr._hipgraph_allgather_outputs), 1)
 
-    def test_get_or_create_allgather_output_rejects_inactive_capture(self):
+    def test_get_or_create_allgather_output_returns_temp_when_inactive(self):
+        """Non-capture mode returns a fresh temporary tensor without caching."""
         hr._rccl_world_size = 2
         src = torch.zeros((2, 4), dtype=torch.float16)
 
         with patch.object(hr, "_is_hipgraph_capture_active", return_value=False):
-            with self.assertRaises(RuntimeError):
-                hr._get_or_create_allgather_output(src)
+            out = hr._get_or_create_allgather_output(src)
 
+        self.assertEqual(tuple(out.shape), (4, 4))
+        self.assertEqual(out.dtype, src.dtype)
         self.assertEqual(len(hr._hipgraph_allgather_outputs), 0)
 
     def test_set_graph_capture_nccl_comm_clears_cache(self):
@@ -245,9 +250,10 @@ class TestCollectiveTorchHipGraphUnit(unittest.TestCase):
         hr._rccl_lib = fake_lib
 
         tensor = torch.zeros((2, 4), dtype=torch.bfloat16)
-        with patch.object(hr, "_is_hipgraph_capture_active", return_value=True), patch(
-            "torch.cuda.current_stream"
-        ) as mock_stream:
+        mock_group = object()
+        with patch.object(hr, "_is_hipgraph_capture_active", return_value=True), \
+             patch("torch.cuda.current_stream") as mock_stream, \
+             patch("rtp_llm.models_py.distributed.collective_torch._get_group", return_value=mock_group):
             mock_stream.return_value.cuda_stream = 0
             out = ct.all_gather(tensor, ct.Group.TP)
 
@@ -338,6 +344,51 @@ class TestCollectiveTorchHipGraphUnit(unittest.TestCase):
 
         # bootstrap must be called (not skipped) because _rccl_comm is None
         bootstrap.assert_called_once_with(tp_group)
+
+    def test_finish_session_calls_consume_when_pending(self):
+        """consume_capture() is called when has_pending_capture() returns True."""
+        mock_consume = unittest.mock.MagicMock()
+        mock_has_pending = unittest.mock.MagicMock(return_value=True)
+        fake_module = SimpleNamespace(
+            consume_capture=mock_consume,
+            has_pending_capture=mock_has_pending,
+        )
+        with patch.dict("sys.modules", {"rtp_llm.models_py.modules.base.rocm.trt_allreduce": fake_module}):
+            hr.finish_hipgraph_capture_session()
+
+        mock_has_pending.assert_called_once()
+        mock_consume.assert_called_once()
+
+    def test_finish_session_skips_when_not_pending(self):
+        """consume_capture() is NOT called when has_pending_capture() returns False."""
+        mock_consume = unittest.mock.MagicMock()
+        mock_has_pending = unittest.mock.MagicMock(return_value=False)
+        fake_module = SimpleNamespace(
+            consume_capture=mock_consume,
+            has_pending_capture=mock_has_pending,
+        )
+        with patch.dict("sys.modules", {"rtp_llm.models_py.modules.base.rocm.trt_allreduce": fake_module}):
+            hr.finish_hipgraph_capture_session()
+
+        mock_has_pending.assert_called_once()
+        mock_consume.assert_not_called()
+
+    def test_finish_session_propagates_consume_error(self):
+        """Runtime errors from consume_capture() propagate (not silenced)."""
+        mock_consume = unittest.mock.MagicMock(side_effect=RuntimeError("barrier timeout"))
+        mock_has_pending = unittest.mock.MagicMock(return_value=True)
+        fake_module = SimpleNamespace(
+            consume_capture=mock_consume,
+            has_pending_capture=mock_has_pending,
+        )
+        with patch.dict("sys.modules", {"rtp_llm.models_py.modules.base.rocm.trt_allreduce": fake_module}):
+            with self.assertRaises(RuntimeError):
+                hr.finish_hipgraph_capture_session()
+
+    def test_finish_session_tolerates_import_error(self):
+        """ImportError (trt_allreduce unavailable) is silently handled."""
+        with patch.dict("sys.modules", {"rtp_llm.models_py.modules.base.rocm.trt_allreduce": None}):
+            hr.finish_hipgraph_capture_session()
 
 
 if __name__ == "__main__":
