@@ -20,6 +20,7 @@ import torch
 # shape parameters so different model configs in the same process don't
 # collide; in practice there's only ever one entry per process.
 _MEGA_BUF_CACHE: dict = {}
+_MEGA_OUTPUT_CACHE: dict = {}
 
 
 def _get_or_create_mega_buf(
@@ -58,6 +59,21 @@ def _get_or_create_mega_buf(
         )
         _MEGA_BUF_CACHE[key] = buf
     return buf
+
+
+def _get_or_create_mega_output(
+    capacity,
+    hidden,
+    dtype,
+    device,
+):
+    key = (device, hidden, dtype)
+    cached = _MEGA_OUTPUT_CACHE.get(key)
+    if cached is not None and cached.size(0) >= capacity:
+        return cached
+    cached = torch.empty((max(capacity, 1), hidden), dtype=dtype, device=device)
+    _MEGA_OUTPUT_CACHE[key] = cached
+    return cached
 
 
 def _mega_moe_unavailable_reason() -> str | None:
