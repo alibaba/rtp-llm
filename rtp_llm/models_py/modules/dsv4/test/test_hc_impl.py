@@ -171,6 +171,49 @@ class TestHCImpl(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must be contiguous"):
             unit.pre(x_noncontig)
 
+    def test_tilelang_head_prefers_fused_and_falls_back(self) -> None:
+        hc, dim = 4, 16
+        fn, base, scale = _weights(hc, dim)
+        head = TileLangHCHead(
+            fn[:hc],
+            base[:hc],
+            scale[:1],
+            dim=dim,
+            hc_mult=hc,
+            norm_eps=1e-6,
+            hc_eps=1e-6,
+        )
+        import rtp_llm.models_py.modules.dsv4.hc.tilelang_impl as tilelang_impl
+
+        calls: list[str] = []
+
+        def fake_fused(residual, *args, **kwargs):
+            calls.append("fused")
+            return torch.ones(1, 5, dim, dtype=torch.bfloat16)
+
+        def fake_old(residual, *args, **kwargs):
+            calls.append("old")
+            return torch.zeros(1, 5, dim, dtype=torch.bfloat16)
+
+        old_fused = tilelang_impl.tk_mhc_head_fused
+        old_head = tilelang_impl.tk_mhc_head
+        tilelang_impl.tk_mhc_head_fused = fake_fused
+        tilelang_impl.tk_mhc_head = fake_old
+        self.addCleanup(lambda: setattr(tilelang_impl, "tk_mhc_head_fused", old_fused))
+        self.addCleanup(lambda: setattr(tilelang_impl, "tk_mhc_head", old_head))
+
+        x = torch.randn(5, hc, dim, dtype=torch.bfloat16)
+        y = head.head(x)
+        self.assertEqual(calls, ["fused"])
+        self.assertEqual(tuple(y.shape), (5, dim))
+        self.assertTrue(torch.all(y == 1))
+
+        calls.clear()
+        tilelang_impl.tk_mhc_head_fused = lambda *args, **kwargs: None
+        y = head.head(x)
+        self.assertEqual(calls, ["old"])
+        self.assertTrue(torch.all(y == 0))
+
     def test_shape_contract_is_checked_before_impl(self) -> None:
         hc, dim = 4, 16
         fn, base, scale = _weights(hc, dim)

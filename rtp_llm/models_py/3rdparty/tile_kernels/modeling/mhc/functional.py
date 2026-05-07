@@ -3,6 +3,7 @@ import torch.nn.functional as F
 
 from .ops.expand import expand_to_mhc
 from .ops.head_compute_mix import mhc_head_compute_mix
+from .ops.head_fuse import mhc_head_fuse
 from .ops.norm_fn import mhc_pre_norm_fn
 from .ops.post import mhc_post
 from .ops.pre_apply_mix import mhc_pre_apply_mix

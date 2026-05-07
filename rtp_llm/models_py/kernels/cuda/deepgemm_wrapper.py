@@ -22,6 +22,7 @@ __all__ = [
     "per_token_cast_to_fp4",
     "cast_back_from_fp4",
     "transpose_packed_fp4",
+    "tf32_hc_prenorm_gemm",
     "has_deep_gemm",
     "is_deep_gemm_e8m0_used",
     "configure_deep_gemm_num_sms",
@@ -42,6 +43,7 @@ _deep_gemm_impl_new_map = {
     "per_token_cast_to_fp4": "per_token_cast_to_fp4",
     "cast_back_from_fp4": "cast_back_from_fp4",
     "transpose_packed_fp4": "transpose_packed_fp4",
+    "tf32_hc_prenorm_gemm": "tf32_hc_prenorm_gemm",
 }
 
 _deep_gemm_impl_old_map = {
@@ -58,6 +60,7 @@ _deep_gemm_impl_old_map = {
     "per_token_cast_to_fp4": "per_token_cast_to_fp4",
     "cast_back_from_fp4": "cast_back_from_fp4",
     "transpose_packed_fp4": "transpose_packed_fp4",
+    "tf32_hc_prenorm_gemm": "tf32_hc_prenorm_gemm",
 }
 
 
@@ -74,6 +77,7 @@ _fp8_fp4_paged_mqa_logits_impl: Callable[..., Any] | None = None
 _per_token_cast_to_fp4_impl: Callable[..., Any] | None = None
 _cast_back_from_fp4_impl: Callable[..., Any] | None = None
 _transpose_packed_fp4_impl: Callable[..., Any] | None = None
+_tf32_hc_prenorm_gemm_impl: Callable[..., Any] | None = None
 
 
 @functools.cache
@@ -119,7 +123,9 @@ def _lazy_init_deep_gemm(symbols: List[str]) -> None:
     global _fp8_gemm_nt_impl, _m_grouped_fp8_gemm_nt_contiguous_impl, _m_grouped_fp8_gemm_nt_masked_impl
     global _bf16_gemm_nt_impl, _m_grouped_bf16_gemm_nt_contiguous_impl, _m_grouped_bf16_gemm_nt_masked_impl
     global _fp8_fp4_gemm_nt_impl, _m_grouped_fp8_fp4_gemm_nt_contiguous_impl, _m_grouped_fp8_fp4_gemm_nt_masked_impl
-    global _fp8_fp4_paged_mqa_logits_impl, _per_token_cast_to_fp4_impl, _cast_back_from_fp4_impl, _transpose_packed_fp4_impl
+    global _fp8_fp4_paged_mqa_logits_impl, _per_token_cast_to_fp4_impl
+    global _cast_back_from_fp4_impl, _transpose_packed_fp4_impl
+    global _tf32_hc_prenorm_gemm_impl
 
     symbol_impls = [f"_{symbol}_impl" for symbol in symbols]
     # check if the symbols are valid
@@ -148,7 +154,8 @@ def _lazy_init_deep_gemm(symbols: List[str]) -> None:
             )
         except AttributeError:
             raise RuntimeError(
-                f"DeepGEMM symbol {_deep_gemm_impl_new_map[symbol]} and {_deep_gemm_impl_old_map[symbol]} not found in deep_gemm module"
+                f"DeepGEMM symbol {_deep_gemm_impl_new_map[symbol]} and "
+                f"{_deep_gemm_impl_old_map[symbol]} not found in deep_gemm module"
             )
 
 
@@ -817,3 +824,23 @@ def transpose_packed_fp4(*args: Any, **kwargs: Any) -> Any:
     if _transpose_packed_fp4_impl is None:
         return _missing_deep_gemm()
     return _transpose_packed_fp4_impl(*args, **kwargs)
+
+
+def tf32_hc_prenorm_gemm(
+    x: torch.Tensor,
+    fn: torch.Tensor,
+    out: torch.Tensor,
+    sqrsum: torch.Tensor,
+    num_split: int,
+) -> torch.Tensor:
+    """DeepGEMM mHC pre helper: out=x.float()@fn.T and sqrsum=x^2.
+
+    This symbol is optional in DeepGEMM, so it is not part of the eager
+    wrapper initialization used by the unrelated GEMM paths.
+    """
+    global _tf32_hc_prenorm_gemm_impl
+    if _tf32_hc_prenorm_gemm_impl is None:
+        _lazy_init_deep_gemm(["tf32_hc_prenorm_gemm"])
+    if _tf32_hc_prenorm_gemm_impl is None:
+        return _missing_deep_gemm()
+    return _tf32_hc_prenorm_gemm_impl(x, fn, out, sqrsum, num_split)
