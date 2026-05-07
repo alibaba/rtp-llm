@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/normal_engine/speculative/MtpBatchStreamProcessor.h"
 #undef private
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
+#include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
@@ -219,7 +220,8 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherDecodeModelInput) {
     cache_config.group_types = {CacheGroupType::FULL};
     auto processor           = MtpBatchStreamProcessor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
-    auto model_input = processor.gatherDecodeModelInput(stream_groups);
+    TensorHolder holder;
+    auto         model_input = processor.gatherDecodeModelInput(stream_groups, holder);
     EXPECT_TRUE(model_input.ok());
 
     auto          last_hidden_states        = model_input.value().last_hidden_states;
@@ -296,13 +298,14 @@ TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInput) {
     cache_config.group_types = {CacheGroupType::FULL};
     auto processor           = MtpBatchStreamProcessor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
-    auto model_input_status = processor.gatherDecodeModelInput(stream_groups);
+    TensorHolder holder;
+    auto         model_input_status = processor.gatherDecodeModelInput(stream_groups, holder);
     EXPECT_TRUE(model_input_status.ok());
 
     auto& model_input            = model_input_status.value();
     model_input.sequence_lengths = torch::tensor({1, 2}, torch::kInt32);
 
-    processor.prepareOneStepSpecDecodeModelInput(stream_groups, model_input);
+    processor.prepareOneStepSpecDecodeModelInput(stream_groups, model_input, holder);
 
     auto        combo_tokens        = model_input.combo_tokens;
     vector<int> expect_combo_tokens = {2, 3, 3, 1};
@@ -317,12 +320,113 @@ TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInput) {
     EXPECT_EQ(expect_input_lengths, toVec<int>(input_lengths));
 
     auto sequence_lengths = model_input.sequence_lengths;
+    EXPECT_TRUE(sequence_lengths.is_cuda());
     EXPECT_EQ(0, sequence_lengths.size(0));
 
     auto        lm_output_indexes        = model_input.lm_output_indexes;
     vector<int> expect_lm_output_indexes = {0, 1, 2, 3};
     EXPECT_TRUE(lm_output_indexes.is_cuda());
     EXPECT_EQ(expect_lm_output_indexes, toVec<int>(lm_output_indexes));
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInputFromDeviceState) {
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    SpeculativeExecutionConfig  sp_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+
+    model_config.max_seq_len    = 2048;
+    model_config.vocab_size     = 4;
+    model_config.num_layers     = 1;
+    sp_config.gen_num_per_cycle = 1;
+
+    auto kv_cache_config = test::makeSimpleMhaCacheConfig(/*layer_num=*/1,
+                                                          /*block_num=*/10,
+                                                          /*tokens_per_block=*/2,
+                                                          rtp_llm::TYPE_INT8,
+                                                          /*local_head_num_kv=*/128,
+                                                          /*size_per_head=*/256);
+    auto cache_manager   = std::make_shared<KVCacheManager>(kv_cache_config,
+
+                                                          /*warmup=*/false,
+                                                          /*metrics_reporter=*/nullptr,
+                                                          KVCacheConfig{},
+                                                          ParallelismConfig{},
+                                                          runtime_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+
+    GenerateStreamPtr stream1 = createContextStream(model_config, runtime_config, resource_context, {1}, 1);
+    GenerateStreamPtr stream2 = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 2);
+
+    auto context_token_1 = torch::tensor({2}, torch::kInt32).reshape({1, 1});
+    auto context_token_2 = torch::tensor({3}, torch::kInt32).reshape({1, 1});
+    stream1->update({context_token_1,
+                     1,
+                     torch::Tensor(),
+                     torch::Tensor(),
+                     torch::Tensor(),
+                     torch::Tensor(),
+                     torch::Tensor(),
+                     torch::Tensor(),
+                     torch::Tensor(),
+                     torch::Tensor()});
+    stream2->update({context_token_2,
+                     1,
+                     torch::Tensor(),
+                     torch::Tensor(),
+                     torch::Tensor(),
+                     torch::Tensor(),
+                     torch::Tensor(),
+                     torch::Tensor(),
+                     torch::Tensor(),
+                     torch::Tensor()});
+
+    const auto                          cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    GenerateStream::MtpAsyncDeviceState state1;
+    state1.accept_len_gpu     = torch::tensor({2}, torch::kInt32).to(torch::kCUDA);
+    state1.accept_tokens_gpu  = torch::tensor({{2, 3}}, torch::kInt32).to(torch::kCUDA);
+    state1.next_seq_len_gpu   = torch::full({1}, 7, cuda_i32);
+    state1.propose_tokens_gpu = torch::tensor({{1}}, torch::kInt32).to(torch::kCUDA);
+    stream1->setMtpAsyncDeviceState(std::move(state1));
+
+    GenerateStream::MtpAsyncDeviceState state2;
+    state2.accept_len_gpu     = torch::tensor({1}, torch::kInt32).to(torch::kCUDA);
+    state2.accept_tokens_gpu  = torch::tensor({{1, 0}}, torch::kInt32).to(torch::kCUDA);
+    state2.next_seq_len_gpu   = torch::full({1}, 4, cuda_i32);
+    state2.propose_tokens_gpu = torch::tensor({{2}}, torch::kInt32).to(torch::kCUDA);
+    stream2->setMtpAsyncDeviceState(std::move(state2));
+
+    auto stream_groups = StreamGroups({stream1, stream2});
+
+    cache_config.group_types = {CacheGroupType::FULL};
+    auto processor           = MtpBatchStreamProcessor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    TensorHolder holder;
+    auto         model_input_status = processor.gatherDecodeModelInput(stream_groups, holder);
+    EXPECT_TRUE(model_input_status.ok());
+
+    auto& model_input            = model_input_status.value();
+    model_input.sequence_lengths = torch::tensor({99, 99}, torch::kInt32);
+
+    processor.prepareOneStepSpecDecodeModelInput(stream_groups, model_input, holder);
+
+    vector<int> expect_combo_tokens = {3, 1, 1, 2};
+    EXPECT_TRUE(model_input.combo_tokens.is_cuda());
+    EXPECT_EQ(expect_combo_tokens, toVec<int>(model_input.combo_tokens));
+
+    vector<int> expect_prefix_lengths = {6, 3};
+    EXPECT_TRUE(model_input.prefix_lengths.is_cuda());
+    EXPECT_EQ(expect_prefix_lengths, toVec<int>(model_input.prefix_lengths));
+    EXPECT_TRUE(model_input.sequence_lengths.is_cuda());
+    EXPECT_EQ(0, model_input.sequence_lengths.size(0));
+
+    vector<int> expect_input_lengths = {2, 2};
+    EXPECT_TRUE(model_input.input_lengths.is_cuda());
+    EXPECT_EQ(expect_input_lengths, toVec<int>(model_input.input_lengths));
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {
@@ -395,13 +499,14 @@ TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {
     cache_config.group_types = {CacheGroupType::FULL};
     auto processor           = MtpBatchStreamProcessor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
-    auto model_input_status = processor.gatherDecodeModelInput(stream_groups);
+    TensorHolder holder;
+    auto         model_input_status = processor.gatherDecodeModelInput(stream_groups, holder);
     EXPECT_TRUE(model_input_status.ok());
 
     auto& model_input            = model_input_status.value();
     model_input.sequence_lengths = torch::tensor({1, 2}, torch::kInt32);
 
-    processor.prepareDecodeDraftModelInput(stream_groups, model_input);
+    processor.prepareDecodeDraftModelInput(stream_groups, model_input, holder);
 
     auto        combo_tokens        = model_input.combo_tokens;
     vector<int> expect_combo_tokens = {3, 1};
@@ -451,7 +556,8 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInput) {
     cache_config.group_types = {CacheGroupType::FULL};
     auto processor           = MtpBatchStreamProcessor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
-    auto model_input_status = processor.gatherModelInput(stream_groups);
+    TensorHolder holder;
+    auto         model_input_status = processor.gatherModelInput(stream_groups, holder);
     EXPECT_TRUE(model_input_status.ok());
 
     auto& model_input            = model_input_status.value();
@@ -464,7 +570,7 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInput) {
     SamplerOutput sampler_output;
     sampler_output.token_ids = torch::tensor({1, -2, 2, 1, 2, 3}, torch::kInt32).reshape({2, 3});
 
-    processor.updatePrefillPostDraftModelInput(model_input, model_output, sampler_output);
+    processor.updatePrefillPostDraftModelInput(model_input, model_output, sampler_output, holder);
 
     auto        combo_tokens        = model_input.combo_tokens;
     vector<int> expect_combo_tokens = {2, 2, 3};
@@ -509,7 +615,8 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInput) {
     cache_config.group_types = {CacheGroupType::FULL};
     auto processor           = MtpBatchStreamProcessor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
-    auto model_input_status = processor.gatherModelInput(stream_groups);
+    TensorHolder holder;
+    auto         model_input_status = processor.gatherModelInput(stream_groups, holder);
     EXPECT_TRUE(model_input_status.ok());
 
     auto& model_input = model_input_status.value();
@@ -527,7 +634,8 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInput) {
         torch::tensor({0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 1.1f, 1.2f, 1.3f, 1.4f, 1.5f, 1.6f}, torch::kFloat32)
             .reshape({6, 2});
 
-    processor.updateDecodePostDraftModelInput(model_input, model_output, spec_decode_output, 2, hidden_states_d_t);
+    processor.updateDecodePostDraftModelInput(
+        model_input, model_output, spec_decode_output, 2, hidden_states_d_t, holder);
 
     auto        combo_tokens        = model_input.combo_tokens.cpu();
     vector<int> expect_combo_tokens = {2, 3, 1, 2, 0, 0};
@@ -587,13 +695,81 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateOneStepDraftSamplerOutput) {
 
     torch::Tensor draft_token_probs_d_t;
     SamplerOutput sampler_output;
+    TensorHolder  holder;
 
-    processor.updateOneStepDraftSamplerOutput(stream_groups, sampler_output, draft_token_probs_d_t);
+    processor.updateOneStepDraftSamplerOutput(stream_groups, sampler_output, draft_token_probs_d_t, holder);
 
     vector<int> expect_token_ids = {2, 3};
     EXPECT_EQ(expect_token_ids, toVec<int>(sampler_output.token_ids));
 
     vector<float> expect_all_probs = {0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8};
+    EXPECT_EQ(expect_all_probs, toVec<float>(sampler_output.all_probs));
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testUpdateOneStepDraftSamplerOutputFromDeviceState) {
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    SpeculativeExecutionConfig  sp_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+
+    model_config.max_seq_len    = 2048;
+    model_config.vocab_size     = 4;
+    model_config.num_layers     = 1;
+    sp_config.gen_num_per_cycle = 1;
+
+    auto kv_cache_config = test::makeSimpleMhaCacheConfig(/*layer_num=*/1,
+                                                          /*block_num=*/10,
+                                                          /*tokens_per_block=*/2,
+                                                          rtp_llm::TYPE_INT8,
+                                                          /*local_head_num_kv=*/128,
+                                                          /*size_per_head=*/256);
+    auto cache_manager   = std::make_shared<KVCacheManager>(kv_cache_config,
+
+                                                          /*warmup=*/false,
+                                                          /*metrics_reporter=*/nullptr,
+                                                          KVCacheConfig{},
+                                                          ParallelismConfig{},
+                                                          runtime_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+
+    GenerateStreamPtr stream1 = createContextStream(model_config, runtime_config, resource_context, {1}, 1);
+    GenerateStreamPtr stream2 = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 2);
+
+    stream1->getSPOutputBuffer()->all_probs = torch::tensor({{0.1f, 0.2f, 0.3f, 0.4f}});
+    stream2->getSPOutputBuffer()->all_probs = torch::tensor({{0.5f, 0.6f, 0.7f, 0.8f}});
+    stream1->getSPOutputBuffer()->tokens    = torch::tensor({1, 2}, torch::kInt32).reshape({1, 2});
+    stream2->getSPOutputBuffer()->tokens    = torch::tensor({2, 3}, torch::kInt32).reshape({1, 2});
+
+    GenerateStream::MtpAsyncDeviceState state1;
+    state1.propose_tokens_gpu  = torch::tensor({{3}}, torch::kInt32).to(torch::kCUDA);
+    state1.draft_all_probs_gpu = torch::tensor({{0.9f, 0.8f, 0.7f, 0.6f}}).to(torch::kCUDA);
+    stream1->setMtpAsyncDeviceState(std::move(state1));
+
+    GenerateStream::MtpAsyncDeviceState state2;
+    state2.propose_tokens_gpu  = torch::tensor({{1}}, torch::kInt32).to(torch::kCUDA);
+    state2.draft_all_probs_gpu = torch::tensor({{0.4f, 0.3f, 0.2f, 0.1f}}).to(torch::kCUDA);
+    stream2->setMtpAsyncDeviceState(std::move(state2));
+
+    auto stream_groups = StreamGroups({stream1, stream2});
+    auto processor     = MtpBatchStreamProcessor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+
+    torch::Tensor draft_token_probs_d_t;
+    SamplerOutput sampler_output;
+    TensorHolder  holder;
+
+    processor.updateOneStepDraftSamplerOutput(stream_groups, sampler_output, draft_token_probs_d_t, holder);
+
+    vector<int> expect_token_ids = {3, 1};
+    EXPECT_TRUE(sampler_output.token_ids.is_cuda());
+    EXPECT_EQ(expect_token_ids, toVec<int>(sampler_output.token_ids));
+
+    vector<float> expect_all_probs = {0.9, 0.8, 0.7, 0.6, 0.4, 0.3, 0.2, 0.1};
+    EXPECT_TRUE(sampler_output.all_probs.is_cuda());
     EXPECT_EQ(expect_all_probs, toVec<float>(sampler_output.all_probs));
 }
 

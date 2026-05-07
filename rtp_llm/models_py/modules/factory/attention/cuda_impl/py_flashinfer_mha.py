@@ -113,8 +113,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
         forbid_realloc: True only when called from prepare_cuda_graph (replay); forbids buffer realloc.
         """
         check_attention_inputs(attn_inputs)
-        # Device-only planner: MHA path uses a device-only planner: fills only the three
-        # paged-KV fields the FlashInfer wrapper consumes, no host fill loop.
+        # Fill FlashInfer paged-KV plus batch/position metadata on device.
         self.fmha_params.fill_params_mha_device(
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,
@@ -356,7 +355,7 @@ class PyFlashinferPrefillAttnOp(object):
         batch_size = attn_inputs.input_lengths.size(0)
         cu_seqlens = attn_inputs.cu_seqlens[: batch_size + 1]
 
-        # Device-only planner: device-only planner; ragged path still wraps the same params.
+        # Ragged prefill also uses the device metadata planner.
         self.fmha_params.fill_params_mha_device(
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,
@@ -679,8 +678,7 @@ class PyFlashinferDecodeAttnOp(object):
         else:  # BASE
             kv_datatype = get_scalar_type(attn_inputs.dtype)
 
-        # Device-only planner: device-only planner: drops the host CPU loop + H2D in
-        # the decode prepare path (called every step in steady state).
+        # Steady-state decode drops the host metadata loop and H2D copy.
         self.fmha_params.fill_params_mha_device(
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,
@@ -722,13 +720,10 @@ class PyFlashinferDecodeAttnOp(object):
         return self.fmha_params
 
     def prepare_for_cuda_graph_replay(self, attn_inputs: PyAttentionInputs) -> None:
-        """Update buffer contents for CUDA graph replay without calling plan().
+        """Update CUDA graph replay buffers without calling plan().
 
-        During CUDA graph replay, we must NOT call plan() because it may launch
-        GPU kernels on the current stream while the graph replays on the capture
-        stream, causing a race condition. We only need to update the page table
-        buffers in-place via fill_params — the pre-allocated buffers are already
-        wired into the decode_wrapper from the initial prepare() call.
+        Replay refreshes decode metadata in-place via fill_decode_cuda_graph_params,
+        falling back to the device MHA planner when the decode-only input is absent.
         """
         fill_decode = getattr(self.fmha_params, "fill_decode_cuda_graph_params", None)
         if (
@@ -743,8 +738,7 @@ class PyFlashinferDecodeAttnOp(object):
             )
             return
 
-        # Device-planner fallback: device planner when the decode-only fast path
-        # above isn't usable (e.g. sequence_lengths_plus_1_d unavailable).
+        # CUDA graph replay fallback when sequence_lengths_plus_1_d is absent.
         self.fmha_params.fill_params_mha_device(
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,

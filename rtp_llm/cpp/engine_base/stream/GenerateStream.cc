@@ -20,6 +20,15 @@ using namespace std;
 
 namespace rtp_llm {
 
+namespace {
+
+bool useStreamAsyncReserveTokens() {
+    static const bool enabled = autil::EnvUtil::getEnv("RTP_LLM_STREAM_ASYNC", false);
+    return enabled;
+}
+
+}  // namespace
+
 GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
                                const ModelConfig&               model_config,
                                const RuntimeConfig&             runtime_config,
@@ -136,10 +145,50 @@ absl::Status GenerateStream::incrKVBlock() {
 
 void GenerateStream::releaseResource() {
     RTP_LLM_PROFILE_FUNCTION();
+    // Return KV blocks only after all workers that captured this stream finish.
+    // Earlier release could let a worker write into blocks owned by another stream.
+    waitPendingAsyncBookkeeping();
     std::lock_guard<std::mutex> lock(*mutex_);
     if (!stream_cache_resource_->isResourceReleased()) {
         stream_cache_resource_->releaseResource();
     }
+}
+
+void GenerateStream::incPendingAsyncBookkeeping() {
+    async_bookkeeping_->count.fetch_add(1, std::memory_order_acq_rel);
+}
+
+void GenerateStream::decPendingAsyncBookkeepingAndMaybeRelease() {
+    int prev = async_bookkeeping_->count.fetch_sub(1, std::memory_order_acq_rel);
+    RTP_LLM_CHECK(prev >= 1);
+    if (prev == 1) {
+        {
+            std::lock_guard<std::mutex> lk(async_bookkeeping_->mu);
+        }
+        async_bookkeeping_->cv.notify_all();
+        // The last worker performs any deferred release after its update lock
+        // has unwound, so releaseResource() can safely re-enter mutex_.
+        if (async_bookkeeping_->defer_release.exchange(false, std::memory_order_acq_rel)) {
+            releaseResource();
+        }
+    }
+}
+
+bool GenerateStream::hasPendingAsyncBookkeeping() const {
+    return async_bookkeeping_->count.load(std::memory_order_acquire) > 0;
+}
+
+void GenerateStream::waitPendingAsyncBookkeeping() {
+    std::unique_lock<std::mutex> lk(async_bookkeeping_->mu);
+    async_bookkeeping_->cv.wait(lk, [this] { return async_bookkeeping_->count.load(std::memory_order_acquire) == 0; });
+}
+
+void GenerateStream::markDeferredRelease() {
+    async_bookkeeping_->defer_release.store(true, std::memory_order_release);
+}
+
+bool GenerateStream::isDeferredReleasePending() const {
+    return async_bookkeeping_->defer_release.load(std::memory_order_acquire);
 }
 void GenerateStream::setNeedReleaseResource(bool need_release_resource) {
     need_release_resource_ = need_release_resource;
@@ -597,12 +646,15 @@ size_t GenerateStream::curBlocksNum() const {
 }
 
 size_t GenerateStream::maxTokenNum() const {
-    int propose_step = 0;
+    int reserve_tokens = 0;
     if (sp_output_buffer_) {
-        propose_step = sp_output_buffer_->propose_step;
+        reserve_tokens = sp_output_buffer_->propose_step;
+        if (useStreamAsyncReserveTokens()) {
+            reserve_tokens = reserve_tokens * 2 + 1;
+        }
     }
 
-    return std::min(max_seq_len_ - propose_step,
+    return std::min(max_seq_len_ > reserve_tokens ? max_seq_len_ - reserve_tokens : 0,
                     generate_input_->generate_config->max_new_tokens + generate_input_->inputLength());
 }
 
@@ -688,22 +740,19 @@ void GenerateStream::matchStopWordsList(int batch_id) {
 }
 
 void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
-    // This function is the worker-thread entry point for
-    // post-step bookkeeping in the MTP async path. It calls
-    // CompleteTokenIds::update (which clamps overshoot via maxTokenNum) and
-    // updateOutput -> needFinish -> matchStopWordsList, all on the worker
-    // thread. Stop / EOS / max-token termination therefore lands before the
-    // next dispatchDecodeAsync starts (under the broad
-    // spec_bookkeeping_runner_.sync() invariant). The
-    // RTP_LLM_MTP_ASYNC_STOP_EXTRA env gate is
-    // intentionally NOT consulted here — the speculative propose_step + 1
-    // window already provides the budget for MTP, and the optimistic
-    // accept-then-clip pipeline handles boundary correctness.
+    // Worker-thread MTP bookkeeping updates tokens/output and finish checks
+    // before the next async dispatch. The speculative propose_step+1 window
+    // already covers stop/EOS/max-token boundaries.
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*mutex_);
     RTP_LLM_LOG_DEBUG("stream [%ld] spec update", streamId());
     *is_context_stream_ = false;
     if (hasError() && !update_info.force_update_info) {
+        return;
+    }
+    // Ignore stale worker updates after finish; committing them would duplicate
+    // tokens and touch KV blocks only deferred until this worker exits.
+    if (isFinished() && !update_info.force_update_info) {
         return;
     }
 
@@ -797,6 +846,11 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
     RTP_LLM_LOG_DEBUG("stream [%ld] update", streamId());
     *is_context_stream_ = false;
     if (hasError() && !update_info.force_update_info) {
+        return;
+    }
+    // Ignore stale worker updates after finish; committing them would duplicate
+    // tokens and touch KV blocks only deferred until this worker exits.
+    if (isFinished() && !update_info.force_update_info) {
         return;
     }
 

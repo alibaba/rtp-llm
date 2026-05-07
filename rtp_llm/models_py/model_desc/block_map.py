@@ -17,9 +17,6 @@ def select_block_map_for_layer(
         attention_inputs.kv_cache_kernel_block_id_device = (
             attention_inputs.kv_cache_kernel_block_id_device_by_group[gid]
         )
-    # NOTE: hybrid (group > 1) per-layer host alias was removed together with
-    # kv_cache_kernel_block_id_host_by_group. Singular kv_cache_kernel_block_id_host
-    # is set once to group 0 in PyWrappedModel::setupKVCacheForAttentionInputs;
-    # callers running hybrid models must derive a per-layer host slice from device
-    # explicitly (not done here to avoid an unnecessary D2H per layer).
+    # Host block-id metadata aliases group 0 only; hybrid callers needing
+    # per-layer host data must derive it explicitly from device state.
     return gid

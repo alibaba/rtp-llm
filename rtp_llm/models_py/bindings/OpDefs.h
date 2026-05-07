@@ -171,11 +171,9 @@ struct PyAttentionInputs {
     // Shape: [group, batch, max_blocks] or [batch, max_blocks].
     torch::Tensor kv_cache_block_id_host;
     torch::Tensor kv_cache_block_id_device;
-    // Hybrid cache support:
-    // - kv_cache_kernel_block_id_device_by_group: vector of 2-D kernel block tables on CUDA,
-    //   each [batch, max_kernel_blocks]. The host counterpart was removed once
-    //   GptModelInputs::kv_cache_kernel_block_id became device-resident; legacy attention
-    //   kernels still consume the singular kv_cache_kernel_block_id_host (group 0 alias).
+    // Hybrid cache support: per-group CUDA kernel block tables.
+    // Legacy CPU consumers still use singular kv_cache_kernel_block_id_host,
+    // which aliases group 0.
     std::vector<torch::Tensor> kv_cache_kernel_block_id_device_by_group;
     torch::Tensor              kv_cache_layer_to_group;
     caffe2::TypeMeta           dtype;

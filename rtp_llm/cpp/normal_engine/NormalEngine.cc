@@ -11,10 +11,10 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
-#include "autil/EnvUtil.h"
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
 #include <algorithm>
+#include <chrono>
 #include <memory>
 #include <thread>
 #include <random>
@@ -156,16 +156,6 @@ void NormalEngine::initScheduler() {
 NormalEngine::~NormalEngine() {
     RTP_LLM_LOG_INFO("destory normal engine");
     (void)stop();
-    // Tear down the result thread if async scheduling was ever
-    // enabled. Safe no-op for the synchronous default.
-    {
-        std::lock_guard<std::mutex> lk(result_mutex_);
-        result_thread_stop_ = true;
-    }
-    result_cv_.notify_all();
-    if (result_thread_.joinable()) {
-        result_thread_.join();
-    }
 }
 
 absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<GenerateInput>& generate_input,
@@ -394,87 +384,13 @@ void NormalEngine::loop() {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_INFO("loop begin");
     cudaPreRun(getDeviceId());
-    // Env switch lets us flip between sync and async scheduling
-    // without recompiling. Default off (synchronous step()) so smoke tests
-    // and existing benchmarks see no behaviour change. The full async path
-    // (result thread, executor split, cudaEvent gating) lands in async_opt.
-    use_async_scheduling_ = autil::EnvUtil::getEnv("RTP_LLM_ASYNC_SCHEDULING", false);
-    if (use_async_scheduling_) {
-        RTP_LLM_LOG_INFO("async scheduling scaffold enabled (RTP_LLM_ASYNC_SCHEDULING=1)");
-        result_thread_ = std::thread(&NormalEngine::resultLoop, this);
-    }
     while (running_) {
-        auto status = use_async_scheduling_ ? asyncStep() : step();
+        auto status = step();
         if (!status.ok()) {
             RTP_LLM_LOG_ERROR("step running error: %s", status.ToString().c_str());
             THROW_IF_STATUS_ERROR(trySaveStepError());
         }
     }
-}
-
-absl::Status NormalEngine::awaitLastBookkeeping() {
-    if (!last_future_) {
-        return absl::OkStatus();
-    }
-    // Spin briefly when the result thread is keeping up; otherwise yield.
-    // Once the executor processAsync/processResults split lands, this turns
-    // into a folly::Promise wait so we can surface errors atomically.
-    for (int i = 0; i < 256 && !last_future_->bookkeeping_done.load(std::memory_order_acquire); ++i) {
-        // tight spin first to keep the cache hot when bookkeeping is fast
-    }
-    while (!last_future_->bookkeeping_done.load(std::memory_order_acquire)) {
-        std::this_thread::yield();
-    }
-    auto st      = last_future_->bookkeeping_status;
-    last_future_ = nullptr;
-    return st;
-}
-
-absl::Status NormalEngine::asyncStep() {
-    // Async scheduling currently delegates execution to the synchronous step
-    // while still exercising await/queue/result-thread lifecycle handling.
-    auto await_status = awaitLastBookkeeping();
-    if (!await_status.ok()) {
-        return await_status;
-    }
-
-    auto status = step();
-
-    // Mint a tombstone BatchFuture so the result thread cycles. Once the
-    // executor is split, this will hold real GPU work; right now it just
-    // proves the queue/cv/lifetime mechanics behave under load.
-    auto future            = std::make_shared<BatchFuture>();
-    future->launch_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-    {
-        std::lock_guard<std::mutex> lk(result_mutex_);
-        result_queue_.push(future);
-    }
-    result_cv_.notify_one();
-    last_future_ = future;
-    return status;
-}
-
-void NormalEngine::resultLoop() {
-    RTP_LLM_LOG_INFO("normal_engine result loop start");
-    while (!result_thread_stop_.load(std::memory_order_acquire)) {
-        BatchFuturePtr future;
-        {
-            std::unique_lock<std::mutex> lk(result_mutex_);
-            result_cv_.wait_for(lk, std::chrono::milliseconds(100), [&] {
-                return !result_queue_.empty() || result_thread_stop_.load(std::memory_order_acquire);
-            });
-            if (result_queue_.empty()) {
-                continue;
-            }
-            future = std::move(result_queue_.front());
-            result_queue_.pop();
-        }
-        // TODO(async_opt): cudaEventSynchronize(future->gpu_done);
-        // TODO(async_opt): executor_->processResults(*future);
-        future->bookkeeping_status = absl::OkStatus();
-        future->bookkeeping_done.store(true, std::memory_order_release);
-    }
-    RTP_LLM_LOG_INFO("normal_engine result loop exit");
 }
 
 absl::Status NormalEngine::trySaveStepError() const {

@@ -154,10 +154,8 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
         return;
     }
 
-    // The legacy host code path below dereferences these tensors via data_ptr<>() +
-    // pointer arithmetic. If callers passed device tensors, do an explicit D2H
-    // stream copy + sync here so the host-side reads stay valid.
-    // TODO(async): rewrite this path to consume device tensors directly.
+    // Legacy host path uses data_ptr pointer arithmetic; sync D2H when callers
+    // pass device tensors. TODO(async): consume device tensors directly.
     auto to_cpu_sync = [](const torch::Tensor& t) -> torch::Tensor {
         if (!t.defined() || t.device().is_cpu()) {
             return t;
@@ -509,11 +507,8 @@ void execBroadcastCpu(const BroadcastParams& params) {
         }
         return;
     }
-    // Fallback (broadcaster not initialized — typically cross-node TP):
-    // delegate to NCCL via the Python callback. The historical contract for
-    // this callsite (tpSyncModelInputs CPU broadcasts) requires the data to
-    // be readable on the current thread immediately after this returns, so
-    // preserve the original sync + cudaSyncAndCheck sequence.
+    // Fallback to NCCL via Python callback, typically for cross-node TP.
+    // Preserve immediate-read semantics with the original sync sequence.
     execBroadcast(params);
     execSyncCommunication(false);
     cudaSyncAndCheck();
@@ -684,11 +679,8 @@ void registerExecCtxOps(pybind11::module& m) {
     m.def(
         "init_cpu_tp_broadcaster",
         [](int tp_rank, int tp_size, const std::string& base_path) {
-            // Release GIL: rank 0 blocks in accept() and rank K blocks in
-            // connect() retry until the peer arrives. Holding the GIL would
-            // dead-lock any other Python thread waiting to enter the runtime
-            // (e.g. logging) and is unnecessary — initialize() touches no
-            // Python state.
+            // Release GIL while peers block in accept/connect retry.
+            // initialize() touches no Python state.
             py::gil_scoped_release release;
             CpuTpBroadcaster::instance().initialize(tp_rank, tp_size, base_path);
         },

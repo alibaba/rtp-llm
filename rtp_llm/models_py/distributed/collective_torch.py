@@ -465,11 +465,9 @@ def _register_process_groups_to_cpp():
         f"Registered C++ comm ops callbacks (modes: {list(mode_to_group.keys())})"
     )
 
-    # Bootstrap the UDS-backed intra-node TP broadcaster used by tpSyncModelInputs
-    # to bypass the cudaSync stall (see m2.md). Lazy-init in C++ races: rank 1
-    # can reach tpSyncModelInputs before rank 0 binds. Calling here guarantees
-    # both TP siblings invoke initialize() in the same window — they have just
-    # finished `new_group` together. Cross-node TP keeps the NCCL fallback.
+    # Bootstrap the UDS-backed intra-node TP broadcaster right after new_group.
+    # Lazy C++ init can race if a peer reaches tpSyncModelInputs before rank 0
+    # binds; cross-node TP keeps the NCCL fallback.
     if (
         _parallelism_config is not None
         and _parallelism_config.tp_size > 1

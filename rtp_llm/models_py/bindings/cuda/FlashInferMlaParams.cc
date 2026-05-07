@@ -29,11 +29,8 @@ torch::Tensor toHostContiguousI32(const torch::Tensor& tensor) {
     return host_tensor.is_contiguous() ? host_tensor : host_tensor.contiguous();
 }
 
-// CudaGraphRunner::initCaptureAttentionInputs allocates sequence_lengths /
-// prefix_lengths / input_lengths as CPU-pinned int32 for the warmup capture
-// (and the slice survives into replay). Real decode also runs through here, so
-// the planner has to accept either CPU-pinned or CUDA inputs and lift them to
-// device. The H2D is a few ints — non_blocking + a cudaMalloc-cached buffer.
+// Accept CUDA tensors and tolerate legacy CPU/CPU-pinned inputs by lifting
+// them to device. The H2D is small and uses cached allocations.
 torch::Tensor toDeviceContiguousI32(const torch::Tensor& tensor) {
     if (!tensor.defined() || tensor.numel() == 0) {
         return tensor;
@@ -635,7 +632,7 @@ void FlashInferMlaAttnParams::fillParamsMhaDevice(torch::Tensor t_prefix_lengths
         return;
     }
 
-    // Lift CPU-pinned (warmup) inputs to device — see toDeviceContiguousI32.
+    // Accept CUDA inputs and lift legacy CPU inputs to device.
     auto t_input_lengths_dev    = toDeviceContiguousI32(t_input_lengths);
     auto t_sequence_lengths_dev = toDeviceContiguousI32(t_sequence_lengths);
     auto t_prefix_lengths_dev   = toDeviceContiguousI32(t_prefix_lengths);
@@ -646,21 +643,16 @@ void FlashInferMlaAttnParams::fillParamsMhaDevice(torch::Tensor t_prefix_lengths
                             "fillParamsMhaDevice: kv_cache_block_id_device must be 2-D and cover the batch");
     const int max_blocks_per_bs = t_block_id_dev.size(1);
 
-    // Conservative upper bounds — exact page_num / input_token_num are on the
-    // device (the planner kernel writes one element per nnz token into
-    // positions_d / batch_indice_d), so we size the buffers for the worst case
-    // (every batch fills its full row of the page table). MIN_CACHE_PAGE_NUM
-    // keeps this from churning the allocator.
+    // Exact page/token counts stay on device, so size for the worst case:
+    // every batch fills its full page-table row. MIN_CACHE_PAGE_NUM prevents
+    // allocator churn.
     const int page_num_upper = batch_size * max_blocks_per_bs;
     const int input_token_num_upper =
         std::max(MIN_CACHE_INPUT_TOKEN_NUM, batch_size * max_blocks_per_bs * seq_size_per_block);
 
-    // ensureTensorSize allocates the MLA-superset buffer; we only write to a
-    // subset, but reusing the same allocation keeps the FlashInfer wrapper's
-    // pre-baked _paged_kv_*_buf aliases stable across calls. Match the
-    // batch_reuse_info_size envelope that fillParams / fillDecodeCudaGraphParams
-    // use (batch_size * 4) so a later replay through either of those methods
-    // doesn't trip the forbid_realloc gate on a buffer we under-sized.
+    // Reuse MLA-superset buffers to keep FlashInfer _paged_kv_* aliases stable.
+    // Match fillParams' batch_reuse_info envelope so later graph replay does
+    // not hit forbid_realloc due to under-sizing.
     ensureTensorSize(batch_size,
                      input_token_num_upper,
                      page_num_upper,
@@ -681,11 +673,9 @@ void FlashInferMlaAttnParams::fillParamsMhaDevice(torch::Tensor t_prefix_lengths
                            positions_d,
                            stream);
 
-    // FlashInfer reads batch_size from paged_kv_last_page_len.size(0) and
-    // expects decode_page_indptr.size(0) == batch_size + 1; page_indice may
-    // be over-sized (wrapper indexes via indptr). batch_indice_d/positions_d
-    // sizes match nnz only via consumer-side narrow() (we don't know nnz
-    // host-side without a sync), so leave them at the buffer-allocation size.
+    // FlashInfer uses paged_kv_last_page_len/decode_page_indptr sizes;
+    // page_indice may stay oversized. Consumers narrow batch_indice/positions
+    // to nnz without a host sync.
     paged_kv_last_page_len_d.unsafeGetTensorImpl()->set_sizes_contiguous({batch_size});
     decode_page_indptr_d.unsafeGetTensorImpl()->set_sizes_contiguous({batch_size + 1});
     page_indice_d.unsafeGetTensorImpl()->set_sizes_contiguous({page_num_upper});

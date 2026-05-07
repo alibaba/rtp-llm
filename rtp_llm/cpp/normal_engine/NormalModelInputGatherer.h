@@ -14,6 +14,8 @@
 
 namespace rtp_llm {
 
+struct TensorHolder;
+
 struct NormalModelInputGathererConfig {
     size_t                      num_layers{};
     size_t                      vocab_size{};
@@ -40,21 +42,21 @@ class NormalModelInputGatherer {
 public:
     explicit NormalModelInputGatherer(const NormalModelInputGathererConfig& config);
 
-    absl::StatusOr<GptModelInputs> gather(const StreamGroups& stream_groups) const;
+    absl::StatusOr<GptModelInputs> gather(const StreamGroups& stream_groups, TensorHolder& host_holder) const;
 
-    // Build only the kv_cache_kernel_block_id tensor (CUDA int32, 3-D layout
-    // [groups, batch, max_blocks * kernel_blocks_per_kv_block]). Read-only over
-    // streams: does NOT mutate stream state (no step()), does NOT fill the
-    // sibling kv_cache_block_id tensor, and does NOT call any other gather
-    // sub-step. Returns an undefined tensor when there are no streams or no
-    // blocks to publish.
-    absl::StatusOr<torch::Tensor> gatherKvCacheKernelBlockId(const StreamGroups& stream_groups) const;
+    // Build only the CUDA kv_cache_kernel_block_id tensor in 3-D layout.
+    // Read-only over streams: no step(), no sibling kv_cache_block_id, no
+    // other gather sub-step. Empty input returns an undefined tensor.
+    absl::StatusOr<torch::Tensor> gatherKvCacheKernelBlockId(const StreamGroups& stream_groups,
+                                                             TensorHolder&       host_holder) const;
 
 private:
     GptModelInputs allocateModelInputBuffers(const StreamGroups& stream_groups) const;
     void           initializeKvCacheMetadata(GptModelInputs& model_input) const;
     absl::Status   processDecodeStreams(GptModelInputs& model_input, const StreamGroups& stream_groups) const;
-    absl::Status   processContextStreams(GptModelInputs& model_input, const StreamGroups& stream_groups) const;
+    absl::Status   processContextStreams(GptModelInputs&     model_input,
+                                         const StreamGroups& stream_groups,
+                                         TensorHolder&       host_holder) const;
 
     NormalModelInputGathererConfig config_;
 };

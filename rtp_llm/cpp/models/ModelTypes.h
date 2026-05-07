@@ -77,10 +77,8 @@ enum GptModelInputIndex : size_t {
     skipRun,
     gptModelRequestLength,  // length of request id & pd_separation
     isFakeStream,
-    // Per-tensor device hint bitmap. Each bit (see GptModelInputDeviceBit
-    // below) is set when the corresponding root-side tensor lives on CUDA, so non-root
-    // ranks can allocate matching GPU buffers and tpSync's GPU-broadcast lane stays
-    // consistent across ranks.
+    // Per-tensor device hint bitmap from root so non-root ranks allocate
+    // matching GPU buffers and keep tpSync broadcast lanes consistent.
     tensorDeviceMap,
     gptModelInputLength,
 };
@@ -112,8 +110,9 @@ struct TokenSliceInfo {
     size_t count  = 0;
 };
 
-struct ModelBufferHolder {
+struct TensorHolder {
     std::vector<torch::Tensor> tensors;
+    std::vector<torch::Tensor> clear_tensors;
 
     void hold_host(const torch::Tensor& tensor) {
         if (tensor.defined() && tensor.device().is_cpu()) {
@@ -128,6 +127,10 @@ struct ModelBufferHolder {
     }
 
     void release() {
+        // Move the current hold set into clear_tensors, releasing the previous
+        // clear_tensors set. This keeps async H2D/D2H source tensors alive for
+        // one extra release point without each caller owning a custom holder.
+        clear_tensors = std::move(tensors);
         tensors.clear();
     }
 };

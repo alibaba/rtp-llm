@@ -56,6 +56,13 @@ struct MallocInfo {
     bool                    enable_device_cache = true;
     // Sparse linear-block cleanup is only valid for incremental allocation.
     bool enable_remove_skipped_blocks = true;
+    // Override for incrMalloc's seqLength read; -1 = fall back to complete_token_ids->seqLength().
+    // Lets the state machine feed the publish-time value instead of racing with the async worker.
+    int incr_seq_len_override = -1;
+
+    int incrSeqLen() const {
+        return incr_seq_len_override >= 0 ? incr_seq_len_override : complete_token_ids->seqLength();
+    }
 };
 
 struct MallocResult {

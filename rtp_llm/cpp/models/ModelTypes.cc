@@ -150,10 +150,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     if (is_non_root) {
         auto context_batch_size = (size_t)shape_hints_ptr[GptModelInputIndex::prefixLengths];
 
-        // respect the root-side device bitmap so GPU-resident fields
-        // are allocated on CUDA on non-root ranks too. Without this, the
-        // pack/unpack loop classifies tensors differently per rank and breaks
-        // NCCL broadcast ordering.
+        // Respect the root-side device bitmap so all ranks classify tensors the
+        // same way and preserve NCCL broadcast ordering.
         const uint32_t device_bits = static_cast<uint32_t>(shape_hints_ptr[GptModelInputIndex::tensorDeviceMap]);
         auto           pickAlloc   = [&](GptModelInputDeviceBit bit) {
             return (device_bits & bit) ? rtp_llm::AllocationType::DEVICE : rtp_llm::AllocationType::HOST;

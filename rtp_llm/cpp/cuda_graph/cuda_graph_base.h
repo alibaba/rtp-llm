@@ -50,11 +50,8 @@ public:
                                                   CudaGraphState&      state,
                                                   bool                 skip_forward_event_sync = false) = 0;
 
-    // Focused refresh of the captured graph's kv_cache_kernel_block_id state:
-    // re-mirrors only the per-group device buffers and re-invokes the python
-    // attn impl's prepare_cuda_graph so FlashInfer plan buffers re-fill from
-    // the new page table. Other captured fields (cu_seqlens, sequence_lengths,
-    // ...) are left untouched. Default no-op for backends without graphs.
+    // Refresh only captured kv_cache_kernel_block_id state and FlashInfer plan
+    // buffers after page-table changes. Other captured fields stay untouched.
     virtual void updateKVCacheKernelBlockId(const PyModelInputs& inputs, CudaGraphState& state) {}
 
     py::object py_instance_;

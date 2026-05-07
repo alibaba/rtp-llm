@@ -84,7 +84,7 @@ private:
     std::shared_ptr<KVCacheManager>          cache_manager_;  // For cache_store access
     torch::Tensor                            residual_scale_fp32_;
     torch::Tensor                            residual_scale_;
-    ModelBufferHolder                        buffer_holder_;
+    TensorHolder                             buffer_holder_;
 
     GraphBase* graph_runner_{nullptr};
     py::object py_model_;

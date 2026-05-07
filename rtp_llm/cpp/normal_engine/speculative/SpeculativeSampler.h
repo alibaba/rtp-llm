@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
+#include "rtp_llm/cpp/models/ModelTypes.h"
 
 namespace rtp_llm {
 
@@ -60,8 +61,9 @@ private:
                       SamplerOutput&                      target_sampler_output) const;
 
 protected:
-    torch::Tensor d2t_map_;
-    size_t        propose_step_;
+    torch::Tensor        d2t_map_;
+    size_t               propose_step_;
+    mutable TensorHolder buffer_holder_;
 
     // Reusable buffer for draft_probs vocab-padding when draft/target vocab sizes differ.
     // Grow-only; reused across batchSample calls to avoid per-forward GPU allocation in hot path.

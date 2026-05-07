@@ -8,22 +8,9 @@
 
 namespace rtp_llm {
 
-// Lightweight CPU-only broadcaster used by tpSyncModelInputs to avoid the
-// NCCL-induced cudaDeviceSynchronize stall (see m2.md / mtp_stream_async).
-//
-// Topology: star, root = rank 0.
-//   - rank 0 binds + listens on a Unix Domain Socket and accepts (tp_size-1)
-//     peers.
-//   - rank K > 0 connects to rank 0's socket.
-//
-// Only intra-node TP groups should call initialize(); cross-node TP must keep
-// using the NCCL path (callers detect via local_world_size). When not
-// initialized, callers fall back to the original NCCL broadcast.
-//
-// Thread safety: initialize() is synchronized. broadcast() is NOT — the design
-// assumes only the engine main thread (the same thread that runs
-// tpSyncModelInputs) ever calls it. If multiple threads need to broadcast,
-// add external synchronization or call out per-mode broadcasters.
+// CPU-only UDS broadcaster for intra-node TP input sync.
+// It avoids NCCL cudaDeviceSynchronize for small CPU tensors; cross-node or
+// uninitialized callers fall back to NCCL. broadcast() is main-thread only.
 class CpuTpBroadcaster {
 public:
     static CpuTpBroadcaster& instance();

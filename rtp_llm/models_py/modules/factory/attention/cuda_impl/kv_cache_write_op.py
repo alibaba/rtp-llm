@@ -58,10 +58,8 @@ class KVCacheWriteOp:
                 :, 1, :, :, :
             ]  # [num_pages, num_kv_heads, page_size, head_dim]
 
-            # FlashInfer requires batch_indices/positions size == nnz (= key.size(0)).
-            # narrow() is a no-op when fillParams already shrank to nnz, and is
-            # the slice we need when fill_params_mha_device left the buffer at
-            # its alloc-time size (no host sync to know exact nnz).
+            # FlashInfer requires batch_indices/positions size == nnz.
+            # Device planner leaves buffers oversized, so narrow without a host sync.
             nnz = key.size(0)
             batch_indices = self.params.batch_indice_d.narrow(0, 0, nnz)
             positions = self.params.positions_d.narrow(0, 0, nnz)

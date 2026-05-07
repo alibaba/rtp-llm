@@ -39,10 +39,8 @@ pybind11::object& pyTopPRenormFn() {
     return fn;
 }
 
-// Wrappers around flashinfer.sampling.top_{k,p}_renorm_probs Python API.
-// The Python kernel returns a freshly allocated tensor; we copy back into
-// renorm_probs to preserve the in-place output contract of the original
-// C++ kernel.
+// Python FlashInfer returns a new tensor; copy back into renorm_probs to
+// preserve the original in-place C++ contract.
 void pyTopKRenormProbs(const torch::Tensor& probs, torch::Tensor& renorm_probs, const torch::Tensor& top_k) {
     pybind11::gil_scoped_acquire gil;
     auto                         result = pyTopKRenormFn()(probs, top_k).cast<torch::Tensor>();
@@ -194,6 +192,10 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
     auto top_p_ptr = params.top_p.data_ptr<float>();
 
     std::transform(top_p_ptr, top_p_ptr + batch_size, top_p_ptr, [&](auto t) { return std::abs(t) < 1e-7 ? 1.0 : t; });
+    // top_k<=0 means "no limit" in our config; flashinfer's top_p_sampling_from_probs
+    // path returns success=false for that input here (verified for any top_p incl. 1.0),
+    // so normalize up front and route through top_k_sampling / top_k_top_p_sampling.
+    std::transform(top_k_ptr, top_k_ptr + batch_size, top_k_ptr, [&](auto t) { return t <= 0 ? 1 << 30 : t; });
 
     if (std::all_of(top_k_ptr, top_k_ptr + batch_size, [&](auto t) { return t == 1; })) {
         torch::Tensor selected_tokens = torch::argmax(probs_t, -1, /*keepdim=*/false);
@@ -202,21 +204,13 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
         if (output_all_probs_t.defined()) {
             pyTopKRenormProbs(probs_t, output_all_probs_t, top_k_t);
         }
-    } else if (std::all_of(top_k_ptr, top_k_ptr + batch_size, [&](auto t) { return t <= 0; })) {
-        top_p_sampling_from_probs(
-            probs_t, uniform_samples, samples_t, success_t, top_p_t, 1.0, deterministic, (int64_t)cur_stream);
-        if (output_all_probs_t.defined()) {
-            pyTopPRenormProbs(probs_t, output_all_probs_t, top_p_t);
-        }
     } else if (std::all_of(top_p_ptr, top_p_ptr + batch_size, [&](auto t) { return std::abs(t - 1.0f) < 1e-7; })) {
-        std::transform(top_k_ptr, top_k_ptr + batch_size, top_k_ptr, [&](auto t) { return t <= 0 ? 1 << 30 : t; });
         top_k_sampling_from_probs(
             probs_t, uniform_samples, samples_t, success_t, top_k_t, 0, deterministic, (int64_t)cur_stream);
         if (output_all_probs_t.defined()) {
             pyTopKRenormProbs(probs_t, output_all_probs_t, top_k_t);
         }
     } else {
-        std::transform(top_k_ptr, top_k_ptr + batch_size, top_k_ptr, [&](auto t) { return t <= 0 ? 1 << 30 : t; });
         top_k_top_p_sampling_from_probs(probs_t,
                                         uniform_samples,
                                         samples_t,

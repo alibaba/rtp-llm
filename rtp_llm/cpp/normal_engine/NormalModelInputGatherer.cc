@@ -1,8 +1,13 @@
 #include <algorithm>
+#include <atomic>
+#include <cstdlib>
 #include <cstring>
 #include <sstream>
+#include <string>
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "torch/all.h"
 #include "rtp_llm/cpp/cache/Types.h"
+#include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/normal_engine/NormalModelInputGatherer.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
@@ -10,6 +15,11 @@
 namespace rtp_llm {
 
 namespace {
+
+bool asyncDebugEnabled() {
+    const char* env = std::getenv("RTP_LLM_ASYNC_DEBUG");
+    return env != nullptr && std::string(env) == "1";
+}
 
 struct GatherModelInputContext {
     int          input_vocab_size;
@@ -110,7 +120,8 @@ void copyKvCacheBlocksToModelInput(GptModelInputs&             model_input,
 
 void gatherMultimodalFeaturesForContextBatch(const GenerateStreamPtr&    stream,
                                              GatherModelInputContext&    ctx,
-                                             std::vector<torch::Tensor>& gathered_mm_features) {
+                                             std::vector<torch::Tensor>& gathered_mm_features,
+                                             TensorHolder&               host_holder) {
     if (!ctx.has_multimodal_input) {
         return;
     }
@@ -126,6 +137,7 @@ void gatherMultimodalFeaturesForContextBatch(const GenerateStreamPtr&    stream,
     }
     for (auto& mm_feature : mm_features) {
         if (!mm_feature.is_cuda()) {
+            host_holder.hold_host(mm_feature);
             gathered_mm_features.emplace_back(mm_feature.to(torch::kCUDA, /*non_blocking=*/true));
         } else {
             gathered_mm_features.emplace_back(mm_feature);
@@ -177,7 +189,7 @@ torch::Tensor buildLmOutputIndexesOnCuda(const GptModelInputs& model_input, cons
     return torch::cat(parts, /*dim=*/0).contiguous();
 }
 
-torch::Tensor publishInt32ToCuda(const torch::Tensor& tensor) {
+torch::Tensor publishInt32ToCuda(const torch::Tensor& tensor, TensorHolder& host_holder) {
     if (!tensor.defined()) {
         return tensor;
     }
@@ -188,21 +200,21 @@ torch::Tensor publishInt32ToCuda(const torch::Tensor& tensor) {
     if (tensor.numel() == 0) {
         return torch::empty(tensor.sizes(), cuda_i32);
     }
+    host_holder.hold_host(tensor);
     return tensor.to(cuda_i32, /*non_blocking=*/true);
 }
 
-void publishModelInputCoreTensorsToCuda(GptModelInputs& model_input) {
+void publishModelInputCoreTensorsToCuda(GptModelInputs& model_input, TensorHolder& host_holder) {
     // TODO(async): stream state is still gathered through CPU pointers above.
     // Publish only device tensors at the model boundary.
-    model_input.combo_tokens     = publishInt32ToCuda(model_input.combo_tokens);
-    model_input.input_lengths    = publishInt32ToCuda(model_input.input_lengths);
-    model_input.sequence_lengths = publishInt32ToCuda(model_input.sequence_lengths);
-    model_input.prefix_lengths   = publishInt32ToCuda(model_input.prefix_lengths);
-    // Migrate the 3-D KV kernel block id tensor to CUDA. Filled host-side above via
-    // copyKvCacheBlocksToModelInput; this is the single H2D that replaces the per-group
-    // tensorHoldHostAndToCuda copies that PyWrappedModel::setupKVCacheForAttentionInputs
-    // used to launch.
-    model_input.kv_cache_kernel_block_id = publishInt32ToCuda(model_input.kv_cache_kernel_block_id);
+    RTP_LLM_PROFILE_SCOPE("normal_engine.model_input_gatherer.publish_core_tensors_to_cuda");
+    model_input.combo_tokens     = publishInt32ToCuda(model_input.combo_tokens, host_holder);
+    model_input.input_lengths    = publishInt32ToCuda(model_input.input_lengths, host_holder);
+    model_input.sequence_lengths = publishInt32ToCuda(model_input.sequence_lengths, host_holder);
+    model_input.prefix_lengths   = publishInt32ToCuda(model_input.prefix_lengths, host_holder);
+    // Migrate the 3-D KV kernel block id tensor with one H2D, replacing the
+    // former per-group tensorHoldHostAndToCuda copies in PyWrappedModel.
+    model_input.kv_cache_kernel_block_id = publishInt32ToCuda(model_input.kv_cache_kernel_block_id, host_holder);
 }
 
 }  // anonymous namespace
@@ -286,7 +298,28 @@ void NormalModelInputGatherer::initializeKvCacheMetadata(GptModelInputs& model_i
 
 absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     model_input,
                                                             const StreamGroups& stream_groups) const {
+    RTP_LLM_PROFILE_SCOPE("normal_engine.model_input_gatherer.process_decode_streams");
     auto ctx = createGatherContext(config_, model_input, stream_groups, GatherContextMode::DECODE);
+
+    bool use_normal_device_state = stream_groups.totalContextBatchSize() == 0
+                                   && stream_groups.totalDecodeBatchSize() > 0 && !ctx.need_cal_position_id;
+    if (use_normal_device_state) {
+        for (const auto& stream : stream_groups.decodeStreams()) {
+            const auto& state = stream->getNormalAsyncDeviceState();
+            if (stream->currentBatchSize() != 1 || !state.last_sample_token_gpu.defined()
+                || !state.last_sample_token_gpu.is_cuda() || !state.next_seq_len_gpu.defined()
+                || !state.next_seq_len_gpu.is_cuda()) {
+                use_normal_device_state = false;
+                break;
+            }
+        }
+    }
+    std::vector<torch::Tensor> normal_combo_tokens_gpu;
+    std::vector<torch::Tensor> normal_sequence_lengths_gpu;
+    if (use_normal_device_state) {
+        normal_combo_tokens_gpu.reserve(stream_groups.totalDecodeBatchSize());
+        normal_sequence_lengths_gpu.reserve(stream_groups.totalDecodeBatchSize());
+    }
 
     for (const auto& stream : stream_groups.decodeStreams()) {
         model_input.need_all_logits = model_input.need_all_logits || stream->calculateLoss();
@@ -297,18 +330,39 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
 
         for (auto i = 0; i < current_batch_size; ++i) {
             model_input.trace_ids.push_back(stream->traceId());
-            auto currentTokens = stream->currentExecuteTokens(i);
-            if (currentTokens[0] >= ctx.input_vocab_size) {
-                std::ostringstream error_msg;
-                error_msg << "stream [" << stream->streamId() << "] token_id " << currentTokens[0]
-                          << " exceed vocab_size " << ctx.input_vocab_size;
-                return absl::InvalidArgumentError(error_msg.str());
-            }
-            ctx.merged_tokens[ctx.batch_idx]    = currentTokens[0];
-            ctx.input_lengths[ctx.batch_idx]    = stream->inputLength();
-            ctx.sequence_lengths[ctx.batch_idx] = stream->seqLength() - 1;
-            if (ctx.need_cal_position_id) {
-                stream->generateNextPositionId(ctx.combo_position_ids + ctx.batch_idx * config_.position_id_len_factor);
+            if (use_normal_device_state) {
+                const auto&             state = stream->getNormalAsyncDeviceState();
+                static std::atomic<int> debug_log_budget{200};
+                if (asyncDebugEnabled() && stream->hasPendingAsyncBookkeeping()
+                    && debug_log_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
+                    RTP_LLM_LOG_WARNING("[async-debug] gather decode with pending bookkeeping: stream=%ld pd_sep=%d "
+                                        "status=%s cpu_seq=%d state_next_real=%d cur_blocks=%zu batch_idx=%d",
+                                        stream->streamId(),
+                                        stream->queryPdSep(),
+                                        StreamStateToString(stream->getStatus()).c_str(),
+                                        stream->seqLength(),
+                                        state.next_real_seq_len,
+                                        stream->curBlocksNum(),
+                                        ctx.batch_idx);
+                }
+                normal_combo_tokens_gpu.push_back(state.last_sample_token_gpu.reshape({1}));
+                normal_sequence_lengths_gpu.push_back((state.next_seq_len_gpu - 1).to(torch::kInt32).reshape({1}));
+                ctx.input_lengths[ctx.batch_idx] = stream->inputLength();
+            } else {
+                auto currentTokens = stream->currentExecuteTokens(i);
+                if (currentTokens[0] >= ctx.input_vocab_size) {
+                    std::ostringstream error_msg;
+                    error_msg << "stream [" << stream->streamId() << "] token_id " << currentTokens[0]
+                              << " exceed vocab_size " << ctx.input_vocab_size;
+                    return absl::InvalidArgumentError(error_msg.str());
+                }
+                ctx.merged_tokens[ctx.batch_idx]    = currentTokens[0];
+                ctx.input_lengths[ctx.batch_idx]    = stream->inputLength();
+                ctx.sequence_lengths[ctx.batch_idx] = stream->seqLength() - 1;
+                if (ctx.need_cal_position_id) {
+                    stream->generateNextPositionId(ctx.combo_position_ids
+                                                   + ctx.batch_idx * config_.position_id_len_factor);
+                }
             }
             copyKvCacheBlocksToModelInput(
                 model_input, kv_cache, i, ctx.batch_idx, ctx.max_blocks_num, config_.kernel_blocks_per_kv_block);
@@ -317,11 +371,18 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
         addCacheUpdateCopy(ctx, stream->streamCacheResource().getKVBlockUpdateMapping());
         stream->step();
     }
+
+    if (use_normal_device_state) {
+        model_input.combo_tokens     = torch::cat(normal_combo_tokens_gpu, 0).to(torch::kInt32);
+        model_input.sequence_lengths = torch::cat(normal_sequence_lengths_gpu, 0).to(torch::kInt32);
+    }
     return absl::OkStatus();
 }
 
 absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&     model_input,
-                                                             const StreamGroups& stream_groups) const {
+                                                             const StreamGroups& stream_groups,
+                                                             TensorHolder&       host_holder) const {
+    RTP_LLM_PROFILE_SCOPE("normal_engine.model_input_gatherer.process_context_streams");
     std::vector<torch::Tensor> gathered_mm_features;
     const auto                 context_batch_size = static_cast<int64_t>(stream_groups.totalContextBatchSize());
     // TODO(async): prefixLength() is still stream CPU state. Stage it explicitly
@@ -362,7 +423,7 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
 
             ctx.input_lengths[ctx.batch_idx]           = input_tokens.size();
             ctx.prefix_lengths_host[prefill_batch_idx] = stream->prefixLength();
-            gatherMultimodalFeaturesForContextBatch(stream, ctx, gathered_mm_features);
+            gatherMultimodalFeaturesForContextBatch(stream, ctx, gathered_mm_features, host_holder);
 
             if (ctx.need_cal_position_id) {
                 auto context_pos_ids = stream->generateContextPositionIds();
@@ -397,12 +458,12 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
     if (config_.is_multimodal && !gathered_mm_features.empty()) {
         model_input.multimodal_features = std::move(gathered_mm_features);
     }
-    model_input.prefix_lengths = publishInt32ToCuda(prefix_lengths_host);
+    model_input.prefix_lengths = publishInt32ToCuda(prefix_lengths_host, host_holder);
     return absl::OkStatus();
 }
 
-absl::StatusOr<torch::Tensor>
-NormalModelInputGatherer::gatherKvCacheKernelBlockId(const StreamGroups& stream_groups) const {
+absl::StatusOr<torch::Tensor> NormalModelInputGatherer::gatherKvCacheKernelBlockId(const StreamGroups& stream_groups,
+                                                                                   TensorHolder& host_holder) const {
     const size_t total_batch_size = stream_groups.totalModelBatchSize();
     const size_t max_blocks_num   = stream_groups.curBlocksNum();
     if (max_blocks_num == 0 || total_batch_size == 0) {
@@ -441,10 +502,11 @@ NormalModelInputGatherer::gatherKvCacheKernelBlockId(const StreamGroups& stream_
         fill_one_stream(stream, batch_idx);
     }
 
-    return publishInt32ToCuda(host_tensor);
+    return publishInt32ToCuda(host_tensor, host_holder);
 }
 
-absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGroups& stream_groups) const {
+absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGroups& stream_groups,
+                                                                TensorHolder&       host_holder) const {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     RTP_LLM_LOG_DEBUG("context_streams size = %d, decode_streams size = %d",
                       stream_groups.contextStreams().size(),
@@ -452,8 +514,8 @@ absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGrou
     auto model_input = allocateModelInputBuffers(stream_groups);
     initializeKvCacheMetadata(model_input);
     RETURN_IF_STATUS_ERROR(processDecodeStreams(model_input, stream_groups));
-    RETURN_IF_STATUS_ERROR(processContextStreams(model_input, stream_groups));
-    publishModelInputCoreTensorsToCuda(model_input);
+    RETURN_IF_STATUS_ERROR(processContextStreams(model_input, stream_groups, host_holder));
+    publishModelInputCoreTensorsToCuda(model_input, host_holder);
     model_input.lm_output_indexes = buildLmOutputIndexesOnCuda(model_input, stream_groups);
     return model_input;
 }
