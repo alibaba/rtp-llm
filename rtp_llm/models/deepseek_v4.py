@@ -188,20 +188,20 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
         norm_name = W.v4_indexer_compressor_norm if inner else W.v4_compressor_norm
         ape_name = W.v4_indexer_compressor_ape if inner else W.v4_compressor_ape
         return [
-            # wkv / wgate are consumed by the compressor's fp32 ``F.linear``
-            # math; load straight to fp32 here so the bind site doesn't have
-            # to cast (one less bf16 -> fp32 transient at module init).
+            # wkv / wgate are BF16 in V4 checkpoints and consumed by BF16
+            # tensor-core GEMMs in the compressor. Keep them BF16 at load time
+            # so module init does not do BF16 -> FP32 -> BF16 churn.
             AtomicWeight(
                 wkv_name,
                 [CkptWeightInfo(f"layers.{{i}}.{ckpt_prefix}.wkv.weight", identity)],
                 identity,
-                data_type=torch.float32,
+                data_type=torch.bfloat16,
             ),
             AtomicWeight(
                 wgate_name,
                 [CkptWeightInfo(f"layers.{{i}}.{ckpt_prefix}.wgate.weight", identity)],
                 identity,
-                data_type=torch.float32,
+                data_type=torch.bfloat16,
             ),
             AtomicWeight(
                 norm_name,
@@ -442,10 +442,10 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
                 W.lm_head,
                 [CkptWeightInfo("head.weight", identity)],
                 identity,
-                # V4 ckpt stores head.weight in bf16; without explicit
-                # data_type the framework loader casts via load_config
-                # .compute_dtype (fp32 in the V4 config) which doubles RAM.
-                data_type=torch.bfloat16,
+                # V4 ckpt stores head.weight in BF16, but the DSV4 Python
+                # path intentionally applies lm_head in FP32. Convert at load
+                # time so V4Transformer init does not allocate a second copy.
+                data_type=torch.float32,
             ),
             AtomicWeight(
                 W.v4_hc_head_base,
