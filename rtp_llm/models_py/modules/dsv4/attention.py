@@ -34,12 +34,6 @@ from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.models_py.modules.dsv4._fused_inv_rope_fp8_quant_triton import (
     fused_inv_rope_fp8_quant,
 )
-from rtp_llm.models_py.modules.dsv4._metadata_triton import (
-    build_cp_compress_topk_idxs,
-    build_cp_window_topk_idxs,
-    build_swa_pool_slot_mapping,
-)
-from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 
 # Audit §7.4 P0 (row 1) + §7.3.4: fused RMSNorm + partial RoPE, single
 # Triton launch.  Covers every Q/KV decode + prefill site.  Standalone
@@ -47,7 +41,25 @@ from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 # ``rtp_llm_ops.rmsnorm`` (matches vLLM — bf16 weight).
 # Validated by test_fused_rmsnorm_rope.py (bf16 <=1-ULP + 1.25-1.75x).
 from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_rope_triton import fused_rmsnorm_rope
+from rtp_llm.models_py.modules.dsv4._metadata_triton import (
+    build_cp_compress_topk_idxs,
+    build_cp_window_topk_idxs,
+    build_swa_pool_slot_mapping,
+)
+from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4.compressor import Compressor
+from rtp_llm.models_py.modules.dsv4.compressor_vllm import CompressorVLLM
+
+
+def _use_vllm_compressor() -> bool:
+    """Runtime switch for the vLLM-style per-token state-pool compressor
+    (BF16 KV pool). Set ``DSV4_COMPRESSOR_VLLM=1`` to opt in. Default off
+    so existing behavior is bit-equal."""
+    import os
+
+    return os.environ.get("DSV4_COMPRESSOR_VLLM", "0") != "0"
+
+
 from rtp_llm.models_py.modules.dsv4.cp import (
     CPContext,
     cp_all_gather_full_async,
@@ -55,10 +67,7 @@ from rtp_llm.models_py.modules.dsv4.cp import (
     cp_wait_gather_full,
 )
 from rtp_llm.models_py.modules.dsv4.indexer import Indexer
-from rtp_llm.models_py.modules.dsv4.qlinear import (
-    QuantizedLinear,
-    _fp8_dequant_to_fp32,
-)
+from rtp_llm.models_py.modules.dsv4.qlinear import QuantizedLinear, _fp8_dequant_to_fp32
 from rtp_llm.models_py.modules.dsv4.rope import (
     apply_rotary_emb,
     apply_rotary_emb_batched,
@@ -183,7 +192,10 @@ def _v4_fp8_linear(w: torch.Tensor, s: torch.Tensor):
     # factory plumbing is unchanged.
     local = {"_w": w, "_s": s}
     return LinearFactory.create_linear_from_weights(
-        local, "_w", "_s", quant_config=_V4_FP8_BLOCK_CFG,
+        local,
+        "_w",
+        "_s",
+        quant_config=_V4_FP8_BLOCK_CFG,
     )
 
 
@@ -197,8 +209,6 @@ def _v4_fp8_linear_from_dict(weights: dict, weight_key: str, scale_key: str):
         s = _repack_v4_fp8_scale_to_int32(s)
         weights[scale_key] = s
     return _v4_fp8_linear(w, s)
-
-
 
 
 def _get_window_topk_idxs(
@@ -591,9 +601,7 @@ class Attention(nn.Module):
             if col_slice is not None:
                 w = w[:, col_slice]
                 if scale_is_packed_int32:
-                    assert (
-                        col_slice.start % 512 == 0 and col_slice.stop % 512 == 0
-                    ), (
+                    assert col_slice.start % 512 == 0 and col_slice.stop % 512 == 0, (
                         f"col_slice {col_slice} not aligned to 512 for "
                         f"packed int32 scale; framework path requires "
                         f"K-slices on 512-byte boundaries"
@@ -673,7 +681,8 @@ class Attention(nn.Module):
                 "wgate": layer_weights[W.v4_compressor_wgate],
                 "norm": layer_weights[W.v4_compressor_norm],
             }
-            self.compressor = Compressor(
+            _CompressorCls = CompressorVLLM if _use_vllm_compressor() else Compressor
+            self.compressor = _CompressorCls(
                 dim=dim,
                 head_dim=head_dim,
                 rope_head_dim=rope_head_dim,
@@ -1078,7 +1087,9 @@ class Attention(nn.Module):
                 if seq_t.numel() == 1 and bsz > 1:
                     seq_t = seq_t.expand(bsz)
             else:
-                seq_t = torch.full((bsz,), int(row_seqlens), device=device, dtype=torch.long)
+                seq_t = torch.full(
+                    (bsz,), int(row_seqlens), device=device, dtype=torch.long
+                )
 
             j = torch.arange(max_n_write, device=device, dtype=torch.long)
             row_valid = j.unsqueeze(0) < seq_t.unsqueeze(1)
@@ -1173,9 +1184,7 @@ class Attention(nn.Module):
             valid, block_id * eb + in_block, torch.zeros_like(block_id)
         )
 
-        from rtp_llm.models_py.modules.dsv4._pool_triton import (
-            masked_gather_from_pool,
-        )
+        from rtp_llm.models_py.modules.dsv4._pool_triton import masked_gather_from_pool
 
         return masked_gather_from_pool(
             pool_view,
@@ -1260,9 +1269,7 @@ class Attention(nn.Module):
             valid, block_id * eb + in_block.unsqueeze(0), torch.zeros_like(block_id)
         )
 
-        from rtp_llm.models_py.modules.dsv4._pool_triton import (
-            masked_gather_from_pool,
-        )
+        from rtp_llm.models_py.modules.dsv4._pool_triton import masked_gather_from_pool
 
         out = masked_gather_from_pool(
             pool_view,
@@ -1405,9 +1412,7 @@ class Attention(nn.Module):
             block_id * eb + in_block.unsqueeze(0),
             torch.zeros_like(block_id),
         )  # [B, T]
-        from rtp_llm.models_py.modules.dsv4._pool_triton import (
-            masked_gather_from_pool,
-        )
+        from rtp_llm.models_py.modules.dsv4._pool_triton import masked_gather_from_pool
 
         return masked_gather_from_pool(
             pool_view,
@@ -2227,7 +2232,9 @@ class Attention(nn.Module):
                     win, seqlen, sp_t, row_seqlens, device
                 )
             else:
-                sp = int(start_pos) if isinstance(start_pos, torch.Tensor) else start_pos
+                sp = (
+                    int(start_pos) if isinstance(start_pos, torch.Tensor) else start_pos
+                )
                 topk_idxs = _get_window_topk_idxs(win, bsz, seqlen, sp, device)
         if self.compress_ratio:
             # Fresh prefill attends over [current sliding KV | current compressed KV].
@@ -2280,7 +2287,9 @@ class Attention(nn.Module):
                         valid = entry_range.unsqueeze(0) < n_entries.unsqueeze(
                             1
                         )  # [B, max_entries]
-                        c_idxs = torch.where(valid, entry_range.unsqueeze(0) + offset, -1)
+                        c_idxs = torch.where(
+                            valid, entry_range.unsqueeze(0) + offset, -1
+                        )
                         compress_idxs = c_idxs.unsqueeze(1)  # [B, 1, max_entries]
                     else:
                         compress_idxs = torch.full(
@@ -2301,7 +2310,9 @@ class Attention(nn.Module):
                     )
                 else:
                     sp_int = (
-                        int(start_pos) if isinstance(start_pos, torch.Tensor) else start_pos
+                        int(start_pos)
+                        if isinstance(start_pos, torch.Tensor)
+                        else start_pos
                     )
                     compress_idxs = _get_compress_topk_idxs(
                         ratio, bsz, seqlen, sp_int, offset, device
@@ -2394,12 +2405,14 @@ class Attention(nn.Module):
             prefill_swa_dense_for_attn = None
             if any_cont:
                 with record_function_range("dsv4.attn.kv_gather_dense_or_paged"):
-                    prefill_swa_dense_for_attn = self._prefill_read_swa_dense_abs_from_pool(
-                        bsz,
-                        pool_read_start,
-                        row_seqlens_for_pool,
-                        prefill_swa_dense_len,
-                        current_kv_full=kv_full,
+                    prefill_swa_dense_for_attn = (
+                        self._prefill_read_swa_dense_abs_from_pool(
+                            bsz,
+                            pool_read_start,
+                            row_seqlens_for_pool,
+                            prefill_swa_dense_len,
+                            current_kv_full=kv_full,
+                        )
                     )
             # Phase E5b: direct SWA pool write from kv_full (no register_buffer
             # intermediary).  The framework SWA pool is absolute-positioned;
@@ -2465,7 +2478,9 @@ class Attention(nn.Module):
                         # through pool read — sp==0 rows' KV was just
                         # written to the pool above, so round-trip is
                         # byte-equal.
-                        with record_function_range("dsv4.attn.kv_gather_dense_or_paged"):
+                        with record_function_range(
+                            "dsv4.attn.kv_gather_dense_or_paged"
+                        ):
                             kv_cat = self._gather_kv_cache_dense_from_pool(
                                 bsz,
                                 pool_read_start,
@@ -2489,7 +2504,9 @@ class Attention(nn.Module):
                     if not any_cont:
                         kv_cat = kv_full
                     else:
-                        with record_function_range("dsv4.attn.kv_gather_dense_or_paged"):
+                        with record_function_range(
+                            "dsv4.attn.kv_gather_dense_or_paged"
+                        ):
                             kv_cat = self._gather_kv_cache_dense_from_pool(
                                 bsz,
                                 pool_read_start,
