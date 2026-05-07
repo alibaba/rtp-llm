@@ -26,6 +26,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from rtp_llm.models_py.modules.dsv4.quant_layouts import (
+    prepare_fp4_weight_scale_for_deepgemm,
+)
+
 
 FP8_BLOCK = 128
 FP4_BLOCK = 32
@@ -108,6 +112,26 @@ class QuantizedLinear(nn.Module):
         # on top of the tensor that already lives in the loader's hands.
         self.weight = None
         self.scale = None
+        self.scale_gemm = None
+
+    def bind_fp4_weight(
+        self,
+        weight: torch.Tensor,
+        scale: torch.Tensor,
+        scale_gemm: Optional[torch.Tensor] = None,
+    ) -> None:
+        """Bind FP4 weight plus a prepacked DeepGEMM scale."""
+        self.weight = weight
+        self.scale = scale
+        self.scale_gemm = scale_gemm
+        if self.scale_gemm is None:
+            self.scale_gemm = prepare_fp4_weight_scale_for_deepgemm(
+                scale, self.out_features, self.in_features
+            )
+        if self.scale_gemm.dtype != torch.int32:
+            raise TypeError(
+                f"expected packed FP4 scale int32, got {self.scale_gemm.dtype}"
+            )
 
     def dequant_weight(self, out_dtype: torch.dtype = torch.bfloat16) -> torch.Tensor:
         """Return dequantized [out, in] weight in `out_dtype`.
@@ -152,9 +176,13 @@ class QuantizedLinear(nn.Module):
             scale_ue8m0=True,
         )
         out = torch.empty(M, self.out_features, dtype=torch.bfloat16, device=x.device)
+        if self.scale_gemm is None or self.scale_gemm.dtype != torch.int32:
+            raise RuntimeError(
+                "DSV4 FP4 QuantizedLinear requires init-time packed int32 scale"
+            )
         fp8_fp4_gemm_nt(
             (x_fp8, x_scale),
-            (self.weight, self.scale.float()),
+            (self.weight, self.scale_gemm),
             out,
             recipe_a=(1, FP8_BLOCK), recipe_b=(1, FP4_BLOCK),
         )

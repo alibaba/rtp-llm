@@ -35,7 +35,7 @@ from rtp_llm.models_py.utils.math import align, ceil_div
 
 from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
 from .._silu_mul_fp8_quant_triton import silu_mul_fp8_quant_packed
-from ..quant_layouts import FP4_BLOCK, FP8_BLOCK
+from ...quant_layouts import FP4_BLOCK, FP8_BLOCK, prepare_fp4_weight_scale_for_deepgemm
 
 
 # ep_scatter requires m_indices.shape[0] % BLOCK_E == 0 (BLOCK_E=128); also
@@ -115,13 +115,13 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         self._w13 = torch.empty(
             (E, 2 * inter, D // 2), dtype=torch.int8, device=device
         )
-        self._s13 = torch.empty(
+        s13_raw = torch.empty(
             (E, 2 * inter, D // FP4_BLOCK),
             dtype=torch.float8_e8m0fnu,
             device=device,
         )
         self._w2 = torch.empty((E, D, inter // 2), dtype=torch.int8, device=device)
-        self._s2 = torch.empty(
+        s2_raw = torch.empty(
             (E, D, inter // FP4_BLOCK),
             dtype=torch.float8_e8m0fnu,
             device=device,
@@ -129,13 +129,19 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         # Bulk copy from stacked → repacked layout (one slice per dim,
         # no per-expert iteration).
         self._w13[:, :inter].copy_(stacked_w1_w)
-        self._s13[:, :inter].copy_(stacked_w1_s)
+        s13_raw[:, :inter].copy_(stacked_w1_s)
         self._w13[:, inter:].copy_(stacked_w3_w)
-        self._s13[:, inter:].copy_(stacked_w3_s)
+        s13_raw[:, inter:].copy_(stacked_w3_s)
         self._w2.copy_(stacked_w2_w)
-        self._s2.copy_(stacked_w2_s)
+        s2_raw.copy_(stacked_w2_s)
         del stacked_w1_w, stacked_w1_s, stacked_w2_w, stacked_w2_s
         del stacked_w3_w, stacked_w3_s
+
+        self._s13 = prepare_fp4_weight_scale_for_deepgemm(
+            s13_raw, 2 * inter, D, E
+        )
+        self._s2 = prepare_fp4_weight_scale_for_deepgemm(s2_raw, D, inter, E)
+        del s13_raw, s2_raw
 
         # Return loader's freed FP4 blocks to CUDA so the KV-cache
         # planner sees the real residual HBM rather than what's
@@ -243,19 +249,18 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         del a_fp8, a_scale
 
         # GEMM 1: gate+up
-        s13_fp32 = self._s13.float()
         gate_up = torch.empty(
             all_tokens, 2 * inter, device=device, dtype=torch.bfloat16
         )
         m_grouped_fp8_fp4_gemm_nt_contiguous(
             (scatter_out, scatter_out_scale),
-            (self._w13, s13_fp32),
+            (self._w13, self._s13),
             gate_up,
             m_indices,
             recipe_a=(1, FP8_BLOCK),
             recipe_b=(1, FP4_BLOCK),
         )
-        del scatter_out, scatter_out_scale, s13_fp32
+        del scatter_out, scatter_out_scale
 
         # (3) Fused SiLU+clamp+mul + per-token-group FP8 quant + UE8M0 packed scale.
         # Router weight is NOT applied here — the ep_gather below folds it
@@ -268,19 +273,18 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         del gate_up
 
         # GEMM 2: down
-        s2_fp32 = self._s2.float()
         down_out = torch.empty(
             all_tokens, D, device=device, dtype=torch.bfloat16
         )
         m_grouped_fp8_fp4_gemm_nt_contiguous(
             (h_fp8, h_scale),
-            (self._w2, s2_fp32),
+            (self._w2, self._s2),
             down_out,
             m_indices,
             recipe_a=(1, FP8_BLOCK),
             recipe_b=(1, FP4_BLOCK),
         )
-        del h_fp8, h_scale, s2_fp32
+        del h_fp8, h_scale
 
         # (4) Triton ep_gather: per output token accumulates topk source rows
         # × router weight in fp32 register, single BF16 store. No
@@ -289,4 +293,3 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         gather_out = torch.empty((N, D), dtype=torch.bfloat16, device=device)
         ep_gather(down_out, adjusted_topk_ids, weights, output_index, gather_out)
         return gather_out.float()
-

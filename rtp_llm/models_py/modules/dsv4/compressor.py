@@ -89,16 +89,16 @@ class Compressor(nn.Module):
         coff = 1 + self.overlap
 
         # ape stays FP32 (descriptor data_type=float32, used additively).
-        # wkv/wgate cast BF16 at load so the forward matmul dispatches to
-        # BF16 tensor cores (~2.5 PFLOPS on B200) instead of the FP32 SIMT
-        # SGEMM path (~80 TFLOPS) that previously dominated V4 prefill
-        # timelines.  FP32 accumulator preserved via cuBLAS's bf16xbf16
-        # → fp32 path; forward sites cast result back to fp32 to match
-        # the downstream pool dtype.  Weight on disk stays FP32; this is
-        # a runtime-side dtype conversion.
+        # wkv/wgate are BF16 in the checkpoint and loaded as BF16, so forward
+        # dispatches to BF16 tensor cores without an init-time dtype round-trip.
         self.ape = compressor_weights["ape"]
-        self.wkv = compressor_weights["wkv"].to(torch.bfloat16)
-        self.wgate = compressor_weights["wgate"].to(torch.bfloat16)
+        self.wkv = compressor_weights["wkv"]
+        self.wgate = compressor_weights["wgate"]
+        if self.wkv.dtype != torch.bfloat16 or self.wgate.dtype != torch.bfloat16:
+            raise TypeError(
+                "DSV4 compressor wkv/wgate must be loaded as BF16; got "
+                f"wkv={self.wkv.dtype}, wgate={self.wgate.dtype}"
+            )
         self.norm = _CompressorNorm(head_dim, weight=compressor_weights["norm"])
         self.norm_eps = norm_eps
 
