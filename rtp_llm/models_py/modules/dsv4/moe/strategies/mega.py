@@ -17,7 +17,11 @@ from typing import Dict, Optional
 import torch
 
 from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
-from ..mega_buf import _get_or_create_mega_buf, _mega_moe_enabled
+from ..mega_buf import (
+    _get_or_create_mega_buf,
+    _get_or_create_mega_output,
+    _mega_moe_enabled,
+)
 from ..input_packer import get_mega_moe_input_packer
 from ..quant_layouts import FP4_BLOCK
 from ..shared_expert import strict_fused_moe_enabled
@@ -147,13 +151,13 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
             use_fp8_dispatch=True,
             activation="swiglu",
         )
-        # Pre-allocate static output buffer — avoids torch.empty((T, D)) inside the
-        # forward, which reallocates on every step and blocks CUDA graph capture.
-        # Sized to max_tokens_per_rank; forward slices [:T] for the live batch.
-        self._mega_y = torch.empty(
-            (max(cfg.max_tokens_per_rank, 1), D),
-            dtype=torch.bfloat16,
-            device=device,
+        # Single-layer staging output. All MoE layers execute sequentially, so one
+        # process-local buffer is enough and avoids O(layers) persistent memory.
+        self._mega_y = _get_or_create_mega_output(
+            max(cfg.max_tokens_per_rank, 1),
+            D,
+            torch.bfloat16,
+            device,
         )
         self._input_packer = get_mega_moe_input_packer()
 

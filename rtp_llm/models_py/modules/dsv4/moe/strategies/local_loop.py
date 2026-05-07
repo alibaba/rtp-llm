@@ -63,6 +63,24 @@ def _topk_dispatch_max_n() -> int:
     return int(os.environ.get("DSV4_LOCALLOOP_TOPK_MAX_N", "32"))
 
 
+_LOCAL_Y_CACHE: dict[tuple, torch.Tensor] = {}
+
+
+def _get_or_create_local_y(
+    capacity: int,
+    dim: int,
+    dtype: torch.dtype,
+    device: torch.device,
+) -> torch.Tensor:
+    key = (device, dim, dtype)
+    cached = _LOCAL_Y_CACHE.get(key)
+    if cached is not None and cached.size(0) >= capacity:
+        return cached
+    cached = torch.empty((max(capacity, 1), dim), dtype=dtype, device=device)
+    _LOCAL_Y_CACHE[key] = cached
+    return cached
+
+
 @register_strategy
 class LocalLoopStrategy(RoutedExpertsStrategy):
     name = "local_loop"
@@ -174,14 +192,13 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
         run local compute on dispatched recv tokens with custom local range.
         """
         T = x.size(0)
+        self._local_y_buf = _get_or_create_local_y(
+            max(T, self.cfg.max_tokens_per_rank),
+            self.cfg.dim,
+            torch.float32,
+            x.device,
+        )
         buf = self._local_y_buf
-        if buf is None or buf.size(0) < T or buf.device != x.device:
-            self._local_y_buf = torch.empty(
-                (max(T, self.cfg.max_tokens_per_rank), self.cfg.dim),
-                dtype=torch.float32,
-                device=x.device,
-            )
-            buf = self._local_y_buf
         y = buf[:T]
         y.zero_()
         if torch.cuda.is_current_stream_capturing():
