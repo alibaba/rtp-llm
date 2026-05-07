@@ -383,6 +383,58 @@ class CaseRunner(object):
                 )
             )
 
+    def _run_concurrent_stress(
+        self,
+        server_manager: MagaServerManager,
+        task_info: TaskInfo,
+        task_states: TaskStates,
+    ) -> None:
+        """Run the concurrent stress test if CONCURRENT_STRESS_ITERS > 0.
+
+        Used to reproduce CUDA-graph-related correctness bugs that only show
+        up under concurrent load (e.g. SP target verify / draft prefill).
+        """
+        try:
+            from smoke.concurrent_stress import maybe_run_from_env
+        except Exception as e:
+            logging.warning("[CONCURRENT_STRESS] import failed: %s", e)
+            return
+        # BUILD `envs=[...]` are forwarded only to the server subprocess via
+        # MagaServerManager; they never land in the test runner's os.environ.
+        # maybe_run_from_env reads CONCURRENT_STRESS_* from os.environ, so we
+        # mirror the stress-related vars here before invoking it.
+        stress_prefixes = ("CONCURRENT_STRESS_",)
+        candidate_env_lists: List[List[str]] = []
+        if isinstance(self.env_args, dict):
+            # PD-separated: decode-side envs drive stress (requests hit decode).
+            for role_key in ("decode", "main", "prefill"):
+                if role_key in self.env_args:
+                    candidate_env_lists.append(self.env_args[role_key])
+        elif isinstance(self.env_args, list):
+            candidate_env_lists.append(self.env_args)
+        for env_list in candidate_env_lists:
+            for kv in env_list:
+                if "=" not in kv:
+                    continue
+                k, v = kv.split("=", 1)
+                if k.startswith(stress_prefixes) and k not in os.environ:
+                    os.environ[k] = v
+                    logging.info("[CONCURRENT_STRESS] env propagated: %s=%s", k, v)
+        passed, summary = maybe_run_from_env(server_manager, task_info)
+        if passed is None:
+            return
+        fail_test = os.environ.get("CONCURRENT_STRESS_FAIL_TEST", "1") == "1"
+        if not passed and fail_test:
+            task_states.ret = False
+            task_states.query_status.append(
+                (
+                    QueryStatus.OTHERS,
+                    "Concurrent stress detected non-determinism: "
+                    + json.dumps(summary or {}),
+                    Tracer(),
+                )
+            )
+
     def _curl_server_impl(
         self, server_manager: MagaServerManager, task_info: TaskInfo
     ) -> TaskStates:
@@ -430,6 +482,7 @@ class CaseRunner(object):
                 logging.info("manually stop remote_kvcm_server")
 
         self._run_stability_repeat(server_manager, task_info, task_states)
+        self._run_concurrent_stress(server_manager, task_info, task_states)
 
         if (
             os.environ.get("SAVE_RESPONSE", "False") == "True"
