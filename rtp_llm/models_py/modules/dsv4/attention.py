@@ -791,6 +791,13 @@ class Attention(nn.Module):
         # automatic `.to(device)` semantics needed.
         self.freqs_cis = freqs_cis
 
+        # Iter2: persistent FP8 sparse decode op. Carries the FlashMLA
+        # ``sched_meta`` cache (per single/dual-pool flag) so the planner
+        # only runs once per layer-type per process — vs the iter1' default
+        # of one planner setup per layer per step. Built lazily on the
+        # first FP8 decode call so BF16-KV runs don't pay the import cost.
+        self._fp8_decode_op: Optional[Any] = None
+
         # CP context bound per-forward by V4Transformer.  None = no CP.
         self._cp_ctx: Optional[CPContext] = None
 
@@ -1639,6 +1646,27 @@ class Attention(nn.Module):
             if self.indexer.compressor is not None:
                 self.indexer.compressor.freqs_cis = None
 
+    def _get_fp8_decode_op(self):
+        """Lazy-build the persistent ``SparseAttnV4DecodeFp8Op`` so its
+        ``sched_meta`` cache survives across decode steps.
+
+        Iter1' instantiated the op per call inside ``_forward_decode_body``
+        which threw away the FlashMLA planner state on every call (60 layers
+        × per step = 60 planner setups). Caching here cuts that to one setup
+        per layer-type per process.
+        """
+        if self._fp8_decode_op is None:
+            from rtp_llm.models_py.modules.dsv4.decode.fp8_sparse_attn_decode_op import (
+                SparseAttnV4DecodeFp8Op,
+            )
+
+            self._fp8_decode_op = SparseAttnV4DecodeFp8Op(
+                n_heads=self.n_heads,
+                head_dim=self.head_dim,
+                softmax_scale=self.softmax_scale,
+            )
+        return self._fp8_decode_op
+
     def _rmsnorm_weighted(self, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
         # Framework C++ ``rtp_llm_ops.rmsnorm`` (single launch, bf16 weight).
         # Requires 2D input — reshape/restore keeps this a drop-in.
@@ -1991,11 +2019,7 @@ class Attention(nn.Module):
                     SparseAttnV4DecodeFp8Op,
                 )
 
-                fp8_sparse_op = SparseAttnV4DecodeFp8Op(
-                    n_heads=self.n_heads,
-                    head_dim=self.head_dim,
-                    softmax_scale=self.softmax_scale,
-                )
+                fp8_sparse_op = self._get_fp8_decode_op()
                 indices_fp8 = (
                     attn_metadata.swa_abs_idx[:bsz].to(torch.int32).contiguous()
                 )
@@ -2039,21 +2063,32 @@ class Attention(nn.Module):
                     f"q_len=1 only (got {q_len})"
                 )
                 if swa_view_3d_fp8 is not None and cmp_view_3d_fp8 is not None:
-                    # FP8 dual-pool: per-slot dequant via existing kernel
-                    # then concat → bf16 packed buffer for sparse_attn.
-                    from rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton import (
-                        dequantize_slots_to_bf16,
+                    # FP8 dual-pool: single FlashMLA call reads both FP8 pools
+                    # via ``extra_k_cache`` + ``extra_indices_in_kvcache`` and
+                    # merges softmax in-kernel. Mirrors vLLM
+                    # ``deepseek_v4_attention.py:849-865``. Eliminates the
+                    # legacy "dequant both pools → BF16 cat → TileLang
+                    # sparse_attn" path.
+                    fp8_dual_op = self._get_fp8_decode_op()
+                    swa_topk_3d = (
+                        swa_global.view(bsz, q_len, win).to(torch.int32).contiguous()
                     )
-
-                    swa_global_flat = swa_global.reshape(-1)
-                    cmp_global_flat = cmp_global.reshape(-1)
-                    swa_bf16 = dequantize_slots_to_bf16(
-                        swa_view_3d_fp8, swa_global_flat
-                    ).view(bsz, win, self.head_dim)
-                    cmp_bf16 = dequantize_slots_to_bf16(
-                        cmp_view_3d_fp8, cmp_global_flat
-                    ).view(bsz, K_cmp, self.head_dim)
-                    kv_packed = torch.cat([swa_bf16, cmp_bf16], dim=1)
+                    cmp_topk_3d = (
+                        cmp_global.view(bsz, q_len, K_cmp).to(torch.int32).contiguous()
+                    )
+                    cache_seqlens_fp8 = (attn_metadata.start_pos[:bsz] + 1).to(
+                        torch.int32
+                    )
+                    o = fp8_dual_op.forward(
+                        q,
+                        swa_view_3d_fp8,
+                        self.attn_sink,
+                        swa_topk_3d,
+                        cache_seqlens=cache_seqlens_fp8,
+                        block_table=swa_pool_bt[:bsz].to(torch.int32).contiguous(),
+                        extra_k_cache=cmp_view_3d_fp8,
+                        extra_topk_idxs=cmp_topk_3d,
+                    )
                 else:
                     kv_packed_4d = gather_dual_pool_kv_packed(
                         swa_view_cache,
@@ -2065,17 +2100,17 @@ class Attention(nn.Module):
                         q_len,
                     )  # [B, 1, win+K, D]
                     kv_packed = kv_packed_4d.view(bsz, win + K_cmp, self.head_dim)
-                identity_topk = (
-                    torch.arange(
-                        win + K_cmp,
-                        device=kv_packed.device,
-                        dtype=torch.int32,
+                    identity_topk = (
+                        torch.arange(
+                            win + K_cmp,
+                            device=kv_packed.device,
+                            dtype=torch.int32,
+                        )
+                        .view(1, 1, win + K_cmp)
+                        .expand(bsz, q_len, win + K_cmp)
+                        .contiguous()
                     )
-                    .view(1, 1, win + K_cmp)
-                    .expand(bsz, q_len, win + K_cmp)
-                    .contiguous()
-                )
-                o = sparse_op.forward(q, kv_packed, self.attn_sink, identity_topk)
+                    o = sparse_op.forward(q, kv_packed, self.attn_sink, identity_topk)
         else:
             # Phase E5b: register_buffer retired.  Production decode must
             # populate paged metadata; any path here is a caller bug.
