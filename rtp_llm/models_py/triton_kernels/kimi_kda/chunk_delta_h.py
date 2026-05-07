@@ -11,21 +11,15 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.triton_kernels.autotune_cache import (
+    autotune_cache_kwargs,
+    cuda_cached_autotune,
+)
 from rtp_llm.models_py.triton_kernels.fla.index import (
     prepare_chunk_indices,
     prepare_chunk_offsets,
 )
 from rtp_llm.models_py.triton_kernels.fla.op import exp, exp2
-from rtp_llm.models_py.triton_kernels.fla.utils import (
-    autotune_cache_kwargs,
-    check_shared_mem,
-)
-from rtp_llm.models_py.triton_kernels.fla.utils import (
-    is_nvidia_hopper as IS_NVIDIA_HOPPER,
-)
-from rtp_llm.models_py.triton_kernels.fla.utils import use_cuda_graph as USE_CUDA_GRAPH
-
-NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8, 16]
 
 
 @triton.heuristics(
@@ -38,15 +32,14 @@ NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8, 16]
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
     }
 )
-@triton.autotune(
+@cuda_cached_autotune(
     configs=[
         triton.Config({"BV": BV}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [2, 4]
-        for num_stages in ([2, 3, 4] if check_shared_mem("ampere") else [2, 1])
-        for BV in ([32, 64] if check_shared_mem("ada") else [32])
+        for num_stages in [2, 3, 4]
+        for BV in [32, 64]
     ],
     key=["H", "HV", "K", "V", "BT", "USE_EXP2", "TRANSPOSE_STATE"],
-    use_cuda_graph=USE_CUDA_GRAPH,
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=["T"])
