@@ -1,6 +1,73 @@
 """DSV4 attention and SWA cache correctness tests."""
 
+from model import Attention as OfficialAttention
+
+import rtp_llm.models_py.modules.dsv4.attention as _our_attention_module
+from rtp_llm.models_py.modules.dsv4.attention import Attention as OurAttention
+from rtp_llm.models_py.modules.dsv4.attention import _get_window_topk_idxs
 from rtp_llm.models_py.modules.dsv4.test.dsv4_test_utils import *
+
+
+def _ue8m0_scale_ones(shape, device: torch.device) -> torch.Tensor:
+    scale = torch.empty(shape, dtype=torch.float8_e8m0fnu, device=device)
+    scale.view(torch.uint8).fill_(127)
+    return scale
+
+
+def _attention_layer_weights(official: OfficialAttention, device: torch.device):
+    from rtp_llm.utils.model_weight import W
+
+    weights = {}
+    for w_key, s_key, module in (
+        (W.v4_attn_wq_a_w, W.v4_attn_wq_a_s, official.wq_a),
+        (W.v4_attn_wq_b_w, W.v4_attn_wq_b_s, official.wq_b),
+        (W.v4_attn_wkv_w, W.v4_attn_wkv_s, official.wkv),
+        (W.v4_attn_wo_b_w, W.v4_attn_wo_b_s, official.wo_b),
+    ):
+        weight = module.weight.detach()
+        weights[w_key] = _fp8_weight(weight, device)
+        weights[s_key] = _fp8_int32_scale_ones(weight, device)
+
+    wo_a = official.wo_a.weight.detach()
+    weights[W.v4_attn_wo_a_w] = _fp8_weight(wo_a, device)
+    # ``_prepare_wo_a_stacked`` consumes the raw [G * R / 128, K / 128]
+    # UE8M0 layout.  The attention unit test uses R=128 so this is one row
+    # block per output group.
+    g = int(official.n_groups)
+    r = int(official.o_lora_rank)
+    k = int(wo_a.shape[1])
+    weights[W.v4_attn_wo_a_s] = _ue8m0_scale_ones(
+        (g * max(1, r // 128), max(1, k // 128)), device
+    )
+
+    weights[W.v4_attn_q_norm] = (
+        official.q_norm.weight.detach().clone().to(device=device, dtype=torch.bfloat16)
+    )
+    weights[W.v4_attn_kv_norm] = (
+        official.kv_norm.weight.detach().clone().to(device=device, dtype=torch.bfloat16)
+    )
+    weights[W.v4_attn_sink] = official.attn_sink.detach().clone().to(device=device)
+
+    if getattr(official, "compress_ratio", 0):
+        weights.update(
+            {
+                W.v4_compressor_ape: official.compressor.ape.detach()
+                .clone()
+                .to(device=device),
+                W.v4_compressor_wkv: official.compressor.wkv.weight.detach()
+                .clone()
+                .to(device=device),
+                W.v4_compressor_wgate: official.compressor.wgate.weight.detach()
+                .clone()
+                .to(device=device),
+                W.v4_compressor_norm: official.compressor.norm.weight.detach()
+                .clone()
+                .to(device=device, dtype=torch.bfloat16),
+            }
+        )
+        if getattr(official, "indexer", None) is not None:
+            weights.update(_indexer_layer_weights(official.indexer, device))
+    return weights
 
 
 class TestSWAKVCache(unittest.TestCase):
@@ -61,6 +128,7 @@ class TestSWAKVCache(unittest.TestCase):
         assert idxs.shape == (1, 1, win)
         # All indices should be valid (no -1)
         assert (idxs >= 0).all(), "Window indices should all be valid for pos >= win-1"
+
 
 class TestAttentionOutput(unittest.TestCase):
     """Compare full Attention output between official and our implementation."""
@@ -149,8 +217,10 @@ class TestAttentionOutput(unittest.TestCase):
         our_attn.wq_b = _bf16_linear_from_weight(official_attn.wq_b.weight, device)
         our_attn.wkv = _bf16_linear_from_weight(official_attn.wkv.weight, device)
         our_attn.wo_b = _bf16_linear_from_weight(official_attn.wo_b.weight, device)
-        our_attn.wo_a_w = official_attn.wo_a.weight.detach().clone().to(
-            device=device, dtype=torch.bfloat16
+        our_attn.wo_a_w = (
+            official_attn.wo_a.weight.detach()
+            .clone()
+            .to(device=device, dtype=torch.bfloat16)
         )
         our_attn.wo_a_s = _ue8m0_scale_ones(
             (
