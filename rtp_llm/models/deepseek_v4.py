@@ -46,6 +46,7 @@ from rtp_llm.models.deepseek_v2 import (
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
+    concat_0,
     identity,
     stack_,
     stack_moe_w1,
@@ -285,20 +286,23 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
         cfg = self._v4_attn_cfg()
         return [
             AttnAtomicWeight(
-                W.v4_shared_w1_w,
-                [CkptWeightInfo("layers.{i}.ffn.shared_experts.w1.weight", identity)],
-                identity,
+                W.v4_shared_w13_w,
+                [
+                    CkptWeightInfo(
+                        "layers.{i}.ffn.shared_experts.w1.weight",
+                        identity,
+                    ),
+                    CkptWeightInfo(
+                        "layers.{i}.ffn.shared_experts.w3.weight",
+                        identity,
+                    ),
+                ],
+                concat_0,
                 config=cfg,
             ),
             AttnAtomicWeight(
                 W.v4_shared_w2_w,
                 [CkptWeightInfo("layers.{i}.ffn.shared_experts.w2.weight", identity)],
-                identity,
-                config=cfg,
-            ),
-            AttnAtomicWeight(
-                W.v4_shared_w3_w,
-                [CkptWeightInfo("layers.{i}.ffn.shared_experts.w3.weight", identity)],
                 identity,
                 config=cfg,
             ),
