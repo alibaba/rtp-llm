@@ -9,6 +9,7 @@ import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.grpc.EngineStatusConverter;
 import org.flexlb.service.monitor.EngineHealthReporter;
+import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.util.CommonUtils;
 import org.flexlb.util.IdUtils;
 import org.slf4j.Logger;
@@ -85,6 +86,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
     }
 
     private void handleStatusResponse(WorkerStatusResponse newWorkerStatus, long startTime) {
+        boolean wasAlive = workerStatus.isAlive();
         try {
             if (newWorkerStatus == null) {
                 logger.info("query engine worker status via gRPC, response body is null");
@@ -181,6 +183,10 @@ public class GrpcWorkerStatusRunner implements Runnable {
         } catch (Throwable e) {
             log("engine worker status check via gRPC exception, msg: " + e.getMessage());
             engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.UNKNOWN_ERROR, ip, roleType);
+        } finally {
+            if (workerStatus.isAlive() != wasAlive) {
+                EngineWorkerStatus.bumpVersion();
+            }
         }
     }
 

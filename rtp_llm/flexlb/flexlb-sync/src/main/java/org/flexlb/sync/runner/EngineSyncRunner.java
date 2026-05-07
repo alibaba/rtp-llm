@@ -193,6 +193,7 @@ public class EngineSyncRunner implements Runnable {
             workerStatus.setIp(split[0]);
             workerStatus.setPort(Integer.parseInt(split[1]));
             workerStatuses.put(workerIpPort, workerStatus);
+            org.flexlb.sync.status.EngineWorkerStatus.bumpVersion();
             logger.info("Created new WorkerStatus for worker: {}", workerIpPort);
         }
         return workerStatus;

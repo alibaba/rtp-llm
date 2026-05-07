@@ -238,7 +238,7 @@ public class DefaultRouter implements Router {
         resp.setSuccess(true);
         resp.setServerStatus(selected);
         resp.setTtlMs(configService.loadBalanceConfig().getSelectWorkersTtlMs());
-        resp.setVersion(0L);
+        resp.setVersion(EngineWorkerStatus.getCurrentVersion());
         resp.setTotalWorkers((int) totalHealthy);
         return resp;
     }

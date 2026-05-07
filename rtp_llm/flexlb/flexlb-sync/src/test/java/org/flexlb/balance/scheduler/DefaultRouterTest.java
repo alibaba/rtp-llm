@@ -558,6 +558,7 @@ class DefaultRouterTest {
             map.put("10.0.0." + i + ":28100", worker("10.0.0." + i, 28100, true, (long) i));
         }
 
+        long versionBefore = EngineWorkerStatus.getCurrentVersion();
         Response resp = defaultRouter.selectNWorkers(balanceContext, RoleType.PDFUSION, 4);
 
         assertTrue(resp.isSuccess(), "Should succeed");
@@ -565,7 +566,7 @@ class DefaultRouterTest {
         assertEquals(4, resp.getServerStatus().size(), "Should return 4 ServerStatus");
         assertEquals(8, resp.getTotalWorkers(), "totalWorkers should reflect healthy pool size");
         assertEquals(1000L, resp.getTtlMs(), "ttlMs from config");
-        assertEquals(0L, resp.getVersion(), "D1 stub version returns 0");
+        assertEquals(versionBefore, resp.getVersion(), "version reflects current counter; direct map.put() does not bump");
         for (ServerStatus s : resp.getServerStatus()) {
             assertEquals(RoleType.PDFUSION, s.getRole());
             assertEquals(28100, s.getHttpPort());
@@ -658,14 +659,19 @@ class DefaultRouterTest {
     }
 
     @Test
-    void testSelectNWorkers_versionStub() {
+    void testSelectNWorkers_versionBump() {
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap()
                 .put("10.0.0.1:28100", worker("10.0.0.1", 28100, true, 1L));
 
-        Response resp = defaultRouter.selectNWorkers(balanceContext, RoleType.PDFUSION, 1);
+        long before = EngineWorkerStatus.getCurrentVersion();
+        Response resp1 = defaultRouter.selectNWorkers(balanceContext, RoleType.PDFUSION, 1);
+        assertTrue(resp1.isSuccess());
+        assertEquals(before, resp1.getVersion(), "version reflects current counter at call time");
 
-        assertTrue(resp.isSuccess());
-        assertEquals(0L, resp.getVersion(), "D1 stub: version always 0");
+        EngineWorkerStatus.bumpVersion();
+        EngineWorkerStatus.bumpVersion();
+        Response resp2 = defaultRouter.selectNWorkers(balanceContext, RoleType.PDFUSION, 1);
+        assertEquals(before + 2, resp2.getVersion(), "version reads pick up subsequent bumps");
     }
 
     @Test

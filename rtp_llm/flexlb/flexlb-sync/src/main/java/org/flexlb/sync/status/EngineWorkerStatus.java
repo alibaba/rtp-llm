@@ -8,6 +8,7 @@ import org.flexlb.dao.route.RoleType;
 import org.springframework.stereotype.Component;
 
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -16,6 +17,16 @@ import java.util.stream.Collectors;
 public class EngineWorkerStatus {
 
     public static final ModelWorkerStatus MODEL_ROLE_WORKER_STATUS = new ModelWorkerStatus();
+
+    private static final AtomicLong VERSION_COUNTER = new AtomicLong(0L);
+
+    public static long getCurrentVersion() {
+        return VERSION_COUNTER.get();
+    }
+
+    public static long bumpVersion() {
+        return VERSION_COUNTER.incrementAndGet();
+    }
 
     public final ModelMetaConfig modelMetaConfig;
 

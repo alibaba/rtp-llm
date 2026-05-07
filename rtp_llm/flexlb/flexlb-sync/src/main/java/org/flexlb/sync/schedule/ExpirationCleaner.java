@@ -64,6 +64,7 @@ public class ExpirationCleaner {
             long currentTime = System.nanoTime() / 1000;
             if (currentTime > expirationTime) {
                 it.remove();
+                EngineWorkerStatus.bumpVersion();
                 continue;
             }
 
