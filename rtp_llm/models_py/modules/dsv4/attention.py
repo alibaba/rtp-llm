@@ -2137,7 +2137,7 @@ class Attention(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        start_pos: int,
+        positions: torch.Tensor,
         kv_cache: Optional[Any] = None,
         block_tables_by_type: Optional[Dict[int, torch.Tensor]] = None,
     ) -> torch.Tensor:
@@ -2145,20 +2145,21 @@ class Attention(nn.Module):
 
         ``x``: flat ``[T, dim]`` (single-request, B==1 — enforced by
         the FIFO scheduler's ``max_context_batch_size=1`` setting and
-        ``DeepSeekV4Model.forward``). ``start_pos``: scalar absolute
-        position of the first new token (block.py extracts it once via
-        ``int(positions[0].item())``). ``kv_cache`` and
-        ``block_tables_by_type`` are stashed on ``self`` for the
-        duration of the call so the many ``_prefill_*`` / pool helpers
-        can resolve via ``self._kv_cache`` without threading the
-        handles through every signature.
+        ``DeepSeekV4Model.forward``). ``positions``: ``[T]`` int64 of
+        absolute token positions; ``positions[0]`` is the prefill
+        start position. We don't read it eagerly — under broadcast
+        meta the sp_int is already on ``self._prefill_meta_shared``
+        (synced once in ``forward.py`` for all layers); standalone
+        path syncs once inside ``_build_shared_prefill_meta``.
+        ``kv_cache`` and ``block_tables_by_type`` are stashed on
+        ``self`` for the duration of the call so the many
+        ``_prefill_*`` / pool helpers can resolve via
+        ``self._kv_cache`` without threading the handles through
+        every signature.
         """
         assert (
             x.dim() == 2
         ), f"DSv4 Attention prefill expects flat [T, dim]; got shape {tuple(x.shape)}"
-        assert isinstance(
-            start_pos, int
-        ), f"DSv4 Attention prefill expects int start_pos; got {type(start_pos).__name__}"
         prev_kv = self._kv_cache
         prev_bt = self._block_tables_by_type
         if kv_cache is not None:
@@ -2168,14 +2169,16 @@ class Attention(nn.Module):
         try:
             self._set_compressor_pool_context()
             try:
-                return self._forward_prefill(x, start_pos)
+                return self._forward_prefill(x, positions)
             finally:
                 self._clear_compressor_pool_context()
         finally:
             self._kv_cache = prev_kv
             self._block_tables_by_type = prev_bt
 
-    def _forward_prefill(self, x: torch.Tensor, start_pos) -> torch.Tensor:
+    def _forward_prefill(
+        self, x: torch.Tensor, positions: torch.Tensor
+    ) -> torch.Tensor:
         """Prefill body. ``x`` is flat ``[T, dim]``; output flat ``[T, dim]``.
 
         Three mutually-exclusive paths gated by ``compress_ratio``:
@@ -2192,7 +2195,7 @@ class Attention(nn.Module):
             "_forward_prefill is FP8-only; BF16 KV-cache prefill is no "
             "longer supported on this branch"
         )
-        common = self._prefill_common_setup(x, start_pos)
+        common = self._prefill_common_setup(x, positions)
         qkv = self._prefill_compute_qkv(x, common)
 
         # SWA pool write — every FP8 layer populates the SWA pool for
@@ -2204,9 +2207,9 @@ class Attention(nn.Module):
         if self.compress_ratio == 0:
             return self._forward_prefill_swa_only(qkv, common)
         if self.compress_ratio == 4:
-            return self._forward_prefill_csa(x, qkv, common, start_pos)
+            return self._forward_prefill_csa(x, qkv, common)
         if self.compress_ratio == 128:
-            return self._forward_prefill_hca(x, qkv, common, start_pos)
+            return self._forward_prefill_hca(x, qkv, common)
         raise AssertionError(f"unknown compress_ratio={self.compress_ratio}")
 
     # ------------------------------------------------------------------
@@ -2231,7 +2234,6 @@ class Attention(nn.Module):
         x: torch.Tensor,
         qkv: PrefillQKV,
         common: PrefillMeta,
-        start_pos,
     ) -> torch.Tensor:
         """CSA path (compress_ratio == 4). Sparse compress topk via the
         IndexerFP8 lightning indexer; main compressor writes the CSA
@@ -2267,7 +2269,6 @@ class Attention(nn.Module):
             x,
             qkv,
             common,
-            start_pos,
             compress_idxs,
             common.csa_meta.compressor_meta,
         )
@@ -2277,7 +2278,6 @@ class Attention(nn.Module):
         x: torch.Tensor,
         qkv: PrefillQKV,
         common: PrefillMeta,
-        start_pos,
     ) -> torch.Tensor:
         """HCA path (compress_ratio == 128). Dense compressed indices —
         no indexer involved. Main compressor writes the HCA pool with
@@ -2302,7 +2302,6 @@ class Attention(nn.Module):
             x,
             qkv,
             common,
-            start_pos,
             compress_idxs,
             common.hca_meta.compressor_meta,
         )
@@ -2312,7 +2311,6 @@ class Attention(nn.Module):
         x: torch.Tensor,
         qkv: PrefillQKV,
         common: PrefillMeta,
-        start_pos,
         compress_idxs: torch.Tensor,
         compressor_meta,
     ) -> torch.Tensor:
@@ -2326,20 +2324,22 @@ class Attention(nn.Module):
         if common.any_cont:
             prefill_swa_dense_for_attn = self._prefill_read_swa_dense_abs_from_pool(
                 1,
-                start_pos,
+                common.sp_int,
                 common.row_seqlens_full,
                 common.seqlen_full + common.sp_int,
                 current_kv_full=kv_full_3d,
             )
 
-        kv_compress = self.compressor(x.unsqueeze(0), start_pos, meta=compressor_meta)
+        kv_compress = self.compressor(
+            x.unsqueeze(0), common.sp_int, meta=compressor_meta
+        )
 
         kv_cat = self._build_kv_cat(
             qkv,
             kv_compress,
             common,
             prefill_swa_dense_for_attn,
-            start_pos,
+            common.sp_int,
             common.row_seqlens_full,
         )
 
@@ -2377,7 +2377,7 @@ class Attention(nn.Module):
                 self.indexer.compressor.freqs_cis = self.freqs_cis
 
     def _build_shared_prefill_meta(
-        self, x: torch.Tensor, start_pos: int
+        self, x: torch.Tensor, positions: Union[int, torch.Tensor]
     ) -> "PrefillMeta":
         """Build the layer-invariant (within compress_ratio bucket) part
         of per-call prefill metadata. All host-side prep work that
@@ -2385,6 +2385,11 @@ class Attention(nn.Module):
         can run it once per ratio and broadcast to every same-ratio
         attention via :meth:`_set_prefill_meta_shared`. Standalone path
         falls back to running this per-layer.
+
+        ``positions`` accepts either a ``[T]`` int64 tensor (from the
+        normal call path) or a pre-synced int (used by upper-layer
+        broadcast meta builders that already paid the sync once for
+        the whole batch). When a tensor is passed we sync once here.
         """
         seqlen = int(x.shape[0])
         rd = self.rope_head_dim
@@ -2394,9 +2399,15 @@ class Attention(nn.Module):
         cp_on = cp_ctx is not None and cp_ctx.cp_size > 1
 
         # CP rank-local view overrides the per-request start_pos. Otherwise
-        # ``forward`` guarantees ``start_pos: int`` (block.py extracts the
-        # scalar via ``int(positions[0].item())`` for B==1 prefill).
-        sp_int = int(cp_ctx.prefix_length) if cp_on else start_pos
+        # sync ``positions[0]`` -> int once. Tensor input pays the sync
+        # here exactly once per (forward, ratio bucket); int input has
+        # already been synced by the upper-layer broadcast builder.
+        if cp_on:
+            sp_int = int(cp_ctx.prefix_length)
+        elif isinstance(positions, torch.Tensor):
+            sp_int = int(positions[0].item())
+        else:
+            sp_int = int(positions)
         any_cont = sp_int > 0
 
         if cp_on:
@@ -2513,13 +2524,16 @@ class Attention(nn.Module):
         finally:
             self._clear_compressor_pool_context()
 
-    def _prefill_common_setup(self, x: torch.Tensor, start_pos: int) -> PrefillMeta:
+    def _prefill_common_setup(
+        self, x: torch.Tensor, positions: torch.Tensor
+    ) -> PrefillMeta:
         """Return the (possibly upper-layer-injected) shared prefill meta.
-        Standalone callers (no upper-layer broadcast) build it per-layer here.
+        Standalone callers (no upper-layer broadcast) build it per-layer
+        here, syncing ``positions[0]`` to int once inside the builder.
         """
         meta = self._prefill_meta_shared
         if meta is None:
-            meta = self._build_shared_prefill_meta(x, start_pos)
+            meta = self._build_shared_prefill_meta(x, positions)
         return meta
 
     def _build_swa_prefill_meta(

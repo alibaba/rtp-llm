@@ -496,20 +496,21 @@ class Block(nn.Module):
                     x_pre[dbg_pos_mask].contiguous(),
                 )
 
-        # B==1 prefill: hand the flat [T, dim] activation straight to
-        # Attention with the scalar absolute start_pos pulled from
-        # positions[0]. cu_seqlens / sequence_lengths / attn_inputs are
-        # consumed elsewhere (cache_store, MoE), not by Attention itself.
+        # B==1 prefill: hand the flat [T, dim] activation + positions
+        # tensor straight to Attention. Attention does not eagerly sync
+        # positions[0]; the broadcast meta builder in forward.py syncs
+        # once for the whole batch (all layers share the same sp_int).
+        # cu_seqlens / sequence_lengths / attn_inputs are consumed
+        # elsewhere (cache_store, MoE), not by Attention itself.
         cu_long = cu_seqlens.to(torch.long)
         assert int(cu_long.numel() - 1) == 1, (
             f"DSv4 prefill expects B==1 (max_context_batch_size=1); "
             f"cu_seqlens has B={int(cu_long.numel() - 1)}"
         )
-        start_pos = int(positions[0].item())
 
         attn_out = self.attn(
             x_pre,  # [T, dim] flat
-            start_pos,
+            positions,  # [T] int64
             kv_cache=kv_cache,
             block_tables_by_type=block_tables_by_type,
         )  # [T, dim]
