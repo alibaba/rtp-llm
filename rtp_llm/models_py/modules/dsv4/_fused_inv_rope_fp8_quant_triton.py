@@ -27,6 +27,8 @@ eager inv-RoPE + per-group quant, and ≤2-ULP end-to-end vs wo_a GEMM).
 
 from __future__ import annotations
 
+import os
+
 import torch
 import triton
 import triton.language as tl
@@ -154,6 +156,143 @@ def _fused_inv_rope_fp8_quant_per_head(
     tl.store(scale_addr, packed_val)
 
 
+@triton.jit
+def _fused_inv_rope_fp8_quant_group_heads(
+    o_ptr,  # [M, H, D] bf16
+    freqs_ri_ptr,  # torch.view_as_real(freqs), float32 [B, RD_HALF, 2]
+    fp8_ptr,  # [G, M_pad, d] fp8 e4m3
+    scale_ptr,  # [G, M_pad, packed_sf_k] int32 UE8M0
+    num_tokens,
+    q_len_per_b: tl.constexpr,
+    heads_per_group: tl.constexpr,
+    o_stride_token,
+    o_stride_head,
+    freqs_stride_b,
+    freqs_stride_k,
+    fp8_stride_group,
+    fp8_stride_token,
+    scale_stride_group,
+    scale_stride_k,
+    fp8_max: tl.constexpr,
+    eps: tl.constexpr,
+    QUANT_GROUP_SIZE: tl.constexpr,
+    CHUNKS_PER_HEAD: tl.constexpr,
+    ROPE_START: tl.constexpr,
+    HEADS_PER_CTA: tl.constexpr,
+):
+    pid_token = tl.program_id(0).to(tl.int64)
+    g = tl.program_id(1).to(tl.int64)
+    head_tile = tl.program_id(2).to(tl.int64)
+    head_base = head_tile * HEADS_PER_CTA
+
+    for head_step in tl.static_range(HEADS_PER_CTA):
+        head_in_group = head_base + head_step
+        scale_addr = (
+            scale_ptr
+            + g * scale_stride_group
+            + pid_token
+            + head_in_group * scale_stride_k
+        )
+        if pid_token >= num_tokens:
+            tl.store(scale_addr, tl.zeros((), dtype=tl.int32))
+        else:
+            global_head = g * heads_per_group + head_in_group
+            input_base = (
+                o_ptr + pid_token * o_stride_token + global_head * o_stride_head
+            )
+
+            HEAD_DIM: tl.constexpr = CHUNKS_PER_HEAD * QUANT_GROUP_SIZE
+            offsets = tl.arange(0, HEAD_DIM)
+            x = tl.load(input_base + offsets).to(tl.float32)
+
+            rope_abs_start: tl.constexpr = (
+                (CHUNKS_PER_HEAD - 1) * QUANT_GROUP_SIZE + ROPE_START
+            )
+            is_rope = offsets >= rope_abs_start
+            rope_local = offsets - rope_abs_start
+            x_partner = tl.load(
+                input_base + (offsets ^ 1), mask=is_rope, other=0.0
+            ).to(tl.float32)
+
+            cs_idx = tl.maximum(rope_local >> 1, 0)
+            b_idx = pid_token // q_len_per_b
+            freq_base = freqs_ri_ptr + b_idx * freqs_stride_b + cs_idx * freqs_stride_k
+            cos_v = tl.load(freq_base, mask=is_rope, other=1.0)
+            sin_v = tl.load(freq_base + 1, mask=is_rope, other=0.0)
+
+            x_add = x * cos_v + x_partner * sin_v
+            x_sub = x * cos_v - x_partner * sin_v
+            is_even = (rope_local & 1) == 0
+            x = tl.where(is_rope, tl.where(is_even, x_add, x_sub), x)
+
+            x_2d = tl.reshape(tl.abs(x), (CHUNKS_PER_HEAD, QUANT_GROUP_SIZE))
+            block_absmax = tl.maximum(tl.max(x_2d, axis=1), eps)
+            scale_raw = block_absmax * (1.0 / fp8_max)
+            scale_raw_bits = scale_raw.to(tl.int32, bitcast=True)
+            exp = ((scale_raw_bits >> 23) & 0xFF) + (
+                (scale_raw_bits & 0x7FFFFF) != 0
+            )
+            exp = tl.minimum(tl.maximum(exp, 1), 254)
+            scale_bits = exp << 23
+            scales = scale_bits.to(tl.float32, bitcast=True)
+
+            scales_exp = tl.reshape(
+                tl.broadcast_to(
+                    tl.reshape(scales, (CHUNKS_PER_HEAD, 1)),
+                    (CHUNKS_PER_HEAD, QUANT_GROUP_SIZE),
+                ),
+                (HEAD_DIM,),
+            )
+            x_quant = tl.clamp(x / scales_exp, -fp8_max, fp8_max).to(tl.float8e4nv)
+
+            fp8_base = (
+                fp8_ptr
+                + g * fp8_stride_group
+                + pid_token * fp8_stride_token
+                + head_in_group * HEAD_DIM
+            )
+            tl.store(fp8_base + offsets, x_quant)
+
+            block_offsets = tl.arange(0, CHUNKS_PER_HEAD)
+            packed_val = tl.sum(exp << (block_offsets * 8))
+            tl.store(scale_addr, packed_val)
+
+
+def _alloc_output_buffers(
+    M: int,
+    n_groups: int,
+    d_per_group: int,
+    packed_sf_k: int,
+    device: torch.device,
+    fp8_buf: torch.Tensor | None = None,
+    scale_buf: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    tma_M = ((M + 3) // 4) * 4
+    if fp8_buf is None:
+        fp8_work = torch.empty(
+            (n_groups, M, d_per_group), dtype=torch.float8_e4m3fn, device=device
+        )
+    else:
+        assert fp8_buf.dtype == torch.float8_e4m3fn
+        assert fp8_buf.shape[0] == n_groups and fp8_buf.shape[1] >= M
+        assert fp8_buf.shape[2] == d_per_group
+        fp8_work = fp8_buf[:, :M, :]
+
+    if scale_buf is None:
+        scale_work = torch.empty(
+            n_groups * packed_sf_k * tma_M, dtype=torch.int32, device=device
+        ).as_strided(
+            (n_groups, M, packed_sf_k),
+            (packed_sf_k * tma_M, 1, tma_M),
+        )
+    else:
+        assert scale_buf.dtype == torch.int32
+        assert scale_buf.shape[0] == n_groups and scale_buf.shape[1] >= M
+        assert scale_buf.shape[2] == packed_sf_k
+        scale_work = scale_buf[:, :M, :]
+    return fp8_work, scale_work
+
+
 def fused_inv_rope_fp8_quant(
     o: torch.Tensor,  # [B, S, H, head_dim] or [M, H, head_dim] bf16
     freqs_cis_per_b: torch.Tensor,  # [B, rope_head_dim // 2] complex64
@@ -163,6 +302,9 @@ def fused_inv_rope_fp8_quant(
     rope_head_dim: int,
     quant_group_size: int = 128,
     eps: float = 1e-10,
+    fp8_buf: torch.Tensor | None = None,
+    scale_buf: torch.Tensor | None = None,
+    impl: str | None = None,
 ):
     """Fused inverse-RoPE + block-scaled FP8 quant for wo_a input.
 
@@ -234,52 +376,100 @@ def fused_inv_rope_fp8_quant(
 
     fp8_max = torch.finfo(torch.float8_e4m3fn).max
 
-    # TMA-aligned M: ceil to multiple of 4 (== 4-byte alignment for int32).
-    tma_M = ((M + 3) // 4) * 4
-
-    fp8_buf = torch.empty(
-        (n_groups, M, d_per_group), dtype=torch.float8_e4m3fn, device=o.device
+    fp8_work, scale_work = _alloc_output_buffers(
+        M, n_groups, d_per_group, packed_sf_k, o.device, fp8_buf, scale_buf
     )
-    scale_buf = torch.empty(
-        n_groups * packed_sf_k * tma_M, dtype=torch.int32, device=o.device
-    ).as_strided(
-        (n_groups, M, packed_sf_k),
-        (packed_sf_k * tma_M, 1, tma_M),
-    )
+    tma_M = scale_work.stride(2)
 
-    # complex64 .real / .imag are stride-2 views; .contiguous() is a real
-    # layout copy.
-    cos = freqs_cis_per_b.real.contiguous()
-    sin = freqs_cis_per_b.imag.contiguous()
-
-    grid = (tma_M, n_groups * heads_per_group)
-    _fused_inv_rope_fp8_quant_per_head[grid](
-        o_flat,
-        cos,
-        sin,
-        fp8_buf,
-        scale_buf,
-        M,
-        q_len_per_b=q_len_per_b,
-        heads_per_group=heads_per_group,
-        o_stride_token=o_flat.stride(0),
-        o_stride_head=o_flat.stride(1),
-        cos_stride_b=cos.stride(0),
-        sin_stride_b=sin.stride(0),
-        fp8_stride_group=fp8_buf.stride(0),
-        fp8_stride_token=fp8_buf.stride(1),
-        scale_stride_group=scale_buf.stride(0),
-        scale_stride_k=scale_buf.stride(2),
-        fp8_max=fp8_max,
-        eps=eps,
-        QUANT_GROUP_SIZE=quant_group_size,
-        CHUNKS_PER_HEAD=chunks_per_head,
-        ROPE_START=nope_dim % quant_group_size,
-        HALF_ROPE=rope_head_dim // 2,
-        num_warps=1,
-        num_stages=1,
-    )
+    selected_impl = (
+        impl
+        if impl is not None
+        else os.environ.get("DSV4_INV_ROPE_FP8_QUANT_IMPL", "optimized")
+    ).lower()
+    if selected_impl == "legacy":
+        # complex64 .real / .imag are stride-2 views; .contiguous() is a real
+        # layout copy. Keep this path only as a correctness/perf baseline.
+        cos = freqs_cis_per_b.real.contiguous()
+        sin = freqs_cis_per_b.imag.contiguous()
+        grid = (tma_M, n_groups * heads_per_group)
+        _fused_inv_rope_fp8_quant_per_head[grid](
+            o_flat,
+            cos,
+            sin,
+            fp8_work,
+            scale_work,
+            M,
+            q_len_per_b=q_len_per_b,
+            heads_per_group=heads_per_group,
+            o_stride_token=o_flat.stride(0),
+            o_stride_head=o_flat.stride(1),
+            cos_stride_b=cos.stride(0),
+            sin_stride_b=sin.stride(0),
+            fp8_stride_group=fp8_work.stride(0),
+            fp8_stride_token=fp8_work.stride(1),
+            scale_stride_group=scale_work.stride(0),
+            scale_stride_k=scale_work.stride(2),
+            fp8_max=fp8_max,
+            eps=eps,
+            QUANT_GROUP_SIZE=quant_group_size,
+            CHUNKS_PER_HEAD=chunks_per_head,
+            ROPE_START=nope_dim % quant_group_size,
+            HALF_ROPE=rope_head_dim // 2,
+            num_warps=1,
+            num_stages=1,
+        )
+    elif selected_impl == "optimized":
+        heads_per_cta = int(os.environ.get("DSV4_INV_ROPE_HEADS_PER_CTA", "2"))
+        if heads_per_cta not in (1, 2, 4, 8):
+            raise ValueError(
+                f"invalid DSV4_INV_ROPE_HEADS_PER_CTA={heads_per_cta}; "
+                "expected 1, 2, 4, or 8"
+            )
+        if heads_per_group % heads_per_cta != 0:
+            heads_per_cta = 1
+        freqs_ri = torch.view_as_real(freqs_cis_per_b)
+        grid = (tma_M, n_groups, heads_per_group // heads_per_cta)
+        _fused_inv_rope_fp8_quant_group_heads[grid](
+            o_flat,
+            freqs_ri,
+            fp8_work,
+            scale_work,
+            M,
+            q_len_per_b=q_len_per_b,
+            heads_per_group=heads_per_group,
+            o_stride_token=o_flat.stride(0),
+            o_stride_head=o_flat.stride(1),
+            freqs_stride_b=freqs_ri.stride(0),
+            freqs_stride_k=freqs_ri.stride(1),
+            fp8_stride_group=fp8_work.stride(0),
+            fp8_stride_token=fp8_work.stride(1),
+            scale_stride_group=scale_work.stride(0),
+            scale_stride_k=scale_work.stride(2),
+            fp8_max=fp8_max,
+            eps=eps,
+            QUANT_GROUP_SIZE=quant_group_size,
+            CHUNKS_PER_HEAD=chunks_per_head,
+            ROPE_START=nope_dim % quant_group_size,
+            HEADS_PER_CTA=heads_per_cta,
+            num_warps=2,
+            num_stages=1,
+        )
+    else:
+        raise ValueError(
+            f"invalid DSV4_INV_ROPE_FP8_QUANT_IMPL={selected_impl!r}; "
+            "expected legacy|optimized"
+        )
     # Transpose (0, 1) so the consumer sees [M, G, …]:
     #   fp8  : [M, G, d]          stride (d, M*d, 1)   — contiguous-like on inner
     #   scale: [M, G, packed_sf_k] stride (1, packed_sf_k * tma_M, tma_M)
-    return fp8_buf.transpose(0, 1), scale_buf.transpose(0, 1)
+    return fp8_work.transpose(0, 1), scale_work.transpose(0, 1)
+
+
+def fused_inv_rope_fp8_quant_legacy(*args, **kwargs):
+    kwargs["impl"] = "legacy"
+    return fused_inv_rope_fp8_quant(*args, **kwargs)
+
+
+def fused_inv_rope_fp8_quant_optimized(*args, **kwargs):
+    kwargs["impl"] = "optimized"
+    return fused_inv_rope_fp8_quant(*args, **kwargs)
