@@ -438,11 +438,37 @@ class SwaPrefillMeta(NamedTuple):
     combined_lens: Optional[torch.Tensor]  # [num_tokens] int32
 
 
+class CsaPrefillMeta(NamedTuple):
+    """CSA-layer prefill metadata (compress_ratio == 4). Carries the
+    nested indexer metadata + the main CSA compressor write metadata so
+    the per-layer ``_forward_prefill_csa`` is kernel-only."""
+
+    indexer_meta: Any  # IndexerFP8PrefillMeta — sparse topk source
+    compressor_meta: Any  # CompressorMeta — main CSA pool write
+
+
+class HcaPrefillMeta(NamedTuple):
+    """HCA-layer prefill metadata (compress_ratio == 128). Carries the
+    main HCA compressor write metadata. HCA generates dense compressed
+    indices in-line so no indexer is involved."""
+
+    compressor_meta: Any  # CompressorMeta — main HCA pool write
+
+
 class PrefillMeta(NamedTuple):
     """Per-call prefill metadata, layer-invariant within a
     ``compress_ratio`` bucket. Built once per (forward, ratio) by
     :meth:`Attention._build_shared_prefill_meta` and broadcast to every
     same-ratio layer via :meth:`Attention._set_prefill_meta_shared`.
+
+    The three sub-metadata fields are mutually exclusive — exactly one
+    is non-None per layer, gated by ``compress_ratio``:
+      * ``compress_ratio == 0``   → ``swa_meta`` only (SWA-only path)
+      * ``compress_ratio == 4``   → ``swa_meta`` + ``csa_meta``
+      * ``compress_ratio == 128`` → ``swa_meta`` + ``hca_meta``
+
+    ``swa_meta`` is set on every FP8 layer because all paths still
+    write the SWA pool for downstream decode.
     """
 
     seqlen: int
@@ -457,7 +483,8 @@ class PrefillMeta(NamedTuple):
     any_cont: bool
     row_seqlens_full: torch.Tensor  # [1] long — for SWA pool helpers
     swa_meta: Optional[SwaPrefillMeta] = None
-    indexer_meta: Optional[Any] = None  # IndexerFP8PrefillMeta when applicable
+    csa_meta: Optional[CsaPrefillMeta] = None
+    hca_meta: Optional[HcaPrefillMeta] = None
 
 
 class PrefillQKV(NamedTuple):
@@ -2151,21 +2178,15 @@ class Attention(nn.Module):
     def _forward_prefill(self, x: torch.Tensor, start_pos) -> torch.Tensor:
         """Prefill body. ``x`` is flat ``[T, dim]``; output flat ``[T, dim]``.
 
-        Pipeline:
-          1. ``_prefill_common_setup`` → freqs_cis + window topk + per-call
-             scalars / debug closure (everything that's the same across
-             the rest of the body).
-          2. ``_prefill_compute_qkv`` → qr / q / kv / kv_full (CP all-gather).
-          3. ``_compute_compress_idxs`` (HCA/CSA layers only) → extend
-             topk_idxs with compressed-block tail.
-          4. ``_prefill_write_swa_to_pool`` → write fresh SWA KV (BF16/FP8
-             internal dispatch).
-          5. Compressor → write compressed pool (BF16/FP8 internal).
-          6. ``_build_kv_cat`` → ``[sliding | compressed]`` BF16 view
-             consumed by sparse attn (FP8 reads dequant from pool).
-          7. ``_prefill_attn`` → ``flash_mla_sparse_fwd`` (FP8) or
-             tilelang/_sparse_attn (BF16).
-          8. ``_prefill_output_proj`` → inverse-RoPE + wo_a + wo_b + AR.
+        Three mutually-exclusive paths gated by ``compress_ratio``:
+          * 0   → :meth:`_forward_prefill_swa_only`
+          * 4   → :meth:`_forward_prefill_csa`   (indexer + compressor)
+          * 128 → :meth:`_forward_prefill_hca`   (compressor, dense idx)
+
+        All three share the same prologue: ``_prefill_common_setup`` →
+        ``_prefill_compute_qkv`` → ``_prefill_write_swa_fp8_paged``.
+        ``csa`` / ``hca`` additionally share the ``[sliding | compressed]``
+        kv_cat + sparse_attn epilogue via :meth:`_forward_prefill_compressed`.
         """
         assert self._kv_cache_is_fp8, (
             "_forward_prefill is FP8-only; BF16 KV-cache prefill is no "
@@ -2174,35 +2195,133 @@ class Attention(nn.Module):
         common = self._prefill_common_setup(x, start_pos)
         qkv = self._prefill_compute_qkv(x, common)
 
-        # SWA pool write — single dispatch point regardless of attention
-        # type. FP8 paged-tail Triton kernel (pre-built slot_mapping in
-        # swa_meta). Safe to do before attention because new K (abs pos
-        # [sp, sp+S)) and any cont-prefill prefix tail (abs pos
-        # [sp-P, sp)) target disjoint slots.
+        # SWA pool write — every FP8 layer populates the SWA pool for
+        # downstream decode. Safe to do before attention because new K
+        # (abs pos [sp, sp+S)) and any cont-prefill prefix tail
+        # (abs pos [sp-P, sp)) target disjoint slots.
         self._prefill_write_swa_fp8_paged(common, qkv.kv_full)
 
-        # FP8 SWA-only fast path: skip the kv_cat / sparse_attn flow
-        # entirely. Cold/warmup attends over the BF16 ``kv_full``
-        # directly; continuation builds [prefix_tail | new_K_bf16] in a
-        # workspace and runs flash_mla_sparse_fwd over it.
         if self.compress_ratio == 0:
-            if common.sp_int == 0 or self._kv_cache is None:
-                o = self._attn_fp8_swa_via_kv_full(qkv, common)
-            else:
-                o = self._attn_fp8_swa_via_concat(qkv, common)
-            out_3d = self._prefill_output_proj(o, common)
-            return out_3d.squeeze(0)
+            return self._forward_prefill_swa_only(qkv, common)
+        if self.compress_ratio == 4:
+            return self._forward_prefill_csa(x, qkv, common, start_pos)
+        if self.compress_ratio == 128:
+            return self._forward_prefill_hca(x, qkv, common, start_pos)
+        raise AssertionError(f"unknown compress_ratio={self.compress_ratio}")
 
-        topk_idxs = common.topk_idxs
-        if self.compress_ratio:
-            compress_idxs = self._compute_compress_idxs(x, qkv.qr, common, qkv)
-            topk_idxs = torch.cat([topk_idxs, compress_idxs], dim=-1)
-        topk_idxs = topk_idxs.long()
+    # ------------------------------------------------------------------
+    # Per-path prefill bodies
+    # ------------------------------------------------------------------
+    def _forward_prefill_swa_only(
+        self, qkv: PrefillQKV, common: PrefillMeta
+    ) -> torch.Tensor:
+        """SWA-only path (compress_ratio == 0). Skips kv_cat + sparse_attn.
+        Cold/warmup attends over BF16 ``kv_full`` directly; continuation
+        builds [prefix_tail | new_K_bf16] in a workspace and runs
+        ``flash_mla_sparse_fwd`` over it."""
+        if common.sp_int == 0 or self._kv_cache is None:
+            o = self._attn_fp8_swa_via_kv_full(qkv, common)
+        else:
+            o = self._attn_fp8_swa_via_concat(qkv, common)
+        out_3d = self._prefill_output_proj(o, common)
+        return out_3d.squeeze(0)
 
-        kv_full_3d = qkv.kv_full.unsqueeze(0)  # [1, T, head_dim] for pool helpers
-        # Continuation prefill rebuilds the dense absolute SWA view from
-        # the pool (prefix + new K) so the cont-prefill read can see the
-        # full window.
+    def _forward_prefill_csa(
+        self,
+        x: torch.Tensor,
+        qkv: PrefillQKV,
+        common: PrefillMeta,
+        start_pos,
+    ) -> torch.Tensor:
+        """CSA path (compress_ratio == 4). Sparse compress topk via the
+        IndexerFP8 lightning indexer; main compressor writes the CSA
+        pool with hoisted meta."""
+        from rtp_llm.models_py.modules.dsv4.indexer_fp8 import IndexerFP8
+
+        assert isinstance(
+            self.indexer, IndexerFP8
+        ), "CSA layer requires IndexerFP8 (BF16 indexer not supported on this branch)"
+        assert common.csa_meta is not None, (
+            "CSA prefill requires common.csa_meta — built by " "_build_csa_prefill_meta"
+        )
+
+        offset = common.seqlen_full + common.sp_int  # global SWA stream end
+        # IndexerFP8._compute_indexer_q feeds q to apply_rotary_emb which
+        # only handles the 4D q layout correctly; pass 3D ``[1, T, dim]``
+        # so q ends up ``[1, T, H, D]``.
+        raw = self.indexer(
+            x.unsqueeze(0), qkv.qr.unsqueeze(0), common.csa_meta.indexer_meta
+        )
+        # Indexer returns int32 raw compressed-pool offsets with -1 past
+        # the per-row valid count. When offset > 0 we rebase to global
+        # sparse-attn coords (preserving -1 sentinels via where). When
+        # offset == 0 the rebase is a no-op so skip the where launch.
+        if offset > 0:
+            compress_idxs = torch.where(raw >= 0, raw + offset, raw).long()
+        else:
+            compress_idxs = raw.long()
+        if compress_idxs.dim() == 2:
+            compress_idxs = compress_idxs.unsqueeze(0)
+
+        return self._forward_prefill_compressed(
+            x,
+            qkv,
+            common,
+            start_pos,
+            compress_idxs,
+            common.csa_meta.compressor_meta,
+        )
+
+    def _forward_prefill_hca(
+        self,
+        x: torch.Tensor,
+        qkv: PrefillQKV,
+        common: PrefillMeta,
+        start_pos,
+    ) -> torch.Tensor:
+        """HCA path (compress_ratio == 128). Dense compressed indices —
+        no indexer involved. Main compressor writes the HCA pool with
+        hoisted meta."""
+        assert self.indexer is None, "HCA layer must not have an indexer"
+        assert common.hca_meta is not None, (
+            "HCA prefill requires common.hca_meta — built by " "_build_hca_prefill_meta"
+        )
+
+        ratio = self.compress_ratio
+        offset = common.seqlen_full + common.sp_int
+        if common.cp_on:
+            compress_idxs = _get_compress_topk_idxs_cp(
+                ratio, 1, common.seqlen_full, offset, common.cp_ctx.global_positions
+            )
+        else:
+            compress_idxs = _get_compress_topk_idxs(
+                ratio, 1, common.seqlen, common.sp_int, offset, common.device
+            )
+
+        return self._forward_prefill_compressed(
+            x,
+            qkv,
+            common,
+            start_pos,
+            compress_idxs,
+            common.hca_meta.compressor_meta,
+        )
+
+    def _forward_prefill_compressed(
+        self,
+        x: torch.Tensor,
+        qkv: PrefillQKV,
+        common: PrefillMeta,
+        start_pos,
+        compress_idxs: torch.Tensor,
+        compressor_meta,
+    ) -> torch.Tensor:
+        """Shared CSA/HCA epilogue: compose ``[window | compressed]``
+        topk, run main compressor write with hoisted ``compressor_meta``,
+        gather kv_cat, sparse_attn, and output projection."""
+        topk_idxs = torch.cat([common.topk_idxs, compress_idxs], dim=-1).long()
+
+        kv_full_3d = qkv.kv_full.unsqueeze(0)
         prefill_swa_dense_for_attn = None
         if common.any_cont:
             prefill_swa_dense_for_attn = self._prefill_read_swa_dense_abs_from_pool(
@@ -2213,9 +2332,7 @@ class Attention(nn.Module):
                 current_kv_full=kv_full_3d,
             )
 
-        kv_compress = None
-        if self.compress_ratio:
-            kv_compress = self.compressor(x.unsqueeze(0), start_pos)
+        kv_compress = self.compressor(x.unsqueeze(0), start_pos, meta=compressor_meta)
 
         kv_cat = self._build_kv_cat(
             qkv,
@@ -2227,7 +2344,6 @@ class Attention(nn.Module):
         )
 
         o = self._prefill_attn(qkv.q.unsqueeze(0), kv_cat, topk_idxs, common)
-
         out_3d = self._prefill_output_proj(o, common)
         return out_3d.squeeze(0)
 
@@ -2312,32 +2428,12 @@ class Attention(nn.Module):
         if self._kv_cache_is_fp8:
             swa_meta = self._build_swa_prefill_meta(seqlen, sp_int, device)
 
-        indexer_meta: Optional[Any] = None
-        if self.indexer is not None:
-            from rtp_llm.models_py.modules.dsv4.attn_type import INDEXER_KV
-            from rtp_llm.models_py.modules.dsv4.indexer_fp8 import IndexerFP8
-
-            if isinstance(self.indexer, IndexerFP8):
-                # Pass INDEXER_KV block_table + entries_per_block directly
-                # so prepare() doesn't depend on a prior set_pool_context
-                # call. Both default to ``None``/``0`` during warmup, which
-                # IndexerFP8.prepare handles by emitting an empty
-                # ``block_table_i32`` (matching the warmup short-circuit
-                # in IndexerFP8.forward).
-                idx_bt = (
-                    self._block_tables_by_type.get(INDEXER_KV)
-                    if self._block_tables_by_type is not None
-                    else None
-                )
-                idx_eb = self._pool_entries_per_block(INDEXER_KV)
-                indexer_meta = self.indexer.prepare(
-                    bsz=1,
-                    seqlen=seqlen,
-                    sp_int=sp_int,
-                    device=device,
-                    kv_block_table=idx_bt,
-                    kv_eb=idx_eb,
-                )
+        csa_meta: Optional[CsaPrefillMeta] = None
+        hca_meta: Optional[HcaPrefillMeta] = None
+        if self.compress_ratio == 4:
+            csa_meta = self._build_csa_prefill_meta(seqlen, sp_int, device)
+        elif self.compress_ratio == 128:
+            hca_meta = self._build_hca_prefill_meta(seqlen, sp_int, device)
 
         return PrefillMeta(
             seqlen=seqlen,
@@ -2352,8 +2448,70 @@ class Attention(nn.Module):
             any_cont=any_cont,
             row_seqlens_full=row_seqlens_full,
             swa_meta=swa_meta,
-            indexer_meta=indexer_meta,
+            csa_meta=csa_meta,
+            hca_meta=hca_meta,
         )
+
+    # ------------------------------------------------------------------
+    # Per-ratio compressor metadata builders (CSA / HCA)
+    # ------------------------------------------------------------------
+    def _build_csa_prefill_meta(
+        self, seqlen: int, sp_int: int, device: torch.device
+    ) -> CsaPrefillMeta:
+        """Build CSA-layer per-call metadata: indexer prepare + main CSA
+        compressor prepare_metadata."""
+        from rtp_llm.models_py.modules.dsv4.attn_type import INDEXER_KV
+        from rtp_llm.models_py.modules.dsv4.indexer_fp8 import IndexerFP8
+
+        assert isinstance(self.indexer, IndexerFP8), "CSA layer requires IndexerFP8"
+
+        # Indexer prepare — pass INDEXER_KV block_table + entries_per_block
+        # explicitly so it doesn't depend on a prior set_pool_context call.
+        idx_bt = (
+            self._block_tables_by_type.get(INDEXER_KV)
+            if self._block_tables_by_type is not None
+            else None
+        )
+        idx_eb = self._pool_entries_per_block(INDEXER_KV)
+        indexer_meta = self.indexer.prepare(
+            bsz=1,
+            seqlen=seqlen,
+            sp_int=sp_int,
+            device=device,
+            kv_block_table=idx_bt,
+            kv_eb=idx_eb,
+        )
+
+        compressor_meta = self._build_compressor_meta(seqlen, sp_int, device)
+        return CsaPrefillMeta(
+            indexer_meta=indexer_meta,
+            compressor_meta=compressor_meta,
+        )
+
+    def _build_hca_prefill_meta(
+        self, seqlen: int, sp_int: int, device: torch.device
+    ) -> HcaPrefillMeta:
+        """Build HCA-layer per-call metadata: main HCA compressor
+        prepare_metadata."""
+        compressor_meta = self._build_compressor_meta(seqlen, sp_int, device)
+        return HcaPrefillMeta(compressor_meta=compressor_meta)
+
+    def _build_compressor_meta(self, seqlen: int, sp_int: int, device: torch.device):
+        """Run the main compressor's ``prepare_metadata`` with its pool
+        context temporarily bound. Returns ``CompressorMeta``. The pool
+        context binding (``_set_compressor_pool_context``) reads CSA_KV/
+        CSA_STATE for ratio=4 and HCA_KV/HCA_STATE for ratio=128 based
+        on ``self.compress_ratio``."""
+        from rtp_llm.models_py.modules.dsv4.compressor_fp8 import (
+            _build_prefill_positions,
+        )
+
+        positions, b_idx = _build_prefill_positions(sp_int, 1, seqlen, device)
+        self._set_compressor_pool_context()
+        try:
+            return self.compressor.prepare_metadata(positions, b_idx)
+        finally:
+            self._clear_compressor_pool_context()
 
     def _prefill_common_setup(self, x: torch.Tensor, start_pos: int) -> PrefillMeta:
         """Return the (possibly upper-layer-injected) shared prefill meta.
@@ -2511,59 +2669,6 @@ class Attention(nn.Module):
             q=q.squeeze(0),
             kv_full=kv_full.squeeze(0),
         )
-
-    # ------------------------------------------------------------------
-    # Compressed-block topk (HCA / CSA layers)
-    # ------------------------------------------------------------------
-    def _compute_compress_idxs(
-        self,
-        x: torch.Tensor,
-        qr: torch.Tensor,
-        common: PrefillMeta,
-        qkv: PrefillQKV,
-    ) -> torch.Tensor:
-        """Build the compressed-block topk tail concatenated to the SWA topk.
-
-        Layouts:
-          * fresh prefill: KV is ``[sliding (kv_full) | compressed tail]``
-            so the compressed offset is ``seqlen_full``.
-          * continuation prefill: dense absolute SWA view of length
-            ``sp + seqlen``, then compressed tail; offset is the same.
-        """
-
-        ratio = self.compress_ratio
-        seqlen = common.seqlen
-        device = common.device
-        offset = common.seqlen_full + common.sp_int  # absolute SWA stream end
-
-        if self.indexer is not None:
-            from rtp_llm.models_py.modules.dsv4.indexer_fp8 import IndexerFP8
-
-            if isinstance(self.indexer, IndexerFP8):
-                # IndexerFP8._compute_indexer_q feeds q to apply_rotary_emb
-                # which only handles the 4D q layout correctly; pass 3D
-                # ``[1, T, dim]`` so q ends up ``[1, T, H, D]``.
-                # ``common.indexer_meta`` was prebuilt in
-                # ``_prefill_common_setup`` (same isinstance gate).
-                raw = self.indexer(x.unsqueeze(0), qr.unsqueeze(0), common.indexer_meta)
-                # Indexer returns int32 raw compressed-pool offsets
-                # with -1 past the per-row valid count; rebase to
-                # global sparse-attn coords + cast to long for cat.
-                compress_idxs = torch.where(raw >= 0, raw + offset, raw).long()
-            else:
-                compress_idxs = self.indexer(
-                    x.unsqueeze(0), qr.unsqueeze(0), common.sp_int, offset
-                )
-            # Indexer outputs may be 2D [T, K] (FP8 flat) or 3D [B, S, K].
-            if compress_idxs.dim() == 2:
-                compress_idxs = compress_idxs.unsqueeze(0)
-            return compress_idxs
-
-        if common.cp_on:
-            return _get_compress_topk_idxs_cp(
-                ratio, 1, common.seqlen_full, offset, common.cp_ctx.global_positions
-            )
-        return _get_compress_topk_idxs(ratio, 1, seqlen, common.sp_int, offset, device)
 
     # ------------------------------------------------------------------
     # KV concat / gather
