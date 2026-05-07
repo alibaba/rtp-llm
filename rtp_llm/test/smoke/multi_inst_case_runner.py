@@ -1,10 +1,11 @@
 from typing import Dict, List, Union
 
+from smoke.case_runner import CaseRunner
+from smoke.task_info import TaskInfo, TaskStates
+
 from rtp_llm.server.host_service import EndPoint, GroupEndPoint, ServiceRoute
 from rtp_llm.test.utils.device_resource import get_gpu_ids
 from rtp_llm.test.utils.maga_server_manager import MagaServerManager
-from smoke.case_runner import CaseRunner
-from smoke.task_info import TaskInfo, TaskStates
 
 PREFILL_ROLE_NAME = "prefill"
 DECODE_ROLE_NAME = "decode"
@@ -39,10 +40,16 @@ class PdSeperationCaseRunner(CaseRunner):
         decode_envs = self.create_env_from_args(self.env_args[DECODE_ROLE_NAME])
         prefill_args = self.smoke_args.get(PREFILL_ROLE_NAME, "")
         decode_args = self.smoke_args.get(DECODE_ROLE_NAME, "")
-        prefill_enable_remote_cache = self._extract_bool_arg(prefill_args, "--enable_remote_cache")
-        decode_enable_remote_cache = self._extract_bool_arg(decode_args, "--enable_remote_cache")
+        prefill_enable_remote_cache = self._extract_bool_arg(
+            prefill_args, "--enable_remote_cache"
+        )
+        decode_enable_remote_cache = self._extract_bool_arg(
+            decode_args, "--enable_remote_cache"
+        )
         if prefill_enable_remote_cache ^ decode_enable_remote_cache:
-            raise Exception(f"prefill and decode instance ENABLE_REMOTE_CACHE not match, prefill[{prefill_enable_remote_cache}] decode[{decode_enable_remote_cache}]")
+            raise Exception(
+                f"prefill and decode instance ENABLE_REMOTE_CACHE not match, prefill[{prefill_enable_remote_cache}] decode[{decode_enable_remote_cache}]"
+            )
         enable_remote_cache = prefill_enable_remote_cache and decode_enable_remote_cache
         if enable_remote_cache:
             self.remote_kvcm_server = self._start_remote_kvcm_server()
@@ -150,7 +157,10 @@ class PdSeperationCaseRunner(CaseRunner):
             else frontend_server_manager
         )
 
-        task_states = self.curl_server(curl_server_mgr)
+        task_states = self.curl_server(
+            curl_server_mgr,
+            profile_server_managers=[decode_server_manager],
+        )
         prefill_server_manager.stop_server()
         decode_server_manager.stop_server()
 
@@ -189,10 +199,16 @@ class DpSeperationCaseRunner(CaseRunner):
         decode_envs = self.create_env_from_args(self.env_args[DECODE_ROLE_NAME])
         prefill_args = self.smoke_args.get(PREFILL_ROLE_NAME, "")
         decode_args = self.smoke_args.get(DECODE_ROLE_NAME, "")
-        prefill_enable_remote_cache = self._extract_bool_arg(prefill_args, "--enable_remote_cache")
-        decode_enable_remote_cache = self._extract_bool_arg(decode_args, "--enable_remote_cache")
+        prefill_enable_remote_cache = self._extract_bool_arg(
+            prefill_args, "--enable_remote_cache"
+        )
+        decode_enable_remote_cache = self._extract_bool_arg(
+            decode_args, "--enable_remote_cache"
+        )
         if prefill_enable_remote_cache ^ decode_enable_remote_cache:
-            raise Exception(f"prefill and decode instance ENABLE_REMOTE_CACHE not match, prefill[{prefill_enable_remote_cache}] decode[{decode_enable_remote_cache}]")
+            raise Exception(
+                f"prefill and decode instance ENABLE_REMOTE_CACHE not match, prefill[{prefill_enable_remote_cache}] decode[{decode_enable_remote_cache}]"
+            )
         enable_remote_cache = prefill_enable_remote_cache and decode_enable_remote_cache
         if enable_remote_cache:
             self.remote_kvcm_server = self._start_remote_kvcm_server()
@@ -306,7 +322,10 @@ class DpSeperationCaseRunner(CaseRunner):
             else frontend_server_manager
         )
 
-        task_states = self.curl_server(curl_server_mgr)
+        task_states = self.curl_server(
+            curl_server_mgr,
+            profile_server_managers=[decode_server_manager],
+        )
         prefill_server_manager.stop_server()
         decode_server_manager.stop_server()
 
