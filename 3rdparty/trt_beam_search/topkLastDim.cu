@@ -1408,7 +1408,7 @@ void standalone_stable_radix_topk_one_block_(void* buf, size_t& buf_size, T cons
 
     check_cuda_error();
 
-    air_topk_stable::radix_topk_one_block_kernel<T, IdxT, BitsPerPass, BlockSize, true>
+    air_topk_stable::radix_topk_one_block_kernel<T, IdxT, BitsPerPass, BlockSize, false>
         <<<batch_size, BlockSize, 0, stream>>>(in, in_idx, len, k, topk_out, topk_out_idx, select_min, bufs);
     check_cuda_error();
 
