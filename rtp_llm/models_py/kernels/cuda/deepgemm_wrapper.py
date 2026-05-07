@@ -1,4 +1,5 @@
 import functools
+import logging
 from contextlib import contextmanager
 from typing import Any, Callable, Generator, List, NoReturn, Optional, Tuple
 
@@ -7,6 +8,8 @@ import triton
 import triton.language as tl
 
 from rtp_llm.utils.module_util import has_module, resolve_symbol
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "fp8_gemm_nt",
@@ -122,7 +125,7 @@ def _lazy_init_deep_gemm(symbols: List[str]) -> None:
 
     import deep_gemm
 
-    # resolve symbols
+    # resolve symbols, skip gracefully if a symbol is missing (e.g. FP4 on older DeepGEMM)
     for i, symbol in enumerate(symbols):
         symbol_impl = symbol_impls[i]
         try:
@@ -132,8 +135,11 @@ def _lazy_init_deep_gemm(symbols: List[str]) -> None:
                 _deep_gemm_impl_old_map[symbol],
             )
         except AttributeError:
-            raise RuntimeError(
-                f"DeepGEMM symbol {_deep_gemm_impl_new_map[symbol]} and {_deep_gemm_impl_old_map[symbol]} not found in deep_gemm module"
+            logger.warning(
+                "DeepGEMM symbol %s / %s not found, %s will be unavailable",
+                _deep_gemm_impl_new_map[symbol],
+                _deep_gemm_impl_old_map[symbol],
+                symbol,
             )
 
 
@@ -629,6 +635,7 @@ def m_grouped_fp8_gemm_nt_masked(
     )
 
     a = (a[0], maybe_pack_ue8m0_scale(a[0], a[1], disable_ue8m0_cast))
+    b = (b[0], maybe_pack_ue8m0_scale(b[0], b[1], disable_ue8m0_cast))
 
     _m_grouped_fp8_gemm_nt_masked_impl(
         a,
