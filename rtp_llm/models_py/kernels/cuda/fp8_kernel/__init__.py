@@ -3,6 +3,7 @@ from .get_best_config import load_all_configs
 # load all configs once at import time
 load_all_configs()
 from .fp8_kernel import (
+    block_quant_dequant,
     create_per_token_group_quant_fp8_output_scale,
     cutlass_moe_mm_fp8_scaled,
     get_best_config_swap_ab,
@@ -15,6 +16,7 @@ from .fp8_kernel import (
 )
 
 __all__ = [
+    "block_quant_dequant",
     "sgl_per_token_group_quant_fp8",
     "scaled_fp8_per_tensor_quant",
     "scaled_fp8_per_token_quant",

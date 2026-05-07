@@ -3,17 +3,21 @@
 # Licensed under the Apache License, Version 2.0
 import logging
 import math
+import os
 from typing import Any, Dict, Optional
 
 import torch
 
-logger = logging.getLogger(__name__)
-
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
     configure_deep_gemm_num_sms,
+    has_deep_gemm,
     is_deep_gemm_e8m0_used,
+    is_sm100,
     m_grouped_fp8_gemm_nt_contiguous,
+    m_grouped_fp8_fp4_gemm_nt_contiguous,
     m_grouped_fp8_gemm_nt_masked,
+    m_grouped_fp8_fp4_gemm_nt_masked,
+    pre_pack_weight_ue8m0_scale,
 )
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
@@ -28,6 +32,9 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.type import ExecutorType
+from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
+    MoeConfigResolver,
+)
 from rtp_llm.models_py.triton_kernels.common.activation import (
     create_packed_scale_tensor,
     silu_and_mul,
@@ -43,8 +50,13 @@ from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
 from rtp_llm.models_py.utils.arch import get_num_device_sms, get_sm
 from rtp_llm.models_py.utils.math import align, ceil_div
 from rtp_llm.models_py.utils.memory import dispose_tensor
+from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear import (
+    CudaFp8DeepGEMMLinear,
+)
 from rtp_llm.ops.compute_ops import trt_fp8_quantize_128
 from rtp_llm.utils.model_weight import W
+
+logger = logging.getLogger(__name__)
 
 
 def align_up_math(n: int, alignment: int = 128) -> int:
@@ -63,11 +75,6 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
         """Check if DeepGemmHybridExecutor can handle the configuration"""
-        from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import has_deep_gemm
-        from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
-            MoeConfigResolver,
-        )
-
         resolver = MoeConfigResolver()
         quant_method = resolver.get_quant_method(config)
         checker.check(quant_method == "FP8_PER_BLOCK")
@@ -115,6 +122,14 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         assert self.w2_weight.size(1) == self.K
         assert self.w2_weight.size(2) == self.N // 2
 
+        # Pre-pack weight scales once at init time (avoids per-forward packing)
+        self.w13_weight_scale_inv = pre_pack_weight_ue8m0_scale(
+            self.w13_weight, self.w13_weight_scale_inv
+        )
+        self.w2_weight_scale_inv = pre_pack_weight_ue8m0_scale(
+            self.w2_weight, self.w2_weight_scale_inv
+        )
+
         self.w13_weight_fp8 = (
             self.w13_weight,
             self.w13_weight_scale_inv,
@@ -124,7 +139,42 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
             self.w2_weight_scale_inv,
         )
 
+        # SM100 FP4: convert w13 (Gate/Up) weight to FP4
+        self._use_fp4_w13 = False
+        if is_sm100() and os.environ.get("DG_USE_FP4_ON_SM100", "1") != "0":
+            try:
+                self._convert_w13_to_fp4()
+                self._use_fp4_w13 = True
+                logger.info(
+                    f"SM100 FP4 enabled for MoE w13 ({self.E}, {self.N}, {self.K})"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"SM100 FP4 MoE w13 conversion failed, fallback to FP8: {e}"
+                )
+
         self.num_gemm_sms = get_num_device_sms()
+
+    @torch.inference_mode()
+    def _convert_w13_to_fp4(self):
+        """Convert MoE w13 (Gate/Up) FP8 weight to FP4 for SM100."""
+        from deep_gemm.utils import per_token_cast_to_fp4
+
+        w13_bf16 = CudaFp8DeepGEMMLinear._unpack_ue8m0_and_dequant(
+            self.w13_weight, self.w13_weight_scale_inv
+        )
+        E, N, K = w13_bf16.shape
+        fp4_list, scale_list = [], []
+        for i in range(E):
+            fp4_i, scale_i = per_token_cast_to_fp4(
+                w13_bf16[i], use_ue8m0=True, gran_k=32
+            )
+            fp4_list.append(fp4_i)
+            scale_list.append(scale_i)
+        self.w13_fp4 = torch.stack(fp4_list)
+        self.w13_fp4_scale = torch.stack(scale_list)
+        self.w13_weight_fp4 = (self.w13_fp4, self.w13_fp4_scale)
+        del w13_bf16, fp4_list, scale_list
 
     def execute(
         self,
@@ -247,14 +297,26 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                 dtype=torch.bfloat16,
             )
             # Gate and Up GroupGEMM-0
-            m_grouped_fp8_gemm_nt_masked(
-                (input_tensor[0], input_tensor[1]),
-                self.w13_weight_fp8,
-                upgate_output,
-                num_recv_tokens_per_expert,
-                expected_m,
-                disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),
-            )
+            if self._use_fp4_w13:
+                m_grouped_fp8_fp4_gemm_nt_masked(
+                    (input_tensor[0], input_tensor[1]),
+                    self.w13_weight_fp4,
+                    upgate_output,
+                    num_recv_tokens_per_expert,
+                    expected_m,
+                    recipe_a=(1, 128),
+                    recipe_b=(1, 32),
+                    disable_ue8m0_cast=False,
+                )
+            else:
+                m_grouped_fp8_gemm_nt_masked(
+                    (input_tensor[0], input_tensor[1]),
+                    self.w13_weight_fp8,
+                    upgate_output,
+                    num_recv_tokens_per_expert,
+                    expected_m,
+                    disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),
+                )
 
             del input_tensor
             # Allocate down_input
@@ -470,13 +532,24 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         )
         if not is_deep_gemm_e8m0_used():
             input_tensor[1] = tma_align_input_scale(input_tensor[1])
-        m_grouped_fp8_gemm_nt_contiguous(
-            (input_tensor[0], input_tensor[1]),
-            self.w13_weight_fp8,
-            gateup_output,
-            m_indices,
-            disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),
-        )
+        if self._use_fp4_w13:
+            m_grouped_fp8_fp4_gemm_nt_contiguous(
+                (input_tensor[0], input_tensor[1]),
+                self.w13_weight_fp4,
+                gateup_output,
+                m_indices,
+                recipe_a=(1, 128),
+                recipe_b=(1, 32),
+                disable_ue8m0_cast=False,
+            )
+        else:
+            m_grouped_fp8_gemm_nt_contiguous(
+                (input_tensor[0], input_tensor[1]),
+                self.w13_weight_fp8,
+                gateup_output,
+                m_indices,
+                disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),
+            )
         del input_tensor
         down_input = torch.empty(
             (
