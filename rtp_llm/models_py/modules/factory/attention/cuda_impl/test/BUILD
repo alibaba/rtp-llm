@@ -201,3 +201,31 @@ py_test(
     },
 )
 
+# FA3 MTP target verify heterogeneous-batch CG correctness regression suite.
+py_test(
+    name = "test_fa3_target_verify_heterogeneous",
+    srcs = [
+        "test_fa3_target_verify_heterogeneous.py",
+        "base_attention_test.py",
+    ],
+    deps = py_test_deps,
+    tags = ["H20"],
+    exec_properties = {
+        'gpu': 'H20',
+    },
+)
+
+# FA3 MTP draft prefill heterogeneous Q-length CG correctness regression suite.
+py_test(
+    name = "test_fa3_draft_prefill_heterogeneous",
+    srcs = [
+        "test_fa3_draft_prefill_heterogeneous.py",
+        "base_attention_test.py",
+    ],
+    deps = py_test_deps,
+    tags = ["H20"],
+    exec_properties = {
+        'gpu': 'H20',
+    },
+)
+

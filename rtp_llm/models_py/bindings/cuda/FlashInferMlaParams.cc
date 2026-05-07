@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/models_py/bindings/common/Torch_ext.h"
 #include <cstdint>
+#include <cstring>
 #include <algorithm>
 #include <numeric>
 #include <cuda_runtime.h>
@@ -438,6 +439,22 @@ void FlashInferMlaAttnParams::fillParams(torch::Tensor t_prefix_lengths,
 
     // Ensure tensors are allocated with sufficient size
     ensureTensorSize(batch_size, input_token_num, page_num, reuse_page_num, batch_reuse_info_size, forbid_realloc);
+
+    // BUG FIX (2026-04-27): zero the entire host buffer before fillParamsInternal
+    // writes the active region. fillParamsInternal only writes the prefix
+    // [0..input_token_num) of batch_indice/positions, [0..page_num) of
+    // page_indice, etc. Without this zero, sub-tensor tails retain stale
+    // entries from previous larger calls (e.g. previous replay had
+    // current_batch_size=3 → batch_indice[0..12]=[0]*4+[1]*4+[2]*4. Next
+    // replay with current_batch_size=2 only writes batch_indice[0..8] →
+    // positions 8..11 still hold [2]*4). refreshBuffer() then cudaMemcpyAsync's
+    // the entire buf_h to buf_d, so captured kernels (target_verify CG path)
+    // that read past the current valid count see stale entries pointing at
+    // pages owned by other active requests, producing cross-request KV cache
+    // corruption and the "** ** **" garbled output.
+    if (buf_h.defined() && buf_h.numel() > 0) {
+        std::memset(buf_h.data_ptr(), 0, buf_h.numel() * sizeof(int32_t));
+    }
 
     // Fill params directly into HOST tensors
     fillParamsInternal(t_prefix_lengths,
