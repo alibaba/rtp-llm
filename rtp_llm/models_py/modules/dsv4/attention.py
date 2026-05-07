@@ -685,7 +685,7 @@ class Attention(nn.Module):
                 "norm": layer_weights[W.v4_compressor_norm],
             }
             if self._kv_cache_is_fp8:
-                from rtp_llm.models_py.modules.dsv4.compressor_fp8 import CompressorFP8
+                from rtp_llm.models_py.modules.dsv4.fp8.compressor import CompressorFP8
 
                 self.compressor = CompressorFP8(
                     dim=dim,
@@ -716,7 +716,7 @@ class Attention(nn.Module):
             # needs the T hint to allocate the ephemeral zero tensor.
             if compress_ratio == 4:
                 if self._kv_cache_is_fp8:
-                    from rtp_llm.models_py.modules.dsv4.indexer_fp8 import IndexerFP8
+                    from rtp_llm.models_py.modules.dsv4.fp8.indexer import IndexerFP8
 
                     self.indexer = IndexerFP8(
                         dim=dim,
@@ -1502,7 +1502,7 @@ class Attention(nn.Module):
             pool_3d = self._pool_view_3d_fp8(attn_type)
             if pool_3d is None or pool_3d.shape[-1] != _DSV4_FP8_KV_ENTRY_BYTES:
                 return None
-            from rtp_llm.models_py.modules.dsv4._swa_fp8_dequant_triton import (
+            from rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton import (
                 dequantize_and_gather_k_cache,
             )
 
@@ -1734,6 +1734,11 @@ class Attention(nn.Module):
         from rtp_llm.models_py.modules.dsv4.decode.sparse_attn_decode_op import (
             SparseAttnV4DecodeOp,
         )
+
+        # Debug tensor probes are off in production; the conditional blocks
+        # below are no-ops, but Python still needs the names defined.
+        _dbg_decode = False
+        _rt = None  # type: ignore[assignment]
 
         bsz, q_len, _ = x.size()
         assert q_len == 1, "Phase 2: q_len==1 only (MTP/spec-decode is later)"
@@ -2238,7 +2243,7 @@ class Attention(nn.Module):
         """CSA path (compress_ratio == 4). Sparse compress topk via the
         IndexerFP8 lightning indexer; main compressor writes the CSA
         pool with hoisted meta."""
-        from rtp_llm.models_py.modules.dsv4.indexer_fp8 import IndexerFP8
+        from rtp_llm.models_py.modules.dsv4.fp8.indexer import IndexerFP8
 
         assert isinstance(
             self.indexer, IndexerFP8
@@ -2472,7 +2477,7 @@ class Attention(nn.Module):
         """Build CSA-layer per-call metadata: indexer prepare + main CSA
         compressor prepare_metadata."""
         from rtp_llm.models_py.modules.dsv4.attn_type import INDEXER_KV
-        from rtp_llm.models_py.modules.dsv4.indexer_fp8 import IndexerFP8
+        from rtp_llm.models_py.modules.dsv4.fp8.indexer import IndexerFP8
 
         assert isinstance(self.indexer, IndexerFP8), "CSA layer requires IndexerFP8"
 
@@ -2513,7 +2518,7 @@ class Attention(nn.Module):
         context binding (``_set_compressor_pool_context``) reads CSA_KV/
         CSA_STATE for ratio=4 and HCA_KV/HCA_STATE for ratio=128 based
         on ``self.compress_ratio``."""
-        from rtp_llm.models_py.modules.dsv4.compressor_fp8 import (
+        from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
             _build_prefill_positions,
         )
 
@@ -2550,8 +2555,8 @@ class Attention(nn.Module):
         can consume it without a fallback). ``cache_*`` / ``combined_*``
         only on continuation prefill (``sp > 0``).
         """
-        from rtp_llm.models_py.modules.dsv4 import _swa_prefill_ops_triton as _swa_ops
         from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
+        from rtp_llm.models_py.modules.dsv4.prefill import _swa_ops_triton as _swa_ops
 
         bsz = 1
         win = self.window_size
@@ -2792,8 +2797,8 @@ class Attention(nn.Module):
         ``2*eb`` capacity get ``slot=-1`` and are skipped. No-op on
         warmup (``swa_meta`` write fields are ``None``).
         """
-        from rtp_llm.models_py.modules.dsv4 import _swa_fp8_kv_insert_triton as _ins
         from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
+        from rtp_llm.models_py.modules.dsv4.fp8 import _swa_kv_insert_triton as _ins
 
         meta = common.swa_meta
         if meta is None or meta.slot_mapping is None:
@@ -2872,8 +2877,11 @@ class Attention(nn.Module):
         """
         from flash_mla import flash_mla_sparse_fwd  # type: ignore[import-not-found]
 
-        from rtp_llm.models_py.modules.dsv4 import _swa_fp8_dequant_triton as _swa_dq
         from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
+        from rtp_llm.models_py.modules.dsv4.fp8 import _swa_dequant_triton as _swa_dq
+
+        # Inline ``_record_tensor`` debug gate — production runs with MOEDBG off.
+        _dbg = False
 
         meta = common.swa_meta
         assert (
