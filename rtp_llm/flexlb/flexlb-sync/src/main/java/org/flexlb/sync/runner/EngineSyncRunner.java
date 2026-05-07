@@ -8,6 +8,7 @@ import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.EngineHealthReporter;
+import org.flexlb.sync.status.EngineWorkerStatus;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.util.CollectionUtils;
@@ -104,6 +105,7 @@ public class EngineSyncRunner implements Runnable {
                     long removalThresholdUs = Math.max(3 * actualIntervalUs, 1_000_000L);
                     if (System.nanoTime() / 1000 - lastTime > removalThresholdUs) {
                         cachedWorkerStatuses.remove(ipPort);
+                        EngineWorkerStatus.bumpVersion();
                         logger.info("[remove] engine ip changes, model={}, role={}, ipPort={}", modelName, roleType, ipPort);
                     }
                 }
@@ -193,7 +195,7 @@ public class EngineSyncRunner implements Runnable {
             workerStatus.setIp(split[0]);
             workerStatus.setPort(Integer.parseInt(split[1]));
             workerStatuses.put(workerIpPort, workerStatus);
-            org.flexlb.sync.status.EngineWorkerStatus.bumpVersion();
+            EngineWorkerStatus.bumpVersion();
             logger.info("Created new WorkerStatus for worker: {}", workerIpPort);
         }
         return workerStatus;

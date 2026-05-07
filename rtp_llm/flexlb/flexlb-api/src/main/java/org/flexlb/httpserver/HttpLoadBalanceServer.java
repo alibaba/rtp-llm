@@ -119,7 +119,7 @@ public class HttpLoadBalanceServer {
             return null;
         }
         try {
-            return RoleType.valueOf(name.toUpperCase());
+            return RoleType.valueOf(name);
         } catch (IllegalArgumentException e) {
             return null;
         }

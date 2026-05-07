@@ -249,7 +249,6 @@ public class DefaultRouter implements Router {
         s.setServerIp(ws.getIp());
         s.setHttpPort(ws.getPort());
         s.setGrpcPort(CommonUtils.toGrpcPort(ws.getPort()));
-        s.setSuccess(true);
         return s;
     }
 }

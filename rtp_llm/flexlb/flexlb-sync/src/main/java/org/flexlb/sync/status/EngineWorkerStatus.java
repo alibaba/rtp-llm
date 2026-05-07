@@ -24,8 +24,8 @@ public class EngineWorkerStatus {
         return VERSION_COUNTER.get();
     }
 
-    public static long bumpVersion() {
-        return VERSION_COUNTER.incrementAndGet();
+    public static void bumpVersion() {
+        VERSION_COUNTER.incrementAndGet();
     }
 
     public final ModelMetaConfig modelMetaConfig;
