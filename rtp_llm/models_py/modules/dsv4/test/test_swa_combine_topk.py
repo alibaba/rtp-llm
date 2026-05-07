@@ -36,7 +36,7 @@ from typing import List
 
 import torch
 
-from rtp_llm.models_py.modules.dsv4._swa_prefill_ops_triton import (
+from rtp_llm.models_py.modules.dsv4.prefill._swa_ops_triton import (
     _SPARSE_PREFILL_TOPK_ALIGNMENT,
     combine_topk_swa_indices,
 )

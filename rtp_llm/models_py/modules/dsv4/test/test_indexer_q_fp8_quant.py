@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import torch
 
-from rtp_llm.models_py.modules.dsv4._indexer_q_fp8_quant_triton import (
+from rtp_llm.models_py.modules.dsv4.fp8._indexer_q_quant_triton import (
     FP8_E4M3_MAX,
     INDEXER_HEAD_DIM,
     indexer_q_fp8_quant_fold,

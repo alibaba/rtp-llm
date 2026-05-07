@@ -274,7 +274,7 @@ class TestIndexerFp8LayoutRoundTrip(unittest.TestCase):
     def _quant_dequant(self, k_bf16: torch.Tensor):
         """Quantize → dequantize via the production kernels and return
         ``(pool, recon_fp32)``.  Single-block placement at slot==arange(T)."""
-        from rtp_llm.models_py.modules.dsv4._indexer_fp8_quant_triton import (
+        from rtp_llm.models_py.modules.dsv4.fp8._indexer_quant_triton import (
             INDEXER_ENTRY_BYTES,
             dequantize_indexer_k,
             quantize_indexer_k,
@@ -313,7 +313,7 @@ class TestIndexerFp8LayoutRoundTrip(unittest.TestCase):
         self.assertTrue(torch.all(recon == 0.0))
 
     def test_uniform_vector_quantizes_to_same_code(self):
-        from rtp_llm.models_py.modules.dsv4._indexer_fp8_quant_triton import (
+        from rtp_llm.models_py.modules.dsv4.fp8._indexer_quant_triton import (
             INDEXER_HEAD_DIM,
         )
 

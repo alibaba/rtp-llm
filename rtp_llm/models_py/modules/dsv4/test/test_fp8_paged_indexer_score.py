@@ -19,20 +19,20 @@ from __future__ import annotations
 
 import torch
 
-from rtp_llm.models_py.modules.dsv4._indexer_fp8_quant_triton import (
+from rtp_llm.models_py.modules.dsv4._indexer_score_triton import v4_indexer_score
+from rtp_llm.models_py.modules.dsv4.fp8._indexer_q_quant_triton import (
+    indexer_q_fp8_quant_fold,
+)
+from rtp_llm.models_py.modules.dsv4.fp8._indexer_quant_triton import (
     INDEXER_ENTRY_BYTES,
     INDEXER_HEAD_DIM,
     dequantize_indexer_k,
     quantize_indexer_k,
 )
-from rtp_llm.models_py.modules.dsv4._indexer_q_fp8_quant_triton import (
-    indexer_q_fp8_quant_fold,
-)
-from rtp_llm.models_py.modules.dsv4._indexer_score_fp8 import (
+from rtp_llm.models_py.modules.dsv4.fp8._indexer_score import (
     fp8_paged_indexer_score,
     has_fp8_paged_mqa_logits,
 )
-from rtp_llm.models_py.modules.dsv4._indexer_score_triton import v4_indexer_score
 
 
 def _make_packed_cache_with_block_table(k_bf16: torch.Tensor, block_size: int):

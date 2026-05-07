@@ -30,7 +30,7 @@ from typing import Optional
 
 import torch
 
-from rtp_llm.models_py.modules.dsv4.indexer_fp8 import (
+from rtp_llm.models_py.modules.dsv4.fp8.indexer import (
     IndexerFP8,
     _IndexerFP8PrefillMeta,
 )

@@ -14,9 +14,9 @@ import torch
 
 from rtp_llm.models_py.modules.dsv4.attention import Attention
 from rtp_llm.models_py.modules.dsv4.compressor import Compressor
-from rtp_llm.models_py.modules.dsv4.compressor_fp8 import CompressorFP8
+from rtp_llm.models_py.modules.dsv4.fp8.compressor import CompressorFP8
+from rtp_llm.models_py.modules.dsv4.fp8.indexer import IndexerFP8
 from rtp_llm.models_py.modules.dsv4.indexer import Indexer
-from rtp_llm.models_py.modules.dsv4.indexer_fp8 import IndexerFP8
 
 
 def _make(ratio: int, dtype):

@@ -24,7 +24,7 @@ from rtp_llm.models_py.modules.dsv4._compressor_consts import (
     KV_ENTRY_BYTES,
     KV_HEAD_DIM,
 )
-from rtp_llm.models_py.modules.dsv4.compressor_fp8 import (
+from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
     CompressorFP8,
     build_decode_metadata,
     build_prefill_metadata,

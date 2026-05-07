@@ -29,7 +29,7 @@ from typing import Optional
 
 import torch
 
-from rtp_llm.models_py.modules.dsv4._indexer_fp8_quant_triton import (
+from rtp_llm.models_py.modules.dsv4.fp8._indexer_quant_triton import (
     INDEXER_ENTRY_BYTES,
     INDEXER_HEAD_DIM,
 )

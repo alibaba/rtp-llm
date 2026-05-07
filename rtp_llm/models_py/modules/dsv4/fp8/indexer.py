@@ -28,20 +28,20 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from rtp_llm.models_py.modules.dsv4._indexer_fp8_quant_triton import (
+from rtp_llm.models_py.modules.dsv4.fp8._indexer_q_quant_triton import (
+    indexer_q_fp8_quant_fold,
+)
+from rtp_llm.models_py.modules.dsv4.fp8._indexer_quant_triton import (
     INDEXER_ENTRY_BYTES,
     INDEXER_HEAD_DIM,
 )
-from rtp_llm.models_py.modules.dsv4._indexer_q_fp8_quant_triton import (
-    indexer_q_fp8_quant_fold,
-)
-from rtp_llm.models_py.modules.dsv4._indexer_score_fp8 import (
+from rtp_llm.models_py.modules.dsv4.fp8._indexer_score import (
     fp8_mqa_indexer_score,
     fp8_paged_indexer_score,
     has_fp8_mqa_logits,
     has_fp8_paged_mqa_logits,
 )
-from rtp_llm.models_py.modules.dsv4.compressor_fp8 import CompressorFP8
+from rtp_llm.models_py.modules.dsv4.fp8.compressor import CompressorFP8
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import PoolBackedModule
 from rtp_llm.models_py.modules.dsv4.qlinear import QuantizedLinear
 from rtp_llm.models_py.modules.dsv4.rope import (

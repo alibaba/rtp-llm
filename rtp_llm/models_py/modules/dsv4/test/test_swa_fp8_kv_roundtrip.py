@@ -30,10 +30,10 @@ import unittest
 
 import torch
 
-from rtp_llm.models_py.modules.dsv4._swa_fp8_dequant_triton import (
+from rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton import (
     dequantize_and_gather_k_cache,
 )
-from rtp_llm.models_py.modules.dsv4._swa_fp8_kv_insert_triton import (
+from rtp_llm.models_py.modules.dsv4.fp8._swa_kv_insert_triton import (
     quantize_and_insert_k_cache,
 )
 
