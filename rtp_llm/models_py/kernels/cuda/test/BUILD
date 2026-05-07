@@ -58,6 +58,13 @@ py_test (
     exec_properties = {'gpu':'H20'},
 )
 
+py_test (
+    name = "fp8_quant_gemm_microbench",
+    srcs = ["fp8_quant_gemm_microbench.py"],
+    deps = py_test_deps,
+    tags = ["manual"],
+)
+
 # py_test(
 #     name = "test_xqa_batch_decode",
 #     srcs = ["test_xqa_batch_decode.py"],
@@ -69,4 +76,3 @@ py_test (
 # #     tags = ["H20"],
 #     exec_properties = {'gpu':'H20'},
 # )
-

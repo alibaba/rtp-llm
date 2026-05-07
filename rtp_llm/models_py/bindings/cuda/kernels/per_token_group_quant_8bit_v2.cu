@@ -4,6 +4,7 @@
 #include <c10/util/Float8_e4m3fn.h>
 
 #include <cmath>
+#include <limits>
 // #include <flashinfer/vec_dtypes.cuh>
 // #include "utils.h"
 #include "vec_dtypes.cuh"
@@ -132,7 +133,6 @@ __device__ __forceinline__ int compute_input_group_start_offset(int expert_idx,
            + token_idx * hidden_size * (FUSE_SILU_AND_MUL ? 2 : 1) + hidden_dim_group_idx * group_size;
 }
 
-constexpr float    LOCAL_ABSMAX_ABS            = 1e-10;
 constexpr uint32_t INPUT_PRIMARY_VEC_NUM_BYTES = 32;
 
 struct NaiveScheduler {
@@ -251,6 +251,7 @@ __global__ void per_token_group_quant_8bit_kernel(const T* __restrict__ input,
                                                   const int32_t* __restrict__ masked_m,
                                                   const int subwarps_per_block,
                                                   const int hidden_dim_num_groups,
+                                                  const float eps,
                                                   // TODO can this be removed?
                                                   const int scale_expert_stride,
                                                   const int scale_hidden_stride,
@@ -326,7 +327,7 @@ __global__ void per_token_group_quant_8bit_kernel(const T* __restrict__ input,
                 }
             }
 
-            float local_absmax = LOCAL_ABSMAX_ABS;
+            float local_absmax = eps;
 
 #pragma unroll
             for (uint32_t j = 0; j < INPUT_PRIMARY_VEC_SIZE; ++j) {
@@ -409,10 +410,10 @@ void sgl_per_token_group_quant_8bit_v2(
     CHECK_INPUT(output_q);
     TORCH_CHECK(input.numel() > 0);
 
-    TORCH_CHECK(std::abs(LOCAL_ABSMAX_ABS - eps) < 1e-13);
-
     CHECK_EQ(input.numel() % group_size, 0);
-    const int num_groups = static_cast<int>(input.numel()) / group_size / (fuse_silu_and_mul ? 2 : 1);
+    const int64_t num_groups_64 = input.numel() / group_size / (fuse_silu_and_mul ? 2 : 1);
+    TORCH_CHECK(num_groups_64 <= std::numeric_limits<int>::max(), "num_groups exceeds int32 range");
+    const int num_groups = static_cast<int>(num_groups_64);
 
     const bool masked_layout = masked_m.has_value();
     TORCH_CHECK(output_s.dim() == (masked_layout ? 3 : 2));
@@ -448,6 +449,7 @@ void sgl_per_token_group_quant_8bit_v2(
                                          static_cast<int32_t*>(masked_m.has_value() ? masked_m->data_ptr() : 0),       \
                                          subwarps_per_block,                                                           \
                                          hidden_dim_num_groups,                                                        \
+                                         static_cast<float>(eps),                                                      \
                                          scale_expert_stride,                                                          \
                                          scale_hidden_stride,                                                          \
                                          num_tokens_per_expert);                                                       \
