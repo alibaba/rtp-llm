@@ -78,6 +78,10 @@ py_test (
         "//rtp_llm:testlib",
         "//rtp_llm:flashinfer-python",
         "//rtp_llm:nvidia-cutlass-dsl",
+        "//rtp_llm:cuda-bindings",
+        "//rtp_llm:cuda-python",
+        "//rtp_llm:cuda-pathfinder",
+        "//rtp_llm:nvidia-cutlass-dsl-libs-base",
     ],
     env = {
         "GPU_COUNT": "1",
@@ -94,6 +98,11 @@ py_test (
         "//rtp_llm:config",
         "//rtp_llm:testlib",
         "//rtp_llm:flashinfer-python",
+        "//rtp_llm:nvidia-cutlass-dsl",
+        "//rtp_llm:cuda-bindings",
+        "//rtp_llm:cuda-python",
+        "//rtp_llm:cuda-pathfinder",
+        "//rtp_llm:nvidia-cutlass-dsl-libs-base",
     ],
     env = {
         "GPU_COUNT": "1",

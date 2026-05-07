@@ -454,8 +454,12 @@ def fp8_fp4_gemm_nt(
     if _fp8_fp4_gemm_nt_impl is None:
         return _missing_deep_gemm()
     _fp8_fp4_gemm_nt_impl(
-        a, b, output, c=c,
-        recipe_a=recipe_a, recipe_b=recipe_b,
+        a,
+        b,
+        output,
+        c=c,
+        recipe_a=recipe_a,
+        recipe_b=recipe_b,
         compiled_dims=compiled_dims,
         disable_ue8m0_cast=disable_ue8m0_cast,
     )
@@ -518,7 +522,10 @@ def m_grouped_fp8_fp4_gemm_nt_contiguous(
     if _m_grouped_fp8_gemm_nt_contiguous_impl is None:
         return _missing_deep_gemm()
     _m_grouped_fp8_gemm_nt_contiguous_impl(
-        a, b, output, m_indices,
+        a,
+        b,
+        output,
+        m_indices,
         compiled_dims=compiled_dims,
         disable_ue8m0_cast=disable_ue8m0_cast,
         recipe_a=recipe_a,
@@ -548,7 +555,11 @@ def m_grouped_fp8_fp4_gemm_nt_masked(
     a = (a[0], maybe_pack_ue8m0_scale(a[0], a[1], disable_ue8m0_cast))
 
     _m_grouped_fp8_gemm_nt_masked_impl(
-        a, b, output, masked_m, expected_m,
+        a,
+        b,
+        output,
+        masked_m,
+        expected_m,
         compiled_dims=compiled_dims,
         disable_ue8m0_cast=disable_ue8m0_cast,
         recipe_a=recipe_a,
@@ -613,22 +624,22 @@ def m_grouped_fp8_gemm_nt_masked(
     expected_m: int,
     compiled_dims: str = "nk",
     disable_ue8m0_cast: Optional[bool] = None,
+    b_prepacked: bool = False,
 ) -> None:
     """Execute grouped FP8 GEMM (A * B^T) with masked layout.
-
-    Weight (b) scales should be pre-packed via ``pre_pack_weight_ue8m0_scale``
-    at init time.  Only input (a) scales are packed here per forward call.
 
     Args:
         a (Tuple[torch.Tensor, torch.Tensor]): FP8 data and scales for the first matrix with masked layout.
         b (Tuple[torch.Tensor, torch.Tensor]): FP8 data and scales for the second matrix.
-            Scales should already be pre-packed via ``pre_pack_weight_ue8m0_scale``.
         output (torch.Tensor): Output tensor.
         masked_m (torch.Tensor): the number of valid tokens in each group.
         expected_m (int): Expected number of valid tokens in each group.
         compiled_dims (str, optional): Compiled dimensions. Defaults to "nk".
         disable_ue8m0_cast (bool, optional): Whether to disable E8M0 type cast for E8M0 scale.
             Defaults to None, which will be set to False if E8M0 scale is used, otherwise True.
+        b_prepacked (bool, optional): If True, skip UE8M0 packing for b scales (caller
+            already pre-packed via ``pre_pack_weight_ue8m0_scale`` at init time).
+            Defaults to False for backward compatibility.
     """
     global _m_grouped_fp8_gemm_nt_masked_impl
     if _m_grouped_fp8_gemm_nt_masked_impl is None:
@@ -641,6 +652,8 @@ def m_grouped_fp8_gemm_nt_masked(
     )
 
     a = (a[0], maybe_pack_ue8m0_scale(a[0], a[1], disable_ue8m0_cast))
+    if not b_prepacked:
+        b = (b[0], maybe_pack_ue8m0_scale(b[0], b[1], disable_ue8m0_cast))
 
     _m_grouped_fp8_gemm_nt_masked_impl(
         a,

@@ -14,10 +14,10 @@ from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
     has_fp8_fp4_gemm_nt,
     is_deep_gemm_e8m0_used,
     is_sm100,
-    m_grouped_fp8_gemm_nt_contiguous,
     m_grouped_fp8_fp4_gemm_nt_contiguous,
-    m_grouped_fp8_gemm_nt_masked,
     m_grouped_fp8_fp4_gemm_nt_masked,
+    m_grouped_fp8_gemm_nt_contiguous,
+    m_grouped_fp8_gemm_nt_masked,
     pre_pack_weight_ue8m0_scale,
 )
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
@@ -36,6 +36,9 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.type import ExecutorType
 from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
     MoeConfigResolver,
 )
+from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear import (
+    CudaFp8DeepGEMMLinear,
+)
 from rtp_llm.models_py.triton_kernels.common.activation import (
     create_packed_scale_tensor,
     silu_and_mul,
@@ -51,9 +54,6 @@ from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
 from rtp_llm.models_py.utils.arch import get_num_device_sms, get_sm
 from rtp_llm.models_py.utils.math import align, ceil_div
 from rtp_llm.models_py.utils.memory import dispose_tensor
-from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear import (
-    CudaFp8DeepGEMMLinear,
-)
 from rtp_llm.ops.compute_ops import trt_fp8_quantize_128
 from rtp_llm.utils.model_weight import W
 
@@ -140,9 +140,13 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
             self.w2_weight_scale_inv,
         )
 
-        # SM100 FP4: convert w13 (Gate/Up) weight to FP4
+        # SM100 FP4: convert w13 (Gate/Up) weight to FP4 (opt-in via DG_USE_FP4_ON_SM100=1)
         self._use_fp4_w13 = False
-        if is_sm100() and has_fp8_fp4_gemm_nt() and os.environ.get("DG_USE_FP4_ON_SM100", "1") != "0":
+        if (
+            is_sm100()
+            and has_fp8_fp4_gemm_nt()
+            and os.environ.get("DG_USE_FP4_ON_SM100", "0") == "1"
+        ):
             try:
                 self._convert_w13_to_fp4()
                 self._use_fp4_w13 = True
@@ -317,6 +321,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                     num_recv_tokens_per_expert,
                     expected_m,
                     disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),
+                    b_prepacked=True,
                 )
 
             del input_tensor
@@ -393,6 +398,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                 num_recv_tokens_per_expert,
                 expected_m,
                 disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),
+                b_prepacked=True,
             )
 
             # Free down_input and down_input_scale

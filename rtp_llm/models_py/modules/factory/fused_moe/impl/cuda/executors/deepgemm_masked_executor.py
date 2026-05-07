@@ -11,8 +11,8 @@ from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
     is_deep_gemm_e8m0_used,
     is_sm100,
     m_grouped_bf16_gemm_nt_masked,
-    m_grouped_fp8_gemm_nt_masked,
     m_grouped_fp8_fp4_gemm_nt_masked,
+    m_grouped_fp8_gemm_nt_masked,
     pre_pack_weight_ue8m0_scale,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
@@ -30,6 +30,9 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.type import ExecutorType
 from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
     MoeConfigResolver,
 )
+from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear import (
+    CudaFp8DeepGEMMLinear,
+)
 from rtp_llm.models_py.triton_kernels.common.activation import (
     create_packed_scale_tensor,
     silu_and_mul_masked_post_quant_fwd,
@@ -39,9 +42,6 @@ from rtp_llm.models_py.triton_kernels.common.activation import (
 )
 from rtp_llm.models_py.utils.arch import get_num_device_sms, get_sm
 from rtp_llm.models_py.utils.memory import dispose_tensor
-from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear import (
-    CudaFp8DeepGEMMLinear,
-)
 from rtp_llm.utils.model_weight import W
 
 logger = logging.getLogger(__name__)
@@ -157,13 +157,13 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
             self._w1_scale = pre_pack_weight_ue8m0_scale(self._w1, self._w1_scale)
             self._w2_scale = pre_pack_weight_ue8m0_scale(self._w2, self._w2_scale)
 
-        # SM100 FP4: convert w1 weight to FP4 for Gate/Up GEMM
+        # SM100 FP4: convert w1 weight to FP4 for Gate/Up GEMM (opt-in via DG_USE_FP4_ON_SM100=1)
         self._use_fp4_w1 = False
         if (
             self._use_fp8
             and is_sm100()
             and has_fp8_fp4_gemm_nt()
-            and os.environ.get("DG_USE_FP4_ON_SM100", "1") != "0"
+            and os.environ.get("DG_USE_FP4_ON_SM100", "0") == "1"
         ):
             try:
                 self._convert_moe_w1_to_fp4()
@@ -273,6 +273,7 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
                         masked_m[start_idx:end_idx],
                         expected_m,
                         disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),
+                        b_prepacked=True,
                     )
 
                 # Free expert_x and expert_x_scale
@@ -357,6 +358,7 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
                     masked_m[start_idx:end_idx],
                     expected_m,
                     disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),
+                    b_prepacked=True,
                 )
 
                 # Free down_input and down_input_scale

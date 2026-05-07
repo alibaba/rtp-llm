@@ -1,7 +1,8 @@
 """CUDA FP8 DeepGEMM quantized Linear implementation.
 
-On SM100 (Blackwell), automatically converts FP8 weights to FP4 at init time
-and uses fp8_fp4_gemm_nt for ~10-15% throughput improvement.
+On SM100 (Blackwell), can convert FP8 weights to FP4 at init time and use
+fp8_fp4_gemm_nt for ~10-15% throughput improvement.  Opt-in via
+``DG_USE_FP4_ON_SM100=1``; default keeps the FP8 path for accuracy safety.
 """
 
 import logging
@@ -29,7 +30,7 @@ from rtp_llm.ops import HWKernelConfig
 
 logger = logging.getLogger(__name__)
 
-_USE_FP4_ON_SM100 = os.environ.get("DG_USE_FP4_ON_SM100", "1") != "0"
+_USE_FP4_ON_SM100 = os.environ.get("DG_USE_FP4_ON_SM100", "0") == "1"
 
 
 class CudaFp8DeepGEMMLinear(LinearBase):
