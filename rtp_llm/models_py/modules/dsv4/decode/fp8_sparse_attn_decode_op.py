@@ -118,6 +118,8 @@ class SparseAttnV4DecodeFp8Op:
         topk_idxs: torch.Tensor,
         cache_seqlens: Optional[torch.Tensor] = None,
         block_table: Optional[torch.Tensor] = None,
+        extra_k_cache: Optional[torch.Tensor] = None,
+        extra_topk_idxs: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if _FLASH_MLA_AVAILABLE and q.is_cuda and kv_cache.is_cuda:
             return self._forward_flash_mla(
@@ -143,6 +145,8 @@ class SparseAttnV4DecodeFp8Op:
         topk_idxs: torch.Tensor,
         cache_seqlens: Optional[torch.Tensor],
         block_table: Optional[torch.Tensor],
+        extra_k_cache: Optional[torch.Tensor] = None,
+        extra_topk_idxs: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         from flash_mla import (  # type: ignore[import-not-found]
             flash_mla_with_kvcache,
@@ -179,6 +183,24 @@ class SparseAttnV4DecodeFp8Op:
             topk_3d = topk_idxs.contiguous()
         topk = topk_3d.shape[-1]
 
+        # Dual-pool: pack the extra (compressed) FP8 pool as 4D + ensure its
+        # topk is 3D ``[B, q_len, K_extra]``. FlashMLA merges softmax of the
+        # primary (SWA) and extra (CMP) pools in-kernel, eliminating the
+        # legacy "dequant both → BF16 cat → TileLang sparse_attn" bandwidth.
+        extra_k_4d: Optional[torch.Tensor] = None
+        extra_topk_3d: Optional[torch.Tensor] = None
+        extra_topk_length: Optional[torch.Tensor] = None
+        if extra_k_cache is not None and extra_topk_idxs is not None:
+            extra_k_4d = extra_k_cache.unsqueeze(-2)  # [extra_blocks, ebS, 1, 584]
+            if extra_topk_idxs.dim() == 4:
+                extra_topk_3d = extra_topk_idxs.squeeze(2).contiguous()
+            else:
+                extra_topk_3d = extra_topk_idxs.contiguous()
+            K_extra = extra_topk_3d.shape[-1]
+            extra_topk_length = torch.full(
+                (B,), K_extra, dtype=torch.int32, device=q.device
+            )
+
         # get_mla_metadata is a no-op stub that returns empty scheduler structures;
         # calling it inline is graph-safe (no stream sync, no alloc).
         tile_scheduler_metadata, num_splits = get_mla_metadata(
@@ -190,7 +212,7 @@ class SparseAttnV4DecodeFp8Op:
             is_fp8_kvcache=True,
         )
 
-        attn_out, _ = flash_mla_with_kvcache(
+        flash_mla_kwargs = dict(
             q=q,
             k_cache=kv_4d,
             block_table=block_table,
@@ -202,6 +224,14 @@ class SparseAttnV4DecodeFp8Op:
             indices=topk_3d,
             softmax_scale=self.softmax_scale,
         )
+        if extra_k_4d is not None:
+            flash_mla_kwargs.update(
+                extra_k_cache=extra_k_4d,
+                extra_indices_in_kvcache=extra_topk_3d,
+                extra_topk_length=extra_topk_length,
+                topk_length=torch.full((B,), topk, dtype=torch.int32, device=q.device),
+            )
+        attn_out, _ = flash_mla_with_kvcache(**flash_mla_kwargs)
         # V4-Flash attn_sink is zero. Avoid tensor.item() while CUDA graph is
         # capturing; if a non-zero sink ever appears, warn once on an eager call.
         is_capturing = q.is_cuda and torch.cuda.is_current_stream_capturing()

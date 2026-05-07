@@ -102,6 +102,10 @@ py_test(
     ],
     tags = ["H20"],
     exec_properties = {"gpu": "H20"},
+    env = {
+        "DG_JIT_CACHE_DIR": "/tmp/deep_gemm_jit",
+        "PATH": "/usr/local/cuda/bin:/usr/bin:/bin",
+    },
 )
 
 # IndexerFP8.prepare per-call meta builder — geometry/ke/ks/cu_kv_seqlens
@@ -129,6 +133,10 @@ py_test(
     ],
     tags = ["H20"],
     exec_properties = {"gpu": "H20"},
+    env = {
+        "DG_JIT_CACHE_DIR": "/tmp/deep_gemm_jit",
+        "PATH": "/usr/local/cuda/bin:/usr/bin:/bin",
+    },
 )
 
 # ── DSV4 SWA prefill Triton kernel UTs ────────────────────────────────────
