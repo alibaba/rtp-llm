@@ -14,10 +14,21 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from rtp_llm.models_py.modules.dsv4.compressor import Compressor
-from rtp_llm.models_py.modules.dsv4.cp import CPContext, cp_freqs_cis_local
+from rtp_llm.models_py.modules.dsv4.compressor_vllm import CompressorVLLM
+
+
+def _use_vllm_compressor() -> bool:
+    """Mirror of attention.py's switch — keep nested indexer compressor
+    in lockstep with the host attention compressor."""
+    import os
+
+    return os.environ.get("DSV4_COMPRESSOR_VLLM", "0") != "0"
+
+
 from rtp_llm.models_py.modules.dsv4._metadata_triton import build_pool_slots
-from rtp_llm.models_py.modules.dsv4.indexer_topk import select_indexer_topk
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
+from rtp_llm.models_py.modules.dsv4.cp import CPContext, cp_freqs_cis_local
+from rtp_llm.models_py.modules.dsv4.indexer_topk import select_indexer_topk
 from rtp_llm.models_py.modules.dsv4.qlinear import QuantizedLinear
 from rtp_llm.models_py.modules.dsv4.rope import (
     apply_rotary_emb,
@@ -72,7 +83,8 @@ class Indexer(nn.Module):
             "wgate": layer_weights[W.v4_indexer_compressor_wgate],
             "norm": layer_weights[W.v4_indexer_compressor_norm],
         }
-        self.compressor = Compressor(
+        _CompressorCls = CompressorVLLM if _use_vllm_compressor() else Compressor
+        self.compressor = _CompressorCls(
             dim=dim,
             head_dim=index_head_dim,
             rope_head_dim=rope_head_dim,
@@ -685,8 +697,7 @@ class Indexer(nn.Module):
                         else int(start_pos)
                     )
                     q_pos = (
-                        sp
-                        + torch.arange(seqlen, device=x.device, dtype=torch.int32)
+                        sp + torch.arange(seqlen, device=x.device, dtype=torch.int32)
                     ).unsqueeze(0)
                 # Kernel computes thr=(q_pos+1)//ratio, matching the prior
                 # post-add mask (kv_col >= (q_pos+1)//ratio → -inf).
@@ -737,10 +748,7 @@ class Indexer(nn.Module):
                             + 1
                         )
                     topk_lengths = (
-                        (q_pos_1 // ratio)
-                        .unsqueeze(0)
-                        .expand(bsz, seqlen)
-                        .reshape(-1)
+                        (q_pos_1 // ratio).unsqueeze(0).expand(bsz, seqlen).reshape(-1)
                     )
                 topk_idxs = select_indexer_topk(
                     index_score,
