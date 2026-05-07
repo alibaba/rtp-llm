@@ -84,12 +84,21 @@ class Expert(nn.Module):
             self.w1 = QuantizedLinear(dim, inter_dim, storage=storage)  # gate
             self.w2 = QuantizedLinear(inter_dim, dim, storage=storage)  # down
             self.w3 = QuantizedLinear(dim, inter_dim, storage=storage)  # up
-            self.w1.weight = expert_weights["w1_w"]
-            self.w1.scale = expert_weights["w1_s"]
-            self.w2.weight = expert_weights["w2_w"]
-            self.w2.scale = expert_weights["w2_s"]
-            self.w3.weight = expert_weights["w3_w"]
-            self.w3.scale = expert_weights["w3_s"]
+            self.w1.bind_fp4_weight(
+                expert_weights["w1_w"],
+                expert_weights["w1_s"],
+                expert_weights.get("w1_s_gemm"),
+            )
+            self.w2.bind_fp4_weight(
+                expert_weights["w2_w"],
+                expert_weights["w2_s"],
+                expert_weights.get("w2_s_gemm"),
+            )
+            self.w3.bind_fp4_weight(
+                expert_weights["w3_w"],
+                expert_weights["w3_s"],
+                expert_weights.get("w3_s_gemm"),
+            )
         self.swiglu_limit = swiglu_limit
 
     def _apply_layer(self, layer: nn.Module, x: torch.Tensor) -> torch.Tensor:

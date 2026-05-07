@@ -629,6 +629,22 @@ def m_grouped_bf16_gemm_nt_masked(
     )
 
 
+def _require_sm100_packed_scale_for_fp8_fp4(
+    a: Tuple[torch.Tensor, torch.Tensor],
+    b: Tuple[torch.Tensor, torch.Tensor],
+) -> None:
+    if not torch.cuda.is_available():
+        return
+    arch_major, _ = torch.cuda.get_device_capability()
+    if arch_major != 10 or not is_deep_gemm_e8m0_used():
+        return
+    if a[1].dtype != torch.int32 or b[1].dtype != torch.int32:
+        raise RuntimeError(
+            "SM100 FP8xFP4 DeepGEMM calls require prepacked int32 scales; "
+            f"got a_scale={a[1].dtype}, b_scale={b[1].dtype}"
+        )
+
+
 # --- FP8 activation × FP4 weight (UE8M0 block-scale) ---
 #
 # DeepGEMM's fp8_fp4 family consumes packed-int8 FP4 weights (2 FP4/byte)
@@ -652,6 +668,7 @@ def fp8_fp4_gemm_nt(
     global _fp8_fp4_gemm_nt_impl
     if _fp8_fp4_gemm_nt_impl is None:
         return _missing_deep_gemm()
+    _require_sm100_packed_scale_for_fp8_fp4(a, b)
     _fp8_fp4_gemm_nt_impl(
         a,
         b,
@@ -691,6 +708,7 @@ def m_grouped_fp8_fp4_gemm_nt_contiguous(
     global _m_grouped_fp8_fp4_gemm_nt_contiguous_impl
     if _m_grouped_fp8_fp4_gemm_nt_contiguous_impl is None:
         return _missing_deep_gemm()
+    _require_sm100_packed_scale_for_fp8_fp4(a, b)
     _m_grouped_fp8_fp4_gemm_nt_contiguous_impl(
         a,
         b,
@@ -727,6 +745,7 @@ def m_grouped_fp8_fp4_gemm_nt_masked(
     global _m_grouped_fp8_fp4_gemm_nt_masked_impl
     if _m_grouped_fp8_fp4_gemm_nt_masked_impl is None:
         return _missing_deep_gemm()
+    _require_sm100_packed_scale_for_fp8_fp4(a, b)
     _m_grouped_fp8_fp4_gemm_nt_masked_impl(
         a,
         b,

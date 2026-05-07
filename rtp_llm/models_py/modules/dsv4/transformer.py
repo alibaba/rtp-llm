@@ -191,11 +191,14 @@ class V4Transformer(nn.Module):
             "W.v4_mtp_* declarations first"
         )
 
-        # LM head — plain fp32 weight matrix [vocab_size, dim], applied via
-        # ``F.linear`` in forward.  head.weight ships as bf16 (descriptor
-        # data_type=bf16, see ``rtp_llm/models/deepseek_v4.py`` for the
-        # loader-RAM rationale); cast to fp32 ParallelHead here.
-        self.head_weight = gw[W.lm_head].float()
+        # LM head — plain FP32 weight matrix [vocab_size, dim], applied via
+        # ``F.linear`` in forward.  head.weight ships as BF16 in the ckpt but
+        # the descriptor converts it at load time to keep module init cheap.
+        self.head_weight = gw[W.lm_head]
+        if self.head_weight.dtype != torch.float32:
+            raise TypeError(
+                f"DSV4 lm_head must be loaded as FP32, got {self.head_weight.dtype}"
+            )
         self.head_hc = build_hc_head(
             gw[W.v4_hc_head_fn],
             gw[W.v4_hc_head_base],
