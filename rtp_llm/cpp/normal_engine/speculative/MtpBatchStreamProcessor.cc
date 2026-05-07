@@ -34,9 +34,9 @@ bool shouldLogFallback(uint64_t count) {
 
 bool useMtpDeviceInput() {
     static const bool enabled = []() {
-        const char* env = std::getenv("RTP_LLM_MTP_DEVICE_INPUT");
+        const char* env = std::getenv("RTP_LLM_DEVICE_INPUT");
         bool        on  = (env != nullptr && std::string(env) == "1");
-        RTP_LLM_LOG_INFO("[mtp-device-input] RTP_LLM_MTP_DEVICE_INPUT=%s -> processor enabled=%d",
+        RTP_LLM_LOG_INFO("[mtp-device-input] RTP_LLM_DEVICE_INPUT=%s -> processor enabled=%d",
                          env ? env : "(unset)",
                          static_cast<int>(on));
         return on;
@@ -607,7 +607,7 @@ void MtpBatchStreamProcessor::updateDecodeDraftModelInput(GptModelInputs&       
         model_input.sequence_lengths = (seq_lengths_d + 1).to(torch::kInt32);
     } else {
         // Legacy CPU fallback. Reachable only when both
-        // RTP_LLM_MTP_DEVICE_INPUT=0 (the default off path is dead in the
+        // RTP_LLM_DEVICE_INPUT=0 (the default off path is dead in the
         // stream-async config we ship today) AND the upstream caller did
         // not already publish sequence_lengths on CUDA. The MtpExecutor
         // boot-time log makes the gate decision visible, so a regression

@@ -37,11 +37,10 @@ bool MtpExecutor::isTpRank0() const {
 
 bool MtpExecutor::useMtpDeviceInput() const {
     static const bool enabled = []() {
-        const char* env = std::getenv("RTP_LLM_MTP_DEVICE_INPUT");
+        const char* env = std::getenv("RTP_LLM_DEVICE_INPUT");
         bool        on  = (env != nullptr && std::string(env) == "1");
-        RTP_LLM_LOG_INFO("[mtp-device-input] RTP_LLM_MTP_DEVICE_INPUT=%s -> enabled=%d",
-                         env ? env : "(unset)",
-                         static_cast<int>(on));
+        RTP_LLM_LOG_INFO(
+            "[mtp-device-input] RTP_LLM_DEVICE_INPUT=%s -> enabled=%d", env ? env : "(unset)", static_cast<int>(on));
         return on;
     }();
     return enabled;
@@ -49,9 +48,9 @@ bool MtpExecutor::useMtpDeviceInput() const {
 
 bool MtpExecutor::checkMtpDeviceInput() const {
     static const bool enabled = []() {
-        const char* env = std::getenv("RTP_LLM_MTP_DEVICE_INPUT_CHECK");
+        const char* env = std::getenv("RTP_LLM_DEVICE_INPUT_CHECK");
         bool        on  = (env != nullptr && std::string(env) == "1");
-        RTP_LLM_LOG_INFO("[mtp-device-input] RTP_LLM_MTP_DEVICE_INPUT_CHECK=%s -> enabled=%d",
+        RTP_LLM_LOG_INFO("[mtp-device-input] RTP_LLM_DEVICE_INPUT_CHECK=%s -> enabled=%d",
                          env ? env : "(unset)",
                          static_cast<int>(on));
         return on;
@@ -656,7 +655,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     }
 
     // Cap outstanding stream-async bookkeeping to one step unless
-    // RTP_LLM_MTP_DROP_BROAD_SYNC explicitly drops the front-loaded CPU
+    // RTP_LLM_DROP_BROAD_SYNC explicitly drops the front-loaded CPU
     // sync. Device-state tensors cover stale host reads, per-stream swap
     // events protect linear KV remapping, and AsyncRunner::launch still
     // single-slots bookkeeping workers.
@@ -1385,7 +1384,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
 
 bool MtpExecutor::useStreamAsync() const {
     // Env-gated stream-async. Read once and cache. Default off so
-    // production behaviour is unchanged unless RTP_LLM_MTP_STREAM_ASYNC=1
+    // production behaviour is unchanged unless RTP_LLM_STREAM_ASYNC=1
     // is exported on server start. Worth recording: per-instance state isn't
     // needed since the flag is process-wide and the AsyncRunner objects (and
     // the underlying CUDA streams / worker threads) are eagerly constructed
@@ -1402,11 +1401,10 @@ bool MtpExecutor::useStreamAsync() const {
     // an explicit broadcast — local short-circuiting on a single rank
     // would deadlock the others.
     static const bool enabled = []() {
-        const char* env = std::getenv("RTP_LLM_MTP_STREAM_ASYNC");
+        const char* env = std::getenv("RTP_LLM_STREAM_ASYNC");
         bool        on  = (env != nullptr && std::string(env) == "1");
-        RTP_LLM_LOG_INFO("[stream-async] RTP_LLM_MTP_STREAM_ASYNC=%s -> useStreamAsync=%d",
-                         env ? env : "(unset)",
-                         static_cast<int>(on));
+        RTP_LLM_LOG_INFO(
+            "[stream-async] RTP_LLM_STREAM_ASYNC=%s -> useStreamAsync=%d", env ? env : "(unset)", static_cast<int>(on));
         return on;
     }();
     return enabled;
@@ -1438,11 +1436,10 @@ bool MtpExecutor::useAsyncHostMirror() const {
 
 bool MtpExecutor::useDropBroadSync() const {
     static const bool enabled = []() {
-        const char* env = std::getenv("RTP_LLM_MTP_DROP_BROAD_SYNC");
+        const char* env = std::getenv("RTP_LLM_DROP_BROAD_SYNC");
         bool        on  = (env != nullptr && std::string(env) == "1");
-        RTP_LLM_LOG_INFO("[drop-broad-sync] RTP_LLM_MTP_DROP_BROAD_SYNC=%s -> enabled=%d",
-                         env ? env : "(unset)",
-                         static_cast<int>(on));
+        RTP_LLM_LOG_INFO(
+            "[drop-broad-sync] RTP_LLM_DROP_BROAD_SYNC=%s -> enabled=%d", env ? env : "(unset)", static_cast<int>(on));
         return on;
     }();
     return enabled;

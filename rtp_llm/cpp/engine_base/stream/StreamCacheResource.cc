@@ -144,6 +144,14 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
                         .loss              = {},
                         .src_batch_indices = {},
                         .all_hidden_states = {}});
+        {
+            const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+            stream->setNormalAsyncDeviceState(GenerateStream::NormalAsyncDeviceState{
+                .epoch                 = 0,
+                .last_sample_token_gpu = new_tokens.reshape({1}).to(cuda_i32),
+                .next_seq_len_gpu      = torch::full({1}, static_cast<int64_t>(stream->seqLength()), cuda_i32),
+            });
+        }
         RTP_LLM_LOG_DEBUG("applyP2PSideChannel: appended first_token_id=%ld, stream_id=%ld",
                           payload->first_token_id,
                           stream->streamId());
@@ -367,13 +375,13 @@ absl::Status StreamCacheResource::incrKVBlock(size_t reserve_step) {
     }
 
     MallocInfo malloc_info;
-    malloc_info.batch_kv_cache_resource = batch_kv_cache_resource_;
-    malloc_info.complete_token_ids      = stream_->completeTokenIdsPtr();
-    malloc_info.request_id              = stream_->streamId();
-    malloc_info.verbose                 = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
-    malloc_info.reuse_cache             = reuseCache();
-    malloc_info.enable_device_cache     = reuseCache() && enableDeviceCache();
-    malloc_info.enable_remove_skipped_blocks   = true;
+    malloc_info.batch_kv_cache_resource      = batch_kv_cache_resource_;
+    malloc_info.complete_token_ids           = stream_->completeTokenIdsPtr();
+    malloc_info.request_id                   = stream_->streamId();
+    malloc_info.verbose                      = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
+    malloc_info.reuse_cache                  = reuseCache();
+    malloc_info.enable_device_cache          = reuseCache() && enableDeviceCache();
+    malloc_info.enable_remove_skipped_blocks = true;
 
     malloc_info.complete_token_ids->setReserveStep(reserve_step);
     auto result = resource_context_.cache_manager->malloc(malloc_info);

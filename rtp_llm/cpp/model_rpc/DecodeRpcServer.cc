@@ -174,6 +174,14 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                              torch::Tensor(),
                              torch::Tensor(),
                              torch::Tensor()});
+    {
+        const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+        generate_stream->setNormalAsyncDeviceState(GenerateStream::NormalAsyncDeviceState{
+            .epoch                 = 0,
+            .last_sample_token_gpu = new_tokens.reshape({1}).to(cuda_i32),
+            .next_seq_len_gpu      = torch::full({1}, static_cast<int64_t>(generate_stream->seqLength()), cuda_i32),
+        });
+    }
     if (generate_request.position_ids_size() > 0) {
         auto context_position_ids = torch::from_blob(const_cast<int32_t*>(generate_request.position_ids().data()),
                                                      {(int64_t)generate_request.position_ids_size()},

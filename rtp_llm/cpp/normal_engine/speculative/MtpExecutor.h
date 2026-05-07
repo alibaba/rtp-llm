@@ -119,7 +119,7 @@ protected:
                         std::list<GenerateStreamPtr>&       decode_streams);
 
     // Env-gated stream-async switch. Default off unless
-    // RTP_LLM_MTP_STREAM_ASYNC=1 is exported at server start.
+    // RTP_LLM_STREAM_ASYNC=1 is exported at server start.
     bool useStreamAsync() const;
 
     // Device-state feature gates. Defaults stay off; each consumer keeps its

@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/engine_base/Executor.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
+#include "rtp_llm/cpp/normal_engine/AsyncRunner.h"
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
@@ -17,6 +18,25 @@ namespace rtp_llm {
 
 class KVCacheManager;
 struct GptModelInitParams;
+
+// Holds pinned CPU source tensors alive across an async H2D copy. The
+// non-blocking `.to(kCUDA)` call returns immediately while the actual H2D
+// runs on the stream; the source tensor must outlive that copy. Released
+// at the start of the next process() iteration once the previous step's
+// copies have surely landed.
+class NormalBufferHolder {
+public:
+    void hold(const torch::Tensor& tensor) {
+        tensor_holder_.push_back(tensor);
+    }
+
+    void release() {
+        tensor_holder_.clear();
+    }
+
+private:
+    std::vector<torch::Tensor> tensor_holder_;
+};
 
 class NormalExecutor: public Executor {
 public:
@@ -48,6 +68,45 @@ public:
 
     bool updateEplbConfig(const EPLBConfig& config) override;
 
+protected:
+    // Stream-async dispatch gate. Reuses the same env var as MtpExecutor so a
+    // single launcher knob (`RTP_LLM_STREAM_ASYNC=1`) flips both paths.
+    // Default off — production behaviour unchanged unless explicitly enabled.
+    bool useStreamAsync() const;
+
+    // Skip the front-loaded sync of the previous step's dispatch worker at
+    // the start of process(). Same env var as MtpExecutor
+    // (`RTP_LLM_DROP_BROAD_SYNC=1`). When dropped, the worker may still
+    // be writing host stream state while the next step's gather reads it; the
+    // normal async device state covers the sampled token and seq_len for the
+    // batch-1 decode path.
+    bool useDropBroadSync() const;
+
+    // Stream-async dispatch. Records sampler_event on the main stream after
+    // sampler_->forward, then forks the bookkeeping worker to wait on the
+    // event and run dispatch + per-stream update off the main thread.
+    absl::Status dispatchOutputAsync(const StreamGroups&           stream_groups,
+                                     GptModelOutputs               model_output,
+                                     SamplerOutput                 sampler_output,
+                                     std::shared_ptr<torch::Event> sampler_event);
+
+    void publishNormalDeviceState(const StreamGroups& stream_groups, const SamplerOutput& sampler_output);
+
+    // Env-gated path that pushes metadata tensors (combo_tokens,
+    // input_lengths, sequence_lengths, prefix_lengths,
+    // sequence_lengths_plus_1, lm_output_indexes) to CUDA before
+    // tpSyncModelInputs. Without it, those tensors travel through the CPU
+    // packed-buffer broadcast (one execBroadcastCpu call with implicit
+    // cudaSyncAndCheck on cross-node fallback, plus per-tensor copy/unpack
+    // on each rank). With it, they ride along the GPU packed buffer in a
+    // single execBroadcast — fewer kernel launches and no CPU-side sync.
+    // Shares the env var name `RTP_LLM_DEVICE_INPUT` with MtpExecutor
+    // so a single launcher knob toggles both paths.
+    bool useMtpDeviceInput() const;
+    bool checkMtpDeviceInput() const;
+    void ensureMtpModelInputsOnCuda(GptModelInputs& model_input, const char* tag);
+    void checkMtpModelInputsOnCuda(const GptModelInputs& model_input, const char* tag) const;
+
 private:
     std::unique_ptr<ModelBase>                                               model_;
     std::unique_ptr<Sampler>                                                 sampler_;
@@ -65,6 +124,18 @@ private:
     int               propose_model_index_ = 0;
     int               tp_rank_             = 0;
     ParallelismConfig parallelism_config_;
+
+    // Bookkeeping worker for stream-async dispatch. Owns a CUDA stream + thread
+    // and runs pinned token_ids/success D2H / per-stream update / KV release
+    // off the main thread. Eagerly constructed regardless of env gate so the lifetime
+    // matches NormalExecutor (the worker only does work when launch() is
+    // called).
+    AsyncRunner dispatch_runner_;
+
+    // Keeps pinned-CPU H2D source tensors alive across one process() call.
+    // Released at the start of the next call after H2D copies have surely
+    // landed via the broadcast path (which is itself stream-ordered).
+    NormalBufferHolder buffer_holder_;
 };
 
 }  // namespace rtp_llm

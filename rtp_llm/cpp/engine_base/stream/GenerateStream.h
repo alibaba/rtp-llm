@@ -576,6 +576,24 @@ public:
         mtp_async_state_ = MtpAsyncDeviceState{};
     }
 
+    // Normal decode async device state. Unlike MTP, normal decode accepts one
+    // sampler token per step, so the next-step state only needs the sampled
+    // token and the committed sequence length after that token.
+    struct NormalAsyncDeviceState {
+        uint64_t      epoch = 0;
+        torch::Tensor last_sample_token_gpu;  // [1] int32
+        torch::Tensor next_seq_len_gpu;       // [1] int32, seqLength after sample
+    };
+
+    uint64_t setNormalAsyncDeviceState(NormalAsyncDeviceState state) {
+        state.epoch         = ++normal_async_epoch_counter_;
+        normal_async_state_ = std::move(state);
+        return normal_async_state_.epoch;
+    }
+    const NormalAsyncDeviceState& getNormalAsyncDeviceState() const {
+        return normal_async_state_;
+    }
+
     GenerateStreamPtr getProposeStream() {
         return propose_stream_;
     }
@@ -739,12 +757,12 @@ protected:
     std::shared_ptr<void> pending_swap_done_event_;
 
     // Stream-async device-resident state for the next decode step's prepare.
-    // See setMtpAsyncDeviceState() / setSpecDecodeDeviceState() for the
-    // contract; the struct stays default-constructed (epoch=0, undefined
-    // tensors) on the synchronous path so existing callers see no behaviour
-    // change. The epoch counter guards against stale worker clears.
-    MtpAsyncDeviceState mtp_async_state_;
-    uint64_t            mtp_async_epoch_counter_ = 0;
+    // These structs stay default-constructed (epoch=0, undefined tensors) until
+    // their corresponding async/sync publisher installs a usable state.
+    MtpAsyncDeviceState    mtp_async_state_;
+    uint64_t               mtp_async_epoch_counter_ = 0;
+    NormalAsyncDeviceState normal_async_state_;
+    uint64_t               normal_async_epoch_counter_ = 0;
 
     bool return_all_hidden_states_ = false;
 
