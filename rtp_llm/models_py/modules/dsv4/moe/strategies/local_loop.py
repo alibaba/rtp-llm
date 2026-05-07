@@ -39,6 +39,7 @@ import torch
 import torch.nn as nn
 
 from ..expert import Expert
+from ...quant_layouts import prepare_fp4_weight_scale_for_deepgemm
 from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
 
 # Block sizes for FP8 / FP4 (mirror values in qlinear.py)
@@ -127,6 +128,15 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
         self._W2_s = stacked_routed["w2_s"]
         self._W3_w = stacked_routed["w3_w"]
         self._W3_s = stacked_routed["w3_s"]
+        self._W1_s_gemm = prepare_fp4_weight_scale_for_deepgemm(
+            self._W1_s, cfg.moe_inter_dim, cfg.dim, self._W1_s.shape[0]
+        )
+        self._W2_s_gemm = prepare_fp4_weight_scale_for_deepgemm(
+            self._W2_s, cfg.dim, cfg.moe_inter_dim, self._W2_s.shape[0]
+        )
+        self._W3_s_gemm = prepare_fp4_weight_scale_for_deepgemm(
+            self._W3_s, cfg.moe_inter_dim, cfg.dim, self._W3_s.shape[0]
+        )
 
         def _expert_at(global_idx: int) -> Optional[Expert]:
             if not (cfg.local_expert_start <= global_idx < cfg.local_expert_end):
@@ -135,10 +145,13 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
             ew = {
                 "w1_w": stacked_routed["w1_w"][local_idx],
                 "w1_s": stacked_routed["w1_s"][local_idx],
+                "w1_s_gemm": self._W1_s_gemm[local_idx],
                 "w2_w": stacked_routed["w2_w"][local_idx],
                 "w2_s": stacked_routed["w2_s"][local_idx],
+                "w2_s_gemm": self._W2_s_gemm[local_idx],
                 "w3_w": stacked_routed["w3_w"][local_idx],
                 "w3_s": stacked_routed["w3_s"][local_idx],
+                "w3_s_gemm": self._W3_s_gemm[local_idx],
             }
             return Expert(
                 cfg.dim,
@@ -358,17 +371,17 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
             # Gather expert eid's weight slices (graph-safe, fixed-shape output).
             # Use squeeze(0) on dim 0 to drop the [1, ...] from index_select.
             w1_w = torch.index_select(self._W1_w, 0, eid_t).squeeze(0)  # [inter, D/2] int8
-            w1_s = torch.index_select(self._W1_s, 0, eid_t).squeeze(0)  # [inter, D/32] ue8m0
+            w1_s = torch.index_select(self._W1_s_gemm, 0, eid_t).squeeze(0)
             w3_w = torch.index_select(self._W3_w, 0, eid_t).squeeze(0)
-            w3_s = torch.index_select(self._W3_s, 0, eid_t).squeeze(0)
+            w3_s = torch.index_select(self._W3_s_gemm, 0, eid_t).squeeze(0)
             w2_w = torch.index_select(self._W2_w, 0, eid_t).squeeze(0)  # [D, inter/2]
-            w2_s = torch.index_select(self._W2_s, 0, eid_t).squeeze(0)
+            w2_s = torch.index_select(self._W2_s_gemm, 0, eid_t).squeeze(0)
 
             # gate = w1 @ x
             gate = torch.empty(1, inter, dtype=torch.bfloat16, device=device)
             fp8_fp4_gemm_nt(
                 (x_fp8, x_scale),
-                (w1_w, w1_s.float()),
+                (w1_w, w1_s),
                 gate,
                 recipe_a=(1, _FP8_BLOCK), recipe_b=(1, _FP4_BLOCK),
             )
@@ -376,7 +389,7 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
             up = torch.empty(1, inter, dtype=torch.bfloat16, device=device)
             fp8_fp4_gemm_nt(
                 (x_fp8, x_scale),
-                (w3_w, w3_s.float()),
+                (w3_w, w3_s),
                 up,
                 recipe_a=(1, _FP8_BLOCK), recipe_b=(1, _FP4_BLOCK),
             )
@@ -413,7 +426,7 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
             delta = torch.empty(1, D, dtype=torch.bfloat16, device=device)
             fp8_fp4_gemm_nt(
                 (sm_fp8, sm_scale),
-                (w2_w, w2_s.float()),
+                (w2_w, w2_s),
                 delta,
                 recipe_a=(1, _FP8_BLOCK), recipe_b=(1, _FP4_BLOCK),
             )
@@ -505,17 +518,17 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
 
                 # Gather expert eid's weight slices (graph-safe).
                 w1_w = torch.index_select(self._W1_w, 0, eid_t).squeeze(0)
-                w1_s = torch.index_select(self._W1_s, 0, eid_t).squeeze(0)
+                w1_s = torch.index_select(self._W1_s_gemm, 0, eid_t).squeeze(0)
                 w3_w = torch.index_select(self._W3_w, 0, eid_t).squeeze(0)
-                w3_s = torch.index_select(self._W3_s, 0, eid_t).squeeze(0)
+                w3_s = torch.index_select(self._W3_s_gemm, 0, eid_t).squeeze(0)
                 w2_w = torch.index_select(self._W2_w, 0, eid_t).squeeze(0)
-                w2_s = torch.index_select(self._W2_s, 0, eid_t).squeeze(0)
+                w2_s = torch.index_select(self._W2_s_gemm, 0, eid_t).squeeze(0)
 
                 # gate = w1 @ x_n
                 gate = torch.empty(1, inter, dtype=torch.bfloat16, device=device)
                 fp8_fp4_gemm_nt(
                     (x_fp8_n, x_scale_n),
-                    (w1_w, w1_s.float()),
+                    (w1_w, w1_s),
                     gate,
                     recipe_a=(1, _FP8_BLOCK), recipe_b=(1, _FP4_BLOCK),
                 )
@@ -523,7 +536,7 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
                 up = torch.empty(1, inter, dtype=torch.bfloat16, device=device)
                 fp8_fp4_gemm_nt(
                     (x_fp8_n, x_scale_n),
-                    (w3_w, w3_s.float()),
+                    (w3_w, w3_s),
                     up,
                     recipe_a=(1, _FP8_BLOCK), recipe_b=(1, _FP4_BLOCK),
                 )
@@ -556,7 +569,7 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
                 delta = torch.empty(1, D, dtype=torch.bfloat16, device=device)
                 fp8_fp4_gemm_nt(
                     (sm_fp8, sm_scale),
-                    (w2_w, w2_s.float()),
+                    (w2_w, w2_s),
                     delta,
                     recipe_a=(1, _FP8_BLOCK), recipe_b=(1, _FP4_BLOCK),
                 )

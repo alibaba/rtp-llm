@@ -23,7 +23,7 @@ from ..mega_buf import (
     _mega_moe_enabled,
 )
 from ..input_packer import get_mega_moe_input_packer
-from ..quant_layouts import FP4_BLOCK
+from ...quant_layouts import FP4_BLOCK, prepare_fp4_weight_scale_for_deepgemm
 from ..shared_expert import strict_fused_moe_enabled
 
 
@@ -79,34 +79,36 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         st_w3_s = layer_weights.pop(W.v4_routed_w3_s)
         device = st_w1_w.device
 
-        # --- L1 (gate + up): stack, transform SF, drop the fp32 stack.
+        # --- L1 (gate + up): stack, transform SF, drop the raw stack.
         w13 = torch.empty((E, 2 * inter, D // 2), dtype=torch.int8, device=device)
-        s13 = torch.empty(
-            (E, 2 * inter, D // FP4_BLOCK), dtype=torch.float32, device=device
+        s13_raw = torch.empty(
+            (E, 2 * inter, D // FP4_BLOCK),
+            dtype=torch.float8_e8m0fnu,
+            device=device,
         )
         w13[:, :inter].copy_(st_w1_w)
-        s13[:, :inter].copy_(st_w1_s.float())
+        s13_raw[:, :inter].copy_(st_w1_s)
         w13[:, inter:].copy_(st_w3_w)
-        s13[:, inter:].copy_(st_w3_s.float())
+        s13_raw[:, inter:].copy_(st_w3_s)
         del st_w1_w, st_w1_s, st_w3_w, st_w3_s
-        s13_int = deep_gemm.transform_sf_into_required_layout(
-            s13, 2 * inter, D, (1, FP4_BLOCK), E
-        )
-        del s13
+        s13_int = prepare_fp4_weight_scale_for_deepgemm(s13_raw, 2 * inter, D, E)
+        del s13_raw
         torch.cuda.empty_cache()
 
         # --- L2 (down): only after L1's fp32 buffer has been freed.
         st_w2_w = layer_weights.pop(W.v4_routed_w2_w)
         st_w2_s = layer_weights.pop(W.v4_routed_w2_s)
         w2 = torch.empty((E, D, inter // 2), dtype=torch.int8, device=device)
-        s2 = torch.empty((E, D, inter // FP4_BLOCK), dtype=torch.float32, device=device)
-        w2.copy_(st_w2_w)
-        s2.copy_(st_w2_s.float())
-        del st_w2_w, st_w2_s
-        s2_int = deep_gemm.transform_sf_into_required_layout(
-            s2, D, inter, (1, FP4_BLOCK), E
+        s2_raw = torch.empty(
+            (E, D, inter // FP4_BLOCK),
+            dtype=torch.float8_e8m0fnu,
+            device=device,
         )
-        del s2
+        w2.copy_(st_w2_w)
+        s2_raw.copy_(st_w2_s)
+        del st_w2_w, st_w2_s
+        s2_int = prepare_fp4_weight_scale_for_deepgemm(s2_raw, D, inter, E)
+        del s2_raw
         torch.cuda.empty_cache()
 
         # Mega MoE transform: L1 gate/up interleave (gran=8 along N) +
