@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import torch
 
-from rtp_llm.models_py.modules.dsv4._mhc_tilelang import tk_mhc_head, tk_mhc_post, tk_mhc_pre
+from rtp_llm.models_py.modules.dsv4.hc.mhc_tilelang import (
+    tk_mhc_head,
+    tk_mhc_head_fused,
+    tk_mhc_post,
+    tk_mhc_pre,
+)
 from rtp_llm.models_py.modules.dsv4.hc.base import HCHeadBase, HCUnitBase
 from rtp_llm.models_py.modules.dsv4.hc.utils import squeeze_hc_batch, wrap_hc_batch
 
@@ -103,7 +108,7 @@ class TileLangHCHead(HCHeadBase):
         # copy to every head reduce on mis-laid-out inputs.
         tk_x = _require_contiguous(tk_x, name="mhc_head residual")
         with torch.inference_mode():
-            out = tk_mhc_head(
+            out = tk_mhc_head_fused(
                 tk_x,
                 self.fn,
                 self.scale,
@@ -112,6 +117,16 @@ class TileLangHCHead(HCHeadBase):
                 pre_eps=self.hc_eps,
                 hc_mult=self.hc_mult,
             )
+            if out is None:
+                out = tk_mhc_head(
+                    tk_x,
+                    self.fn,
+                    self.scale,
+                    self.base,
+                    norm_eps=self.norm_eps,
+                    pre_eps=self.hc_eps,
+                    hc_mult=self.hc_mult,
+                )
         if out is None:
             _raise_unavailable("head", x, self.hc_mult)
         return squeeze_hc_batch(out, wrapped, name="mhc_head output")

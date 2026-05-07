@@ -34,11 +34,13 @@ _log = logging.getLogger(__name__)
 
 _TK_PRE_OK: bool | None = None  # None = untried, True/False = sticky verdict
 _TK_POST_OK: bool | None = None
+_TK_HEAD_FUSED_OK: bool | None = None
 _TK_HEAD_OK: bool | None = None
 
 # Lazy-imported callables (populated on first successful import).
 _tk_mhc_pre = None
 _tk_mhc_post = None
+_tk_mhc_head_fused = None
 _tk_mhc_head = None
 
 
@@ -47,7 +49,7 @@ def _import_tk():
 
     Raises on import failure; caller pins the failure verdict.
     """
-    global _tk_mhc_pre, _tk_mhc_post, _tk_mhc_head
+    global _tk_mhc_pre, _tk_mhc_post, _tk_mhc_head_fused, _tk_mhc_head
     # Reuse the dsv4 tilelang env-prep (z3 path, TVM tmpdir).
     try:
         from rtp_llm.models_py.modules.dsv4 import tilelang_kernels as _dsv4_tl
@@ -64,12 +66,17 @@ def _import_tk():
     )
     _tk_mhc_pre = mod.mhc_pre
     _tk_mhc_post = mod.mhc_post
+    _tk_mhc_head_fused = getattr(mod, "mhc_head_fuse", None)
     _tk_mhc_head = mod.mhc_head
-    return _tk_mhc_pre, _tk_mhc_post, _tk_mhc_head
+    return _tk_mhc_pre, _tk_mhc_post, _tk_mhc_head_fused, _tk_mhc_head
 
 
 def _env_disabled() -> bool:
     return os.environ.get("DSV4_USE_TK_MHC", "1") == "0"
+
+
+def _head_fuse_disabled() -> bool:
+    return os.environ.get("DSV4_MHC_HEAD_FUSED", "1") == "0"
 
 
 def _can_use_tk(residual: torch.Tensor, hc_mult: int) -> bool:
@@ -90,6 +97,51 @@ def _can_use_tk(residual: torch.Tensor, hc_mult: int) -> bool:
     if (int(residual.shape[-1]) * int(residual.shape[-2])) % 256 != 0:
         return False
     return True
+
+
+def tk_mhc_head_fused(
+    residual: torch.Tensor,
+    fn: torch.Tensor,
+    scale: torch.Tensor,
+    base: torch.Tensor,
+    *,
+    norm_eps: float,
+    pre_eps: float,
+    hc_mult: int = 4,
+) -> torch.Tensor | None:
+    """Fused TK ``mhc_head`` wrapper.
+
+    Returns ``None`` when the fused head is disabled or unavailable so callers
+    can fall back to the older TileLang head composition.
+    """
+    global _TK_HEAD_FUSED_OK
+    if _head_fuse_disabled():
+        return None
+    if not _can_use_tk(residual, hc_mult):
+        return None
+    if _TK_HEAD_FUSED_OK is False:
+        return None
+    try:
+        if _tk_mhc_head_fused is None:
+            _import_tk()
+        if _tk_mhc_head_fused is None:
+            _TK_HEAD_FUSED_OK = False
+            return None
+        out = _tk_mhc_head_fused(
+            residual,
+            fn,
+            scale.reshape(1),
+            base,
+            rms_eps=norm_eps,
+            mhc_pre_eps=pre_eps,
+        )
+        _TK_HEAD_FUSED_OK = True
+        return out
+    except Exception:
+        if _TK_HEAD_FUSED_OK is None:
+            _log.exception("tk fused mhc_head disabled after JIT failure")
+        _TK_HEAD_FUSED_OK = False
+        return None
 
 
 def tk_mhc_pre(
