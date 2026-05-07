@@ -1992,6 +1992,7 @@ class Attention(nn.Module):
                     nope_dim=self.head_dim - self.rope_head_dim,
                     rope_head_dim=self.rope_head_dim,
                 )
+                del o
                 o = self._wo_a_einsum_from_fp8(o_fp8, o_scale, bsz, q_len)
             else:
                 apply_rotary_emb_batched(o[..., -rd:], freqs_cis_per_req, inverse=True)
@@ -2572,6 +2573,8 @@ class Attention(nn.Module):
                     f"L{self.layer_id:02d}_attn_sparse_out_{dbg_pos_name}",
                     o[:, dbg_pos_idx : dbg_pos_idx + 1],
                 )
+        if not _dbg:
+            del q, kv_cat, topk_idxs
 
         with record_function_range("dsv4.attn.out_proj"):
             if _dbg:
@@ -2626,6 +2629,7 @@ class Attention(nn.Module):
                     nope_dim=self.head_dim - self.rope_head_dim,
                     rope_head_dim=self.rope_head_dim,
                 )
+                del o, o_3d, freqs_per_token
                 o = self._wo_a_einsum_from_fp8(o_fp8, o_scale, bsz, seqlen)
             else:
                 apply_rotary_emb(o[..., -rd:], freqs_cis, inverse=True)

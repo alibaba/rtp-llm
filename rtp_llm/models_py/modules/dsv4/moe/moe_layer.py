@@ -34,6 +34,24 @@ from .shared_expert import (
 from .strategies.base import MoeCfg, _resolve_forced, select_strategy
 
 
+_FINAL_OUT_CACHE: dict[tuple, torch.Tensor] = {}
+
+
+def _get_or_create_final_out(
+    capacity: int,
+    dim: int,
+    dtype: torch.dtype,
+    device: torch.device,
+) -> torch.Tensor:
+    key = (device, dim, dtype)
+    cached = _FINAL_OUT_CACHE.get(key)
+    if cached is not None and cached.size(0) >= capacity:
+        return cached
+    cached = torch.empty((max(capacity, 1), dim), dtype=dtype, device=device)
+    _FINAL_OUT_CACHE[key] = cached
+    return cached
+
+
 class MoE(nn.Module):
     """V4 MoE block: routed top-k experts + 1 shared expert.
 
@@ -251,16 +269,11 @@ class MoE(nn.Module):
             return y.type_as(x).view(shape)
         with record_function_range("dsv4.moe.add_shared"):
             T = x.size(0)
-            if self._final_out is None or self._final_out.size(0) < T:
-                self._final_out = torch.empty(
-                    (max(T, self.max_tokens_per_rank, 1), self.dim),
-                    dtype=x.dtype,
-                    device=x.device,
-                )
-            assert self._final_out is not None
-            assert self._final_out.size(1) == self.dim
-            assert self._final_out.device == x.device
-            assert self._final_out.dtype == x.dtype
-            out = self._final_out
+            out = _get_or_create_final_out(
+                max(T, self.max_tokens_per_rank, 1),
+                self.dim,
+                x.dtype,
+                x.device,
+            )
             y = combine_routed_and_shared(y, shared_y, x.dtype, out=out[:T])
             return y.view(shape)
