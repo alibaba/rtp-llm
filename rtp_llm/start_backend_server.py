@@ -47,6 +47,16 @@ def local_rank_start(
 
     logging.info(f"import BackendManager took {time.time()- start_time:.2f}s")
 
+    def clear_cpp_comm_ops():
+        try:
+            import librtp_compute_ops
+
+            if hasattr(librtp_compute_ops, "clear_comm_ops"):
+                librtp_compute_ops.clear_comm_ops()
+                logging.info("Cleared C++ comm ops callbacks")
+        except Exception as e:
+            logging.warning(f"Failed to clear C++ comm ops callbacks: {e}")
+
     def signal_handler(signum, frame):
         logging.info(
             f"Local rank received signal {signum}, shutting down gracefully..."
@@ -113,6 +123,8 @@ def local_rank_start(
             except Exception as pipe_error:
                 logging.warning(f"Failed to send error status via pipe: {pipe_error}")
         raise e
+    finally:
+        clear_cpp_comm_ops()
 
 
 def _get_local_world_size(py_env_configs: PyEnvConfigs) -> int:
