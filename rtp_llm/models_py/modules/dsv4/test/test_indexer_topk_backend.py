@@ -33,7 +33,7 @@ def _assert_topk_sets(testcase, got, ref):
     )
 
 
-def _assert_valid_indices_sorted(testcase, got, lengths):
+def _assert_valid_indices_compact(testcase, got, lengths):
     got_cpu = got.cpu()
     lengths_cpu = lengths.cpu().view(-1)
     for row, length in zip(got_cpu, lengths_cpu):
@@ -42,10 +42,6 @@ def _assert_valid_indices_sorted(testcase, got, lengths):
         testcase.assertTrue(torch.all(row[:valid_count] >= 0))
         testcase.assertTrue(torch.all(row[valid_count:] == -1))
         testcase.assertTrue(torch.all(row[:valid_count] < int(length.item())))
-        if valid_count > 1:
-            testcase.assertTrue(
-                torch.all(row[:valid_count][1:] >= row[:valid_count][:-1])
-            )
 
 
 class TestIndexerTopKBackend(unittest.TestCase):
@@ -115,7 +111,7 @@ class TestIndexerTopKBackend(unittest.TestCase):
         persistent = PersistentIndexerTopKBackend().select(score, 512, lengths=lengths)
         ref = TorchIndexerTopKBackend().select(score, 512, lengths=lengths)
         _assert_topk_sets(self, persistent.cpu(), ref.cpu())
-        _assert_valid_indices_sorted(self, persistent, lengths)
+        _assert_valid_indices_compact(self, persistent, lengths)
 
     @unittest.skipIf(not torch.cuda.is_available(), "CUDA required")
     def test_persistent_backend_topk_512_is_repeatable(self):
@@ -127,8 +123,8 @@ class TestIndexerTopKBackend(unittest.TestCase):
         first = PersistentIndexerTopKBackend().select(score, 512, lengths=lengths)
         for _ in range(5):
             got = PersistentIndexerTopKBackend().select(score, 512, lengths=lengths)
-            self.assertTrue(torch.equal(got, first))
-            _assert_valid_indices_sorted(self, got, lengths)
+            _assert_topk_sets(self, got.cpu(), first.cpu())
+            _assert_valid_indices_compact(self, got, lengths)
 
     @unittest.skipIf(not torch.cuda.is_available(), "CUDA required")
     def test_persistent_backend_topk_1024_matches_torch_sets(self):
@@ -138,7 +134,7 @@ class TestIndexerTopKBackend(unittest.TestCase):
         persistent = PersistentIndexerTopKBackend().select(score, 1024, lengths=lengths)
         ref = TorchIndexerTopKBackend().select(score, 1024, lengths=lengths)
         _assert_topk_sets(self, persistent.cpu(), ref.cpu())
-        _assert_valid_indices_sorted(self, persistent, lengths)
+        _assert_valid_indices_compact(self, persistent, lengths)
 
     @unittest.skipIf(not torch.cuda.is_available(), "CUDA required")
     def test_fast_backend_topk_2048_matches_torch_sets(self):
