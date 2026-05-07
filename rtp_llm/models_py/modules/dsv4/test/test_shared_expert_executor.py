@@ -21,10 +21,12 @@ from rtp_llm.models_py.modules.dsv4.moe.shared_expert import (
     FusedSharedExpertFastPath,
     OverlapSharedExpertExecutor,
     SequentialSharedExpertExecutor,
+    W13SharedExpert,
     combine_routed_and_shared,
     get_shared_expert_executor,
 )
 from rtp_llm.test.utils.numeric_util import calc_diff
+from rtp_llm.utils.model_weight import concat_0
 
 
 @contextmanager
@@ -79,7 +81,7 @@ def _make_shared_expert(
     dim: int = 256,
     inter: int = 256,
     swiglu_limit: float = 0.0,
-) -> Expert:
+) -> tuple[W13SharedExpert, Expert]:
     torch.manual_seed(123)
     device = torch.device("cuda")
     w1_bf16 = torch.randn((inter, dim), device=device, dtype=torch.bfloat16) * 0.05
@@ -88,7 +90,7 @@ def _make_shared_expert(
     w1_w, w1_s = _quant_weight(w1_bf16)
     w2_w, w2_s = _quant_weight(w2_bf16)
     w3_w, w3_s = _quant_weight(w3_bf16)
-    return Expert(
+    split_ref = Expert(
         dim,
         inter,
         swiglu_limit=swiglu_limit,
@@ -102,6 +104,18 @@ def _make_shared_expert(
             "w3_s": w3_s,
         },
     )
+    shared_w13 = W13SharedExpert(
+        dim,
+        inter,
+        expert_weights={
+            "w13_w": concat_0([w1_w, w3_w]),
+            "w13_s": FusedSharedExpertFastPath._merge_weight_scales(w1_s, w3_s),
+            "w2_w": w2_w,
+            "w2_s": w2_s,
+        },
+        swiglu_limit=swiglu_limit,
+    )
+    return shared_w13, split_ref
 
 
 def _split_reference(
@@ -230,7 +244,7 @@ class TestSharedExpertExecutor(unittest.TestCase):
     @unittest.skipIf(not torch.cuda.is_available(), "CUDA required")
     def test_merged_w13_matches_split_reference(self):
         swiglu_limit = 1.5
-        shared = _make_shared_expert(swiglu_limit=swiglu_limit)
+        shared, split_ref = _make_shared_expert(swiglu_limit=swiglu_limit)
         executor = FusedSharedExpertExecutor(
             max_tokens_per_rank=64,
             dim=256,
@@ -239,19 +253,16 @@ class TestSharedExpertExecutor(unittest.TestCase):
         )
         executor.prepare(shared)
         self.assertTrue(FusedSharedExpertFastPath.has_merged_w13(shared))
+        w13_w, w13_s = FusedSharedExpertFastPath._linear_parts(shared.w13)
         self.assertEqual(
-            getattr(shared, FusedSharedExpertFastPath._W13_WEIGHT_NAME).shape,
+            w13_w.shape,
             (512, 256),
         )
-        self.assertEqual(
-            getattr(shared, FusedSharedExpertFastPath._W13_SCALE_NAME).shape[0],
-            512,
-        )
-        if getattr(shared, FusedSharedExpertFastPath._W13_SCALE_NAME).dtype == torch.int32:
-            self.assertEqual(
-                getattr(shared, FusedSharedExpertFastPath._W13_SCALE_NAME).stride(0),
-                1,
-            )
+        self.assertEqual(w13_s.shape[0], 512)
+        if w13_s.dtype == torch.int32:
+            self.assertEqual(w13_s.stride(0), 1)
+        self.assertFalse(hasattr(shared, "w1"))
+        self.assertFalse(hasattr(shared, "w3"))
 
         for tokens in (0, 1, 33):
             with self.subTest(tokens=tokens):
@@ -273,7 +284,7 @@ class TestSharedExpertExecutor(unittest.TestCase):
                 ):
                     got = executor.run(shared, x)
                     merged_calls = list(gemm_calls)
-                    ref = _split_reference(shared, x, swiglu_limit)
+                    ref = _split_reference(split_ref, x, swiglu_limit)
                 if tokens == 0:
                     self.assertEqual(tuple(got.shape), (0, 256))
                     self.assertEqual(merged_calls, [])
@@ -288,16 +299,31 @@ class TestSharedExpertExecutor(unittest.TestCase):
                 self.assertLess(calc_diff(got, ref), 0.0011)
 
     @unittest.skipIf(not torch.cuda.is_available(), "CUDA required")
+    def test_w13_generic_forward_matches_split_expert(self):
+        swiglu_limit = 1.5
+        shared, split_ref = _make_shared_expert(swiglu_limit=swiglu_limit)
+        x = torch.randn((5, 256), device="cuda", dtype=torch.bfloat16)
+        self.assertFalse(hasattr(shared, "w1"))
+        self.assertFalse(hasattr(shared, "w3"))
+
+        with mock.patch(
+            "rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear.fp8_gemm_nt",
+            side_effect=_fake_fp8_gemm_nt,
+        ):
+            got = shared(x)
+            ref = split_ref(x)
+        self.assertLess(calc_diff(got, ref), 0.0011)
+
+    @unittest.skipIf(not torch.cuda.is_available(), "CUDA required")
     def test_strict_fused_requires_prepared_w13(self):
-        shared = _make_shared_expert()
+        _, shared = _make_shared_expert()
         executor = FusedSharedExpertExecutor(
             max_tokens_per_rank=8,
             dim=256,
             inter_dim=256,
         )
-        x = torch.randn((2, 256), device="cuda", dtype=torch.bfloat16)
-        with self.assertRaisesRegex(RuntimeError, "prepared merged w13"):
-            executor.run(shared, x)
+        with self.assertRaisesRegex(RuntimeError, "loader-prepared w13"):
+            executor.prepare(shared)
 
 
 if __name__ == "__main__":

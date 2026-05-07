@@ -2,7 +2,7 @@
 
 This orchestrator owns:
   - ``self.gate``: ``Gate`` module (routing scores → topk)
-  - ``self.shared_experts``: ``Expert`` (FP8 shared expert)
+  - ``self.shared_experts``: ``W13SharedExpert`` (FP8 shared expert)
   - ``self._strategy``: a ``RoutedExpertsStrategy`` chosen by ``select_strategy``
 
 Forward: gate → strategy.forward → shared_y add. The 4-way if/elif from
@@ -25,9 +25,9 @@ import torch.nn as nn
 
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 
-from .expert import Expert
 from .gate import Gate
 from .shared_expert import (
+    W13SharedExpert,
     combine_routed_and_shared,
     get_shared_expert_executor,
 )
@@ -105,19 +105,16 @@ class MoE(nn.Module):
         )
         assert n_shared_experts == 1, "V4 always has exactly 1 shared expert"
         shared_w = {
-            "w1_w": layer_weights[W.v4_shared_w1_w],
-            "w1_s": layer_weights[W.v4_shared_w1_s],
+            "w13_w": layer_weights[W.v4_shared_w13_w],
+            "w13_s": layer_weights[W.v4_shared_w13_s],
             "w2_w": layer_weights[W.v4_shared_w2_w],
             "w2_s": layer_weights[W.v4_shared_w2_s],
-            "w3_w": layer_weights[W.v4_shared_w3_w],
-            "w3_s": layer_weights[W.v4_shared_w3_s],
         }
-        self.shared_experts = Expert(
+        self.shared_experts = W13SharedExpert(
             dim,
             moe_inter_dim,
-            swiglu_limit=0.0,
-            storage="fp8",
             expert_weights=shared_w,
+            swiglu_limit=swiglu_limit,
         )
         self._shared_executor = get_shared_expert_executor(
             max_tokens_per_rank=max_tokens_per_rank,

@@ -8,7 +8,7 @@ Public API (preserved across the moe.py → moe/ refactor):
 Internal layout (Phase 1 complete):
   - moe_layer.py: thin MoE orchestrator (gate + shared + strategy dispatch)
   - gate.py: Gate + _use_fused_gate
-  - expert.py: Expert + _use_silu_mul_split
+  - expert.py: Expert + mandatory fused SiLU path
   - quant_layouts.py: FP4_BLOCK / FP8_BLOCK / per-token-cast helper
   - mega_buf.py: symm-mem buffer cache + capability gates
   - strategies/{base,mega,grouped_fp4,local_loop,deepep}.py:

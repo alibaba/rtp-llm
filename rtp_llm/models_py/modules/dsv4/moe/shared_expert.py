@@ -25,6 +25,63 @@ def strict_fused_moe_enabled() -> bool:
     return os.environ.get("DSV4_MOE_STRICT_FUSED", "1") != "0"
 
 
+class W13SharedExpert(nn.Module):
+    """DSV4 shared expert with loader-merged gate/up projection.
+
+    The checkpoint stores shared w1 and w3 separately, but the loader merges
+    them into ``w13`` so inference never keeps duplicate split linears.
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        inter_dim: int,
+        expert_weights: dict[str, torch.Tensor],
+        swiglu_limit: float = 0.0,
+    ) -> None:
+        super().__init__()
+        from rtp_llm.models_py.modules.dsv4.attention import _v4_fp8_linear
+
+        w13_w = expert_weights["w13_w"]
+        w13_s = expert_weights["w13_s"]
+        if w13_w.dim() != 2:
+            raise RuntimeError(f"shared w13 weight must be 2D, got {w13_w.dim()}D")
+        if w13_w.shape[0] != 2 * inter_dim or w13_w.shape[1] != dim:
+            raise RuntimeError(
+                "shared w13 weight shape mismatch: "
+                f"got {tuple(w13_w.shape)}, expected {(2 * inter_dim, dim)}"
+            )
+        self.w13 = _v4_fp8_linear(w13_w, w13_s)
+        self.w2 = _v4_fp8_linear(expert_weights["w2_w"], expert_weights["w2_s"])
+        self.swiglu_limit = swiglu_limit
+
+    def _apply_layer(self, layer: nn.Module, x: torch.Tensor) -> torch.Tensor:
+        if x.dim() > 2:
+            shape = x.shape
+            return layer(x.reshape(-1, shape[-1])).view(*shape[:-1], -1)
+        return layer(x)
+
+    def forward(
+        self, x: torch.Tensor, weights: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        dtype = x.dtype
+        with record_function_range("dsv4.shared_expert.w13"):
+            gate_up = self._apply_layer(self.w13, x).float()
+            gate, up = gate_up.chunk(2, dim=-1)
+        with record_function_range("dsv4.shared_expert.silu_mul"):
+            from .expert import require_silu_mul_split
+
+            hidden = require_silu_mul_split()(
+                gate.contiguous(),
+                up.contiguous(),
+                clamp_limit=self.swiglu_limit,
+            )
+        if weights is not None:
+            hidden = weights * hidden
+        with record_function_range("dsv4.shared_expert.w2"):
+            return self._apply_layer(self.w2, hidden.to(dtype))
+
+
 class FusedSharedExpertFastPath:
     """Workspace-backed DSV4 shared expert path.
 
@@ -68,12 +125,13 @@ class FusedSharedExpertFastPath:
     def can_run(shared_experts: nn.Module, x: torch.Tensor) -> bool:
         if not (x.is_cuda and x.dtype == torch.bfloat16 and x.dim() == 2):
             return False
-        return all(hasattr(shared_experts, name) for name in ("w1", "w2", "w3"))
+        return all(hasattr(shared_experts, name) for name in ("w13", "w2"))
 
     @classmethod
     def has_merged_w13(cls, shared_experts: nn.Module) -> bool:
-        return hasattr(shared_experts, cls._W13_WEIGHT_NAME) and hasattr(
-            shared_experts, cls._W13_SCALE_NAME
+        return hasattr(shared_experts, "w13") or (
+            hasattr(shared_experts, cls._W13_WEIGHT_NAME)
+            and hasattr(shared_experts, cls._W13_SCALE_NAME)
         )
 
     @classmethod
@@ -110,31 +168,16 @@ class FusedSharedExpertFastPath:
         return merged
 
     def prepare(self, shared_experts: nn.Module) -> None:
-        """Build merged w13 buffers during setup, not in the forward hot path."""
-        if not all(hasattr(shared_experts, name) for name in ("w1", "w3")):
-            return
-        w1_w, w1_s = self._linear_parts(shared_experts.w1)
-        w3_w, w3_s = self._linear_parts(shared_experts.w3)
-        if w1_w.dim() != 2 or w3_w.dim() != 2:
-            raise RuntimeError(
-                f"shared w1/w3 weights must be 2D, got {w1_w.dim()}D/{w3_w.dim()}D"
-            )
-        if w1_s.dim() != 2 or w3_s.dim() != 2:
-            raise RuntimeError(
-                f"shared w1/w3 scales must be 2D, got {w1_s.dim()}D/{w3_s.dim()}D"
-            )
-        if w1_w.shape != w3_w.shape:
-            raise RuntimeError(
-                f"shared w1/w3 weight shape mismatch: {w1_w.shape} vs {w3_w.shape}"
-            )
-        if w1_s.shape != w3_s.shape:
-            raise RuntimeError(
-                f"shared w1/w3 scale shape mismatch: {w1_s.shape} vs {w3_s.shape}"
-            )
-        w13_w = torch.cat((w1_w, w3_w), dim=0).contiguous()
-        w13_s = self._merge_weight_scales(w1_s, w3_s)
-        self._set_shared_buffer(shared_experts, self._W13_WEIGHT_NAME, w13_w)
-        self._set_shared_buffer(shared_experts, self._W13_SCALE_NAME, w13_s)
+        """Validate the loader-prepared merged w13; no runtime concatenation."""
+        if not hasattr(shared_experts, "w13"):
+            raise RuntimeError("DSV4 shared expert requires loader-prepared w13")
+        w13_w, w13_s = self._linear_parts(shared_experts.w13)
+        if w13_w.dim() != 2:
+            raise RuntimeError(f"shared w13 weight must be 2D, got {w13_w.dim()}D")
+        if w13_s.dim() != 2:
+            raise RuntimeError(f"shared w13 scale must be 2D, got {w13_s.dim()}D")
+        if w13_w.shape[0] % 2 != 0:
+            raise RuntimeError(f"shared w13 rows must be even, got {w13_w.shape[0]}")
 
     @staticmethod
     def _tma_aligned_rows(rows: int, element_size: int) -> int:
@@ -176,8 +219,8 @@ class FusedSharedExpertFastPath:
         if D != self.dim:
             raise RuntimeError(f"shared expert dim mismatch: got {D}, expected {self.dim}")
         if self.inter_dim is None:
-            w1, _ = self._linear_parts(self._shared.w1)  # type: ignore[attr-defined]
-            self.inter_dim = w1.shape[0]
+            w13, _ = self._linear_parts(self._shared.w13)  # type: ignore[attr-defined]
+            self.inter_dim = w13.shape[0] // 2
         inter = self.inter_dim
         assert inter is not None
         capacity = max(T, self.max_tokens_per_rank or 0, 1)
@@ -224,7 +267,7 @@ class FusedSharedExpertFastPath:
         if not self.can_run(shared_experts, x):
             raise RuntimeError(
                 "DSV4 fused shared expert requires CUDA bf16 2D input and FP8 "
-                "shared Expert weights"
+                "loader-merged shared w13/w2 weights"
             )
         self._shared = shared_experts
         self._ensure_workspace(x)
@@ -236,7 +279,7 @@ class FusedSharedExpertFastPath:
         assert self._hidden_scale_storage is not None
         assert self._out_bf16 is not None
         if not self.has_merged_w13(shared_experts):
-            raise RuntimeError("DSV4 fused shared expert requires prepared merged w13")
+            raise RuntimeError("DSV4 fused shared expert requires loader-prepared w13")
 
         x_fp8 = self._x_fp8[:T]
         x_scale = self._scale_view(self._x_scale_storage, T)
@@ -252,10 +295,7 @@ class FusedSharedExpertFastPath:
         from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import fp8_gemm_nt
 
         quant_bf16_fp8_packed_ue8m0(x, x_fp8, x_scale, group_size=128, eps=1.0e-4)
-        w13 = (
-            getattr(shared_experts, self._W13_WEIGHT_NAME),
-            getattr(shared_experts, self._W13_SCALE_NAME),
-        )
+        w13 = self._linear_parts(shared_experts.w13)
         w2 = self._linear_parts(shared_experts.w2)
         fp8_gemm_nt((x_fp8, x_scale), w13, gate_up, disable_ue8m0_cast=False)
         silu_mul_fp8_quant_packed(
