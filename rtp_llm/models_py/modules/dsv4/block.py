@@ -453,13 +453,9 @@ class Block(nn.Module):
         DSV4 layer layout.  ``_hc_pre`` / ``_hc_post`` are flat-native;
         ``self.ffn`` (MoE) reshapes to 2D internally so any shape flows.
 
-        Attention is called with a padded ``[B, max_S, dim]`` tensor and
-        per-row ``start_pos [B]`` / ``sequence_lengths [B]`` derived from
-        ``cu_seqlens`` + ``positions``.  For B==1 the scatter/gather
-        collapses to an identity copy and Attention's internal scalar
-        path kicks in (start_pos tensor with ``numel()==1`` falls through
-        to ``int(start_pos)``), so the single-request case is bit-equal
-        to the pre-batched behavior.
+        Attention is single-request (B==1, enforced by the FIFO scheduler's
+        ``max_context_batch_size=1``); the [T, dim] hidden goes straight
+        in with ``positions[0]`` as the scalar absolute start_pos.
         """
         from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 
@@ -500,36 +496,23 @@ class Block(nn.Module):
                     x_pre[dbg_pos_mask].contiguous(),
                 )
 
-        # Scatter flat [T, dim] into padded [B, max_S, dim] so that
-        # Attention._forward_body's [B, S, dim] body processes every
-        # request in a single layer call.
+        # B==1 prefill: hand the flat [T, dim] activation straight to
+        # Attention with the scalar absolute start_pos pulled from
+        # positions[0]. cu_seqlens / sequence_lengths / attn_inputs are
+        # consumed elsewhere (cache_store, MoE), not by Attention itself.
         cu_long = cu_seqlens.to(torch.long)
-        batch_size = int(cu_long.numel() - 1)
-        seqlens = cu_long[1:] - cu_long[:-1]  # [B]
-        T = int(x_pre.size(0))
-        D = int(x_pre.size(-1))
-        device = x_pre.device
-        max_S = int(seqlens.max().item()) if batch_size > 0 else 0
-        t_idx = torch.arange(T, device=device, dtype=torch.long)
-        # right=True so tokens at cu_seqlens[b] land in request b
-        # (cu_long[1:] are exclusive ends).
-        b_idx = torch.searchsorted(cu_long[1:].contiguous(), t_idx, right=True)
-        s_idx = t_idx - cu_long[:-1][b_idx]
-        x_padded = torch.zeros(batch_size, max_S, D, dtype=x_pre.dtype, device=device)
-        x_padded[b_idx, s_idx] = x_pre
-        # Per-row start_pos = absolute position of each request's first
-        # token, pulled directly off the flat positions tensor.
-        start_pos_per_req = positions[cu_long[:-1]].to(torch.long)  # [B]
+        assert int(cu_long.numel() - 1) == 1, (
+            f"DSv4 prefill expects B==1 (max_context_batch_size=1); "
+            f"cu_seqlens has B={int(cu_long.numel() - 1)}"
+        )
+        start_pos = int(positions[0].item())
 
-        attn_out_padded = self.attn(
-            x_padded,  # [B, max_S, dim]
-            start_pos_per_req,
-            sequence_lengths=seqlens,
+        attn_out = self.attn(
+            x_pre,  # [T, dim] flat
+            start_pos,
             kv_cache=kv_cache,
             block_tables_by_type=block_tables_by_type,
-            attn_inputs=attn_inputs,
-        )  # [B, max_S, dim]
-        attn_out = attn_out_padded[b_idx, s_idx]  # [T, dim]
+        )  # [T, dim]
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_out", attn_out)
             if dbg_pos_mask is not None:

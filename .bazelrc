@@ -140,6 +140,7 @@ build:cuda13_arm --host_copt=-Wno-missing-field-initializers
 # can swap in CUDA-13-specific deps (cutlass_cu13, flashinfer_cpp_cu13)
 # without being tied to the ARM path's using_cuda13_arm.
 build:cuda13 --config=cuda13_base
+build:cuda13 --config=sm10x
 # Same -Wno-* set as cuda13_arm — gcc 10 (al8) on the CUDA 13 toolchain is
 # strict enough to flag warnings in third-party code (grpc tcp_posix.cc:
 # `(flag & MSG_CTRUNC) == 1` triggers -Werror=tautological-compare; etc.).

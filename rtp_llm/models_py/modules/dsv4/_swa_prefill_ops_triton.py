@@ -257,6 +257,7 @@ def _combine_topk_swa_indices_kernel(
     COMPRESS_RATIO: tl.constexpr,
     WINDOW_SIZE: tl.constexpr,
     PADDED_TOP_K: tl.constexpr,
+    PADDED_WINDOW_SIZE: tl.constexpr,
 ):
     """Per-query layout of ``[combined_topk]`` row in the gathered workspace.
 
@@ -311,7 +312,10 @@ def _combine_topk_swa_indices_kernel(
             mask=mask,
         )
 
-        offset = tl.arange(0, WINDOW_SIZE)
+        # Triton ``arange`` requires a power-of-2 range; use the padded
+        # tile but mask down to the real ``swa_len`` (≤ WINDOW_SIZE) so
+        # callers can pass any window_size.
+        offset = tl.arange(0, PADDED_WINDOW_SIZE)
         # SWA workspace indices for positions [pos - swa_len + 1, pos]:
         # buffer index = N + (position - gather_start), then offset by
         # this batch's slice (M * batch_idx).
@@ -385,6 +389,9 @@ def combine_topk_swa_indices(
     # part; pad to power-of-2 ≥ topk_indices.shape[-1] so the SIMD load mask
     # lines up. SWA-only layers pass topk_indices.shape[-1] == 0 → use 1.
     padded_top_k = max(1, triton.next_power_of_2(int(topk_indices.shape[-1])))
+    # Same constraint for the SWA arange tile — Triton requires arange ranges
+    # to be power-of-2; mask inside the kernel handles the real ``window_size``.
+    padded_window_size = max(1, triton.next_power_of_2(int(window_size)))
     NUM_WORKERS = 128
     _combine_topk_swa_indices_kernel[(num_reqs, NUM_WORKERS)](
         combined_indices,
@@ -401,5 +408,6 @@ def combine_topk_swa_indices(
         COMPRESS_RATIO=compress_ratio,
         WINDOW_SIZE=window_size,
         PADDED_TOP_K=padded_top_k,
+        PADDED_WINDOW_SIZE=padded_window_size,
     )
     return combined_indices, combined_lens

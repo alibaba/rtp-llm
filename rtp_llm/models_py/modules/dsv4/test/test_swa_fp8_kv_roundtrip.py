@@ -228,13 +228,25 @@ class SwaFp8KvRoundtripTest(unittest.TestCase):
         # Slots 4..15 of block 0 (untouched) plus all of block 1 must
         # still be sentinel — confirming -1 skipped tokens didn't
         # accidentally write somewhere.
-        # Token data region for slot k starts at byte k * 576 within
-        # the block; scales region starts at byte (block_size * 576).
-        # We just check that block_size > 4 ⇒ trailing bytes are sentinel.
-        untouched_slots_data = k_cache[0, 4:, :HEAD_BYTES]  # slots 4..15
+        # The kernel uses a packed-per-block layout: each block holds
+        #   [block_size * 576 token-data bytes || block_size * 8 scale bytes],
+        # NOT a per-token contiguous [block_size, 584] view. So inspect the
+        # block as a flat byte buffer and check the kernel-aligned untouched
+        # regions: data bytes [4*576, 9216) and scales bytes [9216+4*8, 9344).
+        TOKEN_DATA_SIZE = 576  # 448 fp8 + 128 bf16 (RoPE)
+        TOKEN_SCALE_SIZE = 8
+        block0_flat = k_cache[0].reshape(-1)
+        data_region_end = block_size * TOKEN_DATA_SIZE  # 9216 for block_size=16
+        scales_touched_end = data_region_end + 4 * TOKEN_SCALE_SIZE  # 9248
+        untouched_data = block0_flat[4 * TOKEN_DATA_SIZE : data_region_end]
+        untouched_scales = block0_flat[scales_touched_end:]
         self.assertTrue(
-            torch.all(untouched_slots_data == sentinel),
-            msg="Untouched slots in block 0 should remain sentinel.",
+            torch.all(untouched_data == sentinel),
+            msg="Untouched slot-data bytes in block 0 should remain sentinel.",
+        )
+        self.assertTrue(
+            torch.all(untouched_scales == sentinel),
+            msg="Untouched scale bytes in block 0 should remain sentinel.",
         )
         self.assertTrue(
             torch.all(k_cache[1] == sentinel),

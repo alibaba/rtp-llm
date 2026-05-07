@@ -167,8 +167,8 @@ class V4Transformer(nn.Module):
         self.hc_eps = args.hc_eps
         self.hc_mult = args.hc_mult
 
-        from rtp_llm.utils.model_weight import W
         from rtp_llm.models_py.modules.dsv4.block import _maybe_squeeze_hc_1d
+        from rtp_llm.utils.model_weight import W
 
         gw = mw.global_weights
         # ``EmbeddingTorch`` keeps ``self.weight`` as a plain attribute (no
@@ -176,7 +176,10 @@ class V4Transformer(nn.Module):
         self.embed = EmbeddingTorch(gw[W.embedding])
 
         self.layers = nn.ModuleList(
-            [_build_block(i, args, layer_weights=mw.weights[i]) for i in range(args.n_layers)]
+            [
+                _build_block(i, args, layer_weights=mw.weights[i])
+                for i in range(args.n_layers)
+            ]
         )
         self.norm = RMSNorm(gw[W.final_ln_gamma], args.norm_eps)
 
@@ -233,6 +236,73 @@ class V4Transformer(nn.Module):
                 ic = getattr(idx, "compressor", None)
                 if ic is not None:
                     ic.set_cp_ctx(cp_ctx)
+
+    def _build_and_propagate_prefill_meta(
+        self,
+        x_first_layer: torch.Tensor,
+        start_pos: int,
+        kv_cache,
+        block_tables_by_type,
+    ) -> None:
+        """Build the layer-invariant prefill meta once per ``compress_ratio``
+        bucket (0=SWA-only, 4=CSA, 128=HCA) and broadcast each bucket's
+        meta to its layers' ``Attention._prefill_meta_shared``. Called once
+        at the top of ``forward_layers`` before the per-layer loop so each
+        layer's ``_prefill_common_setup`` short-circuits the host-side
+        prep work.
+
+        We pick the first layer of each unique ratio as the rep to build
+        the meta. ``kv_cache`` + ``block_tables_by_type`` are temporarily
+        stashed on the rep attention so ``_pool_view`` /
+        ``_pool_entries_per_block`` / FP8-pool-bound checks resolve
+        without threading the framework handles through every signature
+        — this matches the same stash that ``Attention.forward`` does in
+        its own try/finally. ``IndexerFP8.prepare`` is called with explicit
+        ``(kv_block_table, kv_eb)`` so the meta build does not rely on a
+        prior ``set_pool_context``.
+
+        All three ratios must be prepared even if the request only
+        exercises one of them, because every layer's ``forward`` reads
+        its own ``_prefill_meta_shared`` and we propagate that here.
+        """
+        meta_by_ratio: Dict[int, "PrefillMeta"] = {}
+        for layer in self.layers:
+            attn = getattr(layer, "attn", None)
+            if attn is None:
+                continue
+            r = int(attn.compress_ratio)
+            if r in meta_by_ratio:
+                continue
+            prev_kv = attn._kv_cache
+            prev_bt = attn._block_tables_by_type
+            if kv_cache is not None:
+                attn._kv_cache = kv_cache
+            if block_tables_by_type is not None:
+                attn._block_tables_by_type = block_tables_by_type
+            try:
+                meta_by_ratio[r] = attn._build_shared_prefill_meta(
+                    x_first_layer, start_pos
+                )
+            finally:
+                attn._kv_cache = prev_kv
+                attn._block_tables_by_type = prev_bt
+
+        for layer in self.layers:
+            attn = getattr(layer, "attn", None)
+            if attn is None:
+                continue
+            # Each layer owns its own compressor / indexer; freqs_cis must
+            # be bound per-layer (not just on the rep). Cheap idempotent
+            # is-None set.
+            attn._ensure_freqs_cis_bound()
+            attn._set_prefill_meta_shared(meta_by_ratio.get(int(attn.compress_ratio)))
+
+    def _clear_prefill_meta_shared(self) -> None:
+        for layer in self.layers:
+            attn = getattr(layer, "attn", None)
+            if attn is None:
+                continue
+            attn._set_prefill_meta_shared(None)
 
     def _hc_head_reduce(self, x: torch.Tensor) -> torch.Tensor:
         """Reduce the hc axis.  Accepts ``[B, S, hc, d] -> [B, S, d]`` or
@@ -419,6 +489,14 @@ class V4Transformer(nn.Module):
             [0, S], dtype=torch.int64, device=input_ids.device
         )  # [2]
         for li, layer in enumerate(self.layers):
+            # MOEDBG_RUN_LAYERS bisection: skip layers outside the configured
+            # slice so the remaining layer's input matches what an external
+            # impl (vLLM) sees with the same skip applied. KV pool / cache
+            # writes are skipped too — pools for skipped layers stay empty.
+            if not _rt.should_run_layer(li):
+                if _rt_on:
+                    _rt.record(f"layer{li:02d}_out", h_flat)
+                continue
             h_flat = layer(
                 h_flat,
                 input_ids_flat,

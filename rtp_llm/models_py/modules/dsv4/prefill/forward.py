@@ -223,7 +223,26 @@ def forward_layers(
     if _rt_on:
         _rt.record("prefill_embed_hc_expanded", h)
 
+    # Build the per-(compress_ratio) shared prefill meta once and broadcast
+    # to every layer's Attention. Each layer's _prefill_common_setup will
+    # short-circuit on the cached meta instead of re-running freqs_cis slice
+    # / window topk / SWA Triton meta / IndexerFP8.prepare per-layer.
+    # ``positions[0]`` is the absolute pos of the first new token (B==1).
+    sp_int_for_meta = int(positions[0].item())
+    v4._build_and_propagate_prefill_meta(
+        h, sp_int_for_meta, kv_cache, block_tables_by_type
+    )
+
     for layer_idx, layer in enumerate(v4.layers):
+        # MOEDBG_RUN_LAYERS bisection: skip layers outside the configured
+        # slice so the remaining layer's input matches what an external
+        # impl (vLLM) sees with the same skip applied.  Hidden state passes
+        # through unchanged; KV pool / cache_store writes are skipped too.
+        if not _rt.should_run_layer(layer_idx):
+            if _rt_on:
+                _rt.record(f"prefill_layer{layer_idx:02d}_out", h)
+                _rt.record(f"layer{layer_idx:02d}_out", h)
+            continue
         h = layer(
             h,  # [T, hc, dim]
             input_ids,  # [T]
@@ -265,6 +284,12 @@ def forward_layers(
                     f"layer{layer_idx:02d}_tail128", h[layer_tail_mask].contiguous()
                 )
             _rt.record(f"layer{layer_idx:02d}_last", layer_last)
+
+    # Clear the broadcast prefill meta so the next forward (or any
+    # standalone path that runs Attention.forward without going through
+    # forward_layers) gets a fresh per-layer build via the fallback in
+    # _prefill_common_setup.
+    v4._clear_prefill_meta_shared()
 
     # _hc_head_reduce is flat-native: [T, hc, dim] -> [T, dim].
     # Framework ``RMSNorm`` expects 2D, which matches the [T, dim] shape here.

@@ -175,6 +175,11 @@ class CompressorFP8(nn.Module):
         self.freqs_cis: Optional[torch.Tensor] = None
         self._cos_sin_cache: Optional[torch.Tensor] = None
         self._cp_ctx: Optional[CPContext] = None
+        # MOEDBG: caller (Attention / IndexerFP8) sets this to a name
+        # prefix like ``"L02_attn_cmp"`` before forward and clears after;
+        # _forward_prefill_body uses it as the rec name root. None / empty
+        # string suppresses recording.
+        self._dbg_prefix: Optional[str] = None
 
     def _fuse_wkv_wgate(self, coff: int) -> None:
         """Concat wkv + wgate along out-dim into one fused fp32 weight,

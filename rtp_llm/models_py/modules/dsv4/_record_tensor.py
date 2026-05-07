@@ -41,8 +41,43 @@ _DBG_NAME_REGEX = os.environ.get("MOEDBG_NAME_REGEX", "")
 _DBG_NAME_RE = re.compile(_DBG_NAME_REGEX) if _DBG_NAME_REGEX else None
 _DBG_GLOBAL_POS = int(os.environ.get("MOEDBG_GLOBAL_POS", "-1"))
 
+
+def _parse_layer_slice(spec: str) -> Optional[Tuple[int, int]]:
+    """Parse ``MOEDBG_RUN_LAYERS`` spec like ``"2:3"`` into ``(start, end)``
+    half-open interval.  Returns None if env unset / empty.  Raises on
+    malformed input so misconfig surfaces immediately."""
+    spec = spec.strip()
+    if not spec:
+        return None
+    if ":" not in spec:
+        i = int(spec)
+        return (i, i + 1)
+    a, b = spec.split(":", 1)
+    return (int(a), int(b))
+
+
+# Layer-loop slicer for vs-vLLM bisection: when set, the per-layer loop in
+# ``transformer.V4Transformer.forward`` and ``prefill.forward.forward_layers``
+# runs ONLY layers in ``[start, end)`` and falls through (hidden state passes
+# unchanged) for all other layer ids.  Skipped layers' KV pool / cache_store
+# writes are also skipped.
+RUN_LAYERS_SLICE: Optional[Tuple[int, int]] = _parse_layer_slice(
+    os.environ.get("MOEDBG_RUN_LAYERS", "")
+)
+
 ENABLED = _MOEDBG > 0
 LEVEL = _MOEDBG  # 1 = top-level only, 2 = top + per-layer detail
+
+
+def should_run_layer(layer_id: int) -> bool:
+    """True iff this layer should actually run.  Independent of MOEDBG
+    enable state — the slicer is purely a forward-execution gate.  When
+    ``MOEDBG_RUN_LAYERS`` is unset all layers run normally."""
+    if RUN_LAYERS_SLICE is None:
+        return True
+    start, end = RUN_LAYERS_SLICE
+    return start <= layer_id < end
+
 
 _local = threading.local()
 

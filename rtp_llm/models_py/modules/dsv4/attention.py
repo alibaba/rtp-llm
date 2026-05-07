@@ -14,7 +14,7 @@ slow but correct. M6 will swap in FlashMLA sparse impl.
 
 import math
 import os
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, NamedTuple, Optional, Union
 
 # P3 (audit §3.5 / §7.4 P0): wo_a batched output projection.
 # Replaces the per-group ``for g in range(G)`` loop (G launches of
@@ -320,87 +320,6 @@ def _get_compress_topk_idxs(
     return matrix.unsqueeze(0).expand(bsz, -1, -1).contiguous()
 
 
-def _get_window_topk_idxs_batched(
-    window_size: int,
-    max_seqlen: int,
-    sp_tensor: torch.Tensor,  # [B] int64
-    row_seqlens: torch.Tensor,  # [B] int64 — valid new-token count per row
-    device,
-) -> torch.Tensor:
-    """Batched variant of :func:`_get_window_topk_idxs` for heterogeneous
-    (sp, seqlen) prefill.  Returns ``[B, max_seqlen, window_size]`` int64
-    with linear absolute KV indices.
-
-    For each row ``b`` and local query position ``i < row_seqlens[b]``:
-      global pos ``g = sp_tensor[b] + i``
-      returns ``[max(0, g-window_size+1), g]``; remaining columns filled
-      with ``-1``.
-
-    Rows with ``i >= row_seqlens[b]`` (padding) get an entire row of
-    ``-1``, so the sparse_attn kernel contributes nothing for them.
-    """
-    bsz = int(sp_tensor.shape[0])
-    if bsz == 0 or max_seqlen == 0 or window_size == 0:
-        return torch.full(
-            (bsz, max_seqlen, window_size), -1, dtype=torch.long, device=device
-        )
-    sp_t = sp_tensor.to(device=device, dtype=torch.long)
-    seq_t = row_seqlens.to(device=device, dtype=torch.long)
-    i = torch.arange(max_seqlen, device=device, dtype=torch.long)  # [S]
-    global_pos = sp_t.unsqueeze(1) + i.unsqueeze(0)  # [B, S]
-    offsets = torch.arange(window_size, device=device, dtype=torch.long)  # [W]
-    window_start = (global_pos - window_size + 1).clamp_min(0)
-    idxs = window_start.unsqueeze(-1) + offsets.view(1, 1, -1)
-    matrix = torch.where(idxs <= global_pos.unsqueeze(-1), idxs, -1)
-    # Padding rows (i >= row_seqlens[b]) -> whole row -1.
-    row_mask = i.unsqueeze(0) < seq_t.unsqueeze(1)  # [B, S]
-    matrix = torch.where(row_mask.unsqueeze(-1), matrix, torch.full_like(matrix, -1))
-    return matrix.contiguous()
-
-
-def _get_compress_topk_idxs_batched(
-    ratio: int,
-    max_seqlen: int,
-    offset: int,
-    sp_tensor: torch.Tensor,  # [B] int64
-    row_seqlens: torch.Tensor,  # [B] int64
-    device,
-) -> torch.Tensor:
-    """Batched variant of :func:`_get_compress_topk_idxs`.
-
-    Returns ``[B, max_seqlen, K]`` where ``K`` is bounded by
-    ``max(sp + seqlen) // ratio`` across the batch.  For each row ``b``
-    with ``g = sp_tensor[b] + i`` where ``i < row_seqlens[b]``:
-      * ``sp_tensor[b] > 0``: query at global position ``sp+i`` sees
-        compressed blocks ``[0, (sp+i+1)//ratio)``.
-      * ``sp_tensor[b] == 0``: row sees compressed blocks ``[0, (i+1)//ratio)``
-        at query ``i`` (causal over compressed KV).
-
-    Rows with ``i >= row_seqlens[b]`` (padding) emit all ``-1``.
-    """
-    bsz = int(sp_tensor.shape[0])
-    if bsz == 0 or ratio == 0:
-        return torch.full((bsz, max_seqlen, 0), -1, dtype=torch.long, device=device)
-    sp_t = sp_tensor.to(device=device, dtype=torch.long)
-    seq_t = row_seqlens.to(device=device, dtype=torch.long)
-    end_per_row = (sp_t + seq_t) // ratio  # [B]
-    K = int(end_per_row.max().item()) if bsz > 0 else 0
-    if K == 0:
-        return torch.full((bsz, max_seqlen, 0), -1, dtype=torch.long, device=device)
-    k = torch.arange(K, device=device, dtype=torch.long)  # [K]
-    i = torch.arange(max_seqlen, device=device, dtype=torch.long)  # [S]
-
-    global_pos = sp_t.unsqueeze(1) + i.unsqueeze(0)  # [B, S]
-    max_allowed_bi = (global_pos + 1) // ratio  # [B, S]
-    k_b_i = k.view(1, 1, K).expand(bsz, max_seqlen, K)
-    valid_k = k_b_i < max_allowed_bi.unsqueeze(-1)  # [B, S, K]
-    matrix = torch.where(valid_k, k_b_i + offset, torch.full_like(k_b_i, -1))
-    # Padding rows -> all -1.
-    row_mask = i.unsqueeze(0) < seq_t.unsqueeze(1)  # [B, S]
-    matrix = torch.where(row_mask.unsqueeze(-1), matrix, torch.full_like(matrix, -1))
-    return matrix.contiguous()
-
-
 def _get_compress_topk_idxs_cp(
     ratio: int,
     bsz: int,
@@ -475,6 +394,83 @@ def _sparse_attn(
     acc_o = torch.einsum("bshk,bskd->bshd", exp_logits, selected_f)  # [B, S, H, D]
     out = acc_o / sum_exp  # divide each head by its denom
     return out.to(q.dtype)
+
+
+class SwaPrefillMeta(NamedTuple):
+    """FP8 prefill metadata bundle — built once per ``_prefill_common_setup``
+    call for **all FP8 KV-cache layers** (compress_ratio 0/4/128 alike).
+
+    Two field groups with different lifecycles:
+
+    1. **FP8 KV cache write metadata** (used by ``_prefill_write_swa_fp8_paged``)
+       — built for every FP8 layer regardless of ``compress_ratio``,
+       because BF16 ``_prefill_write_swa_to_pool`` is also unconditional
+       across compress_ratio. CSA/HCA layers still need to populate the
+       SWA pool for downstream decode reads.
+
+       Fields: ``slot_mapping``, ``query_start_loc``, ``combined_seq_lens``.
+       ``None`` on warmup forward (``self._kv_cache is None``).
+
+    2. **SWA-only attention metadata** (used by ``_attn_fp8_swa_via_kv_full``
+       / ``_attn_fp8_swa_via_concat``) — built only when
+       ``compress_ratio == 0``. CSA/HCA layers don't read the SWA pool
+       directly during attention (they go through compressor/indexer).
+
+       ``topk_length_kv_full`` is cache-independent so it's also set on
+       warmup. ``cache_*`` / ``combined_indices`` etc. are skipped on
+       warmup or non-SWA-only layers.
+    """
+
+    # Group 1: FP8 KV cache write meta (all FP8 layers)
+    slot_mapping: Optional[torch.Tensor]  # [num_tokens] int64; -1 = skip
+    query_start_loc: Optional[torch.Tensor]  # [B+1] int32
+    combined_seq_lens: Optional[torch.Tensor]  # [B] int32 — sp + S per req
+
+    # Group 2: SWA-only attention meta (compress_ratio == 0 only)
+    topk_length_kv_full: Optional[torch.Tensor]  # [num_tokens] int32
+    combined_gather_lens: Optional[torch.Tensor]  # [B] int32 — P + S per req
+    combined_gather_len_max: int
+    M: int  # workspace stride
+    cache_seq_lens: Optional[torch.Tensor]  # [B] int32 — sp per req
+    cache_gather_lens: Optional[torch.Tensor]  # [B] int32 — P = min(sp, win-1)
+    prefix_len_max: int
+    combined_indices: Optional[torch.Tensor]  # [num_tokens, combined_topk] int32
+    combined_lens: Optional[torch.Tensor]  # [num_tokens] int32
+
+
+class PrefillMeta(NamedTuple):
+    """Per-call prefill metadata, layer-invariant within a
+    ``compress_ratio`` bucket. Built once per (forward, ratio) by
+    :meth:`Attention._build_shared_prefill_meta` and broadcast to every
+    same-ratio layer via :meth:`Attention._set_prefill_meta_shared`.
+    """
+
+    seqlen: int
+    seqlen_full: int  # CP-aware (== seqlen when CP off); reused by compress / pool
+    rd: int
+    device: torch.device
+    cp_ctx: Optional[CPContext]
+    cp_on: bool
+    freqs_cis: torch.Tensor
+    topk_idxs: torch.Tensor
+    sp_int: int
+    any_cont: bool
+    row_seqlens_full: torch.Tensor  # [1] long — for SWA pool helpers
+    swa_meta: Optional[SwaPrefillMeta] = None
+    indexer_meta: Optional[Any] = None  # IndexerFP8PrefillMeta when applicable
+
+
+class PrefillQKV(NamedTuple):
+    """Q/KV intermediate produced by ``_prefill_compute_qkv``.
+
+    ``qr`` is fed to the indexer (CSA layers); ``q`` is the dense Q.
+    ``kv_full`` is the all-gathered KV under CP; equals ``kv`` otherwise.
+    The CP-aware sequence length lives on ``PrefillMeta.seqlen_full``.
+    """
+
+    qr: torch.Tensor
+    q: torch.Tensor
+    kv_full: torch.Tensor
 
 
 class Attention(nn.Module):
@@ -777,6 +773,13 @@ class Attention(nn.Module):
 
         # CP context bound per-forward by V4Transformer.  None = no CP.
         self._cp_ctx: Optional[CPContext] = None
+
+        # Shared prefill meta (compress_ratio bucket; not layer-specific).
+        # V4Transformer.forward_layers builds one per ratio in use, sets it
+        # on every layer's attention via ``_set_prefill_meta_shared``, and
+        # clears at end-of-forward. None ⇒ standalone path / decode →
+        # ``_prefill_common_setup`` falls back to per-call build.
+        self._prefill_meta_shared: Optional["PrefillMeta"] = None
 
         # qwen3-style: framework KVCache handle + per-request block tables
         # flow in as kwargs on ``forward`` / ``forward_decode``; these two
@@ -1331,22 +1334,7 @@ class Attention(nn.Module):
         b_idx = torch.arange(bsz, device=device, dtype=torch.long).unsqueeze(1)
         block_id = bt_long[b_idx, safe_block.unsqueeze(0).expand(bsz, -1)]
         valid = in_capacity_row.unsqueeze(0) & (block_id > 0)
-        from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 
-        if _rt.should_record_layer(self.layer_id):
-            _rt.record_if_level(2, f"L{self.layer_id:02d}_swa_bt", bt_long)
-            _rt.record_if_level(
-                2,
-                f"L{self.layer_id:02d}_swa_abs_block_id",
-                block_id,
-            )
-            _rt.record_if_level(
-                2,
-                f"L{self.layer_id:02d}_swa_eb",
-                torch.tensor(
-                    [eb, self.window_size, dense_len], device=device, dtype=torch.int32
-                ),
-            )
         safe_slot = torch.where(
             valid, block_id * eb + in_block.unsqueeze(0), torch.zeros_like(block_id)
         )
@@ -1716,7 +1704,6 @@ class Attention(nn.Module):
         Decode-only — does NOT touch the prefill ``forward`` arm. Phase
         4 will swap the TileLang sparse_attn for FlashMLA + FP8 KV here.
         """
-        from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
         from rtp_llm.models_py.modules.dsv4.decode.sparse_attn_decode_op import (
             SparseAttnV4DecodeOp,
         )
@@ -1727,7 +1714,6 @@ class Attention(nn.Module):
         ratio = self.compress_ratio
         rd = self.rope_head_dim
         device = x.device
-        _dbg_decode = _rt.should_record_layer(self.layer_id)
         # Slice metadata to actual bsz — the CUDA-graph impl allocates
         # buffers at max_bs, but the captured graph at BS=k must read only
         # the [:k] prefix. Padding entries [k:max_bs] are stale across
@@ -1760,9 +1746,6 @@ class Attention(nn.Module):
         # via apply_rotary_emb_batched (mirrors vLLM's batched cos/sin lookup).
         freqs_cis_per_req = self.freqs_cis[start_pos.long()]  # [B, freqs_dim]
         q = fused_rmsnorm_rope(q, None, freqs_cis_per_req, rd, eps=self.eps)
-        if _dbg_decode:
-            _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_q", q)
-
         # KV path (single MQA head)
         kv = fused_rmsnorm_rope(
             self._lin(self.wkv, x),
@@ -1771,9 +1754,6 @@ class Attention(nn.Module):
             rd,
             eps=self.eps,
         )
-        if _dbg_decode:
-            _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_kv", kv)
-
         # Phase E5b: direct SWA pool write (register_buffer retired).
         kv_flat = kv.reshape(bsz * q_len, self.head_dim)  # [T, head_dim]
         from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
@@ -1783,12 +1763,6 @@ class Attention(nn.Module):
 
         swa_pool_slots = attn_metadata.pool_write_slot_mappings.get(SWA_KV)
         swa_view = self._pool_view(SWA_KV)
-        if _dbg_decode and swa_pool_slots is not None:
-            _rt.record_if_level(
-                2,
-                f"L{self.layer_id:02d}_decode_swa_write_slot",
-                swa_pool_slots[: bsz * q_len],
-            )
         if (
             swa_view is not None
             and swa_pool_slots is not None
@@ -1865,20 +1839,10 @@ class Attention(nn.Module):
                 topk_idxs = topk_total
                 # Compressor self-binds/writes/scatters compressed-K into
                 # the HCA_KV + HCA_STATE pool via set_pool_context lifecycle.
-                if _dbg_decode:
-                    self.compressor._dbg_prefix = f"L{self.layer_id:02d}_decode_cmp"
                 if use_vec:
-                    try:
-                        self.compressor.forward_decode_vectorized(x, start_pos)
-                    finally:
-                        if _dbg_decode:
-                            self.compressor._dbg_prefix = None
+                    self.compressor.forward_decode_vectorized(x, start_pos)
                 else:
-                    try:
-                        self.compressor.forward_decode(x, start_pos)
-                    finally:
-                        if _dbg_decode:
-                            self.compressor._dbg_prefix = None
+                    self.compressor.forward_decode(x, start_pos)
         else:
             # SWA-only layer: just window topk. Already request-local ring slots.
             topk_idxs = attn_metadata.topk_window_idxs[:bsz]
@@ -1993,17 +1957,6 @@ class Attention(nn.Module):
                 swa_local,
                 swa_eb,
             )
-            if _dbg_decode:
-                _rt.record_if_level(
-                    2, f"L{self.layer_id:02d}_decode_topk_idxs", topk_idxs
-                )
-                _rt.record_if_level(
-                    2, f"L{self.layer_id:02d}_decode_swa_local", swa_local
-                )
-                _rt.record_if_level(
-                    2, f"L{self.layer_id:02d}_decode_swa_global", swa_global
-                )
-
             if use_paged_swa_read and swa_view_3d_fp8 is not None:
                 # FP8 path: FlashMLA reads the packed FP8 pool directly
                 # (block_table + per-request virtual indices). swa_abs_idx
@@ -2056,13 +2009,6 @@ class Attention(nn.Module):
                     cmp_local,
                     cmp_eb,
                 )
-                if _dbg_decode:
-                    _rt.record_if_level(
-                        2, f"L{self.layer_id:02d}_decode_cmp_local", cmp_local
-                    )
-                    _rt.record_if_level(
-                        2, f"L{self.layer_id:02d}_decode_cmp_global", cmp_global
-                    )
                 assert q_len == 1, (
                     "Phase 2B-2b dual-pool paged read currently supports "
                     f"q_len=1 only (got {q_len})"
@@ -2094,10 +2040,6 @@ class Attention(nn.Module):
                         q_len,
                     )  # [B, 1, win+K, D]
                     kv_packed = kv_packed_4d.view(bsz, win + K_cmp, self.head_dim)
-                if _dbg_decode:
-                    _rt.record_if_level(
-                        2, f"L{self.layer_id:02d}_decode_kv_packed", kv_packed
-                    )
                 identity_topk = (
                     torch.arange(
                         win + K_cmp,
@@ -2162,660 +2104,780 @@ class Attention(nn.Module):
             all_reduce(out, Group.TP)
         return out
 
+    # ==================================================================
+    # Prefill — flat ``[T, dim]`` input, B==1 invariant.
+    # ==================================================================
     def forward(
         self,
         x: torch.Tensor,
-        start_pos,
-        sequence_lengths=None,
+        start_pos: int,
         kv_cache: Optional[Any] = None,
         block_tables_by_type: Optional[Dict[int, torch.Tensor]] = None,
-        attn_inputs: Any = None,
     ) -> torch.Tensor:
-        """qwen3-style: ``kv_cache`` (framework KVCache handle) and
-        ``block_tables_by_type`` (per-request, per-attn_type block tables)
-        flow in as kwargs on every forward call. We stash them on ``self``
-        for the duration of this call so the many internal helpers
-        (``_pool_view``, ``_prefill_*_write_*``, ``_bind_compressor_state
-        _for_prefill``, etc.) can use ``self._kv_cache`` /
-        ``self._block_tables_by_type`` without threading the handle
-        through every method signature. try/finally restores the prior
-        state so recursive or mis-used callers see deterministic clears.
+        """Prefill entry point.
 
-        Accepts either ``[B, S, dim]`` (legacy) or the flat ``[T, dim]``
-        layout that vLLM uses.  Flat input is reboxed to ``[1, T, dim]``
-        for the existing ``_forward_body`` and squeezed on the way out
-        so the caller sees ``[T, dim]``.  Full internal flatten is a
-        follow-up; for now this just closes the ``Block.forward``
-        unsqueeze/squeeze shim.
+        ``x``: flat ``[T, dim]`` (single-request, B==1 — enforced by
+        the FIFO scheduler's ``max_context_batch_size=1`` setting and
+        ``DeepSeekV4Model.forward``). ``start_pos``: scalar absolute
+        position of the first new token (block.py extracts it once via
+        ``int(positions[0].item())``). ``kv_cache`` and
+        ``block_tables_by_type`` are stashed on ``self`` for the
+        duration of the call so the many ``_prefill_*`` / pool helpers
+        can resolve via ``self._kv_cache`` without threading the
+        handles through every signature.
         """
+        assert (
+            x.dim() == 2
+        ), f"DSv4 Attention prefill expects flat [T, dim]; got shape {tuple(x.shape)}"
+        assert isinstance(
+            start_pos, int
+        ), f"DSv4 Attention prefill expects int start_pos; got {type(start_pos).__name__}"
         prev_kv = self._kv_cache
         prev_bt = self._block_tables_by_type
         if kv_cache is not None:
             self._kv_cache = kv_cache
         if block_tables_by_type is not None:
             self._block_tables_by_type = block_tables_by_type
-        was_flat = x.dim() == 2
-        x_in = x.unsqueeze(0) if was_flat else x
         try:
             self._set_compressor_pool_context()
             try:
-                out = self._forward_body(x_in, start_pos, sequence_lengths)
+                return self._forward_prefill(x, start_pos)
             finally:
                 self._clear_compressor_pool_context()
         finally:
             self._kv_cache = prev_kv
             self._block_tables_by_type = prev_bt
-        return out.squeeze(0) if was_flat else out
 
-    def _forward_body(
-        self, x: torch.Tensor, start_pos, sequence_lengths=None
-    ) -> torch.Tensor:
-        """Forward pass. start_pos can be int (B=1) or tensor [B] for batched decode."""
-        from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
+    def _forward_prefill(self, x: torch.Tensor, start_pos) -> torch.Tensor:
+        """Prefill body. ``x`` is flat ``[T, dim]``; output flat ``[T, dim]``.
 
-        # Master switch: when MOEDBG=0 the AND short-circuits so neither the
-        # layer_id compare nor any record_if_level call site below runs.
-        _dbg = _rt.should_record_layer(self.layer_id)
-        bsz, seqlen, _ = x.size()
-        win = self.window_size
-        ratio = self.compress_ratio
+        Pipeline:
+          1. ``_prefill_common_setup`` → freqs_cis + window topk + per-call
+             scalars / debug closure (everything that's the same across
+             the rest of the body).
+          2. ``_prefill_compute_qkv`` → qr / q / kv / kv_full (CP all-gather).
+          3. ``_compute_compress_idxs`` (HCA/CSA layers only) → extend
+             topk_idxs with compressed-block tail.
+          4. ``_prefill_write_swa_to_pool`` → write fresh SWA KV (BF16/FP8
+             internal dispatch).
+          5. Compressor → write compressed pool (BF16/FP8 internal).
+          6. ``_build_kv_cat`` → ``[sliding | compressed]`` BF16 view
+             consumed by sparse attn (FP8 reads dequant from pool).
+          7. ``_prefill_attn`` → ``flash_mla_sparse_fwd`` (FP8) or
+             tilelang/_sparse_attn (BF16).
+          8. ``_prefill_output_proj`` → inverse-RoPE + wo_a + wo_b + AR.
+        """
+        assert self._kv_cache_is_fp8, (
+            "_forward_prefill is FP8-only; BF16 KV-cache prefill is no "
+            "longer supported on this branch"
+        )
+        common = self._prefill_common_setup(x, start_pos)
+        qkv = self._prefill_compute_qkv(x, common)
+
+        # SWA pool write — single dispatch point regardless of attention
+        # type. FP8 paged-tail Triton kernel (pre-built slot_mapping in
+        # swa_meta). Safe to do before attention because new K (abs pos
+        # [sp, sp+S)) and any cont-prefill prefix tail (abs pos
+        # [sp-P, sp)) target disjoint slots.
+        self._prefill_write_swa_fp8_paged(common, qkv.kv_full)
+
+        # FP8 SWA-only fast path: skip the kv_cat / sparse_attn flow
+        # entirely. Cold/warmup attends over the BF16 ``kv_full``
+        # directly; continuation builds [prefix_tail | new_K_bf16] in a
+        # workspace and runs flash_mla_sparse_fwd over it.
+        if self.compress_ratio == 0:
+            if common.sp_int == 0 or self._kv_cache is None:
+                o = self._attn_fp8_swa_via_kv_full(qkv, common)
+            else:
+                o = self._attn_fp8_swa_via_concat(qkv, common)
+            out_3d = self._prefill_output_proj(o, common)
+            return out_3d.squeeze(0)
+
+        topk_idxs = common.topk_idxs
+        if self.compress_ratio:
+            compress_idxs = self._compute_compress_idxs(x, qkv.qr, common, qkv)
+            topk_idxs = torch.cat([topk_idxs, compress_idxs], dim=-1)
+        topk_idxs = topk_idxs.long()
+
+        kv_full_3d = qkv.kv_full.unsqueeze(0)  # [1, T, head_dim] for pool helpers
+        # Continuation prefill rebuilds the dense absolute SWA view from
+        # the pool (prefix + new K) so the cont-prefill read can see the
+        # full window.
+        prefill_swa_dense_for_attn = None
+        if common.any_cont:
+            prefill_swa_dense_for_attn = self._prefill_read_swa_dense_abs_from_pool(
+                1,
+                start_pos,
+                common.row_seqlens_full,
+                common.seqlen_full + common.sp_int,
+                current_kv_full=kv_full_3d,
+            )
+
+        kv_compress = None
+        if self.compress_ratio:
+            kv_compress = self.compressor(x.unsqueeze(0), start_pos)
+
+        kv_cat = self._build_kv_cat(
+            qkv,
+            kv_compress,
+            common,
+            prefill_swa_dense_for_attn,
+            start_pos,
+            common.row_seqlens_full,
+        )
+
+        o = self._prefill_attn(qkv.q.unsqueeze(0), kv_cat, topk_idxs, common)
+
+        out_3d = self._prefill_output_proj(o, common)
+        return out_3d.squeeze(0)
+
+    # ------------------------------------------------------------------
+    # Per-call meta + Q/KV
+    # ------------------------------------------------------------------
+    def _set_prefill_meta_shared(self, meta: Optional["PrefillMeta"]) -> None:
+        """Inject the (compress_ratio bucket) shared prefill meta built by
+        the upper layer (V4Transformer.forward_layers). The shared meta is
+        layer-invariant within a ratio, so the upper layer builds it once
+        per ratio and broadcasts to every layer attention sharing that
+        ratio. ``None`` clears the binding (used at end of forward).
+        """
+        self._prefill_meta_shared = meta
+
+    def _ensure_freqs_cis_bound(self) -> None:
+        """Bind ``self.freqs_cis`` onto this layer's compressor / indexer
+        chain so their forward()s can read ``self.freqs_cis`` without an
+        extra parameter. Idempotent — safe to call many times. Required
+        on every layer (not just the meta-build rep) because each layer
+        owns its own compressor / indexer instance.
+        """
+        if not self.compress_ratio:
+            return
+        if self.compressor.freqs_cis is None:
+            self.compressor.freqs_cis = self.freqs_cis
+        if self.indexer is not None:
+            if self.indexer.freqs_cis is None:
+                self.indexer.freqs_cis = self.freqs_cis
+            if self.indexer.compressor.freqs_cis is None:
+                self.indexer.compressor.freqs_cis = self.freqs_cis
+
+    def _build_shared_prefill_meta(
+        self, x: torch.Tensor, start_pos: int
+    ) -> "PrefillMeta":
+        """Build the layer-invariant (within compress_ratio bucket) part
+        of per-call prefill metadata. All host-side prep work that
+        doesn't depend on ``self.layer_id`` lives here so the upper layer
+        can run it once per ratio and broadcast to every same-ratio
+        attention via :meth:`_set_prefill_meta_shared`. Standalone path
+        falls back to running this per-layer.
+        """
+        seqlen = int(x.shape[0])
         rd = self.rope_head_dim
         device = x.device
 
         cp_ctx = self._cp_ctx
-        is_batched = isinstance(start_pos, torch.Tensor) and start_pos.numel() > 1
-        is_batched_decode = is_batched and seqlen == 1
-        is_batched_prefill = is_batched and seqlen > 1
-        is_prefill_attn = is_batched_prefill or (not is_batched and seqlen > 1)
-        cp_on = cp_ctx is not None and cp_ctx.cp_size > 1 and is_prefill_attn
+        cp_on = cp_ctx is not None and cp_ctx.cp_size > 1
 
-        # ``any_cont`` decides whether prefill attention reads the temporary
-        # linear [current KV | current compressed KV] buffer (fresh prefill) or
-        # the framework paged pools (continuation / mixed prefill).  Compute it
-        # before topk construction because those two layouts use different
-        # index spaces.
-        if cp_on:
-            sp_int = int(cp_ctx.prefix_length)
-            any_cont = sp_int > 0
-        elif isinstance(start_pos, torch.Tensor):
-            if start_pos.numel() == 1:
-                sp_int = int(start_pos.item())
-            else:
-                sp_int = 0  # placeholder; batched paths use start_pos tensor directly
-            any_cont = bool((start_pos > 0).any().item())
-        else:
-            sp_int = int(start_pos)
-            any_cont = sp_int > 0
+        # CP rank-local view overrides the per-request start_pos. Otherwise
+        # ``forward`` guarantees ``start_pos: int`` (block.py extracts the
+        # scalar via ``int(positions[0].item())`` for B==1 prefill).
+        sp_int = int(cp_ctx.prefix_length) if cp_on else start_pos
+        any_cont = sp_int > 0
 
-        # Per-token RoPE angles.  Non-CP uses the contiguous window
-        # freqs_cis[start_pos:start_pos+seqlen]; CP selects at each
-        # rank-local token's GLOBAL position; batched prefill picks
-        # per-row positions via gather.
         if cp_on:
             freqs_cis = cp_freqs_cis_local(self.freqs_cis, cp_ctx)
-        elif is_batched_decode:
-            # Batched decode: each batch element at different position, seqlen=1
-            # Gather freqs for each batch element's position
-            positions = start_pos.long()
-            freqs_cis = self.freqs_cis[positions]  # [B, rope_dim//2]
-            freqs_cis = freqs_cis.unsqueeze(1)  # [B, 1, rope_dim//2]
-        elif is_batched_prefill:
-            # Batched prefill: each row at its own sp, advanced by local
-            # index i ∈ [0, seqlen).  Returns [B, seqlen, rope_dim//2].
-            sp_t = start_pos.to(device=device, dtype=torch.long)  # [B]
-            positions = sp_t.unsqueeze(1) + torch.arange(
-                seqlen, device=device, dtype=torch.long
-            ).unsqueeze(
-                0
-            )  # [B, S]
-            pos_max = int(self.freqs_cis.shape[0])
-            positions = positions.clamp(max=pos_max - 1)
-            freqs_cis = self.freqs_cis[positions]  # [B, S, rope_dim//2]
         else:
-            sp = int(start_pos) if isinstance(start_pos, torch.Tensor) else start_pos
-            freqs_cis = self.freqs_cis[sp : sp + seqlen]
+            freqs_cis = self.freqs_cis[sp_int : sp_int + seqlen]
 
-        # #50: Compressor / Indexer are fully pool-backed — no persistent
-        # Python buffers to allocate.  Bind freqs_cis once (idempotent).
-        if self.compress_ratio:
-            if self.compressor.freqs_cis is None:
-                self.compressor.freqs_cis = self.freqs_cis
-            if self.indexer is not None:
-                if self.indexer.freqs_cis is None:
-                    self.indexer.freqs_cis = self.freqs_cis
-                if self.indexer.compressor.freqs_cis is None:
-                    self.indexer.compressor.freqs_cis = self.freqs_cis
+        # Bind freqs_cis to this layer's compressor / indexer chain
+        # (idempotent — safe to call from both standalone and meta-broadcast paths).
+        self._ensure_freqs_cis_bound()
 
-        # Q path
-        qr = self._rmsnorm_weighted(
-            self._lin(self.wq_a, x), self.q_norm
-        )  # [B, S, q_lora_rank]
-        if _dbg:
-            _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_qr_norm", qr)
-        q = self._lin(self.wq_b, qr).unflatten(-1, (self.n_heads, self.head_dim))
-        if _dbg:
-            _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_q_pre_rmsnorm", q)
-        # Per-head QK RMSNorm (no learnable scale, per official code) + partial
-        # RoPE, single Triton launch.  ``fused_rmsnorm_rope`` handles both
-        # prefill (``freqs_cis`` per-position ``[S, rd/2]``) and batched-
-        # decode-in-prefill (``[B, 1, rd/2]``) via the unified freq_stride.
-        q = fused_rmsnorm_rope(q, None, freqs_cis, rd, eps=self.eps)
-        if _dbg:
-            _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_q_post_rope", q)
-            _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_freqs_cis", freqs_cis)
-
-        # KV path (single KV head) — rank-local under CP.
-        kv_in = self._lin(self.wkv, x)
-        kv = fused_rmsnorm_rope(kv_in, self.kv_norm, freqs_cis, rd, eps=self.eps)
-        if _dbg:
-            _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_kv_post_rope_local", kv)
-
-        # Under CP prefill, all-gather KV across the CP (== TP) group
-        # and strip padding so every rank has the FULL uncompressed
-        # sliding KV in logical order; attention then runs with rank-
-        # local Q × full-KV.
-        if cp_on:
-            kv_full = cp_all_gather_full(kv, cp_ctx)  # [1, seq_len_full, head_dim]
-            seqlen_full = cp_ctx.seq_len_full
-        else:
-            kv_full = kv
-            seqlen_full = seqlen
-        if cp_on:
-            prefill_kv_len = cp_ctx.seq_len_total
-        elif is_batched_prefill:
-            if sequence_lengths is not None:
-                row_seqlens_for_kv = sequence_lengths.to(
-                    device=device, dtype=torch.long
-                )
-            else:
-                row_seqlens_for_kv = torch.full(
-                    (bsz,), seqlen, device=device, dtype=torch.long
-                )
-            prefill_kv_len = int(
-                (start_pos.to(device=device, dtype=torch.long) + row_seqlens_for_kv)
-                .max()
-                .item()
-            )
-        else:
-            prefill_kv_len = sp_int + seqlen
-        if _dbg:
-            _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_kv_full", kv_full)
-
-        prefill_swa_dense_len = prefill_kv_len
-        # Build topk_idxs — rows = rank-local Q; columns reference either the
-        # fresh-prefill [sliding | compressed] tensor or the continuation
-        # paged-pool [SWA absolute stream | compressed] tensor.
+        win = self.window_size
+        seqlen_full = cp_ctx.seq_len_full if cp_on else seqlen
         if cp_on:
             topk_idxs = _get_window_topk_idxs_cp(
                 win,
-                bsz,
-                prefill_kv_len,
+                1,
+                seqlen_full,
                 cp_ctx.global_positions,
             )
-        elif is_batched_decode:
-            # Batched decode: vectorized topk_idxs — each batch at different ring position
-            sp = start_pos % win  # [B]
-            offsets = torch.arange(win, device=device)  # [win]
-            idxs = (sp.unsqueeze(1) + 1 + offsets.unsqueeze(0)) % win  # [B, win]
-            valid_count = torch.clamp(start_pos + 1, max=win)  # [B]
-            invalid = offsets.unsqueeze(0) < (win - valid_count.unsqueeze(1))
-            idxs = torch.where(invalid, -1, idxs)
-            topk_idxs = idxs.unsqueeze(1)  # [B, 1, win]
-        elif is_batched_prefill:
-            sp_t = start_pos.to(device=device, dtype=torch.long)
-            if sequence_lengths is not None:
-                row_seqlens = sequence_lengths.to(device=device, dtype=torch.long)
-            else:
-                row_seqlens = torch.full(
-                    (bsz,), seqlen, device=device, dtype=torch.long
-                )
-            topk_idxs = _get_window_topk_idxs_batched(
-                win, seqlen, sp_t, row_seqlens, device
-            )
         else:
-            sp = int(start_pos) if isinstance(start_pos, torch.Tensor) else start_pos
-            topk_idxs = _get_window_topk_idxs(win, bsz, seqlen, sp, device)
-        if self.compress_ratio:
-            # Fresh prefill attends over [current sliding KV | current compressed KV].
-            # Continuation prefill uses a dense absolute SWA view; decode keeps
-            # the compact [SWA ring | compressed] layout.
-            if is_prefill_attn:
-                offset = prefill_swa_dense_len
-            else:
-                offset = win
-            if self.indexer is not None:
-                if _dbg:
-                    self.indexer._dbg_prefix = f"L{self.layer_id:02d}_attn_idx"
-                if is_batched_decode:
-                    # Indexer now supports tensor start_pos directly
-                    compress_idxs = self.indexer(x, qr, start_pos, offset)
-                elif is_batched_prefill:
-                    # Indexer batched prefill passes through sp tensor;
-                    # Indexer handles per-row seqlens internally.
-                    compress_idxs = self.indexer(
-                        x,
-                        qr,
-                        start_pos,
-                        offset,
-                        sequence_lengths=sequence_lengths,
-                    )
-                else:
-                    compress_idxs = self.indexer(x, qr, start_pos, offset)
-                if _dbg:
-                    self.indexer._dbg_prefix = None
-                    _rt.record_if_level(
-                        2,
-                        f"L{self.layer_id:02d}_attn_compress_idxs",
-                        compress_idxs,
-                    )
-            elif cp_on:
-                compress_idxs = _get_compress_topk_idxs_cp(
-                    ratio,
-                    bsz,
-                    prefill_kv_len,
-                    offset,
-                    cp_ctx.global_positions,
-                )
-            elif is_batched_decode:
-                # Vectorized compress_idxs for HCA batched decode (no indexer)
-                n_entries = (start_pos + 1) // ratio  # [B]
-                max_entries = int(n_entries.max().item())
-                if max_entries > 0:
-                    entry_range = torch.arange(max_entries, device=device)
-                    valid = entry_range.unsqueeze(0) < n_entries.unsqueeze(
-                        1
-                    )  # [B, max_entries]
-                    c_idxs = torch.where(valid, entry_range.unsqueeze(0) + offset, -1)
-                    compress_idxs = c_idxs.unsqueeze(1)  # [B, 1, max_entries]
-                else:
-                    compress_idxs = torch.full(
-                        (bsz, 1, 0), -1, device=device, dtype=torch.long
-                    )
-            elif is_batched_prefill:
-                sp_t_cmp = start_pos.to(device=device, dtype=torch.long)
-                if sequence_lengths is not None:
-                    row_seqlens_cmp = sequence_lengths.to(
-                        device=device, dtype=torch.long
-                    )
-                else:
-                    row_seqlens_cmp = torch.full(
-                        (bsz,), seqlen, device=device, dtype=torch.long
-                    )
-                compress_idxs = _get_compress_topk_idxs_batched(
-                    ratio, seqlen, offset, sp_t_cmp, row_seqlens_cmp, device
-                )
-            else:
-                sp_int = (
-                    int(start_pos) if isinstance(start_pos, torch.Tensor) else start_pos
-                )
-                compress_idxs = _get_compress_topk_idxs(
-                    ratio, bsz, seqlen, sp_int, offset, device
-                )
-            topk_idxs = torch.cat([topk_idxs, compress_idxs], dim=-1)
-        topk_idxs = topk_idxs.long()
+            topk_idxs = _get_window_topk_idxs(win, 1, seqlen, sp_int, device)
 
-        dbg_last_idx = None
-        dbg_pos_idx = None
-        dbg_pos_name = None
-        if _dbg:
-            if cp_on:
-                last_pos = cp_ctx.seq_len_total - 1
-                last_mask = (cp_ctx.global_positions == last_pos) & cp_ctx.local_is_real
-                last_idx_t = torch.nonzero(last_mask, as_tuple=False).flatten()
-                if last_idx_t.numel() > 0:
-                    dbg_last_idx = int(last_idx_t[0].item())
-                dbg_pos = getattr(_rt, "_DBG_GLOBAL_POS", -1)
-                if dbg_pos >= 0:
-                    pos_mask = (
-                        cp_ctx.global_positions == dbg_pos
-                    ) & cp_ctx.local_is_real
-                    pos_idx_t = torch.nonzero(pos_mask, as_tuple=False).flatten()
-                    if pos_idx_t.numel() > 0:
-                        dbg_pos_idx = int(pos_idx_t[0].item())
-                        dbg_pos_name = f"pos{dbg_pos}"
-            elif bsz == 1:
-                if sequence_lengths is not None and sequence_lengths.numel() > 0:
-                    dbg_last_idx = int(sequence_lengths.reshape(-1)[0].item()) - 1
-                else:
-                    dbg_last_idx = seqlen - 1
-                if dbg_last_idx < 0 or dbg_last_idx >= seqlen:
-                    dbg_last_idx = None
-                dbg_pos = getattr(_rt, "_DBG_GLOBAL_POS", -1)
-                if dbg_pos >= 0:
-                    dbg_pos_idx = dbg_pos - sp_int
-                    if dbg_pos_idx < 0 or dbg_pos_idx >= seqlen:
-                        dbg_pos_idx = None
-                    else:
-                        dbg_pos_name = f"pos{dbg_pos}"
-            if dbg_last_idx is not None:
-                _rt.record_if_level(
-                    2,
-                    f"L{self.layer_id:02d}_attn_q_last",
-                    q[:, dbg_last_idx : dbg_last_idx + 1],
+        # row_seqlens_full: [1] long tensor. Reused by SWA pool read/write
+        # helpers (BF16 path) — they refuse a None for the per-row seqlens.
+        row_seqlens_full = torch.tensor([seqlen_full], device=device, dtype=torch.long)
+
+        swa_meta: Optional[SwaPrefillMeta] = None
+        if self._kv_cache_is_fp8:
+            swa_meta = self._build_swa_prefill_meta(seqlen, sp_int, device)
+
+        indexer_meta: Optional[Any] = None
+        if self.indexer is not None:
+            from rtp_llm.models_py.modules.dsv4.attn_type import INDEXER_KV
+            from rtp_llm.models_py.modules.dsv4.indexer_fp8 import IndexerFP8
+
+            if isinstance(self.indexer, IndexerFP8):
+                # Pass INDEXER_KV block_table + entries_per_block directly
+                # so prepare() doesn't depend on a prior set_pool_context
+                # call. Both default to ``None``/``0`` during warmup, which
+                # IndexerFP8.prepare handles by emitting an empty
+                # ``block_table_i32`` (matching the warmup short-circuit
+                # in IndexerFP8.forward).
+                idx_bt = (
+                    self._block_tables_by_type.get(INDEXER_KV)
+                    if self._block_tables_by_type is not None
+                    else None
                 )
-                _rt.record_if_level(
-                    2,
-                    f"L{self.layer_id:02d}_attn_topk_last",
-                    topk_idxs[:, dbg_last_idx : dbg_last_idx + 1],
-                )
-            if dbg_pos_idx is not None and dbg_pos_name is not None:
-                _rt.record_if_level(
-                    2,
-                    f"L{self.layer_id:02d}_attn_q_{dbg_pos_name}",
-                    q[:, dbg_pos_idx : dbg_pos_idx + 1],
-                )
-                _rt.record_if_level(
-                    2,
-                    f"L{self.layer_id:02d}_attn_topk_{dbg_pos_name}",
-                    topk_idxs[:, dbg_pos_idx : dbg_pos_idx + 1],
+                idx_eb = self._pool_entries_per_block(INDEXER_KV)
+                indexer_meta = self.indexer.prepare(
+                    bsz=1,
+                    seqlen=seqlen,
+                    sp_int=sp_int,
+                    device=device,
+                    kv_block_table=idx_bt,
+                    kv_eb=idx_eb,
                 )
 
-        if is_prefill_attn:
-            if cp_on:
-                pool_read_start = cp_ctx.prefix_length
-                row_seqlens_for_pool = torch.full(
-                    (bsz,), seqlen_full, device=device, dtype=torch.long
-                )
-            else:
-                pool_read_start = start_pos
-                row_seqlens_for_pool = (
-                    sequence_lengths
-                    if sequence_lengths is not None
-                    else torch.full((bsz,), seqlen, device=device, dtype=torch.long)
-                )
-            prefill_swa_dense_for_attn = None
-            if any_cont:
-                prefill_swa_dense_for_attn = self._prefill_read_swa_dense_abs_from_pool(
-                    bsz,
-                    pool_read_start,
-                    row_seqlens_for_pool,
-                    prefill_swa_dense_len,
-                    current_kv_full=kv_full,
-                )
-            # Phase E5b: direct SWA pool write from kv_full (no register_buffer
-            # intermediary).  The framework SWA pool is absolute-positioned;
-            # prefix KV for continuation prefill already lives in the pool from
-            # prior calls.
-            if cp_on:
-                # CP prefill has rank-local Q but kv_full is already all-gathered
-                # in logical order for the current input.  Continuation prefill
-                # must preserve the reused prefix offset when writing SWA slots;
-                # otherwise the suffix overwrites positions 0..N.
-                swa_write_start = cp_ctx.prefix_length
-                swa_write_lengths = torch.full(
-                    (bsz,), seqlen_full, device=device, dtype=torch.long
-                )
-            else:
-                swa_write_start = start_pos
-                swa_write_lengths = sequence_lengths
-            self._prefill_write_swa_to_pool(
-                bsz, kv_full, swa_write_start, swa_write_lengths
+        return PrefillMeta(
+            seqlen=seqlen,
+            seqlen_full=seqlen_full,
+            rd=rd,
+            device=device,
+            cp_ctx=cp_ctx,
+            cp_on=cp_on,
+            freqs_cis=freqs_cis,
+            topk_idxs=topk_idxs,
+            sp_int=sp_int,
+            any_cont=any_cont,
+            row_seqlens_full=row_seqlens_full,
+            swa_meta=swa_meta,
+            indexer_meta=indexer_meta,
+        )
+
+    def _prefill_common_setup(self, x: torch.Tensor, start_pos: int) -> PrefillMeta:
+        """Return the (possibly upper-layer-injected) shared prefill meta.
+        Standalone callers (no upper-layer broadcast) build it per-layer here.
+        """
+        meta = self._prefill_meta_shared
+        if meta is None:
+            meta = self._build_shared_prefill_meta(x, start_pos)
+        return meta
+
+    def _build_swa_prefill_meta(
+        self, seqlen: int, sp_int: int, device: torch.device
+    ) -> SwaPrefillMeta:
+        """Build the per-call FP8 prefill metadata bundle (B==1 invariant).
+
+        Group 1 (write meta): always populated for FP8 layers when the
+        SWA pool is bound. ``None`` on warmup forward.
+
+        Group 2 (attention meta): only populated for SWA-only layers
+        (``compress_ratio == 0``). ``topk_length_kv_full`` is cache-
+        independent so it's set even on warmup (so the warmup path
+        can consume it without a fallback). ``cache_*`` / ``combined_*``
+        only on continuation prefill (``sp > 0``).
+        """
+        from rtp_llm.models_py.modules.dsv4 import _swa_prefill_ops_triton as _swa_ops
+        from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
+
+        bsz = 1
+        win = self.window_size
+        num_tokens = bsz * seqlen
+        is_swa_only = self.compress_ratio == 0
+
+        topk_length_kv_full: Optional[torch.Tensor] = None
+        if is_swa_only:
+            positions = torch.arange(num_tokens, device=device, dtype=torch.int32)
+            topk_length_kv_full = torch.clamp(positions + 1, max=win)
+
+        slot_mapping: Optional[torch.Tensor] = None
+        query_start_loc: Optional[torch.Tensor] = None
+        combined_seq_lens: Optional[torch.Tensor] = None
+        combined_gather_lens: Optional[torch.Tensor] = None
+        combined_gather_len_max = 0
+        M = 0
+        cache_seq_lens: Optional[torch.Tensor] = None
+        cache_gather_lens: Optional[torch.Tensor] = None
+        prefix_len_max = 0
+        combined_indices: Optional[torch.Tensor] = None
+        combined_lens: Optional[torch.Tensor] = None
+
+        bt = (
+            self._block_tables_by_type.get(SWA_KV)
+            if self._block_tables_by_type is not None
+            else None
+        )
+        eb = self._pool_entries_per_block(SWA_KV)
+        if self._kv_cache is not None and bt is not None and bt.numel() > 0 and eb > 0:
+            seq_total = sp_int + seqlen
+            query_start_loc = torch.tensor(
+                [0, num_tokens], device=device, dtype=torch.int32
             )
-            if self.compress_ratio:
-                # #50: compressor self-binds kv_state / score_state /
-                # kv_cache from the framework pool at entry, runs body,
-                # scatters back at exit.  Pool context was set by the
-                # outer ``forward`` wrapper in its try/finally.
-                if _dbg:
-                    self.compressor._dbg_prefix = f"L{self.layer_id:02d}_attn_cmp"
-                kv_compress = self.compressor(
-                    x, start_pos, sequence_lengths=sequence_lengths
+            combined_seq_lens = torch.tensor(
+                [seq_total], device=device, dtype=torch.int32
+            )
+            bt_swa = bt[:bsz].to(device=device, dtype=torch.int32).contiguous()
+            slot_mapping = _swa_ops.compute_swa_slot_mapping(
+                block_table=bt_swa,
+                query_start_loc=query_start_loc,
+                seq_lens=combined_seq_lens,
+                block_size=eb,
+                num_tokens=num_tokens,
+            )
+
+            if is_swa_only:
+                combined_gather_lens = _swa_ops.compute_prefill_gather_lens(
+                    seq_lens=combined_seq_lens,
+                    query_start_loc=query_start_loc,
+                    num_prefills=bsz,
+                    num_decodes=0,
+                    window_size=win,
                 )
-                # FP8 path: CompressorFP8 wrote the compressed K to the
-                # CSA/HCA pool itself and returns None. Materialize a bf16
-                # ``kv_compress`` for the BF16 sparse_attn dispatch by
-                # dequantizing the just-written suffix from the pool. Skip
-                # the BF16 ``_prefill_paged_write_kv_range`` below — the
-                # FP8 writer already populated the FP8 layout (a second
-                # bf16 write would corrupt the per-block striped scales).
-                _fp8_compressor_handled_pool_write = False
-                if (
-                    kv_compress is None
-                    and self._kv_cache_is_fp8
-                    and self.compress_ratio
-                ):
-                    from rtp_llm.models_py.modules.dsv4.attn_type import CSA_KV, HCA_KV
+                # B==1: gather_len = query_len + min(prefix, win-1) by formula;
+                # avoid an .item() sync on combined_gather_lens.max().
+                combined_gather_len_max = seqlen + min(sp_int, win - 1)
+                M = max(combined_gather_len_max, 1)
 
-                    _fp8_cmp_at = CSA_KV if self.compress_ratio == 4 else HCA_KV
-                    cmp_write_start = sp_int // ratio
-                    NB_total = (sp_int + seqlen) // ratio
-                    NB_new = NB_total - cmp_write_start
-                    if NB_new > 0:
-                        # Read the entire [0, NB_total) range, then slice
-                        # the new suffix [cmp_write_start, NB_total).
-                        full_range = self._prefill_paged_read_kv(
-                            _fp8_cmp_at,
-                            bsz,
-                            NB_total,
-                            self.head_dim,
-                            torch.bfloat16,
-                            device,
-                        )
-                        if full_range is not None:
-                            kv_compress = full_range[
-                                :, cmp_write_start:NB_total, :
-                            ].contiguous()
-                            _fp8_compressor_handled_pool_write = True
-                if _dbg:
-                    self.compressor._dbg_prefix = None
-                    if kv_compress is not None:
-                        _rt.record_if_level(
-                            2,
-                            f"L{self.layer_id:02d}_attn_kv_compress",
-                            kv_compress,
-                        )
-                if kv_compress is not None:
-                    cmp_at = None
-                    if self.compress_ratio == 4:
-                        from rtp_llm.models_py.modules.dsv4.attn_type import CSA_KV
-
-                        cmp_at = CSA_KV
-                    elif self.compress_ratio == 128:
-                        from rtp_llm.models_py.modules.dsv4.attn_type import HCA_KV
-
-                        cmp_at = HCA_KV
-                    cmp_write_start = sp_int // ratio
-                    if cmp_at is not None and not _fp8_compressor_handled_pool_write:
-                        self._prefill_paged_write_kv_range(
-                            cmp_at, kv_compress, bsz, cmp_write_start
-                        )
-                    if not any_cont:
-                        kv_cat = torch.cat([kv_full, kv_compress], dim=1)
-                    else:
-                        # Phase E5b: pool-only read.  Register_buffer is
-                        # gone; continuation prefill gathers SWA+compressed
-                        # from the framework pool.  Must have paged ctx.
-                        # Mixed batches (some sp==0, some sp>0) also go
-                        # through pool read — sp==0 rows' KV was just
-                        # written to the pool above, so round-trip is
-                        # byte-equal.
-                        kv_cat = self._gather_kv_cache_dense_from_pool(
-                            bsz,
-                            pool_read_start,
-                            row_seqlens_for_pool,
-                            swa_dense_len=prefill_swa_dense_len,
-                            swa_dense_override=prefill_swa_dense_for_attn,
-                            cmp_T=prefill_kv_len // ratio,
-                        )
-                        assert kv_cat is not None, (
-                            "Phase E5b: continuation prefill requires paged "
-                            "ctx (pass kv_cache=... + block_tables_by_type=... "
-                            "to Attention.forward via V4Transformer)."
-                        )
-                        cmp_base = prefill_swa_dense_len + cmp_write_start
-                        cmp_end = min(cmp_base + kv_compress.shape[1], kv_cat.shape[1])
-                        if cmp_end > cmp_base:
-                            kv_cat[:bsz, cmp_base:cmp_end] = kv_compress[
-                                :bsz, : cmp_end - cmp_base
-                            ].to(kv_cat.dtype)
-                else:
-                    if not any_cont:
-                        kv_cat = kv_full
-                    else:
-                        kv_cat = self._gather_kv_cache_dense_from_pool(
-                            bsz,
-                            pool_read_start,
-                            row_seqlens_for_pool,
-                            swa_dense_len=prefill_swa_dense_len,
-                            swa_dense_override=prefill_swa_dense_for_attn,
-                            cmp_T=prefill_kv_len // ratio,
-                        )
-                        assert (
-                            kv_cat is not None
-                        ), "Phase E5b: continuation prefill requires paged ctx."
-            else:
-                if not any_cont:
-                    kv_cat = kv_full
-                else:
-                    kv_cat = self._gather_kv_cache_dense_from_pool(
-                        bsz,
-                        pool_read_start,
-                        row_seqlens_for_pool,
-                        swa_dense_len=prefill_swa_dense_len,
-                        swa_dense_override=prefill_swa_dense_for_attn,
+                if sp_int > 0:
+                    prefix_len = min(sp_int, win - 1)
+                    cache_seq_lens = torch.tensor(
+                        [sp_int], device=device, dtype=torch.int32
                     )
-                    assert (
-                        kv_cat is not None
-                    ), "Phase E5b: continuation prefill requires paged ctx."
-            if _dbg:
-                _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_kv_cat", kv_cat)
-                if dbg_last_idx is not None and bsz == 1:
-                    idx = topk_idxs[0, dbg_last_idx]
-                    valid = idx >= 0
-                    if valid.any():
-                        safe_idx = idx[valid].to(torch.long)
-                        _rt.record_if_level(
-                            2,
-                            f"L{self.layer_id:02d}_attn_kv_selected_last",
-                            kv_cat[:, safe_idx],
-                        )
-                if dbg_pos_idx is not None and dbg_pos_name is not None and bsz == 1:
-                    idx = topk_idxs[0, dbg_pos_idx]
-                    valid = idx >= 0
-                    if valid.any():
-                        safe_idx = idx[valid].to(torch.long)
-                        _rt.record_if_level(
-                            2,
-                            f"L{self.layer_id:02d}_attn_kv_selected_{dbg_pos_name}",
-                            kv_cat[:, safe_idx],
-                        )
-            if self._kv_cache_is_fp8 and bsz == 1 and q.is_cuda:
-                # FP8 prefill: dispatch to flash_mla_sparse_fwd (FP8-aware
-                # FlashMLA dense+sparse kernel; bf16 inputs).
-                #   - kv_cat is bf16 [1, T, head_dim] (CSA/HCA dequant +
-                #     concat already done above; SWA-only path: kv_cat ==
-                #     kv_full).
-                #   - topk_length per query row masks -1 sentinels so the
-                #     kernel skips invalid topk slots without OOB reads.
-                #   - K (topk dim) must be a multiple of B_TOPK=128 for the
-                #     head128 sparse-fwd; pad with -1 (masked by topk_length).
-                from flash_mla import (  # type: ignore[import-not-found]
-                    flash_mla_sparse_fwd,
-                )
-
-                _topk_idxs_i32 = topk_idxs.to(torch.int32)
-                topk_length = (
-                    (_topk_idxs_i32 >= 0)
-                    .sum(dim=-1)
-                    .to(torch.int32)
-                    .reshape(-1)
-                    .contiguous()
-                )
-                _B_TOPK = 128
-                _K = _topk_idxs_i32.shape[-1]
-                if _K % _B_TOPK != 0:
-                    _pad = _B_TOPK - (_K % _B_TOPK)
-                    _topk_idxs_i32 = torch.nn.functional.pad(
-                        _topk_idxs_i32, (0, _pad), value=-1
+                    cache_gather_lens = torch.tensor(
+                        [prefix_len], device=device, dtype=torch.int32
                     )
-                o3, _, _ = flash_mla_sparse_fwd(
-                    q=q.squeeze(0),
-                    kv=kv_cat.squeeze(0).unsqueeze(1),
-                    indices=_topk_idxs_i32.squeeze(0).unsqueeze(1).contiguous(),
-                    sm_scale=self.softmax_scale,
-                    attn_sink=self.attn_sink,
-                    topk_length=topk_length,
-                )
-                o = o3.unsqueeze(0)
-            elif _tl_kernels.tilelang_available():
-                o = _tl_kernels.sparse_attn(
-                    q, kv_cat, self.attn_sink, topk_idxs, self.softmax_scale
-                )
-            else:
-                o = _sparse_attn(
-                    q, kv_cat, self.attn_sink, topk_idxs, self.softmax_scale
-                )
+                    prefix_len_max = prefix_len
+
+                    topk_indices_empty = torch.empty(
+                        (num_tokens, 0), dtype=torch.int32, device=device
+                    )
+                    combined_indices, combined_lens = _swa_ops.combine_topk_swa_indices(
+                        topk_indices=topk_indices_empty,
+                        query_start_loc=query_start_loc,
+                        seq_lens=combined_seq_lens,
+                        gather_lens=combined_gather_lens,
+                        window_size=win,
+                        compress_ratio=1,
+                        topk=0,
+                        M=M,
+                        N=0,
+                    )
+
+        return SwaPrefillMeta(
+            slot_mapping=slot_mapping,
+            query_start_loc=query_start_loc,
+            combined_seq_lens=combined_seq_lens,
+            topk_length_kv_full=topk_length_kv_full,
+            combined_gather_lens=combined_gather_lens,
+            combined_gather_len_max=combined_gather_len_max,
+            M=M,
+            cache_seq_lens=cache_seq_lens,
+            cache_gather_lens=cache_gather_lens,
+            prefix_len_max=prefix_len_max,
+            combined_indices=combined_indices,
+            combined_lens=combined_lens,
+        )
+
+    def _prefill_compute_qkv(self, x: torch.Tensor, common: PrefillMeta) -> PrefillQKV:
+        """Q/KV path — RMSNorm + LoRA Q + KV linears + fused RMSNorm-RoPE.
+
+        Internally uses ``[1, T, ...]`` so ``fused_rmsnorm_rope`` sees the
+        ``(B, S, …)`` layout it expects. Returned tensors keep the 3D
+        shape because downstream pool/compressor helpers rely on it.
+        """
+        x_3d = x.unsqueeze(0)
+        rd = common.rd
+        # Q path
+        qr = self._rmsnorm_weighted(
+            self._lin(self.wq_a, x_3d), self.q_norm
+        )  # [1, T, q_lora_rank]
+        q = self._lin(self.wq_b, qr).unflatten(-1, (self.n_heads, self.head_dim))
+        q = fused_rmsnorm_rope(q, None, common.freqs_cis, rd, eps=self.eps)
+
+        # KV path (single MQA head) — rank-local under CP.
+        kv_in = self._lin(self.wkv, x_3d)
+        kv = fused_rmsnorm_rope(kv_in, self.kv_norm, common.freqs_cis, rd, eps=self.eps)
+
+        if common.cp_on:
+            kv_full = cp_all_gather_full(
+                kv, common.cp_ctx
+            )  # [1, seq_len_full, head_dim]
         else:
-            # Phase E5b: eager decode via Attention.forward removed — the
-            # register_buffer kv_cache that this arm relied on is retired.
-            # Production decode must go through Attention.forward_decode with
-            # paged metadata; any caller here is stale test or warmup code.
-            raise NotImplementedError(
-                "Phase E5b: Attention.forward eager-decode path retired "
-                "(register_buffer kv_cache removed). Use forward_decode + "
-                "DSv4DecodeAttnMetadata with paged pool descriptors."
+            kv_full = kv
+
+        return PrefillQKV(
+            qr=qr.squeeze(0),
+            q=q.squeeze(0),
+            kv_full=kv_full.squeeze(0),
+        )
+
+    # ------------------------------------------------------------------
+    # Compressed-block topk (HCA / CSA layers)
+    # ------------------------------------------------------------------
+    def _compute_compress_idxs(
+        self,
+        x: torch.Tensor,
+        qr: torch.Tensor,
+        common: PrefillMeta,
+        qkv: PrefillQKV,
+    ) -> torch.Tensor:
+        """Build the compressed-block topk tail concatenated to the SWA topk.
+
+        Layouts:
+          * fresh prefill: KV is ``[sliding (kv_full) | compressed tail]``
+            so the compressed offset is ``seqlen_full``.
+          * continuation prefill: dense absolute SWA view of length
+            ``sp + seqlen``, then compressed tail; offset is the same.
+        """
+
+        ratio = self.compress_ratio
+        seqlen = common.seqlen
+        device = common.device
+        offset = common.seqlen_full + common.sp_int  # absolute SWA stream end
+
+        if self.indexer is not None:
+            from rtp_llm.models_py.modules.dsv4.indexer_fp8 import IndexerFP8
+
+            if isinstance(self.indexer, IndexerFP8):
+                # IndexerFP8._compute_indexer_q feeds q to apply_rotary_emb
+                # which only handles the 4D q layout correctly; pass 3D
+                # ``[1, T, dim]`` so q ends up ``[1, T, H, D]``.
+                # ``common.indexer_meta`` was prebuilt in
+                # ``_prefill_common_setup`` (same isinstance gate).
+                raw = self.indexer(x.unsqueeze(0), qr.unsqueeze(0), common.indexer_meta)
+                # Indexer returns int32 raw compressed-pool offsets
+                # with -1 past the per-row valid count; rebase to
+                # global sparse-attn coords + cast to long for cat.
+                compress_idxs = torch.where(raw >= 0, raw + offset, raw).long()
+            else:
+                compress_idxs = self.indexer(
+                    x.unsqueeze(0), qr.unsqueeze(0), common.sp_int, offset
+                )
+            # Indexer outputs may be 2D [T, K] (FP8 flat) or 3D [B, S, K].
+            if compress_idxs.dim() == 2:
+                compress_idxs = compress_idxs.unsqueeze(0)
+            return compress_idxs
+
+        if common.cp_on:
+            return _get_compress_topk_idxs_cp(
+                ratio, 1, common.seqlen_full, offset, common.cp_ctx.global_positions
+            )
+        return _get_compress_topk_idxs(ratio, 1, seqlen, common.sp_int, offset, device)
+
+    # ------------------------------------------------------------------
+    # KV concat / gather
+    # ------------------------------------------------------------------
+    def _build_kv_cat(
+        self,
+        qkv: PrefillQKV,
+        kv_compress: Optional[torch.Tensor],
+        common: PrefillMeta,
+        prefill_swa_dense_for_attn: Optional[torch.Tensor],
+        start_pos,
+        row_seqlens_full: torch.Tensor,
+    ) -> torch.Tensor:
+        """Assemble the ``[sliding | compressed]`` BF16 KV tensor consumed
+        by sparse_attn (3D ``[1, T_kv, head_dim]``).
+
+        - Fresh prefill (sp == 0): use ``kv_full``; if compressor returned
+          a bf16 tail, concat it. (FP8 compressor returns ``None`` —
+          re-read the just-written suffix from the pool to materialize a
+          bf16 tail for the kv_cat.)
+        - Continuation prefill (sp > 0): always read SWA + compressed back
+          from the framework pool (BF16 read, FP8 dequant — handled inside
+          ``_prefill_paged_read_kv``).
+        """
+        seqlen = common.seqlen
+        sp_int = common.sp_int
+        ratio = self.compress_ratio
+        kv_full_3d = qkv.kv_full.unsqueeze(0)
+        prefill_swa_dense_len = common.seqlen_full + sp_int  # absolute end
+
+        # FP8 compressor handled the pool write itself; recover a bf16
+        # tail for the fresh-prefill concat by dequant-reading the
+        # just-written suffix.
+        fp8_compressor_handled_pool_write = False
+        if self.compress_ratio and kv_compress is None and self._kv_cache_is_fp8:
+            from rtp_llm.models_py.modules.dsv4.attn_type import CSA_KV, HCA_KV
+
+            cmp_at = CSA_KV if ratio == 4 else HCA_KV
+            cmp_write_start = sp_int // ratio
+            NB_total = (sp_int + seqlen) // ratio
+            NB_new = NB_total - cmp_write_start
+            if NB_new > 0:
+                full_range = self._prefill_paged_read_kv(
+                    cmp_at, 1, NB_total, self.head_dim, torch.bfloat16, common.device
+                )
+                if full_range is not None:
+                    kv_compress = full_range[
+                        :, cmp_write_start:NB_total, :
+                    ].contiguous()
+                    fp8_compressor_handled_pool_write = True
+
+        # BF16 compressor wrote nothing — mirror its tail into the
+        # CSA/HCA pool (FP8 already handled).
+        if (
+            self.compress_ratio
+            and kv_compress is not None
+            and not fp8_compressor_handled_pool_write
+        ):
+            from rtp_llm.models_py.modules.dsv4.attn_type import CSA_KV, HCA_KV
+
+            cmp_at = CSA_KV if ratio == 4 else HCA_KV
+            cmp_write_start = sp_int // ratio
+            self._prefill_paged_write_kv_range(cmp_at, kv_compress, 1, cmp_write_start)
+
+        if not common.any_cont:
+            if kv_compress is not None:
+                return torch.cat([kv_full_3d, kv_compress], dim=1)
+            return kv_full_3d
+
+        # Continuation prefill: gather SWA + compressed dense view from pool.
+        cmp_T = (common.seqlen_full + sp_int) // ratio if self.compress_ratio else None
+        kv_cat = self._gather_kv_cache_dense_from_pool(
+            1,
+            start_pos,
+            row_seqlens_full,
+            swa_dense_len=prefill_swa_dense_len,
+            swa_dense_override=prefill_swa_dense_for_attn,
+            cmp_T=cmp_T,
+        )
+        assert kv_cat is not None, (
+            "DSv4 continuation prefill requires paged ctx (pass kv_cache + "
+            "block_tables_by_type to Attention.forward via V4Transformer)."
+        )
+        # Overlay freshly compressed K into the cmp tail (matches BF16
+        # round-trip when sp==0 rows were just written above).
+        if self.compress_ratio and kv_compress is not None:
+            cmp_base = prefill_swa_dense_len + (sp_int // ratio)
+            cmp_end = min(cmp_base + kv_compress.shape[1], kv_cat.shape[1])
+            if cmp_end > cmp_base:
+                kv_cat[:, cmp_base:cmp_end] = kv_compress[:, : cmp_end - cmp_base].to(
+                    kv_cat.dtype
+                )
+        return kv_cat
+
+    # ------------------------------------------------------------------
+    # FP8 SWA-only fast path: paged-tail write + concat-from-cache
+    # ------------------------------------------------------------------
+    def _prefill_write_swa_fp8_paged(
+        self, common: PrefillMeta, kv_full: torch.Tensor
+    ) -> None:
+        """Single-launch quantize + insert into the FP8 SWA pool, using
+        the paged-tail ``slot_mapping`` pre-built in ``common.swa_meta``.
+
+        Independent of the legacy ring-write in ``_prefill_write_swa_to_pool``;
+        the paged-tail formula matches ``DSV4_CACHE_LAYOUT.md §6`` and the
+        decode-side dequant kernel. Segments outside the SWA pool's last
+        ``2*eb`` capacity get ``slot=-1`` and are skipped. No-op on
+        warmup (``swa_meta`` write fields are ``None``).
+        """
+        from rtp_llm.models_py.modules.dsv4 import _swa_fp8_kv_insert_triton as _ins
+        from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
+
+        meta = common.swa_meta
+        if meta is None or meta.slot_mapping is None:
+            return
+        packed_3d = self._pool_view_3d_fp8(SWA_KV)
+        if packed_3d is None:
+            return
+
+        k_bf16 = kv_full.reshape(-1, self.head_dim)
+        if k_bf16.dtype != torch.bfloat16:
+            k_bf16 = k_bf16.to(torch.bfloat16)
+        _ins.quantize_and_insert_k_cache(k_bf16, packed_3d, meta.slot_mapping)
+
+    def _attn_fp8_swa_via_kv_full(
+        self,
+        qkv: PrefillQKV,
+        common: PrefillMeta,
+    ) -> torch.Tensor:
+        """sparse_fwd over BF16 ``kv_full`` directly — no FP8 round-trip.
+
+        Used by:
+          * cold prefill (``sp == 0``) — pool capacity (``2 * eb``)
+            can't hold the full prefill anyway; attend over BF16 K
+            we just computed.
+          * warmup forward (``self._kv_cache is None``) — pool not yet
+            allocated; needed for the framework's dry-run shape inference.
+
+        Caller is responsible for pre-writing the new K to the FP8 SWA
+        pool (via ``_prefill_write_swa_fp8_paged``) for future decode
+        reads — write order doesn't matter here since this path doesn't
+        read from the pool.
+        """
+        from flash_mla import flash_mla_sparse_fwd  # type: ignore[import-not-found]
+
+        meta = common.swa_meta
+        assert meta is not None and meta.topk_length_kv_full is not None, (
+            "FP8 SWA prefill requires common.swa_meta.topk_length_kv_full; "
+            "built in _prefill_common_setup for FP8 SWA-only layers."
+        )
+
+        o3, _, _ = flash_mla_sparse_fwd(
+            q=qkv.q,
+            kv=qkv.kv_full.unsqueeze(1),
+            indices=common.topk_idxs.squeeze(0).unsqueeze(1).to(torch.int32),
+            sm_scale=self.softmax_scale,
+            attn_sink=self.attn_sink,
+            topk_length=meta.topk_length_kv_full,
+        )
+        return o3.unsqueeze(0)
+
+    def _attn_fp8_swa_via_concat(
+        self,
+        qkv: PrefillQKV,
+        common: PrefillMeta,
+    ) -> torch.Tensor:
+        """Continuation prefill (sp>0): prefix-from-cache + new-K-bf16 concat.
+
+        Pipeline:
+          1. ``dequantize_and_gather_k_cache`` reads only the trailing
+             ``P = min(sp, win-1)`` cached tokens (the SWA prefix tail,
+             abs pos ``[sp - P, sp)``) into ``workspace[:, :P, :]``.
+             Caller must have written new K via
+             ``_prefill_write_swa_fp8_paged`` *before* this method runs;
+             new K targets abs pos ``[sp, sp+S)``, distinct slot_mapping
+             from prefix tail, so prefix read is safe.
+          2. BF16-copy ``kv_full`` (the freshly computed new K) into
+             ``workspace[:, P:P+S, :]``.
+          3. ``flash_mla_sparse_fwd`` over the concat workspace using
+             ``combined_indices`` from ``combine_topk_swa_indices``
+             (TOP_K=0, N=0 ⇒ SWA-only rows; indices map abs positions
+             ``[sp - P, sp + S)`` onto workspace ``[0, P+S)``).
+
+        Avoids the legacy round-trip's 2*eb capacity wall: cache only
+        stores prefix tail (``P <= win-1``, fits in 2*eb=512), and
+        new K stays BF16 in the workspace — no FP8 quant loss either.
+        """
+        from flash_mla import flash_mla_sparse_fwd  # type: ignore[import-not-found]
+
+        from rtp_llm.models_py.modules.dsv4 import _swa_fp8_dequant_triton as _swa_dq
+        from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
+
+        meta = common.swa_meta
+        assert (
+            meta is not None
+            and meta.combined_indices is not None
+            and meta.cache_seq_lens is not None
+            and meta.cache_gather_lens is not None
+        ), (
+            "via_concat path requires swa_meta with cache_* and combined_* "
+            "fields (only built for sp>0 continuation prefill)"
+        )
+
+        bsz = 1
+        bt = self._block_tables_by_type[SWA_KV][:bsz]
+        packed_3d = self._pool_view_3d_fp8(SWA_KV)
+        assert packed_3d is not None, "FP8 SWA pool unavailable"
+        eb = int(packed_3d.shape[1])
+
+        D = self.head_dim
+        S = common.seqlen
+        P = meta.prefix_len_max
+        workspace = torch.zeros(
+            (bsz, meta.M, D),
+            dtype=torch.bfloat16,
+            device=qkv.q.device,
+        )
+        bt_swa = bt.to(dtype=torch.int32)
+
+        if P > 0:
+            _swa_dq.dequantize_and_gather_k_cache(
+                out=workspace,
+                k_cache=packed_3d,
+                seq_lens=meta.cache_seq_lens,
+                gather_lens=meta.cache_gather_lens,
+                block_table=bt_swa,
+                block_size=eb,
+                offset=0,
             )
 
-        if _dbg:
-            _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_sparse_out", o)
-            _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_topk_idxs", topk_idxs)
-            if dbg_last_idx is not None:
-                _rt.record_if_level(
-                    2,
-                    f"L{self.layer_id:02d}_attn_sparse_out_last",
-                    o[:, dbg_last_idx : dbg_last_idx + 1],
-                )
-            if dbg_pos_idx is not None and dbg_pos_name is not None:
-                _rt.record_if_level(
-                    2,
-                    f"L{self.layer_id:02d}_attn_sparse_out_{dbg_pos_name}",
-                    o[:, dbg_pos_idx : dbg_pos_idx + 1],
-                )
+        # B==1: kv_full is [T, D]; copy into workspace[0, P:P+S, :].
+        workspace[:, P : P + S, :].copy_(qkv.kv_full.to(torch.bfloat16).unsqueeze(0))
 
-        if _dbg:
-            # Keep the debuggable explicit path when tensor probes are enabled.
-            apply_rotary_emb(o[..., -rd:], freqs_cis, inverse=True)
-            _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_o_post_inv_rope", o)
-            if dbg_last_idx is not None:
-                _rt.record_if_level(
-                    2,
-                    f"L{self.layer_id:02d}_attn_o_post_inv_rope_last",
-                    o[:, dbg_last_idx : dbg_last_idx + 1],
-                )
-            if dbg_pos_idx is not None and dbg_pos_name is not None:
-                _rt.record_if_level(
-                    2,
-                    f"L{self.layer_id:02d}_attn_o_post_inv_rope_{dbg_pos_name}",
-                    o[:, dbg_pos_idx : dbg_pos_idx + 1],
-                )
-            o = o.reshape(bsz, seqlen, self.n_groups, -1)
-            wo_a_bf16 = _fp8_dequant_to_fp32(self.wo_a_w, self.wo_a_s).to(o.dtype)
-            wo_a = wo_a_bf16.view(self.n_groups, self.o_lora_rank, -1)
-            o = torch.einsum("bsgd,grd->bsgr", o, wo_a)
-        # Grouped output projection: inverse-RoPE + FP8 quant + wo_a einsum.
-        # Same fused path as forward_decode (line ~1648) — collapses
-        # apply_rotary_emb (1 launch) + per-group per_token_group_quant_fp8
-        # (G launches) into ONE Triton kernel emitting (fp8 [M,G,K], scale
-        # [M,G,K/512]) in the einsum-expected UE8M0 layout. Matches vLLM
-        # ``deepseek_v4_attention.py``.
-        elif o.is_cuda and o.numel() > 0:
-            # The Triton kernel computes ``b_idx = pid_token // q_len_per_b``
-            # to index freqs. Decode uses [B, rd/2] freqs with q_len_per_b=1
-            # so b_idx == request index. In prefill we have per-position
-            # freqs [S, rd/2]; pass o as 3D [B*S, H, D] with freqs_cis_per_b
-            # = freqs.expand(B*S, ...) so q_len_per_b=1 and b_idx == token
-            # index → each token reads its own row.
-            o_3d = o.reshape(bsz * seqlen, self.n_heads, self.head_dim)
+        o3, _, _ = flash_mla_sparse_fwd(
+            q=qkv.q,
+            kv=workspace.view(-1, 1, D),
+            indices=meta.combined_indices.unsqueeze(1),
+            sm_scale=self.softmax_scale,
+            attn_sink=self.attn_sink,
+            topk_length=meta.combined_lens,
+        )
+        return o3.unsqueeze(0)
+
+    # ------------------------------------------------------------------
+    # Sparse attention dispatch
+    # ------------------------------------------------------------------
+    def _prefill_attn(
+        self,
+        q_3d: torch.Tensor,  # [1, T, H, D]
+        kv_cat: torch.Tensor,  # [1, T_kv, D] bf16
+        topk_idxs: torch.Tensor,  # [1, T, K] long
+        common: PrefillMeta,
+    ) -> torch.Tensor:
+        """Sparse attention call — FP8 KV-cache layers go through FlashMLA's
+        sparse_fwd (the FP8-aware kernel that's also fed BF16 inputs);
+        BF16 KV-cache layers fall through to TileLang or the PyTorch
+        reference implementation. Returns ``[1, T, H, D]`` BF16.
+        """
+        if self._kv_cache_is_fp8 and q_3d.is_cuda:
+            from flash_mla import flash_mla_sparse_fwd  # type: ignore[import-not-found]
+
+            topk_i32 = topk_idxs.to(torch.int32)
+            topk_length = (
+                (topk_i32 >= 0).sum(dim=-1).reshape(-1).to(torch.int32).contiguous()
+            )
+            B_TOPK = 128
+            K = topk_i32.shape[-1]
+            if K % B_TOPK != 0:
+                pad = B_TOPK - (K % B_TOPK)
+                topk_i32 = torch.nn.functional.pad(topk_i32, (0, pad), value=-1)
+            o3, _, _ = flash_mla_sparse_fwd(
+                q=q_3d.squeeze(0),
+                kv=kv_cat.squeeze(0).unsqueeze(1),
+                indices=topk_i32.squeeze(0).unsqueeze(1).contiguous(),
+                sm_scale=self.softmax_scale,
+                attn_sink=self.attn_sink,
+                topk_length=topk_length,
+            )
+            return o3.unsqueeze(0)
+        if _tl_kernels.tilelang_available():
+            return _tl_kernels.sparse_attn(
+                q_3d, kv_cat, self.attn_sink, topk_idxs, self.softmax_scale
+            )
+        return _sparse_attn(q_3d, kv_cat, self.attn_sink, topk_idxs, self.softmax_scale)
+
+    # ------------------------------------------------------------------
+    # Output projection: inv-RoPE + wo_a + wo_b + tp all-reduce
+    # ------------------------------------------------------------------
+    def _prefill_output_proj(
+        self, o: torch.Tensor, common: PrefillMeta
+    ) -> torch.Tensor:
+        """Inverse-RoPE + grouped wo_a + wo_b + (TP) all-reduce.
+
+        Fast path (CUDA, non-empty): single fused Triton kernel
+        (``fused_inv_rope_fp8_quant``) emits the exact ``(fp8 [M,G,K],
+        scale [M,G,K/512])`` layout ``deep_gemm.fp8_einsum`` consumes,
+        collapsing what used to be apply_rotary_emb + per-group
+        per_token_group_quant_fp8 + einsum into one launch.
+
+        Eager fallback (CPU / empty): explicit inv-rotary + bf16-dequant +
+        ``einsum("bsgd,grd->bsgr")``, kept for warmup / unit tests.
+
+        Output shape ``[1, T, dim]`` (caller squeezes to ``[T, dim]``).
+        """
+        rd = common.rd
+        seqlen = common.seqlen
+        freqs_cis = common.freqs_cis
+
+        if o.is_cuda and o.numel() > 0:
+            o_3d = o.reshape(seqlen, self.n_heads, self.head_dim)
             if freqs_cis.dim() == 2:
-                # Per-position freqs [S, rd/2] — broadcast to [B*S, rd/2].
-                freqs_per_token = (
-                    freqs_cis.unsqueeze(0)
-                    .expand(bsz, -1, -1)
-                    .reshape(bsz * seqlen, -1)
-                    .contiguous()
-                )
-            else:
                 freqs_per_token = freqs_cis.contiguous()
+            else:
+                freqs_per_token = freqs_cis.reshape(seqlen, -1).contiguous()
             o_fp8, o_scale = fused_inv_rope_fp8_quant(
                 o_3d,
                 freqs_per_token,
@@ -2824,26 +2886,16 @@ class Attention(nn.Module):
                 nope_dim=self.head_dim - self.rope_head_dim,
                 rope_head_dim=self.rope_head_dim,
             )
-            o = self._wo_a_einsum_from_fp8(o_fp8, o_scale, bsz, seqlen)
+            o = self._wo_a_einsum_from_fp8(o_fp8, o_scale, 1, seqlen)
         else:
             apply_rotary_emb(o[..., -rd:], freqs_cis, inverse=True)
-            o = o.reshape(bsz, seqlen, self.n_groups, -1)
+            o = o.reshape(1, seqlen, self.n_groups, -1)
             wo_a_bf16 = _fp8_dequant_to_fp32(self.wo_a_w, self.wo_a_s).to(o.dtype)
             wo_a = wo_a_bf16.view(self.n_groups, self.o_lora_rank, -1)
             o = torch.einsum("bsgd,grd->bsgr", o, wo_a)
-        if _dbg:
-            _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_wo_a_out", o)
         out = self._lin(self.wo_b, o.flatten(2))
-        if _dbg:
-            _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_wo_b_out_pre_ar", out)
         if self.tp_size > 1:
-            # wo_b is row-split along K — each rank produces a partial
-            # sum; AR combines across the tp group.
             from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 
             all_reduce(out, Group.TP)
-            if _dbg:
-                _rt.record_if_level(
-                    2, f"L{self.layer_id:02d}_attn_wo_b_out_post_ar", out
-                )
         return out
