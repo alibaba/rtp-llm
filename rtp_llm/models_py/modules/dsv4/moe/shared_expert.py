@@ -17,6 +17,9 @@ import torch.nn as nn
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 
 
+_SHARED_EXPERT_WORKSPACE_CACHE: dict[tuple, dict[str, torch.Tensor | int | torch.device]] = {}
+
+
 def _mode() -> str:
     return os.environ.get("DSV4_SHARED_EXPERT_MODE", "auto").strip().lower()
 
@@ -234,6 +237,18 @@ class FusedSharedExpertFastPath:
             raise RuntimeError(
                 f"shared expert fused path requires D/inter divisible by 128, got {D}/{inter}"
             )
+        key = (x.device, D, inter)
+        cached = _SHARED_EXPERT_WORKSPACE_CACHE.get(key)
+        if cached is not None and int(cached["capacity"]) >= capacity:
+            self._device = x.device
+            self._capacity = int(cached["capacity"])
+            self._x_fp8 = cached["x_fp8"]  # type: ignore[assignment]
+            self._x_scale_storage = cached["x_scale_storage"]  # type: ignore[assignment]
+            self._gate_up_bf16 = cached["gate_up_bf16"]  # type: ignore[assignment]
+            self._hidden_fp8 = cached["hidden_fp8"]  # type: ignore[assignment]
+            self._hidden_scale_storage = cached["hidden_scale_storage"]  # type: ignore[assignment]
+            self._out_bf16 = cached["out_bf16"]  # type: ignore[assignment]
+            return
         self._device = x.device
         self._capacity = capacity
         self._x_fp8 = torch.empty(
@@ -262,6 +277,16 @@ class FusedSharedExpertFastPath:
             dtype=torch.bfloat16,
             device=x.device,
         )
+        _SHARED_EXPERT_WORKSPACE_CACHE[key] = {
+            "capacity": capacity,
+            "device": x.device,
+            "x_fp8": self._x_fp8,
+            "x_scale_storage": self._x_scale_storage,
+            "gate_up_bf16": self._gate_up_bf16,
+            "hidden_fp8": self._hidden_fp8,
+            "hidden_scale_storage": self._hidden_scale_storage,
+            "out_bf16": self._out_bf16,
+        }
 
     def run(self, shared_experts: nn.Module, x: torch.Tensor) -> torch.Tensor:
         if not self.can_run(shared_experts, x):
