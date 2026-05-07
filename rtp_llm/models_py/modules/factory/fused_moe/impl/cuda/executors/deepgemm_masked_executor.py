@@ -7,6 +7,7 @@ import torch
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
     configure_deep_gemm_num_sms,
     has_deep_gemm,
+    has_fp8_fp4_gemm_nt,
     is_deep_gemm_e8m0_used,
     is_sm100,
     m_grouped_bf16_gemm_nt_masked,
@@ -161,6 +162,7 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
         if (
             self._use_fp8
             and is_sm100()
+            and has_fp8_fp4_gemm_nt()
             and os.environ.get("DG_USE_FP4_ON_SM100", "1") != "0"
         ):
             try:

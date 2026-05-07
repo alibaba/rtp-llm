@@ -14,6 +14,7 @@ from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
     fp8_gemm_nt,
     fp8_fp4_gemm_nt,
     has_deep_gemm,
+    has_fp8_fp4_gemm_nt,
     is_deep_gemm_e8m0_used,
     is_sm100,
 )
@@ -150,7 +151,7 @@ class CudaFp8DeepGEMMLinear(LinearBase):
 
         # SM100 FP4 weight conversion: dequant FP8 -> BF16 -> FP4
         self.use_fp4 = False
-        if _USE_FP4_ON_SM100 and is_sm100() and self.weight.dtype == torch.float8_e4m3fn:
+        if _USE_FP4_ON_SM100 and is_sm100() and has_fp8_fp4_gemm_nt() and self.weight.dtype == torch.float8_e4m3fn:
             try:
                 self._convert_weight_to_fp4()
                 self.use_fp4 = True

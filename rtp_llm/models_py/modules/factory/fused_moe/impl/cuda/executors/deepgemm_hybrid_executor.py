@@ -11,6 +11,7 @@ import torch
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
     configure_deep_gemm_num_sms,
     has_deep_gemm,
+    has_fp8_fp4_gemm_nt,
     is_deep_gemm_e8m0_used,
     is_sm100,
     m_grouped_fp8_gemm_nt_contiguous,
@@ -141,7 +142,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
 
         # SM100 FP4: convert w13 (Gate/Up) weight to FP4
         self._use_fp4_w13 = False
-        if is_sm100() and os.environ.get("DG_USE_FP4_ON_SM100", "1") != "0":
+        if is_sm100() and has_fp8_fp4_gemm_nt() and os.environ.get("DG_USE_FP4_ON_SM100", "1") != "0":
             try:
                 self._convert_w13_to_fp4()
                 self._use_fp4_w13 = True

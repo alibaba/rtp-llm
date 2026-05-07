@@ -22,6 +22,7 @@ __all__ = [
     "m_grouped_bf16_gemm_nt_contiguous",
     "m_grouped_bf16_gemm_nt_masked",
     "has_deep_gemm",
+    "has_fp8_fp4_gemm_nt",
     "is_deep_gemm_e8m0_used",
     "is_sm100",
     "configure_deep_gemm_num_sms",
@@ -69,6 +70,11 @@ def is_sm100() -> bool:
 def has_deep_gemm() -> bool:
     """Whether the optional `deep_gemm` package is available."""
     return has_module("deep_gemm")
+
+
+def has_fp8_fp4_gemm_nt() -> bool:
+    """Whether the fp8_fp4_gemm_nt kernel is resolved and usable."""
+    return _fp8_fp4_gemm_nt_impl is not None
 
 
 @functools.cache
@@ -635,7 +641,6 @@ def m_grouped_fp8_gemm_nt_masked(
     )
 
     a = (a[0], maybe_pack_ue8m0_scale(a[0], a[1], disable_ue8m0_cast))
-    b = (b[0], maybe_pack_ue8m0_scale(b[0], b[1], disable_ue8m0_cast))
 
     _m_grouped_fp8_gemm_nt_masked_impl(
         a,
