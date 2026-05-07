@@ -102,11 +102,16 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         auto torch_dtype = dataTypeToTorchType(dtype);
         auto options     = torch::TensorOptions(torch_dtype);
         if (atype == rtp_llm::AllocationType::DEVICE) {
+#if USING_ASCEND
+            options = options.device(torch::kPrivateUse1);
+#else
             options = options.device(torch::kCUDA);
+#endif
         }
         std::vector<int64_t> dims64(dims.begin(), dims.end());
         auto                 tensor = torch::empty(dims64, options);
         // NCCL broadcast requires pinned memory for CPU buffers
+        // TODO: Ascend - check if this is still true for ascend
         if (atype != rtp_llm::AllocationType::DEVICE) {
             tensor = tensor.pin_memory();
         }
@@ -176,7 +181,12 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
             for (auto mm_index = 0; mm_index < mm_features_num; ++mm_index) {
                 mm_features.emplace_back(torch::empty({(int64_t)mm_features_shape_ptr[mm_index],
                                                        (int64_t)shape_hints_ptr[GptModelInputIndex::mmFeaturesSize]},
-                                                      torch::TensorOptions().dtype(mm_dtype).device(torch::kCUDA)));
+                                                       torch::TensorOptions().dtype(mm_dtype)
+#if USING_ASCEND
+                                                           .device(torch::kPrivateUse1)));
+#else
+                                                           .device(torch::kCUDA)));
+#endif
             }
             inputs.multimodal_features = std::move(mm_features);
         }
@@ -249,7 +259,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
 
     for (auto* tp : tensor_ptrs) {
         auto nb = static_cast<int64_t>(tp->nbytes());
-        if (tp->is_cuda()) {
+        if (tp->is_cuda() || tp->is_privateuseone()) {
             gpu_entries.push_back({tp, gpu_total_bytes, nb});
             gpu_total_bytes += align_up(nb, kPackAlignment);
         } else {
@@ -276,7 +286,12 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     }
 
     if (gpu_total_bytes > 0) {
-        gpu_packed = torch::empty({gpu_total_bytes}, torch::TensorOptions(torch::kUInt8).device(torch::kCUDA));
+        gpu_packed = torch::empty({gpu_total_bytes}, torch::TensorOptions(torch::kUInt8)
+#if USING_ASCEND
+                                 .device(torch::kPrivateUse1));
+#else
+                                 .device(torch::kCUDA));
+#endif
         if (is_root) {
             for (auto& e : gpu_entries) {
                 auto contig    = e.tensor->contiguous();

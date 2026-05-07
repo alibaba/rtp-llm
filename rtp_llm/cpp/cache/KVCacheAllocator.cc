@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 
 namespace rtp_llm {
 
@@ -149,9 +150,9 @@ void KVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, const BlockI
     const size_t copy_num = (end_ptr - begin_ptr) * config_.layer_num;
 
     size_t copy_nums[CopyType::TYPE_SIZE] = {};
-    auto   copy_type                      = BatchCopyParams::get_copy_type(
-        allocation_type_ == AllocationType::DEVICE ? rtp_llm::MEMORY_GPU : rtp_llm::MEMORY_CPU,
-        allocation_type_ == AllocationType::DEVICE ? rtp_llm::MEMORY_GPU : rtp_llm::MEMORY_CPU);
+    auto   memory_type_pool = block_pool_ ? block_pool_->where() :
+        allocationTypeToMemoryType(allocation_type_);
+    auto   copy_type = BatchCopyParams::get_copy_type(memory_type_pool, memory_type_pool);
     copy_nums[copy_type] += copy_num;  // for kv
 
     for (size_t i = 0; i < CopyType::TYPE_SIZE; ++i) {

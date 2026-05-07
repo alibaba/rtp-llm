@@ -7,6 +7,8 @@
 #elif USING_ROCM
 #include <hip/hip_runtime.h>
 #include "rtp_llm/models_py/bindings/rocm/hip_host_utils.h"
+#elif USING_ASCEND
+#include "rtp_llm/models_py/bindings/ascend/ascend_host_utils.h"
 #endif
 
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -59,6 +61,10 @@ size_t MemoryEvaluationHelper::getDefaultRuntimeMemorySize(const RuntimeConfig& 
     check_cuda_value(cudaMemGetInfo(&free_gpu_bytes, &total_gpu_bytes));
 #elif USING_ROCM
     ROCM_CHECK(hipMemGetInfo(&free_gpu_bytes, &total_gpu_bytes));
+#elif USING_ASCEND
+    auto [used_bytes, free_bytes] = rtp_llm::ascend::getDeviceMemoryInfo(false);
+    free_gpu_bytes  = free_bytes;
+    total_gpu_bytes = used_bytes + free_bytes;
 #endif
     const auto minimal_runtime_bytes = std::max(2048L * 1024 * 1024, (long)(total_gpu_bytes * 0.05));
     if (reserve_runtime_mem_bytes < minimal_runtime_bytes) {

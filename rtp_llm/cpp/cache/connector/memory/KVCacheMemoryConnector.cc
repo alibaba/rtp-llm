@@ -640,8 +640,16 @@ bool KVCacheMemoryConnector::appendCopyBytesToBuffers(const BlockInfo&          
         return false;
     }
 
-    auto mem_device = mem_block.is_cuda ? torch::kCUDA : torch::kCPU;
-    auto gpu_device = gpu_block.is_cuda ? torch::kCUDA : torch::kCPU;
+    auto to_device = [](bool is_accel) -> torch::Device {
+        if (!is_accel) return torch::kCPU;
+#if USING_ASCEND
+        return torch::Device(torch::kPrivateUse1);
+#else
+        return torch::kCUDA;
+#endif
+    };
+    auto mem_device = to_device(mem_block.is_cuda);
+    auto gpu_device = to_device(gpu_block.is_cuda);
     auto mem_tensor = torch::from_blob(static_cast<void*>(static_cast<char*>(mem_block.addr) + byte_off),
                                        {(int64_t)gpu_block.size_bytes},
                                        torch::TensorOptions().dtype(torch::kUInt8).device(mem_device));

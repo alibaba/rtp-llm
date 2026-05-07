@@ -122,9 +122,16 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     model_id_              = params.model_id;
     kv_cache_layer_layout_ = params.kv_cache_layer_layout;
     if (abs(description_.residual_scalar - 1.0) > 1e-6) {
-        auto residual_tensor = torch::tensor({(float)description_.residual_scalar}, torch::kFloat32).cuda();
+        auto residual_tensor = torch::tensor({(float)description_.residual_scalar}, torch::kFloat32);
+#if USING_ASCEND
+        residual_tensor = residual_tensor.to(torch::kPrivateUse1);
+#else
+        residual_tensor = residual_tensor.cuda();
+#endif
 #if USING_CUDA
         c10::cuda::getCurrentCUDAStream().synchronize();
+#elif USING_ASCEND
+        c10_npu::getCurrentNPUStream().synchronize();
 #endif
         residual_scale_fp32_ = residual_tensor;
         residual_scale_      = residual_tensor.to(dataTypeToTorchType(description_.data_type));

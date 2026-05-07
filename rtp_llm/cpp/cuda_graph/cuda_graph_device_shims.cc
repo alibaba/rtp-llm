@@ -1,5 +1,8 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
-#if USING_ROCM
+#if USING_ASCEND
+#include <acl/acl.h>
+#include "rtp_llm/models_py/bindings/ascend/ascend_host_utils.h"
+#elif USING_ROCM
 #include <hip/hip_runtime.h>
 #else
 #include <c10/cuda/CUDACachingAllocator.h>
@@ -10,7 +13,12 @@ namespace rtp_llm {
 namespace cuda_graph {
 
 namespace {
-#if USING_ROCM
+#if USING_ASCEND
+inline void graphCheck(int result, const char* call_expr) {
+    (void)result;
+    (void)call_expr;
+}
+#elif USING_ROCM
 inline void graphCheck(hipError_t result, const char* call_expr) {
     RTP_LLM_CHECK_WITH_INFO(result == hipSuccess, "%s failed: %s", call_expr, hipGetErrorString(result));
 }
@@ -132,7 +140,11 @@ void exit_graph_capture(GraphNcclCaptureContext* ctx) {
 }
 
 void graphMemcpyAsync(void* dst, const void* src, size_t size, GraphMemcpyKind kind, void* stream) {
-#if USING_ROCM
+#if USING_ASCEND
+    (void)kind;
+    (void)stream;
+    std::memcpy(dst, src, size);
+#elif USING_ROCM
     hipMemcpyKind hip_kind = hipMemcpyDeviceToDevice;
     if (kind == GraphMemcpyKind::D2H) {
         hip_kind = hipMemcpyDeviceToHost;
@@ -152,7 +164,9 @@ void graphMemcpyAsync(void* dst, const void* src, size_t size, GraphMemcpyKind k
 }
 
 void graphDeviceSynchronize() {
-#if USING_ROCM
+#if USING_ASCEND
+    aclrtSynchronizeDevice();
+#elif USING_ROCM
     graphCheck(hipDeviceSynchronize(), "hipDeviceSynchronize");
 #else
     graphCheck(cudaDeviceSynchronize(), "cudaDeviceSynchronize");
@@ -160,7 +174,11 @@ void graphDeviceSynchronize() {
 }
 
 void graphMemGetInfo(size_t* free_bytes, size_t* total_bytes) {
-#if USING_ROCM
+#if USING_ASCEND
+    auto [used, free] = ascend::getDeviceMemoryInfo(false);
+    *free_bytes  = free;
+    *total_bytes = used + free;
+#elif USING_ROCM
     graphCheck(hipMemGetInfo(free_bytes, total_bytes), "hipMemGetInfo");
 #else
     graphCheck(cudaMemGetInfo(free_bytes, total_bytes), "cudaMemGetInfo");
@@ -196,7 +214,7 @@ void graphCaptureBegin(at::cuda::CUDAGraph& graph, GraphPoolHandle pool) {
     graph.capture_begin(pool);
 #else
     (void)pool;
-    graph.capture_begin();
+    (void)graph;
 #endif
 }
 

@@ -26,7 +26,13 @@ bool CudaCopyUtil::batchCopyToHost(std::vector<CopyTask>& tasks) {
             RTP_LLM_LOG_WARNING("dst_ptr is nullptr, caller must pre-allocate dst_ptr");
             return false;
         }
-        params.multi_src.push_back(wrapRawPtr(task.src_ptr, task.size, torch::kCUDA));
+        params.multi_src.push_back(wrapRawPtr(task.src_ptr, task.size,
+#if USING_ASCEND
+            torch::Device(torch::kPrivateUse1)
+#else
+            torch::kCUDA
+#endif
+        ));
         params.multi_dst.push_back(wrapRawPtr(task.dst_ptr, task.size, torch::kCPU));
     }
 
@@ -49,7 +55,13 @@ bool CudaCopyUtil::batchCopyToDevice(std::vector<CopyTask>& tasks) {
             return false;
         }
         params.multi_src.push_back(wrapRawPtr(task.src_ptr, task.size, torch::kCPU));
-        params.multi_dst.push_back(wrapRawPtr(task.dst_ptr, task.size, torch::kCUDA));
+        params.multi_dst.push_back(wrapRawPtr(task.dst_ptr, task.size,
+#if USING_ASCEND
+            torch::Device(torch::kPrivateUse1)
+#else
+            torch::kCUDA
+#endif
+        ));
     }
 
     execNoBlockCopy(params);

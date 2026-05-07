@@ -559,10 +559,17 @@ OverallExpertStats execCreateMoeExpertStates(const ExpertStatsParams& params) {
     states.ep_size                 = params.ep_size;
     states.log_exp_num             = params.log_exp_num;
     states.phy_exp_num             = params.phy_exp_num;
+    torch::Device moe_device =
+#if USING_ASCEND
+        torch::Device(torch::kPrivateUse1);
+#else
+        torch::Device(torch::kCUDA);
+#endif
+
     states.stats_buf.log_stats_buf = torch::zeros({(int64_t)params.layer_num, (int64_t)params.log_exp_num},
-                                                  torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
+                                                  torch::TensorOptions(torch::kInt32).device(moe_device));
     states.stats_buf.gpu_loads_buf = torch::zeros({(int64_t)params.layer_num, (int64_t)params.ep_size},
-                                                  torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
+                                                  torch::TensorOptions(torch::kInt32).device(moe_device));
     return states;
 }
 

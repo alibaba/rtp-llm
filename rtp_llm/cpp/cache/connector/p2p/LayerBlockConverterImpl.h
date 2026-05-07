@@ -33,8 +33,8 @@ public:
                 return;
             }
             BlockInfo info;
-            info.is_cuda = t.is_cuda();
-            info.device_index = t.is_cuda() ? static_cast<int32_t>(t.get_device()) : 0;
+            info.is_cuda = t.is_cuda() || t.is_privateuseone();
+            info.device_index = t.is_cuda() || t.is_privateuseone() ? static_cast<int32_t>(t.get_device()) : 0;
             info.scalar_type     = static_cast<int32_t>(t.scalar_type());
             info.addr            = t.data_ptr();
             info.size_bytes      = static_cast<size_t>(t.nbytes());

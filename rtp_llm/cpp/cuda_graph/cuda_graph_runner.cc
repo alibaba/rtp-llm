@@ -487,7 +487,13 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     inputs.attention_inputs.is_s_padded               = true;
     inputs.attention_inputs.sequence_lengths_plus_1_d = torch::zeros({int(max_bs_)}, options_cuda_int32_);
     inputs.attention_inputs.decode_cu_seqlens_d =
-        torch::arange(0, max_bs_ + 1, 1, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
+        torch::arange(0, max_bs_ + 1, 1, torch::TensorOptions(torch::kInt32)
+#if USING_ASCEND
+            .device(torch::kPrivateUse1)
+#else
+            .device(torch::kCUDA)
+#endif
+        );
 }
 
 void CudaGraphRunner::initCaptureAttentionInputsPost() {
@@ -521,7 +527,13 @@ void CudaGraphRunner::setInputEmbeddingScalar(float input_embedding_scalar) {
 }
 
 void CudaGraphRunner::initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs, int max_num_token) {
-    auto options_cuda_int32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
+    auto options_cuda_int32 = torch::TensorOptions().dtype(torch::kInt32)
+#if USING_ASCEND
+        .device(torch::kPrivateUse1)
+#else
+        .device(torch::kCUDA)
+#endif
+        .requires_grad(false);
     // Initialize BertEmbeddingInputs for capture
     // combo_position_ids: empty tensor for capture (will be filled during actual forward)
     inputs.bert_embedding_inputs.combo_position_ids = torch::zeros({max_seq_len_ * max_bs}, options_cuda_int32);

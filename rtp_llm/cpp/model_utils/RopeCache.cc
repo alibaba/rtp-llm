@@ -21,7 +21,14 @@ torch::Tensor genBaseCache(const int   rope_dim,
     // Compute on GPU to avoid CPU multi-threading non-determinism
     // (CPU torch.cos/sin can produce different float32 results across processes
     //  due to MKL/SIMD thread scheduling, causing ~2% cross-rank divergence)
-    auto gpu_opts = torch::TensorOptions(torch::kInt64).device(torch::kCUDA);
+    auto gpu_opts = torch::TensorOptions(torch::kInt64)
+                        .device(
+#if USING_ASCEND
+                            torch::kPrivateUse1
+#else
+                            torch::kCUDA
+#endif
+                        );
     auto inv_freq =
         1.f / torch::pow(rope_theta, torch::arange(0, rope_dim, 2, gpu_opts).to(torch::kFloat32) / rope_dim);
     auto t = torch::arange(max_position_embeddings * rope_scale, gpu_opts).to(torch::kFloat32);
@@ -49,7 +56,14 @@ torch::Tensor genYarnCache(const int   rope_dim,
                            const float extrapolation_factor,
                            const float mscale,
                            const bool  interleave) {
-    auto  gpu_opts  = torch::TensorOptions(torch::kInt64).device(torch::kCUDA);
+    auto  gpu_opts  = torch::TensorOptions(torch::kInt64)
+                          .device(
+#if USING_ASCEND
+                              torch::kPrivateUse1
+#else
+                              torch::kCUDA
+#endif
+                          );
     auto  pos_freqs = torch::pow(rope_theta, torch::arange(0, rope_dim, 2, gpu_opts).to(torch::kFloat32) / rope_dim);
     auto  inv_freq_extrapolation = 1.f / pos_freqs;
     auto  inv_freq_interpolation = 1.f / (rope_scale * pos_freqs);

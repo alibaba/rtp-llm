@@ -71,15 +71,19 @@ std::string GptModelInputs::debugString(bool force) const {
     return debug_string.str();
 }
 
+static bool isDeviceMemory(MemoryType type) {
+    return type == MEMORY_GPU || type == MEMORY_NPU;
+}
+
 BatchCopyParams::CopyType BatchCopyParams::get_copy_type(MemoryType dst_type, MemoryType src_type) {
-    if (src_type == MEMORY_GPU) {
-        if (dst_type == MEMORY_GPU) {
+    if (isDeviceMemory(src_type)) {
+        if (isDeviceMemory(dst_type)) {
             return CopyType::D2D;
         } else {
             return CopyType::D2H;
         }
     } else {
-        if (dst_type == MEMORY_GPU) {
+        if (isDeviceMemory(dst_type)) {
             return CopyType::H2D;
         } else {
             return CopyType::H2H;
