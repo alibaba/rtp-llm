@@ -461,11 +461,10 @@ def finish_hipgraph_capture_session() -> None:
             consume_capture,
             has_pending_capture,
         )
-
-        if has_pending_capture():
-            consume_capture()
-    except Exception:
-        pass
+    except ImportError:
+        return
+    if has_pending_capture():
+        consume_capture()
 
 
 def should_use_hipgraph_capture_rccl(is_tp_group: bool) -> bool:

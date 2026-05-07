@@ -291,9 +291,9 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
                                          nullptr,
                                          stream_);
     }
-    // FP8 path: return full qkv_buf_fp8 for flash_attn_varlen_fp8_pertensor_func
+    // FP8 path: paged returns Q-only fp8 buf; non-paged returns full qkv fp8 buf
     if (use_fmha_fp8) {
-        return std::make_tuple(qkv_buf_fp8, torch::Tensor(), torch::Tensor());
+        return std::make_tuple(paged_fp8 ? q_fp8_buf : qkv_buf_fp8, torch::Tensor(), torch::Tensor());
     }
     // Non-FP8 path: return Q, K, V for flash_attn_varlen_func
     return std::make_tuple(q_output, k_output, v_output);

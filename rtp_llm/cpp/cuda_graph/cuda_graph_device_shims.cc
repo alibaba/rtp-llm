@@ -208,6 +208,7 @@ void finish_capture_session() {
         graph_capture.attr("finish_hipgraph_capture_session")();
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_WARNING("Failed to finish capture session: %s", e.what());
+        throw;
     }
 #endif
 }
