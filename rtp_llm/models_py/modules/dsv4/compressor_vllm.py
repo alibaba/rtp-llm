@@ -64,6 +64,7 @@ class CompressorMeta:
       * ``kv_slots``     : int64 KV-pool slot per token (-1 if non-boundary
                            or unallocated)
       * ``token_to_req`` : int32 alias of ``b_idx`` for the fused KV writer
+      * ``boundary_token_indices`` : int64 token indices that write KV slots
     """
 
     positions: torch.Tensor
@@ -71,6 +72,7 @@ class CompressorMeta:
     state_slots: torch.Tensor
     kv_slots: torch.Tensor
     token_to_req: torch.Tensor
+    boundary_token_indices: torch.Tensor
 
 
 class _CompressorNorm(nn.Module):
@@ -250,12 +252,14 @@ class CompressorVLLM(nn.Module):
         state_slots = self._compute_state_slot_mapping(positions, b_idx)
         kv_slots = self._compute_kv_slot_mapping(positions, b_idx)
         token_to_req = b_idx.to(torch.int32)
+        boundary_token_indices = torch.nonzero(kv_slots >= 0, as_tuple=False).flatten()
         return CompressorMeta(
             positions=positions,
             b_idx=b_idx,
             state_slots=state_slots,
             kv_slots=kv_slots,
             token_to_req=token_to_req,
+            boundary_token_indices=boundary_token_indices,
         )
 
     # ----------------------------------------------------------------------
@@ -388,6 +392,7 @@ class CompressorVLLM(nn.Module):
             self.ape,
             0 if raw_disabled else int(seq_start),
             disable_raw_path=raw_disabled,
+            boundary_token_indices=meta.boundary_token_indices,
             head_dim=self.head_dim,
             rope_head_dim=self.rope_head_dim,
             compress_ratio=self.compress_ratio,
