@@ -136,6 +136,66 @@ py_test(
     exec_properties = {"gpu": "H20"},
 )
 
+# Phase-3a part 2: byte-equal parity between flat 2D ``[T_total, dim]``
+# and legacy 3D ``[1, S, dim]`` input to CompressorFP8.forward. Pins
+# down the invariant so a future patch can't silently drift one shape
+# off the other.
+py_test(
+    name = "test_compressor_forward_flat_input",
+    srcs = ["test_compressor_forward_flat_input.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        "//rtp_llm:testlib",
+    ],
+    tags = ["H20"],
+    exec_properties = {"gpu": "H20"},
+)
+
+# Phase-3a part 4c: ``run_fused_compress_kv_write`` BATCHED varlen raw
+# path byte-equal vs per-request scalar-seq_start launches. Locks down
+# the kernel-native varlen path so B>1 batched prefill keeps the raw
+# fast path while staying bit-identical to the legacy B==1 launches.
+py_test(
+    name = "test_compressor_varlen_raw_path",
+    srcs = ["test_compressor_varlen_raw_path.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        "//rtp_llm:testlib",
+    ],
+    tags = ["H20"],
+    exec_properties = {"gpu": "H20"},
+)
+
+# Phase-3a part 4a: ``CompressorFP8._launch`` raw_path on/off byte-equal
+# parity for short B==1 prefill (seqlen <= state pool capacity). Validates
+# that batched prefill can safely fall back to ``seq_start=None`` while
+# kernel-level varlen support (option c) is being landed.
+py_test(
+    name = "test_compressor_disable_raw_path",
+    srcs = ["test_compressor_disable_raw_path.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        "//rtp_llm:testlib",
+    ],
+    tags = ["H20"],
+    exec_properties = {"gpu": "H20"},
+)
+
+# Phase-3a part 3: IndexerFP8._compute_indexer_q under flat 2D qr
+# input. Validates that wrapping the flat ``[T, H, rope]`` slice with
+# a fake ``S=1`` dim before apply_rotary_emb produces byte-equal q
+# output to the legacy ``[1, T, H, rope]`` path.
+py_test(
+    name = "test_indexer_compute_q_flat_input",
+    srcs = ["test_indexer_compute_q_flat_input.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        "//rtp_llm:testlib",
+    ],
+    tags = ["H20"],
+    exec_properties = {"gpu": "H20"},
+)
+
 # IndexerFP8 prefill kernel chain glue: cp_gather + fp8_mqa_logits +
 # dsv4_top_k_per_row_prefill end-to-end. Locks shape/dtype contracts at
 # each boundary + the k_scale view(fp32).squeeze(-1) glue.

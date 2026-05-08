@@ -113,6 +113,17 @@ def _use_varlen_prefill() -> bool:
     return os.environ.get("DSV4_VARLEN_PREFILL", "1") != "0"
 
 
+def _is_varlen_prefill(batch_size: int) -> bool:
+    """Single dispatch gate: legacy B==1 scalar path vs new cu_seqlens
+    varlen path. ``forward_layers`` builds the full
+    ``(cu_seqlens, position_ids, prefix_lengths, input_lengths,
+    sp_per_req, req_id_per_token)`` bundle together whenever
+    ``batch_size > 1``, so downstream callers don't need to re-check
+    that each tensor is non-None.
+    """
+    return _use_varlen_prefill() and batch_size > 1
+
+
 _V4_FP8_BLOCK_CFG = Fp8BlockWiseQuantConfig()
 
 _DSV4_FP8_KV_ENTRY_BYTES = 584
@@ -2350,12 +2361,11 @@ class Attention(nn.Module):
         )
 
         _dbg = _rt.should_record_layer(self.layer_id)
-        # IndexerFP8._compute_indexer_q feeds q to apply_rotary_emb which
-        # only handles the 4D q layout correctly; pass 3D ``[1, T, dim]``
-        # so q ends up ``[1, T, H, D]``.
-        raw = self.indexer(
-            x.unsqueeze(0), qkv.qr.unsqueeze(0), common.csa_meta.indexer_meta
-        )
+        # Phase-3a part 3: IndexerFP8.forward + nested CompressorFP8.forward
+        # are now flat-input-native (accept ``[T_total, dim]`` /
+        # ``[T_total, q_lora]``). Drop the legacy ``unsqueeze(0)`` so the
+        # batched flat caller hits the same code path without rewrapping.
+        raw = self.indexer(x, qkv.qr, common.csa_meta.indexer_meta)
         if _dbg:
             _rt.record(f"L{self.layer_id:02d}_csa_indexer_raw_topk", raw)
 
@@ -2407,7 +2417,12 @@ class Attention(nn.Module):
         # Compressor write (return value is unused — compressor handles its
         # own pool dual-write; the workspace path re-reads the just-written
         # tail via dequantize_and_gather_k_cache, with BF16 overlay on top).
-        self.compressor(x.unsqueeze(0), common.sp_int, meta=compressor_meta)
+        # Phase-3a: ``CompressorFP8.forward`` is now flat-input-native
+        # (accepts ``[T_total, dim]``). Drop the ``unsqueeze(0)`` legacy
+        # rewrap so the batched (B>1) caller can reuse this code path
+        # without re-shaping. B==1 reaches the same kernel — same flat
+        # ``[T_total, dim]`` reshape inside ``_launch``.
+        self.compressor(x, common.sp_int, meta=compressor_meta)
 
         if workspace_meta is None:
             # Warmup forward: pool not bound. Fall back to BF16 ``kv_full``
@@ -2624,18 +2639,13 @@ class Attention(nn.Module):
 
         if cp_on:
             freqs_cis = cp_freqs_cis_local(self.freqs_cis, cp_ctx)
-        elif (
-            _use_varlen_prefill()
-            and batch_size > 1
-            and position_ids is not None
-            and position_ids.numel() == seqlen
-        ):
+        elif _is_varlen_prefill(batch_size):
             # Phase-1 batched RoPE: per-token absolute-position gather.
             # When B > 1 the request positions are not a contiguous range
             # (each request starts at its own ``prefix_lengths[b]`` and the
             # flat token axis interleaves them), so the legacy contiguous
-            # slice would feed wrong angles to RoPE. Falls back to the
-            # contiguous slice for B == 1 to keep that hot path branchless.
+            # slice would feed wrong angles to RoPE. B == 1 stays on the
+            # contiguous slice path — cheaper, no index_select.
             freqs_cis = self.freqs_cis.index_select(
                 0, position_ids.to(device=self.freqs_cis.device, dtype=torch.long)
             )
@@ -2805,12 +2815,7 @@ class Attention(nn.Module):
         # compressor-meta hoist condition fires instead of silently
         # no-opping (which forces ~20 small kernels per CSA layer to
         # rebuild on the hot path).
-        if (
-            _use_varlen_prefill()
-            and batch_size > 1
-            and position_ids is not None
-            and req_id_per_token is not None
-        ):
+        if _is_varlen_prefill(batch_size):
             positions = position_ids.to(device=device, dtype=torch.long).contiguous()
             b_idx = req_id_per_token.to(device=device, dtype=torch.long).contiguous()
         else:
@@ -3016,12 +3021,8 @@ class Attention(nn.Module):
             _build_prefill_positions,
         )
 
-        if (
-            _use_varlen_prefill()
-            and batch_size > 1
-            and position_ids is not None
-            and req_id_per_token is not None
-        ):
+        is_batched = _is_varlen_prefill(batch_size)
+        if is_batched:
             # Phase-3a batched path: ``compressor.prepare_metadata`` already
             # accepts arbitrary per-token ``(positions, b_idx)`` pairs, so
             # we just feed the upper-layer-derived ``position_ids`` /
@@ -3036,9 +3037,25 @@ class Attention(nn.Module):
             b_idx = req_id_per_token.to(device=device, dtype=torch.long).contiguous()
         else:
             positions, b_idx = _build_prefill_positions(sp_int, 1, seqlen, device)
+        # Phase-3a part 4c — varlen raw-path plumbing. ``sp_per_req`` is
+        # exactly the per-request first-token absolute position the kernel
+        # needs (== prefix_lengths). ``cu_seqlens`` is the offset of req b
+        # in the flat kv_flat axis. ``None`` on the legacy B==1 path.
+        if is_batched:
+            seq_start_per_req = sp_per_req.to(device=device, dtype=torch.int32)
+            cu_seq_per_req = cu_seqlens.to(device=device, dtype=torch.int32)
+        else:
+            seq_start_per_req = None
+            cu_seq_per_req = None
         self._set_compressor_pool_context()
         try:
-            return self.compressor.prepare_metadata(positions, b_idx)
+            return self.compressor.prepare_metadata(
+                positions,
+                b_idx,
+                is_batched=is_batched,
+                seq_start_per_req=seq_start_per_req,
+                cu_seq_per_req=cu_seq_per_req,
+            )
         finally:
             self._clear_compressor_pool_context()
 

@@ -73,6 +73,11 @@ class CompressorMeta:
       * ``kv_slots``     : int64 KV-pool slot per token (-1 if non-boundary
                            or unallocated)
       * ``token_to_req`` : int32 alias of ``b_idx`` for the fused KV writer
+      * ``is_batched``   : True when this meta packs multiple requests
+                           (B>1) — the kernel's scalar ``seq_start`` raw
+                           path is unsafe and ``_launch`` must disable it.
+                           Validated byte-equal to raw_path=True for short
+                           prefill by ``test_compressor_disable_raw_path``.
     """
 
     positions: torch.Tensor
@@ -80,6 +85,13 @@ class CompressorMeta:
     state_slots: torch.Tensor
     kv_slots: torch.Tensor
     token_to_req: torch.Tensor
+    is_batched: bool = False
+    # Phase-3a part 4c — varlen raw path. Populated only when is_batched;
+    # otherwise the legacy scalar-seq_start path is used.
+    #   seq_start_per_req[b] = abs position of req b's first new token (sp_b)
+    #   cu_seq_per_req[b+1]  = end offset of req b in flat kv_flat axis
+    seq_start_per_req: Optional[torch.Tensor] = None
+    cu_seq_per_req: Optional[torch.Tensor] = None
 
 
 class _CompressorNorm(nn.Module):
@@ -262,6 +274,9 @@ class CompressorFP8(nn.Module):
         self,
         positions: torch.Tensor,  # [N] int64
         b_idx: torch.Tensor,  # [N] int64
+        is_batched: bool = False,
+        seq_start_per_req: Optional[torch.Tensor] = None,
+        cu_seq_per_req: Optional[torch.Tensor] = None,
     ) -> CompressorMeta:
         """Compute slot mappings + token_to_req from current pool context.
 
@@ -280,6 +295,9 @@ class CompressorFP8(nn.Module):
             state_slots=state_slots,
             kv_slots=kv_slots,
             token_to_req=token_to_req,
+            is_batched=is_batched,
+            seq_start_per_req=seq_start_per_req,
+            cu_seq_per_req=cu_seq_per_req,
         )
 
     # ----------------------------------------------------------------------
@@ -415,7 +433,15 @@ class CompressorFP8(nn.Module):
 
         # Decode path passes seq_start=None: disable the raw branch so the
         # kernel only reads state_cache. seq_start value is then irrelevant.
-        raw_disabled = seq_start is None
+        # Phase-3a part 4c: when meta carries per-request raw windows, the
+        # kernel uses native varlen raw path (one address per request) and
+        # the scalar ``seq_start`` is unused.
+        use_varlen_raw = (
+            meta.is_batched
+            and meta.seq_start_per_req is not None
+            and meta.cu_seq_per_req is not None
+        )
+        raw_disabled = (seq_start is None) and not use_varlen_raw
         run_fused_compress_kv_write(
             self._state_pool_3d,
             meta.token_to_req,
@@ -430,12 +456,14 @@ class CompressorFP8(nn.Module):
             kv_flat,
             score_flat,
             self.ape,
-            0 if raw_disabled else seq_start,
+            0 if (raw_disabled or use_varlen_raw) else seq_start,
             disable_raw_path=raw_disabled,
             head_dim=self.head_dim,
             rope_head_dim=self.rope_head_dim,
             compress_ratio=self.compress_ratio,
             overlap=self.overlap,
+            seq_start_per_req=meta.seq_start_per_req if use_varlen_raw else None,
+            cu_seq_per_req=meta.cu_seq_per_req if use_varlen_raw else None,
         )
 
     # ----------------------------------------------------------------------
@@ -460,7 +488,16 @@ class CompressorFP8(nn.Module):
         back to the in-body compute path (warmup / standalone / UT).
         """
         del sequence_lengths  # not needed: positions derived from start_pos+arange
-        bsz, seqlen, _ = x.size()
+        # Phase-3a: accept either flat ``[T_total, dim]`` (vLLM-native /
+        # batched prefill) or legacy ``[B, S, dim]``. CP gather still
+        # produces a 3D tensor downstream so we leave the post-gather
+        # (bsz, seqlen) recompute alone — the dim-2 fast path only fires
+        # when the *input* arrives flat.
+        if x.dim() == 2:
+            bsz = 1
+            seqlen = int(x.size(0))
+        else:
+            bsz, seqlen, _ = x.size()
         sp = (
             int(start_pos.item())
             if isinstance(start_pos, torch.Tensor)
@@ -479,17 +516,32 @@ class CompressorFP8(nn.Module):
 
         cp_ctx = self._cp_ctx
         if cp_should_gather(cp_ctx, start_pos):
+            # CP gather expects 3D — re-wrap the flat case before gathering.
+            if kv.dim() == 2:
+                kv = kv.unsqueeze(0)
+                score = score.unsqueeze(0)
             kv = cp_all_gather_full(kv, cp_ctx)
             score = cp_all_gather_full(score, cp_ctx)
             bsz, seqlen = kv.size(0), kv.size(1)
 
         N = bsz * seqlen
+        # ``reshape(N, -1)`` collapses dim-0/1 for 3D, no-op for 2D — same
+        # contiguous flat layout the kernel expects in both cases.
         kv_flat = kv.reshape(N, -1).contiguous()
         score_flat = score.reshape(N, -1).contiguous()
         if meta is None:
             positions, b_idx = _build_prefill_positions(sp, bsz, seqlen, device)
             meta = self.prepare_metadata(positions, b_idx)
-        self._launch(kv_flat, score_flat, meta, seq_start=sp)
+        # Phase-3a part 4b/4c: B>1 batched prefill — each request has its
+        # own absolute start_pos so the scalar ``seq_start`` raw path is
+        # unsafe. When the meta carries per-request varlen raw arrays
+        # (4c), ``_launch`` routes through the kernel's BATCHED branch.
+        # Otherwise (4b fallback) ``seq_start=None`` disables the raw
+        # path and reads from state_cache instead. Both validated byte-
+        # equal vs raw_path=True for short prefill by
+        # ``test_compressor_disable_raw_path``.
+        seq_start = None if meta.is_batched else sp
+        self._launch(kv_flat, score_flat, meta, seq_start=seq_start)
         return None
 
     # ----------------------------------------------------------------------

@@ -244,7 +244,17 @@ class IndexerFP8(PoolBackedModule):
         freqs_cis: torch.Tensor,
         batched_rope: bool = False,
     ) -> torch.Tensor:
-        """qr → wq_b → unflatten → RoPE → q [B, S, H, D]."""
+        """qr → wq_b → unflatten → RoPE → q.
+
+        Output layout mirrors qr's leading dims:
+          * qr ``[B, S, q_lora]``  → q ``[B, S, H, D]``  (legacy 3D)
+          * qr ``[T_total, q_lora]`` → q ``[T_total, H, D]`` (Phase-3a flat)
+
+        ``apply_rotary_emb`` only natively supports the 3D / 4D ``[B, S, ...]``
+        layouts, so the flat 3D ``[T, H, D]`` path wraps a fake ``S=1`` dim
+        before calling — the in-place ``copy_`` writes back through the
+        view, leaving q itself in the flat layout the caller expects.
+        """
         # Framework FP8 linear (CudaFp8DeepGEMMLinear) requires 2D input;
         # flatten leading dims and restore.
         if qr.dim() > 2:
@@ -255,10 +265,18 @@ class IndexerFP8(PoolBackedModule):
         else:
             q = self.wq_b(qr)
         q = q.unflatten(-1, (self.n_heads, self.head_dim))
+        rope_view = q[..., -self.rope_head_dim :]
         if batched_rope:
-            apply_rotary_emb_batched(q[..., -self.rope_head_dim :], freqs_cis)
+            apply_rotary_emb_batched(rope_view, freqs_cis)
+        elif rope_view.dim() == 3:
+            # Flat path: ``[T, H, rope]`` → wrap to ``[T, 1, H, rope]`` so
+            # apply_rotary_emb hits its 4D branch (``freqs`` reshaped to
+            # ``[T, 1, 1, rope/2]`` and broadcast across the H axis). The
+            # unsqueeze is a view; the kernel's in-place copy_ propagates
+            # back to the original ``q`` storage.
+            apply_rotary_emb(rope_view.unsqueeze(1), freqs_cis)
         else:
-            apply_rotary_emb(q[..., -self.rope_head_dim :], freqs_cis)
+            apply_rotary_emb(rope_view, freqs_cis)
         return q
 
     # --------------------------------------------------------------
@@ -416,17 +434,13 @@ class IndexerFP8(PoolBackedModule):
         assert self.freqs_cis is not None, "IndexerFP8.prepare needs freqs_cis bound"
         ratio = self.compress_ratio
         # Phase-3a varlen path: every per-token / per-request scalar above
-        # gets fanned out to ``[B] / [B+1] / [T_total]`` tensors. Gate on
-        # the same kill-switch ``attention.py`` uses so the legacy B==1
-        # path keeps shipping bit-for-bit while the migration lands.
+        # gets fanned out to ``[B] / [B+1] / [T_total]`` tensors. Single
+        # dispatch gate — ``attention._is_varlen_prefill(batch_size)``
+        # inlined to keep ``indexer.py`` import-cycle-free vs attention.py.
+        # Upstream ``forward_layers`` builds the full kwargs bundle
+        # whenever ``batch_size > 1`` so we don't re-check each tensor.
         use_varlen = (
-            os.environ.get("DSV4_VARLEN_PREFILL", "1") != "0"
-            and batch_size > 1
-            and cu_seqlens is not None
-            and input_lengths is not None
-            and prefix_lengths is not None
-            and position_ids is not None
-            and req_id_per_token is not None
+            os.environ.get("DSV4_VARLEN_PREFILL", "1") != "0" and batch_size > 1
         )
         if use_varlen:
             # Per-request compressed-K count: T_b = (sp_b + S_b) // ratio.
@@ -648,8 +662,15 @@ class IndexerFP8(PoolBackedModule):
             # contig — view uint8 [T, 4] → fp32 [T, 1] → squeeze [T].
             k_scale_flat = k_scale_buf.view(torch.float32).squeeze(-1)
 
+            # Phase-3a part 3 fix: when ``_compute_indexer_q`` was given a
+            # flat 2D qr it returns 3D ``[T, H, D]``; ``indexer_q_fp8_quant_fold``
+            # requires 4D ``[B, S, H, D]`` (asserts ``q_bf16.dim() == 4``).
+            # Wrap with a fake B=1 — downstream consumers immediately reshape
+            # to flat ``[M, H, D]`` so the wrap is a free view.
+            q_for_quant = q if q.dim() == 4 else q.unsqueeze(0)
+            w_for_quant = weights if weights.dim() == 3 else weights.unsqueeze(0)
             q_fp8, w_fold = indexer_q_fp8_quant_fold(
-                _as_bf16_contig(q), _as_bf16_contig(weights)
+                _as_bf16_contig(q_for_quant), _as_bf16_contig(w_for_quant)
             )
 
             logits = fp8_mqa_indexer_score(
