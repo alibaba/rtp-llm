@@ -2020,17 +2020,20 @@ class Attention(nn.Module):
                 )
 
                 fp8_sparse_op = self._get_fp8_decode_op()
-                indices_fp8 = (
-                    attn_metadata.swa_abs_idx[:bsz].to(torch.int32).contiguous()
-                )
-                cache_seqlens_fp8 = (attn_metadata.start_pos[:bsz] + 1).to(torch.int32)
+                # Iter3.2: swa_abs_idx / swa_pool_bt / cache_seqlens are all
+                # already int32 contiguous tensors owned by attn_metadata
+                # (see allocate_decode_metadata). Dropping the per-layer
+                # ``.to(torch.int32).contiguous()`` chain removes 3× no-op
+                # casts × 43 layers = 129 redundant kernel launches/step.
+                # cache_seqlens_i32 is precomputed once per step in
+                # update_decode_metadata_in_place / build_decode_metadata.
                 o = fp8_sparse_op.forward(
                     q,
                     swa_view_3d_fp8,
                     self.attn_sink,
-                    indices_fp8,
-                    cache_seqlens=cache_seqlens_fp8,
-                    block_table=swa_pool_bt[:bsz].to(torch.int32).contiguous(),
+                    attn_metadata.swa_abs_idx[:bsz],
+                    cache_seqlens=attn_metadata.cache_seqlens_i32[:bsz],
+                    block_table=swa_pool_bt[:bsz],
                 )
             elif use_paged_swa_read:
                 # Zero-copy: pool view fed straight to TileLang kernel.
@@ -2070,22 +2073,21 @@ class Attention(nn.Module):
                     # legacy "dequant both pools → BF16 cat → TileLang
                     # sparse_attn" path.
                     fp8_dual_op = self._get_fp8_decode_op()
-                    swa_topk_3d = (
-                        swa_global.view(bsz, q_len, win).to(torch.int32).contiguous()
-                    )
-                    cmp_topk_3d = (
-                        cmp_global.view(bsz, q_len, K_cmp).to(torch.int32).contiguous()
-                    )
-                    cache_seqlens_fp8 = (attn_metadata.start_pos[:bsz] + 1).to(
-                        torch.int32
-                    )
+                    # Iter3.2: swa_global / cmp_global are int32 from the
+                    # triton translator (``translate_local_to_global_slots``),
+                    # so ``.to(torch.int32)`` is a no-op; only ``.view() +
+                    # .contiguous()`` is needed for the [B, q_len, K]
+                    # reshape FlashMLA wants. cache_seqlens / swa_pool_bt
+                    # are pre-cast on attn_metadata (see SWA-only branch).
+                    swa_topk_3d = swa_global.view(bsz, q_len, win).contiguous()
+                    cmp_topk_3d = cmp_global.view(bsz, q_len, K_cmp).contiguous()
                     o = fp8_dual_op.forward(
                         q,
                         swa_view_3d_fp8,
                         self.attn_sink,
                         swa_topk_3d,
-                        cache_seqlens=cache_seqlens_fp8,
-                        block_table=swa_pool_bt[:bsz].to(torch.int32).contiguous(),
+                        cache_seqlens=attn_metadata.cache_seqlens_i32[:bsz],
+                        block_table=swa_pool_bt[:bsz],
                         extra_k_cache=cmp_view_3d_fp8,
                         extra_topk_idxs=cmp_topk_3d,
                     )

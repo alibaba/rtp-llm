@@ -141,6 +141,15 @@ class DSv4DecodeAttnMetadata:
     # views via ``self._kv_cache.get_layer_cache(layer_id, attn_type)``
     # at call time, no per-layer descriptor cache needed.
 
+    # FlashMLA's ``cache_seqlens`` argument = start_pos + 1 (number of
+    # valid kv tokens for this step). The decode FP8 attention op is
+    # called 43× per step (once per layer) with the same value, so we
+    # compute the int32 tensor once here and reuse across layers instead
+    # of re-running ``(start_pos[:bsz] + 1).to(torch.int32)`` per layer.
+    # Pre-allocated at max_batch by ``allocate_decode_metadata`` and
+    # refilled per step by ``update_decode_metadata_in_place``.
+    cache_seqlens_i32: torch.Tensor = field(default=None)  # type: ignore[assignment]
+
 
 def _build_swa_slot_mapping(
     start_pos: torch.Tensor, q_len: int, window_size: int, swa_buffer_stride: int
@@ -367,6 +376,10 @@ def allocate_decode_metadata(
         device=device,
     )
 
+    # Iter3.2: precomputed cache_seqlens = start_pos + 1 int32, reused
+    # across all 43 decode layers. See field doc on DSv4DecodeAttnMetadata.
+    cache_seqlens_i32_alloc = torch.zeros(B, dtype=torch.int32, device=device)
+
     return DSv4DecodeAttnMetadata(
         batch_size=B,
         q_len_per_req=q_len,
@@ -387,6 +400,7 @@ def allocate_decode_metadata(
         pool_block_tables=pool_block_tables,
         pool_write_slot_mappings=pool_write_slot_mappings,
         swa_abs_idx=swa_abs_idx,
+        cache_seqlens_i32=cache_seqlens_i32_alloc,
     )
 
 
@@ -450,6 +464,11 @@ def update_decode_metadata_in_place(
 
     # start_pos
     meta.start_pos[:bs].copy_(start_pos)
+    # Iter3.2: refresh cache_seqlens = start_pos + 1 (shared across all 43
+    # decode-layer calls this step). Cheap scalar add + copy, done once
+    # here instead of 43× in ``_forward_decode_body``.
+    if meta.cache_seqlens_i32 is not None:
+        meta.cache_seqlens_i32[:bs].copy_(start_pos + 1)
 
     # SWA slot mapping prefix [:bs * q_len]
     swa_buffer_stride = window_size
@@ -852,6 +871,8 @@ def build_decode_metadata(
         torch.full_like(candidate, -1),
     )
 
+    cache_seqlens_i32 = (start_pos + 1).to(torch.int32)
+
     return DSv4DecodeAttnMetadata(
         batch_size=B,
         q_len_per_req=q_len,
@@ -872,4 +893,5 @@ def build_decode_metadata(
         pool_block_tables=pool_block_tables,
         pool_write_slot_mappings=pool_write_slot_mappings,
         swa_abs_idx=swa_abs_idx,
+        cache_seqlens_i32=cache_seqlens_i32,
     )
