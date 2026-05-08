@@ -1767,6 +1767,12 @@ class Attention(nn.Module):
         ratio = self.compress_ratio
         rd = self.rope_head_dim
         device = x.device
+        # Iter3.3: record_function regions let the no-graph profiler attribute
+        # every aten micro-op to a semantic stage. Cheap in capture mode (Python
+        # overhead only, no extra kernel). Layer tag ``L{id}/{ratio}`` groups
+        # regions per layer; the profiler timeline can then bucket launches per
+        # stage across 43 layers.
+        _dbg_tag = f"L{getattr(self, 'layer_id', '?'):0>2}/r{ratio}"
         # Slice metadata to actual bsz — the CUDA-graph impl allocates
         # buffers at max_bs, but the captured graph at BS=k must read only
         # the [:k] prefix. Padding entries [k:max_bs] are stale across
@@ -1789,44 +1795,47 @@ class Attention(nn.Module):
                     self.indexer.compressor.freqs_cis = self.freqs_cis
 
         # Q path
-        qr = self._rmsnorm_weighted(
-            self._lin(self.wq_a, x), self.q_norm
-        )  # [B, 1, q_lora]
-        q = self._lin(self.wq_b, qr).unflatten(
-            -1, (self.n_heads, self.head_dim)
-        )  # [B, 1, H, D]
-        # Per-request RoPE on q_pe — each req has its own start_pos. Vectorized
-        # via apply_rotary_emb_batched (mirrors vLLM's batched cos/sin lookup).
-        freqs_cis_per_req = self.freqs_cis[start_pos.long()]  # [B, freqs_dim]
-        q = fused_rmsnorm_rope(q, None, freqs_cis_per_req, rd, eps=self.eps)
-        # KV path (single MQA head)
-        kv = fused_rmsnorm_rope(
-            self._lin(self.wkv, x),
-            self.kv_norm,
-            freqs_cis_per_req,
-            rd,
-            eps=self.eps,
-        )
-        # Phase E5b: direct SWA pool write (register_buffer retired).
-        kv_flat = kv.reshape(bsz * q_len, self.head_dim)  # [T, head_dim]
-        from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
-        from rtp_llm.models_py.modules.dsv4.decode.kv_write_decode_op import (
-            write_kv_to_pool,
-        )
-
-        swa_pool_slots = attn_metadata.pool_write_slot_mappings.get(SWA_KV)
-        swa_view = self._pool_view(SWA_KV)
-        if (
-            swa_view is not None
-            and swa_pool_slots is not None
-            and swa_pool_slots.numel() > 0
-        ):
-            write_kv_to_pool(
-                kv_flat,
-                swa_pool_slots[: bsz * q_len],
-                swa_view,
-                mask_negative=False,
+        with torch.profiler.record_function(f"{_dbg_tag}/q_proj"):
+            qr = self._rmsnorm_weighted(
+                self._lin(self.wq_a, x), self.q_norm
+            )  # [B, 1, q_lora]
+            q = self._lin(self.wq_b, qr).unflatten(
+                -1, (self.n_heads, self.head_dim)
+            )  # [B, 1, H, D]
+            # Per-request RoPE on q_pe — each req has its own start_pos. Vectorized
+            # via apply_rotary_emb_batched (mirrors vLLM's batched cos/sin lookup).
+            freqs_cis_per_req = self.freqs_cis[start_pos.long()]  # [B, freqs_dim]
+            q = fused_rmsnorm_rope(q, None, freqs_cis_per_req, rd, eps=self.eps)
+        with torch.profiler.record_function(f"{_dbg_tag}/kv_proj"):
+            # KV path (single MQA head)
+            kv = fused_rmsnorm_rope(
+                self._lin(self.wkv, x),
+                self.kv_norm,
+                freqs_cis_per_req,
+                rd,
+                eps=self.eps,
             )
+        with torch.profiler.record_function(f"{_dbg_tag}/swa_kv_write"):
+            # Phase E5b: direct SWA pool write (register_buffer retired).
+            kv_flat = kv.reshape(bsz * q_len, self.head_dim)  # [T, head_dim]
+            from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
+            from rtp_llm.models_py.modules.dsv4.decode.kv_write_decode_op import (
+                write_kv_to_pool,
+            )
+
+            swa_pool_slots = attn_metadata.pool_write_slot_mappings.get(SWA_KV)
+            swa_view = self._pool_view(SWA_KV)
+            if (
+                swa_view is not None
+                and swa_pool_slots is not None
+                and swa_pool_slots.numel() > 0
+            ):
+                write_kv_to_pool(
+                    kv_flat,
+                    swa_pool_slots[: bsz * q_len],
+                    swa_view,
+                    mask_negative=False,
+                )
 
         # CSA / HCA: build / fill compressed topk; write compressed-K.
         # Stage 3B: when the metadata is from CUDA-graph capture, dispatch
@@ -1845,57 +1854,62 @@ class Attention(nn.Module):
             # only the [:bsz] prefix (graph impl allocates [max_bs, ...]).
             topk_buf_cmp = attn_metadata.topk_buffer_compressed[:bsz]
             if self.indexer is not None:
-                # CSA layer (ratio=4): indexer fills topk_buf_cmp with
-                # per-request compressed-block indices and self-scatters
-                # its nested compressor's kv_cache + state back into the
-                # INDEXER_KV / INDEXER_STATE pool via the set_pool_context
-                # lifecycle (#50).
-                if use_vec:
-                    self.indexer.forward_decode_vectorized(
-                        x,
-                        qr,
-                        start_pos,
+                with torch.profiler.record_function(f"{_dbg_tag}/indexer"):
+                    # CSA layer (ratio=4): indexer fills topk_buf_cmp with
+                    # per-request compressed-block indices and self-scatters
+                    # its nested compressor's kv_cache + state back into the
+                    # INDEXER_KV / INDEXER_STATE pool via the set_pool_context
+                    # lifecycle (#50).
+                    if use_vec:
+                        self.indexer.forward_decode_vectorized(
+                            x,
+                            qr,
+                            start_pos,
+                            topk_buf_cmp,
+                        )
+                    else:
+                        self.indexer.forward_decode(
+                            x,
+                            qr,
+                            start_pos,
+                            topk_buf_cmp,
+                        )
+                with torch.profiler.record_function(f"{_dbg_tag}/compressor_write"):
+                    # The Indexer owns INDEXER_KV/INDEXER_STATE only.  CSA
+                    # attention reads CSA_KV, so the layer's main compressor
+                    # must also emit the boundary compressed-K before the paged
+                    # dual-pool gather below.
+                    if use_vec:
+                        self.compressor.forward_decode_vectorized(x, start_pos)
+                    else:
+                        self.compressor.forward_decode(x, start_pos)
+                with torch.profiler.record_function(f"{_dbg_tag}/topk_stitch"):
+                    # Stitch indexer output into topk_total compressed half (with +win offset).
+                    topk_total = attn_metadata.topk_total_by_ratio[4][
+                        :bsz
+                    ]  # [bsz, 1, win+K]
+                    idx_with_off = torch.where(
+                        topk_buf_cmp >= 0,
+                        topk_buf_cmp + win,
                         topk_buf_cmp,
                     )
-                else:
-                    self.indexer.forward_decode(
-                        x,
-                        qr,
-                        start_pos,
-                        topk_buf_cmp,
-                    )
-                # The Indexer owns INDEXER_KV/INDEXER_STATE only.  CSA
-                # attention reads CSA_KV, so the layer's main compressor
-                # must also emit the boundary compressed-K before the paged
-                # dual-pool gather below.
-                if use_vec:
-                    self.compressor.forward_decode_vectorized(x, start_pos)
-                else:
-                    self.compressor.forward_decode(x, start_pos)
-                # Stitch indexer output into topk_total compressed half (with +win offset).
-                topk_total = attn_metadata.topk_total_by_ratio[4][
-                    :bsz
-                ]  # [bsz, 1, win+K]
-                idx_with_off = torch.where(
-                    topk_buf_cmp >= 0,
-                    topk_buf_cmp + win,
-                    topk_buf_cmp,
-                )
-                topk_total[:, :, win:] = idx_with_off
-                topk_idxs = topk_total
+                    topk_total[:, :, win:] = idx_with_off
+                    topk_idxs = topk_total
             else:
-                # HCA layer (ratio=128): use the dense-filled topk from builder.
-                topk_total = attn_metadata.topk_total_by_ratio[ratio][:bsz].clone()
-                cmp_part = topk_total[:, :, win:]
-                cmp_part = torch.where(cmp_part >= 0, cmp_part + win, cmp_part)
-                topk_total[:, :, win:] = cmp_part
-                topk_idxs = topk_total
-                # Compressor self-binds/writes/scatters compressed-K into
-                # the HCA_KV + HCA_STATE pool via set_pool_context lifecycle.
-                if use_vec:
-                    self.compressor.forward_decode_vectorized(x, start_pos)
-                else:
-                    self.compressor.forward_decode(x, start_pos)
+                with torch.profiler.record_function(f"{_dbg_tag}/topk_stitch"):
+                    # HCA layer (ratio=128): use the dense-filled topk from builder.
+                    topk_total = attn_metadata.topk_total_by_ratio[ratio][:bsz].clone()
+                    cmp_part = topk_total[:, :, win:]
+                    cmp_part = torch.where(cmp_part >= 0, cmp_part + win, cmp_part)
+                    topk_total[:, :, win:] = cmp_part
+                    topk_idxs = topk_total
+                with torch.profiler.record_function(f"{_dbg_tag}/compressor_write"):
+                    # Compressor self-binds/writes/scatters compressed-K into
+                    # the HCA_KV + HCA_STATE pool via set_pool_context lifecycle.
+                    if use_vec:
+                        self.compressor.forward_decode_vectorized(x, start_pos)
+                    else:
+                        self.compressor.forward_decode(x, start_pos)
         else:
             # SWA-only layer: just window topk. Already request-local ring slots.
             topk_idxs = attn_metadata.topk_window_idxs[:bsz]
@@ -1905,27 +1919,20 @@ class Attention(nn.Module):
         # output buffer holds raw values (the +win is added in-place later);
         # for HCA we synthesize the dense [0..compressed_lens) range.
         cmp_local_raw: Optional[torch.Tensor] = None
-        if self.compress_ratio:
-            ratio_l = int(self.compress_ratio)
-            if self.indexer is not None:
-                # CSA: indexer just wrote raw indices into topk_buf_cmp.
-                cmp_local_raw = attn_metadata.topk_buffer_compressed[:bsz].clone()
-            else:
-                # HCA: dense read of [0..compressed_lens) for each request.
-                cmp_lens_h = attn_metadata.compressed_lens.get(ratio_l)
-                tt_h = attn_metadata.topk_total_by_ratio.get(ratio_l)
-                if cmp_lens_h is not None and tt_h is not None:
-                    K_h = tt_h.shape[-1] - win
-                    dense = (
-                        torch.arange(K_h, device=cmp_lens_h.device, dtype=torch.int32)
-                        .view(1, 1, K_h)
-                        .expand(bsz, q_len, K_h)
-                    )
-                    cmp_local_raw = torch.where(
-                        dense < cmp_lens_h[:bsz].view(bsz, 1, 1),
-                        dense,
-                        torch.full_like(dense, -1),
-                    )
+        with torch.profiler.record_function(f"{_dbg_tag}/cmp_local_raw"):
+            if self.compress_ratio:
+                ratio_l = int(self.compress_ratio)
+                if self.indexer is not None:
+                    # CSA: indexer just wrote raw indices into topk_buf_cmp.
+                    cmp_local_raw = attn_metadata.topk_buffer_compressed[:bsz].clone()
+                else:
+                    # HCA: dense-with-masking idx was already built into
+                    # topk_total_by_ratio[128] by update_decode_metadata_in_place
+                    # (see _build_dense_compressed_idxs). Reuse it instead of
+                    # rebuilding arange+expand+where+full_like per layer.
+                    tt_h = attn_metadata.topk_total_by_ratio.get(ratio_l)
+                    if tt_h is not None:
+                        cmp_local_raw = tt_h[:bsz, :, win:]
 
         # Sparse attn over per-request KV view.
         # NOTE: kv_cache layout is [max_B, win + max_seq_len/ratio, head_dim].
@@ -2000,16 +2007,26 @@ class Attention(nn.Module):
                 translate_local_to_global_slots,
             )
 
-            T = bsz * q_len
-            req_id = build_req_id_per_token(bsz, q_len, swa_pool_bt.device)
-            swa_eb = self._pool_entries_per_block(SWA_KV)
-            swa_local = attn_metadata.swa_abs_idx[:bsz].reshape(T, win)
-            swa_global = translate_local_to_global_slots(
-                req_id,
-                swa_pool_bt[:bsz],
-                swa_local,
-                swa_eb,
-            )
+            with torch.profiler.record_function(f"{_dbg_tag}/translate_swa"):
+                T = bsz * q_len
+                # Iter3.3: req_id and swa_global_slots are shared across all
+                # 43 layers this step — precomputed by update_decode_metadata_in_place
+                # into pre-allocated max-bs buffers; slice the [:T] prefix.
+                # Fallback to compute if metadata is from the eager build
+                # (build_decode_metadata path).
+                if attn_metadata.swa_global_slots is not None:
+                    req_id = attn_metadata.req_id_per_token[:T]
+                    swa_global = attn_metadata.swa_global_slots[:T]
+                else:
+                    req_id = build_req_id_per_token(bsz, q_len, swa_pool_bt.device)
+                    swa_eb = self._pool_entries_per_block(SWA_KV)
+                    swa_local = attn_metadata.swa_abs_idx[:bsz].reshape(T, win)
+                    swa_global = translate_local_to_global_slots(
+                        req_id,
+                        swa_pool_bt[:bsz],
+                        swa_local,
+                        swa_eb,
+                    )
             if use_paged_swa_read and swa_view_3d_fp8 is not None:
                 # FP8 path: FlashMLA reads the packed FP8 pool directly
                 # (block_table + per-request virtual indices). swa_abs_idx
@@ -2020,21 +2037,22 @@ class Attention(nn.Module):
                 )
 
                 fp8_sparse_op = self._get_fp8_decode_op()
-                # Iter3.2: swa_abs_idx / swa_pool_bt / cache_seqlens are all
-                # already int32 contiguous tensors owned by attn_metadata
-                # (see allocate_decode_metadata). Dropping the per-layer
-                # ``.to(torch.int32).contiguous()`` chain removes 3× no-op
-                # casts × 43 layers = 129 redundant kernel launches/step.
-                # cache_seqlens_i32 is precomputed once per step in
-                # update_decode_metadata_in_place / build_decode_metadata.
-                o = fp8_sparse_op.forward(
-                    q,
-                    swa_view_3d_fp8,
-                    self.attn_sink,
-                    attn_metadata.swa_abs_idx[:bsz],
-                    cache_seqlens=attn_metadata.cache_seqlens_i32[:bsz],
-                    block_table=swa_pool_bt[:bsz],
-                )
+                with torch.profiler.record_function(f"{_dbg_tag}/fmla_fp8_swa"):
+                    # Iter3.2: swa_abs_idx / swa_pool_bt / cache_seqlens are all
+                    # already int32 contiguous tensors owned by attn_metadata
+                    # (see allocate_decode_metadata). Dropping the per-layer
+                    # ``.to(torch.int32).contiguous()`` chain removes 3× no-op
+                    # casts × 43 layers = 129 redundant kernel launches/step.
+                    # cache_seqlens_i32 is precomputed once per step in
+                    # update_decode_metadata_in_place / build_decode_metadata.
+                    o = fp8_sparse_op.forward(
+                        q,
+                        swa_view_3d_fp8,
+                        self.attn_sink,
+                        attn_metadata.swa_abs_idx[:bsz],
+                        cache_seqlens=attn_metadata.cache_seqlens_i32[:bsz],
+                        block_table=swa_pool_bt[:bsz],
+                    )
             elif use_paged_swa_read:
                 # Zero-copy: pool view fed straight to TileLang kernel.
                 q_packed = (
@@ -2052,15 +2070,27 @@ class Attention(nn.Module):
                 # gather both into a packed scratch and call sparse_attn
                 # with identity topk = arange(win+K). Memory cost noted in
                 # paged_topk_translator.gather_dual_pool_kv_packed docstring.
-                cmp_eb = self._pool_entries_per_block(cmp_attn_type)
-                K_cmp = cmp_local_raw.shape[-1]
-                cmp_local = cmp_local_raw.reshape(T, K_cmp)
-                cmp_global = translate_local_to_global_slots(
-                    req_id,
-                    cmp_pool_bt[:bsz],
-                    cmp_local,
-                    cmp_eb,
-                )
+                with torch.profiler.record_function(f"{_dbg_tag}/translate_cmp"):
+                    K_cmp = cmp_local_raw.shape[-1]
+                    # Iter3.3: HCA layers share a single precomputed
+                    # hca_cmp_global_slots (dense-idx input is identical
+                    # across HCA layers). CSA layers must still translate
+                    # per-layer because topk_buf_cmp comes from the indexer
+                    # and differs per layer.
+                    if (
+                        self.indexer is None
+                        and attn_metadata.hca_cmp_global_slots is not None
+                    ):
+                        cmp_global = attn_metadata.hca_cmp_global_slots[:T]
+                    else:
+                        cmp_eb = self._pool_entries_per_block(cmp_attn_type)
+                        cmp_local = cmp_local_raw.reshape(T, K_cmp)
+                        cmp_global = translate_local_to_global_slots(
+                            req_id,
+                            cmp_pool_bt[:bsz],
+                            cmp_local,
+                            cmp_eb,
+                        )
                 assert q_len == 1, (
                     "Phase 2B-2b dual-pool paged read currently supports "
                     f"q_len=1 only (got {q_len})"
@@ -2073,24 +2103,26 @@ class Attention(nn.Module):
                     # legacy "dequant both pools → BF16 cat → TileLang
                     # sparse_attn" path.
                     fp8_dual_op = self._get_fp8_decode_op()
-                    # Iter3.2: swa_global / cmp_global are int32 from the
-                    # triton translator (``translate_local_to_global_slots``),
-                    # so ``.to(torch.int32)`` is a no-op; only ``.view() +
-                    # .contiguous()`` is needed for the [B, q_len, K]
-                    # reshape FlashMLA wants. cache_seqlens / swa_pool_bt
-                    # are pre-cast on attn_metadata (see SWA-only branch).
-                    swa_topk_3d = swa_global.view(bsz, q_len, win).contiguous()
-                    cmp_topk_3d = cmp_global.view(bsz, q_len, K_cmp).contiguous()
-                    o = fp8_dual_op.forward(
-                        q,
-                        swa_view_3d_fp8,
-                        self.attn_sink,
-                        swa_topk_3d,
-                        cache_seqlens=attn_metadata.cache_seqlens_i32[:bsz],
-                        block_table=swa_pool_bt[:bsz],
-                        extra_k_cache=cmp_view_3d_fp8,
-                        extra_topk_idxs=cmp_topk_3d,
-                    )
+                    with torch.profiler.record_function(f"{_dbg_tag}/topk_reshape"):
+                        # Iter3.2: swa_global / cmp_global are int32 from the
+                        # triton translator (``translate_local_to_global_slots``),
+                        # so ``.to(torch.int32)`` is a no-op; only ``.view() +
+                        # .contiguous()`` is needed for the [B, q_len, K]
+                        # reshape FlashMLA wants. cache_seqlens / swa_pool_bt
+                        # are pre-cast on attn_metadata (see SWA-only branch).
+                        swa_topk_3d = swa_global.view(bsz, q_len, win).contiguous()
+                        cmp_topk_3d = cmp_global.view(bsz, q_len, K_cmp).contiguous()
+                    with torch.profiler.record_function(f"{_dbg_tag}/fmla_fp8_dual"):
+                        o = fp8_dual_op.forward(
+                            q,
+                            swa_view_3d_fp8,
+                            self.attn_sink,
+                            swa_topk_3d,
+                            cache_seqlens=attn_metadata.cache_seqlens_i32[:bsz],
+                            block_table=swa_pool_bt[:bsz],
+                            extra_k_cache=cmp_view_3d_fp8,
+                            extra_topk_idxs=cmp_topk_3d,
+                        )
                 else:
                     kv_packed_4d = gather_dual_pool_kv_packed(
                         swa_view_cache,
@@ -2138,33 +2170,37 @@ class Attention(nn.Module):
                 f"kv_cache_bound={self._kv_cache is not None}"
             )
 
-        # Grouped output projection: inverse-RoPE + FP8 quant + wo_a einsum.
-        # Fused path collapses torch ``apply_rotary_emb_batched`` (5 launches)
-        # + per-group ``per_token_group_quant_fp8`` (G launches) into ONE
-        # Triton kernel emitting ``(fp8 [M,G,K], scale [M,G,K/512])`` in the
-        # einsum-expected UE8M0 layout.  Matches vLLM ``deepseek_v4_attention.py``.
-        if o.is_cuda and o.numel() > 0:
-            o_fp8, o_scale = fused_inv_rope_fp8_quant(
-                o,
-                freqs_cis_per_req,
-                n_groups=self.n_groups,
-                heads_per_group=self.n_heads // self.n_groups,
-                nope_dim=self.head_dim - self.rope_head_dim,
-                rope_head_dim=self.rope_head_dim,
-            )
-            o = self._wo_a_einsum_from_fp8(o_fp8, o_scale, bsz, q_len)
-        else:
-            apply_rotary_emb_batched(o[..., -rd:], freqs_cis_per_req, inverse=True)
-            o = o.reshape(bsz, q_len, self.n_groups, -1)
-            wo_a_bf16 = _fp8_dequant_to_fp32(self.wo_a_w, self.wo_a_s).to(o.dtype)
-            wo_a = wo_a_bf16.view(self.n_groups, self.o_lora_rank, -1)
-            o = torch.einsum("bsgd,grd->bsgr", o, wo_a)
-        out = self._lin(self.wo_b, o.flatten(2))
-        if self.tp_size > 1:
-            from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
+        with torch.profiler.record_function(f"{_dbg_tag}/output_proj"):
+            # Grouped output projection: inverse-RoPE + FP8 quant + wo_a einsum.
+            # Fused path collapses torch ``apply_rotary_emb_batched`` (5 launches)
+            # + per-group ``per_token_group_quant_fp8`` (G launches) into ONE
+            # Triton kernel emitting ``(fp8 [M,G,K], scale [M,G,K/512])`` in the
+            # einsum-expected UE8M0 layout.  Matches vLLM ``deepseek_v4_attention.py``.
+            if o.is_cuda and o.numel() > 0:
+                o_fp8, o_scale = fused_inv_rope_fp8_quant(
+                    o,
+                    freqs_cis_per_req,
+                    n_groups=self.n_groups,
+                    heads_per_group=self.n_heads // self.n_groups,
+                    nope_dim=self.head_dim - self.rope_head_dim,
+                    rope_head_dim=self.rope_head_dim,
+                )
+                o = self._wo_a_einsum_from_fp8(o_fp8, o_scale, bsz, q_len)
+            else:
+                apply_rotary_emb_batched(o[..., -rd:], freqs_cis_per_req, inverse=True)
+                o = o.reshape(bsz, q_len, self.n_groups, -1)
+                wo_a_bf16 = _fp8_dequant_to_fp32(self.wo_a_w, self.wo_a_s).to(o.dtype)
+                wo_a = wo_a_bf16.view(self.n_groups, self.o_lora_rank, -1)
+                o = torch.einsum("bsgd,grd->bsgr", o, wo_a)
+            out = self._lin(self.wo_b, o.flatten(2))
+            if self.tp_size > 1:
+                from rtp_llm.models_py.distributed.collective_torch import (
+                    Group,
+                    all_reduce,
+                )
 
-            all_reduce(out, Group.TP)
-        return out
+                all_reduce(out, Group.TP)
+            return out
 
     # ==================================================================
     # Prefill — flat ``[T, dim]`` input, B==1 invariant.

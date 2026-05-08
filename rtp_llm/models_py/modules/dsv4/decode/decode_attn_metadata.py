@@ -150,6 +150,25 @@ class DSv4DecodeAttnMetadata:
     # refilled per step by ``update_decode_metadata_in_place``.
     cache_seqlens_i32: torch.Tensor = field(default=None)  # type: ignore[assignment]
 
+    # Iter3.3: shared-across-layers request-id mapping ``[T]`` int32 = the
+    # ``arange(bsz)`` (for q_len=1) passed to every ``translate_local_to_global_slots``
+    # call. 43 layers × same arange = one cached tensor.
+    req_id_per_token: Optional[torch.Tensor] = None
+
+    # Iter3.3: cached ``swa_global_slots`` = translate_local_to_global_slots(
+    # req_id, swa_pool_bt, swa_abs_idx, swa_eb). Shape [T, win] int32.
+    # Shared across all 43 layers (SWA block table + swa_abs_idx are
+    # identical). When non-None the per-layer body skips the triton
+    # translator call and reads this directly.
+    swa_global_slots: Optional[torch.Tensor] = None
+
+    # Iter3.3: cached ``hca_cmp_global_slots`` = translate_local_to_global_slots(
+    # req_id, hca_pool_bt, hca_cmp_local, hca_eb). Shape [T, K_h] int32.
+    # Shared across all HCA layers in a step (HCA block table + dense cmp
+    # idx are identical across HCA layers). Only populated when an HCA
+    # pool is bound.
+    hca_cmp_global_slots: Optional[torch.Tensor] = None
+
 
 def _build_swa_slot_mapping(
     start_pos: torch.Tensor, q_len: int, window_size: int, swa_buffer_stride: int
@@ -380,6 +399,26 @@ def allocate_decode_metadata(
     # across all 43 decode layers. See field doc on DSv4DecodeAttnMetadata.
     cache_seqlens_i32_alloc = torch.zeros(B, dtype=torch.int32, device=device)
 
+    # Iter3.3: pre-allocated buffers for the shared-across-layers translate
+    # outputs. Under CUDA graph capture the graph bakes in the buffer
+    # address, so refill MUST .copy_() into the existing storage instead of
+    # reassigning ``meta.swa_global_slots = translate(...)`` — that would
+    # leave captured reads pointing at stale memory. ``req_id_per_token``
+    # is deterministic (``arange(bs)`` for q_len=1) so we fill it once here.
+    req_id_per_token_alloc = torch.arange(B, dtype=torch.int32, device=device)
+    if q_len != 1:
+        req_id_per_token_alloc = req_id_per_token_alloc.repeat_interleave(
+            q_len
+        ).contiguous()
+    swa_global_slots_alloc = torch.full(
+        (B * q_len, window_size), -1, dtype=torch.int32, device=device
+    )
+    # HCA dense-idx width = max_seq_len / 128 = index_topk by construction
+    # (see allocate_decode_metadata: topk_total shape[-1] = win + index_topk).
+    hca_cmp_global_slots_alloc = torch.full(
+        (B * q_len, index_topk), -1, dtype=torch.int32, device=device
+    )
+
     return DSv4DecodeAttnMetadata(
         batch_size=B,
         q_len_per_req=q_len,
@@ -401,6 +440,9 @@ def allocate_decode_metadata(
         pool_write_slot_mappings=pool_write_slot_mappings,
         swa_abs_idx=swa_abs_idx,
         cache_seqlens_i32=cache_seqlens_i32_alloc,
+        req_id_per_token=req_id_per_token_alloc,
+        swa_global_slots=swa_global_slots_alloc,
+        hca_cmp_global_slots=hca_cmp_global_slots_alloc,
     )
 
 
@@ -650,6 +692,59 @@ def update_decode_metadata_in_place(
         meta.swa_abs_idx[:bs].copy_(
             torch.where(valid_pos, candidate, torch.full_like(candidate, -1))
         )
+
+    # Iter3.3: precompute translate_swa / translate_hca once per step.
+    # Shared across all 43 attention layers. Graph-safe: ``.copy_()`` into
+    # pre-allocated buffers on meta (allocated at max_bs); never reassigns
+    # the attribute, so graph replays read from fixed addresses.
+    # ``req_id_per_token`` is deterministic (``arange(B)``) so it was filled
+    # at allocate time and stays stable.
+    if paged_block_tables is not None and paged_pool_entries_per_block is not None:
+        from rtp_llm.models_py.modules.dsv4.attn_type import HCA_KV, SWA_KV
+        from rtp_llm.models_py.modules.dsv4.decode.paged_topk_translator import (
+            translate_local_to_global_slots,
+        )
+
+        T = bs * q_len
+        req_id_bs = (
+            meta.req_id_per_token[:T] if meta.req_id_per_token is not None else None
+        )
+
+        if (
+            req_id_bs is not None
+            and meta.swa_global_slots is not None
+            and SWA_KV in meta.pool_block_tables
+            and meta.swa_abs_idx is not None
+        ):
+            swa_eb = paged_pool_entries_per_block.get(SWA_KV, window_size)
+            swa_local = meta.swa_abs_idx[:bs].reshape(T, window_size)
+            swa_global_new = translate_local_to_global_slots(
+                req_id_bs,
+                meta.pool_block_tables[SWA_KV][:bs],
+                swa_local,
+                swa_eb,
+            )
+            meta.swa_global_slots[:T].copy_(swa_global_new)
+
+        # HCA layers all share the dense-idx-masked cmp_local_raw (already
+        # materialised as topk_total[r=128][:, :, win:]); translate it once.
+        if (
+            req_id_bs is not None
+            and meta.hca_cmp_global_slots is not None
+            and HCA_KV in meta.pool_block_tables
+            and 128 in meta.topk_total_by_ratio
+        ):
+            hca_eb = paged_pool_entries_per_block.get(HCA_KV, 1)
+            hca_tt = meta.topk_total_by_ratio[128]
+            K_h = hca_tt.shape[-1] - window_size
+            hca_cmp_local = hca_tt[:bs, :, window_size:].reshape(T, K_h).contiguous()
+            hca_global_new = translate_local_to_global_slots(
+                req_id_bs,
+                meta.pool_block_tables[HCA_KV][:bs],
+                hca_cmp_local,
+                hca_eb,
+            )
+            meta.hca_cmp_global_slots[:T].copy_(hca_global_new)
 
     # Update Python-scalar geometry (cheap — these are not captured into the graph)
     meta.batch_size = bs
