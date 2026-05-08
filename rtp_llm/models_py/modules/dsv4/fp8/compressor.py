@@ -144,10 +144,10 @@ class CompressorFP8(nn.Module):
         self.wgate = nn.Linear(dim, coff * head_dim, bias=False)
         with torch.no_grad():
             self.wkv.weight = nn.Parameter(
-                compressor_weights["wkv"], requires_grad=False
+                compressor_weights["wkv"].to(torch.bfloat16), requires_grad=False
             )
             self.wgate.weight = nn.Parameter(
-                compressor_weights["wgate"], requires_grad=False
+                compressor_weights["wgate"].to(torch.bfloat16), requires_grad=False
             )
         self.norm = _CompressorNorm(head_dim)
         self.norm.weight = nn.Parameter(
