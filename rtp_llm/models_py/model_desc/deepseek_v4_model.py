@@ -374,30 +374,45 @@ class DeepSeekV4Model(GptModelBase):
                 v4_indexer_score as _v4_idx,
             )
 
-            _idx = self.v4.layers[2].attn.indexer  # first CSA layer (ratio=4)
-            _H = int(_idx.n_heads)
-            _D = int(_idx.head_dim)
-            _ratio = max(int(_idx.compress_ratio), 1)
-            _T_dec = int(self._v4_args.max_seq_len) // _ratio
-            _q_dec = _torch.zeros(
-                (1, 1, _H, _D), dtype=_torch.bfloat16, device=device_str
-            )
-            _kv_dec = _torch.zeros(
-                (1, _T_dec, _D), dtype=_torch.bfloat16, device=device_str
-            )
-            _w_dec = _torch.zeros((1, 1, _H), dtype=_torch.bfloat16, device=device_str)
-            # Decode shape (no mask).
-            _v4_idx(_q_dec, _kv_dec, _w_dec, q_pos=None, compress_ratio=1)
-            # Prefill mask variant — only matters if CSA prefill goes through
-            # graph capture. Cheap to prewarm regardless.
-            _v4_idx(
-                _q_dec,
-                _kv_dec,
-                _w_dec,
-                q_pos=_torch.zeros((1, 1), dtype=_torch.int32, device=device_str),
-                compress_ratio=_ratio,
-            )
-            _torch.cuda.synchronize()
+            # Find the first CSA layer (compress_ratio == 4). The hardcoded
+            # ``layers[2]`` only works at full layer count; under
+            # ``HACK_LAYER_NUM=N`` for N < 3 the model has SWA-only layers
+            # and there is no indexer to prewarm — skip the block entirely.
+            _idx = None
+            for _l in self.v4.layers:
+                _attn_l = getattr(_l, "attn", None)
+                if (
+                    _attn_l is not None
+                    and getattr(_attn_l, "indexer", None) is not None
+                ):
+                    _idx = _attn_l.indexer
+                    break
+            if _idx is not None:
+                _H = int(_idx.n_heads)
+                _D = int(_idx.head_dim)
+                _ratio = max(int(_idx.compress_ratio), 1)
+                _T_dec = int(self._v4_args.max_seq_len) // _ratio
+                _q_dec = _torch.zeros(
+                    (1, 1, _H, _D), dtype=_torch.bfloat16, device=device_str
+                )
+                _kv_dec = _torch.zeros(
+                    (1, _T_dec, _D), dtype=_torch.bfloat16, device=device_str
+                )
+                _w_dec = _torch.zeros(
+                    (1, 1, _H), dtype=_torch.bfloat16, device=device_str
+                )
+                # Decode shape (no mask).
+                _v4_idx(_q_dec, _kv_dec, _w_dec, q_pos=None, compress_ratio=1)
+                # Prefill mask variant — only matters if CSA prefill goes through
+                # graph capture. Cheap to prewarm regardless.
+                _v4_idx(
+                    _q_dec,
+                    _kv_dec,
+                    _w_dec,
+                    q_pos=_torch.zeros((1, 1), dtype=_torch.int32, device=device_str),
+                    compress_ratio=_ratio,
+                )
+                _torch.cuda.synchronize()
 
         self._materialized = True
 

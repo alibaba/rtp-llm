@@ -274,3 +274,15 @@ py_test(
     tags = ["H20"],
     exec_properties = {"gpu": "H20"},
 )
+
+# Phase-2 SWA-only prefill varlen migration UT. Stub-driven (no FP8
+# weights); validates the new _get_window_topk_idxs_varlen helper, the
+# varlen branch of _build_swa_prefill_meta (B==1 bit-equality + B>1
+# per-request semantics), and the _attn_fp8_swa_via_concat scatter math.
+py_test(
+    name = "test_swa_prefill_varlen",
+    srcs = ["test_swa_prefill_varlen.py"],
+    deps = _swa_triton_ut_deps,
+    tags = ["H20"],
+    exec_properties = {"gpu": "H20"},
+)
