@@ -408,31 +408,107 @@ class IndexerFP8(PoolBackedModule):
         """
         assert self.freqs_cis is not None, "IndexerFP8.prepare needs freqs_cis bound"
         ratio = self.compress_ratio
-        end_pos = sp_int + seqlen
-        is_fresh_prefill = sp_int == 0
-        T = end_pos // ratio
-        M = bsz * seqlen
-
-        freqs_cis_slice = self.freqs_cis[sp_int : sp_int + seqlen]
-
-        # Global Q positions for this chunk: sp..sp+S-1 (B==1 → flat [M]).
-        positions_d = torch.arange(
-            sp_int, sp_int + seqlen, device=device, dtype=torch.int32
+        # Phase-3a varlen path: every per-token / per-request scalar above
+        # gets fanned out to ``[B] / [B+1] / [T_total]`` tensors. Gate on
+        # the same kill-switch ``attention.py`` uses so the legacy B==1
+        # path keeps shipping bit-for-bit while the migration lands.
+        use_varlen = (
+            os.environ.get("DSV4_VARLEN_PREFILL", "1") != "0"
+            and batch_size > 1
+            and cu_seqlens is not None
+            and input_lengths is not None
+            and prefix_lengths is not None
+            and position_ids is not None
+            and req_id_per_token is not None
         )
-
-        # Per-row visible-K window (causal): row r → [0, (pos+1)//ratio),
-        # clamped to T (compressed K count).
-        ke = ((positions_d + 1) // ratio).clamp_max(T).to(torch.int32)
-        ks = torch.zeros(M, dtype=torch.int32, device=device)
-
-        # K-side block_table — None during warmup (no pool bound).
-        if kv_block_table is not None and kv_eb > 0:
-            block_table_i32 = (
-                kv_block_table[:bsz].to(device=device, dtype=torch.int32).contiguous()
+        if use_varlen:
+            # Per-request compressed-K count: T_b = (sp_b + S_b) // ratio.
+            seq_total_per_req = prefix_lengths.to(
+                device=device, dtype=torch.int64
+            ) + input_lengths.to(
+                device=device, dtype=torch.int64
+            )  # [B]
+            T_per_req = (seq_total_per_req // ratio).to(torch.int32)  # [B]
+            cu_kv_seqlens = torch.zeros(
+                batch_size + 1, dtype=torch.int32, device=device
             )
+            cu_kv_seqlens[1:] = torch.cumsum(T_per_req.to(torch.int64), dim=0).to(
+                torch.int32
+            )
+            T = int(cu_kv_seqlens[-1].item())  # total compressed K across batch
+            M = int(position_ids.numel())  # T_total
+
+            positions_d = position_ids.to(device=device, dtype=torch.int32).contiguous()
+
+            # Per-row visible-K window: ke[t] = ((pos_t + 1) // ratio)
+            # clamped to that token's request-local ``T_b``. ks stays 0 —
+            # both cold + continuation prefill attend the full per-request
+            # compressed-K range up to ke (matches B==1 ks=0 invariant).
+            req_id_long = req_id_per_token.to(device=device, dtype=torch.int64)
+            T_per_token = T_per_req.to(torch.int64).index_select(0, req_id_long)
+            ke = (
+                ((positions_d.to(torch.int64) + 1) // ratio)
+                .clamp_max(T_per_token)
+                .to(torch.int32)
+            )
+            ks = torch.zeros(M, dtype=torch.int32, device=device)
+
+            # ``freqs_cis_slice`` per-token gather — RoPE angles for ``q``
+            # in ``_compute_indexer_q``. Equivalent to ``self.freqs_cis[
+            # sp:sp+S]`` for B == 1 contiguous range; per-token gather is
+            # required when requests interleave on the flat axis.
+            freqs_cis_slice = self.freqs_cis.index_select(0, positions_d.to(torch.long))
+
+            if kv_block_table is not None and kv_eb > 0:
+                block_table_i32 = (
+                    kv_block_table[:batch_size]
+                    .to(device=device, dtype=torch.int32)
+                    .contiguous()
+                )
+            else:
+                block_table_i32 = torch.empty(
+                    (batch_size, 0), dtype=torch.int32, device=device
+                )
+
+            # Legacy scalar fields kept for downstream consumers that
+            # haven't been varlen-aware yet (notably the nested compressor
+            # call ``self.compressor(x, sp)`` in ``forward``). Carrying
+            # the first request's values here is *not* correct for B > 1
+            # mixed-sp — the corresponding forward() varlen branch still
+            # needs to land before B > 1 actually executes end-to-end.
+            end_pos = int(seq_total_per_req[0].item())
+            is_fresh_prefill = sp_int == 0
         else:
-            block_table_i32 = torch.empty((bsz, 0), dtype=torch.int32, device=device)
-        cu_kv_seqlens = torch.tensor([0, T], dtype=torch.int32, device=device)
+            # Legacy B == 1 scalar path — unchanged, bit-equal to pre-Phase-3a.
+            end_pos = sp_int + seqlen
+            is_fresh_prefill = sp_int == 0
+            T = end_pos // ratio
+            M = bsz * seqlen
+
+            freqs_cis_slice = self.freqs_cis[sp_int : sp_int + seqlen]
+
+            # Global Q positions for this chunk: sp..sp+S-1 (B==1 → flat [M]).
+            positions_d = torch.arange(
+                sp_int, sp_int + seqlen, device=device, dtype=torch.int32
+            )
+
+            # Per-row visible-K window (causal): row r → [0, (pos+1)//ratio),
+            # clamped to T (compressed K count).
+            ke = ((positions_d + 1) // ratio).clamp_max(T).to(torch.int32)
+            ks = torch.zeros(M, dtype=torch.int32, device=device)
+
+            # K-side block_table — None during warmup (no pool bound).
+            if kv_block_table is not None and kv_eb > 0:
+                block_table_i32 = (
+                    kv_block_table[:bsz]
+                    .to(device=device, dtype=torch.int32)
+                    .contiguous()
+                )
+            else:
+                block_table_i32 = torch.empty(
+                    (bsz, 0), dtype=torch.int32, device=device
+                )
+            cu_kv_seqlens = torch.tensor([0, T], dtype=torch.int32, device=device)
 
         return _IndexerFP8PrefillMeta(
             bsz=bsz,

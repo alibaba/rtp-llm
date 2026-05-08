@@ -3000,7 +3000,26 @@ class Attention(nn.Module):
             _build_prefill_positions,
         )
 
-        positions, b_idx = _build_prefill_positions(sp_int, 1, seqlen, device)
+        if (
+            _use_varlen_prefill()
+            and batch_size > 1
+            and position_ids is not None
+            and req_id_per_token is not None
+        ):
+            # Phase-3a batched path: ``compressor.prepare_metadata`` already
+            # accepts arbitrary per-token ``(positions, b_idx)`` pairs, so
+            # we just feed the upper-layer-derived ``position_ids`` /
+            # ``req_id_per_token`` directly. For B == 1 the legacy
+            # ``_build_prefill_positions(sp_int, 1, seqlen, ...)`` is bit-
+            # equal to ``(position_ids, req_id_per_token)`` (positions =
+            # arange(sp, sp+seqlen), b_idx = zeros) — keep the legacy call
+            # so any regression bisection between the two paths can isolate
+            # batched vs scalar plumbing without mixing in dtype/contiguity
+            # differences.
+            positions = position_ids.to(device=device, dtype=torch.long).contiguous()
+            b_idx = req_id_per_token.to(device=device, dtype=torch.long).contiguous()
+        else:
+            positions, b_idx = _build_prefill_positions(sp_int, 1, seqlen, device)
         self._set_compressor_pool_context()
         try:
             return self.compressor.prepare_metadata(positions, b_idx)
