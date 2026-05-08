@@ -21,6 +21,7 @@
 #include "rtp_llm/models_py/bindings/cuda/FakeBalanceExpertOp.h"
 
 #include "rtp_llm/models_py/bindings/cuda/kernels/mla_quant_kernel.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/dsv4_top_k_per_row_prefill.h"
 
 using namespace rtp_llm;
 
@@ -237,6 +238,22 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("workspace"),
                   py::arg("k"),
                   py::arg("max_seq_len"));
+
+    // Vendored from vLLM (csrc/sampler.cu::top_k_per_row_prefill).
+    // Per-row TopK over [row_starts[r], row_ends[r]); returned indices
+    // are relative to row_starts[r], padded with -1 past the per-row
+    // valid count. CUDA-only.
+    rtp_ops_m.def("dsv4_top_k_per_row_prefill",
+                  &dsv4_top_k_per_row_prefill,
+                  "Per-row TopK for DSv4 indexer prefill",
+                  py::arg("logits"),
+                  py::arg("row_starts"),
+                  py::arg("row_ends"),
+                  py::arg("indices_out"),
+                  py::arg("num_rows"),
+                  py::arg("stride0"),
+                  py::arg("stride1"),
+                  py::arg("top_k"));
 
     rtp_ops_m.def("indexer_k_quant_and_cache",
                   &rtp_llm::indexer_k_quant_and_cache,

@@ -140,6 +140,25 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+# Per-row TopK for the prefill phase of the DeepSeek-V4 indexer.
+# Vendored from vLLM (csrc/sampler.cu::top_k_per_row_prefill). Hybrid:
+# insertion-sort blocks for the first 12288 rows, radix-select beyond.
+cc_library(
+    name = "dsv4_top_k_per_row_prefill",
+    srcs = ["dsv4_top_k_per_row_prefill.cu"],
+    hdrs = [
+        "dsv4_top_k_per_row_prefill.h",
+        "dsv4_top_k_per_row_prefill.cuh",
+    ],
+    deps = [
+        "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
+        ":cuda_utils_common",
+        "//rtp_llm/cpp/utils:core_utils",
+    ] + torch_deps(),
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
 cc_library(
     name = "mla_quant_kernel",
     srcs = ["mla_quant_kernel.cu"],
