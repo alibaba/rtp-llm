@@ -5,6 +5,7 @@ import torch
 
 from rtp_llm.models_py.modules.dsv4 import compressor as compressor_mod
 from rtp_llm.models_py.modules.dsv4.compressor import Compressor
+from rtp_llm.models_py.modules.dsv4.compressor_vllm import _flatten_token_major_2d
 from rtp_llm.models_py.modules.dsv4.cp import CPContext
 from rtp_llm.models_py.modules.dsv4.indexer import Indexer
 
@@ -56,6 +57,114 @@ def test_indexer_weights_proj_uses_full_sequence_not_abs256_chunks():
     assert not hasattr(Indexer, "_weights_proj_abs_blocked")
     assert "_weights_proj_abs_blocked" not in forward_names
     assert "linear" in forward_names
+
+
+def test_vllm_flatten_preserves_regular_strided_linear_slices():
+    fused = torch.arange(2 * 5 * 9, dtype=torch.float32).reshape(2, 5, 9)
+    kv = fused[..., :4]
+    score = fused[..., 4:]
+
+    kv_flat = _flatten_token_major_2d(kv, rows=10)
+    score_flat = _flatten_token_major_2d(score, rows=10)
+
+    assert tuple(kv_flat.shape) == (10, 4)
+    assert tuple(score_flat.shape) == (10, 5)
+    assert kv_flat.stride() == (9, 1)
+    assert score_flat.stride() == (9, 1)
+    assert kv_flat.data_ptr() == kv.data_ptr()
+    assert score_flat.data_ptr() == score.data_ptr()
+    torch.testing.assert_close(kv_flat, kv.reshape(10, 4), rtol=0, atol=0)
+    torch.testing.assert_close(score_flat, score.reshape(10, 5), rtol=0, atol=0)
+
+
+def _reference_metadata(positions, b_idx, state_bt, state_eb, kv_bt, kv_eb, ratio):
+    state_bt_long = state_bt.to(torch.long)
+    state_block_in_seq = (positions // state_eb) % state_bt_long.shape[1]
+    state_in_block = positions % state_eb
+    state_block_id = state_bt_long[b_idx, state_block_in_seq]
+    state_slot = state_block_id * state_eb + state_in_block
+    state_slot = torch.where(
+        state_block_id > 0, state_slot, torch.full_like(state_slot, -1)
+    )
+
+    kv_bt_long = kv_bt.to(torch.long)
+    tokens_per_block = kv_eb * ratio
+    boundary = ((positions + 1) % ratio) == 0
+    kv_block_in_seq = positions // tokens_per_block
+    kv_in_block = (positions % tokens_per_block) // ratio
+    kv_in_capacity = kv_block_in_seq < kv_bt_long.shape[1]
+    kv_safe_block = kv_block_in_seq.clamp(min=0, max=kv_bt_long.shape[1] - 1)
+    kv_block_id = kv_bt_long[b_idx, kv_safe_block]
+    kv_valid = boundary & kv_in_capacity & (kv_block_id > 0)
+    kv_slot = kv_block_id * kv_eb + kv_in_block
+    kv_slot = torch.where(kv_valid, kv_slot, torch.full_like(kv_slot, -1))
+    token_to_req = b_idx.to(torch.int32)
+    return state_slot, kv_slot, token_to_req
+
+
+def test_compressor_metadata_triton_matches_torch_reference():
+    if not torch.cuda.is_available():
+        return
+    from rtp_llm.models_py.modules.dsv4._compressor_metadata_triton import (
+        build_prefill_compressor_metadata,
+        map_compressor_metadata,
+    )
+
+    state_eb = 16
+    kv_eb = 8
+    ratio = 4
+    state_bt = torch.tensor(
+        [[3, 4, 0, 6, 7], [8, 0, 10, 11, 12]], device="cuda", dtype=torch.int32
+    )
+    kv_bt = torch.tensor(
+        [[13, 14, 0, 16], [17, 0, 19, 20]], device="cuda", dtype=torch.int32
+    )
+    positions = torch.tensor(
+        [0, 3, 4, 15, 16, 31, 32, 63, 64, 95, 96, 127],
+        device="cuda",
+        dtype=torch.long,
+    )
+    b_idx = torch.tensor([0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 1, 1], device="cuda")
+
+    got = map_compressor_metadata(
+        positions, b_idx, state_bt, state_eb, kv_bt, kv_eb, ratio
+    )
+    assert got is not None
+    expected = _reference_metadata(positions, b_idx, state_bt, state_eb, kv_bt, kv_eb, ratio)
+    for actual, ref in zip(got, expected):
+        torch.testing.assert_close(actual.cpu(), ref.cpu(), rtol=0, atol=0)
+
+    prefill = build_prefill_compressor_metadata(
+        5,
+        2,
+        10,
+        torch.device("cuda"),
+        state_bt,
+        state_eb,
+        kv_bt,
+        kv_eb,
+        ratio,
+    )
+    assert prefill is not None
+    p_pos, p_bidx, p_state, p_kv, p_req = prefill
+    ref_pos = (
+        (torch.arange(10, device="cuda", dtype=torch.long).unsqueeze(0) + 5)
+        .expand(2, -1)
+        .reshape(-1)
+        .contiguous()
+    )
+    ref_bidx = (
+        torch.arange(2, device="cuda", dtype=torch.long)
+        .unsqueeze(1)
+        .expand(-1, 10)
+        .reshape(-1)
+        .contiguous()
+    )
+    torch.testing.assert_close(p_pos.cpu(), ref_pos.cpu(), rtol=0, atol=0)
+    torch.testing.assert_close(p_bidx.cpu(), ref_bidx.cpu(), rtol=0, atol=0)
+    expected = _reference_metadata(ref_pos, ref_bidx, state_bt, state_eb, kv_bt, kv_eb, ratio)
+    for actual, ref in zip((p_state, p_kv, p_req), expected):
+        torch.testing.assert_close(actual.cpu(), ref.cpu(), rtol=0, atol=0)
 
 
 def test_compressor_fast_path_is_explicit_opt_in():
