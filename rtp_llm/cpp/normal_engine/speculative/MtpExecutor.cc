@@ -506,8 +506,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     metrics_collector.not_skip = true;
 
     // release model input before forward
-    model_->releaseBuffers();
-    draft_model_->releaseBuffers();
+    releaseAllModelBuffers();
 
     // target model prefill
     {
@@ -552,8 +551,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
         cudaSyncAndCheck();
-        model_->releaseBuffers();
-        draft_model_->releaseBuffers();
+        releaseAllModelBuffers();
         return absl::OkStatus();
     }
 
@@ -589,8 +587,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
                                                      {std::move(draft_model_output), std::move(draft_sampler_output)});
         RTP_LLM_LOG_DEBUG("dispatch done");
 
-        model_->releaseBuffers();
-        draft_model_->releaseBuffers();
+        releaseAllModelBuffers();
 
         return result;
     }
@@ -741,8 +738,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     size_t batch_size = model_input.input_lengths.size(0);
 
     // release hold buffers before draft model forward
-    draft_model_->releaseBuffers();
-    model_->releaseBuffers();
+    releaseAllModelBuffers();
 
     if (propose_step_ > 1) {
         launchTargetVerifyPrepareAsync(model_input, batch_size);
@@ -835,8 +831,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     GptModelOutputs draft_prefill_model_output = runDraftPrefillForward(model_input);
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
-        draft_model_->releaseBuffers();
-        model_->releaseBuffers();
+        releaseAllModelBuffers();
         return absl::OkStatus();
     }
 
@@ -1182,10 +1177,17 @@ absl::Status MtpExecutor::dispatchDecodeOutput(const StreamGroups&              
         stream->getSPOutputBuffer()->tensors_holder.clear();
     }
 
-    draft_model_->releaseBuffers();
-    model_->releaseBuffers();
+    releaseAllModelBuffers();
 
     return result;
+}
+
+void MtpExecutor::releaseAllModelBuffers() {
+    model_->releaseBuffers();
+    draft_model_->releaseBuffers();
+    if (sp_prefill_draft_model_) {
+        sp_prefill_draft_model_->releaseBuffers();
+    }
 }
 
 void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,

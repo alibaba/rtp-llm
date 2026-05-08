@@ -184,6 +184,8 @@ protected:
                                    const speculative::SpeculativeSamplerOutput& spec_decode_output,
                                    const MergedOutput&                          draft_prefill_output);
 
+    void releaseAllModelBuffers();
+
 private:
     std::unique_ptr<ModelBase>               model_;
     std::unique_ptr<Sampler>                 sampler_;
