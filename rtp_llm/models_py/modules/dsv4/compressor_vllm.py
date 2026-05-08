@@ -5,7 +5,7 @@ pool + fused boundary writer Triton kernels) that emits BF16 directly to
 the same ``[total_slots, head_dim]`` BF16 KV pool that the existing
 ``Compressor`` writes — i.e. **no FP8 quantization, no UE8M0 scales, no
 584B / 132B FP8 slot layout**. Drop-in replacement for ``Compressor``
-when ``DSV4_COMPRESSOR_VLLM=1`` is set.
+when ``DSV4_BF16_VLLM=1`` is set (see :data:`attention.DSV4_BF16_VLLM`).
 
 Why this exists: the vLLM-style flow trades a complex per-logical-block
 state buffer for two single-launch Triton kernels (per-token state write
