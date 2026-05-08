@@ -173,6 +173,16 @@ py_test(
 )
 
 py_test(
+    name = "test_fused_kv_compress_norm_rope_insert_perf",
+    srcs = ["test_fused_kv_compress_norm_rope_insert_perf.py"],
+    deps = [
+        ":dsv4_kernel_perf_utils",
+        "//rtp_llm/models_py:dsv4_fused_kernel_sources",
+    ],
+    tags = ["manual", "H20", "SM100_ARM"],
+)
+
+py_test(
     name = "test_dsv4_tc_simt_overlap_perf",
     srcs = ["test_dsv4_tc_simt_overlap_perf.py"],
     deps = [
