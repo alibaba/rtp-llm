@@ -217,8 +217,11 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
         self.assertEqual(_unpack_int32_le(by_name["generated_ids"]), [7, 8, 9])
         self.assertEqual(list(infer.outputs[0].shape), [1, 3])
         self.assertEqual(_unpack_int64_le(by_name["finish_reason"]), [0])
-        self.assertEqual(_unpack_int32_le(by_name["prompt_token_num"]), [10])
-        self.assertEqual(_unpack_int32_le(by_name["prompt_cached_token_num"]), [4])
+        # Metric scalars now ride on InferParameter int64_param (dashllm parity).
+        self.assertNotIn("prompt_token_num", by_name)
+        self.assertNotIn("prompt_cached_token_num", by_name)
+        self.assertEqual(infer.parameters["prompt_token_num"].int64_param, 10)
+        self.assertEqual(infer.parameters["prompt_cached_token_num"].int64_param, 4)
 
     def test_not_finished_finish_reason_two(self) -> None:
         out = GenerateOutput(
@@ -239,8 +242,9 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
             for i in range(len(infer.outputs))
         }
         self.assertEqual(_unpack_int64_le(by_name["finish_reason"]), [2])
-        self.assertEqual(_unpack_int32_le(by_name["prompt_token_num"]), [0])
-        self.assertEqual(_unpack_int32_le(by_name["prompt_cached_token_num"]), [0])
+        # Metric scalars on InferParameter int64_param even when AuxInfo is None.
+        self.assertEqual(infer.parameters["prompt_token_num"].int64_param, 0)
+        self.assertEqual(infer.parameters["prompt_cached_token_num"].int64_param, 0)
 
     def test_output_ids_2d_uses_first_row(self) -> None:
         out = GenerateOutput(
@@ -277,6 +281,8 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
         )
         infer = resp.infer_response
         names = [infer.outputs[i].name for i in range(len(infer.outputs))]
+        # Metrics moved off ``outputs`` onto ``parameters`` — only wire-tensor
+        # entries remain in the outputs list.
         self.assertEqual(
             names,
             [
@@ -284,8 +290,6 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
                 "generated_ids",
                 "finish_reason",
                 "finished",
-                "prompt_token_num",
-                "prompt_cached_token_num",
             ],
         )
         by_name = {

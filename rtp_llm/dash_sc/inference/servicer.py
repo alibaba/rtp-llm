@@ -15,6 +15,7 @@ coroutine automatically.
 from __future__ import annotations
 
 import logging
+import socket
 from typing import Any, AsyncIterator, Optional
 
 import torch
@@ -26,6 +27,11 @@ from rtp_llm.dash_sc.codec import (
     iter_fake_model_stream_infer,
     parse_dash_sc_grpc_request,
     prepend_to_generated_ids_tensor,
+)
+from rtp_llm.dash_sc.dashscope_compat import (
+    DashScopeResponseEchoArgs,
+    apply_dashscope_extras_to_generate_config,
+    parse_dashscope_request_extras,
 )
 from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.frontend.request_id_generator import generate_request_id
@@ -53,6 +59,9 @@ async def iter_real_model_stream_infer(
     rtp_llm_request_id: int,
     echo_prefix_ids: Optional[list[int]] = None,
     extra_stop_word_ids: Optional[list[list[int]]] = None,
+    invocation_metadata: Optional[Any] = None,
+    instance_ip: Optional[str] = None,
+    hostname: Optional[str] = None,
 ) -> AsyncIterator[predict_v2_pb2.ModelStreamInferResponse]:
     """Run enqueue on ``backend_visitor`` and yield one proto per chunk as the backend streams.
 
@@ -75,6 +84,13 @@ async def iter_real_model_stream_infer(
     so 99% of calls hit the fast branch (empty ``existing``) and skip the dedup set
     + tuple hashing entirely. The slow branch only fires when a caller explicitly
     sets ``stop_words_list`` on the request.
+
+    ``invocation_metadata`` / ``instance_ip`` / ``hostname`` are threaded through
+    from the servicer so the dashscope-compat layer can: (1) read the
+    ``x-ds-max-matched-token-num`` header to gate ``prompt_cached_token_num``
+    suppression, and (2) echo the worker identity (``model_instance_ip`` /
+    ``model_hostname``) on every response chunk — same fields dashllm emits at
+    ``dashllm/worker/processors/model.py:832-834``.
     """
     trace_str = str(request.id)
     tag = stream_log_tag(request_id_numeric=rtp_llm_request_id, trace_id=trace_str)
@@ -92,8 +108,26 @@ async def iter_real_model_stream_infer(
     )
     echoed = False
     try:
+        # Parse dashscope-specific extras (parameters JSON + invocation_metadata)
+        # BEFORE building GenerateConfig so apply step can override defaults
+        # without being clobbered by `to_generate_config`.
+        extras = parse_dashscope_request_extras(request, invocation_metadata)
+
         generate_config = sampling.to_generate_config(other=other)
         generate_config.trace_id = trace_str
+        # Apply dashllm-style overrides (stop / stop_token_ids / max_thinking_tokens
+        # / return_all_probs / return_incremental / chat_id; unsupported fields
+        # logged and dropped here).
+        apply_dashscope_extras_to_generate_config(
+            generate_config, extras, request_log_tag=tag
+        )
+        echo_args = DashScopeResponseEchoArgs(
+            suppress_cached_token_num=extras.suppress_cached_token_num,
+            model_name=request.model_name or None,
+            instance_ip=instance_ip,
+            hostname=hostname,
+            scheduler_request_id=extras.scheduler_request_id,
+        )
         if extra_stop_word_ids:
             existing = generate_config.stop_words_list
             if existing:
@@ -132,6 +166,7 @@ async def iter_real_model_stream_infer(
                 request_input_ids=input_ids_list,
                 return_input_ids=other.return_input_ids,
                 is_streaming=is_streaming,
+                dashscope_response_echo=echo_args,
                 _request_shape=request_shape,
             )
             if should_echo and not echoed:
@@ -196,6 +231,17 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             [list(w) for w in extra_stop_word_ids] if extra_stop_word_ids else []
         )
         self._seq_counter = AtomicCounter()
+        # Cache hostname once at startup. ``socket.gethostname`` is a syscall
+        # but contention-free; calling it per-request would still be cheap, but
+        # caching keeps the response builder allocation-free in steady state.
+        # ``instance_ip`` reuses the bound listening IP from ``server_config``;
+        # avoids the ``socket.gethostbyname`` DNS roundtrip that
+        # ``dashllm/utils.get_cen_ip`` does (which can stall on broken DNS).
+        try:
+            self._hostname = socket.gethostname()
+        except Exception:
+            self._hostname = ""
+        self._instance_ip = ip or ""
 
     async def close(self) -> None:
         """Hook for teardown; currently holds no resources (backend_visitor is owned by
@@ -208,6 +254,15 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         return generate_request_id(self._ip, self._port, self._server_id, sequence)
 
     async def ModelStreamInfer(self, request_iterator, context):
+        # Snapshot once per RPC: ``invocation_metadata()`` returns the
+        # client-sent headers (case-insensitive lookup performed downstream by
+        # ``dashscope_compat._extract_metadata_value``). Capturing here means
+        # every request frame on the same RPC sees the same headers, matching
+        # gRPC semantics (metadata is per-RPC, not per-frame).
+        try:
+            invocation_metadata = context.invocation_metadata()
+        except Exception:
+            invocation_metadata = ()
         async for request in request_iterator:
             logging.debug(
                 "[DashScGrpc] ModelInferRequest: id=%s model_name=%s",
@@ -239,5 +294,8 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                     rtp_llm_request_id=self._next_rtp_llm_request_id(),
                     echo_prefix_ids=self._echo_prefix_ids,
                     extra_stop_word_ids=self._extra_stop_word_ids,
+                    invocation_metadata=invocation_metadata,
+                    instance_ip=self._instance_ip,
+                    hostname=self._hostname,
                 ):
                     yield resp

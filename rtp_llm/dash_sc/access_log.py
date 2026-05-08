@@ -316,12 +316,21 @@ def _declared_element_count(shape) -> int:
 def _scan_response_outputs(
     infer_response,
 ) -> tuple[Optional[list[int]], Optional[int], Optional[int]]:
-    """Single-pass scan: pulls generated_ids / finish_reason / prompt_cached_token_num in one loop.
+    """Single-pass scan: pulls generated_ids / finish_reason from ``outputs[]`` and
+    ``prompt_cached_token_num`` from ``parameters[]`` in one pass.
 
-    Respects the declared tensor ``shape`` — some producers append a 4-byte filler
-    for empty ``generated_ids`` (shape=[1, 0]); without this check the accumulator
-    would pick up spurious ``0`` tokens. See ``_append_generated_ids_output`` in
-    ``codec.py``.
+    ``prompt_cached_token_num`` lives on ``infer_response.parameters`` as an
+    ``InferParameter.int64_param`` — see :func:`rtp_llm.dash_sc.codec._append_aux_info_metrics_outputs`
+    for the dashllm-parity rationale (dashllm emits the metric the same way,
+    so dashscope-serving's metric collector finds it on the same wire path).
+    A ``HasField`` guard tolerates the parameter being absent on intermediate
+    streaming chunks (the real servicer always emits it, but the proxy raw
+    mode and fake-inference paths don't).
+
+    Respects the declared tensor ``shape`` for ``outputs[]`` entries — some
+    producers append a 4-byte filler for empty ``generated_ids`` (shape=[1, 0]);
+    without this check the accumulator would pick up spurious ``0`` tokens.
+    See ``_append_generated_ids_output`` in ``codec.py``.
     """
     gen_ids: Optional[list[int]] = None
     finish_reason: Optional[int] = None
@@ -346,10 +355,9 @@ def _scan_response_outputs(
             ids = unpack_int_tensor_flat(out.datatype, raw)
             if ids:
                 finish_reason = int(ids[0])
-        elif name == "prompt_cached_token_num":
-            ids = unpack_int_tensor_flat(out.datatype, raw)
-            if ids:
-                cached = int(ids[0])
+    cached_param = infer_response.parameters.get("prompt_cached_token_num")
+    if cached_param is not None and cached_param.HasField("int64_param"):
+        cached = int(cached_param.int64_param)
     return gen_ids, finish_reason, cached
 
 

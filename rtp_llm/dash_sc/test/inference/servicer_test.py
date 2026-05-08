@@ -325,6 +325,42 @@ class IterRealModelStreamInferStopWordsTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn([154829], sw)
 
 
+class IterRealModelStreamInferDashScopeExtrasTest(unittest.IsolatedAsyncioTestCase):
+    """``parameters["stop"]`` flows through dashscope_compat into GenerateConfig."""
+
+    def _req_with_stop_param(self) -> predict_v2_pb2.ModelInferRequest:
+        req = predict_v2_pb2.ModelInferRequest()
+        req.id = "compat-trace"
+        req.model_name = "default"
+        _add_input_tensor(req, "input_ids", "INT32", [1], struct.pack("<i", 7))
+        # ``parameters["stop"]`` ships JSON list (dashllm wire shape).
+        req.parameters["stop"].string_param = '["DONE", "STOP"]'
+        return req
+
+    async def test_parameters_stop_propagates_to_stop_words_str(self) -> None:
+        captured: list = []
+
+        class _CaptureVisitor:
+            async def enqueue(self, gi):
+                captured.append(gi)
+                return _FakeAsyncStream([])
+
+        await _drain(
+            iter_real_model_stream_infer(
+                self._req_with_stop_param(),
+                [7],
+                SamplingParams(),
+                OtherParams(),
+                _CaptureVisitor(),
+                rtp_llm_request_id=1,
+            )
+        )
+        self.assertEqual(len(captured), 1)
+        gc = captured[0].generate_config
+        self.assertIn("DONE", gc.stop_words_str)
+        self.assertIn("STOP", gc.stop_words_str)
+
+
 async def _areq_iter(requests):
     for r in requests:
         yield r
