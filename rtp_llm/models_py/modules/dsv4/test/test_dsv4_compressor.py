@@ -530,6 +530,28 @@ class TestSequenceLengthBoundaries(unittest.TestCase):
         result = comp(x, start_pos=0)
         assert result is None  # not enough tokens to compress
 
+    def test_continuation_prefill_less_than_ratio(self):
+        """Continuation prefill can have no complete compressed window."""
+        comp, args, pool_ctx = self._make_csa_compressor()
+        ctx = _bind_standalone_pools(
+            comp,
+            pool_ctx,
+            1,
+            sequence_lengths=[11],
+        )
+        x_prefill = torch.randn(
+            1, 8, args["dim"], dtype=torch.bfloat16, device=ctx.device
+        )
+        result = comp(x_prefill, start_pos=0)
+        assert result is not None
+        assert result.shape[1] == 2
+
+        x_cont = torch.randn(
+            1, 3, args["dim"], dtype=torch.bfloat16, device=ctx.device
+        )
+        result = comp(x_cont, start_pos=8)
+        assert result is None
+
     def test_single_token_decode(self):
         """Length = 1 (single token decode)."""
         comp, args, pool_ctx = self._make_csa_compressor()
