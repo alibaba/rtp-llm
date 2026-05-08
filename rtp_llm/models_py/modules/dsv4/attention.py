@@ -103,6 +103,16 @@ def _use_read_from_pool() -> bool:
     return os.environ.get("DSV4_READ_FROM_POOL", "1") != "0"
 
 
+# Phase-1 varlen migration kill-switch. While the per-builder bodies are
+# being switched from B==1 scalar plumbing to ``cu_seqlens``/``position_ids``
+# per-request plumbing (Phase 2 SWA, Phase 3a/3b CSA·HCA), each new code
+# path checks this flag at the dispatch point. Default ON once a phase
+# lands; ``DSV4_VARLEN_PREFILL=0`` forces the legacy B==1 path so a
+# regression can be bisected without reverting the patch series.
+def _use_varlen_prefill() -> bool:
+    return os.environ.get("DSV4_VARLEN_PREFILL", "1") != "0"
+
+
 _V4_FP8_BLOCK_CFG = Fp8BlockWiseQuantConfig()
 
 _DSV4_FP8_KV_ENTRY_BYTES = 584
@@ -2627,6 +2637,21 @@ class Attention(nn.Module):
 
         if cp_on:
             freqs_cis = cp_freqs_cis_local(self.freqs_cis, cp_ctx)
+        elif (
+            _use_varlen_prefill()
+            and batch_size > 1
+            and position_ids is not None
+            and position_ids.numel() == seqlen
+        ):
+            # Phase-1 batched RoPE: per-token absolute-position gather.
+            # When B > 1 the request positions are not a contiguous range
+            # (each request starts at its own ``prefix_lengths[b]`` and the
+            # flat token axis interleaves them), so the legacy contiguous
+            # slice would feed wrong angles to RoPE. Falls back to the
+            # contiguous slice for B == 1 to keep that hot path branchless.
+            freqs_cis = self.freqs_cis.index_select(
+                0, position_ids.to(device=self.freqs_cis.device, dtype=torch.long)
+            )
         else:
             freqs_cis = self.freqs_cis[sp_int : sp_int + seqlen]
 

@@ -176,6 +176,22 @@ py_test(
     exec_properties = {"gpu": "H20"},
 )
 
+# Phase-0 oracle for the prefill varlen migration. Drives B>1 prefill via
+# both per-request and batched paths and asserts equal output. Sub-tests
+# are xfail-marked per phase (2 SWA, 3a compressor/indexer, 3b workspace)
+# so each Engineer flips just their own marker as the body lands. See
+# the test file docstring for the migration plan.
+py_test(
+    name = "test_varlen_prefill_oracle",
+    srcs = ["test_varlen_prefill_oracle.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        "//rtp_llm:testlib",
+    ],
+    tags = ["H20"],
+    exec_properties = {"gpu": "H20"},
+)
+
 py_test(
     name = "test_swa_combine_topk",
     srcs = ["test_swa_combine_topk.py"],
