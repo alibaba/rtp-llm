@@ -234,6 +234,17 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     {
         RTP_LLM_PROFILE_SCOPE("executor.sampler_forward");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+
+        // gatherSamplerInput reads CPU-side stream state (complete_token_ids,
+        // seqLength, logit-processor counters) that the previous step's
+        // dispatch worker writes in stream->update(). NormalAsyncDeviceState
+        // covers gatherModelInput's GPU path but not this CPU memcpy path,
+        // so DROP_BROAD_SYNC=1 needs a narrow sync here for batch>1.
+        if (useStreamAsync() && useDropBroadSync()) {
+            RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.wait_prev_dispatch_pre_sampler(stream_count=%zu)", streams.size());
+            dispatch_runner_.sync(cuda_graph::graphGetCurrentStream());
+        }
+
         CHECK_AND_RETURN_REF(sampler_input,
                              batch_stream_processor_->gatherSamplerInput(stream_groups, model_input, model_output));
         sampler_output = std::move(sampler_->forward(sampler_input));
