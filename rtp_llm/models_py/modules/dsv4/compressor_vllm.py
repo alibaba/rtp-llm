@@ -13,7 +13,8 @@ state buffer for two single-launch Triton kernels (per-token state write
 exactly the same outer flow but swap the FP8 quant tail for a single
 ``store(bf16)`` to the existing BF16 KV pool, so downstream readers
 (``flash_mla_sparse_fwd`` for CSA / dense MQA for HCA / DeepGEMM
-``fp8_paged_mqa_logits`` indexer reader's BF16 sibling) work unchanged.
+``fp8_paged_mqa_logits`` indexer reader's BF16 sibling) work un
+changed.
 
 Public API mirrors :class:`Compressor` so attention.py / indexer.py
 construction sites can swap classes without touching call sites:

@@ -12,22 +12,15 @@ Direct adaptation of the FP8 path in
     ``head_dim==128`` (indexer compressor, NoPE+RoPE) because the BF16
     layout is uniform.
 
-Both fused writers self-skip non-boundary tokens (early-exit when
+The boundary writer self-skips non-boundary tokens (early-exit when
 ``(position+1) % COMPRESS_RATIO != 0``), so the caller passes a flat
 ``[N_tok]`` slot_mapping and lets the kernel decide.
 
-NOTE on state-pool sizing: this kernel mirrors vLLM's "per-token state
-pool" design, which in the source's C++ config uses
-``entries_per_block=256, fixed_blocks_per_req=2`` (= 512 slots per
-request). The current project's C++ config uses much smaller per-block
-counts (CSA / INDEXER state ``entries_per_block=8``, HCA state
-``entries_per_block=128``) — for short prefills + decode this still works
-because the boundary kernel falls back to the raw ``kv_flat`` /
-``score_flat`` for in-batch positions whose state has been cyclically
-overwritten. For long prefills past the cyclic capacity, out-of-batch
-positions will be wrong. Bump the state-pool ``entries_per_block`` in
-``DSV4ConfigCreator.cc`` to match the source if you need long-prefill
-correctness.
+Source dispatch (see :func:`run_fused_compress_kv_write_bf16` for the
+full reasoning) pins ``CACHE_WINDOW=0``, so the boundary writer reads
+the entire in-batch range from raw and only consults the state pool for
+(a) continuation-prefill prefix overlap and (b) decode. Prefill
+correctness therefore does not depend on state-pool capacity at all.
 """
 
 from __future__ import annotations
@@ -103,13 +96,12 @@ def _fused_kv_compress_norm_rope_insert_bf16(
     block_table_ptr,
     block_table_stride,
     block_size,
-    # Raw current-batch tensors + ape + batch context. The state pool
-    # is a cyclic buffer (fixed_blocks_per_req * entries_per_block slots
-    # per request), so within a single launch later writes overwrite
-    # earlier tokens' state. The kernel reads these raw tensors directly
-    # for any overlap-window position whose absolute pos falls inside
-    # ``[seq_start, seq_start + n_batch)`` AND whose state is no longer
-    # in the cyclic cache window.
+    # Raw current-batch tensors + ape + batch context. With the wrapper
+    # forcing ``CACHE_WINDOW=0``, the kernel reads from these raw tensors
+    # for *every* overlap-window position whose absolute pos falls inside
+    # ``[seq_start, seq_start + n_batch)``; only positions before
+    # ``seq_start`` (continuation-prefill prefix overlap or decode) hit
+    # the state cache.
     kv_raw_ptr,
     kv_raw_stride,
     score_raw_ptr,
@@ -155,7 +147,10 @@ def _fused_kv_compress_norm_rope_insert_bf16(
     block = tl.arange(0, TRITON_BLOCK_SIZE)
     mask = block < HEAD_SIZE
 
-    # ── Source dispatch: raw for the prefix evicted from cache ──
+    # ── Source dispatch ──
+    # With ``CACHE_WINDOW=0`` (wrapper default) ``use_raw == in_batch``,
+    # so all in-batch positions read from the raw tensors and only
+    # ``pos < seq_start`` falls through to the cache path below.
     flat_idx = pos - seq_start
     in_batch = mask_pos & (flat_idx >= 0) & (flat_idx < n_batch)
     use_raw = in_batch & (flat_idx < n_batch - CACHE_WINDOW)
@@ -331,9 +326,27 @@ def run_fused_compress_kv_write_bf16(
     rope_head_dim: int,
     compress_ratio: int,
     overlap: bool,
-    fixed_blocks_per_req: int = 2,
 ) -> None:
-    """Boundary-token compress→norm→rope→BF16 KV-pool store."""
+    """Boundary-token compress→norm→rope→BF16 KV-pool store.
+
+    Source dispatch policy (set ``CACHE_WINDOW=0`` always):
+      * **Prefill / in-batch token** (``flat_idx in [0, n_batch)``) → raw
+        path reads directly from ``kv_raw`` / ``score_raw``. State pool is
+        never consulted, so its sizing / cyclic-overwrite behaviour does
+        not affect prefill correctness.
+      * **Continuation prefill, prefix overlap** (``pos < seq_start``)
+        → cache path, reads from ``state_cache`` (populated by a previous
+        prefill via :func:`run_save_partial_states`).
+      * **Decode** (``disable_raw_path=True`` → ``n_batch=0``) → all
+        overlap-window reads go through the cache path.
+
+    The vLLM source kernel uses a non-zero ``CACHE_WINDOW`` so the back of
+    the in-batch range falls into the (cache-friendly) state pool read; it
+    requires a large per-request state pool (256 entries × 2 blocks = 512
+    slots) to remain correct when batches exceed the cyclic capacity. We
+    skip that micro-optimization: raw and cache reads are bit-equivalent,
+    and forcing raw for the entire in-batch range eliminates state-pool
+    sizing as a correctness constraint."""
     N = int(slot_mapping.shape[0])
     if N == 0:
         return
@@ -345,23 +358,7 @@ def run_fused_compress_kv_write_bf16(
     state_width = int(state_cache.shape[-1] // 2)
     state_block_size = int(state_cache.shape[1])
     n_batch = 0 if disable_raw_path else int(kv_raw.shape[0])
-
-    # Cache window per request: the framework keeps the last
-    # ``fixed_blocks_per_req`` page-aligned state blocks. The most recent
-    # block is partially filled with ``(seq_len-1) % page_size + 1`` valid
-    # entries; older blocks are full. So the window is:
-    #   seq_len <= page_size                 -> seq_len
-    #   page_size < seq_len <= 2*page_size   -> page_size + (seq_len-1)%page_size + 1
-    #   ...
-    seq_len = int(seq_start) + n_batch
-    if seq_len <= 0:
-        cache_window = 0
-    elif seq_len <= state_block_size:
-        cache_window = seq_len
-    else:
-        tail = ((seq_len - 1) % state_block_size) + 1
-        cache_window = (fixed_blocks_per_req - 1) * state_block_size + tail
-        cache_window = min(cache_window, seq_len)
+    cache_window = 0
 
     num_warps = 4 if head_dim == 512 else 1
 
