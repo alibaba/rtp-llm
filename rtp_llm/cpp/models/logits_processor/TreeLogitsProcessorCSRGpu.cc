@@ -23,7 +23,23 @@
 #include <vector>
 #include <future>
 
+#include "autil/LockFreeThreadPool.h"
+
 namespace rtp_llm {
+
+// =============================================================================
+// 全局共享线程池：用于 CSR CPU 构建，避免每个请求新建 OS 线程。
+// 初始线程数 5，队列大小 1024（足够覆盖并发请求峰值）。
+// =============================================================================
+static std::shared_ptr<autil::LockFreeThreadPool> getCsrInitThreadPool() {
+    static std::shared_ptr<autil::LockFreeThreadPool> pool = []() {
+        auto p = std::make_shared<autil::LockFreeThreadPool>(
+            /*threadNum=*/5, /*queueSize=*/1024, /*factory=*/nullptr, /*name=*/"CSRInitThreadPool");
+        p->start();
+        return p;
+    }();
+    return pool;
+}
 
 // =============================================================================
 // process()
@@ -340,11 +356,9 @@ std::shared_ptr<TreeLogitsProcessorCSR> TreeLogitsProcessorCSR::fromGenerateInpu
     auto    ele_rq_ids_copy = generate_input->generate_config->ele_rq_ids;
     int32_t vocab_size_copy = vocab_size;
 
-    // WARNING: std::launch::async 会为每个请求新建一个 OS 线程。
-    // 当前场景为少量大请求（单机 <= 40 QPS），线程开销可接受。
-    // 若后续扩展到高 QPS 小请求场景，请改用线程池（如 autil::LockFreeThreadPool）。
-    processor_ptr->async_cpu_init_future_ = std::async(
-        std::launch::async,
+    // 使用全局共享线程池执行后台 CPU 构建，避免每个请求新建 OS 线程。
+    auto pool = getCsrInitThreadPool();
+    processor_ptr->async_cpu_init_future_ = pool->async(
         [ele_rq_ids_copy, vocab_size_copy]() -> std::shared_ptr<CSRIndex<token_num>> {
             auto origin_rq_ids = split_strings<token_num>(ele_rq_ids_copy);
             std::sort(origin_rq_ids.begin(), origin_rq_ids.end());

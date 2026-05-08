@@ -75,25 +75,28 @@ bool build_csr_from_fresh_data(const std::vector<sids<N>>& fresh_data,
 
     // --- 1. 构建第0层合法token掩码（start_mask） ---
     index.start_mask.assign(vocab_size, false);
+    int depth0_count = 0;
     for (const auto& s : fresh_data) {
-        if (s.rq_id[0] >= 0 && s.rq_id[0] < vocab_size) {
-            index.start_mask[s.rq_id[0]] = true;
+        int t0 = s.rq_id[0];
+        if (t0 >= 0 && t0 < vocab_size && !index.start_mask[t0]) {
+            index.start_mask[t0] = true;
+            ++depth0_count;
         }
     }
 
     // --- 2. is_new[i][j]：第i行是否在第j层引入了新的前缀树节点 ---
-    // 用 vector<vector<bool>> 代替 C99 可变长数组（VLA）
-    std::vector<std::vector<bool>> is_new(data_size, std::vector<bool>(N, false));
+    // 扁平化为一维连续数组，提升缓存局部性
+    std::vector<char> is_new(data_size * N, 0);
     for (int j = 0; j < N; ++j) {
-        is_new[0][j] = true;
+        is_new[j] = 1;
     }
     for (int i = 1; i < data_size; ++i) {
-        is_new[i][0] = (fresh_data[i].rq_id[0] != fresh_data[i - 1].rq_id[0]);
+        is_new[i * N + 0] = (fresh_data[i].rq_id[0] != fresh_data[i - 1].rq_id[0]);
         for (int j = 1; j < N; ++j) {
-            if (!is_new[i][j - 1] && fresh_data[i].rq_id[j] == fresh_data[i - 1].rq_id[j]) {
-                is_new[i][j] = false;
+            if (!is_new[i * N + j - 1] && fresh_data[i].rq_id[j] == fresh_data[i - 1].rq_id[j]) {
+                is_new[i * N + j] = 0;
             } else {
-                is_new[i][j] = true;
+                is_new[i * N + j] = 1;
             }
         }
     }
@@ -101,19 +104,19 @@ bool build_csr_from_fresh_data(const std::vector<sids<N>>& fresh_data,
     // --- 3. 状态ID分配 ---
     // 第0层节点：state_id = token_id + 1（占用 state 1..vocab_size）
     // 更深层节点：从 vocab_size+1 开始顺序分配
-    std::vector<std::vector<int>> state_ids(data_size, std::vector<int>(N - 1, 0));
+    std::vector<int> state_ids(data_size * (N - 1), 0);
     for (int i = 0; i < data_size; ++i) {
-        state_ids[i][0] = fresh_data[i].rq_id[0] + 1;
+        state_ids[i * (N - 1) + 0] = fresh_data[i].rq_id[0] + 1;
     }
 
     int num_states = vocab_size;  // 下一个可用状态ID - 1
     for (int depth = 1; depth < N - 1; ++depth) {
         for (int i = 0; i < data_size; ++i) {
-            if (i == 0 || is_new[i][depth]) {
+            if (i == 0 || is_new[i * N + depth]) {
                 ++num_states;
-                state_ids[i][depth] = num_states;
+                state_ids[i * (N - 1) + depth] = num_states;
             } else {
-                state_ids[i][depth] = state_ids[i - 1][depth];
+                state_ids[i * (N - 1) + depth] = state_ids[(i - 1) * (N - 1) + depth];
             }
         }
     }
@@ -124,39 +127,36 @@ bool build_csr_from_fresh_data(const std::vector<sids<N>>& fresh_data,
     std::vector<int> parent_ids_vec;
     std::vector<int> token_ids_vec;
     std::vector<int> child_ids_vec;
+    const int max_edges = data_size * (N - 1);
+    parent_ids_vec.reserve(max_edges);
+    token_ids_vec.reserve(max_edges);
+    child_ids_vec.reserve(max_edges);
 
     // layer_max_branches[0] = 第0层不同起始token的个数
-    int depth0_count = 0;
-    for (int v = 0; v < vocab_size; ++v) {
-        if (index.start_mask[v]) ++depth0_count;
-    }
     index.layer_max_branches.clear();
     index.layer_max_branches.push_back(depth0_count);
 
     for (int depth = 1; depth < N; ++depth) {
-        int start_pos = static_cast<int>(parent_ids_vec.size());
-        for (int i = 0; i < data_size; ++i) {
-            if (is_new[i][depth]) {
-                int parent = state_ids[i][depth - 1];
-                int token  = fresh_data[i].rq_id[depth];
-                int child  = (depth < N - 1) ? state_ids[i][depth] : 0;  // 0 表示终止状态
-                parent_ids_vec.push_back(parent);
-                token_ids_vec.push_back(token);
-                child_ids_vec.push_back(child);
-            }
-        }
-        int end_pos = static_cast<int>(parent_ids_vec.size());
-
-        // 计算当前层的最大分支数
         int max_branches = 0;
         int cur_branches = 0;
-        for (int i = start_pos; i < end_pos; ++i) {
-            if (i == start_pos || parent_ids_vec[i] != parent_ids_vec[i - 1]) {
-                cur_branches = 1;
-            } else {
-                ++cur_branches;
+        int prev_parent  = -1;
+        for (int i = 0; i < data_size; ++i) {
+            if (is_new[i * N + depth]) {
+                int parent = state_ids[i * (N - 1) + depth - 1];
+                int token  = fresh_data[i].rq_id[depth];
+                int child  = (depth < N - 1) ? state_ids[i * (N - 1) + depth] : 0;  // 0 表示终止状态
+                parent_ids_vec.emplace_back(parent);
+                token_ids_vec.emplace_back(token);
+                child_ids_vec.emplace_back(child);
+
+                if (parent != prev_parent) {
+                    cur_branches = 1;
+                    prev_parent = parent;
+                } else {
+                    ++cur_branches;
+                }
+                if (cur_branches > max_branches) max_branches = cur_branches;
             }
-            if (cur_branches > max_branches) max_branches = cur_branches;
         }
         index.layer_max_branches.push_back(max_branches);
     }
@@ -211,17 +211,25 @@ std::vector<sids<N>> split_strings(const std::vector<std::string>& ele_rq_ids) {
 
         while (count < N) {
             size_t end = str.find('_', start);
-            std::string token = (end == std::string::npos)
-                                    ? str.substr(start)
-                                    : str.substr(start, end - start);
-            if (!token.empty() && count < N) {
-                sid.rq_id[count] = std::stoi(token);
+            size_t token_end = (end == std::string::npos) ? str.size() : end;
+
+            int value = 0;
+            bool has_digit = false;
+            for (size_t k = start; k < token_end; ++k) {
+                char c = str[k];
+                if (c >= '0' && c <= '9') {
+                    value = value * 10 + (c - '0');
+                    has_digit = true;
+                }
+            }
+            if (has_digit) {
+                sid.rq_id[count] = value;
             }
             ++count;
             if (end == std::string::npos) break;
             start = end + 1;
         }
-        result.push_back(sid);
+        result.emplace_back(sid);
     }
     return result;
 }
