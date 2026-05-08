@@ -475,6 +475,40 @@ class PrefillMeta(NamedTuple):
     sp_int: int
     any_cont: bool
     row_seqlens_full: torch.Tensor  # [1] long — for SWA pool helpers
+    # Phase-1 varlen plumbing — populated by upper-layer broadcast builder.
+    # All ``None`` on the standalone (B==1) path so existing logic that
+    # consults ``sp_int`` / ``seqlen`` continues to work bit-equally;
+    # varlen-aware code paths added in later phases (attention / indexer /
+    # compressor) prefer these tensors when present.
+    #
+    #   batch_size       : B — number of requests packed in this prefill
+    #   cu_seqlens       : [B+1] int32/int64 — per-request token offsets
+    #                      into the flat [T_total] axis
+    #   input_lengths    : [B] int32 — per-request new-token count (S_b)
+    #   prefix_lengths   : [B] int32 — per-request prior context length
+    #                      (== absolute start_pos of each request, i.e.
+    #                      ``sp_per_req``); kept under both names because
+    #                      framework plumbing uses ``prefix_lengths`` and
+    #                      DSV4 internals use ``sp_per_req``
+    #   sp_per_req       : alias of ``prefix_lengths`` cast to int64 on
+    #                      device — what the existing SWA pool helpers
+    #                      consume
+    #   position_ids     : [T_total] int64 — per-token global absolute
+    #                      position (RoPE input)
+    #   req_id_per_token : [T_total] int32 — request id each token
+    #                      belongs to (== ``searchsorted(cu_seqlens, t,
+    #                      right=True) - 1``); shared by indexer.prepare
+    #                      / compressor.prepare_metadata as ``b_idx`` and
+    #                      by the workspace path's per-request slot offsets
+    #   max_seqlen_q     : max(input_lengths) — workspace sizing hint
+    sp_per_req: Optional[torch.Tensor] = None
+    cu_seqlens: Optional[torch.Tensor] = None
+    batch_size: int = 1
+    input_lengths: Optional[torch.Tensor] = None
+    prefix_lengths: Optional[torch.Tensor] = None
+    position_ids: Optional[torch.Tensor] = None
+    req_id_per_token: Optional[torch.Tensor] = None
+    max_seqlen_q: int = 0
     swa_meta: Optional[SwaPrefillMeta] = None
     csa_meta: Optional[CsaPrefillMeta] = None
     hca_meta: Optional[HcaPrefillMeta] = None
@@ -2548,7 +2582,17 @@ class Attention(nn.Module):
                 self.indexer.compressor.freqs_cis = self.freqs_cis
 
     def _build_shared_prefill_meta(
-        self, x: torch.Tensor, positions: Union[int, torch.Tensor]
+        self,
+        x: torch.Tensor,
+        positions: Union[int, torch.Tensor],
+        sp_per_req: Optional[torch.Tensor] = None,
+        cu_seqlens: Optional[torch.Tensor] = None,
+        batch_size: int = 1,
+        input_lengths: Optional[torch.Tensor] = None,
+        prefix_lengths: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
+        req_id_per_token: Optional[torch.Tensor] = None,
+        max_seqlen_q: int = 0,
     ) -> "PrefillMeta":
         """Build the layer-invariant (within compress_ratio bucket) part
         of per-call prefill metadata. All host-side prep work that
@@ -2606,16 +2650,38 @@ class Attention(nn.Module):
         # helpers (BF16 path) — they refuse a None for the per-row seqlens.
         row_seqlens_full = torch.tensor([seqlen_full], device=device, dtype=torch.long)
 
+        # Bundle every batched plumbing tensor into one kwargs dict so the
+        # three sub-builders (swa / csa / hca) all see the same set without
+        # the call site duplicating the argument list. Each builder consumes
+        # whichever subset its body needs; Phase-2/3 work fills in those
+        # bodies independently behind this stable signature.
+        batched_kwargs = dict(
+            batch_size=batch_size,
+            cu_seqlens=cu_seqlens,
+            input_lengths=input_lengths,
+            prefix_lengths=prefix_lengths,
+            sp_per_req=sp_per_req,
+            position_ids=position_ids,
+            req_id_per_token=req_id_per_token,
+            max_seqlen_q=max_seqlen_q,
+        )
+
         swa_meta: Optional[SwaPrefillMeta] = None
         if self._kv_cache_is_fp8:
-            swa_meta = self._build_swa_prefill_meta(seqlen, sp_int, device)
+            swa_meta = self._build_swa_prefill_meta(
+                seqlen, sp_int, device, **batched_kwargs
+            )
 
         csa_meta: Optional[CsaPrefillMeta] = None
         hca_meta: Optional[HcaPrefillMeta] = None
         if self.compress_ratio == 4:
-            csa_meta = self._build_csa_prefill_meta(seqlen, sp_int, device)
+            csa_meta = self._build_csa_prefill_meta(
+                seqlen, sp_int, device, **batched_kwargs
+            )
         elif self.compress_ratio == 128:
-            hca_meta = self._build_hca_prefill_meta(seqlen, sp_int, device)
+            hca_meta = self._build_hca_prefill_meta(
+                seqlen, sp_int, device, **batched_kwargs
+            )
 
         return PrefillMeta(
             seqlen=seqlen,
@@ -2629,6 +2695,14 @@ class Attention(nn.Module):
             sp_int=sp_int,
             any_cont=any_cont,
             row_seqlens_full=row_seqlens_full,
+            sp_per_req=sp_per_req,
+            cu_seqlens=cu_seqlens,
+            batch_size=batch_size,
+            input_lengths=input_lengths,
+            prefix_lengths=prefix_lengths,
+            position_ids=position_ids,
+            req_id_per_token=req_id_per_token,
+            max_seqlen_q=max_seqlen_q,
             swa_meta=swa_meta,
             csa_meta=csa_meta,
             hca_meta=hca_meta,
@@ -2638,7 +2712,22 @@ class Attention(nn.Module):
     # Per-ratio compressor metadata builders (CSA / HCA)
     # ------------------------------------------------------------------
     def _build_csa_prefill_meta(
-        self, seqlen: int, sp_int: int, device: torch.device
+        self,
+        seqlen: int,
+        sp_int: int,
+        device: torch.device,
+        *,
+        # Phase-1 varlen plumbing — see PrefillMeta docstring for semantics.
+        # Defaults preserve the legacy B==1 + scalar-sp path bit-for-bit;
+        # Engineer B fills the body to consume these in Phase-3 (csa/hca).
+        batch_size: int = 1,
+        cu_seqlens: Optional[torch.Tensor] = None,
+        input_lengths: Optional[torch.Tensor] = None,
+        prefix_lengths: Optional[torch.Tensor] = None,
+        sp_per_req: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
+        req_id_per_token: Optional[torch.Tensor] = None,
+        max_seqlen_q: int = 0,
     ) -> CsaPrefillMeta:
         """Build CSA-layer per-call metadata: indexer prepare + main CSA
         compressor prepare_metadata."""
@@ -2662,11 +2751,45 @@ class Attention(nn.Module):
             device=device,
             kv_block_table=idx_bt,
             kv_eb=idx_eb,
+            # Phase-3 hand-off: indexer body needs cu_seqlens (-> cu_kv_seqlens
+            # via // ratio), position_ids (positions_d), input_lengths +
+            # prefix_lengths (per-row visible-K bounds). Threaded through
+            # now so signature is stable while body still runs B==1 path.
+            batch_size=batch_size,
+            cu_seqlens=cu_seqlens,
+            input_lengths=input_lengths,
+            prefix_lengths=prefix_lengths,
+            position_ids=position_ids,
+            req_id_per_token=req_id_per_token,
+            max_seqlen_q=max_seqlen_q,
         )
 
-        compressor_meta = self._build_compressor_meta(seqlen, sp_int, device)
+        compressor_meta = self._build_compressor_meta(
+            seqlen,
+            sp_int,
+            device,
+            batch_size=batch_size,
+            cu_seqlens=cu_seqlens,
+            input_lengths=input_lengths,
+            prefix_lengths=prefix_lengths,
+            sp_per_req=sp_per_req,
+            position_ids=position_ids,
+            req_id_per_token=req_id_per_token,
+            max_seqlen_q=max_seqlen_q,
+        )
         workspace_meta = self._build_workspace_meta(
-            seqlen, sp_int, device, with_dense_cmp_topk=False
+            seqlen,
+            sp_int,
+            device,
+            with_dense_cmp_topk=False,
+            batch_size=batch_size,
+            cu_seqlens=cu_seqlens,
+            input_lengths=input_lengths,
+            prefix_lengths=prefix_lengths,
+            sp_per_req=sp_per_req,
+            position_ids=position_ids,
+            req_id_per_token=req_id_per_token,
+            max_seqlen_q=max_seqlen_q,
         )
         return CsaPrefillMeta(
             indexer_meta=indexer_meta,
@@ -2675,13 +2798,49 @@ class Attention(nn.Module):
         )
 
     def _build_hca_prefill_meta(
-        self, seqlen: int, sp_int: int, device: torch.device
+        self,
+        seqlen: int,
+        sp_int: int,
+        device: torch.device,
+        *,
+        # Phase-1 varlen plumbing — same set as csa; HCA has no indexer.
+        batch_size: int = 1,
+        cu_seqlens: Optional[torch.Tensor] = None,
+        input_lengths: Optional[torch.Tensor] = None,
+        prefix_lengths: Optional[torch.Tensor] = None,
+        sp_per_req: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
+        req_id_per_token: Optional[torch.Tensor] = None,
+        max_seqlen_q: int = 0,
     ) -> HcaPrefillMeta:
         """Build HCA-layer per-call metadata: main HCA compressor
         prepare_metadata."""
-        compressor_meta = self._build_compressor_meta(seqlen, sp_int, device)
+        compressor_meta = self._build_compressor_meta(
+            seqlen,
+            sp_int,
+            device,
+            batch_size=batch_size,
+            cu_seqlens=cu_seqlens,
+            input_lengths=input_lengths,
+            prefix_lengths=prefix_lengths,
+            sp_per_req=sp_per_req,
+            position_ids=position_ids,
+            req_id_per_token=req_id_per_token,
+            max_seqlen_q=max_seqlen_q,
+        )
         workspace_meta = self._build_workspace_meta(
-            seqlen, sp_int, device, with_dense_cmp_topk=True
+            seqlen,
+            sp_int,
+            device,
+            with_dense_cmp_topk=True,
+            batch_size=batch_size,
+            cu_seqlens=cu_seqlens,
+            input_lengths=input_lengths,
+            prefix_lengths=prefix_lengths,
+            sp_per_req=sp_per_req,
+            position_ids=position_ids,
+            req_id_per_token=req_id_per_token,
+            max_seqlen_q=max_seqlen_q,
         )
         return HcaPrefillMeta(
             compressor_meta=compressor_meta,
@@ -2694,6 +2853,19 @@ class Attention(nn.Module):
         sp_int: int,
         device: torch.device,
         with_dense_cmp_topk: bool,
+        *,
+        # Phase-1 varlen plumbing. Body still B==1; Engineer B's Phase-3
+        # work converts swa_seq_lens / cmp_seq_lens / swa_gather_lens / qsl
+        # / dense_cmp_topk into per-request [B] / [B+1] / [T_total, ...]
+        # tensors using these inputs.
+        batch_size: int = 1,
+        cu_seqlens: Optional[torch.Tensor] = None,
+        input_lengths: Optional[torch.Tensor] = None,
+        prefix_lengths: Optional[torch.Tensor] = None,
+        sp_per_req: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
+        req_id_per_token: Optional[torch.Tensor] = None,
+        max_seqlen_q: int = 0,
     ) -> Optional[WorkspaceMeta]:
         """Compute static index/dim metadata for the vLLM-style workspace +
         dual-gather + ``combine_topk_swa_indices`` flow. Returns ``None`` when
@@ -2774,7 +2946,26 @@ class Attention(nn.Module):
             dense_cmp_topk=dense_cmp_topk,
         )
 
-    def _build_compressor_meta(self, seqlen: int, sp_int: int, device: torch.device):
+    def _build_compressor_meta(
+        self,
+        seqlen: int,
+        sp_int: int,
+        device: torch.device,
+        *,
+        # Phase-1 varlen plumbing. Body still calls
+        # ``_build_prefill_positions(sp_int, 1, seqlen, device)``;
+        # Engineer B's Phase-3 work replaces that with
+        # ``positions = position_ids``, ``b_idx = req_id_per_token``
+        # (compressor.prepare_metadata already accepts batched b_idx).
+        batch_size: int = 1,
+        cu_seqlens: Optional[torch.Tensor] = None,
+        input_lengths: Optional[torch.Tensor] = None,
+        prefix_lengths: Optional[torch.Tensor] = None,
+        sp_per_req: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
+        req_id_per_token: Optional[torch.Tensor] = None,
+        max_seqlen_q: int = 0,
+    ):
         """Run the main compressor's ``prepare_metadata`` with its pool
         context temporarily bound. Returns ``CompressorMeta``. The pool
         context binding (``_set_compressor_pool_context``) reads CSA_KV/
@@ -2804,7 +2995,33 @@ class Attention(nn.Module):
         return meta
 
     def _build_swa_prefill_meta(
-        self, seqlen: int, sp_int: int, device: torch.device
+        self,
+        seqlen: int,
+        sp_int: int,
+        device: torch.device,
+        *,
+        # Phase-1 varlen plumbing — see PrefillMeta docstring for semantics.
+        # Defaults preserve the legacy B==1 + scalar-sp path bit-for-bit;
+        # Engineer A fills the body to consume these in Phase-2 (swa).
+        # Body extension targets:
+        #   * slot_mapping        — pass cu_seqlens as query_start_loc and
+        #     ``prefix_lengths + input_lengths`` as combined_seq_lens to the
+        #     existing batched ``compute_swa_slot_mapping`` triton helper
+        #   * topk_length_kv_full — per-token ``min(pos_in_req+1, win)``
+        #     using position_ids - prefix_lengths[req_id_per_token]
+        #   * combined_gather_lens / cache_seq_lens / cache_gather_lens
+        #     — drop the [single_value] tensors for true ``[B] int32``
+        #     derived from input_lengths / prefix_lengths
+        #   * combined_indices / combined_lens — pass cu_seqlens to the
+        #     batched ``combine_topk_swa_indices`` triton helper
+        batch_size: int = 1,
+        cu_seqlens: Optional[torch.Tensor] = None,
+        input_lengths: Optional[torch.Tensor] = None,
+        prefix_lengths: Optional[torch.Tensor] = None,
+        sp_per_req: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
+        req_id_per_token: Optional[torch.Tensor] = None,
+        max_seqlen_q: int = 0,
     ) -> SwaPrefillMeta:
         """Build the per-call FP8 prefill metadata bundle (B==1 invariant).
 

@@ -360,6 +360,30 @@ class IndexerFP8(PoolBackedModule):
         device: torch.device,
         kv_block_table: Optional[torch.Tensor] = None,
         kv_eb: int = 0,
+        *,
+        # Phase-1 varlen plumbing — defaults preserve the B==1 + scalar
+        # ``(seqlen, sp_int)`` path bit-for-bit. Phase-3 work converts the
+        # body to consume these so:
+        #   * ``positions_d``    = position_ids (per-token global)
+        #   * ``ke``             = ``((position_ids+1)//ratio).clamp_max(T_b)``
+        #     where T_b is per-request compressed-K count; needs cu_seqlens
+        #     and prefix_lengths to compute T_b and clamp per-row.
+        #   * ``ks``             = ``(prefix_lengths[req] // ratio)`` per
+        #     row when continuation prefill stops attending pre-prefix
+        #     compressed K (default still 0 for cold-start parity).
+        #   * ``cu_kv_seqlens``  = per-request cumsum of T_b across [B+1].
+        #   * ``block_table_i32``= ``kv_block_table[:batch_size]``.
+        # Note: ``bsz`` and ``batch_size`` are kept separate during the
+        # transition — ``bsz`` is the legacy positional, ``batch_size``
+        # the new canonical (== B from upper layer); enforce equality
+        # once Engineer B's Phase-3 lands.
+        batch_size: int = 1,
+        cu_seqlens: Optional[torch.Tensor] = None,
+        input_lengths: Optional[torch.Tensor] = None,
+        prefix_lengths: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
+        req_id_per_token: Optional[torch.Tensor] = None,
+        max_seqlen_q: int = 0,
     ) -> _IndexerFP8PrefillMeta:
         """Build per-call FP8 prefill metadata.
 

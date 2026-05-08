@@ -227,10 +227,74 @@ def forward_layers(
     # to every layer's Attention. Each layer's _prefill_common_setup will
     # short-circuit on the cached meta instead of re-running freqs_cis slice
     # / window topk / SWA Triton meta / IndexerFP8.prepare per-layer.
-    # ``positions[0]`` is the absolute pos of the first new token (B==1).
+    # ``positions[0]`` is the absolute pos of the first new token of the
+    # first request — preserved as ``sp_int_for_meta`` for the legacy
+    # B==1 code paths. Also derive ``sp_per_req[B]`` (per-request absolute
+    # start_pos) for varlen-aware downstream consumers; the upper-layer
+    # broadcast pays the H2D sync once per forward.
     sp_int_for_meta = int(positions[0].item())
+    sp_per_req: Optional[torch.Tensor] = None
+    req_id_per_token: Optional[torch.Tensor] = None
+    if cu_seqlens is not None and cu_seqlens.numel() >= 2:
+        # cu_seqlens may be int32 from the framework; positions is int64.
+        starts = cu_seqlens[:-1].to(device=positions.device, dtype=torch.int64)
+        sp_per_req = positions.index_select(0, starts).to(torch.int64).contiguous()
+        # req_id_per_token[t] = which request token t belongs to. Used by
+        # batched compressor.prepare_metadata (b_idx), indexer.prepare
+        # (per-row visible-K bounds), and the workspace path's per-request
+        # slot offsets. Computed once per forward and broadcast to every
+        # ratio's meta builder so the per-builder bodies don't repeat the
+        # same searchsorted / repeat_interleave.
+        req_id_per_token = (
+            torch.searchsorted(
+                cu_seqlens.to(device=positions.device, dtype=torch.int64),
+                torch.arange(
+                    int(cu_seqlens[-1].item()),
+                    device=positions.device,
+                    dtype=torch.int64,
+                ),
+                right=True,
+            )
+            .sub_(1)
+            .to(torch.int32)
+            .contiguous()
+        )
+
+    # Phase-1 varlen plumbing: hoist the per-request descriptors off
+    # ``attn_inputs`` once per forward and broadcast onto every layer's
+    # ``PrefillMeta`` so attention / indexer / compressor can drop the
+    # ``B==1`` + scalar ``start_pos`` assumptions in later phases.
+    batch_size = 1
+    input_lengths: Optional[torch.Tensor] = None
+    prefix_lengths: Optional[torch.Tensor] = None
+    max_seqlen_q = 0
+    if cu_seqlens is not None and cu_seqlens.numel() >= 2:
+        batch_size = int(cu_seqlens.numel() - 1)
+    if attn_inputs is not None:
+        il = getattr(attn_inputs, "input_lengths", None)
+        if il is not None and il.numel() > 0:
+            input_lengths = il.to(
+                device=positions.device, dtype=torch.int32
+            ).contiguous()
+            max_seqlen_q = int(input_lengths.max().item())
+        pl = getattr(attn_inputs, "prefix_lengths", None)
+        if pl is not None and pl.numel() > 0:
+            prefix_lengths = pl.to(
+                device=positions.device, dtype=torch.int32
+            ).contiguous()
     v4._build_and_propagate_prefill_meta(
-        h, sp_int_for_meta, kv_cache, block_tables_by_type
+        h,
+        sp_int_for_meta,
+        kv_cache,
+        block_tables_by_type,
+        sp_per_req=sp_per_req,
+        cu_seqlens=cu_seqlens,
+        batch_size=batch_size,
+        input_lengths=input_lengths,
+        prefix_lengths=prefix_lengths,
+        position_ids=positions,
+        req_id_per_token=req_id_per_token,
+        max_seqlen_q=max_seqlen_q,
     )
 
     for layer_idx, layer in enumerate(v4.layers):
