@@ -42,9 +42,11 @@ Public API parity:
     is responsible for any downstream coordinate transform / dtype cast.
   * Decode: ``forward_decode_vectorized(x, qr, start_pos, out_topk_buffer)``
     fills ``out_topk_buffer`` in-place; returns the same tensor.
-  * No CP support — ``set_cp_ctx`` accepts ``None`` only and refuses any
-    real context.  CP scenarios must continue to use the legacy BF16
-    :class:`Indexer`.
+  * CP supported — ``set_cp_ctx`` stores the context; :meth:`prepare`
+    swaps in ``cp_ctx.global_positions`` (rank-local global Q positions)
+    for ``q_pos`` / ``ke`` and ``cp_freqs_cis_local`` for the RoPE slice.
+    ``T`` covers the FULL compressed-K count (``seq_len_full // ratio``)
+    populated by the nested :class:`CompressorVLLM`'s own all-gather.
 """
 
 from __future__ import annotations
@@ -59,6 +61,7 @@ import torch.nn.functional as F
 from rtp_llm.models_py.modules.dsv4._indexer_score_triton import v4_indexer_score
 from rtp_llm.models_py.modules.dsv4._pool_triton import masked_gather_from_pool
 from rtp_llm.models_py.modules.dsv4.compressor_vllm import CompressorVLLM
+from rtp_llm.models_py.modules.dsv4.cp import CPContext, cp_freqs_cis_local
 from rtp_llm.models_py.modules.dsv4.rope import (
     apply_rotary_emb,
     apply_rotary_emb_batched,
@@ -235,6 +238,12 @@ class IndexerVLLM(nn.Module):
         self._state_block_table: Optional[torch.Tensor] = None
         self._state_eb: int = 0
 
+        # CP context bound per-forward by V4Transformer's _propagate_cp_ctx;
+        # ``None`` = single-rank / decode → all paths fall through to the
+        # original sp+arange / freqs_cis slice metadata.  Mirrors
+        # :class:`Indexer` (the BF16 reference).
+        self._cp_ctx: Optional[CPContext] = None
+
     # ------------------------------------------------------------------
     # Pool context lifecycle (mirrors BF16 Indexer surface)
     # ------------------------------------------------------------------
@@ -275,11 +284,16 @@ class IndexerVLLM(nn.Module):
     def _clear_nested_pool(self) -> None:
         self.compressor.clear_pool_context()
 
-    def set_cp_ctx(self, cp_ctx) -> None:
-        # Mirrors IndexerFP8: transformer's global ``_propagate_cp_ctx``
-        # calls this on every indexer; accept ``None`` (CP off) silently
-        # and refuse a real ctx loudly.
-        assert cp_ctx is None, "IndexerVLLM does not support Context-Parallel"
+    def set_cp_ctx(self, cp_ctx: Optional[CPContext]) -> None:
+        """Bind CP context.  When active (``cp_size > 1``) prefill takes
+        the CP branch in :meth:`prepare`: rank-local Q applies RoPE at
+        global positions (``cp_ctx.global_positions``), the per-row
+        visible-K window uses those same global positions, and the K-side
+        gather scope is the FULL compressed-KV count (``seq_len_full //
+        ratio``) — populated by the nested :class:`CompressorVLLM`'s own
+        all-gather path.  Decode is always single-token per request and
+        skips CP regardless of the bound context."""
+        self._cp_ctx = cp_ctx
 
     # ------------------------------------------------------------------
     # Q-projection + RoPE helper (shared between prefill & decode)
@@ -391,17 +405,36 @@ class IndexerVLLM(nn.Module):
             self.freqs_cis is not None
         ), "IndexerVLLM.prepare needs freqs_cis bound"
         ratio = self.compress_ratio
-        end_pos = sp_int + seqlen
+        cp_ctx = self._cp_ctx
+        cp_on = cp_ctx is not None and cp_ctx.cp_size > 1 and seqlen > 1
+
+        if cp_on:
+            # CP branch — mirror :class:`Indexer.forward` (CP path):
+            # * sp_int  : full-sequence prefix start (matches the nested
+            #             CompressorVLLM's CP write start_pos)
+            # * end_pos : full sequence length (T then covers the full
+            #             compressed K count populated by the nested
+            #             compressor's all-gather)
+            # * positions_d / q_pos : rank-local Q's global positions, used
+            #   both for RoPE (via cp_freqs_cis_local) and for the per-row
+            #   causal visible-K window in the score / TopK kernels.
+            sp_int = int(cp_ctx.prefix_length)
+            end_pos = int(cp_ctx.seq_len_total)
+            freqs_cis_slice = cp_freqs_cis_local(self.freqs_cis, cp_ctx)
+            positions_d = cp_ctx.global_positions.to(
+                device=device, dtype=torch.int32
+            )
+        else:
+            end_pos = sp_int + seqlen
+            freqs_cis_slice = self.freqs_cis[sp_int : sp_int + seqlen]
+            # Global Q positions for this chunk: sp..sp+S-1 (B==1 → flat [M]).
+            positions_d = torch.arange(
+                sp_int, sp_int + seqlen, device=device, dtype=torch.int32
+            )
+
         is_fresh_prefill = sp_int == 0
         T = end_pos // ratio
         M = bsz * seqlen
-
-        freqs_cis_slice = self.freqs_cis[sp_int : sp_int + seqlen]
-
-        # Global Q positions for this chunk: sp..sp+S-1 (B==1 → flat [M]).
-        positions_d = torch.arange(
-            sp_int, sp_int + seqlen, device=device, dtype=torch.int32
-        )
         q_pos = positions_d.view(bsz, seqlen)
 
         # Per-row visible-K window (causal): row r → (pos+1)//ratio,
