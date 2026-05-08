@@ -147,8 +147,10 @@ def test_csa_layer_prefill_b2_mixed_sp() -> None:
 
 @pytest.mark.xfail(
     reason=(
-        "Phase 3b (workspace) not yet landed — _build_workspace_meta + "
-        "_attn_via_workspace still B==1"
+        "Phase 3b workspace builder has landed (_build_workspace_meta + "
+        "_attn_via_workspace are varlen-capable; field-level coverage in "
+        "test_workspace_prefill_varlen). End-to-end oracle still pending the "
+        "small FP8-KV V4 fixture for ``_build_v4_fp8_test_model``."
     ),
     strict=False,
 )

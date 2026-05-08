@@ -502,31 +502,57 @@ class WorkspaceMeta(NamedTuple):
     both CSA and HCA paths. Built once per (forward, ratio) by
     :meth:`Attention._build_workspace_meta`.
 
-    Workspace layout: ``[bsz, M, head_dim]`` BF16 with
-      * ``[:, 0:N, :]``       — full compressed pool, dequantized via
-        ``dequantize_and_gather_k_cache`` with offset=0
-      * ``[:, N:N+gather_len, :]`` — last ``gather_len`` SWA tokens,
-        dequantized via ``dequantize_and_gather_k_cache`` with offset=N
-        (``gather_len = S + min(sp, win-1)``)
-      * remaining slots are zero-padded
+    Workspace layout under varlen B>=1 — **N_max-padded** so the per-request
+    compressed and SWA regions land at the same column offset across the
+    batch (lets ``combine_topk_swa_indices`` keep its scalar ``M`` / ``N``
+    contract). For each request b in ``workspace[b, :, :]``:
+
+        ``[0,             N_b              )`` — request b compressed
+        ``[N_b,           N_max            )`` — zero pad
+        ``[N_max,         N_max + gather_b )`` — request b SWA stream
+                  (first ``P_b = min(sp_b, win-1)`` rows are prefix tail
+                  dequant'd from pool; next ``S_b`` rows are overwritten
+                  by fresh BF16 new K via ``new_k_slot_in_flat``)
+        ``[N_max+gather_b, M               )`` — zero pad
+
+    with ``N_max = max_b N_b``, ``gather_len_max = max_b gather_b``,
+    ``M = N_max + gather_len_max``. For B==1 / DSV4_VARLEN_PREFILL=0 the
+    formulas collapse: ``N_max = N``, ``gather_len_max = gather_len``,
+    ``M = N + gather_len``.
+
+    Every elementwise operation needed by ``_attn_via_workspace`` is
+    pre-baked here so the hot path stays kernel-only (dequant ×2 +
+    ``index_copy_`` + ``combine_topk`` + ``flash_mla_sparse_fwd``).
     """
 
-    M: int  # workspace stride per batch (= N + gather_len)
-    N: int  # compressed region size (= (sp+S) // ratio)
-    gather_len: int  # SWA tokens gathered (= S + min(sp, win-1))
-    new_k_offset: int  # workspace offset where new K (BF16 overlay) lands
+    M: int  # workspace stride per batch (= N_max + gather_len_max)
+    N: int  # compressed region stride (= N_max under varlen)
     swa_eb: int
     cmp_eb: int
-    swa_bt_int32: torch.Tensor  # [bsz, max_blocks_per_seq] int32 contig
+    swa_bt_int32: torch.Tensor  # [B, max_blocks_per_seq] int32 contig
     cmp_bt_int32: torch.Tensor
-    swa_seq_lens: torch.Tensor  # [bsz] int32 — total SWA stream length
-    cmp_seq_lens: torch.Tensor  # [bsz] int32 — full compressed pool length
-    swa_gather_lens: torch.Tensor  # [bsz] int32 — equals gather_len
-    qsl: torch.Tensor  # [bsz+1] int32 — query_start_loc
-    # HCA only: precomputed dense compressed topk [num_tokens, T_comp] int32
-    # (each row = arange(T_comp); kernel masks down to (pos+1)//ratio).
-    # CSA gets None; runtime indexer output is fed to combine_topk instead.
+    swa_seq_lens: torch.Tensor  # [B] int32 — total SWA stream length per req
+    cmp_seq_lens: torch.Tensor  # [B] int32 — per-req compressed pool length
+    swa_gather_lens: torch.Tensor  # [B] int32 — per-req gather length
+    qsl: torch.Tensor  # [B+1] int32 — query_start_loc (== cu_seqlens)
+    # HCA only: precomputed dense compressed topk [T_total, N_max] int32
+    # (each row = arange(N_max)). The ``_combine_topk_swa_indices_kernel``
+    # masks each row down to ``min((pos+1)//ratio, TOP_K)`` per token from
+    # ``COMPRESS_RATIO`` + per-request ``seq_lens`` / ``query_start_loc``,
+    # so even tokens whose request has ``N_b < N_max`` only see valid
+    # compressed slots in ``[0, (pos+1)//ratio) ⊆ [0, N_b)``. CSA gets
+    # None; runtime indexer output is fed to combine_topk instead.
     dense_cmp_topk: Optional[torch.Tensor]
+    # Per-token scatter target into ``workspace.view(B*M, D)`` for the new
+    # K BF16 overlay. Pre-baked here so the hot path is a single
+    # ``index_copy_`` regardless of B / mixed prefix.
+    #   slot_in_flat[t] = req_id_per_token[t] * M
+    #                     + N           # = N_max ⇒ start of SWA region
+    #                     + min(prefix_lengths[req(t)], win - 1)
+    #                     + (position_ids[t] - prefix_lengths[req(t)])
+    # B==1 collapses to a contiguous ``arange(seqlen) + (N + P)`` so the
+    # ``index_copy_`` is bit-equal to the legacy ``copy_`` slice write.
+    new_k_slot_in_flat: torch.Tensor  # [T_total] int64
 
 
 class CsaPrefillMeta(NamedTuple):
@@ -2538,25 +2564,31 @@ class Attention(nn.Module):
         workspace_meta: "WorkspaceMeta",
         cmp_topk_runtime: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        """vLLM-style workspace path for CSA/HCA prefill (B==1, non-CP).
+        """vLLM-style workspace path for CSA/HCA prefill (varlen B>=1, non-CP).
 
-        Pipeline:
-          1. Allocate ``workspace [1, M, head_dim]`` BF16 zeros.
-          2. ``dequantize_and_gather_k_cache(cmp_pool, offset=0)`` → ``[:, 0:N]``.
-          3. ``dequantize_and_gather_k_cache(swa_pool, offset=N)`` → ``[:, N:N+gather_len]``.
-          4. BF16 overlay freshly computed new K into
-             ``workspace[:, new_k_offset:new_k_offset+S]`` to avoid the FP8
-             round-trip on tokens we just wrote.
+        Pipeline (kernel-only — every elementwise op pre-baked in
+        :meth:`_build_workspace_meta`):
+          1. Allocate ``workspace [B, M, head_dim]`` BF16 zeros.
+          2. ``dequantize_and_gather_k_cache(cmp_pool, offset=0)`` →
+             ``workspace[b, 0:N_b, :]`` per request (per-req ``cmp_seq_lens``
+             handle the per-row variable length; ``[N_b, N_max)`` stays zero).
+          3. ``dequantize_and_gather_k_cache(swa_pool, offset=N_max)`` →
+             ``workspace[b, N_max:N_max+gather_b, :]`` per request.
+          4. BF16 overlay freshly computed new K via single ``index_copy_``
+             over ``workspace.view(B*M, D)`` using ``wm.new_k_slot_in_flat``
+             (already encodes ``M*req_id + N + P_b + local_pos``).
           5. ``combine_topk_swa_indices`` packs the per-query
-             ``[compressed_valid | swa_valid]`` index list into the kernel
-             contract — flash_mla_sparse_fwd reads only ``[:, :combined_lens[i]]``.
-          6. ``flash_mla_sparse_fwd`` over the workspace.
+             ``[compressed_valid | swa_valid]`` index list. The kernel
+             internally computes per-token ``min((pos+1)//ratio, TOP_K)``
+             so HCA's full ``arange(N_max)`` row gets masked even for tokens
+             whose request has ``N_b < N_max``.
+          6. ``flash_mla_sparse_fwd`` over the ``[B*M, 1, D]`` workspace view.
 
         Mirrors vLLM ``DeepseekV4MultiHeadLatentAttentionWrapper._forward_prefill``.
 
         ``cmp_topk_runtime`` is the indexer output (CSA path); for HCA it's
         ignored and ``workspace_meta.dense_cmp_topk`` (precomputed
-        ``arange(N)`` per token) is used instead.
+        ``arange(N_max)`` per token) is used instead.
         """
         from flash_mla import flash_mla_sparse_fwd  # type: ignore[import-not-found]
 
@@ -2578,13 +2610,12 @@ class Attention(nn.Module):
             swa_pool_3d is not None and cmp_pool_3d is not None
         ), "FP8 SWA + CSA/HCA pools required for workspace path"
 
-        bsz = 1
-        S = common.seqlen
-        D = self.head_dim
         wm = workspace_meta
-        workspace = torch.zeros(
-            (bsz, wm.M, D), dtype=torch.bfloat16, device=qkv.q.device
-        )
+        # ``B`` from the per-request meta — bit-equal to legacy 1 when meta
+        # was built from the scalar branch (swa_seq_lens shape == [1]).
+        B = int(wm.swa_seq_lens.shape[0])
+        D = self.head_dim
+        workspace = torch.zeros((B, wm.M, D), dtype=torch.bfloat16, device=qkv.q.device)
 
         if wm.N > 0:
             _swa_dq.dequantize_and_gather_k_cache(
@@ -2596,25 +2627,28 @@ class Attention(nn.Module):
                 block_size=wm.cmp_eb,
                 offset=0,
             )
-        if wm.gather_len > 0:
-            _swa_dq.dequantize_and_gather_k_cache(
-                out=workspace,
-                k_cache=swa_pool_3d,
-                seq_lens=wm.swa_seq_lens,
-                gather_lens=wm.swa_gather_lens,
-                block_table=wm.swa_bt_int32,
-                block_size=wm.swa_eb,
-                offset=wm.N,
-            )
-
-        # BF16 overlay of freshly computed new K — avoids FP8 round-trip
-        # loss on the just-written suffix.
-        workspace[:, wm.new_k_offset : wm.new_k_offset + S, :].copy_(
-            qkv.kv_full.to(torch.bfloat16).unsqueeze(0)
+        # SWA dequant is unconditional in prefill — every request has at least
+        # ``S_b`` SWA gather rows (just-written new K). Per-request ``gather_lens``
+        # handles the per-row variable length.
+        _swa_dq.dequantize_and_gather_k_cache(
+            out=workspace,
+            k_cache=swa_pool_3d,
+            seq_lens=wm.swa_seq_lens,
+            gather_lens=wm.swa_gather_lens,
+            block_table=wm.swa_bt_int32,
+            block_size=wm.swa_eb,
+            offset=wm.N,
         )
 
-        # combine_topk: HCA uses precomputed dense arange(N); CSA uses the
-        # runtime indexer output (raw compressed-pool offsets in [0, N)).
+        # BF16 overlay of freshly computed new K — single ``index_copy_``
+        # using the meta-precomputed ``new_k_slot_in_flat``. Avoids the FP8
+        # round-trip loss on tokens we just wrote, while keeping the hot
+        # path free of casts / gathers / per-request slicing.
+        kv_bf16 = qkv.kv_full.to(torch.bfloat16).reshape(-1, D)
+        workspace.view(B * wm.M, D).index_copy_(0, wm.new_k_slot_in_flat, kv_bf16)
+
+        # combine_topk: HCA uses precomputed dense arange(N_max); CSA uses
+        # the runtime indexer output (raw compressed-pool offsets in [0, N_b)).
         if wm.dense_cmp_topk is not None:
             cmp_topk = wm.dense_cmp_topk
         else:
@@ -2652,7 +2686,7 @@ class Attention(nn.Module):
 
         o3, _, _ = flash_mla_sparse_fwd(
             q=qkv.q,
-            kv=workspace.view(-1, 1, D),
+            kv=workspace.view(B * wm.M, 1, D),
             indices=combined_indices.unsqueeze(1),
             sm_scale=self.softmax_scale,
             attn_sink=self.attn_sink,
@@ -3029,10 +3063,6 @@ class Attention(nn.Module):
         device: torch.device,
         with_dense_cmp_topk: bool,
         *,
-        # Phase-1 varlen plumbing. Body still B==1; Engineer B's Phase-3
-        # work converts swa_seq_lens / cmp_seq_lens / swa_gather_lens / qsl
-        # / dense_cmp_topk into per-request [B] / [B+1] / [T_total, ...]
-        # tensors using these inputs.
         batch_size: int = 1,
         cu_seqlens: Optional[torch.Tensor] = None,
         input_lengths: Optional[torch.Tensor] = None,
@@ -3042,13 +3072,29 @@ class Attention(nn.Module):
         req_id_per_token: Optional[torch.Tensor] = None,
         max_seqlen_q: int = 0,
     ) -> Optional[WorkspaceMeta]:
-        """Compute static index/dim metadata for the vLLM-style workspace +
-        dual-gather + ``combine_topk_swa_indices`` flow. Returns ``None`` when
+        """Static index/dim metadata for the vLLM-style workspace + dual-
+        gather + ``combine_topk_swa_indices`` flow. Returns ``None`` when
         pool context isn't bound (warmup) so callers fall through to BF16
         ``kv_full`` fast paths.
 
-        ``with_dense_cmp_topk=True`` precomputes the dense ``arange(T_comp)``
-        topk grid HCA needs (``[num_tokens, T_comp]`` int32 contiguous).
+        Two branches share field semantics (see :class:`WorkspaceMeta`):
+
+          * **varlen** (``_use_varlen_prefill() and batch_size > 1``):
+            per-request ``N_b`` / ``gather_b`` / ``M_b`` derived from
+            ``prefix_lengths`` + ``input_lengths`` + ``cu_seqlens`` +
+            ``position_ids`` + ``req_id_per_token``. One ``.item()`` sync
+            per forward via a single ``torch.stack([N_max, gather_max])``
+            ⇒ ``.tolist()``. ``new_k_slot_in_flat`` per-token target into
+            ``workspace.view(B*M, D)`` for the BF16 overlay.
+          * **legacy B==1 / DSV4_VARLEN_PREFILL=0**: ``N`` / ``gather_len``
+            collapse to scalar arithmetic from ``sp_int`` + ``seqlen``.
+            ``new_k_slot_in_flat = arange(seqlen) + (N + P)`` is bit-equal
+            to the legacy slice ``copy_`` over ``[N+P, N+P+S)``.
+
+        ``with_dense_cmp_topk=True`` precomputes the dense ``arange(N_max)``
+        topk grid HCA needs (``[T_total, N_max]`` int32 contiguous; the
+        ``_combine_topk_swa_indices_kernel`` masks per-token validity via
+        ``COMPRESS_RATIO`` so no per-token mask is required up here).
         CSA passes ``False`` and feeds runtime indexer output to combine_topk.
         """
         from rtp_llm.models_py.modules.dsv4.attn_type import CSA_KV, HCA_KV, SWA_KV
@@ -3074,42 +3120,99 @@ class Attention(nn.Module):
         if swa_eb <= 0 or cmp_eb <= 0:
             return None
 
-        bsz = 1
         win = self.window_size
-        seq_total = sp_int + seqlen
-        N = seq_total // ratio
-        gather_len = seqlen + min(sp_int, win - 1)
-        M = N + gather_len
-        new_k_offset = N + min(sp_int, win - 1)
+        # Dispatch on the same gate as ``_build_compressor_meta`` /
+        # ``_build_swa_prefill_meta`` so a single env flag flips the whole
+        # prefill stack between batched + scalar plumbing.
+        use_varlen = (
+            _use_varlen_prefill()
+            and batch_size > 1
+            and prefix_lengths is not None
+            and input_lengths is not None
+            and cu_seqlens is not None
+            and position_ids is not None
+            and req_id_per_token is not None
+        )
 
-        swa_bt_int32 = swa_bt[:bsz].to(device=device, dtype=torch.int32).contiguous()
-        cmp_bt_int32 = cmp_bt[:bsz].to(device=device, dtype=torch.int32).contiguous()
-        swa_seq_lens = torch.tensor([seq_total], device=device, dtype=torch.int32)
-        cmp_seq_lens = torch.tensor([N], device=device, dtype=torch.int32)
-        swa_gather_lens = torch.tensor([gather_len], device=device, dtype=torch.int32)
-        qsl = torch.tensor([0, seqlen], device=device, dtype=torch.int32)
+        if use_varlen:
+            B = batch_size
+            sp_i32 = prefix_lengths.to(device=device, dtype=torch.int32)
+            S_i32 = input_lengths.to(device=device, dtype=torch.int32)
+            seq_total_per_req = sp_i32 + S_i32  # [B]
+            N_per_req = seq_total_per_req // ratio  # [B]
+            P_per_req = torch.clamp_max(sp_i32, win - 1)  # [B]
+            gather_len_per_req = S_i32 + P_per_req  # [B]
+
+            # Single .item() sync — stack two scalars then one D2H tolist().
+            maxes = torch.stack([N_per_req.max(), gather_len_per_req.max()])
+            N_max, gather_len_max = (int(v) for v in maxes.tolist())
+            N = N_max
+            M = N_max + gather_len_max
+
+            swa_seq_lens = seq_total_per_req.contiguous()
+            cmp_seq_lens = N_per_req.contiguous()
+            swa_gather_lens = gather_len_per_req.contiguous()
+            qsl = cu_seqlens.to(device=device, dtype=torch.int32).contiguous()
+            swa_bt_int32 = swa_bt[:B].to(device=device, dtype=torch.int32).contiguous()
+            cmp_bt_int32 = cmp_bt[:B].to(device=device, dtype=torch.int32).contiguous()
+
+            # Per-token scatter target — pre-baked elementwise on the
+            # builder side so ``_attn_via_workspace`` is kernel-only.
+            sp_l64 = prefix_lengths.to(device=device, dtype=torch.long)
+            req_l64 = req_id_per_token.to(device=device, dtype=torch.long)
+            pos_l64 = position_ids.to(device=device, dtype=torch.long)
+            P_per_req_l64 = P_per_req.to(torch.long)  # [B]
+            new_k_slot_in_flat = (
+                req_l64 * M
+                + N
+                + P_per_req_l64.gather(0, req_l64)
+                + (pos_l64 - sp_l64.gather(0, req_l64))
+            ).contiguous()
+
+            T_total = seqlen
+        else:
+            # Legacy B==1 / DSV4_VARLEN_PREFILL=0 — bit-equal to pre-Phase-3.
+            B = 1
+            seq_total = sp_int + seqlen
+            N = seq_total // ratio
+            P = min(sp_int, win - 1)
+            gather_len = seqlen + P
+            M = N + gather_len
+
+            swa_bt_int32 = swa_bt[:B].to(device=device, dtype=torch.int32).contiguous()
+            cmp_bt_int32 = cmp_bt[:B].to(device=device, dtype=torch.int32).contiguous()
+            swa_seq_lens = torch.tensor([seq_total], device=device, dtype=torch.int32)
+            cmp_seq_lens = torch.tensor([N], device=device, dtype=torch.int32)
+            swa_gather_lens = torch.tensor(
+                [gather_len], device=device, dtype=torch.int32
+            )
+            qsl = torch.tensor([0, seqlen], device=device, dtype=torch.int32)
+
+            # B==1 collapses to a contiguous arange — bit-equal to the
+            # legacy ``workspace[:, N+P : N+P+S, :].copy_(kv_bf16)`` slice.
+            new_k_slot_in_flat = (
+                torch.arange(seqlen, device=device, dtype=torch.long) + (N + P)
+            ).contiguous()
+
+            T_total = seqlen
 
         dense_cmp_topk: Optional[torch.Tensor] = None
         if with_dense_cmp_topk:
-            num_tokens = bsz * seqlen
-            T_comp = N
-            if T_comp > 0:
+            if N > 0:
                 dense_cmp_topk = (
-                    torch.arange(T_comp, device=device, dtype=torch.int32)
-                    .view(1, T_comp)
-                    .expand(num_tokens, T_comp)
+                    torch.arange(N, device=device, dtype=torch.int32)
+                    .view(1, N)
+                    .expand(T_total, N)
                     .contiguous()
                 )
             else:
                 dense_cmp_topk = torch.empty(
-                    (num_tokens, 0), device=device, dtype=torch.int32
+                    (T_total, 0), device=device, dtype=torch.int32
                 )
 
         return WorkspaceMeta(
             M=M,
             N=N,
-            gather_len=gather_len,
-            new_k_offset=new_k_offset,
             swa_eb=swa_eb,
             cmp_eb=cmp_eb,
             swa_bt_int32=swa_bt_int32,
@@ -3119,6 +3222,7 @@ class Attention(nn.Module):
             swa_gather_lens=swa_gather_lens,
             qsl=qsl,
             dense_cmp_topk=dense_cmp_topk,
+            new_k_slot_in_flat=new_k_slot_in_flat,
         )
 
     def _build_compressor_meta(

@@ -286,3 +286,16 @@ py_test(
     tags = ["H20"],
     exec_properties = {"gpu": "H20"},
 )
+
+# Phase-3b CSA / HCA workspace prefill varlen migration UT. Stub-driven;
+# validates _build_workspace_meta on (1) legacy B==1 scalar path, (2)
+# warmup/unbound short-circuits, (3) varlen B>=2 per-request fields +
+# N_max-padded slot_in_flat math, (4) HCA dense_cmp_topk shape/values,
+# and (5) end-to-end workspace overlay scatter via index_copy_.
+py_test(
+    name = "test_workspace_prefill_varlen",
+    srcs = ["test_workspace_prefill_varlen.py"],
+    deps = _swa_triton_ut_deps,
+    tags = ["H20"],
+    exec_properties = {"gpu": "H20"},
+)
