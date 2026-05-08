@@ -25,6 +25,12 @@ def _use_vllm_compressor() -> bool:
     return os.environ.get("DSV4_COMPRESSOR_VLLM", "1") != "0"
 
 
+def _use_rope_only_kernel() -> bool:
+    import os
+
+    return os.environ.get("DSV4_INDEXER_ROPE_ONLY", "1") != "0"
+
+
 from rtp_llm.models_py.modules.dsv4._metadata_triton import build_pool_slots
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4.cp import CPContext, cp_freqs_cis_local
@@ -647,7 +653,13 @@ class Indexer(nn.Module):
             if _dbg is not None:
                 _rt.record_if_level(2, f"{_dbg}_q_pre_rope", q)
                 _rt.record_if_level(2, f"{_dbg}_freqs_cis", freqs_cis)
-            apply_rotary_emb(q[..., -rd:], freqs_cis)
+            q_rope = q[..., -rd:]
+            if q_rope.is_cuda and _use_rope_only_kernel():
+                from rtp_llm.models_py.modules.dsv4._rope_only_triton import rope_only_inplace
+
+                rope_only_inplace(q_rope, freqs_cis)
+            else:
+                apply_rotary_emb(q_rope, freqs_cis)
             if _dbg is not None:
                 _rt.record_if_level(2, f"{_dbg}_q_post_rope", q)
 
