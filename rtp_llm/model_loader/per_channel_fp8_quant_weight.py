@@ -37,11 +37,11 @@ from rtp_llm.utils.model_weight import (
     sp_head_gemm_a8,
     sp_head_s_gemm_a8_channel,
     sp_id,
+    sp_moe_neg1,
+    sp_moe_w1,
     sp_neg1,
     stack_,
     stack_moe_w1,
-    sp_moe_w1,
-    sp_moe_neg1
 )
 from rtp_llm.utils.util import check_with_info
 
@@ -67,15 +67,15 @@ def _ckpt_base_matches_quant_exclude(
 ) -> bool:
     """
     Check if the checkpoint module path template matches any entry in the quantization exclude list.
-    
+
     Args:
-        base_name_template: A template string representing the module path, where '{i}' 
+        base_name_template: A template string representing the module path, where '{i}'
                             acts as a placeholder for the layer index (e.g., 'model.layers.{i}.mlp.gate_proj').
-        exclude_modules: A set of concrete module paths that are excluded from quantization 
+        exclude_modules: A set of concrete module paths that are excluded from quantization
                          (e.g., {'model.layers.0.mlp.gate_proj', 'model.layers.1.mlp.gate_proj'}).
-    
+
     Returns:
-        True if the template (with '{i}' replaced by a wildcard for digits) matches any 
+        True if the template (with '{i}' replaced by a wildcard for digits) matches any
         concrete path in 'exclude_modules'.
     """
     if not exclude_modules:
@@ -133,6 +133,7 @@ def cast_to_fp8(x: torch.Tensor):
     """Convert tensor to FP8 format."""
     return x.to(torch.float8_e4m3fn)
 
+
 def per_channel_cast_to_fp8(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Per-channel FP8 quantization.
@@ -141,7 +142,10 @@ def per_channel_cast_to_fp8(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor
     Returns:
         tuple[torch.Tensor, torch.Tensor]: Quantized tensor and channel-wise scales
     """
-    assert x.dim() in [2, 3], f"weight dim=2 or dim=3 supported, but got shape {x.shape}"
+    assert x.dim() in [
+        2,
+        3,
+    ], f"weight dim=2 or dim=3 supported, but got shape {x.shape}"
     if x.dim() == 3:
         channel_max = x.abs().amax(dim=-1, keepdim=True).clamp(1e-4)
         scales = (channel_max / FP8_E4M3_MAX).to(torch.float32)
@@ -155,6 +159,7 @@ def per_channel_cast_to_fp8(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor
     # Quantize the tensor
     quantized = (x / scales).to(torch.float8_e4m3fn)
     return (quantized.T).contiguous(), (scales.T).contiguous()
+
 
 def gemm_channel_fp8_gpt_style_tp_strategy():
     gemm_channel_fp8_weight_tp_strategy: Dict[str, Any] = {
@@ -245,7 +250,8 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
         cls, quant_config: QuantizationConfig, src_weight_info: WeightModule
     ) -> bool:
         if not quant_config.is_quanted() or not isinstance(
-            quant_config, (Fp8PerChannelCompressedQuantConfig, Fp8PerChannelQuarkQuantConfig)
+            quant_config,
+            (Fp8PerChannelCompressedQuantConfig, Fp8PerChannelQuarkQuantConfig),
         ):
             return False
         name = src_weight_info.name
@@ -641,6 +647,7 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
 
         return processed_res
 
+
 class LoadQuantPerChannelFp8Weight(PerChannelFp8Weight):
     """
     LoadQuantPerChannelFp8Weight class for dynamic per-channel FP8 quantization.
@@ -682,7 +689,7 @@ class LoadQuantPerChannelFp8Weight(PerChannelFp8Weight):
         scale_name = self.w8a8_weight_list.get(src_weight_info.name)
         scale = None
         if scale_name:
-            scale_params = copy.deepcopy(params)
+            scale_params = {**params}
             scale_params["name"] = scale_name
             scale: AtomicWeight = create_w8a8_fp8_per_channel_weight(
                 src_weight_info, **scale_params
