@@ -700,7 +700,15 @@ class Attention(nn.Module):
             # absent (warmup, unit tests), ``_bind_kv_cache_from_pool``
             # needs the T hint to allocate the ephemeral zero tensor.
             if compress_ratio == 4:
-                self.indexer = Indexer(
+                if _use_vllm_compressor():
+                    from rtp_llm.models_py.modules.dsv4.indexer_vllm import (
+                        IndexerVLLM,
+                    )
+
+                    _IndexerCls = IndexerVLLM
+                else:
+                    _IndexerCls = Indexer
+                self.indexer = _IndexerCls(
                     dim=dim,
                     q_lora_rank=q_lora_rank,
                     index_n_heads=index_n_heads,
