@@ -171,7 +171,7 @@ class TestHCImpl(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must be contiguous"):
             unit.pre(x_noncontig)
 
-    def test_tilelang_head_prefers_fused_and_falls_back(self) -> None:
+    def test_tilelang_head_requires_fused_when_enabled(self) -> None:
         hc, dim = 4, 16
         fn, base, scale = _weights(hc, dim)
         head = TileLangHCHead(
@@ -209,8 +209,16 @@ class TestHCImpl(unittest.TestCase):
         self.assertTrue(torch.all(y == 1))
 
         calls.clear()
-        tilelang_impl.tk_mhc_head_fused = lambda *args, **kwargs: None
-        y = head.head(x)
+        tilelang_impl.tk_mhc_head_fused = (
+            lambda *args, **kwargs: calls.append("fused") or None
+        )
+        with self.assertRaisesRegex(RuntimeError, "fused head must succeed"):
+            head.head(x)
+        self.assertEqual(calls, ["fused"])
+
+        calls.clear()
+        with _env("DSV4_MHC_HEAD_FUSED", "0"):
+            y = head.head(x)
         self.assertEqual(calls, ["old"])
         self.assertTrue(torch.all(y == 0))
 

@@ -2,8 +2,9 @@
 
 Thin adapter over the vendored ``rtp_llm.models_py.3rdparty.tile_kernels``
 (DeepSeek TileKernels). Each entry point caches a compile-success/failure
-verdict. A failure is returned to the caller as ``None``; production HC callers
-must treat that as fail-fast rather than falling back implicitly.
+verdict. Most failures are returned to the caller as ``None``; production HC
+callers must treat that as fail-fast rather than falling back implicitly. The
+fused head is stricter: when enabled, unavailable/JIT failure raises directly.
 
 Why per-op flags rather than a single ``_TK_AVAILABLE``: empirically
 ``pre_big_fuse`` has hit ``decouple_type_cast`` ICEs while ``post`` /
@@ -26,7 +27,7 @@ from __future__ import annotations
 import importlib
 import logging
 import os
-from typing import Tuple
+from typing import NoReturn, Tuple
 
 import torch
 
@@ -75,8 +76,25 @@ def _env_disabled() -> bool:
     return os.environ.get("DSV4_USE_TK_MHC", "1") == "0"
 
 
+def tk_mhc_head_fused_enabled() -> bool:
+    return os.environ.get("DSV4_MHC_HEAD_FUSED", "1") != "0"
+
+
 def _head_fuse_disabled() -> bool:
-    return os.environ.get("DSV4_MHC_HEAD_FUSED", "1") == "0"
+    return not tk_mhc_head_fused_enabled()
+
+
+def _raise_head_fused_unavailable(
+    residual: torch.Tensor,
+    hc_mult: int,
+    reason: str,
+) -> NoReturn:
+    raise RuntimeError(
+        f"TileLang fused mHC head unavailable: {reason}; "
+        f"shape={tuple(residual.shape)}, stride={tuple(residual.stride())}, "
+        f"dtype={residual.dtype}, device={residual.device}, hc_mult={hc_mult}. "
+        "Set DSV4_MHC_HEAD_FUSED=0 to use the older TileLang head composition."
+    )
 
 
 def _can_use_tk(residual: torch.Tensor, hc_mult: int) -> bool:
@@ -111,22 +129,46 @@ def tk_mhc_head_fused(
 ) -> torch.Tensor | None:
     """Fused TK ``mhc_head`` wrapper.
 
-    Returns ``None`` when the fused head is disabled or unavailable so callers
-    can fall back to the older TileLang head composition.
+    Returns ``None`` only when the fused head is explicitly disabled. When the
+    fused path is enabled, incompatibility or JIT/import failure is fatal so the
+    caller cannot silently fall back to the older TileLang head composition.
     """
     global _TK_HEAD_FUSED_OK
     if _head_fuse_disabled():
         return None
     if not _can_use_tk(residual, hc_mult):
-        return None
+        _raise_head_fused_unavailable(
+            residual,
+            hc_mult,
+            "input does not satisfy TileLang fused mHC head gates",
+        )
     if _TK_HEAD_FUSED_OK is False:
-        return None
-    try:
-        if _tk_mhc_head_fused is None:
+        _raise_head_fused_unavailable(
+            residual,
+            hc_mult,
+            "previous fused mHC head compile failed",
+        )
+    if _tk_mhc_head_fused is None:
+        try:
             _import_tk()
-        if _tk_mhc_head_fused is None:
+        except Exception as e:
+            if _TK_HEAD_FUSED_OK is None:
+                _log.exception("tk fused mhc_head disabled after import failure")
             _TK_HEAD_FUSED_OK = False
-            return None
+            _raise_head_fused_unavailable(
+                residual,
+                hc_mult,
+                f"import failure: {e!r}",
+            )
+    if _tk_mhc_head_fused is None:
+        _TK_HEAD_FUSED_OK = False
+        _raise_head_fused_unavailable(
+            residual,
+            hc_mult,
+            "vendored TileKernels has no mhc_head_fuse",
+        )
+    out = None
+    try:
         out = _tk_mhc_head_fused(
             residual,
             fn,
@@ -135,13 +177,24 @@ def tk_mhc_head_fused(
             rms_eps=norm_eps,
             mhc_pre_eps=pre_eps,
         )
-        _TK_HEAD_FUSED_OK = True
-        return out
-    except Exception:
+    except Exception as e:
         if _TK_HEAD_FUSED_OK is None:
             _log.exception("tk fused mhc_head disabled after JIT failure")
         _TK_HEAD_FUSED_OK = False
-        return None
+        _raise_head_fused_unavailable(
+            residual,
+            hc_mult,
+            f"JIT/import failure: {e!r}",
+        )
+    if out is None:
+        _TK_HEAD_FUSED_OK = False
+        _raise_head_fused_unavailable(
+            residual,
+            hc_mult,
+            "fused kernel returned None",
+        )
+    _TK_HEAD_FUSED_OK = True
+    return out
 
 
 def tk_mhc_pre(
