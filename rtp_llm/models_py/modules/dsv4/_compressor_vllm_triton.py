@@ -561,6 +561,26 @@ _FUSED_CONSTEXPR_BY_HEAD_DIM = {
 }
 
 
+def _fused_num_warps(head_dim: int, compress_ratio: int, cfg: dict) -> int:
+    """Pick num_warps for the boundary fused kernel.
+
+    Why: the head_dim=512 kernel materialises a ``[(1+overlap)*ratio, 512]``
+    fp32 register tile per boundary program for both the gather and the
+    softmax reduction. CSA (ratio=4, overlap=1) -> ``[8, 512]`` = 16 KB
+    fits comfortably in 4 warps (128 threads, 32 fp32 per thread). HCA
+    (ratio=128, overlap=0) -> ``[128, 512]`` = 256 KB blows past the
+    SM100 per-thread 256-register limit at 4 warps (~512 fp32/thread)
+    and spills into local memory -- the decode timeline showed 20 HCA
+    boundary programs at ~650 us each (all of step 0's Top1 13 ms).
+    Bumping to 16 warps brings per-thread tile slice down to
+    ``128 * 512 / (16*32) = 128`` fp32 ~= 64 registers, well under the
+    limit, and also speeds the cross-warp softmax reduce over dim=0.
+    """
+    if head_dim == 512 and compress_ratio >= 64:
+        return 16
+    return cfg["num_warps"]
+
+
 def run_save_partial_states(
     kv: torch.Tensor,  # [N, coff*head_dim] fp32 contiguous
     score: torch.Tensor,  # [N, coff*head_dim] fp32 contiguous
@@ -693,7 +713,7 @@ def run_fused_compress_kv_write(
         TOKEN_STRIDE=cfg["token_stride"],
         SCALE_DIM=cfg["scale_dim"],
         KV_BLOCK_STRIDE=kv_block_stride,
-        num_warps=cfg["num_warps"],
+        num_warps=_fused_num_warps(head_dim, compress_ratio, cfg),
     )
 
 
