@@ -2970,20 +2970,34 @@ class Attention(nn.Module):
             req_id_per_token=req_id_per_token,
             max_seqlen_q=max_seqlen_q,
         )
-        # Mirror ``_build_compressor_meta``'s varlen gate so the inlined
+        # Mirror ``_build_compressor_meta``'s varlen gate AND its is_batched
+        # / seq_start_per_req / cu_seq_per_req plumbing so the inlined
         # ``prepare_metadata`` call still honors ``position_ids`` /
-        # ``req_id_per_token`` for B>1. Inline (vs. calling
-        # ``_build_compressor_meta``) is load-bearing: it shares the
-        # surrounding pool bind with ``indexer.prepare`` so the indexer's
-        # compressor-meta hoist condition fires instead of silently
-        # no-opping (which forces ~20 small kernels per CSA layer to
-        # rebuild on the hot path).
-        if _is_varlen_prefill(batch_size):
+        # ``req_id_per_token`` for B>1 AND lets ``compressor.forward``
+        # take the kernel-native varlen raw path (otherwise CSA falls back
+        # to the per-request scalar launches even under varlen). Inline
+        # (vs. calling ``_build_compressor_meta``) is load-bearing: it
+        # shares the surrounding pool bind with ``indexer.prepare`` so
+        # the indexer's compressor-meta hoist condition fires instead of
+        # silently no-opping (which forces ~20 small kernels per CSA
+        # layer to rebuild on the hot path).
+        is_batched = _is_varlen_prefill(batch_size)
+        if is_batched:
             positions = position_ids.to(device=device, dtype=torch.long).contiguous()
             b_idx = req_id_per_token.to(device=device, dtype=torch.long).contiguous()
+            seq_start_per_req = sp_per_req.to(device=device, dtype=torch.int32)
+            cu_seq_per_req = cu_seqlens.to(device=device, dtype=torch.int32)
         else:
             positions, b_idx = _build_prefill_positions(sp_int, 1, seqlen, device)
-        compressor_meta = self.compressor.prepare_metadata(positions, b_idx)
+            seq_start_per_req = None
+            cu_seq_per_req = None
+        compressor_meta = self.compressor.prepare_metadata(
+            positions,
+            b_idx,
+            is_batched=is_batched,
+            seq_start_per_req=seq_start_per_req,
+            cu_seq_per_req=cu_seq_per_req,
+        )
         self._clear_compressor_pool_context()
 
         workspace_meta = self._build_workspace_meta(

@@ -659,5 +659,666 @@ class WorkspaceOverlayScatterTest(unittest.TestCase):
         self.assertTrue(torch.all(ws[1, :21, :] == 0))
 
 
+# =========================================================================
+# Per-builder coverage: _build_compressor_meta, _build_csa_prefill_meta,
+# _build_hca_prefill_meta. These three sit on top of
+# _build_workspace_meta + delegate to compressor.prepare_metadata /
+# indexer.prepare. We stub the compressor + indexer to capture call args
+# and assert each builder threads varlen kwargs correctly.
+# =========================================================================
+from rtp_llm.models_py.modules.dsv4.attention import (  # noqa: E402
+    Attention,
+    CsaPrefillMeta,
+    HcaPrefillMeta,
+    _is_varlen_prefill,
+    _use_varlen_prefill,
+)
+from rtp_llm.models_py.modules.dsv4.attn_type import (  # noqa: E402
+    CSA_STATE,
+    HCA_STATE,
+    INDEXER_KV,
+    INDEXER_STATE,
+)
+
+
+class _StubCompressor:
+    """Capture every ``prepare_metadata`` call so the UT can assert the
+    builder fed ``positions`` / ``b_idx`` / ``is_batched`` /
+    ``seq_start_per_req`` / ``cu_seq_per_req`` correctly."""
+
+    def __init__(self) -> None:
+        self.calls: list = []
+
+    def prepare_metadata(
+        self,
+        positions,
+        b_idx,
+        is_batched=False,
+        seq_start_per_req=None,
+        cu_seq_per_req=None,
+    ):
+        self.calls.append(
+            dict(
+                positions=positions,
+                b_idx=b_idx,
+                is_batched=is_batched,
+                seq_start_per_req=seq_start_per_req,
+                cu_seq_per_req=cu_seq_per_req,
+            )
+        )
+        return f"compressor_meta_call_{len(self.calls)}"
+
+
+class _StubIndexer:
+    """Capture every ``prepare`` call so the UT can assert the CSA
+    builder threads varlen tensors through to the indexer."""
+
+    def __init__(self, freqs_cis: Optional[torch.Tensor] = None) -> None:
+        # Required by ``_ensure_freqs_cis_bound`` (called transitively).
+        self.freqs_cis = freqs_cis if freqs_cis is not None else torch.empty(0)
+        self.compressor = _StubCompressor()  # nested compressor (CSA-only)
+        self.compressor.freqs_cis = self.freqs_cis  # type: ignore[attr-defined]
+        self.calls: list = []
+
+    def prepare(
+        self,
+        bsz,
+        seqlen,
+        sp_int,
+        device,
+        kv_block_table=None,
+        kv_eb=0,
+        *,
+        batch_size=1,
+        cu_seqlens=None,
+        input_lengths=None,
+        prefix_lengths=None,
+        position_ids=None,
+        req_id_per_token=None,
+        max_seqlen_q=0,
+    ):
+        self.calls.append(
+            dict(
+                bsz=bsz,
+                seqlen=seqlen,
+                sp_int=sp_int,
+                device=device,
+                kv_block_table=kv_block_table,
+                kv_eb=kv_eb,
+                batch_size=batch_size,
+                cu_seqlens=cu_seqlens,
+                input_lengths=input_lengths,
+                prefix_lengths=prefix_lengths,
+                position_ids=position_ids,
+                req_id_per_token=req_id_per_token,
+                max_seqlen_q=max_seqlen_q,
+            )
+        )
+        return f"indexer_meta_call_{len(self.calls)}"
+
+
+def _make_meta_stub(
+    *,
+    win: int,
+    compress_ratio: int,
+    n_reqs: int = 2,
+    blocks_per_req: int = 4,
+    swa_eb: int = 256,
+    cmp_eb: int = 64,
+    indexer_eb: int = 32,
+    state_eb: int = 32,
+    bind_indexer: bool = False,
+    device: Optional[torch.device] = None,
+) -> _StubAttention:
+    """Extend ``_make_stub`` with INDEXER_KV / INDEXER_STATE / CSA_STATE /
+    HCA_STATE pools + a stub Compressor / Indexer attached to the stub
+    Attention. The compressor is required by every builder; the indexer
+    is required only by CSA (``compress_ratio == 4``)."""
+    dev = device or _device()
+    base = _make_stub(
+        win=win,
+        compress_ratio=compress_ratio,
+        n_reqs=n_reqs,
+        blocks_per_req=blocks_per_req,
+        swa_eb=swa_eb,
+        cmp_eb=cmp_eb,
+        device=dev,
+    )
+    # Attach state + indexer pools so _set_compressor_pool_context's
+    # `set_pool_context` lookups don't AttributeError. The pool tables
+    # themselves are unused — the stubs for compressor/indexer don't
+    # touch them, but the bind path requires the dict entries to exist.
+    if base._block_tables_by_type is not None:
+        for at in (INDEXER_KV, INDEXER_STATE, CSA_STATE, HCA_STATE):
+            base._block_tables_by_type.setdefault(
+                at, _make_block_table(n_reqs, blocks_per_req, dev)
+            )
+        base._eb_by_type[INDEXER_KV] = indexer_eb
+        base._eb_by_type[INDEXER_STATE] = state_eb
+        base._eb_by_type[CSA_STATE] = state_eb
+        base._eb_by_type[HCA_STATE] = state_eb
+    base.compressor = _StubCompressor()
+    if bind_indexer:
+        base.indexer = _StubIndexer()
+    else:
+        base.indexer = None
+    base.layer_id = 0
+    base.tp_size = 1
+    base.tp_rank = 0
+    return base
+
+
+class _NoBindStubAttention(_StubAttention):
+    """Variant that no-ops ``_set_compressor_pool_context`` /
+    ``_clear_compressor_pool_context``. The real method walks the full
+    pool view machinery (KVCache.get_layer_cache, _pool_view_3d_fp8,
+    Compressor.set_pool_context); for prepare_metadata stub tests we just
+    want to verify the dispatch logic calls compressor.prepare_metadata
+    with the right args. Override here so the stub doesn't need to fake
+    out KVCache + framework."""
+
+    def _set_compressor_pool_context(self) -> None:
+        pass
+
+    def _clear_compressor_pool_context(self) -> None:
+        pass
+
+    _build_workspace_meta = Attention._build_workspace_meta
+    _build_compressor_meta = Attention._build_compressor_meta
+    _build_csa_prefill_meta = Attention._build_csa_prefill_meta
+    _build_hca_prefill_meta = Attention._build_hca_prefill_meta
+
+
+def _make_no_bind_stub(**kwargs) -> _NoBindStubAttention:
+    """Promote a ``_StubAttention`` to ``_NoBindStubAttention`` (sub-class
+    that no-ops the pool bind/unbind so the prepare_metadata UT doesn't
+    have to fake KVCache.get_layer_cache + pool view tensors)."""
+    base = _make_meta_stub(**kwargs)
+    promoted = _NoBindStubAttention(
+        window_size=base.window_size,
+        compress_ratio=base.compress_ratio,
+        block_tables=base._block_tables_by_type,
+        eb_by_type=base._eb_by_type,
+        kv_cache_present=base._kv_cache is not None,
+    )
+    promoted.compressor = base.compressor
+    promoted.indexer = base.indexer
+    promoted.layer_id = 0
+    promoted.tp_size = 1
+    promoted.tp_rank = 0
+    return promoted
+
+
+# -------------------------------------------------------------------------
+# 5. _build_compressor_meta — varlen vs legacy dispatch (shared by HCA
+#    + the inline CSA path). Verifies positions/b_idx/is_batched/
+#    seq_start_per_req/cu_seq_per_req plumbing.
+# -------------------------------------------------------------------------
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA needed for tensor scaffolding")
+class BuildCompressorMetaTest(unittest.TestCase):
+
+    def setUp(self) -> None:
+        self.device = _device()
+
+    def _call(
+        self,
+        stub: _NoBindStubAttention,
+        sp_int: int,
+        seqlen: int,
+        *,
+        batch_size: int = 1,
+        prefix_lengths: Optional[list] = None,
+        input_lengths: Optional[list] = None,
+    ):
+        if batch_size > 1:
+            assert prefix_lengths is not None and input_lengths is not None
+            positions, req_id, cu_seqlens = _flat_positions(
+                prefix_lengths, input_lengths, self.device
+            )
+            pl = torch.tensor(prefix_lengths, dtype=torch.int32, device=self.device)
+            il = torch.tensor(input_lengths, dtype=torch.int32, device=self.device)
+            return stub._build_compressor_meta(
+                seqlen=int(positions.numel()),
+                sp_int=prefix_lengths[0],
+                device=self.device,
+                batch_size=batch_size,
+                cu_seqlens=cu_seqlens,
+                input_lengths=il,
+                prefix_lengths=pl,
+                sp_per_req=pl.to(torch.int64),
+                position_ids=positions,
+                req_id_per_token=req_id,
+                max_seqlen_q=int(il.max().item()),
+            )
+        return stub._build_compressor_meta(
+            seqlen=seqlen, sp_int=sp_int, device=self.device
+        )
+
+    def test_legacy_b1_uses_build_prefill_positions(self) -> None:
+        """B==1 with no varlen tensors: positions = arange(sp, sp+S),
+        b_idx = zeros(S), is_batched=False, seq_start/cu_seq = None."""
+        stub = _make_no_bind_stub(win=8, compress_ratio=128)  # HCA host compressor
+        ret = self._call(stub, sp_int=10, seqlen=20)
+        self.assertEqual(ret, "compressor_meta_call_1")
+        call = stub.compressor.calls[0]
+        self.assertEqual(call["is_batched"], False)
+        self.assertIsNone(call["seq_start_per_req"])
+        self.assertIsNone(call["cu_seq_per_req"])
+        # positions == arange(sp, sp+S) per _build_prefill_positions contract.
+        expected_pos = torch.arange(10, 30, dtype=torch.long, device=self.device)
+        self.assertTrue(torch.equal(call["positions"], expected_pos))
+        # b_idx == zeros(S) (B==1 flat batch).
+        self.assertTrue(
+            torch.equal(
+                call["b_idx"], torch.zeros(20, dtype=torch.long, device=self.device)
+            )
+        )
+
+    def test_varlen_b2_threads_position_ids_and_req_id(self) -> None:
+        """B==2 cold+cont: positions = position_ids.long(), b_idx =
+        req_id_per_token.long(), is_batched=True, seq_start_per_req =
+        prefix_lengths.int32, cu_seq_per_req = cu_seqlens.int32."""
+        stub = _make_no_bind_stub(win=8, compress_ratio=128, n_reqs=2)
+        ret = self._call(
+            stub,
+            sp_int=0,
+            seqlen=0,
+            batch_size=2,
+            prefix_lengths=[0, 32],
+            input_lengths=[8, 6],
+        )
+        self.assertEqual(ret, "compressor_meta_call_1")
+        call = stub.compressor.calls[0]
+        self.assertEqual(call["is_batched"], True)
+        # positions == flat per-token absolute positions (req0 [0..7] +
+        # req1 [32..37]).
+        expected_pos = torch.cat(
+            [
+                torch.arange(0, 8, dtype=torch.long, device=self.device),
+                torch.arange(32, 38, dtype=torch.long, device=self.device),
+            ]
+        )
+        self.assertTrue(torch.equal(call["positions"], expected_pos))
+        self.assertEqual(call["positions"].dtype, torch.long)
+        self.assertTrue(call["positions"].is_contiguous())
+        # b_idx == req_id_per_token (req0 zeros, req1 ones).
+        expected_bidx = torch.tensor(
+            [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1],
+            dtype=torch.long,
+            device=self.device,
+        )
+        self.assertTrue(torch.equal(call["b_idx"], expected_bidx))
+        # seq_start_per_req == prefix_lengths int32.
+        self.assertEqual(call["seq_start_per_req"].dtype, torch.int32)
+        self.assertTrue(
+            torch.equal(
+                call["seq_start_per_req"],
+                torch.tensor([0, 32], dtype=torch.int32, device=self.device),
+            )
+        )
+        # cu_seq_per_req == cu_seqlens int32 = [0, 8, 14].
+        self.assertEqual(call["cu_seq_per_req"].dtype, torch.int32)
+        self.assertTrue(
+            torch.equal(
+                call["cu_seq_per_req"],
+                torch.tensor([0, 8, 14], dtype=torch.int32, device=self.device),
+            )
+        )
+
+    def test_b1_with_varlen_tensors_takes_legacy(self) -> None:
+        """batch_size==1 forces the legacy branch even when env=1 + varlen
+        tensors populated. ``_is_varlen_prefill(1) == False``."""
+        stub = _make_no_bind_stub(win=8, compress_ratio=128)
+        # Pass varlen tensors with B==1 — same as upper-layer broadcast
+        # builder does when there's only one request in the batch.
+        positions, req_id, cu_seqlens = _flat_positions([4], [10], self.device)
+        pl = torch.tensor([4], dtype=torch.int32, device=self.device)
+        il = torch.tensor([10], dtype=torch.int32, device=self.device)
+        stub._build_compressor_meta(
+            seqlen=10,
+            sp_int=4,
+            device=self.device,
+            batch_size=1,
+            cu_seqlens=cu_seqlens,
+            input_lengths=il,
+            prefix_lengths=pl,
+            sp_per_req=pl.to(torch.int64),
+            position_ids=positions,
+            req_id_per_token=req_id,
+            max_seqlen_q=10,
+        )
+        call = stub.compressor.calls[0]
+        self.assertEqual(call["is_batched"], False)
+        self.assertIsNone(call["seq_start_per_req"])
+        self.assertIsNone(call["cu_seq_per_req"])
+        # B==1 + varlen tensors collapse to the same positions/b_idx as
+        # _build_prefill_positions(sp=4, bsz=1, seqlen=10).
+        expected_pos = torch.arange(4, 14, dtype=torch.long, device=self.device)
+        self.assertTrue(torch.equal(call["positions"], expected_pos))
+
+    def test_env_disabled_forces_legacy_under_b2(self) -> None:
+        stub = _make_no_bind_stub(win=8, compress_ratio=128, n_reqs=2)
+        with mock.patch.dict(os.environ, {"DSV4_VARLEN_PREFILL": "0"}):
+            self._call(
+                stub,
+                sp_int=0,
+                seqlen=0,
+                batch_size=2,
+                prefix_lengths=[0, 32],
+                input_lengths=[8, 6],
+            )
+        call = stub.compressor.calls[0]
+        self.assertEqual(call["is_batched"], False)
+        self.assertIsNone(call["seq_start_per_req"])
+        self.assertIsNone(call["cu_seq_per_req"])
+        # Legacy path uses (sp_int=0, seqlen=14) — falls back to scalars.
+        # _build_prefill_positions(0, 1, 14) = arange(14), zeros(14).
+        # NOTE: seqlen forwarded from the upper-layer builder (positions.numel())
+        # via our _call helper above — which under env=0 still uses
+        # batch_size > 1 branch in our helper. We just hand seqlen=14, sp=0.
+        # The helper goes through batch_size>1 branch passing pl/il etc.,
+        # but the dispatch inside _build_compressor_meta sees env=0 and
+        # picks legacy → calls _build_prefill_positions(prefix_lengths[0]=0, 1, 14)
+        expected_pos = torch.arange(14, dtype=torch.long, device=self.device)
+        self.assertTrue(torch.equal(call["positions"], expected_pos))
+
+
+# -------------------------------------------------------------------------
+# 6. _build_csa_prefill_meta — wraps indexer.prepare + compressor +
+#    workspace_meta. Verifies all three sub-calls receive the right
+#    varlen kwargs.
+# -------------------------------------------------------------------------
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA needed for tensor scaffolding")
+class BuildCsaPrefillMetaTest(unittest.TestCase):
+
+    def setUp(self) -> None:
+        self.device = _device()
+
+    def _call(
+        self,
+        stub: _NoBindStubAttention,
+        prefix_lengths: list,
+        input_lengths: list,
+    ) -> CsaPrefillMeta:
+        positions, req_id, cu_seqlens = _flat_positions(
+            prefix_lengths, input_lengths, self.device
+        )
+        pl = torch.tensor(prefix_lengths, dtype=torch.int32, device=self.device)
+        il = torch.tensor(input_lengths, dtype=torch.int32, device=self.device)
+        # ``_build_csa_prefill_meta`` asserts ``isinstance(self.indexer,
+        # IndexerFP8)``. Patch the symbol the builder imports to our stub
+        # base so the type check passes without dragging in the real
+        # IndexerFP8 weights / DeepGEMM kernels.
+        with mock.patch(
+            "rtp_llm.models_py.modules.dsv4.fp8.indexer.IndexerFP8",
+            _StubIndexer,
+        ):
+            return stub._build_csa_prefill_meta(
+                seqlen=int(positions.numel()),
+                sp_int=prefix_lengths[0],
+                device=self.device,
+                batch_size=len(input_lengths),
+                cu_seqlens=cu_seqlens,
+                input_lengths=il,
+                prefix_lengths=pl,
+                sp_per_req=pl.to(torch.int64),
+                position_ids=positions,
+                req_id_per_token=req_id,
+                max_seqlen_q=int(il.max().item()),
+            )
+
+    def test_b1_legacy_indexer_args(self) -> None:
+        """B==1: indexer.prepare gets bsz=1 + scalar (seqlen, sp_int);
+        varlen kwargs still threaded but batch_size=1 ⇒ legacy semantics."""
+        stub = _make_no_bind_stub(win=8, compress_ratio=4, n_reqs=1, bind_indexer=True)
+        ret = self._call(stub, [4], [10])
+        self.assertIsInstance(ret, CsaPrefillMeta)
+        # Indexer received the explicit varlen kwargs even on B==1 (the
+        # builder always forwards them so signature stays stable).
+        idx_call = stub.indexer.calls[0]
+        self.assertEqual(idx_call["bsz"], 1)
+        self.assertEqual(idx_call["seqlen"], 10)
+        self.assertEqual(idx_call["sp_int"], 4)
+        self.assertEqual(idx_call["batch_size"], 1)
+        self.assertEqual(idx_call["max_seqlen_q"], 10)
+        # Indexer's INDEXER_KV pool table forwarded as-is.
+        self.assertIs(
+            idx_call["kv_block_table"],
+            stub._block_tables_by_type[INDEXER_KV],
+        )
+        self.assertEqual(idx_call["kv_eb"], 32)  # from _make_meta_stub default
+        # Inlined compressor.prepare_metadata took the legacy branch.
+        cmp_call = stub.compressor.calls[0]
+        self.assertEqual(cmp_call["is_batched"], False)
+        self.assertIsNone(cmp_call["seq_start_per_req"])
+        self.assertIsNone(cmp_call["cu_seq_per_req"])
+
+    def test_b2_varlen_threads_all_kwargs(self) -> None:
+        """B==2: indexer.prepare receives every per-request tensor,
+        compressor.prepare_metadata uses position_ids/req_id_per_token
+        AND is_batched + seq_start_per_req + cu_seq_per_req."""
+        stub = _make_no_bind_stub(win=8, compress_ratio=4, n_reqs=2, bind_indexer=True)
+        ret = self._call(stub, [0, 32], [8, 6])
+        self.assertIsInstance(ret, CsaPrefillMeta)
+
+        # ---- Indexer call ----
+        idx_call = stub.indexer.calls[0]
+        self.assertEqual(idx_call["bsz"], 1)  # legacy positional kept
+        self.assertEqual(idx_call["batch_size"], 2)  # canonical varlen B
+        self.assertEqual(idx_call["seqlen"], 14)  # T_total = 8+6
+        self.assertEqual(idx_call["max_seqlen_q"], 8)  # max(input_lengths)
+        # Per-request tensors threaded through.
+        self.assertIsNotNone(idx_call["cu_seqlens"])
+        self.assertTrue(
+            torch.equal(
+                idx_call["cu_seqlens"],
+                torch.tensor([0, 8, 14], dtype=torch.int32, device=self.device),
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                idx_call["prefix_lengths"],
+                torch.tensor([0, 32], dtype=torch.int32, device=self.device),
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                idx_call["input_lengths"],
+                torch.tensor([8, 6], dtype=torch.int32, device=self.device),
+            )
+        )
+        # position_ids per token — same as _flat_positions builds.
+        expected_pos = torch.cat(
+            [
+                torch.arange(0, 8, dtype=torch.int64, device=self.device),
+                torch.arange(32, 38, dtype=torch.int64, device=self.device),
+            ]
+        )
+        self.assertTrue(torch.equal(idx_call["position_ids"], expected_pos))
+
+        # ---- Compressor call (inline) ----
+        cmp_call = stub.compressor.calls[0]
+        self.assertEqual(cmp_call["is_batched"], True)
+        self.assertEqual(cmp_call["positions"].dtype, torch.long)
+        self.assertTrue(torch.equal(cmp_call["positions"], expected_pos))
+        # b_idx == req_id_per_token long.
+        expected_bidx = torch.tensor(
+            [0] * 8 + [1] * 6,
+            dtype=torch.long,
+            device=self.device,
+        )
+        self.assertTrue(torch.equal(cmp_call["b_idx"], expected_bidx))
+        # seq_start_per_req == prefix_lengths int32.
+        self.assertTrue(
+            torch.equal(
+                cmp_call["seq_start_per_req"],
+                torch.tensor([0, 32], dtype=torch.int32, device=self.device),
+            )
+        )
+        # cu_seq_per_req == cu_seqlens int32.
+        self.assertTrue(
+            torch.equal(
+                cmp_call["cu_seq_per_req"],
+                torch.tensor([0, 8, 14], dtype=torch.int32, device=self.device),
+            )
+        )
+
+        # ---- Workspace meta ----
+        wm = ret.workspace_meta
+        self.assertIsNotNone(wm)
+        # CSA layer ⇒ dense_cmp_topk = None (indexer fills runtime topk).
+        self.assertIsNone(wm.dense_cmp_topk)
+        # Per-request fields baked correctly (delegated to _build_workspace_meta
+        # which has its own dedicated test class above; just spot-check).
+        self.assertEqual(int(wm.swa_seq_lens.shape[0]), 2)
+
+    def test_b1_csa_returns_workspace_meta_with_no_dense_topk(self) -> None:
+        """CSA layer always builds workspace_meta with dense_cmp_topk=None
+        regardless of B — runtime indexer output replaces it."""
+        stub = _make_no_bind_stub(win=8, compress_ratio=4, n_reqs=1, bind_indexer=True)
+        ret = self._call(stub, [4], [10])
+        self.assertIsNotNone(ret.workspace_meta)
+        self.assertIsNone(ret.workspace_meta.dense_cmp_topk)
+        # And indexer + compressor returns are bundled into the meta.
+        self.assertEqual(ret.indexer_meta, "indexer_meta_call_1")
+        self.assertEqual(ret.compressor_meta, "compressor_meta_call_1")
+
+
+# -------------------------------------------------------------------------
+# 7. _build_hca_prefill_meta — wraps _build_compressor_meta +
+#    _build_workspace_meta(with_dense_cmp_topk=True). Verifies dense_cmp_topk
+#    is built + compressor_meta delegated correctly.
+# -------------------------------------------------------------------------
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA needed for tensor scaffolding")
+class BuildHcaPrefillMetaTest(unittest.TestCase):
+
+    def setUp(self) -> None:
+        self.device = _device()
+
+    def _call(
+        self,
+        stub: _NoBindStubAttention,
+        prefix_lengths: list,
+        input_lengths: list,
+    ) -> HcaPrefillMeta:
+        positions, req_id, cu_seqlens = _flat_positions(
+            prefix_lengths, input_lengths, self.device
+        )
+        pl = torch.tensor(prefix_lengths, dtype=torch.int32, device=self.device)
+        il = torch.tensor(input_lengths, dtype=torch.int32, device=self.device)
+        return stub._build_hca_prefill_meta(
+            seqlen=int(positions.numel()),
+            sp_int=prefix_lengths[0],
+            device=self.device,
+            batch_size=len(input_lengths),
+            cu_seqlens=cu_seqlens,
+            input_lengths=il,
+            prefix_lengths=pl,
+            sp_per_req=pl.to(torch.int64),
+            position_ids=positions,
+            req_id_per_token=req_id,
+            max_seqlen_q=int(il.max().item()),
+        )
+
+    def test_b1_legacy_compressor_call(self) -> None:
+        stub = _make_no_bind_stub(win=512, compress_ratio=128, n_reqs=1)
+        ret = self._call(stub, [256], [128])
+        self.assertIsInstance(ret, HcaPrefillMeta)
+        cmp_call = stub.compressor.calls[0]
+        self.assertEqual(cmp_call["is_batched"], False)
+        self.assertIsNone(cmp_call["seq_start_per_req"])
+        self.assertIsNone(cmp_call["cu_seq_per_req"])
+        # Legacy positions = arange(256, 256+128) per _build_prefill_positions.
+        expected_pos = torch.arange(
+            256,
+            384,
+            dtype=torch.long,
+            device=self.device,
+        )
+        self.assertTrue(torch.equal(cmp_call["positions"], expected_pos))
+        # workspace_meta has dense_cmp_topk (HCA path).
+        wm = ret.workspace_meta
+        self.assertIsNotNone(wm)
+        self.assertIsNotNone(wm.dense_cmp_topk)
+        # N=(256+128)//128=3, T=128.
+        self.assertEqual(wm.dense_cmp_topk.shape, (128, 3))
+
+    def test_b2_varlen_compressor_and_workspace_dense_topk(self) -> None:
+        """B==2: compressor gets is_batched=True + per-request tensors;
+        workspace gets dense_cmp_topk shape [T_total, N_max]."""
+        stub = _make_no_bind_stub(win=512, compress_ratio=128, n_reqs=2)
+        # sp=[0, 256], S=[64, 128]: N=[0, 3], N_max=3, T_total=192.
+        ret = self._call(stub, [0, 256], [64, 128])
+        cmp_call = stub.compressor.calls[0]
+        self.assertEqual(cmp_call["is_batched"], True)
+        # positions = req0 [0..63] + req1 [256..383]
+        expected_pos = torch.cat(
+            [
+                torch.arange(0, 64, dtype=torch.long, device=self.device),
+                torch.arange(256, 384, dtype=torch.long, device=self.device),
+            ]
+        )
+        self.assertTrue(torch.equal(cmp_call["positions"], expected_pos))
+        # b_idx = req_id long.
+        expected_bidx = torch.tensor(
+            [0] * 64 + [1] * 128,
+            dtype=torch.long,
+            device=self.device,
+        )
+        self.assertTrue(torch.equal(cmp_call["b_idx"], expected_bidx))
+        # seq_start_per_req = prefix_lengths int32.
+        self.assertTrue(
+            torch.equal(
+                cmp_call["seq_start_per_req"],
+                torch.tensor([0, 256], dtype=torch.int32, device=self.device),
+            )
+        )
+        # workspace dense_cmp_topk: [192, 3] arange.
+        wm = ret.workspace_meta
+        self.assertIsNotNone(wm)
+        self.assertEqual(wm.dense_cmp_topk.shape, (192, 3))
+        self.assertEqual(wm.N, 3)
+
+    def test_hca_has_no_indexer_call(self) -> None:
+        """HCA path doesn't call indexer.prepare (HCA has no indexer).
+        Stub indexer left attached as None — verify nothing tries to use it."""
+        stub = _make_no_bind_stub(
+            win=512, compress_ratio=128, n_reqs=1, bind_indexer=False
+        )
+        # Should not raise. self.indexer is None on HCA layers in the prod
+        # construction path; the builder must never touch it.
+        self._call(stub, [256], [128])
+        self.assertIsNone(stub.indexer)
+
+
+# -------------------------------------------------------------------------
+# 8. _is_varlen_prefill helper — single dispatch gate used by every
+#    prepare-metadata builder. Pin its semantics so a future tweak doesn't
+#    silently change the dispatch threshold.
+# -------------------------------------------------------------------------
+class IsVarlenPrefillGateTest(unittest.TestCase):
+
+    def test_env_default_is_on(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("DSV4_VARLEN_PREFILL", None)
+            self.assertTrue(_use_varlen_prefill())
+
+    def test_env_zero_disables(self) -> None:
+        with mock.patch.dict(os.environ, {"DSV4_VARLEN_PREFILL": "0"}):
+            self.assertFalse(_use_varlen_prefill())
+
+    def test_b1_always_legacy_even_under_env_on(self) -> None:
+        with mock.patch.dict(os.environ, {"DSV4_VARLEN_PREFILL": "1"}):
+            self.assertFalse(_is_varlen_prefill(0))
+            self.assertFalse(_is_varlen_prefill(1))
+            self.assertTrue(_is_varlen_prefill(2))
+            self.assertTrue(_is_varlen_prefill(64))
+
+    def test_env_off_overrides_b_gt_1(self) -> None:
+        with mock.patch.dict(os.environ, {"DSV4_VARLEN_PREFILL": "0"}):
+            self.assertFalse(_is_varlen_prefill(2))
+            self.assertFalse(_is_varlen_prefill(128))
+
+
 if __name__ == "__main__":
     unittest.main()
