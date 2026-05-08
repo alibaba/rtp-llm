@@ -13,9 +13,8 @@ PrefillServerCallerContext::PrefillServerCallerContext(const std::string& prefil
 }
 
 PrefillServerCallerContext::~PrefillServerCallerContext() {
-    if (client_context_) {
-        client_context_->TryCancel();
-    }
+    cancel();
+    wait();
     completion_queue_->Shutdown();
     // Drain all remaining events per gRPC contract: after Shutdown(), Next() must be
     // called until it returns SHUTDOWN to avoid leaking pending async operations.
@@ -25,16 +24,73 @@ PrefillServerCallerContext::~PrefillServerCallerContext() {
 }
 
 void PrefillServerCallerContext::cancel() {
-    std::unique_lock<std::shared_mutex> lock(state_mutex_);
-    if (finished_) {
-        return;
+    bool need_cancel = false;
+    {
+        std::unique_lock<std::shared_mutex> lock(state_mutex_);
+        if (!finished_ && !cancel_requested_) {
+            cancel_requested_ = true;
+            need_cancel       = true;
+        }
     }
-    if (client_context_) {
+    if (need_cancel && client_context_) {
         client_context_->TryCancel();
         RTP_LLM_LOG_DEBUG("PrefillServerCallerContext::cancel: cancelled grpc request, prefill_addr: %s",
                           prefill_addr_.c_str());
     }
-    finished_ = true;
+}
+
+void PrefillServerCallerContext::wait() {
+    joinPollingThread();
+}
+
+void PrefillServerCallerContext::startPolling() {
+    if (polling_thread_.joinable()) {
+        return;
+    }
+    polling_thread_ = std::thread([this]() {
+        try {
+            while (!done()) {
+                checkDone();
+                if (!done()) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+            }
+        } catch (const std::exception& e) {
+            {
+                std::unique_lock<std::shared_mutex> lock(state_mutex_);
+                if (!finished_) {
+                    finished_ = true;
+                    status_   = grpc::Status(grpc::StatusCode::INTERNAL, e.what());
+                }
+            }
+            if (client_context_) {
+                client_context_->TryCancel();
+            }
+            RTP_LLM_LOG_ERROR(
+                "PrefillServerCallerContext::startPolling: unexpected exception, prefill_addr: %s, error: %s",
+                prefill_addr_.c_str(),
+                e.what());
+        } catch (...) {
+            {
+                std::unique_lock<std::shared_mutex> lock(state_mutex_);
+                if (!finished_) {
+                    finished_ = true;
+                    status_   = grpc::Status(grpc::StatusCode::INTERNAL, "unknown exception in prefill poll thread");
+                }
+            }
+            if (client_context_) {
+                client_context_->TryCancel();
+            }
+            RTP_LLM_LOG_ERROR("PrefillServerCallerContext::startPolling: unknown exception, prefill_addr: %s",
+                              prefill_addr_.c_str());
+        }
+    });
+}
+
+void PrefillServerCallerContext::joinPollingThread() {
+    if (polling_thread_.joinable() && polling_thread_.get_id() != std::this_thread::get_id()) {
+        polling_thread_.join();
+    }
 }
 
 void PrefillServerCallerContext::handleReadChunkLocked(const GenerateOutputsPB& response) {
@@ -79,7 +135,7 @@ void PrefillServerCallerContext::checkDone() {
 
     if (next_status == grpc::CompletionQueue::NextStatus::SHUTDOWN) {
         finished_ = true;
-        if (!finish_started_) {
+        if (!finish_started_ && !cancel_requested_) {
             status_ = grpc::Status(grpc::StatusCode::CANCELLED, "completion queue shutdown");
         }
         return;
@@ -121,6 +177,9 @@ void PrefillServerCallerContext::checkDone() {
         finished_ = true;
         if (!ok) {
             status_ = grpc::Status(grpc::StatusCode::INTERNAL, "prefill stream finish event failed");
+        }
+        if (cancel_requested_ && status_.ok()) {
+            status_ = grpc::Status(grpc::StatusCode::CANCELLED, "prefill request cancelled");
         }
         if (!status_.ok()) {
             RTP_LLM_LOG_WARNING(

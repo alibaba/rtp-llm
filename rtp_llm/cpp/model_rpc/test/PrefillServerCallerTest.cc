@@ -193,6 +193,19 @@ TEST_F(PrefillServerCallerTest, CancelMarksContextDoneAndUnsuccessful) {
     EXPECT_TRUE(server.service()->waitCancelled(std::chrono::seconds(1)));
 }
 
+TEST_F(PrefillServerCallerTest, DestroyContextCancelsOutstandingPrefillRpc) {
+    FakePrefillRpcServer server(std::make_unique<FakePrefillRpcService>(FakePrefillRpcService::Mode::kWaitForCancel));
+    ASSERT_TRUE(server.start());
+
+    {
+        auto context = callPrefill(server, 1004, "destroy-cancel");
+        ASSERT_NE(context, nullptr);
+        ASSERT_TRUE(server.service()->waitStarted(std::chrono::seconds(1)));
+    }
+
+    EXPECT_TRUE(server.service()->waitCancelled(std::chrono::seconds(1)));
+}
+
 TEST_F(PrefillServerCallerTest, RpcFailureWithoutAnyChunkStaysUnsuccessful) {
     FakePrefillRpcServer server(
         std::make_unique<FakePrefillRpcService>(FakePrefillRpcService::Mode::kReturnErrorWithoutChunk));

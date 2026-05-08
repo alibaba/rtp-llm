@@ -255,8 +255,8 @@ TEST_F(StreamCacheResourceTest, testStreamCacheResourceReuseCacheMethod) {
     ASSERT_FALSE(resource.reuseCache());
 }
 
-TEST_F(StreamCacheResourceTest, testInitKVBlock_TriggersLoadCacheSync_AndUpdatesReuseLen) {
-    // initKVBlock() ends with loadCacheSync() (same as GenerateStream::initKVBlock).
+TEST_F(StreamCacheResourceTest, testInitKVBlock_ThenAsyncLoadCache_UpdatesReuseLen) {
+    // initKVBlock() allocates blocks; async cache loading is driven separately by the state machine path.
     prepareResource(/*reuse_cache=*/true);
     auto& resource = stream_->streamCacheResource();
 
@@ -320,7 +320,7 @@ TEST_F(StreamCacheResourceTest, testDecodeInitKVBlock_DisablesDeviceCacheOnlyFor
     stream_->generate_input_->generate_config->enable_device_cache = true;
     resource.resource_context_.enable_device_cache                 = true;
 
-    // initKVBlock() -> loadCacheSync() -> asyncRead.
+    // initKVBlock() allocates first decode blocks; asyncLoadCache() then issues connector asyncRead.
     stream_->generate_input_->generate_config->enable_memory_cache = true;
     resource.resource_context_.enable_memory_cache                 = true;
 
@@ -367,7 +367,7 @@ TEST_F(StreamCacheResourceTest, testDecodeInitKVBlock_DisablesDeviceCacheOnlyFor
 }
 
 TEST_F(StreamCacheResourceTest, testTryReleaseKVBlock_TriggersStoreCacheAsync_WhenFinishedAndReuseCache) {
-    // Use incrKVBlock() to avoid loadCacheSync() noise; we only want to validate storeCacheAsync path.
+    // Use incrKVBlock() here; this test only validates the storeCacheAsync path.
     prepareResource(/*reuse_cache=*/true);
     auto& resource = stream_->streamCacheResource();
 
@@ -718,12 +718,10 @@ TEST_F(StreamCacheResourceTest, testInitKVBlock_SecondCallDoesNotOverwriteReuseL
     auto                  load_ctx1 = std::make_shared<FusedAsyncReadContext>(fused_match1, kv_resource1, meta1);
     load_ctx1->setFusedReadContext(nullptr);
 
-    // Second call: load_cache_once_ prevents re-issue (no asyncRead call expected)
-    // loadCacheSync runs once inside initKVBlock; second initKVBlock skips async read (load_cache_once_).
     EXPECT_CALL(*mock_coord, asyncRead(testing::_))
         .WillOnce(testing::Return(std::static_pointer_cast<AsyncContext>(load_ctx1)));
 
-    // First initKVBlock + asyncLoadCache + loadCacheDone: sets reuse lengths
+    // First initKVBlock allocates blocks; asyncLoadCache/loadCacheDone applies connector reuse lengths.
     ASSERT_TRUE(resource.initKVBlock(/*reserve_step=*/0).ok());
     ASSERT_GT(resource.curBlocksNum(), 0);
     ASSERT_TRUE(resource.asyncLoadCache());
@@ -734,12 +732,9 @@ TEST_F(StreamCacheResourceTest, testInitKVBlock_SecondCallDoesNotOverwriteReuseL
     EXPECT_EQ(stream_->reuseLength(), expected_total_reuse_len);
     EXPECT_EQ(stream_->memoryReuseLength(), expected_memory_reuse_len);
 
-    // Second initKVBlock + asyncLoadCache + loadCacheDone: load_cache_once_ prevents re-issue.
-    // The once-per-lifecycle guard means the second asyncLoadCache() returns false (skipped),
-    // which inherently preserves the reuse lengths set by the first load.
+    // Second initKVBlock should not clear the reuse lengths already applied by the completed async load.
+    // Re-issuing asyncLoadCache is now controlled by the state machine's LoadInitiated event, not by StreamCacheResource.
     ASSERT_TRUE(resource.initKVBlock(/*reserve_step=*/0).ok());
-    ASSERT_TRUE(resource.asyncLoadCache());
-    ASSERT_TRUE(resource.loadCacheDone());
 
     EXPECT_EQ(stream_->reuseLength(), expected_total_reuse_len);
     EXPECT_EQ(stream_->initialReuseLength(), expected_total_reuse_len);
@@ -842,7 +837,7 @@ TEST_F(StreamCacheResourceTest, testWaitLoadCacheDone_ZeroReuseLen_DoesNotOverwr
     prepareResource(/*reuse_cache=*/true);
     auto& resource = stream_->streamCacheResource();
 
-    // Pre-set reuse lengths on the stream (simulating a prior successful loadCacheSync)
+    // Pre-set reuse lengths on the stream (simulating a prior successful async cache load)
     stream_->setReuseLength(100);
     stream_->setInitialReuseLength(100);
     stream_->setLocalReuseLength(80);

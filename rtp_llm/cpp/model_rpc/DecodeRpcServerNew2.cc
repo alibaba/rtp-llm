@@ -38,6 +38,20 @@ grpc::Status DecodeRpcServerNew2::init(const EngineInitParams&                  
 grpc::Status DecodeRpcServerNew2::GenerateStreamCall(grpc::ServerContext*                   server_context,
                                                      const GenerateInputPB*                 request,
                                                      grpc::ServerWriter<GenerateOutputsPB>* response_writer) {
+    struct PrefillContextGuard {
+        std::shared_ptr<PrefillServerCallerContext> context;
+
+        ~PrefillContextGuard() {
+            if (!context) {
+                return;
+            }
+            if (!context->done()) {
+                context->cancel();
+            }
+            context->wait();
+        }
+    };
+
     // Check if pd separation should be used
     auto pd_separation = request->generate_config().max_new_tokens() > 1 && request->generate_config().num_beams() <= 1
                          && request->generate_config().variable_num_beams().size() == 0
@@ -110,6 +124,7 @@ grpc::Status DecodeRpcServerNew2::GenerateStreamCall(grpc::ServerContext*       
 
     // 由 DecodeRpcServerNew2 负责发起异步 prefill 调用；保留局部 context 防止提前销毁导致 prefill 侧 stream 被 cancel
     std::shared_ptr<PrefillServerCallerContext> prefill_caller_ctx;
+    PrefillContextGuard                         prefill_context_guard;
     if (need_prefill) {
         const auto& unique_key  = input->generate_config->unique_key;
         auto        deadline_us = static_cast<int64_t>(request->generate_config().timeout_ms()) * 1000;
@@ -123,6 +138,7 @@ grpc::Status DecodeRpcServerNew2::GenerateStreamCall(grpc::ServerContext*       
                 serializeErrorMsg(generate_context.request_key, generate_context.error_info);
             return generate_context.error_status;
         }
+        prefill_context_guard.context = prefill_caller_ctx;
     }
 
     engine_->enqueue(stream);
@@ -130,6 +146,10 @@ grpc::Status DecodeRpcServerNew2::GenerateStreamCall(grpc::ServerContext*       
     generate_context.error_status =
         pollStreamOutput(server_context, generate_context.request_key, response_writer, generate_context.getStream());
     meta_->dequeue(generate_context.request_id, generate_context.getStream());
+
+    if (prefill_caller_ctx && (!generate_context.error_status.ok() || server_context->IsCancelled())) {
+        prefill_caller_ctx->cancel();
+    }
     return generate_context.error_status;
 }
 

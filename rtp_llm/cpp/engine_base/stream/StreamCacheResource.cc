@@ -65,6 +65,11 @@ public:
     GenerateStream* generateStream() const override {
         return generate_stream_;
     }
+    void reportError(ErrorCode error_code, const std::string& error_msg) override {
+        if (generate_stream_) {
+            generate_stream_->reportError(error_code, error_msg);
+        }
+    }
 
     // P2P routing context: cached at construction time, read-only access thereafter
     std::optional<P2PRoutingContext> p2pRouting() const override {
@@ -135,30 +140,23 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
         stream->step();
         auto new_tokens                   = torch::zeros({(int64_t)stream->nextBatchSize(), 1}, torch::kInt32);
         new_tokens.data_ptr<int32_t>()[0] = static_cast<int32_t>(payload->first_token_id);
-        stream->incLastOutputPos();
-        stream->update({.new_tokens        = new_tokens,
-                        .num_new_tokens    = 1,
-                        .hidden_states     = {},
-                        .logits            = {},
-                        .softmax_probs     = {},
-                        .cum_log_probs     = {},
-                        .all_probs         = {},
-                        .loss              = {},
-                        .src_batch_indices = {},
-                        .all_hidden_states = {}});
-        RTP_LLM_LOG_DEBUG("applyP2PSideChannel: appended first_token_id=%ld, stream_id=%ld",
-                          payload->first_token_id,
-                          stream->streamId());
+        stream->updateWithoutLock({.new_tokens             = new_tokens,
+                                   .num_new_tokens         = 1,
+                                   .hidden_states          = {},
+                                   .logits                 = {},
+                                   .softmax_probs          = {},
+                                   .cum_log_probs          = {},
+                                   .all_probs              = {},
+                                   .loss                   = {},
+                                   .src_batch_indices      = {},
+                                   .all_hidden_states      = {},
+                                   .update_remote_generate = false});
     }
 
     // 2. Reuse lengths
     if (payload->total_reuse_len > 0) {
-        stream->setInitialReuseLength(payload->total_reuse_len);
-        stream->setReuseLength(payload->total_reuse_len);
-        stream->setLocalReuseLength(payload->local_reuse_len + payload->memory_reuse_len);
-        stream->setMtpTokenIndex(payload->total_reuse_len);
-        stream->setMemoryReuseLength(payload->memory_reuse_len);
-        stream->setRemoteReuseLength(payload->remote_reuse_len);
+        stream->setPrefillReuseLength(
+            payload->total_reuse_len, payload->local_reuse_len, payload->remote_reuse_len, payload->memory_reuse_len);
         RTP_LLM_LOG_DEBUG("applyP2PSideChannel: reuse total=%d, local=%d, remote=%d, memory=%d",
                           payload->total_reuse_len,
                           payload->local_reuse_len,
@@ -302,7 +300,6 @@ void StreamCacheResource::releaseResource() {
     tryReleaseKVBlock(curBlocksNum());
     batch_kv_cache_resource_->clearBlocks();
     resource_released_ = true;
-    load_cache_once_.store(false, std::memory_order_release);
 }
 
 int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
@@ -413,13 +410,13 @@ absl::Status StreamCacheResource::incrKVBlock(size_t reserve_step) {
     }
 
     MallocInfo malloc_info;
-    malloc_info.batch_kv_cache_resource = batch_kv_cache_resource_;
-    malloc_info.complete_token_ids      = stream_->completeTokenIdsPtr();
-    malloc_info.request_id              = stream_->streamId();
-    malloc_info.verbose                 = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
-    malloc_info.reuse_cache             = reuseCache();
-    malloc_info.enable_device_cache     = reuseCache() && enableDeviceCache();
-    malloc_info.enable_remove_skipped_blocks   = true;
+    malloc_info.batch_kv_cache_resource      = batch_kv_cache_resource_;
+    malloc_info.complete_token_ids           = stream_->completeTokenIdsPtr();
+    malloc_info.request_id                   = stream_->streamId();
+    malloc_info.verbose                      = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
+    malloc_info.reuse_cache                  = reuseCache();
+    malloc_info.enable_device_cache          = reuseCache() && enableDeviceCache();
+    malloc_info.enable_remove_skipped_blocks = true;
 
     malloc_info.complete_token_ids->setReserveStep(reserve_step);
     auto result = resource_context_.cache_manager->malloc(malloc_info);
@@ -452,10 +449,6 @@ bool StreamCacheResource::asyncLoadCache() {
     }
     if (load_cache_context_) {
         return true;  // 已有进行中的 load 任务（幂等）
-    }
-    // Second+ initKVBlock (same stream): skip — reuse lengths already set on first load.
-    if (load_cache_once_.exchange(true)) {
-        return true;
     }
     auto meta = std::make_shared<MetaImpl>(
         reuseCache() && enableMemoryCache(), reuseCache() && enableRemoteCache(), stream_->traceId());
@@ -613,36 +606,6 @@ bool StreamCacheResource::enableTieredMemoryCache() const {
     return resource_context_.enable_tiered_memory_cache && enableMemoryCache() && enableDeviceCache();
 }
 
-void StreamCacheResource::loadCacheSync() {
-    RTP_LLM_PROFILE_FUNCTION();
-    if (!resource_context_.cache_manager || !resource_context_.cache_manager->hasActiveConnectors()) {
-        return;
-    }
-    // Memory/remote connectors require reuseCache(); P2P connector does not.
-    // Skip when only memory/remote connectors are active and reuseCache is disabled.
-    const bool has_reuse_path = reuseCache() && (enableMemoryCache() || enableRemoteCache());
-    const bool has_p2p_path   = resource_context_.cache_manager->hasP2PConnector();
-    if (!has_reuse_path && !has_p2p_path) {
-        return;
-    }
-    // Second+ initKVBlock (same stream): skip — reuse lengths already set on first load.
-    if (load_cache_once_.exchange(true)) {
-        return;
-    }
-    auto meta = std::make_shared<MetaImpl>(
-        reuseCache() && enableMemoryCache(), reuseCache() && enableRemoteCache(), stream_->traceId());
-    meta->generate_stream_ = stream_;
-    meta->fillRoutingContext(stream_);  // Fill routing context once from GenerateStream
-    auto connector_context = std::make_shared<KVCacheConnectorReadWriteContextImpl>(batch_kv_cache_resource_, meta);
-    std::shared_ptr<AsyncContext> load_cache_context;
-    {
-        RTP_LLM_PROFILE_SCOPE("asyncLoadCache");
-        load_cache_context = resource_context_.cache_manager->asyncLoadCache(connector_context);
-    }
-    waitLoadCacheDone(load_cache_context);
-    // TODO: scheduler will call incrkvblock after load cache, or may lack block on p2p connector
-}
-
 void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>& load_context) {
     RTP_LLM_PROFILE_FUNCTION();
     if (!load_context) {
@@ -690,6 +653,8 @@ std::shared_ptr<AsyncContext> StreamCacheResource::storeCacheAsync(
     const std::shared_ptr<BatchKVCacheResource>& batch_resource, bool enable_memory_cache, bool enable_remote_cache) {
     RTP_LLM_PROFILE_FUNCTION();
     auto meta              = std::make_shared<MetaImpl>(enable_memory_cache, enable_remote_cache, stream_->traceId());
+    meta->generate_stream_ = stream_;
+    meta->fillRoutingContext(stream_);
     auto connector_context = std::make_shared<KVCacheConnectorReadWriteContextImpl>(batch_resource, meta);
     auto store_context     = resource_context_.cache_manager->asyncStoreCache(connector_context);
     if (resource_context_.write_cache_sync) {

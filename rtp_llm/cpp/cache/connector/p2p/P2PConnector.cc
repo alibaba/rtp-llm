@@ -97,7 +97,7 @@ std::shared_ptr<AsyncContext> P2PConnector::asyncRead(const KVCacheResourcePtr& 
             RTP_LLM_LOG_WARNING("asyncRead failed, unique_key: %s, error: %s",
                                 meta->p2pRouting().value_or(Meta::P2PRoutingContext{}).unique_key.c_str(),
                                 result.error_info.ToString().c_str());
-            meta->setStop(result.error_info.code(), result.error_info.ToString());
+            meta->reportError(result.error_info.code(), result.error_info.ToString());
             return nullptr;
         }
         return result.context;
@@ -204,8 +204,22 @@ void P2PConnector::waitAndFillResponse(const std::shared_ptr<P2PConnectorResourc
             response.set_error_message("waitAndFillResponse: cancelled");
             return;
         }
-        resource_entry->side_channel_cv.wait_until(lock, timeout_tp);
+
+        P2PConnectorResourceEntry::SideChannelData side_channel_data;
+        if (stream_store_->consumeSideChannelData(unique_key, side_channel_data)) {
+            resource_entry->side_channel_data  = std::move(side_channel_data);
+            resource_entry->side_channel_ready = true;
+            break;
+        }
+
+        auto next_wake_tp = std::min(timeout_tp, std::chrono::system_clock::now() + std::chrono::milliseconds(10));
+        resource_entry->side_channel_cv.wait_until(lock, next_wake_tp);
         if (!resource_entry->side_channel_ready) {
+            if (stream_store_->consumeSideChannelData(unique_key, side_channel_data)) {
+                resource_entry->side_channel_data  = std::move(side_channel_data);
+                resource_entry->side_channel_ready = true;
+                break;
+            }
             if (std::chrono::system_clock::now() >= timeout_tp) {
                 RTP_LLM_LOG_WARNING("waitAndFillResponse: timeout, unique_key: %s", unique_key.c_str());
                 stream_store_->clearSideChannelData(unique_key);

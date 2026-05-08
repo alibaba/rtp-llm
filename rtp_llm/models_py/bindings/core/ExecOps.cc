@@ -143,7 +143,7 @@ class WriteCacheLayerContext: public KVCacheConnectorLayerContext {
 public:
     WriteCacheLayerContext(std::shared_ptr<KVCacheResource> resource,
                            int64_t                          request_id,
-                           std::optional<c10::Event>        attention_event):
+                           std::shared_ptr<torch::Event>    attention_event):
         resource_(std::move(resource)), request_id_(request_id), attention_event_(std::move(attention_event)) {}
 
     const KVCacheResource& kvCacheResource() const override {
@@ -158,18 +158,18 @@ public:
         return request_id_;
     }
 
-    std::optional<c10::Event> attentionEvent() const override {
+    std::shared_ptr<torch::Event> attentionEvent() const override {
         return attention_event_;
     }
 
 private:
     std::shared_ptr<KVCacheResource> resource_;
     int64_t                          request_id_;
-    std::optional<c10::Event>        attention_event_;
+    std::shared_ptr<torch::Event>    attention_event_;
 };
 
-std::optional<c10::Event> makeConnectorEvent(const std::shared_ptr<torch::Event>& event) {
-    return event ? std::optional<c10::Event>(*event) : std::nullopt;
+std::shared_ptr<torch::Event> makeConnectorEvent(const std::shared_ptr<torch::Event>& event) {
+    return event;
 }
 
 void writeCacheToConnector(const CacheStoreInputs& param, IKVCacheConnectorCoordinator* connector_coordinator) {
@@ -346,6 +346,7 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
     RTP_LLM_CHECK_WITH_INFO(param.host_kv_cache_offset.defined(), "failed to get host_kv_cache_offset");
     const int32_t* offset_addr          = nullptr;
     size_t         max_blocks_per_batch = 0;
+    int            gid                  = 0;
 
     bool is_hybrid = false;
     if (param.kv_cache_group_types_host.defined() && param.kv_cache_group_types_host.size(0) > 1) {
@@ -356,7 +357,7 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
     const size_t group_num = is_hybrid ? param.kv_cache_group_types_host.size(0) : 1;
 
     if (param.host_kv_cache_offset.dim() == 3) {
-        int gid = -1;
+        gid = -1;
         if (param.kv_cache_layer_to_group_host.defined() && param.layer_id >= 0
             && static_cast<size_t>(param.layer_id) < static_cast<size_t>(param.kv_cache_layer_to_group_host.numel())) {
             gid = param.kv_cache_layer_to_group_host.data_ptr<int32_t>()[param.layer_id];
@@ -367,7 +368,7 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
         max_blocks_per_batch         = group_offset_view.size(1);
         offset_addr                  = group_offset_view.data_ptr<int32_t>();
     } else {
-        int gid = 0;
+        gid = 0;
         if (param.kv_cache_layer_to_group_host.defined() && param.layer_id >= 0
             && static_cast<size_t>(param.layer_id) < static_cast<size_t>(param.kv_cache_layer_to_group_host.numel())) {
             gid = param.kv_cache_layer_to_group_host.data_ptr<int32_t>()[param.layer_id];
@@ -408,7 +409,9 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
             "write cache store, request id is %ld, blocks num is %ld", request_id, block_num + reuse_block_num);
 
         CacheGroupType group_type = CacheGroupType::FULL;
-        group_type = static_cast<CacheGroupType>(param.kv_cache_group_types_host.data_ptr<int32_t>()[gid]);
+        if (param.kv_cache_group_types_host.defined()) {
+            group_type = static_cast<CacheGroupType>(param.kv_cache_group_types_host.data_ptr<int32_t>()[gid]);
+        }
 
         const int total_blocks = block_num + reuse_block_num;
         if (total_blocks <= 0) {

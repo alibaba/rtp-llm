@@ -253,20 +253,6 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
         all_probs_ = update_info.all_probs.cpu();
     }
 
-    // TODO: move it to better position
-    RTP_LLM_LOG_DEBUG("stream [%ld] finished: %d, pd_sep: %d, is_streaming: %d, need_remote_generate: %d",
-                      streamId(),
-                      finished_,
-                      queryPdSep(),
-                      isStreaming(),
-                      update_info.update_remote_generate);
-
-    if (!finished_ && queryPdSep() && update_info.update_remote_generate) {
-        holdKVCacheForPDSep();
-        reportEventWithoutLock(StreamEvents::NeedRemoteGenerate);
-        reportEventWithoutLock(StreamEvents::GenerateDone);
-    }
-
     bool pd_sep_first_token = queryPdSep();
     bool need_update        = pd_sep_first_token || isStreaming() || finished_;
     if (!need_update) {

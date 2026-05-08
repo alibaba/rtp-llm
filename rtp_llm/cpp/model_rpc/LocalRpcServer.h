@@ -107,6 +107,7 @@ protected:
                                   const std::string&               request_key,
                                   WriterInterface*                 writer,
                                   std::shared_ptr<GenerateStream>& stream);
+    virtual void updateAuxInfo(GenerateOutputsPB& outputs_pb, std::shared_ptr<GenerateStream>& stream) {}
 
     // Shared helpers for single and batch paths
     ErrorInfo prepareInput(const GenerateInputPB& input_pb, std::shared_ptr<GenerateInput>& output);

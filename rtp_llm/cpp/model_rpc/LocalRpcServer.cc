@@ -105,6 +105,7 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
             RTP_LLM_LOG_WARNING("request [%s] cancelled by user", request_key.c_str());
             return grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled by user");
         }
+        updateAuxInfo(outputs_pb, stream);
         if (!writer->Write(outputs_pb)) {
             stream->reportError(ErrorCode::CANCELLED, "write outputs pb failed");
             RTP_LLM_LOG_WARNING("request [%s] write outputs pb failed", request_key.c_str());
@@ -119,7 +120,7 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
             }
             break;
         }
-        if (stream->queryPdSep()) {
+        if (stream->queryPdSep() && stream->resourceContext().role_type == RoleType::PREFILL) {
             stream->waitForRemoteGenerate();
             break;
         }

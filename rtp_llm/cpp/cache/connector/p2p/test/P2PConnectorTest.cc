@@ -318,6 +318,57 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnOk_WithNotifySideChannelMechanism) {
     }
 }
 
+TEST_F(P2PConnectorTest, HandleRead_ReturnOk_WhenNotifySideChannelAfterSteal) {
+    std::string unique_key  = "test_notify_side_channel_after_steal";
+    int64_t     request_id  = 5011;
+    int64_t     timeout_ms  = 5000;
+    int64_t     deadline_ms = currentTimeMs() + timeout_ms;
+    auto        resource    = createValidKVCacheResource(2, 2);
+    auto        stream      = createGenerateStream(unique_key, request_id, timeout_ms);
+    auto        meta        = createMockMeta(stream.get());
+    connector_->asyncMatch(resource, meta);
+
+    for (auto& server : tp_broadcast_servers_) {
+        server->service()->setP2PResponseSuccess(true);
+        server->service()->resetCallCounts();
+    }
+
+    auto request = createValidStartLoadRequest(unique_key, deadline_ms, 1);
+
+    auto handle_read_future = std::async(std::launch::async, [&]() {
+        P2PConnectorStartLoadResponsePB response;
+        connector_->handleRead(request, response);
+        return response;
+    });
+
+    bool kv_cache_sent = false;
+    for (int i = 0; i < 100; ++i) {
+        if (tp_broadcast_servers_[0]->service()->getBroadcastTpCallCount() > 0) {
+            kv_cache_sent = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    ASSERT_TRUE(kv_cache_sent);
+
+    P2PConnectorResourceEntry::SideChannelData data;
+    data.has_first_token  = true;
+    data.first_token_id   = 23456;
+    data.total_reuse_len  = 12;
+    data.local_reuse_len  = 4;
+    data.remote_reuse_len = 8;
+    connector_->streamStore()->notifySideChannelReady(unique_key, deadline_ms, data);
+
+    auto status = handle_read_future.wait_for(std::chrono::seconds(2));
+    ASSERT_EQ(status, std::future_status::ready);
+
+    auto response = handle_read_future.get();
+    EXPECT_EQ(response.error_code(), ErrorCodePB::NONE_ERROR);
+    EXPECT_TRUE(response.payload().has_first_generate_token());
+    EXPECT_EQ(response.payload().first_generate_token_id(), 23456);
+    EXPECT_EQ(response.payload().total_reuse_len(), 12);
+}
+
 TEST_F(P2PConnectorTest, HandleRead_PreservesZeroFirstToken) {
     std::string unique_key  = "test_zero_token";
     int64_t     request_id  = 5002;

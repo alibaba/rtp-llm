@@ -30,9 +30,7 @@ public:
         return nullptr;
     }
 
-    // Set stream to stop with error code and message (delegates to GenerateStream::setStop)
-    virtual void setStop(ErrorCode error_code, const std::string& error_msg) {
-        // Default: no-op (non-P2P scenario)
+    virtual void reportError(ErrorCode error_code, const std::string& error_msg) {
     }
 
     // P2P routing context: encapsulates routing metadata extracted from GenerateStream

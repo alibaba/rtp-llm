@@ -5,7 +5,6 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include <algorithm>
 #include <chrono>
-#include <thread>
 
 namespace rtp_llm {
 
@@ -52,17 +51,7 @@ std::shared_ptr<PrefillServerCallerContext> PrefillServerCaller::callPrefill(con
                                                 reinterpret_cast<void*>(0)));
 
     context->reader_ = std::move(reader);
-
-    // Drain the async stream in background so the prefill side can finish
-    // writing its response/finish events without blocking on an unread CQ.
-    std::thread([context]() {
-        while (!context->done()) {
-            context->checkDone();
-            if (!context->done()) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            }
-        }
-    }).detach();
+    context->startPolling();
 
     return context;
 }
@@ -145,8 +134,9 @@ int PrefillServerCaller::getPrefillTpSize(const std::string& ip, uint32_t port, 
     }
 
     grpc::ClientContext ctx;
-    ctx.set_deadline(std::chrono::system_clock::now()
-                     + std::chrono::milliseconds(std::clamp(request_timeout_ms, kPeerInfoProbeMinMs, kPeerInfoProbeMaxMs)));
+    ctx.set_deadline(
+        std::chrono::system_clock::now()
+        + std::chrono::milliseconds(std::clamp(request_timeout_ms, kPeerInfoProbeMinMs, kPeerInfoProbeMaxMs)));
 
     GetPeerInfoRequestPB  request;
     GetPeerInfoResponsePB response;

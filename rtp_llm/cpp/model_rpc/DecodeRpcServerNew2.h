@@ -21,7 +21,7 @@ public:
                                     grpc::ServerWriter<GenerateOutputsPB>* response_writer);
 
 private:
-    void updateAuxInfo(GenerateOutputsPB& outputs_pb, std::shared_ptr<GenerateStream>& stream) override;
+    void updateAuxInfo(GenerateOutputsPB& outputs_pb, std::shared_ptr<GenerateStream>& stream);
 
 private:
     std::atomic<int64_t>                 unique_key_id_{0};

@@ -5,6 +5,7 @@
 #include <memory>
 #include <shared_mutex>
 #include <string>
+#include <thread>
 
 namespace rtp_llm {
 
@@ -19,6 +20,9 @@ public:
 
     // Non-blocking check if Prefill is complete
     void checkDone();
+
+    // Start CQ polling in a managed background thread.
+    void startPolling();
 
     // Check if complete
     bool done() const {
@@ -40,9 +44,13 @@ public:
     // Cancel the ongoing RPC call
     void cancel();
 
+    // Wait for the managed polling thread to exit.
+    void wait();
+
 private:
     friend class PrefillServerCaller;
     void handleReadChunkLocked(const GenerateOutputsPB& response);
+    void joinPollingThread();
 
     // Metadata
     std::string prefill_addr_;
@@ -64,9 +72,11 @@ private:
     bool finished_          = false;
     bool response_received_ = false;
     bool finish_started_    = false;
+    bool cancel_requested_  = false;
 
     mutable std::shared_mutex state_mutex_;
     int64_t                   request_begin_time_us_;
+    std::thread               polling_thread_;
 };
 
 }  // namespace rtp_llm
