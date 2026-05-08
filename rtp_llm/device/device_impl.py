@@ -693,6 +693,23 @@ class PpuImpl(CudaImpl):
         return False
 
 
+class AscendImpl(GpuImpl):
+    def __init__(self):
+        super().__init__()
+
+    def get_device_id(self) -> int:
+        return torch.npu.current_device()
+
+    def _get_mem_info(self) -> MemInfo:
+        free_bytes, total_bytes = torch.npu.mem_get_info()
+        used = total_bytes - free_bytes
+        return MemInfo(used=used, free=free_bytes)
+
+    @property
+    def support_dio_load(self) -> bool:
+        return False
+
+
 class RocmImpl(GpuImpl):
     def __init__(self):
         super().__init__()

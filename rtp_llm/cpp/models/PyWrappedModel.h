@@ -20,6 +20,12 @@
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/models_py/bindings/core/CacheStoreAsyncWriter.h"
+#if USING_ASCEND
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+#include <torch_npu/csrc/core/npu/NPUStream.h>
+#pragma GCC diagnostic pop
+#endif
 
 namespace py = pybind11;
 

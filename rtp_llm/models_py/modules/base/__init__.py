@@ -6,11 +6,9 @@ Different architectures may have different implementations.
 from rtp_llm.device.device_type import DeviceType, get_device_type
 
 # Import common base modules (architecture-independent)
-from rtp_llm.models_py.modules.base.common.embedding import Embedding, EmbeddingBert
 from rtp_llm.models_py.modules.base.common.kvcache_store import WriteCacheStoreOp
 from rtp_llm.models_py.modules.base.common.norm import (
     AddBiasResLayerNormTorch,
-    LayerNorm,
     LayerNormTorch,
     RMSNormTorch,
     RMSResNormTorch,
@@ -19,7 +17,24 @@ from rtp_llm.models_py.modules.base.common.norm import (
 # Determine device type and import architecture-specific modules
 device_type = get_device_type()
 
-if device_type == DeviceType.ROCm:
+if device_type == DeviceType.Ascend:
+    from rtp_llm.models_py.modules.base.ascend.activation import FusedSiluAndMul
+    from rtp_llm.models_py.modules.base.ascend.embedding import Embedding, EmbeddingBert
+    from rtp_llm.models_py.modules.base.ascend.moe_gating import SigmoidGateScaleAdd
+    from rtp_llm.models_py.modules.base.ascend.norm import (
+        AddBiasResLayerNorm,
+        FusedQKRMSNorm,
+        QKRMSNorm,
+        RMSNorm,
+        RMSResNorm,
+    )
+    from rtp_llm.models_py.modules.base.ascend.not_implemented_ops import (
+        FakeBalanceExpert,
+        GroupTopK,
+        IndexerOp,
+    )
+    from rtp_llm.models_py.modules.base.ascend.select_topk import SelectTopk
+elif device_type == DeviceType.ROCm:
     from rtp_llm.models_py.modules.base.rocm.activation import FusedSiluAndMul
     from rtp_llm.models_py.modules.base.rocm.moe_gating import SigmoidGateScaleAdd
     from rtp_llm.models_py.modules.base.rocm.norm import (
@@ -37,6 +52,7 @@ if device_type == DeviceType.ROCm:
         IndexerOp,
     )
     from rtp_llm.models_py.modules.base.rocm.select_topk import SelectTopk
+    from rtp_llm.models_py.modules.base.common.embedding import Embedding, EmbeddingBert
 else:
     from rtp_llm.models_py.modules.base.cuda.activation import FusedSiluAndMul
     from rtp_llm.models_py.modules.base.cuda.indexer_op import IndexerOp
@@ -53,25 +69,26 @@ else:
         GroupTopK,
         SelectTopk,
     )
+    from rtp_llm.models_py.modules.base.common.embedding import Embedding, EmbeddingBert
 
-    __all__ = [
-        "Embedding",
-        "EmbeddingBert",
-        "WriteCacheStoreOp",
-        "AddBiasResLayerNorm",
-        "AddBiasResLayerNormTorch",
-        "LayerNorm",
-        "LayerNormTorch",
-        "RMSNormTorch",
-        "RMSResNormTorch",
-        "FusedQKRMSNorm",
-        "QKRMSNorm",
-        "RMSNorm",
-        "RMSResNorm",
-        "SelectTopk",
-        "GroupTopK",
-        "FakeBalanceExpert",
-        "FusedSiluAndMul",
-        "IndexerOp",
-        "SigmoidGateScaleAdd",
-    ]
+__all__ = [
+    "Embedding",
+    "EmbeddingBert",
+    "WriteCacheStoreOp",
+    "AddBiasResLayerNorm",
+    "AddBiasResLayerNormTorch",
+    "LayerNorm",
+    "LayerNormTorch",
+    "RMSNormTorch",
+    "RMSResNormTorch",
+    "FusedQKRMSNorm",
+    "QKRMSNorm",
+    "RMSNorm",
+    "RMSResNorm",
+    "SelectTopk",
+    "GroupTopK",
+    "FakeBalanceExpert",
+    "FusedSiluAndMul",
+    "IndexerOp",
+    "SigmoidGateScaleAdd",
+]
