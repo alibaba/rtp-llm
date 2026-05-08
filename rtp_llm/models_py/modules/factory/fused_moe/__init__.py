@@ -59,6 +59,17 @@ if device_type == DeviceType.ROCm:
     registry.register(BatchedTritonStrategy())
     FusedMoeFactory.set_registry(registry)
 
+elif device_type == DeviceType.Ascend:
+    # ========== Ascend Registry ==========
+
+    from rtp_llm.models_py.modules.factory.fused_moe.impl.ascend.strategy import (
+        AscendBf16FallbackStrategy,
+    )
+
+    registry = StrategyRegistry()
+    registry.register(AscendBf16FallbackStrategy())
+    FusedMoeFactory.set_registry(registry)
+
 else:
     # ========== CUDA Registry ==========
 

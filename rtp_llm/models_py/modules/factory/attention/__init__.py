@@ -45,6 +45,16 @@ if device_type == DeviceType.ROCm:
     DECODE_MHA_IMPS.append(AiterDecodeImplTriton)
     DECODE_MHA_IMPS.append(AiterDecodeImplAsm)
     DECODE_MHA_IMPS.append(AiterDecodeImplNonAsm)
+elif device_type == DeviceType.Ascend:
+    # Ascend FMHA: use PyTorch native SDPA for prefill,
+    # and a basic contiguous attention impl for decode.
+    from rtp_llm.models_py.modules.factory.attention.ascend_impl.torch_sdpa import (
+        AscendSDPAPrefillImpl,
+        AscendSDPADecodeImpl,
+    )
+
+    PREFILL_MHA_IMPS.append(AscendSDPAPrefillImpl)
+    DECODE_MHA_IMPS.append(AscendSDPADecodeImpl)
 else:
     # currently append early means impl has higher priority
     if device_type == DeviceType.Cuda:
