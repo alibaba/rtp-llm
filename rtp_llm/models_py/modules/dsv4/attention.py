@@ -71,23 +71,30 @@ from typing import NamedTuple as _NamedTuple
 
 class _VLLMPrefillCommon(_NamedTuple):
     bsz: int
-    seqlen: int
-    sp_int: int  # absolute prefix length
-    end_pos: int  # = sp_int + seqlen
+    seqlen: int           # rank-local Q length (== chunk_length under CP)
+    sp_int: int          # absolute prefix length
+    end_pos: int          # = sp_int + seqlen (non-CP) / cp_ctx.seq_len_total (CP)
     is_fresh_prefill: bool  # = (sp_int == 0)
     device: torch.device
-    freqs_cis: torch.Tensor  # self.freqs_cis[sp:sp+S]; pre-sliced view
-    swa_dense_len: int  # SWA prefix length in the dense kv_cat layout
+    freqs_cis: torch.Tensor  # rank-local per-Q freqs (cp_freqs_cis_local under CP)
+    swa_dense_len: int        # SWA prefix length in the dense kv_cat layout
     # hoisted meta — built once per layer-call, reused across compressor +
     # nested indexer compressor:
     compressor_meta: Any  # CompressorMeta from compressor_vllm
     indexer_meta: Optional[Any]  # _IndexerVLLMPrefillMeta or None (HCA)
+    # CP context — None / cp_size <= 1 means single-rank fast path.  When
+    # active, callers must:
+    #   * all-gather rank-local KV before SWA pool write / sparse_attn read
+    #   * use ``cp_ctx.global_positions`` for window/compress topk indices
+    #   * size the dense kv_cat as ``[seq_len_total + seq_len_total/ratio]``
+    cp_ctx: Optional["CPContext"]
+    cp_on: bool
 
 
 class _VLLMPrefillQKV(_NamedTuple):
-    q: torch.Tensor  # [B, S, n_heads, head_dim] bf16
-    qr: torch.Tensor  # [B, S, q_lora_rank] bf16
-    kv_full: torch.Tensor  # [B, S, head_dim] bf16
+    q: torch.Tensor       # [B, S, n_heads, head_dim] bf16 — rank-local under CP
+    qr: torch.Tensor      # [B, S, q_lora_rank] bf16 — rank-local under CP
+    kv_full: torch.Tensor  # [B, T, head_dim] bf16 — all-gathered global under CP
 
 
 from rtp_llm.models_py.modules.dsv4.cp import (
@@ -2121,16 +2128,15 @@ class Attention(nn.Module):
         bsz, seqlen, _ = x.size()
 
         # vLLM-flow prefill dispatch (env switch + CSA/HCA layer +
-        # bsz==1 prefill + no CP). Falls through to the legacy body for
-        # SWA-only layers, batched / CP prefills, decode, etc. — the
-        # vLLM path is intentionally narrow to mirror the source FP8
-        # attention's bsz==1 single-request prefill assumption.
-        cp_ctx_local = self._cp_ctx
+        # bsz==1 prefill).  Falls through to the legacy body for SWA-only
+        # layers, batched prefills, decode, etc.  CP prefill is supported
+        # via the CP branch in ``_prefill_common_setup_vllm`` /
+        # ``_prefill_compute_qkv_vllm`` / ``_forward_prefill_compressed_vllm``
+        # (rank-local Q × all-gathered KV with global topk).
         is_batched_local = isinstance(start_pos, torch.Tensor) and start_pos.numel() > 1
         if (
             seqlen > 1
             and not is_batched_local
-            and (cp_ctx_local is None or cp_ctx_local.cp_size <= 1)
             and self.compress_ratio in (4, 128)
             and _use_vllm_compressor()
         ):
@@ -2569,23 +2575,32 @@ class Attention(nn.Module):
                                 :bsz, : cmp_end - cmp_base
                             ].to(kv_cat.dtype)
                 else:
-                    if not any_cont:
-                        kv_cat = kv_full
-                    else:
-                        with record_function_range(
-                            "dsv4.attn.kv_gather_dense_or_paged"
-                        ):
-                            kv_cat = self._gather_kv_cache_dense_from_pool(
-                                bsz,
-                                pool_read_start,
-                                row_seqlens_for_pool,
-                                swa_dense_len=prefill_swa_dense_len,
-                                swa_dense_override=prefill_swa_dense_for_attn,
-                                cmp_T=prefill_kv_len // ratio,
-                            )
-                        assert (
-                            kv_cat is not None
-                        ), "Phase E5b: continuation prefill requires paged ctx."
+                    # CompressorVLLM returns None — it wrote the current
+                    # chunk's compressed K to the framework pool internally
+                    # via ``self._launch``.  We still need the [sliding |
+                    # compressed] cat layout downstream because the indexer's
+                    # topk indices reference compressed-pool offsets shifted
+                    # by ``prefill_swa_dense_len``.  Gather both segments from
+                    # the pool; pass ``kv_full`` as the SWA override on fresh
+                    # prefill so the sliding read avoids a pool round-trip.
+                    with record_function_range(
+                        "dsv4.attn.kv_gather_dense_or_paged"
+                    ):
+                        kv_cat = self._gather_kv_cache_dense_from_pool(
+                            bsz,
+                            pool_read_start,
+                            row_seqlens_for_pool,
+                            swa_dense_len=prefill_swa_dense_len,
+                            swa_dense_override=(
+                                kv_full[:bsz]
+                                if not any_cont
+                                else prefill_swa_dense_for_attn
+                            ),
+                            cmp_T=prefill_kv_len // ratio,
+                        )
+                    assert (
+                        kv_cat is not None
+                    ), "CompressorVLLM kv_cat assembly requires paged ctx."
             else:
                 if not any_cont:
                     kv_cat = kv_full
@@ -2804,13 +2819,23 @@ class Attention(nn.Module):
 
         bsz, seqlen, _ = x.size()
         device = x.device
-        if isinstance(start_pos, torch.Tensor):
-            sp_int = int(start_pos.item()) if start_pos.numel() == 1 else 0
+        cp_ctx = self._cp_ctx
+        cp_on = cp_ctx is not None and cp_ctx.cp_size > 1 and seqlen > 1
+
+        if cp_on:
+            # CP prefill — sp / end_pos / freqs_cis follow GLOBAL geometry;
+            # rank-local Q dimension stays as ``seqlen`` (== chunk_length).
+            sp_int = int(cp_ctx.prefix_length)
+            end_pos = int(cp_ctx.seq_len_total)
+            freqs_cis_slice = cp_freqs_cis_local(self.freqs_cis, cp_ctx)
         else:
-            sp_int = int(start_pos)
-        end_pos = sp_int + seqlen
+            if isinstance(start_pos, torch.Tensor):
+                sp_int = int(start_pos.item()) if start_pos.numel() == 1 else 0
+            else:
+                sp_int = int(start_pos)
+            end_pos = sp_int + seqlen
+            freqs_cis_slice = self.freqs_cis[sp_int : sp_int + seqlen]
         is_fresh = sp_int == 0
-        freqs_cis_slice = self.freqs_cis[sp_int : sp_int + seqlen]
 
         # Bind freqs_cis to compressor / indexer (idempotent).
         if self.compressor.freqs_cis is None:
@@ -2825,11 +2850,17 @@ class Attention(nn.Module):
         # the host compressor and the nested indexer compressor (when
         # the latter shares positions / b_idx with the host, which it
         # does for bsz==1 prefill).
+        # Under CP the compressor consumes the all-gathered ``[1, seq_len_full,
+        # H]`` kv/score (see compressor_vllm.forward CP branch), so the meta
+        # must cover ``seq_len_full`` positions — not the rank-local chunk.
+        meta_seqlen = int(cp_ctx.seq_len_full) if cp_on else seqlen
         compressor_meta = _build_compressor_prefill_metadata(
-            self.compressor, sp_int, bsz, seqlen, device
+            self.compressor, sp_int, bsz, meta_seqlen, device
         )
 
-        # Hoisted indexer meta — only meaningful for CSA layers.
+        # Hoisted indexer meta — only meaningful for CSA layers.  Under CP
+        # the indexer's ``prepare`` reads ``self._cp_ctx`` and overrides
+        # sp/end/positions internally; ``seqlen`` here is rank-local Q count.
         indexer_meta = None
         if self.indexer is not None:
             kv_block_table = (
@@ -2858,6 +2889,8 @@ class Attention(nn.Module):
             swa_dense_len=end_pos,
             compressor_meta=compressor_meta,
             indexer_meta=indexer_meta,
+            cp_ctx=cp_ctx if cp_on else None,
+            cp_on=cp_on,
         )
 
     # ------------------------------------------------------------------
@@ -2877,6 +2910,22 @@ class Attention(nn.Module):
             kv_full = fused_rmsnorm_rope(
                 kv_in, self.kv_norm, common.freqs_cis, rd, eps=self.eps
             )
+        # CP prefill: rank-local KV needs to be all-gathered to the global
+        # ``[1, seq_len_full, head_dim]`` layout that the SWA pool write +
+        # downstream sparse_attn read both expect.  Mirror the legacy
+        # ``_forward_body`` async-gather contract (see attention.py CP path).
+        if common.cp_on:
+            assert common.cp_ctx is not None
+            assert kv_full.dim() == 3 and kv_full.size(0) == 1, (
+                f"vLLM CP prefill KV expects [1, T_local, D], "
+                f"got {tuple(kv_full.shape)}"
+            )
+            with record_function_range("dsv4.attn.cp_kv_gather_start"):
+                handle = cp_all_gather_full_async(
+                    kv_full.squeeze(0), common.cp_ctx
+                )
+            with record_function_range("dsv4.attn.cp_kv_gather_wait"):
+                kv_full = cp_wait_gather_full(handle).unsqueeze(0)
         return _VLLMPrefillQKV(q=q, qr=qr, kv_full=kv_full)
 
     # ------------------------------------------------------------------
@@ -2888,9 +2937,18 @@ class Attention(nn.Module):
         self, common: "_VLLMPrefillCommon", kv_full: torch.Tensor
     ) -> None:
         bsz = common.bsz
-        seqlen = common.seqlen
         device = common.device
-        swa_lengths = torch.full((bsz,), seqlen, device=device, dtype=torch.long)
+        # Under CP each rank writes the full all-gathered sequence to its
+        # own SWA pool starting at the absolute prefix offset; outside CP
+        # the rank-local seqlen is the absolute write length.
+        write_len = (
+            int(common.cp_ctx.seq_len_full)
+            if common.cp_on
+            else common.seqlen
+        )
+        swa_lengths = torch.full(
+            (bsz,), write_len, device=device, dtype=torch.long
+        )
         with record_function_range("dsv4.attn.swa_pool_write"):
             self._prefill_write_swa_to_pool(bsz, kv_full, common.sp_int, swa_lengths)
 
@@ -2951,8 +3009,16 @@ class Attention(nn.Module):
         ratio = self.compress_ratio
         win = self.window_size
 
-        # Window topk (causal sliding view).
-        topk_window = _get_window_topk_idxs(win, bsz, seqlen, sp, device)
+        # Window topk (causal sliding view).  Under CP, rank-local Q at
+        # local index i sits at GLOBAL position cp_ctx.global_positions[i];
+        # the CP variant builds the per-row window in that global frame.
+        if common.cp_on:
+            assert common.cp_ctx is not None
+            topk_window = _get_window_topk_idxs_cp(
+                win, bsz, common.end_pos, common.cp_ctx.global_positions
+            )
+        else:
+            topk_window = _get_window_topk_idxs(win, bsz, seqlen, sp, device)
 
         # Compressed topk for CSA (from IndexerVLLM raw int32 + offset)
         # or HCA (deterministic dense block range).
@@ -2963,6 +3029,11 @@ class Attention(nn.Module):
                 cmp_topk_runtime_int32 + offset,
                 cmp_topk_runtime_int32,
             ).long()
+        elif common.cp_on:
+            assert common.cp_ctx is not None
+            cmp_topk = _get_compress_topk_idxs_cp(
+                ratio, bsz, common.end_pos, offset, common.cp_ctx.global_positions
+            )
         else:
             cmp_topk = _get_compress_topk_idxs(ratio, bsz, seqlen, sp, offset, device)
         topk_idxs = torch.cat([topk_window, cmp_topk], dim=-1).long()
@@ -2982,20 +3053,31 @@ class Attention(nn.Module):
         # Build the dense [SWA | compressed] KV view sparse_attn reads.
         cmp_at = CSA_KV if ratio == 4 else HCA_KV
         cmp_T = common.end_pos // ratio
+        # Pool-read geometry — CP path mirrors the legacy ``_forward_body``:
+        # rank's pool already holds the full all-gathered sequence (compressor
+        # writes it during ``_launch``, SWA write step above writes the
+        # gathered ``qkv.kv_full``).  Reads use the global absolute frame.
+        if common.cp_on:
+            pool_read_lengths = torch.full(
+                (bsz,), int(common.cp_ctx.seq_len_full),
+                device=device, dtype=torch.long,
+            )
+        else:
+            pool_read_lengths = torch.full(
+                (bsz,), seqlen, device=device, dtype=torch.long
+            )
         if common.is_fresh_prefill:
-            # Fresh prefill: SWA part is in-memory (qkv.kv_full); the
-            # compressed part lives in the pool the compressor just
-            # wrote. We still go through ``_gather_kv_cache_dense_from_pool``
-            # to pick up the compressed slots; the SWA portion is
-            # overlaid from kv_full to avoid the SWA pool round-trip.
+            # Fresh prefill: SWA part is in-memory (qkv.kv_full, already
+            # all-gathered under CP); the compressed part lives in the pool
+            # the compressor just wrote.  We still go through
+            # ``_gather_kv_cache_dense_from_pool`` to pick up the compressed
+            # slots; the SWA portion is overlaid from kv_full to avoid the
+            # SWA pool round-trip.
             with record_function_range("dsv4.attn.kv_gather_dense_or_paged"):
-                row_seqlens = torch.full(
-                    (bsz,), seqlen, device=device, dtype=torch.long
-                )
                 kv_cat = self._gather_kv_cache_dense_from_pool(
                     bsz,
                     sp,
-                    row_seqlens,
+                    pool_read_lengths,
                     swa_dense_len=common.swa_dense_len,
                     swa_dense_override=qkv.kv_full,
                     cmp_T=cmp_T,
@@ -3006,13 +3088,10 @@ class Attention(nn.Module):
             )
         else:
             with record_function_range("dsv4.attn.kv_gather_dense_or_paged"):
-                row_seqlens = torch.full(
-                    (bsz,), seqlen, device=device, dtype=torch.long
-                )
                 kv_cat = self._gather_kv_cache_dense_from_pool(
                     bsz,
                     sp,
-                    row_seqlens,
+                    pool_read_lengths,
                     swa_dense_len=common.swa_dense_len,
                     cmp_T=cmp_T,
                 )
