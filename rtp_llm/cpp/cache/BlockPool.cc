@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/MemoryUtil.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/NormalCacheStore.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include <c10/cuda/CUDAStream.h>
 
 namespace rtp_llm {
 
@@ -47,6 +48,21 @@ void BlockPool::initializeCacheBuffer() {
     }
     cache_base_ptr_ = cache_aligned_buffer_.data_ptr();
     RTP_LLM_CHECK_WITH_INFO(cache_base_ptr_ != nullptr, "block pool allocate cache aligned buffer is null");
+    // One-shot zero-init of the entire pool. Closes the last LINEAR-fp32 -> FULL-bf16
+    // garble path: BlockPool's reserved block 0 is referenced by zero-padded page_table
+    // entries (both NormalModelInputGatherer allocates kv_cache_kernel_block_id with
+    // torch::zeros, and CudaGraphRunner::prepareInputs explicitly fill_(0)s the captured
+    // page_table tensors before each replay). Without this initial zero, block 0
+    // carries uninitialized GPU memory whose bf16 reinterpretation can be NaN/Inf --
+    // which then poisons XQA's softmax. It also guarantees that any block read before
+    // the first write returns 0 instead of stale bytes, so the LINEAR-free zero pass
+    // is just maintaining the invariant we set up here. The explicit sync below is
+    // cheap (one-time at startup) and removes any doubt about whether the memset has
+    // landed before the first malloc returns the block to a forward kernel.
+    cache_aligned_buffer_.zero_();
+    if (allocation_type_ == AllocationType::DEVICE) {
+        c10::cuda::getCurrentCUDAStream().synchronize();
+    }
 }
 
 void BlockPool::initializeLayerMappings() {
