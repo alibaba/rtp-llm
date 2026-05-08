@@ -1,43 +1,30 @@
-"""UT for ``run_fused_compress_kv_write`` raw-vs-cache dispatch.
+"""UT for ``run_fused_compress_kv_write`` under the new dispatch.
 
-The state pool keeps the last ``fixed_blocks_per_req`` (=2) page-aligned
-blocks per request — NOT a cyclic 512-slot ring. For a prefill launch with
-``seq_len > page_size``, the actual cache window is::
+After the rewrite, in-launch positions (``flat_idx >= 0``) always read
+from ``kv_raw``; only prefix-cache hits (``flat_idx < 0``) read from
+``state_cache`` via ``block_table``. This UT exercises that with
+framework-faithful ``block_id`` / ``slot_mapping`` layouts:
 
-    cache_window = page_size + ((seq_len-1) % page_size + 1)
-                 = page_size + tail_of_current_block
+  * **long prefill** (N > ``2*page_size``): the request only owns 2 state
+    pool blocks, so the earliest logical block is unmapped in
+    ``block_table``. Every in-launch position routes through raw — proves
+    the kernel does not need state_cache to retain earlier positions.
 
-(or ``seq_len`` when shorter than a single page). Earlier in-batch positions
-whose logical block has rolled out are evicted from cache and must come from
-raw kv_flat / score_flat. The dispatch inside the kernel is::
+  * **prefix-cache reuse**: launch 1 prefills positions ``[0, PAGE)``
+    into phys block 1; launch 2 starts at ``sp=PAGE`` and reuses phys 1
+    for its logical block 0 (the prefix-cache hit). The boundary near
+    ``sp`` reads its prefix overlap from launch 1's state_cache and the
+    rest from launch 2's raw kv.
 
-    flat_idx  = pos - seq_start
-    use_raw   = (0 <= flat_idx < n_batch) & (flat_idx < n_batch - CACHE_WINDOW)
-    use_cache = mask_pos & ~use_raw
+  * **decode**: a single boundary token, ``disable_raw_path=True``;
+    the entire overlap window comes from state_cache populated by a
+    prior prefill launch.
 
-with ``CACHE_WINDOW`` computed per-launch by the wrapper.
-
-This UT verifies the dispatch via a **differential-against-ground-truth** check:
-
-  * Ground truth: run the kernel on a tiny launch (N == 8 << CACHE_WINDOW) so
-    every overlap-window read is unambiguously cache-correct. Capture the FP8
-    bytes produced for the boundary at ``pos == COMPRESS_RATIO - 1``.
-
-  * Full launch (N == 600 > CACHE_WINDOW): the same boundary's overlap window
-    [0, 7] now sits inside the overwritten prefix, so reading from the cache
-    would yield wrong (cyclically-overwritten) data. The kernel must take the
-    raw path and produce the **same** FP8 bytes as the ground truth.
-
-  * Negative control: re-run the full launch with ``disable_raw_path=True`` and
-    confirm the boundary's bytes **diverge** from the ground truth (the cache
-    read indeed sources stale data). This proves the raw path is what saves us.
-
-Two scenarios are exercised:
-
-  * ``head_dim=128`` indexer kernel (overlap=True, ratio=4)
-  * ``head_dim=512`` sparse-attn kernel (overlap=True, ratio=4) — this is the
-    CSA layer's compressor; HCA (overlap=False, ratio=128) shares the same
-    sparse-attn kernel + dispatch path so it's covered by the same logic.
+Reference for all three: a monolithic "all-raw" launch covering every
+position with an oversized state pool — captures the canonical FP8
+bytes per boundary. Each scenario assembles its launches so the boundary
+under test sees identical kv/score/ape data, and we assert byte-for-byte
+equality of both the FP8 segment and the UE8M0/FP32 scale segment.
 
 Run:
   cd .../github-opensource && CUDA_VISIBLE_DEVICES=0 \\
@@ -55,351 +42,409 @@ from rtp_llm.models_py.modules.dsv4._compressor_vllm_triton import (
 )
 
 # --------------------------------------------------------------------------- #
-# Constants matching DSV4ConfigCreator + indexer/CSA layout.                  #
+# Layout constants                                                            #
 # --------------------------------------------------------------------------- #
-STATE_BLOCK_SIZE = 256  # entries_per_block for state pools
-FIXED_BLOCKS_PER_REQ = 2  # 2 * 256 = 512-slot cyclic ring
-CACHE_WINDOW = STATE_BLOCK_SIZE * FIXED_BLOCKS_PER_REQ  # 512
-
+PAGE = 256  # state pool entries_per_block
 COMPRESS_RATIO = 4
 OVERLAP = True
 COFF = 1 + int(OVERLAP)  # = 2 for ratio=4 layers
 
+_TOKEN_STRIDE = {128: 128, 512: 576}
+_SCALE_DIM = {128: 4, 512: 8}
+_ROPE_DIM = {128: 128, 512: 64}
+
 
 # --------------------------------------------------------------------------- #
-# Helpers                                                                      #
+# Tensor helpers                                                              #
 # --------------------------------------------------------------------------- #
-def _alloc_state_cache(head_dim: int, num_blocks: int) -> torch.Tensor:
-    """Per-token (kv | score+ape) fp32 state cache. The kernel treats
-    ``block_table[req, i] == 0`` as ``unallocated``, so we allocate one
-    extra physical block at index 0 (unused) and have the block_table
-    point to physical blocks 1..num_blocks."""
+def _alloc_state_cache(head_dim: int, num_phys_blocks: int) -> torch.Tensor:
+    """Phys block 0 is reserved as the kernel's ``unallocated`` sentinel
+    (``block_table > 0`` is the valid check), so callers should request
+    ``num_phys_blocks`` *usable* blocks; we allocate one extra at index 0."""
     width = COFF * head_dim
     return torch.zeros(
-        (num_blocks + 1, STATE_BLOCK_SIZE, 2 * width),
+        (num_phys_blocks + 1, PAGE, 2 * width),
         dtype=torch.float32,
         device="cuda",
     )
 
 
 def _alloc_kv_cache(head_dim: int, num_slots: int) -> torch.Tensor:
-    """Single contiguous KV pool block sized to fit ``num_slots`` boundaries.
+    """Single KV-pool block sized for ``num_slots`` boundaries.
 
-    Layout per block: ``[num_slots, TOKEN_STRIDE]`` packed FP8/RoPE bytes,
-    then ``[num_slots, SCALE_DIM]`` UE8M0 scales — matches what the kernel
-    indexes (``cache_block_ptr + slot * TOKEN_STRIDE`` for KV and
-    ``cache_block_ptr + num_slots * TOKEN_STRIDE + slot * SCALE_DIM`` for
-    scales).
+    Layout: ``[num_slots * TOKEN_STRIDE bytes][num_slots * SCALE_DIM bytes]``,
+    matching what the kernel indexes via ``KV_BLOCK_STRIDE``.
     """
-    if head_dim == 128:
-        token_stride, scale_dim = 128, 4
-    elif head_dim == 512:
-        token_stride, scale_dim = 576, 8
-    else:
-        raise ValueError(head_dim)
-    block_bytes = num_slots * token_stride + num_slots * scale_dim
-    # shape[1] must equal num_slots; stride(0) = block_bytes is what the
-    # kernel reads as ``KV_BLOCK_STRIDE``.
-    cache = torch.zeros(
-        (1, num_slots, block_bytes // num_slots), dtype=torch.uint8, device="cuda"
-    )
-    # The above may not reproduce exact bytes-per-block if scale_dim doesn't
-    # divide evenly. Build it explicitly via as_strided.
+    ts, sd = _TOKEN_STRIDE[head_dim], _SCALE_DIM[head_dim]
+    block_bytes = num_slots * (ts + sd)
     flat = torch.zeros((1, block_bytes), dtype=torch.uint8, device="cuda")
     cache = flat.as_strided(
-        size=(1, num_slots, token_stride), stride=(block_bytes, token_stride, 1)
+        size=(1, num_slots, ts),
+        stride=(block_bytes, ts, 1),
     )
-    # Keep the underlying flat alive by stashing it on the view.
     cache._flat_backing = flat  # type: ignore[attr-defined]
     return cache
 
 
-def _build_block_table(seq_len: int, fixed_blocks_per_req: int) -> torch.Tensor:
-    """Single-request block table sized to cover all logical blocks of the
-    request. Only the LAST ``fixed_blocks_per_req`` entries point at real
-    physical blocks (1, 2, ...); earlier logical blocks are -1 (evicted).
-    Physical block 0 is reserved as the kernel's ``unallocated`` sentinel
-    (``block_table value > 0`` is the valid check)."""
-    n_logical = max((seq_len + STATE_BLOCK_SIZE - 1) // STATE_BLOCK_SIZE, 1)
-    bt = torch.full((1, n_logical), -1, dtype=torch.int32, device="cuda")
-    n_kept = min(fixed_blocks_per_req, n_logical)
-    phys = torch.arange(n_kept, dtype=torch.int32, device="cuda") + 1
-    bt[0, n_logical - n_kept :] = phys
-    return bt
+def _read_kv_slot(kv_cache: torch.Tensor, slot: int, head_dim: int, num_slots: int):
+    """Return ``(kv_bytes, scale_bytes)`` for boundary ``slot`` in block 0."""
+    ts, sd = _TOKEN_STRIDE[head_dim], _SCALE_DIM[head_dim]
+    flat = kv_cache._flat_backing.view(-1)  # type: ignore[attr-defined]
+    kv = flat[slot * ts : (slot + 1) * ts].clone()
+    scale_base = num_slots * ts
+    scale = flat[scale_base + slot * sd : scale_base + (slot + 1) * sd].clone()
+    return kv, scale
 
 
-def _build_kv_block_table(num_blocks: int) -> torch.Tensor:
-    return torch.arange(num_blocks, dtype=torch.int32, device="cuda").view(
-        1, num_blocks
-    )
+# --------------------------------------------------------------------------- #
+# slot_mapping / block_table builders (mirror fp8/compressor.py)              #
+# --------------------------------------------------------------------------- #
+def _build_state_slots(
+    positions: torch.Tensor, block_table: torch.Tensor
+) -> torch.Tensor:
+    """``state_slots[t] = block_table[0, pos // PAGE] * PAGE + (pos % PAGE)``
+    when the logical block is allocated (``block_table > 0``), else ``-1``.
 
-
-def _build_meta(N: int, sp: int, fixed_blocks_per_req: int):
-    """Construct positions / token_to_req / state_slots / kv_slots for a
-    single-request launch starting at absolute position ``sp``.
-
-    State pool semantics (page-aligned, NOT cyclic ring):
-      * Each request keeps the last ``fixed_blocks_per_req`` page-aligned
-        logical blocks, allocated to physical blocks 1..fixed_blocks_per_req.
-      * For a token at absolute pos, its logical block is ``pos // page``;
-        the corresponding physical block id is the one stored at
-        ``block_table[req, pos // page]`` (which is -1 if that logical
-        block has been evicted).
-      * The save kernel writes via ``slot_mapping[token]`` which encodes
-        ``physical_block * page + (pos % page)``. So we mirror the
-        block_table allocation: most-recent ``fixed_blocks_per_req`` logical
-        blocks → physical 1, 2, ...
+    Matches ``_kv_attention_slot_mapping_impl`` in ``fp8/compressor.py`` modulo
+    the boundary mask (state pool stores per-token, not per-boundary).
     """
-    positions = torch.arange(sp, sp + N, dtype=torch.int64, device="cuda")
-    token_to_req = torch.zeros(N, dtype=torch.int32, device="cuda")
-
-    seq_len = sp + N
-    n_logical = max((seq_len + STATE_BLOCK_SIZE - 1) // STATE_BLOCK_SIZE, 1)
-    n_kept = min(fixed_blocks_per_req, n_logical)
-    first_kept_logical = n_logical - n_kept
-
-    logical_block = (positions // STATE_BLOCK_SIZE).to(torch.int64)
-    in_window = logical_block >= first_kept_logical
-    # Map kept logical block i → physical block (i - first_kept_logical + 1)
-    # (offset 1 because physical 0 is the unallocated sentinel).
-    phys_block = (logical_block - first_kept_logical + 1).clamp(min=1)
-    state_slots = (phys_block * STATE_BLOCK_SIZE + (positions % STATE_BLOCK_SIZE)).to(
-        torch.int64
-    )
-    # Tokens whose logical block is evicted: save_partial_states must skip
-    # them (slot_mapping=-1) — in production those slots also wouldn't be
-    # written. (For the differential test the boundary we inspect always
-    # falls inside the eviction zone for raw_off, so its overlap reads from
-    # cache return -1/0 → zero data.)
-    state_slots = torch.where(in_window, state_slots, torch.full_like(state_slots, -1))
-
-    # KV slot: one per boundary (where (pos+1) % ratio == 0); -1 otherwise.
-    is_boundary = ((positions + 1) % COMPRESS_RATIO) == 0
-    boundary_idx = torch.cumsum(is_boundary.to(torch.int64), dim=0) - 1
-    kv_slots = torch.where(is_boundary, boundary_idx, torch.full_like(boundary_idx, -1))
-    return positions, token_to_req, state_slots, kv_slots
+    log = (positions // PAGE).to(torch.int64)
+    in_table = log < block_table.shape[1]
+    log_safe = log.clamp(max=block_table.shape[1] - 1)
+    phys = block_table[0, log_safe].to(torch.int64)
+    valid = in_table & (phys > 0)
+    slots = phys * PAGE + (positions % PAGE)
+    return torch.where(valid, slots, torch.full_like(slots, -1))
 
 
-def _make_inputs(N: int, sp: int, head_dim: int, *, seed: int):
-    """Build a self-contained launch context."""
+def _build_kv_slots(
+    positions: torch.Tensor, kv_block_id: int, kv_block_size: int
+) -> torch.Tensor:
+    """Pack boundaries into a single KV-pool block. Boundary k in this
+    launch → slot = ``kv_block_id * kv_block_size + k``; non-boundary → -1."""
+    is_b = ((positions + 1) % COMPRESS_RATIO) == 0
+    boundary_idx = torch.cumsum(is_b.to(torch.int64), dim=0) - 1
+    slot = kv_block_id * kv_block_size + boundary_idx
+    return torch.where(is_b, slot, torch.full_like(slot, -1))
+
+
+def _global_boundary_idx(pos: int) -> int:
+    return (pos + 1) // COMPRESS_RATIO - 1
+
+
+# --------------------------------------------------------------------------- #
+# Random data + launch                                                        #
+# --------------------------------------------------------------------------- #
+def _make_random(N: int, head_dim: int, *, seed: int):
     g = torch.Generator(device="cuda").manual_seed(seed)
-    # Independent generator for ``ape`` so its values don't depend on N
-    # (otherwise gt's N=8 and full's N=612 launches would draw different
-    # ape values from the shared stream).
-    g_ape = torch.Generator(device="cuda").manual_seed(seed + 1000)
-
-    # Raw kv/score: [N, COFF*head_dim] fp32. Use small magnitudes so
-    # softmax+RMSNorm produce numerically stable results.
+    g_ape = torch.Generator(device="cuda").manual_seed(seed + 9973)
     width = COFF * head_dim
-    kv_flat = (
-        torch.randn(N, width, dtype=torch.float32, device="cuda", generator=g) * 0.1
-    )
-    score_flat = (
-        torch.randn(N, width, dtype=torch.float32, device="cuda", generator=g) * 0.1
-    )
+    kv = torch.randn(N, width, dtype=torch.float32, device="cuda", generator=g) * 0.1
+    score = torch.randn(N, width, dtype=torch.float32, device="cuda", generator=g) * 0.1
     ape = (
         torch.randn(
-            COMPRESS_RATIO,
-            width,
-            dtype=torch.float32,
-            device="cuda",
-            generator=g_ape,
+            COMPRESS_RATIO, width, dtype=torch.float32, device="cuda", generator=g_ape
         )
         * 0.1
     )
-
-    rms_w = torch.ones(
-        head_dim, dtype=torch.bfloat16, device="cuda"
-    )  # identity-ish norm
-    rope_head_dim = head_dim if head_dim == 128 else 64
-    max_pos = sp + N + 16
-    cos_sin = torch.zeros(max_pos, rope_head_dim, dtype=torch.float32, device="cuda")
-    cos_sin[:, : rope_head_dim // 2] = 1.0  # cos = 1 (identity rotation)
-    # sin = 0 (default)
-
-    # State pool sized for 2 blocks per request.
-    state_cache = _alloc_state_cache(head_dim, FIXED_BLOCKS_PER_REQ)
-    state_block_table = _build_block_table(sp + N, FIXED_BLOCKS_PER_REQ)
-
-    # KV pool sized for all boundaries in this launch (single block).
-    n_boundaries = ((sp + N) // COMPRESS_RATIO) - (sp // COMPRESS_RATIO)
-    n_boundaries = max(n_boundaries, 1)
-    kv_cache = _alloc_kv_cache(head_dim, n_boundaries)
-
-    positions, token_to_req, state_slots, kv_slots = _build_meta(
-        N, sp, FIXED_BLOCKS_PER_REQ
-    )
-
-    return dict(
-        kv_flat=kv_flat,
-        score_flat=score_flat,
-        ape=ape,
-        rms_w=rms_w,
-        cos_sin=cos_sin,
-        state_cache=state_cache,
-        state_block_table=state_block_table,
-        kv_cache=kv_cache,
-        positions=positions,
-        token_to_req=token_to_req,
-        state_slots=state_slots,
-        kv_slots=kv_slots,
-        rope_head_dim=rope_head_dim,
-    )
+    return kv, score, ape
 
 
-def _launch(ctx: dict, head_dim: int, *, disable_raw_path: bool):
-    run_save_partial_states(
-        ctx["kv_flat"],
-        ctx["score_flat"],
-        ctx["ape"],
-        ctx["positions"],
-        ctx["state_cache"],
-        ctx["state_slots"],
-        compress_ratio=COMPRESS_RATIO,
-    )
+def _identity_cos_sin(head_dim: int, max_pos: int) -> torch.Tensor:
+    rope_dim = _ROPE_DIM[head_dim]
+    cs = torch.zeros(max_pos, rope_dim, dtype=torch.float32, device="cuda")
+    cs[:, : rope_dim // 2] = 1.0  # cos = 1, sin = 0 → identity rotation
+    return cs
+
+
+def _launch(
+    *,
+    kv_flat: torch.Tensor,
+    score_flat: torch.Tensor,
+    ape: torch.Tensor,
+    positions: torch.Tensor,
+    state_cache: torch.Tensor,
+    state_slots: torch.Tensor,
+    state_block_table: torch.Tensor,
+    kv_cache: torch.Tensor,
+    kv_slots: torch.Tensor,
+    sp: int,
+    head_dim: int,
+    disable_raw: bool,
+    skip_save: bool = False,
+):
+    rope_dim = _ROPE_DIM[head_dim]
+    rms_w = torch.ones(head_dim, dtype=torch.bfloat16, device="cuda")
+    cos_sin = _identity_cos_sin(head_dim, int(positions.max().item()) + 16)
+    token_to_req = torch.zeros(positions.shape[0], dtype=torch.int32, device="cuda")
+
+    if not skip_save:
+        run_save_partial_states(
+            kv_flat,
+            score_flat,
+            ape,
+            positions,
+            state_cache,
+            state_slots,
+            compress_ratio=COMPRESS_RATIO,
+        )
     run_fused_compress_kv_write(
-        ctx["state_cache"],
-        ctx["token_to_req"],
-        ctx["positions"],
-        ctx["state_slots"],
-        ctx["state_block_table"],
-        ctx["rms_w"],
+        state_cache,
+        token_to_req,
+        positions,
+        state_slots,
+        state_block_table.to(torch.int32),
+        rms_w,
         1e-6,
-        ctx["cos_sin"],
-        ctx["kv_cache"],
-        ctx["kv_slots"],
-        ctx["kv_flat"],
-        ctx["score_flat"],
-        ctx["ape"],
-        0,  # seq_start (will be overridden below for the full launch)
-        disable_raw_path=disable_raw_path,
+        cos_sin,
+        kv_cache,
+        kv_slots,
+        kv_flat,
+        score_flat,
+        ape,
+        sp,
+        disable_raw_path=disable_raw,
         head_dim=head_dim,
-        rope_head_dim=ctx["rope_head_dim"],
+        rope_head_dim=rope_dim,
         compress_ratio=COMPRESS_RATIO,
         overlap=OVERLAP,
     )
 
 
-def _kv_slot_bytes(kv_cache: torch.Tensor, slot: int) -> torch.Tensor:
-    """Return the FP8/RoPE bytes for a single boundary slot in block 0."""
-    # kv_cache view is (1, num_slots, token_stride) but slot bytes also
-    # depend on the trailing scale_dim region; we compare both KV bytes and
-    # the scale region by reading the underlying flat backing.
-    return kv_cache._flat_backing.clone()  # type: ignore[attr-defined]
+def _run_reference(N_total: int, head_dim: int, *, seed: int):
+    """Monolithic all-raw launch covering positions ``[0, N_total)``.
+    State pool is sized to hold every position (all logical blocks mapped),
+    so save_partial_states never returns -1 — but the fused writer reads
+    purely from raw anyway (``flat_idx >= 0`` for all positions)."""
+    n_logical = (N_total + PAGE - 1) // PAGE
+    state_cache = _alloc_state_cache(head_dim, n_logical)
+    bt = torch.arange(1, n_logical + 1, dtype=torch.int64, device="cuda").view(1, -1)
 
+    positions = torch.arange(N_total, dtype=torch.int64, device="cuda")
+    state_slots = _build_state_slots(positions, bt)
+    n_boundaries = N_total // COMPRESS_RATIO
+    kv_cache = _alloc_kv_cache(head_dim, n_boundaries)
+    kv_slots = _build_kv_slots(positions, 0, n_boundaries)
 
-# --------------------------------------------------------------------------- #
-# Differential test                                                            #
-# --------------------------------------------------------------------------- #
-def _run_one(head_dim: int, *, tag: str):
-    sp = 0
-    target_pos = COMPRESS_RATIO - 1  # earliest boundary; overlap = [0..7]
-    big_N = CACHE_WINDOW + 100  # 612, > 512 so target_pos is overwritten
-
-    # ---------- Ground truth (small launch, no overwrite) ----------
-    gt = _make_inputs(N=COMPRESS_RATIO * 2, sp=sp, head_dim=head_dim, seed=0)
-    _launch(gt, head_dim, disable_raw_path=True)  # raw path off, pure cache
-    gt_bytes = _kv_slot_bytes(gt["kv_cache"], slot=0).clone()
-
-    def _make_full(seed_for_late: int):
-        f = _make_inputs(N=big_N, sp=sp, head_dim=head_dim, seed=seed_for_late)
-        # Mirror gt's first 8 raw rows so the boundary at target_pos has
-        # identical raw data (raw path -> matches gt).
-        f["kv_flat"][: COMPRESS_RATIO * 2].copy_(gt["kv_flat"])
-        f["score_flat"][: COMPRESS_RATIO * 2].copy_(gt["score_flat"])
-        # Deliberately scale up the late-batch tokens (those that cyclically
-        # overwrite slots [0..7]) so the cache-only path reads obviously
-        # different data than gt — defeats coincidental FP8-quant collisions.
-        late_lo = big_N - CACHE_WINDOW
-        f["kv_flat"][late_lo:] *= 50.0
-        f["score_flat"][late_lo:] *= 50.0
-        return f
-
-    # ---------- Full launch with raw enabled ----------
-    full = _make_full(seed_for_late=0)
-    _launch(full, head_dim, disable_raw_path=False)
-    raw_on_bytes = _kv_slot_bytes(full["kv_cache"], slot=0).clone()
-
-    # ---------- Full launch with raw disabled (negative control) ----------
-    full_neg = _make_full(seed_for_late=0)
-    _launch(full_neg, head_dim, disable_raw_path=True)
-    raw_off_bytes = _kv_slot_bytes(full_neg["kv_cache"], slot=0).clone()
-
-    # Slot 0 in the KV pool corresponds to boundary at target_pos.
-    # KV bytes for slot 0 sit at byte offset 0, length token_stride. Scale
-    # bytes sit at ``num_slots * token_stride`` (different in gt vs full
-    # because the launches have different boundary counts), so compare each
-    # per-slot region using its own num_slots.
-    token_stride = 128 if head_dim == 128 else 576
-    scale_dim = 4 if head_dim == 128 else 8
-
-    def _kv_and_scale(buf, num_slots):
-        # buf is the (1, block_bytes) flat backing.
-        flat = buf.view(-1)
-        kv = flat[:token_stride]
-        sstart = num_slots * token_stride
-        scale = flat[sstart : sstart + scale_dim]
-        return kv, scale
-
-    gt_kv, gt_scale = _kv_and_scale(gt_bytes, gt["kv_cache"].shape[1])
-    raw_on_kv, raw_on_scale = _kv_and_scale(raw_on_bytes, full["kv_cache"].shape[1])
-    raw_off_kv, raw_off_scale = _kv_and_scale(
-        raw_off_bytes, full_neg["kv_cache"].shape[1]
+    kv_flat, score_flat, ape = _make_random(N_total, head_dim, seed=seed)
+    _launch(
+        kv_flat=kv_flat,
+        score_flat=score_flat,
+        ape=ape,
+        positions=positions,
+        state_cache=state_cache,
+        state_slots=state_slots,
+        state_block_table=bt,
+        kv_cache=kv_cache,
+        kv_slots=kv_slots,
+        sp=0,
+        head_dim=head_dim,
+        disable_raw=False,
     )
-
-    eq_on = torch.equal(gt_kv, raw_on_kv) and torch.equal(gt_scale, raw_on_scale)
-    eq_off = torch.equal(gt_kv, raw_off_kv) and torch.equal(gt_scale, raw_off_scale)
-    diff_on = (gt_kv.to(torch.int16) - raw_on_kv.to(torch.int16)).abs().sum().item()
-    diff_off = (gt_kv.to(torch.int16) - raw_off_kv.to(torch.int16)).abs().sum().item()
-    print(
-        f"[{tag}] head_dim={head_dim} N={big_N} target_pos={target_pos} "
-        f"gt vs raw_on bytes_diff={diff_on}  vs raw_off bytes_diff={diff_off}"
-    )
-    assert eq_on, (
-        f"{tag}: with raw path enabled, boundary at pos={target_pos} (in the "
-        f"overwritten prefix) must reproduce the ground-truth FP8 bytes; got "
-        f"diff={diff_on}."
-    )
-    assert not eq_off, (
-        f"{tag}: with raw path disabled, the same boundary must read stale "
-        f"cache and diverge from ground truth — but bytes matched, suggesting "
-        f"the cyclic overwrite isn't actually happening (or CACHE_WINDOW is "
-        f"miscalibrated)."
+    return dict(
+        kv_flat=kv_flat,
+        score_flat=score_flat,
+        ape=ape,
+        kv_cache=kv_cache,
+        n_boundaries=n_boundaries,
     )
 
 
-def _run_invalid_block_id(head_dim: int, *, tag: str):
-    """Cover the early-prefill case where the framework hasn't allocated
-    both state blocks yet (block_table contains -1 sentinels). The
-    kernel's cache-read guard ``valid_block = block_numbers > 0`` must
-    suppress those reads — the launch should not OOB, and boundaries
-    whose overlap window falls entirely on -1 entries should still produce
-    bytes (sourced from the raw path when in_batch).
-    """
-    sp = 0
-    # Short launch so all overlap reads are inside the cache window
-    # (use_raw=False for an in-batch position would normally trigger a
-    # cache read; we replace the table entry with -1 to verify the guard).
-    N = 64
-    ctx = _make_inputs(N=N, sp=sp, head_dim=head_dim, seed=1)
-    # Poison block_table: mark the most-recent kept logical block as -1
-    # (mirrors the early-prefill "framework hasn't allocated all blocks
-    # yet" case). The kernel must not OOB and must skip those reads.
-    ctx["state_block_table"][0, -1] = -1
+def _assert_eq(
+    tag: str, scenario: str, target_pos: int, ref_kv, ref_sc, got_kv, got_sc
+) -> None:
+    if torch.equal(ref_kv, got_kv) and torch.equal(ref_sc, got_sc):
+        print(f"[{tag}] {scenario:<14s} pos={target_pos:<4d} OK")
+        return
+    diff_kv = (ref_kv.to(torch.int16) - got_kv.to(torch.int16)).abs().sum().item()
+    diff_sc = (ref_sc.to(torch.int16) - got_sc.to(torch.int16)).abs().sum().item()
+    raise AssertionError(
+        f"[{tag}] {scenario}: boundary at pos={target_pos} mismatch "
+        f"(diff_kv={diff_kv}, diff_scale={diff_sc})"
+    )
 
-    # Should not crash / OOB / produce NaN bytes.
-    _launch(ctx, head_dim, disable_raw_path=False)
-    bytes_buf = _kv_slot_bytes(ctx["kv_cache"], slot=0)
-    assert bytes_buf.numel() > 0
-    print(f"[{tag}] head_dim={head_dim} -1 block_id case ran cleanly")
+
+# ============================================================================ #
+# Scenario 1: long prefill — N > 2 * PAGE, only 2 state blocks per request
+# ============================================================================ #
+def _test_long_prefill(head_dim: int, *, tag: str) -> None:
+    N = 600  # 3 logical blocks; only 2 mapped
+    target_pos = 519  # boundary in logical block 2
+    ref = _run_reference(N, head_dim, seed=42)
+
+    state_cache = _alloc_state_cache(head_dim, 2)
+    n_logical = (N + PAGE - 1) // PAGE  # 3
+    bt = torch.zeros((1, n_logical), dtype=torch.int64, device="cuda")
+    bt[0, n_logical - 2] = 1  # most-recent 2 logical blocks
+    bt[0, n_logical - 1] = 2  # → phys 1, 2; logical 0 unmapped (= 0)
+
+    positions = torch.arange(N, dtype=torch.int64, device="cuda")
+    state_slots = _build_state_slots(positions, bt)
+    n_boundaries = N // COMPRESS_RATIO
+    kv_cache = _alloc_kv_cache(head_dim, n_boundaries)
+    kv_slots = _build_kv_slots(positions, 0, n_boundaries)
+
+    _launch(
+        kv_flat=ref["kv_flat"],
+        score_flat=ref["score_flat"],
+        ape=ref["ape"],
+        positions=positions,
+        state_cache=state_cache,
+        state_slots=state_slots,
+        state_block_table=bt,
+        kv_cache=kv_cache,
+        kv_slots=kv_slots,
+        sp=0,
+        head_dim=head_dim,
+        disable_raw=False,
+    )
+
+    bidx = _global_boundary_idx(target_pos)
+    ref_kv, ref_sc = _read_kv_slot(ref["kv_cache"], bidx, head_dim, ref["n_boundaries"])
+    got_kv, got_sc = _read_kv_slot(kv_cache, bidx, head_dim, n_boundaries)
+    _assert_eq(tag, "long_prefill", target_pos, ref_kv, ref_sc, got_kv, got_sc)
+
+
+# ============================================================================ #
+# Scenario 2: prefix-cache reuse — launch 2 inherits launch 1's state pool
+# ============================================================================ #
+def _test_prefix_reuse(head_dim: int, *, tag: str) -> None:
+    N1 = PAGE  # launch 1 fills logical block 0
+    N2 = 8  # launch 2 prefills 8 new tokens
+    target_pos = PAGE + COMPRESS_RATIO - 1  # 259, boundary in launch 2
+    N_total = N1 + N2
+
+    ref = _run_reference(N_total, head_dim, seed=7)
+
+    # Shared state pool: phys 0 sentinel, phys 1 (logical 0), phys 2 (logical 1).
+    state_cache = _alloc_state_cache(head_dim, 2)
+
+    # ── Launch 1 ──
+    bt1 = torch.tensor([[1]], dtype=torch.int64, device="cuda")
+    pos1 = torch.arange(0, N1, dtype=torch.int64, device="cuda")
+    slots1 = _build_state_slots(pos1, bt1)
+    n_b1 = N1 // COMPRESS_RATIO
+    kv_cache_1 = _alloc_kv_cache(head_dim, n_b1)
+    kv_slots_1 = _build_kv_slots(pos1, 0, n_b1)
+    _launch(
+        kv_flat=ref["kv_flat"][:N1],
+        score_flat=ref["score_flat"][:N1],
+        ape=ref["ape"],
+        positions=pos1,
+        state_cache=state_cache,
+        state_slots=slots1,
+        state_block_table=bt1,
+        kv_cache=kv_cache_1,
+        kv_slots=kv_slots_1,
+        sp=0,
+        head_dim=head_dim,
+        disable_raw=False,
+    )
+
+    # ── Launch 2: logical 0 reuses phys 1 (prefix hit), logical 1 → phys 2 ──
+    bt2 = torch.tensor([[1, 2]], dtype=torch.int64, device="cuda")
+    pos2 = torch.arange(N1, N1 + N2, dtype=torch.int64, device="cuda")
+    slots2 = _build_state_slots(pos2, bt2)
+    n_b2 = N2 // COMPRESS_RATIO
+    kv_cache_2 = _alloc_kv_cache(head_dim, n_b2)
+    kv_slots_2 = _build_kv_slots(pos2, 0, n_b2)
+    _launch(
+        kv_flat=ref["kv_flat"][N1:],
+        score_flat=ref["score_flat"][N1:],
+        ape=ref["ape"],
+        positions=pos2,
+        state_cache=state_cache,
+        state_slots=slots2,
+        state_block_table=bt2,
+        kv_cache=kv_cache_2,
+        kv_slots=kv_slots_2,
+        sp=N1,
+        head_dim=head_dim,
+        disable_raw=False,
+    )
+
+    bidx_global = _global_boundary_idx(target_pos)
+    bidx_local = bidx_global - n_b1
+    ref_kv, ref_sc = _read_kv_slot(
+        ref["kv_cache"], bidx_global, head_dim, ref["n_boundaries"]
+    )
+    got_kv, got_sc = _read_kv_slot(kv_cache_2, bidx_local, head_dim, n_b2)
+    _assert_eq(tag, "prefix_reuse", target_pos, ref_kv, ref_sc, got_kv, got_sc)
+
+
+# ============================================================================ #
+# Scenario 3: decode — disable_raw_path; entire overlap window from cache
+# ============================================================================ #
+def _test_decode(head_dim: int, *, tag: str) -> None:
+    """Pre-fill state_cache via a prefill launch covering ``[0, target_pos+1)``
+    so all overlap positions live in the pool, then "decode" the boundary
+    token at ``target_pos`` with N=1 and ``disable_raw_path=True`` — every
+    overlap-window read must come from the cache."""
+    target_pos = COMPRESS_RATIO * 70 - 1  # 279, in logical block 1
+    N_pre = target_pos + 1  # 280
+    ref = _run_reference(N_pre, head_dim, seed=11)
+
+    state_cache = _alloc_state_cache(head_dim, 2)
+    n_logical = (N_pre + PAGE - 1) // PAGE  # 2
+    bt = torch.tensor([[1, 2]], dtype=torch.int64, device="cuda")
+
+    # ── Prefill: write every position [0, target_pos+1) into state_cache. ──
+    pos_pre = torch.arange(0, N_pre, dtype=torch.int64, device="cuda")
+    slots_pre = _build_state_slots(pos_pre, bt)
+    n_b_pre = N_pre // COMPRESS_RATIO
+    kv_cache_pre = _alloc_kv_cache(head_dim, n_b_pre)
+    kv_slots_pre = _build_kv_slots(pos_pre, 0, n_b_pre)
+    _launch(
+        kv_flat=ref["kv_flat"][:N_pre],
+        score_flat=ref["score_flat"][:N_pre],
+        ape=ref["ape"],
+        positions=pos_pre,
+        state_cache=state_cache,
+        state_slots=slots_pre,
+        state_block_table=bt,
+        kv_cache=kv_cache_pre,
+        kv_slots=kv_slots_pre,
+        sp=0,
+        head_dim=head_dim,
+        disable_raw=False,
+    )
+
+    # ── Decode: N=1, disable_raw=True. kv_flat is a dummy (won't be read). ──
+    pos_dec = torch.tensor([target_pos], dtype=torch.int64, device="cuda")
+    slots_dec = _build_state_slots(pos_dec, bt)
+    kv_cache_dec = _alloc_kv_cache(head_dim, 1)
+    kv_slots_dec = torch.tensor([0], dtype=torch.int64, device="cuda")
+    width = COFF * head_dim
+    dummy = torch.zeros(1, width, dtype=torch.float32, device="cuda")
+    _launch(
+        kv_flat=dummy,
+        score_flat=dummy,
+        ape=ref["ape"],
+        positions=pos_dec,
+        state_cache=state_cache,
+        state_slots=slots_dec,
+        state_block_table=bt,
+        kv_cache=kv_cache_dec,
+        kv_slots=kv_slots_dec,
+        sp=N_pre,
+        head_dim=head_dim,
+        disable_raw=True,
+        skip_save=True,
+    )
+
+    bidx = _global_boundary_idx(target_pos)
+    ref_kv, ref_sc = _read_kv_slot(ref["kv_cache"], bidx, head_dim, ref["n_boundaries"])
+    got_kv, got_sc = _read_kv_slot(kv_cache_dec, 0, head_dim, 1)
+    _assert_eq(tag, "decode", target_pos, ref_kv, ref_sc, got_kv, got_sc)
 
 
 def main():
     assert torch.cuda.is_available(), "CUDA required"
-    _run_one(head_dim=128, tag="indexer")
-    _run_one(head_dim=512, tag="sparse")
-    _run_invalid_block_id(head_dim=128, tag="indexer-invalid")
-    _run_invalid_block_id(head_dim=512, tag="sparse-invalid")
+    for hd in (128, 512):
+        tag = "indexer" if hd == 128 else "sparse "
+        _test_long_prefill(hd, tag=tag)
+        _test_prefix_reuse(hd, tag=tag)
+        _test_decode(hd, tag=tag)
     print("OK")
 
 

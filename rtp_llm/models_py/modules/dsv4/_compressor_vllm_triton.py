@@ -1,23 +1,53 @@
-"""DSV4 CompressorFP8 Triton kernels (ported verbatim from vLLM).
+"""DSV4 CompressorFP8 Triton kernels (ported from vLLM, RTP-LLM-adapted).
 
-Ports three kernels used by the per-token state pool layout (post commit
-``e76867719`` — state pools now use ``entries_per_block=256``):
+Three kernels backing the DSV4 sparse-attention compressor. The state
+pool layout is page-aligned: each request owns ``fixed_blocks_per_req``
+(=2 in production) physical blocks of ``entries_per_block`` (=256) fp32
+slots; ``slot_mapping[t]`` resolves to the slot reserved for token ``t``
+in the most recent block.
 
   * ``_save_partial_states_kernel`` — per-token write of (kv | score+ape)
-    into the fp32 state cache. Source: vLLM ``deepseek_compressor.py``.
+    into the fp32 state cache. One program per token; non-boundary tokens
+    still write so that the boundary writer can read them later.
+    Source: vLLM ``deepseek_compressor.py``.
+
   * ``_fused_kv_compress_norm_rope_insert_sparse_attn`` — head=512 fused
-    boundary writer (compress → RMSNorm → FP8 quant nope → RoPE bf16 →
-    584B KV slot store). Source: vLLM ``fused_compress_quant_cache.py``.
+    boundary writer (gather → softmax-reduce → RMSNorm → FP8 quant nope →
+    RoPE bf16 → 584B KV-pool slot store). Source: vLLM
+    ``fused_compress_quant_cache.py``.
+
   * ``_fused_kv_compress_norm_rope_insert_indexer_attn`` — head=128 fused
-    boundary writer (compress → RMSNorm → RoPE → FP8 quant whole token →
-    132B KV slot store). Source: vLLM ``fused_compress_quant_cache.py``.
+    boundary writer (same pipeline; whole token is one quant block, 132B
+    per KV-pool slot).
 
-Both fused writers self-skip non-boundary tokens (early-exit when
-``(position+1) % COMPRESS_RATIO != 0``), so the caller passes a flat
-``[N_tok]`` slot_mapping and lets the kernel decide.
+Boundary writer source dispatch (raw vs state cache):
 
-The two thin wrappers ``run_save_partial_states`` / ``run_fused_compress_kv_write``
-hide the constexpr table per ``head_dim``.
+  The writer needs the prior ``(1+OVERLAP)*COMPRESS_RATIO`` positions of
+  kv/score for the boundary token. There are two sources:
+
+    raw   — ``kv_raw[flat_idx]`` / ``score_raw[flat_idx]`` where
+             ``flat_idx = pos - seq_start``. ``kv_raw/score_raw`` is the
+             authoritative copy of every token whose kv/score the caller
+             materialised for this launch (prefill: the current chunk
+             passed through linear projections). Used whenever
+             ``0 <= flat_idx < n_raw``.
+
+    cache — ``state_cache[block_table[req_idx, pos // block_size], ...]``.
+             Used for ``flat_idx < 0``, i.e. positions belonging to a
+             prefix-cache hit: they were written into the state pool by a
+             prior request, and the framework reuses those physical
+             blocks via this request's ``block_table``. ``block_table``
+             entries that point at unused blocks are 0 and filtered.
+
+  Decode passes ``disable_raw_path=True`` → ``n_raw == 0``, so every
+  position routes through the cache branch.
+
+Both fused writers self-skip non-boundary tokens via early-exit on
+``(position+1) % COMPRESS_RATIO != 0``, so the caller hands in a flat
+``[N_tok]`` slot_mapping without pre-filtering.
+
+The thin wrappers ``run_save_partial_states`` / ``run_fused_compress_kv_write``
+hide the per-``head_dim`` constexpr table.
 """
 
 from __future__ import annotations
@@ -91,9 +121,12 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     block_table_ptr,
     block_table_stride,
     block_size,
-    # Raw kv/score (current batch) + ape + batch context — see indexer
-    # kernel comments for rationale (cyclic state_cache cannot retain
-    # earlier-batch data after later writes overwrite it).
+    # Raw kv/score for the tokens supplied to this launch + ape table.
+    # ``seq_start`` = absolute position of ``kv_raw[0]`` (prefill: the
+    # current chunk's start = sp_int). ``n_raw`` = ``kv_raw.shape[0]``,
+    # i.e. how many leading positions ``kv_raw`` covers (NOT a batch
+    # size — DSV4 prefill runs bsz=1, so this is the chunk length).
+    # See module docstring for the source-dispatch rules.
     kv_raw_ptr,
     kv_raw_stride,
     score_raw_ptr,
@@ -101,7 +134,7 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     ape_ptr,
     ape_stride,
     seq_start,
-    n_batch,
+    n_raw,
     rms_norm_weight_ptr,
     rms_norm_eps,
     cos_sin_cache_ptr,
@@ -120,19 +153,12 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     TOKEN_STRIDE: tl.constexpr,
     SCALE_DIM: tl.constexpr,
     KV_BLOCK_STRIDE: tl.constexpr,
-    CACHE_WINDOW: tl.constexpr,
 ):
     token_idx = tl.program_id(0)
 
     position = tl.load(positions_ptr + token_idx)
     if (position + 1) % COMPRESS_RATIO != 0:
         return
-
-    # Note: we deliberately do NOT early-return on ``slot_mapping[token]<0``.
-    # When a boundary's state slot has been evicted (cyclic ring overwrote
-    # it within this same launch) the raw path provides the data — the
-    # ``kv_slot_idx < 0`` check at the bottom is the real gate for whether
-    # this token should write to the KV pool.
 
     req_idx = tl.load(token_to_req_indices_ptr + token_idx)
 
@@ -145,16 +171,13 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     block = tl.arange(0, TRITON_BLOCK_SIZE)
     mask = block < HEAD_SIZE
 
-    # ── Source dispatch: raw for the prefix evicted from cache ──
-    # State pool is fixed_blocks_per_req page-aligned blocks per request
-    # (NOT a cyclic ring). Cache retains the LAST ``cache_window`` positions
-    # = (page_size + (seq_len-1) % page_size + 1) when seq_len > page_size,
-    # else seq_len. Earlier in-batch positions were evicted when their
-    # logical block rolled out and must come from raw tensors.
-    # Out-of-batch (previous-batch overlap) reads from cache too.
+    # ── Source dispatch (see module docstring) ──
+    #   flat_idx in [0, n_raw)  → raw   (covered by this launch's kv_raw)
+    #   flat_idx <  0           → cache (prefix-cache hit; resolve via
+    #                                    block_table[req_idx])
+    # Decode: disable_raw_path → n_raw == 0, every position → cache.
     flat_idx = pos - seq_start
-    in_batch = mask_pos & (flat_idx >= 0) & (flat_idx < n_batch)
-    use_raw = in_batch & (flat_idx < n_batch - CACHE_WINDOW)
+    use_raw = mask_pos & (flat_idx >= 0) & (flat_idx < n_raw)
     flat_idx_safe = tl.where(use_raw, flat_idx, 0)
 
     raw_mask = use_raw[:, None] & mask[None, :]
@@ -186,10 +209,9 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     )
     score_from_raw = score_from_raw + ape_vals
 
-    # State-cache path. block_table is sized to cover all logical blocks of
-    # the request; only the last fixed_blocks_per_req entries are valid
-    # (others are -1 sentinels for evicted blocks past the start, or 0 for
-    # padding past the current end). The valid_block check filters both.
+    # State-cache path: prefix-cache hit region. block_table[req_idx] maps
+    # logical_block = pos // block_size to a physical state-pool block;
+    # padding/unused entries are 0 and filtered by valid_block.
     use_cache = mask_pos & ~use_raw
     block_indices = pos // block_size
     block_indices_safe = tl.where(use_cache, block_indices, 0)
@@ -325,13 +347,12 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
     block_table_ptr,
     block_table_stride,
     block_size,
-    # Raw kv/score (current batch) + ape + batch context. Used for any
-    # overlap-window position whose absolute ``pos`` falls inside the
-    # current batch (``seq_start <= pos < seq_start + n_batch``); we read
-    # the per-token contribution directly from these tensors instead of
-    # the cyclic state_cache, which only retains the latest ~512 tokens
-    # per request and would have been overwritten by later writes in
-    # this same launch.
+    # Raw kv/score for the tokens supplied to this launch + ape table.
+    # ``seq_start`` = absolute position of ``kv_raw[0]`` (prefill: the
+    # current chunk's start = sp_int). ``n_raw`` = ``kv_raw.shape[0]``,
+    # i.e. how many leading positions ``kv_raw`` covers (NOT a batch
+    # size — DSV4 prefill runs bsz=1, so this is the chunk length).
+    # See module docstring for the source-dispatch rules.
     kv_raw_ptr,
     kv_raw_stride,
     score_raw_ptr,
@@ -339,7 +360,7 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
     ape_ptr,
     ape_stride,
     seq_start,
-    n_batch,
+    n_raw,
     rms_norm_weight_ptr,
     rms_norm_eps,
     cos_sin_cache_ptr,
@@ -358,19 +379,12 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
     TOKEN_STRIDE: tl.constexpr,
     SCALE_DIM: tl.constexpr,
     KV_BLOCK_STRIDE: tl.constexpr,
-    CACHE_WINDOW: tl.constexpr,
 ):
     token_idx = tl.program_id(0)
 
     position = tl.load(positions_ptr + token_idx)
     if (position + 1) % COMPRESS_RATIO != 0:
         return
-
-    # Note: we deliberately do NOT early-return on ``slot_mapping[token]<0``.
-    # When a boundary's state slot has been evicted (cyclic ring overwrote
-    # it within this same launch) the raw path provides the data — the
-    # ``kv_slot_idx < 0`` check at the bottom is the real gate for whether
-    # this token should write to the KV pool.
 
     req_idx = tl.load(token_to_req_indices_ptr + token_idx)
 
@@ -383,18 +397,15 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
     block = tl.arange(0, TRITON_BLOCK_SIZE)
     mask = block < HEAD_SIZE
 
-    # ── Source dispatch: raw for the prefix evicted from cache ──
-    # State pool: page-aligned, fixed_blocks_per_req physical blocks per
-    # request (NOT a cyclic 512 ring). Cache retains the LAST cache_window
-    # positions = (page_size + (seq_len-1) % page_size + 1) when seq_len >
-    # page_size, else seq_len. Earlier in-batch positions whose logical
-    # block has rolled out must come from raw kv_flat/score_flat.
+    # ── Source dispatch (see module docstring) ──
+    #   flat_idx in [0, n_raw)  → raw   (covered by this launch's kv_raw)
+    #   flat_idx <  0           → cache (prefix-cache hit; resolve via
+    #                                    block_table[req_idx])
+    # Decode: disable_raw_path → n_raw == 0, every position → cache.
     flat_idx = pos - seq_start
-    in_batch = mask_pos & (flat_idx >= 0) & (flat_idx < n_batch)
-    use_raw = in_batch & (flat_idx < n_batch - CACHE_WINDOW)
+    use_raw = mask_pos & (flat_idx >= 0) & (flat_idx < n_raw)
     flat_idx_safe = tl.where(use_raw, flat_idx, 0)
 
-    # Raw path: kv_raw[flat_idx, head_offset:head_offset+HEAD_SIZE]
     raw_mask = use_raw[:, None] & mask[None, :]
     kv_from_raw = tl.load(
         kv_raw_ptr
@@ -412,7 +423,7 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
         mask=raw_mask,
         other=0.0,
     )
-    # Add ape (state_cache stores score+ape; raw path adds it here)
+    # state_cache stores score+ape pre-summed; raw path adds ape here.
     ape_rows = pos % COMPRESS_RATIO
     ape_rows_safe = tl.where(use_raw, ape_rows, 0)
     ape_vals = tl.load(
@@ -425,10 +436,9 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
     )
     score_from_raw = score_from_raw + ape_vals
 
-    # State-cache path. block_table is sized to cover all logical blocks of
-    # the request; only the last fixed_blocks_per_req entries are valid
-    # (others are -1 sentinels for evicted blocks past the start, or 0 for
-    # padding past the current end). The valid_block check filters both.
+    # State-cache path: prefix-cache hit region. block_table[req_idx] maps
+    # logical_block = pos // block_size to a physical state-pool block;
+    # padding/unused entries are 0 and filtered by valid_block.
     use_cache = mask_pos & ~use_raw
     block_indices = pos // block_size
     block_indices_safe = tl.where(use_cache, block_indices, 0)
@@ -598,25 +608,36 @@ def run_fused_compress_kv_write(
     cos_sin_cache: torch.Tensor,  # [max_pos, rope_head_dim] fp32
     kv_cache: torch.Tensor,  # [num_blocks, kv_block_size, ENTRY_BYTES] uint8 (per-block padded)
     kv_slot_mapping: torch.Tensor,  # [N] int64 — KV-pool slot per token (-1 if non-boundary)
-    # Raw current-batch tensors + ape + batch context. The state pool is a
-    # cyclic buffer of only ~512 slots per request (2 fixed blocks * 256
-    # entries), so within a single launch later writes overwrite earlier
-    # tokens' state. The kernel reads these raw tensors directly for any
-    # overlap-window position whose absolute pos falls inside the current
-    # batch [seq_start, seq_start + n_batch).
-    kv_raw: torch.Tensor,  # [N_batch, (1+overlap)*head_dim] fp32 contiguous
-    score_raw: torch.Tensor,  # [N_batch, (1+overlap)*head_dim] fp32 contiguous
+    # Raw kv/score for the tokens supplied to this launch + ape table.
+    # In prefill these cover the current chunk (kv_raw.shape[0] = chunk
+    # length, NOT a batch dim — DSV4 prefill is bsz=1). The kernel reads
+    # from them whenever ``flat_idx = pos - seq_start`` falls in
+    # ``[0, kv_raw.shape[0])``; positions before ``seq_start`` are
+    # prefix-cache hits and route to the state pool via block_table.
+    kv_raw: torch.Tensor,  # [n_raw, (1+overlap)*head_dim] fp32 contiguous
+    score_raw: torch.Tensor,  # [n_raw, (1+overlap)*head_dim] fp32 contiguous
     ape: torch.Tensor,  # [compress_ratio, (1+overlap)*head_dim] fp32
-    seq_start: int,  # absolute position of kv_raw[0] (== sp_int)
+    seq_start: int,  # absolute position of kv_raw[0] (prefill: == sp_int)
     disable_raw_path: bool = False,  # decode path: skip raw, read cache only
     *,
     head_dim: int,
     rope_head_dim: int,
     compress_ratio: int,
     overlap: bool,
-    fixed_blocks_per_req: int = 2,
 ) -> None:
-    """Boundary-token compress→norm→rope→fp8 quant→KV-pool store."""
+    """Boundary-token compress→norm→rope→fp8 quant→KV-pool store.
+
+    For each boundary token (``(position+1) % compress_ratio == 0``), the
+    kernel gathers the prior ``(1+overlap)*compress_ratio`` positions of
+    kv/score, softmax-reduces over positions, RMSNorms, FP8-quantises the
+    nope segment + RoPEs the rope segment, and writes the result into
+    ``kv_cache`` at ``kv_slot_mapping[t]``. Non-boundary tokens self-skip
+    (early-exit); pass a flat ``[N_tok]`` slot_mapping.
+
+    Source dispatch for each gathered position is described in the module
+    docstring. The wrapper materialises ``n_raw`` from ``kv_raw.shape[0]``
+    (or 0 if ``disable_raw_path``) and forwards everything else verbatim.
+    """
     N = int(slot_mapping.shape[0])
     if N == 0:
         return
@@ -628,26 +649,7 @@ def run_fused_compress_kv_write(
     state_block_size = int(state_cache.shape[1])
     kv_block_size = int(kv_cache.shape[1])
     kv_block_stride = int(kv_cache.stride(0))
-    n_batch = 0 if disable_raw_path else int(kv_raw.shape[0])
-
-    # Cache window per request: the framework keeps the last
-    # ``fixed_blocks_per_req`` page-aligned state blocks. The most recent
-    # block is partially filled with ``(seq_len-1) % page_size + 1`` valid
-    # entries; older blocks are full. So the window is:
-    #   seq_len <= page_size              -> seq_len
-    #   page_size < seq_len <= 2*page_size -> page_size + (seq_len-1)%page_size + 1
-    #   ...
-    # (We support fixed_blocks_per_req == 2 as the only configured DSV4 case;
-    # the formula generalises to ``min(seq_len, (k-1)*page_size + tail)``.)
-    seq_len = int(seq_start) + n_batch
-    if seq_len <= 0:
-        cache_window = 0
-    elif seq_len <= state_block_size:
-        cache_window = seq_len
-    else:
-        tail = ((seq_len - 1) % state_block_size) + 1
-        cache_window = (fixed_blocks_per_req - 1) * state_block_size + tail
-        cache_window = min(cache_window, seq_len)
+    n_raw = 0 if disable_raw_path else int(kv_raw.shape[0])
 
     if head_dim == 512:
         kernel = _fused_kv_compress_norm_rope_insert_sparse_attn
@@ -672,7 +674,7 @@ def run_fused_compress_kv_write(
         ape,
         ape.stride(0),
         seq_start,
-        n_batch,
+        n_raw,
         rms_norm_weight,
         rms_norm_eps,
         cos_sin_cache,
@@ -691,7 +693,6 @@ def run_fused_compress_kv_write(
         TOKEN_STRIDE=cfg["token_stride"],
         SCALE_DIM=cfg["scale_dim"],
         KV_BLOCK_STRIDE=kv_block_stride,
-        CACHE_WINDOW=cache_window,
         num_warps=cfg["num_warps"],
     )
 
