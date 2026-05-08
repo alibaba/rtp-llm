@@ -41,8 +41,9 @@ from rtp_llm.models_py.modules.dsv4._compressor_vllm_triton import (
 )
 from rtp_llm.models_py.modules.dsv4.cp import (
     CPContext,
-    cp_all_gather_full,
+    cp_all_gather_full_async,
     cp_should_gather,
+    cp_wait_gather_full,
 )
 
 
@@ -436,17 +437,41 @@ class CompressorVLLM(nn.Module):
         fused_out = torch.nn.functional.linear(x32, self._wkv_wgate_fused)
         kv, score = fused_out[..., :out_dim], fused_out[..., out_dim:]
 
-        if cp_should_gather(cp_ctx, start_pos):
-            kv = cp_all_gather_full(kv, cp_ctx)
-            score = cp_all_gather_full(score, cp_ctx)
-            bsz, seqlen = kv.size(0), kv.size(1)
+        cp_gather = cp_should_gather(cp_ctx, start_pos)
+        kv_gather_handle = None
+        score_gather_handle = None
+        if cp_gather:
+            assert cp_ctx is not None
+            if kv.dim() != 3 or kv.size(0) != 1:
+                raise RuntimeError(
+                    f"vLLM CP compressor KV expects [1, T_local, H], got {tuple(kv.shape)}"
+                )
+            if score.dim() != 3 or score.size(0) != 1:
+                raise RuntimeError(
+                    f"vLLM CP compressor score expects [1, T_local, H], got {tuple(score.shape)}"
+                )
+            gather_stream = torch.cuda.Stream(device=kv.device) if kv.is_cuda else None
+            kv_gather_handle = cp_all_gather_full_async(
+                kv.squeeze(0), cp_ctx, stream=gather_stream
+            )
+            score_gather_handle = cp_all_gather_full_async(
+                score.squeeze(0), cp_ctx, stream=gather_stream
+            )
+            bsz, seqlen = 1, cp_ctx.seq_len_full
+
+        if meta is None:
+            positions, b_idx = _build_prefill_positions(sp, bsz, seqlen, device)
+            meta = self.prepare_metadata(positions, b_idx)
+
+        if cp_gather:
+            assert kv_gather_handle is not None
+            assert score_gather_handle is not None
+            kv = cp_wait_gather_full(kv_gather_handle).unsqueeze(0)
+            score = cp_wait_gather_full(score_gather_handle).unsqueeze(0)
 
         N = bsz * seqlen
         kv_flat = kv.reshape(N, -1).contiguous()
         score_flat = score.reshape(N, -1).contiguous()
-        if meta is None:
-            positions, b_idx = _build_prefill_positions(sp, bsz, seqlen, device)
-            meta = self.prepare_metadata(positions, b_idx)
         self._launch(kv_flat, score_flat, meta, seq_start=sp)
         return None
 
