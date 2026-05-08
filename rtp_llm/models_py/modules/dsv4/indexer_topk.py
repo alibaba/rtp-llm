@@ -257,6 +257,11 @@ class AutoIndexerTopKBackend(IndexerTopKBackend):
         lengths: Optional[torch.Tensor] = None,
         offset: int | torch.Tensor = 0,
     ) -> torch.Tensor:
+        # The fused TopK kernels are only used for full-row selection. Decode
+        # can request topk=512 while only a short compressed prefix is valid;
+        # keep that masked case on the exact torch path.
+        if lengths is not None:
+            return self._torch.select(score, topk, lengths=lengths, offset=offset)
         if (
             score.is_cuda
             and score.dtype == torch.float32

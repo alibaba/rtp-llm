@@ -1,7 +1,9 @@
+import os
 from unittest.mock import patch
 
 import torch
 
+from rtp_llm.models_py.modules.dsv4 import compressor as compressor_mod
 from rtp_llm.models_py.modules.dsv4.compressor import Compressor
 from rtp_llm.models_py.modules.dsv4.cp import CPContext
 from rtp_llm.models_py.modules.dsv4.indexer import Indexer
@@ -54,6 +56,18 @@ def test_indexer_weights_proj_uses_full_sequence_not_abs256_chunks():
     assert not hasattr(Indexer, "_weights_proj_abs_blocked")
     assert "_weights_proj_abs_blocked" not in forward_names
     assert "linear" in forward_names
+
+
+def test_compressor_fast_path_is_explicit_opt_in():
+    with patch.dict(os.environ, {}, clear=True):
+        assert not compressor_mod._use_compressor_fast()
+
+    with patch.dict(os.environ, {"DSV4_COMPRESSOR_FAST": "0"}, clear=True):
+        assert not compressor_mod._use_compressor_fast()
+
+    with patch.dict(os.environ, {"DSV4_COMPRESSOR_FAST": "1"}, clear=True):
+        with patch.object(compressor_mod, "_COMPRESSOR_FAST_OK", True):
+            assert compressor_mod._use_compressor_fast()
 
 
 def test_bind_kv_cache_from_pool_gathers_valid_slots_and_zero_fills_invalid():

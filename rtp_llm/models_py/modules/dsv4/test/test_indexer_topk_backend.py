@@ -79,6 +79,26 @@ class TestIndexerTopKBackend(unittest.TestCase):
         self.assertEqual(out.dtype, torch.int32)
         self.assertTrue(torch.all(out.reshape(-1, 4) < lengths.view(-1, 1)))
 
+    def test_auto_backend_masks_short_rows_on_torch_path(self):
+        score = torch.tensor(
+            [
+                [0.1, 0.9, 0.5, 4.0, 3.0],
+                [0.4, 0.2, 8.0, 7.0, 6.0],
+            ],
+            dtype=torch.float32,
+        )
+        lengths = torch.tensor([3, 2], dtype=torch.int32)
+
+        out = AutoIndexerTopKBackend().select(score, 4, lengths=lengths)
+
+        self.assertEqual(out.dtype, torch.int32)
+        self.assertTrue(
+            torch.equal(out[0], torch.tensor([1, 2, 0, -1], dtype=torch.int32))
+        )
+        self.assertTrue(
+            torch.equal(out[1], torch.tensor([0, 1, -1, -1], dtype=torch.int32))
+        )
+
     def test_dispatch_env(self):
         with _env("DSV4_INDEXER_TOPK_BACKEND", ""):
             os.environ.pop("DSV4_INDEXER_TOPK_BACKEND", None)
