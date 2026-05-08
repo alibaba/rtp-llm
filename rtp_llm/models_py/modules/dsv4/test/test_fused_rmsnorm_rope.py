@@ -122,6 +122,65 @@ def test_kv_correctness():
     assert d_ref.max() < 5e-2, f"KV max diff {d_ref.max()} exceeds tol"
 
 
+def test_output_buffer_and_inplace_correctness():
+    """Wrapper output modes used by future decode workspace reuse."""
+    torch.manual_seed(3)
+    B, H, head_dim, rd, eps = 4, 64, 128, 64, 1e-6
+    q = torch.randn(B, 1, H, head_dim, dtype=torch.bfloat16, device="cuda") * 0.5
+    freqs = _make_freqs(B, rd)
+
+    ref = fused_rmsnorm_rope(q, None, freqs, rd, eps=eps)
+
+    out = torch.empty_like(q)
+    cand_out = fused_rmsnorm_rope(q, None, freqs, rd, eps=eps, out=out)
+    assert cand_out.data_ptr() == out.data_ptr()
+    d_out = (cand_out.float() - ref.float()).abs()
+    print(f"  [OUT]  cand vs default-ref max={d_out.max():.4e}  mean={d_out.mean():.4e}")
+    assert d_out.max() <= 2e-2
+
+    q_inplace = q.clone()
+    cand_inplace = fused_rmsnorm_rope(q_inplace, None, freqs, rd, eps=eps, inplace=True)
+    assert cand_inplace.data_ptr() == q_inplace.data_ptr()
+    d_inplace = (cand_inplace.float() - ref.float()).abs()
+    print(
+        f"  [INP]  cand vs default-ref max={d_inplace.max():.4e}  "
+        f"mean={d_inplace.mean():.4e}"
+    )
+    assert d_inplace.max() <= 2e-2
+
+
+def test_group_heads_correctness():
+    """Grouped-head Q path shares one freq row across multiple heads."""
+    torch.manual_seed(4)
+    B, H, head_dim, rd, eps = 4, 64, 128, 64, 1e-6
+    q = torch.randn(B, 1, H, head_dim, dtype=torch.bfloat16, device="cuda") * 0.5
+    freqs = _make_freqs(B, rd)
+    ref = fused_rmsnorm_rope(q, None, freqs, rd, eps=eps)
+    for group_heads in (2, 4, 8):
+        cand = fused_rmsnorm_rope(
+            q, None, freqs, rd, eps=eps, group_heads=group_heads
+        )
+        d = (cand.float() - ref.float()).abs()
+        print(
+            f"  [GH{group_heads}] cand vs default-ref max={d.max():.4e} "
+            f"mean={d.mean():.4e}"
+        )
+        assert d.max() <= 2e-2
+
+        q_inplace = q.clone()
+        cand_inplace = fused_rmsnorm_rope(
+            q_inplace,
+            None,
+            freqs,
+            rd,
+            eps=eps,
+            group_heads=group_heads,
+            inplace=True,
+        )
+        d_inplace = (cand_inplace.float() - ref.float()).abs()
+        assert d_inplace.max() <= 2e-2
+
+
 def test_inverse_rope_path_correctness():
     """Inverse RoPE path (used on attention output before wo_a)."""
     torch.manual_seed(2)
@@ -250,6 +309,8 @@ if __name__ == "__main__":
     print("== Correctness ==")
     test_q_correctness()
     test_kv_correctness()
+    test_output_buffer_and_inplace_correctness()
+    test_group_heads_correctness()
     test_inverse_rope_path_correctness()
     print("\n== Benchmark (T sweep: covers decode + prefill paths) ==")
     q_res, kv_res = bench_token_sweep()
