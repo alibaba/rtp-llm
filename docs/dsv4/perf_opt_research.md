@@ -22,8 +22,9 @@ these relevant open-source shapes:
 ## Implemented Choices
 
 - `hc_head` now has a fused TileLang fast path controlled by
-  `DSV4_MHC_HEAD_FUSED` and falls back to the older TileLang composition when
-  unavailable.
+  `DSV4_MHC_HEAD_FUSED`. When enabled, fused head is required and raises if it
+  cannot run; set `DSV4_MHC_HEAD_FUSED=0` to use the older TileLang
+  composition.
 - `mhc_pre_big_fuse` now selects its pre-GEMM backend via
   `DSV4_MHC_PRE_GEMM_BACKEND`.
   - Default/`auto`: try DeepGEMM split-K, then fall back to TileLang single-K
