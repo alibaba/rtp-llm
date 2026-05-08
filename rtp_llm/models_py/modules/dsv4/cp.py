@@ -71,6 +71,10 @@ class CPContext:
     seq_len_total: int
     # Raw cp_info, kept for any caller needing extra fields.
     cp_info: object
+    # True when unpadding is just ``gathered[:seq_len_full]``.  This is
+    # computed while building CPContext from CPU restore metadata to avoid a
+    # per-forward CUDA comparison on the hot path.
+    unpad_restore_is_prefix: bool = False
 
 
 @dataclass
@@ -243,7 +247,12 @@ def build_cp_context(
             f"the single prefill stream path; got {got}"
         )
     seq_len_full = int(actual_lengths_cpu.reshape(-1)[0].item())
-    unpad_restore = restore_indices[:seq_len_full].to(torch.long)
+    restore_prefix = restore_indices[:seq_len_full]
+    unpad_restore_is_prefix = False
+    if restore_prefix.device.type == "cpu":
+        expected = torch.arange(seq_len_full, dtype=restore_prefix.dtype)
+        unpad_restore_is_prefix = bool(torch.equal(restore_prefix.cpu(), expected))
+    unpad_restore = restore_prefix.to(torch.long)
     seq_len_full = int(unpad_restore.shape[0])
     prefix_length = int(position_offset)
     global_positions = relative_positions + prefix_length
@@ -262,6 +271,7 @@ def build_cp_context(
         unpad_restore=unpad_restore,
         seq_len_total=seq_len_total,
         cp_info=cp_info,
+        unpad_restore_is_prefix=unpad_restore_is_prefix,
     )
 
 
@@ -285,6 +295,8 @@ def _cp_gather_2d(
         )
     if local_2d.size(1) <= 0:
         raise ValueError(f"CP gather hidden dimension must be positive, got shape {tuple(local_2d.shape)}")
+    if local_2d.is_contiguous():
+        return local_2d
     return local_2d.contiguous()
 
 
@@ -297,7 +309,10 @@ def _cp_restore_gathered_full_2d(
     expected_rows = cp_ctx.cp_size * cp_ctx.chunk_length
     if gathered.size(0) != expected_rows:
         raise ValueError(f"CP gathered rows({gathered.size(0)}) != expected rows({expected_rows})")
-    full = gathered.index_select(0, cp_ctx.unpad_restore)  # [seq_len_full, H]
+    if cp_ctx.unpad_restore_is_prefix:
+        full = gathered[: cp_ctx.seq_len_full]  # [seq_len_full, H], view
+    else:
+        full = gathered.index_select(0, cp_ctx.unpad_restore)  # [seq_len_full, H]
     if full.size(0) != cp_ctx.seq_len_full:
         raise ValueError(f"CP restored rows({full.size(0)}) != cp_ctx.seq_len_full({cp_ctx.seq_len_full})")
     return full

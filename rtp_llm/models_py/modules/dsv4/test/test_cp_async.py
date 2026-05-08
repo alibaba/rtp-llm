@@ -8,6 +8,8 @@ from rtp_llm.models_py.modules.dsv4.cp import (
     CPSyncGatherHandle,
     CudaAsyncCPGatherImpl,
     SyncCPGatherImpl,
+    _cp_gather_2d,
+    _cp_restore_gathered_full_2d,
     build_cp_context,
     build_cp_gather_impl,
     cp_all_gather_full,
@@ -144,6 +146,59 @@ def test_build_cp_context_single_stream_direct_slice_unpad_restore():
     assert torch.equal(ctx.relative_positions, torch.tensor([0, 1, 6, 7]))
     assert torch.equal(ctx.global_positions, torch.tensor([10, 11, 16, 17]))
     assert torch.equal(ctx.unpad_restore, cp_info.prefill_qkv_restore_indice[:6].long())
+    assert not ctx.unpad_restore_is_prefix
+
+
+def test_build_cp_context_marks_identity_restore_prefix():
+    cp_info = SimpleNamespace(
+        prefill_qkv_padding_mask=torch.ones(8, dtype=torch.int32),
+        prefill_qkv_restore_indice=torch.arange(8, dtype=torch.int32),
+        prefill_cp_chunk_lengths=torch.tensor([4], dtype=torch.int32),
+        prefill_actual_input_lengths_cpu=torch.tensor([6], dtype=torch.int32),
+    )
+
+    ctx = build_cp_context(
+        cp_info,
+        cp_size=2,
+        cp_rank=0,
+        chunk_length=4,
+        device=torch.device("cpu"),
+    )
+
+    assert torch.equal(ctx.unpad_restore, torch.arange(6, dtype=torch.long))
+    assert ctx.unpad_restore_is_prefix
+
+
+def test_cp_restore_prefix_returns_view_without_index_select():
+    ctx = CPContext(
+        cp_size=2,
+        cp_rank=0,
+        chunk_length=4,
+        padded_seq_len=8,
+        seq_len_full=6,
+        relative_positions=torch.arange(4, dtype=torch.long),
+        prefix_length=0,
+        global_positions=torch.arange(4, dtype=torch.long),
+        local_is_real=torch.ones(4, dtype=torch.bool),
+        unpad_restore=torch.arange(6, dtype=torch.long),
+        seq_len_total=6,
+        cp_info=object(),
+        unpad_restore_is_prefix=True,
+    )
+    gathered = torch.arange(8 * 3, dtype=torch.float32).reshape(8, 3)
+    full = _cp_restore_gathered_full_2d(gathered, ctx)
+
+    assert torch.equal(full, gathered[:6])
+    assert full.data_ptr() == gathered.data_ptr()
+    assert full.storage_offset() == gathered.storage_offset()
+
+
+def test_cp_gather_2d_keeps_contiguous_input_object():
+    ctx = _make_cp_ctx()
+    local = torch.zeros((2, 6), dtype=torch.float32)
+    out = _cp_gather_2d(local, ctx)
+
+    assert out is local
 
 
 def test_build_cp_context_rejects_multi_prefill_stream():
@@ -204,6 +259,12 @@ if __name__ == "__main__":
     print("PASS test_cp_wait_gather_full_rejects_unknown_handle")
     test_build_cp_context_single_stream_direct_slice_unpad_restore()
     print("PASS test_build_cp_context_single_stream_direct_slice_unpad_restore")
+    test_build_cp_context_marks_identity_restore_prefix()
+    print("PASS test_build_cp_context_marks_identity_restore_prefix")
+    test_cp_restore_prefix_returns_view_without_index_select()
+    print("PASS test_cp_restore_prefix_returns_view_without_index_select")
+    test_cp_gather_2d_keeps_contiguous_input_object()
+    print("PASS test_cp_gather_2d_keeps_contiguous_input_object")
     test_build_cp_context_rejects_multi_prefill_stream()
     print("PASS test_build_cp_context_rejects_multi_prefill_stream")
     test_build_cp_context_moves_restore_indices_independently_when_cuda_available()
