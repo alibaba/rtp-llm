@@ -60,6 +60,36 @@ def _use_vllm_compressor() -> bool:
     return os.environ.get("DSV4_COMPRESSOR_VLLM", "1") != "0"
 
 
+# ---------------------------------------------------------------------------
+# vLLM-flow prefill metadata bundles. Mirror of source's ``PrefillMeta`` /
+# ``PrefillQKV`` (FP8 attention.py) but stripped to the BF16 essentials
+# (no FP8 workspace, no fused varlen slot mapping). Consumed by
+# ``Attention._forward_prefill_vllm`` and friends.
+# ---------------------------------------------------------------------------
+from typing import NamedTuple as _NamedTuple
+
+
+class _VLLMPrefillCommon(_NamedTuple):
+    bsz: int
+    seqlen: int
+    sp_int: int          # absolute prefix length
+    end_pos: int          # = sp_int + seqlen
+    is_fresh_prefill: bool  # = (sp_int == 0)
+    device: torch.device
+    freqs_cis: torch.Tensor  # self.freqs_cis[sp:sp+S]; pre-sliced view
+    swa_dense_len: int        # SWA prefix length in the dense kv_cat layout
+    # hoisted meta — built once per layer-call, reused across compressor +
+    # nested indexer compressor:
+    compressor_meta: Any  # CompressorMeta from compressor_vllm
+    indexer_meta: Optional[Any]  # _IndexerVLLMPrefillMeta or None (HCA)
+
+
+class _VLLMPrefillQKV(_NamedTuple):
+    q: torch.Tensor       # [B, S, n_heads, head_dim] bf16
+    qr: torch.Tensor      # [B, S, q_lora_rank] bf16
+    kv_full: torch.Tensor  # [B, S, head_dim] bf16
+
+
 from rtp_llm.models_py.modules.dsv4.cp import (
     CPContext,
     cp_all_gather_full_async,
@@ -2091,6 +2121,22 @@ class Attention(nn.Module):
         # layer_id compare nor any record_if_level call site below runs.
         _dbg = _rt.should_record_layer(self.layer_id)
         bsz, seqlen, _ = x.size()
+
+        # vLLM-flow prefill dispatch (env switch + CSA/HCA layer +
+        # bsz==1 prefill + no CP). Falls through to the legacy body for
+        # SWA-only layers, batched / CP prefills, decode, etc. — the
+        # vLLM path is intentionally narrow to mirror the source FP8
+        # attention's bsz==1 single-request prefill assumption.
+        cp_ctx_local = self._cp_ctx
+        is_batched_local = isinstance(start_pos, torch.Tensor) and start_pos.numel() > 1
+        if (
+            seqlen > 1
+            and not is_batched_local
+            and (cp_ctx_local is None or cp_ctx_local.cp_size <= 1)
+            and self.compress_ratio in (4, 128)
+            and _use_vllm_compressor()
+        ):
+            return self._forward_prefill_vllm(x, start_pos, sequence_lengths)
         win = self.window_size
         ratio = self.compress_ratio
         rd = self.rope_head_dim
@@ -2698,4 +2744,353 @@ class Attention(nn.Module):
                 _rt.record_if_level(
                     2, f"L{self.layer_id:02d}_attn_wo_b_out_post_ar", out
                 )
+        return out
+
+    # ==================================================================
+    # vLLM-flow prefill (mirror of source ``fp8/attention.py``'s
+    # ``_forward_prefill`` family, but BF16 KV-cache throughout and
+    # using the local CompressorVLLM / IndexerVLLM with hoisted meta).
+    #
+    # Activated by :func:`_use_vllm_compressor` (env ``DSV4_COMPRESSOR_VLLM``);
+    # entry hook lives in :meth:`_forward_body`. Constraints (matching
+    # the source class):
+    #   * single request only (bsz == 1)
+    #   * no Context-Parallel (``set_cp_ctx`` accepts ``None`` only on
+    #     IndexerVLLM); CP prefills fall through to the legacy path.
+    #   * SWA-only layers (compress_ratio == 0) also fall through —
+    #     IndexerVLLM/CompressorVLLM are no-ops there, so reusing the
+    #     legacy path costs nothing and avoids re-implementing the
+    #     window-only attention here.
+    # ==================================================================
+
+    def _forward_prefill_vllm(
+        self,
+        x: torch.Tensor,
+        start_pos,
+        sequence_lengths: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """vLLM-flow prefill entry. Mirrors source ``_forward_prefill``:
+        common setup → QKV → SWA pool write → CSA / HCA dispatch.
+
+        ``x`` is ``[1, S, dim]`` (caller already unsqueezed flat input);
+        output is ``[1, S, dim]``.
+        """
+        del sequence_lengths  # bsz==1 invariant; sequence_lengths is redundant
+        common = self._prefill_common_setup_vllm(x, start_pos)
+        qkv = self._prefill_compute_qkv_vllm(x, common)
+        self._prefill_write_swa_bf16_vllm(common, qkv.kv_full)
+        if self.compress_ratio == 4:
+            return self._forward_prefill_csa_vllm(x, qkv, common)
+        if self.compress_ratio == 128:
+            return self._forward_prefill_hca_vllm(x, qkv, common)
+        raise AssertionError(
+            f"_forward_prefill_vllm only handles compress_ratio in {{4, 128}}; "
+            f"got {self.compress_ratio} (SWA-only layers should fall through "
+            "to the legacy path)"
+        )
+
+    # ------------------------------------------------------------------
+    # Common setup — single-pass build of every per-call meta the hot
+    # path needs. Mirrors source ``_prefill_common_setup`` +
+    # ``_build_csa_prefill_meta`` / ``_build_hca_prefill_meta`` (collapsed
+    # into one pass since BF16 KV pool needs far fewer fields than the
+    # FP8 workspace path).
+    # ------------------------------------------------------------------
+    def _prefill_common_setup_vllm(
+        self, x: torch.Tensor, start_pos
+    ) -> "_VLLMPrefillCommon":
+        from rtp_llm.models_py.modules.dsv4.attn_type import INDEXER_KV
+        from rtp_llm.models_py.modules.dsv4.compressor_vllm import (
+            build_prefill_metadata as _build_compressor_prefill_metadata,
+        )
+
+        bsz, seqlen, _ = x.size()
+        device = x.device
+        if isinstance(start_pos, torch.Tensor):
+            sp_int = int(start_pos.item()) if start_pos.numel() == 1 else 0
+        else:
+            sp_int = int(start_pos)
+        end_pos = sp_int + seqlen
+        is_fresh = sp_int == 0
+        freqs_cis_slice = self.freqs_cis[sp_int : sp_int + seqlen]
+
+        # Bind freqs_cis to compressor / indexer (idempotent).
+        if self.compressor.freqs_cis is None:
+            self.compressor.freqs_cis = self.freqs_cis
+        if self.indexer is not None:
+            if self.indexer.freqs_cis is None:
+                self.indexer.freqs_cis = self.freqs_cis
+            if self.indexer.compressor.freqs_cis is None:
+                self.indexer.compressor.freqs_cis = self.freqs_cis
+
+        # Hoisted compressor meta — built once here, consumed by both
+        # the host compressor and the nested indexer compressor (when
+        # the latter shares positions / b_idx with the host, which it
+        # does for bsz==1 prefill).
+        compressor_meta = _build_compressor_prefill_metadata(
+            self.compressor, sp_int, bsz, seqlen, device
+        )
+
+        # Hoisted indexer meta — only meaningful for CSA layers.
+        indexer_meta = None
+        if self.indexer is not None:
+            kv_block_table = (
+                self._block_tables_by_type.get(INDEXER_KV)
+                if self._block_tables_by_type is not None
+                else None
+            )
+            kv_eb = self._pool_entries_per_block(INDEXER_KV)
+            indexer_meta = self.indexer.prepare(
+                bsz=bsz,
+                seqlen=seqlen,
+                sp_int=sp_int,
+                device=device,
+                kv_block_table=kv_block_table,
+                kv_eb=kv_eb,
+            )
+
+        return _VLLMPrefillCommon(
+            bsz=bsz,
+            seqlen=seqlen,
+            sp_int=sp_int,
+            end_pos=end_pos,
+            is_fresh_prefill=is_fresh,
+            device=device,
+            freqs_cis=freqs_cis_slice,
+            swa_dense_len=end_pos,
+            compressor_meta=compressor_meta,
+            indexer_meta=indexer_meta,
+        )
+
+    # ------------------------------------------------------------------
+    # QKV proj + RMSNorm + RoPE, identical math to the legacy body
+    # (lines ~2147-2191) — factored out so the hot path is readable.
+    # ------------------------------------------------------------------
+    def _prefill_compute_qkv_vllm(
+        self, x: torch.Tensor, common: "_VLLMPrefillCommon"
+    ) -> "_VLLMPrefillQKV":
+        rd = self.rope_head_dim
+        with record_function_range("dsv4.attn.q_proj_norm_rope"):
+            qr = self._rmsnorm_weighted(self._lin(self.wq_a, x), self.q_norm)
+            q = self._lin(self.wq_b, qr).unflatten(
+                -1, (self.n_heads, self.head_dim)
+            )
+            q = fused_rmsnorm_rope(q, None, common.freqs_cis, rd, eps=self.eps)
+        with record_function_range("dsv4.attn.kv_proj_norm_rope"):
+            kv_in = self._lin(self.wkv, x)
+            kv_full = fused_rmsnorm_rope(
+                kv_in, self.kv_norm, common.freqs_cis, rd, eps=self.eps
+            )
+        return _VLLMPrefillQKV(q=q, qr=qr, kv_full=kv_full)
+
+    # ------------------------------------------------------------------
+    # SWA pool write — direct BF16 paged write (no FP8 quant). Reuses
+    # the existing ``_prefill_write_swa_to_pool`` helper, which already
+    # handles bsz>=1 / continuation prefill / sentinel block masking.
+    # ------------------------------------------------------------------
+    def _prefill_write_swa_bf16_vllm(
+        self, common: "_VLLMPrefillCommon", kv_full: torch.Tensor
+    ) -> None:
+        bsz = common.bsz
+        seqlen = common.seqlen
+        device = common.device
+        swa_lengths = torch.full(
+            (bsz,), seqlen, device=device, dtype=torch.long
+        )
+        with record_function_range("dsv4.attn.swa_pool_write"):
+            self._prefill_write_swa_to_pool(
+                bsz, kv_full, common.sp_int, swa_lengths
+            )
+
+    # ------------------------------------------------------------------
+    # CSA / HCA dispatch (compress_ratio == 4 / 128).
+    # ------------------------------------------------------------------
+    def _forward_prefill_csa_vllm(
+        self,
+        x: torch.Tensor,
+        qkv: "_VLLMPrefillQKV",
+        common: "_VLLMPrefillCommon",
+    ) -> torch.Tensor:
+        """CSA path. IndexerVLLM produces sparse compressed-block topk
+        with hoisted meta; main CompressorVLLM writes the CSA pool.
+        Final attention runs through the shared
+        :meth:`_forward_prefill_compressed_vllm` epilogue."""
+        from rtp_llm.models_py.modules.dsv4.indexer_vllm import IndexerVLLM
+
+        assert isinstance(self.indexer, IndexerVLLM), (
+            "CSA vLLM prefill requires IndexerVLLM (mismatched indexer "
+            "class — env switch likely changed mid-process)"
+        )
+        with record_function_range("dsv4.attn.indexer"):
+            raw_int32 = self.indexer.forward_with_meta(
+                x, qkv.qr, common.indexer_meta
+            )
+        # raw_int32 layout matches qkv.qr leading dims with K trailing.
+        return self._forward_prefill_compressed_vllm(
+            x, qkv, common, cmp_topk_runtime_int32=raw_int32
+        )
+
+    def _forward_prefill_hca_vllm(
+        self,
+        x: torch.Tensor,
+        qkv: "_VLLMPrefillQKV",
+        common: "_VLLMPrefillCommon",
+    ) -> torch.Tensor:
+        """HCA path. No indexer (dense compressed indices); main
+        CompressorVLLM writes the HCA pool. Same epilogue as CSA."""
+        assert self.indexer is None, "HCA layer must not have an indexer"
+        return self._forward_prefill_compressed_vllm(
+            x, qkv, common, cmp_topk_runtime_int32=None
+        )
+
+    # ------------------------------------------------------------------
+    # Shared CSA / HCA epilogue: compressor write + dense KV cat +
+    # sparse_attn + output proj.
+    # ------------------------------------------------------------------
+    def _forward_prefill_compressed_vllm(
+        self,
+        x: torch.Tensor,
+        qkv: "_VLLMPrefillQKV",
+        common: "_VLLMPrefillCommon",
+        cmp_topk_runtime_int32: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        from rtp_llm.models_py.modules.dsv4.attn_type import CSA_KV, HCA_KV
+
+        bsz, seqlen, sp = common.bsz, common.seqlen, common.sp_int
+        device = common.device
+        ratio = self.compress_ratio
+        win = self.window_size
+
+        # Window topk (causal sliding view).
+        topk_window = _get_window_topk_idxs(win, bsz, seqlen, sp, device)
+
+        # Compressed topk for CSA (from IndexerVLLM raw int32 + offset)
+        # or HCA (deterministic dense block range).
+        offset = common.swa_dense_len  # SWA prefix length in kv_cat
+        if cmp_topk_runtime_int32 is not None:
+            cmp_topk = torch.where(
+                cmp_topk_runtime_int32 >= 0,
+                cmp_topk_runtime_int32 + offset,
+                cmp_topk_runtime_int32,
+            ).long()
+        else:
+            cmp_topk = _get_compress_topk_idxs(
+                ratio, bsz, seqlen, sp, offset, device
+            )
+        topk_idxs = torch.cat([topk_window, cmp_topk], dim=-1).long()
+
+        # Main compressor — hoisted meta path; returns ``None`` since
+        # CompressorVLLM scatters its output through the BF16 pool only.
+        with record_function_range("dsv4.attn.compressor"):
+            self.compressor(x, sp, meta=common.compressor_meta)
+        # The vLLM compressor writes the compressed-K slot directly via
+        # its own pool context — we still need to mirror it into the
+        # global CSA/HCA pool view used by the dense gather below.
+        # Fortunately ``_set_compressor_pool_context`` already bound the
+        # same pool view, and the boundary kernel writes through that
+        # view. So no additional mirror is needed here; the dense
+        # gather will pick up the freshly written slots.
+
+        # Build the dense [SWA | compressed] KV view sparse_attn reads.
+        cmp_at = CSA_KV if ratio == 4 else HCA_KV
+        cmp_T = common.end_pos // ratio
+        if common.is_fresh_prefill:
+            # Fresh prefill: SWA part is in-memory (qkv.kv_full); the
+            # compressed part lives in the pool the compressor just
+            # wrote. We still go through ``_gather_kv_cache_dense_from_pool``
+            # to pick up the compressed slots; the SWA portion is
+            # overlaid from kv_full to avoid the SWA pool round-trip.
+            with record_function_range("dsv4.attn.kv_gather_dense_or_paged"):
+                row_seqlens = torch.full(
+                    (bsz,), seqlen, device=device, dtype=torch.long
+                )
+                kv_cat = self._gather_kv_cache_dense_from_pool(
+                    bsz,
+                    sp,
+                    row_seqlens,
+                    swa_dense_len=common.swa_dense_len,
+                    swa_dense_override=qkv.kv_full,
+                    cmp_T=cmp_T,
+                )
+            assert kv_cat is not None, (
+                "vLLM prefill requires paged context (kv_cache + "
+                "block_tables_by_type bound by V4Transformer)"
+            )
+        else:
+            with record_function_range("dsv4.attn.kv_gather_dense_or_paged"):
+                row_seqlens = torch.full(
+                    (bsz,), seqlen, device=device, dtype=torch.long
+                )
+                kv_cat = self._gather_kv_cache_dense_from_pool(
+                    bsz,
+                    sp,
+                    row_seqlens,
+                    swa_dense_len=common.swa_dense_len,
+                    cmp_T=cmp_T,
+                )
+            assert kv_cat is not None, (
+                "vLLM continuation prefill requires paged context"
+            )
+
+        with record_function_range("dsv4.attn.sparse_attn"):
+            if _tl_kernels.tilelang_available():
+                o = _tl_kernels.sparse_attn(
+                    qkv.q, kv_cat, self.attn_sink, topk_idxs, self.softmax_scale
+                )
+            else:
+                o = _sparse_attn(
+                    qkv.q, kv_cat, self.attn_sink, topk_idxs, self.softmax_scale
+                )
+
+        return self._prefill_output_proj_vllm(o, common)
+
+    # ------------------------------------------------------------------
+    # Output projection — inv-RoPE + FP8 quant + wo_a einsum + wo_b lin
+    # + TP all-reduce. Mirrors the production path in ``_forward_body``
+    # (lines ~2604-2680, the ``elif o.is_cuda`` branch).
+    # ------------------------------------------------------------------
+    def _prefill_output_proj_vllm(
+        self, o: torch.Tensor, common: "_VLLMPrefillCommon"
+    ) -> torch.Tensor:
+        bsz, seqlen = common.bsz, common.seqlen
+        with record_function_range("dsv4.attn.out_proj"):
+            if o.is_cuda and o.numel() > 0:
+                o_3d = o.reshape(bsz * seqlen, self.n_heads, self.head_dim)
+                if common.freqs_cis.dim() == 2:
+                    freqs_per_token = (
+                        common.freqs_cis.unsqueeze(0)
+                        .expand(bsz, -1, -1)
+                        .reshape(bsz * seqlen, -1)
+                        .contiguous()
+                    )
+                else:
+                    freqs_per_token = common.freqs_cis.contiguous()
+                o_fp8, o_scale = fused_inv_rope_fp8_quant(
+                    o_3d,
+                    freqs_per_token,
+                    n_groups=self.n_groups,
+                    heads_per_group=self.n_heads // self.n_groups,
+                    nope_dim=self.head_dim - self.rope_head_dim,
+                    rope_head_dim=self.rope_head_dim,
+                )
+                del o, o_3d, freqs_per_token
+                o = self._wo_a_einsum_from_fp8(o_fp8, o_scale, bsz, seqlen)
+            else:
+                # CPU / empty fallback (unit tests).
+                apply_rotary_emb(
+                    o[..., -self.rope_head_dim :], common.freqs_cis, inverse=True
+                )
+                o = o.reshape(bsz, seqlen, self.n_groups, -1)
+                wo_a_bf16 = _fp8_dequant_to_fp32(self.wo_a_w, self.wo_a_s).to(o.dtype)
+                wo_a = wo_a_bf16.view(self.n_groups, self.o_lora_rank, -1)
+                o = torch.einsum("bsgd,grd->bsgr", o, wo_a)
+            out = self._lin(self.wo_b, o.flatten(2))
+        if self.tp_size > 1:
+            from rtp_llm.models_py.distributed.collective_torch import (
+                Group,
+                all_reduce,
+            )
+
+            with record_function_range("dsv4.attn.tp_all_reduce"):
+                all_reduce(out, Group.TP)
         return out
