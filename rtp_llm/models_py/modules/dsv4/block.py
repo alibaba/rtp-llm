@@ -209,33 +209,6 @@ class Block(nn.Module):
             cache[key] = bf
         return bf
 
-    def _hc_linear_mixes(
-        self, x_flat: torch.Tensor, hc_fn_bf16: torch.Tensor, rsqrt: torch.Tensor
-    ) -> torch.Tensor:
-        positions = getattr(self, "_hc_positions", None)
-        if (
-            x_flat.dim() != 2
-            or positions is None
-            or positions.numel() != x_flat.shape[0]
-        ):
-            return (F.linear(x_flat, hc_fn_bf16) * rsqrt).float()
-
-        pos = positions.to(device=x_flat.device, dtype=torch.long)
-        block = pos // 256
-        T = int(x_flat.shape[0])
-        out = torch.empty(
-            T, hc_fn_bf16.shape[0], dtype=x_flat.dtype, device=x_flat.device
-        )
-        start = 0
-        while start < T:
-            cur = block[start]
-            end = start + 1
-            while end < T and bool((block[end] == cur).item()):
-                end += 1
-            out[start:end] = F.linear(x_flat[start:end], hc_fn_bf16)
-            start = end
-        return (out * rsqrt).float()
-
     def _hc_pre(
         self,
         x: torch.Tensor,
@@ -278,7 +251,7 @@ class Block(nn.Module):
         rsqrt = torch.rsqrt(
             x_flat_f32.square().mean(-1, keepdim=True) + self.norm_eps
         ).to(dtype)
-        mixes = self._hc_linear_mixes(x_flat, self._hc_fn_bf16(hc_fn), rsqrt)
+        mixes = (F.linear(x_flat, self._hc_fn_bf16(hc_fn)) * rsqrt).float()
         mixes = mixes.contiguous()
         use_fused = _use_fused_sinkhorn(mixes, self.hc_mult)
         self._dbg_record_hc_pre_path(dbg_tag, x, "fallback", use_fused=use_fused)
@@ -459,7 +432,6 @@ class Block(nn.Module):
         """
         from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 
-        self._hc_positions = positions
         # Master switch: when MOEDBG=0 the AND short-circuits so neither the
         # layer_id compare nor any record_if_level call site below runs.
         # By default keep the narrow trace from _record_tensor; use
@@ -577,7 +549,6 @@ class Block(nn.Module):
                 f"L{self.layer_id:02d}_ffn_residual_{dbg_pos_name}",
                 x[dbg_pos_mask].contiguous(),
             )
-        self._hc_positions = None
         return x  # [T, hc, dim]
 
 

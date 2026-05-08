@@ -41,7 +41,7 @@ from rtp_llm.models_py.modules.dsv4.fp8._indexer_score import (
     has_fp8_mqa_logits,
     has_fp8_paged_mqa_logits,
 )
-from rtp_llm.models_py.modules.dsv4.fp8.compressor import CompressorFP8
+from rtp_llm.models_py.modules.dsv4.fp8.compressor import CompressorFP8, CompressorMeta
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import PoolBackedModule
 from rtp_llm.models_py.modules.dsv4.qlinear import QuantizedLinear
 from rtp_llm.models_py.modules.dsv4.rope import (
@@ -121,6 +121,13 @@ class _IndexerFP8PrefillMeta(NamedTuple):
     # ── K-side (paged) ──
     block_table_i32: torch.Tensor  # [B, max_blocks] int32 contig
     cu_kv_seqlens: torch.Tensor  # [B+1] int32 (compressed)
+
+    # ── Nested CompressorFP8 metadata, hoisted out of the per-call hot
+    # path. Without this, ``CompressorFP8.forward(meta=None)`` rebuilds
+    # ~30 small kernels (state/kv slot mapping) per layer between the
+    # F.linear SGEMM and ``run_save_partial_states``. ``None`` during
+    # warmup (pool not bound); forward then falls back to in-band rebuild.
+    compressor_meta: Optional[CompressorMeta]
 
 
 class IndexerFP8(PoolBackedModule):
@@ -510,6 +517,38 @@ class IndexerFP8(PoolBackedModule):
                 )
             cu_kv_seqlens = torch.tensor([0, T], dtype=torch.int32, device=device)
 
+        # Hoist the nested CompressorFP8's slot-mapping metadata. The
+        # IndexerFP8's pool context is bound by Attention's
+        # ``_set_compressor_pool_context`` BEFORE ``_build_csa_prefill_meta``
+        # runs, so ``_propagate_pool_to_nested`` is safe here. Without
+        # this, ``CompressorFP8.forward(meta=None)`` rebuilds the slot
+        # mappings each call (~30 small kernels per layer between the
+        # F.linear SGEMM and ``run_save_partial_states``). ``getattr``
+        # defaults keep the stub-based UTs (which expose only the four
+        # attrs ``prepare`` historically read) working — they fall through
+        # to ``compressor_meta=None`` and the in-band rebuild path.
+        compressor_meta: Optional[CompressorMeta] = None
+        state_bt = getattr(self, "_state_block_table", None)
+        state_eb = getattr(self, "_state_eb", 0)
+        compressor = getattr(self, "compressor", None)
+        if (
+            self._kv_block_table is not None
+            and self._kv_eb > 0
+            and state_bt is not None
+            and state_eb > 0
+            and compressor is not None
+        ):
+            from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
+                _build_prefill_positions,
+            )
+
+            self._propagate_pool_to_nested()
+            try:
+                positions, b_idx = _build_prefill_positions(sp_int, bsz, seqlen, device)
+                compressor_meta = compressor.prepare_metadata(positions, b_idx)
+            finally:
+                self._clear_nested_pool()
+
         return _IndexerFP8PrefillMeta(
             bsz=bsz,
             seqlen=seqlen,
@@ -524,6 +563,7 @@ class IndexerFP8(PoolBackedModule):
             ke=ke,
             block_table_i32=block_table_i32,
             cu_kv_seqlens=cu_kv_seqlens,
+            compressor_meta=compressor_meta,
         )
 
     # --------------------------------------------------------------
@@ -570,7 +610,7 @@ class IndexerFP8(PoolBackedModule):
         self._propagate_pool_to_nested()
         try:
             q = self._compute_indexer_q(qr, attention_inputs.freqs_cis_slice)
-            self.compressor(x, sp)
+            self.compressor(x, sp, meta=attention_inputs.compressor_meta)
             # ``softmax_scale * n_heads^-0.5`` is pre-folded into weights_proj at __init__.
             weights = F.linear(x, self.weights_proj)
 

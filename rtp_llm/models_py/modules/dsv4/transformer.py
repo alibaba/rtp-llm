@@ -345,31 +345,7 @@ class V4Transformer(nn.Module):
         shape, dtype = x.size(), x.dtype
         x_flat = x.flatten(-2).float()  # [..., hc*d]
         rsqrt = torch.rsqrt(x_flat.square().mean(-1, keepdim=True) + self.norm_eps)
-        positions = getattr(self, "_hc_head_positions", None)
-        if (
-            x.dim() == 3
-            and positions is not None
-            and positions.numel() == x_flat.shape[0]
-        ):
-            pos = positions.to(device=x_flat.device, dtype=torch.long)
-            block = pos // 256
-            mixes_linear = torch.empty(
-                x_flat.shape[0],
-                self.hc_head_fn.shape[0],
-                dtype=x_flat.dtype,
-                device=x_flat.device,
-            )
-            start = 0
-            while start < x_flat.shape[0]:
-                cur = block[start]
-                end = start + 1
-                while end < x_flat.shape[0] and bool((block[end] == cur).item()):
-                    end += 1
-                mixes_linear[start:end] = F.linear(x_flat[start:end], self.hc_head_fn)
-                start = end
-        else:
-            mixes_linear = F.linear(x_flat, self.hc_head_fn)
-        mixes = mixes_linear * rsqrt
+        mixes = F.linear(x_flat, self.hc_head_fn) * rsqrt
         pre = (
             torch.sigmoid(mixes * self.hc_head_scale + self.hc_head_base) + self.hc_eps
         )
