@@ -9,6 +9,11 @@ py_library(
     deps = _DSV4_TEST_DEPS,
 )
 
+py_library(
+    name = "dsv4_kernel_perf_utils",
+    srcs = ["dsv4_kernel_perf_utils.py"],
+)
+
 py_test(
     name = "test_dsv4_compressor",
     srcs = ["test_dsv4_compressor.py"],
@@ -139,9 +144,44 @@ py_test(
 )
 
 py_test(
+    name = "test_fused_rmsnorm_rope",
+    srcs = ["test_fused_rmsnorm_rope.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+)
+
+py_test(
     name = "test_fused_inv_rope_fp8_quant_perf",
     srcs = ["test_fused_inv_rope_fp8_quant_perf.py"],
-    deps = ["//rtp_llm/models_py:dsv4_fused_kernel_sources"],
+    deps = [
+        ":dsv4_kernel_perf_utils",
+        "//rtp_llm/models_py:dsv4_fused_kernel_sources",
+    ],
+    tags = ["manual", "H20", "SM100_ARM"],
+)
+
+py_test(
+    name = "test_fused_rmsnorm_rope_perf",
+    srcs = ["test_fused_rmsnorm_rope_perf.py"],
+    deps = [
+        ":dsv4_kernel_perf_utils",
+        "//rtp_llm/models_py:dsv4_fused_kernel_sources",
+    ],
+    tags = ["manual", "H20", "SM100_ARM"],
+)
+
+py_test(
+    name = "test_dsv4_tc_simt_overlap_perf",
+    srcs = ["test_dsv4_tc_simt_overlap_perf.py"],
+    deps = [
+        "//rtp_llm/models_py:dsv4_fused_kernel_sources",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    tags = ["manual", "SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
 )
 
 py_test(

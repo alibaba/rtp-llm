@@ -34,6 +34,14 @@ import triton
 import triton.language as tl
 
 
+def _is_blackwell_device(device: torch.device | int | None = None) -> bool:
+    try:
+        major, _ = torch.cuda.get_device_capability(device)
+    except Exception:
+        return False
+    return major >= 10
+
+
 @triton.jit
 def _fused_inv_rope_fp8_quant_per_head(
     o_ptr,  # [M, H, D] bf16
@@ -305,6 +313,7 @@ def fused_inv_rope_fp8_quant(
     fp8_buf: torch.Tensor | None = None,
     scale_buf: torch.Tensor | None = None,
     impl: str | None = None,
+    heads_per_cta: int | None = None,
 ):
     """Fused inverse-RoPE + block-scaled FP8 quant for wo_a input.
 
@@ -320,6 +329,10 @@ def fused_inv_rope_fp8_quant(
         nope_dim, rope_head_dim: per-head NoPE / RoPE split.
         quant_group_size: FP8 quant block size along K (fixed at 128 for V4).
         eps: Numerical epsilon used inside absmax-scale computation.
+        heads_per_cta: Optimized Triton path head grouping.  Valid values are
+           1, 2, 4, and 8; ``None`` reads ``DSV4_INV_ROPE_HEADS_PER_CTA``.
+           ``DSV4_INV_ROPE_NUM_WARPS`` is an experimental tuning override for
+           the optimized Triton launch; default is 2.
 
     Returns:
         (o_fp8, o_scale) where:
@@ -419,16 +432,28 @@ def fused_inv_rope_fp8_quant(
             num_stages=1,
         )
     elif selected_impl == "optimized":
-        heads_per_cta = int(os.environ.get("DSV4_INV_ROPE_HEADS_PER_CTA", "2"))
-        if heads_per_cta not in (1, 2, 4, 8):
+        env_heads_per_cta = os.environ.get("DSV4_INV_ROPE_HEADS_PER_CTA")
+        if heads_per_cta is not None:
+            selected_heads_per_cta = heads_per_cta
+        elif env_heads_per_cta is not None:
+            selected_heads_per_cta = int(env_heads_per_cta)
+        else:
+            selected_heads_per_cta = 8 if _is_blackwell_device(o.device) else 2
+        if selected_heads_per_cta not in (1, 2, 4, 8):
             raise ValueError(
-                f"invalid DSV4_INV_ROPE_HEADS_PER_CTA={heads_per_cta}; "
+                f"invalid DSV4_INV_ROPE_HEADS_PER_CTA={selected_heads_per_cta}; "
                 "expected 1, 2, 4, or 8"
             )
-        if heads_per_group % heads_per_cta != 0:
-            heads_per_cta = 1
+        if heads_per_group % selected_heads_per_cta != 0:
+            selected_heads_per_cta = 1
+        selected_num_warps = int(os.environ.get("DSV4_INV_ROPE_NUM_WARPS", "2"))
+        if selected_num_warps not in (1, 2, 4, 8):
+            raise ValueError(
+                f"invalid DSV4_INV_ROPE_NUM_WARPS={selected_num_warps}; "
+                "expected 1, 2, 4, or 8"
+            )
         freqs_ri = torch.view_as_real(freqs_cis_per_b)
-        grid = (tma_M, n_groups, heads_per_group // heads_per_cta)
+        grid = (tma_M, n_groups, heads_per_group // selected_heads_per_cta)
         _fused_inv_rope_fp8_quant_group_heads[grid](
             o_flat,
             freqs_ri,
@@ -450,8 +475,8 @@ def fused_inv_rope_fp8_quant(
             QUANT_GROUP_SIZE=quant_group_size,
             CHUNKS_PER_HEAD=chunks_per_head,
             ROPE_START=nope_dim % quant_group_size,
-            HEADS_PER_CTA=heads_per_cta,
-            num_warps=2,
+            HEADS_PER_CTA=selected_heads_per_cta,
+            num_warps=selected_num_warps,
             num_stages=1,
         )
     else:
