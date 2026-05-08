@@ -78,6 +78,13 @@ class XQAImpl(FMHAImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
+        if attn_inputs.is_target_verify:
+            return False
+        # XQA kernel path currently assumes FP8/Base KV cache layouts.
+        # NVFP4 KV cache requires explicit dequantization before attention.
+        if attn_configs.kv_cache_dtype == KvCacheDataType.NVFP4:
+            return False
+        # Create temporary instance to check support
         fmha_impl = XQAAttnOp(attn_configs)
         return fmha_impl.support(attn_inputs)
 

@@ -206,9 +206,8 @@ void invokeBatchApplyRepetitionPenalty(T*           logits,
     //   output_ids [step, batch_size] : output token ids (with offset ite * local_batch_size).
     //   input_lengths [local_batch_size], input lengths (optional).
     //      Padding tokens at [input_length, max_input_length) of input will not be penalized.
-    dim3   block(min(step, 1024));
-    dim3   grid(local_batch_size);
-    size_t smem_size = step * (sizeof(float) + sizeof(int));
+    dim3 block(min(step, 1024));
+    dim3 grid(local_batch_size);
     batchApplyPenaltyLongSeq<T><<<grid, block, 0, stream>>>(logits,
                                                             penalty_ws,
                                                             repetition_penalty,

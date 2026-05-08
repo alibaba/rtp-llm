@@ -6,6 +6,7 @@ py_library(
     name = "collective_torch",
     srcs = [
         "collective_torch.py",
+        "custom_ar.py",
         "rocm_rccl.py",
         "symm_mem.py",
     ],

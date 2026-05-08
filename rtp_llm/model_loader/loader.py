@@ -240,7 +240,6 @@ class ModelLoader:
                 load_method = LoadMethod.FASTSAFETENSORS
             else:
                 load_method = LoadMethod.SCRATCH
-
         logging.info(
             f"load method: {load_method}, finally choose load method: {load_method}"
         )

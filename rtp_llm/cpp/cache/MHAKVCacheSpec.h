@@ -17,15 +17,15 @@ struct MHAKVCacheSpec: public KVCacheSpec {
     MHAKVCacheSpec() = default;
 
     MHAKVCacheSpec(const AttentionConfigs& attn_config, const ParallelismConfig& parallelism_config) {
-        type              = KVCacheSpecType::MultiHeadAttention;
-        layer_num         = 1;  // Will be set by caller
+        type      = KVCacheSpecType::MultiHeadAttention;
+        layer_num = 1;  // Will be set by caller
 
-        // TODO(xinfei.sxf): 这里的head_num_kv分配逻辑需要和ModelConfig::getAttentionConfigs里保持一致，目前这里还是单独计算的
+        // TODO(xinfei.sxf):
+        // 这里的head_num_kv分配逻辑需要和ModelConfig::getAttentionConfigs里保持一致，目前这里还是单独计算的
         local_head_num_kv = static_cast<uint32_t>(
             (attn_config.kv_head_num % parallelism_config.get_attn_tp_size() == 0) ?
                 attn_config.kv_head_num / parallelism_config.get_attn_tp_size() :
-                attn_config.kv_head_num / std::gcd(attn_config.kv_head_num, parallelism_config.get_attn_tp_size())
-        );
+                attn_config.kv_head_num / std::gcd(attn_config.kv_head_num, parallelism_config.get_attn_tp_size()));
         seq_size_per_block = static_cast<uint32_t>(attn_config.tokens_per_block);
         size_per_head      = static_cast<uint32_t>(attn_config.size_per_head);
     }
@@ -41,27 +41,47 @@ struct MHAKVCacheSpec: public KVCacheSpec {
         return local_head_num_kv * size_per_head * seq_size_per_block;
     }
 
-    size_t block_size_bytes() const override {
-        return block_size() * rtp_llm::getTypeSize(dtype);
-    }
-    size_t k_block_size_bytes() const override {
-        return k_block_size() * rtp_llm::getTypeSize(dtype);
-    }
-    size_t v_block_size_bytes() const override {
-        return v_block_size() * rtp_llm::getTypeSize(dtype);
+    static constexpr size_t NVFP4_BLOCK_SCALE_SIZE = 16;  // one scale per 16 elements for NVFP4
+
+    size_t elemSizeBytes(size_t num_elements) const {
+        if (dtype == rtp_llm::TYPE_NVFP4) {
+            return num_elements / 2;  // 4 bits per element, 2 elements per byte
+        }
+        return num_elements * rtp_llm::getTypeSize(dtype);
     }
 
-    // Scale-related methods for MHA (only MHA supports scales for now)
+    size_t block_size_bytes() const override {
+        return elemSizeBytes(block_size());
+    }
+    size_t k_block_size_bytes() const override {
+        return elemSizeBytes(k_block_size());
+    }
+    size_t v_block_size_bytes() const override {
+        return elemSizeBytes(v_block_size());
+    }
+
+    // Scale-related methods for MHA
     size_t scale_size_per_block() const {
-        // For INT8 or FP8, we need scales for both K and V
         if (dtype == rtp_llm::TYPE_INT8 || dtype == rtp_llm::TYPE_FP8_E4M3) {
-            return 2 * local_head_num_kv * seq_size_per_block;  // K and V scales
+            // Per-head per-token scale for both K and V
+            return 2 * local_head_num_kv * seq_size_per_block;
+        }
+        if (dtype == rtp_llm::TYPE_NVFP4) {
+            // Block scale: one float scale per NVFP4_BLOCK_SCALE_SIZE elements, for both K and V
+            return 2 * local_head_num_kv * seq_size_per_block * (size_per_head / NVFP4_BLOCK_SCALE_SIZE);
         }
         return 0;  // No scales for other data types
     }
 
+    size_t scale_element_size() const {
+        if (dtype == rtp_llm::TYPE_NVFP4) {
+            return 1;  // float8_e4m3fn
+        }
+        return sizeof(float);
+    }
+
     size_t scale_size_bytes_per_block() const {
-        return scale_size_per_block() * sizeof(float);
+        return scale_size_per_block() * scale_element_size();
     }
 
     size_t scale_block_size_bytes() const override {

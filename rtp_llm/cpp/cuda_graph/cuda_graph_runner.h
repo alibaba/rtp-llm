@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <unordered_map>
 #include <vector>
 #include <pybind11/embed.h>
@@ -43,7 +44,18 @@ public:
         if (kernel_seq_size_per_block_ <= 0) {
             throw std::runtime_error("CudaGraphRunner constructor: kernel_tokens_per_block must be > 0.");
         }
-        max_bs_               = graph_params.max_context_batch_size;
+        if (graph_params.is_prefill_cuda_graph_mode) {
+            max_bs_ = graph_params.max_context_batch_size;
+        } else {
+            max_bs_ = graph_params.max_context_batch_size;
+            if (!decode_capture_batch_sizes_.empty()) {
+                const int max_capture_bs =
+                    *std::max_element(decode_capture_batch_sizes_.begin(), decode_capture_batch_sizes_.end());
+                if (max_capture_bs > 0 && max_capture_bs < max_bs_) {
+                    max_bs_ = max_capture_bs;
+                }
+            }
+        }
         py_attn_pyobj_method_ = py_instance_.attr("prepare_fmha_impl");
         py_forward_method_    = py_instance_.attr("forward");
         options_cuda_int32_   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);

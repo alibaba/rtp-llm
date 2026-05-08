@@ -382,9 +382,14 @@ void setTraceMemory(bool trace_memory) {
 
 namespace {
 #if USING_CUDA
-at::cuda::CUDAStream& getNoBlockCopyStream() {
-    static thread_local auto stream = at::cuda::getStreamFromPool(/*isHighPriority=*/false);
-    return stream;
+int getCopyDeviceIndex(const torch::Tensor& dst, const torch::Tensor& src) {
+    if (dst.is_cuda()) {
+        return static_cast<int>(dst.get_device());
+    }
+    if (src.is_cuda()) {
+        return static_cast<int>(src.get_device());
+    }
+    return -1;
 }
 #endif
 }  // anonymous namespace
@@ -394,7 +399,13 @@ void execNoBlockCopy(const CopyParams& params) {
     const auto& src = params.src;
     const auto& dst = params.dst;
 #if USING_CUDA
-    auto stream = getNoBlockCopyStream().stream();
+    const int device_index = getCopyDeviceIndex(dst, src);
+    if (device_index < 0) {
+        dst.copy_(src);
+        return;
+    }
+    DeviceGuard device_guard(device_index);
+    auto        stream = at::cuda::getStreamFromPool(/*isHighPriority=*/false, device_index).stream();
     check_cuda_value(cudaMemcpyAsync(dst.data_ptr(), src.data_ptr(), src.nbytes(), cudaMemcpyDefault, stream));
     check_cuda_value(cudaStreamSynchronize(stream));
     check_cuda_error();

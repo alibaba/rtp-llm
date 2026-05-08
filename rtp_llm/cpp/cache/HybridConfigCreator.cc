@@ -158,13 +158,9 @@ void HybridConfigCreator::setupPhysicalSizes(CacheConfig&          config,
     const size_t full_kv_block_stride_bytes   = full_spec->block_size_bytes();
     const size_t linear_kv_block_stride_bytes = linear_spec->block_size_bytes();
 
-    // now we only support that linear attention block have padding
-    RTP_LLM_CHECK_WITH_INFO(full_kv_block_stride_bytes >= linear_kv_block_stride_bytes,
-                            "not support full attention with padding now");
-
-    config.kv_block_stride_bytes = full_kv_block_stride_bytes;
+    config.kv_block_stride_bytes = std::max(full_kv_block_stride_bytes, linear_kv_block_stride_bytes);
     config.kv_block_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_block_stride_bytes;
-    config.kv_scale_stride_bytes = full_spec->scale_block_size_bytes();
+    config.kv_scale_stride_bytes = std::max(full_spec->scale_block_size_bytes(), linear_spec->scale_block_size_bytes());
     config.kv_scale_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_scale_stride_bytes;
     config.block_size_bytes      = config.kv_block_size_bytes + config.kv_scale_size_bytes;
 }

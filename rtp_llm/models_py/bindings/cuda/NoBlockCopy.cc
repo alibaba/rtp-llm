@@ -10,9 +10,14 @@ namespace rtp_llm {
 
 namespace {
 
-at::cuda::CUDAStream& getNoBlockCopyStream() {
-    static thread_local auto stream = at::cuda::getStreamFromPool(/*isHighPriority=*/false);
-    return stream;
+int getCopyDevice(const MultiCopyParams& params) {
+    if (!params.multi_dst.empty() && params.multi_dst[0].is_cuda()) {
+        return static_cast<int>(params.multi_dst[0].get_device());
+    }
+    if (!params.multi_src.empty() && params.multi_src[0].is_cuda()) {
+        return static_cast<int>(params.multi_src[0].get_device());
+    }
+    return -1;
 }
 
 }  // namespace
@@ -23,19 +28,15 @@ void execNoBlockCopy(const MultiCopyParams& params) {
                             params.multi_src.size(),
                             params.multi_dst.size());
 
-    int copy_device = -1;
-    if (!params.multi_dst.empty()) {
-        if (params.multi_dst[0].is_cuda()) {
-            copy_device = static_cast<int>(params.multi_dst[0].get_device());
-        } else if (params.multi_src[0].is_cuda()) {
-            copy_device = static_cast<int>(params.multi_src[0].get_device());
+    const int copy_device = getCopyDevice(params);
+    if (copy_device < 0) {
+        for (size_t i = 0; i < params.multi_src.size(); ++i) {
+            params.multi_dst[i].copy_(params.multi_src[i]);
         }
-        if (copy_device >= 0) {
-            check_cuda_value(cudaSetDevice(copy_device));
-        }
+        return;
     }
-
-    auto stream = getNoBlockCopyStream().stream();
+    c10::cuda::CUDAGuard device_guard(copy_device);
+    auto                 stream = at::cuda::getStreamFromPool(/*isHighPriority=*/false, copy_device).stream();
 
     if (params.split_kv_layer_num > 0 && copy_device >= 0) {
         if (splitKvMultiCopy(params.multi_src,

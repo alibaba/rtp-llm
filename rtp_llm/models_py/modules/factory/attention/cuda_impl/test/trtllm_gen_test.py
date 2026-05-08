@@ -5,6 +5,7 @@ import sys
 from typing import List, Optional
 from unittest import SkipTest, TestCase, main
 
+import flashinfer
 import torch
 
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.atten_test_util import (
@@ -241,6 +242,158 @@ class FlashInferPythonMHATest(TestCase):
             [11, 129, 255, 63],
             is_prefill=False,
             use_prefill_op=False,
+        )
+
+    def _test_flashinfer_trtllm_nvfp4_base(
+        self,
+        lengths: List[int],
+        is_prefill: bool,
+        use_prefill_op: bool,
+    ):
+        """Test FlashInferTRTLLM attention with NVFP4 KV cache.
+
+        NVFP4 uses global scale + per-block (block_size=16) scale factors.
+        KV cache data is stored as uint8 (packed FP4, 2 values per byte).
+        Block scales are float8_e4m3fn.
+
+        Args:
+            lengths: sequence lengths for each request.
+            is_prefill: if True, treat lengths as input_lengths (prefill data);
+                        if False, treat as sequence_lengths (decode data).
+            use_prefill_op: if True, use FlashInferTRTLLMPrefillOp;
+                            if False, use FlashInferTRTLLMDecodeOp.
+        """
+        is_sm_100 = torch.cuda.get_device_capability()[0] in [10]
+        if not is_sm_100:
+            raise SkipTest(
+                "FlashInferTRTLLM NVFP4 requires SM_100 (compute capability 10.0)"
+            )
+
+        config = self._create_config(torch.bfloat16)
+        q_size = self.head_dim * self.num_heads
+        k_size = self.head_dim * self.num_kv_heads
+        v_size = self.head_dim * self.num_kv_heads
+        qkv_dim = self.head_dim * self.num_heads + 2 * self.num_kv_heads * self.head_dim
+        num_tokens = sum(lengths)
+        if is_prefill:
+            attn_inputs = gen_attention_inputs(
+                self.page_size, self.num_pages, input_lengths=lengths
+            )
+        else:
+            attn_inputs = gen_attention_inputs(
+                self.page_size, self.num_pages, sequence_lengths=lengths
+            )
+
+        qkv = (
+            torch.rand([num_tokens, qkv_dim], dtype=torch.bfloat16, device=self.device)
+            * 2
+            - 1
+        )
+        q_ref = qkv[:, :q_size].reshape(num_tokens, self.num_heads, self.head_dim)
+        k_ref = qkv[:, q_size : q_size + k_size].reshape(
+            num_tokens, self.num_kv_heads, self.head_dim
+        )
+        v_ref = qkv[:, q_size + k_size : q_size + k_size + v_size].reshape(
+            num_tokens, self.num_kv_heads, self.head_dim
+        )
+
+        # Create BF16 KV cache for reference and quantization
+        bf16_kv_cache = self._init_kv_cache(torch.bfloat16)
+        kv_write_lengths = (
+            attn_inputs.input_lengths if is_prefill else attn_inputs.sequence_lengths
+        )
+        write_kv_cache(
+            k_ref,
+            v_ref,
+            bf16_kv_cache,
+            kv_write_lengths,
+            attn_inputs.kv_cache_block_id_host,
+        )
+
+        # Compute reference output using BF16 K/V
+        out_ref = attention_prefill_ref(
+            q_ref,
+            k_ref,
+            v_ref,
+            attn_inputs.sequence_lengths,
+            self.num_heads,
+            self.num_kv_heads,
+            self.head_dim,
+            causal=True,
+        )
+
+        # Quantize BF16 KV cache to NVFP4
+        k_bf16 = bf16_kv_cache.kv_cache_base[:, 0]  # [num_pages, H, N, D]
+        v_bf16 = bf16_kv_cache.kv_cache_base[:, 1]  # [num_pages, H, N, D]
+        (k_fp4, v_fp4), (k_sf, v_sf), k_gs, v_gs = (
+            flashinfer.nvfp4_quantize_paged_kv_cache(k_bf16, v_bf16, kv_layout="HND")
+        )
+
+        # Create NVFP4 KV cache
+        nvfp4_kv_cache: LayerKVCache = LayerKVCache()
+        nvfp4_kv_cache.kv_cache_base = torch.stack([k_fp4, v_fp4], dim=1)
+        nvfp4_kv_cache.kv_scale_base = torch.stack([k_sf, v_sf], dim=1)
+
+        if use_prefill_op:
+            op = FlashInferTRTLLMPrefillOp(config)
+            input_params = op.prepare(attn_inputs)
+            input_params.kv_global_scale = (k_gs, v_gs)
+            out_trtllm = op.forward(q_ref, nvfp4_kv_cache, input_params)
+
+            out_trtllm_f32 = out_trtllm.reshape(
+                num_tokens, self.num_heads, self.head_dim
+            ).float()
+            out_ref_f32 = out_ref.float()
+            allowed_mismatch_rate = 0.01
+        else:
+            last_token_idx = attn_inputs.cu_seqlens[1:] - 1
+            if is_prefill:
+                q_len_per_req = 6
+                attn_inputs.prefix_lengths = attn_inputs.input_lengths - q_len_per_req
+                attn_inputs.input_lengths = (
+                    torch.ones_like(
+                        attn_inputs.input_lengths, dtype=attn_inputs.input_lengths.dtype
+                    )
+                    * q_len_per_req
+                )
+                last_token_idx = last_token_idx.unsqueeze(-1).repeat(
+                    1, q_len_per_req
+                ) - torch.arange(q_len_per_req).flip([0]).view(1, q_len_per_req)
+                last_token_idx = last_token_idx.reshape(-1)
+            out_ref = out_ref[last_token_idx]
+            op = FlashInferTRTLLMDecodeOp(config)
+            q = q_ref[last_token_idx]
+            attn_inputs.sequence_lengths -= 1
+            input_params = op.prepare(attn_inputs)
+            input_params.kv_global_scale = (k_gs, v_gs)
+            out_trtllm = op.forward(q, nvfp4_kv_cache, input_params)
+
+            out_trtllm_f32 = out_trtllm.reshape(
+                -1, self.num_heads, self.head_dim
+            ).float()
+            out_ref_f32 = out_ref.float()
+            allowed_mismatch_rate = 0.01
+        assert_close_with_mismatch_tolerance(
+            out_trtllm_f32,
+            out_ref_f32,
+            atol=0.15,
+            rtol=0.15,
+            max_mismatched_elements=int(allowed_mismatch_rate * out_ref_f32.numel()),
+        )
+
+    def test_flashinfer_trtllm_prefill_op_nvfp4(self):
+        self._test_flashinfer_trtllm_nvfp4_base(
+            [2, 129, 255, 63], is_prefill=True, use_prefill_op=True
+        )
+
+    def test_flashinfer_trtllm_spec_op_nvfp4(self):
+        self._test_flashinfer_trtllm_nvfp4_base(
+            [11, 129, 255, 63], is_prefill=True, use_prefill_op=False
+        )
+
+    def test_flashinfer_trtllm_decode_op_nvfp4(self):
+        self._test_flashinfer_trtllm_nvfp4_base(
+            [2, 129, 255, 63], is_prefill=False, use_prefill_op=False
         )
 
 

@@ -238,18 +238,31 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 cache_manager});
         if (!params.py_sp_model.is_none()) {
             RTP_LLM_LOG_INFO("[speculative decoding] using py model");
+            const bool enable_cuda_graph            = params.hw_kernel_config.enable_cuda_graph;
+            const bool force_single_prefill_capture = (params.hw_kernel_config.prefill_capture_seq_lens.size() == 1
+                                                       && params.hw_kernel_config.prefill_capture_seq_lens[0] == 1);
+            auto       draft_model_params           = model_params;
+            if (force_single_prefill_capture) {
+                draft_model_params.hw_kernel_config.enable_cuda_graph = false;
+                draft_model_params.hw_kernel_config.decode_capture_batch_sizes.clear();
+                draft_model_params.hw_kernel_config.prefill_capture_seq_lens.clear();
+                RTP_LLM_LOG_INFO(
+                    "[speculative decoding] disable CUDA graph for draft model when prefill_capture_seq_lens=[1]");
+            }
             draft_model_.reset(new PyWrappedModel(
-                model_params, params.py_sp_model, false, false, draft_cache_layer_layout.layer_to_groups));
+                draft_model_params, params.py_sp_model, false, false, draft_cache_layer_layout.layer_to_groups));
             // Create separate model for speculative prefill with CUDA graph if enabled (from params)
-            const bool enable_cuda_graph = params.hw_kernel_config.enable_cuda_graph;
             RTP_LLM_LOG_INFO(
                 "[speculative decoding] enable_cuda_graph=%d (set ENABLE_CUDA_GRAPH=1 when starting server to enable sp_prefill_draft_model_)",
                 static_cast<int>(enable_cuda_graph));
-            if (enable_cuda_graph) {
+            if (enable_cuda_graph && !force_single_prefill_capture) {
                 RTP_LLM_LOG_INFO(
                     "[speculative decoding] creating separate prefill draft model with CUDA graph support");
                 sp_prefill_draft_model_.reset(new PyWrappedModel(
                     model_params, params.py_sp_model, true, false, draft_cache_layer_layout.layer_to_groups));
+            } else if (enable_cuda_graph && force_single_prefill_capture) {
+                RTP_LLM_LOG_INFO(
+                    "[speculative decoding] skip separate prefill draft CUDA graph model when prefill_capture_seq_lens=[1]");
             }
         }
         break;  // NOTE: only support one mtp model now

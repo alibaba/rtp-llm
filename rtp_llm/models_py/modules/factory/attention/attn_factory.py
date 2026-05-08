@@ -168,6 +168,13 @@ def get_fmha_impl(
         try:
             instance = impl(attn_configs, attn_inputs, parallelism_config)
             if not is_cuda_graph or instance.support_cuda_graph():
+                logging.info(
+                    "Selected FMHA impl: %s (is_prefill=%s, kv_cache_dtype=%s, is_cuda_graph=%s)",
+                    impl_class_name,
+                    attn_inputs.is_prefill,
+                    attn_configs.kv_cache_dtype,
+                    is_cuda_graph,
+                )
                 return instance
 
         except Exception as e:
