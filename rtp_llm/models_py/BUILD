@@ -79,9 +79,11 @@ py_library(
 py_library(
     name = "dsv4_fused_kernel_sources",
     srcs = [
+        "modules/dsv4/_compressor_metadata_triton.py",
         "modules/dsv4/_compressor_vllm_triton.py",
         "modules/dsv4/_fused_inv_rope_fp8_quant_triton.py",
         "modules/dsv4/_fused_rmsnorm_rope_triton.py",
+        "modules/dsv4/_rope_only_triton.py",
         "modules/dsv4/moe/_mega_input_pack_triton.py",
     ],
     visibility = ["//visibility:public"],

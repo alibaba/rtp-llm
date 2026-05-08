@@ -28,6 +28,7 @@ construction sites can swap classes without touching call sites:
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
@@ -45,6 +46,15 @@ from rtp_llm.models_py.modules.dsv4.cp import (
     cp_should_gather,
     cp_wait_gather_full,
 )
+
+
+def _use_metadata_triton() -> bool:
+    return os.environ.get("DSV4_COMPRESSOR_METADATA_TRITON", "1").lower() not in (
+        "0",
+        "false",
+        "off",
+        "no",
+    )
 
 
 @dataclass(frozen=True)
@@ -249,9 +259,27 @@ class CompressorVLLM(nn.Module):
         b_idx: torch.Tensor,  # [N] int64
     ) -> CompressorMeta:
         """Compute slot mappings + token_to_req from current pool context."""
-        state_slots = self._compute_state_slot_mapping(positions, b_idx)
-        kv_slots = self._compute_kv_slot_mapping(positions, b_idx)
-        token_to_req = b_idx.to(torch.int32)
+        fused_meta = None
+        if _use_metadata_triton():
+            from rtp_llm.models_py.modules.dsv4._compressor_metadata_triton import (
+                map_compressor_metadata,
+            )
+
+            fused_meta = map_compressor_metadata(
+                positions,
+                b_idx,
+                self._state_block_table,
+                self._state_eb,
+                self._kv_block_table,
+                self._kv_eb,
+                self.compress_ratio,
+            )
+        if fused_meta is not None:
+            state_slots, kv_slots, token_to_req = fused_meta
+        else:
+            state_slots = self._compute_state_slot_mapping(positions, b_idx)
+            kv_slots = self._compute_kv_slot_mapping(positions, b_idx)
+            token_to_req = b_idx.to(torch.int32)
         boundary_token_indices = torch.nonzero(kv_slots >= 0, as_tuple=False).flatten()
         return CompressorMeta(
             positions=positions,
@@ -465,8 +493,7 @@ class CompressorVLLM(nn.Module):
             bsz, seqlen = 1, cp_ctx.seq_len_full
 
         if meta is None:
-            positions, b_idx = _build_prefill_positions(sp, bsz, seqlen, device)
-            meta = self.prepare_metadata(positions, b_idx)
+            meta = self._prepare_prefill_metadata(sp, bsz, seqlen, device)
 
         if cp_gather:
             assert kv_gather_handle is not None
@@ -475,8 +502,8 @@ class CompressorVLLM(nn.Module):
             score = cp_wait_gather_full(score_gather_handle).unsqueeze(0)
 
         N = bsz * seqlen
-        kv_flat = kv.reshape(N, -1).contiguous()
-        score_flat = score.reshape(N, -1).contiguous()
+        kv_flat = _flatten_token_major_2d(kv, N)
+        score_flat = _flatten_token_major_2d(score, N)
         self._launch(kv_flat, score_flat, meta, seq_start=sp)
         return None
 
@@ -505,14 +532,51 @@ class CompressorVLLM(nn.Module):
         fused_out = torch.nn.functional.linear(x32, self._wkv_wgate_fused)
         kv, score = fused_out[..., :out_dim], fused_out[..., out_dim:]
 
-        kv_flat = kv.reshape(bsz, -1).contiguous()
-        score_flat = score.reshape(bsz, -1).contiguous()
+        kv_flat = _flatten_token_major_2d(kv, bsz)
+        score_flat = _flatten_token_major_2d(score, bsz)
         if meta is None:
             positions = start_pos.to(device=device, dtype=torch.long).reshape(bsz)
             b_idx = torch.arange(bsz, device=device, dtype=torch.long)
             meta = self.prepare_metadata(positions, b_idx)
         self._launch(kv_flat, score_flat, meta)
         return None
+
+    def _prepare_prefill_metadata(
+        self, sp: int, bsz: int, seqlen: int, device: torch.device
+    ) -> CompressorMeta:
+        fused_meta = None
+        if _use_metadata_triton():
+            from rtp_llm.models_py.modules.dsv4._compressor_metadata_triton import (
+                build_prefill_compressor_metadata,
+            )
+
+            fused_meta = build_prefill_compressor_metadata(
+                sp,
+                bsz,
+                seqlen,
+                device,
+                self._state_block_table,
+                self._state_eb,
+                self._kv_block_table,
+                self._kv_eb,
+                self.compress_ratio,
+            )
+        if fused_meta is not None:
+            positions, b_idx, state_slots, kv_slots, token_to_req = fused_meta
+            boundary_token_indices = torch.nonzero(
+                kv_slots >= 0, as_tuple=False
+            ).flatten()
+            return CompressorMeta(
+                positions=positions,
+                b_idx=b_idx,
+                state_slots=state_slots,
+                kv_slots=kv_slots,
+                token_to_req=token_to_req,
+                boundary_token_indices=boundary_token_indices,
+            )
+
+        positions, b_idx = _build_prefill_positions(sp, bsz, seqlen, device)
+        return self.prepare_metadata(positions, b_idx)
 
     # API parity with Compressor: scalar-loop forward_decode aliases the
     # vectorized form (the vLLM path does not need a separate Python loop).
@@ -550,6 +614,22 @@ def _build_prefill_positions(
     return positions, b_idx
 
 
+def _flatten_token_major_2d(x: torch.Tensor, rows: int) -> torch.Tensor:
+    """Flatten ``[..., H]`` token-major tensors without forcing contiguity.
+
+    Fused linear slices such as ``fused_out[..., :out_dim]`` are regular
+    strided views: last-dim stride is 1 and each token row advances by a
+    constant parent row stride.  The compressor Triton kernels already accept
+    a row stride, so preserving this 2D view avoids an eager Torch copy.
+    """
+    cols = int(x.shape[-1])
+    if rows == 0:
+        return x.reshape(0, cols)
+    if x.stride(-1) == 1 and x.dim() >= 2:
+        return torch.as_strided(x, (rows, cols), (x.stride(-2), 1))
+    return x.reshape(rows, cols).contiguous()
+
+
 def build_prefill_metadata(
     compressor: "CompressorVLLM",
     sp: int,
@@ -558,8 +638,7 @@ def build_prefill_metadata(
     device: torch.device,
 ) -> CompressorMeta:
     """Convenience: build positions/b_idx + ``CompressorMeta`` in one call."""
-    positions, b_idx = _build_prefill_positions(sp, bsz, seqlen, device)
-    return compressor.prepare_metadata(positions, b_idx)
+    return compressor._prepare_prefill_metadata(sp, bsz, seqlen, device)
 
 
 def build_decode_metadata(
