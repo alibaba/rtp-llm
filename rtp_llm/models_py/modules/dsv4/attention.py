@@ -72,12 +72,12 @@ from typing import NamedTuple as _NamedTuple
 class _VLLMPrefillCommon(_NamedTuple):
     bsz: int
     seqlen: int
-    sp_int: int          # absolute prefix length
-    end_pos: int          # = sp_int + seqlen
+    sp_int: int  # absolute prefix length
+    end_pos: int  # = sp_int + seqlen
     is_fresh_prefill: bool  # = (sp_int == 0)
     device: torch.device
     freqs_cis: torch.Tensor  # self.freqs_cis[sp:sp+S]; pre-sliced view
-    swa_dense_len: int        # SWA prefix length in the dense kv_cat layout
+    swa_dense_len: int  # SWA prefix length in the dense kv_cat layout
     # hoisted meta — built once per layer-call, reused across compressor +
     # nested indexer compressor:
     compressor_meta: Any  # CompressorMeta from compressor_vllm
@@ -85,8 +85,8 @@ class _VLLMPrefillCommon(_NamedTuple):
 
 
 class _VLLMPrefillQKV(_NamedTuple):
-    q: torch.Tensor       # [B, S, n_heads, head_dim] bf16
-    qr: torch.Tensor      # [B, S, q_lora_rank] bf16
+    q: torch.Tensor  # [B, S, n_heads, head_dim] bf16
+    qr: torch.Tensor  # [B, S, q_lora_rank] bf16
     kv_full: torch.Tensor  # [B, S, head_dim] bf16
 
 
@@ -731,9 +731,7 @@ class Attention(nn.Module):
             # needs the T hint to allocate the ephemeral zero tensor.
             if compress_ratio == 4:
                 if _use_vllm_compressor():
-                    from rtp_llm.models_py.modules.dsv4.indexer_vllm import (
-                        IndexerVLLM,
-                    )
+                    from rtp_llm.models_py.modules.dsv4.indexer_vllm import IndexerVLLM
 
                     _IndexerCls = IndexerVLLM
                 else:
@@ -2852,9 +2850,7 @@ class Attention(nn.Module):
         rd = self.rope_head_dim
         with record_function_range("dsv4.attn.q_proj_norm_rope"):
             qr = self._rmsnorm_weighted(self._lin(self.wq_a, x), self.q_norm)
-            q = self._lin(self.wq_b, qr).unflatten(
-                -1, (self.n_heads, self.head_dim)
-            )
+            q = self._lin(self.wq_b, qr).unflatten(-1, (self.n_heads, self.head_dim))
             q = fused_rmsnorm_rope(q, None, common.freqs_cis, rd, eps=self.eps)
         with record_function_range("dsv4.attn.kv_proj_norm_rope"):
             kv_in = self._lin(self.wkv, x)
@@ -2874,13 +2870,9 @@ class Attention(nn.Module):
         bsz = common.bsz
         seqlen = common.seqlen
         device = common.device
-        swa_lengths = torch.full(
-            (bsz,), seqlen, device=device, dtype=torch.long
-        )
+        swa_lengths = torch.full((bsz,), seqlen, device=device, dtype=torch.long)
         with record_function_range("dsv4.attn.swa_pool_write"):
-            self._prefill_write_swa_to_pool(
-                bsz, kv_full, common.sp_int, swa_lengths
-            )
+            self._prefill_write_swa_to_pool(bsz, kv_full, common.sp_int, swa_lengths)
 
     # ------------------------------------------------------------------
     # CSA / HCA dispatch (compress_ratio == 4 / 128).
@@ -2902,9 +2894,7 @@ class Attention(nn.Module):
             "class — env switch likely changed mid-process)"
         )
         with record_function_range("dsv4.attn.indexer"):
-            raw_int32 = self.indexer.forward_with_meta(
-                x, qkv.qr, common.indexer_meta
-            )
+            raw_int32 = self.indexer.forward_with_meta(x, qkv.qr, common.indexer_meta)
         # raw_int32 layout matches qkv.qr leading dims with K trailing.
         return self._forward_prefill_compressed_vllm(
             x, qkv, common, cmp_topk_runtime_int32=raw_int32
@@ -2954,9 +2944,7 @@ class Attention(nn.Module):
                 cmp_topk_runtime_int32,
             ).long()
         else:
-            cmp_topk = _get_compress_topk_idxs(
-                ratio, bsz, seqlen, sp, offset, device
-            )
+            cmp_topk = _get_compress_topk_idxs(ratio, bsz, seqlen, sp, offset, device)
         topk_idxs = torch.cat([topk_window, cmp_topk], dim=-1).long()
 
         # Main compressor — hoisted meta path; returns ``None`` since
@@ -3008,19 +2996,47 @@ class Attention(nn.Module):
                     swa_dense_len=common.swa_dense_len,
                     cmp_T=cmp_T,
                 )
-            assert kv_cat is not None, (
-                "vLLM continuation prefill requires paged context"
-            )
+            assert (
+                kv_cat is not None
+            ), "vLLM continuation prefill requires paged context"
+
+        # Sparse attention via flash_mla_sparse_fwd (BF16 native, mirrors
+        # source FP8 attention's ``_attn_via_workspace`` epilogue). Layout
+        # massage:
+        #   q       : [B=1, S, H, D]  → [S, H, D]
+        #   kv      : [B=1, T_kv, D]  → [T_kv, 1, D]
+        #   indices : [B=1, S, K]     → [S, 1, K_aligned] int32, padded
+        #             to a multiple of 128 (matches source's
+        #             ``_SPARSE_PREFILL_TOPK_ALIGNMENT``; SM100 head64
+        #             kernel asserts ``params.topk % B_TOPK == 0`` with
+        #             ``B_TOPK = 64`` so 128 is the safe upper bound).
+        #             ``-1`` in the tail = kernel's invalid sentinel.
+        #   attn_sink + sm_scale: unchanged
+        # The kernel returns ``[S, H, D_v]`` BF16; we restore the leading
+        # batch dim so :meth:`_prefill_output_proj_vllm` can ingest it.
+        from flash_mla import flash_mla_sparse_fwd  # type: ignore[import-not-found]
+
+        _SPARSE_PREFILL_TOPK_ALIGN = 128
 
         with record_function_range("dsv4.attn.sparse_attn"):
-            if _tl_kernels.tilelang_available():
-                o = _tl_kernels.sparse_attn(
-                    qkv.q, kv_cat, self.attn_sink, topk_idxs, self.softmax_scale
-                )
-            else:
-                o = _sparse_attn(
-                    qkv.q, kv_cat, self.attn_sink, topk_idxs, self.softmax_scale
-                )
+            q_flat = qkv.q.squeeze(0).contiguous()
+            kv_flat = kv_cat.squeeze(0).unsqueeze(1).contiguous()
+
+            indices_i32 = topk_idxs.squeeze(0).to(torch.int32)
+            K_total = int(indices_i32.shape[-1])
+            pad_K = (-K_total) % _SPARSE_PREFILL_TOPK_ALIGN
+            if pad_K > 0:
+                indices_i32 = F.pad(indices_i32, (0, pad_K), value=-1)
+            indices_i32 = indices_i32.unsqueeze(1).contiguous()
+
+            o3, _, _ = flash_mla_sparse_fwd(
+                q=q_flat,
+                kv=kv_flat,
+                indices=indices_i32,
+                sm_scale=self.softmax_scale,
+                attn_sink=self.attn_sink,
+            )
+            o = o3.unsqueeze(0)
 
         return self._prefill_output_proj_vllm(o, common)
 
@@ -3066,10 +3082,7 @@ class Attention(nn.Module):
                 o = torch.einsum("bsgd,grd->bsgr", o, wo_a)
             out = self._lin(self.wo_b, o.flatten(2))
         if self.tp_size > 1:
-            from rtp_llm.models_py.distributed.collective_torch import (
-                Group,
-                all_reduce,
-            )
+            from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 
             with record_function_range("dsv4.attn.tp_all_reduce"):
                 all_reduce(out, Group.TP)
