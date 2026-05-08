@@ -121,6 +121,21 @@ py_test(
     exec_properties = {"gpu": "H20"},
 )
 
+# CompressorFP8.prepare_metadata under batched (positions, b_idx) — the
+# Phase-3a varlen entry point. Stub-driven slot-mapping arithmetic UT
+# (no FP8 weights / kernels). Asserts B==1 bit-equality with legacy
+# _build_prefill_positions and B==2 per-request routing through bt[b_idx].
+py_test(
+    name = "test_compressor_prepare_metadata_varlen",
+    srcs = ["test_compressor_prepare_metadata_varlen.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        "//rtp_llm:testlib",
+    ],
+    tags = ["H20"],
+    exec_properties = {"gpu": "H20"},
+)
+
 # IndexerFP8 prefill kernel chain glue: cp_gather + fp8_mqa_logits +
 # dsv4_top_k_per_row_prefill end-to-end. Locks shape/dtype contracts at
 # each boundary + the k_scale view(fp32).squeeze(-1) glue.

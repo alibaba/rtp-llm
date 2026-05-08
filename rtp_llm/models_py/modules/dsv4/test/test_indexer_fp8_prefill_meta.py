@@ -233,5 +233,236 @@ class IndexerFP8PrepareTest(unittest.TestCase):
             _call(bad, bsz=1, seqlen=8, sp_int=0, device=self.device)
 
 
+# ---------------------------------------------------------------------------
+# Phase-3a varlen path: B>1 with mixed-prefix requests.
+# Asserts every per-request scalar from the legacy B==1 builder fans out
+# correctly to per-request [B] / [B+1] / [T_total] tensors.
+# ---------------------------------------------------------------------------
+class IndexerFP8PrepareVarlenTest(unittest.TestCase):
+
+    def setUp(self) -> None:
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA required")
+        self.device = torch.device("cuda")
+        self.ratio = 4
+        self.max_pos = 4096
+        self.rope_half = 32
+        self.freqs_cis = torch.arange(
+            self.max_pos * self.rope_half, dtype=torch.float32, device=self.device
+        ).view(self.max_pos, self.rope_half)
+        self.kv_eb = 64
+        # B=2 block table — distinct per-request rows.
+        self.bt = torch.arange(1, 33, dtype=torch.int64, device=self.device).view(2, 16)
+        self.stub = _StubIndexerFP8(self.ratio, self.freqs_cis, self.bt, self.kv_eb)
+
+    def _make_batched_kwargs(
+        self,
+        prefix_lengths: list[int],
+        input_lengths: list[int],
+    ) -> dict:
+        """Build the canonical varlen kwargs the upper-layer broadcast
+        builder hands down. Mirrors prefill/forward.py derivation."""
+        device = self.device
+        B = len(input_lengths)
+        il = torch.tensor(input_lengths, dtype=torch.int32, device=device)
+        pl = torch.tensor(prefix_lengths, dtype=torch.int32, device=device)
+        cu = torch.zeros(B + 1, dtype=torch.int32, device=device)
+        cu[1:] = torch.cumsum(il, dim=0).to(torch.int32)
+        T_total = int(cu[-1].item())
+        positions = torch.cat(
+            [
+                torch.arange(p, p + L, dtype=torch.int64, device=device)
+                for L, p in zip(input_lengths, prefix_lengths)
+            ],
+            dim=0,
+        )
+        req_id = (
+            torch.searchsorted(
+                cu.to(torch.int64),
+                torch.arange(T_total, dtype=torch.int64, device=device),
+                right=True,
+            )
+            .sub_(1)
+            .to(torch.int32)
+            .contiguous()
+        )
+        return dict(
+            batch_size=B,
+            cu_seqlens=cu,
+            input_lengths=il,
+            prefix_lengths=pl,
+            position_ids=positions,
+            req_id_per_token=req_id,
+            max_seqlen_q=int(il.max().item()),
+        )
+
+    def test_b1_varlen_kwargs_bit_equal_to_legacy(self) -> None:
+        """B==1 with full varlen kwargs must produce bit-equal meta to
+        the scalar-only call. Guards against accidental divergence in
+        the new branch."""
+        kw = self._make_batched_kwargs(prefix_lengths=[12], input_lengths=[20])
+        legacy = IndexerFP8.prepare(
+            self.stub,
+            1,
+            20,
+            12,
+            self.device,
+            kv_block_table=self.bt,
+            kv_eb=self.kv_eb,
+        )
+        new = IndexerFP8.prepare(
+            self.stub,
+            1,
+            20,
+            12,
+            self.device,
+            kv_block_table=self.bt,
+            kv_eb=self.kv_eb,
+            **kw,
+        )
+        # Scalar fields
+        self.assertEqual(legacy.M, new.M)
+        self.assertEqual(legacy.T, new.T)
+        self.assertEqual(legacy.sp_int, new.sp_int)
+        self.assertEqual(legacy.end_pos, new.end_pos)
+        self.assertEqual(legacy.is_fresh_prefill, new.is_fresh_prefill)
+        # Tensor fields — bit-equal at B==1
+        self.assertTrue(torch.equal(legacy.positions_d, new.positions_d))
+        self.assertTrue(torch.equal(legacy.ke, new.ke))
+        self.assertTrue(torch.equal(legacy.ks, new.ks))
+        self.assertTrue(torch.equal(legacy.cu_kv_seqlens, new.cu_kv_seqlens))
+        self.assertTrue(torch.equal(legacy.block_table_i32, new.block_table_i32))
+        self.assertTrue(torch.equal(legacy.freqs_cis_slice, new.freqs_cis_slice))
+
+    def test_b2_mixed_sp_geometry(self) -> None:
+        """B=2: req0 (sp=0, S=16) + req1 (sp=8, S=12), ratio=4.
+        T_per_req = [16//4, 20//4] = [4, 5] → cu_kv_seqlens = [0,4,9].
+        T_total (M) = 28. positions = [0..15, 8..19]."""
+        kw = self._make_batched_kwargs(
+            prefix_lengths=[0, 8],
+            input_lengths=[16, 12],
+        )
+        meta = IndexerFP8.prepare(
+            self.stub,
+            kw["batch_size"],
+            int(kw["max_seqlen_q"]),
+            0,
+            self.device,
+            kv_block_table=self.bt,
+            kv_eb=self.kv_eb,
+            **kw,
+        )
+        self.assertEqual(meta.M, 28)
+        self.assertEqual(meta.T, 9)  # 4 + 5
+        self.assertEqual(meta.cu_kv_seqlens.tolist(), [0, 4, 9])
+        self.assertEqual(meta.positions_d.shape, (28,))
+        self.assertEqual(meta.positions_d[0].item(), 0)
+        self.assertEqual(meta.positions_d[15].item(), 15)
+        self.assertEqual(meta.positions_d[16].item(), 8)
+        self.assertEqual(meta.positions_d[27].item(), 19)
+
+    def test_b2_ke_clamps_per_request_T_b(self) -> None:
+        """ke[t] must clamp to that token's request-local T_b, NOT the
+        global T_total. Token in req0 with pos=15 → ke=(16//4)=4
+        (clamped to req0's T_b=4). Token in req1 with pos=19 → ke=(20//4)=5
+        (clamped to req1's T_b=5). If we accidentally clamped to global
+        T=9, both would just take their // value with no clamping."""
+        kw = self._make_batched_kwargs(
+            prefix_lengths=[0, 8],
+            input_lengths=[16, 12],
+        )
+        meta = IndexerFP8.prepare(
+            self.stub,
+            kw["batch_size"],
+            int(kw["max_seqlen_q"]),
+            0,
+            self.device,
+            kv_block_table=self.bt,
+            kv_eb=self.kv_eb,
+            **kw,
+        )
+        ke_cpu = meta.ke.cpu()
+        # Req0 last token: pos=15 → expected_ke = clamp((15+1)//4=4, max=4) = 4
+        self.assertEqual(int(ke_cpu[15].item()), 4)
+        # Req1 last token: pos=19 → expected_ke = clamp((19+1)//4=5, max=5) = 5
+        self.assertEqual(int(ke_cpu[27].item()), 5)
+        # Cross-check first req0 token: pos=0 → ke = clamp(1//4=0, max=4) = 0
+        self.assertEqual(int(ke_cpu[0].item()), 0)
+        # First req1 token: pos=8 → ke = clamp(9//4=2, max=5) = 2
+        self.assertEqual(int(ke_cpu[16].item()), 2)
+
+    def test_b2_block_table_sliced_to_B(self) -> None:
+        kw = self._make_batched_kwargs(
+            prefix_lengths=[0, 8],
+            input_lengths=[16, 12],
+        )
+        meta = IndexerFP8.prepare(
+            self.stub,
+            kw["batch_size"],
+            int(kw["max_seqlen_q"]),
+            0,
+            self.device,
+            kv_block_table=self.bt,
+            kv_eb=self.kv_eb,
+            **kw,
+        )
+        self.assertEqual(meta.block_table_i32.shape, (2, 16))
+        self.assertEqual(meta.block_table_i32.dtype, torch.int32)
+        self.assertTrue(torch.equal(meta.block_table_i32, self.bt[:2].to(torch.int32)))
+
+    def test_b2_freqs_cis_per_token_gather(self) -> None:
+        """freqs_cis_slice[t] must equal self.freqs_cis[position_ids[t]] —
+        per-token gather, not a contiguous slice."""
+        kw = self._make_batched_kwargs(
+            prefix_lengths=[0, 8],
+            input_lengths=[16, 12],
+        )
+        meta = IndexerFP8.prepare(
+            self.stub,
+            kw["batch_size"],
+            int(kw["max_seqlen_q"]),
+            0,
+            self.device,
+            kv_block_table=self.bt,
+            kv_eb=self.kv_eb,
+            **kw,
+        )
+        positions = kw["position_ids"]
+        expected = self.freqs_cis.index_select(0, positions)
+        self.assertTrue(torch.equal(meta.freqs_cis_slice, expected))
+
+    def test_b2_env_flag_disables_varlen_path(self) -> None:
+        """DSV4_VARLEN_PREFILL=0 should fall back to the legacy B==1
+        scalar path even when B>1 kwargs are present (kill-switch)."""
+        import os as _os
+
+        kw = self._make_batched_kwargs(
+            prefix_lengths=[0, 8],
+            input_lengths=[16, 12],
+        )
+        prev = _os.environ.get("DSV4_VARLEN_PREFILL")
+        _os.environ["DSV4_VARLEN_PREFILL"] = "0"
+        try:
+            meta = IndexerFP8.prepare(
+                self.stub,
+                1,
+                16,
+                0,
+                self.device,
+                kv_block_table=self.bt,
+                kv_eb=self.kv_eb,
+                **kw,
+            )
+        finally:
+            if prev is None:
+                _os.environ.pop("DSV4_VARLEN_PREFILL", None)
+            else:
+                _os.environ["DSV4_VARLEN_PREFILL"] = prev
+        # Legacy path: M = 1*16, T = (0+16)//4 = 4, cu_kv_seqlens=[0,4]
+        self.assertEqual(meta.M, 16)
+        self.assertEqual(meta.T, 4)
+        self.assertEqual(meta.cu_kv_seqlens.tolist(), [0, 4])
+
+
 if __name__ == "__main__":
     unittest.main()
