@@ -45,56 +45,6 @@ def build_req_id_per_token(
     return base.repeat_interleave(q_len)
 
 
-def gather_dual_pool_kv_packed(
-    swa_pool_view: torch.Tensor,  # [num_swa_slots, D] bf16
-    cmp_pool_view: torch.Tensor,  # [num_cmp_slots, D] bf16
-    swa_global: torch.Tensor,  # [T, win] int32, -1 sentinel
-    cmp_global: torch.Tensor,  # [T, K] int32, -1 sentinel
-    head_dim: int,
-    batch_size: int,
-    q_len: int,
-) -> torch.Tensor:
-    """Phase 2B-2b: vectorized dual-pool gather → packed scratch.
-
-    Returns ``[B, q_len, win+K, D]`` bf16. Invalid (``-1``) slots are
-    masked to zeros so the downstream sparse-attn kernel can treat the
-    packed buffer as dense (identity topk = ``arange(win+K)``) — same
-    output as if the kernel did the gather + ``-1`` skip itself.
-
-    Hot-path note: this is the gather-into-packed fallback because our
-    TileLang ``sparse_attn_kernel`` only takes a single ``kv`` tensor.
-    Memory traffic is ~``(win+K)*D*bs`` bf16 per call (~10MB at typical
-    bs=16, win+K=640, D=512). Phase 2B-2c may extend the kernel to take
-    two pools (mirror vLLM ``flash_mla_with_kvcache(extra_k_cache,
-    extra_indices)``) for true zero-copy.
-    """
-    T = batch_size * q_len
-    win = swa_global.shape[1]
-    K = cmp_global.shape[1]
-
-    # SWA half: index_select with -1-safe redirect, then mask to 0.
-    swa_safe = torch.where(
-        swa_global >= 0,
-        swa_global,
-        torch.zeros_like(swa_global),
-    ).to(torch.long)
-    swa_kv = swa_pool_view.index_select(0, swa_safe.view(-1)).view(T, win, head_dim)
-    swa_mask = (swa_global >= 0).unsqueeze(-1)
-    swa_kv = torch.where(swa_mask, swa_kv, torch.zeros_like(swa_kv))
-
-    # Compressed half: same pattern, different pool.
-    cmp_safe = torch.where(
-        cmp_global >= 0,
-        cmp_global,
-        torch.zeros_like(cmp_global),
-    ).to(torch.long)
-    cmp_kv = cmp_pool_view.index_select(0, cmp_safe.view(-1)).view(T, K, head_dim)
-    cmp_mask = (cmp_global >= 0).unsqueeze(-1)
-    cmp_kv = torch.where(cmp_mask, cmp_kv, torch.zeros_like(cmp_kv))
-
-    return torch.cat([swa_kv, cmp_kv], dim=1).view(batch_size, q_len, win + K, head_dim)
-
-
 def translate_local_to_global_slots(
     req_id_per_token: torch.Tensor,  # [T] int32
     block_table: torch.Tensor,  # [B, max_blocks_per_req] int32

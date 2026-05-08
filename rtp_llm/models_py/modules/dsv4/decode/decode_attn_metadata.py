@@ -39,7 +39,7 @@ the slot indices we produce here are ``r * stride + offset_in_request``.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
@@ -168,6 +168,73 @@ class DSv4DecodeAttnMetadata:
     # idx are identical across HCA layers). Only populated when an HCA
     # pool is bound.
     hca_cmp_global_slots: Optional[torch.Tensor] = None
+
+    # FlashMLA ``sched_meta`` cache — per-(batch_size, extra_attn_type).
+    # Mirrors vLLM's ``swa_metadata.tile_sched_{swaonly,c4a,c128a}`` pattern:
+    # the planner is called once per (mode, B) combination and the returned
+    # ``sched_meta`` is reused across all layers of the same type in a decode
+    # step (43× in DSv4). Lives on the metadata so:
+    #   * Eager path: rebuilt each step with the metadata instance, freed
+    #     when metadata GCs — no cross-step accumulation.
+    #   * CUDA graph path: populated lazily during capture (tensors alloc'd
+    #     via the graph-aware allocator), stays alive for the impl lifetime
+    #     so replay at the same captured B reuses the same Python tensors.
+    # CSA and HCA layers MUST NOT share a sched_meta: the first
+    # ``flash_mla_with_kvcache`` call bakes ``extra_k_cache.shape[1]``
+    # (page_block_size of the compressed pool) into the sched_meta, and the
+    # wheel enforces ``sched_meta.config.extra_page_block_size ==
+    # extra_k_cache.shape[1]`` on every subsequent call. CSA_KV and HCA_KV
+    # pools have different page_block_size → separate cache keys.
+    # ``extra_at`` is the ``attn_type`` int for the compressed pool
+    # (``CSA_KV`` / ``HCA_KV``) or ``None`` for single-pool SWA-only.
+    sched_meta_cache: Dict[Tuple[int, Optional[int]], Any] = field(default_factory=dict)
+
+
+def get_or_build_sched_meta(
+    metadata: "DSv4DecodeAttnMetadata",
+    *,
+    batch_size: int,
+    q_len: int,
+    num_heads: int,
+    topk: int,
+    extra_attn_type: Optional[int] = None,
+) -> Any:
+    """Lazy-build + cache FlashMLA ``sched_meta`` on the metadata object.
+
+    Replaces the ``SparseAttnV4DecodeFp8Op._sched_meta_cache`` anti-pattern
+    (per-op instance cache accumulating across steps). Matches vLLM's
+    ``DeepseekSparseSWAMetadataBuilder.build_tile_scheduler`` design —
+    sched_meta lives on the per-step metadata object.
+
+    Cache key is ``(batch_size, extra_attn_type)``:
+      * The FlashMLA wheel bakes ``config.b`` (batch size) and
+        ``config.extra_page_block_size`` (extra_k_cache page size) into the
+        sched_meta on the first ``flash_mla_with_kvcache`` call and asserts
+        equality on every subsequent call.
+      * SWA-only (single pool) → ``extra_attn_type=None``.
+      * CSA layers (dual pool, CSA_KV as extra) → ``extra_attn_type=CSA_KV``.
+      * HCA layers (dual pool, HCA_KV as extra) → ``extra_attn_type=HCA_KV``.
+      * CSA_KV and HCA_KV pools have different ``page_block_size``, so
+        they MUST use separate sched_meta instances.
+
+    Within one (B, extra_attn_type) bucket ``q_len / num_heads / topk`` are
+    process-constants.
+    """
+    from flash_mla import get_mla_metadata  # type: ignore[import-not-found]
+
+    key = (batch_size, extra_attn_type)
+    sched_meta = metadata.sched_meta_cache.get(key)
+    if sched_meta is None:
+        sched_meta, _ = get_mla_metadata(
+            cache_seqlens=None,
+            num_q_tokens_per_head_k=batch_size * q_len * num_heads,
+            topk=topk,
+            num_heads_q=num_heads,
+            num_heads_k=1,
+            is_fp8_kvcache=True,
+        )
+        metadata.sched_meta_cache[key] = sched_meta
+    return sched_meta
 
 
 def _build_swa_slot_mapping(

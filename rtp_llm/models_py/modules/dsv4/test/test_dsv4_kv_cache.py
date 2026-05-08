@@ -97,7 +97,7 @@ from model import ModelArgs as OfficialArgs
 _official_model.rotate_activation = _mock_rotate_activation
 
 from rtp_llm.models_py.modules.dsv4.attention import Attention as OurAttention
-from rtp_llm.models_py.modules.dsv4.attention import _get_window_topk_idxs, _sparse_attn
+from rtp_llm.models_py.modules.dsv4.attention import _get_window_topk_idxs
 
 # Import our implementation
 from rtp_llm.models_py.modules.dsv4.compressor import Compressor as OurCompressor

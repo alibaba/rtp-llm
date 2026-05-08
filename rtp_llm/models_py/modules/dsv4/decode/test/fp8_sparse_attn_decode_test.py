@@ -2,9 +2,8 @@
 
 The op no longer carries a Python reference fallback (production / dev /
 CI all have flash_mla wheel; the CPU dequant-loop reference was a slow
-dead path). Numerical equivalence is covered by:
-  * SM100 smoke gates (production correctness)
-  * ``test_fp8_sparse_attn_dual_pool.py`` (FlashMLA single- vs dual-pool)
+dead path). Numerical equivalence is covered by the SM100 smoke gates
+(production correctness).
 """
 
 import unittest

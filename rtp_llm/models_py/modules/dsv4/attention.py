@@ -12,7 +12,6 @@ Sparse attention reference uses `gather`-based PyTorch implementation —
 slow but correct. M6 will swap in FlashMLA sparse impl.
 """
 
-import math
 import os
 from typing import Any, Dict, NamedTuple, Optional, Union
 
@@ -49,12 +48,8 @@ from rtp_llm.models_py.modules.dsv4.cp import (
     cp_freqs_cis_local,
 )
 from rtp_llm.models_py.modules.dsv4.indexer import Indexer
-from rtp_llm.models_py.modules.dsv4.qlinear import QuantizedLinear, _fp8_dequant_to_fp32
-from rtp_llm.models_py.modules.dsv4.rope import (
-    apply_rotary_emb,
-    apply_rotary_emb_batched,
-    precompute_freqs_cis,
-)
+from rtp_llm.models_py.modules.dsv4.qlinear import _fp8_dequant_to_fp32
+from rtp_llm.models_py.modules.dsv4.rope import apply_rotary_emb, precompute_freqs_cis
 from rtp_llm.models_py.modules.factory.linear import LinearFactory
 from rtp_llm.ops.compute_ops import KVCacheRegionName, rtp_llm_ops
 
@@ -183,15 +178,6 @@ def _prepare_wo_a_stacked(
     scale_rep = scale_fp32.index_select(-2, idx).contiguous()  # [G, R, K/128]
     s_stk = get_mn_major_tma_aligned_packed_ue8m0_tensor(scale_rep)
     return w_stk, s_stk
-
-
-# V4 author's TileLang sparse_attn kernel — vendored from
-# /mnt/nas1/hf/DeepSeek-V4-Flash/inference/kernel.py:sparse_attn_kernel.
-# V4 is MQA + Q-LoRA (NOT MLA); this is the author-authored kernel for
-# exactly this math. Falls back to the PyTorch reference `_sparse_attn`
-# when tilelang is unavailable (e.g. environments where libstdc++
-# symbols don't match tilelang's pre-built libtvm.so).
-from rtp_llm.models_py.modules.dsv4 import tilelang_kernels as _tl_kernels
 
 
 def _v4_fp8_linear(w: torch.Tensor, s: torch.Tensor):
@@ -399,53 +385,6 @@ def _get_window_topk_idxs_varlen(
         torch.full_like(window_flat_idx, -1),
         window_flat_idx,
     ).contiguous()
-
-
-def _sparse_attn(
-    q: torch.Tensor,  # [B, S, H, D]
-    kv: torch.Tensor,  # [B, T_kv, D]   (single KV head, shared across H)
-    sink: torch.Tensor,  # [H]   FP32 logit added to softmax denom (per-head sink)
-    topk_idxs: torch.Tensor,  # [B, S, K] long; -1 entries are masked out
-    softmax_scale: float,
-) -> torch.Tensor:
-    """Reference PyTorch sparse attention with attention sink.
-
-    Output: [B, S, H, D]
-    """
-    bsz, seqlen, n_heads, head_dim = q.size()
-    K = topk_idxs.size(-1)
-    valid = topk_idxs >= 0  # [B, S, K]
-    safe_idxs = topk_idxs.clamp_min(0)  # [B, S, K]
-
-    # gather selected KV: [B, S, K, D]
-    idx_expanded = safe_idxs.unsqueeze(-1).expand(-1, -1, -1, head_dim)
-    kv_exp = kv.unsqueeze(1).expand(-1, seqlen, -1, -1)  # [B, S, T_kv, D]
-    selected = torch.gather(kv_exp, 2, idx_expanded)  # [B, S, K, D]
-
-    # logits: [B, S, H, K] = einsum(qhd, kd)
-    q_f = q.float()
-    selected_f = selected.float()
-    logits = torch.einsum("bshd,bskd->bshk", q_f, selected_f) * softmax_scale
-    # mask invalid slots
-    logits = logits.masked_fill(~valid.unsqueeze(2), float("-inf"))
-
-    # Softmax with attn_sink — matches official `sparse_attn_kernel`:
-    #   scores_max = max over logits only (NOT including sink)
-    #   exp_logits = exp(logits - scores_max)
-    #   acc_o = Σ exp_logits · v
-    #   sum_exp = Σ exp_logits + exp(sink - scores_max)
-    #   out = acc_o / sum_exp
-    # Note: we do NOT include sink in `scores_max`, and the numerator has no sink term.
-    scores_max = logits.amax(dim=-1, keepdim=True).clamp_min(-1e30)  # [B, S, H, 1]
-    exp_logits = torch.exp(logits - scores_max)  # [B, S, H, K]
-    sink_logit = sink.view(1, 1, n_heads, 1).expand_as(scores_max)
-    exp_sink = torch.exp(sink_logit - scores_max)  # [B, S, H, 1]
-    sum_exp = exp_logits.sum(dim=-1, keepdim=True) + exp_sink  # [B, S, H, 1]
-
-    # acc_o = Σ_k exp_logits[k] · selected[k]
-    acc_o = torch.einsum("bshk,bskd->bshd", exp_logits, selected_f)  # [B, S, H, D]
-    out = acc_o / sum_exp  # divide each head by its denom
-    return out.to(q.dtype)
 
 
 class SwaPrefillMeta(NamedTuple):
@@ -1889,6 +1828,10 @@ class Attention(nn.Module):
         come from ``attn_metadata.pool_block_tables`` — stashed onto
         ``self._block_tables_by_type`` here so Compressor / Indexer pool
         context resolution shares one code path with prefill."""
+        assert self._kv_cache_is_fp8, (
+            "forward_decode is FP8-only; BF16 KV-cache decode is no "
+            "longer supported on this branch (mirrors _forward_prefill)"
+        )
         prev_kv = self._kv_cache
         prev_bt = self._block_tables_by_type
         if kv_cache is not None:
@@ -1910,438 +1853,333 @@ class Attention(nn.Module):
         x: torch.Tensor,  # [B, 1, dim] bf16  (q_len=1 pure decode)
         attn_metadata: "DSv4DecodeAttnMetadata",  # type: ignore[name-defined]
     ) -> torch.Tensor:
-        """Decode-only attention forward.
+        """Decode attention body — thin dispatcher mirroring ``_forward_prefill``.
 
-        Per-request batched: every request has its own ``start_pos`` from
-        ``attn_metadata.start_pos[B]``. KV writes use the metadata's
-        ``slot_mapping_swa`` / ``slot_mapping_compressed[ratio]`` indices
-        into the (still register_buffer-backed) per-layer KV cache.
+        Pipeline:
+          1. Q/KV + per-request partial RoPE (``decode_compute_qkv``).
+          2. FP8 SWA pool write (``decode_write_swa_fp8``).
+          3. Per-``compress_ratio`` body:
+             * ``0``   → :meth:`_forward_decode_swa_only`
+             * ``4``   → :meth:`_forward_decode_csa`   (indexer + compressor)
+             * ``128`` → :meth:`_forward_decode_hca`   (compressor, dense idx)
+          4. Output projection (``decode_output_proj``).
 
-        Decode-only — does NOT touch the prefill ``forward`` arm. Phase
-        4 will swap the TileLang sparse_attn for FlashMLA + FP8 KV here.
+        Compressor / Indexer freqs_cis is bound lazily on first call
+        (pool context is set in :meth:`forward_decode`'s try/finally).
         """
-        from rtp_llm.models_py.modules.dsv4.decode.sparse_attn_decode_op import (
-            SparseAttnV4DecodeOp,
-        )
-
-        # Debug tensor probes are off in production; the conditional blocks
-        # below are no-ops, but Python still needs the names defined.
-        _dbg_decode = False
-        _rt = None  # type: ignore[assignment]
+        from rtp_llm.models_py.modules.dsv4.decode.compute_qkv import decode_compute_qkv
+        from rtp_llm.models_py.modules.dsv4.decode.output_proj import decode_output_proj
 
         bsz, q_len, _ = x.size()
-        assert q_len == 1, "Phase 2: q_len==1 only (MTP/spec-decode is later)"
-        win = self.window_size
-        ratio = self.compress_ratio
-        rd = self.rope_head_dim
-        device = x.device
+        assert q_len == 1, "decode: q_len==1 only (MTP/spec-decode is later)"
         # Iter3.3: record_function regions let the no-graph profiler attribute
         # every aten micro-op to a semantic stage. Cheap in capture mode (Python
         # overhead only, no extra kernel). Layer tag ``L{id}/{ratio}`` groups
         # regions per layer; the profiler timeline can then bucket launches per
         # stage across 43 layers.
-        _dbg_tag = f"L{getattr(self, 'layer_id', '?'):0>2}/r{ratio}"
+        _dbg_tag = f"L{getattr(self, 'layer_id', '?'):0>2}/r{self.compress_ratio}"
         # Slice metadata to actual bsz — the CUDA-graph impl allocates
         # buffers at max_bs, but the captured graph at BS=k must read only
         # the [:k] prefix. Padding entries [k:max_bs] are stale across
         # replays; mixing them with k-sized index arrays in fancy
-        # indexing (e.g. self.kv_state[b_idx[k], slot[max_bs]] = ...)
-        # broadcasts the same row to multiple slots and corrupts state.
+        # indexing broadcasts the same row to multiple slots and corrupts state.
         start_pos = attn_metadata.start_pos[:bsz]  # [bsz] int32
 
-        # #50: Compressor / Indexer are fully pool-backed — no persistent
-        # Python-owned kv_state / score_state / kv_cache buffers.  Bind
-        # freqs_cis on first call (idempotent); pool context is set per-
-        # forward below in the try/finally.
-        if self.compress_ratio:
-            if self.compressor.freqs_cis is None:
-                self.compressor.freqs_cis = self.freqs_cis
-            if self.indexer is not None:
-                if self.indexer.freqs_cis is None:
-                    self.indexer.freqs_cis = self.freqs_cis
-                if self.indexer.compressor.freqs_cis is None:
-                    self.indexer.compressor.freqs_cis = self.freqs_cis
+        self._ensure_freqs_cis_bound()
 
-        # Q path
-        with torch.profiler.record_function(f"{_dbg_tag}/q_proj"):
-            qr = self._rmsnorm_weighted(
-                self._lin(self.wq_a, x), self.q_norm
-            )  # [B, 1, q_lora]
-            q = self._lin(self.wq_b, qr).unflatten(
-                -1, (self.n_heads, self.head_dim)
-            )  # [B, 1, H, D]
-            # Per-request RoPE on q_pe — each req has its own start_pos. Vectorized
-            # via apply_rotary_emb_batched (mirrors vLLM's batched cos/sin lookup).
-            freqs_cis_per_req = self.freqs_cis[start_pos.long()]  # [B, freqs_dim]
-            q = fused_rmsnorm_rope(q, None, freqs_cis_per_req, rd, eps=self.eps)
-        with torch.profiler.record_function(f"{_dbg_tag}/kv_proj"):
-            # KV path (single MQA head)
-            kv = fused_rmsnorm_rope(
-                self._lin(self.wkv, x),
-                self.kv_norm,
-                freqs_cis_per_req,
-                rd,
-                eps=self.eps,
+        qkv = decode_compute_qkv(self, x, start_pos, dbg_tag=_dbg_tag)
+        self._decode_write_swa_fp8(qkv.kv, bsz, q_len, attn_metadata, _dbg_tag)
+
+        if self.compress_ratio == 0:
+            o = self._forward_decode_swa_only(
+                qkv.q, bsz, q_len, attn_metadata, _dbg_tag
             )
-        with torch.profiler.record_function(f"{_dbg_tag}/swa_kv_write"):
-            # Phase E5b: direct SWA pool write (register_buffer retired).
-            kv_flat = kv.reshape(bsz * q_len, self.head_dim)  # [T, head_dim]
-            from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
+        elif self.compress_ratio == 4:
+            o = self._forward_decode_csa(
+                x, qkv, bsz, q_len, start_pos, attn_metadata, _dbg_tag
+            )
+        elif self.compress_ratio == 128:
+            o = self._forward_decode_hca(
+                x, qkv, bsz, q_len, start_pos, attn_metadata, _dbg_tag
+            )
+        else:
+            raise AssertionError(f"unknown compress_ratio={self.compress_ratio}")
 
-            swa_pool_slots = attn_metadata.pool_write_slot_mappings.get(SWA_KV)
-            if swa_pool_slots is not None and swa_pool_slots.numel() > 0:
-                if self._kv_cache_is_fp8:
-                    # Mirror ``_prefill_write_swa_to_pool``'s FP8 branch:
-                    # FP8 SWA pool stores 584B/slot (fp8 NoPE 448 + bf16
-                    # RoPE 128 + ue8m0 scale 8).  ``write_kv_to_pool``
-                    # cannot emit this layout — it does a raw
-                    # ``bf16.to(uint8)`` cast that clobbers the pool.
-                    # Dispatch the CUDA
-                    # ``concat_and_cache_mla("fp8_model1_mla", ...)``
-                    # kernel via ``quantize_v4_kv_decode`` instead.
-                    from rtp_llm.models_py.modules.dsv4.decode.fp8_kv_quant_decode_op import (
-                        quantize_v4_kv_decode,
-                    )
-
-                    pool_3d = self._pool_view_3d_fp8(SWA_KV)
-                    if pool_3d is not None:
-                        quantize_v4_kv_decode(
-                            kv_flat.to(torch.bfloat16),
-                            swa_pool_slots[: bsz * q_len],
-                            pool_3d,
-                        )
-                else:
-                    from rtp_llm.models_py.modules.dsv4.decode.kv_write_decode_op import (
-                        write_kv_to_pool,
-                    )
-
-                    swa_view = self._pool_view(SWA_KV)
-                    if swa_view is not None:
-                        write_kv_to_pool(
-                            kv_flat,
-                            swa_pool_slots[: bsz * q_len],
-                            swa_view,
-                            mask_negative=False,
-                        )
-
-        # CSA / HCA: write compressed-K (via indexer for CSA, compressor
-        # for HCA). Downstream paged read consumes ``cmp_local_raw`` +
-        # ``swa_abs_idx`` directly; the legacy ``topk_idxs`` stitch that
-        # concatenated window + offset-compressed indices was dead code
-        # (no reader on either FP8 or BF16 production path).
-        if self.compress_ratio:
-            if self.indexer is not None:
-                # CSA layer (ratio=4): indexer fills
-                # ``attn_metadata.topk_buffer_compressed[:bsz]`` with
-                # per-request compressed-block indices + self-scatters
-                # its nested compressor back into INDEXER_KV/INDEXER_STATE.
-                with torch.profiler.record_function(f"{_dbg_tag}/indexer"):
-                    self.indexer.forward_decode_vectorized(
-                        x,
-                        qr,
-                        start_pos,
-                        attn_metadata.topk_buffer_compressed[:bsz],
-                    )
-                with torch.profiler.record_function(f"{_dbg_tag}/compressor_write"):
-                    # Main CSA compressor emits boundary compressed-K into
-                    # CSA_KV/CSA_STATE (required by the dual-pool paged read).
-                    self.compressor.forward_decode_vectorized(x, start_pos)
-            else:
-                # HCA layer (ratio=128): compressor writes HCA_KV/HCA_STATE.
-                with torch.profiler.record_function(f"{_dbg_tag}/compressor_write"):
-                    self.compressor.forward_decode_vectorized(x, start_pos)
-
-        # Phase 2B-2b: capture raw (no +win offset) compressed local idx for
-        # the optional paged dual-pool read below. For CSA the indexer's
-        # output buffer holds raw values (the +win is added in-place later);
-        # for HCA we synthesize the dense [0..compressed_lens) range.
-        cmp_local_raw: Optional[torch.Tensor] = None
-        with torch.profiler.record_function(f"{_dbg_tag}/cmp_local_raw"):
-            if self.compress_ratio:
-                ratio_l = int(self.compress_ratio)
-                if self.indexer is not None:
-                    # CSA: indexer just wrote raw indices into topk_buf_cmp.
-                    cmp_local_raw = attn_metadata.topk_buffer_compressed[:bsz].clone()
-                else:
-                    # HCA: dense-with-masking idx was already built into
-                    # topk_total_by_ratio[128] by update_decode_metadata_in_place
-                    # (see _build_dense_compressed_idxs). Reuse it instead of
-                    # rebuilding arange+expand+where+full_like per layer.
-                    tt_h = attn_metadata.topk_total_by_ratio.get(ratio_l)
-                    if tt_h is not None:
-                        cmp_local_raw = tt_h[:bsz, :, win:]
-
-        # Sparse attn op for the BF16 paged branches (FP8 branches use
-        # ``_get_fp8_decode_op`` instead). Constructed lazily below where
-        # the BF16 kernel is actually dispatched so the FP8 production
-        # path doesn't pay 43× per-step Python object churn.
-
-        # Phase 2B-2a paged read (SWA-only layers, zero-copy):
-        #   q[B, 1, H, D] → reshape view [1, B, H, D]
-        #   kv = swa_pool_view [num_global_slots, D] → unsqueeze [1, num_slots, D]
-        #   topk = swa_global_slots [B, win] → unsqueeze [1, B, win]
-        # No gather, no packed buffer — TileLang kernel does indirect read
-        # through ``kv[by, idxs[i], j]`` (mirrors vLLM/flash_mla pattern).
-        # Gated on env flag for safe rollout; CSA/HCA paths fall through to
-        # legacy register_buffer below until Phase 2B-2b.
-        from rtp_llm.models_py.modules.dsv4.attn_type import CSA_KV, HCA_KV, SWA_KV
-
-        swa_pool_bt = attn_metadata.pool_block_tables.get(SWA_KV)
-        swa_view_cache = self._pool_view(SWA_KV)
-        swa_view_3d_fp8 = (
-            self._pool_view_3d_fp8(SWA_KV) if self._kv_cache_is_fp8 else None
+        return decode_output_proj(
+            self, o, qkv.freqs_cis_per_req, bsz, q_len, dbg_tag=_dbg_tag
         )
 
-        # Decide which paged read variant to use, if any.
-        use_paged_swa_read = (
-            not self.compress_ratio
-            and (swa_view_cache is not None or swa_view_3d_fp8 is not None)
-            and attn_metadata.swa_abs_idx is not None
+    # ------------------------------------------------------------------
+    # Decode per-path bodies + shared epilogue
+    # ------------------------------------------------------------------
+    def _decode_write_swa_fp8(
+        self,
+        kv: torch.Tensor,  # [B, q_len, head_dim] bf16
+        bsz: int,
+        q_len: int,
+        attn_metadata: "DSv4DecodeAttnMetadata",  # type: ignore[name-defined]
+        dbg_tag: str,
+    ) -> None:
+        """Write newly computed SWA KV into the FP8 584B/slot pool.
+
+        Mirrors :meth:`_prefill_write_swa_fp8_paged` for decode — uses
+        the framework-populated ``pool_write_slot_mappings[SWA_KV]``
+        plus the CUDA ``concat_and_cache_mla("fp8_model1_mla", ...)``
+        kernel dispatched by ``quantize_v4_kv_decode``.
+        """
+        from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
+        from rtp_llm.models_py.modules.dsv4.decode.write_swa import decode_write_swa_fp8
+
+        with torch.profiler.record_function(f"{dbg_tag}/swa_kv_write"):
+            slot_mapping = attn_metadata.pool_write_slot_mappings.get(SWA_KV)
+            swa_pool_3d = self._pool_view_3d_fp8(SWA_KV)
+            decode_write_swa_fp8(
+                kv=kv,
+                slot_mapping=slot_mapping,
+                swa_pool_3d=swa_pool_3d,
+                bsz=bsz,
+                q_len=q_len,
+                head_dim=self.head_dim,
+            )
+
+    def _forward_decode_swa_only(
+        self,
+        q: torch.Tensor,  # [B, 1, H, D]
+        bsz: int,
+        q_len: int,
+        attn_metadata: "DSv4DecodeAttnMetadata",  # type: ignore[name-defined]
+        dbg_tag: str,
+    ) -> torch.Tensor:
+        """SWA-only layer (compress_ratio == 0) — one FlashMLA call over
+        the FP8 SWA pool using per-request ``swa_abs_idx`` indices."""
+        from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
+        from rtp_llm.models_py.modules.dsv4.decode.attention_kernels import (
+            attn_fp8_swa_paged,
+        )
+        from rtp_llm.models_py.modules.dsv4.decode.decode_attn_metadata import (
+            get_or_build_sched_meta,
+        )
+
+        swa_pool_3d = self._pool_view_3d_fp8(SWA_KV)
+        swa_pool_bt = attn_metadata.pool_block_tables.get(SWA_KV)
+        assert (
+            swa_pool_3d is not None
             and swa_pool_bt is not None
             and swa_pool_bt.numel() > 0
-        )
-        # CSA layer cmp pool = CSA_KV; HCA layer cmp pool = HCA_KV.
-        cmp_attn_type = (
-            CSA_KV
-            if (self.compress_ratio == 4)
-            else HCA_KV if (self.compress_ratio == 128) else None
-        )
-        cmp_pool_bt = (
-            attn_metadata.pool_block_tables.get(cmp_attn_type)
-            if cmp_attn_type is not None
-            else None
-        )
-        cmp_view_cache = (
-            self._pool_view(cmp_attn_type) if cmp_attn_type is not None else None
-        )
-        cmp_view_3d_fp8 = (
-            self._pool_view_3d_fp8(cmp_attn_type)
-            if (self._kv_cache_is_fp8 and cmp_attn_type is not None)
-            else None
-        )
-        use_paged_dual_read = (
-            self.compress_ratio in (4, 128)
-            and (swa_view_cache is not None or swa_view_3d_fp8 is not None)
-            and (cmp_view_cache is not None or cmp_view_3d_fp8 is not None)
             and attn_metadata.swa_abs_idx is not None
+        ), (
+            f"[DSV4 decode SWA-only] FP8 pool + block table + swa_abs_idx "
+            f"required (layer={self.layer_id}); "
+            f"kv_cache_bound={self._kv_cache is not None}"
+        )
+        sched_meta = get_or_build_sched_meta(
+            attn_metadata,
+            batch_size=bsz,
+            q_len=q_len,
+            num_heads=self.n_heads,
+            topk=self.window_size,
+            extra_attn_type=None,
+        )
+        return attn_fp8_swa_paged(
+            q=q,
+            swa_pool_3d=swa_pool_3d,
+            attn_sink=self.attn_sink,
+            swa_abs_idx=attn_metadata.swa_abs_idx[:bsz],
+            cache_seqlens=attn_metadata.cache_seqlens_i32[:bsz],
+            swa_block_table=swa_pool_bt[:bsz],
+            sched_meta=sched_meta,
+            fp8_op=self._get_fp8_decode_op(),
+            dbg_tag=dbg_tag,
+        )
+
+    def _forward_decode_csa(
+        self,
+        x: torch.Tensor,
+        qkv: "DecodeQKV",  # type: ignore[name-defined]
+        bsz: int,
+        q_len: int,
+        start_pos: torch.Tensor,
+        attn_metadata: "DSv4DecodeAttnMetadata",  # type: ignore[name-defined]
+        dbg_tag: str,
+    ) -> torch.Tensor:
+        """CSA layer (compress_ratio == 4). Indexer + main compressor
+        both scatter into their pools; the indexer's topk buffer holds
+        raw (pre +win) compressed local indices which the shared
+        dual-pool epilogue consumes."""
+        from rtp_llm.models_py.modules.dsv4.attn_type import CSA_KV
+
+        assert self.indexer is not None, "CSA layer must have an indexer"
+        # Indexer fills ``topk_buffer_compressed[:bsz]`` + self-scatters
+        # nested compressor state into INDEXER_KV / INDEXER_STATE.
+        with torch.profiler.record_function(f"{dbg_tag}/indexer"):
+            self.indexer.forward_decode_vectorized(
+                x,
+                qkv.qr,
+                start_pos,
+                attn_metadata.topk_buffer_compressed[:bsz],
+            )
+        # Main CSA compressor emits boundary compressed-K into
+        # CSA_KV / CSA_STATE (required by the dual-pool paged read).
+        with torch.profiler.record_function(f"{dbg_tag}/compressor_write"):
+            self.compressor.forward_decode_vectorized(x, start_pos)
+        # CSA cmp_local_raw = indexer's raw indices (the +win offset is
+        # added later inside the epilogue's translate path).
+        cmp_local_raw = attn_metadata.topk_buffer_compressed[:bsz].clone()
+        return self._forward_decode_compressed(
+            qkv.q,
+            cmp_local_raw,
+            bsz,
+            q_len,
+            attn_metadata,
+            cmp_attn_type=CSA_KV,
+            dbg_tag=dbg_tag,
+        )
+
+    def _forward_decode_hca(
+        self,
+        x: torch.Tensor,
+        qkv: "DecodeQKV",  # type: ignore[name-defined]
+        bsz: int,
+        q_len: int,
+        start_pos: torch.Tensor,
+        attn_metadata: "DSv4DecodeAttnMetadata",  # type: ignore[name-defined]
+        dbg_tag: str,
+    ) -> torch.Tensor:
+        """HCA layer (compress_ratio == 128). Compressor writes
+        HCA_KV / HCA_STATE (no indexer). ``cmp_local_raw`` is the dense
+        idx precomputed once per step by
+        ``update_decode_metadata_in_place._build_dense_compressed_idxs``
+        (reused across all HCA layers via ``topk_total_by_ratio[128]``)."""
+        from rtp_llm.models_py.modules.dsv4.attn_type import HCA_KV
+
+        assert self.indexer is None, "HCA layer must not have an indexer"
+        with torch.profiler.record_function(f"{dbg_tag}/compressor_write"):
+            self.compressor.forward_decode_vectorized(x, start_pos)
+        win = self.window_size
+        tt_h = attn_metadata.topk_total_by_ratio.get(int(self.compress_ratio))
+        assert tt_h is not None, (
+            f"[DSV4 decode HCA] topk_total_by_ratio[{int(self.compress_ratio)}] "
+            f"missing (layer={self.layer_id})"
+        )
+        cmp_local_raw = tt_h[:bsz, :, win:]
+        return self._forward_decode_compressed(
+            qkv.q,
+            cmp_local_raw,
+            bsz,
+            q_len,
+            attn_metadata,
+            cmp_attn_type=HCA_KV,
+            dbg_tag=dbg_tag,
+        )
+
+    def _forward_decode_compressed(
+        self,
+        q: torch.Tensor,  # [B, 1, H, D]
+        cmp_local_raw: torch.Tensor,  # [B, 1, K_cmp] int32 pool-local idx
+        bsz: int,
+        q_len: int,
+        attn_metadata: "DSv4DecodeAttnMetadata",  # type: ignore[name-defined]
+        cmp_attn_type: int,
+        dbg_tag: str,
+    ) -> torch.Tensor:
+        """Shared CSA/HCA epilogue: translate pool-local → global slots
+        for both SWA and compressed pools, then one dual-pool FlashMLA
+        call (``extra_k_cache`` + ``extra_indices_in_kvcache`` merges
+        softmax in-kernel; mirrors vLLM ``deepseek_v4_attention.py:849-865``)."""
+        from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
+        from rtp_llm.models_py.modules.dsv4.decode.attention_kernels import (
+            attn_fp8_dual_paged,
+        )
+        from rtp_llm.models_py.modules.dsv4.decode.decode_attn_metadata import (
+            get_or_build_sched_meta,
+        )
+        from rtp_llm.models_py.modules.dsv4.decode.paged_topk_translator import (
+            build_req_id_per_token,
+            translate_local_to_global_slots,
+        )
+
+        win = self.window_size
+        T = bsz * q_len
+        K_cmp = cmp_local_raw.shape[-1]
+
+        swa_pool_3d = self._pool_view_3d_fp8(SWA_KV)
+        swa_pool_bt = attn_metadata.pool_block_tables.get(SWA_KV)
+        cmp_pool_3d = self._pool_view_3d_fp8(cmp_attn_type)
+        cmp_pool_bt = attn_metadata.pool_block_tables.get(cmp_attn_type)
+        assert (
+            swa_pool_3d is not None
+            and cmp_pool_3d is not None
             and swa_pool_bt is not None
             and swa_pool_bt.numel() > 0
             and cmp_pool_bt is not None
             and cmp_pool_bt.numel() > 0
-            and cmp_local_raw is not None
+            and attn_metadata.swa_abs_idx is not None
+        ), (
+            f"[DSV4 decode compressed] FP8 SWA + cmp pools + block tables "
+            f"required (layer={self.layer_id}, cmp_attn_type={cmp_attn_type}); "
+            f"kv_cache_bound={self._kv_cache is not None}"
         )
 
-        if use_paged_swa_read or use_paged_dual_read:
-            from rtp_llm.models_py.modules.dsv4.decode.paged_topk_translator import (
-                build_req_id_per_token,
-                gather_dual_pool_kv_packed,
-                translate_local_to_global_slots,
-            )
-
-            with torch.profiler.record_function(f"{_dbg_tag}/translate_swa"):
-                T = bsz * q_len
-                # Iter3.3: req_id and swa_global_slots are shared across all
-                # 43 layers this step — precomputed by update_decode_metadata_in_place
-                # into pre-allocated max-bs buffers; slice the [:T] prefix.
-                # Fallback to compute if metadata is from the eager build
-                # (build_decode_metadata path).
-                if attn_metadata.swa_global_slots is not None:
-                    req_id = attn_metadata.req_id_per_token[:T]
-                    swa_global = attn_metadata.swa_global_slots[:T]
-                else:
-                    req_id = build_req_id_per_token(bsz, q_len, swa_pool_bt.device)
-                    swa_eb = self._pool_entries_per_block(SWA_KV)
-                    swa_local = attn_metadata.swa_abs_idx[:bsz].reshape(T, win)
-                    swa_global = translate_local_to_global_slots(
-                        req_id,
-                        swa_pool_bt[:bsz],
-                        swa_local,
-                        swa_eb,
-                    )
-            if use_paged_swa_read and swa_view_3d_fp8 is not None:
-                # FP8 path: FlashMLA reads the packed FP8 pool directly
-                # (block_table + per-request virtual indices). swa_abs_idx
-                # already holds per-request abs positions with -1 padding,
-                # which is the FlashMLA `indices` contract.
-                from rtp_llm.models_py.modules.dsv4.decode.fp8_sparse_attn_decode_op import (
-                    SparseAttnV4DecodeFp8Op,
-                )
-
-                fp8_sparse_op = self._get_fp8_decode_op()
-                with torch.profiler.record_function(f"{_dbg_tag}/fmla_fp8_swa"):
-                    # Iter3.2: swa_abs_idx / swa_pool_bt / cache_seqlens are all
-                    # already int32 contiguous tensors owned by attn_metadata
-                    # (see allocate_decode_metadata). Dropping the per-layer
-                    # ``.to(torch.int32).contiguous()`` chain removes 3× no-op
-                    # casts × 43 layers = 129 redundant kernel launches/step.
-                    # cache_seqlens_i32 is precomputed once per step in
-                    # update_decode_metadata_in_place / build_decode_metadata.
-                    o = fp8_sparse_op.forward(
-                        q,
-                        swa_view_3d_fp8,
-                        self.attn_sink,
-                        attn_metadata.swa_abs_idx[:bsz],
-                        cache_seqlens=attn_metadata.cache_seqlens_i32[:bsz],
-                        block_table=swa_pool_bt[:bsz],
-                    )
-            elif use_paged_swa_read:
-                # Zero-copy: pool view fed straight to TileLang kernel.
-                sparse_op = SparseAttnV4DecodeOp(
-                    n_heads=self.n_heads,
-                    head_dim=self.head_dim,
-                    softmax_scale=self.softmax_scale,
-                )
-                q_packed = (
-                    q.transpose(0, 1).contiguous() if q_len > 1 else q.transpose(0, 1)
-                )
-                o_packed = sparse_op.forward(
-                    q_packed,
-                    swa_view_cache.unsqueeze(0),
-                    self.attn_sink,
-                    swa_global.view(1, T, win).contiguous(),
-                )
-                o = o_packed.transpose(0, 1)
+        # Translate SWA local → global slots (iter3.3: metadata caches
+        # the result once per step, shared across all 43 layers).
+        with torch.profiler.record_function(f"{dbg_tag}/translate_swa"):
+            if attn_metadata.swa_global_slots is not None:
+                req_id = attn_metadata.req_id_per_token[:T]
+                swa_global = attn_metadata.swa_global_slots[:T]
             else:
-                # Dual-pool: TileLang kernel can't take 2 kv tensors so we
-                # gather both into a packed scratch and call sparse_attn
-                # with identity topk = arange(win+K). Memory cost noted in
-                # paged_topk_translator.gather_dual_pool_kv_packed docstring.
-                with torch.profiler.record_function(f"{_dbg_tag}/translate_cmp"):
-                    K_cmp = cmp_local_raw.shape[-1]
-                    # Iter3.3: HCA layers share a single precomputed
-                    # hca_cmp_global_slots (dense-idx input is identical
-                    # across HCA layers). CSA layers must still translate
-                    # per-layer because topk_buf_cmp comes from the indexer
-                    # and differs per layer.
-                    if (
-                        self.indexer is None
-                        and attn_metadata.hca_cmp_global_slots is not None
-                    ):
-                        cmp_global = attn_metadata.hca_cmp_global_slots[:T]
-                    else:
-                        cmp_eb = self._pool_entries_per_block(cmp_attn_type)
-                        cmp_local = cmp_local_raw.reshape(T, K_cmp)
-                        cmp_global = translate_local_to_global_slots(
-                            req_id,
-                            cmp_pool_bt[:bsz],
-                            cmp_local,
-                            cmp_eb,
-                        )
-                assert q_len == 1, (
-                    "Phase 2B-2b dual-pool paged read currently supports "
-                    f"q_len=1 only (got {q_len})"
+                req_id = build_req_id_per_token(bsz, q_len, swa_pool_bt.device)
+                swa_local = attn_metadata.swa_abs_idx[:bsz].reshape(T, win)
+                swa_global = translate_local_to_global_slots(
+                    req_id,
+                    swa_pool_bt[:bsz],
+                    swa_local,
+                    self._pool_entries_per_block(SWA_KV),
                 )
-                if swa_view_3d_fp8 is not None and cmp_view_3d_fp8 is not None:
-                    # FP8 dual-pool: single FlashMLA call reads both FP8 pools
-                    # via ``extra_k_cache`` + ``extra_indices_in_kvcache`` and
-                    # merges softmax in-kernel. Mirrors vLLM
-                    # ``deepseek_v4_attention.py:849-865``. Eliminates the
-                    # legacy "dequant both pools → BF16 cat → TileLang
-                    # sparse_attn" path.
-                    fp8_dual_op = self._get_fp8_decode_op()
-                    with torch.profiler.record_function(f"{_dbg_tag}/topk_reshape"):
-                        # Iter3.2: swa_global / cmp_global are int32 from the
-                        # triton translator (``translate_local_to_global_slots``),
-                        # so ``.to(torch.int32)`` is a no-op; only ``.view() +
-                        # .contiguous()`` is needed for the [B, q_len, K]
-                        # reshape FlashMLA wants. cache_seqlens / swa_pool_bt
-                        # are pre-cast on attn_metadata (see SWA-only branch).
-                        swa_topk_3d = swa_global.view(bsz, q_len, win).contiguous()
-                        cmp_topk_3d = cmp_global.view(bsz, q_len, K_cmp).contiguous()
-                    with torch.profiler.record_function(f"{_dbg_tag}/fmla_fp8_dual"):
-                        o = fp8_dual_op.forward(
-                            q,
-                            swa_view_3d_fp8,
-                            self.attn_sink,
-                            swa_topk_3d,
-                            cache_seqlens=attn_metadata.cache_seqlens_i32[:bsz],
-                            block_table=swa_pool_bt[:bsz],
-                            extra_k_cache=cmp_view_3d_fp8,
-                            extra_topk_idxs=cmp_topk_3d,
-                        )
-                else:
-                    sparse_op = SparseAttnV4DecodeOp(
-                        n_heads=self.n_heads,
-                        head_dim=self.head_dim,
-                        softmax_scale=self.softmax_scale,
-                    )
-                    kv_packed_4d = gather_dual_pool_kv_packed(
-                        swa_view_cache,
-                        cmp_view_cache,
-                        swa_global,
-                        cmp_global,
-                        self.head_dim,
-                        bsz,
-                        q_len,
-                    )  # [B, 1, win+K, D]
-                    kv_packed = kv_packed_4d.view(bsz, win + K_cmp, self.head_dim)
-                    identity_topk = (
-                        torch.arange(
-                            win + K_cmp,
-                            device=kv_packed.device,
-                            dtype=torch.int32,
-                        )
-                        .view(1, 1, win + K_cmp)
-                        .expand(bsz, q_len, win + K_cmp)
-                        .contiguous()
-                    )
-                    o = sparse_op.forward(q, kv_packed, self.attn_sink, identity_topk)
-        else:
-            # Phase E5b: register_buffer retired.  Production decode must
-            # populate paged metadata; any path here is a caller bug.
-            # Include gating state so a regression surfaces precisely
-            # rather than as a bare "no path taken" error.
-            pool_bt_keys = (
-                list(attn_metadata.pool_block_tables.keys())
-                if attn_metadata.pool_block_tables is not None
-                else None
-            )
-            raise RuntimeError(
-                "[DSV4] forward_decode requires paged metadata "
-                f"(layer={self.layer_id}, ratio={self.compress_ratio}); "
-                "Phase E5b removed the register_buffer fallback. "
-                f"swa_view_cache={'set' if swa_view_cache is not None else 'None'}, "
-                f"swa_pool_bt_numel={swa_pool_bt.numel() if swa_pool_bt is not None else 'None'}, "
-                f"swa_abs_idx={'set' if attn_metadata.swa_abs_idx is not None else 'None'}, "
-                f"cmp_attn_type={cmp_attn_type}, "
-                f"cmp_view_cache={'set' if cmp_view_cache is not None else 'None'}, "
-                f"cmp_pool_bt_numel={cmp_pool_bt.numel() if cmp_pool_bt is not None else 'None'}, "
-                f"cmp_local_raw={'set' if cmp_local_raw is not None else 'None'}, "
-                f"pool_bt_keys={pool_bt_keys}, "
-                f"kv_cache_bound={self._kv_cache is not None}"
-            )
 
-        with torch.profiler.record_function(f"{_dbg_tag}/output_proj"):
-            # Grouped output projection: inverse-RoPE + FP8 quant + wo_a einsum.
-            # Fused path collapses torch ``apply_rotary_emb_batched`` (5 launches)
-            # + per-group ``per_token_group_quant_fp8`` (G launches) into ONE
-            # Triton kernel emitting ``(fp8 [M,G,K], scale [M,G,K/512])`` in the
-            # einsum-expected UE8M0 layout.  Matches vLLM ``deepseek_v4_attention.py``.
-            if o.is_cuda and o.numel() > 0:
-                o_fp8, o_scale = fused_inv_rope_fp8_quant(
-                    o,
-                    freqs_cis_per_req,
-                    n_groups=self.n_groups,
-                    heads_per_group=self.n_heads // self.n_groups,
-                    nope_dim=self.head_dim - self.rope_head_dim,
-                    rope_head_dim=self.rope_head_dim,
-                )
-                o = self._wo_a_einsum_from_fp8(o_fp8, o_scale, bsz, q_len)
+        # Translate compressed local → global slots. HCA layers share a
+        # precomputed ``hca_cmp_global_slots`` (dense idx input is
+        # identical across HCA layers); CSA layers must translate per-
+        # layer because ``topk_buffer_compressed`` is populated by the
+        # per-layer indexer.
+        with torch.profiler.record_function(f"{dbg_tag}/translate_cmp"):
+            if self.indexer is None and attn_metadata.hca_cmp_global_slots is not None:
+                cmp_global = attn_metadata.hca_cmp_global_slots[:T]
             else:
-                apply_rotary_emb_batched(o[..., -rd:], freqs_cis_per_req, inverse=True)
-                o = o.reshape(bsz, q_len, self.n_groups, -1)
-                wo_a_bf16 = _fp8_dequant_to_fp32(self.wo_a_w, self.wo_a_s).to(o.dtype)
-                wo_a = wo_a_bf16.view(self.n_groups, self.o_lora_rank, -1)
-                o = torch.einsum("bsgd,grd->bsgr", o, wo_a)
-            out = self._lin(self.wo_b, o.flatten(2))
-            if self.tp_size > 1:
-                from rtp_llm.models_py.distributed.collective_torch import (
-                    Group,
-                    all_reduce,
+                cmp_global = translate_local_to_global_slots(
+                    req_id,
+                    cmp_pool_bt[:bsz],
+                    cmp_local_raw.reshape(T, K_cmp),
+                    self._pool_entries_per_block(cmp_attn_type),
                 )
 
-                all_reduce(out, Group.TP)
-            return out
+        # Iter3.2: swa_global / cmp_global are int32 from the translator,
+        # so only ``.view + .contiguous`` is needed for FlashMLA's
+        # [B, q_len, K] contract.
+        with torch.profiler.record_function(f"{dbg_tag}/topk_reshape"):
+            swa_topk_3d = swa_global.view(bsz, q_len, win).contiguous()
+            cmp_topk_3d = cmp_global.view(bsz, q_len, K_cmp).contiguous()
+
+        sched_meta = get_or_build_sched_meta(
+            attn_metadata,
+            batch_size=bsz,
+            q_len=q_len,
+            num_heads=self.n_heads,
+            topk=win,
+            extra_attn_type=cmp_attn_type,
+        )
+        return attn_fp8_dual_paged(
+            q=q,
+            swa_pool_3d=swa_pool_3d,
+            cmp_pool_3d=cmp_pool_3d,
+            attn_sink=self.attn_sink,
+            swa_topk_3d=swa_topk_3d,
+            cmp_topk_3d=cmp_topk_3d,
+            cache_seqlens=attn_metadata.cache_seqlens_i32[:bsz],
+            swa_block_table=swa_pool_bt[:bsz],
+            sched_meta=sched_meta,
+            fp8_op=self._get_fp8_decode_op(),
+            dbg_tag=dbg_tag,
+        )
 
     # ==================================================================
     # Prefill — flat ``[T, dim]`` input, B==1 invariant.

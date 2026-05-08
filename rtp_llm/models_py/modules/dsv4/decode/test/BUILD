@@ -11,14 +11,6 @@ py_test(
 )
 
 py_test(
-    name = "sparse_attn_decode_test",
-    srcs = ["sparse_attn_decode_test.py"],
-    deps = py_test_deps,
-    tags = ["open_skip", "SM100_ARM"],
-    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
-)
-
-py_test(
     name = "indexer_decode_test",
     srcs = ["indexer_decode_test.py"],
     deps = py_test_deps,
@@ -37,14 +29,6 @@ py_test(
 py_test(
     name = "forward_decode_wiring_test",
     srcs = ["forward_decode_wiring_test.py"],
-    deps = py_test_deps,
-    tags = ["open_skip", "SM100_ARM"],
-    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
-)
-
-py_test(
-    name = "attention_decode_equivalence_test",
-    srcs = ["attention_decode_equivalence_test.py"],
     deps = py_test_deps,
     tags = ["open_skip", "SM100_ARM"],
     exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},

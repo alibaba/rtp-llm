@@ -21,7 +21,7 @@ because all dev/CI/prod boxes carry flash_mla.
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 
@@ -72,19 +72,6 @@ class SparseAttnV4DecodeFp8Op:
         self.n_heads = n_heads
         self.head_dim = head_dim
         self.softmax_scale = softmax_scale
-        # Iter2: cached FlashMLASchedMeta keyed by the dual-pool flag (single
-        # vs dual). The wheel populates ``sched_meta.config`` and the kernel-
-        # side ``tile_scheduler_metadata`` / ``num_splits`` tensors on the
-        # FIRST call where ``have_initialized=False``; subsequent calls with
-        # the same shape skip the planner. Decode at fixed B/q_len/H/topk
-        # across all 60 layers means one planner setup per layer-type per
-        # process lifetime instead of 60 setups per step. Mirrors vLLM's
-        # ``swa_metadata.tile_sched_{swaonly,c4a,c128a}`` cache.
-        #
-        # Keys: 0 = single-pool (no extra_k_cache); 1 = dual-pool. Different
-        # extra_topk values would in principle need separate metas, but
-        # within one layer-type the dual-pool topk is constant across calls.
-        self._sched_meta_cache: dict = {}
 
     def forward(
         self,
@@ -92,6 +79,7 @@ class SparseAttnV4DecodeFp8Op:
         kv_cache: torch.Tensor,
         attn_sink: torch.Tensor,
         topk_idxs: torch.Tensor,
+        sched_meta: Any,
         cache_seqlens: Optional[torch.Tensor] = None,
         block_table: Optional[torch.Tensor] = None,
         topk_length: Optional[torch.Tensor] = None,
@@ -100,6 +88,13 @@ class SparseAttnV4DecodeFp8Op:
         extra_topk_length: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Single- or dual-pool sparse attention.
+
+        ``sched_meta`` is the FlashMLA planner output (``get_mla_metadata``
+        return) — owned by :class:`DSv4DecodeAttnMetadata` and fetched via
+        :func:`~decode_attn_metadata.get_or_build_sched_meta`. The op is a
+        pure dispatcher; it does NOT cache sched_meta itself (was the
+        iter2 anti-pattern that accumulated per-instance state across
+        decode steps).
 
         Dual-pool: pass ``extra_k_cache`` (e.g. CMP pool 3D
         ``[num_blocks, block_size, 584]`` uint8) + ``extra_topk_idxs``
@@ -117,6 +112,7 @@ class SparseAttnV4DecodeFp8Op:
             kv_cache,
             attn_sink,
             topk_idxs,
+            sched_meta,
             cache_seqlens,
             block_table,
             topk_length,
@@ -131,6 +127,7 @@ class SparseAttnV4DecodeFp8Op:
         kv_cache: torch.Tensor,
         attn_sink: torch.Tensor,
         topk_idxs: torch.Tensor,
+        sched_meta: Any,
         cache_seqlens: Optional[torch.Tensor],
         block_table: Optional[torch.Tensor],
         topk_length: Optional[torch.Tensor] = None,
@@ -138,10 +135,7 @@ class SparseAttnV4DecodeFp8Op:
         extra_topk_idxs: Optional[torch.Tensor] = None,
         extra_topk_length: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        from flash_mla import (  # type: ignore[import-not-found]
-            flash_mla_with_kvcache,
-            get_mla_metadata,
-        )
+        from flash_mla import flash_mla_with_kvcache  # type: ignore[import-not-found]
 
         B, q_len, H, D = q.shape
         # FlashMLA expects 4D q ``(batch_size, seq_len_q, num_heads_q, head_dim)``
@@ -171,7 +165,6 @@ class SparseAttnV4DecodeFp8Op:
             topk_3d = topk_idxs.squeeze(2).contiguous()
         else:
             topk_3d = topk_idxs.contiguous()
-        topk = topk_3d.shape[-1]
 
         if extra_topk_idxs is not None:
             extra_topk_3d = (
@@ -181,27 +174,6 @@ class SparseAttnV4DecodeFp8Op:
             )
         else:
             extra_topk_3d = None
-
-        # Iter2 (revised iter3.0a): cache + reuse FlashMLASchedMeta across
-        # decode layers of the same shape bucket. Cache key must include
-        # batch size (FlashMLA bakes ``config.b`` into sched_meta — reusing
-        # across different B triggers the wheel's ``sched_meta.config.b ==
-        # batch_size`` assert, which CUDA graph capture surfaces because it
-        # enumerates BS ∈ {capture sizes}). q_len is always 1 in decode and
-        # H/topk are per-op-instance constants, so (B, single/dual) is the
-        # minimal unique key; including q_len/H/topk for safety.
-        cache_key = (B, q_len, H, topk, 1 if extra_k_cache is not None else 0)
-        sched_meta = self._sched_meta_cache.get(cache_key)
-        if sched_meta is None:
-            sched_meta, _ = get_mla_metadata(
-                cache_seqlens=None,
-                num_q_tokens_per_head_k=B * q_len * H,
-                topk=topk,
-                num_heads_q=H,
-                num_heads_k=1,
-                is_fp8_kvcache=True,
-            )
-            self._sched_meta_cache[cache_key] = sched_meta
 
         # DSv4 attn_sink is per-head fp32, loaded from ckpt (layers.*.attn.attn_sink
         # shape [n_heads], non-zero ~0.3..0.6 mean). FlashMLA kernel applies
