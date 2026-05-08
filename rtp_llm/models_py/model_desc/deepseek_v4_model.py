@@ -276,6 +276,85 @@ def _prewarm_mega_moe_buffer(args: V4Args) -> None:
     )
 
 
+def _decode_cuda_graph_batch_sizes(max_generate_batch_size: int) -> list[int]:
+    max_bs = max(int(max_generate_batch_size or 1), 1)
+    raw = os.environ.get("DECODE_CAPTURE_CONFIG", "").strip()
+    if raw:
+        sizes = []
+        for item in raw.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            try:
+                value = int(item)
+            except ValueError:
+                logging.warning("Ignore invalid DECODE_CAPTURE_CONFIG item %r", item)
+                continue
+            if value > 0:
+                sizes.append(min(value, max_bs))
+        if sizes:
+            return sorted(set(sizes))
+
+    sizes = [value for value in (1, 8, 16, 24, 32) if value <= max_bs]
+    sizes.extend(range(48, max_bs + 1, 16))
+    if not sizes or sizes[-1] != max_bs:
+        sizes.append(max_bs)
+    return sorted(set(sizes))
+
+
+def _prewarm_tilelang_mhc(v4: V4Transformer, args: V4Args, device_str: str) -> None:
+    if os.environ.get("DSV4_HC_IMPL", "tilelang").lower() != "tilelang":
+        return
+    if os.environ.get("DSV4_USE_TK_MHC", "1") == "0":
+        return
+    if not device_str.startswith("cuda"):
+        return
+
+    first_layer = v4.layers[0]
+    modules = (
+        ("attn", first_layer.attn_hc),
+        ("ffn", first_layer.ffn_hc),
+    )
+    batch_sizes = [1]
+    if (
+        os.environ.get("ROLE_TYPE", "").upper() == "DECODE"
+        and os.environ.get("ENABLE_CUDA_GRAPH", "0") != "0"
+    ):
+        batch_sizes = _decode_cuda_graph_batch_sizes(args.max_batch_size)
+
+    logging.info(
+        "[DeepSeekV4Model] pre-warming TileLang mHC on %s: batch_sizes=%s "
+        "hc_mult=%d dim=%d",
+        device_str,
+        batch_sizes,
+        args.hc_mult,
+        args.dim,
+    )
+    try:
+        with torch.inference_mode():
+            for batch_size in batch_sizes:
+                residual = torch.zeros(
+                    (int(batch_size), 1, args.hc_mult, args.dim),
+                    dtype=torch.bfloat16,
+                    device=device_str,
+                )
+                for name, module in modules:
+                    y, post, comb = module.pre(residual)
+                    module.post(y, residual, post, comb)
+                    logging.debug(
+                        "[DeepSeekV4Model] TileLang mHC %s pre/post prewarmed "
+                        "for batch=%d",
+                        name,
+                        int(batch_size),
+                    )
+                v4.head_hc.head(residual)
+            torch.cuda.synchronize(torch.device(device_str))
+    except Exception:
+        logging.exception("[DeepSeekV4Model] TileLang mHC prewarm failed")
+        raise
+    logging.info("[DeepSeekV4Model] TileLang mHC prewarm done")
+
+
 def prewarm_mega_moe_buffer_from_config(
     model_config: ModelConfig,
     parallelism_config,
@@ -517,6 +596,7 @@ class DeepSeekV4Model(GptModelBase):
                 first_attn.softmax_scale,
                 device_str,
             )
+            _prewarm_tilelang_mhc(self.v4, self._v4_args, device_str)
 
             # Pre-warm the v4_indexer_score Triton kernel for the SAME
             # constexpr config the live decode (and CSA prefill) call will

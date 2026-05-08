@@ -14,7 +14,6 @@ The cache key set MUST stay invariant across the refactor — see Phase 1 risk
 
 import logging
 import os
-from datetime import timedelta
 
 import torch
 
@@ -23,28 +22,17 @@ import torch
 # collide; in practice there's only ever one entry per process.
 _MEGA_BUF_CACHE: dict = {}
 _MEGA_OUTPUT_CACHE: dict = {}
-_MEGA_GROUP = None
 
 
 def get_mega_moe_group():
-    """Return a dedicated same-rank NCCL group for DeepGEMM symmetric memory."""
-    global _MEGA_GROUP
-    if _MEGA_GROUP is not None:
-        return _MEGA_GROUP
-
+    """Return the default process group for DeepGEMM symmetric memory."""
     import torch.distributed as dist
 
     if not dist.is_initialized():
         raise RuntimeError("Mega MoE process group requires torch.distributed")
     ranks = list(range(dist.get_world_size()))
-    logging.info("Create Mega MoE process group with ranks=%s", ranks)
-    _MEGA_GROUP = dist.new_group(
-        ranks=ranks,
-        backend="nccl",
-        timeout=timedelta(days=36500),
-    )
-    dist.barrier(group=_MEGA_GROUP)
-    return _MEGA_GROUP
+    logging.info("Use default Mega MoE process group WORLD with ranks=%s", ranks)
+    return dist.group.WORLD
 
 
 def _get_or_create_mega_buf(

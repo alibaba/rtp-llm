@@ -60,6 +60,16 @@ def _use_vllm_compressor() -> bool:
     return os.environ.get("DSV4_COMPRESSOR_VLLM", "1") != "0"
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
 # ---------------------------------------------------------------------------
 # vLLM-flow prefill metadata bundles. Mirror of source's ``PrefillMeta`` /
 # ``PrefillQKV`` (FP8 attention.py) but stripped to the BF16 essentials
@@ -588,6 +598,13 @@ class Attention(nn.Module):
         ), f"o_groups={o_groups} not divisible by tp_size={tp_size}"
         self.n_heads = n_heads // tp_size
         self.n_groups = o_groups // tp_size
+        # CP prefill uses the raw TP_SIZE ranks as CP ranks, while
+        # get_attn_tp_size() intentionally reports 1 so attention heads are
+        # not sharded.  The vLLM-flow compressor is CP-aware, but
+        # IndexerVLLM is single-rank only; use the CP-aware legacy Indexer
+        # whenever the runtime env says CP/TP has more than one rank.
+        runtime_cp_size = max(tp_size, _env_int("CP_SIZE", 1), _env_int("TP_SIZE", 1))
+        self._use_indexer_vllm = _use_vllm_compressor() and runtime_cp_size <= 1
 
         # Slices used to carve TP-local tensors out of the full ckpt.
         n_heads_local = self.n_heads
@@ -730,7 +747,7 @@ class Attention(nn.Module):
             # absent (warmup, unit tests), ``_bind_kv_cache_from_pool``
             # needs the T hint to allocate the ephemeral zero tensor.
             if compress_ratio == 4:
-                if _use_vllm_compressor():
+                if self._use_indexer_vllm:
                     from rtp_llm.models_py.modules.dsv4.indexer_vllm import (
                         IndexerVLLM,
                     )
@@ -2135,6 +2152,7 @@ class Attention(nn.Module):
             and (cp_ctx_local is None or cp_ctx_local.cp_size <= 1)
             and self.compress_ratio in (4, 128)
             and _use_vllm_compressor()
+            and (self.compress_ratio != 4 or self._use_indexer_vllm)
         ):
             return self._forward_prefill_vllm(x, start_pos, sequence_lengths)
         win = self.window_size

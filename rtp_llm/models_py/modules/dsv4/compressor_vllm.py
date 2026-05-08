@@ -57,6 +57,15 @@ def _use_metadata_triton() -> bool:
     )
 
 
+def _is_current_stream_capturing(t: torch.Tensor) -> bool:
+    if not t.is_cuda or not torch.cuda.is_available():
+        return False
+    try:
+        return bool(torch.cuda.is_current_stream_capturing())
+    except Exception:
+        return False
+
+
 @dataclass(frozen=True)
 class CompressorMeta:
     """Pre-computed per-token launch metadata.
@@ -74,7 +83,10 @@ class CompressorMeta:
       * ``kv_slots``     : int64 KV-pool slot per token (-1 if non-boundary
                            or unallocated)
       * ``token_to_req`` : int32 alias of ``b_idx`` for the fused KV writer
-      * ``boundary_token_indices`` : int64 token indices that write KV slots
+      * ``boundary_token_indices`` : optional int64 compact token indices that
+        write KV slots. ``None`` means launch over every token and let the
+        kernel skip non-boundary tokens, which is required inside CUDA graph
+        capture because ``torch.nonzero`` has dynamic output shape.
     """
 
     positions: torch.Tensor
@@ -82,7 +94,7 @@ class CompressorMeta:
     state_slots: torch.Tensor
     kv_slots: torch.Tensor
     token_to_req: torch.Tensor
-    boundary_token_indices: torch.Tensor
+    boundary_token_indices: Optional[torch.Tensor]
 
 
 class _CompressorNorm(nn.Module):
@@ -280,7 +292,11 @@ class CompressorVLLM(nn.Module):
             state_slots = self._compute_state_slot_mapping(positions, b_idx)
             kv_slots = self._compute_kv_slot_mapping(positions, b_idx)
             token_to_req = b_idx.to(torch.int32)
-        boundary_token_indices = torch.nonzero(kv_slots >= 0, as_tuple=False).flatten()
+        boundary_token_indices = None
+        if not _is_current_stream_capturing(positions):
+            boundary_token_indices = torch.nonzero(
+                kv_slots >= 0, as_tuple=False
+            ).flatten()
         return CompressorMeta(
             positions=positions,
             b_idx=b_idx,
@@ -563,9 +579,11 @@ class CompressorVLLM(nn.Module):
             )
         if fused_meta is not None:
             positions, b_idx, state_slots, kv_slots, token_to_req = fused_meta
-            boundary_token_indices = torch.nonzero(
-                kv_slots >= 0, as_tuple=False
-            ).flatten()
+            boundary_token_indices = None
+            if not _is_current_stream_capturing(kv_slots):
+                boundary_token_indices = torch.nonzero(
+                    kv_slots >= 0, as_tuple=False
+                ).flatten()
             return CompressorMeta(
                 positions=positions,
                 b_idx=b_idx,
