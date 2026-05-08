@@ -17,6 +17,17 @@ using namespace std;
 
 namespace rtp_llm {
 
+namespace {
+
+bool readEnvFlagOnce(const char* env_name, const char* log_tag, const char* label) {
+    const char* env = std::getenv(env_name);
+    const bool  on  = (env != nullptr && std::string(env) == "1");
+    RTP_LLM_LOG_INFO("[%s] %s=%s -> %s=%d", log_tag, env_name, env ? env : "(unset)", label, static_cast<int>(on));
+    return on;
+}
+
+}  // namespace
+
 NormalExecutor::ModelFactory NormalExecutor::test_model_factory = nullptr;
 
 NormalExecutor::~NormalExecutor() {
@@ -313,51 +324,29 @@ bool NormalExecutor::updateEplbConfig(const EPLBConfig& config) {
 }
 
 bool NormalExecutor::useStreamAsync() const {
-    // Process-wide gate, evaluated once. Mirrors MtpExecutor::useStreamAsync
-    // and intentionally shares the same env var so a single launcher knob
-    // toggles both the MTP and non-MTP async dispatch paths.
     static const bool enabled = []() {
-        const char* env = std::getenv("RTP_LLM_STREAM_ASYNC");
-        bool        on  = (env != nullptr && std::string(env) == "1");
-        RTP_LLM_LOG_INFO("[normal-stream-async] RTP_LLM_STREAM_ASYNC=%s -> useStreamAsync=%d",
-                         env ? env : "(unset)",
-                         static_cast<int>(on));
-        return on;
+        return readEnvFlagOnce("RTP_LLM_STREAM_ASYNC", "normal-stream-async", "useStreamAsync");
     }();
     return enabled;
 }
 
 bool NormalExecutor::useDropBroadSync() const {
     static const bool enabled = []() {
-        const char* env = std::getenv("RTP_LLM_DROP_BROAD_SYNC");
-        bool        on  = (env != nullptr && std::string(env) == "1");
-        RTP_LLM_LOG_INFO("[normal-drop-broad-sync] RTP_LLM_DROP_BROAD_SYNC=%s -> enabled=%d",
-                         env ? env : "(unset)",
-                         static_cast<int>(on));
-        return on;
+        return readEnvFlagOnce("RTP_LLM_DROP_BROAD_SYNC", "normal-drop-broad-sync", "enabled");
     }();
     return enabled;
 }
 
 bool NormalExecutor::useMtpDeviceInput() const {
     static const bool enabled = []() {
-        const char* env = std::getenv("RTP_LLM_DEVICE_INPUT");
-        bool        on  = (env != nullptr && std::string(env) == "1");
-        RTP_LLM_LOG_INFO(
-            "[normal-device-input] RTP_LLM_DEVICE_INPUT=%s -> enabled=%d", env ? env : "(unset)", static_cast<int>(on));
-        return on;
+        return readEnvFlagOnce("RTP_LLM_DEVICE_INPUT", "normal-device-input", "enabled");
     }();
     return enabled;
 }
 
 bool NormalExecutor::checkMtpDeviceInput() const {
     static const bool enabled = []() {
-        const char* env = std::getenv("RTP_LLM_DEVICE_INPUT_CHECK");
-        bool        on  = (env != nullptr && std::string(env) == "1");
-        RTP_LLM_LOG_INFO("[normal-device-input] RTP_LLM_DEVICE_INPUT_CHECK=%s -> enabled=%d",
-                         env ? env : "(unset)",
-                         static_cast<int>(on));
-        return on;
+        return readEnvFlagOnce("RTP_LLM_DEVICE_INPUT_CHECK", "normal-device-input", "enabled");
     }();
     return enabled;
 }

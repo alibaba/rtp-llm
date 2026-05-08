@@ -96,6 +96,13 @@ public:
                                                        int                    vocab_size);
 
 protected:
+    struct AcceptLenMetricsSnapshot {
+        int64_t total_accept_len        = 0;
+        int64_t total_stream_num        = 0;
+        int64_t total_propose_token_num = 0;
+        bool    valid                   = false;
+    };
+
     bool isTpRank0() const;
 
     void maybePrintModelInput(const GptModelInputs& model_input, const std::string& prefix) const;
@@ -103,6 +110,28 @@ protected:
     absl::Status prefillStep(const std::list<GenerateStreamPtr>& streams, MtpMetricsCollector& metrics_collector);
 
     absl::Status decodeStep(const std::list<GenerateStreamPtr>& streams, MtpMetricsCollector& metrics_collector);
+
+    // decodeStep helpers — extracted to keep decodeStep readable. Each helper
+    // owns a single phase (sync, prepare, forward, broadcast, dispatch) and
+    // preserves the original PROFILE_SCOPE labels.
+    void            waitPreviousBookkeepingAndKvSwaps(const std::list<GenerateStreamPtr>& streams);
+    void            rebuildAsyncDeviceStateFromHolder(const std::list<GenerateStreamPtr>& streams);
+    void            launchTargetVerifyPrepareAsync(const GptModelInputs& model_input, size_t batch_size);
+    void            launchDraftPrefillPrepareAsync(const GptModelInputs& model_input);
+    GptModelOutputs runTargetVerifyForward(GptModelInputs& model_input, const StreamGroups& stream_groups);
+    void            broadcastPostRejectionInputs(GptModelInputs& model_input);
+    GptModelOutputs runDraftPrefillForward(GptModelInputs& model_input);
+    void            collectDecodeMetrics(const StreamGroups&                          stream_groups,
+                                         torch::Event&                                accept_len_ready_event,
+                                         const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
+                                         MtpMetricsCollector&                         metrics_collector);
+    absl::Status    dispatchDecodeOutput(const StreamGroups&                          stream_groups,
+                                         const std::list<GenerateStreamPtr>&          streams,
+                                         const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
+                                         GptModelOutputs                              draft_prefill_model_output,
+                                         SamplerOutput                                draft_prefill_sampler_output,
+                                         std::shared_ptr<torch::Event>                rejection_event,
+                                         std::shared_ptr<torch::Event>                draft_event);
 
     void draftModelDecode(GptModelInputs&             model_input,
                           const StreamGroups&         stream_groups,
@@ -113,6 +142,10 @@ protected:
     bool checkMtpDeviceInput() const;
     void ensureMtpModelInputsOnCuda(GptModelInputs& model_input, const char* tag);
     void checkMtpModelInputsOnCuda(const GptModelInputs& model_input, const char* tag) const;
+
+    AcceptLenMetricsSnapshot consumePendingAcceptLenMetrics();
+    void
+    stageAcceptLenMetrics(const torch::Tensor& accept_len, torch::Event& accept_len_ready_event, size_t stream_count);
 
     void prepareStreams(const std::list<GenerateStreamPtr>& streams,
                         std::list<GenerateStreamPtr>&       prefill_streams,
@@ -191,7 +224,12 @@ private:
 
     torch::Tensor d2t_map_;
 
-    torch::Stream collect_metrics_stream_;
+    torch::Stream                 collect_metrics_stream_;
+    torch::Tensor                 metrics_accept_len_sum_gpu_;
+    torch::Tensor                 metrics_accept_len_sum_cpu_;
+    std::shared_ptr<torch::Event> metrics_accept_len_ready_event_;
+    int64_t                       metrics_accept_len_stream_num_        = 0;
+    int64_t                       metrics_accept_len_propose_token_num_ = 0;
 
     AsyncRunner target_verify_prepare_runner_;
     AsyncRunner draft_prefill_prepare_runner_;

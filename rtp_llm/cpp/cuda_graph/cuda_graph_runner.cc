@@ -104,6 +104,68 @@ int inferTotalTokensNoSync(const PyModelInputs& inputs) {
     return 0;
 }
 
+void addD2DCopy(FusedD2DCopyParams& copies, const torch::Tensor& src, torch::Tensor& dst, size_t bytes) {
+    if (src.defined() && src.numel() > 0) {
+        copies.add(src.data_ptr(), dst.data_ptr(), bytes);
+    }
+}
+
+void addStridedD2DCopy(FusedStridedCopyParams& strided_copies,
+                       FusedD2DCopyParams&     d2d_copies,
+                       const torch::Tensor&    src,
+                       torch::Tensor&          dst) {
+    if (!src.defined() || src.numel() <= 0) {
+        return;
+    }
+    if (src.dim() < 2) {
+        d2d_copies.add(src.data_ptr(), dst.data_ptr(), src.numel() * src.element_size());
+        return;
+    }
+    strided_copies.add(src.data_ptr(),
+                       dst.data_ptr(),
+                       src.size(0),
+                       src.size(1) * src.element_size(),
+                       src.stride(0) * src.element_size(),
+                       dst.stride(0) * dst.element_size());
+}
+
+void copyStridedHost(const torch::Tensor& src, torch::Tensor& dst) {
+    if (!src.defined() || src.numel() <= 0) {
+        return;
+    }
+    RTP_LLM_PROFILE_SCOPE("stridedCopyHost");
+    if (src.dim() < 2) {
+        memcpy(dst.data_ptr(), src.data_ptr(), src.numel() * src.element_size());
+        return;
+    }
+    const size_t nrows      = src.size(0);
+    const size_t row_bytes  = src.size(1) * src.element_size();
+    const size_t src_stride = src.stride(0) * src.element_size();
+    const size_t dst_stride = dst.stride(0) * dst.element_size();
+    const char*  src_ptr    = reinterpret_cast<const char*>(src.data_ptr());
+    char*        dst_ptr    = reinterpret_cast<char*>(dst.data_ptr());
+    for (size_t r = 0; r < nrows; ++r) {
+        memcpy(dst_ptr + r * dst_stride, src_ptr + r * src_stride, row_bytes);
+    }
+}
+
+size_t hybridCacheGroup(const PyModelInputs& src_inputs, const PyModelInputs& dst_inputs, bool require_equal = true) {
+    const auto src_group = src_inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group.size();
+    const auto dst_group = dst_inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group.size();
+    if (src_group == 0 || dst_group == 0) {
+        return 0;
+    }
+    if (require_equal) {
+        RTP_LLM_CHECK_WITH_INFO(src_group == dst_group, "kv_cache_kernel_block_id_device_by_group size mismatch");
+    }
+    return require_equal ? src_group : std::min(src_group, dst_group);
+}
+
+void launchFusedD2DCopies(FusedD2DCopyParams& d2d_copies, FusedStridedCopyParams& strided_d2d_copies) {
+    fusedCopy(d2d_copies);
+    fusedStridedCopy(strided_d2d_copies);
+}
+
 void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState& state) {
     RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareInputs");
     prepareInputData(inputs, state);
@@ -151,63 +213,8 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     FusedD2DCopyParams     d2d_copies;
     FusedStridedCopyParams strided_d2d_copies;
 
-    auto tryAddD2DCopy = [&d2d_copies](const torch::Tensor& src, torch::Tensor& dst, size_t bytes) {
-        if (src.defined() && src.numel() > 0) {
-            d2d_copies.add(src.data_ptr(), dst.data_ptr(), bytes);
-        }
-    };
-
-    // Collect a strided 2D D2D copy: copies src[0..rows, 0..cols] into dst[0..rows, 0..cols]
-    // where src and dst may have different column strides (copySmallerIntoLarger semantics).
-    // For 1D tensors, falls back to a contiguous D2D copy to avoid silent data loss.
-    auto tryAddStridedD2DCopy = [&strided_d2d_copies, &d2d_copies](const torch::Tensor& src, torch::Tensor& dst) {
-        if (!src.defined() || src.numel() <= 0)
-            return;
-        if (src.dim() < 2) {
-            d2d_copies.add(src.data_ptr(), dst.data_ptr(), src.numel() * src.element_size());
-            return;
-        }
-        strided_d2d_copies.add(src.data_ptr(),
-                               dst.data_ptr(),
-                               src.size(0),
-                               src.size(1) * src.element_size(),
-                               src.stride(0) * src.element_size(),
-                               dst.stride(0) * dst.element_size());
-    };
-
-    // H2H strided 2D copy via row-by-row memcpy (cannot use GPU kernel for host memory).
-    // For 1D tensors, falls back to a contiguous memcpy.
-    auto stridedCopyHost = [](const torch::Tensor& src, torch::Tensor& dst) {
-        if (!src.defined() || src.numel() <= 0)
-            return;
-        RTP_LLM_PROFILE_SCOPE("stridedCopyHost");
-        if (src.dim() < 2) {
-            memcpy(dst.data_ptr(), src.data_ptr(), src.numel() * src.element_size());
-            return;
-        }
-        const size_t nrows      = src.size(0);
-        const size_t row_bytes  = src.size(1) * src.element_size();
-        const size_t src_stride = src.stride(0) * src.element_size();
-        const size_t dst_stride = dst.stride(0) * dst.element_size();
-        const char*  src_ptr    = reinterpret_cast<const char*>(src.data_ptr());
-        char*        dst_ptr    = reinterpret_cast<char*>(dst.data_ptr());
-        for (size_t r = 0; r < nrows; ++r) {
-            memcpy(dst_ptr + r * dst_stride, src_ptr + r * src_stride, row_bytes);
-        }
-    };
-
-    const bool has_hybrid_cache =
-        !inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group.empty()
-        && !py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device_by_group.empty();
-    size_t hybrid_cache_group = 0;
-
-    if (has_hybrid_cache) {
-        RTP_LLM_CHECK_WITH_INFO(
-            inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group.size()
-                == py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device_by_group.size(),
-            "kv_cache_kernel_block_id_device_by_group size mismatch");
-        hybrid_cache_group = inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group.size();
-    }
+    const size_t hybrid_cache_group = hybridCacheGroup(inputs, py_model_inputs_);
+    const bool   has_hybrid_cache   = hybrid_cache_group > 0;
 
     // Clear stale device ranges before strided D2D copies. All device-side fills
     // are fused into one kernel to avoid a train of tiny aten::fill_ launches.
@@ -267,39 +274,49 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     // because the async-prepare path (PyWrappedModel::prepareAttentionInputs) calls this with
     // undefined empty tensors for those slots, which would crash on element_size().
 
-    tryAddD2DCopy(inputs.attention_inputs.cu_seqlens,
-                  py_model_inputs_.attention_inputs.cu_seqlens,
-                  (state.current_batch_size + 1) * sizeof(int));
-    tryAddD2DCopy(inputs.attention_inputs.cu_kv_seqlens,
-                  py_model_inputs_.attention_inputs.cu_kv_seqlens,
-                  (state.current_batch_size + 1) * sizeof(int));
-    tryAddD2DCopy(inputs.attention_inputs.input_lengths,
-                  py_model_inputs_.attention_inputs.input_lengths,
-                  state.current_batch_size * sizeof(int));
-    tryAddD2DCopy(inputs.attention_inputs.prefix_lengths,
-                  py_model_inputs_.attention_inputs.prefix_lengths,
-                  state.current_batch_size * sizeof(int));
+    addD2DCopy(d2d_copies,
+               inputs.attention_inputs.cu_seqlens,
+               py_model_inputs_.attention_inputs.cu_seqlens,
+               (state.current_batch_size + 1) * sizeof(int));
+    addD2DCopy(d2d_copies,
+               inputs.attention_inputs.cu_kv_seqlens,
+               py_model_inputs_.attention_inputs.cu_kv_seqlens,
+               (state.current_batch_size + 1) * sizeof(int));
+    addD2DCopy(d2d_copies,
+               inputs.attention_inputs.input_lengths,
+               py_model_inputs_.attention_inputs.input_lengths,
+               state.current_batch_size * sizeof(int));
+    addD2DCopy(d2d_copies,
+               inputs.attention_inputs.prefix_lengths,
+               py_model_inputs_.attention_inputs.prefix_lengths,
+               state.current_batch_size * sizeof(int));
     // Strided 2D D2D copy for flat kv_cache_block_id
-    tryAddStridedD2DCopy(inputs.attention_inputs.kv_cache_kernel_block_id_device,
-                         py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device);
+    addStridedD2DCopy(strided_d2d_copies,
+                      d2d_copies,
+                      inputs.attention_inputs.kv_cache_kernel_block_id_device,
+                      py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device);
 
     if (!is_prefill_cuda_graph_mode_) {
         // D2D copies — collected for single batched kernel launch
-        tryAddD2DCopy(inputs.attention_inputs.sequence_lengths_plus_1_d,
-                      py_model_inputs_.attention_inputs.sequence_lengths_plus_1_d,
-                      state.current_batch_size * sizeof(int));
-        tryAddD2DCopy(inputs.attention_inputs.decode_cu_seqlens_d,
-                      py_model_inputs_.attention_inputs.decode_cu_seqlens_d,
-                      (state.current_batch_size + 1) * sizeof(int));
+        addD2DCopy(d2d_copies,
+                   inputs.attention_inputs.sequence_lengths_plus_1_d,
+                   py_model_inputs_.attention_inputs.sequence_lengths_plus_1_d,
+                   state.current_batch_size * sizeof(int));
+        addD2DCopy(d2d_copies,
+                   inputs.attention_inputs.decode_cu_seqlens_d,
+                   py_model_inputs_.attention_inputs.decode_cu_seqlens_d,
+                   (state.current_batch_size + 1) * sizeof(int));
     } else {
         // D2D copy
         if (inputs.bert_embedding_inputs.position_encoding.numel() > 0) {
-            tryAddD2DCopy(inputs.bert_embedding_inputs.combo_position_ids,
-                          py_model_inputs_.bert_embedding_inputs.combo_position_ids,
-                          state.current_seq_len * sizeof(int));
-            tryAddD2DCopy(inputs.bert_embedding_inputs.combo_tokens_type_ids,
-                          py_model_inputs_.bert_embedding_inputs.combo_tokens_type_ids,
-                          state.current_seq_len * sizeof(int));
+            addD2DCopy(d2d_copies,
+                       inputs.bert_embedding_inputs.combo_position_ids,
+                       py_model_inputs_.bert_embedding_inputs.combo_position_ids,
+                       state.current_seq_len * sizeof(int));
+            addD2DCopy(d2d_copies,
+                       inputs.bert_embedding_inputs.combo_tokens_type_ids,
+                       py_model_inputs_.bert_embedding_inputs.combo_tokens_type_ids,
+                       state.current_seq_len * sizeof(int));
         }
     }
 
@@ -309,16 +326,17 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     // need to D2D-mirror the live group tables.
     if (has_hybrid_cache) {
         for (size_t g = 0; g < hybrid_cache_group; ++g) {
-            tryAddStridedD2DCopy(inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group[g],
-                                 py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device_by_group[g]);
+            addStridedD2DCopy(strided_d2d_copies,
+                              d2d_copies,
+                              inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group[g],
+                              py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device_by_group[g]);
         }
     }
 
     // Launch ALL D2D copies (contiguous + strided) in two fused kernels
     {
         RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(fused_d2d_copy)");
-        fusedCopy(d2d_copies);
-        fusedStridedCopy(strided_d2d_copies);
+        launchFusedD2DCopies(d2d_copies, strided_d2d_copies);
     }
 
     // NOTE: we do H2H after D2D copies to let GPU finish the D2D copies as soon as possible,
@@ -331,7 +349,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                            (state.current_batch_size + 1) * sizeof(int));
 
         // Common H2H strided copies for kv_cache block tables (both decode & prefill)
-        stridedCopyHost(inputs.attention_inputs.kv_cache_kernel_block_id_host,
+        copyStridedHost(inputs.attention_inputs.kv_cache_kernel_block_id_host,
                         py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_host);
 
         optimizedCopyAsync(inputs.attention_inputs.kv_cache_layer_to_group,
@@ -399,42 +417,25 @@ void CudaGraphRunner::updateKVCacheKernelBlockId(const PyModelInputs& inputs, Cu
     // unchanged between the propose-time gather and the verify-time re-gather.
     FusedD2DCopyParams     d2d_copies;
     FusedStridedCopyParams strided_d2d_copies;
-    auto tryAddStridedD2DCopy = [&strided_d2d_copies, &d2d_copies](const torch::Tensor& src, torch::Tensor& dst) {
-        if (!src.defined() || src.numel() <= 0) {
-            return;
-        }
-        if (src.dim() < 2) {
-            d2d_copies.add(src.data_ptr(), dst.data_ptr(), src.numel() * src.element_size());
-            return;
-        }
-        strided_d2d_copies.add(src.data_ptr(),
-                               dst.data_ptr(),
-                               src.size(0),
-                               src.size(1) * src.element_size(),
-                               src.stride(0) * src.element_size(),
-                               dst.stride(0) * dst.element_size());
-    };
 
-    tryAddStridedD2DCopy(inputs.attention_inputs.kv_cache_kernel_block_id_device,
-                         py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device);
+    addStridedD2DCopy(strided_d2d_copies,
+                      d2d_copies,
+                      inputs.attention_inputs.kv_cache_kernel_block_id_device,
+                      py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device);
 
-    const bool has_hybrid_cache =
-        !inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group.empty()
-        && !py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device_by_group.empty();
-    if (has_hybrid_cache) {
-        const size_t hybrid_cache_group =
-            std::min(inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group.size(),
-                     py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device_by_group.size());
+    const size_t hybrid_cache_group = hybridCacheGroup(inputs, py_model_inputs_, /*require_equal=*/false);
+    if (hybrid_cache_group > 0) {
         for (size_t g = 0; g < hybrid_cache_group; ++g) {
-            tryAddStridedD2DCopy(inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group[g],
-                                 py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device_by_group[g]);
+            addStridedD2DCopy(strided_d2d_copies,
+                              d2d_copies,
+                              inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group[g],
+                              py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device_by_group[g]);
         }
     }
 
     {
         RTP_LLM_PROFILE_SCOPE("cuda_graph.updateKVCacheKernelBlockId(fused_d2d_copy)");
-        fusedCopy(d2d_copies);
-        fusedStridedCopy(strided_d2d_copies);
+        launchFusedD2DCopies(d2d_copies, strided_d2d_copies);
     }
 }
 

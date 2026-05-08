@@ -20,7 +20,7 @@
 
 namespace rtp_llm {
 
-// WARNGING: buffer in generate stream should all be host to avoid gpu buffer hold more time (except kv cache)
+// GenerateStream-owned buffers stay on host by default; KV cache is the device-side exception.
 
 struct StreamUpdateInfo {
     const torch::Tensor new_tokens;
@@ -75,11 +75,8 @@ public:
 public:
     size_t        propose_step = 0;
     torch::Tensor tokens;  // selected tokens (CPU, preserved for PD-disaggregate / RPC / tests)
-    // GPU mirror of the next-step propose tokens. shape [propose_step].
-    // Populated only on the PDFUSION fast path (via specUpdate). When defined,
-    // PDFUSION readers (prepareDecodeDraftModelInput / prepareOneStepSpecDecodeModelInput
-    // / updateOneStepDraftSamplerOutput / MtpExecutor::prefillStep) consume this
-    // GPU tensor directly and avoid the D2H + CPU loop + H2D round trip.
+    // GPU mirror of next-step propose tokens, used by PDFUSION fast paths to
+    // avoid a D2H + CPU loop + H2D round trip.
     torch::Tensor propose_tokens_gpu;
     torch::Tensor hidden_states;
     torch::Tensor all_probs;
@@ -468,14 +465,8 @@ public:
         return sp_output_buffer_;
     }
 
-    // Linear-attention KV swap synchronisation handle. A fully async step can
-    // dispatch the next target verify before the previous specUpdate finishes
-    // swapLinearBlocks, so the verify stream waits on this completion event.
-    //
-    // The opaque shared_ptr<void> keeps cuda_runtime.h out of this header. The
-    // deleter (set by the producer side, e.g. specUpdate / cache resource)
-    // cleans up the cudaEvent_t with cudaEventDestroy. nullptr means "no
-    // pending swap" and the executor short-circuits the wait.
+    // Opaque CUDA event used by async MTP to wait for linear-attention KV swaps
+    // without including cuda_runtime.h in this header.
     void setPendingSwapDoneEvent(std::shared_ptr<void> event) {
         pending_swap_done_event_ = std::move(event);
     }
@@ -497,28 +488,16 @@ public:
     //   next_seq_len_gpu   : [1] int32          old_seq_len + accept_len (committed seq len)
     //   propose_tokens_gpu : [1, token_stride]  draft sampler output for next-step propose
     //
-    // The tensors above are grouped into MtpAsyncDeviceState with an epoch counter:
-    //   setMtpAsyncDeviceState(state) -> epoch  // bumps counter, stores, returns epoch
-    //   getMtpAsyncDeviceState()                // borrow current state (may be empty)
-    //   clearMtpAsyncDeviceState(epoch)         // legacy/testing escape hatch
-    // The old setSpecDecodeDeviceState / getAcceptLenGpu / ... helpers stay as
-    // thin wrappers on top so existing call sites compile unchanged. Active
-    // decode paths publish/overwrite state instead of clearing it.
+    // The epoch lets legacy/testing code clear only the state it observed;
+    // active decode paths publish/overwrite instead of clearing.
     struct MtpAsyncDeviceState {
         uint64_t      epoch = 0;
         torch::Tensor accept_len_gpu;
         torch::Tensor accept_tokens_gpu;
         torch::Tensor next_seq_len_gpu;
         torch::Tensor propose_tokens_gpu;
-        // DROP_BROAD_SYNC: main thread also publishes the per-stream draft
-        // hidden state (last accepted position, [1, hidden_size]) and the
-        // per-stream draft propose all_probs slice ([next_batch_size, vocab]
-        // for propose_step==1; [next_batch_size, token_stride, vocab] for
-        // propose_step>1). These were previously written by the worker via
-        // GenerateStream::specUpdate; with broad sync dropped, the next
-        // step's gatherHiddenStates / updateMultiStepDraftSamplerOutput would
-        // race the worker. Publishing them here under the epoch guard makes
-        // main thread the sole writer.
+        // Main-thread mirrors used when DROP_BROAD_SYNC lets the next step run
+        // before worker-side specUpdate has written sp_output_buffer fields.
         torch::Tensor last_hidden_states_gpu;
         torch::Tensor draft_all_probs_gpu;
     };
