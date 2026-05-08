@@ -1,7 +1,7 @@
 #pragma once
 
 #include "rtp_llm/cpp/cache/KVCacheSpecBase.h"
-#include "rtp_llm/cpp/cache/DSV4CacheConfig.h"
+#include "rtp_llm/cpp/cache/CacheGroupType.h"
 
 namespace rtp_llm {
 
@@ -11,21 +11,26 @@ namespace rtp_llm {
 // Future mixed-precision: FP8 NoPE + BF16 RoPE + UE8M0 scales (smaller entries).
 // Each entry contains the full KV for one compressed token (one KV head).
 struct DSV4KVSpec: public KVCacheSpec {
-    DSV4CacheType cache_type;
-    uint32_t      entry_elems;        // bytes per entry (584 for KV, 132 for Indexer)
-    uint32_t      entries_per_block;  // entries per block (64 or 2)
-    DataType      store_dtype;        // TYPE_UINT8
+    KVCacheRegionName cache_type = KVCacheRegionName::DEFAULT;
+    uint32_t          entry_elems;        // bytes per entry (584 for KV, 132 for Indexer)
+    uint32_t          entries_per_block;  // entries per block (64 or 2)
+    DataType          store_dtype;        // TYPE_UINT8
 
     DSV4KVSpec() = default;
 
-    DSV4KVSpec(const DSV4PoolSpec& pool_spec, uint32_t seq_size_per_blk) {
-        cache_type        = pool_spec.type;
-        entry_elems       = pool_spec.entry_elems;
-        entries_per_block = pool_spec.entries_per_block;
-        store_dtype       = pool_spec.store_dtype;
+    DSV4KVSpec(KVCacheRegionName cache_region,
+               uint32_t          layer_count,
+               uint32_t          entry_elements,
+               uint32_t          block_entries,
+               DataType          storage_dtype,
+               uint32_t          seq_size_per_blk) {
+        cache_type        = cache_region;
+        entry_elems       = entry_elements;
+        entries_per_block = block_entries;
+        store_dtype       = storage_dtype;
 
         // KVCacheSpec base fields
-        layer_num          = pool_spec.layer_num;
+        layer_num          = layer_count;
         local_head_num_kv  = 1;  // DSV4 is MQA (1 KV head)
         seq_size_per_block = seq_size_per_blk;
         type               = KVCacheSpecType::MultiHeadAttention;
@@ -72,23 +77,29 @@ struct DSV4KVSpec: public KVCacheSpec {
 // They do NOT participate in prefix cache (CacheGroupType::FIXED).
 // The K/V split is a placeholder — state is an opaque blob with no K/V semantic.
 struct DSV4StateSpec: public KVCacheSpec {
-    DSV4CacheType cache_type;
-    uint32_t      state_dim;             // state dimension (entry_elems in pool_spec)
-    uint32_t      entries_per_block;     // 4 or 8
-    uint32_t      fixed_blocks_per_req;  // blocks per request (2 or 16)
-    DataType      store_dtype;           // TYPE_FP32
+    KVCacheRegionName cache_type = KVCacheRegionName::DEFAULT;
+    uint32_t          state_dim;             // state dimension (entry_elems in pool_spec)
+    uint32_t          entries_per_block;     // 4 or 8
+    uint32_t          fixed_blocks_per_req;  // blocks per request (2 or 16)
+    DataType          store_dtype;           // TYPE_FP32
 
     DSV4StateSpec() = default;
 
-    DSV4StateSpec(const DSV4PoolSpec& pool_spec, uint32_t seq_size_per_blk) {
-        cache_type           = pool_spec.type;
-        state_dim            = pool_spec.entry_elems;
-        entries_per_block    = pool_spec.entries_per_block;
-        fixed_blocks_per_req = pool_spec.fixed_blocks_per_req;
-        store_dtype          = pool_spec.store_dtype;
+    DSV4StateSpec(KVCacheRegionName cache_region,
+                  uint32_t          layer_count,
+                  uint32_t          state_elements,
+                  uint32_t          block_entries,
+                  uint32_t          fixed_blocks,
+                  DataType          storage_dtype,
+                  uint32_t          seq_size_per_blk) {
+        cache_type           = cache_region;
+        state_dim            = state_elements;
+        entries_per_block    = block_entries;
+        fixed_blocks_per_req = fixed_blocks;
+        store_dtype          = storage_dtype;
 
         // KVCacheSpec base fields
-        layer_num          = pool_spec.layer_num;
+        layer_num          = layer_count;
         local_head_num_kv  = 1;
         seq_size_per_block = seq_size_per_blk;
         type               = KVCacheSpecType::MultiHeadAttention;
