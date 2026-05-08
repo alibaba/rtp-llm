@@ -12,16 +12,12 @@ internal refs.
 """
 
 from rtp_llm.models_py.modules.dsv4.prefill.forward import (
-    DSv4WriteCacheStoreOp,
-    create_dsv4_write_cache_store_impl,
     forward_layers,
     forward_prefill,
     set_cp_info,
 )
 
 __all__ = [
-    "DSv4WriteCacheStoreOp",
-    "create_dsv4_write_cache_store_impl",
     "forward_layers",
     "forward_prefill",
     "set_cp_info",

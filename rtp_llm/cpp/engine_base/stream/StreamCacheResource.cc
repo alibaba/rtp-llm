@@ -332,11 +332,12 @@ absl::Status StreamCacheResource::initKVBlock(size_t reserve_step) {
     malloc_info.request_id              = stream_->streamId();
     malloc_info.verbose                 = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
 
-    const bool is_hybrid       = resource_context_.cache_manager->cacheConfig().groupNums() > 1;
+    const bool disable_first_malloc_reuse =
+        resource_context_.cache_manager->cacheConfig().disable_decode_first_malloc_device_reuse;
     const bool is_decode_role  = (resource_context_.role_type == RoleType::DECODE);
     const bool is_first_malloc = (batch_kv_cache_resource_->curBlocksNum() == 0);
 
-    if (is_hybrid && is_decode_role && is_first_malloc) {
+    if (disable_first_malloc_reuse && is_decode_role && is_first_malloc) {
         malloc_info.reuse_cache         = false;
         malloc_info.enable_device_cache = false;
     } else {

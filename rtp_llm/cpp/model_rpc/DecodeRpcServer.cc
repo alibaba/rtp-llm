@@ -578,13 +578,15 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     const int peer_cnt = static_cast<int>(load_context.peer_addrs.size());
     RTP_LLM_CHECK_WITH_INFO(peer_cnt > 0, "peer_addrs is empty");
 
-    const bool   use_mla       = cache_config.use_mla;
-    const bool   use_hybrid    = cache_config.groupNums() > 1;
-    const auto&  spec          = cache_config.cache_specs[0];
-    const size_t k_total_bytes = spec->k_block_size_bytes();
-    const size_t v_total_bytes = spec->v_block_size_bytes();
+    const bool   use_mla             = cache_config.use_mla;
+    const bool   use_hybrid          = cache_config.groupNums() > 1;
+    const bool   use_typed_regions   = cache_config.use_typed_cache_regions;
+    const bool   use_opaque_kv_store = cache_config.use_opaque_kv_cache_store;
+    const auto&  spec                = cache_config.cache_specs[0];
+    const size_t k_total_bytes       = spec->k_block_size_bytes();
+    const size_t v_total_bytes       = spec->v_block_size_bytes();
 
-    if (!use_mla && peer_cnt > 1) {
+    if (!use_mla && !use_opaque_kv_store && peer_cnt > 1) {
         RTP_LLM_CHECK_WITH_INFO(k_total_bytes % static_cast<size_t>(peer_cnt) == 0,
                                 "k_block bytes[%zu] not divisible by peer_cnt[%d]",
                                 k_total_bytes,
@@ -604,11 +606,9 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         RTP_LLM_LOG_DEBUG("load context request id is %d", load_context.request_id);
 
         for (size_t layer_id = 0; layer_id < layer_num; layer_id++) {
-            // For DSV4 each layer is in multiple groups (CSA layer ∈
-            // {CSA_KV, INDEXER_KV, INDEXER_STATE, CSA_STATE}). Iterate every
-            // group the layer owns. For other models layer_to_group_ids is
-            // either empty or a single-element vector — both reduce to the
-            // legacy one-gid-per-layer behaviour.
+            // Some typed-region cache layouts let one logical layer own
+            // multiple groups. Iterate every group the layer owns; other
+            // layouts reduce to the legacy one-gid-per-layer behaviour.
             std::vector<int> layer_gids;
             if (use_hybrid && layer_id < cache_config.layer_to_group_ids.size()
                 && !cache_config.layer_to_group_ids[layer_id].empty()) {
@@ -638,7 +638,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                 size_t      model_id  = maga_init_params_.model_id;
 
                 KVCacheRegionName region_name = KVCacheRegionName::DEFAULT;
-                if (use_hybrid && gid < cache_config.group_region_names.size()) {
+                if (use_typed_regions && gid < cache_config.group_region_names.size()) {
                     region_name = cache_config.group_region_names[gid];
                 }
                 CacheGroupType group_type = CacheGroupType::FULL;
@@ -675,8 +675,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                         load_layer_cache->addBlock(key, addr, static_cast<uint32_t>(block.size_bytes), true, true);
                     };
 
-                    // Hybrid Attention not support asymmetric TP, thus transfer the whole kvache blocks
-                    if (use_mla || use_hybrid) {
+                    if (use_mla || use_opaque_kv_store) {
                         RTP_LLM_CHECK_WITH_INFO(parts.size() == 1 || parts.size() == 2,
                                                 "unexpected mla convertIndexToBuffer parts size=%zu",
                                                 parts.size());
@@ -725,7 +724,9 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                         "mtp_cache_cfg.global_layer_ids is empty (mtp_model_id=" + std::to_string(mtp_model_id) + ")");
 
                     for (size_t layer_id = 0; layer_id < layer_num; layer_id++) {
-                        const bool mtp_use_hybrid = mtp_cache_cfg.groupNums() > 1;
+                        const bool mtp_use_hybrid          = mtp_cache_cfg.groupNums() > 1;
+                        const bool mtp_use_typed_regions   = mtp_cache_cfg.use_typed_cache_regions;
+                        const bool mtp_use_opaque_kv_store = mtp_cache_cfg.use_opaque_kv_cache_store;
 
                         // Same multi-group iteration as the main path.
                         std::vector<int> mtp_layer_gids;
@@ -760,7 +761,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                             size_t      model_id  = mtp_base_model_id;
 
                             KVCacheRegionName region_name = KVCacheRegionName::DEFAULT;
-                            if (mtp_use_hybrid && gid < mtp_cache_cfg.group_region_names.size()) {
+                            if (mtp_use_typed_regions && gid < mtp_cache_cfg.group_region_names.size()) {
                                 region_name = mtp_cache_cfg.group_region_names[gid];
                             }
                             CacheGroupType group_type = CacheGroupType::FULL;
@@ -802,7 +803,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                         key, addr, static_cast<uint32_t>(block.size_bytes), true, true);
                                 };
 
-                                if (mtp_use_mla || mtp_use_hybrid) {
+                                if (mtp_use_mla || mtp_use_opaque_kv_store) {
                                     RTP_LLM_CHECK_WITH_INFO(parts.size() == 1 || parts.size() == 2,
                                                             "unexpected mtp mla convertIndexToBuffer parts size=%zu",
                                                             parts.size());

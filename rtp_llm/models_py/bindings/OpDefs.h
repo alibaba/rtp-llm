@@ -27,6 +27,7 @@ struct LayerKVCache {
     torch::Tensor              kv_scale_base;
     int                        seq_size_per_block = 0;
     int                        layer_id           = -1;
+    int                        group_id           = -1;
     rtp_llm::KVCacheRegionName region_name        = rtp_llm::KVCacheRegionName::DEFAULT;
 };
 
@@ -120,6 +121,14 @@ struct KVCache {
                 }
             }
         }
+        const auto layer  = static_cast<size_t>(idx);
+        const auto region = static_cast<size_t>(rtp_llm::KVCacheRegionName::DEFAULT);
+        if (!layer_region_to_group_id.empty() && layer < layer_region_to_group_id.size()
+            && region < layer_region_to_group_id[layer].size()) {
+            layer_cache.group_id = layer_region_to_group_id[layer][region];
+        } else {
+            layer_cache.group_id = 0;
+        }
         return layer_cache;
     }
 
@@ -153,6 +162,7 @@ struct KVCache {
 
         LayerKVCache layer_cache;
         layer_cache.layer_id           = idx;
+        layer_cache.group_id           = layer_region_to_group_id.empty() ? -1 : layer_region_to_group_id[layer][attn];
         layer_cache.region_name        = region_name;
         layer_cache.seq_size_per_block = seq_size_per_block;
         layer_cache.kv_cache_base      = base;
@@ -161,6 +171,28 @@ struct KVCache {
             layer_cache.kv_scale_base = kv_scale_base_by_layer_region[layer][attn];
         }
         return layer_cache;
+    }
+
+    std::vector<LayerKVCache> getLayerCaches(int idx) {
+        if (layer_region_to_group_id.empty() || group_region_names.empty()) {
+            return {getLayerCache(idx)};
+        }
+        const auto layer = static_cast<size_t>(idx);
+        if (idx < 0 || layer >= layer_region_to_group_id.size()) {
+            throw std::runtime_error("Invalid layer index: " + std::to_string(idx));
+        }
+
+        std::vector<LayerKVCache> layer_caches;
+        const auto&               layer_groups = layer_region_to_group_id[layer];
+        for (size_t gid = 0; gid < group_region_names.size(); ++gid) {
+            const auto region_name = group_region_names[gid];
+            const auto region      = static_cast<size_t>(region_name);
+            if (region >= layer_groups.size() || layer_groups[region] != static_cast<int>(gid)) {
+                continue;
+            }
+            layer_caches.push_back(getLayerCache(idx, region_name));
+        }
+        return layer_caches;
     }
 
     // Return raw [total_blocks, stride_bytes] tensor for a specific pool,
@@ -197,11 +229,12 @@ struct PyCacheStoreInputs {
     size_t                   tokens_per_block;
     size_t                   kv_block_stride_bytes;
     size_t                   kv_scale_stride_bytes;
-    bool                     pd_separation   = false;
-    size_t                   model_id        = 0;
-    bool                     decode_entrance = false;
-    bool                     warmup          = false;
-    bool                     mla_kvcache     = false;
+    bool                     pd_separation             = false;
+    size_t                   model_id                  = 0;
+    bool                     decode_entrance           = false;
+    bool                     warmup                    = false;
+    bool                     use_opaque_kv_cache_store = false;
+    bool                     mla_kvcache               = false;
 
     // Opaque cache_store reference (C++ only; passes through Python without inspection)
     std::shared_ptr<rtp_llm::CacheStore> cache_store;
@@ -244,14 +277,7 @@ struct PyAttentionInputs {
     std::vector<torch::Tensor> kv_cache_kernel_block_id_host_by_group;
     std::vector<torch::Tensor> kv_cache_kernel_block_id_device_by_group;
     torch::Tensor              kv_cache_layer_to_group;
-    // DSV4-only dense gid list per layer.
-    // Flat int32 tensor of length [num_layers * DSV4_MAX_GROUPS_PER_LAYER=5].
-    // Reshape to [num_layers, 5]: row l holds up to 5 gids the layer
-    // participates in (order follows CacheConfig::layer_to_group_ids), padded
-    // with -1. CSA layer fills all 5, HCA layer fills 3, SWA-only fills 1.
-    // undefined() == true for non-DSV4 models.
-    torch::Tensor    kv_cache_layer_to_group_dpsk_v4;
-    caffe2::TypeMeta dtype;
+    caffe2::TypeMeta           dtype;
     // Cumulative sequence lengths for attention kernels (e.g. FusedRopeKVCacheDecodeOp).
     // cu_seqlens lives on CUDA device; cu_seqlens_host is its pinned-memory CPU mirror
     // used for CUDA graph replay (write host → async copy to device, avoiding GPU-side fills).

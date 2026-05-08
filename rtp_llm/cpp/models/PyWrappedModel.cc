@@ -119,9 +119,6 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     if (inputs.kv_cache_layer_to_group.defined()) {
         py_attn_inputs.kv_cache_layer_to_group = inputs.kv_cache_layer_to_group;
     }
-    if (inputs.kv_cache_layer_to_group_dpsk_v4.defined()) {
-        py_attn_inputs.kv_cache_layer_to_group_dpsk_v4 = inputs.kv_cache_layer_to_group_dpsk_v4;
-    }
 
     // Calculate cu_seqlens
     int    batch_size               = py_attn_inputs.input_lengths.size(0);
@@ -316,6 +313,7 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
                                               model_id_,
                                               inputs.decode_entrance,
                                               inputs.warmup,
+                                              inputs.use_opaque_kv_cache_store,
                                               description_.attention_conf.use_mla
                                                   && mla_ops_type_ != rtp_llm::MlaOpsType::MHA,
                                               cache_manager_ ? cache_manager_->getCacheStore() : nullptr,

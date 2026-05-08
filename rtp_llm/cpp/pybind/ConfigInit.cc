@@ -711,11 +711,21 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("SLIDING_WINDOW", HybridAttentionType::SLIDING_WINDOW);
 
     pybind11::class_<HybridAttentionConfig>(m, "HybridAttentionConfig")
-        .def(pybind11::init<bool, std::vector<HybridAttentionType>>(),
-             pybind11::arg("enable_hybrid_attention") = false,
-             pybind11::arg("hybrid_attention_types")  = std::vector<HybridAttentionType>{})
+        .def(pybind11::init([](bool                             enable_hybrid_attention,
+                               std::vector<HybridAttentionType> hybrid_attention_types,
+                               bool                             enable_independent_kv_cache_pools) {
+                 HybridAttentionConfig config;
+                 config.enable_hybrid_attention           = enable_hybrid_attention;
+                 config.hybrid_attention_types            = std::move(hybrid_attention_types);
+                 config.enable_independent_kv_cache_pools = enable_independent_kv_cache_pools;
+                 return config;
+             }),
+             pybind11::arg("enable_hybrid_attention")           = false,
+             pybind11::arg("hybrid_attention_types")            = std::vector<HybridAttentionType>{},
+             pybind11::arg("enable_independent_kv_cache_pools") = false)
         .def("to_string", &HybridAttentionConfig::to_string)
         .def_readwrite("enable_hybrid_attention", &HybridAttentionConfig::enable_hybrid_attention)
+        .def_readwrite("enable_independent_kv_cache_pools", &HybridAttentionConfig::enable_independent_kv_cache_pools)
         .def_readwrite("hybrid_attention_types", &HybridAttentionConfig::hybrid_attention_types);
 
     // Register SpeculativeType enum

@@ -442,13 +442,27 @@ size_t HybridPoolKVCacheAllocator::maxAvailableTokensNum() const {
     if (group_block_pools_.empty()) {
         return 0;
     }
-    size_t min_tokens = std::numeric_limits<size_t>::max();
+    size_t min_tokens     = std::numeric_limits<size_t>::max();
+    bool   saw_full_group = false;
     for (size_t gid = 0; gid < group_block_pools_.size(); ++gid) {
+        if (gid < config_.group_types.size() && config_.group_types[gid] != CacheGroupType::FULL) {
+            continue;
+        }
+        saw_full_group = true;
         const size_t seq_size =
             (gid < config_.group_seq_size_per_block.size() && config_.group_seq_size_per_block[gid] > 0) ?
                 config_.group_seq_size_per_block[gid] :
                 config_.seq_size_per_block;
         min_tokens = std::min(min_tokens, group_block_pools_[gid]->totalBlocksNum() * seq_size);
+    }
+    if (!saw_full_group) {
+        for (size_t gid = 0; gid < group_block_pools_.size(); ++gid) {
+            const size_t seq_size =
+                (gid < config_.group_seq_size_per_block.size() && config_.group_seq_size_per_block[gid] > 0) ?
+                    config_.group_seq_size_per_block[gid] :
+                    config_.seq_size_per_block;
+            min_tokens = std::min(min_tokens, group_block_pools_[gid]->totalBlocksNum() * seq_size);
+        }
     }
     return min_tokens;
 }

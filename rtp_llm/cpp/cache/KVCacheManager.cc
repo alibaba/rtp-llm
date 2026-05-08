@@ -246,8 +246,7 @@ KVCacheManager::convertIndexToBuffer(int block_index, int layer_id, int partitio
     return allocator_->convertIndexToBuffer(layer_id, block_index, partition_count, partition_id);
 }
 
-BlockAddrInfo
-KVCacheManager::convertIndexToAddr(int block_index, int layer_id, KVCacheRegionName region_name) const {
+BlockAddrInfo KVCacheManager::convertIndexToAddr(int block_index, int layer_id, KVCacheRegionName region_name) const {
     return allocator_->convertIndexToAddr(layer_id, region_name, block_index);
 }
 
@@ -256,11 +255,8 @@ KVCacheManager::convertIndexToBuffer(int block_index, int layer_id, KVCacheRegio
     return allocator_->convertIndexToBuffer(layer_id, region_name, block_index);
 }
 
-std::vector<BlockInfo> KVCacheManager::convertIndexToBuffer(int             block_index,
-                                                            int             layer_id,
-                                                            KVCacheRegionName region_name,
-                                                            int             partition_count,
-                                                            int             partition_id) const {
+std::vector<BlockInfo> KVCacheManager::convertIndexToBuffer(
+    int block_index, int layer_id, KVCacheRegionName region_name, int partition_count, int partition_id) const {
     return allocator_->convertIndexToBuffer(layer_id, region_name, block_index, partition_count, partition_id);
 }
 
@@ -531,6 +527,15 @@ void KVCacheManager::allocateAndSync() {
             config_.block_num = 1;
         } else {
             config_.block_num = *std::min_element(block_num_ptr, block_num_ptr + world_size);
+        }
+    }
+    if (config_.use_independent_block_pools) {
+        for (size_t gid = 0; gid < config_.group_block_nums.size(); ++gid) {
+            const uint32_t fixed_blocks_per_req =
+                gid < config_.group_fixed_blocks_per_req.size() ? config_.group_fixed_blocks_per_req[gid] : 0;
+            if (fixed_blocks_per_req == 0) {
+                config_.group_block_nums[gid] = static_cast<uint32_t>(config_.block_num);
+            }
         }
     }
     RTP_LLM_LOG_INFO("block_num is %d after tp sync", config_.block_num);
