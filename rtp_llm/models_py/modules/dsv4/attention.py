@@ -109,14 +109,14 @@ def _use_varlen_prefill() -> bool:
 
 
 def _is_varlen_prefill(batch_size: int) -> bool:
-    """Single dispatch gate: legacy B==1 scalar path vs new cu_seqlens
-    varlen path. ``forward_layers`` builds the full
-    ``(cu_seqlens, position_ids, prefix_lengths, input_lengths,
-    sp_per_req, req_id_per_token)`` bundle together whenever
-    ``batch_size > 1``, so downstream callers don't need to re-check
-    that each tensor is non-None.
+    """Deprecated alias for :func:`_use_varlen_prefill`. Kept so existing
+    callers / tests keep importing without churn, but the dispatch is now
+    purely env-driven (``DSV4_VARLEN_PREFILL``) — ``batch_size`` is
+    intentionally ignored. The legacy scalar path is reachable only by
+    setting ``DSV4_VARLEN_PREFILL=0``.
     """
-    return _use_varlen_prefill() and batch_size > 1
+    del batch_size
+    return _use_varlen_prefill()
 
 
 _V4_FP8_BLOCK_CFG = Fp8BlockWiseQuantConfig()
@@ -2819,7 +2819,7 @@ class Attention(nn.Module):
         # the indexer's compressor-meta hoist condition fires instead of
         # silently no-opping (which forces ~20 small kernels per CSA
         # layer to rebuild on the hot path).
-        is_batched = _is_varlen_prefill(batch_size)
+        is_batched = _use_varlen_prefill()
         if is_batched:
             positions = position_ids.to(device=device, dtype=torch.long).contiguous()
             b_idx = req_id_per_token.to(device=device, dtype=torch.long).contiguous()
@@ -2976,15 +2976,21 @@ class Attention(nn.Module):
         # Dispatch on the same gate as ``_build_compressor_meta`` /
         # ``_build_swa_prefill_meta`` so a single env flag flips the whole
         # prefill stack between batched + scalar plumbing.
-        use_varlen = (
-            _use_varlen_prefill()
-            and batch_size > 1
-            and prefix_lengths is not None
-            and input_lengths is not None
-            and cu_seqlens is not None
-            and position_ids is not None
-            and req_id_per_token is not None
-        )
+        # Single env-driven gate. Under varlen the upper-layer broadcast
+        # builder is responsible for populating every per-request tensor —
+        # if any are missing here it's a caller bug, not a B==1 fast path.
+        use_varlen = _use_varlen_prefill()
+        if use_varlen:
+            assert (
+                prefix_lengths is not None
+                and input_lengths is not None
+                and cu_seqlens is not None
+                and position_ids is not None
+                and req_id_per_token is not None
+            ), (
+                "_build_workspace_meta: varlen requires per-request tensors; "
+                "set DSV4_VARLEN_PREFILL=0 for the legacy scalar path."
+            )
 
         if use_varlen:
             B = batch_size
@@ -3106,7 +3112,7 @@ class Attention(nn.Module):
             _build_prefill_positions,
         )
 
-        is_batched = _is_varlen_prefill(batch_size)
+        is_batched = _use_varlen_prefill()
         if is_batched:
             # Phase-3a batched path: ``compressor.prepare_metadata`` already
             # accepts arbitrary per-token ``(positions, b_idx)`` pairs, so

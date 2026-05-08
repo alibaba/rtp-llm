@@ -583,8 +583,20 @@ class CompressorFP8(nn.Module):
 def _build_prefill_positions(
     sp: int, bsz: int, seqlen: int, device: torch.device
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """``positions = sp + arange(seqlen)`` broadcast to ``[bsz, seqlen]`` →
-    flat ``[bsz*seqlen]``; ``b_idx = repeat_interleave(arange(bsz))``."""
+    """``positions = sp + arange(seqlen)`` flat ``[seqlen]``; ``b_idx``
+    all-zeros ``[seqlen]``.
+
+    Legacy B==1 / ``DSV4_VARLEN_PREFILL=0`` helper only — varlen feeds
+    ``(position_ids, req_id_per_token)`` straight into
+    ``compressor.prepare_metadata`` so this builder must NEVER be reached
+    from a varlen call site (positions would collapse to a single
+    contiguous ``[sp, sp+T_total)`` range and ``b_idx`` to all-zeros,
+    silently mapping every token onto request-0's block_table).
+    """
+    assert bsz == 1, (
+        f"_build_prefill_positions is the legacy B==1 helper; got bsz={bsz}. "
+        "Varlen callers must use position_ids / req_id_per_token directly."
+    )
     N = bsz * seqlen
     positions = (
         (torch.arange(seqlen, device=device, dtype=torch.long).unsqueeze(0) + sp)

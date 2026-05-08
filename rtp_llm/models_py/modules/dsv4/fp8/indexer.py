@@ -94,33 +94,47 @@ class _IndexerFP8PrefillMeta(NamedTuple):
     All ``torch.Tensor`` fields are device-side, contiguous, and
     immediately consumable by the gather / score / topk kernels.
 
-    Coordinate system: ``ks`` / ``ke`` index the compressed K pool
-    starting at 0 — no global offset baked in. The caller is responsible
-    for any downstream coordinate transforms (``+offset`` / dtype cast
-    for cat-with-SWA / etc.).
+    Coordinate system:
+      * **legacy B==1 / DSV4_VARLEN_PREFILL=0**: ``ks=0``, ``ke =
+        clamp((positions_d+1)//ratio, max=T)`` — request-local indices
+        directly into the single-request flat K (== global flat K when
+        B==1). Returned topk is request-local.
+      * **varlen**: K is request-concatenated on the flat axis
+        (``cu_kv_seqlens``). ``ks/ke`` are GLOBAL flat-K coords with the
+        per-token request offset baked in (``ks[t] = cu_kv_seqlens[req_t]``,
+        ``ke[t] = ks[t] + min((pos_t+1)//ratio, T_b)``). The TopK kernel
+        emits global indices; ``forward()`` subtracts ``cu_kv_per_token``
+        before returning so consumers (``combine_topk_swa_indices`` →
+        per-request ``[0, N_b)`` workspace columns) get request-local
+        compressed offsets — same contract as the B==1 path.
     """
 
     # ── geometry (Python scalars; cheap) ──
     bsz: int
     seqlen: int
     M: int  # = bsz * seqlen  (= T_total for flat 2D)
-    sp_int: int  # absolute prefix length
-    end_pos: int  # = sp_int + seqlen
-    is_fresh_prefill: bool  # = (sp_int == 0)
-    T: int  # compressed K count = end_pos // ratio
+    sp_int: int  # legacy compat: prefix_lengths[0] under varlen, sp_int otherwise
+    end_pos: int  # legacy compat: sp_per_req[0] + S_0 under varlen
+    is_fresh_prefill: bool  # legacy compat: any-cont negation under varlen
+    T: int  # compressed K count: total across batch (sum T_b) under varlen
 
     # ── Q-side ──
     freqs_cis_slice: torch.Tensor  # self.freqs_cis[sp:sp+seqlen]; pre-sliced view
-    positions_d: torch.Tensor  # [M] int32 — global positions sp..sp+S-1
+    positions_d: torch.Tensor  # [M] int32 — per-token global absolute positions
 
     # ── per-row visible-K window for fp8_mqa_logits ──
-    # ks[r] = 0; ke[r] = clamp((positions_d[r]+1)//ratio, max=T)
+    # See class docstring for the legacy vs varlen coord contract.
     ks: torch.Tensor  # [M] int32
     ke: torch.Tensor  # [M] int32
 
     # ── K-side (paged) ──
     block_table_i32: torch.Tensor  # [B, max_blocks] int32 contig
     cu_kv_seqlens: torch.Tensor  # [B+1] int32 (compressed)
+    # Per-token global K offset (= ``cu_kv_seqlens[req_id_per_token]``).
+    # ``None`` on the legacy B==1 path (no offset needed); populated under
+    # varlen so ``forward()`` can convert global TopK indices back to
+    # request-local in one ``torch.where(idx >= 0, idx - off, idx)`` launch.
+    cu_kv_per_token: Optional[torch.Tensor]
 
     # ── Nested CompressorFP8 metadata, hoisted out of the per-call hot
     # path. Without this, ``CompressorFP8.forward(meta=None)`` rebuilds
@@ -433,15 +447,13 @@ class IndexerFP8(PoolBackedModule):
         """
         assert self.freqs_cis is not None, "IndexerFP8.prepare needs freqs_cis bound"
         ratio = self.compress_ratio
-        # Phase-3a varlen path: every per-token / per-request scalar above
-        # gets fanned out to ``[B] / [B+1] / [T_total]`` tensors. Single
-        # dispatch gate — ``attention._is_varlen_prefill(batch_size)``
-        # inlined to keep ``indexer.py`` import-cycle-free vs attention.py.
-        # Upstream ``forward_layers`` builds the full kwargs bundle
-        # whenever ``batch_size > 1`` so we don't re-check each tensor.
-        use_varlen = (
-            os.environ.get("DSV4_VARLEN_PREFILL", "1") != "0" and batch_size > 1
-        )
+        # Single env-driven dispatch gate (mirrors
+        # ``attention._use_varlen_prefill``; inlined here to keep
+        # ``indexer.py`` import-cycle-free vs attention.py). Upstream
+        # ``forward_layers`` populates the full per-request kwargs bundle
+        # whenever ``DSV4_VARLEN_PREFILL=1`` so we don't re-check each
+        # tensor — set ``DSV4_VARLEN_PREFILL=0`` to take the legacy path.
+        use_varlen = os.environ.get("DSV4_VARLEN_PREFILL", "1") != "0"
         if use_varlen:
             # Per-request compressed-K count: T_b = (sp_b + S_b) // ratio.
             seq_total_per_req = prefix_lengths.to(
@@ -461,18 +473,37 @@ class IndexerFP8(PoolBackedModule):
 
             positions_d = position_ids.to(device=device, dtype=torch.int32).contiguous()
 
-            # Per-row visible-K window: ke[t] = ((pos_t + 1) // ratio)
-            # clamped to that token's request-local ``T_b``. ks stays 0 —
-            # both cold + continuation prefill attend the full per-request
-            # compressed-K range up to ke (matches B==1 ks=0 invariant).
+            # Under varlen, ``fp8_mqa_indexer_score`` consumes a single
+            # request-concatenated K axis ``k_quant_flat[0..T)`` whose
+            # per-request offset is ``cu_kv_seqlens[b]``. ``ks/ke`` MUST
+            # be in this GLOBAL flat-K coord (kernel docstring:
+            # "K start, inclusive / K end, exclusive" — same 1D K axis
+            # across rows). Per-token visible window for token t in
+            # request b at absolute position pos_t:
+            #     ks[t] = cu_kv_seqlens[b]
+            #     ke[t] = cu_kv_seqlens[b] + min((pos_t+1)//ratio, T_b)
+            # The TopK kernel returns indices in the same global coord
+            # space; ``forward()`` subtracts ``cu_kv_per_token`` so
+            # downstream ``combine_topk_swa_indices`` receives request-
+            # local ``[0, N_b)`` compressed offsets — same contract as
+            # the legacy B==1 path.
             req_id_long = req_id_per_token.to(device=device, dtype=torch.int64)
             T_per_token = T_per_req.to(torch.int64).index_select(0, req_id_long)
-            ke = (
-                ((positions_d.to(torch.int64) + 1) // ratio)
-                .clamp_max(T_per_token)
-                .to(torch.int32)
+            cu_kv_per_token_i64 = cu_kv_seqlens.to(torch.int64).index_select(
+                0, req_id_long
             )
-            ks = torch.zeros(M, dtype=torch.int32, device=device)
+            ks = cu_kv_per_token_i64.to(torch.int32).contiguous()
+            ke = (
+                (
+                    cu_kv_per_token_i64
+                    + ((positions_d.to(torch.int64) + 1) // ratio).clamp_max(
+                        T_per_token
+                    )
+                )
+                .to(torch.int32)
+                .contiguous()
+            )
+            cu_kv_per_token = cu_kv_per_token_i64.to(torch.int32).contiguous()
 
             # ``freqs_cis_slice`` per-token gather — RoPE angles for ``q``
             # in ``_compute_indexer_q``. Equivalent to ``self.freqs_cis[
@@ -491,12 +522,12 @@ class IndexerFP8(PoolBackedModule):
                     (batch_size, 0), dtype=torch.int32, device=device
                 )
 
-            # Legacy scalar fields kept for downstream consumers that
-            # haven't been varlen-aware yet (notably the nested compressor
-            # call ``self.compressor(x, sp)`` in ``forward``). Carrying
-            # the first request's values here is *not* correct for B > 1
-            # mixed-sp — the corresponding forward() varlen branch still
-            # needs to land before B > 1 actually executes end-to-end.
+            # Legacy compat scalar fields. Under varlen ``forward()`` does
+            # not consume ``end_pos`` / ``is_fresh_prefill`` (the kernel-
+            # native path drives off the per-request tensors); ``sp_int``
+            # is still passed to ``self.compressor(x, sp, meta=...)`` but
+            # is ignored there because ``meta.is_batched=True``. Keep the
+            # request-0 values for diagnostics / B==1 collapse equivalence.
             end_pos = int(seq_total_per_req[0].item())
             is_fresh_prefill = sp_int == 0
         else:
@@ -530,6 +561,10 @@ class IndexerFP8(PoolBackedModule):
                     (bsz, 0), dtype=torch.int32, device=device
                 )
             cu_kv_seqlens = torch.tensor([0, T], dtype=torch.int32, device=device)
+            # B==1 → request-0 offset is 0 → request-local ≡ global; the
+            # subtract in ``forward()`` becomes a no-op so we leave this
+            # field as ``None`` to skip the launch entirely on the legacy path.
+            cu_kv_per_token = None
 
         # Hoist the nested CompressorFP8's slot-mapping metadata. The
         # IndexerFP8's pool context is bound by Attention's
@@ -558,8 +593,37 @@ class IndexerFP8(PoolBackedModule):
 
             self._propagate_pool_to_nested()
             try:
-                positions, b_idx = _build_prefill_positions(sp_int, bsz, seqlen, device)
-                compressor_meta = compressor.prepare_metadata(positions, b_idx)
+                if use_varlen:
+                    # Multi-request varlen: feed the nested compressor the
+                    # per-token global positions + per-token request id, plus
+                    # the per-request raw-window arrays. Without this the
+                    # nested compressor would (a) write every token into
+                    # request-0's state/KV block_table, (b) take the kernel's
+                    # scalar ``seq_start`` raw path with sp_per_req[0] as the
+                    # global offset — both silently corrupt the indexer pool
+                    # under B>1 prefill.
+                    positions = position_ids.to(
+                        device=device, dtype=torch.long
+                    ).contiguous()
+                    b_idx = req_id_per_token.to(
+                        device=device, dtype=torch.long
+                    ).contiguous()
+                    seq_start_per_req = prefix_lengths.to(
+                        device=device, dtype=torch.int32
+                    )
+                    cu_seq_per_req = cu_seqlens.to(device=device, dtype=torch.int32)
+                    compressor_meta = compressor.prepare_metadata(
+                        positions,
+                        b_idx,
+                        is_batched=True,
+                        seq_start_per_req=seq_start_per_req,
+                        cu_seq_per_req=cu_seq_per_req,
+                    )
+                else:
+                    positions, b_idx = _build_prefill_positions(
+                        sp_int, bsz, seqlen, device
+                    )
+                    compressor_meta = compressor.prepare_metadata(positions, b_idx)
             finally:
                 self._clear_nested_pool()
 
@@ -577,6 +641,7 @@ class IndexerFP8(PoolBackedModule):
             ke=ke,
             block_table_i32=block_table_i32,
             cu_kv_seqlens=cu_kv_seqlens,
+            cu_kv_per_token=cu_kv_per_token,
             compressor_meta=compressor_meta,
         )
 
@@ -697,6 +762,15 @@ class IndexerFP8(PoolBackedModule):
                 logits.stride(1),
                 K,
             )
+
+            # Varlen path: TopK indices are global flat-K coords (matching
+            # ks/ke). Convert back to request-local ``[0, N_b)`` so the
+            # downstream ``combine_topk_swa_indices`` (per-request workspace
+            # column space) sees the same contract as the legacy B==1 path.
+            # ``-1`` sentinel rows past the per-row valid count must stay -1.
+            if attention_inputs.cu_kv_per_token is not None:
+                off = attention_inputs.cu_kv_per_token.unsqueeze(1)  # [M, 1] int32
+                out_buf = torch.where(out_buf >= 0, out_buf - off, out_buf).contiguous()
             return out_buf.view(out_shape)
         finally:
             self._clear_nested_pool()
