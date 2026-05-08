@@ -18,10 +18,20 @@ import torch
 
 _FAST_TOPK_VALUES = (2048,)
 _PERSISTENT_TOPK_VALUES = (512, 1024, 2048)
+_ENV_CANONICALIZE = "DSV4_INDEXER_TOPK_CANONICALIZE"
 
 
 def _backend_name() -> str:
     return os.environ.get("DSV4_INDEXER_TOPK_BACKEND", "auto").strip().lower()
+
+
+def _canonicalize_enabled() -> bool:
+    return os.environ.get(_ENV_CANONICALIZE, "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
 
 
 def _flatten_score(score: torch.Tensor) -> tuple[torch.Tensor, tuple[int, ...]]:
@@ -68,6 +78,17 @@ def _apply_offset(indices: torch.Tensor, offset: int | torch.Tensor) -> torch.Te
         flat = indices.reshape(-1, indices.shape[-1])
         return torch.where(flat >= 0, flat + off, flat).view_as(indices)
     return torch.where(indices >= 0, indices + int(offset), indices)
+
+
+def _sort_valid_indices(indices: torch.Tensor) -> torch.Tensor:
+    sentinel = torch.full_like(indices, torch.iinfo(indices.dtype).max)
+    sortable = torch.where(indices >= 0, indices, sentinel)
+    sorted_indices = torch.sort(sortable, dim=-1).values
+    return torch.where(
+        sorted_indices == sentinel,
+        torch.full_like(sorted_indices, -1),
+        sorted_indices,
+    )
 
 
 class IndexerTopKBackend(ABC):
@@ -213,6 +234,8 @@ class PersistentIndexerTopKBackend(IndexerTopKBackend):
         workspace = torch.empty((1 << 20,), dtype=torch.uint8, device=flat.device)
         persistent_topk(flat, lengths_i32, out, workspace, int(topk), int(flat.shape[1]))
         out = _apply_offset(out, offset)
+        if _canonicalize_enabled():
+            out = _sort_valid_indices(out)
         return _reshape_indices(out, shape)
 
 
