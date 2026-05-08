@@ -251,7 +251,14 @@ void DSV4ConfigCreator::populateCacheConfig(CacheConfig&             config,
     // Paged pools (0/1/2) use the global block_num (0 = fallback).
     // Use a conservative max_batch estimate; the actual concurrency limit
     // is set later by the scheduler, but we need an upper bound for allocation.
-    const uint32_t max_batch = 128;  // DSV4 fixed pools  // conservative upper bound
+    // Bump 128 -> 256: SWA ring rotation alloc-before-free needs 3 transient
+    // blocks per request (not 2); at bs=128 that's 384 blocks required, so
+    // max_batch must be >= 192 with fixed_blocks_per_req=2. 256 leaves 33%
+    // headroom and keeps the fixed-pool reservation under 50% of total KV
+    // budget on B300. Without this bump, bs=128 decode drops ~34% of
+    // requests (66.4% success) vs 100% at 256 (baseline_v2). See
+    // dsv4_perf_smoke_gate memory / iteration3.md iter 3.0 notes.
+    const uint32_t max_batch = 256;  // DSV4 fixed pools  // conservative upper bound
     config.group_block_nums.resize(DSV4_NUM_POOLS, 0);
     for (int i = 0; i < DSV4_NUM_POOLS; i++) {
         const auto& pool = dsv4_config.pool_specs[i];
