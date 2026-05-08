@@ -351,6 +351,9 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     // release model input before forward
     model_->releaseBuffers();
     draft_model_->releaseBuffers();
+    if (sp_prefill_draft_model_) {
+        sp_prefill_draft_model_->releaseBuffers();
+    }
 
     // target model prefill
     {
@@ -397,6 +400,9 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         cudaSyncAndCheck();
         model_->releaseBuffers();
         draft_model_->releaseBuffers();
+        if (sp_prefill_draft_model_) {
+            sp_prefill_draft_model_->releaseBuffers();
+        }
         return absl::OkStatus();
     }
 
@@ -434,6 +440,9 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
 
         model_->releaseBuffers();
         draft_model_->releaseBuffers();
+        if (sp_prefill_draft_model_) {
+            sp_prefill_draft_model_->releaseBuffers();
+        }
 
         return result;
     }
@@ -586,6 +595,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     // release hold buffers before draft model forward
     draft_model_->releaseBuffers();
+    if (sp_prefill_draft_model_) {
+        sp_prefill_draft_model_->releaseBuffers();
+    }
     model_->releaseBuffers();
 
     if (propose_step_ > 1) {
@@ -688,6 +700,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
         cudaSyncAndCheck();
         draft_model_->releaseBuffers();
+        if (sp_prefill_draft_model_) {
+            sp_prefill_draft_model_->releaseBuffers();
+        }
         model_->releaseBuffers();
         return absl::OkStatus();
     }
@@ -732,6 +747,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         }
 
         draft_model_->releaseBuffers();
+        if (sp_prefill_draft_model_) {
+            sp_prefill_draft_model_->releaseBuffers();
+        }
         model_->releaseBuffers();
 
         return result;
