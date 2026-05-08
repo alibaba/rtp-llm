@@ -25,6 +25,7 @@ correctness therefore does not depend on state-pool capacity at all.
 
 from __future__ import annotations
 
+import os
 from typing import Optional
 
 import torch
@@ -116,6 +117,7 @@ def _fused_kv_compress_norm_rope_insert_bf16(
     cos_sin_stride,
     k_cache_ptr,  # bf16 [total_slots, head_dim] flat, slot-addressed
     kv_slot_mapping_ptr,
+    boundary_token_indices_ptr,
     HEAD_SIZE: tl.constexpr,
     TRITON_BLOCK_SIZE: tl.constexpr,
     STATE_WIDTH: tl.constexpr,
@@ -123,12 +125,18 @@ def _fused_kv_compress_norm_rope_insert_bf16(
     OVERLAP: tl.constexpr,
     ROPE_HEAD_DIM: tl.constexpr,
     CACHE_WINDOW: tl.constexpr,
+    COMPACT_BOUNDARY: tl.constexpr,
 ):
-    token_idx = tl.program_id(0)
+    pid = tl.program_id(0)
+    if COMPACT_BOUNDARY:
+        token_idx = tl.load(boundary_token_indices_ptr + pid)
+    else:
+        token_idx = pid
 
     position = tl.load(positions_ptr + token_idx)
-    if (position + 1) % COMPRESS_RATIO != 0:
-        return
+    if not COMPACT_BOUNDARY:
+        if (position + 1) % COMPRESS_RATIO != 0:
+            return
 
     # Note: we deliberately do NOT early-return on ``slot_mapping[token]<0``.
     # When a boundary's state slot has been evicted (cyclic ring overwrote
@@ -266,9 +274,283 @@ def _fused_kv_compress_norm_rope_insert_bf16(
     tl.store(out_ptr + block, result.to(tl.bfloat16), mask=mask)
 
 
+@triton.jit
+def _fused_kv_compress_norm_rope_insert_bf16_ratio128_tile(
+    state_cache_ptr,
+    state_cache_stride0,
+    state_cache_stride1,
+    token_to_req_indices_ptr,
+    positions_ptr,
+    block_table_ptr,
+    block_table_stride,
+    block_size,
+    kv_raw_ptr,
+    kv_raw_stride,
+    score_raw_ptr,
+    score_raw_stride,
+    ape_ptr,
+    ape_stride,
+    seq_start,
+    n_batch,
+    kv_slot_mapping_ptr,
+    boundary_token_indices_ptr,
+    compressed_tmp_ptr,
+    partial_sumsq_ptr,
+    HEAD_SIZE: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+):
+    boundary_pid = tl.program_id(0)
+    tile_pid = tl.program_id(1)
+    token_idx = tl.load(boundary_token_indices_ptr + boundary_pid)
+    kv_slot_idx = tl.load(kv_slot_mapping_ptr + token_idx)
+    if kv_slot_idx < 0:
+        return
+
+    position = tl.load(positions_ptr + token_idx)
+    req_idx = tl.load(token_to_req_indices_ptr + token_idx)
+
+    tokens = tl.arange(0, 128)
+    pos = position - 127 + tokens
+    mask_pos = pos >= 0
+
+    head = tile_pid * BLOCK_H + tl.arange(0, BLOCK_H)
+    head_mask = head < HEAD_SIZE
+
+    flat_idx = pos - seq_start
+    in_batch = mask_pos & (flat_idx >= 0) & (flat_idx < n_batch)
+    flat_idx_safe = tl.where(in_batch, flat_idx, 0)
+    raw_mask = in_batch[:, None] & head_mask[None, :]
+
+    kv_from_raw = tl.load(
+        kv_raw_ptr + flat_idx_safe[:, None] * kv_raw_stride + head[None, :],
+        mask=raw_mask,
+        other=0.0,
+    )
+    score_from_raw = tl.load(
+        score_raw_ptr + flat_idx_safe[:, None] * score_raw_stride + head[None, :],
+        mask=raw_mask,
+        other=0.0,
+    )
+    ape_rows = pos % 128
+    ape_rows_safe = tl.where(in_batch, ape_rows, 0)
+    ape_vals = tl.load(
+        ape_ptr + ape_rows_safe[:, None] * ape_stride + head[None, :],
+        mask=raw_mask,
+        other=0.0,
+    )
+    score_from_raw = score_from_raw + ape_vals
+
+    use_cache = mask_pos & ~in_batch
+    block_indices = pos // block_size
+    block_indices_safe = tl.where(use_cache, block_indices, 0)
+    block_numbers = tl.load(
+        block_table_ptr + req_idx * block_table_stride + block_indices_safe,
+        mask=use_cache,
+        other=0,
+    )
+    valid_block = block_numbers > 0
+    block_numbers_i64 = tl.where(valid_block, block_numbers, 0).to(tl.int64)
+    block_offsets = tl.where(mask_pos, pos % block_size, 0)
+    row_base = (
+        state_cache_ptr
+        + block_numbers_i64 * state_cache_stride0
+        + block_offsets * state_cache_stride1
+    )
+    cache_mask = (use_cache & valid_block)[:, None] & head_mask[None, :]
+    kv_from_cache = tl.load(
+        row_base[:, None] + head[None, :], mask=cache_mask, other=0.0
+    )
+    score_from_cache = tl.load(
+        row_base[:, None] + HEAD_SIZE + head[None, :],
+        mask=cache_mask,
+        other=0.0,
+    )
+
+    kv = tl.where(in_batch[:, None], kv_from_raw, kv_from_cache)
+    score = tl.where(in_batch[:, None], score_from_raw, score_from_cache)
+    final_valid = in_batch | (use_cache & valid_block)
+    combined_mask = final_valid[:, None] & head_mask[None, :]
+
+    score = tl.where(combined_mask, score, float("-inf"))
+    score = tl.softmax(score, dim=0)
+    kv = tl.where(combined_mask, kv, 0.0)
+    compressed = tl.sum(kv * score, axis=0)
+
+    tl.store(
+        compressed_tmp_ptr + boundary_pid * HEAD_SIZE + head,
+        compressed,
+        mask=head_mask,
+    )
+    sumsq = tl.sum(compressed * compressed, axis=0)
+    tl.store(partial_sumsq_ptr + boundary_pid * (HEAD_SIZE // BLOCK_H) + tile_pid, sumsq)
+
+
+@triton.jit
+def _fused_kv_compress_norm_rope_insert_bf16_ratio128_finalize(
+    positions_ptr,
+    rms_norm_weight_ptr,
+    rms_norm_eps,
+    cos_sin_cache_ptr,
+    cos_sin_stride,
+    k_cache_ptr,
+    kv_slot_mapping_ptr,
+    boundary_token_indices_ptr,
+    compressed_tmp_ptr,
+    partial_sumsq_ptr,
+    HEAD_SIZE: tl.constexpr,
+    TRITON_BLOCK_SIZE: tl.constexpr,
+    ROPE_HEAD_DIM: tl.constexpr,
+    NUM_TILES: tl.constexpr,
+):
+    boundary_pid = tl.program_id(0)
+    token_idx = tl.load(boundary_token_indices_ptr + boundary_pid)
+    kv_slot_idx = tl.load(kv_slot_mapping_ptr + token_idx)
+    if kv_slot_idx < 0:
+        return
+
+    tile = tl.arange(0, NUM_TILES)
+    partial = tl.load(partial_sumsq_ptr + boundary_pid * NUM_TILES + tile)
+    variance = tl.sum(partial, axis=0) / HEAD_SIZE
+    rrms = tl.rsqrt(variance + rms_norm_eps)
+
+    block = tl.arange(0, TRITON_BLOCK_SIZE)
+    mask = block < HEAD_SIZE
+    compressed = tl.load(
+        compressed_tmp_ptr + boundary_pid * HEAD_SIZE + block, mask=mask, other=0.0
+    )
+    rms_w = tl.load(rms_norm_weight_ptr + block, mask=mask, other=0.0)
+    normed = compressed * rrms * rms_w
+
+    NOPE_HEAD_DIM: tl.constexpr = HEAD_SIZE - ROPE_HEAD_DIM
+    HALF_ROPE: tl.constexpr = ROPE_HEAD_DIM // 2
+    NUM_PAIRS: tl.constexpr = TRITON_BLOCK_SIZE // 2
+    NOPE_PAIRS: tl.constexpr = NOPE_HEAD_DIM // 2
+
+    pair_2d = tl.reshape(normed, (NUM_PAIRS, 2))
+    even, odd = tl.split(pair_2d)
+    pair_idx = tl.arange(0, NUM_PAIRS)
+    rope_pair_local = pair_idx - NOPE_PAIRS
+    is_rope_pair = rope_pair_local >= 0
+    cs_idx = tl.maximum(rope_pair_local, 0)
+
+    position = tl.load(positions_ptr + token_idx)
+    compressed_pos = (position // 128) * 128
+    cache_base = cos_sin_cache_ptr + compressed_pos * cos_sin_stride
+    cos_v = tl.load(cache_base + cs_idx, mask=is_rope_pair, other=1.0)
+    sin_v = tl.load(cache_base + HALF_ROPE + cs_idx, mask=is_rope_pair, other=0.0)
+
+    new_even = even * cos_v - odd * sin_v
+    new_odd = odd * cos_v + even * sin_v
+    result = tl.interleave(new_even, new_odd)
+
+    out_ptr = k_cache_ptr + kv_slot_idx.to(tl.int64) * HEAD_SIZE
+    tl.store(out_ptr + block, result.to(tl.bfloat16), mask=mask)
+
+
 # =============================================================================
 # Python wrappers
 # =============================================================================
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.lower() in ("1", "true", "yes", "on")
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
+def _should_use_compact_boundary(
+    n_tokens: int,
+    n_boundaries: int,
+    *,
+    head_dim: int,
+    compress_ratio: int,
+) -> bool:
+    """Heuristic from local CUDA13 microbenchmarks.
+
+    Compact launch removes boundary self-skip blocks, but the extra index load
+    is not free. Keep the dense launch for measured small/head128 cases where
+    it is faster, and return early before this helper when there are no
+    boundaries.
+    """
+    if n_boundaries <= 0:
+        return False
+    if compress_ratio == 128:
+        return head_dim == 512
+    if compress_ratio == 4:
+        if head_dim == 128:
+            return n_tokens >= 4096
+        return n_tokens >= 1024
+    return n_boundaries < n_tokens
+
+
+def _should_use_ratio128_tiled(
+    n_boundaries: int,
+    *,
+    head_dim: int,
+    rope_head_dim: int,
+    compress_ratio: int,
+    overlap: bool,
+) -> bool:
+    if _env_flag("DSV4_KV_COMPRESS_RATIO128_TILED_DISABLE", False):
+        return False
+    if _env_flag("DSV4_KV_COMPRESS_RATIO128_HEAD512_TILED_DISABLE", False):
+        return False
+    if (
+        head_dim not in (128, 512)
+        or rope_head_dim != 64
+        or compress_ratio != 128
+        or overlap
+        or n_boundaries <= 0
+    ):
+        return False
+    min_boundaries = _env_int(
+        "DSV4_KV_COMPRESS_RATIO128_HEAD512_TILED_MIN",
+        _env_int("DSV4_KV_COMPRESS_RATIO128_TILED_MIN", 1),
+    )
+    return n_boundaries >= min_boundaries
+
+
+def _select_kv_write_dispatch(
+    n_tokens: int,
+    n_boundaries: int,
+    *,
+    has_boundary_indices: bool,
+    head_dim: int,
+    rope_head_dim: int,
+    compress_ratio: int,
+    overlap: bool,
+) -> str:
+    if n_tokens == 0:
+        return "skip"
+    if has_boundary_indices and n_boundaries == 0:
+        return "skip"
+    if has_boundary_indices and _should_use_ratio128_tiled(
+        n_boundaries,
+        head_dim=head_dim,
+        rope_head_dim=rope_head_dim,
+        compress_ratio=compress_ratio,
+        overlap=overlap,
+    ):
+        return "ratio128_tiled"
+    if has_boundary_indices and _should_use_compact_boundary(
+        n_tokens,
+        n_boundaries,
+        head_dim=head_dim,
+        compress_ratio=compress_ratio,
+    ):
+        return "compact_boundary"
+    return "dense"
+
+
 def run_save_partial_states(
     kv: torch.Tensor,  # [N, coff*head_dim] fp32 contiguous
     score: torch.Tensor,  # [N, coff*head_dim] fp32 contiguous
@@ -305,6 +587,89 @@ def run_save_partial_states(
     )
 
 
+def _run_ratio128_tiled_bf16(
+    state_cache: torch.Tensor,
+    token_to_req_indices: torch.Tensor,
+    positions: torch.Tensor,
+    block_table: torch.Tensor,
+    rms_norm_weight: torch.Tensor,
+    rms_norm_eps: float,
+    cos_sin_cache: torch.Tensor,
+    kv_cache: torch.Tensor,
+    kv_slot_mapping: torch.Tensor,
+    kv_raw: torch.Tensor,
+    score_raw: torch.Tensor,
+    ape: torch.Tensor,
+    seq_start: int,
+    n_batch: int,
+    boundary_token_indices: torch.Tensor,
+    *,
+    head_dim: int,
+    rope_head_dim: int,
+) -> None:
+    boundary_count = int(boundary_token_indices.shape[0])
+    if boundary_count == 0:
+        return
+    default_block_h = 32 if head_dim == 512 and boundary_count >= 512 else 64
+    block_h = _env_int("DSV4_KV_COMPRESS_RATIO128_TILE_HEAD_BLOCK", default_block_h)
+    if block_h not in (16, 32, 64, 128) or head_dim % block_h != 0:
+        block_h = 64
+    num_tiles = head_dim // block_h
+    compressed_tmp = torch.empty(
+        (boundary_count, head_dim), device=kv_cache.device, dtype=torch.float32
+    )
+    partial_sumsq = torch.empty(
+        (boundary_count, num_tiles), device=kv_cache.device, dtype=torch.float32
+    )
+
+    _fused_kv_compress_norm_rope_insert_bf16_ratio128_tile[
+        (boundary_count, num_tiles)
+    ](
+        state_cache,
+        state_cache.stride(0),
+        state_cache.stride(1),
+        token_to_req_indices,
+        positions,
+        block_table,
+        block_table.stride(0),
+        int(state_cache.shape[1]),
+        kv_raw,
+        kv_raw.stride(0),
+        score_raw,
+        score_raw.stride(0),
+        ape,
+        ape.stride(0),
+        seq_start,
+        n_batch,
+        kv_slot_mapping,
+        boundary_token_indices,
+        compressed_tmp,
+        partial_sumsq,
+        HEAD_SIZE=head_dim,
+        BLOCK_H=block_h,
+        num_warps=4,
+    )
+    _fused_kv_compress_norm_rope_insert_bf16_ratio128_finalize[
+        (boundary_count,)
+    ](
+        positions,
+        rms_norm_weight,
+        rms_norm_eps,
+        cos_sin_cache,
+        cos_sin_cache.stride(0),
+        kv_cache,
+        kv_slot_mapping,
+        boundary_token_indices,
+        compressed_tmp,
+        partial_sumsq,
+        HEAD_SIZE=head_dim,
+        TRITON_BLOCK_SIZE=triton.next_power_of_2(head_dim),
+        ROPE_HEAD_DIM=rope_head_dim,
+        NUM_TILES=num_tiles,
+        num_warps=4,
+    )
+
+
 def run_fused_compress_kv_write_bf16(
     state_cache: torch.Tensor,  # [num_blocks, state_eb, 2*coff*head_dim] fp32
     token_to_req_indices: torch.Tensor,  # [N] int32
@@ -321,6 +686,7 @@ def run_fused_compress_kv_write_bf16(
     ape: torch.Tensor,  # [compress_ratio, (1+overlap)*head_dim] fp32
     seq_start: int,  # absolute position of kv_raw[0]
     disable_raw_path: bool = False,
+    boundary_token_indices: Optional[torch.Tensor] = None,
     *,
     head_dim: int,
     rope_head_dim: int,
@@ -360,9 +726,54 @@ def run_fused_compress_kv_write_bf16(
     n_batch = 0 if disable_raw_path else int(kv_raw.shape[0])
     cache_window = 0
 
+    compact_boundary = boundary_token_indices is not None
+    if compact_boundary:
+        assert boundary_token_indices is not None
+        boundary_token_indices = boundary_token_indices.contiguous()
+        boundary_count = int(boundary_token_indices.shape[0])
+        if boundary_count == 0:
+            return
+        dispatch = _select_kv_write_dispatch(
+            N,
+            boundary_count,
+            has_boundary_indices=True,
+            head_dim=head_dim,
+            rope_head_dim=rope_head_dim,
+            compress_ratio=compress_ratio,
+            overlap=overlap,
+        )
+        if dispatch == "ratio128_tiled":
+            _run_ratio128_tiled_bf16(
+                state_cache,
+                token_to_req_indices,
+                positions,
+                block_table,
+                rms_norm_weight,
+                rms_norm_eps,
+                cos_sin_cache,
+                kv_cache,
+                kv_slot_mapping,
+                kv_raw,
+                score_raw,
+                ape,
+                seq_start,
+                n_batch,
+                boundary_token_indices,
+                head_dim=head_dim,
+                rope_head_dim=rope_head_dim,
+            )
+            return
+        compact_boundary = dispatch == "compact_boundary"
+        grid_n = boundary_count if compact_boundary else N
+        if not compact_boundary:
+            boundary_token_indices = positions
+    else:
+        boundary_token_indices = positions
+        grid_n = N
+
     num_warps = 4 if head_dim == 512 else 1
 
-    _fused_kv_compress_norm_rope_insert_bf16[(N,)](
+    _fused_kv_compress_norm_rope_insert_bf16[(grid_n,)](
         state_cache,
         state_cache.stride(0),
         state_cache.stride(1),
@@ -386,6 +797,7 @@ def run_fused_compress_kv_write_bf16(
         cos_sin_cache.stride(0),
         kv_cache,
         kv_slot_mapping,
+        boundary_token_indices,
         HEAD_SIZE=head_dim,
         TRITON_BLOCK_SIZE=triton.next_power_of_2(head_dim),
         STATE_WIDTH=state_width,
@@ -393,6 +805,7 @@ def run_fused_compress_kv_write_bf16(
         OVERLAP=overlap,
         ROPE_HEAD_DIM=rope_head_dim,
         CACHE_WINDOW=cache_window,
+        COMPACT_BOUNDARY=compact_boundary,
         num_warps=num_warps,
     )
 
