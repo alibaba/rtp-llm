@@ -1945,18 +1945,34 @@ class Attention(nn.Module):
                     _rt.record_if_level(
                         2, f"L{self.layer_id:02d}_decode_kv_packed", kv_packed
                     )
-                identity_topk = (
-                    torch.arange(
-                        win + K_cmp,
-                        device=kv_packed.device,
-                        dtype=torch.int32,
-                    )
-                    .view(1, 1, win + K_cmp)
-                    .expand(bsz, q_len, win + K_cmp)
-                    .contiguous()
+                swa_valid = (swa_global >= 0).view(bsz, q_len, win)
+                cmp_valid = (cmp_global >= 0).view(bsz, q_len, K_cmp)
+                swa_topk = (
+                    torch.arange(win, device=kv_packed.device, dtype=torch.int32)
+                    .view(1, 1, win)
+                    .expand(bsz, q_len, win)
+                )
+                cmp_topk = (
+                    torch.arange(K_cmp, device=kv_packed.device, dtype=torch.int32)
+                    .add_(win)
+                    .view(1, 1, K_cmp)
+                    .expand(bsz, q_len, K_cmp)
+                )
+                packed_topk = torch.cat(
+                    [
+                        torch.where(
+                            swa_valid, swa_topk, torch.full_like(swa_topk, -1)
+                        ),
+                        torch.where(
+                            cmp_valid, cmp_topk, torch.full_like(cmp_topk, -1)
+                        ),
+                    ],
+                    dim=-1,
                 )
                 with record_function_range("dsv4.attn.sparse_attn"):
-                    o = sparse_op.forward(q, kv_packed, self.attn_sink, identity_topk)
+                    o = sparse_op.forward(
+                        q, kv_packed, self.attn_sink, packed_topk.contiguous()
+                    )
         else:
             # Phase E5b: register_buffer retired.  Production decode must
             # populate paged metadata; any path here is a caller bug.
@@ -2594,7 +2610,11 @@ class Attention(nn.Module):
             del q, kv_cat, topk_idxs
 
         with record_function_range("dsv4.attn.out_proj"):
-            if _dbg:
+            if (
+                _dbg
+                and os.environ.get("DSV4_MOEDBG_PREFILL_EXPLICIT_OUT_PROJ", "1")
+                != "0"
+            ):
                 # Keep the debuggable explicit path when tensor probes are enabled.
                 apply_rotary_emb(o[..., -rd:], freqs_cis, inverse=True)
                 _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_o_post_inv_rope", o)

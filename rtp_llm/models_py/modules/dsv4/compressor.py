@@ -31,8 +31,10 @@ from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 # P2 (prefill_opt/final_plan.md): fused softmax+weighted-sum Triton kernel.
 # Replaces the prefill `(kv * score.softmax(dim=2)).sum(dim=2)` chain
-# (~10 launches) with one kernel.  Set DSV4_COMPRESSOR_FAST=0 to force
-# the REF path (debug only).
+# (~10 launches) with one kernel.  HumanEval greedy decoding contains
+# tie-sensitive cases where the fused softmax's small numerical drift changes
+# the selected token, so keep the reference path as the production default.
+# Set DSV4_COMPRESSOR_FAST=1 to opt into the fused kernel for perf experiments.
 try:
     from rtp_llm.models_py.modules.dsv4._compressor_triton import v4_compressor_pool
 
@@ -43,7 +45,7 @@ except Exception:  # pragma: no cover — keep V4 importable without Triton
 
 
 def _use_compressor_fast() -> bool:
-    enabled = os.environ.get("DSV4_COMPRESSOR_FAST", "1") != "0"
+    enabled = os.environ.get("DSV4_COMPRESSOR_FAST", "0") == "1"
     if enabled and not _COMPRESSOR_FAST_OK:
         raise RuntimeError("DSV4 compressor fast path requires Triton compressor kernel")
     return enabled
@@ -1424,7 +1426,7 @@ class Compressor(nn.Module):
                 # kv_state[:, :ratio] / score_state[:, :ratio] with this
                 # call's own tail, which would feed wrong data into window 0's
                 # overlap slots.
-                if sp_int > 0:
+                if sp_int > 0 and kv.shape[1] > 0:
                     kv[:bsz, 0, :ratio] = prior_kv_state_ratio
                     score[:bsz, 0, :ratio] = prior_score_state_ratio
 
