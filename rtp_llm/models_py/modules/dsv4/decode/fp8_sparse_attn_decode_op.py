@@ -183,12 +183,15 @@ class SparseAttnV4DecodeFp8Op:
         else:
             extra_topk_3d = None
 
-        # Iter2: cache + reuse FlashMLASchedMeta across decode layers of
-        # the same dual-pool type. ``sched_meta.have_initialized`` flips to
-        # True after the first ``flash_mla_with_kvcache`` call below, and
-        # the wheel asserts shape consistency on every subsequent call so
-        # silent shape drift can't slip past.
-        cache_key = 1 if extra_k_cache is not None else 0
+        # Iter2 (revised iter3.0a): cache + reuse FlashMLASchedMeta across
+        # decode layers of the same shape bucket. Cache key must include
+        # batch size (FlashMLA bakes ``config.b`` into sched_meta — reusing
+        # across different B triggers the wheel's ``sched_meta.config.b ==
+        # batch_size`` assert, which CUDA graph capture surfaces because it
+        # enumerates BS ∈ {capture sizes}). q_len is always 1 in decode and
+        # H/topk are per-op-instance constants, so (B, single/dual) is the
+        # minimal unique key; including q_len/H/topk for safety.
+        cache_key = (B, q_len, H, topk, 1 if extra_k_cache is not None else 0)
         sched_meta = self._sched_meta_cache.get(cache_key)
         if sched_meta is None:
             sched_meta, _ = get_mla_metadata(
