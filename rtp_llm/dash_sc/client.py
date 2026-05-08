@@ -234,8 +234,6 @@ def print_model_stream_infer_response(
         return
     infer = resp.infer_response
     print(f"[client] response id={infer.id!r} model_name={infer.model_name!r}")
-    prompt_token_num: int | None = None
-    prompt_cached_token_num: int | None = None
     for i, out in enumerate(infer.outputs):
         print(
             f"[client]   output[{i}] name={out.name!r} datatype={out.datatype!r} shape={list(out.shape)}"
@@ -263,12 +261,14 @@ def print_model_stream_infer_response(
         elif out.name == "finish_reason":
             finish = decode_finish_reason(out, raw)
             print(f"[client]   finish_reason: {finish}")
-        elif out.name == "prompt_token_num" and out.datatype == "INT32":
-            prompt_token_num = struct.unpack("<i", raw[:4])[0]
-            print(f"[client]   prompt_token_num: {prompt_token_num}")
-        elif out.name == "prompt_cached_token_num" and out.datatype == "INT32":
-            prompt_cached_token_num = struct.unpack("<i", raw[:4])[0]
-            print(f"[client]   prompt_cached_token_num: {prompt_cached_token_num}")
+
+    # ``prompt_token_num`` / ``prompt_cached_token_num`` live on
+    # ``infer.parameters`` as ``int64_param`` (dashllm parity); see
+    # ``codec._append_aux_info_metrics_outputs``.
+    for param_name in ("prompt_token_num", "prompt_cached_token_num"):
+        p = infer.parameters.get(param_name)
+        if p is not None and p.HasField("int64_param"):
+            print(f"[client]   {param_name}: {p.int64_param}")
 
 
 def _parse_stop_token_ids_csv(s: str | None) -> tuple[tuple[int, ...], ...]:

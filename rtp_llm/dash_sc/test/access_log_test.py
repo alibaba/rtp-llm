@@ -85,11 +85,11 @@ def _make_stream_response(
         out.shape.append(1)
         infer.raw_output_contents.append(struct.pack("<q", finish_reason))
     if prompt_cached_token_num is not None:
-        out = infer.outputs.add()
-        out.name = "prompt_cached_token_num"
-        out.datatype = "INT32"
-        out.shape.append(1)
-        infer.raw_output_contents.append(struct.pack("<i", prompt_cached_token_num))
+        # Metric scalars now ride on InferParameter int64_param (dashllm parity);
+        # access_log reads them off ``infer.parameters``.
+        infer.parameters["prompt_cached_token_num"].int64_param = (
+            prompt_cached_token_num
+        )
     return resp
 
 

@@ -20,6 +20,7 @@ py_library(
         "app.py",
         "client.py",
         "codec.py",
+        "dashscope_compat.py",
         "inference/__init__.py",
         "inference/__main__.py",
         "inference/servicer.py",
@@ -42,6 +43,14 @@ py_library(
 py_test(
     name = "codec_test",
     srcs = ["test/codec_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    imports = [],
+    exec_properties = {"gpu": "A10"},
+)
+
+py_test(
+    name = "dashscope_compat_test",
+    srcs = ["test/dashscope_compat_test.py"],
     deps = ["//rtp_llm:testlib"],
     imports = [],
     exec_properties = {"gpu": "A10"},

@@ -422,12 +422,21 @@ def _append_int32_scalar_output(
 def _append_aux_info_metrics_outputs(
     infer: predict_v2_pb2.ModelInferResponse, out_py: Any
 ) -> None:
-    """``prompt_token_num`` = AuxInfo.input_len; ``prompt_cached_token_num`` = AuxInfo.reuse_len."""
+    """Write ``prompt_token_num`` (= ``AuxInfo.input_len``) and ``prompt_cached_token_num``
+    (= ``AuxInfo.reuse_len``) as ``InferParameter.int64_param`` entries on the response.
+
+    Wire-shape contract: dashllm (``dashllm/worker/processors/model.py``) emits
+    these as ``parameters[...].int64_param`` so dashscope-serving's upstream
+    metric collector can read them as named scalars without scanning the
+    output-tensor list. Mirroring that shape here is what lets a dashscope-
+    serving deployment swap the dashllm worker for the rtp_llm dash_sc
+    backend without changing its response parser.
+    """
     ax = getattr(out_py, "aux_info", None)
     input_len = int(ax.input_len) if ax is not None else 0
     reuse_len = int(ax.reuse_len) if ax is not None else 0
-    _append_int32_scalar_output(infer, "prompt_token_num", input_len)
-    _append_int32_scalar_output(infer, "prompt_cached_token_num", reuse_len)
+    infer.parameters["prompt_token_num"].int64_param = input_len
+    infer.parameters["prompt_cached_token_num"].int64_param = reuse_len
 
 
 def build_stream_response_from_generate_outputs(
@@ -438,14 +447,25 @@ def build_stream_response_from_generate_outputs(
     request_input_ids: list[int] | None = None,
     return_input_ids: bool = False,
     is_streaming: bool = True,
+    dashscope_response_echo: Any = None,
     _request_shape: list[int] | None = None,
 ) -> predict_v2_pb2.ModelStreamInferResponse:
     """Build ``ModelStreamInferResponse`` from one ``GenerateOutputs`` chunk.
 
-    When ``return_input_ids`` is True, prepends ``prompt_token_ids`` (request ``input_ids``)
-    before ``generated_ids`` and ``finish_reason``. After ``finish_reason`` appends
-    ``prompt_token_num`` (``AuxInfo.input_len``) and ``prompt_cached_token_num``
-    (``AuxInfo.reuse_len``). Output order is stable across chunks.
+    When ``return_input_ids`` is True, prepends ``prompt_token_ids`` (request
+    ``input_ids``) before ``generated_ids`` and ``finish_reason``.
+
+    ``prompt_token_num`` and ``prompt_cached_token_num`` are written as
+    ``InferParameter.int64_param`` entries (not tensors) — see
+    :func:`_append_aux_info_metrics_outputs` for the dashllm parity rationale.
+
+    ``dashscope_response_echo`` is an optional :class:`DashScopeResponseEchoArgs`
+    (typed loosely here to avoid an import cycle with ``dashscope_compat``).
+    When supplied it appends dashllm-style response parameters
+    (``model_name`` / ``model_instance_ip`` / ``model_hostname`` /
+    ``scheduler_request_id``) and may override ``prompt_cached_token_num``
+    to 0 when ``suppress_cached_token_num`` is set on the echo. Output order
+    of the tensor entries is stable across chunks regardless of this echo.
     """
     del _request_shape  # reserved for future shape alignment
     if not go.generate_outputs:
@@ -469,6 +489,14 @@ def build_stream_response_from_generate_outputs(
     _append_finished_output(infer, finished)
     _append_aux_info_metrics_outputs(infer, out_py)
     infer.parameters["incremental_output"].int64_param = 1 if is_streaming else 0
+
+    if dashscope_response_echo is not None:
+        # Local import to break the circular dependency: ``dashscope_compat``
+        # imports private helpers from this module, so the call site here can't
+        # import the type at module load time.
+        from rtp_llm.dash_sc.dashscope_compat import append_dashscope_response_extras
+
+        append_dashscope_response_extras(infer, dashscope_response_echo)
 
     logging.debug("[DashScGrpc] [%s] generated_ids: %s", request_log_tag, generated_ids)
     logging.debug(
