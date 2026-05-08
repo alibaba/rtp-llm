@@ -50,14 +50,14 @@ from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4.compressor import Compressor
 from rtp_llm.models_py.modules.dsv4.compressor_vllm import CompressorVLLM
 
-
-def _use_vllm_compressor() -> bool:
-    """Runtime switch for the vLLM-style per-token state-pool compressor
-    (BF16 KV pool). On by default; set ``DSV4_COMPRESSOR_VLLM=0`` to fall
-    back to the legacy logical-block ``Compressor``."""
-    import os
-
-    return os.environ.get("DSV4_COMPRESSOR_VLLM", "1") != "0"
+# Single source of truth for the BF16 vLLM-flow opt-in switch.
+# Off by default; set ``DSV4_BF16_VLLM=1`` to swap the legacy
+# logical-block ``Compressor`` / ``Indexer`` for ``CompressorVLLM`` /
+# ``IndexerVLLM`` at construction time. Resolved once at module load
+# (env vars are set before Python launches in production).  ``indexer.py``
+# imports this constant lazily inside ``__init__`` to avoid the
+# attention.py ↔ indexer.py module-load cycle.
+DSV4_BF16_VLLM: bool = os.environ.get("DSV4_BF16_VLLM", "0") != "0"
 
 
 # ---------------------------------------------------------------------------
@@ -71,13 +71,13 @@ from typing import NamedTuple as _NamedTuple
 
 class _VLLMPrefillCommon(_NamedTuple):
     bsz: int
-    seqlen: int           # rank-local Q length (== chunk_length under CP)
-    sp_int: int          # absolute prefix length
-    end_pos: int          # = sp_int + seqlen (non-CP) / cp_ctx.seq_len_total (CP)
+    seqlen: int  # rank-local Q length (== chunk_length under CP)
+    sp_int: int  # absolute prefix length
+    end_pos: int  # = sp_int + seqlen (non-CP) / cp_ctx.seq_len_total (CP)
     is_fresh_prefill: bool  # = (sp_int == 0)
     device: torch.device
     freqs_cis: torch.Tensor  # rank-local per-Q freqs (cp_freqs_cis_local under CP)
-    swa_dense_len: int        # SWA prefix length in the dense kv_cat layout
+    swa_dense_len: int  # SWA prefix length in the dense kv_cat layout
     # hoisted meta — built once per layer-call, reused across compressor +
     # nested indexer compressor:
     compressor_meta: Any  # CompressorMeta from compressor_vllm
@@ -92,8 +92,8 @@ class _VLLMPrefillCommon(_NamedTuple):
 
 
 class _VLLMPrefillQKV(_NamedTuple):
-    q: torch.Tensor       # [B, S, n_heads, head_dim] bf16 — rank-local under CP
-    qr: torch.Tensor      # [B, S, q_lora_rank] bf16 — rank-local under CP
+    q: torch.Tensor  # [B, S, n_heads, head_dim] bf16 — rank-local under CP
+    qr: torch.Tensor  # [B, S, q_lora_rank] bf16 — rank-local under CP
     kv_full: torch.Tensor  # [B, T, head_dim] bf16 — all-gathered global under CP
 
 
@@ -718,7 +718,7 @@ class Attention(nn.Module):
                 "wgate": layer_weights[W.v4_compressor_wgate],
                 "norm": layer_weights[W.v4_compressor_norm],
             }
-            _CompressorCls = CompressorVLLM if _use_vllm_compressor() else Compressor
+            _CompressorCls = CompressorVLLM if DSV4_BF16_VLLM else Compressor
             self.compressor = _CompressorCls(
                 dim=dim,
                 head_dim=head_dim,
@@ -737,7 +737,7 @@ class Attention(nn.Module):
             # absent (warmup, unit tests), ``_bind_kv_cache_from_pool``
             # needs the T hint to allocate the ephemeral zero tensor.
             if compress_ratio == 4:
-                if _use_vllm_compressor():
+                if DSV4_BF16_VLLM:
                     from rtp_llm.models_py.modules.dsv4.indexer_vllm import IndexerVLLM
 
                     _IndexerCls = IndexerVLLM
@@ -2003,12 +2003,8 @@ class Attention(nn.Module):
                 )
                 packed_topk = torch.cat(
                     [
-                        torch.where(
-                            swa_valid, swa_topk, torch.full_like(swa_topk, -1)
-                        ),
-                        torch.where(
-                            cmp_valid, cmp_topk, torch.full_like(cmp_topk, -1)
-                        ),
+                        torch.where(swa_valid, swa_topk, torch.full_like(swa_topk, -1)),
+                        torch.where(cmp_valid, cmp_topk, torch.full_like(cmp_topk, -1)),
                     ],
                     dim=-1,
                 )
@@ -2138,7 +2134,7 @@ class Attention(nn.Module):
             seqlen > 1
             and not is_batched_local
             and self.compress_ratio in (4, 128)
-            and _use_vllm_compressor()
+            and DSV4_BF16_VLLM
         ):
             return self._forward_prefill_vllm(x, start_pos, sequence_lengths)
         win = self.window_size
@@ -2583,9 +2579,7 @@ class Attention(nn.Module):
                     # by ``prefill_swa_dense_len``.  Gather both segments from
                     # the pool; pass ``kv_full`` as the SWA override on fresh
                     # prefill so the sliding read avoids a pool round-trip.
-                    with record_function_range(
-                        "dsv4.attn.kv_gather_dense_or_paged"
-                    ):
+                    with record_function_range("dsv4.attn.kv_gather_dense_or_paged"):
                         kv_cat = self._gather_kv_cache_dense_from_pool(
                             bsz,
                             pool_read_start,
@@ -2679,8 +2673,7 @@ class Attention(nn.Module):
         with record_function_range("dsv4.attn.out_proj"):
             if (
                 _dbg
-                and os.environ.get("DSV4_MOEDBG_PREFILL_EXPLICIT_OUT_PROJ", "1")
-                != "0"
+                and os.environ.get("DSV4_MOEDBG_PREFILL_EXPLICIT_OUT_PROJ", "1") != "0"
             ):
                 # Keep the debuggable explicit path when tensor probes are enabled.
                 apply_rotary_emb(o[..., -rd:], freqs_cis, inverse=True)
@@ -2764,7 +2757,8 @@ class Attention(nn.Module):
     # ``_forward_prefill`` family, but BF16 KV-cache throughout and
     # using the local CompressorVLLM / IndexerVLLM with hoisted meta).
     #
-    # Activated by :func:`_use_vllm_compressor` (env ``DSV4_COMPRESSOR_VLLM``);
+    # Activated by the module-level :data:`DSV4_BF16_VLLM` flag (env
+    # ``DSV4_BF16_VLLM``);
     # entry hook lives in :meth:`_forward_body`. Constraints (matching
     # the source class):
     #   * single request only (bsz == 1)
@@ -2921,9 +2915,7 @@ class Attention(nn.Module):
                 f"got {tuple(kv_full.shape)}"
             )
             with record_function_range("dsv4.attn.cp_kv_gather_start"):
-                handle = cp_all_gather_full_async(
-                    kv_full.squeeze(0), common.cp_ctx
-                )
+                handle = cp_all_gather_full_async(kv_full.squeeze(0), common.cp_ctx)
             with record_function_range("dsv4.attn.cp_kv_gather_wait"):
                 kv_full = cp_wait_gather_full(handle).unsqueeze(0)
         return _VLLMPrefillQKV(q=q, qr=qr, kv_full=kv_full)
@@ -2941,14 +2933,8 @@ class Attention(nn.Module):
         # Under CP each rank writes the full all-gathered sequence to its
         # own SWA pool starting at the absolute prefix offset; outside CP
         # the rank-local seqlen is the absolute write length.
-        write_len = (
-            int(common.cp_ctx.seq_len_full)
-            if common.cp_on
-            else common.seqlen
-        )
-        swa_lengths = torch.full(
-            (bsz,), write_len, device=device, dtype=torch.long
-        )
+        write_len = int(common.cp_ctx.seq_len_full) if common.cp_on else common.seqlen
+        swa_lengths = torch.full((bsz,), write_len, device=device, dtype=torch.long)
         with record_function_range("dsv4.attn.swa_pool_write"):
             self._prefill_write_swa_to_pool(bsz, kv_full, common.sp_int, swa_lengths)
 
@@ -3059,8 +3045,10 @@ class Attention(nn.Module):
         # gathered ``qkv.kv_full``).  Reads use the global absolute frame.
         if common.cp_on:
             pool_read_lengths = torch.full(
-                (bsz,), int(common.cp_ctx.seq_len_full),
-                device=device, dtype=torch.long,
+                (bsz,),
+                int(common.cp_ctx.seq_len_full),
+                device=device,
+                dtype=torch.long,
             )
         else:
             pool_read_lengths = torch.full(

@@ -17,14 +17,6 @@ from rtp_llm.models_py.modules.dsv4.compressor import Compressor
 from rtp_llm.models_py.modules.dsv4.compressor_vllm import CompressorVLLM
 
 
-def _use_vllm_compressor() -> bool:
-    """Mirror of attention.py's switch — keep nested indexer compressor
-    in lockstep with the host attention compressor."""
-    import os
-
-    return os.environ.get("DSV4_COMPRESSOR_VLLM", "1") != "0"
-
-
 def _use_rope_only_kernel() -> bool:
     import os
 
@@ -89,7 +81,11 @@ class Indexer(nn.Module):
             "wgate": layer_weights[W.v4_indexer_compressor_wgate],
             "norm": layer_weights[W.v4_indexer_compressor_norm],
         }
-        _CompressorCls = CompressorVLLM if _use_vllm_compressor() else Compressor
+        # Late import to dodge the attention.py ↔ indexer.py module-load
+        # cycle (attention imports Indexer at top level).
+        from rtp_llm.models_py.modules.dsv4.attention import DSV4_BF16_VLLM
+
+        _CompressorCls = CompressorVLLM if DSV4_BF16_VLLM else Compressor
         self.compressor = _CompressorCls(
             dim=dim,
             head_dim=index_head_dim,
@@ -655,7 +651,9 @@ class Indexer(nn.Module):
                 _rt.record_if_level(2, f"{_dbg}_freqs_cis", freqs_cis)
             q_rope = q[..., -rd:]
             if q_rope.is_cuda and _use_rope_only_kernel():
-                from rtp_llm.models_py.modules.dsv4._rope_only_triton import rope_only_inplace
+                from rtp_llm.models_py.modules.dsv4._rope_only_triton import (
+                    rope_only_inplace,
+                )
 
                 rope_only_inplace(q_rope, freqs_cis)
             else:
