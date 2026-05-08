@@ -24,7 +24,10 @@ def _compute_num_split(block_k: int, k: int, grid_size: int) -> int:
 def _requested_backend() -> tuple[str, bool]:
     requested = os.environ.get("DSV4_MHC_PRE_GEMM_BACKEND", "").strip().lower()
     if requested in ("", "auto"):
-        return "deepgemm", False
+        # DeepGEMM split-k is faster but has shown DSV4 greedy semantic drift
+        # from layer 0 on SM100 TP1. Keep it as an explicit opt-in backend and
+        # use the single-CTA TileLang path as the precision-safe default.
+        return "tilelang_single", False
     aliases = {
         "dg": "deepgemm",
         "tilelang": "tilelang_single",
