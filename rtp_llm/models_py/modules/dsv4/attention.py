@@ -121,7 +121,7 @@ from rtp_llm.ops.compute_ops import KVCacheRegionName, rtp_llm_ops
 # collapsing the pool read to None (and eventually the continuation-prefill
 # ``_gather_kv_cache_dense_from_pool`` assert).  Map ints → enums up front so
 # the pybind dispatch succeeds.  Mirrors
-# ``prefill/forward.py::DSv4WriteCacheStoreOp._ATTN_TYPE_ENUM_BY_INT``.
+# ``base/common/kvcache_store.py`` for multi-region cache-store writes.
 def _build_attn_type_enum_map() -> Dict[int, "KVCacheRegionName"]:
     from rtp_llm.models_py.modules.dsv4.attn_type import (
         CSA_KV,
