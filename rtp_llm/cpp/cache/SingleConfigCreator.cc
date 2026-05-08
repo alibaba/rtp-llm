@@ -65,6 +65,14 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
     config.layer_ids.push_back(all_layer_ids);
     config.layer_to_group_id.assign(config.layer_num, 0);
     config.layer_group_types.assign(config.layer_num, CacheGroupType::FULL);
+    // Populate region mapping: single group uses DEFAULT region.
+    config.group_region_names.push_back(KVCacheRegionName::DEFAULT);
+    const size_t region_count = static_cast<size_t>(KVCacheRegionName::REGION_COUNT);
+    config.layer_region_to_group_id.resize(config.layer_num);
+    for (size_t i = 0; i < config.layer_num; i++) {
+        config.layer_region_to_group_id[i].assign(region_count, -1);
+        config.layer_region_to_group_id[i][static_cast<size_t>(KVCacheRegionName::DEFAULT)] = 0;
+    }
     return config;
 }
 

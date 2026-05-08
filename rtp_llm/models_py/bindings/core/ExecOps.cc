@@ -161,7 +161,7 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
     size_t         max_blocks_per_batch = 0;
 
     const size_t group_num = param.kv_cache_group_types_host.defined() ? param.kv_cache_group_types_host.size(0) : 1;
-    const bool   is_hybrid = group_num > 1;
+    const bool   use_group_cache_transfer_policy = group_num > 1;
 
     int  gid             = 0;
     auto mapped_group_id = [&param, group_num]() -> int {
@@ -170,10 +170,8 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
             && static_cast<int64_t>(param.layer_id) < param.kv_cache_layer_region_to_group_host.size(0)) {
             const auto region = static_cast<int64_t>(param.region_name);
             if (region >= 0 && region < param.kv_cache_layer_region_to_group_host.size(1)) {
-                const int candidate =
-                    param.kv_cache_layer_region_to_group_host
-                        .data_ptr<int32_t>()[param.layer_id * param.kv_cache_layer_region_to_group_host.size(1)
-                                             + region];
+                const int candidate = param.kv_cache_layer_region_to_group_host.data_ptr<
+                    int32_t>()[param.layer_id * param.kv_cache_layer_region_to_group_host.size(1) + region];
                 if (candidate >= 0) {
                     return candidate;
                 }
@@ -253,18 +251,17 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
                                   index);
                 return;
             }
-            std::string cache_key =
-                makeCacheKey(param.model_id,
-                             param.cache_keys[batch_id * max_blocks_per_batch + index],
-                             param.layer_id,
-                             param.region_name);
+            std::string cache_key = makeCacheKey(param.model_id,
+                                                 param.cache_keys[batch_id * max_blocks_per_batch + index],
+                                                 param.layer_id,
+                                                 param.region_name);
 
             void*                 kv_addr = (void*)((int8_t*)kv_cache_data + block_id * param.kv_block_stride_bytes);
             std::shared_ptr<void> kv_block_addr(kv_addr, [](void* p) {});
 
-            // Hybrid (DSV4 / Qwen3-Next) and MLA layouts treat the block as a
-            // single opaque KV chunk. Only the legacy MHA path splits k/v.
-            if (is_hybrid || mla_kvcache) {
+            // Some layouts treat the block as a single opaque KV chunk. Only
+            // the legacy MHA path splits k/v.
+            if (param.use_opaque_kv_cache_store || mla_kvcache) {
                 request_blocks->addBlock("kv_" + cache_key, kv_block_addr, param.kv_block_stride_bytes, true, true);
             } else {
                 const uint32_t        kv_half = static_cast<uint32_t>(param.kv_block_stride_bytes / 2);
@@ -279,7 +276,7 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
             if (kv_scale_data) {
                 void* kv_scale_addr = (void*)((int8_t*)kv_scale_data + block_id * param.kv_scale_stride_bytes);
                 std::shared_ptr<void> kv_scale_block_addr(kv_scale_addr, [](void* p) {});
-                if (is_hybrid || mla_kvcache) {
+                if (param.use_opaque_kv_cache_store || mla_kvcache) {
                     request_blocks->addBlock(
                         "kv_scale_" + cache_key, kv_scale_block_addr, param.kv_scale_stride_bytes, true, true);
                 } else {
@@ -294,13 +291,12 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
             }
         };
 
-        const auto block_positions = blockPositionsForCacheTransfer(static_cast<size_t>(std::min<int>(
-                                                                        total_blocks,
-                                                                        static_cast<int>(max_blocks_per_batch))),
-                                                                    /*reuse_block_size=*/0,
-                                                                    is_hybrid,
-                                                                    group_type,
-                                                                    /*hybrid_full_from_begin=*/true);
+        const auto block_positions = blockPositionsForCacheTransfer(
+            static_cast<size_t>(std::min<int>(total_blocks, static_cast<int>(max_blocks_per_batch))),
+            /*reuse_block_size=*/0,
+            use_group_cache_transfer_policy,
+            group_type,
+            /*hybrid_full_from_begin=*/true);
         for (const auto block_pos : block_positions) {
             addBlock(static_cast<int>(block_pos));
         }
@@ -507,7 +503,7 @@ void clearCommOpsUnlocked() {
 }  // anonymous namespace
 
 void execBroadcast(const BroadcastParams& params) {
-    py::function fn;
+    py::function           fn;
     py::gil_scoped_acquire gil;
     {
         std::lock_guard<std::mutex> lock(g_comm_mutex);
@@ -524,7 +520,7 @@ void execBroadcast(const BroadcastParams& params) {
 }
 
 AllReduceOutput execAllReduce(const AllReduceParams& params) {
-    py::function fn;
+    py::function           fn;
     py::gil_scoped_acquire gil;
     {
         std::lock_guard<std::mutex> lock(g_comm_mutex);
@@ -542,7 +538,7 @@ AllReduceOutput execAllReduce(const AllReduceParams& params) {
 }
 
 void execAllGather(const AllGatherParams& params) {
-    py::function fn;
+    py::function           fn;
     py::gil_scoped_acquire gil;
     {
         std::lock_guard<std::mutex> lock(g_comm_mutex);

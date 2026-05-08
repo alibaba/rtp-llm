@@ -26,6 +26,7 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("kv_scale_base", &LayerKVCache::kv_scale_base, "Key/value cache scale tensor")
         .def_readonly("seq_size_per_block", &LayerKVCache::seq_size_per_block, "Sequence size per block")
         .def_readonly("layer_id", &LayerKVCache::layer_id, "Global layer id")
+        .def_readonly("group_id", &LayerKVCache::group_id, "KV cache group id")
         .def_readonly("region_name", &LayerKVCache::region_name, "KV cache attention type");
 
     pybind11::class_<KVCache>(m, "KVCache")
@@ -64,6 +65,9 @@ void registerPyOpDefs(pybind11::module& m) {
         .def("get_layer_cache",
              pybind11::overload_cast<int, rtp_llm::KVCacheRegionName>(&KVCache::getLayerCache),
              "Return a raw per-layer LayerKVCache for the given global layer id and KV cache attention type")
+        .def("get_layer_caches",
+             &KVCache::getLayerCaches,
+             "Return every per-region LayerKVCache owned by the given global layer id")
         .def("get_raw_pool_tensor",
              &KVCache::getRawPoolTensor,
              "Return raw [total_blocks, stride_bytes] tensor for a specific layer and region name, no reshape (DSV4)");
@@ -138,7 +142,6 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("kv_cache_kernel_block_id_device_by_group",
                        &PyAttentionInputs::kv_cache_kernel_block_id_device_by_group)
         .def_readwrite("kv_cache_layer_to_group", &PyAttentionInputs::kv_cache_layer_to_group)
-        .def_readwrite("kv_cache_layer_to_group_dpsk_v4", &PyAttentionInputs::kv_cache_layer_to_group_dpsk_v4)
         .def_readwrite("dtype", &PyAttentionInputs::dtype)
         .def_readwrite("cu_seqlens", &PyAttentionInputs::cu_seqlens)
         .def_readwrite("cu_seqlens_host", &PyAttentionInputs::cu_seqlens_host)

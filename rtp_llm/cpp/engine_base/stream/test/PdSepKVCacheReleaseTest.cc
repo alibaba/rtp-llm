@@ -5,8 +5,7 @@
 #define protected public
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
-#include "rtp_llm/cpp/cache/DSV4CacheConfig.h"
-#include "rtp_llm/cpp/cache/DSV4ConfigCreator.h"
+#include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/KVCacheTransferPlanner.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
@@ -32,6 +31,9 @@
 namespace rtp_llm {
 
 namespace {
+
+constexpr int kDsv4PoolNum        = 7;
+constexpr int kDsv4TokensPerBlock = 256;
 
 class DummyMemoryUtil: public MemoryUtil {
 public:
@@ -233,7 +235,7 @@ protected:
         mc.attn_config.layer_compress_ratios = ratios;
 
         ParallelismConfig pc;
-        auto              config = DSV4ConfigCreator::createConfig(mc, pc);
+        auto              config = HybridPoolConfigCreator::createConfig(mc, pc);
         config.block_num         = block_num;
         config.group_block_nums.assign(config.groupNums(), block_num);
         return config;
@@ -245,8 +247,7 @@ protected:
     }
 
     void prepareDsv4Stream(const std::vector<int>& input_tokens, RoleType role_type = RoleType::PREFILL) {
-        prepareStreamWithConfig(
-            input_tokens, makeDsv4Config(), static_cast<int>(DSV4CacheConfig::TOKENS_PER_BLOCK), role_type);
+        prepareStreamWithConfig(input_tokens, makeDsv4Config(), static_cast<int>(kDsv4TokensPerBlock), role_type);
     }
 
     void prepareStreamWithConfig(const std::vector<int>& input_tokens,
@@ -535,7 +536,7 @@ TEST_F(PdSepKVCacheReleaseTest, testHoldWithoutReleasePDSep_ResourceReleasedStil
 }
 
 TEST_F(PdSepKVCacheReleaseTest, testDsv4PDSepPrefillReleaseInsertsSevenGroupDeviceCache) {
-    const int        spb = static_cast<int>(DSV4CacheConfig::TOKENS_PER_BLOCK);
+    const int        spb = static_cast<int>(kDsv4TokensPerBlock);
     std::vector<int> tokens(3 * spb + 17);
     std::iota(tokens.begin(), tokens.end(), 1);
 
@@ -543,9 +544,9 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4PDSepPrefillReleaseInsertsSevenGroupDevi
     allocateAndFinish();
 
     auto& resource = stream_->streamCacheResource();
-    ASSERT_EQ(resource.kvCache().groupNums(), DSV4_NUM_POOLS);
+    ASSERT_EQ(resource.kvCache().groupNums(), kDsv4PoolNum);
     ASSERT_GT(resource.curBlocksNum(), 0);
-    for (int gid = 0; gid < DSV4_NUM_POOLS; ++gid) {
+    for (int gid = 0; gid < kDsv4PoolNum; ++gid) {
         ASSERT_EQ(resource.kvCache().blocksNum(0, gid), 4) << "group " << gid;
         const auto& blocks = resource.kvCache().blocks(0, gid);
         if (gid < 3) {
@@ -591,7 +592,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4PDSepPrefillReleaseInsertsSevenGroupDevi
     auto& resource2 = stream2->streamCacheResource();
     ASSERT_TRUE(resource2.initKVBlock().ok());
     EXPECT_GE(stream2->reuseLength(), spb) << "DSV4 prefill should reuse cached 7-group prefix blocks";
-    EXPECT_EQ(resource2.kvCache().groupNums(), DSV4_NUM_POOLS);
+    EXPECT_EQ(resource2.kvCache().groupNums(), kDsv4PoolNum);
 
     stream2->generate_status_->status = StreamState::FINISHED;
     stream2->fillSubGenerateStatus(StreamState::FINISHED);
@@ -599,7 +600,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4PDSepPrefillReleaseInsertsSevenGroupDevi
 }
 
 TEST_F(PdSepKVCacheReleaseTest, testDsv4DecodeFirstMallocBypassesLocalDeviceReuseInPDSep) {
-    const int        spb = static_cast<int>(DSV4CacheConfig::TOKENS_PER_BLOCK);
+    const int        spb = static_cast<int>(kDsv4TokensPerBlock);
     std::vector<int> tokens(3 * spb + 17);
     std::iota(tokens.begin(), tokens.end(), 1);
 
@@ -638,8 +639,8 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecodeFirstMallocBypassesLocalDeviceReus
 
     EXPECT_EQ(decode_stream->reuseLength(), 0)
         << "Hybrid DSV4 decode first malloc must not consume local device-cache reuse; PD load owns reuse.";
-    EXPECT_EQ(decode_resource.kvCache().groupNums(), DSV4_NUM_POOLS);
-    for (int gid = 0; gid < DSV4_NUM_POOLS; ++gid) {
+    EXPECT_EQ(decode_resource.kvCache().groupNums(), kDsv4PoolNum);
+    for (int gid = 0; gid < kDsv4PoolNum; ++gid) {
         EXPECT_EQ(decode_resource.kvCache().blocksNum(0, gid), 4) << "group " << gid;
     }
 
@@ -647,7 +648,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecodeFirstMallocBypassesLocalDeviceReus
 }
 
 TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions) {
-    const int     spb        = static_cast<int>(DSV4CacheConfig::TOKENS_PER_BLOCK);
+    const int     spb        = static_cast<int>(kDsv4TokensPerBlock);
     const int     block_num  = 4;
     const int64_t request_id = 9017;
     const size_t  model_id   = 77;
@@ -763,6 +764,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
             inputs.model_id                            = model_id;
             inputs.decode_entrance                     = false;
             inputs.warmup                              = false;
+            inputs.use_opaque_kv_cache_store           = config.use_opaque_kv_cache_store;
             inputs.layer_id                            = layer_id;
             inputs.region_name                         = region_name;
 
@@ -818,7 +820,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
 }
 
 TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsWithPrefixReuse) {
-    const int     spb        = static_cast<int>(DSV4CacheConfig::TOKENS_PER_BLOCK);
+    const int     spb        = static_cast<int>(kDsv4TokensPerBlock);
     const int     block_num  = 4;
     const int     reuse_num  = 1;
     const int64_t request_id = 9018;
@@ -935,6 +937,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
             inputs.model_id                            = model_id;
             inputs.decode_entrance                     = false;
             inputs.warmup                              = false;
+            inputs.use_opaque_kv_cache_store           = config.use_opaque_kv_cache_store;
             inputs.layer_id                            = layer_id;
             inputs.region_name                         = region_name;
 

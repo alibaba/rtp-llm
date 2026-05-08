@@ -1,8 +1,9 @@
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 
 #include <numeric>
+#include <algorithm>
 
-#include "rtp_llm/cpp/cache/DSV4ConfigCreator.h"
+#include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/HybridConfigCreator.h"
 #include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
 #include "rtp_llm/cpp/cache/SingleConfigCreator.h"
@@ -11,11 +12,25 @@
 
 namespace rtp_llm {
 
+namespace {
+
+bool hasTypedHybridPoolLayout(const ModelConfig& model_config) {
+    return !model_config.attn_config.layer_compress_ratios.empty();
+}
+
+bool shouldUseHybridPoolLayout(const ModelConfig& model_config) {
+    return hasTypedHybridPoolLayout(model_config)
+           || (model_config.hybrid_attention_config.enable_hybrid_attention
+               && model_config.hybrid_attention_config.enable_independent_kv_cache_pools);
+}
+
+}  // namespace
+
 CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model_config,
                                                   const ParallelismConfig& parallelism_config,
                                                   bool                     is_mtp) {
-    if (!model_config.attn_config.layer_compress_ratios.empty()) {
-        return DSV4ConfigCreator::createConfig(model_config, parallelism_config, is_mtp);
+    if (shouldUseHybridPoolLayout(model_config)) {
+        return HybridPoolConfigCreator::createConfig(model_config, parallelism_config, is_mtp);
     } else if (model_config.hybrid_attention_config.enable_hybrid_attention) {
         return HybridConfigCreator::createHybridConfig(model_config, parallelism_config, is_mtp);
     } else {
@@ -47,11 +62,15 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
     if (kv_cache_config.test_block_num > 0) {
         RTP_LLM_LOG_INFO("KVCacheConfig explicitly specified kv cache block num %d", kv_cache_config.test_block_num);
         block_num = kv_cache_config.test_block_num;
+        config.finalizeBlockNums(block_num, runtime_config);
     } else {
         const auto kv_cache_mem_size = MemoryEvaluationHelper::getKVCacheMemorySize(
             runtime_config, kv_cache_config, model_config, parallelism_config, warm_up_result, sp_config);
-        // Deduct fixed-pool reservation (DSV4 state / SWA pools) from the budget
-        // so paged pools don't overcommit HBM.
+        // Fixed-pool sizing depends on runtime scheduler limits, so finalize it
+        // here after RuntimeConfig is available. The temporary global block
+        // number is only used for groups that are not fixed pools.
+        config.finalizeBlockNums(0, runtime_config);
+        // Deduct fixed-pool reservation from the budget so paged pools don't overcommit HBM.
         size_t paged_budget = kv_cache_mem_size;
         if (config.fixed_pool_reserve_bytes > 0) {
             RTP_LLM_CHECK_WITH_INFO(kv_cache_mem_size > config.fixed_pool_reserve_bytes,
@@ -73,18 +92,7 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
 
     const auto kv_cache_seq_len = static_cast<size_t>(block_num) * config.seq_size_per_block;
     config.block_num            = static_cast<int>(block_num);
-    if (config.dsv4_config.has_value() && config.use_independent_block_pools) {
-        // DSV4ConfigCreator already set per-group block_nums; only fill
-        // groups that were left at 0 (= use global block_num).
-        if (config.group_block_nums.empty()) {
-            config.group_block_nums.assign(config.groupNums(), block_num);
-        } else {
-            for (auto& gbn : config.group_block_nums) {
-                if (gbn == 0)
-                    gbn = block_num;
-            }
-        }
-    }
+    config.finalizeBlockNums(block_num, runtime_config);
     RTP_LLM_LOG_INFO("kv cache block nums is %u, allows storing %ld tokens", block_num, kv_cache_seq_len);
     if (kv_cache_seq_len < model_config.max_seq_len) {
         RTP_LLM_LOG_WARNING("kv cache block nums %u can only store %ld tokens, less than max_seq_len %ld, "

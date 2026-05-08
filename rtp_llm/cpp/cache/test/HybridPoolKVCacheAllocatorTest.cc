@@ -11,7 +11,7 @@
 #include "rtp_llm/cpp/cache/BlockPool.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
-#include "rtp_llm/cpp/cache/DSV4ConfigCreator.h"
+#include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
@@ -130,7 +130,7 @@ static ModelConfig makeProModelConfig() {
 static CacheConfig makeDSV4HybridPoolConfig(uint32_t block_num = 200) {
     auto              mc = makeProModelConfig();
     ParallelismConfig pc;
-    auto              config = DSV4ConfigCreator::createConfig(mc, pc);
+    auto              config = HybridPoolConfigCreator::createConfig(mc, pc);
     config.block_num         = block_num;
     return config;
 }
@@ -226,16 +226,16 @@ TEST_F(HybridPoolKVCacheAllocatorTest, TotalAndFreeBlocksAggregateAcrossGroups) 
     EXPECT_EQ(allocator->blockCacheRefBlocksNum(), 0u);
 }
 
-TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsTakeMinAcrossGroups) {
+TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsUseDifferentCapacityScopes) {
     auto config = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/6, /*full_block_num=*/8);
-    // Group 0: seq_size_per_block=4 -> 5 free * 4 = 20
-    // Group 1: seq_size_per_block=2 -> 7 free * 2 = 14  (overrides global 4)
-    config.group_seq_size_per_block = {4, 2};
+    // Group 0 (LINEAR): seq_size_per_block=2 -> 5 blocks * 2 = 10
+    // Group 1 (FULL):   seq_size_per_block=4 -> 7 blocks * 4 = 28
+    config.group_seq_size_per_block = {2, 4};
     auto allocator                  = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
-    EXPECT_EQ(allocator->maxAvailableTokensNum(), 14u);
-    EXPECT_EQ(allocator->availableTokensNum(), 14u);
+    EXPECT_EQ(allocator->maxAvailableTokensNum(), 28u);
+    EXPECT_EQ(allocator->availableTokensNum(), 10u);
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsFallBackToGlobalSeqSize) {

@@ -63,6 +63,7 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
                                 captured_cache_store.model_id,
                                 captured_cache_store.decode_entrance,
                                 captured_cache_store.warmup,
+                                captured_cache_store.use_opaque_kv_cache_store,
                                 captured_kv_cache.layer_id,
                                 captured_kv_cache.region_name,
                                 std::move(event)};

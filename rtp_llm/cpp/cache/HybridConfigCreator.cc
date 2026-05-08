@@ -198,6 +198,18 @@ CacheConfig HybridConfigCreator::createHybridConfig(const ModelConfig&       mod
     // Setup layer to group mapping
     HybridConfigCreator::setupLayerToGroupMapping(config);
 
+    // Populate region mapping: all hybrid groups use DEFAULT region.
+    for (size_t gid = 0; gid < config.cache_specs.size(); ++gid) {
+        config.group_region_names.push_back(KVCacheRegionName::DEFAULT);
+    }
+    const size_t region_count = static_cast<size_t>(KVCacheRegionName::REGION_COUNT);
+    config.layer_region_to_group_id.resize(config.layer_num);
+    for (size_t l = 0; l < config.layer_num; l++) {
+        config.layer_region_to_group_id[l].assign(region_count, -1);
+        int gid = config.layer_to_group_id[l];
+        config.layer_region_to_group_id[l][static_cast<size_t>(KVCacheRegionName::DEFAULT)] = gid;
+    }
+
     config.layer_group_types.assign(config.layer_num, CacheGroupType::FULL);
     for (size_t layer_id = 0; layer_id < config.layer_to_group_id.size(); ++layer_id) {
         const int gid = config.layer_to_group_id[layer_id];

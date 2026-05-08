@@ -78,6 +78,11 @@ public:
         return batch_resource[batch_id].blocks(layer_id, region_name);
     }
 
+    const BlockIndicesType& blocks(int layer_id, KVCacheRegionName region_name) const {
+        RTP_LLM_CHECK(!batch_resource.empty());
+        return batch_resource[0].blocks(layer_id, region_name);
+    }
+
     const BlockIndicesType& kernelBlocks(int batch_id, int group_id = 0) const {
         RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
         return batch_resource[batch_id].kernelBlocks(group_id);
@@ -93,9 +98,24 @@ public:
         return batch_resource[batch_id].groupId(layer_id, region_name);
     }
 
+    const BlockIndicesType& kernelBlocks(int layer_id, KVCacheRegionName region_name) const {
+        RTP_LLM_CHECK(!batch_resource.empty());
+        return batch_resource[0].kernelBlocks(layer_id, region_name);
+    }
+
     BlockIds& mutableBlockIds(int batch_id, int group_id = 0) {
         RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
         return batch_resource[batch_id].mutableBlockIds(group_id);
+    }
+
+    BlockIds& mutableBlockIds(int layer_id, KVCacheRegionName region_name) {
+        RTP_LLM_CHECK(!batch_resource.empty());
+        return batch_resource[0].mutableBlockIds(layer_id, region_name);
+    }
+
+    int groupId(int layer_id, KVCacheRegionName region_name) const {
+        RTP_LLM_CHECK(!batch_resource.empty());
+        return batch_resource[0].groupId(layer_id, region_name);
     }
 
     const GroupBlockIds& groupBlocks(int batch_id = 0) const {

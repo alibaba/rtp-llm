@@ -5,12 +5,11 @@ class stays thin:
 
 * ``set_cp_info``                    — bind/clear Context-Parallel metadata on ``v4``
 * ``forward_layers``                 — per-layer loop body (embed → layers → reduce → norm)
-* ``DSv4WriteCacheStoreOp``          — per-layer PD-disagg cache_store writer (qwen3-style)
-* ``create_dsv4_write_cache_store_impl`` — factory helper mirroring
-  :func:`common.create_write_cache_store_impl`
+* unified cache-store registration via
+  :func:`rtp_llm.models_py.modules.factory.attention.common.create_write_cache_store_impl`
 * ``forward_prefill``                — full prefill arm (per-request loop over flat 1D input_ids)
 
-Generic KV-cache lookup helpers (``gid_for``, ``build_block_tables_batched``) live
+Generic KV-cache lookup helpers (``build_block_tables_batched``) live
 in :mod:`rtp_llm.models_py.modules.dsv4.kv_cache_utils`.
 
 Nothing in here holds state. ``DeepSeekV4Model.forward`` feeds in
@@ -22,31 +21,19 @@ does the same job for the decode path.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, Optional
 
 import torch
-from torch import nn
 
 from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
-from rtp_llm.models_py.modules.dsv4.attn_type import (
-    CSA_KV,
-    CSA_STATE,
-    HCA_KV,
-    HCA_STATE,
-    INDEXER_KV,
-    INDEXER_STATE,
-    SWA_KV,
-)
 from rtp_llm.models_py.modules.dsv4.cp import build_cp_context
-from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
-    build_block_tables_batched,
-    gid_for,
+from rtp_llm.models_py.modules.dsv4.kv_cache_utils import build_block_tables_batched
+from rtp_llm.models_py.modules.factory.attention.common import (
+    create_write_cache_store_impl,
 )
 from rtp_llm.ops import ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     KVCache,
-    KVCacheRegionName,
-    LayerKVCache,
     PyAttentionInputs,
     PyModelInputs,
     PyModelOutputs,
@@ -57,24 +44,6 @@ if TYPE_CHECKING:
     # doesn't depend on ``prefill`` today but this guard makes that
     # non-load-bearing (module loads fine even if the cycle reappears).
     from rtp_llm.models_py.modules.dsv4.transformer import V4Transformer
-
-
-# ---- DSV4 per-layer pool set ------------------------------------------------
-# Each layer's compress_ratio selects the set of pools it participates in:
-#   0   -> SWA-only: {SWA_KV}
-#   4   -> CSA layer: {SWA_KV, CSA_KV, INDEXER_KV, INDEXER_STATE, CSA_STATE}
-#   128 -> HCA layer: {SWA_KV, HCA_KV, HCA_STATE}
-_POOL_SET_BY_RATIO: Dict[int, frozenset] = {
-    0: frozenset((SWA_KV,)),
-    4: frozenset((SWA_KV, CSA_KV, INDEXER_KV, INDEXER_STATE, CSA_STATE)),
-    128: frozenset((SWA_KV, HCA_KV, HCA_STATE)),
-}
-
-# Attn types written as a LINEAR ring — their block_id rows are padded to
-# the group's full max_blocks_num but only the first 2 entries are valid
-# (DSV4 linear_fixed_cap=2). Tail is junk zero padding that would register
-# wrong block_ids in cache_store.
-_LINEAR_ATTN_TYPES: frozenset = frozenset((INDEXER_STATE, CSA_STATE, HCA_STATE, SWA_KV))
 
 
 def _build_positions_from_lengths(
@@ -167,9 +136,8 @@ def forward_layers(
     is flattened.
 
     When ``attn_inputs`` is provided AND cache_store is active, each layer's
-    KV pool write is registered with the PD-disagg cache_store immediately
-    after that layer's forward — matches the qwen3-style per-layer ownership
-    model (see :class:`DSv4WriteCacheStoreOp`).
+    owned KV regions are registered with the PD-disagg cache_store immediately
+    after that layer's forward.
     """
     # Build + propagate CP context once per prefill step. Under CP the
     # caller hands us a per-rank chunk slice (T_local = chunk_length),
@@ -211,10 +179,7 @@ def forward_layers(
     # a cheap None check.
     write_cache_store_impl = None
     if kv_cache is not None and attn_inputs is not None:
-        write_cache_store_impl = create_dsv4_write_cache_store_impl(
-            attn_inputs,
-            [layer.attn.compress_ratio for layer in v4.layers],
-        )
+        write_cache_store_impl = create_write_cache_store_impl(attn_inputs, kv_cache)
 
     h = v4.embed(input_ids)  # [T_total, dim]
     if _rt_on:
@@ -235,7 +200,7 @@ def forward_layers(
         if _rt_on:
             _rt.record(f"prefill_layer{layer_idx:02d}_out", h)
         if write_cache_store_impl is not None:
-            write_cache_store_impl(kv_cache, layer_idx)
+            write_cache_store_impl(kv_cache.get_layer_caches(layer_idx))
         if _rt_on:
             _rt.record(f"layer{layer_idx:02d}_out", h)
             if cp_ctx is None:
@@ -330,116 +295,6 @@ def forward_layers(
         _rt.dump(step=step, extra=extra)
         v4._dbg_step = step + 1
     return h  # [T, dim]
-
-
-class DSv4WriteCacheStoreOp(nn.Module):
-    """Per-layer PD-disagg cache_store writer for DSV4.
-
-    Mirrors the :class:`rtp_llm.models_py.modules.base.common.kvcache_store
-    .WriteCacheStoreOp` pattern used by qwen3/xqa, but adapted to DSV4's
-    per-layer 5-pool layout:
-
-    * SWA-only layer: ``{SWA_KV}``
-    * CSA layer (ratio=4): ``{SWA_KV, CSA_KV, INDEXER_KV, INDEXER_STATE, CSA_STATE}``
-    * HCA layer (ratio=128): ``{SWA_KV, HCA_KV, HCA_STATE}``
-
-    Each pool has its own ``(head_dim × entries_per_block × dtype)``
-    layout and its own block_id table. The shared
-    ``compute_ops.write_cache_store`` path assumes one pool per layer, so
-    this Op calls it once per (layer × pool), passing the pool-specific
-    block_id table, raw ``[num_blocks, stride_bytes]`` tensor,
-    ``group_id`` (used in the ``"_g{gid}"`` cache key suffix that decode
-    mirrors in ``DecodeRpcServer``) and per-pool stride.
-
-    Invariants bound at construct time:
-      * ``attn_inputs``      — ``input_lengths``, ``prefix_lengths``,
-        ``cache_store_inputs``, ``kv_cache_kernel_block_id_host_by_group``
-      * ``compress_ratios``  — list of per-layer ratios so ``forward``
-        can pick the right pool set without reaching back into ``v4``
-
-    Call convention mirrors qwen3/xqa: ``impl(kv_cache, layer_idx)``.
-    """
-
-    # int id → pybind ``KVCacheRegionName`` enum. Built at class scope so
-    # every instance shares the same table; ``attn_type.py`` stays free
-    # of a ``compute_ops`` (C++ .so) import dependency.
-    _ATTN_TYPE_ENUM_BY_INT: Dict[int, KVCacheRegionName] = {
-        CSA_KV: KVCacheRegionName.CSA_KV,
-        HCA_KV: KVCacheRegionName.HCA_KV,
-        INDEXER_KV: KVCacheRegionName.INDEXER_KV,
-        INDEXER_STATE: KVCacheRegionName.INDEXER_STATE,
-        CSA_STATE: KVCacheRegionName.CSA_STATE,
-        HCA_STATE: KVCacheRegionName.HCA_STATE,
-        SWA_KV: KVCacheRegionName.SWA_KV,
-    }
-
-    def __init__(
-        self,
-        attn_inputs: PyAttentionInputs,
-        compress_ratios: List[int],
-    ):
-        super().__init__()
-        self.attn_inputs = attn_inputs
-        self.compress_ratios = compress_ratios
-        # Invariant references — safe to capture once because they don't
-        # change across the forward.
-        self.input_lengths: torch.Tensor = attn_inputs.input_lengths
-        cp_info = getattr(attn_inputs, "context_parallel_info", None)
-        if cp_info is not None:
-            actual_lengths = getattr(cp_info, "prefill_actual_input_lengths_cpu", None)
-            if actual_lengths is not None and actual_lengths.numel() > 0:
-                self.input_lengths = actual_lengths
-        self.prefix_lengths: torch.Tensor = attn_inputs.prefix_lengths
-        self.cache_store_inputs = attn_inputs.cache_store_inputs
-        self.by_group_host: List[torch.Tensor] = (
-            attn_inputs.kv_cache_kernel_block_id_host_by_group
-        )
-
-    def forward(self, kv_cache: KVCache, layer_idx: int) -> None:
-        import rtp_llm.ops.compute_ops as compute_ops
-
-        ratio = self.compress_ratios[layer_idx]
-        pool_set = _POOL_SET_BY_RATIO.get(ratio, _POOL_SET_BY_RATIO[0])
-        for attn_type in pool_set:
-            # Model is group-oblivious: it only knows which attn_types this
-            # layer participates in. Resolve (layer, attn_type) → gid via
-            # the DSV4 dense gid list populated by NormalModelInputGatherer.
-            gid = gid_for(kv_cache, self.attn_inputs, layer_idx, attn_type)
-            if gid < 0 or gid >= len(self.by_group_host):
-                continue
-            attn_type_enum = self._ATTN_TYPE_ENUM_BY_INT.get(attn_type)
-            if attn_type_enum is None:
-                continue
-            block_ids_2d: torch.Tensor = self.by_group_host[gid]
-            if block_ids_2d is None or block_ids_2d.numel() == 0:
-                continue
-            layer_kv: LayerKVCache = kv_cache.get_layer_cache(layer_idx, attn_type_enum)
-            compute_ops.write_cache_store(
-                self.input_lengths,
-                self.prefix_lengths,
-                block_ids_2d,
-                self.cache_store_inputs,
-                layer_kv,
-            )
-
-
-def create_dsv4_write_cache_store_impl(
-    attn_inputs: PyAttentionInputs,
-    compress_ratios: List[int],
-) -> Optional[DSv4WriteCacheStoreOp]:
-    """Factory mirroring :func:`common.create_write_cache_store_impl`:
-    return an active :class:`DSv4WriteCacheStoreOp` only when this is a
-    prefill step with cache_store bound AND a populated per-group block-id
-    host tensor; else ``None`` so the caller can no-op cheaply.
-    """
-    if not getattr(attn_inputs, "is_prefill", False):
-        return None
-    if getattr(attn_inputs, "cache_store_inputs", None) is None:
-        return None
-    by_group_host = getattr(attn_inputs, "kv_cache_kernel_block_id_host_by_group", None)
-    if not by_group_host:
-        return None
-    return DSv4WriteCacheStoreOp(attn_inputs, compress_ratios)
 
 
 def forward_prefill(
