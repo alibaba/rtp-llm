@@ -134,20 +134,24 @@ class CompressorVLLM(nn.Module):
         coff = 1 + self.overlap
         self.coff = coff
 
-        # ape / wkv / wgate stay FP32 — accumulation happens in FP32 inside
-        # the state pool; vLLM keeps the same convention. Register ape as a
-        # non-trainable Parameter so .to(device) follows the module.
+        # ape stays FP32 (additive bias accumulated in fp32 inside the state
+        # pool). wkv / wgate are bf16: the compressor GEMM is bf16(x) ×
+        # bf16(W); only the matmul *result* is upcast to fp32 before being
+        # handed to the state-pool / boundary-write Triton kernels (which
+        # still expect fp32 kv_raw/score_raw).
         self.ape = nn.Parameter(
             compressor_weights["ape"].float().contiguous(), requires_grad=False
         )
-        self.wkv = nn.Linear(dim, coff * head_dim, bias=False)
-        self.wgate = nn.Linear(dim, coff * head_dim, bias=False)
+        self.wkv = nn.Linear(dim, coff * head_dim, bias=False, dtype=torch.bfloat16)
+        self.wgate = nn.Linear(dim, coff * head_dim, bias=False, dtype=torch.bfloat16)
         with torch.no_grad():
             self.wkv.weight = nn.Parameter(
-                compressor_weights["wkv"].float(), requires_grad=False
+                compressor_weights["wkv"].to(torch.bfloat16).contiguous(),
+                requires_grad=False,
             )
             self.wgate.weight = nn.Parameter(
-                compressor_weights["wgate"].float(), requires_grad=False
+                compressor_weights["wgate"].to(torch.bfloat16).contiguous(),
+                requires_grad=False,
             )
         self.norm = _CompressorNorm(head_dim)
         self.norm.weight = nn.Parameter(
@@ -155,8 +159,8 @@ class CompressorVLLM(nn.Module):
             requires_grad=False,
         )
 
-        # Fuse wkv + wgate into one fp32 weight matrix; saves one SIMT
-        # SGEMM launch per compressor decode call.
+        # Fuse wkv + wgate into one bf16 weight matrix; saves one GEMM
+        # launch per compressor decode call.
         self._wkv_wgate_fused: Optional[torch.Tensor] = None
         self._fuse_wkv_wgate(coff)
 
@@ -179,7 +183,7 @@ class CompressorVLLM(nn.Module):
         self._dbg_prefix: Optional[str] = None
 
     def _fuse_wkv_wgate(self, coff: int) -> None:
-        """Concat wkv + wgate along out-dim into one fused fp32 weight,
+        """Concat wkv + wgate along out-dim into one fused bf16 weight,
         then re-point ``wkv.weight`` / ``wgate.weight`` to views of the
         fused storage (zero memory overhead)."""
         with torch.no_grad():
@@ -465,9 +469,11 @@ class CompressorVLLM(nn.Module):
             return None
 
         device = x.device
-        x32 = x.float()
+        # bf16(x) × bf16(W) GEMM; upcast result to fp32 for the downstream
+        # state-pool / boundary-write Triton kernels.
+        x_bf16 = x if x.dtype == torch.bfloat16 else x.to(torch.bfloat16)
         out_dim = (1 + self.overlap) * self.head_dim
-        fused_out = torch.nn.functional.linear(x32, self._wkv_wgate_fused)
+        fused_out = torch.nn.functional.linear(x_bf16, self._wkv_wgate_fused).float()
         kv, score = fused_out[..., :out_dim], fused_out[..., out_dim:]
 
         cp_gather = cp_should_gather(cp_ctx, start_pos)
@@ -527,9 +533,11 @@ class CompressorVLLM(nn.Module):
             return None
 
         device = x.device
-        x32 = x.float()
+        # bf16(x) × bf16(W) GEMM; upcast result to fp32 for the downstream
+        # state-pool / boundary-write Triton kernels.
+        x_bf16 = x if x.dtype == torch.bfloat16 else x.to(torch.bfloat16)
         out_dim = (1 + self.overlap) * self.head_dim
-        fused_out = torch.nn.functional.linear(x32, self._wkv_wgate_fused)
+        fused_out = torch.nn.functional.linear(x_bf16, self._wkv_wgate_fused).float()
         kv, score = fused_out[..., :out_dim], fused_out[..., out_dim:]
 
         kv_flat = _flatten_token_major_2d(kv, bsz)
