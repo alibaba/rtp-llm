@@ -72,7 +72,6 @@ class SparseAttnV4DecodeFp8Op:
         self.n_heads = n_heads
         self.head_dim = head_dim
         self.softmax_scale = softmax_scale
-        self._warned_nonzero_sink = False
         # Iter2: cached FlashMLASchedMeta keyed by the dual-pool flag (single
         # vs dual). The wheel populates ``sched_meta.config`` and the kernel-
         # side ``tile_scheduler_metadata`` / ``num_splits`` tensors on the
@@ -204,6 +203,10 @@ class SparseAttnV4DecodeFp8Op:
             )
             self._sched_meta_cache[cache_key] = sched_meta
 
+        # DSv4 attn_sink is per-head fp32, loaded from ckpt (layers.*.attn.attn_sink
+        # shape [n_heads], non-zero ~0.3..0.6 mean). FlashMLA kernel applies
+        # output *= exp(lse) / (exp(lse) + exp(attn_sink)). Mirrors vLLM
+        # ``deepseek_v4_attention.py:860`` (both single- and dual-pool calls).
         attn_out, _ = flash_mla_with_kvcache(
             q=q,
             k_cache=kv_4d,
@@ -216,19 +219,10 @@ class SparseAttnV4DecodeFp8Op:
             indices=topk_3d,
             softmax_scale=self.softmax_scale,
             topk_length=topk_length,
+            attn_sink=attn_sink,
             extra_k_cache=extra_kv_4d,
             extra_indices_in_kvcache=extra_topk_3d,
             extra_topk_length=extra_topk_length,
         )
-        # V4-Flash attn_sink is zero. Avoid tensor.item() while CUDA graph is
-        # capturing; if a non-zero sink ever appears, warn once on an eager call.
-        is_capturing = q.is_cuda and torch.cuda.is_current_stream_capturing()
-        if attn_sink is not None and not is_capturing and not self._warned_nonzero_sink:
-            self._warned_nonzero_sink = True
-            if attn_sink.abs().max().item() > 0:
-                logging.warning(
-                    "[dsv4-fp8] non-zero attn_sink with FlashMLA path: sink "
-                    "correction deferred"
-                )
 
         return attn_out.view(B, q_len, H, self.head_dim).contiguous()
