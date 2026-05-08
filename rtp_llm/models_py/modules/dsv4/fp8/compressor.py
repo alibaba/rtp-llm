@@ -144,10 +144,10 @@ class CompressorFP8(nn.Module):
         self.wgate = nn.Linear(dim, coff * head_dim, bias=False)
         with torch.no_grad():
             self.wkv.weight = nn.Parameter(
-                compressor_weights["wkv"].float(), requires_grad=False
+                compressor_weights["wkv"], requires_grad=False
             )
             self.wgate.weight = nn.Parameter(
-                compressor_weights["wgate"].float(), requires_grad=False
+                compressor_weights["wgate"], requires_grad=False
             )
         self.norm = _CompressorNorm(head_dim)
         self.norm.weight = nn.Parameter(
@@ -155,8 +155,8 @@ class CompressorFP8(nn.Module):
             requires_grad=False,
         )
 
-        # Fuse wkv + wgate into one fp32 weight matrix; saves one SIMT
-        # SGEMM launch per compressor decode call (~92/step at bs16).
+        # Fuse wkv + wgate into one bf16 weight matrix; saves one
+        # GEMM launch per compressor decode call (~92/step at bs16).
         self._wkv_wgate_fused: Optional[torch.Tensor] = None
         self._fuse_wkv_wgate(coff)
 
@@ -182,7 +182,7 @@ class CompressorFP8(nn.Module):
         self._dbg_prefix: Optional[str] = None
 
     def _fuse_wkv_wgate(self, coff: int) -> None:
-        """Concat wkv + wgate along out-dim into one fused fp32 weight,
+        """Concat wkv + wgate along out-dim into one fused bf16 weight,
         then re-point ``wkv.weight`` / ``wgate.weight`` to views of the
         fused storage (zero memory overhead)."""
         with torch.no_grad():
@@ -471,9 +471,8 @@ class CompressorFP8(nn.Module):
             return None
 
         device = x.device
-        x32 = x.float()
         out_dim = (1 + self.overlap) * self.head_dim
-        fused_out = torch.nn.functional.linear(x32, self._wkv_wgate_fused)
+        fused_out = torch.nn.functional.linear(x, self._wkv_wgate_fused)
         kv, score = fused_out[..., :out_dim], fused_out[..., out_dim:]
 
         cp_ctx = self._cp_ctx
@@ -507,9 +506,8 @@ class CompressorFP8(nn.Module):
             return None
 
         device = x.device
-        x32 = x.float()
         out_dim = (1 + self.overlap) * self.head_dim
-        fused_out = torch.nn.functional.linear(x32, self._wkv_wgate_fused)
+        fused_out = torch.nn.functional.linear(x, self._wkv_wgate_fused)
         kv, score = fused_out[..., :out_dim], fused_out[..., out_dim:]
 
         kv_flat = kv.reshape(bsz, -1).contiguous()
