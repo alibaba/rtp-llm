@@ -271,16 +271,182 @@ py_test(
     tags = ["manual"],
 )
 
+# V4-Flash DP=4 + EP=4 captured-graph decode at fixed bs=128 / input_len=64K.
+# Same shape as baseline_v2 in dpskv4-study/perf/branch_split_rebase/ — 64K
+# context × 128 batch × DP=4 × FP8 KV × FP8_PER_BLOCK weights × Mega MoE ×
+# cuda graph capture. Canonical rebase-branch iter3 bench target.
+py_test(
+    name = "v4_flash_dp4_decode_bs128_64k_perf",
+    main = "batch_decode_test.py",
+    srcs = ["batch_decode_test.py"],
+    timeout = "eternal",
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = ["//rtp_llm:sdk"],
+    args = [
+        "--model_type", "deepseek_v4",
+        "--checkpoint_path", "/mnt/nas1/hf/DeepSeek-V4-Flash",
+        "--tokenizer_path", "/mnt/nas1/hf/DeepSeek-V4-Flash",
+        "--batch_size", "128",
+        "--input_len", "65536",
+        "--partial", "1",
+        "--decode_test_length", "16",
+        "--seq_size_per_block", "64",
+        "--max_seq_len", "65664",
+        "--tp_size", "1",
+        "--dp_size", "4",
+        "--ep_size", "4",
+        "--world_size", "4",
+        "--use_deepep_moe", "1",
+        "--use_deepep_low_latency", "0",
+        "--act_type", "BF16",
+        "--quantization", "FP8_PER_BLOCK",
+        "--fp8_kv_cache", "1",
+        "--load_method", "fastsafetensors",
+        "--concurrency_limit", "32",
+        "--enable_cuda_graph", "1",
+        "--reserver_runtime_mem_mb", "32768",
+        "--max_context_batch_size", "1",
+    ],
+    env = {
+        "WORLD_SIZE": "4",
+        "DG_JIT_CPP_STANDARD": "20",
+        "GEN_TIMELINE_SYNC": "1",
+        "PERF_PREARM_PROFILE": "1",
+        "PERF_PROFILE_NUM_STEPS": "4",
+        "PERF_PROFILE_ARM_SLEEP": "2",
+        "PERF_PROFILE_FLUSH_SLEEP": "120",
+        "DSV4_USE_MEGA_MOE": "1",
+    },
+    tags = ["manual"],
+)
+
+# No-graph sibling of v4_flash_dp4_decode_bs128_64k_perf. Disables CUDA graph
+# capture so every torch op in _forward_decode_body surfaces individually in
+# the profiler timeline. Used by iter3 to drive "eliminate torch micro-ops".
+py_test(
+    name = "v4_flash_dp4_decode_bs128_64k_perf_nograph",
+    main = "batch_decode_test.py",
+    srcs = ["batch_decode_test.py"],
+    timeout = "eternal",
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = ["//rtp_llm:sdk"],
+    args = [
+        "--model_type", "deepseek_v4",
+        "--checkpoint_path", "/mnt/nas1/hf/DeepSeek-V4-Flash",
+        "--tokenizer_path", "/mnt/nas1/hf/DeepSeek-V4-Flash",
+        "--batch_size", "128",
+        "--input_len", "65536",
+        "--partial", "1",
+        "--decode_test_length", "16",
+        "--seq_size_per_block", "64",
+        "--max_seq_len", "65664",
+        "--tp_size", "1",
+        "--dp_size", "4",
+        "--ep_size", "4",
+        "--world_size", "4",
+        "--use_deepep_moe", "1",
+        "--use_deepep_low_latency", "0",
+        "--act_type", "BF16",
+        "--quantization", "FP8_PER_BLOCK",
+        "--fp8_kv_cache", "1",
+        "--load_method", "fastsafetensors",
+        "--concurrency_limit", "32",
+        "--enable_cuda_graph", "0",
+        "--reserver_runtime_mem_mb", "32768",
+        "--max_context_batch_size", "1",
+    ],
+    env = {
+        "WORLD_SIZE": "4",
+        "DG_JIT_CPP_STANDARD": "20",
+        "GEN_TIMELINE_SYNC": "1",
+        "PERF_PREARM_PROFILE": "1",
+        "PERF_PROFILE_NUM_STEPS": "4",
+        "PERF_PROFILE_ARM_SLEEP": "2",
+        "PERF_PROFILE_FLUSH_SLEEP": "120",
+        "DSV4_USE_MEGA_MOE": "1",
+    },
+    tags = ["manual"],
+)
+
+# No-graph sibling of v4_flash_dp4_decode_bs128_16k_perf. Disables CUDA graph
+# capture so every torch op in _forward_decode_body surfaces individually in
+# the profiler timeline — the record_function regions tagged
+# "L{XX}/{ratio}/<stage>" stay navigable, and stray elementwise / dtype-convert
+# / contiguous calls that get coalesced under graph capture become visible.
+# Used by iter3 to drive the "eliminate torch micro-ops" iterations.
+py_test(
+    name = "v4_flash_dp4_decode_bs128_16k_perf_nograph",
+    main = "batch_decode_test.py",
+    srcs = ["batch_decode_test.py"],
+    timeout = "eternal",
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = ["//rtp_llm:sdk"],
+    args = [
+        "--model_type", "deepseek_v4",
+        "--checkpoint_path", "/mnt/nas1/hf/DeepSeek-V4-Flash",
+        "--tokenizer_path", "/mnt/nas1/hf/DeepSeek-V4-Flash",
+        "--batch_size", "128",
+        "--input_len", "16384",
+        "--partial", "1",
+        "--decode_test_length", "16",
+        "--seq_size_per_block", "64",
+        "--max_seq_len", "16448",
+        "--tp_size", "1",
+        "--dp_size", "4",
+        "--ep_size", "4",
+        "--world_size", "4",
+        "--use_deepep_moe", "1",
+        "--use_deepep_low_latency", "0",
+        "--act_type", "BF16",
+        "--quantization", "FP8_PER_BLOCK",
+        "--fp8_kv_cache", "1",
+        "--load_method", "fastsafetensors",
+        "--concurrency_limit", "32",
+        "--enable_cuda_graph", "0",
+        "--reserver_runtime_mem_mb", "32768",
+        "--max_context_batch_size", "1",
+    ],
+    env = {
+        "WORLD_SIZE": "4",
+        "DG_JIT_CPP_STANDARD": "20",
+        "GEN_TIMELINE_SYNC": "1",
+        "PERF_PREARM_PROFILE": "1",
+        "PERF_PROFILE_NUM_STEPS": "4",
+        "PERF_PROFILE_ARM_SLEEP": "2",
+        "PERF_PROFILE_FLUSH_SLEEP": "120",
+        "DSV4_USE_MEGA_MOE": "1",
+    },
+    tags = ["manual"],
+)
+
 # DeepSeek V4-Flash perf coverage on SM100 (B300 / GB200).
-#   v4_flash_cp4_ep4_prefill_64k_perf      → CP=4 EP=4 64k prefill timeline
-#   v4_flash_dp4_decode_grid_perf          → DP=4 EP=4 captured-graph decode grid
-#   v4_flash_dp4_decode_bs128_16k_perf     → DP=4 EP=4 fixed bs=128/input=16K bench
+#   v4_flash_cp4_ep4_prefill_64k_perf          → CP=4 EP=4 64k prefill timeline
+#   v4_flash_dp4_decode_grid_perf              → DP=4 EP=4 captured-graph decode grid
+#   v4_flash_dp4_decode_bs128_16k_perf         → DP=4 EP=4 fixed bs=128/input=16K bench
+#   v4_flash_dp4_decode_bs128_16k_perf_nograph → 16K, CUDA graph off
+#   v4_flash_dp4_decode_bs128_64k_perf         → DP=4 EP=4 fixed bs=128/input=64K (iter3 canonical)
+#   v4_flash_dp4_decode_bs128_64k_perf_nograph → 64K, CUDA graph off (iter3 micro-op hunt)
 test_suite(
     name = "perf_dsv4_v4_flash",
     tests = [
         ":v4_flash_cp4_ep4_prefill_64k_perf",
         ":v4_flash_dp4_decode_grid_perf",
         ":v4_flash_dp4_decode_bs128_16k_perf",
+        ":v4_flash_dp4_decode_bs128_16k_perf_nograph",
+        ":v4_flash_dp4_decode_bs128_64k_perf",
+        ":v4_flash_dp4_decode_bs128_64k_perf_nograph",
     ],
     tags = ["manual"],
 )
