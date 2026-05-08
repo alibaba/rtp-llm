@@ -472,7 +472,9 @@ class CompressorFP8(nn.Module):
 
         device = x.device
         out_dim = (1 + self.overlap) * self.head_dim
-        fused_out = torch.nn.functional.linear(x, self._wkv_wgate_fused)
+        fused_out = torch.nn.functional.linear(
+            x.to(self._wkv_wgate_fused.dtype), self._wkv_wgate_fused
+        )
         kv, score = fused_out[..., :out_dim], fused_out[..., out_dim:]
 
         cp_ctx = self._cp_ctx
@@ -507,7 +509,9 @@ class CompressorFP8(nn.Module):
 
         device = x.device
         out_dim = (1 + self.overlap) * self.head_dim
-        fused_out = torch.nn.functional.linear(x, self._wkv_wgate_fused)
+        fused_out = torch.nn.functional.linear(
+            x.to(self._wkv_wgate_fused.dtype), self._wkv_wgate_fused
+        )
         kv, score = fused_out[..., :out_dim], fused_out[..., out_dim:]
 
         kv_flat = kv.reshape(bsz, -1).contiguous()
