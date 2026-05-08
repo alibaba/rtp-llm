@@ -22,7 +22,7 @@ def _use_vllm_compressor() -> bool:
     in lockstep with the host attention compressor."""
     import os
 
-    return os.environ.get("DSV4_COMPRESSOR_VLLM", "0") != "0"
+    return os.environ.get("DSV4_COMPRESSOR_VLLM", "1") != "0"
 
 
 from rtp_llm.models_py.modules.dsv4._metadata_triton import build_pool_slots
