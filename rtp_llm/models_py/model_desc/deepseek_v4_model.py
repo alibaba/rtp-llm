@@ -126,6 +126,189 @@ def _args_from_model_config(
     )
 
 
+def _positive_env_int(name: str) -> Optional[int]:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        logging.warning("Ignore invalid %s=%r; expected positive integer", name, raw)
+        return None
+    if value <= 0:
+        logging.warning("Ignore invalid %s=%r; expected positive integer", name, raw)
+        return None
+    return value
+
+
+def _rank_local_cuda_device() -> Optional[torch.device]:
+    if not torch.cuda.is_available():
+        return None
+    local_rank = os.environ.get("LOCAL_RANK")
+    if local_rank is None:
+        world_rank = os.environ.get("WORLD_RANK")
+        local_world_size = os.environ.get("LOCAL_WORLD_SIZE")
+        if world_rank is not None and local_world_size is not None:
+            try:
+                local_rank = str(int(world_rank) % max(int(local_world_size), 1))
+            except ValueError:
+                local_rank = None
+    if local_rank is None:
+        return None
+    try:
+        rank = int(local_rank)
+    except ValueError:
+        logging.warning("Ignore invalid LOCAL_RANK=%r", local_rank)
+        return None
+    if rank < 0 or rank >= torch.cuda.device_count():
+        logging.warning(
+            "Ignore out-of-range local CUDA rank %s; device_count=%s",
+            rank,
+            torch.cuda.device_count(),
+        )
+        return None
+    return torch.device(f"cuda:{rank}")
+
+
+def _cap_mega_tokens_per_rank(
+    args: V4Args,
+    parallelism_config,
+    max_generate_batch_size: int,
+) -> None:
+    # CP-aware Mega MoE buffer sizing.  When CP is on, each rank only sees
+    # ``max_seq_len / cp_size`` prefill tokens (zigzag split), so the per-rank
+    # symmetric dispatch buffer can be cp_size smaller.
+    cp_size = 1
+    if (
+        parallelism_config is not None
+        and getattr(parallelism_config, "prefill_cp_config", None) is not None
+    ):
+        try:
+            if parallelism_config.prefill_cp_config.is_enabled():
+                cp_size = int(getattr(parallelism_config, "tp_size", 1) or 1)
+        except Exception:
+            pass
+    if cp_size > 1:
+        new_tokens_per_rank_bound = max(args.max_seq_len // cp_size, 4096)
+        logging.info(
+            "[DeepSeekV4Model] CP=%d: max_tokens_per_rank %d -> %d "
+            "(Mega MoE per-rank symm-mem buffer)",
+            cp_size,
+            args.max_tokens_per_rank,
+            new_tokens_per_rank_bound,
+        )
+        args.max_tokens_per_rank = new_tokens_per_rank_bound
+
+    override_tokens_per_rank = _positive_env_int("DSV4_MEGA_MOE_MAX_TOKENS_PER_RANK")
+    if override_tokens_per_rank is not None:
+        logging.info(
+            "[DeepSeekV4Model] DSV4_MEGA_MOE_MAX_TOKENS_PER_RANK: "
+            "max_tokens_per_rank %d -> %d",
+            args.max_tokens_per_rank,
+            override_tokens_per_rank,
+        )
+        args.max_tokens_per_rank = override_tokens_per_rank
+    elif os.environ.get("ROLE_TYPE", "").upper() == "DECODE":
+        # Decode runs one token per live sequence through MoE.  Sizing the Mega
+        # MoE symmetric buffer from a long MAX_SEQ_LEN can reserve most of a
+        # B300 before weights finish loading.
+        decode_tokens_per_rank = max(int(max_generate_batch_size or 1), 1)
+        if args.max_tokens_per_rank > decode_tokens_per_rank:
+            logging.info(
+                "[DeepSeekV4Model] DECODE: max_tokens_per_rank %d -> %d "
+                "(Mega MoE per-step batch bound)",
+                args.max_tokens_per_rank,
+                decode_tokens_per_rank,
+            )
+            args.max_tokens_per_rank = decode_tokens_per_rank
+
+
+def _prewarm_mega_moe_buffer(args: V4Args) -> None:
+    if args.ep_size <= 1 or os.environ.get("DSV4_PREWARM_MEGA_MOE_BUFFER", "1") == "0":
+        return
+
+    import torch.distributed as dist
+
+    if not dist.is_initialized():
+        logging.info(
+            "[DeepSeekV4Model] skip Mega MoE symm buffer prewarm: "
+            "torch.distributed is not initialized"
+        )
+        return
+
+    from rtp_llm.models_py.modules.dsv4.moe.mega_buf import (
+        get_mega_moe_group,
+        _get_or_create_mega_buf,
+        _mega_moe_disabled_or_unavailable_reason,
+        _mega_moe_enabled,
+    )
+
+    if not _mega_moe_enabled():
+        raise RuntimeError(
+            "DSV4 EP MoE requires MegaMoEStrategy, but Mega MoE is unavailable. "
+            f"Reason: {_mega_moe_disabled_or_unavailable_reason()}."
+        )
+
+    rank_device = _rank_local_cuda_device()
+    if rank_device is not None:
+        torch.cuda.set_device(rank_device)
+    group = get_mega_moe_group()
+    logging.info(
+        "[DeepSeekV4Model] prewarm Mega MoE symm buffer on %s: "
+        "experts=%d tokens_per_rank=%d topk=%d hidden=%d inter=%d group=%s",
+        rank_device if rank_device is not None else "current CUDA device",
+        args.n_routed_experts,
+        max(args.max_tokens_per_rank, 1),
+        args.n_activated_experts,
+        args.dim,
+        args.moe_inter_dim,
+        getattr(group, "group_name", group),
+    )
+    _get_or_create_mega_buf(
+        group=group,
+        num_experts=args.n_routed_experts,
+        num_max_tokens_per_rank=max(args.max_tokens_per_rank, 1),
+        num_topk=args.n_activated_experts,
+        hidden=args.dim,
+        intermediate_hidden=args.moe_inter_dim,
+        use_fp8_dispatch=True,
+        activation="swiglu",
+    )
+
+
+def prewarm_mega_moe_buffer_from_config(
+    model_config: ModelConfig,
+    parallelism_config,
+    moe_config,
+    max_generate_batch_size: int,
+) -> None:
+    args = _args_from_model_config(model_config, max_generate_batch_size)
+    if (
+        moe_config is not None
+        and getattr(moe_config, "moe_inter_padding_size", 0) > 0
+    ):
+        args.moe_inter_dim = int(moe_config.moe_inter_padding_size)
+    else:
+        args.moe_inter_dim = int(model_config.inter_size) or args.moe_inter_dim
+
+    if parallelism_config is not None:
+        if hasattr(parallelism_config, "get_attn_tp_size"):
+            args.tp_size = int(parallelism_config.get_attn_tp_size() or 1)
+            args.tp_rank = int(parallelism_config.get_attn_tp_rank() or 0)
+        else:
+            args.tp_size = int(getattr(parallelism_config, "tp_size", 1) or 1)
+            args.tp_rank = int(getattr(parallelism_config, "tp_rank", 0) or 0)
+        args.ep_size = int(getattr(parallelism_config, "ep_size", 1) or 1)
+        args.ep_rank = int(getattr(parallelism_config, "ep_rank", 0) or 0)
+        args.dp_size = int(getattr(parallelism_config, "dp_size", 1) or 1)
+        args.dp_rank = int(getattr(parallelism_config, "dp_rank", 0) or 0)
+        args.world_size = int(getattr(parallelism_config, "world_size", 1) or 1)
+        args.world_rank = int(getattr(parallelism_config, "world_rank", 0) or 0)
+
+    _cap_mega_tokens_per_rank(args, parallelism_config, max_generate_batch_size)
+    _prewarm_mega_moe_buffer(args)
+
+
 class DeepSeekV4Model(GptModelBase):
     """Framework-facing model: owns a V4Transformer, feeds framework IO into it."""
 
@@ -201,36 +384,7 @@ class DeepSeekV4Model(GptModelBase):
                 args.dp_size,
             )
 
-        # CP-aware Mega MoE buffer sizing.  When CP is on, each rank only
-        # sees ``max_seq_len / cp_size`` prefill tokens (zigzag split), so
-        # the per-rank symm-mem dispatch buffer can be cp_size× smaller.
-        # Without this, a 64k+CP=4 prefill tries to allocate a per-rank
-        # buffer sized for the full 64k which aborts in
-        # ``CUDASymmetricMemory::~CUDASymmetricMemory`` during V4Transformer
-        # construction (per-rank symm region limit + ~190 GB BF16 footprint
-        # split across 4 ranks leaves no headroom).  RTP-LLM's CP convention
-        # repurposes the TP group as the CP group (cp_size == raw tp_size,
-        # ``get_attn_tp_size()`` returns 1), so use the raw tp_size here.
-        cp_size = 1
-        if (
-            parallelism_config is not None
-            and getattr(parallelism_config, "prefill_cp_config", None) is not None
-        ):
-            try:
-                if parallelism_config.prefill_cp_config.is_enabled():
-                    cp_size = int(getattr(parallelism_config, "tp_size", 1) or 1)
-            except Exception:  # pyi-only stub or non-CP build
-                pass
-        if cp_size > 1:
-            new_tokens_per_rank_bound = max(args.max_seq_len // cp_size, 4096)
-            logging.info(
-                "[DeepSeekV4Model] CP=%d: max_tokens_per_rank %d -> %d "
-                "(Mega MoE per-rank symm-mem buffer)",
-                cp_size,
-                args.max_tokens_per_rank,
-                new_tokens_per_rank_bound,
-            )
-            args.max_tokens_per_rank = new_tokens_per_rank_bound
+        _cap_mega_tokens_per_rank(args, parallelism_config, max_generate_batch_size)
 
         logging.info(
             "[DeepSeekV4Model] V4Args: n_layers=%d n_heads=%d head_dim=%d q_lora=%d "
@@ -252,6 +406,7 @@ class DeepSeekV4Model(GptModelBase):
             args.swiglu_limit,
         )
         self._v4_args = args
+        _prewarm_mega_moe_buffer(args)
 
         # Defer V4Transformer construction to `initialize()` where each
         # dsv4 sub-module reads its weights directly from the framework's
@@ -291,6 +446,13 @@ class DeepSeekV4Model(GptModelBase):
 
     def _initialize_impl(self, init_resource: PyModelInitResources) -> bool:
         # Called by the engine after construction and before forward.
+        rank_device = _rank_local_cuda_device()
+        if rank_device is not None:
+            torch.cuda.set_device(rank_device)
+            logging.info(
+                "[DeepSeekV4Model] set CUDA current device for init thread to %s",
+                rank_device,
+            )
         super().initialize(init_resource)
         if self._materialized:
             return True

@@ -55,10 +55,10 @@ def _import_tk():
     try:
         from rtp_llm.models_py.modules.dsv4 import tilelang_kernels as _dsv4_tl
 
+        if hasattr(_dsv4_tl, "_ensure_libz3_loadable"):
+            _dsv4_tl._ensure_libz3_loadable()
         if hasattr(_dsv4_tl, "_ensure_tvm_tmpdir_writable"):
             _dsv4_tl._ensure_tvm_tmpdir_writable()
-        if hasattr(_dsv4_tl, "_ensure_z3_loadable"):
-            _dsv4_tl._ensure_z3_loadable()
     except Exception as e:  # pragma: no cover
         _log.debug("dsv4 tilelang env-prep skipped: %r", e)
 

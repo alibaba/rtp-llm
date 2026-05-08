@@ -53,6 +53,7 @@ def start_backend_server_impl(
     global_controller,
     py_env_configs: PyEnvConfigs,
     process_manager: ProcessManager = None,
+    wait_ready: bool = False,
 ):
     from rtp_llm.start_backend_server import start_backend_server
 
@@ -116,13 +117,26 @@ def start_backend_server_impl(
         return False
 
     # Register health check with ProcessManager using custom check_ready_fn
-    if process_manager:
+    if process_manager and not wait_ready:
         process_manager.register_health_check(
             processes=[backend_process],
             process_name="backend_server",
             check_ready_fn=check_backend_ready,
             retry_interval_seconds=0.1,
         )
+
+    if wait_ready:
+        start_time = time.time()
+        while True:
+            if not backend_process.is_alive():
+                raise Exception(
+                    f"Backend server process exited before ready: exitcode={backend_process.exitcode}"
+                )
+            if check_backend_ready():
+                break
+            if time.time() - start_time > max_wait_seconds:
+                raise Exception(f"Backend server startup timeout: {max_wait_seconds}s")
+            time.sleep(0.1)
 
     return backend_process
 
@@ -341,8 +355,14 @@ def start_server(py_env_configs: PyEnvConfigs):
     try:
         if py_env_configs.role_config.role_type != RoleType.FRONTEND:
             logging.info("start backend server")
+            serialize_server_startup = (
+                os.environ.get("RTP_SERIALIZE_SERVER_STARTUP", "1") != "0"
+            )
             backend_process = start_backend_server_impl(
-                global_controller, py_env_configs, process_manager
+                global_controller,
+                py_env_configs,
+                process_manager if not serialize_server_startup else None,
+                wait_ready=serialize_server_startup,
             )
             process_manager.add_process(backend_process)
 

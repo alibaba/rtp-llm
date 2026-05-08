@@ -14,7 +14,10 @@ so unlike ``flash_mla.flash_mla_sparse_fwd`` there is no "misleading
 name" concern.
 """
 
+import importlib as _importlib
 import logging as _logging
+import os as _os
+import sys as _sys
 from typing import Optional
 
 import torch
@@ -23,12 +26,39 @@ _log = _logging.getLogger(__name__)
 
 _TILELANG_AVAILABLE: bool = False
 _SPARSE_ATTN_KERNEL_CACHE: dict = {}
+_TILELANG_LAZY_SKIPPED: bool = False
 
 
 def _ensure_tvm_tmpdir_writable() -> None:
-    """Route TVM debug tempdirs away from a root-owned /tmp parent."""
+    """Prepare a writable, process-local TVM/nvcc temp directory.
+
+    TileLang JIT shells out through TVM/nvcc.  nvcc emits ``tmpxft_*``
+    intermediates directly under ``TMPDIR``; if multiple ranks compile the same
+    kernels concurrently with a shared TMPDIR, nvcc can race its own cleanup and
+    fail with missing ``*.cpp1.ii`` files.  Keep each rank process on its own
+    TMPDIR by default, but preserve the old writable-parent fallback.
+    """
     import os
     import tempfile
+
+    pid = str(os.getpid())
+    if os.environ.get("RTP_TILELANG_TMPDIR_ISOLATED_PID") == pid:
+        return
+
+    if os.environ.get("DSV4_TILELANG_ISOLATE_TMPDIR", "1") != "0":
+        base_tmpdir = os.environ.get("DSV4_TILELANG_TMPDIR_BASE")
+        if not base_tmpdir:
+            base_tmpdir = os.environ.get("TMPDIR") or tempfile.gettempdir()
+        rank = os.environ.get("WORLD_RANK") or os.environ.get("LOCAL_RANK") or "norank"
+        isolated_tmpdir = os.path.join(base_tmpdir, f"rank_{rank}_pid_{pid}")
+        try:
+            os.makedirs(isolated_tmpdir, exist_ok=True)
+            os.environ["TMPDIR"] = isolated_tmpdir
+            os.environ["RTP_TILELANG_TMPDIR_ISOLATED_PID"] = pid
+            tempfile.tempdir = None
+            return
+        except OSError:
+            pass
 
     default_parent = os.path.join(tempfile.gettempdir(), "tvm-debug-mode-tempdirs")
     if os.path.exists(default_parent) and os.access(default_parent, os.W_OK):
@@ -110,10 +140,14 @@ def _ensure_libz3_loadable() -> None:
                 pass
 
 
-_ensure_libz3_loadable()
-_ensure_tvm_tmpdir_writable()
+_LAZY_TILELANG_IMPORT = _os.environ.get("DSV4_TILELANG_LAZY_IMPORT", "1") != "0"
+if not _LAZY_TILELANG_IMPORT:
+    _ensure_libz3_loadable()
+    _ensure_tvm_tmpdir_writable()
 
 try:  # noqa: broad except — ImportError / OSError (CDLL symbol miss) / RuntimeError
+    if _LAZY_TILELANG_IMPORT:
+        raise ImportError("defer TileLang import until prewarm or first use")
     import tilelang
     import tilelang.language as T
 
@@ -236,18 +270,33 @@ try:  # noqa: broad except — ImportError / OSError (CDLL symbol miss) / Runtim
         return sparse_attn_kernel_
 
 except (ImportError, OSError, RuntimeError) as _e:  # pragma: no cover
-    _log.warning(
-        "[dsv4] tilelang unavailable (%s: %s); sparse attention falls "
-        "back to the Python reference",
-        type(_e).__name__,
-        _e,
-    )
+    if _LAZY_TILELANG_IMPORT:
+        _TILELANG_LAZY_SKIPPED = True
+        _log.info("[dsv4] defer TileLang import until prewarm or first use")
+    else:
+        _log.warning(
+            "[dsv4] tilelang unavailable (%s: %s); sparse attention falls "
+            "back to the Python reference",
+            type(_e).__name__,
+            _e,
+        )
     _TILELANG_AVAILABLE = False
 
 _log.info("[dsv4] tilelang_kernels init: _TILELANG_AVAILABLE=%s", _TILELANG_AVAILABLE)
 
 
+def _reload_with_tilelang():
+    if not _TILELANG_LAZY_SKIPPED:
+        return None
+    _os.environ["DSV4_TILELANG_LAZY_IMPORT"] = "0"
+    return _importlib.reload(_sys.modules[__name__])
+
+
 def tilelang_available() -> bool:
+    if not _TILELANG_AVAILABLE:
+        mod = _reload_with_tilelang()
+        if mod is not None:
+            return mod.tilelang_available()
     return _TILELANG_AVAILABLE
 
 
@@ -261,6 +310,9 @@ def prewarm(
     module-level _SPARSE_ATTN_KERNEL_CACHE and skip compilation.
     """
     if not _TILELANG_AVAILABLE:
+        mod = _reload_with_tilelang()
+        if mod is not None:
+            return mod.prewarm(n_heads, head_dim, softmax_scale, device)
         return
     h_padded = max(n_heads, 16)
     _log.info(
@@ -292,6 +344,9 @@ def sparse_attn(
     Caches the compiled kernel per ``(h_padded, d, softmax_scale)`` triple.
     """
     if not _TILELANG_AVAILABLE:
+        mod = _reload_with_tilelang()
+        if mod is not None:
+            return mod.sparse_attn(q, kv, attn_sink, topk_idxs, softmax_scale)
         raise RuntimeError(
             "tilelang is not available; cannot run V4 TileLang sparse_attn. "
             "Install tilelang>=0.1.7 (pip install --no-build-isolation tilelang).",

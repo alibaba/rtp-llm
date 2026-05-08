@@ -12,7 +12,9 @@ The cache key set MUST stay invariant across the refactor — see Phase 1 risk
 #9 in ``.claude/plans/optimized-riding-mist.md``.
 """
 
+import logging
 import os
+from datetime import timedelta
 
 import torch
 
@@ -21,6 +23,28 @@ import torch
 # collide; in practice there's only ever one entry per process.
 _MEGA_BUF_CACHE: dict = {}
 _MEGA_OUTPUT_CACHE: dict = {}
+_MEGA_GROUP = None
+
+
+def get_mega_moe_group():
+    """Return a dedicated same-rank NCCL group for DeepGEMM symmetric memory."""
+    global _MEGA_GROUP
+    if _MEGA_GROUP is not None:
+        return _MEGA_GROUP
+
+    import torch.distributed as dist
+
+    if not dist.is_initialized():
+        raise RuntimeError("Mega MoE process group requires torch.distributed")
+    ranks = list(range(dist.get_world_size()))
+    logging.info("Create Mega MoE process group with ranks=%s", ranks)
+    _MEGA_GROUP = dist.new_group(
+        ranks=ranks,
+        backend="nccl",
+        timeout=timedelta(days=36500),
+    )
+    dist.barrier(group=_MEGA_GROUP)
+    return _MEGA_GROUP
 
 
 def _get_or_create_mega_buf(
@@ -47,6 +71,18 @@ def _get_or_create_mega_buf(
     )
     buf = _MEGA_BUF_CACHE.get(key)
     if buf is None:
+        if torch.cuda.is_available():
+            logging.info(
+                "Create Mega MoE symm buffer: group=%s current_cuda=%d "
+                "experts=%d tokens_per_rank=%d topk=%d hidden=%d inter=%d",
+                getattr(group, "group_name", group),
+                torch.cuda.current_device(),
+                num_experts,
+                num_max_tokens_per_rank,
+                num_topk,
+                hidden,
+                intermediate_hidden,
+            )
         buf = deep_gemm.get_symm_buffer_for_mega_moe(
             group=group,
             num_experts=num_experts,
@@ -58,6 +94,14 @@ def _get_or_create_mega_buf(
             activation=activation,
         )
         _MEGA_BUF_CACHE[key] = buf
+    else:
+        logging.info(
+            "Reuse Mega MoE symm buffer: group=%s tokens_per_rank=%d hidden=%d inter=%d",
+            getattr(group, "group_name", group),
+            num_max_tokens_per_rank,
+            hidden,
+            intermediate_hidden,
+        )
     return buf
 
 

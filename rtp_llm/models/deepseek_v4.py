@@ -476,6 +476,25 @@ class DeepSeekV4(DeepSeekV2):
     `_create_python_model` until M2 lands the HCA-only forward path.
     """
 
+    def load(self, skip_python_model: bool = False):
+        if not skip_python_model:
+            remote_jit_dir = os.environ.get("REMOTE_JIT_DIR", None)
+            if remote_jit_dir:
+                os.environ["DG_JIT_REMOTE_CACHE_DIR"] = os.path.join(
+                    remote_jit_dir, "deep_gemm_python"
+                )
+            from rtp_llm.models_py.model_desc.deepseek_v4_model import (
+                prewarm_mega_moe_buffer_from_config,
+            )
+
+            prewarm_mega_moe_buffer_from_config(
+                self.model_config,
+                self.parallelism_config,
+                self.moe_config,
+                self.max_generate_batch_size,
+            )
+        return super().load(skip_python_model=skip_python_model)
+
     @classmethod
     def _create_config(cls, ckpt_path: str):
         config = ModelConfig()

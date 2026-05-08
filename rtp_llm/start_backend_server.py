@@ -92,6 +92,11 @@ def local_rank_start(
             py_env_configs.prefill_cp_config,
         )
         local_rank = py_env_configs.parallelism_config.local_rank
+        os.environ["WORLD_RANK"] = str(py_env_configs.parallelism_config.world_rank)
+        os.environ["LOCAL_RANK"] = str(local_rank)
+        os.environ["LOCAL_WORLD_SIZE"] = str(
+            py_env_configs.parallelism_config.local_world_size
+        )
         py_env_configs.server_config.set_local_rank(local_rank)
         py_env_configs.distribute_config.set_local_rank(local_rank)
         setup_cuda_device_and_accl_env(local_rank)
@@ -193,6 +198,8 @@ def _create_rank_processes(
         reader, writer = multiprocessing.Pipe(duplex=False)
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(cuda_device_list)
         os.environ["WORLD_RANK"] = str(world_rank)
+        os.environ["LOCAL_RANK"] = str(world_rank % local_world_size)
+        os.environ["LOCAL_WORLD_SIZE"] = str(local_world_size)
 
         proc = Process(
             target=local_rank_start,
