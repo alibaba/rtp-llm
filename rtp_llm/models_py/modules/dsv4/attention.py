@@ -53,11 +53,11 @@ from rtp_llm.models_py.modules.dsv4.compressor_vllm import CompressorVLLM
 
 def _use_vllm_compressor() -> bool:
     """Runtime switch for the vLLM-style per-token state-pool compressor
-    (BF16 KV pool). Set ``DSV4_COMPRESSOR_VLLM=1`` to opt in. Default off
-    so existing behavior is bit-equal."""
+    (BF16 KV pool). On by default; set ``DSV4_COMPRESSOR_VLLM=0`` to fall
+    back to the legacy logical-block ``Compressor``."""
     import os
 
-    return os.environ.get("DSV4_COMPRESSOR_VLLM", "0") != "0"
+    return os.environ.get("DSV4_COMPRESSOR_VLLM", "1") != "0"
 
 
 from rtp_llm.models_py.modules.dsv4.cp import (
