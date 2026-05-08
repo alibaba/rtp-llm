@@ -2,6 +2,7 @@
 
 #include <vector>
 #include <string>
+#include <string_view>
 #include <sstream>
 #include <fstream>
 #include <algorithm>
@@ -14,14 +15,22 @@ static const int token_num = 3;
 template<int N>
 struct sids {
     int rq_id[N];
+    uint64_t packed_key = 0;  // 预计算的 64-bit 打包 key，用于 N==3 时加速排序
 
-    inline bool operator<(const sids<N>& other) const {
-        for (int i = 0; i < N - 1; ++i) {
-            if (rq_id[i] != other.rq_id[i]) {
-                return rq_id[i] < other.rq_id[i];
+    __attribute__((always_inline)) bool operator<(const sids<N>& other) const {
+        if constexpr (N == 3) {
+            // N==3 时使用预计算的 packed_key，单次 64-bit 整数比较
+            return packed_key < other.packed_key;
+        } else {
+            // 显式展开前几个比较，消除小 N 时的循环开销，确保编译器内联最优
+            if (rq_id[0] != other.rq_id[0]) return rq_id[0] < other.rq_id[0];
+            if (N > 1 && rq_id[1] != other.rq_id[1]) return rq_id[1] < other.rq_id[1];
+            if (N > 2 && rq_id[2] != other.rq_id[2]) return rq_id[2] < other.rq_id[2];
+            for (int i = 3; i < N - 1; ++i) {
+                if (rq_id[i] != other.rq_id[i]) return rq_id[i] < other.rq_id[i];
             }
+            return rq_id[N - 1] < other.rq_id[N - 1];
         }
-        return rq_id[N - 1] < other.rq_id[N - 1];
     }
 };
 
@@ -196,6 +205,35 @@ bool build_csr_from_fresh_data(const std::vector<sids<N>>& fresh_data,
 }
 
 // ---------------------------------------------------------------------------
+// parse_sid_from_string_view<N>
+// 单次遍历解析 "t0_t1_t2" 格式，无需 find('_')，零拷贝。
+// ---------------------------------------------------------------------------
+template<int N>
+inline sids<N> parse_sid_from_string_view(std::string_view sv) {
+    sids<N> sid{};
+    const char* p   = sv.data();
+    const char* end = p + sv.size();
+    for (int j = 0; j < N && p < end; ++j) {
+        int value = 0;
+        while (p < end && *p >= '0' && *p <= '9') {
+            value = value * 10 + (*p - '0');
+            ++p;
+        }
+        sid.rq_id[j] = value;
+        if (p < end && *p == '_') {
+            ++p;
+        }
+    }
+    if constexpr (N == 3) {
+        // 每个字段分配 18 bits（最大支持 262143），覆盖千问3 词表（~152064）
+        sid.packed_key = (uint64_t(sid.rq_id[0]) << 36) |
+                         (uint64_t(sid.rq_id[1]) << 18) |
+                         uint64_t(sid.rq_id[2]);
+    }
+    return sid;
+}
+
+// ---------------------------------------------------------------------------
 // split_strings<N>
 // 将 "t0_t1_t2" 格式的字符串解析为 sids<N>。
 // ---------------------------------------------------------------------------
@@ -205,31 +243,7 @@ std::vector<sids<N>> split_strings(const std::vector<std::string>& ele_rq_ids) {
     result.reserve(ele_rq_ids.size());
 
     for (const std::string& str : ele_rq_ids) {
-        sids<N> sid{};
-        size_t  start = 0;
-        int     count = 0;
-
-        while (count < N) {
-            size_t end = str.find('_', start);
-            size_t token_end = (end == std::string::npos) ? str.size() : end;
-
-            int value = 0;
-            bool has_digit = false;
-            for (size_t k = start; k < token_end; ++k) {
-                char c = str[k];
-                if (c >= '0' && c <= '9') {
-                    value = value * 10 + (c - '0');
-                    has_digit = true;
-                }
-            }
-            if (has_digit) {
-                sid.rq_id[count] = value;
-            }
-            ++count;
-            if (end == std::string::npos) break;
-            start = end + 1;
-        }
-        result.emplace_back(sid);
+        result.emplace_back(parse_sid_from_string_view<N>(std::string_view(str)));
     }
     return result;
 }

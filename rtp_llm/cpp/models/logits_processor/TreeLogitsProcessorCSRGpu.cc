@@ -352,18 +352,17 @@ std::shared_ptr<TreeLogitsProcessorCSR> TreeLogitsProcessorCSR::fromGenerateInpu
     processor_ptr->pending_is_multi_seq_ = is_multi_seq;
     processor_ptr->pending_input_length_ = generate_input->inputLength();
 
-    // 捕获所需数据（按值拷贝，避免引用 generate_input 生命周期）
-    auto    ele_rq_ids_copy = generate_input->generate_config->ele_rq_ids;
-    int32_t vocab_size_copy = vocab_size;
-
     // 使用全局共享线程池执行后台 CPU 构建，避免每个请求新建 OS 线程。
+    // lambda 按值捕获 generate_input shared_ptr，保证 ele_rq_ids 字符串数据生命周期安全，
+    // 同时避免 std::vector<std::string> 的深拷贝开销。
     auto pool = getCsrInitThreadPool();
     processor_ptr->async_cpu_init_future_ = pool->async(
-        [ele_rq_ids_copy, vocab_size_copy]() -> std::shared_ptr<CSRIndex<token_num>> {
-            auto origin_rq_ids = split_strings<token_num>(ele_rq_ids_copy);
+        [generate_input, vocab_size]() -> std::shared_ptr<CSRIndex<token_num>> {
+            const auto& ele_rq_ids = generate_input->generate_config->ele_rq_ids;
+            auto origin_rq_ids = split_strings<token_num>(ele_rq_ids);
             std::sort(origin_rq_ids.begin(), origin_rq_ids.end());
             auto csr_index = std::make_shared<CSRIndex<token_num>>();
-            bool success   = build_csr_from_fresh_data<token_num>(origin_rq_ids, *csr_index, vocab_size_copy);
+            bool success   = build_csr_from_fresh_data<token_num>(origin_rq_ids, *csr_index, vocab_size);
             if (!success) {
                 return nullptr;
             }
