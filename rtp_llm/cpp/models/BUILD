@@ -73,6 +73,8 @@ cc_library(
         "//rtp_llm/cpp/multimodal_processor:multimodal_types",
         "//rtp_llm/cpp/pybind:py_utils",
         "//rtp_llm/cpp/kernels:kernels_sampling",
+        "@havenask//aios/autil:lock_free",
+        "@havenask//aios/autil:thread",
     ],
     visibility = ["//visibility:public"],
 )
