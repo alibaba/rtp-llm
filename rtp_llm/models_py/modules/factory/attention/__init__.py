@@ -54,6 +54,9 @@ else:
         from rtp_llm.models_py.modules.factory.attention.cuda_headwise_impl.headwise_fp8 import (
             HeadWiseFP8PrefillImpl,
         )
+        from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_fa3_paged import (
+            PyFA3PrefillImpl,
+        )
         from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
             PyFlashinferDecodeImpl,
             PyFlashinferPagedPrefillImpl,
@@ -78,6 +81,7 @@ else:
                 HeadWisePrefillImpl,
                 FlashInferTRTLLMSpecDecodeImpl,
                 FlashInferTRTLLMPrefillImpl,
+                PyFA3PrefillImpl,
                 TRTMHAImpl,
                 PyFlashinferPrefillImpl,
                 PyFlashinferPagedPrefillImpl,
