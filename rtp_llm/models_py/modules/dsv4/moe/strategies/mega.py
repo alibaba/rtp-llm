@@ -12,12 +12,15 @@ available. Direct port of the pre-refactor ``_setup_mega_moe`` +
 
 from __future__ import annotations
 
+import logging
+import os
 from typing import Dict, Optional
 
 import torch
 
 from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
 from ..mega_buf import (
+    get_mega_moe_group,
     _get_or_create_mega_buf,
     _get_or_create_mega_output,
     _mega_moe_enabled,
@@ -25,6 +28,29 @@ from ..mega_buf import (
 from ..input_packer import get_mega_moe_input_packer
 from ...quant_layouts import FP4_BLOCK, prepare_fp4_weight_scale_for_deepgemm
 from ..shared_expert import strict_fused_moe_enabled
+
+
+def _rank_local_cuda_device(fallback: torch.device) -> torch.device:
+    if fallback.type != "cuda" or not torch.cuda.is_available():
+        return fallback
+    local_rank = os.environ.get("LOCAL_RANK")
+    if local_rank is None:
+        world_rank = os.environ.get("WORLD_RANK")
+        local_world_size = os.environ.get("LOCAL_WORLD_SIZE")
+        if world_rank is not None and local_world_size is not None:
+            try:
+                local_rank = str(int(world_rank) % max(int(local_world_size), 1))
+            except ValueError:
+                local_rank = None
+    if local_rank is None:
+        return fallback
+    try:
+        rank = int(local_rank)
+    except ValueError:
+        return fallback
+    if 0 <= rank < torch.cuda.device_count():
+        return torch.device(f"cuda:{rank}")
+    return fallback
 
 
 @register_strategy
@@ -140,9 +166,22 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
             "Mega MoE requires torch.distributed initialised; "
             "_mega_moe_available() should have gated this earlier"
         )
-        group = dist.group.WORLD
+        group = get_mega_moe_group()
         # Symm buffer is single-layer staging — share one across all
         # MoE layers via the module-level cache (see _get_or_create_mega_buf).
+        symm_device = _rank_local_cuda_device(device)
+        if device.type == "cuda":
+            # Model construction may run in a background thread. CUDA's current
+            # device is thread-local, while DeepGEMM allocates its symmetric
+            # buffer with device="cuda"; set it before rendezvous.
+            if symm_device != device:
+                logging.warning(
+                    "Mega MoE weight device %s differs from rank-local device %s; "
+                    "using rank-local device for symmetric buffer rendezvous",
+                    device,
+                    symm_device,
+                )
+            torch.cuda.set_device(symm_device)
         self._mega_buf = _get_or_create_mega_buf(
             group=group,
             num_experts=cfg.n_routed_experts,

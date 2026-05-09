@@ -130,6 +130,50 @@ def _args_from_model_config(
     )
 
 
+def _positive_env_int(name: str) -> Optional[int]:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        logging.warning("Ignore invalid %s=%r; expected positive integer", name, raw)
+        return None
+    if value <= 0:
+        logging.warning("Ignore invalid %s=%r; expected positive integer", name, raw)
+        return None
+    return value
+
+
+def _rank_local_cuda_device() -> Optional[torch.device]:
+    if not torch.cuda.is_available():
+        return None
+    local_rank = os.environ.get("LOCAL_RANK")
+    if local_rank is None:
+        world_rank = os.environ.get("WORLD_RANK")
+        local_world_size = os.environ.get("LOCAL_WORLD_SIZE")
+        if world_rank is not None and local_world_size is not None:
+            try:
+                local_rank = str(int(world_rank) % max(int(local_world_size), 1))
+            except ValueError:
+                local_rank = None
+    if local_rank is None:
+        return None
+    try:
+        rank = int(local_rank)
+    except ValueError:
+        logging.warning("Ignore invalid LOCAL_RANK=%r", local_rank)
+        return None
+    if rank < 0 or rank >= torch.cuda.device_count():
+        logging.warning(
+            "Ignore out-of-range local CUDA rank %s; device_count=%s",
+            rank,
+            torch.cuda.device_count(),
+        )
+        return None
+    return torch.device(f"cuda:{rank}")
+
+
 class DeepSeekV4Model(GptModelBase):
     """Framework-facing model: owns a V4Transformer, feeds framework IO into it."""
 
@@ -236,6 +280,31 @@ class DeepSeekV4Model(GptModelBase):
             )
             args.max_tokens_per_rank = new_tokens_per_rank_bound
 
+        override_tokens_per_rank = _positive_env_int(
+            "DSV4_MEGA_MOE_MAX_TOKENS_PER_RANK"
+        )
+        if override_tokens_per_rank is not None:
+            logging.info(
+                "[DeepSeekV4Model] DSV4_MEGA_MOE_MAX_TOKENS_PER_RANK: "
+                "max_tokens_per_rank %d -> %d",
+                args.max_tokens_per_rank,
+                override_tokens_per_rank,
+            )
+            args.max_tokens_per_rank = override_tokens_per_rank
+        elif os.environ.get("ROLE_TYPE", "").upper() == "DECODE":
+            # Decode runs one token per live sequence through MoE.  Sizing the
+            # Mega MoE symmetric buffer from long MAX_SEQ_LEN (for example
+            # 200k) can trigger an invalid DeepGEMM Mega MoE specialization.
+            decode_tokens_per_rank = max(int(max_generate_batch_size or 1), 1)
+            if args.max_tokens_per_rank > decode_tokens_per_rank:
+                logging.info(
+                    "[DeepSeekV4Model] DECODE: max_tokens_per_rank %d -> %d "
+                    "(Mega MoE per-step batch bound)",
+                    args.max_tokens_per_rank,
+                    decode_tokens_per_rank,
+                )
+                args.max_tokens_per_rank = decode_tokens_per_rank
+
         logging.info(
             "[DeepSeekV4Model] V4Args: n_layers=%d n_heads=%d head_dim=%d q_lora=%d "
             "o_groups=%d n_experts=%d n_act=%d moe_inter=%d win=%d hc_mult=%d "
@@ -299,6 +368,13 @@ class DeepSeekV4Model(GptModelBase):
 
     def _initialize_impl(self, init_resource: PyModelInitResources) -> bool:
         # Called by the engine after construction and before forward.
+        rank_device = _rank_local_cuda_device()
+        if rank_device is not None:
+            torch.cuda.set_device(rank_device)
+            logging.info(
+                "[DeepSeekV4Model] set CUDA current device for init thread to %s",
+                rank_device,
+            )
         super().initialize(init_resource)
         if self._materialized:
             return True
