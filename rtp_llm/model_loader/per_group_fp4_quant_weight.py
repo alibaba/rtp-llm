@@ -144,7 +144,6 @@ class PerGroupFp4Weight(CompositeWeight, QuantWeight):
     ):
         kernel: WeightModule = None
         scale: WeightModule = None
-
         if src_weight_info.name == W.attn_qkv_w:
             kernel, scale, scale_2, input_scale = self._get_qkv_quant_weight(src_weight_info)
         elif src_weight_info.name == W.attn_o_w:
