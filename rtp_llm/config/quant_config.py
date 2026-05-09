@@ -559,7 +559,7 @@ class MXFp4QuarkQuantConfig(QuarkQuantConfig):
         return [torch.float16, torch.bfloat16]
 
     def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
-        return [torch.float16, torch.bfloat16, torch.float4_e2m1fn_x2]
+        return [torch.float16, torch.bfloat16, torch.float8_e4m3fn]
 
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
