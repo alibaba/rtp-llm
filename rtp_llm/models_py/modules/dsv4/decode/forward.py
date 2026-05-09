@@ -122,6 +122,7 @@ def build_metadata_eager(
     device: torch.device,
     paged_pool_specs: Dict[int, Tuple[int, int]],
     kv_cache: Optional[Any] = None,
+    fp8_kv_cache: bool = False,
 ) -> Optional[Any]:  # DSv4DecodeAttnMetadata | None
     """Build ``DSv4DecodeAttnMetadata`` inline from framework attn inputs.
 
@@ -137,10 +138,20 @@ def build_metadata_eager(
     predecessor (per ``NormalModelInputGatherer.cc:255``). Clamped to
     ``max_seq_len - 1`` for warmup safety (probe at max_seq_len then
     decode).
+
+    ``fp8_kv_cache=True`` switches the underlying builder to
+    :func:`build_decode_metadata_fp8`, which yields the FP8-flavored
+    ``DSv4DecodeAttnMetadataFP8`` (carries ``sched_meta_cache``, FP8 pool
+    specs, etc.) consumed by ``AttentionFP8`` decode helpers.
     """
-    from rtp_llm.models_py.modules.dsv4.decode.decode_attn_metadata import (
-        build_decode_metadata,
-    )
+    if fp8_kv_cache:
+        from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_attn_metadata import (
+            build_decode_metadata_fp8 as build_decode_metadata,
+        )
+    else:
+        from rtp_llm.models_py.modules.dsv4.decode.decode_attn_metadata import (
+            build_decode_metadata,
+        )
 
     seq_lens_d = attn.sequence_lengths
     if seq_lens_d.device.type == "cpu":
@@ -301,6 +312,7 @@ def forward_decode(
             param_dev,
             paged_specs,
             kv_cache=kv_cache,
+            fp8_kv_cache=bool(getattr(v4, "fp8_kv_cache", False)),
         )
         if meta is None:
             # Empty batch (B == 0) — short-circuit with zero-row hidden.

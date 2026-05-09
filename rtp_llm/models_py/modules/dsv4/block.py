@@ -258,57 +258,69 @@ class Block(nn.Module):
                     x_pre[dbg_pos_mask].contiguous(),
                 )
 
-        # Present flat [T, dim] as [B, S, dim] for Attention.  The common
-        # prefill layouts (single request, or dense equal-length batch) are
-        # already request-major, so a view is enough.  Ragged batches keep
-        # the padded scatter/gather fallback.
-        cu_long = cu_seqlens.to(torch.long)
-        batch_size = int(cu_long.numel() - 1)
-        seqlens = cu_long[1:] - cu_long[:-1]  # [B]
-        T = int(x_pre.size(0))
-        D = int(x_pre.size(-1))
-        device = x_pre.device
-        max_S = (
-            int(seqlens.max().item())
-            if batch_size > 0 and seqlens.device.type == "cpu"
-            else T
-        )
-        # Per-row start_pos = absolute position of each request's first
-        # token, pulled directly off the flat positions tensor.
-        start_pos_per_req = positions[cu_long[:-1]].to(torch.long)  # [B]
-
-        equal_len_dense = (
-            T == batch_size * max_S
-            and seqlens.device.type == "cpu"
-            and bool((seqlens == max_S).all().item())
-        )
-        dense_layout = batch_size == 1 or (batch_size > 1 and equal_len_dense)
-        if dense_layout:
-            x_padded = x_pre.view(batch_size, max_S, D)
-            b_idx = None
-            s_idx = None
+        # AttentionFP8 is flat-native: takes [T, dim] + per-token positions,
+        # no padding / per-request scalars. Block must skip the BF16
+        # padded-path bookkeeping or self.attn() blows up (TypeError on
+        # `sequence_lengths`, then assert on x.dim()==2).
+        if self.fp8_kv_cache:
+            attn_out = self.attn(
+                x_pre,  # [T, dim]
+                positions,  # [T] int64 absolute positions
+                kv_cache=kv_cache,
+                block_tables_by_type=block_tables_by_type,
+            )  # [T, dim]
         else:
-            t_idx = torch.arange(T, device=device, dtype=torch.long)
-            # right=True so tokens at cu_seqlens[b] land in request b
-            # (cu_long[1:] are exclusive ends).
-            b_idx = torch.searchsorted(cu_long[1:].contiguous(), t_idx, right=True)
-            s_idx = t_idx - cu_long[:-1][b_idx]
-            x_padded = torch.zeros(
-                batch_size, max_S, D, dtype=x_pre.dtype, device=device
+            # Present flat [T, dim] as [B, S, dim] for Attention.  The common
+            # prefill layouts (single request, or dense equal-length batch) are
+            # already request-major, so a view is enough.  Ragged batches keep
+            # the padded scatter/gather fallback.
+            cu_long = cu_seqlens.to(torch.long)
+            batch_size = int(cu_long.numel() - 1)
+            seqlens = cu_long[1:] - cu_long[:-1]  # [B]
+            T = int(x_pre.size(0))
+            D = int(x_pre.size(-1))
+            device = x_pre.device
+            max_S = (
+                int(seqlens.max().item())
+                if batch_size > 0 and seqlens.device.type == "cpu"
+                else T
             )
-            x_padded[b_idx, s_idx] = x_pre
+            # Per-row start_pos = absolute position of each request's first
+            # token, pulled directly off the flat positions tensor.
+            start_pos_per_req = positions[cu_long[:-1]].to(torch.long)  # [B]
 
-        attn_out_padded = self.attn(
-            x_padded,  # [B, max_S, dim]
-            start_pos_per_req,
-            sequence_lengths=seqlens,
-            kv_cache=kv_cache,
-            block_tables_by_type=block_tables_by_type,
-        )  # [B, max_S, dim]
-        if dense_layout:
-            attn_out = attn_out_padded.reshape(T, D)
-        else:
-            attn_out = attn_out_padded[b_idx, s_idx]  # [T, dim]
+            equal_len_dense = (
+                T == batch_size * max_S
+                and seqlens.device.type == "cpu"
+                and bool((seqlens == max_S).all().item())
+            )
+            dense_layout = batch_size == 1 or (batch_size > 1 and equal_len_dense)
+            if dense_layout:
+                x_padded = x_pre.view(batch_size, max_S, D)
+                b_idx = None
+                s_idx = None
+            else:
+                t_idx = torch.arange(T, device=device, dtype=torch.long)
+                # right=True so tokens at cu_seqlens[b] land in request b
+                # (cu_long[1:] are exclusive ends).
+                b_idx = torch.searchsorted(cu_long[1:].contiguous(), t_idx, right=True)
+                s_idx = t_idx - cu_long[:-1][b_idx]
+                x_padded = torch.zeros(
+                    batch_size, max_S, D, dtype=x_pre.dtype, device=device
+                )
+                x_padded[b_idx, s_idx] = x_pre
+
+            attn_out_padded = self.attn(
+                x_padded,  # [B, max_S, dim]
+                start_pos_per_req,
+                sequence_lengths=seqlens,
+                kv_cache=kv_cache,
+                block_tables_by_type=block_tables_by_type,
+            )  # [B, max_S, dim]
+            if dense_layout:
+                attn_out = attn_out_padded.reshape(T, D)
+            else:
+                attn_out = attn_out_padded[b_idx, s_idx]  # [T, dim]
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_out", attn_out)
             if dbg_pos_mask is not None:

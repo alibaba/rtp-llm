@@ -1831,7 +1831,6 @@ class AttentionFP8(nn.Module):
         bsz: int,
         q_len: int,
         attn_metadata: "DSv4DecodeAttnMetadataFP8",  # type: ignore[name-defined]
-        dbg_tag: str,
     ) -> None:
         """Write newly computed SWA KV into the FP8 584B/slot pool.
 
@@ -1862,7 +1861,6 @@ class AttentionFP8(nn.Module):
         bsz: int,
         q_len: int,
         attn_metadata: "DSv4DecodeAttnMetadataFP8",  # type: ignore[name-defined]
-        dbg_tag: str,
     ) -> torch.Tensor:
         """SWA-only layer (compress_ratio == 0) — one FlashMLA call over
         the FP8 SWA pool using per-request ``swa_abs_idx`` indices."""
@@ -1913,7 +1911,6 @@ class AttentionFP8(nn.Module):
         q_len: int,
         start_pos: torch.Tensor,
         attn_metadata: "DSv4DecodeAttnMetadataFP8",  # type: ignore[name-defined]
-        dbg_tag: str,
     ) -> torch.Tensor:
         """CSA layer (compress_ratio == 4). Indexer + main compressor
         both scatter into their pools; the indexer's topk buffer holds
@@ -1953,7 +1950,6 @@ class AttentionFP8(nn.Module):
         q_len: int,
         start_pos: torch.Tensor,
         attn_metadata: "DSv4DecodeAttnMetadataFP8",  # type: ignore[name-defined]
-        dbg_tag: str,
     ) -> torch.Tensor:
         """HCA layer (compress_ratio == 128). Compressor writes
         HCA_KV / HCA_STATE (no indexer). ``cmp_local_raw`` is the dense
@@ -1988,7 +1984,6 @@ class AttentionFP8(nn.Module):
         q_len: int,
         attn_metadata: "DSv4DecodeAttnMetadataFP8",  # type: ignore[name-defined]
         cmp_attn_type: int,
-        dbg_tag: str,
     ) -> torch.Tensor:
         """Shared CSA/HCA epilogue: translate pool-local → global slots
         for both SWA and compressed pools, then one dual-pool FlashMLA
