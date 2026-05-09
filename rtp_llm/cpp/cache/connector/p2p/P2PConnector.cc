@@ -17,6 +17,25 @@
 
 namespace rtp_llm {
 
+namespace {
+
+const char* p2pBroadcastTypeToString(P2PConnectorBroadcastType type) {
+    switch (type) {
+        case P2PConnectorBroadcastType::HANDLE_READ:
+            return "HANDLE_READ";
+        case P2PConnectorBroadcastType::READ:
+            return "READ";
+        case P2PConnectorBroadcastType::CANCEL_READ:
+            return "CANCEL_READ";
+        case P2PConnectorBroadcastType::CANCEL_HANDLE_READ:
+            return "CANCEL_HANDLE_READ";
+        default:
+            return "UNKNOWN";
+    }
+}
+
+}  // namespace
+
 P2PConnector::P2PConnector(P2PConnectorConfig                          config,
                            const std::shared_ptr<LayerBlockConverter>& layer_block_converter,
                            const kmonitor::MetricsReporterPtr&         metrics_reporter):
@@ -151,8 +170,11 @@ void P2PConnector::handleRead(const P2PConnectorStartLoadRequestPB& request,
     std::shared_ptr<P2PConnectorResourceEntry> resource_entry = nullptr;
     grpc::Status wait_status = waitForResourceEntry(unique_key, deadline_ms, is_cancelled, resource_entry);
     if (!wait_status.ok()) {
-        RTP_LLM_LOG_WARNING("handleRead [P2P]: waitForResourceEntry failed, unique_key=%s, status=%s",
+        RTP_LLM_LOG_WARNING("handleRead [P2P]: waitForResourceEntry failed, unique_key=%s, deadline_ms=%ld, "
+                            "current_time_ms=%ld, status=%s",
                             unique_key.c_str(),
+                            deadline_ms,
+                            currentTimeMs(),
                             wait_status.error_message().c_str());
         response.set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED));
         response.set_error_message("waitForResourceEntry failed: " + wait_status.error_message());
@@ -166,8 +188,12 @@ void P2PConnector::handleRead(const P2PConnectorStartLoadRequestPB& request,
     ErrorInfo error_info = scheduler_->sendKVCache(
         resource_entry->kv_cache_resource, unique_key, request_id, decode_transfer_servers, deadline_ms, is_cancelled);
     if (error_info.hasError()) {
-        RTP_LLM_LOG_ERROR("handleRead failed: worker handleRead failed, unique_key: %s, error: %s",
+        RTP_LLM_LOG_ERROR("handleRead failed: worker handleRead failed, unique_key: %s, request_id: %ld, "
+                          "decode_servers=%zu, deadline_ms=%ld, error: %s",
                           unique_key.c_str(),
+                          request_id,
+                          decode_transfer_servers.size(),
+                          deadline_ms,
                           error_info.ToString().c_str());
         response.set_error_code(transErrorCodeToRPC(error_info.code()));
         response.set_error_message(error_info.ToString());
@@ -188,7 +214,12 @@ void P2PConnector::waitAndFillResponse(const std::shared_ptr<P2PConnectorResourc
     std::unique_lock<std::mutex> lock(resource_entry->side_channel_mutex);
     const int64_t                remaining_us = deadline_ms * 1000 - currentTimeUs();
     if (remaining_us <= 0) {
-        RTP_LLM_LOG_WARNING("waitAndFillResponse: past deadline, unique_key: %s", unique_key.c_str());
+        RTP_LLM_LOG_WARNING("waitAndFillResponse: past deadline, unique_key: %s, request_id: %ld, deadline_ms: %ld, "
+                            "current_time_ms: %ld",
+                            unique_key.c_str(),
+                            resource_entry->request_id,
+                            deadline_ms,
+                            currentTimeMs());
         stream_store_->clearSideChannelData(unique_key);
         response.set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_FILL_RESPONSE_FAILED));
         response.set_error_message("waitAndFillResponse: past deadline");
@@ -198,7 +229,10 @@ void P2PConnector::waitAndFillResponse(const std::shared_ptr<P2PConnectorResourc
     const auto timeout_tp = std::chrono::system_clock::now() + std::chrono::microseconds(remaining_us);
     while (!resource_entry->side_channel_ready) {
         if (is_cancelled && is_cancelled()) {
-            RTP_LLM_LOG_DEBUG("waitAndFillResponse: cancelled, unique_key: %s", unique_key.c_str());
+            RTP_LLM_LOG_WARNING("waitAndFillResponse: cancelled, unique_key: %s, request_id: %ld, deadline_ms: %ld",
+                                unique_key.c_str(),
+                                resource_entry->request_id,
+                                deadline_ms);
             stream_store_->clearSideChannelData(unique_key);
             response.set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_FILL_RESPONSE_FAILED));
             response.set_error_message("waitAndFillResponse: cancelled");
@@ -221,7 +255,13 @@ void P2PConnector::waitAndFillResponse(const std::shared_ptr<P2PConnectorResourc
                 break;
             }
             if (std::chrono::system_clock::now() >= timeout_tp) {
-                RTP_LLM_LOG_WARNING("waitAndFillResponse: timeout, unique_key: %s", unique_key.c_str());
+                RTP_LLM_LOG_WARNING("waitAndFillResponse: timeout, unique_key: %s, request_id: %ld, deadline_ms: %ld, "
+                                    "current_time_ms: %ld, side_channel_ready=%d",
+                                    unique_key.c_str(),
+                                    resource_entry->request_id,
+                                    deadline_ms,
+                                    currentTimeMs(),
+                                    resource_entry->side_channel_ready);
                 stream_store_->clearSideChannelData(unique_key);
                 response.set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_FILL_RESPONSE_FAILED));
                 response.set_error_message("waitAndFillResponse: timeout");
@@ -236,8 +276,9 @@ void P2PConnector::waitAndFillResponse(const std::shared_ptr<P2PConnectorResourc
 
     grpc::Status fill_status = fillResponseWithStreamInfo(resource_entry, response);
     if (!fill_status.ok()) {
-        RTP_LLM_LOG_WARNING("waitAndFillResponse failed, unique_key: %s, error: %s",
+        RTP_LLM_LOG_WARNING("waitAndFillResponse failed, unique_key: %s, request_id: %ld, error: %s",
                             resource_entry->unique_key.c_str(),
+                            resource_entry->request_id,
                             fill_status.error_message().c_str());
         stream_store_->clearSideChannelData(unique_key);
         response.set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_FILL_RESPONSE_FAILED));
@@ -356,7 +397,13 @@ bool P2PConnector::executeFunction(const FunctionRequestPB& request, FunctionRes
         case P2PConnectorBroadcastType::CANCEL_HANDLE_READ:
             return executeCancelHandleRead(unique_key, response);
         default:
-            RTP_LLM_LOG_WARNING("executeFunction failed, unsupported p2p_request type %d", p2p_request.type());
+            RTP_LLM_LOG_WARNING("executeFunction failed, unsupported p2p_request type %d(%s), unique_key=%s, "
+                                "request_id=%ld, deadline_ms=%ld",
+                                p2p_request.type(),
+                                p2pBroadcastTypeToString(p2p_request.type()),
+                                unique_key.c_str(),
+                                request_id,
+                                deadline_ms);
             auto* p2p_response = response.mutable_p2p_response();
             p2p_response->set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED));
             p2p_response->set_error_message("unsupported p2p_request type");

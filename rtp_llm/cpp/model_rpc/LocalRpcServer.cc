@@ -15,6 +15,38 @@ using namespace std;
 
 namespace rtp_llm {
 
+namespace {
+
+std::string summarizeFunctionRequest(const FunctionRequestPB& request) {
+    if (request.has_mem_request()) {
+        return "mem_request";
+    }
+    if (request.has_remote_request()) {
+        return "remote_request(trace_id=" + request.remote_request().trace_id() + ")";
+    }
+    if (request.has_p2p_request()) {
+        const auto& p2p_request = request.p2p_request();
+        return "p2p_request(type=" + std::to_string(static_cast<int>(p2p_request.type()))
+               + ", unique_key=" + p2p_request.unique_key() + ", request_id=" + std::to_string(p2p_request.request_id())
+               + ", deadline_ms=" + std::to_string(p2p_request.deadline_ms())
+               + ", layer_blocks=" + std::to_string(p2p_request.layer_blocks_size())
+               + ", peer_workers=" + std::to_string(p2p_request.peer_workers_size())
+               + ", remote_tp_size=" + std::to_string(p2p_request.remote_tp_size()) + ")";
+    }
+    return "unknown";
+}
+
+std::string summarizeFunctionResponse(const FunctionResponsePB& response) {
+    if (!response.has_p2p_response()) {
+        return "no_p2p_response";
+    }
+    const auto& p2p_response = response.p2p_response();
+    return "p2p_response(error_code=" + ErrorCodeToString(transRPCErrorCode(p2p_response.error_code()))
+           + ", error_message=" + p2p_response.error_message() + ")";
+}
+
+}  // namespace
+
 grpc::Status LocalRpcServer::init(const EngineInitParams&                       maga_init_params,
                                   py::object                                    mm_process_engine,
                                   std::unique_ptr<ProposeModelEngineInitParams> propose_params) {
@@ -586,18 +618,12 @@ void LocalRpcServer::reportCacheStatusTime(int64_t request_begin_time_us) {
         return grpc::Status(grpc::StatusCode::INTERNAL, "cache manager is null");
     }
     if (!cache_manager->executeFunction(*request, *response)) {
-        std::string request_case;
-        if (request->has_mem_request()) {
-            request_case = "mem_request";
-        } else if (request->has_remote_request()) {
-            request_case = "remote_request(trace_id=" + request->remote_request().trace_id() + ")";
-        } else if (request->has_p2p_request()) {
-            request_case = "p2p_request";
-        } else {
-            request_case = "unknown";
-        }
-        RTP_LLM_LOG_WARNING(
-            "execute function failed, peer: %s, request_case: %s", context->peer().c_str(), request_case.c_str());
+        const std::string request_case     = summarizeFunctionRequest(*request);
+        const std::string response_summary = summarizeFunctionResponse(*response);
+        RTP_LLM_LOG_WARNING("execute function failed, peer: %s, request_case: %s, response: %s",
+                            context->peer().c_str(),
+                            request_case.c_str(),
+                            response_summary.c_str());
         const std::string error_msg = "execute function failed, request_case: " + request_case;
         return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
     }

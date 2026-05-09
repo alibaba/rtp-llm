@@ -600,9 +600,28 @@ void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>&
     }
     load_context->waitDone();
     if (!(load_context->success())) {
-        auto error = load_context->errorInfo();
-        RTP_LLM_LOG_WARNING(
-            "load cache done but not success, stream: [%ld], error: %s", stream_->streamId(), error.ToString().c_str());
+        auto error        = load_context->errorInfo();
+        auto read_context = std::dynamic_pointer_cast<FusedAsyncReadContext>(load_context);
+        if (read_context && read_context->meta()) {
+            auto routing = read_context->meta()->p2pRouting();
+            if (routing.has_value()) {
+                RTP_LLM_LOG_WARNING("load cache done but not success, stream: [%ld], request_id: %ld, unique_key: %s, "
+                                    "deadline_ms: %ld, error: %s",
+                                    stream_->streamId(),
+                                    routing->request_id,
+                                    routing->unique_key.c_str(),
+                                    routing->deadline_ms,
+                                    error.ToString().c_str());
+            } else {
+                RTP_LLM_LOG_WARNING("load cache done but not success, stream: [%ld], error: %s",
+                                    stream_->streamId(),
+                                    error.ToString().c_str());
+            }
+        } else {
+            RTP_LLM_LOG_WARNING("load cache done but not success, stream: [%ld], error: %s",
+                                stream_->streamId(),
+                                error.ToString().c_str());
+        }
         if (error.hasError()) {
             stream_->reportError(error.code(), error.ToString());
         }

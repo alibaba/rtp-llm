@@ -116,19 +116,29 @@ void P2PBroadcastClient::genBroadcastRequest(
 
 bool P2PBroadcastClient::Result::success() const {
     if (!tp_broadcast_result_ || !tp_broadcast_result_->success()) {
-        RTP_LLM_LOG_WARNING("P2PBroadcastClient::Result success is false, tp_broadcast_result failed");
+        RTP_LLM_LOG_WARNING("P2PBroadcastClient::Result success is false, unique_key: %s, error: %s",
+                            unique_key_.c_str(),
+                            errorMessage().c_str());
         return false;
     }
     auto responses = tp_broadcast_result_->responses();
-    for (const auto& response : responses) {
+    for (size_t rank = 0; rank < responses.size(); ++rank) {
+        const auto& response = responses[rank];
         if (!response.has_p2p_response()) {
-            RTP_LLM_LOG_WARNING("P2PBroadcastClient::Result success is false, response has no p2p_response");
+            RTP_LLM_LOG_WARNING("P2PBroadcastClient::Result success is false, unique_key: %s, rank=%zu, "
+                                "response has no p2p_response",
+                                unique_key_.c_str(),
+                                rank);
             return false;
         }
         const auto& p2p_response = response.p2p_response();
         if (p2p_response.error_code() != ErrorCodePB::NONE_ERROR) {
-            RTP_LLM_LOG_WARNING("P2PBroadcastClient::Result success is false, p2p_response error code: %s",
-                                ErrorCodeToString(transRPCErrorCode(p2p_response.error_code())).c_str());
+            RTP_LLM_LOG_WARNING("P2PBroadcastClient::Result success is false, unique_key: %s, rank=%zu, "
+                                "p2p_response error=%s, message=%s",
+                                unique_key_.c_str(),
+                                rank,
+                                ErrorCodeToString(transRPCErrorCode(p2p_response.error_code())).c_str(),
+                                p2p_response.error_message().c_str());
             return false;
         }
     }
@@ -215,7 +225,7 @@ std::string P2PBroadcastClient::Result::errorMessage() const {
         }
     }
     if (!tp_broadcast_result_->success()) {
-        return "P2PBroadcastClient broadcast failed";
+        return "P2PBroadcastClient broadcast failed, unique_key=" + unique_key_;
     }
     return "";
 }

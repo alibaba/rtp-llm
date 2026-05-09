@@ -57,6 +57,7 @@ std::shared_ptr<PrefillLoadCaller::Result> PrefillLoadCaller::load(int64_t      
 
     result->request_id      = request_id;
     result->generate_stream = generate_stream;
+    result->unique_key      = unique_key;
 
     if (!buildAndStartAsyncRpc(result, unique_key, deadline_ms, request_id)) {
         return nullptr;
@@ -142,7 +143,11 @@ void PrefillLoadCaller::Result::cancel() {
 
 bool PrefillLoadCaller::Result::pollCompletionQueue() {
     if (!completion_queue) {
-        RTP_LLM_LOG_WARNING("PrefillLoadCaller::Result::pollCompletionQueue: completion_queue is null");
+        RTP_LLM_LOG_WARNING("PrefillLoadCaller::Result::pollCompletionQueue: completion_queue is null, "
+                            "unique_key: %s, request_id: %ld, server_addr: %s",
+                            unique_key.c_str(),
+                            request_id,
+                            server_addr.c_str());
         error_code    = ErrorCode::P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED;
         error_message = "completion_queue is null";
         return false;
@@ -161,24 +166,37 @@ bool PrefillLoadCaller::Result::pollCompletionQueue() {
     total_cost_time_us = currentTimeUs() - start_time_us;
 
     if (!ok) {
-        RTP_LLM_LOG_WARNING("PrefillLoadCaller::Result::pollCompletionQueue: async next failed, server_addr: %s",
-                            server_addr.c_str());
+        RTP_LLM_LOG_WARNING("PrefillLoadCaller::Result::pollCompletionQueue: async next failed, unique_key: %s, "
+                            "request_id: %ld, server_addr: %s, grpc_status=%d(%s)",
+                            unique_key.c_str(),
+                            request_id,
+                            server_addr.c_str(),
+                            static_cast<int>(status.error_code()),
+                            status.error_message().c_str());
         error_code    = ErrorCode::P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED;
         error_message = "async next failed: " + status.error_message();
         return false;
     }
     if (!status.ok()) {
-        RTP_LLM_LOG_WARNING("PrefillLoadCaller::Result::pollCompletionQueue: rpc error: %s, server_addr: %s",
-                            status.error_message().c_str(),
-                            server_addr.c_str());
+        RTP_LLM_LOG_WARNING("PrefillLoadCaller::Result::pollCompletionQueue: rpc error, unique_key: %s, "
+                            "request_id: %ld, server_addr: %s, grpc_status=%d(%s)",
+                            unique_key.c_str(),
+                            request_id,
+                            server_addr.c_str(),
+                            static_cast<int>(status.error_code()),
+                            status.error_message().c_str());
         error_code    = ErrorCode::P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED;
         error_message = status.error_message();
         return false;
     }
     if (response.error_code() != ErrorCodePB::NONE_ERROR) {
-        RTP_LLM_LOG_WARNING(
-            "PrefillLoadCaller::Result::pollCompletionQueue: response error_code is not NONE_ERROR, server_addr: %s",
-            server_addr.c_str());
+        RTP_LLM_LOG_WARNING("PrefillLoadCaller::Result::pollCompletionQueue: start_load response failed, "
+                            "unique_key: %s, request_id: %ld, server_addr: %s, response_error=%s, response_message=%s",
+                            unique_key.c_str(),
+                            request_id,
+                            server_addr.c_str(),
+                            ErrorCodeToString(transRPCErrorCode(response.error_code())).c_str(),
+                            response.error_message().c_str());
         error_code    = transRPCErrorCode(response.error_code());
         error_message = response.error_message();
         return false;
@@ -227,9 +245,17 @@ void PrefillLoadCaller::Result::updateStreamFromResponse() {
         }
     }
 
-    RTP_LLM_LOG_DEBUG("PrefillLoadCaller::Result: parsed side-channel payload, first_token: %ld, total_reuse: %d",
+    RTP_LLM_LOG_DEBUG("PrefillLoadCaller::Result: parsed side-channel payload, unique_key: %s, request_id: %ld, "
+                      "first_token: %ld, total_reuse: %d, propose_tokens=%zu, has_probs=%d, has_hidden=%d, "
+                      "position_ids=%zu",
+                      unique_key.c_str(),
+                      request_id,
                       side_channel_payload.first_token_id,
-                      side_channel_payload.total_reuse_len);
+                      side_channel_payload.total_reuse_len,
+                      side_channel_payload.propose_tokens.size(),
+                      side_channel_payload.propose_probs.ByteSizeLong() > 0,
+                      side_channel_payload.propose_hidden.ByteSizeLong() > 0,
+                      side_channel_payload.position_ids.size());
 }
 
 void PrefillLoadCaller::Result::checkDone() {

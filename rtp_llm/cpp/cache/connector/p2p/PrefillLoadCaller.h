@@ -75,6 +75,7 @@ public:
         std::unique_ptr<grpc::ClientAsyncResponseReader<P2PConnectorStartLoadResponsePB>> reader;
         grpc::Status                                                                      status;
         std::string                                                                       server_addr;
+        std::string                                                                       unique_key;
         int                                                                               timeout_ms;
         int64_t                                                                           request_id;
         int64_t                                                                           start_time_us;
