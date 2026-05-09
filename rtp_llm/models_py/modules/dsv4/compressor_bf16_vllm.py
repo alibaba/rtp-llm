@@ -370,11 +370,16 @@ class CompressorBF16VLLM(nn.Module):
         eb = self._state_eb
         assert bt is not None and eb > 0, "state pool context unbound"
         bt_long = bt.to(torch.long)
+        max_reqs = int(bt_long.shape[0])
         max_blocks = int(bt_long.shape[1])
+        if max_reqs <= 0 or max_blocks <= 0:
+            return torch.full_like(positions, -1)
+        req_in_capacity = (b_idx >= 0) & (b_idx < max_reqs)
+        safe_b_idx = b_idx.clamp(min=0, max=max_reqs - 1)
         block_in_seq = (positions // eb) % max_blocks
         in_block = positions % eb
-        block_id = bt_long[b_idx, block_in_seq]
-        valid = block_id > 0
+        block_id = bt_long[safe_b_idx, block_in_seq]
+        valid = req_in_capacity & (block_id > 0)
         slot = block_id * eb + in_block
         return torch.where(valid, slot, torch.full_like(slot, -1))
 
@@ -400,18 +405,21 @@ class CompressorBF16VLLM(nn.Module):
             return torch.full_like(positions, -1)
         tokens_per_block = kv_eb * ratio
         bt_long = bt.to(torch.long)
+        max_reqs = int(bt_long.shape[0])
         max_blocks = int(bt_long.shape[1])
-        if max_blocks <= 0:
+        if max_reqs <= 0 or max_blocks <= 0:
             return torch.full_like(positions, -1)
 
         boundary = ((positions + 1) % ratio) == 0
         block_in_seq = positions // tokens_per_block
         in_block = (positions % tokens_per_block) // ratio
+        req_in_capacity = (b_idx >= 0) & (b_idx < max_reqs)
+        safe_b_idx = b_idx.clamp(min=0, max=max_reqs - 1)
         in_capacity = block_in_seq < max_blocks
         safe_block_in_seq = block_in_seq.clamp(min=0, max=max_blocks - 1)
-        block_id = bt_long[b_idx, safe_block_in_seq]
+        block_id = bt_long[safe_b_idx, safe_block_in_seq]
+        valid = req_in_capacity & boundary & in_capacity & (block_id > 0)
         slot = block_id * kv_eb + in_block
-        valid = boundary & in_capacity & (block_id > 0)
         # Pool-overflow guard (mirrors the legacy `_compute_pool_slots`
         # safeguard added in upstream 2184f972): a malformed block_table
         # can otherwise produce a slot above ``pool_view.shape[0]`` and
