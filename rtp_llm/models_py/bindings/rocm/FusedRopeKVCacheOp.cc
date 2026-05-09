@@ -26,7 +26,7 @@ static at::ScalarType get_fp8_dtype() {
 
 static void copyTensorExactInPlace(torch::Tensor& dst, const torch::Tensor& src, const char* name) {
     if (!src.defined()) {
-        throw std::runtime_error(std::string("update_prefill_runtime expects defined tensor: ") + name);
+        throw std::runtime_error(std::string("prepare_in_place expects defined tensor: ") + name);
     }
     torch::Tensor src_flat = src.contiguous().reshape({-1});
     if (!dst.defined()) {
@@ -36,7 +36,7 @@ static void copyTensorExactInPlace(torch::Tensor& dst, const torch::Tensor& src,
     torch::Tensor dst_flat = dst.reshape({-1});
     if (dst_flat.numel() != src_flat.numel()) {
         throw std::runtime_error(
-            std::string("update_prefill_runtime tensor size mismatch for ")
+            std::string("prepare_in_place tensor size mismatch for ")
             + name + ": capture=" + std::to_string(dst_flat.numel()) + ", replay=" + std::to_string(src_flat.numel()));
     }
 
@@ -65,22 +65,25 @@ void updateKvCacheOffset(CKAttn& params, const torch::Tensor& kv_cache_block_id_
                                         stream);
 }
 
-void updatePrefillRuntime(CKAttn&              params,
-                          const torch::Tensor& input_lengths,
-                          const torch::Tensor& cu_seqlens,
-                          const torch::Tensor& cu_kv_seqlens,
-                          const torch::Tensor& prefix_lengths,
-                          int                  max_seq_len,
-                          int                  max_prefix_len) {
-    copyTensorExactInPlace(params.input_lengths, input_lengths, "input_lengths");
-    copyTensorExactInPlace(params.cu_seqlens, cu_seqlens, "cu_seqlens");
-    copyTensorExactInPlace(params.cu_kv_seqlens, cu_kv_seqlens, "cu_kv_seqlens");
-    copyTensorExactInPlace(params.prefix_lengths, prefix_lengths, "prefix_lengths");
+void prepareInPlace(CKAttn& params, const torch_ext::PyAttentionInputs& attn_inputs) {
+    const bool has_prefix =
+        attn_inputs.prefix_lengths.defined() && attn_inputs.prefix_lengths.numel() > 0;
 
-    params.max_seq_len                        = max_seq_len;
-    params.prefill_runtime_max_seq_len        = max_seq_len;
-    params.prefill_runtime_max_prefix_len     = max_prefix_len;
-    params.prefill_runtime_seq_len_with_prefix = max_seq_len + max_prefix_len;
+    if (has_prefix && params.prefix_lengths.defined() && params.prefix_lengths.numel() > 0
+        && params.prefix_lengths.data_ptr() != attn_inputs.prefix_lengths.data_ptr()) {
+        copyTensorExactInPlace(params.prefix_lengths, attn_inputs.prefix_lengths, "prefix_lengths");
+    }
+
+    params.max_seq_len = attn_inputs.input_lengths.max().item<int32_t>();
+    int max_prefix_len = 0;
+    if (has_prefix) {
+        max_prefix_len = attn_inputs.prefix_lengths.max().item<int32_t>();
+    }
+    params.prefill_runtime_max_seq_len         = params.max_seq_len;
+    params.prefill_runtime_max_prefix_len      = max_prefix_len;
+    params.prefill_runtime_seq_len_with_prefix = params.max_seq_len + max_prefix_len;
+
+    updateKvCacheOffset(params, attn_inputs.kv_cache_kernel_block_id_device);
 }
 
 FusedRopeKVCachePrefillOpBase::FusedRopeKVCachePrefillOpBase(const AttentionConfigs& attn_configs):
@@ -473,14 +476,7 @@ void registerFusedRopeKVCacheOp(const py::module& m) {
     pybind11::class_<CKAttn, std::shared_ptr<CKAttn>>(m, "CKAttn")
         .def(pybind11::init<>())
         .def("update_kv_cache_offset", &updateKvCacheOffset, py::arg("kv_cache_block_id_device"))
-        .def("update_prefill_runtime",
-             &updatePrefillRuntime,
-             py::arg("input_lengths"),
-             py::arg("cu_seqlens"),
-             py::arg("cu_kv_seqlens"),
-             py::arg("prefix_lengths"),
-             py::arg("max_seq_len"),
-             py::arg("max_prefix_len"));
+        .def("prepare_in_place", &prepareInPlace, py::arg("attn_inputs"));
 
     // Prefill ASM
     pybind11::class_<FusedRopeKVCachePrefillOpAsm>(m, "FusedRopeKVCachePrefillOpAsm")

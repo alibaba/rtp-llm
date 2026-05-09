@@ -1157,7 +1157,6 @@ class AiterPrefillImplPaged(FMHAImplBase):
         fmha_params.max_seqlen_k = int(kv_lens.max()) if expected_batch > 0 else 0
         fmha_params.token_q_num = int(q_lens.sum())
         fmha_params.token_kv_num = int(kv_lens.sum())
-        fmha_params.max_prefix_len = int(p_lens.max()) if expected_batch > 0 and p_lens.numel() > 0 else 0
 
         kv_block_id = getattr(attn_inputs, "kv_cache_kernel_block_id_device", None)
         if kv_block_id is None:
@@ -1174,23 +1173,9 @@ class AiterPrefillImplPaged(FMHAImplBase):
 
         self.batch_prefill_impl.prepare_cuda_graph(self.fmha_params, attn_inputs)
 
-        update_prefill_runtime = getattr(self.rope_params, "update_prefill_runtime", None)
-        if callable(update_prefill_runtime):
-            prefix_lengths = self.fmha_params.prefix_lengths
-            if prefix_lengths is None:
-                prefix_lengths = torch.zeros_like(attn_inputs.input_lengths, dtype=torch.int32)
-            update_prefill_runtime(
-                attn_inputs.input_lengths,
-                self.fmha_params.cu_seqlens_q,
-                self.fmha_params.cu_seqlens_k,
-                prefix_lengths,
-                int(self.fmha_params.max_seqlen_q),
-                getattr(self.fmha_params, "max_prefix_len", 0),
-            )
-
-        update_kv_cache_offset = getattr(self.rope_params, "update_kv_cache_offset", None)
-        if callable(update_kv_cache_offset):
-            update_kv_cache_offset(self.fmha_params.kv_cache_block_id_device)
+        prepare_in_place = getattr(self.rope_params, "prepare_in_place", None)
+        if callable(prepare_in_place):
+            prepare_in_place(attn_inputs)
 
     def forward(
         self,
