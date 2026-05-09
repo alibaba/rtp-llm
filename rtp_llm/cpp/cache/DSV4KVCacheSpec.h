@@ -5,14 +5,23 @@
 
 namespace rtp_llm {
 
+// FP8 KV slot byte sizes mirror the canonical fp8_model1_mla layout written
+// by Python (rtp_llm/models_py/modules/dsv4/fp8/_compressor_vllm_triton.py).
+// 584B = 448 fp8 NoPE + 64 bf16 RoPE + 8 UE8M0 scales; 132B = 128 fp8 + 4 fp32
+// scale. FlashMLA SM100 sparse_attn requires per-block byte alignment so
+// padded_block_size_bytes() rounds up FP8 KV blocks to FP8_MLA_BLOCK_ALIGNMENT.
+inline constexpr uint32_t DSV4_FP8_KV_ENTRY_BYTES            = 584;
+inline constexpr uint32_t DSV4_FP8_INDEXER_ENTRY_BYTES       = 132;
+inline constexpr size_t   DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES = 1024;
+
 // KVCacheSpec for DSV4 paged KV pools (Pool 0/1/2/6: CSA_KV, HCA_KV, INDEXER_KV, SWA_KV).
 // These are variable-length paged pools storing KV entries as uint8 (byte-addressed).
-// Current model (BF16-only): each entry is head_dim * 2 bytes (bf16).
-// Future mixed-precision: FP8 NoPE + BF16 RoPE + UE8M0 scales (smaller entries).
+// BF16 mode: head_dim * 2 bytes per entry (1024 KV / 256 Indexer).
+// FP8 mode: 584B per KV entry, 132B per Indexer entry — see constants above.
 // Each entry contains the full KV for one compressed token (one KV head).
 struct DSV4KVSpec: public KVCacheSpec {
     KVCacheRegionName cache_type = KVCacheRegionName::DEFAULT;
-    uint32_t          entry_elems;        // bytes per entry (584 for KV, 132 for Indexer)
+    uint32_t          entry_elems;        // bytes per entry (1024/584 KV, 256/132 Indexer)
     uint32_t          entries_per_block;  // entries per block (64 or 2)
     DataType          store_dtype;        // TYPE_UINT8
 
@@ -51,6 +60,18 @@ struct DSV4KVSpec: public KVCacheSpec {
 
     size_t block_size_bytes() const override {
         return static_cast<size_t>(entries_per_block) * entry_elems * getTypeSize(store_dtype);
+    }
+
+    // FlashMLA SM100 sparse_attn requires per-block byte alignment for
+    // FP8 KV pools. BF16 KV pools (1024B / 256B per entry) are already
+    // naturally aligned so this collapses to block_size_bytes().
+    size_t padded_block_size_bytes() const {
+        const size_t natural = block_size_bytes();
+        if (entry_elems == DSV4_FP8_KV_ENTRY_BYTES) {
+            constexpr size_t align = DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES;
+            return ((natural + align - 1) / align) * align;
+        }
+        return natural;
     }
 
     size_t k_block_size_bytes() const override {

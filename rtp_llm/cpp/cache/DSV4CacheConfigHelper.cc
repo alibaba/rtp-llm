@@ -8,10 +8,18 @@ namespace rtp_llm {
 
 namespace {
 
-constexpr uint32_t kDsv4TokensPerBlock    = 256;
-constexpr uint32_t kDsv4KvEntryBytes      = 1024;
-constexpr uint32_t kDsv4IndexerEntryBytes = 256;
-constexpr size_t   kDsv4PoolNum           = 7;
+constexpr uint32_t kDsv4TokensPerBlock = 256;
+// BF16 pool: head_dim=512 × 2B = 1024B per KV slot, 128 × 2B = 256B per
+// indexer slot. FP8 pool packs the same logical KV into a smaller slot
+// (canonical fp8_model1_mla layout: 448B fp8 NoPE + 64B bf16 RoPE + 8B
+// UE8M0 scales = 584B; indexer is 128B fp8 + 4B fp32 scale = 132B).
+// Selected at runtime from ``attn_config.kv_cache_dtype`` — see
+// ``buildDSV4PoolDescs``.
+constexpr uint32_t kDsv4KvEntryBytesBf16      = 1024;
+constexpr uint32_t kDsv4IndexerEntryBytesBf16 = 256;
+constexpr uint32_t kDsv4KvEntryBytesFp8       = 584;
+constexpr uint32_t kDsv4IndexerEntryBytesFp8  = 132;
+constexpr size_t   kDsv4PoolNum               = 7;
 
 struct DSV4LayerSets {
     std::vector<int> csa_layers;
@@ -70,24 +78,32 @@ std::vector<DSV4PoolDesc> buildDSV4PoolDescs(const DSV4LayerSets& sets, const Mo
     const uint32_t csa_state_dim = 2 * head_dim;
     const uint32_t hca_state_dim = head_dim;
 
+    // Pick KV / indexer slot byte size from the model's kv_cache_dtype.
+    // FP8 paged pools use 584B / 132B (canonical fp8_model1_mla layout
+    // shared with the Python writer in
+    // dsv4/fp8/_compressor_vllm_triton.py); BF16 stays at 1024B / 256B.
+    const bool     fp8_kv              = (attn.kv_cache_dtype == KvCacheDataType::FP8);
+    const uint32_t kv_entry_bytes      = fp8_kv ? kDsv4KvEntryBytesFp8 : kDsv4KvEntryBytesBf16;
+    const uint32_t indexer_entry_bytes = fp8_kv ? kDsv4IndexerEntryBytesFp8 : kDsv4IndexerEntryBytesBf16;
+
     return {
         {KVCacheRegionName::CSA_KV,
          &sets.csa_layers,
-         kDsv4KvEntryBytes,
+         kv_entry_bytes,
          kDsv4TokensPerBlock / 4,
          DataType::TYPE_UINT8,
          true,
          0},
         {KVCacheRegionName::HCA_KV,
          &sets.hca_layers,
-         kDsv4KvEntryBytes,
+         kv_entry_bytes,
          kDsv4TokensPerBlock / 128,
          DataType::TYPE_UINT8,
          true,
          0},
         {KVCacheRegionName::INDEXER_KV,
          &sets.csa_layers,
-         kDsv4IndexerEntryBytes,
+         indexer_entry_bytes,
          kDsv4TokensPerBlock / 4,
          DataType::TYPE_UINT8,
          true,
@@ -97,7 +113,7 @@ std::vector<DSV4PoolDesc> buildDSV4PoolDescs(const DSV4LayerSets& sets, const Mo
         {KVCacheRegionName::HCA_STATE, &sets.hca_layers, hca_state_dim * 2, 128, DataType::TYPE_FP32, false, 2},
         {KVCacheRegionName::SWA_KV,
          &sets.all_layers,
-         kDsv4KvEntryBytes,
+         kv_entry_bytes,
          kDsv4TokensPerBlock,
          DataType::TYPE_UINT8,
          false,
