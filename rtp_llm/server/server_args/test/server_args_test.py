@@ -256,6 +256,111 @@ class ServerArgsSetTest(TestCase):
             1,
         )
 
+    def test_mooncake_cache_store_args_set_to_py_env_configs(self):
+        """Test that Mooncake cache store arguments are parsed and bound."""
+        sys.argv = [
+            "prog",
+            "--cache_store_mooncake_mode",
+            "1",
+            "--cache_store_mooncake_metadata_conn_string",
+            "mock://metadata",
+            "--cache_store_mooncake_local_server_name",
+            "prefill-node:23545",
+            "--cache_store_mooncake_ip_or_host_name",
+            "127.0.0.1",
+            "--cache_store_mooncake_transport",
+            "nvlink_intraNode",
+            "--cache_store_mooncake_rpc_port",
+            "23545",
+            "--cache_store_mooncake_control_plane_port",
+            "22345",
+            "--cache_store_mooncake_location",
+            "tp0",
+            "--cache_store_mooncake_remote_accessible",
+            "1",
+            "--cache_store_mooncake_update_metadata",
+            "0",
+        ]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        self.assertEqual(py_env_configs.cache_store_config.cache_store_mooncake_mode, True)
+        self.assertEqual(
+            py_env_configs.cache_store_config.cache_store_mooncake_metadata_conn_string,
+            "mock://metadata",
+        )
+        self.assertEqual(
+            py_env_configs.cache_store_config.cache_store_mooncake_local_server_name,
+            "prefill-node:23545",
+        )
+        self.assertEqual(
+            py_env_configs.cache_store_config.cache_store_mooncake_ip_or_host_name,
+            "127.0.0.1",
+        )
+        self.assertEqual(
+            py_env_configs.cache_store_config.cache_store_mooncake_transport,
+            "nvlink_intraNode",
+        )
+        self.assertEqual(
+            py_env_configs.cache_store_config.cache_store_mooncake_rpc_port,
+            23545,
+        )
+        self.assertEqual(
+            py_env_configs.cache_store_config.cache_store_mooncake_control_plane_port,
+            22345,
+        )
+        self.assertEqual(
+            py_env_configs.cache_store_config.cache_store_mooncake_location,
+            "tp0",
+        )
+        self.assertEqual(
+            py_env_configs.cache_store_config.cache_store_mooncake_remote_accessible,
+            True,
+        )
+        self.assertEqual(
+            py_env_configs.cache_store_config.cache_store_mooncake_update_metadata,
+            False,
+        )
+
+    def test_mooncake_cache_store_args_accept_barex_transport(self):
+        sys.argv = [
+            "prog",
+            "--cache_store_mooncake_mode",
+            "1",
+            "--cache_store_mooncake_transport",
+            "barex",
+        ]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        self.assertEqual(
+            py_env_configs.cache_store_config.cache_store_mooncake_transport,
+            "barex",
+        )
+
+    def test_mooncake_cache_store_transport_defaults_to_tcp(self):
+        sys.argv = [
+            "prog",
+            "--cache_store_mooncake_mode",
+            "1",
+        ]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        self.assertEqual(
+            py_env_configs.cache_store_config.cache_store_mooncake_transport,
+            "tcp",
+        )
+
 
 if __name__ == "__main__":
     main()

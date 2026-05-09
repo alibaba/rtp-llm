@@ -1,0 +1,30 @@
+--- a/mooncake-transfer-engine/src/topology.cpp
++++ b/mooncake-transfer-engine/src/topology.cpp
+@@ -405,7 +405,26 @@
+ 
+ int Topology::discover(const std::vector<std::string> &filter) {
+     matrix_.clear();
+-    auto all_hca = listInfiniBandDevices(filter);
++    std::vector<std::string> effective_filter = filter;
++    if (effective_filter.empty()) {
++        const char *force_hca = std::getenv("MC_FORCE_HCA");
++        if (force_hca && force_hca[0] != '\0') {
++            std::string force_hca_list(force_hca);
++            size_t start = 0;
++            while (start < force_hca_list.size()) {
++                size_t end = force_hca_list.find(',', start);
++                std::string token = force_hca_list.substr(start, end - start);
++                if (!token.empty()) {
++                    effective_filter.push_back(token);
++                }
++                if (end == std::string::npos) {
++                    break;
++                }
++                start = end + 1;
++            }
++        }
++    }
++    auto all_hca = listInfiniBandDevices(effective_filter);
+     for (auto &ent : discoverCpuTopology(all_hca)) {
+         matrix_[ent.name] = ent;
+     }

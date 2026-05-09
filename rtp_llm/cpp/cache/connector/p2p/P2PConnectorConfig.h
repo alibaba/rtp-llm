@@ -46,6 +46,24 @@ struct P2PConnectorWorkerConfig {
                                            uint32_t                 layer_all_num) {
         P2PConnectorWorkerConfig config;
         config.transfer_backend_config.cache_store_rdma_mode         = cache_store_config.cache_store_rdma_mode;
+        config.transfer_backend_config.cache_store_mooncake_mode     = cache_store_config.cache_store_mooncake_mode;
+        config.transfer_backend_config.mooncake.classic.metadata_conn_string =
+            cache_store_config.cache_store_mooncake_metadata_conn_string;
+        config.transfer_backend_config.mooncake.classic.local_server_name =
+            cache_store_config.cache_store_mooncake_local_server_name;
+        config.transfer_backend_config.mooncake.classic.ip_or_host_name =
+            cache_store_config.cache_store_mooncake_ip_or_host_name;
+        config.transfer_backend_config.mooncake.classic.transport =
+            transfer::normalizeMooncakeTransport(cache_store_config.cache_store_mooncake_transport);
+        config.transfer_backend_config.mooncake.classic.rpc_port =
+            static_cast<uint16_t>(cache_store_config.cache_store_mooncake_rpc_port);
+        config.transfer_backend_config.mooncake.control_plane_port =
+            cache_store_config.cache_store_mooncake_control_plane_port;
+        config.transfer_backend_config.mooncake.location = cache_store_config.cache_store_mooncake_location;
+        config.transfer_backend_config.mooncake.remote_accessible =
+            cache_store_config.cache_store_mooncake_remote_accessible;
+        config.transfer_backend_config.mooncake.update_metadata =
+            cache_store_config.cache_store_mooncake_update_metadata;
         config.transfer_backend_config.rdma_transfer_wait_timeout_ms = cache_store_config.rdma_transfer_wait_timeout_ms;
         config.transfer_backend_config.messager_io_thread_count      = cache_store_config.messager_io_thread_count;
         config.transfer_backend_config.messager_worker_thread_count  = cache_store_config.messager_worker_thread_count;

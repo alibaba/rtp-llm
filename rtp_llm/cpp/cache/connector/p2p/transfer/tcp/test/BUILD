@@ -36,7 +36,7 @@ cc_test(
     copts = test_copts,
     env = {
         # Limit per-process GPU reservation when many cc_tests run in parallel (bazel test //...).
-        "DEVICE_RESERVE_MEMORY_BYTES": "128000000",
+        "DEVICE_RESERVE_MEMORY_BYTES": "2048000000",
     },
     exec_properties = {'gpu':'A10'},
     deps = [
@@ -60,7 +60,7 @@ cc_test(
     ],
     copts = test_copts,
     env = {
-        "DEVICE_RESERVE_MEMORY_BYTES": "128000000",
+        "DEVICE_RESERVE_MEMORY_BYTES": "2048000000",
     },
     exec_properties = {'gpu':'A10'},
     deps = [

@@ -449,4 +449,13 @@ def setup_and_configure_server(py_env_configs: PyEnvConfigs):
 
     # Set local ip if not already set (e.g. for world_info / distributed_server)
     if not py_env_configs.server_config.ip:
-        py_env_configs.server_config.ip = socket.gethostbyname(socket.gethostname())
+        for env_name in ("HOST_IP", "POD_IP"):
+            env_value = os.environ.get(env_name)
+            if env_value:
+                py_env_configs.server_config.ip = env_value
+                break
+        if not py_env_configs.server_config.ip:
+            try:
+                py_env_configs.server_config.ip = socket.gethostbyname(socket.gethostname())
+            except socket.gaierror:
+                py_env_configs.server_config.ip = "127.0.0.1"

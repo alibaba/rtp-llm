@@ -23,7 +23,7 @@ _HF3FS_SHARED_LIBS = [
 ]
 
 rpm_library(
-    name = "hf3fs_default_impl",
+    name = "hf3fs_mooncake_impl",
     rpms = [
         "@hf3fs_rpm//file:file",
     ],
@@ -33,22 +33,8 @@ rpm_library(
     hdrs = [
         "hf3fs_usrbio.h",
     ],
-)
-
-cc_library(
-    name = "hf3fs",
-    deps = select({
-        "//:enable_mooncake_te": ["//3rdparty/3fs/mooncake:hf3fs_mooncake_impl"],
-        "//conditions:default": [":hf3fs_default_impl"],
-    }),
-    visibility = ["//visibility:public"],
-)
-
-alias(
-    name = "hf3fs_shared",
-    actual = select({
-        "//:enable_mooncake_te": "//3rdparty/3fs/mooncake:hf3fs_mooncake_impl_shared",
-        "//conditions:default": ":hf3fs_default_impl_shared",
-    }),
-    visibility = ["//visibility:public"],
+    deps = [
+        "@mooncake_transfer_engine//:glog",
+        "@mooncake_transfer_engine//:gflags",
+    ],
 )

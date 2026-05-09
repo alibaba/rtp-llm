@@ -311,6 +311,16 @@ std::string VitConfig::to_string() const {
 std::string CacheStoreConfig::to_string() const {
     std::ostringstream oss;
     oss << "cache_store_rdma_mode: " << cache_store_rdma_mode << "\n"
+        << "cache_store_mooncake_mode: " << cache_store_mooncake_mode << "\n"
+        << "cache_store_mooncake_metadata_conn_string: " << cache_store_mooncake_metadata_conn_string << "\n"
+        << "cache_store_mooncake_local_server_name: " << cache_store_mooncake_local_server_name << "\n"
+        << "cache_store_mooncake_ip_or_host_name: " << cache_store_mooncake_ip_or_host_name << "\n"
+        << "cache_store_mooncake_transport: " << cache_store_mooncake_transport << "\n"
+        << "cache_store_mooncake_rpc_port: " << cache_store_mooncake_rpc_port << "\n"
+        << "cache_store_mooncake_control_plane_port: " << cache_store_mooncake_control_plane_port << "\n"
+        << "cache_store_mooncake_location: " << cache_store_mooncake_location << "\n"
+        << "cache_store_mooncake_remote_accessible: " << cache_store_mooncake_remote_accessible << "\n"
+        << "cache_store_mooncake_update_metadata: " << cache_store_mooncake_update_metadata << "\n"
         << "wrr_available_ratio: " << wrr_available_ratio << "\n"
         << "rank_factor: " << rank_factor << "\n"
         << "thread_count: " << thread_count << "\n"

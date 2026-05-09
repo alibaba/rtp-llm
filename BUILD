@@ -91,6 +91,17 @@ config_setting(
     define_values = {"use_remote_kv_cache": "true"},
 )
 
+config_setting(
+    name = "enable_mooncake_te",
+    values = {"define": "enable_mooncake_te=true"},
+)
+
+filegroup(
+    name = "open_source_internal_smoke_compat",
+    srcs = glob(["internal_source/rtp_llm/test/smoke/**"], allow_empty = True),
+    visibility = ["//visibility:public"],
+)
+
 cc_binary(
     name = "th_transformer_config",
     copts = copts(),

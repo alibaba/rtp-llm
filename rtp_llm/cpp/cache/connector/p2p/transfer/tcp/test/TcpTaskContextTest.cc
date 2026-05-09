@@ -79,6 +79,8 @@ public:
         EPLBConfig                  eplb_config;
         FMHAConfig                  fmha_config;
         DeviceResourceConfig        device_resource_config;
+        // 这些测试直接构造 DeviceResourceConfig，不会读取 Bazel test env。
+        device_resource_config.device_reserve_memory_bytes = 2048000000;
         MoeConfig                   moe_config;
         SpeculativeExecutionConfig  sp_config;
         MiscellaneousConfig         misc_config;
