@@ -546,11 +546,11 @@ class MXFp4QuarkQuantConfig(QuarkQuantConfig):
 
     @classmethod
     def get_method(cls) -> str:
-        return "FP4_PER_GROUP_QUARK"
+        return "QuarkMXFP4"
 
     @classmethod
     def get_algo(cls) -> str:
-        return "fp4-pergroup-quark"
+        return "mxfp4-quark"
 
     def get_supported_act_dtypes(self) -> List[torch.dtype]:
         return [torch.float16, torch.bfloat16]

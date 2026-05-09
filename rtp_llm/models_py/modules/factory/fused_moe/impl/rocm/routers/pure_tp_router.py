@@ -229,8 +229,7 @@ class PureTpRouterMXFp4Passthrough(PureTpRouterBase):
         quant_method = resolver.get_quant_method(config)
         checker.check(
             quant_method in (
-                "FP4_PER_GROUP",
-                "FP4_PER_GROUP_QUARK",
+                "QuarkMXFP4",
                 "modelopt_fp4",
             )
         )
