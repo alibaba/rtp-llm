@@ -1,6 +1,7 @@
 from typing import Any, Dict, Optional
 
 import aiter
+import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -52,6 +53,26 @@ class FusedMoeExecutor(FusedMoeExpertExecutor):
 
         # Use actual local expert count from weight shape, not global config
         self.num_experts = self.w13_weight.shape[0]
+
+    def parse_sorted_ids(self, sorted_ids: torch.Tensor):
+        arr_uint32 = sorted_ids.cpu().numpy().view(np.uint32)
+        results = []
+        for i, val in enumerate(arr_uint32):
+            topk_id = (val >> 24) & 0xFF
+            token_id = val & 0xFFFFFF
+            results.append(
+                {
+                    "index": i,
+                    "signed": sorted_ids[i].item(),
+                    "unsigned": val,
+                    "topk_id": topk_id,
+                    "token_id": token_id,
+                }
+            )
+            print(
+                f"[{i:3d}] {sorted_ids[i].item():12d} -> topk_id={topk_id}, token_id={token_id}"
+            )
+        return results
 
     def get_block_size(self, num_tokens: int, topk: int, num_experts: int) -> int:
         """
@@ -179,6 +200,7 @@ class FusedMoeExecutor(FusedMoeExpertExecutor):
         a2 = torch.empty((M, topk, inter_dim // 2), dtype=dtype, device=device)
         fc1_scale = None
         a1_scale = None
+        # act_op = 1 if activation == "silu" else 0  # 1 = silu_and_mul
 
         aiter.ck_moe_stage1(
             hidden_states=a1,
