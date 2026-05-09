@@ -11,9 +11,16 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from rtp_llm.models_py.modules import RMSNorm
-from rtp_llm.models_py.modules.dsv4.attention import Attention
+from rtp_llm.models_py.modules.dsv4.attention import DSV4_BF16_VLLM, Attention
 from rtp_llm.models_py.modules.dsv4.hc import build_hc_head, build_hc_unit
 from rtp_llm.models_py.modules.dsv4.moe import MoE
+
+if DSV4_BF16_VLLM:
+    from rtp_llm.models_py.modules.dsv4.attention_vllm import (
+        AttentionVLLM as _AttentionCls,
+    )
+else:
+    _AttentionCls = Attention
 
 
 class Block(nn.Module):
@@ -67,7 +74,7 @@ class Block(nn.Module):
         super().__init__()
         self.layer_id = layer_id
 
-        self.attn = Attention(
+        self.attn = _AttentionCls(
             layer_id=layer_id,
             dim=dim,
             n_heads=n_heads,
@@ -276,10 +283,7 @@ class Block(nn.Module):
             and seqlens.device.type == "cpu"
             and bool((seqlens == max_S).all().item())
         )
-        dense_layout = (
-            batch_size == 1
-            or (batch_size > 1 and equal_len_dense)
-        )
+        dense_layout = batch_size == 1 or (batch_size > 1 and equal_len_dense)
         if dense_layout:
             x_padded = x_pre.view(batch_size, max_S, D)
             b_idx = None
