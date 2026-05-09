@@ -1081,14 +1081,10 @@ class AiterPrefillImplPaged(FMHAImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
-        is_draft_capture = getattr(
-            attn_inputs, "is_draft_prefill_cuda_graph_capture", False
-        )
         pl = attn_inputs.prefix_lengths
-        pl_ok = pl is not None and pl.numel() > 0
-        pl_max = int(pl.max().item()) if pl_ok else -1
-        has_prefix = is_draft_capture or (pl_ok and pl_max > 0)
-        return has_prefix
+        if pl is None or pl.numel() == 0:
+            return False
+        return int(pl.max().item()) > 0
 
     def _update_prefill_params_for_cuda_graph(self, attn_inputs: PyAttentionInputs) -> None:
         input_lengths = attn_inputs.input_lengths

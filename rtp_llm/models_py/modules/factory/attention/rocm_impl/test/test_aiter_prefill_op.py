@@ -297,50 +297,39 @@ class TestAiterPrefillAttnOp(unittest.TestCase):
 class TestAiterPrefillImplPagedSupport(unittest.TestCase):
     """Unit tests for AiterPrefillImplPaged.support() classmethod.
 
-    Validates draft-prefill-cuda-graph flag and prefix_lengths boundary logic.
-    Does NOT require GPU — only exercises the static support() decision.
+    Validates prefix_lengths boundary logic. MTP draft prefill capture inputs are
+    pre-filled with non-zero prefix in cuda_graph_runner.cc, so support() needs
+    only the prefix>0 check.
     """
 
-    def _make_attn_inputs(self, prefix_lengths, is_draft_capture=False):
+    def _make_attn_inputs(self, prefix_lengths):
         from types import SimpleNamespace
-        inputs = SimpleNamespace(
+        return SimpleNamespace(
             prefix_lengths=prefix_lengths,
-            is_draft_prefill_cuda_graph_capture=is_draft_capture,
             is_cuda_graph=False,
             is_prefill=True,
             input_lengths=torch.tensor([4], dtype=torch.int32),
         )
-        return inputs
-
-    def test_support_true_for_draft_capture_flag_with_zero_prefix(self):
-        """MTP draft flag set + prefix_lengths all zeros => support() returns True."""
-        pl = torch.zeros(4, dtype=torch.int32)
-        inputs = self._make_attn_inputs(pl, is_draft_capture=True)
-        self.assertTrue(AiterPrefillImplPaged.support(None, inputs))
 
     def test_support_true_for_real_prefix(self):
-        """prefix_lengths.max() > 0 => support() returns True (no draft flag needed)."""
+        """prefix_lengths.max() > 0 => support() returns True."""
         pl = torch.tensor([0, 128, 0, 64], dtype=torch.int32)
-        inputs = self._make_attn_inputs(pl, is_draft_capture=False)
-        self.assertTrue(AiterPrefillImplPaged.support(None, inputs))
+        self.assertTrue(AiterPrefillImplPaged.support(None, self._make_attn_inputs(pl)))
 
-    def test_support_false_without_prefix_or_flag(self):
-        """No prefix and no draft flag => support() returns False."""
+    def test_support_true_for_capture_filled_prefix(self):
+        """MTP draft capture pre-fills prefix_lengths with max_seq_len => support() True."""
+        pl = torch.full((4,), 1024, dtype=torch.int32)
+        self.assertTrue(AiterPrefillImplPaged.support(None, self._make_attn_inputs(pl)))
+
+    def test_support_false_for_zero_prefix(self):
+        """All-zero prefix_lengths => support() returns False (ASM/NonAsm preferred)."""
         pl = torch.zeros(4, dtype=torch.int32)
-        inputs = self._make_attn_inputs(pl, is_draft_capture=False)
-        self.assertFalse(AiterPrefillImplPaged.support(None, inputs))
+        self.assertFalse(AiterPrefillImplPaged.support(None, self._make_attn_inputs(pl)))
 
     def test_support_false_for_empty_prefix_lengths(self):
-        """Empty prefix_lengths tensor and no draft flag => support() returns False."""
+        """Empty prefix_lengths tensor => support() returns False."""
         pl = torch.empty(0, dtype=torch.int32)
-        inputs = self._make_attn_inputs(pl, is_draft_capture=False)
-        self.assertFalse(AiterPrefillImplPaged.support(None, inputs))
-
-    def test_support_true_for_empty_prefix_with_draft_flag(self):
-        """Empty prefix_lengths but draft flag set => support() returns True."""
-        pl = torch.empty(0, dtype=torch.int32)
-        inputs = self._make_attn_inputs(pl, is_draft_capture=True)
-        self.assertTrue(AiterPrefillImplPaged.support(None, inputs))
+        self.assertFalse(AiterPrefillImplPaged.support(None, self._make_attn_inputs(pl)))
 
 
 @unittest.skipUnless(_OPS_IMPORTABLE, "Requires AiterPrefillImplPaged module")

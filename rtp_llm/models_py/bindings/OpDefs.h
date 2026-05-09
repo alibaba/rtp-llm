@@ -203,7 +203,6 @@ struct PyAttentionInputs {
 
     // CUDA Graph mode flags
     bool is_cuda_graph = false;  // True when running in CUDA graph mode (capture or replay)
-    bool is_draft_prefill_cuda_graph_capture = false;
 
     std::optional<PyContextParallelParams> context_parallel_info;
 
