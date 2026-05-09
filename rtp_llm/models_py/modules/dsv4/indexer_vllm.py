@@ -353,10 +353,15 @@ class IndexerVLLM(nn.Module):
             safe_pos = torch.where(in_capacity, pos, torch.zeros_like(pos))
             block_in_seq = safe_pos // eb
             in_block = safe_pos % eb
-            bt_long = self._kv_block_table[:bsz].to(device=device, dtype=torch.long)
+            bt_long = self._kv_block_table.to(device=device, dtype=torch.long)
+            max_reqs = int(bt_long.shape[0])
+            if max_reqs <= 0:
+                return torch.zeros(bsz, T, D, dtype=torch.bfloat16, device=device)
             b_idx = torch.arange(bsz, device=device, dtype=torch.long).unsqueeze(1)
-            block_id = bt_long[b_idx, block_in_seq.unsqueeze(0).expand(bsz, -1)]
-            valid = (block_id > 0) & in_capacity.unsqueeze(0)
+            req_in_capacity = b_idx < max_reqs
+            safe_b_idx = b_idx.clamp(max=max_reqs - 1)
+            block_id = bt_long[safe_b_idx, block_in_seq.unsqueeze(0).expand(bsz, -1)]
+            valid = req_in_capacity & (block_id > 0) & in_capacity.unsqueeze(0)
             slot_mapping = torch.where(
                 valid,
                 block_id * eb + in_block.unsqueeze(0),
@@ -454,15 +459,23 @@ class IndexerVLLM(nn.Module):
             safe_pos = torch.where(in_capacity, kpos, torch.zeros_like(kpos))
             block_in_seq = safe_pos // kv_eb
             in_block = safe_pos % kv_eb
-            bt_long = kv_block_table[:bsz].to(device=device, dtype=torch.long)
-            b_idx = torch.arange(bsz, device=device, dtype=torch.long).unsqueeze(1)
-            block_id = bt_long[b_idx, block_in_seq.unsqueeze(0).expand(bsz, -1)]
-            k_valid = (block_id > 0) & in_capacity.unsqueeze(0)
-            k_slot_mapping = torch.where(
-                k_valid,
-                block_id * kv_eb + in_block.unsqueeze(0),
-                torch.zeros_like(block_id),
-            )
+            bt_long = kv_block_table.to(device=device, dtype=torch.long)
+            max_reqs = int(bt_long.shape[0])
+            if max_reqs <= 0:
+                k_slot_mapping = torch.empty((bsz, 0), dtype=torch.long, device=device)
+                k_valid = torch.empty((bsz, 0), dtype=torch.bool, device=device)
+                T = 0
+            else:
+                b_idx = torch.arange(bsz, device=device, dtype=torch.long).unsqueeze(1)
+                req_in_capacity = b_idx < max_reqs
+                safe_b_idx = b_idx.clamp(max=max_reqs - 1)
+                block_id = bt_long[safe_b_idx, block_in_seq.unsqueeze(0).expand(bsz, -1)]
+                k_valid = req_in_capacity & (block_id > 0) & in_capacity.unsqueeze(0)
+                k_slot_mapping = torch.where(
+                    k_valid,
+                    block_id * kv_eb + in_block.unsqueeze(0),
+                    torch.zeros_like(block_id),
+                )
         else:
             k_slot_mapping = torch.empty((bsz, 0), dtype=torch.long, device=device)
             k_valid = torch.empty((bsz, 0), dtype=torch.bool, device=device)

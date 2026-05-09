@@ -198,7 +198,7 @@ def _fused_kv_compress_norm_rope_insert_bf16(
     # (==0). The valid_block check filters those.
     use_cache = mask_pos & ~use_raw
     block_indices = pos // block_size
-    block_indices_safe = tl.where(use_cache, block_indices, 0)
+    block_indices_safe = tl.where(use_cache, block_indices % block_table_stride, 0)
     block_numbers = tl.load(
         block_table_ptr + req_idx * block_table_stride + block_indices_safe,
         mask=use_cache,
@@ -342,7 +342,7 @@ def _fused_kv_compress_norm_rope_insert_bf16_ratio128_tile(
 
     use_cache = mask_pos & ~in_batch
     block_indices = pos // block_size
-    block_indices_safe = tl.where(use_cache, block_indices, 0)
+    block_indices_safe = tl.where(use_cache, block_indices % block_table_stride, 0)
     block_numbers = tl.load(
         block_table_ptr + req_idx * block_table_stride + block_indices_safe,
         mask=use_cache,
