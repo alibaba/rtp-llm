@@ -75,6 +75,19 @@ class CompressorMeta:
                            or unallocated)
       * ``token_to_req`` : int32 alias of ``b_idx`` for the fused KV writer
       * ``boundary_token_indices`` : int64 token indices that write KV slots
+      * ``is_batched``   : True when this meta packs multiple requests
+                           (B>1) — the kernel's scalar ``seq_start`` raw
+                           path is unsafe and ``_launch`` falls back to
+                           ``disable_raw_path=True`` (cache-only) until
+                           the BF16 kernel grows varlen-raw support.
+      * ``seq_start_per_req`` : Optional ``[B]`` int32/int64 — varlen raw
+                                window starts (one per request).  Reserved
+                                for the future BF16 varlen-raw path; the
+                                current ``run_fused_compress_kv_write_bf16``
+                                ignores it (B>1 routes through cache).
+      * ``cu_seq_per_req`` : Optional ``[B+1]`` int32/int64 — varlen raw
+                             window cumulative offsets.  Same status as
+                             ``seq_start_per_req`` above.
     """
 
     positions: torch.Tensor
@@ -83,6 +96,9 @@ class CompressorMeta:
     kv_slots: torch.Tensor
     token_to_req: torch.Tensor
     boundary_token_indices: torch.Tensor
+    is_batched: bool = False
+    seq_start_per_req: Optional[torch.Tensor] = None
+    cu_seq_per_req: Optional[torch.Tensor] = None
 
 
 class _CompressorNorm(nn.Module):
@@ -93,7 +109,7 @@ class _CompressorNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(dim, dtype=torch.bfloat16))
 
 
-class CompressorVLLM(nn.Module):
+class CompressorBF16VLLM(nn.Module):
     """vLLM-style per-token state-pool compressor with BF16 KV-pool writeback.
 
     Compress ratio: CSA uses ratio=4 (overlap=True), HCA uses ratio=128
@@ -119,9 +135,9 @@ class CompressorVLLM(nn.Module):
         assert head_dim in (
             128,
             512,
-        ), f"CompressorVLLM supports head_dim in {{128, 512}}; got {head_dim}"
+        ), f"CompressorBF16VLLM supports head_dim in {{128, 512}}; got {head_dim}"
         assert compressor_weights is not None, (
-            "CompressorVLLM requires compressor_weights — meta-tensor / "
+            "CompressorBF16VLLM requires compressor_weights — meta-tensor / "
             "stand-alone construction is not supported (use the BF16 path)."
         )
         self.dim = dim
@@ -173,7 +189,7 @@ class CompressorVLLM(nn.Module):
         self._kv_eb: int = 0
 
         # Legacy attribute kept so attention.py's cmp_T fallback keeps
-        # working when probing a CompressorVLLM instance.
+        # working when probing a CompressorBF16VLLM instance.
         self._kv_cache_t: int = 0
 
         # Cached cos_sin cache built from self.freqs_cis at first forward.
@@ -261,8 +277,21 @@ class CompressorVLLM(nn.Module):
         self,
         positions: torch.Tensor,  # [N] int64
         b_idx: torch.Tensor,  # [N] int64
+        is_batched: bool = False,
+        seq_start_per_req: Optional[torch.Tensor] = None,
+        cu_seq_per_req: Optional[torch.Tensor] = None,
     ) -> CompressorMeta:
-        """Compute slot mappings + token_to_req from current pool context."""
+        """Compute slot mappings + token_to_req from current pool context.
+
+        ``is_batched`` / ``seq_start_per_req`` / ``cu_seq_per_req`` are
+        Phase-3a varlen-prefill metadata: when True, the host packs
+        multiple requests into one launch.  ``_launch`` then disables
+        the scalar-``seq_start`` raw path (which only addresses one
+        contiguous batch) so reads route through the state cache for
+        correctness.  Future BF16 kernel work can use the per-request
+        arrays to restore the raw fast path under B>1 (see source
+        FP8 kernel ``run_fused_compress_kv_write``'s varlen branch).
+        """
         fused_meta = None
         if _use_metadata_triton():
             from rtp_llm.models_py.modules.dsv4._compressor_metadata_triton import (
@@ -292,6 +321,9 @@ class CompressorVLLM(nn.Module):
             kv_slots=kv_slots,
             token_to_req=token_to_req,
             boundary_token_indices=boundary_token_indices,
+            is_batched=is_batched,
+            seq_start_per_req=seq_start_per_req,
+            cu_seq_per_req=cu_seq_per_req,
         )
 
     # ----------------------------------------------------------------------
@@ -301,7 +333,7 @@ class CompressorVLLM(nn.Module):
         if self._cos_sin_cache is None or self._cos_sin_cache.device != device:
             assert (
                 self.freqs_cis is not None
-            ), "CompressorVLLM.freqs_cis must be bound before forward"
+            ), "CompressorBF16VLLM.freqs_cis must be bound before forward"
             cache, _ = build_cos_sin_cache(self.freqs_cis.to(device))
             self._cos_sin_cache = cache
         return self._cos_sin_cache
@@ -357,8 +389,15 @@ class CompressorVLLM(nn.Module):
         in_capacity = block_in_seq < max_blocks
         safe_block_in_seq = block_in_seq.clamp(min=0, max=max_blocks - 1)
         block_id = bt_long[b_idx, safe_block_in_seq]
-        valid = boundary & in_capacity & (block_id > 0)
         slot = block_id * kv_eb + in_block
+        valid = boundary & in_capacity & (block_id > 0)
+        # Pool-overflow guard (mirrors the legacy `_compute_pool_slots`
+        # safeguard added in upstream 2184f972): a malformed block_table
+        # can otherwise produce a slot above ``pool_view.shape[0]`` and
+        # silently corrupt an unrelated pool entry.
+        if self._kv_pool_view is not None:
+            pool_rows = int(self._kv_pool_view.shape[0])
+            valid = valid & (slot < pool_rows)
         return torch.where(valid, slot, torch.full_like(slot, -1))
 
     def _launch(
@@ -448,6 +487,13 @@ class CompressorVLLM(nn.Module):
         :class:`Compressor` writes).
         """
         del sequence_lengths  # not needed: positions derived from start_pos+arange
+        # Phase-3a: accept either flat ``[T_total, dim]`` (vLLM-native /
+        # batched prefill) or legacy ``[B, S, dim]``.  The downstream CP
+        # gather + reshape paths still expect 3D, so re-wrap the flat case
+        # to ``[1, T_total, dim]`` immediately and let everything else
+        # flow through unchanged.
+        if x.dim() == 2:
+            x = x.unsqueeze(0)
         bsz, seqlen, _ = x.size()
 
         # CP prefill: absolute prefix start is cp_ctx.prefix_length, NOT
@@ -510,7 +556,14 @@ class CompressorVLLM(nn.Module):
         N = bsz * seqlen
         kv_flat = _flatten_token_major_2d(kv, N)
         score_flat = _flatten_token_major_2d(score, N)
-        self._launch(kv_flat, score_flat, meta, seq_start=sp)
+        # Phase-3a part 4b: B>1 batched prefill — each request has its own
+        # absolute start_pos so the scalar ``seq_start`` raw path is unsafe
+        # (it assumes one contiguous batch).  Disable raw path for batched
+        # meta so reads route through the state cache.  Future kernel work
+        # can wire ``meta.seq_start_per_req`` / ``cu_seq_per_req`` to
+        # restore the raw fast path under B>1.
+        seq_start = None if meta.is_batched else sp
+        self._launch(kv_flat, score_flat, meta, seq_start=seq_start)
         return None
 
     # ----------------------------------------------------------------------
@@ -603,8 +656,20 @@ class CompressorVLLM(nn.Module):
 def _build_prefill_positions(
     sp: int, bsz: int, seqlen: int, device: torch.device
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """``positions = sp + arange(seqlen)`` broadcast to ``[bsz, seqlen]`` →
-    flat ``[bsz*seqlen]``; ``b_idx = repeat_interleave(arange(bsz))``."""
+    """``positions = sp + arange(seqlen)`` flat ``[seqlen]``; ``b_idx``
+    all-zeros ``[seqlen]``.
+
+    Legacy B==1 / ``DSV4_VARLEN_PREFILL=0`` helper only — varlen callers
+    must feed ``(position_ids, req_id_per_token)`` straight into
+    ``compressor.prepare_metadata`` so this builder is NEVER reached
+    from a varlen call site (positions would otherwise collapse to a
+    single contiguous ``[sp, sp+T_total)`` range and ``b_idx`` to all-
+    zeros, silently mapping every token onto request-0's block_table).
+    """
+    assert bsz == 1, (
+        f"_build_prefill_positions is the legacy B==1 helper; got bsz={bsz}. "
+        "Varlen callers must use position_ids / req_id_per_token directly."
+    )
     N = bsz * seqlen
     positions = (
         (torch.arange(seqlen, device=device, dtype=torch.long).unsqueeze(0) + sp)
@@ -639,7 +704,7 @@ def _flatten_token_major_2d(x: torch.Tensor, rows: int) -> torch.Tensor:
 
 
 def build_prefill_metadata(
-    compressor: "CompressorVLLM",
+    compressor: "CompressorBF16VLLM",
     sp: int,
     bsz: int,
     seqlen: int,
@@ -650,7 +715,7 @@ def build_prefill_metadata(
 
 
 def build_decode_metadata(
-    compressor: "CompressorVLLM", start_pos: torch.Tensor, bsz: int
+    compressor: "CompressorBF16VLLM", start_pos: torch.Tensor, bsz: int
 ) -> CompressorMeta:
     device = start_pos.device
     positions = start_pos.to(device=device, dtype=torch.long).reshape(bsz)

@@ -7,10 +7,10 @@ indexer) with two changes:
      ``indexer_q_fp8_quant_fold`` + ``cp_gather_indexer_k_quant_cache`` +
      ``fp8_mqa_indexer_score`` / ``fp8_paged_indexer_score`` chain is
      replaced with: BF16 K gather from the BF16 INDEXER_KV pool (same one
-     :class:`CompressorVLLM` writes) → :func:`v4_indexer_score`
+     :class:`CompressorBF16VLLM` writes) → :func:`v4_indexer_score`
      (BF16 fused score Triton kernel, identical math to the legacy
      :class:`Indexer`).
-  2. **Nested compressor is locked to** :class:`CompressorVLLM`
+  2. **Nested compressor is locked to** :class:`CompressorBF16VLLM`
      (head_dim=128).  No env-switch fallback to legacy ``Compressor`` —
      this class is a single-flavor companion to the vLLM compressor.
 
@@ -46,7 +46,7 @@ Public API parity:
     swaps in ``cp_ctx.global_positions`` (rank-local global Q positions)
     for ``q_pos`` / ``ke`` and ``cp_freqs_cis_local`` for the RoPE slice.
     ``T`` covers the FULL compressed-K count (``seq_len_full // ratio``)
-    populated by the nested :class:`CompressorVLLM`'s own all-gather.
+    populated by the nested :class:`CompressorBF16VLLM`'s own all-gather.
 """
 
 from __future__ import annotations
@@ -60,14 +60,13 @@ import torch.nn.functional as F
 
 from rtp_llm.models_py.modules.dsv4._indexer_score_triton import v4_indexer_score
 from rtp_llm.models_py.modules.dsv4._pool_triton import masked_gather_from_pool
-from rtp_llm.models_py.modules.dsv4.compressor_vllm import CompressorVLLM
+from rtp_llm.models_py.modules.dsv4.compressor_bf16_vllm import CompressorBF16VLLM
 from rtp_llm.models_py.modules.dsv4.cp import CPContext, cp_freqs_cis_local
 from rtp_llm.models_py.modules.dsv4.rope import (
     apply_rotary_emb,
     apply_rotary_emb_batched,
 )
 from rtp_llm.ops.compute_ops import rtp_llm_ops
-
 
 _INDEXER_HEAD_DIM = 128
 
@@ -99,12 +98,12 @@ def _get_topk_workspace(device: torch.device) -> torch.Tensor:
 
 
 class _IndexerVLLMPrefillMeta(NamedTuple):
-    """Per-call BF16 prefill metadata for :class:`IndexerVLLM`.
+    """Per-call BF16 prefill metadata for :class:`IndexerBF16VLLM`.
 
-    Built once by :meth:`IndexerVLLM.prepare` from the caller's per-step
+    Built once by :meth:`IndexerBF16VLLM.prepare` from the caller's per-step
     state (``bsz``, ``seqlen``, ``sp_int``, ``device``) and the bound
     INDEXER_KV pool. Replaces the in-forward ``torch.arange`` / ``where``
-    / ``contiguous`` chain so :meth:`IndexerVLLM.forward` is kernel-only.
+    / ``contiguous`` chain so :meth:`IndexerBF16VLLM.forward` is kernel-only.
 
     All ``torch.Tensor`` fields are device-side, contiguous, and
     immediately consumable by the gather / score / topk kernels.
@@ -116,35 +115,40 @@ class _IndexerVLLMPrefillMeta(NamedTuple):
     # ── geometry (Python scalars; cheap) ──
     bsz: int
     seqlen: int
-    M: int          # = bsz * seqlen
-    sp_int: int    # absolute prefix length
-    end_pos: int   # = sp_int + seqlen
+    M: int  # = bsz * seqlen
+    sp_int: int  # absolute prefix length
+    end_pos: int  # = sp_int + seqlen
     is_fresh_prefill: bool  # = (sp_int == 0)
-    T: int         # compressed K count = end_pos // ratio
+    T: int  # compressed K count = end_pos // ratio
 
     # ── Q-side ──
     freqs_cis_slice: torch.Tensor  # self.freqs_cis[sp:sp+seqlen]; pre-sliced view
-    positions_d: torch.Tensor       # [M] int32 — global positions sp..sp+S-1
-    q_pos: torch.Tensor             # [B, S] int32 (== positions_d viewed)
+    positions_d: torch.Tensor  # [M] int32 — global positions sp..sp+S-1
+    q_pos: torch.Tensor  # [B, S] int32 (== positions_d viewed)
 
     # ── per-row visible-K window (causal) ──
     # ks[r] = 0; ke[r] = clamp((positions_d[r]+1)//ratio, max=T).
     # Mirrors the FP8 source's ``_IndexerFP8PrefillMeta`` exactly so the
     # ``dsv4_top_k_per_row_prefill`` call site is byte-for-byte identical.
-    ks: torch.Tensor                # [M] int32
-    ke: torch.Tensor                # [M] int32
+    ks: torch.Tensor  # [M] int32
+    ke: torch.Tensor  # [M] int32
 
     # ── K-side gather (compressed pool slots 0..T-1) ──
     # k_slot_mapping[c] = block_table[b, c // eb] * eb + (c % eb), or -1 / 0
     # depending on `k_valid[c]`. Both are 1D length T (bsz==1 today).
-    k_slot_mapping: torch.Tensor    # [T] int64
-    k_valid: torch.Tensor           # [T] bool
+    k_slot_mapping: torch.Tensor  # [T] int64
+    k_valid: torch.Tensor  # [T] bool
+
+    # Nested compressor launch metadata. Built while INDEXER_KV/STATE pools
+    # are bound so forward can write current compressed K without
+    # rebuilding the same slot maps in the hot path.
+    compressor_meta: Optional[object] = None
 
 
-class IndexerVLLM(nn.Module):
+class IndexerBF16VLLM(nn.Module):
     """vLLM-flow lightning indexer with BF16 score.
 
-    Single-flavor companion to :class:`CompressorVLLM` (head_dim=128). No
+    Single-flavor companion to :class:`CompressorBF16VLLM` (head_dim=128). No
     runtime branching on quantization / DeepGEMM availability — pick this
     class at construction time when you want the per-token state-pool
     flow + BF16 score pipeline.
@@ -168,14 +172,14 @@ class IndexerVLLM(nn.Module):
         (``ModelWeights.weights[layer_id]``), keyed by ``W.v4_*`` enum.
         Reads ``W.v4_indexer_wq_b_{w,s}``, ``W.v4_indexer_weights_proj_w``,
         and the four ``W.v4_indexer_compressor_*`` keys for the nested
-        :class:`CompressorVLLM`."""
+        :class:`CompressorBF16VLLM`."""
         super().__init__()
         assert index_head_dim == _INDEXER_HEAD_DIM, (
-            f"IndexerVLLM locked to index_head_dim={_INDEXER_HEAD_DIM} "
-            f"(matches CompressorVLLM 128-dim BF16 KV slot); got {index_head_dim}"
+            f"IndexerBF16VLLM locked to index_head_dim={_INDEXER_HEAD_DIM} "
+            f"(matches CompressorBF16VLLM 128-dim BF16 KV slot); got {index_head_dim}"
         )
         assert layer_weights is not None, (
-            "IndexerVLLM requires layer_weights — meta-tensor / stand-alone "
+            "IndexerBF16VLLM requires layer_weights — meta-tensor / stand-alone "
             "construction is not supported (use the legacy BF16 path for that)."
         )
         self.dim = dim
@@ -214,7 +218,7 @@ class IndexerVLLM(nn.Module):
             "wgate": layer_weights[W.v4_indexer_compressor_wgate],
             "norm": layer_weights[W.v4_indexer_compressor_norm],
         }
-        self.compressor = CompressorVLLM(
+        self.compressor = CompressorBF16VLLM(
             dim=dim,
             head_dim=index_head_dim,
             rope_head_dim=rope_head_dim,
@@ -290,7 +294,7 @@ class IndexerVLLM(nn.Module):
         global positions (``cp_ctx.global_positions``), the per-row
         visible-K window uses those same global positions, and the K-side
         gather scope is the FULL compressed-KV count (``seq_len_full //
-        ratio``) — populated by the nested :class:`CompressorVLLM`'s own
+        ratio``) — populated by the nested :class:`CompressorBF16VLLM`'s own
         all-gather path.  Decode is always single-token per request and
         skips CP regardless of the bound context."""
         self._cp_ctx = cp_ctx
@@ -403,7 +407,7 @@ class IndexerVLLM(nn.Module):
         """
         assert (
             self.freqs_cis is not None
-        ), "IndexerVLLM.prepare needs freqs_cis bound"
+        ), "IndexerBF16VLLM.prepare needs freqs_cis bound"
         ratio = self.compress_ratio
         cp_ctx = self._cp_ctx
         cp_on = cp_ctx is not None and cp_ctx.cp_size > 1 and seqlen > 1
@@ -411,7 +415,7 @@ class IndexerVLLM(nn.Module):
         if cp_on:
             # CP branch — mirror :class:`Indexer.forward` (CP path):
             # * sp_int  : full-sequence prefix start (matches the nested
-            #             CompressorVLLM's CP write start_pos)
+            #             CompressorBF16VLLM's CP write start_pos)
             # * end_pos : full sequence length (T then covers the full
             #             compressed K count populated by the nested
             #             compressor's all-gather)
@@ -421,9 +425,7 @@ class IndexerVLLM(nn.Module):
             sp_int = int(cp_ctx.prefix_length)
             end_pos = int(cp_ctx.seq_len_total)
             freqs_cis_slice = cp_freqs_cis_local(self.freqs_cis, cp_ctx)
-            positions_d = cp_ctx.global_positions.to(
-                device=device, dtype=torch.int32
-            )
+            positions_d = cp_ctx.global_positions.to(device=device, dtype=torch.int32)
         else:
             end_pos = sp_int + seqlen
             freqs_cis_slice = self.freqs_cis[sp_int : sp_int + seqlen]
@@ -467,6 +469,30 @@ class IndexerVLLM(nn.Module):
             k_slot_mapping = torch.empty((bsz, 0), dtype=torch.long, device=device)
             k_valid = torch.empty((bsz, 0), dtype=torch.bool, device=device)
 
+        compressor_meta = None
+        state_bt = getattr(self, "_state_block_table", None)
+        state_eb = getattr(self, "_state_eb", 0)
+        if (
+            self._kv_block_table is not None
+            and self._kv_eb > 0
+            and state_bt is not None
+            and state_eb > 0
+            and self.compressor is not None
+        ):
+            from rtp_llm.models_py.modules.dsv4.compressor_bf16_vllm import (
+                _build_prefill_positions,
+            )
+
+            self._propagate_pool_to_nested()
+            try:
+                meta_seqlen = int(cp_ctx.seq_len_full) if cp_on else seqlen
+                positions, b_idx = _build_prefill_positions(
+                    sp_int, bsz, meta_seqlen, device
+                )
+                compressor_meta = self.compressor.prepare_metadata(positions, b_idx)
+            finally:
+                self._clear_nested_pool()
+
         return _IndexerVLLMPrefillMeta(
             bsz=bsz,
             seqlen=seqlen,
@@ -482,6 +508,7 @@ class IndexerVLLM(nn.Module):
             ke=ke,
             k_slot_mapping=k_slot_mapping,
             k_valid=k_valid,
+            compressor_meta=compressor_meta,
         )
 
     # ------------------------------------------------------------------
@@ -491,7 +518,7 @@ class IndexerVLLM(nn.Module):
     # downstream coordinate transform / dtype cast (matches the FP8
     # source's contract).
     # ------------------------------------------------------------------
-    def forward_with_meta(
+    def forward(
         self,
         x: torch.Tensor,
         qr: torch.Tensor,
@@ -526,7 +553,7 @@ class IndexerVLLM(nn.Module):
             # Nested compressor writes the current chunk's compressed K
             # into the BF16 INDEXER_KV pool (and per-token state into
             # INDEXER_STATE).
-            self.compressor(x, sp)
+            self.compressor(x, sp, meta=attention_inputs.compressor_meta)
             # ``softmax_scale * n_heads^-0.5`` is pre-folded into
             # weights_proj at __init__.
             weights = F.linear(x, self.weights_proj)
@@ -534,9 +561,7 @@ class IndexerVLLM(nn.Module):
             if T == 0:
                 # Cold-start prefill before any compressed tokens — no K
                 # to score against; emit empty topk buffer behavior.
-                return torch.full(
-                    empty_shape, -1, dtype=torch.int32, device=x.device
-                )
+                return torch.full(empty_shape, -1, dtype=torch.int32, device=x.device)
 
             # BF16 K gather: dense [bsz, T, 128] from the INDEXER_KV pool.
             kv = self._gather_compressed_k(
@@ -564,9 +589,7 @@ class IndexerVLLM(nn.Module):
             # ``rtp_llm_ops.dsv4_top_k_per_row_prefill`` block.
             M = attention_inputs.M
             logits = index_score.view(M, T).contiguous()
-            out_buf = torch.empty(
-                (M, K), dtype=torch.int32, device=logits.device
-            )
+            out_buf = torch.empty((M, K), dtype=torch.int32, device=logits.device)
             rtp_llm_ops.dsv4_top_k_per_row_prefill(
                 logits,
                 attention_inputs.ks,
@@ -581,82 +604,6 @@ class IndexerVLLM(nn.Module):
         finally:
             self._clear_nested_pool()
 
-    # ------------------------------------------------------------------
-    # Backward-compat ``forward(x, qr, start_pos, offset, sequence_lengths)``
-    # entry. Lets attention.py's existing prefill call sites keep using
-    # the legacy ``self.indexer(x, qr, start_pos, offset)`` invocation —
-    # we just build the metadata internally and re-add ``offset`` so the
-    # returned indices live in the [SWA | compressed] coordinate space
-    # the legacy ``Indexer`` produces.
-    #
-    # Returns ``[B, S, K]`` int64 (matches legacy ``Indexer.forward``);
-    # raw int32 indices live behind :meth:`forward_with_meta` for callers
-    # that want the FP8 source's contract.
-    # ------------------------------------------------------------------
-    def forward(
-        self,
-        x: torch.Tensor,
-        qr: torch.Tensor,
-        start_pos,
-        offset: int = 0,
-        sequence_lengths: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        bsz, seqlen, _ = x.size()
-        is_batched = (
-            isinstance(start_pos, torch.Tensor) and start_pos.numel() > 1
-        )
-        is_prefill = seqlen > 1
-
-        if is_batched and is_prefill:
-            # Source FP8 indexer assumes single-request layout (bsz==1).
-            # For BF16 vLLM batched prefill we per-row dispatch, mirroring
-            # the legacy Indexer's ``_forward_batched_prefill``.
-            return self._forward_batched_prefill(
-                x, qr, start_pos, offset, sequence_lengths
-            )
-
-        device = x.device
-        if isinstance(start_pos, torch.Tensor):
-            sp_int = int(start_pos.item()) if start_pos.numel() == 1 else 0
-        else:
-            sp_int = int(start_pos)
-
-        if self.compressor.freqs_cis is None:
-            self.compressor.freqs_cis = self.freqs_cis
-
-        if is_prefill:
-            meta = self.prepare(
-                bsz=bsz,
-                seqlen=seqlen,
-                sp_int=sp_int,
-                device=device,
-                kv_block_table=self._kv_block_table,
-                kv_eb=self._kv_eb,
-            )
-            topk_int32 = self.forward_with_meta(x, qr, meta)
-        else:
-            # bsz>=1 single-step decode (q_len==1 per request). Route
-            # through the vectorized decode path with a temporary buffer.
-            K = self.index_topk
-            tmp_buf = torch.full(
-                (bsz, 1, K), -1, dtype=torch.int32, device=device
-            )
-            sp_t = (
-                start_pos
-                if isinstance(start_pos, torch.Tensor)
-                else torch.full((bsz,), sp_int, device=device, dtype=torch.int32)
-            )
-            self.forward_decode_vectorized(x, qr, sp_t, tmp_buf)
-            topk_int32 = tmp_buf
-
-        # Lift to long + add SWA prefix offset (legacy Indexer contract).
-        topk_long = topk_int32.long()
-        if isinstance(offset, torch.Tensor) or offset != 0:
-            topk_long = torch.where(
-                topk_long >= 0, topk_long + offset, topk_long
-            )
-        return topk_long
-
     def forward_decode(
         self,
         x: torch.Tensor,
@@ -667,69 +614,6 @@ class IndexerVLLM(nn.Module):
         """Alias to :meth:`forward_decode_vectorized` — vLLM flow has no
         scalar-loop decode body, so the two are identical."""
         return self.forward_decode_vectorized(x, qr, start_pos, out_topk_buffer)
-
-    def _forward_batched_prefill(
-        self,
-        x: torch.Tensor,
-        qr: torch.Tensor,
-        start_pos: torch.Tensor,
-        offset: int,
-        sequence_lengths: Optional[torch.Tensor],
-    ) -> torch.Tensor:
-        """Per-row prefill dispatch for ``bsz>1, seqlen>1``. Each row
-        narrows the bound INDEXER_KV / INDEXER_STATE block tables to its
-        own slice and calls back into the bsz==1 path."""
-        bsz = int(x.size(0))
-        max_S = int(x.size(1))
-        device = x.device
-
-        if sequence_lengths is None:
-            seq_t = torch.full((bsz,), max_S, device=device, dtype=torch.long)
-        else:
-            seq_t = sequence_lengths.to(device=device, dtype=torch.long)
-        sp_t = start_pos.to(device=device, dtype=torch.long)
-
-        end_pos_t = sp_t + seq_t
-        k_per_row = torch.minimum(
-            torch.full_like(end_pos_t, self.index_topk),
-            end_pos_t // self.compress_ratio,
-        )
-        K_max = int(k_per_row.max().item()) if bsz > 0 else 0
-        if K_max <= 0:
-            return torch.full(
-                (bsz, max_S, 0), -1, dtype=torch.long, device=device
-            )
-        out = torch.full(
-            (bsz, max_S, K_max), -1, dtype=torch.long, device=device
-        )
-
-        saved_kv_bt = self._kv_block_table
-        saved_state_bt = self._state_block_table
-        try:
-            for b in range(bsz):
-                seq_b = int(seq_t[b].item())
-                if seq_b == 0:
-                    continue
-                sp_b = int(sp_t[b].item())
-                x_b = x[b : b + 1, :seq_b]
-                qr_b = qr[b : b + 1, :seq_b]
-                self._kv_block_table = (
-                    saved_kv_bt[b : b + 1] if saved_kv_bt is not None else None
-                )
-                self._state_block_table = (
-                    saved_state_bt[b : b + 1]
-                    if saved_state_bt is not None
-                    else None
-                )
-                topk_b = self.forward(x_b, qr_b, sp_b, offset)  # [1, seq_b, K_b]
-                k_b = int(topk_b.size(-1))
-                if k_b > 0:
-                    out[b : b + 1, :seq_b, :k_b] = topk_b
-        finally:
-            self._kv_block_table = saved_kv_bt
-            self._state_block_table = saved_state_bt
-
-        return out
 
     # ------------------------------------------------------------------
     # Optional debug-prefix attribute used by ``attention.py`` when the
@@ -744,8 +628,8 @@ class IndexerVLLM(nn.Module):
     # ------------------------------------------------------------------
     def forward_decode_vectorized(
         self,
-        x: torch.Tensor,        # [B, 1, dim] bf16
-        qr: torch.Tensor,       # [B, 1, q_lora_rank] bf16
+        x: torch.Tensor,  # [B, 1, dim] bf16
+        qr: torch.Tensor,  # [B, 1, q_lora_rank] bf16
         start_pos: torch.Tensor,  # [B] int32
         out_topk_buffer: torch.Tensor,  # [B, 1, K]
     ) -> torch.Tensor:
@@ -766,14 +650,24 @@ class IndexerVLLM(nn.Module):
             # ``softmax_scale * n_heads^-0.5`` is pre-folded into weights_proj.
             weights = F.linear(x, self.weights_proj)
 
-            # Fresh pool read picks up the slot the nested compressor
-            # just scattered. Gather full ``T_max = self._kv_cache_t``;
-            # mask invalid positions via ``compressed_len`` in TopK.
-            T_max = (
+            # Fresh pool read picks up the slot the nested compressor just
+            # scattered.  Match the FP8 vLLM path: eager decode trims the
+            # scored context to the live compressed length, while CUDA-graph
+            # capture must keep a static upper bound to avoid a D2H sync.
+            T_cache = (
                 self._kv_block_table.shape[1] * self._kv_eb
                 if self._kv_block_table is not None and self._kv_eb > 0
                 else self._kv_cache_t
             )
+            if T_cache <= 0:
+                T_max = 0
+            elif q.is_cuda and torch.cuda.is_current_stream_capturing():
+                T_static = self._kv_cache_t if self._kv_cache_t > 0 else T_cache
+                T_max = max(32, min(T_cache, T_static))
+            else:
+                sp_max = int(start_pos.max().item())
+                T_live = (((sp_max + 1) // ratio) + 31) & ~31
+                T_max = max(32, min(T_cache, T_live))
             kv_cache = self._gather_compressed_k(bsz, T_max, x.device)
 
             # BF16 fused score, no causal mask (decode → q_pos=None).
@@ -791,14 +685,12 @@ class IndexerVLLM(nn.Module):
             # source's ``dsv4_persistent_topk`` block (only the op name
             # differs; algorithm + signature are identical).
             K_eff = min(K, T_max)
-            if (
-                K_eff > 0
-                and K in (512, 1024, 2048)
-                and _persistent_topk_enabled()
-            ):
+            score_2d = score.view(bsz, T_max)
+            lengths_i32 = compressed_len.view(bsz).clamp(max=T_max).to(torch.int32)
+            if K_eff > 0 and K in (512, 1024, 2048) and _persistent_topk_enabled():
                 rtp_llm_ops.persistent_topk(
-                    score.view(bsz, T_max),
-                    compressed_len.view(bsz).to(torch.int32),
+                    score_2d,
+                    lengths_i32,
                     out_topk_buffer.view(bsz, K),
                     _get_topk_workspace(score.device),
                     K,
@@ -807,12 +699,18 @@ class IndexerVLLM(nn.Module):
             else:
                 out_topk_buffer.fill_(-1)
                 if K_eff > 0:
-                    topk_idxs = score.topk(K_eff, dim=-1)[1].to(torch.int32)
+                    t_range = torch.arange(T_max, device=score.device).view(1, T_max)
+                    score_masked = torch.where(
+                        t_range < lengths_i32.view(bsz, 1),
+                        score_2d,
+                        torch.full_like(score_2d, float("-inf")),
+                    )
+                    topk_idxs = score_masked.topk(K_eff, dim=-1)[1].to(torch.int32)
                     out_topk_buffer[:, :, :K_eff].copy_(topk_idxs)
-                    k_arange = torch.arange(
-                        K, device=out_topk_buffer.device
-                    ).view(1, 1, K)
-                    out_topk_buffer.masked_fill_(k_arange >= compressed_len, -1)
+                    out_topk_buffer.masked_fill_(
+                        out_topk_buffer >= lengths_i32.view(bsz, 1, 1),
+                        -1,
+                    )
             return out_topk_buffer
         finally:
             self._clear_nested_pool()
