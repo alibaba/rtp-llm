@@ -3,6 +3,20 @@
 import logging
 
 logger = logging.getLogger(__name__)
+
+try:
+    import sys
+    import os
+    import nvidia_cutlass_dsl
+    pkg_dir = nvidia_cutlass_dsl.__path__[0]
+    python_packages_dir = os.path.join(pkg_dir, 'python_packages')
+
+    if os.path.isdir(python_packages_dir) and python_packages_dir not in sys.path:
+        sys.path.insert(0, python_packages_dir)
+        logger.debug(f"Added to sys.path: {python_packages_dir}")
+except ImportError:
+    pass
+
 logger.debug("Registered CUDA Linear strategies")
 
 
