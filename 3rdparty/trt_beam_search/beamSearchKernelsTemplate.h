@@ -674,9 +674,8 @@ void beamSearchKernelLauncher(
         check_cuda_error();
 
         int nThread = std::min(roundUp(nBMIn * nBMOut * 2, 32), MAX_BLOCK_SIZE);
-        addCumLogProbs<<<nBS, nThread, 0, stream>>>(pStage1LogProbs, bh.cumLogProbsIn, bh.finished, bh.endIds,
-            bh.diversityRates, bh.batchSlots, nBS, nBMIn, nBMOut);
-        check_cuda_error();
+        launchAddCumLogProbs<T>(pStage1LogProbs, bh.cumLogProbsIn, bh.finished, bh.endIds,
+            bh.diversityRates, bh.batchSlots, nBS, nBMIn, nBMOut, nThread, stream);
 
         // Stage 2
         invokeTopkLastDim<T>(
