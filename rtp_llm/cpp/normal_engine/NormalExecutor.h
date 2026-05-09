@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/normal_engine/AsyncRunner.h"
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
+#include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
@@ -18,25 +19,6 @@ namespace rtp_llm {
 
 class KVCacheManager;
 struct GptModelInitParams;
-
-// Holds pinned CPU source tensors alive across an async H2D copy. The
-// non-blocking `.to(kCUDA)` call returns immediately while the actual H2D
-// runs on the stream; the source tensor must outlive that copy. Released
-// at the start of the next process() iteration once the previous step's
-// copies have surely landed.
-class NormalBufferHolder {
-public:
-    void hold(const torch::Tensor& tensor) {
-        tensor_holder_.push_back(tensor);
-    }
-
-    void release() {
-        tensor_holder_.clear();
-    }
-
-private:
-    std::vector<torch::Tensor> tensor_holder_;
-};
 
 class NormalExecutor: public Executor {
 public:
@@ -92,6 +74,15 @@ protected:
 
     void publishNormalDeviceState(const StreamGroups& stream_groups, const SamplerOutput& sampler_output);
 
+    // Mirrors the use_normal_device_state condition in
+    // NormalModelInputGatherer::processDecodeStreams. When this returns false,
+    // gatherModelInput falls back to host-side stream accessors (currentExecuteTokens
+    // / seqLength) that the previous step's dispatch worker is still mutating
+    // — the caller MUST sync the worker before invoking gather. Uses
+    // config-only proxies (hasNumBeams / numReturnSequences) for batch checks
+    // to avoid touching the racy outputTokenLen()-derived currentBatchSize().
+    bool gatherCanUseDeviceState(const StreamGroups& stream_groups) const;
+
     // Env-gated path that pushes metadata tensors (combo_tokens,
     // input_lengths, sequence_lengths, prefix_lengths,
     // sequence_lengths_plus_1, lm_output_indexes) to CUDA before
@@ -102,10 +93,10 @@ protected:
     // single execBroadcast — fewer kernel launches and no CPU-side sync.
     // Shares the env var name `RTP_LLM_DEVICE_INPUT` with MtpExecutor
     // so a single launcher knob toggles both paths.
-    bool useMtpDeviceInput() const;
-    bool checkMtpDeviceInput() const;
-    void ensureMtpModelInputsOnCuda(GptModelInputs& model_input, const char* tag);
-    void checkMtpModelInputsOnCuda(const GptModelInputs& model_input, const char* tag) const;
+    bool useDeviceInput() const;
+    bool checkDeviceInput() const;
+    void ensureModelInputsOnCuda(GptModelInputs& model_input, const char* tag);
+    void checkModelInputsOnCuda(const GptModelInputs& model_input, const char* tag) const;
 
 private:
     std::unique_ptr<ModelBase>                                               model_;
@@ -132,10 +123,9 @@ private:
     // called).
     AsyncRunner dispatch_runner_;
 
-    // Keeps pinned-CPU H2D source tensors alive across one process() call.
-    // Released at the start of the next call after H2D copies have surely
-    // landed via the broadcast path (which is itself stream-ordered).
-    NormalBufferHolder buffer_holder_;
+    // Keeps async copy source tensors alive across release points. NormalExecutor
+    // uses this for model-input H2D staging and sampler-input staging.
+    TensorHolder buffer_holder_;
 };
 
 }  // namespace rtp_llm

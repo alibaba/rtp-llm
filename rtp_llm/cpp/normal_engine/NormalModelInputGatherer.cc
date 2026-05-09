@@ -1,6 +1,9 @@
 #include <algorithm>
+#include <atomic>
+#include <cstdlib>
 #include <cstring>
 #include <sstream>
+#include <string>
 #include "torch/all.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/normal_engine/NormalModelInputGatherer.h"
@@ -10,6 +13,11 @@
 namespace rtp_llm {
 
 namespace {
+
+bool asyncDebugEnabled() {
+    const char* env = std::getenv("RTP_LLM_ASYNC_DEBUG");
+    return env != nullptr && std::string(env) == "1";
+}
 
 struct GatherModelInputContext {
     int          input_vocab_size;
@@ -318,7 +326,20 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
         for (auto i = 0; i < current_batch_size; ++i) {
             model_input.trace_ids.push_back(stream->traceId());
             if (use_normal_device_state) {
-                const auto& state = stream->getNormalAsyncDeviceState();
+                const auto&             state = stream->getNormalAsyncDeviceState();
+                static std::atomic<int> debug_log_budget{200};
+                if (asyncDebugEnabled() && stream->hasPendingAsyncBookkeeping()
+                    && debug_log_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
+                    RTP_LLM_LOG_WARNING("[async-debug] gather decode with pending bookkeeping: stream=%ld pd_sep=%d "
+                                        "status=%s cpu_seq=%d state_next_real=%d cur_blocks=%zu batch_idx=%d",
+                                        stream->streamId(),
+                                        stream->queryPdSep(),
+                                        StreamStateToString(stream->getStatus()).c_str(),
+                                        stream->seqLength(),
+                                        state.next_real_seq_len,
+                                        stream->curBlocksNum(),
+                                        ctx.batch_idx);
+                }
                 normal_combo_tokens_gpu.push_back(state.last_sample_token_gpu.reshape({1}));
                 normal_sequence_lengths_gpu.push_back((state.next_seq_len_gpu - 1).to(torch::kInt32).reshape({1}));
                 ctx.input_lengths[ctx.batch_idx] = stream->inputLength();

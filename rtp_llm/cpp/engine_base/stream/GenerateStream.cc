@@ -136,10 +136,55 @@ absl::Status GenerateStream::incrKVBlock() {
 
 void GenerateStream::releaseResource() {
     RTP_LLM_PROFILE_FUNCTION();
+    // Block until every async bookkeeping worker that captured this stream has
+    // finished. This is the *only* place in the lifecycle that returns KV blocks
+    // to the pool — any earlier release would let a still-running worker write
+    // into blocks now owned by some other stream.
+    waitPendingAsyncBookkeeping();
     std::lock_guard<std::mutex> lock(*mutex_);
     if (!stream_cache_resource_->isResourceReleased()) {
         stream_cache_resource_->releaseResource();
     }
+}
+
+void GenerateStream::incPendingAsyncBookkeeping() {
+    async_bookkeeping_->count.fetch_add(1, std::memory_order_acq_rel);
+}
+
+void GenerateStream::decPendingAsyncBookkeepingAndMaybeRelease() {
+    int prev = async_bookkeeping_->count.fetch_sub(1, std::memory_order_acq_rel);
+    RTP_LLM_CHECK(prev >= 1);
+    if (prev == 1) {
+        {
+            std::lock_guard<std::mutex> lk(async_bookkeeping_->mu);
+        }
+        async_bookkeeping_->cv.notify_all();
+        // If the state machine already transitioned this stream to FINISHED but
+        // deferred the actual release because a worker was in flight, we are
+        // that last worker — pull the release trigger now. We are no longer
+        // holding mutex_ at this point (specUpdate / update lock_guard already
+        // unwound), so releaseResource() can re-enter mutex_ safely.
+        if (async_bookkeeping_->defer_release.exchange(false, std::memory_order_acq_rel)) {
+            releaseResource();
+        }
+    }
+}
+
+bool GenerateStream::hasPendingAsyncBookkeeping() const {
+    return async_bookkeeping_->count.load(std::memory_order_acquire) > 0;
+}
+
+void GenerateStream::waitPendingAsyncBookkeeping() {
+    std::unique_lock<std::mutex> lk(async_bookkeeping_->mu);
+    async_bookkeeping_->cv.wait(lk, [this] { return async_bookkeeping_->count.load(std::memory_order_acquire) == 0; });
+}
+
+void GenerateStream::markDeferredRelease() {
+    async_bookkeeping_->defer_release.store(true, std::memory_order_release);
+}
+
+bool GenerateStream::isDeferredReleasePending() const {
+    return async_bookkeeping_->defer_release.load(std::memory_order_acquire);
 }
 void GenerateStream::setNeedReleaseResource(bool need_release_resource) {
     need_release_resource_ = need_release_resource;
@@ -706,6 +751,14 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     if (hasError() && !update_info.force_update_info) {
         return;
     }
+    // Stream was finished by an earlier worker step; this update belongs to a
+    // stale batch (one-inflight schedule/process race window in stream-async).
+    // Skip — committing it would emit duplicate tokens past the natural finish
+    // boundary and would also trigger swapLinearBlocks against KV blocks whose
+    // release is being deferred only because we are still in flight.
+    if (isFinished() && !update_info.force_update_info) {
+        return;
+    }
 
     const auto& new_tokens = update_info.new_tokens;
 
@@ -797,6 +850,14 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
     RTP_LLM_LOG_DEBUG("stream [%ld] update", streamId());
     *is_context_stream_ = false;
     if (hasError() && !update_info.force_update_info) {
+        return;
+    }
+    // Stream was finished by an earlier worker step; this update belongs to a
+    // stale batch (one-inflight schedule/process race window in stream-async).
+    // Skip — committing it would emit duplicate tokens past the natural finish
+    // boundary, and updateKvCacheBlocks would touch KV blocks whose release is
+    // being deferred only because we are still in flight.
+    if (isFinished() && !update_info.force_update_info) {
         return;
     }
 

@@ -112,8 +112,9 @@ struct TokenSliceInfo {
     size_t count  = 0;
 };
 
-struct ModelBufferHolder {
+struct TensorHolder {
     std::vector<torch::Tensor> tensors;
+    std::vector<torch::Tensor> clear_tensors;
 
     void hold_host(const torch::Tensor& tensor) {
         if (tensor.defined() && tensor.device().is_cpu()) {
@@ -128,6 +129,10 @@ struct ModelBufferHolder {
     }
 
     void release() {
+        // Move the current hold set into clear_tensors, releasing the previous
+        // clear_tensors set. This keeps async H2D/D2H source tensors alive for
+        // one extra release point without each caller owning a custom holder.
+        clear_tensors = std::move(tensors);
         tensors.clear();
     }
 };

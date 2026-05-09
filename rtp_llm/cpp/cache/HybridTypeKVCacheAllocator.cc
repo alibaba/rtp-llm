@@ -140,7 +140,7 @@ int HybridTypeKVCacheAllocator::reuseCache(const CacheKeysType& cache_keys, Batc
 MallocResult HybridTypeKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
     auto&     kv_resource  = malloc_info.batch_kv_cache_resource;
     const int batch_size   = kv_resource->batchSize();
-    const int seq_len      = malloc_info.complete_token_ids->seqLength();
+    const int seq_len      = malloc_info.incrSeqLen();
     const int reserve_step = malloc_info.complete_token_ids->getReserveStep();
 
     // Record original sizes for rollback in case any subsequent allocation fails

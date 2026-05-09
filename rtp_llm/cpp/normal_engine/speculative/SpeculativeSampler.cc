@@ -29,6 +29,9 @@ FastTopKSamplerOutput FastTopKSampler::forward(const torch::Tensor& logits, int 
 SpeculativeSamplerOutput SpeculativeSampler::forward(const std::list<GenerateStreamPtr>& streams,
                                                      SamplerOutput&                      draft_sampler_output,
                                                      SamplerOutput&                      target_sampler_output) {
+    // TensorHolder release point (SpeculativeSampler): advances host tensors
+    // staged for rejection sampling H2D in the previous forward.
+    buffer_holder_.release();
     SpeculativeSamplerOutput sample_output;
     batchSample(sample_output, streams, draft_sampler_output, target_sampler_output);
 
@@ -41,17 +44,11 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
                                      SamplerOutput&                      target_sampler_output) const {
     RTP_LLM_PROFILE_SCOPE("speculative_sampler.batchSample");
     torch::Device target_device = getTorchCudaDevice();
-    torch::Device host_device   = torch::Device(torch::kCPU);
 
     int batch_size = streams.size();
 
-    // target_sampler_output.token_ids may be a CUDA tensor (Sampler keeps it on GPU to avoid
-    // D2H sync during sampling). Move to CPU once here for data_ptr access.
-    const torch::Tensor target_token_ids_cpu = target_sampler_output.token_ids.is_cuda() ?
-                                                   target_sampler_output.token_ids.to(host_device, true) :
-                                                   target_sampler_output.token_ids;
-    auto                draft_token_ids      = draft_sampler_output.token_ids;
-    auto                target_token_ids     = target_sampler_output.token_ids;
+    auto draft_token_ids  = draft_sampler_output.token_ids;
+    auto target_token_ids = target_sampler_output.token_ids;
 
     auto draft_token_probs  = draft_sampler_output.all_probs;
     auto target_token_probs = target_sampler_output.all_probs;
@@ -70,6 +67,7 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
         do_sample[stream_idx] = !stream->generateConfig()->top1();
         stream_idx++;
     }
+    buffer_holder_.hold_host(do_sample);
     auto do_sample_d = do_sample.to(target_device, true);
 
     auto          rand_options      = torch::TensorOptions().device(target_device).dtype(torch::kFloat);

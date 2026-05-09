@@ -14,6 +14,8 @@
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPrompt.h"
 #include "rtp_llm/cpp/models/position_ids/PositionIdsGenerator.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
+#include <atomic>
+#include <condition_variable>
 #include <iterator>
 #include <mutex>
 #include <optional>
@@ -477,6 +479,19 @@ public:
         pending_swap_done_event_.reset();
     }
 
+    // In-flight async bookkeeping workers (NormalExecutor::dispatchOutputAsync /
+    // MtpExecutor::dispatchDecodeAsync) that still hold a logical claim on this
+    // stream's KV resource. releaseResource MUST wait this to drain to 0 before
+    // returning blocks to the cache_manager pool, otherwise a still-running
+    // worker's update / specUpdate / updateKvCacheBlocks will operate on blocks
+    // that have been re-allocated to another stream — silent KV pool pollution.
+    void incPendingAsyncBookkeeping();
+    void decPendingAsyncBookkeepingAndMaybeRelease();
+    bool hasPendingAsyncBookkeeping() const;
+    void waitPendingAsyncBookkeeping();
+    void markDeferredRelease();
+    bool isDeferredReleasePending() const;
+
     // Per-step MTP device state for the next decode step. These per-stream GPU
     // handles let prepare build combo_tokens / sequence_lengths uniformly. In
     // async dispatch they bridge unfinished host bookkeeping; in sync dispatch
@@ -500,6 +515,10 @@ public:
         // before worker-side specUpdate has written sp_output_buffer fields.
         torch::Tensor last_hidden_states_gpu;
         torch::Tensor draft_all_probs_gpu;
+        // Host upper-bound mirror for the next iter's incrKVBlock; chained on
+        // the main thread as prev + (propose_step + 1) to skip racing the worker.
+        // -1 = unset (first iter / cleared).
+        int next_real_seq_len = -1;
     };
 
     uint64_t setMtpAsyncDeviceState(MtpAsyncDeviceState state) {
@@ -562,6 +581,10 @@ public:
         uint64_t      epoch = 0;
         torch::Tensor last_sample_token_gpu;  // [1] int32
         torch::Tensor next_seq_len_gpu;       // [1] int32, seqLength after sample
+        // Host mirror of next_seq_len_gpu, computed at publish time so the
+        // scheduler can drive incrKVBlock without racing the async worker.
+        // -1 = unset (first iter / cleared).
+        int next_real_seq_len = -1;
     };
 
     uint64_t setNormalAsyncDeviceState(NormalAsyncDeviceState state) {
@@ -734,6 +757,24 @@ protected:
     // swapLinearBlocks. MtpExecutor waits on it before issuing the next
     // target verify. nullptr on streams without pending swaps.
     std::shared_ptr<void> pending_swap_done_event_;
+
+    // In-flight async bookkeeping workers (see comment on incPendingAsyncBookkeeping).
+    // pending_async_mutex MUST be a separate lock from mutex_: the release path waits
+    // on this cv without holding mutex_, while the worker takes mutex_ to run
+    // specUpdate / update — sharing a single lock would deadlock.
+    //
+    // Wrapped in a shared_ptr (mirroring mutex_ / cv_) so GenerateStream stays
+    // copy-constructible — NormalGenerateStream forwards through a copy ctor.
+    // Copies of the stream legitimately share the same coordination state: a
+    // worker that captured the source stream's GenerateStreamPtr must keep any
+    // copy from racing release as well.
+    struct AsyncBookkeepingCoordinator {
+        std::atomic<int>        count{0};
+        std::atomic<bool>       defer_release{false};
+        std::mutex              mu;
+        std::condition_variable cv;
+    };
+    std::shared_ptr<AsyncBookkeepingCoordinator> async_bookkeeping_ = std::make_shared<AsyncBookkeepingCoordinator>();
 
     // Stream-async device-resident state for the next decode step's prepare.
     // These structs stay default-constructed (epoch=0, undefined tensors) until

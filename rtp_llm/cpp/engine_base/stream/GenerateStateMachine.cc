@@ -1,10 +1,21 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateStateMachine.h"
+#include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
+#include <cstdlib>
+#include <string>
 
 using namespace std;
 
 namespace rtp_llm {
+namespace {
+
+bool asyncDebugEnabled() {
+    const char* env = std::getenv("RTP_LLM_ASYNC_DEBUG");
+    return env != nullptr && std::string(env) == "1";
+}
+
+}  // namespace
 // ============================================================================
 // GenerateStateMachine method implementations
 // ============================================================================
@@ -104,7 +115,34 @@ void GenerateStateMachine::handleRunning() {
     if (stream_cache_resource_->resourceContext().role_type == RoleType::PREFILL) {
         return;
     }
-    auto result = stream_cache_resource_->incrKVBlock(reserve_step_);
+    // Use the publish-time seqLength so incrKVBlock doesn't race the async
+    // worker's update() — a stale read skips the block-boundary allocation.
+    // Prefer Normal state; fall back to MTP state if the stream is MTP.
+    int             seq_len_override = -1;
+    GenerateStream* stream           = stream_cache_resource_->stream();
+    if (stream != nullptr) {
+        const int normal_override = stream->getNormalAsyncDeviceState().next_real_seq_len;
+        if (normal_override > 0) {
+            seq_len_override = normal_override;
+        } else {
+            const int mtp_override = stream->getMtpAsyncDeviceState().next_real_seq_len;
+            if (mtp_override > 0) {
+                seq_len_override = mtp_override;
+            }
+        }
+        if (asyncDebugEnabled() && stream->hasPendingAsyncBookkeeping()) {
+            RTP_LLM_LOG_WARNING("[async-debug] handleRunning while async bookkeeping pending: stream=%ld pd_sep=%d "
+                                "status=%s seq_len=%d normal_next_real=%d mtp_next_real=%d override=%d",
+                                stream->streamId(),
+                                stream->queryPdSep(),
+                                StreamStateToString(status.load(std::memory_order_acquire)).c_str(),
+                                stream->seqLength(),
+                                stream->getNormalAsyncDeviceState().next_real_seq_len,
+                                stream->getMtpAsyncDeviceState().next_real_seq_len,
+                                seq_len_override);
+        }
+    }
+    auto result = stream_cache_resource_->incrKVBlock(reserve_step_, seq_len_override);
     if (!result.ok()) {
         // Report Error event so moveToNext() won't be called again on this stream
         reportEvent(StreamEvents::Error, ErrorCode::MALLOC_FAILED, "incrKVBlock failed: LACK MEM");
@@ -114,8 +152,21 @@ void GenerateStateMachine::handleRunning() {
 }
 
 void GenerateStateMachine::releaseResource() {
-    if (!stream_cache_resource_->isResourceReleased()) {
-        stream_cache_resource_->releaseResource();
+    if (stream_cache_resource_->isResourceReleased()) {
+        return;
     }
+    // Defer if any async bookkeeping worker still holds a claim. We arrive here
+    // under GenerateStream::mutex_ (moveToNext holds it across the entire state
+    // machine call), so we cannot block on the worker — the worker itself needs
+    // mutex_ to run specUpdate / update. Instead, mark for deferred release; the
+    // worker's dec path will trigger the actual releaseResource once the count
+    // drains. The caller has already set status to FINISHED, so the scheduler
+    // will remove this stream from running_streams_ and no new workers fire.
+    GenerateStream* stream = stream_cache_resource_->stream();
+    if (stream != nullptr && stream->hasPendingAsyncBookkeeping()) {
+        stream->markDeferredRelease();
+        return;
+    }
+    stream_cache_resource_->releaseResource();
 }
 }  // namespace rtp_llm

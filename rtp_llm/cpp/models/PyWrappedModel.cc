@@ -55,6 +55,8 @@ void PyWrappedModel::releaseBuffers() {
         py::gil_scoped_acquire gil;
         held_attn_pyobj_ = py::object();
     }
+    // TensorHolder release point (PyWrappedModel): advances model-internal
+    // host staging buffers from tensorHoldHostAndToCuda()/holdInputsHostBuffers().
     buffer_holder_.release();
 }
 

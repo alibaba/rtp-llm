@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/models/eplb/ExpertBalancer.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpBatchStreamProcessor.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
+#include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/normal_engine/AsyncRunner.h"
 #include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
 
@@ -22,29 +23,6 @@ struct MtpMetricsCollector {
     RtpLLMSpeculativeEngineMetricsCollector sp_engine_collector;
 
     bool not_skip = false;
-};
-
-class MtpBufferHolder {
-public:
-    void hold(const torch::Tensor& tensor) {
-        tensor_holder_.push_back(tensor);
-    }
-
-    void hold(const GptModelInputs& model_input) {
-        tensor_holder_.push_back(model_input.combo_tokens);
-        tensor_holder_.push_back(model_input.input_lengths);
-        tensor_holder_.push_back(model_input.sequence_lengths);
-        tensor_holder_.push_back(model_input.lm_output_indexes);
-        tensor_holder_.push_back(model_input.prefix_lengths);
-        tensor_holder_.push_back(model_input.sequence_lengths_plus_1);
-    }
-
-    void release() {
-        tensor_holder_.clear();
-    }
-
-private:
-    std::vector<torch::Tensor> tensor_holder_;
 };
 
 class MtpExecutor: public Executor {
@@ -119,6 +97,8 @@ protected:
     void            launchTargetVerifyPrepareAsync(const GptModelInputs& model_input, size_t batch_size);
     void            launchDraftPrefillPrepareAsync(const GptModelInputs& model_input);
     GptModelOutputs runTargetVerifyForward(GptModelInputs& model_input, const StreamGroups& stream_groups);
+    void            debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& model_input,
+                                                         const StreamGroups&   stream_groups) const;
     void            broadcastPostRejectionInputs(GptModelInputs& model_input);
     GptModelOutputs runDraftPrefillForward(GptModelInputs& model_input);
     void            collectDecodeMetrics(const StreamGroups&                          stream_groups,
@@ -138,10 +118,10 @@ protected:
                           std::vector<torch::Tensor>& draft_probs_list,
                           torch::Tensor&              draft_token_ids_t);
 
-    bool useMtpDeviceInput() const;
-    bool checkMtpDeviceInput() const;
-    void ensureMtpModelInputsOnCuda(GptModelInputs& model_input, const char* tag);
-    void checkMtpModelInputsOnCuda(const GptModelInputs& model_input, const char* tag) const;
+    bool useDeviceInput() const;
+    bool checkDeviceInput() const;
+    void ensureModelInputsOnCuda(GptModelInputs& model_input, const char* tag);
+    void checkModelInputsOnCuda(const GptModelInputs& model_input, const char* tag) const;
 
     AcceptLenMetricsSnapshot consumePendingAcceptLenMetrics();
     void
@@ -209,8 +189,8 @@ private:
     std::unique_ptr<speculative::SpeculativeSampler> speculative_sampler_;
     std::unique_ptr<speculative::FastTopKSampler>    fast_topk_sampler_;
 
-    // holder for host buffers to avoid early free before H2D copy kernel execution
-    MtpBufferHolder buffer_holder_;
+    // Keeps async copy source tensors alive across release points.
+    TensorHolder buffer_holder_;
 
     bool     warm_up_;
     RoleType role_type_;

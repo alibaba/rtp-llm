@@ -94,7 +94,15 @@ bool LinearKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_re
     int need_alloc_blocks = 0;
 
     for (int i = current_blocks_len; i < current_blocks_len + new_blocks_len; i++) {
-        const bool is_seq_tail  = (seq_slots > 0) && (i == seq_slots - 1);
+        // Mark the last TWO seq positions as tail (real). Reason: the
+        // causal_conv1d_update kernel reads block_map at offset
+        // cal_block_idx(seq_len - 1, SBP) = (seq_len - 2) // SBP. When seq_len
+        // is exactly N*SBP + 1 (one token past a block boundary), this lands
+        // on `seq_slots - 2`, NOT on the current tail at `seq_slots - 1`. If
+        // that position is NULL_BLOCK_IDX (e.g., long initial prompt that
+        // straddles a block boundary), the kernel hits IMA. Allocating both
+        // tail and tail-1 as real keeps the boundary read safe.
+        const bool is_seq_tail  = (seq_slots > 0) && (i >= std::max(0, seq_slots - 2)) && (i < seq_slots);
         const bool is_reserve   = (reserve_step > 0) && (i >= seq_slots);
         const bool step_hit     = (((i + 1) % step) == 0);
         const bool should_alloc = is_reserve || (enable_reuse_cache ? (step_hit || is_seq_tail) : is_seq_tail);
@@ -118,7 +126,15 @@ bool LinearKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_re
     BlockIndicesType new_ids;
     new_ids.reserve(static_cast<size_t>(new_blocks_len));
     for (int i = current_blocks_len; i < current_blocks_len + new_blocks_len; i++) {
-        const bool is_seq_tail  = (seq_slots > 0) && (i == seq_slots - 1);
+        // Mark the last TWO seq positions as tail (real). Reason: the
+        // causal_conv1d_update kernel reads block_map at offset
+        // cal_block_idx(seq_len - 1, SBP) = (seq_len - 2) // SBP. When seq_len
+        // is exactly N*SBP + 1 (one token past a block boundary), this lands
+        // on `seq_slots - 2`, NOT on the current tail at `seq_slots - 1`. If
+        // that position is NULL_BLOCK_IDX (e.g., long initial prompt that
+        // straddles a block boundary), the kernel hits IMA. Allocating both
+        // tail and tail-1 as real keeps the boundary read safe.
+        const bool is_seq_tail  = (seq_slots > 0) && (i >= std::max(0, seq_slots - 2)) && (i < seq_slots);
         const bool is_reserve   = (reserve_step > 0) && (i >= seq_slots);
         const bool step_hit     = (((i + 1) % step) == 0);
         const bool should_alloc = is_reserve || (enable_reuse_cache ? (step_hit || is_seq_tail) : is_seq_tail);

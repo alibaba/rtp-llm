@@ -4,6 +4,8 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
+#include <cstdlib>
+#include <string>
 #if USING_CUDA
 #include "rtp_llm/models_py/bindings/cuda/ops/StandaloneOps.h"
 #include "ATen/cuda/CUDAContext.h"
@@ -11,6 +13,11 @@
 
 namespace rtp_llm {
 namespace {
+
+bool asyncDebugEnabled() {
+    const char* env = std::getenv("RTP_LLM_ASYNC_DEBUG");
+    return env != nullptr && std::string(env) == "1";
+}
 
 torch::Tensor copyToPinnedCpuAsync(const torch::Tensor& tensor, bool& need_sync) {
     if (!tensor.defined() || !tensor.is_cuda()) {
@@ -178,6 +185,19 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
 
     for (int i = 0; i < cur_batch_size; ++i) {
         if (success_cpu.defined() && !(success_cpu.data_ptr<bool>()[batch_idx_in + i])) {
+            if (asyncDebugEnabled()) {
+                const auto& state = stream->getNormalAsyncDeviceState();
+                RTP_LLM_LOG_ERROR("[async-debug] sampler success=false: stream=%ld pd_sep=%d status=%s "
+                                  "pending=%d seq_len=%d state_next_real=%d batch_idx_in=%d token_stride=%zu",
+                                  stream->streamId(),
+                                  stream->queryPdSep(),
+                                  StreamStateToString(stream->getStatus()).c_str(),
+                                  stream->hasPendingAsyncBookkeeping(),
+                                  stream->seqLength(),
+                                  state.next_real_seq_len,
+                                  batch_idx_in + i,
+                                  token_stride);
+            }
             stream->reportError(ErrorCode::UNKNOWN_ERROR, "sampler generate token id failed");
         }
     }
