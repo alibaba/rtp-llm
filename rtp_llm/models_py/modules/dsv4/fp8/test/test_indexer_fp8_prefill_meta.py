@@ -366,6 +366,47 @@ class IndexerFP8PrepareVarlenTest(unittest.TestCase):
         self.assertEqual(meta.positions_d[16].item(), 8)
         self.assertEqual(meta.positions_d[27].item(), 19)
 
+    def test_wrapped_token_dim_matches_flat(self) -> None:
+        kw = self._make_batched_kwargs(
+            prefix_lengths=[0, 8],
+            input_lengths=[16, 12],
+        )
+        flat = IndexerFP8.prepare(
+            self.stub,
+            kw["batch_size"],
+            int(kw["max_seqlen_q"]),
+            0,
+            self.device,
+            kv_block_table=self.bt,
+            kv_eb=self.kv_eb,
+            use_varlen=True,
+            **kw,
+        )
+        wrapped_kw = dict(kw)
+        for key in (
+            "cu_seqlens",
+            "input_lengths",
+            "prefix_lengths",
+            "position_ids",
+            "req_id_per_token",
+        ):
+            wrapped_kw[key] = wrapped_kw[key].view(1, -1)
+        wrapped = IndexerFP8.prepare(
+            self.stub,
+            kw["batch_size"],
+            int(kw["max_seqlen_q"]),
+            0,
+            self.device,
+            kv_block_table=self.bt,
+            kv_eb=self.kv_eb,
+            use_varlen=True,
+            **wrapped_kw,
+        )
+        self.assertTrue(torch.equal(wrapped.positions_d, flat.positions_d))
+        self.assertTrue(torch.equal(wrapped.ks, flat.ks))
+        self.assertTrue(torch.equal(wrapped.ke, flat.ke))
+        self.assertTrue(torch.equal(wrapped.cu_kv_seqlens, flat.cu_kv_seqlens))
+
     def test_b2_ke_clamps_per_request_T_b(self) -> None:
         """ke[t] = ``cu_kv_seqlens[b] + clamp_max((pos+1)//ratio, T_b)`` —
         GLOBAL flat-K coord per token. The clamp must be against per-request

@@ -32,6 +32,7 @@ import torch
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 _HAS_OP = hasattr(rtp_llm_ops, "dsv4_top_k_per_row_prefill")
+_HAS_INDEXED_OP = hasattr(rtp_llm_ops, "dsv4_top_k_per_row_prefill_indexed")
 
 
 # ---------------------------------------------------------------------------
@@ -57,6 +58,23 @@ def _run(logits, row_starts, row_ends, K):
         logits,
         row_starts,
         row_ends,
+        out,
+        N,
+        logits.stride(0),
+        logits.stride(1),
+        K,
+    )
+    return out
+
+
+def _run_indexed(logits, row_starts, row_ends, row_indices, K):
+    N = logits.size(0)
+    out = torch.full((N, K), -1, dtype=torch.int32, device=logits.device)
+    rtp_llm_ops.dsv4_top_k_per_row_prefill_indexed(
+        logits,
+        row_starts,
+        row_ends,
+        row_indices,
         out,
         N,
         logits.stride(0),
@@ -152,6 +170,20 @@ def test_radix_branch_above_threshold():
     _assert_equiv(out, logits, rs, re, K=64, tag="N>12288 radix tail")
 
 
+def test_indexed_row_schedule_writes_original_rows():
+    """Explicit row schedule changes launch order only, not output rows."""
+    if not _HAS_INDEXED_OP:
+        print("  [indexed schedule] SKIP: op not built")
+        return
+    lens = [128, 4096, 256, 8192, 64, 2048, 1024, 16]
+    logits, rs, re = _make(len(lens), 8192, lens, seed=41)
+    row_indices = torch.tensor(
+        [7, 0, 6, 1, 5, 2, 4, 3], dtype=torch.int32, device="cuda"
+    )
+    out = _run_indexed(logits, rs, re, row_indices, K=64)
+    _assert_equiv(out, logits, rs, re, K=64, tag="indexed schedule")
+
+
 def test_zero_length_row():
     """row_starts == row_ends → all -1."""
     logits, rs, re = _make(4, 1024, [1024, 0, 512, 0], seed=5)
@@ -232,6 +264,7 @@ if __name__ == "__main__":
     test_short_rows_padding()
     test_long_T_radix_inside_block()
     test_radix_branch_above_threshold()
+    test_indexed_row_schedule_writes_original_rows()
     test_zero_length_row()
     print("\n== Benchmark ==")
     bench_prefill_sweep()

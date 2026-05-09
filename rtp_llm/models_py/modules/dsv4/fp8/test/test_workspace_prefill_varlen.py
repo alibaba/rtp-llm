@@ -422,6 +422,48 @@ class BuildWorkspaceMetaVarlenTest(unittest.TestCase):
         )
         self.assertTrue(torch.equal(m.new_k_slot_in_flat, expected))
 
+    def test_wrapped_token_dim_matches_flat(self) -> None:
+        stub = _make_stub(win=8, compress_ratio=4, n_reqs=2)
+        dev = self.device
+        positions, req_id, cu_seqlens = _flat_positions([0, 32], [8, 6], dev)
+        pl = torch.tensor([0, 32], dtype=torch.int32, device=dev)
+        il = torch.tensor([8, 6], dtype=torch.int32, device=dev)
+        flat = stub._build_workspace_meta(
+            seqlen=int(positions.numel()),
+            sp_int=0,
+            device=dev,
+            with_dense_cmp_topk=False,
+            use_varlen=True,
+            batch_size=2,
+            cu_seqlens=cu_seqlens,
+            input_lengths=il,
+            prefix_lengths=pl,
+            sp_per_req=pl.to(torch.int64),
+            position_ids=positions,
+            req_id_per_token=req_id,
+            max_seqlen_q=int(il.max().item()),
+        )
+        wrapped = stub._build_workspace_meta(
+            seqlen=int(positions.numel()),
+            sp_int=0,
+            device=dev,
+            with_dense_cmp_topk=False,
+            use_varlen=True,
+            batch_size=2,
+            cu_seqlens=cu_seqlens.view(1, -1),
+            input_lengths=il.view(1, -1),
+            prefix_lengths=pl.view(1, -1),
+            sp_per_req=pl.to(torch.int64).view(1, -1),
+            position_ids=positions.view(1, -1),
+            req_id_per_token=req_id.view(1, -1),
+            max_seqlen_q=int(il.max().item()),
+        )
+        self.assertTrue(
+            torch.equal(wrapped.new_k_slot_in_flat, flat.new_k_slot_in_flat)
+        )
+        self.assertTrue(torch.equal(wrapped.swa_seq_lens, flat.swa_seq_lens))
+        self.assertTrue(torch.equal(wrapped.qsl, flat.qsl))
+
     # ----- B==2 cold + continuation ---------------------------------------
     def test_b2_cold_plus_continuation_fields(self) -> None:
         """sp=[0, 32], S=[8, 6], ratio=4, win=8:

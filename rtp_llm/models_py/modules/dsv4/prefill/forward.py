@@ -17,6 +17,78 @@ Nothing in here holds state. ``DeepSeekV4Model.forward`` feeds in
 
 Paired with :mod:`rtp_llm.models_py.modules.dsv4.decode.forward`, which
 does the same job for the decode path.
+
+----------------------------------------------------------------------
+Context-Parallel (CP) prefill data flow
+----------------------------------------------------------------------
+
+CP repurposes the TP process group as the CP group (see
+``ParallelismConfig::get_attn_tp_size`` — returns 1 when CP enabled).
+The C++ ``ZigZagProcessor`` splits each request's padded prefill tokens
+across the CP group with a zigzag layout. ``forward_layers`` consumes
+the resulting per-rank metadata and builds a ``CPContext`` (in
+``cp.py``) bound onto every Attention / Compressor / Indexer module
+via ``v4._propagate_cp_ctx`` before the per-layer loop runs.
+
+Per-rank inputs (rank-local, shaped for ``T_local = chunk_length``):
+  * ``input_ids``                — token slice owned by this rank
+  * ``attn.position_ids``        — framework-provided positions; under CP,
+                                   ``forward_layers`` replaces these with
+                                   CPContext's per-token request-absolute
+                                   positions
+  * ``attn.cu_seqlens``          — rank-local request boundaries
+  * ``attn.input_lengths``       — rank-local per-req token count
+
+Rank-invariant inputs:
+  * ``attn.prefix_lengths``      — global per-req KV prefix length
+
+Global view (held on ``CPContext``, derived once in
+``build_cp_context``):
+  * ``cp_ctx.input_lengths_global`` — full per-req length, =
+    ``cp_info.prefill_actual_input_lengths_cpu``
+  * ``cp_ctx.cu_seqlens_global``    — cumsum, used as ``query_start_loc``
+    for SWA-pool write meta
+  * ``cp_ctx.global_positions``     — GLOBAL absolute pos per rank-local
+    token (zigzag-derived, per-request for B>=1)
+  * ``cp_ctx.seq_len_full``         — total real prefill length
+
+Per-layer pipeline under CP (compress_ratio == 0, SWA-only):
+  1. ``_prefill_compute_qkv``: rank-local Q + KV → KV all-gathered to
+     ``kv_full[seq_len_full, D]`` in GLOBAL request order
+  2. ``_prefill_write_swa_fp8_paged``: every rank writes the GATHER'd
+     KV to its own paged pool. ``slot_mapping`` is built from the
+     global write trio (cu_seqlens_global / combined_seq_lens_global /
+     seq_len_full) so all ranks' pools end up bit-identical.
+  3. ``_attn_fp8_swa_via_kv_full`` (fresh, sp==0): rank-local Q over
+     gathered KV. The varlen topk builder uses CP global positions plus
+     global per-request cu_seqlens, so topk indices address rows in
+     ``kv_full`` for B>=1.
+  4. ``_attn_fp8_swa_via_concat`` (cont, sp>0): workspace ``[B, M, D]``
+     with per-request prefix tails and new-K slots. ``combined_indices`` /
+     ``combined_lens`` are built in Python because the Triton helper's
+     ``pos = start_pos + token_idx_in_query`` formula assumes contiguous Q,
+     which zigzag CP breaks.
+
+CSA / HCA layers (compress_ratio == 4 / 128) add:
+  * ``CompressorFP8.forward`` all-gathers KV/score then drops the
+    rank-local ``meta`` and rebuilds ``state_slots`` / ``kv_slots`` from
+    CPContext's full per-request positions.
+  * ``IndexerFP8.prepare`` swaps ``input_lengths`` →
+    ``cp_ctx.input_lengths_global`` for ``T_per_req`` so ks / ke /
+    cu_kv_seqlens index into the per-rank pool's GLOBAL compressed-K
+    extent. Nested compressor_meta is nulled for the same rebuild path.
+
+Output: each layer's hidden state ``h`` is rank-local
+``[T_local, hc, dim]`` — the framework's exit all-gather + strip-pad
+gather (driven by ``cp_info.prefill_qkv_restore_indice`` /
+``prefill_qkv_padding_mask``) reassembles the full sequence for the
+next-layer / lm-head step.
+
+Decode does NOT all-gather. Each rank's pool already holds the full
+sequence's compressed entries (each rank wrote the gather'd new K
+during prefill), so per-rank decode reads remain self-contained.
+
+Padding-token slots are nulled via ``cp_info.prefill_qkv_padding_mask``.
 """
 
 from __future__ import annotations
@@ -154,19 +226,32 @@ def forward_layers(
     cp_ctx = None
     if cp_info is not None and cp_size > 1:
         T_local = int(input_ids.size(0))
-        prefix_length = 0
+        prefix_offsets = 0
         prefix_lengths = getattr(attn_inputs, "prefix_lengths", None)
         if prefix_lengths is not None and prefix_lengths.numel() > 0:
-            prefix_length = int(prefix_lengths.reshape(-1)[0].item())
+            prefix_offsets = prefix_lengths.to(
+                device=input_ids.device, dtype=torch.long
+            )
         cp_ctx = build_cp_context(
             cp_info,
             cp_size,
             cp_rank,
             T_local,
             input_ids.device,
-            position_offset=prefix_length,
+            position_offset=prefix_offsets,
         )
     v4._propagate_cp_ctx(cp_ctx)
+    if cp_ctx is not None:
+        # The framework's fallback position_ids are rank-local contiguous
+        # after ZigZagProcessor rewrites input_lengths to CP chunk lengths.
+        # DSV4 attention/indexer/compressor need the per-token absolute
+        # request positions carried by CPContext.
+        positions = cp_ctx.global_positions.to(
+            device=positions.device, dtype=torch.long
+        )
+    positions = positions.reshape(-1).contiguous()
+    if cu_seqlens is not None:
+        cu_seqlens = cu_seqlens.reshape(-1).contiguous()
 
     # MOEDBG hook (mirrors V4Transformer.forward standalone path so the
     # smoke / production prefill path produces the same per-layer dump
@@ -200,7 +285,18 @@ def forward_layers(
         sp_int_for_meta = int(positions[0].item())
         sp_per_req: Optional[torch.Tensor] = None
         req_id_per_token: Optional[torch.Tensor] = None
-        if cu_seqlens is not None and cu_seqlens.numel() >= 2:
+        if cp_ctx is not None:
+            # Under CP, rank-local token order is zigzagged. The first token of
+            # each rank-local request chunk is therefore not necessarily the
+            # request's absolute start position. Use CP metadata instead of
+            # deriving request ids from rank-local cu_seqlens.
+            sp_per_req = cp_ctx.prefix_lengths.to(
+                device=positions.device, dtype=torch.int64
+            ).contiguous()
+            req_id_per_token = cp_ctx.req_id_per_token.to(
+                device=positions.device, dtype=torch.int32
+            ).contiguous()
+        elif cu_seqlens is not None and cu_seqlens.numel() >= 2:
             starts = cu_seqlens[:-1].to(device=positions.device, dtype=torch.int64)
             sp_per_req = positions.index_select(0, starts).to(torch.int64).contiguous()
             req_id_per_token = (
@@ -381,10 +477,9 @@ def forward_prefill(
       :func:`build_block_tables_batched`.
 
     Downstream (``block.py`` / ``attention.py`` / ``compressor.py`` /
-    ``indexer.py``) still has to be made cu_seqlens-aware to honour per-request
-    boundaries correctly when ``B > 1``; until then the single-call path will
-    compute as if the flat ``T_total`` were one giant sequence. ``B==1`` is
-    bit-equal to the prior per-request loop.
+    ``indexer.py``) consumes the cu_seqlens-aware metadata directly; under CP
+    the per-layer setup swaps in CPContext's request-absolute positions and
+    full-length write-side view.
 
     Returns ``PyModelOutputs`` with ``[T_total, dim]`` pre-lm-head hidden.
     """

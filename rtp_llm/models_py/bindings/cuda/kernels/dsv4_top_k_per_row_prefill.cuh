@@ -459,6 +459,7 @@ template<int kNumThreadsPerBlock, bool useRadixSort>
 static __global__ __launch_bounds__(kNumThreadsPerBlock) void topKPerRowPrefill(const float* logits,
                                                                                 const int*   rowStarts,
                                                                                 const int*   rowEnds,
+                                                                                const int*   rowIndices,
                                                                                 int*         outIndices,
                                                                                 int          stride0,
                                                                                 int          stride1,
@@ -466,7 +467,8 @@ static __global__ __launch_bounds__(kNumThreadsPerBlock) void topKPerRowPrefill(
                                                                                 const int    offsetIndex) {
     static constexpr int kNumBins = 2048;
 
-    int rowIdx = blockIdx.x + offsetIndex;
+    int scheduleIdx = blockIdx.x + offsetIndex;
+    int rowIdx      = rowIndices == nullptr ? scheduleIdx : rowIndices[scheduleIdx];
 
     int rowStart = rowStarts[rowIdx];
     int rowEnd   = rowEnds[rowIdx];

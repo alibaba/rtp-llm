@@ -39,10 +39,12 @@ from typing import Any, Dict, Optional
 import torch
 import torch.nn as nn
 
+from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4.cp import (
     CPContext,
-    cp_all_gather_full,
+    cp_all_gather_full_async,
     cp_should_gather,
+    cp_wait_gather_full,
 )
 from rtp_llm.models_py.modules.dsv4.fp8._compressor_consts import (
     INDEXER_ENTRY_BYTES,
@@ -286,9 +288,19 @@ class CompressorFP8(nn.Module):
         across the host compressor and any nested indexer compressor that
         shares the same positions/b_idx (when their pool context is bound).
         """
-        state_slots = self._compute_state_slot_mapping(positions, b_idx)
-        kv_slots = self._compute_kv_slot_mapping(positions, b_idx)
-        token_to_req = b_idx.to(torch.int32)
+        assert (
+            positions.dim() == 1
+        ), f"positions must be flat [N], got {positions.shape}"
+        assert b_idx.dim() == 1, f"b_idx must be flat [N], got {b_idx.shape}"
+        assert (
+            positions.numel() == b_idx.numel()
+        ), f"positions/b_idx length mismatch: {positions.numel()} vs {b_idx.numel()}"
+        with record_function_range("dsv4.fp8.compressor.meta.state_slots"):
+            state_slots = self._compute_state_slot_mapping(positions, b_idx)
+        with record_function_range("dsv4.fp8.compressor.meta.kv_slots"):
+            kv_slots = self._compute_kv_slot_mapping(positions, b_idx)
+        with record_function_range("dsv4.fp8.compressor.meta.token_to_req"):
+            token_to_req = b_idx.to(torch.int32)
         return CompressorMeta(
             positions=positions,
             b_idx=b_idx,
@@ -419,17 +431,19 @@ class CompressorFP8(nn.Module):
         if N == 0:
             return
 
-        cos_sin_cache = self._ensure_cos_sin_cache(kv_flat.device)
+        with record_function_range("dsv4.fp8.compressor.launch.cos_sin_cache"):
+            cos_sin_cache = self._ensure_cos_sin_cache(kv_flat.device)
 
-        run_save_partial_states(
-            kv_flat,
-            score_flat,
-            self.ape,
-            meta.positions,
-            self._state_pool_3d,
-            meta.state_slots,
-            compress_ratio=self.compress_ratio,
-        )
+        with record_function_range("dsv4.fp8.compressor.launch.save_partial_states"):
+            run_save_partial_states(
+                kv_flat,
+                score_flat,
+                self.ape,
+                meta.positions,
+                self._state_pool_3d,
+                meta.state_slots,
+                compress_ratio=self.compress_ratio,
+            )
 
         # Decode path passes seq_start=None: disable the raw branch so the
         # kernel only reads state_cache. seq_start value is then irrelevant.
@@ -442,29 +456,30 @@ class CompressorFP8(nn.Module):
             and meta.cu_seq_per_req is not None
         )
         raw_disabled = (seq_start is None) and not use_varlen_raw
-        run_fused_compress_kv_write(
-            self._state_pool_3d,
-            meta.token_to_req,
-            meta.positions,
-            meta.state_slots,
-            self._state_block_table.to(torch.int32),
-            self.norm.weight,
-            self.norm_eps,
-            cos_sin_cache,
-            self._kv_pool_3d,
-            meta.kv_slots,
-            kv_flat,
-            score_flat,
-            self.ape,
-            0 if (raw_disabled or use_varlen_raw) else seq_start,
-            disable_raw_path=raw_disabled,
-            head_dim=self.head_dim,
-            rope_head_dim=self.rope_head_dim,
-            compress_ratio=self.compress_ratio,
-            overlap=self.overlap,
-            seq_start_per_req=meta.seq_start_per_req if use_varlen_raw else None,
-            cu_seq_per_req=meta.cu_seq_per_req if use_varlen_raw else None,
-        )
+        with record_function_range("dsv4.fp8.compressor.launch.compress_kv_write"):
+            run_fused_compress_kv_write(
+                self._state_pool_3d,
+                meta.token_to_req,
+                meta.positions,
+                meta.state_slots,
+                self._state_block_table.to(torch.int32),
+                self.norm.weight,
+                self.norm_eps,
+                cos_sin_cache,
+                self._kv_pool_3d,
+                meta.kv_slots,
+                kv_flat,
+                score_flat,
+                self.ape,
+                0 if (raw_disabled or use_varlen_raw) else seq_start,
+                disable_raw_path=raw_disabled,
+                head_dim=self.head_dim,
+                rope_head_dim=self.rope_head_dim,
+                compress_ratio=self.compress_ratio,
+                overlap=self.overlap,
+                seq_start_per_req=meta.seq_start_per_req if use_varlen_raw else None,
+                cu_seq_per_req=meta.cu_seq_per_req if use_varlen_raw else None,
+            )
 
     # ----------------------------------------------------------------------
     # Forward (prefill)
@@ -509,29 +524,79 @@ class CompressorFP8(nn.Module):
 
         device = x.device
         out_dim = (1 + self.overlap) * self.head_dim
-        fused_out = torch.nn.functional.linear(
-            x.to(self._wkv_wgate_fused.dtype), self._wkv_wgate_fused
-        )
-        kv, score = fused_out[..., :out_dim], fused_out[..., out_dim:]
+        with record_function_range("dsv4.fp8.compressor.prefill.fused_linear"):
+            fused_out = torch.nn.functional.linear(
+                x.to(self._wkv_wgate_fused.dtype), self._wkv_wgate_fused
+            )
+            kv, score = fused_out[..., :out_dim], fused_out[..., out_dim:]
 
         cp_ctx = self._cp_ctx
-        if cp_should_gather(cp_ctx, start_pos):
-            # CP gather expects 3D — re-wrap the flat case before gathering.
-            if kv.dim() == 2:
-                kv = kv.unsqueeze(0)
-                score = score.unsqueeze(0)
-            kv = cp_all_gather_full(kv, cp_ctx)
-            score = cp_all_gather_full(score, cp_ctx)
-            bsz, seqlen = kv.size(0), kv.size(1)
+        cp_gather = cp_should_gather(cp_ctx, start_pos)
+        kv_gather_handle = None
+        score_gather_handle = None
+        if cp_gather:
+            assert cp_ctx is not None
+            # Current CP gather API is flattened token-major 2D. Production
+            # prefill flattens requests to [T_total, dim]; accept the legacy
+            # [1, T_total, dim] wrapper by squeezing it at the module boundary.
+            if kv.dim() == 3:
+                assert kv.size(0) == 1, "CompressorFP8 CP expects flattened input"
+                kv_local = kv.squeeze(0)
+                score_local = score.squeeze(0)
+            else:
+                kv_local = kv
+                score_local = score
+            gather_stream = (
+                torch.cuda.Stream(device=kv_local.device) if kv_local.is_cuda else None
+            )
+            # Start both collectives early so their NCCL work can overlap with
+            # downstream CPU/Python setup before the gathered tensors are needed.
+            with record_function_range("dsv4.fp8.compressor.prefill.cp_gather_kv"):
+                kv_gather_handle = cp_all_gather_full_async(
+                    kv_local, cp_ctx, stream=gather_stream
+                )
+            with record_function_range("dsv4.fp8.compressor.prefill.cp_gather_score"):
+                score_gather_handle = cp_all_gather_full_async(
+                    score_local, cp_ctx, stream=gather_stream
+                )
+            bsz = 1
+            seqlen = int(cp_ctx.seq_len_full)
+            # The post-gather kv/score tensors are sized for the GLOBAL
+            # ``seq_len_full``. The matching slot metadata is layer-invariant
+            # and must be built in the prefill-meta broadcast path before this
+            # hot path runs.
+            # ``bsz`` here is the leading dim of the compressor input, NOT
+            # the number of prefill requests — production prefill always
+            # flattens multi-request input to ``[1, T_total, dim]`` (with
+            # T_total being the sum of per-request lengths). Multi-request CP
+            # keeps this convention and makes
+            # ``seqlen == seq_len_full == sum_i L_i_global``.
+            assert meta is not None, (
+                "CompressorFP8 CP prefill requires full-sequence metadata from "
+                "rtp_llm.models_py.modules.dsv4.fp8.prefill_meta; rebuilding it "
+                "inside compressor.forward is intentionally disabled."
+            )
+            assert int(meta.positions.numel()) == seqlen, (
+                f"CP compressor meta/token length mismatch: meta={meta.positions.numel()} "
+                f"seq_len_full={seqlen}"
+            )
+            assert kv_gather_handle is not None
+            assert score_gather_handle is not None
+            with record_function_range("dsv4.fp8.compressor.prefill.cp_wait_kv"):
+                kv = cp_wait_gather_full(kv_gather_handle).unsqueeze(0)
+            with record_function_range("dsv4.fp8.compressor.prefill.cp_wait_score"):
+                score = cp_wait_gather_full(score_gather_handle).unsqueeze(0)
 
         N = bsz * seqlen
         # ``reshape(N, -1)`` collapses dim-0/1 for 3D, no-op for 2D — same
         # contiguous flat layout the kernel expects in both cases.
-        kv_flat = kv.reshape(N, -1).contiguous()
-        score_flat = score.reshape(N, -1).contiguous()
+        with record_function_range("dsv4.fp8.compressor.prefill.flatten"):
+            kv_flat = kv.reshape(N, -1).contiguous()
+            score_flat = score.reshape(N, -1).contiguous()
         if meta is None:
-            positions, b_idx = _build_prefill_positions(sp, bsz, seqlen, device)
-            meta = self.prepare_metadata(positions, b_idx)
+            with record_function_range("dsv4.fp8.compressor.prefill.build_meta"):
+                positions, b_idx = _build_prefill_positions(sp, bsz, seqlen, device)
+                meta = self.prepare_metadata(positions, b_idx)
         # Phase-3a part 4b/4c: B>1 batched prefill — each request has its
         # own absolute start_pos so the scalar ``seq_start`` raw path is
         # unsafe. When the meta carries per-request varlen raw arrays
@@ -541,7 +606,8 @@ class CompressorFP8(nn.Module):
         # equal vs raw_path=True for short prefill by
         # ``test_compressor_disable_raw_path``.
         seq_start = None if meta.is_batched else sp
-        self._launch(kv_flat, score_flat, meta, seq_start=seq_start)
+        with record_function_range("dsv4.fp8.compressor.prefill.launch"):
+            self._launch(kv_flat, score_flat, meta, seq_start=seq_start)
         return None
 
     # ----------------------------------------------------------------------
@@ -597,20 +663,8 @@ def _build_prefill_positions(
         f"_build_prefill_positions is the legacy B==1 helper; got bsz={bsz}. "
         "Varlen callers must use position_ids / req_id_per_token directly."
     )
-    N = bsz * seqlen
-    positions = (
-        (torch.arange(seqlen, device=device, dtype=torch.long).unsqueeze(0) + sp)
-        .expand(bsz, -1)
-        .reshape(N)
-        .contiguous()
-    )
-    b_idx = (
-        torch.arange(bsz, device=device, dtype=torch.long)
-        .unsqueeze(1)
-        .expand(-1, seqlen)
-        .reshape(N)
-        .contiguous()
-    )
+    positions = torch.arange(sp, sp + seqlen, device=device, dtype=torch.long)
+    b_idx = torch.zeros(seqlen, device=device, dtype=torch.long)
     return positions, b_idx
 
 
@@ -659,11 +713,19 @@ def build_prepare_metadata_args(
             and cu_seqlens is not None
         ), "varlen dispatch requires position_ids/req_id_per_token/seq_start_per_req/cu_seqlens"
         return dict(
-            positions=position_ids.to(device=device, dtype=torch.long).contiguous(),
-            b_idx=req_id_per_token.to(device=device, dtype=torch.long).contiguous(),
+            positions=position_ids.to(device=device, dtype=torch.long)
+            .reshape(-1)
+            .contiguous(),
+            b_idx=req_id_per_token.to(device=device, dtype=torch.long)
+            .reshape(-1)
+            .contiguous(),
             is_batched=True,
-            seq_start_per_req=seq_start_per_req.to(device=device, dtype=torch.int32),
-            cu_seq_per_req=cu_seqlens.to(device=device, dtype=torch.int32),
+            seq_start_per_req=seq_start_per_req.to(device=device, dtype=torch.int32)
+            .reshape(-1)
+            .contiguous(),
+            cu_seq_per_req=cu_seqlens.to(device=device, dtype=torch.int32)
+            .reshape(-1)
+            .contiguous(),
         )
     positions, b_idx = _build_prefill_positions(sp_int, 1, seqlen, device)
     return dict(

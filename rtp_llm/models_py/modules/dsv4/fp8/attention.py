@@ -40,8 +40,10 @@ from rtp_llm.models_py.modules.dsv4._fused_inv_rope_fp8_quant_triton import (
 # ``rtp_llm_ops.rmsnorm`` (matches vLLM — bf16 weight).
 # Validated by test_fused_rmsnorm_rope.py (bf16 <=1-ULP + 1.25-1.75x).
 from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_rope_triton import fused_rmsnorm_rope
+from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4.cp import (
     CPContext,
+    build_cp_full_prefill_positions,
     cp_all_gather_full,
     cp_freqs_cis_local,
 )
@@ -105,6 +107,10 @@ def _use_read_from_pool() -> bool:
 # regression can be bisected without reverting the patch series.
 def _use_varlen_prefill() -> bool:
     return os.environ.get("DSV4_VARLEN_PREFILL", "1") != "0"
+
+
+def _flat_1d(t: torch.Tensor) -> torch.Tensor:
+    return t.reshape(-1).contiguous()
 
 
 _V4_FP8_BLOCK_CFG = Fp8BlockWiseQuantConfig()
@@ -312,6 +318,12 @@ def _get_window_topk_idxs_varlen(
     via ``_attn_fp8_swa_via_concat``, so prefix-tail KV does NOT need to be
     represented here.
 
+    **CP alignment:** under cp_size > 1 the caller passes GLOBAL per-request
+    positions for each rank-local token plus the full per-request
+    ``cu_seqlens`` view. The formula therefore emits row indices into the
+    all-gathered ``kv_full[seq_len_full]`` while preserving request
+    boundaries for B>=1.
+
     Mirrors the right-pad slot ordering of ``_get_window_topk_idxs`` (sparse_attn
     kernel block reductions are not invariant to slot ordering — see comment
     on ``_get_window_topk_idxs_cp`` line 281+).
@@ -323,6 +335,14 @@ def _get_window_topk_idxs_varlen(
     ``_attn_fp8_swa_via_kv_full`` casts to int32 anyway, so int32 here saves
     a 64MB → 32MB allocation at T=16K, win=512.
     """
+    position_ids = _flat_1d(position_ids)
+    req_id_per_token = _flat_1d(req_id_per_token)
+    cu_seqlens = _flat_1d(cu_seqlens)
+    prefix_lengths = _flat_1d(prefix_lengths)
+    assert position_ids.numel() == req_id_per_token.numel(), (
+        "position_ids / req_id_per_token must have matching token counts: "
+        f"{position_ids.numel()} vs {req_id_per_token.numel()}"
+    )
     device = position_ids.device
 
     # gather() requires int64 indices — this is the only mandatory long cast.
@@ -2120,11 +2140,16 @@ class AttentionFP8(nn.Module):
         if block_tables_by_type is not None:
             self._block_tables_by_type = block_tables_by_type
         try:
-            self._set_compressor_pool_context()
+            with record_function_range("dsv4.fp8.attn.set_pool_context"):
+                self._set_compressor_pool_context()
             try:
-                return self._forward_prefill(x, positions)
+                with record_function_range(
+                    f"dsv4.fp8.attn.L{self.layer_id:02d}.prefill"
+                ):
+                    return self._forward_prefill(x, positions)
             finally:
-                self._clear_compressor_pool_context()
+                with record_function_range("dsv4.fp8.attn.clear_pool_context"):
+                    self._clear_compressor_pool_context()
         finally:
             self._kv_cache = prev_kv
             self._block_tables_by_type = prev_bt
@@ -2147,20 +2172,53 @@ class AttentionFP8(nn.Module):
         FP8 KV-cache is asserted at the public ``forward()`` entry; this
         body assumes FP8 unconditionally.
         """
-        common = self._prefill_common_setup(x, positions)
-        qkv = self._prefill_compute_qkv(x, common)
+        with record_function_range("dsv4.fp8.attn.prefill.common_setup"):
+            common = self._prefill_common_setup(x, positions)
+        if self.layer_id == 0 and os.environ.get("DSV4_PREFILL_BATCH_DBG") == "1":
+            try:
+                _cu = getattr(common, "cu_seqlens", None)
+                _il = getattr(common, "input_lengths", None)
+                _cp_on = bool(getattr(common, "cp_on", False))
+                _seq_full = None
+                if _cp_on and getattr(common, "cp_ctx", None) is not None:
+                    _seq_full = int(common.cp_ctx.seq_len_full)
+                    _ilg = getattr(common.cp_ctx, "input_lengths_global", None)
+                    _ilg_list = _ilg.tolist() if _ilg is not None else None
+                else:
+                    _ilg_list = None
+                _cu_list = _cu.tolist() if _cu is not None else None
+                _il_list = _il.tolist() if _il is not None else None
+                _B = (
+                    len(_il_list)
+                    if _il_list is not None
+                    else (len(_cu_list) - 1 if _cu_list else -1)
+                )
+                print(
+                    f"[DSV4_PREFILL_BATCH_DBG] cp_on={_cp_on} B={_B} T_local={int(x.shape[0])} "
+                    f"cu_seqlens={_cu_list} input_lengths={_il_list} "
+                    f"seq_len_full={_seq_full} input_lengths_global={_ilg_list}",
+                    flush=True,
+                )
+            except Exception as _e:
+                print(f"[DSV4_PREFILL_BATCH_DBG] log failed: {_e}", flush=True)
+        with record_function_range("dsv4.fp8.attn.prefill.compute_qkv"):
+            qkv = self._prefill_compute_qkv(x, common)
         # SWA pool write — every FP8 layer populates the SWA pool for
         # downstream decode. Safe to do before attention because new K
         # (abs pos [sp, sp+S)) and any cont-prefill prefix tail
         # (abs pos [sp-P, sp)) target disjoint slots.
-        self._prefill_write_swa_fp8_paged(common, qkv.kv_full)
+        with record_function_range("dsv4.fp8.attn.prefill.swa_write"):
+            self._prefill_write_swa_fp8_paged(common, qkv.kv_full)
 
         if self.compress_ratio == 0:
-            out = self._forward_prefill_swa_only(qkv, common)
+            with record_function_range("dsv4.fp8.attn.prefill.path_swa"):
+                out = self._forward_prefill_swa_only(qkv, common)
         elif self.compress_ratio == 4:
-            out = self._forward_prefill_csa(x, qkv, common)
+            with record_function_range("dsv4.fp8.attn.prefill.path_csa"):
+                out = self._forward_prefill_csa(x, qkv, common)
         elif self.compress_ratio == 128:
-            out = self._forward_prefill_hca(x, qkv, common)
+            with record_function_range("dsv4.fp8.attn.prefill.path_hca"):
+                out = self._forward_prefill_hca(x, qkv, common)
         else:
             raise AssertionError(f"unknown compress_ratio={self.compress_ratio}")
         return out
@@ -2179,10 +2237,13 @@ class AttentionFP8(nn.Module):
         otherwise) so a B>1 batch with any continuation request takes the
         workspace path."""
         if not common.any_cont or self._kv_cache is None:
-            o = self._attn_fp8_swa_via_kv_full(qkv, common)
+            with record_function_range("dsv4.fp8.attn.swa.via_kv_full"):
+                o = self._attn_fp8_swa_via_kv_full(qkv, common)
         else:
-            o = self._attn_fp8_swa_via_concat(qkv, common)
-        out_3d = self._prefill_output_proj(o, common)
+            with record_function_range("dsv4.fp8.attn.swa.via_concat"):
+                o = self._attn_fp8_swa_via_concat(qkv, common)
+        with record_function_range("dsv4.fp8.attn.prefill.output_proj"):
+            out_3d = self._prefill_output_proj(o, common)
         return out_3d.squeeze(0)
 
     def _forward_prefill_csa(
@@ -2209,7 +2270,8 @@ class AttentionFP8(nn.Module):
         # are now flat-input-native (accept ``[T_total, dim]`` /
         # ``[T_total, q_lora]``). Drop the legacy ``unsqueeze(0)`` so the
         # batched flat caller hits the same code path without rewrapping.
-        raw = self.indexer(x, qkv.qr, common.csa_meta.indexer_meta)
+        with record_function_range("dsv4.fp8.attn.csa.indexer"):
+            raw = self.indexer(x, qkv.qr, common.csa_meta.indexer_meta)
         return self._forward_prefill_compressed(
             x,
             qkv,
@@ -2263,15 +2325,21 @@ class AttentionFP8(nn.Module):
         # rewrap so the batched (B>1) caller can reuse this code path
         # without re-shaping. B==1 reaches the same kernel — same flat
         # ``[T_total, dim]`` reshape inside ``_launch``.
-        self.compressor(x, common.sp_int, meta=compressor_meta)
+        with record_function_range("dsv4.fp8.attn.compressed.compressor"):
+            self.compressor(x, common.sp_int, meta=compressor_meta)
 
         if workspace_meta is None:
             # Warmup forward: pool not bound. Fall back to BF16 ``kv_full``
             # SWA-only attention so framework shape inference still runs.
-            o = self._attn_fp8_swa_via_kv_full(qkv, common)
+            with record_function_range("dsv4.fp8.attn.compressed.warmup_attn"):
+                o = self._attn_fp8_swa_via_kv_full(qkv, common)
         else:
-            o = self._attn_via_workspace(qkv, common, workspace_meta, cmp_topk_runtime)
-        out_3d = self._prefill_output_proj(o, common)
+            with record_function_range("dsv4.fp8.attn.compressed.workspace_attn"):
+                o = self._attn_via_workspace(
+                    qkv, common, workspace_meta, cmp_topk_runtime
+                )
+        with record_function_range("dsv4.fp8.attn.prefill.output_proj"):
+            out_3d = self._prefill_output_proj(o, common)
         return out_3d.squeeze(0)
 
     def _attn_via_workspace(
@@ -2313,9 +2381,8 @@ class AttentionFP8(nn.Module):
         from rtp_llm.models_py.modules.dsv4.fp8 import _swa_dequant_triton as _swa_dq
         from rtp_llm.models_py.modules.dsv4.fp8._swa_ops_triton import (
             combine_topk_swa_indices,
+            combine_topk_swa_indices_cp,
         )
-
-        assert not common.cp_on, "workspace path does not support CP"
 
         ratio = self.compress_ratio
         ratio_tag = "csa" if ratio == 4 else "hca"
@@ -2341,37 +2408,43 @@ class AttentionFP8(nn.Module):
             "dispatch mismatch."
         )
         D = self.head_dim
-        workspace = torch.zeros((B, wm.M, D), dtype=torch.bfloat16, device=qkv.q.device)
+        with record_function_range("dsv4.fp8.attn.workspace.alloc"):
+            workspace = torch.zeros(
+                (B, wm.M, D), dtype=torch.bfloat16, device=qkv.q.device
+            )
 
         if wm.N > 0:
-            _swa_dq.dequantize_and_gather_k_cache(
-                out=workspace,
-                k_cache=cmp_pool_3d,
-                seq_lens=wm.cmp_seq_lens,
-                gather_lens=None,
-                block_table=wm.cmp_bt_int32,
-                block_size=wm.cmp_eb,
-                offset=0,
-            )
+            with record_function_range("dsv4.fp8.attn.workspace.gather_cmp"):
+                _swa_dq.dequantize_and_gather_k_cache(
+                    out=workspace,
+                    k_cache=cmp_pool_3d,
+                    seq_lens=wm.cmp_seq_lens,
+                    gather_lens=None,
+                    block_table=wm.cmp_bt_int32,
+                    block_size=wm.cmp_eb,
+                    offset=0,
+                )
         # SWA dequant is unconditional in prefill — every request has at least
         # ``S_b`` SWA gather rows (just-written new K). Per-request ``gather_lens``
         # handles the per-row variable length.
-        _swa_dq.dequantize_and_gather_k_cache(
-            out=workspace,
-            k_cache=swa_pool_3d,
-            seq_lens=wm.swa_seq_lens,
-            gather_lens=wm.swa_gather_lens,
-            block_table=wm.swa_bt_int32,
-            block_size=wm.swa_eb,
-            offset=wm.N,
-        )
+        with record_function_range("dsv4.fp8.attn.workspace.gather_swa"):
+            _swa_dq.dequantize_and_gather_k_cache(
+                out=workspace,
+                k_cache=swa_pool_3d,
+                seq_lens=wm.swa_seq_lens,
+                gather_lens=wm.swa_gather_lens,
+                block_table=wm.swa_bt_int32,
+                block_size=wm.swa_eb,
+                offset=wm.N,
+            )
 
         # BF16 overlay of freshly computed new K — single ``index_copy_``
         # using the meta-precomputed ``new_k_slot_in_flat``. Avoids the FP8
         # round-trip loss on tokens we just wrote, while keeping the hot
         # path free of casts / gathers / per-request slicing.
-        kv_bf16 = qkv.kv_full.to(torch.bfloat16).reshape(-1, D)
-        workspace.view(B * wm.M, D).index_copy_(0, wm.new_k_slot_in_flat, kv_bf16)
+        with record_function_range("dsv4.fp8.attn.workspace.overlay_new_k"):
+            kv_bf16 = qkv.kv_full.to(torch.bfloat16).reshape(-1, D)
+            workspace.view(B * wm.M, D).index_copy_(0, wm.new_k_slot_in_flat, kv_bf16)
 
         # combine_topk: HCA uses precomputed dense arange(N_max); CSA uses
         # the runtime indexer output (raw compressed-pool offsets in [0, N_b)).
@@ -2396,26 +2469,65 @@ class AttentionFP8(nn.Module):
             )
             cmp_topk = cmp_topk_runtime
 
-        combined_indices, combined_lens = combine_topk_swa_indices(
-            topk_indices=cmp_topk,
-            query_start_loc=wm.qsl,
-            seq_lens=wm.swa_seq_lens,
-            gather_lens=wm.swa_gather_lens,
-            window_size=self.window_size,
-            compress_ratio=ratio,
-            topk=int(cmp_topk.shape[-1]),
-            M=wm.M,
-            N=wm.N,
-        )
+        if common.cp_on:
+            # Phase F2/Phase-2: kernel ``combine_topk_swa_indices`` derives
+            # per-Q-row ``pos = start_pos + token_idx_in_query`` assuming Q
+            # is a contiguous slice. Under zigzag CP each rank's Q rows
+            # have non-contiguous global positions, so use the CP fused
+            # kernel that consumes explicit positions directly.
+            assert common.cp_ctx is not None
+            cp_ctx_local = common.cp_ctx
+            legacy_prefix_length = int(cp_ctx_local.prefix_length)
+            use_cp_varlen = _use_varlen_prefill()
+            if not use_cp_varlen:
+                # Legacy DSV4_VARLEN_PREFILL=0 path keeps its B==1 invariant.
+                assert (
+                    int(wm.swa_seq_lens.shape[0]) == 1
+                ), "legacy CP workspace path supports B=1; set DSV4_VARLEN_PREFILL=1 for B>1"
+            combine_kwargs = dict(
+                topk_indices=cmp_topk,
+                global_positions=_flat_1d(cp_ctx_local.global_positions),
+                sp_int=legacy_prefix_length,
+                window_size=self.window_size,
+                compress_ratio=ratio,
+                topk=int(cmp_topk.shape[-1]),
+                M=wm.M,
+                N=wm.N,
+            )
+            if use_cp_varlen:
+                assert common.req_id_per_token is not None
+                assert common.prefix_lengths is not None
+                combine_kwargs.update(
+                    req_id_per_token=_flat_1d(common.req_id_per_token),
+                    prefix_lengths=_flat_1d(common.prefix_lengths),
+                )
+            with record_function_range("dsv4.fp8.attn.workspace.combine_topk_cp"):
+                combined_indices, combined_lens = combine_topk_swa_indices_cp(
+                    **combine_kwargs
+                )
+        else:
+            with record_function_range("dsv4.fp8.attn.workspace.combine_topk"):
+                combined_indices, combined_lens = combine_topk_swa_indices(
+                    topk_indices=cmp_topk,
+                    query_start_loc=wm.qsl,
+                    seq_lens=wm.swa_seq_lens,
+                    gather_lens=wm.swa_gather_lens,
+                    window_size=self.window_size,
+                    compress_ratio=ratio,
+                    topk=int(cmp_topk.shape[-1]),
+                    M=wm.M,
+                    N=wm.N,
+                )
 
-        o3, _, _ = flash_mla_sparse_fwd(
-            q=qkv.q,
-            kv=workspace.view(B * wm.M, 1, D),
-            indices=combined_indices.unsqueeze(1),
-            sm_scale=self.softmax_scale,
-            attn_sink=self.attn_sink,
-            topk_length=combined_lens,
-        )
+        with record_function_range("dsv4.fp8.attn.workspace.flash_mla_sparse_fwd"):
+            o3, _, _ = flash_mla_sparse_fwd(
+                q=qkv.q,
+                kv=workspace.view(B * wm.M, 1, D),
+                indices=combined_indices.unsqueeze(1),
+                sm_scale=self.softmax_scale,
+                attn_sink=self.attn_sink,
+                topk_length=combined_lens,
+            )
         return o3.unsqueeze(0)
 
     # ------------------------------------------------------------------
@@ -2476,24 +2588,19 @@ class AttentionFP8(nn.Module):
         rd = self.rope_head_dim
         device = x.device
 
-        # CP support is intentionally NOT carried through this builder. CP
-        # had its own bespoke plumbing (cp_freqs_cis_local /
-        # _get_window_topk_idxs_cp / cp_all_gather_full); the varlen
-        # migration owns this path now and any CP integration is a
-        # follow-up. The caller is the only place we permit CP to live.
-        cp_ctx = self._cp_ctx
-        assert cp_ctx is None or cp_ctx.cp_size <= 1, (
-            "DSV4 CP-prefill is not yet ported onto the varlen path; set "
-            "DSV4_VARLEN_PREFILL=0 to bisect or disable CP."
-        )
-        cp_on = False  # kept on PrefillMeta for downstream code that still reads it
+        # CP plumbing: this builder threads ``cp_ctx`` onto ``PrefillMeta`` so
+        # downstream SWA write / sparse attention / compressor paths can switch
+        # between rank-local Q metadata and the all-gathered KV/write view.
+        # CP=1 collapses to the legacy single-rank values.
+        cp_ctx = getattr(self, "_cp_ctx", None)
+        cp_on = cp_ctx is not None and cp_ctx.cp_size > 1
 
         # Sync ``positions[0]`` -> int once. Tensor input pays the sync here
         # exactly once per (forward, ratio bucket); int input has already
         # been synced by the upper-layer broadcast builder. Used by the
         # ``DSV4_VARLEN_PREFILL=0`` legacy fallback only.
         if isinstance(positions, torch.Tensor):
-            sp_int = int(positions[0].item())
+            sp_int = int(positions.reshape(-1)[0].item())
         else:
             sp_int = int(positions)
 
@@ -2513,7 +2620,12 @@ class AttentionFP8(nn.Module):
         # narrowing kicks in at each one).
         use_varlen = _use_varlen_prefill()
         win = self.window_size
-        seqlen_full = seqlen  # CP path retired
+        # Under CP each rank holds only ``chunk_length`` tokens locally; the
+        # full prefill sequence has length ``cp_ctx.seq_len_full``. Code that
+        # needs the global length (SWA pool write after all-gather, KV-side
+        # cu_seqlens) reads ``seqlen_full``; rank-local code keeps using
+        # ``seqlen``.
+        seqlen_full = cp_ctx.seq_len_full if cp_on else seqlen
 
         if use_varlen:
             _msg = (
@@ -2530,33 +2642,76 @@ class AttentionFP8(nn.Module):
             assert sp_per_req is not None, _msg
             assert batch_size > 0 and max_seqlen_q > 0, _msg
 
+            cu_seqlens = _flat_1d(cu_seqlens)
+            input_lengths = _flat_1d(input_lengths)
+            prefix_lengths = _flat_1d(prefix_lengths)
+            position_ids = _flat_1d(position_ids)
+            req_id_per_token = _flat_1d(req_id_per_token)
+            sp_per_req = _flat_1d(sp_per_req)
+            assert (
+                position_ids.numel() == seqlen
+            ), f"position_ids must be flat [T_total={seqlen}], got {position_ids.shape}"
+            assert (
+                req_id_per_token.numel() == seqlen
+            ), f"req_id_per_token must be flat [T_total={seqlen}], got {req_id_per_token.shape}"
+            assert (
+                cu_seqlens.numel() == batch_size + 1
+            ), f"cu_seqlens must be [B+1={batch_size + 1}], got {cu_seqlens.shape}"
+            assert (
+                input_lengths.numel() == batch_size
+            ), f"input_lengths must be [B={batch_size}], got {input_lengths.shape}"
+            assert (
+                prefix_lengths.numel() == batch_size
+            ), f"prefix_lengths must be [B={batch_size}], got {prefix_lengths.shape}"
+            assert (
+                sp_per_req.numel() == batch_size
+            ), f"sp_per_req must be [B={batch_size}], got {sp_per_req.shape}"
+
+            position_ids_eff = position_ids
+            cu_seqlens_for_k = cu_seqlens
+            if cp_on:
+                assert cp_ctx is not None
+                position_ids_eff = _flat_1d(
+                    cp_ctx.global_positions.to(device=device, dtype=torch.long)
+                )
+                if cp_ctx.cu_seqlens_global is not None:
+                    cu_seqlens_for_k = _flat_1d(
+                        cp_ctx.cu_seqlens_global.to(device=device, dtype=torch.int32)
+                    )
             # Per-token absolute-position RoPE gather. For B==1 contiguous
             # this is bit-equal to the legacy slice; for B>1 it's the only
             # correct option since requests interleave on the flat token axis.
-            freqs_cis = self.freqs_cis.index_select(
-                0, position_ids.to(device=self.freqs_cis.device, dtype=torch.long)
-            )
-            topk_idxs = _get_window_topk_idxs_varlen(
-                win, cu_seqlens, position_ids, prefix_lengths, req_id_per_token
-            )  # [T_total, win]
-            # One .item() sync per forward — the same order of magnitude as
-            # ``int(positions[0].item())`` we already pay above.
-            any_cont = bool((prefix_lengths > 0).any().item())
+            with record_function_range("dsv4.fp8.meta.varlen.freqs_topk"):
+                freqs_cis = self.freqs_cis.index_select(
+                    0,
+                    position_ids_eff.to(device=self.freqs_cis.device, dtype=torch.long),
+                )
+                topk_idxs = _get_window_topk_idxs_varlen(
+                    win,
+                    cu_seqlens_for_k,
+                    position_ids_eff,
+                    prefix_lengths,
+                    req_id_per_token,
+                )  # [T_total, win]
+                # One .item() sync per forward — the same order of magnitude as
+                # ``int(positions[0].item())`` we already pay above.
+                any_cont = bool((prefix_lengths > 0).any().item())
 
             # SWA dispatch inlined (was the trivial ``_build_swa_prefill_meta``
             # trampoline). Per-request tensors flow in directly with the
             # narrowed Tensor (non-Optional) types from the asserts above.
-            swa_meta = self._build_swa_prefill_meta_varlen(
-                seqlen=seqlen,
-                device=device,
-                any_cont=any_cont,
-                batch_size=batch_size,
-                cu_seqlens=cu_seqlens,
-                input_lengths=input_lengths,
-                prefix_lengths=prefix_lengths,
-                position_ids=position_ids,
-                req_id_per_token=req_id_per_token,
-            )
+            with record_function_range("dsv4.fp8.meta.swa_varlen"):
+                swa_meta = self._build_swa_prefill_meta_varlen(
+                    seqlen=seqlen,
+                    device=device,
+                    any_cont=any_cont,
+                    batch_size=batch_size,
+                    cu_seqlens=cu_seqlens,
+                    input_lengths=input_lengths,
+                    prefix_lengths=prefix_lengths,
+                    position_ids=position_ids,
+                    req_id_per_token=req_id_per_token,
+                )
         else:
             assert batch_size == 1, (
                 "DSV4_VARLEN_PREFILL=0 (legacy scalar path) only supports "
@@ -2564,10 +2719,12 @@ class AttentionFP8(nn.Module):
                 "for batched prefill."
             )
             # ``DSV4_VARLEN_PREFILL=0`` regression channel — legacy B==1 path.
-            freqs_cis = self.freqs_cis[sp_int : sp_int + seqlen]
-            topk_idxs = _get_window_topk_idxs(win, 1, seqlen, sp_int, device)
-            any_cont = sp_int > 0
-            swa_meta = self._build_swa_prefill_meta_legacy(seqlen, sp_int, device)
+            with record_function_range("dsv4.fp8.meta.legacy.freqs_topk"):
+                freqs_cis = self.freqs_cis[sp_int : sp_int + seqlen]
+                topk_idxs = _get_window_topk_idxs(win, 1, seqlen, sp_int, device)
+                any_cont = sp_int > 0
+            with record_function_range("dsv4.fp8.meta.swa_legacy"):
+                swa_meta = self._build_swa_prefill_meta_legacy(seqlen, sp_int, device)
 
         # Bind freqs_cis to this layer's compressor / indexer chain
         # (idempotent — safe to call from both standalone and meta-broadcast paths).
@@ -2583,35 +2740,37 @@ class AttentionFP8(nn.Module):
         csa_meta: Optional[CsaPrefillMeta] = None
         hca_meta: Optional[HcaPrefillMeta] = None
         if self.compress_ratio == 4:
-            csa_meta = self._build_csa_prefill_meta(
-                seqlen,
-                sp_int,
-                device,
-                use_varlen=use_varlen,
-                batch_size=batch_size,
-                cu_seqlens=cu_seqlens,
-                input_lengths=input_lengths,
-                prefix_lengths=prefix_lengths,
-                sp_per_req=sp_per_req,
-                position_ids=position_ids,
-                req_id_per_token=req_id_per_token,
-                max_seqlen_q=max_seqlen_q,
-            )
+            with record_function_range("dsv4.fp8.meta.csa"):
+                csa_meta = self._build_csa_prefill_meta(
+                    seqlen,
+                    sp_int,
+                    device,
+                    use_varlen=use_varlen,
+                    batch_size=batch_size,
+                    cu_seqlens=cu_seqlens,
+                    input_lengths=input_lengths,
+                    prefix_lengths=prefix_lengths,
+                    sp_per_req=sp_per_req,
+                    position_ids=position_ids,
+                    req_id_per_token=req_id_per_token,
+                    max_seqlen_q=max_seqlen_q,
+                )
         elif self.compress_ratio == 128:
-            hca_meta = self._build_hca_prefill_meta(
-                seqlen,
-                sp_int,
-                device,
-                use_varlen=use_varlen,
-                batch_size=batch_size,
-                cu_seqlens=cu_seqlens,
-                input_lengths=input_lengths,
-                prefix_lengths=prefix_lengths,
-                sp_per_req=sp_per_req,
-                position_ids=position_ids,
-                req_id_per_token=req_id_per_token,
-                max_seqlen_q=max_seqlen_q,
-            )
+            with record_function_range("dsv4.fp8.meta.hca"):
+                hca_meta = self._build_hca_prefill_meta(
+                    seqlen,
+                    sp_int,
+                    device,
+                    use_varlen=use_varlen,
+                    batch_size=batch_size,
+                    cu_seqlens=cu_seqlens,
+                    input_lengths=input_lengths,
+                    prefix_lengths=prefix_lengths,
+                    sp_per_req=sp_per_req,
+                    position_ids=position_ids,
+                    req_id_per_token=req_id_per_token,
+                    max_seqlen_q=max_seqlen_q,
+                )
 
         return PrefillMeta(
             seqlen=seqlen,
@@ -2694,56 +2853,83 @@ class AttentionFP8(nn.Module):
         )
         idx_eb = self._pool_entries_per_block(INDEXER_KV)
 
-        self._set_compressor_pool_context()
-        indexer_meta = self.indexer.prepare(
-            bsz=1,
-            seqlen=seqlen,
-            sp_int=sp_int,
-            device=device,
-            kv_block_table=idx_bt,
-            kv_eb=idx_eb,
-            use_varlen=use_varlen,
-            batch_size=batch_size,
-            cu_seqlens=cu_seqlens,
-            input_lengths=input_lengths,
-            prefix_lengths=prefix_lengths,
-            position_ids=position_ids,
-            req_id_per_token=req_id_per_token,
-            max_seqlen_q=max_seqlen_q,
-        )
-        # Inline (vs. calling ``_build_compressor_meta``) is load-bearing:
-        # it shares the surrounding pool bind with ``indexer.prepare`` so
-        # the indexer's nested compressor-meta hoist fires under one bind
-        # (the hoist short-circuits when the bind isn't live, which would
-        # force ~20 small kernels per CSA layer to rebuild on the hot path).
-        cmp_args = build_prepare_metadata_args(
-            use_varlen=use_varlen,
-            device=device,
-            sp_int=sp_int,
-            seqlen=seqlen,
-            position_ids=position_ids,
-            req_id_per_token=req_id_per_token,
-            seq_start_per_req=sp_per_req,
-            cu_seqlens=cu_seqlens,
-        )
-        compressor_meta = self.compressor.prepare_metadata(**cmp_args)
-        self._clear_compressor_pool_context()
+        with record_function_range("dsv4.fp8.meta.csa.bind_pool"):
+            self._set_compressor_pool_context()
+        with record_function_range("dsv4.fp8.meta.csa.indexer_prepare"):
+            indexer_meta = self.indexer.prepare(
+                bsz=1,
+                seqlen=seqlen,
+                sp_int=sp_int,
+                device=device,
+                kv_block_table=idx_bt,
+                kv_eb=idx_eb,
+                use_varlen=use_varlen,
+                batch_size=batch_size,
+                cu_seqlens=cu_seqlens,
+                input_lengths=input_lengths,
+                prefix_lengths=prefix_lengths,
+                position_ids=position_ids,
+                req_id_per_token=req_id_per_token,
+                max_seqlen_q=max_seqlen_q,
+            )
+        cp_ctx_local = getattr(self, "_cp_ctx", None)
+        cp_active = cp_ctx_local is not None and cp_ctx_local.cp_size > 1
+        if cp_active:
+            # Under CP the main compressor all-gathers KV/score to the full
+            # global sequence. Build the matching full-sequence metadata once
+            # per ratio bucket here (the prefill_meta broadcast path) instead
+            # of rebuilding it inside every layer's compressor.forward.
+            assert cp_ctx_local is not None
+            with record_function_range("dsv4.fp8.meta.csa.cp_compressor_prepare"):
+                (
+                    cp_positions,
+                    cp_b_idx,
+                    cp_seq_start_per_req,
+                    cp_cu_seq_per_req,
+                ) = build_cp_full_prefill_positions(cp_ctx_local, device)
+                assert cp_ctx_local.input_lengths_global is not None
+                compressor_meta = self.compressor.prepare_metadata(
+                    cp_positions,
+                    cp_b_idx,
+                    is_batched=bool(cp_ctx_local.input_lengths_global.numel() > 1),
+                    seq_start_per_req=cp_seq_start_per_req,
+                    cu_seq_per_req=cp_cu_seq_per_req,
+                )
+        else:
+            # Inline (vs. calling ``_build_compressor_meta``) is load-bearing:
+            # it shares the surrounding pool bind with ``indexer.prepare`` so
+            # the indexer's nested compressor-meta hoist fires under one bind.
+            with record_function_range("dsv4.fp8.meta.csa.compressor_prepare"):
+                cmp_args = build_prepare_metadata_args(
+                    use_varlen=use_varlen,
+                    device=device,
+                    sp_int=sp_int,
+                    seqlen=seqlen,
+                    position_ids=position_ids,
+                    req_id_per_token=req_id_per_token,
+                    seq_start_per_req=sp_per_req,
+                    cu_seqlens=cu_seqlens,
+                )
+                compressor_meta = self.compressor.prepare_metadata(**cmp_args)
+        with record_function_range("dsv4.fp8.meta.csa.clear_pool"):
+            self._clear_compressor_pool_context()
 
-        workspace_meta = self._build_workspace_meta(
-            seqlen,
-            sp_int,
-            device,
-            with_dense_cmp_topk=False,
-            use_varlen=use_varlen,
-            batch_size=batch_size,
-            cu_seqlens=cu_seqlens,
-            input_lengths=input_lengths,
-            prefix_lengths=prefix_lengths,
-            sp_per_req=sp_per_req,
-            position_ids=position_ids,
-            req_id_per_token=req_id_per_token,
-            max_seqlen_q=max_seqlen_q,
-        )
+        with record_function_range("dsv4.fp8.meta.csa.workspace"):
+            workspace_meta = self._build_workspace_meta(
+                seqlen,
+                sp_int,
+                device,
+                with_dense_cmp_topk=False,
+                use_varlen=use_varlen,
+                batch_size=batch_size,
+                cu_seqlens=cu_seqlens,
+                input_lengths=input_lengths,
+                prefix_lengths=prefix_lengths,
+                sp_per_req=sp_per_req,
+                position_ids=position_ids,
+                req_id_per_token=req_id_per_token,
+                max_seqlen_q=max_seqlen_q,
+            )
         return CsaPrefillMeta(
             indexer_meta=indexer_meta,
             compressor_meta=compressor_meta,
@@ -2768,35 +2954,62 @@ class AttentionFP8(nn.Module):
     ) -> HcaPrefillMeta:
         """Build HCA-layer per-call metadata: main HCA compressor
         prepare_metadata."""
-        compressor_meta = self._build_compressor_meta(
-            seqlen,
-            sp_int,
-            device,
-            use_varlen=use_varlen,
-            batch_size=batch_size,
-            cu_seqlens=cu_seqlens,
-            input_lengths=input_lengths,
-            prefix_lengths=prefix_lengths,
-            sp_per_req=sp_per_req,
-            position_ids=position_ids,
-            req_id_per_token=req_id_per_token,
-            max_seqlen_q=max_seqlen_q,
-        )
-        workspace_meta = self._build_workspace_meta(
-            seqlen,
-            sp_int,
-            device,
-            with_dense_cmp_topk=True,
-            use_varlen=use_varlen,
-            batch_size=batch_size,
-            cu_seqlens=cu_seqlens,
-            input_lengths=input_lengths,
-            prefix_lengths=prefix_lengths,
-            sp_per_req=sp_per_req,
-            position_ids=position_ids,
-            req_id_per_token=req_id_per_token,
-            max_seqlen_q=max_seqlen_q,
-        )
+        cp_ctx_local = getattr(self, "_cp_ctx", None)
+        if cp_ctx_local is not None and cp_ctx_local.cp_size > 1:
+            # CP compressor metadata is for the all-gathered global sequence.
+            # It is still layer-invariant within the HCA ratio bucket, so build
+            # it in the prefill_meta broadcast path and pass it to the hot path.
+            with record_function_range("dsv4.fp8.meta.hca.cp_compressor_prepare"):
+                self._set_compressor_pool_context()
+                try:
+                    (
+                        cp_positions,
+                        cp_b_idx,
+                        cp_seq_start_per_req,
+                        cp_cu_seq_per_req,
+                    ) = build_cp_full_prefill_positions(cp_ctx_local, device)
+                    assert cp_ctx_local.input_lengths_global is not None
+                    compressor_meta = self.compressor.prepare_metadata(
+                        cp_positions,
+                        cp_b_idx,
+                        is_batched=bool(cp_ctx_local.input_lengths_global.numel() > 1),
+                        seq_start_per_req=cp_seq_start_per_req,
+                        cu_seq_per_req=cp_cu_seq_per_req,
+                    )
+                finally:
+                    self._clear_compressor_pool_context()
+        else:
+            with record_function_range("dsv4.fp8.meta.hca.compressor_prepare"):
+                compressor_meta = self._build_compressor_meta(
+                    seqlen,
+                    sp_int,
+                    device,
+                    use_varlen=use_varlen,
+                    batch_size=batch_size,
+                    cu_seqlens=cu_seqlens,
+                    input_lengths=input_lengths,
+                    prefix_lengths=prefix_lengths,
+                    sp_per_req=sp_per_req,
+                    position_ids=position_ids,
+                    req_id_per_token=req_id_per_token,
+                    max_seqlen_q=max_seqlen_q,
+                )
+        with record_function_range("dsv4.fp8.meta.hca.workspace"):
+            workspace_meta = self._build_workspace_meta(
+                seqlen,
+                sp_int,
+                device,
+                with_dense_cmp_topk=True,
+                use_varlen=use_varlen,
+                batch_size=batch_size,
+                cu_seqlens=cu_seqlens,
+                input_lengths=input_lengths,
+                prefix_lengths=prefix_lengths,
+                sp_per_req=sp_per_req,
+                position_ids=position_ids,
+                req_id_per_token=req_id_per_token,
+                max_seqlen_q=max_seqlen_q,
+            )
         return HcaPrefillMeta(
             compressor_meta=compressor_meta,
             workspace_meta=workspace_meta,
@@ -2873,9 +3086,102 @@ class AttentionFP8(nn.Module):
         # stack). UT helpers must pass it explicitly.
 
         if use_varlen:
+            assert cu_seqlens is not None
+            assert input_lengths is not None
+            assert prefix_lengths is not None
+            assert position_ids is not None
+            assert req_id_per_token is not None
+            cu_seqlens = _flat_1d(cu_seqlens)
+            input_lengths = _flat_1d(input_lengths)
+            prefix_lengths = _flat_1d(prefix_lengths)
+            position_ids = _flat_1d(position_ids)
+            req_id_per_token = _flat_1d(req_id_per_token)
+            assert (
+                position_ids.numel() == seqlen
+            ), f"position_ids must be flat [T_total={seqlen}], got {position_ids.shape}"
+            assert (
+                req_id_per_token.numel() == seqlen
+            ), f"req_id_per_token must be flat [T_total={seqlen}], got {req_id_per_token.shape}"
+            assert (
+                cu_seqlens.numel() == batch_size + 1
+            ), f"cu_seqlens must be [B+1={batch_size + 1}], got {cu_seqlens.shape}"
+            assert (
+                input_lengths.numel() == batch_size
+            ), f"input_lengths must be [B={batch_size}], got {input_lengths.shape}"
+            assert (
+                prefix_lengths.numel() == batch_size
+            ), f"prefix_lengths must be [B={batch_size}], got {prefix_lengths.shape}"
             B = batch_size
             sp_i32 = prefix_lengths.to(device=device, dtype=torch.int32)
             S_i32 = input_lengths.to(device=device, dtype=torch.int32)
+
+            # CP awareness:
+            # Under CP both pools (compressor + SWA) hold the FULL gathered
+            # sequence, and ``qkv.kv_full`` consumed by the BF16 overlay
+            # has been all-gathered into ``[seq_len_full, D]``. So for
+            # workspace sizing + per-token slot mapping we must use the
+            # GLOBAL per-request lengths (``cp_ctx.input_lengths_global``)
+            # plus a synthesised ``[seq_len_full]`` global position /
+            # req_id stream. ``cu_seqlens`` (qsl) stays rank-local because
+            # the kernel form of ``combine_topk_swa_indices`` is replaced
+            # by the CP combine path under attention, which consumes explicit
+            # ``cp_ctx.global_positions`` directly.
+            cp_ctx_local = getattr(self, "_cp_ctx", None)
+            cp_active = cp_ctx_local is not None and cp_ctx_local.cp_size > 1
+            if cp_active:
+                # B>=1 multi-request supported. Pools (compressor + SWA) hold
+                # the FULL gathered sequence and ``qkv.kv_full`` is the
+                # all-gathered ``[seq_len_full, D]`` tensor.
+                # ``cp_ctx.input_lengths_global`` is the per-request global
+                # length array (B entries). We
+                # synthesise a ``[seq_len_full]`` global per-token stream
+                # of (position_ids, req_id_per_token) by bucketising
+                # against per-request cumulative starts so the existing
+                # ``new_k_slot_in_flat`` formula
+                # ``req*M + N + P_req + (pos - sp_req)`` lands each global
+                # token in workspace[req_id]'s SWA tail correctly. For
+                # B==1 this collapses to the previous arange + sp_global.
+                assert (
+                    cp_ctx_local.input_lengths_global is not None
+                ), "CP workspace meta requires cp_ctx.input_lengths_global"
+                S_i32 = cp_ctx_local.input_lengths_global.to(
+                    device=device, dtype=torch.int32
+                )
+                B = int(S_i32.shape[0])
+                seq_len_full = int(cp_ctx_local.seq_len_full)
+                cum_after = torch.cumsum(S_i32, 0).to(torch.int32)  # [B]
+                cum_starts = torch.cat(
+                    [
+                        torch.zeros(1, dtype=torch.int32, device=device),
+                        cum_after[:-1],
+                    ]
+                )  # [B] each req's start in [0, seq_len_full)
+                g_arange32 = torch.arange(
+                    seq_len_full, device=device, dtype=torch.int32
+                )
+                # req_id[g] = searchsorted(cum_after, g, right=True).
+                # torch.bucketize(input, boundaries, right=True) returns the
+                # count of cumulative ends <= g for ascending boundaries.
+                req_id_per_token_eff = torch.bucketize(
+                    g_arange32, cum_after, right=True
+                ).to(torch.int64)
+                # Clamp in case of float rounding edge: every g < seq_len_full
+                # must map to a valid req index in [0, B).
+                req_id_per_token_eff.clamp_(max=B - 1)
+                cum_starts_l64 = cum_starts.to(torch.int64)
+                sp_l64_b = prefix_lengths.to(device=device, dtype=torch.long)
+                position_ids_eff = (
+                    g_arange32.to(torch.int64)
+                    - cum_starts_l64.gather(0, req_id_per_token_eff)
+                ) + sp_l64_b.gather(0, req_id_per_token_eff)
+            else:
+                position_ids_eff = _flat_1d(
+                    position_ids.to(device=device, dtype=torch.int64)
+                )
+                req_id_per_token_eff = _flat_1d(
+                    req_id_per_token.to(device=device, dtype=torch.int64)
+                )
+
             seq_total_per_req = sp_i32 + S_i32  # [B]
             N_per_req = seq_total_per_req // ratio  # [B]
             P_per_req = torch.clamp_max(sp_i32, win - 1)  # [B]
@@ -2896,9 +3202,12 @@ class AttentionFP8(nn.Module):
 
             # Per-token scatter target — pre-baked elementwise on the
             # builder side so ``_attn_via_workspace`` is kernel-only.
+            # Under CP these come from the synthesised global streams above
+            # so the resulting ``new_k_slot_in_flat`` matches
+            # ``qkv.kv_full.size(0) == seq_len_full``.
             sp_l64 = prefix_lengths.to(device=device, dtype=torch.long)
-            req_l64 = req_id_per_token.to(device=device, dtype=torch.long)
-            pos_l64 = position_ids.to(device=device, dtype=torch.long)
+            req_l64 = req_id_per_token_eff
+            pos_l64 = position_ids_eff
             P_per_req_l64 = P_per_req.to(torch.long)  # [B]
             new_k_slot_in_flat = (
                 req_l64 * M
@@ -2910,11 +3219,32 @@ class AttentionFP8(nn.Module):
             T_total = seqlen
         else:
             # Legacy B==1 / DSV4_VARLEN_PREFILL=0 — bit-equal to pre-Phase-3.
+            #
+            # Legacy CP awareness (B==1 only, gated by ``self._cp_ctx``):
+            # under CP both pools (compressor + SWA) hold the FULL gathered
+            # sequence (Phase C / Phase F write the all-gather'd KV per
+            # rank), so workspace sizing (N / gather_len / M) and the new
+            # K BF16 overlay slot mapping must use ``seq_len_full`` rather
+            # than the rank-local ``seqlen``. ``T_total`` stays rank-local
+            # because Q rows are still local to this rank — ``dense_cmp_topk``
+            # and combine_topk consume it per local Q row. ``qsl`` is also
+            # rank-local because the kernel form is replaced by a Python
+            # vectorized builder under CP (see ``_attn_via_workspace``).
+            cp_ctx_local = getattr(self, "_cp_ctx", None)
+            cp_active = cp_ctx_local is not None and cp_ctx_local.cp_size > 1
+            if cp_active:
+                assert (
+                    batch_size == 1
+                ), "legacy CP workspace path supports B=1; set DSV4_VARLEN_PREFILL=1 for B>1"
+                seqlen_eff = int(cp_ctx_local.seq_len_full)
+            else:
+                seqlen_eff = seqlen
+
             B = 1
-            seq_total = sp_int + seqlen
+            seq_total = sp_int + seqlen_eff
             N = seq_total // ratio
             P = min(sp_int, win - 1)
-            gather_len = seqlen + P
+            gather_len = seqlen_eff + P
             M = N + gather_len
 
             swa_bt_int32 = swa_bt[:B].to(device=device, dtype=torch.int32).contiguous()
@@ -2926,10 +3256,14 @@ class AttentionFP8(nn.Module):
             )
             qsl = torch.tensor([0, seqlen], device=device, dtype=torch.int32)
 
-            # B==1 collapses to a contiguous arange — bit-equal to the
-            # legacy ``workspace[:, N+P : N+P+S, :].copy_(kv_bf16)`` slice.
+            # ``new_k_slot_in_flat`` writes the BF16 overlay of freshly
+            # computed K. Non-CP: K is rank-local (== input), size
+            # ``seqlen``; CP: K has been all-gathered into ``qkv.kv_full``
+            # by ``_prefill_compute_qkv`` and now spans the full sequence
+            # ``seq_len_full``, so the scatter target is a contiguous
+            # ``arange(seq_len_full)`` into the SWA region [N+P, N+P+seq_len_full).
             new_k_slot_in_flat = (
-                torch.arange(seqlen, device=device, dtype=torch.long) + (N + P)
+                torch.arange(seqlen_eff, device=device, dtype=torch.long) + (N + P)
             ).contiguous()
 
             T_total = seqlen
@@ -3052,6 +3386,27 @@ class AttentionFP8(nn.Module):
         from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
         from rtp_llm.models_py.modules.dsv4.fp8 import _swa_ops_triton as _swa_ops
 
+        cu_seqlens = _flat_1d(cu_seqlens)
+        input_lengths = _flat_1d(input_lengths)
+        prefix_lengths = _flat_1d(prefix_lengths)
+        position_ids = _flat_1d(position_ids)
+        req_id_per_token = _flat_1d(req_id_per_token)
+        assert (
+            position_ids.numel() == seqlen
+        ), f"position_ids must be flat [T_total={seqlen}], got {position_ids.shape}"
+        assert (
+            req_id_per_token.numel() == seqlen
+        ), f"req_id_per_token must be flat [T_total={seqlen}], got {req_id_per_token.shape}"
+        assert (
+            cu_seqlens.numel() == batch_size + 1
+        ), f"cu_seqlens must be [B+1={batch_size + 1}], got {cu_seqlens.shape}"
+        assert (
+            input_lengths.numel() == batch_size
+        ), f"input_lengths must be [B={batch_size}], got {input_lengths.shape}"
+        assert (
+            prefix_lengths.numel() == batch_size
+        ), f"prefix_lengths must be [B={batch_size}], got {prefix_lengths.shape}"
+
         win = self.window_size
         is_swa_only = self.compress_ratio == 0
         num_tokens = seqlen  # T_total — flat token axis
@@ -3091,18 +3446,59 @@ class AttentionFP8(nn.Module):
             )
 
         # Group-1 (every pool-bound FP8 layer): SWA pool write meta.
+        #
+        # CP-aware: under cp_size > 1 the framework's ``cu_seqlens`` /
+        # ``input_lengths`` are rank-local (already split by ZigZag), but
+        # ``_prefill_compute_qkv`` all-gathers KV to ``[seq_len_full]`` in
+        # GLOBAL request order before this write meta is consumed. So the
+        # slot_mapping we build here is sized for the global view — one
+        # slot per gather'd token — using the global cu_seqlens /
+        # input_lengths derived in ``build_cp_context``. Each rank still
+        # writes the full segment to its own paged pool (decode does not
+        # gather); pools end up bit-identical across ranks. CP=1 falls
+        # back to the rank-local tensors and is bit-equal to the legacy
+        # path.
+        #
+        # Group-2 (attention) meta further down keeps using the rank-local
+        # ``cu_seqlens`` / ``input_lengths`` because Q stays rank-local
+        # under CP — Phase D wires up the cu_seqlens "double-track" for
+        # ``flash_mla_sparse_fwd``. So we build the write view as a
+        # standalone trio (``write_*``) and keep the rank-local
+        # ``query_start_loc`` / ``combined_seq_lens`` for downstream.
         B = batch_size
+        cp_ctx = getattr(self, "_cp_ctx", None)
+        cp_on_write = (
+            cp_ctx is not None
+            and cp_ctx.cp_size > 1
+            and cp_ctx.cu_seqlens_global is not None
+            and cp_ctx.input_lengths_global is not None
+        )
         query_start_loc = cu_seqlens.to(device=device, dtype=torch.int32).contiguous()
         combined_seq_lens = (
             prefix_lengths.to(torch.int32) + input_lengths.to(torch.int32)
         ).contiguous()
-        bt_swa = bt[:B].to(device=device, dtype=torch.int32).contiguous()
+        if cp_on_write:
+            write_B = int(cp_ctx.input_lengths_global.numel())
+            write_query_start_loc = _flat_1d(
+                cp_ctx.cu_seqlens_global.to(device=device, dtype=torch.int32)
+            ).contiguous()
+            write_combined_seq_lens = (
+                prefix_lengths.to(torch.int32)[:write_B]
+                + _flat_1d(cp_ctx.input_lengths_global.to(torch.int32))
+            ).contiguous()
+            write_num_tokens = cp_ctx.seq_len_full
+        else:
+            write_B = B
+            write_query_start_loc = query_start_loc
+            write_combined_seq_lens = combined_seq_lens
+            write_num_tokens = num_tokens
+        bt_swa = bt[:write_B].to(device=device, dtype=torch.int32).contiguous()
         slot_mapping = _swa_ops.compute_swa_slot_mapping(
             block_table=bt_swa,
-            query_start_loc=query_start_loc,
-            seq_lens=combined_seq_lens,
+            query_start_loc=write_query_start_loc,
+            seq_lens=write_combined_seq_lens,
             block_size=eb,
-            num_tokens=num_tokens,
+            num_tokens=write_num_tokens,
         )
 
         # CSA/HCA: Group-1 only. Their attention meta lives on workspace_meta.
@@ -3124,10 +3520,23 @@ class AttentionFP8(nn.Module):
             )
 
         # Group-2 (SWA-only attention meta).
+        #
+        # CP-aware sizing: under cp_on_write, the workspace and attention
+        # are shaped for the GLOBAL gather'd new K (``seq_len_full`` rows
+        # of fresh K plus prefix tail), since ``_prefill_compute_qkv``
+        # all-gathers ``kv_full`` to ``[seq_len_full]`` and that's what
+        # gets scattered into the workspace. ``combined_gather_lens`` /
+        # ``M`` therefore use the global write trio above.
+        # ``query_start_loc`` for the kernel call must match the seq_lens
+        # view (the kernel derives ``query_len = qsl[b+1]-qsl[b]`` and
+        # ``prefix_len = seq_len - query_len``), so we feed the write trio
+        # consistently. Q stays rank-local at attention time — we rebuild
+        # ``combined_indices`` / ``combined_lens`` for rank-local Q tokens
+        # with explicit GLOBAL positions further below.
         combined_gather_lens = _swa_ops.compute_prefill_gather_lens(
-            seq_lens=combined_seq_lens,
-            query_start_loc=query_start_loc,
-            num_prefills=B,
+            seq_lens=write_combined_seq_lens,
+            query_start_loc=write_query_start_loc,
+            num_prefills=write_B,
             num_decodes=0,
             window_size=win,
         )
@@ -3143,41 +3552,95 @@ class AttentionFP8(nn.Module):
         # P_b math runs through ``cache_gather_lens``. Sentinel ``1`` on
         # continuation avoids an extra ``.item()`` sync.
         if any_cont:
-            cache_seq_lens = prefix_lengths.to(
-                device=device, dtype=torch.int32
-            ).contiguous()
+            # cache_seq_lens / cache_gather_lens read the SWA prefix tail
+            # from each rank's own paged pool (Phase C wrote the full
+            # gather'd KV on every rank). prefix_lengths is rank-invariant
+            # under CP, so the same per-req tensors work for CP=1 and CP>1.
+            # Slice to ``write_B`` so CP B=1 (write_B=1) doesn't pull in
+            # the full rank-local request count from a longer prefix tensor.
+            cache_seq_lens = prefix_lengths.to(device=device, dtype=torch.int32)[
+                :write_B
+            ].contiguous()
             cache_gather_lens = (
                 torch.clamp_max(prefix_lengths, win - 1)
-                .to(device=device, dtype=torch.int32)
+                .to(device=device, dtype=torch.int32)[:write_B]
                 .contiguous()
             )
-            topk_indices_empty = torch.empty(
-                (num_tokens, 0), dtype=torch.int32, device=device
-            )
-            combined_indices, combined_lens = _swa_ops.combine_topk_swa_indices(
-                topk_indices=topk_indices_empty,
-                query_start_loc=query_start_loc,
-                seq_lens=combined_seq_lens,
-                gather_lens=combined_gather_lens,
-                window_size=win,
-                compress_ratio=1,
-                topk=0,
-                M=M,
-                N=0,
-            )
-            # Pre-bake the per-token scatter index for ``via_concat`` step-2.
-            # All inputs are layer-invariant (per-batch tensors + window_size
-            # + M); building once here keeps the attn helper free of casts /
-            # gathers / arith on every cont layer.
-            prefix_l64 = prefix_lengths.to(device=device, dtype=torch.long)
-            req_id_l64 = req_id_per_token.to(device=device, dtype=torch.long)
-            pos_l64 = position_ids.to(device=device, dtype=torch.long)
-            P_b = torch.clamp_max(prefix_l64, win - 1)
-            slot_in_flat = (
-                req_id_l64 * M
-                + P_b.gather(0, req_id_l64)
-                + (pos_l64 - prefix_l64.gather(0, req_id_l64))
-            ).contiguous()
+            if cp_on_write:
+                # CP path: build per-Q-token attention meta with explicit
+                # rank-local CP positions. B>1 needs request offsets in the
+                # flattened workspace; the generic non-CP Triton kernel
+                # assumes contiguous Q and cannot derive those under zigzag CP.
+                if not _use_varlen_prefill():
+                    assert (
+                        write_B == 1
+                    ), "legacy CP via_concat path supports B=1; set DSV4_VARLEN_PREFILL=1 for B>1"
+
+                topk_indices_empty = torch.empty(
+                    (seqlen, 0), dtype=torch.int32, device=device
+                )
+                combined_indices, combined_lens = _swa_ops.combine_topk_swa_indices_cp(
+                    topk_indices=topk_indices_empty,
+                    global_positions=_flat_1d(cp_ctx.global_positions),
+                    sp_int=int(prefix_lengths[0].item()),
+                    window_size=win,
+                    compress_ratio=1,
+                    topk=0,
+                    M=M,
+                    N=0,
+                    req_id_per_token=req_id_per_token,
+                    prefix_lengths=prefix_lengths,
+                )
+
+                full_req_ids = torch.repeat_interleave(
+                    torch.arange(write_B, device=device, dtype=torch.long),
+                    _flat_1d(
+                        cp_ctx.input_lengths_global.to(device=device, dtype=torch.long)
+                    ),
+                )
+                full_prefix = prefix_lengths.to(device=device, dtype=torch.long)[
+                    :write_B
+                ]
+                full_starts = cp_ctx.cu_seqlens_global.to(
+                    device=device, dtype=torch.long
+                )[:-1]
+                g_arange = torch.arange(
+                    cp_ctx.seq_len_full, device=device, dtype=torch.long
+                )
+                local_pos = g_arange - full_starts.gather(0, full_req_ids)
+                P_b_full = torch.clamp_max(full_prefix, win - 1)
+                slot_in_flat = (
+                    full_req_ids * M + P_b_full.gather(0, full_req_ids) + local_pos
+                ).contiguous()
+            else:
+                topk_indices_empty = torch.empty(
+                    (num_tokens, 0), dtype=torch.int32, device=device
+                )
+                combined_indices, combined_lens = _swa_ops.combine_topk_swa_indices(
+                    topk_indices=topk_indices_empty,
+                    query_start_loc=query_start_loc,
+                    seq_lens=combined_seq_lens,
+                    gather_lens=combined_gather_lens,
+                    window_size=win,
+                    compress_ratio=1,
+                    topk=0,
+                    M=M,
+                    N=0,
+                )
+                # Pre-bake the per-token scatter index for ``via_concat``
+                # step-2. All inputs are layer-invariant (per-batch tensors
+                # + window_size + M); building once here keeps the attn
+                # helper free of casts / gathers / arith on every cont
+                # layer.
+                prefix_l64 = prefix_lengths.to(device=device, dtype=torch.long)
+                req_id_l64 = req_id_per_token.to(device=device, dtype=torch.long)
+                pos_l64 = position_ids.to(device=device, dtype=torch.long)
+                P_b = torch.clamp_max(prefix_l64, win - 1)
+                slot_in_flat = (
+                    req_id_l64 * M
+                    + P_b.gather(0, req_id_l64)
+                    + (pos_l64 - prefix_l64.gather(0, req_id_l64))
+                ).contiguous()
             prefix_len_max = 1
         else:
             cache_seq_lens = None
@@ -3348,20 +3811,37 @@ class AttentionFP8(nn.Module):
         x_3d = x.unsqueeze(0)
         rd = common.rd
         # Q path
-        qr = self._rmsnorm_weighted(
-            self._lin(self.wq_a, x_3d), self.q_norm
-        )  # [1, T, q_lora_rank]
-        q = self._lin(self.wq_b, qr).unflatten(-1, (self.n_heads, self.head_dim))
-        q = fused_rmsnorm_rope(q, None, common.freqs_cis, rd, eps=self.eps)
+        with record_function_range("dsv4.fp8.attn.qkv.q_lora_a_norm"):
+            qr = self._rmsnorm_weighted(
+                self._lin(self.wq_a, x_3d), self.q_norm
+            )  # [1, T, q_lora_rank]
+        with record_function_range("dsv4.fp8.attn.qkv.q_lora_b_rope"):
+            q = self._lin(self.wq_b, qr).unflatten(-1, (self.n_heads, self.head_dim))
+            q = fused_rmsnorm_rope(q, None, common.freqs_cis, rd, eps=self.eps)
 
         # KV path (single MQA head) — rank-local under CP.
-        kv_in = self._lin(self.wkv, x_3d)
-        kv = fused_rmsnorm_rope(kv_in, self.kv_norm, common.freqs_cis, rd, eps=self.eps)
+        with record_function_range("dsv4.fp8.attn.qkv.kv_proj_rope"):
+            kv_in = self._lin(self.wkv, x_3d)
+            kv = fused_rmsnorm_rope(
+                kv_in, self.kv_norm, common.freqs_cis, rd, eps=self.eps
+            )
 
         if common.cp_on:
-            kv_full = cp_all_gather_full(
-                kv, common.cp_ctx
-            )  # [1, seq_len_full, head_dim]
+            # Dispatch on _use_varlen_prefill: varlen (default) supports
+            # B>=1 via the flat helper; legacy keeps the B==1 [B, T, *F]
+            # path. Both produce [1, seq_len_full, head_dim] downstream.
+            if _use_varlen_prefill():
+                from rtp_llm.models_py.modules.dsv4.cp import cp_all_gather_full_varlen
+
+                with record_function_range("dsv4.fp8.attn.qkv.cp_gather_varlen"):
+                    kv_flat = kv.reshape(kv.size(0) * kv.size(1), *kv.shape[2:])
+                    kv_full_flat = cp_all_gather_full_varlen(kv_flat, common.cp_ctx)
+                    kv_full = kv_full_flat.unsqueeze(0)
+            else:
+                with record_function_range("dsv4.fp8.attn.qkv.cp_gather"):
+                    kv_full = cp_all_gather_full(
+                        kv.squeeze(0), common.cp_ctx
+                    ).unsqueeze(0)
         else:
             kv_full = kv
 
@@ -3399,7 +3879,38 @@ class AttentionFP8(nn.Module):
         k_bf16 = kv_full.reshape(-1, self.head_dim)
         if k_bf16.dtype != torch.bfloat16:
             k_bf16 = k_bf16.to(torch.bfloat16)
-        _ins.quantize_and_insert_k_cache(k_bf16, packed_3d, meta.slot_mapping)
+        if self.layer_id == 0 and os.environ.get("DSV4_SWA_WRITE_DBG") == "1":
+            try:
+                sm = meta.slot_mapping
+                bt = (
+                    self._block_tables_by_type.get(SWA_KV)
+                    if self._block_tables_by_type is not None
+                    else None
+                )
+                bt_numel = int(bt.numel()) if bt is not None else -1
+                bt_shape = list(bt.shape) if bt is not None else None
+                pool_total_slots = int(packed_3d.shape[0])
+                sm_total = int(sm.numel())
+                sm_valid = int((sm >= 0).sum().item())
+                sm_max = int(sm.max().item()) if sm_total > 0 else -1
+                sm_min = int(sm.min().item()) if sm_total > 0 else -1
+                k_rows = int(k_bf16.shape[0])
+                _cp_on = bool(getattr(common, "cp_on", False))
+                _seq_full = (
+                    int(common.cp_ctx.seq_len_full)
+                    if _cp_on and common.cp_ctx is not None
+                    else -1
+                )
+                print(
+                    f"[DSV4_SWA_WRITE_DBG] cp_on={_cp_on} k_rows={k_rows} seq_len_full={_seq_full} "
+                    f"slot_mapping_total={sm_total} valid={sm_valid} min={sm_min} max={sm_max} "
+                    f"swa_bt_shape={bt_shape} swa_bt_numel={bt_numel} pool_total_slots={pool_total_slots}",
+                    flush=True,
+                )
+            except Exception as _e:
+                print(f"[DSV4_SWA_WRITE_DBG] failed: {_e}", flush=True)
+        with record_function_range("dsv4.fp8.attn.swa.quant_insert"):
+            _ins.quantize_and_insert_k_cache(k_bf16, packed_3d, meta.slot_mapping)
 
     def _attn_fp8_swa_via_kv_full(
         self,
@@ -3434,19 +3945,36 @@ class AttentionFP8(nn.Module):
         #   * legacy / CP path → ``[1, T, win]``.
         # Either lands at flash_mla_sparse_fwd's ``[T, 1, win]`` indices
         # contract after the same ``squeeze + unsqueeze + cast`` chain.
+        #
+        # CP fresh prefill alignment: under cp_size > 1 ``qkv.q`` is
+        # rank-local ``[T_local, H, D]`` and ``qkv.kv_full`` is the
+        # all-gathered ``[seq_len_full, D]`` in GLOBAL request order. The
+        # varlen topk builder receives CP global positions plus global
+        # per-request cu_seqlens, so indices address the gathered KV for B>=1.
+        if common.cp_on:
+            # B>=1 is allowed under varlen (default DSV4_VARLEN_PREFILL=1).
+            # Legacy DSV4_VARLEN_PREFILL=0 keeps the B==1 invariant.
+            if not _use_varlen_prefill():
+                assert (
+                    common.cp_ctx is None or common.batch_size == 1
+                ), "legacy CP attention path supports B=1; set DSV4_VARLEN_PREFILL=1 for B>1"
+            assert (
+                qkv.kv_full.size(0) == common.seqlen_full
+            ), "CP gather should produce kv_full sized to seq_len_full"
         ti = common.topk_idxs
         if ti.dim() == 3:
             ti = ti.squeeze(0)
         indices = ti.unsqueeze(1).to(torch.int32)
 
-        o3, _, _ = flash_mla_sparse_fwd(
-            q=qkv.q,
-            kv=qkv.kv_full.unsqueeze(1),
-            indices=indices,
-            sm_scale=self.softmax_scale,
-            attn_sink=self.attn_sink,
-            topk_length=meta.topk_length_kv_full,
-        )
+        with record_function_range("dsv4.fp8.attn.swa.flash_mla_kv_full"):
+            o3, _, _ = flash_mla_sparse_fwd(
+                q=qkv.q,
+                kv=qkv.kv_full.unsqueeze(1),
+                indices=indices,
+                sm_scale=self.softmax_scale,
+                attn_sink=self.attn_sink,
+                topk_length=meta.topk_length_kv_full,
+            )
         return o3.unsqueeze(0)
 
     def _attn_fp8_swa_via_concat(
@@ -3512,15 +4040,16 @@ class AttentionFP8(nn.Module):
         # 1. Prefix tail dequant. ``cache_*`` are per-request ``[B]`` tensors
         # under varlen, single-element under legacy — same kernel call.
         if meta.prefix_len_max > 0:
-            _swa_dq.dequantize_and_gather_k_cache(
-                out=workspace,
-                k_cache=packed_3d,
-                seq_lens=meta.cache_seq_lens,
-                gather_lens=meta.cache_gather_lens,
-                block_table=bt_int32,
-                block_size=eb,
-                offset=0,
-            )
+            with record_function_range("dsv4.fp8.attn.swa_concat.gather_prefix"):
+                _swa_dq.dequantize_and_gather_k_cache(
+                    out=workspace,
+                    k_cache=packed_3d,
+                    seq_lens=meta.cache_seq_lens,
+                    gather_lens=meta.cache_gather_lens,
+                    block_table=bt_int32,
+                    block_size=eb,
+                    offset=0,
+                )
 
         # 2. New K BF16 overlay.
         kv_bf16 = qkv.kv_full.to(torch.bfloat16)
@@ -3531,22 +4060,25 @@ class AttentionFP8(nn.Module):
             assert (
                 meta.slot_in_flat is not None
             ), "via_concat varlen path expects pre-baked slot_in_flat in swa_meta"
-            workspace.view(B * meta.M, D).index_copy_(0, meta.slot_in_flat, kv_bf16)
+            with record_function_range("dsv4.fp8.attn.swa_concat.overlay_new_k"):
+                workspace.view(B * meta.M, D).index_copy_(0, meta.slot_in_flat, kv_bf16)
         else:
             # Legacy B==1 single slice — bit-equal to the original code.
             S = common.seqlen
             P = meta.prefix_len_max
-            workspace[:, P : P + S, :].copy_(kv_bf16.unsqueeze(0))
+            with record_function_range("dsv4.fp8.attn.swa_concat.overlay_new_k"):
+                workspace[:, P : P + S, :].copy_(kv_bf16.unsqueeze(0))
 
         # 3. flash_mla_sparse_fwd over the [B*M] flat KV view.
-        o3, _, _ = flash_mla_sparse_fwd(
-            q=qkv.q,
-            kv=workspace.view(B * meta.M, 1, D),
-            indices=meta.combined_indices.unsqueeze(1),
-            sm_scale=self.softmax_scale,
-            attn_sink=self.attn_sink,
-            topk_length=meta.combined_lens,
-        )
+        with record_function_range("dsv4.fp8.attn.swa_concat.flash_mla"):
+            o3, _, _ = flash_mla_sparse_fwd(
+                q=qkv.q,
+                kv=workspace.view(B * meta.M, 1, D),
+                indices=meta.combined_indices.unsqueeze(1),
+                sm_scale=self.softmax_scale,
+                attn_sink=self.attn_sink,
+                topk_length=meta.combined_lens,
+            )
         return o3.unsqueeze(0)
 
     # ------------------------------------------------------------------
@@ -3578,24 +4110,29 @@ class AttentionFP8(nn.Module):
                 freqs_per_token = freqs_cis.contiguous()
             else:
                 freqs_per_token = freqs_cis.reshape(seqlen, -1).contiguous()
-            o_fp8, o_scale = fused_inv_rope_fp8_quant(
-                o_3d,
-                freqs_per_token,
-                n_groups=self.n_groups,
-                heads_per_group=self.n_heads // self.n_groups,
-                nope_dim=self.head_dim - self.rope_head_dim,
-                rope_head_dim=self.rope_head_dim,
-            )
-            o = self._wo_a_einsum_from_fp8(o_fp8, o_scale, 1, seqlen)
+            with record_function_range("dsv4.fp8.attn.out.fused_inv_rope_quant"):
+                o_fp8, o_scale = fused_inv_rope_fp8_quant(
+                    o_3d,
+                    freqs_per_token,
+                    n_groups=self.n_groups,
+                    heads_per_group=self.n_heads // self.n_groups,
+                    nope_dim=self.head_dim - self.rope_head_dim,
+                    rope_head_dim=self.rope_head_dim,
+                )
+            with record_function_range("dsv4.fp8.attn.out.wo_a_einsum"):
+                o = self._wo_a_einsum_from_fp8(o_fp8, o_scale, 1, seqlen)
         else:
-            apply_rotary_emb(o[..., -rd:], freqs_cis, inverse=True)
-            o = o.reshape(1, seqlen, self.n_groups, -1)
-            wo_a_bf16 = _fp8_dequant_to_fp32(self.wo_a_w, self.wo_a_s).to(o.dtype)
-            wo_a = wo_a_bf16.view(self.n_groups, self.o_lora_rank, -1)
-            o = torch.einsum("bsgd,grd->bsgr", o, wo_a)
-        out = self._lin(self.wo_b, o.flatten(2))
+            with record_function_range("dsv4.fp8.attn.out.eager_inv_rope_wo_a"):
+                apply_rotary_emb(o[..., -rd:], freqs_cis, inverse=True)
+                o = o.reshape(1, seqlen, self.n_groups, -1)
+                wo_a_bf16 = _fp8_dequant_to_fp32(self.wo_a_w, self.wo_a_s).to(o.dtype)
+                wo_a = wo_a_bf16.view(self.n_groups, self.o_lora_rank, -1)
+                o = torch.einsum("bsgd,grd->bsgr", o, wo_a)
+        with record_function_range("dsv4.fp8.attn.out.wo_b"):
+            out = self._lin(self.wo_b, o.flatten(2))
         if self.tp_size > 1:
             from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 
-            all_reduce(out, Group.TP)
+            with record_function_range("dsv4.fp8.attn.out.tp_all_reduce"):
+                all_reduce(out, Group.TP)
         return out
