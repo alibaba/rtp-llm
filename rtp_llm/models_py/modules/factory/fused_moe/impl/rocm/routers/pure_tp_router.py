@@ -212,8 +212,8 @@ class PureTpRouterFp8PerBlockPassthrough(PureTpRouterBase):
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         return a1, None
 
-class PureTpRouterFp4PerGroupPassthrough(PureTpRouterBase):
-    """Pure TP router for FP4 PerGroup passthrough."""
+class PureTpRouterMXFp4Passthrough(PureTpRouterBase):
+    """Pure TP router for the MXFP4 passthrough path."""
 
     def __init__(
         self,

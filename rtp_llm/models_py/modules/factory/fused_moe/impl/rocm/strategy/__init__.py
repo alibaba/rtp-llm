@@ -2,15 +2,15 @@
 
 from .bf16_no_quant import RocmBf16PureTPStrategy
 from .ep import RocmEpLowLatencyStrategy, RocmEpNormalStrategy
+from .mxfp4 import RocmMXFp4PureTPStrategy
 from .fp8_per_block import RocmFp8PerBlockPureTPStrategy
 from .fp8_per_channel import RocmFp8PerChannelPureTPStrategy
-from .fp4_per_group import RocmFp4PerGroupPureTPStrategy
 
 __all__ = [
     "RocmEpNormalStrategy",
     "RocmEpLowLatencyStrategy",
+    "RocmMXFp4PureTPStrategy",
     "RocmFp8PerChannelPureTPStrategy",
     "RocmFp8PerBlockPureTPStrategy",
     "RocmBf16PureTPStrategy",
-    "RocmFp4PerGroupPureTPStrategy",
 ]
