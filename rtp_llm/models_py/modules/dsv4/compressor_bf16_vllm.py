@@ -74,7 +74,10 @@ class CompressorMeta:
       * ``kv_slots``     : int64 KV-pool slot per token (-1 if non-boundary
                            or unallocated)
       * ``token_to_req`` : int32 alias of ``b_idx`` for the fused KV writer
-      * ``boundary_token_indices`` : int64 token indices that write KV slots
+      * ``boundary_token_indices`` : int64 token indices that write KV slots,
+        or ``None`` when compaction is skipped (CUDA graph capture) — the
+        downstream KV writer switches to its dense ``COMPACT_BOUNDARY=False``
+        path, which reads ``kv_slots`` and skips non-boundary tokens itself.
       * ``is_batched``   : True when this meta packs multiple requests
                            (B>1) — the kernel's scalar ``seq_start`` raw
                            path is unsafe and ``_launch`` falls back to
@@ -95,10 +98,28 @@ class CompressorMeta:
     state_slots: torch.Tensor
     kv_slots: torch.Tensor
     token_to_req: torch.Tensor
-    boundary_token_indices: torch.Tensor
+    boundary_token_indices: Optional[torch.Tensor]
     is_batched: bool = False
     seq_start_per_req: Optional[torch.Tensor] = None
     cu_seq_per_req: Optional[torch.Tensor] = None
+
+
+def _compact_boundary_indices(kv_slots: torch.Tensor) -> Optional[torch.Tensor]:
+    """Return ``[M] int64`` indices of tokens with ``kv_slots[t] >= 0``.
+
+    ``torch.nonzero`` has a data-dependent output shape, which forces a
+    GPU→CPU sync and is illegal inside a CUDA graph capture window
+    (``cudaErrorStreamCaptureUnsupported``). When we are being captured,
+    return ``None`` instead; the downstream KV writer
+    (``run_fused_compress_kv_write_bf16``) already has a ``COMPACT_BOUNDARY
+    =False`` path that dispatches one program per token and skips
+    non-boundary tokens by checking ``kv_slots[t] < 0`` inside the kernel —
+    functionally equivalent to the compacted launch, just with ``N - M``
+    early-exit threads.
+    """
+    if torch.cuda.is_current_stream_capturing():
+        return None
+    return torch.nonzero(kv_slots >= 0, as_tuple=False).flatten()
 
 
 class _CompressorNorm(nn.Module):
@@ -313,7 +334,7 @@ class CompressorBF16VLLM(nn.Module):
             state_slots = self._compute_state_slot_mapping(positions, b_idx)
             kv_slots = self._compute_kv_slot_mapping(positions, b_idx)
             token_to_req = b_idx.to(torch.int32)
-        boundary_token_indices = torch.nonzero(kv_slots >= 0, as_tuple=False).flatten()
+        boundary_token_indices = _compact_boundary_indices(kv_slots)
         return CompressorMeta(
             positions=positions,
             b_idx=b_idx,
@@ -624,9 +645,7 @@ class CompressorBF16VLLM(nn.Module):
             )
         if fused_meta is not None:
             positions, b_idx, state_slots, kv_slots, token_to_req = fused_meta
-            boundary_token_indices = torch.nonzero(
-                kv_slots >= 0, as_tuple=False
-            ).flatten()
+            boundary_token_indices = _compact_boundary_indices(kv_slots)
             return CompressorMeta(
                 positions=positions,
                 b_idx=b_idx,
