@@ -22,6 +22,7 @@
 #include "rtp_llm/models_py/bindings/cuda/FakeBalanceExpertOp.h"
 
 #include "rtp_llm/models_py/bindings/cuda/kernels/mla_quant_kernel.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/dsv4_persistent_topk.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/dsv4_top_k_per_row_prefill.h"
 
 using namespace rtp_llm;
@@ -233,6 +234,21 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
     rtp_ops_m.def("persistent_topk",
                   &persistent_topk,
                   "Persistent TopK kernel",
+                  py::arg("logits"),
+                  py::arg("lengths"),
+                  py::arg("output"),
+                  py::arg("workspace"),
+                  py::arg("k"),
+                  py::arg("max_seq_len"));
+
+    // Vendored from vLLM (csrc/persistent_topk.cuh + csrc/topk.cu @ b55d830).
+    // DSv4-specific variant of the radix-select TopK kernel registered above:
+    // writes -1 padding past per-row ``lengths`` directly into the output
+    // buffer (folds the previous fill_/copy_/masked_fill_ chain). Used by
+    // the FP8 indexer decode hot path; see kernels/dsv4_persistent_topk.h.
+    rtp_ops_m.def("dsv4_persistent_topk",
+                  &dsv4_persistent_topk,
+                  "DSv4 persistent radix-select TopK (K∈{512,1024,2048})",
                   py::arg("logits"),
                   py::arg("lengths"),
                   py::arg("output"),

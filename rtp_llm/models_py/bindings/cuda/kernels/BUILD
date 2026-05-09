@@ -140,6 +140,28 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+# Vendored from vLLM (csrc/persistent_topk.cuh + csrc/topk.cu @ b55d830).
+# Replaces torch.topk on the DSv4 indexer decode hot path:
+#   K=512 / T_max=2048: torch.topk ~30us → this kernel ~5-10us.
+# See dsv4_persistent_topk.h for the contract. Distinct from the legacy
+# ``persistent_topk`` (rtp_llm:: namespace) above — the dsv4 variant lives
+# in ``torch_ext::`` and writes -1 padding past per-row lengths inline.
+cc_library(
+    name = "dsv4_persistent_topk",
+    srcs = ["dsv4_persistent_topk.cu"],
+    hdrs = [
+        "dsv4_persistent_topk.h",
+        "dsv4_persistent_topk.cuh",
+    ],
+    deps = [
+        "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
+        ":cuda_utils_common",
+        "//rtp_llm/cpp/utils:core_utils",
+    ] + torch_deps(),
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
 # Per-row TopK for the prefill phase of the DeepSeek-V4 indexer.
 # Vendored from vLLM (csrc/sampler.cu::top_k_per_row_prefill). Hybrid:
 # insertion-sort blocks for the first 12288 rows, radix-select beyond.

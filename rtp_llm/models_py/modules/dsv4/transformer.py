@@ -86,6 +86,12 @@ class V4Args:
     dp_rank: int = 0
     world_size: int = 1
     world_rank: int = 0
+    # KV-cache dtype switch.  True selects ``AttentionFP8`` (paged 584B
+    # SWA/CSA/HCA pools, FlashMLA dual-pool decode); False keeps the BF16
+    # ``Attention`` path. Resolved from
+    # ``attn_config.kv_cache_dtype == KvCacheDataType.FP8`` in
+    # ``DeepSeekV4Model._args_from_model_config``.
+    fp8_kv_cache: bool = False
 
 
 def _block_kwargs(
@@ -139,6 +145,7 @@ def _block_kwargs(
         ep_size=args.ep_size,
         ep_rank=args.ep_rank,
         max_tokens_per_rank=args.max_tokens_per_rank,
+        fp8_kv_cache=args.fp8_kv_cache,
     )
 
 
@@ -163,6 +170,10 @@ class V4Transformer(nn.Module):
         self.args = args
         self.max_seq_len = args.max_seq_len
         self.hc_mult = args.hc_mult
+        # Surface ``fp8_kv_cache`` as a top-level attr so
+        # ``prefill/forward.py`` and ``DeepSeekV4Model.prepare_fmha_impl``
+        # can dispatch via ``v4.fp8_kv_cache`` without reading args.
+        self.fp8_kv_cache = args.fp8_kv_cache
 
         from rtp_llm.utils.model_weight import W
 
@@ -172,7 +183,10 @@ class V4Transformer(nn.Module):
         self.embed = EmbeddingTorch(gw[W.embedding])
 
         self.layers = nn.ModuleList(
-            [_build_block(i, args, layer_weights=mw.weights[i]) for i in range(args.n_layers)]
+            [
+                _build_block(i, args, layer_weights=mw.weights[i])
+                for i in range(args.n_layers)
+            ]
         )
         self.norm = RMSNorm(gw[W.final_ln_gamma], args.norm_eps)
 

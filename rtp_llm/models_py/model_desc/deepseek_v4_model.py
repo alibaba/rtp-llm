@@ -73,8 +73,11 @@ from rtp_llm.ops.compute_ops import PyModelInitResources, PyModelInputs, PyModel
 def _args_from_model_config(
     model_config: ModelConfig, max_generate_batch_size: int = 4
 ) -> V4Args:
+    from rtp_llm.ops import KvCacheDataType
+
     attn_config = model_config.attn_config
     rope_config = attn_config.rope_config
+    fp8_kv_cache = attn_config.kv_cache_dtype == KvCacheDataType.FP8
     return V4Args(
         vocab_size=model_config.vocab_size,
         dim=model_config.hidden_size,
@@ -123,6 +126,7 @@ def _args_from_model_config(
         # max_seq_len is the safest per-rank upper bound (one long prefill
         # fully on one rank) — the buffer is allocated once and reused.
         max_tokens_per_rank=int(model_config.max_seq_len) or 4096,
+        fp8_kv_cache=fp8_kv_cache,
     )
 
 
@@ -252,6 +256,10 @@ class DeepSeekV4Model(GptModelBase):
             args.swiglu_limit,
         )
         self._v4_args = args
+        # Surface FP8 KV-cache flag at the Model level so
+        # ``prepare_fmha_impl`` can dispatch BF16 / FP8 decode FMHA impls
+        # without re-reading attn_config.
+        self.fp8_kv_cache = bool(args.fp8_kv_cache)
 
         # Defer V4Transformer construction to `initialize()` where each
         # dsv4 sub-module reads its weights directly from the framework's
@@ -431,10 +439,20 @@ class DeepSeekV4Model(GptModelBase):
             )
             return None
 
-        from rtp_llm.models_py.modules.dsv4.decode.decode_fmha_impl import (
-            DSv4DecodeFmhaImpl,
-            DSv4DecodeFmhaImplConfig,
-        )
+        if self.fp8_kv_cache:
+            from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_fmha_impl import (
+                DSv4DecodeFmhaImplConfigFP8 as _DecodeFmhaImplConfig,
+            )
+            from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_fmha_impl import (
+                DSv4DecodeFmhaImplFP8 as _DecodeFmhaImpl,
+            )
+        else:
+            from rtp_llm.models_py.modules.dsv4.decode.decode_fmha_impl import (
+                DSv4DecodeFmhaImpl as _DecodeFmhaImpl,
+            )
+            from rtp_llm.models_py.modules.dsv4.decode.decode_fmha_impl import (
+                DSv4DecodeFmhaImplConfig as _DecodeFmhaImplConfig,
+            )
 
         batch_size = (
             int(attn.input_lengths.size(0)) if attn.input_lengths.numel() > 0 else 1
@@ -445,15 +463,15 @@ class DeepSeekV4Model(GptModelBase):
             self.kv_cache, self.v4, max_seq_len=int(self._v4_args.max_seq_len)
         )
         # Snapshot framework's group ordering — CUDA-graph replay path
-        # inside ``DSv4DecodeFmhaImpl.prepare`` has no live kv_cache, so
-        # carry the list in the config. Position IS the group id.
+        # inside the impl's ``prepare`` has no live kv_cache, so carry
+        # the list in the config. Position IS the group id.
         group_region_names_snapshot = (
             [int(t) for t in (self.kv_cache.group_region_names or [])]
             if self.kv_cache is not None
             else []
         )
 
-        cfg = DSv4DecodeFmhaImplConfig(
+        cfg = _DecodeFmhaImplConfig(
             max_batch_size=batch_size,
             q_len=1,
             window_size=int(self._v4_args.window_size),
@@ -466,7 +484,7 @@ class DeepSeekV4Model(GptModelBase):
             paged_pool_specs=paged_pool_specs,
             group_region_names=group_region_names_snapshot,
         )
-        impl = DSv4DecodeFmhaImpl(
+        impl = _DecodeFmhaImpl(
             cfg,
             device=device,
             attn_inputs=attn,
