@@ -1458,6 +1458,9 @@ class QuantAlgo:
     def isModelOptFP4(self) -> bool:
         ...
 
+    def isQuarkMXFP4(self) -> bool:
+        ...
+
     def isOmniQuant(self) -> bool:
         ...
 
@@ -1500,6 +1503,8 @@ class QuantMethod:
       FP8PTPC
 
       ModelOptFP4
+
+      QuarkMXFP4
     """
     Awq: typing.ClassVar[QuantMethod]  # value = <QuantMethod.Awq: 3>
     FP8PTPC: typing.ClassVar[QuantMethod]  # value = <QuantMethod.FP8PTPC: 8>
@@ -1507,6 +1512,7 @@ class QuantMethod:
     FP8Quant: typing.ClassVar[QuantMethod]  # value = <QuantMethod.FP8Quant: 7>
     GptQ: typing.ClassVar[QuantMethod]  # value = <QuantMethod.GptQ: 2>
     ModelOptFP4: typing.ClassVar[QuantMethod]  # value = <QuantMethod.ModelOptFP4: 10>
+    QuarkMXFP4: typing.ClassVar[QuantMethod]  # value = <QuantMethod.QuarkMXFP4: 11>
     None: typing.ClassVar[QuantMethod]  # value = <QuantMethod.None: 0>
     OmniQuant: typing.ClassVar[QuantMethod]  # value = <QuantMethod.OmniQuant: 5>
     PerTensorQuant: typing.ClassVar[QuantMethod]  # value = <QuantMethod.PerTensorQuant: 6>
