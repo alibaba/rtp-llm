@@ -15,6 +15,7 @@ enum QuantMethod {
     FP8PTPC          = 8,
     W4A8INT4PTPC     = 9,
     ModelOptFP4      = 10,
+    QuarkFP4         = 11,
 };
 
 struct QuantAlgo {
@@ -57,6 +58,9 @@ public:
     }
     bool isModelOptFP4() const {
         return group_size_ > 0 && quant_method_ == ModelOptFP4;
+    }
+    bool isQuarkFP4() const {
+        return group_size_ > 0 && quant_method_ == QuarkFP4;
     }
     QuantMethod getQuantMethod() const {
         return quant_method_;

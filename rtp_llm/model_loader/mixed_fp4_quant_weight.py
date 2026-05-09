@@ -3,7 +3,11 @@ import copy
 from typing import Any, List, Dict, Union
 import torch
 
-from rtp_llm.config.quant_config import ModelOptFp4Config, QuantizationConfig
+from rtp_llm.config.quant_config import (
+    MXFp4QuarkQuantConfig,
+    ModelOptFp4Config,
+    QuantizationConfig,
+)
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight
 from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, MoeAtomicWeight
@@ -162,12 +166,20 @@ class MixedFp4Weight(CompositeWeight, QuantWeight):
         cls, quant_config: QuantizationConfig, src_weight_info: WeightModule
     ) -> bool:
         if not quant_config.is_quanted() or not isinstance(
-            quant_config, ModelOptFp4Config
+            quant_config, (ModelOptFp4Config, MXFp4QuarkQuantConfig)
         ):
             return False
         name = src_weight_info.name
-        return (name in cls.unquantized_weight_list or name in cls.w4a4_weight_list) \
-               and quant_config.mixed_attention
+        if isinstance(quant_config, MXFp4QuarkQuantConfig):
+            # Some Quark checkpoints keep shared_expert in non-quantized format
+            # (no *.weight_scale). Let those weights bypass quant wrappers.
+            ckpt_names = [w.name for w in getattr(src_weight_info, "weights", [])]
+            if any(".shared_expert." in n for n in ckpt_names):
+                return False
+            return name in cls.unquantized_weight_list or name in cls.w4a4_weight_list
+        return (name in cls.unquantized_weight_list or name in cls.w4a4_weight_list) and getattr(
+            quant_config, "mixed_attention", False
+        )
                 
 
     def __init__(
@@ -177,6 +189,7 @@ class MixedFp4Weight(CompositeWeight, QuantWeight):
         *args: Any,
         **kwargs: Any,
     ):
+        self._is_quark_fp4 = isinstance(quant_config, MXFp4QuarkQuantConfig)
         kernel: WeightModule = None
         scale: WeightModule = None
         scale_2: WeightModule = None
@@ -200,10 +213,19 @@ class MixedFp4Weight(CompositeWeight, QuantWeight):
             kernel = self._get_norm_weight(src_weight_info)
         elif src_weight_info.name in [W.ffn_w1, W.ffn_w2, W.ffn_w3, W.ffn_w13]:
             kernel, scale, scale_2, input_scale = self._get_ffn_quant_weight(src_weight_info)
+            if self._is_quark_fp4:
+                scale_2 = None
+                input_scale = None
         elif src_weight_info.name == W.moe_w1:
             kernel, scale, scale_2, input_scale = self._get_moe_w1_quant_weight(src_weight_info)
+            if self._is_quark_fp4:
+                scale_2 = None
+                input_scale = None
         elif src_weight_info.name == W.moe_w2:
             kernel, scale, scale_2, input_scale = self._get_moe_w2_quant_weight(src_weight_info)
+            if self._is_quark_fp4:
+                scale_2 = None
+                input_scale = None
 
         sub_weights = {kernel.name: kernel}
         if scale is not None:
@@ -218,6 +240,9 @@ class MixedFp4Weight(CompositeWeight, QuantWeight):
         self.scale = sub_weights.get(scale.name) if scale is not None else None
         self.scale_2 = sub_weights.get(scale_2.name) if scale_2 is not None else None
         self.input_scale = sub_weights.get(input_scale.name) if input_scale is not None else None
+
+    def _get_moe_scale_dtype(self) -> torch.dtype:
+        return torch.uint8 if self._is_quark_fp4 else torch.float8_e4m3fn
 
     def _get_qkv_weight(self, src_weight_info: AttnAtomicWeight):
         assert src_weight_info.name == W.attn_qkv_w
@@ -533,6 +558,7 @@ class MixedFp4Weight(CompositeWeight, QuantWeight):
     def _get_moe_w2_quant_weight(self, src_weight_info: MoeAtomicWeight):
         assert src_weight_info.name in [W.moe_w2]
         w_name = src_weight_info.weights[0].name[: -len(W_SUFFIX)]
+        scale_dtype = self._get_moe_scale_dtype()
         kernel = create_mixed_fp4_per_group_weight(
             src_weight_info,
             W.moe_w2,
@@ -546,7 +572,7 @@ class MixedFp4Weight(CompositeWeight, QuantWeight):
             W.moe_s2,
             [CkptWeightInfo(w_name + QS_SUFFIX, identity)],
             stack_,
-            data_type=torch.float8_e4m3fn,
+            data_type=scale_dtype,
             config=src_weight_info.config,
         )
         scale_2 = create_mixed_fp4_per_group_weight(
@@ -569,6 +595,7 @@ class MixedFp4Weight(CompositeWeight, QuantWeight):
 
     def _get_moe_w1_quant_weight(self, src_weight_info: MoeAtomicWeight):
         assert src_weight_info.name in [W.moe_w1]
+        scale_dtype = self._get_moe_scale_dtype()
         kernel = create_mixed_fp4_per_group_weight(
             src_weight_info,
             W.moe_w1,
@@ -588,7 +615,7 @@ class MixedFp4Weight(CompositeWeight, QuantWeight):
                 for w in src_weight_info.weights
             ],
             stack_moe_w1,
-            data_type=torch.float8_e4m3fn,
+            data_type=scale_dtype,
             config=src_weight_info.config,
         )
         scale_2 = create_mixed_fp4_per_group_weight(
