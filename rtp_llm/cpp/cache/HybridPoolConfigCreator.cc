@@ -3,6 +3,7 @@
 #include <algorithm>
 
 #include "rtp_llm/cpp/cache/DSV4CacheConfigHelper.h"
+#include "rtp_llm/cpp/cache/DSV4KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -157,7 +158,20 @@ void setupIndependentPoolSizes(CacheConfig& config) {
         const auto& spec = config.cache_specs[gid];
         RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "cache_specs[%zu] is null", gid);
         const auto layer_count                  = static_cast<uint32_t>(config.global_layer_ids[gid].size());
-        const auto kv_stride                    = spec->block_size_bytes();
+        // DSV4 FP8 KV pools (CSA_KV / HCA_KV / SWA_KV at 584B/entry) need
+        // their per-block byte stride padded to TMA_K_STRIDE (576B) so the
+        // FlashMLA SM100 sparse decode/prefill kernel's
+        // ``k_cache.stride(0) % TMA_K_STRIDE == 0`` assertion holds. SWA_KV
+        // uses DSV4StateSpec (fixed/ring allocation) but stores the same
+        // 584B FP8 layout, so dispatch covers both spec types. Non-FP8
+        // specs return natural size, so this is byte-equivalent for them.
+        size_t kv_stride = spec->block_size_bytes();
+        if (auto* dsv4_kv = dynamic_cast<DSV4KVSpec*>(spec.get()); dsv4_kv != nullptr) {
+            kv_stride = dsv4_kv->padded_block_size_bytes();
+        } else if (auto* dsv4_state = dynamic_cast<DSV4StateSpec*>(spec.get());
+                   dsv4_state != nullptr) {
+            kv_stride = dsv4_state->padded_block_size_bytes();
+        }
         const auto scale_stride                 = spec->scale_block_size_bytes();
         config.group_kv_block_stride_bytes[gid] = kv_stride;
         config.group_kv_scale_stride_bytes[gid] = scale_stride;
