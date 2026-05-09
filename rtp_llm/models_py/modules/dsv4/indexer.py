@@ -14,7 +14,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from rtp_llm.models_py.modules.dsv4.compressor import Compressor
-from rtp_llm.models_py.modules.dsv4.compressor_vllm import CompressorVLLM
 
 
 def _use_rope_only_kernel() -> bool:
@@ -81,12 +80,7 @@ class Indexer(nn.Module):
             "wgate": layer_weights[W.v4_indexer_compressor_wgate],
             "norm": layer_weights[W.v4_indexer_compressor_norm],
         }
-        # Late import to dodge the attention.py ↔ indexer.py module-load
-        # cycle (attention imports Indexer at top level).
-        from rtp_llm.models_py.modules.dsv4.attention import DSV4_BF16_VLLM
-
-        _CompressorCls = CompressorVLLM if DSV4_BF16_VLLM else Compressor
-        self.compressor = _CompressorCls(
+        self.compressor = Compressor(
             dim=dim,
             head_dim=index_head_dim,
             rope_head_dim=rope_head_dim,

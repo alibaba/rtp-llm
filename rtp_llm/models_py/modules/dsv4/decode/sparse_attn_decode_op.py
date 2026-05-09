@@ -40,7 +40,7 @@ class SparseAttnV4DecodeOp:
         attn_sink: torch.Tensor,  # [H] fp32
         topk_idxs: torch.Tensor,  # [B, q_len, K_total] int32; -1 == masked
     ) -> torch.Tensor:
-        if _tl_kernels.tilelang_available():
+        if q.is_cuda and _tl_kernels.tilelang_available():
             return _tl_kernels.sparse_attn(
                 q,
                 kv,
