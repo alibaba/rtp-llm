@@ -129,6 +129,7 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.return_softmax_probs = (
         input_py.generate_config.return_softmax_probs
     )
+    generate_config_pb.aux_info = input_py.generate_config.aux_info
     generate_config_pb.can_use_pd_separation = (
         input_py.generate_config.can_use_pd_separation
     )
