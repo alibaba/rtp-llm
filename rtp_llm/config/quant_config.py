@@ -488,8 +488,10 @@ class Fp8PerChannelCompressedQuantConfig(CompressedTensorsQuantConfig):
 
 
 class QuarkQuantConfig(QuantizationConfig):
-    def __init__(self, bits: int = 0, is_quanted: bool = False):
-        super().__init__(bits=bits, group_size=0, is_quanted=is_quanted)
+    def __init__(
+        self, bits: int = 0, group_size: int = 0, is_quanted: bool = False, **kwargs: Any
+    ):
+        super().__init__(bits=bits, group_size=group_size, is_quanted=is_quanted)
 
     @classmethod
     def get_method(cls) -> str:
@@ -504,7 +506,7 @@ class QuarkQuantConfig(QuantizationConfig):
 
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
-        return QuarkQuantConfig()
+        return QuarkQuantConfig(**config)
 
 
 class Fp8PerChannelQuarkQuantConfig(QuarkQuantConfig):
@@ -533,8 +535,14 @@ class Fp8PerChannelQuarkQuantConfig(QuarkQuantConfig):
         return Fp8PerChannelQuarkQuantConfig(**config)
 
 class MXFp4QuarkQuantConfig(QuarkQuantConfig):
-    def __init__(self, bits: int = 4, is_quanted: bool = False, **kwargs: Any):
-        super().__init__(bits=bits, is_quanted=is_quanted)
+    def __init__(
+        self,
+        bits: int = 4,
+        group_size: int = 0,
+        is_quanted: bool = False,
+        **kwargs: Any,
+    ):
+        super().__init__(bits=bits, group_size=group_size, is_quanted=is_quanted)
 
     @classmethod
     def get_method(cls) -> str:
