@@ -28,6 +28,7 @@ cc_library(
     name = "grpc_buffer_list_link_fix",
     srcs = ["@grpc//:src/core/lib/iomgr/buffer_list.cc"],
     alwayslink = True,
+    copts = ["-DGRPC_LINUX_ERRQUEUE=1"],
     deps = ["@grpc//:grpc_base_c"],
 )
 
