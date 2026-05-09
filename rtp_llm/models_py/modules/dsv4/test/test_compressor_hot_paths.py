@@ -5,7 +5,7 @@ import torch
 
 from rtp_llm.models_py.modules.dsv4 import compressor as compressor_mod
 from rtp_llm.models_py.modules.dsv4.compressor import Compressor
-from rtp_llm.models_py.modules.dsv4.compressor_vllm import _flatten_token_major_2d
+from rtp_llm.models_py.modules.dsv4.compressor_bf16_vllm import _flatten_token_major_2d
 from rtp_llm.models_py.modules.dsv4.cp import CPContext
 from rtp_llm.models_py.modules.dsv4.indexer import Indexer
 
@@ -130,7 +130,9 @@ def test_compressor_metadata_triton_matches_torch_reference():
         positions, b_idx, state_bt, state_eb, kv_bt, kv_eb, ratio
     )
     assert got is not None
-    expected = _reference_metadata(positions, b_idx, state_bt, state_eb, kv_bt, kv_eb, ratio)
+    expected = _reference_metadata(
+        positions, b_idx, state_bt, state_eb, kv_bt, kv_eb, ratio
+    )
     for actual, ref in zip(got, expected):
         torch.testing.assert_close(actual.cpu(), ref.cpu(), rtol=0, atol=0)
 
@@ -162,7 +164,9 @@ def test_compressor_metadata_triton_matches_torch_reference():
     )
     torch.testing.assert_close(p_pos.cpu(), ref_pos.cpu(), rtol=0, atol=0)
     torch.testing.assert_close(p_bidx.cpu(), ref_bidx.cpu(), rtol=0, atol=0)
-    expected = _reference_metadata(ref_pos, ref_bidx, state_bt, state_eb, kv_bt, kv_eb, ratio)
+    expected = _reference_metadata(
+        ref_pos, ref_bidx, state_bt, state_eb, kv_bt, kv_eb, ratio
+    )
     for actual, ref in zip((p_state, p_kv, p_req), expected):
         torch.testing.assert_close(actual.cpu(), ref.cpu(), rtol=0, atol=0)
 
@@ -285,7 +289,12 @@ def test_cp_continuation_state_uses_global_prefix_for_bind_and_scatter():
             relative_positions=torch.tensor([2, 3, 4, 5], dtype=torch.long),
             prefix_length=prefix_length,
             global_positions=torch.tensor(
-                [prefix_length + 2, prefix_length + 3, prefix_length + 4, prefix_length + 5],
+                [
+                    prefix_length + 2,
+                    prefix_length + 3,
+                    prefix_length + 4,
+                    prefix_length + 5,
+                ],
                 dtype=torch.long,
             ),
             local_is_real=torch.ones(4, dtype=torch.bool),
@@ -310,8 +319,12 @@ def test_cp_continuation_state_uses_global_prefix_for_bind_and_scatter():
         return torch.ones((1, 1, comp.head_dim), dtype=torch.float32)
 
     with patch.object(comp, "_bind_kv_cache_from_pool", lambda *args, **kwargs: None):
-        with patch.object(comp, "_scatter_kv_cache_to_pool", lambda *args, **kwargs: None):
-            with patch.object(comp, "_forward_scalar_impl", side_effect=fake_scalar_body):
+        with patch.object(
+            comp, "_scatter_kv_cache_to_pool", lambda *args, **kwargs: None
+        ):
+            with patch.object(
+                comp, "_forward_scalar_impl", side_effect=fake_scalar_body
+            ):
                 out = comp.forward(
                     torch.zeros(1, 4, comp.dim, dtype=torch.bfloat16),
                     start_pos=torch.tensor(12, dtype=torch.long),
@@ -319,7 +332,9 @@ def test_cp_continuation_state_uses_global_prefix_for_bind_and_scatter():
 
     assert out is not None
     expected_written = torch.cat([new_kv.squeeze(0), new_score.squeeze(0)], dim=-1)
-    torch.testing.assert_close(state_pool[write_slots], expected_written, rtol=0, atol=0)
+    torch.testing.assert_close(
+        state_pool[write_slots], expected_written, rtol=0, atol=0
+    )
     # The rank-local start_pos block must not receive the continuation state.
     wrong_block = (12 + 4 - 1) // block_tokens
     if wrong_block not in (read_logical_block, write_logical_block):
