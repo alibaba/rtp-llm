@@ -733,7 +733,8 @@ TEST_F(StreamCacheResourceTest, testInitKVBlock_SecondCallDoesNotOverwriteReuseL
     EXPECT_EQ(stream_->memoryReuseLength(), expected_memory_reuse_len);
 
     // Second initKVBlock should not clear the reuse lengths already applied by the completed async load.
-    // Re-issuing asyncLoadCache is now controlled by the state machine's LoadInitiated event, not by StreamCacheResource.
+    // Re-issuing asyncLoadCache is now controlled by the state machine's LoadInitiated event, not by
+    // StreamCacheResource.
     ASSERT_TRUE(resource.initKVBlock(/*reserve_step=*/0).ok());
 
     EXPECT_EQ(stream_->reuseLength(), expected_total_reuse_len);
@@ -776,7 +777,7 @@ TEST_F(StreamCacheResourceTest, testApplyP2PSideChannelRestoresSpeculativeTensor
     EXPECT_TRUE(torch::equal(stream_->getContextPositionIds(), torch::tensor({0, 1, 2}, torch::kInt32)));
 }
 
-TEST_F(StreamCacheResourceTest, testApplyP2PSideChannelSynthesizesMissingProposeTokensFromFirstTokenAndProbs) {
+TEST_F(StreamCacheResourceTest, testApplyP2PSideChannelSkipsSpeculativePayloadWhenProposeTokensMissing) {
     prepareResource(/*reuse_cache=*/true, RoleType::DECODE);
     auto& resource = stream_->streamCacheResource();
 
@@ -799,13 +800,44 @@ TEST_F(StreamCacheResourceTest, testApplyP2PSideChannelSynthesizesMissingPropose
 
     resource.updateReuseLengthsFromContext(read_ctx);
 
-    auto sp_output_buffer = stream_->getSPOutputBuffer();
-    ASSERT_NE(sp_output_buffer, nullptr);
-    EXPECT_TRUE(torch::equal(sp_output_buffer->tokens, torch::tensor({{7, 2}}, torch::kInt32)));
+    EXPECT_EQ(stream_->getSPOutputBuffer(), nullptr);
     EXPECT_FALSE(stream_->getContainProposeToken());
     EXPECT_TRUE(stream_->getProposeToken().empty());
-    EXPECT_TRUE(torch::equal(sp_output_buffer->all_probs, propose_probs));
-    EXPECT_TRUE(torch::equal(sp_output_buffer->hidden_states, propose_hidden));
+    EXPECT_EQ(stream_->seqLength(), 7);
+    auto all_tokens = stream_->completeTokenIdsVec(0);
+    ASSERT_EQ(all_tokens.size(), 7);
+    EXPECT_EQ(all_tokens.back(), 7);
+}
+
+TEST_F(StreamCacheResourceTest, testApplyP2PSideChannelSkipsSpeculativePayloadWhenProposeTokensIncomplete) {
+    prepareResource(/*reuse_cache=*/true, RoleType::DECODE);
+    auto& resource = stream_->streamCacheResource();
+
+    auto server_call_result                                  = std::make_shared<PrefillLoadCaller::Result>();
+    server_call_result->side_channel_payload.has_data        = true;
+    server_call_result->side_channel_payload.has_first_token = true;
+    server_call_result->side_channel_payload.first_token_id  = 7;
+    server_call_result->side_channel_payload.propose_tokens  = {7};
+
+    auto propose_probs = torch::tensor({{0.1f, 0.2f, 0.6f, 0.1f}}, torch::kFloat32);
+    TensorPbConvert::torchToPb(&server_call_result->side_channel_payload.propose_probs, propose_probs);
+
+    auto kv_resource = std::make_shared<KVCacheResource>();
+    auto p2p_ctx = std::make_shared<P2PConnectorAsyncReadContext>(kv_resource, nullptr, server_call_result, nullptr, 0);
+    auto fused_read = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{p2p_ctx});
+    auto read_ctx   = std::make_shared<FusedAsyncReadContext>(
+        std::shared_ptr<FusedAsyncContext>(), kv_resource, std::shared_ptr<Meta>());
+    read_ctx->setFusedReadContext(fused_read);
+
+    resource.updateReuseLengthsFromContext(read_ctx);
+
+    EXPECT_EQ(stream_->getSPOutputBuffer(), nullptr);
+    EXPECT_FALSE(stream_->getContainProposeToken());
+    EXPECT_TRUE(stream_->getProposeToken().empty());
+    EXPECT_EQ(stream_->seqLength(), 7);
+    auto all_tokens = stream_->completeTokenIdsVec(0);
+    ASSERT_EQ(all_tokens.size(), 7);
+    EXPECT_EQ(all_tokens.back(), 7);
 }
 
 TEST_F(StreamCacheResourceTest, testApplyP2PSideChannelPreservesZeroFirstToken) {

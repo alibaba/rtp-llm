@@ -173,57 +173,44 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
         || !payload->propose_hidden.bf16_data().empty() || !payload->propose_hidden.fp32_data().empty();
     const bool has_sp_side_channel = !payload->propose_tokens.empty() || has_propose_probs || has_propose_hidden;
     if (has_sp_side_channel) {
-        auto propose_probs_t  = has_propose_probs ? TensorPbConvert::pbToTorch(payload->propose_probs) :
-                                                    torch::empty({0}, torch::TensorOptions().dtype(torch::kFloat32));
-        auto propose_hidden_t = has_propose_hidden ? TensorPbConvert::pbToTorch(payload->propose_hidden) :
-                                                     torch::empty({0}, torch::TensorOptions().dtype(torch::kFloat16));
+        if (payload->propose_tokens.size() < 2) {
+            RTP_LLM_LOG_WARNING("decode_entrance applyP2PSideChannelToStream skipping malformed speculative "
+                                "side-channel, unique_key=%s, propose_tokens=%zu, has_probs=%d, has_hidden=%d",
+                                stream->uniqueKey().c_str(),
+                                payload->propose_tokens.size(),
+                                has_propose_probs,
+                                has_propose_hidden);
+            stream->setContainProposeToken(false);
+            stream->setProposeToken({});
+            stream->setSPOutputBuffer(nullptr);
+        } else {
+            auto propose_probs_t  = has_propose_probs ? TensorPbConvert::pbToTorch(payload->propose_probs) :
+                                                        torch::empty({0}, torch::TensorOptions().dtype(torch::kFloat32));
+            auto propose_hidden_t = has_propose_hidden ?
+                                        TensorPbConvert::pbToTorch(payload->propose_hidden) :
+                                        torch::empty({0}, torch::TensorOptions().dtype(torch::kFloat16));
 
-        const bool       has_explicit_propose_tokens = !payload->propose_tokens.empty();
-        std::vector<int> side_channel_tokens         = payload->propose_tokens;
-        if (side_channel_tokens.empty()) {
-            if (payload->has_first_token) {
-                side_channel_tokens.push_back(payload->first_token_id);
-            } else {
-                RTP_LLM_LOG_WARNING("decode_entrance applyP2PSideChannelToStream missing both propose_tokens and "
-                                    "first_token, unique_key=%s; injecting 0 as fallback target token",
-                                    stream->uniqueKey().c_str());
-                side_channel_tokens.push_back(0);
-            }
-        }
-        if (side_channel_tokens.size() == 1) {
-            int draft_token = side_channel_tokens[0];
-            if (propose_probs_t.defined() && propose_probs_t.numel() > 0) {
-                draft_token = propose_probs_t.reshape({-1}).argmax().item<int64_t>();
-            } else {
-                RTP_LLM_LOG_WARNING("decode_entrance applyP2PSideChannelToStream missing draft token/probs, "
-                                    "duplicating target token as fallback, unique_key=%s, target_token=%d",
-                                    stream->uniqueKey().c_str(),
-                                    draft_token);
-            }
-            side_channel_tokens.push_back(draft_token);
-        }
-
-        if (has_explicit_propose_tokens && !side_channel_tokens.empty()) {
+            std::vector<int> side_channel_tokens = payload->propose_tokens;
             stream->setReuseLength(stream->seqLength() - 1);
             stream->setSpEditRun(false);
             stream->setMtpTokenIndex(stream->seqLength() - 1);
             stream->setContainProposeToken(true);
             stream->setProposeToken(side_channel_tokens);
+
+            auto sp_output_buffer    = std::make_shared<SpeculativeExecutorStreamOutput>();
+            sp_output_buffer->tokens = torch::zeros({1, (int64_t)side_channel_tokens.size()}, torch::kInt32);
+            memcpy(sp_output_buffer->tokens.data_ptr<int>(),
+                   side_channel_tokens.data(),
+                   side_channel_tokens.size() * sizeof(int));
+
+            sp_output_buffer->all_probs     = propose_probs_t;
+            sp_output_buffer->hidden_states = propose_hidden_t;
+            sp_output_buffer->tensors_holder.emplace_back(std::move(propose_probs_t));
+            sp_output_buffer->tensors_holder.emplace_back(std::move(propose_hidden_t));
+
+            stream->setSPOutputBuffer(sp_output_buffer);
+            RTP_LLM_LOG_DEBUG("applyP2PSideChannel: propose_tokens count=%zu", payload->propose_tokens.size());
         }
-
-        auto sp_output_buffer    = std::make_shared<SpeculativeExecutorStreamOutput>();
-        sp_output_buffer->tokens = torch::zeros({1, (int64_t)side_channel_tokens.size()}, torch::kInt32);
-        memcpy(sp_output_buffer->tokens.data_ptr<int>(),
-               side_channel_tokens.data(),
-               side_channel_tokens.size() * sizeof(int));
-
-        sp_output_buffer->all_probs     = propose_probs_t;
-        sp_output_buffer->hidden_states = propose_hidden_t;
-        sp_output_buffer->tensors_holder.emplace_back(std::move(propose_probs_t));
-        sp_output_buffer->tensors_holder.emplace_back(std::move(propose_hidden_t));
-
-        stream->setSPOutputBuffer(sp_output_buffer);
-        RTP_LLM_LOG_DEBUG("applyP2PSideChannel: propose_tokens count=%zu", payload->propose_tokens.size());
     }
 
     // 4. Position IDs
