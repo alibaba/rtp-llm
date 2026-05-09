@@ -27,6 +27,10 @@ import torch
 
 from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv4.cp import build_cp_context
+from rtp_llm.models_py.modules.dsv4.fp8.prefill_meta import (
+    build_and_propagate_prefill_meta_fp8,
+    clear_prefill_meta_shared_fp8,
+)
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import build_block_tables_batched
 from rtp_llm.models_py.modules.factory.attention.common import (
     create_write_cache_store_impl,
@@ -188,6 +192,65 @@ def forward_layers(
     if _rt_on:
         _rt.record("prefill_embed_hc_expanded", h)
 
+    # FP8 KV-cache: hoist host-side prefill metadata once per ratio bucket
+    # and broadcast to every layer's ``AttentionFP8._prefill_meta_shared``.
+    # BF16 path doesn't need this; ``Attention`` rebuilds meta inside its
+    # own forward.
+    if v4.fp8_kv_cache:
+        sp_int_for_meta = int(positions[0].item())
+        sp_per_req: Optional[torch.Tensor] = None
+        req_id_per_token: Optional[torch.Tensor] = None
+        if cu_seqlens is not None and cu_seqlens.numel() >= 2:
+            starts = cu_seqlens[:-1].to(device=positions.device, dtype=torch.int64)
+            sp_per_req = positions.index_select(0, starts).to(torch.int64).contiguous()
+            req_id_per_token = (
+                torch.searchsorted(
+                    cu_seqlens.to(device=positions.device, dtype=torch.int64),
+                    torch.arange(
+                        int(cu_seqlens[-1].item()),
+                        device=positions.device,
+                        dtype=torch.int64,
+                    ),
+                    right=True,
+                )
+                .sub_(1)
+                .to(torch.int32)
+                .contiguous()
+            )
+        batch_size = 1
+        if cu_seqlens is not None and cu_seqlens.numel() >= 2:
+            batch_size = int(cu_seqlens.numel() - 1)
+        input_lengths: Optional[torch.Tensor] = None
+        prefix_lengths: Optional[torch.Tensor] = None
+        max_seqlen_q = 0
+        if attn_inputs is not None:
+            il = getattr(attn_inputs, "input_lengths", None)
+            if il is not None and il.numel() > 0:
+                input_lengths = il.to(
+                    device=positions.device, dtype=torch.int32
+                ).contiguous()
+                max_seqlen_q = int(input_lengths.max().item())
+            pl = getattr(attn_inputs, "prefix_lengths", None)
+            if pl is not None and pl.numel() > 0:
+                prefix_lengths = pl.to(
+                    device=positions.device, dtype=torch.int32
+                ).contiguous()
+        build_and_propagate_prefill_meta_fp8(
+            v4,
+            h,
+            sp_int_for_meta,
+            kv_cache,
+            block_tables_by_type,
+            sp_per_req=sp_per_req,
+            cu_seqlens=cu_seqlens,
+            batch_size=batch_size,
+            input_lengths=input_lengths,
+            prefix_lengths=prefix_lengths,
+            position_ids=positions,
+            req_id_per_token=req_id_per_token,
+            max_seqlen_q=max_seqlen_q,
+        )
+
     for layer_idx, layer in enumerate(v4.layers):
         h = layer(
             h,  # [T, hc, dim]
@@ -229,6 +292,9 @@ def forward_layers(
                     f"layer{layer_idx:02d}_tail128", h[layer_tail_mask].contiguous()
                 )
             _rt.record(f"layer{layer_idx:02d}_last", layer_last)
+
+    if v4.fp8_kv_cache:
+        clear_prefill_meta_shared_fp8(v4)
 
     # _hc_head_reduce is flat-native: [T, hc, dim] -> [T, dim].
     # Framework ``RMSNorm`` expects 2D, which matches the [T, dim] shape here.

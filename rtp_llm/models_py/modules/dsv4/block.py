@@ -11,7 +11,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from rtp_llm.models_py.modules import RMSNorm
-from rtp_llm.models_py.modules.dsv4.attention import Attention
+from rtp_llm.models_py.modules.dsv4.attention import Attention as AttentionBF16
+from rtp_llm.models_py.modules.dsv4.fp8.attention import AttentionFP8
 from rtp_llm.models_py.modules.dsv4.hc import build_hc_head, build_hc_unit
 from rtp_llm.models_py.modules.dsv4.moe import MoE
 
@@ -59,15 +60,20 @@ class Block(nn.Module):
         ep_size: int = 1,
         ep_rank: int = 0,
         max_tokens_per_rank: int = 8192,
+        fp8_kv_cache: bool = False,
     ):
         """``layer_weights`` is the framework's per-layer dict
         (``ModelWeights.weights[layer_id]``) keyed by ``W.v4_*`` enum.
         Block reads ``W.v4_attn_norm`` / ``W.v4_ffn_norm`` / ``W.v4_hc_*``
-        and forwards the dict to ``Attention`` and ``MoE``."""
+        and forwards the dict to ``Attention`` and ``MoE``.
+        ``fp8_kv_cache=True`` selects ``AttentionFP8`` (584B paged
+        SWA/CSA/HCA pools); ``False`` keeps the BF16 ``Attention``."""
         super().__init__()
         self.layer_id = layer_id
+        self.fp8_kv_cache = fp8_kv_cache
 
-        self.attn = Attention(
+        attn_cls = AttentionFP8 if self.fp8_kv_cache else AttentionBF16
+        self.attn = attn_cls(
             layer_id=layer_id,
             dim=dim,
             n_heads=n_heads,
@@ -276,10 +282,7 @@ class Block(nn.Module):
             and seqlens.device.type == "cpu"
             and bool((seqlens == max_S).all().item())
         )
-        dense_layout = (
-            batch_size == 1
-            or (batch_size > 1 and equal_len_dense)
-        )
+        dense_layout = batch_size == 1 or (batch_size > 1 and equal_len_dense)
         if dense_layout:
             x_padded = x_pre.view(batch_size, max_S, D)
             b_idx = None
@@ -435,6 +438,7 @@ class MTPBlock(Block):
         ep_size: int = 1,
         ep_rank: int = 0,
         max_tokens_per_rank: int = 8192,
+        fp8_kv_cache: bool = False,
     ):
         super().__init__(
             layer_id=layer_id,
@@ -480,6 +484,7 @@ class MTPBlock(Block):
             ep_size=ep_size,
             ep_rank=ep_rank,
             max_tokens_per_rank=max_tokens_per_rank,
+            fp8_kv_cache=fp8_kv_cache,
         )
         from rtp_llm.models_py.modules.dsv4.qlinear import QuantizedLinear
 

@@ -175,6 +175,7 @@ cc_library(
         "//rtp_llm/models_py/bindings/common/kernels:kernels_kv_cache",
         "//rtp_llm/models_py/bindings/cuda/kernels:fast_topk",
         "//rtp_llm/models_py/bindings/cuda/kernels:persistent_topk",
+        "//rtp_llm/models_py/bindings/cuda/kernels:dsv4_persistent_topk",
         "//rtp_llm/models_py/bindings/cuda/kernels:dsv4_top_k_per_row_prefill",
         "//rtp_llm/models_py/bindings/cuda/kernels:mla_quant_kernel",
         "//rtp_llm/models_py/bindings:op_defs",
