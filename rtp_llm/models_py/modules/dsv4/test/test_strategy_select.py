@@ -117,12 +117,19 @@ class StrategySelectTest(unittest.TestCase):
         self.assertIn("Forced MoE strategy 'grouped_fp4'", str(cm.exception))
         self.assertIn("cannot handle", str(cm.exception))
 
-    def test_forced_ep_gt1_non_mega_raises_even_if_capable(self):
-        with mock.patch.object(DeepEPStrategy, "can_handle", return_value=True):
+    def test_forced_ep_gt1_non_mega_non_deepep_raises_even_if_capable(self):
+        with mock.patch.object(LocalLoopStrategy, "can_handle", return_value=True):
             with self.assertRaises(RuntimeError) as cm:
-                select_strategy(_cfg(ep_size=4), forced="deepep")
+                select_strategy(_cfg(ep_size=4), forced="local_loop")
         self.assertIn("requires MegaMoEStrategy", str(cm.exception))
         self.assertIn("bypass Mega", str(cm.exception))
+
+    def test_forced_ep_gt1_deepep_allowed_if_capable(self):
+        with mock.patch.object(DeepEPStrategy, "can_handle", return_value=True):
+            self.assertIs(
+                select_strategy(_cfg(ep_size=4), forced="deepep"),
+                DeepEPStrategy,
+            )
 
     def test_forced_unknown_raises(self):
         with self.assertRaises(RuntimeError) as cm:

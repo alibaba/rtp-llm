@@ -203,9 +203,9 @@ def select_strategy(
         for cls in _STRATEGY_PRIORITY:
             if cls.name == forced:
                 if cls.can_handle(cfg):
-                    if cfg.ep_size > 1 and cls.name != "mega":
+                    if cfg.ep_size > 1 and cls.name not in ("mega", "deepep"):
                         raise RuntimeError(
-                            "DSV4 EP MoE requires MegaMoEStrategy. "
+                            "DSV4 EP MoE requires MegaMoEStrategy by default. "
                             f"Requested strategy {forced!r} would bypass Mega "
                             f"(layer_id={cfg.layer_id}, ep_size={cfg.ep_size})."
                         )
