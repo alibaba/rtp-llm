@@ -59,6 +59,11 @@ private:
     void evaluateWaitingStreams(std::list<GenerateStreamPtr>& streams);
     void cancelStreams(std::list<GenerateStreamPtr>& streams);
     bool checkInputLength(const GenerateStreamPtr& stream);
+    bool hasRunningPrefill() const;
+    bool hasRunningDecode() const;
+    bool hasAvailableKVForPrefill(const std::list<GenerateStreamPtr>& streams,
+                                  const GenerateStreamPtr&            new_stream) const;
+    std::list<GenerateStreamPtr> selectRunnableStreams() const;
 
 protected:
     void evaluateAndUpdateStreams(std::list<GenerateStreamPtr>& streams);
