@@ -10,11 +10,16 @@ namespace rtp_llm {
 // 584B = 448 fp8 NoPE + 64 bf16 RoPE + 8 UE8M0 scales; 132B = 128 fp8 + 4 fp32
 // scale. FlashMLA SM100 sparse_attn (head64 instantiations) hard-requires
 // ``k_cache.stride(0) % TMA_K_STRIDE == 0``; TMA_K_STRIDE for the FP8
-// path is 576 bytes (= 9 cachelines × 64B). Natural 256·584 = 149504 fails
-// (149504 % 576 = 320), so block_size_bytes() rounds up to 576-aligned.
+// path is 576 bytes (= 9 cachelines x 64B). Natural 256 * 584 = 149504 fails
+// (149504 % 576 = 320), so block_size_bytes() returns the physical padded stride.
 inline constexpr uint32_t DSV4_FP8_KV_ENTRY_BYTES            = 584;
 inline constexpr uint32_t DSV4_FP8_INDEXER_ENTRY_BYTES       = 132;
 inline constexpr size_t   DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES = 576;
+
+inline size_t alignDsv4Fp8KvBlockBytes(size_t natural) {
+    constexpr size_t align = DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES;
+    return ((natural + align - 1) / align) * align;
+}
 
 // KVCacheSpec for DSV4 paged KV pools (Pool 0/1/2/6: CSA_KV, HCA_KV, INDEXER_KV, SWA_KV).
 // These are variable-length paged pools storing KV entries as uint8 (byte-addressed).
@@ -60,18 +65,16 @@ struct DSV4KVSpec: public KVCacheSpec {
         return block_size() / 2;
     }
 
-    size_t block_size_bytes() const override {
+    size_t natural_block_size_bytes() const {
         return static_cast<size_t>(entries_per_block) * entry_elems * getTypeSize(store_dtype);
     }
 
-    // FlashMLA SM100 sparse_attn requires per-block byte alignment for
-    // FP8 KV pools. BF16 KV pools (1024B / 256B per entry) are already
-    // naturally aligned so this collapses to block_size_bytes().
-    size_t padded_block_size_bytes() const {
-        const size_t natural = block_size_bytes();
+    // Public block size is the physical per-block stride. FP8 KV pools need
+    // padding for FlashMLA TMA; BF16 and indexer pools keep their natural size.
+    size_t block_size_bytes() const override {
+        const size_t natural = natural_block_size_bytes();
         if (entry_elems == DSV4_FP8_KV_ENTRY_BYTES) {
-            constexpr size_t align = DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES;
-            return ((natural + align - 1) / align) * align;
+            return alignDsv4Fp8KvBlockBytes(natural);
         }
         return natural;
     }
@@ -141,22 +144,17 @@ struct DSV4StateSpec: public KVCacheSpec {
         return block_size() / 2;
     }
 
-    size_t block_size_bytes() const override {
+    size_t natural_block_size_bytes() const {
         return static_cast<size_t>(entries_per_block) * state_dim * getTypeSize(store_dtype);
     }
 
-    // SWA_KV uses DSV4StateSpec for its fixed/ring allocation strategy but
-    // stores the same FP8 ``fp8_model1_mla`` 584B layout as the paged FP8 KV
-    // pools. FlashMLA SM100 sparse-decode/prefill kernels read SWA blocks via
-    // TMA and assert ``k_cache.stride(0) % TMA_K_STRIDE == 0`` (576B), so
-    // pad SWA_KV per-block bytes the same way DSV4KVSpec does. Other state
-    // pools (INDEXER_STATE / CSA_STATE / HCA_STATE) keep state_dim != 584B
-    // per slot — they fall through to natural block_size_bytes().
-    size_t padded_block_size_bytes() const {
-        const size_t natural = block_size_bytes();
+    // Public block size is the physical per-block stride. SWA_KV uses this
+    // state spec but stores the FP8 KV layout, so it also needs TMA padding.
+    // Other state pools keep their natural size.
+    size_t block_size_bytes() const override {
+        const size_t natural = natural_block_size_bytes();
         if (state_dim == DSV4_FP8_KV_ENTRY_BYTES) {
-            constexpr size_t align = DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES;
-            return ((natural + align - 1) / align) * align;
+            return alignDsv4Fp8KvBlockBytes(natural);
         }
         return natural;
     }

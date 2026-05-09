@@ -21,6 +21,7 @@ constexpr int      kDsv4PoolNum           = 7;
 constexpr uint32_t kDsv4TokensPerBlock    = 256;
 constexpr uint32_t kDsv4KvEntryBytes      = 1024;
 constexpr uint32_t kDsv4IndexerEntryBytes = 256;
+constexpr uint32_t kDsv4Fp8KvEntryBytes   = 584;
 
 }  // namespace
 
@@ -133,15 +134,15 @@ TEST(HybridPoolConfigCreatorTest, ProPoolSpecs) {
     EXPECT_EQ(config.cache_specs[2]->block_size_bytes(), 64u * kDsv4IndexerEntryBytes);
 
     EXPECT_EQ(config.cache_specs[3]->layer_num, 30u);
-    EXPECT_EQ(config.cache_specs[3]->block_size_bytes(), 8u * 512u * 4u);
+    EXPECT_EQ(config.cache_specs[3]->block_size_bytes(), 256u * 512u * 4u);
     EXPECT_EQ(config.group_fixed_blocks_per_req[3], 2u);
 
     EXPECT_EQ(config.cache_specs[4]->layer_num, 30u);
-    EXPECT_EQ(config.cache_specs[4]->block_size_bytes(), 8u * 2048u * 4u);
+    EXPECT_EQ(config.cache_specs[4]->block_size_bytes(), 256u * 2048u * 4u);
     EXPECT_EQ(config.group_fixed_blocks_per_req[4], 2u);
 
     EXPECT_EQ(config.cache_specs[5]->layer_num, 31u);
-    EXPECT_EQ(config.cache_specs[5]->block_size_bytes(), 128u * 1024u * 4u);
+    EXPECT_EQ(config.cache_specs[5]->block_size_bytes(), 256u * 1024u * 4u);
     EXPECT_EQ(config.group_fixed_blocks_per_req[5], 2u);
 
     EXPECT_EQ(config.cache_specs[6]->layer_num, 61u);
@@ -166,10 +167,29 @@ TEST(HybridPoolConfigCreatorTest, BlockSizeBytes) {
     EXPECT_EQ(config.cache_specs[0]->block_size_bytes(), 64u * kDsv4KvEntryBytes);
     EXPECT_EQ(config.cache_specs[1]->block_size_bytes(), 2u * kDsv4KvEntryBytes);
     EXPECT_EQ(config.cache_specs[2]->block_size_bytes(), 64u * kDsv4IndexerEntryBytes);
-    EXPECT_EQ(config.cache_specs[3]->block_size_bytes(), 8u * 512u * 4u);
-    EXPECT_EQ(config.cache_specs[4]->block_size_bytes(), 8u * 2048u * 4u);
-    EXPECT_EQ(config.cache_specs[5]->block_size_bytes(), 128u * 1024u * 4u);
+    EXPECT_EQ(config.cache_specs[3]->block_size_bytes(), 256u * 512u * 4u);
+    EXPECT_EQ(config.cache_specs[4]->block_size_bytes(), 256u * 2048u * 4u);
+    EXPECT_EQ(config.cache_specs[5]->block_size_bytes(), 256u * 1024u * 4u);
     EXPECT_EQ(config.cache_specs[6]->block_size_bytes(), kDsv4TokensPerBlock * kDsv4KvEntryBytes);
+}
+
+TEST(HybridPoolConfigCreatorTest, Fp8BlockSizeBytesUsePaddedPhysicalStride) {
+    ParallelismConfig pc;
+    auto              mc = makeProModelConfig();
+    mc.attn_config.kv_cache_dtype = KvCacheDataType::FP8;
+    auto config                   = HybridPoolConfigCreator::createConfig(mc, pc);
+
+    ASSERT_EQ(config.cache_specs.size(), 7u);
+    ASSERT_EQ(config.group_kv_block_stride_bytes.size(), 7u);
+
+    EXPECT_EQ(config.cache_specs[0]->block_size_bytes(), 37440u);   // 64 * 584 padded to 576B alignment
+    EXPECT_EQ(config.cache_specs[1]->block_size_bytes(), 1728u);    // 2 * 584 padded to 576B alignment
+    EXPECT_EQ(config.cache_specs[2]->block_size_bytes(), 64u * 132u);
+    EXPECT_EQ(config.cache_specs[6]->block_size_bytes(), 149760u);  // 256 * 584 padded to 576B alignment
+
+    EXPECT_EQ(config.group_kv_block_stride_bytes[0], config.cache_specs[0]->block_size_bytes());
+    EXPECT_EQ(config.group_kv_block_stride_bytes[1], config.cache_specs[1]->block_size_bytes());
+    EXPECT_EQ(config.group_kv_block_stride_bytes[6], config.cache_specs[6]->block_size_bytes());
 }
 
 // ============================================================
@@ -235,14 +255,32 @@ TEST(HybridPoolConfigCreatorTest, HybridAttentionWithoutIndependentPoolKeepsShar
 // ============================================================
 
 TEST(DSV4KVCacheSpecTest, KVSpecFromPoolSpec) {
-    DSV4KVSpec spec(KVCacheRegionName::CSA_KV, 30, 584, 64, DataType::TYPE_UINT8, kDsv4TokensPerBlock);
+    DSV4KVSpec spec(
+        KVCacheRegionName::CSA_KV, 30, kDsv4Fp8KvEntryBytes, 64, DataType::TYPE_UINT8, kDsv4TokensPerBlock);
 
     EXPECT_EQ(spec.layer_num, 30u);
-    EXPECT_EQ(spec.block_size(), 64u * 584u);
-    EXPECT_EQ(spec.block_size_bytes(), 64u * 584u * 1u);  // uint8 = 1 byte
+    EXPECT_EQ(spec.block_size(), 64u * kDsv4Fp8KvEntryBytes);
+    EXPECT_EQ(spec.natural_block_size_bytes(), 64u * kDsv4Fp8KvEntryBytes * 1u);  // uint8 = 1 byte
+    EXPECT_EQ(spec.block_size_bytes(), 37440u);
     EXPECT_EQ(spec.cache_type, KVCacheRegionName::CSA_KV);
-    EXPECT_EQ(spec.entry_elems, 584u);
+    EXPECT_EQ(spec.entry_elems, kDsv4Fp8KvEntryBytes);
     EXPECT_EQ(spec.entries_per_block, 64u);
+
+    DSV4KVSpec hca_spec(
+        KVCacheRegionName::HCA_KV, 31, kDsv4Fp8KvEntryBytes, 2, DataType::TYPE_UINT8, kDsv4TokensPerBlock);
+    EXPECT_EQ(hca_spec.natural_block_size_bytes(), 2u * kDsv4Fp8KvEntryBytes);
+    EXPECT_EQ(hca_spec.block_size_bytes(), 1728u);
+}
+
+TEST(DSV4KVCacheSpecTest, SWAFp8StateSpecUsesPaddedPhysicalBlockSize) {
+    DSV4StateSpec spec(
+        KVCacheRegionName::SWA_KV, 61, kDsv4Fp8KvEntryBytes, 256, 2, DataType::TYPE_UINT8, kDsv4TokensPerBlock);
+
+    EXPECT_EQ(spec.block_size(), kDsv4TokensPerBlock * kDsv4Fp8KvEntryBytes);
+    EXPECT_EQ(spec.natural_block_size_bytes(), kDsv4TokensPerBlock * kDsv4Fp8KvEntryBytes);
+    EXPECT_EQ(spec.block_size_bytes(), 149760u);
+    EXPECT_EQ(spec.fixed_blocks_per_req, 2u);
+    EXPECT_EQ(spec.cache_type, KVCacheRegionName::SWA_KV);
 }
 
 TEST(DSV4KVCacheSpecTest, StateSpecFloat32) {
@@ -548,9 +586,9 @@ TEST_F(DSV4AllocatorTest, SpecBlockSizesMatchPoolSpecs) {
     EXPECT_EQ(config.cache_specs[0]->block_size_bytes(), 64u * kDsv4KvEntryBytes);
     EXPECT_EQ(config.cache_specs[1]->block_size_bytes(), 2u * kDsv4KvEntryBytes);
     EXPECT_EQ(config.cache_specs[2]->block_size_bytes(), 64u * kDsv4IndexerEntryBytes);
-    EXPECT_EQ(config.cache_specs[3]->block_size_bytes(), 8u * 512u * 4u);
-    EXPECT_EQ(config.cache_specs[4]->block_size_bytes(), 8u * 2048u * 4u);
-    EXPECT_EQ(config.cache_specs[5]->block_size_bytes(), 128u * 1024u * 4u);
+    EXPECT_EQ(config.cache_specs[3]->block_size_bytes(), 256u * 512u * 4u);
+    EXPECT_EQ(config.cache_specs[4]->block_size_bytes(), 256u * 2048u * 4u);
+    EXPECT_EQ(config.cache_specs[5]->block_size_bytes(), 256u * 1024u * 4u);
     EXPECT_EQ(config.cache_specs[6]->block_size_bytes(), kDsv4TokensPerBlock * kDsv4KvEntryBytes);
 }
 
@@ -563,7 +601,7 @@ TEST_F(DSV4AllocatorTest, KVBlockStrideIsMaxAcrossGroups) {
         expected_max = std::max(expected_max, config.cache_specs[i]->block_size_bytes());
     }
     EXPECT_EQ(config.kv_block_stride_bytes, expected_max);
-    EXPECT_EQ(expected_max, config.cache_specs[5]->block_size_bytes());
+    EXPECT_EQ(expected_max, config.cache_specs[4]->block_size_bytes());
 }
 
 TEST_F(DSV4AllocatorTest, AllGroupsParticipateInPrefixCache) {

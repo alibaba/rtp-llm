@@ -139,7 +139,7 @@ def quantize_and_insert_k_cache(
     is read from ``k_cache.shape[1]`` so this works with both vLLM (64)
     and RTP-LLM (256) page sizes. ``block_stride`` is read from
     ``k_cache.stride(0)`` so the C++-side TMA padding (576B alignment via
-    ``DSV4PoolSpec::padded_block_size_bytes``) is honored automatically.
+    ``block_size_bytes``) is honored automatically.
 
     Slots with value ``-1`` are skipped (matches the SWA paged-tail
     eviction contract: tokens older than the last ``2*eb`` window are
