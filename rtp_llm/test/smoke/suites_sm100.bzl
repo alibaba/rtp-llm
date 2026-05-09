@@ -82,6 +82,18 @@ def sm100_suites():
                 smoke_args="--decode_capture_config '1,2,3,4' --warm_up 0 --enable_cuda_graph 1 --act_type BF16 --tp_size 2 --world_size 2 --ep_size 2 --reserver_runtime_mem_mb 20000 --seq_size_per_block 2048 --concurrency_limit 64  --kernel_seq_size_per_block 64",
                 gpu_type=["SM100_ARM"],
             ),
+            smoke_test(
+                name="moe_fp8_flashinfer_cutedsl_deepep_normal_dp2_sm100",
+                task_info="data/model/qwen3_moe/q_r_30b_fp8_cutedsl_dp2_normal_sm100_arm.json",
+                smoke_args="--moe_strategy fp8_cutedsl_ep_normal --warm_up 0 --act_type BF16 --dp_size 2 --world_size 2 --ep_size 2 --reserver_runtime_mem_mb 16005 --fp8_kv_cache 1 --seq_size_per_block 64 --concurrency_limit 64 --blockwise_use_fp8_kv_cache 1 --use_deepep_moe 1 --use_deepep_low_latency 0 --use_all_gather 0",
+                gpu_type=["SM100_ARM"],
+            ),
+            smoke_test(
+                name="moe_fp8_flashinfer_cutedsl_deepep_ll_tp2_sm100",
+                task_info="data/model/qwen3_moe/q_r_30b_fp8_cutedsl_tp2_ll_sm100_arm.json",
+                smoke_args="--moe_strategy fp8_cutedsl_ep_low_latency --warm_up 0 --act_type BF16 --tp_size 2 --world_size 2 --ep_size 2 --reserver_runtime_mem_mb 16005 --fp8_kv_cache 1 --seq_size_per_block 64 --concurrency_limit 64 --blockwise_use_fp8_kv_cache 1 --use_deepep_moe 1 --use_deepep_low_latency 1",
+                gpu_type=["SM100_ARM"],
+            ),
             # REMOVED: moe_masked_cudagraph_tp2_sm100 (Masked MoE + FP8_PER_BLOCK + CudaGraph + TP2)
             # Reason: shares task_info with H20 moe_masked_fp8_tp2 (q_r_30b_py_masked_without_deepep_tp2.json),
             # only differs by enable_cuda_graph and mem size; SM100 DeepGemm UE8M0 masked path

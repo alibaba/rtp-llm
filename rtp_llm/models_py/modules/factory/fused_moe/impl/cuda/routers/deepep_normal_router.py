@@ -369,3 +369,111 @@ class DeepepNormalRouterFp4PerGroup(DeepepNormalRouterBase):
         checker.check(quant_method == "modelopt_fp4")
         checker.check(config.moe_config.use_deepep_moe)
         checker.check(not config.moe_config.use_deepep_low_latency)
+
+
+class DeepepNormalRouterFp8Cutedsl(DeepepNormalRouterBase):
+    """DeepEP normal router for the MXFP8 (FlashInfer CuteDSL) MoE path.
+
+    Uses ``expert_alignment=128`` and preserves the raw deepep ``recv_topk_idx``
+    (local expert IDs with ``-1`` sentinels) — the cutedsl FP8 executor needs
+    local IDs to scatter the 2D dispatch buffer into per-expert slots.
+    """
+
+    def __init__(
+        self,
+        config: MoEConfigAdapter,
+        quant_config: FusedMoEQuantConfig,
+    ):
+        super().__init__(config, quant_config, expert_alignment=128)
+
+    @classmethod
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
+        super().check_conditions(checker, config)
+        checker.check(config.moe_config.use_deepep_moe)
+        checker.check(not config.moe_config.use_deepep_low_latency)
+        checker.check(config.moe_strategy == "fp8_cutedsl_ep_normal")
+
+    def prepare(
+        self,
+        a1: torch.Tensor,
+        a1_scale: Optional[torch.Tensor],
+        a2_scale: Optional[torch.Tensor],
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> ExpertForwardPayload:
+        # Replicate the base prepare but skip the global-id rewrite — the
+        # cutedsl FP8 executor expects local expert ids (with -1 for non-local).
+        # We can't simply chain super().prepare() because it always rewrites
+        # ids; reproduce the body here and bind the raw recv_topk_idx.
+        if a1_scale is not None or a2_scale is not None:
+            raise ValueError("DeepEPNormal a1_scale or a2_scale should be None")
+        act_dtype = a1.dtype
+
+        tp_size = self.config.tp_size
+        tp_rank = self.config.tp_rank
+        token_num = a1.size(0)
+        tp_token_size = (token_num + tp_size - 1) // tp_size
+        slice_begin = min(tp_token_size * tp_rank, token_num)
+        slice_size = min(token_num - slice_begin, tp_token_size)
+
+        tp_expert_a1 = torch.narrow(a1, 0, slice_begin, slice_size)
+        tp_expert_input = tp_expert_a1
+
+        tp_expert_ids = torch.narrow(topk_ids, 0, slice_begin, slice_size).to(
+            torch.int64
+        )
+        tp_expert_scales = torch.narrow(topk_weights, 0, slice_begin, slice_size)
+
+        (
+            num_tokens_per_rank,
+            num_tokens_per_rdma_rank,
+            num_tokens_per_expert,
+            is_token_in_rank,
+            _,
+        ) = self.deepep_buffer_wrapper.buffer.get_dispatch_layout(
+            tp_expert_ids, self.expert_num
+        )
+
+        (
+            output,
+            recv_topk_idx,
+            recv_topk_weights,
+            num_recv_tokens_per_expert_list,
+            self.handle,
+            _,
+        ) = self.deepep_buffer_wrapper.buffer.dispatch(
+            tp_expert_input,
+            None,
+            num_tokens_per_rank,
+            num_tokens_per_rdma_rank,
+            is_token_in_rank,
+            num_tokens_per_expert,
+            tp_expert_ids,
+            tp_expert_scales,
+            expert_alignment=self.expert_alignment,
+        )
+        assert isinstance(output, torch.Tensor)
+        expert_x = output
+
+        expert_num_tokens = torch.tensor(
+            num_recv_tokens_per_expert_list, device=expert_x.device, dtype=torch.int32
+        )
+
+        # deepep returns recv_topk_idx already as LOCAL indices (0..local_E-1)
+        # with -1 for non-local entries — see csrc/kernels/intranode.cu where
+        # ``idx_value = (idx_value >= recv_expert_begin and ... < recv_expert_end)
+        # ? idx_value - recv_expert_begin : -1``. Pass through as-is; the cutedsl
+        # FP8 executor's scatter loop expects local indices.
+        expert_topk_ids = recv_topk_idx
+
+        return ExpertForwardPayload(
+            expert_x=expert_x,
+            expert_x_scale=None,
+            expert_x_origin_dtype=act_dtype,
+            expert_topk_ids=expert_topk_ids,
+            expert_topk_weights=recv_topk_weights,
+            expert_tokens_meta=ExpertTokensMetadata(
+                expert_num_tokens=expert_num_tokens,
+                expert_num_tokens_cpu=num_recv_tokens_per_expert_list,
+            ),
+        )

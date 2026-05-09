@@ -1,5 +1,14 @@
 """CUDA MOE strategies"""
 
+from .fp4 import (
+    CudaFp4EpLowLatencyStrategy,
+    CudaFp4EpNormalStrategy,
+    CudaFp4NoDPStrategy,
+)
+from .fp8_cutedsl import (
+    CudaFp8CutedslEpLowLatencyStrategy,
+    CudaFp8CutedslEpNormalStrategy,
+)
 from .fp8_per_block import (
     CudaFp8PerBlockEpLowLatencyStrategy,
     CudaFp8PerBlockEpNormalStrategy,
@@ -11,20 +20,16 @@ from .fp8_per_tensor import (
     CudaFp8PerTensorEpNormalStrategy,
     CudaFp8PerTensorNoDPStrategy,
 )
-from .w4a8_int4_per_channel import (
-    CudaW4a8Int4PerChannelEpLowLatencyStrategy,
-    CudaW4a8Int4PerChannelEpNormalStrategy,
-    CudaW4a8Int4PerChannelNoDPStrategy,
-)
 from .no_quant import (
     CudaNoQuantCppStrategy,
     CudaNoQuantDpNormalStrategy,
     CudaNoQuantEpLowLatencyStrategy,
 )
-from .fp4 import (CudaFp4EpLowLatencyStrategy,
-                  CudaFp4EpNormalStrategy,
-                  CudaFp4NoDPStrategy)
-
+from .w4a8_int4_per_channel import (
+    CudaW4a8Int4PerChannelEpLowLatencyStrategy,
+    CudaW4a8Int4PerChannelEpNormalStrategy,
+    CudaW4a8Int4PerChannelNoDPStrategy,
+)
 
 __all__ = [
     # No quantization
@@ -46,5 +51,8 @@ __all__ = [
     "CudaW4a8Int4PerChannelNoDPStrategy",
     "CudaFp4EpLowLatencyStrategy",
     "CudaFp4EpNormalStrategy",
-    "CudaFp4NoDPStrategy"
+    "CudaFp4NoDPStrategy",
+    # FP8 CuteDSL (MXFP8)
+    "CudaFp8CutedslEpLowLatencyStrategy",
+    "CudaFp8CutedslEpNormalStrategy",
 ]
