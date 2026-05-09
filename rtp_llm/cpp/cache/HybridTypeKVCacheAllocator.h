@@ -60,6 +60,15 @@ private:
     // bf16 -> Inf -> softmax NaN.
     void zeroLinearGroupBytes(const BlockIndicesType& blocks) const;
 
+    // Diagnostic-grade: wipe every block freshly returned by a group->malloc
+    // call (LINEAR + FULL alike). Reused/referenced blocks already in the
+    // block_ids prefix are skipped — those carry meaningful prefix state owned
+    // by the same group and must not be zeroed. This makes "block returned by
+    // malloc starts as deterministic 0" an unconditional invariant, so any
+    // remaining NaN/garble cannot be attributed to fp32 ssm_state bytes
+    // surviving across owner switches.
+    void zeroFreshlyMallocedBlocks(const BlockIndicesType& after_blocks, size_t before_size) const;
+
 private:
     std::vector<KVCacheGroupPtr> kv_cache_groups_;
 

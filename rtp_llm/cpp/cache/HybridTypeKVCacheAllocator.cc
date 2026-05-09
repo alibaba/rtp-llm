@@ -107,6 +107,32 @@ void HybridTypeKVCacheAllocator::cleanBlocksBeforeBlockCacheFree(const BlockIndi
     zeroLinearGroupBytes(blocks);
 }
 
+void HybridTypeKVCacheAllocator::zeroFreshlyMallocedBlocks(const BlockIndicesType& after_blocks,
+                                                           size_t                  before_size) const {
+    if (after_blocks.size() <= before_size) {
+        return;
+    }
+    BlockIndicesType new_blocks;
+    new_blocks.reserve(after_blocks.size() - before_size);
+    for (size_t i = before_size; i < after_blocks.size(); ++i) {
+        // LinearKVCacheGroup::malloc may push NULL_BLOCK_IDX for sparse linear slots
+        // and BlockPool reserves block 0 as a sentinel; both are filtered downstream
+        // by zeroLinearGroupBytes, but copying them here would be wasted work.
+        if (!isNullBlockIdx(after_blocks[i]) && after_blocks[i] > 0) {
+            new_blocks.push_back(after_blocks[i]);
+        }
+    }
+    if (!new_blocks.empty()) {
+        // zeroLinearGroupBytes wipes the entire physical row of each linear-owned
+        // layer slot. In the hybrid layout every physical slot is shared across
+        // exactly one LINEAR group's owned layer AND the FULL group's owned layer,
+        // so iterating linear groups is sufficient to zero the full per-block
+        // row (linear region + FULL-only suffix) — covering both LINEAR-bound
+        // and FULL-bound new blocks in one pass.
+        zeroLinearGroupBytes(new_blocks);
+    }
+}
+
 int HybridTypeKVCacheAllocator::reuseCache(const CacheKeysType& cache_keys, BatchKVCacheResource& kv_resource) {
     // 1) Prefix match on all full-attn groups, take the shortest prefix.
     int                           min_full_reuse_blocks = static_cast<int>(cache_keys.size());
@@ -189,7 +215,8 @@ MallocResult HybridTypeKVCacheAllocator::incrMalloc(const MallocInfo& malloc_inf
 
     for (int b = 0; b < batch_size; ++b) {
         for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
-            auto& block_ids = kv_resource->mutableBlockIds(b, gid);
+            auto&        block_ids   = kv_resource->mutableBlockIds(b, gid);
+            const size_t before_size = block_ids.blocksNum();
 
             if (!kv_cache_groups_[static_cast<size_t>(gid)]->malloc(
                     block_ids, seq_len, malloc_info.reuse_cache, reserve_step)) {
@@ -198,6 +225,11 @@ MallocResult HybridTypeKVCacheAllocator::incrMalloc(const MallocInfo& malloc_inf
                 failed_group = gid;
                 break;
             }
+            // Diagnostic invariant: every block returned by group->malloc starts
+            // as deterministic zero bytes, regardless of group type. Reused
+            // prefix slots (already in block_ids before this call) are skipped
+            // because the diff window is [before_size, after.size()).
+            zeroFreshlyMallocedBlocks(block_ids.blocks(), before_size);
         }
         if (!all_success) {
             break;
@@ -301,13 +333,19 @@ MallocResult HybridTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
 
     // Allocate common blocks on batch 0.
     for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
-        auto& block_ids_0 = kv_resource->mutableBlockIds(0, gid);
+        auto&        block_ids_0 = kv_resource->mutableBlockIds(0, gid);
+        const size_t before_size = block_ids_0.blocksNum();
 
         // Common blocks are shared across batches; reserve_step is per-batch extra and will be handled in incrMalloc.
         if (!kv_cache_groups_[static_cast<size_t>(gid)]->malloc(
                 block_ids_0, common_seq_len, malloc_info.reuse_cache, 0)) {
             return {false, 0};
         }
+        // Diagnostic invariant: zero only the freshly malloc'd suffix. The
+        // prefix populated by reuseCache + referenceValidBlocks above carries
+        // valid prefix state (LINEAR ssm end-state / FULL K/V) and must not be
+        // wiped, otherwise BlockCache reuse becomes a no-op.
+        zeroFreshlyMallocedBlocks(block_ids_0.blocks(), before_size);
     }
 
     // Other batches reference batch 0's common blocks.
