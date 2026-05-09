@@ -411,3 +411,193 @@ def combine_topk_swa_indices(
         PADDED_WINDOW_SIZE=padded_window_size,
     )
     return combined_indices, combined_lens
+
+
+@triton.jit
+def _combine_topk_swa_indices_cp_kernel(
+    combined_indices_ptr,
+    combined_indices_stride,
+    combined_lens_ptr,
+    topk_indices_ptr,
+    topk_indices_stride,
+    global_positions_ptr,
+    req_id_per_token_ptr,
+    prefix_lengths_ptr,
+    num_tokens,
+    sp_int,
+    M,
+    N,
+    TOP_K: tl.constexpr,
+    COMPRESS_RATIO: tl.constexpr,
+    WINDOW_SIZE: tl.constexpr,
+    COMBINED_TOPK: tl.constexpr,
+    BLOCK_T: tl.constexpr,
+    BLOCK_C: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+):
+    """CP-aware fused combine.
+
+    Unlike the generic vLLM kernel, CP cannot derive ``pos`` from
+    contiguous query row ids because rank-local rows are zigzagged. This
+    kernel consumes explicit per-row ``global_positions`` and optionally
+    per-row request ids / per-request prefixes for varlen B>1.
+    """
+    block_t = tl.program_id(0)
+    block_c = tl.program_id(1)
+    rows = block_t * BLOCK_T + tl.arange(0, BLOCK_T)
+    cols = block_c * BLOCK_C + tl.arange(0, BLOCK_C)
+    row_mask = rows < num_tokens
+    col_mask = cols < COMBINED_TOPK
+
+    gp = tl.load(global_positions_ptr + rows, mask=row_mask, other=0).to(tl.int64)
+    if IS_VARLEN:
+        req = tl.load(req_id_per_token_ptr + rows, mask=row_mask, other=0).to(tl.int64)
+        prefix = tl.load(prefix_lengths_ptr + req, mask=row_mask, other=0).to(tl.int64)
+        req_base = req * M
+    else:
+        prefix = tl.full((BLOCK_T,), sp_int, tl.int64)
+        req_base = tl.zeros((BLOCK_T,), tl.int64)
+
+    p = tl.minimum(prefix, WINDOW_SIZE - 1)
+    gather_start = prefix - p
+    topk_len = tl.minimum((gp + 1) // COMPRESS_RATIO, TOP_K)
+    swa_len = tl.minimum(gp + 1, WINDOW_SIZE)
+    combined_len = topk_len + swa_len
+
+    col = cols[None, :]
+    row = rows[:, None]
+    in_topk = col < topk_len[:, None]
+    in_swa = (col >= topk_len[:, None]) & (col < combined_len[:, None])
+
+    topk_val = tl.load(
+        topk_indices_ptr + row * topk_indices_stride + col,
+        mask=row_mask[:, None] & col_mask[None, :] & in_topk,
+        other=0,
+    ).to(tl.int64)
+    swa_off = col - topk_len[:, None]
+    swa_val = (
+        req_base[:, None]
+        + N
+        + gp[:, None]
+        - gather_start[:, None]
+        - swa_len[:, None]
+        + 1
+        + swa_off
+    )
+    out_val = tl.where(
+        in_topk,
+        req_base[:, None] + topk_val,
+        tl.where(in_swa, swa_val, -1),
+    ).to(tl.int32)
+
+    tl.store(
+        combined_indices_ptr + row * combined_indices_stride + col,
+        out_val,
+        mask=row_mask[:, None] & col_mask[None, :],
+    )
+
+    tl.store(
+        combined_lens_ptr + rows,
+        combined_len.to(tl.int32),
+        mask=row_mask & (block_c == 0),
+    )
+
+
+def combine_topk_swa_indices_cp(
+    topk_indices: torch.Tensor,
+    global_positions: torch.Tensor,
+    sp_int: int,
+    window_size: int,
+    compress_ratio: int,
+    topk: int,
+    M: int,
+    N: int,
+    req_id_per_token: torch.Tensor | None = None,
+    prefix_lengths: torch.Tensor | None = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """CP-aware fused combine for ``flash_mla_sparse_fwd``.
+
+    This is the kernel equivalent of
+    ``cp.combine_topk_swa_indices_cp_varlen`` / ``_b1``. It consumes
+    explicit rank-local CP global positions, so it works for zigzag CP
+    where contiguous query-row math is invalid.
+    """
+    assert (
+        topk_indices.dtype == torch.int32
+    ), f"topk_indices must be int32, got {topk_indices.dtype}"
+    assert topk_indices.dim() == 2, f"topk_indices must be 2D, got {topk_indices.shape}"
+    assert window_size >= 1 and compress_ratio >= 1
+
+    num_tokens = int(global_positions.numel())
+    combined_topk = (
+        (topk + window_size + _SPARSE_PREFILL_TOPK_ALIGNMENT - 1)
+        // _SPARSE_PREFILL_TOPK_ALIGNMENT
+        * _SPARSE_PREFILL_TOPK_ALIGNMENT
+    )
+    combined_indices = torch.empty(
+        (num_tokens, combined_topk),
+        dtype=torch.int32,
+        device=topk_indices.device,
+    )
+    combined_lens = torch.empty(
+        num_tokens, dtype=torch.int32, device=topk_indices.device
+    )
+    if num_tokens == 0:
+        return combined_indices, combined_lens
+
+    assert (
+        topk_indices.shape[0] == num_tokens
+    ), f"topk rows {topk_indices.shape[0]} != positions {num_tokens}"
+    assert int(topk_indices.shape[1]) >= int(
+        topk
+    ), f"topk_indices width {topk_indices.shape[1]} < topk {topk}"
+    if not topk_indices.is_contiguous():
+        topk_indices = topk_indices.contiguous()
+    global_positions = global_positions.reshape(-1).contiguous()
+
+    assert (req_id_per_token is None) == (prefix_lengths is None), (
+        "req_id_per_token and prefix_lengths must be passed together for "
+        "CP varlen combine"
+    )
+    is_varlen = req_id_per_token is not None
+    if is_varlen:
+        req_id_per_token = req_id_per_token.reshape(-1).contiguous()
+        prefix_lengths = prefix_lengths.reshape(-1).contiguous()
+        assert (
+            req_id_per_token.numel() == num_tokens
+        ), f"req_id_per_token rows {req_id_per_token.numel()} != positions {num_tokens}"
+        req_ptr = req_id_per_token
+        prefix_ptr = prefix_lengths
+    else:
+        req_ptr = global_positions
+        prefix_ptr = global_positions
+
+    BLOCK_T = 16
+    BLOCK_C = 128
+    grid = (
+        triton.cdiv(num_tokens, BLOCK_T),
+        triton.cdiv(combined_topk, BLOCK_C),
+    )
+    _combine_topk_swa_indices_cp_kernel[grid](
+        combined_indices,
+        combined_indices.stride(0),
+        combined_lens,
+        topk_indices,
+        topk_indices.stride(0),
+        global_positions,
+        req_ptr,
+        prefix_ptr,
+        num_tokens,
+        int(sp_int),
+        int(M),
+        int(N),
+        TOP_K=int(topk),
+        COMPRESS_RATIO=int(compress_ratio),
+        WINDOW_SIZE=int(window_size),
+        COMBINED_TOPK=int(combined_topk),
+        BLOCK_T=BLOCK_T,
+        BLOCK_C=BLOCK_C,
+        IS_VARLEN=bool(is_varlen),
+        num_warps=4,
+    )
+    return combined_indices, combined_lens

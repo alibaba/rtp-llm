@@ -271,6 +271,19 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("stride1"),
                   py::arg("top_k"));
 
+    rtp_ops_m.def("dsv4_top_k_per_row_prefill_indexed",
+                  &dsv4_top_k_per_row_prefill_indexed,
+                  "Per-row TopK for DSv4 indexer prefill with explicit row scheduling order",
+                  py::arg("logits"),
+                  py::arg("row_starts"),
+                  py::arg("row_ends"),
+                  py::arg("row_indices"),
+                  py::arg("indices_out"),
+                  py::arg("num_rows"),
+                  py::arg("stride0"),
+                  py::arg("stride1"),
+                  py::arg("top_k"));
+
     rtp_ops_m.def("indexer_k_quant_and_cache",
                   &rtp_llm::indexer_k_quant_and_cache,
                   "Indexer K quantization and cache kernel",

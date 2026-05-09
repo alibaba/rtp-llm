@@ -136,6 +136,23 @@ class GetWindowTopkIdxsVarlenTest(unittest.TestCase):
         self.assertEqual(varlen.shape, legacy.shape)
         self.assertTrue(torch.equal(varlen, legacy))
 
+    def test_b1_wrapped_token_dim_matches_flat(self) -> None:
+        win, S = 8, 12
+        positions, req_id, cu_seqlens = _flat_positions([0], [S], self.device)
+        prefix_lengths = torch.tensor([0], dtype=torch.int32, device=self.device)
+        flat = _get_window_topk_idxs_varlen(
+            win, cu_seqlens, positions, prefix_lengths, req_id
+        )
+        wrapped = _get_window_topk_idxs_varlen(
+            win,
+            cu_seqlens.view(1, -1),
+            positions.view(1, -1),
+            prefix_lengths.view(1, -1),
+            req_id.view(1, -1),
+        )
+        self.assertEqual(tuple(wrapped.shape), (S, win))
+        self.assertTrue(torch.equal(wrapped, flat))
+
     def test_b1_continuation_indices(self) -> None:
         """B==1, sp>0: index window in flat-KV layout = local pos within
         the request (cu_seqlens[0]==0 ⇒ flat idx == local pos)."""

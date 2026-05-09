@@ -3,6 +3,36 @@ _DSV4_TEST_DEPS = [
     "//rtp_llm:testlib",
 ]
 
+py_test(
+    name = "test_cp_context_build",
+    srcs = ["test_cp_context_build.py"],
+    deps = _DSV4_TEST_DEPS,
+)
+
+py_test(
+    name = "test_cp_topk_idxs_align",
+    srcs = ["test_cp_topk_idxs_align.py"],
+    deps = _DSV4_TEST_DEPS,
+)
+
+py_test(
+    name = "test_cp_via_concat_meta",
+    srcs = ["test_cp_via_concat_meta.py"],
+    deps = _DSV4_TEST_DEPS,
+)
+
+py_test(
+    name = "test_cp_indexer_seq_total",
+    srcs = ["test_cp_indexer_seq_total.py"],
+    deps = _DSV4_TEST_DEPS,
+)
+
+py_test(
+    name = "test_cp_workspace_combine_topk",
+    srcs = ["test_cp_workspace_combine_topk.py"],
+    deps = _DSV4_TEST_DEPS,
+)
+
 py_library(
     name = "dsv4_test_utils",
     srcs = ["dsv4_test_utils.py"],

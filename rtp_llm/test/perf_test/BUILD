@@ -136,6 +136,7 @@ py_test(
         "--use_deepep_moe", "1",
         "--use_deepep_low_latency", "0",
         "--act_type", "BF16",
+        "--fp8_kv_cache", "1",
         "--load_method", "fastsafetensors",
         "--concurrency_limit", "1",
         "--enable_cuda_graph", "0",

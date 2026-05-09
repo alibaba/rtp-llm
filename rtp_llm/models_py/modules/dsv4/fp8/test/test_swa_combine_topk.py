@@ -39,6 +39,7 @@ import torch
 from rtp_llm.models_py.modules.dsv4.fp8._swa_ops_triton import (
     _SPARSE_PREFILL_TOPK_ALIGNMENT,
     combine_topk_swa_indices,
+    combine_topk_swa_indices_cp,
 )
 
 
@@ -305,6 +306,142 @@ class SwaCombineTopkTest(unittest.TestCase):
         )
         self.assertEqual(out_idx.shape[0], 0)
         self.assertEqual(out_lens.shape[0], 0)
+
+    def _check_cp_against_ref(
+        self,
+        topk_indices: torch.Tensor,
+        global_positions: torch.Tensor,
+        sp_int: int,
+        window_size: int,
+        compress_ratio: int,
+        topk: int,
+        M: int,
+        N: int,
+        req_id_per_token: torch.Tensor | None = None,
+        prefix_lengths: torch.Tensor | None = None,
+    ):
+        from rtp_llm.models_py.modules.dsv4.cp import (
+            combine_topk_swa_indices_cp_b1,
+            combine_topk_swa_indices_cp_varlen,
+        )
+
+        got_idx, got_lens = combine_topk_swa_indices_cp(
+            topk_indices=topk_indices,
+            global_positions=global_positions,
+            sp_int=sp_int,
+            window_size=window_size,
+            compress_ratio=compress_ratio,
+            topk=topk,
+            M=M,
+            N=N,
+            req_id_per_token=req_id_per_token,
+            prefix_lengths=prefix_lengths,
+        )
+        if req_id_per_token is None:
+            ref_idx, ref_lens = combine_topk_swa_indices_cp_b1(
+                topk_indices=topk_indices,
+                global_positions=global_positions,
+                sp_int=sp_int,
+                window_size=window_size,
+                compress_ratio=compress_ratio,
+                topk=topk,
+                M=M,
+                N=N,
+            )
+        else:
+            ref_idx, ref_lens = combine_topk_swa_indices_cp_varlen(
+                topk_indices=topk_indices,
+                global_positions=global_positions,
+                sp_int=sp_int,
+                window_size=window_size,
+                compress_ratio=compress_ratio,
+                topk=topk,
+                M=M,
+                N=N,
+                req_id_per_token=req_id_per_token,
+                prefix_lengths=prefix_lengths,
+            )
+        self.assertTrue(torch.equal(got_lens, ref_lens))
+        self.assertTrue(torch.equal(got_idx, ref_idx))
+
+    def test_cp_fused_b1_zigzag(self):
+        seq_full = 64
+        cp_size = 2
+        rank = 0
+        pair = seq_full // (cp_size * 2)
+        gp = torch.cat(
+            [
+                torch.arange(rank * pair, (rank + 1) * pair, device=self.device),
+                torch.arange(
+                    seq_full - (rank + 1) * pair,
+                    seq_full - rank * pair,
+                    device=self.device,
+                ),
+            ]
+        ).to(torch.int64)
+        topk = 8
+        ratio = 4
+        win = 16
+        N = seq_full // ratio
+        M = N + seq_full
+        topk_indices = torch.randint(
+            0, max(1, N), (gp.numel(), topk), dtype=torch.int32, device=self.device
+        )
+        self._check_cp_against_ref(
+            topk_indices=topk_indices,
+            global_positions=gp,
+            sp_int=0,
+            window_size=win,
+            compress_ratio=ratio,
+            topk=topk,
+            M=M,
+            N=N,
+        )
+
+    def test_cp_fused_varlen_b2_offsets(self):
+        win = 8
+        ratio = 4
+        topk = 4
+        N = 6
+        M = 32
+        prefix = torch.tensor([0, 10], dtype=torch.int64, device=self.device)
+        req = torch.tensor([0, 0, 1, 1], dtype=torch.int32, device=self.device)
+        gp = torch.tensor([0, 7, 10, 13], dtype=torch.int64, device=self.device)
+        topk_indices = torch.tensor(
+            [[0, 1, 2, 3], [0, 1, 2, 3], [0, 1, 2, 3], [0, 1, 2, 3]],
+            dtype=torch.int32,
+            device=self.device,
+        )
+        self._check_cp_against_ref(
+            topk_indices=topk_indices,
+            global_positions=gp,
+            sp_int=0,
+            window_size=win,
+            compress_ratio=ratio,
+            topk=topk,
+            M=M,
+            N=N,
+            req_id_per_token=req,
+            prefix_lengths=prefix,
+        )
+
+    def test_cp_fused_swa_only_topk0(self):
+        seq = 33
+        win = 8
+        gp = torch.arange(seq, dtype=torch.int64, device=self.device)
+        topk_indices = torch.empty((seq, 0), dtype=torch.int32, device=self.device)
+        self._check_cp_against_ref(
+            topk_indices=topk_indices,
+            global_positions=gp,
+            sp_int=0,
+            window_size=win,
+            compress_ratio=1,
+            topk=0,
+            M=seq,
+            N=0,
+            req_id_per_token=torch.zeros(seq, dtype=torch.int32, device=self.device),
+            prefix_lengths=torch.zeros(1, dtype=torch.int64, device=self.device),
+        )
 
 
 if __name__ == "__main__":

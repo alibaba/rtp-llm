@@ -34,6 +34,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
     CompressorFP8,
     CompressorMeta,
     _build_prefill_positions,
+    build_prepare_metadata_args,
 )
 
 
@@ -111,6 +112,50 @@ class CompressorPrepareMetadataVarlenTest(unittest.TestCase):
         self.assertTrue(torch.equal(legacy_meta.state_slots, new_meta.state_slots))
         self.assertTrue(torch.equal(legacy_meta.kv_slots, new_meta.kv_slots))
         self.assertTrue(torch.equal(legacy_meta.token_to_req, new_meta.token_to_req))
+
+    def test_legacy_positions_are_flat_token_major(self) -> None:
+        sp, S = 12, 20
+        positions, b_idx = _build_prefill_positions(sp, 1, S, self.device)
+        self.assertEqual(tuple(positions.shape), (S,))
+        self.assertEqual(tuple(b_idx.shape), (S,))
+        self.assertTrue(
+            torch.equal(
+                positions,
+                torch.arange(sp, sp + S, dtype=torch.int64, device=self.device),
+            )
+        )
+        self.assertTrue(torch.equal(b_idx, torch.zeros_like(b_idx)))
+
+    def test_varlen_prepare_args_flattens_legacy_batch_dim(self) -> None:
+        S = 5
+        position_ids = torch.arange(
+            12, 12 + S, dtype=torch.int32, device=self.device
+        ).view(1, S)
+        req_id = torch.zeros((1, S), dtype=torch.int32, device=self.device)
+        args = build_prepare_metadata_args(
+            use_varlen=True,
+            device=self.device,
+            sp_int=12,
+            seqlen=S,
+            position_ids=position_ids,
+            req_id_per_token=req_id,
+            seq_start_per_req=torch.tensor([12], dtype=torch.int32, device=self.device),
+            cu_seqlens=torch.tensor([0, S], dtype=torch.int32, device=self.device),
+        )
+        self.assertEqual(tuple(args["positions"].shape), (S,))
+        self.assertEqual(tuple(args["b_idx"].shape), (S,))
+        self.assertTrue(
+            torch.equal(
+                args["positions"],
+                torch.arange(12, 12 + S, dtype=torch.int64, device=self.device),
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                args["b_idx"],
+                torch.zeros(S, dtype=torch.int64, device=self.device),
+            )
+        )
 
     # ------------------------------------------------------------------
     # B == 2: each token must read its own request's block_table row.
