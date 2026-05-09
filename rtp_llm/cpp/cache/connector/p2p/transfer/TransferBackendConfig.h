@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <string>
+#include <string_view>
 
 namespace rtp_llm {
 namespace transfer {
@@ -29,6 +30,12 @@ inline std::string normalizeMooncakeTransport(std::string transport) {
         return "nvlink_intra";
     }
     return transport;
+}
+
+inline bool isSupportedMooncakeTransport(const std::string& transport) {
+    const auto normalized = normalizeMooncakeTransport(transport);
+    return normalized == "tcp" || normalized == "rdma" || normalized == "barex" || normalized == "nvlink"
+           || normalized == "nvlink_intra";
 }
 
 struct MooncakeBackendConfig {

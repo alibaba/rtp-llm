@@ -46,6 +46,9 @@ cc_library(
 
 alias(
     name = "hf3fs_shared",
-    actual = ":hf3fs",
+    actual = select({
+        "//:enable_mooncake_te": "//3rdparty/3fs/mooncake:hf3fs_mooncake_impl_shared",
+        "//conditions:default": ":hf3fs_default_impl_shared",
+    }),
     visibility = ["//visibility:public"],
 )

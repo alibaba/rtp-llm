@@ -1,6 +1,6 @@
 load("//bazel:defs.bzl", "rpm_library")
 
-_HF3FS_SHARED_LIBS_WITHOUT_GLOG = [
+_HF3FS_SHARED_LIBS = [
     "libhf3fs_api_shared.so",
     "libboost_context.so.1.71.0",
     "libboost_filesystem.so.1.71.0",
@@ -10,6 +10,8 @@ _HF3FS_SHARED_LIBS_WITHOUT_GLOG = [
     "libboost_thread.so.1.71.0",
     "libboost_atomic.so.1.71.0",
     "libdouble-conversion.so.3",
+    "libgflags.so.2.2",
+    "libglog.so.0",
     "libevent-2.1.so.7",
     "libdwarf.so.1",
     "libicui18n.so.66",
@@ -27,7 +29,7 @@ rpm_library(
     ],
     lib_path = "usr/lib64",
     include_path = "usr/include",
-    shared_libs = _HF3FS_SHARED_LIBS_WITHOUT_GLOG,
+    shared_libs = _HF3FS_SHARED_LIBS,
     hdrs = [
         "hf3fs_usrbio.h",
     ],

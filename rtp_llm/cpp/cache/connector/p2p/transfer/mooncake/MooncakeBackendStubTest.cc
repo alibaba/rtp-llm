@@ -1747,6 +1747,21 @@ TEST(MooncakeKVCacheClassicTeTest, InitFailsWhenTransportProtoInvalid) {
     EXPECT_FALSE(receiver.init(config));
 }
 
+TEST(MooncakeKVCacheClassicTeTest, InitUsesDefaultTcpTransportWhenNotSpecified) {
+    auto adapter = createMooncakeTransferEngineAdapter();
+    if (!adapter) {
+        GTEST_SKIP() << "Mooncake classic TE is not enabled in this build";
+    }
+
+    TransferBackendConfig config;
+    config.cache_store_mooncake_mode = true;
+    config.mooncake.location = "tp0";
+    config.mooncake.classic.ip_or_host_name = "127.0.0.1";
+    config.mooncake.classic.rpc_port = static_cast<uint16_t>(nextTestPort());
+
+    EXPECT_TRUE(adapter->init(config.mooncake));
+}
+
 TEST(MooncakeKVCacheClassicTeTest, RegisterLocalMemoryIsIdempotentForSameAddressAndSize) {
     auto adapter = createMooncakeTransferEngineAdapter();
     if (!adapter) {
@@ -1767,6 +1782,31 @@ TEST(MooncakeKVCacheClassicTeTest, RegisterLocalMemoryIsIdempotentForSameAddress
     EXPECT_TRUE(adapter->registerLocalMemory(block_info, sizeof(block)));
     EXPECT_TRUE(adapter->registerLocalMemory(block_info, sizeof(block)));
     EXPECT_FALSE(adapter->registerLocalMemory(block_info, sizeof(block) * 2));
+}
+
+TEST(MooncakeKVCacheClassicTeTest, BarexKeepsExplicitMemoryLocation) {
+    auto receiver_adapter = createMooncakeTransferEngineAdapter();
+    if (!receiver_adapter) {
+        GTEST_SKIP() << "Mooncake classic TE is not enabled in this build";
+    }
+
+    TransferBackendConfig config;
+    config.cache_store_mooncake_mode = true;
+    config.mooncake.location = "tp7";
+    config.mooncake.classic.transport = "barex";
+    config.mooncake.classic.ip_or_host_name = "127.0.0.1";
+    config.mooncake.classic.rpc_port = static_cast<uint16_t>(nextTestPort());
+
+    MooncakeKVCacheReceiver receiver(receiver_adapter);
+    ASSERT_TRUE(receiver.init(config));
+
+    void* target_block_raw = nullptr;
+    ASSERT_EQ(posix_memalign(&target_block_raw, 4096, 4096), 0);
+    std::unique_ptr<void, decltype(&std::free)> target_block_guard(target_block_raw, &std::free);
+    auto* target_block = static_cast<char*>(target_block_guard.get());
+    std::memset(target_block, 0, 4096);
+    BlockInfo recv_mem{false, 0, 0, target_block, 64};
+    EXPECT_TRUE(receiver.regMem(recv_mem, 64));
 }
 
 TEST(MooncakeKVCacheClassicTeTest, RealClassicTransferEngineCopiesPayloadOverTcpTransport) {

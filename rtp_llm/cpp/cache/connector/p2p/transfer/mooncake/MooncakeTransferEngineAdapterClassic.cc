@@ -29,6 +29,29 @@ std::string resolveTransportProto(const MooncakeTransferEngineInitConfig& config
     return normalizeMooncakeTransport(config.transport);
 }
 
+bool requiresMooncakeAutoDiscover(const std::string& transport_proto) {
+    return transport_proto != "tcp";
+}
+
+bool usesDefaultMooncakeLocation(const std::string& location) {
+    return location.empty() || location == "*";
+}
+
+std::string resolveMemoryLocation(const MooncakeBackendConfig& config, const BlockInfo& block_info) {
+    const auto transport_proto = resolveTransportProto(config.classic);
+    if (transport_proto != "barex") {
+        return config.location;
+    }
+    // Barex needs a concrete memory location string. Preserve explicit
+    // caller-provided locations and only infer from the block when the config
+    // still carries the default wildcard.
+    if (!usesDefaultMooncakeLocation(config.location)) {
+        return config.location;
+    }
+    const int device_index = block_info.device_index >= 0 ? block_info.device_index : 0;
+    return std::string(block_info.is_cuda ? "cuda:" : "cpu:") + std::to_string(device_index);
+}
+
 constexpr ::mooncake::SegmentHandle kInvalidSegmentHandle = static_cast<::mooncake::SegmentHandle>(-1);
 
 bool isValidSegmentHandle(::mooncake::SegmentHandle handle) {
@@ -51,13 +74,21 @@ public:
         }
 
         config_ = config;
-        engine_ = std::make_unique<::mooncake::TransferEngine>(true);
-
         const auto metadata_conn_string = config.classic.metadata_conn_string.empty()
                                               ? std::string(P2PHANDSHAKE)
                                               : config.classic.metadata_conn_string;
         const auto local_server_name = resolveLocalServerName(config.classic);
         const auto transport_proto = resolveTransportProto(config.classic);
+        if (!isSupportedMooncakeTransport(config.classic.transport)) {
+            RTP_LLM_LOG_ERROR("MooncakeClassicTransferEngineAdapter unsupported transport=%s",
+                              config.classic.transport.c_str());
+            return false;
+        }
+        // Explicit tcp should not trigger TE auto-discovery because that
+        // eagerly initializes RDMA on HCA hosts. Other transports preserve the
+        // historical auto-discovery behavior so their transport-specific
+        // topology setup continues to work.
+        engine_ = std::make_unique<::mooncake::TransferEngine>(requiresMooncakeAutoDiscover(transport_proto));
         const auto ip_or_host_name = config.classic.ip_or_host_name.empty()
                                          ? std::string("127.0.0.1")
                                          : config.classic.ip_or_host_name;
@@ -93,14 +124,16 @@ public:
         if (it != registered_memory_.end()) {
             return it->second == length;
         }
+        const auto location = resolveMemoryLocation(config_, block_info);
 
         const int rc = engine_->registerLocalMemory(
-            block_info.addr, length, config_.location, config_.remote_accessible, config_.update_metadata);
+            block_info.addr, length, location, config_.remote_accessible, config_.update_metadata);
         if (rc != 0) {
-            RTP_LLM_LOG_ERROR("MooncakeClassicTransferEngineAdapter registerLocalMemory failed, rc=%d, addr=%p, length=%lu",
+            RTP_LLM_LOG_ERROR("MooncakeClassicTransferEngineAdapter registerLocalMemory failed, rc=%d, addr=%p, length=%lu, location=%s",
                               rc,
                               block_info.addr,
-                              length);
+                              length,
+                              location.c_str());
             return false;
         }
         registered_memory_[block_info.addr] = length;

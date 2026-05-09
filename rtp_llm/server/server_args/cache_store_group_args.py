@@ -52,7 +52,7 @@ def init_cache_store_group_args(parser, cache_store_config):
         bind_to=(cache_store_config, "cache_store_mooncake_transport"),
         type=str,
         default="tcp",
-        help="Mooncake classic TransferEngine 传输协议，当前支持 tcp / rdma / nvlink / nvlink_intra，兼容别名 nvlink_intraNode。",
+        help="Mooncake classic TransferEngine 传输协议，当前支持 tcp / rdma / barex / nvlink / nvlink_intra，兼容别名 nvlink_intraNode。",
     )
     cache_store_group.add_argument(
         "--cache_store_mooncake_rpc_port",

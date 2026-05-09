@@ -325,6 +325,42 @@ class ServerArgsSetTest(TestCase):
             False,
         )
 
+    def test_mooncake_cache_store_args_accept_barex_transport(self):
+        sys.argv = [
+            "prog",
+            "--cache_store_mooncake_mode",
+            "1",
+            "--cache_store_mooncake_transport",
+            "barex",
+        ]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        self.assertEqual(
+            py_env_configs.cache_store_config.cache_store_mooncake_transport,
+            "barex",
+        )
+
+    def test_mooncake_cache_store_transport_defaults_to_tcp(self):
+        sys.argv = [
+            "prog",
+            "--cache_store_mooncake_mode",
+            "1",
+        ]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        self.assertEqual(
+            py_env_configs.cache_store_config.cache_store_mooncake_transport,
+            "tcp",
+        )
+
 
 if __name__ == "__main__":
     main()
