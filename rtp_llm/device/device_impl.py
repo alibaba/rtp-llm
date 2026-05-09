@@ -895,8 +895,6 @@ class RocmImpl(GpuImpl):
         is_gate = name in [W.moe_w1, W.moe_s1]
         do_weight_shuffle = name in [W.moe_w1, W.moe_w2]
         do_fp4_scale_shuffle = name in [W.moe_s1, W.moe_s2]
-        quantization = self.py_env_configs.quantization_config.get_quantization().upper()
-        is_fp4_quant = "FP4" in quantization
 
         original_ndim = x.dim()
         if original_ndim == 2:
@@ -910,8 +908,11 @@ class RocmImpl(GpuImpl):
         if do_weight_shuffle:
             x_ = shuffle_weight(x_, (16, 16))
 
-        # FP4 uses E8M0 block scales that should be pre-shuffled.
-        if is_fp4_quant and do_fp4_scale_shuffle:
+        # Quark MXFP4 stores MoE scales as uint8 E8M0 blocks. Detect that
+        # directly from the actual tensor instead of relying on the startup
+        # quantization string, which can be empty on ckpt auto-detect paths.
+        is_mxfp4_scale = do_fp4_scale_shuffle and x_.dtype == torch.uint8
+        if is_mxfp4_scale:
             if x_.dim() == 3:
                 s0, s1, _ = x_.shape
                 x_ = e8m0_shuffle(x_.contiguous().view(s0 * s1, -1)).view(s0, s1, -1)
