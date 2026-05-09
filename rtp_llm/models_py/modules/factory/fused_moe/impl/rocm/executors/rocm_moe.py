@@ -528,14 +528,14 @@ class RocmExpertsFp4PerGroup(FusedMoeExpertExecutor):
         return CombineForwardPayload(fused_expert_output=output)
 
 
-class RocmExpertsFp4PerGroup(FusedMoeExpertExecutor):
+class RocmExpertsMXFp4(FusedMoeExpertExecutor):
     @classmethod
     def executor_type(cls):
         return ExecutorType.FUSED_MOE
 
     @classmethod
     def check_conditions(cls, checker: Any, config: Any) -> None:
-        """Check if RocmExpertsFp4PerGroup can handle the configuration"""
+        """Check if the ROCm MXFP4 executor can handle the configuration."""
         from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
             MoeConfigResolver,
         )

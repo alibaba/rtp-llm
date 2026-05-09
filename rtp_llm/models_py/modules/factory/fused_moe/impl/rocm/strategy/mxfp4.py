@@ -1,4 +1,4 @@
-"""Rocm FP4 PerGroup quantization strategies"""
+"""ROCm MXFP4 quantization strategies."""
 
 import torch
 
@@ -11,15 +11,15 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
 from rtp_llm.models_py.modules.factory.fused_moe.defs.strategy_base import MoeStrategy
 
 
-class RocmFp4PerGroupPureTPStrategy(MoeStrategy):
-    """Rocm FP4 PerGroup pure TP strategy"""
+class RocmMXFp4PureTPStrategy(MoeStrategy):
+    """ROCm MXFP4 pure TP strategy."""
 
     def get_attributes(self) -> StrategyAttributes:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.executors.rocm_moe import (
-            RocmExpertsFp4PerGroup,
+            RocmExpertsMXFp4,
         )
         from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.routers.pure_tp_router import (
-            PureTpRouterFp4PerGroupPassthrough,
+            PureTpRouterMXFp4Passthrough,
         )
 
         quant_config = FusedMoEQuantConfig(
@@ -29,7 +29,7 @@ class RocmFp4PerGroupPureTPStrategy(MoeStrategy):
             block_shape=None,
         )
         return StrategyAttributes(
-            router_class=PureTpRouterFp4PerGroupPassthrough,
-            executor_class=RocmExpertsFp4PerGroup,
+            router_class=PureTpRouterMXFp4Passthrough,
+            executor_class=RocmExpertsMXFp4,
             quant_config=quant_config,
         )
