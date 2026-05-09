@@ -1,5 +1,5 @@
 """DSv4 decode BF16 sparse attention dispatch — extracted from
-``AttentionVLLM._forward_decode_body``.
+``AttentionBF16VLLM._forward_decode_body``.
 
 Mirrors the source project's :mod:`rtp_llm.models_py.modules.dsv4.decode.attention_kernels`
 (FP8 FlashMLA path) for the BF16 KV-cache. Two variants:

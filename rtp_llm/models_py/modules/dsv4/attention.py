@@ -52,7 +52,7 @@ from rtp_llm.models_py.modules.dsv4.compressor import Compressor
 # Single source of truth for the BF16 vLLM-flow opt-in switch.
 # Off by default; set ``DSV4_BF16_VLLM=1`` to swap this :class:`Attention`
 # (legacy logical-block ``Compressor`` / ``Indexer``) for
-# :class:`AttentionVLLM` (``CompressorVLLM`` / ``IndexerVLLM``) at
+# :class:`AttentionBF16VLLM` (``CompressorBF16VLLM`` / ``IndexerBF16VLLM``) at
 # construction time in ``block.py``. Resolved once at module load (env
 # vars are set before Python launches in production). ``indexer.py``
 # imports this constant lazily inside ``__init__`` to avoid the
@@ -2515,10 +2515,10 @@ class Attention(nn.Module):
                 else:
                     # Vestigial branch — legacy ``Compressor`` always
                     # returns a tensor; this ``kv_compress is None`` arm
-                    # was authored for ``CompressorVLLM`` (which scatters
+                    # was authored for ``CompressorBF16VLLM`` (which scatters
                     # compressed K through the framework pool itself and
-                    # returns ``None``). ``CompressorVLLM`` now lives in
-                    # ``AttentionVLLM`` (``attention_vllm.py``) so this
+                    # returns ``None``). ``CompressorBF16VLLM`` now lives in
+                    # ``AttentionBF16VLLM`` (``attention_bf16_vllm.py``) so this
                     # branch is unreachable here. Kept defensively in case
                     # a future legacy compressor variant adopts the
                     # pool-side write contract.
@@ -2537,7 +2537,7 @@ class Attention(nn.Module):
                         )
                     assert (
                         kv_cat is not None
-                    ), "vestigial branch (was CompressorVLLM) requires paged ctx."
+                    ), "vestigial branch (was CompressorBF16VLLM) requires paged ctx."
             else:
                 if not any_cont:
                     kv_cat = kv_full

@@ -1,5 +1,5 @@
 """DSv4 decode SWA BF16 pool write — extracted from
-``AttentionVLLM._forward_decode_body``.
+``AttentionBF16VLLM._forward_decode_body``.
 
 Mirrors :mod:`rtp_llm.models_py.modules.dsv4.decode.write_swa` (FP8 path)
 for the BF16 KV-cache. Calls :func:`write_kv_to_pool` directly — no

@@ -1,4 +1,4 @@
-"""DSv4 decode Q/KV projection — extracted from ``AttentionVLLM._forward_decode_body``.
+"""DSv4 decode Q/KV projection — extracted from ``AttentionBF16VLLM._forward_decode_body``.
 
 Mirrors the per-request batched (``q_len == 1``) Q/KV path of the
 monolithic decode body. The Attention module is passed in as ``attn`` and
@@ -14,7 +14,9 @@ import torch
 from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_rope_triton import fused_rmsnorm_rope
 
 if TYPE_CHECKING:
-    from rtp_llm.models_py.modules.dsv4.attention_vllm import AttentionVLLM as Attention
+    from rtp_llm.models_py.modules.dsv4.attention_bf16_vllm import (
+        AttentionBF16VLLM as Attention,
+    )
 
 
 class DecodeQKV(NamedTuple):

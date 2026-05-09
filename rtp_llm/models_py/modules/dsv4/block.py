@@ -16,8 +16,8 @@ from rtp_llm.models_py.modules.dsv4.hc import build_hc_head, build_hc_unit
 from rtp_llm.models_py.modules.dsv4.moe import MoE
 
 if DSV4_BF16_VLLM:
-    from rtp_llm.models_py.modules.dsv4.attention_vllm import (
-        AttentionVLLM as _AttentionCls,
+    from rtp_llm.models_py.modules.dsv4.attention_bf16_vllm import (
+        AttentionBF16VLLM as _AttentionCls,
     )
 else:
     _AttentionCls = Attention

@@ -93,7 +93,7 @@ class _CompressorNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(dim, dtype=torch.bfloat16))
 
 
-class CompressorVLLM(nn.Module):
+class CompressorBF16VLLM(nn.Module):
     """vLLM-style per-token state-pool compressor with BF16 KV-pool writeback.
 
     Compress ratio: CSA uses ratio=4 (overlap=True), HCA uses ratio=128
@@ -119,9 +119,9 @@ class CompressorVLLM(nn.Module):
         assert head_dim in (
             128,
             512,
-        ), f"CompressorVLLM supports head_dim in {{128, 512}}; got {head_dim}"
+        ), f"CompressorBF16VLLM supports head_dim in {{128, 512}}; got {head_dim}"
         assert compressor_weights is not None, (
-            "CompressorVLLM requires compressor_weights — meta-tensor / "
+            "CompressorBF16VLLM requires compressor_weights — meta-tensor / "
             "stand-alone construction is not supported (use the BF16 path)."
         )
         self.dim = dim
@@ -173,7 +173,7 @@ class CompressorVLLM(nn.Module):
         self._kv_eb: int = 0
 
         # Legacy attribute kept so attention.py's cmp_T fallback keeps
-        # working when probing a CompressorVLLM instance.
+        # working when probing a CompressorBF16VLLM instance.
         self._kv_cache_t: int = 0
 
         # Cached cos_sin cache built from self.freqs_cis at first forward.
@@ -301,7 +301,7 @@ class CompressorVLLM(nn.Module):
         if self._cos_sin_cache is None or self._cos_sin_cache.device != device:
             assert (
                 self.freqs_cis is not None
-            ), "CompressorVLLM.freqs_cis must be bound before forward"
+            ), "CompressorBF16VLLM.freqs_cis must be bound before forward"
             cache, _ = build_cos_sin_cache(self.freqs_cis.to(device))
             self._cos_sin_cache = cache
         return self._cos_sin_cache
@@ -639,7 +639,7 @@ def _flatten_token_major_2d(x: torch.Tensor, rows: int) -> torch.Tensor:
 
 
 def build_prefill_metadata(
-    compressor: "CompressorVLLM",
+    compressor: "CompressorBF16VLLM",
     sp: int,
     bsz: int,
     seqlen: int,
@@ -650,7 +650,7 @@ def build_prefill_metadata(
 
 
 def build_decode_metadata(
-    compressor: "CompressorVLLM", start_pos: torch.Tensor, bsz: int
+    compressor: "CompressorBF16VLLM", start_pos: torch.Tensor, bsz: int
 ) -> CompressorMeta:
     device = start_pos.device
     positions = start_pos.to(device=device, dtype=torch.long).reshape(bsz)

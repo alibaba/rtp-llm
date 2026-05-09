@@ -1,4 +1,4 @@
-"""DSv4 decode output projection — extracted from ``AttentionVLLM._forward_decode_body``.
+"""DSv4 decode output projection — extracted from ``AttentionBF16VLLM._forward_decode_body``.
 
 Pipeline:
     1. Inverse partial RoPE (unrotate the ``[rope_head_dim:]`` slice).
@@ -26,7 +26,9 @@ from rtp_llm.models_py.modules.dsv4.qlinear import _fp8_dequant_to_fp32
 from rtp_llm.models_py.modules.dsv4.rope import apply_rotary_emb_batched
 
 if TYPE_CHECKING:
-    from rtp_llm.models_py.modules.dsv4.attention_vllm import AttentionVLLM as Attention
+    from rtp_llm.models_py.modules.dsv4.attention_bf16_vllm import (
+        AttentionBF16VLLM as Attention,
+    )
 
 
 def decode_output_proj(

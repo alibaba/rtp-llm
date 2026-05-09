@@ -2,7 +2,7 @@
 
 Standalone parallel of :class:`Attention` in ``attention.py``. Same
 public surface and same constructor args, but constructs
-:class:`CompressorVLLM` / :class:`IndexerVLLM` for the nested modules
+:class:`CompressorBF16VLLM` / :class:`IndexerBF16VLLM` for the nested modules
 and adds the ``_forward_prefill_vllm`` family + dispatch hook in
 ``_forward_body``. Selected at construction time by ``block.py`` when
 ``DSV4_BF16_VLLM=1`` (see ``attention.DSV4_BF16_VLLM``); legacy
@@ -63,7 +63,7 @@ from rtp_llm.models_py.modules.dsv4._metadata_triton import (
     build_swa_pool_slot_mapping,
 )
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
-from rtp_llm.models_py.modules.dsv4.compressor_vllm import CompressorVLLM
+from rtp_llm.models_py.modules.dsv4.compressor_bf16_vllm import CompressorBF16VLLM
 
 
 class _VLLMPrefillCommon(_NamedTuple):
@@ -100,7 +100,7 @@ from rtp_llm.models_py.modules.dsv4.cp import (
     cp_freqs_cis_local,
     cp_wait_gather_full,
 )
-from rtp_llm.models_py.modules.dsv4.indexer_vllm import IndexerVLLM
+from rtp_llm.models_py.modules.dsv4.indexer_bf16_vllm import IndexerBF16VLLM
 from rtp_llm.models_py.modules.dsv4.qlinear import QuantizedLinear, _fp8_dequant_to_fp32
 from rtp_llm.models_py.modules.dsv4.rope import (
     apply_rotary_emb,
@@ -534,7 +534,7 @@ def _sparse_attn(
     return out.to(q.dtype)
 
 
-class AttentionVLLM(nn.Module):
+class AttentionBF16VLLM(nn.Module):
     def __init__(
         self,
         layer_id: int,
@@ -715,7 +715,7 @@ class AttentionVLLM(nn.Module):
                 "wgate": layer_weights[W.v4_compressor_wgate],
                 "norm": layer_weights[W.v4_compressor_norm],
             }
-            self.compressor = CompressorVLLM(
+            self.compressor = CompressorBF16VLLM(
                 dim=dim,
                 head_dim=head_dim,
                 rope_head_dim=rope_head_dim,
@@ -733,7 +733,7 @@ class AttentionVLLM(nn.Module):
             # absent (warmup, unit tests), ``_bind_kv_cache_from_pool``
             # needs the T hint to allocate the ephemeral zero tensor.
             if compress_ratio == 4:
-                self.indexer = IndexerVLLM(
+                self.indexer = IndexerBF16VLLM(
                     dim=dim,
                     q_lora_rank=q_lora_rank,
                     index_n_heads=index_n_heads,
@@ -2039,7 +2039,7 @@ class AttentionVLLM(nn.Module):
         if seqlen > 1 and not is_batched_local and self.compress_ratio in (4, 128):
             return self._forward_prefill_vllm(x, start_pos, sequence_lengths)
         raise NotImplementedError(
-            "AttentionVLLM._forward_body legacy fall-through removed (BF16 vLLM-only "
+            "AttentionBF16VLLM._forward_body legacy fall-through removed (BF16 vLLM-only "
             f"branch). Got seqlen={seqlen}, is_batched_local={is_batched_local}, "
             f"compress_ratio={self.compress_ratio}. Only single-request prefill with "
             "compress_ratio in {4, 128} is supported; SWA-only layers, batched "
@@ -2050,17 +2050,17 @@ class AttentionVLLM(nn.Module):
     # ==================================================================
     # vLLM-flow prefill (mirror of source ``fp8/attention.py``'s
     # ``_forward_prefill`` family, but BF16 KV-cache throughout and
-    # using the local CompressorVLLM / IndexerVLLM with hoisted meta).
+    # using the local CompressorBF16VLLM / IndexerBF16VLLM with hoisted meta).
     #
-    # Always-on for this class (block.py picks AttentionVLLM only when
+    # Always-on for this class (block.py picks AttentionBF16VLLM only when
     # ``DSV4_BF16_VLLM=1``); entry hook lives in :meth:`_forward_body`.
     # Constraints (matching
     # the source class):
     #   * single request only (bsz == 1)
     #   * no Context-Parallel (``set_cp_ctx`` accepts ``None`` only on
-    #     IndexerVLLM); CP prefills fall through to the legacy path.
+    #     IndexerBF16VLLM); CP prefills fall through to the legacy path.
     #   * SWA-only layers (compress_ratio == 0) also fall through —
-    #     IndexerVLLM/CompressorVLLM are no-ops there, so reusing the
+    #     IndexerBF16VLLM/CompressorBF16VLLM are no-ops there, so reusing the
     #     legacy path costs nothing and avoids re-implementing the
     #     window-only attention here.
     # ==================================================================
@@ -2102,7 +2102,7 @@ class AttentionVLLM(nn.Module):
         self, x: torch.Tensor, start_pos
     ) -> "_VLLMPrefillCommon":
         from rtp_llm.models_py.modules.dsv4.attn_type import INDEXER_KV
-        from rtp_llm.models_py.modules.dsv4.compressor_vllm import (
+        from rtp_llm.models_py.modules.dsv4.compressor_bf16_vllm import (
             build_prefill_metadata as _build_compressor_prefill_metadata,
         )
 
@@ -2242,14 +2242,14 @@ class AttentionVLLM(nn.Module):
         qkv: "_VLLMPrefillQKV",
         common: "_VLLMPrefillCommon",
     ) -> torch.Tensor:
-        """CSA path. IndexerVLLM produces sparse compressed-block topk
-        with hoisted meta; main CompressorVLLM writes the CSA pool.
+        """CSA path. IndexerBF16VLLM produces sparse compressed-block topk
+        with hoisted meta; main CompressorBF16VLLM writes the CSA pool.
         Final attention runs through the shared
         :meth:`_forward_prefill_compressed_vllm` epilogue."""
-        from rtp_llm.models_py.modules.dsv4.indexer_vllm import IndexerVLLM
+        from rtp_llm.models_py.modules.dsv4.indexer_bf16_vllm import IndexerBF16VLLM
 
-        assert isinstance(self.indexer, IndexerVLLM), (
-            "CSA vLLM prefill requires IndexerVLLM (mismatched indexer "
+        assert isinstance(self.indexer, IndexerBF16VLLM), (
+            "CSA vLLM prefill requires IndexerBF16VLLM (mismatched indexer "
             "class — env switch likely changed mid-process)"
         )
         with record_function_range("dsv4.attn.indexer"):
@@ -2266,7 +2266,7 @@ class AttentionVLLM(nn.Module):
         common: "_VLLMPrefillCommon",
     ) -> torch.Tensor:
         """HCA path. No indexer (dense compressed indices); main
-        CompressorVLLM writes the HCA pool. Same epilogue as CSA."""
+        CompressorBF16VLLM writes the HCA pool. Same epilogue as CSA."""
         assert self.indexer is None, "HCA layer must not have an indexer"
         return self._forward_prefill_compressed_vllm(
             x, qkv, common, cmp_topk_runtime_int32=None
@@ -2301,7 +2301,7 @@ class AttentionVLLM(nn.Module):
         else:
             topk_window = _get_window_topk_idxs(win, bsz, seqlen, sp, device)
 
-        # Compressed topk for CSA (from IndexerVLLM raw int32 + offset)
+        # Compressed topk for CSA (from IndexerBF16VLLM raw int32 + offset)
         # or HCA (deterministic dense block range).
         offset = common.swa_dense_len  # SWA prefix length in kv_cat
         if cmp_topk_runtime_int32 is not None:
@@ -2320,7 +2320,7 @@ class AttentionVLLM(nn.Module):
         topk_idxs = torch.cat([topk_window, cmp_topk], dim=-1).long()
 
         # Main compressor — hoisted meta path; returns ``None`` since
-        # CompressorVLLM scatters its output through the BF16 pool only.
+        # CompressorBF16VLLM scatters its output through the BF16 pool only.
         with record_function_range("dsv4.attn.compressor"):
             self.compressor(x, sp, meta=common.compressor_meta)
         # The vLLM compressor writes the compressed-K slot directly via
