@@ -1624,40 +1624,30 @@ class AttentionVLLM(nn.Module):
         x: torch.Tensor,  # [B, 1, dim] bf16  (q_len=1 pure decode)
         attn_metadata: "DSv4DecodeAttnMetadata",  # type: ignore[name-defined]
     ) -> torch.Tensor:
-        """Decode-only attention forward.
+        """Decode dispatcher mirroring source ``_forward_decode_body``
+        (attention.py:1851-1910).
 
-        Per-request batched: every request has its own ``start_pos`` from
-        ``attn_metadata.start_pos[B]``. KV writes use the metadata's
-        ``slot_mapping_swa`` / ``slot_mapping_compressed[ratio]`` indices
-        into the (still register_buffer-backed) per-layer KV cache.
+        Pipeline:
+          1. ``decode_compute_qkv``        — Q/KV proj + per-request RoPE.
+          2. ``_decode_write_swa_bf16``    — write new K to BF16 SWA pool.
+          3. per ``compress_ratio``:
+               * 0   → :meth:`_forward_decode_swa_only`
+               * 4   → :meth:`_forward_decode_csa`   (indexer + compressor)
+               * 128 → :meth:`_forward_decode_hca`   (compressor, dense idx)
+          4. ``decode_output_proj``        — inv-RoPE + wo_a + wo_b + AR.
 
-        Decode-only — does NOT touch the prefill ``forward`` arm. Phase
-        4 will swap the TileLang sparse_attn for FlashMLA + FP8 KV here.
+        Compressor / Indexer freqs_cis is bound lazily on first call;
+        pool context is set in :meth:`forward_decode`'s try/finally.
         """
-        from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
-        from rtp_llm.models_py.modules.dsv4.decode.sparse_attn_decode_op import (
-            SparseAttnV4DecodeOp,
-        )
+        from rtp_llm.models_py.modules.dsv4.decode.compute_qkv import decode_compute_qkv
+        from rtp_llm.models_py.modules.dsv4.decode.output_proj import decode_output_proj
 
         bsz, q_len, _ = x.size()
-        assert q_len == 1, "Phase 2: q_len==1 only (MTP/spec-decode is later)"
-        win = self.window_size
-        ratio = self.compress_ratio
-        rd = self.rope_head_dim
-        device = x.device
-        _dbg_decode = _rt.should_record_layer(self.layer_id)
-        # Slice metadata to actual bsz — the CUDA-graph impl allocates
-        # buffers at max_bs, but the captured graph at BS=k must read only
-        # the [:k] prefix. Padding entries [k:max_bs] are stale across
-        # replays; mixing them with k-sized index arrays in fancy
-        # indexing (e.g. self.kv_state[b_idx[k], slot[max_bs]] = ...)
-        # broadcasts the same row to multiple slots and corrupts state.
+        assert q_len == 1, "decode: q_len==1 only (MTP/spec-decode is later)"
+        _dbg_tag = f"L{getattr(self, 'layer_id', '?'):0>2}/r{self.compress_ratio}"
+        # CUDA-graph max-bs buffers — slice every metadata read to actual bsz.
         start_pos = attn_metadata.start_pos[:bsz]  # [bsz] int32
 
-        # #50: Compressor / Indexer are fully pool-backed — no persistent
-        # Python-owned kv_state / score_state / kv_cache buffers.  Bind
-        # freqs_cis on first call (idempotent); pool context is set per-
-        # forward below in the try/finally.
         if self.compress_ratio:
             if self.compressor.freqs_cis is None:
                 self.compressor.freqs_cis = self.freqs_cis
@@ -1667,225 +1657,260 @@ class AttentionVLLM(nn.Module):
                 if self.indexer.compressor.freqs_cis is None:
                     self.indexer.compressor.freqs_cis = self.freqs_cis
 
-        # Q path
-        with record_function_range("dsv4.attn.q_proj_norm_rope"):
-            qr = self._rmsnorm_weighted(
-                self._lin(self.wq_a, x), self.q_norm
-            )  # [B, 1, q_lora]
-            q = self._lin(self.wq_b, qr).unflatten(
-                -1, (self.n_heads, self.head_dim)
-            )  # [B, 1, H, D]
-            # Per-request RoPE on q_pe — each req has its own start_pos. Vectorized
-            # via apply_rotary_emb_batched (mirrors vLLM's batched cos/sin lookup).
-            freqs_cis_per_req = self.freqs_cis[start_pos.long()]  # [B, freqs_dim]
-            q = fused_rmsnorm_rope(q, None, freqs_cis_per_req, rd, eps=self.eps)
-        if _dbg_decode:
-            _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_q", q)
+        qkv = decode_compute_qkv(self, x, start_pos, dbg_tag=_dbg_tag)
+        self._decode_write_swa_bf16(qkv.kv, bsz, q_len, attn_metadata, _dbg_tag)
 
-        # KV path (single MQA head)
-        with record_function_range("dsv4.attn.kv_proj_norm_rope"):
-            kv = fused_rmsnorm_rope(
-                self._lin(self.wkv, x),
-                self.kv_norm,
-                freqs_cis_per_req,
-                rd,
-                eps=self.eps,
+        if self.compress_ratio == 0:
+            o = self._forward_decode_swa_only(
+                qkv.q, bsz, q_len, attn_metadata, _dbg_tag
             )
-        if _dbg_decode:
-            _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_kv", kv)
+        elif self.compress_ratio == 4:
+            o = self._forward_decode_csa(
+                x, qkv, bsz, q_len, start_pos, attn_metadata, _dbg_tag
+            )
+        elif self.compress_ratio == 128:
+            o = self._forward_decode_hca(
+                x, qkv, bsz, q_len, start_pos, attn_metadata, _dbg_tag
+            )
+        else:
+            raise AssertionError(f"unknown compress_ratio={self.compress_ratio}")
 
-        # Phase E5b: direct SWA pool write (register_buffer retired).
-        kv_flat = kv.reshape(bsz * q_len, self.head_dim)  # [T, head_dim]
+        return decode_output_proj(
+            self, o, qkv.freqs_cis_per_req, bsz, q_len, dbg_tag=_dbg_tag
+        )
+
+    # ------------------------------------------------------------------
+    # Decode SWA pool write — BF16 paged write helper.
+    # ------------------------------------------------------------------
+    def _decode_write_swa_bf16(
+        self,
+        kv: torch.Tensor,
+        bsz: int,
+        q_len: int,
+        attn_metadata: "DSv4DecodeAttnMetadata",  # type: ignore[name-defined]
+        dbg_tag: str,
+    ) -> None:
+        """Write newly computed SWA KV into the BF16 pool slots."""
+        from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
         from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
-        from rtp_llm.models_py.modules.dsv4.decode.kv_write_decode_op import (
-            write_kv_to_pool,
+        from rtp_llm.models_py.modules.dsv4.decode.write_swa_bf16 import (
+            decode_write_swa_bf16,
         )
 
         swa_pool_slots = attn_metadata.pool_write_slot_mappings.get(SWA_KV)
         swa_view = self._pool_view(SWA_KV)
-        if _dbg_decode and swa_pool_slots is not None:
+        if _rt.should_record_layer(self.layer_id) and swa_pool_slots is not None:
             _rt.record_if_level(
                 2,
                 f"L{self.layer_id:02d}_decode_swa_write_slot",
                 swa_pool_slots[: bsz * q_len],
             )
         with record_function_range("dsv4.attn.swa_pool_write"):
-            if (
-                swa_view is not None
-                and swa_pool_slots is not None
-                and swa_pool_slots.numel() > 0
-            ):
-                write_kv_to_pool(
-                    kv_flat,
-                    swa_pool_slots[: bsz * q_len],
-                    swa_view,
-                    mask_negative=False,
-                )
+            decode_write_swa_bf16(
+                kv=kv,
+                slot_mapping=swa_pool_slots,
+                swa_pool_view=swa_view,
+                bsz=bsz,
+                q_len=q_len,
+                head_dim=self.head_dim,
+            )
 
-        # CSA / HCA: build / fill compressed topk; write compressed-K.
-        # Stage 3B: when the metadata is from CUDA-graph capture, dispatch
-        # to the vectorized (Python-branch-free) variants so the captured
-        # forward holds no data-dependent control flow. Eager Phase 2 path
-        # keeps the loop variants for byte-equal regression safety.
-        # Always use the vectorized compressor/indexer decode variants.
-        # Originally gated on cuda-graph capture for byte-equal regression
-        # safety; the loop variants do per-request .item() D2H syncs which
-        # serialize the GPU stream. vectorized is math-equivalent and
-        # graph-capturable.
-        use_vec = True
-        topk_idxs: torch.Tensor
-        if self.compress_ratio:
-            # Slice topk_buffer_compressed to actual bsz so indexer writes
-            # only the [:bsz] prefix (graph impl allocates [max_bs, ...]).
-            topk_buf_cmp = attn_metadata.topk_buffer_compressed[:bsz]
-            if self.indexer is not None:
-                # CSA layer (ratio=4): indexer fills topk_buf_cmp with
-                # per-request compressed-block indices and self-scatters
-                # its nested compressor's kv_cache + state back into the
-                # INDEXER_KV / INDEXER_STATE pool via the set_pool_context
-                # lifecycle (#50).
-                if use_vec:
-                    with record_function_range("dsv4.attn.indexer"):
-                        self.indexer.forward_decode_vectorized(
-                            x,
-                            qr,
-                            start_pos,
-                            topk_buf_cmp,
-                        )
-                else:
-                    with record_function_range("dsv4.attn.indexer"):
-                        self.indexer.forward_decode(
-                            x,
-                            qr,
-                            start_pos,
-                            topk_buf_cmp,
-                        )
-                # The Indexer owns INDEXER_KV/INDEXER_STATE only.  CSA
-                # attention reads CSA_KV, so the layer's main compressor
-                # must also emit the boundary compressed-K before the paged
-                # dual-pool gather below.
-                if use_vec:
-                    with record_function_range("dsv4.attn.compressor"):
-                        self.compressor.forward_decode_vectorized(x, start_pos)
-                else:
-                    with record_function_range("dsv4.attn.compressor"):
-                        self.compressor.forward_decode(x, start_pos)
-                # Stitch indexer output into topk_total compressed half (with +win offset).
-                topk_total = attn_metadata.topk_total_by_ratio[4][
-                    :bsz
-                ]  # [bsz, 1, win+K]
-                idx_with_off = torch.where(
-                    topk_buf_cmp >= 0,
-                    topk_buf_cmp + win,
-                    topk_buf_cmp,
-                )
-                topk_total[:, :, win:] = idx_with_off
-                topk_idxs = topk_total
-            else:
-                # HCA layer (ratio=128): use the dense-filled topk from builder.
-                topk_total = attn_metadata.topk_total_by_ratio[ratio][:bsz].clone()
-                cmp_part = topk_total[:, :, win:]
-                cmp_part = torch.where(cmp_part >= 0, cmp_part + win, cmp_part)
-                topk_total[:, :, win:] = cmp_part
-                topk_idxs = topk_total
-                # Compressor self-binds/writes/scatters compressed-K into
-                # the HCA_KV + HCA_STATE pool via set_pool_context lifecycle.
-                if _dbg_decode:
-                    self.compressor._dbg_prefix = f"L{self.layer_id:02d}_decode_cmp"
-                if use_vec:
-                    try:
-                        with record_function_range("dsv4.attn.compressor"):
-                            self.compressor.forward_decode_vectorized(x, start_pos)
-                    finally:
-                        if _dbg_decode:
-                            self.compressor._dbg_prefix = None
-                else:
-                    try:
-                        with record_function_range("dsv4.attn.compressor"):
-                            self.compressor.forward_decode(x, start_pos)
-                    finally:
-                        if _dbg_decode:
-                            self.compressor._dbg_prefix = None
-        else:
-            # SWA-only layer: just window topk. Already request-local ring slots.
-            topk_idxs = attn_metadata.topk_window_idxs[:bsz]
+    # ------------------------------------------------------------------
+    # Decode per-path bodies + shared epilogue (mirror source attention.py:1945-2185).
+    # ------------------------------------------------------------------
+    def _forward_decode_swa_only(
+        self,
+        q: torch.Tensor,
+        bsz: int,
+        q_len: int,
+        attn_metadata: "DSv4DecodeAttnMetadata",  # type: ignore[name-defined]
+        dbg_tag: str,
+    ) -> torch.Tensor:
+        """SWA-only layer (compress_ratio == 0) — single zero-copy sparse-attn
+        call via ``attn_bf16_swa_paged``."""
+        from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
+        from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
+        from rtp_llm.models_py.modules.dsv4.decode.attention_kernels_bf16 import (
+            attn_bf16_swa_paged,
+        )
+        from rtp_llm.models_py.modules.dsv4.decode.paged_topk_translator import (
+            build_req_id_per_token,
+            translate_local_to_global_slots,
+        )
+        from rtp_llm.models_py.modules.dsv4.decode.sparse_attn_decode_op import (
+            SparseAttnV4DecodeOp,
+        )
 
-        # Phase 2B-2b: capture raw (no +win offset) compressed local idx for
-        # the optional paged dual-pool read below. For CSA the indexer's
-        # output buffer holds raw values (the +win is added in-place later);
-        # for HCA we synthesize the dense [0..compressed_lens) range.
-        cmp_local_raw: Optional[torch.Tensor] = None
-        if self.compress_ratio:
-            ratio_l = int(self.compress_ratio)
-            if self.indexer is not None:
-                # CSA: indexer just wrote raw indices into topk_buf_cmp.
-                cmp_local_raw = attn_metadata.topk_buffer_compressed[:bsz].clone()
-            else:
-                # HCA: dense read of [0..compressed_lens) for each request.
-                cmp_lens_h = attn_metadata.compressed_lens.get(ratio_l)
-                tt_h = attn_metadata.topk_total_by_ratio.get(ratio_l)
-                if cmp_lens_h is not None and tt_h is not None:
-                    K_h = tt_h.shape[-1] - win
-                    dense = (
-                        torch.arange(K_h, device=cmp_lens_h.device, dtype=torch.int32)
-                        .view(1, 1, K_h)
-                        .expand(bsz, q_len, K_h)
-                    )
-                    cmp_local_raw = torch.where(
-                        dense < cmp_lens_h[:bsz].view(bsz, 1, 1),
-                        dense,
-                        torch.full_like(dense, -1),
-                    )
+        win = self.window_size
+        swa_view_cache = self._pool_view(SWA_KV)
+        swa_pool_bt = attn_metadata.pool_block_tables.get(SWA_KV)
+        assert (
+            swa_view_cache is not None
+            and attn_metadata.swa_abs_idx is not None
+            and swa_pool_bt is not None
+            and swa_pool_bt.numel() > 0
+        ), (
+            f"[DSV4 decode SWA-only] paged metadata required (layer={self.layer_id}); "
+            f"swa_view={'set' if swa_view_cache is not None else 'None'}, "
+            f"swa_abs_idx={'set' if attn_metadata.swa_abs_idx is not None else 'None'}, "
+            f"swa_pool_bt_numel={swa_pool_bt.numel() if swa_pool_bt is not None else 'None'}, "
+            f"kv_cache_bound={self._kv_cache is not None}"
+        )
 
-        # Sparse attn over per-request KV view.
-        # NOTE: kv_cache layout is [max_B, win + max_seq_len/ratio, head_dim].
-        # For SWA-only layers, only the [:, :win, :] slice carries valid data
-        # but the buffer is allocated as [max_B, win, head_dim] (no compressed
-        # tail). For CSA/HCA, the full buffer is used.
+        T = bsz * q_len
+        req_id = build_req_id_per_token(bsz, q_len, swa_pool_bt.device)
+        swa_eb = self._pool_entries_per_block(SWA_KV)
+        swa_local = attn_metadata.swa_abs_idx[:bsz].reshape(T, win)
+        with record_function_range("dsv4.attn.kv_gather_dense_or_paged"):
+            swa_global = translate_local_to_global_slots(
+                req_id, swa_pool_bt[:bsz], swa_local, swa_eb
+            )
+        if _rt.should_record_layer(self.layer_id):
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_swa_local", swa_local)
+            _rt.record_if_level(
+                2, f"L{self.layer_id:02d}_decode_swa_global", swa_global
+            )
+
         sparse_op = SparseAttnV4DecodeOp(
             n_heads=self.n_heads,
             head_dim=self.head_dim,
             softmax_scale=self.softmax_scale,
         )
+        return attn_bf16_swa_paged(
+            q=q,
+            swa_pool_view=swa_view_cache,
+            attn_sink=self.attn_sink,
+            swa_global_topk=swa_global,
+            bsz=bsz,
+            q_len=q_len,
+            win=win,
+            sparse_op=sparse_op,
+        )
 
-        # Phase 2B-2a paged read (SWA-only layers, zero-copy):
-        #   q[B, 1, H, D] → reshape view [1, B, H, D]
-        #   kv = swa_pool_view [num_global_slots, D] → unsqueeze [1, num_slots, D]
-        #   topk = swa_global_slots [B, win] → unsqueeze [1, B, win]
-        # No gather, no packed buffer — TileLang kernel does indirect read
-        # through ``kv[by, idxs[i], j]`` (mirrors vLLM/flash_mla pattern).
-        # Gated on env flag for safe rollout; CSA/HCA paths fall through to
-        # legacy register_buffer below until Phase 2B-2b.
-        from rtp_llm.models_py.modules.dsv4.attn_type import CSA_KV, HCA_KV, SWA_KV
+    def _forward_decode_csa(
+        self,
+        x: torch.Tensor,
+        qkv: "DecodeQKV",  # type: ignore[name-defined]
+        bsz: int,
+        q_len: int,
+        start_pos: torch.Tensor,
+        attn_metadata: "DSv4DecodeAttnMetadata",  # type: ignore[name-defined]
+        dbg_tag: str,
+    ) -> torch.Tensor:
+        """CSA layer (compress_ratio == 4). Indexer fills topk_buffer_compressed
+        and self-scatters into INDEXER_KV/STATE; main compressor writes the
+        CSA pool. Both call ``forward_decode_vectorized`` (graph-capturable,
+        no per-request D2H .item() syncs)."""
+        from rtp_llm.models_py.modules.dsv4.attn_type import CSA_KV
 
-        swa_pool_bt = attn_metadata.pool_block_tables.get(SWA_KV)
+        assert self.indexer is not None, "CSA layer requires an indexer"
+        topk_buf_cmp = attn_metadata.topk_buffer_compressed[:bsz]
+        with record_function_range("dsv4.attn.indexer"):
+            self.indexer.forward_decode_vectorized(x, qkv.qr, start_pos, topk_buf_cmp)
+        with record_function_range("dsv4.attn.compressor"):
+            self.compressor.forward_decode_vectorized(x, start_pos)
+        # CSA cmp_local_raw = indexer's just-written raw indices (no +win shift).
+        cmp_local_raw = attn_metadata.topk_buffer_compressed[:bsz].clone()
+        return self._forward_decode_compressed(
+            qkv.q,
+            cmp_local_raw,
+            bsz,
+            q_len,
+            attn_metadata,
+            cmp_attn_type=CSA_KV,
+            dbg_tag=dbg_tag,
+        )
+
+    def _forward_decode_hca(
+        self,
+        x: torch.Tensor,
+        qkv: "DecodeQKV",  # type: ignore[name-defined]
+        bsz: int,
+        q_len: int,
+        start_pos: torch.Tensor,
+        attn_metadata: "DSv4DecodeAttnMetadata",  # type: ignore[name-defined]
+        dbg_tag: str,
+    ) -> torch.Tensor:
+        """HCA layer (compress_ratio == 128). No indexer; main compressor
+        writes HCA_KV/STATE. ``cmp_local_raw`` is the dense
+        ``[0, compressed_lens)`` range per request."""
+        from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
+        from rtp_llm.models_py.modules.dsv4.attn_type import HCA_KV
+
+        assert self.indexer is None, "HCA layer must not have an indexer"
+        win = self.window_size
+        _dbg_decode = _rt.should_record_layer(self.layer_id)
+        if _dbg_decode:
+            self.compressor._dbg_prefix = f"L{self.layer_id:02d}_decode_cmp"
+        try:
+            with record_function_range("dsv4.attn.compressor"):
+                self.compressor.forward_decode_vectorized(x, start_pos)
+        finally:
+            if _dbg_decode:
+                self.compressor._dbg_prefix = None
+
+        ratio_l = int(self.compress_ratio)
+        cmp_lens_h = attn_metadata.compressed_lens.get(ratio_l)
+        tt_h = attn_metadata.topk_total_by_ratio.get(ratio_l)
+        assert cmp_lens_h is not None and tt_h is not None, (
+            f"[DSV4 decode HCA] compressed_lens / topk_total_by_ratio[{ratio_l}] "
+            f"missing (layer={self.layer_id})"
+        )
+        K_h = tt_h.shape[-1] - win
+        dense = (
+            torch.arange(K_h, device=cmp_lens_h.device, dtype=torch.int32)
+            .view(1, 1, K_h)
+            .expand(bsz, q_len, K_h)
+        )
+        cmp_local_raw = torch.where(
+            dense < cmp_lens_h[:bsz].view(bsz, 1, 1),
+            dense,
+            torch.full_like(dense, -1),
+        )
+        return self._forward_decode_compressed(
+            qkv.q,
+            cmp_local_raw,
+            bsz,
+            q_len,
+            attn_metadata,
+            cmp_attn_type=HCA_KV,
+            dbg_tag=dbg_tag,
+        )
+
+    def _forward_decode_compressed(
+        self,
+        q: torch.Tensor,
+        cmp_local_raw: torch.Tensor,
+        bsz: int,
+        q_len: int,
+        attn_metadata: "DSv4DecodeAttnMetadata",  # type: ignore[name-defined]
+        cmp_attn_type: int,
+        dbg_tag: str,
+    ) -> torch.Tensor:
+        """Shared CSA/HCA epilogue: translate pool-local → global slots for
+        both pools, then run ``attn_bf16_dual_paged`` (gather-into-packed +
+        TileLang sparse_attn with identity ``[0..win) | [win..win+K)`` topk).
+        """
+        from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
+        from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
+        from rtp_llm.models_py.modules.dsv4.decode.attention_kernels_bf16 import (
+            attn_bf16_dual_paged,
+        )
+        from rtp_llm.models_py.modules.dsv4.decode.paged_topk_translator import (
+            build_req_id_per_token,
+            translate_local_to_global_slots,
+        )
+        from rtp_llm.models_py.modules.dsv4.decode.sparse_attn_decode_op import (
+            SparseAttnV4DecodeOp,
+        )
+
+        win = self.window_size
         swa_view_cache = self._pool_view(SWA_KV)
-
-        # Decide which paged read variant to use, if any.
-        use_paged_swa_read = (
-            not self.compress_ratio
-            and swa_view_cache is not None
-            and attn_metadata.swa_abs_idx is not None
-            and swa_pool_bt is not None
-            and swa_pool_bt.numel() > 0
-        )
-        # CSA layer cmp pool = CSA_KV; HCA layer cmp pool = HCA_KV.
-        cmp_attn_type = (
-            CSA_KV
-            if (self.compress_ratio == 4)
-            else HCA_KV if (self.compress_ratio == 128) else None
-        )
-        cmp_pool_bt = (
-            attn_metadata.pool_block_tables.get(cmp_attn_type)
-            if cmp_attn_type is not None
-            else None
-        )
-        cmp_view_cache = (
-            self._pool_view(cmp_attn_type) if cmp_attn_type is not None else None
-        )
-        use_paged_dual_read = (
-            self.compress_ratio in (4, 128)
-            and swa_view_cache is not None
+        swa_pool_bt = attn_metadata.pool_block_tables.get(SWA_KV)
+        cmp_view_cache = self._pool_view(cmp_attn_type)
+        cmp_pool_bt = attn_metadata.pool_block_tables.get(cmp_attn_type)
+        assert (
+            swa_view_cache is not None
             and cmp_view_cache is not None
             and attn_metadata.swa_abs_idx is not None
             and swa_pool_bt is not None
@@ -1893,170 +1918,61 @@ class AttentionVLLM(nn.Module):
             and cmp_pool_bt is not None
             and cmp_pool_bt.numel() > 0
             and cmp_local_raw is not None
+        ), (
+            f"[DSV4 decode compressed] paged metadata required (layer={self.layer_id}, "
+            f"cmp_attn_type={cmp_attn_type}); "
+            f"swa_view={'set' if swa_view_cache is not None else 'None'}, "
+            f"cmp_view={'set' if cmp_view_cache is not None else 'None'}, "
+            f"swa_abs_idx={'set' if attn_metadata.swa_abs_idx is not None else 'None'}, "
+            f"swa_pool_bt_numel={swa_pool_bt.numel() if swa_pool_bt is not None else 'None'}, "
+            f"cmp_pool_bt_numel={cmp_pool_bt.numel() if cmp_pool_bt is not None else 'None'}, "
+            f"cmp_local_raw={'set' if cmp_local_raw is not None else 'None'}, "
+            f"kv_cache_bound={self._kv_cache is not None}"
         )
 
-        if use_paged_swa_read or use_paged_dual_read:
-            from rtp_llm.models_py.modules.dsv4.decode.paged_topk_translator import (
-                build_req_id_per_token,
-                gather_dual_pool_kv_packed,
-                translate_local_to_global_slots,
+        T = bsz * q_len
+        req_id = build_req_id_per_token(bsz, q_len, swa_pool_bt.device)
+        swa_eb = self._pool_entries_per_block(SWA_KV)
+        cmp_eb = self._pool_entries_per_block(cmp_attn_type)
+        swa_local = attn_metadata.swa_abs_idx[:bsz].reshape(T, win)
+        K_cmp = cmp_local_raw.shape[-1]
+        cmp_local = cmp_local_raw.reshape(T, K_cmp)
+        with record_function_range("dsv4.attn.kv_gather_dense_or_paged"):
+            swa_global = translate_local_to_global_slots(
+                req_id, swa_pool_bt[:bsz], swa_local, swa_eb
+            )
+            cmp_global = translate_local_to_global_slots(
+                req_id, cmp_pool_bt[:bsz], cmp_local, cmp_eb
             )
 
-            T = bsz * q_len
-            req_id = build_req_id_per_token(bsz, q_len, swa_pool_bt.device)
-            swa_eb = self._pool_entries_per_block(SWA_KV)
-            swa_local = attn_metadata.swa_abs_idx[:bsz].reshape(T, win)
-            with record_function_range("dsv4.attn.kv_gather_dense_or_paged"):
-                swa_global = translate_local_to_global_slots(
-                    req_id,
-                    swa_pool_bt[:bsz],
-                    swa_local,
-                    swa_eb,
-                )
-            if _dbg_decode:
-                _rt.record_if_level(
-                    2, f"L{self.layer_id:02d}_decode_topk_idxs", topk_idxs
-                )
-                _rt.record_if_level(
-                    2, f"L{self.layer_id:02d}_decode_swa_local", swa_local
-                )
-                _rt.record_if_level(
-                    2, f"L{self.layer_id:02d}_decode_swa_global", swa_global
-                )
-
-            if use_paged_swa_read:
-                # Zero-copy: pool view fed straight to TileLang kernel.
-                q_packed = (
-                    q.transpose(0, 1).contiguous() if q_len > 1 else q.transpose(0, 1)
-                )
-                with record_function_range("dsv4.attn.sparse_attn"):
-                    o_packed = sparse_op.forward(
-                        q_packed,
-                        swa_view_cache.unsqueeze(0),
-                        self.attn_sink,
-                        swa_global.view(1, T, win).contiguous(),
-                    )
-                o = o_packed.transpose(0, 1)
-            else:
-                # Dual-pool: TileLang kernel can't take 2 kv tensors so we
-                # gather both into a packed scratch and call sparse_attn
-                # with identity topk = arange(win+K). Memory cost noted in
-                # paged_topk_translator.gather_dual_pool_kv_packed docstring.
-                cmp_eb = self._pool_entries_per_block(cmp_attn_type)
-                K_cmp = cmp_local_raw.shape[-1]
-                cmp_local = cmp_local_raw.reshape(T, K_cmp)
-                with record_function_range("dsv4.attn.kv_gather_dense_or_paged"):
-                    cmp_global = translate_local_to_global_slots(
-                        req_id,
-                        cmp_pool_bt[:bsz],
-                        cmp_local,
-                        cmp_eb,
-                    )
-                if _dbg_decode:
-                    _rt.record_if_level(
-                        2, f"L{self.layer_id:02d}_decode_cmp_local", cmp_local
-                    )
-                    _rt.record_if_level(
-                        2, f"L{self.layer_id:02d}_decode_cmp_global", cmp_global
-                    )
-                assert q_len == 1, (
-                    "Phase 2B-2b dual-pool paged read currently supports "
-                    f"q_len=1 only (got {q_len})"
-                )
-                with record_function_range("dsv4.attn.kv_gather_dense_or_paged"):
-                    kv_packed_4d = gather_dual_pool_kv_packed(
-                        swa_view_cache,
-                        cmp_view_cache,
-                        swa_global,
-                        cmp_global,
-                        self.head_dim,
-                        bsz,
-                        q_len,
-                    )  # [B, 1, win+K, D]
-                kv_packed = kv_packed_4d.view(bsz, win + K_cmp, self.head_dim)
-                if _dbg_decode:
-                    _rt.record_if_level(
-                        2, f"L{self.layer_id:02d}_decode_kv_packed", kv_packed
-                    )
-                swa_valid = (swa_global >= 0).view(bsz, q_len, win)
-                cmp_valid = (cmp_global >= 0).view(bsz, q_len, K_cmp)
-                swa_topk = (
-                    torch.arange(win, device=kv_packed.device, dtype=torch.int32)
-                    .view(1, 1, win)
-                    .expand(bsz, q_len, win)
-                )
-                cmp_topk = (
-                    torch.arange(K_cmp, device=kv_packed.device, dtype=torch.int32)
-                    .add_(win)
-                    .view(1, 1, K_cmp)
-                    .expand(bsz, q_len, K_cmp)
-                )
-                packed_topk = torch.cat(
-                    [
-                        torch.where(swa_valid, swa_topk, torch.full_like(swa_topk, -1)),
-                        torch.where(cmp_valid, cmp_topk, torch.full_like(cmp_topk, -1)),
-                    ],
-                    dim=-1,
-                )
-                with record_function_range("dsv4.attn.sparse_attn"):
-                    o = sparse_op.forward(
-                        q, kv_packed, self.attn_sink, packed_topk.contiguous()
-                    )
-        else:
-            # Phase E5b: register_buffer retired.  Production decode must
-            # populate paged metadata; any path here is a caller bug.
-            # Include gating state so a regression surfaces precisely
-            # rather than as a bare "no path taken" error.
-            pool_bt_keys = (
-                list(attn_metadata.pool_block_tables.keys())
-                if attn_metadata.pool_block_tables is not None
-                else None
+        if _rt.should_record_layer(self.layer_id):
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_swa_local", swa_local)
+            _rt.record_if_level(
+                2, f"L{self.layer_id:02d}_decode_swa_global", swa_global
             )
-            raise RuntimeError(
-                "[DSV4] forward_decode requires paged metadata "
-                f"(layer={self.layer_id}, ratio={self.compress_ratio}); "
-                "Phase E5b removed the register_buffer fallback. "
-                f"swa_view_cache={'set' if swa_view_cache is not None else 'None'}, "
-                f"swa_pool_bt_numel={swa_pool_bt.numel() if swa_pool_bt is not None else 'None'}, "
-                f"swa_abs_idx={'set' if attn_metadata.swa_abs_idx is not None else 'None'}, "
-                f"cmp_attn_type={cmp_attn_type}, "
-                f"cmp_view_cache={'set' if cmp_view_cache is not None else 'None'}, "
-                f"cmp_pool_bt_numel={cmp_pool_bt.numel() if cmp_pool_bt is not None else 'None'}, "
-                f"cmp_local_raw={'set' if cmp_local_raw is not None else 'None'}, "
-                f"pool_bt_keys={pool_bt_keys}, "
-                f"kv_cache_bound={self._kv_cache is not None}"
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_cmp_local", cmp_local)
+            _rt.record_if_level(
+                2, f"L{self.layer_id:02d}_decode_cmp_global", cmp_global
             )
 
-        # Grouped output projection: inverse-RoPE + FP8 quant + wo_a einsum.
-        # Fused path collapses torch ``apply_rotary_emb_batched`` (5 launches)
-        # + per-group ``per_token_group_quant_fp8`` (G launches) into ONE
-        # Triton kernel emitting ``(fp8 [M,G,K], scale [M,G,K/512])`` in the
-        # einsum-expected UE8M0 layout.  Matches vLLM ``deepseek_v4_attention.py``.
-        with record_function_range("dsv4.attn.out_proj"):
-            if o.is_cuda and o.numel() > 0:
-                o_fp8, o_scale = fused_inv_rope_fp8_quant(
-                    o,
-                    freqs_cis_per_req,
-                    n_groups=self.n_groups,
-                    heads_per_group=self.n_heads // self.n_groups,
-                    nope_dim=self.head_dim - self.rope_head_dim,
-                    rope_head_dim=self.rope_head_dim,
-                )
-                del o
-                o = self._wo_a_einsum_from_fp8(o_fp8, o_scale, bsz, q_len)
-            else:
-                apply_rotary_emb_batched(o[..., -rd:], freqs_cis_per_req, inverse=True)
-                o = o.reshape(bsz, q_len, self.n_groups, -1)
-                wo_a_bf16 = _fp8_dequant_to_fp32(self.wo_a_w, self.wo_a_s).to(o.dtype)
-                wo_a = wo_a_bf16.view(self.n_groups, self.o_lora_rank, -1)
-                o = torch.einsum("bsgd,grd->bsgr", o, wo_a)
-            out = self._lin(self.wo_b, o.flatten(2))
-        if self.tp_size > 1:
-            from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
-
-            with record_function_range("dsv4.attn.tp_all_reduce"):
-                all_reduce(out, Group.TP)
-        return out
+        sparse_op = SparseAttnV4DecodeOp(
+            n_heads=self.n_heads,
+            head_dim=self.head_dim,
+            softmax_scale=self.softmax_scale,
+        )
+        return attn_bf16_dual_paged(
+            q=q,
+            swa_pool_view=swa_view_cache,
+            cmp_pool_view=cmp_view_cache,
+            swa_global_topk=swa_global,
+            cmp_global_topk=cmp_global,
+            attn_sink=self.attn_sink,
+            head_dim=self.head_dim,
+            bsz=bsz,
+            q_len=q_len,
+            win=win,
+            sparse_op=sparse_op,
+        )
 
     def forward(
         self,
@@ -2122,620 +2038,14 @@ class AttentionVLLM(nn.Module):
         is_batched_local = isinstance(start_pos, torch.Tensor) and start_pos.numel() > 1
         if seqlen > 1 and not is_batched_local and self.compress_ratio in (4, 128):
             return self._forward_prefill_vllm(x, start_pos, sequence_lengths)
-        win = self.window_size
-        ratio = self.compress_ratio
-        rd = self.rope_head_dim
-        device = x.device
-
-        cp_ctx = self._cp_ctx
-        is_batched = isinstance(start_pos, torch.Tensor) and start_pos.numel() > 1
-        is_batched_decode = is_batched and seqlen == 1
-        is_batched_prefill = is_batched and seqlen > 1
-        is_prefill_attn = is_batched_prefill or (not is_batched and seqlen > 1)
-        cp_on = cp_ctx is not None and cp_ctx.cp_size > 1 and is_prefill_attn
-
-        # ``any_cont`` decides whether prefill attention reads the temporary
-        # linear [current KV | current compressed KV] buffer (fresh prefill) or
-        # the framework paged pools (continuation / mixed prefill).  Compute it
-        # before topk construction because those two layouts use different
-        # index spaces.
-        if cp_on:
-            sp_int = int(cp_ctx.prefix_length)
-            any_cont = sp_int > 0
-        elif isinstance(start_pos, torch.Tensor):
-            if start_pos.numel() == 1:
-                sp_int = int(start_pos.item())
-            else:
-                sp_int = 0  # placeholder; batched paths use start_pos tensor directly
-            any_cont = bool((start_pos > 0).any().item())
-        else:
-            sp_int = int(start_pos)
-            any_cont = sp_int > 0
-
-        # Per-token RoPE angles.  Non-CP uses the contiguous window
-        # freqs_cis[start_pos:start_pos+seqlen]; CP selects at each
-        # rank-local token's GLOBAL position; batched prefill picks
-        # per-row positions via gather.
-        if cp_on:
-            freqs_cis = cp_freqs_cis_local(self.freqs_cis, cp_ctx)
-        elif is_batched_decode:
-            # Batched decode: each batch element at different position, seqlen=1
-            # Gather freqs for each batch element's position
-            positions = start_pos.to(torch.long)
-            freqs_cis = self.freqs_cis[positions]  # [B, rope_dim//2]
-            freqs_cis = freqs_cis.unsqueeze(1)  # [B, 1, rope_dim//2]
-        elif is_batched_prefill:
-            # Batched prefill: each row at its own sp, advanced by local
-            # index i ∈ [0, seqlen).  Returns [B, seqlen, rope_dim//2].
-            sp_t = start_pos.to(device=device, dtype=torch.long)  # [B]
-            positions = sp_t.unsqueeze(1) + torch.arange(
-                seqlen, device=device, dtype=torch.long
-            ).unsqueeze(
-                0
-            )  # [B, S]
-            pos_max = int(self.freqs_cis.shape[0])
-            positions = positions.clamp(max=pos_max - 1)
-            freqs_cis = self.freqs_cis[positions]  # [B, S, rope_dim//2]
-        else:
-            sp = int(start_pos) if isinstance(start_pos, torch.Tensor) else start_pos
-            freqs_cis = self.freqs_cis[sp : sp + seqlen]
-
-        # #50: Compressor / Indexer are fully pool-backed — no persistent
-        # Python buffers to allocate.  Bind freqs_cis once (idempotent).
-        if self.compress_ratio:
-            if self.compressor.freqs_cis is None:
-                self.compressor.freqs_cis = self.freqs_cis
-            if self.indexer is not None:
-                if self.indexer.freqs_cis is None:
-                    self.indexer.freqs_cis = self.freqs_cis
-                if self.indexer.compressor.freqs_cis is None:
-                    self.indexer.compressor.freqs_cis = self.freqs_cis
-
-        # Q path
-        with record_function_range("dsv4.attn.q_proj_norm_rope"):
-            qr = self._rmsnorm_weighted(
-                self._lin(self.wq_a, x), self.q_norm
-            )  # [B, S, q_lora_rank]
-            if _dbg:
-                _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_qr_norm", qr)
-            q = self._lin(self.wq_b, qr).unflatten(-1, (self.n_heads, self.head_dim))
-            if _dbg:
-                _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_q_pre_rmsnorm", q)
-            # Per-head QK RMSNorm (no learnable scale, per official code) + partial
-            # RoPE, single Triton launch.  ``fused_rmsnorm_rope`` handles both
-            # prefill (``freqs_cis`` per-position ``[S, rd/2]``) and batched-
-            # decode-in-prefill (``[B, 1, rd/2]``) via the unified freq_stride.
-            q = fused_rmsnorm_rope(q, None, freqs_cis, rd, eps=self.eps)
-        if _dbg:
-            _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_q_post_rope", q)
-            _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_freqs_cis", freqs_cis)
-
-        # KV path (single KV head) — rank-local under CP.
-        with record_function_range("dsv4.attn.kv_proj_norm_rope"):
-            kv_in = self._lin(self.wkv, x)
-            kv = fused_rmsnorm_rope(kv_in, self.kv_norm, freqs_cis, rd, eps=self.eps)
-        if _dbg:
-            _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_kv_post_rope_local", kv)
-
-        # Under CP prefill, start the KV all-gather as soon as rank-local KV
-        # is ready. Top-k/indexer work below is independent and can overlap
-        # with the collective; restore/wait happens at the first KV consumer.
-        kv_full_handle = None
-        if cp_on:
-            assert cp_ctx is not None
-            if kv.dim() != 3 or kv.size(0) != 1:
-                raise RuntimeError(
-                    f"CP attention KV expects [1, T_local, D], got {tuple(kv.shape)}"
-                )
-            # CP gather API is flattened token-major 2D; attention owns the
-            # module-local batch dimension.
-            with record_function_range("dsv4.attn.cp_kv_gather_start"):
-                kv_full_handle = cp_all_gather_full_async(kv.squeeze(0), cp_ctx)
-            kv_full = None
-            seqlen_full = cp_ctx.seq_len_full
-        else:
-            kv_full = kv
-            seqlen_full = seqlen
-        if cp_on:
-            prefill_kv_len = cp_ctx.seq_len_total
-        elif is_batched_prefill:
-            if sequence_lengths is not None:
-                row_seqlens_for_kv = sequence_lengths.to(
-                    device=device, dtype=torch.long
-                )
-            else:
-                row_seqlens_for_kv = torch.full(
-                    (bsz,), seqlen, device=device, dtype=torch.long
-                )
-            prefill_kv_len = int(
-                (start_pos.to(device=device, dtype=torch.long) + row_seqlens_for_kv)
-                .max()
-                .item()
-            )
-        else:
-            prefill_kv_len = sp_int + seqlen
-        prefill_swa_dense_len = prefill_kv_len
-        # Build topk_idxs — rows = rank-local Q; columns reference either the
-        # fresh-prefill [sliding | compressed] tensor or the continuation
-        # paged-pool [SWA absolute stream | compressed] tensor.
-        with record_function_range("dsv4.attn.topk.window"):
-            if cp_on:
-                topk_idxs = _get_window_topk_idxs_cp(
-                    win,
-                    bsz,
-                    prefill_kv_len,
-                    cp_ctx.global_positions,
-                )
-            elif is_batched_decode:
-                # Batched decode: vectorized topk_idxs — each batch at different ring position
-                sp = start_pos % win  # [B]
-                offsets = torch.arange(win, device=device)  # [win]
-                idxs = (sp.unsqueeze(1) + 1 + offsets.unsqueeze(0)) % win  # [B, win]
-                valid_count = torch.clamp(start_pos + 1, max=win)  # [B]
-                invalid = offsets.unsqueeze(0) < (win - valid_count.unsqueeze(1))
-                idxs = torch.where(invalid, -1, idxs)
-                topk_idxs = idxs.unsqueeze(1)  # [B, 1, win]
-            elif is_batched_prefill:
-                sp_t = start_pos.to(device=device, dtype=torch.long)
-                if sequence_lengths is not None:
-                    row_seqlens = sequence_lengths.to(device=device, dtype=torch.long)
-                else:
-                    row_seqlens = torch.full(
-                        (bsz,), seqlen, device=device, dtype=torch.long
-                    )
-                topk_idxs = _get_window_topk_idxs_batched(
-                    win, seqlen, sp_t, row_seqlens, device
-                )
-            else:
-                sp = (
-                    int(start_pos) if isinstance(start_pos, torch.Tensor) else start_pos
-                )
-                topk_idxs = _get_window_topk_idxs(win, bsz, seqlen, sp, device)
-        if self.compress_ratio:
-            # Fresh prefill attends over [current sliding KV | current compressed KV].
-            # Continuation prefill uses a dense absolute SWA view; decode keeps
-            # the compact [SWA ring | compressed] layout.
-            if is_prefill_attn:
-                offset = prefill_swa_dense_len
-            else:
-                offset = win
-            with record_function_range("dsv4.attn.topk.compress"):
-                if self.indexer is not None:
-                    if _dbg:
-                        self.indexer._dbg_prefix = f"L{self.layer_id:02d}_attn_idx"
-                    if is_batched_decode:
-                        # Indexer now supports tensor start_pos directly
-                        compress_idxs = self.indexer(x, qr, start_pos, offset)
-                    elif is_batched_prefill:
-                        # Indexer batched prefill passes through sp tensor;
-                        # Indexer handles per-row seqlens internally.
-                        compress_idxs = self.indexer(
-                            x,
-                            qr,
-                            start_pos,
-                            offset,
-                            sequence_lengths=sequence_lengths,
-                        )
-                    else:
-                        compress_idxs = self.indexer(x, qr, start_pos, offset)
-                    if _dbg:
-                        self.indexer._dbg_prefix = None
-                        _rt.record_if_level(
-                            2,
-                            f"L{self.layer_id:02d}_attn_compress_idxs",
-                            compress_idxs,
-                        )
-                elif cp_on:
-                    compress_idxs = _get_compress_topk_idxs_cp(
-                        ratio,
-                        bsz,
-                        prefill_kv_len,
-                        offset,
-                        cp_ctx.global_positions,
-                    )
-                elif is_batched_decode:
-                    # Vectorized compress_idxs for HCA batched decode (no indexer)
-                    n_entries = (start_pos + 1) // ratio  # [B]
-                    max_entries = int(n_entries.max().item())
-                    if max_entries > 0:
-                        entry_range = torch.arange(max_entries, device=device)
-                        valid = entry_range.unsqueeze(0) < n_entries.unsqueeze(
-                            1
-                        )  # [B, max_entries]
-                        c_idxs = torch.where(
-                            valid, entry_range.unsqueeze(0) + offset, -1
-                        )
-                        compress_idxs = c_idxs.unsqueeze(1)  # [B, 1, max_entries]
-                    else:
-                        compress_idxs = torch.full(
-                            (bsz, 1, 0), -1, device=device, dtype=torch.long
-                        )
-                elif is_batched_prefill:
-                    sp_t_cmp = start_pos.to(device=device, dtype=torch.long)
-                    if sequence_lengths is not None:
-                        row_seqlens_cmp = sequence_lengths.to(
-                            device=device, dtype=torch.long
-                        )
-                    else:
-                        row_seqlens_cmp = torch.full(
-                            (bsz,), seqlen, device=device, dtype=torch.long
-                        )
-                    compress_idxs = _get_compress_topk_idxs_batched(
-                        ratio, seqlen, offset, sp_t_cmp, row_seqlens_cmp, device
-                    )
-                else:
-                    sp_int = (
-                        int(start_pos)
-                        if isinstance(start_pos, torch.Tensor)
-                        else start_pos
-                    )
-                    compress_idxs = _get_compress_topk_idxs(
-                        ratio, bsz, seqlen, sp_int, offset, device
-                    )
-            with record_function_range("dsv4.attn.topk.cat_cast"):
-                topk_idxs = torch.cat([topk_idxs, compress_idxs], dim=-1)
-                topk_idxs = topk_idxs.long()
-        else:
-            with record_function_range("dsv4.attn.topk.cat_cast"):
-                topk_idxs = topk_idxs.long()
-
-        dbg_last_idx = None
-        dbg_pos_idx = None
-        dbg_pos_name = None
-        if _dbg:
-            if cp_on:
-                last_pos = cp_ctx.seq_len_total - 1
-                last_mask = (cp_ctx.global_positions == last_pos) & cp_ctx.local_is_real
-                last_idx_t = torch.nonzero(last_mask, as_tuple=False).flatten()
-                if last_idx_t.numel() > 0:
-                    dbg_last_idx = int(last_idx_t[0].item())
-                dbg_pos = getattr(_rt, "_DBG_GLOBAL_POS", -1)
-                if dbg_pos >= 0:
-                    pos_mask = (
-                        cp_ctx.global_positions == dbg_pos
-                    ) & cp_ctx.local_is_real
-                    pos_idx_t = torch.nonzero(pos_mask, as_tuple=False).flatten()
-                    if pos_idx_t.numel() > 0:
-                        dbg_pos_idx = int(pos_idx_t[0].item())
-                        dbg_pos_name = f"pos{dbg_pos}"
-            elif bsz == 1:
-                if sequence_lengths is not None and sequence_lengths.numel() > 0:
-                    dbg_last_idx = int(sequence_lengths.reshape(-1)[0].item()) - 1
-                else:
-                    dbg_last_idx = seqlen - 1
-                if dbg_last_idx < 0 or dbg_last_idx >= seqlen:
-                    dbg_last_idx = None
-                dbg_pos = getattr(_rt, "_DBG_GLOBAL_POS", -1)
-                if dbg_pos >= 0:
-                    dbg_pos_idx = dbg_pos - sp_int
-                    if dbg_pos_idx < 0 or dbg_pos_idx >= seqlen:
-                        dbg_pos_idx = None
-                    else:
-                        dbg_pos_name = f"pos{dbg_pos}"
-            if dbg_last_idx is not None:
-                _rt.record_if_level(
-                    2,
-                    f"L{self.layer_id:02d}_attn_q_last",
-                    q[:, dbg_last_idx : dbg_last_idx + 1],
-                )
-                _rt.record_if_level(
-                    2,
-                    f"L{self.layer_id:02d}_attn_topk_last",
-                    topk_idxs[:, dbg_last_idx : dbg_last_idx + 1],
-                )
-            if dbg_pos_idx is not None and dbg_pos_name is not None:
-                _rt.record_if_level(
-                    2,
-                    f"L{self.layer_id:02d}_attn_q_{dbg_pos_name}",
-                    q[:, dbg_pos_idx : dbg_pos_idx + 1],
-                )
-                _rt.record_if_level(
-                    2,
-                    f"L{self.layer_id:02d}_attn_topk_{dbg_pos_name}",
-                    topk_idxs[:, dbg_pos_idx : dbg_pos_idx + 1],
-                )
-
-        if cp_on:
-            assert kv_full_handle is not None
-            with record_function_range("dsv4.attn.cp_kv_gather_wait"):
-                kv_full = cp_wait_gather_full(kv_full_handle).unsqueeze(0)
-        if _dbg:
-            _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_kv_full", kv_full)
-
-        if is_prefill_attn:
-            if cp_on:
-                pool_read_start = cp_ctx.prefix_length
-                row_seqlens_for_pool = (
-                    torch.full((bsz,), seqlen_full, device=device, dtype=torch.long)
-                    if any_cont
-                    else seqlen_full
-                )
-            else:
-                pool_read_start = start_pos
-                row_seqlens_for_pool = (
-                    sequence_lengths
-                    if sequence_lengths is not None
-                    else torch.full((bsz,), seqlen, device=device, dtype=torch.long)
-                )
-            prefill_swa_dense_for_attn = None
-            if any_cont:
-                with record_function_range("dsv4.attn.kv_gather_dense_or_paged"):
-                    prefill_swa_dense_for_attn = (
-                        self._prefill_read_swa_dense_abs_from_pool(
-                            bsz,
-                            pool_read_start,
-                            row_seqlens_for_pool,
-                            prefill_swa_dense_len,
-                            current_kv_full=kv_full,
-                        )
-                    )
-            # Phase E5b: direct SWA pool write from kv_full (no register_buffer
-            # intermediary).  The framework SWA pool is absolute-positioned;
-            # prefix KV for continuation prefill already lives in the pool from
-            # prior calls.
-            if cp_on:
-                # CP prefill has rank-local Q but kv_full is already all-gathered
-                # in logical order for the current input.  Continuation prefill
-                # must preserve the reused prefix offset when writing SWA slots;
-                # otherwise the suffix overwrites positions 0..N.
-                swa_write_start = cp_ctx.prefix_length
-                swa_write_lengths = torch.full(
-                    (bsz,), seqlen_full, device=device, dtype=torch.long
-                )
-            else:
-                swa_write_start = start_pos
-                swa_write_lengths = sequence_lengths
-            with record_function_range("dsv4.attn.swa_pool_write"):
-                self._prefill_write_swa_to_pool(
-                    bsz, kv_full, swa_write_start, swa_write_lengths
-                )
-            if self.compress_ratio:
-                # #50: compressor self-binds kv_state / score_state /
-                # kv_cache from the framework pool at entry, runs body,
-                # scatters back at exit.  Pool context was set by the
-                # outer ``forward`` wrapper in its try/finally.
-                if _dbg:
-                    self.compressor._dbg_prefix = f"L{self.layer_id:02d}_attn_cmp"
-                with record_function_range("dsv4.attn.compressor"):
-                    kv_compress = self.compressor(
-                        x, start_pos, sequence_lengths=sequence_lengths
-                    )
-                if _dbg:
-                    self.compressor._dbg_prefix = None
-                    if kv_compress is not None:
-                        _rt.record_if_level(
-                            2,
-                            f"L{self.layer_id:02d}_attn_kv_compress",
-                            kv_compress,
-                        )
-                if kv_compress is not None:
-                    cmp_at = None
-                    if self.compress_ratio == 4:
-                        from rtp_llm.models_py.modules.dsv4.attn_type import CSA_KV
-
-                        cmp_at = CSA_KV
-                    elif self.compress_ratio == 128:
-                        from rtp_llm.models_py.modules.dsv4.attn_type import HCA_KV
-
-                        cmp_at = HCA_KV
-                    cmp_write_start = sp_int // ratio
-                    if cmp_at is not None:
-                        self._prefill_paged_write_kv_range(
-                            cmp_at, kv_compress, bsz, cmp_write_start
-                        )
-                    if not any_cont:
-                        kv_cat = torch.cat([kv_full, kv_compress], dim=1)
-                    else:
-                        # Phase E5b: pool-only read.  Register_buffer is
-                        # gone; continuation prefill gathers SWA+compressed
-                        # from the framework pool.  Must have paged ctx.
-                        # Mixed batches (some sp==0, some sp>0) also go
-                        # through pool read — sp==0 rows' KV was just
-                        # written to the pool above, so round-trip is
-                        # byte-equal.
-                        with record_function_range(
-                            "dsv4.attn.kv_gather_dense_or_paged"
-                        ):
-                            kv_cat = self._gather_kv_cache_dense_from_pool(
-                                bsz,
-                                pool_read_start,
-                                row_seqlens_for_pool,
-                                swa_dense_len=prefill_swa_dense_len,
-                                swa_dense_override=prefill_swa_dense_for_attn,
-                                cmp_T=prefill_kv_len // ratio,
-                            )
-                        assert kv_cat is not None, (
-                            "Phase E5b: continuation prefill requires paged "
-                            "ctx (pass kv_cache=... + block_tables_by_type=... "
-                            "to Attention.forward via V4Transformer)."
-                        )
-                        cmp_base = prefill_swa_dense_len + cmp_write_start
-                        cmp_end = min(cmp_base + kv_compress.shape[1], kv_cat.shape[1])
-                        if cmp_end > cmp_base:
-                            kv_cat[:bsz, cmp_base:cmp_end] = kv_compress[
-                                :bsz, : cmp_end - cmp_base
-                            ].to(kv_cat.dtype)
-                else:
-                    # CompressorVLLM returns None — it wrote the current
-                    # chunk's compressed K to the framework pool internally
-                    # via ``self._launch``.  We still need the [sliding |
-                    # compressed] cat layout downstream because the indexer's
-                    # topk indices reference compressed-pool offsets shifted
-                    # by ``prefill_swa_dense_len``.  Gather both segments from
-                    # the pool; pass ``kv_full`` as the SWA override on fresh
-                    # prefill so the sliding read avoids a pool round-trip.
-                    with record_function_range("dsv4.attn.kv_gather_dense_or_paged"):
-                        kv_cat = self._gather_kv_cache_dense_from_pool(
-                            bsz,
-                            pool_read_start,
-                            row_seqlens_for_pool,
-                            swa_dense_len=prefill_swa_dense_len,
-                            swa_dense_override=(
-                                kv_full[:bsz]
-                                if not any_cont
-                                else prefill_swa_dense_for_attn
-                            ),
-                            cmp_T=prefill_kv_len // ratio,
-                        )
-                    assert (
-                        kv_cat is not None
-                    ), "CompressorVLLM kv_cat assembly requires paged ctx."
-            else:
-                if not any_cont:
-                    kv_cat = kv_full
-                else:
-                    with record_function_range("dsv4.attn.kv_gather_dense_or_paged"):
-                        kv_cat = self._gather_kv_cache_dense_from_pool(
-                            bsz,
-                            pool_read_start,
-                            row_seqlens_for_pool,
-                            swa_dense_len=prefill_swa_dense_len,
-                            swa_dense_override=prefill_swa_dense_for_attn,
-                        )
-                    assert (
-                        kv_cat is not None
-                    ), "Phase E5b: continuation prefill requires paged ctx."
-            if _dbg:
-                _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_kv_cat", kv_cat)
-                if dbg_last_idx is not None and bsz == 1:
-                    idx = topk_idxs[0, dbg_last_idx]
-                    valid = idx >= 0
-                    if valid.any():
-                        safe_idx = idx[valid].to(torch.long)
-                        _rt.record_if_level(
-                            2,
-                            f"L{self.layer_id:02d}_attn_kv_selected_last",
-                            kv_cat[:, safe_idx],
-                        )
-                if dbg_pos_idx is not None and dbg_pos_name is not None and bsz == 1:
-                    idx = topk_idxs[0, dbg_pos_idx]
-                    valid = idx >= 0
-                    if valid.any():
-                        safe_idx = idx[valid].to(torch.long)
-                        _rt.record_if_level(
-                            2,
-                            f"L{self.layer_id:02d}_attn_kv_selected_{dbg_pos_name}",
-                            kv_cat[:, safe_idx],
-                        )
-            with record_function_range("dsv4.attn.sparse_attn"):
-                if _tl_kernels.tilelang_available():
-                    o = _tl_kernels.sparse_attn(
-                        q, kv_cat, self.attn_sink, topk_idxs, self.softmax_scale
-                    )
-                else:
-                    o = _sparse_attn(
-                        q, kv_cat, self.attn_sink, topk_idxs, self.softmax_scale
-                    )
-        else:
-            # Phase E5b: eager decode via Attention.forward removed — the
-            # register_buffer kv_cache that this arm relied on is retired.
-            # Production decode must go through Attention.forward_decode with
-            # paged metadata; any caller here is stale test or warmup code.
-            raise NotImplementedError(
-                "Phase E5b: Attention.forward eager-decode path retired "
-                "(register_buffer kv_cache removed). Use forward_decode + "
-                "DSv4DecodeAttnMetadata with paged pool descriptors."
-            )
-
-        if _dbg:
-            _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_sparse_out", o)
-            _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_topk_idxs", topk_idxs)
-            if dbg_last_idx is not None:
-                _rt.record_if_level(
-                    2,
-                    f"L{self.layer_id:02d}_attn_sparse_out_last",
-                    o[:, dbg_last_idx : dbg_last_idx + 1],
-                )
-            if dbg_pos_idx is not None and dbg_pos_name is not None:
-                _rt.record_if_level(
-                    2,
-                    f"L{self.layer_id:02d}_attn_sparse_out_{dbg_pos_name}",
-                    o[:, dbg_pos_idx : dbg_pos_idx + 1],
-                )
-        if not _dbg:
-            del q, kv_cat, topk_idxs
-
-        with record_function_range("dsv4.attn.out_proj"):
-            if (
-                _dbg
-                and os.environ.get("DSV4_MOEDBG_PREFILL_EXPLICIT_OUT_PROJ", "1") != "0"
-            ):
-                # Keep the debuggable explicit path when tensor probes are enabled.
-                apply_rotary_emb(o[..., -rd:], freqs_cis, inverse=True)
-                _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_o_post_inv_rope", o)
-                if dbg_last_idx is not None:
-                    _rt.record_if_level(
-                        2,
-                        f"L{self.layer_id:02d}_attn_o_post_inv_rope_last",
-                        o[:, dbg_last_idx : dbg_last_idx + 1],
-                    )
-                if dbg_pos_idx is not None and dbg_pos_name is not None:
-                    _rt.record_if_level(
-                        2,
-                        f"L{self.layer_id:02d}_attn_o_post_inv_rope_{dbg_pos_name}",
-                        o[:, dbg_pos_idx : dbg_pos_idx + 1],
-                    )
-                o = o.reshape(bsz, seqlen, self.n_groups, -1)
-                wo_a_bf16 = _fp8_dequant_to_fp32(self.wo_a_w, self.wo_a_s).to(o.dtype)
-                wo_a = wo_a_bf16.view(self.n_groups, self.o_lora_rank, -1)
-                o = torch.einsum("bsgd,grd->bsgr", o, wo_a)
-            # Grouped output projection: inverse-RoPE + FP8 quant + wo_a einsum.
-            # Same fused path as forward_decode (line ~1648) — collapses
-            # apply_rotary_emb (1 launch) + per-group per_token_group_quant_fp8
-            # (G launches) into ONE Triton kernel emitting (fp8 [M,G,K], scale
-            # [M,G,K/512]) in the einsum-expected UE8M0 layout. Matches vLLM
-            # ``deepseek_v4_attention.py``.
-            elif o.is_cuda and o.numel() > 0:
-                # The Triton kernel computes ``b_idx = pid_token // q_len_per_b``
-                # to index freqs. Decode uses [B, rd/2] freqs with q_len_per_b=1
-                # so b_idx == request index. In prefill we have per-position
-                # freqs [S, rd/2]; pass o as 3D [B*S, H, D] with freqs_cis_per_b
-                # = freqs.expand(B*S, ...) so q_len_per_b=1 and b_idx == token
-                # index → each token reads its own row.
-                o_3d = o.reshape(bsz * seqlen, self.n_heads, self.head_dim)
-                if freqs_cis.dim() == 2:
-                    # Per-position freqs [S, rd/2] — broadcast to [B*S, rd/2].
-                    freqs_per_token = (
-                        freqs_cis.unsqueeze(0)
-                        .expand(bsz, -1, -1)
-                        .reshape(bsz * seqlen, -1)
-                        .contiguous()
-                    )
-                else:
-                    freqs_per_token = freqs_cis.contiguous()
-                o_fp8, o_scale = fused_inv_rope_fp8_quant(
-                    o_3d,
-                    freqs_per_token,
-                    n_groups=self.n_groups,
-                    heads_per_group=self.n_heads // self.n_groups,
-                    nope_dim=self.head_dim - self.rope_head_dim,
-                    rope_head_dim=self.rope_head_dim,
-                )
-                del o, o_3d, freqs_per_token
-                o = self._wo_a_einsum_from_fp8(o_fp8, o_scale, bsz, seqlen)
-            else:
-                apply_rotary_emb(o[..., -rd:], freqs_cis, inverse=True)
-                o = o.reshape(bsz, seqlen, self.n_groups, -1)
-                wo_a_bf16 = _fp8_dequant_to_fp32(self.wo_a_w, self.wo_a_s).to(o.dtype)
-                wo_a = wo_a_bf16.view(self.n_groups, self.o_lora_rank, -1)
-                o = torch.einsum("bsgd,grd->bsgr", o, wo_a)
-            if _dbg:
-                _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_wo_a_out", o)
-            out = self._lin(self.wo_b, o.flatten(2))
-        if _dbg:
-            _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_wo_b_out_pre_ar", out)
-        if self.tp_size > 1:
-            # wo_b is row-split along K — each rank produces a partial
-            # sum; AR combines across the tp group.
-            from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
-
-            with record_function_range("dsv4.attn.tp_all_reduce"):
-                all_reduce(out, Group.TP)
-            if _dbg:
-                _rt.record_if_level(
-                    2, f"L{self.layer_id:02d}_attn_wo_b_out_post_ar", out
-                )
-        return out
+        raise NotImplementedError(
+            "AttentionVLLM._forward_body legacy fall-through removed (BF16 vLLM-only "
+            f"branch). Got seqlen={seqlen}, is_batched_local={is_batched_local}, "
+            f"compress_ratio={self.compress_ratio}. Only single-request prefill with "
+            "compress_ratio in {4, 128} is supported; SWA-only layers, batched "
+            "prefill, and eager decode via Attention.forward are not supported on "
+            "this branch."
+        )
 
     # ==================================================================
     # vLLM-flow prefill (mirror of source ``fp8/attention.py``'s
