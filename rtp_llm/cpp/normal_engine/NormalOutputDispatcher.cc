@@ -18,8 +18,34 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
     RTP_LLM_CHECK(total_batch_size_out == (size_t)sampler_output.token_ids.size(0));
     // token_ids and success may be CUDA tensors (Sampler keeps them on GPU to avoid D2H sync during sampling).
     // Move to CPU once here so dispatchSingleStream can use data_ptr safely.
-    const torch::Tensor token_ids_cpu =
-        sampler_output.token_ids.defined() ? sampler_output.token_ids.cpu() : torch::Tensor();
+    //
+    // sampler_output.token_ids has shape [B, step+1] (the cumulative all-token buffer the sampler
+    // writes new tokens into at column `step`). The non-beam path in dispatchSingleStream only
+    // reads the LAST column (NormalOutputDispatcher.cc:131-134), so a full-row DtoH is wasted —
+    // at long contexts the row width = max_seq_len and the per-step pageable copy dominates wall
+    // time (e.g. bs=128/seq=65K → 32 MiB DtoH vs 512 B actually consumed). Beam search consumes
+    // the whole batch row at line 159, so keep the wide copy on that branch only.
+    bool any_beam_search = false;
+    if (sampler_output.token_ids.defined() && sampler_output.token_ids.size(1) > 1) {
+        for (auto& stream : stream_groups.allStreams()) {
+            if (stream->currentNumBeams() > 1 || stream->nextNumBeams() > 1) {
+                any_beam_search = true;
+                break;
+            }
+        }
+    }
+    torch::Tensor token_ids_cpu;
+    if (sampler_output.token_ids.defined()) {
+        if (any_beam_search) {
+            token_ids_cpu = sampler_output.token_ids.cpu();
+        } else {
+            // Slice the last column on-device so the DtoH is only [B, 1] int32. token_stride
+            // collapses to 1 and `(idx * 1) + (1 - 1) == idx` keeps the indexing at lines 131-134
+            // pointing at the new token for each output row.
+            const int64_t last_col = sampler_output.token_ids.size(1) - 1;
+            token_ids_cpu          = sampler_output.token_ids.narrow(1, last_col, 1).contiguous().cpu();
+        }
+    }
     RTP_LLM_LOG_DEBUG("new_all_token_ids = [%s]", tensorDebugStringWithData<int32_t>(token_ids_cpu).c_str());
     const torch::Tensor success_cpu = sampler_output.success.defined() ? sampler_output.success.cpu() : torch::Tensor();
     int                 batch_idx_in     = 0;
