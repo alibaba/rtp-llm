@@ -185,7 +185,6 @@ class PyAttentionInputs:
     dtype: TypeMeta
     input_lengths: torch.Tensor
     is_cuda_graph: bool
-    is_draft_prefill_cuda_graph_capture: bool
     is_prefill: bool
     is_s_padded: bool
     is_target_verify: bool

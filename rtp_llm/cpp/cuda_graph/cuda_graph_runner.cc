@@ -475,7 +475,14 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
             torch::full({int(max_bs_)}, max_seq_len_ - num_tokens_per_bs_, options_cpu_int32_).pin_memory();
         inputs.attention_inputs.prefix_lengths_d = inputs.attention_inputs.prefix_lengths.cuda();
     } else if (is_prefill_cuda_graph_mode_) {
-        inputs.attention_inputs.prefix_lengths   = torch::zeros({int(max_bs_)}, options_cpu_int32_).pin_memory();
+        // ROCm needs prefix>0 here for AiterPrefillImplPaged.support(); CUDA keeps prefix=0.
+#if USING_ROCM
+        const int prefix_init = isMtpDraftPrefillCudaGraph() ? max_seq_len_ : 0;
+#else
+        const int prefix_init = 0;
+#endif
+        inputs.attention_inputs.prefix_lengths =
+            torch::full({int(max_bs_)}, prefix_init, options_cpu_int32_).pin_memory();
         inputs.attention_inputs.prefix_lengths_d = inputs.attention_inputs.prefix_lengths.cuda();
     } else {
         // Decode CUDA graph mode: prefix_lengths should be empty tensor
@@ -586,7 +593,6 @@ void CudaGraphRunner::initCapture() {
 
         torch::Tensor output;
         capture_mem_hold_ = CaptureMemoryHold(output, inputs, is_prefill_cuda_graph_mode_);
-        applyDraftPrefillGraphCaptureFlag(capture_mem_hold_.py_model_inputs_.attention_inputs);
         initKernelInternalMemory();
 
         // get real output data type (params already prepared in attn impl __init__/create_params)
@@ -691,10 +697,6 @@ void CudaGraphRunner::replayAndSyncCheck(int key, const char* key_type) {
     RTP_LLM_LOG_INFO("replay end check for %s %d", key_type, key);
 }
 
-void CudaGraphRunner::applyDraftPrefillGraphCaptureFlag(torch_ext::PyAttentionInputs& attn) {
-    attn.is_draft_prefill_cuda_graph_capture = isMtpDraftPrefillCudaGraph();
-}
-
 void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens) {
     // Common slice operations for input_ids and padding_offset
     inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1;
@@ -768,7 +770,6 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
         capture_mem_hold_.py_model_inputs_.attention_inputs.kv_cache_layer_to_group;
     inputs.bert_embedding_inputs        = capture_mem_hold_.py_model_inputs_.bert_embedding_inputs;
     inputs.attention_inputs.is_s_padded = true;
-    applyDraftPrefillGraphCaptureFlag(inputs.attention_inputs);
 }
 
 CaptureMemoryHold CudaGraphRunner::createCaptureMemoryHold(PyModelInputs& inputs, int tokens_count) {
