@@ -99,6 +99,10 @@ void PrefillServerCallerContext::handleReadChunkLocked(const GenerateOutputsPB& 
         response_received_ = true;
     }
     if (response.has_error_info() && response.error_info().error_code() != ErrorCodePB::NONE_ERROR) {
+        error_info_ =
+            ErrorInfo(transRPCErrorCode(response.error_info().error_code()), response.error_info().error_message());
+        status_   = grpc::Status(grpc::StatusCode::INTERNAL, error_info_.ToString());
+        finished_ = true;
         RTP_LLM_LOG_WARNING(
             "PrefillServerCallerContext::checkDone: prefill response error, unique_key: %s, error_code: %s, error_message: %s",
             unique_key_.c_str(),
@@ -159,7 +163,7 @@ void PrefillServerCallerContext::checkDone() {
     if (got_tag == reinterpret_cast<void*>(1)) {
         if (ok) {
             handleReadChunkLocked(read_response_);
-            if (reader_) {
+            if (!finished_ && reader_) {
                 read_response_.Clear();
                 reader_->Read(&read_response_, reinterpret_cast<void*>(1));
             }
@@ -178,8 +182,16 @@ void PrefillServerCallerContext::checkDone() {
         if (!ok) {
             status_ = grpc::Status(grpc::StatusCode::INTERNAL, "prefill stream finish event failed");
         }
+        if (error_info_.hasError()) {
+            return;
+        }
         if (cancel_requested_ && status_.ok()) {
             status_ = grpc::Status(grpc::StatusCode::CANCELLED, "prefill request cancelled");
+        }
+        if (!status_.ok() && !cancel_requested_) {
+            error_info_ = ErrorInfo(status_.error_code() == grpc::StatusCode::CANCELLED ? ErrorCode::CANCELLED :
+                                                                                          ErrorCode::UNKNOWN_ERROR,
+                                    status_.error_message());
         }
         if (!status_.ok()) {
             RTP_LLM_LOG_WARNING(

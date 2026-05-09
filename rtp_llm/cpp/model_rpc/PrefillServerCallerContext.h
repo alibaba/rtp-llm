@@ -1,6 +1,7 @@
 #pragma once
 
 #include "grpc++/grpc++.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include <memory>
 #include <shared_mutex>
@@ -36,9 +37,20 @@ public:
         return finished_ && status_.ok() && response_received_;
     }
 
+    bool failed() const {
+        std::shared_lock<std::shared_mutex> lock(state_mutex_);
+        return finished_
+               && (error_info_.hasError() || (!status_.ok() && status_.error_code() != grpc::StatusCode::CANCELLED));
+    }
+
     // Get response (only valid after done() returns true)
     const GenerateOutputsPB& response() const {
         return response_;
+    }
+
+    ErrorInfo errorInfo() const {
+        std::shared_lock<std::shared_mutex> lock(state_mutex_);
+        return error_info_;
     }
 
     // Cancel the ongoing RPC call
@@ -67,6 +79,7 @@ private:
     GenerateOutputsPB response_;
     GenerateOutputsPB read_response_;
     grpc::Status      status_;
+    ErrorInfo         error_info_;
 
     // State
     bool finished_          = false;

@@ -21,7 +21,12 @@ public:
                                     grpc::ServerWriter<GenerateOutputsPB>* response_writer);
 
 private:
-    void updateAuxInfo(GenerateOutputsPB& outputs_pb, std::shared_ptr<GenerateStream>& stream);
+    void         updateAuxInfo(GenerateOutputsPB& outputs_pb, std::shared_ptr<GenerateStream>& stream);
+    grpc::Status pollStreamOutputWithPrefill(grpc::ServerContext*                               context,
+                                             const std::string&                                 request_key,
+                                             WriterInterface*                                   writer,
+                                             std::shared_ptr<GenerateStream>&                   stream,
+                                             const std::shared_ptr<PrefillServerCallerContext>& prefill_ctx);
 
 private:
     std::atomic<int64_t>                 unique_key_id_{0};

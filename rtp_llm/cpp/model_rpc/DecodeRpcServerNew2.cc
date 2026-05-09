@@ -2,9 +2,81 @@
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/engine_base/Host.h"
 #include "autil/NetUtil.h"
+#include <chrono>
 #include <cstring>
+#include <thread>
 
 namespace rtp_llm {
+
+grpc::Status
+DecodeRpcServerNew2::pollStreamOutputWithPrefill(grpc::ServerContext*                               context,
+                                                 const std::string&                                 request_key,
+                                                 WriterInterface*                                   writer,
+                                                 std::shared_ptr<GenerateStream>&                   stream,
+                                                 const std::shared_ptr<PrefillServerCallerContext>& prefill_ctx) {
+    auto propagate_prefill_error = [&]() -> grpc::Status {
+        if (!prefill_ctx || !prefill_ctx->failed()) {
+            return grpc::Status::OK;
+        }
+        auto error_info = prefill_ctx->errorInfo();
+        if (error_info.hasError() && !stream->hasError()) {
+            stream->reportError(error_info.code(), error_info.ToString());
+        }
+        return serializeErrorMsg(request_key, error_info);
+    };
+
+    while (stream->isActive() || stream->hasOutput()) {
+        auto prefill_status = propagate_prefill_error();
+        if (!prefill_status.ok()) {
+            return prefill_status;
+        }
+        if (context->IsCancelled()) {
+            stream->reportError(ErrorCode::CANCELLED, "request cancelled by user");
+            RTP_LLM_LOG_WARNING("request [%s] cancelled by user", request_key.c_str());
+            return grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled by user");
+        }
+        if (!stream->hasOutput()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            continue;
+        }
+
+        const auto result = stream->nextOutput();
+        if (!result.ok()) {
+            if (result.status().code() != ErrorCode::FINISHED) {
+                return serializeErrorMsg(request_key, result.status());
+            } else {
+                break;
+            }
+        }
+        RTP_LLM_LOG_DEBUG("request [%s] generate next output success", request_key.c_str());
+        GenerateOutputsPB outputs_pb;
+
+        QueryConverter::transResponse(&outputs_pb,
+                                      &(result.value()),
+                                      stream->generateConfig()->aux_info,
+                                      maga_init_params_.misc_config.aux_string,
+                                      stream->specialTokens().eos_token_id);
+        updateAuxInfo(outputs_pb, stream);
+        if (!writer->Write(outputs_pb)) {
+            stream->reportError(ErrorCode::CANCELLED, "write outputs pb failed");
+            RTP_LLM_LOG_WARNING("request [%s] write outputs pb failed", request_key.c_str());
+            return grpc::Status(grpc::StatusCode::INTERNAL, "request write outputs pb failed");
+        }
+        if (stream->hasEvent(StreamEvents::NeedRemoteGenerate)) {
+            break;
+        }
+    }
+
+    auto prefill_status = propagate_prefill_error();
+    if (!prefill_status.ok()) {
+        return prefill_status;
+    }
+    if (stream->hasError()) {
+        return serializeErrorMsg(request_key, stream->statusInfo());
+    }
+    RTP_LLM_LOG_DEBUG("request [%s] decode generate done", request_key.c_str());
+    return grpc::Status::OK;
+}
 
 grpc::Status DecodeRpcServerNew2::init(const EngineInitParams&                                maga_init_params,
                                        py::object                                             mm_process_engine,
@@ -143,8 +215,11 @@ grpc::Status DecodeRpcServerNew2::GenerateStreamCall(grpc::ServerContext*       
 
     engine_->enqueue(stream);
 
-    generate_context.error_status =
-        pollStreamOutput(server_context, generate_context.request_key, response_writer, generate_context.getStream());
+    generate_context.error_status = pollStreamOutputWithPrefill(server_context,
+                                                                generate_context.request_key,
+                                                                response_writer,
+                                                                generate_context.getStream(),
+                                                                prefill_caller_ctx);
     meta_->dequeue(generate_context.request_id, generate_context.getStream());
 
     if (prefill_caller_ctx && (!generate_context.error_status.ok() || server_context->IsCancelled())) {

@@ -159,7 +159,7 @@ protected:
     PrefillServerCaller caller_{"prefill-server-caller-test"};
 };
 
-TEST_F(PrefillServerCallerTest, PreserveFirstReadResponseSnapshotThroughPublicApi) {
+TEST_F(PrefillServerCallerTest, ErrorChunkMarksContextFailedAndPreservesFirstSnapshot) {
     FakePrefillRpcServer server(
         std::make_unique<FakePrefillRpcService>(FakePrefillRpcService::Mode::kFirstChunkSnapshot));
     ASSERT_TRUE(server.start());
@@ -167,7 +167,10 @@ TEST_F(PrefillServerCallerTest, PreserveFirstReadResponseSnapshotThroughPublicAp
     auto context = callPrefill(server, 1001, "snapshot");
     ASSERT_NE(context, nullptr);
     ASSERT_TRUE(waitDone(context));
-    EXPECT_TRUE(context->success());
+    EXPECT_FALSE(context->success());
+    EXPECT_TRUE(context->failed());
+    EXPECT_EQ(context->errorInfo().code(), ErrorCode::UNKNOWN_ERROR);
+    EXPECT_EQ(context->errorInfo().ToString(), "first chunk error");
 
     const auto& response = context->response();
     ASSERT_TRUE(response.has_error_info());
@@ -215,6 +218,9 @@ TEST_F(PrefillServerCallerTest, RpcFailureWithoutAnyChunkStaysUnsuccessful) {
     ASSERT_NE(context, nullptr);
     ASSERT_TRUE(waitDone(context));
     EXPECT_FALSE(context->success());
+    EXPECT_TRUE(context->failed());
+    EXPECT_EQ(context->errorInfo().code(), ErrorCode::UNKNOWN_ERROR);
+    EXPECT_EQ(context->errorInfo().ToString(), "prefill failed before any response");
     EXPECT_FALSE(context->response().has_error_info());
 }
 
