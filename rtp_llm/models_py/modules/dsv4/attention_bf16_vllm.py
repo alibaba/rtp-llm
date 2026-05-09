@@ -1832,41 +1832,22 @@ class AttentionBF16VLLM(nn.Module):
         dbg_tag: str,
     ) -> torch.Tensor:
         """HCA layer (compress_ratio == 128). No indexer; main compressor
-        writes HCA_KV/STATE. ``cmp_local_raw`` is the dense
-        ``[0, compressed_lens)`` range per request."""
-        from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
+        writes HCA_KV/STATE. ``cmp_local_raw`` is the dense idx slice
+        precomputed by decode metadata, matching the FP8 path."""
         from rtp_llm.models_py.modules.dsv4.attn_type import HCA_KV
 
         assert self.indexer is None, "HCA layer must not have an indexer"
         win = self.window_size
-        _dbg_decode = _rt.should_record_layer(self.layer_id)
-        if _dbg_decode:
-            self.compressor._dbg_prefix = f"L{self.layer_id:02d}_decode_cmp"
-        try:
-            with record_function_range("dsv4.attn.compressor"):
-                self.compressor.forward_decode_vectorized(x, start_pos)
-        finally:
-            if _dbg_decode:
-                self.compressor._dbg_prefix = None
+        with record_function_range("dsv4.attn.compressor"):
+            self.compressor.forward_decode_vectorized(x, start_pos)
 
         ratio_l = int(self.compress_ratio)
-        cmp_lens_h = attn_metadata.compressed_lens.get(ratio_l)
         tt_h = attn_metadata.topk_total_by_ratio.get(ratio_l)
-        assert cmp_lens_h is not None and tt_h is not None, (
-            f"[DSV4 decode HCA] compressed_lens / topk_total_by_ratio[{ratio_l}] "
-            f"missing (layer={self.layer_id})"
+        assert tt_h is not None, (
+            f"[DSV4 decode HCA] topk_total_by_ratio[{ratio_l}] missing "
+            f"(layer={self.layer_id})"
         )
-        K_h = tt_h.shape[-1] - win
-        dense = (
-            torch.arange(K_h, device=cmp_lens_h.device, dtype=torch.int32)
-            .view(1, 1, K_h)
-            .expand(bsz, q_len, K_h)
-        )
-        cmp_local_raw = torch.where(
-            dense < cmp_lens_h[:bsz].view(bsz, 1, 1),
-            dense,
-            torch.full_like(dense, -1),
-        )
+        cmp_local_raw = tt_h[:bsz, :, win:]
         return self._forward_decode_compressed(
             qkv.q,
             cmp_local_raw,
@@ -2313,7 +2294,7 @@ class AttentionBF16VLLM(nn.Module):
             "class — env switch likely changed mid-process)"
         )
         with record_function_range("dsv4.attn.indexer"):
-            raw_int32 = self.indexer.forward_with_meta(x, qkv.qr, common.indexer_meta)
+            raw_int32 = self.indexer(x, qkv.qr, common.indexer_meta)
         # raw_int32 layout matches qkv.qr leading dims with K trailing.
         return self._forward_prefill_compressed_vllm(
             x, qkv, common, cmp_topk_runtime_int32=raw_int32
