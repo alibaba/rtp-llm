@@ -139,6 +139,11 @@ class _IndexerVLLMPrefillMeta(NamedTuple):
     k_slot_mapping: torch.Tensor  # [T] int64
     k_valid: torch.Tensor  # [T] bool
 
+    # Nested compressor launch metadata. Built while INDEXER_KV/STATE pools
+    # are bound so forward_with_meta can write current compressed K without
+    # rebuilding the same slot maps in the hot path.
+    compressor_meta: Optional[object] = None
+
 
 class IndexerBF16VLLM(nn.Module):
     """vLLM-flow lightning indexer with BF16 score.
@@ -464,6 +469,30 @@ class IndexerBF16VLLM(nn.Module):
             k_slot_mapping = torch.empty((bsz, 0), dtype=torch.long, device=device)
             k_valid = torch.empty((bsz, 0), dtype=torch.bool, device=device)
 
+        compressor_meta = None
+        state_bt = getattr(self, "_state_block_table", None)
+        state_eb = getattr(self, "_state_eb", 0)
+        if (
+            self._kv_block_table is not None
+            and self._kv_eb > 0
+            and state_bt is not None
+            and state_eb > 0
+            and self.compressor is not None
+        ):
+            from rtp_llm.models_py.modules.dsv4.compressor_bf16_vllm import (
+                _build_prefill_positions,
+            )
+
+            self._propagate_pool_to_nested()
+            try:
+                meta_seqlen = int(cp_ctx.seq_len_full) if cp_on else seqlen
+                positions, b_idx = _build_prefill_positions(
+                    sp_int, bsz, meta_seqlen, device
+                )
+                compressor_meta = self.compressor.prepare_metadata(positions, b_idx)
+            finally:
+                self._clear_nested_pool()
+
         return _IndexerVLLMPrefillMeta(
             bsz=bsz,
             seqlen=seqlen,
@@ -479,6 +508,7 @@ class IndexerBF16VLLM(nn.Module):
             ke=ke,
             k_slot_mapping=k_slot_mapping,
             k_valid=k_valid,
+            compressor_meta=compressor_meta,
         )
 
     # ------------------------------------------------------------------
@@ -523,7 +553,7 @@ class IndexerBF16VLLM(nn.Module):
             # Nested compressor writes the current chunk's compressed K
             # into the BF16 INDEXER_KV pool (and per-token state into
             # INDEXER_STATE).
-            self.compressor(x, sp)
+            self.compressor(x, sp, meta=attention_inputs.compressor_meta)
             # ``softmax_scale * n_heads^-0.5`` is pre-folded into
             # weights_proj at __init__.
             weights = F.linear(x, self.weights_proj)

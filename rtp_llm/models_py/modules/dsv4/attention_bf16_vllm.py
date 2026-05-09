@@ -2036,15 +2036,14 @@ class AttentionBF16VLLM(nn.Module):
         # ``_prefill_compute_qkv_vllm`` / ``_forward_prefill_compressed_vllm``
         # (rank-local Q × all-gathered KV with global topk).
         is_batched_local = isinstance(start_pos, torch.Tensor) and start_pos.numel() > 1
-        if seqlen > 1 and not is_batched_local and self.compress_ratio in (4, 128):
+        if seqlen > 1 and not is_batched_local and self.compress_ratio in (0, 4, 128):
             return self._forward_prefill_vllm(x, start_pos, sequence_lengths)
         raise NotImplementedError(
             "AttentionBF16VLLM._forward_body legacy fall-through removed (BF16 vLLM-only "
             f"branch). Got seqlen={seqlen}, is_batched_local={is_batched_local}, "
             f"compress_ratio={self.compress_ratio}. Only single-request prefill with "
-            "compress_ratio in {4, 128} is supported; SWA-only layers, batched "
-            "prefill, and eager decode via Attention.forward are not supported on "
-            "this branch."
+            "compress_ratio in {0, 4, 128} is supported; batched prefill and eager "
+            "decode via Attention.forward are not supported on this branch."
         )
 
     # ==================================================================
@@ -2054,15 +2053,9 @@ class AttentionBF16VLLM(nn.Module):
     #
     # Always-on for this class (block.py picks AttentionBF16VLLM only when
     # ``DSV4_BF16_VLLM=1``); entry hook lives in :meth:`_forward_body`.
-    # Constraints (matching
-    # the source class):
+    # Constraints:
     #   * single request only (bsz == 1)
-    #   * no Context-Parallel (``set_cp_ctx`` accepts ``None`` only on
-    #     IndexerBF16VLLM); CP prefills fall through to the legacy path.
-    #   * SWA-only layers (compress_ratio == 0) also fall through —
-    #     IndexerBF16VLLM/CompressorBF16VLLM are no-ops there, so reusing the
-    #     legacy path costs nothing and avoids re-implementing the
-    #     window-only attention here.
+    #   * CP support follows the existing BF16 dense/paged gather helpers.
     # ==================================================================
 
     def _forward_prefill_vllm(
@@ -2081,14 +2074,15 @@ class AttentionBF16VLLM(nn.Module):
         common = self._prefill_common_setup_vllm(x, start_pos)
         qkv = self._prefill_compute_qkv_vllm(x, common)
         self._prefill_write_swa_bf16_vllm(common, qkv.kv_full)
+        if self.compress_ratio == 0:
+            return self._forward_prefill_swa_vllm(qkv, common)
         if self.compress_ratio == 4:
             return self._forward_prefill_csa_vllm(x, qkv, common)
         if self.compress_ratio == 128:
             return self._forward_prefill_hca_vllm(x, qkv, common)
         raise AssertionError(
-            f"_forward_prefill_vllm only handles compress_ratio in {{4, 128}}; "
-            f"got {self.compress_ratio} (SWA-only layers should fall through "
-            "to the legacy path)"
+            f"_forward_prefill_vllm only handles compress_ratio in {{0, 4, 128}}; "
+            f"got {self.compress_ratio}"
         )
 
     # ------------------------------------------------------------------
@@ -2102,9 +2096,6 @@ class AttentionBF16VLLM(nn.Module):
         self, x: torch.Tensor, start_pos
     ) -> "_VLLMPrefillCommon":
         from rtp_llm.models_py.modules.dsv4.attn_type import INDEXER_KV
-        from rtp_llm.models_py.modules.dsv4.compressor_bf16_vllm import (
-            build_prefill_metadata as _build_compressor_prefill_metadata,
-        )
 
         bsz, seqlen, _ = x.size()
         device = x.device
@@ -2127,7 +2118,7 @@ class AttentionBF16VLLM(nn.Module):
         is_fresh = sp_int == 0
 
         # Bind freqs_cis to compressor / indexer (idempotent).
-        if self.compressor.freqs_cis is None:
+        if self.compressor is not None and self.compressor.freqs_cis is None:
             self.compressor.freqs_cis = self.freqs_cis
         if self.indexer is not None:
             if self.indexer.freqs_cis is None:
@@ -2142,10 +2133,16 @@ class AttentionBF16VLLM(nn.Module):
         # Under CP the compressor consumes the all-gathered ``[1, seq_len_full,
         # H]`` kv/score (see compressor_vllm.forward CP branch), so the meta
         # must cover ``seq_len_full`` positions — not the rank-local chunk.
-        meta_seqlen = int(cp_ctx.seq_len_full) if cp_on else seqlen
-        compressor_meta = _build_compressor_prefill_metadata(
-            self.compressor, sp_int, bsz, meta_seqlen, device
-        )
+        compressor_meta = None
+        if self.compressor is not None:
+            from rtp_llm.models_py.modules.dsv4.compressor_bf16_vllm import (
+                build_prefill_metadata as _build_compressor_prefill_metadata,
+            )
+
+            meta_seqlen = int(cp_ctx.seq_len_full) if cp_on else seqlen
+            compressor_meta = _build_compressor_prefill_metadata(
+                self.compressor, sp_int, bsz, meta_seqlen, device
+            )
 
         # Hoisted indexer meta — only meaningful for CSA layers.  Under CP
         # the indexer's ``prepare`` reads ``self._cp_ctx`` and overrides
@@ -2232,6 +2229,69 @@ class AttentionBF16VLLM(nn.Module):
         swa_lengths = torch.full((bsz,), write_len, device=device, dtype=torch.long)
         with record_function_range("dsv4.attn.swa_pool_write"):
             self._prefill_write_swa_to_pool(bsz, kv_full, common.sp_int, swa_lengths)
+
+    def _forward_prefill_swa_vllm(
+        self,
+        qkv: "_VLLMPrefillQKV",
+        common: "_VLLMPrefillCommon",
+    ) -> torch.Tensor:
+        """SWA-only prefill path adapted from the FP8 flow, with BF16 pools.
+
+        Fresh prefill attends over the just-computed dense KV. Continuation
+        prefill rebuilds an absolute dense SWA view from the framework pool
+        and overlays the current suffix KV so every query sees the window
+        that was visible at its own global position.
+        """
+        bsz, seqlen, sp = common.bsz, common.seqlen, common.sp_int
+        device = common.device
+        win = self.window_size
+
+        if common.cp_on:
+            assert common.cp_ctx is not None
+            topk_idxs = _get_window_topk_idxs_cp(
+                win, bsz, common.end_pos, common.cp_ctx.global_positions
+            )
+        else:
+            topk_idxs = _get_window_topk_idxs(win, bsz, seqlen, sp, device)
+
+        if common.is_fresh_prefill:
+            kv_cat = qkv.kv_full
+        else:
+            row_seqlens = torch.full((bsz,), seqlen, device=device, dtype=torch.long)
+            with record_function_range("dsv4.attn.swa_pool_read_dense_abs"):
+                kv_cat = self._prefill_read_swa_dense_abs_from_pool(
+                    bsz,
+                    sp,
+                    row_seqlens,
+                    dense_len=common.end_pos,
+                    current_kv_full=qkv.kv_full,
+                )
+            assert kv_cat is not None, (
+                "BF16 vLLM SWA continuation prefill requires paged SWA pool "
+                f"context (layer={self.layer_id})"
+            )
+
+        from flash_mla import flash_mla_sparse_fwd  # type: ignore[import-not-found]
+
+        _SPARSE_PREFILL_TOPK_ALIGN = 128
+        with record_function_range("dsv4.attn.sparse_attn"):
+            q_flat = qkv.q.squeeze(0).contiguous()
+            kv_flat = kv_cat.squeeze(0).unsqueeze(1).contiguous()
+            indices_i32 = topk_idxs.squeeze(0).to(torch.int32)
+            K_total = int(indices_i32.shape[-1])
+            pad_K = (-K_total) % _SPARSE_PREFILL_TOPK_ALIGN
+            if pad_K > 0:
+                indices_i32 = F.pad(indices_i32, (0, pad_K), value=-1)
+            indices_i32 = indices_i32.unsqueeze(1).contiguous()
+            o3, _, _ = flash_mla_sparse_fwd(
+                q=q_flat,
+                kv=kv_flat,
+                indices=indices_i32,
+                sm_scale=self.softmax_scale,
+                attn_sink=self.attn_sink,
+            )
+            o = o3.unsqueeze(0)
+        return self._prefill_output_proj_vllm(o, common)
 
     # ------------------------------------------------------------------
     # CSA / HCA dispatch (compress_ratio == 4 / 128).
