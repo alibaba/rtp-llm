@@ -43,6 +43,7 @@ if device_type == DeviceType.ROCm:
 
     # MoE strategies
     from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.strategy import (
+        MoriEpFp4Strategy,
         RocmBf16PureTPStrategy,
         RocmEpLowLatencyStrategy,
         RocmEpNormalStrategy,
@@ -53,6 +54,7 @@ if device_type == DeviceType.ROCm:
     registry = StrategyRegistry()
     registry.register(RocmEpLowLatencyStrategy())
     registry.register(RocmEpNormalStrategy())
+    registry.register(MoriEpFp4Strategy())
     registry.register(RocmFp8PerChannelPureTPStrategy())
     registry.register(RocmFp8PerBlockPureTPStrategy())
     registry.register(RocmBf16PureTPStrategy())
