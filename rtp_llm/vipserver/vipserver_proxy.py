@@ -83,10 +83,9 @@ class VIPServerProxy:
             self.srv_hosts = srv_lst
             self.srv_update_lock.release()
         except Exception as e:
-            # logging.error(
-            #     f"failed to refresh vipserver server list, exception : {str(e)}"
-            # )
-            return
+            logging.error(
+                f"failed to refresh vipserver server list, exception : {str(e)}"
+            )
 
     def req_api(self, api: str, params: dict[str, str]):
         """
