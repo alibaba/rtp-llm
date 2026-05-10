@@ -52,8 +52,13 @@ config_setting(
 
 # x86_64 counterpart of using_cuda13_arm — same CUDA-13-vs-12 differentiation,
 # applied on x86 builds.  Enables the CUDA-13 variants of cutlass / flashinfer
-# on the x86 toolchain.  define_values lists ALL flags this config requires so
-# Bazel can detect specialization vs using_cuda / using_cuda12.
+# on the x86 toolchain.
+#
+# define_values lists ALL flags this config requires, so Bazel can detect
+# specialization: a select() with both `using_cuda` and `using_cuda13_x86`
+# keys picks `using_cuda13_x86` for cuda13 builds (it's the strict superset).
+# Without listing using_cuda + using_cuda12 here, Bazel would report
+# "multiple matching configs" for those selects.
 config_setting(
     name = "using_cuda13_x86",
     define_values = {
