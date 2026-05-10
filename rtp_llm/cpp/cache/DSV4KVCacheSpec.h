@@ -21,7 +21,7 @@ inline size_t alignDsv4Fp8KvBlockBytes(size_t natural) {
     return ((natural + align - 1) / align) * align;
 }
 
-// KVCacheSpec for DSV4 paged KV pools (Pool 0/1/2/6: CSA_KV, HCA_KV, INDEXER_KV, SWA_KV).
+// KVCacheSpec for DSV4 paged KV pools (Pool 0/1/2: CSA_KV, HCA_KV, INDEXER_KV).
 // These are variable-length paged pools storing KV entries as uint8 (byte-addressed).
 // BF16 mode: head_dim * 2 bytes per entry (1024 KV / 256 Indexer).
 // FP8 mode: 584B per KV entry, 132B per Indexer entry — see constants above.
@@ -98,15 +98,16 @@ struct DSV4KVSpec: public KVCacheSpec {
     }
 };
 
-// KVCacheSpec for DSV4 fixed-allocation state pools (Pool 3/4/5: INDEXER_STATE, CSA_STATE, HCA_STATE).
-// These are per-request fixed-size allocations storing compressor/indexer state as float32.
-// They do NOT participate in prefix cache (CacheGroupType::FIXED).
-// The K/V split is a placeholder — state is an opaque blob with no K/V semantic.
+// KVCacheSpec for DSV4 fixed-allocation pools (Pool 3/4/5/6: INDEXER_STATE,
+// CSA_STATE, HCA_STATE, SWA_KV).  State pools store compressor/indexer state as
+// float32; SWA_KV stores byte-addressed KV entries.  They use SWA tail
+// allocation, and non-null tail blocks can participate in prefix cache.  The
+// K/V split is a placeholder for state pools because state is an opaque blob.
 struct DSV4StateSpec: public KVCacheSpec {
     KVCacheRegionName cache_type = KVCacheRegionName::DEFAULT;
     uint32_t          state_dim;             // state dimension (entry_elems in pool_spec)
     uint32_t          entries_per_block;     // 4 or 8
-    uint32_t          fixed_blocks_per_req;  // blocks per request (2 or 16)
+    uint32_t          fixed_blocks_per_req;  // pool-reserved blocks per request slot
     DataType          store_dtype;           // TYPE_FP32
 
     DSV4StateSpec() = default;

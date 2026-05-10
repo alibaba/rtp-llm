@@ -20,6 +20,10 @@ constexpr uint32_t kDsv4IndexerEntryBytesBf16 = 256;
 constexpr uint32_t kDsv4KvEntryBytesFp8       = 584;
 constexpr uint32_t kDsv4IndexerEntryBytesFp8  = 132;
 constexpr size_t   kDsv4PoolNum               = 7;
+// SWA/state groups keep two active tail blocks per request.  A request may
+// also reuse one cached block while allocating two fresh tail blocks, so size
+// these fixed pools at 2x the active tail requirement per runtime slot.
+constexpr uint32_t kDsv4FixedPoolBlocksPerReq = 4;
 
 struct DSV4LayerSets {
     std::vector<int> csa_layers;
@@ -108,16 +112,34 @@ std::vector<DSV4PoolDesc> buildDSV4PoolDescs(const DSV4LayerSets& sets, const Mo
          DataType::TYPE_UINT8,
          true,
          0},
-        {KVCacheRegionName::INDEXER_STATE, &sets.csa_layers, idx_state_dim * 2, 256, DataType::TYPE_FP32, false, 2},
-        {KVCacheRegionName::CSA_STATE, &sets.csa_layers, csa_state_dim * 2, 256, DataType::TYPE_FP32, false, 2},
-        {KVCacheRegionName::HCA_STATE, &sets.hca_layers, hca_state_dim * 2, 256, DataType::TYPE_FP32, false, 2},
+        {KVCacheRegionName::INDEXER_STATE,
+         &sets.csa_layers,
+         idx_state_dim * 2,
+         256,
+         DataType::TYPE_FP32,
+         false,
+         kDsv4FixedPoolBlocksPerReq},
+        {KVCacheRegionName::CSA_STATE,
+         &sets.csa_layers,
+         csa_state_dim * 2,
+         256,
+         DataType::TYPE_FP32,
+         false,
+         kDsv4FixedPoolBlocksPerReq},
+        {KVCacheRegionName::HCA_STATE,
+         &sets.hca_layers,
+         hca_state_dim * 2,
+         256,
+         DataType::TYPE_FP32,
+         false,
+         kDsv4FixedPoolBlocksPerReq},
         {KVCacheRegionName::SWA_KV,
          &sets.all_layers,
          kv_entry_bytes,
          kDsv4TokensPerBlock,
          DataType::TYPE_UINT8,
          false,
-         2},
+         kDsv4FixedPoolBlocksPerReq},
     };
 }
 
