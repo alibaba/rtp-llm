@@ -39,6 +39,18 @@ bool readEnvFlagOnce(const char* env_name, const char* log_tag, const char* labe
     return on;
 }
 
+bool debugTargetVerifyInputEnabled() {
+    static const bool enabled = []() {
+        const char* env = std::getenv("RTP_LLM_DEBUG_TARGET_VERIFY_INPUT");
+        const bool  on  = env != nullptr && std::string(env) != "0";
+        if (on) {
+            RTP_LLM_LOG_WARNING("[debug-target-verify] enabled; this performs D2H copies and serializes the hot path");
+        }
+        return on;
+    }();
+    return enabled;
+}
+
 void holdSamplerInputHostBuffers(TensorHolder& holder, const SamplerInputs& inputs) {
     holder.hold_host(inputs.token_ids);
     holder.hold_host(inputs.input_lengths);
@@ -1086,11 +1098,11 @@ GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input,
         // sequence_lengths copies, ...).
         model_->updateKVCacheKernelBlockId(model_input);
 
-        // Pre-kernel safety check: causal_conv1d_update reads block_map at
-        // (sequence_length - 2) // SBP. If that slot is NULL_BLOCK_IDX the
-        // kernel hits IMA. Catch it here on host with full diagnostics so we
-        // don't have to dig through GPU coredumps.
-        // debugCheckLinearBlockMapAtKernelRead(model_input, stream_groups);
+        // Optional pre-kernel safety check. It performs D2H and can hide the
+        // async race being diagnosed, so keep it out of the default hot path.
+        if (debugTargetVerifyInputEnabled()) {
+            debugCheckLinearBlockMapAtKernelRead(model_input, stream_groups);
+        }
     }
 
     ensureModelInputsOnCuda(model_input, "decode.target_verify_forward");
@@ -1106,7 +1118,7 @@ void MtpExecutor::debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& mod
     // (sequence_length - 2) // SBP. If that slot is NULL_BLOCK_IDX the read
     // hits OOB. Verify here on host before forward so we capture the offending
     // iter without going through GPU coredumps.
-    static const bool always_print = std::getenv("RTP_LLM_DEBUG_TARGET_VERIFY_INPUT") != nullptr;
+    static const bool always_print = debugTargetVerifyInputEnabled();
 
     if (!model_input.kv_cache_kernel_block_id.defined() || !model_input.sequence_lengths.defined()) {
         return;

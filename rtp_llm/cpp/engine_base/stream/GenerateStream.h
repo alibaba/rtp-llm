@@ -470,12 +470,15 @@ public:
     // Opaque CUDA event used by async MTP to wait for linear-attention KV swaps
     // without including cuda_runtime.h in this header.
     void setPendingSwapDoneEvent(std::shared_ptr<void> event) {
+        std::lock_guard<std::mutex> lk(*pending_swap_done_event_mutex_);
         pending_swap_done_event_ = std::move(event);
     }
     std::shared_ptr<void> getPendingSwapDoneEvent() const {
+        std::lock_guard<std::mutex> lk(*pending_swap_done_event_mutex_);
         return pending_swap_done_event_;
     }
     void clearPendingSwapDoneEvent() {
+        std::lock_guard<std::mutex> lk(*pending_swap_done_event_mutex_);
         pending_swap_done_event_.reset();
     }
 
@@ -756,7 +759,8 @@ protected:
     // cudaEvent_t (type-erased) recorded after specUpdate runs
     // swapLinearBlocks. MtpExecutor waits on it before issuing the next
     // target verify. nullptr on streams without pending swaps.
-    std::shared_ptr<void> pending_swap_done_event_;
+    std::shared_ptr<void>       pending_swap_done_event_;
+    std::shared_ptr<std::mutex> pending_swap_done_event_mutex_ = std::make_shared<std::mutex>();
 
     // In-flight async bookkeeping workers (see comment on incPendingAsyncBookkeeping).
     // pending_async_mutex MUST be a separate lock from mutex_: the release path waits
