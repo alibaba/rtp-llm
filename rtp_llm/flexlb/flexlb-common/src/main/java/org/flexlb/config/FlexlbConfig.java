@@ -75,6 +75,13 @@ public class FlexlbConfig {
     private long decodeAvailableMemoryThreshold = 90;
 
     /**
+     * Maximum in-flight requests per DECODE worker.
+     * FlexLB counts reported waiting/running tasks plus local in-transit selections.
+     * Values <= 0 disable the FlexLB-side decode concurrency limit.
+     */
+    private long decodeConcurrencyLimit = 0;
+
+    /**
      * Resource availability hysteresis bias (percentage)
      * Used to prevent frequent switching of resource availability near threshold
      * Range: 0-100, default 15 means hysteresis range is 15%
@@ -127,6 +134,11 @@ public class FlexlbConfig {
      * Actual worker threads = availableProcessors * nettyWorkerThreadMultiplier
      */
     private int nettyWorkerThreadMultiplier = 2;
+
+    /**
+     * Ordered traffic policy rules. A matched rule forces the whole request to a worker group.
+     */
+    private volatile TrafficPolicyConfig trafficPolicy = new TrafficPolicyConfig();
 
     /**
      * Get load balancing strategy for a role type
