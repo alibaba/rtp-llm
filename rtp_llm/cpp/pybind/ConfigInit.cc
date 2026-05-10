@@ -1126,18 +1126,21 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::init<>())
         .def_readwrite("max_context_batch_size", &FIFOSchedulerConfig::max_context_batch_size)
         .def_readwrite("max_batch_tokens_size", &FIFOSchedulerConfig::max_batch_tokens_size)
+        .def_readwrite("cp_force_single_prefill", &FIFOSchedulerConfig::cp_force_single_prefill)
         .def("to_string", &FIFOSchedulerConfig::to_string)
         .def(py::pickle(
             [](const FIFOSchedulerConfig& self) {
-                return py::make_tuple(self.max_context_batch_size, self.max_batch_tokens_size);
+                return py::make_tuple(
+                    self.max_context_batch_size, self.max_batch_tokens_size, self.cp_force_single_prefill);
             },
             [](py::tuple t) {
-                if (t.size() != 2)
+                if (t.size() != 2 && t.size() != 3)
                     throw std::runtime_error("Invalid state!");
                 FIFOSchedulerConfig c;
                 try {
-                    c.max_context_batch_size = t[0].cast<int64_t>();
-                    c.max_batch_tokens_size  = t[1].cast<int64_t>();
+                    c.max_context_batch_size  = t[0].cast<int64_t>();
+                    c.max_batch_tokens_size   = t[1].cast<int64_t>();
+                    c.cp_force_single_prefill = t.size() == 3 ? t[2].cast<bool>() : true;
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("FIFOSchedulerConfig unpickle error: ") + e.what());
                 }

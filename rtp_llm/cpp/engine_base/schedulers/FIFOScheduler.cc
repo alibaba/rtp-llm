@@ -27,7 +27,8 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
     max_batch_tokens_size_(runtime_config.fifo_scheduler_config.max_batch_tokens_size),
     max_generate_batch_size_(runtime_config.max_generate_batch_size),
     need_fill_fake_stream_(parallelism_config.dp_size > 1 && parallelism_config.tp_rank == 0),
-    cp_force_single_prefill_(parallelism_config.prefill_cp_config.is_enabled()),
+    cp_force_single_prefill_(parallelism_config.prefill_cp_config.is_enabled()
+                             && runtime_config.fifo_scheduler_config.cp_force_single_prefill),
     metrics_reporter_(metrics_reporter) {
     RTP_LLM_LOG_INFO("max_generate_batch_size is [%d], max_batch_tokens_size is [%d], cp_force_single_prefill is [%d]",
                      max_generate_batch_size_,
@@ -134,11 +135,8 @@ bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams
     if (!running_streams_.empty()) {
         return false;
     }
-    // CP prefill (dsv4): per-request layout not yet supported in
-    // cp_all_gather_full / cp_freqs_cis_local / global_positions; mixing
-    // multiple requests in one prefill round trips on these single-sequence
-    // assertions. Cap at one stream per round until end-to-end multi-request
-    // CP lands. See dsv4/cp.py:140 (assert B == 1) and dsv4/attention.py:2042.
+    // Conservative CP prefill mode: cap at one stream per round unless runtime
+    // config explicitly allows CP prefill batching.
     if (cp_force_single_prefill_ && !streams.empty()) {
         return false;
     }
