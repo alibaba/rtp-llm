@@ -22,6 +22,7 @@ constexpr uint32_t kDsv4TokensPerBlock    = 256;
 constexpr uint32_t kDsv4KvEntryBytes      = 1024;
 constexpr uint32_t kDsv4IndexerEntryBytes = 256;
 constexpr uint32_t kDsv4Fp8KvEntryBytes   = 584;
+constexpr uint32_t kDsv4FixedBlocksPerReq = 4;
 
 }  // namespace
 
@@ -135,18 +136,19 @@ TEST(HybridPoolConfigCreatorTest, ProPoolSpecs) {
 
     EXPECT_EQ(config.cache_specs[3]->layer_num, 30u);
     EXPECT_EQ(config.cache_specs[3]->block_size_bytes(), 256u * 512u * 4u);
-    EXPECT_EQ(config.group_fixed_blocks_per_req[3], 2u);
+    EXPECT_EQ(config.group_fixed_blocks_per_req[3], kDsv4FixedBlocksPerReq);
 
     EXPECT_EQ(config.cache_specs[4]->layer_num, 30u);
     EXPECT_EQ(config.cache_specs[4]->block_size_bytes(), 256u * 2048u * 4u);
-    EXPECT_EQ(config.group_fixed_blocks_per_req[4], 2u);
+    EXPECT_EQ(config.group_fixed_blocks_per_req[4], kDsv4FixedBlocksPerReq);
 
     EXPECT_EQ(config.cache_specs[5]->layer_num, 31u);
     EXPECT_EQ(config.cache_specs[5]->block_size_bytes(), 256u * 1024u * 4u);
-    EXPECT_EQ(config.group_fixed_blocks_per_req[5], 2u);
+    EXPECT_EQ(config.group_fixed_blocks_per_req[5], kDsv4FixedBlocksPerReq);
 
     EXPECT_EQ(config.cache_specs[6]->layer_num, 61u);
     EXPECT_EQ(config.cache_specs[6]->block_size_bytes(), kDsv4TokensPerBlock * kDsv4KvEntryBytes);
+    EXPECT_EQ(config.group_fixed_blocks_per_req[6], kDsv4FixedBlocksPerReq);
 }
 
 TEST(HybridPoolConfigCreatorTest, FlashPoolSpecs) {
@@ -273,24 +275,30 @@ TEST(DSV4KVCacheSpecTest, KVSpecFromPoolSpec) {
 }
 
 TEST(DSV4KVCacheSpecTest, SWAFp8StateSpecUsesPaddedPhysicalBlockSize) {
-    DSV4StateSpec spec(
-        KVCacheRegionName::SWA_KV, 61, kDsv4Fp8KvEntryBytes, 256, 2, DataType::TYPE_UINT8, kDsv4TokensPerBlock);
+    DSV4StateSpec spec(KVCacheRegionName::SWA_KV,
+                       61,
+                       kDsv4Fp8KvEntryBytes,
+                       256,
+                       kDsv4FixedBlocksPerReq,
+                       DataType::TYPE_UINT8,
+                       kDsv4TokensPerBlock);
 
     EXPECT_EQ(spec.block_size(), kDsv4TokensPerBlock * kDsv4Fp8KvEntryBytes);
     EXPECT_EQ(spec.natural_block_size_bytes(), kDsv4TokensPerBlock * kDsv4Fp8KvEntryBytes);
     EXPECT_EQ(spec.block_size_bytes(), 149760u);
-    EXPECT_EQ(spec.fixed_blocks_per_req, 2u);
+    EXPECT_EQ(spec.fixed_blocks_per_req, kDsv4FixedBlocksPerReq);
     EXPECT_EQ(spec.cache_type, KVCacheRegionName::SWA_KV);
 }
 
 TEST(DSV4KVCacheSpecTest, StateSpecFloat32) {
-    DSV4StateSpec spec(KVCacheRegionName::CSA_STATE, 30, 2048, 8, 2, DataType::TYPE_FP32, kDsv4TokensPerBlock);
+    DSV4StateSpec spec(
+        KVCacheRegionName::CSA_STATE, 30, 2048, 8, kDsv4FixedBlocksPerReq, DataType::TYPE_FP32, kDsv4TokensPerBlock);
 
     EXPECT_EQ(spec.block_size(), 8u * 2048u);
     EXPECT_EQ(spec.block_size_bytes(), 8u * 2048u * 4u);  // float32 = 4 bytes
     EXPECT_EQ(spec.cache_type, KVCacheRegionName::CSA_STATE);
     EXPECT_EQ(spec.state_dim, 2048u);
-    EXPECT_EQ(spec.fixed_blocks_per_req, 2u);
+    EXPECT_EQ(spec.fixed_blocks_per_req, kDsv4FixedBlocksPerReq);
 }
 
 TEST(DSV4KVCacheSpecTest, IndexerKVSpec) {
@@ -302,10 +310,16 @@ TEST(DSV4KVCacheSpecTest, IndexerKVSpec) {
 }
 
 TEST(DSV4KVCacheSpecTest, HCAStateSpec) {
-    DSV4StateSpec spec(KVCacheRegionName::HCA_STATE, 31, 1024, 128, 2, DataType::TYPE_FP32, kDsv4TokensPerBlock);
+    DSV4StateSpec spec(KVCacheRegionName::HCA_STATE,
+                       31,
+                       1024,
+                       128,
+                       kDsv4FixedBlocksPerReq,
+                       DataType::TYPE_FP32,
+                       kDsv4TokensPerBlock);
 
     EXPECT_EQ(spec.block_size_bytes(), 128u * 1024u * 4u);
-    EXPECT_EQ(spec.fixed_blocks_per_req, 2u);
+    EXPECT_EQ(spec.fixed_blocks_per_req, kDsv4FixedBlocksPerReq);
     EXPECT_EQ(spec.cache_type, KVCacheRegionName::HCA_STATE);
 }
 
@@ -363,7 +377,7 @@ TEST(HybridPoolConfigCreatorTest, FixedPoolsUseRuntimeBatchForBlockNums) {
     EXPECT_EQ(config.group_block_nums[1], 100u);
     EXPECT_EQ(config.group_block_nums[2], 100u);
     for (int gid = 3; gid < kDsv4PoolNum; ++gid) {
-        EXPECT_EQ(config.group_block_nums[gid], 11u) << "gid=" << gid;
+        EXPECT_EQ(config.group_block_nums[gid], kDsv4FixedBlocksPerReq * 5u + 1u) << "gid=" << gid;
     }
 
     size_t expected_fixed_reserve = 0;
@@ -372,6 +386,27 @@ TEST(HybridPoolConfigCreatorTest, FixedPoolsUseRuntimeBatchForBlockNums) {
             static_cast<size_t>(config.group_block_nums[gid]) * config.group_block_size_bytes[gid];
     }
     EXPECT_EQ(config.fixed_pool_reserve_bytes, expected_fixed_reserve);
+}
+
+TEST(HybridPoolConfigCreatorTest, FixedPoolsReserveFourBlocksPerMaxConcurrency) {
+    for (uint32_t max_concurrency : {1u, 2u, 8u}) {
+        auto              mc = makeProModelConfig();
+        ParallelismConfig pc;
+        RuntimeConfig     runtime_config;
+        KVCacheConfig     kv_cache_config;
+        kv_cache_config.test_block_num                              = 100;
+        runtime_config.max_generate_batch_size                      = max_concurrency;
+        runtime_config.fifo_scheduler_config.max_context_batch_size = 1;
+
+        auto config = CacheConfigCreator::createConfig(mc, pc, runtime_config, kv_cache_config);
+
+        ASSERT_EQ(config.group_block_nums.size(), static_cast<size_t>(kDsv4PoolNum));
+        for (int gid = 3; gid < kDsv4PoolNum; ++gid) {
+            EXPECT_EQ(config.group_fixed_blocks_per_req[gid], kDsv4FixedBlocksPerReq) << "gid=" << gid;
+            EXPECT_EQ(config.group_block_nums[gid], kDsv4FixedBlocksPerReq * max_concurrency + 1u)
+                << "gid=" << gid << " max_concurrency=" << max_concurrency;
+        }
+    }
 }
 
 TEST(CacheConfigTest, FinalizeBlockNumsIsNoopForSingleAndSharedHybridConfig) {
@@ -406,7 +441,7 @@ TEST(CacheConfigTest, FinalizeBlockNumsAppliesToIndependentPools) {
     EXPECT_EQ(config.group_block_nums[1], 100u);
     EXPECT_EQ(config.group_block_nums[2], 100u);
     for (int gid = 3; gid < kDsv4PoolNum; ++gid) {
-        EXPECT_EQ(config.group_block_nums[gid], 11u) << "gid=" << gid;
+        EXPECT_EQ(config.group_block_nums[gid], kDsv4FixedBlocksPerReq * 5u + 1u) << "gid=" << gid;
     }
     EXPECT_GT(config.fixed_pool_reserve_bytes, 0u);
 }
