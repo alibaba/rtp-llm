@@ -51,6 +51,8 @@ cc_library(
         "logits_processor/LogitsProcessorStates.h",
         "logits_processor/ThinkModeLogitsProcessor.h",
         "logits_processor/TreeLogitsProcessor.h",
+        "logits_processor/TreeLogitsProcessorCSR.h",
+        "logits_processor/csr_utils.h",
         "logits_processor/LogitsProcessorFactory.h",
     ],
     srcs = [
@@ -59,6 +61,9 @@ cc_library(
         "logits_processor/LogitsProcessorStates.cc",
         "logits_processor/ThinkModeLogitsProcessor.cc",
         "logits_processor/TreeLogitsProcessor.cc",
+        "logits_processor/TreeLogitsProcessorCSR.cc",
+        "logits_processor/TreeLogitsProcessorCSRGpu.cc",
+        "logits_processor/csr_utils.cpp",
         "logits_processor/LogitsProcessorFactory.cc",
     ],
     deps = [
@@ -69,6 +74,9 @@ cc_library(
         "//rtp_llm/cpp/multimodal_processor:multimodal_types",
         "//rtp_llm/cpp/pybind:py_utils",
         "//rtp_llm/cpp/utils:error_code",
+        "//rtp_llm/models_py/bindings/common/kernels:kernels_sampling",
+        "@havenask//aios/autil:lock_free",
+        "@havenask//aios/autil:thread",
     ] + select({
         "//:using_cuda": ["//rtp_llm/models_py/bindings/cuda/ops:standalone_ops"],
         "//conditions:default": [],

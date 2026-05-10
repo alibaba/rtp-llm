@@ -149,6 +149,8 @@ class GenerateConfig(BaseModel):
 
     unique_key: str = ""
 
+    ele_rq_ids: List[str] = []
+
     def gen_hash_value(self):
         cp = copy.copy(self)
         cp.max_new_tokens = 0

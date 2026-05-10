@@ -139,9 +139,6 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                 success.fill_(true);
             }
         } else {
-            RTP_LLM_LOG_DEBUG("current_num_beams_in is %d", cur_num_beams_in);
-            RTP_LLM_LOG_DEBUG("current_num_beams_out is %d", cur_num_beams_out);
-            RTP_LLM_LOG_DEBUG("current_beam_batch is %d", beam_batch_size);
             RTP_LLM_CHECK_WITH_INFO((batch_size_in % cur_num_beams_in == 0),
                                     "sample_batch_size[%d] must devide by current_num_beams_in[%d]");
 

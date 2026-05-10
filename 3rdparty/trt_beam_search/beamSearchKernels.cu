@@ -20,6 +20,8 @@
 #include <cuda_fp16.h>
 #endif
 
+
+#include <cfloat>
 #include "beamSearchKernels.h"
 
 using namespace tensorrt_llm::common;
@@ -160,7 +162,14 @@ __global__ void addCumLogProbs(T* __restrict pStage1LogProbs, float const* __res
         }
         else
         {
-            pLocalLogProbs[i] += cumLogProbs[slot * nBMIn + iBMIn] + diversityRate * iBMIn;
+            // Avoid -inf + (-inf) = NaN
+            float const cumLogProb = cumLogProbs[slot * nBMIn + iBMIn];
+            float const localVal = (float) pLocalLogProbs[i];
+            if (localVal <= -FLT_MAX / 2 || cumLogProb <= -FLT_MAX / 2) {
+                pLocalLogProbs[i] = T(-FLT_MAX);
+            } else {
+                pLocalLogProbs[i] = T(localVal + cumLogProb + diversityRate * iBMIn);
+            }
         }
     }
     return;

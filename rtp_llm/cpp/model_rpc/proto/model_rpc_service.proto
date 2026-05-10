@@ -100,6 +100,7 @@ message GenerateConfigPB {
     google.protobuf.Int32Value batch_group_timeout = 56;
     string profile_trace_name = 57;
     bool aux_info = 58;
+    repeated string ele_rq_ids = 59;
 }
 
 message MMPreprocessConfigPB {

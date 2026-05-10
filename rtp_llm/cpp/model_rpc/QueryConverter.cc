@@ -92,6 +92,10 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     TRANS_OPTIONAL(batch_group_timeout);
     TRANS_OPTIONAL(force_batch);
 
+    for (const auto& rq_id : config_proto->ele_rq_ids()) {
+        generate_config->ele_rq_ids.push_back(rq_id);
+    }
+
     return generate_config;
 }
 

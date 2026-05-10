@@ -408,7 +408,14 @@ __launch_bounds__(BLOCK_SIZE) __global__ void beamStage3Kernel(
                 bh.outputIdsCBA[offsetCBA + step] = bh.endIds[slot];
                 if (bh.logProbsCBA != nullptr)
                 {
-                    bh.logProbsCBA[offsetCBA + step] = (float) topLogProb - smem.cumLogProbs[(topId / nV) % nBMOut];
+                    // Avoid -inf - (-inf) = NaN
+                    float const cumLogProb = smem.cumLogProbs[(topId / nV) % nBMOut];
+                    float const topLogProbF = (float) topLogProb;
+                    if (topLogProbF <= -FLT_MAX / 2 || cumLogProb <= -FLT_MAX / 2) {
+                        bh.logProbsCBA[offsetCBA + step] = -FLT_MAX;
+                    } else {
+                        bh.logProbsCBA[offsetCBA + step] = topLogProbF - cumLogProb;
+                    }
                 }
                 // Previous tokens
                 for (int j = step - 1; j >= 0; j--)
@@ -448,7 +455,14 @@ __launch_bounds__(BLOCK_SIZE) __global__ void beamStage3Kernel(
                     int const step = bh.sequenceLengthsIn[slot * nBMIn + nBeamForNextStep];
                     int const index = step * nMBS * nBMOut + slot * nBMOut + nBeamForNextStep;
                     int const indexBeam = topId / nV % nBMOut;
-                    bh.logProbsTiled[index] = (float) topLogProb - smem.cumLogProbs[indexBeam];
+                    // Avoid -inf - (-inf) = NaN
+                    float const cumLogProb = smem.cumLogProbs[indexBeam];
+                    float const topLogProbF = (float) topLogProb;
+                    if (topLogProbF <= -FLT_MAX / 2 || cumLogProb <= -FLT_MAX / 2) {
+                        bh.logProbsTiled[index] = -FLT_MAX;
+                    } else {
+                        bh.logProbsTiled[index] = topLogProbF - cumLogProb;
+                    }
                 }
                 bh.cumLogProbsOut[slot * nBMOut + nBeamForNextStep] = (float) topLogProb;
                 nBeamForNextStep++;

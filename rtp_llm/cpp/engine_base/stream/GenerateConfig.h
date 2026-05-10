@@ -71,6 +71,8 @@ public:
     std::string                   sp_advice_prompt;
     std::vector<int>              sp_advice_prompt_token_ids;
 
+    std::vector<std::string> ele_rq_ids;
+
     bool do_sample             = true;
     bool can_use_pd_separation = true;
     bool pd_separation         = false;
@@ -90,6 +92,7 @@ public:
     bool               force_batch = false;  // If true, streams with same batch_group_id must be scheduled together
     std::optional<int> batch_group_timeout;
     std::string      unique_key;
+
 
     bool top1() {
         return top_k == 1;
@@ -227,6 +230,7 @@ public:
         JSONIZE(aux_info);
         JSONIZE_OPTIONAL(batch_group_timeout);
         JSONIZE(unique_key);
+        JSONIZE(ele_rq_ids);
 #undef JSONIZE
 #undef JSONIZE_OPTIONAL
     }
