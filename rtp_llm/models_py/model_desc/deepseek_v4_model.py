@@ -236,6 +236,12 @@ class DeepSeekV4Model(GptModelBase):
             )
             args.max_tokens_per_rank = new_tokens_per_rank_bound
 
+        if os.environ.get("ROLE_TYPE", "").upper() == "DECODE":
+            decode_tokens_per_rank = max(int(max_generate_batch_size or 1), 1)
+            args.max_tokens_per_rank = min(
+                args.max_tokens_per_rank, decode_tokens_per_rank
+            )
+
         logging.info(
             "[DeepSeekV4Model] V4Args: n_layers=%d n_heads=%d head_dim=%d q_lora=%d "
             "o_groups=%d n_experts=%d n_act=%d moe_inter=%d win=%d hc_mult=%d "
