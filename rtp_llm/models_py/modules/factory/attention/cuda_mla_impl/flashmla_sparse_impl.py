@@ -529,14 +529,18 @@ class SparseMlaImpl(MlaImplBase):
         # Apply input BMM to transform query
         q_transformed = self._apply_input_bmm(q, layer_id)
 
-        # Get full KV cache: [num_blocks * page_size, kv_lora_rank + rope_head_dim]
-        # Reshape from [num_blocks, page_size, kv_dim] to [num_blocks * page_size, h_kv, kv_dim]
-        kv_cache_flat = kv_cache.kv_cache_base.view(
-            -1, 1, kv_cache.kv_cache_base.size(-1)
-        )
+        # SparseMlaFp8Op expects kv_cache_base in its original paged shape
+        # [num_blocks, page_size, kv_dim] and handles reshaping internally.
+        # BF16 ops still need the flat [num_blocks*page_size, 1, kv_dim] layout.
+        if isinstance(self.fmha_impl, SparseMlaFp8Op):
+            kv_input = kv_cache.kv_cache_base
+        else:
+            kv_input = kv_cache.kv_cache_base.view(
+                -1, 1, kv_cache.kv_cache_base.size(-1)
+            )
         # Call unified Op with input kv (returns [total_q_len, num_heads, kv_lora_rank])
         attn_output = self.fmha_impl.forward(
-            q_transformed, kv_cache_flat, topk_indices, layer_id=layer_id
+            q_transformed, kv_input, topk_indices, layer_id=layer_id
         )
 
         # Apply output BMM to get final output

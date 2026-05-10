@@ -123,10 +123,11 @@ class Indexer(nn.Module):
         k = self.wk(x)
         k = self.k_norm(k)
 
-        if self._prefill_cp_enabled():
-            assert cp_params is not None
+        if cp_params is not None:
             query, key = self.indexer_op.apply_rope_and_rotate_q_k_cp(
-                q, k, cp_params.full_rope_pos_ids,
+                q,
+                k,
+                cp_params.full_rope_pos_ids,
             )
         else:
             positions = flashmla_params.positions_d

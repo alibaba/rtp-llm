@@ -385,8 +385,12 @@ class IndexerOp(nn.Module):
             attention_inputs.kv_cache_kernel_block_id_device.shape[1] * self.blocksize
         )
 
+        # deep_gemm ≥ FlashInfer-0.6.9 (cuda13) requires context_lens to be 2D.
+        # fmha_params.kvlen_d is 1D [B]; unsqueeze(0) → [1, B] satisfies dim()==2.
+        kvlen_2d = fmha_params.kvlen_d.unsqueeze(0)
+
         schedule_metadata = deep_gemm.get_paged_mqa_logits_metadata(
-            fmha_params.kvlen_d,
+            kvlen_2d,
             self.blocksize,
             deep_gemm.get_num_sms(),
         )
@@ -395,7 +399,7 @@ class IndexerOp(nn.Module):
             q_fp8.unsqueeze(1),
             kv_cache_fp8.view(dtype=torch.uint8),
             weights,
-            fmha_params.kvlen_d,
+            kvlen_2d,
             attention_inputs.kv_cache_kernel_block_id_device,
             schedule_metadata,
             max_seq_len,
@@ -603,9 +607,12 @@ class IndexerOp(nn.Module):
 
         if total_local_ids.size(0) > 0:
             topk = run_part_logits_topk(
-                q0, weights_sq0,
-                precomputed_ks, precomputed_ke,
-                precomputed_lengths, precomputed_topk_off,
+                q0,
+                weights_sq0,
+                precomputed_ks,
+                precomputed_ke,
+                precomputed_lengths,
+                precomputed_topk_off,
             )
         else:
             topk = None

@@ -50,8 +50,10 @@ def get_mla_impl(
             )
         )
 
-        if not use_fast_path and not impl.support_parallelism_config(
-            parallelism_config
+        if (
+            attn_inputs.is_prefill
+            and not use_fast_path
+            and not impl.support_parallelism_config(parallelism_config)
         ):
             continue
 
