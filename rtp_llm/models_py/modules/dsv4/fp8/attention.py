@@ -1883,7 +1883,8 @@ class AttentionFP8(nn.Module):
         attn_metadata: "DSv4DecodeAttnMetadataFP8",  # type: ignore[name-defined]
     ) -> torch.Tensor:
         """SWA-only layer (compress_ratio == 0) — one FlashMLA call over
-        the FP8 SWA pool using per-request ``swa_abs_idx`` indices."""
+        the FP8 SWA pool using per-request global slot ids translated
+        from ``swa_abs_idx`` through the SWA block table."""
         from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
         from rtp_llm.models_py.modules.dsv4.fp8.decode.attention_kernels import (
             attn_fp8_swa_paged,
@@ -1891,9 +1892,17 @@ class AttentionFP8(nn.Module):
         from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_attn_metadata import (
             get_or_build_sched_meta,
         )
+        from rtp_llm.models_py.modules.dsv4.fp8.decode.paged_topk_translator import (
+            build_req_id_per_token,
+            translate_local_to_global_slots,
+        )
 
         swa_pool_3d = self._pool_view_3d_fp8(SWA_KV)
-        swa_pool_bt = attn_metadata.pool_block_tables.get(SWA_KV)
+        swa_pool_bt = (
+            attn_metadata.pool_block_tables.get(SWA_KV)
+            if attn_metadata.pool_block_tables
+            else None
+        )
         assert (
             swa_pool_3d is not None
             and swa_pool_bt is not None
@@ -1902,8 +1911,31 @@ class AttentionFP8(nn.Module):
         ), (
             f"[DSV4 decode SWA-only] FP8 pool + block table + swa_abs_idx "
             f"required (layer={self.layer_id}); "
-            f"kv_cache_bound={self._kv_cache is not None}"
+            f"kv_cache_bound={self._kv_cache is not None}, "
+            f"pool_3d_ok={swa_pool_3d is not None}, "
+            f"pool_block_tables_keys={list(attn_metadata.pool_block_tables.keys()) if attn_metadata.pool_block_tables else None}, "
+            f"swa_pool_bt_shape={tuple(swa_pool_bt.shape) if swa_pool_bt is not None else None}, "
+            f"swa_abs_idx_shape={tuple(attn_metadata.swa_abs_idx.shape) if attn_metadata.swa_abs_idx is not None else None}"
         )
+        win = self.window_size
+        T = bsz * q_len
+        # FlashMLA's sparse FP8 kernel reads the packed pool via direct
+        # ``pool[indices[i]]`` addressing — no block-table indirection on
+        # the kernel side — so ``indices`` MUST be global slot ids, not
+        # abs positions. Mirrors the CSA/HCA dual-pool path below.
+        if attn_metadata.swa_global_slots is not None:
+            swa_global = attn_metadata.swa_global_slots[:T]
+        else:
+            req_id = build_req_id_per_token(bsz, q_len, swa_pool_bt.device)
+            swa_local = attn_metadata.swa_abs_idx[:bsz].reshape(T, win)
+            swa_global = translate_local_to_global_slots(
+                req_id,
+                swa_pool_bt[:bsz],
+                swa_local,
+                self._pool_entries_per_block(SWA_KV),
+            )
+        swa_topk_3d = swa_global.view(bsz, q_len, win).contiguous()
+
         sched_meta = get_or_build_sched_meta(
             attn_metadata,
             batch_size=bsz,
@@ -1916,7 +1948,7 @@ class AttentionFP8(nn.Module):
             q=q,
             swa_pool_3d=swa_pool_3d,
             attn_sink=self.attn_sink,
-            swa_abs_idx=attn_metadata.swa_abs_idx[:bsz],
+            swa_topk_3d=swa_topk_3d,
             cache_seqlens=attn_metadata.cache_seqlens_i32[:bsz],
             swa_block_table=swa_pool_bt[:bsz],
             sched_meta=sched_meta,

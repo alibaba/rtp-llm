@@ -30,7 +30,7 @@ def attn_fp8_swa_paged(
     q: torch.Tensor,  # [B, 1, H, D] bf16
     swa_pool_3d: torch.Tensor,  # [num_blocks, entries_per_block, 584] uint8
     attn_sink: torch.Tensor,  # [H] bf16 / fp32
-    swa_abs_idx: torch.Tensor,  # [B, win] int32, -1 padding per FlashMLA contract
+    swa_topk_3d: torch.Tensor,  # [B, 1, win] int32 global slots into SWA pool
     cache_seqlens: torch.Tensor,  # [B] int32
     swa_block_table: torch.Tensor,  # [B, max_blocks_per_req] int32
     sched_meta: Any,  # FlashMLA sched_meta from DSv4DecodeAttnMetadataFP8
@@ -39,9 +39,12 @@ def attn_fp8_swa_paged(
     """SWA-only FP8 FlashMLA — returns ``[B, 1, H, D_v]`` bf16 output.
 
     Contract notes:
-      * ``swa_abs_idx`` already holds per-request abs positions with ``-1``
-        padding, which is exactly what FlashMLA's ``indices`` expects —
-        no re-cast or re-contiguous needed (iter3.2 optimization).
+      * ``swa_topk_3d`` holds per-request **global pool slot ids** (``-1``
+        padding for entries before sequence start). FlashMLA's sparse FP8
+        kernel reads ``pool[indices[i]]`` with no block-table indirection,
+        so the caller MUST translate abs positions via
+        :func:`~paged_topk_translator.translate_local_to_global_slots`
+        before invoking this op.
       * ``cache_seqlens`` is precomputed once per step into
         ``attn_metadata.cache_seqlens_i32`` and sliced ``[:bsz]`` by the
         caller.
@@ -53,7 +56,7 @@ def attn_fp8_swa_paged(
         q,
         swa_pool_3d,
         attn_sink,
-        swa_abs_idx,
+        swa_topk_3d,
         sched_meta,
         cache_seqlens=cache_seqlens,
         block_table=swa_block_table,

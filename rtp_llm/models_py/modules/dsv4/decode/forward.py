@@ -290,6 +290,22 @@ def forward_decode(
     )
     from rtp_llm.ops.compute_ops import PyModelOutputs
 
+    # FP8 decode has a separate, non-inheriting FmhaImpl class. Include both
+    # in the graph-path dispatch so the CUDA-graph capture (which passes an
+    # ``fmha_impl`` via ``prepare_fmha_impl``) reads the impl's persistent
+    # metadata instead of falling through to ``build_metadata_eager`` — the
+    # eager path does CPU→GPU copies on ``attn.sequence_lengths`` which are
+    # rejected inside a CUDA stream capture.
+    _graph_impl_types: Tuple[type, ...] = (DSv4DecodeFmhaImpl,)
+    try:
+        from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_fmha_impl import (
+            DSv4DecodeFmhaImplFP8,
+        )
+
+        _graph_impl_types = (DSv4DecodeFmhaImpl, DSv4DecodeFmhaImplFP8)
+    except ImportError:
+        pass
+
     attn = inputs.attention_inputs
     # No nn.Parameter on V4Transformer anymore — pull device from a known-bound tensor.
     param_dev = v4.embed.weight.device
@@ -300,7 +316,7 @@ def forward_decode(
     if input_ids.device != param_dev:
         input_ids = input_ids.to(param_dev)
 
-    if isinstance(fmha_impl, DSv4DecodeFmhaImpl):
+    if isinstance(fmha_impl, _graph_impl_types):
         meta = fmha_impl.metadata
     else:
         paged_specs = build_paged_pool_specs(
