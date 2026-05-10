@@ -212,7 +212,8 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
 
         auto sp_output_buffer          = std::make_shared<SpeculativeExecutorStreamOutput>();
         sp_output_buffer->propose_step = propose_step;
-        sp_output_buffer->tokens       = torch::zeros({1, (int64_t)propose_tokens.size()}, torch::kInt32);
+        sp_output_buffer->tokens       = torch::zeros({1, (int64_t)propose_tokens.size()},
+                                                torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
         memcpy(sp_output_buffer->tokens.data_ptr<int>(), propose_tokens.data(), propose_tokens.size() * sizeof(int));
 
         auto propose_probs_t  = QueryConverter::transTensor(generate_request.propose_probs());

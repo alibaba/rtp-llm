@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
 #include "rtp_llm/cpp/utils/StringUtil.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include <atomic>
 #include <cstdlib>
 #include <numeric>
@@ -836,6 +837,7 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
 }
 
 void MtpBatchStreamProcessor::gatherHiddenStates(const StreamGroups& stream_groups, GptModelInputs& model_input) const {
+    RTP_LLM_PROFILE_SCOPE("normal_engine.mtp_batch_stream_processor.gather_hidden_states");
     auto            all_streams = stream_groups.allStreams();
     c10::ScalarType dtype       = c10::ScalarType::Undefined;
     size_t          hidden_size = 0;
@@ -880,34 +882,52 @@ void MtpBatchStreamProcessor::gatherHiddenStates(const StreamGroups& stream_grou
         return;
     } else if (all_streams.size() == 1) {
         all_hidden_states = pick_hidden_states(all_streams.front());
-    } else if (all_streams.size() < 8) {
+    } else {
+        RTP_LLM_PROFILE_SCOPE("normal_engine.mtp_batch_stream_processor.gather_hidden_states.fused_copy");
         all_hidden_states = torch::empty({(int64_t)all_hidden_tokens_num, (int64_t)hidden_size},
                                          torch::TensorOptions().dtype(dtype).device(torch::kCUDA));
-        size_t index      = 0;
+
+        bool all_sources_fused_copy_ready = true;
         for (auto& stream : all_streams) {
             const auto& hidden_states = pick_hidden_states(stream);
-            auto        hidden_num    = hidden_states.size(0);
-            all_hidden_states.narrow(0, index, hidden_num).copy_(hidden_states);
-            index += hidden_num;
+            if (!hidden_states.is_cuda() || !hidden_states.is_contiguous()) {
+                all_sources_fused_copy_ready = false;
+                break;
+            }
         }
-    } else {
-        all_hidden_states = torch::empty({(int64_t)all_hidden_tokens_num, (int64_t)hidden_size},
-                                         torch::TensorOptions().dtype(dtype).device(torch::kCUDA));
 
-        MultiMergeCopyParams params;
-        params.dst_ptr         = all_hidden_states.data_ptr();
         size_t accu_dst_offset = 0;
-        for (auto& stream : all_streams) {
-            const auto& hidden_states    = pick_hidden_states(stream);
-            size_t      hidden_copy_size = hidden_states.nbytes();
-            params.src_ptrs.push_back(hidden_states.data_ptr());
-            params.copy_size.push_back(hidden_copy_size);
-            params.dst_offsets.push_back(accu_dst_offset);
-            accu_dst_offset += hidden_copy_size;
-        }
+        if (all_sources_fused_copy_ready) {
+            auto               dst_base = static_cast<char*>(all_hidden_states.data_ptr());
+            FusedD2DCopyParams params;
+            auto               flush_fused_copy = [&]() {
+                if (params.num_copies > 0) {
+                    fusedCopy(params);
+                    params.clear();
+                }
+            };
 
-        if (accu_dst_offset > 0) {
-            execMultiMergeCopy(params);
+            // Do not use execMultiMergeCopy here: its thrust::device_vector
+            // metadata staging creates H2D work on this hot path. fusedCopy
+            // passes copy metadata as kernel params and can be chunked.
+            for (auto& stream : all_streams) {
+                const auto& hidden_states    = pick_hidden_states(stream);
+                size_t      hidden_copy_size = hidden_states.nbytes();
+                if (params.num_copies == MAX_FUSED_D2D_COPIES) {
+                    flush_fused_copy();
+                }
+                params.add(hidden_states.data_ptr(), dst_base + accu_dst_offset, hidden_copy_size);
+                accu_dst_offset += hidden_copy_size;
+            }
+            flush_fused_copy();
+        } else {
+            size_t index = 0;
+            for (auto& stream : all_streams) {
+                const auto& hidden_states = pick_hidden_states(stream);
+                auto        hidden_num    = hidden_states.size(0);
+                all_hidden_states.narrow(0, index, hidden_num).copy_(hidden_states);
+                index += hidden_num;
+            }
         }
     }
 

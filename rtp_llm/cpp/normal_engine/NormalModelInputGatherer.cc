@@ -4,6 +4,7 @@
 #include <cstring>
 #include <sstream>
 #include <string>
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "torch/all.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/normal_engine/NormalModelInputGatherer.h"
@@ -202,6 +203,7 @@ torch::Tensor publishInt32ToCuda(const torch::Tensor& tensor) {
 void publishModelInputCoreTensorsToCuda(GptModelInputs& model_input) {
     // TODO(async): stream state is still gathered through CPU pointers above.
     // Publish only device tensors at the model boundary.
+    RTP_LLM_PROFILE_SCOPE("normal_engine.model_input_gatherer.publish_core_tensors_to_cuda");
     model_input.combo_tokens     = publishInt32ToCuda(model_input.combo_tokens);
     model_input.input_lengths    = publishInt32ToCuda(model_input.input_lengths);
     model_input.sequence_lengths = publishInt32ToCuda(model_input.sequence_lengths);
@@ -294,6 +296,7 @@ void NormalModelInputGatherer::initializeKvCacheMetadata(GptModelInputs& model_i
 
 absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     model_input,
                                                             const StreamGroups& stream_groups) const {
+    RTP_LLM_PROFILE_SCOPE("normal_engine.model_input_gatherer.process_decode_streams");
     auto ctx = createGatherContext(config_, model_input, stream_groups, GatherContextMode::DECODE);
 
     bool use_normal_device_state = stream_groups.totalContextBatchSize() == 0
@@ -376,6 +379,7 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
 
 absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&     model_input,
                                                              const StreamGroups& stream_groups) const {
+    RTP_LLM_PROFILE_SCOPE("normal_engine.model_input_gatherer.process_context_streams");
     std::vector<torch::Tensor> gathered_mm_features;
     const auto                 context_batch_size = static_cast<int64_t>(stream_groups.totalContextBatchSize());
     // TODO(async): prefixLength() is still stream CPU state. Stage it explicitly
