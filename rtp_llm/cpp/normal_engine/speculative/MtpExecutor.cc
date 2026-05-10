@@ -711,16 +711,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     std::shared_ptr<torch::Event> rejection_event;
     std::shared_ptr<torch::Event> draft_event;
 
-    if (useDeviceInput()) {
-        // TensorHolder release point (MtpExecutor device-input path):
-        // advances the one-extra-round hold window for decode-step model-input
-        // H2D sources. draftModelDecode must not release again in this path
-        // because it may still be holding sources queued before TP sync.
-        buffer_holder_.release();
-    }
-
     waitPreviousBookkeepingAndKvSwaps(streams);
-    rebuildAsyncDeviceStateFromHolder(streams);
 
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(gather_model_input)");
@@ -922,48 +913,6 @@ void MtpExecutor::waitPreviousBookkeepingAndKvSwaps(const std::list<GenerateStre
                 stream->clearPendingSwapDoneEvent();
             }
         }
-    }
-}
-
-void MtpExecutor::rebuildAsyncDeviceStateFromHolder(const std::list<GenerateStreamPtr>& streams) {
-    RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.decode_step(clone_sp_tensors,stream_count=%zu)", streams.size());
-    for (auto& stream : streams) {
-        auto sp_output_buffer = stream->getSPOutputBuffer();
-        if (!sp_output_buffer) {
-            continue;
-        }
-        auto const& tensors_holder = sp_output_buffer->tensors_holder;
-        if (tensors_holder.empty()) {
-            continue;
-        }
-
-        auto const& propose_probs_cpu   = tensors_holder[0];
-        auto const& propose_hidden_cpu  = tensors_holder[1];
-        sp_output_buffer->all_probs     = propose_probs_cpu.to(torch::kCUDA);
-        sp_output_buffer->hidden_states = propose_hidden_cpu.to(torch::kCUDA);
-
-        auto propose_tokens_gpu = torch::empty({1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
-
-        auto accept_len    = torch::ones({1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
-        auto accept_tokens = torch::zeros({1, (long)propose_step_ + 1},
-                                          torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
-
-        accept_tokens[0][0]   = sp_output_buffer->tokens[0][0];
-        propose_tokens_gpu[0] = sp_output_buffer->tokens[0][1];
-
-        auto next_seq_len = torch::ones({1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
-        next_seq_len[0]   = stream->seqLength();
-
-        stream->setMtpAsyncDeviceState(GenerateStream::MtpAsyncDeviceState{
-            .epoch                  = 0,
-            .accept_len_gpu         = accept_len,
-            .accept_tokens_gpu      = accept_tokens,
-            .next_seq_len_gpu       = next_seq_len,
-            .propose_tokens_gpu     = propose_tokens_gpu,
-            .last_hidden_states_gpu = sp_output_buffer->hidden_states,
-            .draft_all_probs_gpu    = sp_output_buffer->all_probs,
-            .next_real_seq_len      = stream->seqLength(),
-        });
     }
 }
 
@@ -1313,11 +1262,6 @@ absl::Status MtpExecutor::dispatchDecodeOutput(const StreamGroups&              
             publishSyncMtpDeviceState(stream_groups, speculative_sampler_output, draft_prefill_output);
         }
     }
-    // clean holder tensors from grpc
-    for (auto& stream : streams) {
-        stream->getSPOutputBuffer()->tensors_holder.clear();
-    }
-
     return result;
 }
 
@@ -1493,9 +1437,9 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
 
     if (!pre_target_token_t.defined()) {
         // Legacy racy fallback retained only for streams that have not yet
-        // published MtpAsyncDeviceState (e.g., PD-disaggregate decode side
-        // before rebuildAsyncDeviceStateFromHolder has ever fired). When this
-        // path is hit while a previous worker is still in flight (DROP_BROAD_
+        // published MtpAsyncDeviceState (e.g., older PD-disaggregate decode
+        // initialization paths). Hitting this path while a previous worker is
+        // still in flight (DROP_BROAD_
         // SYNC=1), output corruption is expected.
         RTP_LLM_PROFILE_SCOPE("executor.mtp.draft_model_decode(pre_target_host_fallback)");
         auto pre_target_token =
