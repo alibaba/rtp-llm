@@ -205,6 +205,11 @@ test:cuda13_arm --test_env=LD_PRELOAD=/usr/lib64/librt.so.1
 # gcc 12+ as host. Container ships /opt/rh/gcc-toolset-12/root/usr/bin/g++
 # (gcc 12.3.0), so point the JIT at that. gcc-toolset-12 lives outside PATH
 # by default, hence the explicit PATH / LD_LIBRARY_PATH overrides.
+#
+# These were previously hard-coded into smoke defs.bzl pointing at user-
+# private conda envs (/home/tanboyu.tby/..., /home/serina.wzq/...) which
+# only worked on those specific dev boxes. Centralize here so every cu13
+# test sees the same toolchain.
 test:cuda13 --test_env=DG_JIT_CPP_STANDARD=20
 test:cuda13 --test_env=CC=/opt/rh/gcc-toolset-12/root/usr/bin/gcc
 test:cuda13 --test_env=CXX=/opt/rh/gcc-toolset-12/root/usr/bin/g++
