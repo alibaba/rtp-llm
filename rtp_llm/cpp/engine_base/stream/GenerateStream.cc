@@ -20,6 +20,15 @@ using namespace std;
 
 namespace rtp_llm {
 
+namespace {
+
+bool useStreamAsyncReserveTokens() {
+    static const bool enabled = autil::EnvUtil::getEnv("RTP_LLM_STREAM_ASYNC", false);
+    return enabled;
+}
+
+}  // namespace
+
 GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
                                const ModelConfig&               model_config,
                                const RuntimeConfig&             runtime_config,
@@ -642,12 +651,15 @@ size_t GenerateStream::curBlocksNum() const {
 }
 
 size_t GenerateStream::maxTokenNum() const {
-    int propose_step = 0;
+    int reserve_tokens = 0;
     if (sp_output_buffer_) {
-        propose_step = sp_output_buffer_->propose_step;
+        reserve_tokens = sp_output_buffer_->propose_step;
+        if (useStreamAsyncReserveTokens()) {
+            reserve_tokens = reserve_tokens * 2 + 1;
+        }
     }
 
-    return std::min(max_seq_len_ - propose_step,
+    return std::min(max_seq_len_ > reserve_tokens ? max_seq_len_ - reserve_tokens : 0,
                     generate_input_->generate_config->max_new_tokens + generate_input_->inputLength());
 }
 
