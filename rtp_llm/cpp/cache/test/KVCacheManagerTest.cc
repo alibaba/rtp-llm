@@ -8,6 +8,7 @@
 
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/cache/BlockCache.h"
+#include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
@@ -117,9 +118,8 @@ static CacheConfig makeCompactDSV4ManagerConfig(uint32_t block_num = 16) {
     return config;
 }
 
-// Creates a DSV4 config that mirrors production behavior: FULL groups (0,1,2) use
-// a large paged pool (full_block_num), while SWA groups (3,4,5,6) use a small fixed
-// pool sized by concurrency (fixed_blocks_per_req=2 × batch_size).
+// Creates an intentionally tight DSV4 config for eviction stress tests: FULL
+// groups use a large paged pool, while SWA groups use a small fixed pool.
 static CacheConfig makeDSV4ConfigWithConcurrencyPool(uint32_t full_block_num, uint32_t swa_batch_size) {
     ParallelismConfig pc;
     auto              config = HybridPoolConfigCreator::createConfig(makeDSV4ManagerFlashModelConfig(), pc);
@@ -128,6 +128,16 @@ static CacheConfig makeDSV4ConfigWithConcurrencyPool(uint32_t full_block_num, ui
         config.group_block_nums[gid] = (gid < 3) ? full_block_num : (2u * swa_batch_size);
     }
     return config;
+}
+
+static CacheConfig makeProductionDSV4Config(uint32_t full_block_num, uint32_t max_concurrency) {
+    ParallelismConfig pc;
+    RuntimeConfig     runtime_config;
+    KVCacheConfig     kv_cache_config;
+    kv_cache_config.test_block_num                              = full_block_num;
+    runtime_config.max_generate_batch_size                      = max_concurrency;
+    runtime_config.fifo_scheduler_config.max_context_batch_size = max_concurrency;
+    return CacheConfigCreator::createConfig(makeDSV4ManagerFlashModelConfig(), pc, runtime_config, kv_cache_config);
 }
 
 static BatchKVCacheResourcePtr makeDSV4BatchResource(const CacheConfig& config) {
@@ -1020,12 +1030,82 @@ TEST_F(KVCacheManagerTest, DSV4EvictionTriggeredWhenPoolExhaustedByCache) {
     EXPECT_EQ(manager->freeBlocksNum(), free_before);
 }
 
+TEST_F(KVCacheManagerTest, DSV4MaxConcurrencyOneReuseOneBlockAndAllocTwoTailBlocks) {
+    auto manager_config = makeProductionDSV4Config(/*full_block_num=*/8, /*max_concurrency=*/1);
+    ASSERT_EQ(manager_config.group_block_nums.size(), static_cast<size_t>(kDsv4PoolNum));
+    for (int gid = 3; gid < kDsv4PoolNum; ++gid) {
+        ASSERT_EQ(manager_config.group_block_nums[gid], 5u) << "group " << gid;
+    }
+
+    auto manager = std::make_shared<KVCacheManager>(manager_config, /*warmup=*/false);
+    ASSERT_TRUE(manager->init());
+
+    const size_t free_before = manager->freeBlocksNum();
+    EXPECT_EQ(free_before, 3u * 7u + 4u * 4u);
+    const int spb = static_cast<int>(manager_config.seq_size_per_block);
+
+    auto makeTokens = [&](int seq_len) {
+        auto input_ids      = torch::arange(0, seq_len, torch::kInt32);
+        auto gi             = std::make_shared<GenerateInput>();
+        gi->input_ids       = input_ids;
+        gi->generate_config = std::make_shared<GenerateConfig>();
+        auto cti            = std::make_shared<CompleteTokenIds>(1, 1, /*max_seq_len=*/4 * spb, spb);
+        cti->init(gi);
+        cti->setSeqLength(seq_len);
+        return cti;
+    };
+
+    // Seed one reusable SWA/state block per fixed pool.  For a 2-block request,
+    // insertIntoCache keeps only the first full block; the active tail is not cached.
+    auto       seed_res    = makeDSV4BatchResource(manager_config);
+    auto       seed_tokens = makeTokens(2 * spb);
+    MallocInfo seed_malloc{seed_res, seed_tokens};
+    seed_malloc.reuse_cache         = false;
+    seed_malloc.enable_device_cache = false;
+    ASSERT_TRUE(manager->malloc(seed_malloc).success);
+
+    for (int gid = 3; gid < kDsv4PoolNum; ++gid) {
+        ASSERT_EQ(seed_res->blocksNum(0, gid), 2) << "seed group " << gid;
+        ASSERT_FALSE(isNullBlockIdx(seed_res->blocks(0, gid)[0])) << "seed group " << gid;
+    }
+
+    manager->insertIntoCache(InsertInfo{seed_res, seed_tokens, /*is_resident=*/false});
+    manager->free(FreeInfo{seed_res, seed_tokens});
+
+    // Same prefix, one more block.  This hits one cached fixed-pool block and
+    // must still have room for the two fresh tail blocks.  The matched block is
+    // then skipped out of the active SWA tail by the decode allocation path.
+    auto       reuse_res    = makeDSV4BatchResource(manager_config);
+    auto       reuse_tokens = makeTokens(3 * spb);
+    MallocInfo reuse_malloc{reuse_res, reuse_tokens};
+    reuse_malloc.reuse_cache         = true;
+    reuse_malloc.enable_device_cache = true;
+    auto reuse_result                = manager->malloc(reuse_malloc);
+    ASSERT_TRUE(reuse_result.success);
+    EXPECT_EQ(reuse_result.reuse_len, spb);
+
+    for (int gid = 3; gid < kDsv4PoolNum; ++gid) {
+        const auto& blocks = reuse_res->blocks(0, gid);
+        ASSERT_EQ(blocks.size(), 3u) << "reuse group " << gid;
+        EXPECT_TRUE(isNullBlockIdx(blocks[0])) << "reuse group " << gid << " skipped reused prefix";
+        EXPECT_FALSE(isNullBlockIdx(blocks[1])) << "reuse group " << gid << " tail block 1";
+        EXPECT_FALSE(isNullBlockIdx(blocks[2])) << "reuse group " << gid << " tail block 2";
+    }
+
+    manager->free(FreeInfo{reuse_res, reuse_tokens});
+    auto evicted = manager->popBlocksFromCache(/*min_blocks_to_free=*/100);
+    if (evicted) {
+        manager->blockCacheFree(evicted);
+    }
+    EXPECT_EQ(manager->freeBlocksNum(), free_before);
+}
+
 TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeContinuation) {
     // This test simulates full DSV4 inference including SWA group eviction.
     //
-    // Production layout:
+    // Tight stress layout:
     //   FULL groups (0,1,2): large paged pool (block_num=8, 7 usable)
-    //   SWA  groups (3,4,5,6): small fixed pool = fixed_blocks_per_req(2) × batch_size(2) + reserved block
+    //   SWA  groups (3,4,5,6): small fixed pool with 3 usable blocks
     //
     // SWA pools are sized by concurrency, NOT by global block_num. This test verifies that
     // eviction is triggered independently on SWA groups when concurrent requests exhaust
