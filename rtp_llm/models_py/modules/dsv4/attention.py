@@ -49,15 +49,15 @@ from rtp_llm.models_py.modules.dsv4._metadata_triton import (
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4.compressor import Compressor
 
-# Single source of truth for the BF16 vLLM-flow opt-in switch.
-# Off by default; set ``DSV4_BF16_VLLM=1`` to swap this :class:`Attention`
-# (legacy logical-block ``Compressor`` / ``Indexer``) for
+# Single source of truth for the BF16 vLLM-flow switch.
+# On by default; set ``DSV4_BF16_VLLM=0`` to keep this legacy logical-block
+# :class:`Attention` (``Compressor`` / ``Indexer``) instead of selecting
 # :class:`AttentionBF16VLLM` (``CompressorBF16VLLM`` / ``IndexerBF16VLLM``) at
-# construction time in ``block.py``. Resolved once at module load (env
-# vars are set before Python launches in production). ``indexer.py``
-# imports this constant lazily inside ``__init__`` to avoid the
-# attention.py ↔ indexer.py module-load cycle.
-DSV4_BF16_VLLM: bool = os.environ.get("DSV4_BF16_VLLM", "0") != "0"
+# construction time in ``block.py``. Resolved once at module load (env vars are
+# set before Python launches in production). ``indexer.py`` imports this
+# constant lazily inside ``__init__`` to avoid the attention.py ↔ indexer.py
+# module-load cycle.
+DSV4_BF16_VLLM: bool = os.environ.get("DSV4_BF16_VLLM", "1") != "0"
 
 
 from rtp_llm.models_py.modules.dsv4.cp import (

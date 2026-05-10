@@ -5,8 +5,9 @@ public surface and same constructor args, but constructs
 :class:`CompressorBF16VLLM` / :class:`IndexerBF16VLLM` for the nested modules
 and adds the ``_forward_prefill_vllm`` family + dispatch hook in
 ``_forward_body``. Selected at construction time by ``block.py`` when
-``DSV4_BF16_VLLM=1`` (see ``attention.DSV4_BF16_VLLM``); legacy
-``Attention`` is selected when off.
+``DSV4_BF16_VLLM`` is enabled (default ``1``; see
+``attention.DSV4_BF16_VLLM``); legacy ``Attention`` is selected when set to
+``0``.
 
 Per-token state-pool / fused-boundary writer + BF16 KV pool throughout —
 no FP8 quant, no UE8M0 scales. Falls through to the legacy body for SWA-
@@ -2032,8 +2033,8 @@ class AttentionBF16VLLM(nn.Module):
     # ``_forward_prefill`` family, but BF16 KV-cache throughout and
     # using the local CompressorBF16VLLM / IndexerBF16VLLM with hoisted meta).
     #
-    # Always-on for this class (block.py picks AttentionBF16VLLM only when
-    # ``DSV4_BF16_VLLM=1``); entry hook lives in :meth:`_forward_body`.
+    # Always-on for this class (block.py picks AttentionBF16VLLM when
+    # ``DSV4_BF16_VLLM`` is enabled); entry hook lives in :meth:`_forward_body`.
     # Constraints:
     #   * single request only (bsz == 1)
     #   * CP support follows the existing BF16 dense/paged gather helpers.
