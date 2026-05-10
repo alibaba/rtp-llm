@@ -234,6 +234,15 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
     fake_input->generate_config->num_return_sequences = runtime_config.fifo_scheduler_config.max_context_batch_size;
     fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
     rtp_llm::setTraceMemory(true);
+    // Snapshot hybrid-cache group info from a basic cache_config before
+    // constructing the warmup NormalExecutor — see decodeWarmUp comment.
+    // Without this, CudaGraphRunner inside the warmup executor sees
+    // kv_cache_group_num_=0 and skips per-group block_table setup.
+    {
+        auto cfg                 = CacheConfigCreator::createBasicConfig(model_config_, parallelism_config);
+        kv_cache_group_num_      = cfg.groupNums();
+        kv_cache_layer_to_group_ = cfg.layer_to_group_id;
+    }
     executor_.reset(new NormalExecutor(
         params, nullptr, true, false, 0, mla_ops_type_, kv_cache_group_num_, kv_cache_layer_to_group_));
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::prefill_warm_up));
@@ -260,6 +269,17 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     auto cache_config               = CacheConfigCreator::createBasicConfig(model_config_, parallelism_config);
     cache_config.seq_size_per_block = model_config_.attn_config.tokens_per_block;
     cache_config.block_num          = 5;
+    // Snapshot hybrid-cache group info from the warmup cache_config so that the
+    // NormalExecutor → PyWrappedModel → CudaGraphRunner created below sees the
+    // real kv_cache_group_num_ / kv_cache_layer_to_group_.  Without this the
+    // members are still default-0 (real values get set in initCacheManager
+    // AFTER warmUp returns — see line 331/348), which makes CudaGraphRunner
+    // skip per-group block_table construction in initCaptureAttentionInputs
+    // (the `if (kv_cache_group_num_ > 1)` branch), and the DSv4 FP8 decode
+    // path then asserts on pool_block_tables=None during the dtype-check
+    // forward inside initCapture.
+    kv_cache_group_num_      = cache_config.groupNums();
+    kv_cache_layer_to_group_ = cache_config.layer_to_group_id;
     ParallelismConfig temp_parallelism_config;
     RuntimeConfig     temp_runtime_config;
     auto              cache_manager = make_shared<KVCacheManager>(
