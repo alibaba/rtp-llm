@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "torch/all.h"
 #include "rtp_llm/cpp/cache/Types.h"
+#include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/normal_engine/NormalModelInputGatherer.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
@@ -186,7 +187,7 @@ torch::Tensor buildLmOutputIndexesOnCuda(const GptModelInputs& model_input, cons
     return torch::cat(parts, /*dim=*/0).contiguous();
 }
 
-torch::Tensor publishInt32ToCuda(const torch::Tensor& tensor) {
+torch::Tensor publishInt32ToCuda(const torch::Tensor& tensor, TensorHolder& host_holder) {
     if (!tensor.defined()) {
         return tensor;
     }
@@ -197,22 +198,23 @@ torch::Tensor publishInt32ToCuda(const torch::Tensor& tensor) {
     if (tensor.numel() == 0) {
         return torch::empty(tensor.sizes(), cuda_i32);
     }
+    host_holder.hold_host(tensor);
     return tensor.to(cuda_i32, /*non_blocking=*/true);
 }
 
-void publishModelInputCoreTensorsToCuda(GptModelInputs& model_input) {
+void publishModelInputCoreTensorsToCuda(GptModelInputs& model_input, TensorHolder& host_holder) {
     // TODO(async): stream state is still gathered through CPU pointers above.
     // Publish only device tensors at the model boundary.
     RTP_LLM_PROFILE_SCOPE("normal_engine.model_input_gatherer.publish_core_tensors_to_cuda");
-    model_input.combo_tokens     = publishInt32ToCuda(model_input.combo_tokens);
-    model_input.input_lengths    = publishInt32ToCuda(model_input.input_lengths);
-    model_input.sequence_lengths = publishInt32ToCuda(model_input.sequence_lengths);
-    model_input.prefix_lengths   = publishInt32ToCuda(model_input.prefix_lengths);
+    model_input.combo_tokens     = publishInt32ToCuda(model_input.combo_tokens, host_holder);
+    model_input.input_lengths    = publishInt32ToCuda(model_input.input_lengths, host_holder);
+    model_input.sequence_lengths = publishInt32ToCuda(model_input.sequence_lengths, host_holder);
+    model_input.prefix_lengths   = publishInt32ToCuda(model_input.prefix_lengths, host_holder);
     // Migrate the 3-D KV kernel block id tensor to CUDA. Filled host-side above via
     // copyKvCacheBlocksToModelInput; this is the single H2D that replaces the per-group
     // tensorHoldHostAndToCuda copies that PyWrappedModel::setupKVCacheForAttentionInputs
     // used to launch.
-    model_input.kv_cache_kernel_block_id = publishInt32ToCuda(model_input.kv_cache_kernel_block_id);
+    model_input.kv_cache_kernel_block_id = publishInt32ToCuda(model_input.kv_cache_kernel_block_id, host_holder);
 }
 
 }  // anonymous namespace
@@ -378,7 +380,8 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
 }
 
 absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&     model_input,
-                                                             const StreamGroups& stream_groups) const {
+                                                             const StreamGroups& stream_groups,
+                                                             TensorHolder&       host_holder) const {
     RTP_LLM_PROFILE_SCOPE("normal_engine.model_input_gatherer.process_context_streams");
     std::vector<torch::Tensor> gathered_mm_features;
     const auto                 context_batch_size = static_cast<int64_t>(stream_groups.totalContextBatchSize());
@@ -455,12 +458,12 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
     if (config_.is_multimodal && !gathered_mm_features.empty()) {
         model_input.multimodal_features = std::move(gathered_mm_features);
     }
-    model_input.prefix_lengths = publishInt32ToCuda(prefix_lengths_host);
+    model_input.prefix_lengths = publishInt32ToCuda(prefix_lengths_host, host_holder);
     return absl::OkStatus();
 }
 
-absl::StatusOr<torch::Tensor>
-NormalModelInputGatherer::gatherKvCacheKernelBlockId(const StreamGroups& stream_groups) const {
+absl::StatusOr<torch::Tensor> NormalModelInputGatherer::gatherKvCacheKernelBlockId(const StreamGroups& stream_groups,
+                                                                                   TensorHolder& host_holder) const {
     const size_t total_batch_size = stream_groups.totalModelBatchSize();
     const size_t max_blocks_num   = stream_groups.curBlocksNum();
     if (max_blocks_num == 0 || total_batch_size == 0) {
@@ -499,10 +502,11 @@ NormalModelInputGatherer::gatherKvCacheKernelBlockId(const StreamGroups& stream_
         fill_one_stream(stream, batch_idx);
     }
 
-    return publishInt32ToCuda(host_tensor);
+    return publishInt32ToCuda(host_tensor, host_holder);
 }
 
-absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGroups& stream_groups) const {
+absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGroups& stream_groups,
+                                                                TensorHolder&       host_holder) const {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     RTP_LLM_LOG_DEBUG("context_streams size = %d, decode_streams size = %d",
                       stream_groups.contextStreams().size(),
@@ -510,8 +514,8 @@ absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGrou
     auto model_input = allocateModelInputBuffers(stream_groups);
     initializeKvCacheMetadata(model_input);
     RETURN_IF_STATUS_ERROR(processDecodeStreams(model_input, stream_groups));
-    RETURN_IF_STATUS_ERROR(processContextStreams(model_input, stream_groups));
-    publishModelInputCoreTensorsToCuda(model_input);
+    RETURN_IF_STATUS_ERROR(processContextStreams(model_input, stream_groups, host_holder));
+    publishModelInputCoreTensorsToCuda(model_input, host_holder);
     model_input.lm_output_indexes = buildLmOutputIndexesOnCuda(model_input, stream_groups);
     return model_input;
 }

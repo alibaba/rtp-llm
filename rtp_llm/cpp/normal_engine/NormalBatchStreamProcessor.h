@@ -25,7 +25,8 @@ public:
                                bool                               warm_up);
 
     virtual absl::Status dispatch(const StreamGroups& stream_groups, const MergedOutput& merge_outputs) const;
-    virtual absl::StatusOr<GptModelInputs> gatherModelInput(const StreamGroups& stream_groups) const;
+    virtual absl::StatusOr<GptModelInputs> gatherModelInput(const StreamGroups& stream_groups,
+                                                            TensorHolder&       host_holder) const;
     virtual absl::StatusOr<SamplerInputs>  gatherSamplerInput(const StreamGroups&    stream_groups,
                                                               const GptModelInputs&  model_inputs,
                                                               const GptModelOutputs& model_output) const;
@@ -34,7 +35,8 @@ public:
     // [groups, batch, max_blocks * kernel_blocks_per_kv_block]). Read-only over
     // streams: does not call stream->step() and does not fill any other field.
     // Returns an undefined tensor when there are no streams or no blocks.
-    virtual absl::StatusOr<torch::Tensor> gatherKvCacheKernelBlockId(const StreamGroups& stream_groups) const;
+    virtual absl::StatusOr<torch::Tensor> gatherKvCacheKernelBlockId(const StreamGroups& stream_groups,
+                                                                     TensorHolder&       host_holder) const;
 
 protected:
     SamplerInputs allocateSamplerInputs(const StreamGroups& stream_groups,

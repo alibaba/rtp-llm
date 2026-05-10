@@ -25,7 +25,8 @@ public:
                                 const speculative::SpeculativeSamplerOutput& spec_decode_output,
                                 const MergedOutput&                          draft_prefill_output) const;
 
-    absl::StatusOr<GptModelInputs> gatherDecodeModelInput(const StreamGroups& stream_groups) const;
+    absl::StatusOr<GptModelInputs> gatherDecodeModelInput(const StreamGroups& stream_groups,
+                                                          TensorHolder&       host_holder) const;
 
     absl::StatusOr<SamplerInputs> gatherSpecSamplerInput(const StreamGroups&    stream_groups,
                                                          const GptModelInputs&  model_inputs,

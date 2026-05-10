@@ -190,7 +190,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     {
         RTP_LLM_PROFILE_SCOPE("executor.gather_model_input");
         int64_t start_time_us      = autil::TimeUtility::currentTimeInMicroSeconds();
-        auto    model_input_status = batch_stream_processor_->gatherModelInput(stream_groups);
+        auto    model_input_status = batch_stream_processor_->gatherModelInput(stream_groups, buffer_holder_);
         RETURN_IF_STATUS_OR_ERROR(model_input_status);
         model_input                              = std::move(model_input_status.value());
         executor_collector.gather_model_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;

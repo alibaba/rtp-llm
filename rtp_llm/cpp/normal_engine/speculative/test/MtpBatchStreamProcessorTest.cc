@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/normal_engine/speculative/MtpBatchStreamProcessor.h"
 #undef private
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
+#include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
@@ -219,7 +220,8 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherDecodeModelInput) {
     cache_config.group_types = {CacheGroupType::FULL};
     auto processor           = MtpBatchStreamProcessor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
-    auto model_input = processor.gatherDecodeModelInput(stream_groups);
+    TensorHolder holder;
+    auto         model_input = processor.gatherDecodeModelInput(stream_groups, holder);
     EXPECT_TRUE(model_input.ok());
 
     auto          last_hidden_states        = model_input.value().last_hidden_states;
@@ -296,7 +298,8 @@ TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInput) {
     cache_config.group_types = {CacheGroupType::FULL};
     auto processor           = MtpBatchStreamProcessor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
-    auto model_input_status = processor.gatherDecodeModelInput(stream_groups);
+    TensorHolder holder;
+    auto         model_input_status = processor.gatherDecodeModelInput(stream_groups, holder);
     EXPECT_TRUE(model_input_status.ok());
 
     auto& model_input            = model_input_status.value();
@@ -395,7 +398,8 @@ TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {
     cache_config.group_types = {CacheGroupType::FULL};
     auto processor           = MtpBatchStreamProcessor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
-    auto model_input_status = processor.gatherDecodeModelInput(stream_groups);
+    TensorHolder holder;
+    auto         model_input_status = processor.gatherDecodeModelInput(stream_groups, holder);
     EXPECT_TRUE(model_input_status.ok());
 
     auto& model_input            = model_input_status.value();
@@ -451,7 +455,8 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInput) {
     cache_config.group_types = {CacheGroupType::FULL};
     auto processor           = MtpBatchStreamProcessor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
-    auto model_input_status = processor.gatherModelInput(stream_groups);
+    TensorHolder holder;
+    auto         model_input_status = processor.gatherModelInput(stream_groups, holder);
     EXPECT_TRUE(model_input_status.ok());
 
     auto& model_input            = model_input_status.value();
@@ -509,7 +514,8 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInput) {
     cache_config.group_types = {CacheGroupType::FULL};
     auto processor           = MtpBatchStreamProcessor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
-    auto model_input_status = processor.gatherModelInput(stream_groups);
+    TensorHolder holder;
+    auto         model_input_status = processor.gatherModelInput(stream_groups, holder);
     EXPECT_TRUE(model_input_status.ok());
 
     auto& model_input = model_input_status.value();

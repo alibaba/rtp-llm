@@ -517,7 +517,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(gather_model_input)");
         int64_t start_time_us      = autil::TimeUtility::currentTimeInMicroSeconds();
-        auto    model_input_status = batch_stream_processor_->gatherModelInput(stream_groups);
+        auto    model_input_status = batch_stream_processor_->gatherModelInput(stream_groups, buffer_holder_);
         RETURN_IF_STATUS_OR_ERROR(model_input_status);
         model_input                              = std::move(model_input_status.value());
         executor_collector.gather_model_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
@@ -716,7 +716,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(gather_model_input)");
         int64_t start_time_us      = autil::TimeUtility::currentTimeInMicroSeconds();
-        auto    model_input_status = batch_stream_processor_->gatherDecodeModelInput(stream_groups);
+        auto    model_input_status = batch_stream_processor_->gatherDecodeModelInput(stream_groups, buffer_holder_);
         RETURN_IF_STATUS_OR_ERROR(model_input_status);
         model_input = std::move(model_input_status.value());
         executor_collector.gather_model_input_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
@@ -1033,7 +1033,7 @@ GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input,
 
         if (tp_rank_ == 0) {
             model_input.kv_cache_kernel_block_id =
-                batch_stream_processor_->gatherKvCacheKernelBlockId(stream_groups).value();
+                batch_stream_processor_->gatherKvCacheKernelBlockId(stream_groups, buffer_holder_).value();
         }
 
         if (parallelism_config_.tp_size > 1) {

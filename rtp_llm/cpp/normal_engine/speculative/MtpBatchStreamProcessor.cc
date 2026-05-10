@@ -224,9 +224,9 @@ absl::Status MtpBatchStreamProcessor::dispatchDecode(const StreamGroups&        
     return absl::OkStatus();
 }
 
-absl::StatusOr<GptModelInputs>
-MtpBatchStreamProcessor::gatherDecodeModelInput(const StreamGroups& stream_groups) const {
-    auto model_input = NormalBatchStreamProcessor::gatherModelInput(stream_groups);
+absl::StatusOr<GptModelInputs> MtpBatchStreamProcessor::gatherDecodeModelInput(const StreamGroups& stream_groups,
+                                                                               TensorHolder&       host_holder) const {
+    auto model_input = NormalBatchStreamProcessor::gatherModelInput(stream_groups, host_holder);
 
     RTP_LLM_CHECK(model_input.ok());
 
