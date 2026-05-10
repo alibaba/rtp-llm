@@ -339,6 +339,7 @@ struct BatchDecodeSchedulerConfig {
 struct FIFOSchedulerConfig {
     int64_t     max_context_batch_size = 1;
     int64_t     max_batch_tokens_size  = 0;
+    bool        cp_force_single_prefill = true;
     std::string to_string() const;
 };
 

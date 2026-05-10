@@ -131,6 +131,12 @@ def _persistent_topk_enabled() -> bool:
     return os.environ.get("DSV4_PERSISTENT_TOPK", "1") != "0"
 
 
+def _cp_topk_row_order_enabled() -> bool:
+    if not _INDEXED_PREFILL_TOPK_OK:
+        return False
+    return os.environ.get("DSV4_CP_TOPK_ROW_ORDER", "0") == "1"
+
+
 def _get_topk_workspace(device: torch.device) -> torch.Tensor:
     ws = _persistent_topk_workspace_cache.get(device)
     if ws is None:
@@ -756,7 +762,11 @@ class IndexerFP8(PoolBackedModule):
                 self._clear_nested_pool()
 
         topk_row_order: Optional[torch.Tensor] = None
-        if cp_active and _INDEXED_PREFILL_TOPK_OK and M > _CP_TOPK_ROW_ORDER_MIN_ROWS:
+        if (
+            cp_active
+            and _cp_topk_row_order_enabled()
+            and M > _CP_TOPK_ROW_ORDER_MIN_ROWS
+        ):
             assert cp_ctx is not None
             with record_function_range("dsv4.fp8.indexer.prepare.cp_topk_row_order"):
                 topk_row_order = _build_cp_zigzag_topk_row_order(
