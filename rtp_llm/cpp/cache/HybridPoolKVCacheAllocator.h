@@ -44,6 +44,11 @@ public:
     void                    regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr) override;
     int64_t                 getMrCostTimeMs() const override;
 
+    // Per-pool access for diagnostics / per-pool metrics reporting.
+    const std::vector<BlockPoolPtr>& groupBlockPools() const {
+        return group_block_pools_;
+    }
+
 private:
     bool doInit() override;
 

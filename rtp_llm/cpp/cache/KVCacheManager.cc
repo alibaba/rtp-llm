@@ -573,6 +573,63 @@ void KVCacheManager::reportMetricsLoop() {
         collector.mr_cost_time_ms = allocator_->getMrCostTimeMs();
 
         metrics_reporter_->report<RtpLLMCacheMetrics, RtpLLMCacheMetricsCollector>(&tags, &collector);
+
+        // Diagnostic raw dump — verifies (total - available) / total matches
+        // ratio at the same tick, so any monitoring-side discrepancy can be
+        // confirmed as an aggregation artefact rather than a server bug.
+        RTP_LLM_LOG_INFO(
+            "kvc raw global: total=%zu avail=%zu req_ref=%zu con_ref=%zu free=%zu items=%ld ratio=%.4f%%",
+            total_blocks,
+            available_blocks,
+            request_ref_blocks,
+            connector_ref_blocks,
+            static_cast<size_t>(collector.kv_cache_free_blocks),
+            static_cast<long>(collector.kv_cache_item_num),
+            collector.kv_cache_used_ratio);
+
+        // Per-pool breakdown — only meaningful for HybridPoolKVCacheAllocator
+        // (DSv4's 7-pool layout etc.). Single-pool allocators skip this.
+        if (auto hybrid = std::dynamic_pointer_cast<rtp_llm::HybridPoolKVCacheAllocator>(allocator_)) {
+            const auto& pools = hybrid->groupBlockPools();
+            for (size_t gid = 0; gid < pools.size(); ++gid) {
+                const auto& pool = pools[gid];
+                if (!pool) {
+                    continue;
+                }
+                const size_t pool_total      = pool->totalBlocksNum();
+                const size_t pool_available  = pool->availableBlocksNum();
+                const size_t pool_free       = pool->freeBlocksNum();
+                const size_t pool_req_ref    = pool->requestRefBlocksNum();
+                const size_t pool_con_ref    = pool->connectorRefBlocksNum();
+                const float  pool_used_ratio = (pool_total == 0) ?
+                                                   0.0f :
+                                                   static_cast<float>(100.0 * (pool_total - pool_available)
+                                                                      / static_cast<double>(pool_total));
+
+                RTP_LLM_LOG_INFO(
+                    "kvc raw pool[%zu]: total=%zu avail=%zu req_ref=%zu con_ref=%zu free=%zu ratio=%.4f%%",
+                    gid,
+                    pool_total,
+                    pool_available,
+                    pool_req_ref,
+                    pool_con_ref,
+                    pool_free,
+                    pool_used_ratio);
+
+                RtpLLMCachePoolMetricsCollector pool_collector;
+                pool_collector.free_blocks          = static_cast<int64_t>(pool_free);
+                pool_collector.available_blocks     = static_cast<int64_t>(pool_available);
+                pool_collector.request_ref_blocks   = static_cast<int64_t>(pool_req_ref);
+                pool_collector.connector_ref_blocks = static_cast<int64_t>(pool_con_ref);
+                pool_collector.total_blocks         = static_cast<int64_t>(pool_total);
+                pool_collector.used_ratio           = pool_used_ratio;
+
+                kmonitor::MetricsTags pool_tags("pool", std::to_string(gid));
+                metrics_reporter_->report<RtpLLMCachePoolMetrics, RtpLLMCachePoolMetricsCollector>(&pool_tags,
+                                                                                                   &pool_collector);
+            }
+        }
+
         std::this_thread::sleep_for(std::chrono::seconds(1));  // 1s
     }
 }
