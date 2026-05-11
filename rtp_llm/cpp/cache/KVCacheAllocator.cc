@@ -114,8 +114,17 @@ uint32_t KVCacheAllocator::convertToGlobalLayerId(size_t model_id, int local_lay
         RTP_LLM_LOG_ERROR("convertToGlobalLayerId: mtp_sub_configs[%zu] global_layer_ids is empty", model_id - 1);
         return std::numeric_limits<uint32_t>::max();
     }
-    if (local_layer_id >= 0 && static_cast<size_t>(local_layer_id) < sub->global_layer_ids[0].size()) {
-        return sub->global_layer_ids[0][static_cast<size_t>(local_layer_id)];
+    // SWA-only DSV4 propose configs put the single MTP layer in the SWA group
+    // (gid=6), not FULL[0], so ``global_layer_ids[0]`` is empty.  Flatten across
+    // all groups — matches ``KVCacheManager::getMTPModuleCacheLayerLayout``.
+    size_t flat_idx = 0;
+    for (const auto& group_ids : sub->global_layer_ids) {
+        for (int gid_val : group_ids) {
+            if (static_cast<int>(flat_idx) == local_layer_id) {
+                return static_cast<uint32_t>(gid_val);
+            }
+            ++flat_idx;
+        }
     }
     RTP_LLM_LOG_ERROR("convertToGlobalLayerId: local_layer_id=%d is invalid", local_layer_id);
     return std::numeric_limits<uint32_t>::max();
