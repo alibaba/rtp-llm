@@ -44,10 +44,11 @@ struct DSV4PoolDesc {
 
 DSV4LayerSets classifyDSV4Layers(const std::vector<int>& compress_ratios) {
     DSV4LayerSets sets;
-    size_t        num_layers = compress_ratios.size();
-    if (num_layers > 0 && compress_ratios.back() == 0) {
-        --num_layers;
-    }
+    // ``compress_ratios`` must describe exactly the layers covered by this
+    // cache config. The main DSV4 descriptor strips the trailing MTP tail,
+    // while the MTP propose descriptor uses ``[0]`` for its SWA-only draft
+    // layer. Do not strip a trailing zero here; that would erase the draft.
+    const size_t num_layers = compress_ratios.size();
 
     for (size_t i = 0; i < num_layers; ++i) {
         const int layer_id = static_cast<int>(i);
