@@ -38,10 +38,18 @@ the slot indices we produce here are ``r * stride + offset_in_request``.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
+
+
+def _fused_prepare_enabled() -> bool:
+    """Gate the Triton-fused pure-start_pos path (see
+    ``_fused_prepare_meta_triton.py``). Read per call so tests can flip
+    the env var mid-process; the cost is a single ``os.environ.get``."""
+    return os.environ.get("DSV4_FUSED_PREPARE", "0") == "1"
 
 
 @dataclass
@@ -168,6 +176,16 @@ class DSv4DecodeAttnMetadataFP8:
     # idx are identical across HCA layers). Only populated when an HCA
     # pool is bound.
     hca_cmp_global_slots: Optional[torch.Tensor] = None
+
+    # Prefetch-dedup hoist: constant index ranges used inside
+    # ``update_decode_metadata_in_place_fp8``. Filled once in
+    # ``allocate_decode_metadata_fp8`` (pure constants, never mutated) so
+    # every decode step can reuse them instead of re-issuing ``torch.arange``
+    # 5-10× per prepare call. Addresses stay stable → graph-capture safe.
+    q_range_i32: Optional[torch.Tensor] = None  # [q_len]
+    window_range_i32: Optional[torch.Tensor] = None  # [window_size]
+    batch_range_i32: Optional[torch.Tensor] = None  # [max_batch_size]
+    index_topk_range_i32: Optional[torch.Tensor] = None  # [index_topk]
 
     # FlashMLA ``sched_meta`` cache — per-(batch_size, extra_attn_type).
     # Mirrors vLLM's ``swa_metadata.tile_sched_{swaonly,c4a,c128a}`` pattern:
@@ -486,6 +504,14 @@ def allocate_decode_metadata_fp8(
         (B * q_len, index_topk), -1, dtype=torch.int32, device=device
     )
 
+    # Hoisted constant ranges (see field doc on DSv4DecodeAttnMetadataFP8).
+    # These are pure constants — filled once, never touched again. Reused
+    # across every prepare call to avoid re-launching arange kernels.
+    q_range_alloc = torch.arange(q_len, dtype=torch.int32, device=device)
+    window_range_alloc = torch.arange(window_size, dtype=torch.int32, device=device)
+    batch_range_alloc = torch.arange(B, dtype=torch.int32, device=device)
+    index_topk_range_alloc = torch.arange(index_topk, dtype=torch.int32, device=device)
+
     return DSv4DecodeAttnMetadataFP8(
         batch_size=B,
         q_len_per_req=q_len,
@@ -510,6 +536,10 @@ def allocate_decode_metadata_fp8(
         req_id_per_token=req_id_per_token_alloc,
         swa_global_slots=swa_global_slots_alloc,
         hca_cmp_global_slots=hca_cmp_global_slots_alloc,
+        q_range_i32=q_range_alloc,
+        window_range_i32=window_range_alloc,
+        batch_range_i32=batch_range_alloc,
+        index_topk_range_i32=index_topk_range_alloc,
     )
 
 
@@ -571,90 +601,159 @@ def update_decode_metadata_in_place_fp8(
         for r, t in meta.topk_total_by_ratio.items():
             ptr_snap[f"topk_total_by_ratio[{r}]"] = t.data_ptr()
 
-    # start_pos
-    meta.start_pos[:bs].copy_(start_pos)
-    # Iter3.2: refresh cache_seqlens = start_pos + 1 (shared across all 43
-    # decode-layer calls this step). Cheap scalar add + copy, done once
-    # here instead of 43× in ``_forward_decode_body``.
-    if meta.cache_seqlens_i32 is not None:
-        meta.cache_seqlens_i32[:bs].copy_(start_pos + 1)
-
-    # SWA slot mapping prefix [:bs * q_len]
-    swa_buffer_stride = window_size
-    s_offsets = start_pos.view(bs, 1) + torch.arange(
-        q_len, device=device, dtype=torch.int32
-    ).view(1, q_len)
-    in_ring = s_offsets % window_size
-    req_base = (
-        torch.arange(bs, device=device, dtype=torch.int32).view(bs, 1)
-        * swa_buffer_stride
-    )
-    swa_slots = (req_base + in_ring).reshape(-1)
-    meta.slot_mapping_swa[: bs * q_len].copy_(swa_slots)
-
-    # Window topk indices [:bs, :, :] — left-aligned (mirrors _build_window_topk_idxs)
-    abs_pos = s_offsets  # [bs, q_len]
-    k_range = torch.arange(window_size, device=device, dtype=torch.int32).view(
-        1,
-        1,
-        window_size,
-    )
-    abs_pos_b = abs_pos.unsqueeze(-1)  # [bs, q_len, 1]
-    sp = (abs_pos % window_size).unsqueeze(-1)  # [bs, q_len, 1]
-    ring_full_idx = (sp + 1 + k_range) % window_size
-    partial_idx = torch.where(
-        k_range <= abs_pos_b, k_range, torch.full_like(k_range, -1)
-    )
-    is_full = abs_pos_b >= (window_size - 1)
-    window_idxs = torch.where(is_full, ring_full_idx, partial_idx)
-    meta.topk_window_idxs[:bs].copy_(window_idxs)
-
-    # Indexer output buffer reset to -1 prefix [:bs]
-    meta.topk_buffer_compressed[:bs].fill_(-1)
-
-    # Per-ratio compressed slot mappings + lens + topk_total
-    for r, slot_t in meta.slot_mapping_compressed.items():
-        stride = meta.compressed_buffer_t_dim_per_ratio[r]
-        abs_pos_plus_1 = (
-            start_pos.view(bs, 1)
-            + torch.arange(q_len, device=device, dtype=torch.int32).view(1, q_len)
-            + 1
+    # ------------------------------------------------------------------
+    # Fused-Triton fast path (DSV4_FUSED_PREPARE=1).
+    # Replaces the pure-start_pos arithmetic (~60 aten ops) with one
+    # kernel launch. Block-table-dependent sections below still run on
+    # the Python path — those are gated on ``paged_block_tables``.
+    # Correctness is verified by test_fused_prepare_meta_triton.py.
+    # ------------------------------------------------------------------
+    _use_fused = False
+    if _fused_prepare_enabled():
+        from rtp_llm.models_py.modules.dsv4.fp8.decode._fused_prepare_meta_triton import (
+            fused_update_decode_meta_pure,
+            is_fused_supported,
         )
-        on_boundary = (abs_pos_plus_1 % r) == 0
-        in_req = abs_pos_plus_1 // r - 1
-        cmp_req_base = (
-            torch.arange(bs, device=device, dtype=torch.int32).view(bs, 1) * stride
+
+        if is_fused_supported(meta):
+            with torch.profiler.record_function("prep.phase1_fused"):
+                fused_update_decode_meta_pure(meta, start_pos, max_seq_len=0)
+                # Indexer output buffer reset — still needed, trivial single op.
+                meta.topk_buffer_compressed[:bs].fill_(-1)
+                # Required: pace the CPU at this call site.  The eager Python
+                # fallback issues ~60 small aten ops before returning, which
+                # naturally paces CPU ↔ GPU.  Replacing that with a single
+                # Triton launch lets the CPU race ahead and queue many decode
+                # steps before the GPU catches up; on DP=4 this surfaces as
+                # cross-rank divergence → DeepGEMM symm-mem NVLink barrier
+                # timeout ~9k syncs in.  Cost is one CPU round-trip per
+                # prepare_cuda_graph (~10µs), negligible vs the ~3ms the
+                # fused kernel saves per call.
+                torch.cuda.current_stream().synchronize()
+                _use_fused = True
+
+    # Hoisted constant ranges — pre-filled in allocate_decode_metadata_fp8
+    # (see field docs on DSv4DecodeAttnMetadataFP8). Eliminates ~10
+    # redundant arange-kernel launches per prepare call.
+    q_range = meta.q_range_i32  # [q_len]
+    window_range = meta.window_range_i32  # [window_size]
+    b_range = meta.batch_range_i32[:bs]  # [bs]
+
+    # Compute ``s_offsets`` / ``abs_pos_plus_1`` / ``abs_pos_b`` ONLY when a
+    # downstream Python path actually consumes them.  In the all-fused steady
+    # state (phase1 + phase2b both on Triton), these are unused and the 3
+    # aten ops here are pure waste (~50-100 us of CPU dispatch per prepare).
+    #
+    # Consumers below:
+    #   * ``not _use_fused`` phase1 fallback — needs all three
+    #   * ``not _phase2b_used_fused`` paged phase2b branch — needs s_offsets +
+    #     abs_pos_plus_1
+    #   * ``not _use_fused`` SWA abs-idx section — needs abs_pos_b
+    #
+    # Decide the phase2b path upfront (without launching the kernel yet) so
+    # we can skip these 3 aten ops when we know all consumers will be gated.
+    # The phase2b fused path is the runtime phase1 fused + paged inputs +
+    # phase2b guard.  Only when all three pass will phase2b run fused below.
+    _phase2b_will_fuse = False
+    if (
+        _use_fused
+        and paged_block_tables is not None
+        and paged_pool_entries_per_block is not None
+    ):
+        from rtp_llm.models_py.modules.dsv4.fp8.decode._fused_prepare_meta_triton import (
+            is_phase2b_fused_supported as _is_phase2b_fused_supported,
         )
-        flat = (cmp_req_base + in_req).reshape(-1)
-        mask = on_boundary.reshape(-1)
-        cmp_slots = torch.where(mask, flat, torch.full_like(flat, -1))
-        slot_t[: bs * q_len].copy_(cmp_slots)
 
-        # compressed_lens
-        meta.compressed_lens[r][:bs].copy_(((start_pos + q_len) // r).to(torch.int32))
+        if _is_phase2b_fused_supported(
+            meta, paged_block_tables, paged_pool_entries_per_block
+        ):
+            _phase2b_will_fuse = True
 
-        # topk_total_by_ratio: refill window half, refill HCA dense half
-        total = meta.topk_total_by_ratio[r]
-        total[:bs, :, :window_size].copy_(window_idxs)
-        if r != 4:
-            K_dense = total.shape[-1] - window_size
-            dense_idxs = (
-                torch.arange(
-                    K_dense,
-                    device=device,
-                    dtype=torch.int32,
+    if _phase2b_will_fuse:
+        # Steady-state hot path: skip 3 aten op launches (view + add + unsqueeze).
+        s_offsets = None
+        abs_pos_plus_1 = None
+        abs_pos_b = None
+    else:
+        s_offsets = start_pos.view(bs, 1) + q_range.view(1, q_len)  # [bs, q_len]
+        abs_pos_plus_1 = s_offsets + 1  # [bs, q_len]
+        abs_pos_b = s_offsets.unsqueeze(-1)  # [bs, q_len, 1]
+
+    if not _use_fused:
+        with torch.profiler.record_function("prep.phase1_py_fallback"):
+            # start_pos
+            meta.start_pos[:bs].copy_(start_pos)
+            # Iter3.2: refresh cache_seqlens = start_pos + 1 (shared across all 43
+            # decode-layer calls this step). Cheap scalar add + copy, done once
+            # here instead of 43× in ``_forward_decode_body``.
+            if meta.cache_seqlens_i32 is not None:
+                meta.cache_seqlens_i32[:bs].copy_(start_pos + 1)
+
+            # SWA slot mapping prefix [:bs * q_len]
+            swa_buffer_stride = window_size
+            in_ring = s_offsets % window_size
+            req_base = b_range.view(bs, 1) * swa_buffer_stride
+            swa_slots = (req_base + in_ring).reshape(-1)
+            meta.slot_mapping_swa[: bs * q_len].copy_(swa_slots)
+
+            # Window topk indices [:bs, :, :] — left-aligned (mirrors _build_window_topk_idxs)
+            k_range = window_range.view(1, 1, window_size)
+            sp = in_ring.unsqueeze(
+                -1
+            )  # [bs, q_len, 1] — already = abs_pos % window_size
+            ring_full_idx = (sp + 1 + k_range) % window_size
+            partial_idx = torch.where(k_range <= abs_pos_b, k_range, -1)
+            is_full = abs_pos_b >= (window_size - 1)
+            window_idxs = torch.where(is_full, ring_full_idx, partial_idx)
+            meta.topk_window_idxs[:bs].copy_(window_idxs)
+
+            # Indexer output buffer reset to -1 prefix [:bs]
+            meta.topk_buffer_compressed[:bs].fill_(-1)
+
+            # Per-ratio compressed slot mappings + lens + topk_total.
+            # abs_pos_plus_1 is hoisted above — only the per-ratio % / // remain here.
+            for r, slot_t in meta.slot_mapping_compressed.items():
+                stride = meta.compressed_buffer_t_dim_per_ratio[r]
+                on_boundary = (abs_pos_plus_1 % r) == 0
+                in_req = abs_pos_plus_1 // r - 1
+                cmp_req_base = b_range.view(bs, 1) * stride
+                flat = (cmp_req_base + in_req).reshape(-1)
+                mask = on_boundary.reshape(-1)
+                cmp_slots = torch.where(mask, flat, -1)
+                slot_t[: bs * q_len].copy_(cmp_slots)
+
+                # compressed_lens
+                meta.compressed_lens[r][:bs].copy_(
+                    ((start_pos + q_len) // r).to(torch.int32)
                 )
-                .view(1, 1, K_dense)
-                .expand(bs, q_len, K_dense)
-            )
-            cmp_lens = meta.compressed_lens[r][:bs].view(bs, 1, 1)
-            valid_h = dense_idxs < cmp_lens
-            total[:bs, :, window_size:].copy_(
-                torch.where(valid_h, dense_idxs, torch.full_like(dense_idxs, -1))
-            )
-        else:
-            # CSA: indexer fills the compressed half per-call. Reset to -1.
-            total[:bs, :, window_size:].fill_(-1)
+
+                # topk_total_by_ratio: refill window half, refill HCA dense half
+                total = meta.topk_total_by_ratio[r]
+                total[:bs, :, :window_size].copy_(window_idxs)
+                if r != 4:
+                    K_dense = total.shape[-1] - window_size
+                    # HCA dense half: slice the hoisted index_topk_range_i32 constant
+                    # so we don't re-launch an arange every step.
+                    if (
+                        meta.index_topk_range_i32 is not None
+                        and meta.index_topk_range_i32.numel() >= K_dense
+                    ):
+                        dense_row = meta.index_topk_range_i32[:K_dense]
+                    else:
+                        dense_row = torch.arange(
+                            K_dense, device=device, dtype=torch.int32
+                        )
+                    dense_idxs = dense_row.view(1, 1, K_dense).expand(
+                        bs, q_len, K_dense
+                    )
+                    cmp_lens = meta.compressed_lens[r][:bs].view(bs, 1, 1)
+                    valid_h = dense_idxs < cmp_lens
+                    total[:bs, :, window_size:].copy_(
+                        torch.where(valid_h, dense_idxs, -1)
+                    )
+                else:
+                    # CSA: indexer fills the compressed half per-call. Reset to -1.
+                    total[:bs, :, window_size:].fill_(-1)
 
     # ------------------------------------------------------------------
     # Phase 2: paged write slot mappings (per attn_type).
@@ -676,89 +775,92 @@ def update_decode_metadata_in_place_fp8(
         # Snapshot block_table content into the metadata's stable buffer
         # (forbid_realloc-friendly: just `.copy_` the prefix). Skip pools
         # without a metadata buffer (e.g. SWA-only layers don't carry CSA).
-        for at, src_bt in paged_block_tables.items():
-            dst_bt = meta.pool_block_tables.get(at)
-            if dst_bt is None:
-                continue
-            n_rows = min(src_bt.shape[0], dst_bt.shape[0])
-            n_cols = min(src_bt.shape[1], dst_bt.shape[1])
-            # Zero stale rows beyond current bs to avoid carrying old block
-            # ids (defensive — graph reads only [:bs] anyway).
-            dst_bt[bs:].zero_()
-            dst_bt[:n_rows, :n_cols].copy_(src_bt[:n_rows, :n_cols])
-            if n_cols < dst_bt.shape[1]:
-                dst_bt[:n_rows, n_cols:].zero_()
-
-        # SWA: every token writes; abs_pos = start_pos + s.
-        if SWA_KV in meta.pool_block_tables:
-            slot = meta.pool_write_slot_mappings[SWA_KV]
-            E = paged_pool_entries_per_block.get(SWA_KV, window_size)
-            abs_pos_swa = (
-                start_pos.view(bs, 1)
-                + torch.arange(q_len, device=device, dtype=torch.int32).view(1, q_len)
-            ).reshape(-1)
-            mapped = compute_kv_pool_slot_mapping(
-                meta.pool_block_tables[SWA_KV][:bs],
-                abs_pos_swa,
-                E,
-            )
-            slot[: bs * q_len].copy_(mapped)
-
-        # Compressed pools (CSA / HCA / INDEXER): write only on boundary;
-        # abs_pos here is the COMPRESSED entry index for this token, with
-        # ``-1`` sentinel for non-boundary tokens. Indexer shares the
-        # ratio=4 boundary with CSA.
-        for ratio_key, attn_type_writers in (
-            (4, [CSA_KV, INDEXER_KV]),
-            (128, [HCA_KV]),
-        ):
-            if ratio_key not in meta.slot_mapping_compressed:
-                continue
-            # Per-request compressed entry index for THIS step's tokens,
-            # with ``-1`` sentinel for non-boundary tokens. The legacy
-            # ``meta.slot_mapping_compressed[ratio]`` is in register_buffer
-            # coordinates (req_idx*stride+offset); for paged we need the
-            # plain per-request entry index.
-            abs_pos_plus_1 = (
-                start_pos.view(bs, 1)
-                + torch.arange(q_len, device=device, dtype=torch.int32).view(1, q_len)
-                + 1
-            )
-            on_boundary = (abs_pos_plus_1 % ratio_key) == 0
-            cmp_idx = abs_pos_plus_1 // ratio_key - 1
-            cmp_idx_with_skip = torch.where(
-                on_boundary,
-                cmp_idx,
-                torch.full_like(cmp_idx, -1),
-            ).reshape(-1)
-            for at in attn_type_writers:
-                if at not in meta.pool_block_tables:
+        # Only emit the ``zero_`` launches when the region actually needs
+        # zeroing — at bs == max_bs with matching src/dst widths (steady
+        # state for bs=128/64K perf), both are no-ops that still cost CPU
+        # dispatch.  Saves ~8 × ~25 us aten launches per prepare call.
+        with torch.profiler.record_function("prep.phase2a_block_table_copy"):
+            for at, src_bt in paged_block_tables.items():
+                dst_bt = meta.pool_block_tables.get(at)
+                if dst_bt is None:
                     continue
-                E = paged_pool_entries_per_block.get(at, 1)
-                mapped = compute_kv_pool_slot_mapping(
-                    meta.pool_block_tables[at][:bs],
-                    cmp_idx_with_skip,
-                    E,
+                n_rows = min(src_bt.shape[0], dst_bt.shape[0])
+                n_cols = min(src_bt.shape[1], dst_bt.shape[1])
+                if bs < dst_bt.shape[0]:
+                    # Zero stale rows beyond current bs to avoid carrying old
+                    # block ids (defensive — graph reads only [:bs] anyway).
+                    dst_bt[bs:].zero_()
+                dst_bt[:n_rows, :n_cols].copy_(src_bt[:n_rows, :n_cols])
+                if n_cols < dst_bt.shape[1]:
+                    dst_bt[:n_rows, n_cols:].zero_()
+
+        # ----- Fused Triton fast path (DSV4_FUSED_PREPARE=1) -----
+        # Replaces the 4 × ``compute_kv_pool_slot_mapping`` calls
+        # (~60 aten ops, ~1.4ms @ bs=128/64K) with a single kernel launch.
+        # Whether we will take the fused path was decided upfront as
+        # ``_phase2b_will_fuse`` (so we could skip s_offsets prep above).
+        _phase2b_used_fused = False
+        if _phase2b_will_fuse:
+            from rtp_llm.models_py.modules.dsv4.fp8.decode._fused_prepare_meta_triton import (
+                fused_phase2b_pool_slot_mapping,
+            )
+
+            with torch.profiler.record_function("prep.phase2b_fused"):
+                fused_phase2b_pool_slot_mapping(
+                    meta, start_pos, bs, paged_pool_entries_per_block
                 )
-                meta.pool_write_slot_mappings[at][: bs * q_len].copy_(mapped)
+                _phase2b_used_fused = True
+
+        if not _phase2b_used_fused:
+            with torch.profiler.record_function("prep.phase2b_pool_slot_mapping"):
+                # SWA: every token writes; abs_pos = start_pos + s — reuse hoisted s_offsets.
+                if SWA_KV in meta.pool_block_tables:
+                    slot = meta.pool_write_slot_mappings[SWA_KV]
+                    E = paged_pool_entries_per_block.get(SWA_KV, window_size)
+                    abs_pos_swa = s_offsets.reshape(-1)
+                    mapped = compute_kv_pool_slot_mapping(
+                        meta.pool_block_tables[SWA_KV][:bs],
+                        abs_pos_swa,
+                        E,
+                    )
+                    slot[: bs * q_len].copy_(mapped)
+
+                # Compressed pools (CSA / HCA / INDEXER): write only on boundary;
+                # abs_pos here is the COMPRESSED entry index for this token, with
+                # ``-1`` sentinel for non-boundary tokens. Indexer shares the
+                # ratio=4 boundary with CSA.  ``abs_pos_plus_1`` is hoisted above.
+                for ratio_key, attn_type_writers in (
+                    (4, [CSA_KV, INDEXER_KV]),
+                    (128, [HCA_KV]),
+                ):
+                    if ratio_key not in meta.slot_mapping_compressed:
+                        continue
+                    on_boundary_r = (abs_pos_plus_1 % ratio_key) == 0
+                    cmp_idx_r = abs_pos_plus_1 // ratio_key - 1
+                    cmp_idx_with_skip = torch.where(
+                        on_boundary_r, cmp_idx_r, -1
+                    ).reshape(-1)
+                    for at in attn_type_writers:
+                        if at not in meta.pool_block_tables:
+                            continue
+                        E = paged_pool_entries_per_block.get(at, 1)
+                        mapped = compute_kv_pool_slot_mapping(
+                            meta.pool_block_tables[at][:bs],
+                            cmp_idx_with_skip,
+                            E,
+                        )
+                        meta.pool_write_slot_mappings[at][: bs * q_len].copy_(mapped)
 
     # Phase 2B-2a: SWA absolute-position window (paged read). Left-aligned,
     # ``-1`` padded for entries before sequence start. Same shape as
-    # ``topk_window_idxs`` but holds abs positions, not ring slots.
-    if meta.swa_abs_idx is not None:
-        win_range = torch.arange(window_size, device=device, dtype=torch.int32).view(
-            1,
-            1,
-            window_size,
-        )
-        win_start = (abs_pos.unsqueeze(-1) - window_size + 1).clamp(
-            min=0
-        )  # [bs,q_len,1]
-        candidate = win_start + win_range  # [bs, q_len, win]
-        valid_pos = candidate <= abs_pos.unsqueeze(-1)
-        meta.swa_abs_idx[:bs].copy_(
-            torch.where(valid_pos, candidate, torch.full_like(candidate, -1))
-        )
+    # ``topk_window_idxs`` but holds abs positions, not ring slots. Reuses
+    # the hoisted window_range + abs_pos_b.
+    if meta.swa_abs_idx is not None and not _use_fused:
+        win_range_view = window_range.view(1, 1, window_size)
+        win_start = (abs_pos_b - window_size + 1).clamp(min=0)  # [bs, q_len, 1]
+        candidate = win_start + win_range_view  # [bs, q_len, win]
+        valid_pos = candidate <= abs_pos_b
+        meta.swa_abs_idx[:bs].copy_(torch.where(valid_pos, candidate, -1))
 
     # Iter3.3: precompute translate_swa / translate_hca once per step.
     # Shared across all 43 attention layers. Graph-safe: ``.copy_()`` into
@@ -767,51 +869,56 @@ def update_decode_metadata_in_place_fp8(
     # ``req_id_per_token`` is deterministic (``arange(B)``) so it was filled
     # at allocate time and stays stable.
     if paged_block_tables is not None and paged_pool_entries_per_block is not None:
-        from rtp_llm.models_py.modules.dsv4.attn_type import HCA_KV, SWA_KV
-        from rtp_llm.models_py.modules.dsv4.fp8.decode.paged_topk_translator import (
-            translate_local_to_global_slots,
-        )
-
-        T = bs * q_len
-        req_id_bs = (
-            meta.req_id_per_token[:T] if meta.req_id_per_token is not None else None
-        )
-
-        if (
-            req_id_bs is not None
-            and meta.swa_global_slots is not None
-            and SWA_KV in meta.pool_block_tables
-            and meta.swa_abs_idx is not None
-        ):
-            swa_eb = paged_pool_entries_per_block.get(SWA_KV, window_size)
-            swa_local = meta.swa_abs_idx[:bs].reshape(T, window_size)
-            swa_global_new = translate_local_to_global_slots(
-                req_id_bs,
-                meta.pool_block_tables[SWA_KV][:bs],
-                swa_local,
-                swa_eb,
+        with torch.profiler.record_function("prep.phase3_translate_global"):
+            from rtp_llm.models_py.modules.dsv4.attn_type import HCA_KV, SWA_KV
+            from rtp_llm.models_py.modules.dsv4.fp8.decode.paged_topk_translator import (
+                translate_local_to_global_slots,
             )
-            meta.swa_global_slots[:T].copy_(swa_global_new)
 
-        # HCA layers all share the dense-idx-masked cmp_local_raw (already
-        # materialised as topk_total[r=128][:, :, win:]); translate it once.
-        if (
-            req_id_bs is not None
-            and meta.hca_cmp_global_slots is not None
-            and HCA_KV in meta.pool_block_tables
-            and 128 in meta.topk_total_by_ratio
-        ):
-            hca_eb = paged_pool_entries_per_block.get(HCA_KV, 1)
-            hca_tt = meta.topk_total_by_ratio[128]
-            K_h = hca_tt.shape[-1] - window_size
-            hca_cmp_local = hca_tt[:bs, :, window_size:].reshape(T, K_h).contiguous()
-            hca_global_new = translate_local_to_global_slots(
-                req_id_bs,
-                meta.pool_block_tables[HCA_KV][:bs],
-                hca_cmp_local,
-                hca_eb,
+            T = bs * q_len
+            req_id_bs = (
+                meta.req_id_per_token[:T] if meta.req_id_per_token is not None else None
             )
-            meta.hca_cmp_global_slots[:T].copy_(hca_global_new)
+
+            if (
+                req_id_bs is not None
+                and meta.swa_global_slots is not None
+                and SWA_KV in meta.pool_block_tables
+                and meta.swa_abs_idx is not None
+            ):
+                with torch.profiler.record_function("prep.phase3_swa_translate"):
+                    swa_eb = paged_pool_entries_per_block.get(SWA_KV, window_size)
+                    swa_local = meta.swa_abs_idx[:bs].reshape(T, window_size)
+                    swa_global_new = translate_local_to_global_slots(
+                        req_id_bs,
+                        meta.pool_block_tables[SWA_KV][:bs],
+                        swa_local,
+                        swa_eb,
+                    )
+                    meta.swa_global_slots[:T].copy_(swa_global_new)
+
+            # HCA layers all share the dense-idx-masked cmp_local_raw (already
+            # materialised as topk_total[r=128][:, :, win:]); translate it once.
+            if (
+                req_id_bs is not None
+                and meta.hca_cmp_global_slots is not None
+                and HCA_KV in meta.pool_block_tables
+                and 128 in meta.topk_total_by_ratio
+            ):
+                with torch.profiler.record_function("prep.phase3_hca_translate"):
+                    hca_eb = paged_pool_entries_per_block.get(HCA_KV, 1)
+                    hca_tt = meta.topk_total_by_ratio[128]
+                    K_h = hca_tt.shape[-1] - window_size
+                    hca_cmp_local = (
+                        hca_tt[:bs, :, window_size:].reshape(T, K_h).contiguous()
+                    )
+                    hca_global_new = translate_local_to_global_slots(
+                        req_id_bs,
+                        meta.pool_block_tables[HCA_KV][:bs],
+                        hca_cmp_local,
+                        hca_eb,
+                    )
+                    meta.hca_cmp_global_slots[:T].copy_(hca_global_new)
 
     # Update Python-scalar geometry (cheap — these are not captured into the graph)
     meta.batch_size = bs

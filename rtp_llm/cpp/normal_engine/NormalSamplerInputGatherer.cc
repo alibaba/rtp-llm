@@ -131,8 +131,12 @@ SamplerInputs NormalSamplerInputGatherer::allocateSamplerInputs(const StreamGrou
     if (stream_groups.needReturnCumLogProbs()) {
         sampler_inputs.cum_log_probs = torch::empty({(int64_t)total_batch_size_in}, torch::kFloat32);
     }
+    // Pin token_ids so Sampler::forward can non_blocking=true the H2D copy.
+    // Without pinning, the .to(kCUDA) becomes a blocking pageable memcpy that
+    // shows up as Memcpy Pageable→Device on the timeline (~33 MiB/rank/step
+    // at bs=128 / step=65552).
     sampler_inputs.token_ids =
-        torch::empty({(int64_t)total_batch_size_in, (int64_t)(sampler_inputs.step + 1)}, torch::kInt32);
+        torch::empty({(int64_t)total_batch_size_in, (int64_t)(sampler_inputs.step + 1)}, pinned_i32);
     sampler_inputs.generator.resize(total_batch_size_in);
     return sampler_inputs;
 }

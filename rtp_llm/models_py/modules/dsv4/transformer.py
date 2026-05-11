@@ -205,13 +205,18 @@ class V4Transformer(nn.Module):
             "W.v4_mtp_* declarations first"
         )
 
-        # LM head — plain FP32 weight matrix [vocab_size, dim], applied via
-        # ``F.linear`` in forward.  head.weight ships as BF16 in the ckpt but
-        # the descriptor converts it at load time to keep module init cheap.
+        # LM head — plain weight matrix [vocab_size, dim].  Accept either
+        # BF16 (ckpt-native, used when ``enable_fp32_lm_head=False``) or
+        # FP32 (legacy path).  Production inference never applies this
+        # weight in Python — the hot-path mm lives in C++ at
+        # ``PyWrappedModel::forwardPostLayers``.  The ``_rt.ENABLED`` debug
+        # path and the standalone ``forward`` (B==1) path below call
+        # ``F.linear`` / ``torch.mm`` with the input cast to
+        # ``self.head_weight.dtype`` so both dtypes work there too.
         self.head_weight = gw[W.lm_head]
-        if self.head_weight.dtype != torch.float32:
+        if self.head_weight.dtype not in (torch.float32, torch.bfloat16):
             raise TypeError(
-                f"DSV4 lm_head must be loaded as FP32, got {self.head_weight.dtype}"
+                f"DSV4 lm_head must be FP32 or BF16, got {self.head_weight.dtype}"
             )
         self.head_hc = build_hc_head(
             gw[W.v4_hc_head_fn],
@@ -438,5 +443,11 @@ class V4Transformer(nn.Module):
             self._dbg_step += 1
 
         if apply_lm_head:
-            return F.linear(h[:, -1].float(), self.head_weight)
+            # Match h dtype to head_weight so F.linear works regardless of
+            # load-time dtype (bf16 when enable_fp32_lm_head=False, f32
+            # otherwise).  Final cast to f32 keeps logits dtype stable for
+            # callers that feed into f32 sampling / softmax.
+            return F.linear(
+                h[:, -1].to(self.head_weight.dtype), self.head_weight
+            ).float()
         return h

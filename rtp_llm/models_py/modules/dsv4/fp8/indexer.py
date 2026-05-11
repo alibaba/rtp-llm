@@ -372,7 +372,18 @@ class IndexerFP8(PoolBackedModule):
         with record_function_range("dsv4.fp8.indexer.compute_q.rope"):
             rope_view = q[..., -self.rope_head_dim :]
             if batched_rope:
-                apply_rotary_emb_batched(rope_view, freqs_cis)
+                # Per-request RoPE on ``q_pe`` — route through the shared
+                # Triton kernel instead of ``apply_rotary_emb_batched`` to
+                # collapse ~10 aten ops (unflatten/view_as_complex/mul/
+                # view_as_real/flatten/copy_) into a single kernel launch.
+                # Graph-size impact: 41 indexer layers × ~9 eliminated ops
+                # = ~370 fewer nodes per captured decode graph, which cuts
+                # the ``cudaGraphLaunch`` CPU overhead we measured.
+                from rtp_llm.models_py.modules.dsv4._rope_only_triton import (
+                    rope_only_inplace,
+                )
+
+                rope_only_inplace(rope_view, freqs_cis)
             elif rope_view.dim() == 3:
                 # Flat path: ``[T, H, rope]`` → wrap to ``[T, 1, H, rope]`` so
                 # apply_rotary_emb hits its 4D branch (``freqs`` reshaped to

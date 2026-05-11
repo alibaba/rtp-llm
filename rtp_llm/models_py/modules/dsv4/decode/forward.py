@@ -356,7 +356,9 @@ def forward_decode(
     hidden = h.reshape(B * q_len, v4_args.dim)  # packed [T_total, dim]
     if _rt_on:
         _rt.record("decode_hidden", hidden)
-        lm_logits = torch.mm(hidden.float(), v4.head_weight.t()).float()
+        lm_logits = torch.mm(
+            hidden.to(v4.head_weight.dtype), v4.head_weight.t()
+        ).float()
         _rt.record("decode_lm_logits", lm_logits)
         top_k = min(16, lm_logits.size(-1))
         lm_top_values, lm_top_indices = torch.topk(lm_logits, k=top_k, dim=-1)

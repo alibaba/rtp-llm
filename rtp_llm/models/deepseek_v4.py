@@ -442,10 +442,19 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
                 W.lm_head,
                 [CkptWeightInfo("head.weight", identity)],
                 identity,
-                # V4 ckpt stores head.weight in BF16, but the DSV4 Python
-                # path intentionally applies lm_head in FP32. Convert at load
-                # time so V4Transformer init does not allocate a second copy.
-                data_type=torch.float32,
+                # Respect ``enable_fp32_lm_head``: prior code hardcoded
+                # ``data_type=torch.float32`` here, which ignored
+                # ``ENABLE_FP32_LM_HEAD=0`` / ``config.enable_fp32_lm_head
+                # = False`` and pushed lm_head into FP32 storage. Downstream
+                # the C++ ``PyWrappedModel::forwardPostLayers`` mm upcast
+                # ``last_hidden`` to match, dispatching to a f32 simt sgemm
+                # (``cutlass3x_sm100_simt_sgemm_f32_f32_f32_f32_f32`` — CUDA
+                # cores, ~2.3 ms / decode step at bs=128 / vocab=129280 on
+                # B300) instead of the bf16 tensor-core path (~0.1 ms).
+                # ``None`` falls through to ``load_config.compute_dtype`` in
+                # AtomicWeight._load_raw_tensor (i.e. bf16 for V4), keeping
+                # the ckpt dtype.
+                data_type=torch.float32 if self.enable_fp32_lm_head else None,
             ),
             AtomicWeight(
                 W.v4_hc_head_base,

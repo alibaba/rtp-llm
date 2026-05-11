@@ -33,6 +33,7 @@ sites do not change:
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
@@ -40,6 +41,17 @@ import torch
 import torch.nn as nn
 
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
+
+
+def _compressor_meta_fused_enabled() -> bool:
+    """Env-gated fused compressor prepare_metadata (iter8).
+
+    Shares the same ``DSV4_FUSED_PREPARE=1`` switch as phase1 / phase2b,
+    so one env enables the full iter5-iter8 fused-prepare family.
+    """
+    return os.environ.get("DSV4_FUSED_PREPARE", "0").strip() == "1"
+
+
 from rtp_llm.models_py.modules.dsv4.cp import (
     CPContext,
     cp_all_gather_full_async,
@@ -295,6 +307,44 @@ class CompressorFP8(nn.Module):
         assert (
             positions.numel() == b_idx.numel()
         ), f"positions/b_idx length mismatch: {positions.numel()} vs {b_idx.numel()}"
+
+        # ----- Fused Triton fast path (DSV4_FUSED_PREPARE=1) -----
+        # Collapses state_slot_mapping + kv_slot_mapping + b_idx.to(int32)
+        # (~25 aten ops) into a single kernel.  The three helpers are
+        # captured into the outer decode cuda graph today (attention /
+        # indexer call ``forward_decode_vectorized`` without pre-built
+        # meta), so the saving shows up as a smaller graph = faster
+        # cudaGraphLaunch at replay.
+        if _compressor_meta_fused_enabled() and self._state_block_table is not None:
+            from rtp_llm.models_py.modules.dsv4.fp8._fused_compressor_meta_triton import (
+                fused_compressor_slot_mapping,
+            )
+
+            pool_rows = 0
+            if self._kv_pool_3d is not None:
+                pool_rows = int(self._kv_pool_3d.numel() // self._kv_pool_3d.shape[-1])
+            with record_function_range("dsv4.fp8.compressor.meta.fused"):
+                state_slots, kv_slots, token_to_req = fused_compressor_slot_mapping(
+                    positions,
+                    b_idx,
+                    self._state_block_table,
+                    self._state_eb,
+                    self._kv_block_table,
+                    self._kv_eb,
+                    self.compress_ratio,
+                    pool_rows=pool_rows,
+                )
+            return CompressorMeta(
+                positions=positions,
+                b_idx=b_idx,
+                state_slots=state_slots,
+                kv_slots=kv_slots,
+                token_to_req=token_to_req,
+                is_batched=is_batched,
+                seq_start_per_req=seq_start_per_req,
+                cu_seq_per_req=cu_seq_per_req,
+            )
+
         with record_function_range("dsv4.fp8.compressor.meta.state_slots"):
             state_slots = self._compute_state_slot_mapping(positions, b_idx)
         with record_function_range("dsv4.fp8.compressor.meta.kv_slots"):
