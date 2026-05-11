@@ -18,6 +18,8 @@ Public-surface contract preserved:
 
 from __future__ import annotations
 
+import logging
+import os
 from typing import Dict, Optional
 
 import torch
@@ -33,8 +35,58 @@ from .shared_expert import (
 )
 from .strategies.base import MoeCfg, _resolve_forced, select_strategy
 
-
 _FINAL_OUT_CACHE: dict[tuple, torch.Tensor] = {}
+_CHUNKED_MOE_LOGGED = False
+
+# Default per-rank MoE prefill chunk size for DeepSeek-V4-Flash long-context
+# serving.  With 1M context and CP=4, a rank can see up to 262144 local tokens.
+# Keeping MegaMoE/shared-expert workspaces sized for all of them is the OOM
+# source this feature addresses.  16384 bounds the persistent MegaMoE symmetric
+# buffer to roughly 4.4 GiB/rank for EP4 while still using large enough chunks
+# to avoid excessive kernel/dispatch overhead.  Override with
+# DSV4_MOE_CHUNK_TOKENS for smoke tests or tighter HBM budgets.
+DEFAULT_MOE_CHUNK_TOKENS = 16384
+
+
+def chunked_moe_enabled() -> bool:
+    return os.environ.get("DSV4_MOE_CHUNK_PREFILL", "1") != "0"
+
+
+def moe_chunk_tokens_from_env(default: int = DEFAULT_MOE_CHUNK_TOKENS) -> int:
+    raw_value = os.environ.get("DSV4_MOE_CHUNK_TOKENS", str(default))
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        logging.warning(
+            "[DSV4 MoE] invalid DSV4_MOE_CHUNK_TOKENS=%r; using default=%d",
+            raw_value,
+            default,
+        )
+        value = default
+    return max(value, 1)
+
+
+def resolve_moe_max_tokens_per_rank(
+    max_seq_len: int,
+    current_max_tokens_per_rank: int,
+    cp_size: int,
+    max_generate_batch_size: int,
+    role_type: str | None = None,
+) -> int:
+    budget = int(current_max_tokens_per_rank)
+    cp_size = max(int(cp_size), 1)
+    if cp_size > 1:
+        cp_bound = max(int(max_seq_len) // cp_size, 4096)
+        budget = min(budget, cp_bound)
+
+    role = (
+        role_type if role_type is not None else os.environ.get("ROLE_TYPE", "")
+    ).upper()
+    if role == "DECODE":
+        return min(budget, max(int(max_generate_batch_size or 1), 1))
+    if chunked_moe_enabled():
+        return min(budget, moe_chunk_tokens_from_env())
+    return budget
 
 
 def _get_or_create_final_out(
@@ -166,6 +218,68 @@ class MoE(nn.Module):
         self._strategy = strategy_cls(cfg)
         self._strategy.setup_weights(layer_weights)
 
+    def _should_chunk(self, tokens: int) -> bool:
+        if not chunked_moe_enabled():
+            return False
+        return tokens > max(int(self.max_tokens_per_rank), 0)
+
+    def _run_chunk(
+        self,
+        x: torch.Tensor,
+        input_ids: torch.Tensor,
+        out: torch.Tensor,
+    ) -> None:
+        with record_function_range("dsv4.moe.gate"):
+            weights, indices = self.gate(x, input_ids)
+
+        with record_function_range("dsv4.moe.shared_expert_start"):
+            self._shared_executor.start(self.shared_experts, x)
+        try:
+            with record_function_range("dsv4.moe.routed_experts"):
+                routed = self._strategy(x, weights, indices)
+        except Exception:
+            with record_function_range("dsv4.moe.shared_expert_finish"):
+                self._shared_executor.finish()
+            raise
+
+        with record_function_range("dsv4.moe.shared_expert_finish"):
+            shared = self._shared_executor.finish()
+        with record_function_range("dsv4.moe.add_shared"):
+            combined = combine_routed_and_shared(routed, shared, x.dtype, out=out)
+            if combined.data_ptr() != out.data_ptr():
+                out.copy_(combined)
+
+    def _forward_chunked(
+        self,
+        x: torch.Tensor,
+        input_ids_flat: torch.Tensor,
+        shape: torch.Size,
+    ) -> torch.Tensor:
+        global _CHUNKED_MOE_LOGGED
+        T = x.size(0)
+        chunk_tokens = max(int(self.max_tokens_per_rank), 1)
+        if not _CHUNKED_MOE_LOGGED:
+            _CHUNKED_MOE_LOGGED = True
+            logging.info(
+                "[DSV4 MoE] chunked forward enabled: layer=%d tokens=%d "
+                "chunk_tokens=%d chunks=%d dim=%d device=%s",
+                self.layer_id,
+                T,
+                chunk_tokens,
+                (T + chunk_tokens - 1) // chunk_tokens,
+                self.dim,
+                x.device,
+            )
+        out = _get_or_create_final_out(T, self.dim, x.dtype, x.device)[:T]
+        for token_start in range(0, T, chunk_tokens):
+            token_end = min(token_start + chunk_tokens, T)
+            self._run_chunk(
+                x[token_start:token_end],
+                input_ids_flat[token_start:token_end],
+                out[token_start:token_end],
+            )
+        return out.view(shape)
+
     def forward(self, x: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
         from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 
@@ -175,6 +289,12 @@ class MoE(nn.Module):
         _dbg = _rt.should_record_layer(self.layer_id)
         shape = x.size()
         x = x.view(-1, self.dim)
+        input_ids_flat = input_ids.flatten()
+        if input_ids_flat.numel() != x.size(0):
+            raise RuntimeError(
+                "MoE input_ids/token mismatch: "
+                f"input_ids={input_ids_flat.numel()} tokens={x.size(0)}"
+            )
         dbg_pos = getattr(_rt, "_DBG_GLOBAL_POS", -1)
         dbg_pos_mask = None
         dbg_pos_name = None
@@ -192,11 +312,14 @@ class MoE(nn.Module):
                     f"L{self.layer_id:02d}_moe_x_in_{dbg_pos_name}",
                     x[dbg_pos_mask].contiguous(),
                 )
+        if self._should_chunk(x.size(0)):
+            return self._forward_chunked(x, input_ids_flat, shape)
+
         with record_function_range("dsv4.moe.gate"):
             if _dbg:
                 self.gate._dbg_prefix = f"L{self.layer_id:02d}_moe_gate"
             try:
-                weights, indices = self.gate(x, input_ids.flatten())
+                weights, indices = self.gate(x, input_ids_flat)
             finally:
                 if _dbg:
                     self.gate._dbg_prefix = None
@@ -220,7 +343,10 @@ class MoE(nn.Module):
         # call site; we keep the assert here for the exact same dev-error
         # behavior. (Future: Phase 2 removes the .item() and lets grouped
         # fall through cleanly under capture.)
-        if self._strategy.name == "grouped_fp4" and torch.cuda.is_current_stream_capturing():
+        if (
+            self._strategy.name == "grouped_fp4"
+            and torch.cuda.is_current_stream_capturing()
+        ):
             raise AssertionError(
                 "grouped FP4 path uses bincount/cumsum/argsort which abort "
                 "cuda-stream capture; do not enable cuda_graph + "

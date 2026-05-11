@@ -12,6 +12,7 @@ The cache key set MUST stay invariant across the refactor — see Phase 1 risk
 #9 in ``.claude/plans/optimized-riding-mist.md``.
 """
 
+import logging
 import os
 
 import torch
@@ -21,6 +22,35 @@ import torch
 # collide; in practice there's only ever one entry per process.
 _MEGA_BUF_CACHE: dict = {}
 _MEGA_OUTPUT_CACHE: dict = {}
+
+
+def estimate_mega_moe_symm_buffer_bytes(
+    group_size: int,
+    num_experts: int,
+    num_max_tokens_per_rank: int,
+    num_topk: int,
+    hidden: int,
+    intermediate_hidden: int,
+    use_fp8_dispatch: bool = True,
+    activation: str = "swiglu",
+) -> int | None:
+    try:
+        import deep_gemm
+
+        return int(
+            deep_gemm._C.get_symm_buffer_size_for_mega_moe(
+                group_size,
+                num_experts,
+                num_max_tokens_per_rank,
+                num_topk,
+                hidden,
+                intermediate_hidden,
+                use_fp8_dispatch,
+                activation,
+            )[0]
+        )
+    except Exception:
+        return None
 
 
 def _get_or_create_mega_buf(
@@ -47,6 +77,24 @@ def _get_or_create_mega_buf(
     )
     buf = _MEGA_BUF_CACHE.get(key)
     if buf is None:
+        try:
+            group_size = int(group.size())
+        except Exception:
+            group_size = 0
+        estimated_bytes = (
+            estimate_mega_moe_symm_buffer_bytes(
+                group_size=group_size,
+                num_experts=num_experts,
+                num_max_tokens_per_rank=num_max_tokens_per_rank,
+                num_topk=num_topk,
+                hidden=hidden,
+                intermediate_hidden=intermediate_hidden,
+                use_fp8_dispatch=use_fp8_dispatch,
+                activation=activation,
+            )
+            if group_size > 0
+            else None
+        )
         buf = deep_gemm.get_symm_buffer_for_mega_moe(
             group=group,
             num_experts=num_experts,
@@ -57,6 +105,52 @@ def _get_or_create_mega_buf(
             use_fp8_dispatch=use_fp8_dispatch,
             activation=activation,
         )
+        actual_bytes = None
+        try:
+            actual_bytes = int(buf.buffer.numel() * buf.buffer.element_size())
+        except Exception:
+            pass
+        if actual_bytes is not None:
+            if estimated_bytes is not None:
+                logging.info(
+                    "[DSV4 MegaMoE] allocated symm buffer: group_size=%d "
+                    "num_experts=%d max_tokens_per_rank=%d topk=%d hidden=%d "
+                    "intermediate=%d actual=%.3f GiB estimated=%.3f GiB",
+                    group_size,
+                    num_experts,
+                    num_max_tokens_per_rank,
+                    num_topk,
+                    hidden,
+                    intermediate_hidden,
+                    actual_bytes / (1024**3),
+                    estimated_bytes / (1024**3),
+                )
+            else:
+                logging.info(
+                    "[DSV4 MegaMoE] allocated symm buffer: group_size=%d "
+                    "num_experts=%d max_tokens_per_rank=%d topk=%d hidden=%d "
+                    "intermediate=%d actual=%.3f GiB",
+                    group_size,
+                    num_experts,
+                    num_max_tokens_per_rank,
+                    num_topk,
+                    hidden,
+                    intermediate_hidden,
+                    actual_bytes / (1024**3),
+                )
+        elif estimated_bytes is not None:
+            logging.info(
+                "[DSV4 MegaMoE] allocated symm buffer: group_size=%d "
+                "num_experts=%d max_tokens_per_rank=%d topk=%d hidden=%d "
+                "intermediate=%d actual=unavailable estimated=%.3f GiB",
+                group_size,
+                num_experts,
+                num_max_tokens_per_rank,
+                num_topk,
+                hidden,
+                intermediate_hidden,
+                estimated_bytes / (1024**3),
+            )
         _MEGA_BUF_CACHE[key] = buf
     return buf
 
