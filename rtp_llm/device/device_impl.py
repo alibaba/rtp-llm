@@ -890,7 +890,6 @@ class RocmImpl(GpuImpl):
         self, x: torch.Tensor, datatype: torch.dtype, name: str
     ) -> torch.Tensor:
         from aiter.ops.shuffle import shuffle_weight
-        from aiter.utility.fp4_utils import e8m0_shuffle
 
         is_gate = name in [W.moe_w1, W.moe_s1]
         do_weight_shuffle = name in [W.moe_w1, W.moe_w2]
@@ -913,6 +912,11 @@ class RocmImpl(GpuImpl):
         # quantization string, which can be empty on ckpt auto-detect paths.
         is_mxfp4_scale = do_fp4_scale_shuffle and x_.dtype == torch.uint8
         if is_mxfp4_scale:
+            if not self._is_gfx950():
+                raise RuntimeError(
+                    "Quark MXFP4 MoE scale shuffle requires gfx950 (MI355)."
+                )
+            from aiter.utility.fp4_utils import e8m0_shuffle
             if x_.dim() == 3:
                 s0, s1, _ = x_.shape
                 x_ = e8m0_shuffle(x_.contiguous().view(s0 * s1, -1)).view(s0, s1, -1)

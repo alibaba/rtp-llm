@@ -5,6 +5,7 @@ import aiter
 import torch
 from aiter.fused_moe import fused_moe
 
+from rtp_llm.device.device_impl import is_gfx950
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -543,6 +544,7 @@ class RocmExpertsMXFp4(FusedMoeExpertExecutor):
         resolver = MoeConfigResolver()
         quant_method = resolver.get_quant_method(config)
         checker.check(quant_method == "QuarkMXFP4")
+        checker.check(is_gfx950())
 
     @property
     def topk_ids_dtype(self) -> torch.dtype:
