@@ -175,6 +175,40 @@ seedNonResidentCacheItem(const HybridPoolKVCacheAllocatorPtr& allocator, int gid
     return blocks[0];
 }
 
+struct PoolCounters {
+    size_t free_blocks;
+    size_t available_blocks;
+    size_t request_refs;
+    size_t block_cache_refs;
+    size_t connector_refs;
+};
+
+static std::vector<PoolCounters> snapshotPoolCounters(const HybridPoolKVCacheAllocatorPtr& allocator) {
+    std::vector<PoolCounters> counters;
+    counters.reserve(allocator->group_block_pools_.size());
+    for (const auto& pool : allocator->group_block_pools_) {
+        counters.push_back({pool->freeBlocksNum(),
+                            pool->availableBlocksNum(),
+                            pool->requestRefBlocksNum(),
+                            pool->blockCacheRefBlocksNum(),
+                            pool->connectorRefBlocksNum()});
+    }
+    return counters;
+}
+
+static void expectPoolCountersEq(const HybridPoolKVCacheAllocatorPtr& allocator,
+                                 const std::vector<PoolCounters>&     expected) {
+    ASSERT_EQ(allocator->group_block_pools_.size(), expected.size());
+    for (size_t gid = 0; gid < expected.size(); ++gid) {
+        const auto& pool = allocator->group_block_pools_[gid];
+        EXPECT_EQ(pool->freeBlocksNum(), expected[gid].free_blocks) << "gid=" << gid;
+        EXPECT_EQ(pool->availableBlocksNum(), expected[gid].available_blocks) << "gid=" << gid;
+        EXPECT_EQ(pool->requestRefBlocksNum(), expected[gid].request_refs) << "gid=" << gid;
+        EXPECT_EQ(pool->blockCacheRefBlocksNum(), expected[gid].block_cache_refs) << "gid=" << gid;
+        EXPECT_EQ(pool->connectorRefBlocksNum(), expected[gid].connector_refs) << "gid=" << gid;
+    }
+}
+
 class HybridPoolKVCacheAllocatorTest: public ::testing::Test {
 protected:
     void SetUp() override {
@@ -568,6 +602,105 @@ TEST_F(HybridPoolKVCacheAllocatorTest, ReserveCheckIsBypassedWhenMallocInfoLacks
 
     MallocInfo info{};
     EXPECT_TRUE(allocator->hasAvailableBlocksForReserve(info, /*reserve_blocks=*/9999));
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocRollbackFreesPartiallyAllocatedGroupBlocks) {
+    // gid=0 has enough room for the LINEAR tail block; gid=1 cannot satisfy
+    // the 3 FULL blocks needed for seq_len=9. initMallocForCommonLen should
+    // roll gid=0 back after gid=1 fails.
+    auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/3, /*full_block_num=*/3);
+    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+
+    const auto counters_before = snapshotPoolCounters(allocator);
+
+    auto batch_res = makeBatchResource(/*batch_size=*/1, config);
+    batch_res->setBatchCacheKeys(0, CacheKeysType{100, 101, 102});
+    auto       token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/9, /*seq_size_per_block=*/4);
+    MallocInfo malloc_info{batch_res, token_ids};
+    malloc_info.enable_device_cache = false;
+    malloc_info.reuse_cache         = false;
+    malloc_info.verbose             = false;
+
+    auto result = allocator->malloc(malloc_info);
+    EXPECT_FALSE(result.success);
+
+    EXPECT_EQ(batch_res->curBlocksNum(), 0u);
+    EXPECT_EQ(batch_res->blocksNum(0, /*gid=*/0), 0u);
+    EXPECT_EQ(batch_res->blocksNum(0, /*gid=*/1), 0u);
+    EXPECT_EQ(allocator->requestRefBlocksNum(), 0u);
+    expectPoolCountersEq(allocator, counters_before);
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocRollbackReleasesDeviceReuseReferencesOnReserveReject) {
+    auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/4, /*full_block_num=*/4);
+    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+
+    const auto linear_cached = seedNonResidentCacheItem(allocator, /*gid=*/0, /*key=*/100);
+    const auto full_cached   = seedNonResidentCacheItem(allocator, /*gid=*/1, /*key=*/100);
+    ASSERT_FALSE(isNullBlockIdx(linear_cached));
+    ASSERT_FALSE(isNullBlockIdx(full_cached));
+    ASSERT_EQ(allocator->requestRefBlocksNum(), 0u);
+    ASSERT_EQ(allocator->blockCacheRefBlocksNum(), 2u);
+
+    const size_t available_before = allocator->availableBlocksNum();
+    const auto   counters_before  = snapshotPoolCounters(allocator);
+    allocator->setReserveBlockNum(std::max<size_t>(1, available_before * 8));
+
+    auto batch_res = makeBatchResource(/*batch_size=*/1, config);
+    batch_res->setBatchCacheKeys(0, CacheKeysType{100, 101});
+    auto       token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/4, /*seq_size_per_block=*/4);
+    MallocInfo malloc_info{batch_res, token_ids};
+    malloc_info.enable_device_cache = true;
+    malloc_info.reuse_cache         = true;
+    malloc_info.verbose             = false;
+
+    auto result = allocator->malloc(malloc_info);
+    EXPECT_FALSE(result.success);
+
+    EXPECT_EQ(batch_res->curBlocksNum(), 0u);
+    EXPECT_EQ(batch_res->blocksNum(0, /*gid=*/0), 0u);
+    EXPECT_EQ(batch_res->blocksNum(0, /*gid=*/1), 0u);
+    EXPECT_EQ(allocator->requestRefBlocksNum(), 0u);
+    EXPECT_EQ(allocator->blockCacheRefBlocksNum(), 2u);
+    expectPoolCountersEq(allocator, counters_before);
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, IncrMallocRollbackFreesPartiallyAllocatedGroupBlocks) {
+    auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/4, /*full_block_num=*/2);
+    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+
+    auto batch_res = makeBatchResource(/*batch_size=*/1, config);
+    batch_res->setBatchCacheKeys(0, CacheKeysType{100, 101, 102});
+
+    auto       token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/4, /*seq_size_per_block=*/4);
+    MallocInfo init_info{batch_res, token_ids};
+    init_info.enable_device_cache = false;
+    init_info.reuse_cache         = false;
+    ASSERT_TRUE(allocator->malloc(init_info).success);
+
+    ASSERT_EQ(batch_res->blocksNum(0, /*gid=*/0), 1u);
+    ASSERT_EQ(batch_res->blocksNum(0, /*gid=*/1), 1u);
+    const auto linear_block_before = batch_res->blocks(0, /*gid=*/0)[0];
+    const auto full_block_before   = batch_res->blocks(0, /*gid=*/1)[0];
+    const auto counters_before     = snapshotPoolCounters(allocator);
+
+    // gid=0 can append one real LINEAR tail block. gid=1 has no remaining
+    // free blocks and no cache to evict, so FULL allocation fails.
+    token_ids->setSeqLength(9);
+    MallocInfo incr_info{batch_res, token_ids};
+    incr_info.enable_device_cache = false;
+    incr_info.reuse_cache         = false;
+    auto incr_result              = allocator->malloc(incr_info);
+    EXPECT_FALSE(incr_result.success);
+
+    ASSERT_EQ(batch_res->blocksNum(0, /*gid=*/0), 1u);
+    ASSERT_EQ(batch_res->blocksNum(0, /*gid=*/1), 1u);
+    EXPECT_EQ(batch_res->blocks(0, /*gid=*/0)[0], linear_block_before);
+    EXPECT_EQ(batch_res->blocks(0, /*gid=*/1)[0], full_block_before);
+    expectPoolCountersEq(allocator, counters_before);
 }
 
 // ---------------------------------------------------------------------------
