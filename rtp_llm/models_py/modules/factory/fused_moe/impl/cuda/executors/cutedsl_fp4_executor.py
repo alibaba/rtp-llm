@@ -81,12 +81,17 @@ class CutedslFp4Executor(FusedMoeExpertExecutor):
         assert _w1_alpha is not None and _w2_alpha is not None, "FP4 MoE alpha weights must be provided"
         assert input_global_scale is not None and a2_global_scale is not None, "FP4 MoE input scale must be provided"
         
-        self._w1_alpha = input_global_scale * _w1_alpha
-        self._w2_alpha = a2_global_scale * _w2_alpha
-        self.input_global_scale = 1 / input_global_scale
-        self.a2_global_scale = 1 / a2_global_scale
-        self.input_global_scale = self.clamp_inf(self.input_global_scale, "input_global_scale")
-        self.a2_global_scale = self.clamp_inf(self.a2_global_scale, "a2_global_scale")
+        # FP4 activation quantization requires a scalar global scale (FlashInfer API).
+        # Use global max across all experts, matching SGLang's approach and the
+        # scaled_fp4_grouped_quantize function's expected a_global_sf shape of [1].
+        w1_input_scale_scalar = input_global_scale.max().to(torch.float32).repeat(input_global_scale.shape[0])
+        w2_input_scale_scalar = a2_global_scale
+
+        # Alphas remain per-expert (required by the CuteDSL MoE kernel).
+        self._w1_alpha = (input_global_scale * _w1_alpha).to(torch.float32)
+        self._w2_alpha = (a2_global_scale * _w2_alpha).to(torch.float32)
+        self.input_global_scale = (1 / w1_input_scale_scalar).to(torch.float32)
+        self.a2_global_scale = (1 / w2_input_scale_scalar).to(torch.float32)
 
         # Check FP4 quantization
         assert self.quant_config.is_quantized
