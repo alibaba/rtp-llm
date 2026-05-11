@@ -544,6 +544,13 @@ void KVCacheManager::allocateAndSync() {
 void KVCacheManager::reportMetricsLoop() {
     RTP_LLM_PROFILE_FUNCTION();
     kmonitor::MetricsTags tags;
+    // Raw "kvc raw" log lines are throttled to once every 3 minutes — kmonitor
+    // gauges still report every 1s so dashboards stay continuous, but the
+    // diagnostic log is intended for sporadic spot-checks, not per-tick spam.
+    // Initialise to "3 min ago" so the first iteration emits one line right
+    // away (gives operators an immediate baseline after restart).
+    constexpr auto kLogInterval = std::chrono::minutes(3);
+    auto           last_log_time = std::chrono::steady_clock::now() - kLogInterval;
     while (!stop_.load(std::memory_order_relaxed)) {
         if (!metrics_reporter_ || !allocator_) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
@@ -574,21 +581,29 @@ void KVCacheManager::reportMetricsLoop() {
 
         metrics_reporter_->report<RtpLLMCacheMetrics, RtpLLMCacheMetricsCollector>(&tags, &collector);
 
-        // Diagnostic raw dump — verifies (total - available) / total matches
-        // ratio at the same tick, so any monitoring-side discrepancy can be
-        // confirmed as an aggregation artefact rather than a server bug.
-        RTP_LLM_LOG_INFO(
-            "kvc raw global: total=%zu avail=%zu req_ref=%zu con_ref=%zu free=%zu items=%ld ratio=%.4f%%",
-            total_blocks,
-            available_blocks,
-            request_ref_blocks,
-            connector_ref_blocks,
-            static_cast<size_t>(collector.kv_cache_free_blocks),
-            static_cast<long>(collector.kv_cache_item_num),
-            collector.kv_cache_used_ratio);
+        // Decide once per tick whether the throttled diagnostic log should fire.
+        // Math is self-consistent within this tick by construction; the log is
+        // for spot-checking when dashboards look off — once every 3 min suffices.
+        const auto now        = std::chrono::steady_clock::now();
+        const bool should_log = (now - last_log_time) >= kLogInterval;
+        if (should_log) {
+            last_log_time = now;
+            RTP_LLM_LOG_INFO(
+                "kvc raw global: total=%zu avail=%zu req_ref=%zu con_ref=%zu free=%zu items=%ld ratio=%.4f%%",
+                total_blocks,
+                available_blocks,
+                request_ref_blocks,
+                connector_ref_blocks,
+                static_cast<size_t>(collector.kv_cache_free_blocks),
+                static_cast<long>(collector.kv_cache_item_num),
+                collector.kv_cache_used_ratio);
+        }
 
         // Per-pool breakdown — only meaningful for HybridPoolKVCacheAllocator
         // (DSv4's 7-pool layout etc.). Single-pool allocators skip this.
+        // kmonitor samples are emitted every tick (dashboards stay continuous);
+        // the diagnostic "kvc raw pool[gid]" lines piggyback on should_log so
+        // they fire alongside "kvc raw global" once every 3 min.
         if (auto hybrid = std::dynamic_pointer_cast<rtp_llm::HybridPoolKVCacheAllocator>(allocator_)) {
             const auto& pools = hybrid->groupBlockPools();
             for (size_t gid = 0; gid < pools.size(); ++gid) {
@@ -606,15 +621,17 @@ void KVCacheManager::reportMetricsLoop() {
                                                    static_cast<float>(100.0 * (pool_total - pool_available)
                                                                       / static_cast<double>(pool_total));
 
-                RTP_LLM_LOG_INFO(
-                    "kvc raw pool[%zu]: total=%zu avail=%zu req_ref=%zu con_ref=%zu free=%zu ratio=%.4f%%",
-                    gid,
-                    pool_total,
-                    pool_available,
-                    pool_req_ref,
-                    pool_con_ref,
-                    pool_free,
-                    pool_used_ratio);
+                if (should_log) {
+                    RTP_LLM_LOG_INFO(
+                        "kvc raw pool[%zu]: total=%zu avail=%zu req_ref=%zu con_ref=%zu free=%zu ratio=%.4f%%",
+                        gid,
+                        pool_total,
+                        pool_available,
+                        pool_req_ref,
+                        pool_con_ref,
+                        pool_free,
+                        pool_used_ratio);
+                }
 
                 RtpLLMCachePoolMetricsCollector pool_collector;
                 pool_collector.free_blocks          = static_cast<int64_t>(pool_free);
