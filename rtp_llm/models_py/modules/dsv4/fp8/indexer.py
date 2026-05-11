@@ -137,6 +137,22 @@ def _cp_topk_row_order_enabled() -> bool:
     return os.environ.get("DSV4_CP_TOPK_ROW_ORDER", "0") == "1"
 
 
+def _fp8_prefill_score_chunk_rows() -> int:
+    """Rows per non-paged FP8 prefill score chunk.
+
+    ``fp8_mqa_indexer_score`` returns dense ``[M, T]`` logits. Long-context
+    CP prefill can have hundreds of thousands of local query rows and K rows,
+    so the one-shot output is not viable. Keep the default conservative; each
+    4096 x 243k fp32 chunk is about 4 GB before TopK consumes it.
+    """
+    raw = os.environ.get("DSV4_FP8_INDEXER_SCORE_CHUNK_ROWS", "4096")
+    try:
+        value = int(raw)
+    except ValueError:
+        return 4096
+    return max(value, 0)
+
+
 def _get_topk_workspace(device: torch.device) -> torch.Tensor:
     ws = _persistent_topk_workspace_cache.get(device)
     if ws is None:
@@ -903,45 +919,62 @@ class IndexerFP8(PoolBackedModule):
                     _as_bf16_contig(q_for_quant), _as_bf16_contig(w_for_quant)
                 )
 
-            with record_function_range("dsv4.fp8.indexer.prefill.score"):
-                logits = fp8_mqa_indexer_score(
-                    q_fp8.view(M, self.n_heads, INDEXER_HEAD_DIM),
-                    w_fold.view(M, self.n_heads),
-                    k_quant_flat,
-                    k_scale_flat,
-                    attention_inputs.ks,
-                    attention_inputs.ke,
-                    clean_logits=False,
-                )  # [M, T] fp32
+            q_score = q_fp8.view(M, self.n_heads, INDEXER_HEAD_DIM)
+            w_score = w_fold.view(M, self.n_heads)
+            score_chunk_rows = _fp8_prefill_score_chunk_rows()
+            chunked_score = score_chunk_rows > 0 and M > score_chunk_rows
+            if not chunked_score:
+                score_chunk_rows = M
+            out_buf = torch.empty((M, K), dtype=torch.int32, device=x.device)
 
-            # Vendored CUDA per-row TopK over [ks[r], ke[r]). Causal
-            # mask is implicit via ke = (q_pos+1)//ratio clamped to T;
-            # padding past per-row valid count is ``-1`` from the kernel.
-            with record_function_range("dsv4.fp8.indexer.prefill.topk"):
-                out_buf = torch.empty((M, K), dtype=torch.int32, device=logits.device)
-                if attention_inputs.topk_row_order is not None:
-                    rtp_llm_ops.dsv4_top_k_per_row_prefill_indexed(
-                        logits,
-                        attention_inputs.ks,
-                        attention_inputs.ke,
-                        attention_inputs.topk_row_order,
-                        out_buf,
-                        M,
-                        logits.stride(0),
-                        logits.stride(1),
-                        K,
-                    )
-                else:
-                    rtp_llm_ops.dsv4_top_k_per_row_prefill(
-                        logits,
-                        attention_inputs.ks,
-                        attention_inputs.ke,
-                        out_buf,
-                        M,
-                        logits.stride(0),
-                        logits.stride(1),
-                        K,
-                    )
+            # Vendored CUDA per-row TopK over [ks[r], ke[r]). Causal mask is
+            # implicit via ke = (q_pos+1)//ratio clamped to T; padding past
+            # per-row valid count is ``-1`` from the kernel. For long prefill,
+            # score in row chunks because DeepGEMM returns dense [rows, T].
+            for row_start in range(0, M, score_chunk_rows):
+                row_end = min(M, row_start + score_chunk_rows)
+                with record_function_range("dsv4.fp8.indexer.prefill.score"):
+                    logits = fp8_mqa_indexer_score(
+                        q_score[row_start:row_end],
+                        w_score[row_start:row_end],
+                        k_quant_flat,
+                        k_scale_flat,
+                        attention_inputs.ks[row_start:row_end],
+                        attention_inputs.ke[row_start:row_end],
+                        clean_logits=False,
+                    )  # [chunk_rows, T] fp32
+
+                with record_function_range("dsv4.fp8.indexer.prefill.topk"):
+                    if (
+                        not chunked_score
+                        and attention_inputs.topk_row_order is not None
+                    ):
+                        rtp_llm_ops.dsv4_top_k_per_row_prefill_indexed(
+                            logits,
+                            attention_inputs.ks,
+                            attention_inputs.ke,
+                            attention_inputs.topk_row_order,
+                            out_buf,
+                            M,
+                            logits.stride(0),
+                            logits.stride(1),
+                            K,
+                        )
+                    else:
+                        # ``topk_row_order`` is only a scheduling hint.
+                        # Natural row order keeps chunked score/topk simple
+                        # and preserves the same output contract.
+                        rtp_llm_ops.dsv4_top_k_per_row_prefill(
+                            logits,
+                            attention_inputs.ks[row_start:row_end],
+                            attention_inputs.ke[row_start:row_end],
+                            out_buf[row_start:row_end],
+                            row_end - row_start,
+                            logits.stride(0),
+                            logits.stride(1),
+                            K,
+                        )
+                del logits
 
             # Varlen path: TopK indices are global flat-K coords (matching
             # ks/ke). Convert back to request-local ``[0, N_b)`` so the
