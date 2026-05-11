@@ -1080,6 +1080,7 @@ def slopes(ts: List[torch.Tensor], n: int):
     slopes = torch.Tensor(get_slopes(n))
     return slopes
 
+
 def merge_qkvz_transpose_reorder(
     ts: List[torch.Tensor],
 ):

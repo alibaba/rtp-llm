@@ -194,14 +194,15 @@ def _make_config_adapter(expert_num: int, top_k: int, inter_dim: int):
 
 class _MXFp4MoeBaseTest(unittest.TestCase):
     def setUp(self):
-        if _IMPORT_ERROR is not None:
-            raise SkipTest(
-                f"ROCm fused_moe deps unavailable (likely stale librtp_compute_ops.so): {_IMPORT_ERROR}"
-            )
         if not torch.cuda.is_available():
             raise SkipTest("CUDA/HIP not available")
         if not is_gfx950():
             raise SkipTest("Quark MXFP4 fused_moe test is MI355/gfx950 only")
+        if _IMPORT_ERROR is not None:
+            raise RuntimeError(
+                "ROCm MXFP4 fused_moe deps unavailable on gfx950 "
+                f"(likely stale librtp_compute_ops.so or missing aiter): {_IMPORT_ERROR}"
+            ) from _IMPORT_ERROR
         self.device = "cuda"
         torch.set_default_device(self.device)
         torch.manual_seed(42)
