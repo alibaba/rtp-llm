@@ -2206,33 +2206,6 @@ class AttentionFP8(nn.Module):
         """
         with record_function_range("dsv4.fp8.attn.prefill.common_setup"):
             common = self._prefill_common_setup(x, positions)
-        if self.layer_id == 0 and os.environ.get("DSV4_PREFILL_BATCH_DBG") == "1":
-            try:
-                _cu = getattr(common, "cu_seqlens", None)
-                _il = getattr(common, "input_lengths", None)
-                _cp_on = bool(getattr(common, "cp_on", False))
-                _seq_full = None
-                if _cp_on and getattr(common, "cp_ctx", None) is not None:
-                    _seq_full = int(common.cp_ctx.seq_len_full)
-                    _ilg = getattr(common.cp_ctx, "input_lengths_global", None)
-                    _ilg_list = _ilg.tolist() if _ilg is not None else None
-                else:
-                    _ilg_list = None
-                _cu_list = _cu.tolist() if _cu is not None else None
-                _il_list = _il.tolist() if _il is not None else None
-                _B = (
-                    len(_il_list)
-                    if _il_list is not None
-                    else (len(_cu_list) - 1 if _cu_list else -1)
-                )
-                print(
-                    f"[DSV4_PREFILL_BATCH_DBG] cp_on={_cp_on} B={_B} T_local={int(x.shape[0])} "
-                    f"cu_seqlens={_cu_list} input_lengths={_il_list} "
-                    f"seq_len_full={_seq_full} input_lengths_global={_ilg_list}",
-                    flush=True,
-                )
-            except Exception as _e:
-                print(f"[DSV4_PREFILL_BATCH_DBG] log failed: {_e}", flush=True)
         with record_function_range("dsv4.fp8.attn.prefill.compute_qkv"):
             qkv = self._prefill_compute_qkv(x, common)
         # SWA pool write — every FP8 layer populates the SWA pool for
