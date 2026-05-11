@@ -1,4 +1,5 @@
 import glob
+import json
 import logging
 import os
 import re
@@ -22,11 +23,9 @@ DEFAULT_THRESHOLD = 0.76
 DEFAULT_MODEL_ARG = "Qwen3-30B"
 DEFAULT_TASK_IDS_FILE = "passing_tasks.json"
 DEFAULT_SCRIPT_FILE = "run_tau2_bench.py"
+EVALSCOPE_PINNED_VERSION = "1.6.0"
 
-_OVERALL_RE = re.compile(
-    r"\|\s*mean_acc\s*\|\s*OVERALL\s*\|\s*\d+\s*\|\s*([0-9]*\.?[0-9]+)\s*\|"
-)
-_REPORT_RE = re.compile(r"model_name=['\"][^'\"]+['\"]\s*,\s*score=([0-9]*\.?[0-9]+)")
+_REPORT_PATH_RE = re.compile(r"Dump report to:\s*(\S+\.json)")
 
 
 class Tau2BenchComparer(BaseComparer):
@@ -53,12 +52,20 @@ class Tau2BenchComparer(BaseComparer):
             extract_root, script_path, model_arg, task_ids_path, host, port, log_path
         )
 
-        score = self._parse_score(stdout_text)
-        logging.info(f"[TAU2] parsed score={score}, threshold={threshold}")
+        report_path = self._resolve_report_path(stdout_text, extract_root)
+        if report_path is None:
+            raise SmokeException(
+                QueryStatus.OTHERS,
+                f"no 'Dump report to: ...json' line in tau2-bench stdout, see {log_path}",
+            )
+        score = self._load_overall_score(report_path)
+        logging.info(
+            f"[TAU2] parsed score={score} from {report_path}, threshold={threshold}"
+        )
         if score is None:
             raise SmokeException(
                 QueryStatus.OTHERS,
-                f"failed to parse tau2-bench score from log {log_path}",
+                f"failed to extract OVERALL score from report {report_path}, see {log_path}",
             )
         if score < threshold:
             raise SmokeException(
@@ -73,14 +80,26 @@ class Tau2BenchComparer(BaseComparer):
         subprocess.run(cmd, check=True)
 
     def _install_evalscope(self) -> None:
+        pinned_spec = f"evalscope=={EVALSCOPE_PINNED_VERSION}"
         try:
-            import evalscope  # noqa: F401
+            import evalscope
 
-            logging.info("[TAU2] evalscope already importable, skip install")
+            current = getattr(evalscope, "__version__", None)
+            if current == EVALSCOPE_PINNED_VERSION:
+                logging.info(
+                    f"[TAU2] evalscope=={current} matches pinned, skip install"
+                )
+                return
+            logging.info(
+                f"[TAU2] evalscope=={current} != pinned {EVALSCOPE_PINNED_VERSION}, "
+                f"force reinstall"
+            )
+            self._pip_install(["--force-reinstall", "--no-deps", pinned_spec])
+            self._pip_install([pinned_spec])
             return
         except ImportError:
             pass
-        self._pip_install(["evalscope"])
+        self._pip_install([pinned_spec])
 
     def _install_tau2_from_tarball(self, extract_root: str) -> None:
         try:
@@ -247,13 +266,31 @@ class Tau2BenchComparer(BaseComparer):
         return "".join(captured)
 
     @staticmethod
-    def _parse_score(text: str) -> Optional[float]:
-        m = _OVERALL_RE.search(text)
-        if m is None:
-            m = _REPORT_RE.search(text)
-        if m is None:
+    def _resolve_report_path(stdout_text: str, cwd: str) -> Optional[str]:
+        """Find the last 'Dump report to: <path>.json' line and return absolute path."""
+        matches = _REPORT_PATH_RE.findall(stdout_text)
+        if not matches:
             return None
+        rel_path = matches[-1].strip()
+        if os.path.isabs(rel_path):
+            return rel_path
+        return os.path.normpath(os.path.join(cwd, rel_path))
+
+    @staticmethod
+    def _load_overall_score(report_path: str) -> Optional[float]:
+        """Read evalscope JSON report and return OVERALL mean_acc score."""
         try:
-            return float(m.group(1))
-        except ValueError:
+            with open(report_path, "r", encoding="utf-8") as fp:
+                data = json.load(fp)
+        except (OSError, json.JSONDecodeError) as e:
+            logging.warning(f"[TAU2] failed to read report {report_path}: {e}")
             return None
+        score = data.get("score")
+        if isinstance(score, (int, float)):
+            return float(score)
+        for m in data.get("metrics", []) or []:
+            if m.get("name") == "mean_acc":
+                s = m.get("score")
+                if isinstance(s, (int, float)):
+                    return float(s)
+        return None
