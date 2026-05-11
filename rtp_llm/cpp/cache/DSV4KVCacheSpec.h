@@ -105,10 +105,10 @@ struct DSV4KVSpec: public KVCacheSpec {
 // K/V split is a placeholder for state pools because state is an opaque blob.
 struct DSV4StateSpec: public KVCacheSpec {
     KVCacheRegionName cache_type = KVCacheRegionName::DEFAULT;
-    uint32_t          state_dim;             // state dimension (entry_elems in pool_spec)
-    uint32_t          entries_per_block;     // 4 or 8
-    uint32_t          fixed_blocks_per_req;  // pool-reserved blocks per request slot
-    DataType          store_dtype;           // TYPE_FP32
+    uint32_t          state_dim;          // state dimension (entry_elems in pool_spec)
+    uint32_t          entries_per_block;  // 4 or 8
+    uint32_t          fixed_pool_blocks;  // total blocks reserved for this fixed pool
+    DataType          store_dtype;        // TYPE_FP32
 
     DSV4StateSpec() = default;
 
@@ -119,11 +119,11 @@ struct DSV4StateSpec: public KVCacheSpec {
                   uint32_t          fixed_blocks,
                   DataType          storage_dtype,
                   uint32_t          seq_size_per_blk) {
-        cache_type           = cache_region;
-        state_dim            = state_elements;
-        entries_per_block    = block_entries;
-        fixed_blocks_per_req = fixed_blocks;
-        store_dtype          = storage_dtype;
+        cache_type        = cache_region;
+        state_dim         = state_elements;
+        entries_per_block = block_entries;
+        fixed_pool_blocks = fixed_blocks;
+        store_dtype       = storage_dtype;
 
         // KVCacheSpec base fields
         layer_num          = layer_count;
@@ -174,7 +174,7 @@ struct DSV4StateSpec: public KVCacheSpec {
         os << std::string(indent + 2, ' ') << "cache_type=" << static_cast<int>(cache_type) << "\n";
         os << std::string(indent + 2, ' ') << "state_dim=" << state_dim << "\n";
         os << std::string(indent + 2, ' ') << "entries_per_block=" << entries_per_block << "\n";
-        os << std::string(indent + 2, ' ') << "fixed_blocks_per_req=" << fixed_blocks_per_req << "\n";
+        os << std::string(indent + 2, ' ') << "fixed_pool_blocks=" << fixed_pool_blocks << "\n";
         os << std::string(indent, ' ') << "}\n";
         return os.str();
     }
