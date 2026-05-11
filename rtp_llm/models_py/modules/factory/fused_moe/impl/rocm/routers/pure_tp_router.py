@@ -227,12 +227,7 @@ class PureTpRouterMXFp4Passthrough(PureTpRouterBase):
         super().check_conditions(checker, config)
         resolver = MoeConfigResolver()
         quant_method = resolver.get_quant_method(config)
-        checker.check(
-            quant_method in (
-                "QuarkMXFP4",
-                "modelopt_fp4",
-            )
-        )
+        checker.check(quant_method == "QuarkMXFP4")
         
     def _do_quant(
         self, a1: torch.Tensor
