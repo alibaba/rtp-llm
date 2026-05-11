@@ -358,9 +358,9 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
                     item.is_complete = copy_info.is_complete;
                     putToCache(item);
                 }
-                // reset resource to decrease block ref count in destructor
-                resource_copy.reset();
             }
+            // reset resource to decrease block ref count in destructor
+            resource_copy.reset();
             const int64_t write_block_num = success ? static_cast<int64_t>(copy_plan->copy_infos.size()) : 0;
             // reset copy plan to release memory block refs
             copy_plan.reset();
@@ -466,9 +466,11 @@ bool KVCacheMemoryConnector::startCopyAsync(const std::shared_ptr<MemoryAsyncCon
     if (stop_.load()) {
         return false;
     }
-    auto code = wait_done_thread_pool_->pushTask([this, context, copy_plan]() mutable {
-        auto send_result = sendCopyPlan(copy_plan);
+    auto task_copy_plan = copy_plan;
+    auto code           = wait_done_thread_pool_->pushTask([this, context, task_copy_plan]() mutable {
+        auto send_result = sendCopyPlan(task_copy_plan);
         context->setBroadcastResult(send_result);
+        task_copy_plan.reset();
         context->waitDone();
     });
     if (code != autil::ThreadPoolBase::ERROR_NONE) {

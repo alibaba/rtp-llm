@@ -125,6 +125,55 @@ cc_library(
 )
 
 cc_library(
+    name = "attention_input_metadata",
+    srcs = ["attention_input_metadata.cu"],
+    hdrs = ["attention_input_metadata.h"],
+    deps = [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps(),
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "cuda_graph_prepare",
+    srcs = ["cuda_graph_prepare.cu"],
+    hdrs = ["cuda_graph_prepare.h"],
+    deps = [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps(),
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "mtp_target_verify_prepare",
+    srcs = ["mtp_target_verify_prepare.cu"],
+    hdrs = ["mtp_target_verify_prepare.h"],
+    deps = [
+        "//rtp_llm/cpp/utils:core_utils",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps(),
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "mha_paged_attn_plan",
+    srcs = ["mha_paged_attn_plan.cu"],
+    hdrs = ["mha_paged_attn_plan.h"],
+    deps = [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps(),
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "mla_quant_kernel",
     srcs = ["mla_quant_kernel.cu"],
     hdrs = ["mla_quant_kernel.h"],
@@ -160,6 +209,22 @@ cc_library(
         "@local_config_cuda//cuda:cudart",
     ] + torch_deps(),
     copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "kernels_speculative_sampling",
+    srcs = glob(["speculative_sampling/*.cu"]),
+    hdrs = glob([
+        "speculative_sampling/*.h",
+        "speculative_sampling/*.cuh",
+    ]),
+    deps = cuda_deps + [
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/models_py/bindings/cuda:launch_utils",
+    ],
+    copts = any_cuda_copts(),
+    include_prefix = "src",
     visibility = ["//visibility:public"],
 )
 

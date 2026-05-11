@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/normal_engine/speculative/MtpBatchStreamProcessor.h"
 #undef private
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
+#include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
@@ -20,7 +21,7 @@ namespace rtp_llm {
 
 template<typename T>
 std::vector<T> toVec(const torch::Tensor& t) {
-    auto c = t.contiguous();
+    auto c = t.is_cuda() ? t.cpu().contiguous() : t.contiguous();
     return std::vector<T>(c.data_ptr<T>(), c.data_ptr<T>() + c.numel());
 }
 
@@ -154,10 +155,10 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
     auto stream_groups = StreamGroups({stream1, stream2});
 
     speculative::SpeculativeSamplerOutput spec_decode_output;
-    spec_decode_output.accept_len = {5, 1};
-
-    spec_decode_output.accept_tokens = {torch::tensor({{2, 3, 1, 3, 2}}, torch::kInt32),
-                                        torch::tensor({{2}}, torch::kInt32)};
+    spec_decode_output.accept_len_cpu    = torch::tensor({5, 1}, torch::kInt32);
+    spec_decode_output.accept_tokens_cpu = torch::tensor({{2, 3, 1, 3, 2}, {2, 0, 0, 0, 0}}, torch::kInt32);
+    spec_decode_output.accept_len        = spec_decode_output.accept_len_cpu.to(torch::kCUDA);
+    spec_decode_output.accept_tokens     = spec_decode_output.accept_tokens_cpu.to(torch::kCUDA);
 
     MergedOutput draft_prefill_output;
     draft_prefill_output.model_output.all_hidden_states =
@@ -219,7 +220,8 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherDecodeModelInput) {
     cache_config.group_types = {CacheGroupType::FULL};
     auto processor           = MtpBatchStreamProcessor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
-    auto model_input = processor.gatherDecodeModelInput(stream_groups);
+    TensorHolder holder;
+    auto         model_input = processor.gatherDecodeModelInput(stream_groups, holder);
     EXPECT_TRUE(model_input.ok());
 
     auto          last_hidden_states        = model_input.value().last_hidden_states;
@@ -296,7 +298,8 @@ TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInput) {
     cache_config.group_types = {CacheGroupType::FULL};
     auto processor           = MtpBatchStreamProcessor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
-    auto model_input_status = processor.gatherDecodeModelInput(stream_groups);
+    TensorHolder holder;
+    auto         model_input_status = processor.gatherDecodeModelInput(stream_groups, holder);
     EXPECT_TRUE(model_input_status.ok());
 
     auto& model_input            = model_input_status.value();
@@ -321,6 +324,7 @@ TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInput) {
 
     auto        lm_output_indexes        = model_input.lm_output_indexes;
     vector<int> expect_lm_output_indexes = {0, 1, 2, 3};
+    EXPECT_TRUE(lm_output_indexes.is_cuda());
     EXPECT_EQ(expect_lm_output_indexes, toVec<int>(lm_output_indexes));
 }
 
@@ -394,7 +398,8 @@ TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {
     cache_config.group_types = {CacheGroupType::FULL};
     auto processor           = MtpBatchStreamProcessor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
-    auto model_input_status = processor.gatherDecodeModelInput(stream_groups);
+    TensorHolder holder;
+    auto         model_input_status = processor.gatherDecodeModelInput(stream_groups, holder);
     EXPECT_TRUE(model_input_status.ok());
 
     auto& model_input            = model_input_status.value();
@@ -408,6 +413,7 @@ TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {
 
     auto        lm_output_indexes        = model_input.lm_output_indexes;
     vector<int> expect_lm_output_indexes = {0, 1};
+    EXPECT_TRUE(lm_output_indexes.is_cuda());
     EXPECT_EQ(expect_lm_output_indexes, toVec<int>(lm_output_indexes));
 }
 
@@ -449,7 +455,8 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInput) {
     cache_config.group_types = {CacheGroupType::FULL};
     auto processor           = MtpBatchStreamProcessor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
-    auto model_input_status = processor.gatherModelInput(stream_groups);
+    TensorHolder holder;
+    auto         model_input_status = processor.gatherModelInput(stream_groups, holder);
     EXPECT_TRUE(model_input_status.ok());
 
     auto& model_input            = model_input_status.value();
@@ -507,40 +514,38 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInput) {
     cache_config.group_types = {CacheGroupType::FULL};
     auto processor           = MtpBatchStreamProcessor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
-    auto model_input_status = processor.gatherModelInput(stream_groups);
+    TensorHolder holder;
+    auto         model_input_status = processor.gatherModelInput(stream_groups, holder);
     EXPECT_TRUE(model_input_status.ok());
 
     auto& model_input = model_input_status.value();
 
     speculative::SpeculativeSamplerOutput spec_decode_output;
-    spec_decode_output.accept_len    = {3, 1};
-    spec_decode_output.accept_tokens = {torch::tensor({{2, 3, 1}}, torch::kInt32), torch::tensor({{2}}, torch::kInt32)};
+    spec_decode_output.accept_len_cpu    = torch::tensor({3, 1}, torch::kInt32);
+    spec_decode_output.accept_tokens_cpu = torch::tensor({{2, 3, 1}, {2, 0, 0}}, torch::kInt32);
+    spec_decode_output.accept_len        = spec_decode_output.accept_len_cpu.to(torch::kCUDA);
+    spec_decode_output.accept_tokens     = spec_decode_output.accept_tokens_cpu.to(torch::kCUDA);
 
     torch::Tensor hidden_states_d_t;
-    size_t        total_accept_len;
 
     GptModelOutputs model_output;
     model_output.all_hidden_states =
         torch::tensor({0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 1.1f, 1.2f, 1.3f, 1.4f, 1.5f, 1.6f}, torch::kFloat32)
             .reshape({6, 2});
 
-    processor.updateDecodePostDraftModelInput(
-        model_input, model_output, spec_decode_output, 2, hidden_states_d_t, total_accept_len);
+    processor.updateDecodePostDraftModelInput(model_input, model_output, spec_decode_output, 2, hidden_states_d_t);
 
-    auto        combo_tokens        = model_input.combo_tokens;
-    vector<int> expect_combo_tokens = {2, 3, 1, 2};
+    auto        combo_tokens        = model_input.combo_tokens.cpu();
+    vector<int> expect_combo_tokens = {2, 3, 1, 2, 0, 0};
     EXPECT_EQ(expect_combo_tokens, toVec<int>(combo_tokens));
 
-    auto        input_lengths        = model_input.input_lengths;
-    vector<int> expect_input_lengths = {3, 1};
-    EXPECT_EQ(expect_input_lengths, toVec<int>(input_lengths));
-
-    auto        lm_output_indexes        = model_input.lm_output_indexes;
+    EXPECT_TRUE(model_input.lm_output_indexes.is_cuda());
+    auto        lm_output_indexes        = model_input.lm_output_indexes.cpu();
     vector<int> expect_lm_output_indexes = {2, 3};
     EXPECT_EQ(expect_lm_output_indexes, toVec<int>(lm_output_indexes));
 
     auto          last_hidden_states        = model_input.last_hidden_states;
-    vector<float> expect_last_hidden_states = {0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 1.1, 1.2};
+    vector<float> expect_last_hidden_states = {0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 1.1f, 1.2f, 1.3f, 1.4f, 1.5f, 1.6f};
     EXPECT_EQ(expect_last_hidden_states, toVec<float>(last_hidden_states));
 }
 

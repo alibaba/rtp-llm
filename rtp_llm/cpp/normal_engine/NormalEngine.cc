@@ -14,6 +14,7 @@
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
 #include <algorithm>
+#include <chrono>
 #include <memory>
 #include <thread>
 #include <random>
@@ -519,7 +520,8 @@ bool NormalEngine::isEagle() {
 
 void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
     if (isMTPEagle()) {
-        int propose_step = sp_config.gen_num_per_cycle;
+        int propose_step   = sp_config.gen_num_per_cycle;
+        int mtp_vocab_size = propose_params_->getEngineInitParams().model_config_.vocab_size;
         switch (pd_sep_config.role_type) {
             case RoleType::PREFILL:
                 if (streams.empty()) {
@@ -530,7 +532,7 @@ void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
             case RoleType::DECODE:
                 if (streams.empty()) {
                     streams.emplace_back(MtpExecutor::createMinFakeDecodeStream(
-                        propose_step, model_config_, runtime_config, resource_context_));
+                        propose_step, model_config_, runtime_config, resource_context_, mtp_vocab_size));
                 }
                 break;
             case RoleType::PDFUSION: {
@@ -549,7 +551,7 @@ void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
                 }
                 if (!has_decode) {
                     streams.emplace_back(MtpExecutor::createMinFakeDecodeStream(
-                        propose_step, model_config_, runtime_config, resource_context_));
+                        propose_step, model_config_, runtime_config, resource_context_, mtp_vocab_size));
                 }
                 break;
             }

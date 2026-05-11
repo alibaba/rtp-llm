@@ -29,13 +29,14 @@ public:
     bool                 hasCacheKeys() const;
     const CacheKeysType& cacheKeys(int32_t batch_id) const;
     absl::Status         initKVBlock(size_t reserve_step = 0);
-    absl::Status         incrKVBlock(size_t reserve_step = 0);
-    void                 fakeInitKVBlock(size_t reserved_blocks = 0);
-    int                  tryReleaseKVBlock(size_t nums);
-    void                 freeBatchBlocks(size_t batch_id, std::vector<int>& blocks);
-    void                 releaseResource();
-    bool                 asyncLoadCache();
-    bool                 loadCacheDone();
+    // seq_len_override (-1 = unset) is forwarded to MallocInfo::incr_seq_len_override.
+    absl::Status incrKVBlock(size_t reserve_step = 0, int seq_len_override = -1);
+    void         fakeInitKVBlock(size_t reserved_blocks = 0);
+    int          tryReleaseKVBlock(size_t nums);
+    void         freeBatchBlocks(size_t batch_id, std::vector<int>& blocks);
+    void         releaseResource();
+    bool         asyncLoadCache();
+    bool         loadCacheDone();
 
     // swap all linear groups rhs and lhs
     void swapLinearBlocks(int32_t batch_id, size_t rhs, size_t lhs);
@@ -97,6 +98,13 @@ public:
 
     bool isResourceReleased() const {
         return resource_released_;
+    }
+
+    // Borrow the owning stream pointer; used by GenerateStateMachine to query
+    // async-bookkeeping state without duplicating accessors here. Lifetime is
+    // bound by the GenerateStream that owns this StreamCacheResource.
+    GenerateStream* stream() const {
+        return stream_;
     }
 
     bool reuseCache() const;

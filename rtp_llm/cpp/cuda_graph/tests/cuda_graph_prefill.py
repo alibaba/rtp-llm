@@ -173,12 +173,12 @@ class TestCudaGraphPrefill(unittest.TestCase):
         inputs.input_ids = input_ids
         inputs.input_hiddens = torch.empty(0, dtype=torch.bfloat16, device="cuda")
         attention_inputs.input_lengths = torch.tensor(
-            input_lengths_data, dtype=torch.int32, device="cpu"
+            input_lengths_data, dtype=torch.int32, device="cuda"
         )
 
         attention_inputs.prefix_lengths = torch.zeros(
-            batch_size, dtype=torch.int32, device="cpu"
-        ).pin_memory()
+            batch_size, dtype=torch.int32, device="cuda"
+        )
 
         attention_inputs.is_prefill = True
         attention_inputs.dtype = get_typemeta(torch.zeros(1, dtype=torch.bfloat16))

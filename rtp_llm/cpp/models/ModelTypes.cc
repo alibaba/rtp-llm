@@ -1,6 +1,11 @@
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
+
+#include <cstdint>
+#include <cstring>
+#include <string>
 
 namespace rtp_llm {
 
@@ -8,6 +13,13 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     if (parallelism_config.tp_size <= 1) {
         return;
     }
+
+    // The UDS-backed CPU broadcaster (used by execBroadcastCpu below) is
+    // bootstrapped from Python in collective_torch._register_process_groups_to_cpp,
+    // which guarantees deterministic timing across TP siblings. Cross-node TP
+    // skips the init and falls back to NCCL automatically inside execBroadcastCpu.
+
+    // first sync stage: shape hints
     const size_t shape_hints_size = GptModelInputIndex::gptModelInputLength;
     auto         shape_hints_t    = torch::empty({(int64_t)shape_hints_size}, torch::kInt32).pin_memory();
     auto         shape_hints_ptr  = shape_hints_t.data_ptr<int32_t>();
@@ -34,8 +46,6 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         inputs.kv_cache_update_mapping.defined() ? inputs.kv_cache_update_mapping.size(0) : 0;
     shape_hints_ptr[GptModelInputIndex::lmOutputIndexes] =
         inputs.lm_output_indexes.defined() ? inputs.lm_output_indexes.numel() : 0;
-    shape_hints_ptr[GptModelInputIndex::lmOutputLengthes] =
-        inputs.lm_output_lengths.defined() ? inputs.lm_output_lengths.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::comboPositionIds] =
         inputs.combo_position_ids.defined() ? inputs.combo_position_ids.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::textTokensMask] =
@@ -59,9 +69,33 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     shape_hints_ptr[GptModelInputIndex::gptModelRequestLength] =
         inputs.request_id.defined() ? inputs.request_id.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::isFakeStream] = inputs.is_fake_stream;
-    execBroadcast({{shape_hints_t}, 0});
-    execSyncCommunication(false);
-    cudaSyncAndCheck();
+    {
+        // encode root-side tensor device for fields that may live on
+        // GPU on the PDFUSION fast path, so non-root ranks can allocate matching
+        // GPU buffers below and tpSync's pack/unpack stays in lockstep.
+        uint32_t device_bits = 0;
+        if (inputs.combo_tokens.defined() && inputs.combo_tokens.is_cuda()) {
+            device_bits |= GptModelInputDeviceBit::kDeviceBitComboTokens;
+        }
+        if (inputs.input_lengths.defined() && inputs.input_lengths.is_cuda()) {
+            device_bits |= GptModelInputDeviceBit::kDeviceBitInputLengths;
+        }
+        if (inputs.sequence_lengths.defined() && inputs.sequence_lengths.is_cuda()) {
+            device_bits |= GptModelInputDeviceBit::kDeviceBitSequenceLengths;
+        }
+        if (inputs.prefix_lengths.defined() && inputs.prefix_lengths.is_cuda()) {
+            device_bits |= GptModelInputDeviceBit::kDeviceBitPrefixLengths;
+        }
+        if (inputs.lm_output_indexes.defined() && inputs.lm_output_indexes.is_cuda()) {
+            device_bits |= GptModelInputDeviceBit::kDeviceBitLmOutputIndexes;
+        }
+        shape_hints_ptr[GptModelInputIndex::tensorDeviceMap] = static_cast<int32_t>(device_bits);
+    }
+
+    // CPU broadcast: routed through CpuTpBroadcaster (UDS) when intra-node;
+    // execBroadcastCpu's fallback path keeps the NCCL+cudaSyncAndCheck
+    // contract for cross-node TP.
+    execBroadcastCpu({{shape_hints_t}, 0});
 
     // multimodal features shape broadcast
     torch::Tensor mm_features_shape_t;
@@ -80,9 +114,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
             mm_features_shape_ptr[i] =
                 inputs.multimodal_features.has_value() ? inputs.multimodal_features.value()[i].size(0) : 0;
         }
-        execBroadcast({{mm_features_shape_t}, 0});
-        execSyncCommunication(false);
-        cudaSyncAndCheck();
+        // CPU broadcast (UDS path; fallback handles cudaSyncAndCheck).
+        execBroadcastCpu({{mm_features_shape_t}, 0});
     }
 
     auto   max_kernel_blocks       = (size_t)shape_hints_ptr[GptModelInputIndex::maxKernelBlocksPerBatch];
@@ -117,17 +150,35 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     if (is_non_root) {
         auto context_batch_size = (size_t)shape_hints_ptr[GptModelInputIndex::prefixLengths];
 
-        inputs.combo_tokens =
-            allocBuf(rtp_llm::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::comboTokens]});
-        inputs.input_lengths =
-            allocBuf(rtp_llm::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::inputLengths]});
-        inputs.sequence_lengths =
-            allocBuf(rtp_llm::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::sequenceLengths]});
-        inputs.prefix_lengths = allocBuf(rtp_llm::DataType::TYPE_INT32, {context_batch_size});
+        // respect the root-side device bitmap so GPU-resident fields
+        // are allocated on CUDA on non-root ranks too. Without this, the
+        // pack/unpack loop classifies tensors differently per rank and breaks
+        // NCCL broadcast ordering.
+        const uint32_t device_bits = static_cast<uint32_t>(shape_hints_ptr[GptModelInputIndex::tensorDeviceMap]);
+        auto           pickAlloc   = [&](GptModelInputDeviceBit bit) {
+            return (device_bits & bit) ? rtp_llm::AllocationType::DEVICE : rtp_llm::AllocationType::HOST;
+        };
+
+        inputs.combo_tokens     = allocBuf(rtp_llm::DataType::TYPE_INT32,
+                                           {(size_t)shape_hints_ptr[GptModelInputIndex::comboTokens]},
+                                       pickAlloc(GptModelInputDeviceBit::kDeviceBitComboTokens));
+        inputs.input_lengths    = allocBuf(rtp_llm::DataType::TYPE_INT32,
+                                           {(size_t)shape_hints_ptr[GptModelInputIndex::inputLengths]},
+                                        pickAlloc(GptModelInputDeviceBit::kDeviceBitInputLengths));
+        inputs.sequence_lengths = allocBuf(rtp_llm::DataType::TYPE_INT32,
+                                           {(size_t)shape_hints_ptr[GptModelInputIndex::sequenceLengths]},
+                                           pickAlloc(GptModelInputDeviceBit::kDeviceBitSequenceLengths));
+        inputs.prefix_lengths   = allocBuf(rtp_llm::DataType::TYPE_INT32,
+                                           {context_batch_size},
+                                         pickAlloc(GptModelInputDeviceBit::kDeviceBitPrefixLengths));
         if (max_kernel_blocks != 0) {
+            // kv_cache_kernel_block_id is now device-resident on the producer (rank 0). Allocate
+            // the matching buffer on CUDA for non-root ranks so the gpu_packed branch below
+            // classifies it identically across ranks (otherwise pack/unpack drifts off-by-tensor).
             inputs.kv_cache_kernel_block_id = allocBuf(
                 rtp_llm::DataType::TYPE_INT32,
-                {kv_cache_group_num, (size_t)shape_hints_ptr[GptModelInputIndex::inputLengths], max_kernel_blocks});
+                {kv_cache_group_num, (size_t)shape_hints_ptr[GptModelInputIndex::inputLengths], max_kernel_blocks},
+                rtp_llm::AllocationType::DEVICE);
             inputs.kv_cache_update_mapping = allocBuf(
                 rtp_llm::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::kvCacheUpdateCopyNum], 2});
         }
@@ -147,10 +198,9 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         }
         inputs.request_id            = allocBuf(rtp_llm::DataType::TYPE_INT64, {request_length});
         inputs.request_pd_separation = allocBuf(rtp_llm::DataType::TYPE_BOOL, {request_length});
-        inputs.lm_output_indexes =
-            allocBuf(rtp_llm::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::lmOutputIndexes]});
-        inputs.lm_output_lengths =
-            allocBuf(rtp_llm::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::lmOutputLengthes]});
+        inputs.lm_output_indexes     = allocBuf(rtp_llm::DataType::TYPE_INT32,
+                                                {(size_t)shape_hints_ptr[GptModelInputIndex::lmOutputIndexes]},
+                                            pickAlloc(GptModelInputDeviceBit::kDeviceBitLmOutputIndexes));
         if (combo_position_ids_size) {
             inputs.combo_position_ids = allocBuf(rtp_llm::DataType::TYPE_INT32, {(size_t)combo_position_ids_size});
         }
@@ -212,7 +262,6 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     collect(inputs.request_id);
     collect(inputs.request_pd_separation);
     collect(inputs.lm_output_indexes);
-    collect(inputs.lm_output_lengths);
     if (combo_position_ids_size) {
         collect(inputs.combo_position_ids);
     }
@@ -278,25 +327,43 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     if (gpu_total_bytes > 0) {
         gpu_packed = torch::empty({gpu_total_bytes}, torch::TensorOptions(torch::kUInt8).device(torch::kCUDA));
         if (is_root) {
+            auto*              packed_base = static_cast<uint8_t*>(gpu_packed.data_ptr());
+            FusedD2DCopyParams fused_params;
+            auto               flush_fused_copy = [&]() {
+                if (fused_params.num_copies > 0) {
+                    fusedCopy(fused_params);
+                    fused_params.clear();
+                }
+            };
             for (auto& e : gpu_entries) {
+                if (e.tensor->is_contiguous()) {
+                    if (fused_params.num_copies == MAX_FUSED_D2D_COPIES) {
+                        flush_fused_copy();
+                    }
+                    fused_params.add(e.tensor->data_ptr(), packed_base + e.offset, static_cast<size_t>(e.nbytes));
+                    continue;
+                }
+
+                // Preserve the old logical-order copy for rare non-contiguous tensors.
+                flush_fused_copy();
                 auto contig    = e.tensor->contiguous();
                 auto src_bytes = torch::from_blob(
                     contig.data_ptr(), {e.nbytes}, torch::TensorOptions(torch::kUInt8).device(contig.device()));
                 gpu_packed.narrow(0, e.offset, e.nbytes).copy_(src_bytes);
             }
+            flush_fused_copy();
         }
     }
 
     // Broadcast at most 2 packed buffers instead of N individual tensors.
-    std::vector<torch::Tensor> packed_buffers;
     if (cpu_packed.defined()) {
-        packed_buffers.push_back(cpu_packed);
+        execBroadcastCpu({{cpu_packed}, 0});
     }
+
     if (gpu_packed.defined()) {
-        packed_buffers.push_back(gpu_packed);
+        // gpu no need to sync communication
+        execBroadcast({{gpu_packed}, 0});
     }
-    execBroadcast({packed_buffers, 0});
-    cudaSyncAndCheck();
 
     // Unpack from packed buffers back to each tensor's original storage.
     if (!is_root) {
@@ -307,11 +374,28 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
             }
         }
         if (gpu_total_bytes > 0) {
+            auto*              packed_base = static_cast<uint8_t*>(gpu_packed.data_ptr());
+            FusedD2DCopyParams fused_params;
+            auto               flush_fused_copy = [&]() {
+                if (fused_params.num_copies > 0) {
+                    fusedCopy(fused_params);
+                    fused_params.clear();
+                }
+            };
             for (auto& e : gpu_entries) {
-                auto dst_bytes = torch::from_blob(
-                    e.tensor->data_ptr(), {e.nbytes}, torch::TensorOptions(torch::kUInt8).device(e.tensor->device()));
-                dst_bytes.copy_(gpu_packed.narrow(0, e.offset, e.nbytes));
+                if (e.tensor->is_contiguous()) {
+                    if (fused_params.num_copies == MAX_FUSED_D2D_COPIES) {
+                        flush_fused_copy();
+                    }
+                    fused_params.add(packed_base + e.offset, e.tensor->data_ptr(), static_cast<size_t>(e.nbytes));
+                    continue;
+                }
+
+                flush_fused_copy();
+                auto src_tensor = torch::from_blob(packed_base + e.offset, e.tensor->sizes(), e.tensor->options());
+                e.tensor->copy_(src_tensor);
             }
+            flush_fused_copy();
         }
     }
 }

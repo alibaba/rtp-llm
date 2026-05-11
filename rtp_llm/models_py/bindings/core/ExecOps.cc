@@ -1,6 +1,7 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/models_py/bindings/core/CommonDefines.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
+#include "rtp_llm/cpp/distribute/CpuTpBroadcaster.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
@@ -33,6 +34,8 @@ namespace rtp_llm {
 GreedyOutput     sampleGreedy(const GreedyParams& params);
 BeamSearchOutput sampleBeamSearch(const BeamSearchParams& params);
 void             chainSpeculativeSampling(const SpeculativeSamplingParams& params);
+void             rejectionSampling(const RejectionSamplingParams& params);
+void             mappingDraft2Target(const MappingDraft2TargetParams& params);
 void             multiMergeCopy(const MultiMergeCopyParams& params);
 }  // namespace rtp_llm
 
@@ -136,21 +139,42 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
                             const KvCacheInfo&          kv_cache,
                             bool                        mla_kvcache,
                             std::shared_ptr<CacheStore> cache_store) {
-    auto& param = cache_store_inputs;
-    if (param.warmup) {
+    if (cache_store_inputs.warmup) {
         RTP_LLM_LOG_DEBUG("is warmup, so ignore writeCacheStore");
         return;
     }
-    if (!param.pd_separation || param.context_batch_size == 0) {
+    if (!cache_store_inputs.pd_separation || cache_store_inputs.context_batch_size == 0) {
         RTP_LLM_LOG_DEBUG("pd_separation = %d, context_batch_size = %d, so ignore writeCacheStore",
-                          param.pd_separation,
-                          param.context_batch_size);
+                          cache_store_inputs.pd_separation,
+                          cache_store_inputs.context_batch_size);
         return;
     }
     if (!cache_store) {
         RTP_LLM_LOG_DEBUG("cache_store is null, skip writeCacheStore");
         return;
     }
+
+    // The legacy host code path below dereferences these tensors via data_ptr<>() +
+    // pointer arithmetic. If callers passed device tensors, do an explicit D2H
+    // stream copy + sync here so the host-side reads stay valid.
+    // TODO(async): rewrite this path to consume device tensors directly.
+    auto to_cpu_sync = [](const torch::Tensor& t) -> torch::Tensor {
+        if (!t.defined() || t.device().is_cpu()) {
+            return t;
+        }
+        return t.cpu();
+    };
+
+    CacheStoreInputs local             = cache_store_inputs;
+    local.host_kv_cache_offset         = to_cpu_sync(local.host_kv_cache_offset);
+    local.prefix_lengths_host          = to_cpu_sync(local.prefix_lengths_host);
+    local.input_lengths_host           = to_cpu_sync(local.input_lengths_host);
+    local.kv_cache_layer_to_group_host = to_cpu_sync(local.kv_cache_layer_to_group_host);
+    local.kv_cache_group_types_host    = to_cpu_sync(local.kv_cache_group_types_host);
+    local.request_id                   = to_cpu_sync(local.request_id);
+    local.request_pd_separation        = to_cpu_sync(local.request_pd_separation);
+
+    auto& param = local;
 
     RTP_LLM_CHECK_WITH_INFO(param.host_kv_cache_offset.defined(), "failed to get host_kv_cache_offset");
     const int32_t* offset_addr          = nullptr;
@@ -427,6 +451,14 @@ void execChainSpeculativeSampling(const SpeculativeSamplingParams& params) {
     chainSpeculativeSampling(params);
 }
 
+void execRejectionSampling(const RejectionSamplingParams& params) {
+    rejectionSampling(params);
+}
+
+void execMappingDraft2Target(const MappingDraft2TargetParams& params) {
+    mappingDraft2Target(params);
+}
+
 // === Communication ops (Python callbacks via pybind11) ===
 
 namespace {
@@ -450,6 +482,45 @@ void execBroadcast(const BroadcastParams& params) {
     for (auto& t : params.buffers)
         tensors.append(t);
     fn(tensors, params.root, static_cast<int>(params.mode));
+}
+
+void execBroadcastCpu(const BroadcastParams& params) {
+    RTP_LLM_CHECK_WITH_INFO(
+        params.root == 0, "execBroadcastCpu supports only root=0; got %ld", static_cast<long>(params.root));
+    RTP_LLM_CHECK_WITH_INFO(params.mode == ParallelMode::TP,
+                            "execBroadcastCpu supports only ParallelMode::TP; got %d",
+                            static_cast<int>(params.mode));
+
+    auto& bcast = CpuTpBroadcaster::instance();
+    if (bcast.isInitialized()) {
+        // Pure CPU path via UDS (no GPU stream, no Python, no cudaSync).
+        // Caller must guarantee CPU tensors with identical (count, nbytes)
+        // on every rank — see execBroadcastCpu doc in ExecOps.h.
+        for (auto& t : params.buffers) {
+            RTP_LLM_CHECK_WITH_INFO(
+                t.is_cpu(), "execBroadcastCpu requires CPU tensors (got device=%s)", t.device().str().c_str());
+            // Pinned tensors from torch::empty(...).pin_memory() are already
+            // contiguous; .contiguous() is a no-op fast path.
+            auto contig = t.contiguous();
+            bcast.broadcast(contig.data_ptr(), contig.nbytes(), params.root);
+            if (!contig.is_same(t)) {
+                t.copy_(contig);
+            }
+        }
+        return;
+    }
+    // Fallback (broadcaster not initialized — typically cross-node TP):
+    // delegate to NCCL via the Python callback. The historical contract for
+    // this callsite (tpSyncModelInputs CPU broadcasts) requires the data to
+    // be readable on the current thread immediately after this returns, so
+    // preserve the original sync + cudaSyncAndCheck sequence.
+    execBroadcast(params);
+    execSyncCommunication(false);
+    cudaSyncAndCheck();
+}
+
+bool isCpuTpBroadcasterInitialized() {
+    return CpuTpBroadcaster::instance().isInitialized();
 }
 
 AllReduceOutput execAllReduce(const AllReduceParams& params) {
@@ -609,6 +680,31 @@ void registerExecCtxOps(pybind11::module& m) {
             g_allgather_fn = py::function();
         },
         "Clear registered Python communication callbacks.");
+
+    m.def(
+        "init_cpu_tp_broadcaster",
+        [](int tp_rank, int tp_size, const std::string& base_path) {
+            // Release GIL: rank 0 blocks in accept() and rank K blocks in
+            // connect() retry until the peer arrives. Holding the GIL would
+            // dead-lock any other Python thread waiting to enter the runtime
+            // (e.g. logging) and is unnecessary — initialize() touches no
+            // Python state.
+            py::gil_scoped_release release;
+            CpuTpBroadcaster::instance().initialize(tp_rank, tp_size, base_path);
+        },
+        py::arg("tp_rank"),
+        py::arg("tp_size"),
+        py::arg("base_path"),
+        "Bootstrap the UDS-backed intra-node TP broadcaster used by tpSyncModelInputs. "
+        "Must be called by every TP rank with the same base_path; rank 0 binds, others connect.");
+
+    m.def(
+        "destroy_cpu_tp_broadcaster",
+        []() {
+            py::gil_scoped_release release;
+            CpuTpBroadcaster::instance().reset();
+        },
+        "Tear down the UDS-backed intra-node TP broadcaster and clear its singleton state.");
 }
 
 }  // namespace rtp_llm

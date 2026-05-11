@@ -25,7 +25,8 @@ public:
                                 const speculative::SpeculativeSamplerOutput& spec_decode_output,
                                 const MergedOutput&                          draft_prefill_output) const;
 
-    absl::StatusOr<GptModelInputs> gatherDecodeModelInput(const StreamGroups& stream_groups) const;
+    absl::StatusOr<GptModelInputs> gatherDecodeModelInput(const StreamGroups& stream_groups,
+                                                          TensorHolder&       host_holder) const;
 
     absl::StatusOr<SamplerInputs> gatherSpecSamplerInput(const StreamGroups&    stream_groups,
                                                          const GptModelInputs&  model_inputs,
@@ -34,6 +35,16 @@ public:
     void prepareDecodeDraftModelInput(const StreamGroups& stream_groups, GptModelInputs& model_input);
 
     void prepareOneStepSpecDecodeModelInput(const StreamGroups& stream_groups, GptModelInputs& model_input);
+
+    // Named entry point for the device-state target-verify
+    // gather. Returns true and fully populates model_input if every stream
+    // in the group has a complete MTP async device state (accept_len /
+    // accept_tokens / next_seq_len / propose_tokens all CUDA-defined).
+    // Returns false without touching model_input if any stream is missing
+    // a piece, so the caller can fail closed to the legacy CPU/GPU mixed
+    // path. The body is the same fast path that previously lived inline
+    // in prepareOneStepSpecDecodeModelInput.
+    bool gatherMtpDecodeModelInputFromDeviceState(const StreamGroups& stream_groups, GptModelInputs& model_input) const;
 
     void updateDecodeDraftModelInput(GptModelInputs&        model_input,
                                      const GptModelOutputs& model_output,
@@ -47,8 +58,7 @@ public:
                                          const GptModelOutputs&                       model_output,
                                          const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
                                          const size_t                                 batch_size,
-                                         torch::Tensor&                               hidden_states_d_t,
-                                         size_t&                                      total_accept_len);
+                                         torch::Tensor&                               hidden_states_d_t);
 
     void updateOneStepDraftSamplerOutput(const StreamGroups& stream_groups,
                                          SamplerOutput&      draft_sampler_output,

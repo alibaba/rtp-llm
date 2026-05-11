@@ -59,7 +59,7 @@ struct LoadFlags {
     void init();
 
     void setReady(bool ready);
-    bool isReady();
+    bool isReady(size_t world_size);
 };
 
 enum class EplbPlanStatus {
@@ -84,7 +84,7 @@ public:
     void       init(const EPLBConfig& eplb_control_data, const EPLBConfig& eplb_config);
     void       setData(const EPLBConfig& updated_control_data);
     bool       stepAndCheckSyncStep();
-    EPLBConfig getAndSyncData();
+    EPLBConfig getAndSyncData(size_t world_size);
 };
 
 class ExpertBalancer {
@@ -96,6 +96,7 @@ public:
                                                           size_t                       hidden_size,
                                                           size_t                       ep_rank,
                                                           size_t                       ep_size,
+                                                          size_t                       world_size,
                                                           py::object                   py_eplb,
                                                           DataType                     dtype,
                                                           QuantAlgo                    quant_algo,
@@ -139,6 +140,7 @@ private:
 
     size_t ep_rank_ = 0;
     size_t ep_size_ = 1;
+    size_t world_size_ = 1;
 
     size_t balance_layer_cnt_      = 0;
     size_t balance_layer_per_step_ = 1;

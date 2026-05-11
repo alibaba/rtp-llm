@@ -113,11 +113,13 @@ class PyFlashinferPrefillPagedAttnOp(object):
         forbid_realloc: True only when called from prepare_cuda_graph (replay); forbids buffer realloc.
         """
         check_attention_inputs(attn_inputs)
-        self.fmha_params.fill_params(
+        # Device-only planner: MHA path uses a device-only planner: fills only the three
+        # paged-KV fields the FlashInfer wrapper consumes, no host fill loop.
+        self.fmha_params.fill_params_mha_device(
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,
             attn_inputs.input_lengths,
-            attn_inputs.kv_cache_kernel_block_id_host,
+            attn_inputs.kv_cache_kernel_block_id_device,
             self.page_size,
             forbid_realloc,
         )
@@ -354,11 +356,12 @@ class PyFlashinferPrefillAttnOp(object):
         batch_size = attn_inputs.input_lengths.size(0)
         cu_seqlens = attn_inputs.cu_seqlens[: batch_size + 1]
 
-        self.fmha_params.fill_params(
+        # Device-only planner: device-only planner; ragged path still wraps the same params.
+        self.fmha_params.fill_params_mha_device(
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,
             attn_inputs.input_lengths,
-            attn_inputs.kv_cache_kernel_block_id_host,
+            attn_inputs.kv_cache_kernel_block_id_device,
             self.page_size,
         )
 
@@ -676,11 +679,13 @@ class PyFlashinferDecodeAttnOp(object):
         else:  # BASE
             kv_datatype = get_scalar_type(attn_inputs.dtype)
 
-        self.fmha_params.fill_params(
+        # Device-only planner: device-only planner: drops the host CPU loop + H2D in
+        # the decode prepare path (called every step in steady state).
+        self.fmha_params.fill_params_mha_device(
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,
             attn_inputs.input_lengths,
-            attn_inputs.kv_cache_kernel_block_id_host,
+            attn_inputs.kv_cache_kernel_block_id_device,
             self.seq_size_per_block,
             forbid_realloc=forbid_realloc,
         )
@@ -725,11 +730,26 @@ class PyFlashinferDecodeAttnOp(object):
         buffers in-place via fill_params — the pre-allocated buffers are already
         wired into the decode_wrapper from the initial prepare() call.
         """
-        self.fmha_params.fill_params(
+        fill_decode = getattr(self.fmha_params, "fill_decode_cuda_graph_params", None)
+        if (
+            callable(fill_decode)
+            and attn_inputs.sequence_lengths_plus_1_d is not None
+            and attn_inputs.sequence_lengths_plus_1_d.numel() > 0
+        ):
+            fill_decode(
+                attn_inputs.sequence_lengths_plus_1_d,
+                attn_inputs.kv_cache_kernel_block_id_device,
+                self.seq_size_per_block,
+            )
+            return
+
+        # Device-planner fallback: device planner when the decode-only fast path
+        # above isn't usable (e.g. sequence_lengths_plus_1_d unavailable).
+        self.fmha_params.fill_params_mha_device(
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,
             attn_inputs.input_lengths,
-            attn_inputs.kv_cache_kernel_block_id_host,
+            attn_inputs.kv_cache_kernel_block_id_device,
             self.seq_size_per_block,
             forbid_realloc=True,
         )

@@ -68,6 +68,24 @@ public:
                     int           seq_size_per_block,
                     bool          forbid_realloc = false);
 
+    void fillDecodeCudaGraphParams(torch::Tensor sequence_lengths_plus_1_d,
+                                   torch::Tensor kv_cache_block_id_device,
+                                   int           seq_size_per_block);
+
+    // Device-only fast path used by the MHA paged-attention wrappers
+    // (PyFlashinferPrefillPagedAttnOp / PyFlashinferDecodeAttnOp). Fills only
+    // decode_page_indptr_d / paged_kv_last_page_len_d / page_indice_d via a
+    // single CUDA kernel; reuses the same buffers as fillParams so existing
+    // FlashInfer _paged_kv_*_buf aliases (baked at CUDA-graph capture time)
+    // stay valid. Other fields (positions, batch_indice, reuse_cache, ...)
+    // are NOT filled — callers that need them must use fillParams instead.
+    void fillParamsMhaDevice(torch::Tensor t_prefix_lengths,
+                             torch::Tensor t_sequence_lengths,
+                             torch::Tensor t_input_lengths,
+                             torch::Tensor t_kv_cache_block_id_device,
+                             int           seq_size_per_block,
+                             bool          forbid_realloc = false);
+
     // Tensor views into buf_h and buf_d
     torch::Tensor batch_indice_h;
     torch::Tensor page_indice_h;
