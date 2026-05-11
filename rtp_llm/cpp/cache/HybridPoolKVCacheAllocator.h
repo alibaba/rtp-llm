@@ -48,6 +48,11 @@ public:
         return group_block_pools_;
     }
 
+    // Per-pool access for diagnostics / per-pool metrics reporting.
+    const std::vector<BlockPoolPtr>& groupBlockPools() const {
+        return group_block_pools_;
+    }
+
 private:
     bool   doInit() override;
     size_t reserveBlocksForPoolMetrics(size_t pool_index) const override;
