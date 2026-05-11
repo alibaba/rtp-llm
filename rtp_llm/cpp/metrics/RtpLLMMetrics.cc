@@ -318,15 +318,25 @@ void RtpLLMSpeculativeEngineMetrics::report(const kmonitor::MetricsTags*        
 
 bool RtpLLMTokenPSMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(context_tps_metric, "rtp_llm_context_tps");
+    REGISTER_GAUGE_MUTABLE_METRIC(context_tps_with_cache_metric, "rtp_llm_context_tps_with_cache");
     REGISTER_GAUGE_MUTABLE_METRIC(generate_tps_metric, "rtp_llm_generate_tps");
     REGISTER_GAUGE_MUTABLE_METRIC(total_tps_metric, "rtp_llm_total_tps");
     return true;
 }
 
 void RtpLLMTokenPSMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMTokenPSMetricsCollector* collector) {
-    REPORT_MUTABLE_METRIC(context_tps_metric, collector->context_tps);
-    REPORT_MUTABLE_METRIC(generate_tps_metric, collector->generate_tps);
-    REPORT_MUTABLE_METRIC(total_tps_metric, collector->total_tps);
+    if (collector->hasContextTPS()) {
+        REPORT_MUTABLE_METRIC(context_tps_metric, collector->contextTPS());
+    }
+    if (collector->hasContextTPSWithCache()) {
+        REPORT_MUTABLE_METRIC(context_tps_with_cache_metric, collector->contextTPSWithCache());
+    }
+    if (collector->hasGenerateTPS()) {
+        REPORT_MUTABLE_METRIC(generate_tps_metric, collector->generateTPS());
+    }
+    if (collector->hasTotalTPS()) {
+        REPORT_MUTABLE_METRIC(total_tps_metric, collector->totalTPS());
+    }
 }
 
 bool RtpLLMCacheMetrics::init(kmonitor::MetricsGroupManager* manager) {

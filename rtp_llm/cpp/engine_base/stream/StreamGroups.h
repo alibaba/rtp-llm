@@ -42,7 +42,16 @@ public:
             } else {
                 decode_block_update_copy_num_ += block_update_copy_num;
             }
-            model_execute_token_size_ += stream->currentExecuteTokenSize();
+            auto execute_token_size = static_cast<size_t>(stream->currentExecuteTokenSize());
+            if (stream->isContextStream()) {
+                auto reuse_length = stream->reuseLength();
+                context_execute_token_size_ += execute_token_size;
+                context_execute_token_size_with_cache_ += execute_token_size;
+                if (reuse_length > 0) {
+                    context_execute_token_size_with_cache_ += static_cast<size_t>(reuse_length) * cur_batch_size;
+                }
+            }
+            model_execute_token_size_ += execute_token_size;
             total_sampler_batch_size_in_ += stream->needTilingForSampling() ? next_batch_size : cur_batch_size;
             total_sampler_batch_size_out_ += next_batch_size;
             max_blocks_num_ = std::max(max_blocks_num_, stream->curBlocksNum());
@@ -82,6 +91,12 @@ public:
     }
     size_t modelExecuteTokenSize() const {
         return model_execute_token_size_;
+    }
+    size_t contextExecuteTokenSize() const {
+        return context_execute_token_size_;
+    }
+    size_t contextExecuteTokenSizeWithCache() const {
+        return context_execute_token_size_with_cache_;
     }
     size_t maxSeqLen() const {
         return max_seq_len_;
@@ -186,7 +201,10 @@ public:
                      << ", total_sampler_batch_size_out: " << total_sampler_batch_size_out_
                      << ", total_block_update_copy_num: " << totalBlockUpdateCopyNum()
                      << ", max_blocks_num_: " << max_blocks_num_
-                     << ", model_execute_token_size: " << model_execute_token_size_ << ", max_seq_len: " << max_seq_len_
+                     << ", model_execute_token_size: " << model_execute_token_size_
+                     << ", context_execute_token_size: " << context_execute_token_size_
+                     << ", context_execute_token_size_with_cache: " << context_execute_token_size_with_cache_
+                     << ", max_seq_len: " << max_seq_len_
                      << ", is_fake_stream: " << is_fake_stream_ << "}";
         return debug_string.str();
     }
@@ -214,6 +232,8 @@ private:
     size_t                       context_block_update_copy_num_ = 0;
     size_t                       max_blocks_num_                = 0;
     size_t                       model_execute_token_size_      = 0;
+    size_t                       context_execute_token_size_    = 0;
+    size_t                       context_execute_token_size_with_cache_ = 0;
     size_t                       max_seq_len_                   = 0;
     size_t                       max_context_seq_len_           = 0;
     size_t                       max_reuse_length_              = 0;

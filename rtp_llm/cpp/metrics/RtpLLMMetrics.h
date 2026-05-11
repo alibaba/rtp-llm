@@ -284,18 +284,105 @@ private:
 
 class RtpLLMTokenPSMetricsCollector final {
 public:
+    void addTokenSize(int64_t context_token_num,
+                      int64_t context_token_num_with_cache,
+                      int64_t generate_token_num,
+                      int64_t total_token_num,
+                      int64_t execute_time_us) {
+        if (execute_time_us <= 0) {
+            return;
+        }
+        if (context_token_num > 0) {
+            context_token_num_ += context_token_num;
+            context_time_us_ += execute_time_us;
+        }
+        if (context_token_num_with_cache > 0) {
+            context_token_num_with_cache_ += context_token_num_with_cache;
+            context_time_us_with_cache_ += execute_time_us;
+        }
+        if (generate_token_num > 0) {
+            generate_token_num_ += generate_token_num;
+            generate_time_us_ += execute_time_us;
+        }
+        if (total_token_num > 0) {
+            total_token_num_ += total_token_num;
+            total_time_us_ += execute_time_us;
+        }
+    }
+
     void merge(const RtpLLMTokenPSMetricsCollector* collector) {
         if (collector) {
+            context_token_num_ += collector->context_token_num_;
+            context_time_us_ += collector->context_time_us_;
+            context_token_num_with_cache_ += collector->context_token_num_with_cache_;
+            context_time_us_with_cache_ += collector->context_time_us_with_cache_;
+            generate_token_num_ += collector->generate_token_num_;
+            generate_time_us_ += collector->generate_time_us_;
+            total_token_num_ += collector->total_token_num_;
+            total_time_us_ += collector->total_time_us_;
             context_tps += collector->context_tps;
+            context_tps_with_cache += collector->context_tps_with_cache;
             generate_tps += collector->generate_tps;
             total_tps += collector->total_tps;
         }
     }
 
+    double contextTPS() const {
+        return calcTps(context_token_num_, context_time_us_, context_tps);
+    }
+
+    double contextTPSWithCache() const {
+        return calcTps(context_token_num_with_cache_, context_time_us_with_cache_, context_tps_with_cache);
+    }
+
+    double generateTPS() const {
+        return calcTps(generate_token_num_, generate_time_us_, generate_tps);
+    }
+
+    double totalTPS() const {
+        return calcTps(total_token_num_, total_time_us_, total_tps);
+    }
+
+    bool hasContextTPS() const {
+        return context_time_us_ > 0 || context_tps > 0;
+    }
+
+    bool hasContextTPSWithCache() const {
+        return context_time_us_with_cache_ > 0 || context_tps_with_cache > 0;
+    }
+
+    bool hasGenerateTPS() const {
+        return generate_time_us_ > 0 || generate_tps > 0;
+    }
+
+    bool hasTotalTPS() const {
+        return total_time_us_ > 0 || total_tps > 0;
+    }
+
+private:
+    static double calcTps(int64_t token_num, int64_t time_us, double fallback_tps) {
+        double tps = fallback_tps;
+        if (time_us > 0) {
+            tps += static_cast<double>(token_num) * 1000000.0 / static_cast<double>(time_us);
+        }
+        return tps;
+    }
+
 public:
-    int64_t context_tps  = 0;
-    int64_t generate_tps = 0;
-    int64_t total_tps    = 0;
+    double context_tps            = 0.0;
+    double context_tps_with_cache = 0.0;
+    double generate_tps           = 0.0;
+    double total_tps              = 0.0;
+
+private:
+    int64_t context_token_num_            = 0;
+    int64_t context_time_us_              = 0;
+    int64_t context_token_num_with_cache_ = 0;
+    int64_t context_time_us_with_cache_   = 0;
+    int64_t generate_token_num_           = 0;
+    int64_t generate_time_us_             = 0;
+    int64_t total_token_num_              = 0;
+    int64_t total_time_us_                = 0;
 };
 
 class RtpLLMTokenPSMetrics: public kmonitor::MetricsGroup {
@@ -304,9 +391,10 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMTokenPSMetricsCollector* collector);
 
 public:
-    kmonitor::MutableMetric* context_tps_metric  = nullptr;
-    kmonitor::MutableMetric* generate_tps_metric = nullptr;
-    kmonitor::MutableMetric* total_tps_metric    = nullptr;
+    kmonitor::MutableMetric* context_tps_metric            = nullptr;
+    kmonitor::MutableMetric* context_tps_with_cache_metric = nullptr;
+    kmonitor::MutableMetric* generate_tps_metric           = nullptr;
+    kmonitor::MutableMetric* total_tps_metric              = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();

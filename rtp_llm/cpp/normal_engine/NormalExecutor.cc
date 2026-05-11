@@ -222,9 +222,11 @@ void NormalExecutor::reportMetrics(const StreamGroups&             stream_groups
         }
         metrics_reporter_->report<RtpLLMExecutorMetrics, RtpLLMExecutorMetricsCollector>(nullptr, &executor_collector);
 
-        tps_collector.context_tps  = stream_groups.modelExecuteTokenSize() - stream_groups.totalDecodeBatchSize();
-        tps_collector.generate_tps = stream_groups.totalDecodeBatchSize();
-        tps_collector.total_tps    = stream_groups.modelExecuteTokenSize();
+        tps_collector.addTokenSize(stream_groups.contextExecuteTokenSize(),
+                                   stream_groups.contextExecuteTokenSizeWithCache(),
+                                   stream_groups.totalDecodeBatchSize(),
+                                   stream_groups.modelExecuteTokenSize(),
+                                   executor_collector.model_forward_us);
         tps_reporter_.report(&tps_collector);
     }
 }

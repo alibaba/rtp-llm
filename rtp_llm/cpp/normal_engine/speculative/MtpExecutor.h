@@ -100,7 +100,8 @@ protected:
     void draftModelDecode(GptModelInputs&             model_input,
                           const StreamGroups&         stream_groups,
                           std::vector<torch::Tensor>& draft_probs_list,
-                          torch::Tensor&              draft_token_ids_t);
+                          torch::Tensor&              draft_token_ids_t,
+                          int64_t&                    model_forward_us);
 
     void prepareStreams(const std::list<GenerateStreamPtr>& streams,
                         std::list<GenerateStreamPtr>&       prefill_streams,
