@@ -25,6 +25,7 @@ from ..mega_buf import (
 from ..input_packer import get_mega_moe_input_packer
 from ...quant_layouts import FP4_BLOCK, prepare_fp4_weight_scale_for_deepgemm
 from ..shared_expert import strict_fused_moe_enabled
+from ..warmup_sync import sync_cuda_graph_warmup_ranks
 
 
 @register_strategy
@@ -195,6 +196,10 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         # alloc (0 is expert 0, but tokens past T aren't read because
         # the kernel uses y.size(0) as the effective token count).
         self._input_packer.pack(x, weights, indices, buf, T)
+        sync_cuda_graph_warmup_ranks(
+            f"dsv4.mega_moe.layer{self.cfg.layer_id}.before_deepgemm",
+            x.device,
+        )
 
         y = self._mega_y[:T]
         deep_gemm.fp8_fp4_mega_moe(

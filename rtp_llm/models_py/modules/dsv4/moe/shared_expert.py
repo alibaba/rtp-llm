@@ -16,6 +16,8 @@ import torch.nn as nn
 
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 
+from .warmup_sync import cuda_graph_warmup_forward_enabled
+
 
 _SHARED_EXPERT_WORKSPACE_CACHE: dict[tuple, dict[str, torch.Tensor | int | torch.device]] = {}
 
@@ -400,6 +402,8 @@ class OverlapSharedExpertExecutor(SharedExpertExecutor):
         if not (x.is_cuda and torch.cuda.is_available()):
             return False
         if torch.cuda.is_current_stream_capturing():
+            return False
+        if cuda_graph_warmup_forward_enabled():
             return False
         if os.environ.get("MOEDBG", "0") != "0":
             return False

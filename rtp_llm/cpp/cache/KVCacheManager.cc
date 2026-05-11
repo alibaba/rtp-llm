@@ -577,7 +577,7 @@ void KVCacheManager::reportMetricsLoop() {
         // Diagnostic raw dump — verifies (total - available) / total matches
         // ratio at the same tick, so any monitoring-side discrepancy can be
         // confirmed as an aggregation artefact rather than a server bug.
-        RTP_LLM_LOG_INFO(
+        RTP_LLM_LOG_DEBUG(
             "kvc raw global: total=%zu avail=%zu req_ref=%zu con_ref=%zu free=%zu items=%ld ratio=%.4f%%",
             total_blocks,
             available_blocks,
@@ -606,7 +606,7 @@ void KVCacheManager::reportMetricsLoop() {
                                                    static_cast<float>(100.0 * (pool_total - pool_available)
                                                                       / static_cast<double>(pool_total));
 
-                RTP_LLM_LOG_INFO(
+                RTP_LLM_LOG_DEBUG(
                     "kvc raw pool[%zu]: total=%zu avail=%zu req_ref=%zu con_ref=%zu free=%zu ratio=%.4f%%",
                     gid,
                     pool_total,

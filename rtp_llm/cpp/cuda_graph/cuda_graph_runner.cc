@@ -1,7 +1,9 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
+#include <string>
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "torch/csrc/autograd/generated/variable_factories.h"
@@ -11,6 +13,35 @@
 #endif
 using namespace torch_ext;
 namespace rtp_llm {
+
+namespace {
+
+class ScopedEnvFlag {
+public:
+    ScopedEnvFlag(const char* name, const char* value): name_(name) {
+        const char* old_value = std::getenv(name_);
+        if (old_value != nullptr) {
+            had_old_value_ = true;
+            old_value_     = old_value;
+        }
+        setenv(name_, value, 1);
+    }
+
+    ~ScopedEnvFlag() {
+        if (had_old_value_) {
+            setenv(name_, old_value_.c_str(), 1);
+        } else {
+            unsetenv(name_);
+        }
+    }
+
+private:
+    const char* name_;
+    bool        had_old_value_ = false;
+    std::string old_value_;
+};
+
+}  // namespace
 
 // clang-format off
 // CUDA Graph Mode Configuration Table:
@@ -583,10 +614,11 @@ void CudaGraphRunner::initKernelInternalMemory() {
     auto input_lengths  = capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths;
     input_lengths       = input_lengths.is_cuda() ? input_lengths.cpu() : input_lengths;
     auto prefix_lengths = capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths;
-    prefix_lengths      = prefix_lengths.defined() && prefix_lengths.is_cuda() ? prefix_lengths.cpu() : prefix_lengths;
+    const bool has_prefix_lengths = prefix_lengths.defined() && prefix_lengths.numel() > 0;
+    prefix_lengths = has_prefix_lengths && prefix_lengths.is_cuda() ? prefix_lengths.cpu() : prefix_lengths;
 
     cu_seqlens.slice(0, 1, max_bs_ + 1) = input_lengths.cumsum(0);
-    if (prefix_lengths.defined()) {
+    if (has_prefix_lengths) {
         cu_kv_seqlens.slice(0, 1, max_bs_ + 1) = input_lengths.add(prefix_lengths).cumsum(0);
     }
     capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens_host = cu_seqlens;
@@ -643,15 +675,13 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
         }
     }
 
-    // prefix_lengths [batch_size, int32] (for attention `prepare`)
-    if (num_tokens_per_bs_ > 1 && !is_prefill_cuda_graph_mode_) {
+    // prefix_lengths [batch_size, int32] is only meaningful for prefill and target-verify.
+    // Plain decode must leave it undefined.
+    if (is_target_verify_) {
         inputs.attention_inputs.prefix_lengths =
             torch::full({int(max_bs_)}, max_seq_len_ - num_tokens_per_bs_, options_cuda_int32_);
     } else if (is_prefill_cuda_graph_mode_) {
         inputs.attention_inputs.prefix_lengths = torch::zeros({int(max_bs_)}, options_cuda_int32_);
-    } else {
-        // Decode CUDA graph mode: prefix_lengths should be empty tensor
-        inputs.attention_inputs.prefix_lengths = torch::empty({0}, options_cuda_int32_);
     }
     // padding_offset [max_num_token_, int32] (for attention padding)
     inputs.attention_inputs.padding_offset            = torch::zeros({int(max_seq_len_ * max_bs_)}, options_cpu_int32_);
@@ -763,7 +793,10 @@ void CudaGraphRunner::initCapture() {
         // get real output data type (params already prepared in attn impl __init__/create_params)
         auto attn_pyobj = py_attn_pyobj_method_(capture_mem_hold_.py_model_inputs_, true);
         RTP_LLM_LOG_INFO("initCapture forward for output datatype start");
-        py_forward_method_(capture_mem_hold_.py_model_inputs_, attn_pyobj);
+        {
+            ScopedEnvFlag cuda_graph_warmup("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD", "1");
+            py_forward_method_(capture_mem_hold_.py_model_inputs_, attn_pyobj);
+        }
         RTP_LLM_LOG_INFO("initCapture forward for output datatype end");
         output = torch::zeros({max_num_token_, hidden_size_}, options_cuda_float_);
         capture_mem_hold_.setHiddenStates(output);
@@ -790,7 +823,10 @@ void CudaGraphRunner::initCapture() {
                 capture_mem_hold_.py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device.slice(0, 0, 1);
             inputs.attention_inputs.kv_cache_kernel_block_id_host =
                 capture_mem_hold_.py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_host.slice(0, 0, 1);
-            py_forward_method_(inputs);
+            {
+                ScopedEnvFlag cuda_graph_warmup("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD", "1");
+                py_forward_method_(inputs);
+            }
             RTP_LLM_LOG_INFO("initCapture forward post check end for prefill");
             capturePrefill();
         } else {
@@ -891,14 +927,10 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
         capture_mem_hold_.py_model_inputs_.attention_inputs.padding_offset.slice(0, 0, seq_len_or_tokens);
 
     // Common slice operations for attention inputs
-    if (capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths.defined()) {
-        if (capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths.size(0) > 0) {
-            inputs.attention_inputs.prefix_lengths =
-                capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths.slice(0, 0, batch_size);
-        } else {
-            // For decode CUDA graph mode: prefix_lengths is empty tensor
-            inputs.attention_inputs.prefix_lengths = capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths;
-        }
+    if (capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths.defined()
+        && capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths.numel() > 0) {
+        inputs.attention_inputs.prefix_lengths =
+            capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths.slice(0, 0, batch_size);
     }
     inputs.attention_inputs.sequence_lengths =
         capture_mem_hold_.py_model_inputs_.attention_inputs.sequence_lengths.slice(0, 0, batch_size);

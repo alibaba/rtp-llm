@@ -26,6 +26,22 @@ namespace py = pybind11;
 
 namespace rtp_llm {
 
+inline void syncCudaGraphCaptureRanks(const ParallelismConfig& parallelism_config, const char* phase) {
+    if (parallelism_config.world_size <= 1) {
+        return;
+    }
+
+    py::gil_scoped_acquire gil;
+    try {
+        auto collective = py::module_::import("rtp_llm.models_py.distributed.collective_torch");
+        auto group      = collective.attr("Group").attr("DP_AND_TP");
+        collective.attr("barrier")(group);
+    } catch (const py::error_already_set& e) {
+        RTP_LLM_LOG_ERROR("CUDA graph capture rank sync failed at %s:\n%s", phase, e.what());
+        throw;
+    }
+}
+
 class KVCacheManager;  // Forward declaration
 
 class PyWrappedModel: public ModelBase {
@@ -293,6 +309,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             RTP_LLM_LOG_ERROR("Python model initialize failed (cuda_graph branch):\n%s", e.what());
             throw;
         }
+        syncCudaGraphCaptureRanks(params.parallelism_config, "before_initCapture");
         graph_runner_->initCapture();
     }
 
