@@ -14,6 +14,7 @@ AUTIL_LOG_SETUP(rtp_llm, RtpEmbeddingGlobalMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpEmbeddingStreamMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMSchedulerMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheMetrics);
+AUTIL_LOG_SETUP(rtp_llm, RtpLLMCachePoolMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheReuseMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMDeviceCacheReuseMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMExecutorMetrics);
@@ -350,6 +351,25 @@ void RtpLLMCacheMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCacheMe
     REPORT_MUTABLE_METRIC(kv_cache_left_seq_metric, collector->kv_cache_left_seq);
     REPORT_MUTABLE_METRIC(kv_cache_used_ratio_metric, collector->kv_cache_used_ratio);
     REPORT_MUTABLE_METRIC(mr_cost_time_ms_metric, collector->mr_cost_time_ms);
+}
+
+bool RtpLLMCachePoolMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_GAUGE_MUTABLE_METRIC(free_blocks_metric, "rtp_llm_kv_cache_pool_free_blocks");
+    REGISTER_GAUGE_MUTABLE_METRIC(available_blocks_metric, "rtp_llm_kv_cache_pool_available_blocks");
+    REGISTER_GAUGE_MUTABLE_METRIC(request_ref_blocks_metric, "rtp_llm_kv_cache_pool_request_ref_blocks");
+    REGISTER_GAUGE_MUTABLE_METRIC(connector_ref_blocks_metric, "rtp_llm_kv_cache_pool_connector_ref_blocks");
+    REGISTER_GAUGE_MUTABLE_METRIC(total_blocks_metric, "rtp_llm_kv_cache_pool_total_blocks");
+    REGISTER_GAUGE_MUTABLE_METRIC(used_ratio_metric, "rtp_llm_kv_cache_pool_used_ratio");
+    return true;
+}
+
+void RtpLLMCachePoolMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCachePoolMetricsCollector* collector) {
+    REPORT_MUTABLE_METRIC(free_blocks_metric, collector->free_blocks);
+    REPORT_MUTABLE_METRIC(available_blocks_metric, collector->available_blocks);
+    REPORT_MUTABLE_METRIC(request_ref_blocks_metric, collector->request_ref_blocks);
+    REPORT_MUTABLE_METRIC(connector_ref_blocks_metric, collector->connector_ref_blocks);
+    REPORT_MUTABLE_METRIC(total_blocks_metric, collector->total_blocks);
+    REPORT_MUTABLE_METRIC(used_ratio_metric, collector->used_ratio);
 }
 
 bool RtpLLMRemoteCacheMatchMetrics::init(kmonitor::MetricsGroupManager* manager) {
