@@ -245,11 +245,27 @@ py_test(
 )
 
 # V4-Flash DP=4 + EP=4 captured-graph decode at fixed bs=128 / input_len=64K.
-# 64K context x 128 batch x DP=4 x FP8 KV x FP8_PER_BLOCK weights x Mega MoE
-# x cuda graph capture. Canonical iter target for feat/dsv4_on_dev decode
-# perf-tuning (see dpskv4-study/perf/dsv4_on_dev_64k/iterations.md).
-# In grid mode the framework multiplies --batch_size by --dp_size for the
-# engine call, so --batch_size 128 yields per-DP-rank decode batch = 128.
+# 64K context x 128 batch (per DP rank) x DP=4 x FP8 KV x FP8_PER_BLOCK weights
+# x Mega MoE x cuda graph capture. Canonical iter target for feat/dsv4_on_dev
+# decode perf-tuning (see dpskv4-study/perf/dsv4_on_dev_64k/iterations.md).
+# --batch_size is per-DP-rank: grid_runner.py:84 multiplies by --dp_size before
+# handing off to BatchPerfImpl, which then divides back by dp_size on the
+# engine side (batch_perf_impl.py:182).  Net: --batch_size 128 + --dp_size 4
+# = 512 total requests distributed 128/rank across 4 DP ranks.  server.py:63
+# also overrides --concurrency_limit to max(batch_size_list)=128 at engine
+# startup, so the BUILD --concurrency_limit below is effectively ignored.
+# State/indexer pools sized by CacheConfig.h:114 as
+# 2 * max(max_context_batch_size, max_generate_batch_size) + 1.  With
+# concurrency_limit=128 driving max_generate_batch_size=128 and the default
+# max_context_batch_size=1, the fixed pools end up exactly 257 blocks ==
+# 128 reqs * 2 blocks + 1.  Block 0 is reserved by BlockPool, so usable is 256
+# == zero margin; any 5% reserve_block_ratio haircut (which --reserve_block_ratio 0
+# does not fully disable — the default still propagates through some config copies)
+# drops admission to ~85/128 per rank (340/512 total, same 66% failure as
+# baseline).  Bumping --max_context_batch_size to 256 lifts the state-pool
+# ceiling to 2*256+1=513 blocks so 128 concurrent reqs fit with ~2x headroom,
+# and the fixed-pool memory overhead is ~9 MiB per rank (negligible vs the
+# ~169 GiB paged KV pools).
 py_test(
     name = "v4_flash_dp4_decode_bs128_64k_perf",
     main = "batch_decode_test.py",
@@ -284,7 +300,8 @@ py_test(
         "--concurrency_limit", "32",
         "--enable_cuda_graph", "1",
         "--reserver_runtime_mem_mb", "32768",
-        "--max_context_batch_size", "1",
+        "--reserve_block_ratio", "0",
+        "--max_context_batch_size", "256",
     ],
     env = {
         "WORLD_SIZE": "4",
@@ -295,6 +312,8 @@ py_test(
         "PERF_PROFILE_ARM_SLEEP": "2",
         "PERF_PROFILE_FLUSH_SLEEP": "120",
         "DSV4_USE_MEGA_MOE": "1",
+        "ENABLE_FP32_LM_HEAD": "0",
+        "DSV4_FUSED_PREPARE": "1",
     },
     tags = ["manual"],
 )
@@ -334,7 +353,8 @@ py_test(
         "--concurrency_limit", "32",
         "--enable_cuda_graph", "0",
         "--reserver_runtime_mem_mb", "32768",
-        "--max_context_batch_size", "1",
+        "--reserve_block_ratio", "0",
+        "--max_context_batch_size", "256",
     ],
     env = {
         "WORLD_SIZE": "4",
@@ -345,6 +365,7 @@ py_test(
         "PERF_PROFILE_ARM_SLEEP": "2",
         "PERF_PROFILE_FLUSH_SLEEP": "120",
         "DSV4_USE_MEGA_MOE": "1",
+        "DSV4_FUSED_PREPARE": "1",
     },
     tags = ["manual"],
 )

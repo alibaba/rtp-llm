@@ -407,7 +407,9 @@ def forward_layers(
             last_mask = (cp_ctx.global_positions == last_pos) & cp_ctx.local_is_real
             last_h = h[last_mask].contiguous()
         _rt.record("lm_last_hidden", last_h)
-        lm_logits = torch.mm(last_h.float(), v4.head_weight.t()).float()
+        lm_logits = torch.mm(
+            last_h.to(v4.head_weight.dtype), v4.head_weight.t()
+        ).float()
         _rt.record("lm_logits_last", lm_logits)
         top_k = min(16, lm_logits.size(-1))
         lm_top_values, lm_top_indices = torch.topk(lm_logits, k=top_k, dim=-1)
