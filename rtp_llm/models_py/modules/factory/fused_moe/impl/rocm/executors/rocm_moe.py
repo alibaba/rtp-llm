@@ -576,8 +576,6 @@ class RocmExpertsMXFp4(FusedMoeExpertExecutor):
         packed_factor = 2 if self.w1.dtype == torch.uint8 else 1
         self.hidden_size_padded = self.w1.size(2) * packed_factor
         self.intermediate_size_padded = self.w2.size(1)
-        self.hidden_pad = max(0, self.hidden_size_padded - self.hidden_size_raw)
-        self.intermediate_pad = max(0, self.intermediate_size_padded - self.intermediate_size_raw)
 
         self.expert_mask = build_ep_expert_mask(
             self.num_experts, self.ep_rank, self.ep_size, self.w1
