@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -48,7 +49,6 @@ static ModelConfig makeProModelConfig() {
     for (int i = 2; i < 61; i++) {
         ratios.push_back((i % 2 == 0) ? 4 : 128);
     }
-    ratios.push_back(0);
     mc.attn_config.layer_compress_ratios = ratios;
     return mc;
 }
@@ -71,8 +71,14 @@ static ModelConfig makeFlashModelConfig() {
     for (int i = 2; i < 43; i++) {
         ratios.push_back((i % 2 == 0) ? 4 : 128);
     }
-    ratios.push_back(0);
     mc.attn_config.layer_compress_ratios = ratios;
+    return mc;
+}
+
+static ModelConfig makeFlashMtpModelConfig() {
+    ModelConfig mc                       = makeFlashModelConfig();
+    mc.num_layers                        = 1;
+    mc.attn_config.layer_compress_ratios = {0};
     return mc;
 }
 
@@ -116,6 +122,21 @@ TEST(HybridPoolConfigCreatorTest, FlashLayerClassification) {
     EXPECT_EQ(config.global_layer_ids[0].size(), 21u);
     EXPECT_EQ(config.global_layer_ids[1].size(), 20u);
     EXPECT_EQ(config.global_layer_ids[6].size(), 43u);
+}
+
+TEST(HybridPoolConfigCreatorTest, MtpSwaOnlyLayerIsNotStripped) {
+    ParallelismConfig pc;
+    auto              config = HybridPoolConfigCreator::createConfig(makeFlashMtpModelConfig(), pc, true);
+
+    EXPECT_EQ(config.layer_num, 1u);
+    EXPECT_EQ(config.block_size_bytes, 1u);
+    EXPECT_TRUE(config.global_layer_ids[0].empty());
+    EXPECT_TRUE(config.global_layer_ids[1].empty());
+    ASSERT_EQ(config.global_layer_ids[6], std::vector<int>({0}));
+    ASSERT_EQ(config.layer_to_group_id.size(), 1u);
+    EXPECT_EQ(config.layer_to_group_id[0], 6);
+    ASSERT_EQ(config.layer_region_to_group_id.size(), 1u);
+    EXPECT_EQ(config.layer_region_to_group_id[0][static_cast<size_t>(KVCacheRegionName::SWA_KV)], 6);
 }
 
 // ============================================================
@@ -459,6 +480,57 @@ TEST(CacheConfigTest, FinalizeBlockNumsAppliesToIndependentPools) {
         EXPECT_EQ(config.group_block_nums[gid], kDsv4FixedPoolBlocks + 1u) << "gid=" << gid;
     }
     EXPECT_GT(config.fixed_pool_reserve_bytes, 0u);
+}
+
+TEST(CacheConfigTest, DSV4MtpKeepsProposeLayerInSwaPool) {
+    auto score_model_config   = makeFlashModelConfig();
+    auto propose_model_config = makeFlashMtpModelConfig();
+
+    ParallelismConfig parallelism_config;
+    RuntimeConfig     runtime_config;
+    runtime_config.max_generate_batch_size                      = 2;
+    runtime_config.fifo_scheduler_config.max_context_batch_size = 1;
+
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.test_block_num = 100;
+
+    SpeculativeExecutionConfig sp_config;
+    sp_config.type              = SP_TYPE_MTP;
+    sp_config.gen_num_per_cycle = 2;
+
+    auto config = CacheConfigCreator::createSpConfig(score_model_config,
+                                                     propose_model_config,
+                                                     parallelism_config,
+                                                     runtime_config,
+                                                     kv_cache_config,
+                                                     sp_config,
+                                                     std::nullopt,
+                                                     true,
+                                                     false);
+
+    ASSERT_EQ(config.layer_num, 43u);
+    ASSERT_EQ(config.layer_all_num, 45u);
+    ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
+    ASSERT_NE(config.mtp_sub_configs[0], nullptr);
+    ASSERT_NE(config.mtp_sub_configs[1], nullptr);
+
+    EXPECT_EQ(config.layer_to_group_id[43], 6);
+    EXPECT_EQ(config.layer_to_group_id[44], 6);
+    EXPECT_EQ(config.layer_region_to_group_id[43][static_cast<size_t>(KVCacheRegionName::SWA_KV)], 6);
+    EXPECT_EQ(config.layer_region_to_group_id[44][static_cast<size_t>(KVCacheRegionName::SWA_KV)], 6);
+
+    EXPECT_EQ(config.global_layer_ids[6].size(), 45u);
+    EXPECT_EQ(config.mtp_sub_configs[0]->global_layer_ids[6], std::vector<int>({43}));
+    EXPECT_EQ(config.mtp_sub_configs[1]->global_layer_ids[6], std::vector<int>({44}));
+    EXPECT_TRUE(config.mtp_sub_configs[0]->global_layer_ids[0].empty());
+    EXPECT_TRUE(config.mtp_sub_configs[1]->global_layer_ids[0].empty());
+
+    const size_t expected_fixed_reserve =
+        config.group_block_nums[3] * config.group_block_size_bytes[3]
+        + config.group_block_nums[4] * config.group_block_size_bytes[4]
+        + config.group_block_nums[5] * config.group_block_size_bytes[5]
+        + config.group_block_nums[6] * config.group_block_size_bytes[6];
+    EXPECT_EQ(config.fixed_pool_reserve_bytes, expected_fixed_reserve);
 }
 
 TEST(HybridPoolConfigCreatorTest, BlockIdConsistencyAcrossGroups) {
