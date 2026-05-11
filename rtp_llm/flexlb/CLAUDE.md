@@ -166,11 +166,12 @@ The `DefaultRouter` orchestrates routing across these stages. If a later stage f
 
 ### Load Balancing Strategies
 
-Three strategies are available (registered with `LoadBalanceStrategyFactory`):
+Four strategies are available (registered with `LoadBalanceStrategyFactory`):
 
 - **RANDOM**: Random worker selection
-- **SHORTEST_TTFT**: Select worker with shortest Time-To-First-Token
-- **WEIGHTED_CACHE**: Cache-aware selection prioritizing workers with matching KV cache blocks
+- **SHORTEST_TTFT**: Select worker with shortest Time-To-First-Token (default for PDFUSION/PREFILL)
+- **WEIGHTED_CACHE**: Cache-aware selection prioritizing workers with matching KV cache blocks (default for DECODE)
+- **ROUND_ROBIN**: Cursor-based round-robin. No load awareness, ~50-200x cheaper than SHORTEST_TTFT (`RoundRobinLoadBalancer`). Supports both `select` and batch-aware `selectBatch`. Use when worker fleets are typically uniform; trades off the ability to avoid hot workers under load skew. See `docs/dispatcher-batch-schedule-comparison-report-2026-05-09.md` for the trade-off data.
 
 Each `RoleType` can use a different strategy. See `LoadBalanceStrategyEnum` in flexlb-common.
 

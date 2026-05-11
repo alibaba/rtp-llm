@@ -5,6 +5,9 @@ import org.flexlb.balance.strategy.LoadBalancer;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.BatchScheduleRequest;
+import org.flexlb.dao.loadbalance.BatchScheduleResponse;
+import org.flexlb.dao.loadbalance.BatchScheduleTarget;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -19,6 +22,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.lang.reflect.Field;
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -239,6 +243,215 @@ class DefaultRouterTest {
         assertTrue(response.isSuccess(), "Response should be successful");
         assertNotNull(response.getServerStatus(), "Server status list should not be null");
         assertEquals(1, response.getServerStatus().size(), "Should have 1 server status");
+    }
+
+    @Test
+    void should_batch_schedule_success_when_single_role_registered_and_strategy_supports_batch() {
+        // Setup - single role with one dummy worker so getRoleTypeList returns 1 role
+        org.flexlb.dao.master.WorkerStatus dummy = new org.flexlb.dao.master.WorkerStatus();
+        dummy.setIp("192.168.1.10");
+        dummy.setPort(8080);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().put("192.168.1.10:8080", dummy);
+
+        ScriptedBatchLoadBalancer scripted = new ScriptedBatchLoadBalancer(List.of(
+                target("192.168.1.10", 8080),
+                target("192.168.1.11", 8080)
+        ));
+        replaceRoleLoadBalancer(RoleType.PDFUSION, scripted);
+
+        BatchScheduleRequest batchRequest = new BatchScheduleRequest();
+        batchRequest.setBatchCount(2);
+
+        BatchScheduleResponse response = defaultRouter.batchSchedule(batchRequest);
+
+        assertTrue(response.isSuccess());
+        assertEquals(2, response.getServerStatus().size());
+        assertEquals(1, scripted.selectBatchCalls);
+        assertEquals(2, scripted.lastRequestedCount);
+    }
+
+    @Test
+    void should_reject_batch_schedule_when_strategy_does_not_support_batch() {
+        // Setup - single role registered, but fusionLoadBalancer (plain mock) does not impl BatchLoadBalancer
+        org.flexlb.dao.master.WorkerStatus dummy = new org.flexlb.dao.master.WorkerStatus();
+        dummy.setIp("192.168.1.10");
+        dummy.setPort(8080);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().put("192.168.1.10:8080", dummy);
+
+        BatchScheduleRequest batchRequest = new BatchScheduleRequest();
+        batchRequest.setBatchCount(2);
+
+        BatchScheduleResponse response = defaultRouter.batchSchedule(batchRequest);
+
+        assertFalse(response.isSuccess());
+        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), response.getCode());
+        assertNotNull(response.getErrorMessage());
+        assertTrue(response.getErrorMessage().contains("does not support batch_schedule"),
+                "error message should mention strategy support: " + response.getErrorMessage());
+    }
+
+    @Test
+    void should_reject_batch_schedule_when_batch_count_is_zero() {
+        BatchScheduleRequest batchRequest = new BatchScheduleRequest();
+        batchRequest.setBatchCount(0);
+
+        BatchScheduleResponse response = defaultRouter.batchSchedule(batchRequest);
+
+        assertFalse(response.isSuccess());
+        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), response.getCode());
+        assertTrue(response.getErrorMessage().contains("batch_count"),
+                "error should mention batch_count: " + response.getErrorMessage());
+    }
+
+    @Test
+    void should_reject_batch_schedule_when_batch_count_is_negative() {
+        BatchScheduleRequest batchRequest = new BatchScheduleRequest();
+        batchRequest.setBatchCount(-1);
+
+        BatchScheduleResponse response = defaultRouter.batchSchedule(batchRequest);
+
+        assertFalse(response.isSuccess());
+        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), response.getCode());
+    }
+
+    @Test
+    void should_reject_batch_schedule_when_batch_count_exceeds_max() {
+        BatchScheduleRequest batchRequest = new BatchScheduleRequest();
+        batchRequest.setBatchCount(10_001);
+
+        BatchScheduleResponse response = defaultRouter.batchSchedule(batchRequest);
+
+        assertFalse(response.isSuccess());
+        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), response.getCode());
+    }
+
+    @Test
+    void should_reject_batch_schedule_when_sub_requests_length_mismatches_batch_count() {
+        BatchScheduleRequest batchRequest = new BatchScheduleRequest();
+        batchRequest.setBatchCount(3);
+        Request r1 = new Request();
+        r1.setRequestId(1001);
+        Request r2 = new Request();
+        r2.setRequestId(1002);
+        batchRequest.setSubRequests(List.of(r1, r2));
+
+        BatchScheduleResponse response = defaultRouter.batchSchedule(batchRequest);
+
+        assertFalse(response.isSuccess());
+        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), response.getCode());
+        assertTrue(response.getErrorMessage().contains("sub_requests length 2 != batch_count 3"),
+                "error should report exact length mismatch: " + response.getErrorMessage());
+    }
+
+    @Test
+    void should_accept_batch_schedule_when_sub_requests_length_matches_batch_count() {
+        org.flexlb.dao.master.WorkerStatus dummy = new org.flexlb.dao.master.WorkerStatus();
+        dummy.setIp("192.168.1.10");
+        dummy.setPort(8080);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().put("192.168.1.10:8080", dummy);
+
+        ScriptedBatchLoadBalancer scripted = new ScriptedBatchLoadBalancer(List.of(
+                target("192.168.1.10", 8080),
+                target("192.168.1.11", 8080)
+        ));
+        replaceRoleLoadBalancer(RoleType.PDFUSION, scripted);
+
+        BatchScheduleRequest batchRequest = new BatchScheduleRequest();
+        batchRequest.setBatchCount(2);
+        Request r1 = new Request();
+        r1.setRequestId(2001);
+        Request r2 = new Request();
+        r2.setRequestId(2002);
+        batchRequest.setSubRequests(List.of(r1, r2));
+
+        BatchScheduleResponse response = defaultRouter.batchSchedule(batchRequest);
+
+        assertTrue(response.isSuccess(),
+                "matching length should pass validation; phase 1 RR ignores sub_requests contents");
+        assertEquals(2, response.getServerStatus().size());
+    }
+
+    @Test
+    void should_accept_batch_schedule_when_sub_requests_is_null() {
+        org.flexlb.dao.master.WorkerStatus dummy = new org.flexlb.dao.master.WorkerStatus();
+        dummy.setIp("192.168.1.10");
+        dummy.setPort(8080);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().put("192.168.1.10:8080", dummy);
+
+        ScriptedBatchLoadBalancer scripted = new ScriptedBatchLoadBalancer(List.of(
+                target("192.168.1.10", 8080),
+                target("192.168.1.11", 8080)
+        ));
+        replaceRoleLoadBalancer(RoleType.PDFUSION, scripted);
+
+        BatchScheduleRequest batchRequest = new BatchScheduleRequest();
+        batchRequest.setBatchCount(2);
+        // sub_requests left null intentionally (Level 0 caller)
+
+        BatchScheduleResponse response = defaultRouter.batchSchedule(batchRequest);
+
+        assertTrue(response.isSuccess(),
+                "null sub_requests must skip length check entirely");
+        assertEquals(2, response.getServerStatus().size());
+    }
+
+    @Test
+    void should_reject_batch_schedule_when_no_role_registered() {
+        // All role maps are cleared in @BeforeEach -- no role registered
+        BatchScheduleRequest batchRequest = new BatchScheduleRequest();
+        batchRequest.setBatchCount(2);
+
+        BatchScheduleResponse response = defaultRouter.batchSchedule(batchRequest);
+
+        assertFalse(response.isSuccess());
+        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), response.getCode());
+        assertTrue(response.getErrorMessage().contains("master not ready"),
+                "error should mention master not ready: " + response.getErrorMessage());
+    }
+
+    @Test
+    void should_reject_batch_schedule_when_multiple_roles_registered() {
+        // Setup - two role maps populated (multi-role deployment)
+        org.flexlb.dao.master.WorkerStatus prefillWorker = new org.flexlb.dao.master.WorkerStatus();
+        prefillWorker.setIp("192.168.1.1");
+        prefillWorker.setPort(8080);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put("192.168.1.1:8080", prefillWorker);
+
+        org.flexlb.dao.master.WorkerStatus decodeWorker = new org.flexlb.dao.master.WorkerStatus();
+        decodeWorker.setIp("192.168.1.2");
+        decodeWorker.setPort(8081);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put("192.168.1.2:8081", decodeWorker);
+
+        BatchScheduleRequest batchRequest = new BatchScheduleRequest();
+        batchRequest.setBatchCount(2);
+
+        BatchScheduleResponse response = defaultRouter.batchSchedule(batchRequest);
+
+        assertFalse(response.isSuccess());
+        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), response.getCode());
+        assertTrue(response.getErrorMessage().contains("single-role"),
+                "error should mention single-role: " + response.getErrorMessage());
+        assertTrue(response.getErrorMessage().contains("/schedule"),
+                "error should point caller to /schedule: " + response.getErrorMessage());
+    }
+
+    @Test
+    void should_return_role_specific_error_when_strategy_returns_no_alive_workers() {
+        org.flexlb.dao.master.WorkerStatus dummy = new org.flexlb.dao.master.WorkerStatus();
+        dummy.setIp("192.168.1.10");
+        dummy.setPort(8080);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().put("192.168.1.10:8080", dummy);
+
+        ScriptedBatchLoadBalancer scripted = new ScriptedBatchLoadBalancer(List.of());
+        replaceRoleLoadBalancer(RoleType.PDFUSION, scripted);
+
+        BatchScheduleRequest batchRequest = new BatchScheduleRequest();
+        batchRequest.setBatchCount(2);
+
+        BatchScheduleResponse response = defaultRouter.batchSchedule(batchRequest);
+
+        assertFalse(response.isSuccess());
+        assertEquals(StrategyErrorType.NO_PDFUSION_WORKER.getErrorCode(), response.getCode());
     }
 
     @Test
@@ -532,5 +745,49 @@ class DefaultRouterTest {
         assertTrue(response.isSuccess(), "Response should be successful");
         assertNotNull(response.getServerStatus(), "Server status list should not be null");
         assertEquals(3, response.getServerStatus().size(), "Should have 3 server statuses");
+    }
+
+    private BatchScheduleTarget target(String ip, int port) {
+        return new BatchScheduleTarget(ip, port, port + 1);
+    }
+
+    private void replaceRoleLoadBalancer(RoleType roleType, LoadBalancer loadBalancer) {
+        try {
+            Field loadBalancerMapField = DefaultRouter.class.getDeclaredField("loadBalancerMap");
+            loadBalancerMapField.setAccessible(true);
+
+            @SuppressWarnings("unchecked")
+            Map<RoleType, LoadBalancer> loadBalancerMap = (Map<RoleType, LoadBalancer>) loadBalancerMapField.get(defaultRouter);
+            loadBalancerMap.put(roleType, loadBalancer);
+        } catch (Exception e) {
+            fail("Failed to replace load balancer: " + e.getMessage());
+        }
+    }
+
+    private static class ScriptedBatchLoadBalancer implements org.flexlb.balance.strategy.BatchLoadBalancer {
+        private final List<BatchScheduleTarget> scriptedResponses;
+        int selectBatchCalls;
+        int lastRequestedCount;
+
+        ScriptedBatchLoadBalancer(List<BatchScheduleTarget> scriptedResponses) {
+            this.scriptedResponses = scriptedResponses;
+        }
+
+        @Override
+        public ServerStatus select(BalanceContext context, RoleType roleType, String group) {
+            throw new UnsupportedOperationException("scripted impl only supports selectBatch");
+        }
+
+        @Override
+        public List<BatchScheduleTarget> selectBatch(int count, RoleType roleType, String group) {
+            selectBatchCalls++;
+            lastRequestedCount = count;
+            return new java.util.ArrayList<>(scriptedResponses);
+        }
+
+        @Override
+        public void rollBack(String ipPort, long requestId) {
+            // No rollback in batch path; route() uses this for /schedule rollback only.
+        }
     }
 }
