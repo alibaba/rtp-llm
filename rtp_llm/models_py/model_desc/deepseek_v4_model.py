@@ -41,6 +41,10 @@ from rtp_llm.models_py.modules.dsv4.decode.forward import (
     build_paged_pool_specs,
     forward_decode,
 )
+from rtp_llm.models_py.modules.dsv4.moe.moe_layer import (
+    moe_chunk_tokens_from_env,
+    resolve_moe_max_tokens_per_rank,
+)
 from rtp_llm.models_py.modules.dsv4.prefill.forward import forward_prefill
 from rtp_llm.models_py.modules.dsv4.transformer import V4Args, V4Transformer
 
@@ -205,16 +209,10 @@ class DeepSeekV4Model(GptModelBase):
                 args.dp_size,
             )
 
-        # CP-aware Mega MoE buffer sizing.  When CP is on, each rank only
-        # sees ``max_seq_len / cp_size`` prefill tokens (zigzag split), so
-        # the per-rank symm-mem dispatch buffer can be cp_size× smaller.
-        # Without this, a 64k+CP=4 prefill tries to allocate a per-rank
-        # buffer sized for the full 64k which aborts in
-        # ``CUDASymmetricMemory::~CUDASymmetricMemory`` during V4Transformer
-        # construction (per-rank symm region limit + ~190 GB BF16 footprint
-        # split across 4 ranks leaves no headroom).  RTP-LLM's CP convention
-        # repurposes the TP group as the CP group (cp_size == raw tp_size,
-        # ``get_attn_tp_size()`` returns 1), so use the raw tp_size here.
+        # CP-aware Mega MoE buffer sizing.  CP first reduces the rank-local
+        # sequence bound, then chunked MoE caps the per-forward routed/shared
+        # expert workspace to a scheduler-style token chunk: allocate by max
+        # batched/chunked tokens, not by the full 1M context length.
         cp_size = 1
         if (
             parallelism_config is not None
@@ -225,22 +223,46 @@ class DeepSeekV4Model(GptModelBase):
                     cp_size = int(getattr(parallelism_config, "tp_size", 1) or 1)
             except Exception:  # pyi-only stub or non-CP build
                 pass
+        original_max_tokens_per_rank = args.max_tokens_per_rank
         if cp_size > 1:
-            new_tokens_per_rank_bound = max(args.max_seq_len // cp_size, 4096)
-            logging.info(
-                "[DeepSeekV4Model] CP=%d: max_tokens_per_rank %d -> %d "
-                "(Mega MoE per-rank symm-mem buffer)",
-                cp_size,
+            cp_tokens_per_rank_bound = min(
                 args.max_tokens_per_rank,
-                new_tokens_per_rank_bound,
+                max(args.max_seq_len // cp_size, 4096),
             )
-            args.max_tokens_per_rank = new_tokens_per_rank_bound
-
-        if os.environ.get("ROLE_TYPE", "").upper() == "DECODE":
-            decode_tokens_per_rank = max(int(max_generate_batch_size or 1), 1)
-            args.max_tokens_per_rank = min(
-                args.max_tokens_per_rank, decode_tokens_per_rank
+            if cp_tokens_per_rank_bound != args.max_tokens_per_rank:
+                logging.info(
+                    "[DeepSeekV4Model] CP=%d: max_tokens_per_rank %d -> %d "
+                    "(Mega MoE per-rank symm-mem buffer)",
+                    cp_size,
+                    args.max_tokens_per_rank,
+                    cp_tokens_per_rank_bound,
+                )
+                args.max_tokens_per_rank = cp_tokens_per_rank_bound
+        resolved_max_tokens_per_rank = resolve_moe_max_tokens_per_rank(
+            max_seq_len=args.max_seq_len,
+            current_max_tokens_per_rank=args.max_tokens_per_rank,
+            cp_size=cp_size,
+            max_generate_batch_size=max_generate_batch_size,
+        )
+        if resolved_max_tokens_per_rank != args.max_tokens_per_rank:
+            role_type = os.environ.get("ROLE_TYPE", "").upper() or "PREFILL"
+            chunk_tokens_for_log = -1
+            if (
+                role_type != "DECODE"
+                and os.environ.get("DSV4_MOE_CHUNK_PREFILL", "1") != "0"
+            ):
+                chunk_tokens_for_log = moe_chunk_tokens_from_env()
+            logging.info(
+                "[DeepSeekV4Model] MoE token budget: max_tokens_per_rank %d -> %d "
+                "(DSV4_MOE_CHUNK_TOKENS=%d, original=%d, CP=%d, role=%s)",
+                args.max_tokens_per_rank,
+                resolved_max_tokens_per_rank,
+                chunk_tokens_for_log,
+                original_max_tokens_per_rank,
+                cp_size,
+                role_type,
             )
+            args.max_tokens_per_rank = resolved_max_tokens_per_rank
 
         logging.info(
             "[DeepSeekV4Model] V4Args: n_layers=%d n_heads=%d head_dim=%d q_lora=%d "
