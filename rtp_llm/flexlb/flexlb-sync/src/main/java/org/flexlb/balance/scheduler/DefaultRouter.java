@@ -1,15 +1,21 @@
 package org.flexlb.balance.scheduler;
 
 import org.apache.commons.collections4.CollectionUtils;
+import org.flexlb.balance.strategy.BatchLoadBalancer;
 import org.flexlb.balance.strategy.LoadBalanceStrategyFactory;
 import org.flexlb.balance.strategy.LoadBalancer;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.BatchScheduleRequest;
+import org.flexlb.dao.loadbalance.BatchScheduleResponse;
+import org.flexlb.dao.loadbalance.BatchScheduleTarget;
+import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.RoutingResult;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.sync.status.EngineWorkerStatus;
@@ -26,18 +32,39 @@ import java.util.Map;
 import static org.flexlb.dao.loadbalance.StrategyErrorType.NO_AVAILABLE_WORKER;
 
 @Component
-@DependsOn({"randomStrategy", "weightedCacheStrategy", "shortestTTFTStrategy"})
+@DependsOn({"randomStrategy", "weightedCacheStrategy", "shortestTTFTStrategy", "roundRobinStrategy"})
 public class DefaultRouter implements Router {
 
+    private static final int DEFAULT_BATCH_SCHEDULE_MAX_COUNT = 1000;
+
     private final Map<RoleType, LoadBalancer> loadBalancerMap;
+    private final ConfigService configService;
+    private final int batchScheduleMaxCount;
 
     public DefaultRouter(ConfigService configService) {
+        this.configService = configService;
         FlexlbConfig config = configService.loadBalanceConfig();
         this.loadBalancerMap = new EnumMap<>(RoleType.class);
 
         for (RoleType roleType : RoleType.values()) {
             LoadBalanceStrategyEnum strategy = config.getStrategyForRoleType(roleType);
             loadBalancerMap.put(roleType, LoadBalanceStrategyFactory.getLoadBalancer(strategy));
+        }
+
+        this.batchScheduleMaxCount = readBatchScheduleMaxCount();
+    }
+
+    private static int readBatchScheduleMaxCount() {
+        String raw = System.getenv("BATCH_SCHEDULE_MAX_COUNT");
+        if (raw == null || raw.isBlank()) {
+            return DEFAULT_BATCH_SCHEDULE_MAX_COUNT;
+        }
+        try {
+            int parsed = Integer.parseInt(raw.trim());
+            return parsed > 0 ? parsed : DEFAULT_BATCH_SCHEDULE_MAX_COUNT;
+        } catch (NumberFormatException e) {
+            Logger.warn("Invalid BATCH_SCHEDULE_MAX_COUNT='{}', falling back to default {}", raw, DEFAULT_BATCH_SCHEDULE_MAX_COUNT);
+            return DEFAULT_BATCH_SCHEDULE_MAX_COUNT;
         }
     }
 
@@ -80,6 +107,81 @@ public class DefaultRouter implements Router {
         }
 
         return response;
+    }
+
+    /**
+     * Single-role batch dispatch. Scope: only callable when the cluster has exactly one
+     * registered role. Multi-stage deployments (disaggregated PD / VL) should fan out
+     * via {@link #route} per request.
+     */
+    public BatchScheduleResponse batchSchedule(BatchScheduleRequest batchRequest) {
+        // (1) batch_count validation
+        if (batchRequest == null) {
+            return BatchScheduleResponse.error(StrategyErrorType.INVALID_REQUEST, "batch_schedule request is null");
+        }
+        int count = batchRequest.getBatchCount();
+        if (count < 1 || count > batchScheduleMaxCount) {
+            return BatchScheduleResponse.error(StrategyErrorType.INVALID_REQUEST,
+                    "batch_count must be in [1, " + batchScheduleMaxCount + "]");
+        }
+
+        // (1a) sub_requests length consistency (when caller opts in to forward-compatible payload)
+        List<Request> subs = batchRequest.getSubRequests();
+        if (subs != null && subs.size() != count) {
+            return BatchScheduleResponse.error(StrategyErrorType.INVALID_REQUEST,
+                    "sub_requests length " + subs.size() + " != batch_count " + count);
+        }
+
+        // (2) master readiness
+        ModelWorkerStatus workerStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS;
+        if (workerStatus == null) {
+            return BatchScheduleResponse.error(NO_AVAILABLE_WORKER,
+                    "master not ready or MODEL_SERVICE_CONFIG missing");
+        }
+
+        // (3) Role inference: reuse the same data source /schedule uses
+        List<RoleType> roleTypes = workerStatus.getRoleTypeList();
+        if (CollectionUtils.isEmpty(roleTypes)) {
+            return BatchScheduleResponse.error(NO_AVAILABLE_WORKER,
+                    "master not ready or MODEL_SERVICE_CONFIG missing");
+        }
+        if (roleTypes.size() > 1) {
+            return BatchScheduleResponse.error(StrategyErrorType.INVALID_REQUEST,
+                    "batch_schedule only supports single-role deployments; "
+                    + "multi-stage deployments (disaggregated PD / VL) should use /schedule per request. "
+                    + "Detected roles: " + roleTypes);
+        }
+        RoleType roleType = roleTypes.get(0);
+
+        // (4) Strategy must support batch
+        LoadBalancer loadBalancer = getLoadBalancer(roleType);
+        if (!(loadBalancer instanceof BatchLoadBalancer batchLoadBalancer)) {
+            return BatchScheduleResponse.error(StrategyErrorType.INVALID_REQUEST,
+                    "strategy for role " + roleType.getCode() + " does not support batch_schedule");
+        }
+
+        // (5) RR pick N targets
+        List<BatchScheduleTarget> targets = batchLoadBalancer.selectBatch(count, roleType, null);
+        if (targets == null || targets.isEmpty()) {
+            return BatchScheduleResponse.error(roleType.getErrorType());
+        }
+
+        return BatchScheduleResponse.success(targets);
+    }
+
+    public ServerStatus routeSingleRole(BalanceContext balanceContext, RoleType roleType) {
+        Response validationResponse = validateRequest(balanceContext);
+        if (validationResponse != null) {
+            ServerStatus result = ServerStatus.code(StrategyErrorType.INVALID_REQUEST);
+            result.setMessage(validationResponse.getErrorMessage());
+            return result;
+        }
+
+        LoadBalancer loadBalancer = getLoadBalancer(roleType);
+        if (loadBalancer == null) {
+            return ServerStatus.code(roleType.getErrorType());
+        }
+        return loadBalancer.select(balanceContext, roleType, null);
     }
 
     /**
@@ -149,15 +251,37 @@ public class DefaultRouter implements Router {
      */
     private void rollBackRoutingFailure(BalanceContext balanceContext, RoutingResult routingResult) {
 
-        List<ServerStatus> partialResults = routingResult.serverStatusList();
-        for (ServerStatus serverStatus : partialResults) {
-            String serverIpPort = serverStatus.getServerIp() + ":" + serverStatus.getHttpPort();
-            long requestId = balanceContext.getRequestId();
+        rollbackServerStatuses(routingResult.serverStatusList(), balanceContext.getRequestId());
+    }
+
+    public void rollbackServerStatuses(List<ServerStatus> serverStatuses) {
+        rollbackServerStatuses(serverStatuses, null);
+    }
+
+    private void rollbackServerStatuses(List<ServerStatus> serverStatuses, Long fallbackRequestId) {
+        for (ServerStatus serverStatus : serverStatuses) {
+            String serverIpPort = toIpPort(serverStatus);
+            long requestId = fallbackRequestId != null ? fallbackRequestId : serverStatus.getRequestId();
 
             RoleType role = serverStatus.getRole();
+            rollbackLocalTask(role, serverIpPort, requestId);
             LoadBalancer loadBalancer = getLoadBalancer(role);
-            loadBalancer.rollBack(serverIpPort, requestId);
+            if (loadBalancer != null) {
+                loadBalancer.rollBack(serverIpPort, requestId);
+            }
         }
+    }
+
+    private void rollbackLocalTask(RoleType role, String serverIpPort, long requestId) {
+        Map<String, WorkerStatus> roleStatusMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getRoleStatusMap(role);
+        WorkerStatus workerStatus = roleStatusMap.get(serverIpPort);
+        if (workerStatus != null) {
+            workerStatus.removeLocalTask(requestId);
+        }
+    }
+
+    private String toIpPort(ServerStatus serverStatus) {
+        return serverStatus.getServerIp() + ":" + serverStatus.getHttpPort();
     }
 
     private Response buildSuccessResponse(long requestId, List<ServerStatus> serverStatusList) {
