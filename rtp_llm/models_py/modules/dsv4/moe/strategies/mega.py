@@ -16,15 +16,15 @@ from typing import Dict, Optional
 
 import torch
 
-from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
+from ...quant_layouts import FP4_BLOCK, prepare_fp4_weight_scale_for_deepgemm
+from ..input_packer import get_mega_moe_input_packer
 from ..mega_buf import (
     _get_or_create_mega_buf,
     _get_or_create_mega_output,
     _mega_moe_enabled,
 )
-from ..input_packer import get_mega_moe_input_packer
-from ...quant_layouts import FP4_BLOCK, prepare_fp4_weight_scale_for_deepgemm
 from ..shared_expert import strict_fused_moe_enabled
+from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
 
 
 @register_strategy
@@ -61,10 +61,10 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         interleave allocates another ~size(w13)+size(w2) transient) OOMs
         268 GB on V4-Pro cp4. Splitting keeps the live set ≤ one stack.
         """
-        from rtp_llm.utils.model_weight import W
-
         import deep_gemm
         import torch.distributed as dist
+
+        from rtp_llm.utils.model_weight import W
 
         cfg = self.cfg
         E = cfg.n_local_experts
@@ -165,7 +165,7 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
 
     def forward(
         self,
-        x: torch.Tensor,        # [T, D] BF16 local-rank tokens
+        x: torch.Tensor,  # [T, D] BF16 local-rank tokens
         weights: torch.Tensor,  # [T, topk] FP32 router weights
         indices: torch.Tensor,  # [T, topk] int64 GLOBAL expert IDs
     ) -> torch.Tensor:
@@ -185,9 +185,34 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
                 f"{buf.num_max_tokens_per_rank} (derived from max_seq_len / "
                 f"max_tokens_per_rank). Raise the budget at startup."
             )
-        if T == 0:
+
+        # ``deep_gemm.fp8_fp4_mega_moe`` is a NVLink-barrier-backed collective:
+        # every rank in ``buf.group`` MUST call the kernel together, otherwise
+        # peers hang 30s on the in-kernel barrier and trap
+        # (``deep_gemm/include/deep_gemm/comm/barrier.cuh:72``,
+        # ``DG_DEVICE_ASSERT(false and "NVLink barrier timeout")``).
+        # Decide *uniformly across ranks* whether to skip the kernel — driven
+        # by the global min of ``T``, not local ``T``.  Without this, a single
+        # rank with ``T == 0`` (e.g. an EP-rank that received no routed tokens
+        # for a particular batch shape) would ``return`` early and deadlock
+        # its peers.
+        import torch.distributed as dist
+
+        if dist.is_initialized() and buf.group.size() > 1:
+            t_min = torch.tensor([T], dtype=torch.int32, device=x.device)
+            dist.all_reduce(t_min, op=dist.ReduceOp.MIN, group=buf.group)
+            skip_collective = bool(t_min.item() == 0)
+        else:
+            skip_collective = T == 0
+
+        if skip_collective:
             if strict_fused_moe_enabled():
-                return self._mega_y[:0]
+                # ``_mega_y`` is uninitialised staging; zero it for the
+                # ``T > 0`` peer-skipped case.  ``[:0]`` is a no-op view
+                # so calling ``zero_()`` is safe for both branches.
+                out = self._mega_y[:T]
+                out.zero_()
+                return out
             return torch.zeros_like(x, dtype=torch.float32)
 
         # Fill the symm-mem buffer slots.  Only the first T rows are
@@ -204,7 +229,9 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
             buf,
             recipe=(1, 1, FP4_BLOCK),
             activation="swiglu",
-            activation_clamp=self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None,
+            activation_clamp=(
+                self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None
+            ),
             fast_math=True,
         )
         return y
