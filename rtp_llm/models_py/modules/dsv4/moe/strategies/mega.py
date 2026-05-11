@@ -186,39 +186,27 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
                 f"max_tokens_per_rank). Raise the budget at startup."
             )
 
-        # ``deep_gemm.fp8_fp4_mega_moe`` is a NVLink-barrier-backed collective:
-        # every rank in ``buf.group`` MUST call the kernel together, otherwise
-        # peers hang 30s on the in-kernel barrier and trap
-        # (``deep_gemm/include/deep_gemm/comm/barrier.cuh:72``,
-        # ``DG_DEVICE_ASSERT(false and "NVLink barrier timeout")``).
-        # Decide *uniformly across ranks* whether to skip the kernel — driven
-        # by the global min of ``T``, not local ``T``.  Without this, a single
-        # rank with ``T == 0`` (e.g. an EP-rank that received no routed tokens
-        # for a particular batch shape) would ``return`` early and deadlock
-        # its peers.
-        import torch.distributed as dist
-
-        if dist.is_initialized() and buf.group.size() > 1:
-            t_min = torch.tensor([T], dtype=torch.int32, device=x.device)
-            dist.all_reduce(t_min, op=dist.ReduceOp.MIN, group=buf.group)
-            skip_collective = bool(t_min.item() == 0)
-        else:
-            skip_collective = T == 0
-
-        if skip_collective:
-            if strict_fused_moe_enabled():
-                # ``_mega_y`` is uninitialised staging; zero it for the
-                # ``T > 0`` peer-skipped case.  ``[:0]`` is a no-op view
-                # so calling ``zero_()`` is safe for both branches.
-                out = self._mega_y[:T]
-                out.zero_()
-                return out
-            return torch.zeros_like(x, dtype=torch.float32)
-
-        # Fill the symm-mem buffer slots.  Only the first T rows are
-        # meaningful; the remainder was zero-initialised at buffer
-        # alloc (0 is expert 0, but tokens past T aren't read because
-        # the kernel uses y.size(0) as the effective token count).
+        # ``deep_gemm.fp8_fp4_mega_moe`` is a peer-symmetric NVLink collective:
+        # every rank in ``buf.group`` MUST enter the kernel together. The kernel
+        # is symmetric — each rank both *dispatches* its ``T`` local tokens to
+        # peers' experts AND *hosts* its local-expert slice to compute peers'
+        # tokens routed to it.  Skipping a rank with ``T == 0`` (e.g. an EP/CP
+        # rank that holds no input tokens for a given batch shape) does two
+        # things, both bad:
+        #   1. Strands the routed-expert work that peers dispatched to its
+        #      local experts -> peers see zero contribution from those experts
+        #      (silent wrong output).
+        #   2. Triggers NVLink barrier timeout in the surviving peers
+        #      (``deep_gemm/include/deep_gemm/comm/barrier.cuh:72``,
+        #      ``DG_DEVICE_ASSERT(false and "NVLink barrier timeout")``) ->
+        #      kernel-side ``asm("trap;")`` -> SIGTRAP after 30 s.  The trap is
+        #      what surfaces as the prod ``CUDA_ERROR_LAUNCH_FAILED`` (719)
+        #      cascading from ``sm100_fp8_fp4_mega_moe_impl``.
+        # Therefore: always pack and always call the kernel, even when local
+        # ``T == 0``.  ``pack`` becomes a no-op (zero-row slices), ``y[:0]``
+        # signals ``num_tokens=0`` so this rank's dispatch loop iterates zero
+        # times, and the rank still participates as expert host.  No control
+        # flow depending on a GPU-side scalar -> CUDA-graph-capture safe.
         self._input_packer.pack(x, weights, indices, buf, T)
 
         y = self._mega_y[:T]
