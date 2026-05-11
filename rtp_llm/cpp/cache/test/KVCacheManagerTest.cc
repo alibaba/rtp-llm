@@ -130,11 +130,13 @@ static CacheConfig makeDSV4ConfigWithConcurrencyPool(uint32_t full_block_num, ui
     return config;
 }
 
-static CacheConfig makeProductionDSV4Config(uint32_t full_block_num, uint32_t max_concurrency) {
+static CacheConfig
+makeProductionDSV4Config(uint32_t full_block_num, uint32_t max_concurrency, uint32_t fixed_pool_blocks = 4) {
     ParallelismConfig pc;
     RuntimeConfig     runtime_config;
     KVCacheConfig     kv_cache_config;
     kv_cache_config.test_block_num                              = full_block_num;
+    kv_cache_config.dsv4_fixed_pool_blocks                      = fixed_pool_blocks;
     runtime_config.max_generate_batch_size                      = max_concurrency;
     runtime_config.fifo_scheduler_config.max_context_batch_size = max_concurrency;
     return CacheConfigCreator::createConfig(makeDSV4ManagerFlashModelConfig(), pc, runtime_config, kv_cache_config);

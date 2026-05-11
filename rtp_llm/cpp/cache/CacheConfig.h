@@ -33,11 +33,14 @@ struct CacheConfig {
     std::vector<size_t>            group_kv_scale_stride_bytes;
     std::vector<size_t>            group_block_size_bytes;
     std::vector<uint32_t>          group_block_nums;
-    std::vector<uint32_t>          group_fixed_blocks_per_req;
-    bool                           use_independent_block_pools              = false;
-    bool                           use_typed_cache_regions                  = false;
-    bool                           use_opaque_kv_cache_store                = false;
-    bool                           disable_decode_first_malloc_device_reuse = false;
+    // Total block count reserved for each group's fixed pool (0 means the group
+    // follows the shared paged `block_num`). This is an absolute count — it is
+    // not multiplied by runtime batch size.
+    std::vector<uint32_t> group_fixed_pool_blocks;
+    bool                  use_independent_block_pools              = false;
+    bool                  use_typed_cache_regions                  = false;
+    bool                  use_opaque_kv_cache_store                = false;
+    bool                  disable_decode_first_malloc_device_reuse = false;
 
     // Model configuration
     rtp_llm::DataType dtype;
@@ -93,25 +96,19 @@ struct CacheConfig {
     }
 
     void finalizeBlockNums(uint32_t global_block_num, const RuntimeConfig& runtime_config) {
+        (void)runtime_config;
         if (!use_independent_block_pools || group_block_nums.empty()) {
             fixed_pool_reserve_bytes = 0;
             return;
         }
 
-        const auto max_context_batch_size =
-            std::max<int64_t>(1, runtime_config.fifo_scheduler_config.max_context_batch_size);
-        const auto max_generate_batch_size = std::max<int64_t>(1, runtime_config.max_generate_batch_size);
-        const auto runtime_batch_size =
-            static_cast<uint32_t>(std::max(max_context_batch_size, max_generate_batch_size));
-
         size_t fixed_pool_reserve = 0;
         for (size_t gid = 0; gid < group_block_nums.size(); ++gid) {
-            const uint32_t fixed_blocks_per_req =
-                gid < group_fixed_blocks_per_req.size() ? group_fixed_blocks_per_req[gid] : 0;
-            if (fixed_blocks_per_req > 0) {
+            const uint32_t fixed_pool_blocks = gid < group_fixed_pool_blocks.size() ? group_fixed_pool_blocks[gid] : 0;
+            if (fixed_pool_blocks > 0) {
                 // BlockPool reserves block 0, so fixed pools need one extra
                 // physical block beyond the request-visible capacity.
-                group_block_nums[gid] = fixed_blocks_per_req * runtime_batch_size + 1;
+                group_block_nums[gid] = fixed_pool_blocks + 1;
                 if (gid < group_block_size_bytes.size()) {
                     fixed_pool_reserve += static_cast<size_t>(group_block_nums[gid]) * group_block_size_bytes[gid];
                 }
@@ -173,7 +170,7 @@ struct CacheConfig {
         OUTPUT_FIELD(use_opaque_kv_cache_store);
         OUTPUT_FIELD(disable_decode_first_malloc_device_reuse);
         os << indent1 << "group_block_nums=" << rtp_llm::vectorToString(group_block_nums) << "\n";
-        os << indent1 << "group_fixed_blocks_per_req=" << rtp_llm::vectorToString(group_fixed_blocks_per_req) << "\n";
+        os << indent1 << "group_fixed_pool_blocks=" << rtp_llm::vectorToString(group_fixed_pool_blocks) << "\n";
         os << "\n";
 
         // Cache specification section

@@ -28,9 +28,10 @@ bool shouldUseHybridPoolLayout(const ModelConfig& model_config) {
 
 CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model_config,
                                                   const ParallelismConfig& parallelism_config,
+                                                  const KVCacheConfig&     kv_cache_config,
                                                   bool                     is_mtp) {
     if (shouldUseHybridPoolLayout(model_config)) {
-        return HybridPoolConfigCreator::createConfig(model_config, parallelism_config, is_mtp);
+        return HybridPoolConfigCreator::createConfig(model_config, parallelism_config, kv_cache_config, is_mtp);
     } else if (model_config.hybrid_attention_config.enable_hybrid_attention) {
         return HybridConfigCreator::createHybridConfig(model_config, parallelism_config, is_mtp);
     } else {
@@ -44,7 +45,7 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
                                              const KVCacheConfig&                             kv_cache_config,
                                              const std::optional<WarmUpResult>&               warm_up_result,
                                              const std::optional<SpeculativeExecutionConfig>& sp_config) {
-    CacheConfig config    = CacheConfigCreator::createBasicConfig(model_config, parallelism_config);
+    CacheConfig config    = CacheConfigCreator::createBasicConfig(model_config, parallelism_config, kv_cache_config);
     uint32_t    block_num = 0;
 
     config.linear_step = kv_cache_config.linear_step;
@@ -113,9 +114,10 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                                                const std::optional<WarmUpResult>& warm_up_result,
                                                bool                               is_mtp,
                                                bool                               is_eagle) {
-    CacheConfig score_config = CacheConfigCreator::createBasicConfig(score_model_config, parallelism_config, false);
+    CacheConfig score_config =
+        CacheConfigCreator::createBasicConfig(score_model_config, parallelism_config, kv_cache_config, false);
     CacheConfig propose_config =
-        CacheConfigCreator::createBasicConfig(propose_model_config, parallelism_config, is_mtp);
+        CacheConfigCreator::createBasicConfig(propose_model_config, parallelism_config, kv_cache_config, is_mtp);
 
     if (kv_cache_config.kernel_seq_size_per_block > 0) {
         const size_t kernel_seq_size_per_block = static_cast<size_t>(kv_cache_config.kernel_seq_size_per_block);

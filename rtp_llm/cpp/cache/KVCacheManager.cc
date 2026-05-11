@@ -531,9 +531,9 @@ void KVCacheManager::allocateAndSync() {
     }
     if (config_.use_independent_block_pools) {
         for (size_t gid = 0; gid < config_.group_block_nums.size(); ++gid) {
-            const uint32_t fixed_blocks_per_req =
-                gid < config_.group_fixed_blocks_per_req.size() ? config_.group_fixed_blocks_per_req[gid] : 0;
-            if (fixed_blocks_per_req == 0) {
+            const uint32_t fixed_pool_blocks =
+                gid < config_.group_fixed_pool_blocks.size() ? config_.group_fixed_pool_blocks[gid] : 0;
+            if (fixed_pool_blocks == 0) {
                 config_.group_block_nums[gid] = static_cast<uint32_t>(config_.block_num);
             }
         }

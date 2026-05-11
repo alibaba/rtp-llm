@@ -229,8 +229,8 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
     // Without this, CudaGraphRunner inside the warmup executor sees
     // kv_cache_group_num_=0 and skips per-group block_table setup.
     {
-        auto cfg                 = CacheConfigCreator::createBasicConfig(model_config_, parallelism_config);
-        kv_cache_group_num_      = cfg.groupNums();
+        auto cfg            = CacheConfigCreator::createBasicConfig(model_config_, parallelism_config, kv_cache_config);
+        kv_cache_group_num_ = cfg.groupNums();
         kv_cache_layer_to_group_ = cfg.layer_to_group_id;
     }
     executor_.reset(new NormalExecutor(
@@ -256,7 +256,7 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
     rtp_llm::setTraceMemory(true);
 
-    auto cache_config               = CacheConfigCreator::createBasicConfig(model_config_, parallelism_config);
+    auto cache_config = CacheConfigCreator::createBasicConfig(model_config_, parallelism_config, kv_cache_config);
     cache_config.seq_size_per_block = model_config_.attn_config.tokens_per_block;
     cache_config.block_num          = 5;
     // Snapshot hybrid-cache group info from the warmup cache_config so that the

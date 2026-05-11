@@ -140,7 +140,7 @@ void setupIndependentPoolSizes(CacheConfig& config) {
     config.use_independent_block_pools = true;
     const auto group_num               = static_cast<size_t>(config.groupNums());
     config.group_block_nums.resize(group_num, 0);
-    config.group_fixed_blocks_per_req.resize(group_num, 0);
+    config.group_fixed_pool_blocks.resize(group_num, 0);
     config.group_seq_size_per_block.resize(group_num, config.seq_size_per_block);
     config.group_kv_block_stride_bytes.resize(group_num, 0);
     config.group_kv_scale_stride_bytes.resize(group_num, 0);
@@ -156,13 +156,13 @@ void setupIndependentPoolSizes(CacheConfig& config) {
     for (size_t gid = 0; gid < config.cache_specs.size(); ++gid) {
         const auto& spec = config.cache_specs[gid];
         RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "cache_specs[%zu] is null", gid);
-        const auto layer_count                  = static_cast<uint32_t>(config.global_layer_ids[gid].size());
+        const auto   layer_count                = static_cast<uint32_t>(config.global_layer_ids[gid].size());
         const size_t kv_stride                  = spec->block_size_bytes();
-        const auto scale_stride                 = spec->scale_block_size_bytes();
+        const auto   scale_stride               = spec->scale_block_size_bytes();
         config.group_kv_block_stride_bytes[gid] = kv_stride;
         config.group_kv_scale_stride_bytes[gid] = scale_stride;
         config.group_block_size_bytes[gid]      = static_cast<size_t>(layer_count) * (kv_stride + scale_stride);
-        if (config.group_fixed_blocks_per_req[gid] == 0) {
+        if (config.group_fixed_pool_blocks[gid] == 0) {
             total_kv_block_bytes += static_cast<size_t>(layer_count) * kv_stride;
             total_scale_block_bytes += static_cast<size_t>(layer_count) * scale_stride;
         }
@@ -231,7 +231,8 @@ void setupGroupCounts(CacheConfig& config) {
 }
 
 CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_config,
-                                            const ParallelismConfig& parallelism_config) {
+                                            const ParallelismConfig& parallelism_config,
+                                            const KVCacheConfig&     kv_cache_config) {
     const auto dtype = MemoryEvaluationHelper::getDataTypeForCache(model_config);
 
     CacheConfig config;
@@ -245,7 +246,7 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
     config.is_sparse          = model_config.attn_config.is_sparse;
 
     if (!model_config.attn_config.layer_compress_ratios.empty()) {
-        DSV4CacheConfigHelper::applyConfig(config, model_config);
+        DSV4CacheConfigHelper::applyConfig(config, model_config, kv_cache_config);
     } else {
         RTP_LLM_CHECK_WITH_INFO(model_config.hybrid_attention_config.enable_hybrid_attention,
                                 "HybridPoolConfigCreator requires DSV4 layer_compress_ratios or hybrid attention");
@@ -263,9 +264,10 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
 
 CacheConfig HybridPoolConfigCreator::createConfig(const ModelConfig&       model_config,
                                                   const ParallelismConfig& parallelism_config,
+                                                  const KVCacheConfig&     kv_cache_config,
                                                   bool                     is_mtp) {
     (void)is_mtp;
-    return createHybridAttentionPoolConfig(model_config, parallelism_config);
+    return createHybridAttentionPoolConfig(model_config, parallelism_config, kv_cache_config);
 }
 
 }  // namespace rtp_llm

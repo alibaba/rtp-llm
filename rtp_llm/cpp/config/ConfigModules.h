@@ -169,6 +169,14 @@ struct KVCacheConfig {
     int64_t device_cache_min_free_blocks = 0;
     int     load_cache_retry_times       = 1;  // Maximum retry attempts for load cache transfer failures
 
+    // DSV4 fixed-pool (indexer/CSA/HCA/SWA state) total block count per pool.
+    // Paged pools are unaffected. This is the absolute number of blocks reserved
+    // for each fixed pool; the runtime scheduler shares them across concurrent
+    // requests. Each request may hold up to 2 active tail blocks plus 1 reused
+    // (prefix-cache matched) block per pool, so the pool must be sized for
+    // (active_concurrency × 3) plus headroom.
+    uint32_t dsv4_fixed_pool_blocks = 256;
+
     // Remote connector configuration fields
     bool        reco_enable_vipserver                = false;
     std::string reco_vipserver_domain                = "";
@@ -337,8 +345,8 @@ struct BatchDecodeSchedulerConfig {
 };
 
 struct FIFOSchedulerConfig {
-    int64_t     max_context_batch_size = 1;
-    int64_t     max_batch_tokens_size  = 0;
+    int64_t     max_context_batch_size  = 1;
+    int64_t     max_batch_tokens_size   = 0;
     bool        cp_force_single_prefill = true;
     std::string to_string() const;
 };
