@@ -148,6 +148,12 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
         }
     }
 
+    // Fixed-pool block counts depend on runtime scheduler limits. Finalize the
+    // score and propose configs before sizing the shared paged budget so DSV4
+    // state/SWA pools are accounted outside the paged KV-cache block budget.
+    score_config.finalizeBlockNums(0, runtime_config);
+    propose_config.finalizeBlockNums(0, runtime_config);
+
     uint32_t total_layer_num = score_config.layer_num;
     for (int i = 0; i < num_mtp_modules; ++i) {
         total_layer_num += propose_config.layer_num;
@@ -158,6 +164,10 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
         total_block_size_bytes += propose_config.block_size_bytes;
     }
 
+    const size_t fixed_reserve = score_config.fixed_pool_reserve_bytes
+                                 + propose_config.fixed_pool_reserve_bytes
+                                       * static_cast<size_t>(num_mtp_modules);
+
     size_t block_num = 0;
     if (kv_cache_config.test_block_num > 0) {
         block_num = kv_cache_config.test_block_num;
@@ -165,7 +175,24 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
         const auto kv_cache_mem_size = MemoryEvaluationHelper::getKVCacheMemorySize(
             runtime_config, kv_cache_config, score_model_config, parallelism_config, warm_up_result, sp_config);
 
-        block_num = kv_cache_mem_size
+        size_t paged_budget = kv_cache_mem_size;
+        if (fixed_reserve > 0) {
+            RTP_LLM_CHECK_WITH_INFO(kv_cache_mem_size > fixed_reserve,
+                                    "sp kv cache budget %zu MiB is smaller than fixed-pool reservation %zu MiB",
+                                    kv_cache_mem_size / 1024 / 1024,
+                                    fixed_reserve / 1024 / 1024);
+            paged_budget = kv_cache_mem_size - fixed_reserve;
+            RTP_LLM_LOG_INFO(
+                "sp kv cache: total budget %zu MiB, fixed-pool reserve %zu MiB (score=%zu MiB + propose=%zu MiB x %d), paged budget %zu MiB",
+                kv_cache_mem_size / 1024 / 1024,
+                fixed_reserve / 1024 / 1024,
+                score_config.fixed_pool_reserve_bytes / 1024 / 1024,
+                propose_config.fixed_pool_reserve_bytes / 1024 / 1024,
+                num_mtp_modules,
+                paged_budget / 1024 / 1024);
+        }
+
+        block_num = paged_budget
                     / (static_cast<size_t>(score_config.block_size_bytes)
                        + static_cast<size_t>(propose_config.block_size_bytes) * static_cast<size_t>(num_mtp_modules));
     }
@@ -177,7 +204,8 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     config.layer_all_num    = total_layer_num;
     config.block_size_bytes = total_block_size_bytes;
     // config.block_size       = config.block_size_bytes / rtp_llm::getTypeSize(config.dtype);
-    config.block_num = block_num;
+    config.block_num                = block_num;
+    config.fixed_pool_reserve_bytes = fixed_reserve;
 
     const uint32_t main_layer_num = score_config.layer_num;
     const uint32_t mtp_layer_num  = propose_config.layer_num;
@@ -198,6 +226,17 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     config.layer_to_group_id.resize(total_layer_num, 0);
     config.layer_group_types.resize(total_layer_num, CacheGroupType::FULL);
     config.layer_to_block_stride_bytes.assign(static_cast<size_t>(total_layer_num), 0);
+    const size_t region_name_count = static_cast<size_t>(KVCacheRegionName::REGION_COUNT);
+    if (!config.layer_region_to_group_id.empty()) {
+        const size_t prev = config.layer_region_to_group_id.size();
+        config.layer_region_to_group_id.resize(static_cast<size_t>(total_layer_num));
+        for (size_t l = prev; l < static_cast<size_t>(total_layer_num); ++l) {
+            config.layer_region_to_group_id[l].assign(region_name_count, -1);
+        }
+    }
+    if (!config.layer_to_group_ids.empty()) {
+        config.layer_to_group_ids.resize(static_cast<size_t>(total_layer_num));
+    }
 
     // Main(score) model per-layer stride (kv + scale).
     // This is expected to be fully populated by createBasicConfig() (Single/Hybrid creators).
@@ -218,29 +257,75 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
         sub_cfg->block_num     = block_num;
         sub_cfg->layer_all_num = sub_cfg->layer_num;
 
-        sub_cfg->global_layer_ids.clear();
-        sub_cfg->global_layer_ids.resize(1);
-        sub_cfg->global_layer_ids[0].resize(mtp_layer_num);
+        const std::vector<std::vector<int>> propose_per_group = propose_config.global_layer_ids;
+        sub_cfg->global_layer_ids.assign(propose_per_group.size(), {});
         RTP_LLM_CHECK_WITH_INFO(sub_cfg->layer_to_block_stride_bytes.size() == static_cast<size_t>(mtp_layer_num),
                                 "sub_cfg.layer_to_block_stride_bytes size mismatch, got=%zu need=%u",
                                 sub_cfg->layer_to_block_stride_bytes.size(),
                                 mtp_layer_num);
-        for (size_t l = 0; l < mtp_layer_num; ++l) {
-            int global_layer_id                       = main_layer_num + m * mtp_layer_num + l;
-            sub_cfg->global_layer_ids[0][l]           = global_layer_id;
-            config.layer_to_group_id[global_layer_id] = static_cast<int>(full_gid);
-            config.global_layer_ids[full_gid].push_back(global_layer_id);
+        for (size_t g = 0; g < propose_per_group.size(); ++g) {
+            for (int local_lid : propose_per_group[g]) {
+                if (local_lid < 0 || local_lid >= static_cast<int>(mtp_layer_num)) {
+                    continue;
+                }
+                const int global_layer_id = main_layer_num + m * mtp_layer_num + local_lid;
+                sub_cfg->global_layer_ids[g].push_back(global_layer_id);
 
-            const int stride_bytes = sub_cfg->layer_to_block_stride_bytes[static_cast<size_t>(l)];
-            config.layer_to_block_stride_bytes[static_cast<size_t>(global_layer_id)] = stride_bytes;
-            if (l < sub_cfg->layer_group_types.size()) {
-                config.layer_group_types[static_cast<size_t>(global_layer_id)] = sub_cfg->layer_group_types[l];
+                // Keep the propose model's group placement. DSV4 MTP is
+                // SWA-only and lives in the SWA typed pool, not the first FULL
+                // pool. Non-typed hybrid configs fall back to the full group.
+                const int target_gid =
+                    (g < config.global_layer_ids.size()) ? static_cast<int>(g) : static_cast<int>(full_gid);
+                config.layer_to_group_id[global_layer_id] = target_gid;
+                if (target_gid >= 0 && target_gid < static_cast<int>(config.global_layer_ids.size())) {
+                    config.global_layer_ids[static_cast<size_t>(target_gid)].push_back(global_layer_id);
+                }
+                if (!config.layer_to_group_ids.empty()
+                    && static_cast<size_t>(global_layer_id) < config.layer_to_group_ids.size()) {
+                    config.layer_to_group_ids[static_cast<size_t>(global_layer_id)].push_back(target_gid);
+                }
+                if (!config.layer_region_to_group_id.empty()
+                    && static_cast<size_t>(global_layer_id) < config.layer_region_to_group_id.size()
+                    && g < propose_config.group_region_names.size()) {
+                    const auto region = static_cast<size_t>(propose_config.group_region_names[g]);
+                    if (region < config.layer_region_to_group_id[static_cast<size_t>(global_layer_id)].size()) {
+                        config.layer_region_to_group_id[static_cast<size_t>(global_layer_id)][region] = target_gid;
+                    }
+                }
+                if (target_gid >= 0 && static_cast<size_t>(target_gid) < config.group_block_size_bytes.size()) {
+                    size_t stride_bytes = 0;
+                    if (g < propose_config.group_kv_block_stride_bytes.size()) {
+                        stride_bytes += propose_config.group_kv_block_stride_bytes[g];
+                    }
+                    if (g < propose_config.group_kv_scale_stride_bytes.size()) {
+                        stride_bytes += propose_config.group_kv_scale_stride_bytes[g];
+                    }
+                    config.group_block_size_bytes[static_cast<size_t>(target_gid)] += stride_bytes;
+                }
+
+                const int stride_bytes = sub_cfg->layer_to_block_stride_bytes[static_cast<size_t>(local_lid)];
+                config.layer_to_block_stride_bytes[static_cast<size_t>(global_layer_id)] = stride_bytes;
+                if (static_cast<size_t>(local_lid) < sub_cfg->layer_group_types.size()) {
+                    config.layer_group_types[static_cast<size_t>(global_layer_id)] =
+                        sub_cfg->layer_group_types[static_cast<size_t>(local_lid)];
+                }
             }
         }
 
-        sub_cfg->layer_to_group_id.assign(static_cast<size_t>(sub_cfg->layer_num), static_cast<int>(full_gid));
+        sub_cfg->layer_to_group_id.assign(static_cast<size_t>(sub_cfg->layer_num), -1);
+        for (size_t g = 0; g < propose_per_group.size(); ++g) {
+            for (int local_lid : propose_per_group[g]) {
+                if (local_lid >= 0 && static_cast<size_t>(local_lid) < sub_cfg->layer_to_group_id.size()) {
+                    sub_cfg->layer_to_group_id[static_cast<size_t>(local_lid)] = static_cast<int>(g);
+                }
+            }
+        }
+        sub_cfg->finalizeBlockNums(static_cast<uint32_t>(block_num), runtime_config);
         config.mtp_sub_configs.push_back(sub_cfg);
     }
+
+    config.finalizeBlockNums(static_cast<uint32_t>(block_num), runtime_config);
+    config.fixed_pool_reserve_bytes = fixed_reserve;
 
     const auto kv_cache_seq_len = static_cast<size_t>(block_num) * config.seq_size_per_block;
     RTP_LLM_LOG_INFO("CacheConfig created: is_mtp=%d, total_layers=%u, num_mtp_modules=%d, block_num=%zu, "
