@@ -1,6 +1,9 @@
 from typing import Any, Dict, List
 
-from transformers.models.gpt2.tokenization_gpt2_fast import GPT2TokenizerFast
+try:
+    from transformers.models.gpt2.tokenization_gpt2_fast import GPT2TokenizerFast
+except ImportError:
+    from transformers import GPT2TokenizerFast
 
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory_register import (
     register_tokenizer,
