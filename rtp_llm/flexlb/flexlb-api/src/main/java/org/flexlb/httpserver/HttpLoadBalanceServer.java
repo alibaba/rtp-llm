@@ -4,6 +4,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.flexlb.balance.scheduler.QueueManager;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.BatchScheduleRequest;
+import org.flexlb.dao.loadbalance.BatchScheduleResponse;
 import org.flexlb.dao.loadbalance.LogLevelUpdateRequest;
 import org.flexlb.dao.loadbalance.QueueSnapshotResponse;
 import org.flexlb.dao.loadbalance.Request;
@@ -66,6 +68,8 @@ public class HttpLoadBalanceServer {
         return route()
                 .POST("/rtp_llm/schedule", accept(MediaType.APPLICATION_JSON),
                         this::scheduleRequest)
+                .POST("/rtp_llm/batch_schedule", accept(MediaType.APPLICATION_JSON),
+                        this::batchScheduleRequest)
                 .POST("/rtp_llm/master/info", accept(MediaType.APPLICATION_JSON),
                         this::responseMasterInfo)
                 .POST("/rtp_llm/schedule_snapshot", accept(MediaType.APPLICATION_JSON),
@@ -100,6 +104,36 @@ public class HttpLoadBalanceServer {
                 })
                 .onErrorResume(e -> handleRequestError(ctx, e))
                 .doFinally(signal -> finalizeRequestContext(ctx));
+    }
+
+    public Mono<ServerResponse> batchScheduleRequest(ServerRequest request) {
+        return request.bodyToMono(BatchScheduleRequest.class)
+                .flatMap(batchRequest -> Mono.using(
+                        activeRequestCounter::acquire,
+                        ignored -> processBatchScheduleRequest(batchRequest),
+                        ActiveRequestCounter.RequestToken::close))
+                .onErrorResume(e -> {
+                    Logger.error("Batch schedule request processing error", e);
+                    return ServerResponse.status(500)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .body(Mono.just(e.getMessage()), String.class);
+                });
+    }
+
+    private Mono<ServerResponse> processBatchScheduleRequest(BatchScheduleRequest batchRequest) {
+        if (lbStatusConsistencyService.isNeedConsistency() && !lbStatusConsistencyService.isMaster()) {
+            return forwardBatchScheduleRequestToMaster(batchRequest);
+        }
+
+        return routeService.batchSchedule(batchRequest)
+                .flatMap(response -> {
+                    response.setRealMasterHost(lbStatusConsistencyService.getMasterHostIpPort());
+                    if (response.isSuccess()) {
+                        return buildBatchSuccessResponse(response);
+                    }
+                    Logger.error("Batch schedule failed with error code: {}", response.getErrorMessage());
+                    return buildBatchErrorResponse(response);
+                });
     }
 
     private Mono<ServerResponse> processScheduledRequest(BalanceContext ctx, Request req) {
@@ -232,6 +266,33 @@ public class HttpLoadBalanceServer {
                 });
     }
 
+    private Mono<ServerResponse> forwardBatchScheduleRequestToMaster(BatchScheduleRequest request) {
+        String master = lbStatusConsistencyService.getMasterHostIpPort();
+        if (master == null) {
+            Logger.error("Master unreachable for batch_schedule");
+            BatchScheduleResponse errorResponse = BatchScheduleResponse.error(
+                    StrategyErrorType.NO_AVAILABLE_WORKER, "master unreachable");
+            return ServerResponse.status(500)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .bodyValue(errorResponse);
+        }
+        Logger.info("Forwarding batch_schedule request to master: {}, request: {}", master, request);
+        URI uri = URI.create("http://" + master);
+        return generalHttpNettyService.request(request, uri, "/rtp_llm/batch_schedule", BatchScheduleResponse.class)
+                .flatMap(resp -> ServerResponse.ok()
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .bodyValue(resp))
+                .onErrorResume(e -> {
+                    String errorCode = e instanceof TimeoutException ? "TIMEOUT" : "CONNECT_FAILED";
+                    Logger.error("[BatchSchedule] Master unreachable, errorCode: {}", errorCode, e);
+                    BatchScheduleResponse errorResponse = BatchScheduleResponse.error(
+                            StrategyErrorType.NO_AVAILABLE_WORKER, "master unreachable");
+                    return ServerResponse.status(500)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .bodyValue(errorResponse);
+                });
+    }
+
     private Mono<ServerResponse> fallbackToLocalRouting(BalanceContext ctx) {
         return routeService.route(ctx)
                 .flatMap(response -> handleRoutingResult(ctx, response))
@@ -287,6 +348,18 @@ public class HttpLoadBalanceServer {
         return ServerResponse.status(500)
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(Mono.just(result), Response.class);
+    }
+
+    private Mono<ServerResponse> buildBatchSuccessResponse(BatchScheduleResponse result) {
+        return ServerResponse.ok()
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Mono.just(result), BatchScheduleResponse.class);
+    }
+
+    private Mono<ServerResponse> buildBatchErrorResponse(BatchScheduleResponse result) {
+        return ServerResponse.status(500)
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Mono.just(result), BatchScheduleResponse.class);
     }
 
     /**
