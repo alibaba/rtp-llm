@@ -542,12 +542,7 @@ class RocmExpertsMXFp4(FusedMoeExpertExecutor):
 
         resolver = MoeConfigResolver()
         quant_method = resolver.get_quant_method(config)
-        checker.check(
-            quant_method in (
-                "QuarkMXFP4",
-                "modelopt_fp4",
-            )
-        )
+        checker.check(quant_method == "QuarkMXFP4")
 
     @property
     def topk_ids_dtype(self) -> torch.dtype:
