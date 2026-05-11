@@ -1,6 +1,6 @@
 """DashSc gRPC servicer (aio) + real-inference bridge.
 
-* :class:`DashScGrpcInferenceServicer` implements ``ModelStreamInfer`` (predict_v2.proto wire)
+* :class:`DashScInferenceServicer` implements ``ModelStreamInfer`` (predict_v2.proto wire)
   as a ``grpc.aio``-native async generator.
 * :func:`iter_real_model_stream_infer` awaits ``backend_visitor.enqueue`` and forwards the
   async stream chunk-by-chunk. No sync→async bridge — the whole path runs on one asyncio
@@ -52,6 +52,7 @@ async def iter_real_model_stream_infer(
     *,
     rtp_llm_request_id: int,
     echo_prefix_ids: Optional[list[int]] = None,
+    extra_stop_word_ids: Optional[list[list[int]]] = None,
 ) -> AsyncIterator[predict_v2_pb2.ModelStreamInferResponse]:
     """Run enqueue on ``backend_visitor`` and yield one proto per chunk as the backend streams.
 
@@ -63,6 +64,17 @@ async def iter_real_model_stream_infer(
     non-empty and ``input_ids_list`` ends with it, the first non-empty ``generated_ids``
     chunk gets ``echo_prefix_ids`` prepended so downstream consumers that rely on the
     prefill-echo contract (dashllm-style) see the expected first token.
+
+    ``extra_stop_word_ids`` is the per-startup snapshot of model-specific stop tokens
+    (renderer-injected extras + env-supplied) the dash-sc path otherwise misses because
+    upstream pre-tokenization bypasses the OpenAI endpoint. Contract: it MUST be
+    pre-deduped (``_derive_stop_word_ids_list`` does this at startup) and is treated
+    as read-only — the hot path shares inner-list references rather than copying.
+
+    Hot-path layout: dashscope-serving doesn't ship ``stop_words_list`` per request,
+    so 99% of calls hit the fast branch (empty ``existing``) and skip the dedup set
+    + tuple hashing entirely. The slow branch only fires when a caller explicitly
+    sets ``stop_words_list`` on the request.
     """
     trace_str = str(request.id)
     tag = stream_log_tag(request_id_numeric=rtp_llm_request_id, trace_id=trace_str)
@@ -82,6 +94,21 @@ async def iter_real_model_stream_infer(
     try:
         generate_config = sampling.to_generate_config(other=other)
         generate_config.trace_id = trace_str
+        if extra_stop_word_ids:
+            existing = generate_config.stop_words_list
+            if existing:
+                # Slow path: request carries its own stops; dedup against them.
+                seen = {tuple(w) for w in existing}
+                for w in extra_stop_word_ids:
+                    t = tuple(w)
+                    if t not in seen:
+                        existing.append(w)
+                        seen.add(t)
+            else:
+                # Fast path: shallow-copy the startup snapshot. Outer copy keeps
+                # any future engine-side mutation request-local; inner lists are
+                # shared (snapshot is read-only by contract).
+                generate_config.stop_words_list = list(extra_stop_word_ids)
         token_ids = torch.tensor(input_ids_list, dtype=torch.int)
         generate_input = GenerateInput(
             request_id=rtp_llm_request_id,
@@ -140,7 +167,7 @@ async def iter_real_model_stream_infer(
 # ----------------------------------------------------------------------------
 
 
-class DashScGrpcInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
+class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
     """ModelStreamInfer: fake mode (mock) or real mode (``backend_visitor.enqueue``).
 
     ``ip`` / ``port`` / ``server_id`` derive the snowflake-style ``GenerateInput.request_id``
@@ -158,12 +185,16 @@ class DashScGrpcInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServic
         port: int = 0,
         server_id: str = "",
         echo_prefix_ids: Optional[list[int]] = None,
+        extra_stop_word_ids: Optional[list[list[int]]] = None,
     ):
         self._backend_visitor = backend_visitor
         self._ip = ip
         self._port = port
         self._server_id = server_id
         self._echo_prefix_ids = list(echo_prefix_ids) if echo_prefix_ids else []
+        self._extra_stop_word_ids = (
+            [list(w) for w in extra_stop_word_ids] if extra_stop_word_ids else []
+        )
         self._seq_counter = AtomicCounter()
 
     async def close(self) -> None:
@@ -207,5 +238,6 @@ class DashScGrpcInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServic
                     self._backend_visitor,
                     rtp_llm_request_id=self._next_rtp_llm_request_id(),
                     echo_prefix_ids=self._echo_prefix_ids,
+                    extra_stop_word_ids=self._extra_stop_word_ids,
                 ):
                     yield resp

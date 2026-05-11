@@ -17,8 +17,8 @@ from rtp_llm.dash_sc.codec import (
     parse_sampling_params,
     prepend_to_generated_ids_tensor,
 )
+from rtp_llm.dash_sc.inference.servicer import stream_log_tag
 from rtp_llm.dash_sc.proto import predict_v2_pb2
-from rtp_llm.dash_sc.service import stream_log_tag
 from rtp_llm.utils.base_model_datatypes import AuxInfo, GenerateOutput, GenerateOutputs
 
 
