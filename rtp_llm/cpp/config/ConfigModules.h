@@ -69,6 +69,12 @@ struct ParallelismConfig {
     bool    enable_sp        = false;
     bool    use_ub_comm      = false;
 
+    // Mirror of py_env_configs.role_config.role_type, plumbed in
+    // engine_config.setup_engine_config so model construction (e.g.
+    // DeepSeekV4Model's mega-MoE token bound cap) does not have to read
+    // os.environ["ROLE_TYPE"] anymore.
+    RoleType role_type = RoleType::PDFUSION;
+
     FfnDisAggregateConfig ffn_disaggregate_config;  // FFN disaggregate configuration
 
     // Context Parallel configuration

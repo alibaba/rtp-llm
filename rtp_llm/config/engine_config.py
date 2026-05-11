@@ -253,6 +253,12 @@ class EngineConfig:
             # role_config.role_type property automatically converts string to RoleType enum
             pd_sep_config.role_type = py_env_configs.role_config.role_type
 
+        # Mirror role into parallelism_config so model construction can read it
+        # via parallelism_config.role_type instead of os.environ["ROLE_TYPE"].
+        # Mirrors the vit_separation override above so VIT rank also surfaces
+        # as RoleType::VIT to model code.
+        parallelism_config.role_type = pd_sep_config.role_type
+
         if nccl_comm_config is None:
             nccl_comm_config = NcclCommConfig(
                 nccl_ip="",
