@@ -272,20 +272,21 @@ CacheLayerLayout KVCacheManager::getMainModelCacheLayerLayout() const {
     auto& all_layer_tensors = all_layout.layers_to_kv_buffer_ptrs;
     auto& all_scale_tensors = all_layout.layers_to_scale_buffer_ptrs;
 
+    layout.layer_to_groups.resize(config_.layer_num);
+    layout.layer_to_group_ids.resize(config_.layer_num);
+    layout.layer_region_to_group_id.resize(config_.layer_num);
     layout.layers_to_kv_buffer_ptrs.resize(config_.layer_num);
     if (!all_scale_tensors.empty()) {
         layout.layers_to_scale_buffer_ptrs.resize(config_.layer_num);
     }
 
-    layout.layer_to_groups          = config_.layer_to_group_id;
-    layout.layer_to_group_ids       = config_.layer_to_group_ids;
-    layout.layer_region_to_group_id = config_.layer_region_to_group_id;
-    layout.group_types              = config_.group_types;
-    layout.group_region_names       = config_.group_region_names;
-    layout.layer_to_groups.resize(config_.layer_num);
+    layout.group_types        = config_.group_types;
+    layout.group_region_names = config_.group_region_names;
     layout.layer_group_types.resize(config_.layer_num, CacheGroupType::FULL);
-    layout.layers_to_kv_buffer_ptrs_by_attn    = all_layout.layers_to_kv_buffer_ptrs_by_attn;
-    layout.layers_to_scale_buffer_ptrs_by_attn = all_layout.layers_to_scale_buffer_ptrs_by_attn;
+    layout.layers_to_kv_buffer_ptrs_by_attn.resize(config_.layer_num);
+    if (!all_layout.layers_to_scale_buffer_ptrs_by_attn.empty()) {
+        layout.layers_to_scale_buffer_ptrs_by_attn.resize(config_.layer_num);
+    }
 
     RTP_LLM_CHECK_WITH_INFO(config_.layer_num <= all_layer_tensors.size(),
                             "config_.layer_num[%d] > all_layer_tensors.size()[%ld]",
@@ -310,6 +311,21 @@ CacheLayerLayout KVCacheManager::getMainModelCacheLayerLayout() const {
         if (static_cast<size_t>(layer_id) < config_.layer_group_types.size()) {
             layout.layer_group_types[layer_id] = config_.layer_group_types[static_cast<size_t>(layer_id)];
         }
+        if (static_cast<size_t>(layer_id) < config_.layer_to_group_ids.size()) {
+            layout.layer_to_group_ids[layer_id] = config_.layer_to_group_ids[static_cast<size_t>(layer_id)];
+        }
+        if (static_cast<size_t>(layer_id) < config_.layer_region_to_group_id.size()) {
+            layout.layer_region_to_group_id[layer_id] =
+                config_.layer_region_to_group_id[static_cast<size_t>(layer_id)];
+        }
+        if (static_cast<size_t>(layer_id) < all_layout.layers_to_kv_buffer_ptrs_by_attn.size()) {
+            layout.layers_to_kv_buffer_ptrs_by_attn[layer_id] =
+                all_layout.layers_to_kv_buffer_ptrs_by_attn[static_cast<size_t>(layer_id)];
+        }
+        if (static_cast<size_t>(layer_id) < all_layout.layers_to_scale_buffer_ptrs_by_attn.size()) {
+            layout.layers_to_scale_buffer_ptrs_by_attn[layer_id] =
+                all_layout.layers_to_scale_buffer_ptrs_by_attn[static_cast<size_t>(layer_id)];
+        }
     }
 
     return layout;
@@ -327,12 +343,22 @@ CacheLayerLayout KVCacheManager::getMTPModuleCacheLayerLayout(int mtp_module_id)
     RTP_LLM_CHECK_WITH_INFO(mtp_sub_config != nullptr, "mtp_sub_configs[%d] is null", mtp_module_id);
     RTP_LLM_CHECK_WITH_INFO(
         !mtp_sub_config->global_layer_ids.empty(), "mtp_sub_configs[%d]->global_layer_ids is empty", mtp_module_id);
-    RTP_LLM_CHECK_WITH_INFO(!mtp_sub_config->global_layer_ids[0].empty(),
-                            "mtp_sub_configs[%d]->global_layer_ids[0] is empty",
-                            mtp_module_id);
 
-    const auto&    mtp_global_layer_ids = mtp_sub_config->global_layer_ids[0];
-    const uint32_t mtp_layer_num        = mtp_sub_config->layer_num;
+    // Flatten across all groups: SWA-only DSV4 propose configs put the
+    // single MTP layer in the SWA group (gid=6), not FULL[0], so reading
+    // group 0 alone would be empty.  Walk every group and collect any
+    // global_layer_ids it contributed so this layout is independent of
+    // which pool the propose layer lives in.
+    std::vector<int> mtp_global_layer_ids;
+    for (const auto& group_ids : mtp_sub_config->global_layer_ids) {
+        for (int lid : group_ids) {
+            mtp_global_layer_ids.push_back(lid);
+        }
+    }
+    RTP_LLM_CHECK_WITH_INFO(!mtp_global_layer_ids.empty(),
+                            "mtp_sub_configs[%d] has no layers across any group",
+                            mtp_module_id);
+    const uint32_t mtp_layer_num = mtp_sub_config->layer_num;
 
     auto  all_layout        = allocator_->allLayerCacheBase();
     auto& all_layer_tensors = all_layout.layers_to_kv_buffer_ptrs;
@@ -344,6 +370,27 @@ CacheLayerLayout KVCacheManager::getMTPModuleCacheLayerLayout(int mtp_module_id)
         layout.layers_to_scale_buffer_ptrs.resize(mtp_layer_num);
     }
     layout.layer_group_types.resize(mtp_layer_num, CacheGroupType::FULL);
+    // Propagate the propose's group identity / typed-pool views so the
+    // Python decode path can build per-attn-type paged metadata.
+    // Mirrors what ``getCacheLayerLayout()`` does for the main model;
+    // without these, ``build_metadata_eager`` finds an empty
+    // ``group_region_names`` and emits zero ``paged_block_tables``,
+    // which trips Attention.forward_decode's "no paged metadata" gate.
+    layout.group_region_names = mtp_sub_config->group_region_names;
+    layout.group_types        = mtp_sub_config->group_types;
+    // Typed-pool views are indexed by LOCAL layer id from the MTP model's
+    // attention modules (self.layer_id ∈ [0, mtp_layer_num)).  The full
+    // layout's by_attn arrays are indexed by GLOBAL layer id (main + MTP
+    // appended), so we MUST remap from global → local — copying the full
+    // arrays verbatim makes local index 0 return main layer 0's typed
+    // buffers, which causes the draft to write into the main model's KV
+    // pool and corrupts target verify (0% acceptance regression).
+    const size_t region_name_count = static_cast<size_t>(KVCacheRegionName::REGION_COUNT);
+    layout.layers_to_kv_buffer_ptrs_by_attn.assign(
+        mtp_layer_num, std::vector<torch::Tensor>(region_name_count));
+    layout.layers_to_scale_buffer_ptrs_by_attn.assign(
+        mtp_layer_num, std::vector<torch::Tensor>(region_name_count));
+    layout.layer_region_to_group_id.assign(mtp_layer_num, std::vector<int>(region_name_count, -1));
 
     for (uint32_t local_layer_id = 0; local_layer_id < mtp_layer_num; ++local_layer_id) {
         if (local_layer_id < mtp_global_layer_ids.size()) {
@@ -365,6 +412,36 @@ CacheLayerLayout KVCacheManager::getMTPModuleCacheLayerLayout(int mtp_module_id)
             }
             if (local_layer_id < mtp_sub_config->layer_group_types.size()) {
                 layout.layer_group_types[local_layer_id] = mtp_sub_config->layer_group_types[local_layer_id];
+            }
+
+            // Remap typed-pool buffers from GLOBAL layer id row to the MTP
+            // model's LOCAL layer id row.  Each region slot is copied as-is
+            // (it points at the per-group BlockPool's per-layer slice that
+            // KVCacheGroup::init bound for global_layer_id), so the draft's
+            // SWA write for local id 0 lands in the SWA pool slot that was
+            // created for the appended MTP global layer — NOT main layer 0.
+            const size_t gid = static_cast<size_t>(global_layer_id);
+            if (gid < all_layout.layers_to_kv_buffer_ptrs_by_attn.size()) {
+                const auto& src_kv = all_layout.layers_to_kv_buffer_ptrs_by_attn[gid];
+                for (size_t a = 0; a < region_name_count && a < src_kv.size(); ++a) {
+                    layout.layers_to_kv_buffer_ptrs_by_attn[local_layer_id][a] = src_kv[a];
+                }
+            }
+            if (gid < all_layout.layers_to_scale_buffer_ptrs_by_attn.size()) {
+                const auto& src_scale = all_layout.layers_to_scale_buffer_ptrs_by_attn[gid];
+                for (size_t a = 0; a < region_name_count && a < src_scale.size(); ++a) {
+                    layout.layers_to_scale_buffer_ptrs_by_attn[local_layer_id][a] = src_scale[a];
+                }
+            }
+            // Remap the typed region→group sentinel so OpDefs.h getLayerCache
+            // ownership check (`layer_region_to_group_id[layer][attn] < 0`)
+            // sees the propose-config's per-attn ownership for THIS local
+            // layer, not main layer 0's CSA/HCA/INDEXER ownership.
+            if (gid < all_layout.layer_region_to_group_id.size()) {
+                const auto& src_region = all_layout.layer_region_to_group_id[gid];
+                for (size_t a = 0; a < region_name_count && a < src_region.size(); ++a) {
+                    layout.layer_region_to_group_id[local_layer_id][a] = src_region[a];
+                }
             }
         } else {
             RTP_LLM_CHECK(false);

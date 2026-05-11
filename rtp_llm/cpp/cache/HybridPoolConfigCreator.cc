@@ -136,7 +136,7 @@ void populateDefaultRegionMappings(CacheConfig& config) {
     }
 }
 
-void setupIndependentPoolSizes(CacheConfig& config) {
+void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
     config.use_independent_block_pools = true;
     const auto group_num               = static_cast<size_t>(config.groupNums());
     config.group_block_nums.resize(group_num, 0);
@@ -188,7 +188,16 @@ void setupIndependentPoolSizes(CacheConfig& config) {
     config.kv_scale_stride_bytes    = max_scale_stride;
     config.kv_block_size_bytes      = total_kv_block_bytes;
     config.kv_scale_size_bytes      = total_scale_block_bytes;
-    config.block_size_bytes         = config.kv_block_size_bytes + config.kv_scale_size_bytes;
+    const size_t paged_block_bytes  = config.kv_block_size_bytes + config.kv_scale_size_bytes;
+    if (paged_block_bytes == 0) {
+        RTP_LLM_CHECK_WITH_INFO(is_mtp && config.use_typed_cache_regions,
+                                "hybrid-pool paged groups produced zero block bytes");
+        config.kv_block_size_bytes = 1;
+        config.kv_scale_size_bytes = 0;
+        config.block_size_bytes    = 1;
+    } else {
+        config.block_size_bytes = paged_block_bytes;
+    }
     config.fixed_pool_reserve_bytes = 0;
 }
 
@@ -239,7 +248,8 @@ void setupGroupCounts(CacheConfig& config) {
 
 CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_config,
                                             const ParallelismConfig& parallelism_config,
-                                            const KVCacheConfig&     kv_cache_config) {
+                                            const KVCacheConfig&     kv_cache_config,
+                                            bool                     is_mtp) {
     const auto dtype = MemoryEvaluationHelper::getDataTypeForCache(model_config);
 
     CacheConfig config;
@@ -263,7 +273,7 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
     RTP_LLM_CHECK_WITH_INFO(!config.cache_specs.empty(), "hybrid-pool config produced no cache specs");
     setupGroupCounts(config);
     populateDefaultRegionMappings(config);
-    setupIndependentPoolSizes(config);
+    setupIndependentPoolSizes(config, is_mtp);
     return config;
 }
 
@@ -273,8 +283,7 @@ CacheConfig HybridPoolConfigCreator::createConfig(const ModelConfig&       model
                                                   const ParallelismConfig& parallelism_config,
                                                   const KVCacheConfig&     kv_cache_config,
                                                   bool                     is_mtp) {
-    (void)is_mtp;
-    return createHybridAttentionPoolConfig(model_config, parallelism_config, kv_cache_config);
+    return createHybridAttentionPoolConfig(model_config, parallelism_config, kv_cache_config, is_mtp);
 }
 
 }  // namespace rtp_llm

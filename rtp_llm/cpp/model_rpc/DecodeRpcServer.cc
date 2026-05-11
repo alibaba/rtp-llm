@@ -723,6 +723,25 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                         !mtp_cache_cfg.global_layer_ids.empty(),
                         "mtp_cache_cfg.global_layer_ids is empty (mtp_model_id=" + std::to_string(mtp_model_id) + ")");
 
+                    // Flatten per-group global_layer_ids into a local-layer-id indexed
+                    // table. SWA-only DSV4 propose configs place the single MTP layer
+                    // in the SWA group (gid=6), NOT in FULL[0], so reading
+                    // ``global_layer_ids[0][layer_id]`` returned garbage (empty vector
+                    // out-of-bounds) and crashed loadCache with SIGSEGV during
+                    // convertIndexToBuffer. Mirrors the flatten pattern already used
+                    // in ``KVCacheManager::getMTPModuleCacheLayerLayout``.
+                    std::vector<int> mtp_local_to_global_layer_id;
+                    for (const auto& group_ids : mtp_cache_cfg.global_layer_ids) {
+                        for (int lid : group_ids) {
+                            mtp_local_to_global_layer_id.push_back(lid);
+                        }
+                    }
+                    RTP_LLM_CHECK_WITH_INFO(mtp_local_to_global_layer_id.size() == layer_num,
+                                            "mtp flat global_layer_ids size %zu != layer_num %zu (mtp_model_id=%zu)",
+                                            mtp_local_to_global_layer_id.size(),
+                                            layer_num,
+                                            mtp_model_id);
+
                     for (size_t layer_id = 0; layer_id < layer_num; layer_id++) {
                         const bool mtp_use_hybrid          = mtp_cache_cfg.groupNums() > 1;
                         const bool mtp_use_typed_regions   = mtp_cache_cfg.use_typed_cache_regions;
@@ -740,8 +759,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                             mtp_layer_gids.push_back(0);
                         }
 
-                        // Use per-module global_layer_ids for address lookup.
-                        const int global_layer_id = mtp_cache_cfg.global_layer_ids[0][layer_id];
+                        const int global_layer_id = mtp_local_to_global_layer_id[layer_id];
 
                         for (int gid_int : mtp_layer_gids) {
                             const size_t gid = static_cast<size_t>(gid_int);
