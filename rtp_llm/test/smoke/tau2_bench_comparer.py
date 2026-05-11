@@ -9,7 +9,7 @@ import sys
 import tarfile
 import tempfile
 import urllib.request
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from smoke.base_comparer import BaseComparer
 from smoke.common_def import ABS_PATH, REL_PATH, QueryStatus, SmokeException
@@ -95,7 +95,6 @@ class Tau2BenchComparer(BaseComparer):
                 f"force reinstall"
             )
             self._pip_install(["--force-reinstall", "--no-deps", pinned_spec])
-            self._pip_install([pinned_spec])
             return
         except ImportError:
             pass
@@ -285,12 +284,71 @@ class Tau2BenchComparer(BaseComparer):
         except (OSError, json.JSONDecodeError) as e:
             logging.warning(f"[TAU2] failed to read report {report_path}: {e}")
             return None
-        score = data.get("score")
-        if isinstance(score, (int, float)):
-            return float(score)
-        for m in data.get("metrics", []) or []:
-            if m.get("name") == "mean_acc":
-                s = m.get("score")
-                if isinstance(s, (int, float)):
-                    return float(s)
+
+        score, metrics = Tau2BenchComparer._normalize_report_schema(data)
+        if score is not None:
+            return score
+        for metric in metrics:
+            if metric["name"] == "mean_acc" and metric["is_overall"]:
+                return metric["score"]
+        return None
+
+    @staticmethod
+    def _normalize_report_schema(data: dict) -> tuple[Optional[float], list[dict[str, Any]]]:
+        score = Tau2BenchComparer._to_float(data.get("score"))
+        metrics = []
+        for raw_metric in data.get("metrics", []) or []:
+            if not isinstance(raw_metric, dict):
+                continue
+            name = Tau2BenchComparer._first_text(
+                raw_metric, ["name", "metric", "metric_name"]
+            )
+            metric_score = Tau2BenchComparer._to_float(
+                raw_metric.get("score", raw_metric.get("value"))
+            )
+            if name is None or metric_score is None:
+                continue
+            metrics.append(
+                {
+                    "name": name.lower(),
+                    "score": metric_score,
+                    "is_overall": Tau2BenchComparer._is_overall_metric(raw_metric),
+                }
+            )
+        return score, metrics
+
+    @staticmethod
+    def _is_overall_metric(metric: dict[str, Any]) -> bool:
+        if metric.get("overall") is True or metric.get("is_overall") is True:
+            return True
+        normalized_dimension = Tau2BenchComparer._first_text(
+            metric,
+            [
+                "dimension",
+                "dim",
+                "scope",
+                "group",
+                "category",
+                "dataset",
+                "dataset_name",
+                "subset",
+                "subset_name",
+                "task",
+                "task_name",
+            ],
+        )
+        return normalized_dimension == "OVERALL"
+
+    @staticmethod
+    def _first_text(data: dict[str, Any], keys: list[str]) -> Optional[str]:
+        for key in keys:
+            value = data.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip().upper()
+        return None
+
+    @staticmethod
+    def _to_float(value: Any) -> Optional[float]:
+        if isinstance(value, (int, float)):
+            return float(value)
         return None
