@@ -326,6 +326,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     torch::Tensor                      draft_probs;
     torch::Tensor                      draft_token_ids;
     speculative::FastTopKSamplerOutput fast_topk_sampler_output;
+    int64_t                            model_forward_us = 0;
 
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(gather_model_input)");
@@ -356,8 +357,10 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(target_model_forward)");
         maybePrintModelInput(model_input, "prefill target model");
+        int64_t start_time_us              = autil::TimeUtility::currentTimeInMicroSeconds();
         model_input.kv_cache_layer_to_group = target_kv_cache_layer_to_group;
         model_output                        = std::move(model_->forward(model_input));
+        model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
     // eplb
@@ -386,11 +389,13 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(draft_model_forward)");
         tpSyncModelInputs(model_input, parallelism_config_);
         maybePrintModelInput(model_input, "prefill post draft model");
+        int64_t     start_time_us          = autil::TimeUtility::currentTimeInMicroSeconds();
         const auto& mtp_cache_cfg           = cache_manager_->getMTPModuleCacheConfig(0);
         model_input.kv_block_stride_bytes   = mtp_cache_cfg.kv_block_stride_bytes;
         model_input.kv_scale_stride_bytes   = mtp_cache_cfg.kv_scale_stride_bytes;
         model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
         draft_model_output                  = std::move(draft_model_->forward(model_input));
+        model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
@@ -418,9 +423,13 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         executor_collector.context_batch_size_when_has_context = executor_collector.context_batch_size;
         executor_collector.execute_token_size_when_has_context = executor_collector.execute_token_size;
         executor_collector.max_seq_len_when_has_context        = executor_collector.max_seq_len;
+        executor_collector.model_forward_us += model_forward_us;
 
-        tps_collector.context_tps = stream_groups.modelExecuteTokenSize();
-        tps_collector.total_tps   = tps_collector.context_tps;
+        tps_collector.addTokenSize(stream_groups.contextExecuteTokenSize(),
+                                   stream_groups.contextExecuteTokenSizeWithCache(),
+                                   0,
+                                   stream_groups.contextExecuteTokenSize(),
+                                   model_forward_us);
     }
 
     // dispatch
@@ -526,6 +535,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     torch::Tensor                      spec_token_ids_t;
     std::vector<torch::Tensor>         draft_probs_list;
     speculative::FastTopKSamplerOutput fast_topk_sampler_output;
+    int64_t                            model_forward_us = 0;
 
     size_t total_accept_len = 0;
 
@@ -591,13 +601,14 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     if (propose_step_ > 1) {
         model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
         RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode start");
-        draftModelDecode(model_input, stream_groups, draft_probs_list, draft_token_ids_t);
+        draftModelDecode(model_input, stream_groups, draft_probs_list, draft_token_ids_t, model_forward_us);
         RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode end");
     }
 
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(target_model_verify)");
         maybePrintModelInput(model_input, "decode target model");
+        int64_t start_time_us              = autil::TimeUtility::currentTimeInMicroSeconds();
         model_input.is_target_verify        = true;
         model_input.kv_cache_layer_to_group = target_kv_cache_layer_to_group;
         RTP_LLM_LOG_DEBUG(
@@ -608,6 +619,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         model_output = std::move(model_->forward(model_input));
         RTP_LLM_LOG_DEBUG("[MTP decode] target model verify forward end");
         model_input.is_target_verify = false;
+        model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
     // trick: update draft sampler output after spec decode to avoid kernel launch overhead
@@ -677,12 +689,14 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(draft_model_forward)");
+        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         // Use sp_prefill_draft_model_ if CUDA graph is enabled, otherwise use draft_model_
         if (sp_prefill_draft_model_) {
             draft_prefill_model_output = std::move(sp_prefill_draft_model_->forward(model_input));
         } else {
             draft_prefill_model_output = std::move(draft_model_->forward(model_input));
         }
+        model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
@@ -706,13 +720,13 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         executor_collector.generate_batch_size = stream_groups.totalModelBatchSize();
         executor_collector.execute_token_size += total_accept_len;
         executor_collector.max_seq_len = stream_groups.maxSeqLen();
+        executor_collector.model_forward_us += model_forward_us;
 
         executor_collector.context_batch_size_when_has_context = executor_collector.context_batch_size;
         executor_collector.execute_token_size_when_has_context = executor_collector.execute_token_size;
         executor_collector.max_seq_len_when_has_context        = executor_collector.max_seq_len;
 
-        tps_collector.generate_tps = total_accept_len;
-        tps_collector.total_tps += total_accept_len;
+        tps_collector.addTokenSize(0, 0, total_accept_len, total_accept_len, model_forward_us);
 
         sp_engine_collector.total_accepted_token_num = total_accept_len;
         sp_engine_collector.total_stream_num         = stream_groups.size();
@@ -820,7 +834,8 @@ bool MtpExecutor::updateEplbConfig(const EPLBConfig& config) {
 void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
                                    const StreamGroups&         stream_groups,
                                    std::vector<torch::Tensor>& draft_probs_list,
-                                   torch::Tensor&              draft_token_ids_t) {
+                                   torch::Tensor&              draft_token_ids_t,
+                                   int64_t&                    model_forward_us) {
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.draft_model_decode(batch_size=%zu)", model_input.combo_tokens.size(0));
 
     // clear host buffers holder
@@ -859,7 +874,9 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
     for (int i = 0; i < propose_step_ - 1; i++) {
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.draft_model_decode(loop_iter=%d)", i);
         RTP_LLM_LOG_DEBUG("[MTP draftDecode] loop step %d/%d start, batch_size %zu", i, propose_step_ - 1, batch_size);
+        int64_t start_time_us     = autil::TimeUtility::currentTimeInMicroSeconds();
         draft_decode_model_output = std::move(draft_model_->forward(model_input));
+        model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
         RTP_LLM_LOG_DEBUG("[MTP draftDecode] loop step %d forward done", i);
 
         // sample
