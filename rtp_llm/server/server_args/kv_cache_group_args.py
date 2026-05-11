@@ -344,3 +344,14 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="分层 cache 模式下 GPU 侧至少保留的空闲 block 数；当空闲 block 低于该阈值时，会把冷 block 从 GPU 淘汰到 memory。"
         "不填或填 0 时自动计算为 min(max_context_batch_size * max_seq_len, max_batch_tokens_size) / seq_size_per_block。",
     )
+    kv_cache_group.add_argument(
+        "--dsv4_fixed_pool_blocks",
+        env_name="DSV4_FIXED_POOL_BLOCKS",
+        bind_to=(kv_cache_config, "dsv4_fixed_pool_blocks"),
+        type=int,
+        default=256,
+        help="DSV4 固定池（indexer/CSA/HCA/SWA state）每个池分配的总 block 数；paged 池不受影响。"
+        "运行时由调度器在并发请求间共享：每个请求最多持有 2 个 tail block，"
+        "加上 prefix cache 命中时复用的 1 个 block，峰值约 3 块/请求。"
+        "池大小需覆盖 (并发请求数 × 3) 并保留余量。",
+    )

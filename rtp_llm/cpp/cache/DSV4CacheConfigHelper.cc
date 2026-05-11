@@ -20,10 +20,6 @@ constexpr uint32_t kDsv4IndexerEntryBytesBf16 = 256;
 constexpr uint32_t kDsv4KvEntryBytesFp8       = 584;
 constexpr uint32_t kDsv4IndexerEntryBytesFp8  = 132;
 constexpr size_t   kDsv4PoolNum               = 7;
-// SWA/state groups keep two active tail blocks per request.  A request may
-// also reuse one cached block while allocating two fresh tail blocks, so size
-// these fixed pools at 2x the active tail requirement per runtime slot.
-constexpr uint32_t kDsv4FixedPoolBlocksPerReq = 4;
 
 struct DSV4LayerSets {
     std::vector<int> csa_layers;
@@ -39,7 +35,7 @@ struct DSV4PoolDesc {
     uint32_t                entries_per_block;
     DataType                store_dtype;
     bool                    is_paged;
-    uint32_t                fixed_blocks_per_req;
+    uint32_t                fixed_pool_blocks;
 };
 
 DSV4LayerSets classifyDSV4Layers(const std::vector<int>& compress_ratios) {
@@ -73,7 +69,8 @@ DSV4LayerSets classifyDSV4Layers(const std::vector<int>& compress_ratios) {
     return sets;
 }
 
-std::vector<DSV4PoolDesc> buildDSV4PoolDescs(const DSV4LayerSets& sets, const ModelConfig& model_config) {
+std::vector<DSV4PoolDesc>
+buildDSV4PoolDescs(const DSV4LayerSets& sets, const ModelConfig& model_config, uint32_t fixed_pool_blocks) {
     const auto& attn         = model_config.attn_config;
     const auto  head_dim     = static_cast<uint32_t>(attn.size_per_head);
     const auto  idx_head_dim = static_cast<uint32_t>(attn.indexer_head_dim);
@@ -118,28 +115,28 @@ std::vector<DSV4PoolDesc> buildDSV4PoolDescs(const DSV4LayerSets& sets, const Mo
          256,
          DataType::TYPE_FP32,
          false,
-         kDsv4FixedPoolBlocksPerReq},
+         fixed_pool_blocks},
         {KVCacheRegionName::CSA_STATE,
          &sets.csa_layers,
          csa_state_dim * 2,
          256,
          DataType::TYPE_FP32,
          false,
-         kDsv4FixedPoolBlocksPerReq},
+         fixed_pool_blocks},
         {KVCacheRegionName::HCA_STATE,
          &sets.hca_layers,
          hca_state_dim * 2,
          256,
          DataType::TYPE_FP32,
          false,
-         kDsv4FixedPoolBlocksPerReq},
+         fixed_pool_blocks},
         {KVCacheRegionName::SWA_KV,
          &sets.all_layers,
          kv_entry_bytes,
          kDsv4TokensPerBlock,
          DataType::TYPE_UINT8,
          false,
-         kDsv4FixedPoolBlocksPerReq},
+         fixed_pool_blocks},
     };
 }
 
@@ -157,19 +154,25 @@ KVCacheSpecPtr makeDSV4Spec(const DSV4PoolDesc& pool) {
                                            layer_count,
                                            pool.entry_elems,
                                            pool.entries_per_block,
-                                           pool.fixed_blocks_per_req,
+                                           pool.fixed_pool_blocks,
                                            pool.store_dtype,
                                            kDsv4TokensPerBlock);
 }
 
 }  // namespace
 
-void DSV4CacheConfigHelper::applyConfig(CacheConfig& config, const ModelConfig& model_config) {
+void DSV4CacheConfigHelper::applyConfig(CacheConfig&         config,
+                                        const ModelConfig&   model_config,
+                                        const KVCacheConfig& kv_cache_config) {
     RTP_LLM_LOG_INFO("Creating DSV4 typed hybrid-pool cache config with %zu compress_ratios",
                      model_config.attn_config.layer_compress_ratios.size());
 
+    const uint32_t fixed_pool_blocks = kv_cache_config.dsv4_fixed_pool_blocks;
+    RTP_LLM_CHECK_WITH_INFO(
+        fixed_pool_blocks > 0, "kv_cache_config.dsv4_fixed_pool_blocks must be > 0, got %u", fixed_pool_blocks);
+
     const auto sets  = classifyDSV4Layers(model_config.attn_config.layer_compress_ratios);
-    const auto pools = buildDSV4PoolDescs(sets, model_config);
+    const auto pools = buildDSV4PoolDescs(sets, model_config, fixed_pool_blocks);
     RTP_LLM_CHECK_WITH_INFO(pools.size() == kDsv4PoolNum, "DSV4 must produce %zu pools", kDsv4PoolNum);
 
     config.layer_num                                = static_cast<uint32_t>(sets.all_layers.size());
@@ -187,7 +190,7 @@ void DSV4CacheConfigHelper::applyConfig(CacheConfig& config, const ModelConfig& 
     config.layer_ids.clear();
     config.group_types.clear();
     config.group_region_names.clear();
-    config.group_fixed_blocks_per_req.assign(pools.size(), 0);
+    config.group_fixed_pool_blocks.assign(pools.size(), 0);
     config.cache_specs.reserve(pools.size());
     config.global_layer_ids.reserve(pools.size());
     config.layer_ids.reserve(pools.size());
@@ -202,7 +205,7 @@ void DSV4CacheConfigHelper::applyConfig(CacheConfig& config, const ModelConfig& 
         config.layer_ids.push_back(*pool.layer_ids);
         config.group_types.push_back(pool.is_paged ? CacheGroupType::FULL : CacheGroupType::SWA);
         config.group_region_names.push_back(pool.region_name);
-        config.group_fixed_blocks_per_req[gid] = pool.is_paged ? 0 : pool.fixed_blocks_per_req;
+        config.group_fixed_pool_blocks[gid] = pool.is_paged ? 0 : pool.fixed_pool_blocks;
     }
 }
 
