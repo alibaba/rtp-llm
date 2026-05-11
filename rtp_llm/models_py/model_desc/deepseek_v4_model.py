@@ -36,6 +36,7 @@ import torch
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
+from rtp_llm.ops import RoleType
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules.dsv4.decode.forward import (
     build_paged_pool_specs,
@@ -238,17 +239,34 @@ class DeepSeekV4Model(GptModelBase):
                     cp_tokens_per_rank_bound,
                 )
                 args.max_tokens_per_rank = cp_tokens_per_rank_bound
+
+        # Resolve role_type from parallelism_config (mirrored from
+        # py_env_configs.role_config in engine_config.setup_engine_config),
+        # avoiding the prior os.environ["ROLE_TYPE"] env-side-channel
+        # dependency. Pass the string name to resolve_moe_max_tokens_per_rank
+        # so it does not fall back to env.
+        role_type_enum = (
+            getattr(parallelism_config, "role_type", RoleType.PDFUSION)
+            if parallelism_config is not None
+            else RoleType.PDFUSION
+        )
+        role_type_name = (
+            role_type_enum.name
+            if hasattr(role_type_enum, "name")
+            else str(role_type_enum)
+        )
+
         resolved_max_tokens_per_rank = resolve_moe_max_tokens_per_rank(
             max_seq_len=args.max_seq_len,
             current_max_tokens_per_rank=args.max_tokens_per_rank,
             cp_size=cp_size,
             max_generate_batch_size=max_generate_batch_size,
+            role_type=role_type_name,
         )
         if resolved_max_tokens_per_rank != args.max_tokens_per_rank:
-            role_type = os.environ.get("ROLE_TYPE", "").upper() or "PREFILL"
             chunk_tokens_for_log = -1
             if (
-                role_type != "DECODE"
+                role_type_name.upper() != "DECODE"
                 and os.environ.get("DSV4_MOE_CHUNK_PREFILL", "1") != "0"
             ):
                 chunk_tokens_for_log = moe_chunk_tokens_from_env()
@@ -260,7 +278,7 @@ class DeepSeekV4Model(GptModelBase):
                 chunk_tokens_for_log,
                 original_max_tokens_per_rank,
                 cp_size,
-                role_type,
+                role_type_name,
             )
             args.max_tokens_per_rank = resolved_max_tokens_per_rank
 

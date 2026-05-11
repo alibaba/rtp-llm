@@ -1038,6 +1038,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("ffn_tp_rank", &ParallelismConfig::ffn_tp_rank)
         .def_readwrite("enable_sp", &ParallelismConfig::enable_sp)
         .def_readwrite("use_ub_comm", &ParallelismConfig::use_ub_comm)
+        .def_readwrite("role_type", &ParallelismConfig::role_type)
         .def_readwrite("ffn_disaggregate_config", &ParallelismConfig::ffn_disaggregate_config)
         .def_readwrite("prefill_cp_config", &ParallelismConfig::prefill_cp_config)
         .def("to_string", &ParallelismConfig::to_string)
@@ -1063,10 +1064,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.enable_sp,
                                       self.ffn_disaggregate_config,
                                       self.prefill_cp_config,
-                                      self.use_ub_comm);
+                                      self.use_ub_comm,
+                                      self.role_type);
             },
             [](py::tuple t) {
-                if (t.size() != 17)
+                if (t.size() != 18)
                     throw std::runtime_error("Invalid state!");
                 ParallelismConfig c;
                 try {
@@ -1087,6 +1089,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.ffn_disaggregate_config = t[14].cast<FfnDisAggregateConfig>();
                     c.prefill_cp_config       = t[15].cast<PrefillCPConfig>();
                     c.use_ub_comm             = t[16].cast<bool>();
+                    c.role_type               = t[17].cast<RoleType>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("ParallelismConfig unpickle error: ") + e.what());
                 }
