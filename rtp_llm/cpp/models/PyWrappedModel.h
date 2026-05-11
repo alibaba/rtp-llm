@@ -281,11 +281,11 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         auto py_initialize_method = py_instance.attr("initialize");
         try {
             py_init_result = py_initialize_method(init_resources);
+            graph_runner_->initCapture();
         } catch (const py::error_already_set& e) {
             RTP_LLM_LOG_ERROR("Python model initialize failed (cuda_graph branch):\n%s", e.what());
             throw;
         }
-        graph_runner_->initCapture();
     }
 
     auto py_init_success = py_init_result.cast<bool>();
