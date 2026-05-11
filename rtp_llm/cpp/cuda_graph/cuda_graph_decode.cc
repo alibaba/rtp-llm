@@ -19,7 +19,7 @@ std::vector<int> CudaGraphRunner::getDecodeBatchSizesToCapture() {
     int              max_generate_batch_size = max_bs_;
     RTP_LLM_LOG_INFO("max_generate_batch_size for cuda graph: %d", max_generate_batch_size);
     // Add key batch sizes up to 32
-    for (int i : {1, 8, 16, 24, 32}) {
+    for (int i : {1, 2, 3, 4, 5, 6, 7, 8, 16, 24, 32}) {
         if (i <= max_generate_batch_size) {
             capture_bs.push_back(i);
         }
