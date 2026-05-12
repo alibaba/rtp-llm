@@ -35,6 +35,7 @@ from rtp_llm.dash_sc.dashscope_compat import (
 )
 from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.frontend.request_id_generator import generate_request_id
+from rtp_llm.server.request_headers import extract_request_headers
 from rtp_llm.utils.base_model_datatypes import GenerateInput
 from rtp_llm.utils.util import AtomicCounter
 
@@ -42,6 +43,17 @@ from rtp_llm.utils.util import AtomicCounter
 def stream_log_tag(*, request_id_numeric: int, trace_id: str) -> str:
     """Align with C++ ``GenerateStream::streamLogTag()`` for log correlation."""
     return f"request_id={request_id_numeric} trace_id={trace_id}"
+
+
+def _headers_from_invocation_metadata(
+    invocation_metadata: Optional[Any],
+) -> dict[str, str]:
+    metadata_headers = {
+        str(key).lower(): value
+        for key, value in invocation_metadata or ()
+        if key is not None and value is not None
+    }
+    return extract_request_headers(metadata_headers)
 
 
 # ----------------------------------------------------------------------------
@@ -149,6 +161,7 @@ async def iter_real_model_stream_infer(
             token_ids=token_ids,
             mm_inputs=[],
             generate_config=generate_config,
+            headers=_headers_from_invocation_metadata(invocation_metadata),
         )
         is_streaming = bool(getattr(generate_config, "is_streaming", True))
         logging.debug("[DashScGrpc] [%s] generate_input: %s", tag, generate_input)

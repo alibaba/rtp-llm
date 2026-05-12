@@ -69,9 +69,11 @@ class _FakeVisitor:
     def __init__(self, stream: _FakeAsyncStream):
         self._stream = stream
         self.enqueue_called = 0
+        self.last_generate_input = None
 
     async def enqueue(self, _generate_input):
         self.enqueue_called += 1
+        self.last_generate_input = _generate_input
         return self._stream
 
 
@@ -451,6 +453,26 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(captured), 1)
         self.assertEqual(captured[0], expected)
+
+    async def test_real_mode_passes_invocation_metadata_to_generate_input(self) -> None:
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+        context = MagicMock()
+        context.invocation_metadata.return_value = (
+            ("User_ID", "u2"),
+            ("x-dashscope-apikeyid", "ak2"),
+            ("authorization", "secret"),
+        )
+
+        await _drain(
+            servicer.ModelStreamInfer(_areq_iter([self._valid_infer_request()]), context)
+        )
+
+        self.assertIsNotNone(visitor.last_generate_input)
+        self.assertEqual(
+            visitor.last_generate_input.headers,
+            {"user_id": "u2", "x-dashscope-apikeyid": "ak2"},
+        )
 
 
 if __name__ == "__main__":
