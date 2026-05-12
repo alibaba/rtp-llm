@@ -26,6 +26,7 @@ public:
     void setStartLoadApplicationError(ErrorCodePB code, const std::string& message = "");
     void setRpcResponseStatus(const ::grpc::Status& status);
     void setFirstGenerateTokenId(int64_t token_id);
+    void setUseLegacyStartLoadResponse(bool use_legacy);
     void setGenerateStreamCallSuccess(bool success);
 
     // 调用计数相关方法
@@ -39,6 +40,7 @@ private:
     int              sleep_millis_{0};
     bool             p2p_response_success_{true};
     bool             start_load_response_success_{true};
+    bool             use_legacy_start_load_response_{false};
     ErrorCodePB      start_load_app_error_pb_{ErrorCodePB::NONE_ERROR};
     std::string      start_load_app_error_message_;
     bool             generate_stream_call_success_{true};

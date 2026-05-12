@@ -124,6 +124,7 @@ public:
 
     virtual void updateOutput(const StreamUpdateInfo& update_info) = 0;
     void         update(const StreamUpdateInfo& update_info);
+    void         updateWithoutLock(const StreamUpdateInfo& update_info);
     void         specUpdate(const StreamSpecUpdateInfo& update_info);
     bool         updateKvCacheBlocks(const torch::Tensor& src_batch_indices);
 
@@ -239,8 +240,9 @@ public:
                                 ErrorCode               error_code = ErrorCode::NONE_ERROR,
                                 const std::string&      error_msg  = "");
 
-    void         reportError(ErrorCode error_code = ErrorCode::NONE_ERROR, const std::string& error_msg = "");
-    bool         hasEvent(StreamEvents::EventType event) const;
+    void reportError(ErrorCode error_code = ErrorCode::NONE_ERROR, const std::string& error_msg = "");
+    void reportErrorWithoutLock(ErrorCode error_code = ErrorCode::NONE_ERROR, const std::string& error_msg = "");
+    bool hasEvent(StreamEvents::EventType event) const;
     virtual bool hasError() const;
     ErrorInfo    statusInfo();
     std::string  stopReason();

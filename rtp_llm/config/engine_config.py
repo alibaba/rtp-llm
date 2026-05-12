@@ -281,9 +281,18 @@ class EngineConfig:
 
 
 def update_worker_addrs(
-    runtime_config: RuntimeConfig, parallelism_config: ParallelismConfig, world_info
+    runtime_config: RuntimeConfig,
+    parallelism_config: ParallelismConfig,
+    world_info,
+    decode_entrance: bool = False,
 ) -> None:
-    """Update worker addresses in runtime_config based on gang info."""
+    """Update worker addresses in runtime_config based on gang info.
+
+    `worker_addrs` keeps the legacy cache-store address list in normal PD mode:
+    `ip:cache_store_listen_port:cache_store_rdma_listen_port`.
+    In decode_entrance mode, P2P needs an extra transfer port and rpc port, so we
+    publish the P2P-specific `ip:p2p_transfer_port:grpc_port` format there.
+    """
     if world_info is None:
         # For standalone mode, skip worker address updates
         logging.warning(
@@ -291,9 +300,18 @@ def update_worker_addrs(
         )
         return
     worker_addrs = []
+    p2p_worker_addrs = []
     worker_grpc_addrs = []
     local_rank = parallelism_config.local_rank
     for member in world_info.members:
+        p2p_transfer_port = (
+            member.cache_store_listen_port + 1
+            if member.cache_store_listen_port > 0
+            else member.cache_store_listen_port
+        )
+        p2p_worker_addr = f"{member.ip}:{p2p_transfer_port}:{member.rpc_server_port}"
+        if decode_entrance:
+            p2p_worker_addrs.append(p2p_worker_addr)
         if (
             int(
                 (member.world_rank / parallelism_config.tp_size)
@@ -301,17 +319,26 @@ def update_worker_addrs(
             )
             == parallelism_config.dp_rank
         ):
-            worker_addrs.append(
-                f"{member.ip}:{member.cache_store_listen_port}:{member.cache_store_rdma_listen_port}"
+            worker_addr = (
+                p2p_worker_addr
+                if decode_entrance
+                else (
+                    f"{member.ip}:{member.cache_store_listen_port}:"
+                    f"{member.cache_store_rdma_listen_port}"
+                )
             )
+            worker_addrs.append(worker_addr)
             worker_grpc_addrs.append(f"{member.ip}:{member.rpc_server_port}")
             logging.info(
                 f"append member for pd sep "
-                f"{member.ip}:{member.rpc_server_port}, {member.cache_store_listen_port}, "
-                f"{member.cache_store_rdma_listen_port} to local rank {local_rank}, world rank {member.world_rank}"
+                f"{member.ip}:{member.rpc_server_port}, worker_addr={worker_addr}, "
+                f"p2p_transfer_port={p2p_transfer_port}, cache_store_port={member.cache_store_listen_port}, "
+                f"cache_store_rdma_port={member.cache_store_rdma_listen_port} "
+                f"to local rank {local_rank}, world rank {member.world_rank}"
             )
     runtime_config.worker_grpc_addrs = worker_grpc_addrs
     runtime_config.worker_addrs = worker_addrs
+    runtime_config.p2p_worker_addrs = p2p_worker_addrs if decode_entrance else []
 
 
 def setup_pd_sep_config(

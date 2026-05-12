@@ -11,12 +11,14 @@
 #include "rtp_llm/cpp/cache/connector/AsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorAsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/test/mock/MockAsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/test/mock/MockKVCacheConnectorCoordinator.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
+#include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
@@ -89,6 +91,7 @@ protected:
         generate_input->generate_config = generate_config;
         ModelConfig model_config;
         model_config.attn_config.tokens_per_block = 2;
+        model_config.vocab_size                   = 32000;
         RuntimeConfig runtime_config;
         model_config.max_seq_len = 2048;
         stream_                  = std::make_shared<NormalGenerateStream>(
@@ -252,8 +255,8 @@ TEST_F(StreamCacheResourceTest, testStreamCacheResourceReuseCacheMethod) {
     ASSERT_FALSE(resource.reuseCache());
 }
 
-TEST_F(StreamCacheResourceTest, testInitKVBlock_TriggersLoadCacheSync_AndUpdatesReuseLen) {
-    // initKVBlock() ends with loadCacheSync() (same as GenerateStream::initKVBlock).
+TEST_F(StreamCacheResourceTest, testInitKVBlock_ThenAsyncLoadCache_UpdatesReuseLen) {
+    // initKVBlock() allocates blocks; async cache loading is driven separately by the state machine path.
     prepareResource(/*reuse_cache=*/true);
     auto& resource = stream_->streamCacheResource();
 
@@ -317,7 +320,7 @@ TEST_F(StreamCacheResourceTest, testDecodeInitKVBlock_DisablesDeviceCacheOnlyFor
     stream_->generate_input_->generate_config->enable_device_cache = true;
     resource.resource_context_.enable_device_cache                 = true;
 
-    // initKVBlock() -> loadCacheSync() -> asyncRead.
+    // initKVBlock() allocates first decode blocks; asyncLoadCache() then issues connector asyncRead.
     stream_->generate_input_->generate_config->enable_memory_cache = true;
     resource.resource_context_.enable_memory_cache                 = true;
 
@@ -364,7 +367,7 @@ TEST_F(StreamCacheResourceTest, testDecodeInitKVBlock_DisablesDeviceCacheOnlyFor
 }
 
 TEST_F(StreamCacheResourceTest, testTryReleaseKVBlock_TriggersStoreCacheAsync_WhenFinishedAndReuseCache) {
-    // Use incrKVBlock() to avoid loadCacheSync() noise; we only want to validate storeCacheAsync path.
+    // Use incrKVBlock() here; this test only validates the storeCacheAsync path.
     prepareResource(/*reuse_cache=*/true);
     auto& resource = stream_->streamCacheResource();
 
@@ -715,12 +718,10 @@ TEST_F(StreamCacheResourceTest, testInitKVBlock_SecondCallDoesNotOverwriteReuseL
     auto                  load_ctx1 = std::make_shared<FusedAsyncReadContext>(fused_match1, kv_resource1, meta1);
     load_ctx1->setFusedReadContext(nullptr);
 
-    // Second call: load_cache_once_ prevents re-issue (no asyncRead call expected)
-    // loadCacheSync runs once inside initKVBlock; second initKVBlock skips async read (load_cache_once_).
     EXPECT_CALL(*mock_coord, asyncRead(testing::_))
         .WillOnce(testing::Return(std::static_pointer_cast<AsyncContext>(load_ctx1)));
 
-    // First initKVBlock + asyncLoadCache + loadCacheDone: sets reuse lengths
+    // First initKVBlock allocates blocks; asyncLoadCache/loadCacheDone applies connector reuse lengths.
     ASSERT_TRUE(resource.initKVBlock(/*reserve_step=*/0).ok());
     ASSERT_GT(resource.curBlocksNum(), 0);
     ASSERT_TRUE(resource.asyncLoadCache());
@@ -731,12 +732,10 @@ TEST_F(StreamCacheResourceTest, testInitKVBlock_SecondCallDoesNotOverwriteReuseL
     EXPECT_EQ(stream_->reuseLength(), expected_total_reuse_len);
     EXPECT_EQ(stream_->memoryReuseLength(), expected_memory_reuse_len);
 
-    // Second initKVBlock + asyncLoadCache + loadCacheDone: load_cache_once_ prevents re-issue.
-    // The once-per-lifecycle guard means the second asyncLoadCache() returns false (skipped),
-    // which inherently preserves the reuse lengths set by the first load.
+    // Second initKVBlock should not clear the reuse lengths already applied by the completed async load.
+    // Re-issuing asyncLoadCache is now controlled by the state machine's LoadInitiated event, not by
+    // StreamCacheResource.
     ASSERT_TRUE(resource.initKVBlock(/*reserve_step=*/0).ok());
-    ASSERT_TRUE(resource.asyncLoadCache());
-    ASSERT_TRUE(resource.loadCacheDone());
 
     EXPECT_EQ(stream_->reuseLength(), expected_total_reuse_len);
     EXPECT_EQ(stream_->initialReuseLength(), expected_total_reuse_len);
@@ -744,12 +743,159 @@ TEST_F(StreamCacheResourceTest, testInitKVBlock_SecondCallDoesNotOverwriteReuseL
     EXPECT_EQ(stream_->memoryReuseLength(), expected_memory_reuse_len);
 }
 
+TEST_F(StreamCacheResourceTest, testApplyP2PSideChannelRestoresSpeculativeTensors) {
+    prepareResource(/*reuse_cache=*/true, RoleType::DECODE);
+    auto& resource = stream_->streamCacheResource();
+
+    auto server_call_result                                  = std::make_shared<PrefillLoadCaller::Result>();
+    server_call_result->side_channel_payload.has_data        = true;
+    server_call_result->side_channel_payload.has_first_token = true;
+    server_call_result->side_channel_payload.first_token_id  = 7;
+    server_call_result->side_channel_payload.propose_tokens  = {7, 9};
+    server_call_result->side_channel_payload.position_ids    = {0, 1, 2};
+
+    auto propose_probs  = torch::tensor({{0.1f, 0.9f}}, torch::kFloat32);
+    auto propose_hidden = torch::tensor({{0.3f, 0.4f}}, torch::kFloat32);
+    TensorPbConvert::torchToPb(&server_call_result->side_channel_payload.propose_probs, propose_probs);
+    TensorPbConvert::torchToPb(&server_call_result->side_channel_payload.propose_hidden, propose_hidden);
+
+    auto kv_resource = std::make_shared<KVCacheResource>();
+    auto p2p_ctx = std::make_shared<P2PConnectorAsyncReadContext>(kv_resource, nullptr, server_call_result, nullptr, 0);
+    auto fused_read = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{p2p_ctx});
+    auto read_ctx   = std::make_shared<FusedAsyncReadContext>(
+        std::shared_ptr<FusedAsyncContext>(), kv_resource, std::shared_ptr<Meta>());
+    read_ctx->setFusedReadContext(fused_read);
+
+    resource.updateReuseLengthsFromContext(read_ctx);
+
+    auto sp_output_buffer = stream_->getSPOutputBuffer();
+    ASSERT_NE(sp_output_buffer, nullptr);
+    ASSERT_EQ(sp_output_buffer->tensors_holder.size(), 2);
+    EXPECT_TRUE(torch::equal(sp_output_buffer->tokens, torch::tensor({{7, 9}}, torch::kInt32)));
+    EXPECT_TRUE(torch::equal(sp_output_buffer->tensors_holder[0], propose_probs));
+    EXPECT_TRUE(torch::equal(sp_output_buffer->tensors_holder[1], propose_hidden));
+    EXPECT_TRUE(torch::equal(stream_->getContextPositionIds(), torch::tensor({0, 1, 2}, torch::kInt32)));
+}
+
+TEST_F(StreamCacheResourceTest, testApplyP2PSideChannelSkipsSpeculativePayloadWhenProposeTokensMissing) {
+    prepareResource(/*reuse_cache=*/true, RoleType::DECODE);
+    auto& resource = stream_->streamCacheResource();
+
+    auto server_call_result                                  = std::make_shared<PrefillLoadCaller::Result>();
+    server_call_result->side_channel_payload.has_data        = true;
+    server_call_result->side_channel_payload.has_first_token = true;
+    server_call_result->side_channel_payload.first_token_id  = 7;
+
+    auto propose_probs  = torch::tensor({{0.1f, 0.2f, 0.6f, 0.1f}}, torch::kFloat32);
+    auto propose_hidden = torch::tensor({{0.3f, 0.4f}}, torch::kFloat32);
+    TensorPbConvert::torchToPb(&server_call_result->side_channel_payload.propose_probs, propose_probs);
+    TensorPbConvert::torchToPb(&server_call_result->side_channel_payload.propose_hidden, propose_hidden);
+
+    auto kv_resource = std::make_shared<KVCacheResource>();
+    auto p2p_ctx = std::make_shared<P2PConnectorAsyncReadContext>(kv_resource, nullptr, server_call_result, nullptr, 0);
+    auto fused_read = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{p2p_ctx});
+    auto read_ctx   = std::make_shared<FusedAsyncReadContext>(
+        std::shared_ptr<FusedAsyncContext>(), kv_resource, std::shared_ptr<Meta>());
+    read_ctx->setFusedReadContext(fused_read);
+
+    resource.updateReuseLengthsFromContext(read_ctx);
+
+    EXPECT_EQ(stream_->getSPOutputBuffer(), nullptr);
+    EXPECT_FALSE(stream_->getContainProposeToken());
+    EXPECT_TRUE(stream_->getProposeToken().empty());
+    EXPECT_EQ(stream_->seqLength(), 7);
+    auto all_tokens = stream_->completeTokenIdsVec(0);
+    ASSERT_EQ(all_tokens.size(), 7);
+    EXPECT_EQ(all_tokens.back(), 7);
+}
+
+TEST_F(StreamCacheResourceTest, testApplyP2PSideChannelSkipsSpeculativePayloadWhenProposeTokensIncomplete) {
+    prepareResource(/*reuse_cache=*/true, RoleType::DECODE);
+    auto& resource = stream_->streamCacheResource();
+
+    auto server_call_result                                  = std::make_shared<PrefillLoadCaller::Result>();
+    server_call_result->side_channel_payload.has_data        = true;
+    server_call_result->side_channel_payload.has_first_token = true;
+    server_call_result->side_channel_payload.first_token_id  = 7;
+    server_call_result->side_channel_payload.propose_tokens  = {7};
+
+    auto propose_probs = torch::tensor({{0.1f, 0.2f, 0.6f, 0.1f}}, torch::kFloat32);
+    TensorPbConvert::torchToPb(&server_call_result->side_channel_payload.propose_probs, propose_probs);
+
+    auto kv_resource = std::make_shared<KVCacheResource>();
+    auto p2p_ctx = std::make_shared<P2PConnectorAsyncReadContext>(kv_resource, nullptr, server_call_result, nullptr, 0);
+    auto fused_read = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{p2p_ctx});
+    auto read_ctx   = std::make_shared<FusedAsyncReadContext>(
+        std::shared_ptr<FusedAsyncContext>(), kv_resource, std::shared_ptr<Meta>());
+    read_ctx->setFusedReadContext(fused_read);
+
+    resource.updateReuseLengthsFromContext(read_ctx);
+
+    EXPECT_EQ(stream_->getSPOutputBuffer(), nullptr);
+    EXPECT_FALSE(stream_->getContainProposeToken());
+    EXPECT_TRUE(stream_->getProposeToken().empty());
+    EXPECT_EQ(stream_->seqLength(), 7);
+    auto all_tokens = stream_->completeTokenIdsVec(0);
+    ASSERT_EQ(all_tokens.size(), 7);
+    EXPECT_EQ(all_tokens.back(), 7);
+}
+
+TEST_F(StreamCacheResourceTest, testApplyP2PSideChannelReportsErrorWhenMtpHandoffMissesProposeTokens) {
+    prepareResource(/*reuse_cache=*/true, RoleType::DECODE);
+    auto& resource                                                  = stream_->streamCacheResource();
+    stream_->generate_input_->generate_config->force_disable_sp_run = false;
+
+    auto server_call_result                                  = std::make_shared<PrefillLoadCaller::Result>();
+    server_call_result->side_channel_payload.has_data        = true;
+    server_call_result->side_channel_payload.has_first_token = true;
+    server_call_result->side_channel_payload.first_token_id  = 7;
+
+    auto kv_resource = std::make_shared<KVCacheResource>();
+    auto p2p_ctx = std::make_shared<P2PConnectorAsyncReadContext>(kv_resource, nullptr, server_call_result, nullptr, 0);
+    auto fused_read = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{p2p_ctx});
+    auto read_ctx   = std::make_shared<FusedAsyncReadContext>(
+        std::shared_ptr<FusedAsyncContext>(), kv_resource, std::shared_ptr<Meta>());
+    read_ctx->setFusedReadContext(fused_read);
+
+    resource.updateReuseLengthsFromContext(read_ctx);
+
+    EXPECT_TRUE(stream_->hasError());
+    EXPECT_EQ(stream_->statusInfo().code(), ErrorCode::P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED);
+    EXPECT_EQ(stream_->getSPOutputBuffer(), nullptr);
+    EXPECT_FALSE(stream_->getContainProposeToken());
+    EXPECT_TRUE(stream_->getProposeToken().empty());
+}
+
+TEST_F(StreamCacheResourceTest, testApplyP2PSideChannelPreservesZeroFirstToken) {
+    prepareResource(/*reuse_cache=*/true, RoleType::DECODE);
+    auto& resource = stream_->streamCacheResource();
+
+    auto server_call_result                                  = std::make_shared<PrefillLoadCaller::Result>();
+    server_call_result->side_channel_payload.has_data        = true;
+    server_call_result->side_channel_payload.has_first_token = true;
+    server_call_result->side_channel_payload.first_token_id  = 0;
+
+    auto kv_resource = std::make_shared<KVCacheResource>();
+    auto p2p_ctx = std::make_shared<P2PConnectorAsyncReadContext>(kv_resource, nullptr, server_call_result, nullptr, 0);
+    auto fused_read = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{p2p_ctx});
+    auto read_ctx   = std::make_shared<FusedAsyncReadContext>(
+        std::shared_ptr<FusedAsyncContext>(), kv_resource, std::shared_ptr<Meta>());
+    read_ctx->setFusedReadContext(fused_read);
+
+    resource.updateReuseLengthsFromContext(read_ctx);
+
+    EXPECT_EQ(stream_->seqLength(), 7);
+    auto all_tokens = stream_->completeTokenIdsVec(0);
+    ASSERT_EQ(all_tokens.size(), 7);
+    EXPECT_EQ(all_tokens.back(), 0);
+}
+
 TEST_F(StreamCacheResourceTest, testWaitLoadCacheDone_ZeroReuseLen_DoesNotOverwriteExisting) {
     // Directly tests that waitLoadCacheDone with total_reuse_len == 0 preserves existing values.
     prepareResource(/*reuse_cache=*/true);
     auto& resource = stream_->streamCacheResource();
 
-    // Pre-set reuse lengths on the stream (simulating a prior successful loadCacheSync)
+    // Pre-set reuse lengths on the stream (simulating a prior successful async cache load)
     stream_->setReuseLength(100);
     stream_->setInitialReuseLength(100);
     stream_->setLocalReuseLength(80);

@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
 
+#include <algorithm>
 #include <utility>
 
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
@@ -9,6 +10,7 @@
 #include "rtp_llm/cpp/cache/connector/memory/KVCacheMemoryConnector.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnector.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverterImpl.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
 #ifdef USE_REMOTE_KV_CACHE
 #include "rtp_llm/cpp/cache/connector/remote_connector/RemoteConnector.h"
 #endif
@@ -72,6 +74,63 @@ bool KVCacheConnectorCoordinator::hasP2PConnector() const {
     return p2p_connector_ != nullptr;
 }
 
+KVCacheResource KVCacheConnectorCoordinator::normalizeResourceForConnector(const KVCacheResource& resource,
+                                                                           int                    layer_id) const {
+    KVCacheResource normalized;
+    normalized.initGroups(cache_config_.groupNums(),
+                          static_cast<int>(cache_config_.layer_all_num),
+                          cache_config_.layer_to_group_id,
+                          cache_config_.kernelBlocksPerKvBlock(),
+                          cache_config_.group_types);
+    normalized.cacheKeys() = resource.cacheKeys();
+    normalized.setDeviceReuseBlockNum(resource.deviceReuseBlockNum());
+    normalized.setMemoryReuseBlockNum(resource.memoryReuseBlockNum());
+    normalized.setRemoteReuseBlockNum(resource.remoteReuseBlockNum());
+    normalized.setLastBlockAligned(resource.lastBlockAligned());
+
+    bool        copied_blocks       = false;
+    const auto& source_layer_blocks = resource.layerBlocks();
+    if (layer_id >= 0 && static_cast<size_t>(layer_id) < source_layer_blocks.size()
+        && static_cast<size_t>(layer_id) < cache_config_.layer_to_group_id.size()) {
+        const auto& source_blocks = source_layer_blocks[static_cast<size_t>(layer_id)]->blocks();
+        if (!source_blocks.empty()) {
+            const int canonical_gid = cache_config_.layer_to_group_id[static_cast<size_t>(layer_id)];
+            normalized.mutableBlockIds(canonical_gid).assign(source_blocks);
+            copied_blocks = true;
+        }
+    } else {
+        const auto max_layer_num = std::min(source_layer_blocks.size(), cache_config_.layer_to_group_id.size());
+        for (size_t current_layer_id = 0; current_layer_id < max_layer_num; ++current_layer_id) {
+            const auto& source_blocks = source_layer_blocks[current_layer_id]->blocks();
+            if (source_blocks.empty()) {
+                continue;
+            }
+            const int canonical_gid = cache_config_.layer_to_group_id[current_layer_id];
+            auto&     dst_block_ids = normalized.mutableBlockIds(canonical_gid);
+            if (dst_block_ids.blocks().empty()) {
+                dst_block_ids.assign(source_blocks);
+                copied_blocks = true;
+                continue;
+            }
+            RTP_LLM_CHECK_WITH_INFO(dst_block_ids.blocks() == source_blocks,
+                                    "conflicting connector block ids for canonical gid %d",
+                                    canonical_gid);
+        }
+    }
+
+    if (!copied_blocks) {
+        const auto& source_groups  = resource.groupBlocks();
+        const int   copy_group_num = std::min<int>(resource.groupNums(), normalized.groupNums());
+        for (int gid = 0; gid < copy_group_num; ++gid) {
+            const auto& source_blocks = source_groups[static_cast<size_t>(gid)]->blocks();
+            if (!source_blocks.empty()) {
+                normalized.mutableBlockIds(gid).assign(source_blocks);
+            }
+        }
+    }
+    return normalized;
+}
+
 bool KVCacheConnectorCoordinator::init() {
     RTP_LLM_LOG_INFO("connector coordinator init, cache config: [%s], kv cache config: [%s], runtime config: [%s]",
                      cache_config_.debugString().c_str(),
@@ -88,7 +147,12 @@ bool KVCacheConnectorCoordinator::init() {
     }
 #endif
     if (!initP2PConnectorInternal()) {
-        RTP_LLM_LOG_WARNING("init P2P connector failed, P2P path disabled — engine continues without it");
+        RTP_LLM_LOG_ERROR("init P2P connector failed");
+        return false;
+    }
+    if (isPdInvertMode() && !hasP2PConnector()) {
+        RTP_LLM_LOG_ERROR("decode_entrance requires an initialized P2P connector");
+        return false;
     }
     initUpdateThread();
     return true;
@@ -190,6 +254,21 @@ KVCacheConnectorCoordinator::asyncWriteByLayer(int                              
                          layer_context->requestId());
     }
     return p2p_connector_->asyncWriteByLayer(layer_id, layer_context);
+}
+
+std::shared_ptr<KVCacheResource>
+KVCacheConnectorCoordinator::holdKVCacheResourceForConnector(const KVCacheResource& resource, int layer_id) {
+    if (resource.cacheKeys().empty()) {
+        RTP_LLM_LOG_DEBUG("holdKVCacheResourceForConnector skipped, resource cache keys is empty");
+        return nullptr;
+    }
+    auto normalized_resource = normalizeResourceForConnector(resource, layer_id);
+    auto held_resource       = allocator_->incrKVCacheRef(normalized_resource, normalized_resource.cacheKeys(), true);
+    if (!held_resource) {
+        RTP_LLM_LOG_WARNING("holdKVCacheResourceForConnector failed, incr kvcache ref failed, resource: [%s]",
+                            normalized_resource.debugString().c_str());
+    }
+    return held_resource;
 }
 
 std::shared_ptr<KVCacheMemoryConnector> KVCacheConnectorCoordinator::initMemoryConnector() {
@@ -305,6 +384,13 @@ void KVCacheConnectorCoordinator::handleRead(const P2PConnectorStartLoadRequestP
     p2p_connector_->handleRead(request, response, std::move(is_cancelled));
 }
 
+void KVCacheConnectorCoordinator::notifySideChannelReady(const std::string&                                unique_key,
+                                                         int64_t                                           deadline_ms,
+                                                         const P2PConnectorResourceEntry::SideChannelData& data) {
+    if (p2p_connector_) {
+        p2p_connector_->streamStore()->notifySideChannelReady(unique_key, deadline_ms, data);
+    }
+}
 bool KVCacheConnectorCoordinator::executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response) {
     if (request.has_mem_request()) {
         RTP_LLM_CHECK(memory_connector_ != nullptr);
@@ -335,9 +421,6 @@ bool KVCacheConnectorCoordinator::isPdInvertMode() const {
 }
 
 bool KVCacheConnectorCoordinator::initP2PConnectorInternal() {
-    // TODO: P2P connector initialization is disabled until the next PR enables
-    // scheduler async load cache support. Change to `#if 1` to activate.
-#if 0
     if (!isPdInvertMode()) {
         return true;
     }
@@ -359,7 +442,6 @@ bool KVCacheConnectorCoordinator::initP2PConnectorInternal() {
         connectors_.emplace_back(p2p_connector_);
     }
     RTP_LLM_LOG_INFO("P2PConnector initialized successfully, total connectors: %zu", connectors_.size());
-#endif
     return true;
 }
 
@@ -368,6 +450,13 @@ std::vector<CacheKeyType> KVCacheConnectorCoordinator::memoryCacheKeys() const {
         return {};
     }
     return memory_connector_->cacheKeys();
+}
+
+void KVCacheConnectorCoordinator::reportP2PCacheWriteFailure() {
+    if (metrics_reporter_) {
+        CacheWriteOpFailureMetricsCollector collector;
+        metrics_reporter_->report<P2PConnectorMetrics, CacheWriteOpFailureMetricsCollector>(nullptr, &collector);
+    }
 }
 
 }  // namespace rtp_llm
