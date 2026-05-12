@@ -21,19 +21,19 @@ def _compute_num_split(block_k: int, k: int, grid_size: int) -> int:
     return max(split_k, 1)
 
 
-def _requested_backend() -> tuple[str, bool]:
+def _requested_backend() -> str:
     requested = os.environ.get("DSV4_MHC_PRE_GEMM_BACKEND", "").strip().lower()
     if requested in ("", "auto"):
-        # DeepGEMM split-k is faster but has shown DSV4 greedy semantic drift
-        # from layer 0 on SM100 TP1. Keep it as an explicit opt-in backend and
-        # use the single-CTA TileLang path as the precision-safe default.
-        return "tilelang_single", False
+        # Experiment branch: enable DeepGEMM by default to validate DSV4
+        # greedy/golden semantics under the full SM100 smoke suite. This is
+        # intentionally hard: DeepGEMM/JIT failures must surface directly.
+        return "deepgemm"
     aliases = {
         "dg": "deepgemm",
         "tilelang": "tilelang_single",
         "single": "tilelang_single",
     }
-    return aliases.get(requested, requested), True
+    return aliases.get(requested, requested)
 
 
 def _run_tilelang_single_gemm(
@@ -107,7 +107,7 @@ def mhc_pre_big_fuse(
     num_tokens = residual_flat.shape[0]
     fn_flat = fn
 
-    backend, strict_backend = _requested_backend()
+    backend = _requested_backend()
     block_k = 64
     block_m = 64
     n_splits = (
@@ -133,27 +133,13 @@ def mhc_pre_big_fuse(
         n_splits, num_tokens, dtype=torch.float32, device=residual.device
     )
     if backend == "deepgemm":
-        try:
-            _run_deepgemm_splitk_gemm(
-                residual_flat.view(num_tokens, mhc_hidden_size),
-                fn_flat,
-                gemm_out_mul,
-                gemm_out_sqrsum,
-                n_splits,
-            )
-        except Exception:
-            if strict_backend:
-                raise
-            n_splits = _run_tilelang_single_gemm(
-                residual_flat,
-                fn_flat,
-                gemm_out_mul,
-                gemm_out_sqrsum,
-                mhc_mult3,
-                mhc_hidden_size,
-            )
-            gemm_out_mul = gemm_out_mul[:1]
-            gemm_out_sqrsum = gemm_out_sqrsum[:1]
+        _run_deepgemm_splitk_gemm(
+            residual_flat.view(num_tokens, mhc_hidden_size),
+            fn_flat,
+            gemm_out_mul,
+            gemm_out_sqrsum,
+            n_splits,
+        )
     elif backend == "tilelang_single":
         n_splits = _run_tilelang_single_gemm(
             residual_flat,
