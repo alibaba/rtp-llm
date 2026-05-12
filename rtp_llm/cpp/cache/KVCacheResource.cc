@@ -121,11 +121,14 @@ void KVCacheResource::initGroups(int                                group_num,
     layer_block_ids.clear();
     layer_region_block_ids.clear();
 
+    // All groups (FULL paged + SWA fixed) use the same kernel/physical block
+    // ratio so kernel-block id arrays have consistent length per token range
+    // across regions. Non-DSV4 paths default to bpk=1 → no behavior change for
+    // them; DSV4 sets bpk=N/256 globally so SWA/state pools also expand.
+    (void)group_types;
     group_block_ids.reserve(static_cast<size_t>(group_num));
     for (int i = 0; i < group_num; i++) {
-        const bool   is_full = group_types.empty() || group_types[static_cast<size_t>(i)] == CacheGroupType::FULL;
-        const size_t group_kernel_blocks_per_kv_block = is_full ? kernel_blocks_per_kv_block : 1;
-        auto         bid                              = std::make_shared<BlockIds>(group_kernel_blocks_per_kv_block);
+        auto bid = std::make_shared<BlockIds>(kernel_blocks_per_kv_block);
         group_block_ids.push_back(std::move(bid));
     }
 
