@@ -428,7 +428,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         tps_collector.addTokenSize(stream_groups.contextExecuteTokenSize(),
                                    stream_groups.contextExecuteTokenSizeWithCache(),
                                    0,
-                                   stream_groups.contextExecuteTokenSize(),
+                                   stream_groups.modelExecuteTokenSize(),
                                    model_forward_us);
     }
 
