@@ -370,8 +370,10 @@ class AiterPrefillAttnOp:
         input_lengths = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
         seqlen_k = (prefix_lengths_device + input_lengths).to(torch.int32)
 
-        max_seqlen_q = int(input_lengths.max().item())
-        max_seqlen_k = int(seqlen_k.max().item())
+        # Reuse values computed once in FMHAParams.prepare() to avoid
+        # per-layer GPU→CPU sync from .item() on the hot path.
+        max_seqlen_q = fmha_params.max_seqlen_q
+        max_seqlen_k = fmha_params.max_seqlen_k
 
         softmax_scale = 1.0 / math.sqrt(self.head_dim)
         # kv_indptr must be all-zeros when kv_page_indices is empty (block_table
