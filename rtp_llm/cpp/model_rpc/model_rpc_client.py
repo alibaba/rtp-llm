@@ -1,13 +1,14 @@
 import functools
 import json
 import logging
+from collections.abc import Sequence
 from typing import AsyncGenerator
 
 import grpc
 from grpc import StatusCode
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
-from rtp_llm.config.generate_config import RoleType
+from rtp_llm.config.generate_config import RoleAddr, RoleType
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     ErrorDetailsPB,
     GenerateInputPB,
@@ -161,6 +162,7 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.profile_step = input_py.generate_config.profile_step
     generate_config_pb.profile_trace_name = input_py.generate_config.profile_trace_name
     generate_config_pb.global_request_id = input_py.generate_config.global_request_id
+    generate_config_pb.unique_key = input_py.generate_config.unique_key
     generate_config_pb.ignore_eos = input_py.generate_config.ignore_eos
     generate_config_pb.reuse_cache = input_py.generate_config.reuse_cache
     generate_config_pb.enable_memory_cache = (
@@ -229,7 +231,10 @@ def trans_multimodal_input(
 
 
 def trans_output(
-    input_py: GenerateInput, outputs_pb: GenerateOutputsPB, stream_state: StreamState
+    input_py: GenerateInput,
+    outputs_pb: GenerateOutputsPB,
+    stream_state: StreamState,
+    response_role_addrs=None,
 ) -> GenerateOutputs:
     logging.debug("outputs_pb = %s", outputs_pb)
     output_pb = outputs_pb.flatten_output
@@ -316,7 +321,7 @@ def trans_output(
                 decode_remote_reuse_len=aux_info_pb.decode_remote_reuse_len,
                 decode_memory_reuse_len=aux_info_pb.decode_memory_reuse_len,
                 aux_string=aux_info_pb.aux_string,
-                role_addrs=input_py.generate_config.role_addrs,
+                role_addrs=response_role_addrs or input_py.generate_config.role_addrs,
             )
             if aux_info_pb.HasField("cum_log_probs"):
                 current_aux_info.cum_log_probs = trans_tensor(
@@ -405,44 +410,116 @@ class ModelRpcClient(object):
     async def close(self):
         await self._channel_pool.close()
 
-    async def enqueue(
-        self, input_py: GenerateInput
-    ) -> AsyncGenerator[GenerateOutputs, None]:
-        request_timeout_ms = input_py.generate_config.timeout_ms
-        rpc_timeout_ms = (
-            self._max_rpc_timeout_ms
-            if self._max_rpc_timeout_ms > 0
-            else MAX_GRPC_TIMEOUT_SECONDS * 1000
-        )
-        if request_timeout_ms == None or request_timeout_ms <= 0:
-            grpc_timeout_seconds = rpc_timeout_ms / 1000
-        else:
-            grpc_timeout_seconds = request_timeout_ms / 1000
-        input_py.generate_config.timeout_ms = (int)(grpc_timeout_seconds * 1000)
-        input_pb = trans_input(input_py)
-        response_iterator = None
-        stream_state = StreamState()
-
-        address_list = self._addresses
-
+    def _get_explicit_target_address(self, input_py: GenerateInput) -> str | None:
         for role_addr in input_py.generate_config.role_addrs:
             if (
                 (self._decode_entrance and role_addr.role == RoleType.DECODE)
                 or role_addr.role == RoleType.PDFUSION
                 or (not self._decode_entrance and role_addr.role == RoleType.PREFILL)
-            ):
-                if role_addr.ip != "":
-                    address_list = [role_addr.ip + ":" + str(role_addr.grpc_port)]
-                    break
+            ) and role_addr.ip != "":
+                return role_addr.ip + ":" + str(role_addr.grpc_port)
+        return None
+
+    def _build_response_role_addrs(
+        self, input_py: GenerateInput, target_address: str
+    ) -> list[RoleAddr] | None:
+        response_role_addrs = (
+            [
+                role_addr
+                for role_addr in input_py.generate_config.role_addrs
+                if role_addr.role == RoleType.DECODE
+            ]
+            if self._decode_entrance
+            else None
+        )
+        if self._decode_entrance and not response_role_addrs:
+            target_ip, target_port = target_address.rsplit(":", 1)
+            response_role_addrs = list(response_role_addrs or [])
+            response_role_addrs.append(
+                RoleAddr(
+                    role=RoleType.DECODE,
+                    ip=target_ip,
+                    http_port=int(target_port) - 1,
+                    grpc_port=int(target_port),
+                )
+            )
+        return response_role_addrs
+
+    def _select_address_and_response_role_addrs(
+        self, input_py: GenerateInput
+    ) -> tuple[list[str], str, list[RoleAddr] | None]:
+        address_list = self._addresses
+        explicit_target_address = self._get_explicit_target_address(input_py)
+        if explicit_target_address is not None:
+            address_list = [explicit_target_address]
 
         if not address_list:
-            raise ValueError(f"No address found for request: {input_pb.request_id}")
+            raise ValueError(f"No address found for request: {input_py.request_id}")
+
+        target_address = self._select_target_address(address_list, input_py.request_id)
+        response_role_addrs = self._build_response_role_addrs(input_py, target_address)
+
+        return address_list, target_address, response_role_addrs
+
+    @staticmethod
+    def _select_target_address(address_list: Sequence[str], request_id: int) -> str:
+        return address_list[request_id % len(address_list)]
+
+    def _compute_grpc_timeout(self, timeout_ms) -> float:
+        rpc_timeout_ms = (
+            self._max_rpc_timeout_ms
+            if self._max_rpc_timeout_ms > 0
+            else MAX_GRPC_TIMEOUT_SECONDS * 1000
+        )
+        if timeout_ms is None or timeout_ms <= 0:
+            return rpc_timeout_ms / 1000
+        return timeout_ms / 1000
+
+    def _handle_grpc_error(self, e: grpc.RpcError, request_desc: str) -> None:
+        error_details = ErrorDetailsPB()
+        metadata = e.trailing_metadata()
+        if "grpc-status-details-bin" in metadata and error_details.ParseFromString(
+            metadata["grpc-status-details-bin"]
+        ):
+            logging.error(
+                f"{request_desc} RPC failed: "
+                f"{e.code()}, {e.details()}, detail error code is "
+                f"{ExceptionType.from_value(error_details.error_code)}"
+            )
+            raise FtRuntimeException(
+                ExceptionType(error_details.error_code), error_details.error_message
+            )
+        else:
+            logging.error(
+                f"{request_desc} RPC failed: "
+                f"error code is {e.code()}, detail is {e.details()}"
+            )
+            if e.code() == StatusCode.DEADLINE_EXCEEDED:
+                raise FtRuntimeException(ExceptionType.GENERATE_TIMEOUT, e.details())
+            elif e.code() == StatusCode.CANCELLED:
+                raise FtRuntimeException(ExceptionType.CANCELLED_ERROR, e.details())
+            else:
+                raise FtRuntimeException(ExceptionType.UNKNOWN_ERROR, e.details())
+
+    async def enqueue(
+        self, input_py: GenerateInput
+    ) -> AsyncGenerator[GenerateOutputs, None]:
+        grpc_timeout_seconds = self._compute_grpc_timeout(
+            input_py.generate_config.timeout_ms
+        )
+        input_py.generate_config.timeout_ms = (int)(grpc_timeout_seconds * 1000)
+        input_pb = trans_input(input_py)
+        response_iterator = None
+        stream_state = StreamState()
+
+        address_list, target_address, response_role_addrs = (
+            self._select_address_and_response_role_addrs(input_py)
+        )
         logging.debug(
-            f"request: [{input_pb.request_id}] send to address: {address_list[input_py.request_id % len(address_list)]}"
+            f"request: [{input_pb.request_id}] send to address: {target_address}"
         )
         try:
             # Select target address
-            target_address = address_list[input_py.request_id % len(address_list)]
             logging.debug(f"target_address: {target_address}")
             # Get channel from pool
             channel = await self._channel_pool.get(target_address)
@@ -453,37 +530,17 @@ class ModelRpcClient(object):
             )
             # 调用服务器方法并接收流式响应
             async for response in response_iterator.__aiter__():
-                yield trans_output(input_py, response, stream_state)
+                yield trans_output(
+                    input_py,
+                    response,
+                    stream_state,
+                    response_role_addrs=response_role_addrs,
+                )
         except grpc.RpcError as e:
             # TODO(xinfei.sxf) 非流式的请求无法取消了
             if response_iterator:
                 response_iterator.cancel()
-            error_details = ErrorDetailsPB()
-            metadata = e.trailing_metadata()
-            if "grpc-status-details-bin" in metadata and error_details.ParseFromString(
-                metadata["grpc-status-details-bin"]
-            ):
-                logging.error(
-                    f"request: [{input_pb.request_id}] RPC failed: "
-                    f"{e.code()}, {e.details()}, detail error code is "
-                    f"{ExceptionType.from_value(error_details.error_code)}"
-                )
-                raise FtRuntimeException(
-                    ExceptionType(error_details.error_code), error_details.error_message
-                )
-            else:
-                logging.error(
-                    f"request: [{input_pb.request_id}] RPC failed: "
-                    f"error code is {e.code()}, detail is {e.details()}"
-                )
-                if e.code() == StatusCode.DEADLINE_EXCEEDED:
-                    raise FtRuntimeException(
-                        ExceptionType.GENERATE_TIMEOUT, e.details()
-                    )
-                elif e.code() == StatusCode.CANCELLED:
-                    raise FtRuntimeException(ExceptionType.CANCELLED_ERROR, e.details())
-                else:
-                    raise FtRuntimeException(ExceptionType.UNKNOWN_ERROR, e.details())
+            self._handle_grpc_error(e, f"request: [{input_pb.request_id}]")
         except Exception as e:
             logging.error(f"rpc unknown error:{str(e)}")
             raise e

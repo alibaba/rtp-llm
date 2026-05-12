@@ -1226,6 +1226,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("model_name", &RuntimeConfig::model_name)
         .def_readwrite("worker_grpc_addrs", &RuntimeConfig::worker_grpc_addrs)
         .def_readwrite("worker_addrs", &RuntimeConfig::worker_addrs)
+        .def_readwrite("p2p_worker_addrs", &RuntimeConfig::p2p_worker_addrs)
         // Fields merged from PyDeviceResourceConfig
         .def_readwrite("specify_gpu_arch", &RuntimeConfig::specify_gpu_arch)
         // Add sub-configs as properties that return references
@@ -1252,10 +1253,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.model_name,
                                       self.worker_grpc_addrs,
                                       self.worker_addrs,
+                                      self.p2p_worker_addrs,
                                       self.specify_gpu_arch);
             },
             [](py::tuple t) {
-                if (t.size() != 13)
+                if (t.size() != 14)
                     throw std::runtime_error("Invalid state!");
                 RuntimeConfig c;
                 try {
@@ -1271,7 +1273,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.model_name                    = t[9].cast<std::string>();
                     c.worker_grpc_addrs             = t[10].cast<std::vector<std::string>>();
                     c.worker_addrs                  = t[11].cast<std::vector<std::string>>();
-                    c.specify_gpu_arch              = t[12].cast<std::string>();
+                    c.p2p_worker_addrs              = t[12].cast<std::vector<std::string>>();
+                    c.specify_gpu_arch              = t[13].cast<std::string>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("RuntimeConfig unpickle error: ") + e.what());
                 }

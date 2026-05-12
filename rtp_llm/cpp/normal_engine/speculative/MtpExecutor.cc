@@ -1035,6 +1035,24 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     prepareGrpcMtpDeviceState(streams, buffer_holder_);
 
     waitPreviousBookkeepingAndKvSwaps(streams);
+    // clone tensors from grpc
+    {
+        RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.decode_step(clone_sp_tensors,stream_count=%zu)", streams.size());
+        for (auto& stream : streams) {
+            auto        sp_output_buffer = stream->getSPOutputBuffer();
+            auto const& tensors_holder   = sp_output_buffer->tensors_holder;
+            if (!tensors_holder.empty()) {
+                auto const& propose_probs       = tensors_holder[0];
+                auto const& propose_hidden      = tensors_holder[1];
+                auto const  hidden_target_dtype = dataTypeToTorchType(data_type_);
+                sp_output_buffer->all_probs     = propose_probs.to(torch::kCUDA).clone();
+                // P2P / PD side-channel payloads may carry propose_hidden as FP32.
+                // Normalize it to the draft model dtype before feeding MTP draft decode.
+                sp_output_buffer->hidden_states =
+                    propose_hidden.to(torch::TensorOptions().device(torch::kCUDA).dtype(hidden_target_dtype)).clone();
+            }
+        }
+    }
 
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(gather_model_input)");

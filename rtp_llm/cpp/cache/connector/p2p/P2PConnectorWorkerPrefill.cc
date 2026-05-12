@@ -47,10 +47,10 @@ bool P2PConnectorWorkerPrefill::init(int64_t store_wait_timeout_ms) {
     return true;
 }
 
-bool P2PConnectorWorkerPrefill::writeByLayer(int                       layer_id,
-                                             const KVCacheResourcePtr& resource,
-                                             int64_t                   request_id,
-                                             std::optional<c10::Event> event) {
+bool P2PConnectorWorkerPrefill::writeByLayer(int                           layer_id,
+                                             const KVCacheResourcePtr&     resource,
+                                             int64_t                       request_id,
+                                             std::shared_ptr<torch::Event> event) {
     auto collector = std::make_shared<PrefillWorkerStoreMetricsCollector>();
 
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
@@ -83,7 +83,8 @@ bool P2PConnectorWorkerPrefill::writeByLayer(int                       layer_id,
         }
         return false;
     }
-    collector->total_block_count = layer_cache_buffers[0]->blockIdMap().size();
+    layer_cache_buffer->setKVCacheResource(resource);
+    collector->total_block_count = layer_cache_buffer->blockIdMap().size();
 
     int64_t deadline_ms = currentTimeMs() + store_wait_timeout_ms_;
     for (size_t i = 0; i < layer_cache_buffers.size(); ++i) {
@@ -127,7 +128,6 @@ int P2PConnectorWorkerPrefill::dispatchPendingLayerTransfers(
     std::set<int>&                                   sent_layer_ids,
     int                                              total_transfers) {
     int sent_count = 0;
-
     while (sent_count < total_transfers && !cancel_flag->load() && currentTimeMs() < return_deadline_ms) {
         std::set<int> need_layer_ids;
         if (!config_.layer_region_to_group_id.empty()) {
@@ -157,7 +157,6 @@ int P2PConnectorWorkerPrefill::dispatchPendingLayerTransfers(
         }
 
         auto [total_layer_num, ready_layer_buffers] = computed_buffer->getBuffers(need_layer_ids);
-
         for (const auto& layer_cache_buffer : ready_layer_buffers) {
             int vid = layer_cache_buffer->virtualLayerId();
             if (sent_layer_ids.count(vid)) {

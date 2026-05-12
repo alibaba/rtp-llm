@@ -95,6 +95,7 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->enable_device_cache = config_proto->enable_device_cache();
     generate_config->enable_memory_cache = config_proto->enable_memory_cache();
     generate_config->enable_remote_cache = config_proto->enable_remote_cache();
+    generate_config->unique_key          = config_proto->unique_key();
     TRANS_OPTIONAL(trace_id);
     TRANS_OPTIONAL(batch_group_timeout);
     TRANS_OPTIONAL(force_batch);

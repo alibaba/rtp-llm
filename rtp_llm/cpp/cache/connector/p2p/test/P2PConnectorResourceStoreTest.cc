@@ -75,11 +75,11 @@ TEST_F(P2PConnectorResourceStoreTest, StealResource_NotFound) {
 }
 
 TEST_F(P2PConnectorResourceStoreTest, StealResource_CanOnlyStealOnce) {
-    std::string unique_key = "test_key_2";
-    int64_t     request_id = 1002;
+    std::string unique_key  = "test_key_2";
+    int64_t     request_id  = 1002;
     int64_t     deadline_ms = getDeadlineMs();
-    auto        meta       = createMockMeta(unique_key, request_id, deadline_ms);
-    auto        resource   = createMockKVCacheResource();
+    auto        meta        = createMockMeta(unique_key, request_id, deadline_ms);
+    auto        resource    = createMockKVCacheResource();
 
     stream_store_->addResource(meta, resource);
 
@@ -341,6 +341,59 @@ TEST_F(P2PConnectorResourceStoreTest, ResourceTimeout_AutoRemoval) {
     // Resource should have been removed due to timeout
     auto entry = stream_store_->waitAndStealResource(unique_key, currentTimeMs() + 10);
     EXPECT_EQ(entry, nullptr);
+}
+
+TEST_F(P2PConnectorResourceStoreTest, SideChannelTimeout_AutoRemoval) {
+    const std::string unique_key  = "test_side_channel_timeout";
+    const int64_t     deadline_ms = currentTimeMs() + 50;
+
+    P2PConnectorResourceEntry::SideChannelData side_data;
+    side_data.has_first_token = true;
+    side_data.first_token_id  = 42;
+    stream_store_->notifySideChannelReady(unique_key, deadline_ms, side_data);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+
+    P2PConnectorResourceEntry::SideChannelData consumed_data;
+    EXPECT_FALSE(stream_store_->consumeSideChannelData(unique_key, consumed_data));
+}
+
+TEST_F(P2PConnectorResourceStoreTest, ClearSideChannelData_RemovesIndependentEntry) {
+    const std::string unique_key  = "test_side_channel_clear";
+    const int64_t     deadline_ms = getDeadlineMs(5000);
+
+    P2PConnectorResourceEntry::SideChannelData side_data;
+    side_data.has_first_token = true;
+    side_data.first_token_id  = 7;
+    stream_store_->notifySideChannelReady(unique_key, deadline_ms, side_data);
+    stream_store_->clearSideChannelData(unique_key);
+
+    P2PConnectorResourceEntry::SideChannelData consumed_data;
+    EXPECT_FALSE(stream_store_->consumeSideChannelData(unique_key, consumed_data));
+}
+
+TEST_F(P2PConnectorResourceStoreTest, StolenEntry_NotifySideChannelWithAbsoluteDeadline_PreservesData) {
+    const std::string unique_key  = "test_side_channel_after_steal";
+    const int64_t     request_id  = 1010;
+    const int64_t     deadline_ms = currentTimeMs() + 1000;
+    auto              meta        = createMockMeta(unique_key, request_id, deadline_ms);
+    auto              resource    = createMockKVCacheResource();
+
+    ASSERT_TRUE(stream_store_->addResource(meta, resource));
+    auto entry = stream_store_->waitAndStealResource(unique_key, currentTimeMs() + 100);
+    ASSERT_NE(entry, nullptr);
+
+    P2PConnectorResourceEntry::SideChannelData side_data;
+    side_data.has_first_token = true;
+    side_data.first_token_id  = 88;
+    stream_store_->notifySideChannelReady(unique_key, deadline_ms, side_data);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+
+    P2PConnectorResourceEntry::SideChannelData consumed_data;
+    ASSERT_TRUE(stream_store_->consumeSideChannelData(unique_key, consumed_data));
+    EXPECT_TRUE(consumed_data.has_first_token);
+    EXPECT_EQ(consumed_data.first_token_id, 88);
 }
 
 }  // namespace rtp_llm

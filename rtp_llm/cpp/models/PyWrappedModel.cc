@@ -1,5 +1,7 @@
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/connector/IKVCacheConnectorCoordinator.h"
+#include "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/utils.h"
@@ -467,7 +469,11 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
             cache_manager_ ? cache_manager_->getCacheStore() : nullptr,
             cache_store_async_writer_.get(),
             device_props_.prefill_cp_kv_cache_sharded ? static_cast<int>(device_props_.tp_size) : 1,
-            device_props_.prefill_cp_kv_cache_sharded ? static_cast<int>(device_props_.tp_rank) : 0};
+            device_props_.prefill_cp_kv_cache_sharded ? static_cast<int>(device_props_.tp_rank) : 0,
+            cache_manager_ ?
+                std::static_pointer_cast<IKVCacheConnectorCoordinator>(cache_manager_->connectorCoordinator()) :
+                nullptr};
+
         params = cache_store_inputs;
     }
     return params;

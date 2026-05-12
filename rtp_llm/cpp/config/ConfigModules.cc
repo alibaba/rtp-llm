@@ -408,6 +408,13 @@ std::string RuntimeConfig::to_string() const {
             oss << ", ";
     }
     oss << "]\n"
+        << "p2p_worker_addrs: [";
+    for (size_t i = 0; i < p2p_worker_addrs.size(); ++i) {
+        oss << p2p_worker_addrs[i];
+        if (i < p2p_worker_addrs.size() - 1)
+            oss << ", ";
+    }
+    oss << "]\n"
         << "specify_gpu_arch: " << specify_gpu_arch;
     return oss.str();
 }

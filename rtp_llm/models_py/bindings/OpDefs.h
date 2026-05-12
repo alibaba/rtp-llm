@@ -14,6 +14,7 @@
 namespace rtp_llm {
 class CacheStore;
 class CacheStoreAsyncWriter;
+class IKVCacheConnectorCoordinator;
 }  // namespace rtp_llm
 
 namespace torch_ext {
@@ -252,6 +253,7 @@ struct PyCacheStoreInputs {
     // CP-page-RR sharding context. (1, 0) = no sharding (legacy path).
     int cp_size = 1;
     int cp_rank = 0;
+    std::shared_ptr<rtp_llm::IKVCacheConnectorCoordinator> connector_coordinator;
 };
 
 struct PyPrefillCudaGaphCopyParams {

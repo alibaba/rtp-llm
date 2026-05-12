@@ -272,7 +272,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, Init_ReturnTrue_WhenMemoryEnabled_HappyP
     cache_config.layer_all_num = 1;
     cache_config.block_num     = 1;
     // Keep block size reasonably large so block_num doesn't explode in createBlockPool().
-    cache_config.block_size_bytes = 1024;
+    cache_config.block_size_bytes = 3072;
     cache_config.dtype            = rtp_llm::TYPE_FP16;
     cache_config.layer_to_group_id.assign(static_cast<size_t>(cache_config.layer_all_num), 0);
     // Memory connector requires per-layer block stride bytes.
@@ -869,6 +869,134 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnContextAndEnqueue_WhenH
     resource.reset();  // trigger auto-decr while allocator_ is alive
     write_ctx.reset();
     coordinator.reset();  // ensure no lingering references before next tests
+}
+
+TEST_F(KVCacheConnectorCoordinatorTest, HoldKVCacheResourceForConnector_UsesConnectorRefAndAutoReleases) {
+    auto coordinator = std::make_shared<KVCacheConnectorCoordinator>(
+        cache_config_, KVCacheConfig{}, RuntimeConfig{}, ParallelismConfig{}, SpeculativeExecutionConfig{}, allocator_);
+
+    KVCacheResource req_resource;
+    req_resource.initGroups(1, cache_config_.layer_all_num, cache_config_.layer_to_group_id);
+    req_resource.cacheKeys() = CacheKeysType{11, 22, 33};
+    auto resource            = makeResourceWithAutoDecr();
+
+    auto resource_holder = std::make_shared<std::shared_ptr<KVCacheResource>>(resource);
+    EXPECT_CALL(*allocator_, incrKVCacheRef(testing::_, testing::_, true))
+        .WillOnce(testing::Invoke([resource_holder](const KVCacheResource&, const CacheKeysType&, bool is_connector) {
+            EXPECT_TRUE(is_connector);
+            auto out = *resource_holder;
+            resource_holder->reset();
+            return out;
+        }));
+
+    auto held_resource = coordinator->holdKVCacheResourceForConnector(req_resource, /*layer_id=*/0);
+    ASSERT_NE(held_resource, nullptr);
+    EXPECT_EQ(held_resource, resource);
+
+    EXPECT_CALL(*allocator_, decrKVCacheRef(testing::_, testing::_)).Times(1);
+    held_resource.reset();
+    resource.reset();
+    coordinator.reset();
+}
+
+TEST_F(KVCacheConnectorCoordinatorTest, HoldKVCacheResourceForConnector_NormalizesToCanonicalLayoutAndKeepsLifetime) {
+    CacheConfig cache_config;
+    cache_config.layer_num        = 3;
+    cache_config.layer_all_num    = 3;
+    cache_config.block_num        = 16;
+    cache_config.block_size_bytes = 1024;
+    cache_config.dtype            = rtp_llm::TYPE_FP16;
+    cache_config.cache_specs.resize(2);
+    cache_config.group_types       = {CacheGroupType::FULL, CacheGroupType::FULL};
+    cache_config.layer_to_group_id = {1, 0, 1};
+
+    auto coordinator = std::make_shared<KVCacheConnectorCoordinator>(
+        cache_config, KVCacheConfig{}, RuntimeConfig{}, ParallelismConfig{}, SpeculativeExecutionConfig{}, allocator_);
+
+    KVCacheResource                     normalized_input;
+    std::weak_ptr<MockKVCacheAllocator> allocator_weak = allocator_;
+    EXPECT_CALL(*allocator_, incrKVCacheRef(testing::_, testing::_, true))
+        .WillOnce(testing::Invoke([&normalized_input, allocator_weak](const KVCacheResource& resource,
+                                                                      const CacheKeysType&   cache_keys,
+                                                                      bool                   is_connector) {
+            EXPECT_TRUE(is_connector);
+            EXPECT_THAT(cache_keys, testing::ElementsAre(101, 102));
+            normalized_input = resource;
+
+            auto owned = std::make_shared<KVCacheResource>(resource);
+            return std::shared_ptr<KVCacheResource>(owned.get(), [owned, allocator_weak](KVCacheResource*) mutable {
+                if (auto allocator = allocator_weak.lock()) {
+                    allocator->decrKVCacheRef(*owned, true);
+                }
+                owned.reset();
+            });
+        }));
+
+    std::shared_ptr<KVCacheResource> held_resource;
+    {
+        KVCacheResource req_resource;
+        req_resource.initGroups(/*group_num=*/2, /*layer_num=*/1, /*layer_to_group_id=*/{1});
+        req_resource.cacheKeys() = CacheKeysType{101, 102};
+        req_resource.mutableBlockIds(/*group_id=*/1).assign(BlockIndicesType{11, 12});
+
+        held_resource = coordinator->holdKVCacheResourceForConnector(req_resource, /*layer_id=*/0);
+    }
+
+    ASSERT_NE(held_resource, nullptr);
+    EXPECT_EQ(normalized_input.groupNums(), 2);
+    EXPECT_EQ(normalized_input.layerBlocks().size(), 3u);
+    EXPECT_EQ(normalized_input.cacheKeys(), CacheKeysType({101, 102}));
+    EXPECT_TRUE(normalized_input.blocks(0).empty());
+    EXPECT_EQ(normalized_input.blocks(1), BlockIndicesType({11, 12}));
+
+    EXPECT_EQ(held_resource->groupNums(), 2);
+    EXPECT_EQ(held_resource->layerBlocks().size(), 3u);
+    EXPECT_EQ(held_resource->cacheKeys(), CacheKeysType({101, 102}));
+    EXPECT_EQ(held_resource->blocks(1), BlockIndicesType({11, 12}));
+    EXPECT_EQ(held_resource->layerBlocks()[0]->blocks(), BlockIndicesType({11, 12}));
+    EXPECT_TRUE(held_resource->layerBlocks()[1]->blocks().empty());
+
+    EXPECT_CALL(*allocator_, decrKVCacheRef(testing::_, true)).Times(1);
+    held_resource.reset();
+    coordinator.reset();
+}
+
+TEST_F(KVCacheConnectorCoordinatorTest, HoldKVCacheResourceForConnector_PreservesSingleGroupLayout) {
+    auto coordinator = std::make_shared<KVCacheConnectorCoordinator>(
+        cache_config_, KVCacheConfig{}, RuntimeConfig{}, ParallelismConfig{}, SpeculativeExecutionConfig{}, allocator_);
+
+    KVCacheResource                     normalized_input;
+    std::weak_ptr<MockKVCacheAllocator> allocator_weak = allocator_;
+    EXPECT_CALL(*allocator_, incrKVCacheRef(testing::_, testing::ElementsAre(7, 8), true))
+        .WillOnce(testing::Invoke([&normalized_input, allocator_weak](
+                                      const KVCacheResource& resource, const CacheKeysType&, bool is_connector) {
+            EXPECT_TRUE(is_connector);
+            normalized_input = resource;
+
+            auto owned = std::make_shared<KVCacheResource>(resource);
+            return std::shared_ptr<KVCacheResource>(owned.get(), [owned, allocator_weak](KVCacheResource*) mutable {
+                if (auto allocator = allocator_weak.lock()) {
+                    allocator->decrKVCacheRef(*owned, true);
+                }
+                owned.reset();
+            });
+        }));
+
+    KVCacheResource req_resource;
+    req_resource.initGroups(1, cache_config_.layer_all_num, cache_config_.layer_to_group_id);
+    req_resource.cacheKeys() = CacheKeysType{7, 8};
+    req_resource.mutableBlockIds(0).assign(BlockIndicesType{3, 4});
+
+    auto held_resource = coordinator->holdKVCacheResourceForConnector(req_resource, /*layer_id=*/0);
+    ASSERT_NE(held_resource, nullptr);
+    EXPECT_EQ(normalized_input.groupNums(), 1);
+    EXPECT_EQ(normalized_input.layerBlocks().size(), 1u);
+    EXPECT_EQ(normalized_input.blocks(0), BlockIndicesType({3, 4}));
+    EXPECT_EQ(held_resource->blocks(0), BlockIndicesType({3, 4}));
+
+    EXPECT_CALL(*allocator_, decrKVCacheRef(testing::_, true)).Times(1);
+    held_resource.reset();
+    coordinator.reset();
 }
 
 TEST_F(KVCacheConnectorCoordinatorTest, AsyncReadAfterMatch_SkipsNonMatchAndUpdatesReuseAndSetsFusedReadContext) {

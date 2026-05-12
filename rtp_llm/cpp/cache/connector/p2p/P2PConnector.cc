@@ -12,6 +12,7 @@
 #include "rtp_llm/cpp/utils/StringUtil.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
+#include <algorithm>
 #include <chrono>
 #include <thread>
 
@@ -97,7 +98,7 @@ std::shared_ptr<AsyncContext> P2PConnector::asyncRead(const KVCacheResourcePtr& 
             RTP_LLM_LOG_WARNING("asyncRead failed, unique_key: %s, error: %s",
                                 meta->p2pRouting().value_or(Meta::P2PRoutingContext{}).unique_key.c_str(),
                                 result.error_info.ToString().c_str());
-            meta->setStop(result.error_info.code(), result.error_info.ToString());
+            meta->reportError(result.error_info.code(), result.error_info.ToString());
             return nullptr;
         }
         return result.context;
@@ -114,7 +115,13 @@ std::shared_ptr<AsyncContext> P2PConnector::asyncWrite(const KVCacheResourcePtr&
 
 std::shared_ptr<AsyncContext>
 P2PConnector::asyncWriteByLayer(int layer_id, const std::shared_ptr<KVCacheConnectorLayerContext>& layer_context) {
-    auto resource = std::make_shared<KVCacheResource>(layer_context->kvCacheResource());
+    auto resource = layer_context->heldKVCacheResource();
+    if (!resource) {
+        RTP_LLM_LOG_WARNING("asyncWriteByLayer failed, held resource is null, layer_id=%d, request_id=%ld",
+                            layer_id,
+                            layer_context->requestId());
+        return nullptr;
+    }
     worker_->writeByLayer(layer_id, resource, layer_context->requestId(), layer_context->attentionEvent());
     return std::make_shared<P2PConnectorAsyncWriteByLayerContext>(resource);
 }
@@ -183,6 +190,7 @@ void P2PConnector::waitAndFillResponse(const std::shared_ptr<P2PConnectorResourc
     const int64_t                remaining_us = deadline_ms * 1000 - currentTimeUs();
     if (remaining_us <= 0) {
         RTP_LLM_LOG_WARNING("waitAndFillResponse: past deadline, unique_key: %s", unique_key.c_str());
+        stream_store_->clearSideChannelData(unique_key);
         response.set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_FILL_RESPONSE_FAILED));
         response.set_error_message("waitAndFillResponse: past deadline");
         return;
@@ -192,14 +200,30 @@ void P2PConnector::waitAndFillResponse(const std::shared_ptr<P2PConnectorResourc
     while (!resource_entry->side_channel_ready) {
         if (is_cancelled && is_cancelled()) {
             RTP_LLM_LOG_DEBUG("waitAndFillResponse: cancelled, unique_key: %s", unique_key.c_str());
+            stream_store_->clearSideChannelData(unique_key);
             response.set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_FILL_RESPONSE_FAILED));
             response.set_error_message("waitAndFillResponse: cancelled");
             return;
         }
-        resource_entry->side_channel_cv.wait_until(lock, timeout_tp);
+
+        P2PConnectorResourceEntry::SideChannelData side_channel_data;
+        if (stream_store_->consumeSideChannelData(unique_key, side_channel_data)) {
+            resource_entry->side_channel_data  = std::move(side_channel_data);
+            resource_entry->side_channel_ready = true;
+            break;
+        }
+
+        auto next_wake_tp = std::min(timeout_tp, std::chrono::system_clock::now() + std::chrono::milliseconds(10));
+        resource_entry->side_channel_cv.wait_until(lock, next_wake_tp);
         if (!resource_entry->side_channel_ready) {
+            if (stream_store_->consumeSideChannelData(unique_key, side_channel_data)) {
+                resource_entry->side_channel_data  = std::move(side_channel_data);
+                resource_entry->side_channel_ready = true;
+                break;
+            }
             if (std::chrono::system_clock::now() >= timeout_tp) {
                 RTP_LLM_LOG_WARNING("waitAndFillResponse: timeout, unique_key: %s", unique_key.c_str());
+                stream_store_->clearSideChannelData(unique_key);
                 response.set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_FILL_RESPONSE_FAILED));
                 response.set_error_message("waitAndFillResponse: timeout");
                 return;
@@ -216,11 +240,13 @@ void P2PConnector::waitAndFillResponse(const std::shared_ptr<P2PConnectorResourc
         RTP_LLM_LOG_WARNING("waitAndFillResponse failed, unique_key: %s, error: %s",
                             resource_entry->unique_key.c_str(),
                             fill_status.error_message().c_str());
+        stream_store_->clearSideChannelData(unique_key);
         response.set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_FILL_RESPONSE_FAILED));
         response.set_error_message("fillResponseWithStreamInfo failed: " + fill_status.error_message());
         return;
     }
 
+    stream_store_->clearSideChannelData(unique_key);
     response.set_error_code(ErrorCodePB::NONE_ERROR);
 }
 
@@ -369,7 +395,10 @@ grpc::Status P2PConnector::fillResponseWithStreamInfo(const std::shared_ptr<P2PC
 
     // Fill response proto from side-channel data
     auto* payload = response.mutable_payload();
-    payload->set_first_generate_token_id(data.first_token_id);
+    payload->set_has_first_generate_token(data.has_first_token);
+    if (data.has_first_token) {
+        payload->set_first_generate_token_id(data.first_token_id);
+    }
     payload->set_total_reuse_len(data.total_reuse_len);
     payload->set_local_reuse_len(data.local_reuse_len);
     payload->set_remote_reuse_len(data.remote_reuse_len);

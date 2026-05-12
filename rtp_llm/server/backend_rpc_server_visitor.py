@@ -1,3 +1,5 @@
+import asyncio
+import copy
 import logging
 import time
 from typing import TYPE_CHECKING, AsyncGenerator, List, Optional
@@ -15,7 +17,11 @@ from rtp_llm.server.host_service import HostService, HostServiceArgs
 from rtp_llm.server.master_client import FlexlbResponse, MasterClient
 from rtp_llm.server.misc import format_exception
 from rtp_llm.server.recent_cache_key_window import RecentCacheKeyWindow
-from rtp_llm.utils.base_model_datatypes import GenerateInput, GenerateOutputs
+from rtp_llm.utils.base_model_datatypes import (
+    GenerateInput,
+    GenerateOutput,
+    GenerateOutputs,
+)
 from rtp_llm.utils.time_util import Timer
 
 if TYPE_CHECKING:
@@ -110,7 +116,13 @@ class BackendRPCServerVisitor:
 
         if config_role_type == RoleType.PREFILL:
             role_list.append(RoleType.DECODE)
-            logging.info("Added DECODE role for PREFILL type")
+            if pd_sep_config.decode_entrance:
+                role_list.append(RoleType.PREFILL)
+                logging.info(
+                    "Added DECODE and PREFILL roles for PREFILL type in decode_entrance mode"
+                )
+            else:
+                logging.info("Added DECODE role for PREFILL type")
         elif config_role_type == RoleType.DECODE and pd_sep_config.decode_entrance:
             role_list.append(RoleType.PREFILL)
             logging.info("Added PREFILL role for DECODE type")
@@ -127,6 +139,17 @@ class BackendRPCServerVisitor:
             if host_args.pdfusion_domain:
                 role_list.append(RoleType.PDFUSION)
                 logging.info("Added PDFUSION role for FRONTEND type")
+            if pd_sep_config.decode_entrance:
+                if RoleType.DECODE not in role_list:
+                    role_list.append(RoleType.DECODE)
+                    logging.info(
+                        "Added DECODE role for FRONTEND type as decode_entrance fallback"
+                    )
+                if RoleType.PREFILL not in role_list:
+                    role_list.append(RoleType.PREFILL)
+                    logging.info(
+                        "Added PREFILL role for FRONTEND type as decode_entrance requirement"
+                    )
 
         logging.info(f"configured backend role list: {role_list}")
         return role_list
@@ -213,6 +236,12 @@ class BackendRPCServerVisitor:
         missing_roles = [
             role for role in self.backend_role_list if role not in specified_roles
         ]
+        if not missing_roles:
+            route_logger.debug(
+                "skip domain routing, request_id=%s, no missing backend roles",
+                input.request_id,
+            )
+            return
         role_addrs: List[RoleAddr] = self.host_service.get_backend_role_addrs(
             missing_roles
         )
@@ -290,11 +319,15 @@ class BackendRPCServerVisitor:
             route_logger.debug("routing to master done")
 
         kmonitor.report(GaugeMetrics.ROUTE_RT_METRIC, route_timer.cost_ms())
-        if not input.generate_config.role_addrs:
+        final_roles = {addr.role for addr in input.generate_config.role_addrs}
+        missing_roles = [
+            role for role in self.backend_role_list if role not in final_roles
+        ]
+        if missing_roles:
             raise FtRuntimeException(
                 ExceptionType.ROUTE_ERROR,
-                "request_id=%s no backend role addresses found after routing"
-                % input.request_id,
+                "request_id=%s missing backend role addresses after routing: %s"
+                % (input.request_id, missing_roles),
             )
 
     def check_sp_supported(self, input: GenerateInput):

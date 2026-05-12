@@ -18,6 +18,7 @@
 namespace rtp_llm {
 
 class CacheStore;
+class IKVCacheConnectorCoordinator;
 
 // ===================================================================
 // Runtime lifecycle
@@ -121,10 +122,11 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     inputs,
                             const KvCacheInfo&          kv_cache,
                             bool                        mla_kvcache,
                             std::shared_ptr<CacheStore> cache_store);
-void execWriteCacheStore(const CacheStoreInputs&     inputs,
-                         const KvCacheInfo&          kv_cache,
-                         bool                        mla_kvcache,
-                         std::shared_ptr<CacheStore> cache_store);
+void execWriteCacheStore(const CacheStoreInputs&       inputs,
+                         const KvCacheInfo&            kv_cache,
+                         bool                          mla_kvcache,
+                         std::shared_ptr<CacheStore>   cache_store,
+                         IKVCacheConnectorCoordinator* connector_coordinator = nullptr);
 
 // ===================================================================
 // Static ops (weight preprocessing)

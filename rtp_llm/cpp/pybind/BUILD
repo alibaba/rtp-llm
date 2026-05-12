@@ -50,10 +50,7 @@ cc_library(
     name = "th_compute_lib",
     srcs = [
         "ComputeInit.cc",
-    ] + select({
-        "@//:using_cuda12": ["//rtp_llm/models_py/bindings/core:exec_ops_srcs"],
-        "//conditions:default": [],
-    }),
+    ],
     hdrs = [],
     deps = [
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
@@ -65,7 +62,10 @@ cc_library(
         "@havenask//aios/autil:base64",
         "@havenask//aios/autil:zlib",
     ] + torch_deps() + select_py_bindings() + select({
-        "@//:using_cuda12": ["//rtp_llm/models_py/bindings/cuda/ops:gpu_base"],
+        "@//:using_cuda12": [
+            "//rtp_llm/models_py/bindings/core:exec_ctx_state",
+            "//rtp_llm/models_py/bindings/cuda/ops:gpu_base",
+        ],
         "@//:using_rocm": ["//rtp_llm/models_py/bindings/core:exec_ctx_rocm"],
         "//conditions:default": [],
     }) + no_block_copy_link_deps(),
