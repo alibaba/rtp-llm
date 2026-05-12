@@ -26,10 +26,26 @@ P2 (OpenAI-compat + observability):
   - response echo ``model_name`` / ``model_instance_ip`` / ``model_hostname`` /
     ``scheduler_request_id``                              -> InferResponse.parameters
 
+P3 (grammar / structured output — protocol parse only; engine wiring lands
+with the xgrammar backend integration):
+  - ``parameters["response_format"]`` (string JSON, OpenAI ResponseFormat shape)
+        type=json_object   -> GenerateConfig.json_schema = '{"type": "object"}'
+        type=json_schema   -> GenerateConfig.json_schema = json.dumps(payload)
+        type=regex         -> GenerateConfig.regex
+        type=ebnf          -> GenerateConfig.ebnf
+        type=structural_tag-> GenerateConfig.structural_tag
+        type=text          -> noop
+  - ``parameters["guided_json"]`` (string JSON, vLLM bare-schema convenience)
+        -> GenerateConfig.json_schema (when response_format absent)
+
+  Field semantics mirror ``rtp_llm/openai/openai_endpoint.py:_apply_response_format``
+  so HTTP and gRPC paths converge on the same GenerateConfig knobs. Until the
+  xgrammar branch merges those four fields onto ``GenerateConfig``, the applier
+  detects their absence via ``model_fields`` and emits a single WARN per request
+  per field — same observability shape as the legacy unsupported bucket.
+
 Engine-unsupported P2 fields (parsed but dropped, with a single WARN log so
 upstream misuse becomes visible):
-  - ``parameters["response_format"]``
-  - ``parameters["guided_json"]``
   - ``parameters["logit_bias"]``
   - ``parameters["context_cache_ttl"]`` (also ``inputs["context_cache_ttl"]``)
 """
@@ -61,12 +77,30 @@ _MAX_MATCHED_TOKEN_NUM_HEADER = "x-ds-max-matched-token-num"
 # A single WARN log per request per field surfaces upstream usage so engine-
 # side support can be prioritised; we deliberately do NOT silently swallow.
 _UNSUPPORTED_PARAMETER_FIELDS: tuple[str, ...] = (
-    "response_format",
-    "guided_json",
     "logit_bias",
     "context_cache_ttl",
 )
 _UNSUPPORTED_INPUT_FIELDS: tuple[str, ...] = ("context_cache_ttl",)
+
+
+# ResponseFormat ``type`` values that map onto a grammar-constrained
+# GenerateConfig field. Mirrors the literal in
+# ``rtp_llm/openai/api_datatype.py:ResponseFormat.type`` on the xgrammar
+# branch. ``text`` is accepted but produces no constraint.
+_GRAMMAR_RESPONSE_FORMAT_TYPES: frozenset[str] = frozenset(
+    {"json_object", "json_schema", "regex", "ebnf", "structural_tag"}
+)
+
+# GenerateConfig fields written by the grammar applier. Used at apply-time to
+# detect whether the running engine has the xgrammar fields declared — when
+# they're absent we emit a WARN instead of silently dropping (matches the
+# observability contract of ``_UNSUPPORTED_PARAMETER_FIELDS``).
+_GRAMMAR_GENERATE_CONFIG_FIELDS: tuple[str, ...] = (
+    "json_schema",
+    "regex",
+    "ebnf",
+    "structural_tag",
+)
 
 
 # ----------------------------------------------------------------------------
@@ -93,6 +127,15 @@ class DashScopeRequestExtras:
     max_thinking_tokens: Optional[int] = None
     enable_logprobs: bool = False
     top_logprobs: int = 0
+    # P3 grammar (engine wiring lands with the xgrammar backend). Values are
+    # already normalised to the GenerateConfig shape — ``json_schema`` is a
+    # JSON-encoded string (so the dict round-trip happens once at parse time,
+    # not on every applier call), ``regex`` / ``ebnf`` are raw bodies,
+    # ``structural_tag`` is a JSON-encoded string of the wrapper dict.
+    json_schema: Optional[str] = None
+    regex: Optional[str] = None
+    ebnf: Optional[str] = None
+    structural_tag: Optional[str] = None
     # Parsed-but-dropped (engine doesn't support these knobs).
     unsupported: tuple[tuple[str, str], ...] = ()
 
@@ -224,6 +267,82 @@ def _parse_max_thinking_tokens(
     return None
 
 
+@dataclass(frozen=True)
+class _GrammarFields:
+    """Result of normalising a ``response_format`` / ``guided_json`` payload
+    onto the four GenerateConfig grammar knobs. Any combination of fields may
+    be ``None`` (the empty case for ``type=text`` or absent payload). The
+    ``error`` slot, when populated, captures a (field, reason) entry for the
+    ``unsupported`` bucket so the caller can WARN without raising.
+    """
+
+    json_schema: Optional[str] = None
+    regex: Optional[str] = None
+    ebnf: Optional[str] = None
+    structural_tag: Optional[str] = None
+    error: Optional[tuple[str, str]] = None
+
+
+def _normalize_response_format_payload(payload: Any) -> _GrammarFields:
+    """Map a parsed ``response_format`` dict onto the four grammar strings.
+
+    Mirrors ``openai_endpoint._apply_response_format``: same accepted ``type``
+    set, same JSON encoding for nested schema, same ``json.dumps`` separators
+    so the digest written into the per-request grammar cache key is identical
+    across HTTP and gRPC entrypoints. Returning a ``_GrammarFields`` (instead
+    of raising) lets the caller record bad payloads in ``unsupported`` and
+    keep the RPC alive — same policy as the existing ``stop`` handler.
+    """
+    if not isinstance(payload, dict):
+        return _GrammarFields(
+            error=("response_format", f"unexpected_shape:{type(payload).__name__}")
+        )
+    rf_type = payload.get("type")
+    if rf_type == "text":
+        return _GrammarFields()
+    if rf_type == "json_object":
+        return _GrammarFields(json_schema=json.dumps({"type": "object"}))
+    if rf_type == "json_schema":
+        # OpenAI ResponseFormatJSONSchema shape: ``{"json_schema": {"name":...,
+        # "schema": {...}, "strict":...}}``. Mirrors the assertion in
+        # ``openai_endpoint._apply_response_format`` so HTTP and gRPC paths
+        # accept the same wire shape — a bare schema dict goes through
+        # ``guided_json`` instead.
+        wrapper = payload.get("json_schema")
+        if not isinstance(wrapper, dict):
+            return _GrammarFields(
+                error=("response_format", "json_schema_missing_wrapper")
+            )
+        sch = wrapper.get("schema")
+        if not isinstance(sch, dict):
+            return _GrammarFields(
+                error=("response_format", "json_schema_missing_schema")
+            )
+        return _GrammarFields(
+            json_schema=json.dumps(sch, ensure_ascii=False, separators=(",", ":"))
+        )
+    if rf_type == "regex":
+        pattern = payload.get("pattern")
+        if not isinstance(pattern, str) or not pattern:
+            return _GrammarFields(error=("response_format", "regex_missing_pattern"))
+        return _GrammarFields(regex=pattern)
+    if rf_type == "ebnf":
+        grammar = payload.get("grammar")
+        if not isinstance(grammar, str) or not grammar:
+            return _GrammarFields(error=("response_format", "ebnf_missing_grammar"))
+        return _GrammarFields(ebnf=grammar)
+    if rf_type == "structural_tag":
+        st = payload.get("structural_tag")
+        if not isinstance(st, dict):
+            return _GrammarFields(
+                error=("response_format", "structural_tag_missing_payload")
+            )
+        return _GrammarFields(
+            structural_tag=json.dumps(st, ensure_ascii=False, separators=(",", ":"))
+        )
+    return _GrammarFields(error=("response_format", f"unknown_type:{rf_type!r}"))
+
+
 def _parse_logprobs_inputs(
     request: predict_v2_pb2.ModelInferRequest,
 ) -> tuple[bool, int]:
@@ -328,6 +447,54 @@ def parse_dashscope_request_extras(
     # P2: logprobs / top_logprobs
     enable_logprobs, top_logprobs = _parse_logprobs_inputs(request)
 
+    # P3: response_format (typed) and guided_json (vLLM bare-schema convenience).
+    # response_format wins when both are present; we record the duplication on the
+    # unsupported bucket so misuse is observable upstream rather than silently
+    # ignored. Empty/text payloads do not collide with guided_json because they
+    # leave json_schema unset.
+    json_schema: Optional[str] = None
+    regex_str: Optional[str] = None
+    ebnf_str: Optional[str] = None
+    structural_tag: Optional[str] = None
+
+    rf_payload: Any = None
+    try:
+        rf_payload = _parse_json_param(request, "response_format", request_log_tag="")
+    except ValueError as exc:
+        unsupported.append(("response_format", str(exc)))
+    if rf_payload is not None:
+        gf = _normalize_response_format_payload(rf_payload)
+        if gf.error is not None:
+            unsupported.append(gf.error)
+        else:
+            json_schema = gf.json_schema
+            regex_str = gf.regex
+            ebnf_str = gf.ebnf
+            structural_tag = gf.structural_tag
+
+    # guided_json: vLLM-style bare schema dict. Parsed only when response_format
+    # didn't already set a json_schema — keeps the OpenAI-typed path authoritative.
+    try:
+        guided_payload = _parse_json_param(
+            request, "guided_json", request_log_tag=""
+        )
+    except ValueError as exc:
+        unsupported.append(("guided_json", str(exc)))
+        guided_payload = None
+    if guided_payload is not None:
+        if json_schema is not None:
+            unsupported.append(
+                ("guided_json", "ignored_response_format_already_set")
+            )
+        elif isinstance(guided_payload, dict):
+            json_schema = json.dumps(
+                guided_payload, ensure_ascii=False, separators=(",", ":")
+            )
+        else:
+            unsupported.append(
+                ("guided_json", f"unexpected_shape:{type(guided_payload).__name__}")
+            )
+
     # Engine-unsupported fields: detect presence (not value) — applier emits the
     # WARN. We don't try to parse them since we won't honour them anyway.
     for name in _UNSUPPORTED_PARAMETER_FIELDS:
@@ -347,6 +514,10 @@ def parse_dashscope_request_extras(
         max_thinking_tokens=max_thinking_tokens,
         enable_logprobs=enable_logprobs,
         top_logprobs=top_logprobs,
+        json_schema=json_schema,
+        regex=regex_str,
+        ebnf=ebnf_str,
+        structural_tag=structural_tag,
         unsupported=tuple(unsupported),
     )
 
@@ -407,6 +578,29 @@ def apply_dashscope_extras_to_generate_config(
         # (group co-scheduled requests by a logical id) intact without adding
         # a new GenerateConfig field.
         gc.chat_id = extras.scheduler_request_id
+
+    # P3 grammar: write only when the running engine declares the field. Until
+    # the xgrammar branch lands those four fields on GenerateConfig, the WARN
+    # branch fires (matches the legacy engine_unsupported observability shape).
+    declared = type(gc).model_fields
+    grammar_values = {
+        "json_schema": extras.json_schema,
+        "regex": extras.regex,
+        "ebnf": extras.ebnf,
+        "structural_tag": extras.structural_tag,
+    }
+    for name, value in grammar_values.items():
+        if value is None:
+            continue
+        if name in declared:
+            setattr(gc, name, value)
+        else:
+            logging.warning(
+                "[DashScopeCompat] [%s] grammar field %s parsed but engine "
+                "lacks support (xgrammar backend not merged); dropping",
+                request_log_tag,
+                name,
+            )
 
     for field_name, reason in extras.unsupported:
         # One log line per unsupported field per request. Bounded cardinality

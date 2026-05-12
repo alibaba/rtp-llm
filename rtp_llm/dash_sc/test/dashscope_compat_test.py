@@ -162,21 +162,11 @@ class ParseDashScopeRequestExtrasTest(TestCase):
 
     def test_engine_unsupported_param_fields_recorded(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
-        _add_string_param(req, "response_format", '{"type":"json_object"}')
-        _add_string_param(req, "guided_json", '{"type":"object"}')
         _add_string_param(req, "logit_bias", '{"42": -10}')
         _add_int64_param(req, "context_cache_ttl", 60)
         extras = parse_dashscope_request_extras(req, None)
         names = sorted(u[0] for u in extras.unsupported)
-        self.assertEqual(
-            names,
-            [
-                "context_cache_ttl",
-                "guided_json",
-                "logit_bias",
-                "response_format",
-            ],
-        )
+        self.assertEqual(names, ["context_cache_ttl", "logit_bias"])
 
     def test_unsupported_input_context_cache_ttl_recorded(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
@@ -184,6 +174,156 @@ class ParseDashScopeRequestExtrasTest(TestCase):
         extras = parse_dashscope_request_extras(req, None)
         names = [u[0] for u in extras.unsupported]
         self.assertIn("input.context_cache_ttl", names)
+
+    # ------------------------------------------------------------------
+    # response_format / guided_json (P3 grammar)
+    # ------------------------------------------------------------------
+
+    def test_response_format_json_object(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        _add_string_param(req, "response_format", '{"type":"json_object"}')
+        extras = parse_dashscope_request_extras(req, None)
+        self.assertEqual(extras.json_schema, '{"type": "object"}')
+        self.assertIsNone(extras.regex)
+        self.assertIsNone(extras.ebnf)
+        self.assertIsNone(extras.structural_tag)
+        self.assertEqual(extras.unsupported, ())
+
+    def test_response_format_json_schema_openai_shape(self) -> None:
+        # OpenAI shape: response_format.json_schema.schema is the actual schema.
+        req = predict_v2_pb2.ModelInferRequest()
+        _add_string_param(
+            req,
+            "response_format",
+            '{"type":"json_schema","json_schema":{"name":"u","schema":{"type":"object","properties":{"name":{"type":"string"}}}}}',
+        )
+        extras = parse_dashscope_request_extras(req, None)
+        # Same separators/encoding as openai_endpoint._apply_response_format so
+        # cross-path grammar cache keys hash identically.
+        self.assertEqual(
+            extras.json_schema,
+            '{"type":"object","properties":{"name":{"type":"string"}}}',
+        )
+        self.assertEqual(extras.unsupported, ())
+
+    def test_response_format_json_schema_bare_dict_rejected(self) -> None:
+        # response_format=json_schema strictly requires the OpenAI wrapper —
+        # a bare schema dict goes via guided_json. Avoids the "is this key a
+        # wrapper or a real schema property?" ambiguity.
+        req = predict_v2_pb2.ModelInferRequest()
+        _add_string_param(
+            req,
+            "response_format",
+            '{"type":"json_schema","json_schema":{"type":"object","required":["a"]}}',
+        )
+        extras = parse_dashscope_request_extras(req, None)
+        self.assertIsNone(extras.json_schema)
+        self.assertIn(
+            ("response_format", "json_schema_missing_schema"), extras.unsupported
+        )
+
+    def test_response_format_json_schema_missing_wrapper_recorded(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        _add_string_param(req, "response_format", '{"type":"json_schema"}')
+        extras = parse_dashscope_request_extras(req, None)
+        self.assertIsNone(extras.json_schema)
+        self.assertIn(
+            ("response_format", "json_schema_missing_wrapper"), extras.unsupported
+        )
+
+    def test_response_format_regex(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        _add_string_param(
+            req, "response_format", '{"type":"regex","pattern":"^[0-9]+$"}'
+        )
+        extras = parse_dashscope_request_extras(req, None)
+        self.assertEqual(extras.regex, "^[0-9]+$")
+        self.assertIsNone(extras.json_schema)
+
+    def test_response_format_regex_missing_pattern_recorded(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        _add_string_param(req, "response_format", '{"type":"regex"}')
+        extras = parse_dashscope_request_extras(req, None)
+        self.assertIsNone(extras.regex)
+        self.assertIn(
+            ("response_format", "regex_missing_pattern"), extras.unsupported
+        )
+
+    def test_response_format_ebnf(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        _add_string_param(
+            req, "response_format", '{"type":"ebnf","grammar":"root ::= \\"hi\\""}'
+        )
+        extras = parse_dashscope_request_extras(req, None)
+        self.assertEqual(extras.ebnf, 'root ::= "hi"')
+
+    def test_response_format_structural_tag(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        _add_string_param(
+            req,
+            "response_format",
+            '{"type":"structural_tag","structural_tag":{"begin":"<a>","end":"</a>"}}',
+        )
+        extras = parse_dashscope_request_extras(req, None)
+        self.assertEqual(extras.structural_tag, '{"begin":"<a>","end":"</a>"}')
+
+    def test_response_format_text_is_noop(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        _add_string_param(req, "response_format", '{"type":"text"}')
+        extras = parse_dashscope_request_extras(req, None)
+        self.assertIsNone(extras.json_schema)
+        self.assertIsNone(extras.regex)
+        self.assertEqual(extras.unsupported, ())
+
+    def test_response_format_unknown_type_recorded(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        _add_string_param(req, "response_format", '{"type":"weird"}')
+        extras = parse_dashscope_request_extras(req, None)
+        self.assertIsNone(extras.json_schema)
+        names = [u[0] for u in extras.unsupported]
+        self.assertIn("response_format", names)
+        reasons = [u[1] for u in extras.unsupported if u[0] == "response_format"]
+        self.assertTrue(any("unknown_type" in r for r in reasons))
+
+    def test_response_format_malformed_json_recorded(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        _add_string_param(req, "response_format", "not_json[")
+        extras = parse_dashscope_request_extras(req, None)
+        self.assertIsNone(extras.json_schema)
+        names = [u[0] for u in extras.unsupported]
+        self.assertIn("response_format", names)
+
+    def test_guided_json_alone_sets_json_schema(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        _add_string_param(
+            req, "guided_json", '{"type":"object","properties":{"x":{"type":"integer"}}}'
+        )
+        extras = parse_dashscope_request_extras(req, None)
+        self.assertEqual(
+            extras.json_schema,
+            '{"type":"object","properties":{"x":{"type":"integer"}}}',
+        )
+
+    def test_guided_json_loses_to_response_format(self) -> None:
+        # response_format wins when both are present; guided_json is recorded
+        # so misuse stays observable upstream rather than being silently dropped.
+        req = predict_v2_pb2.ModelInferRequest()
+        _add_string_param(req, "response_format", '{"type":"json_object"}')
+        _add_string_param(req, "guided_json", '{"type":"object"}')
+        extras = parse_dashscope_request_extras(req, None)
+        self.assertEqual(extras.json_schema, '{"type": "object"}')
+        self.assertIn(
+            ("guided_json", "ignored_response_format_already_set"),
+            extras.unsupported,
+        )
+
+    def test_guided_json_non_dict_payload_recorded(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        _add_string_param(req, "guided_json", "[1,2,3]")
+        extras = parse_dashscope_request_extras(req, None)
+        self.assertIsNone(extras.json_schema)
+        names = [u[0] for u in extras.unsupported]
+        self.assertIn("guided_json", names)
 
 
 class ApplyDashScopeExtrasToGenerateConfigTest(TestCase):
@@ -223,6 +363,66 @@ class ApplyDashScopeExtrasToGenerateConfigTest(TestCase):
         extras = DashScopeRequestExtras(scheduler_request_id="sched-77")
         apply_dashscope_extras_to_generate_config(gc, extras, request_log_tag="t")
         self.assertEqual(gc.chat_id, "sched-77")
+
+    def test_grammar_fields_warn_when_engine_lacks_support(self) -> None:
+        # Until the xgrammar branch lands json_schema/regex/ebnf/structural_tag
+        # on GenerateConfig, the applier must WARN (one line per parsed knob)
+        # rather than silently dropping — same observability shape as the
+        # _UNSUPPORTED_PARAMETER_FIELDS bucket.
+        if "json_schema" in GenerateConfig.model_fields:
+            self.skipTest(
+                "GenerateConfig already declares grammar fields — covered by "
+                "test_grammar_fields_set_when_engine_supports."
+            )
+        gc = GenerateConfig()
+        extras = DashScopeRequestExtras(
+            json_schema='{"type":"object"}',
+            regex="^x$",
+        )
+        with self.assertLogs(level=logging.WARNING) as cm:
+            apply_dashscope_extras_to_generate_config(
+                gc, extras, request_log_tag="tag-grm"
+            )
+        joined = "\n".join(cm.output)
+        self.assertIn("json_schema", joined)
+        self.assertIn("regex", joined)
+        self.assertIn("tag-grm", joined)
+
+    def test_grammar_fields_set_when_engine_supports(self) -> None:
+        # Forward-compatible coverage: a GenerateConfig variant that *does*
+        # declare the four grammar fields gets them set as plain attributes.
+        # Mirrors the post-xgrammar shape of GenerateConfig so the contract
+        # stays under test before that merge lands.
+        from typing import Optional as _Opt
+
+        from pydantic import BaseModel
+
+        class _GcWithGrammar(BaseModel):
+            json_schema: _Opt[str] = None
+            regex: _Opt[str] = None
+            ebnf: _Opt[str] = None
+            structural_tag: _Opt[str] = None
+            # Carry the subset of GenerateConfig fields the applier touches so
+            # the rest of the apply pipeline doesn't AttributeError.
+            stop_words_str: list = []
+            stop_words_list: list = []
+            return_all_probs: bool = False
+            max_thinking_tokens: int = 0
+            return_incremental: bool = False
+            chat_id: _Opt[str] = None
+
+        gc = _GcWithGrammar()
+        extras = DashScopeRequestExtras(
+            json_schema='{"type":"object"}',
+            regex="^x$",
+            ebnf="root ::= \"hi\"",
+            structural_tag='{"begin":"<a>"}',
+        )
+        apply_dashscope_extras_to_generate_config(gc, extras, request_log_tag="t")
+        self.assertEqual(gc.json_schema, '{"type":"object"}')
+        self.assertEqual(gc.regex, "^x$")
+        self.assertEqual(gc.ebnf, 'root ::= "hi"')
+        self.assertEqual(gc.structural_tag, '{"begin":"<a>"}')
 
     def test_unsupported_field_emits_warning_log(self) -> None:
         gc = GenerateConfig()
