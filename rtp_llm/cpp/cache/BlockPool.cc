@@ -1,10 +1,10 @@
 #include "rtp_llm/cpp/cache/BlockPool.h"
-#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/cache/MemoryLayoutStrategy.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/MemoryUtil.h"
-#include "rtp_llm/cpp/disaggregate/cache_store/NormalCacheStore.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 
 namespace rtp_llm {
@@ -342,7 +342,7 @@ void BlockPool::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_sto
     }
     if (cache_store_ && !kvcache_reg_mr_) {
         RTP_LLM_LOG_INFO("start to register user mr");
-        auto memory_util = std::static_pointer_cast<NormalCacheStore>(cache_store_)->getMemoryUtil();
+        auto memory_util = cache_store_->getMemoryUtil();
 
         for (size_t layout_idx = 0; layout_idx < config_.memory_layouts.size(); ++layout_idx) {
             const auto& layout_cfg = config_.memory_layouts[layout_idx];
@@ -373,7 +373,7 @@ void BlockPool::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_sto
 void BlockPool::deregUserMr() {
     if (kvcache_reg_mr_ && cache_store_) {
         RTP_LLM_LOG_INFO("start to deregister user mr");
-        auto memory_util = std::static_pointer_cast<NormalCacheStore>(cache_store_)->getMemoryUtil();
+        auto memory_util = cache_store_->getMemoryUtil();
 
         for (size_t layout_idx = 0; layout_idx < config_.memory_layouts.size(); ++layout_idx) {
             const auto& layout_cfg = config_.memory_layouts[layout_idx];

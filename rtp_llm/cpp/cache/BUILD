@@ -40,8 +40,8 @@ cc_library(
         ":block_info",
         ":batch_kv_cache_resource",
         ":cache_group_type",
-        "//:rtp_compute_ops",
         "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/model_utils:model_utils",
         "//rtp_llm/models_py/bindings/core:types",
     ] + torch_deps(),
 )
@@ -66,13 +66,19 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":cache_types",
-        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
-        "//rtp_llm/cpp/disaggregate/cache_store",
-        "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
+        "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
         "//rtp_llm/cpp/utils:kv_cache_utils",
         "//rtp_llm/cpp/utils:lru_cache",
         "//rtp_llm/cpp/utils:profiling_scope",
-    ],
+        "//rtp_llm/models_py/bindings/core:type_convert",
+    ] + select({
+        "@//:using_cuda": [
+            "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
+            "@local_config_cuda//cuda:cuda_headers",
+            "@local_config_cuda//cuda:cudart",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 cc_library(
@@ -112,6 +118,20 @@ cc_library(
 )
 
 cc_library(
+    name = "kv_cache_allocator_hdr",
+    hdrs = [
+        "KVCacheAllocator.h",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":block_pool",
+        ":cache_types",
+        "//rtp_llm/cpp/metrics:metrics",
+    ] + torch_deps(),
+)
+
+cc_library(
     name = "kv_cache_allocator",
     srcs = [
         "HybridKVCacheAllocator.cc",
@@ -130,7 +150,9 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
+        ":kv_cache_allocator_hdr",
         ":kv_cache_group",
+        "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
     ],
 )
@@ -177,6 +199,7 @@ cc_library(
         ":cache_types",
         ":kv_cache_allocator",
         "//rtp_llm/cpp/config:model_config",
+        "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/models_py/bindings/core:type_convert",
         "//rtp_llm/cpp/disaggregate/cache_store",
