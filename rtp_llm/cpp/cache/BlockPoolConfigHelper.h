@@ -18,8 +18,9 @@ public:
     static BlockPoolConfig createConfig(const CacheConfig& cache_config) {
         RTP_LLM_CHECK_WITH_INFO(!cache_config.cache_specs.empty(), "cache_specs must not be empty");
         BlockPoolConfig config;
-        config.block_num      = cache_config.block_num;
-        const bool  is_hybrid = cache_config.groupNums() > 1;
+        config.block_num         = cache_config.block_num;
+        config.separate_kv_cache = cache_config.separate_kv_cache;
+        const bool  is_hybrid    = cache_config.groupNums() > 1;
         auto        layer_num = is_hybrid ? cache_config.group_layer_num : cache_config.layer_num;
         const auto& main_spec = cache_config.cache_specs[0];
         // linear block size is same with full block block size

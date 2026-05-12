@@ -146,6 +146,8 @@ void KVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, const BlockI
     }
 
     BatchCopyParams copy_params;
+    BatchCopyParams k_copy_params;
+    BatchCopyParams v_copy_params;
 
     const size_t copy_num = (end_ptr - begin_ptr) * config_.layer_num;
 
@@ -153,14 +155,46 @@ void KVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, const BlockI
     auto   memory_type_pool = block_pool_ ? block_pool_->where() :
         allocationTypeToMemoryType(allocation_type_);
     auto   copy_type = BatchCopyParams::get_copy_type(memory_type_pool, memory_type_pool);
-    copy_nums[copy_type] += copy_num;  // for kv
+
+    if (config_.separate_kv_cache) {
+        copy_nums[copy_type] += copy_num * 2;
+    } else {
+        copy_nums[copy_type] += copy_num;
+    }
 
     for (size_t i = 0; i < CopyType::TYPE_SIZE; ++i) {
         copy_params.reserve(static_cast<CopyType>(i), copy_nums[i]);
+        if (config_.separate_kv_cache) {
+            k_copy_params.reserve(static_cast<CopyType>(i), copy_nums[i] / 2);
+            v_copy_params.reserve(static_cast<CopyType>(i), copy_nums[i] / 2);
+        }
     }
 
     auto&  spec                = config_.cache_specs[0];
     size_t kv_block_size_bytes = spec->block_size_bytes();
+
+    if (config_.separate_kv_cache) {
+        size_t k_block_size_bytes = spec->k_block_size_bytes();
+        size_t v_block_size_bytes = spec->v_block_size_bytes();
+        for (auto it = begin_ptr; it != end_ptr; ++it) {
+            auto [src_block_index, dest_block_index] = *it;
+            for (int layer_id = 0; layer_id < config_.layer_num; layer_id++) {
+                auto src_addr_info = convertIndexToAddr(layer_id, src_block_index);
+                auto dst_addr_info = convertIndexToAddr(layer_id, dest_block_index);
+                if (!src_addr_info.kv_addr || !dst_addr_info.kv_addr
+                    || !src_addr_info.v_addr || !dst_addr_info.v_addr) {
+                    RTP_LLM_LOG_ERROR("Failed to get block address for layer %d, src_block %d, dst_block %d",
+                                      layer_id, src_block_index, dest_block_index);
+                    continue;
+                }
+                k_copy_params.add(dst_addr_info.kv_addr, src_addr_info.kv_addr, k_block_size_bytes, copy_type);
+                v_copy_params.add(dst_addr_info.v_addr, src_addr_info.v_addr, v_block_size_bytes, copy_type);
+            }
+        }
+        execBatchCopy(k_copy_params);
+        execBatchCopy(v_copy_params);
+        return;
+    }
 
     for (auto it = begin_ptr; it != end_ptr; ++it) {
         auto [src_block_index, dest_block_index] = *it;

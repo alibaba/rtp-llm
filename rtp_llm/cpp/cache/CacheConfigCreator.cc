@@ -29,6 +29,7 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
     CacheConfig config    = CacheConfigCreator::createBasicConfig(model_config, parallelism_config);
     uint32_t    block_num = 0;
 
+    config.separate_kv_cache = kv_cache_config.separate_kv_cache;
     config.linear_step = kv_cache_config.linear_step;
     if (kv_cache_config.kernel_seq_size_per_block > 0) {
         RTP_LLM_CHECK_WITH_INFO(kv_cache_config.seq_size_per_block % kv_cache_config.kernel_seq_size_per_block == 0,
@@ -131,6 +132,7 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     RTP_LLM_CHECK_WITH_INFO(block_num > 0, "kv cache needs at least 1 block but %zu", block_num);
 
     CacheConfig config      = score_config;
+    config.separate_kv_cache = kv_cache_config.separate_kv_cache;
     config.linear_step      = std::max(1, kv_cache_config.linear_step);
     config.layer_all_num    = total_layer_num;
     config.block_size_bytes = total_block_size_bytes;

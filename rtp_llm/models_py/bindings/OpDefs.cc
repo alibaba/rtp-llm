@@ -13,7 +13,9 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("kv_cache_base", &LayerKVCache::kv_cache_base, "Key/value cache tensor (per-layer view)")
         .def_readwrite("kv_scale_base", &LayerKVCache::kv_scale_base, "Key/value cache scale tensor")
         .def_readonly("seq_size_per_block", &LayerKVCache::seq_size_per_block, "Sequence size per block")
-        .def_readonly("layer_id", &LayerKVCache::layer_id, "Global layer id");
+        .def_readonly("layer_id", &LayerKVCache::layer_id, "Global layer id")
+        .def_readwrite("k_cache_base", &LayerKVCache::k_cache_base, "K cache tensor (separate, NHD layout)")
+        .def_readwrite("v_cache_base", &LayerKVCache::v_cache_base, "V cache tensor (separate, NHD layout)");
 
     pybind11::class_<KVCache>(m, "KVCache")
         .def(pybind11::init<>())
@@ -32,6 +34,9 @@ void registerPyOpDefs(pybind11::module& m) {
                        &KVCache::layer_attn_types,
                        "Per-layer attention type (CacheGroupType::FULL or LINEAR). "
                        "Empty = all layers treated as FULL (backward compatibility).")
+        .def_readwrite("separate_kv_cache", &KVCache::separate_kv_cache, "Whether K/V cache is separated")
+        .def_readwrite("k_cache_base_by_layer", &KVCache::k_cache_base_by_layer, "Per-layer K cache tensors")
+        .def_readwrite("v_cache_base_by_layer", &KVCache::v_cache_base_by_layer, "Per-layer V cache tensors")
         .def("get_layer_cache",
              &KVCache::getLayerCache,
              "Return a per-layer LayerKVCache for the given global layer id");

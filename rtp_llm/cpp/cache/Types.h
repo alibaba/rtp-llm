@@ -18,6 +18,7 @@ typedef std::vector<int> LayerIdsType;
 struct BlockAddrInfo {
     void* kv_addr       = nullptr;
     void* kv_scale_addr = nullptr;
+    void* v_addr        = nullptr;
 };
 
 struct KVCacheInfo {

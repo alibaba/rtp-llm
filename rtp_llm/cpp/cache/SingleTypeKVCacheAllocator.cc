@@ -218,6 +218,21 @@ CacheLayerLayout SingleTypeKVCacheAllocator::allLayerCacheBase() const {
     layout.layers_to_kv_buffer_ptrs.resize(config_.layer_all_num);
     layout.layers_to_scale_buffer_ptrs.resize(config_.layer_all_num);
 
+    if (config_.separate_kv_cache) {
+        auto k_tensors = block_pool_->allLayerKCacheBase();
+        auto v_tensors = block_pool_->allLayerVCacheBase();
+        layout.layers_to_k_buffer_ptrs.resize(config_.layer_all_num);
+        layout.layers_to_v_buffer_ptrs.resize(config_.layer_all_num);
+        for (int layer_id = 0; layer_id < config_.layer_all_num; ++layer_id) {
+            if (static_cast<size_t>(layer_id) < k_tensors.size() && k_tensors[layer_id].defined()) {
+                layout.layers_to_k_buffer_ptrs[layer_id] = k_tensors[layer_id];
+            }
+            if (static_cast<size_t>(layer_id) < v_tensors.size() && v_tensors[layer_id].defined()) {
+                layout.layers_to_v_buffer_ptrs[layer_id] = v_tensors[layer_id];
+            }
+        }
+    }
+
     for (int layer_id = 0; layer_id < config_.layer_all_num; ++layer_id) {
         if (layer_tensors[layer_id].defined() && layer_tensors[layer_id].numel() > 0) {
             layout.layers_to_kv_buffer_ptrs[layer_id] = layer_tensors[layer_id];

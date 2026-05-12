@@ -176,6 +176,19 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             kv_cache.kv_scale_base_by_layer.push_back(t);
         }
 
+        // Separate K/V cache (Ascend NPU)
+        if (!layout.layers_to_k_buffer_ptrs.empty() && !layout.layers_to_v_buffer_ptrs.empty()) {
+            kv_cache.separate_kv_cache = true;
+            kv_cache.k_cache_base_by_layer.reserve(layout.layers_to_k_buffer_ptrs.size());
+            kv_cache.v_cache_base_by_layer.reserve(layout.layers_to_v_buffer_ptrs.size());
+            for (const auto& t : layout.layers_to_k_buffer_ptrs) {
+                kv_cache.k_cache_base_by_layer.push_back(t);
+            }
+            for (const auto& t : layout.layers_to_v_buffer_ptrs) {
+                kv_cache.v_cache_base_by_layer.push_back(t);
+            }
+        }
+
         kv_cache.layer_attn_types = layout.layer_attn_types;
         init_resources.kv_cache   = kv_cache;
     }

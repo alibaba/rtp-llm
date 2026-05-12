@@ -18,7 +18,9 @@ public:
     bool init(const MemoryLayoutConfig& config,
               torch::Tensor&            kv_cache_tensor,
               torch::Tensor&            kv_scale_tensor,
-              void*                     cache_base_ptr);
+              void*                     cache_base_ptr,
+              bool                      separate_kv_cache = false,
+              void*                     v_cache_base_ptr  = nullptr);
 
     std::vector<torch::Tensor> getLayerCacheTensors() const;
     std::vector<torch::Tensor> getLayerScaleCacheTensors() const;
@@ -49,7 +51,9 @@ private:
 
     MemoryLayoutConfig         config_;
     void*                      cache_base_ptr_    = nullptr;
+    void*                      v_cache_base_ptr_  = nullptr;
     void*                      kv_scale_base_ptr_ = nullptr;
+    bool                       separate_kv_cache_ = false;
     rtp_llm::DataType          data_type_         = rtp_llm::TYPE_INVALID;
     std::vector<torch::Tensor> layer_kv_tensors_;
     std::vector<torch::Tensor> layer_kv_scale_tensors_;

@@ -46,8 +46,18 @@ if device_type == DeviceType.ROCm:
     DECODE_MHA_IMPS.append(AiterDecodeImplAsm)
     DECODE_MHA_IMPS.append(AiterDecodeImplNonAsm)
 elif device_type == DeviceType.Ascend:
-    # Ascend FMHA: use PyTorch native SDPA for prefill,
-    # and a basic contiguous attention impl for decode.
+    # Ascend FMHA: torch_npu paged attention (new, with separate K/V cache)
+    from rtp_llm.models_py.modules.factory.attention.ascend_impl.ascend_prefill import (
+        AscendPrefillImpl,
+    )
+    from rtp_llm.models_py.modules.factory.attention.ascend_impl.ascend_decode import (
+        AscendDecodeImpl,
+    )
+
+    PREFILL_MHA_IMPS.append(AscendPrefillImpl)
+    DECODE_MHA_IMPS.append(AscendDecodeImpl)
+
+    # SDPA baseline (fallback for non-separate K/V cache)
     from rtp_llm.models_py.modules.factory.attention.ascend_impl.torch_sdpa import (
         AscendSDPAPrefillImpl,
         AscendSDPADecodeImpl,

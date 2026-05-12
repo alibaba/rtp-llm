@@ -10,10 +10,14 @@
 namespace rtp_llm {
 
 BlockPool::BlockPool(const BlockPoolConfig& config, AllocationType allocation_type):
-    config_(config), allocation_type_(allocation_type) {}
+    config_(config), allocation_type_(allocation_type) {
+    separate_kv_cache_ = config_.separate_kv_cache;
+}
 
 BlockPool::~BlockPool() {
     cache_aligned_buffer_ = torch::Tensor();
+    k_cache_buffer_ = torch::Tensor();
+    v_cache_buffer_ = torch::Tensor();
 }
 
 void BlockPool::validateConfig() const {
@@ -52,17 +56,28 @@ void BlockPool::initializeCacheBuffer() {
 #endif
     }
     auto options = torch::TensorOptions().dtype(torch::kUInt8).device(device);
-    cache_aligned_buffer_ = torch::empty({static_cast<int64_t>(config_.total_size_bytes)}, options);
-    if (allocation_type_ == AllocationType::HOST) {
-        cache_aligned_buffer_ = cache_aligned_buffer_.pin_memory();
+
+    if (separate_kv_cache_) {
+        size_t per_buffer_bytes = config_.total_size_bytes / 2;
+        k_cache_buffer_ = torch::empty({static_cast<int64_t>(per_buffer_bytes)}, options);
+        v_cache_buffer_ = torch::empty({static_cast<int64_t>(per_buffer_bytes)}, options);
+        if (allocation_type_ == AllocationType::HOST) {
+            k_cache_buffer_ = k_cache_buffer_.pin_memory();
+            v_cache_buffer_ = v_cache_buffer_.pin_memory();
+        }
+        cache_base_ptr_ = k_cache_buffer_.data_ptr();
+        // cache_aligned_buffer_ remains empty; allLayerCacheBase() returns K/V per-layer views
+    } else {
+        cache_aligned_buffer_ = torch::empty({static_cast<int64_t>(config_.total_size_bytes)}, options);
+        if (allocation_type_ == AllocationType::HOST) {
+            cache_aligned_buffer_ = cache_aligned_buffer_.pin_memory();
+        }
+        cache_base_ptr_ = cache_aligned_buffer_.data_ptr();
     }
-    cache_base_ptr_ = cache_aligned_buffer_.data_ptr();
     RTP_LLM_CHECK_WITH_INFO(cache_base_ptr_ != nullptr, "block pool allocate cache aligned buffer is null");
 }
 
 void BlockPool::initializeLayerMappings() {
-    torch::Tensor full_tensor = cache_aligned_buffer_;
-
     size_t total_layers = 0;
     for (const auto& layout_cfg : config_.memory_layouts) {
         total_layers += static_cast<size_t>(layout_cfg.layer_num);
@@ -70,14 +85,18 @@ void BlockPool::initializeLayerMappings() {
     global_layer_to_local_.assign(total_layers, {-1, -1});
     global_layer_kv_tensors_.assign(total_layers, torch::Tensor());
     global_layer_kv_scale_tensors_.assign(total_layers, torch::Tensor());
+    if (separate_kv_cache_) {
+        global_layer_k_tensors_.assign(total_layers, torch::Tensor());
+        global_layer_v_tensors_.assign(total_layers, torch::Tensor());
+    }
 }
 
 void BlockPool::initializeLayoutStrategies() {
     layout_strategies_.resize(config_.memory_layouts.size());
-    torch::Tensor full_tensor = cache_aligned_buffer_;
 
     size_t global_layer_begin = 0;
     for (size_t layout_idx = 0; layout_idx < config_.memory_layouts.size(); ++layout_idx) {
+        torch::Tensor full_tensor = separate_kv_cache_ ? k_cache_buffer_ : cache_aligned_buffer_;
         processMemoryLayout(layout_idx, full_tensor, global_layer_begin);
         global_layer_begin += static_cast<size_t>(config_.memory_layouts[layout_idx].layer_num);
     }
@@ -138,6 +157,11 @@ void BlockPool::initializeLayoutStrategy(size_t                    layout_idx,
                                          torch::Tensor&            kv_scale_tensor) {
     void* layout_cache_base_ptr =
         static_cast<void*>(static_cast<char*>(cache_base_ptr_) + layout_cfg.kv_cache_offset_bytes);
+    void* v_cache_base_ptr = nullptr;
+    if (separate_kv_cache_ && v_cache_buffer_.defined()) {
+        v_cache_base_ptr = static_cast<void*>(
+            static_cast<char*>(v_cache_buffer_.data_ptr()) + layout_cfg.kv_cache_offset_bytes);
+    }
 
     layout_strategies_[layout_idx] = std::make_unique<MemoryLayoutStrategy>();
     RTP_LLM_CHECK_WITH_INFO(layout_strategies_[layout_idx] != nullptr,
@@ -145,7 +169,9 @@ void BlockPool::initializeLayoutStrategy(size_t                    layout_idx,
                             layout_idx);
 
     RTP_LLM_CHECK_WITH_INFO(
-        layout_strategies_[layout_idx]->init(layout_cfg, kv_cache_tensor, kv_scale_tensor, layout_cache_base_ptr),
+        layout_strategies_[layout_idx]->init(
+            layout_cfg, kv_cache_tensor, kv_scale_tensor, layout_cache_base_ptr,
+            separate_kv_cache_, v_cache_base_ptr),
         "Failed to initialize memory layout strategy for layout[%zu]",
         layout_idx);
 }
@@ -153,7 +179,6 @@ void BlockPool::initializeLayoutStrategy(size_t                    layout_idx,
 void BlockPool::processLayerTensors(size_t                    layout_idx,
                                     const MemoryLayoutConfig& layout_cfg,
                                     size_t&                   global_layer_begin) {
-    // 获取层张量
     auto layer_tensors = layout_strategies_[layout_idx]->getLayerCacheTensors();
     RTP_LLM_CHECK_WITH_INFO(layer_tensors.size() == static_cast<size_t>(layout_cfg.layer_num),
                             "layout[%zu] layer tensors size mismatch: got=%zu expect=%u",
@@ -161,7 +186,6 @@ void BlockPool::processLayerTensors(size_t                    layout_idx,
                             layer_tensors.size(),
                             layout_cfg.layer_num);
 
-    // 映射全局层到局部层，并设置KV张量
     for (size_t local_layer = 0; local_layer < static_cast<size_t>(layout_cfg.layer_num); ++local_layer) {
         const size_t global_layer = global_layer_begin + local_layer;
         RTP_LLM_CHECK_WITH_INFO(global_layer < global_layer_to_local_.size(), "global layer index out of range");
@@ -169,7 +193,28 @@ void BlockPool::processLayerTensors(size_t                    layout_idx,
         global_layer_kv_tensors_[global_layer] = layer_tensors[local_layer];
     }
 
-    // 处理缩放张量（如果存在）
+    // Separate K/V: compute per-layer V tensor views from v_cache_buffer_
+    if (separate_kv_cache_) {
+        for (size_t local_layer = 0; local_layer < static_cast<size_t>(layout_cfg.layer_num); ++local_layer) {
+            const size_t global_layer = global_layer_begin + local_layer;
+            auto& k_layer_tensor = global_layer_kv_tensors_[global_layer];
+            global_layer_k_tensors_[global_layer] = k_layer_tensor;
+
+            // V tensor: same offset within v_cache_buffer_ as K within k_cache_buffer_
+            if (k_layer_tensor.data_ptr() && k_cache_buffer_.data_ptr()) {
+                int64_t offset_bytes = static_cast<char*>(k_layer_tensor.data_ptr())
+                                     - static_cast<char*>(k_cache_buffer_.data_ptr());
+                auto v_ptr = static_cast<char*>(v_cache_buffer_.data_ptr()) + offset_bytes;
+                auto v_options = torch::TensorOptions()
+                                     .dtype(k_layer_tensor.dtype())
+                                     .device(v_cache_buffer_.device())
+                                     .requires_grad(false);
+                auto v_view = torch::from_blob(v_ptr, k_layer_tensor.sizes(), k_layer_tensor.strides(), v_options);
+                global_layer_v_tensors_[global_layer] = v_view;
+            }
+        }
+    }
+
     auto scale_tensors = layout_strategies_[layout_idx]->getLayerScaleCacheTensors();
     if (!scale_tensors.empty()) {
         RTP_LLM_CHECK_WITH_INFO(scale_tensors.size() == static_cast<size_t>(layout_cfg.layer_num),
@@ -221,6 +266,14 @@ std::vector<torch::Tensor> BlockPool::allLayerCacheBase() const {
 
 std::vector<torch::Tensor> BlockPool::allLayerScaleCacheBase() const {
     return global_layer_kv_scale_tensors_;
+}
+
+std::vector<torch::Tensor> BlockPool::allLayerKCacheBase() const {
+    return global_layer_k_tensors_;
+}
+
+std::vector<torch::Tensor> BlockPool::allLayerVCacheBase() const {
+    return global_layer_v_tensors_;
 }
 
 BlockIndicesType BlockPool::malloc(int num_blocks) {
@@ -512,6 +565,9 @@ BlockPool::convertIndexToBuffer(int layer_id, int block_id, int partition_count,
 
 MemoryType BlockPool::where() const {
 #if USING_ASCEND
+    if (separate_kv_cache_) {
+        return k_cache_buffer_.is_privateuseone() ? MemoryType::MEMORY_NPU : MemoryType::MEMORY_CPU;
+    }
     return cache_aligned_buffer_.is_privateuseone() ? MemoryType::MEMORY_NPU : MemoryType::MEMORY_CPU;
 #else
     return cache_aligned_buffer_.is_cuda() ? MemoryType::MEMORY_GPU : MemoryType::MEMORY_CPU;

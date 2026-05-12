@@ -163,6 +163,8 @@ void HybridConfigCreator::setupPhysicalSizes(CacheConfig&          config,
                             "not support full attention with padding now");
 
     config.kv_block_stride_bytes = full_kv_block_stride_bytes;
+    config.k_block_stride_bytes  = full_spec->k_block_size_bytes();
+    config.v_block_stride_bytes  = full_spec->v_block_size_bytes();
     config.kv_block_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_block_stride_bytes;
     config.kv_scale_stride_bytes = full_spec->scale_block_size_bytes();
     config.kv_scale_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_scale_stride_bytes;

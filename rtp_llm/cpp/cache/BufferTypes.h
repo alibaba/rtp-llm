@@ -18,6 +18,10 @@ struct CacheLayerLayout {
     std::vector<CacheGroupType> layer_attn_types;
     std::vector<torch::Tensor>  layers_to_kv_buffer_ptrs;
     std::vector<torch::Tensor>  layers_to_scale_buffer_ptrs;
+
+    // Separate K/V cache buffers (Ascend NPU path)
+    std::vector<torch::Tensor>  layers_to_k_buffer_ptrs;
+    std::vector<torch::Tensor>  layers_to_v_buffer_ptrs;
 };
 
 struct KVCacheBuffer {

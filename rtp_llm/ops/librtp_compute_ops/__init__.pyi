@@ -133,6 +133,22 @@ class LayerKVCache:
     @kv_scale_base.setter
     def kv_scale_base(self, arg0: torch.Tensor) -> None: ...
     @property
+    def k_cache_base(self) -> torch.Tensor:
+        """
+        K cache tensor (separate, NHD layout)
+        """
+
+    @k_cache_base.setter
+    def k_cache_base(self, arg0: torch.Tensor) -> None: ...
+    @property
+    def v_cache_base(self) -> torch.Tensor:
+        """
+        V cache tensor (separate, NHD layout)
+        """
+
+    @v_cache_base.setter
+    def v_cache_base(self, arg0: torch.Tensor) -> None: ...
+    @property
     def layer_id(self) -> int:
         """
         Global layer id
@@ -156,6 +172,9 @@ class KVCache:
     use_mla: bool
     kv_lora_rank: int
     rope_head_dim: int
+    separate_kv_cache: bool
+    k_cache_base_by_layer: list[torch.Tensor]
+    v_cache_base_by_layer: list[torch.Tensor]
     def __init__(self) -> None: ...
     def get_layer_cache(self, arg0: int) -> LayerKVCache:
         """Return a per-layer LayerKVCache for the given global layer id."""

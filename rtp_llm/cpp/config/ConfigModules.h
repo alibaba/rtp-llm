@@ -159,6 +159,7 @@ struct KVCacheConfig {
     int         kernel_seq_size_per_block = 0;
     int         test_block_num            = 0;
     int         use_block_cache           = -1;  // -1 means not set, use Optional<int> equivalent
+    bool        separate_kv_cache         = false;  // Ascend NPU: allocate K and V in separate buffers
     bool        enable_device_cache       = true;
     bool        enable_memory_cache       = false;
     // When true, memory-cache H2D/D2H may use split-KV SM scatter/gather (CUDA) when layout is eligible.

@@ -33,6 +33,8 @@ public:
     MemoryType                 where() const;
     std::vector<torch::Tensor> allLayerCacheBase() const;
     std::vector<torch::Tensor> allLayerScaleCacheBase() const;
+    std::vector<torch::Tensor> allLayerKCacheBase() const;
+    std::vector<torch::Tensor> allLayerVCacheBase() const;
 
     // these interfaces are all thread-safe
     std::vector<BlockIdxType> malloc(int num_blocks);
@@ -135,10 +137,19 @@ private:
     int64_t                     mr_cost_time_ms_ = 0;
     std::shared_ptr<CacheStore> cache_store_;
 
+    // Separate K/V cache buffers (Ascend NPU)
+    torch::Tensor               k_cache_buffer_;
+    torch::Tensor               v_cache_buffer_;
+    bool                        separate_kv_cache_ = false;
+
     std::vector<std::unique_ptr<MemoryLayoutStrategy>> layout_strategies_;
     std::vector<std::pair<int, int>>                   global_layer_to_local_;
     std::vector<torch::Tensor>                         global_layer_kv_tensors_;
     std::vector<torch::Tensor>                         global_layer_kv_scale_tensors_;
+
+    // Separate K/V per-layer views (Ascend NPU)
+    std::vector<torch::Tensor>                         global_layer_k_tensors_;
+    std::vector<torch::Tensor>                         global_layer_v_tensors_;
 
     mutable std::recursive_mutex mutex_;
 };

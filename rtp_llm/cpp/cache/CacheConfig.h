@@ -44,6 +44,9 @@ struct CacheConfig {
         return std::max<size_t>(1, seq_size_per_block / kernel_seq_size_per_block);
     }
 
+    // Separate K/V cache (required for Ascend NPU)
+    bool separate_kv_cache = false;
+
     // Block sizing information
     // ---- Per-block sizes (all layers) ----
     size_t kv_block_size_bytes = 0;
@@ -53,6 +56,10 @@ struct CacheConfig {
     // ---- Per-block strides (one layer) ----
     size_t kv_block_stride_bytes = 0;
     size_t kv_scale_stride_bytes = 0;
+
+    // ---- Separate K/V strides (Ascend NPU) ----
+    size_t k_block_stride_bytes = 0;
+    size_t v_block_stride_bytes = 0;
 
     // Attention-specific configuration
     int linear_step      = 1;  // For Linear attention: keep one cache block every `linear_step` blocks
@@ -100,11 +107,14 @@ struct CacheConfig {
 
         // Block sizing information section
         os << indent1 << "# Block Sizing Information:\n";
+        OUTPUT_FIELD(separate_kv_cache);
         OUTPUT_FIELD(kv_block_size_bytes);
         OUTPUT_FIELD(kv_scale_size_bytes);
         OUTPUT_FIELD(block_size_bytes);
         OUTPUT_FIELD(kv_block_stride_bytes);
         OUTPUT_FIELD(kv_scale_stride_bytes);
+        OUTPUT_FIELD(k_block_stride_bytes);
+        OUTPUT_FIELD(v_block_stride_bytes);
         os << "\n";
 
         // Attention-specific configuration section

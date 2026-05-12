@@ -346,6 +346,23 @@ CacheLayerLayout HybridTypeKVCacheAllocator::allLayerCacheBase() const {
     layout.layers_to_kv_buffer_ptrs.resize(config_.layer_all_num);
     layout.layers_to_scale_buffer_ptrs.resize(config_.layer_all_num);
 
+    if (config_.separate_kv_cache) {
+        auto k_tensors = block_pool_->allLayerKCacheBase();
+        auto v_tensors = block_pool_->allLayerVCacheBase();
+        layout.layers_to_k_buffer_ptrs.resize(config_.layer_all_num);
+        layout.layers_to_v_buffer_ptrs.resize(config_.layer_all_num);
+        for (size_t layer_id = 0; layer_id < static_cast<size_t>(config_.layer_all_num); ++layer_id) {
+            int32_t      local     = global_layer_to_local_id_[layer_id];
+            const size_t local_idx = static_cast<size_t>(local);
+            if (local_idx < k_tensors.size() && k_tensors[local_idx].defined()) {
+                layout.layers_to_k_buffer_ptrs[layer_id] = k_tensors[local_idx];
+            }
+            if (local_idx < v_tensors.size() && v_tensors[local_idx].defined()) {
+                layout.layers_to_v_buffer_ptrs[layer_id] = v_tensors[local_idx];
+            }
+        }
+    }
+
     for (size_t layer_id = 0; layer_id < static_cast<size_t>(config_.layer_all_num); ++layer_id) {
         int32_t      local     = global_layer_to_local_id_[layer_id];
         const size_t local_idx = static_cast<size_t>(local);

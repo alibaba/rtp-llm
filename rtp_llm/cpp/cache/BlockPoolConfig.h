@@ -7,6 +7,8 @@
 namespace rtp_llm {
 
 struct BlockPoolConfig {
+    bool separate_kv_cache = false;  // Ascend NPU: K and V in separate buffers
+
     // all memory layouts share the same block id space
     uint32_t block_num = 0;
 

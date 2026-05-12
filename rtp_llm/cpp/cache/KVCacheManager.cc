@@ -154,7 +154,40 @@ bool KVCacheManager::setKVBlockValue(int                  block_index,
                                      int                  layer_id,
                                      const torch::Tensor& k_buffer,
                                      const torch::Tensor& v_buffer) {
-    // Basic size/type validation to prevent out-of-bounds copy
+    if (config_.separate_kv_cache) {
+        auto dst = allocator_->convertIndexToBuffer(layer_id, block_index);
+        RTP_LLM_CHECK_WITH_INFO(dst.size() >= 2,
+                                "convertIndexToBuffer returned fewer than 2 blocks for separate K/V cache");
+        auto copyFunc = [&](const torch::Tensor& src_tensor, const BlockInfo& dst_block) -> bool {
+            const size_t src_bytes = src_tensor.nbytes();
+            if (dst_block.size_bytes < src_bytes) {
+                RTP_LLM_LOG_ERROR("dst block bytes[%zu] < src bytes[%zu] in setKVBlockValue(layer=%d)",
+                                  dst_block.size_bytes, src_bytes, layer_id);
+                return false;
+            }
+            auto src_device = src_tensor.is_privateuseone() ? torch::Device(torch::kPrivateUse1) :
+                              src_tensor.is_cuda() ? torch::kCUDA : torch::kCPU;
+            auto dst_device = dst_block.is_cuda ?
+#if USING_ASCEND
+                torch::Device(torch::kPrivateUse1) :
+#else
+                torch::kCUDA :
+#endif
+                torch::kCPU;
+            auto dst_t = torch::from_blob(dst_block.addr, {(int64_t)src_bytes},
+                torch::TensorOptions().dtype(torch::kUInt8).device(dst_device));
+            auto src_t = torch::from_blob(src_tensor.data_ptr(), {(int64_t)src_bytes},
+                torch::TensorOptions().dtype(torch::kUInt8).device(src_device));
+            dst_t.copy_(src_t);
+            return true;
+        };
+        if (!copyFunc(k_buffer, dst[0]) || !copyFunc(v_buffer, dst[1])) {
+            return false;
+        }
+        cudaSyncAndCheck();
+        return true;
+    }
+
     auto&  spec             = config_.cache_specs[0];
     size_t expected_k_bytes = spec->k_block_size_bytes();
     size_t expected_v_bytes = spec->v_block_size_bytes();
@@ -265,6 +298,13 @@ CacheLayerLayout KVCacheManager::getMainModelCacheLayerLayout() const {
         layout.layers_to_scale_buffer_ptrs.resize(config_.layer_num);
     }
 
+    if (config_.separate_kv_cache) {
+        auto& all_k_tensors = all_layout.layers_to_k_buffer_ptrs;
+        auto& all_v_tensors = all_layout.layers_to_v_buffer_ptrs;
+        layout.layers_to_k_buffer_ptrs.resize(config_.layer_num);
+        layout.layers_to_v_buffer_ptrs.resize(config_.layer_num);
+    }
+
     layout.layer_to_groups = config_.layer_to_group_id;
     layout.group_types     = config_.group_types;
     layout.layer_attn_types.resize(config_.layer_num, CacheGroupType::FULL);
@@ -280,6 +320,17 @@ CacheLayerLayout KVCacheManager::getMainModelCacheLayerLayout() const {
             layout.layers_to_kv_buffer_ptrs[layer_id] = all_layer_tensors[layer_id];
         } else {
             RTP_LLM_CHECK(false);
+        }
+
+        if (config_.separate_kv_cache) {
+            auto& all_k_tensors = all_layout.layers_to_k_buffer_ptrs;
+            auto& all_v_tensors = all_layout.layers_to_v_buffer_ptrs;
+            if (static_cast<size_t>(layer_id) < all_k_tensors.size()) {
+                layout.layers_to_k_buffer_ptrs[layer_id] = all_k_tensors[layer_id];
+            }
+            if (static_cast<size_t>(layer_id) < all_v_tensors.size()) {
+                layout.layers_to_v_buffer_ptrs[layer_id] = all_v_tensors[layer_id];
+            }
         }
 
         if (!all_scale_tensors.empty()) {
