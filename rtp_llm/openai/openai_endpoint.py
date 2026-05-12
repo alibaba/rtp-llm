@@ -40,6 +40,7 @@ from rtp_llm.openai.renderers.custom_renderer import (
 )
 from rtp_llm.ops import SpecialTokens
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
+from rtp_llm.server.request_headers import extract_request_headers
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
@@ -502,6 +503,7 @@ class OpenaiEndpoint(object):
             generate_config,
             self.backend_rpc_server_visitor,
             chat_request,
+            headers=extract_request_headers(raw_request.headers),
         )
 
         return self._complete_stream_response(
