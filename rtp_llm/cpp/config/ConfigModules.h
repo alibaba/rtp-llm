@@ -122,21 +122,21 @@ enum class FMHAType {
 };
 
 struct FMHAConfig {
-    bool        enable_fmha                   = true;
-    bool        enable_trt_fmha               = true;
-    bool        enable_paged_trt_fmha         = true;
-    bool        enable_open_source_fmha       = true;
-    bool        enable_paged_open_source_fmha = true;
-    bool        enable_trtv1_fmha             = true;
-    bool        disable_flash_infer           = false;
-    bool        enable_xqa                    = true;
-    bool        use_aiter_pa                  = true;
-    bool        use_asm_pa                    = true;
+    bool enable_fmha                   = true;
+    bool enable_trt_fmha               = true;
+    bool enable_paged_trt_fmha         = true;
+    bool enable_open_source_fmha       = true;
+    bool enable_paged_open_source_fmha = true;
+    bool enable_trtv1_fmha             = true;
+    bool disable_flash_infer           = false;
+    bool enable_xqa                    = true;
+    bool use_aiter_pa                  = true;
+    bool use_asm_pa                    = true;
     // Default off: Triton PA on ROCm regressed vs ASM PA after the rocm_impl
     // refactor; ASM/NonAsm now own the default decode path. Set to true to opt
     // back into the Triton kernel.
-    bool        use_triton_pa                 = false;
-    int64_t     absorb_opt_len                = 1024;
+    bool        use_triton_pa  = false;
+    int64_t     absorb_opt_len = 1024;
     std::string to_string() const;
 };
 
@@ -353,6 +353,7 @@ struct RuntimeConfig {
     std::string              model_name = "";
     std::vector<std::string> worker_grpc_addrs;
     std::vector<std::string> worker_addrs;
+    std::vector<std::string> p2p_worker_addrs;
 
     // Fields merged from PyDeviceResourceConfig
     std::string specify_gpu_arch = "";

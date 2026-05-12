@@ -1,8 +1,35 @@
 #include "rtp_llm/cpp/cache/connector/p2p/test/TestRpcServer.h"
+
+#include <google/protobuf/io/coded_stream.h>
+#include <google/protobuf/unknown_field_set.h>
+
+#include <cstring>
 #include <thread>
 #include <atomic>
 
 namespace rtp_llm {
+
+namespace {
+
+std::string encodePackedVarints(std::initializer_list<uint32_t> values) {
+    std::string bytes;
+    bytes.reserve(values.size() * 2);
+    for (uint32_t value : values) {
+        uint8_t  buffer[10];
+        uint8_t* ptr = google::protobuf::io::CodedOutputStream::WriteVarint32ToArray(value, buffer);
+        bytes.append(reinterpret_cast<const char*>(buffer), ptr - buffer);
+    }
+    return bytes;
+}
+
+std::string encodeFp32TensorBytes(std::initializer_list<float> values) {
+    std::string bytes;
+    bytes.resize(values.size() * sizeof(float));
+    std::memcpy(&bytes[0], values.begin(), bytes.size());
+    return bytes;
+}
+
+}  // namespace
 
 ::grpc::Status TestRpcService::ExecuteFunction(::grpc::ServerContext*     context,
                                                const ::FunctionRequestPB* request,
@@ -67,8 +94,30 @@ namespace rtp_llm {
     // 设置响应
     if (start_load_response_success_) {
         response->set_error_code(ErrorCodePB::NONE_ERROR);
-        auto* payload = response->mutable_payload();
-        payload->set_first_generate_token_id(first_generate_token_id_);
+        if (use_legacy_start_load_response_) {
+            auto* unknown_fields = response->GetReflection()->MutableUnknownFields(response);
+            unknown_fields->AddVarint(1, first_generate_token_id_);
+            unknown_fields->AddVarint(2, 10);
+            unknown_fields->AddVarint(3, 4);
+            unknown_fields->AddVarint(4, 6);
+            unknown_fields->AddVarint(11, 2);
+            unknown_fields->AddLengthDelimited(5, encodePackedVarints({7, 8}));
+
+            TensorPB tensor_pb;
+            tensor_pb.set_data_type(TensorPB::FP32);
+            tensor_pb.add_shape(1);
+            tensor_pb.add_shape(2);
+            std::string fp32_bytes = encodeFp32TensorBytes({0.1f, 0.2f});
+            tensor_pb.set_fp32_data(fp32_bytes.data(), fp32_bytes.size());
+            std::string tensor_bytes;
+            tensor_pb.SerializeToString(&tensor_bytes);
+            unknown_fields->AddLengthDelimited(6, tensor_bytes);
+            unknown_fields->AddLengthDelimited(7, tensor_bytes);
+            unknown_fields->AddLengthDelimited(8, encodePackedVarints({11, 12}));
+        } else {
+            auto* payload = response->mutable_payload();
+            payload->set_first_generate_token_id(first_generate_token_id_);
+        }
     } else {
         response->set_error_code(ErrorCodePB::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED);
         response->set_error_message("test start load response failed");
@@ -129,6 +178,10 @@ void TestRpcService::setFirstGenerateTokenId(int64_t token_id) {
     first_generate_token_id_ = token_id;
 }
 
+void TestRpcService::setUseLegacyStartLoadResponse(bool use_legacy) {
+    use_legacy_start_load_response_ = use_legacy;
+}
+
 void TestRpcService::setGenerateStreamCallSuccess(bool success) {
     generate_stream_call_success_ = success;
 }
@@ -154,6 +207,7 @@ void TestRpcService::resetCallCounts() {
     broadcast_tp_cancel_call_count_ = 0;
     start_load_call_count_          = 0;
     generate_stream_call_count_     = 0;
+    use_legacy_start_load_response_ = false;
     start_load_app_error_pb_        = ErrorCodePB::NONE_ERROR;
     start_load_app_error_message_.clear();
 }

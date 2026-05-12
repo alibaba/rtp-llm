@@ -176,7 +176,6 @@ ErrorInfo P2PConnectorWorkerDecode::read(int64_t                                
     if (build_result.hasError()) {
         return build_result;
     }
-
     {
         std::lock_guard<std::mutex> lock(read_tasks_mutex_);
         read_tasks_[unique_key] = task_group;
@@ -191,11 +190,21 @@ ErrorInfo P2PConnectorWorkerDecode::read(int64_t                                
     }
 
     if (outcome == ReadWaitOutcome::ReturnDeadlineIncomplete) {
+        int done_count = 0;
+        for (const auto& task : task_group->tasks) {
+            if (task->done()) {
+                ++done_count;
+            }
+        }
         reportReadMetrics(total_block_count, false, read_start_time_us);
         const std::string msg = "read: transfers not all done before return deadline (D-"
                                 + std::to_string(config_.p2p_read_return_before_deadline_ms) + "ms)";
-        RTP_LLM_LOG_WARNING(
-            "read failed, request_id: %ld, unique_key: %s, %s", request_id, unique_key.c_str(), msg.c_str());
+        RTP_LLM_LOG_WARNING("read failed, request_id: %ld, unique_key: %s, %s, done_tasks=%d/%zu",
+                            request_id,
+                            unique_key.c_str(),
+                            msg.c_str(),
+                            done_count,
+                            task_group->tasks.size());
         return ErrorInfo(ErrorCode::P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE, msg);
     }
 

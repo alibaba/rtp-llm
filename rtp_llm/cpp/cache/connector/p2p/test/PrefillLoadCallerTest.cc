@@ -159,6 +159,38 @@ TEST_F(PrefillLoadCallerTest, Load_ReturnNotNull_NullGenerateStream) {
     EXPECT_TRUE(success);
 }
 
+TEST_F(PrefillLoadCallerTest, Load_ParsesLegacyStartLoadResponse) {
+    server_->service()->setUseLegacyStartLoadResponse(true);
+    server_->service()->setFirstGenerateTokenId(23456);
+
+    std::string unique_key   = "test_load_legacy";
+    int64_t     request_id   = 1007;
+    int64_t     deadline_ms  = currentTimeMs() + 5000;
+    std::string prefill_ip   = "127.0.0.1";
+    uint32_t    prefill_port = static_cast<uint32_t>(server_->listenPort());
+
+    auto result = client_->load(request_id, prefill_ip, prefill_port, unique_key, deadline_ms, nullptr);
+    ASSERT_NE(result, nullptr);
+
+    bool success = waitDone(result);
+    EXPECT_TRUE(success);
+    EXPECT_TRUE(result->side_channel_payload.has_data);
+    EXPECT_TRUE(result->side_channel_payload.has_first_token);
+    EXPECT_EQ(result->side_channel_payload.first_token_id, 23456);
+    EXPECT_EQ(result->side_channel_payload.total_reuse_len, 10);
+    EXPECT_EQ(result->side_channel_payload.local_reuse_len, 4);
+    EXPECT_EQ(result->side_channel_payload.remote_reuse_len, 6);
+    EXPECT_EQ(result->side_channel_payload.memory_reuse_len, 2);
+    ASSERT_EQ(result->side_channel_payload.propose_tokens.size(), 2u);
+    EXPECT_EQ(result->side_channel_payload.propose_tokens[0], 7);
+    EXPECT_EQ(result->side_channel_payload.propose_tokens[1], 8);
+    ASSERT_EQ(result->side_channel_payload.position_ids.size(), 2u);
+    EXPECT_EQ(result->side_channel_payload.position_ids[0], 11);
+    EXPECT_EQ(result->side_channel_payload.position_ids[1], 12);
+    EXPECT_EQ(result->side_channel_payload.propose_probs.shape_size(), 2);
+    EXPECT_EQ(result->side_channel_payload.propose_hidden.shape_size(), 2);
+}
+
 TEST_F(PrefillLoadCallerTest, Load_ReturnNotNull_RpcStatusFailed) {
     // 设置服务器返回 RPC 错误状态
     server_->service()->setRpcResponseStatus(::grpc::Status(grpc::StatusCode::INTERNAL, "Internal error"));

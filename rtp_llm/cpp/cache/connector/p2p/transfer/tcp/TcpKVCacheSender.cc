@@ -165,7 +165,6 @@ void TcpKVCacheSender::loadToRemote(
     auto controller        = new arpc::ANetRPCController();
     auto timeout_ms        = deadline_ms - currentTimeMs();
     controller->SetExpireTime(timeout_ms > 0 ? timeout_ms : 1);
-
     auto closure = new TcpTransferClosure(ip, port, transfer_request, transfer_response, controller, callback);
     ::tcp_transfer::TcpTransferService_Stub stub((::google::protobuf::RpcChannel*)(channel.get()),
                                                  ::google::protobuf::Service::STUB_DOESNT_OWN_CHANNEL);
