@@ -1,5 +1,6 @@
 
 #pragma once
+#include <c10/core/InferenceMode.h>
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include <optional>
@@ -118,6 +119,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     use_spec_decoding_(use_spec_decoding),
     enable_device_perf_(params.profile_debug_logging_config.enable_device_perf),
     check_nan_(params.profile_debug_logging_config.check_nan) {
+
+    c10::InferenceMode inference_guard(true);
+
     weights_               = params.weights;
     model_id_              = params.model_id;
     kv_cache_layer_layout_ = params.kv_cache_layer_layout;
