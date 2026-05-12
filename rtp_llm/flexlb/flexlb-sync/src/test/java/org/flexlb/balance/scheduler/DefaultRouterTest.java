@@ -326,6 +326,76 @@ class DefaultRouterTest {
     }
 
     @Test
+    void should_reject_batch_schedule_when_sub_requests_length_mismatches_batch_count() {
+        BatchScheduleRequest batchRequest = new BatchScheduleRequest();
+        batchRequest.setBatchCount(3);
+        Request r1 = new Request();
+        r1.setRequestId(1001);
+        Request r2 = new Request();
+        r2.setRequestId(1002);
+        batchRequest.setSubRequests(List.of(r1, r2));
+
+        BatchScheduleResponse response = defaultRouter.batchSchedule(batchRequest);
+
+        assertFalse(response.isSuccess());
+        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), response.getCode());
+        assertTrue(response.getErrorMessage().contains("sub_requests length 2 != batch_count 3"),
+                "error should report exact length mismatch: " + response.getErrorMessage());
+    }
+
+    @Test
+    void should_accept_batch_schedule_when_sub_requests_length_matches_batch_count() {
+        org.flexlb.dao.master.WorkerStatus dummy = new org.flexlb.dao.master.WorkerStatus();
+        dummy.setIp("192.168.1.10");
+        dummy.setPort(8080);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().put("192.168.1.10:8080", dummy);
+
+        ScriptedBatchLoadBalancer scripted = new ScriptedBatchLoadBalancer(List.of(
+                target("192.168.1.10", 8080),
+                target("192.168.1.11", 8080)
+        ));
+        replaceRoleLoadBalancer(RoleType.PDFUSION, scripted);
+
+        BatchScheduleRequest batchRequest = new BatchScheduleRequest();
+        batchRequest.setBatchCount(2);
+        Request r1 = new Request();
+        r1.setRequestId(2001);
+        Request r2 = new Request();
+        r2.setRequestId(2002);
+        batchRequest.setSubRequests(List.of(r1, r2));
+
+        BatchScheduleResponse response = defaultRouter.batchSchedule(batchRequest);
+
+        assertTrue(response.isSuccess(),
+                "matching length should pass validation; phase 1 RR ignores sub_requests contents");
+        assertEquals(2, response.getServerStatus().size());
+    }
+
+    @Test
+    void should_accept_batch_schedule_when_sub_requests_is_null() {
+        org.flexlb.dao.master.WorkerStatus dummy = new org.flexlb.dao.master.WorkerStatus();
+        dummy.setIp("192.168.1.10");
+        dummy.setPort(8080);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().put("192.168.1.10:8080", dummy);
+
+        ScriptedBatchLoadBalancer scripted = new ScriptedBatchLoadBalancer(List.of(
+                target("192.168.1.10", 8080),
+                target("192.168.1.11", 8080)
+        ));
+        replaceRoleLoadBalancer(RoleType.PDFUSION, scripted);
+
+        BatchScheduleRequest batchRequest = new BatchScheduleRequest();
+        batchRequest.setBatchCount(2);
+        // sub_requests left null intentionally (Level 0 caller)
+
+        BatchScheduleResponse response = defaultRouter.batchSchedule(batchRequest);
+
+        assertTrue(response.isSuccess(),
+                "null sub_requests must skip length check entirely");
+        assertEquals(2, response.getServerStatus().size());
+    }
+
+    @Test
     void should_reject_batch_schedule_when_no_role_registered() {
         // All role maps are cleared in @BeforeEach -- no role registered
         BatchScheduleRequest batchRequest = new BatchScheduleRequest();

@@ -21,6 +21,11 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 class RoundRobinLoadBalancerTest {
 
@@ -115,6 +120,83 @@ class RoundRobinLoadBalancerTest {
         overlap.retainAll(secondSet);
         Assertions.assertTrue(overlap.isEmpty(),
                 "consecutive batch_size=2 calls on a 4-worker pool should not overlap");
+    }
+
+    @Test
+    void selectBatch_atomic_range_does_not_overlap_with_concurrent_selects() throws Exception {
+        // Verifies the getAndAdd(count) optimization: a batch call must occupy a
+        // contiguous cursor range so that concurrent select() calls do not land
+        // on indices already claimed by the batch (and vice versa).
+        // 4 workers, batch=4 -> batch claims one full cycle; concurrent singles
+        // proceed on the next cycle. Across many trials, the union of slots
+        // assigned in one (batch, single) pair should always cover 4 distinct
+        // index positions modulo 4 (i.e. the batch picks 4 distinct workers and
+        // each single pick is one of those 4 -- which is exactly the RR contract
+        // when cursor advances atomically).
+
+        int trials = 200;
+        int concurrentSingles = 16;
+        ExecutorService exec = Executors.newFixedThreadPool(concurrentSingles + 1);
+        AtomicInteger violations = new AtomicInteger(0);
+
+        try {
+            for (int t = 0; t < trials; t++) {
+                CountDownLatch ready = new CountDownLatch(concurrentSingles + 1);
+                CountDownLatch start = new CountDownLatch(1);
+                CountDownLatch done = new CountDownLatch(concurrentSingles + 1);
+
+                List<List<BatchScheduleTarget>> batchOut = new ArrayList<>();
+                batchOut.add(null);
+
+                exec.submit(() -> {
+                    try {
+                        ready.countDown();
+                        start.await();
+                        batchOut.set(0, rr.selectBatch(4, RoleType.PDFUSION, null));
+                    } catch (InterruptedException ignored) {
+                    } finally {
+                        done.countDown();
+                    }
+                });
+                List<ServerStatus> singleOut = new ArrayList<>();
+                for (int i = 0; i < concurrentSingles; i++) {
+                    final long rid = (long) t * 1000 + i;
+                    exec.submit(() -> {
+                        try {
+                            ready.countDown();
+                            start.await();
+                            BalanceContext ctx = newSingleContext(rid);
+                            ServerStatus s = rr.select(ctx, RoleType.PDFUSION, null);
+                            synchronized (singleOut) {
+                                singleOut.add(s);
+                            }
+                        } catch (InterruptedException ignored) {
+                        } finally {
+                            done.countDown();
+                        }
+                    });
+                }
+                ready.await();
+                start.countDown();
+                done.await(5, TimeUnit.SECONDS);
+
+                List<BatchScheduleTarget> b = batchOut.get(0);
+                Set<String> batchWorkers = new HashSet<>();
+                for (BatchScheduleTarget bt : b) {
+                    batchWorkers.add(bt.getServerIp() + ":" + bt.getHttpPort());
+                }
+                if (batchWorkers.size() != 4) {
+                    violations.incrementAndGet();
+                }
+            }
+        } finally {
+            exec.shutdown();
+            exec.awaitTermination(5, TimeUnit.SECONDS);
+        }
+
+        Assertions.assertEquals(0, violations.get(),
+                "batch=4 must always pick all 4 workers regardless of concurrent select() pressure "
+                        + "(verifies getAndAdd is atomic over the whole range)");
     }
 
     @Test

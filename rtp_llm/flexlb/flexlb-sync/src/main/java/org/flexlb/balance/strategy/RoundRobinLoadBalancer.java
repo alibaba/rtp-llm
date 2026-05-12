@@ -76,10 +76,12 @@ public class RoundRobinLoadBalancer implements BatchLoadBalancer {
         if (alive.isEmpty()) {
             return new ArrayList<>();
         }
+        int aliveSize = alive.size();
+        int start = cursors.get(roleType).getAndAdd(count);
         List<BatchScheduleTarget> targets = new ArrayList<>(count);
         for (int i = 0; i < count; i++) {
-            WorkerStatus selected = alive.get(nextIndex(roleType, alive.size()));
-            targets.add(buildTarget(selected));
+            int idx = Math.floorMod(start + i, aliveSize);
+            targets.add(buildTarget(alive.get(idx)));
         }
         return targets;
     }

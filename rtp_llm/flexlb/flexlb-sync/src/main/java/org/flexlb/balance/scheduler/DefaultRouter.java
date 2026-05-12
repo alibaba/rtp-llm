@@ -10,6 +10,7 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.BatchScheduleRequest;
 import org.flexlb.dao.loadbalance.BatchScheduleResponse;
 import org.flexlb.dao.loadbalance.BatchScheduleTarget;
+import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.RoutingResult;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -122,6 +123,13 @@ public class DefaultRouter implements Router {
         if (count < 1 || count > batchScheduleMaxCount) {
             return BatchScheduleResponse.error(StrategyErrorType.INVALID_REQUEST,
                     "batch_count must be in [1, " + batchScheduleMaxCount + "]");
+        }
+
+        // (1a) sub_requests length consistency (when caller opts in to forward-compatible payload)
+        List<Request> subs = batchRequest.getSubRequests();
+        if (subs != null && subs.size() != count) {
+            return BatchScheduleResponse.error(StrategyErrorType.INVALID_REQUEST,
+                    "sub_requests length " + subs.size() + " != batch_count " + count);
         }
 
         // (2) master readiness
