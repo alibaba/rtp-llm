@@ -1423,6 +1423,7 @@ class RuntimeConfig:
     use_batch_decode_scheduler: bool
     warm_up: bool
     warm_up_with_loss: bool
+    p2p_worker_addrs: list[str]
     worker_addrs: list[str]
     worker_grpc_addrs: list[str]
     def __getstate__(self) -> tuple:

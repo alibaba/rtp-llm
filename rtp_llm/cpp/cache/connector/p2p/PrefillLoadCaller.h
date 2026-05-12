@@ -20,6 +20,7 @@ class GenerateStream;
 
 // Side-channel payload for P2P bypass (carries first token, reuse, SP info, position_ids)
 struct P2PSideChannelPayload {
+    bool                 has_first_token  = false;
     int64_t              first_token_id   = 0;
     int32_t              total_reuse_len  = 0;
     int32_t              local_reuse_len  = 0;
@@ -74,6 +75,7 @@ public:
         std::unique_ptr<grpc::ClientAsyncResponseReader<P2PConnectorStartLoadResponsePB>> reader;
         grpc::Status                                                                      status;
         std::string                                                                       server_addr;
+        std::string                                                                       unique_key;
         int                                                                               timeout_ms;
         int64_t                                                                           request_id;
         int64_t                                                                           start_time_us;
@@ -89,12 +91,12 @@ public:
     };
 
     /// @brief 向 Prefill server 发起异步 StartLoad RPC，通知其开始向 Decode 发送 KV cache
-    std::shared_ptr<Result> load(int64_t                   request_id,
-                                 const std::string&        prefill_ip,
-                                 uint32_t                  prefill_port,
-                                 const std::string&        unique_key,
-                                 int64_t                   deadline_ms,
-                                 GenerateStream*           generate_stream);
+    std::shared_ptr<Result> load(int64_t            request_id,
+                                 const std::string& prefill_ip,
+                                 uint32_t           prefill_port,
+                                 const std::string& unique_key,
+                                 int64_t            deadline_ms,
+                                 GenerateStream*    generate_stream);
 
 private:
     bool buildAndStartAsyncRpc(const std::shared_ptr<Result>& result,

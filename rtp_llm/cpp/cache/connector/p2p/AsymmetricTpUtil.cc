@@ -30,11 +30,15 @@ AsymmetricTpUtil::handleNP1D(const std::vector<std::pair<std::string, uint32_t>>
         return std::vector<AsymmetricTPContext>();
     }
 
-    auto  local_partition_count  = 1;
-    auto  local_partition_id     = 0;
-    auto  remote_partition_count = static_cast<int>(tp_size_ / decode_transfer_servers.size());
-    auto  remote_partition_id    = static_cast<int>(tp_rank_ % remote_partition_count);
-    auto& decode_transfer_server = decode_transfer_servers[static_cast<size_t>(tp_rank_ / remote_partition_count)];
+    // In N prefill -> 1 decode-group routing, each decode target receives data from
+    // a subset of prefill TP ranks. Each participating prefill rank must send only
+    // its slice within that subset, which matches the old DecodeRpcServer peer_cnt/i
+    // semantics.
+    const int local_partition_count  = static_cast<int>(tp_size_ / decode_transfer_servers.size());
+    const int local_partition_id     = static_cast<int>(tp_rank_ % local_partition_count);
+    const int remote_partition_count = local_partition_count;
+    const int remote_partition_id    = local_partition_id;
+    auto&     decode_transfer_server = decode_transfer_servers[static_cast<size_t>(tp_rank_ / local_partition_count)];
 
     std::vector<AsymmetricTPContext> asymmetric_tp_contexts{{decode_transfer_server.first,
                                                              decode_transfer_server.second,

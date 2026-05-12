@@ -1,0 +1,112 @@
+#include "rtp_llm/cpp/model_rpc/PrefillRpcServerNew2.h"
+#include "rtp_llm/cpp/model_rpc/DecodeRpcServerNew2.h"
+#include "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
+
+namespace rtp_llm {
+
+grpc::Status PrefillRpcServerNew2::init(const EngineInitParams&                                maga_init_params,
+                                        py::object                                             mm_process_engine,
+                                        std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params) {
+    auto ret = RemoteRpcServer::init(maga_init_params, mm_process_engine, std::move(propose_params));
+    if (!ret.ok()) {
+        RTP_LLM_LOG_ERROR("prefill rpc server new2 init failed, err: %s", ret.error_message().c_str());
+        return ret;
+    }
+
+    auto kvcache_manager = engine_->getCacheManager();
+    if (!kvcache_manager) {
+        RTP_LLM_LOG_WARNING("prefill rpc server new2 init failed, kvcache manager is null");
+        return grpc::Status(grpc::StatusCode::INTERNAL, "kvcache manager is null");
+    }
+    auto connector_coordinator = kvcache_manager->connectorCoordinator();
+    if (!connector_coordinator) {
+        RTP_LLM_LOG_WARNING("prefill rpc server new2 init failed, connector coordinator is null");
+        return grpc::Status(grpc::StatusCode::INTERNAL, "connector coordinator is null");
+    }
+    if (!kvcache_manager->hasP2PConnector()) {
+        RTP_LLM_LOG_WARNING("prefill rpc server new2 init failed, decode_entrance requires P2P connector");
+        return grpc::Status(grpc::StatusCode::INTERNAL, "decode_entrance requires P2P connector");
+    }
+    return grpc::Status::OK;
+}
+
+grpc::Status PrefillRpcServerNew2::GenerateStreamCall(grpc::ServerContext*                   server_context,
+                                                      const GenerateInputPB*                 request,
+                                                      grpc::ServerWriter<GenerateOutputsPB>* response_writer) {
+    const bool pd_separation = decodeEntranceRequiresPrefill(*request);
+    if (!pd_separation) {
+        RTP_LLM_LOG_INFO("pd separation is disabled, call local rpc server");
+        return LocalRpcServer::GenerateStreamCall(server_context, request, response_writer);
+    }
+    if (request->generate_config().unique_key().empty()) {
+        RTP_LLM_LOG_WARNING("decode_entrance prefill handoff requires non-empty unique_key, request_id=%ld",
+                            request->request_id());
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                            "decode_entrance handoff requires non-empty unique_key");
+    }
+
+    AtomicGuard request_guard(onflight_requests_);
+    auto        request_id = request->request_id();
+    RTP_LLM_LOG_DEBUG("receive request %ld", request_id);
+    auto generate_context =
+        GenerateContext(request_id, request->generate_config().timeout_ms(), server_context, metrics_reporter_, meta_);
+    auto input                            = QueryConverter::transQuery(request);
+    input->generate_config->pd_separation = true;
+    if (engine_->isMTPEagle()) {
+        input->generate_config->force_disable_sp_run = false;
+    } else {
+        input->generate_config->force_disable_sp_run = true;
+    }
+
+    if (mm_processor_ != nullptr && input->multimodal_inputs) {
+        auto mm_res = mm_processor_->updateMultimodalFeatures(input);
+        if (!mm_res.ok()) {
+            generate_context.error_status = serializeErrorMsg(generate_context.request_key, mm_res);
+        }
+    }
+    CHECK_ERROR_STATUS(generate_context);
+
+    RTP_LLM_LOG_DEBUG("request [%ld] trans to stream success", request_id);
+    auto stream = engine_->enqueue(input);
+    generate_context.setStream(stream);
+
+    RTP_LLM_LOG_DEBUG("request [%ld] enqueue success", request_id);
+    generate_context.error_status =
+        pollStreamOutput(server_context, generate_context.request_key, response_writer, generate_context.getStream());
+    meta_->dequeue(generate_context.request_id, generate_context.getStream());
+    return generate_context.error_status;
+}
+
+::grpc::Status PrefillRpcServerNew2::StartLoad(::grpc::ServerContext*                context,
+                                               const P2PConnectorStartLoadRequestPB* request,
+                                               P2PConnectorStartLoadResponsePB*      response) {
+    RTP_LLM_LOG_DEBUG("receive start load request from client: %s, request: [%s]",
+                      context->peer().c_str(),
+                      request->DebugString().c_str());
+    if (context->IsCancelled()) {
+        RTP_LLM_LOG_WARNING("start load failed, request is cancelled");
+        return grpc::Status(grpc::StatusCode::CANCELLED, "request is cancelled");
+    }
+    if (!engine_) {
+        RTP_LLM_LOG_WARNING("start load failed, engine is null");
+        return grpc::Status(grpc::StatusCode::INTERNAL, "engine is null");
+    }
+    auto cache_manager = engine_->getCacheManager();
+    if (!cache_manager) {
+        RTP_LLM_LOG_WARNING("start load failed, cache manager is null");
+        return grpc::Status(grpc::StatusCode::INTERNAL, "cache manager is null");
+    }
+    auto is_cancelled = [context]() { return context->IsCancelled(); };
+    cache_manager->handleRead(*request, *response, is_cancelled);
+    return grpc::Status::OK;
+}
+
+::grpc::Status PrefillRpcServerNew2::GetPeerInfo(::grpc::ServerContext*      context,
+                                                 const GetPeerInfoRequestPB* request,
+                                                 GetPeerInfoResponsePB*      response) {
+    response->set_tp_size(static_cast<int32_t>(tpSize()));
+    RTP_LLM_LOG_DEBUG("GetPeerInfo: returning tp_size=%ld", tpSize());
+    return grpc::Status::OK;
+}
+
+}  // namespace rtp_llm

@@ -8,9 +8,16 @@
 
 namespace rtp_llm {
 
+inline int64_t getP2PTransferListenPort(int64_t cache_store_listen_port) {
+    // Reuse the reserved per-worker slot right after cache_store_listen_port.
+    // Keep port 0 unchanged so tests can still request an ephemeral port.
+    return cache_store_listen_port > 0 ? cache_store_listen_port + 1 : cache_store_listen_port;
+}
+
 struct P2PConnectorSchedulerConfig {
     std::vector<std::string> worker_grpc_addrs;
     std::vector<std::string> worker_addrs;
+    std::vector<std::string> p2p_worker_addrs;
     int64_t                  p2p_transfer_not_done_resource_hold_ms       = 10 * 1000;
     int                      p2p_resource_store_timeout_check_interval_ms = 100;
     int64_t                  p2p_cancel_broadcast_timeout_ms              = 1000;
@@ -21,6 +28,7 @@ struct P2PConnectorSchedulerConfig {
         P2PConnectorSchedulerConfig config;
         config.worker_grpc_addrs                      = runtime_config.worker_grpc_addrs;
         config.worker_addrs                           = runtime_config.worker_addrs;
+        config.p2p_worker_addrs                       = runtime_config.p2p_worker_addrs;
         config.p2p_transfer_not_done_resource_hold_ms = cache_store_config.p2p_transfer_not_done_resource_hold_ms;
         config.p2p_resource_store_timeout_check_interval_ms =
             cache_store_config.p2p_resource_store_timeout_check_interval_ms;
@@ -51,7 +59,8 @@ struct P2PConnectorWorkerConfig {
         config.transfer_backend_config.messager_worker_thread_count  = cache_store_config.messager_worker_thread_count;
         config.transfer_backend_config.rdma_max_block_pairs_per_connection =
             cache_store_config.rdma_max_block_pairs_per_connection;
-        config.transfer_backend_config.cache_store_listen_port = pd_sep_config.cache_store_listen_port;
+        config.transfer_backend_config.cache_store_listen_port =
+            getP2PTransferListenPort(pd_sep_config.cache_store_listen_port);
         config.transfer_backend_config.cache_store_tcp_anet_rpc_thread_num =
             cache_store_config.cache_store_tcp_anet_rpc_thread_num;
         config.transfer_backend_config.cache_store_tcp_anet_rpc_queue_num =

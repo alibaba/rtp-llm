@@ -509,6 +509,10 @@ void GenerateStream::reportEventWithoutLock(StreamEvents::EventType event,
 
 void GenerateStream::reportError(ErrorCode error_code, const std::string& error_msg) {
     std::lock_guard<std::mutex> lock(*mutex_);
+    reportErrorWithoutLock(error_code, error_msg);
+}
+
+void GenerateStream::reportErrorWithoutLock(ErrorCode error_code, const std::string& error_msg) {
     generate_status_->reportEvent(StreamEvents::Error, error_code, error_msg);
 }
 
@@ -733,6 +737,7 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     int* spec_tokens       = sp_output_buffer_->tokens.data_ptr<int>();
     spec_tokens[0]         = target_last_token;
     spec_tokens[1]         = update_info.draft_token;
+    contain_propose_token_ = true;
     propose_token_         = {target_last_token, update_info.draft_token};
 
     sp_output_buffer_->hidden_states = update_info.draft_hidden_states;
@@ -785,6 +790,11 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
 void GenerateStream::update(const StreamUpdateInfo& update_info) {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*mutex_);
+    updateWithoutLock(update_info);
+}
+
+void GenerateStream::updateWithoutLock(const StreamUpdateInfo& update_info) {
+    RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("stream [%ld] update", streamId());
     *is_context_stream_ = false;
     if (hasError() && !update_info.force_update_info) {

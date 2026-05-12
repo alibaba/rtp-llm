@@ -298,7 +298,7 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
             model_rpc_service_.reset(new LocalRpcServiceImpl());
         }
         grpc::Status grpc_status =
-            model_rpc_service_->init(maga_init_params, std::move(propose_params), mm_process_engine);
+            model_rpc_service_->init(maga_init_params, std::move(mm_process_engine), std::move(propose_params));
         if (!grpc_status.ok()) {
             RTP_LLM_FAIL("init rpc server failed, error msg: %s", grpc_status.error_message().c_str());
         }
