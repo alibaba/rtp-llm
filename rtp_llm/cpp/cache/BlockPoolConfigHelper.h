@@ -121,10 +121,18 @@ public:
             group_cache_config.seq_size_per_block = cache_config.group_seq_size_per_block[group_id];
         }
 
+        // FULL groups inherit the global kv-vs-kernel block ratio (bpk).  SWA
+        // groups always use bpk=1: their blocks are kernel-sized regardless of
+        // the global physical block size.
+        const bool is_full = group_id < cache_config.group_types.size()
+                             && cache_config.group_types[group_id] == CacheGroupType::FULL;
+        const size_t group_bpk = is_full ? cache_config.kernelBlocksPerKvBlock() : 1;
+
         MemoryLayoutConfig layout =
             createMemoryLayoutConfig(false, layer_num, kv_stride, scale_stride, spec, group_cache_config);
-        layout.kv_cache_offset_bytes = 0;
-        layout.kv_scale_offset_bytes = layout.kv_cache_offset_bytes + layout.kv_block_pool_size_bytes;
+        layout.kernel_blocks_per_kv_block = group_bpk;
+        layout.kv_cache_offset_bytes      = 0;
+        layout.kv_scale_offset_bytes      = layout.kv_cache_offset_bytes + layout.kv_block_pool_size_bytes;
 
         config.memory_layouts.push_back(layout);
         config.total_size_bytes = layout.kv_block_pool_size_bytes + layout.kv_scale_pool_size_bytes;

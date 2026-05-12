@@ -55,8 +55,11 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
                                 kv_cache_config.seq_size_per_block,
                                 kv_cache_config.kernel_seq_size_per_block);
         config.kernel_seq_size_per_block = static_cast<size_t>(kv_cache_config.kernel_seq_size_per_block);
-    } else {
-        // Default: kernel block size == physical block size (no split).
+    } else if (config.kernel_seq_size_per_block == 0
+               || config.kernel_seq_size_per_block == config.seq_size_per_block) {
+        // Default: kernel block size == physical block size (no split). Keep
+        // any explicit value already set by createBasicConfig (e.g. DSV4 forces
+        // kernel_seq_size_per_block = 256 even when physical seq_size > 256).
         config.kernel_seq_size_per_block = config.seq_size_per_block;
     }
 
