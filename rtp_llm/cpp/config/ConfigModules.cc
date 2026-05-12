@@ -69,6 +69,12 @@ std::string ParallelismConfig::to_string() const {
         << "role_type: " << static_cast<int>(role_type) << "\n"
         << "use_ub_comm: " << use_ub_comm << "\n"
         << "dp_controller_managed: " << dp_controller_managed << "\n"
+        << "dp_peer_addrs: [";
+    for (size_t i = 0; i < dp_peer_addrs.size(); ++i) {
+        if (i > 0) oss << ", ";
+        oss << dp_peer_addrs[i];
+    }
+    oss << "]\n"
         << "ffn_disaggregate_config: {\n"
         << ffn_disaggregate_config.to_string() << "\n}\n"
         << "prefill_cp_config: {\n"

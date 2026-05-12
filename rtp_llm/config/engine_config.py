@@ -353,6 +353,36 @@ def update_worker_addrs(
     runtime_config.worker_addrs = worker_addrs
 
 
+def update_dp_peer_addrs(
+    parallelism_config: ParallelismConfig, world_info
+) -> None:
+    """Populate dp_peer_addrs for V1 DP-controller fan-out.
+
+    Only fills when dp_controller_managed is true and dp_size > 1.
+    Index == dp_rank, value == "ip:grpc_port" of each DP group's TP-leader.
+    """
+    if not parallelism_config.dp_controller_managed or parallelism_config.dp_size <= 1:
+        return
+    if world_info is None:
+        return
+
+    tp_size = parallelism_config.tp_size
+    dp_size = parallelism_config.dp_size
+    addrs = [""] * dp_size
+    for member in world_info.members:
+        if member.world_rank % tp_size == 0:
+            dp_rank = member.world_rank // tp_size
+            if 0 <= dp_rank < dp_size:
+                addrs[dp_rank] = f"{member.ip}:{member.rpc_server_port}"
+
+    missing = [i for i, a in enumerate(addrs) if not a]
+    if missing:
+        logging.warning(f"dp_peer_addrs: missing addrs for dp_ranks {missing}")
+
+    parallelism_config.dp_peer_addrs = addrs
+    logging.info(f"dp_peer_addrs initialized: {addrs}")
+
+
 def setup_pd_sep_config(
     pd_sep_config: PDSepConfig,
     cache_store_config,

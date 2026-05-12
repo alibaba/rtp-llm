@@ -8,7 +8,11 @@ from pydantic import BaseModel
 
 from rtp_llm.access_logger.access_logger import AccessLogger
 from rtp_llm.async_decoder_engine.base_engine import BaseEngine
-from rtp_llm.config.engine_config import EngineConfig, update_worker_addrs
+from rtp_llm.config.engine_config import (
+    EngineConfig,
+    update_dp_peer_addrs,
+    update_worker_addrs,
+)
 from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.distribute.distributed_server import DistributedServer, get_world_info
@@ -66,6 +70,10 @@ class BackendManager(object):
         )
         update_worker_addrs(
             engine_config.runtime_config,
+            engine_config.parallelism_config,
+            world_info,
+        )
+        update_dp_peer_addrs(
             engine_config.parallelism_config,
             world_info,
         )
