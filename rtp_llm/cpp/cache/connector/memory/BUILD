@@ -12,10 +12,9 @@ cc_library(
     deps = [
         "//rtp_llm/cpp/cache/connector:connector_base",
         "//rtp_llm/cpp/config:config_modules",
-        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/cpp/metrics:metrics",
         "//rtp_llm/cpp/model_rpc:broadcast_manager",
-        "//rtp_llm/cpp/cache:kv_cache_allocator",
+        "//rtp_llm/cpp/cache:kv_cache_allocator_hdr",
         "//rtp_llm/cpp/utils:lru_cache",
         "//rtp_llm/cpp/utils:profiling_scope",
         "@havenask//aios/autil:json",

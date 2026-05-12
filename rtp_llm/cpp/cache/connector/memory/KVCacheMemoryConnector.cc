@@ -7,7 +7,6 @@
 #include "rtp_llm/cpp/cache/connector/memory/MemoryAsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
-#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/models_py/bindings/NoBlockCopy.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
@@ -16,8 +15,7 @@
 namespace rtp_llm {
 
 // When set on MultiCopyParams, execNoBlockCopy may try CUDA split scatter/gather (SplitKvCacheCopy; not on PPU).
-// Eligibility for the fast path is decided only by enable_memory_cache_sm_copy; splitKvMultiCopy falls back if layout
-// mismatches.
+// This legacy SM-copy path is only used for non typed layer-region layouts.
 static void applySplitKvMultiCopyFieldsIfEligible(bool enable_sm_copy, const CacheConfig& cfg, MultiCopyParams& out) {
     if (!enable_sm_copy) {
         return;
@@ -25,6 +23,50 @@ static void applySplitKvMultiCopyFieldsIfEligible(bool enable_sm_copy, const Cac
     out.split_kv_layer_num          = static_cast<int>(cfg.layer_all_num);
     out.split_kv_cache_stride_bytes = cfg.kv_block_stride_bytes;
     out.split_kv_scale_stride_bytes = cfg.kv_scale_stride_bytes;
+}
+
+static void appendBatchedMemoryCopyTile(void*                         dst,
+                                        const void*                   src,
+                                        size_t                        bytes,
+                                        std::vector<BatchedMemoryCopyTile>& tiles) {
+    if (bytes > 0) {
+        tiles.push_back(BatchedMemoryCopyTile{dst, src, bytes});
+    }
+}
+
+static void appendStagedMemoryCopyTile(void*                         gpu,
+                                       size_t                        host_offset,
+                                       size_t                        bytes,
+                                       std::vector<StagedMemoryCopyTile>& tiles) {
+    if (gpu != nullptr && bytes > 0) {
+        tiles.push_back(StagedMemoryCopyTile{gpu, host_offset, bytes});
+    }
+}
+
+static void appendStagedMemoryCopyHostSegment(void*                                    host,
+                                              size_t                                   host_offset,
+                                              size_t                                   bytes,
+                                              std::vector<StagedMemoryCopyHostSegment>& segments) {
+    if (host == nullptr || bytes == 0) {
+        return;
+    }
+    if (!segments.empty()) {
+        auto& prev = segments.back();
+        if (static_cast<char*>(prev.host) + prev.bytes == host && prev.host_offset + prev.bytes == host_offset) {
+            prev.bytes += bytes;
+            return;
+        }
+    }
+    segments.push_back(StagedMemoryCopyHostSegment{host, host_offset, bytes});
+}
+
+static size_t alignUp(size_t value, size_t alignment) {
+    RTP_LLM_CHECK_WITH_INFO(alignment != 0, "alignment must not be zero");
+    return ((value + alignment - 1) / alignment) * alignment;
+}
+
+static size_t regionIndex(KVCacheRegionName region_name) {
+    return static_cast<size_t>(region_name);
 }
 
 KVCacheMemoryConnector::KVCacheMemoryConnector(const CacheConfig&                       cache_config,
@@ -52,6 +94,15 @@ KVCacheMemoryConnector::~KVCacheMemoryConnector() {
     broadcast_manager_.reset();
     block_pool_.reset();
     block_cache_.reset();
+    {
+        std::lock_guard<std::mutex> lock(staged_copy_scratch_mutex_);
+        for (auto& [_, scratch] : staged_copy_scratch_by_device_) {
+            if (scratch) {
+                releaseStagedMemoryCopyScratch(*scratch);
+            }
+        }
+        staged_copy_scratch_by_device_.clear();
+    }
 }
 
 bool KVCacheMemoryConnector::init() {
@@ -173,6 +224,112 @@ bool KVCacheMemoryConnector::hasTypedLayerRegionSlots(const std::vector<LayerReg
         }
     }
     return false;
+}
+
+bool KVCacheMemoryConnector::isDsv4TypedCacheLayout(const std::vector<LayerRegionSlot>& slots) const {
+    // Keep this gate deliberately strict: this staged SM path is enabled by the current DSV4 typed
+    // cache schema, not by model name. DSV4 Flash/Pro currently use seven typed pools in the fixed
+    // order below, 256 tokens/block, sparse opaque KV cache store, and SWA_KV in group 6. If that
+    // schema changes, update this matcher together with HybridPoolConfigCreator coverage.
+    constexpr size_t kDsv4PoolNum        = 7;
+    constexpr size_t kDsv4TokensPerBlock = 256;
+    constexpr KVCacheRegionName kExpectedRegions[kDsv4PoolNum] = {KVCacheRegionName::CSA_KV,
+                                                                  KVCacheRegionName::HCA_KV,
+                                                                  KVCacheRegionName::INDEXER_KV,
+                                                                  KVCacheRegionName::INDEXER_STATE,
+                                                                  KVCacheRegionName::CSA_STATE,
+                                                                  KVCacheRegionName::HCA_STATE,
+                                                                  KVCacheRegionName::SWA_KV};
+    constexpr CacheGroupType kExpectedGroupTypes[kDsv4PoolNum] = {CacheGroupType::FULL,
+                                                                  CacheGroupType::FULL,
+                                                                  CacheGroupType::FULL,
+                                                                  CacheGroupType::SWA,
+                                                                  CacheGroupType::SWA,
+                                                                  CacheGroupType::SWA,
+                                                                  CacheGroupType::SWA};
+
+    if (slots.empty() || !hasTypedLayerRegionSlots(slots)) {
+        return false;
+    }
+    if (!cache_config_.use_typed_cache_regions || !cache_config_.use_opaque_kv_cache_store
+        || !cache_config_.use_independent_block_pools || !cache_config_.is_sparse) {
+        return false;
+    }
+    if (cache_config_.seq_size_per_block != kDsv4TokensPerBlock
+        || cache_config_.kernel_seq_size_per_block != kDsv4TokensPerBlock) {
+        return false;
+    }
+    if (cache_config_.cache_specs.size() != kDsv4PoolNum
+        || cache_config_.group_region_names.size() != kDsv4PoolNum
+        || cache_config_.group_types.size() != kDsv4PoolNum
+        || cache_config_.group_kv_block_stride_bytes.size() < kDsv4PoolNum
+        || cache_config_.group_kv_scale_stride_bytes.size() < kDsv4PoolNum
+        || cache_config_.layer_region_to_group_id.size() < cache_config_.layer_all_num) {
+        return false;
+    }
+
+    for (size_t gid = 0; gid < kDsv4PoolNum; ++gid) {
+        if (cache_config_.group_region_names[gid] != kExpectedRegions[gid]
+            || cache_config_.group_types[gid] != kExpectedGroupTypes[gid]) {
+            return false;
+        }
+        if (cache_config_.group_kv_block_stride_bytes[gid] + cache_config_.group_kv_scale_stride_bytes[gid] == 0) {
+            return false;
+        }
+    }
+
+    bool saw_csa_layer = false;
+    bool saw_hca_layer = false;
+    for (size_t layer = 0; layer < cache_config_.layer_all_num; ++layer) {
+        const auto& row = cache_config_.layer_region_to_group_id[layer];
+        if (row.size() < regionIndex(KVCacheRegionName::REGION_COUNT)) {
+            return false;
+        }
+        if (row[regionIndex(KVCacheRegionName::DEFAULT)] >= 0
+            || row[regionIndex(KVCacheRegionName::SWA_KV)] != 6) {
+            return false;
+        }
+
+        const bool has_csa_region = row[regionIndex(KVCacheRegionName::CSA_KV)] >= 0
+                                    || row[regionIndex(KVCacheRegionName::INDEXER_KV)] >= 0
+                                    || row[regionIndex(KVCacheRegionName::INDEXER_STATE)] >= 0
+                                    || row[regionIndex(KVCacheRegionName::CSA_STATE)] >= 0;
+        const bool has_hca_region =
+            row[regionIndex(KVCacheRegionName::HCA_KV)] >= 0 || row[regionIndex(KVCacheRegionName::HCA_STATE)] >= 0;
+        const bool complete_csa_region = row[regionIndex(KVCacheRegionName::CSA_KV)] == 0
+                                         && row[regionIndex(KVCacheRegionName::INDEXER_KV)] == 2
+                                         && row[regionIndex(KVCacheRegionName::INDEXER_STATE)] == 3
+                                         && row[regionIndex(KVCacheRegionName::CSA_STATE)] == 4;
+        const bool complete_hca_region =
+            row[regionIndex(KVCacheRegionName::HCA_KV)] == 1 && row[regionIndex(KVCacheRegionName::HCA_STATE)] == 5;
+        if (has_csa_region != complete_csa_region || has_hca_region != complete_hca_region
+            || (complete_csa_region && complete_hca_region)) {
+            return false;
+        }
+        saw_csa_layer = saw_csa_layer || complete_csa_region;
+        saw_hca_layer = saw_hca_layer || complete_hca_region;
+    }
+    if (!saw_csa_layer || !saw_hca_layer) {
+        return false;
+    }
+
+    for (const auto& slot : slots) {
+        const auto layer = static_cast<size_t>(slot.layer_id);
+        const auto attn  = regionIndex(slot.region_name);
+        if (slot.group_id < 0 || static_cast<size_t>(slot.group_id) >= kDsv4PoolNum
+            || layer >= cache_config_.layer_region_to_group_id.size()
+            || attn >= cache_config_.layer_region_to_group_id[layer].size()
+            || cache_config_.layer_region_to_group_id[layer][attn] != slot.group_id) {
+            return false;
+        }
+        const auto group_id     = static_cast<size_t>(slot.group_id);
+        const auto group_stride = cache_config_.group_kv_block_stride_bytes[group_id]
+                                  + cache_config_.group_kv_scale_stride_bytes[group_id];
+        if (slot.stride_bytes != group_stride) {
+            return false;
+        }
+    }
+    return true;
 }
 
 std::shared_ptr<AsyncMatchContext> KVCacheMemoryConnector::asyncMatch(const std::shared_ptr<KVCacheResource>& resource,
@@ -629,6 +786,19 @@ bool KVCacheMemoryConnector::copyCache(const MemoryOperationRequestPB& request, 
     autil::ScopedTime2 timer;
     const auto         copy_direction =
         (request.copy_direction() == MemoryOperationRequestPB::H2D) ? CopyDirection::H2D : CopyDirection::D2H;
+    const auto slots = layerRegionSlots();
+    const bool has_typed_slots = hasTypedLayerRegionSlots(slots);
+
+    if (tryCopyCacheWithStagedMemoryCopy(request, copy_direction, slots)) {
+        response.set_success(true);
+        reportCopyMetrics(true, timer.done_us(), copy_direction);
+        return true;
+    }
+    if (has_typed_slots && tryCopyCacheWithBatchedMemoryCopy(request, copy_direction, slots)) {
+        response.set_success(true);
+        reportCopyMetrics(true, timer.done_us(), copy_direction);
+        return true;
+    }
 
     std::vector<torch::Tensor> dst_buffers;
     std::vector<torch::Tensor> src_buffers;
@@ -649,7 +819,7 @@ bool KVCacheMemoryConnector::copyCache(const MemoryOperationRequestPB& request, 
 
     if (!dst_buffers.empty()) {
         MultiCopyParams mc{dst_buffers, src_buffers};
-        const bool can_use_split_kv_copy = !hasTypedLayerRegionSlots(layerRegionSlots());
+        const bool can_use_split_kv_copy = !hasTypedLayerRegionSlots(slots);
         applySplitKvMultiCopyFieldsIfEligible(
             kv_cache_config_.enable_memory_cache_sm_copy && can_use_split_kv_copy, cache_config_, mc);
         execNoBlockCopy(mc);
@@ -658,6 +828,199 @@ bool KVCacheMemoryConnector::copyCache(const MemoryOperationRequestPB& request, 
     response.set_success(true);
     reportCopyMetrics(true, timer.done_us(), copy_direction);
     return true;
+}
+
+bool KVCacheMemoryConnector::tryCopyCacheWithStagedMemoryCopy(const MemoryOperationRequestPB&     request,
+                                                              CopyDirection                       direction,
+                                                              const std::vector<LayerRegionSlot>& slots) {
+    RTP_LLM_PROFILE_SCOPE("reuse_cache.memory.copy.plan_staged");
+    if (!isDsv4TypedCacheLayout(slots)) {
+        return false;
+    }
+    if (block_pool_ == nullptr || allocator_ == nullptr) {
+        return false;
+    }
+
+    StagedMemoryCopyParams params;
+    params.direction = direction == CopyDirection::H2D ? StagedMemoryCopyDirection::H2D :
+                                                         StagedMemoryCopyDirection::D2H;
+
+    size_t logical_rows  = 0;
+    size_t payload_bytes = 0;
+
+    for (int i = 0; i < request.copy_items_size(); ++i) {
+        const auto&                     item      = request.copy_items(i);
+        const auto                      mem_block = static_cast<BlockIdxType>(item.mem_block());
+        const std::vector<BlockIdxType> gpu_blocks(item.gpu_blocks().begin(), item.gpu_blocks().end());
+
+        if (isNullBlockIdx(mem_block) || gpu_blocks.size() != slots.size()) {
+            return false;
+        }
+
+        auto mem_buffers = block_pool_->convertIndexToBuffer(/*layer_id=*/0, mem_block);
+        if (mem_buffers.size() != 1u || mem_buffers[0].addr == nullptr || mem_buffers[0].size_bytes == 0
+            || mem_buffers[0].is_cuda) {
+            return false;
+        }
+        const auto& mem_buffer = mem_buffers[0];
+        auto*       mem_addr   = static_cast<char*>(mem_buffer.addr);
+
+        size_t byte_off = 0;
+        for (size_t slot_idx = 0; slot_idx < slots.size(); ++slot_idx) {
+            const auto& slot         = slots[slot_idx];
+            const auto  gpu_block    = gpu_blocks.at(slot_idx);
+            const auto  layer_stride = slot.stride_bytes;
+
+            if (isNullBlockIdx(gpu_block)) {
+                byte_off += layer_stride;
+                continue;
+            }
+
+            const auto gpu_buffers = allocator_->convertIndexToBuffer(slot.layer_id, slot.region_name, gpu_block);
+            size_t     within_layer_off = 0;
+            for (const auto& gpu_buffer : gpu_buffers) {
+                if (gpu_buffer.addr == nullptr || gpu_buffer.size_bytes == 0) {
+                    within_layer_off += gpu_buffer.size_bytes;
+                    continue;
+                }
+                if (!gpu_buffer.is_cuda) {
+                    return false;
+                }
+                if (within_layer_off + gpu_buffer.size_bytes > layer_stride
+                    || byte_off + within_layer_off + gpu_buffer.size_bytes > mem_buffer.size_bytes) {
+                    return false;
+                }
+                if (params.device_index < 0) {
+                    params.device_index = gpu_buffer.device_index;
+                } else if (params.device_index != gpu_buffer.device_index) {
+                    return false;
+                }
+
+                // The SM copy kernels vectorize with int4/int2. Keep every staged tile aligned so compact
+                // staging does not trade fewer memcpy calls for misaligned vector accesses.
+                constexpr size_t kStagedTileAlignment = 16;
+                const size_t     staging_offset       = alignUp(params.host_bytes, kStagedTileAlignment);
+                params.host_bytes                     = staging_offset;
+                auto*        host_addr       = mem_addr + byte_off + within_layer_off;
+                appendStagedMemoryCopyHostSegment(host_addr, staging_offset, gpu_buffer.size_bytes, params.host_segments);
+                appendStagedMemoryCopyTile(gpu_buffer.addr, staging_offset, gpu_buffer.size_bytes, params.tiles);
+                params.host_bytes += gpu_buffer.size_bytes;
+                ++logical_rows;
+                payload_bytes += gpu_buffer.size_bytes;
+                within_layer_off += gpu_buffer.size_bytes;
+            }
+            byte_off += layer_stride;
+        }
+    }
+
+    if (params.tiles.empty()) {
+        return true;
+    }
+
+    RTP_LLM_LOG_DEBUG("cuda staged memory copy, direction=%s, rows=%zu, tiles=%zu, bytes=%zu, span=%zu, device=%d",
+                      direction == CopyDirection::H2D ? "H2D" : "D2H",
+                      logical_rows,
+                      params.tiles.size(),
+                      payload_bytes,
+                      params.host_bytes,
+                      params.device_index);
+    RTP_LLM_PROFILE_SCOPE("reuse_cache.memory.copy.exec_staged");
+    std::lock_guard<std::mutex> scratch_lock(staged_copy_scratch_mutex_);
+    return execStagedMemoryCopy(params, &stagedCopyScratchForDevice(params.device_index));
+}
+
+StagedMemoryCopyScratch& KVCacheMemoryConnector::stagedCopyScratchForDevice(int device_index) {
+    auto& scratch = staged_copy_scratch_by_device_[device_index];
+    if (!scratch) {
+        scratch = std::make_unique<StagedMemoryCopyScratch>();
+    }
+    return *scratch;
+}
+
+bool KVCacheMemoryConnector::tryCopyCacheWithBatchedMemoryCopy(const MemoryOperationRequestPB&     request,
+                                                               CopyDirection                       direction,
+                                                               const std::vector<LayerRegionSlot>& slots) {
+    RTP_LLM_PROFILE_SCOPE("reuse_cache.memory.copy.plan_batch");
+    if (block_pool_ == nullptr || allocator_ == nullptr) {
+        return false;
+    }
+
+    BatchedMemoryCopyParams params;
+    size_t                  logical_rows  = 0;
+    size_t                  payload_bytes = 0;
+
+    for (int i = 0; i < request.copy_items_size(); ++i) {
+        const auto&                     item      = request.copy_items(i);
+        const auto                      mem_block = static_cast<BlockIdxType>(item.mem_block());
+        const std::vector<BlockIdxType> gpu_blocks(item.gpu_blocks().begin(), item.gpu_blocks().end());
+
+        if (isNullBlockIdx(mem_block) || gpu_blocks.size() != slots.size()) {
+            return false;
+        }
+
+        auto mem_buffers = block_pool_->convertIndexToBuffer(/*layer_id=*/0, mem_block);
+        if (mem_buffers.size() != 1u || mem_buffers[0].addr == nullptr || mem_buffers[0].size_bytes == 0) {
+            return false;
+        }
+        const auto& mem_buffer = mem_buffers[0];
+
+        size_t byte_off = 0;
+        for (size_t slot_idx = 0; slot_idx < slots.size(); ++slot_idx) {
+            const auto& slot         = slots[slot_idx];
+            const auto  gpu_block    = gpu_blocks.at(slot_idx);
+            const auto  layer_stride = slot.stride_bytes;
+
+            if (isNullBlockIdx(gpu_block)) {
+                byte_off += layer_stride;
+                continue;
+            }
+
+            const auto gpu_buffers = allocator_->convertIndexToBuffer(slot.layer_id, slot.region_name, gpu_block);
+            size_t     within_layer_off = 0;
+            for (const auto& gpu_buffer : gpu_buffers) {
+                if (gpu_buffer.addr == nullptr || gpu_buffer.size_bytes == 0) {
+                    within_layer_off += gpu_buffer.size_bytes;
+                    continue;
+                }
+                if (!gpu_buffer.is_cuda) {
+                    return false;
+                }
+                if (within_layer_off + gpu_buffer.size_bytes > layer_stride
+                    || byte_off + within_layer_off + gpu_buffer.size_bytes > mem_buffer.size_bytes) {
+                    return false;
+                }
+                if (params.device_index < 0) {
+                    params.device_index = gpu_buffer.device_index;
+                } else if (params.device_index != gpu_buffer.device_index) {
+                    return false;
+                }
+
+                auto* mem_addr = static_cast<void*>(static_cast<char*>(mem_buffer.addr) + byte_off + within_layer_off);
+                if (direction == CopyDirection::H2D) {
+                    appendBatchedMemoryCopyTile(gpu_buffer.addr, mem_addr, gpu_buffer.size_bytes, params.tiles);
+                } else {
+                    appendBatchedMemoryCopyTile(mem_addr, gpu_buffer.addr, gpu_buffer.size_bytes, params.tiles);
+                }
+                ++logical_rows;
+                payload_bytes += gpu_buffer.size_bytes;
+                within_layer_off += gpu_buffer.size_bytes;
+            }
+            byte_off += layer_stride;
+        }
+    }
+
+    if (params.tiles.empty()) {
+        return true;
+    }
+
+    RTP_LLM_LOG_DEBUG("cuda memcpy batch, direction=%s, rows=%zu, tiles=%zu, bytes=%zu, device=%d",
+                      direction == CopyDirection::H2D ? "H2D" : "D2H",
+                      logical_rows,
+                      params.tiles.size(),
+                      payload_bytes,
+                      params.device_index);
+    RTP_LLM_PROFILE_SCOPE("reuse_cache.memory.copy.exec_batch");
+    return execBatchedMemoryCopy(params);
 }
 
 bool KVCacheMemoryConnector::prepareCopyBuffers(BlockIdxType                     mem_block,

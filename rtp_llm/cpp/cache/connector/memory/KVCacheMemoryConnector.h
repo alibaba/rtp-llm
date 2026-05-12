@@ -24,6 +24,7 @@ class BlockPool;
 class BroadcastManager;
 class KVCacheAllocator;
 class MemoryAsyncContext;
+struct StagedMemoryCopyScratch;
 
 class KVCacheMemoryConnector: public KVCacheConnector {
 public:
@@ -100,6 +101,13 @@ private:
                             CopyDirection                    direction,
                             std::vector<torch::Tensor>&      dst,
                             std::vector<torch::Tensor>&      src);
+    bool tryCopyCacheWithBatchedMemoryCopy(const MemoryOperationRequestPB&     request,
+                                           CopyDirection                       direction,
+                                           const std::vector<LayerRegionSlot>& slots);
+    bool tryCopyCacheWithStagedMemoryCopy(const MemoryOperationRequestPB&     request,
+                                          CopyDirection                       direction,
+                                          const std::vector<LayerRegionSlot>& slots);
+    StagedMemoryCopyScratch& stagedCopyScratchForDevice(int device_index);
     bool appendCopyBytesToBuffers(const BlockInfo&            mem_block,
                                   const BlockInfo&            gpu_block,
                                   size_t                      byte_off,
@@ -110,6 +118,7 @@ private:
     void checkLayerBlockStrideBytes() const;
     std::vector<LayerRegionSlot> layerRegionSlots() const;
     bool                      hasTypedLayerRegionSlots(const std::vector<LayerRegionSlot>& slots) const;
+    bool                      isDsv4TypedCacheLayout(const std::vector<LayerRegionSlot>& slots) const;
     bool checkLayerBlocks(const LayerBlockIds& layer_block_ids, size_t required_len) const;
     bool checkLayerRegionBlocks(const LayerAttnBlockIds& layer_attn_block_ids,
                               const std::vector<LayerRegionSlot>& slots,
@@ -143,6 +152,8 @@ private:
 
     std::shared_ptr<BlockPool> block_pool_;
     mutable std::mutex                         malloc_mutex_;
+    mutable std::mutex                         staged_copy_scratch_mutex_;
+    std::map<int, std::unique_ptr<StagedMemoryCopyScratch>> staged_copy_scratch_by_device_;
     std::shared_ptr<MemoryBlockCache>          block_cache_;
     std::shared_ptr<BroadcastManager>          broadcast_manager_;
     std::shared_ptr<autil::LockFreeThreadPool> wait_done_thread_pool_;
