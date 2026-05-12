@@ -2,11 +2,12 @@ import concurrent.futures
 import json
 import logging
 import os
-import traceback
 import time
+import traceback
 
 try:
     import torch
+
     _HAS_TORCH = True
 except ImportError:
     _HAS_TORCH = False
@@ -17,12 +18,15 @@ class _TensorEncoder(json.JSONEncoder):
         if _HAS_TORCH and isinstance(o, torch.Tensor):
             return o.tolist()
         return super().default(o)
+
+
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 from smoke.cache_status_comparer import CacheStatusComparer
 from smoke.classifier_comparer import ClassifierComparer
 from smoke.common_def import QueryStatus, SmokeException, Tracer
+from smoke.embedding_comparer import EmbeddingComparer
 from smoke.gpu_diagnostics import (
     ExceptionType,
     ProcessFailureType,
@@ -32,21 +36,18 @@ from smoke.gpu_diagnostics import (
     scan_process_log,
     snapshot_dmesg,
 )
-from smoke.embedding_comparer import EmbeddingComparer
 from smoke.normal_comparer import NormalComparer
 from smoke.openai_comparer import OpenaiComparer
+from smoke.remote_kvcm_server import RemoteKVCMServer
 from smoke.reranker_comparer import RerankerComparer
 from smoke.similarity_comparer import SimilarityComparer
 from smoke.task_info import TaskInfo, TaskStates
 from smoke.tau2_bench_comparer import Tau2BenchComparer
 from smoke.worker_status_comparer import WorkerStatusComparer
-from smoke.remote_kvcm_server import RemoteKVCMServer
 
-from rtp_llm.utils.util import (
-    str_to_bool,
-)
 from rtp_llm.test.utils.coredump_util import summarize_and_cleanup_coredumps
 from rtp_llm.test.utils.maga_server_manager import MagaServerManager
+from rtp_llm.utils.util import str_to_bool
 
 
 def _iterate_modidfy_qr(origin: Dict[str, Any], new: Dict[str, Any]):
@@ -110,7 +111,9 @@ class CaseRunner(object):
     def run(self):
         self._dmesg_baseline = snapshot_dmesg()
         env_dict = self.create_env_from_args(self.env_args)
-        enable_remote_cache = self._extract_bool_arg(self.smoke_args_str, "--enable_remote_cache")
+        enable_remote_cache = self._extract_bool_arg(
+            self.smoke_args_str, "--enable_remote_cache"
+        )
         if enable_remote_cache:
             self.remote_kvcm_server = self._start_remote_kvcm_server()
             assert self.remote_kvcm_server is not None, "remote kvcm shoule not be None"
@@ -119,7 +122,10 @@ class CaseRunner(object):
         logging.info(f"smoke_args_str: {self.smoke_args_str}")
         try:
             server_manager = self.start_server(
-                env_dict, task_states, self.task_info, smoke_args_str=self.smoke_args_str
+                env_dict,
+                task_states,
+                self.task_info,
+                smoke_args_str=self.smoke_args_str,
             )
             if server_manager is None:
                 task_states.ret = False
@@ -139,20 +145,23 @@ class CaseRunner(object):
             )
 
     def _start_remote_kvcm_server(self) -> Optional[RemoteKVCMServer]:
-        server_path = os.path.join(os.environ["TEST_SRCDIR"], os.environ["TEST_WORKSPACE"], "external/remote_kv_cache_manager_server")
+        server_path = os.path.join(
+            os.environ["TEST_SRCDIR"],
+            os.environ["TEST_WORKSPACE"],
+            "external/remote_kv_cache_manager_server",
+        )
         kvcm_src_logs_path = os.path.join(os.environ["TEST_SRCDIR"], "rtp_llm/logs")
         bazel_outputs_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", os.getcwd())
         kvcm_dst_logs_path = os.path.join(bazel_outputs_dir, "kvcm_logs")
-        remote_kvcm_server = RemoteKVCMServer(server_path, self.kvcm_config, kvcm_src_logs_path, kvcm_dst_logs_path)
+        remote_kvcm_server = RemoteKVCMServer(
+            server_path, self.kvcm_config, kvcm_src_logs_path, kvcm_dst_logs_path
+        )
         if remote_kvcm_server.start_server():
             return remote_kvcm_server
         logging.error("start remote_kvcm_server")
         return None
 
-
-    def curl_server(
-        self, server_manager: MagaServerManager
-    ) -> TaskStates:
+    def curl_server(self, server_manager: MagaServerManager) -> TaskStates:
         if self.concurrency_test:
             task_states = TaskStates()
             with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
@@ -227,13 +236,20 @@ class CaseRunner(object):
             return RerankerComparer
         elif q_r.get("mainse_module", None) == True:
             if q_r.get("use_decode_arpc", None) == True:
-                from smoke.mainse.mainse_decode_arpc_comparer import MainseDecodeArpcComparer
+                from smoke.mainse.mainse_decode_arpc_comparer import (
+                    MainseDecodeArpcComparer,
+                )
+
                 return MainseDecodeArpcComparer
             elif q_r.get("use_emb_arpc", None) == True:
-                from smoke.mainse.mainse_embedding_arpc_comparer import MainseEmbeddingArpcComparer
+                from smoke.mainse.mainse_embedding_arpc_comparer import (
+                    MainseEmbeddingArpcComparer,
+                )
+
                 return MainseEmbeddingArpcComparer
             else:
                 from smoke.mainse.mainse_comparer import MainseComparer
+
                 return MainseComparer
         return NormalComparer
 
@@ -243,35 +259,51 @@ class CaseRunner(object):
         task_info: TaskInfo,
         task_states: TaskStates,
     ) -> None:
-        repeat_count = int(os.environ.get('STABILITY_REPEAT', '0'))
+        repeat_count = int(os.environ.get("STABILITY_REPEAT", "0"))
         if repeat_count <= 0 or task_states.ret == False:
             return
 
         qr_array = task_info.query_result
         task_endpoint = task_info.endpoint
         num_queries = len(qr_array)
-        logging.info(f"[STABILITY_TEST] Starting {repeat_count} repeat iterations for {num_queries} queries")
+        logging.info(
+            f"[STABILITY_TEST] Starting {repeat_count} repeat iterations for {num_queries} queries"
+        )
 
         per_query_pass: Dict[int, int] = defaultdict(int)
         per_query_fail: Dict[int, int] = defaultdict(int)
-        per_query_responses: Dict[int, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        per_query_responses: Dict[int, Dict[str, int]] = defaultdict(
+            lambda: defaultdict(int)
+        )
 
         for iter_idx in range(repeat_count):
             for q_idx, q_r in enumerate(qr_array):
                 request_endpoint = self._resolve_endpoint(q_r, task_endpoint)
                 comparer_cls = self._get_comparer_cls(q_r, request_endpoint)
                 try:
-                    comparer_cls(server_manager, request_endpoint, q_r, Tracer(), self.batch_infer).run()
+                    comparer_cls(
+                        server_manager,
+                        request_endpoint,
+                        q_r,
+                        Tracer(),
+                        self.batch_infer,
+                    ).run()
                     per_query_pass[q_idx] += 1
-                    logging.info(f"[STABILITY_TEST iter={iter_idx+1}/{repeat_count} query={q_idx}] PASS")
+                    logging.info(
+                        f"[STABILITY_TEST iter={iter_idx+1}/{repeat_count} query={q_idx}] PASS"
+                    )
                 except Exception as e:
                     exc_type = classify_exception(e)
                     if exc_type != ExceptionType.NOT_GPU_ERROR:
-                        output_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", os.getcwd())
+                        output_dir = os.environ.get(
+                            "TEST_UNDECLARED_OUTPUTS_DIR", os.getcwd()
+                        )
                         dump_gpu_state(
                             exc=e,
                             failure_context=f"stability repeat ({exc_type.value})",
-                            log_path=os.path.join(output_dir, "gpu_state_stability.log"),
+                            log_path=os.path.join(
+                                output_dir, "gpu_state_stability.log"
+                            ),
                             dmesg_baseline=getattr(self, "_dmesg_baseline", 0),
                         )
                     per_query_fail[q_idx] += 1
@@ -279,18 +311,24 @@ class CaseRunner(object):
                     if "actual.response" in err_msg:
                         start = err_msg.find("actual.response = [")
                         if start != -1:
-                            resp = err_msg[start + len("actual.response = ["):]
+                            resp = err_msg[start + len("actual.response = [") :]
                             resp = resp.rstrip("]").rstrip()
                             per_query_responses[q_idx][resp] += 1
-                    logging.warning(f"[STABILITY_TEST iter={iter_idx+1}/{repeat_count} query={q_idx}] FAIL: {e}")
+                    logging.warning(
+                        f"[STABILITY_TEST iter={iter_idx+1}/{repeat_count} query={q_idx}] FAIL: {e}"
+                    )
 
         total_checks = repeat_count * num_queries
         total_pass = sum(per_query_pass.values())
         total_fail = sum(per_query_fail.values())
         pass_rate = total_pass / total_checks * 100 if total_checks > 0 else 0
 
-        logging.info(f"[STABILITY_SUMMARY] Total: {repeat_count} iterations x {num_queries} queries = {total_checks} checks")
-        logging.info(f"[STABILITY_SUMMARY] Pass: {total_pass}, Fail: {total_fail} (rate: {pass_rate:.1f}%)")
+        logging.info(
+            f"[STABILITY_SUMMARY] Total: {repeat_count} iterations x {num_queries} queries = {total_checks} checks"
+        )
+        logging.info(
+            f"[STABILITY_SUMMARY] Pass: {total_pass}, Fail: {total_fail} (rate: {pass_rate:.1f}%)"
+        )
         for q_idx in range(num_queries):
             p = per_query_pass.get(q_idx, 0)
             f = per_query_fail.get(q_idx, 0)
@@ -302,9 +340,12 @@ class CaseRunner(object):
         if total_fail > 0:
             task_states.ret = False
             task_states.query_status.append(
-                (QueryStatus.OTHERS,
-                 f"Stability test: {total_fail}/{total_checks} failures in {repeat_count} iterations",
-                 Tracer()))
+                (
+                    QueryStatus.OTHERS,
+                    f"Stability test: {total_fail}/{total_checks} failures in {repeat_count} iterations",
+                    Tracer(),
+                )
+            )
 
     def _curl_server_impl(
         self, server_manager: MagaServerManager, task_info: TaskInfo
@@ -321,7 +362,9 @@ class CaseRunner(object):
             request_endpoint = self._resolve_endpoint(q_r, task_endpoint)
             try:
                 comparer_cls = self._get_comparer_cls(q_r, request_endpoint)
-                comparer_cls(server_manager, request_endpoint, q_r, tracer, self.batch_infer).run()
+                comparer_cls(
+                    server_manager, request_endpoint, q_r, tracer, self.batch_infer
+                ).run()
                 task_states.query_status.append((QueryStatus.OK, f"", tracer))
             except SmokeException as e:
                 task_states.ret = False
@@ -329,7 +372,9 @@ class CaseRunner(object):
             except Exception as e:
                 exc_type = classify_exception(e)
                 if exc_type != ExceptionType.NOT_GPU_ERROR:
-                    output_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", os.getcwd())
+                    output_dir = os.environ.get(
+                        "TEST_UNDECLARED_OUTPUTS_DIR", os.getcwd()
+                    )
                     dump_gpu_state(
                         exc=e,
                         failure_context=f"query exception ({exc_type.value})",
@@ -341,10 +386,12 @@ class CaseRunner(object):
                 task_states.query_status.append((QueryStatus.OTHERS, str(e), tracer))
             if self.sleep_time_qr > 0:
                 time.sleep(self.sleep_time_qr)
-            if self.kill_remote and getattr(self, 'remote_kvcm_server', None) is not None:
+            if (
+                self.kill_remote
+                and getattr(self, "remote_kvcm_server", None) is not None
+            ):
                 self.remote_kvcm_server.stop_server()
                 logging.info("manually stop remote_kvcm_server")
-
 
         self._run_stability_repeat(server_manager, task_info, task_states)
 
@@ -355,6 +402,7 @@ class CaseRunner(object):
             with open(task_info.taskinfo_rel_path, "r") as f:
                 try:
                     import json5
+
                     origin_json = json5.load(f)
                 except ImportError:
                     origin_json = json.load(f)
@@ -375,7 +423,9 @@ class CaseRunner(object):
                     _iterate_modidfy_qr(origin_qr["result"], now_result)
 
             out_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", os.getcwd())
-            rewrite_path = os.path.join(out_dir, "smoke_actual", os.path.basename(task_info.taskinfo_rel_path))
+            rewrite_path = os.path.join(
+                out_dir, "smoke_actual", os.path.basename(task_info.taskinfo_rel_path)
+            )
             os.makedirs(os.path.dirname(rewrite_path), exist_ok=True)
             with open(rewrite_path, "w") as f:
                 json.dump(
@@ -412,11 +462,7 @@ class CaseRunner(object):
             role_name=role_name,
             smoke_args_str=smoke_args_str,
         )
-        tokenizer_path = (
-            task_info.tokenizer_path
-            if task_info.tokenizer_path is not None
-            else task_info.model_path
-        )
+        tokenizer_path = task_info.tokenizer_path or task_info.model_path
 
         ret = server_manager.start_server(
             task_info.model_path,
@@ -446,11 +492,15 @@ class CaseRunner(object):
         if ret is False:
             task_states.ret = False
             failure_type, failure_desc = classify_process_exit(server_manager.exit_code)
-            task_states.err_msg = f"start server failed: {failure_type.value} — {failure_desc}"
+            task_states.err_msg = (
+                f"start server failed: {failure_type.value} — {failure_desc}"
+            )
 
             log_errors = scan_process_log(server_manager.log_file_path, max_lines=30)
             if log_errors:
-                task_states.err_msg += "\n[process.log errors]\n" + "\n".join(log_errors)
+                task_states.err_msg += "\n[process.log errors]\n" + "\n".join(
+                    log_errors
+                )
 
             output_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", os.getcwd())
             dump_gpu_state(

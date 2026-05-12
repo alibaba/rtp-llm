@@ -1,5 +1,7 @@
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/connector/IKVCacheConnectorCoordinator.h"
+#include "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/utils.h"
@@ -270,24 +272,27 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
             inputs.kv_cache_layer_to_group.defined() ? inputs.kv_cache_layer_to_group : torch::Tensor();
         torch::Tensor kv_cache_group_types =
             inputs.kv_cache_group_types.defined() ? inputs.kv_cache_group_types : torch::Tensor();
-        PyCacheStoreInputs cache_store_inputs{context_batch_size,
-                                              decoder_batch_size,
-                                              inputs.request_id,
-                                              inputs.request_pd_separation,
-                                              kv_cache_layer_to_group,
-                                              kv_cache_group_types,
-                                              transVectorToString(cache_keys_vec),
-                                              inputs.seq_size_per_block,
-                                              inputs.kv_block_stride_bytes,
-                                              inputs.kv_scale_stride_bytes,
-                                              inputs.pd_separation,
-                                              model_id_,
-                                              inputs.decode_entrance,
-                                              inputs.warmup,
-                                              description_.attention_conf.use_mla
-                                                  && mla_ops_type_ != rtp_llm::MlaOpsType::MHA,
-                                              cache_manager_ ? cache_manager_->getCacheStore() : nullptr,
-                                              cache_store_async_writer_.get()};
+        PyCacheStoreInputs cache_store_inputs{
+            context_batch_size,
+            decoder_batch_size,
+            inputs.request_id,
+            inputs.request_pd_separation,
+            kv_cache_layer_to_group,
+            kv_cache_group_types,
+            transVectorToString(cache_keys_vec),
+            inputs.seq_size_per_block,
+            inputs.kv_block_stride_bytes,
+            inputs.kv_scale_stride_bytes,
+            inputs.pd_separation,
+            model_id_,
+            inputs.decode_entrance,
+            inputs.warmup,
+            description_.attention_conf.use_mla && mla_ops_type_ != rtp_llm::MlaOpsType::MHA,
+            cache_manager_ ? cache_manager_->getCacheStore() : nullptr,
+            cache_store_async_writer_.get(),
+            cache_manager_ ?
+                std::static_pointer_cast<IKVCacheConnectorCoordinator>(cache_manager_->connectorCoordinator()) :
+                nullptr};
         params = cache_store_inputs;
     }
     return params;

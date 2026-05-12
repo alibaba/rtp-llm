@@ -48,6 +48,28 @@ def remote_cache_suites():
                 gpu_type = ["L20"],
                 kvcm_envs = ["SEQ_SIZE_PER_BLOCK=8", "KVCM_LOG_LEVEL=DEBUG"],
                 sleep_time_qr = 20,
+                enable_decode_entrance = False,
+                smoke_args = {
+                    "prefill": "--warm_up 0  --reuse_cache 1 --role_type PREFILL --act_type FP16 --seq_size_per_block 8 --enable_remote_cache true --enable_device_cache 0 --reco_put_timeout_ms 12000 --reco_get_timeout_ms 12000 --reco_get_broadcast_timeout 15000 --reco_put_broadcast_timeout 15000",
+                    "decode": "--warm_up 0  --reuse_cache 1 --role_type DECODE --act_type FP16 --seq_size_per_block 8 --enable_remote_cache true --enable_device_cache 0 --reco_put_timeout_ms 12000 --reco_get_timeout_ms 12000 --reco_get_broadcast_timeout 15000 --reco_put_broadcast_timeout 15000",
+                },
+                task_info = "data/model/qwen25/q_r_l20_remote_cache_pd_sep.json",
+            ),
+            smoke_test(
+                name = "remote_cache_pd_decode_entrance",
+                data = ["@remote_kv_cache_manager_server//:bin/kv_cache_manager_bin"],
+                gpu_type = ["L20"],
+                kvcm_envs = ["SEQ_SIZE_PER_BLOCK=8", "KVCM_LOG_LEVEL=DEBUG"],
+                sleep_time_qr = 20,
+                envs = {
+                    "prefill": [
+                        "DECODE_ENTRANCE=1",
+                    ],
+                    "decode": [
+                        "DECODE_ENTRANCE=1",
+                    ],
+                },
+                enable_decode_entrance = True,
                 smoke_args = {
                     "prefill": "--warm_up 0  --reuse_cache 1 --role_type PREFILL --act_type FP16 --seq_size_per_block 8 --enable_remote_cache true --enable_device_cache 0 --reco_put_timeout_ms 12000 --reco_get_timeout_ms 12000 --reco_get_broadcast_timeout 15000 --reco_put_broadcast_timeout 15000",
                     "decode": "--warm_up 0  --reuse_cache 1 --role_type DECODE --act_type FP16 --seq_size_per_block 8 --enable_remote_cache true --enable_device_cache 0 --reco_put_timeout_ms 12000 --reco_get_timeout_ms 12000 --reco_get_broadcast_timeout 15000 --reco_put_broadcast_timeout 15000",
@@ -58,7 +80,7 @@ def remote_cache_suites():
                 name = "remote_cache_match_fail",
                 data = ["@remote_kv_cache_manager_server//:bin/kv_cache_manager_bin"],
                 gpu_type = ["L20"],
-                kvcm_envs = ["SEQ_SIZE_PER_BLOCK=8", 
+                kvcm_envs = ["SEQ_SIZE_PER_BLOCK=8",
                     "KVCM_LOG_LEVEL=DEBUG",
                     "ENABLE_DEBUG_SERVICE=TRUE",
                     "TEST_MATCH_FAILURE=1",
@@ -71,7 +93,7 @@ def remote_cache_suites():
                 name = "remote_cache_write_start_fail",
                 data = ["@remote_kv_cache_manager_server//:bin/kv_cache_manager_bin"],
                 gpu_type = ["L20"],
-                kvcm_envs = ["SEQ_SIZE_PER_BLOCK=8", 
+                kvcm_envs = ["SEQ_SIZE_PER_BLOCK=8",
                     "KVCM_LOG_LEVEL=DEBUG",
                     "ENABLE_DEBUG_SERVICE=TRUE",
                     "TEST_START_WRITE_FAILURE=1",
@@ -84,7 +106,7 @@ def remote_cache_suites():
                 name = "remote_cache_write_finish_fail",
                 data = ["@remote_kv_cache_manager_server//:bin/kv_cache_manager_bin"],
                 gpu_type = ["L20"],
-                kvcm_envs = ["SEQ_SIZE_PER_BLOCK=8", 
+                kvcm_envs = ["SEQ_SIZE_PER_BLOCK=8",
                     "KVCM_LOG_LEVEL=DEBUG",
                     "ENABLE_DEBUG_SERVICE=TRUE",
                     "TEST_FINISH_WRITE_FAILURE=1",
@@ -104,4 +126,3 @@ def remote_cache_suites():
             ),
         ],
     )
-
