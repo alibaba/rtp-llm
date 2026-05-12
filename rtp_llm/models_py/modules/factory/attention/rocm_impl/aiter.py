@@ -62,7 +62,9 @@ class FMHAParams(ParamsBase):
             # Create cu_seqlens on GPU directly to avoid per-layer .to(device) copies.
             # On ROCm each hipMemcpyWithStream costs ~1-8ms, so keeping these on GPU
             # from the start eliminates 28-layer × ~3ms/layer = ~84ms of sync overhead.
-            gpu_device = input_lengths.device
+            # NOTE: input_lengths is CPU pinned memory in production; we must
+            # explicitly target CUDA so cumsum and cu_seqlens live on GPU.
+            gpu_device = torch.device("cuda")
             input_lengths_gpu = input_lengths.to(gpu_device, non_blocking=True)
 
             # Create cu_seqlens_q for query (based on input_lengths only)
@@ -101,8 +103,7 @@ class FMHAParams(ParamsBase):
             self.token_kv_num = kv_lengths.sum().item()
 
             if alloc_scale:
-                dev = input_lengths.device
-                self.kv_scale = torch.ones(1, dtype=torch.float32, device=dev)
+                self.kv_scale = torch.ones(1, dtype=torch.float32, device=gpu_device)
         # Decode mode
         else:
             input_lengths = attn_inputs.input_lengths
@@ -264,20 +265,60 @@ class AiterPrefillAttnOp:
             token_kv_num,
         )
 
-    def _forward_varlen(self, qkv, fmha_params):
-        """Fallback path using flash_attn_varlen_func for models without KV cache.
+    @staticmethod
+    def _unpad_kv(kv_padded: torch.Tensor, cu_seqlens_k: torch.Tensor) -> torch.Tensor:
+        """Unpad 4D [B, H_kv, max_seqlen, D] → 3D [total_tokens, H_kv, D].
 
-        Handles raw QKV tensor (from qkv_proj) by splitting and reshaping, then
-        dispatches to aiter.flash_attn_varlen_func.
+        This reverses the padding applied by C++ FusedRopeKVCachePrefillOp which
+        emits K/V in [B, H_kv, max_seqlen_k, D] layout.
+        """
+        batch_size = kv_padded.shape[0]
+        head_num_kv = kv_padded.shape[1]
+        head_dim = kv_padded.shape[3]
+        cu_seqlens_cpu = cu_seqlens_k.cpu()
+        chunks = []
+        for i in range(batch_size):
+            seq_len = int(cu_seqlens_cpu[i + 1].item() - cu_seqlens_cpu[i].item())
+            # kv_padded[i] is [H_kv, max_seqlen, D], take first seq_len tokens
+            # and transpose to [seq_len, H_kv, D]
+            chunks.append(kv_padded[i, :, :seq_len, :].permute(1, 0, 2))
+        return torch.cat(chunks, dim=0)
+
+    def _forward_varlen(self, qkv, fmha_params):
+        """Varlen path using flash_attn_varlen_func.
+
+        Accepts either:
+          - A packed QKV tensor (from qkv_proj): split into Q/K/V and reshape.
+          - A tuple/list of (Q, K, V) tensors where Q is [tokens, H_q, D] and
+            K/V may be 4D padded [B, H_kv, max_seqlen, D] (from C++ RoPE op).
+            In that case, unpad K/V back to [total_tokens, H_kv, D].
         """
         if isinstance(qkv, (tuple, list)):
-            qkv = qkv[0]
-        query, key, value = self._split_raw_qkv(
-            qkv, fmha_params.token_q_num, fmha_params.token_kv_num
-        )
-        # cu_seqlens are already on GPU from FMHAParams.__init__
+            query, key, value = qkv[0], qkv[1], qkv[2]
+            # Ensure Q is 3D [tokens, heads, head_dim]
+            if query.dim() == 2:
+                query = query.view(-1, self.head_num, self.head_dim)
+            # K/V from C++ FusedRopeKVCachePrefillOp are 4D padded [B, H_kv, max_seqlen, D].
+            # Unpad them to [total_kv_tokens, H_kv, D] using cu_seqlens_k.
+            if key.dim() == 4:
+                key = self._unpad_kv(key, fmha_params.cu_seqlens_k)
+            elif key.dim() == 2:
+                key = key.view(-1, self.head_num_kv, self.head_dim)
+            if value.dim() == 4:
+                value = self._unpad_kv(value, fmha_params.cu_seqlens_k)
+            elif value.dim() == 2:
+                value = value.view(-1, self.head_num_kv, self.head_dim)
+        else:
+            query, key, value = self._split_raw_qkv(
+                qkv, fmha_params.token_q_num, fmha_params.token_kv_num
+            )
         cu_seqlens_q = fmha_params.cu_seqlens_q
         cu_seqlens_k = fmha_params.cu_seqlens_k
+        # Defensive: ensure cu_seqlens are on the same device as query
+        if cu_seqlens_q.device != query.device:
+            cu_seqlens_q = cu_seqlens_q.to(query.device, non_blocking=True)
+        if cu_seqlens_k.device != query.device:
+            cu_seqlens_k = cu_seqlens_k.to(query.device, non_blocking=True)
         res = aiter.flash_attn_varlen_func(
             query,
             key,
@@ -387,9 +428,12 @@ class AiterPrefillAttnOp:
     def forward(self, qkv, kv_cache, fmha_params):
         q_tensor = qkv[0] if isinstance(qkv, (tuple, list)) else qkv
 
-        # When kv_cache exists, always use paged path (handles both BF16 and FP8 KV cache).
-        # The _forward_paged method already handles FP8 KV cache via descale parameters.
-        if kv_cache is not None:
+        # Paged path: only when kv_cache is a real paged cache object (has kv_cache_base).
+        # When qkv is a tuple (Q, K_padded, V_padded), we always use the varlen unpad path
+        # regardless of kv_cache presence — the caller provides K/V explicitly.
+        # NOTE on head_dim=256: aiter.mha_batch_prefill_func supports head_dim in {64,128,256}
+        # since aiter 0.1.13.dev4 (commit 9ed3e3490). No varlen fallback needed here.
+        if kv_cache is not None and hasattr(kv_cache, 'kv_cache_base'):
             return self._forward_paged(q_tensor, kv_cache, fmha_params)
 
         # FP8 non-paged path: C++ returns full qkv_buf_fp8 (Q+K+V concatenated in FP8).
