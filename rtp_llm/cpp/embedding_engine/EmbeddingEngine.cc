@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include <c10/core/InferenceMode.h>
 #include <exception>
 
 using namespace std;
@@ -57,6 +58,7 @@ absl::Status EmbeddingEngine::stop() {
 void EmbeddingEngine::loop() {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_INFO("loop begin");
+    c10::InferenceMode inference_guard(true);
     while (running_) {
         auto status = step();
         if (!status.ok()) {

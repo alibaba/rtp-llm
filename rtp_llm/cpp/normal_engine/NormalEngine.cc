@@ -174,6 +174,8 @@ NormalEngine::~NormalEngine() {
 
 absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<GenerateInput>& generate_input,
                                                        preRunMode                            mode) {
+    c10::InferenceMode inference_guard(true);
+
     auto stream = std::make_shared<NormalGenerateStream>(generate_input,
                                                          model_config_,
                                                          runtime_config,
@@ -272,8 +274,15 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     if (!cache_manager->init()) {
         RTP_LLM_FAIL("init kv cache manager failed in decodeWarmUp");
     }
-    executor_.reset(new NormalExecutor(
-        thread_pool_, params, cache_manager, true, false, 0, mla_ops_type_, kv_cache_group_num_, kv_cache_layer_to_group_));
+    executor_.reset(new NormalExecutor(thread_pool_,
+                                       params,
+                                       cache_manager,
+                                       true,
+                                       false,
+                                       0,
+                                       mla_ops_type_,
+                                       kv_cache_group_num_,
+                                       kv_cache_layer_to_group_));
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::decode_warm_up));
     const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
     rtp_llm::setTraceMemory(false);
@@ -402,6 +411,7 @@ absl::Status NormalEngine::stop() {
 void NormalEngine::loop() {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_INFO("loop begin");
+    c10::InferenceMode inference_guard(true);
     cudaPreRun(getDeviceId());
     while (running_) {
         auto status = step();
