@@ -51,7 +51,7 @@ public:
                          const std::vector<int32_t>&                    kv_cache_layer_to_group = {},
                          bool                                           warm_up                 = false);
 
-    absl::Status process(const std::list<GenerateStreamPtr>& streams) override;
+    absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) override;
     bool         updateEplbConfig(const EPLBConfig& config) override;
 
     void setTargetModel(std::unique_ptr<ModelBase> model) {
@@ -93,7 +93,9 @@ protected:
 
     void maybePrintModelInput(const GptModelInputs& model_input, const std::string& prefix) const;
 
-    absl::Status prefillStep(const std::list<GenerateStreamPtr>& streams, MtpMetricsCollector& metrics_collector);
+    absl::Status prefillStep(const std::list<GenerateStreamPtr>& streams,
+                             MtpMetricsCollector&                metrics_collector,
+                             int64_t                             schedule_time_us);
 
     absl::Status decodeStep(const std::list<GenerateStreamPtr>& streams, MtpMetricsCollector& metrics_collector);
 
@@ -117,6 +119,7 @@ private:
     int                                      tp_rank_                 = 0;
     ParallelismConfig                        parallelism_config_;
     kmonitor::MetricsReporterPtr             metrics_reporter_ = nullptr;
+    MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector> tps_reporter_;
     std::shared_ptr<ExpertBalancer>          expert_balancer_;
     size_t                                   vocab_size_;
 

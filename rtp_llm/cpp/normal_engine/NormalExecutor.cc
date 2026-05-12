@@ -116,10 +116,16 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     cudaProfilerBegin();
 }
 
-absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams) {
+absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us) {
+    const int64_t process_start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+    if (schedule_time_us <= 0) {
+        schedule_time_us = process_start_time_us;
+    }
     StreamGroups                   stream_groups(streams);
     RtpLLMExecutorMetricsCollector executor_collector;
     RtpLLMTokenPSMetricsCollector  tps_collector;
+    auto                           tps_active_guard =
+        tps_reporter_.makeActiveGuard(metrics_reporter_ && tp_rank_ == 0 && !warm_up_ && !streams.empty());
     GptModelInputs                 model_input;
     GptModelOutputs                model_output;
     SamplerOutput                  sampler_output;
@@ -195,7 +201,11 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         auto    result =
             batch_stream_processor_->dispatch(stream_groups, {std::move(model_output), std::move(sampler_output)});
         executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-        reportMetrics(stream_groups, executor_collector, tps_collector);
+        int64_t tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
+        if (tps_execute_time_us <= 0) {
+            tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us;
+        }
+        reportMetrics(stream_groups, executor_collector, tps_collector, tps_execute_time_us);
 
         model_->releaseBuffers();
 
@@ -205,7 +215,8 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
 
 void NormalExecutor::reportMetrics(const StreamGroups&             stream_groups,
                                    RtpLLMExecutorMetricsCollector& executor_collector,
-                                   RtpLLMTokenPSMetricsCollector&  tps_collector) {
+                                   RtpLLMTokenPSMetricsCollector&  tps_collector,
+                                   int64_t                         tps_execute_time_us) {
     if (tp_rank_ > 0) {
         return;
     }
@@ -226,7 +237,7 @@ void NormalExecutor::reportMetrics(const StreamGroups&             stream_groups
                                    stream_groups.contextExecuteTokenSizeWithCache(),
                                    stream_groups.totalDecodeBatchSize(),
                                    stream_groups.modelExecuteTokenSize(),
-                                   executor_collector.model_forward_us);
+                                   tps_execute_time_us);
         tps_reporter_.report(&tps_collector);
     }
 }

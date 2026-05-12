@@ -29,10 +29,11 @@ public:
                             int32_t                                kv_cache_group_num      = 1,
                             const std::vector<int32_t>&            kv_cache_layer_to_group = {});
     ~NormalExecutor();
-    absl::Status process(const std::list<GenerateStreamPtr>& streams) override;
+    absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) override;
     void         reportMetrics(const StreamGroups&             stream_groups,
                                RtpLLMExecutorMetricsCollector& executor_collector,
-                               RtpLLMTokenPSMetricsCollector&  tps_collector);
+                               RtpLLMTokenPSMetricsCollector&  tps_collector,
+                               int64_t                         tps_execute_time_us);
 
     void setBatchProcessor(std::unique_ptr<NormalBatchStreamProcessor> processor) {
         batch_stream_processor_ = std::move(processor);

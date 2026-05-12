@@ -313,6 +313,11 @@ public:
             context_time_us_with_cache_ += collector->context_time_us_with_cache_;
             generate_token_num_ += collector->generate_token_num_;
             total_token_num_ += collector->total_token_num_;
+            if (hasMetrics()) {
+                report_zero_tps_ = false;
+            } else if (collector->report_zero_tps_) {
+                report_zero_tps_ = true;
+            }
         }
     }
 
@@ -348,6 +353,20 @@ public:
         return total_token_num_ > 0;
     }
 
+    bool hasMetrics() const {
+        return hasContextTPS() || hasContextTPSWithCache() || hasGenerateTPS() || hasTotalTPS();
+    }
+
+    void markIdleWindow() {
+        if (!hasMetrics()) {
+            report_zero_tps_ = true;
+        }
+    }
+
+    bool reportZeroTPS() const {
+        return report_zero_tps_;
+    }
+
 private:
     static double calcTps(int64_t token_num, int64_t time_us) {
         if (time_us > 0) {
@@ -363,6 +382,7 @@ private:
     int64_t context_time_us_with_cache_   = 0;
     int64_t generate_token_num_           = 0;
     int64_t total_token_num_              = 0;
+    bool    report_zero_tps_              = false;
 };
 
 class RtpLLMTokenPSMetrics: public kmonitor::MetricsGroup {
@@ -397,18 +417,79 @@ public:
         }
     }
 
+    class ActiveGuard {
+    public:
+        ActiveGuard() = default;
+        explicit ActiveGuard(MetricsLoopReporter* reporter): reporter_(reporter) {
+            if (reporter_) {
+                reporter_->beginActive();
+            }
+        }
+        ActiveGuard(const ActiveGuard&)            = delete;
+        ActiveGuard& operator=(const ActiveGuard&) = delete;
+        ActiveGuard(ActiveGuard&& other): reporter_(other.reporter_) {
+            other.reporter_ = nullptr;
+        }
+        ActiveGuard& operator=(ActiveGuard&& other) {
+            if (this != &other) {
+                release();
+                reporter_       = other.reporter_;
+                other.reporter_ = nullptr;
+            }
+            return *this;
+        }
+        ~ActiveGuard() {
+            release();
+        }
+
+    private:
+        void release() {
+            if (reporter_) {
+                reporter_->endActive();
+                reporter_ = nullptr;
+            }
+        }
+
+    private:
+        MetricsLoopReporter* reporter_ = nullptr;
+    };
+
+    ActiveGuard makeActiveGuard(bool active = true) {
+        return ActiveGuard(active ? this : nullptr);
+    }
+
     void report(const CollectType* collector) {
         std::lock_guard<std::mutex> lock(mutex_);
         collector_.merge(collector);
     }
 
 private:
+    void beginActive() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++active_count_;
+    }
+
+    void endActive() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (active_count_ > 0) {
+            --active_count_;
+        }
+    }
+
     void reportLoop() {
         while (metrics_reporter_ && !stop_) {
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                metrics_reporter_->report<MetricsType, CollectType>(nullptr, &collector_);
-                collector_ = CollectType();
+                if (collector_.hasMetrics()) {
+                    metrics_reporter_->report<MetricsType, CollectType>(nullptr, &collector_);
+                    collector_ = CollectType();
+                } else if (active_count_ == 0) {
+                    // Idle service should emit 0 TPS. An in-flight long step with no completed sample stays silent
+                    // until its step-interval-normalized TPS is known.
+                    collector_.markIdleWindow();
+                    metrics_reporter_->report<MetricsType, CollectType>(nullptr, &collector_);
+                    collector_ = CollectType();
+                }
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms_));
         }
@@ -418,6 +499,7 @@ private:
     std::mutex                   mutex_;
     bool                         stop_ = false;
     CollectType                  collector_;
+    int                          active_count_ = 0;
     int                          interval_ms_ = 1000;
     std::thread                  metrics_reporter_thread_;
     kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;

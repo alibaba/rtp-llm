@@ -77,4 +77,48 @@ TEST(RtpLLMTokenPSMetricsCollectorTest, KeepsGenerateAndTotalWhenExecutionTimeIs
     EXPECT_NEAR(collector.totalTPS(), 1002.0, 1e-6);
 }
 
+TEST(RtpLLMTokenPSMetricsCollectorTest, MarksEmptyIdleWindowForZeroReport) {
+    RtpLLMTokenPSMetricsCollector collector;
+
+    EXPECT_FALSE(collector.hasMetrics());
+    EXPECT_FALSE(collector.reportZeroTPS());
+
+    collector.markIdleWindow();
+
+    EXPECT_FALSE(collector.hasMetrics());
+    EXPECT_TRUE(collector.reportZeroTPS());
+    EXPECT_NEAR(collector.contextTPS(), 0.0, 1e-6);
+    EXPECT_NEAR(collector.contextTPSWithCache(), 0.0, 1e-6);
+    EXPECT_NEAR(collector.generateTPS(), 0.0, 1e-6);
+    EXPECT_NEAR(collector.totalTPS(), 0.0, 1e-6);
+}
+
+TEST(RtpLLMTokenPSMetricsCollectorTest, DoesNotMarkNonEmptyWindowAsIdle) {
+    RtpLLMTokenPSMetricsCollector collector;
+
+    collector.addTokenSize(1000, 1500, 2, 1002, 100 * 1000);
+    collector.markIdleWindow();
+
+    EXPECT_TRUE(collector.hasMetrics());
+    EXPECT_FALSE(collector.reportZeroTPS());
+}
+
+TEST(RtpLLMTokenPSMetricsCollectorTest, MergeKeepsIdleZeroOnlyForEmptyMetrics) {
+    RtpLLMTokenPSMetricsCollector idle;
+    RtpLLMTokenPSMetricsCollector merged;
+
+    idle.markIdleWindow();
+    merged.merge(&idle);
+
+    EXPECT_FALSE(merged.hasMetrics());
+    EXPECT_TRUE(merged.reportZeroTPS());
+
+    RtpLLMTokenPSMetricsCollector non_empty;
+    non_empty.addTokenSize(1000, 1000, 0, 1000, 100 * 1000);
+    merged.merge(&non_empty);
+
+    EXPECT_TRUE(merged.hasMetrics());
+    EXPECT_FALSE(merged.reportZeroTPS());
+}
+
 }  // namespace rtp_llm
