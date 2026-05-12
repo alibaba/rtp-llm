@@ -18,6 +18,7 @@ from rtp_llm.ops import HWKernelConfig
 from flashinfer import (
     mm_fp4,
     fp4_quantize,
+    autotune,
 )
 
 
@@ -63,7 +64,7 @@ class CudaFp4GEMMLinear(LinearBase):
         self.weight_scale_2 = weight_scale_2
         self.input_scale = input_scales
         self.bias = bias
-        self.backend = os.getenv("RTP_LLM_FP4_GEMM_BACKEND", "cutlass")
+        self.backend = os.getenv("RTP_LLM_FP4_GEMM_BACKEND", "cute-dsl")
         self.alpha = self.weight_scale_2 * self.input_scale
         self.input_scale_inv = 1 / self.input_scale
 
@@ -105,15 +106,16 @@ class CudaFp4GEMMLinear(LinearBase):
                 output_dtype
             ).view(*output_shape)
         else:
-            output = mm_fp4(
-                input_fp4,
-                self.weight.T,
-                input_scale_interleaved,
-                self.weight_scales.T,
-                self.alpha,
-                output_dtype,
-                backend=self.backend
-            ).view(*output_shape)
+            with autotune(True, cache=None): 
+                output = mm_fp4(
+                    input_fp4,
+                    self.weight.T,
+                    input_scale_interleaved,
+                    self.weight_scales.T,
+                    self.alpha,
+                    output_dtype,
+                    backend=self.backend
+                ).view(*output_shape)
 
         if self.bias is not None:
             output = output + self.bias.to(output.dtype)
