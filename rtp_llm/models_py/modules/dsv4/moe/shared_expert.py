@@ -18,14 +18,73 @@ from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 
 
 _SHARED_EXPERT_WORKSPACE_CACHE: dict[tuple, dict[str, torch.Tensor | int | torch.device]] = {}
+_SHARED_EXPERT_STREAM_CACHE: dict[int, torch.cuda.Stream] = {}
 
 
 def _mode() -> str:
-    return os.environ.get("DSV4_SHARED_EXPERT_MODE", "auto").strip().lower()
+    return os.environ.get("DSV4_SHARED_EXPERT_MODE", "sequential").strip().lower()
 
 
 def strict_fused_moe_enabled() -> bool:
     return os.environ.get("DSV4_MOE_STRICT_FUSED", "1") != "0"
+
+
+def _normalize_cuda_device(device: torch.device) -> torch.device | None:
+    if not torch.cuda.is_available() or device.type != "cuda":
+        return None
+    device_index = device.index
+    if device_index is None:
+        device_index = torch.cuda.current_device()
+    return torch.device("cuda", device_index)
+
+
+def _ensure_shared_expert_stream(device: torch.device) -> torch.cuda.Stream | None:
+    device = _normalize_cuda_device(device)
+    if device is None:
+        return None
+    device_index = device.index
+    assert device_index is not None
+    stream = _SHARED_EXPERT_STREAM_CACHE.get(device_index)
+    if stream is None:
+        stream = torch.cuda.Stream(device=device)
+        _SHARED_EXPERT_STREAM_CACHE[device_index] = stream
+    return stream
+
+
+def _get_shared_expert_stream(
+    device: torch.device,
+    *,
+    allow_create: bool,
+) -> torch.cuda.Stream:
+    device = _normalize_cuda_device(device)
+    if device is None:
+        raise RuntimeError(f"shared expert overlap requires CUDA device, got {device}")
+    device_index = device.index
+    assert device_index is not None
+    stream = _SHARED_EXPERT_STREAM_CACHE.get(device_index)
+    if stream is not None:
+        return stream
+    if not allow_create:
+        raise RuntimeError(
+            "shared expert overlap stream was not created before CUDA graph "
+            f"capture for device cuda:{device_index}"
+        )
+    stream = torch.cuda.Stream(device=device)
+    _SHARED_EXPERT_STREAM_CACHE[device_index] = stream
+    return stream
+
+
+def _find_module_cuda_device(module: nn.Module) -> torch.device | None:
+    for tensor in list(module.parameters(recurse=True)) + list(module.buffers(recurse=True)):
+        if tensor.is_cuda:
+            return tensor.device
+
+    for submodule in module.modules():
+        for attr in ("weight", "weight_scales", "bias"):
+            tensor = getattr(submodule, attr, None)
+            if isinstance(tensor, torch.Tensor) and tensor.is_cuda:
+                return tensor.device
+    return None
 
 
 class W13SharedExpert(nn.Module):
@@ -387,7 +446,6 @@ class OverlapSharedExpertExecutor(SharedExpertExecutor):
         self,
         fast_path: FusedSharedExpertFastPath | None = None,
     ) -> None:
-        self._stream: torch.cuda.Stream | None = None
         self._active_stream: torch.cuda.Stream | None = None
         self._out: torch.Tensor | None = None
         self._fast_path = fast_path
@@ -395,11 +453,12 @@ class OverlapSharedExpertExecutor(SharedExpertExecutor):
     def prepare(self, shared_experts: nn.Module) -> None:
         if self._fast_path is not None:
             self._fast_path.prepare(shared_experts)
+        device = _find_module_cuda_device(shared_experts)
+        if device is not None:
+            _ensure_shared_expert_stream(device)
 
     def _can_overlap(self, x: torch.Tensor) -> bool:
         if not (x.is_cuda and torch.cuda.is_available()):
-            return False
-        if torch.cuda.is_current_stream_capturing():
             return False
         if os.environ.get("MOEDBG", "0") != "0":
             return False
@@ -414,10 +473,10 @@ class OverlapSharedExpertExecutor(SharedExpertExecutor):
             with record_function_range("dsv4.moe.shared_expert"):
                 self._out = _run_shared_expert(shared_experts, x, self._fast_path)
             return
-        if self._stream is None:
-            self._stream = torch.cuda.Stream(device=x.device)
-        stream = self._stream
-        x.record_stream(stream)
+        capturing = torch.cuda.is_current_stream_capturing()
+        stream = _get_shared_expert_stream(x.device, allow_create=not capturing)
+        if not capturing:
+            x.record_stream(stream)
         stream.wait_stream(torch.cuda.current_stream(x.device))
         with torch.cuda.stream(stream):
             with record_function_range("dsv4.moe.shared_expert"):

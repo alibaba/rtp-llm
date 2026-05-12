@@ -22,6 +22,7 @@ from rtp_llm.models_py.modules.dsv4.moe.shared_expert import (
     OverlapSharedExpertExecutor,
     SequentialSharedExpertExecutor,
     W13SharedExpert,
+    _SHARED_EXPERT_STREAM_CACHE,
     combine_routed_and_shared,
     get_shared_expert_executor,
 )
@@ -45,6 +46,12 @@ def _env(key: str, value: str):
 class _Shared(nn.Module):
     def forward(self, x):
         return (x.float() * 0.25).to(x.dtype)
+
+
+class _SharedWithCudaWeight(_Shared):
+    def __init__(self):
+        super().__init__()
+        self.weight = torch.empty(1, device="cuda")
 
 
 def _quant_weight(weight_bf16: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -216,9 +223,13 @@ class TestSharedExpertExecutor(unittest.TestCase):
             executor.start(_Shared(), x)
 
     def test_executor_dispatch(self):
+        os.environ.pop("DSV4_SHARED_EXPERT_MODE", None)
+        self.assertIsInstance(get_shared_expert_executor(), SequentialSharedExpertExecutor)
         with _env("DSV4_SHARED_EXPERT_MODE", "sequential"):
             self.assertIsInstance(get_shared_expert_executor(), SequentialSharedExpertExecutor)
         with _env("DSV4_SHARED_EXPERT_MODE", "overlap"):
+            self.assertIsInstance(get_shared_expert_executor(), OverlapSharedExpertExecutor)
+        with _env("DSV4_SHARED_EXPERT_MODE", "auto"):
             self.assertIsInstance(get_shared_expert_executor(), OverlapSharedExpertExecutor)
 
     def test_sequential_executor(self):
@@ -238,6 +249,98 @@ class TestSharedExpertExecutor(unittest.TestCase):
         with _env("DSV4_MOE_STRICT_FUSED", "0"):
             overlap.start(shared, x)
         got = overlap.finish()
+        ref = shared(x).float()
+        self.assertTrue(torch.equal(got.cpu(), ref.cpu()))
+
+    @unittest.skipIf(not torch.cuda.is_available(), "CUDA required")
+    def test_overlap_executor_reuses_fixed_device_stream(self):
+        x = torch.randn(33, 128, device="cuda", dtype=torch.bfloat16)
+        shared = _Shared().cuda()
+        first = OverlapSharedExpertExecutor()
+        second = OverlapSharedExpertExecutor()
+
+        with _env("DSV4_MOE_STRICT_FUSED", "0"):
+            first.start(shared, x)
+            first_stream = first._active_stream
+            self.assertIsNotNone(first_stream)
+            first.finish()
+
+            second.start(shared, x)
+            second_stream = second._active_stream
+            self.assertIs(second_stream, first_stream)
+            second.finish()
+
+        device_index = x.device.index
+        assert device_index is not None
+        self.assertIs(_SHARED_EXPERT_STREAM_CACHE[device_index], first_stream)
+
+    @unittest.skipIf(not torch.cuda.is_available(), "CUDA required")
+    def test_overlap_prepare_precreates_device_stream(self):
+        _SHARED_EXPERT_STREAM_CACHE.clear()
+        shared = _SharedWithCudaWeight()
+        executor = OverlapSharedExpertExecutor()
+
+        executor.prepare(shared)
+
+        device_index = shared.weight.device.index
+        assert device_index is not None
+        self.assertIn(device_index, _SHARED_EXPERT_STREAM_CACHE)
+
+    @unittest.skipIf(not torch.cuda.is_available(), "CUDA required")
+    def test_overlap_capture_requires_precreated_stream(self):
+        _SHARED_EXPERT_STREAM_CACHE.clear()
+        x = torch.randn(33, 128, device="cuda", dtype=torch.bfloat16)
+        shared = _Shared().cuda()
+        executor = OverlapSharedExpertExecutor()
+
+        with _env("DSV4_MOE_STRICT_FUSED", "0"), mock.patch(
+            "torch.cuda.is_current_stream_capturing",
+            return_value=True,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "not created before CUDA graph capture"):
+                executor.start(shared, x)
+
+    @unittest.skipIf(not torch.cuda.is_available(), "CUDA required")
+    def test_overlap_executor_captures_with_precreated_stream(self):
+        _SHARED_EXPERT_STREAM_CACHE.clear()
+        x = torch.randn(33, 128, device="cuda", dtype=torch.bfloat16)
+        shared = _Shared().cuda()
+        executor = OverlapSharedExpertExecutor()
+        out = torch.empty(x.shape, device=x.device, dtype=torch.float32)
+
+        with _env("DSV4_MOE_STRICT_FUSED", "0"):
+            executor.start(shared, x)
+            warmup_stream = executor._active_stream
+            self.assertIsNotNone(warmup_stream)
+            executor.finish()
+            torch.cuda.synchronize()
+
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                executor.start(shared, x)
+                self.assertIs(executor._active_stream, warmup_stream)
+                out.copy_(executor.finish())
+
+            x.mul_(2.0)
+            graph.replay()
+            torch.cuda.synchronize()
+
+        ref = shared(x).float()
+        self.assertTrue(torch.equal(out.cpu(), ref.cpu()))
+
+    @unittest.skipIf(not torch.cuda.is_available(), "CUDA required")
+    def test_overlap_threshold_falls_back_to_sequential(self):
+        x = torch.randn(33, 128, device="cuda", dtype=torch.bfloat16)
+        shared = _Shared().cuda()
+        executor = OverlapSharedExpertExecutor()
+
+        with _env("DSV4_MOE_STRICT_FUSED", "0"), _env(
+            "DSV4_SHARED_EXPERT_STREAM_TOKEN_THRESHOLD", "1"
+        ):
+            executor.start(shared, x)
+            self.assertIsNone(executor._active_stream)
+            got = executor.finish()
+
         ref = shared(x).float()
         self.assertTrue(torch.equal(got.cpu(), ref.cpu()))
 
