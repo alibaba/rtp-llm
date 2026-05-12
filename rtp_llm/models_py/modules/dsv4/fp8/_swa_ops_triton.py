@@ -300,14 +300,21 @@ def _combine_topk_swa_indices_kernel(
         topk_len = tl.minimum((pos + 1) // COMPRESS_RATIO, TOP_K)
         swa_len = tl.minimum(pos + 1, WINDOW_SIZE)
 
+        # Promote the row index once. Long-context HCA prefill of a 1.1M-token
+        # query can reach token_idx ~ 274092 with strides 8565 / 9600, so the
+        # default int32 ``token_idx * stride`` wraps at ~2.35-2.63B and writes
+        # off-allocation (sticky CUDA_ERROR_ILLEGAL_ADDRESS at the next sync).
+        # Same wrap, same fix as the CP variant kernel below.
+        token_idx_i64 = token_idx.to(tl.int64)
+
         offset = tl.arange(0, PADDED_TOP_K)
         mask = offset < topk_len
         topk_indices = tl.load(
-            topk_indices_ptr + token_idx * topk_indices_stride + offset,
+            topk_indices_ptr + token_idx_i64 * topk_indices_stride + offset,
             mask=mask,
         )
         tl.store(
-            combined_indices_ptr + token_idx * combined_indices_stride + offset,
+            combined_indices_ptr + token_idx_i64 * combined_indices_stride + offset,
             topk_indices + M * batch_idx,
             mask=mask,
         )
@@ -321,7 +328,7 @@ def _combine_topk_swa_indices_kernel(
         # this batch's slice (M * batch_idx).
         tl.store(
             combined_indices_ptr
-            + token_idx * combined_indices_stride
+            + token_idx_i64 * combined_indices_stride
             + topk_len
             + offset,
             M * batch_idx + N + offset + pos - swa_len + 1 - gather_start,
@@ -465,7 +472,16 @@ def _combine_topk_swa_indices_cp_kernel(
     combined_len = topk_len + swa_len
 
     col = cols[None, :]
-    row = rows[:, None]
+    # int64 row indexing — long-context CP4 HCA L3 prefill of a 1.1M-token
+    # query gives ``num_tokens`` ≈ 274092 and ``topk_indices_stride`` = 8565
+    # (dense ``arange(N)`` materialised on the meta builder side). The
+    # default int32 ``row * topk_indices_stride`` therefore overflows at
+    # ~2.35B, producing a sticky CUDA_ERROR_ILLEGAL_ADDRESS that surfaces
+    # at the next sync (typically caught at ``_ws_sync('combine_topk_cp')``
+    # in ``Attention._attn_via_workspace``). Same wrap exists on
+    # ``combined_indices_stride`` (9600) at ~2.63B. Promote the row
+    # broadcast once and reuse for both pointer expressions.
+    row = rows[:, None].to(tl.int64)
     in_topk = col < topk_len[:, None]
     in_swa = (col >= topk_len[:, None]) & (col < combined_len[:, None])
 
