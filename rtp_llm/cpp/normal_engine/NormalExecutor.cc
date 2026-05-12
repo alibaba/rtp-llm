@@ -34,7 +34,8 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     warm_up_(warm_up),
     use_all_gather_(params.moe_config.use_all_gather && !params.moe_config.use_deepep_low_latency),
     metrics_reporter_(params.metrics_reporter),
-    tps_reporter_(MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(metrics_reporter_)),
+    tps_reporter_(MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(
+        params.parallelism_config.tp_rank == 0 && !warm_up ? metrics_reporter_ : nullptr)),
     is_propose_(is_propose),
     propose_model_index_(propose_model_index) {
     enable_detail_log_  = params.profiling_debug_logging_config.enable_detail_log;
