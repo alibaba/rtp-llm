@@ -69,9 +69,13 @@ class ConfigServiceTest {
     }
 
     @Test
-    void should_keep_scalar_env_overrides_with_injected_environment() {
+    void should_load_decode_concurrency_limit_from_flexlb_config() {
         ConfigService configService = new ConfigService(Map.of(
-                "DECODE_CONCURRENCY_LIMIT", "32"));
+                "FLEXLB_CONFIG", """
+                        {
+                          "decodeConcurrencyLimit": 32
+                        }
+                        """));
 
         assertEquals(32, configService.loadBalanceConfig().getDecodeConcurrencyLimit());
     }
