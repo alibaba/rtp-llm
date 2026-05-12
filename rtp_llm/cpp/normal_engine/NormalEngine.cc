@@ -325,6 +325,13 @@ std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_ne
                                      torch::Tensor(),
                                      false};
         stream->update(update_info);
+        const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+        stream->setNormalAsyncDeviceState(GenerateStream::NormalAsyncDeviceState{
+            .epoch                 = 0,
+            .last_sample_token_gpu = torch::zeros({1}, cuda_i32),
+            .next_seq_len_gpu      = torch::full({1}, static_cast<int64_t>(stream->seqLength()), cuda_i32),
+            .next_real_seq_len     = stream->seqLength(),
+        });
     }
     return stream;
 }

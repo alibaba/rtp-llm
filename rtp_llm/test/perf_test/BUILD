@@ -279,8 +279,8 @@ py_test(
     data = ["//rtp_llm:sdk"],
     args = [
         "--model_type", "deepseek_v4",
-        "--checkpoint_path", "/home/baowending.bwd/DeepSeek-V4-Flash",
-        "--tokenizer_path", "/home/baowending.bwd/DeepSeek-V4-Flash",
+        "--checkpoint_path", "/mnt/nas1/hf/DeepSeek-V4-Flash",
+        "--tokenizer_path", "/mnt/nas1/hf/DeepSeek-V4-Flash",
         "--batch_size", "128",
         "--input_len", "65536",
         "--partial", "1",
@@ -314,6 +314,9 @@ py_test(
         "DSV4_USE_MEGA_MOE": "1",
         "ENABLE_FP32_LM_HEAD": "0",
         "DSV4_FUSED_PREPARE": "1",
+        "RTP_LLM_STREAM_ASYNC": "1",
+        "RTP_LLM_DROP_BROAD_SYNC": "1",
+        "RTP_LLM_DEVICE_INPUT": "1",
     },
     tags = ["manual"],
 )
@@ -332,8 +335,8 @@ py_test(
     data = ["//rtp_llm:sdk"],
     args = [
         "--model_type", "deepseek_v4",
-        "--checkpoint_path", "/home/baowending.bwd/DeepSeek-V4-Flash",
-        "--tokenizer_path", "/home/baowending.bwd/DeepSeek-V4-Flash",
+        "--checkpoint_path", "/mnt/nas1/hf/DeepSeek-V4-Flash",
+        "--tokenizer_path", "/mnt/nas1/hf/DeepSeek-V4-Flash",
         "--batch_size", "128",
         "--input_len", "65536",
         "--partial", "1",
