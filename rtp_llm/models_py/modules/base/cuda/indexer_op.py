@@ -472,7 +472,7 @@ class IndexerOp(nn.Module):
 
         # Compute logits
         weights = weights.squeeze(-1)
-        kv_fp8 = (k_fp8, k_scale.view(torch.float32))
+        kv_fp8 = (k_fp8, k_scale.view(torch.float32).squeeze(-1))
 
         assert (
             fmha_params.ks is not None and fmha_params.ke is not None
@@ -579,7 +579,7 @@ class IndexerOp(nn.Module):
             attention_inputs.kv_cache_kernel_block_id_device,
             cu_kv_seqlens_global,
         )
-        kv_fp8_full = (k_fp8, k_scale.view(torch.float32))
+        kv_fp8_full = (k_fp8, k_scale.view(torch.float32).squeeze(-1))
 
         def run_part_logits_topk(
             q_part: torch.Tensor,

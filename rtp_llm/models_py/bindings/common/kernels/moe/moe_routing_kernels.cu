@@ -16,6 +16,10 @@
 #ifndef CUDART_VERSION
 #error CUDART_VERSION Undefined!
 #elif (CUDART_VERSION >= 11050)
+#if (CUDART_VERSION >= 12060)
+#include <cuda/std/functional>
+#include <cuda/__functional/maximum.h>
+#endif
 #include <cub/cub.cuh>
 #include <cub/device/device_radix_sort.cuh>
 #include <cub/util_type.cuh>
@@ -46,7 +50,11 @@ __launch_bounds__(TPB) __global__
     int64_t const bidx              = blockIdx.x;
     int64_t const thread_row_offset = bidx * num_cols;
 
+#if (CUDART_VERSION >= 12060)
+    ::cuda::std::plus<float> sum;
+#else
     cub::Sum sum;
+#endif
     float    threadData(-FLT_MAX);
 
     if ((finished != nullptr) && finished[bidx]) {
@@ -58,7 +66,11 @@ __launch_bounds__(TPB) __global__
         threadData        = max(input[idx], threadData);
     }
 
+#if (CUDART_VERSION >= 12060)
+    float const maxElem = BlockReduce(tmpStorage).Reduce(threadData, ::cuda::maximum<float>{});
+#else
     float const maxElem = BlockReduce(tmpStorage).Reduce(threadData, cub::Max());
+#endif
     if (tidx == 0) {
         float_max = maxElem;
     }
