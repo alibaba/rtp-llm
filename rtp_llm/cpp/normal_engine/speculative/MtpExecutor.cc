@@ -119,6 +119,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     Executor(),
     cache_manager_(cache_manager),
     metrics_reporter_(params.metrics_reporter),
+    tps_reporter_(MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(metrics_reporter_)),
     speculative_sampler_(new speculative::SpeculativeSampler(propose_params->gen_num_per_circle)),
     fast_topk_sampler_(new speculative::FastTopKSampler()),
     warm_up_(warm_up),
@@ -309,7 +310,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
  * @return absl::Status
  */
 absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& streams,
-                                      MtpMetricsCollector&                metrics_collector) {
+                                      MtpMetricsCollector&                metrics_collector,
+                                      int64_t                             schedule_time_us) {
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.prefill_step(prefill_stream_size=%zu)", streams.size());
 
     RtpLLMExecutorMetricsCollector& executor_collector = metrics_collector.executor_collector;
@@ -424,12 +426,16 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         executor_collector.execute_token_size_when_has_context = executor_collector.execute_token_size;
         executor_collector.max_seq_len_when_has_context        = executor_collector.max_seq_len;
         executor_collector.model_forward_us += model_forward_us;
+        int64_t tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
+        if (tps_execute_time_us <= 0) {
+            tps_execute_time_us = model_forward_us;
+        }
 
         tps_collector.addTokenSize(stream_groups.contextExecuteTokenSize(),
                                    stream_groups.contextExecuteTokenSizeWithCache(),
                                    0,
                                    stream_groups.modelExecuteTokenSize(),
-                                   model_forward_us);
+                                   tps_execute_time_us);
     }
 
     // dispatch
@@ -785,10 +791,16 @@ void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
     }
 }
 
-absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams) {
+absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us) {
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.process(stream_size=%zu,mtp_step=%zu)", streams.size(), propose_step_);
 
+    const int64_t process_start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+    if (schedule_time_us <= 0) {
+        schedule_time_us = process_start_time_us;
+    }
     MtpMetricsCollector metrics_collector;
+    auto tps_active_guard =
+        tps_reporter_.makeActiveGuard(metrics_reporter_ && isTpRank0() && !warm_up_ && !streams.empty());
 
     std::list<GenerateStreamPtr> prefill_streams;
     std::list<GenerateStreamPtr> decode_streams;
@@ -800,7 +812,7 @@ absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams) {
     int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
 
     if (role_type_ == RoleType::PREFILL || role_type_ == RoleType::PDFUSION) {
-        THROW_IF_STATUS_ERROR(prefillStep(prefill_streams, metrics_collector));
+        THROW_IF_STATUS_ERROR(prefillStep(prefill_streams, metrics_collector, schedule_time_us));
     }
 
     if (role_type_ == RoleType::DECODE || role_type_ == RoleType::PDFUSION) {
@@ -815,8 +827,7 @@ absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.process(report_metrics)");
         metrics_reporter_->report<RtpLLMExecutorMetrics, RtpLLMExecutorMetricsCollector>(
             nullptr, &metrics_collector.executor_collector);
-        metrics_reporter_->report<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(
-            nullptr, &metrics_collector.tps_collector);
+        tps_reporter_.report(&metrics_collector.tps_collector);
         metrics_reporter_->report<RtpLLMSpeculativeEngineMetrics, RtpLLMSpeculativeEngineMetricsCollector>(
             nullptr, &metrics_collector.sp_engine_collector);
     }

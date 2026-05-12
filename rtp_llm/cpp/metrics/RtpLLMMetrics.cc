@@ -325,6 +325,13 @@ bool RtpLLMTokenPSMetrics::init(kmonitor::MetricsGroupManager* manager) {
 }
 
 void RtpLLMTokenPSMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMTokenPSMetricsCollector* collector) {
+    if (collector->reportZeroTPS()) {
+        REPORT_MUTABLE_METRIC(context_tps_metric, 0.0);
+        REPORT_MUTABLE_METRIC(context_tps_with_cache_metric, 0.0);
+        REPORT_MUTABLE_METRIC(generate_tps_metric, 0.0);
+        REPORT_MUTABLE_METRIC(total_tps_metric, 0.0);
+        return;
+    }
     if (collector->hasContextTPS()) {
         REPORT_MUTABLE_METRIC(context_tps_metric, collector->contextTPS());
     }
