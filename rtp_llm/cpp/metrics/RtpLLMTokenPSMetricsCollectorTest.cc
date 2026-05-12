@@ -11,7 +11,7 @@ TEST(RtpLLMTokenPSMetricsCollectorTest, ReportsLongPrefillByExecutionTime) {
 
     EXPECT_NEAR(collector.contextTPS(), 25600.0, 1e-6);
     EXPECT_NEAR(collector.contextTPSWithCache(), 25600.0, 1e-6);
-    EXPECT_NEAR(collector.totalTPS(), 25600.0, 1e-6);
+    EXPECT_NEAR(collector.totalTPS(), 256000.0, 1e-6);
     EXPECT_TRUE(collector.hasContextTPS());
     EXPECT_TRUE(collector.hasContextTPSWithCache());
     EXPECT_TRUE(collector.hasTotalTPS());
@@ -51,6 +51,30 @@ TEST(RtpLLMTokenPSMetricsCollectorTest, MergeKeepsTimeWeightedTps) {
     EXPECT_NEAR(merged.contextTPS(), 10000.0, 1e-6);
     EXPECT_NEAR(merged.contextTPSWithCache(), 10000.0, 1e-6);
     EXPECT_NEAR(merged.totalTPS(), 10000.0, 1e-6);
+}
+
+TEST(RtpLLMTokenPSMetricsCollectorTest, KeepsGenerateAndTotalAsTokenCounts) {
+    RtpLLMTokenPSMetricsCollector collector;
+
+    collector.addTokenSize(1000, 1500, 10, 1010, 100 * 1000);
+
+    EXPECT_NEAR(collector.contextTPS(), 10000.0, 1e-6);
+    EXPECT_NEAR(collector.contextTPSWithCache(), 15000.0, 1e-6);
+    EXPECT_NEAR(collector.generateTPS(), 10.0, 1e-6);
+    EXPECT_NEAR(collector.totalTPS(), 1010.0, 1e-6);
+}
+
+TEST(RtpLLMTokenPSMetricsCollectorTest, KeepsGenerateAndTotalWhenExecutionTimeIsZero) {
+    RtpLLMTokenPSMetricsCollector collector;
+
+    collector.addTokenSize(1000, 1000, 2, 1002, 0);
+
+    EXPECT_FALSE(collector.hasContextTPS());
+    EXPECT_FALSE(collector.hasContextTPSWithCache());
+    EXPECT_TRUE(collector.hasGenerateTPS());
+    EXPECT_TRUE(collector.hasTotalTPS());
+    EXPECT_NEAR(collector.generateTPS(), 2.0, 1e-6);
+    EXPECT_NEAR(collector.totalTPS(), 1002.0, 1e-6);
 }
 
 }  // namespace rtp_llm
