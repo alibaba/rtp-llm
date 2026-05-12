@@ -4,11 +4,13 @@
 #include <memory>
 #include <optional>
 #include <algorithm>
+#include <limits>
 #include <thread>
 
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/cache/BlockCache.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
+#include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
@@ -859,6 +861,37 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_MergesDeviceAndMemoryKeys_Dedup) {
     std::vector<CacheKeyType> expected = {10, 11, 12, 13};
     std::sort(expected.begin(), expected.end());
     EXPECT_EQ(got, expected);
+}
+
+TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSmallestHybridPoolTokenCapacity) {
+    auto cache_config = makeDSV4ConfigWithConcurrencyPool(/*full_block_num=*/16, /*swa_batch_size=*/3);
+
+    auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(kv_cache_manager->init());
+
+    auto hybrid_allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(kv_cache_manager->allocator_);
+    ASSERT_NE(hybrid_allocator, nullptr);
+
+    size_t expected_total_tokens     = std::numeric_limits<size_t>::max();
+    size_t expected_available_tokens = std::numeric_limits<size_t>::max();
+    const auto& pools                = hybrid_allocator->groupBlockPools();
+    ASSERT_GT(pools.size(), 1u);
+
+    for (size_t gid = 0; gid < pools.size(); ++gid) {
+        ASSERT_NE(pools[gid], nullptr);
+        const size_t seq_size =
+            (gid < cache_config.group_seq_size_per_block.size() && cache_config.group_seq_size_per_block[gid] > 0) ?
+                cache_config.group_seq_size_per_block[gid] :
+                cache_config.seq_size_per_block;
+        expected_total_tokens     = std::min(expected_total_tokens, pools[gid]->totalBlocksNum() * seq_size);
+        expected_available_tokens = std::min(expected_available_tokens, pools[gid]->availableBlocksNum() * seq_size);
+    }
+
+    auto info = kv_cache_manager->getKVCacheInfo(/*latest_version=*/-1, /*need_cache_keys=*/false);
+
+    EXPECT_EQ(info.total_kv_cache, expected_total_tokens);
+    EXPECT_EQ(info.available_kv_cache, expected_available_tokens);
+    EXPECT_LT(info.total_kv_cache, kv_cache_manager->totalBlocksNum() * cache_config.seq_size_per_block);
 }
 
 TEST_F(KVCacheManagerTest, GetKVCacheInfo_IncludesMemoryBlocksInTotalAndAvailable) {

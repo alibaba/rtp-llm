@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <limits>
 #include <unordered_set>
 
 #include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
@@ -433,12 +434,34 @@ KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cac
     }
 
     const size_t block_size_tokens = config_.seq_size_per_block;
-    const size_t total_blocks      = allocator_->totalBlocksNum();
-    const size_t available_blocks  = allocator_->availableBlocksNum();
 
-    info.block_size         = block_size_tokens;
-    info.total_kv_cache     = total_blocks * block_size_tokens;
-    info.available_kv_cache = available_blocks * block_size_tokens;
+    info.block_size = block_size_tokens;
+    if (auto hybrid = std::dynamic_pointer_cast<rtp_llm::HybridPoolKVCacheAllocator>(allocator_)) {
+        const auto& pools            = hybrid->groupBlockPools();
+        size_t      total_tokens     = std::numeric_limits<size_t>::max();
+        size_t      available_tokens = std::numeric_limits<size_t>::max();
+        bool        has_pool         = false;
+        for (size_t gid = 0; gid < pools.size(); ++gid) {
+            const auto& pool = pools[gid];
+            if (!pool) {
+                continue;
+            }
+            const size_t seq_size =
+                (gid < config_.group_seq_size_per_block.size() && config_.group_seq_size_per_block[gid] > 0) ?
+                    config_.group_seq_size_per_block[gid] :
+                    block_size_tokens;
+            total_tokens     = std::min(total_tokens, pool->totalBlocksNum() * seq_size);
+            available_tokens = std::min(available_tokens, pool->availableBlocksNum() * seq_size);
+            has_pool         = true;
+        }
+        info.total_kv_cache     = has_pool ? total_tokens : 0;
+        info.available_kv_cache = has_pool ? available_tokens : 0;
+    } else {
+        const size_t total_blocks     = allocator_->totalBlocksNum();
+        const size_t available_blocks = allocator_->availableBlocksNum();
+        info.total_kv_cache           = total_blocks * block_size_tokens;
+        info.available_kv_cache       = available_blocks * block_size_tokens;
+    }
     // cached_keys left empty for now; can be populated when distributed cache is wired up.
 
     return info;
