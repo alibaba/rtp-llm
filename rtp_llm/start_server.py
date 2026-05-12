@@ -37,7 +37,17 @@ def _install_hot_hook_runtime(role: str) -> None:
 def check_server_health(server_port):
     try:
         response = requests.get(f"http://localhost:{server_port}/health", timeout=60)
-        if response.status_code == 200 and response.json().get("status", "") == "ok":
+        health_ok = False
+        if response.status_code == 200:
+            try:
+                health_body = response.json()
+                if isinstance(health_body, dict):
+                    health_ok = health_body.get("status", "") == "ok"
+                elif isinstance(health_body, str):
+                    health_ok = health_body == "ok"
+            except ValueError:
+                health_ok = response.text.strip() == "ok"
+        if health_ok:
             logging.info(
                 f"{server_port}/health, response status_code = {response.status_code}, text = {response.text}, len = {len(response.text)}"
             )
@@ -365,6 +375,8 @@ def start_server(py_env_configs: PyEnvConfigs):
             logging.error("Health checks failed")
             raise Exception("Health checks failed")
 
+        _maybe_run_startup_real_warmup(py_env_configs)
+
         logging.info(
             f"Backend RPC service is listening on 0.0.0.0, IP/IP range can be customized as needed"
         )
@@ -376,6 +388,60 @@ def start_server(py_env_configs: PyEnvConfigs):
         process_manager.graceful_shutdown()
     finally:
         process_manager.monitor_and_release_processes()
+
+
+def _env_flag_enabled(name: str, default: str = "0") -> bool:
+    return os.environ.get(name, default).strip().lower() in ("1", "true", "on", "yes")
+
+
+def _maybe_run_startup_real_warmup(py_env_configs: PyEnvConfigs):
+    flag = os.environ.get("DSV4_STARTUP_REAL_WARMUP", "auto").strip().lower()
+    if flag in ("0", "false", "off", "no"):
+        return
+
+    model_type = getattr(py_env_configs.model_args, "model_type", "")
+    role_type = py_env_configs.role_config.role_type
+    role_value = getattr(role_type, "value", role_type)
+    prefill_value = getattr(RoleType.PREFILL, "value", RoleType.PREFILL)
+    role_is_prefill = role_type == RoleType.PREFILL or str(role_type).endswith("PREFILL")
+    try:
+        role_is_prefill = role_is_prefill or int(role_value) == int(prefill_value)
+    except Exception:
+        pass
+    if flag == "auto" and not (model_type == "deepseek_v4" and role_is_prefill):
+        return
+
+    port = int(py_env_configs.server_config.server_port)
+    url = f"http://127.0.0.1:{port}/v1/chat/completions"
+    prompt = os.environ.get("DSV4_STARTUP_REAL_WARMUP_PROMPT", "你是谁")
+    model = os.environ.get("DSV4_STARTUP_REAL_WARMUP_MODEL", "startup-warmup")
+    timeout_s = float(os.environ.get("DSV4_STARTUP_REAL_WARMUP_TIMEOUT_S", "600"))
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": int(os.environ.get("DSV4_STARTUP_REAL_WARMUP_MAX_TOKENS", "1")),
+        "temperature": 0,
+        "stream": False,
+    }
+
+    begin = time.time()
+    logging.info(
+        "running DSV4 startup real warmup via %s, timeout=%.1fs",
+        url,
+        timeout_s,
+    )
+    try:
+        response = requests.post(url, json=payload, timeout=timeout_s)
+        response.raise_for_status()
+        logging.info(
+            "DSV4 startup real warmup finished in %.2fs, response_prefix=%s",
+            time.time() - begin,
+            response.text[:512],
+        )
+    except Exception:
+        logging.error("DSV4 startup real warmup failed, trace: %s", traceback.format_exc())
+        if _env_flag_enabled("DSV4_STARTUP_REAL_WARMUP_REQUIRED", "1"):
+            raise
 
 
 if __name__ == "__main__":
