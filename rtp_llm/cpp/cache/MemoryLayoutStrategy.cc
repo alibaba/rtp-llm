@@ -74,10 +74,24 @@ void MemoryLayoutStrategy::processKVTensor(torch::Tensor& kv_cache_tensor) {
                               torch::str(layer_kv_tensors_[layer_id].sizes()).c_str());
         }
     } else {
-        // MHA: [layer_num, block_num, kv_block_stride_elems], per layer 2D
-        torch::Tensor reshaped_tensor = kv_cache_typed.reshape({static_cast<int64_t>(config_.layer_num),
-                                                                static_cast<int64_t>(config_.block_num),
-                                                                static_cast<int64_t>(kv_block_stride_elems)});
+        // MHA: [layer_num, block_num, kv_block_stride_elems], per layer 2D.
+        // When kernel_blocks_per_kv_block > 1 (e.g. DSV4 paged FULL pools with
+        // physical block > 256 tokens), reshape into the kernel-block view —
+        // (layer_num, block_num × bpk, kv_block_stride_elems / bpk) — so that
+        // kernels addressing by kernel-block id see per-kernel-block strides.
+        // The underlying memory is identical, only the shape interpretation
+        // changes; entries_per_block derived from tensor stride stays at the
+        // kernel-block size (e.g. 64 for compress_ratio=4) and FlashMLA's
+        // template instantiation constraint (block_kv == 64) holds.
+        const size_t bpk = std::max<size_t>(1, config_.kernel_blocks_per_kv_block);
+        RTP_LLM_CHECK_WITH_INFO(kv_block_stride_elems % bpk == 0,
+                                "kv_block_stride_elems(%zu) must be divisible by kernel_blocks_per_kv_block(%zu)",
+                                kv_block_stride_elems,
+                                bpk);
+        const int64_t kernel_block_count        = static_cast<int64_t>(config_.block_num) * static_cast<int64_t>(bpk);
+        const int64_t kernel_block_stride_elems = static_cast<int64_t>(kv_block_stride_elems / bpk);
+        torch::Tensor reshaped_tensor           = kv_cache_typed.reshape(
+            {static_cast<int64_t>(config_.layer_num), kernel_block_count, kernel_block_stride_elems});
         clearKVTensor(reshaped_tensor);
         for (uint32_t layer_id = 0; layer_id < config_.layer_num; ++layer_id) {
             layer_kv_tensors_.push_back(reshaped_tensor[layer_id]);
