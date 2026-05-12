@@ -450,6 +450,92 @@ class DeepSeekV4Model(GptModelBase):
                 q_pos=_torch.zeros((1, 1), dtype=_torch.int32, device=device_str),
                 compress_ratio=_ratio,
             )
+
+            if os.environ.get("DSV4_PREWARM_FLASH_MLA_SWA", "1") != "0":
+                try:
+                    from flash_mla import flash_mla_sparse_fwd as _flash_mla_sparse_fwd
+
+                    _swa_attn = self.v4.layers[0].attn
+                    _H_swa = int(_swa_attn.n_heads)
+                    _D_swa = int(_swa_attn.head_dim)
+                    _W_swa = int(_swa_attn.window_size)
+                    _q_swa = _torch.zeros(
+                        (2, _H_swa, _D_swa), dtype=_torch.bfloat16, device=device_str
+                    )
+                    _kv_swa = _torch.zeros(
+                        (5, 1, _D_swa), dtype=_torch.bfloat16, device=device_str
+                    )
+                    _idx_swa = _torch.full(
+                        (2, 1, _W_swa), -1, dtype=_torch.int32, device=device_str
+                    )
+                    _cp_rank_swa = 0
+                    try:
+                        import torch.distributed as _dist
+
+                        if _dist.is_available() and _dist.is_initialized():
+                            _cp_rank_swa = int(_dist.get_rank())
+                    except Exception:
+                        _cp_rank_swa = 0
+                    _first_topk_len_swa = min(_cp_rank_swa + 1, 5, _W_swa)
+                    _idx_swa[0, 0, :_first_topk_len_swa] = _torch.arange(
+                        _first_topk_len_swa, dtype=_torch.int32, device=device_str
+                    )
+                    _idx_swa[1, 0, :5] = _torch.arange(
+                        5, dtype=_torch.int32, device=device_str
+                    )
+                    _topk_len_swa = _torch.tensor(
+                        [_first_topk_len_swa, 5], dtype=_torch.int32, device=device_str
+                    )
+                    _flash_mla_sparse_fwd(
+                        q=_q_swa,
+                        kv=_kv_swa,
+                        indices=_idx_swa,
+                        sm_scale=float(_swa_attn.softmax_scale),
+                        attn_sink=_swa_attn.attn_sink,
+                        topk_length=_topk_len_swa,
+                    )
+                    logging.info("[DeepSeekV4Model] flash_mla SWA kv_full prewarm done")
+                except Exception:
+                    logging.exception("[DeepSeekV4Model] flash_mla SWA kv_full prewarm failed")
+                    raise
+
+            if os.environ.get("DSV4_PREWARM_MEGA_MOE", "1") != "0":
+                try:
+                    import torch.distributed as _dist
+
+                    _strategy = self.v4.layers[0].ffn._strategy
+                    if getattr(_strategy, "name", "") == "mega":
+                        if _dist.is_available() and _dist.is_initialized():
+                            _dist.barrier()
+                        _cfg = _strategy.cfg
+                        _x_moe = _torch.zeros(
+                            (1, int(_cfg.dim)), dtype=_torch.bfloat16, device=device_str
+                        )
+                        _w_moe = _torch.zeros(
+                            (1, int(_cfg.n_activated_experts)),
+                            dtype=_torch.float32,
+                            device=device_str,
+                        )
+                        _w_moe[:, 0] = 1.0
+                        _start = int(_cfg.local_expert_start)
+                        _end = max(int(_cfg.local_expert_end), _start + 1)
+                        _idx_vals = (
+                            _torch.arange(
+                                int(_cfg.n_activated_experts),
+                                dtype=_torch.int64,
+                                device=device_str,
+                            )
+                            % (_end - _start)
+                        ) + _start
+                        _idx_moe = _idx_vals.unsqueeze(0).contiguous()
+                        _strategy(_x_moe, _w_moe, _idx_moe)
+                        _torch.cuda.synchronize()
+                        if _dist.is_available() and _dist.is_initialized():
+                            _dist.barrier()
+                        logging.info("[DeepSeekV4Model] MegaMoE prewarm done")
+                except Exception:
+                    logging.exception("[DeepSeekV4Model] MegaMoE prewarm failed")
+                    raise
             _torch.cuda.synchronize()
 
         self._materialized = True

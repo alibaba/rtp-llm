@@ -4,6 +4,8 @@ Mirrors `inference/model.py:Block`. Each call applies hc_pre/F/hc_post
 twice — once for Attention and once for MoE FFN.
 """
 
+import logging
+import os
 from typing import Dict, Optional
 
 import torch
@@ -110,6 +112,7 @@ class Block(nn.Module):
             tp_size=tp_size,
             tp_rank=tp_rank,
         )
+        self._cp_sync_after_attn_done = False
         self.ffn = MoE(
             layer_id=layer_id,
             dim=dim,
@@ -160,6 +163,32 @@ class Block(nn.Module):
             hc_eps=hc_eps,
             layer_id=layer_id,
             name="ffn",
+        )
+
+    def _sync_after_first_cp_prefill_attention(self) -> None:
+        if self._cp_sync_after_attn_done:
+            return
+        if os.environ.get("DSV4_CP_SYNC_AFTER_ATTN_ONCE", "1") == "0":
+            return
+        if getattr(getattr(self.ffn, "_strategy", None), "name", "") != "mega":
+            return
+        if getattr(self.attn, "_cp_ctx", None) is None:
+            return
+
+        import torch.distributed as dist
+
+        if not (dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1):
+            return
+
+        torch.cuda.synchronize()
+        try:
+            dist.barrier(device_ids=[torch.cuda.current_device()])
+        except TypeError:
+            dist.barrier()
+        self._cp_sync_after_attn_done = True
+        logging.info(
+            "[DeepSeekV4Block] CP first-prefill sync after attention done layer=%d",
+            self.layer_id,
         )
 
     def forward_decode(
@@ -340,6 +369,7 @@ class Block(nn.Module):
                     attn_out[dbg_pos_mask].contiguous(),
                 )
         x = self.attn_hc.post(attn_out, residual, post, comb)  # [T, hc, dim]
+        self._sync_after_first_cp_prefill_attention()
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_residual", x)
             if dbg_pos_mask is not None:
