@@ -33,6 +33,7 @@ from rtp_llm.openai.api_datatype import (
 )
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
+from rtp_llm.server.request_headers import normalize_request_headers
 from rtp_llm.utils.base_model_datatypes import (
     AuxInfo,
     GenerateInput,
@@ -431,6 +432,7 @@ class CustomChatRenderer:
         generate_config: GenerateConfig,
         backend_rpc_server_visitor: BackendRPCServerVisitor,
         request: ChatCompletionRequest,
+        headers: Optional[Dict[str, str]] = None,
     ) -> AsyncGenerator[StreamResponseObject, None]:
 
         token_type_ids = []
@@ -444,6 +446,7 @@ class CustomChatRenderer:
                     generate_config=generate_config,
                     tokenizer=self.tokenizer,
                     token_type_ids=token_type_ids,
+                    headers=normalize_request_headers(headers),
                 )
             )
         )

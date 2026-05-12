@@ -62,6 +62,7 @@ class GenerateInput:
     batch_group_id: int = (
         -1
     )  # Batch group ID for force batch grouping, -1 means not set
+    headers: Dict[str, str] = field(default_factory=dict, repr=False)
 
     class Config:
         arbitrary_types_allowed = True
