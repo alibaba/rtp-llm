@@ -249,8 +249,8 @@ __global__ void per_token_group_quant_8bit_kernel(const T* __restrict__ input,
                                                   DST_DTYPE* __restrict__ output_q,
                                                   scale_packed_t* __restrict__ output_s,
                                                   const int32_t* __restrict__ masked_m,
-                                                  const int subwarps_per_block,
-                                                  const int hidden_dim_num_groups,
+                                                  const int   subwarps_per_block,
+                                                  const int   hidden_dim_num_groups,
                                                   const float eps,
                                                   // TODO can this be removed?
                                                   const int scale_expert_stride,
@@ -273,8 +273,20 @@ __global__ void per_token_group_quant_8bit_kernel(const T* __restrict__ input,
             constexpr uint32_t INPUT_PRIMARY_VEC_SIZE  = INPUT_PRIMARY_VEC_NUM_BYTES / sizeof(T);
             constexpr uint32_t INPUT_PRIMARY_INT4_SIZE = INPUT_PRIMARY_VEC_NUM_BYTES / sizeof(int4);
 
-            const int offset_num_groups = expert_idx * num_tokens_per_expert * hidden_dim_num_groups
-                                          + token_idx * hidden_dim_num_groups + hidden_dim_group_idx;
+            // Use ``int64_t`` so the byte offset ``offset_num_groups *
+            // GROUP_SIZE`` (used at the global ``st_global`` below) cannot
+            // wrap when ``M * hidden_dim_num_groups * GROUP_SIZE >= 2^31``.
+            // Concrete failure: long-context CP4 prefill wo_b feeds
+            // ``[M=274092, K=8192]`` -> ``offset_num_groups`` in [0, 17.5M),
+            // ``offset_num_groups * GROUP_SIZE=128`` peaks at 2.245B which
+            // overflows int32 and produces a negative pointer offset. The
+            // ``st_global`` then writes off ``output_q``'s allocation and
+            // surfaces a sticky ``CUDA_ERROR_ILLEGAL_ADDRESS`` (700) at the
+            // next sync (typically inside DeepGEMM's TMA encode /
+            // ``cuLaunchKernel``), which makes it look like a DeepGEMM bug.
+            const int64_t offset_num_groups =
+                static_cast<int64_t>(expert_idx) * num_tokens_per_expert * hidden_dim_num_groups
+                + static_cast<int64_t>(token_idx) * hidden_dim_num_groups + hidden_dim_group_idx;
 
             int4 input_primary_int4[INPUT_PRIMARY_INT4_SIZE];
             T*   input_primary_vec = reinterpret_cast<T*>(input_primary_int4);

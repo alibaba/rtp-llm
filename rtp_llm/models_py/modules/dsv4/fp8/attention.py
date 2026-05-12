@@ -2524,15 +2524,49 @@ class AttentionFP8(nn.Module):
                     N=wm.N,
                 )
 
+        # flash_mla_sparse_fwd is called once when ``s_q`` fits the safe
+        # threshold; otherwise it is chunked along Q so each launch stays
+        # below ``DSV4_FLASH_MLA_SPARSE_Q_CHUNK`` rows. Sparse attention
+        # has no cross-Q dependency so chunking is bit-equal. The Q-chunk
+        # is defensive: with the int64 row-indexing fix in
+        # ``_combine_topk_swa_indices_cp_kernel`` long-context HCA L3
+        # prefill works in a single launch, but the chunk caps still
+        # protect against any latent int32 indexing inside flash_mla
+        # itself. Set chunk <= 0 to disable.
+        kv_view = workspace.view(B * wm.M, 1, D)
+        indices_3d = combined_indices.unsqueeze(1)
+        q_chunk_env = os.environ.get("DSV4_FLASH_MLA_SPARSE_Q_CHUNK", "65536")
+        try:
+            q_chunk = int(q_chunk_env)
+        except ValueError:
+            q_chunk = 65536
+        s_q = qkv.q.shape[0]
+        if q_chunk <= 0 or s_q <= q_chunk:
+            with record_function_range("dsv4.fp8.attn.workspace.flash_mla_sparse_fwd"):
+                o3, _, _ = flash_mla_sparse_fwd(
+                    q=qkv.q,
+                    kv=kv_view,
+                    indices=indices_3d,
+                    sm_scale=self.softmax_scale,
+                    attn_sink=self.attn_sink,
+                    topk_length=combined_lens,
+                )
+            return o3.unsqueeze(0)
+
+        chunks: list[torch.Tensor] = []
         with record_function_range("dsv4.fp8.attn.workspace.flash_mla_sparse_fwd"):
-            o3, _, _ = flash_mla_sparse_fwd(
-                q=qkv.q,
-                kv=workspace.view(B * wm.M, 1, D),
-                indices=combined_indices.unsqueeze(1),
-                sm_scale=self.softmax_scale,
-                attn_sink=self.attn_sink,
-                topk_length=combined_lens,
-            )
+            for start in range(0, s_q, q_chunk):
+                end = min(start + q_chunk, s_q)
+                o_part, _, _ = flash_mla_sparse_fwd(
+                    q=qkv.q[start:end],
+                    kv=kv_view,
+                    indices=indices_3d[start:end],
+                    sm_scale=self.softmax_scale,
+                    attn_sink=self.attn_sink,
+                    topk_length=combined_lens[start:end],
+                )
+                chunks.append(o_part)
+        o3 = torch.cat(chunks, dim=0)
         return o3.unsqueeze(0)
 
     # ------------------------------------------------------------------
