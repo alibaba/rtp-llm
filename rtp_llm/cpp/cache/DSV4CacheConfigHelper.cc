@@ -93,18 +93,13 @@ std::vector<DSV4PoolDesc> buildDSV4PoolDescs(const DSV4LayerSets& sets,
     const uint32_t kv_entry_bytes      = fp8_kv ? kDsv4KvEntryBytesFp8 : kDsv4KvEntryBytesBf16;
     const uint32_t indexer_entry_bytes = fp8_kv ? kDsv4IndexerEntryBytesFp8 : kDsv4IndexerEntryBytesBf16;
 
-    // entries_per_block per pool kind:
-    //   - Paged FULL pools (CSA_KV/HCA_KV/INDEXER_KV): kernel-block sized
-    //     (256/compress_ratio = 64/2/64). FlashMLA / DeepGEMM kernels are
-    //     template-instantiated for these fixed values; the framework's bpk
-    //     machinery expands one physical block into bpk = N/256 contiguous
-    //     kernel sub-blocks at runtime, kernels keep seeing 256-token blocks.
-    //   - SWA/state pools: scale linearly with physical_tokens_per_block.
-    //     Cache keys are generated at the global seq_size_per_block (= N)
-    //     granularity and shared across all groups in
-    //     HybridKVCacheAllocator::reuseCache, so SWA must use the same N to
-    //     stay aligned (otherwise insertIntoCache drops state and match
-    //     produces partial coverage).
+    // entries_per_block stays at the kernel-block size (256/compress_ratio for
+    // paged compressed entries; 256 for state/SWA per-token slots) for every
+    // pool. The framework's bpk machinery uniformly expands each physical
+    // block into bpk = N/256 contiguous kernel sub-blocks (FULL paged + SWA
+    // fixed alike), so kernels always see 256-token blocks and block_table
+    // lengths are consistent across regions for the same token range.
+    (void)physical_tokens_per_block;  // used for spec.seq_size_per_blk via makeDSV4Spec
     return {
         {KVCacheRegionName::CSA_KV,
          &sets.csa_layers,
@@ -130,28 +125,28 @@ std::vector<DSV4PoolDesc> buildDSV4PoolDescs(const DSV4LayerSets& sets,
         {KVCacheRegionName::INDEXER_STATE,
          &sets.csa_layers,
          idx_state_dim * 2,
-         physical_tokens_per_block,
+         kDsv4KernelTokensPerBlock,
          DataType::TYPE_FP32,
          false,
          fixed_pool_blocks},
         {KVCacheRegionName::CSA_STATE,
          &sets.csa_layers,
          csa_state_dim * 2,
-         physical_tokens_per_block,
+         kDsv4KernelTokensPerBlock,
          DataType::TYPE_FP32,
          false,
          fixed_pool_blocks},
         {KVCacheRegionName::HCA_STATE,
          &sets.hca_layers,
          hca_state_dim * 2,
-         physical_tokens_per_block,
+         kDsv4KernelTokensPerBlock,
          DataType::TYPE_FP32,
          false,
          fixed_pool_blocks},
         {KVCacheRegionName::SWA_KV,
          &sets.all_layers,
          kv_entry_bytes,
-         physical_tokens_per_block,
+         kDsv4KernelTokensPerBlock,
          DataType::TYPE_UINT8,
          false,
          fixed_pool_blocks},

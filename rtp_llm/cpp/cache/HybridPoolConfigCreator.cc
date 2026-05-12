@@ -152,24 +152,20 @@ void setupIndependentPoolSizes(CacheConfig& config) {
     size_t   total_scale_block_bytes = 0;
     uint32_t max_group_layers        = 0;
 
-    // Per-group physical block size in kernel-block units. FULL groups inherit
-    // the global bpk (=seq_size_per_block / kernel_seq_size_per_block); SWA
-    // groups always use bpk=1, so each SWA "block" is one kernel block. The
-    // per-group bpk scales the spec's kernel-block stride into the physical
-    // (BlockPool allocation unit) stride/size for memory accounting.
+    // All groups share the global bpk (= seq_size_per_block / kernel_seq_size).
+    // FULL paged + SWA fixed pools both view the spec's per-block bytes as
+    // kernel-block-sized; multiplying by bpk gives the BlockPool's per-physical
+    // allocation stride. Non-DSV4 paths default bpk=1 → no scaling.
     const size_t global_bpk = config.kernelBlocksPerKvBlock();
     config.layer_to_block_stride_bytes.assign(config.layer_all_num, 0);
     for (size_t gid = 0; gid < config.cache_specs.size(); ++gid) {
         const auto& spec = config.cache_specs[gid];
         RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "cache_specs[%zu] is null", gid);
-        const auto   layer_count       = static_cast<uint32_t>(config.global_layer_ids[gid].size());
-        const bool   is_full           = gid < config.group_types.size()
-                              && config.group_types[gid] == CacheGroupType::FULL;
-        const size_t group_bpk         = is_full ? global_bpk : 1;
-        const size_t kernel_kv_stride  = spec->block_size_bytes();
-        const auto   kernel_scale      = spec->scale_block_size_bytes();
-        const size_t kv_stride         = kernel_kv_stride * group_bpk;
-        const size_t scale_stride      = kernel_scale * group_bpk;
+        const auto   layer_count      = static_cast<uint32_t>(config.global_layer_ids[gid].size());
+        const size_t kernel_kv_stride = spec->block_size_bytes();
+        const auto   kernel_scale     = spec->scale_block_size_bytes();
+        const size_t kv_stride        = kernel_kv_stride * global_bpk;
+        const size_t scale_stride     = kernel_scale * global_bpk;
         config.group_kv_block_stride_bytes[gid] = kv_stride;
         config.group_kv_scale_stride_bytes[gid] = scale_stride;
         config.group_block_size_bytes[gid]      = static_cast<size_t>(layer_count) * (kv_stride + scale_stride);
