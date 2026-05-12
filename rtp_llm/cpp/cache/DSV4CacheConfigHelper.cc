@@ -8,7 +8,11 @@ namespace rtp_llm {
 
 namespace {
 
-constexpr uint32_t kDsv4TokensPerBlock = 256;
+// Kernel block size in tokens. DSV4 attention/compressor kernels and the
+// FlashMLA SWA path are compiled assuming 256-token kernel blocks; physical
+// blocks (config.seq_size_per_block) may be larger multiples of this, with the
+// FULL paged pools auto-expanding via the framework's bpk machinery.
+constexpr uint32_t kDsv4KernelTokensPerBlock = 256;
 // BF16 pool: head_dim=512 × 2B = 1024B per KV slot, 128 × 2B = 256B per
 // indexer slot. FP8 pool packs the same logical KV into a smaller slot
 // (canonical fp8_model1_mla layout: 448B fp8 NoPE + 64B bf16 RoPE + 8B
@@ -69,8 +73,10 @@ DSV4LayerSets classifyDSV4Layers(const std::vector<int>& compress_ratios) {
     return sets;
 }
 
-std::vector<DSV4PoolDesc>
-buildDSV4PoolDescs(const DSV4LayerSets& sets, const ModelConfig& model_config, uint32_t fixed_pool_blocks) {
+std::vector<DSV4PoolDesc> buildDSV4PoolDescs(const DSV4LayerSets& sets,
+                                             const ModelConfig&   model_config,
+                                             uint32_t             physical_tokens_per_block,
+                                             uint32_t             fixed_pool_blocks) {
     const auto& attn         = model_config.attn_config;
     const auto  head_dim     = static_cast<uint32_t>(attn.size_per_head);
     const auto  idx_head_dim = static_cast<uint32_t>(attn.indexer_head_dim);
@@ -87,68 +93,85 @@ buildDSV4PoolDescs(const DSV4LayerSets& sets, const ModelConfig& model_config, u
     const uint32_t kv_entry_bytes      = fp8_kv ? kDsv4KvEntryBytesFp8 : kDsv4KvEntryBytesBf16;
     const uint32_t indexer_entry_bytes = fp8_kv ? kDsv4IndexerEntryBytesFp8 : kDsv4IndexerEntryBytesBf16;
 
+    // entries_per_block per pool kind:
+    //   - Paged FULL pools (CSA_KV/HCA_KV/INDEXER_KV): kernel-block sized
+    //     (256/compress_ratio = 64/2/64). FlashMLA / DeepGEMM kernels are
+    //     template-instantiated for these fixed values; the framework's bpk
+    //     machinery expands one physical block into bpk = N/256 contiguous
+    //     kernel sub-blocks at runtime, kernels keep seeing 256-token blocks.
+    //   - SWA/state pools: scale linearly with physical_tokens_per_block.
+    //     Cache keys are generated at the global seq_size_per_block (= N)
+    //     granularity and shared across all groups in
+    //     HybridKVCacheAllocator::reuseCache, so SWA must use the same N to
+    //     stay aligned (otherwise insertIntoCache drops state and match
+    //     produces partial coverage).
     return {
         {KVCacheRegionName::CSA_KV,
          &sets.csa_layers,
          kv_entry_bytes,
-         kDsv4TokensPerBlock / 4,
+         kDsv4KernelTokensPerBlock / 4,
          DataType::TYPE_UINT8,
          true,
          0},
         {KVCacheRegionName::HCA_KV,
          &sets.hca_layers,
          kv_entry_bytes,
-         kDsv4TokensPerBlock / 128,
+         kDsv4KernelTokensPerBlock / 128,
          DataType::TYPE_UINT8,
          true,
          0},
         {KVCacheRegionName::INDEXER_KV,
          &sets.csa_layers,
          indexer_entry_bytes,
-         kDsv4TokensPerBlock / 4,
+         kDsv4KernelTokensPerBlock / 4,
          DataType::TYPE_UINT8,
          true,
          0},
         {KVCacheRegionName::INDEXER_STATE,
          &sets.csa_layers,
          idx_state_dim * 2,
-         256,
+         physical_tokens_per_block,
          DataType::TYPE_FP32,
          false,
          fixed_pool_blocks},
         {KVCacheRegionName::CSA_STATE,
          &sets.csa_layers,
          csa_state_dim * 2,
-         256,
+         physical_tokens_per_block,
          DataType::TYPE_FP32,
          false,
          fixed_pool_blocks},
         {KVCacheRegionName::HCA_STATE,
          &sets.hca_layers,
          hca_state_dim * 2,
-         256,
+         physical_tokens_per_block,
          DataType::TYPE_FP32,
          false,
          fixed_pool_blocks},
         {KVCacheRegionName::SWA_KV,
          &sets.all_layers,
          kv_entry_bytes,
-         kDsv4TokensPerBlock,
+         physical_tokens_per_block,
          DataType::TYPE_UINT8,
          false,
          fixed_pool_blocks},
     };
 }
 
-KVCacheSpecPtr makeDSV4Spec(const DSV4PoolDesc& pool) {
+KVCacheSpecPtr makeDSV4Spec(const DSV4PoolDesc& pool, uint32_t physical_tokens_per_block) {
     const auto layer_count = static_cast<uint32_t>(pool.layer_ids->size());
+    // All pools use the same physical seq_size so cache_keys stay aligned across
+    // groups (HybridKVCacheAllocator::reuseCache iterates a single shared keys
+    // array). FULL paged pools split each physical block into bpk kernel blocks
+    // via the framework's bpk machinery; SWA/state pools have bpk = 1 and
+    // entries_per_block scaled to physical_tokens_per_block.
     if (pool.is_paged) {
         return std::make_shared<DSV4KVSpec>(pool.region_name,
                                             layer_count,
                                             pool.entry_elems,
                                             pool.entries_per_block,
                                             pool.store_dtype,
-                                            kDsv4TokensPerBlock);
+                                            physical_tokens_per_block);
     }
     return std::make_shared<DSV4StateSpec>(pool.region_name,
                                            layer_count,
@@ -156,7 +179,7 @@ KVCacheSpecPtr makeDSV4Spec(const DSV4PoolDesc& pool) {
                                            pool.entries_per_block,
                                            pool.fixed_pool_blocks,
                                            pool.store_dtype,
-                                           kDsv4TokensPerBlock);
+                                           physical_tokens_per_block);
 }
 
 }  // namespace
@@ -171,16 +194,39 @@ void DSV4CacheConfigHelper::applyConfig(CacheConfig&         config,
     RTP_LLM_CHECK_WITH_INFO(
         fixed_pool_blocks > 0, "kv_cache_config.dsv4_fixed_pool_blocks must be > 0, got %u", fixed_pool_blocks);
 
+    // Honor user-supplied --seq_size_per_block when it's a positive multiple of
+    // the kernel block size; otherwise fall back to the kernel block size. Paged
+    // FULL groups split each physical block into integer-many 256-token kernel
+    // sub-blocks via the framework's bpk machinery; non-multiples would break it.
+    const auto user_seq_size = kv_cache_config.seq_size_per_block;
+    uint32_t   physical_tokens_per_block;
+    if (user_seq_size > 0 && user_seq_size % kDsv4KernelTokensPerBlock == 0) {
+        physical_tokens_per_block = static_cast<uint32_t>(user_seq_size);
+    } else {
+        if (user_seq_size > 0) {
+            RTP_LLM_LOG_WARNING("DSV4 ignoring seq_size_per_block=%d (not a positive multiple of %u); "
+                                "using kernel block size %u as physical block size",
+                                user_seq_size,
+                                kDsv4KernelTokensPerBlock,
+                                kDsv4KernelTokensPerBlock);
+        }
+        physical_tokens_per_block = kDsv4KernelTokensPerBlock;
+    }
+    RTP_LLM_LOG_INFO("DSV4 physical block = %u tokens, kernel block = %u tokens (bpk = %u)",
+                     physical_tokens_per_block,
+                     kDsv4KernelTokensPerBlock,
+                     physical_tokens_per_block / kDsv4KernelTokensPerBlock);
+
     const auto sets  = classifyDSV4Layers(model_config.attn_config.layer_compress_ratios);
-    const auto pools = buildDSV4PoolDescs(sets, model_config, fixed_pool_blocks);
+    const auto pools = buildDSV4PoolDescs(sets, model_config, physical_tokens_per_block, fixed_pool_blocks);
     RTP_LLM_CHECK_WITH_INFO(pools.size() == kDsv4PoolNum, "DSV4 must produce %zu pools", kDsv4PoolNum);
 
     config.layer_num                                = static_cast<uint32_t>(sets.all_layers.size());
     config.layer_all_num                            = config.layer_num;
     config.use_mla                                  = false;
     config.is_sparse                                = true;
-    config.seq_size_per_block                       = kDsv4TokensPerBlock;
-    config.kernel_seq_size_per_block                = kDsv4TokensPerBlock;
+    config.seq_size_per_block                       = physical_tokens_per_block;
+    config.kernel_seq_size_per_block                = kDsv4KernelTokensPerBlock;
     config.use_typed_cache_regions                  = true;
     config.use_opaque_kv_cache_store                = true;
     config.disable_decode_first_malloc_device_reuse = true;
@@ -191,6 +237,10 @@ void DSV4CacheConfigHelper::applyConfig(CacheConfig&         config,
     config.group_types.clear();
     config.group_region_names.clear();
     config.group_fixed_pool_blocks.assign(pools.size(), 0);
+    // All groups share the same physical seq_size — required so the global
+    // cache_keys array (initCacheKeys uses config.seq_size_per_block) aligns
+    // with every group's match() / insertIntoCache() granularity.
+    config.group_seq_size_per_block.assign(pools.size(), physical_tokens_per_block);
     config.cache_specs.reserve(pools.size());
     config.global_layer_ids.reserve(pools.size());
     config.layer_ids.reserve(pools.size());
@@ -198,7 +248,7 @@ void DSV4CacheConfigHelper::applyConfig(CacheConfig&         config,
     config.group_region_names.reserve(pools.size());
     for (size_t gid = 0; gid < pools.size(); ++gid) {
         const auto& pool = pools[gid];
-        auto        spec = makeDSV4Spec(pool);
+        auto        spec = makeDSV4Spec(pool, physical_tokens_per_block);
 
         config.cache_specs.push_back(spec);
         config.global_layer_ids.push_back(*pool.layer_ids);
