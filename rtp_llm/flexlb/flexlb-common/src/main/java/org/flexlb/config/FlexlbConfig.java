@@ -35,6 +35,35 @@ public class FlexlbConfig {
      * Load balancing strategy for VIT role
      */
     private LoadBalanceStrategyEnum vitLoadBalanceStrategy = LoadBalanceStrategyEnum.RANDOM;
+
+    /**
+     * Deployment mode, for compatibility with existing FLEXLB_CONFIG payloads.
+     */
+    private String deploy = "DISAGGREGATED";
+
+    /**
+     * KV cache strategy name, for compatibility with existing FLEXLB_CONFIG payloads.
+     */
+    private String kvCache = "LOCAL_STATIC";
+
+    private int staticCacheBlockSize = 500;
+
+    private int batchSize = 1;
+
+    private long prefillBatchWaitTimeMs = 100;
+
+    private long prefillLbTimeoutMs = 300;
+
+    private long prefillGenerateTimeoutMs = 5000;
+
+    private boolean enableGrpcPrefillMaster = false;
+
+    private boolean enableGrpcCacheStatus = true;
+
+    private boolean enableGrpcEngineStatus = true;
+
+    private long decodeConcurrencyLimit = 128;
+
     /**
      * Weight decay factor, controls weight difference degree
      * Smaller value means smaller weight difference, larger value means more obvious weight difference

@@ -330,6 +330,11 @@ class BackendRPCServerVisitor:
         return await self.model_rpc_client.batch_enqueue(inputs)
 
     def is_backend_service_ready(self, refresh: bool = False) -> bool:
+        if self.host_service.get_master_addr():
+            return True
+        if not self.backend_role_list:
+            logging.warning("no backend roles configured and master is not ready")
+            return False
         roles: List[RoleAddr] = self.host_service.get_backend_role_addrs(
             self.backend_role_list, refresh
         )

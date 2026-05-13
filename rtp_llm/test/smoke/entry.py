@@ -4,7 +4,7 @@ import json
 import logging
 import os
 import shutil
-from typing import Dict, List, Type, Union, Any
+from typing import Any, Dict, List, Type, Union
 
 logging.basicConfig(
     level="INFO", format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -12,7 +12,6 @@ logging.basicConfig(
 
 from smoke.case_runner import CaseRunner
 from smoke.common_def import REL_PATH
-from smoke.utils import resolve_prompt_refs
 from smoke.gpu_diagnostics import (
     ExceptionType,
     classify_exception,
@@ -21,12 +20,17 @@ from smoke.gpu_diagnostics import (
 )
 from smoke.multi_inst_case_runner import (
     DpSeperationCaseRunner,
+    FlexLbFrontAppSeperationCaseRunner,
+    FlexLbPdSeperationCaseRunner,
     FrontAppSeperationCaseRunner,
     PdSeperationCaseRunner,
     VitSeperationCaseRunner,
 )
 from smoke.task_info import TaskInfo
+from smoke.utils import resolve_prompt_refs
+
 from rtp_llm.utils.util import str_to_bool
+
 
 def get_runner_type(
     env_args: Union[List[str], Dict[str, List[str]]]
@@ -34,6 +38,12 @@ def get_runner_type(
     if isinstance(env_args, list):
         return CaseRunner
     else:
+        if "flexlb" in env_args:
+            if "pd_fusion" in env_args:
+                return FlexLbFrontAppSeperationCaseRunner
+            if "prefill" in env_args and "decode" in env_args:
+                return FlexLbPdSeperationCaseRunner
+            raise Exception(f"unknown flexlb env_args for runner selection: {env_args}")
         if "prefill" in env_args:
             if "DECODE_ENTRANCE=1" in env_args["prefill"]:
                 return DpSeperationCaseRunner
@@ -62,12 +72,24 @@ if __name__ == "__main__":
     parser.add_argument("--suite_name", type=str, required=True, help="suite_name")
     parser.add_argument("--task_info", type=str, required=True, help="task_info")
     parser.add_argument("--envs", type=str, required=False, default="", help="envs")
-    parser.add_argument("--smoke_args", type=str, required=False, default="", help="smoke_args")
-    parser.add_argument("--gpu_card", type=str, required=True, default="", help="gpu_card")
-    parser.add_argument("--kvcm_envs", type=str, required=False, default="[]", help="KVCM server config")
-    parser.add_argument("--sleep_time_qr", type=int, default=0, help="sleep seconds between queries")
-    parser.add_argument("--kill_remote", type=str, default="False", help="kill KVCM server mid-test")
-    parser.add_argument("--concurrency_test", type=str, default="False", help="concurrent request mode")
+    parser.add_argument(
+        "--smoke_args", type=str, required=False, default="", help="smoke_args"
+    )
+    parser.add_argument(
+        "--gpu_card", type=str, required=True, default="", help="gpu_card"
+    )
+    parser.add_argument(
+        "--kvcm_envs", type=str, required=False, default="[]", help="KVCM server config"
+    )
+    parser.add_argument(
+        "--sleep_time_qr", type=int, default=0, help="sleep seconds between queries"
+    )
+    parser.add_argument(
+        "--kill_remote", type=str, default="False", help="kill KVCM server mid-test"
+    )
+    parser.add_argument(
+        "--concurrency_test", type=str, default="False", help="concurrent request mode"
+    )
     args, _ = parser.parse_known_args()
 
     logging.info(
@@ -76,6 +98,7 @@ if __name__ == "__main__":
     with open(os.path.join(REL_PATH, args.task_info), "r") as f:
         try:
             import json5
+
             x = json5.load(f)
         except ImportError:
             x = json.load(f)
@@ -85,7 +108,12 @@ if __name__ == "__main__":
             **x, taskinfo_rel_path=os.path.join(REL_PATH, args.task_info)
         )
 
-    env_args = json.loads(args.envs)
+    envs_clean = args.envs.strip()
+    if (envs_clean.startswith("'") and envs_clean.endswith("'")) or (
+        envs_clean.startswith('"') and envs_clean.endswith('"')
+    ):
+        envs_clean = envs_clean[1:-1]
+    env_args = json.loads(envs_clean)
     smoke_args = args.smoke_args
     if smoke_args:
         smoke_args_clean = smoke_args.strip().strip("'\"")
@@ -134,7 +162,11 @@ if __name__ == "__main__":
     finally:
         output_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", os.getcwd())
         rocm_debug_dir = os.path.join(output_dir, "rocm_debug")
-        for pattern in ["/tmp/rocm_debug_agent*", "/tmp/rocm_code_objects/*", "/tmp/gpucore.*"]:
+        for pattern in [
+            "/tmp/rocm_debug_agent*",
+            "/tmp/rocm_code_objects/*",
+            "/tmp/gpucore.*",
+        ]:
             for src in glob.glob(pattern):
                 os.makedirs(rocm_debug_dir, exist_ok=True)
                 dst = os.path.join(rocm_debug_dir, os.path.basename(src))

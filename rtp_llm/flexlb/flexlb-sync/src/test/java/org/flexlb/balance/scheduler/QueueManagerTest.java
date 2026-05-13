@@ -12,6 +12,9 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import uk.org.webcompere.systemstubs.environment.EnvironmentVariables;
+import uk.org.webcompere.systemstubs.jupiter.SystemStub;
+import uk.org.webcompere.systemstubs.jupiter.SystemStubsExtension;
 
 import java.util.concurrent.CompletableFuture;
 
@@ -23,8 +26,32 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-@ExtendWith(MockitoExtension.class)
+@ExtendWith({MockitoExtension.class, SystemStubsExtension.class})
 class QueueManagerTest {
+
+    private static final String FLEXLB_CONFIG = """
+            {
+                "enableQueueing": true,
+                "deploy": "DISAGGREGATED",
+                "loadBalanceStrategy": "SHORTEST_TTFT",
+                "prefillBatchWaitTimeMs": 100,
+                "kvCache": "LOCAL_STATIC",
+                "staticCacheBlockSize": 500,
+                "batchSize": 1,
+                "prefillLbTimeoutMs": 300,
+                "prefillGenerateTimeoutMs": 5000,
+                "enableGrpcPrefillMaster": false,
+                "enableGrpcCacheStatus": true,
+                "enableGrpcEngineStatus": true,
+                "maxPrefillQueueSize": 10,
+                "prefillQueueSizeThreshold": 8,
+                "decodeConcurrencyLimit": 128,
+                "maxQueueSize": 20
+            }
+            """;
+
+    @SystemStub
+    private EnvironmentVariables environmentVariables = new EnvironmentVariables();
 
     @Mock
     private RoutingQueueReporter metrics;
@@ -129,6 +156,23 @@ class QueueManagerTest {
 
         assertTrue(future.isDone());
         Response response = future.join();
+        assertFalse(response.isSuccess());
+        assertEquals(StrategyErrorType.QUEUE_FULL.getErrorCode(), response.getCode());
+    }
+
+    @Test
+    void tryRouteAsync_shouldUseMaxQueueSizeFromFlexlbConfig() {
+        environmentVariables.set("FLEXLB_CONFIG", FLEXLB_CONFIG);
+        QueueManager configuredQueueManager = new QueueManager(metrics, new ConfigService());
+
+        for (int i = 0; i < 20; i++) {
+            configuredQueueManager.tryRouteAsync(createContext(i));
+        }
+
+        assertEquals(20, configuredQueueManager.getQueue().size());
+        Response response = configuredQueueManager.tryRouteAsync(createContext(21L)).block();
+
+        assertNotNull(response);
         assertFalse(response.isSuccess());
         assertEquals(StrategyErrorType.QUEUE_FULL.getErrorCode(), response.getCode());
     }

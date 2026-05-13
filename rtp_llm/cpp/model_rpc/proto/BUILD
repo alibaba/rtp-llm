@@ -1,6 +1,11 @@
 load("//bazel:tf_proto.bzl", "tf_proto_library_cc")
 load("//bazel:py_proto.bzl", "generate_grpc_proto")
 
+exports_files(
+    ["model_rpc_service.proto"],
+    visibility = ["//visibility:public"],
+)
+
 tf_proto_library_cc(
     name = "model_rpc_service",
     srcs = ["model_rpc_service.proto"],
