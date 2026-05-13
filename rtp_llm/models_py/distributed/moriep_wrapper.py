@@ -3,7 +3,6 @@ import threading
 from dataclasses import dataclass
 from typing import Any, Optional
 
-import mori
 import torch
 
 from rtp_llm.config.engine_config import EngineConfig
@@ -38,19 +37,25 @@ class MoriEPWrapperConfig:
     warp_num_per_block: int = 16
     block_num: int = 80
     use_external_inp_buf: bool = True
-    kernel_type: mori.ops.EpDispatchCombineKernelType = (
-        mori.ops.EpDispatchCombineKernelType.IntraNode
-    )
+    kernel_type: Any = None  # mori.ops.EpDispatchCombineKernelType, lazy-loaded
     gpu_per_node: Optional[int] = None
     rdma_block_num: int = 0
     num_qp_per_pe: int = 1
     quant_type: str = "none"
+
+    def __post_init__(self) -> None:
+        if self.kernel_type is None:
+            import mori
+
+            self.kernel_type = mori.ops.EpDispatchCombineKernelType.IntraNode
 
     @classmethod
     def from_config_adapter(
         cls, config_adapter: MoEConfigAdapter
     ) -> "MoriEPWrapperConfig":
         """Create MoriEPWrapperConfig from MoEConfigAdapter."""
+        import mori
+
         model_config = config_adapter.model_config
         parallelism_config = config_adapter.parallelism_config
         moe_config = config_adapter.moe_config
@@ -201,6 +206,8 @@ class MoriEPWrapper:
             self._op.reset()
 
     def _init_op(self) -> None:
+        import mori
+
         mori_config = mori.ops.EpDispatchCombineConfig(**self._config.to_mori_kwargs())
         self._op = mori.ops.EpDispatchCombineOp(mori_config)
 
@@ -222,6 +229,9 @@ def init_moriep_wrapper_from_config(
     world_group = torch.distributed.group.WORLD
     assert world_group is not None
     torch._C._distributed_c10d._register_process_group(shmem_group_name, world_group)
+
+    import mori
+
     mori.shmem.shmem_torch_process_group_init(shmem_group_name)
 
     logging.info("Start initialize MoriEP wrapper (from_config)")
@@ -248,6 +258,9 @@ def init_moriep_wrapper(
     world_group = torch.distributed.group.WORLD
     assert world_group is not None
     torch._C._distributed_c10d._register_process_group(shmem_group_name, world_group)
+
+    import mori
+
     mori.shmem.shmem_torch_process_group_init(shmem_group_name)
 
     enable_cuda_graph = (

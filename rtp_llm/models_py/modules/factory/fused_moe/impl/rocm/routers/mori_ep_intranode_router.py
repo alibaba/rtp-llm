@@ -220,7 +220,6 @@ class MoriEpIntranodeRouter(FusedMoeDataRouter):
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         extra_finalize_args: Optional[Dict[str, Any]],
-        skip_allreduce: bool = False,
     ) -> torch.Tensor:
         logging.info(
             f"[MoriEpIntranodeRouter] finalize called, ep_rank={self.ep_rank}, chunked={self._is_chunked}"

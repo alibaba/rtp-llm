@@ -36,10 +36,10 @@ class AutoConfigureDeepepTest(TestCase):
 
     def test_use_all_gather_disables_all_deepep(self):
         """Test: USE_ALL_GATHER enabled should disable all DeepEP settings"""
-        # Setup: ep_size == 1 (pure TP) and USE_ALL_GATHER is True
+        # Setup: ep_size == tp_size and USE_ALL_GATHER is True
 
         self._setup_parallel_info(
-            world_size=8, tp_size=8, ep_size=1, local_world_size=8
+            world_size=8, tp_size=8, ep_size=8, local_world_size=8
         )
 
         self.moe_config.use_all_gather = True
@@ -104,7 +104,7 @@ class AutoConfigureDeepepTest(TestCase):
         )
 
         self._assert_deepep_config(moe=True, low_latency=False, internode=True)
-        # test set use_all_gather = True not influence result (ep_size > 1)
+        # test set use_all_gather = True not influence result (ep_size != tp_size)
         self.moe_config.use_all_gather = True
         self.moe_config.use_deepep_moe = False
         self.moe_config.use_deepep_low_latency = False
@@ -296,8 +296,8 @@ class AutoConfigureDeepepTest(TestCase):
         # Because: num_nodes=1 and world_size == local_world_size
         self._assert_deepep_config(moe=True, low_latency=True, internode=False)
 
-    def test_use_all_gather_false_when_ep_enabled(self):
-        """Test: USE_ALL_GATHER true but ep_size > 1, should not disable DeepEP"""
+    def test_use_all_gather_false_but_ep_not_equal_tp(self):
+        """Test: USE_ALL_GATHER true but ep_size != tp_size, should not disable DeepEP"""
         self._setup_parallel_info(
             world_size=8, tp_size=4, ep_size=8, local_world_size=8
         )
@@ -311,7 +311,7 @@ class AutoConfigureDeepepTest(TestCase):
             role_type=role_type,
         )
 
-        # Since ep_size > 1, use_all_gather should not be enabled
+        # Since ep_size != tp_size, use_all_gather should not be enabled
         # Should apply normal rules for DECODE + single-node multi-GPU
         self._assert_deepep_config(moe=True, low_latency=True, internode=False)
 
@@ -568,9 +568,9 @@ class AutoConfigureDeepepTest(TestCase):
         self.assertEqual(self.moe_config.use_deepep_internode, True)
 
     def test_use_all_gather_disabled_by_low_latency(self):
-        """Test: use_deepep_low_latency=True should disable use_all_gather even in pure TP mode"""
+        """Test: use_deepep_low_latency=True should disable use_all_gather"""
         self._setup_parallel_info(
-            world_size=8, tp_size=8, ep_size=1, local_world_size=8
+            world_size=8, tp_size=8, ep_size=8, local_world_size=8
         )
         self.moe_config.use_all_gather = True
         # User sets low_latency, which should disable use_all_gather
@@ -591,8 +591,8 @@ class AutoConfigureDeepepTest(TestCase):
         # And DeepEP settings should be applied
         self.assertEqual(self.moe_config.use_deepep_low_latency, True)
 
-    def test_use_all_gather_with_ep_size_gt_1(self):
-        """Test: use_all_gather=True but ep_size > 1 should not disable DeepEP"""
+    def test_use_all_gather_with_ep_not_equal_tp(self):
+        """Test: use_all_gather=True but ep_size != tp_size should not disable DeepEP"""
         self._setup_parallel_info(
             world_size=8, tp_size=4, ep_size=8, local_world_size=8
         )
@@ -609,34 +609,8 @@ class AutoConfigureDeepepTest(TestCase):
             role_type=role_type,
         )
 
-        # Since ep_size > 1, use_all_gather should be disabled
+        # Since ep_size != tp_size, use_all_gather should be disabled
         # and normal auto-config should apply
-        self.assertEqual(self.moe_config.use_all_gather, False)
-        # Should apply auto-config for DECODE + single-node multi-GPU
-        self._assert_deepep_config(moe=True, low_latency=True, internode=False)
-
-    def test_use_all_gather_ep_equal_tp_but_gt_1(self):
-        """Test: use_all_gather=True with ep_size == tp_size > 1 should be disabled.
-
-        This documents the rule change: the old condition was ep_size == tp_size,
-        the new condition is ep_size == 1 (pure TP mode). Even when ep_size equals
-        tp_size (e.g. 8tp8ep), use_all_gather should not be enabled because EP is
-        active and requires all_to_all dispatch, not all_gather.
-        """
-        self._setup_parallel_info(
-            world_size=8, tp_size=8, ep_size=8, local_world_size=8
-        )
-        self.moe_config.use_all_gather = True
-        role_type = RoleType.DECODE
-
-        auto_configure_deepep(
-            moe_config=self.moe_config,
-            deep_ep_config=self.deep_ep_config,
-            parallelism_config=self.parallel_config,
-            role_type=role_type,
-        )
-
-        # ep_size == tp_size == 8, but ep_size > 1 → use_all_gather disabled
         self.assertEqual(self.moe_config.use_all_gather, False)
         # Should apply auto-config for DECODE + single-node multi-GPU
         self._assert_deepep_config(moe=True, low_latency=True, internode=False)
