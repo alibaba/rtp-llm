@@ -376,6 +376,9 @@ class ModelRpcClient(object):
         )
         logging.info(f"addresses: {self._addresses}")
 
+    async def close(self):
+        await self._channel_pool.close()
+
     async def enqueue(
         self, input_py: GenerateInput
     ) -> AsyncGenerator[GenerateOutputs, None]:
