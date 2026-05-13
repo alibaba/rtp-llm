@@ -116,7 +116,24 @@ KVCacheConnectorCoordinator::asyncRead(const std::shared_ptr<KVCacheConnectorRea
         return nullptr;
     }
 
-    auto resource = allocator_->incrKVCacheRef(kvcache_resource, kvcache_resource.cacheKeys(), true);
+    // In CP page-level round-robin mode, cacheKeys() returns ALL virtual block
+    // keys (total_blocks) while blocks() holds only local physical blocks
+    // (total_blocks / cp_size).  Remap to last-rank-key namespace so that
+    // cacheKeys[i] corresponds 1:1 with blocks[i].  See SingleTypeKVCacheAllocator
+    // (initMallocForCommonLen / insertIntoCache) for the matching match/insert side.
+    const int       cp_size      = cpSize();
+    KVCacheResource ref_resource = kvcache_resource;
+    if (cp_size > 1) {
+        ref_resource.cacheKeys() = kvcache_resource.localCacheKeys(cp_size - 1, cp_size);
+        // Short requests (< cp_size logical blocks) have no complete virtual
+        // block, so the canonical last-rank-key namespace is empty by design.
+        // Skip silently — connector activity for these is a no-op anyway.
+        if (ref_resource.cacheKeys().empty()) {
+            return nullptr;
+        }
+    }
+    auto ref_keys = ref_resource.cacheKeys();
+    auto resource = allocator_->incrKVCacheRef(ref_resource, ref_keys, true);
     if (!resource) {
         RTP_LLM_LOG_WARNING("async read failed, incr kvcache ref failed, resource: [%s]",
                             kvcache_resource.debugString().c_str());
@@ -154,7 +171,17 @@ KVCacheConnectorCoordinator::asyncWrite(const std::shared_ptr<KVCacheConnectorRe
         return nullptr;
     }
 
-    auto resource = allocator_->incrKVCacheRef(kvcache_resource, kvcache_resource.cacheKeys(), true);
+    // Same CP adjustment as asyncRead — last-rank-key namespace.
+    const int       cp_size      = cpSize();
+    KVCacheResource ref_resource = kvcache_resource;
+    if (cp_size > 1) {
+        ref_resource.cacheKeys() = kvcache_resource.localCacheKeys(cp_size - 1, cp_size);
+        if (ref_resource.cacheKeys().empty()) {
+            return nullptr;  // request shorter than one virtual block — nothing to write
+        }
+    }
+    auto ref_keys = ref_resource.cacheKeys();
+    auto resource = allocator_->incrKVCacheRef(ref_resource, ref_keys, true);
     if (!resource) {
         RTP_LLM_LOG_WARNING("async write failed, incr kvcache ref failed, resource: [%s]",
                             kvcache_resource.debugString().c_str());
@@ -222,6 +249,14 @@ std::shared_ptr<RemoteConnector> KVCacheConnectorCoordinator::initRemoteConnecto
     RTP_LLM_LOG_ERROR("not RemoteConnector");
     return nullptr;
 #endif
+}
+
+int KVCacheConnectorCoordinator::cpSize() const {
+    const auto& cp_cfg = parallelism_config_.prefill_cp_config;
+    if (cp_cfg.kv_cache_sharded && parallelism_config_.tp_size > 1) {
+        return static_cast<int>(parallelism_config_.tp_size);
+    }
+    return 1;
 }
 
 void KVCacheConnectorCoordinator::updateOnce() {

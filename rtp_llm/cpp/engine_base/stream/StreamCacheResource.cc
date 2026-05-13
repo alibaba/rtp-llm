@@ -643,10 +643,11 @@ void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>&
 }
 
 void StreamCacheResource::updateReuseLengthsFromContext(const std::shared_ptr<FusedAsyncReadContext>& read_context) {
-    const int total_reuse_len  = read_context->resource()->reuseBlockNum() * seqSizePerBlock();
-    const int memory_reuse_len = read_context->resource()->memoryReuseBlockNum() * seqSizePerBlock();
-    const int remote_reuse_len = read_context->resource()->remoteReuseBlockNum() * seqSizePerBlock();
-    const int device_reuse_len = read_context->resource()->deviceReuseBlockNum() * seqSizePerBlock();
+    const int block_tokens     = reuseBlockTokens();
+    const int total_reuse_len  = read_context->resource()->reuseBlockNum() * block_tokens;
+    const int memory_reuse_len = read_context->resource()->memoryReuseBlockNum() * block_tokens;
+    const int remote_reuse_len = read_context->resource()->remoteReuseBlockNum() * block_tokens;
+    const int device_reuse_len = read_context->resource()->deviceReuseBlockNum() * block_tokens;
     if (total_reuse_len > 0) {
         stream_->setInitialReuseLength(total_reuse_len);
         stream_->setReuseLength(total_reuse_len);

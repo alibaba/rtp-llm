@@ -4,13 +4,13 @@
 
 namespace rtp_llm {
 
-std::vector<std::shared_ptr<LayerCacheBuffer>>
-LayerCacheBufferUtil::convert(KVCacheResource& resource, int batch_id, int start_block_idx, int block_count) {
+std::vector<std::shared_ptr<LayerCacheBuffer>> LayerCacheBufferUtil::convert(
+    KVCacheResource& resource, int batch_id, int start_block_idx, int block_count, int cp_rank, int cp_size) {
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
 
     const auto& layer_block_ids = resource.layerBlocks();
     for (size_t i = 0; i < layer_block_ids.size(); ++i) {
-        auto layer_cache_buffer = convertLayer(resource, batch_id, i, start_block_idx, block_count);
+        auto layer_cache_buffer = convertLayer(resource, batch_id, i, start_block_idx, block_count, cp_rank, cp_size);
         if (layer_cache_buffer) {
             layer_cache_buffers.push_back(layer_cache_buffer);
         }
@@ -18,8 +18,13 @@ LayerCacheBufferUtil::convert(KVCacheResource& resource, int batch_id, int start
     return layer_cache_buffers;
 }
 
-std::shared_ptr<LayerCacheBuffer> LayerCacheBufferUtil::convertLayer(
-    KVCacheResource& resource, int batch_id, int layer_id, int start_block_idx, int block_count) {
+std::shared_ptr<LayerCacheBuffer> LayerCacheBufferUtil::convertLayer(KVCacheResource& resource,
+                                                                     int              batch_id,
+                                                                     int              layer_id,
+                                                                     int              start_block_idx,
+                                                                     int              block_count,
+                                                                     int              cp_rank,
+                                                                     int              cp_size) {
     const auto& layer_block_ids = resource.layerBlocks();
     const auto& cache_keys      = resource.cacheKeys();
 
@@ -34,9 +39,30 @@ std::shared_ptr<LayerCacheBuffer> LayerCacheBufferUtil::convertLayer(
         return nullptr;
     }
 
+    if (cp_size < 1 || cp_rank < 0 || cp_rank >= cp_size) {
+        RTP_LLM_LOG_WARNING("invalid cp_rank/cp_size: cp_rank=%d cp_size=%d", cp_rank, cp_size);
+        return nullptr;
+    }
+
     const auto& block_ids = layer_block_ids[layer_id]->blocks();
-    // Use signed arithmetic throughout to avoid unsigned underflow when start_block_idx >= actual_block_count
-    int actual_block_count = static_cast<int>(std::min(block_ids.size(), cache_keys.size()));
+    // Under CP page-RR sharding the rank's block_ids hold only owned physical
+    // blocks (length = ceil(total_logical / cp_size)); cache_keys is still the
+    // FULL logical-block sequence (length = total_logical). The i-th local
+    // owned block belongs to logical position cp_rank + i*cp_size, so its
+    // cache_key must come from cache_keys[cp_rank + i*cp_size]. Without this
+    // remap the prefill side registers each owned block under cache_keys[i],
+    // which the decode-side per-peer block_pos lookup never finds → load
+    // buffer timeouts.
+    const int local_to_logical_stride = cp_size;
+    const int local_to_logical_offset = cp_rank;
+    const int max_local_blocks_for_keys =
+        cp_size > 1 ?
+            static_cast<int>((cache_keys.size() > static_cast<size_t>(cp_rank) ? cache_keys.size() - cp_rank : 0)
+                             + cp_size - 1)
+                / cp_size :
+            static_cast<int>(cache_keys.size());
+    int actual_block_count =
+        static_cast<int>(std::min(block_ids.size(), static_cast<size_t>(max_local_blocks_for_keys)));
     if (start_block_idx >= actual_block_count) {
         RTP_LLM_LOG_WARNING("start_block_idx %d >= actual_block_count %d", start_block_idx, actual_block_count);
         return nullptr;
@@ -50,8 +76,18 @@ std::shared_ptr<LayerCacheBuffer> LayerCacheBufferUtil::convertLayer(
 
     auto layer_cache_buffer = std::make_shared<LayerCacheBuffer>(layer_id);
     for (size_t i = 0; i < block_ids_size; ++i) {
-        int     block_id = block_ids[start_block_idx + i];
-        int64_t key      = cache_keys[start_block_idx + i];
+        const int local_idx   = start_block_idx + static_cast<int>(i);
+        const int logical_idx = local_to_logical_offset + local_idx * local_to_logical_stride;
+        if (logical_idx < 0 || static_cast<size_t>(logical_idx) >= cache_keys.size()) {
+            RTP_LLM_LOG_WARNING("logical_idx %d out of cache_keys range %zu (cp_rank=%d cp_size=%d)",
+                                logical_idx,
+                                cache_keys.size(),
+                                cp_rank,
+                                cp_size);
+            break;
+        }
+        int     block_id = block_ids[local_idx];
+        int64_t key      = cache_keys[logical_idx];
         layer_cache_buffer->addBlockId(key, block_id);
     }
 
