@@ -41,11 +41,32 @@ class LinearFactory:
 
     @classmethod
     def register(cls, strategy_class: type) -> None:
-        """Register a strategy class
+        """Register a strategy class. Idempotent on (module, name).
 
-        Args:
-            strategy_class: Strategy class (not instance) to register
+        Why dedup: under pytest+editable install, the same impl `__init__.py`
+        can be re-executed via different package contexts and produce a fresh
+        class object on each run. (module, name) catches duplicates as long as
+        BOTH registrations resolve the same canonical dotted module path. The
+        underlying root cause for the prior 504 rocm_linear failure was a
+        missing `rtp_llm/models_py/__init__.py` — without it, pytest's
+        `import_path` walked up to `models_py/` (the first init-less ancestor)
+        when setting up Package collectors for `kernels`/`modules`/`standalone`
+        and inserted `.../rtp_llm/models_py` onto `sys.path`. That made
+        `modules.factory.linear.impl.rocm` importable as a TOP-LEVEL bare
+        dotted name in addition to its canonical FQN, so the same .py file
+        loaded under two sys.modules keys with two different `__module__`
+        strings — bypassing this dedup. Adding `models_py/__init__.py` fixes
+        the path leak; this dedup remains as a belt-and-suspenders safety net.
         """
+        key = (strategy_class.__module__, strategy_class.__name__)
+        existing_keys = {(c.__module__, c.__name__) for c in cls._strategies}
+        if key in existing_keys:
+            logger.debug(
+                f"Linear strategy {strategy_class.__name__} "
+                f"(module={strategy_class.__module__}) already registered, "
+                "skipping duplicate"
+            )
+            return
         cls._strategies.append(strategy_class)
         logger.debug(f"Registered Linear strategy: {strategy_class.__name__}")
 

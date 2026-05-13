@@ -12,12 +12,14 @@ _HAS_RTP_KERNEL = False
 try:
     from flashinfer import BatchPrefillWithPagedKVCacheWrapper
     from flashinfer.cascade import merge_state
+
     _HAS_FLASHINFER = True
 except ImportError as e:
     logging.warning(f"FlashInfer not found: {e}")
 
 try:
     from rtp_kernel.sparse_attention import BatchPrefillWithSparseAttention
+
     _HAS_RTP_KERNEL = True
 except ImportError as e:
     logging.warning(f"rtp_kernel.sparse_attention not found: {e}")
@@ -45,7 +47,9 @@ def _headwise_prefill_bf16_runtime_ready(attn_inputs) -> bool:
         major, minor = map(int, torch.version.cuda.split(".")[:2])
     except (AttributeError, TypeError, ValueError):
         return False
-    return (major, minor) >= (12, 8) and getattr(attn_inputs, 'headwise_config', None) is not None
+    return (major, minor) >= (12, 8) and getattr(
+        attn_inputs, "headwise_config", None
+    ) is not None
 
 
 # ----------------------------
@@ -78,7 +82,9 @@ class HeadWisePrefillAttnOp:
     """
 
     def __init__(
-        self, attn_configs: AttentionConfigs, parallelism_config: ParallelismConfig,
+        self,
+        attn_configs: AttentionConfigs,
+        parallelism_config: ParallelismConfig,
         headwise_config: Optional[dict] = None,
     ) -> None:
         self.rank = parallelism_config.tp_rank
@@ -109,8 +115,11 @@ class HeadWisePrefillAttnOp:
         )
 
         self._retrieval_wrapper = (
-            BatchPrefillWithPagedKVCacheWrapper(self.workspace_buffer, "HND", backend="fa3")
-            if _HAS_FLASHINFER else None
+            BatchPrefillWithPagedKVCacheWrapper(
+                self.workspace_buffer, "HND", backend="fa3"
+            )
+            if _HAS_FLASHINFER
+            else None
         )
 
         # runtime states (set per-layer by _get_headwise_config)
@@ -126,7 +135,9 @@ class HeadWisePrefillAttnOp:
         if not (_HAS_FLASHINFER and _HAS_RTP_KERNEL):
             return False
         major, minor = map(int, torch.version.cuda.split(".")[:2])
-        return (major, minor) >= (12, 8) and getattr(attn_inputs, 'headwise_config', None) is not None
+        return (major, minor) >= (12, 8) and getattr(
+            attn_inputs, "headwise_config", None
+        ) is not None
 
     def _get_paged_metadata(
         self, q_len: int, kv_len: int, kv_indices: torch.Tensor
@@ -146,7 +157,9 @@ class HeadWisePrefillAttnOp:
         """根据层索引提取并分类当前 Rank 负责的头（结果按 layer_idx 缓存）"""
         cached = self._headwise_cache.get(layer_idx)
         if cached is not None:
-            self.retrieval_heads, self.non_retrieval_heads, self.num_retrieval_heads = cached
+            self.retrieval_heads, self.non_retrieval_heads, self.num_retrieval_heads = (
+                cached
+            )
             return
 
         layer_key = str(layer_idx)
@@ -155,8 +168,12 @@ class HeadWisePrefillAttnOp:
                 f"[HeadWise] layer_idx={layer_idx} not found in headwise_config, "
                 f"falling back to all-retrieval heads"
             )
-            self.retrieval_heads = torch.ones(self.head_num, dtype=torch.bool, device="cuda")
-            self.non_retrieval_heads = torch.zeros(self.head_num, dtype=torch.bool, device="cuda")
+            self.retrieval_heads = torch.ones(
+                self.head_num, dtype=torch.bool, device="cuda"
+            )
+            self.non_retrieval_heads = torch.zeros(
+                self.head_num, dtype=torch.bool, device="cuda"
+            )
             self.num_retrieval_heads = self.head_num
         else:
             start = self.head_num * self.rank
@@ -172,7 +189,9 @@ class HeadWisePrefillAttnOp:
             self.num_retrieval_heads = int(self.retrieval_heads.sum().cpu())
 
         self._headwise_cache[layer_idx] = (
-            self.retrieval_heads, self.non_retrieval_heads, self.num_retrieval_heads
+            self.retrieval_heads,
+            self.non_retrieval_heads,
+            self.num_retrieval_heads,
         )
 
     def prepare(self, attn_inputs: PyAttentionInputs) -> None:
@@ -263,9 +282,13 @@ class HeadWisePrefillAttnOp:
             dtype=fmha_input.dtype,
             device=fmha_input.device,
         )
-        kv_base = kv_cache.kv_cache_base  # [block_num, 2*kv_head_num*page_size*head_dim] (packed 2D)
+        kv_base = (
+            kv_cache.kv_cache_base
+        )  # [block_num, 2*kv_head_num*page_size*head_dim] (packed 2D)
         block_num = kv_base.shape[0]
-        kv_expanded = kv_base.view(block_num, 2, self.head_num_kv, self.paged_size, self.size_per_head)
+        kv_expanded = kv_base.view(
+            block_num, 2, self.head_num_kv, self.paged_size, self.size_per_head
+        )
         k_slice = kv_expanded[:, 0, ...]
         v_slice = kv_expanded[:, 1, ...]
         k_cache = k_slice if k_slice.is_contiguous() else k_slice.contiguous()
@@ -363,8 +386,12 @@ class HeadWisePrefillAttnOp:
         q_len: int,
         kv_len: int,
     ) -> torch.Tensor:
-        k_cache_contiguous = k_cache if k_cache.is_contiguous() else k_cache.contiguous()
-        v_cache_contiguous = v_cache if v_cache.is_contiguous() else v_cache.contiguous()
+        k_cache_contiguous = (
+            k_cache if k_cache.is_contiguous() else k_cache.contiguous()
+        )
+        v_cache_contiguous = (
+            v_cache if v_cache.is_contiguous() else v_cache.contiguous()
+        )
 
         if q_len == kv_len:
             qf1 = q_h[: self.hw_cfg.sink_token_num]
@@ -379,6 +406,7 @@ class HeadWisePrefillAttnOp:
 
 
 class HeadWisePrefillImpl(FMHAImplBase):
+    NAME = "headwise"
 
     def __init__(
         self,
@@ -388,8 +416,10 @@ class HeadWisePrefillImpl(FMHAImplBase):
     ) -> None:
         # Create implementations
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
-        headwise_config = getattr(attn_inputs, 'headwise_config', None)
-        self.fmha_impl = HeadWisePrefillAttnOp(attn_configs, parallelism_config, headwise_config)
+        headwise_config = getattr(attn_inputs, "headwise_config", None)
+        self.fmha_impl = HeadWisePrefillAttnOp(
+            attn_configs, parallelism_config, headwise_config
+        )
         self.rope_kvcache_impl = FusedRopeKVCachePrefillOpQKVOut(attn_configs)
         self.attn_configs = attn_configs
 
@@ -407,7 +437,9 @@ class HeadWisePrefillImpl(FMHAImplBase):
     ) -> bool:
         # Must match factory ordering: only take this path when headwise config + deps exist,
         # otherwise fall through to other prefill implementations (e.g. FlashInfer).
-        return not attn_configs.use_mla and _headwise_prefill_bf16_runtime_ready(attn_inputs)
+        return not attn_configs.use_mla and _headwise_prefill_bf16_runtime_ready(
+            attn_inputs
+        )
 
     def forward(
         self,

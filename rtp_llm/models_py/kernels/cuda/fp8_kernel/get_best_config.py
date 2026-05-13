@@ -28,16 +28,19 @@ def load_all_configs():
     # Collect all config directories to load
     config_dirs = [opensource_dir]
     try:
-        import internal_source.rtp_llm.models_py.kernels.cuda.fp8_kernel
+        import internal_source.rtp_llm.models_py.kernels.cuda.fp8_kernel as _isrc_fp8
 
-        internalsource_dir = os.path.join(
-            os.path.dirname(
-                os.path.realpath(
-                    internal_source.rtp_llm.models_py.kernels.cuda.fp8_kernel.__file__
-                )
-            ),
-            op_name,
-        )
+        # internal_source/rtp_llm/models_py/kernels/cuda/fp8_kernel/ has no
+        # __init__.py (just a sibling cutlass_groupgemm/ tree of JSON
+        # configs), so Python treats it as a PEP 420 namespace package and
+        # __file__ is None — `os.path.realpath(None)` raises TypeError. Use
+        # __path__ (always populated for namespace packages) when __file__
+        # is missing.
+        if _isrc_fp8.__file__ is not None:
+            base_dir = os.path.dirname(os.path.realpath(_isrc_fp8.__file__))
+        else:
+            base_dir = os.path.realpath(list(_isrc_fp8.__path__)[0])
+        internalsource_dir = os.path.join(base_dir, op_name)
         config_dirs.append(internalsource_dir)
     except ImportError:
         logging.info("internal_source not found")

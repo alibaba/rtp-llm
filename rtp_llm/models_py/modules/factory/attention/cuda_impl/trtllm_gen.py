@@ -8,7 +8,7 @@ import triton.language as tl
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.utils import is_sm_100
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
-from rtp_llm.ops import AttentionConfigs, FMHAType, ParallelismConfig
+from rtp_llm.ops import AttentionConfigs, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCacheDecodeOp,
     FusedRopeKVCachePrefillOpQOut,
@@ -538,6 +538,7 @@ class FlashInferTRTLLMDecodeOp(object):
 
 
 class FlashInferTRTLLMPrefillImpl(FMHAImplBase):
+    NAME = "trtllm_gen"
 
     def __init__(
         self,
@@ -603,6 +604,7 @@ class FlashInferTRTLLMPrefillImpl(FMHAImplBase):
 
 
 class FlashInferTRTLLMSpecDecodeImpl(FMHAImplBase):
+    NAME = "trtllm_spec"
 
     def __init__(
         self,
@@ -679,6 +681,7 @@ class FlashInferTRTLLMSpecDecodeImpl(FMHAImplBase):
 
 
 class FlashInferTRTLLMDecodeImpl(FMHAImplBase):
+    NAME = "trtllm_gen"
 
     def __init__(
         self,
