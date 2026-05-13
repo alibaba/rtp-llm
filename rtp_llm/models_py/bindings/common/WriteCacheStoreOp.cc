@@ -66,6 +66,8 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
                                 captured_cache_store.use_opaque_kv_cache_store,
                                 captured_kv_cache.layer_id,
                                 captured_kv_cache.region_name,
+                                captured_cache_store.cp_rank,
+                                captured_cache_store.cp_size,
                                 std::move(event)};
 
         KvCacheInfo kv_cache_info;

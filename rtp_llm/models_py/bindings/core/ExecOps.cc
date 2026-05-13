@@ -221,6 +221,12 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
 
     RTP_LLM_LOG_DEBUG("write cache store, context_batch_size is %ld", param.context_batch_size);
 
+    // cache_keys is laid out [batch, global_max_blocks]; this stride is INDEPENDENT
+    // of `max_blocks_per_batch` (which is per-group offset stride and may be smaller
+    // for CP-sharded FULL groups whose offset is rank-local-compact).
+    const size_t cache_keys_per_batch =
+        param.context_batch_size > 0 ? (param.cache_keys.size() / param.context_batch_size) : 0;
+
     for (size_t batch_id = 0; batch_id < param.context_batch_size; batch_id++) {
         if (*(param.request_pd_separation.data_ptr<bool>() + batch_id) == false) {
             continue;
@@ -249,22 +255,28 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
             continue;
         }
 
-        auto addBlock = [&](int index) {
-            RTP_LLM_CHECK_WITH_INFO(index >= 0 && index < static_cast<int>(max_blocks_per_batch),
-                                    "invalid block index=%d (max_blocks_per_batch=%zu)",
-                                    index,
+        auto addBlock = [&](int key_index, int offset_index) {
+            RTP_LLM_CHECK_WITH_INFO(offset_index >= 0 && offset_index < static_cast<int>(max_blocks_per_batch),
+                                    "invalid block offset_index=%d (max_blocks_per_batch=%zu)",
+                                    offset_index,
                                     max_blocks_per_batch);
-            auto block_id = *(offset_addr + (param.decoder_batch_size + batch_id) * max_blocks_per_batch + index);
+            RTP_LLM_CHECK_WITH_INFO(key_index >= 0 && key_index < static_cast<int>(cache_keys_per_batch),
+                                    "invalid block key_index=%d (cache_keys_per_batch=%zu)",
+                                    key_index,
+                                    cache_keys_per_batch);
+            auto block_id =
+                *(offset_addr + (param.decoder_batch_size + batch_id) * max_blocks_per_batch + offset_index);
             if (isNullBlockIdx(block_id)) {
-                RTP_LLM_LOG_DEBUG("skip null kv cache block, request id [%ld], layer id [%d], region [%d], index [%d]",
-                                  request_id,
-                                  param.layer_id,
-                                  static_cast<int>(param.region_name),
-                                  index);
+                RTP_LLM_LOG_DEBUG(
+                    "skip null kv cache block, request id [%ld], layer id [%d], region [%d], offset_index [%d]",
+                    request_id,
+                    param.layer_id,
+                    static_cast<int>(param.region_name),
+                    offset_index);
                 return;
             }
             std::string cache_key = makeCacheKey(param.model_id,
-                                                 param.cache_keys[batch_id * max_blocks_per_batch + index],
+                                                 param.cache_keys[batch_id * cache_keys_per_batch + key_index],
                                                  param.layer_id,
                                                  param.region_name);
 
@@ -303,14 +315,22 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
             }
         };
 
-        const auto block_positions = blockPositionsForCacheTransfer(
-            static_cast<size_t>(std::min<int>(total_blocks, static_cast<int>(max_blocks_per_batch))),
+        // Under CP-page-RR sharding the FULL group's kv_cache_offset is
+        // rank-local-compact while cache_keys stays FULL-length, so the
+        // legacy 1:1 (cache_keys[i], offset[i]) pairing puts the wrong key
+        // on each block. The planner returns the right (key_idx, offset_idx)
+        // pairs for both legacy and sharded cases.
+        // Clamp by cache_keys_per_batch (global stride) — NOT max_blocks_per_batch,
+        // which under CP shard is the local-compact stride for FULL groups.
+        const auto block_plan = buildCacheStoreBlockPlan(
+            static_cast<size_t>(std::min<int>(total_blocks, static_cast<int>(cache_keys_per_batch))),
             /*reuse_block_size=*/0,
             use_group_cache_transfer_policy,
             group_type,
-            /*hybrid_full_from_begin=*/true);
-        for (const auto block_pos : block_positions) {
-            addBlock(static_cast<int>(block_pos));
+            param.cp_rank,
+            param.cp_size);
+        for (const auto& pair : block_plan) {
+            addBlock(pair.key_index, pair.offset_index);
         }
 
         auto storeCallback = [layer_id = param.layer_id, request_id](bool success, CacheStoreErrorCode ec) {

@@ -195,6 +195,14 @@ struct CacheStoreInputs {
     int               layer_id    = 0;
     KVCacheRegionName region_name = KVCacheRegionName::DEFAULT;
 
+    // CP-page-RR sharding context. ``cp_size > 1`` means FULL groups have
+    // their kv_cache_offset compacted to ``ceil(total/cp_size)`` per rank;
+    // the writer must re-pair (cache_keys[r + i*cp_size], offset[i]) instead
+    // of the legacy (cache_keys[i], offset[i]). Defaults of (0, 1) preserve
+    // the non-sharded path. See ``buildCacheStoreBlockPlan``.
+    int cp_rank = 0;
+    int cp_size = 1;
+
     // Pre-created event from the main thread to avoid cudaEventRecord
     // contention on background threads. nullptr means writeCacheStore will
     // create an event on the spot (single-threaded / C++ path).

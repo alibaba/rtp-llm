@@ -248,6 +248,10 @@ struct PyCacheStoreInputs {
     // Opaque cache_store reference (C++ only; passes through Python without inspection)
     std::shared_ptr<rtp_llm::CacheStore> cache_store;
     rtp_llm::CacheStoreAsyncWriter*      cache_store_async_writer = nullptr;
+
+    // CP-page-RR sharding context. (1, 0) = no sharding (legacy path).
+    int cp_size = 1;
+    int cp_rank = 0;
 };
 
 struct PyPrefillCudaGaphCopyParams {

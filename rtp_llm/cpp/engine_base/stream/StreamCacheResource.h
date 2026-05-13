@@ -75,6 +75,18 @@ public:
         return resource_context_.cache_manager->cacheConfig().seq_size_per_block;
     }
 
+    // Effective block-tokens for converting reuse_blocks → token count.
+    // Under CP shard, reuseBlockNum() counts cp-virtual blocks (each spanning
+    // cp_size physical blocks), so multiply by virtualBlockSize() instead of
+    // raw seq_size_per_block.
+    int reuseBlockTokens() const {
+        const auto& mapper = resource_context_.cache_manager->cpSlotMapper();
+        if (mapper && mapper->isSharded()) {
+            return mapper->virtualBlockSize();
+        }
+        return resource_context_.cache_manager->cacheConfig().seq_size_per_block;
+    }
+
     void setNeedReleaseResource(bool need_release_resource) {
         need_release_resource_ = need_release_resource;
     }

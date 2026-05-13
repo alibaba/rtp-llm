@@ -84,7 +84,10 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
     for (auto& addr : allocate_request.peer_addrs()) {
         decode_context.peer_addrs.push_back(addr);
     }
-    RTP_LLM_LOG_DEBUG("request [%s] prepare generate context done", decode_context.request_key.c_str());
+    decode_context.prefill_cp_size = std::max(1, allocate_request.prefill_cp_size());
+    RTP_LLM_LOG_DEBUG("request [%s] prepare generate context done, prefill_cp_size=%d",
+                      decode_context.request_key.c_str(),
+                      decode_context.prefill_cp_size);
 }
 
 void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
@@ -280,9 +283,15 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
     request.set_dp_rank(maga_init_params_.parallelism_config.dp_rank);
     request.set_partition_count(1);
     request.set_partition_id(0);
+    request.set_prefill_cp_size(load_context.prefill_cp_size);
 
-    // D >= P
-    if (resource_.workers.size() % peer_addrs.size() == 0) {
+    if (load_context.prefill_cp_size > 1) {
+        // CP-sharded prefill: each prefill peer holds 1/N RR shard, pull from all N peers
+        for (const auto& addr : peer_addrs) {
+            request.add_peer_addrs(addr);
+        }
+    } else if (resource_.workers.size() % peer_addrs.size() == 0) {
+        // D >= P
         int part_cnt = resource_.workers.size() / peer_addrs.size();
         request.add_peer_addrs(peer_addrs[index / part_cnt]);
     } else {
@@ -313,8 +322,15 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
     request.set_request_id(load_context.request_id);
     request.set_request_key(load_context.request_key);
     request.set_dp_rank(maga_init_params_.parallelism_config.dp_rank);
-    // prefill worker has full kv cache each rank
-    if (maga_init_params_.parallelism_config.prefill_cp_config.is_prefill_enabled()) {
+    request.set_prefill_cp_size(load_context.prefill_cp_size);
+    if (load_context.prefill_cp_size > 1) {
+        // CP-sharded prefill: pull from all peers (each holds 1/N RR shard)
+        request.set_partition_count(1);
+        request.set_partition_id(0);
+        for (const auto& addr : peer_addrs) {
+            request.add_peer_addrs(addr);
+        }
+    } else if (maga_init_params_.parallelism_config.prefill_cp_config.is_prefill_enabled()) {
         int part_cnt = resource_.workers.size();
         int peer_cnt = peer_addrs.size();
         request.set_partition_count(part_cnt);
@@ -387,7 +403,8 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
                                     min_timeout_ms,
                                     1,
                                     0,
-                                    decode_context.server_context};
+                                    decode_context.server_context,
+                                    decode_context.prefill_cp_size};
 
     // Prefill: TP = 1 && Decode: TP = 1
     if (resource_.workers.size() == 1 && decode_context.peer_addrs.size() == 1) {
@@ -439,7 +456,6 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
             string error_msg = "get grpc connection for rank:" + std::to_string(i) + ", addr:" + worker + " failed";
             return ErrorInfo(ErrorCode::GET_CONNECTION_FAILED, error_msg);
         }
-        all_context.push_back(WorkerRpcContext());
         auto& rpc_context = all_context[i];
         rpc_context.stub  = connect_status.value().stub;
         BroadcastLoadRequestPB load_request;
@@ -650,6 +666,8 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     auto cancel_check_func  = [&load_context]() -> bool { return load_context.server_context->IsCancelled(); };
     auto start_load_time_us = currentTimeUs();
     std::vector<std::shared_ptr<LoadContext>> load_contexts;
+    const bool                                is_page_level_rr = load_context.prefill_cp_size > 1
+                                  && static_cast<int>(load_context.peer_addrs.size()) == load_context.prefill_cp_size;
     for (int i = 0; i < load_context.peer_addrs.size(); i++) {
         auto&                                            peer_addr = load_context.peer_addrs[i];
         std::vector<std::shared_ptr<RequestBlockBuffer>> layer_caches;
@@ -702,7 +720,19 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                                                      group_type,
                                                                      /*hybrid_full_from_begin=*/true);
 
+                // RR-shard only applies to FULL paged groups on the prefill side
+                // (see HybridKVCacheAllocator::cpShardThisGroup). Non-FULL groups
+                // (state pools, SWA_KV) are written redundantly by every prefill
+                // rank; they must be received in full from one rank only — pick
+                // rank 0 to avoid double-writes.
+                const bool group_is_rr_sharded = is_page_level_rr && group_type == CacheGroupType::FULL;
+                if (is_page_level_rr && !group_is_rr_sharded && i != 0) {
+                    continue;
+                }
                 for (size_t block_pos : block_pos_list) {
+                    if (group_is_rr_sharded && (static_cast<int>(block_pos) % load_context.prefill_cp_size) != i) {
+                        continue;
+                    }
                     auto block_id = block_ids[block_pos];
                     if (isNullBlockIdx(block_id)) {
                         continue;
@@ -710,8 +740,8 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                     auto cache_key = makeCacheKey(
                         model_id, std::to_string(load_context.cache_keys[block_pos]), layer_id, region_name);
 
-                    const int local_part_cnt = peer_cnt;
-                    const int local_part_id  = i;
+                    const int local_part_cnt = is_page_level_rr ? 1 : peer_cnt;
+                    const int local_part_id  = is_page_level_rr ? 0 : i;
                     auto      parts =
                         (region_name != KVCacheRegionName::DEFAULT) ?
                                  cache_manager->convertIndexToBuffer(
@@ -843,6 +873,10 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                                                                  /*hybrid_full_from_begin=*/true);
 
                             for (size_t block_pos : block_pos_list) {
+                                if (is_page_level_rr
+                                    && (static_cast<int>(block_pos) % load_context.prefill_cp_size) != i) {
+                                    continue;
+                                }
                                 auto block_id = block_ids[block_pos];
                                 if (isNullBlockIdx(block_id)) {
                                     continue;
@@ -852,8 +886,8 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                                               layer_id,
                                                               region_name);
                                 const bool mtp_use_mla    = mtp_cache_cfg.use_mla;
-                                const int  local_part_cnt = peer_cnt;
-                                const int  local_part_id  = i;
+                                const int  local_part_cnt = is_page_level_rr ? 1 : peer_cnt;
+                                const int  local_part_id  = is_page_level_rr ? 0 : i;
                                 auto       parts =
                                     (region_name != KVCacheRegionName::DEFAULT) ?
                                               cache_manager->convertIndexToBuffer(
@@ -970,7 +1004,8 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
                                  request->timeout_ms(),
                                  request->partition_count(),
                                  request->partition_id(),
-                                 server_context});
+                                 server_context,
+                                 std::max(1, request->prefill_cp_size())});
     response->mutable_error_info()->set_error_code(transErrorCodeToRPC(error_info.code()));
     response->mutable_error_info()->set_error_message(error_info.ToString());
     response->set_done_time_us(currentTimeUs());

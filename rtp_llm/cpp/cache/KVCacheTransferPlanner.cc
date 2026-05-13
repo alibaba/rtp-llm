@@ -27,6 +27,36 @@ std::vector<size_t> blockPositionsForCacheTransfer(size_t         block_num,
     return block_pos_list;
 }
 
+std::vector<CacheStoreBlockPair> buildCacheStoreBlockPlan(size_t         total_logical_blocks,
+                                                          size_t         reuse_block_size,
+                                                          bool           use_hybrid,
+                                                          CacheGroupType group_type,
+                                                          int            cp_rank,
+                                                          int            cp_size) {
+    auto positions = blockPositionsForCacheTransfer(
+        total_logical_blocks, reuse_block_size, use_hybrid, group_type, /*hybrid_full_from_begin=*/true);
+
+    std::vector<CacheStoreBlockPair> plan;
+    plan.reserve(positions.size());
+
+    const bool sharded = (cp_size > 1) && (group_type == CacheGroupType::FULL);
+    if (!sharded) {
+        for (auto pos : positions) {
+            const int p = static_cast<int>(pos);
+            plan.push_back({p, p});
+        }
+        return plan;
+    }
+    for (auto pos : positions) {
+        const int p = static_cast<int>(pos);
+        if (p % cp_size != cp_rank) {
+            continue;
+        }
+        plan.push_back({p, p / cp_size});
+    }
+    return plan;
+}
+
 std::string layerRegionCacheTransferKey(size_t request_id, size_t layer_id, KVCacheRegionName region_name) {
     auto key = std::to_string(request_id) + "-" + std::to_string(layer_id);
     if (region_name != KVCacheRegionName::DEFAULT) {
