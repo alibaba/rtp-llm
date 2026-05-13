@@ -69,11 +69,11 @@ public:
     BlockAddrInfo          convertIndexToAddr(int block_index, int layer_id) const;
     std::vector<BlockInfo> convertIndexToBuffer(int block_index, int layer_id) const;
     std::vector<BlockInfo>
-    convertIndexToBuffer(int block_index, int layer_id, int partition_count, int partition_id) const;
-    BlockAddrInfo          convertIndexToAddr(int block_index, int layer_id, KVCacheRegionName region_name) const;
+                  convertIndexToBuffer(int block_index, int layer_id, int partition_count, int partition_id) const;
+    BlockAddrInfo convertIndexToAddr(int block_index, int layer_id, KVCacheRegionName region_name) const;
     std::vector<BlockInfo> convertIndexToBuffer(int block_index, int layer_id, KVCacheRegionName region_name) const;
-    std::vector<BlockInfo>
-    convertIndexToBuffer(int block_index, int layer_id, KVCacheRegionName region_name, int partition_count, int partition_id) const;
+    std::vector<BlockInfo> convertIndexToBuffer(
+        int block_index, int layer_id, KVCacheRegionName region_name, int partition_count, int partition_id) const;
 
     CacheLayerLayout allLayerCacheBase() const;
 
@@ -128,6 +128,13 @@ public:
     std::shared_ptr<KVCacheResource>
     incrKVCacheRef(const KVCacheResource& resource, const CacheKeysType& cache_keys, bool is_connector = true);
 
+    // CP page-level RR sharding context. Returns nullptr when sharding is not active
+    // (single-rank or kv_cache_sharded=false).  Used by connector / cache_store to
+    // remap cacheKeys -> last-rank-key namespace.
+    std::shared_ptr<CPSlotMapper> cpSlotMapper() const {
+        return cp_slot_mapper_;
+    }
+
 private:
     void initConnectorCoordinator();
     void allocateAndSync();
@@ -144,6 +151,8 @@ private:
     const SpeculativeExecutionConfig   sp_config_;
     const PDSepConfig                  pd_sep_config_;
     const CacheStoreConfig             cache_store_config_;
+
+    std::shared_ptr<CPSlotMapper> cp_slot_mapper_;
 
     std::atomic<bool> stop_{false};
     std::thread       metrics_reporter_thread_;

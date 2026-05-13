@@ -1688,20 +1688,27 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::init<>())
         .def_readwrite("method", &PrefillCPConfig::method)
         .def_readwrite("comm_buffer_size", &PrefillCPConfig::comm_buffer_size)
+        .def_readwrite("kv_cache_sharded", &PrefillCPConfig::kv_cache_sharded)
         .def("to_string", &PrefillCPConfig::to_string)
         .def("is_enabled", &PrefillCPConfig::is_enabled)
         .def("is_prefill_enabled", &PrefillCPConfig::is_prefill_enabled)
-        .def(py::pickle([](const PrefillCPConfig& self) { return py::make_tuple(self.method, self.comm_buffer_size); },
-                        [](py::tuple t) {
-                            if (t.size() != 2)
-                                throw std::runtime_error("Invalid state!");
-                            PrefillCPConfig c;
-                            try {
-                                c.method           = t[0].cast<CPRotateMethod>();
-                                c.comm_buffer_size = t[1].cast<size_t>();
-                            } catch (const std::exception& e) {
-                                throw std::runtime_error(std::string("PrefillCPConfig unpickle error: ") + e.what());
-                            }
-                            return c;
-                        }));
+        .def(py::pickle(
+            [](const PrefillCPConfig& self) {
+                return py::make_tuple(self.method, self.comm_buffer_size, self.kv_cache_sharded);
+            },
+            [](py::tuple t) {
+                if (t.size() < 2 || t.size() > 3)
+                    throw std::runtime_error("Invalid state!");
+                PrefillCPConfig c;
+                try {
+                    c.method           = t[0].cast<CPRotateMethod>();
+                    c.comm_buffer_size = t[1].cast<size_t>();
+                    if (t.size() == 3) {
+                        c.kv_cache_sharded = t[2].cast<bool>();
+                    }
+                } catch (const std::exception& e) {
+                    throw std::runtime_error(std::string("PrefillCPConfig unpickle error: ") + e.what());
+                }
+                return c;
+            }));
 }

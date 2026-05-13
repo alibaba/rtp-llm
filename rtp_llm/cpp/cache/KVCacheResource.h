@@ -67,18 +67,18 @@ private:
     size_t           kernel_blocks_per_kv_block_ = 1;
 };
 
-using GroupBlockIds = std::vector<std::shared_ptr<BlockIds>>;
-using LayerBlockIds = std::vector<std::shared_ptr<BlockIds>>;
+using GroupBlockIds     = std::vector<std::shared_ptr<BlockIds>>;
+using LayerBlockIds     = std::vector<std::shared_ptr<BlockIds>>;
 using LayerAttnBlockIds = std::vector<std::vector<std::shared_ptr<BlockIds>>>;
 
 class KVCacheResource {
 public:
-    void initGroups(int                                group_num,
-                    int                                layer_num,
-                    const std::vector<int>&            layer_to_group_id          = {},
-                    size_t                             kernel_blocks_per_kv_block = 1,
-                    const std::vector<CacheGroupType>& group_types                = {},
-                    const std::vector<std::vector<int>>& layer_region_to_group_id    = {});
+    void initGroups(int                                  group_num,
+                    int                                  layer_num,
+                    const std::vector<int>&              layer_to_group_id          = {},
+                    size_t                               kernel_blocks_per_kv_block = 1,
+                    const std::vector<CacheGroupType>&   group_types                = {},
+                    const std::vector<std::vector<int>>& layer_region_to_group_id   = {});
     void resizeBlocks(int reserver_blocks, int value = 0);
 
     int                     blocksNum(int group_id = 0) const;
@@ -94,12 +94,27 @@ public:
     GroupBlockIds&       groupBlocks();
     const GroupBlockIds& groupBlocks() const;
 
-    const LayerBlockIds& layerBlocks() const;
+    const LayerBlockIds&     layerBlocks() const;
     const LayerAttnBlockIds& layerAttnBlocks() const;
-    int groupId(int layer_id, KVCacheRegionName region_name) const;
+    int                      groupId(int layer_id, KVCacheRegionName region_name) const;
 
     CacheKeysType&       cacheKeys();
     const CacheKeysType& cacheKeys() const;
+
+    // Return rank-local cache keys: every cp_size-th key starting from cp_rank.
+    // localCacheKeys(r, s)[i] == cacheKeys()[i * s + r]
+    // Note: when cacheKeys().size() % cp_size != 0 (e.g. 1 real block, cp_size=2),
+    // localCacheKeys may return fewer entries than blocks().size().  This is
+    // intentional — padding blocks carry no real data and must NOT participate in
+    // device cache insert, PD transfer, or connector operations.  Downstream code
+    // (e.g. insertIntoCache) already uses min(keys, blocks) to handle this.
+    CacheKeysType localCacheKeys(int cp_rank, int cp_size) const {
+        CacheKeysType local;
+        for (int i = cp_rank; i < static_cast<int>(cache_keys.size()); i += cp_size) {
+            local.push_back(cache_keys[i]);
+        }
+        return local;
+    }
 
     size_t reuseBlockNum() const;
 

@@ -88,6 +88,36 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+cc_test(
+    name = "cp_slot_mapper_test",
+    srcs = [
+        "CPSlotMapperTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache:cp_slot_mapper",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    env = {},
+)
+
+cc_test(
+    name = "kv_cache_resource_local_cache_keys_test",
+    srcs = [
+        "KVCacheResourceLocalCacheKeysTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache:batch_kv_cache_resource",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    env = {},
+)
+
 cc_library(
     name = "block_pool_test_helper",
     hdrs = [
@@ -185,6 +215,22 @@ cc_test(
 )
 
 cc_test(
+    name = "kv_cache_manager_cp_test",
+    srcs = [
+        "KVCacheManagerCPSlotMapperTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps + [
+        ":block_pool_test_helper",
+        "//rtp_llm/cpp/cache/connector/test/mock:connector_mock_files_lib",
+        "//rtp_llm/cpp/cache/connector/memory:memory_connector",
+    ],
+    env = {},
+    exec_properties = {'gpu':'H20'},
+)
+
+cc_test(
     name = "linear_kv_cache_group_test",
     srcs = [
         "LinearKVCacheGroupTest.cc",
@@ -202,6 +248,20 @@ cc_test(
     name = "hybrid_kv_cache_allocator_test",
     srcs = [
         "HybridTypeKVCacheAllocatorTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps + [
+        ":block_pool_test_helper",
+    ],
+    env = {},
+    exec_properties = {'gpu':'H20'},
+)
+
+cc_test(
+    name = "hybrid_kv_cache_allocator_cp_shard_test",
+    srcs = [
+        "HybridKVCacheAllocatorCPShardTest.cc",
     ],
     data = [],
     copts = test_copts,

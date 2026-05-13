@@ -288,6 +288,9 @@ def set_parallelism_config(
         parallelism_config.prefill_cp_config.comm_buffer_size = (
             py_prefill_cp_config.comm_buffer_size
         )
+        parallelism_config.prefill_cp_config.kv_cache_sharded = (
+            py_prefill_cp_config.kv_cache_sharded
+        )
     logging.info(
         f"set_parallelism_config: rank {world_rank}\nparallelism_config={parallelism_config.to_string()}world_rank={world_rank}\n"
     )
@@ -345,12 +348,18 @@ def setup_default_args(py_env_configs):
             "[MI308X] enable FT_DISABLE_CUSTOM_AR by default, as amd has own implementation."
         )
 
-    if os.path.exists("/dev/kfd") and py_env_configs.kv_cache_config.seq_size_per_block == 0:
+    if (
+        os.path.exists("/dev/kfd")
+        and py_env_configs.kv_cache_config.seq_size_per_block == 0
+    ):
         py_env_configs.kv_cache_config.seq_size_per_block = 16
         logging.info(
             "[MI308X] set SEQ_SIZE_PER_BLOCK 16 by default, as it just support 16 now."
         )
-    if os.path.exists("/dev/alixpu") and py_env_configs.kv_cache_config.seq_size_per_block == 0:
+    if (
+        os.path.exists("/dev/alixpu")
+        and py_env_configs.kv_cache_config.seq_size_per_block == 0
+    ):
         py_env_configs.kv_cache_config.seq_size_per_block = 256
         logging.info("set SEQ_SIZE_PER_BLOCK 256 by default")
     if py_env_configs.kv_cache_config.seq_size_per_block == 0:
