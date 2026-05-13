@@ -29,7 +29,11 @@ enum class CPRotateMethod {
 struct PrefillCPConfig {
     CPRotateMethod method           = CPRotateMethod::DISABLED;
     size_t         comm_buffer_size = 512 * 1024 * 1024;  // 512MB
-    bool           is_enabled() const {
+    // When true + tp_size > 1, KV cache uses page-level round-robin sharding
+    // across the CP (== TP) group. Each rank physically holds only owned blocks
+    // (block_idx % cp_size == cp_rank); see rtp_llm/cpp/cache/CPSlotMapper.h.
+    bool kv_cache_sharded = false;
+    bool is_enabled() const {
         return method != CPRotateMethod::DISABLED && method != CPRotateMethod::UNKNOWN
                && method != CPRotateMethod::PREFILL_CP;
     }
