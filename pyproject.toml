@@ -240,6 +240,7 @@ markers = [
     "manual: manual tests - not run automatically",
     "slow: slow tests",
     "perf: performance tests",
+    "eval: benchmark-style evaluation smoke tests",
     "timeout(timeout): per-test timeout override from pytest-timeout",
 
     # Feature markers
@@ -328,7 +329,13 @@ markexpr = "manual and smoke and not H20 and not MI308X_ROCM7 and not SM100 and 
 description = "OSS smoke SM100 ARM (smoke-sm100-oss)"
 paths = ["rtp_llm/test/smoke/suites/"]
 gpu_type = "SM100_ARM"
-markexpr = "manual and smoke and SM100_ARM"
+markexpr = "manual and smoke and SM100_ARM and not eval"
+
+[tool.rtp_llm.pytest_ci.profiles.smoke_sm100_eval_oss]
+description = "OSS smoke SM100 ARM eval bench (smoke-sm100-eval-oss)"
+paths = ["rtp_llm/test/smoke/suites/"]
+gpu_type = "SM100_ARM"
+markexpr = "manual and smoke and SM100_ARM and eval"
 
 [tool.rtp_llm.pytest_ci.profiles.smoke_rocm_oss]
 description = "OSS smoke ROCm (smoke-rocm-oss)"
