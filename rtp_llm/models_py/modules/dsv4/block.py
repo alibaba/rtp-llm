@@ -13,18 +13,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from rtp_llm.models_py.modules import RMSNorm
-from rtp_llm.models_py.modules.dsv4.attention import (
-    DSV4_BF16_VLLM,
-    Attention as AttentionBF16,
-)
+from rtp_llm.models_py.modules.dsv4.attention import DSV4_BF16_VLLM
+from rtp_llm.models_py.modules.dsv4.attention import Attention as AttentionBF16
 from rtp_llm.models_py.modules.dsv4.fp8.attention import AttentionFP8
 from rtp_llm.models_py.modules.dsv4.hc import build_hc_head, build_hc_unit
 from rtp_llm.models_py.modules.dsv4.moe import MoE
 
 if DSV4_BF16_VLLM:
-    from rtp_llm.models_py.modules.dsv4.attention_bf16_vllm import (
-        AttentionBF16VLLM,
-    )
+    from rtp_llm.models_py.modules.dsv4.attention_bf16_vllm import AttentionBF16VLLM
 else:
     AttentionBF16VLLM = AttentionBF16
 
@@ -166,8 +162,8 @@ class Block(nn.Module):
         )
 
     def _sync_after_first_cp_prefill_attention(self) -> None:
-        if self._cp_sync_after_attn_done:
-            return
+        # if self._cp_sync_after_attn_done:
+        #     return
         if os.environ.get("DSV4_CP_SYNC_AFTER_ATTN_ONCE", "1") == "0":
             return
         if getattr(getattr(self.ffn, "_strategy", None), "name", "") != "mega":
@@ -177,7 +173,9 @@ class Block(nn.Module):
 
         import torch.distributed as dist
 
-        if not (dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1):
+        if not (
+            dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1
+        ):
             return
 
         torch.cuda.synchronize()
