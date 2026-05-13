@@ -25,7 +25,10 @@ from rtp_llm.models_py.modules.dsv4._fused_inv_rope_fp8_quant_triton import (
     fused_inv_rope_fp8_quant,
 )
 from rtp_llm.models_py.modules.dsv4.qlinear import _fp8_dequant_to_fp32
-from rtp_llm.models_py.modules.dsv4.rope import apply_rotary_emb_batched
+from rtp_llm.models_py.modules.dsv4.rope import (
+    apply_rotary_emb,
+    apply_rotary_emb_batched,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from rtp_llm.models_py.modules.dsv4.fp8.attention import AttentionFP8
@@ -34,7 +37,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 def decode_output_proj(
     attn: "AttentionFP8",
     o: torch.Tensor,  # [B, q_len, H, D]
-    freqs_cis_per_req: torch.Tensor,  # [B, freqs_dim]
+    freqs_cis: torch.Tensor,  # [B, freqs_dim] or flat [B*q_len, freqs_dim]
     bsz: int,
     q_len: int,
 ) -> torch.Tensor:
@@ -55,7 +58,7 @@ def decode_output_proj(
     if o.is_cuda and o.numel() > 0:
         o_fp8, o_scale = fused_inv_rope_fp8_quant(
             o,
-            freqs_cis_per_req,
+            freqs_cis,
             n_groups=attn.n_groups,
             heads_per_group=attn.n_heads // attn.n_groups,
             nope_dim=attn.head_dim - attn.rope_head_dim,
@@ -63,7 +66,14 @@ def decode_output_proj(
         )
         o = attn._wo_a_einsum_from_fp8(o_fp8, o_scale, bsz, q_len)
     else:
-        apply_rotary_emb_batched(o[..., -rd:], freqs_cis_per_req, inverse=True)
+        if freqs_cis.dim() == 2 and int(freqs_cis.shape[0]) == bsz:
+            apply_rotary_emb_batched(o[..., -rd:], freqs_cis, inverse=True)
+        else:
+            apply_rotary_emb(
+                o[..., -rd:],
+                freqs_cis.reshape(-1, freqs_cis.shape[-1]).contiguous(),
+                inverse=True,
+            )
         o = o.reshape(bsz, q_len, attn.n_groups, -1)
         wo_a_bf16 = _fp8_dequant_to_fp32(attn.wo_a_w, attn.wo_a_s).to(o.dtype)
         wo_a = wo_a_bf16.view(attn.n_groups, attn.o_lora_rank, -1)

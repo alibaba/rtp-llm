@@ -1770,7 +1770,7 @@ class AttentionFP8(nn.Module):
 
     def forward_decode(
         self,
-        x: torch.Tensor,  # [B, 1, dim] bf16  (q_len=1 pure decode)
+        x: torch.Tensor,  # [B, q_len, dim] bf16
         attn_metadata: "DSv4DecodeAttnMetadataFP8",  # type: ignore[name-defined]
         kv_cache: Optional[Any] = None,
     ) -> torch.Tensor:
@@ -1823,24 +1823,29 @@ class AttentionFP8(nn.Module):
         )
 
         bsz, q_len, _ = x.size()
-        assert q_len == 1, "decode: q_len==1 only (MTP/spec-decode is later)"
+        T = bsz * q_len
         start_pos = attn_metadata.start_pos[:bsz]  # [bsz] int32
+        position_ids = attn_metadata.position_ids[:T]  # [T] int32
 
         self._ensure_freqs_cis_bound()
 
-        qkv = decode_compute_qkv(self, x, start_pos)
+        qkv = decode_compute_qkv(self, x, position_ids)
         self._decode_write_swa_fp8(qkv.kv, bsz, q_len, attn_metadata)
 
         if self.compress_ratio == 0:
             o = self._forward_decode_swa_only(qkv.q, bsz, q_len, attn_metadata)
         elif self.compress_ratio == 4:
-            o = self._forward_decode_csa(x, qkv, bsz, q_len, start_pos, attn_metadata)
+            o = self._forward_decode_csa(
+                x, qkv, bsz, q_len, start_pos, position_ids, attn_metadata
+            )
         elif self.compress_ratio == 128:
-            o = self._forward_decode_hca(x, qkv, bsz, q_len, start_pos, attn_metadata)
+            o = self._forward_decode_hca(
+                x, qkv, bsz, q_len, start_pos, position_ids, attn_metadata
+            )
         else:
             raise AssertionError(f"unknown compress_ratio={self.compress_ratio}")
 
-        return decode_output_proj(self, o, qkv.freqs_cis_per_req, bsz, q_len)
+        return decode_output_proj(self, o, qkv.freqs_cis, bsz, q_len)
 
     # ------------------------------------------------------------------
     # Decode per-path bodies + shared epilogue
@@ -1962,6 +1967,7 @@ class AttentionFP8(nn.Module):
         bsz: int,
         q_len: int,
         start_pos: torch.Tensor,
+        position_ids: torch.Tensor,
         attn_metadata: "DSv4DecodeAttnMetadataFP8",  # type: ignore[name-defined]
     ) -> torch.Tensor:
         """CSA layer (compress_ratio == 4). Indexer + main compressor
@@ -1978,10 +1984,13 @@ class AttentionFP8(nn.Module):
             qkv.qr,
             start_pos,
             attn_metadata.topk_buffer_compressed[:bsz],
+            position_ids=position_ids,
         )
         # Main CSA compressor emits boundary compressed-K into
         # CSA_KV / CSA_STATE (required by the dual-pool paged read).
-        self.compressor.forward_decode_vectorized(x, start_pos)
+        self.compressor.forward_decode_vectorized(
+            x, start_pos, position_ids=position_ids
+        )
         # CSA cmp_local_raw = indexer's raw indices (the +win offset is
         # added later inside the epilogue's translate path).
         cmp_local_raw = attn_metadata.topk_buffer_compressed[:bsz].clone()
@@ -2001,6 +2010,7 @@ class AttentionFP8(nn.Module):
         bsz: int,
         q_len: int,
         start_pos: torch.Tensor,
+        position_ids: torch.Tensor,
         attn_metadata: "DSv4DecodeAttnMetadataFP8",  # type: ignore[name-defined]
     ) -> torch.Tensor:
         """HCA layer (compress_ratio == 128). Compressor writes
@@ -2011,7 +2021,9 @@ class AttentionFP8(nn.Module):
         from rtp_llm.models_py.modules.dsv4.attn_type import HCA_KV
 
         assert self.indexer is None, "HCA layer must not have an indexer"
-        self.compressor.forward_decode_vectorized(x, start_pos)
+        self.compressor.forward_decode_vectorized(
+            x, start_pos, position_ids=position_ids
+        )
         win = self.window_size
         tt_h = attn_metadata.topk_total_by_ratio.get(int(self.compress_ratio))
         assert tt_h is not None, (

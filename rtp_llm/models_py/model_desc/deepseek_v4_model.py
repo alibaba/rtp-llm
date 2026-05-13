@@ -75,6 +75,27 @@ def _materialize_meta_buffers(module: torch.nn.Module, device: str) -> int:
 from rtp_llm.ops.compute_ops import PyModelInitResources, PyModelInputs, PyModelOutputs
 
 
+def _is_decode_fmha(fmha_impl: Any) -> bool:
+    """True when ``fmha_impl`` is one of the dsv4 captured decode impls.
+    Imports are lazy so missing FP8 builds don't bring the module down."""
+    if fmha_impl is None:
+        return False
+    from rtp_llm.models_py.modules.dsv4.decode.decode_fmha_impl import (
+        DSv4DecodeFmhaImpl,
+    )
+
+    decode_types: tuple = (DSv4DecodeFmhaImpl,)
+    try:
+        from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_fmha_impl import (
+            DSv4DecodeFmhaImplFP8,
+        )
+
+        decode_types = (DSv4DecodeFmhaImpl, DSv4DecodeFmhaImplFP8)
+    except ImportError:
+        pass
+    return isinstance(fmha_impl, decode_types)
+
+
 def _args_from_model_config(
     model_config: ModelConfig, max_generate_batch_size: int = 4
 ) -> V4Args:
@@ -385,6 +406,11 @@ class DeepSeekV4Model(GptModelBase):
         for layer in self.v4.layers:
             layer.attn.reset_rope_cache(device=device_str)
 
+        # Subclass hook: lift any model-level weights (e.g. MTP fusion
+        # norms / projections) off the ModelWeights wrapper before we
+        # discard it.  Default impl is a no-op.
+        self._load_extra_weights(self.weight)
+
         # Drop the ModelWeights wrapper — per-tensor refs are now held
         # only by the V4Transformer modules (or were popped during
         # MoE._setup_mega_moe / per-expert routed init).
@@ -427,29 +453,32 @@ class DeepSeekV4Model(GptModelBase):
                 v4_indexer_score as _v4_idx,
             )
 
-            _idx = self.v4.layers[2].attn.indexer  # first CSA layer (ratio=4)
-            _H = int(_idx.n_heads)
-            _D = int(_idx.head_dim)
-            _ratio = max(int(_idx.compress_ratio), 1)
-            _T_dec = int(self._v4_args.max_seq_len) // _ratio
-            _q_dec = _torch.zeros(
-                (1, 1, _H, _D), dtype=_torch.bfloat16, device=device_str
-            )
-            _kv_dec = _torch.zeros(
-                (1, _T_dec, _D), dtype=_torch.bfloat16, device=device_str
-            )
-            _w_dec = _torch.zeros((1, 1, _H), dtype=_torch.bfloat16, device=device_str)
-            # Decode shape (no mask).
-            _v4_idx(_q_dec, _kv_dec, _w_dec, q_pos=None, compress_ratio=1)
-            # Prefill mask variant — only matters if CSA prefill goes through
-            # graph capture. Cheap to prewarm regardless.
-            _v4_idx(
-                _q_dec,
-                _kv_dec,
-                _w_dec,
-                q_pos=_torch.zeros((1, 1), dtype=_torch.int32, device=device_str),
-                compress_ratio=_ratio,
-            )
+            if len(self.v4.layers) > 2:
+                _idx = self.v4.layers[2].attn.indexer  # first CSA layer (ratio=4)
+                _H = int(_idx.n_heads)
+                _D = int(_idx.head_dim)
+                _ratio = max(int(_idx.compress_ratio), 1)
+                _T_dec = int(self._v4_args.max_seq_len) // _ratio
+                _q_dec = _torch.zeros(
+                    (1, 1, _H, _D), dtype=_torch.bfloat16, device=device_str
+                )
+                _kv_dec = _torch.zeros(
+                    (1, _T_dec, _D), dtype=_torch.bfloat16, device=device_str
+                )
+                _w_dec = _torch.zeros(
+                    (1, 1, _H), dtype=_torch.bfloat16, device=device_str
+                )
+                # Decode shape (no mask).
+                _v4_idx(_q_dec, _kv_dec, _w_dec, q_pos=None, compress_ratio=1)
+                # Prefill mask variant — only matters if CSA prefill goes through
+                # graph capture. Cheap to prewarm regardless.
+                _v4_idx(
+                    _q_dec,
+                    _kv_dec,
+                    _w_dec,
+                    q_pos=_torch.zeros((1, 1), dtype=_torch.int32, device=device_str),
+                    compress_ratio=_ratio,
+                )
 
             if os.environ.get("DSV4_PREWARM_FLASH_MLA_SWA", "1") != "0":
                 try:
@@ -538,14 +567,52 @@ class DeepSeekV4Model(GptModelBase):
                     raise
             _torch.cuda.synchronize()
 
+        if getattr(init_resource, "is_speculative", False):
+            self.v4._allocate_mtp_buffer(torch.device(device_str))
+
         self._materialized = True
 
-        # qwen3-style: no per-Attention KV wiring needed — ``self.kv_cache``
-        # is read on every ``forward`` call and threaded through as a
-        # kwarg. Framework may still allocate ``self.kv_cache`` after
-        # ``initialize()`` returns; the first forward will pick it up.
-
         return True
+
+    def _should_capture_cuda_graph(
+        self, attn: Any, is_target_verify: bool
+    ) -> bool:
+        """Default: capture decode + verify, skip plain prefill.  MTP
+        overrides to capture all cudagraph requests because the draft's
+        post-verify multi-token batch arrives with ``is_prefill=True``
+        but is functionally a multi-token decode."""
+        return not (bool(attn.is_prefill) and not is_target_verify)
+
+    def _load_extra_weights(self, weights: ModelWeights) -> None:
+        """Subclass hook for loading model-level (non-Block) tensors off
+        the framework's ``ModelWeights`` before it gets dropped.  Default
+        no-op; ``DeepSeekV4MtpModel`` overrides to bind enorm/hnorm/
+        e_proj/h_proj from the MTP-only globals."""
+        return None
+
+    def _prepare_decode_hidden(
+        self,
+        input_ids: torch.Tensor,
+        meta: Any,
+    ) -> torch.Tensor:
+        """Build the per-token ``[B, q_len, hc, dim]`` hidden tensor that
+        feeds the layer loop on the decode path.  Default impl is the
+        regular embed+repeat that the main model uses; ``DeepSeekV4MtpModel``
+        overrides with the e_proj/h_proj fusion stage."""
+        B = meta.batch_size
+        q_len = meta.q_len_per_req
+        h = self.v4.embed(input_ids).view(B, q_len, -1)
+        return h.unsqueeze(2).repeat(1, 1, self.v4.hc_mult, 1)
+
+    def _prepare_prefill_hidden(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> torch.Tensor:
+        """Build the flat ``[T_total, hc, dim]`` hidden tensor that feeds
+        the layer loop on the prefill path.  Default = embed+repeat."""
+        h = self.v4.embed(input_ids)
+        return h.unsqueeze(-2).repeat(1, self.v4.hc_mult, 1)
 
     def prepare_fmha_impl(
         self, inputs: PyModelInputs, is_cuda_graph: bool = False
@@ -559,9 +626,17 @@ class DeepSeekV4Model(GptModelBase):
             return None
 
         attn = inputs.attention_inputs
-        # V4 only captures CUDA graphs for decode — prefill runs eagerly.
-        # Mirrors attn_factory.py: PREFILL_MLA_IMPS if is_prefill else DECODE_MLA_IMPS.
-        if attn is None or bool(attn.is_prefill):
+        # V4 captures CUDA graphs for decode AND target verify — but not
+        # plain prefill. Verify carries ``is_prefill==True`` (C++ MtpExecutor
+        # routes verify-split through PyWrappedModel's prefill path), so
+        # rejecting on ``is_prefill`` alone would also reject verify.
+        # Reject only when prefill AND not verify.  Subclasses (MTP) may
+        # opt in to all-cudagraph capture by overriding
+        # ``_should_capture_cuda_graph``.
+        if attn is None:
+            return None
+        is_target_verify = bool(getattr(attn, "is_target_verify", False))
+        if not self._should_capture_cuda_graph(attn, is_target_verify):
             return None
 
         if self.kv_cache is None:
@@ -569,6 +644,13 @@ class DeepSeekV4Model(GptModelBase):
                 "[DeepSeekV4Model] prepare_fmha_impl: kv_cache not yet allocated "
                 "(warmup phase); skipping CUDA-graph impl creation."
             )
+            return None
+
+        if is_target_verify and not self.fp8_kv_cache:
+            # Per REFORMAT_FINAL.md A2: BF16 verify intentionally unsupported
+            # in this scope (BF16 decode attention still has q_len==1
+            # assumptions). The eager path's assert is the load-bearing one;
+            # under cudagraph we just refuse the impl.
             return None
 
         if self.fp8_kv_cache:
@@ -589,6 +671,16 @@ class DeepSeekV4Model(GptModelBase):
         batch_size = (
             int(attn.input_lengths.size(0)) if attn.input_lengths.numel() > 0 else 1
         )
+        # Per-graph q_len comes from ``input_lengths[0]`` whenever the
+        # batch carries it. Three flows pass through here:
+        #   * main decode capture: ``input_lengths=[1,1,…]`` → q_len=1
+        #   * main verify capture: ``input_lengths=[gen+1]`` → q_len=gen+1
+        #   * MTP draft capture (single-token / multi-token):
+        #     ``input_lengths=[1]`` or ``[gen+1]`` respectively
+        # The C++ CudaGraphRunner captures one graph per (batch, q_len).
+        q_len = (
+            int(attn.input_lengths[0]) if attn.input_lengths.numel() > 0 else 1
+        )
         device = self.v4.embed.weight.device
 
         paged_pool_specs = build_paged_pool_specs(
@@ -605,7 +697,7 @@ class DeepSeekV4Model(GptModelBase):
 
         cfg = _DecodeFmhaImplConfig(
             max_batch_size=batch_size,
-            q_len=1,
+            q_len=q_len,
             window_size=int(self._v4_args.window_size),
             head_dim=int(self._v4_args.head_dim),
             max_seq_len=int(self._v4_args.max_seq_len),
@@ -625,6 +717,14 @@ class DeepSeekV4Model(GptModelBase):
         # per-layer descriptor cache to stash on metadata.
         return impl
 
+    def get_mtp_target_hidden_states(self, num_tokens: int) -> Optional[torch.Tensor]:
+        if self.v4 is None:
+            raise RuntimeError("DeepSeekV4Model: v4 transformer not initialized")
+        buf = self.v4._mtp_hidden_buffer
+        if buf is None:
+            return None
+        return buf
+
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         """qwen3-style dispatcher — per-arm orchestration lives in the
         prefill / decode runtime modules.
@@ -633,8 +733,40 @@ class DeepSeekV4Model(GptModelBase):
         the PyWrappedModel with cache_manager==nullptr); only the prefill
         path needs to tolerate this — warmup never enters decode.
         """
-        if inputs.attention_inputs.is_prefill:
+        attn = inputs.attention_inputs
+
+        # Subclass-overridable hidden-state preparation hooks.  When a
+        # subclass (e.g. ``DeepSeekV4MtpModel``) overrides
+        # ``_prepare_decode_hidden`` / ``_prepare_prefill_hidden``, the
+        # forward helpers splice the override in front of the layer
+        # loop while leaving the rest of the body untouched.  Defaults
+        # do exactly the embed+expand the main path always did.
+        cls = type(self)
+        prep_decode = (
+            self._prepare_decode_hidden
+            if cls._prepare_decode_hidden is not DeepSeekV4Model._prepare_decode_hidden
+            else None
+        )
+        prep_prefill = (
+            self._prepare_prefill_hidden
+            if cls._prepare_prefill_hidden is not DeepSeekV4Model._prepare_prefill_hidden
+            else None
+        )
+
+        if attn.is_prefill:
             return forward_prefill(
-                self.v4, self.kv_cache, self.parallelism_config, inputs
+                self.v4,
+                self.kv_cache,
+                self.parallelism_config,
+                inputs,
+                prepare_hidden_fn=prep_prefill,
             )
-        return forward_decode(self.v4, self.kv_cache, self._v4_args, inputs, fmha_impl)
+        else:
+            return forward_decode(
+                self.v4,
+                self.kv_cache,
+                self._v4_args,
+                inputs,
+                fmha_impl,
+                prepare_hidden_fn=prep_decode,
+            )
