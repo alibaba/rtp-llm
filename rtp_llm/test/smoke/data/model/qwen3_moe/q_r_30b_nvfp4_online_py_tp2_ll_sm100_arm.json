@@ -14,7 +14,7 @@
                 "_prompt_source": "chat-template wrapping $prompt:s1"
             },
             "result": {
-                "response": "The **CAP Theorem**, also known as **Brewer's Theorem**, is a fundamental principle in distributed systems that states:\n\n> **In any distributed data system, you can only guarantee two out of the following three properties at the same time:**\n\n1. **Consistency (C)**  \n   - Every",
+                "response": "The **CAP Theorem**, also known as **Brewer's Theorem**, is a fundamental principle in distributed systems that states that a distributed system can only guarantee **two out of three** of the following properties simultaneously:\n\n1. **Consistency (C)**: Every read receives the most recent write or an error",
                 "response_alternatives": null,
                 "hidden_states": null,
                 "logits": null,
@@ -62,7 +62,7 @@
             "result": {
                 "response_batch": [
                     {
-                        "response": "The **CAP Theorem**, also known as **Brewer's Theorem**, is a fundamental concept in distributed systems that states:\n\n> In a distributed system, you can only guarantee **two out of the following three** properties simultaneously:\n\n1. **Consistency (C)**: Every read receives the most recent write",
+                        "response": "The **CAP Theorem**, also known as **Brewer's Theorem**, is a fundamental principle in distributed systems that states:\n\n> **In any distributed data system, you can only guarantee two out of the following three properties simultaneously:**\n\n1. **Consistency (C)**  \n   - All nodes see the",
                         "response_alternatives": null,
                         "hidden_states": null,
                         "logits": null,
@@ -94,7 +94,7 @@
                         }
                     },
                     {
-                        "response": "The error `NameError: name 'screen_manager' is not defined` means that you're trying to use a variable or object called `screen_manager` in your code, but Python doesn't recognize it because it hasn't been defined yet.\n\nThis commonly happens in Kivy applications when you try to access a `Screen",
+                        "response": "The `NameError: name 'screen_manager' is not defined` error occurs when you try to use a variable named `screen_manager` in your code, but it hasn't been defined or created yet.\n\nThis commonly happens in Kivy applications where you're trying to access a `ScreenManager` instance that wasn't",
                         "response_alternatives": null,
                         "hidden_states": null,
                         "logits": null,

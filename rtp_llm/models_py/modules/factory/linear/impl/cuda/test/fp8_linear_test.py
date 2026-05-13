@@ -4,7 +4,10 @@ import shutil
 import unittest
 from unittest import mock
 
+import pytest
 import torch
+
+pytestmark = [pytest.mark.gpu(type="H20")]
 
 from rtp_llm.config.quant_config import init_quant_config
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_used
@@ -38,6 +41,10 @@ class CudaFp8LinearTestBase:
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         if self.device == "cpu":
             self.skipTest("FP8 tests require CUDA")
+        import gc
+
+        gc.collect()
+        torch.cuda.empty_cache()
         logging.getLogger(
             "rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear"
         ).setLevel(logging.WARNING)

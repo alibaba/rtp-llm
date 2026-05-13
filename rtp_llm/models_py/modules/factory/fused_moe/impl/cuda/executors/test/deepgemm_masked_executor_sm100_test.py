@@ -1,6 +1,8 @@
 import platform
 import unittest
 
+import pytest
+
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
     has_deep_gemm,
     is_deep_gemm_e8m0_used,
@@ -8,6 +10,8 @@ from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.test.deepgemm_masked_executor_test import (
     DeepGemmMaskedExecutorTestBase,
 )
+
+pytestmark = [pytest.mark.gpu(type="SM100_ARM")]
 
 
 class DeepGemmMaskedExecutorSM100Test(
