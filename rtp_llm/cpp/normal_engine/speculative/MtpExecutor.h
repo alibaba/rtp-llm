@@ -109,6 +109,12 @@ protected:
                         std::list<GenerateStreamPtr>&       prefill_streams,
                         std::list<GenerateStreamPtr>&       decode_streams);
 
+    // Spec-decode hand-off: when the source model exposes a pre-output-projection
+    // residual buffer (DSv4 pre-hc [T, hc*D]), swap it into the C++ hidden-state
+    // carrier. The source returns the full buffer; consumers slice as needed.
+    void maybeOverrideLastHiddenWithMtpBuffer(GptModelInputs& model_input, ModelBase& source);
+    void maybeOverrideLastHiddenWithMtpBuffer(GptModelOutputs& model_output, ModelBase& source);
+
 private:
     std::unique_ptr<ModelBase>               model_;
     std::unique_ptr<Sampler>                 sampler_;
