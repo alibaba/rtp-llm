@@ -14,7 +14,7 @@ except Exception:  # pragma: no cover
 
 if triton is not None:
 
-    @triton.jit
+    @triton.jit(do_not_specialize=["M", "out_scale_stride_k"])
     def _bf16_to_fp8_packed_ue8m0_kernel(
         x_ptr,
         out_q_ptr,
@@ -67,12 +67,12 @@ if triton is not None:
         scale_ptrs = out_scale_ptr + pid_pack * out_scale_stride_k + m_offset + offs_m
         tl.store(scale_ptrs, packed_scale, mask=row_mask)
 
-    @triton.jit
+    @triton.jit(do_not_specialize=["M"])
     def _add_cast_kernel(
         routed_ptr,
         shared_ptr,
         out_ptr,
-        M: tl.constexpr,
+        M,
         N: tl.constexpr,
         routed_stride_m: tl.constexpr,
         routed_stride_n: tl.constexpr,

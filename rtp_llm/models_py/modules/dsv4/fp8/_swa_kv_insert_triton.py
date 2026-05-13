@@ -24,7 +24,7 @@ import triton
 import triton.language as tl
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_tokens"])
 def _quantize_and_insert_k_kernel(
     # Inputs
     k_ptr,  # [num_tokens, 512] bf16

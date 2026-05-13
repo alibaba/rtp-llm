@@ -50,13 +50,13 @@ FP8_E4M3_MAX = 448.0
 # Quantize: K[T, 128] bf16 -> kv_cache_packed[num_blocks, block_size, 132]
 #                              (per-block layout: K_all_tokens || scale_all_tokens)
 # ---------------------------------------------------------------------------
-@triton.jit
+@triton.jit(do_not_specialize=["T"])
 def _indexer_k_quant_kernel(
     k_ptr,  # [T, D] bf16
     slot_mapping_ptr,  # [T] int64; -1 = skip
     cache_ptr,  # raw byte ptr into [num_blocks, block_size*(D+4)] uint8
     # geometry
-    T: tl.constexpr,
+    T,
     D: tl.constexpr,  # head_dim = 128
     cache_block_size: tl.constexpr,
     cache_stride_b: tl.constexpr,  # bytes per block = block_size * (D+4) = block_size * 132
@@ -154,12 +154,12 @@ def quantize_indexer_k(
 # (Mirrors the quant layout above. Used by the bf16-fallback indexer path
 # when DeepGEMM's FP8 logits kernel isn't applicable.)
 # ---------------------------------------------------------------------------
-@triton.jit
+@triton.jit(do_not_specialize=["T"])
 def _indexer_k_dequant_kernel(
     cache_ptr,  # raw byte ptr into [num_blocks, block_size*(D+4)]
     slot_mapping_ptr,  # [T] int64; -1 = output zeros
     out_ptr,  # [T, D] OUT_DTYPE
-    T: tl.constexpr,
+    T,
     D: tl.constexpr,
     cache_block_size: tl.constexpr,
     cache_stride_b: tl.constexpr,
