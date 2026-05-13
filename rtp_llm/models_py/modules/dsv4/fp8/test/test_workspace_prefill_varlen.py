@@ -7,6 +7,7 @@ Phase-3b of the dsv4 prefill varlen migration. Validates that
      pre-Phase-3 scalar implementation (sp_int + seqlen scalars).
   2. **Varlen B>=2** — N_max-padded layout with per-request
      ``swa_seq_lens`` / ``cmp_seq_lens`` / ``swa_gather_lens`` /
+     ``swa_cache_seq_lens`` / ``swa_cache_gather_lens`` /
      ``new_k_slot_in_flat`` derived from ``prefix_lengths`` +
      ``input_lengths`` + ``cu_seqlens`` + ``position_ids`` +
      ``req_id_per_token``.
@@ -239,6 +240,8 @@ class BuildWorkspaceMetaLegacyTest(unittest.TestCase):
         self.assertEqual(int(m.swa_seq_lens.item()), 20)
         self.assertEqual(int(m.cmp_seq_lens.item()), 5)
         self.assertEqual(int(m.swa_gather_lens.item()), 20)
+        self.assertEqual(int(m.swa_cache_seq_lens.item()), 0)
+        self.assertEqual(int(m.swa_cache_gather_lens.item()), 0)
         self.assertTrue(
             torch.equal(
                 m.qsl,
@@ -259,6 +262,8 @@ class BuildWorkspaceMetaLegacyTest(unittest.TestCase):
         self.assertEqual(int(m.swa_seq_lens.item()), 30)
         self.assertEqual(int(m.cmp_seq_lens.item()), 7)
         self.assertEqual(int(m.swa_gather_lens.item()), 27)
+        self.assertEqual(int(m.swa_cache_seq_lens.item()), 10)
+        self.assertEqual(int(m.swa_cache_gather_lens.item()), 7)
         expected_slot = torch.arange(20, dtype=torch.long, device=self.device) + 14
         self.assertTrue(torch.equal(m.new_k_slot_in_flat, expected_slot))
 
@@ -306,6 +311,15 @@ class BuildWorkspaceMetaLegacyTest(unittest.TestCase):
         self.assertTrue(torch.equal(legacy.swa_seq_lens, varlen_b1.swa_seq_lens))
         self.assertTrue(torch.equal(legacy.cmp_seq_lens, varlen_b1.cmp_seq_lens))
         self.assertTrue(torch.equal(legacy.swa_gather_lens, varlen_b1.swa_gather_lens))
+        self.assertTrue(
+            torch.equal(legacy.swa_cache_seq_lens, varlen_b1.swa_cache_seq_lens)
+        )
+        self.assertTrue(
+            torch.equal(
+                legacy.swa_cache_gather_lens,
+                varlen_b1.swa_cache_gather_lens,
+            )
+        )
         self.assertTrue(torch.equal(legacy.qsl, varlen_b1.qsl))
         self.assertTrue(
             torch.equal(legacy.new_k_slot_in_flat, varlen_b1.new_k_slot_in_flat)
@@ -399,6 +413,18 @@ class BuildWorkspaceMetaVarlenTest(unittest.TestCase):
                 torch.tensor([16, 12], dtype=torch.int32, device=self.device),
             )
         )
+        self.assertTrue(
+            torch.equal(
+                m.swa_cache_seq_lens,
+                torch.tensor([0, 0], dtype=torch.int32, device=self.device),
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                m.swa_cache_gather_lens,
+                torch.tensor([0, 0], dtype=torch.int32, device=self.device),
+            )
+        )
         # qsl == cu_seqlens [0, 16, 28]
         self.assertTrue(
             torch.equal(
@@ -462,6 +488,15 @@ class BuildWorkspaceMetaVarlenTest(unittest.TestCase):
             torch.equal(wrapped.new_k_slot_in_flat, flat.new_k_slot_in_flat)
         )
         self.assertTrue(torch.equal(wrapped.swa_seq_lens, flat.swa_seq_lens))
+        self.assertTrue(
+            torch.equal(wrapped.swa_cache_seq_lens, flat.swa_cache_seq_lens)
+        )
+        self.assertTrue(
+            torch.equal(
+                wrapped.swa_cache_gather_lens,
+                flat.swa_cache_gather_lens,
+            )
+        )
         self.assertTrue(torch.equal(wrapped.qsl, flat.qsl))
 
     # ----- B==2 cold + continuation ---------------------------------------
@@ -489,6 +524,18 @@ class BuildWorkspaceMetaVarlenTest(unittest.TestCase):
             torch.equal(
                 m.swa_gather_lens,
                 torch.tensor([8, 13], dtype=torch.int32, device=self.device),
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                m.swa_cache_seq_lens,
+                torch.tensor([0, 32], dtype=torch.int32, device=self.device),
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                m.swa_cache_gather_lens,
+                torch.tensor([0, 7], dtype=torch.int32, device=self.device),
             )
         )
         # Slot calc:
@@ -522,6 +569,18 @@ class BuildWorkspaceMetaVarlenTest(unittest.TestCase):
             torch.equal(
                 m.swa_gather_lens,
                 torch.tensor([12, 15], dtype=torch.int32, device=self.device),
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                m.swa_cache_seq_lens,
+                torch.tensor([20, 50], dtype=torch.int32, device=self.device),
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                m.swa_cache_gather_lens,
+                torch.tensor([7, 7], dtype=torch.int32, device=self.device),
             )
         )
         # Both requests have prefix > win-1, so P_b is clamped at 7 for both.

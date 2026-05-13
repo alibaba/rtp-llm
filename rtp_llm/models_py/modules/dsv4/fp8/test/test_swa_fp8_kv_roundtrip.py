@@ -307,6 +307,33 @@ class SwaFp8KvRoundtripTest(unittest.TestCase):
         self._assert_nope_within_ue8m0_bound(compressed_kv, recovered)
         self._assert_rope_exact(compressed_kv, recovered)
 
+    def test_dequant_negative_block_id_zero_fills(self):
+        """SWA tail-only block tables may contain -1 sentinel blocks. Dequant
+        must not form a negative cache address; invalid rows stay zero."""
+        block_size = 16
+        num_tokens = 4
+        k_cache = self._alloc_cache(1, block_size)
+        out = torch.ones(
+            1, num_tokens, HEAD_DIM, dtype=torch.bfloat16, device=self.device
+        )
+        seq_lens = torch.tensor([num_tokens], dtype=torch.int32, device=self.device)
+        gather_lens = torch.tensor([num_tokens], dtype=torch.int32, device=self.device)
+        block_table = torch.tensor(
+            [[-10_000_000]], dtype=torch.int32, device=self.device
+        )
+
+        dequantize_and_gather_k_cache(
+            out=out,
+            k_cache=k_cache,
+            seq_lens=seq_lens,
+            gather_lens=gather_lens,
+            block_table=block_table,
+            block_size=block_size,
+            offset=0,
+        )
+        torch.cuda.synchronize()
+        self.assertTrue(torch.equal(out, torch.zeros_like(out)))
+
 
 if __name__ == "__main__":
     unittest.main()
