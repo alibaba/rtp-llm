@@ -11,8 +11,8 @@ import tempfile
 import urllib.request
 from typing import Any, List, Optional
 
-from smoke.base_comparer import BaseComparer
-from smoke.common_def import ABS_PATH, REL_PATH, QueryStatus, SmokeException
+from rtp_llm.test.smoke.base_comparer import BaseComparer
+from rtp_llm.test.smoke.common_def import ABS_PATH, REL_PATH, QueryStatus, SmokeException
 
 TAU2_TARBALL_URL = os.environ.get(
     "TAU2_TARBALL_URL",

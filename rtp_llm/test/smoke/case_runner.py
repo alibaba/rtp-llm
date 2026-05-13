@@ -56,6 +56,7 @@ from rtp_llm.test.smoke.openai_comparer import OpenaiComparer
 from rtp_llm.test.smoke.remote_kvcm_server import RemoteKVCMServer
 from rtp_llm.test.smoke.reranker_comparer import RerankerComparer
 from rtp_llm.test.smoke.similarity_comparer import SimilarityComparer
+from rtp_llm.test.smoke.tau2_bench_comparer import Tau2BenchComparer
 from rtp_llm.test.smoke.task_info import TaskInfo, TaskStates
 from rtp_llm.test.smoke.worker_status_comparer import WorkerStatusComparer
 
@@ -101,6 +102,7 @@ register_comparer(
 register_comparer(lambda q_r, ep: ep == "/v1/embeddings/similarity", SimilarityComparer)
 register_comparer(lambda q_r, ep: ep == "/v1/classifier", ClassifierComparer)
 register_comparer(lambda q_r, ep: ep == "/v1/reranker", RerankerComparer)
+register_comparer(lambda q_r, ep: q_r.get("tau2_bench", False), Tau2BenchComparer)
 set_default_comparer(NormalComparer)
 
 
