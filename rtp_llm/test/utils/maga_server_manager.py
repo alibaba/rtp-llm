@@ -206,6 +206,15 @@ class MagaServerManager(object):
                     )
                 break
 
+        try:
+            import resource
+
+            resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+        except Exception as e:
+            logging.warning(
+                "failed to disable core dumps for server subprocesses: %s", e
+            )
+
         p = subprocess.Popen(
             ["/opt/conda310/bin/python", "-m", "rtp_llm.start_server"] + parsed_args,
             env=current_env,

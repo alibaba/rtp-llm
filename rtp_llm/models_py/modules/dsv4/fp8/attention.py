@@ -4145,6 +4145,55 @@ class AttentionFP8(nn.Module):
         freqs_cis = common.freqs_cis
 
         if o.is_cuda and o.numel() > 0:
+            chunk_tokens = int(os.environ.get("DSV4_ATTN_OUT_CHUNK_TOKENS", "16384"))
+            if chunk_tokens > 0 and seqlen > chunk_tokens:
+                if freqs_cis.dim() == 2:
+                    freqs_all = freqs_cis
+                else:
+                    freqs_all = freqs_cis.reshape(seqlen, -1)
+                out = torch.empty(
+                    1, seqlen, self.dim, dtype=torch.bfloat16, device=o.device
+                )
+                out_2d = out.view(seqlen, self.dim)
+                o_tokens = o.reshape(seqlen, self.n_heads * self.head_dim)
+                for token_start in range(0, seqlen, chunk_tokens):
+                    token_end = min(token_start + chunk_tokens, seqlen)
+                    chunk_len = token_end - token_start
+                    o_3d = (
+                        o_tokens[token_start:token_end]
+                        .reshape(chunk_len, self.n_heads, self.head_dim)
+                        .contiguous()
+                    )
+                    freqs_per_token = freqs_all[token_start:token_end].contiguous()
+                    with record_function_range(
+                        "dsv4.fp8.attn.out.fused_inv_rope_quant"
+                    ):
+                        o_fp8, o_scale = fused_inv_rope_fp8_quant(
+                            o_3d,
+                            freqs_per_token,
+                            n_groups=self.n_groups,
+                            heads_per_group=self.n_heads // self.n_groups,
+                            nope_dim=self.head_dim - self.rope_head_dim,
+                            rope_head_dim=self.rope_head_dim,
+                        )
+                    with record_function_range("dsv4.fp8.attn.out.wo_a_einsum"):
+                        o_chunk = self._wo_a_einsum_from_fp8(
+                            o_fp8, o_scale, 1, chunk_len
+                        )
+                    with record_function_range("dsv4.fp8.attn.out.wo_b"):
+                        out_2d[token_start:token_end].copy_(
+                            self.wo_b(o_chunk.flatten(2).reshape(chunk_len, -1))
+                        )
+                if self.tp_size > 1:
+                    from rtp_llm.models_py.distributed.collective_torch import (
+                        Group,
+                        all_reduce,
+                    )
+
+                    with record_function_range("dsv4.fp8.attn.out.tp_all_reduce"):
+                        all_reduce(out, Group.TP)
+                return out
+
             o_3d = o.reshape(seqlen, self.n_heads, self.head_dim)
             if freqs_cis.dim() == 2:
                 freqs_per_token = freqs_cis.contiguous()

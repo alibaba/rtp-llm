@@ -7,7 +7,25 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/MemoryUtil.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 
+#include <cstdlib>
+#include <exception>
+#include <string>
+#include <utility>
+
 namespace rtp_llm {
+
+namespace {
+
+bool shouldPinHostBlockPool() {
+    const char* value = std::getenv("RTP_LLM_PIN_HOST_BLOCK_POOL");
+    if (value == nullptr) {
+        return true;
+    }
+    const std::string flag(value);
+    return flag != "0" && flag != "false" && flag != "FALSE" && flag != "off" && flag != "OFF";
+}
+
+}  // namespace
 
 BlockPool::BlockPool(const BlockPoolConfig& config, AllocationType allocation_type):
     config_(config), allocation_type_(allocation_type) {}
@@ -38,9 +56,23 @@ void BlockPool::validateConfig() const {
 
 void BlockPool::initializeCacheBuffer() {
     if (allocation_type_ == AllocationType::HOST) {
-        cache_aligned_buffer_ = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
-                                             torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU))
-                                    .pin_memory();
+        auto cpu_buffer = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
+                                       torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
+        if (shouldPinHostBlockPool()) {
+            try {
+                cache_aligned_buffer_ = cpu_buffer.pin_memory();
+            } catch (const std::exception& e) {
+                RTP_LLM_LOG_WARNING(
+                    "pin host block pool failed, fallback to pageable CPU memory, total_size=%zu bytes, error=%s",
+                    config_.total_size_bytes,
+                    e.what());
+                cache_aligned_buffer_ = std::move(cpu_buffer);
+            }
+        } else {
+            RTP_LLM_LOG_INFO("host block pool uses pageable CPU memory, total_size=%zu bytes",
+                             config_.total_size_bytes);
+            cache_aligned_buffer_ = std::move(cpu_buffer);
+        }
     } else {
         cache_aligned_buffer_ = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
                                              torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
