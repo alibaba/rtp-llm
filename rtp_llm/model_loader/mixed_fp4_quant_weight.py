@@ -36,7 +36,6 @@ from rtp_llm.utils.model_weight import (
     merge_qkvz_transpose_reorder,
     merge_ba_transpose_reorder,
     transpose,
-    plus_one,
     split_q_gate,
 )
 
@@ -289,7 +288,7 @@ class MixedFp4Weight(CompositeWeight, QuantWeight):
             src_weight_info,
             src_weight_info.name,
             weights,
-            plus_one,
+            identity,
             config=src_weight_info.config,
         )
         return kernel
