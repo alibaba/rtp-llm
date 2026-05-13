@@ -21,6 +21,7 @@ from rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4 import (
 )
 from rtp_llm.models_py.modules.dsv4.moe.strategies.local_loop import (
     LocalLoopStrategy,
+    _select_mn_major_scale_for_index,
 )
 from rtp_llm.models_py.modules.dsv4.moe.strategies.mega import MegaMoEStrategy
 from rtp_llm.models_py.modules.dsv4.quant_layouts import (
@@ -142,6 +143,25 @@ class DSV4WeightConversionContractTest(unittest.TestCase):
                 recipe_a=(1, FP8_BLOCK),
                 recipe_b=(1, FP4_BLOCK),
             )
+
+    def test_topk_scale_select_preserves_mn_major_stride(self) -> None:
+        grouped = torch.empty_strided(
+            (4, 16, 8),
+            (16 * 8, 1, 16),
+            dtype=torch.int32,
+        )
+        expert_idx = torch.tensor([0], dtype=torch.long)
+
+        bad = torch.index_select(grouped, 0, expert_idx).squeeze(0)
+        self.assertNotEqual(bad.stride(-2), 1)
+
+        selected = _select_mn_major_scale_for_index(
+            grouped.transpose(-1, -2),
+            expert_idx,
+        )
+        self.assertEqual(selected.shape, (16, 8))
+        self.assertEqual(selected.stride(-2), 1)
+        self.assertEqual(selected.stride(-1), 16)
 
     def test_quantized_linear_forward_uses_packed_scale_only(self) -> None:
         _requires_sm100_deepgemm(self)
