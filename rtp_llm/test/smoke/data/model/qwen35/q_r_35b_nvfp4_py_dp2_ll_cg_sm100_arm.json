@@ -4,41 +4,41 @@
     "query_result": [
         {
             "query": {
-                "prompt": "$prompt:s1",
+                "prompt": "Please introduce yourself.",
                 "generate_config": {
-                    "max_new_tokens": 10,
+                    "max_new_tokens": 20,
                     "temperature": 0.0,
                     "top_p": 0,
                     "top_k": 1
                 }
             },
             "result": {
-                "response": "\n\nThe **CAP Theorem** (also known",
+                "response": "\n\n<think>\n\n</think>\n\nHello! I'm **Qwen3.5**, the latest large language",
                 "finished": true
             }
         },
         {
             "query": {
                 "prompt_batch": [
-                    "$prompt:s1",
-                    "$prompt:s1",
-                    "$prompt:s1"
+                    "Please introduce yourself.",
+                    "Please introduce yourself.",
+                    "Please introduce yourself."
                 ],
                 "generate_config": {
-                    "max_new_tokens": 10,
+                    "max_new_tokens": 20,
                     "top_k": 1
                 }
             },
             "result": {
                 "response_batch": [
                     {
-                        "response": "\n\nThe **CAP Theorem** (also known"
+                        "response": "\n\n<think>\n\n</think>\n\nHello! I'm **Qwen3.5**, the latest large language"
                     },
                     {
-                        "response": "\n\nThe **CAP Theorem** (also known"
+                        "response": "\n\n<think>\n\n</think>\n\nHello! I'm **Qwen3.5**, the latest large language"
                     },
                     {
-                        "response": "\n\nThe **CAP Theorem** (also known"
+                        "response": "\n\n<think>\n\n</think>\n\nHello! I'm **Qwen3.5**, the latest large language"
                     }
                 ]
             }
