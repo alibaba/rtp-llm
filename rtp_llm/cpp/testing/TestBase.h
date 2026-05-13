@@ -26,8 +26,35 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateConfig.h"
 #include "autil/EnvUtil.h"
+#include <pybind11/embed.h>
 
 using namespace rtp_llm;
+
+namespace rtp_llm {
+namespace test_helpers {
+
+// Opt-in embedded Python interpreter for cc_tests that exercise Python paths
+// (e.g. GrammarManagerTest's pure-Python fake backend via py::exec).
+// Most cc_tests don't touch Python — runtime types short-circuit via
+// hasGrammarObject() / Py_IsInitialized() checks before any GIL acquire — so
+// this helper is NOT called from EngineBaseTest::SetUp. Only the tests that
+// genuinely need Python invoke it.
+//
+// Initialized once on first call and never finalized; letting Python tear
+// itself down at process exit avoids races with destructors of long-lived
+// globals (caches, kmonitor, etc.).
+inline void ensurePythonInterpreterStarted() {
+    static bool started = []() {
+        if (!Py_IsInitialized()) {
+            py::initialize_interpreter();
+        }
+        return true;
+    }();
+    (void)started;
+}
+
+}  // namespace test_helpers
+}  // namespace rtp_llm
 
 static const std::string DEFAULT_DEVICE = "CPU";
 

@@ -6,6 +6,7 @@
 #include <ATen/cuda/CUDAGeneratorImpl.h>
 #endif
 #include "autil/EnvUtil.h"
+#include "rtp_llm/cpp/engine_base/grammar/RtpGrammarMatcher.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -945,6 +946,21 @@ void GenerateStream::reportStreamMetrics() {
             if (timeout) {
                 collector.timeout_latency_us = getTimeoutMs() * 1000;
             }
+            // Pull per-stream grammar telemetry off the attached matcher when
+            // the request used grammar. The matcher is single-threaded by
+            // construction (one stream owner), so reading stats without
+            // additional sync is safe at end-of-stream.
+            if (auto* matcher = tryGetGrammarMatcher(); matcher != nullptr) {
+                const auto& gs                       = matcher->stats();
+                collector.grammar_used_qps           = true;
+                collector.grammar_cache_hit_qps      = gs.cache_hit;
+                collector.grammar_cache_miss_qps     = !gs.cache_hit;
+                collector.grammar_compile_time_us    = gs.compile_time_us;
+                collector.grammar_mask_apply_count   = gs.mask_apply_count;
+                collector.grammar_accept_calls       = gs.accept_calls;
+                collector.grammar_accept_failures    = gs.accept_failures;
+                collector.grammar_rollback_calls     = gs.rollback_calls;
+            }
         }
         // pass tag will cause default tags deep copy
         static kmonitor::MetricsTags timeout_tag("timeout", "true");
@@ -1005,6 +1021,42 @@ int GenerateStream::reuseBlockSize() const {
     int reuse_length       = reuseLength();
     int seq_size_per_block = seqSizePerBlock();
     return reuse_length / seq_size_per_block;
+}
+
+// Grammar accessors are now pure C++ — RtpGrammarMatcher is owned exclusively
+// by this stream and contains no Python state. None of the four entry points
+// here acquires the GIL.
+//
+// Concurrency: setGrammarMatcher / clearGrammarMatcher run on the scheduler
+// thread between ticks; the read accessors run on the executor thread
+// (NormalBatchStreamProcessor / NormalOutputDispatcher / spec variants)
+// during a tick. The two phases are serialized by the engine's main loop, so
+// there is no concurrent reader+writer today. If a future change introduces
+// cross-thread access, replace the unique_ptr with std::atomic<RtpGrammarMatcher*>
+// and arrange the lifetime accordingly.
+
+GenerateStream::~GenerateStream() {
+    // matcher_ is std::unique_ptr<RtpGrammarMatcher>: pure C++ destructor,
+    // zero GIL, safe in cc_test binaries with no Python interpreter.
+    reportMetric();
+    releaseResource();
+    stream_magic_ = 0;
+}
+
+void GenerateStream::setGrammarMatcher(std::shared_ptr<RtpGrammarMatcher> matcher) {
+    matcher_ = std::move(matcher);
+}
+
+bool GenerateStream::hasGrammarMatcher() const noexcept {
+    return matcher_ != nullptr;
+}
+
+RtpGrammarMatcher* GenerateStream::tryGetGrammarMatcher() const noexcept {
+    return matcher_.get();
+}
+
+void GenerateStream::clearGrammarMatcher() noexcept {
+    matcher_.reset();
 }
 
 void GenerateStream::setSeqLength(int seq_length) {

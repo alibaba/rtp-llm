@@ -5,7 +5,6 @@
 #include <optional>
 #include <vector>
 #include <map>
-#include <torch/torch.h>
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPrompt.h"
 #include "rtp_llm/cpp/engine_base/EngineBase.h"

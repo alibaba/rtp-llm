@@ -1805,6 +1805,7 @@ class DeepEPTest(TestCase):
             arpc_config=py_env.arpc_config,
             grpc_config=py_env.grpc_config,
             load_config=py_env.load_config,
+            grammar_config=py_env.grammar_config,
         )
 
         return nccl_comm_config, master_port, engine_config, model_config

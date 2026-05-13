@@ -102,6 +102,11 @@ message GenerateConfigPB {
     // 生成式推荐：组合 token 粒度去重与曝光过滤
     int32 combo_token_size = 58;
     IntMatrix banned_combo_token_ids = 59;
+    google.protobuf.StringValue json_schema = 60;
+    google.protobuf.StringValue regex = 61;
+    google.protobuf.StringValue ebnf = 62;
+    google.protobuf.StringValue structural_tag = 63;
+    google.protobuf.StringValue response_format = 64;
 }
 
 message MMPreprocessConfigPB {

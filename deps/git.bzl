@@ -79,6 +79,14 @@ def git_deps():
     )
 
     new_git_repository(
+        name = "xgrammar",
+        remote = "https://github.com/mlc-ai/xgrammar.git",
+        commit = "62e13551b9b63251114894c5ee638564b160dd48",  # v0.1.32
+        init_submodules = True,
+        build_file = str(Label("@rtp_llm//3rdparty/xgrammar:xgrammar.BUILD")),
+    )
+
+    new_git_repository(
         name = "flashmla",
         remote = "https://github.com/deepseek-ai/FlashMLA.git",
         commit = "b31bfe72a83ea205467b3271a5845440a03ed7cb",

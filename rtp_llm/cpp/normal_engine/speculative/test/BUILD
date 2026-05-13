@@ -7,6 +7,10 @@ test_copts = [
     "-fno-access-control",
 ] + copts()
 
+# Covers 9 non-grammar MTP state-machine invariants that smoke can't hit:
+# prefill/decode dispatch, KVCache block mapping, draft input gather,
+# post-draft update, single/multi-step sampler-output update. Grammar-
+# specific spec/draft coverage now lives in the mtp_grammar smoke.
 cc_test(
     name = "mtp_batch_stream_processor_test",
     srcs = glob([

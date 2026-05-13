@@ -165,6 +165,19 @@ public:
     int32_t batch_with_prefill_times = 0;
     int32_t batch_with_prefill_len   = 0;
     int32_t malloc_failed_times      = 0;
+
+    // Per-request grammar telemetry. Populated by
+    // GenerateStream::reportStreamMetrics from the attached RtpGrammarMatcher
+    // when the request used grammar; left at defaults otherwise so the
+    // per-request branch in the report path simply skips the qps counters.
+    bool    grammar_used_qps          = false;  // request used grammar at all
+    bool    grammar_cache_hit_qps     = false;  // served from memory cache (no compile)
+    bool    grammar_cache_miss_qps    = false;  // triggered async compile
+    int64_t grammar_compile_time_us   = 0;
+    int64_t grammar_mask_apply_count  = 0;
+    int64_t grammar_accept_calls      = 0;
+    int64_t grammar_accept_failures   = 0;
+    int64_t grammar_rollback_calls    = 0;
 };
 
 class RtpLLMStreamMetrics: public kmonitor::MetricsGroup {
@@ -194,6 +207,15 @@ public:
 
     kmonitor::MutableMetric* timeout_latency_us_metric  = nullptr;
     kmonitor::MutableMetric* malloc_failed_times_metric = nullptr;
+
+    kmonitor::MutableMetric* grammar_used_qps_metric         = nullptr;
+    kmonitor::MutableMetric* grammar_cache_hit_qps_metric    = nullptr;
+    kmonitor::MutableMetric* grammar_cache_miss_qps_metric   = nullptr;
+    kmonitor::MutableMetric* grammar_compile_time_us_metric  = nullptr;
+    kmonitor::MutableMetric* grammar_mask_apply_count_metric = nullptr;
+    kmonitor::MutableMetric* grammar_accept_calls_metric     = nullptr;
+    kmonitor::MutableMetric* grammar_accept_failures_metric  = nullptr;
+    kmonitor::MutableMetric* grammar_rollback_calls_metric   = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();

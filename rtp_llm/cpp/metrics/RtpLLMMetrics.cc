@@ -160,6 +160,15 @@ bool RtpLLMStreamMetrics::init(kmonitor::MetricsGroupManager* manager) {
 
     REGISTER_GAUGE_MUTABLE_METRIC(malloc_failed_times_metric, "rtp_llm_malloc_failed_times");
 
+    REGISTER_QPS_MUTABLE_METRIC(grammar_used_qps_metric, "rtp_llm_grammar_used_qps");
+    REGISTER_QPS_MUTABLE_METRIC(grammar_cache_hit_qps_metric, "rtp_llm_grammar_cache_hit_qps");
+    REGISTER_QPS_MUTABLE_METRIC(grammar_cache_miss_qps_metric, "rtp_llm_grammar_cache_miss_qps");
+    REGISTER_GAUGE_MUTABLE_METRIC(grammar_compile_time_us_metric, "rtp_llm_grammar_compile_time_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(grammar_mask_apply_count_metric, "rtp_llm_grammar_mask_apply_count");
+    REGISTER_GAUGE_MUTABLE_METRIC(grammar_accept_calls_metric, "rtp_llm_grammar_accept_calls");
+    REGISTER_GAUGE_MUTABLE_METRIC(grammar_accept_failures_metric, "rtp_llm_grammar_accept_failures");
+    REGISTER_GAUGE_MUTABLE_METRIC(grammar_rollback_calls_metric, "rtp_llm_grammar_rollback_calls");
+
     return true;
 }
 
@@ -185,6 +194,18 @@ void RtpLLMStreamMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMStream
     REPORT_GAUGE(batch_with_prefill_len);
 
     REPORT_GAUGE(malloc_failed_times);
+
+    // Grammar telemetry — REPORT_QPS / REPORT_GAUGE already short-circuit
+    // when the field is false / 0, so non-grammar traffic emits nothing
+    // here and the time series stay empty by construction.
+    REPORT_QPS(grammar_used_qps);
+    REPORT_QPS(grammar_cache_hit_qps);
+    REPORT_QPS(grammar_cache_miss_qps);
+    REPORT_GAUGE(grammar_compile_time_us);
+    REPORT_GAUGE(grammar_mask_apply_count);
+    REPORT_GAUGE(grammar_accept_calls);
+    REPORT_GAUGE(grammar_accept_failures);
+    REPORT_GAUGE(grammar_rollback_calls);
 }
 
 // for rpc request

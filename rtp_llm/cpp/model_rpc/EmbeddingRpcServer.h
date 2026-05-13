@@ -10,9 +10,6 @@
 #include <iostream>
 #include <memory>
 #include <string>
-#include <pybind11/pybind11.h>
-#include <torch/extension.h>
-using namespace pybind11;
 namespace rtp_llm {
 
 class EmbeddingRpcServiceImpl: public EmbeddingRpcService::Service {

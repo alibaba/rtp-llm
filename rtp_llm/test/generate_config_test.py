@@ -5,6 +5,7 @@ from unittest import TestCase, main
 from transformers import AutoTokenizer
 
 from rtp_llm.ops import SpecialTokens
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.frontend.tokenizer_factory.tokenizers.tokenization_qwen import (
     QWenTokenizer,
 )
@@ -505,6 +506,105 @@ class OpenaiGenerateConfigTest(TestCase):
                 [41963, 2193, 4232, 2936, 1140],
                 [21912, 2936, 1140],
             ],
+        )
+
+
+class GrammarBeamSearchRejectionTest(TestCase):
+    """validate() must reject beam search + grammar-constrained decoding.
+
+    Rationale: NormalOutputDispatcher skips grammar matcher advance under
+    beam search, so the matcher never moves and schema-illegal tokens can
+    be emitted. See NormalOutputDispatcher.cc:193.
+    """
+
+    def _assert_rejected(self, **fields):
+        cfg = GenerateConfig(**fields)
+        with self.assertRaises(FtRuntimeException) as ctx:
+            cfg.validate()
+        self.assertEqual(ctx.exception.exception_type, ExceptionType.UNSUPPORTED_OPERATION)
+
+    def _assert_accepted(self, **fields):
+        GenerateConfig(**fields).validate()
+
+    def test_num_beams_plus_json_schema_rejected(self):
+        self._assert_rejected(num_beams=4, json_schema='{"type": "object"}')
+
+    def test_num_beams_plus_regex_rejected(self):
+        self._assert_rejected(num_beams=2, regex=r"\d+")
+
+    def test_num_beams_plus_ebnf_rejected(self):
+        self._assert_rejected(num_beams=2, ebnf="root ::= 'a'")
+
+    def test_num_beams_plus_structural_tag_rejected(self):
+        self._assert_rejected(num_beams=2, structural_tag='{"begin": "<t>", "end": "</t>"}')
+
+    def test_variable_num_beams_plus_grammar_rejected(self):
+        self._assert_rejected(variable_num_beams=[1, 3], json_schema='{"type": "object"}')
+
+    def test_num_return_sequences_plus_grammar_rejected(self):
+        self._assert_rejected(num_return_sequences=2, json_schema='{"type": "object"}')
+
+    def test_response_format_json_schema_rejected(self):
+        self._assert_rejected(
+            num_beams=2,
+            response_format={"type": "json_schema", "json_schema": {"schema": {"type": "object"}}},
+        )
+
+    def test_response_format_json_object_rejected(self):
+        self._assert_rejected(num_beams=2, response_format={"type": "json_object"})
+
+    def test_response_format_regex_rejected(self):
+        self._assert_rejected(num_beams=2, response_format={"type": "regex", "pattern": r"\d+"})
+
+    def test_response_format_string_json_rejected(self):
+        self._assert_rejected(
+            num_beams=2,
+            response_format='{"type": "json_object"}',
+        )
+
+    def test_response_format_text_allowed(self):
+        self._assert_accepted(num_beams=2, response_format={"type": "text"})
+
+    def test_response_format_unknown_type_allowed(self):
+        self._assert_accepted(num_beams=2, response_format={"type": "something_else"})
+
+    def test_grammar_without_beam_search_allowed(self):
+        self._assert_accepted(json_schema='{"type": "object"}')
+        self._assert_accepted(regex=r"\d+")
+        self._assert_accepted(response_format={"type": "json_object"})
+
+    def test_beam_search_without_grammar_allowed(self):
+        self._assert_accepted(num_beams=4)
+        self._assert_accepted(num_return_sequences=2)
+        self._assert_accepted(variable_num_beams=[1, 3])
+
+    # `_has_grammar_constraint` historically used Python truthy checks, so
+    # an empty `{}` schema or empty `""` regex/ebnf/structural_tag silently
+    # bypassed the beam-search rejection path. The user explicitly set the
+    # field — that's a grammar request and must be detected.
+    def test_empty_dict_json_schema_plus_beam_rejected(self):
+        self._assert_rejected(num_beams=2, json_schema={})
+
+    def test_empty_string_json_schema_plus_beam_rejected(self):
+        self._assert_rejected(num_beams=2, json_schema="")
+
+    def test_empty_string_regex_plus_beam_rejected(self):
+        self._assert_rejected(num_beams=2, regex="")
+
+    def test_empty_string_ebnf_plus_beam_rejected(self):
+        self._assert_rejected(num_beams=2, ebnf="")
+
+    def test_empty_string_structural_tag_plus_beam_rejected(self):
+        self._assert_rejected(num_beams=2, structural_tag="")
+
+    def test_none_grammar_fields_with_beam_allowed(self):
+        # Sanity: None still means "not set" — beam alone must stay allowed.
+        self._assert_accepted(
+            num_beams=4,
+            json_schema=None,
+            regex=None,
+            ebnf=None,
+            structural_tag=None,
         )
 
 

@@ -216,6 +216,84 @@ def h20_oss_suites():
         ],
     )
 
+    # H20 Grammar (xgrammar) structured-output smoke. Grammar-cudagraph queries
+    # share the next_mtp_cudagraph_deepep server; concurrent MTP+grammar runs
+    # as a standalone case below. Remaining cases each cover one server-only
+    # axis that no other smoke spans.
+    native.test_suite(
+        name = "smoke_h20_grammar",
+        tests = [
+            # Streaming SSE + EBNF compile path + invalid_schema error path,
+            # ending with a sanity regex query. Single sequential server
+            # exercises three orthogonal grammar paths cheaply.
+            smoke_test(
+                name = "qwen2_1_5b_grammar_misc",
+                task_info = "data/model/qwen2/q_r_grammar_misc.json",
+                smoke_args = "--act_type BF16 --warm_up 0 --seq_size_per_block 8",
+                gpu_type = ["H20"],
+                envs = ["PYTHONUNBUFFERED=TRUE", "VISIT_RETRY_TIME=1"],
+            ),
+            # Mixed batch + concurrent: grammar / non-grammar streams in the
+            # same batch under 5-thread concurrency. Catches bitmask leak
+            # across active-index boundaries and parallel-fill path bugs.
+            smoke_test(
+                name = "qwen2_1_5b_grammar_mixed_batch",
+                task_info = "data/model/qwen2/q_r_grammar_mixed.json",
+                smoke_args = "--act_type BF16 --warm_up 0 --seq_size_per_block 8",
+                gpu_type = ["H20"],
+                envs = ["PYTHONUNBUFFERED=TRUE"],
+                concurrency_test = True,
+            ),
+            # PD-sep base case — cross-role matcher state transfer (prefill
+            # ships advanced NFA state to decode via cache_store_rdma).
+            smoke_test(
+                name = "qwen2_1_5b_grammar_pd_cache_base",
+                task_info = "data/model/qwen2/q_r_grammar_pd.json",
+                smoke_args = {
+                    "prefill": "--act_type BF16 --warm_up 0 --seq_size_per_block 8 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --tp_size 1",
+                    "decode":  "--act_type BF16 --warm_up 0 --seq_size_per_block 8 --role_type DECODE  --cache_store_rdma_mode 0 --use_local 1 --tp_size 1",
+                },
+                gpu_type = ["H20"],
+                envs = ["PYTHONUNBUFFERED=TRUE"],
+            ),
+            # TP2 × DP2 (world=4) + concurrent + mixed batch — full
+            # ready/failed bitmap fold across two parallelism layers, on
+            # heterogeneous grammar/non-grammar streams.
+            smoke_test(
+                name = "qwen2_1_5b_grammar_tp2_dp2",
+                task_info = "data/model/qwen2/q_r_grammar_mixed.json",
+                smoke_args = "--act_type BF16 --warm_up 0 --seq_size_per_block 8 --tp_size 2 --dp_size 2 --world_size 4",
+                gpu_type = ["H20"],
+                envs = ["PYTHONUNBUFFERED=TRUE"],
+                concurrency_test = True,
+            ),
+            # MTP + grammar + reasoning — 4-axis stack: rollback active_steps
+            # formula (reasoning vs non-reasoning), ReasonerGrammarObject
+            # per-stream init, MTP prefill bonus token T0, grammar fork/DFS
+            # in spec decoding.
+            smoke_test(
+                name = "qwen35_mtp_grammar_reasoning",
+                task_info = "data/model/qwen35/q_r_mtp_grammar_reasoning.json",
+                smoke_args = "--act_type BF16 --seq_size_per_block 2048 --tp_size 2 --max_seq_len 12800 --reserver_runtime_mem_mb 10000 --warm_up 0 --sp_model_type qwen35_moe_mtp --gen_num_per_cycle 4 --sp_type eagle --sp_checkpoint_path /mnt/nas1/hf/Qwen3.5-35B-A3B-FP8 --sp_act_type bf16 --think_mode 1 --reasoning_parser qwen3",
+                gpu_type = ["H20"],
+                envs = ["PYTHONUNBUFFERED=TRUE", "RTP_SP_ACCEPT_TRACE=1"],
+            ),
+            # MTP + grammar + concurrent — race coverage. 5 parallel threads
+            # drive regex/json_schema queries so multiple grammar streams
+            # co-exist in one batch, exercising batchAcceptSpecGrammarTokens
+            # and applySpecGrammarConstraints DFS under concurrent matcher
+            # fork/rollback.
+            smoke_test(
+                name = "qwen35_mtp_grammar_concurrent",
+                task_info = "data/model/qwen35/q_r_mtp_grammar.json",
+                smoke_args = "--act_type BF16 --seq_size_per_block 2048 --tp_size 2 --max_seq_len 12800 --reserver_runtime_mem_mb 10000 --warm_up 0 --sp_model_type qwen35_moe_mtp --gen_num_per_cycle 4 --sp_type eagle --sp_checkpoint_path /mnt/nas1/hf/Qwen3.5-35B-A3B-FP8 --sp_act_type bf16 --concurrency_limit 8",
+                envs = ["NCCL_DISABLE_ABORT=1", "NCCL_DEBUG=INFO", "LOG_LEVEL=INFO", "PYTHONUNBUFFERED=TRUE", "RTP_SP_ACCEPT_TRACE=1"],
+                gpu_type = ["H20"],
+                concurrency_test = True,
+            ),
+        ],
+    )
+
 
     # H20 Qwen3.5/Next
     native.test_suite(
@@ -233,6 +311,10 @@ def h20_oss_suites():
                 smoke_args="--act_type BF16 --seq_size_per_block 2048 --tp_size 2 --max_seq_len 12800 --reserver_runtime_mem_mb 10000 --sp_model_type qwen35_moe_mtp --gen_num_per_cycle 4 --sp_type eagle --sp_checkpoint_path /mnt/nas1/hf/Qwen3.5-35B-A3B-FP8 --sp_act_type bf16 --reuse_cache 1",
                 gpu_type=["H20"],
             ),
+            # Hosts grammar-cudagraph coverage (regex/json_schema queries
+            # appended to task_info). Server config matches the former
+            # qwen35_mtp_grammar_cudagraph case verbatim — guards CUDA
+            # graph capture/replay vs xgrammar accept_token timing.
             smoke_test(
                 name="next_mtp_cudagraph_deepep",
                 task_info="data/model/qwen3_next/q_r_next_fp8_tp2_mtp_cudagraph.json",

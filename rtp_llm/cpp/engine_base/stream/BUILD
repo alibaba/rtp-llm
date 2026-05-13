@@ -52,6 +52,7 @@ cc_library(
         ":generate_types",
         ":generate_config",
         ":complete_token_ids",
+        "//rtp_llm/cpp/engine_base/grammar:grammar_cpp_lib",
         "//rtp_llm/cpp/engine_base/system_prompt:system_prompt",
         "//rtp_llm/cpp/models:models",
         "//rtp_llm/cpp/cache:cache",

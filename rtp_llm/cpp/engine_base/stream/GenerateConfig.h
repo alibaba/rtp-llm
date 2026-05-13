@@ -1,5 +1,7 @@
 #pragma once
 #include <cstdint>
+#include <functional>
+#include <iomanip>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -11,6 +13,19 @@
 #include "rtp_llm/cpp/config/SpecialTokens.h"
 
 namespace rtp_llm {
+
+// Summarize an optional grammar/schema string for debug logging without leaking
+// full content (which can be large and contain user-controlled payloads).
+inline std::string summarizeGrammarField(const std::optional<std::string>& field) {
+    if (!field.has_value()) {
+        return "<unset>";
+    }
+    const auto&       s = field.value();
+    std::stringstream out;
+    out << "len=" << s.size() << " hash=0x" << std::hex << std::setw(16) << std::setfill('0')
+        << std::hash<std::string>{}(s);
+    return out.str();
+}
 
 // NOTE: The params in generate config should be splitted into two parts:
 //       1. The params that can be different for a single sampler.
@@ -42,6 +57,11 @@ public:
     std::optional<float>       top_p_min;
     std::optional<int>         top_p_reset_ids;
     std::optional<std::string> task_id;
+    std::optional<std::string> json_schema;
+    std::optional<std::string> regex;
+    std::optional<std::string> ebnf;
+    std::optional<std::string> structural_tag;
+    std::optional<std::string> response_format;
     std::string                adapter_name = "";
     std::vector<std::string>   adapter_names;
 
@@ -142,6 +162,11 @@ public:
                      << ", is_streaming:" << is_streaming << ", timeout_ms:" << timeout_ms << ", top_k:" << top_k
                      << ", top_p:" << top_p << ", force_disable_sp_run: " << force_disable_sp_run
                      << ", force_sp_accept: " << force_sp_accept << ", return_all_probs: " << return_all_probs
+                     << ", json_schema: " << summarizeGrammarField(json_schema)
+                     << ", regex: " << summarizeGrammarField(regex)
+                     << ", ebnf: " << summarizeGrammarField(ebnf)
+                     << ", structural_tag: " << summarizeGrammarField(structural_tag)
+                     << ", response_format: " << summarizeGrammarField(response_format)
                      << ", stop_words_list:" << vectorsToString(stop_words_list)
                      << ", can_use_pd_separation: " << can_use_pd_separation << ", pd_separation: " << pd_separation
                      << ", in_think_mode: " << in_think_mode << ", max_thinking_tokens: " << max_thinking_tokens
@@ -186,6 +211,11 @@ public:
         JSONIZE_OPTIONAL(top_p_min);
         JSONIZE_OPTIONAL(top_p_reset_ids);
         JSONIZE_OPTIONAL(task_id);
+        JSONIZE_OPTIONAL(json_schema);
+        JSONIZE_OPTIONAL(regex);
+        JSONIZE_OPTIONAL(ebnf);
+        JSONIZE_OPTIONAL(structural_tag);
+        JSONIZE_OPTIONAL(response_format);
         try {
             std::string adapter_name_;
             json.Jsonize("adapter_name", adapter_name_);

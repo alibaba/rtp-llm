@@ -100,6 +100,18 @@ This page lists server arguments used to configure the behavior and performance 
 | `--max-batch-size` | Override system maximum batch size. | 0 |
 | `--enable-flashinfer-sample-kernel` | Enables FlashInfer sampling kernel. | True |
 
+## [Grammar / Constrained Decoding](./grammar.md)
+
+| Arguments | Description | Defaults |
+|-----------|-------------|----------|
+| `--grammar_backend` | Constrained decoding backend. `xgrammar` or `none`. | `xgrammar` |
+| `--constrained_json_disable_any_whitespace` | Disable XGrammar's any-whitespace mode for JSON schemas. | False |
+| `--reasoning_parser` | sglang-compatible detector key (e.g. `qwen3`, `deepseek-r1`). Empty = reasoner disabled. See [grammar.md](./grammar.md#reasoning-parser). | `""` |
+| `--grammar_compile_timeout_ms` | Per-compile wall-clock timeout (ms) inside the GrammarManager queue. | 60000 |
+| `--grammar_num_workers` | Size of the C++ compile worker pool. | 32 |
+| `--grammar_cache_dir` | Reserved for future on-disk DFA cache; currently no effect. | `""` |
+| `--grammar_debug_log` | Promote per-step grammar traces from DEBUG to INFO. | False |
+
 ## Logging & Profiling
 
 | Arguments | Description | Defaults |

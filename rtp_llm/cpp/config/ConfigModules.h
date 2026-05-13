@@ -336,6 +336,29 @@ struct FIFOSchedulerConfig {
     std::string to_string() const;
 };
 
+// Config data for grammar-constrained decoding. Holds both user-facing knobs
+// (any_whitespace / num_workers) and engine-bootstrap fields populated from
+// the live HF tokenizer at start time (tokenizer_info_json,
+// override_stop_tokens, think_end_id). EngineBase reads the bootstrap fields
+// once to construct XGrammarBackendCpp natively.
+struct GrammarConfig {
+    std::string grammar_backend                         = "xgrammar";
+    bool        constrained_json_disable_any_whitespace = false;
+    // Reasoning detector key (e.g. "qwen3", "deepseek-r1"). Empty ⇒ reasoner disabled.
+    std::string reasoning_parser                        = "";
+    int64_t     compile_timeout_ms                      = 60000;
+    int         num_workers                             = 32;
+
+    // Empty tokenizer_info_json ⇒ grammar disabled.
+    // think_end_id == -1 ⇒ reasoner gating disabled (plain xgrammar).
+    // Empty override_stop_tokens ⇒ no override (xgrammar uses tokenizer-derived stops).
+    std::string          tokenizer_info_json;
+    std::vector<int32_t> override_stop_tokens;
+    int64_t              think_end_id = -1;
+
+    std::string to_string() const;
+};
+
 struct RuntimeConfig {
     int64_t max_generate_batch_size = 1;
 

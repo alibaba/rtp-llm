@@ -14,6 +14,8 @@
 
 namespace rtp_llm {
 
+class XGrammarBackendCpp;
+
 enum preRunMode {
     prefill_warm_up     = 0,
     decode_warm_up      = 1,
@@ -95,8 +97,13 @@ protected:
     MlaOpsType                     mla_ops_type_       = MlaOpsType::AUTO;
     int32_t                        kv_cache_group_num_ = 1;
     std::vector<int32_t>           kv_cache_layer_to_group_;
-    std::unique_ptr<SchedulerBase> scheduler_ = nullptr;
-    bool                           pause_     = false;
+    // Native C++ grammar backend (or nullptr in cc_test / no-grammar paths).
+    // Pure C++; the shared_ptr null check at FIFOScheduler / GrammarManager
+    // construction puts the manager into disabled mode.
+    std::shared_ptr<XGrammarBackendCpp> grammar_backend_;
+    GrammarConfig                       grammar_config_;
+    std::unique_ptr<SchedulerBase> scheduler_                  = nullptr;
+    bool                           pause_                      = false;
 };
 
 }  // namespace rtp_llm

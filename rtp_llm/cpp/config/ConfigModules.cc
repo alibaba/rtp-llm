@@ -354,6 +354,21 @@ std::string FIFOSchedulerConfig::to_string() const {
     return oss.str();
 }
 
+// GrammarConfig
+std::string GrammarConfig::to_string() const {
+    std::ostringstream oss;
+    oss << "grammar_backend: " << grammar_backend << "\n"
+        << "constrained_json_disable_any_whitespace: " << std::boolalpha << constrained_json_disable_any_whitespace
+        << "\n"
+        << "reasoning_parser: " << (reasoning_parser.empty() ? "<disabled>" : reasoning_parser) << "\n"
+        << "compile_timeout_ms: " << compile_timeout_ms << "\n"
+        << "num_workers: " << num_workers << "\n"
+        << "tokenizer_info_json_size: " << tokenizer_info_json.size() << "\n"
+        << "override_stop_tokens_size: " << override_stop_tokens.size() << "\n"
+        << "think_end_id: " << think_end_id;
+    return oss.str();
+}
+
 // RuntimeConfig
 std::string RuntimeConfig::to_string() const {
     std::ostringstream oss;

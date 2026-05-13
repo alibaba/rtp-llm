@@ -68,6 +68,7 @@ The core features include:
    backend/reuse_kv_cache.md
    backend/function_calling.ipynb
    backend/separate_reasoning.ipynb
+   backend/grammar.md
    backend/quantization.md
    backend/lora.ipynb
    backend/pd_disaggregation.ipynb

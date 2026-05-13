@@ -58,6 +58,106 @@
                 "response": "<think>\n\n</think>\n\nThe **CAP Theorem** (also known as Brewer's Theorem) is",
                 "finished": true
             }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {"role": "user", "content": "Give me a hex color code."}
+                ],
+                "response_format": {"type": "regex", "pattern": "#[0-9A-Fa-f]{6}"},
+                "max_tokens": 16,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "stream": false
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "", "partial": false},
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {"prompt_tokens": 0, "total_tokens": 0, "completion_tokens": 0}
+            },
+            "_comment": "MTP + cudagraph + regex — guards graph capture/replay vs xgrammar accept_token timing (host-side state desync would produce off-state mask outputs)."
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {"role": "user", "content": "Give me a US zip code."}
+                ],
+                "response_format": {"type": "regex", "pattern": "[0-9]{5}"},
+                "max_tokens": 12,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "stream": false
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "", "partial": false},
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {"prompt_tokens": 0, "total_tokens": 0, "completion_tokens": 0}
+            },
+            "_comment": "MTP + cudagraph + regex zip — second bounded regex."
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {"role": "user", "content": "Generate a person profile as JSON."}
+                ],
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "person",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string", "maxLength": 40},
+                                "age": {"type": "integer"},
+                                "city": {"type": "string", "maxLength": 40}
+                            },
+                            "required": ["name", "age", "city"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "max_tokens": 256,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "stream": false
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "", "partial": false},
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {"prompt_tokens": 0, "total_tokens": 0, "completion_tokens": 0}
+            },
+            "grammar_constraint_only": true,
+            "_comment": "MTP + cudagraph + json_schema — structured grammar through graph replay."
         }
     ]
 }

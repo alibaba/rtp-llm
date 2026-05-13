@@ -671,4 +671,5 @@ TEST_F(MtpBatchStreamProcessorTest, updateMultiStepDraftSamplerOutput) {
     EXPECT_EQ(expect_all_probs, toVec<float>(sampler_output.all_probs));
 }
 
+
 }  // namespace rtp_llm

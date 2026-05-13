@@ -114,7 +114,12 @@ struct EngineInitParams {
     py::object                   py_eplb;
     py::object                   py_sp_model;
     py::object                   weight_manager;
-    kmonitor::MetricsReporterPtr metrics_reporter = nullptr;
+    // Grammar config — also carries tokenizer_info_json / override_stop_tokens
+    // / think_end_id populated by Python from the live HF tokenizer at engine
+    // start. EngineBase reads these once and constructs the C++
+    // XGrammarBackendCpp natively (no pybind on the hot path).
+    GrammarConfig                grammar_config;
+    kmonitor::MetricsReporterPtr metrics_reporter    = nullptr;
 
 public:
     void showDebugInfo() const {

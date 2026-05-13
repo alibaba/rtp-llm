@@ -134,6 +134,17 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+# Header-only py::object debug helpers (no pybind dep here; consumers
+# already pull pybind11 transitively).
+cc_library(
+    name = "py_obj_utils",
+    hdrs = [
+        "PyObjUtils.h",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
 # Atomic utilities
 cc_library(
     name = "atomic_util",
