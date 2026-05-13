@@ -2056,6 +2056,13 @@ class AttentionBF16VLLM(nn.Module):
         common = self._prefill_common_setup_vllm(x, start_pos)
         qkv = self._prefill_compute_qkv_vllm(x, common)
         self._prefill_write_swa_bf16_vllm(common, qkv.kv_full)
+        if self._kv_cache is None:
+            # Warmup: pool unbound. Run compressor (no-op when pool
+            # unbound) then fall back to SWA-only kv_full attention so
+            # framework shape/memory inference sees the real compute.
+            if self.compress_ratio != 0:
+                self.compressor(x, common.sp_int, meta=common.compressor_meta)
+            return self._forward_prefill_swa_vllm(qkv, common)
         if self.compress_ratio == 0:
             return self._forward_prefill_swa_vllm(qkv, common)
         if self.compress_ratio == 4:

@@ -36,7 +36,6 @@ import torch
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
-from rtp_llm.ops import RoleType
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules.dsv4.decode.forward import (
     build_paged_pool_specs,
@@ -48,6 +47,7 @@ from rtp_llm.models_py.modules.dsv4.moe.moe_layer import (
 )
 from rtp_llm.models_py.modules.dsv4.prefill.forward import forward_prefill
 from rtp_llm.models_py.modules.dsv4.transformer import V4Args, V4Transformer
+from rtp_llm.ops import RoleType
 
 
 def _materialize_meta_buffers(module: torch.nn.Module, device: str) -> int:
@@ -628,20 +628,11 @@ class DeepSeekV4Model(GptModelBase):
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         """qwen3-style dispatcher — per-arm orchestration lives in the
         prefill / decode runtime modules.
+
+        ``self.kv_cache`` may be None during warmup (NormalExecutor builds
+        the PyWrappedModel with cache_manager==nullptr); only the prefill
+        path needs to tolerate this — warmup never enters decode.
         """
-        if self.kv_cache is None:
-            # Warmup-only PyWrappedModel: NormalExecutor builds it with
-            # cache_manager==nullptr, so init_resources carries no kv_cache.
-            # Return zeros so CUDA-graph memory probe completes; a post-warmup
-            # occurrence means the captured graph is bogus — fail loudly.
-            logging.warning(
-                "[DeepSeekV4Model] forward() with kv_cache=None — warmup only"
-            )
-            T = max(inputs.input_ids.numel(), 1)
-            device = self.v4.embed.weight.device
-            return PyModelOutputs(
-                torch.zeros(T, self._v4_args.dim, dtype=torch.bfloat16, device=device)
-            )
         if inputs.attention_inputs.is_prefill:
             return forward_prefill(
                 self.v4, self.kv_cache, self.parallelism_config, inputs
