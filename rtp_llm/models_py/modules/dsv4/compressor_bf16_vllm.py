@@ -314,6 +314,19 @@ class CompressorBF16VLLM(nn.Module):
         arrays to restore the raw fast path under B>1 (see source
         FP8 kernel ``run_fused_compress_kv_write``'s varlen branch).
         """
+        if self._state_block_table is None or self._state_eb <= 0:
+            return CompressorMeta(
+                positions=positions,
+                b_idx=b_idx,
+                state_slots=None,
+                kv_slots=None,
+                token_to_req=b_idx.to(torch.int32),
+                boundary_token_indices=None,
+                is_batched=is_batched,
+                seq_start_per_req=seq_start_per_req,
+                cu_seq_per_req=cu_seq_per_req,
+            )
+
         fused_meta = None
         if _use_metadata_triton():
             from rtp_llm.models_py.modules.dsv4._compressor_metadata_triton import (
