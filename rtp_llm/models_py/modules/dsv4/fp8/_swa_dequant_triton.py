@@ -80,15 +80,14 @@ def _dequantize_and_gather_k_kernel(
 
         block_table_row_ptr = block_table_ptr + batch_idx * max_blocks_per_seq
         physical_block_idx = tl.load(block_table_row_ptr + block_in_seq)
-
-        # Guard against sentinel / out-of-range block ids leaking in from a
-        # broken meta. Reading a -1 slot is never correct here — caller
-        # must pre-mask or trim ``gather_lens`` before invoking us.
-        tl.device_assert(physical_block_idx >= 0, "block_table contains -1")
+        valid_block = physical_block_idx >= 0
+        safe_physical_block_idx = tl.where(valid_block, physical_block_idx, 0)
 
         # int64: physical_block_idx * block_stride can exceed 2^31 with many
         # KV-cache blocks. Match vLLM.
-        cache_block_ptr = k_cache_ptr + physical_block_idx.to(tl.int64) * block_stride
+        cache_block_ptr = (
+            k_cache_ptr + safe_physical_block_idx.to(tl.int64) * block_stride
+        )
 
         token_data_ptr = cache_block_ptr + pos_in_block * token_data_size
         token_scale_ptr = (
@@ -108,11 +107,14 @@ def _dequantize_and_gather_k_kernel(
                 offsets = qblock_start + tl.arange(0, quant_block)
                 mask = offsets < fp8_dim
 
-                x_uint8 = tl.load(token_fp8_ptr + offsets, mask=mask, other=0)
+                load_mask = mask & valid_block
+                x_uint8 = tl.load(token_fp8_ptr + offsets, mask=load_mask, other=0)
                 x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
                 x_float = x_fp8.to(tl.float32)
 
-                encoded_scale = tl.load(token_scale_ptr + qblock_idx)
+                encoded_scale = tl.load(
+                    token_scale_ptr + qblock_idx, mask=valid_block, other=127
+                )
                 exponent = encoded_scale.to(tl.float32) - 127.0
                 scale = tl.exp2(exponent)
 
@@ -124,7 +126,9 @@ def _dequantize_and_gather_k_kernel(
         bf16_cache_ptr = token_bf16_ptr.to(tl.pointer_type(tl.bfloat16))
         for j in tl.static_range(bf16_dim // 16):
             chunk_offsets = j * 16 + tl.arange(0, 16)
-            bf16_vals = tl.load(bf16_cache_ptr + chunk_offsets)
+            bf16_vals = tl.load(
+                bf16_cache_ptr + chunk_offsets, mask=valid_block, other=0.0
+            )
             tl.store(output_row_ptr + bf16_output_offset + chunk_offsets, bf16_vals)
 
 
