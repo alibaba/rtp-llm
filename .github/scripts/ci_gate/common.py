@@ -9,8 +9,8 @@ from typing import Any, Dict, Optional, Tuple
 PROJECT_ID = "2654816"
 PIPELINE_ID = "1346"
 BRANCH_REF = "main-internal"
-CI_STATUS_URL = "https://get-tasend-back-twkvcdsbpj.cn-hangzhou-vpc.fcapp.run"
-CI_TRIGGER_URL = "https://triggerid-to-mq-wjrdhcgbie.cn-hangzhou-vpc.fcapp.run"
+CI_STATUS_URL = "https://get-tasend-back-twkvcdsbpj.cn-hangzhou.fcapp.run"
+CI_TRIGGER_URL = "https://triggerid-to-mq-wjrdhcgbie.cn-hangzhou.fcapp.run"
 GITHUB_API = "https://api.github.com"
 
 
