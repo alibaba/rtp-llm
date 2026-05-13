@@ -1426,6 +1426,20 @@ class W:
     v4_routed_w3_w = "v4.routed.w3.weight"
     v4_routed_w3_s = "v4.routed.w3.scale"
 
+    # DSV4 MTP-only per-block extras. The draft block reuses the normal
+    # v4_attn/v4_ffn/v4_hc/v4_router/v4_expert tags with `mtp.{i}` ckpt
+    # prefixes; only these fusion and per-block head tensors are unique.
+    v4_mtp_enorm = "v4.mtp.enorm.weight"
+    v4_mtp_hnorm = "v4.mtp.hnorm.weight"
+    v4_mtp_norm = "v4.mtp.norm.weight"
+    v4_mtp_e_proj_w = "v4.mtp.e_proj.weight"
+    v4_mtp_e_proj_s = "v4.mtp.e_proj.scale"
+    v4_mtp_h_proj_w = "v4.mtp.h_proj.weight"
+    v4_mtp_h_proj_s = "v4.mtp.h_proj.scale"
+    v4_mtp_hc_head_fn = "v4.mtp.hc_head_fn"
+    v4_mtp_hc_head_base = "v4.mtp.hc_head_base"
+    v4_mtp_hc_head_scale = "v4.mtp.hc_head_scale"
+
     gpt_style_tp_strategy: Dict[str, Any] = {
         embedding: sp_neg1,
         lm_head: sp_0_pad8,
@@ -1596,6 +1610,16 @@ class W:
         v4_routed_w2_s: sp_id,
         v4_routed_w3_w: sp_id,
         v4_routed_w3_s: sp_id,
+        v4_mtp_enorm: sp_id,
+        v4_mtp_hnorm: sp_id,
+        v4_mtp_norm: sp_id,
+        v4_mtp_e_proj_w: sp_id,
+        v4_mtp_e_proj_s: sp_id,
+        v4_mtp_h_proj_w: sp_id,
+        v4_mtp_h_proj_s: sp_id,
+        v4_mtp_hc_head_fn: sp_id,
+        v4_mtp_hc_head_base: sp_id,
+        v4_mtp_hc_head_scale: sp_id,
     }
 
     weights_list = [
