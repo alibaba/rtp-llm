@@ -16,6 +16,36 @@ py_test(
 )
 
 py_test(
+    name = "test_cp_pool_block_gather",
+    srcs = ["test_cp_pool_block_gather.py"],
+    deps = _DSV4_TEST_DEPS,
+)
+
+py_test(
+    name = "test_pool_reader",
+    srcs = ["test_pool_reader.py"],
+    deps = _DSV4_TEST_DEPS,
+)
+
+py_test(
+    name = "test_cp_kv_allgather_restore",
+    srcs = ["test_cp_kv_allgather_restore.py"],
+    deps = _DSV4_TEST_DEPS,
+)
+
+py_test(
+    name = "test_cp_slot_mapping",
+    srcs = ["test_cp_slot_mapping.py"],
+    deps = _DSV4_TEST_DEPS,
+)
+
+py_test(
+    name = "test_indexer_cp_assembler",
+    srcs = ["test_indexer_cp_assembler.py"],
+    deps = _DSV4_TEST_DEPS,
+)
+
+py_test(
     name = "test_cp_via_concat_meta",
     srcs = ["test_cp_via_concat_meta.py"],
     deps = _DSV4_TEST_DEPS,

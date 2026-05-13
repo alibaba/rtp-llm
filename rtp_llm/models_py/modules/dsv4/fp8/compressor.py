@@ -238,6 +238,8 @@ class CompressorFP8(nn.Module):
         self._cos_sin_cache: Optional[torch.Tensor] = None
         self._cos_sin_cache_device: Optional[torch.device] = None
         self._cp_ctx: Optional[CPContext] = None
+        self._cp_gather_stream: Optional[Any] = None
+        self._kv_cache_sharded: bool = False
         # MOEDBG: caller (Attention / IndexerFP8) sets this to a name
         # prefix like ``"L02_attn_cmp"`` before forward and clears after;
         # _forward_prefill_body uses it as the rec name root. None / empty
@@ -269,6 +271,14 @@ class CompressorFP8(nn.Module):
 
     def set_cp_ctx(self, cp_ctx: Optional[CPContext]) -> None:
         self._cp_ctx = cp_ctx
+        # When ``kv_cache_sharded=True`` flows in via the CPContext, only the
+        # paged KV-pool writer uses CP-aware slot mapping. STATE pools are not
+        # sharded and must keep the full slot mapping on every rank.
+        self._kv_cache_sharded = bool(
+            cp_ctx is not None
+            and getattr(cp_ctx, "kv_cache_sharded", False)
+            and cp_ctx.cp_size > 1
+        )
 
     # ----------------------------------------------------------------------
     # Pool context lifecycle (6-arg signature matches PoolBackedModule)
@@ -360,7 +370,7 @@ class CompressorFP8(nn.Module):
                 cu_seq_per_req=cu_seq_per_req,
             )
 
-        if _compressor_meta_fused_enabled():
+        if _compressor_meta_fused_enabled() and not self._kv_cache_sharded:
             from rtp_llm.models_py.modules.dsv4.fp8 import _fused_compressor_meta_triton
 
             if _fused_compressor_meta_triton._TRITON_AVAILABLE:
@@ -446,6 +456,11 @@ class CompressorFP8(nn.Module):
         bt = self._state_block_table
         eb = self._state_eb
         assert bt is not None and eb > 0, "state pool context unbound"
+        # STATE pools (CSA_STATE / HCA_STATE) are NOT cp-sharded — each rank
+        # holds the full block_table. Applying cp ownership mask here would
+        # leave half the entries as -1 sentinels, the writer would skip them,
+        # and decode would read garbage at non-owned positions. Always use
+        # the full slot mapping.
         bt_long = bt.to(torch.long)
         max_blocks = int(bt_long.shape[1])
         if max_blocks <= 0:
@@ -492,6 +507,25 @@ class CompressorFP8(nn.Module):
         # Recover seq_size_per_block from the pool spec invariant
         # (kv_eb * ratio); avoids hard-coding 256 here.
         tokens_per_block = kv_eb * ratio
+        if self._kv_cache_sharded and self._cp_ctx is not None:
+            from rtp_llm.models_py.modules.dsv4.fp8._cp_slot_mapping import (
+                cp_kv_slot_mapping,
+            )
+
+            slot = cp_kv_slot_mapping(
+                positions,
+                bt,
+                b_idx,
+                tokens_per_block,
+                kv_eb,
+                ratio,
+                self._cp_ctx.cp_size,
+                self._cp_ctx.cp_rank,
+            )
+            if self._kv_pool_3d is not None:
+                pool_rows = int(self._kv_pool_3d.numel() // self._kv_pool_3d.shape[-1])
+                slot = torch.where(slot < pool_rows, slot, torch.full_like(slot, -1))
+            return slot
         bt_long = bt.to(torch.long)
         max_blocks = int(bt_long.shape[1])
         if max_blocks <= 0:

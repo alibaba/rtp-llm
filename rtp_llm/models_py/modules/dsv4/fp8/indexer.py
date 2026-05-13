@@ -46,6 +46,12 @@ from rtp_llm.models_py.modules.dsv4.fp8._indexer_score import (
 )
 from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import PoolBackedModule
 from rtp_llm.models_py.modules.dsv4.fp8.compressor import CompressorFP8, CompressorMeta
+
+
+def _use_varlen_prefill() -> bool:
+    return os.environ.get("DSV4_VARLEN_PREFILL", "1") != "0"
+
+
 from rtp_llm.models_py.modules.dsv4.qlinear import QuantizedLinear
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
@@ -783,7 +789,7 @@ class IndexerFP8(PoolBackedModule):
                             compressor_meta = compressor.prepare_metadata(
                                 cp_positions,
                                 cp_b_idx,
-                                is_batched=True,
+                                is_batched=_use_varlen_prefill(),
                                 seq_start_per_req=cp_seq_start_per_req,
                                 cu_seq_per_req=cp_cu_seq_per_req,
                             )
@@ -900,13 +906,60 @@ class IndexerFP8(PoolBackedModule):
                 )
                 # quant_block_size = head_dim*4/dst_scale.size(1) = 128*4/4 = 128.
                 k_scale_buf = torch.empty((T, 4), dtype=torch.uint8, device=x.device)
-                rtp_llm_ops.cp_gather_indexer_k_quant_cache(
-                    self._kv_pool_view,
-                    k_quant_flat,
-                    k_scale_buf,
-                    attention_inputs.block_table_i32,
-                    attention_inputs.cu_kv_seqlens,
+                cp_ctx = getattr(self, "_cp_ctx", None)
+                kv_cache_sharded = bool(
+                    cp_ctx is not None
+                    and getattr(cp_ctx, "kv_cache_sharded", False)
+                    and cp_ctx.cp_size > 1
                 )
+                if not kv_cache_sharded:
+                    rtp_llm_ops.cp_gather_indexer_k_quant_cache(
+                        self._kv_pool_view,
+                        k_quant_flat,
+                        k_scale_buf,
+                        attention_inputs.block_table_i32,
+                        attention_inputs.cu_kv_seqlens,
+                    )
+                else:
+                    from rtp_llm.models_py.modules.dsv4.fp8._indexer_cp_assembler import (
+                        assemble_indexer_k,
+                        build_indexer_cp_chunk_plan,
+                        build_local_cu_kv_seqlens,
+                    )
+
+                    cu = attention_inputs.cu_kv_seqlens.to(torch.int64)
+                    per_req_T = (cu[1:] - cu[:-1]).contiguous()
+                    plan = build_indexer_cp_chunk_plan(
+                        cp_ctx=cp_ctx,
+                        per_req_total_kv_lens=per_req_T,
+                        block_size=self._kv_eb,
+                        device=k_quant_flat.device,
+                    )
+                    local_cu = build_local_cu_kv_seqlens(plan)
+                    local_q = torch.empty(
+                        (plan.total_local_T, k_quant_flat.shape[-1]),
+                        dtype=k_quant_flat.dtype,
+                        device=k_quant_flat.device,
+                    )
+                    local_s = torch.empty(
+                        (plan.total_local_T, k_scale_buf.shape[-1]),
+                        dtype=k_scale_buf.dtype,
+                        device=k_scale_buf.device,
+                    )
+                    rtp_llm_ops.cp_gather_indexer_k_quant_cache(
+                        self._kv_pool_view,
+                        local_q,
+                        local_s,
+                        attention_inputs.block_table_i32,
+                        local_cu,
+                    )
+                    assemble_indexer_k(
+                        plan=plan,
+                        local_k_quant=local_q,
+                        local_k_scale=local_s,
+                        out_k_quant=k_quant_flat,
+                        out_k_scale=k_scale_buf,
+                    )
                 # ``deep_gemm.fp8_mqa_logits`` expects k_scale as 1D fp32
                 # contig — view uint8 [T, 4] → fp32 [T, 1] → squeeze [T].
                 k_scale_flat = k_scale_buf.view(torch.float32).squeeze(-1)

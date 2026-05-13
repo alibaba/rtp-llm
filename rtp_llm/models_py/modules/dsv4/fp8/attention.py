@@ -48,6 +48,11 @@ from rtp_llm.models_py.modules.dsv4.cp import (
     cp_all_gather_full,
     cp_freqs_cis_local,
 )
+from rtp_llm.models_py.modules.dsv4.fp8._pool_reader import (
+    CompressedKPoolReader,
+    LocalPoolReader,
+    make_compressed_k_pool_reader,
+)
 from rtp_llm.models_py.modules.dsv4.fp8.compressor import CompressorFP8, CompressorMeta
 from rtp_llm.models_py.modules.dsv4.fp8.indexer import IndexerFP8
 from rtp_llm.models_py.modules.dsv4.qlinear import _fp8_dequant_to_fp32
@@ -494,6 +499,13 @@ class WorkspaceMeta(NamedTuple):
     # B==1 collapses to a contiguous ``arange(seqlen) + (N + P)`` so the
     # ``index_copy_`` is bit-equal to the legacy ``copy_`` slice write.
     new_k_slot_in_flat: torch.Tensor  # [T_total] int64
+    # Stage 5b: compressed-K pool reader strategy. Built by
+    # :meth:`_build_workspace_meta` via ``make_compressed_k_pool_reader``.
+    # Defaults to ``LocalPoolReader`` so any future builder that forgets to
+    # set it falls back to the original ``dequantize_and_gather_k_cache``
+    # path. CP-sharded prefill with reuse-hit returns
+    # ``CPShardedPoolReader``.
+    cmp_reader: Optional["CompressedKPoolReader"] = None
 
 
 class CsaPrefillMeta(NamedTuple):
@@ -2533,7 +2545,15 @@ class AttentionFP8(nn.Module):
 
         if wm.N > 0:
             with record_function_range("dsv4.fp8.attn.workspace.gather_cmp"):
-                _swa_dq.dequantize_and_gather_k_cache(
+                # Stage 5b: dispatch through the per-iteration reader. For
+                # non-CP / cp_size=1 / cold prefill this is a thin wrapper
+                # around the original ``dequantize_and_gather_k_cache``
+                # (LocalPoolReader). For CP-sharded reuse-hit prefill it
+                # gathers the prefix from peer ranks before dequant.
+                cmp_reader = (
+                    wm.cmp_reader if wm.cmp_reader is not None else LocalPoolReader()
+                )
+                cmp_reader.fill(
                     out=workspace,
                     k_cache=cmp_pool_3d,
                     seq_lens=wm.cmp_seq_lens,
@@ -3066,7 +3086,7 @@ class AttentionFP8(nn.Module):
                 compressor_meta = self.compressor.prepare_metadata(
                     cp_positions,
                     cp_b_idx,
-                    is_batched=True,
+                    is_batched=_use_varlen_prefill(),
                     seq_start_per_req=cp_seq_start_per_req,
                     cu_seq_per_req=cp_cu_seq_per_req,
                 )
@@ -3147,7 +3167,7 @@ class AttentionFP8(nn.Module):
                     compressor_meta = self.compressor.prepare_metadata(
                         cp_positions,
                         cp_b_idx,
-                        is_batched=True,
+                        is_batched=_use_varlen_prefill(),
                         seq_start_per_req=cp_seq_start_per_req,
                         cu_seq_per_req=cp_cu_seq_per_req,
                     )
@@ -3469,6 +3489,36 @@ class AttentionFP8(nn.Module):
                     (T_total, 0), device=device, dtype=torch.int32
                 )
 
+        # Stage 5b: pick compressed-K pool reader once per (forward, ratio).
+        # Non-CP / cp_size=1 / kv_cache_sharded=False / cold prefill all
+        # collapse to ``LocalPoolReader`` ⇒ zero overhead vs pre-Stage-5b.
+        cp_ctx_local = getattr(self, "_cp_ctx", None)
+        kv_cache_sharded = bool(getattr(cp_ctx_local, "kv_cache_sharded", False))
+        per_req_total_kv_lens: Optional[torch.Tensor] = None
+        ratio = self.compress_ratio
+        if (
+            kv_cache_sharded
+            and ratio > 0
+            and prefix_lengths is not None
+            and prefix_lengths.numel() > 0
+            and cmp_eb > 0
+        ):
+            # Per-req compressed-K count to gather == cmp_seq_lens
+            # (== (prefix + new_tokens) // ratio). Must include this
+            # iteration's just-written new K — the compressor has already
+            # scattered it into the pool by the time _attn_via_workspace
+            # reads, and ``cmp_seq_lens`` (used by the scatter step) covers
+            # the full count.
+            per_req_total_kv_lens = cmp_seq_lens.to(
+                device=device, dtype=torch.int64
+            ).contiguous()
+        cmp_reader = make_compressed_k_pool_reader(
+            cp_ctx=cp_ctx_local,
+            kv_cache_sharded=kv_cache_sharded,
+            per_req_total_kv_lens=per_req_total_kv_lens,
+            block_size=cmp_eb if cmp_eb > 0 else None,
+        )
+
         return WorkspaceMeta(
             M=M,
             N=N,
@@ -3484,6 +3534,7 @@ class AttentionFP8(nn.Module):
             qsl=qsl,
             dense_cmp_topk=dense_cmp_topk,
             new_k_slot_in_flat=new_k_slot_in_flat,
+            cmp_reader=cmp_reader,
         )
 
     def _build_compressor_meta(

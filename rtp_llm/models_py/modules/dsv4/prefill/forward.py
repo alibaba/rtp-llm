@@ -203,6 +203,9 @@ def set_cp_info(
             cp_info=attn.context_parallel_info,
             cp_size=int(parallelism_config.tp_size),
             cp_rank=int(parallelism_config.tp_rank),
+            kv_cache_sharded=bool(
+                getattr(parallelism_config.prefill_cp_config, "kv_cache_sharded", False)
+            ),
         )
     else:
         v4.set_cp_info(None, 1, 0)
@@ -269,6 +272,7 @@ def forward_layers(
             T_local,
             input_ids.device,
             position_offset=prefix_offsets,
+            kv_cache_sharded=bool(getattr(v4, "_kv_cache_sharded", False)),
         )
     v4._propagate_cp_ctx(cp_ctx)
     if cp_ctx is not None:
