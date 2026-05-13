@@ -46,7 +46,7 @@ import triton
 import triton.language as tl
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["M", "output_scale_stride_k"])
 def _silu_mul_fp8_quant_packed_kernel(
     input_ptr,            # [M, N=2*inter] BF16 (gate_up)
     output_q_ptr,         # [M, N_2=inter]  FP8 e4m3fn
@@ -137,7 +137,7 @@ def _silu_mul_fp8_quant_packed_kernel(
     tl.store(scale_ptrs, packed_scale, mask=row_mask)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["M", "output_scale_stride_k"])
 def _silu_mul_fp8_quant_packed_split_kernel(
     gate_ptr,             # [M, inter] BF16
     up_ptr,               # [M, inter] BF16

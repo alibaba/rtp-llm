@@ -22,12 +22,12 @@ except Exception:  # pragma: no cover - CPU-only import
 
 if triton is not None:
 
-    @triton.jit
+    @triton.jit(do_not_specialize=["M"])
     def _pack_x_kernel(
         x_ptr,
         out_fp8_ptr,
         out_sf_ptr,
-        M: tl.constexpr,
+        M,
         N: tl.constexpr,
         x_stride_m: tl.constexpr,
         out_stride_m: tl.constexpr,
@@ -59,13 +59,13 @@ if triton is not None:
         packed = tl.sum(ue8m0 << (group_offsets * 8))
         tl.store(out_sf_ptr + pid_m * sf_stride_m + pid_blk, packed, mask=pid_m < M)
 
-    @triton.jit
+    @triton.jit(do_not_specialize=["M"])
     def _pack_router_kernel(
         weights_ptr,
         indices_ptr,
         out_weights_ptr,
         out_indices_ptr,
-        M: tl.constexpr,
+        M,
         K: tl.constexpr,
         weights_stride_m: tl.constexpr,
         indices_stride_m: tl.constexpr,
@@ -85,7 +85,7 @@ if triton is not None:
         tl.store(out_weights_ptr + pid * out_weights_stride_m + offs, w, mask=mask)
         tl.store(out_indices_ptr + pid * out_indices_stride_m + offs, idx, mask=mask)
 
-    @triton.jit
+    @triton.jit(do_not_specialize=["M"])
     def _pack_mega_moe_inputs_optimized_kernel(
         x_ptr,
         weights_ptr,
@@ -94,7 +94,7 @@ if triton is not None:
         out_sf_ptr,
         out_weights_ptr,
         out_indices_ptr,
-        M: tl.constexpr,
+        M,
         N: tl.constexpr,
         K: tl.constexpr,
         x_stride_m: tl.constexpr,
