@@ -473,16 +473,77 @@ py_test(
     tags = ["manual"],
 )
 
+# V4-Flash DP=4 + EP=4 captured-graph decode grid sweep with MTP
+# speculative decoding + FP8 KV cache.  Mirrors the decode side of the
+# smoke target ``v4_flash_pd_cp2ep2_dp2ep2_sm100_fp8kv1_mtp_batch4_cudagraph``
+# (TP=1 / DP=4 / EP=4 / world=4, DeepEP low-latency, decode CUDA graph,
+# MTP draft via deepseek_v4_mtp + gen_num_per_cycle=1, FP8 KV) but
+# scaled out from DP=2 → DP=4 and pinned at input_len=65536 (64K).
+# Sweeps ``--batch_size`` over 1, 8, 16, 32 so per-BS MTP+graph decode
+# timelines land in TEST_UNDECLARED_OUTPUTS_DIR.  ``decode_capture_config``
+# captures one graph per BS (matches the grid).
+py_test(
+    name = "v4_flash_dp4_decode_64k_mtp_grid_perf",
+    main = "batch_decode_test.py",
+    srcs = ["batch_decode_test.py"],
+    timeout = "eternal",
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = ["//rtp_llm:sdk"],
+    args = [
+        "--model_type", "deepseek_v4",
+        "--checkpoint_path", "/mnt/nas1/hf/DeepSeek-V4-Flash",
+        "--tokenizer_path", "/mnt/nas1/hf/DeepSeek-V4-Flash",
+        "--batch_size", "1,8,16,32",
+        "--input_len", "65536",
+        "--partial", "1",
+        "--decode_test_length", "30",
+        "--seq_size_per_block", "64",
+        "--tp_size", "1",
+        "--dp_size", "4",
+        "--ep_size", "4",
+        "--world_size", "4",
+        "--act_type", "BF16",
+        "--fp8_kv_cache", "1",
+        "--load_method", "fastsafetensors",
+        "--enable_cuda_graph", "1",
+        "--reserver_runtime_mem_mb", "32768",
+        "--max_context_batch_size", "1",
+        "--sp_type", "mtp",
+        "--gen_num_per_cycle", "3",
+        "--sp_model_type", "deepseek_v4_mtp",
+        "--sp_checkpoint_path", "/mnt/nas1/hf/DeepSeek-V4-Flash",
+        "--sp_act_type", "bf16",
+        "--warm_up", "0",
+    ],
+    env = {
+        "WORLD_SIZE": "4",
+        "DG_JIT_CPP_STANDARD": "20",
+        "GEN_TIMELINE_SYNC": "1",
+        "PERF_PREARM_PROFILE": "1",
+        "PERF_PROFILE_NUM_STEPS": "4",
+        "PERF_PROFILE_ARM_SLEEP": "2",
+        "PERF_PROFILE_FLUSH_SLEEP": "120",
+        "DSV4_USE_MEGA_MOE": "1",
+    },
+    tags = ["manual"],
+)
+
 # DeepSeek V4-Flash perf coverage on SM100 (B300 / GB200).
-#   v4_flash_cp4_ep4_prefill_64k_perf  → CP=4 EP=4 64k prefill timeline
-#   v4_flash_dp4_decode_grid_perf      → DP=4 EP=4 captured-graph decode grid
-#   v4_flash_dp4_decode_bs128_64k_perf → DP=4 EP=4 fixed bs=128/input=64K (perf-tuning canonical)
+#   v4_flash_cp4_ep4_prefill_64k_perf       → CP=4 EP=4 64k prefill timeline
+#   v4_flash_dp4_decode_grid_perf           → DP=4 EP=4 captured-graph decode grid
+#   v4_flash_dp4_decode_bs128_64k_perf      → DP=4 EP=4 fixed bs=128/input=64K (perf-tuning canonical)
+#   v4_flash_dp4_decode_64k_mtp_grid_perf   → DP=4 EP=4 + MTP + cudagraph @ 64K, BS={1,8,16,32}
 test_suite(
     name = "perf_dsv4_v4_flash",
     tests = [
         ":v4_flash_cp4_ep4_prefill_64k_perf",
         ":v4_flash_dp4_decode_grid_perf",
         ":v4_flash_dp4_decode_bs128_64k_perf",
+        ":v4_flash_dp4_decode_64k_mtp_grid_perf",
     ],
     tags = ["manual"],
 )

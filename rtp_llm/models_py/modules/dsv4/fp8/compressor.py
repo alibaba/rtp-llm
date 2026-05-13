@@ -683,10 +683,13 @@ class CompressorFP8(nn.Module):
         x: torch.Tensor,
         start_pos: torch.Tensor,
         meta: Optional[CompressorMeta] = None,
+        position_ids: Optional[torch.Tensor] = None,
     ) -> Optional[torch.Tensor]:
-        """Batched decode entry. q_len == 1 per request."""
-        assert x.shape[1] == 1, "decode-only: q_len must be 1"
-        bsz = x.size(0)
+        """Batched decode entry. ``position_ids`` enables q_len > 1 verify."""
+        bsz, q_len = int(x.size(0)), int(x.size(1))
+        T = bsz * q_len
+        if position_ids is None:
+            assert q_len == 1, "decode q_len > 1 requires flat position_ids"
         if self._state_pool_3d is None or self._kv_pool_3d is None or self._kv_eb <= 0:
             return None
 
@@ -697,12 +700,38 @@ class CompressorFP8(nn.Module):
         )
         kv, score = fused_out[..., :out_dim], fused_out[..., out_dim:]
 
-        kv_flat = kv.reshape(bsz, -1).contiguous()
-        score_flat = score.reshape(bsz, -1).contiguous()
+        kv_flat = kv.reshape(T, -1).contiguous()
+        score_flat = score.reshape(T, -1).contiguous()
         if meta is None:
-            positions = start_pos.to(device=device, dtype=torch.long).reshape(bsz)
-            b_idx = torch.arange(bsz, device=device, dtype=torch.long)
-            meta = self.prepare_metadata(positions, b_idx)
+            if position_ids is None:
+                positions = start_pos.to(device=device, dtype=torch.long).reshape(bsz)
+                b_idx = torch.arange(bsz, device=device, dtype=torch.long)
+                meta = self.prepare_metadata(positions, b_idx)
+            else:
+                positions = (
+                    position_ids.to(device=device, dtype=torch.long)
+                    .reshape(T)
+                    .contiguous()
+                )
+                b_idx = torch.arange(bsz, device=device, dtype=torch.long)
+                b_idx = b_idx.repeat_interleave(q_len).contiguous()
+                position_ids_2d = positions.view(bsz, q_len)
+                cu_seq_per_req = torch.arange(
+                    0,
+                    (bsz + 1) * q_len,
+                    q_len,
+                    device=device,
+                    dtype=torch.int32,
+                )
+                meta = self.prepare_metadata(
+                    positions,
+                    b_idx,
+                    is_batched=q_len > 1,
+                    seq_start_per_req=position_ids_2d[:, 0]
+                    .to(torch.int32)
+                    .contiguous(),
+                    cu_seq_per_req=cu_seq_per_req,
+                )
         self._launch(kv_flat, score_flat, meta)
         return None
 

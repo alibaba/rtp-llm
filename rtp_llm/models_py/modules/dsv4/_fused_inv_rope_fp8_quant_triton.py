@@ -303,7 +303,7 @@ def _alloc_output_buffers(
 
 def fused_inv_rope_fp8_quant(
     o: torch.Tensor,  # [B, S, H, head_dim] or [M, H, head_dim] bf16
-    freqs_cis_per_b: torch.Tensor,  # [B, rope_head_dim // 2] complex64
+    freqs_cis_per_b: torch.Tensor,  # [B or M, rope_head_dim // 2] complex64
     n_groups: int,
     heads_per_group: int,
     nope_dim: int,
@@ -322,9 +322,8 @@ def fused_inv_rope_fp8_quant(
            ``[M, H, head_dim]`` bf16.  ``H == n_groups * heads_per_group``.
            ``head_dim == nope_dim + rope_head_dim`` and must be a multiple
            of ``quant_group_size``.
-        freqs_cis_per_b: Per-request rotation ``[B, rope_head_dim // 2]``
-           complex64 (same tensor consumed by ``apply_rotary_emb_batched``
-           with ``inverse=True`` today — we take ``.real`` / ``.imag``).
+        freqs_cis_per_b: Per-request ``[B, rope_head_dim // 2]`` or
+           per-token ``[M, rope_head_dim // 2]`` complex64 rotations.
         n_groups, heads_per_group: wo_a grouping.
         nope_dim, rope_head_dim: per-head NoPE / RoPE split.
         quant_group_size: FP8 quant block size along K (fixed at 128 for V4).
@@ -351,9 +350,17 @@ def fused_inv_rope_fp8_quant(
     # Normalize input to [M, H, D]
     if o.dim() == 4:
         B, S, H, D = o.shape
-        q_len_per_b = S
         M = B * S
         o_flat = o.view(M, H, D)
+        freq_rows = int(freqs_cis_per_b.shape[0])
+        if freq_rows == M:
+            q_len_per_b = 1
+        elif freq_rows == B:
+            q_len_per_b = S
+        else:
+            raise AssertionError(
+                f"freq rows must be B={B} or M={M}; got {freq_rows}"
+            )
     else:
         assert o.dim() == 3
         M, H, D = o.shape
