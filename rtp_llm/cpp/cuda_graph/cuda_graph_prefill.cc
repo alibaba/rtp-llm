@@ -71,8 +71,18 @@ void CudaGraphRunner::capturePrefill() {
         graph_instances_[seq_len].mem_hold_ = createCaptureMemoryHold(inputs, max_bs_ * num_tokens_per_bs_);
         graph_instances_[seq_len].mem_hold_.attn_pyobj_ =
             py_attn_pyobj_method_(graph_instances_[seq_len].mem_hold_.py_model_inputs_, true);
-        graph_instances_[seq_len].mem_hold_.decoder_layer_hidden_states_ =
-            graph_instances_[seq_len].mem_hold_.decoder_layer_hidden_states_.slice(0, 0, seq_len);
+        // Draft prefill graph mode (num_tokens_per_bs_ != max_seq_len_) routes
+        // through ``forward_decode`` whose output is ``[B * q_len, dim]`` —
+        // i.e. always the full ``max_bs_ * num_tokens_per_bs_``. Slicing the
+        // output buffer to ``seq_len`` here would produce a copy-size
+        // mismatch in ``captureOneGraphInstance``'s
+        // ``decoder_layer_hidden_states_.copy_(outputs.hidden_states)``.
+        // Embedding prefill (num_tokens_per_bs_ == max_seq_len_) still needs
+        // the per-seq_len slice because its output shape is ``[seq_len, dim]``.
+        if (num_tokens_per_bs_ == max_seq_len_) {
+            graph_instances_[seq_len].mem_hold_.decoder_layer_hidden_states_ =
+                graph_instances_[seq_len].mem_hold_.decoder_layer_hidden_states_.slice(0, 0, seq_len);
+        }
         capturePrefillOneSeqLen(seq_len);
         replayAndSyncCheck(seq_len, "seq len");
         RTP_LLM_LOG_INFO("capture success for seq_len: %d", seq_len);

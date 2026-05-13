@@ -40,6 +40,7 @@ public:
     GptModelOutputs forward(const GptModelInputs& inputs) override;
     GptModelOutputs forwardMicroBatched(const GptModelInputs& inputs);
     void            releaseBuffers() override;
+    torch::Tensor   getMtpTargetHiddenStates(int64_t num_tokens) override;
 
 private:
     std::optional<PyCacheStoreInputs> prepareWriteCacheParams(const GptModelInputs& inputs);
@@ -186,6 +187,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
 
         init_resources.kv_cache = kv_cache;
     }
+    init_resources.is_speculative = (params.sp_config.type != SP_TYPE_NONE);
 
     py::object py_init_result;
     // Always initialize py_model_ so it can be used as fallback when CUDA graph cannot run
@@ -217,6 +219,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_params.tokens_per_block             = params.tokens_per_block;
         graph_params.kernel_tokens_per_block      = params.kernel_tokens_per_block;
         graph_params.hidden_size                  = params.hidden_size;
+        graph_params.hc_mult                      = params.hc_mult;
         graph_params.model_data_type              = dtype;
         graph_params.max_context_batch_size       = params.concurrency_config.concurrency_limit;
         graph_params.prefill_capture_seq_lens     = params.hw_kernel_config.prefill_capture_seq_lens;
@@ -245,7 +248,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         if (is_prefill_cuda_graph_mode && params.sp_config.type == SP_TYPE_NONE) {
             // for embedding model
             graph_params.num_tokens_per_bs = params.max_seq_len;
-        } else if (params.sp_config.type != SP_TYPE_NONE && params.sp_config.gen_num_per_cycle > 1
+        } else if (params.sp_config.type != SP_TYPE_NONE && params.sp_config.gen_num_per_cycle > 0
                    && (!params.model_id || is_prefill_cuda_graph_mode)) {
             // for target model verify and draft model prefill
             // Only use multi-token capture when SP is actually enabled;
@@ -254,7 +257,18 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         } else {
             graph_params.num_tokens_per_bs = 1;
         }
-        graph_params.is_target_verify = use_spec_decoding;
+        // Target-model decode path with SP enabled (num_tokens_per_bs>1,
+        // not prefill-graph, model_id==0) must set is_target_verify so the
+        // Python dispatch routes through forward_decode.  NormalExecutor's
+        // decodeWarmUp path defaults use_spec_decoding=false but still sees
+        // sp_config enabled, so infer the flag from config instead of
+        // relying solely on the constructor arg.
+        const bool is_target_verify_decode =
+            params.sp_config.type != SP_TYPE_NONE
+            && params.sp_config.gen_num_per_cycle > 0
+            && !params.model_id
+            && !is_prefill_cuda_graph_mode;
+        graph_params.is_target_verify = use_spec_decoding || is_target_verify_decode;
         if (params.sp_config.type != SP_TYPE_NONE) {
             graph_params.sp_steps = params.sp_config.gen_num_per_cycle;
         }
