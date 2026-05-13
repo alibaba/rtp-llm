@@ -19,14 +19,16 @@ except Exception:  # pragma: no cover
 
 if _TRITON_AVAILABLE:
 
-    @triton.jit
+    @triton.jit(
+        do_not_specialize=["S", "WINDOW", "SEQ_LEN_TOTAL", "W_ACTIVE"]
+    )
     def _cp_window_topk_kernel(
         global_pos_ptr,
         out_ptr,
-        S: tl.constexpr,
-        WINDOW: tl.constexpr,
-        SEQ_LEN_TOTAL: tl.constexpr,
-        W_ACTIVE: tl.constexpr,
+        S,
+        WINDOW,
+        SEQ_LEN_TOTAL,
+        W_ACTIVE,
         BLOCK_N: tl.constexpr,
     ):
         b = tl.program_id(0)
@@ -49,14 +51,14 @@ if _TRITON_AVAILABLE:
             mask=cols < WINDOW,
         )
 
-    @triton.jit
+    @triton.jit(do_not_specialize=["S", "T_COMP", "OFFSET"])
     def _cp_compress_topk_kernel(
         global_pos_ptr,
         out_ptr,
-        S: tl.constexpr,
-        T_COMP: tl.constexpr,
+        S,
+        T_COMP,
         RATIO: tl.constexpr,
-        OFFSET: tl.constexpr,
+        OFFSET,
         BLOCK_N: tl.constexpr,
     ):
         b = tl.program_id(0)
@@ -69,14 +71,14 @@ if _TRITON_AVAILABLE:
         vals = tl.where(valid, cols.to(tl.int64) + OFFSET, -1)
         tl.store(out_ptr + (b * S + s) * T_COMP + cols, vals, mask=cols < T_COMP)
 
-    @triton.jit
+    @triton.jit(do_not_specialize=["B", "T", "MAX_BLOCKS"])
     def _pool_slots_kernel(
         block_table_ptr,
         valid_ptr,
         safe_slot_ptr,
-        B: tl.constexpr,
-        T: tl.constexpr,
-        MAX_BLOCKS: tl.constexpr,
+        B,
+        T,
+        MAX_BLOCKS,
         EB: tl.constexpr,
         BLOCK_N: tl.constexpr,
     ):
@@ -98,20 +100,22 @@ if _TRITON_AVAILABLE:
         tl.store(valid_ptr + off, valid, mask=pos < T)
         tl.store(safe_slot_ptr + off, slot, mask=pos < T)
 
-    @triton.jit
+    @triton.jit(
+        do_not_specialize=["B", "T", "MAX_BLOCKS", "SP_VALUE", "SEQ_VALUE"]
+    )
     def _swa_pool_slot_mapping_kernel(
         block_table_ptr,
         sp_ptr,
         seq_ptr,
         out_ptr,
-        B: tl.constexpr,
-        T: tl.constexpr,
-        MAX_BLOCKS: tl.constexpr,
+        B,
+        T,
+        MAX_BLOCKS,
         EB: tl.constexpr,
         HAS_SP_TENSOR: tl.constexpr,
         HAS_SEQ_TENSOR: tl.constexpr,
-        SP_VALUE: tl.constexpr,
-        SEQ_VALUE: tl.constexpr,
+        SP_VALUE,
+        SEQ_VALUE,
         BLOCK_N: tl.constexpr,
     ):
         b = tl.program_id(0)
