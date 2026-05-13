@@ -6,8 +6,7 @@ import unittest
 from typing import Dict
 from unittest.mock import MagicMock, patch
 
-from rtp_llm.server.host_service import FlexlbHeartbeatInfo
-from rtp_llm.server.host_service import MasterService
+from rtp_llm.server.host_service import FlexlbHeartbeatInfo, MasterService
 from rtp_llm.vipserver.host import Host
 
 

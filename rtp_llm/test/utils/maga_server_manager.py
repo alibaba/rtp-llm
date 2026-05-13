@@ -250,7 +250,13 @@ class MagaServerManager(object):
             self._file_stream = None
         return True
 
-    def visit(self, query: Dict[str, Any], retry_times: int, endpoint: str = "/"):
+    def visit(
+        self,
+        query: Dict[str, Any],
+        retry_times: int,
+        endpoint: str = "/",
+        timeout: Optional[float] = None,
+    ):
         logging.info(f"retry times: {retry_times}")
         port_offset = 5 if int(self._env_args.get("HTTP_API_TEST", 0)) else 0
         # for dp test, random select dp for visit
@@ -266,7 +272,7 @@ class MagaServerManager(object):
         for _ in range(retry_times):
             try:
                 logging.info(f"curl {url} -d '{json.dumps(query)}'")
-                response = requests.post(url, json=query)
+                response = requests.post(url, json=query, timeout=timeout)
                 if response.status_code == 200:
                     logging.debug("%s", response.text)
                 else:

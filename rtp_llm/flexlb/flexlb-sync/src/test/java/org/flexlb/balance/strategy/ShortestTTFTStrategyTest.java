@@ -37,6 +37,7 @@ class ShortestTTFTStrategyTest {
 
         EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig());
         Map<String/*ip*/, WorkerStatus> prefillStatusMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        prefillStatusMap.clear();
         Map<String, TaskInfo> waitingTaskList = new HashMap<>();
         Map<String, TaskInfo> runningTaskList = new HashMap<>();
         Map<String, TaskInfo> finishedTaskList = new HashMap<>();
@@ -81,6 +82,61 @@ class ShortestTTFTStrategyTest {
         }
         Assertions.assertTrue(result.isSuccess(), "Result should be successful but got: " + result.getMessage());
         Assertions.assertEquals("127.0.0.2", result.getServerIp());
+        Assertions.assertNotNull(result.getDebugInfo());
+        Assertions.assertEquals(0, result.getDebugInfo().getHitCacheLen());
+    }
+
+    @Test
+    void selectShouldExposeCacheHitDebugInfo() {
+        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig());
+        Map<String, WorkerStatus> prefillStatusMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        prefillStatusMap.clear();
+
+        WorkerStatus cachedWorker = createWorkerStatus(
+                "127.0.0.1",
+                200,
+                new HashMap<>(),
+                new HashMap<>(),
+                new HashMap<>(),
+                new ConcurrentHashMap<>());
+        WorkerStatus uncachedWorker = createWorkerStatus(
+                "127.0.0.2",
+                100,
+                new HashMap<>(),
+                new HashMap<>(),
+                new HashMap<>(),
+                new ConcurrentHashMap<>());
+        prefillStatusMap.put(cachedWorker.getIpPort(), cachedWorker);
+        prefillStatusMap.put(uncachedWorker.getIpPort(), uncachedWorker);
+
+        Request req = new Request();
+        req.setSeqLen(1000);
+        req.setRequestId(12345L);
+        req.setBlockCacheKeys(List.of(1L, 2L));
+
+        Map<String, Integer> cacheMatches = new HashMap<>();
+        cacheMatches.put(cachedWorker.getIpPort(), 2);
+
+        EngineHealthReporter engineHealthReporter = Mockito.mock(EngineHealthReporter.class);
+        CacheAwareService cacheAwareService = Mockito.mock(CacheAwareService.class);
+        ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
+        org.flexlb.balance.resource.ResourceMeasure resourceMeasure = Mockito.mock(org.flexlb.balance.resource.ResourceMeasure.class);
+        Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(resourceMeasure);
+        Mockito.when(resourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
+        Mockito.when(cacheAwareService.findMatchingEngines(Mockito.anyList(), Mockito.any(), Mockito.any())).thenReturn(cacheMatches);
+
+        ShortestTTFTStrategy loadBalancer =
+                new ShortestTTFTStrategy(engineWorkerStatus, engineHealthReporter, cacheAwareService, resourceMeasureFactory);
+        BalanceContext balanceContext = new BalanceContext();
+        balanceContext.setConfig(new FlexlbConfig());
+        balanceContext.setRequest(req);
+
+        ServerStatus result = loadBalancer.select(balanceContext, RoleType.PREFILL, null);
+
+        Assertions.assertTrue(result.isSuccess(), "Result should be successful but got: " + result.getMessage());
+        Assertions.assertEquals("127.0.0.1", result.getServerIp());
+        Assertions.assertNotNull(result.getDebugInfo());
+        Assertions.assertEquals(512, result.getDebugInfo().getHitCacheLen());
     }
 
     @Test

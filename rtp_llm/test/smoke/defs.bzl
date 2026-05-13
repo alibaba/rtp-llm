@@ -88,8 +88,74 @@ def get_aiter_envs(name, envs):
     # files in bazel-out/k8-opt/bin
     return ["AITER_ASM_DIR=../../../../../../../bin/internal_source/rtp_llm/test/smoke/" + name + ".runfiles/pip_gpu_rocm_torch_aiter/site-packages/aiter_meta/hsa/"]
 
+def json_quote(value):
+    return "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+
+def arg_json_quote(value):
+    return "\\\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\\\""
+
+def role_uses_gpu(role):
+    return role != "frontend" and role != "flexlb"
+
+def envs_have_assignment(envs, key):
+    prefix = key + "="
+    if type(envs) == "list":
+        for env in envs:
+            if env.startswith(prefix):
+                return True
+    elif type(envs) == "dict":
+        for role_envs in envs.values():
+            for env in role_envs:
+                if env.startswith(prefix):
+                    return True
+    return False
+
+def normalize_frontend_flexlb(
+        smoke_args,
+        data,
+        envs,
+        enable_frontend_flexlb,
+        flexlb_data):
+    if type(smoke_args) != "dict":
+        return smoke_args, data
+
+    # Frontend-separated suites that are intended to cover the production
+    # frontend -> FlexLB -> backend path should declare the flexlb role
+    # explicitly. The enable_frontend_flexlb switch is kept as a local migration
+    # helper for suites that want macro-level injection, while ordinary
+    # smoke_test callers keep their declared topology.
+    if (enable_frontend_flexlb and
+        "frontend" in smoke_args and
+        "flexlb" not in smoke_args):
+        next_smoke_args = {}
+        for k, v in smoke_args.items():
+            next_smoke_args[k] = v
+        next_smoke_args["flexlb"] = ""
+        smoke_args = next_smoke_args
+
+    if "flexlb" not in smoke_args:
+        return smoke_args, data
+
+    if flexlb_data == "auto":
+        flexlb_data = not envs_have_assignment(envs, "FLEXLB_JAR_PATH")
+    elif type(flexlb_data) != "bool":
+        fail("flexlb_data must be True, False, or \"auto\"")
+
+    if flexlb_data and "//rtp_llm/flexlb:flexlb_api_jar" not in data:
+        data = data + ["//rtp_llm/flexlb:flexlb_api_jar"]
+    return smoke_args, data
+
 def smoke_test(name, task_info, tags=[], envs=[], gpu_type=[], data=[], smoke_args="",
-               kvcm_envs=[], sleep_time_qr=0, kill_remote=False, concurrency_test=False):
+               kvcm_envs=[], sleep_time_qr=0, kill_remote=False,
+               concurrency_test=False, enable_frontend_flexlb=False,
+               flexlb_data="auto"):
+    smoke_args, data = normalize_frontend_flexlb(
+        smoke_args,
+        data,
+        envs,
+        enable_frontend_flexlb,
+        flexlb_data,
+    )
     path = '/'.join(task_info.split('/')[:-1])
     data = data + native.glob([path + '/*.pt',
                                path + '/*.jpg',
@@ -106,8 +172,9 @@ def smoke_test(name, task_info, tags=[], envs=[], gpu_type=[], data=[], smoke_ar
             v = envs.get(k, []) if type(envs) == "dict" else []
             world_size = get_world_size_from_smoke_args(role_args)
             v = v + ['WORLD_SIZE=' + str(world_size)]
-            gpu_count += world_size
-            part_env_list.append("\"" + k + "\": " + "[" + ",".join(["\"" + x + "\"" for x in v]) +  "]")
+            if role_uses_gpu(k):
+                gpu_count += world_size
+            part_env_list.append(json_quote(k) + ": " + "[" + ",".join([json_quote(x) for x in v]) +  "]")
             data.extend(extract_data(v))
         env_str = "'{" + ','.join(part_env_list) + "}'"
     else:
@@ -115,7 +182,7 @@ def smoke_test(name, task_info, tags=[], envs=[], gpu_type=[], data=[], smoke_ar
         world_size = get_world_size_from_smoke_args(smoke_args)
         envs_list = envs_list + ['WORLD_SIZE=' + str(world_size)]
         gpu_count += world_size
-        env_str = "[" + ",".join(["\\\"" + x + "\\\"" for x in envs_list]) +  "]"
+        env_str = "[" + ",".join([arg_json_quote(x) for x in envs_list]) +  "]"
         data.extend(extract_data(envs_list))
 
     if type(smoke_args) == 'string':
@@ -123,15 +190,14 @@ def smoke_test(name, task_info, tags=[], envs=[], gpu_type=[], data=[], smoke_ar
     elif type(smoke_args) == 'dict':
         part_args_list = []
         for k, v in smoke_args.items():
-            part_args_list.append("\"" + k + "\": " + "\"" + v + "\"")
+            part_args_list.append(json_quote(k) + ": " + json_quote(v))
         smoke_args_str = "'{" + ','.join(part_args_list) + "}'"
     elif type(smoke_args) == 'list':
         smoke_args_str = "\"" + " ".join(smoke_args) + "\""
     else:
         fail("unknown smoke_args type: " + str(type(smoke_args)))
 
-    kvcm_envs_str = "[" + ",".join(["\\\"" + x + "\\\"" for x in kvcm_envs]) + "]"
-
+    kvcm_envs_str = "[" + ",".join([arg_json_quote(x) for x in kvcm_envs]) + "]"
     local_srcs = native.glob(["*.py", "mainse/*.py"])
     has_entry = bool([f for f in local_srcs if f == "entry.py" or f.endswith("/entry.py")])
     if has_entry:

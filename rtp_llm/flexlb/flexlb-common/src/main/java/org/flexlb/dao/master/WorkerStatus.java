@@ -51,6 +51,7 @@ public class WorkerStatus {
      */
     private List<DpRankStatus> dpStatuses = List.of();
 
+    private AtomicLong statusFirstSeenTimeUs = new AtomicLong(System.nanoTime() / 1000); // First discovery time (microseconds)
     private AtomicLong statusLastUpdateTime = new AtomicLong(-1); // Last status update time (microseconds)
     private AtomicLong statusUpdateIntervalUs = new AtomicLong(0); // Actual interval between last two status updates (microseconds)
     private AtomicLong cacheLastUpdateTime = new AtomicLong(-1); // Last cache status update time

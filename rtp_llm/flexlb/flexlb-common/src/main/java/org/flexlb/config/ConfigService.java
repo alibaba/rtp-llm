@@ -86,6 +86,7 @@ public class ConfigService {
                 || type == Double.class
                 || type == boolean.class
                 || type == Boolean.class
+                || type == String.class
                 || type.isEnum();
     }
 
@@ -118,6 +119,8 @@ public class ConfigService {
             return Double.parseDouble(value);
         } else if (targetType == boolean.class || targetType == Boolean.class) {
             return Boolean.parseBoolean(value);
+        } else if (targetType == String.class) {
+            return value;
         } else if (targetType.isEnum()) {
             return Enum.valueOf((Class<Enum>) targetType, value);
         }

@@ -1,18 +1,22 @@
 import copy
 import json
-from typing import Any, Dict, List, Optional, Union
+import logging
 import os
+from enum import Enum
+from typing import Any, Dict, List, Optional, Union
+
 import torch
 from pydantic import BaseModel
 from smoke.base_comparer import BaseComparer
-from smoke.common_def import QueryStatus, SmokeException, REL_PATH
+from smoke.common_def import REL_PATH, QueryStatus, SmokeException
 from smoke.utils import create_temporary_copy
-from rtp_llm.utils.base_model_datatypes import AuxInfo
+
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatCompletionResponse,
     ChatCompletionStreamResponse,
 )
+from rtp_llm.utils.base_model_datatypes import AuxInfo
 
 
 class OpenaiComparer(BaseComparer):
@@ -26,10 +30,12 @@ class OpenaiComparer(BaseComparer):
         return query_info
 
     def format_result(self, result_json: Dict[str, Any]) -> BaseModel:
-        if result_json.get('extra_outputs', None) is not None:
-            path = result_json['extra_outputs'].get('all_hidden_states', None)
+        if result_json.get("extra_outputs", None) is not None:
+            path = result_json["extra_outputs"].get("all_hidden_states", None)
             if path is not None and isinstance(path, str):
-                result_json['extra_outputs']['all_hidden_states'] = torch.load(os.path.join(REL_PATH, path)).numpy().tolist()
+                result_json["extra_outputs"]["all_hidden_states"] = (
+                    torch.load(os.path.join(REL_PATH, path)).numpy().tolist()
+                )
         if self.is_stream:
             return ChatCompletionStreamResponse(**result_json)
         else:
@@ -166,7 +172,9 @@ class OpenaiComparer(BaseComparer):
     def _to_json_safe(self, value: Any) -> Any:
         """Convert value to JSON-serializable form (e.g. BaseModel -> dict)."""
         if isinstance(value, BaseModel):
-            return value.model_dump()
+            return self._to_json_safe(value.model_dump(mode="json"))
+        if isinstance(value, Enum):
+            return value.value
         if isinstance(value, list):
             return [self._to_json_safe(x) for x in value]
         if isinstance(value, dict):
@@ -212,6 +220,79 @@ class OpenaiComparer(BaseComparer):
         lines.append("")
         lines.append("=" * 60)
         return "\n".join(lines)
+
+    def _content_alternatives_by_choice(self) -> Dict[int, List[str]]:
+        """Return optional accepted message.content alternatives by choice index.
+
+        NormalComparer already supports response_alternatives for /batch_infer
+        smoke data. OpenAI chat smoke needs the same narrowly-scoped escape
+        hatch for models whose deterministic decode has two observed stable
+        strings on different CI hosts. The alternative is only applied to
+        choices[i].message.content; every other response field remains strict.
+        """
+
+        raw_alternatives = self.qr_info.get("result", {}).get("content_alternatives")
+        if raw_alternatives is None:
+            return {}
+
+        alternatives_by_choice: Dict[int, List[str]] = {}
+        if isinstance(raw_alternatives, list):
+            for index, alternatives in enumerate(raw_alternatives):
+                if isinstance(alternatives, str):
+                    alternatives_by_choice[index] = [alternatives]
+                elif isinstance(alternatives, list):
+                    alternatives_by_choice[index] = [
+                        item for item in alternatives if isinstance(item, str)
+                    ]
+            return alternatives_by_choice
+
+        if isinstance(raw_alternatives, dict):
+            for raw_index, alternatives in raw_alternatives.items():
+                try:
+                    index = int(raw_index)
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(alternatives, str):
+                    alternatives_by_choice[index] = [alternatives]
+                elif isinstance(alternatives, list):
+                    alternatives_by_choice[index] = [
+                        item for item in alternatives if isinstance(item, str)
+                    ]
+        return alternatives_by_choice
+
+    def _choices_match_with_content_alternatives(
+        self,
+        expect_choices: List[Any],
+        actual_choices: List[Any],
+    ) -> bool:
+        alternatives_by_choice = self._content_alternatives_by_choice()
+        if not alternatives_by_choice or len(expect_choices) != len(actual_choices):
+            return False
+
+        normalized_expect = copy.deepcopy(expect_choices)
+        for index, (expect_choice, actual_choice) in enumerate(
+            zip(normalized_expect, actual_choices)
+        ):
+            expect_message = getattr(expect_choice, "message", None)
+            actual_message = getattr(actual_choice, "message", None)
+            if expect_message is None or actual_message is None:
+                return False
+            if expect_message.content == actual_message.content:
+                continue
+            alternatives = alternatives_by_choice.get(index, [])
+            if actual_message.content not in alternatives:
+                return False
+            logging.info(
+                "[STABILITY_DIAG] OpenAI content matched alternative: "
+                "choice=%d primary=%r actual=%r alternatives=%r",
+                index,
+                expect_message.content,
+                actual_message.content,
+                alternatives,
+            )
+            expect_message.content = actual_message.content
+
+        return normalized_expect == actual_choices
 
     def compare_result(
         self,
@@ -267,7 +348,12 @@ class OpenaiComparer(BaseComparer):
         expect_logprobs, expect_choices = self.extract_logprobs(expect_result.choices)
         actual_logprobs, actual_choices = self.extract_logprobs(actual_result.choices)
 
-        if expect_choices != actual_choices:
+        if (
+            expect_choices != actual_choices
+            and not self._choices_match_with_content_alternatives(
+                expect_choices, actual_choices
+            )
+        ):
             diffs.append(
                 self._format_expect_actual(
                     "choices not equal (after normalizing logprobs)",
@@ -408,13 +494,16 @@ class OpenaiComparer(BaseComparer):
             return
 
         obj1, obj2 = expect_aux, actual_aux
-        ignore_fields = set([
-            "cost_time",
-            "wait_time",
-            "first_token_cost_time",
-            "role_addrs.http_port",
-            "role_addrs.grpc_port",
-        ])
+        ignore_fields = set(
+            [
+                "cost_time",
+                "wait_time",
+                "first_token_cost_time",
+                "role_addrs.ip",
+                "role_addrs.http_port",
+                "role_addrs.grpc_port",
+            ]
+        )
         top_level_ignore = set()
         nested_ignore: Dict[str, set] = {}
         for field in ignore_fields:

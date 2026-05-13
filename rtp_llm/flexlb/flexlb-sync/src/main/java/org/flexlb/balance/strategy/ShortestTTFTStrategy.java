@@ -7,6 +7,7 @@ import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.TaskInfo;
@@ -433,6 +434,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
             result.setServerIp(workerStatus.getIp());
             result.setHttpPort(workerStatus.getPort());
             result.setGrpcPort(CommonUtils.toGrpcPort(workerStatus.getPort()));
+            result.setDebugInfo(buildDebugInfo(selectedWorker, workerStatus));
         } catch (Exception e) {
             Logger.error("Failed to build server status for requestId: {}", requestId, e);
             result.setCode(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode());
@@ -440,6 +442,19 @@ public class ShortestTTFTStrategy implements LoadBalancer {
             result.setSuccess(false);
         }
         return result;
+    }
+
+    private DebugInfo buildDebugInfo(ScoredWorker selectedWorker, WorkerStatus workerStatus) {
+        DebugInfo debugInfo = new DebugInfo();
+        debugInfo.setHitCacheLen(selectedWorker.hitCacheTokens());
+        debugInfo.setEstimateTtftMs(selectedWorker.ttft());
+        debugInfo.setQueueSize(
+                workerStatus.getWaitingTaskList() == null
+                        ? 0
+                        : workerStatus.getWaitingTaskList().size());
+        debugInfo.setWaitingTimeMs(workerStatus.getRunningQueueTime().get());
+        debugInfo.setAvailableKvCacheLen(workerStatus.getAvailableKvCacheTokens().get());
+        return debugInfo;
     }
 
     /**
