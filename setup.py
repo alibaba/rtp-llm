@@ -9,13 +9,14 @@ Wheel naming follows vllm convention:
   rtp_llm-{VERSION}+{PLATFORM}-cp{PY}-cp{PY}-{PLATFORM_TAG}.whl
 
 Examples:
-  rtp_llm-0.1.0+cu126-cp310-cp310-manylinux_2_28_x86_64.whl
-  rtp_llm-0.1.0+rocm62-cp310-cp310-linux_x86_64.whl
+  rtp_llm-0.2.0+cu126-cp310-cp310-manylinux_2_28_x86_64.whl
+  rtp_llm-0.2.0+rocm62-cp310-cp310-linux_x86_64.whl
 """
 import datetime
 import json
 import os
 import platform
+import re
 import shutil
 import socket
 import subprocess
@@ -60,8 +61,6 @@ from _build.platform import (  # noqa: E402
     should_skip_bazel_build,
 )
 
-# Base version from pyproject.toml
-BASE_VERSION = "0.1.0"
 _REMOTE_TESTS_PROTO_DIR = "rtp_llm/test/remote_tests"
 # Protobuf sources + outputs for pytest REAPI client (generated during pip install / build_ext).
 REMOTE_TESTS_PROTO_SOURCES = [
@@ -90,14 +89,31 @@ def get_project_root() -> Path:
     return Path(__file__).parent.absolute()
 
 
+def get_release_version(project_root: Path = None) -> str:
+    """Read the canonical package version without importing rtp_llm."""
+    project_root = project_root or get_project_root()
+    version_file = project_root / "rtp_llm" / "release_version.py"
+    try:
+        text = version_file.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(
+            f"Failed to read release version from {version_file}"
+        ) from exc
+
+    match = re.search(r'^RELEASE_VERSION\s*=\s*["\']([^"\']+)["\']', text, re.M)
+    if not match:
+        raise RuntimeError(f"RELEASE_VERSION not found in {version_file}")
+    return match.group(1)
+
+
 def get_version_with_platform() -> str:
     """Get version string with platform suffix.
 
-    Returns version like: 0.1.0+cu129 or 0.1.0+cu126
+    Returns version like: 0.2.0+cu129 or 0.2.0+cu126
     Platform is always auto-detected from environment.
     """
     detected = detect_build_config()
-    return f"{BASE_VERSION}+{get_platform_config_versions()[detected]}"
+    return f"{get_release_version()}+{get_platform_config_versions()[detected]}"
 
 
 def get_platform_tag() -> str:
@@ -479,14 +495,15 @@ def _load_remote_config() -> dict:
     base = get_project_root() / "pyproject.toml"
     if base.exists():
         cfg.update(
-            _read_toml_file(base)
-            .get("tool", {}).get("rtp-llm", {}).get("remote", {})
+            _read_toml_file(base).get("tool", {}).get("rtp-llm", {}).get("remote", {})
         )
     overlay = _find_overlay("internal_source/pyproject_internal.toml")
     if overlay:
         cfg.update(
             _read_toml_file(overlay)
-            .get("tool", {}).get("rtp-llm", {}).get("remote", {})
+            .get("tool", {})
+            .get("rtp-llm", {})
+            .get("remote", {})
         )
     return cfg
 
@@ -668,7 +685,9 @@ def _include_remote_kvcm_runtime_outputs(bazel_args: list) -> bool:
         .get("rtp-llm", {})
         .get("remote_kvcm_skip_configs", [])
     )
-    return not any(name in skip_configs or "arm" in name.lower() for name in config_names)
+    return not any(
+        name in skip_configs or "arm" in name.lower() for name in config_names
+    )
 
 
 def _selected_bazel_staged_outputs(build_config: str, bazel_args: list = None) -> list:
@@ -1042,7 +1061,7 @@ def generate_pyi_stubs(project_root: Path) -> None:
     ops_dir = project_root / "rtp_llm" / "ops"
     modules = ["libth_transformer_config", "libth_transformer", "librtp_compute_ops"]
     failures: list = []  # list of (module, exit_code, stderr) — real .so bugs
-    skipped: list = []   # list of (module, stderr) — host can't dlopen target
+    skipped: list = []  # list of (module, stderr) — host can't dlopen target
 
     # Host-environment shape: dynamic linker can't find a system shared lib
     # the .so links against (libcuda.so.1 on a CPU-only frontend container,
@@ -1107,7 +1126,9 @@ def generate_pyi_stubs(project_root: Path) -> None:
             )
         else:
             failures.append((module, result.returncode, result.stderr))
-            print(f"  ERROR: pybind11_stubgen failed for {module} (exit={result.returncode})")
+            print(
+                f"  ERROR: pybind11_stubgen failed for {module} (exit={result.returncode})"
+            )
             print("  --- stderr (full) ---")
             print(result.stderr or "<empty>")
             print("  --- end stderr ---")
@@ -1619,8 +1640,12 @@ if __name__ == "__main__":
         cmdclass=cmdclass,
         entry_points={
             "pytest11": [
+                # These plugins intentionally live under rtp_llm.test.* and
+                # tests are packaged in the wheel so installed pytest sessions
+                # can load the same CI helpers used from a source checkout.
                 "remote-gpu = rtp_llm.test.remote_tests.plugin",
                 "rtp-ci-profile = rtp_llm.test.ci_profile_plugin",
+                "smoke-runs-per-test = rtp_llm.test.smoke_framework.runs_plugin",
             ],
         },
     )

@@ -30,6 +30,9 @@ SMOKE_CASES = {
         "markers": ["smoke", "cuda", "SM100_ARM"],
         "timeout": 600,
     },
+    # This task_info intentionally references the internal SM100 smoke model
+    # mount. It is kept in the OSS suite so installed smoke tooling can load
+    # the same manifest shape, but the case only runs in that internal env.
     "fp8_attention_sm100": {
         "task_info": "data/model/qwen3/q_r_block_fp8_sm100.json",
         "smoke_args": "--act_type BF16 --seq_size_per_block 64 --fp8_kv_cache 1 "

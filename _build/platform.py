@@ -37,6 +37,8 @@ from pathlib import Path
 #   --config=cuda12_6     CUDA 12.6
 #   --config=cuda12_9     CUDA 12.9
 #   --config=rocm         ROCm/AMD
+#   --config=cpu / --config=arm are deprecated for pip packaging. They remain
+#   Bazel concepts only and intentionally have no platform dependency mapping.
 #
 # ============================================================================
 
@@ -55,6 +57,8 @@ CONFIG_TO_EXTRAS = {
     "cuda12_9_arm": "cuda12_arm",
     "rocm": "rocm",
 }
+
+DEPRECATED_PIP_PLATFORM_CONFIGS = frozenset({"cpu", "arm"})
 
 
 # ---------------------------------------------------------------------------
@@ -223,6 +227,17 @@ def extract_platform_from_config() -> str:
     return ""
 
 
+def extract_deprecated_platform_from_config() -> str:
+    """Return deprecated CPU/ARM platform configs requested explicitly."""
+    bazel_config = _get_bazel_config()
+    for arg in bazel_config.split():
+        if arg.startswith("--config="):
+            config_value = arg.split("=", 1)[1]
+            if config_value in DEPRECATED_PIP_PLATFORM_CONFIGS:
+                return config_value
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # Filesystem platform detection
 # ---------------------------------------------------------------------------
@@ -246,6 +261,16 @@ def _get_cuda_version_from_json() -> str | None:
         return None
 
 
+def _parse_cuda_major_minor(version_str: str) -> tuple[int, int] | None:
+    parts = version_str.split(".")
+    if len(parts) < 2:
+        return None
+    try:
+        return int(parts[0]), int(parts[1])
+    except ValueError:
+        return None
+
+
 def _get_cuda_config_from_version(version_str: str) -> str:
     """Map CUDA version string to config name.
 
@@ -258,15 +283,13 @@ def _get_cuda_config_from_version(version_str: str) -> str:
     if not version_str:
         return "cuda12_6"
 
-    parts = version_str.split(".")
-    if len(parts) >= 2:
-        version_key = f"{parts[0]}.{parts[1]}"
-        if version_key >= "12.9":
+    version_key = _parse_cuda_major_minor(version_str)
+    if version_key:
+        if version_key >= (12, 9):
             return "cuda12_9"
-        elif version_key >= "12.6":
+        if version_key >= (12, 6):
             return "cuda12_6"
-        else:
-            return "cuda12_6"
+        return "cuda12_6"
 
     return "cuda12_6"
 
@@ -312,7 +335,9 @@ def _detect_overlay_build_config(verbose: bool = True) -> str:
     if detector is None:
         return ""
     if not callable(detector):
-        raise RuntimeError("platform detector overlay detect_build_config is not callable")
+        raise RuntimeError(
+            "platform detector overlay detect_build_config is not callable"
+        )
 
     known_configs = get_platform_config_versions()
     build_config = detector(known_configs)
@@ -389,6 +414,15 @@ def detect_build_config(verbose: bool = True) -> str:
     if _cached_build_config is not None:
         return _cached_build_config
 
+    deprecated_config = extract_deprecated_platform_from_config()
+    if deprecated_config:
+        raise RuntimeError(
+            f"RTP_BAZEL_CONFIG requests deprecated pip platform config "
+            f"{deprecated_config!r}. CPU/ARM dependency resolution is no longer "
+            "supported by setup.py; use a supported accelerator config "
+            "(cuda12_6, cuda12_9, cuda12_9_arm, rocm, or an overlay config)."
+        )
+
     # 1. Check RTP_BAZEL_CONFIG first
     build_config = extract_platform_from_config()
     if build_config:
@@ -422,9 +456,19 @@ def detect_build_config(verbose: bool = True) -> str:
         _cached_build_config = "rocm"
         return "rocm"
 
+    if should_skip_bazel_build():
+        raise RuntimeError(
+            "Cannot detect a supported accelerator build configuration for "
+            "deps-only install. CPU/ARM pip packaging paths are deprecated; set "
+            "RTP_BAZEL_CONFIG to a supported accelerator config such as "
+            "'--config=cuda12_9' or '--config=rocm'."
+        )
+
     raise RuntimeError(
-        "Cannot detect build configuration. Please set RTP_BAZEL_CONFIG environment variable. "
-        "Example: export RTP_BAZEL_CONFIG='--config=cuda12_6 --config=sm9x'"
+        "Cannot detect build configuration. Please set RTP_BAZEL_CONFIG to a "
+        "supported accelerator config. Example: export "
+        "RTP_BAZEL_CONFIG='--config=cuda12_6 --config=sm9x'. CPU/ARM pip "
+        "packaging configs are deprecated."
     )
 
 

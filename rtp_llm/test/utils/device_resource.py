@@ -481,17 +481,17 @@ def _get_visible_devices_env(device_name: str) -> str:
     return "CUDA_VISIBLE_DEVICES"
 
 
+def _get_required_gpu_count() -> int:
+    gpu_count_env = os.environ.get("GPU_COUNT", os.environ.get("WORLD_SIZE"))
+    return int(gpu_count_env) if gpu_count_env is not None else 1
+
+
 if __name__ == "__main__":
     device_info = get_device_info()
-    # Only treat the GPU requirement as hard when the caller explicitly asks
-    # for a non-zero count via GPU_COUNT/WORLD_SIZE. Without an explicit ask
-    # we default to "no GPU needed" — this lets CPU-only cc_tests (utils,
-    # api_server http_client, etc.) that bazel dispatches to the cpu sub-pool
-    # of the cuda12_9 worker pool succeed under `--run_under=gpu_lock`.
-    # Tests that genuinely need a GPU either declare it via env / args or
-    # fail clearly inside the binary when CUDA is missing.
-    gpu_count_env = os.environ.get("GPU_COUNT", os.environ.get("WORLD_SIZE"))
-    require_count = int(gpu_count_env) if gpu_count_env is not None else 0
+    # `--run_under=gpu_lock` historically means "serialize one GPU by default".
+    # Keep that invariant for GPU tests. CPU-only wrappers that intentionally do
+    # not need isolation must opt out explicitly with GPU_COUNT=0.
+    require_count = _get_required_gpu_count()
 
     if not device_info:
         if require_count > 0:
@@ -505,10 +505,7 @@ if __name__ == "__main__":
         sys.exit(_run_child(sys.argv[1:]))
 
     if require_count == 0:
-        # Have GPU(s) but caller didn't ask for any — skip locking entirely.
-        logging.info(
-            "[device_resource] GPU present but GPU_COUNT not set; skipping lock"
-        )
+        logging.info("[device_resource] GPU_COUNT=0; skipping GPU lock")
         sys.exit(_run_child(sys.argv[1:]))
 
     device_name, _ = device_info

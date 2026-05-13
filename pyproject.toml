@@ -7,6 +7,8 @@
 requires = [
     "setuptools>=75.0,<82",
     "wheel",
+    "grpcio-tools==1.57.0",
+    "protobuf==4.25",
     "tomli; python_version < '3.11'",
 ]
 build-backend = "setuptools.build_meta"
@@ -32,6 +34,9 @@ classifiers = [
 rtp-llm = "rtp_llm.cli.main:main"
 rtp-llm-server = "rtp_llm.start_server:main"
 
+# These pytest plugins intentionally live under rtp_llm.test.*. Keep them in
+# release metadata together with packaged tests so installed wheels expose the
+# same CI/test helpers as source checkouts.
 [project.entry-points."pytest11"]
 remote-gpu = "rtp_llm.test.remote_tests.plugin"
 rtp-ci-profile = "rtp_llm.test.ci_profile_plugin"
@@ -65,15 +70,12 @@ package-dir = {"" = "."}
 
 # Use namespace-package discovery so the wheel actually contains every
 # subpackage (rtp_llm.cpp, rtp_llm.models_py, rtp_llm.config, rtp_llm.ops,
-# rtp_llm.server, ...). The previous `packages = ["rtp_llm"]` literal was a
-# footgun: any reorg could silently drop subpackages from the wheel while
-# `pip install` still succeeded — `import rtp_llm.cpp` would then fail at
-# runtime.  `exclude` keeps test code (lives alongside source) out of the
-# published wheel.
+# rtp_llm.server, ...). Tests are intentionally packaged too: the public
+# pytest11 entry points below import modules from rtp_llm.test.*, so excluding
+# tests would produce installed wheels whose pytest plugins fail at startup.
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["rtp_llm", "rtp_llm.*"]
-exclude = ["rtp_llm.test*", "rtp_llm.*.test*"]
 
 # ``dependencies`` is dynamic but no source is declared here: setuptools accepts
 # ``install_requires=`` from setup.py for any field marked dynamic in [project]
@@ -92,6 +94,14 @@ rtp_llm = [
     "config/*.json",
     "ops/**/*.pyi",
     "openai/renderers/qwen_agent/utils/*.tiktoken",
+    "test/**/*.proto",
+    "test/**/*.json",
+    "test/**/*.jsonl",
+    "test/**/*.txt",
+    "test/**/*.yaml",
+    "test/**/*.yml",
+    "test/**/*.sh",
+    "test/**/*.jinja",
 ]
 
 # ============================================================
