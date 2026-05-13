@@ -42,7 +42,7 @@ def _is_blackwell_device(device: torch.device | int | None = None) -> bool:
     return major >= 10
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_tokens", "scale_stride_k"])
 def _fused_inv_rope_fp8_quant_per_head(
     o_ptr,  # [M, H, D] bf16
     cos_ptr,  # [B, RD_HALF] fp32 (from freqs_cis.real)
@@ -164,7 +164,7 @@ def _fused_inv_rope_fp8_quant_per_head(
     tl.store(scale_addr, packed_val)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_tokens", "scale_stride_k"])
 def _fused_inv_rope_fp8_quant_group_heads(
     o_ptr,  # [M, H, D] bf16
     freqs_ri_ptr,  # torch.view_as_real(freqs), float32 [B, RD_HALF, 2]

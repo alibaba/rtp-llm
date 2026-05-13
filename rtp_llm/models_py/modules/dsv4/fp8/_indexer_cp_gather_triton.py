@@ -33,13 +33,13 @@ from rtp_llm.models_py.modules.dsv4.fp8._indexer_quant_triton import (
 )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["N"])
 def _cp_gather_indexer_k_kernel(
     cache_ptr,  # raw byte ptr into [num_blocks, block_size*132] uint8
     slot_mapping_ptr,  # [N] int64; -1 = write zeros
     k_quant_ptr,  # [N, D] float8_e4m3fn (uint8 view)
     k_scale_ptr,  # [N]    float32
-    N: tl.constexpr,
+    N,
     D: tl.constexpr,
     cache_block_size: tl.constexpr,
     cache_stride_b: tl.constexpr,

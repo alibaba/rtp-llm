@@ -121,7 +121,7 @@ def compute_prefill_gather_lens(
 # ---------------------------------------------------------------------------
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_reqs", "max_blocks_per_seq"])
 def _compute_swa_slot_mapping_kernel(
     # Output
     slot_mapping_ptr,  # [num_tokens] int64
@@ -131,7 +131,7 @@ def _compute_swa_slot_mapping_kernel(
     seq_lens_ptr,  # [num_reqs] int32 — total seq len per req (sp + S_local)
     # Constants
     num_reqs,
-    max_blocks_per_seq: tl.constexpr,
+    max_blocks_per_seq,
     block_size: tl.constexpr,  # eb
     BLOCK_M: tl.constexpr,  # tokens per program
 ):
@@ -241,7 +241,15 @@ def compute_swa_slot_mapping(
 # ---------------------------------------------------------------------------
 
 
-@triton.jit
+@triton.jit(
+    do_not_specialize=[
+        "combined_indices_stride",
+        "topk_indices_stride",
+        "M",
+        "N",
+        "TOP_K",
+    ]
+)
 def _combine_topk_swa_indices_kernel(
     combined_indices_ptr,
     combined_indices_stride,
@@ -253,7 +261,7 @@ def _combine_topk_swa_indices_kernel(
     gather_lens_ptr,
     M,
     N,
-    TOP_K: tl.constexpr,
+    TOP_K,
     COMPRESS_RATIO: tl.constexpr,
     WINDOW_SIZE: tl.constexpr,
     PADDED_TOP_K: tl.constexpr,
@@ -371,6 +379,9 @@ def combine_topk_swa_indices(
     ), "query_start_loc and seq_lens must be int32"
     assert gather_lens.dtype == torch.int32, "gather_lens must be int32"
     assert window_size >= 1 and compress_ratio >= 1
+    assert int(topk_indices.shape[-1]) >= int(
+        topk
+    ), f"topk_indices width {topk_indices.shape[-1]} < topk {topk}"
 
     num_tokens = int(topk_indices.shape[0])
     num_reqs = int(seq_lens.shape[0])
@@ -392,9 +403,10 @@ def combine_topk_swa_indices(
     if num_tokens == 0 or num_reqs == 0:
         return combined_indices, combined_lens
 
-    # ``PADDED_TOP_K`` is the kernel-side load tile for the compressed-attn
-    # part; pad to power-of-2 ≥ topk_indices.shape[-1] so the SIMD load mask
-    # lines up. SWA-only layers pass topk_indices.shape[-1] == 0 → use 1.
+    # ``PADDED_TOP_K`` is the constexpr ``tl.arange`` tile for the
+    # compressed-attn part; pad to power-of-2 ≥ topk_indices.shape[-1] so the
+    # SIMD load mask lines up. SWA-only layers pass topk_indices.shape[-1] == 0
+    # → use 1.
     padded_top_k = max(1, triton.next_power_of_2(int(topk_indices.shape[-1])))
     # Same constraint for the SWA arange tile — Triton requires arange ranges
     # to be power-of-2; mask inside the kernel handles the real ``window_size``.
@@ -420,7 +432,18 @@ def combine_topk_swa_indices(
     return combined_indices, combined_lens
 
 
-@triton.jit
+@triton.jit(
+    do_not_specialize=[
+        "combined_indices_stride",
+        "topk_indices_stride",
+        "num_tokens",
+        "sp_int",
+        "M",
+        "N",
+        "TOP_K",
+        "COMBINED_TOPK",
+    ]
+)
 def _combine_topk_swa_indices_cp_kernel(
     combined_indices_ptr,
     combined_indices_stride,
@@ -434,10 +457,10 @@ def _combine_topk_swa_indices_cp_kernel(
     sp_int,
     M,
     N,
-    TOP_K: tl.constexpr,
+    TOP_K,
     COMPRESS_RATIO: tl.constexpr,
     WINDOW_SIZE: tl.constexpr,
-    COMBINED_TOPK: tl.constexpr,
+    COMBINED_TOPK,
     BLOCK_T: tl.constexpr,
     BLOCK_C: tl.constexpr,
     IS_VARLEN: tl.constexpr,

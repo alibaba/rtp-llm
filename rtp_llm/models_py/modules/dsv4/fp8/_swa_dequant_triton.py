@@ -37,7 +37,7 @@ ENTRY_BYTES = TOKEN_DATA_SIZE + SCALE_BYTES_PER_TOKEN  # 584
 FP8_MAX = 448.0
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["offset", "max_blocks_per_seq"])
 def _dequantize_and_gather_k_kernel(
     out_ptr,
     out_stride0,
@@ -47,7 +47,7 @@ def _dequantize_and_gather_k_kernel(
     block_table_ptr,
     offset,
     gather_lens_ptr,
-    max_blocks_per_seq: tl.constexpr,
+    max_blocks_per_seq,
     fp8_dim: tl.constexpr,
     bf16_dim: tl.constexpr,
     scale_dim: tl.constexpr,

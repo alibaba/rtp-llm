@@ -21,13 +21,13 @@ import triton
 import triton.language as tl
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["N"])
 def _v4_gate_sqrtsoftplus_topk_kernel(
     scores_ptr,         # [N, E] fp32
     bias_ptr,           # [E] fp32
     out_idx_ptr,        # [N, K] int64
     out_w_ptr,          # [N, K] fp32
-    N: tl.constexpr,
+    N,
     E: tl.constexpr,
     K: tl.constexpr,
     NORM_EPS: tl.constexpr,   # 1e-12

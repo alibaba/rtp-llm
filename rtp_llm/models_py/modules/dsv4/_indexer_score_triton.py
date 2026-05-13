@@ -40,7 +40,18 @@ import triton
 import triton.language as tl
 
 
-@triton.jit
+@triton.jit(
+    do_not_specialize=[
+        "q_b",
+        "kv_b",
+        "w_b",
+        "qpos_b",
+        "out_b",
+        "out_s",
+        "S",
+        "T",
+    ]
+)
 def _v4_indexer_score_fwd(
     q_ptr,           # [B, S, H, D] bf16
     kv_ptr,          # [B, T, D]    bf16
@@ -49,15 +60,15 @@ def _v4_indexer_score_fwd(
     out_ptr,         # [B, S, T] fp32
 
     # strides
-    q_b: tl.constexpr, q_s: tl.constexpr, q_h: tl.constexpr,   # q strides; d-stride==1 assumed (contiguous)
-    kv_b: tl.constexpr, kv_t: tl.constexpr,                     # kv strides; d-stride==1 assumed
-    w_b: tl.constexpr, w_s: tl.constexpr,                       # w strides; h-stride==1 assumed
-    qpos_b: tl.constexpr,                                       # q_pos stride for B; s-stride==1
-    out_b: tl.constexpr, out_s: tl.constexpr,                   # out strides; t-stride==1 assumed
+    q_b, q_s: tl.constexpr, q_h: tl.constexpr,                  # q strides; d-stride==1 assumed (contiguous)
+    kv_b, kv_t: tl.constexpr,                                   # kv strides; d-stride==1 assumed
+    w_b, w_s: tl.constexpr,                                     # w strides; h-stride==1 assumed
+    qpos_b,                                                     # q_pos stride for B; s-stride==1
+    out_b, out_s,                                               # out strides; t-stride==1 assumed
 
     # geometry
-    S: tl.constexpr,
-    T: tl.constexpr,
+    S,
+    T,
     H: tl.constexpr,
     D: tl.constexpr,
     COMPRESS_RATIO: tl.constexpr,

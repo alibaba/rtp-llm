@@ -110,7 +110,14 @@ def _save_partial_states_kernel(
 # =============================================================================
 # DeepseekV4 attention path: head_dim=512 (CSA / HCA), 584B per slot
 # =============================================================================
-@triton.jit
+@triton.jit(
+    do_not_specialize=[
+        "block_table_stride",
+        "seq_start",
+        "n_raw",
+        "kv_cache_block_size",
+    ]
+)
 def _fused_kv_compress_norm_rope_insert_sparse_attn(
     state_cache_ptr,
     state_cache_stride0,
@@ -358,7 +365,14 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
 # =============================================================================
 # Indexer path: head_dim=128, single quant block, 132B per slot
 # =============================================================================
-@triton.jit
+@triton.jit(
+    do_not_specialize=[
+        "block_table_stride",
+        "seq_start",
+        "n_raw",
+        "kv_cache_block_size",
+    ]
+)
 def _fused_kv_compress_norm_rope_insert_indexer_attn(
     state_cache_ptr,
     state_cache_stride0,

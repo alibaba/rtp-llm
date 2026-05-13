@@ -32,14 +32,14 @@ INDEXER_HEAD_DIM = 128
 FP8_E4M3_MAX = 448.0
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["BSH"])
 def _indexer_q_fp8_fold_kernel(
     q_ptr,  # [B*S, H, D] bf16
     w_ptr,  # [B*S, H]    bf16/fp32
     q_fp8_ptr,  # [B*S, H, D] fp8e4nv (uint8 view)
     w_fold_ptr,  # [B*S, H]    fp32
     # geometry
-    BSH: tl.constexpr,  # B*S*H — rows
+    BSH,  # B*S*H — rows
     D: tl.constexpr,  # head_dim = 128
     fp8_max: tl.constexpr,
 ):
