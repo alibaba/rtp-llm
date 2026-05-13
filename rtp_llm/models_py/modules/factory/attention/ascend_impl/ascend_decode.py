@@ -17,15 +17,13 @@ class AscendDecodeImpl(FMHAImplBase):
     Composes RoPE -> KVCacheWrite -> write_cache_store -> paged_attention.
     """
 
-    def __init__(self, attn_configs, attn_inputs, weights,
-                 cos_sin_cache=None, fmha_config=None,
-                 parallelism_config=None, **kwargs):
+    def __init__(self, attn_configs, attn_inputs, parallelism_config):
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
         self.attn_configs = attn_configs
         self.attn_inputs = attn_inputs
 
         self.fmha_impl = AscendDecodeAttnOp(attn_configs, attn_inputs)
-        self.rope_impl = self._create_rope_impl(attn_configs, cos_sin_cache)
+        self.rope_impl = self._create_rope_impl(attn_configs)
         self.kv_cache_write_op = AscendKVCacheWriteOp(
             num_kv_heads=attn_configs.kv_head_num,
             head_size=attn_configs.size_per_head,
@@ -40,11 +38,11 @@ class AscendDecodeImpl(FMHAImplBase):
         self.fmha_impl.prepare(attn_inputs)
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
 
-    def _create_rope_impl(self, attn_configs, cos_sin_cache):
+    def _create_rope_impl(self, attn_configs):
         from rtp_llm.ops import RopeStyle
         if attn_configs.rope_config.style == RopeStyle.No:
             return None
-        return AscendRotaryEmbeddingOp(attn_configs, cos_sin_cache)
+        return AscendRotaryEmbeddingOp(attn_configs)
 
     def _split_qkv(self, qkv):
         qkv = qkv.reshape(qkv.shape[0], -1)

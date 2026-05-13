@@ -56,15 +56,6 @@ elif device_type == DeviceType.Ascend:
 
     PREFILL_MHA_IMPS.append(AscendPrefillImpl)
     DECODE_MHA_IMPS.append(AscendDecodeImpl)
-
-    # SDPA baseline (fallback for non-separate K/V cache)
-    from rtp_llm.models_py.modules.factory.attention.ascend_impl.torch_sdpa import (
-        AscendSDPAPrefillImpl,
-        AscendSDPADecodeImpl,
-    )
-
-    PREFILL_MHA_IMPS.append(AscendSDPAPrefillImpl)
-    DECODE_MHA_IMPS.append(AscendSDPADecodeImpl)
 else:
     # currently append early means impl has higher priority
     if device_type == DeviceType.Cuda:

@@ -1,7 +1,7 @@
 import torch
 
 from rtp_llm.models_py.modules.factory.attention.ascend_impl.ascend_rope import apply_rope_pos_ids_nhd
-from rtp_llm.ops import AttentionConfigs
+from rtp_llm.ops import AttentionConfigs, get_rope_cache_once
 
 
 class AscendRotaryEmbeddingOp:
@@ -13,6 +13,14 @@ class AscendRotaryEmbeddingOp:
         self.token_per_block = attn_config.kernel_tokens_per_block
         self.rope_config = attn_config.rope_config
         self.cos_sin_cache = cos_sin_cache
+        if self.cos_sin_cache is None and self.rope_config is not None:
+            rope_cache = get_rope_cache_once(
+                self.rope_config,
+                max_position_embeddings=attn_config.max_seq_len,
+                is_cuda=True,  # Ascend can also set to True
+                interleave=False,
+            )
+            self.cos_sin_cache = rope_cache.data
         self.num_heads = attn_config.head_num
         self.num_kv_heads = attn_config.kv_head_num
         self.params = None
@@ -37,6 +45,9 @@ class AscendRotaryEmbeddingOp:
 
     def _apply_rope(self, query, key, rope_params):
         if self.cos_sin_cache is not None:
+            device = rope_params.positions_d.device
+            if self.cos_sin_cache.device != device:
+                self.cos_sin_cache = self.cos_sin_cache.to(device, non_blocking=True)
             apply_rope_pos_ids_nhd(
                 query, key,
                 self.cos_sin_cache,
