@@ -82,6 +82,14 @@ def _get_or_create_local_y(
     return cached
 
 
+def _select_mn_major_scale_for_index(
+    scale_gemm_t: torch.Tensor,
+    expert_idx: torch.Tensor,
+) -> torch.Tensor:
+    """Select one expert scale while preserving DeepGEMM's MN-major stride."""
+    return torch.index_select(scale_gemm_t, 0, expert_idx).squeeze(0).transpose(0, 1)
+
+
 @register_strategy
 class LocalLoopStrategy(RoutedExpertsStrategy):
     name = "local_loop"
@@ -137,6 +145,14 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
         self._W3_s_gemm = prepare_fp4_weight_scale_for_deepgemm(
             self._W3_s, cfg.moe_inter_dim, cfg.dim, self._W3_s.shape[0]
         )
+        # Per-expert DeepGEMM scales are MN-major: a direct
+        # self._W*_s_gemm[i] view has stride (1, mn).  torch.index_select on
+        # the grouped tensor returns a row-major copy, which fails
+        # DeepGEMM's layout check during CUDA graph top-k dispatch.  Select
+        # from the transposed view and transpose the selected copy back.
+        self._W1_s_gemm_t = self._W1_s_gemm.transpose(-1, -2)
+        self._W2_s_gemm_t = self._W2_s_gemm.transpose(-1, -2)
+        self._W3_s_gemm_t = self._W3_s_gemm.transpose(-1, -2)
 
         def _expert_at(global_idx: int) -> Optional[Expert]:
             if not (cfg.local_expert_start <= global_idx < cfg.local_expert_end):
@@ -371,11 +387,11 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
             # Gather expert eid's weight slices (graph-safe, fixed-shape output).
             # Use squeeze(0) on dim 0 to drop the [1, ...] from index_select.
             w1_w = torch.index_select(self._W1_w, 0, eid_t).squeeze(0)  # [inter, D/2] int8
-            w1_s = torch.index_select(self._W1_s_gemm, 0, eid_t).squeeze(0)
+            w1_s = _select_mn_major_scale_for_index(self._W1_s_gemm_t, eid_t)
             w3_w = torch.index_select(self._W3_w, 0, eid_t).squeeze(0)
-            w3_s = torch.index_select(self._W3_s_gemm, 0, eid_t).squeeze(0)
+            w3_s = _select_mn_major_scale_for_index(self._W3_s_gemm_t, eid_t)
             w2_w = torch.index_select(self._W2_w, 0, eid_t).squeeze(0)  # [D, inter/2]
-            w2_s = torch.index_select(self._W2_s_gemm, 0, eid_t).squeeze(0)
+            w2_s = _select_mn_major_scale_for_index(self._W2_s_gemm_t, eid_t)
 
             # gate = w1 @ x
             gate = torch.empty(1, inter, dtype=torch.bfloat16, device=device)
@@ -518,11 +534,11 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
 
                 # Gather expert eid's weight slices (graph-safe).
                 w1_w = torch.index_select(self._W1_w, 0, eid_t).squeeze(0)
-                w1_s = torch.index_select(self._W1_s_gemm, 0, eid_t).squeeze(0)
+                w1_s = _select_mn_major_scale_for_index(self._W1_s_gemm_t, eid_t)
                 w3_w = torch.index_select(self._W3_w, 0, eid_t).squeeze(0)
-                w3_s = torch.index_select(self._W3_s_gemm, 0, eid_t).squeeze(0)
+                w3_s = _select_mn_major_scale_for_index(self._W3_s_gemm_t, eid_t)
                 w2_w = torch.index_select(self._W2_w, 0, eid_t).squeeze(0)
-                w2_s = torch.index_select(self._W2_s_gemm, 0, eid_t).squeeze(0)
+                w2_s = _select_mn_major_scale_for_index(self._W2_s_gemm_t, eid_t)
 
                 # gate = w1 @ x_n
                 gate = torch.empty(1, inter, dtype=torch.bfloat16, device=device)
