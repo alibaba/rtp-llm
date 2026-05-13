@@ -25,7 +25,7 @@ from unittest import TestCase, main
 
 import torch
 
-from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.config.generate_config import GenerateConfig, RoleType
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.cpp.model_rpc.model_rpc_client import (
     ModelRpcClient,
@@ -180,6 +180,145 @@ class ModelRpcClientTest(TestCase):
         logits_2 = res[2].logits.tolist()
         self.assertAlmostEqual(logits_2[0][0], 0.0, places=6)
         self.assertAlmostEqual(logits_2[0][1], 0.0, places=6)
+
+
+class FakeGrpcStream:
+    """Mimics a gRPC async response stream with __aiter__ and cancel()."""
+
+    def __init__(self, outputs):
+        self._outputs = outputs
+
+    def __aiter__(self):
+        return self._aiter()
+
+    async def _aiter(self):
+        for out in self._outputs:
+            yield out
+
+    def cancel(self):
+        pass
+
+
+class DpControllerFetchOnlyTest(TestCase):
+    """Verify that DP_CONTROLLER_MANAGED mode only does FetchResponse (no Enqueue)."""
+
+    def _make_client(self, addresses):
+        ModelRpcClient, _, _, _ = _load_model_rpc_symbols()
+        with patch.dict(os.environ, {"DP_CONTROLLER_MANAGED": "true"}):
+            client = ModelRpcClient(addresses, {}, 0, False)
+        return client
+
+    def _make_input(self, request_id=0):
+        return GenerateInput(
+            token_ids=torch.tensor([1, 2, 3]),
+            generate_config=GenerateConfig(using_hf_sampling=False),
+            request_id=request_id,
+            mm_inputs=[],
+        )
+
+    def _make_final_output(self):
+        out = GenerateOutputsPB()
+        out.flatten_output.finished.extend([True])
+        out.flatten_output.output_ids.data_type = TensorPB.DataType.INT32
+        out.flatten_output.output_ids.shape.extend([1, 1])
+        out.flatten_output.output_ids.int32_data = struct.pack("<i", 0)
+        aux = out.flatten_output.aux_info.add()
+        aux.iter_count = 1
+        aux.output_len = 1
+        return out
+
+    def test_fetch_response_only_no_enqueue(self):
+        """In DP_CONTROLLER_MANAGED mode, enqueue() should call FetchResponse directly, never Enqueue."""
+        addresses = ["dp0:20001"]
+        client = self._make_client(addresses)
+        final_output = self._make_final_output()
+        calls = {"fetch": 0, "enqueue": 0}
+
+        async def mock_pool_get(addr):
+            return MagicMock(name=f"channel_{addr}")
+        client._channel_pool = MagicMock()
+        client._channel_pool.get = mock_pool_get
+
+        class StubTracker:
+            def __init__(self, channel):
+                pass
+            async def Enqueue(self, req, timeout=None):
+                calls["enqueue"] += 1
+            def FetchResponse(self, req, timeout=None):
+                calls["fetch"] += 1
+                return FakeGrpcStream([final_output])
+
+        with patch("rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub", StubTracker):
+            async def run():
+                return [out async for out in client.enqueue(self._make_input(request_id=0))]
+            asyncio.run(run())
+
+        self.assertEqual(calls["enqueue"], 0, "Should NOT call Enqueue")
+        self.assertEqual(calls["fetch"], 1, "Should call FetchResponse exactly once")
+
+    def test_cancel_on_early_exit(self):
+        """On early exit, Cancel should be sent to the DPx."""
+        addresses = ["dp0:20001"]
+        client = self._make_client(addresses)
+        non_final = self._make_final_output()
+        non_final.flatten_output.finished[0] = False
+        cancel_calls = []
+
+        async def mock_pool_get(addr):
+            return MagicMock(name=f"channel_{addr}")
+        client._channel_pool = MagicMock()
+        client._channel_pool.get = mock_pool_get
+
+        class StubTracker:
+            def __init__(self, channel):
+                pass
+            def FetchResponse(self, req, timeout=None):
+                return FakeGrpcStream([non_final, non_final, non_final])
+            async def Cancel(self, req, timeout=None):
+                cancel_calls.append(req.request_id)
+
+        with patch("rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub", StubTracker):
+            async def run():
+                async for out in client.enqueue(self._make_input(request_id=42)):
+                    break  # early exit → triggers Cancel
+            asyncio.run(run())
+
+        self.assertEqual(len(cancel_calls), 1)
+        self.assertEqual(cancel_calls[0], 42)
+
+    def test_role_addrs_determines_fetch_target(self):
+        """role_addrs from FlexLB should determine which address to FetchResponse from."""
+        from rtp_llm.config.generate_config import RoleAddr
+
+        addresses = ["dp0:20001", "dp1:20001"]
+        client = self._make_client(addresses)
+        final_output = self._make_final_output()
+        fetch_targets = []
+
+        async def mock_pool_get(addr):
+            return MagicMock(name=f"channel_{addr}")
+        client._channel_pool = MagicMock()
+        client._channel_pool.get = mock_pool_get
+
+        class StubTracker:
+            def __init__(self, channel):
+                self._channel = channel
+            def FetchResponse(self, req, timeout=None):
+                fetch_targets.append(self._channel._mock_name)
+                return FakeGrpcStream([final_output])
+
+        input_py = self._make_input(request_id=0)
+        input_py.generate_config.role_addrs = [
+            RoleAddr(role=RoleType.PREFILL, ip="10.0.0.99", grpc_port=30001, http_port=8080)
+        ]
+
+        with patch("rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub", StubTracker):
+            async def run():
+                return [out async for out in client.enqueue(input_py)]
+            asyncio.run(run())
+
+        self.assertEqual(len(fetch_targets), 1)
+        self.assertEqual(fetch_targets[0], "channel_10.0.0.99:30001")
 
 
 if __name__ == "__main__":
