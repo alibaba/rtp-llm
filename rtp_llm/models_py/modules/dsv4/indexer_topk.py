@@ -39,7 +39,8 @@ def _flatten_score(score: torch.Tensor) -> tuple[torch.Tensor, tuple[int, ...]]:
     if score.dim() == 2:
         return score.contiguous(), shape
     if score.dim() == 3:
-        return score.reshape(-1, score.shape[-1]).contiguous(), shape
+        rows = score.shape[0] * score.shape[1]
+        return score.reshape(rows, score.shape[-1]).contiguous(), shape
     raise ValueError(f"score must be [rows,T] or [B,S,T], got {shape}")
 
 
@@ -56,7 +57,9 @@ def _normalize_lengths(
     topk: int,
     lengths: Optional[torch.Tensor],
 ) -> torch.Tensor:
-    rows = score.numel() // score.shape[-1]
+    rows = 1
+    for dim in score.shape[:-1]:
+        rows *= dim
     if lengths is None:
         lengths = torch.full(
             (rows,), score.shape[-1], device=score.device, dtype=torch.int32
@@ -280,6 +283,8 @@ class AutoIndexerTopKBackend(IndexerTopKBackend):
         lengths: Optional[torch.Tensor] = None,
         offset: int | torch.Tensor = 0,
     ) -> torch.Tensor:
+        if int(topk) <= 0 or score.shape[-1] == 0:
+            return self._torch.select(score, topk, lengths=lengths, offset=offset)
         # The fused TopK kernels are only used for full-row selection. Decode
         # can request topk=512 while only a short compressed prefix is valid;
         # keep that masked case on the exact torch path.

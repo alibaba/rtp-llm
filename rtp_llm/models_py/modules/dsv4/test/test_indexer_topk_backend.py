@@ -10,6 +10,7 @@ from rtp_llm.models_py.modules.dsv4.indexer_topk import (
     PersistentIndexerTopKBackend,
     TorchIndexerTopKBackend,
     get_indexer_topk_backend,
+    select_indexer_topk,
 )
 
 
@@ -78,6 +79,29 @@ class TestIndexerTopKBackend(unittest.TestCase):
         self.assertEqual(out.shape, (2, 3, 4))
         self.assertEqual(out.dtype, torch.int32)
         self.assertTrue(torch.all(out.reshape(-1, 4) < lengths.view(-1, 1)))
+
+    def test_torch_backend_empty_3d_score(self):
+        score = torch.empty(1, 2, 0, dtype=torch.float32)
+        out = TorchIndexerTopKBackend().select(score, 3)
+        self.assertEqual(out.shape, (1, 2, 3))
+        self.assertEqual(out.dtype, torch.int32)
+        self.assertTrue(torch.equal(out, torch.full_like(out, -1)))
+
+        out_with_lengths = TorchIndexerTopKBackend().select(
+            score, 3, lengths=torch.zeros(2, dtype=torch.int32)
+        )
+        self.assertTrue(torch.equal(out_with_lengths, torch.full_like(out, -1)))
+
+        empty_topk = TorchIndexerTopKBackend().select(score, 0)
+        self.assertEqual(empty_topk.shape, (1, 2, 0))
+
+    def test_auto_backend_empty_3d_score_uses_safe_torch_path(self):
+        score = torch.empty(1, 2, 0, dtype=torch.float32)
+        with _env("DSV4_INDEXER_TOPK_BACKEND", ""):
+            os.environ.pop("DSV4_INDEXER_TOPK_BACKEND", None)
+            out = select_indexer_topk(score, 512)
+        self.assertEqual(out.shape, (1, 2, 512))
+        self.assertTrue(torch.equal(out, torch.full_like(out, -1)))
 
     def test_auto_backend_masks_short_rows_on_torch_path(self):
         score = torch.tensor(
