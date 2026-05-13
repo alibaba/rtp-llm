@@ -385,6 +385,9 @@ class ModelRpcClient(object):
         )
         logging.info(f"addresses: {self._addresses}")
 
+    async def close(self):
+        await self._channel_pool.close()
+
     def _compute_grpc_timeout(self, timeout_ms) -> float:
         rpc_timeout_ms = (
             self._max_rpc_timeout_ms

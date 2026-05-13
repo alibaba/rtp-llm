@@ -542,69 +542,79 @@ async def _run_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs):
             client_config=client_config,
             max_rpc_timeout_ms=timeout_ms,
         )
-        for len_idx, token_len in enumerate(token_lens):
-            total_requests += 1
-            request_id = _new_startup_real_warmup_request_id(
-                addr_idx * len(token_lens) + len_idx
-            )
-            generate_config = GenerateConfig(
-                max_new_tokens=max_new_tokens,
-                top_k=1,
-                top_p=1.0,
-                temperature=0.0,
-                do_sample=False,
-                can_use_pd_separation=False,
-                reuse_cache=False,
-                enable_device_cache=False,
-                enable_memory_cache=False,
-                enable_remote_cache=False,
-                aux_info=True,
-                timeout_ms=timeout_ms,
-            )
-            generate_input = GenerateInput(
-                request_id=request_id,
-                token_ids=torch.full((token_len,), token_id, dtype=torch.int32),
-                mm_inputs=[],
-                generate_config=generate_config,
-            )
-
-            begin = time.time()
-            last_aux = None
-            chunk_count = 0
-            logging.info(
-                "DSV4 startup grpc warmup request begin, "
-                "addr=%s, request_id=%d, token_len=%d",
-                addr,
-                request_id,
-                token_len,
-            )
-            async for outputs in client.enqueue(generate_input):
-                chunk_count += 1
-                if outputs.generate_outputs:
-                    last_aux = outputs.generate_outputs[0].aux_info
-            if last_aux is not None:
-                logging.info(
-                    "DSV4 startup grpc warmup request finished, addr=%s, request_id=%d, "
-                    "token_len=%d, chunks=%d, input_len=%s, reuse_len=%s, output_len=%s, "
-                    "cost=%.2fs",
-                    addr,
-                    request_id,
-                    token_len,
-                    chunk_count,
-                    getattr(last_aux, "input_len", None),
-                    getattr(last_aux, "reuse_len", None),
-                    getattr(last_aux, "output_len", None),
-                    time.time() - begin,
+        try:
+            for len_idx, token_len in enumerate(token_lens):
+                total_requests += 1
+                request_id = _new_startup_real_warmup_request_id(
+                    addr_idx * len(token_lens) + len_idx
                 )
-            else:
+                generate_config = GenerateConfig(
+                    max_new_tokens=max_new_tokens,
+                    top_k=1,
+                    top_p=1.0,
+                    temperature=0.0,
+                    do_sample=False,
+                    can_use_pd_separation=False,
+                    reuse_cache=False,
+                    enable_device_cache=False,
+                    enable_memory_cache=False,
+                    enable_remote_cache=False,
+                    aux_info=True,
+                    timeout_ms=timeout_ms,
+                )
+                generate_input = GenerateInput(
+                    request_id=request_id,
+                    token_ids=torch.full((token_len,), token_id, dtype=torch.int32),
+                    mm_inputs=[],
+                    generate_config=generate_config,
+                )
+
+                begin = time.time()
+                last_aux = None
+                chunk_count = 0
                 logging.info(
-                    "DSV4 startup grpc warmup request finished, addr=%s, request_id=%d, "
-                    "token_len=%d, chunks=%d, aux_info=None, cost=%.2fs",
+                    "DSV4 startup grpc warmup request begin, "
+                    "addr=%s, request_id=%d, token_len=%d",
                     addr,
                     request_id,
                     token_len,
-                    chunk_count,
-                    time.time() - begin,
+                )
+                async for outputs in client.enqueue(generate_input):
+                    chunk_count += 1
+                    if outputs.generate_outputs:
+                        last_aux = outputs.generate_outputs[0].aux_info
+                if last_aux is not None:
+                    logging.info(
+                        "DSV4 startup grpc warmup request finished, addr=%s, request_id=%d, "
+                        "token_len=%d, chunks=%d, input_len=%s, reuse_len=%s, output_len=%s, "
+                        "cost=%.2fs",
+                        addr,
+                        request_id,
+                        token_len,
+                        chunk_count,
+                        getattr(last_aux, "input_len", None),
+                        getattr(last_aux, "reuse_len", None),
+                        getattr(last_aux, "output_len", None),
+                        time.time() - begin,
+                    )
+                else:
+                    logging.info(
+                        "DSV4 startup grpc warmup request finished, addr=%s, request_id=%d, "
+                        "token_len=%d, chunks=%d, aux_info=None, cost=%.2fs",
+                        addr,
+                        request_id,
+                        token_len,
+                        chunk_count,
+                        time.time() - begin,
+                    )
+        finally:
+            try:
+                await client.close()
+            except Exception:
+                logging.warning(
+                    "failed to close DSV4 startup grpc warmup client, addr=%s, trace=%s",
+                    addr,
+                    traceback.format_exc(),
                 )
 
     logging.info(
