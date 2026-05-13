@@ -208,6 +208,10 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
     RTP_LLM_LOG_DEBUG(
         "decode init stream[%d]: %s", generate_stream->streamId(), generate_stream->debugString().c_str());
     engine_->enqueue(generate_stream);
+    if (generate_stream->hasError()) {
+        decode_context.error_status = serializeErrorMsg(decode_context.request_key, generate_stream->statusInfo());
+        return;
+    }
     RTP_LLM_LOG_DEBUG("request [%s] enqueue success", decode_context.request_key.c_str());
     decode_context.error_status =
         pollStreamOutput(decode_context.server_context,

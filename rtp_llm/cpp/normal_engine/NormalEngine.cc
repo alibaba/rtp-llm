@@ -404,14 +404,20 @@ std::shared_ptr<GenerateStream> NormalEngine::makeStream(const std::shared_ptr<G
 
 void NormalEngine::enqueue(std::shared_ptr<GenerateStream>& stream) {
     stream->setReserveStep(reserve_step_);
-    (void)scheduler_->enqueue(stream);
+    auto status = scheduler_->enqueue(stream);
+    if (!status.ok()) {
+        RTP_LLM_LOG_WARNING("enqueue stream [%ld] failed: %s", stream->streamId(), status.ToString().c_str());
+    }
 }
 
 std::shared_ptr<GenerateStream> NormalEngine::enqueue(const std::shared_ptr<GenerateInput>& input) {
     std::shared_ptr<GenerateStream> stream = std::make_shared<NormalGenerateStream>(
         input, model_config_, runtime_config, resource_context_, metrics_reporter_);
     stream->setReserveStep(reserve_step_);
-    (void)scheduler_->enqueue(stream);
+    auto status = scheduler_->enqueue(stream);
+    if (!status.ok()) {
+        RTP_LLM_LOG_WARNING("enqueue stream [%ld] failed: %s", stream->streamId(), status.ToString().c_str());
+    }
     return stream;
 }
 
@@ -425,7 +431,8 @@ NormalEngine::batchEnqueue(const std::vector<std::shared_ptr<GenerateInput>>& in
         stream->setReserveStep(reserve_step_);
         streams.push_back(stream);
     }
-    return scheduler_->batchEnqueue(streams);
+    scheduler_->batchEnqueue(streams);
+    return streams;
 }
 
 absl::Status NormalEngine::step() {

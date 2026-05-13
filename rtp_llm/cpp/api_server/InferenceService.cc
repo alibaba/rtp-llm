@@ -187,6 +187,18 @@ void InferenceService::inferResponse(int64_t                                    
         inputs.push_back(input);
     }
     auto                                                ori_streams = engine_->batchEnqueue(inputs);
+    for (size_t i = 0; i < ori_streams.size(); ++i) {
+        if (ori_streams[i]->hasError()) {
+            for (size_t j = 0; j < ori_streams.size(); ++j) {
+                if (j != i && !ori_streams[j]->hasError()) {
+                    ori_streams[j]->reportError(ErrorCode::CANCELLED, "batch peer failed enqueue");
+                }
+            }
+            auto error_info = ori_streams[i]->statusInfo();
+            throw HttpApiServerException(transErrorCodeToHttpExceptionType(error_info.code()),
+                                         error_info.ToString());
+        }
+    }
     std::vector<std::shared_ptr<GenerateStreamWrapper>> streams;
     streams.reserve(ori_streams.size());
     for (size_t idx = 0; idx < ori_streams.size(); ++idx) {

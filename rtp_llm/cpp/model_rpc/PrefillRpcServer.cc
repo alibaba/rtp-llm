@@ -221,6 +221,11 @@ void PrefillRpcServer::enqueueRequest(PrefillGenerateContext& prefill_context) {
     RTP_LLM_LOG_DEBUG("request [%ld] trans to stream success", prefill_context.request_id);
     auto stream = engine_->enqueue(prefill_context.generate_input);
     prefill_context.setStream(stream);
+    if (stream->hasError()) {
+        prefill_context.error_info   = stream->statusInfo();
+        prefill_context.error_status = serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);
+        return;
+    }
     RTP_LLM_LOG_DEBUG("request [%ld] enqueue success", prefill_context.request_id);
 }
 
