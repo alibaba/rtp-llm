@@ -134,6 +134,44 @@ def _install_task_filter(task_ids_map: dict) -> None:
     # 规范化为 str 集合,便于比较
     normalized = {d: set(str(x) for x in ids) for d, ids in task_ids_map.items()}
 
+    def _normalize_tau2_data_root(path: str | None) -> str | None:
+        """Return the directory Tau2 expects in TAU2_DATA_DIR, if present.
+
+        Tau2 appends ``tau2/domains/...`` to ``TAU2_DATA_DIR`` internally.
+        The bundled tarball stores files under ``data/tau2``; passing that
+        directory directly would make Tau2 look for ``data/tau2/tau2``.
+        """
+        if not path or not os.path.isdir(path):
+            return None
+        if os.path.isdir(os.path.join(path, "tau2", "domains")):
+            return path
+        if os.path.isdir(os.path.join(path, "domains")):
+            return os.path.dirname(path)
+        return None
+
+    def _resolve_dataset_path(dataset_name_or_path: str) -> str:
+        local_candidates = [
+            os.environ.get("TAU2_DATA_DIR"),
+            os.path.join(os.getcwd(), "data"),
+            os.path.join(os.getcwd(), "data", "tau2"),
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "data"),
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "tau2"),
+        ]
+        if os.path.exists(dataset_name_or_path):
+            local_candidates.insert(0, dataset_name_or_path)
+        for candidate in local_candidates:
+            data_root = _normalize_tau2_data_root(candidate)
+            if data_root:
+                return data_root
+
+        from modelscope import dataset_snapshot_download
+
+        downloaded = dataset_snapshot_download(dataset_name_or_path)
+        data_root = _normalize_tau2_data_root(downloaded)
+        if data_root:
+            return data_root
+        return downloaded
+
     def patched_load(self):
         # 把 adapter 的 subset_list 压到有 filter 的 domain,避免加载无关域
         self.subset_list = [d for d in self.subset_list if normalized.get(d)]
@@ -146,11 +184,7 @@ def _install_task_filter(task_ids_map: dict) -> None:
         from evalscope.api.dataset.loader import DictDataLoader
 
         dataset_name_or_path = self.dataset_id
-        if _os.path.exists(dataset_name_or_path):
-            dataset_path = dataset_name_or_path
-        else:
-            from modelscope import dataset_snapshot_download
-            dataset_path = dataset_snapshot_download(dataset_name_or_path)
+        dataset_path = _resolve_dataset_path(dataset_name_or_path)
         _os.environ["TAU2_DATA_DIR"] = dataset_path
 
         from tau2.agent.llm_agent import LLMGTAgent
