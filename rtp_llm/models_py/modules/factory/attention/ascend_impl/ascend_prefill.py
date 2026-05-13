@@ -30,7 +30,7 @@ class AscendPrefillImpl(FMHAImplBase):
             token_per_block=attn_inputs.kv_cache.seq_size_per_block,
         )
 
-        self.params = AscendAttnParams()
+        self.params = AscendAttnParams() # Only used by rope and KV cache write
         if self.rope_impl is not None:
             self.rope_impl.set_params(self.params)
         self.kv_cache_write_op.set_params(self.params)
@@ -66,6 +66,8 @@ class AscendPrefillImpl(FMHAImplBase):
 
     def prepare(self, attn_inputs):
         self.fmha_impl.prepare(attn_inputs)
+        self.attn_inputs = attn_inputs
+        # TODO: Ascend Is not called outside, will be called in graph mode
 
     def forward(self, qkv, kv_cache, layer_idx=0):
         if self.need_rope_kv_cache:

@@ -66,6 +66,8 @@ class AscendDecodeImpl(FMHAImplBase):
 
     def prepare(self, attn_inputs):
         self.fmha_impl.prepare(attn_inputs)
+        self.attn_inputs = attn_inputs
+        # TODO: Ascend Is not called outside, will be called in graph mode
 
     def forward(self, qkv, kv_cache, layer_idx=0):
         if self.need_rope_kv_cache:
