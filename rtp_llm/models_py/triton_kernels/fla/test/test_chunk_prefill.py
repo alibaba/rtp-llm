@@ -151,9 +151,14 @@ def test_chunk_varlen(
     mask_p: float,
     cu_seqlens: List[int],
     dtype: torch.dtype,
+    state_dtype: torch.dtype = None,
 ):
     torch.manual_seed(42)
     os.environ["TRITON_F32_DEFAULT"] = "ieee"
+    # state_dtype controls initial_state (h0) precision, simulating --ssm_state_dtype
+    if state_dtype is None:
+        state_dtype = dtype
+
     # randomly split the sequence into N segments
     cu_seqlens = torch.LongTensor(cu_seqlens).to(device)
     T = cu_seqlens[-1]
@@ -166,7 +171,7 @@ def test_chunk_varlen(
     g = F.logsigmoid(torch.rand(1, T, H, dtype=dtype))
     g = g * (torch.rand_like(g) > mask_p)
     beta = torch.rand(1, T, H, dtype=dtype).sigmoid()
-    h0 = torch.randn((N, H, D, D), dtype=dtype)
+    h0 = torch.randn((N, H, D, D), dtype=state_dtype)
 
     q, k, v, beta, g, h0 = map(
         lambda x: x.to(device).requires_grad_(), (q, k, v, beta, g, h0)
@@ -207,8 +212,12 @@ def test_chunk_varlen(
 
 if __name__ == "__main__":
     test_params = [
+        # (H, D, mask_p, cu_seqlens, dtype, state_dtype)
         (4, 64, 0, [0, 15], torch.bfloat16),
         (4, 64, 0, [0, 256, 500, 1000], torch.bfloat16),
+        # fp32 ssm_state_dtype: inputs bf16, initial_state fp32
+        (4, 64, 0, [0, 15], torch.bfloat16, torch.float32),
+        (4, 64, 0, [0, 256, 500, 1000], torch.bfloat16, torch.float32),
     ]
     for test in test_params:
         logging.info(f"Testing test_chunk_varlen with params: {test}")
