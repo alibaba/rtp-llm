@@ -144,6 +144,9 @@ ErrorInfo LocalRpcServer::collectStreamOutput(grpc::ServerContext*              
                                               std::shared_ptr<GenerateStream>&      stream,
                                               const std::shared_ptr<GenerateInput>& input,
                                               GenerateOutputs&                      last_outputs) {
+    if (stream->hasError()) {
+        return stream->statusInfo();
+    }
     while (!stream->isFinished() || stream->hasOutput()) {
         if (context->IsCancelled()) {
             stream->reportError(ErrorCode::CANCELLED, "request cancelled by client");
