@@ -308,6 +308,21 @@ class CompressorFP8(nn.Module):
             positions.numel() == b_idx.numel()
         ), f"positions/b_idx length mismatch: {positions.numel()} vs {b_idx.numel()}"
 
+        # Warmup: pool context unbound — return None-slotted meta so
+        # callers (compressor.forward, _forward_prefill_compressed) can
+        # short-circuit without crashing.
+        if self._state_block_table is None or self._state_eb <= 0:
+            return CompressorMeta(
+                positions=positions,
+                b_idx=b_idx,
+                state_slots=None,
+                kv_slots=None,
+                token_to_req=b_idx.to(torch.int32),
+                is_batched=is_batched,
+                seq_start_per_req=seq_start_per_req,
+                cu_seq_per_req=cu_seq_per_req,
+            )
+
         # ----- Fused Triton fast path (DSV4_FUSED_PREPARE=1) -----
         # Collapses state_slot_mapping + kv_slot_mapping + b_idx.to(int32)
         # (~25 aten ops) into a single kernel.  The three helpers are

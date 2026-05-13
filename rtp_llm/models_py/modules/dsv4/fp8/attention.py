@@ -3450,10 +3450,11 @@ class AttentionFP8(nn.Module):
         is_swa_only = self.compress_ratio == 0
         num_tokens = seqlen  # T_total — flat token axis
 
-        # Cache-independent — needed even on warmup so the SWA-only attn path
-        # (``_attn_fp8_swa_via_kv_full``) has a topk_length to consume.
+        # Cache-independent — needed on warmup for ALL layer types because
+        # CSA/HCA layers fall back to ``_attn_fp8_swa_via_kv_full`` when
+        # workspace_meta is None (pool unbound).
         topk_length_kv_full: Optional[torch.Tensor] = None
-        if is_swa_only:
+        if is_swa_only or self._kv_cache is None:
             sp_per_token = prefix_lengths.to(torch.int32).gather(
                 0, req_id_per_token.to(torch.int64)
             )  # [T_total]
@@ -3728,7 +3729,7 @@ class AttentionFP8(nn.Module):
         num_tokens = bsz * seqlen
 
         topk_length_kv_full: Optional[torch.Tensor] = None
-        if is_swa_only:
+        if is_swa_only or self._kv_cache is None:
             positions = torch.arange(num_tokens, device=device, dtype=torch.int32)
             topk_length_kv_full = torch.clamp(positions + 1, max=win)
 
