@@ -103,6 +103,11 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
             return 0
         return int(self._compress_ratios[layer_id])
 
+    _LAYER_PREFIX: str = "layers.{i}"
+
+    def _key(self, suffix: str) -> str:
+        return f"{self._LAYER_PREFIX}.{suffix}"
+
     # ------------------------------------------------------------------
     # Per-layer descriptor builders
     # ------------------------------------------------------------------
@@ -111,22 +116,22 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
         return [
             AtomicWeight(
                 W.v4_attn_norm,
-                [CkptWeightInfo("layers.{i}.attn_norm.weight", identity)],
+                [CkptWeightInfo(self._key("attn_norm.weight"), identity)],
                 identity,
             ),
             AtomicWeight(
                 W.v4_attn_q_norm,
-                [CkptWeightInfo("layers.{i}.attn.q_norm.weight", identity)],
+                [CkptWeightInfo(self._key("attn.q_norm.weight"), identity)],
                 identity,
             ),
             AtomicWeight(
                 W.v4_attn_kv_norm,
-                [CkptWeightInfo("layers.{i}.attn.kv_norm.weight", identity)],
+                [CkptWeightInfo(self._key("attn.kv_norm.weight"), identity)],
                 identity,
             ),
             AtomicWeight(
                 W.v4_attn_sink,
-                [CkptWeightInfo("layers.{i}.attn.attn_sink", identity)],
+                [CkptWeightInfo(self._key("attn.attn_sink"), identity)],
                 identity,
                 data_type=torch.float32,
             ),
@@ -148,31 +153,31 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
         return [
             AttnAtomicWeight(
                 W.v4_attn_wq_a_w,
-                [CkptWeightInfo("layers.{i}.attn.wq_a.weight", identity)],
+                [CkptWeightInfo(self._key("attn.wq_a.weight"), identity)],
                 identity,
                 config=cfg,
             ),
             AttnAtomicWeight(
                 W.v4_attn_wq_b_w,
-                [CkptWeightInfo("layers.{i}.attn.wq_b.weight", identity)],
+                [CkptWeightInfo(self._key("attn.wq_b.weight"), identity)],
                 identity,
                 config=cfg,
             ),
             AttnAtomicWeight(
                 W.v4_attn_wkv_w,
-                [CkptWeightInfo("layers.{i}.attn.wkv.weight", identity)],
+                [CkptWeightInfo(self._key("attn.wkv.weight"), identity)],
                 identity,
                 config=cfg,
             ),
             AttnAtomicWeight(
                 W.v4_attn_wo_a_w,
-                [CkptWeightInfo("layers.{i}.attn.wo_a.weight", identity)],
+                [CkptWeightInfo(self._key("attn.wo_a.weight"), identity)],
                 identity,
                 config=cfg,
             ),
             AttnAtomicWeight(
                 W.v4_attn_wo_b_w,
-                [CkptWeightInfo("layers.{i}.attn.wo_b.weight", identity)],
+                [CkptWeightInfo(self._key("attn.wo_b.weight"), identity)],
                 identity,
                 config=cfg,
             ),
@@ -193,24 +198,24 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
             # so module init does not do BF16 -> FP32 -> BF16 churn.
             AtomicWeight(
                 wkv_name,
-                [CkptWeightInfo(f"layers.{{i}}.{ckpt_prefix}.wkv.weight", identity)],
+                [CkptWeightInfo(self._key(f"{ckpt_prefix}.wkv.weight"), identity)],
                 identity,
                 data_type=torch.bfloat16,
             ),
             AtomicWeight(
                 wgate_name,
-                [CkptWeightInfo(f"layers.{{i}}.{ckpt_prefix}.wgate.weight", identity)],
+                [CkptWeightInfo(self._key(f"{ckpt_prefix}.wgate.weight"), identity)],
                 identity,
                 data_type=torch.bfloat16,
             ),
             AtomicWeight(
                 norm_name,
-                [CkptWeightInfo(f"layers.{{i}}.{ckpt_prefix}.norm.weight", identity)],
+                [CkptWeightInfo(self._key(f"{ckpt_prefix}.norm.weight"), identity)],
                 identity,
             ),
             AtomicWeight(
                 ape_name,
-                [CkptWeightInfo(f"layers.{{i}}.{ckpt_prefix}.ape", identity)],
+                [CkptWeightInfo(self._key(f"{ckpt_prefix}.ape"), identity)],
                 identity,
                 data_type=torch.float32,
             ),
@@ -221,7 +226,7 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
         return [
             AttnAtomicWeight(
                 W.v4_indexer_wq_b_w,
-                [CkptWeightInfo("layers.{i}.attn.indexer.wq_b.weight", identity)],
+                [CkptWeightInfo(self._key("attn.indexer.wq_b.weight"), identity)],
                 identity,
                 config=cfg,
             ),
@@ -229,7 +234,7 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
                 W.v4_indexer_weights_proj_w,
                 [
                     CkptWeightInfo(
-                        "layers.{i}.attn.indexer.weights_proj.weight", identity
+                        self._key("attn.indexer.weights_proj.weight"), identity
                     )
                 ],
                 identity,
@@ -247,7 +252,7 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
                 out.append(
                     AtomicWeight(
                         w_name,
-                        [CkptWeightInfo(f"layers.{{i}}.hc_{tag}_{sub}", identity)],
+                        [CkptWeightInfo(self._key(f"hc_{tag}_{sub}"), identity)],
                         identity,
                         data_type=torch.float32,
                     )
@@ -258,7 +263,7 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
         out: List[WeightModule] = [
             AtomicWeight(
                 W.v4_router_w,
-                [CkptWeightInfo("layers.{i}.ffn.gate.weight", identity)],
+                [CkptWeightInfo(self._key("ffn.gate.weight"), identity)],
                 identity,
             ),
         ]
@@ -266,7 +271,7 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
             out.append(
                 AtomicWeight(
                     W.v4_router_tid2eid,
-                    [CkptWeightInfo("layers.{i}.ffn.gate.tid2eid", identity)],
+                    [CkptWeightInfo(self._key("ffn.gate.tid2eid"), identity)],
                     identity,
                     data_type=torch.int32,
                 )
@@ -275,7 +280,7 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
             out.append(
                 AtomicWeight(
                     W.v4_router_bias,
-                    [CkptWeightInfo("layers.{i}.ffn.gate.bias", identity)],
+                    [CkptWeightInfo(self._key("ffn.gate.bias"), identity)],
                     identity,
                     data_type=torch.float32,
                 )
@@ -289,11 +294,11 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
                 W.v4_shared_w13_w,
                 [
                     CkptWeightInfo(
-                        "layers.{i}.ffn.shared_experts.w1.weight",
+                        self._key("ffn.shared_experts.w1.weight"),
                         identity,
                     ),
                     CkptWeightInfo(
-                        "layers.{i}.ffn.shared_experts.w3.weight",
+                        self._key("ffn.shared_experts.w3.weight"),
                         identity,
                     ),
                 ],
@@ -302,7 +307,7 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
             ),
             AttnAtomicWeight(
                 W.v4_shared_w2_w,
-                [CkptWeightInfo("layers.{i}.ffn.shared_experts.w2.weight", identity)],
+                [CkptWeightInfo(self._key("ffn.shared_experts.w2.weight"), identity)],
                 identity,
                 config=cfg,
             ),
@@ -339,7 +344,7 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
                     sub_w_name,
                     [
                         CkptWeightInfo(
-                            f"layers.{{i}}.ffn.experts.{{expert_id}}.{sub}.weight",
+                            self._key(f"ffn.experts.{{expert_id}}.{sub}.weight"),
                             identity,
                         )
                     ],
@@ -353,7 +358,7 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
                     sub_s_name,
                     [
                         CkptWeightInfo(
-                            f"layers.{{i}}.ffn.experts.{{expert_id}}.{sub}.scale",
+                            self._key(f"ffn.experts.{{expert_id}}.{sub}.scale"),
                             identity,
                         )
                     ],
@@ -401,7 +406,7 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
         weights.append(
             AtomicWeight(
                 W.v4_ffn_norm,
-                [CkptWeightInfo("layers.{i}.ffn_norm.weight", identity)],
+                [CkptWeightInfo(self._key("ffn_norm.weight"), identity)],
                 identity,
             )
         )
@@ -632,7 +637,7 @@ class DeepSeekV4(DeepSeekV2):
         config.moe_layer_index = list(range(config.num_layers))
 
         # ---- V4-only model-level fields ----
-        config.hc_mult = int(config_json.get("hc_mult", 0))
+        config.hc_mult = int(config_json.get("hc_mult", 1))
         config.hc_sinkhorn_iters = int(config_json.get("hc_sinkhorn_iters", 0))
         config.hc_eps = float(config_json.get("hc_eps", 1e-6))
         config.swiglu_limit = float(config_json.get("swiglu_limit", 0.0))
@@ -675,7 +680,108 @@ class DeepSeekV4(DeepSeekV2):
 
 
 class DeepSeekV4MtpWeight(DeepSeekV4Weight, DeepSeekV3MtpWeight):
-    """MTP weight loader — reuses V3 MTP layout (enorm/hnorm/eh_proj/shared_head)."""
+    """MTP draft weight loader for the V4 `mtp.{i}.*` checkpoint layout."""
+
+    _LAYER_PREFIX: str = "mtp.{i}"
+
+    def _process_meta(self, meta_dict, weight_keys):  # type: ignore[override]
+        super()._process_meta(meta_dict, weight_keys)
+        self._num_hash_layers = 0
+
+    def _get_weight_info(self) -> ModelWeightInfo:
+        # Per-layer entries are inherited from DeepSeekV4Weight as-is — the
+        # MTP draft is a single regular V4 Block.  All MTP-only tensors
+        # (norm, hc_head_*, enorm, hnorm, e_proj, h_proj) live under the
+        # ``mtp.0.*`` ckpt prefix and are loaded as GLOBALS, mapped onto
+        # the same W keys the main-model V4Transformer reads:
+        #   * ``mtp.0.norm.weight``     → W.final_ln_gamma
+        #   * ``mtp.0.hc_head_*``       → W.v4_hc_head_*
+        # so the main V4Transformer ctor can be reused with no MTP-specific
+        # branches.  ``enorm/hnorm/e_proj/h_proj`` are MTP-only fusion
+        # weights and stay under their dedicated W.v4_mtp_* tags; the
+        # ``DeepSeekV4MtpModel`` subclass picks them up from
+        # ``mw.global_weights`` and assembles the mHC fuse stage.
+        layer_weights: List[List[WeightModule]] = [
+            self._get_hf_layer_weight_info(layer_id)
+            for layer_id in range(self._num_layers)
+        ]
+        weights: List[WeightModule] = [
+            AtomicWeight(
+                W.embedding,
+                [CkptWeightInfo("embed.weight", identity)],
+                identity,
+            ),
+            AtomicWeight(
+                W.final_ln_gamma,
+                [CkptWeightInfo("mtp.0.norm.weight", identity)],
+                identity,
+            ),
+            AtomicWeight(
+                W.final_ln_beta,
+                [],
+                functools.partial(zeros, shape=[self._hidden_size]),
+            ),
+            AtomicWeight(
+                W.lm_head,
+                [CkptWeightInfo("head.weight", identity)],
+                identity,
+                # MTP loads alongside the main model in the same process;
+                # keep its lm_head copy in bf16 to halve the per-process
+                # memory footprint (the FP32 cast happens lazily on the
+                # rare standalone test path).  Production routes the
+                # framework lm_head through the main model's tensor.
+                data_type=torch.bfloat16,
+            ),
+            AtomicWeight(
+                W.v4_hc_head_base,
+                [CkptWeightInfo("mtp.0.hc_head_base", identity)],
+                identity,
+                data_type=torch.float32,
+            ),
+            AtomicWeight(
+                W.v4_hc_head_fn,
+                [CkptWeightInfo("mtp.0.hc_head_fn", identity)],
+                identity,
+                data_type=torch.float32,
+            ),
+            AtomicWeight(
+                W.v4_hc_head_scale,
+                [CkptWeightInfo("mtp.0.hc_head_scale", identity)],
+                identity,
+                data_type=torch.float32,
+            ),
+            AtomicWeight(
+                W.v4_mtp_enorm,
+                [CkptWeightInfo("mtp.0.enorm.weight", identity)],
+                identity,
+            ),
+            AtomicWeight(
+                W.v4_mtp_hnorm,
+                [CkptWeightInfo("mtp.0.hnorm.weight", identity)],
+                identity,
+            ),
+            AtomicWeight(
+                W.v4_mtp_e_proj_w,
+                [CkptWeightInfo("mtp.0.e_proj.weight", identity)],
+                identity,
+            ),
+            AtomicWeight(
+                W.v4_mtp_e_proj_s,
+                [CkptWeightInfo("mtp.0.e_proj.scale", identity)],
+                identity,
+            ),
+            AtomicWeight(
+                W.v4_mtp_h_proj_w,
+                [CkptWeightInfo("mtp.0.h_proj.weight", identity)],
+                identity,
+            ),
+            AtomicWeight(
+                W.v4_mtp_h_proj_s,
+                [CkptWeightInfo("mtp.0.h_proj.scale", identity)],
+                identity,
+            ),
+        ]
+        return ModelWeightInfo(layer_weights=layer_weights, weights=weights)
 
 
 class DeepSeekV4Mtp(DeepSeekV4, DeepSeekV3Mtp):
@@ -683,10 +789,28 @@ class DeepSeekV4Mtp(DeepSeekV4, DeepSeekV3Mtp):
     @classmethod
     def _create_config(cls, ckpt_path: str):
         config = super()._create_config(ckpt_path)
+        config.num_layers = 1
+        config.attn_config.layer_compress_ratios = [0]
         config.moe_layer_index = list(range(config.num_layers))
         config.reverse_e_h_norm = True
         config.is_mtp = True
         return config
+
+    def _create_python_model(self):
+        from rtp_llm.models_py.model_desc.deepseek_v4_mtp_model import (
+            DeepSeekV4MtpModel,
+        )
+
+        self.py_model = DeepSeekV4MtpModel(
+            self.model_config,
+            self.parallelism_config,
+            self.weight,
+            self.moe_config,
+            max_generate_batch_size=self.max_generate_batch_size,
+            fmha_config=self.fmha_config,
+            py_hw_kernel_config=self.hw_kernel_config,
+            device_resource_config=self.device_resource_config,
+        )
 
     @staticmethod
     def get_weight_cls():
