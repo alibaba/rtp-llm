@@ -89,7 +89,8 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
          params.model_config_.attn_config.kernel_tokens_per_block,
          kv_cache_group_num,
          kv_cache_layer_to_group,
-         cache_manager});
+         cache_manager,
+         params.model_config_.hc_mult});
 
     if (params.ffn_disaggregate_config.enable_ffn_disaggregate) {
         RTP_LLM_LOG_INFO("using ffn as service");
