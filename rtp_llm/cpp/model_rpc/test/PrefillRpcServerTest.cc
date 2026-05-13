@@ -29,7 +29,9 @@ public:
 class PrefillRpcServerTest: public DeviceTestBase {};
 
 TEST_F(PrefillRpcServerTest, waitStreamBeforeRunReturnsSchedulerEnqueueErrorImmediately) {
-    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 8, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    // block_num=1, tokens_per_block=2 → maxAvailableTokensNum=2 < inputLength=3,
+    // so checkInputLength fails synchronously with EXCEEDS_KV_CACHE_MAX_LEN.
+    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 1, 1, 4, 2, rtp_llm::DataType::TYPE_FP16);
     std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
     ASSERT_TRUE(cache_manager->init());
 
@@ -41,7 +43,7 @@ TEST_F(PrefillRpcServerTest, waitStreamBeforeRunReturnsSchedulerEnqueueErrorImme
 
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
-    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 2;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
 
     PDSepConfig         pd_sep_config;
     ParallelismConfig   parallelism_config;
@@ -59,7 +61,7 @@ TEST_F(PrefillRpcServerTest, waitStreamBeforeRunReturnsSchedulerEnqueueErrorImme
     ASSERT_FALSE(scheduler.enqueue(stream).ok());
     ASSERT_TRUE(stream->hasError());
     ASSERT_EQ(stream->getStatus(), StreamState::FINISHED);
-    ASSERT_EQ(stream->statusInfo().code(), ErrorCode::MALLOC_FAILED);
+    ASSERT_EQ(stream->statusInfo().code(), ErrorCode::EXCEEDS_KV_CACHE_MAX_LEN);
 
     TestablePrefillRpcServer server;
     server.initParams().pd_sep_config.prefill_max_wait_timeout_ms = 1;
@@ -67,12 +69,14 @@ TEST_F(PrefillRpcServerTest, waitStreamBeforeRunReturnsSchedulerEnqueueErrorImme
     auto error_info = server.waitStreamBeforeRun(stream);
 
     ASSERT_TRUE(error_info.hasError());
-    ASSERT_EQ(error_info.code(), ErrorCode::MALLOC_FAILED);
-    ASSERT_NE(error_info.ToString().find("max_batch_tokens_size"), std::string::npos);
+    ASSERT_EQ(error_info.code(), ErrorCode::EXCEEDS_KV_CACHE_MAX_LEN);
+    ASSERT_NE(error_info.ToString().find("kv cache max available tokens num"), std::string::npos);
 }
 
 TEST_F(PrefillRpcServerTest, collectStreamOutputReturnsErrorForFailedBatchEnqueue) {
-    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 8, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    // block_num=1, tokens_per_block=2 → maxAvailableTokensNum=2 < inputLength=3,
+    // so checkInputLength fails synchronously with EXCEEDS_KV_CACHE_MAX_LEN.
+    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 1, 1, 4, 2, rtp_llm::DataType::TYPE_FP16);
     std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
     ASSERT_TRUE(cache_manager->init());
 
@@ -84,7 +88,7 @@ TEST_F(PrefillRpcServerTest, collectStreamOutputReturnsErrorForFailedBatchEnqueu
 
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
-    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 2;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
 
     PDSepConfig         pd_sep_config;
     ParallelismConfig   parallelism_config;
