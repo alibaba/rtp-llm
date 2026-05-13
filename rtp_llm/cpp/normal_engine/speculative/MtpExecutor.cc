@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "autil/TimeUtility.h"
+#include <limits>
 #include <memory>
 #include <thread>
 #include <random>
@@ -25,6 +26,23 @@ namespace rtp_llm {
 bool MtpExecutor::isTpRank0() const {
     return tp_rank_ == 0;
 }
+
+void MtpExecutor::maybeOverrideLastHiddenWithMtpBuffer(GptModelInputs& model_input, ModelBase& source) {
+    auto pre_hc = source.getMtpTargetHiddenStates(std::numeric_limits<int64_t>::max());
+    if (!pre_hc.defined() || pre_hc.numel() == 0) {
+        return;
+    }
+    model_input.last_hidden_states = pre_hc;
+}
+
+void MtpExecutor::maybeOverrideLastHiddenWithMtpBuffer(GptModelOutputs& model_output, ModelBase& source) {
+    auto pre_hc = source.getMtpTargetHiddenStates(std::numeric_limits<int64_t>::max());
+    if (!pre_hc.defined() || pre_hc.numel() == 0) {
+        return;
+    }
+    model_output.all_hidden_states = pre_hc;
+}
+
 
 void MtpExecutor::maybePrintModelInput(const GptModelInputs& model_input, const std::string& prefix) const {
     bool force = tp_rank_ == 0 && enable_detail_log_;
@@ -87,8 +105,13 @@ GenerateStreamPtr MtpExecutor::createMinFakeDecodeStream(int                    
     auto fake_stream =
         makeFakeStream(max_new_tokens, 1 + max_new_tokens, model_config, runtime_config, resource_context);
 
-    auto sp_buffer = makeFakeSPOutputBuffer(
-        model_config.data_type, model_config.hidden_size, model_config.vocab_size, max_new_tokens);
+    // Fake SP buffer's hidden_states stands in for the target's pre-output
+    // residual that the draft consumes (DSv4: [T, hc_mult*hidden_size];
+    // non-DSv4 keeps hc_mult=1 so the shape is plain [T, hidden_size]).
+    auto sp_buffer = makeFakeSPOutputBuffer(model_config.data_type,
+                                            model_config.hidden_size * model_config.hc_mult,
+                                            model_config.vocab_size,
+                                            max_new_tokens);
 
     auto new_tokens = torch::zeros({1, 1}, torch::kInt32);
 
@@ -126,7 +149,11 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     warm_up_(warm_up),
     role_type_(params.pd_sep_config.role_type) {
     data_type_          = params.model_config_.data_type;
-    hidden_size_        = params.model_config_.hidden_size;
+    // Pre-hc residual width for the target → draft hand-off (DSv4: hc*dim;
+    // non-DSv4 hc_mult=1 → plain hidden_size). makeFakeSPOutputBuffer in
+    // the perf_test path (l. ~800) sizes the fake hidden_states tensor
+    // from this; it must match getMtpTargetHiddenStates.
+    hidden_size_        = params.model_config_.hidden_size * params.model_config_.hc_mult;
     propose_step_       = propose_params->gen_num_per_circle;
     vocab_size_         = params.model_config_.vocab_size;
     propose_vocab_size_ = propose_params->getEngineInitParams().model_config_.vocab_size;
@@ -189,7 +216,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
          params.model_config_.attn_config.kernel_tokens_per_block,
          kv_cache_group_num,
          kv_cache_layer_to_group,
-         cache_manager});
+         cache_manager,
+         params.model_config_.hc_mult});
 
     if (params.ffn_disaggregate_config.enable_ffn_disaggregate) {
         RTP_LLM_LOG_INFO("using ffn as service");
@@ -237,7 +265,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 mtp_params->model_config_.attn_config.kernel_tokens_per_block,
                                 kv_cache_group_num,
                                 kv_cache_layer_to_group,
-                                cache_manager});
+                                cache_manager,
+                                mtp_params->model_config_.hc_mult});
         if (!params.py_sp_model.is_none()) {
             RTP_LLM_LOG_INFO("[speculative decoding] using py model");
             draft_model_.reset(new PyWrappedModel(
@@ -257,17 +286,32 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
         break;  // NOTE: only support one mtp model now
     }
 
-    target_kv_cache_layer_to_group =
-        torch::empty({(int64_t)target_cache_layer_layout.layers_to_kv_buffer_ptrs.size()}, torch::kInt32);
-    draft_kv_cache_layer_to_group =
-        torch::empty({(int64_t)draft_cache_layer_layout.layers_to_kv_buffer_ptrs.size()}, torch::kInt32);
+    RTP_LLM_CHECK_WITH_INFO(
+        target_cache_layer_layout.layer_to_groups.size() == target_cache_layer_layout.layers_to_kv_buffer_ptrs.size(),
+        "target_cache_layer_layout layer_to_groups size[%zu] != layers_to_kv_buffer_ptrs size[%zu]",
+        target_cache_layer_layout.layer_to_groups.size(),
+        target_cache_layer_layout.layers_to_kv_buffer_ptrs.size());
+    RTP_LLM_CHECK_WITH_INFO(
+        draft_cache_layer_layout.layer_to_groups.size() == draft_cache_layer_layout.layers_to_kv_buffer_ptrs.size(),
+        "draft_cache_layer_layout layer_to_groups size[%zu] != layers_to_kv_buffer_ptrs size[%zu]",
+        draft_cache_layer_layout.layer_to_groups.size(),
+        draft_cache_layer_layout.layers_to_kv_buffer_ptrs.size());
 
-    memcpy(target_kv_cache_layer_to_group.data_ptr<int>(),
-           target_cache_layer_layout.layer_to_groups.data(),
-           target_cache_layer_layout.layer_to_groups.size() * sizeof(int));
-    memcpy(draft_kv_cache_layer_to_group.data_ptr<int>(),
-           draft_cache_layer_layout.layer_to_groups.data(),
-           draft_cache_layer_layout.layer_to_groups.size() * sizeof(int));
+    target_kv_cache_layer_to_group =
+        torch::empty({(int64_t)target_cache_layer_layout.layer_to_groups.size()}, torch::kInt32);
+    draft_kv_cache_layer_to_group =
+        torch::empty({(int64_t)draft_cache_layer_layout.layer_to_groups.size()}, torch::kInt32);
+
+    if (!target_cache_layer_layout.layer_to_groups.empty()) {
+        memcpy(target_kv_cache_layer_to_group.data_ptr<int>(),
+               target_cache_layer_layout.layer_to_groups.data(),
+               target_cache_layer_layout.layer_to_groups.size() * sizeof(int));
+    }
+    if (!draft_cache_layer_layout.layer_to_groups.empty()) {
+        memcpy(draft_kv_cache_layer_to_group.data_ptr<int>(),
+               draft_cache_layer_layout.layer_to_groups.data(),
+               draft_cache_layer_layout.layer_to_groups.size() * sizeof(int));
+    }
 }
 
 /*
@@ -356,6 +400,28 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     model_->releaseBuffers();
     draft_model_->releaseBuffers();
 
+    // CP+MTP: PyWrappedModel's CP processor (handleInputs) MUTATES
+    // ``model_input.combo_tokens`` and ``model_input.input_lengths`` in
+    // place to the rank-local zigzag chunk layout for the target forward.
+    // The post-target MTP pipeline (updatePrefillPostDraftModelInput +
+    // draft re-CP-slice) needs the FULL/global view, so snapshot both
+    // tensors here while they still hold the global sequence and restore
+    // on rank 0 before the second tpSync (which then broadcasts the
+    // restored full view to every rank for the draft pass).
+    const bool    cp_enabled = parallelism_config_.prefill_cp_config.is_enabled();
+    torch::Tensor saved_combo_tokens;
+    torch::Tensor saved_input_lengths;
+    if (cp_enabled) {
+        // Pinned host buffers preserved via clone().pin_memory() — the
+        // upstream tensors come from gather_model_input pinned, and
+        // PyWrappedModel's fused d2d copy path asserts the host source
+        // is pinned (PyWrappedModel.cc:67). A plain clone() drops the
+        // pinned flag and would trip that assert when the draft pass
+        // re-enters PyWrappedModel::forward.
+        saved_combo_tokens  = model_input.combo_tokens.clone().pin_memory();
+        saved_input_lengths = model_input.input_lengths.clone().pin_memory();
+    }
+
     // target model prefill
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(target_model_forward)");
@@ -383,6 +449,15 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
             CHECK_AND_RETURN_REF(sampler_input,
                                  batch_stream_processor_->gatherSamplerInput(stream_groups, model_input, model_output));
             sampler_output = std::move(sampler_->forward(sampler_input));
+            // Restore the full combo_tokens / input_lengths before the MTP
+            // shift logic — under CP both were mutated to rank-local by the
+            // target forward's handleInputs and the shift formula assumes a
+            // contiguous full sequence (offset += input_length, last token
+            // overwrite at offset+input_length-1).
+            if (cp_enabled) {
+                model_input.combo_tokens  = saved_combo_tokens;
+                model_input.input_lengths = saved_input_lengths;
+            }
             batch_stream_processor_->updatePrefillPostDraftModelInput(model_input, model_output, sampler_output);
         }
     }
@@ -390,6 +465,20 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     // draft model prefill
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(draft_model_forward)");
+        // CP fix: under prefill_cp, the target's all_hidden_states (just
+        // copied into model_input.last_hidden_states by
+        // updatePrefillPostDraftModelInput) is the cross-rank GATHERED
+        // tensor with [T_global, hidden_size] rows, while combo_tokens
+        // is rank-local [T_local].  tpSyncModelInputs broadcasts the
+        // gather'd numel and then asserts numel % combo_tokens.numel() == 0
+        // which fails for any T_global that doesn't evenly divide T_local.
+        // The maybeOverride below repopulates last_hidden_states from
+        // each rank's own _mtp_hidden_buffer (per-rank, T_local rows),
+        // so the broadcast value is wasted anyway — clear it before sync
+        // and let every rank fill its own per-rank pre-hc residual.
+        if (cp_enabled) {
+            model_input.last_hidden_states = torch::Tensor();
+        }
         tpSyncModelInputs(model_input, parallelism_config_);
         maybePrintModelInput(model_input, "prefill post draft model");
         int64_t     start_time_us          = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -397,8 +486,11 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         model_input.kv_block_stride_bytes   = mtp_cache_cfg.kv_block_stride_bytes;
         model_input.kv_scale_stride_bytes   = mtp_cache_cfg.kv_scale_stride_bytes;
         model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
-        draft_model_output                  = std::move(draft_model_->forward(model_input));
+        // Source = main (just ran prefill; its pre-hc buffer is current).
+        maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_);
+        draft_model_output = std::move(draft_model_->forward(model_input));
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        maybeOverrideLastHiddenWithMtpBuffer(draft_model_output, *draft_model_);
     }
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
@@ -675,9 +767,14 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             // rejection sampling
             speculative_sampler_output = speculative_sampler_->forward(streams, draft_sampler_output, sampler_output);
         }
+        // Replace target's post-reduce hidden with pre-hc MTP buffer so that
+        // updateDecodePostDraftModelInput gathers the correct residual for the
+        // draft model.
+        maybeOverrideLastHiddenWithMtpBuffer(model_output, *model_);
         // NOTE: here will have cuda device sync before update model input
         batch_stream_processor_->updateDecodePostDraftModelInput(
-            model_input, model_output, speculative_sampler_output, batch_size, hidden_states_d_t, total_accept_len);
+            model_input, model_output, speculative_sampler_output, batch_size,
+            hidden_states_d_t, total_accept_len);
     }
 
     {
@@ -697,13 +794,14 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(draft_model_forward)");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        // Use sp_prefill_draft_model_ if CUDA graph is enabled, otherwise use draft_model_
+        // last_hidden_states already set to pre-hc by updateDecodePostDraftModelInput
         if (sp_prefill_draft_model_) {
             draft_prefill_model_output = std::move(sp_prefill_draft_model_->forward(model_input));
         } else {
             draft_prefill_model_output = std::move(draft_model_->forward(model_input));
         }
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        maybeOverrideLastHiddenWithMtpBuffer(draft_prefill_model_output, *draft_model_);
     }
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
@@ -886,9 +984,10 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
     for (int i = 0; i < propose_step_ - 1; i++) {
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.draft_model_decode(loop_iter=%d)", i);
         RTP_LLM_LOG_DEBUG("[MTP draftDecode] loop step %d/%d start, batch_size %zu", i, propose_step_ - 1, batch_size);
-        int64_t start_time_us     = autil::TimeUtility::currentTimeInMicroSeconds();
+        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         draft_decode_model_output = std::move(draft_model_->forward(model_input));
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        maybeOverrideLastHiddenWithMtpBuffer(draft_decode_model_output, *draft_model_);
         RTP_LLM_LOG_DEBUG("[MTP draftDecode] loop step %d forward done", i);
 
         // sample

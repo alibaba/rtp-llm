@@ -215,6 +215,7 @@ struct KVCache {
 
 struct PyModelInitResources {
     std::optional<KVCache> kv_cache;
+    bool                   is_speculative = false;
 };
 
 struct PyCacheStoreInputs {

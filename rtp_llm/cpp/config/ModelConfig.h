@@ -95,8 +95,9 @@ public:
     std::vector<int64_t> moe_layer_index = {};
 
     // DeepSeek-V4 specific
-    // mHC residual hyper-parameters (Eq. 2-8): n_hc multiplier, Sinkhorn iterations, eps
-    int64_t hc_mult           = 0;
+    // mHC residual hyper-parameters (Eq. 2-8): n_hc multiplier, Sinkhorn iterations, eps.
+    // Default 1 means "no head-channel expansion" — pre-output residual is plain [T, hidden_size].
+    int64_t hc_mult           = 1;
     int64_t hc_sinkhorn_iters = 0;
     double  hc_eps            = 1e-6;
     // Clamp limit for SwiGLU (linear in [-limit,limit], gate <= limit). 0 disables clamp.

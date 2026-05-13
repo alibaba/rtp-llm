@@ -51,6 +51,11 @@ struct GptModelInitParams {
     int32_t                               kv_cache_group_num      = 1;
     std::vector<int32_t>                  kv_cache_layer_to_group;
     std::shared_ptr<KVCacheManager>       cache_manager;
+    // DSv4 head-channel residual multiplier. Default 1 (no expansion).
+    // When >1, the model's pre-output residual ([T, hc_mult*hidden_size])
+    // is the contract between target and draft for MTP — see
+    // MtpExecutor::makeFakeSPOutputBuffer and CudaGraphRunner input_hiddens.
+    int64_t                               hc_mult                 = 1;
 };
 
 enum GptModelInputIndex : size_t {
@@ -123,6 +128,18 @@ public:
     virtual ~ModelBase()                                          = default;
     virtual GptModelOutputs forward(const GptModelInputs& inputs) = 0;
     virtual void            releaseBuffers() {}
+
+    // Optional spec-decode hand-off: target model exposes the pre-output-projection
+    // residual buffer (DSv4: pre-``hc_head`` ``[T, hc*D]``) so MtpExecutor can
+    // swap it into ``last_hidden_states`` before each draft forward instead of
+    // the post-reduce ``[T, D]``. Default returns an empty Tensor (model has no
+    // such buffer); ``PyWrappedModel`` overrides to call the Python accessor.
+    //
+    // The producer writes the buffer in verify (req-major) layout
+    // ``[r0_v0, r0_v1, …, r0_v_ps, r1_v0, …]``: each request occupies
+    virtual torch::Tensor getMtpTargetHiddenStates(int64_t /*num_tokens*/) {
+        return torch::Tensor();
+    }
 
     rtp_llm::Weights            weights_;
     rtp_llm::OverallExpertStats overall_expert_stats_;

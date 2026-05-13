@@ -584,7 +584,12 @@ void CudaGraphRunner::initCapture() {
         PyModelInputs inputs;
         // input_ids [tokens_nums] = [batch_size * num_tokens_per_bs]
         inputs.input_ids     = torch::zeros({max_num_token_}, options_cuda_int32_);
-        inputs.input_hiddens = torch::zeros({max_num_token_, hidden_size_}, options_cuda_float_);
+        // DSv4 MTP draft consumes the target's pre-hc residual ([T, hc*dim])
+        // as input_hiddens; for everyone else hc_mult_ == 1 so this matches
+        // the post-reduce hidden size. The output tensor below stays at
+        // hidden_size_ (post-reduce) regardless.
+        inputs.input_hiddens =
+            torch::zeros({max_num_token_, hidden_size_ * hc_mult_}, options_cuda_float_);
         // Setup attention inputs using the extracted function
         initCaptureAttentionInputs(inputs, max_bs_, num_tokens_per_bs_);
 
@@ -701,8 +706,21 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     // Common slice operations for input_ids and padding_offset
     inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1;
     inputs.attention_inputs.is_target_verify = is_target_verify_;
-    inputs.input_ids     = capture_mem_hold_.py_model_inputs_.input_ids.slice(0, 0, seq_len_or_tokens);
-    inputs.input_hiddens = capture_mem_hold_.py_model_inputs_.input_hiddens.slice(0, 0, seq_len_or_tokens);
+    // Draft prefill cudagraph mode (num_tokens_per_bs_ > 1 and
+    // is_prefill_cuda_graph_mode_) must keep input_ids / input_hiddens at
+    // full capacity (max_bs_ * num_tokens_per_bs_).  The downstream Python
+    // dispatch routes through ``forward_decode`` + MTP's
+    // ``_prepare_decode_hidden`` which uses ``T = B*q_len`` — any per-
+    // capture slice to ``seq_len < B*q_len`` produces a shape mismatch in
+    // the ``view(T, hc, dim)`` reshape.  Embedding prefill (num_tokens_per_bs_
+    // == max_seq_len_) still slices to seq_len because it goes through
+    // ``forward_prefill`` which expects flat ``T = input_ids.numel()``.
+    const bool draft_prefill_graph_mode =
+        is_prefill_cuda_graph_mode_ && num_tokens_per_bs_ != max_seq_len_;
+    const int token_slice_len =
+        draft_prefill_graph_mode ? max_bs_ * num_tokens_per_bs_ : seq_len_or_tokens;
+    inputs.input_ids     = capture_mem_hold_.py_model_inputs_.input_ids.slice(0, 0, token_slice_len);
+    inputs.input_hiddens = capture_mem_hold_.py_model_inputs_.input_hiddens.slice(0, 0, token_slice_len);
     inputs.attention_inputs.input_lengths =
         capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths.slice(0, 0, batch_size);
     inputs.attention_inputs.input_lengths_d =
