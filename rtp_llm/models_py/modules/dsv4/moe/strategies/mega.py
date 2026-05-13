@@ -12,12 +12,20 @@ available. Direct port of the pre-refactor ``_setup_mega_moe`` +
 
 from __future__ import annotations
 
+import logging
 from typing import Dict, Optional
 
 import torch
 
 from ...quant_layouts import FP4_BLOCK, prepare_fp4_weight_scale_for_deepgemm
 from ..input_packer import get_mega_moe_input_packer
+from ..mega_jit_warmup import (
+    clamp_token_counts,
+    format_token_counts,
+    generate_mega_moe_jit_token_counts,
+    mega_moe_jit_warmup_enabled,
+    parse_mega_moe_jit_warmup_tokens_override,
+)
 from ..mega_buf import (
     _get_or_create_mega_buf,
     _get_or_create_mega_output,
@@ -25,6 +33,9 @@ from ..mega_buf import (
 )
 from ..shared_expert import strict_fused_moe_enabled
 from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
+
+
+_MEGA_MOE_JIT_WARMED_KEYS: set[tuple] = set()
 
 
 @register_strategy
@@ -162,6 +173,116 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
             device,
         )
         self._input_packer = get_mega_moe_input_packer()
+        self._maybe_warmup_jit_once()
+
+    def _resolve_jit_warmup_token_counts(self, num_sms: int) -> list[int]:
+        cfg = self.cfg
+        # Use the logical model/runtime token cap, not DeepGEMM's internally
+        # aligned buffer capacity.  The JIT key is driven by request-visible T
+        # buckets; the aligned capacity only needs to be large enough to hold
+        # those representatives.
+        max_tokens_per_rank = int(cfg.max_tokens_per_rank)
+        override = parse_mega_moe_jit_warmup_tokens_override()
+        if override is not None:
+            return clamp_token_counts(override, max_tokens_per_rank)
+        return generate_mega_moe_jit_token_counts(
+            num_ranks=cfg.ep_size,
+            num_experts=cfg.n_routed_experts,
+            num_experts_per_rank=cfg.n_local_experts,
+            num_topk=cfg.n_activated_experts,
+            intermediate_hidden=cfg.moe_inter_dim,
+            num_sms=num_sms,
+            max_tokens_per_rank=max_tokens_per_rank,
+        )
+
+    def _maybe_warmup_jit_once(self) -> None:
+        if not mega_moe_jit_warmup_enabled():
+            return
+        if torch.cuda.is_current_stream_capturing():
+            raise RuntimeError("MegaMoE JIT warmup must not run inside CUDA graph capture")
+
+        import deep_gemm
+        import torch.distributed as dist
+
+        cfg = self.cfg
+        num_sms = int(deep_gemm.get_num_sms())
+        token_counts = self._resolve_jit_warmup_token_counts(num_sms)
+        if not token_counts:
+            return
+
+        max_tokens_per_rank = int(
+            cfg.max_tokens_per_rank
+        )
+        warmup_key = (
+            cfg.ep_size,
+            cfg.n_routed_experts,
+            cfg.n_local_experts,
+            cfg.n_activated_experts,
+            cfg.dim,
+            cfg.moe_inter_dim,
+            max_tokens_per_rank,
+            cfg.swiglu_limit,
+            num_sms,
+            tuple(token_counts),
+        )
+        if warmup_key in _MEGA_MOE_JIT_WARMED_KEYS:
+            return
+
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        if rank == 0:
+            logging.info(
+                "[DSV4 MegaMoE] JIT warmup start: layer=%d tokens=[%s] "
+                "max_tokens_per_rank=%d ep=%d experts=%d topk=%d hidden=%d "
+                "intermediate=%d num_sms=%d",
+                cfg.layer_id,
+                format_token_counts(token_counts),
+                max_tokens_per_rank,
+                cfg.ep_size,
+                cfg.n_routed_experts,
+                cfg.n_activated_experts,
+                cfg.dim,
+                cfg.moe_inter_dim,
+                num_sms,
+            )
+        self.warmup_jit(token_counts)
+        _MEGA_MOE_JIT_WARMED_KEYS.add(warmup_key)
+        if rank == 0:
+            logging.info(
+                "[DSV4 MegaMoE] JIT warmup done: layer=%d tokens=[%s]",
+                cfg.layer_id,
+                format_token_counts(token_counts),
+            )
+
+    @torch.inference_mode()
+    def warmup_jit(self, token_counts: list[int]) -> None:
+        """Compile MegaMoE JIT buckets with synthetic rank-local tokens."""
+        import torch.distributed as dist
+
+        cfg = self.cfg
+        device = self._mega_l1_w.device
+        max_tokens = max(token_counts)
+        x = torch.zeros((max_tokens, cfg.dim), dtype=torch.bfloat16, device=device)
+        weights = torch.zeros(
+            (max_tokens, cfg.n_activated_experts),
+            dtype=torch.float32,
+            device=device,
+        )
+        local_expert_ids = (
+            cfg.local_expert_start
+            + torch.arange(cfg.n_activated_experts, dtype=torch.long, device=device)
+            % max(cfg.n_local_experts, 1)
+        )
+        indices = local_expert_ids.view(1, -1).expand(max_tokens, -1).contiguous()
+
+        for token_count in token_counts:
+            dist.barrier()
+            self.forward(
+                x[:token_count],
+                weights[:token_count],
+                indices[:token_count],
+            )
+            torch.cuda.synchronize(device)
+        dist.barrier()
 
     def forward(
         self,
