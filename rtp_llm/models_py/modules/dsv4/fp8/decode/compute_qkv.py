@@ -1,7 +1,7 @@
 """DSv4 decode Q/KV projection — extracted from ``AttentionFP8._forward_decode_body``.
 
 Mirrors ``AttentionFP8._prefill_compute_qkv`` for the decode path
-(per-request batched, ``q_len == 1``).
+(per-request batched, including target-verify ``q_len > 1``).
 
 The Attention module is passed in as ``attn`` and treated as a bag of
 weights + tiny helpers (``_lin`` / ``_rmsnorm_weighted``) — this matches
@@ -24,33 +24,34 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 class DecodeQKV(NamedTuple):
     """Q/KV intermediate produced by :func:`decode_compute_qkv`.
 
-    ``qr``  — ``[B, 1, q_lora_rank]`` bf16 — fed to the CSA indexer.
-    ``q``   — ``[B, 1, H, D]`` bf16 — dense Q for sparse attn.
-    ``kv``  — ``[B, 1, D]`` bf16 — single MQA head, written to SWA pool.
-    ``freqs_cis_per_req`` — ``[B, freqs_dim]`` — per-request RoPE table
+    ``qr``  — ``[B, S, q_lora_rank]`` bf16 — fed to the CSA indexer.
+    ``q``   — ``[B, S, H, D]`` bf16 — dense Q for sparse attn.
+    ``kv``  — ``[B, S, D]`` bf16 — single MQA head, written to SWA pool.
+    ``freqs_cis`` — ``[T, freqs_dim]`` — per-token RoPE table
         lookup, reused by the output-proj inverse-RoPE.
     """
 
     qr: torch.Tensor
     q: torch.Tensor
     kv: torch.Tensor
-    freqs_cis_per_req: torch.Tensor
+    freqs_cis: torch.Tensor
 
 
 def decode_compute_qkv(
     attn: "AttentionFP8",
-    x: torch.Tensor,  # [B, 1, dim] bf16
-    start_pos: torch.Tensor,  # [B] int32 per-request absolute position
+    x: torch.Tensor,  # [B, S, dim] bf16
+    position_ids: torch.Tensor,  # [T] int32 absolute position per token
 ) -> DecodeQKV:
     """Decode Q/KV path — RMSNorm + LoRA Q + KV linear + fused RMSNorm-RoPE.
 
-    Per-request batched: each row of ``x`` has its own ``start_pos`` so the
-    RoPE table is gathered via ``freqs_cis[start_pos.long()]``;
-    ``fused_rmsnorm_rope`` applies the partial RoPE in-kernel. KV is a
-    single MQA head.
+    ``position_ids`` is flat over the token-major ``[B, S]`` layout. For
+    normal decode ``S == 1``; target verify passes the full verify span.
     """
     rd = attn.rope_head_dim
-    freqs_cis_per_req = attn.freqs_cis[start_pos.long()]  # [B, freqs_dim]
+    position_ids = position_ids.reshape(-1).to(
+        device=attn.freqs_cis.device, dtype=torch.long
+    )
+    freqs_cis = attn.freqs_cis.index_select(0, position_ids).contiguous()
 
     # Q path
     qr = attn._rmsnorm_weighted(
@@ -58,16 +59,16 @@ def decode_compute_qkv(
     )  # [B, 1, q_lora_rank]
     q = attn._lin(attn.wq_b, qr).unflatten(
         -1, (attn.n_heads, attn.head_dim)
-    )  # [B, 1, H, D]
-    q = fused_rmsnorm_rope(q, None, freqs_cis_per_req, rd, eps=attn.eps)
+    )  # [B, S, H, D]
+    q = fused_rmsnorm_rope(q, None, freqs_cis, rd, eps=attn.eps)
 
-    # KV path (single MQA head) — per-request RoPE using the same table lookup.
+    # KV path (single MQA head) — per-token RoPE using the same table lookup.
     kv = fused_rmsnorm_rope(
         attn._lin(attn.wkv, x),
         attn.kv_norm,
-        freqs_cis_per_req,
+        freqs_cis,
         rd,
         eps=attn.eps,
     )
 
-    return DecodeQKV(qr=qr, q=q, kv=kv, freqs_cis_per_req=freqs_cis_per_req)
+    return DecodeQKV(qr=qr, q=q, kv=kv, freqs_cis=freqs_cis)

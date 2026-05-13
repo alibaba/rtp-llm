@@ -20,7 +20,7 @@ The impl only carries:
 
   * Pre-allocated ``DSv4DecodeAttnMetadataFP8`` (sized for the captured BS).
   * A ``prepare_cuda_graph(attn_inputs)`` method that updates the
-    metadata in place with the new ``start_pos`` (= ``attn_inputs.sequence_lengths``).
+    metadata in place from the framework attention inputs.
 
 ``DeepSeekV4Model._forward_decode`` reads the metadata off the impl
 when one is supplied; otherwise it builds inline (Phase 2 eager path).
@@ -122,23 +122,7 @@ class DSv4DecodeFmhaImplFP8:
         return True
 
     def prepare(self, attn_inputs, forbid_realloc: bool = False) -> None:
-        """Eager-path preparation: extract ``start_pos`` from
-        ``attn_inputs.sequence_lengths`` (per
-        ``NormalModelInputGatherer.cc:255`` this is exactly the absolute
-        position of the new token's predecessor — i.e. our ``start_pos``).
-        Then update the persistent metadata in place, including paged
-        block_table snapshot when configured.
-        """
-        seq_lens = attn_inputs.sequence_lengths
-        if seq_lens.device != self.device:
-            seq_lens = seq_lens.to(self.device)
-        start_pos = seq_lens.to(torch.int32)
-        # Clamp for warmup safety — the framework warmup probes at
-        # max_seq_len then decode pushes start_pos past the freqs_cis
-        # range. Same clamp used in DeepSeekV4Model._forward_decode.
-        max_s = self.config.max_seq_len
-        start_pos = torch.clamp(start_pos, min=0, max=max(0, max_s - 1))
-
+        """Update persistent metadata and paged block-table snapshots."""
         # Phase 2: pull per-attn_type block_tables from the framework's
         # by_group list. Empty paged_pool_specs ⇒ skip (legacy path).
         paged_block_tables: Optional[Dict[int, torch.Tensor]] = None
@@ -163,7 +147,7 @@ class DSv4DecodeFmhaImplFP8:
 
         update_decode_metadata_in_place_fp8(
             self.metadata,
-            start_pos,
+            attn_inputs,
             forbid_realloc=forbid_realloc,
             paged_block_tables=paged_block_tables,
             paged_pool_entries_per_block=self._paged_entries_per_block,

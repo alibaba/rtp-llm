@@ -153,10 +153,25 @@ def build_metadata_eager(
             build_decode_metadata,
         )
 
-    seq_lens_d = attn.sequence_lengths
-    if seq_lens_d.device.type == "cpu":
-        seq_lens_d = seq_lens_d.to(device)
-    start_pos = seq_lens_d.to(torch.int32)
+    # Target verify is a multi-token decode. C++ MtpExecutor (see
+    # MtpExecutor.cc:879-958) clears ``sequence_lengths`` and stashes the
+    # prior decode positions into ``prefix_lengths``; ``input_lengths``
+    # carries the uniform verify width = ``gen_num_per_cycle + 1``. Read
+    # from those fields when ``is_target_verify`` is set.
+    is_target_verify = bool(getattr(attn, "is_target_verify", False))
+    if is_target_verify:
+        prefix_d = attn.prefix_lengths
+        if prefix_d.device.type == "cpu":
+            prefix_d = prefix_d.to(device)
+        start_pos = prefix_d.to(torch.int32)
+        input_lengths_d = attn.input_lengths
+        q_len = int(input_lengths_d[0]) if input_lengths_d.numel() > 0 else 1
+    else:
+        seq_lens_d = attn.sequence_lengths
+        if seq_lens_d.device.type == "cpu":
+            seq_lens_d = seq_lens_d.to(device)
+        start_pos = seq_lens_d.to(torch.int32)
+        q_len = 1
     B = int(start_pos.shape[0])
     if B == 0:
         return None
@@ -196,7 +211,7 @@ def build_metadata_eager(
 
     return build_decode_metadata(
         start_pos=start_pos,
-        q_len=1,
+        q_len=q_len,
         window_size=int(v4_args.window_size),
         head_dim=int(v4_args.head_dim),
         max_seq_len=max_s,
@@ -211,29 +226,46 @@ def build_metadata_eager(
 def forward_layers(
     v4: Any,
     kv_cache: Optional[Any],
-    input_ids_2d: torch.Tensor,  # [B, q_len]
+    input_ids: torch.Tensor,  # [T_total]
     attn_metadata: Any,  # DSv4DecodeAttnMetadata
+    prepare_hidden_fn: Optional[Any] = None,
 ) -> torch.Tensor:
     """qwen3-style decode per-layer loop. Same body shape as the prefill
     helper (:func:`rtp_llm.models_py.modules.dsv4.prefill.forward.forward_layers`)
     but dispatches to ``layer.forward_decode`` (FlashMLA / FP8 path)
-    and threads the pre-built decode metadata."""
+    and threads the pre-built decode metadata.
+
+    ``prepare_hidden_fn``, when given, replaces the default
+    embed-and-expand step. Signature: ``fn(input_ids, meta) -> Tensor`` of
+    shape ``[B, q_len, hc, dim]``. Used by MTP to splice the
+    e_proj/h_proj fusion stage in front of the layer loop while sharing
+    the rest of the decode body with the main model.
+    """
+    B = attn_metadata.batch_size
+    q_len = attn_metadata.q_len_per_req
+    input_ids = input_ids.reshape(-1)
+
     _rt_on = _rt.ENABLED
     if _rt_on:
-        _rt.begin(seqlen=int(input_ids_2d.numel()))
+        _rt.begin(seqlen=int(input_ids.numel()))
         if _rt._get_buf() is None:
             _rt_on = False
 
-    h = v4.embed(input_ids_2d)  # [B, q_len, dim]
-    if _rt_on:
-        _rt.record("decode_embed_out", h)
-    h = h.unsqueeze(2).repeat(1, 1, v4.hc_mult, 1)  # [B, q_len, hc, dim]
+    if prepare_hidden_fn is None:
+        h = v4.embed(input_ids).view(B, q_len, -1)  # [B, q_len, dim]
+        if _rt_on:
+            _rt.record("decode_embed_out", h)
+        h = h.unsqueeze(2).repeat(1, 1, v4.hc_mult, 1)  # [B, q_len, hc, dim]
+    else:
+        h = prepare_hidden_fn(input_ids=input_ids, meta=attn_metadata)
     if _rt_on:
         _rt.record("decode_embed_hc_expanded", h)
     for layer in v4.layers:
-        h = layer.forward_decode(h, attn_metadata, input_ids_2d, kv_cache=kv_cache)
+        h = layer.forward_decode(h, attn_metadata, input_ids, kv_cache=kv_cache)
         if _rt_on:
             _rt.record(f"decode_layer{layer.layer_id:02d}_out", h)
+    _pre_hc_flat = h.flatten(-2).reshape(-1, h.size(-2) * h.size(-1))
+    v4._write_mtp_hidden_buffer(_pre_hc_flat, is_cuda_graph=attn_metadata.is_cuda_graph)
     h = v4._hc_head_reduce(h)
     if _rt_on:
         _rt.record("decode_hc_reduced", h)
@@ -247,8 +279,8 @@ def forward_layers(
             step=step,
             extra={
                 "path": "decode",
-                "input_ids_shape": tuple(input_ids_2d.shape),
-                "input_ids": input_ids_2d.detach().cpu(),
+                "input_ids_shape": tuple(input_ids.shape),
+                "input_ids": input_ids.detach().cpu(),
                 "start_pos": attn_metadata.start_pos[: attn_metadata.batch_size]
                 .detach()
                 .cpu(),
@@ -266,6 +298,7 @@ def forward_decode(
     v4_args: Any,
     inputs: Any,  # PyModelInputs
     fmha_impl: Any = None,  # Optional[DSv4DecodeFmhaImpl]
+    prepare_hidden_fn: Optional[Any] = None,
 ) -> Any:  # PyModelOutputs
     """Batched decode arm — full orchestration used by
     ``DeepSeekV4Model.forward`` dispatcher.
@@ -315,6 +348,7 @@ def forward_decode(
         input_ids = input_ids.unsqueeze(0)
     if input_ids.device != param_dev:
         input_ids = input_ids.to(param_dev)
+    input_ids = input_ids.reshape(-1)
 
     if isinstance(fmha_impl, _graph_impl_types):
         meta = fmha_impl.metadata
@@ -342,17 +376,18 @@ def forward_decode(
 
     B = meta.batch_size
     q_len = meta.q_len_per_req
-    input_ids_2d = input_ids.view(B, q_len) if input_ids.dim() == 1 else input_ids
-
     _rt_on = _rt.ENABLED
     if _rt_on:
-        _rt.begin(seqlen=int(input_ids_2d.numel()))
+        _rt.begin(seqlen=int(input_ids.numel()))
         if _rt._get_buf() is None:
             _rt_on = False
         else:
-            _rt.record("decode_input_ids", input_ids_2d)
+            _rt.record("decode_input_ids", input_ids)
 
-    h = forward_layers(v4, kv_cache, input_ids_2d, meta)  # [B, q_len, dim]
+    h = forward_layers(
+        v4, kv_cache, input_ids, meta,
+        prepare_hidden_fn=prepare_hidden_fn,
+    )  # [B, q_len, dim]
     hidden = h.reshape(B * q_len, v4_args.dim)  # packed [T_total, dim]
     if _rt_on:
         _rt.record("decode_hidden", hidden)
@@ -366,8 +401,8 @@ def forward_decode(
         _rt.record("decode_lm_top_indices", lm_top_indices)
         extra = {
             "is_decode": True,
-            "input_ids_shape": tuple(input_ids_2d.shape),
-            "input_ids": input_ids_2d.detach().cpu(),
+            "input_ids_shape": tuple(input_ids.shape),
+            "input_ids": input_ids.detach().cpu(),
             "batch_size": int(B),
             "q_len": int(q_len),
         }
