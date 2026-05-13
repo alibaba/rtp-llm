@@ -499,7 +499,37 @@ async def _run_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs):
     from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient
     from rtp_llm.utils.base_model_datatypes import GenerateInput
 
-    token_lens = _get_startup_real_warmup_token_lens(py_env_configs)
+    raw_token_lens = _get_startup_real_warmup_token_lens(py_env_configs)
+    min_token_len = int(os.environ.get("DSV4_STARTUP_REAL_WARMUP_MIN_TOKEN_LEN", "2"))
+    if min_token_len <= 0:
+        raise ValueError(
+            "DSV4_STARTUP_REAL_WARMUP_MIN_TOKEN_LEN should be positive, "
+            f"got {min_token_len}"
+        )
+    token_lens = []
+    skipped_token_lens = []
+    seen_token_lens = set()
+    for token_len in raw_token_lens:
+        if token_len < min_token_len:
+            skipped_token_lens.append(token_len)
+            continue
+        if token_len not in seen_token_lens:
+            token_lens.append(token_len)
+            seen_token_lens.add(token_len)
+    if skipped_token_lens:
+        logging.warning(
+            "skip DSV4 startup grpc warmup token lens below min prefill length, "
+            "skipped=%s, min_token_len=%d",
+            skipped_token_lens,
+            min_token_len,
+        )
+    if not token_lens:
+        token_lens = [min_token_len]
+        logging.warning(
+            "DSV4 startup grpc warmup token lens are all below min prefill length; "
+            "fallback to token_lens=%s",
+            token_lens,
+        )
     addresses = _get_startup_real_warmup_grpc_addresses(py_env_configs)
     timeout_s = float(os.environ.get("DSV4_STARTUP_REAL_WARMUP_TIMEOUT_S", "600"))
     if timeout_s <= 0:
