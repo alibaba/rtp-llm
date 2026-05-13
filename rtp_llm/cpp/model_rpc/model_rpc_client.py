@@ -12,7 +12,6 @@ from rtp_llm.config.generate_config import RoleType
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     BatchGenerateInputPB,
     CancelRequestPB,
-    EnqueueRequestPB,
     ErrorDetailsPB,
     FetchRequestPB,
     GenerateInputPB,
@@ -466,14 +465,9 @@ class ModelRpcClient(object):
             stub = RpcServiceStub(channel)
 
             if self._dp_controller_managed:
-                enqueue_req = EnqueueRequestPB()
-                enqueue_req.input.CopyFrom(input_pb)
-                ack = await stub.Enqueue(enqueue_req, timeout=grpc_timeout_seconds)
-                if ack.error_info.error_code != 0:
-                    raise FtRuntimeException(
-                        ExceptionType(ack.error_info.error_code),
-                        ack.error_info.error_message,
-                    )
+                # FlexLB already enqueued via BatchEnqueue to DP0 → DPx.
+                # target_address (from role_addrs) points to the DPx that owns
+                # this request. We only need to FetchResponse from it.
                 response_iterator = stub.FetchResponse(
                     FetchRequestPB(request_id=input_pb.request_id),
                     timeout=grpc_timeout_seconds,
