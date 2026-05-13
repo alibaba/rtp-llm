@@ -309,16 +309,24 @@ class V4Transformer(nn.Module):
         buf[:T].copy_(flat)
         self._mtp_last_hidden_valid_tokens = int(T)
 
-    def set_cp_info(self, cp_info, cp_size: int, cp_rank: int) -> None:
+    def set_cp_info(
+        self, cp_info, cp_size: int, cp_rank: int, kv_cache_sharded: bool = False
+    ) -> None:
         """Bind / clear the framework's Context-Parallel metadata for the
         NEXT forward.  Only stashes the raw metadata; the derived
         ``CPContext`` (global positions, stripped restore indices, etc.)
         is built inside ``forward`` once chunk_length is known and then
         propagated to every layer's attn + compressor + indexer via
-        ``set_cp_ctx``."""
+        ``set_cp_ctx``.
+
+        ``kv_cache_sharded`` is the Stage 5b switch: when True the CSA /
+        HCA / INDEXER paged pools are RR-sharded across CP ranks, and
+        attention's compressed-K reader takes the CP-aware path.
+        """
         self._cp_info = cp_info
         self._cp_size = int(cp_size)
         self._cp_rank = int(cp_rank)
+        self._kv_cache_sharded = bool(kv_cache_sharded)
 
     def _propagate_cp_ctx(self, cp_ctx: Optional[CPContext]) -> None:
         for layer in self.layers:
@@ -428,7 +436,14 @@ class V4Transformer(nn.Module):
         cp_ctx: Optional[CPContext] = None
         if _cp_info is not None and _cp_size > 1 and start_pos == 0 and S > 0:
             device = input_ids.device
-            cp_ctx = build_cp_context(_cp_info, _cp_size, _cp_rank, S, device)
+            cp_ctx = build_cp_context(
+                _cp_info,
+                _cp_size,
+                _cp_rank,
+                S,
+                device,
+                kv_cache_sharded=bool(getattr(self, "_kv_cache_sharded", False)),
+            )
         self._propagate_cp_ctx(cp_ctx)
 
         # Master switch: when MOEDBG=0 every record/begin/dump call site is

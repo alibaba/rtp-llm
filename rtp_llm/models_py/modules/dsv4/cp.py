@@ -93,6 +93,12 @@ class CPContext:
     # Rank-local per-request chunk lengths after ZigZagProcessor splitting.
     # Each request chunk is laid out as [front half, back half] locally.
     chunk_lengths_per_req: Optional[Tuple[int, ...]] = None
+    # Stage 5b: True when the prefill node's CSA / HCA / INDEXER paged pools
+    # are RR-sharded across CP ranks (logical block ``b`` owned by rank
+    # ``b % cp_size``). When False, attention's compressed-K read goes
+    # straight to the local pool. Plumbed from
+    # ``parallelism_config.prefill_cp_config.kv_cache_sharded``.
+    kv_cache_sharded: bool = False
 
 
 @dataclass
@@ -224,6 +230,7 @@ def build_cp_context(
     chunk_length: int,
     device: torch.device,
     position_offset: Union[int, torch.Tensor] = 0,
+    kv_cache_sharded: bool = False,
 ) -> CPContext:
     """Compute the per-forward derived CPContext from framework metadata."""
     padding_mask = cp_info.prefill_qkv_padding_mask
@@ -390,6 +397,7 @@ def build_cp_context(
         cu_seqlens_global=cu_seqlens_global,
         unpad_restore_is_prefix=unpad_restore_is_prefix,
         chunk_lengths_per_req=tuple(chunk_lengths),
+        kv_cache_sharded=bool(kv_cache_sharded),
     )
 
 
@@ -856,6 +864,307 @@ def combine_topk_swa_indices_cp_b1(
     flat_val = swa_val[mask_w]
     combined_indices.view(-1).scatter_(0, flat_target, flat_val)
     return combined_indices, combined_lens
+
+
+# ---------------------------------------------------------------------------
+# CP-sharded paged-pool block gather (Stage 5b).
+#
+# Under ``prefill_cp_config.kv_cache_sharded=true`` the CSA / HCA / INDEXER
+# paged pools are RR-sharded across ``cp_size`` ranks: logical block ``b`` is
+# physically owned by rank ``b % cp_size``. Prefill attention's
+# ``_attn_via_workspace`` path needs the full request prefix to compute
+# correctly, so we gather the missing (cp_size-1)/cp_size fraction from peer
+# ranks via NCCL and interleave into logical order.
+#
+# This module ships two pieces so the interleave (pure tensor reshape) is
+# unit-testable on CPU without a distributed init:
+#
+#   * ``cp_interleave_gathered_pool_blocks`` — pure tensor reorder
+#   * ``cp_gather_request_pool_blocks``      — NCCL wrapper + interleave
+# ---------------------------------------------------------------------------
+def cp_interleave_gathered_pool_blocks(
+    gathered: torch.Tensor,
+    cp_size: int,
+    total_logical_blocks: int,
+) -> torch.Tensor:
+    """Reorder rank-major NCCL all_gather output to logical block order.
+
+    Args:
+      gathered: ``[cp_size * L, *block_shape]`` — rank-major concatenation
+                produced by ``all_gather`` of each rank's ``[L, *block_shape]``
+                contribution. Rank ``r``'s contribution lives at rows
+                ``[r*L, (r+1)*L)``.
+      cp_size:  number of CP ranks.
+      total_logical_blocks: actual logical block count for the request
+                (``L * cp_size`` may overshoot when total is not divisible
+                by ``cp_size``; trailing rows are dropped).
+
+    Returns:
+      ``[total_logical_blocks, *block_shape]`` in logical order.
+      Logical block ``b`` is at row ``b``, sourced from rank ``b % cp_size``'s
+      local block ``b // cp_size``.
+    """
+    if gathered.dim() < 1:
+        raise ValueError(
+            f"gathered must have rank >= 1, got shape {tuple(gathered.shape)}"
+        )
+    if cp_size <= 0:
+        raise ValueError(f"cp_size must be positive, got {cp_size}")
+    n = gathered.size(0)
+    if n % cp_size != 0:
+        raise ValueError(f"gathered.size(0)={n} not divisible by cp_size={cp_size}")
+    L = n // cp_size
+    if total_logical_blocks > n:
+        raise ValueError(
+            f"total_logical_blocks({total_logical_blocks}) > gathered rows({n})"
+        )
+    block_shape = gathered.shape[1:]
+    # Rank-major view: [cp_size, L, *block_shape] -> permute to
+    # [L, cp_size, *block_shape] so flatten yields logical order
+    # row[i*cp_size + r] == rank r local block i, equivalent to logical
+    # block (r + i*cp_size).
+    viewed = gathered.view(cp_size, L, *block_shape)
+    perm_dims = (1, 0) + tuple(range(2, viewed.dim()))
+    out = viewed.permute(*perm_dims).contiguous().view(cp_size * L, *block_shape)
+    return out[:total_logical_blocks]
+
+
+def cp_gather_request_pool_blocks(
+    local_pool: torch.Tensor,
+    local_block_table_for_req: torch.Tensor,
+    cp_size: int,
+    cp_rank: int,
+    total_logical_blocks: int,
+) -> torch.Tensor:
+    """Gather one request's owned-block slice from each CP rank into logical order.
+
+    Each rank packs its locally-owned blocks into a contiguous tensor, calls
+    NCCL ``all_gather``, then reorders the result so logical block ``b`` is at
+    row ``b``. Logical block ``b`` is owned by rank ``b % cp_size``.
+
+    Args:
+      local_pool: ``[num_pool_blocks, *block_shape]`` — this rank's full pool
+                  storage (e.g. ``[N, block_size, slot_bytes]`` for FP8 paged
+                  CSA / HCA / INDEXER pools).
+      local_block_table_for_req: ``[L]`` int64 / int32 — physical pool block
+                  ids, one per locally-owned logical position. Must be the
+                  rank's view of the request's block table after Stage 5a's
+                  ``HybridKVCacheAllocator`` allocation
+                  (``L = ceil(total_logical_blocks / cp_size)``).
+      cp_size, cp_rank: CP geometry.
+      total_logical_blocks: logical block count for the request, used to
+                  trim trailing padded rows when total is not a multiple of
+                  ``cp_size``.
+
+    Returns:
+      ``[total_logical_blocks, *block_shape]`` logical-order assembly of the
+      request's full prefix data.
+    """
+    if local_pool.dim() < 2:
+        raise ValueError(
+            f"local_pool must have rank >= 2, got shape {tuple(local_pool.shape)}"
+        )
+    if local_block_table_for_req.dim() != 1:
+        raise ValueError(
+            f"local_block_table_for_req must be 1D, got shape "
+            f"{tuple(local_block_table_for_req.shape)}"
+        )
+    L = int(local_block_table_for_req.numel())
+    if cp_size <= 0:
+        raise ValueError(f"cp_size must be positive, got {cp_size}")
+    if not (0 <= cp_rank < cp_size):
+        raise ValueError(f"cp_rank({cp_rank}) out of range [0, {cp_size})")
+
+    expected_L = (total_logical_blocks + cp_size - 1) // cp_size
+    if L != expected_L:
+        raise ValueError(
+            f"local_block_table size {L} != ceil(total_logical_blocks="
+            f"{total_logical_blocks} / cp_size={cp_size}) = {expected_L}"
+        )
+
+    # Pack owned blocks contiguously.
+    local_owned = local_pool.index_select(
+        0, local_block_table_for_req.to(device=local_pool.device, dtype=torch.long)
+    ).contiguous()
+
+    # NCCL all_gather. Each rank contributes [L, *block_shape] -> output is
+    # [cp_size * L, *block_shape] rank-major.
+    gathered = all_gather(local_owned, group=Group.TP)
+
+    return cp_interleave_gathered_pool_blocks(gathered, cp_size, total_logical_blocks)
+
+
+# ---------------------------------------------------------------------------
+# Stage 5b — per-iteration restore-indices builder (branch
+# `_get_topk_ragged_cp_roundrobin` pattern).
+#
+# Each CP rank holds the OWNED K of every request (1/cp_size of the global
+# token stream, RR by ``logical_block_idx % cp_size``). For prefill
+# attention / indexer to see the full K, each layer:
+#
+#   1. gathers its LOCAL owned K from the local pool (one cp_gather op,
+#      per-request ``cu_local_kv_seqlens`` is the count of owned tokens),
+#   2. ``all_gather`` across cp_size ranks → ``[cp_size * local_kv_len, D]``
+#      rank-major,
+#   3. reorders into logical token order via the precomputed
+#      ``restore_indices`` ``[total_kv_len]`` index tensor.
+#
+# This builder produces step (3)'s ``restore_indices`` once at prefill
+# planning time. It is request-batched (concatenates per-request restore
+# slices) so a single tensor covers the whole iteration.
+# ---------------------------------------------------------------------------
+def build_kv_allgather_restore_indices(
+    per_req_total_kv_lens: torch.Tensor,
+    cp_size: int,
+    block_size: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Compute the per-iteration restore index tensor.
+
+    The all_gather output is laid out as ``[cp_size, sum_b L_b, D]`` (rank
+    major; rank ``r``'s contribution lives at row range
+    ``[r * sum_L, (r+1) * sum_L)``). We want to reorder this into logical
+    token order (per request, then concatenated across requests).
+
+    Owner rule: logical block ``b`` owned by rank ``b % cp_size``. Within a
+    block, all ``block_size`` tokens have the same owner. So for request r
+    with ``T_r`` total kv tokens:
+
+      logical token ``t`` (in [0, T_r)) is owned by rank
+      ``(t // block_size) % cp_size``, and lives at the rank's local
+      position ``(t // block_size) // cp_size * block_size + t %
+      block_size``.
+
+    Args:
+      per_req_total_kv_lens: ``[B]`` int64 — total KV tokens per request
+            (== prefix_len + new_len for prefill iterations after the
+            writer has written this iteration's K).
+      cp_size: number of CP ranks.
+      block_size: tokens per pool block (==
+            ``cache_config.seq_size_per_block`` for the relevant pool;
+            CSA/HCA/INDEXER pool block_size is uniform per pool).
+      device: target device.
+
+    Returns:
+      ``restore_indices`` ``[total_kv_len]`` int64 — applied as
+      ``flat_global = gathered_flat[restore_indices]``. Each row of
+      ``flat_global`` is the K for that logical token, in
+      request-concatenated logical order.
+    """
+    if cp_size <= 0:
+        raise ValueError(f"cp_size must be positive, got {cp_size}")
+    if block_size <= 0:
+        raise ValueError(f"block_size must be positive, got {block_size}")
+    if per_req_total_kv_lens.dim() != 1:
+        raise ValueError(
+            f"per_req_total_kv_lens must be 1D, got shape "
+            f"{tuple(per_req_total_kv_lens.shape)}"
+        )
+
+    # Vectorized formulation (mirrors branch
+    # ``flashmla_sparse_cp_impl.py:565-572`` plan()).
+    total_kv_lens = per_req_total_kv_lens.to(dtype=torch.int64, device=device)
+    if int(total_kv_lens.numel()) == 0:
+        return torch.empty(0, dtype=torch.int64, device=device)
+
+    local_per_req = cp_padded_local_kv_lens(total_kv_lens, cp_size, block_size)
+    cu_local_per_req = torch.zeros(
+        int(local_per_req.numel()) + 1, dtype=torch.int64, device=device
+    )
+    cu_local_per_req[1:] = torch.cumsum(local_per_req, dim=0)
+    total_local_kv = int(cu_local_per_req[-1].item())  # per-rank padded local
+
+    total_real = int(total_kv_lens.sum().item())
+    if total_real == 0:
+        return torch.empty(0, dtype=torch.int64, device=device)
+
+    # Flat ``[total_real]`` arange of "logical token position within request".
+    # Built without Python loops over B by using torch.repeat_interleave.
+    positions_flat = torch.cat(
+        [
+            torch.arange(int(t.item()), dtype=torch.int64, device=device)
+            for t in total_kv_lens
+        ]
+    )
+    req_ids = torch.repeat_interleave(
+        torch.arange(int(total_kv_lens.numel()), dtype=torch.int64, device=device),
+        total_kv_lens,
+    )
+    cu_offsets = cu_local_per_req[req_ids]  # per-token rank-local request base
+    global_block_idx = positions_flat // block_size
+    token_in_block = positions_flat % block_size
+    owner = global_block_idx % cp_size
+    local_block_idx = global_block_idx // cp_size
+    local_pos_in_req = local_block_idx * block_size + token_in_block
+    # rank-major flat index:
+    #   owner * total_local_kv + (cu_offset_of_request_for_this_rank + local_pos)
+    # The cu_offset is the same value for every rank because all ranks pad
+    # to identical L_r per request.
+    restore = (owner * total_local_kv + cu_offsets + local_pos_in_req).contiguous()
+    assert int(restore.numel()) == total_real, (
+        f"restore size {int(restore.numel())} != sum(per_req_total_kv_lens) "
+        f"{total_real}"
+    )
+    return restore
+
+
+def cp_padded_local_kv_lens(
+    per_req_total_kv_lens: torch.Tensor, cp_size: int, block_size: int
+) -> torch.Tensor:
+    """Uniform per-rank local KV lengths for CP all_gather.
+
+    For request length ``T_r``, each rank contributes
+    ``ceil(T_r / (block_size * cp_size)) * block_size`` rows so NCCL
+    ``all_gather`` sees identical shapes. Rows past the actual owned count are
+    padding and must be initialized by the caller before gather.
+    """
+    if cp_size <= 0:
+        raise ValueError(f"cp_size must be positive, got {cp_size}")
+    if block_size <= 0:
+        raise ValueError(f"block_size must be positive, got {block_size}")
+    virtual_block_size = block_size * cp_size
+    lens = per_req_total_kv_lens.to(torch.int64)
+    n_virtual_blocks = (lens + virtual_block_size - 1) // virtual_block_size
+    return n_virtual_blocks * block_size
+
+
+def cp_actual_owned_kv_lens(
+    per_req_total_kv_lens: torch.Tensor,
+    cp_size: int,
+    block_size: int,
+    cp_rank: int,
+) -> torch.Tensor:
+    """Actual KV-token count written by ``cp_rank`` for each request.
+
+    Ownership is block round-robin: logical block ``b`` belongs to
+    ``b % cp_size``. The last owned block may be partial, so this can be
+    smaller than :func:`cp_padded_local_kv_lens`.
+    """
+    if cp_size <= 0:
+        raise ValueError(f"cp_size must be positive, got {cp_size}")
+    if block_size <= 0:
+        raise ValueError(f"block_size must be positive, got {block_size}")
+    if cp_rank < 0 or cp_rank >= cp_size:
+        raise ValueError(f"cp_rank({cp_rank}) out of range [0, {cp_size})")
+
+    T = per_req_total_kv_lens.to(torch.int64)
+    total_blocks = (T + block_size - 1) // block_size
+    raw = total_blocks - cp_rank
+    n_owned = torch.where(
+        raw > 0,
+        (raw + cp_size - 1) // cp_size,
+        torch.zeros_like(raw),
+    )
+    last_blk_idx = (n_owned - 1).clamp_min(0) * cp_size + cp_rank
+    last_blk_size = torch.minimum(
+        torch.full_like(T, block_size),
+        (T - last_blk_idx * block_size).clamp_min(0),
+    )
+    return torch.where(
+        n_owned > 0,
+        (n_owned - 1) * block_size + last_blk_size,
+        torch.zeros_like(T),
+    )
 
 
 def cp_should_gather(cp_ctx: Optional[CPContext], start_pos: int) -> bool:
