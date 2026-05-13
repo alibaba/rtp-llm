@@ -420,24 +420,41 @@ class IndexerFP8(PoolBackedModule):
         qr: torch.Tensor,
         start_pos: torch.Tensor,
         out_topk_buffer: torch.Tensor,
+        position_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        assert x.shape[1] == 1, "decode-only: q_len must be 1"
-
-        bsz = x.size(0)
+        bsz, q_len = int(x.size(0)), int(x.size(1))
+        if position_ids is None:
+            assert q_len == 1, "decode q_len > 1 requires flat position_ids"
         ratio = self.compress_ratio
         K = self.index_topk
 
         self._propagate_pool_to_nested()
         try:
             # Nested compressor writes its compressed token to the 132B pool.
-            self.compressor.forward_decode_vectorized(x, start_pos)
+            self.compressor.forward_decode_vectorized(
+                x, start_pos, position_ids=position_ids
+            )
 
-            freqs_per_b = self.freqs_cis[start_pos.long()]
-            q = self._compute_indexer_q(qr, freqs_per_b, batched_rope=True)
+            if position_ids is None:
+                freqs = self.freqs_cis[start_pos.long()]
+                q = self._compute_indexer_q(qr, freqs, batched_rope=True)
+                compressed_len = ((start_pos + 1) // ratio).to(torch.int64).view(
+                    bsz, 1, 1
+                )
+                pos_for_max = start_pos
+            else:
+                pos_flat = position_ids.to(
+                    device=self.freqs_cis.device, dtype=torch.long
+                ).reshape(-1)
+                freqs = self.freqs_cis.index_select(0, pos_flat).contiguous()
+                q = self._compute_indexer_q(qr, freqs, batched_rope=False)
+                pos_2d = pos_flat.to(device=x.device, dtype=torch.int64).view(
+                    bsz, q_len
+                )
+                compressed_len = ((pos_2d + 1) // ratio).view(bsz, q_len, 1)
+                pos_for_max = pos_2d.reshape(-1)
             # ``softmax_scale * n_heads^-0.5`` is pre-folded into weights_proj at __init__.
             weights = F.linear(x, self.weights_proj)
-
-            compressed_len = ((start_pos + 1) // ratio).to(torch.int64).view(bsz, 1, 1)
 
             # Always use DeepGEMM (FP8 path).  Eager decode trims the
             # scored context length from the live max position. During CUDA
@@ -453,14 +470,14 @@ class IndexerFP8(PoolBackedModule):
                 T_static = self._kv_cache_t if self._kv_cache_t > 0 else T_cache
                 T_max = max(32, min(T_cache, T_static))
             else:
-                sp_max = int(start_pos.max().item())
+                sp_max = int(pos_for_max.max().item())
                 T_live = (((sp_max + 1) // ratio) + 31) & ~31
                 T_max = max(32, min(T_cache, T_live))
 
             q_fp8, w_fold = indexer_q_fp8_quant_fold(
                 _as_bf16_contig(q), _as_bf16_contig(weights)
             )
-            ctx_lens_2d = compressed_len.view(bsz, 1).to(torch.int32)
+            ctx_lens_2d = compressed_len.view(bsz, q_len).to(torch.int32)
             bt_i32 = self._kv_block_table[:bsz].to(torch.int32).contiguous()
             # ``_kv_pool_view`` is 3D ``[num_blocks, eb, 132]`` from production
             # (set by ``Attention._set_compressor_pool_context``); standalone
@@ -473,18 +490,23 @@ class IndexerFP8(PoolBackedModule):
             )
             logits = fp8_paged_indexer_score(
                 q_fp8,
-                w_fold.view(bsz * 1, self.n_heads),
+                w_fold.view(bsz * q_len, self.n_heads),
                 pool_2d,
                 bt_i32,
                 ctx_lens_2d,
                 block_size=self._kv_eb,
                 max_ctx_len=T_max,
-            )  # [B, T_max] fp32
-            score = logits.view(bsz, 1, T_max)
+            )  # [B*q_len, T_max] fp32
+            score = logits.view(bsz, q_len, T_max)
 
             # TopK (with optional persistent radix-select)
             K_eff = min(K, T_max)
-            if K_eff > 0 and K in (512, 1024, 2048) and _persistent_topk_enabled():
+            if (
+                q_len == 1
+                and K_eff > 0
+                and K in (512, 1024, 2048)
+                and _persistent_topk_enabled()
+            ):
                 rtp_llm_ops.dsv4_persistent_topk(
                     score.view(bsz, T_max),
                     compressed_len.view(bsz).to(torch.int32),

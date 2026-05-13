@@ -93,7 +93,7 @@ Padding-token slots are nulled via ``cp_info.prefill_qkv_padding_mask``.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import torch
 
@@ -128,13 +128,19 @@ def _build_positions_from_lengths(
     device: torch.device,
 ) -> torch.Tensor:
     """Synthesize per-token global positions ``[T_total]`` int64 when the
-    framework didn't populate ``attn.position_ids`` (warmup path).
+    framework didn't populate ``attn.position_ids`` (warmup / cudagraph
+    capture path).
 
     For each request ``b`` with prefix ``sp[b]`` and input length ``L[b]``,
     emit ``sp[b], sp[b]+1, ..., sp[b]+L[b]-1``; concatenated across the batch.
+
+    Must be CUDA-graph-capture-safe: callers pass GPU-resident tensors
+    (``input_lengths_d`` / ``prefix_lengths_d``) during capture, and the
+    per-element ``.item()`` reads synchronize on fixed-shape capture inputs
+    without inserting unpinned host→device copies.
     """
-    input_lengths = input_lengths.to(device=device, dtype=torch.int64)
-    prefix_lengths = prefix_lengths.to(device=device, dtype=torch.int64)
+    input_lengths = input_lengths.to(dtype=torch.int64)
+    prefix_lengths = prefix_lengths.to(dtype=torch.int64)
     batch_size = int(input_lengths.numel())
     segments = []
     for b in range(batch_size):
@@ -187,6 +193,7 @@ def forward_layers(
     cu_seqlens: torch.Tensor,  # [B+1] int64 — request boundaries
     block_tables_by_type: Optional[Dict[int, torch.Tensor]],
     attn_inputs: Optional[PyAttentionInputs] = None,
+    prepare_hidden_fn: Optional[Any] = None,
 ) -> torch.Tensor:
     """Flat per-layer loop — vLLM-aligned layout.
 
@@ -270,10 +277,13 @@ def forward_layers(
     if kv_cache is not None and attn_inputs is not None:
         write_cache_store_impl = create_write_cache_store_impl(attn_inputs, kv_cache)
 
-    h = v4.embed(input_ids)  # [T_total, dim]
-    if _rt_on:
-        _rt.record("prefill_embed_out", h)
-    h = h.unsqueeze(-2).repeat(1, v4.hc_mult, 1)  # [T_total, hc, dim]
+    if prepare_hidden_fn is None:
+        h = v4.embed(input_ids)  # [T_total, dim]
+        if _rt_on:
+            _rt.record("prefill_embed_out", h)
+        h = h.unsqueeze(-2).repeat(1, v4.hc_mult, 1)  # [T_total, hc, dim]
+    else:
+        h = prepare_hidden_fn(input_ids=input_ids, positions=positions)
     if _rt_on:
         _rt.record("prefill_embed_hc_expanded", h)
 
@@ -392,6 +402,9 @@ def forward_layers(
     if v4.fp8_kv_cache:
         clear_prefill_meta_shared_fp8(v4)
 
+    _pre_hc_flat = h.flatten(-2)
+    v4._write_mtp_hidden_buffer(_pre_hc_flat, is_cuda_graph=False)
+
     # _hc_head_reduce is flat-native: [T, hc, dim] -> [T, dim].
     # Framework ``RMSNorm`` expects 2D, which matches the [T, dim] shape here.
     h = v4._hc_head_reduce(h)  # [T, dim]
@@ -466,6 +479,7 @@ def forward_prefill(
     kv_cache: Optional[KVCache],
     parallelism_config: Optional[ParallelismConfig],
     inputs: PyModelInputs,
+    prepare_hidden_fn: Optional[Any] = None,
 ) -> PyModelOutputs:
     """Prefill dispatcher — single :func:`forward_layers` call on the full
     flat ``[T_total]`` batch (vLLM-aligned).
@@ -498,11 +512,19 @@ def forward_prefill(
     #  * ``attn.position_ids`` : [T_total] per-token global absolute position
     cu_seqlens = attn.cu_seqlens
     positions = attn.position_ids
-    # warmup path doesn't populate position_ids — synthesize from
-    # (prefix_lengths, input_lengths).
+    # warmup / cudagraph capture path doesn't populate position_ids —
+    # synthesize from (prefix_lengths, input_lengths). Prefer ``_d`` (GPU)
+    # variants when available: during cudagraph capture, the host-side
+    # ``input_lengths`` / ``prefix_lengths`` are pinned int32 CPU tensors,
+    # but a dtype-converting ``.to(device=..., dtype=int64)`` on a pinned
+    # tensor produces an unpinned intermediate which capture rejects.
     if positions is None:
+        il_d = attn.input_lengths_d
+        pl_d = attn.prefix_lengths_d
+        input_lens = il_d if il_d.numel() > 0 else attn.input_lengths
+        prefix_lens = pl_d if pl_d.numel() > 0 else attn.prefix_lengths
         positions = _build_positions_from_lengths(
-            attn.input_lengths, attn.prefix_lengths, input_ids.device
+            input_lens, prefix_lens, input_ids.device
         )
 
     block_tables_by_type = build_block_tables_batched(kv_cache, attn)
@@ -515,5 +537,6 @@ def forward_prefill(
         cu_seqlens,
         block_tables_by_type,
         attn_inputs=attn,
+        prepare_hidden_fn=prepare_hidden_fn,
     )  # [T_total, dim]
     return PyModelOutputs(hidden)

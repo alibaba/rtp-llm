@@ -190,19 +190,13 @@ class V4Transformer(nn.Module):
         )
         self.norm = RMSNorm(gw[W.final_ln_gamma], args.norm_eps)
 
-        # MTP layers — draft heads for speculative decoding.  Full impl
-        # in block.py::MTPBlock; each layer owns its own e_proj/h_proj +
-        # enorm/hnorm/norm + per-layer hc_head_*, plus all the regular
-        # Block machinery (attn, ffn, mHC). The shared embedding and LM
-        # head flow through ``forward_draft`` explicitly at inference
-        # time rather than being stashed on the MTPBlock instance.
-        # NOTE: MTP weight tags (W.v4_mtp_*) are not yet declared in the
-        # descriptor; ``args.n_mtp_layers`` is hardcoded to 0 in
-        # ``deepseek_v4_model.py`` so this loop is a no-op in production.
-        self.mtp = nn.ModuleList()
+        # MTP draft is a separate model (``DeepSeekV4MtpModel``) that
+        # holds its own V4Transformer — no MTP layers live on the main
+        # model's transformer.  ``args.n_mtp_layers`` exists only to
+        # surface that contract via an assert.
         assert args.n_mtp_layers == 0, (
-            "MTP factory not yet migrated to W.* tags; descriptor needs "
-            "W.v4_mtp_* declarations first"
+            "V4Transformer does not host MTP layers; the draft is a "
+            "separate DeepSeekV4MtpModel instance."
         )
 
         # LM head — plain weight matrix [vocab_size, dim].  Accept either
@@ -229,6 +223,38 @@ class V4Transformer(nn.Module):
         )
 
         self._dbg_step = 0
+        self.register_buffer("_mtp_hidden_buffer", None, persistent=False)
+
+    def _allocate_mtp_buffer(self, device: torch.device) -> None:
+        """Allocate the pre-hc_head residual buffer for MTP draft reads.
+        Called by DeepSeekV4Model._initialize_impl when is_mtp is True."""
+        if self._mtp_hidden_buffer is not None:
+            return
+        hc_dim = self.args.hc_mult * self.args.dim
+        self.register_buffer(
+            "_mtp_hidden_buffer",
+            torch.empty(
+                self.args.max_tokens_per_rank,
+                hc_dim,
+                dtype=torch.bfloat16,
+                device=device,
+            ),
+            persistent=False,
+        )
+
+    def _write_mtp_hidden_buffer(self, flat: torch.Tensor, is_cuda_graph: bool) -> None:
+        if self._mtp_hidden_buffer is None:
+            return
+        T = flat.size(0)
+        if T > self._mtp_hidden_buffer.size(0):
+            assert not is_cuda_graph, (
+                f"_mtp_hidden_buffer overflow under cuda_graph: T={T} > "
+                f"cap={self._mtp_hidden_buffer.size(0)}, cannot realloc"
+            )
+            self._mtp_hidden_buffer = torch.empty_like(
+                self._mtp_hidden_buffer[:1].expand(T, -1)
+            )
+        self._mtp_hidden_buffer[:T].copy_(flat)
 
     def set_cp_info(self, cp_info, cp_size: int, cp_rank: int) -> None:
         """Bind / clear the framework's Context-Parallel metadata for the
