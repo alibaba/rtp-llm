@@ -1,10 +1,11 @@
-"""Multi-GPU tests for Mori EP router 行为（prepare / finalize 与 mori_ep_intranode_router 对齐）。
+"""Multi-GPU tests for Mori EP router 行为（直接实例化生产 MoriEpIntranodeRouter）。
 
 与 distributed/test/moriep_test.py 相同策略：
 - 用 importlib 按文件路径加载 moriep_wrapper.py，无需整包安装/编译 rtp_llm；
 - 在加载前注入最小 rtp_llm 桩模块，满足 moriep_wrapper.py 顶层 import；
 - 分布式使用 torch.distributed 直接 init（同 moriep_test），不依赖 collective_torch / PortManager；
-- prepare/finalize 逻辑内联自 mori_ep_intranode_router.py，避免再 import fused_moe 等。
+- 通过 importlib 加载生产 MoriEpIntranodeRouter 及其依赖的 fused_moe defs 模块，
+  直接调用 router.prepare() / router.finalize()，确保测试覆盖生产代码路径。
 
 依赖：mori、多卡 CUDA/ROCm。无 mori 时 __main__ 退出 0。
 
@@ -28,7 +29,7 @@ import subprocess
 import sys
 import time
 import types
-from dataclasses import dataclass
+import unittest
 from typing import Any, List, Optional, Tuple
 
 import torch
@@ -136,97 +137,102 @@ def _install_rtp_llm_stubs_for_moriep_wrapper() -> None:
         ModelConfig=type("ModelConfig", (), {}),
     )
     _register_stub_module(
-        "rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter",
-        MoEConfigAdapter=type("MoEConfigAdapter", (), {}),
-    )
-    _register_stub_module(
         "rtp_llm.utils.util",
         to_torch_dtype=_to_torch_dtype_stub,
     )
+
+
+# ---------------------------------------------------------------------------
+# Production router 加载（加载 fused_moe defs + mori_ep_intranode_router）
+# ---------------------------------------------------------------------------
+
+_FUSED_MOE_DEFS_DIR = _MODELS_PY / "modules" / "factory" / "fused_moe" / "defs"
+_ROUTER_FILE = (
+    _MODELS_PY
+    / "modules"
+    / "factory"
+    / "fused_moe"
+    / "impl"
+    / "rocm"
+    / "routers"
+    / "mori_ep_intranode_router.py"
+)
+
+
+def _load_production_router_modules() -> None:
+    """Load production fused_moe def modules so MoriEpIntranodeRouter can be imported."""
+    # Ensure package hierarchy exists in sys.modules
+    _ensure_packages_up_to("rtp_llm.models_py.modules.factory.fused_moe.defs")
+    # 1. type.py (RouterType, ExecutorType)
+    type_mod = _load_module(
+        "rtp_llm.models_py.modules.factory.fused_moe.defs.type",
+        _FUSED_MOE_DEFS_DIR / "type.py",
+    )
+    # 2. quant_config.py (FusedMoEQuantConfig)
+    quant_mod = _load_module(
+        "rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config",
+        _FUSED_MOE_DEFS_DIR / "quant_config.py",
+    )
+    # 3. config_adapter.py (MoEConfigAdapter) — stub with minimal class
+    _register_stub_module(
+        "rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter",
+        MoEConfigAdapter=type("MoEConfigAdapter", (), {}),
+    )
+    # 4. fused_moe.py (FusedMoeDataRouter, dataclasses)
+    _load_module(
+        "rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe",
+        _FUSED_MOE_DEFS_DIR / "fused_moe.py",
+    )
+
+
+def _load_production_router():
+    """Load the production MoriEpIntranodeRouter class."""
+    _load_production_router_modules()
+    _ensure_packages_up_to(
+        "rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.routers"
+    )
+    mod = _load_module(
+        "rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.routers.mori_ep_intranode_router",
+        _ROUTER_FILE,
+    )
+    return mod.MoriEpIntranodeRouter
 
 
 def _load_moriep_wrapper():
     """importlib 加载 moriep_wrapper.py（需先桩 rtp_llm）。"""
     _install_rtp_llm_stubs_for_moriep_wrapper()
     mod = _load_module("moriep_wrapper_under_test", _MORIEP_WRAPPER_PATH)
+    # Also register under canonical name so production router's import resolves
+    _ensure_packages_up_to("rtp_llm.models_py.distributed")
+    sys.modules["rtp_llm.models_py.distributed.moriep_wrapper"] = mod
     return mod.MoriEPWrapper, mod.MoriEPWrapperConfig
 
 
 # 延迟到 worker / main 中赋值，避免 import 时即依赖 mori
 MoriEPWrapper: Any = None
 MoriEPWrapperConfig: Any = None
+MoriEpIntranodeRouter: Any = None
 
 
 def _ensure_moriep_symbols_loaded() -> None:
-    global MoriEPWrapper, MoriEPWrapperConfig
+    global MoriEPWrapper, MoriEPWrapperConfig, MoriEpIntranodeRouter
     if MoriEPWrapper is None:
         MoriEPWrapper, MoriEPWrapperConfig = _load_moriep_wrapper()
+        MoriEpIntranodeRouter = _load_production_router()
 
 
 # ---------------------------------------------------------------------------
-# 与 mori_ep_intranode_router.py 中 dataclass 字段对齐的最小结构（仅本测试使用）
+# 最小 MoEConfigAdapter mock，仅提供 MoriEpIntranodeRouter.__init__ 所需字段
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class ExpertTokensMetadata:
-    expected_m: Optional[int] = None
-    expert_num_tokens: Optional[torch.Tensor] = None
-    expert_num_tokens_cpu: Optional[Any] = None
+class _MockMoEConfig:
+    """Minimal mock satisfying MoriEpIntranodeRouter's config requirements."""
 
-
-@dataclass
-class ExpertForwardPayload:
-    expert_x: torch.Tensor
-    expert_x_origin_dtype: Optional[torch.dtype] = None
-    expert_x_scale: Optional[torch.Tensor] = None
-    expert_tokens_meta: Optional[ExpertTokensMetadata] = None
-    expert_topk_ids: Optional[torch.Tensor] = None
-    expert_topk_weights: Optional[torch.Tensor] = None
-
-
-@dataclass
-class CombineForwardPayload:
-    fused_expert_output: torch.Tensor
-
-
-def router_prepare(
-    mori_buffer_wrapper: Any,
-    a1: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-) -> ExpertForwardPayload:
-    """与 MoriEpIntranodeRouter.prepare 一致。"""
-    (
-        dispatch_a1,
-        dispatch_weights,
-        dispatch_scale,
-        dispatch_ids,
-        dispatch_recv_token_num,
-    ) = mori_buffer_wrapper.op.dispatch(a1, topk_weights, None, topk_ids)
-    return ExpertForwardPayload(
-        expert_x=dispatch_a1,
-        expert_x_scale=dispatch_scale,
-        expert_x_origin_dtype=None,
-        expert_topk_ids=dispatch_ids,
-        expert_topk_weights=dispatch_weights,
-        expert_tokens_meta=ExpertTokensMetadata(
-            expert_num_tokens=None,
-            expert_num_tokens_cpu=dispatch_recv_token_num,
-        ),
-    )
-
-
-def router_finalize(
-    mori_buffer_wrapper: Any,
-    payload: CombineForwardPayload,
-    topk_ids: torch.Tensor,
-) -> torch.Tensor:
-    """与 MoriEpIntranodeRouter.finalize 一致。"""
-    recv_x = mori_buffer_wrapper.op.combine(
-        payload.fused_expert_output, None, topk_ids
-    )[0]
-    return recv_x
+    def __init__(self, ep_size: int, ep_rank: int, expert_num: int):
+        self.ep_size = ep_size
+        self.ep_rank = ep_rank
+        self.expert_num = expert_num
 
 
 # ---------------------------------------------------------------------------
@@ -342,7 +348,7 @@ def _init_moriep_shmem_and_wrapper(
     _moriep_log(
         rank, "after barrier #2, before MoriEPWrapper._create / EpDispatchCombineOp"
     )
-    MoriEPWrapper._create(mori_cfg, shmem_group_name=shmem_group_name)
+    MoriEPWrapper._create(mori_cfg)
     _moriep_log(rank, "after MoriEPWrapper._create")
 
 
@@ -423,6 +429,20 @@ def worker_function(
         top_k = expert_num
         current_device = torch.device(f"cuda:{rank}")
 
+        # Instantiate the production router with a minimal mock config
+        _moriep_log(rank, "instantiating production MoriEpIntranodeRouter")
+        from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
+            CombineForwardPayload,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
+            FusedMoEQuantConfig,
+        )
+
+        mock_config = _MockMoEConfig(
+            ep_size=world_size, ep_rank=rank, expert_num=expert_num
+        )
+        router = MoriEpIntranodeRouter(mock_config, FusedMoEQuantConfig())
+
         for it in range(5):
             _moriep_log(rank, f"iter {it + 1}/5: alloc tensors + randn")
             token_num = token_num_per_rank[rank]
@@ -432,12 +452,18 @@ def worker_function(
                 expert_num, device=current_device, dtype=torch.int32
             ).repeat(token_num, 1)
 
-            _moriep_log(rank, f"iter {it + 1}/5: router_prepare (mori dispatch)")
-            payload = router_prepare(wrapper, a1, topk_weights, topk_ids)
+            _moriep_log(rank, f"iter {it + 1}/5: router.prepare (mori dispatch)")
+            payload = router.prepare(a1, None, None, topk_weights, topk_ids)
             combine_x = payload.expert_x
             combine_payload = CombineForwardPayload(fused_expert_output=combine_x)
-            _moriep_log(rank, f"iter {it + 1}/5: router_finalize (mori combine)")
-            a2 = router_finalize(wrapper, combine_payload, topk_ids)
+            _moriep_log(rank, f"iter {it + 1}/5: router.finalize (mori combine)")
+            a2 = router.finalize(
+                combine_payload,
+                topk_weights,
+                topk_ids,
+                apply_router_weight_on_input=False,
+                extra_finalize_args={"original_num_tokens": token_num},
+            )
 
             _moriep_log(rank, f"iter {it + 1}/5: assert_close")
             ref_a2 = a1 * world_size
@@ -522,27 +548,43 @@ def test_single(world_size: int, dist_port: int):
         )
 
 
+_MAX_GPUS = int(os.environ.get("MORIEP_TEST_MAX_GPUS", "0"))
+
+
+class MoriEpIntranodeRouterTest(unittest.TestCase):
+    """Bazel-schedulable wrapper for moriep_intranode_router multi-GPU tests.
+
+    MORIEP_TEST_MAX_GPUS env var controls which tests run:
+    - "2": only test_world_size_2
+    - "4": test_world_size_2 and test_world_size_4
+    - unset/0: run all tests (original behavior)
+    """
+
+    def _check_skip(self):
+        if importlib.util.find_spec("mori") is None:
+            self.skipTest("mori is not available")
+        max_gpu_count, _ = _gpu_count_without_parent_cuda_init()
+        if max_gpu_count < 2:
+            self.skipTest(f"Need at least 2 GPUs, got {max_gpu_count}")
+
+    def test_world_size_2(self):
+        self._check_skip()
+        max_gpu_count, _ = _gpu_count_without_parent_cuda_init()
+        if max_gpu_count < 2:
+            self.skipTest("Need at least 2 GPUs")
+        mp.set_start_method("spawn", force=True)
+        test_single(world_size=2, dist_port=_get_free_port())
+
+    def test_world_size_4(self):
+        if _MAX_GPUS > 0 and _MAX_GPUS < 4:
+            self.skipTest(f"MORIEP_TEST_MAX_GPUS={_MAX_GPUS}, skipping 4-GPU test")
+        self._check_skip()
+        max_gpu_count, _ = _gpu_count_without_parent_cuda_init()
+        if max_gpu_count < 4:
+            self.skipTest("Need at least 4 GPUs")
+        mp.set_start_method("spawn", force=True)
+        test_single(world_size=4, dist_port=_get_free_port())
+
+
 if __name__ == "__main__":
-    mp.set_start_method("spawn")
-
-    if importlib.util.find_spec("mori") is None:
-        print("跳过：未安装 mori")
-        sys.exit(0)
-
-    _moriep_log(None, "[parent] __main__ (调试: MORIEP_TEST_DEBUG=1 默认开启，=0 关闭)")
-
-    # 父进程不要 _ensure_moriep_symbols_loaded()：避免多余 import，子进程内再加载 wrapper
-    max_gpu_count, gpu_count_source = _gpu_count_without_parent_cuda_init()
-    print(
-        f"当前可用GPU数量: {max_gpu_count} | 来源: {gpu_count_source}",
-        flush=True,
-    )
-
-    available_world_sizes = [ws for ws in [2, 4] if ws <= max_gpu_count]
-    print(f"可用的world_size: {available_world_sizes}")
-
-    for world_size in available_world_sizes:
-        dist_port = _get_free_port()
-        print(f"dist_port={dist_port}")
-        test_single(world_size, dist_port)
-        _moriep_log(None, f"[parent] test_single(world_size={world_size}) finished OK")
+    unittest.main()

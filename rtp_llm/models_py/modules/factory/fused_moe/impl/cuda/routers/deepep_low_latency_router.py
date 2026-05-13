@@ -249,13 +249,11 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         self,
         combined_x: torch.Tensor,
         extra_finalize_args: Optional[Dict[str, Any]],
-        skip_allreduce: bool = False,
     ) -> torch.Tensor:
         """Finalize post tp gather for DeepEP Low-Latency.
         Args:
             combined_x (torch.Tensor): Combined output from all tp ranks.
             extra_finalize_args (Optional[Dict[str, Any]]): Extra finalize arguments.
-            skip_allreduce (bool): If True, skip the all_gather collective operation.
         """
         # Check input data
         assert combined_x.dim() == 2
@@ -265,7 +263,7 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         tp_size = self.config.tp_size
         original_num_tokens = extra_finalize_args["original_num_tokens"]
         tp_token_size = (original_num_tokens + tp_size - 1) // tp_size
-        if tp_size > 1 and not skip_allreduce:
+        if tp_size > 1:
             # combine_x.size(0) might be 0
             if combined_x.size(0) < tp_token_size:
                 # Pad combined output if needed
@@ -289,7 +287,6 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         extra_finalize_args: Optional[Dict[str, Any]],
-        skip_allreduce: bool = False,
     ) -> torch.Tensor:
         """
         Combines expert outputs back to all original ranks.
@@ -320,9 +317,7 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         combined_x = self._normal_finalize(combine_args)
 
         # Finalize post tp gather
-        combined_x = self._finalize_post_tp_gather(
-            combined_x, extra_finalize_args, skip_allreduce
-        )
+        combined_x = self._finalize_post_tp_gather(combined_x, extra_finalize_args)
         # reset handle
         self._handle = None
 

@@ -33,10 +33,6 @@ class PureTpRouterBase(FusedMoeDataRouter):
     with all-gather or all-reduce patterns.
     """
 
-    @property
-    def supports_skip_allreduce(self) -> bool:
-        return True
-
     @classmethod
     def router_type(cls):
         return RouterType.PURE_TP
@@ -123,10 +119,9 @@ class PureTpRouterBase(FusedMoeDataRouter):
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         extra_finalize_args: Optional[dict[str, Any]],
-        skip_allreduce: bool = False,
     ) -> torch.Tensor:
         fused_expert_output = payload.fused_expert_output
-        if not skip_allreduce and self.tp_size > 1:
+        if self.tp_size > 1:
             fused_expert_output = all_reduce(fused_expert_output, group=Group.TP)
         return fused_expert_output
 
@@ -189,10 +184,9 @@ class PureTpRouterFusedQuant(PureTpRouterBase):
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         extra_finalize_args: Optional[dict[str, Any]],
-        skip_allreduce: bool = False,
     ) -> torch.Tensor:
         fused_expert_output = payload.fused_expert_output
-        if not skip_allreduce and self.tp_size > 1:
+        if self.tp_size > 1:
             fused_expert_output = all_reduce(fused_expert_output, group=Group.TP)
         return fused_expert_output
 
