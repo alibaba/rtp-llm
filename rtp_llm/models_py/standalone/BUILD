@@ -76,6 +76,9 @@ py_library(
         "@//:using_cuda13_arm": [
             "//rtp_llm:deep_gemm",
         ],
+        "@//:using_cuda13_arm": [
+            "//rtp_llm:deep_gemm",
+        ],
         "@//:using_cuda12": [
             "//rtp_llm:deep_gemm",
         ],
