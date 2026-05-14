@@ -69,6 +69,12 @@ _CONTRACT_TESTS = [
     "test_compressor_cp_merged_gather",
 ]
 
+py_test(
+    name = "test_decode_attn_metadata_start_pos",
+    srcs = ["test_decode_attn_metadata_start_pos.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+)
+
 [
     dsv4_py_test(
         name = name,
