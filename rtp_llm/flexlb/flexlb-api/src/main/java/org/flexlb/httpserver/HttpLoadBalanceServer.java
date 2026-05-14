@@ -4,6 +4,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.flexlb.balance.scheduler.QueueManager;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.BatchScheduleContext;
 import org.flexlb.dao.loadbalance.BatchScheduleRequest;
 import org.flexlb.dao.loadbalance.BatchScheduleResponse;
 import org.flexlb.dao.loadbalance.LogLevelUpdateRequest;
@@ -11,6 +12,7 @@ import org.flexlb.dao.loadbalance.QueueSnapshotResponse;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.pv.BatchPvLogData;
 import org.flexlb.dao.pv.PvLogData;
 import org.flexlb.domain.consistency.MasterChangeNotifyReq;
 import org.flexlb.domain.consistency.MasterChangeNotifyResp;
@@ -107,31 +109,41 @@ public class HttpLoadBalanceServer {
     }
 
     public Mono<ServerResponse> batchScheduleRequest(ServerRequest request) {
+        BatchScheduleContext bctx = new BatchScheduleContext();
         return request.bodyToMono(BatchScheduleRequest.class)
-                .flatMap(batchRequest -> Mono.using(
-                        activeRequestCounter::acquire,
-                        ignored -> processBatchScheduleRequest(batchRequest),
-                        ActiveRequestCounter.RequestToken::close))
+                .flatMap(batchRequest -> {
+                    bctx.setBatchRequest(batchRequest);
+                    return Mono.using(
+                            activeRequestCounter::acquire,
+                            ignored -> processBatchScheduleRequest(bctx),
+                            ActiveRequestCounter.RequestToken::close);
+                })
                 .onErrorResume(e -> {
                     Logger.error("Batch schedule request processing error", e);
+                    bctx.setSuccess(false);
+                    bctx.setErrorMessage(e.getMessage());
                     return ServerResponse.status(500)
                             .contentType(MediaType.APPLICATION_JSON)
                             .body(Mono.just(e.getMessage()), String.class);
-                });
+                })
+                .doFinally(signal -> finalizeBatchContext(bctx));
     }
 
-    private Mono<ServerResponse> processBatchScheduleRequest(BatchScheduleRequest batchRequest) {
+    private Mono<ServerResponse> processBatchScheduleRequest(BatchScheduleContext bctx) {
         if (lbStatusConsistencyService.isNeedConsistency() && !lbStatusConsistencyService.isMaster()) {
-            return forwardBatchScheduleRequestToMaster(batchRequest);
+            return forwardBatchScheduleRequestToMaster(bctx);
         }
 
-        return routeService.batchSchedule(batchRequest)
+        return routeService.batchSchedule(bctx.getBatchRequest())
                 .flatMap(response -> {
                     response.setRealMasterHost(lbStatusConsistencyService.getMasterHostIpPort());
+                    bctx.setBatchResponse(response);
                     if (response.isSuccess()) {
                         return buildBatchSuccessResponse(response);
                     }
-                    Logger.error("Batch schedule failed with error code: {}", response.getErrorMessage());
+                    bctx.setSuccess(false);
+                    bctx.setErrorMessage(response.getErrorMessage());
+                    Logger.error("Batch schedule failed with error message: {}", response.getErrorMessage());
                     return buildBatchErrorResponse(response);
                 });
     }
@@ -266,27 +278,43 @@ public class HttpLoadBalanceServer {
                 });
     }
 
-    private Mono<ServerResponse> forwardBatchScheduleRequestToMaster(BatchScheduleRequest request) {
+    private Mono<ServerResponse> forwardBatchScheduleRequestToMaster(BatchScheduleContext bctx) {
         String master = lbStatusConsistencyService.getMasterHostIpPort();
         if (master == null) {
             Logger.error("Master unreachable for batch_schedule");
+            engineHealthReporter.reportForwardToMasterResult("LOCAL", "MASTER_NULL");
             BatchScheduleResponse errorResponse = BatchScheduleResponse.error(
                     StrategyErrorType.NO_AVAILABLE_WORKER, "master unreachable");
+            bctx.setBatchResponse(errorResponse);
+            bctx.setSuccess(false);
+            bctx.setErrorMessage("master unreachable");
             return ServerResponse.status(500)
                     .contentType(MediaType.APPLICATION_JSON)
                     .bodyValue(errorResponse);
         }
-        Logger.info("Forwarding batch_schedule request to master: {}, request: {}", master, request);
+        Logger.info("Forwarding batch_schedule request to master: {}, request: {}", master, bctx.getBatchRequest());
         URI uri = URI.create("http://" + master);
-        return generalHttpNettyService.request(request, uri, "/rtp_llm/batch_schedule", BatchScheduleResponse.class)
-                .flatMap(resp -> ServerResponse.ok()
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .bodyValue(resp))
+        return generalHttpNettyService.request(bctx.getBatchRequest(), uri, "/rtp_llm/batch_schedule", BatchScheduleResponse.class)
+                .flatMap(resp -> {
+                    engineHealthReporter.reportForwardToMasterResult(uri.getHost(), String.valueOf(resp.getCode()));
+                    bctx.setBatchResponse(resp);
+                    bctx.setSuccess(resp.isSuccess());
+                    if (!resp.isSuccess()) {
+                        bctx.setErrorMessage(resp.getErrorMessage());
+                    }
+                    return ServerResponse.ok()
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .bodyValue(resp);
+                })
                 .onErrorResume(e -> {
                     String errorCode = e instanceof TimeoutException ? "TIMEOUT" : "CONNECT_FAILED";
                     Logger.error("[BatchSchedule] Master unreachable, errorCode: {}", errorCode, e);
+                    engineHealthReporter.reportForwardToMasterResult("LOCAL", errorCode);
                     BatchScheduleResponse errorResponse = BatchScheduleResponse.error(
                             StrategyErrorType.NO_AVAILABLE_WORKER, "master unreachable");
+                    bctx.setBatchResponse(errorResponse);
+                    bctx.setSuccess(false);
+                    bctx.setErrorMessage("master unreachable: " + errorCode);
                     return ServerResponse.status(500)
                             .contentType(MediaType.APPLICATION_JSON)
                             .bodyValue(errorResponse);
@@ -407,6 +435,37 @@ public class HttpLoadBalanceServer {
             }
         } catch (Exception ex) {
             Logger.error("Failed to serialize PV log data", ex);
+        }
+    }
+
+    /**
+     * Finalizes the batch schedule context by reporting metrics and writing the PV log.
+     *
+     * @param bctx the batch schedule context to finalize
+     */
+    private void finalizeBatchContext(BatchScheduleContext bctx) {
+        engineHealthReporter.reportBatchSchedule(bctx);
+        logBatchPvRecord(bctx);
+    }
+
+    /**
+     * Logs the batch PV record with appropriate log level based on success status.
+     *
+     * @param bctx the batch schedule context containing PV log data
+     */
+    private void logBatchPvRecord(BatchScheduleContext bctx) {
+
+        BatchPvLogData pvLogData = new BatchPvLogData(bctx);
+
+        try {
+            String jsonLog = JsonUtils.toStringOrEmpty(pvLogData);
+            if (pvLogData.isSuccess()) {
+                pvLogger.info(jsonLog);
+            } else {
+                pvLogger.error(jsonLog);
+            }
+        } catch (Exception ex) {
+            Logger.error("Failed to serialize batch PV log data", ex);
         }
     }
 
