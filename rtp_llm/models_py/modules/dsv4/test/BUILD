@@ -174,6 +174,17 @@ py_test(
 )
 
 py_test(
+    name = "test_grouped_fp4_strategy_perf",
+    srcs = ["test_grouped_fp4_strategy_perf.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+)
+
+py_test(
     name = "test_fused_inv_rope_fp8_quant",
     srcs = ["test_fused_inv_rope_fp8_quant.py"],
     deps = [
