@@ -17,9 +17,6 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.type import RouterType
-from rtp_llm.models_py.triton_kernels.moe.remap_local_ids_kernel import (
-    remap_to_local_ids,
-)
 
 
 class MoriEpIntranodeRouter(FusedMoeDataRouter):
@@ -70,6 +67,10 @@ class MoriEpIntranodeRouter(FusedMoeDataRouter):
         Non-local experts are mapped to local index 0 (safe fallback) so the
         fused kernel computes valid output that is zeroed by weight=0.
         """
+        from rtp_llm.models_py.triton_kernels.moe.remap_local_ids_kernel import (
+            remap_to_local_ids,
+        )
+
         local_start = self.ep_rank * self.expert_num_per_rank
         local_end = local_start + self.expert_num_per_rank
         return remap_to_local_ids(dispatch_ids, dispatch_weights, local_start, local_end)

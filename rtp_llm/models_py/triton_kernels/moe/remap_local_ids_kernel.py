@@ -39,6 +39,14 @@ def remap_to_local_ids(
     assert dispatch_weights.is_contiguous()
 
     N = dispatch_ids.numel()
+
+    if N == 0:
+        local_ids = torch.empty_like(dispatch_ids, dtype=torch.int32)
+        local_weights = torch.empty(
+            dispatch_ids.shape, dtype=torch.float32, device=dispatch_ids.device
+        )
+        return local_ids, local_weights
+
     local_ids = torch.empty_like(dispatch_ids, dtype=torch.int32)
     local_weights = torch.empty(
         dispatch_ids.shape, dtype=torch.float32, device=dispatch_ids.device
