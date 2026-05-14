@@ -40,6 +40,7 @@ def _install_hot_hook_runtime(role: str) -> None:
 STARTUP_WARMUP_HEALTH_GATE_FILE_ENV = "RTP_LLM_STARTUP_WARMUP_HEALTH_GATE_FILE"
 STARTUP_REAL_WARMUP_MIN_TOKEN_LEN = 2
 STARTUP_REAL_WARMUP_TIMEOUT_S = 600.0
+STARTUP_REAL_WARMUP_DEFAULT_MAX_SEQ_LEN = 65536
 STARTUP_REAL_WARMUP_MAX_NEW_TOKENS = 1
 STARTUP_REAL_WARMUP_TOKEN_ID = 100
 
@@ -342,8 +343,15 @@ def _role_is_prefill(py_env_configs: PyEnvConfigs) -> bool:
 
 
 def _should_run_startup_real_warmup(py_env_configs: PyEnvConfigs) -> bool:
+    flag = os.environ.get("DSV4_STARTUP_REAL_WARMUP", "auto").strip().lower()
+    if flag in ("0", "false", "off", "no"):
+        return False
+
     model_type = getattr(py_env_configs.model_args, "model_type", "")
-    return model_type == "deepseek_v4" and _role_is_prefill(py_env_configs)
+    role_is_prefill = _role_is_prefill(py_env_configs)
+    if flag in ("1", "true", "on", "yes", "force"):
+        return role_is_prefill
+    return model_type == "deepseek_v4" and role_is_prefill
 
 
 def _setup_startup_warmup_health_gate(py_env_configs: PyEnvConfigs):
@@ -473,12 +481,29 @@ def _get_startup_real_warmup_pow2_lens(max_len: int):
 
 
 def _get_startup_real_warmup_max_len(py_env_configs: PyEnvConfigs):
-    max_len = int(getattr(py_env_configs.model_args, "max_seq_len", None) or 0)
-    if max_len <= 0:
+    model_max_len = int(getattr(py_env_configs.model_args, "max_seq_len", None) or 0)
+    if model_max_len <= 0:
         raise ValueError(
-            f"model_args.max_seq_len should be positive, got {max_len}"
+            f"model_args.max_seq_len should be positive, got {model_max_len}"
         )
-    return max_len
+    warmup_max_len = int(
+        os.environ.get(
+            "DSV4_STARTUP_REAL_WARMUP_MAX_SEQ_LEN",
+            str(STARTUP_REAL_WARMUP_DEFAULT_MAX_SEQ_LEN),
+        )
+    )
+    if warmup_max_len <= 0:
+        raise ValueError(
+            "DSV4_STARTUP_REAL_WARMUP_MAX_SEQ_LEN should be positive, "
+            f"got {warmup_max_len}"
+        )
+    warmup_max_len = min(warmup_max_len, model_max_len)
+    logging.info(
+        "DSV4 startup real warmup max len resolved to %d, model max_seq_len=%d",
+        warmup_max_len,
+        model_max_len,
+    )
+    return warmup_max_len
 
 
 def _get_startup_real_warmup_token_lens(py_env_configs: PyEnvConfigs):
@@ -528,6 +553,17 @@ def _get_startup_real_warmup_max_new_tokens() -> int:
     return STARTUP_REAL_WARMUP_MAX_NEW_TOKENS
 
 
+def _get_startup_real_warmup_timeout_s() -> float:
+    timeout_s = float(
+        os.environ.get("DSV4_STARTUP_REAL_WARMUP_TIMEOUT_S", STARTUP_REAL_WARMUP_TIMEOUT_S)
+    )
+    if timeout_s <= 0:
+        raise ValueError(
+            f"DSV4_STARTUP_REAL_WARMUP_TIMEOUT_S should be positive, got {timeout_s}"
+        )
+    return timeout_s
+
+
 def _run_startup_real_warmup_async(coroutine):
     import asyncio
 
@@ -547,7 +583,8 @@ async def _run_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs):
     token_lens = _get_startup_real_warmup_token_lens(py_env_configs)
     max_len = _get_startup_real_warmup_max_len(py_env_configs)
     addresses = _get_startup_real_warmup_grpc_addresses(py_env_configs)
-    timeout_ms = int(STARTUP_REAL_WARMUP_TIMEOUT_S * 1000)
+    timeout_s = _get_startup_real_warmup_timeout_s()
+    timeout_ms = int(timeout_s * 1000)
 
     client_config = (
         py_env_configs.grpc_config.get_client_config()
@@ -561,7 +598,7 @@ async def _run_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs):
         token_lens,
         STARTUP_REAL_WARMUP_TOKEN_ID,
         STARTUP_REAL_WARMUP_MAX_NEW_TOKENS,
-        STARTUP_REAL_WARMUP_TIMEOUT_S,
+        timeout_s,
     )
 
     begin_all = time.time()
