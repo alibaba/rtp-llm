@@ -396,13 +396,20 @@ def _build_start_pos_from_attention_inputs(
     attention_inputs: Any,
     device: torch.device,
     max_seq_len: int,
+    q_len: int,
 ) -> torch.Tensor:
     """Derive DSv4 decode first-token positions from framework attention inputs."""
     if isinstance(attention_inputs, torch.Tensor):
         start_pos = attention_inputs
     else:
         is_target_verify = bool(getattr(attention_inputs, "is_target_verify", False))
-        if is_target_verify:
+        is_prefill = bool(getattr(attention_inputs, "is_prefill", False))
+        # Target verify and MTP draft-prefill CUDA graph are both multi-token
+        # decode-shaped batches.  CudaGraphRunner copies prefix_lengths for
+        # prefill graph replay but leaves sequence_lengths at capture-time
+        # sentinel values, so prefix_lengths is the only valid first-token
+        # position source for those q_len > 1 paths.
+        if is_target_verify or (is_prefill and q_len > 1):
             start_pos = attention_inputs.prefix_lengths
         else:
             start_pos = attention_inputs.sequence_lengths
@@ -655,6 +662,7 @@ def update_decode_metadata_in_place_fp8(
         attention_inputs,
         device,
         meta.max_seq_len,
+        q_len,
     )
     bs = int(start_pos.shape[0])
     position_ids_2d = _build_position_ids_2d(start_pos, q_len, device)
