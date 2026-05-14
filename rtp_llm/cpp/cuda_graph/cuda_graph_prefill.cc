@@ -29,11 +29,12 @@ void CudaGraphRunner::capturePrefill() {
             inputs.attention_inputs.input_lengths[0] = seq_len;
         } else {
             // Draft model prefill: distribute seq_len tokens across batches (max num_tokens_per_bs_ each).
-            // All max_bs_ batches get prefix to ensure buffer allocation covers worst-case replay.
+            // All max_bs_ batches get the largest legal prefix to ensure buffer allocation covers worst-case replay.
             int active_bs  = (seq_len + num_tokens_per_bs_ - 1) / num_tokens_per_bs_;
-            int prefix_len = max_seq_len_;
+            int prefix_len = max_seq_len_ > num_tokens_per_bs_ ? max_seq_len_ - num_tokens_per_bs_ : 0;
 
-            // All batches get prefix_len to maximize buffer allocation during capture.
+            // Active batches must satisfy prefix_len + input_len <= max_seq_len_;
+            // DSv4 decode metadata derives position_ids from prefix_lengths.
             // Active batches get real input tokens, inactive batches get 0 input tokens.
             inputs.attention_inputs.input_lengths.fill_(0);
             inputs.attention_inputs.prefix_lengths.fill_(prefix_len);
