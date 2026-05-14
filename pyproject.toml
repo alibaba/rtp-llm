@@ -46,7 +46,7 @@ smoke-runs-per-test = "rtp_llm.test.smoke_framework.runs_plugin"
 # Model plugins can be registered here
 
 # `dev` and `docs` extras are declared statically here (not via setup.py
-# extras_require) so `uv pip install -e .[dev]` resolves them from PEP 621
+# extras_require) so `uv pip install --compile-bytecode -e .[dev]` resolves them from PEP 621
 # metadata. Without this, uv warns "does not have an extra named dev" and
 # silently drops pytest, breaking REAPI workers that need pytest to run.
 # GPU platform extras (cuda12_9 / rocm / cuda12_arm) stay in

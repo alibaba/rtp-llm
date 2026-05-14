@@ -11,8 +11,8 @@ To speed up installation, it is recommended to use pip to install dependencies:
 ## Method 1: With pip
 
 ```bash
-pip install --upgrade pip
-pip install "rtp_llm>=0.2.0"
+pip install --compile --upgrade pip
+pip install --compile "rtp_llm>=0.2.0"
 ```
 
 

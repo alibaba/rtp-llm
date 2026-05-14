@@ -1,13 +1,13 @@
 # Documentation Manual
 ## Prepare Docs Requirements
 ``` 
-wget --no-check-certificate https://github.com/jgm/pandoc/releases/download/3.7.0.2/pandoc-3.7.0.2-linux-amd64.tar.gz -O pandoc-3.7.0.2-linux-amd64.tar.gz &&     tar xzf pandoc-3.7.0.2-linux-amd64.tar.gz &&     cp pandoc-3.7.0.2/bin/pandoc /usr/local/bin/ &&     rm -rf pandoc-3.7.0.2*/opt/conda310/bin/pip install uv 
+wget --no-check-certificate https://github.com/jgm/pandoc/releases/download/3.7.0.2/pandoc-3.7.0.2-linux-amd64.tar.gz -O pandoc-3.7.0.2-linux-amd64.tar.gz &&     tar xzf pandoc-3.7.0.2-linux-amd64.tar.gz &&     cp pandoc-3.7.0.2/bin/pandoc /usr/local/bin/ &&     rm -rf pandoc-3.7.0.2*/opt/conda310/bin/pip install --compile uv
 
-/opt/conda310/bin/uv pip install sphinx myst-nb jupyter nbconvert sphinx-autobuild --cache-dir=/root/.cache/uv/      --python=/opt/conda310/bin/python      --verbose
+/opt/conda310/bin/uv pip install --compile-bytecode sphinx myst-nb jupyter nbconvert sphinx-autobuild --cache-dir=/root/.cache/uv/      --python=/opt/conda310/bin/python      --verbose
 
 yum update -y &&     yum install -y moreutils --skip-broken || true &&     yum install -y parallel --skip-broken || true &&     rm -rf /var/cache/yum/*
 
-/opt/conda310/bin/uv pip install -r  docs/requirements.txt       --cache-dir=/root/.cache/uv/      --python=/opt/conda310/bin/python      --verbose
+/opt/conda310/bin/uv pip install --compile-bytecode -r  docs/requirements.txt       --cache-dir=/root/.cache/uv/      --python=/opt/conda310/bin/python      --verbose
 ```
 
 ## Add Documentation

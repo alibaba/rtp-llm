@@ -75,7 +75,7 @@ class Tau2BenchComparer(BaseComparer):
         logging.info(f"[TAU2] PASS: OVERALL score={score} >= threshold={threshold}")
 
     def _pip_install(self, args: List[str]) -> None:
-        cmd = [sys.executable, "-m", "pip", "install", "--quiet"] + args
+        cmd = [sys.executable, "-m", "pip", "install", "--compile", "--quiet"] + args
         logging.info(f"[TAU2] pip install: {' '.join(cmd)}")
         subprocess.run(cmd, check=True)
 

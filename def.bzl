@@ -295,7 +295,7 @@ def _torch_repo_impl(ctx):
     torch_path = ctx.os.environ.get("TORCH_ROOT")
     if not torch_path:
         fail("TORCH_ROOT environment variable is not set. " +
-             "Run 'pip install -e .' first (setup.py generates .torch_bazelrc), " +
+             "Run 'pip install --compile -e .' first (setup.py generates .torch_bazelrc), " +
              "or set TORCH_ROOT manually to your torch installation path.")
 
     if not ctx.path(torch_path).exists:

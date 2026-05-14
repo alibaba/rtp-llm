@@ -109,14 +109,14 @@ def preflight(api_base: str, model: str) -> None:
         import evalscope  # noqa: F401
         print(f"[OK]   evalscope {getattr(evalscope, '__version__', '?')}")
     except ImportError:
-        print("[ERR] 未安装 evalscope。pip install evalscope")
+        print("[ERR] 未安装 evalscope。pip install --compile evalscope")
         sys.exit(1)
     try:
         import tau2  # noqa: F401
         print(f"[OK]   tau2 imported")
     except ImportError:
         print("[ERR] 未安装 tau2。")
-        print("      pip install 'git+https://github.com/sierra-research/tau2-bench@v0.2.0'")
+        print("      pip install --compile 'git+https://github.com/sierra-research/tau2-bench@v0.2.0'")
         sys.exit(1)
 
 

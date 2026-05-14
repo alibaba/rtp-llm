@@ -73,7 +73,7 @@ cuda12_9 = [
 ]
 
 # dev and docs extras moved to pyproject.toml [project.optional-dependencies] —
-# uv pip install -e .[dev] reads PEP 621 metadata directly and silently drops
+# uv pip install --compile-bytecode -e .[dev] reads PEP 621 metadata directly and silently drops
 # extras declared only via setup.py extras_require. GPU extras stay here
 # because they carry internal-only pin URLs.
 

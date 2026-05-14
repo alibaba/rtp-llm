@@ -194,7 +194,7 @@ def check_build_prerequisites() -> None:
             errors.append(
                 "grpcio-tools is required to generate *_pb2.py from .proto when those "
                 "files are absent (model_rpc + remote_tests REAPI). "
-                "Fix: uv pip install grpcio-tools  (match your grpcio version, e.g. grpcio-tools==1.62.0)"
+                "Fix: uv pip install --compile-bytecode grpcio-tools  (match your grpcio version, e.g. grpcio-tools==1.62.0)"
             )
 
     # -- Always required --
@@ -206,16 +206,16 @@ def check_build_prerequisites() -> None:
         if major < 75:
             errors.append(
                 f"setuptools >= 64.0 required (found {sv}). "
-                "Fix: uv pip install 'setuptools>=75.0,<82'"
+                "Fix: uv pip install --compile-bytecode 'setuptools>=75.0,<82'"
             )
         elif major >= 82:
             errors.append(
                 f"setuptools {sv} removed pkg_resources which breaks grpc_tools. "
-                "Fix: uv pip install 'setuptools>=75.0,<82'"
+                "Fix: uv pip install --compile-bytecode 'setuptools>=75.0,<82'"
             )
     except _meta.PackageNotFoundError:
         errors.append(
-            "setuptools not found. Fix: uv pip install 'setuptools>=75.0,<82'"
+            "setuptools not found. Fix: uv pip install --compile-bytecode 'setuptools>=75.0,<82'"
         )
 
     if sys.version_info < (3, 11):
@@ -224,13 +224,13 @@ def check_build_prerequisites() -> None:
         except ImportError:
             errors.append(
                 "tomli required for Python <3.11 to parse pyproject.toml. "
-                "Fix: uv pip install tomli"
+                "Fix: uv pip install --compile-bytecode tomli"
             )
 
     try:
         import wheel  # noqa: F401
     except ImportError:
-        errors.append("wheel required. Fix: uv pip install wheel")
+        errors.append("wheel required. Fix: uv pip install --compile-bytecode wheel")
 
     # -- Required only for full build (C++ extensions) --
     if not skip_build:
@@ -240,8 +240,8 @@ def check_build_prerequisites() -> None:
             errors.append(
                 "torch not found. uv pip should have installed it before build_ext.\n"
                 "  If running manually, ensure torch is installed first:\n"
-                "    uv pip install -e '.[dev]' --no-build-isolation-package rtp-llm\n"
-                "  Or for deps-only: RTP_SKIP_BAZEL_BUILD=1 uv pip install -e '.[dev]' --no-build-isolation"
+                "    uv pip install --compile-bytecode -e '.[dev]' --no-build-isolation-package rtp-llm\n"
+                "  Or for deps-only: RTP_SKIP_BAZEL_BUILD=1 uv pip install --compile-bytecode -e '.[dev]' --no-build-isolation"
             )
 
         if not shutil.which("bazelisk"):
@@ -256,7 +256,7 @@ def check_build_prerequisites() -> None:
         footer = (
             f"{sep}\n"
             "If you only need to install Python deps (skip C++ build), run:\n"
-            "  RTP_SKIP_BAZEL_BUILD=1 uv pip install -e '.[dev]' --no-build-isolation\n"
+            "  RTP_SKIP_BAZEL_BUILD=1 uv pip install --compile-bytecode -e '.[dev]' --no-build-isolation\n"
             f"{sep}"
         )
         detail = "\n".join(f"  [{i+1}] {e}" for i, e in enumerate(errors))
@@ -303,7 +303,7 @@ def generate_proto_files(project_root: Path = None) -> None:
     except ImportError as exc:
         raise BuildPrerequisiteError(
             "grpcio-tools is required to generate *_pb2.py from .proto, but it is not installed.\n"
-            "Fix: uv pip install grpcio-tools  (e.g. grpcio-tools==1.62.0 to match grpcio)"
+            "Fix: uv pip install --compile-bytecode grpcio-tools  (e.g. grpcio-tools==1.62.0 to match grpcio)"
         ) from exc
 
     project_root = project_root or get_project_root()

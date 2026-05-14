@@ -961,7 +961,7 @@ def test_classifies_remote_setup_network_failure_as_infra():
         status_message="",
         stdout_raw=b">>>PHASE:pip_install_failed 123 rc=1",
         stderr_raw=(
-            b"[prepare_venv] uv pip install -e .[dev]\n"
+            b"[prepare_venv] uv pip install --compile-bytecode -e .[dev]\n"
             b"error: Request failed after 3 retries\n"
             b"Caused by: Failed to fetch: https://example/simple/pytest-asyncio/\n"
             b"Caused by: operation timed out\n"

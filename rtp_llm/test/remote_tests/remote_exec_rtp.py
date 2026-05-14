@@ -275,7 +275,7 @@ def build_remote_setup_command(rootdir: Path, *, setup_env: Optional[dict] = Non
     - Computing isolated venv path (per CAS input root hash)
     - Locking (fcntl.flock) to prevent concurrent install races
     - Caching (.installed_ok) to skip install when venv already ready
-    - Creating venv + bootstrap + uv pip install
+    - Creating venv + bootstrap + uv pip install --compile-bytecode
 
     CWD on the remote worker is github-opensource (CAS rootdir).
     prepare_venv.py is included in the CAS upload via _collect_base_files().
