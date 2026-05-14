@@ -19,6 +19,9 @@ cc_library(
             "@local_config_rocm//rocm:rocm",
             "//rtp_llm/models_py/bindings/rocm:rocm_types_hdr",
         ],
+        "@//:using_ascend": [
+            "@local_config_ascend//ascend:ascend_headers",
+        ],
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],
@@ -45,6 +48,9 @@ cc_library(
         "//:using_rocm": [
             "//rtp_llm/models_py/bindings/common/kernels:kernels_cu",
             "//rtp_llm/models_py/bindings/core:exec_ctx_rocm",
+        ],
+        "@//:using_ascend": [
+            "//rtp_llm/models_py/bindings/ascend:ascend_host_utils",
         ],
         "//conditions:default": [],
     }),

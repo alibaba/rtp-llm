@@ -6,6 +6,8 @@
 #if USING_CUDA
 #include "rtp_llm/models_py/bindings/cuda/ops/StandaloneOps.h"
 #include "ATen/cuda/CUDAContext.h"
+#elif USING_ASCEND
+#include "acl/acl.h"
 #endif
 
 namespace rtp_llm {
@@ -116,7 +118,12 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
         auto tokens            = stream->currentExecuteTokens(0);
         auto label_tensor =
             torch::from_blob(const_cast<int*>(tokens.data() + 1), {(int64_t)(tokens.size() - 1)}, torch::kInt32)
-                .to(torch::kCUDA);
+#if USING_ASCEND
+                .to(torch::kPrivateUse1)
+#else
+                .to(torch::kCUDA)
+#endif
+            ;
         auto labels_int64 = label_tensor.toType(torch::kInt64);
         loss = torch::cross_entropy_loss(all_logits_tensor, labels_int64, torch::nullopt, at::Reduction::None)
                    .to(torch::kFloat32);

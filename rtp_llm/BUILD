@@ -62,12 +62,14 @@ xft_dep = select({
 arch_dep = select({
     "@//:using_arm": [],
     "@//:using_cuda12_arm": [],
-    "//conditions:default": [":decord"],
+    "@//:using_ascend": [],
+    "//conditions:default": [],
 })
 
 arch_with_version_dep = select({
     "@//:using_arm": [],
     "@//:using_cuda12_arm": [],
+    "@//:using_ascend": [],
     "//conditions:default": ["decord==0.6.0"],
 })
 

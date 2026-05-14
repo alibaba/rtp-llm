@@ -25,6 +25,7 @@ cc_library(
     ] + select({
         "//:using_cuda": ["//rtp_llm/cpp/cuda_graph:cuda_graph_impl"],
         "@//:using_rocm": ["//rtp_llm/cpp/cuda_graph:cuda_graph_impl"],
+        "@//:using_ascend": [],
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"]

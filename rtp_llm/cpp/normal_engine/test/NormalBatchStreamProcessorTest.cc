@@ -2,6 +2,12 @@
 #include "torch/all.h"
 #include "gtest/gtest.h"
 
+#if USING_ASCEND
+#define DEVICE_TYPE torch::kPrivateUse1
+#else
+#define DEVICE_TYPE torch::kCUDA
+#endif
+
 #define private public
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
@@ -172,12 +178,12 @@ TEST_F(NormalBatchStreamProcessorTest, testSoftmaxProbs) {
 
     SamplerInputs sampler_inputs;
     MergedOutput  merge_outputs;
-    auto          hidden_tensor                = torch::tensor({1.0f, 2.0f}).reshape({1, 2}).to(torch::kCUDA);
-    auto          logits_tensor                = torch::tensor({1.0f, 2.0f}).reshape({1, 2}).to(torch::kCUDA);
+    auto          hidden_tensor                = torch::tensor({1.0f, 2.0f}).reshape({1, 2}).to(DEVICE_TYPE);
+    auto          logits_tensor                = torch::tensor({1.0f, 2.0f}).reshape({1, 2}).to(DEVICE_TYPE);
     merge_outputs.model_output.hidden_states   = hidden_tensor;
     merge_outputs.model_output.logits          = logits_tensor;
     merge_outputs.sampler_output.token_ids     = torch::tensor({0, 1}, torch::kInt32).reshape({1, 2});
-    merge_outputs.sampler_output.cum_log_probs = torch::tensor({1.0f}).to(torch::kCUDA);
+    merge_outputs.sampler_output.cum_log_probs = torch::tensor({1.0f}).to(DEVICE_TYPE);
     auto status                                = processor.dispatch(stream_groups, merge_outputs);
     EXPECT_TRUE(status.ok());
 
@@ -252,18 +258,18 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
 
     SamplerInputs sampler_inputs;
     MergedOutput  merge_outputs;
-    auto loss_hidden_tensor = torch::tensor({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}).reshape({3, 2}).to(torch::kCUDA);
-    auto loss_logits_tensor = torch::tensor({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}).reshape({3, 2}).to(torch::kCUDA);
+    auto loss_hidden_tensor = torch::tensor({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}).reshape({3, 2}).to(DEVICE_TYPE);
+    auto loss_logits_tensor = torch::tensor({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}).reshape({3, 2}).to(DEVICE_TYPE);
     auto loss_all_logits_tensor =
         torch::tensor({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f, 9.0f, 10.0f, 11.0f, 12.0f})
             .reshape({6, 2})
-            .to(torch::kCUDA);
+            .to(DEVICE_TYPE);
     merge_outputs.model_output.hidden_states = loss_hidden_tensor;
     merge_outputs.model_output.logits        = loss_logits_tensor;
     merge_outputs.model_output.all_logits    = loss_all_logits_tensor;
     merge_outputs.sampler_output.token_ids =
         torch::tensor({0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 0, 1}, torch::kInt32).reshape({3, 4});
-    merge_outputs.sampler_output.cum_log_probs = torch::tensor({1.0f, 2.0f, 3.0f}).to(torch::kCUDA);
+    merge_outputs.sampler_output.cum_log_probs = torch::tensor({1.0f, 2.0f, 3.0f}).to(DEVICE_TYPE);
     auto status                                = processor.dispatch(stream_groups, merge_outputs);
     EXPECT_TRUE(status.ok());
     EXPECT_FALSE(stream1->getLoss().defined());

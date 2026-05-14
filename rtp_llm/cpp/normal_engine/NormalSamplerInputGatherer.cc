@@ -61,7 +61,12 @@ absl::StatusOr<SamplerInputs> NormalSamplerInputGatherer::gather(const StreamGro
     sampler_inputs.vocab_size = vocab_size;
     if (return_all_probs) {
         sampler_inputs.all_probs = torch::zeros({(int64_t)total_batch_size_in, (int64_t)vocab_size},
-                                                torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+                                                torch::TensorOptions().dtype(torch::kFloat32)
+#if USING_ASCEND
+                                                    .device(torch::kPrivateUse1));
+#else
+                                                    .device(torch::kCUDA));
+#endif
     }
 
     // copy logits when needs tiling or returning logits

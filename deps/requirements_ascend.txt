@@ -1,4 +1,4 @@
-# Ascend NPU dependencies
-torch==2.9.0+cpu
-torch_npu==2.9.0
+-r requirements_base.txt
+https://mirrors.aliyun.com/pytorch-wheels/cpu/torch-2.9.0%2Bcpu-cp310-cp310-manylinux_2_28_aarch64.whl
+https://files.pythonhosted.org/packages/66/79/d169a3b085c07d967053c629f26559dc7d757bbb2fe11f3ab38cea90a20e/torch_npu-2.9.0-cp310-cp310-manylinux_2_28_aarch64.whl
 numpy==1.26.4

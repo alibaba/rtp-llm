@@ -198,6 +198,9 @@ build:ascend --linkopt="-lhccl"
 build:ascend --copt=-Wno-deprecated-declarations
 build:ascend --copt="-Wno-error=unused-result"
 build:ascend --copt="-Wno-error=array-bounds"
+build:ascend --copt=-Wno-tautological-compare
+build:ascend --copt=-Wno-array-parameter
+build:ascend --copt=-Wno-unused-variable
 build:ascend --action_env LD_LIBRARY_PATH="/usr/local/Ascend/ascend-toolkit/latest/lib64:/usr/local/Ascend/driver/lib64:/usr/local/Ascend/add-ons/"
 build:ascend --host_action_env LD_LIBRARY_PATH="/usr/local/Ascend/ascend-toolkit/latest/lib64:/usr/local/Ascend/driver/lib64:/usr/local/Ascend/add-ons/"
 

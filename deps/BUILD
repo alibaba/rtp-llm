@@ -86,5 +86,6 @@ compile_pip_requirements(
     extra_args = PIP_EXTRA_ARGS,
     extra_data = ["//:requirements_base.txt"],
     requirements_txt = "requirements_lock_ascend.txt",
+    generate_hashes = False,
     tags = ["manual"],
 )

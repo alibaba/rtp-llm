@@ -12,20 +12,46 @@ def copy_all_so():
     copy_so("@rtp_llm//:th_transformer_config")
     copy_so("@rtp_llm//:rtp_compute_ops")
 
+_ascend_excluded = [
+    "triton",
+    "xfastertransformer_devel",
+    "xfastertransformer_devel_icx",
+    "pyrsmi",
+    "amdsmi",
+    "aiter",
+    "fast-safetensors",
+    "fastsafetensors",
+    "decord",
+]
+
 def requirement(names):
     for name in names:
-        native.py_library(
-            name = name,
-            deps = select({
-                "@rtp_llm//:cuda_pre_12_9": [requirement_gpu_cuda12(name)],
-                "@rtp_llm//:using_cuda12_9_x86": [requirement_gpu_cuda12_9(name)],
-                "@rtp_llm//:using_rocm": [requirement_gpu_rocm(name)],
-                "@rtp_llm//:using_arm": [requirement_arm(name)],
-                "@rtp_llm//:using_ascend": [requirement_ascend(name)],
-                "//conditions:default": [requirement_cpu(name)],
-            }),
-            visibility = ["//visibility:public"],
-        )
+        if name in _ascend_excluded:
+            native.py_library(
+                name = name,
+                deps = select({
+                    "@rtp_llm//:cuda_pre_12_9": [requirement_gpu_cuda12(name)],
+                    "@rtp_llm//:using_cuda12_9_x86": [requirement_gpu_cuda12_9(name)],
+                    "@rtp_llm//:using_rocm": [requirement_gpu_rocm(name)],
+                    "@rtp_llm//:using_arm": [requirement_arm(name)],
+                    "@rtp_llm//:using_ascend": [],
+                    "//conditions:default": [requirement_cpu(name)],
+                }),
+                visibility = ["//visibility:public"],
+            )
+        else:
+            native.py_library(
+                name = name,
+                deps = select({
+                    "@rtp_llm//:cuda_pre_12_9": [requirement_gpu_cuda12(name)],
+                    "@rtp_llm//:using_cuda12_9_x86": [requirement_gpu_cuda12_9(name)],
+                    "@rtp_llm//:using_rocm": [requirement_gpu_rocm(name)],
+                    "@rtp_llm//:using_arm": [requirement_arm(name)],
+                    "@rtp_llm//:using_ascend": [requirement_ascend(name)],
+                    "//conditions:default": [requirement_cpu(name)],
+                }),
+                visibility = ["//visibility:public"],
+            )
 
 def cache_store_deps():
     native.alias(
@@ -70,7 +96,7 @@ def platform_deps():
         "@rtp_llm//:using_arm": [],
         "@rtp_llm//:using_cuda12_arm": [],
         "@rtp_llm//:using_rocm": ["pyyaml==6.0.2","decord==0.6.0"],
-        "@rtp_llm//:using_ascend": ["decord==0.6.0"],
+        "@rtp_llm//:using_ascend": [],
         "//conditions:default": ["decord==0.6.0"],
     })
 

@@ -118,8 +118,9 @@ absl::Status EmbeddingEngine::step() {
             stream->setError(error_msg);
             RTP_LLM_LOG_WARNING("error_stream_info: length: %d", stream->inputLength());
         }
-        if (error_msg.find("CUDA Driver error") != string::npos || error_msg.find("CUDA error") != string::npos) {
-            RTP_LLM_LOG_ERROR("detect CUDA error, do abort");
+        if (error_msg.find("CUDA Driver error") != string::npos || error_msg.find("CUDA error") != string::npos
+            || error_msg.find("Ascend runtime error") != string::npos || error_msg.find("Ascend sync error") != string::npos) {
+            RTP_LLM_LOG_ERROR("detect fatal error, do abort");
             abort();
         }
     }

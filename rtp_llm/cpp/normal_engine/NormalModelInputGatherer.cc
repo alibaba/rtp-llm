@@ -131,11 +131,19 @@ void gatherMultimodalFeaturesForContextBatch(const GenerateStreamPtr&    stream,
         ctx.mm_feature_index++;
     }
     for (auto& mm_feature : mm_features) {
+#if USING_ASCEND
+        if (!mm_feature.is_privateuseone()) {
+            gathered_mm_features.emplace_back(mm_feature.to(torch::kPrivateUse1));
+        } else {
+            gathered_mm_features.emplace_back(mm_feature);
+        }
+#else
         if (!mm_feature.is_cuda()) {
             gathered_mm_features.emplace_back(mm_feature.to(torch::kCUDA));
         } else {
             gathered_mm_features.emplace_back(mm_feature);
         }
+#endif
     }
     auto text_token_mask = stream->textTokensMask();
     memcpy(ctx.merged_text_mask + ctx.token_idx, text_token_mask.data(), text_token_mask.size() * sizeof(int));

@@ -296,12 +296,12 @@ public:
         EXPECT_EQ(expect_propose_tokens, toVec<int>(tokens_h));
 
         auto all_probs   = sp_output_buffer->all_probs;
-        auto all_probs_h = all_probs.is_cuda() ? all_probs.cpu() : all_probs;
+        auto all_probs_h = all_probs.is_cuda() || all_probs.is_privateuseone() ? all_probs.cpu() : all_probs;
         EXPECT_EQ(expect_all_probs, toVec<float>(all_probs_h));
 
         if (expect_last_hidden_states.size() > 0) {
             auto last_hidden_states   = sp_output_buffer->hidden_states;
-            auto last_hidden_states_h = last_hidden_states.is_cuda() ? last_hidden_states.cpu() : last_hidden_states;
+            auto last_hidden_states_h = last_hidden_states.is_cuda() || last_hidden_states.is_privateuseone() ? last_hidden_states.cpu() : last_hidden_states;
             EXPECT_EQ(expect_last_hidden_states, toVec<float>(last_hidden_states_h));
         } else {
             EXPECT_TRUE(!sp_output_buffer->hidden_states.defined());

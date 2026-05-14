@@ -191,6 +191,7 @@ cc_library(
         "//rtp_llm/models_py/bindings/core:common_defines",
     ] + select({
         "//:using_cuda": ["//rtp_llm/models_py/bindings/cuda/ops:gpu_base"],
+        "@//:using_ascend": [],
         "//conditions:default": [],
     }),
     copts = copts(),

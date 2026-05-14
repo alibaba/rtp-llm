@@ -100,7 +100,12 @@ absl::StatusOr<SamplerInputs> MtpBatchStreamProcessor::gatherSpecSamplerInput(
     auto vocab_size = (size_t)model_output.logits.size(1);
     if (return_all_probs) {
         sampler_inputs.all_probs = torch::zeros({(int64_t)total_batch_size, (int64_t)vocab_size},
-                                                torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+                                                torch::TensorOptions().dtype(torch::kFloat32)
+#if USING_ASCEND
+                                                    .device(torch::kPrivateUse1));
+#else
+                                                    .device(torch::kCUDA));
+#endif
     }
 
     sampler_inputs.logits = model_output.logits.clone();
@@ -231,7 +236,7 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(GptModelInputs&  
     const size_t token_stride = new_all_token_ids.size(1);
     // token_ids may be a CUDA tensor; move to CPU for data_ptr access.
     const torch::Tensor new_all_token_ids_cpu =
-        new_all_token_ids.is_cuda() ? new_all_token_ids.cpu() : new_all_token_ids;
+        new_all_token_ids.is_cuda() || new_all_token_ids.is_privateuseone() ? new_all_token_ids.cpu() : new_all_token_ids;
 
     int* input_lengths = model_input.input_lengths.data_ptr<int>();
     int* combo_tokens  = model_input.combo_tokens.data_ptr<int>();
@@ -356,9 +361,9 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
     RTP_LLM_CHECK(total_batch_size_out == (size_t)new_all_token_ids.size(0));
     const size_t token_stride = new_all_token_ids.size(1);
 
-    // token_ids and success may be CUDA tensors; move to CPU once before iterating.
+    // token_ids and success may be GPU tensors; move to CPU once before iterating.
     const torch::Tensor new_all_token_ids_cpu =
-        new_all_token_ids.is_cuda() ? new_all_token_ids.cpu() : new_all_token_ids;
+        new_all_token_ids.is_cuda() || new_all_token_ids.is_privateuseone() ? new_all_token_ids.cpu() : new_all_token_ids;
     const torch::Tensor success_cpu = sampler_output.success.defined() ? sampler_output.success.cpu() : torch::Tensor();
 
     int batch_idx_in  = 0;
@@ -385,7 +390,12 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
 
         // speculative decoding info
         torch::Tensor propose_all_probs =
-            draft_sampler_output.all_probs.narrow(0, batch_idx_out, next_batch_size).to(torch::kCUDA).clone();
+            draft_sampler_output.all_probs.narrow(0, batch_idx_out, next_batch_size)
+#if USING_ASCEND
+                .to(torch::kPrivateUse1).clone();
+#else
+                .to(torch::kCUDA).clone();
+#endif
 
         torch::Tensor last_hidden_states;
         if (propose_step_ > 1) {
@@ -421,7 +431,12 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
 
         // speculative decoding info
         torch::Tensor propose_all_probs =
-            draft_sampler_output.all_probs.narrow(0, batch_idx_out, next_batch_size).to(torch::kCUDA).clone();
+            draft_sampler_output.all_probs.narrow(0, batch_idx_out, next_batch_size)
+#if USING_ASCEND
+                .to(torch::kPrivateUse1).clone();
+#else
+                .to(torch::kCUDA).clone();
+#endif
 
         torch::Tensor last_hidden_states;
         if (propose_step_ > 1) {
@@ -474,7 +489,12 @@ void MtpBatchStreamProcessor::gatherHiddenStates(const StreamGroups& stream_grou
         all_hidden_states = all_streams.front()->getSPOutputBuffer()->hidden_states;
     } else if (all_streams.size() < 8) {
         all_hidden_states = torch::empty({(int64_t)all_hidden_tokens_num, (int64_t)hidden_size},
-                                         torch::TensorOptions().dtype(dtype).device(torch::kCUDA));
+                                         torch::TensorOptions().dtype(dtype)
+#if USING_ASCEND
+                                             .device(torch::kPrivateUse1));
+#else
+                                             .device(torch::kCUDA));
+#endif
         size_t index      = 0;
         for (auto& stream : all_streams) {
             auto  sp_output_buffer = stream->getSPOutputBuffer();
@@ -485,7 +505,12 @@ void MtpBatchStreamProcessor::gatherHiddenStates(const StreamGroups& stream_grou
         }
     } else {
         all_hidden_states = torch::empty({(int64_t)all_hidden_tokens_num, (int64_t)hidden_size},
-                                         torch::TensorOptions().dtype(dtype).device(torch::kCUDA));
+                                         torch::TensorOptions().dtype(dtype)
+#if USING_ASCEND
+                                             .device(torch::kPrivateUse1));
+#else
+                                             .device(torch::kCUDA));
+#endif
 
         MultiMergeCopyParams params;
         params.dst_ptr         = all_hidden_states.data_ptr();

@@ -62,9 +62,16 @@ makeFakeSPOutputBuffer(DataType data_type, size_t hidden_size, size_t vocab_size
     auto sp_buffer = std::make_shared<SpeculativeExecutorStreamOutput>();
 
     auto fake_hidden_states = torch::zeros(
-        {1, (int64_t)hidden_size}, torch::TensorOptions().dtype(dataTypeToTorchType(data_type)).device(torch::kCUDA));
+        {1, (int64_t)hidden_size}, torch::TensorOptions().dtype(dataTypeToTorchType(data_type))
+#if USING_ASCEND
+            .device(torch::kPrivateUse1));
+    auto fake_probs =
+        torch::zeros({1, (int64_t)vocab_size}, torch::TensorOptions().dtype(torch::kFloat).device(torch::kPrivateUse1));
+#else
+            .device(torch::kCUDA));
     auto fake_probs =
         torch::zeros({1, (int64_t)vocab_size}, torch::TensorOptions().dtype(torch::kFloat).device(torch::kCUDA));
+#endif
     sp_buffer->propose_step  = propose_step;
     sp_buffer->all_probs     = fake_probs;
     sp_buffer->tokens        = torch::zeros({1, 2}, torch::kInt32);
@@ -538,8 +545,14 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             if (!tensors_holder.empty()) {
                 auto const& propose_probs       = tensors_holder[0];
                 auto const& propose_hidden      = tensors_holder[1];
-                sp_output_buffer->all_probs     = propose_probs.to(torch::kCUDA).clone();
+                sp_output_buffer->all_probs     = propose_probs
+#if USING_ASCEND
+                    .to(torch::kPrivateUse1).clone();
+                sp_output_buffer->hidden_states = propose_hidden.to(torch::kPrivateUse1).clone();
+#else
+                    .to(torch::kCUDA).clone();
                 sp_output_buffer->hidden_states = propose_hidden.to(torch::kCUDA).clone();
+#endif
             }
         }
     }
@@ -838,7 +851,12 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
     size_t batch_size   = model_input.combo_tokens.size(0);
     spec_prefix_lengths = model_input.sequence_lengths.cpu().clone().pin_memory();
 
-    auto pre_propose_token_t_raw = model_input.combo_tokens.to(torch::kCUDA).clone();
+    auto pre_propose_token_t_raw = model_input.combo_tokens
+#if USING_ASCEND
+        .to(torch::kPrivateUse1).clone();
+#else
+        .to(torch::kCUDA).clone();
+#endif
 
     auto pre_target_token = torch::empty({(int64_t)batch_size}, torch::kInt32);
     int  batch_idx        = 0;
@@ -848,7 +866,12 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         batch_idx++;
     }
 
-    auto pre_target_token_t         = pre_target_token.to(torch::kCUDA);
+    auto pre_target_token_t         = pre_target_token
+#if USING_ASCEND
+        .to(torch::kPrivateUse1);
+#else
+        .to(torch::kCUDA);
+#endif
     auto pre_target_token_t_reshape = pre_target_token_t.reshape({(int)batch_size, 1});
     draft_token_ids_list.push_back(pre_target_token_t_reshape);
 
@@ -873,7 +896,12 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
             draft_decode_model_output.all_hidden_states.zero_();
         }
 
-        draft_token_ids = draft_token_ids.to(torch::kInt32).to(torch::kCUDA);
+        draft_token_ids = draft_token_ids.to(torch::kInt32)
+#if USING_ASCEND
+            .to(torch::kPrivateUse1);
+#else
+            .to(torch::kCUDA);
+#endif
         draft_token_ids_list.push_back(draft_token_ids);
         draft_probs_list.push_back(draft_probs_reshape);
 

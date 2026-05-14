@@ -33,6 +33,7 @@ cc_library(
         "@//:using_rocm": [
             "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
         ],
+        "@//:using_ascend": [],
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],
