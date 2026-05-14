@@ -12,6 +12,7 @@ Sparse attention reference uses `gather`-based PyTorch implementation —
 slow but correct. M6 will swap in FlashMLA sparse impl.
 """
 
+import json
 import os
 from typing import Any, Dict, NamedTuple, Optional, Union
 
@@ -111,6 +112,180 @@ def _use_varlen_prefill() -> bool:
 
 def _flat_1d(t: torch.Tensor) -> torch.Tensor:
     return t.reshape(-1).contiguous()
+
+
+_DSV4_SWA_DEBUG_INPUT_DUMPS = 0
+
+
+def _debug_limit_from_env(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _tensor_list(t: Optional[torch.Tensor]) -> Optional[list]:
+    if t is None:
+        return None
+    return t.detach().cpu().tolist()
+
+
+def _debug_dump_swa_dequant_input(
+    *,
+    layer_id: int,
+    ratio: int,
+    head_dim: int,
+    common: Optional["PrefillMeta"],
+    wm: "WorkspaceMeta",
+    out: torch.Tensor,
+    swa_pool_3d: torch.Tensor,
+    cmp_pool_3d: torch.Tensor,
+    offset: int,
+) -> None:
+    """Dump the exact SWA dequant inputs before launching the Triton kernel.
+
+    This is intentionally env-gated and sync-heavy. It is only for crash
+    reproduction, where seeing the block-table sentinels matters more than
+    preserving prefill performance.
+    """
+    global _DSV4_SWA_DEBUG_INPUT_DUMPS
+    if os.environ.get("DSV4_SWA_DEBUG_INPUT", "0") != "1":
+        return
+    rank_filter = os.environ.get("DSV4_SWA_DEBUG_RANK", "")
+    if rank_filter and os.environ.get("RANK", "") != rank_filter:
+        return
+    limit = _debug_limit_from_env("DSV4_SWA_DEBUG_INPUT_LIMIT", 32)
+    if _DSV4_SWA_DEBUG_INPUT_DUMPS >= limit:
+        return
+
+    try:
+        seq_lens = _tensor_list(wm.swa_seq_lens) or []
+        gather_lens = _tensor_list(wm.swa_gather_lens) or []
+        block_table = _tensor_list(wm.swa_bt_int32) or []
+        prefix_lengths = (
+            _tensor_list(common.prefix_lengths) if common is not None else None
+        )
+        input_lengths = (
+            _tensor_list(common.input_lengths) if common is not None else None
+        )
+        min_prefix = _debug_limit_from_env("DSV4_SWA_DEBUG_MIN_PREFIX", 0)
+        rows = []
+        total_negative_reads = 0
+        has_reuse_row = False
+        for b, seq_len in enumerate(seq_lens):
+            gather_len = int(gather_lens[b])
+            seq_len = int(seq_len)
+            prefix_len = (
+                int(prefix_lengths[b])
+                if prefix_lengths is not None and b < len(prefix_lengths)
+                else None
+            )
+            input_len = (
+                int(input_lengths[b])
+                if input_lengths is not None and b < len(input_lengths)
+                else None
+            )
+            if prefix_len is not None and prefix_len >= min_prefix:
+                has_reuse_row = True
+            start_pos = seq_len - gather_len
+            end_pos = seq_len
+            if gather_len > 0:
+                begin_slot = max(start_pos, 0) // int(wm.swa_eb)
+                end_slot = (end_pos - 1) // int(wm.swa_eb)
+                read_slots = list(range(begin_slot, end_slot + 1))
+            else:
+                read_slots = []
+            row = block_table[b] if b < len(block_table) else []
+            read_blocks = [
+                row[slot] if 0 <= slot < len(row) else None for slot in read_slots
+            ]
+            negative_read_slots = [
+                slot
+                for slot, block in zip(read_slots, read_blocks)
+                if block is None or int(block) < 0
+            ]
+            total_negative_reads += len(negative_read_slots)
+            rows.append(
+                {
+                    "request": b,
+                    "prefix_len": prefix_len,
+                    "input_len": input_len,
+                    "seq_len": seq_len,
+                    "gather_len": gather_len,
+                    "start_pos": start_pos,
+                    "end_pos_exclusive": end_pos,
+                    "block_size": int(wm.swa_eb),
+                    "read_slots": read_slots,
+                    "read_blocks": read_blocks,
+                    "negative_read_slots": negative_read_slots,
+                    "negative_read_count": len(negative_read_slots),
+                    "null_read_slots": negative_read_slots,
+                    "block_table": row,
+                }
+            )
+
+        if (
+            os.environ.get("DSV4_SWA_DEBUG_ONLY_NEGATIVE", "0") == "1"
+            and total_negative_reads == 0
+        ):
+            return
+        if min_prefix > 0 and not has_reuse_row:
+            return
+        _DSV4_SWA_DEBUG_INPUT_DUMPS += 1
+        payload = {
+            "event": "DSV4_SWA_DEQUANT_INPUT",
+            "dump_index": _DSV4_SWA_DEBUG_INPUT_DUMPS - 1,
+            "pid": os.getpid(),
+            "rank": os.environ.get("RANK", ""),
+            "local_rank": os.environ.get("LOCAL_RANK", ""),
+            "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES", ""),
+            "layer_id": int(layer_id),
+            "compress_ratio": int(ratio),
+            "head_dim": int(head_dim),
+            "workspace": {
+                "M": int(wm.M),
+                "N": int(wm.N),
+                "offset": int(offset),
+                "prefix_lengths": prefix_lengths,
+                "input_lengths": input_lengths,
+                "swa_seq_lens": seq_lens,
+                "swa_gather_lens": gather_lens,
+                "cmp_seq_lens": _tensor_list(wm.cmp_seq_lens),
+                "new_k_slot_in_flat": _tensor_list(wm.new_k_slot_in_flat),
+            },
+            "total_negative_read_count": total_negative_reads,
+            "out": {
+                "shape": list(out.shape),
+                "stride": list(out.stride()),
+                "dtype": str(out.dtype),
+                "device": str(out.device),
+                "data_ptr": int(out.data_ptr()),
+            },
+            "swa_pool": {
+                "shape": list(swa_pool_3d.shape),
+                "stride": list(swa_pool_3d.stride()),
+                "dtype": str(swa_pool_3d.dtype),
+                "device": str(swa_pool_3d.device),
+                "data_ptr": int(swa_pool_3d.data_ptr()),
+            },
+            "cmp_pool": {
+                "shape": list(cmp_pool_3d.shape),
+                "stride": list(cmp_pool_3d.stride()),
+                "dtype": str(cmp_pool_3d.dtype),
+                "device": str(cmp_pool_3d.device),
+                "data_ptr": int(cmp_pool_3d.data_ptr()),
+            },
+            "rows": rows,
+        }
+        print(
+            "DSV4_SWA_DEQUANT_INPUT " + json.dumps(payload, sort_keys=True), flush=True
+        )
+    except Exception as e:
+        print(
+            "DSV4_SWA_DEQUANT_INPUT_DUMP_FAILED "
+            + json.dumps({"error": repr(e), "layer_id": int(layer_id)}, sort_keys=True),
+            flush=True,
+        )
 
 
 _V4_FP8_BLOCK_CFG = Fp8BlockWiseQuantConfig()
@@ -2432,6 +2607,17 @@ class AttentionFP8(nn.Module):
         # SWA dequant is unconditional in prefill — every request has at least
         # ``S_b`` SWA gather rows (just-written new K). Per-request ``gather_lens``
         # handles the per-row variable length.
+        _debug_dump_swa_dequant_input(
+            layer_id=self.layer_id,
+            ratio=ratio,
+            head_dim=D,
+            common=common,
+            wm=wm,
+            out=workspace,
+            swa_pool_3d=swa_pool_3d,
+            cmp_pool_3d=cmp_pool_3d,
+            offset=wm.N,
+        )
         with record_function_range("dsv4.fp8.attn.workspace.gather_swa"):
             _swa_dq.dequantize_and_gather_k_cache(
                 out=workspace,

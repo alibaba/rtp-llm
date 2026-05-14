@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -25,6 +26,26 @@ constexpr uint32_t kDsv4KvEntryBytes      = 1024;
 constexpr uint32_t kDsv4IndexerEntryBytes = 256;
 constexpr uint32_t kDsv4Fp8KvEntryBytes   = 584;
 constexpr uint32_t kDsv4FixedPoolBlocks   = 256;
+
+static std::vector<int>
+oldWorkspaceSWAReadSlots(int prefix_len, int input_len, int sliding_window, int seq_size_per_block) {
+    const int seq_total   = prefix_len + input_len;
+    const int prefix_tail = std::min(prefix_len, sliding_window - 1);
+    const int gather_len  = input_len + prefix_tail;
+    const int begin_pos   = seq_total - gather_len;
+    const int end_pos     = seq_total;
+
+    std::vector<int> slots;
+    if (begin_pos >= end_pos) {
+        return slots;
+    }
+    const int begin_slot = begin_pos / seq_size_per_block;
+    const int end_slot   = (end_pos - 1) / seq_size_per_block;
+    for (int slot = begin_slot; slot <= end_slot; ++slot) {
+        slots.push_back(slot);
+    }
+    return slots;
+}
 
 }  // namespace
 
@@ -1255,6 +1276,97 @@ TEST_F(DSV4AllocatorTest, SWAPrefixCacheRestoresTailReuse) {
     ASSERT_GE(swa_out.size(), 2u);
     EXPECT_TRUE(isNullBlockIdx(swa_out[0])) << "SWA previous matched tail is evicted after new tail allocation";
     EXPECT_EQ(swa_out[1], cached_blocks[6][1]) << "SWA last matched tail block should remain";
+
+    FreeInfo free_info{batch_res};
+    allocator->free(free_info);
+}
+
+TEST_F(DSV4AllocatorTest, OldWorkspaceSWADequantReadsNullReuseAndCurrentChunkSlots) {
+    auto config    = makeDSV4AllocatorConfig();
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+
+    auto block_pool  = allocator->getBlockPool();
+    auto block_cache = block_pool->blockCache();
+
+    CacheKeysType                          cached_keys = {900, 901, 902};
+    std::vector<std::vector<BlockIdxType>> cached_blocks(7);
+    for (int gid = 0; gid < 7; gid++) {
+        auto blocks = block_pool->malloc(static_cast<int>(cached_keys.size()));
+        ASSERT_EQ(blocks.size(), cached_keys.size());
+        for (size_t i = 0; i < cached_keys.size(); ++i) {
+            BlockCache::CacheItem item{cached_keys[i], gid, blocks[i], true};
+            EXPECT_TRUE(block_cache->put(item));
+            block_pool->blockCacheReference(blocks[i]);
+        }
+        cached_blocks[gid] = blocks;
+        block_pool->requestFree(blocks);
+    }
+
+    auto reuse_only_res = std::make_shared<BatchKVCacheResource>();
+    reuse_only_res->resetBatchSize(1);
+    reuse_only_res->initGroups(7, static_cast<int>(config.layer_all_num), config.layer_to_group_id);
+    const int reused_blocks = allocator->reuseCache(cached_keys, *reuse_only_res);
+    ASSERT_EQ(reused_blocks, 3);
+
+    const auto& reuse_only_swa = reuse_only_res->blocks(0, 6);
+    ASSERT_EQ(reuse_only_swa.size(), 3u);
+    EXPECT_TRUE(isNullBlockIdx(reuse_only_swa[0]));
+    EXPECT_TRUE(isNullBlockIdx(reuse_only_swa[1]));
+    EXPECT_EQ(reuse_only_swa[2], cached_blocks[6][2])
+        << "SWA reuse restores only the latest matched tail block; earlier reused prefix slots stay -1";
+
+    auto batch_res = std::make_shared<BatchKVCacheResource>();
+    batch_res->resetBatchSize(1);
+    batch_res->initGroups(7, static_cast<int>(config.layer_all_num), config.layer_to_group_id);
+    batch_res->setBatchCacheKeys(0, CacheKeysType{900, 901, 902, 903, 904, 905, 906});
+
+    const int spb           = allocator->seqSizePerBlock();
+    const int prefix_len    = reused_blocks * spb;
+    const int input_len     = 3 * spb + 1;
+    const int total_seq_len = prefix_len + input_len;
+    auto      cti           = std::make_shared<CompleteTokenIds>(1, 1, total_seq_len + 1, spb);
+    auto      gi            = std::make_shared<GenerateInput>();
+    gi->input_ids           = torch::arange(total_seq_len, torch::kInt32);
+    gi->generate_config     = std::make_shared<GenerateConfig>();
+    cti->init(gi);
+
+    MallocInfo info{batch_res, cti};
+    info.enable_device_cache = true;
+    info.reuse_cache         = true;
+    auto result              = allocator->malloc(info);
+    ASSERT_TRUE(result.success);
+    EXPECT_EQ(result.reuse_len, prefix_len);
+
+    const auto& final_swa = batch_res->blocks(0, 6);
+    ASSERT_EQ(final_swa.size(), 7u);
+    for (int slot = 0; slot <= 4; ++slot) {
+        EXPECT_TRUE(isNullBlockIdx(final_swa[static_cast<size_t>(slot)])) << "slot=" << slot;
+    }
+    EXPECT_FALSE(isNullBlockIdx(final_swa[5]));
+    EXPECT_FALSE(isNullBlockIdx(final_swa[6]));
+
+    const auto old_read_slots =
+        oldWorkspaceSWAReadSlots(prefix_len, input_len, makeProModelConfig().attn_config.sliding_window, spb);
+    ASSERT_EQ(old_read_slots.size(), 5u);
+    EXPECT_EQ(old_read_slots[0], 2);
+    EXPECT_EQ(old_read_slots[1], 3);
+    EXPECT_EQ(old_read_slots[2], 4);
+    EXPECT_EQ(old_read_slots[3], 5);
+    EXPECT_EQ(old_read_slots[4], 6);
+
+    std::vector<int> null_read_slots;
+    for (const int slot : old_read_slots) {
+        ASSERT_LT(static_cast<size_t>(slot), final_swa.size());
+        if (isNullBlockIdx(final_swa[static_cast<size_t>(slot)])) {
+            null_read_slots.push_back(slot);
+        }
+    }
+    ASSERT_EQ(null_read_slots.size(), 3u);
+    EXPECT_EQ(null_read_slots[0], 2)
+        << "old workspace dequant rereads the prefix-tail slot after SWA drops it from the two-block tail";
+    EXPECT_EQ(null_read_slots[1], 3) << "old workspace dequant also reads a non-tail current-chunk slot";
+    EXPECT_EQ(null_read_slots[2], 4) << "old workspace dequant also reads another non-tail current-chunk slot";
 
     FreeInfo free_info{batch_res};
     allocator->free(free_info);
