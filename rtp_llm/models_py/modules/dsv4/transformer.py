@@ -225,16 +225,20 @@ class V4Transformer(nn.Module):
         self._dbg_step = 0
         self.register_buffer("_mtp_hidden_buffer", None, persistent=False)
 
-    def _allocate_mtp_buffer(self, device: torch.device) -> None:
-        """Allocate the pre-hc_head residual buffer for MTP draft reads.
-        Called by DeepSeekV4Model._initialize_impl when is_mtp is True."""
+    def _allocate_mtp_buffer(self, device: torch.device, token_capacity: int) -> None:
+        """Allocate the pre-hc_head residual buffer for speculative draft reads.
+        Called by DeepSeekV4Model._initialize_impl during speculative init."""
         if self._mtp_hidden_buffer is not None:
             return
+        if token_capacity <= 0:
+            raise ValueError(
+                f"_mtp_hidden_buffer token_capacity must be positive, got {token_capacity}"
+            )
         hc_dim = self.args.hc_mult * self.args.dim
         self.register_buffer(
             "_mtp_hidden_buffer",
             torch.empty(
-                self.args.max_tokens_per_rank,
+                token_capacity,
                 hc_dim,
                 dtype=torch.bfloat16,
                 device=device,
@@ -247,12 +251,9 @@ class V4Transformer(nn.Module):
             return
         T = flat.size(0)
         if T > self._mtp_hidden_buffer.size(0):
-            assert not is_cuda_graph, (
-                f"_mtp_hidden_buffer overflow under cuda_graph: T={T} > "
-                f"cap={self._mtp_hidden_buffer.size(0)}, cannot realloc"
-            )
-            self._mtp_hidden_buffer = torch.empty_like(
-                self._mtp_hidden_buffer[:1].expand(T, -1)
+            raise RuntimeError(
+                f"_mtp_hidden_buffer overflow: T={T} > "
+                f"cap={self._mtp_hidden_buffer.size(0)}, cannot realloc after init"
             )
         self._mtp_hidden_buffer[:T].copy_(flat)
 

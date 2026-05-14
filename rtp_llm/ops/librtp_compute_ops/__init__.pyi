@@ -294,6 +294,8 @@ class PyModelInitResources:
         """
         Layered kv cache for all layers
         """
+    @property
+    def max_potential_token_num(self) -> int: ...
 
 class PyModelInputs:
     @typing.overload

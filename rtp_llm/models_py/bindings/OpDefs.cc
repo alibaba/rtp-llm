@@ -75,7 +75,12 @@ void registerPyOpDefs(pybind11::module& m) {
     pybind11::class_<PyModelInitResources>(m, "PyModelInitResources")
         .def(pybind11::init<>())
         .def_readonly("kv_cache", &PyModelInitResources::kv_cache, "KV cache for all layers")
-        .def_readonly("is_speculative", &PyModelInitResources::is_speculative, "True when speculative decoding is active");
+        .def_readonly("is_speculative",
+                      &PyModelInitResources::is_speculative,
+                      "True when speculative decoding is active")
+        .def_readonly("max_potential_token_num",
+                      &PyModelInitResources::max_potential_token_num,
+                      "Token capacity for model-side reusable buffers");
 
     pybind11::class_<caffe2::TypeMeta>(m, "TypeMeta").def(pybind11::init<>());
 
