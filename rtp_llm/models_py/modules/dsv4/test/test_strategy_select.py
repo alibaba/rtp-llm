@@ -8,6 +8,8 @@ contract. Pure-Python, no CUDA / DeepGEMM / dist required — runs on host.
 from __future__ import annotations
 
 import os
+import sys
+import types
 import unittest
 from contextlib import contextmanager
 from unittest import mock
@@ -19,6 +21,7 @@ from rtp_llm.models_py.modules.dsv4.moe.strategies import (
     LocalLoopStrategy,
     MegaMoEStrategy,
     MoeCfg,
+    _has_fp8_fp4_grouped_kernel,
     select_strategy,
 )
 from rtp_llm.models_py.modules.dsv4.moe.strategies.base import _resolve_forced
@@ -81,6 +84,46 @@ class StrategySelectTest(unittest.TestCase):
              mock.patch.object(MegaMoEStrategy, "can_handle", return_value=False):
             self.assertIs(select_strategy(_cfg(ep_size=1)),
                           GroupedFP4Strategy)
+
+    def test_grouped_selection_is_gated_by_ep_size(self):
+        cfg = _cfg(ep_size=2)
+        with mock.patch(
+            "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4."
+            "_has_fp8_fp4_grouped_kernel",
+            return_value=True,
+        ):
+            self.assertFalse(GroupedFP4Strategy.can_handle(cfg))
+
+    def test_grouped_kernel_probe_requires_sm100(self):
+        fake_deep_gemm = types.SimpleNamespace(
+            m_grouped_fp8_fp4_gemm_nt_contiguous=object(),
+            get_mk_alignment_for_contiguous_layout=lambda: (128, 128),
+        )
+        with mock.patch.dict(sys.modules, {"deep_gemm": fake_deep_gemm}), \
+             mock.patch(
+                 "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4."
+                 "torch.cuda.is_available",
+                 return_value=True,
+             ), \
+             mock.patch(
+                 "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4."
+                 "torch.cuda.get_device_capability",
+                 return_value=(12, 0),
+             ):
+            self.assertFalse(_has_fp8_fp4_grouped_kernel())
+
+        with mock.patch.dict(sys.modules, {"deep_gemm": fake_deep_gemm}), \
+             mock.patch(
+                 "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4."
+                 "torch.cuda.is_available",
+                 return_value=True,
+             ), \
+             mock.patch(
+                 "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4."
+                 "torch.cuda.get_device_capability",
+                 return_value=(10, 0),
+             ):
+            self.assertTrue(_has_fp8_fp4_grouped_kernel())
 
     def test_ep1_no_grouped_falls_to_local(self):
         with mock.patch.object(GroupedFP4Strategy, "can_handle", return_value=False), \
