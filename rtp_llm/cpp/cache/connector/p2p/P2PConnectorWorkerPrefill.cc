@@ -71,10 +71,10 @@ bool P2PConnectorWorkerPrefill::writeByLayer(int                           layer
     store_wait_context_checker_->addContext(
         StoreWaitContext(request_id, std::move(event), layer_cache_buffer, deadline_ms, collector));
     if (layer_id == 0) {
-        RTP_LLM_LOG_INFO("writeByLayer [P2P Prefill]: queued request_id=%ld, layer_id=%d, blocks=%zu",
-                         request_id,
-                         layer_id,
-                         layer_cache_buffer->blockIdMap().size());
+        RTP_LLM_LOG_DEBUG("writeByLayer [P2P Prefill]: queued request_id=%ld, layer_id=%d, blocks=%zu",
+                          request_id,
+                          layer_id,
+                          layer_cache_buffer->blockIdMap().size());
     }
     return true;
 }
@@ -219,7 +219,7 @@ P2PConnectorWorkerPrefill::sendKVCache(int64_t                                  
     // D（deadline_ms）为 RPC 语义截止；return_deadline_ms = D - return_before，与 decode recv_req.deadline_ms 对齐。
     const int64_t return_before_ms   = config_.p2p_read_return_before_deadline_ms;
     const int64_t return_deadline_ms = deadline_ms - return_before_ms;
-    RTP_LLM_LOG_INFO(
+    RTP_LLM_LOG_DEBUG(
         "sendKVCache [P2P]: start request_id=%ld, unique_key=%s, deadline_ms=%ld, return_deadline_ms=%ld, decode_servers=%zu",
         request_id,
         unique_key.c_str(),
@@ -302,12 +302,12 @@ P2PConnectorWorkerPrefill::sendKVCache(int64_t                                  
         return ErrorInfo(send_result.error_code, send_result.error_msg);
     }
 
-    RTP_LLM_LOG_INFO("sendKVCache [P2P]: done request_id=%ld, unique_key=%s, sent=%d/%d, cost_us=%ld",
-                     request_id,
-                     unique_key.c_str(),
-                     sent_transfer_count,
-                     total_transfers,
-                     currentTimeUs() - start_time_us);
+    RTP_LLM_LOG_DEBUG("sendKVCache [P2P]: done request_id=%ld, unique_key=%s, sent=%d/%d, cost_us=%ld",
+                      request_id,
+                      unique_key.c_str(),
+                      sent_transfer_count,
+                      total_transfers,
+                      currentTimeUs() - start_time_us);
     return ErrorInfo::OkStatus();
 }
 

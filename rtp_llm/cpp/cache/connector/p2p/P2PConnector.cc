@@ -144,10 +144,10 @@ void P2PConnector::handleRead(const P2PConnectorStartLoadRequestPB& request,
         decode_transfer_servers.emplace_back(worker.ip(), worker.cache_store_port());
     }
 
-    RTP_LLM_LOG_INFO("handleRead [P2P]: start unique_key=%s, deadline_ms=%ld, decode_servers=%zu",
-                     unique_key.c_str(),
-                     deadline_ms,
-                     decode_transfer_servers.size());
+    RTP_LLM_LOG_DEBUG("handleRead [P2P]: start unique_key=%s, deadline_ms=%ld, decode_servers=%zu",
+                      unique_key.c_str(),
+                      deadline_ms,
+                      decode_transfer_servers.size());
 
     std::shared_ptr<P2PConnectorResourceEntry> resource_entry = nullptr;
     grpc::Status wait_status = waitForResourceEntry(unique_key, deadline_ms, is_cancelled, resource_entry);
@@ -161,9 +161,9 @@ void P2PConnector::handleRead(const P2PConnectorStartLoadRequestPB& request,
     }
 
     int64_t request_id = resource_entry->request_id;
-    RTP_LLM_LOG_INFO("handleRead [P2P]: resource ready, unique_key=%s, request_id=%ld, sending KV cache",
-                     unique_key.c_str(),
-                     request_id);
+    RTP_LLM_LOG_DEBUG("handleRead [P2P]: resource ready, unique_key=%s, request_id=%ld, sending KV cache",
+                      unique_key.c_str(),
+                      request_id);
     ErrorInfo error_info = scheduler_->sendKVCache(
         resource_entry->kv_cache_resource, unique_key, request_id, decode_transfer_servers, deadline_ms, is_cancelled);
     if (error_info.hasError()) {

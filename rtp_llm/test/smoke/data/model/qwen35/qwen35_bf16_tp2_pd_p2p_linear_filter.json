@@ -1,0 +1,111 @@
+{
+  "model_type": "qwen35_moe",
+  "model_path": "/home/yanzhan.yzh/model/Qwen3.5-35B-A3B",
+  "query_result": [
+    {
+      "endpoint": "/v1/chat/completions",
+      "query": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "$prompt:x4"
+          }
+        ],
+        "max_tokens": 5,
+        "temperature": 0.0,
+        "top_p": 0,
+        "top_k": 1,
+        "random_seed": 42
+      },
+      "result": {
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "Here's a thinking process"
+            },
+            "finish_reason": "length"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 7309,
+          "total_tokens": 7314,
+          "completion_tokens": 5
+        },
+        "aux_info": null
+      }
+    },
+    {
+      "endpoint": "/v1/chat/completions",
+      "query": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "$prompt:x4"
+          }
+        ],
+        "max_tokens": 5,
+        "temperature": 0.0,
+        "top_p": 0,
+        "top_k": 1,
+        "random_seed": 42
+      },
+      "result": {
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "Here's a thinking process"
+            },
+            "finish_reason": "length"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 7309,
+          "total_tokens": 7314,
+          "completion_tokens": 5,
+          "prompt_tokens_details": {
+            "cached_tokens": 4096
+          }
+        },
+        "aux_info": null
+      }
+    },
+    {
+      "endpoint": "/v1/chat/completions",
+      "query": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "$prompt:l2"
+          }
+        ],
+        "max_tokens": 5,
+        "temperature": 0.0,
+        "top_p": 0,
+        "top_k": 1,
+        "random_seed": 42
+      },
+      "result": {
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "Here's a thinking process"
+            },
+            "finish_reason": "length"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 467,
+          "total_tokens": 472,
+          "completion_tokens": 5
+        },
+        "aux_info": null
+      }
+    }
+  ]
+}

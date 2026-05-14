@@ -41,6 +41,7 @@ cc_test(
         "AsymmetricTpUtilTest.cc",
         "ComputedLayerCacheBufferTest.cc",
         "P2PLinearWriteTest.cc",
+        "LayerCacheBufferUtilFilterTest.cc",
         "StoreWaitContextTest.cc",
         "P2PConnectorResourceStoreTest.cc",
     ],

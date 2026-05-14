@@ -390,6 +390,23 @@ def h20_oss_suites():
                 gpu_type=["H20"],
             ),
             smoke_test(
+                name="next_p2p_linear_filter_decode_entrance",
+                task_info="data/model/qwen35/qwen35_bf16_tp2_pd_p2p_linear_filter.json",
+                envs={
+                    "prefill": ["DECODE_ENTRANCE=1"],
+                    "decode": [
+                        "ACCL_LOW_LATENCY_OPTIMIZE=1",
+                        "DECODE_ENTRANCE=1",
+                    ],
+                },
+                enable_decode_entrance=True,
+                smoke_args={
+                    "prefill": "--warm_up 0 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --tp_size 2 --world_size 2 --act_type BF16 --seq_size_per_block 2048 --linear_step 2 --reuse_cache 1 --reserver_runtime_mem_mb 12000",
+                    "decode": "--warm_up 0 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --tp_size 2 --world_size 2 --act_type BF16 --seq_size_per_block 2048 --linear_step 2 --reuse_cache 1 --reserver_runtime_mem_mb 12000",
+                },
+                gpu_type=["H20"],
+            ),
+            smoke_test(
                 name="next_load_quant_tp2",
                 task_info="data/model/qwen35/qwen35_bf16_tp2_load_quant.json",
                 smoke_args="--tp_size 2 --act_type BF16 --seq_size_per_block 2048 --quantization fp8_per_block",

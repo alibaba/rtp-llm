@@ -1,5 +1,6 @@
 #pragma once
 
+#include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBuffer.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverter.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
@@ -20,6 +21,21 @@ public:
     /// @brief 将 KVCacheResource 的指定层转换为单个 LayerCacheBuffer
     static std::shared_ptr<LayerCacheBuffer>
     convertLayer(KVCacheResource& resource, int batch_id, int layer_id, int start_block_idx, int block_count);
+
+    /// @brief 将 KVCacheResource 按 group type 过滤后转换为所有层的 LayerCacheBuffer 列表
+    static std::vector<std::shared_ptr<LayerCacheBuffer>> convert(KVCacheResource&                   resource,
+                                                                  int                                batch_id,
+                                                                  const std::vector<CacheGroupType>& layer_attn_types,
+                                                                  int start_block_idx = 0,
+                                                                  int block_count     = -1);
+
+    /// @brief 将 KVCacheResource 的指定层按 group type 过滤后转换为单个 LayerCacheBuffer
+    static std::shared_ptr<LayerCacheBuffer> convertLayer(KVCacheResource& resource,
+                                                          int              batch_id,
+                                                          int              layer_id,
+                                                          int              start_block_idx,
+                                                          int              block_count,
+                                                          CacheGroupType   group_type);
 
     /// @brief 将 LayerCacheBuffer 转换为 transfer 层需要的 KeyBlockInfoMap
     static transfer::KeyBlockInfoMap buildKeyBlockInfos(const std::shared_ptr<LayerBlockConverter>& converter,

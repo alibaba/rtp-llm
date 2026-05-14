@@ -249,9 +249,9 @@ KVCacheConnectorCoordinator::asyncWriteByLayer(int                              
         return nullptr;
     }
     if (layer_id == 0) {
-        RTP_LLM_LOG_INFO("asyncWriteByLayer [P2P]: dispatching layer_id=%d, request_id=%ld to P2PConnector",
-                         layer_id,
-                         layer_context->requestId());
+        RTP_LLM_LOG_DEBUG("asyncWriteByLayer [P2P]: dispatching layer_id=%d, request_id=%ld to P2PConnector",
+                          layer_id,
+                          layer_context->requestId());
     }
     return p2p_connector_->asyncWriteByLayer(layer_id, layer_context);
 }
@@ -429,6 +429,7 @@ bool KVCacheConnectorCoordinator::initP2PConnectorInternal() {
 
     auto p2p_config = P2PConnectorConfig::create(
         runtime_config_, cache_store_config_, parallelism_config_, pd_sep_config_, layer_all_num);
+    p2p_config.scheduler_config.layer_attn_types = cache_config_.layer_attn_types;
     auto p2p = std::make_shared<P2PConnector>(std::move(p2p_config), layer_block_converter, metrics_reporter_);
     if (!p2p->init()) {
         RTP_LLM_LOG_ERROR("P2PConnector init failed");

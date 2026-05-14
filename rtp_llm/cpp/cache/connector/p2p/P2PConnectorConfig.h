@@ -1,5 +1,6 @@
 #pragma once
 
+#include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferBackendConfig.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include <cstdint>
@@ -15,12 +16,13 @@ inline int64_t getP2PTransferListenPort(int64_t cache_store_listen_port) {
 }
 
 struct P2PConnectorSchedulerConfig {
-    std::vector<std::string> worker_grpc_addrs;
-    std::vector<std::string> worker_addrs;
-    std::vector<std::string> p2p_worker_addrs;
-    int64_t                  p2p_transfer_not_done_resource_hold_ms       = 10 * 1000;
-    int                      p2p_resource_store_timeout_check_interval_ms = 100;
-    int64_t                  p2p_cancel_broadcast_timeout_ms              = 1000;
+    std::vector<std::string>    worker_grpc_addrs;
+    std::vector<std::string>    worker_addrs;
+    std::vector<std::string>    p2p_worker_addrs;
+    int64_t                     p2p_transfer_not_done_resource_hold_ms       = 10 * 1000;
+    int                         p2p_resource_store_timeout_check_interval_ms = 100;
+    int64_t                     p2p_cancel_broadcast_timeout_ms              = 1000;
+    std::vector<CacheGroupType> layer_attn_types;
 
     static P2PConnectorSchedulerConfig create(const RuntimeConfig&    runtime_config,
                                               const CacheStoreConfig& cache_store_config,
