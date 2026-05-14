@@ -3,14 +3,20 @@ import os
 from concurrent.futures import ProcessPoolExecutor
 from typing import Any, Dict, List, Optional, Tuple
 
-from transformers import AutoTokenizer, PreTrainedTokenizerBase
+from transformers import AutoTokenizer, PreTrainedTokenizerBase, PreTrainedTokenizerFast
 
 from rtp_llm.utils.fuser import fetch_remote_file_to_local
 
 
 def _load_tokenizer(tokenizer_path: str) -> PreTrainedTokenizerBase:
     local_path = fetch_remote_file_to_local(os.path.expanduser(tokenizer_path.strip()))
-    return AutoTokenizer.from_pretrained(local_path, trust_remote_code=True)
+    try:
+        return AutoTokenizer.from_pretrained(local_path, trust_remote_code=True)
+    except (ValueError, KeyError):
+        tokenizer_file = os.path.join(local_path, "tokenizer.json")
+        if os.path.exists(tokenizer_file):
+            return PreTrainedTokenizerFast(tokenizer_file=tokenizer_file)
+        raise
 
 
 def get_prompt(tokenizer: Any, prompt: str, seqlen: int):

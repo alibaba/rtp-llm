@@ -202,19 +202,17 @@ test:cuda13_arm --test_env=LD_PRELOAD=/usr/lib64/librt.so.1
 # The fp8_fp4_mega_moe kernel uses a C++20 floating-point non-type template
 # parameter (`float kActivationClamp`). nvcc 13.2 + gcc 10.2.1 (the system
 # /usr/bin/g++) rejects this even with -std=c++20 — the FP-NTTP feature needs
-# gcc 12+ as host. Container ships /opt/rh/gcc-toolset-12/root/usr/bin/g++
-# (gcc 12.3.0), so point the JIT at that. gcc-toolset-12 lives outside PATH
-# by default, hence the explicit PATH / LD_LIBRARY_PATH overrides.
-#
-# These were previously hard-coded into smoke defs.bzl pointing at user-
-# private conda envs (/home/tanboyu.tby/..., /home/serina.wzq/...) which
-# only worked on those specific dev boxes. Centralize here so every cu13
-# test sees the same toolchain.
+# Deep-GEMM JIT needs a C++20-capable host compiler and nvcc in PATH.
+# gcc-toolset-12 (gcc 12.3) is preferred when available (CI container);
+# system gcc 10+ works as fallback on dev machines.  PATH lists
+# gcc-toolset-12 first so CI picks it up automatically; CC/CXX use bare
+# names resolved via PATH rather than absolute paths, so both environments
+# work without override.
 test:cuda13 --test_env=DG_JIT_CPP_STANDARD=20
-test:cuda13 --test_env=CC=/opt/rh/gcc-toolset-12/root/usr/bin/gcc
-test:cuda13 --test_env=CXX=/opt/rh/gcc-toolset-12/root/usr/bin/g++
-test:cuda13 --test_env=CUDAHOSTCXX=/opt/rh/gcc-toolset-12/root/usr/bin/g++
-test:cuda13 --test_env=NVCC_PREPEND_FLAGS=-ccbin=/opt/rh/gcc-toolset-12/root/usr/bin/g++
+test:cuda13 --test_env=CC=gcc
+test:cuda13 --test_env=CXX=g++
+test:cuda13 --test_env=CUDAHOSTCXX=g++
+test:cuda13 --test_env=NVCC_PREPEND_FLAGS=-ccbin=g++
 test:cuda13 --test_env=PATH=/opt/rh/gcc-toolset-12/root/usr/bin:/opt/conda310/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
 test:cuda13 --test_env=LD_LIBRARY_PATH=/opt/rh/gcc-toolset-12/root/usr/lib64:/usr/local/cuda/lib64:/opt/conda310/lib:/usr/lib64
 
