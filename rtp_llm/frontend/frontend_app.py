@@ -421,6 +421,16 @@ class FrontendApp(object):
                     detail="inference service is not ready",
                 )
 
+        def check_startup_warmup_ready(request: Request):
+            if request.url.path == "/liveness":
+                return
+            gate_file = os.environ.get(STARTUP_WARMUP_HEALTH_GATE_FILE_ENV, "").strip()
+            if gate_file and not os.path.exists(gate_file):
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="startup warmup is not ready",
+                )
+
         @app.post("/frontend_health")
         @app.get("/frontend_health")
         async def frontend_health():
