@@ -1,6 +1,7 @@
 import asyncio
 import gc
 import logging
+import os
 import socket
 import threading
 import time
@@ -39,6 +40,7 @@ MAX_INCOMPLETE_EVENT_SIZE = 1024 * 1024
 
 active_requests = AtomicCounter()
 server_shutdown = False
+STARTUP_WARMUP_HEALTH_GATE_FILE_ENV = "RTP_LLM_STARTUP_WARMUP_HEALTH_GATE_FILE"
 
 
 class GracefulShutdownServer(Server):
@@ -191,6 +193,16 @@ class FrontendApp(object):
                     detail="inference service is not ready",
                 )
 
+        def check_startup_warmup_ready(request: Request):
+            if request.url.path == "/liveness":
+                return
+            gate_file = os.environ.get(STARTUP_WARMUP_HEALTH_GATE_FILE_ENV, "").strip()
+            if gate_file and not os.path.exists(gate_file):
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="startup warmup is not ready",
+                )
+
         @app.post("/frontend_health")
         @app.get("/frontend_health")
         async def frontend_health():
@@ -207,7 +219,8 @@ class FrontendApp(object):
         @app.get("/status")
         @app.post("/status")
         @app.post("/health_check")
-        async def health_check():
+        async def health_check(request: Request):
+            check_startup_warmup_ready(request)
             if self.separated_frontend:
                 await check_all_health()
                 return "ok"
