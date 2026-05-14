@@ -154,3 +154,97 @@ class LayerNorm(BaseLayerNorm):
             self.variance_epsilon,
         )
         return output
+
+
+class LayerwiseQKRMSNorm(nn.Module):
+    """Per-layer (a.k.a. per-token) QK RMSNorm.
+
+    Used by MiniMax-M2 (`qk_norm_type="per_layer"`): the RMSNorm is computed
+    over the FULL Q (head_num*head_dim) and K (kv_head_num*head_dim) dims
+    BEFORE per-head reshape. This is mathematically distinct from the
+    per-head QKRMSNorm where variance is taken per-head over head_dim.
+    Pipeline:
+        sumsq_qk (Triton)  →  all_reduce([m, 2] fp32, TP group)  →  apply_qk (Triton)
+    The all_reduce step is skipped for ``tp_size == 1``.
+
+    Inputs:
+        q_weight: full gamma for Q, shape [head_num_total*head_dim].
+        k_weight: full gamma for K, shape [kv_head_num_total*head_dim].
+        head_num / kv_head_num: LOCAL counts on this TP rank.
+        tp_size / tp_rank: attention TP info. With tp_size>1 the variance
+            must be reduced across the TP group so each rank sees the
+            global mean(x^2) over the full H*D / Hkv*D dimension.
+    """
+
+    def __init__(
+        self,
+        q_weight: torch.Tensor,
+        k_weight: torch.Tensor,
+        head_num: int,
+        kv_head_num: int,
+        size_per_head: int = 128,
+        eps: float = 1e-6,
+        tp_size: int = 1,
+        tp_rank: int = 0,
+    ):
+        super().__init__()
+        self.head_num = head_num
+        self.kv_head_num = kv_head_num
+        self.size_per_head = size_per_head
+        self.eps = eps
+        self.tp_size = tp_size
+        self.tp_rank = tp_rank
+        self.q_size = head_num * size_per_head
+        self.kv_size = kv_head_num * size_per_head
+        self.q_total_elts = int(q_weight.numel())
+        self.kv_total_elts = int(k_weight.numel())
+        if tp_size > 1:
+            expected_q = self.q_size * tp_size
+            expected_kv = self.kv_size * tp_size
+            assert (
+                self.q_total_elts == expected_q
+            ), f"q_weight numel {self.q_total_elts} != expected {expected_q}"
+            assert self.kv_total_elts == expected_kv, (
+                f"k_weight numel {self.kv_total_elts} != expected {expected_kv}. "
+                f"LayerwiseQKRMSNorm does not support duplicate KV yet "
+                f"(kv_head_num must be divisible by tp_size)."
+            )
+            self.q_weight = q_weight[
+                tp_rank * self.q_size : (tp_rank + 1) * self.q_size
+            ].contiguous()
+            self.k_weight = k_weight[
+                tp_rank * self.kv_size : (tp_rank + 1) * self.kv_size
+            ].contiguous()
+        else:
+            assert (
+                self.q_total_elts == self.q_size
+            ), f"q_weight numel {self.q_total_elts} != {self.q_size}"
+            assert (
+                self.kv_total_elts == self.kv_size
+            ), f"k_weight numel {self.kv_total_elts} != {self.kv_size}"
+            self.q_weight = q_weight
+            self.k_weight = k_weight
+
+    @torch.no_grad()
+    def forward(self, qk: torch.Tensor) -> torch.Tensor:
+        from rtp_llm.models_py.triton_kernels.common.layerwise_qk_norm import (
+            rmsnorm_qk_apply,
+            rmsnorm_qk_sumsq,
+        )
+
+        sumsq = rmsnorm_qk_sumsq(qk, self.q_size, self.kv_size)
+        if self.tp_size > 1:
+            from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
+
+            sumsq = all_reduce(sumsq.to(torch.float64), group=Group.TP).to(
+                torch.float32
+            )
+        return rmsnorm_qk_apply(
+            qk,
+            self.q_weight,
+            self.k_weight,
+            sumsq,
+            self.q_total_elts,
+            self.kv_total_elts,
+            self.eps,
+        )

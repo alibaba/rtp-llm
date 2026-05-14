@@ -12,6 +12,7 @@ from rtp_llm.models_py.modules.base.common.norm import (
     AddBiasResLayerNormTorch,
     LayerNorm,
     LayerNormTorch,
+    LayerwiseQKRMSNorm,
     RMSNormTorch,
     RMSResNormTorch,
 )
@@ -65,6 +66,7 @@ else:
         "RMSNormTorch",
         "RMSResNormTorch",
         "FusedQKRMSNorm",
+        "LayerwiseQKRMSNorm",
         "QKRMSNorm",
         "RMSNorm",
         "RMSResNorm",
