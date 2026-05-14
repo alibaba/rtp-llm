@@ -40,6 +40,12 @@ _DSV4_FP8_TESTS = [
     "test_workspace_prefill_varlen",
 ]
 
+py_test(
+    name = "test_decode_attn_metadata_start_pos",
+    srcs = ["test_decode_attn_metadata_start_pos.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+)
+
 [
     py_test(
         name = t,
