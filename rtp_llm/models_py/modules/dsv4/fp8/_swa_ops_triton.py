@@ -34,13 +34,18 @@ import triton.language as tl
 # Mirror vLLM's combined-topk row alignment (kernel tile width).
 _SPARSE_PREFILL_TOPK_ALIGNMENT = 128
 
+# Production caps request batching at MAX_BATCH_SIZE=1024.  Pinning the
+# gather-lens tile to one bucket keeps batch-shape changes from creating new
+# Triton keys after startup warmup.
+_GATHER_LENS_FIXED_BLOCK_SIZE = 1024
+
 
 # ---------------------------------------------------------------------------
 # 1) Per-request gather_len = query_len + min(prefix_len, window_size - 1)
 # ---------------------------------------------------------------------------
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_prefills", "num_decodes", "window_size"])
 def _compute_prefill_gather_lens_kernel(
     # Outputs
     prefill_gather_lens_ptr,
@@ -102,8 +107,12 @@ def compute_prefill_gather_lens(
     out = torch.empty(num_prefills, dtype=torch.int32, device=seq_lens.device)
     if num_prefills == 0:
         return out
-    # Triton requires the block size to be a power of 2 ≥ num_prefills.
-    block_size = max(1, triton.next_power_of_2(num_prefills))
+    if num_prefills > _GATHER_LENS_FIXED_BLOCK_SIZE:
+        raise ValueError(
+            f"num_prefills={num_prefills} exceeds fixed BLOCK_SIZE="
+            f"{_GATHER_LENS_FIXED_BLOCK_SIZE}; bump _GATHER_LENS_FIXED_BLOCK_SIZE."
+        )
+    block_size = _GATHER_LENS_FIXED_BLOCK_SIZE
     _compute_prefill_gather_lens_kernel[(1,)](
         out,
         seq_lens,

@@ -39,8 +39,8 @@ def _install_hot_hook_runtime(role: str) -> None:
 
 STARTUP_WARMUP_HEALTH_GATE_FILE_ENV = "RTP_LLM_STARTUP_WARMUP_HEALTH_GATE_FILE"
 STARTUP_REAL_WARMUP_MIN_TOKEN_LEN = 2
-STARTUP_REAL_WARMUP_TIMEOUT_S = 600.0
-STARTUP_REAL_WARMUP_DEFAULT_MAX_SEQ_LEN = 65536
+STARTUP_REAL_WARMUP_TIMEOUT_S = 120.0
+STARTUP_REAL_WARMUP_MAX_GRPC_TOKEN_LEN = 524288
 STARTUP_REAL_WARMUP_MAX_NEW_TOKENS = 1
 STARTUP_REAL_WARMUP_TOKEN_ID = 100
 
@@ -486,31 +486,29 @@ def _get_startup_real_warmup_max_len(py_env_configs: PyEnvConfigs):
         raise ValueError(
             f"model_args.max_seq_len should be positive, got {model_max_len}"
         )
-    warmup_max_len = int(
-        os.environ.get(
-            "DSV4_STARTUP_REAL_WARMUP_MAX_SEQ_LEN",
-            str(STARTUP_REAL_WARMUP_DEFAULT_MAX_SEQ_LEN),
-        )
-    )
-    if warmup_max_len <= 0:
-        raise ValueError(
-            "DSV4_STARTUP_REAL_WARMUP_MAX_SEQ_LEN should be positive, "
-            f"got {warmup_max_len}"
-        )
-    warmup_max_len = min(warmup_max_len, model_max_len)
     logging.info(
-        "DSV4 startup real warmup max len resolved to %d, model max_seq_len=%d",
-        warmup_max_len,
+        "DSV4 startup real warmup max len = model max_seq_len = %d",
         model_max_len,
     )
-    return warmup_max_len
+    return model_max_len
 
 
 def _get_startup_real_warmup_token_lens(py_env_configs: PyEnvConfigs):
     max_len = _get_startup_real_warmup_max_len(py_env_configs)
-    token_lens = _get_startup_real_warmup_pow2_lens(max_len)
+    grpc_max_len = min(max_len, STARTUP_REAL_WARMUP_MAX_GRPC_TOKEN_LEN)
+    token_lens = _get_startup_real_warmup_pow2_lens(grpc_max_len)
+    if grpc_max_len < max_len:
+        logging.warning(
+            "DSV4 startup real warmup backend grpc token lens capped at %d "
+            "to avoid startup-killing full-forward requests; direct kernel "
+            "JIT prewarm still covers model max_seq_len=%d",
+            grpc_max_len,
+            max_len,
+        )
     logging.info(
-        "DSV4 startup real warmup uses fixed pow2 token lens through max_seq_len=%d: %s",
+        "DSV4 startup real warmup uses fixed pow2 token lens through grpc_max_len=%d "
+        "(model max_seq_len=%d): %s",
+        grpc_max_len,
         max_len,
         token_lens,
     )
@@ -713,14 +711,25 @@ def _maybe_run_startup_real_warmup(py_env_configs: PyEnvConfigs):
     if not _should_run_startup_real_warmup(py_env_configs):
         return
 
+    model_type = getattr(py_env_configs.model_args, "model_type", "")
+    if model_type == "deepseek_v4" and _role_is_prefill(py_env_configs):
+        max_len = _get_startup_real_warmup_max_len(py_env_configs)
+        logging.info(
+            "DSV4 startup backend grpc warmup skipped after direct kernel JIT "
+            "prewarm; direct prewarm covers model max_seq_len=%d and avoids "
+            "leaving uncancelled backend warmup requests during startup",
+            max_len,
+        )
+        return
+
     try:
         _run_startup_real_warmup_async(_run_startup_real_warmup_grpc(py_env_configs))
     except Exception:
-        logging.error(
-            "DSV4 startup real warmup failed, trace: %s",
+        logging.warning(
+            "DSV4 startup real warmup failed; continuing startup because direct "
+            "kernel JIT prewarm has already run, trace: %s",
             traceback.format_exc(),
         )
-        raise
 
 
 if __name__ == "__main__":
