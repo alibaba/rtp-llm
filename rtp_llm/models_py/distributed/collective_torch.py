@@ -36,6 +36,7 @@ class Group(Enum):
 # Global process group storage
 # Key can be Group enum or string (for multiple DP/TP groups)
 _group_map: Dict[Union[Group, str], torch.distributed.ProcessGroup] = {}
+_cpu_world_group: Optional[torch.distributed.ProcessGroup] = None
 _parallelism_config: Optional[ParallelismConfig] = None
 _initialized: bool = False  # Track if we've initialized (to prevent double init)
 _cpu_tp_broadcaster_base_path: Optional[str] = None
@@ -91,6 +92,57 @@ def _normalize_parallelism_ranks(parallelism_config: ParallelismConfig) -> None:
         parallelism_config.dp_rank = dp_rank
 
 
+def _ensure_cpu_world_group(
+    world_size: int, timeout: timedelta
+) -> Optional[torch.distributed.ProcessGroup]:
+    """Create a Gloo WORLD group for synchronization-only barriers."""
+    global _cpu_world_group
+
+    if _cpu_world_group is not None:
+        return _cpu_world_group
+
+    if not torch.distributed.is_available() or not torch.distributed.is_initialized():
+        return None
+
+    if not torch.distributed.is_gloo_available():
+        logging.warning("Gloo backend is not available; NCCL barriers will be used")
+        return None
+
+    try:
+        _cpu_world_group = torch.distributed.new_group(
+            ranks=list(range(world_size)),
+            backend="gloo",
+            timeout=timeout,
+        )
+    except Exception as e:
+        logging.warning("Failed to create Gloo world group: %s", e)
+        _cpu_world_group = None
+
+    return _cpu_world_group
+
+
+def _safe_barrier(
+    group: Optional[torch.distributed.ProcessGroup] = None,
+    local_rank: Optional[int] = None,
+) -> None:
+    """Synchronize without letting ProcessGroupNCCL guess a CUDA device."""
+    world_group = torch.distributed.group.WORLD
+    if group is None or group == world_group:
+        if _cpu_world_group is not None:
+            torch.distributed.barrier(group=_cpu_world_group)
+            return
+        group = world_group
+
+    if local_rank is None and _parallelism_config is not None:
+        local_rank = _parallelism_config.local_rank
+
+    if torch.cuda.is_available() and local_rank is not None:
+        torch.distributed.barrier(group=group, device_ids=[local_rank])
+        return
+
+    torch.distributed.barrier(group=group)
+
+
 def init_distributed_environment(
     parallelism_config: ParallelismConfig,
     nccl_comm_config: NcclCommConfig,
@@ -126,6 +178,9 @@ def init_distributed_environment(
             _cpu_tp_broadcaster_base_path = _make_cpu_tp_broadcaster_base_path(
                 parallelism_config, nccl_init_port
             )
+            _ensure_cpu_world_group(
+                parallelism_config.world_size, timedelta(days=36500)
+            )
             _create_process_groups(parallelism_config, backend, timedelta(days=36500))
             _register_process_groups_to_cpp()
         if rocm_rccl.is_available_runtime() and parallelism_config.tp_size > 1:
@@ -151,6 +206,7 @@ def init_distributed_environment(
     # we still need to create our process groups
     if torch.distributed.is_initialized():
         logging.info("torch.distributed already initialized, creating process groups")
+        _ensure_cpu_world_group(world_size, timedelta(days=36500))
         _create_process_groups(parallelism_config, backend, timedelta(days=36500))
         _parallelism_config = parallelism_config
         _initialized = True
@@ -178,7 +234,8 @@ def init_distributed_environment(
         # device_id=torch.device(f"cuda:{local_rank}"), # https://github.com/pytorch/pytorch/pull/149144
         timeout=infinite_timeout,
     )
-    torch.distributed.barrier(group=torch.distributed.group.WORLD)
+    _ensure_cpu_world_group(world_size, infinite_timeout)
+    _safe_barrier(group=torch.distributed.group.WORLD, local_rank=local_rank)
     _group_map[Group.DP_AND_TP] = torch.distributed.group.WORLD
     logging.info(
         f"[rank: {world_rank}] Created DP_AND_TP group {torch.distributed.group.WORLD} with ranks: {list(range(world_size))}"
@@ -236,7 +293,7 @@ def _create_process_groups(
                         f"[rank: {world_rank}] Stored DP group with key: {group_key} {dp_group} with ranks: {dp_ranks}"
                     )
                 # All ranks must wait for group creation to complete
-                torch.distributed.barrier()
+                _safe_barrier(local_rank=parallelism_config.local_rank)
 
     if tp_size > 1 and world_size != tp_size:
         # Create all TP groups - all ranks must participate in creating all TP groups
@@ -264,7 +321,7 @@ def _create_process_groups(
                 init_symm_mem_communicator(tp_group)
 
                 # All ranks must wait for group creation to complete
-                torch.distributed.barrier()
+                _safe_barrier(local_rank=parallelism_config.local_rank)
     elif tp_size > 1 and world_size == tp_size:
         # Single TP group: WORLD is the TP group, init symm_mem for it
         init_symm_mem_communicator(torch.distributed.group.WORLD)
@@ -527,7 +584,7 @@ def destroy_distributed_environment():
     After calling this function, init_distributed_environment() can be called again
     to reinitialize the distributed environment.
     """
-    global _group_map, _parallelism_config, _initialized, _cpu_tp_broadcaster_base_path
+    global _group_map, _cpu_world_group, _parallelism_config, _initialized, _cpu_tp_broadcaster_base_path
 
     rank = torch.distributed.get_rank()
     logging.info(f"[rank: {rank}] Destroying distributed environment")
@@ -560,6 +617,7 @@ def destroy_distributed_environment():
     if torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
     _group_map.clear()
+    _cpu_world_group = None
     logging.info(f"[rank: {rank}] Distributed environment destroyed")
     _parallelism_config = None
     _cpu_tp_broadcaster_base_path = None
@@ -744,7 +802,7 @@ def barrier(group: Group) -> None:
         group: Process group to use
     """
     process_group = _get_group(group)
-    torch.distributed.barrier(group=process_group)
+    _safe_barrier(group=process_group)
 
 
 __all__ = [

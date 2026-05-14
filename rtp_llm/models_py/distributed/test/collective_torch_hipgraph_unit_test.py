@@ -16,6 +16,8 @@ class TestCollectiveTorchHipGraphUnit(unittest.TestCase):
         self._orig_rccl_world_size = hr._rccl_world_size
         self._orig_rccl_lib = hr._rccl_lib
         self._orig_cache = dict(hr._hipgraph_allgather_outputs)
+        self._orig_cpu_world_group = ct._cpu_world_group
+        self._orig_parallelism_config = ct._parallelism_config
         hr._hipgraph_allgather_outputs.clear()
 
     def tearDown(self):
@@ -25,6 +27,40 @@ class TestCollectiveTorchHipGraphUnit(unittest.TestCase):
         hr._rccl_lib = self._orig_rccl_lib
         hr._hipgraph_allgather_outputs.clear()
         hr._hipgraph_allgather_outputs.update(self._orig_cache)
+        ct._cpu_world_group = self._orig_cpu_world_group
+        ct._parallelism_config = self._orig_parallelism_config
+
+    def test_safe_barrier_uses_cpu_world_group_for_world_barrier(self):
+        cpu_group = object()
+        ct._cpu_world_group = cpu_group
+
+        with patch("torch.distributed.barrier") as barrier:
+            ct._safe_barrier(group=torch.distributed.group.WORLD, local_rank=3)
+
+        barrier.assert_called_once_with(group=cpu_group)
+
+    def test_safe_barrier_uses_device_ids_without_cpu_group(self):
+        process_group = object()
+        ct._cpu_world_group = None
+
+        with patch("torch.cuda.is_available", return_value=True), patch(
+            "torch.distributed.barrier"
+        ) as barrier:
+            ct._safe_barrier(group=process_group, local_rank=2)
+
+        barrier.assert_called_once_with(group=process_group, device_ids=[2])
+
+    def test_safe_barrier_uses_parallelism_config_local_rank(self):
+        process_group = object()
+        ct._cpu_world_group = None
+        ct._parallelism_config = SimpleNamespace(local_rank=1)
+
+        with patch("torch.cuda.is_available", return_value=True), patch(
+            "torch.distributed.barrier"
+        ) as barrier:
+            ct._safe_barrier(group=process_group)
+
+        barrier.assert_called_once_with(group=process_group, device_ids=[1])
 
     def test_should_use_hipgraph_capture_rccl(self):
         hr._is_rocm_runtime = True
