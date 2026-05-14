@@ -155,12 +155,12 @@ def _debug_dump_swa_dequant_input(
     if rank_filter and os.environ.get("RANK", "") != rank_filter:
         return
     limit = _debug_limit_from_env("DSV4_SWA_DEBUG_INPUT_LIMIT", 32)
-    if _DSV4_SWA_DEBUG_INPUT_DUMPS >= limit:
+    if limit > 0 and _DSV4_SWA_DEBUG_INPUT_DUMPS >= limit:
         return
 
     try:
-        seq_lens = _tensor_list(wm.swa_seq_lens) or []
-        gather_lens = _tensor_list(wm.swa_gather_lens) or []
+        seq_lens = _tensor_list(wm.swa_cache_seq_lens) or []
+        gather_lens = _tensor_list(wm.swa_cache_gather_lens) or []
         block_table = _tensor_list(wm.swa_bt_int32) or []
         prefix_lengths = (
             _tensor_list(common.prefix_lengths) if common is not None else None
@@ -250,6 +250,8 @@ def _debug_dump_swa_dequant_input(
                 "input_lengths": input_lengths,
                 "swa_seq_lens": seq_lens,
                 "swa_gather_lens": gather_lens,
+                "swa_workspace_seq_lens": _tensor_list(wm.swa_seq_lens),
+                "swa_workspace_gather_lens": _tensor_list(wm.swa_gather_lens),
                 "cmp_seq_lens": _tensor_list(wm.cmp_seq_lens),
                 "new_k_slot_in_flat": _tensor_list(wm.new_k_slot_in_flat),
             },
@@ -283,6 +285,149 @@ def _debug_dump_swa_dequant_input(
     except Exception as e:
         print(
             "DSV4_SWA_DEQUANT_INPUT_DUMP_FAILED "
+            + json.dumps({"error": repr(e), "layer_id": int(layer_id)}, sort_keys=True),
+            flush=True,
+        )
+
+
+def _debug_dump_swa_concat_input(
+    *,
+    layer_id: int,
+    head_dim: int,
+    common: Optional["PrefillMeta"],
+    meta: Any,
+    block_table: torch.Tensor,
+    out: torch.Tensor,
+    swa_pool_3d: torch.Tensor,
+) -> None:
+    """Dump SWA-only via-concat prefix-cache read inputs before launch."""
+    global _DSV4_SWA_DEBUG_INPUT_DUMPS
+    if os.environ.get("DSV4_SWA_DEBUG_INPUT", "0") != "1":
+        return
+    rank_filter = os.environ.get("DSV4_SWA_DEBUG_RANK", "")
+    if rank_filter and os.environ.get("RANK", "") != rank_filter:
+        return
+    limit = _debug_limit_from_env("DSV4_SWA_DEBUG_INPUT_LIMIT", 32)
+    if limit > 0 and _DSV4_SWA_DEBUG_INPUT_DUMPS >= limit:
+        return
+
+    try:
+        seq_lens = _tensor_list(meta.cache_seq_lens) or []
+        gather_lens = _tensor_list(meta.cache_gather_lens) or []
+        block_table_list = _tensor_list(block_table) or []
+        prefix_lengths = (
+            _tensor_list(common.prefix_lengths) if common is not None else None
+        )
+        input_lengths = (
+            _tensor_list(common.input_lengths) if common is not None else None
+        )
+        min_prefix = _debug_limit_from_env("DSV4_SWA_DEBUG_MIN_PREFIX", 0)
+        rows = []
+        total_negative_reads = 0
+        has_reuse_row = False
+        for b, seq_len in enumerate(seq_lens):
+            gather_len = int(gather_lens[b])
+            seq_len = int(seq_len)
+            prefix_len = (
+                int(prefix_lengths[b])
+                if prefix_lengths is not None and b < len(prefix_lengths)
+                else None
+            )
+            input_len = (
+                int(input_lengths[b])
+                if input_lengths is not None and b < len(input_lengths)
+                else None
+            )
+            if prefix_len is not None and prefix_len >= min_prefix:
+                has_reuse_row = True
+            start_pos = seq_len - gather_len
+            end_pos = seq_len
+            if gather_len > 0:
+                begin_slot = max(start_pos, 0) // int(swa_pool_3d.shape[1])
+                end_slot = (end_pos - 1) // int(swa_pool_3d.shape[1])
+                read_slots = list(range(begin_slot, end_slot + 1))
+            else:
+                read_slots = []
+            row = block_table_list[b] if b < len(block_table_list) else []
+            read_blocks = [
+                row[slot] if 0 <= slot < len(row) else None for slot in read_slots
+            ]
+            negative_read_slots = [
+                slot
+                for slot, block in zip(read_slots, read_blocks)
+                if block is None or int(block) < 0
+            ]
+            total_negative_reads += len(negative_read_slots)
+            rows.append(
+                {
+                    "request": b,
+                    "prefix_len": prefix_len,
+                    "input_len": input_len,
+                    "seq_len": seq_len,
+                    "gather_len": gather_len,
+                    "start_pos": start_pos,
+                    "end_pos_exclusive": end_pos,
+                    "block_size": int(swa_pool_3d.shape[1]),
+                    "read_slots": read_slots,
+                    "read_blocks": read_blocks,
+                    "negative_read_slots": negative_read_slots,
+                    "negative_read_count": len(negative_read_slots),
+                    "null_read_slots": negative_read_slots,
+                    "block_table": row,
+                }
+            )
+
+        if (
+            os.environ.get("DSV4_SWA_DEBUG_ONLY_NEGATIVE", "0") == "1"
+            and total_negative_reads == 0
+        ):
+            return
+        if min_prefix > 0 and not has_reuse_row:
+            return
+        _DSV4_SWA_DEBUG_INPUT_DUMPS += 1
+        payload = {
+            "event": "DSV4_SWA_CONCAT_DEQUANT_INPUT",
+            "dump_index": _DSV4_SWA_DEBUG_INPUT_DUMPS - 1,
+            "pid": os.getpid(),
+            "rank": os.environ.get("RANK", ""),
+            "local_rank": os.environ.get("LOCAL_RANK", ""),
+            "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES", ""),
+            "layer_id": int(layer_id),
+            "compress_ratio": 0,
+            "head_dim": int(head_dim),
+            "workspace": {
+                "M": int(meta.M),
+                "prefix_len_max": int(meta.prefix_len_max),
+                "prefix_lengths": prefix_lengths,
+                "input_lengths": input_lengths,
+                "cache_seq_lens": seq_lens,
+                "cache_gather_lens": gather_lens,
+            },
+            "total_negative_read_count": total_negative_reads,
+            "out": {
+                "shape": list(out.shape),
+                "stride": list(out.stride()),
+                "dtype": str(out.dtype),
+                "device": str(out.device),
+                "data_ptr": int(out.data_ptr()),
+            },
+            "swa_pool": {
+                "shape": list(swa_pool_3d.shape),
+                "stride": list(swa_pool_3d.stride()),
+                "dtype": str(swa_pool_3d.dtype),
+                "device": str(swa_pool_3d.device),
+                "data_ptr": int(swa_pool_3d.data_ptr()),
+            },
+            "rows": rows,
+        }
+        print(
+            "DSV4_SWA_CONCAT_DEQUANT_INPUT "
+            + json.dumps(payload, sort_keys=True),
+            flush=True,
+        )
+    except Exception as e:
+        print(
+            "DSV4_SWA_CONCAT_DEQUANT_INPUT_DUMP_FAILED "
             + json.dumps({"error": repr(e), "layer_id": int(layer_id)}, sort_keys=True),
             flush=True,
         )
@@ -643,6 +788,8 @@ class WorkspaceMeta(NamedTuple):
     cmp_eb: int
     swa_bt_int32: torch.Tensor  # [B, max_blocks_per_seq] int32 contig
     cmp_bt_int32: torch.Tensor
+    swa_cache_seq_lens: torch.Tensor  # [B] int32 — cached prefix length per req
+    swa_cache_gather_lens: torch.Tensor  # [B] int32 — cached prefix tail to read
     swa_seq_lens: torch.Tensor  # [B] int32 — total SWA stream length per req
     cmp_seq_lens: torch.Tensor  # [B] int32 — per-req compressed pool length
     swa_gather_lens: torch.Tensor  # [B] int32 — per-req gather length
@@ -2604,30 +2751,31 @@ class AttentionFP8(nn.Module):
                     block_size=wm.cmp_eb,
                     offset=0,
                 )
-        # SWA dequant is unconditional in prefill — every request has at least
-        # ``S_b`` SWA gather rows (just-written new K). Per-request ``gather_lens``
-        # handles the per-row variable length.
-        _debug_dump_swa_dequant_input(
-            layer_id=self.layer_id,
-            ratio=ratio,
-            head_dim=D,
-            common=common,
-            wm=wm,
-            out=workspace,
-            swa_pool_3d=swa_pool_3d,
-            cmp_pool_3d=cmp_pool_3d,
-            offset=wm.N,
-        )
-        with record_function_range("dsv4.fp8.attn.workspace.gather_swa"):
-            _swa_dq.dequantize_and_gather_k_cache(
+        # Only cached prefix-tail K is read back from the SWA pool. Current
+        # prefill tokens are already available in BF16 and are overlaid below;
+        # cold prefill therefore does not launch an empty SWA cache gather.
+        if common.any_cont:
+            _debug_dump_swa_dequant_input(
+                layer_id=self.layer_id,
+                ratio=ratio,
+                head_dim=D,
+                common=common,
+                wm=wm,
                 out=workspace,
-                k_cache=swa_pool_3d,
-                seq_lens=wm.swa_seq_lens,
-                gather_lens=wm.swa_gather_lens,
-                block_table=wm.swa_bt_int32,
-                block_size=wm.swa_eb,
+                swa_pool_3d=swa_pool_3d,
+                cmp_pool_3d=cmp_pool_3d,
                 offset=wm.N,
             )
+            with record_function_range("dsv4.fp8.attn.workspace.gather_swa_prefix"):
+                _swa_dq.dequantize_and_gather_k_cache(
+                    out=workspace,
+                    k_cache=swa_pool_3d,
+                    seq_lens=wm.swa_cache_seq_lens,
+                    gather_lens=wm.swa_cache_gather_lens,
+                    block_table=wm.swa_bt_int32,
+                    block_size=wm.swa_eb,
+                    offset=wm.N,
+                )
 
         # BF16 overlay of freshly computed new K — single ``index_copy_``
         # using the meta-precomputed ``new_k_slot_in_flat``. Avoids the FP8
@@ -3421,6 +3569,8 @@ class AttentionFP8(nn.Module):
             swa_seq_lens = seq_total_per_req.contiguous()
             cmp_seq_lens = N_per_req.contiguous()
             swa_gather_lens = gather_len_per_req.contiguous()
+            swa_cache_seq_lens = sp_i32.contiguous()
+            swa_cache_gather_lens = P_per_req.contiguous()
             qsl = cu_seqlens.to(device=device, dtype=torch.int32).contiguous()
             swa_bt_int32 = swa_bt[:B].to(device=device, dtype=torch.int32).contiguous()
             cmp_bt_int32 = cmp_bt[:B].to(device=device, dtype=torch.int32).contiguous()
@@ -3474,6 +3624,10 @@ class AttentionFP8(nn.Module):
 
             swa_bt_int32 = swa_bt[:B].to(device=device, dtype=torch.int32).contiguous()
             cmp_bt_int32 = cmp_bt[:B].to(device=device, dtype=torch.int32).contiguous()
+            swa_cache_seq_lens = torch.tensor(
+                [sp_int], device=device, dtype=torch.int32
+            )
+            swa_cache_gather_lens = torch.tensor([P], device=device, dtype=torch.int32)
             swa_seq_lens = torch.tensor([seq_total], device=device, dtype=torch.int32)
             cmp_seq_lens = torch.tensor([N], device=device, dtype=torch.int32)
             swa_gather_lens = torch.tensor(
@@ -3514,6 +3668,8 @@ class AttentionFP8(nn.Module):
             cmp_eb=cmp_eb,
             swa_bt_int32=swa_bt_int32,
             cmp_bt_int32=cmp_bt_int32,
+            swa_cache_seq_lens=swa_cache_seq_lens,
+            swa_cache_gather_lens=swa_cache_gather_lens,
             swa_seq_lens=swa_seq_lens,
             cmp_seq_lens=cmp_seq_lens,
             swa_gather_lens=swa_gather_lens,
@@ -4265,6 +4421,15 @@ class AttentionFP8(nn.Module):
         # 1. Prefix tail dequant. ``cache_*`` are per-request ``[B]`` tensors
         # under varlen, single-element under legacy — same kernel call.
         if meta.prefix_len_max > 0:
+            _debug_dump_swa_concat_input(
+                layer_id=self.layer_id,
+                head_dim=D,
+                common=common,
+                meta=meta,
+                block_table=bt_int32,
+                out=workspace,
+                swa_pool_3d=packed_3d,
+            )
             with record_function_range("dsv4.fp8.attn.swa_concat.gather_prefix"):
                 _swa_dq.dequantize_and_gather_k_cache(
                     out=workspace,
