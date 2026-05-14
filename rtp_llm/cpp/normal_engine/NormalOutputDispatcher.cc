@@ -226,7 +226,12 @@ void NormalOutputDispatcher::invokeBatchAcceptTokens(
                 break;
             }
         }
-        if (!stream->isActive()) {
+        if (matcher->isTerminated()) {
+            matcher->markFinished();
+            if (stream->isActive()) {
+                stream->reportEvent(StreamEvents::GenerateDone);
+            }
+        } else if (!stream->isActive()) {
             matcher->markFinished();
         }
     }
