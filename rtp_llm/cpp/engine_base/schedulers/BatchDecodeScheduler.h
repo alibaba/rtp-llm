@@ -1,7 +1,6 @@
 #pragma once
 
 #include "autil/legacy/jsonizable.h"
-#include "rtp_llm/cpp/engine_base/grammar/XGrammarBackendCpp.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerBase.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/Types.h"
@@ -28,12 +27,10 @@ public:
     };
     BatchDecodeScheduler(const RuntimeConfig&                   runtime_config,
                          const std::shared_ptr<KVCacheManager>& cache_manager,
-                         std::shared_ptr<XGrammarBackendCpp>    grammar_backend,
                          const kmonitor::MetricsReporterPtr     metrics_reporter,
                          int                                    dp_rank = 0) {
         cache_manager_    = cache_manager;
         metrics_reporter_ = metrics_reporter;
-        grammar_backend_  = std::move(grammar_backend);
         batch_size_       = runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size;
         scheduler_type_   = SchedulerType::kBatchDecode;
         dp_rank_          = dp_rank;
@@ -280,8 +277,6 @@ private:
 
     std::shared_ptr<KVCacheManager>     cache_manager_;
     kmonitor::MetricsReporterPtr        metrics_reporter_;
-    // Pure C++ grammar backend. Null in cc_test ctors.
-    std::shared_ptr<XGrammarBackendCpp> grammar_backend_;
     SchedulerType                       scheduler_type_;
     int                                 dp_rank_ = 0;
 };

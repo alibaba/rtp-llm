@@ -83,10 +83,6 @@ public:
     void markFinished() noexcept { finished_ = true; }
     bool finished() const noexcept { return finished_; }
 
-    // Escape hatch for advanced ops (e.g. jump-forward). Bypasses reasoner gate.
-    xgrammar::GrammarMatcher&       raw() noexcept       { return *matcher_; }
-    const xgrammar::GrammarMatcher& raw() const noexcept { return *matcher_; }
-
     const GrammarStats& stats() const noexcept        { return stats_; }
     GrammarStats&       mutableStats() noexcept       { return stats_; }
 

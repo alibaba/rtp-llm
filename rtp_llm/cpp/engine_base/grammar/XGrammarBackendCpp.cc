@@ -149,11 +149,9 @@ std::shared_ptr<xgrammar::CompiledGrammar> XGrammarBackendCpp::getCached(const G
         std::lock_guard<std::mutex> lock(cache_mutex_);
         auto it = cache_.find(kid);
         if (it != cache_.end()) {
-            cache_hits_.fetch_add(1, std::memory_order_relaxed);
             return it->second;
         }
     }
-    cache_misses_.fetch_add(1, std::memory_order_relaxed);
     return nullptr;
 }
 
@@ -172,35 +170,23 @@ void XGrammarBackendCpp::setCache(const GrammarKeyCpp&                       key
     if (!compiled) {
         return;  // use setCacheInvalid for nullptrs.
     }
-    const std::string kid             = key.id();
-    const auto        new_size_bytes  = static_cast<int64_t>(compiled->MemorySizeBytes());
-    int64_t           prev_size_bytes = 0;
+    const std::string kid = key.id();
     {
         std::lock_guard<std::mutex> lock(cache_mutex_);
-        auto                        it = cache_.find(kid);
-        if (it != cache_.end()) {
-            prev_size_bytes = static_cast<int64_t>(it->second->MemorySizeBytes());
-        }
         cache_[kid] = std::move(compiled);
-        invalid_cache_.erase(kid);  // success invalidates any prior failure marker.
+        invalid_cache_.erase(kid);
     }
-    bytes_in_cache_.fetch_add(new_size_bytes - prev_size_bytes, std::memory_order_relaxed);
 }
 
 void XGrammarBackendCpp::setCacheInvalid(const GrammarKeyCpp& key, const std::string& error_message) {
     const std::string kid = key.id();
     std::lock_guard<std::mutex> lock(cache_mutex_);
     invalid_cache_[kid] = error_message;
-    auto it             = cache_.find(kid);
-    if (it != cache_.end()) {
-        bytes_in_cache_.fetch_sub(static_cast<int64_t>(it->second->MemorySizeBytes()),
-                                  std::memory_order_relaxed);
-        cache_.erase(it);
-    }
+    cache_.erase(kid);
 }
 
+// Thread-safe: xgrammar::GrammarCompiler uses ThreadSafeLRUCache (shared_mutex + shared_future) internally.
 CompileResult XGrammarBackendCpp::compileNow(const GrammarKeyCpp& key) {
-    compile_calls_.fetch_add(1, std::memory_order_relaxed);
     const auto t_start = std::chrono::steady_clock::now();
 
     // Wrap an xgrammar Compile* call: schema-rejection exceptions become
@@ -248,7 +234,6 @@ CompileResult XGrammarBackendCpp::compileNow(const GrammarKeyCpp& key) {
                           static_cast<long long>(elapsed_ms),
                           result.compiled->MemorySizeBytes());
     } else {
-        compile_failures_.fetch_add(1, std::memory_order_relaxed);
         RTP_LLM_LOG_WARNING(
             "XGrammarBackendCpp compile FAIL: type=%s, len=%zu, elapsed_ms=%lld, invalid=%d, err=%s",
             key.key_type.c_str(),
@@ -276,19 +261,8 @@ void XGrammarBackendCpp::clear() {
         cache_.clear();
         invalid_cache_.clear();
     }
-    bytes_in_cache_.store(0, std::memory_order_relaxed);
     compiler_.ClearCache();
     RTP_LLM_LOG_INFO("XGrammarBackendCpp clear: caches dropped");
-}
-
-XGrammarBackendCpp::Stats XGrammarBackendCpp::stats() const {
-    Stats s;
-    s.compile_calls    = compile_calls_.load(std::memory_order_relaxed);
-    s.compile_failures = compile_failures_.load(std::memory_order_relaxed);
-    s.cache_hits       = cache_hits_.load(std::memory_order_relaxed);
-    s.cache_misses     = cache_misses_.load(std::memory_order_relaxed);
-    s.bytes_in_cache   = bytes_in_cache_.load(std::memory_order_relaxed);
-    return s;
 }
 
 }  // namespace rtp_llm

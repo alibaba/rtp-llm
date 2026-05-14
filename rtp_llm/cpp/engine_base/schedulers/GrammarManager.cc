@@ -121,27 +121,6 @@ bool GrammarManager::hasActionableGrammar() const {
     return false;
 }
 
-void GrammarManager::clear() {
-    std::list<GrammarEntry> drained;
-    {
-        std::lock_guard<std::mutex> lock(queue_mutex_);
-        drained.swap(grammar_queue_);
-        compile_tasks_.clear();
-        in_flight_.clear();
-    }
-
-    RTP_LLM_LOG_INFO("GrammarManager clear: drained=%zu", drained.size());
-
-    if (hasBackend()) {
-        backend_->clear();
-    }
-    for (auto& entry : drained) {
-        if (entry.stream) {
-            entry.stream->clearGrammarMatcher();
-        }
-    }
-}
-
 bool GrammarManager::isGrammarRequested(const GenerateStreamPtr& stream) const {
     auto& config = stream->generateConfig();
     return config->json_schema.has_value() || config->regex.has_value() || config->ebnf.has_value()
@@ -504,6 +483,16 @@ void GrammarManager::workerLoop() {
                           static_cast<int>(payload.is_invalid),
                           static_cast<long long>(elapsed_us / 1000),
                           payload.error_msg.empty() ? "" : payload.error_msg.c_str());
+
+        // Cache eagerly so the result survives even when all subscribers
+        // have timed out. Without this, a schema that compiles in 61s
+        // (just past the 60s default timeout) would never be cached and
+        // every future request would re-compile and re-timeout.
+        if (payload.compiled) {
+            backend_->setCache(popped->key, payload.compiled);
+        } else if (payload.is_invalid) {
+            backend_->setCacheInvalid(popped->key, payload.error_msg);
+        }
 
         try {
             popped->promise.set_value(std::move(payload));

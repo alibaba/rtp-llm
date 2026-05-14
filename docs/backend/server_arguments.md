@@ -109,8 +109,6 @@ This page lists server arguments used to configure the behavior and performance 
 | `--reasoning_parser` | sglang-compatible detector key (e.g. `qwen3`, `deepseek-r1`). Empty = reasoner disabled. See [grammar.md](./grammar.md#reasoning-parser). | `""` |
 | `--grammar_compile_timeout_ms` | Per-compile wall-clock timeout (ms) inside the GrammarManager queue. | 60000 |
 | `--grammar_num_workers` | Size of the C++ compile worker pool. | 32 |
-| `--grammar_cache_dir` | Reserved for future on-disk DFA cache; currently no effect. | `""` |
-| `--grammar_debug_log` | Promote per-step grammar traces from DEBUG to INFO. | False |
 
 ## Logging & Profiling
 

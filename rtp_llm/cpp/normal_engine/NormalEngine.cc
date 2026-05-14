@@ -139,7 +139,6 @@ void NormalEngine::initScheduler() {
     if (runtime_config.use_batch_decode_scheduler) {
         scheduler_.reset(new BatchDecodeScheduler(runtime_config,
                                                   resource_context_.cache_manager,
-                                                  grammar_backend_,
                                                   metrics_reporter_,
                                                   parallelism_config.dp_rank));
         RTP_LLM_LOG_INFO("create batch decode scheduler done");

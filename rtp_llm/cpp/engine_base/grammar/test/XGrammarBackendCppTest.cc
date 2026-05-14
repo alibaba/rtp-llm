@@ -60,8 +60,6 @@ XGrammarBackendOptions defaultOptions() {
 TEST(XGrammarBackendCppTest, ConstructFromTokenizerInfoJson) {
     XGrammarBackendCpp backend(makeTokenizerInfoJson(), defaultOptions());
     EXPECT_FALSE(backend.hasReasoner());
-    auto stats = backend.stats();
-    EXPECT_EQ(stats.compile_calls, 0);
 }
 
 TEST(XGrammarBackendCppTest, CompileBuiltinJSONViaSentinel) {
@@ -102,7 +100,6 @@ TEST(XGrammarBackendCppTest, CacheGetAndSet) {
     GrammarKeyCpp      key{"json", R"({"type":"integer"})"};
 
     EXPECT_FALSE(backend.getCached(key));
-    EXPECT_EQ(backend.stats().cache_misses, 1);
 
     auto compiled = backend.compileNow(key).compiled;
     ASSERT_TRUE(compiled);
@@ -111,7 +108,6 @@ TEST(XGrammarBackendCppTest, CacheGetAndSet) {
     auto cached = backend.getCached(key);
     ASSERT_TRUE(cached);
     EXPECT_EQ(cached.get(), compiled.get()) << "cache must hand back the same shared_ptr";
-    EXPECT_EQ(backend.stats().cache_hits, 1);
 }
 
 TEST(XGrammarBackendCppTest, InvalidCacheShortCircuitsRepeat) {

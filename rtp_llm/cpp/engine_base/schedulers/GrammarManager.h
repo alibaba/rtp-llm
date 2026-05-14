@@ -48,7 +48,6 @@ public:
     GrammarManager& operator=(const GrammarManager&) = delete;
 
     size_t size() const;
-    void   clear();
     bool   hasWaitingGrammars() const;
 
     // True iff the scheduler should call getReadyGrammarRequests now (avoids

@@ -1,6 +1,5 @@
 #pragma once
 
-#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <memory>
@@ -96,18 +95,6 @@ public:
 
     void clear();
 
-    struct Stats {
-        int64_t compile_calls    = 0;
-        int64_t compile_failures = 0;
-        int64_t cache_hits       = 0;
-        int64_t cache_misses     = 0;
-        int64_t bytes_in_cache   = 0;
-    };
-    Stats stats() const;
-
-    // Test-only access to internal compiler.
-    xgrammar::GrammarCompiler& compilerForTest() noexcept { return compiler_; }
-
     bool                   hasReasoner() const noexcept { return options_.think_end_id.has_value(); }
     std::optional<int32_t> thinkEndId() const noexcept { return options_.think_end_id; }
 
@@ -124,14 +111,6 @@ private:
     mutable std::mutex                                                          cache_mutex_;
     std::unordered_map<std::string, std::shared_ptr<xgrammar::CompiledGrammar>> cache_;
     std::unordered_map<std::string, std::string>                                invalid_cache_;
-
-    // Atomic counters bumped from const observer methods (getCached etc),
-    // hence `mutable`.
-    mutable std::atomic<int64_t> compile_calls_{0};
-    mutable std::atomic<int64_t> compile_failures_{0};
-    mutable std::atomic<int64_t> cache_hits_{0};
-    mutable std::atomic<int64_t> cache_misses_{0};
-    mutable std::atomic<int64_t> bytes_in_cache_{0};
 };
 
 }  // namespace rtp_llm

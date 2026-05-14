@@ -32,16 +32,10 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
     max_batch_tokens_size_(runtime_config.fifo_scheduler_config.max_batch_tokens_size),
     max_generate_batch_size_(runtime_config.max_generate_batch_size),
     need_fill_fake_stream_(parallelism_config.dp_size > 1 && parallelism_config.tp_rank == 0),
-    metrics_reporter_(metrics_reporter),
-    grammar_backend_(std::move(grammar_backend)) {
-    // Skip the manager entirely when no real backend was provided. Constructing
-    // it anyway would spawn worker threads and force schedule() into a 50ms
-    // wait_for loop for every FIFOScheduler deployment, even those that never
-    // use grammar. The shared_ptr null check is a single pointer comparison —
-    // no Python interaction.
-    const bool has_grammar_backend = static_cast<bool>(grammar_backend_);
+    metrics_reporter_(metrics_reporter) {
+    const bool has_grammar_backend = static_cast<bool>(grammar_backend);
     if (has_grammar_backend) {
-        grammar_manager_ = std::make_unique<GrammarManager>(grammar_backend_, std::move(grammar_config));
+        grammar_manager_ = std::make_unique<GrammarManager>(std::move(grammar_backend), std::move(grammar_config));
     }
     RTP_LLM_LOG_INFO("max_generate_batch_size is [%d], max_batch_tokens_size is [%d], grammar_manager=%s",
                      max_generate_batch_size_,

@@ -91,7 +91,6 @@ protected:
 
     std::vector<EngineScheduleInfo::TaskInfo> waiting_task_list_;
     std::vector<EngineScheduleInfo::TaskInfo> running_task_list_;
-    std::shared_ptr<XGrammarBackendCpp> grammar_backend_;
     std::unique_ptr<GrammarManager>     grammar_manager_;
 
     // TODO @wangyin support different beams run togather

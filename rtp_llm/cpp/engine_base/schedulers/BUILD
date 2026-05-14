@@ -14,7 +14,6 @@ cc_library(
         "//rtp_llm/cpp/engine_base/system_prompt:system_prompt",
         "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/utils:profiling_scope",
-        "//rtp_llm/cpp/utils:py_obj_utils",
     ],
     visibility = ["//visibility:public"],
 )

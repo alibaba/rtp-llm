@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
 
 #include <dlpack/dlpack.h>
 
@@ -158,20 +159,29 @@ void NormalBatchStreamProcessor::applyGrammarConstraints(SamplerInputs&      inp
     auto      bitmask = at::full({total_batch, words}, /*fill_value=*/-1, at::dtype(at::kInt));
     DLTensor  dl      = spec_grammar::makeBitmaskView(bitmask.data_ptr<int32_t>(), total_batch, words);
 
-    for (auto& [row_idx, m] : active) {
-        m->fillBitmask(&dl, row_idx);
+    {
+        RTP_LLM_PROFILE_SCOPE("grammar.fillBitmask");
+        for (auto& [row_idx, m] : active) {
+            m->fillBitmask(&dl, row_idx);
+        }
     }
 
-    auto bitmask_gpu = bitmask.to(inputs.logits.device(), /*non_blocking=*/true);
-    // Logits may be vocab-padded for tensor parallelism; slice down before the kernel.
-    auto target_logits =
-        inputs.logits.size(1) > vocab_size ? inputs.logits.slice(/*dim=*/1, 0, vocab_size) : inputs.logits;
+    at::Tensor bitmask_gpu;
+    at::Tensor target_logits;
+    {
+        RTP_LLM_PROFILE_SCOPE("grammar.bitmask_to_gpu");
+        bitmask_gpu = bitmask.to(inputs.logits.device(), /*non_blocking=*/true);
+        // Logits may be vocab-padded for tensor parallelism; slice down before the kernel.
+        target_logits =
+            inputs.logits.size(1) > vocab_size ? inputs.logits.slice(/*dim=*/1, 0, vocab_size) : inputs.logits;
+    }
 
-    // The one remaining GIL touch on the grammar hot path. Eliminating it
-    // requires exposing apply_token_bitmask_inplace_triton as a TORCH_LIBRARY op.
-    py::gil_scoped_acquire acquire;
-    triton_bitmask_ops_.attr("apply_token_bitmask_inplace_triton")(
-        convertTensorToObject(target_logits), convertTensorToObject(bitmask_gpu));
+    {
+        RTP_LLM_PROFILE_SCOPE("grammar.apply_kernel");
+        py::gil_scoped_acquire acquire;
+        triton_bitmask_ops_.attr("apply_token_bitmask_inplace_triton")(
+            convertTensorToObject(target_logits), convertTensorToObject(bitmask_gpu));
+    }
 }
 
 bool NormalBatchStreamProcessor::reportGrammarUnavailableIfNeeded(

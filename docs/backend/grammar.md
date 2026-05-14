@@ -37,8 +37,6 @@ production-safe; override only when needed.
 | `--reasoning_parser` | `REASONING_PARSER` | `""` (disabled) | sglang-compatible detector key. See [Reasoning Parser](#reasoning-parser). |
 | `--grammar_compile_timeout_ms` | `GRAMMAR_COMPILE_TIMEOUT_MS` | `60000` | Wall-clock timeout per compile request inside the GrammarManager queue. Raise under sustained queue pressure; lower to fail-fast on huge schemas. |
 | `--grammar_num_workers` | `GRAMMAR_NUM_WORKERS` | `32` | Size of the C++ compile worker pool. A pathological schema (recursive `$ref`, ReDoS regex) can hang one worker indefinitely; with N workers, the system survives N-1 concurrent hangs. |
-| `--grammar_cache_dir` | `GRAMMAR_CACHE_DIR` | `""` | **Reserved.** No backend currently reads this — set has no effect. Tracks an upcoming on-disk DFA cache. |
-| `--grammar_debug_log` | `GRAMMAR_DEBUG_LOG` | `False` | Promotes per-step grammar traces (accept_token, bitmask stats) from DEBUG to INFO. Use only for targeted debugging. |
 
 ## Sending Constrained Requests
 
@@ -79,7 +77,7 @@ string that uniquely identifies the schema shape.
   "messages": [{"role": "user", "content": "Pick a hex color."}],
   "response_format": {
     "type": "regex",
-    "regex": "#[0-9a-fA-F]{6}"
+    "pattern": "#[0-9a-fA-F]{6}"
   }
 }
 ```
@@ -91,7 +89,7 @@ string that uniquely identifies the schema shape.
   "messages": [{"role": "user", "content": "Emit two integers."}],
   "response_format": {
     "type": "ebnf",
-    "ebnf": "root ::= [0-9]+ \" \" [0-9]+"
+    "grammar": "root ::= [0-9]+ \" \" [0-9]+"
   }
 }
 ```
@@ -311,8 +309,6 @@ matcher starts in free-accept regardless.
 - Reasoner mode requires the closing think token to be a **single**
   tokenizer id. Models that split it across multiple tokens are
   silently downgraded to plain grammar (with a warning at startup).
-- `--grammar_cache_dir` is reserved; passing it currently has no
-  effect.
 
 ## See Also
 

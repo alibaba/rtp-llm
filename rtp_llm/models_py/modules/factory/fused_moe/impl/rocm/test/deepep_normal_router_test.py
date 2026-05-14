@@ -93,6 +93,7 @@ def init_router(
         arpc_config=py_env.arpc_config,
         grpc_config=py_env.grpc_config,
         load_config=py_env.load_config,
+        grammar_config=py_env.grammar_config,
     )
     init_deepep_wrapper(engine_config, model_config)
 
