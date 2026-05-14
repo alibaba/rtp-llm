@@ -85,6 +85,7 @@ class ModelConfig(CppModelConfig):
         "phy2log_path",
         "lora_infos",
         "headwise_config",
+        "deepgemm_warmup_mode",
     }
 
     # Known C++ ModelConfig members (from ModelConfig.h)
@@ -523,6 +524,7 @@ class ModelConfig(CppModelConfig):
         self.render_config: Optional[Any] = None  # RenderConfig for renderer factory
         self.mm_related_params = VitParameters()
         self.quant_config = None
+        self.deepgemm_warmup_mode: str = "skip"  # "skip", "relax", or "full"
 
     def apply_override_args(self, json_model_override_args: str) -> None:
         """Apply model override arguments to ModelConfig.
@@ -863,6 +865,9 @@ def build_model_config(
 
     if model_args.enable_fp32_lm_head is not None:
         model_config.enable_fp32_lm_head = model_args.enable_fp32_lm_head
+
+    # DeepGEMM warmup mode
+    model_config.deepgemm_warmup_mode = model_args.deepgemm_warmup_mode
 
     # Apply model override args
     if model_args.json_model_override_args:

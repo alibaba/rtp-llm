@@ -29,6 +29,7 @@ class ModelArgs:
         "json_model_override_args",
         "phy2log_path",
         "enable_fp32_lm_head",
+        "deepgemm_warmup_mode",
     ]
 
     def __init__(self):
@@ -61,3 +62,6 @@ class ModelArgs:
 
         # LM head precision
         self.enable_fp32_lm_head: Optional[bool] = None
+
+        # DeepGEMM warmup mode: "skip" (default), "relax", or "full"
+        self.deepgemm_warmup_mode: str = "skip"
