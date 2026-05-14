@@ -64,18 +64,20 @@ else:
 
     # MoE strategies
     from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.strategy import (
-        CudaFp8PerBlockPureCPStrategy,
-        CudaFp8PerBlockPureDPStrategy,
         CudaFp8PerBlockEpLowLatencyStrategy,
         CudaFp8PerBlockEpNormalStrategy,
         CudaFp8PerBlockNoDPMaskedStrategy,
         CudaFp8PerBlockNoDPStrategy,
+        CudaFp8PerBlockPureCPStrategy,
+        CudaFp8PerBlockPureDPStrategy,
         CudaFp8PerTensorEpLowLatencyStrategy,
         CudaFp8PerTensorEpNormalStrategy,
         CudaFp8PerTensorNoDPStrategy,
         CudaNoQuantCppStrategy,
         CudaNoQuantDpNormalStrategy,
         CudaNoQuantEpLowLatencyStrategy,
+        CudaNoQuantEpNormalMaskedStrategy,
+        CudaNoQuantPureDPStrategy,
         CudaW4a8Int4PerChannelEpLowLatencyStrategy,
         CudaW4a8Int4PerChannelEpNormalStrategy,
         CudaW4a8Int4PerChannelNoDPStrategy,
@@ -92,6 +94,10 @@ else:
     registry.register(CudaFp8PerBlockNoDPStrategy())
     registry.register(CudaFp8PerTensorNoDPStrategy())
     registry.register(CudaNoQuantEpLowLatencyStrategy())
+    registry.register(CudaNoQuantPureDPStrategy())
+    registry.register(
+        CudaNoQuantEpNormalMaskedStrategy()
+    )  # registered before DpNormal to win priority tie
     registry.register(CudaNoQuantDpNormalStrategy())
     registry.register(CudaNoQuantCppStrategy())
     registry.register(BatchedTritonStrategy())

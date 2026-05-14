@@ -27,9 +27,7 @@ from rtp_llm.models_py.distributed.collective_torch import (
     reduce_scatter,
 )
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_used
-from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
-    sgl_per_token_group_quant_fp8,
-)
+from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -169,6 +167,22 @@ class PureDpRouterBase(FusedMoeDataRouter):
         if output.shape[0] > self._local_batch_size:
             output = output[: self._local_batch_size]
         return output
+
+
+class PureDpRouterNoQuant(PureDpRouterBase):
+    """Pure DP router without quantization (for bf16/fp16)."""
+
+    @classmethod
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
+        super().check_conditions(checker, config)
+        resolver = MoeConfigResolver()
+        quant_method = resolver.get_quant_method(config)
+        checker.check(quant_method is None)
+
+    def _do_quant(
+        self, a1: torch.Tensor
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        return a1, None
 
 
 class PureDpRouterFp8PerBlock(PureDpRouterBase):

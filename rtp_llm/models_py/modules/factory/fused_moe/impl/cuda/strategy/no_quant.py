@@ -73,6 +73,69 @@ class CudaNoQuantCppStrategy(MoeStrategy):
         )
 
 
+class CudaNoQuantPureDPStrategy(MoeStrategy):
+    """CUDA pure DP mode without quantization using allgather + reduce_scatter."""
+
+    @classmethod
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
+        checker.check(
+            config.moe_strategy == "no_quant_pure_dp" or config.moe_strategy == "auto"
+        )
+
+    def get_attributes(self) -> StrategyAttributes:
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.triton_fused_executor import (
+            TritonFusedMoeExecutor,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_dp_router import (
+            PureDpRouterNoQuant,
+        )
+
+        quant_config = FusedMoEQuantConfig(quant_dtype=None)
+        return StrategyAttributes(
+            router_class=PureDpRouterNoQuant,
+            executor_class=TritonFusedMoeExecutor,
+            quant_config=quant_config,
+        )
+
+
+class CudaNoQuantEpNormalMaskedStrategy(MoeStrategy):
+    """CUDA normal DeepEP mode without quantization using deep_gemm masked BF16 GEMM."""
+
+    @classmethod
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
+        from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
+            has_deep_gemm,
+            is_deep_gemm_e8m0_used,
+        )
+        from rtp_llm.models_py.utils.arch import get_sm
+
+        resolver = MoeConfigResolver()
+        quant_method = resolver.get_quant_method(config)
+        checker.check(quant_method is None)
+        checker.check(
+            config.moe_strategy == "no_quant_ep_normal_masked"
+            or config.moe_strategy == "auto"
+        )
+        checker.check(has_deep_gemm())
+        checker.check(get_sm()[0] >= 9)
+        checker.check(not is_deep_gemm_e8m0_used())
+
+    def get_attributes(self) -> StrategyAttributes:
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_normal_ep_bf16_executor import (
+            DeepGemmNormalEpBf16Executor,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_normal_router import (
+            DeepepNormalRouterNoQuant,
+        )
+
+        quant_config = FusedMoEQuantConfig(quant_dtype=None)
+        return StrategyAttributes(
+            router_class=DeepepNormalRouterNoQuant,
+            executor_class=DeepGemmNormalEpBf16Executor,
+            quant_config=quant_config,
+        )
+
+
 class CudaNoQuantDpNormalStrategy(MoeStrategy):
     """CUDA CPP mode without quantization strategy and dp normal mode"""
 

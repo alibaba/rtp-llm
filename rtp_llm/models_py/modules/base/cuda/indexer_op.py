@@ -52,13 +52,15 @@ def _rotate_activation(x: torch.Tensor) -> torch.Tensor:
     Returns:
         Rotated activation tensor
     """
-    assert x.dtype == torch.bfloat16
+    assert (
+        x.dtype == torch.bfloat16
+    ), f"_rotate_activation got dtype={x.dtype}, shape={x.shape}"
     from fast_hadamard_transform import hadamard_transform
 
     hidden_size = x.size(-1)
     assert (
         hidden_size & (hidden_size - 1)
-    ) == 0, "Hidden size must be a power of 2 for Hadamard transform."
+    ) == 0, f"Hidden size must be a power of 2 for Hadamard transform; got {hidden_size}, shape={x.shape}"
 
     return hadamard_transform(x, scale=hidden_size**-0.5)
 
@@ -139,8 +141,9 @@ class IndexerOp(nn.Module):
             )
 
         # Apply Hadamard transform (activation rotation)
-        query = _rotate_activation(q)
-        key = _rotate_activation(k)
+        # Cast to bfloat16: warmup may pass fp16 dummy tensors from C++ engine
+        query = _rotate_activation(q.to(torch.bfloat16))
+        key = _rotate_activation(k.to(torch.bfloat16))
 
         return query, key
 
@@ -182,8 +185,8 @@ class IndexerOp(nn.Module):
                 interleave=not self.is_neox_style,
             )
 
-        query = _rotate_activation(q)
-        key = _rotate_activation(k)
+        query = _rotate_activation(q.to(torch.bfloat16))
+        key = _rotate_activation(k.to(torch.bfloat16))
 
         return query, key
 
@@ -218,7 +221,7 @@ class IndexerOp(nn.Module):
             )
 
         # Apply Hadamard transform (activation rotation)
-        key = _rotate_activation(k)
+        key = _rotate_activation(k.to(torch.bfloat16))
 
         return key
 

@@ -707,7 +707,9 @@ class DeepSeekV2(BaseModel):
 
             config.config_dtype = config_json.get("torch_dtype", None)
 
-            if config_json.get("index_topk") is not None:
+            if config_json.get("index_topk") is not None and not os.environ.get(
+                "DISABLE_INDEXER"
+            ):
                 config.attn_config.is_sparse = True
                 config.attn_config.indexer_head_dim = config_json["index_head_dim"]
                 config.attn_config.indexer_head_num = config_json["index_n_heads"]
