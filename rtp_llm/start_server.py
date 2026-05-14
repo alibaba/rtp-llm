@@ -37,9 +37,16 @@ def _install_hot_hook_runtime(role: str) -> None:
         logging.error("failed to install RTP hot hook runtime for %s: %s", role, e)
 
 
-def check_server_health(server_port):
+STARTUP_WARMUP_HEALTH_GATE_FILE_ENV = "RTP_LLM_STARTUP_WARMUP_HEALTH_GATE_FILE"
+STARTUP_REAL_WARMUP_MIN_TOKEN_LEN = 2
+STARTUP_REAL_WARMUP_TIMEOUT_S = 600.0
+STARTUP_REAL_WARMUP_MAX_NEW_TOKENS = 1
+STARTUP_REAL_WARMUP_TOKEN_ID = 100
+
+
+def check_server_health(server_port, path="/health"):
     try:
-        response = requests.get(f"http://localhost:{server_port}/health", timeout=60)
+        response = requests.get(f"http://localhost:{server_port}{path}", timeout=60)
         health_ok = False
         if response.status_code == 200:
             try:
@@ -52,7 +59,7 @@ def check_server_health(server_port):
                 health_ok = response.text.strip() == "ok"
         if health_ok:
             logging.info(
-                f"{server_port}/health, response status_code = {response.status_code}, text = {response.text}, len = {len(response.text)}"
+                f"{server_port}{path}, response status_code = {response.status_code}, text = {response.text}, len = {len(response.text)}"
             )
             return True
         else:
@@ -308,7 +315,9 @@ def start_frontend_server_impl(
     if process_manager and frontend_processes:
         # Register health check with ProcessManager for the first frontend server
         def check_frontend_ready():
-            return check_server_health(py_env_configs.server_config.start_port)
+            return check_server_health(
+                py_env_configs.server_config.start_port, path="/frontend_health"
+            )
 
         process_manager.register_health_check(
             processes=frontend_processes,
@@ -318,6 +327,58 @@ def start_frontend_server_impl(
         )
 
     return frontend_processes
+
+
+def _role_is_prefill(py_env_configs: PyEnvConfigs) -> bool:
+    role_type = py_env_configs.role_config.role_type
+    role_value = getattr(role_type, "value", role_type)
+    prefill_value = getattr(RoleType.PREFILL, "value", RoleType.PREFILL)
+    role_is_prefill = role_type == RoleType.PREFILL or str(role_type).endswith("PREFILL")
+    try:
+        role_is_prefill = role_is_prefill or int(role_value) == int(prefill_value)
+    except Exception:
+        pass
+    return role_is_prefill
+
+
+def _should_run_startup_real_warmup(py_env_configs: PyEnvConfigs) -> bool:
+    model_type = getattr(py_env_configs.model_args, "model_type", "")
+    return model_type == "deepseek_v4" and _role_is_prefill(py_env_configs)
+
+
+def _setup_startup_warmup_health_gate(py_env_configs: PyEnvConfigs):
+    if not _should_run_startup_real_warmup(py_env_configs):
+        os.environ.pop(STARTUP_WARMUP_HEALTH_GATE_FILE_ENV, None)
+        return None
+
+    gate_file = os.path.join(
+        "/tmp",
+        "rtp_llm_startup_warmup_ready_"
+        f"{os.getpid()}_{int(py_env_configs.server_config.start_port)}",
+    )
+    try:
+        os.remove(gate_file)
+    except FileNotFoundError:
+        pass
+    os.environ[STARTUP_WARMUP_HEALTH_GATE_FILE_ENV] = gate_file
+    logging.info("startup warmup health gate enabled, gate_file=%s", gate_file)
+    return gate_file
+
+
+def _mark_startup_warmup_health_gate_ready(gate_file):
+    if not gate_file:
+        return
+    try:
+        with open(gate_file, "w") as f:
+            f.write("ready\n")
+        logging.info("startup warmup health gate marked ready, gate_file=%s", gate_file)
+    except Exception:
+        logging.error(
+            "failed to mark startup warmup health gate ready, gate_file=%s, trace=%s",
+            gate_file,
+            traceback.format_exc(),
+        )
+        raise
 
 
 def main():
@@ -350,6 +411,7 @@ def start_server(py_env_configs: PyEnvConfigs):
     )
     # Initialize backend_process to None in case role_type is FRONTEND
     backend_process = None
+    startup_warmup_gate_file = _setup_startup_warmup_health_gate(py_env_configs)
 
     try:
         if py_env_configs.role_config.role_type != RoleType.FRONTEND:
@@ -379,6 +441,7 @@ def start_server(py_env_configs: PyEnvConfigs):
             raise Exception("Health checks failed")
 
         _maybe_run_startup_real_warmup(py_env_configs)
+        _mark_startup_warmup_health_gate_ready(startup_warmup_gate_file)
 
         logging.info(
             f"Backend RPC service is listening on 0.0.0.0, IP/IP range can be customized as needed"
@@ -393,70 +456,43 @@ def start_server(py_env_configs: PyEnvConfigs):
         process_manager.monitor_and_release_processes()
 
 
-def _env_flag_enabled(name: str, default: str = "0") -> bool:
-    return os.environ.get(name, default).strip().lower() in ("1", "true", "on", "yes")
+def _get_startup_real_warmup_pow2_lens(max_len: int):
+    if max_len < STARTUP_REAL_WARMUP_MIN_TOKEN_LEN:
+        raise ValueError(
+            "model_args.max_seq_len should be at least "
+            f"{STARTUP_REAL_WARMUP_MIN_TOKEN_LEN}, got {max_len}"
+        )
+    lens = []
+    value = STARTUP_REAL_WARMUP_MIN_TOKEN_LEN
+    while value <= max_len:
+        lens.append(value)
+        value *= 2
+    if lens[-1] != max_len:
+        lens.append(max_len)
+    return lens
 
 
-def _parse_positive_int_list(raw_value: str, env_name: str):
-    values = []
-    for item in raw_value.replace(";", ",").split(","):
-        item = item.strip()
-        if not item:
-            continue
-        value = int(item)
-        if value <= 0:
-            raise ValueError(f"{env_name} should contain positive integers, got {value}")
-        values.append(value)
-    if not values:
-        raise ValueError(f"{env_name} should contain at least one positive integer")
-    return values
+def _get_startup_real_warmup_max_len(py_env_configs: PyEnvConfigs):
+    max_len = int(getattr(py_env_configs.model_args, "max_seq_len", None) or 0)
+    if max_len <= 0:
+        raise ValueError(
+            f"model_args.max_seq_len should be positive, got {max_len}"
+        )
+    return max_len
 
 
 def _get_startup_real_warmup_token_lens(py_env_configs: PyEnvConfigs):
-    token_lens_env = os.environ.get("DSV4_STARTUP_REAL_WARMUP_TOKEN_LENS", "").strip()
-    if token_lens_env:
-        lower_value = token_lens_env.lower()
-        if lower_value in ("pow2", "power2", "powers_of_2", "powers-of-2"):
-            max_len = int(
-                os.environ.get(
-                    "DSV4_STARTUP_REAL_WARMUP_MAX_SEQ_LEN",
-                    getattr(py_env_configs.model_args, "max_seq_len", None) or 8192,
-                )
-            )
-            if max_len <= 0:
-                raise ValueError(
-                    f"DSV4_STARTUP_REAL_WARMUP_MAX_SEQ_LEN should be positive, got {max_len}"
-                )
-            lens = []
-            value = 1
-            while value <= max_len:
-                lens.append(value)
-                value *= 2
-            return lens
-        return _parse_positive_int_list(
-            token_lens_env, "DSV4_STARTUP_REAL_WARMUP_TOKEN_LENS"
-        )
-
-    token_len = int(os.environ.get("DSV4_STARTUP_REAL_WARMUP_TOKEN_LEN", "1"))
-    if token_len <= 0:
-        raise ValueError(
-            f"DSV4_STARTUP_REAL_WARMUP_TOKEN_LEN should be positive, got {token_len}"
-        )
-    return [token_len]
+    max_len = _get_startup_real_warmup_max_len(py_env_configs)
+    token_lens = _get_startup_real_warmup_pow2_lens(max_len)
+    logging.info(
+        "DSV4 startup real warmup uses fixed pow2 token lens through max_seq_len=%d: %s",
+        max_len,
+        token_lens,
+    )
+    return token_lens
 
 
 def _get_startup_real_warmup_grpc_addresses(py_env_configs: PyEnvConfigs):
-    addrs_env = os.environ.get("DSV4_STARTUP_REAL_WARMUP_GRPC_ADDRS", "").strip()
-    if addrs_env:
-        addrs = [
-            addr.strip()
-            for addr in addrs_env.replace(";", ",").split(",")
-            if addr.strip()
-        ]
-        if not addrs:
-            raise ValueError("DSV4_STARTUP_REAL_WARMUP_GRPC_ADDRS is empty")
-        return addrs
-
     try:
         world_info = get_world_info(
             server_config=py_env_configs.server_config,
@@ -475,12 +511,21 @@ def _get_startup_real_warmup_grpc_addresses(py_env_configs: PyEnvConfigs):
             traceback.format_exc(),
         )
 
-    grpc_host = os.environ.get("DSV4_STARTUP_REAL_WARMUP_GRPC_HOST", "127.0.0.1")
-    return [f"{grpc_host}:{int(py_env_configs.server_config.rpc_server_port)}"]
+    return [f"127.0.0.1:{int(py_env_configs.server_config.rpc_server_port)}"]
 
 
 def _new_startup_real_warmup_request_id(index: int) -> int:
     return (int(time.time() * 1000000) + index) & 0x7FFFFFFFFFFFFFFF
+
+
+def _get_startup_real_warmup_request_token_len(token_len: int, max_len: int) -> int:
+    if token_len >= max_len:
+        return max(1, max_len - STARTUP_REAL_WARMUP_MAX_NEW_TOKENS)
+    return token_len
+
+
+def _get_startup_real_warmup_max_new_tokens() -> int:
+    return STARTUP_REAL_WARMUP_MAX_NEW_TOKENS
 
 
 def _run_startup_real_warmup_async(coroutine):
@@ -499,55 +544,10 @@ async def _run_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs):
     from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient
     from rtp_llm.utils.base_model_datatypes import GenerateInput
 
-    raw_token_lens = _get_startup_real_warmup_token_lens(py_env_configs)
-    min_token_len = int(os.environ.get("DSV4_STARTUP_REAL_WARMUP_MIN_TOKEN_LEN", "2"))
-    if min_token_len <= 0:
-        raise ValueError(
-            "DSV4_STARTUP_REAL_WARMUP_MIN_TOKEN_LEN should be positive, "
-            f"got {min_token_len}"
-        )
-    token_lens = []
-    skipped_token_lens = []
-    seen_token_lens = set()
-    for token_len in raw_token_lens:
-        if token_len < min_token_len:
-            skipped_token_lens.append(token_len)
-            continue
-        if token_len not in seen_token_lens:
-            token_lens.append(token_len)
-            seen_token_lens.add(token_len)
-    if skipped_token_lens:
-        logging.warning(
-            "skip DSV4 startup grpc warmup token lens below min prefill length, "
-            "skipped=%s, min_token_len=%d",
-            skipped_token_lens,
-            min_token_len,
-        )
-    if not token_lens:
-        token_lens = [min_token_len]
-        logging.warning(
-            "DSV4 startup grpc warmup token lens are all below min prefill length; "
-            "fallback to token_lens=%s",
-            token_lens,
-        )
+    token_lens = _get_startup_real_warmup_token_lens(py_env_configs)
+    max_len = _get_startup_real_warmup_max_len(py_env_configs)
     addresses = _get_startup_real_warmup_grpc_addresses(py_env_configs)
-    timeout_s = float(os.environ.get("DSV4_STARTUP_REAL_WARMUP_TIMEOUT_S", "600"))
-    if timeout_s <= 0:
-        raise ValueError(
-            f"DSV4_STARTUP_REAL_WARMUP_TIMEOUT_S should be positive, got {timeout_s}"
-        )
-    timeout_ms = int(timeout_s * 1000)
-    max_new_tokens = int(os.environ.get("DSV4_STARTUP_REAL_WARMUP_MAX_TOKENS", "1"))
-    if max_new_tokens <= 0:
-        raise ValueError(
-            "DSV4_STARTUP_REAL_WARMUP_MAX_TOKENS should be positive, "
-            f"got {max_new_tokens}"
-        )
-    token_id = int(os.environ.get("DSV4_STARTUP_REAL_WARMUP_TOKEN_ID", "100"))
-    if token_id < 0:
-        raise ValueError(
-            f"DSV4_STARTUP_REAL_WARMUP_TOKEN_ID should be non-negative, got {token_id}"
-        )
+    timeout_ms = int(STARTUP_REAL_WARMUP_TIMEOUT_S * 1000)
 
     client_config = (
         py_env_configs.grpc_config.get_client_config()
@@ -559,9 +559,9 @@ async def _run_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs):
         "token_lens=%s, token_id=%d, max_new_tokens=%d, timeout=%.1fs",
         addresses,
         token_lens,
-        token_id,
-        max_new_tokens,
-        timeout_s,
+        STARTUP_REAL_WARMUP_TOKEN_ID,
+        STARTUP_REAL_WARMUP_MAX_NEW_TOKENS,
+        STARTUP_REAL_WARMUP_TIMEOUT_S,
     )
 
     begin_all = time.time()
@@ -578,6 +578,10 @@ async def _run_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs):
                 request_id = _new_startup_real_warmup_request_id(
                     addr_idx * len(token_lens) + len_idx
                 )
+                request_token_len = _get_startup_real_warmup_request_token_len(
+                    token_len, max_len
+                )
+                max_new_tokens = _get_startup_real_warmup_max_new_tokens()
                 generate_config = GenerateConfig(
                     max_new_tokens=max_new_tokens,
                     top_k=1,
@@ -594,7 +598,11 @@ async def _run_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs):
                 )
                 generate_input = GenerateInput(
                     request_id=request_id,
-                    token_ids=torch.full((token_len,), token_id, dtype=torch.int32),
+                    token_ids=torch.full(
+                        (request_token_len,),
+                        STARTUP_REAL_WARMUP_TOKEN_ID,
+                        dtype=torch.int32,
+                    ),
                     mm_inputs=[],
                     generate_config=generate_config,
                 )
@@ -604,10 +612,13 @@ async def _run_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs):
                 chunk_count = 0
                 logging.info(
                     "DSV4 startup grpc warmup request begin, "
-                    "addr=%s, request_id=%d, token_len=%d",
+                    "addr=%s, request_id=%d, target_token_len=%d, "
+                    "request_token_len=%d, max_new_tokens=%d",
                     addr,
                     request_id,
                     token_len,
+                    request_token_len,
+                    max_new_tokens,
                 )
                 async for outputs in client.enqueue(generate_input):
                     chunk_count += 1
@@ -616,11 +627,14 @@ async def _run_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs):
                 if last_aux is not None:
                     logging.info(
                         "DSV4 startup grpc warmup request finished, addr=%s, request_id=%d, "
-                        "token_len=%d, chunks=%d, input_len=%s, reuse_len=%s, output_len=%s, "
-                        "cost=%.2fs",
+                        "target_token_len=%d, request_token_len=%d, max_new_tokens=%d, "
+                        "chunks=%d, input_len=%s, "
+                        "reuse_len=%s, output_len=%s, cost=%.2fs",
                         addr,
                         request_id,
                         token_len,
+                        request_token_len,
+                        max_new_tokens,
                         chunk_count,
                         getattr(last_aux, "input_len", None),
                         getattr(last_aux, "reuse_len", None),
@@ -630,10 +644,13 @@ async def _run_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs):
                 else:
                     logging.info(
                         "DSV4 startup grpc warmup request finished, addr=%s, request_id=%d, "
-                        "token_len=%d, chunks=%d, aux_info=None, cost=%.2fs",
+                        "target_token_len=%d, request_token_len=%d, max_new_tokens=%d, "
+                        "chunks=%d, aux_info=None, cost=%.2fs",
                         addr,
                         request_id,
                         token_len,
+                        request_token_len,
+                        max_new_tokens,
                         chunk_count,
                         time.time() - begin,
                     )
@@ -655,88 +672,18 @@ async def _run_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs):
         time.time() - begin_all,
     )
 
-
-def _run_startup_real_warmup_http(py_env_configs: PyEnvConfigs):
-    port = int(py_env_configs.server_config.server_port)
-    url = f"http://127.0.0.1:{port}/v1/chat/completions"
-    prompt = os.environ.get("DSV4_STARTUP_REAL_WARMUP_PROMPT", "你是谁")
-    model = os.environ.get("DSV4_STARTUP_REAL_WARMUP_MODEL", "startup-warmup")
-    timeout_s = float(os.environ.get("DSV4_STARTUP_REAL_WARMUP_TIMEOUT_S", "600"))
-    payload = {
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": int(os.environ.get("DSV4_STARTUP_REAL_WARMUP_MAX_TOKENS", "1")),
-        "temperature": 0,
-        "stream": False,
-    }
-
-    begin = time.time()
-    logging.info(
-        "running DSV4 startup real warmup via http chat, url=%s, prompt_chars=%d, timeout=%.1fs",
-        url,
-        len(prompt),
-        timeout_s,
-    )
-    response = requests.post(url, json=payload, timeout=timeout_s)
-    response.raise_for_status()
-    logging.info(
-        "DSV4 startup http warmup finished in %.2fs, response_prefix=%s",
-        time.time() - begin,
-        response.text[:512],
-    )
-
-
 def _maybe_run_startup_real_warmup(py_env_configs: PyEnvConfigs):
-    flag = os.environ.get("DSV4_STARTUP_REAL_WARMUP", "auto").strip().lower()
-    if flag in ("0", "false", "off", "no"):
+    if not _should_run_startup_real_warmup(py_env_configs):
         return
 
-    model_type = getattr(py_env_configs.model_args, "model_type", "")
-    role_type = py_env_configs.role_config.role_type
-    role_value = getattr(role_type, "value", role_type)
-    prefill_value = getattr(RoleType.PREFILL, "value", RoleType.PREFILL)
-    role_is_prefill = role_type == RoleType.PREFILL or str(role_type).endswith("PREFILL")
     try:
-        role_is_prefill = role_is_prefill or int(role_value) == int(prefill_value)
-    except Exception:
-        pass
-    if flag == "auto" and not (model_type == "deepseek_v4" and role_is_prefill):
-        return
-
-    backend = os.environ.get("DSV4_STARTUP_REAL_WARMUP_BACKEND", "grpc").strip().lower()
-    try:
-        if backend in ("grpc", "model_rpc", "token", "tokens"):
-            try:
-                _run_startup_real_warmup_async(
-                    _run_startup_real_warmup_grpc(py_env_configs)
-                )
-            except (ImportError, ModuleNotFoundError):
-                if not _env_flag_enabled(
-                    "DSV4_STARTUP_REAL_WARMUP_GRPC_FALLBACK_HTTP", "1"
-                ):
-                    raise
-                logging.warning(
-                    "DSV4 startup grpc warmup dependency import failed; "
-                    "fallback to legacy http chat warmup. trace=%s",
-                    traceback.format_exc(),
-                )
-                _run_startup_real_warmup_http(py_env_configs)
-        elif backend in ("http", "chat", "openai"):
-            _run_startup_real_warmup_http(py_env_configs)
-        else:
-            raise ValueError(
-                "DSV4_STARTUP_REAL_WARMUP_BACKEND should be one of "
-                "grpc/model_rpc/token/tokens/http/chat/openai, got "
-                f"{backend}"
-            )
+        _run_startup_real_warmup_async(_run_startup_real_warmup_grpc(py_env_configs))
     except Exception:
         logging.error(
-            "DSV4 startup real warmup failed, backend=%s, trace: %s",
-            backend,
+            "DSV4 startup real warmup failed, trace: %s",
             traceback.format_exc(),
         )
-        if _env_flag_enabled("DSV4_STARTUP_REAL_WARMUP_REQUIRED", "1"):
-            raise
+        raise
 
 
 if __name__ == "__main__":
