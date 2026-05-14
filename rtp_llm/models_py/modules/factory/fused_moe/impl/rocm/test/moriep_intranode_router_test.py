@@ -147,6 +147,7 @@ def _install_rtp_llm_stubs_for_moriep_wrapper() -> None:
 # ---------------------------------------------------------------------------
 
 _FUSED_MOE_DEFS_DIR = _MODELS_PY / "modules" / "factory" / "fused_moe" / "defs"
+_TRITON_MOE_DIR = _MODELS_PY / "triton_kernels" / "moe"
 _ROUTER_FILE = (
     _MODELS_PY
     / "modules"
@@ -182,6 +183,12 @@ def _load_production_router_modules() -> None:
     _load_module(
         "rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe",
         _FUSED_MOE_DEFS_DIR / "fused_moe.py",
+    )
+    # 5. remap_local_ids_kernel (lazy-imported by router._remap_to_local_ids)
+    _ensure_packages_up_to("rtp_llm.models_py.triton_kernels.moe")
+    _load_module(
+        "rtp_llm.models_py.triton_kernels.moe.remap_local_ids_kernel",
+        _TRITON_MOE_DIR / "remap_local_ids_kernel.py",
     )
 
 
