@@ -338,23 +338,6 @@ class MoE(nn.Module):
                     indices[dbg_pos_mask].contiguous(),
                 )
 
-        # GroupedFP4 path uses bincount/cumsum/argsort + .item() — these
-        # abort cuda-stream capture. The legacy code asserted this at the
-        # call site; we keep the assert here for the exact same dev-error
-        # behavior. (Future: Phase 2 removes the .item() and lets grouped
-        # fall through cleanly under capture.)
-        if (
-            self._strategy.name == "grouped_fp4"
-            and torch.cuda.is_current_stream_capturing()
-        ):
-            raise AssertionError(
-                "grouped FP4 path uses bincount/cumsum/argsort which abort "
-                "cuda-stream capture; do not enable cuda_graph + "
-                "DSV4_USE_GROUPED_FP4=1 together (grouped is a prefill "
-                "optimisation, decode-under-graph should keep the env off "
-                "to fall through to LocalLoopStrategy)."
-            )
-
         with record_function_range("dsv4.moe.shared_expert_start"):
             self._shared_executor.start(self.shared_experts, x)
         try:

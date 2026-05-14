@@ -1,11 +1,12 @@
-"""GroupedFP4Strategy: single-card DeepGEMM ``m_grouped_fp8_fp4_gemm_nt_contiguous``.
+"""GroupedFP4Strategy: single-card DeepGEMM FP8-act x FP4-weight MoE.
 
-EP == 1 + DeepGEMM ≥ 2.4 + SM100. Opt-in via
-``DSV4_USE_GROUPED_FP4=1`` (legacy toggle, mapped to ``forced='grouped_fp4'``
-in ``select_strategy``).
+This mirrors vLLM's DeepSeek-V4 ``DeepGemmFP4Experts`` backend: route tokens
+by expert, run grouped ``m_grouped_fp8_fp4_gemm_nt_contiguous`` for the
+gate/up projection, fuse SiLU+mul+FP8 requant, run grouped down projection,
+then gather/reduce by router weight.
 
-Wired into ``MoE`` via ``select_strategy`` when ep_size == 1 and the
-DeepGEMM kernel is available + opted in.
+Single-card + DeepGEMM ≥ 2.4 + SM100 selects this path by default. Set
+``DSV4_USE_GROUPED_FP4=0`` or ``DSV4_MOE_STRATEGY=local_loop`` to opt out.
 
 Forward is the 4-opt prefill path:
   (1) quant input ONCE pre-permute (vs. ×topk on padded buffer)
@@ -23,6 +24,7 @@ from typing import Dict, Optional
 import torch
 
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
+    fp8_fp4_gemm_nt,
     m_grouped_fp8_fp4_gemm_nt_contiguous,
 )
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
@@ -47,21 +49,18 @@ _GROUPED_ALIGNMENT = 128
 def _has_fp8_fp4_grouped_kernel() -> bool:
     """True iff the grouped FP4 routed-expert path should be used.
 
-    Opt-in via ``DSV4_USE_GROUPED_FP4=1`` because the path historically
-    produced garbage output across V4-Flash's 60 layers when the kernel's
-    per-group row alignment (``get_mk_alignment_for_contiguous_layout()``,
-    default 128 on SM100) was not honored — single-pass synthetic tests
-    were inside 5% rel-diff but per-layer error compounded catastrophically.
-    The current ``_grouped_routed_experts`` zeros padding rows + tags
-    ``-1`` in ``grouped_layout`` per the kernel contract (mirrors
-    ``deepgemm/tests/generators.py::generate_m_grouped_contiguous``),
-    but smoke validation on every new SM100 variant is required before
-    flipping this default ON.
-
     Requires deep_gemm ≥ 2.4 (ships ``m_grouped_fp8_fp4_gemm_nt_contiguous``)
-    and an SM100+ device.
+    and an SM100 device.
+
+    ``DSV4_USE_GROUPED_FP4`` semantics:
+      - unset / "auto": enable when the runtime supports the vLLM-style
+        DeepGEMM FP8xFP4 backend.
+      - "0": disable and fall back to LocalLoopStrategy.
+      - "1": request this strategy, but still require the kernel/device probe
+        to pass.
     """
-    if os.environ.get("DSV4_USE_GROUPED_FP4", "0") != "1":
+    flag = os.environ.get("DSV4_USE_GROUPED_FP4", "auto").strip().lower()
+    if flag in ("0", "false", "off", "no"):
         return False
     try:
         import deep_gemm
@@ -74,7 +73,7 @@ def _has_fp8_fp4_grouped_kernel() -> bool:
     if not torch.cuda.is_available():
         return False
     cap = torch.cuda.get_device_capability()
-    return cap[0] >= 10
+    return cap[0] == 10
 
 
 @register_strategy
@@ -83,7 +82,12 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
 
     @classmethod
     def can_handle(cls, cfg: MoeCfg) -> bool:
-        return cfg.ep_size == 1 and _has_fp8_fp4_grouped_kernel()
+        return (
+            cfg.ep_size == 1
+            and cfg.dim % FP8_BLOCK == 0
+            and cfg.moe_inter_dim % FP8_BLOCK == 0
+            and _has_fp8_fp4_grouped_kernel()
+        )
 
     def setup_weights(self, layer_weights: Dict) -> None:
         """Stack EP-sliced routed-expert tensors into ``[E, ...]`` int8 +
@@ -141,6 +145,24 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
             s13_raw, 2 * inter, D, E
         )
         self._s2 = prepare_fp4_weight_scale_for_deepgemm(s2_raw, D, inter, E)
+        s13_dense = prepare_fp4_weight_scale_for_deepgemm(
+            s13_raw.reshape(E * 2 * inter, D // FP4_BLOCK),
+            E * 2 * inter,
+            D,
+        )
+        self._s13_dense_t = s13_dense.as_strided(
+            (E, s13_dense.size(1), 2 * inter),
+            (2 * inter, E * 2 * inter, 1),
+        )
+        s2_dense = prepare_fp4_weight_scale_for_deepgemm(
+            s2_raw.reshape(E * D, inter // FP4_BLOCK),
+            E * D,
+            inter,
+        )
+        self._s2_dense_t = s2_dense.as_strided(
+            (E, s2_dense.size(1), D),
+            (D, E * D, 1),
+        )
         del s13_raw, s2_raw
 
         # Return loader's freed FP4 blocks to CUDA so the KV-cache
@@ -173,6 +195,8 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
 
         if N == 0:
             return torch.zeros(N, D, dtype=torch.float32, device=device)
+        if torch.cuda.is_current_stream_capturing():
+            return self._forward_capture_topk(x, weights, indices)
 
         # (1) Quant input ONCE — column-major TMA-aligned UE8M0 packed scale,
         # shape compatible with both ep_scatter input and DeepGEMM contiguous.
@@ -293,3 +317,75 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         gather_out = torch.empty((N, D), dtype=torch.bfloat16, device=device)
         ep_gather(down_out, adjusted_topk_ids, weights, output_index, gather_out)
         return gather_out.float()
+
+    def _forward_capture_topk(
+        self,
+        x: torch.Tensor,
+        weights: torch.Tensor,
+        indices: torch.Tensor,
+    ) -> torch.Tensor:
+        cfg = self.cfg
+        N, D = x.shape
+        inter = cfg.moe_inter_dim
+        K = indices.size(1)
+        device = x.device
+
+        x_2d = x.reshape(N, D).contiguous()
+        if x_2d.dtype != torch.bfloat16:
+            x_2d = x_2d.to(torch.bfloat16)
+
+        y = torch.empty((N, D), dtype=torch.float32, device=device)
+        y.zero_()
+        for n in range(N):
+            x_n = x_2d[n : n + 1].contiguous()
+            x_fp8, x_scale = sgl_per_token_group_quant_fp8(
+                x_n,
+                group_size=FP8_BLOCK,
+                eps=1e-4,
+                column_major_scales=True,
+                scale_tma_aligned=True,
+                scale_ue8m0=True,
+            )
+            for k in range(K):
+                eid_t = indices[n, k : k + 1]
+                router_w = weights[n, k : k + 1, None]
+
+                w13 = torch.index_select(self._w13, 0, eid_t).squeeze(0)
+                s13 = (
+                    torch.index_select(self._s13_dense_t, 0, eid_t)
+                    .squeeze(0)
+                    .transpose(0, 1)
+                )
+                gate_up = torch.empty(
+                    1, 2 * inter, device=device, dtype=torch.bfloat16
+                )
+                fp8_fp4_gemm_nt(
+                    (x_fp8, x_scale),
+                    (w13, s13),
+                    gate_up,
+                    recipe_a=(1, FP8_BLOCK),
+                    recipe_b=(1, FP4_BLOCK),
+                )
+
+                h_fp8, h_scale = silu_mul_fp8_quant_packed(
+                    gate_up,
+                    clamp_limit=cfg.swiglu_limit,
+                    group_size=FP8_BLOCK,
+                )
+                w2 = torch.index_select(self._w2, 0, eid_t).squeeze(0)
+                s2 = (
+                    torch.index_select(self._s2_dense_t, 0, eid_t)
+                    .squeeze(0)
+                    .transpose(0, 1)
+                )
+                down_out = torch.empty(1, D, device=device, dtype=torch.bfloat16)
+                fp8_fp4_gemm_nt(
+                    (h_fp8, h_scale),
+                    (w2, s2),
+                    down_out,
+                    recipe_a=(1, FP8_BLOCK),
+                    recipe_b=(1, FP4_BLOCK),
+                )
+                y[n : n + 1].add_(down_out.float() * router_w)
+
+        return y
