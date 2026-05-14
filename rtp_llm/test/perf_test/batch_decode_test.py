@@ -260,6 +260,8 @@ def main() -> str:
     else:
         batch_size_list = [int(x) for x in args.batch_size.split(",")]
         input_len_list = [int(x) for x in args.input_len.split(",")]
+        needed_seq_len = max(input_len_list) + args.decode_test_length
+        effective_max_seq_len = max(needed_seq_len, args.max_seq_len)
 
         server = EngineServer(args, remaining)
         server.start(
