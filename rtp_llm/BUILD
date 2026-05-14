@@ -240,14 +240,12 @@ py_library(
         "//rtp_llm/model_loader:loader",
         "//rtp_llm/models_py:models",
     ] + arch_dep + select({
-        # cuda13 lock omits deep_ep pending rebuild → only deep_gemm here.
-        "@//:using_cuda13_x86": ["deep_gemm"],
+        "@//:using_cuda13_x86": deep,
         "@//:using_cuda": deep,
         "//conditions:default": []
     }) + select({
-        # cuda13 lock currently ships flash-mla + tilelang (no flashinfer /
-        # fast-hadamard yet); rebuilds for those tracked separately.
-        "@//:using_cuda13_x86": ["flash-mla", "tilelang"],
+        # cuda13 ships flash-mla + tilelang + fast-hadamard-transform (no flashinfer yet).
+        "@//:using_cuda13_x86": ["flash-mla", "tilelang", "fast-hadamard-transform"],
         "@//:using_cuda12_9_x86": flashinfer_with_cache + flashmla,
         "@//:using_cuda12_arm": flashinfer_with_cache + ["flash-mla", "fast-hadamard-transform"],
         "@//:cuda_pre_12_9": flashinfer,

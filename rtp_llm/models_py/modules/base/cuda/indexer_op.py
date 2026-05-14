@@ -385,9 +385,9 @@ class IndexerOp(nn.Module):
             attention_inputs.kv_cache_kernel_block_id_device.shape[1] * self.blocksize
         )
 
-        # deep_gemm ≥ FlashInfer-0.6.9 (cuda13) requires context_lens to be 2D.
-        # fmha_params.kvlen_d is 1D [B]; unsqueeze(0) → [1, B] satisfies dim()==2.
-        kvlen_2d = fmha_params.kvlen_d.unsqueeze(0)
+        # deep_gemm 2.5.0 expects context_lens as [batch_size, next_n].
+        # fmha_params.kvlen_d is 1D [B]; unsqueeze(1) → [B, 1] for next_n=1 (decode).
+        kvlen_2d = fmha_params.kvlen_d.unsqueeze(1)
 
         schedule_metadata = deep_gemm.get_paged_mqa_logits_metadata(
             kvlen_2d,
