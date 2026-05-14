@@ -390,6 +390,8 @@ class TestUpdatePrefillParamsForCudaGraph(unittest.TestCase):
         self.assertEqual(p.max_seqlen_k, 5)
         self.assertEqual(p.token_q_num, 20)
         self.assertEqual(p.token_kv_num, 20)
+        # prefill_seqlen_k_int32 must be synced from cu_seqlens_k
+        self.assertEqual(p.prefill_seqlen_k_int32.tolist(), [5, 5, 5, 5])
 
     def test_rebuild_with_prefix(self):
         """Rebuild cu_seqlens from input_lengths + prefix_lengths."""
@@ -407,6 +409,8 @@ class TestUpdatePrefillParamsForCudaGraph(unittest.TestCase):
         self.assertEqual(p.max_seqlen_k, 203)
         self.assertEqual(p.token_q_num, 13)
         self.assertEqual(p.token_kv_num, 313)
+        # prefill_seqlen_k_int32 must match per-batch kv lengths
+        self.assertEqual(p.prefill_seqlen_k_int32.tolist(), [105, 203, 5])
 
     def test_active_and_inactive_batches(self):
         """MTP draft: active batches have tokens, inactive batches have 0."""
@@ -440,6 +444,8 @@ class TestUpdatePrefillParamsForCudaGraph(unittest.TestCase):
         self.assertEqual(p.cu_seqlens_k.tolist(), [0, 105, 210])
         self.assertEqual(p.prefix_lengths.tolist(), [100, 100])
         self.assertEqual(p.max_seqlen_k, 105)
+        # prefill_seqlen_k_int32 must be derived from live cu_seqlens_k
+        self.assertEqual(p.prefill_seqlen_k_int32.tolist(), [105, 105])
 
     def test_prefix_batch_size_mismatch_raises(self):
         """prefix_lengths batch size != expected_batch raises ValueError."""
