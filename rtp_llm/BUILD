@@ -243,12 +243,14 @@ py_library(
     ] + arch_dep + select({
         # cuda13 lock omits deep_ep pending rebuild → only deep_gemm here.
         "@//:using_cuda13_x86": ["deep_gemm"],
+        "@//:using_cuda13_arm": ["deep_gemm"],
         "@//:using_cuda": deep,
         "//conditions:default": []
     }) + select({
         # cuda13 lock currently ships flash-mla + tilelang (no flashinfer /
         # fast-hadamard yet); rebuilds for those tracked separately.
         "@//:using_cuda13_x86": ["flash-mla", "tilelang"],
+        "@//:using_cuda13_arm": ["flash-mla", "tilelang"],
         "@//:using_cuda12_9_x86": flashinfer_with_cache + flashmla,
         "@//:using_cuda12_arm": flashinfer_with_cache + ["flash-mla", "fast-hadamard-transform"],
         "@//:cuda_pre_12_9": flashinfer,
@@ -256,6 +258,7 @@ py_library(
     }) + select({
         # rtp_kernel built from gitlab cuda_extension main against torch 2.11+cu130.
         "@//:using_cuda13_x86": rtp_kernel,
+        "@//:using_cuda13_arm": rtp_kernel,
         "@//:using_cuda12_9_x86": rtp_kernel,
         "@//:using_cuda12_arm": rtp_kernel,
         "@//:cuda_pre_12_9": [],
@@ -263,12 +266,14 @@ py_library(
     }) + select({
         # flash_attn / flash_attn_3 not yet rebuilt for torch 2.11 → cuda13 empty.
         "@//:using_cuda13_x86": [],
+        "@//:using_cuda13_arm": [],
         "@//:using_cuda12_9_x86": flashattn,
         "@//:using_cuda12_arm": flashattn,
         "@//:cuda_pre_12_9": [],
         "//conditions:default": []
     }) + select({
         "@//:using_arm": [],
+        "@//:using_cuda13_arm": [],
         "@//:using_cuda12_arm": [],
         # "//:xft_use_icx": [
         #     "xfastertransformer_devel_icx",
@@ -280,6 +285,7 @@ py_library(
         "@//:using_arm": [],
 	    "@//:using_rocm": ["pyrsmi", "amdsmi"],
         "@//:using_cpu": [],
+        "@//:using_cuda13_arm": [],
         "@//:using_cuda12_arm": [],
         "//conditions:default": []
     }) + triton_deps(["triton"]) + internal_deps(),
