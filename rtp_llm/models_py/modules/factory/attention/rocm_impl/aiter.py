@@ -87,11 +87,17 @@ class FMHAParams(ParamsBase):
                 )
                 self.max_seqlen_k = self.max_seq_len + max_prefix_length
                 kv_lengths = input_lengths + prefix_lengths
+                # Hoist FMHA-setup tensor out of the per-layer hot path: with prefix,
+                # seqlen_k = input_lengths + prefix_lengths (int32, on GPU).
+                self.prefill_seqlen_k_int32 = kv_lengths_gpu.to(torch.int32)
             else:
                 # No prefix, kv_lengths equals input_lengths
                 kv_lengths = input_lengths
                 self.cu_seqlens_k = self.cu_seqlens_q.clone()
                 self.max_seqlen_k = self.max_seq_len
+                # Hoist FMHA-setup tensor: with no prefix, seqlen_k == input_lengths
+                # (int32 on GPU). Saves a per-layer alloc + add + dtype-cast trio.
+                self.prefill_seqlen_k_int32 = input_lengths_gpu.to(torch.int32)
 
             self.max_seqlen_q = self.max_seq_len
             self.seq_lens = None
@@ -432,24 +438,14 @@ class AiterPrefillAttnOp:
         if cu_seqlens_q.device != q_tensor.device:
             cu_seqlens_q = cu_seqlens_q.to(q_tensor.device, non_blocking=True)
 
-        # prefix_lengths: default to zeros when no prefix (unified logic)
+        # FMHA-setup tensor is pre-computed once per prefill in FMHAParams.__init__,
+        # so the per-layer hot path skips a kernel/alloc trio (prefix-zeros allocation
+        # + cu_seqlens diff + add+to_int32). The cached tensor is bit-exact identical
+        # to the per-layer recomputation.
         batch_size = cu_seqlens_q.shape[0] - 1
-        if (
-            fmha_params.prefix_lengths is not None
-            and fmha_params.prefix_lengths.numel() > 0
-        ):
-            prefix_lengths_device = fmha_params.prefix_lengths
-            if prefix_lengths_device.device != cu_seqlens_q.device:
-                prefix_lengths_device = prefix_lengths_device.to(
-                    cu_seqlens_q.device, non_blocking=True
-                )
-        else:
-            prefix_lengths_device = torch.zeros(
-                batch_size, dtype=torch.int32, device=cu_seqlens_q.device
-            )
-
-        input_lengths = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
-        seqlen_k = (prefix_lengths_device + input_lengths).to(torch.int32)
+        seqlen_k = fmha_params.prefill_seqlen_k_int32
+        if seqlen_k.device != q_tensor.device:
+            seqlen_k = seqlen_k.to(q_tensor.device, non_blocking=True)
 
         # Reuse values computed once in FMHAParams.prepare() to avoid
         # per-layer GPU→CPU sync from .item() on the hot path.
@@ -1419,6 +1415,12 @@ class AiterPrefillImplPaged(FMHAImplBase):
         fmha_params.max_seqlen_k = int(kv_lens.max()) if expected_batch > 0 else 0
         fmha_params.token_q_num = int(q_lens.sum())
         fmha_params.token_kv_num = int(kv_lens.sum())
+
+        # Sync prefill_seqlen_k_int32 from updated cu_seqlens_k so that
+        # CUDA graph replay does not reuse stale seqlen_k values.
+        fmha_params.prefill_seqlen_k_int32 = (
+            fmha_params.cu_seqlens_k[1:] - fmha_params.cu_seqlens_k[:-1]
+        ).to(torch.int32)
 
         kv_block_id = getattr(attn_inputs, "kv_cache_kernel_block_id_device", None)
         if kv_block_id is None:
