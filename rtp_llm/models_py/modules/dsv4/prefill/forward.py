@@ -126,6 +126,7 @@ def _build_positions_from_lengths(
     input_lengths: torch.Tensor,  # [B] int
     prefix_lengths: torch.Tensor,  # [B] int
     device: torch.device,
+    total_tokens: Optional[int] = None,
 ) -> torch.Tensor:
     """Synthesize per-token global positions ``[T_total]`` int64 when the
     framework didn't populate ``attn.position_ids`` (warmup / cudagraph
@@ -135,23 +136,29 @@ def _build_positions_from_lengths(
     emit ``sp[b], sp[b]+1, ..., sp[b]+L[b]-1``; concatenated across the batch.
 
     Must be CUDA-graph-capture-safe: callers pass GPU-resident tensors
-    (``input_lengths_d`` / ``prefix_lengths_d``) during capture, and the
-    per-element ``.item()`` reads synchronize on fixed-shape capture inputs
-    without inserting unpinned host→device copies.
+    (``input_lengths_d`` / ``prefix_lengths_d``) during capture. Keep the
+    body tensor-only so capture does not synchronize on scalar reads.
     """
-    input_lengths = input_lengths.to(dtype=torch.int64)
-    prefix_lengths = prefix_lengths.to(dtype=torch.int64)
+    input_lengths = input_lengths.to(device=device, dtype=torch.int64)
+    prefix_lengths = prefix_lengths.to(device=device, dtype=torch.int64)
     batch_size = int(input_lengths.numel())
-    segments = []
-    for b in range(batch_size):
-        length = int(input_lengths[b].item())
-        start = int(prefix_lengths[b].item())
-        segments.append(
-            torch.arange(start, start + length, dtype=torch.int64, device=device)
-        )
-    if not segments:
+    if total_tokens is None:
+        total_tokens = int(input_lengths.sum().item())
+    if batch_size == 0 or total_tokens == 0:
         return torch.zeros(0, dtype=torch.int64, device=device)
-    return torch.cat(segments, dim=0)
+
+    token_offsets = torch.arange(total_tokens, dtype=torch.int64, device=device)
+    cu_seqlens = torch.cat(
+        [
+            torch.zeros(1, dtype=torch.int64, device=device),
+            input_lengths.cumsum(0),
+        ],
+        dim=0,
+    )
+    req_ids = torch.searchsorted(cu_seqlens[1:], token_offsets, right=True)
+    req_ids = req_ids.clamp(max=batch_size - 1)
+    local_offsets = token_offsets - cu_seqlens.gather(0, req_ids)
+    return prefix_lengths.gather(0, req_ids) + local_offsets
 
 
 def set_cp_info(
@@ -524,7 +531,10 @@ def forward_prefill(
         input_lens = il_d if il_d.numel() > 0 else attn.input_lengths
         prefix_lens = pl_d if pl_d.numel() > 0 else attn.prefix_lengths
         positions = _build_positions_from_lengths(
-            input_lens, prefix_lens, input_ids.device
+            input_lens,
+            prefix_lens,
+            input_ids.device,
+            total_tokens=int(input_ids.numel()),
         )
 
     block_tables_by_type = build_block_tables_batched(kv_cache, attn)
