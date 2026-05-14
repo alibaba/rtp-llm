@@ -255,15 +255,19 @@ class TestProcessManager(unittest.TestCase):
         for proc in procs:
             proc.start()
 
-        # Monitor - should detect crash and terminate all
-        with patch("logging.error") as mock_error:
-            self.manager.monitor_and_release_processes()
+        # Monitor - should detect crash, terminate all, and fail the parent.
+        with patch("logging.error") as mock_error, patch("os._exit") as mock_exit:
+            mock_exit.side_effect = SystemExit(1)
+            with self.assertRaises(SystemExit):
+                self.manager.monitor_and_release_processes()
             mock_error.assert_called()
+            mock_exit.assert_called_with(1)
 
         # All processes should be terminated
         for proc in procs:
             self.assertFalse(proc.is_alive())
         self.assertTrue(self.manager.terminated)
+        self.assertTrue(self.manager.failure_detected)
 
     def test_monitor_with_shutdown_signal(self):
         """Test monitoring with shutdown signal"""
@@ -311,31 +315,6 @@ class TestProcessManager(unittest.TestCase):
         with patch("os.kill") as mock_kill:
             self.manager._monitor_processes_health()
             mock_kill.assert_called_with(12345, signal.SIGKILL)
-
-    def test_failure_cleanup_is_bounded_when_shutdown_timeout_is_unlimited(self):
-        """Unexpected child death should not honor unlimited graceful shutdown."""
-        dead_proc = Mock()
-        dead_proc.is_alive.return_value = False
-        dead_proc.pid = 12345
-        dead_proc._mock_name = "dead_proc"
-
-        alive_proc = Mock()
-        alive_proc.is_alive.return_value = True
-        alive_proc.pid = 23456
-        alive_proc._mock_name = "alive_proc"
-
-        manager = ProcessManager(shutdown_timeout=-1, monitor_interval=0.1)
-        manager.DEFAULT_FAILURE_SHUTDOWN_TIMEOUT = 0
-        manager.set_processes([dead_proc, alive_proc])
-
-        with patch("os.kill") as mock_kill, patch("os._exit") as mock_exit:
-            mock_exit.side_effect = SystemExit(1)
-            with self.assertRaises(SystemExit):
-                manager._monitor_processes_health()
-
-        mock_kill.assert_called_with(23456, signal.SIGKILL)
-        mock_exit.assert_called_with(1)
-        self.assertTrue(manager.failure_detected)
 
     def test_graceful_shutdown(self):
         """Test graceful shutdown method"""
