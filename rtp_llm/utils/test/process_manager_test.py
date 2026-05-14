@@ -312,6 +312,31 @@ class TestProcessManager(unittest.TestCase):
             self.manager._monitor_processes_health()
             mock_kill.assert_called_with(12345, signal.SIGKILL)
 
+    def test_failure_cleanup_is_bounded_when_shutdown_timeout_is_unlimited(self):
+        """Unexpected child death should not honor unlimited graceful shutdown."""
+        dead_proc = Mock()
+        dead_proc.is_alive.return_value = False
+        dead_proc.pid = 12345
+        dead_proc._mock_name = "dead_proc"
+
+        alive_proc = Mock()
+        alive_proc.is_alive.return_value = True
+        alive_proc.pid = 23456
+        alive_proc._mock_name = "alive_proc"
+
+        manager = ProcessManager(shutdown_timeout=-1, monitor_interval=0.1)
+        manager.DEFAULT_FAILURE_SHUTDOWN_TIMEOUT = 0
+        manager.set_processes([dead_proc, alive_proc])
+
+        with patch("os.kill") as mock_kill, patch("os._exit") as mock_exit:
+            mock_exit.side_effect = SystemExit(1)
+            with self.assertRaises(SystemExit):
+                manager._monitor_processes_health()
+
+        mock_kill.assert_called_with(23456, signal.SIGKILL)
+        mock_exit.assert_called_with(1)
+        self.assertTrue(manager.failure_detected)
+
     def test_graceful_shutdown(self):
         """Test graceful shutdown method"""
         self.assertFalse(self.manager.shutdown_requested)
