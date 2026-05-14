@@ -154,11 +154,6 @@ class ProcessManager:
                 and (time.time() - self.first_dead_time) > effective_timeout
             ):
                 self._force_kill_processes(effective_timeout)
-                if self.failure_detected:
-                    logging.error(
-                        "Child process failure cleanup completed, exiting parent"
-                    )
-                    os._exit(1)
                 break
 
             time.sleep(self.monitor_interval)
@@ -172,6 +167,9 @@ class ProcessManager:
         logging.info(f"Monitoring {len(self.processes)} processes")
         self._monitor_processes_health()
         self._join_all_processes()
+        if self.failure_detected:
+            logging.error("Child process failure cleanup completed, exiting parent")
+            os._exit(1)
         logging.info("Process monitoring completed")
 
     def graceful_shutdown(self):
