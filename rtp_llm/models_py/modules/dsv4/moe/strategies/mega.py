@@ -34,6 +34,7 @@ from ..mega_jit_warmup import (
 )
 from ..shared_expert import strict_fused_moe_enabled
 from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
+from ..warmup_sync import sync_cuda_graph_warmup_ranks
 
 _MEGA_MOE_JIT_WARMED_KEYS: set[tuple] = set()
 _PRE_KERNEL_BARRIER_ENV = "DSV4_MEGA_MOE_PRE_KERNEL_BARRIER"
@@ -394,6 +395,10 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         # flow depending on a GPU-side scalar -> CUDA-graph-capture safe.
         self._input_packer.pack(x, weights, indices, buf, T)
         self._maybe_pre_kernel_barrier(T)
+        sync_cuda_graph_warmup_ranks(
+            f"dsv4.mega_moe.layer{self.cfg.layer_id}.before_deepgemm",
+            x.device,
+        )
 
         y = self._mega_y[:T]
         deep_gemm.fp8_fp4_mega_moe(
