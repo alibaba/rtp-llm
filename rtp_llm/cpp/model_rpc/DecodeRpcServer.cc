@@ -668,6 +668,39 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     std::vector<std::shared_ptr<LoadContext>> load_contexts;
     const bool                                is_page_level_rr = load_context.prefill_cp_size > 1
                                   && static_cast<int>(load_context.peer_addrs.size()) == load_context.prefill_cp_size;
+    auto layerGroupIds = [](const CacheConfig& cfg, bool use_hybrid, size_t layer_id) {
+        std::vector<int> layer_gids;
+        if (use_hybrid && layer_id < cfg.layer_to_group_ids.size() && !cfg.layer_to_group_ids[layer_id].empty()) {
+            layer_gids = cfg.layer_to_group_ids[layer_id];
+        } else if (use_hybrid && layer_id < cfg.layer_to_group_id.size()) {
+            const int mapped = cfg.layer_to_group_id[layer_id];
+            layer_gids.push_back(mapped >= 0 ? mapped : 0);
+        } else {
+            layer_gids.push_back(0);
+        }
+        return layer_gids;
+    };
+    auto groupType = [](const CacheConfig& cfg, bool use_hybrid, size_t gid) {
+        if (use_hybrid && gid < cfg.group_types.size()) {
+            return cfg.group_types[gid];
+        }
+        return CacheGroupType::FULL;
+    };
+    auto shouldLoadGroupFromPeer = [&](CacheGroupType group_type, int peer_idx) {
+        if (!is_page_level_rr) {
+            return true;
+        }
+        // Page-RR CP sharding only applies to FULL paged groups. Non-FULL
+        // groups are replicated by prefill ranks, so decode must choose one
+        // source rank to avoid duplicate writes.
+        return group_type == CacheGroupType::FULL || peer_idx == 0;
+    };
+    auto shouldLoadBlockFromPeer = [&](CacheGroupType group_type, size_t block_pos, int peer_idx) {
+        if (!is_page_level_rr || group_type != CacheGroupType::FULL) {
+            return true;
+        }
+        return (static_cast<int>(block_pos) % load_context.prefill_cp_size) == peer_idx;
+    };
     for (int i = 0; i < load_context.peer_addrs.size(); i++) {
         auto&                                            peer_addr = load_context.peer_addrs[i];
         std::vector<std::shared_ptr<RequestBlockBuffer>> layer_caches;
@@ -677,16 +710,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
             // Some typed-region cache layouts let one logical layer own
             // multiple groups. Iterate every group the layer owns; other
             // layouts reduce to the legacy one-gid-per-layer behaviour.
-            std::vector<int> layer_gids;
-            if (use_hybrid && layer_id < cache_config.layer_to_group_ids.size()
-                && !cache_config.layer_to_group_ids[layer_id].empty()) {
-                layer_gids = cache_config.layer_to_group_ids[layer_id];
-            } else if (use_hybrid && layer_id < cache_config.layer_to_group_id.size()) {
-                const int mapped = cache_config.layer_to_group_id[layer_id];
-                layer_gids.push_back(mapped >= 0 ? mapped : 0);
-            } else {
-                layer_gids.push_back(0);
-            }
+            std::vector<int> layer_gids = layerGroupIds(cache_config, use_hybrid, layer_id);
 
             for (int gid_int : layer_gids) {
                 const size_t gid = static_cast<size_t>(gid_int);
@@ -709,10 +733,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                 if (use_typed_regions && gid < cache_config.group_region_names.size()) {
                     region_name = cache_config.group_region_names[gid];
                 }
-                CacheGroupType group_type = CacheGroupType::FULL;
-                if (use_hybrid && gid < cache_config.group_types.size()) {
-                    group_type = cache_config.group_types[gid];
-                }
+                CacheGroupType group_type = groupType(cache_config, use_hybrid, gid);
 
                 auto block_pos_list = blockPositionsForCacheTransfer(block_num,
                                                                      load_context.reuse_block_size,
@@ -720,17 +741,11 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                                                      group_type,
                                                                      /*hybrid_full_from_begin=*/true);
 
-                // RR-shard only applies to FULL paged groups on the prefill side
-                // (see HybridKVCacheAllocator::cpShardThisGroup). Non-FULL groups
-                // (state pools, SWA_KV) are written redundantly by every prefill
-                // rank; they must be received in full from one rank only — pick
-                // rank 0 to avoid double-writes.
-                const bool group_is_rr_sharded = is_page_level_rr && group_type == CacheGroupType::FULL;
-                if (is_page_level_rr && !group_is_rr_sharded && i != 0) {
+                if (!shouldLoadGroupFromPeer(group_type, i)) {
                     continue;
                 }
                 for (size_t block_pos : block_pos_list) {
-                    if (group_is_rr_sharded && (static_cast<int>(block_pos) % load_context.prefill_cp_size) != i) {
+                    if (!shouldLoadBlockFromPeer(group_type, block_pos, i)) {
                         continue;
                     }
                     auto block_id = block_ids[block_pos];
@@ -828,16 +843,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                         const bool mtp_use_opaque_kv_store = mtp_cache_cfg.use_opaque_kv_cache_store;
 
                         // Same multi-group iteration as the main path.
-                        std::vector<int> mtp_layer_gids;
-                        if (mtp_use_hybrid && layer_id < mtp_cache_cfg.layer_to_group_ids.size()
-                            && !mtp_cache_cfg.layer_to_group_ids[layer_id].empty()) {
-                            mtp_layer_gids = mtp_cache_cfg.layer_to_group_ids[layer_id];
-                        } else if (mtp_use_hybrid && layer_id < mtp_cache_cfg.layer_to_group_id.size()) {
-                            const int mapped = mtp_cache_cfg.layer_to_group_id[layer_id];
-                            mtp_layer_gids.push_back(mapped >= 0 ? mapped : 0);
-                        } else {
-                            mtp_layer_gids.push_back(0);
-                        }
+                        std::vector<int> mtp_layer_gids = layerGroupIds(mtp_cache_cfg, mtp_use_hybrid, layer_id);
 
                         const int global_layer_id = mtp_local_to_global_layer_id[layer_id];
 
@@ -862,19 +868,18 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                             if (mtp_use_typed_regions && gid < mtp_cache_cfg.group_region_names.size()) {
                                 region_name = mtp_cache_cfg.group_region_names[gid];
                             }
-                            CacheGroupType group_type = CacheGroupType::FULL;
-                            if (mtp_use_hybrid && gid < mtp_cache_cfg.group_types.size()) {
-                                group_type = mtp_cache_cfg.group_types[gid];
-                            }
-                            auto block_pos_list = blockPositionsForCacheTransfer(block_num,
+                            CacheGroupType group_type     = groupType(mtp_cache_cfg, mtp_use_hybrid, gid);
+                            auto           block_pos_list = blockPositionsForCacheTransfer(block_num,
                                                                                  load_context.reuse_block_size,
                                                                                  mtp_use_hybrid,
                                                                                  group_type,
                                                                                  /*hybrid_full_from_begin=*/true);
 
+                            if (!shouldLoadGroupFromPeer(group_type, i)) {
+                                continue;
+                            }
                             for (size_t block_pos : block_pos_list) {
-                                if (is_page_level_rr
-                                    && (static_cast<int>(block_pos) % load_context.prefill_cp_size) != i) {
+                                if (!shouldLoadBlockFromPeer(group_type, block_pos, i)) {
                                     continue;
                                 }
                                 auto block_id = block_ids[block_pos];

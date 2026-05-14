@@ -12,6 +12,7 @@ Sparse attention reference uses `gather`-based PyTorch implementation —
 slow but correct. M6 will swap in FlashMLA sparse impl.
 """
 
+import json
 import os
 from typing import Any, Dict, NamedTuple, Optional, Union
 
@@ -45,8 +46,18 @@ from rtp_llm.models_py.modules.dsv4.chunk_env import dsv4_chunk_tokens_from_env
 from rtp_llm.models_py.modules.dsv4.cp import (
     CPContext,
     build_cp_full_prefill_positions,
+    cp_actual_owned_kv_lens,
     cp_all_gather_full,
+    cp_all_gather_full_async,
+    cp_all_gather_full_varlen,
     cp_freqs_cis_local,
+    cp_padded_local_kv_lens,
+    cp_wait_gather_full,
+)
+from rtp_llm.models_py.modules.dsv4.fp8._cp_attention_merge import merge_lse_output
+from rtp_llm.models_py.modules.dsv4.fp8._cp_attention_shard import (
+    build_swa_cp_local_indices,
+    remap_topk_to_cp_local,
 )
 from rtp_llm.models_py.modules.dsv4.fp8._pool_reader import (
     CompressedKPoolReader,
@@ -114,6 +125,39 @@ def _use_read_from_pool() -> bool:
 # regression can be bisected without reverting the patch series.
 def _use_varlen_prefill() -> bool:
     return os.environ.get("DSV4_VARLEN_PREFILL", "1") != "0"
+
+
+# Prefill CP all-gather overlap kill-switch. Default ON gives the
+# producer-consumer ordered scheduling: indexer's nested compressor AG →
+# main compressor AG → attention KV AG, all queued on one cp_gather stream
+# while indexer compute (weights_proj / quant_q / score / topk) hides the
+# NCCL latency. ``DSV4_PREFILL_CP_OVERLAP=0`` falls back to pre-overlap
+# behaviour: each layer's compressor / nested compressor runs synchronously
+# (start_prefill + finish_prefill back-to-back) and the only async piece is
+# the attention KV gather started in ``_prefill_compute_qkv``. Use this to
+# A/B test the overlap optimisation on a live deployment.
+def _prefill_cp_overlap_enabled() -> bool:
+    return os.environ.get("DSV4_PREFILL_CP_OVERLAP", "1") != "0"
+
+
+def _use_cp_cache_hit_raw_q_merge() -> bool:
+    # The raw-Q/O/LSE merge implementation is still an experimental validation
+    # path: it avoids KV gather communication, but its current index planning is
+    # Python-heavy and not suitable for automatic hot-path selection. Keep the
+    # path available only through explicit force modes until the planner is
+    # kernelized.
+    return _force_cp_cache_hit_raw_q_merge() or _force_all_cp_raw_q_merge()
+
+
+def _force_cp_cache_hit_raw_q_merge() -> bool:
+    return os.environ.get("DSV4_CP_CACHE_HIT_RAW_Q_MERGE", "0").lower() == "force"
+
+
+def _force_all_cp_raw_q_merge() -> bool:
+    return os.environ.get("DSV4_CP_CACHE_HIT_RAW_Q_MERGE", "0").lower() in (
+        "force_all",
+        "all",
+    )
 
 
 def _flat_1d(t: torch.Tensor) -> torch.Tensor:
@@ -2538,6 +2582,18 @@ class AttentionFP8(nn.Module):
             "dispatch mismatch."
         )
         D = self.head_dim
+
+        if self._should_use_cp_raw_q_merge(common, wm):
+            with record_function_range("dsv4.fp8.attn.workspace.cp_raw_q_merge"):
+                return self._attn_via_workspace_cp_raw_q_merge(
+                    qkv=qkv,
+                    common=common,
+                    workspace_meta=wm,
+                    cmp_topk_runtime=cmp_topk_runtime,
+                    cmp_pool_3d=cmp_pool_3d,
+                    swa_pool_3d=swa_pool_3d,
+                )
+
         with record_function_range("dsv4.fp8.attn.workspace.alloc"):
             workspace = torch.zeros(
                 (B, wm.M, D), dtype=torch.bfloat16, device=qkv.q.device
@@ -2724,6 +2780,353 @@ class AttentionFP8(nn.Module):
         dispose_tensor(qkv.q)
         assert o3 is not None
         return o3.unsqueeze(0)
+
+    def _should_use_cp_raw_q_merge(
+        self, common: PrefillMeta, wm: WorkspaceMeta
+    ) -> bool:
+        if not _use_cp_cache_hit_raw_q_merge():
+            return False
+        if not common.cp_on or common.cp_ctx is None:
+            return False
+        cp_ctx = common.cp_ctx
+        if cp_ctx.cp_size <= 1 or not bool(getattr(cp_ctx, "kv_cache_sharded", False)):
+            return False
+        if wm.N <= 0:
+            return False
+        if common.prefix_lengths is None or common.input_lengths is None:
+            return False
+        if _force_all_cp_raw_q_merge():
+            input_src = (
+                cp_ctx.input_lengths_global
+                if cp_ctx.input_lengths_global is not None
+                else common.input_lengths
+            )
+            return int(input_src.to(torch.long).sum().item()) > 0
+        prefix_src = (
+            cp_ctx.prefix_lengths
+            if cp_ctx.prefix_lengths is not None
+            else common.prefix_lengths
+        )
+        input_src = (
+            cp_ctx.input_lengths_global
+            if cp_ctx.input_lengths_global is not None
+            else common.input_lengths
+        )
+        prefix_len = int(prefix_src.to(torch.long).sum().item())
+        input_len = int(input_src.to(torch.long).sum().item())
+        return prefix_len > 0 and input_len > 0
+
+    @staticmethod
+    def _cp_full_req_ids_and_positions(
+        common: PrefillMeta,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        assert common.cp_ctx is not None
+        cp_ctx = common.cp_ctx
+        lengths = cp_ctx.input_lengths_global
+        if lengths is None:
+            lengths = torch.tensor(
+                [int(cp_ctx.seq_len_full)], device=common.device, dtype=torch.int32
+            )
+        prefix = cp_ctx.prefix_lengths
+        if prefix is None:
+            prefix = torch.tensor(
+                [int(cp_ctx.prefix_length)], device=common.device, dtype=torch.long
+            )
+        device = common.device
+        lengths_l = lengths.to(device=device, dtype=torch.long).reshape(-1)
+        prefix_l = prefix.to(device=device, dtype=torch.long).reshape(-1)
+        req_parts = []
+        pos_parts = []
+        for req_id, length in enumerate(lengths_l.detach().cpu().tolist()):
+            if int(length) <= 0:
+                continue
+            local_pos = torch.arange(int(length), device=device, dtype=torch.long)
+            req_parts.append(torch.full_like(local_pos, req_id))
+            pos_parts.append(local_pos + prefix_l[req_id])
+        if not req_parts:
+            return (
+                torch.empty((0,), device=device, dtype=torch.long),
+                torch.empty((0,), device=device, dtype=torch.long),
+            )
+        return torch.cat(req_parts).contiguous(), torch.cat(pos_parts).contiguous()
+
+    @staticmethod
+    def _cp_local_full_row_indices(common: PrefillMeta) -> torch.Tensor:
+        assert common.cp_ctx is not None
+        cp_ctx = common.cp_ctx
+        assert cp_ctx.req_id_per_token is not None
+        device = common.device
+        req = cp_ctx.req_id_per_token.to(device=device, dtype=torch.long).reshape(-1)
+        if cp_ctx.prefix_lengths is not None:
+            prefix = cp_ctx.prefix_lengths.to(device=device, dtype=torch.long).reshape(
+                -1
+            )
+        else:
+            prefix = torch.tensor(
+                [int(cp_ctx.prefix_length)], device=device, dtype=torch.long
+            )
+        if cp_ctx.cu_seqlens_global is not None:
+            cu = cp_ctx.cu_seqlens_global.to(device=device, dtype=torch.long).reshape(
+                -1
+            )
+        else:
+            cu = torch.tensor(
+                [0, int(cp_ctx.seq_len_full)], device=device, dtype=torch.long
+            )
+        pos = cp_ctx.global_positions.to(device=device, dtype=torch.long).reshape(-1)
+        local_pos = pos - prefix.index_select(0, req)
+        idx = cu.index_select(0, req) + local_pos
+        return idx.clamp_(min=0, max=max(int(cp_ctx.seq_len_full) - 1, 0)).contiguous()
+
+    @staticmethod
+    def _compact_indices(
+        parts: list[torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if not parts:
+            raise ValueError("_compact_indices requires at least one tensor")
+        T = int(parts[0].shape[0])
+        device = parts[0].device
+        max_width = sum(int(p.shape[1]) for p in parts)
+        aligned_width = ((max_width + 127) // 128) * 128
+        out = torch.full((T, aligned_width), -1, dtype=torch.int32, device=device)
+        lens = torch.zeros((T,), dtype=torch.int32, device=device)
+        for row in range(T):
+            cursor = 0
+            for part in parts:
+                valid = part[row][part[row] >= 0].to(torch.int32)
+                n = int(valid.numel())
+                if n == 0:
+                    continue
+                out[row, cursor : cursor + n] = valid
+                cursor += n
+            lens[row] = cursor
+        return out, lens
+
+    @staticmethod
+    def _compact_local_topk_to_workspace(
+        local_topk: torch.Tensor,
+        *,
+        req_id_per_token: torch.Tensor,
+        per_req_total_kv_lens: torch.Tensor,
+        cp_size: int,
+        block_size: int,
+        M: int,
+    ) -> torch.Tensor:
+        device = local_topk.device
+        per_req = per_req_total_kv_lens.to(device=device, dtype=torch.int64)
+        local_lens = cp_padded_local_kv_lens(per_req, cp_size, block_size).to(
+            device=device, dtype=torch.int64
+        )
+        cu_local = torch.zeros(
+            int(local_lens.numel()) + 1, dtype=torch.int64, device=device
+        )
+        cu_local[1:] = torch.cumsum(local_lens, dim=0)
+        req = req_id_per_token.to(device=device, dtype=torch.int64).reshape(-1)
+        req_base = cu_local.index_select(0, req).unsqueeze(1)
+        local_pos = local_topk.to(torch.int64) - req_base
+        req_workspace_base = (req * int(M)).unsqueeze(1)
+        valid = local_topk >= 0
+        workspace_idx = req_workspace_base + local_pos
+        return torch.where(
+            valid,
+            workspace_idx,
+            torch.full_like(workspace_idx, -1),
+        ).to(torch.int32)
+
+    def _raw_q_merge_apply_sink(
+        self, out: torch.Tensor, lse: torch.Tensor
+    ) -> torch.Tensor:
+        if self.attn_sink is None:
+            return out
+        sink = self.attn_sink.to(device=out.device, dtype=torch.float32).view(1, -1)
+        factor = torch.sigmoid(lse.float() - sink)
+        factor = torch.where(torch.isfinite(lse), factor, torch.zeros_like(factor))
+        return (out.float() * factor.unsqueeze(-1)).to(out.dtype)
+
+    def _attn_via_workspace_cp_raw_q_merge(
+        self,
+        *,
+        qkv: PrefillQKV,
+        common: PrefillMeta,
+        workspace_meta: WorkspaceMeta,
+        cmp_topk_runtime: Optional[torch.Tensor],
+        cmp_pool_3d: torch.Tensor,
+        swa_pool_3d: torch.Tensor,
+    ) -> torch.Tensor:
+        from flash_mla import flash_mla_sparse_fwd  # type: ignore[import-not-found]
+
+        from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
+        from rtp_llm.models_py.modules.dsv4.fp8 import _swa_dequant_triton as _swa_dq
+
+        assert common.cp_ctx is not None
+        cp_ctx = common.cp_ctx
+        wm = workspace_meta
+        D = self.head_dim
+        B = int(wm.swa_seq_lens.shape[0])
+        if (
+            os.environ.get("DSV4_FORWARD_TENSOR_DEBUG", "0") != "0"
+            or os.environ.get("DSV4_CP_RAW_Q_MERGE_LOG", "0") != "0"
+        ):
+            prefix_src = (
+                cp_ctx.prefix_lengths
+                if cp_ctx.prefix_lengths is not None
+                else common.prefix_lengths
+            )
+            input_src = (
+                cp_ctx.input_lengths_global
+                if cp_ctx.input_lengths_global is not None
+                else common.input_lengths
+            )
+            payload = {
+                "tag": "DSV4_RAW_Q_MERGE",
+                "layer_id": int(self.layer_id),
+                "compress_ratio": int(self.compress_ratio),
+                "cp_rank": int(cp_ctx.cp_rank),
+                "cp_size": int(cp_ctx.cp_size),
+                "B": B,
+                "prefix_lengths": (
+                    prefix_src.detach().cpu().reshape(-1).tolist()
+                    if prefix_src is not None
+                    else None
+                ),
+                "input_lengths": (
+                    input_src.detach().cpu().reshape(-1).tolist()
+                    if input_src is not None
+                    else None
+                ),
+            }
+            print(json.dumps(payload, sort_keys=True), flush=True)
+
+        local_cmp_lens = cp_actual_owned_kv_lens(
+            wm.cmp_seq_lens.to(torch.int64),
+            cp_ctx.cp_size,
+            wm.cmp_eb,
+            cp_ctx.cp_rank,
+        ).to(device=qkv.q.device, dtype=torch.int32)
+        local_N = int(local_cmp_lens.max().item()) if local_cmp_lens.numel() else 0
+        gather_len_max = (
+            int(wm.swa_gather_lens.max().item()) if wm.swa_gather_lens.numel() else 0
+        )
+        local_M = local_N + gather_len_max
+        workspace = torch.zeros(
+            (B, local_M, D), dtype=torch.bfloat16, device=qkv.q.device
+        )
+
+        if local_N > 0:
+            LocalPoolReader().fill(
+                out=workspace,
+                k_cache=cmp_pool_3d,
+                seq_lens=local_cmp_lens,
+                gather_lens=None,
+                block_table=wm.cmp_bt_int32,
+                block_size=wm.cmp_eb,
+                offset=0,
+            )
+
+        _swa_dq.dequantize_and_gather_k_cache(
+            out=workspace,
+            k_cache=swa_pool_3d,
+            seq_lens=wm.swa_seq_lens,
+            gather_lens=wm.swa_gather_lens,
+            block_table=wm.swa_bt_int32,
+            block_size=wm.swa_eb,
+            offset=local_N,
+        )
+
+        req_full, pos_full = self._cp_full_req_ids_and_positions(common)
+        if common.cp_ctx.prefix_lengths is not None:
+            prefix_lens = common.cp_ctx.prefix_lengths.to(
+                device=qkv.q.device, dtype=torch.long
+            )
+        else:
+            prefix_lens = torch.tensor(
+                [int(common.cp_ctx.prefix_length)],
+                device=qkv.q.device,
+                dtype=torch.long,
+            )
+        P_per_req = torch.clamp_max(prefix_lens, self.window_size - 1)
+        local_pos = pos_full - prefix_lens.index_select(0, req_full)
+        new_k_slots = (
+            req_full * local_M
+            + local_N
+            + P_per_req.index_select(0, req_full)
+            + local_pos
+        ).contiguous()
+        workspace.view(B * local_M, D).index_copy_(
+            0, new_k_slots, qkv.kv_full.to(torch.bfloat16).reshape(-1, D)
+        )
+
+        q_full = cp_all_gather_full_varlen(qkv.q, cp_ctx)
+        if wm.dense_cmp_topk is not None:
+            if wm.N > 0:
+                dense = (
+                    torch.arange(wm.N, device=qkv.q.device, dtype=torch.int64)
+                    .view(1, wm.N)
+                    .expand(int(q_full.shape[0]), wm.N)
+                )
+                dense_len = torch.clamp(
+                    (pos_full + 1) // int(self.compress_ratio),
+                    max=wm.N,
+                ).unsqueeze(1)
+                cmp_topk_full = (
+                    torch.where(dense < dense_len, dense, torch.full_like(dense, -1))
+                    .to(torch.int32)
+                    .contiguous()
+                )
+            else:
+                cmp_topk_full = torch.empty(
+                    (int(q_full.shape[0]), 0), device=qkv.q.device, dtype=torch.int32
+                )
+        else:
+            assert cmp_topk_runtime is not None
+            cmp_topk_full = cp_all_gather_full_varlen(cmp_topk_runtime, cp_ctx)
+
+        local_topk_compact = remap_topk_to_cp_local(
+            cmp_topk_full,
+            per_req_total_kv_lens=wm.cmp_seq_lens.to(torch.int64),
+            cp_size=cp_ctx.cp_size,
+            cp_rank=cp_ctx.cp_rank,
+            block_size=wm.cmp_eb,
+            req_id_per_token=req_full,
+        )
+        local_topk = self._compact_local_topk_to_workspace(
+            local_topk_compact,
+            req_id_per_token=req_full,
+            per_req_total_kv_lens=wm.cmp_seq_lens.to(torch.int64),
+            cp_size=cp_ctx.cp_size,
+            block_size=wm.cmp_eb,
+            M=local_M,
+        )
+        local_swa, _ = build_swa_cp_local_indices(
+            pos_full,
+            prefix_lengths=prefix_lens,
+            cp_size=cp_ctx.cp_size,
+            cp_rank=cp_ctx.cp_rank,
+            window_size=self.window_size,
+            M=local_M,
+            N=local_N,
+            req_id_per_token=req_full,
+        )
+        combined_indices, combined_lens = self._compact_indices([local_topk, local_swa])
+
+        local_o, _, local_lse = flash_mla_sparse_fwd(
+            q=q_full,
+            kv=workspace.view(B * local_M, 1, D),
+            indices=combined_indices.unsqueeze(1),
+            sm_scale=self.softmax_scale,
+            attn_sink=None,
+            topk_length=combined_lens,
+        )
+        gathered_o = all_gather(local_o.contiguous(), group=Group.TP).view(
+            cp_ctx.cp_size, int(q_full.shape[0]), self.n_heads, D
+        )
+        gathered_lse = all_gather(local_lse.contiguous(), group=Group.TP).view(
+            cp_ctx.cp_size, int(q_full.shape[0]), self.n_heads
+        )
+        merged_o, merged_lse = merge_lse_output(gathered_o, gathered_lse, dim=0)
+        merged_o = self._raw_q_merge_apply_sink(merged_o, merged_lse)
+        local_rows = self._cp_local_full_row_indices(common)
+        return merged_o.index_select(0, local_rows).unsqueeze(0)
 
     # ------------------------------------------------------------------
     # Per-call meta + Q/KV

@@ -263,6 +263,205 @@ def dequantize_and_gather_k_cache(
     )
 
 
+@triton.jit
+def _gather_k_cache_packed_kernel(
+    out_ptr,
+    out_stride0,
+    out_stride1,
+    k_cache_ptr,
+    seq_lens_ptr,
+    block_table_ptr,
+    offset,
+    gather_lens_ptr,
+    max_blocks_per_seq: tl.constexpr,
+    cache_block_size: tl.constexpr,
+    token_data_size: tl.constexpr,
+    scale_dim: tl.constexpr,
+    block_stride: tl.constexpr,
+):
+    """Gather paged FP8 cache into true per-token packed slots.
+
+    The physical block layout stores all token data first and all per-token
+    scales at the end of the block. The output layout is compact per token:
+    ``[448 fp8 NoPE | 128 bf16 RoPE | 8 UE8M0 scale]``.
+    """
+    batch_idx = tl.program_id(0)
+    worker_id = tl.program_id(1)
+    num_workers = tl.num_programs(1)
+
+    seq_len = tl.load(seq_lens_ptr + batch_idx)
+    if gather_lens_ptr is not None:  # noqa: SIM108
+        gather_len = tl.load(gather_lens_ptr + batch_idx)
+    else:
+        gather_len = seq_len
+    start_pos = seq_len - gather_len
+
+    data_offsets = tl.arange(0, 1024)
+    data_mask = data_offsets < token_data_size
+    scale_offsets = tl.arange(0, 8)
+    scale_mask = scale_offsets < scale_dim
+
+    for i in range(worker_id, gather_len, num_workers):
+        pos = start_pos + i
+        block_in_seq = pos // cache_block_size
+        pos_in_block = pos % cache_block_size
+
+        block_table_row_ptr = block_table_ptr + batch_idx * max_blocks_per_seq
+        physical_block_idx = tl.load(block_table_row_ptr + block_in_seq)
+        tl.device_assert(physical_block_idx >= 0, "block_table contains -1")
+
+        cache_block_ptr = k_cache_ptr + physical_block_idx.to(tl.int64) * block_stride
+        token_data_ptr = cache_block_ptr + pos_in_block * token_data_size
+        token_scale_ptr = (
+            cache_block_ptr
+            + cache_block_size * token_data_size
+            + pos_in_block * scale_dim
+        )
+        output_row_ptr = out_ptr + batch_idx * out_stride0 + (offset + i) * out_stride1
+
+        data = tl.load(token_data_ptr + data_offsets, mask=data_mask, other=0)
+        tl.store(output_row_ptr + data_offsets, data, mask=data_mask)
+        scales = tl.load(token_scale_ptr + scale_offsets, mask=scale_mask, other=0)
+        tl.store(
+            output_row_ptr + token_data_size + scale_offsets,
+            scales,
+            mask=scale_mask,
+        )
+
+
+def gather_k_cache_packed(
+    out: torch.Tensor,
+    k_cache: torch.Tensor,
+    seq_lens: torch.Tensor,
+    gather_lens: Optional[torch.Tensor],
+    block_table: torch.Tensor,
+    block_size: int,
+    offset: int,
+) -> None:
+    """Gather FP8 K cache into compact per-token packed slots.
+
+    Args mirror :func:`dequantize_and_gather_k_cache`, but ``out`` is
+    ``[B, max_tokens, 584] uint8`` rather than BF16.
+    """
+    assert out.dim() == 3 and out.shape[-1] == ENTRY_BYTES and out.dtype == torch.uint8
+    assert out.stride(2) == 1, f"out must have packed byte stride; got {out.stride()}"
+    assert (
+        k_cache.dim() == 3
+        and k_cache.shape[-1] == ENTRY_BYTES
+        and k_cache.dtype == torch.uint8
+    )
+    assert k_cache.stride(2) == 1 and k_cache.stride(1) == ENTRY_BYTES, (
+        "k_cache must be packed within each token (stride[1]=584, stride[2]=1); "
+        f"got stride={k_cache.stride()}"
+    )
+    assert (
+        block_table.dtype == torch.int32
+        and block_table.is_contiguous()
+        and block_table.device == k_cache.device
+    ), (
+        "block_table must be int32, contiguous, and on the same device as k_cache; "
+        f"got dtype={block_table.dtype} contig={block_table.is_contiguous()} "
+        f"dev={block_table.device} (k_cache dev={k_cache.device})"
+    )
+
+    NUM_WORKERS = 128
+    _gather_k_cache_packed_kernel[(seq_lens.shape[0], NUM_WORKERS)](
+        out,
+        out.stride(0),
+        out.stride(1),
+        k_cache,
+        seq_lens,
+        block_table,
+        offset,
+        gather_lens,
+        max_blocks_per_seq=block_table.shape[-1],
+        cache_block_size=block_size,
+        token_data_size=TOKEN_DATA_SIZE,
+        scale_dim=SCALE_BYTES_PER_TOKEN,
+        block_stride=k_cache.stride(0),
+    )
+
+
+@triton.jit
+def _dequantize_packed_k_cache_flat_kernel(
+    out_ptr,
+    out_stride0,
+    packed_ptr,
+    n_tokens,
+    fp8_dim: tl.constexpr,
+    bf16_dim: tl.constexpr,
+    quant_block: tl.constexpr,
+    token_data_size: tl.constexpr,
+    entry_bytes: tl.constexpr,
+    n_quant_blocks: tl.constexpr,
+):
+    token_idx = tl.program_id(0)
+    if token_idx >= n_tokens:
+        return
+
+    token_ptr = packed_ptr + token_idx * entry_bytes
+    token_fp8_ptr = token_ptr
+    token_bf16_ptr = token_ptr + fp8_dim
+    token_scale_ptr = token_ptr + token_data_size
+    output_row_ptr = out_ptr + token_idx * out_stride0
+
+    for qblock_idx in tl.static_range(n_quant_blocks):
+        qblock_start = qblock_idx * quant_block
+        if qblock_start < fp8_dim:
+            offsets = qblock_start + tl.arange(0, quant_block)
+            mask = offsets < fp8_dim
+
+            x_uint8 = tl.load(token_fp8_ptr + offsets, mask=mask, other=0)
+            x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
+            x_float = x_fp8.to(tl.float32)
+
+            encoded_scale = tl.load(token_scale_ptr + qblock_idx)
+            exponent = encoded_scale.to(tl.float32) - 127.0
+            scale = tl.exp2(exponent)
+            x_dequant = x_float * scale
+            tl.store(output_row_ptr + offsets, x_dequant.to(tl.bfloat16), mask=mask)
+
+    bf16_output_offset = fp8_dim
+    bf16_cache_ptr = token_bf16_ptr.to(tl.pointer_type(tl.bfloat16))
+    for j in tl.static_range(bf16_dim // 16):
+        chunk_offsets = j * 16 + tl.arange(0, 16)
+        bf16_vals = tl.load(bf16_cache_ptr + chunk_offsets)
+        tl.store(output_row_ptr + bf16_output_offset + chunk_offsets, bf16_vals)
+
+
+def dequantize_packed_k_cache_flat(out: torch.Tensor, packed: torch.Tensor) -> None:
+    """Dequant compact packed FP8 slots into flat BF16 rows.
+
+    ``packed`` is ``[N, 584] uint8`` with per-token compact layout
+    ``[576 data | 8 scale]``. ``out`` is ``[N, 512] bf16``.
+    """
+    assert out.dim() == 2 and out.shape[-1] == HEAD_DIM and out.dtype == torch.bfloat16
+    assert out.stride(1) == 1, f"out must be contiguous by row; got {out.stride()}"
+    assert (
+        packed.dim() == 2
+        and packed.shape[-1] == ENTRY_BYTES
+        and packed.dtype == torch.uint8
+    )
+    assert packed.stride() == (
+        ENTRY_BYTES,
+        1,
+    ), f"packed must be contiguous [N, {ENTRY_BYTES}]; got {packed.stride()}"
+    if packed.numel() == 0:
+        return
+    _dequantize_packed_k_cache_flat_kernel[(packed.shape[0],)](
+        out,
+        out.stride(0),
+        packed,
+        packed.shape[0],
+        fp8_dim=NOPE_DIM,
+        bf16_dim=ROPE_DIM,
+        quant_block=TILE_SIZE,
+        token_data_size=TOKEN_DATA_SIZE,
+        entry_bytes=ENTRY_BYTES,
+        n_quant_blocks=NOPE_TILES,
+    )
+
+
 def dequantize_swa_window_to_bf16(
     kv_cache_packed: torch.Tensor,
     block_table: torch.Tensor,

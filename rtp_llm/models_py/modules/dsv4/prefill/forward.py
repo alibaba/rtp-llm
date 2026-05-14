@@ -97,6 +97,7 @@ from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import torch
 
+from rtp_llm.models_py.modules.dsv4 import _forward_tensor_debug as _fwd_dbg
 from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv4.cp import (
     build_cp_context,
@@ -502,6 +503,17 @@ def forward_layers(
         step = getattr(v4, "_dbg_step", 0)
         _rt.dump(step=step, extra=extra)
         v4._dbg_step = step + 1
+    if _fwd_dbg.enabled():
+        _fwd_dbg.print_prefill(
+            hidden=h,
+            input_ids=input_ids,
+            positions=positions,
+            cu_seqlens=cu_seqlens,
+            attn_inputs=attn_inputs,
+            cp_ctx=cp_ctx,
+            head_weight=getattr(v4, "head_weight", None),
+            step=int(getattr(v4, "_dbg_step", 0)),
+        )
     return h  # [T, dim]
 
 

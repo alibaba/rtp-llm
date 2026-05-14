@@ -32,6 +32,8 @@ import torch
 
 from rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton import (
     dequantize_and_gather_k_cache,
+    dequantize_packed_k_cache_flat,
+    gather_k_cache_packed,
 )
 from rtp_llm.models_py.modules.dsv4.fp8._swa_kv_insert_triton import (
     quantize_and_insert_k_cache,
@@ -114,6 +116,42 @@ class SwaFp8KvRoundtripTest(unittest.TestCase):
         )
         return out[0, :num_tokens]
 
+    def _roundtrip_packed_gather(
+        self,
+        compressed_kv: torch.Tensor,
+        block_size: int,
+    ) -> torch.Tensor:
+        """quantize+insert → packed gather → flat dequant."""
+        num_tokens = compressed_kv.shape[0]
+        num_blocks = (num_tokens + block_size - 1) // block_size + 1
+
+        k_cache = self._alloc_cache(num_blocks, block_size)
+        slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=self.device)
+        quantize_and_insert_k_cache(compressed_kv, k_cache, slot_mapping)
+
+        seq_lens = torch.tensor([num_tokens], dtype=torch.int32, device=self.device)
+        block_table = torch.arange(
+            num_blocks, dtype=torch.int32, device=self.device
+        ).unsqueeze(0)
+
+        packed = torch.zeros(
+            1, num_tokens, HEAD_BYTES, dtype=torch.uint8, device=self.device
+        )
+        gather_k_cache_packed(
+            out=packed,
+            k_cache=k_cache,
+            seq_lens=seq_lens,
+            gather_lens=None,
+            block_table=block_table,
+            block_size=block_size,
+            offset=0,
+        )
+        out = torch.empty(
+            num_tokens, HEAD_DIM, dtype=torch.bfloat16, device=self.device
+        )
+        dequantize_packed_k_cache_flat(out, packed[0])
+        return out
+
     def _assert_nope_within_ue8m0_bound(
         self, original: torch.Tensor, recovered: torch.Tensor
     ):
@@ -169,6 +207,22 @@ class SwaFp8KvRoundtripTest(unittest.TestCase):
                 recovered = self._roundtrip(compressed_kv, block_size=256)
                 self._assert_nope_within_ue8m0_bound(compressed_kv, recovered)
                 self._assert_rope_exact(compressed_kv, recovered)
+
+    def test_packed_gather_matches_direct_dequant(self):
+        """Packed-FP8 gather + local dequant must be bitwise-equivalent to
+        the original gather+dequant path. This pins the CP all_gather payload
+        optimization's byte layout.
+        """
+        for block_size, num_tokens in [(64, 117), (256, 513)]:
+            with self.subTest(block_size=block_size, num_tokens=num_tokens):
+                compressed_kv = torch.randn(
+                    num_tokens, HEAD_DIM, dtype=torch.bfloat16, device=self.device
+                )
+                direct = self._roundtrip(compressed_kv, block_size=block_size)
+                packed = self._roundtrip_packed_gather(
+                    compressed_kv, block_size=block_size
+                )
+                self.assertTrue(torch.equal(direct, packed))
 
     def test_magnitude_range(self):
         """Per-token NoPE quant scale must adapt to token magnitude.

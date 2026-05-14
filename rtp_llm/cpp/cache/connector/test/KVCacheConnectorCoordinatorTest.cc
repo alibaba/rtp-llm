@@ -537,6 +537,124 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnNull_WhenCacheKeysEmpty
     EXPECT_EQ(ctx, nullptr);
 }
 
+TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_CPShardedKeepsNonFullGroupsInLogicalCoordinates) {
+    CacheConfig cp_cache_config       = cache_config_;
+    cp_cache_config.layer_num         = 2;
+    cp_cache_config.layer_all_num     = 2;
+    cp_cache_config.layer_to_group_id = {0, 1};
+    cp_cache_config.group_types       = {CacheGroupType::FULL, CacheGroupType::SWA};
+
+    ParallelismConfig parallelism_config;
+    parallelism_config.tp_size                            = 2;
+    parallelism_config.prefill_cp_config.kv_cache_sharded = true;
+
+    auto coordinator = std::make_shared<KVCacheConnectorCoordinator>(cp_cache_config,
+                                                                     kv_cache_config_,
+                                                                     runtime_config_,
+                                                                     parallelism_config,
+                                                                     SpeculativeExecutionConfig{},
+                                                                     allocator_);
+    coordinator->connectors_.clear();
+
+    KVCacheResource resource;
+    resource.initGroups(/*group_num=*/2,
+                        /*layer_num=*/static_cast<int>(cp_cache_config.layer_all_num),
+                        cp_cache_config.layer_to_group_id,
+                        cp_cache_config.kernelBlocksPerKvBlock(),
+                        cp_cache_config.group_types);
+    resource.cacheKeys() = CacheKeysType{10, 11, 12, 13};
+    resource.setLastBlockAligned(false);
+    resource.mutableBlockIds(/*gid=*/0).assign(BlockIndicesType{100, 101});            // FULL: compact local blocks
+    resource.mutableBlockIds(/*gid=*/1).assign(BlockIndicesType{200, 201, 202, 203});  // SWA: full logical slots
+
+    EXPECT_CALL(*allocator_, incrKVCacheRef(testing::_, testing::_, testing::Eq(true)))
+        .WillOnce(
+            testing::Invoke([](const KVCacheResource& ref_resource, const CacheKeysType& ref_keys, bool is_connector) {
+                (void)is_connector;
+                EXPECT_THAT(ref_keys, testing::ElementsAre(11, 13));
+                EXPECT_THAT(ref_resource.cacheKeys(), testing::ElementsAre(11, 13));
+                EXPECT_FALSE(ref_resource.lastBlockAligned());
+                EXPECT_THAT(ref_resource.blocks(/*gid=*/0), testing::ElementsAre(100, 101));
+                EXPECT_THAT(ref_resource.blocks(/*gid=*/1), testing::ElementsAre(201, 203));
+                return std::make_shared<KVCacheResource>();
+            }));
+
+    auto rw_ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
+    ON_CALL(*rw_ctx, kvCacheResource()).WillByDefault(testing::ReturnRef(resource));
+    std::shared_ptr<Meta> meta =
+        std::make_shared<TestMeta>(/*enable_memory_cache=*/true, /*enable_remote_cache=*/false, "");
+    ON_CALL(*rw_ctx, meta()).WillByDefault(testing::ReturnRef(meta));
+
+    auto async_ctx = coordinator->asyncWrite(rw_ctx);
+    ASSERT_NE(async_ctx, nullptr);
+
+    {
+        std::lock_guard<std::mutex> lock(coordinator->update_mutex_);
+        coordinator->fused_async_write_context_list_.clear();
+    }
+    async_ctx.reset();
+    coordinator.reset();
+}
+
+TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_CPShardedAppendsDummyTailWhenPartialIsNotLastRank) {
+    CacheConfig cp_cache_config       = cache_config_;
+    cp_cache_config.layer_num         = 2;
+    cp_cache_config.layer_all_num     = 2;
+    cp_cache_config.layer_to_group_id = {0, 1};
+    cp_cache_config.group_types       = {CacheGroupType::FULL, CacheGroupType::SWA};
+
+    ParallelismConfig parallelism_config;
+    parallelism_config.tp_size                            = 2;
+    parallelism_config.prefill_cp_config.kv_cache_sharded = true;
+
+    auto coordinator = std::make_shared<KVCacheConnectorCoordinator>(cp_cache_config,
+                                                                     kv_cache_config_,
+                                                                     runtime_config_,
+                                                                     parallelism_config,
+                                                                     SpeculativeExecutionConfig{},
+                                                                     allocator_);
+    coordinator->connectors_.clear();
+
+    KVCacheResource resource;
+    resource.initGroups(/*group_num=*/2,
+                        /*layer_num=*/static_cast<int>(cp_cache_config.layer_all_num),
+                        cp_cache_config.layer_to_group_id,
+                        cp_cache_config.kernelBlocksPerKvBlock(),
+                        cp_cache_config.group_types);
+    resource.cacheKeys() = CacheKeysType{10, 11, 12, 13, 14};
+    resource.setLastBlockAligned(false);
+    resource.mutableBlockIds(/*gid=*/0).assign(BlockIndicesType{100, 101, 102});
+    resource.mutableBlockIds(/*gid=*/1).assign(BlockIndicesType{200, 201, 202, 203, 204});
+
+    EXPECT_CALL(*allocator_, incrKVCacheRef(testing::_, testing::_, testing::Eq(true)))
+        .WillOnce(
+            testing::Invoke([](const KVCacheResource& ref_resource, const CacheKeysType& ref_keys, bool is_connector) {
+                (void)is_connector;
+                EXPECT_THAT(ref_keys, testing::ElementsAre(11, 13, 14));
+                EXPECT_THAT(ref_resource.cacheKeys(), testing::ElementsAre(11, 13, 14));
+                EXPECT_FALSE(ref_resource.lastBlockAligned());
+                EXPECT_THAT(ref_resource.blocks(/*gid=*/0), testing::ElementsAre(100, 101));
+                EXPECT_THAT(ref_resource.blocks(/*gid=*/1), testing::ElementsAre(201, 203));
+                return std::make_shared<KVCacheResource>();
+            }));
+
+    auto rw_ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
+    ON_CALL(*rw_ctx, kvCacheResource()).WillByDefault(testing::ReturnRef(resource));
+    std::shared_ptr<Meta> meta =
+        std::make_shared<TestMeta>(/*enable_memory_cache=*/true, /*enable_remote_cache=*/false, "");
+    ON_CALL(*rw_ctx, meta()).WillByDefault(testing::ReturnRef(meta));
+
+    auto async_ctx = coordinator->asyncWrite(rw_ctx);
+    ASSERT_NE(async_ctx, nullptr);
+
+    {
+        std::lock_guard<std::mutex> lock(coordinator->update_mutex_);
+        coordinator->fused_async_write_context_list_.clear();
+    }
+    async_ctx.reset();
+    coordinator.reset();
+}
+
 TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnNull_WhenIncrKVCacheRefReturnsNull) {
     auto mock_connector       = std::make_shared<MockKVCacheConnector>();
     coordinator_->connectors_ = {mock_connector};

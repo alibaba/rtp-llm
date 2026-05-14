@@ -72,6 +72,18 @@ py_test(
     ],
 )
 
+py_test(
+    name = "test_cp_attention_merge",
+    srcs = ["test_cp_attention_merge.py"],
+    deps = _DSV4_TEST_DEPS,
+)
+
+py_test(
+    name = "test_cp_attention_shard",
+    srcs = ["test_cp_attention_shard.py"],
+    deps = _DSV4_TEST_DEPS,
+)
+
 py_library(
     name = "dsv4_test_utils",
     srcs = ["dsv4_test_utils.py"],
