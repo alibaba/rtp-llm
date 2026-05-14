@@ -418,5 +418,70 @@ class MoriEPWrapperIntegrationTest(unittest.TestCase):
                             )
 
 
+class MoriEPWrapperValidationTest(unittest.TestCase):
+    """Tests for ep_size/world_size mismatch guards."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        try:
+            mp.set_start_method("spawn", force=True)
+        except RuntimeError:
+            pass
+
+    def _require_mori(self):
+        if not _MORI_AVAILABLE:
+            self.skipTest("mori is not available")
+
+    def _require_gpus(self, n: int):
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA is not available")
+        if torch.cuda.device_count() < n:
+            self.skipTest(f"Need at least {n} CUDA devices")
+
+    def test_world_size_mismatch_raises(self):
+        """init_moriep_wrapper_from_config should reject config.world_size != dist world_size."""
+        self._require_gpus(2)
+        self._require_mori()
+        port = _get_free_port()
+        mp.spawn(
+            _run_world_size_mismatch_check,
+            args=(2, port),
+            nprocs=2,
+            join=True,
+        )
+
+
+def _run_world_size_mismatch_check(rank: int, world_size: int, port: int) -> None:
+    """Worker that creates a config with mismatched world_size and expects AssertionError."""
+    try:
+        _init_dist(rank, world_size, port)
+
+        # Config claims world_size=4 but actual distributed world_size is 2
+        config = MoriEPWrapperConfig(
+            data_type=torch.bfloat16,
+            rank=rank,
+            world_size=4,  # intentional mismatch
+            hidden_dim=1024,
+            scale_dim=0,
+            scale_type_size=0,
+            max_token_type_size=2,
+            max_num_inp_token_per_rank=128,
+            num_experts_per_rank=4,
+            num_experts_per_token=2,
+            gpu_per_node=4,
+        )
+
+        try:
+            init_moriep_wrapper_from_config(config, shmem_group_name="mismatch_test")
+            raise RuntimeError("Expected AssertionError was not raised")
+        except AssertionError as e:
+            assert "world_size" in str(e), f"Unexpected assertion message: {e}"
+            if rank == 0:
+                print(f"[PASS] world_size mismatch correctly rejected: {e}")
+    finally:
+        MoriEPWrapper.reset()
+        _cleanup_dist()
+
+
 if __name__ == "__main__":
     unittest.main()
