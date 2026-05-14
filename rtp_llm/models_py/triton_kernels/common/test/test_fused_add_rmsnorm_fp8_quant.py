@@ -143,8 +143,16 @@ class TestFusedAddRmsNormFp8Quant(unittest.TestCase):
             with self.subTest(T=T, H=H, scale_ue8m0=True):
                 self._run(T, H, scale_ue8m0=True)
 
-    def test_legacy_2pass_large_H(self):
-        """H > MAX_INREG_H (4096) forces the 2-pass legacy kernel path."""
+    def test_non_pow2_H(self):
+        """Non-power-of-2 H (GLM5=6144, DSV3=7168) uses singlepass with padding."""
+        cases = [(1, 3072), (1, 5120), (4, 6144), (32, 6144), (1, 7168)]
+        for T, H in cases:
+            for ue8m0 in [False, True]:
+                with self.subTest(T=T, H=H, scale_ue8m0=ue8m0):
+                    self._run(T, H, scale_ue8m0=ue8m0)
+
+    def test_baseline_fallback_large_H(self):
+        """H > MAX_INREG_H forces baseline fallback path."""
         cases = [(1, 8192), (4, 8192)]
         for T, H in cases:
             for ue8m0 in [False, True]:
@@ -231,8 +239,16 @@ class TestFusedAddRmsNormFp8QuantDualOutput(unittest.TestCase):
             with self.subTest(T=T, H=H, scale_ue8m0=True):
                 self._run(T, H, scale_ue8m0=True)
 
-    def test_legacy_2pass_large_H(self):
-        """H > MAX_INREG_H (4096) forces the 2-pass legacy dual-output path."""
+    def test_non_pow2_H(self):
+        """Non-power-of-2 H (GLM5=6144, DSV3=7168) uses singlepass with padding."""
+        cases = [(1, 3072), (4, 6144), (32, 6144), (1, 7168)]
+        for T, H in cases:
+            for ue8m0 in [False, True]:
+                with self.subTest(T=T, H=H, scale_ue8m0=ue8m0):
+                    self._run(T, H, scale_ue8m0=ue8m0)
+
+    def test_baseline_fallback_large_H(self):
+        """H > MAX_INREG_H forces baseline fallback path."""
         cases = [(1, 8192), (4, 8192)]
         for T, H in cases:
             for ue8m0 in [False, True]:

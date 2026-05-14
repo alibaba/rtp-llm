@@ -30,6 +30,19 @@ from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
 
+try:
+    from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
+        CudaFp8GEMMLinear,
+    )
+    from rtp_llm.models_py.triton_kernels.common.fused_add_rmsnorm_fp8_quant import (
+        fused_add_rmsnorm_fp8_quant,
+        fused_add_rmsnorm_fp8_quant_with_bf16_output,
+    )
+except ImportError:
+    CudaFp8GEMMLinear = None
+    fused_add_rmsnorm_fp8_quant = None
+    fused_add_rmsnorm_fp8_quant_with_bf16_output = None
+
 
 class GenericMoeLayer(nn.Module):
     """Generic MoE layer supporting both Qwen3 and internal model."""
@@ -108,7 +121,12 @@ class GenericMoeLayer(nn.Module):
         # for group topk
         self.correction_bias = weights.get(W.e_score_correction_b, None)
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        x_fp8: "Optional[torch.Tensor]" = None,
+        x_scale: "Optional[torch.Tensor]" = None,
+    ) -> torch.Tensor:
         num_tokens, _ = hidden_states.shape
         router_logits = self.gate(
             hidden_states
@@ -171,7 +189,10 @@ class GenericMoeLayer(nn.Module):
         )
         if self.shared_expert is not None:
             shared_expert_output = self.shared_expert(
-                hidden_states, skip_allreduce=use_unified_allreduce
+                hidden_states,
+                x_fp8=x_fp8,
+                x_scale=x_scale,
+                skip_allreduce=use_unified_allreduce,
             )
             if self.shared_expert_gate is not None:
                 gate_output = self.shared_expert_gate(
@@ -265,6 +286,38 @@ class GenericMoeDecoderLayer(nn.Module):
             weights[W.post_ln_gamma], eps=config.layernorm_eps
         )
 
+        # Fuse input_layernorm + fp8_quant → pass fp8 directly to first linear
+        self._fuse_input_norm_quant = False
+        self._fuse_input_scale_ue8m0 = False
+        if fused_add_rmsnorm_fp8_quant is not None and CudaFp8GEMMLinear is not None:
+            if isinstance(self.self_attn, CausalAttention):
+                _qkv = getattr(self.self_attn, "qkv_proj", None)
+                if isinstance(_qkv, CudaFp8GEMMLinear):
+                    self._fuse_input_norm_quant = True
+                    self._fuse_input_scale_ue8m0 = _qkv.scale_ue8m0
+            elif isinstance(self.self_attn, MlaAttention):
+                _proj = getattr(self.self_attn, "fused_qkv_a_proj", None) or getattr(
+                    self.self_attn, "fused_qkv_proj", None
+                )
+                if isinstance(_proj, CudaFp8GEMMLinear):
+                    self._fuse_input_norm_quant = True
+                    self._fuse_input_scale_ue8m0 = _proj.scale_ue8m0
+
+        # Fuse post_attention_layernorm + fp8_quant for DenseMLP
+        self._fuse_post_norm_quant = (
+            fused_add_rmsnorm_fp8_quant is not None
+            and isinstance(self.mlp, DenseMLP)
+            and self.mlp.accepts_fp8_input
+        )
+
+        # Fuse post_attention_layernorm + dual output (bf16+fp8) for MoE
+        self._fuse_post_norm_quant_moe = (
+            fused_add_rmsnorm_fp8_quant_with_bf16_output is not None
+            and isinstance(self.mlp, GenericMoeLayer)
+            and self.mlp.shared_expert is not None
+            and self.mlp.shared_expert.accepts_fp8_input
+        )
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -272,15 +325,53 @@ class GenericMoeDecoderLayer(nn.Module):
         fmha_impl: FMHAImplBase,
         kv_cache: Optional[LayerKVCache] = None,
     ) -> DecodeLayerOutput:
-        hidden_states, residual = self.input_layernorm(hidden_states, residual)
+        if self._fuse_input_norm_quant and hidden_states.dim() == 2:
+            fp8_hs, scale = fused_add_rmsnorm_fp8_quant(
+                hidden_states,
+                residual,
+                self.input_layernorm.weight.data,
+                self.input_layernorm.variance_epsilon,
+                group_size=128,
+                scale_ue8m0=self._fuse_input_scale_ue8m0,
+            )
+            hidden_states = self.self_attn(
+                hidden_states=hidden_states,
+                fmha_impl=fmha_impl,
+                kv_cache=kv_cache,
+                x_fp8=fp8_hs,
+                x_scale=scale,
+            )
+        else:
+            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+            hidden_states = self.self_attn(
+                hidden_states=hidden_states, fmha_impl=fmha_impl, kv_cache=kv_cache
+            )
 
-        hidden_states = self.self_attn(
-            hidden_states=hidden_states, fmha_impl=fmha_impl, kv_cache=kv_cache
-        )
-
-        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-
-        hidden_states = self.mlp(hidden_states)
+        if self._fuse_post_norm_quant and hidden_states.dim() == 2:
+            fp8_hs, scale = fused_add_rmsnorm_fp8_quant(
+                hidden_states,
+                residual,
+                self.post_attention_layernorm.weight.data,
+                self.post_attention_layernorm.variance_epsilon,
+                group_size=128,
+                scale_ue8m0=self.mlp.up_proj.scale_ue8m0,
+            )
+            hidden_states = self.mlp(hidden_states, x_fp8=fp8_hs, x_scale=scale)
+        elif self._fuse_post_norm_quant_moe and hidden_states.dim() == 2:
+            bf16_hs, fp8_hs, scale = fused_add_rmsnorm_fp8_quant_with_bf16_output(
+                hidden_states,
+                residual,
+                self.post_attention_layernorm.weight.data,
+                self.post_attention_layernorm.variance_epsilon,
+                group_size=128,
+                scale_ue8m0=self.mlp.shared_expert.up_proj.scale_ue8m0,
+            )
+            hidden_states = self.mlp(bf16_hs, x_fp8=fp8_hs, x_scale=scale)
+        else:
+            hidden_states, residual = self.post_attention_layernorm(
+                hidden_states, residual
+            )
+            hidden_states = self.mlp(hidden_states)
 
         return DecodeLayerOutput(hidden_states, residual)
 
