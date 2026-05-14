@@ -53,6 +53,12 @@ def rocm_oss_suites():
                 smoke_args="--quantization FP8_PER_CHANNEL_COMPRESSED --use_swizzleA 1 --use_asm_pa 0 --fp8_kv_cache 1 --enable_cuda_graph 1 --warm_up 1 --act_type BF16 --reserver_runtime_mem_mb 70000 --test_block_num 1000",
                 gpu_type=["MI308X-ROCM7"],
             ),
+            smoke_test(
+                name="rocm_dense_qwen3_8b_ptpc_no_asm_pa",
+                task_info="data/model/qwen3/ptpc_q_r_8b.json",
+                smoke_args="--quantization FP8_PER_CHANNEL_COMPRESSED --use_swizzleA 1 --use_asm_pa 0 --disable_flash_infer 1 --warm_up 0 --use_aiter_pa 1 --seq_size_per_block 16 --act_type BF16 --test_block_num 1000 --reserver_runtime_mem_mb 70000",
+                gpu_type=["MI308X-ROCM7"],
+            ),
         ],
     )
 
