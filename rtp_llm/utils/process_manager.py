@@ -10,10 +10,13 @@ from typing import Callable, Dict, List, Optional
 class ProcessManager:
     """Process manager for managing and monitoring processes"""
 
+    DEFAULT_FAILURE_SHUTDOWN_TIMEOUT = 50
+
     def __init__(self, shutdown_timeout: int = 50, monitor_interval: int = 1):
         self.processes: List[Process] = []
         self.shutdown_requested = False
         self.terminated = False
+        self.failure_detected = False
         self.first_dead_time = 0
         self.shutdown_timeout = shutdown_timeout
         self.monitor_interval = monitor_interval
@@ -68,11 +71,11 @@ class ProcessManager:
         self.terminated = True
         self.first_dead_time = time.time()
 
-    def _force_kill_processes(self):
+    def _force_kill_processes(self, timeout: Optional[int] = None):
         """Force kill processes after timeout"""
-        logging.warning(
-            f"Graceful shutdown timeout ({self.shutdown_timeout}s), force killing..."
-        )
+        if timeout is None:
+            timeout = self.shutdown_timeout
+        logging.warning(f"Graceful shutdown timeout ({timeout}s), force killing...")
         for proc in self.processes:
             if proc.is_alive():
                 logging.warning(f"Force killing process {proc.pid}")
@@ -134,18 +137,23 @@ class ProcessManager:
                 for proc in self.processes:
                     if not proc.is_alive():
                         logging.error(f"Process {proc.pid} died unexpectedly")
+                self.failure_detected = True
                 if self.first_dead_time == 0:
                     self.first_dead_time = time.time()
                 logging.error("Some processes died unexpectedly, terminating all...")
                 self._terminate_processes()
 
-            # Force kill after timeout (only if shutdown_timeout != -1)
+            # User-requested infinite graceful shutdown should not apply after
+            # a child dies unexpectedly; failure cleanup must remain bounded.
+            effective_timeout = self.shutdown_timeout
+            if self.failure_detected and effective_timeout == -1:
+                effective_timeout = self.DEFAULT_FAILURE_SHUTDOWN_TIMEOUT
             if (
                 self.terminated
-                and self.shutdown_timeout != -1
-                and (time.time() - self.first_dead_time) > self.shutdown_timeout
+                and effective_timeout != -1
+                and (time.time() - self.first_dead_time) > effective_timeout
             ):
-                self._force_kill_processes()
+                self._force_kill_processes(effective_timeout)
                 break
 
             time.sleep(self.monitor_interval)
@@ -159,6 +167,9 @@ class ProcessManager:
         logging.info(f"Monitoring {len(self.processes)} processes")
         self._monitor_processes_health()
         self._join_all_processes()
+        if self.failure_detected:
+            logging.error("Child process failure cleanup completed, exiting parent")
+            os._exit(1)
         logging.info("Process monitoring completed")
 
     def graceful_shutdown(self):
