@@ -76,10 +76,16 @@ class MoriEPWrapperConfig:
             block_num = 80
 
         torch_dtype = to_torch_dtype(model_config.data_type)
+        assert parallelism_config.ep_size == parallelism_config.world_size, (
+            f"MoriEP currently requires ep_size == world_size "
+            f"(TP×EP/DP co-existence is not yet supported), "
+            f"got ep_size={parallelism_config.ep_size}, "
+            f"world_size={parallelism_config.world_size}"
+        )
         return cls(
             data_type=torch_dtype,
             rank=parallelism_config.ep_rank,
-            world_size=parallelism_config.world_size,
+            world_size=parallelism_config.ep_size,
             hidden_dim=model_config.hidden_size,
             scale_dim=0,  # 0 = no quantization scale
             scale_type_size=0,  # 0 = no quantization scale
@@ -226,6 +232,14 @@ def init_moriep_wrapper_from_config(
             "Call torch.distributed.init_process_group() first."
         )
 
+    # Validate that the config's world_size matches actual distributed world
+    # size, since we register WORLD group for shmem communication.
+    dist_world_size = torch.distributed.get_world_size()
+    assert moriep_config.world_size == dist_world_size, (
+        f"MoriEP config world_size ({moriep_config.world_size}) must equal "
+        f"distributed world_size ({dist_world_size}) when using WORLD group for shmem."
+    )
+
     world_group = torch.distributed.group.WORLD
     assert world_group is not None
     torch._C._distributed_c10d._register_process_group(shmem_group_name, world_group)
@@ -254,7 +268,15 @@ def init_moriep_wrapper(
             "Call torch.distributed.init_process_group() first."
         )
 
-    # 注册 WORLD group 并初始化 mori shmem
+    # MoriEP uses WORLD group for shmem – this is only correct when EP covers
+    # all ranks (ep_size == world_size).  Guard against future TP×EP/DP modes.
+    ep_size = engine_config.parallelism_config.ep_size
+    world_size = engine_config.parallelism_config.world_size
+    assert ep_size == world_size, (
+        f"MoriEP currently requires ep_size == world_size, "
+        f"got ep_size={ep_size}, world_size={world_size}. "
+        f"Using WORLD group for shmem is invalid when EP is a subset of ranks."
+    )
     world_group = torch.distributed.group.WORLD
     assert world_group is not None
     torch._C._distributed_c10d._register_process_group(shmem_group_name, world_group)
