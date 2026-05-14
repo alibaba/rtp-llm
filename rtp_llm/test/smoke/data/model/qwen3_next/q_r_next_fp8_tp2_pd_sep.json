@@ -84,6 +84,7 @@
       }
     },
     {
+      "endpoint": "/",
       "query": {
         "prompt_batch": [
           "$prompt:s1",
