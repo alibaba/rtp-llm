@@ -9,7 +9,6 @@ from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import KVCache
 from rtp_llm.utils.model_weight import W
 
-
 class Indexer(nn.Module):
     """
     Indexer for DeepSeek-V3.2 DSA (DeepSeek Sparse Attention) mechanism.
@@ -78,6 +77,10 @@ class Indexer(nn.Module):
             quant_config=quant_config,
             hw_kernel_config=hw_kernel_config,
         )
+        self.weights_proj.weight = self.weights_proj.weight.bfloat16()
+        if self.weights_proj.bias is not None:
+            self.weights_proj.bias = self.weights_proj.bias.bfloat16()
+
         self.cos_sin_cache = global_weights[W.rope_cos_sin_cache]
 
         self.indexer_op = IndexerOp(
@@ -104,8 +107,8 @@ class Indexer(nn.Module):
     def _get_logits_head_gate(
         self, x: torch.Tensor, q_scale: torch.Tensor
     ) -> torch.Tensor:
-        x = x.float()
         weights = self.weights_proj(x)
+        weights = weights.float()
         scale = self.softmax_scale * self.weights_scale
         weights = weights.unsqueeze(-1) * q_scale * scale
         return weights
