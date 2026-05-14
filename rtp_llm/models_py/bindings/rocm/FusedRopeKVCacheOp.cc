@@ -157,7 +157,13 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
     const bool paged_fp8 = use_paged_fmha && attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
     const auto q_opts = torch::TensorOptions(qkv.dtype()).device(qkv.device());
 
-    torch::Tensor q_output = torch::zeros({q_output_token_num, local_head_num, size_per_head}, q_opts);
+    // pad_query=false: q_output is packed [token_num, heads, dim] and the kernel writes
+    // every cell — skip the zero-fill. pad_query=true: padded slots between sequences
+    // are not written by the kernel, so they must be zero-initialized for downstream
+    // FMHA correctness.
+    torch::Tensor q_output = (use_paged_fmha && pad_query)
+        ? torch::zeros({q_output_token_num, local_head_num, size_per_head}, q_opts)
+        : torch::empty({q_output_token_num, local_head_num, size_per_head}, q_opts);
     torch::Tensor q_fp8_buf;
     if (paged_fp8) {
         q_fp8_buf = torch::empty({q_output_token_num, local_head_num, size_per_head},
