@@ -39,7 +39,7 @@ def init_cache_store_group_args(parser, cache_store_config):
         env_name="CACHE_STORE_THREAD_COUNT",
         bind_to=(cache_store_config, "thread_count"),
         type=int,
-        default=16,
+        default=32,
         help="为 cache store 线程池设置线程数量。",
     )
 
@@ -101,7 +101,7 @@ def init_cache_store_group_args(parser, cache_store_config):
         env_name="CACHE_STORE_MESSAGER_WORKER_THREAD_COUNT",
         bind_to=(cache_store_config, "messager_worker_thread_count"),
         type=int,
-        default=16,
+        default=32,
         help="为 cache store P2P messager 通信层设置 worker 线程数量。",
     )
     cache_store_group.add_argument(

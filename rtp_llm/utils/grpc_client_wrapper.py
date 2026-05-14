@@ -72,6 +72,7 @@ class GrpcClientWrapper:
             await self.stub.CheckHealth(request, timeout=1)
             return {"status": "ok"}
         except Exception as e:
+            await self.close()
             return {
                 "status": "error",
                 "message": e,

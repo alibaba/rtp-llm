@@ -47,7 +47,8 @@ def _curl_server_single_worker(
         req["top_k"] = 1
 
     # for prefill profiler step should only be 1, but for decode, we hope to get more steps for cpu analysis
-    profile_step = min(decode_test_length, 3) if is_decode else 1
+    profile_steps = int(os.environ.get("PERF_PROFILE_NUM_STEPS", "3"))
+    profile_step = min(decode_test_length, profile_steps) if is_decode else 1
     if profile:
         req["gen_timeline"] = True
         req["profile_step"] = profile_step
@@ -199,17 +200,33 @@ class BatchPerfImpl(object):
             f"concurrency {self.batch_size} must be divisible by dp_size {self.dp_size}",
         )
         local_batch_size = self.batch_size // self.dp_size
-        response = requests.post(
-            f"http://127.0.0.1:{self.base_port}/update_scheduler_info",
-            json={
-                "batch_size": local_batch_size,
-                "mode": "decode" if self.is_decode else "prefill",
-            },
-        )
-        if response.status_code != 200 or response.json().get("status", "ok") != "ok":
-            raise Exception(
-                f"failed to set concurrency: {response.text}, {response.status_code}"
+        payload = {
+            "batch_size": local_batch_size,
+            "mode": "decode" if self.is_decode else "prefill",
+        }
+        last_error = None
+        for attempt in range(1, 21):
+            try:
+                response = requests.post(
+                    f"http://127.0.0.1:{self.base_port}/update_scheduler_info",
+                    json=payload,
+                    timeout=60,
+                )
+                if (
+                    response.status_code == 200
+                    and response.json().get("status", "ok") == "ok"
+                ):
+                    return
+                last_error = f"{response.text}, {response.status_code}"
+            except Exception as e:
+                last_error = repr(e)
+            logging.warning(
+                "failed to set concurrency, retrying (%d/20): %s",
+                attempt,
+                last_error,
             )
+            time.sleep(3)
+        raise Exception(f"failed to set concurrency after retries: {last_error}")
 
     def _curl_server(self, profile: bool = False) -> TestResultMetrics:
         request_batches: List[List[int]] = []

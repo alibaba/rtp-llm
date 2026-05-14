@@ -335,18 +335,13 @@ py_test(
 # = 512 total requests distributed 128/rank across 4 DP ranks.  server.py:63
 # also overrides --concurrency_limit to max(batch_size_list)=128 at engine
 # startup, so the BUILD --concurrency_limit below is effectively ignored.
-# State/indexer pools sized by CacheConfig.h:114 as
-# 2 * max(max_context_batch_size, max_generate_batch_size) + 1.  With
-# concurrency_limit=128 driving max_generate_batch_size=128 and the default
-# max_context_batch_size=1, the fixed pools end up exactly 257 blocks ==
-# 128 reqs * 2 blocks + 1.  Block 0 is reserved by BlockPool, so usable is 256
-# == zero margin; any 5% reserve_block_ratio haircut (which --reserve_block_ratio 0
-# does not fully disable — the default still propagates through some config copies)
-# drops admission to ~85/128 per rank (340/512 total, same 66% failure as
-# baseline).  Bumping --max_context_batch_size to 256 lifts the state-pool
-# ceiling to 2*256+1=513 blocks so 128 concurrent reqs fit with ~2x headroom,
-# and the fixed-pool memory overhead is ~9 MiB per rank (negligible vs the
-# ~169 GiB paged KV pools).
+# DSV4 fixed pools are sized by --dsv4_fixed_pool_blocks.  Each request can hold
+# up to 3 fixed-pool blocks, so 128 concurrent reqs need 384 request-visible
+# blocks per rank.  The default 256 leaves the bs128 run short of admission
+# headroom and surfaces as incrKVBlock LACK MEM; 512 keeps roughly 33% margin.
+# Keep one frontend per DP rank for this smoke: the test readiness check probes a
+# shared rank port once, and multiple SO_REUSEPORT frontends can otherwise route
+# early scheduler updates to a process that is still completing startup.
 py_test(
     name = "v4_flash_dp4_decode_bs128_64k_perf",
     main = "batch_decode_test.py",
@@ -360,12 +355,12 @@ py_test(
     data = ["//rtp_llm:sdk"],
     args = [
         "--model_type", "deepseek_v4",
-        "--checkpoint_path", "/home/baowending.bwd/DeepSeek-V4-Flash",
-        "--tokenizer_path", "/home/baowending.bwd/DeepSeek-V4-Flash",
+        "--checkpoint_path", "/mnt/nas1/hf/DeepSeek-V4-Flash",
+        "--tokenizer_path", "/mnt/nas1/hf/DeepSeek-V4-Flash",
         "--batch_size", "128",
         "--input_len", "65536",
         "--partial", "1",
-        "--decode_test_length", "16",
+        "--decode_test_length", "100",
         "--seq_size_per_block", "64",
         "--max_seq_len", "65664",
         "--tp_size", "1",
@@ -374,6 +369,7 @@ py_test(
         "--world_size", "4",
         "--use_deepep_moe", "1",
         "--use_deepep_low_latency", "0",
+        "--frontend_server_count", "1",
         "--act_type", "BF16",
         "--quantization", "FP8_PER_BLOCK",
         "--fp8_kv_cache", "1",
@@ -383,17 +379,22 @@ py_test(
         "--reserver_runtime_mem_mb", "32768",
         "--reserve_block_ratio", "0",
         "--max_context_batch_size", "256",
+        "--dsv4_fixed_pool_blocks", "512",
     ],
     env = {
         "WORLD_SIZE": "4",
         "DG_JIT_CPP_STANDARD": "20",
         "GEN_TIMELINE_SYNC": "1",
         "PERF_PREARM_PROFILE": "1",
-        "PERF_PROFILE_NUM_STEPS": "4",
+        "PERF_PROFILE_NUM_STEPS": "6",
         "PERF_PROFILE_ARM_SLEEP": "2",
         "PERF_PROFILE_FLUSH_SLEEP": "120",
         "DSV4_USE_MEGA_MOE": "1",
         "ENABLE_FP32_LM_HEAD": "0",
+        "DSV4_FUSED_PREPARE": "1",
+        "RTP_LLM_STREAM_ASYNC": "1",
+        "RTP_LLM_DROP_BROAD_SYNC": "1",
+        "RTP_LLM_DEVICE_INPUT": "1",
     },
     tags = ["manual"],
 )
@@ -412,8 +413,8 @@ py_test(
     data = ["//rtp_llm:sdk"],
     args = [
         "--model_type", "deepseek_v4",
-        "--checkpoint_path", "/home/baowending.bwd/DeepSeek-V4-Flash",
-        "--tokenizer_path", "/home/baowending.bwd/DeepSeek-V4-Flash",
+        "--checkpoint_path", "/mnt/nas1/hf/DeepSeek-V4-Flash",
+        "--tokenizer_path", "/mnt/nas1/hf/DeepSeek-V4-Flash",
         "--batch_size", "128",
         "--input_len", "65536",
         "--partial", "1",
@@ -426,6 +427,7 @@ py_test(
         "--world_size", "4",
         "--use_deepep_moe", "1",
         "--use_deepep_low_latency", "0",
+        "--frontend_server_count", "1",
         "--act_type", "BF16",
         "--quantization", "FP8_PER_BLOCK",
         "--fp8_kv_cache", "1",
@@ -435,6 +437,7 @@ py_test(
         "--reserver_runtime_mem_mb", "32768",
         "--reserve_block_ratio", "0",
         "--max_context_batch_size", "256",
+        "--dsv4_fixed_pool_blocks", "512",
     ],
     env = {
         "WORLD_SIZE": "4",
