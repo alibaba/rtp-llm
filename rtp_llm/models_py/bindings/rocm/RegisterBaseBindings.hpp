@@ -71,6 +71,19 @@ void registerBasicRocmOps(py::module& rtp_ops_m) {
                   py::arg("n"),
                   py::arg("norm_size"));
 
+    rtp_ops_m.def("fused_qk_rmsnorm_v2",
+                  &FusedQKRMSNormV2,
+                  "Fused QK RMSNorm V2 (warp-per-head wave64 single-pass, ROCm)",
+                  py::arg("IO"),
+                  py::arg("q_gamma"),
+                  py::arg("k_gamma"),
+                  py::arg("layernorm_eps"),
+                  py::arg("q_group_num"),
+                  py::arg("k_group_num"),
+                  py::arg("m"),
+                  py::arg("n"),
+                  py::arg("norm_size"));
+
     rtp_ops_m.def("gemm", &gemm, "Gemm kernel", py::arg("output"), py::arg("input"), py::arg("weight"));
 
     // CUDA Graph Copy Kernel Functions (also supported in ROCm)

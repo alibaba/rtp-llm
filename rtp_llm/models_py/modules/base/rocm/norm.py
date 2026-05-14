@@ -176,7 +176,7 @@ class FusedQKRMSNorm(nn.Module):
 
     def forward(self, hidden_states):
         m, n = hidden_states.shape
-        rtp_llm_ops.fused_qk_rmsnorm(
+        rtp_llm_ops.fused_qk_rmsnorm_v2(
             hidden_states,
             self.q_weight,
             self.k_weight,
