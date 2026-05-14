@@ -100,16 +100,15 @@ TEST_F(PrefillRpcServerTest, collectStreamOutputReturnsErrorForFailedBatchEnqueu
     auto stream =
         std::make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
 
-    auto streams = scheduler.batchEnqueue({stream});
-    ASSERT_EQ(streams.size(), 1u);
-    ASSERT_TRUE(streams[0]->hasError());
-    ASSERT_EQ(streams[0]->getStatus(), StreamState::FINISHED);
+    scheduler.batchEnqueue({stream});
+    ASSERT_TRUE(stream->hasError());
+    ASSERT_EQ(stream->getStatus(), StreamState::FINISHED);
 
     TestablePrefillRpcServer server;
-    auto                     err = server.collectStreamOutputPublic(streams[0], query);
+    auto                     err = server.collectStreamOutputPublic(stream, query);
 
     ASSERT_TRUE(err.hasError());
-    ASSERT_EQ(err.code(), streams[0]->statusInfo().code());
+    ASSERT_EQ(err.code(), stream->statusInfo().code());
 }
 
 }  // namespace rtp_llm

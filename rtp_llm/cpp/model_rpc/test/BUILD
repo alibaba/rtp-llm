@@ -68,7 +68,7 @@ cc_test(
         "BroadcastManagerTest.cc",
     ],
     data = [],
-    copts = test_copts,
+    copts = test_copts + ["-fno-access-control"],
     deps = test_deps + [
         "//rtp_llm/cpp/model_rpc:model_rpc_pool",
         "@havenask//aios/autil:net",
