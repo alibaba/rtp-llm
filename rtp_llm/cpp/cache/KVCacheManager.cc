@@ -20,6 +20,17 @@
 
 namespace rtp_llm {
 
+namespace {
+
+size_t expectedCPShardedLocalBlocks(const CPSlotMapper& mapper, int seq_len, int reserve_step) {
+    const int effective_seq_len = mapper.effectiveSeqLenForAlloc(std::max(seq_len, 0));
+    const int block_size        = mapper.blockSize();
+    const int total_len         = effective_seq_len + std::max(reserve_step, 0);
+    return static_cast<size_t>((total_len + block_size - 1) / block_size);
+}
+
+}  // namespace
+
 KVCacheManager::KVCacheManager(const CacheConfig&                 config,
                                bool                               warmup,
                                const kmonitor::MetricsReporterPtr metrics_reporter,
@@ -144,20 +155,25 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
 
     auto result = allocator_->malloc(*effective);
 
-    // CP invariant: cacheKeys covers the full token sequence (total_blocks),
-    // blocks holds only this rank's local share = ceil(total_blocks / cp_size).
-    if (effective->cp_slot_mapper && effective->cp_slot_mapper->isSharded()) {
+    // CP invariant: blocks holds this rank's local share of logical KV pages.
+    // cacheKeys can be shorter than logical blocks because an in-flight partial
+    // tail is not always cacheable, so derive the expected count from seq_len.
+    if (result.success && effective->cp_slot_mapper && effective->cp_slot_mapper->isSharded()) {
         const auto& res        = effective->batch_kv_cache_resource->cacheResource(0);
-        size_t      num_keys   = res.cacheKeys().size();
         size_t      num_blocks = res.blocks().size();
-        int         cp_size    = effective->cp_slot_mapper->cpSize();
-        size_t      expected   = (num_keys + cp_size - 1) / cp_size;
+        size_t      expected   = expectedCPShardedLocalBlocks(*effective->cp_slot_mapper,
+                                                       effective->complete_token_ids->seqLength(),
+                                                       effective->complete_token_ids->getReserveStep());
         RTP_LLM_CHECK_WITH_INFO(num_blocks == expected,
-                                "CP invariant violated: blocks=%zu != ceil(cacheKeys=%zu / cp_size=%d) = %zu",
+                                "CP invariant violated: blocks=%zu != expected_local_blocks=%zu "
+                                "(seq_len=%d, reserve_step=%d, cp_size=%d, block_size=%d, cacheKeys=%zu)",
                                 num_blocks,
-                                num_keys,
-                                cp_size,
-                                expected);
+                                expected,
+                                effective->complete_token_ids->seqLength(),
+                                effective->complete_token_ids->getReserveStep(),
+                                effective->cp_slot_mapper->cpSize(),
+                                effective->cp_slot_mapper->blockSize(),
+                                res.cacheKeys().size());
     }
 
     return result;

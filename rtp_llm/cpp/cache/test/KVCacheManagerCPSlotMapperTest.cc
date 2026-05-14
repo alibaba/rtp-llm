@@ -111,6 +111,35 @@ TEST_F(KVCacheManagerCPSlotMapperTest, CPShardingEnabled_ReturnsValidMapper) {
     EXPECT_EQ(mapper->virtualBlockSize(), seq_size_per_block * 2);
 }
 
+// Partial tails may be allocated as live KV blocks before they become cacheable
+// full blocks. CP invariants must therefore be based on logical sequence length,
+// not cacheKeys().size().
+TEST_F(KVCacheManagerCPSlotMapperTest, CPShardedMallocAllowsPartialTailWithoutCacheKey) {
+    const int seq_size_per_block = 4;
+    auto      config             = makeTestConfig(/*block_num=*/20, seq_size_per_block);
+
+    ParallelismConfig par;
+
+    auto mgr = std::make_shared<KVCacheManager>(config, /*warmup=*/false, nullptr, KVCacheConfig{}, par);
+    ASSERT_TRUE(mgr->init());
+
+    auto resource  = makeResource(1, config.layer_num);
+    auto token_ids = makeTokenIds(1, /*seq_len=*/1, seq_size_per_block);
+
+    MallocInfo info{resource, token_ids};
+    info.cp_slot_mapper = std::make_shared<CPSlotMapper>(0, 2, seq_size_per_block);
+
+    auto result = mgr->malloc(info);
+    ASSERT_TRUE(result.success);
+    EXPECT_EQ(resource->blocksNum(0, 0), 1);
+
+    token_ids->setSeqLength(2);
+    result = mgr->malloc(info);
+    ASSERT_TRUE(result.success);
+    EXPECT_EQ(resource->blocksNum(0, 0), 1);
+    EXPECT_EQ(resource->cacheKeys(0).size(), 0);
+}
+
 // malloc() should auto-inject cpSlotMapper when caller does not provide one.
 // With CP sharding (cp_size=2, block_size=4), virtual_block_size=8.
 // A sequence of 16 tokens needs ceil(16/8)=2 physical blocks per batch (not 4).

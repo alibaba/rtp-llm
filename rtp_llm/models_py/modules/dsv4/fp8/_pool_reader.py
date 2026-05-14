@@ -11,16 +11,17 @@ attention/indexer call sites stay agnostic of CP storage layout:
   ``feat/support_distributed_cp_kvcache_rebase`` per-iteration pattern
   (mirrors ``flashmla_sparse_cp_impl.py``):
 
-    1. Each rank dequants its OWNED prefix slice from the local pool into
-       a packed ``[total_local_kv, D]`` BF16 buffer (one Triton call per
+    1. Each rank gathers its OWNED prefix slice from the local pool into a
+       packed FP8 ``[total_local_kv, 584]`` uint8 buffer (one Triton call per
        fill, NOT per-request).
-    2. ONE NCCL ``all_gather`` produces ``[cp_size * total_local_kv, D]``.
+    2. ONE NCCL ``all_gather`` produces
+       ``[cp_size * total_local_kv, 584]``.
     3. Pre-built ``restore_indices`` (from
        ``cp.build_kv_allgather_restore_indices``) reorder the gathered
        buffer into request-concatenated logical token order.
-    4. The result is scattered into ``out[r, offset:offset+seq_lens[r], :]``
-       per request (the workspace contract used by ``_attn_via_workspace``
-       / indexer).
+    4. The restored packed slots are dequantized locally to BF16 and scattered
+       into ``out[r, offset:offset+seq_lens[r], :]`` per request (the
+       workspace contract used by ``_attn_via_workspace`` / indexer).
 
 Compared to a per-request gather loop this collapses ``B`` collectives into
 one and avoids ``B`` Triton kernel launches.
@@ -40,7 +41,10 @@ from rtp_llm.models_py.modules.dsv4.cp import (
     cp_padded_local_kv_lens,
 )
 from rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton import (
+    ENTRY_BYTES,
     dequantize_and_gather_k_cache,
+    dequantize_packed_k_cache_flat,
+    gather_k_cache_packed,
 )
 
 
@@ -114,7 +118,7 @@ class CPShardConfig:
 
 
 class CPShardedPoolReader(CompressedKPoolReader):
-    """Per-iteration: dequant owned → all_gather → restore → scatter."""
+    """Per-iteration: gather owned packed FP8 → all_gather → restore → dequant."""
 
     def __init__(self, shard_config: CPShardConfig) -> None:
         self.cfg = shard_config
@@ -135,11 +139,16 @@ class CPShardedPoolReader(CompressedKPoolReader):
             raise ValueError(
                 f"block_size mismatch: cfg={cfg.block_size} call={block_size}"
             )
+        if gather_lens is not None:
+            raise NotImplementedError(
+                "CPShardedPoolReader does not support gather_lens yet; "
+                "pass full per-request seq_lens or add suffix-aware restore/scatter."
+            )
         cp_ctx = cfg.cp_ctx
         device = out.device
         D = out.shape[-1]
 
-        # Step 1: dequant owned slice into packed [total_local_kv, D].
+        # Step 1: gather owned slice into packed [total_local_kv, 584] uint8.
         # Two distinct per-rank lengths matter here:
         #   * padded — what each rank's local buffer is sized for; uniform
         #     across ranks so all_gather has matching shapes.
@@ -167,13 +176,13 @@ class CPShardedPoolReader(CompressedKPoolReader):
                     if local_seq_lens_padded.numel()
                     else 0
                 ),
-                D,
+                ENTRY_BYTES,
             ),
-            dtype=out.dtype,
+            dtype=torch.uint8,
             device=device,
         )
         if local_packed.shape[1] > 0 and int(local_seq_lens_actual.max().item()) > 0:
-            dequantize_and_gather_k_cache(
+            gather_k_cache_packed(
                 out=local_packed,
                 k_cache=k_cache,
                 seq_lens=local_seq_lens_actual,
@@ -182,12 +191,12 @@ class CPShardedPoolReader(CompressedKPoolReader):
                 block_size=block_size,
                 offset=0,
             )
-        # Step 2: pack to flat [total_local_kv, D] (drop per-row padding).
+        # Step 2: pack to flat [total_local_kv, 584] (drop per-row padding).
         local_flat = _pack_padded_to_flat(
-            local_packed, local_seq_lens_padded, cfg.total_local_kv, D
+            local_packed, local_seq_lens_padded, cfg.total_local_kv, ENTRY_BYTES
         )
 
-        # Step 3: all_gather across cp ranks → [cp_size * total_local_kv, D].
+        # Step 3: all_gather across cp ranks → [cp_size * total_local_kv, 584].
         # Use raw rank-major all_gather; cp_all_gather_full_async asserts
         # T_local == cp_ctx.chunk_length (prefill-token space), but
         # local_flat lives in KV-pool-entry space (block-aligned).
@@ -199,12 +208,19 @@ class CPShardedPoolReader(CompressedKPoolReader):
         if local_flat.is_cuda:
             torch.cuda.current_stream(local_flat.device).synchronize()
         gathered = all_gather(local_flat, group=Group.TP)
-        # gathered shape is rank-major: [cp_size * total_local_kv, D].
+        # gathered shape is rank-major: [cp_size * total_local_kv, 584].
 
         # Step 4: restore to request-concatenated logical order.
-        restored = gathered[cfg.restore_indices]  # [sum(T_r), D]
+        restored_packed = gathered[cfg.restore_indices].contiguous()  # [sum(T_r), 584]
 
-        # Step 5: scatter restored into out[r, offset:offset+T_r, :].
+        # Step 5: dequant locally after communication. This keeps NCCL payload
+        # at 584B/token instead of 1024B/token BF16 [512].
+        restored = torch.empty(
+            (int(restored_packed.shape[0]), D), dtype=out.dtype, device=device
+        )
+        dequantize_packed_k_cache_flat(restored, restored_packed)
+
+        # Step 6: scatter restored into out[r, offset:offset+T_r, :].
         _scatter_flat_to_workspace(restored, out, seq_lens, offset)
 
 

@@ -541,7 +541,9 @@ std::shared_ptr<AsyncMatchContext> KVCacheMemoryConnector::asyncMatch(const std:
     }
 
     const auto& cache_keys = resource->cacheKeys();
-    // do not match last block, whether it is aligned or not, otherwise may cause core dump in computing ops.
+    // Do not match the last key.  It is either a real partial tail or a
+    // connector-level dummy tail used to preserve the same contract after CP
+    // Page-RR remap.
     const auto cache_keys_size = cache_keys.empty() ? 0 : cache_keys.size() - 1;
     if (cache_keys_size == 0) {
         RTP_LLM_LOG_DEBUG("async match skip, cache keys is empty");
@@ -613,10 +615,10 @@ std::shared_ptr<AsyncMatchContext> KVCacheMemoryConnector::asyncMatch(const std:
         return nullptr;
     }
 
-    RTP_LLM_LOG_INFO("memory cache matched blocks: already_reuse=%zu matched=%zu cache_keys=%zu",
-                     already_reuse_num,
-                     matched_num,
-                     cache_keys_size);
+    RTP_LLM_LOG_DEBUG("memory cache matched blocks: already_reuse=%zu matched=%zu cache_keys=%zu",
+                      already_reuse_num,
+                      matched_num,
+                      cache_keys_size);
     reportMatchMetrics(/*success=*/true, timer.done_us(), cache_keys_size, matched_num);
     reportDiskMatchMetrics(/*success=*/true, timer.done_us(), cache_keys_size, matched_disk ? matched_num : 0);
     return std::make_shared<MemoryAsyncMatchContext>(matched_num, start_read_block_index, read_block_num, copy_plan);
@@ -841,6 +843,9 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
     const auto slots                = layerRegionSlots();
     const auto layer_attn_block_ids = resourceLayerRegionBlocks(*resource, slots);
     if (!checkLayerRegionBlocks(layer_attn_block_ids, slots, cache_keys_size)) {
+        RTP_LLM_LOG_WARNING("async write failed, invalid layer_attn_block_ids, cache_keys_size=%zu resource_keys=%zu",
+                            cache_keys_size,
+                            cache_keys.size());
         reportWriteMetrics(false, timer.done_us(), cache_keys_size, 0);
         return nullptr;
     }
@@ -864,19 +869,29 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
     auto copy_plan     = buildCopyPlanForWrite(
         cache_keys, layer_attn_block_ids, slots, mem_matched_num, cache_keys_size - mem_matched_num, no_need_write);
     if (!copy_plan || copy_plan->copy_infos.empty()) {
+        RTP_LLM_LOG_DEBUG(
+            "async write skip, no copy plan, cache_keys=%zu write_start=%zu write_num=%zu no_need_write=%d",
+            cache_keys_size,
+            mem_matched_num,
+            cache_keys_size - mem_matched_num,
+            no_need_write);
         reportWriteMetrics(no_need_write, timer.done_us(), static_cast<int64_t>(cache_keys_size), 0);
         return nullptr;
     }
 
     auto write_done =
         [copy_plan, resource_copy = resource, timer, total_block_num = cache_keys_size, this](bool success) mutable {
-            RTP_LLM_LOG_DEBUG("async write done, success: %d", success);
             int64_t disk_write_block_num = 0;
             for (const auto& copy_info : copy_plan->copy_infos) {
                 if (copy_info.backing_type == CacheBackingType::DISK) {
                     ++disk_write_block_num;
                 }
             }
+            RTP_LLM_LOG_DEBUG("memory cache write done: success=%d write_blocks=%zu total_blocks=%zu disk_blocks=%ld",
+                              success,
+                              copy_plan ? copy_plan->copy_infos.size() : 0,
+                              total_block_num,
+                              disk_write_block_num);
 
             if (success) {
                 for (auto& copy_info : copy_plan->copy_infos) {
@@ -951,6 +966,8 @@ KVCacheMemoryConnector::buildCopyPlanForWrite(const CacheKeysType&              
     // ensure the final written key is complete
     no_need_write = last_complete_index < start_index;
     if (no_need_write) {
+        RTP_LLM_LOG_DEBUG(
+            "build copy plan for write found no complete key, start=%d write_num=%d", start_index, write_num);
         return nullptr;
     }
 

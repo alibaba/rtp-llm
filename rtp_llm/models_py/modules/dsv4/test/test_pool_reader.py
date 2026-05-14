@@ -4,9 +4,8 @@ Verifies factory dispatch + the per-iteration assemble pipeline:
   dequant owned → all_gather → restore → scatter → workspace.
 
 The Triton dequant kernel is stubbed with an identity passthrough so we
-test the dataflow shape, not the kernel itself. The all_gather stub
-returns its input (cp_size=1 simulation) — sharded-path dataflow under
-real cp_size>1 is exercised end-to-end by Stage 6 PD smoke.
+test the dataflow shape, not the kernel itself. Tests patch all_gather per
+case, including rank-major cp_size>1 payloads for the sharded reader.
 """
 
 import importlib.util
@@ -45,13 +44,25 @@ def _stub_modules():
     sk_name = "rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton"
     if sk_name not in sys.modules:
         sk = types.ModuleType(sk_name)
+        sk.ENTRY_BYTES = 584
 
         def _stub_dequant(**kwargs):
             _DEQUANT_CALLS.append({k: v for k, v in kwargs.items()})
             # Identity-fill: write zeros (we test scatter / dataflow only).
             kwargs["out"].zero_()
 
+        def _stub_gather_packed(**kwargs):
+            _DEQUANT_CALLS.append({k: v for k, v in kwargs.items()})
+            kwargs["out"].zero_()
+
+        def _stub_dequant_flat(out, packed):
+            width = min(out.shape[-1], packed.shape[-1])
+            out.zero_()
+            out[..., :width].copy_(packed[..., :width].to(out.dtype))
+
         sk.dequantize_and_gather_k_cache = _stub_dequant
+        sk.gather_k_cache_packed = _stub_gather_packed
+        sk.dequantize_packed_k_cache_flat = _stub_dequant_flat
         sys.modules[sk_name] = sk
         for p in (
             "rtp_llm.models_py.modules",
@@ -106,6 +117,32 @@ def _fake_cp_ctx(cp_size: int, cp_rank: int = 0):
     ctx.cp_size = cp_size
     ctx.cp_rank = cp_rank
     return ctx
+
+
+def _rank_major_packed_payload(
+    per_req: torch.Tensor, cp_size: int, block_size: int, total_local: int, D: int
+) -> torch.Tensor:
+    """Build rank-major all_gather payload with logical-token tags."""
+    entry_bytes = PR.ENTRY_BYTES
+    gathered = torch.zeros((cp_size * total_local, entry_bytes), dtype=torch.uint8)
+    local_lens = PR._compute_local_seq_lens(per_req, cp_size, block_size).tolist()
+    local_offsets = [0]
+    for local_len in local_lens:
+        local_offsets.append(local_offsets[-1] + int(local_len))
+
+    for req_id, req_len in enumerate(per_req.tolist()):
+        for token_idx in range(int(req_len)):
+            block_idx = token_idx // block_size
+            token_in_block = token_idx % block_size
+            owner = block_idx % cp_size
+            local_block_idx = block_idx // cp_size
+            local_pos = (
+                local_offsets[req_id] + local_block_idx * block_size + token_in_block
+            )
+            row = owner * total_local + local_pos
+            tag = req_id * 40 + token_idx + 1
+            gathered[row, :D] = torch.arange(tag, tag + D, dtype=torch.uint8)
+    return gathered
 
 
 # ---------- Factory ----------
@@ -262,6 +299,95 @@ def test_cp_sharded_fill_dataflow_cp1_passthrough():
     # stub dequant zeros local_packed → restored is zeros → out becomes zeros.
     assert torch.equal(out[0, 0:8], torch.zeros((8, 2)))
     assert len(_DEQUANT_CALLS) == 1, "exactly one dequant call per fill"
+
+
+def test_cp_sharded_fill_dataflow_cp2_batched_partial_blocks():
+    """Reader-level cp_size>1 restore: rank-major gather → logical order."""
+    _DEQUANT_CALLS.clear()
+    cp_size = 2
+    block_size = 4
+    D = 3
+    per_req = torch.tensor([5, 9], dtype=torch.int64)
+    cp_ctx = _fake_cp_ctx(cp_size=cp_size, cp_rank=0)
+    cp_mod = sys.modules["rtp_llm.models_py.modules.dsv4.cp"]
+    restore_idx = cp_mod.build_kv_allgather_restore_indices(
+        per_req, cp_size, block_size, torch.device("cpu")
+    )
+    local_lens = PR._compute_local_seq_lens(per_req, cp_size, block_size)
+    total_local = int(local_lens.sum().item())
+    gathered = _rank_major_packed_payload(per_req, cp_size, block_size, total_local, D)
+
+    old_all_gather = PR.all_gather
+
+    def fake_all_gather(local, group=None):
+        assert local.shape == (total_local, PR.ENTRY_BYTES)
+        return gathered
+
+    PR.all_gather = fake_all_gather
+    try:
+        reader = PR.CPShardedPoolReader(
+            PR.CPShardConfig(
+                cp_ctx=cp_ctx,
+                per_req_total_kv_lens=per_req,
+                restore_indices=restore_idx,
+                block_size=block_size,
+                total_local_kv=total_local,
+            )
+        )
+        out = torch.full((2, 11, D), -1.0)
+        reader.fill(
+            out=out,
+            k_cache=torch.zeros((8, block_size, PR.ENTRY_BYTES), dtype=torch.uint8),
+            seq_lens=per_req.to(torch.int32),
+            gather_lens=None,
+            block_table=torch.zeros(
+                (2, int(local_lens.max().item())), dtype=torch.int32
+            ),
+            block_size=block_size,
+            offset=1,
+        )
+    finally:
+        PR.all_gather = old_all_gather
+
+    for req_id, req_len in enumerate(per_req.tolist()):
+        for token_idx in range(int(req_len)):
+            tag = req_id * 40 + token_idx + 1
+            expected = torch.arange(tag, tag + D, dtype=torch.float32)
+            assert torch.equal(out[req_id, 1 + token_idx], expected)
+        assert torch.equal(out[req_id, 0], torch.full((D,), -1.0))
+        assert torch.equal(out[req_id, 1 + int(req_len)], torch.full((D,), -1.0))
+    assert len(_DEQUANT_CALLS) == 1, "only local packed gather is stub-recorded"
+
+
+def test_cp_sharded_fill_rejects_gather_lens():
+    cp_ctx = _fake_cp_ctx(cp_size=2, cp_rank=0)
+    per_req = torch.tensor([8], dtype=torch.int64)
+    cp_mod = sys.modules["rtp_llm.models_py.modules.dsv4.cp"]
+    restore_idx = cp_mod.build_kv_allgather_restore_indices(
+        per_req, 2, 4, torch.device("cpu")
+    )
+    reader = PR.CPShardedPoolReader(
+        PR.CPShardConfig(
+            cp_ctx=cp_ctx,
+            per_req_total_kv_lens=per_req,
+            restore_indices=restore_idx,
+            block_size=4,
+            total_local_kv=4,
+        )
+    )
+    try:
+        reader.fill(
+            out=torch.zeros((1, 8, 2)),
+            k_cache=torch.zeros((4, 4, 2)),
+            seq_lens=torch.tensor([8]),
+            gather_lens=torch.tensor([4]),
+            block_table=torch.zeros((1, 1), dtype=torch.int32),
+            block_size=4,
+            offset=0,
+        )
+    except NotImplementedError:
+        return
+    raise AssertionError("expected NotImplementedError when gather_lens is set")
 
 
 def test_cp_sharded_fill_block_size_mismatch_raises():
