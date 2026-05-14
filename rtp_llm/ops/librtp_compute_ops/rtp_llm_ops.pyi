@@ -363,6 +363,14 @@ def fused_qk_rmsnorm(IO: torch.Tensor, q_gamma: torch.Tensor, k_gamma: torch.Ten
     """
     Fused QK RMSNorm kernel
     """
+
+
+def fused_qk_rmsnorm_v2(IO: torch.Tensor, q_gamma: torch.Tensor, k_gamma: torch.Tensor, layernorm_eps: float, q_group_num: int, k_group_num: int, m: int, n: int, norm_size: int) -> None:
+    """
+    Fused QK RMSNorm V2 (warp-per-head wave64 single-pass, ROCm)
+    """
+
+
 def indexer_k_quant_and_cache(k: torch.Tensor, kv_cache: torch.Tensor, slot_mapping: torch.Tensor, quant_block_size: int, scale_fmt: str) -> None:
     """
     Indexer K quantization and cache kernel
