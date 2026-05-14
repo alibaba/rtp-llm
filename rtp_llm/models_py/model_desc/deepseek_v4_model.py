@@ -766,6 +766,17 @@ class DeepSeekV4Model(GptModelBase):
         the PyWrappedModel with cache_manager==nullptr); only the prefill
         path needs to tolerate this — warmup never enters decode.
         """
+        if self.kv_cache is None:
+            # Warmup-only PyWrappedModel: NormalExecutor builds it with
+            # cache_manager==nullptr, so init_resources carries no kv_cache.
+            logging.warning(
+                "[DeepSeekV4Model] forward() with kv_cache=None — warmup only"
+            )
+            T = max(inputs.input_ids.numel(), 1)
+            device = self.v4.embed.weight.device
+            return PyModelOutputs(
+                torch.zeros(T, self._v4_args.dim, dtype=torch.bfloat16, device=device)
+            )
         attn = inputs.attention_inputs
 
         # Subclass-overridable hidden-state preparation hooks.  When a
@@ -786,7 +797,22 @@ class DeepSeekV4Model(GptModelBase):
             else None
         )
 
-        if attn.is_prefill:
+        if _is_decode_fmha(fmha_impl) or bool(
+            getattr(attn, "is_target_verify", False)
+        ):
+            if bool(getattr(attn, "is_target_verify", False)):
+                assert bool(getattr(self.v4, "fp8_kv_cache", False)), (
+                    "target verify requires fp8 kv cache"
+                )
+            return forward_decode(
+                self.v4,
+                self.kv_cache,
+                self._v4_args,
+                inputs,
+                fmha_impl,
+                prepare_hidden_fn=prep_decode,
+            )
+        elif attn.is_prefill:
             return forward_prefill(
                 self.v4,
                 self.kv_cache,
