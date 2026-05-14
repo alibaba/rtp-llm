@@ -4,6 +4,7 @@
 #include <pybind11/stl.h>
 #include <pybind11/embed.h>
 #include <torch/extension.h>
+#include <cstdint>
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
@@ -216,6 +217,7 @@ struct KVCache {
 struct PyModelInitResources {
     std::optional<KVCache> kv_cache;
     bool                   is_speculative = false;
+    int64_t                max_potential_token_num = 0;
 };
 
 struct PyCacheStoreInputs {

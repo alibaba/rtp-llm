@@ -188,6 +188,15 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         init_resources.kv_cache = kv_cache;
     }
     init_resources.is_speculative = (params.sp_config.type != SP_TYPE_NONE);
+    if (params.parallelism_config.role_type != RoleType::DECODE) {
+        init_resources.max_potential_token_num =
+            params.max_seq_len * params.runtime_config.fifo_scheduler_config.max_context_batch_size;
+    } else if (params.sp_config.type == SP_TYPE_MTP) {
+        init_resources.max_potential_token_num =
+            params.runtime_config.max_generate_batch_size * (params.sp_config.gen_num_per_cycle + 1);
+    } else {
+        init_resources.max_potential_token_num = params.runtime_config.max_generate_batch_size;
+    }
 
     py::object py_init_result;
     // Always initialize py_model_ so it can be used as fallback when CUDA graph cannot run

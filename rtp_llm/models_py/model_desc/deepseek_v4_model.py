@@ -568,7 +568,16 @@ class DeepSeekV4Model(GptModelBase):
             _torch.cuda.synchronize()
 
         if getattr(init_resource, "is_speculative", False):
-            self.v4._allocate_mtp_buffer(torch.device(device_str))
+            max_potential_token_num = int(
+                getattr(init_resource, "max_potential_token_num", 0)
+            )
+            self.v4._allocate_mtp_buffer(
+                torch.device(device_str), max_potential_token_num
+            )
+            logging.info(
+                "[DeepSeekV4Model] allocated MTP hidden buffer: tokens=%d",
+                max_potential_token_num,
+            )
 
         self._materialized = True
 
