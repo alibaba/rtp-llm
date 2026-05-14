@@ -7,7 +7,10 @@
 namespace rtp_llm {
 
 AsyncRunner::AsyncRunner(torch::Stream stream): stream_(stream), event_(stream.device_type()) {
-    thread_ = std::thread([this] { workerLoop(); });
+    thread_ = std::thread([this] {
+        cuda_graph::setDevice(static_cast<int>(stream_.device_index()));
+        workerLoop();
+    });
 }
 
 AsyncRunner::~AsyncRunner() {

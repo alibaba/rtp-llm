@@ -13,6 +13,7 @@
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "autil/LockFreeThreadPool.h"
+#include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 
 using namespace std;
 using namespace autil::legacy;
@@ -152,6 +153,7 @@ void DecodeRpcServer::loadCacheFromPrefill(DecodeGenerateContext& decode_context
 
 void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
     RTP_LLM_PROFILE_FUNCTION();
+    cuda_graph::setDevice(static_cast<int>(maga_init_params_.parallelism_config.local_rank));
     RTP_LLM_LOG_DEBUG("request [%s] start to local generate", decode_context.request_key.c_str());
     auto&             grpc_stream     = decode_context.rpc_context.grpc_stream;
     auto&             generate_stream = decode_context.getStream();
