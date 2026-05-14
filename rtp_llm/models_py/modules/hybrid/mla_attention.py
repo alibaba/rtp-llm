@@ -128,11 +128,16 @@ class MlaAttention(nn.Module):
         hidden_states: torch.Tensor,
         fmha_impl: MlaImplBase,
         kv_cache: Optional[LayerKVCache] = None,
+        x_fp8: Optional[torch.Tensor] = None,
+        x_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         input_shape = hidden_states.shape[:-1]
         q_c = None
         if self.q_lora_rank > 0:
-            fused_qkv = self.fused_qkv_a_proj(hidden_states)
+            if x_fp8 is not None and x_scale is not None:
+                fused_qkv = self.fused_qkv_a_proj(x_fp8, input_scales=x_scale)
+            else:
+                fused_qkv = self.fused_qkv_a_proj(hidden_states)
             kv_offset = self.q_lora_rank
             q, compressed_kv = torch.split(
                 fused_qkv,
@@ -145,7 +150,10 @@ class MlaAttention(nn.Module):
             q_c = self.q_a_layernorm(q.contiguous())
             q = self.q_b_proj(q_c)
         else:
-            fused_qkv = self.fused_qkv_proj(hidden_states)
+            if x_fp8 is not None and x_scale is not None:
+                fused_qkv = self.fused_qkv_proj(x_fp8, input_scales=x_scale)
+            else:
+                fused_qkv = self.fused_qkv_proj(hidden_states)
             kv_offset = self.num_heads * self.attn_config.size_per_head
             q, compressed_kv = torch.split(
                 fused_qkv,
