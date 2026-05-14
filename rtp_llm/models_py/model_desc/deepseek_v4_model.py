@@ -536,6 +536,30 @@ class DeepSeekV4Model(GptModelBase):
                 except Exception:
                     logging.exception("[DeepSeekV4Model] MegaMoE prewarm failed")
                     raise
+
+            try:
+                from rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup import (
+                    _collect_dsv4_dense_gemm_shapes,
+                    warmup_compressor_combine_branch_kernels,
+                    warmup_dense_gemm_jit,
+                )
+
+                _jit_device = _torch.device(device_str)
+                warmup_compressor_combine_branch_kernels(
+                    v4=self.v4,
+                    v4_args=self._v4_args,
+                    device=_jit_device,
+                )
+                _dense_shapes = _collect_dsv4_dense_gemm_shapes(self.v4)
+                warmup_dense_gemm_jit(
+                    _dense_shapes,
+                    max_m=int(self._v4_args.max_seq_len),
+                    device=_jit_device,
+                )
+                logging.info("[DeepSeekV4Model] kernel JIT prewarm done")
+            except Exception:
+                logging.exception("[DeepSeekV4Model] kernel JIT prewarm failed")
+                raise
             _torch.cuda.synchronize()
 
         self._materialized = True
