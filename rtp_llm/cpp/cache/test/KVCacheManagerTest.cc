@@ -618,6 +618,65 @@ TEST_F(KVCacheManagerTest, DSV4InsertIntoDeviceBlockCacheThenReuseSamePrefix) {
     manager->free(second_free);
 }
 
+TEST_F(KVCacheManagerTest, DSV4InitReuseKeepsSWAPrefixTailBlock) {
+    auto manager_config = makeCompactDSV4ManagerConfig(/*block_num=*/64);
+    auto manager        = std::make_shared<KVCacheManager>(manager_config, /*warmup=*/false);
+    ASSERT_TRUE(manager->init());
+
+    const int spb = static_cast<int>(manager_config.seq_size_per_block);
+
+    auto first_resource = makeDSV4BatchResource(manager_config);
+    auto first_tokens   = makeDSV4CompleteTokenIds(/*initial_seq_len=*/4 * spb, /*max_seq_len=*/4 * spb + 1, spb);
+
+    MallocInfo first_malloc{first_resource, first_tokens};
+    first_malloc.reuse_cache         = false;
+    first_malloc.enable_device_cache = false;
+    ASSERT_TRUE(manager->malloc(first_malloc).success);
+
+    std::vector<std::pair<BlockIdxType, BlockIdxType>> first_swa_tail_blocks;
+    first_swa_tail_blocks.reserve(kDsv4PoolNum - 3);
+    for (int gid = 3; gid < kDsv4PoolNum; ++gid) {
+        ASSERT_EQ(first_resource->blocksNum(0, gid), 4) << "first SWA group " << gid;
+        ASSERT_TRUE(isNullBlockIdx(first_resource->blocks(0, gid)[0]));
+        ASSERT_TRUE(isNullBlockIdx(first_resource->blocks(0, gid)[1]));
+        ASSERT_FALSE(isNullBlockIdx(first_resource->blocks(0, gid)[2]));
+        ASSERT_FALSE(isNullBlockIdx(first_resource->blocks(0, gid)[3]));
+        first_swa_tail_blocks.emplace_back(first_resource->blocks(0, gid)[2],
+                                           first_resource->blocks(0, gid)[3]);
+    }
+
+    // Simulate one generated token before inserting into the device cache, so
+    // the fourth full block is cached and can be reused by the next prefill.
+    first_tokens->setSeqLength(4 * spb + 1);
+    manager->insertIntoCache(InsertInfo{first_resource, first_tokens, /*is_resident=*/false});
+    manager->free(FreeInfo{first_resource, first_tokens});
+
+    auto second_resource = makeDSV4BatchResource(manager_config);
+    auto second_tokens =
+        makeDSV4CompleteTokenIds(/*initial_seq_len=*/24 * spb, /*max_seq_len=*/24 * spb, spb);
+
+    MallocInfo second_malloc{second_resource, second_tokens};
+    second_malloc.reuse_cache                  = true;
+    second_malloc.enable_device_cache          = true;
+    second_malloc.enable_remove_skipped_blocks = false;
+    auto reuse_result                          = manager->malloc(second_malloc);
+    ASSERT_TRUE(reuse_result.success);
+    EXPECT_EQ(reuse_result.reuse_len, 4 * spb);
+
+    for (int gid = 3; gid < kDsv4PoolNum; ++gid) {
+        const auto& blocks = second_resource->blocks(0, gid);
+        ASSERT_EQ(blocks.size(), 24u) << "second SWA group " << gid;
+        EXPECT_EQ(blocks[2], first_swa_tail_blocks[static_cast<size_t>(gid - 3)].first)
+            << "SWA reuse prefix penultimate block must stay readable";
+        EXPECT_EQ(blocks[3], first_swa_tail_blocks[static_cast<size_t>(gid - 3)].second)
+            << "SWA reuse prefix tail block must stay readable";
+        EXPECT_FALSE(isNullBlockIdx(blocks[22])) << "second SWA group " << gid << " fresh tail block 22";
+        EXPECT_FALSE(isNullBlockIdx(blocks[23])) << "second SWA group " << gid << " fresh tail block 23";
+    }
+
+    manager->free(FreeInfo{second_resource, second_tokens});
+}
+
 TEST_F(KVCacheManagerTest, DSV4PopCachedBlocksPreservesGroupShape) {
     auto manager_config = makeCompactDSV4ManagerConfig(/*block_num=*/16);
     auto manager        = std::make_shared<KVCacheManager>(manager_config, /*warmup=*/false);

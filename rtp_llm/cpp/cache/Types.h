@@ -57,6 +57,10 @@ struct MallocInfo {
     bool                    verbose             = true;  // for failed log
     bool                    reuse_cache         = true;
     bool                    enable_device_cache = true;
+    // Sparse tail-group cleanup is only valid for incremental allocation.
+    // Prefill init keeps reused prefix slots intact because model-path kernels
+    // still read them by prefix_length.
+    bool enable_remove_skipped_blocks = true;
 };
 
 struct MallocResult {

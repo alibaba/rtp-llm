@@ -75,6 +75,12 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType& cache_keys, BatchKVC
                 all_tail_groups_matched = false;
                 break;
             }
+            if (pos - 1 >= 0) {
+                auto prev = swa_group->matchSingleKey(cache_keys[static_cast<size_t>(pos - 1)]);
+                if (!prev.block_indices.empty()) {
+                    candidate_swa_tail_blocks[i].push_back(prev.block_indices[0]);
+                }
+            }
             candidate_swa_tail_blocks[i].push_back(result.block_indices[0]);
         }
         if (all_tail_groups_matched) {
@@ -193,10 +199,12 @@ MallocResult HybridKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
         }
     }
 
-    for (int b = 0; b < batch_size; ++b) {
-        for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
-            kv_cache_groups_[static_cast<size_t>(gid)]->removeSkippedBlocks(
-                kv_resource->mutableBlockIds(b, gid), malloc_info.reuse_cache, reserve_step);
+    if (malloc_info.enable_remove_skipped_blocks) {
+        for (int b = 0; b < batch_size; ++b) {
+            for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
+                kv_cache_groups_[static_cast<size_t>(gid)]->removeSkippedBlocks(
+                    kv_resource->mutableBlockIds(b, gid), malloc_info.reuse_cache, reserve_step);
+            }
         }
     }
 
