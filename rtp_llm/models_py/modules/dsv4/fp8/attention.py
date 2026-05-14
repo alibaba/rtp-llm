@@ -470,7 +470,9 @@ class WorkspaceMeta(NamedTuple):
     cmp_bt_int32: torch.Tensor
     swa_seq_lens: torch.Tensor  # [B] int32 — total SWA stream length per req
     cmp_seq_lens: torch.Tensor  # [B] int32 — per-req compressed pool length
-    swa_gather_lens: torch.Tensor  # [B] int32 — per-req gather length
+    swa_gather_lens: torch.Tensor  # [B] int32 — per-req workspace SWA length (P + S)
+    swa_cache_seq_lens: torch.Tensor  # [B] int32 — cached prefix length (sp)
+    swa_cache_gather_lens: torch.Tensor  # [B] int32 — cached prefix tail length (P)
     qsl: torch.Tensor  # [B+1] int32 — query_start_loc (== cu_seqlens)
     # HCA only: precomputed dense compressed topk [T_total, N_max] int32
     # (each row = arange(N_max)). The ``_combine_topk_swa_indices_kernel``
@@ -2363,7 +2365,8 @@ class AttentionFP8(nn.Module):
              ``workspace[b, 0:N_b, :]`` per request (per-req ``cmp_seq_lens``
              handle the per-row variable length; ``[N_b, N_max)`` stays zero).
           3. ``dequantize_and_gather_k_cache(swa_pool, offset=N_max)`` →
-             ``workspace[b, N_max:N_max+gather_b, :]`` per request.
+             ``workspace[b, N_max:N_max+P_b, :]`` per request. SWA only
+             stores the tail blocks; fresh ``S_b`` rows are supplied by step 4.
           4. BF16 overlay freshly computed new K via single ``index_copy_``
              over ``workspace.view(B*M, D)`` using ``wm.new_k_slot_in_flat``
              (already encodes ``M*req_id + N + P_b + local_pos``).
@@ -2429,19 +2432,20 @@ class AttentionFP8(nn.Module):
                     block_size=wm.cmp_eb,
                     offset=0,
                 )
-        # SWA dequant is unconditional in prefill — every request has at least
-        # ``S_b`` SWA gather rows (just-written new K). Per-request ``gather_lens``
-        # handles the per-row variable length.
-        with record_function_range("dsv4.fp8.attn.workspace.gather_swa"):
-            _swa_dq.dequantize_and_gather_k_cache(
-                out=workspace,
-                k_cache=swa_pool_3d,
-                seq_lens=wm.swa_seq_lens,
-                gather_lens=wm.swa_gather_lens,
-                block_table=wm.swa_bt_int32,
-                block_size=wm.swa_eb,
-                offset=wm.N,
-            )
+        # SWA dequant only reads the cached prefix tail. The fresh new-K rows
+        # are already available as BF16 and are overlaid below; cold prefill
+        # does not need to read the SWA pool at all.
+        if common.any_cont:
+            with record_function_range("dsv4.fp8.attn.workspace.gather_swa_prefix"):
+                _swa_dq.dequantize_and_gather_k_cache(
+                    out=workspace,
+                    k_cache=swa_pool_3d,
+                    seq_lens=wm.swa_cache_seq_lens,
+                    gather_lens=wm.swa_cache_gather_lens,
+                    block_table=wm.swa_bt_int32,
+                    block_size=wm.swa_eb,
+                    offset=wm.N,
+                )
 
         # BF16 overlay of freshly computed new K — single ``index_copy_``
         # using the meta-precomputed ``new_k_slot_in_flat``. Avoids the FP8
@@ -3236,6 +3240,8 @@ class AttentionFP8(nn.Module):
             swa_seq_lens = seq_total_per_req.contiguous()
             cmp_seq_lens = N_per_req.contiguous()
             swa_gather_lens = gather_len_per_req.contiguous()
+            swa_cache_seq_lens = sp_i32.contiguous()
+            swa_cache_gather_lens = P_per_req.contiguous()
             qsl = cu_seqlens.to(device=device, dtype=torch.int32).contiguous()
             swa_bt_int32 = swa_bt[:B].to(device=device, dtype=torch.int32).contiguous()
             cmp_bt_int32 = cmp_bt[:B].to(device=device, dtype=torch.int32).contiguous()
@@ -3294,6 +3300,10 @@ class AttentionFP8(nn.Module):
             swa_gather_lens = torch.tensor(
                 [gather_len], device=device, dtype=torch.int32
             )
+            swa_cache_seq_lens = torch.tensor(
+                [sp_int], device=device, dtype=torch.int32
+            )
+            swa_cache_gather_lens = torch.tensor([P], device=device, dtype=torch.int32)
             qsl = torch.tensor([0, seqlen], device=device, dtype=torch.int32)
 
             # ``new_k_slot_in_flat`` writes the BF16 overlay of freshly
@@ -3332,6 +3342,8 @@ class AttentionFP8(nn.Module):
             swa_seq_lens=swa_seq_lens,
             cmp_seq_lens=cmp_seq_lens,
             swa_gather_lens=swa_gather_lens,
+            swa_cache_seq_lens=swa_cache_seq_lens,
+            swa_cache_gather_lens=swa_cache_gather_lens,
             qsl=qsl,
             dense_cmp_topk=dense_cmp_topk,
             new_k_slot_in_flat=new_k_slot_in_flat,
