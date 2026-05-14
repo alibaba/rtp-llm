@@ -82,7 +82,7 @@ cc_test(
     srcs = [
         "PrefillRpcServerTest.cc",
     ],
-    copts = test_copts,
+    copts = test_copts + ["-fno-access-control"],
     deps = test_deps + [
         "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/engine_base/schedulers:schedulers",

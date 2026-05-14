@@ -5,10 +5,7 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
-
-#define private public
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
-#undef private
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 
