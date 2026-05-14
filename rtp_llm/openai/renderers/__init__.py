@@ -19,4 +19,6 @@ from .qwen_v2_audio_renderer import QwenV2AudioRenderer
 from .qwen_vl_renderer import QwenVLRenderer
 
 if has_internal_source():
-    import internal_source.rtp_llm.openai_renderers.internal_init
+    # Phase-25 namespace merge: rtp_llm.openai_renderers resolves to
+    # internal_source/rtp_llm/openai_renderers via the extended __path__.
+    from rtp_llm.openai_renderers import internal_init  # noqa: F401

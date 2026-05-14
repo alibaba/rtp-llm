@@ -364,7 +364,17 @@ class QWenV2(QWen):
         config_path = os.path.join(ckpt_path, "config.json")
 
         if not os.path.exists(config_path):
-            return
+            # Surface the missing path explicitly. The previous silent
+            # return left _create_config() asserting on
+            # head_num=0/num_layers=0 with no hint about which path the
+            # server actually inspected when the model directory is missing
+            # or not mounted in the execution environment.
+            raise FileNotFoundError(
+                "QWenV2._from_hf: config.json not found at "
+                + config_path + " (ckpt_path=" + repr(ckpt_path) + "). "
+                "Verify CHECKPOINT_PATH env / model_path arg is correct "
+                "and the model dir is mounted on this host."
+            )
         with open(config_path) as reader:
             content = reader.read()
             config_json = json.loads(content)

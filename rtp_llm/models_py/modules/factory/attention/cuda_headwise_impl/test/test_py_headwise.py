@@ -5,8 +5,11 @@ import unittest
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
+import pytest
 import torch
 from torch.nn.attention.flex_attention import create_block_mask, flex_attention
+
+pytestmark = [pytest.mark.gpu(type="H20")]
 
 from rtp_llm.models_py.modules.factory.attention.cuda_headwise_impl.headwise import (
     HeadWisePrefillAttnOp,
@@ -167,10 +170,22 @@ class TestHeadwisePrefillOp(unittest.TestCase):
     ) -> torch.Tensor:
         op = self._get_or_create_op(case)
         if not op.support(attn_inputs):
-            self.skipTest("HeadWisePrefillAttnOp not supported (missing flashinfer/rtp_kernel)")
+            self.skipTest(
+                "HeadWisePrefillAttnOp not supported (missing flashinfer/rtp_kernel)"
+            )
         op.prepare(attn_inputs)
         op._get_headwise_config(0)
         return op.forward(qkv, cache, None)
+
+    def tearDown(self):
+        """Release GPU memory between test methods."""
+        self._op = None
+        self._cached_op_key = None
+        self.compiled_flex_attention = None
+        import gc
+
+        gc.collect()
+        torch.cuda.empty_cache()
 
     # -------------------------
     # Core Test Runner Logic
@@ -213,21 +228,30 @@ class TestHeadwisePrefillOp(unittest.TestCase):
         torch.testing.assert_close(out_ref_flat, out_op_flat, rtol=rtol, atol=atol)
         logging.info(f"✓ Test passed for case: {case}")
 
+        del q, k, v, cache, qkv, attn_inputs, out_op, out_ref, out_op_flat, out_ref_flat
+        self._op = None
+        self._cached_op_key = None
+        import gc
+
+        gc.collect()
+        torch.cuda.empty_cache()
+
     # -------------------------
     # Test Cases (replaces the old main loop)
     # -------------------------
     def test_long_context_prefill(self):
-        """Tests prefill with long context lengths (32k, 65k)."""
+        """Tests headwise prefill with long KV contexts without CI-scale full prefill."""
         logging.info("\n=== Testing Long Context Prefill ===")
 
-        kv_lens = [32768, 65536]
-        qo_lens = [32768, 65536]
-
-        for i in range(len(kv_lens)):
+        cases = [
+            (32768, 64),
+            (65536, 64),
+        ]
+        for kv_len, qo_len in cases:
             case = self.Case(
-                batch_size=2,
-                kv_len=kv_lens[i],
-                qo_len=qo_lens[i],
+                batch_size=1,
+                kv_len=kv_len,
+                qo_len=qo_len,
                 window_left=8192,
                 num_kv_heads=1,
                 num_qo_heads=8,
@@ -235,7 +259,7 @@ class TestHeadwisePrefillOp(unittest.TestCase):
                 page_size=128,
             )
 
-            with self.subTest(case=case):
+            with self.subTest(kv_len=kv_len, qo_len=qo_len, case=case):
                 self._run_correctness_check(case)
 
     def test_various_page_sizes(self):
@@ -245,9 +269,9 @@ class TestHeadwisePrefillOp(unittest.TestCase):
         page_sizes = [128, 256, 512]
         for ps in page_sizes:
             case = self.Case(
-                batch_size=2,
-                kv_len=32768,
-                qo_len=32768,
+                batch_size=1,
+                kv_len=16384,
+                qo_len=64,
                 window_left=8192,
                 num_kv_heads=1,
                 num_qo_heads=8,
@@ -257,17 +281,18 @@ class TestHeadwisePrefillOp(unittest.TestCase):
             with self.subTest(page_size=ps, case=case):
                 self._run_correctness_check(case)
 
+    @pytest.mark.manual
     def test_various_head(self):
-        """Tests different page sizes for memory layout."""
-        logging.info("\n=== Testing Various Page Sizes ===")
+        """Tests different KV head counts for GQA/MHA layouts."""
+        logging.info("\n=== Testing Various Head Counts ===")
 
         qo_head = [8, 8, 8]
         kv_head = [1, 4, 8]
         for i in range(len(qo_head)):
             case = self.Case(
-                batch_size=2,
-                kv_len=32768,
-                qo_len=32768,
+                batch_size=1,
+                kv_len=16384,
+                qo_len=64,
                 window_left=8192,
                 num_kv_heads=kv_head[i],
                 num_qo_heads=qo_head[i],

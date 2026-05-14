@@ -1,5 +1,5 @@
 load("//:def.bzl", "cc_test_wrapper", "copts")
-load("@arch_config//:arch_select.bzl", "torch_deps")
+load("@rtp_llm//bazel:defs.bzl", "torch_deps")
 
 cc_test = cc_test_wrapper
 
@@ -33,7 +33,7 @@ cc_test(
         "//rtp_llm/cpp/cache/connector/memory/test/mock:test_rpc_service_lib",
     ],
     env = {},
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -47,7 +47,7 @@ cc_test(
         "//rtp_llm/cpp/cache/connector/memory:memory_connector",
     ],
     env = {},
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -61,5 +61,5 @@ cc_test(
         "//rtp_llm/cpp/cache/connector/memory:memory_connector",
     ],
     env = {},
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )

@@ -2,12 +2,16 @@ import os
 import sys
 from unittest import TestCase, main
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="A10"), pytest.mark.manual]
+
 print(os.getcwd())
 print(
     "PYTHONPATH="
-    + os.environ["PYTHONPATH"]
+    + os.environ.get("PYTHONPATH", "")
     + " LD_LIBRARY_PATH="
-    + os.environ["LD_LIBRARY_PATH"]
+    + os.environ.get("LD_LIBRARY_PATH", "")
     + " "
     + sys.executable
     + " "

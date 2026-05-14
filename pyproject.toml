@@ -1,0 +1,381 @@
+# RTP-LLM Open Source Project Configuration
+#
+# 此文件仅包含开源依赖，不包含私有 URL。
+# 适用于开源社区用户。
+
+[build-system]
+requires = [
+    "setuptools>=75.0,<82",
+    "wheel",
+    "grpcio-tools==1.57.0",
+    "protobuf==4.25",
+    "tomli; python_version < '3.11'",
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rtp-llm"
+dynamic = ["version", "dependencies"]
+description = "High-performance Large Language Model inference engine"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.10,<3.12"
+authors = [
+    {name = "Alibaba RTP-LLM Team"}
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.scripts]
+rtp-llm = "rtp_llm.cli.main:main"
+rtp-llm-server = "rtp_llm.start_server:main"
+
+# These pytest plugins intentionally live under rtp_llm.test.*. Keep them in
+# release metadata together with packaged tests so installed wheels expose the
+# same CI/test helpers as source checkouts.
+[project.entry-points."pytest11"]
+remote-gpu = "rtp_llm.test.remote_tests.plugin"
+rtp-ci-profile = "rtp_llm.test.ci_profile_plugin"
+smoke-runs-per-test = "rtp_llm.test.smoke_framework.runs_plugin"
+
+[project.entry-points."rtp_llm.models"]
+# Model plugins can be registered here
+
+# `dev` and `docs` extras are declared statically here (not via setup.py
+# extras_require) so `uv pip install --compile-bytecode -e .[dev]` resolves them from PEP 621
+# metadata. Without this, uv warns "does not have an extra named dev" and
+# silently drops pytest, breaking REAPI workers that need pytest to run.
+# GPU platform extras (cuda12_9 / rocm / cuda12_arm) stay in
+# _build/oss_optional_extras.toml — they carry internal pin URLs.
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "pytest-timeout>=2.0",
+    "pytest-xdist>=3.0",
+    "httpx>=0.24.0",
+    "coverage>=7.0",
+]
+docs = [
+    "sphinx>=5.0",
+    "sphinx-rtd-theme",
+]
+
+[tool.setuptools]
+package-dir = {"" = "."}
+
+# Use namespace-package discovery so the wheel actually contains every
+# subpackage (rtp_llm.cpp, rtp_llm.models_py, rtp_llm.config, rtp_llm.ops,
+# rtp_llm.server, ...). Tests are intentionally packaged too: the public
+# pytest11 entry points below import modules from rtp_llm.test.*, so excluding
+# tests would produce installed wheels whose pytest plugins fail at startup.
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["rtp_llm", "rtp_llm.*"]
+
+# ``dependencies`` is dynamic but no source is declared here: setuptools accepts
+# ``install_requires=`` from setup.py for any field marked dynamic in [project]
+# without an explicit dynamic source. setup.py builds the per-platform list from
+# pyproject.toml [tool.rtp-llm].base-dependencies + extras at import time.
+[tool.setuptools.dynamic]
+version = {attr = "setup.dynamic_version"}
+
+[tool.setuptools.package-data]
+rtp_llm = [
+    "libs/*.so",
+    "libs/*.so.*",
+    "libs/kv_cache_manager_server/bin/*",
+    "tokenizer_data/*",
+    "config/*.conf",
+    "config/*.json",
+    "ops/**/*.pyi",
+    "openai/renderers/qwen_agent/utils/*.tiktoken",
+    "test/**/*.proto",
+    "test/**/*.json",
+    "test/**/*.jsonl",
+    "test/**/*.txt",
+    "test/**/*.yaml",
+    "test/**/*.yml",
+    "test/**/*.sh",
+    "test/**/*.jinja",
+]
+
+# ============================================================
+# RTP-LLM 构建配置
+# ============================================================
+[tool.rtp-llm]
+# 基础依赖 - 所有平台共用 (仅开源包)
+# 历史上由旧基础 requirements 源迁移而来
+base-dependencies = [
+    # Core
+    "filelock>=3.20.0",
+    "jinja2",
+    "sympy",
+    "typing-extensions",
+    "importlib_metadata",
+
+    # ML/Transformers
+    "transformers==4.51.2",
+    "tokenizers==0.21.4",
+    "huggingface-hub>=0.30.0,<1.0",
+    "sentencepiece==0.2.0",
+    "safetensors",
+    "numpy<2.0a0,>=1.25",
+    "einops",
+    "timm==0.9.12",
+    "bitsandbytes>=0.41.0",
+
+    # Server/API
+    "fastapi==0.115.6",
+    "uvicorn==0.30.0",
+    "grpcio==1.62.0",
+    "grpcio-tools==1.57.0",
+    "protobuf==4.25",
+    "aiohttp",
+    "orjson",
+    "pydantic",
+    # Pin pyarrow to 16.x: pyarrow 23.x reproducibly crashes TP convert tests
+    # in libarrow background_thread_entry during import/runtime initialization.
+    "pyarrow==16.1.0",
+
+    # Utilities
+    "setuptools>=64.0,<82",
+    "dacite",
+    "psutil",
+    "tiktoken==0.7.0",
+    "lru-dict",
+    "py-spy",
+    "cpm_kernels",
+    "prettytable",
+    "setproctitle",
+    "portalocker",
+    "concurrent_log_handler",
+    "pybind11_stubgen",
+    "pyOpenSSL==24.1.0",
+
+    # Image/Media
+    "Pillow",
+    "pillow-heif",
+    "pillow-avif-plugin==1.5.2",
+    "librosa",
+    "matplotlib",
+
+    # Cloud/Storage
+    "oss2",
+    "pyodps",
+    "blobfile",
+
+    # NLP/AI
+    "onnx==1.16.0",
+    "sentence-transformers==2.7.0",
+    "json5",
+    "dashscope>=1.11.0",
+    "jieba",
+    "openai",
+    "nest_asyncio",
+    "partial_json_parser",
+
+    # Monitoring
+    "thrift",
+
+    # Video processing
+    "decord==0.6.0 ; platform_machine == 'x86_64'",
+
+    # Platform-specific
+    "pynvml",
+]
+
+[tool.pytest.ini_options]
+# Pytest 最低版本要求
+minversion = "7.0"
+
+# 测试搜索路径
+testpaths = [
+    "rtp_llm/test",
+    "rtp_llm/utils/test",
+    "rtp_llm/config/test",
+    "rtp_llm/distribute/test",
+    "rtp_llm/server",
+    "rtp_llm/frontend/test",
+    "rtp_llm/models/multimodal/test",
+    "rtp_llm/models_py",
+    "rtp_llm/cpp/models",
+    "rtp_llm/cpp/model_rpc/test",
+    "rtp_llm/aios",
+]
+
+# 测试文件、类和函数的匹配模式
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*", "*Test"]
+python_functions = ["test_*"]
+
+# JUnit XML 报告中的日志记录级别
+junit_logging = "all"
+
+# Markers matching Bazel tags
+markers = [
+    # Device/Platform markers
+    "gpu(type, count): requires GPU — use @pytest.mark.gpu(type='A10', count=1)",
+    "cpu: CPU-only tests (no GPU required)",
+    "cuda: CUDA-specific tests (NVIDIA GPU)",
+    "rocm: ROCm-specific tests (AMD GPU)",
+
+    # Legacy GPU type markers (deprecated — use gpu(type=...) instead)
+    "A10: (deprecated) use gpu(type='A10')",
+    "GeForce_RTX_3090: (deprecated) use gpu(type='GeForce_RTX_3090')",
+    "GeForce_RTX_4090: (deprecated) use gpu(type='GeForce_RTX_4090')",
+    "Tesla_V100S_PCIE_32GB: (deprecated) use gpu(type='Tesla_V100S_PCIE_32GB')",
+    "L20: (deprecated) use gpu(type='L20')",
+    "H20: (deprecated) use gpu(type='H20')",
+    "SM100: (deprecated) use gpu(type='SM100')",
+    "SM100_ARM: (deprecated) use gpu(type='SM100_ARM')",
+    "MI308X: (deprecated) use gpu(type='MI308X')",
+
+    # Test type markers
+    "smoke: smoke tests",
+    "light: light smoke test suite (quick validation)",
+    "manual: manual tests - not run automatically",
+    "slow: slow tests",
+    "perf: performance tests",
+    "eval: benchmark-style evaluation smoke tests",
+    "timeout(timeout): per-test timeout override from pytest-timeout",
+
+    # Feature markers
+    "open_skip: skip in open source build",
+]
+
+# 日志配置
+log_cli = true
+log_cli_level = "INFO"
+log_cli_format = "%(asctime)s [%(levelname)8s] %(message)s (%(filename)s:%(lineno)s)"
+log_cli_date_format = "%Y-%m-%d %H:%M:%S"
+
+# 默认命令行选项
+addopts = [
+    "-v",
+    "--tb=short",
+    "--strict-markers",
+    "-ra",
+    # C++ wrapper tests (bazel-compiled test .so, run via cpp-ut-* jobs)
+    "--ignore=rtp_llm/cpp/models/context_parallel/test",
+    "--ignore=rtp_llm/cpp/models/eplb/test",
+]
+
+# 异步测试模式
+asyncio_mode = "auto"
+
+# 默认超时时间
+timeout = 60
+
+# 忽略特定类型的警告
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+    "ignore::UserWarning",
+]
+
+# =============================================================================
+# CI pytest profiles (Aone main.yaml py-ut-* / smoke-* jobs).
+# Consumed by: pytest --rtp-ci-profile=<name> or RTP_PYTEST_CI_PROFILE=<name>
+# =============================================================================
+[tool.rtp_llm.pytest_ci]
+version = 1
+default_pytest_cli = "-v --tb=short --timeout=300"
+
+[tool.rtp_llm.pytest_ci.profiles.py_ut_sm8x]
+description = "Python UT on SM8x class GPUs (py-ut-sm8x)"
+gpu_type = "A10"
+markexpr = "not H20 and not MI308X and not SM100 and not SM100_ARM and not smoke and not perf and not manual"
+
+[tool.rtp_llm.pytest_ci.profiles.py_ut_sm9x]
+description = "Python UT on H20 / SM9x pool (py-ut-sm9x)"
+gpu_type = "H20"
+markexpr = "H20 and not MI308X and not SM100 and not SM100_ARM and not smoke and not perf and not manual"
+
+[tool.rtp_llm.pytest_ci.profiles.py_ut_sm100_arm]
+description = "Python UT on SM100 ARM (py-ut-sm100-arm)"
+gpu_type = "SM100_ARM"
+markexpr = "SM100_ARM and not smoke and not perf and not manual"
+
+[tool.rtp_llm.pytest_ci.profiles.py_ut_amd]
+description = "Python UT on AMD MI308X (py-ut-amd)"
+gpu_type = "MI308X"
+markexpr = "MI308X and not smoke and not perf and not manual"
+
+[tool.rtp_llm.pytest_ci.profiles.py_ut_frontend]
+description = "Frontend Python UT (py-ut-frontend)"
+paths = ["rtp_llm/frontend/test", "rtp_llm/test/frontend_test"]
+markexpr = "not manual and not rocm and not cpu"
+
+# -------- OSS smoke profiles (drive suite files in rtp_llm/test/smoke/suites/) --------
+[tool.rtp_llm.pytest_ci.profiles.smoke_h20_oss]
+description = "OSS smoke H20 (smoke-h20-oss)"
+paths = ["rtp_llm/test/smoke/suites/"]
+markexpr = "manual and smoke and H20"
+
+[tool.rtp_llm.pytest_ci.profiles.smoke_sm8x_oss]
+description = "OSS smoke SM8x (smoke-sm8x-oss)"
+paths = ["rtp_llm/test/smoke/suites/"]
+# NOTE: rocm marker is `MI308X_ROCM7` (suffixed), not `MI308X` — pytest marker
+# matching is exact-token. Run 39158147 leaked all rocm cases into
+# smoke-light-sm8x and they crashed with `libcudart.so.12 cannot open` when
+# dispatched to MI308X workers carrying cuda12_9-built .so files.
+markexpr = "manual and smoke and not H20 and not MI308X_ROCM7 and not SM100 and not SM100_ARM"
+
+[tool.rtp_llm.pytest_ci.profiles.smoke_sm100_oss]
+description = "OSS smoke SM100 ARM (smoke-sm100-oss)"
+paths = ["rtp_llm/test/smoke/suites/"]
+gpu_type = "SM100_ARM"
+markexpr = "manual and smoke and SM100_ARM and not eval"
+
+[tool.rtp_llm.pytest_ci.profiles.smoke_sm100_eval_oss]
+description = "OSS smoke SM100 ARM eval bench (smoke-sm100-eval-oss)"
+paths = ["rtp_llm/test/smoke/suites/"]
+gpu_type = "SM100_ARM"
+markexpr = "manual and smoke and SM100_ARM and eval"
+
+[tool.rtp_llm.pytest_ci.profiles.smoke_rocm_oss]
+description = "OSS smoke ROCm (smoke-rocm-oss)"
+paths = ["rtp_llm/test/smoke/suites/"]
+# Must match smoke_defs_oss.py gpu markers (MI308X_ROCM7), not the hyphenated gpu_type string.
+markexpr = "manual and smoke and MI308X_ROCM7"
+
+[tool.rtp_llm.pytest_ci.profiles.smoke_remote_cache_oss]
+description = "OSS smoke remote cache (smoke-remote-cache-oss)"
+paths = ["rtp_llm/test/smoke/suites/"]
+markexpr = "manual and smoke and remote_cache"
+
+# -------- Internal smoke profiles (drive suite files in internal_source/rtp_llm/test/smoke/suites/) --------
+[tool.rtp_llm.pytest_ci.profiles.smoke_h20_internal]
+description = "Internal smoke H20 (smoke-h20-internal)"
+paths = ["../internal_source/rtp_llm/test/smoke/suites/"]
+markexpr = "manual and smoke and H20"
+
+[tool.rtp_llm.pytest_ci.profiles.smoke_sm8x_internal]
+description = "Internal smoke SM8x (smoke-sm8x-internal)"
+paths = ["../internal_source/rtp_llm/test/smoke/suites/"]
+markexpr = "manual and smoke and not H20 and not MI308X and not MI308X_ROCM7 and not SM100 and not SM100_ARM"
+
+[tool.rtp_llm.pytest_ci.profiles.smoke_ppu_internal]
+description = "Internal smoke PPU (smoke-ppu-internal)"
+paths = ["../internal_source/rtp_llm/test/smoke/suites/"]
+markexpr = "manual and smoke and PPU_ZW810E"
+
+[tool.rtp_llm.pytest_ci.profiles.smoke_amd_internal]
+description = "Internal smoke AMD MI308X (smoke-amd-internal)"
+paths = ["../internal_source/rtp_llm/test/smoke/suites/"]
+# Pytest markers must be valid Python identifiers (underscore), so suites declare
+# `markers: [... 'MI308X_ROCM7']`. The REAPI worker pool registers as
+# `gpu=MI308X-ROCM7` (hyphen) — see internal_source/.cicd_bazelrc:31. The two
+# forms must NOT be confused: underscore here for pytest, hyphen for gpu_type/REAPI.
+markexpr = "manual and smoke and MI308X_ROCM7"
+
+[tool.rtp_llm.pytest_ci.profiles.perf_sm9x]
+description = "Performance tests on H20 / SM9x (perf-test)"
+paths = ["../internal_source/rtp_llm/test/perf_test/suites/"]
+gpu_type = "H20"
+markexpr = "manual and perf and H20"

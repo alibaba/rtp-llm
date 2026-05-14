@@ -2,7 +2,8 @@ from typing import Any, Dict, List, Optional, Union
 
 import prettytable as pt
 from pydantic import BaseModel
-from smoke.common_def import QueryStatus
+
+from rtp_llm.test.smoke.common_def import QueryStatus
 
 
 class LoraUpdateInfo(BaseModel):

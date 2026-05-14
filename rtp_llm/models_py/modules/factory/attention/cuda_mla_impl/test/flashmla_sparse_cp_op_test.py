@@ -21,7 +21,10 @@ from unittest import SkipTest, TestCase, main, skipIf
 from unittest.mock import patch
 
 import numpy as np
+import pytest
 import torch
+
+pytestmark = [pytest.mark.gpu(type="H20")]
 
 from rtp_llm.models_py.distributed.collective_torch import (
     destroy_distributed_environment,

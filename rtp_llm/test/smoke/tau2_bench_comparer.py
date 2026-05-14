@@ -11,8 +11,8 @@ import tempfile
 import urllib.request
 from typing import Any, List, Optional
 
-from smoke.base_comparer import BaseComparer
-from smoke.common_def import ABS_PATH, REL_PATH, QueryStatus, SmokeException
+from rtp_llm.test.smoke.base_comparer import BaseComparer
+from rtp_llm.test.smoke.common_def import ABS_PATH, REL_PATH, QueryStatus, SmokeException
 
 TAU2_TARBALL_URL = os.environ.get(
     "TAU2_TARBALL_URL",
@@ -75,7 +75,7 @@ class Tau2BenchComparer(BaseComparer):
         logging.info(f"[TAU2] PASS: OVERALL score={score} >= threshold={threshold}")
 
     def _pip_install(self, args: List[str]) -> None:
-        cmd = [sys.executable, "-m", "pip", "install", "--quiet"] + args
+        cmd = [sys.executable, "-m", "pip", "install", "--compile", "--quiet"] + args
         logging.info(f"[TAU2] pip install: {' '.join(cmd)}")
         subprocess.run(cmd, check=True)
 

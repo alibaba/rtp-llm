@@ -19,13 +19,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla im
     check_attention_inputs,
 )
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
-from rtp_llm.ops import (
-    AttentionConfigs,
-    FMHAType,
-    KvCacheDataType,
-    ParallelismConfig,
-    RopeStyle,
-)
+from rtp_llm.ops import AttentionConfigs, KvCacheDataType, ParallelismConfig, RopeStyle
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCacheDecodeOp,
     LayerKVCache,
@@ -535,6 +529,8 @@ class PyFlashinferPrefillImplBase(FMHAImplBase):
 class PyFlashinferPagedPrefillImpl(PyFlashinferPrefillImplBase):
     """FlashInfer prefill implementation with paged KV cache layout using MhaRotaryEmbeddingOp."""
 
+    NAME = "py_flashinfer_paged"
+
     def _create_fmha_impl(
         self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> Any:
@@ -570,6 +566,8 @@ class PyFlashinferPagedPrefillImpl(PyFlashinferPrefillImplBase):
 
 class PyFlashinferPrefillImpl(PyFlashinferPrefillImplBase):
     """FlashInfer prefill implementation with ragged KV cache layout using MhaRotaryEmbeddingOp."""
+
+    NAME = "py_flashinfer"
 
     def _create_fmha_impl(
         self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
@@ -754,6 +752,8 @@ class PyFlashinferDecodeAttnOp(object):
 
 
 class PyFlashinferDecodeImpl(FMHAImplBase):
+    NAME = "py_flashinfer"
+
     def __init__(
         self,
         attn_configs: AttentionConfigs,

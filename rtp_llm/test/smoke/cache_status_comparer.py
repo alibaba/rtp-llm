@@ -3,10 +3,10 @@ import logging
 from typing import Any, Dict
 
 from pydantic import BaseModel
-from smoke.base_comparer import BaseComparer
-from smoke.common_def import QueryStatus, SmokeException
 
-from rtp_llm.server.worker_status import WorkerStatusRequest, CacheStatus
+from rtp_llm.server.worker_status import CacheStatus, WorkerStatusRequest
+from rtp_llm.test.smoke.base_comparer import BaseComparer
+from rtp_llm.test.smoke.common_def import QueryStatus, SmokeException
 
 
 class CacheStatusComparer(BaseComparer):
@@ -39,9 +39,7 @@ class CacheStatusComparer(BaseComparer):
             # 其他字段直接比较
             # logging.info("expect_val: %s , actual_val: %s", str(expect_val), str(actual_val))
             if expect_val != actual_val:
-                logging.info(
-                    f"Check {check_field} 失败: {expect_val} != {actual_val}"
-                )
+                logging.info(f"Check {check_field} 失败: {expect_val} != {actual_val}")
                 raise SmokeException(
                     QueryStatus.COMPARE_FAILED,
                     f"{check_field} 不匹配\n预期: {expect_val}\n实际: {actual_val}",

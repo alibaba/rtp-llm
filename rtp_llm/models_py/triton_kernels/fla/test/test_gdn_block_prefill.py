@@ -4,6 +4,10 @@ import random
 import unittest
 from typing import List
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="H20")]
+
 import torch
 
 from rtp_llm.models_py.triton_kernels.fla import (

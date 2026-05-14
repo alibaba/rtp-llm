@@ -18,7 +18,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import ORJSONResponse
 from typing_extensions import override
 from uvicorn import Config, Server
-from uvicorn.loops.auto import auto_loop_setup
 
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.py_config_modules import PyEnvConfigs
@@ -40,6 +39,31 @@ MAX_INCOMPLETE_EVENT_SIZE = 1024 * 1024
 
 active_requests = AtomicCounter()
 server_shutdown = False
+
+
+def _setup_auto_loop_for_thread() -> None:
+    try:
+        from uvicorn.loops.auto import auto_loop_setup
+
+        auto_loop_setup()
+        return
+    except ImportError:
+        pass
+
+    try:
+        import uvloop
+
+        asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+        return
+    except ImportError:
+        pass
+
+    try:
+        from uvicorn.loops.asyncio import asyncio_setup
+
+        asyncio_setup()
+    except ImportError:
+        logging.debug("uvicorn asyncio loop setup is unavailable", exc_info=True)
 
 
 class GracefulShutdownServer(Server):
@@ -127,7 +151,7 @@ class FrontendApp(object):
         if threading.current_thread() != threading.main_thread():
             # NOTE: asyncio
             loop = "none"
-            auto_loop_setup()
+            _setup_auto_loop_for_thread()
             asyncio.set_event_loop(asyncio.new_event_loop())
 
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

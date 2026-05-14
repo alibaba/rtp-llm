@@ -3,6 +3,10 @@ import math
 import random
 import unittest
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="H20")]
+
 import torch
 import torch.nn.functional as F
 

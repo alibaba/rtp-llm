@@ -6,12 +6,12 @@ from typing import List, Optional
 
 from transformers import AutoConfig, PretrainedConfig
 
+from rtp_llm.config.kv_cache_config import KVCacheConfig
+from rtp_llm.config.model_args import ModelArgs
+from rtp_llm.config.model_config import ModelConfig, build_model_config
+from rtp_llm.config.py_config_modules import QuantizationConfig
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.model_factory_register import ModelDict
-from rtp_llm.config.model_config import ModelConfig, build_model_config
-from rtp_llm.config.model_args import ModelArgs
-from rtp_llm.config.py_config_modules import QuantizationConfig
-from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.ops import ProfilingDebugLoggingConfig
 from rtp_llm.tools.api.hf_model_helper import HfStyleModelInfo, get_hf_model_info
 from rtp_llm.utils.fuser import fetch_remote_file_to_local, umount_file
@@ -181,11 +181,18 @@ def _load_as_ft_style(
     kv_cache_config.int8_kv_cache = int(env_params.get("INT8_KV_CACHE", "0")) == 1
     kv_cache_config.fp8_kv_cache = int(env_params.get("FP8_KV_CACHE", "0")) == 1
 
-    build_model_config(config,
-                       model_args=model_args,
-                       kv_cache_config=kv_cache_config,
-                       profiling_debug_logging_config=ProfilingDebugLoggingConfig(),
-                       quantization_config=quantization_config)
+    profiling_debug_logging_config = ProfilingDebugLoggingConfig()
+    hack_layer_num = getattr(profiling_debug_logging_config, "hack_layer_num", 0)
+    if not isinstance(hack_layer_num, int):
+        profiling_debug_logging_config.hack_layer_num = 0
+
+    build_model_config(
+        config,
+        model_args=model_args,
+        kv_cache_config=kv_cache_config,
+        profiling_debug_logging_config=profiling_debug_logging_config,
+        quantization_config=quantization_config,
+    )
 
     is_quant_weight = config.quant_algo.isQuant()
     quant_config = None

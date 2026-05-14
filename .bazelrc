@@ -2,8 +2,6 @@ common --experimental_downloader_config=bazel/bazel_downloader.cfg
 fetch:downloader --experimental_remote_downloader=grpc://com.taobao.search.bazel.server:9092 --remote_cache=grpc://com.taobao.search.bazel.server:9092
 
 
-build --python_top=//:python310 --incompatible_use_python_toolchains=false # force use /opt/conda310/bin/python3
-
 build --spawn_strategy=local # avoid nvcc conflicts
 build --action_env PYTHON_BIN_PATH="/opt/conda310/bin/python3"
 build --cxxopt="-std=c++17" --copt="-DGTEST_USE_OWN_TR1_TUPLE=0" --copt="-DEIGEN_MAX_CPP_VER=11"
@@ -168,14 +166,14 @@ build:rocm --copt="-D_GLIBCXX_USE_CXX11_ABI=1"
 #build:rocm --action_env HIPBLASLT_LOG_MASK="32" # to log blasLt
 #build:rocm --action_env ROCBLAS_LAYER="4"
 #build:rocm --copt="-DENABLE_PROF=1"
-build:rocm --action_env LD_LIBRARY_PATH="/opt/rh/gcc-toolset-12/root/usr/lib64:/lib64:/opt/conda310/lib/:/opt/rocm/lib/:/opt/taobao/java/jre/lib/amd64/server/:/opt/amdgpu/lib64/"
-build:rocm --host_action_env LD_LIBRARY_PATH="/opt/rocm/lib/:/opt/taobao/java/jre/lib/amd64/server/:/opt/amdgpu/lib64/"
-build:rocm --action_env PATH="/opt/rh/gcc-toolset-12/root/usr/bin:/opt/conda310/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/tmp/cache_bust_20260423"
-build:rocm --host_action_env PATH="/opt/rh/gcc-toolset-12/root/usr/bin:/opt/conda310/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/tmp/cache_bust_20260423"
+build:rocm --action_env LD_LIBRARY_PATH="/opt/rh/gcc-toolset-12/root/usr/lib64:/lib64:/opt/rocm/lib/:/opt/amdgpu/lib64/"
+build:rocm --host_action_env  LD_LIBRARY_PATH="/opt/rh/gcc-toolset-12/root/usr/lib64:/lib64:/opt/rocm/lib/:/opt/amdgpu/lib64/"
+build:rocm --action_env PATH="/opt/rh/gcc-toolset-12/root/usr/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/tmp/cache_bust_20260423"
+build:rocm --host_action_env PATH="/opt/rh/gcc-toolset-12/root/usr/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/tmp/cache_bust_20260423"
 build:rocm --copt="-DUSE_ROCM=1"
 build:rocm --copt="-DFORCE_NVSHMEM_API=1"
 build:rocm --copt="-DFLASHINFER_CUB_SUBTRACTLEFT_DEFINED"  # ROCm 7.2 hipcub uses SubtractLeft instead of FlagHeads
-test:rocm --test_env="/opt/rocm/lib/:/opt/taobao/java/jre/lib/amd64/server/:/opt/amdgpu/lib64/"
+
 
 build:arm --copt="-DENABLE_BF16=1"
 build:arm --define=using_cuda=false --define=using_cuda_nvcc=false
@@ -213,9 +211,6 @@ build:asan --copt -fPIC # for "fix relocation truncated to fit: R_X86_64_32 agai
 build:asan --copt -fdebug-types-section # for "fix relocation truncated to fit: R_X86_64_32 against `.debug_info'" collect2 error
 build:asan --linkopt -fsanitize=address
 
-test:rocm --test_env PATH="/opt/rocm/bin:/opt/rh/gcc-toolset-12/root/usr/bin:/opt/conda310/bin:/opt/conda310/condabin:/usr/share/Modules/bin:/sbin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/usr/X11R6/bin:/opt/cmake/cmake-3.26.4/bin"
-test:rocm --test_env LD_LIBRARY_PATH="/opt/rh/gcc-toolset-12/root/usr/lib64:/opt/rocm/lib:/opt/conda310/lib/:/usr/lib64:/opt/amdgpu/lib64"
-test --test_env LD_LIBRARY_PATH="/opt/rocm/lib:/opt/conda310/lib/:/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64:/opt/amdgpu/lib64:/usr/local/cuda/extras/CUPTI/lib64"
 test --test_env OMP_NUM_THREADS=8
 test --test_env FT_SERVER_TEST="1"
 test --test_env LOG_LEVEL="INFO"
@@ -224,9 +219,28 @@ test --test_env NCCL_DEBUG="INFO"
 test --test_env TZ=Asia/Shanghai
 # for flashinfer find cuda; scope to CUDA-specific test runs
 test:cuda --test_env CUDA_HOME=/usr/local/cuda
+
+# NOTE: /opt/conda310/bin MUST stay on PATH — many cpp tests use
+# `#!/usr/bin/env python3` shebangs / subprocess invocations and conda310
+# is the only python3 in the dev images.  Dropping it caused
+# `/usr/bin/env: 'python3': No such file or directory` to fail all 54 cpp-ut
+# tests on REAPI workers (PR 965 run 39271211 cpp-ut job).
+test:cuda --test_env PATH="/opt/conda310/bin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+test:cuda --test_env LD_LIBRARY_PATH="/opt/conda310/lib/:/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64:/usr/local/cuda/extras/CUPTI/lib64"
+
+# ROCm: gcc-toolset-12 lib64 MUST come first so dlopen of aiter JIT-built
+# .so finds GCC 12 libstdc++ (has __cxx11::ostringstream::str() const).
+# conda310 lib AFTER gcc-toolset-12 to avoid clobbering libstdc++ resolution
+# but BEFORE rocm/amdgpu so python finds its own runtime.
+test:rocm --test_env LD_LIBRARY_PATH="/opt/rh/gcc-toolset-12/root/usr/lib64:/opt/conda310/lib/:/lib64:/opt/rocm/lib/:/opt/amdgpu/lib64/"
+test:rocm --test_env PATH="/opt/rh/gcc-toolset-12/root/usr/bin:/opt/conda310/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/tmp/cache_bust_20260423"
+
 # compat for low driver < 535
 test:compat --test_env LD_LIBRARY_PATH="/opt/rocm/lib:/opt/conda310/lib/:/usr/local/cuda/compat/:/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64:/opt/amdgpu/lib64:/usr/local/cuda/extras/CUPTI/lib64:/usr/local/cuda/lib64/stubs"
 
-# internal source overrides (only loaded when internal_source symlink exists)
-try-import %workspace%/internal_source/.internal_bazelrc
-try-import %workspace%/internal_source/.cicd_bazelrc
+# internal source overrides (only loaded in the internal monorepo checkout)
+try-import %workspace%/../internal_source/.internal_bazelrc
+# torch path from host environment (generated by setup.py)
+try-import %workspace%/.torch_bazelrc
+# always use for aone ci
+try-import %workspace%/../internal_source/.cicd_bazelrc
