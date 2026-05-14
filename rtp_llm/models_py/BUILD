@@ -53,6 +53,7 @@ py_library(
     ] + select({
         # cuda13 lock omits flashinfer-python and deep_ep → only deep_gemm.
         "@//:using_cuda13_x86": ["deep_gemm"],
+        "@//:using_cuda13_arm": ["deep_gemm"],
         "@//:using_cuda12": flashinfer + deep,
         "@//:using_ppu": deep,
         "@//:using_rocm": [
@@ -63,18 +64,21 @@ py_library(
     }) + select({
         # cuda13 lock currently ships flash-mla + tilelang (no fast-hadamard).
         "@//:using_cuda13_x86": ["flash-mla", "tilelang"],
+        "@//:using_cuda13_arm": ["flash-mla", "tilelang"],
         "@//:using_cuda12_9_x86": flashmla,
         "@//:using_cuda12_arm": flashmla,
         "//conditions:default": [],
     }) + select({
         # rtp_kernel built from gitlab cuda_extension main against torch 2.11+cu130.
         "@//:using_cuda13_x86": rtp_kernel,
+        "@//:using_cuda13_arm": rtp_kernel,
         "@//:using_cuda12_9_x86": rtp_kernel,
         "@//:using_cuda12_arm": rtp_kernel,
         "//conditions:default": [],
     }) + select({
         # flash_attn / flash_attn_3: deferred rebuild.
         "@//:using_cuda13_x86": [],
+        "@//:using_cuda13_arm": [],
         "@//:using_cuda12_9_x86": flashattn,
         "@//:using_cuda12_arm": flashattn,
         "//conditions:default": [],

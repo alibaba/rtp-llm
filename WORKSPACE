@@ -47,6 +47,9 @@ pip_gpu_cuda13_torch_install_deps()
 load("@pip_cuda12_arm_torch//:requirements.bzl", pip_cuda12_arm_torch_install_deps = "install_deps")
 pip_cuda12_arm_torch_install_deps()
 
+load("@pip_cuda13_arm_torch//:requirements.bzl", pip_cuda13_arm_torch_install_deps = "install_deps")
+pip_cuda13_arm_torch_install_deps()
+
 load("@pip_gpu_rocm_torch//:requirements.bzl", pip_gpu_rocm_torch_install_deps = "install_deps")
 pip_gpu_rocm_torch_install_deps()
 

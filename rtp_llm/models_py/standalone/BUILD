@@ -72,6 +72,9 @@ py_library(
             "//rtp_llm:aiter",
             "//rtp_llm:amdsmi",
         ],
+        "@//:using_cuda13_arm": [
+            "//rtp_llm:deep_gemm",
+        ],
         "@//:using_cuda12": [
             "//rtp_llm:deep_gemm",
         ],
@@ -81,18 +84,21 @@ py_library(
         "//conditions:default": [],
     }) + select({
         "@//:using_cuda13_x86": ["//rtp_llm:flash-mla"],
+        "@//:using_cuda13_arm": ["//rtp_llm:flash-mla"],
         "@//:using_cuda12_9_x86": flashinfer_with_cache + flashmla,
         "@//:using_cuda12_arm": flashinfer_with_cache,
         "@//:cuda_pre_12_9": flashinfer,
         "//conditions:default": []
     }) + select({
         "@//:using_cuda13_x86": rtp_kernel,
+        "@//:using_cuda13_arm": rtp_kernel,
         "@//:using_cuda12_9_x86": rtp_kernel,
         "@//:using_cuda12_arm": rtp_kernel,
         "@//:cuda_pre_12_9": [],
         "//conditions:default": []
     }) + select({
         "@//:using_cuda13_x86": [],
+        "@//:using_cuda13_arm": [],
         "@//:using_cuda12_9_x86": flashattn,
         "@//:using_cuda12_arm": flashattn,
         "@//:cuda_pre_12_9": [],
