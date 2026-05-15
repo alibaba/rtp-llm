@@ -273,13 +273,15 @@ P2PConnectorWorkerPrefill::sendKVCache(int64_t                                  
     const bool all_callbacks_received =
         waitSendCallbacksWithTimeout(transfer_result, sent_transfer_count, return_deadline_ms);
 
-    // Release the per-layer KVCacheResource refs held in computed_buffers_ now that all RDMA
-    // transfers have completed (callbacks fired or timed out). Without this, the
-    // connectorReference'd blocks stay pinned until checkTimeout() fires (~store_wait_timeout_ms_
-    // seconds later), starving the allocator under sustained load and causing LACK MEM.
-    computed_buffers_->removeBuffer(request_id);
-
-    if (!all_callbacks_received) {
+    if (all_callbacks_received) {
+        // All RDMA send callbacks have fired: the NIC has DMA'd data out of the source GPU
+        // buffers, so it is safe to release the per-layer KVCacheResource refs now.
+        // Without this, connectorReference'd blocks stay pinned until checkTimeout() fires
+        // (~store_wait_timeout_ms_ later), starving the allocator under load (LACK MEM).
+        // Do NOT call removeBuffer on the timeout path: in-flight RDMA ops may still hold
+        // references into those GPU buffers, and the 10-s timeout is the safety margin.
+        computed_buffers_->removeBuffer(request_id);
+    } else {
         RTP_LLM_LOG_WARNING(
             "sendKVCache transfer callback wait ended before return_deadline_ms or rdma cap, request_id: %ld, unique_key: %s",
             request_id,
