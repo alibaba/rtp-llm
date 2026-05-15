@@ -49,7 +49,7 @@ class MegaMoEJitWarmupTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"DSV4_MEGA_MOE_JIT_WARMUP": "0"}):
             self.assertFalse(mega_moe_jit_warmup_enabled())
 
-    def test_default_dsv4_ep4_chunk_64k_representatives(self):
+    def test_default_dsv4_ep4_chunk_16k_representatives(self):
         with mock.patch.dict(os.environ, {"DSV4_MOE_CHUNK_PREFILL": "1"}):
             tokens = generate_mega_moe_jit_token_counts(
                 num_ranks=4,
@@ -58,11 +58,11 @@ class MegaMoEJitWarmupTest(unittest.TestCase):
                 num_topk=6,
                 intermediate_hidden=2048,
                 num_sms=148,
-                max_tokens_per_rank=65536,
+                max_tokens_per_rank=16384,
             )
         self.assertEqual(
             tokens,
-            [1, 11, 91, 177, 347, 689, 1030, 2049, 4097, 8193, 65536],
+            [1, 11, 91, 177, 347, 689, 1030, 2049, 4097, 16384],
         )
 
     def test_representatives_share_bucket_with_cp4_even_values(self):
@@ -113,6 +113,26 @@ class MegaMoEJitWarmupTest(unittest.TestCase):
 
     def test_chunk_disabled_keeps_long_bucket_start(self):
         with mock.patch.dict(os.environ, {"DSV4_MOE_CHUNK_PREFILL": "0"}):
+            tokens = generate_mega_moe_jit_token_counts(
+                num_ranks=4,
+                num_experts=256,
+                num_experts_per_rank=64,
+                num_topk=6,
+                intermediate_hidden=2048,
+                num_sms=148,
+                max_tokens_per_rank=250000,
+            )
+        self.assertEqual(
+            tokens,
+            [1, 11, 91, 177, 347, 689, 1030, 2049, 4097, 8193, 18433],
+        )
+
+    def test_global_chunk_zero_keeps_long_bucket_start(self):
+        with mock.patch.dict(
+            os.environ,
+            {"DSV4_CHUNK_TOKENS": "0", "DSV4_MOE_CHUNK_PREFILL": "1"},
+            clear=True,
+        ):
             tokens = generate_mega_moe_jit_token_counts(
                 num_ranks=4,
                 num_experts=256,
