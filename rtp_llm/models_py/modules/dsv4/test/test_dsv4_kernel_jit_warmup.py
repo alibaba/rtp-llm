@@ -1,12 +1,39 @@
+import os
+import sys
+import types
 import unittest
 from types import SimpleNamespace
 
 import torch
 import torch.nn as nn
 
+_THIS = os.path.dirname(os.path.abspath(__file__))
+_REPO = os.path.abspath(os.path.join(_THIS, "..", "..", "..", "..", ".."))
+if _REPO not in sys.path:
+    sys.path.insert(0, _REPO)
+
+
+def _stub_package(name: str, path: str) -> None:
+    module = types.ModuleType(name)
+    module.__path__ = [path]
+    sys.modules.setdefault(name, module)
+
+
+_stub_package("rtp_llm", os.path.join(_REPO, "rtp_llm"))
+_stub_package("rtp_llm.models_py", os.path.join(_REPO, "rtp_llm", "models_py"))
+_stub_package(
+    "rtp_llm.models_py.modules",
+    os.path.join(_REPO, "rtp_llm", "models_py", "modules"),
+)
+_stub_package(
+    "rtp_llm.models_py.modules.dsv4",
+    os.path.join(_REPO, "rtp_llm", "models_py", "modules", "dsv4"),
+)
+
 from rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup import (
     _collect_dsv4_branch_kernel_configs,
     _collect_dsv4_dense_gemm_shapes,
+    resolve_dense_gemm_warmup_max_m,
 )
 
 
@@ -20,6 +47,55 @@ def _module_type(name, attrs):
 
 
 class Dsv4KernelJitWarmupTest(unittest.TestCase):
+    def test_dense_warmup_prefill_uses_sequence_bound(self):
+        self.assertEqual(
+            resolve_dense_gemm_warmup_max_m(
+                max_seq_len=1048576,
+                max_batch_size=1024,
+                role_type_name="PREFILL",
+                max_potential_token_num=5120,
+                is_speculative=True,
+                gen_num_per_cycle=4,
+            ),
+            1048576,
+        )
+
+    def test_dense_warmup_decode_uses_model_token_capacity(self):
+        self.assertEqual(
+            resolve_dense_gemm_warmup_max_m(
+                max_seq_len=1048576,
+                max_batch_size=1024,
+                role_type_name="DECODE",
+                max_potential_token_num=5120,
+                is_speculative=True,
+                gen_num_per_cycle=4,
+            ),
+            5120,
+        )
+
+    def test_dense_warmup_decode_fallback_accounts_for_speculative_width(self):
+        self.assertEqual(
+            resolve_dense_gemm_warmup_max_m(
+                max_seq_len=1048576,
+                max_batch_size=1024,
+                role_type_name="RoleType.DECODE",
+                max_potential_token_num=0,
+                is_speculative=True,
+                gen_num_per_cycle=4,
+            ),
+            5120,
+        )
+
+    def test_dense_warmup_decode_fallback_defaults_to_batch_size(self):
+        self.assertEqual(
+            resolve_dense_gemm_warmup_max_m(
+                max_seq_len=1048576,
+                max_batch_size=1024,
+                role_type_name="DECODE",
+            ),
+            1024,
+        )
+
     def test_collect_branch_configs_covers_all_ratios(self):
         args = SimpleNamespace(
             compress_ratios=[0, 4, 128, 4],
