@@ -9,31 +9,45 @@ attention kernels live in ``aiter.py``.
 import torch
 
 
-def unpad_kv_vectorized(k_padded, v_padded, cu_seqlens_k):
-    """Gather ``[B, H_kv, max_seqlen_k, D]`` padded K/V into packed
-    ``[total_kv, H_kv, D]`` without Python-side iteration.
+def compute_kv_unpad_indices(cu_seqlens_k, total_kv_tokens=None):
+    """Compute per-token ``(batch_idx, pos_idx)`` gather indices used by
+    :func:`unpad_kv_vectorized` to scatter ``[B, H_kv, max_seqlen_k, D]``
+    padded K/V into packed ``[total_kv, H_kv, D]``.
 
-    ``cu_seqlens_k`` is a ``[B+1]`` int tensor on the same device as the K/V
-    buffers. The function builds per-token ``(batch_idx, pos_idx)`` on device
-    via ``repeat_interleave`` + ``arange`` and gathers via advanced indexing —
-    one kernel chain, no ``.item()`` per batch.
+    ``cu_seqlens_k`` is a ``[B+1]`` int tensor. The per-token ``batch_idx`` is
+    recovered via ``searchsorted`` on ``cu_seqlens_k`` (data-independent
+    output shape — no host sync), and ``pos_idx`` is the residual within each
+    batch.
+
+    ``total_kv_tokens`` (Python int) sizes the per-token index buffers. The
+    hot caller (``AiterPrefillAttnOp.prepare``) already has
+    ``fmha_params.token_kv_num`` and should pass it; otherwise we read
+    ``cu_seqlens_k[-1]``, which forces one host-device sync. The previous
+    ``repeat_interleave(arange, kv_lengths)`` formulation always synced (its
+    output length is the GPU-resident sum), which serialised this op against
+    the CPU stream.
+
+    The indices depend only on the per-batch sequence-length layout — not on
+    K/V data — so the prefill op materialises them on ``FMHAParams`` once per
+    request and reuses them for every attention layer.
     """
-    device = k_padded.device
-    batch_size = cu_seqlens_k.shape[0] - 1
-    kv_lengths = cu_seqlens_k[1:] - cu_seqlens_k[:-1]
+    device = cu_seqlens_k.device
+    if total_kv_tokens is None:
+        total_kv_tokens = int(cu_seqlens_k[-1])
 
-    batch_idx = torch.repeat_interleave(
-        torch.arange(batch_size, device=device, dtype=cu_seqlens_k.dtype),
-        kv_lengths,
-    )
-    pos_idx = (
-        torch.arange(batch_idx.shape[0], device=device, dtype=cu_seqlens_k.dtype)
-        - cu_seqlens_k[batch_idx]
-    )
-    b_long = batch_idx.long()
-    p_long = pos_idx.long()
-    key_packed = k_padded[b_long, :, p_long, :].contiguous()
-    value_packed = v_padded[b_long, :, p_long, :].contiguous()
+    pos_lin = torch.arange(total_kv_tokens, device=device, dtype=cu_seqlens_k.dtype)
+    batch_idx = torch.searchsorted(cu_seqlens_k, pos_lin, right=True) - 1
+    pos_idx = pos_lin - cu_seqlens_k[batch_idx]
+    return batch_idx.long(), pos_idx.long()
+
+
+def unpad_kv_vectorized(k_padded, v_padded, batch_idx_long, pos_idx_long):
+    """Gather ``[B, H_kv, max_seqlen_k, D]`` padded K/V into packed
+    ``[total_kv, H_kv, D]`` using precomputed per-token indices from
+    :func:`compute_kv_unpad_indices`.
+    """
+    key_packed = k_padded[batch_idx_long, :, pos_idx_long, :].contiguous()
+    value_packed = v_padded[batch_idx_long, :, pos_idx_long, :].contiguous()
     return key_packed, value_packed
 
 

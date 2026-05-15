@@ -16,6 +16,7 @@ import unittest
 import torch
 
 from rtp_llm.models_py.modules.factory.attention.rocm_impl._attn_utils import (
+    compute_kv_unpad_indices,
     reshape_kv_cache_vectorized,
     split_qkv_fp8,
     split_raw_qkv,
@@ -62,7 +63,8 @@ def _make_padded(kv_lengths, num_kv_heads, head_dim, dtype):
 class TestUnpadKvVectorized(unittest.TestCase):
     def _check(self, kv_lengths, num_kv_heads=4, head_dim=8, dtype=torch.float32):
         k, v, cu = _make_padded(kv_lengths, num_kv_heads, head_dim, dtype)
-        k_vec, v_vec = unpad_kv_vectorized(k, v, cu)
+        b_idx, p_idx = compute_kv_unpad_indices(cu, sum(kv_lengths))
+        k_vec, v_vec = unpad_kv_vectorized(k, v, b_idx, p_idx)
         k_ref, v_ref = _unpad_kv_loop(k, v, cu)
         torch.testing.assert_close(k_vec, k_ref)
         torch.testing.assert_close(v_vec, v_ref)
@@ -85,7 +87,8 @@ class TestUnpadKvVectorized(unittest.TestCase):
         cu = torch.zeros(4, dtype=torch.int32)
         k = torch.zeros((3, 2, 0, 4), dtype=torch.float32)
         v = torch.zeros_like(k)
-        k_vec, v_vec = unpad_kv_vectorized(k, v, cu)
+        b_idx, p_idx = compute_kv_unpad_indices(cu, 0)
+        k_vec, v_vec = unpad_kv_vectorized(k, v, b_idx, p_idx)
         self.assertEqual(k_vec.shape, (0, 2, 4))
         self.assertEqual(v_vec.shape, (0, 2, 4))
 
@@ -99,10 +102,36 @@ class TestUnpadKvVectorized(unittest.TestCase):
         kv_lengths = [2, 5, 3]
         k, v, _ = _make_padded(kv_lengths, 2, 4, torch.float32)
         cu = torch.tensor([0, 2, 7, 10], dtype=torch.int64)
-        k_vec, v_vec = unpad_kv_vectorized(k, v, cu)
+        b_idx, p_idx = compute_kv_unpad_indices(cu, sum(kv_lengths))
+        k_vec, v_vec = unpad_kv_vectorized(k, v, b_idx, p_idx)
         k_ref, v_ref = _unpad_kv_loop(k, v, cu)
         torch.testing.assert_close(k_vec, k_ref)
         torch.testing.assert_close(v_vec, v_ref)
+
+
+class TestComputeKvUnpadIndices(unittest.TestCase):
+    """Direct check that the per-token (batch_idx, pos_idx) layout matches the
+    cu_seqlens_k layout — covers the empty-batch slot in the middle of a batch
+    (batch 1 has 0 tokens), which is the kind of off-by-one that ``searchsorted``
+    used to silently break."""
+
+    def test_indices_match_layout(self):
+        # batch 0: 3 tokens; batch 1: 0 tokens (empty); batch 2: 5 tokens.
+        cu = torch.tensor([0, 3, 3, 8], dtype=torch.int32)
+        b_idx, p_idx = compute_kv_unpad_indices(cu, 8)
+        torch.testing.assert_close(
+            b_idx, torch.tensor([0, 0, 0, 2, 2, 2, 2, 2], dtype=torch.long)
+        )
+        torch.testing.assert_close(
+            p_idx, torch.tensor([0, 1, 2, 0, 1, 2, 3, 4], dtype=torch.long)
+        )
+
+    def test_total_kv_tokens_default(self):
+        # When total_kv_tokens is omitted, the helper falls back to cu[-1].
+        cu = torch.tensor([0, 2, 5], dtype=torch.int32)
+        b_idx, p_idx = compute_kv_unpad_indices(cu)
+        self.assertEqual(b_idx.shape, (5,))
+        self.assertEqual(p_idx.shape, (5,))
 
 
 # ---------------------------------------------------------------------------

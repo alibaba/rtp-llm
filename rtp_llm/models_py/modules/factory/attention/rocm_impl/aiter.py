@@ -11,6 +11,7 @@ from aiter_meta.csrc.cpp_itfs.pa_gluon_aot.pa_decode_gluon_aot import (
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.models_py.modules.factory.attention.rocm_impl._attn_utils import (
+    compute_kv_unpad_indices,
     reshape_kv_cache_vectorized,
     split_qkv_fp8,
     split_raw_qkv,
@@ -134,6 +135,17 @@ class FMHAParams(ParamsBase):
             if bid is not None and alloc_scale:
                 self.kv_scale = torch.ones(1, dtype=torch.float32, device=bid.device)
 
+        self.cu_seqlens_k_device = self.cu_seqlens_k
+        if self.cu_seqlens_k is not None:
+            self.cu_seqlens_k_device = self.cu_seqlens_k_device.to(
+                torch.device("cuda"), non_blocking=True
+            )
+        self.cu_seqlens_q_device = self.cu_seqlens_q
+        if self.cu_seqlens_q is not None:
+            self.cu_seqlens_q_device = self.cu_seqlens_q_device.to(
+                torch.device("cuda"), non_blocking=True
+            )
+
     def fillParams(
         self,
         sequence_lengths,
@@ -147,7 +159,10 @@ class FMHAParams(ParamsBase):
         if kv_cache_block_id_device is not None:
             self.kv_cache_block_id_device = kv_cache_block_id_device
         if self.seq_lens is not None and self.sequence_lengths is not None:
-            self.seq_lens.copy_((self.sequence_lengths + 1).to(torch.device("cuda"), non_blocking=True), non_blocking=True)
+            self.seq_lens.copy_(
+                (self.sequence_lengths + 1).to(torch.device("cuda"), non_blocking=True),
+                non_blocking=True,
+            )
             if (
                 self.enable_cuda_graph
                 and self.graph_max_seq_len is not None
@@ -180,6 +195,22 @@ class AiterPrefillAttnOp:
             attn_inputs=attn_inputs,
             is_prefill=True,
         )
+        # Precompute the (batch_idx, pos_idx) gather indices used by
+        # unpad_kv_vectorized. They depend only on cu_seqlens_k, so doing the
+        # arange + searchsorted once here lets every attention layer in the
+        # request reuse the same indices instead of recomputing them in each
+        # forward() call.
+        if self.fmha_params.cu_seqlens_k_device is not None:
+            (
+                self.fmha_params.kv_unpad_batch_idx,
+                self.fmha_params.kv_unpad_pos_idx,
+            ) = compute_kv_unpad_indices(
+                self.fmha_params.cu_seqlens_k_device,
+                self.fmha_params.token_kv_num,
+            )
+        else:
+            self.fmha_params.kv_unpad_batch_idx = None
+            self.fmha_params.kv_unpad_pos_idx = None
         return self.fmha_params
 
     def _reshape_kv_cache_vectorized(self, kv_cache_base):
@@ -215,8 +246,8 @@ class AiterPrefillAttnOp:
         query, key, value = self._split_raw_qkv(
             qkv, fmha_params.token_q_num, fmha_params.token_kv_num
         )
-        cu_seqlens_q = fmha_params.cu_seqlens_q.to(query.device)
-        cu_seqlens_k = fmha_params.cu_seqlens_k.to(query.device)
+        cu_seqlens_q = fmha_params.cu_seqlens_q_device
+        cu_seqlens_k = fmha_params.cu_seqlens_k_device
         res = aiter.flash_attn_varlen_func(
             query,
             key,
@@ -264,14 +295,19 @@ class AiterPrefillAttnOp:
         k_padded = qkv[1]
         v_padded = qkv[2]
 
-        cu_seqlens_q = fmha_params.cu_seqlens_q.to(q_tensor.device)
-        cu_seqlens_k = fmha_params.cu_seqlens_k.to(q_tensor.device)
+        cu_seqlens_q = fmha_params.cu_seqlens_q_device
+        cu_seqlens_k = fmha_params.cu_seqlens_k_device
 
         # Vectorized unpad from [batch_size, num_kv_heads, max_seqlen_k, head_dim]
-        # to packed [total_kv_tokens, num_kv_heads, head_dim]. Avoids per-batch
-        # .item() syncs and per-batch transpose/contiguous launches by computing
-        # (batch_idx, pos_idx) on device and using advanced indexing once.
-        key_packed, value_packed = unpad_kv_vectorized(k_padded, v_padded, cu_seqlens_k)
+        # to packed [total_kv_tokens, num_kv_heads, head_dim] via advanced
+        # indexing. The (batch_idx, pos_idx) gather indices were materialised
+        # once on fmha_params in prepare() and are reused across every layer.
+        key_packed, value_packed = unpad_kv_vectorized(
+            k_padded,
+            v_padded,
+            fmha_params.kv_unpad_batch_idx,
+            fmha_params.kv_unpad_pos_idx,
+        )
         res = aiter.flash_attn_varlen_func(
             q_tensor,
             key_packed,
