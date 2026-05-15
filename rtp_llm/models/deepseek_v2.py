@@ -810,6 +810,82 @@ class DeepSeekV3Mtp(DeepSeekV2):
         return DeepSeekV3MtpWeight
 
 
+class Glm5MtpWeight(DeepSeekV2Weight):
+
+    def _get_weight_info(self):
+        layer_weights: List[List[WeightModule]] = []
+        weights = [
+            AtomicWeight(
+                W.embedding,
+                [CkptWeightInfo("model.layers.0.embed_tokens.weight", identity)],
+                identity,
+            ),
+            AtomicWeight(
+                W.lm_head,
+                [CkptWeightInfo("model.layers.0.shared_head.head.weight", identity)],
+                identity,
+            ),
+            AtomicWeight(
+                W.multi_tokens_predict_final_ln_gamma,
+                [CkptWeightInfo("model.layers.0.shared_head.norm.weight", identity)],
+                identity,
+            ),
+            AtomicWeight(
+                W.multi_tokens_predict_final_ln_beta,
+                [],
+                functools.partial(zeros, shape=[self._hidden_size]),
+            ),
+            AtomicWeight(
+                W.multi_tokens_predict_enorm,
+                [CkptWeightInfo("model.layers.0.enorm.weight", identity)],
+                identity,
+            ),
+            AtomicWeight(
+                W.multi_tokens_predict_hnorm,
+                [CkptWeightInfo("model.layers.0.hnorm.weight", identity)],
+                identity,
+            ),
+            AtomicWeight(
+                W.multi_tokens_predict_eh_proj,
+                [CkptWeightInfo("model.layers.0.eh_proj.weight", identity)],
+                transpose,
+            ),
+        ]
+        assert self._num_layers == 1
+        for layer in range(self._num_layers):
+            layer_weights.append(self._get_hf_layer_weight_info(layer))
+
+        return ModelWeightInfo(layer_weights=layer_weights, weights=weights)
+
+
+class Glm5Mtp(DeepSeekV2):
+
+    @classmethod
+    def _create_config(cls, ckpt_path: str):
+        config = super()._create_config(ckpt_path)
+        config.moe_layer_index = [i for i in range(config.num_layers)]
+        config.is_mtp = True
+        return config
+
+    def _create_python_model(self):
+        from rtp_llm.models_py.model_desc.generic_moe_mtp import GenericMoeMTPModel
+
+        self.py_model = GenericMoeMTPModel(
+            self.model_config,
+            self.parallelism_config,
+            self.weight,
+            self.moe_config,
+            max_generate_batch_size=self.max_generate_batch_size,
+            fmha_config=self.fmha_config,
+            py_hw_kernel_config=self.hw_kernel_config,
+            device_resource_config=self.device_resource_config,
+        )
+
+    @staticmethod
+    def get_weight_cls():
+        return Glm5MtpWeight
+
+
 register_model("deepseek2", DeepSeekV2, ["DeepseekV2ForCausalLM"])
 register_model("deepseek3", DeepSeekV2, ["DeepseekV3ForCausalLM"])
 register_model("deepseek-v3-mtp", DeepSeekV3Mtp, ["DeepseekV3ForCausalLMNextN"])
@@ -817,3 +893,4 @@ register_model("kimi_k2", DeepSeekV2, [])
 register_model("deepseek_v31", DeepSeekV2, [])
 register_model("deepseek_v32", DeepSeekV2, ["DeepseekV32ForCausalLM"])
 register_model("glm_5", DeepSeekV2, ["GlmMoeDsaForCausalLM"])
+register_model("glm_5_mtp", Glm5Mtp, ["GlmMoeDsaMtpForCausalLM"])

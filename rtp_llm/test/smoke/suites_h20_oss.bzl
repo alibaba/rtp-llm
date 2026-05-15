@@ -111,6 +111,12 @@ def h20_oss_suites():
                 smoke_args="--cache_store_rdma_mode 0 --use_local 1 --seq_size_per_block 64 --decode_entrance 1 --act_type bf16 --quantization FP8_PER_BLOCK --tp_size 2 --reserver_runtime_mem_mb 5026",
                 gpu_type=["H20"]
             ),
+            smoke_test(
+                name="mla_mtp_basic",
+                task_info="data/model/glm5/glm_5_fp8_q_r_h20_mtp.json",
+                smoke_args="--fp8_kv_cache 0 --act_type BF16 --seq_size_per_block 64 --tp_size 4 --world_size 4 --warm_up 0 --reserver_runtime_mem_mb 8192 --hack_layer_num 1 --sp_model_type glm_5_mtp --gen_num_per_cycle 4 --sp_type eagle --sp_checkpoint_path /home/zw193905/models/GLM-5-FP8-MTP --sp_act_type bf16",
+                gpu_type=["H20"],
+            ),
         ],
     )
 

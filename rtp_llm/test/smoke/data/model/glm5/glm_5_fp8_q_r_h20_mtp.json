@@ -1,0 +1,20 @@
+{
+    "model_type": "glm_5",
+    "model_path": "/home/zw193905/models/GLM-5-FP8-4layer",
+    "query_result": [
+        {
+            "query": {
+                "prompt": "$prompt:s1",
+                "generate_config": {
+                    "max_new_tokens": 20,
+                    "top_k": 1,
+                    "top_p": 0
+                }
+            },
+            "result": {
+                "response": "出家 Farms tactical SSRuntimePartitionedBy实践的回收站点的_DLtoyphanedidgeanutterscaculty",
+                "finished": true
+            }
+        }
+    ]
+}

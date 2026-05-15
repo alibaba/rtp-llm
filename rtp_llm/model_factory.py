@@ -127,7 +127,7 @@ class ModelFactory:
             or sp_type == SpeculativeType.EAGLE
         ):
             model_type = propose_model_config.model_type
-            if model_type == "deepseek-v3-mtp" or model_type == "mixtbstars-mtp":
+            if model_type in ("deepseek-v3-mtp", "mixtbstars-mtp", "glm_5_mtp"):
                 logging.warning(
                     f"create sp model type is {model_type}, so change the sp type to mtp"
                 )
