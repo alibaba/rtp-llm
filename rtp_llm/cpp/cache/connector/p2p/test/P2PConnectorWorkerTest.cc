@@ -310,6 +310,15 @@ protected:
         computed_buffers_->addBuffer(request_id, layer_cache_buffer, deadline_ms);
     }
 
+    void addComputedBufferWithResource(int64_t                   request_id,
+                                       int                       layer_id,
+                                       int64_t                   deadline_ms,
+                                       const KVCacheResourcePtr& resource) {
+        auto layer_cache_buffer = createLayerCacheBuffer(layer_id);
+        layer_cache_buffer->setKVCacheResource(resource);
+        computed_buffers_->addBuffer(request_id, layer_cache_buffer, deadline_ms);
+    }
+
     std::shared_ptr<LayerCacheBuffer> createLayerCacheBuffer(int layer_id, int num_blocks = 2) {
         auto buffer = std::make_shared<LayerCacheBuffer>(layer_id);
         for (int i = 0; i < num_blocks; ++i) {
@@ -998,6 +1007,138 @@ TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnFalse_CallbackWaitTimeout) {
     // callback 未收齐，必须报告失败（fix: 修复前此处可能误判成功）
     EXPECT_TRUE(result.hasError());
     EXPECT_EQ(result.code(), ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT);
+}
+
+// ==================== 资源释放验证测试（对 LACK MEM 修复的直接验证） ====================
+//
+// 背景：sendKVCache() 在 RDMA 传输完成后未调用 removeBuffer(request_id)，导致
+// computed_buffers_[request_id] 持续持有 LayerCacheBuffer::resource_（即经
+// holdKVCacheResourceForConnector 增加引用的 KVCacheResource），这些 KV block
+// 的 connectorReference 直到 checkTimeout()（默认 10s）才被解除，持续高负载下
+// 造成 block pool 耗尽触发 LACK MEM。
+// 修复方案：在 waitSendCallbacksWithTimeout() 返回后立即调用
+// computed_buffers_->removeBuffer(request_id)。
+// 以下测试验证该修复的正确性。
+
+// 1. sendKVCache 成功后，computed_buffers_ 中对应 request 的 buffer 必须立即移除。
+TEST_F(P2PConnectorWorkerTest, SendKVCache_Success_ComputedBufferRemovedImmediately) {
+    int64_t     request_id  = 5001;
+    std::string unique_key  = "test_buffer_removed_on_success";
+    int64_t     deadline_ms = currentTimeMs() + 5000;
+
+    std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
+    decode_transfer_servers.push_back({"127.0.0.1", 12345});
+
+    mock_sender_->setShouldSucceed(true);
+    mock_sender_->setAsyncCallback(true);
+
+    addComputedBuffer(request_id, 0, deadline_ms);
+    addComputedBuffer(request_id, 1, deadline_ms);
+
+    // send 前 buffer 存在
+    ASSERT_NE(computed_buffers_->getBuffer(request_id), nullptr);
+
+    ErrorInfo result = prefill_->sendKVCache(request_id, unique_key, deadline_ms, decode_transfer_servers);
+    EXPECT_TRUE(result.ok());
+
+    // 修复前：getBuffer 返回非 nullptr，buffer 持有 KV block 引用直到 checkTimeout（最多 10s）
+    // 修复后：getBuffer 必须返回 nullptr
+    EXPECT_EQ(computed_buffers_->getBuffer(request_id), nullptr)
+        << "BUG: computed_buffers_ still holds buffer after sendKVCache() success — "
+           "connectorReference'd KV blocks are not released, causing LACK MEM under load";
+}
+
+// 2. sendKVCache 因 transfer 失败返回错误时，buffer 同样必须立即移除。
+TEST_F(P2PConnectorWorkerTest, SendKVCache_TransferFailure_ComputedBufferRemovedImmediately) {
+    int64_t     request_id  = 5002;
+    std::string unique_key  = "test_buffer_removed_on_failure";
+    int64_t     deadline_ms = currentTimeMs() + 5000;
+
+    std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
+    decode_transfer_servers.push_back({"127.0.0.1", 12345});
+
+    mock_sender_->setShouldSucceed(false);
+    mock_sender_->setAsyncCallback(true);
+
+    addComputedBuffer(request_id, 0, deadline_ms);
+    addComputedBuffer(request_id, 1, deadline_ms);
+
+    ASSERT_NE(computed_buffers_->getBuffer(request_id), nullptr);
+
+    ErrorInfo result = prefill_->sendKVCache(request_id, unique_key, deadline_ms, decode_transfer_servers);
+    EXPECT_TRUE(result.hasError());
+
+    // 即使 transfer 失败，buffer 也应立即释放，不能等到 checkTimeout
+    EXPECT_EQ(computed_buffers_->getBuffer(request_id), nullptr)
+        << "BUG: computed_buffers_ still holds buffer after sendKVCache() failure — "
+           "KV blocks remain pinned even when transfer failed";
+}
+
+// 3. sendKVCache 成功后，LayerCacheBuffer 中持有的 KVCacheResource 引用必须归零
+//    （用 weak_ptr 观察 shared_ptr 是否已析构）。
+//    这是对 connectorReference'd block 不被泄漏的直接验证。
+TEST_F(P2PConnectorWorkerTest, SendKVCache_Success_KVCacheResourceReleasedAfterSend) {
+    int64_t     request_id  = 5003;
+    std::string unique_key  = "test_kvcache_ref_released_on_success";
+    int64_t     deadline_ms = currentTimeMs() + 5000;
+
+    std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
+    decode_transfer_servers.push_back({"127.0.0.1", 12345});
+
+    mock_sender_->setShouldSucceed(true);
+    mock_sender_->setAsyncCallback(true);
+
+    // 构造一个 KVCacheResource，通过 weak_ptr 追踪其生命周期
+    auto                           resource      = createKVCacheResource(0, 2);
+    std::weak_ptr<KVCacheResource> weak_resource = resource;
+
+    // 注入到两层的 LayerCacheBuffer，模拟 writeByLayer 后的状态
+    addComputedBufferWithResource(request_id, 0, deadline_ms, resource);
+    addComputedBufferWithResource(request_id, 1, deadline_ms, resource);
+
+    // 释放本地强引用，让 computed_buffers_ 成为唯一持有者
+    resource.reset();
+    ASSERT_FALSE(weak_resource.expired()) << "resource should still be alive inside computed_buffers_";
+
+    ErrorInfo result = prefill_->sendKVCache(request_id, unique_key, deadline_ms, decode_transfer_servers);
+    EXPECT_TRUE(result.ok());
+
+    // sendKVCache 返回后，computed_buffers_ 已通过 removeBuffer 释放 ComputedLayerCacheBuffer，
+    // 其局部 shared_ptr computed_layer_cache_buffer 也已随函数返回而析构，
+    // 因此 KVCacheResource 的所有强引用归零，weak_ptr 应已过期。
+    // 修复前：resource 仍被 computed_buffers_[request_id] 持有，weak_ptr 未过期
+    // 修复后：resource 立即被释放，weak_ptr 过期
+    EXPECT_TRUE(weak_resource.expired())
+        << "BUG: KVCacheResource still alive after sendKVCache() success — "
+           "connectorReference'd KV blocks are not released, causing LACK MEM under load";
+}
+
+// 4. sendKVCache 因 transfer 失败时，KVCacheResource 同样必须立即释放。
+TEST_F(P2PConnectorWorkerTest, SendKVCache_TransferFailure_KVCacheResourceReleasedAfterSend) {
+    int64_t     request_id  = 5004;
+    std::string unique_key  = "test_kvcache_ref_released_on_failure";
+    int64_t     deadline_ms = currentTimeMs() + 5000;
+
+    std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
+    decode_transfer_servers.push_back({"127.0.0.1", 12345});
+
+    mock_sender_->setShouldSucceed(false);
+    mock_sender_->setAsyncCallback(true);
+
+    auto                           resource      = createKVCacheResource(0, 2);
+    std::weak_ptr<KVCacheResource> weak_resource = resource;
+
+    addComputedBufferWithResource(request_id, 0, deadline_ms, resource);
+    addComputedBufferWithResource(request_id, 1, deadline_ms, resource);
+
+    resource.reset();
+    ASSERT_FALSE(weak_resource.expired());
+
+    ErrorInfo result = prefill_->sendKVCache(request_id, unique_key, deadline_ms, decode_transfer_servers);
+    EXPECT_TRUE(result.hasError());
+
+    EXPECT_TRUE(weak_resource.expired()) << "BUG: KVCacheResource still alive after failed sendKVCache() — "
+                                            "blocks remain connectorReference'd even when transfer failed";
 }
 
 // ==================== LayerCacheBufferUtil 边界测试 ====================
