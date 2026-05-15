@@ -1,6 +1,6 @@
 import logging
-import os
 import time
+
 import torch
 
 logger = logging.getLogger(__name__)
@@ -17,16 +17,6 @@ def reset_warmed_caches() -> None:
 
 BLOCK_M = 128
 
-def _get_local_rank_info() -> tuple[int, int]:
-    """Return (local_rank, local_world_size) from env vars.
-
-    Same-node ranks share DG_JIT_CACHE_DIR, so we split M values by
-    local_rank and let the shared file cache avoid redundant compilations.
-    """
-    local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    local_world_size = int(os.environ.get("LOCAL_WORLD_SIZE", 1))
-    return local_rank, local_world_size
-
 
 def _split_m_values(
     m_values: list[int], local_rank: int, local_world_size: int
@@ -41,10 +31,6 @@ def _split_m_values(
 # M-value generation
 # ---------------------------------------------------------------------------
 def _generate_m_values(max_tokens: int, mode: str, n: int) -> list[int]:
-    """Generate M values that cover all possible DeepGEMM kernel configurations.
-
-    Reference: https://github.com/deepseek-ai/DeepGEMM/blob/79f48ee/csrc/jit_kernels/heuristics/common.hpp
-    """
     if mode == "full":
         return list(range(1, max_tokens + 1))
 
@@ -97,14 +83,12 @@ def _rank_warmup(
     my_values: list[int],
     local_world_size: int,
 ):
-    """Phase 1: compile this rank's slice; Phase 2: load the rest from cache."""
     # Phase 1: each rank compiles its own slice (JIT compile → shared cache)
     for v in my_values:
         func(v)
-    # Barrier: wait for all ranks to finish Phase 1
-    if local_world_size > 1 and torch.distributed.is_initialized():
-        torch.distributed.barrier()
-    # Phase 2: load remaining kernels (all cache hits after barrier)
+    # Phase 2: run remaining values — cache hit if other ranks finished, JIT compile otherwise.
+    # No barrier needed: correctness is guaranteed (DeepGEMM JIT is idempotent),
+    # worst case is some redundant compilation on fast-finishing ranks.
     if local_world_size > 1:
         remaining = [v for v in all_values if v not in set(my_values)]
         for v in remaining:
@@ -343,6 +327,8 @@ def deep_gemm_warmup(
     model: torch.nn.Module,
     max_tokens: int,
     mode: str = "skip",
+    local_rank: int = 0,
+    local_world_size: int = 1,
 ):
     from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import has_deep_gemm
 
@@ -353,7 +339,6 @@ def deep_gemm_warmup(
     if mode == "skip" or not has_deep_gemm() or model is None:
         return
 
-    local_rank, local_world_size = _get_local_rank_info()
     t0 = time.time()
     _warmup_fp8_linear(model, max_tokens, mode, local_rank, local_world_size)
     _warmup_moe_grouped_gemm(model, max_tokens, mode, local_rank, local_world_size)

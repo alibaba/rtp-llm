@@ -63,5 +63,5 @@ class ModelArgs:
         # LM head precision
         self.enable_fp32_lm_head: Optional[bool] = None
 
-        # DeepGEMM warmup mode: "skip" (default), "relax", or "full"
-        self.deepgemm_warmup_mode: str = "skip"
+        # DeepGEMM warmup mode: "relax" (default), "skip", or "full"
+        self.deepgemm_warmup_mode: str = "relax"

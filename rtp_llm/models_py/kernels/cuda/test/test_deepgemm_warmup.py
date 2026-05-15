@@ -3,6 +3,7 @@
 import logging
 import multiprocessing as mp
 import os
+import socket
 import tempfile
 import time
 from unittest import SkipTest, TestCase, main
@@ -80,16 +81,21 @@ def _build_model(device):
     return model
 
 
-def _warmup_worker(rank, num_ranks, cache_dir, barrier, results):
+def _find_free_port() -> int:
+    """Find an available port to avoid conflicts in parallel CI runs."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        return s.getsockname()[1]
+
+
+def _warmup_worker(rank, num_ranks, cache_dir, barrier, results, master_port):
     """Subprocess entry for warmup benchmark."""
     os.environ["DG_JIT_CACHE_DIR"] = cache_dir
-    os.environ["LOCAL_RANK"] = str(rank)
-    os.environ["LOCAL_WORLD_SIZE"] = str(num_ranks)
     torch.cuda.set_device(rank)
 
     if num_ranks > 1:
         os.environ["MASTER_ADDR"] = "127.0.0.1"
-        os.environ["MASTER_PORT"] = "29500"
+        os.environ["MASTER_PORT"] = str(master_port)
         os.environ["NCCL_DEBUG"] = "WARN"
         torch.distributed.init_process_group(
             backend="nccl", world_size=num_ranks, rank=rank,
@@ -105,7 +111,10 @@ def _warmup_worker(rank, num_ranks, cache_dir, barrier, results):
         reset_warmed_caches()
         barrier.wait()
         t0 = time.time()
-        deep_gemm_warmup(model, max_tokens=1024, mode="relax")
+        deep_gemm_warmup(
+            model, max_tokens=1024, mode="relax",
+            local_rank=rank, local_world_size=num_ranks,
+        )
         results[rank] = time.time() - t0
     finally:
         if num_ranks > 1:
@@ -117,9 +126,10 @@ def _run_warmup(num_ranks: int, cache_dir: str) -> dict[int, float]:
     ctx = mp.get_context("spawn")
     barrier = ctx.Barrier(num_ranks)
     results = ctx.Manager().dict()
+    master_port = _find_free_port()
     procs = []
     for rank in range(num_ranks):
-        p = ctx.Process(target=_warmup_worker, args=(rank, num_ranks, cache_dir, barrier, results))
+        p = ctx.Process(target=_warmup_worker, args=(rank, num_ranks, cache_dir, barrier, results, master_port))
         p.start()
         procs.append(p)
     for p in procs:

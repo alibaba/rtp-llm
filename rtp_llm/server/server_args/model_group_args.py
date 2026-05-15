@@ -105,7 +105,7 @@ def init_model_group_args(parser, model_args):
         "--deepgemm_warmup_mode",
         bind_to=(model_args, "deepgemm_warmup_mode"),
         type=str,
-        default="skip",
+        default="relax",
         choices=["skip", "relax", "full"],
         help="DeepGEMM JIT kernel预热模式: skip(不预热), relax(启发式M值), full(所有M值)",
     )
