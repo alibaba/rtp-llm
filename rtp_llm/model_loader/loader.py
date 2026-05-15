@@ -9,6 +9,7 @@ import torch
 import torch.nn.functional as F
 
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.quant_config import Fp8PerChannelCompressedQuantConfig
 from rtp_llm.lora.lora_weights import LoRAWeights
 from rtp_llm.model_loader.ffn_weight import iter_stacked_moe_weights
 from rtp_llm.model_loader.load_config import LoadConfig, LoadMethod
@@ -265,9 +266,30 @@ class ModelLoader:
             / max(self._load_config.ep_size, self._load_config.tp_size)
             / (1024.0**2)
         )
+        quant_algo = self._weights_info.model_config.quant_algo
+        if (
+            quant_algo is not None
+            and quant_algo.getWeightBits() == 8
+            and hasattr(self._weights_info, "_quant_config")
+            and self._weights_info._quant_config is not None
+            and not self._weights_info._quant_config.is_quanted()
+        ):
+            if self._is_online_ptpc():
+                logging.info(
+                    f"online PTPC with inline FP8 quantization: "
+                    f"not doubling model_mem (MoE weights quantized during loading)"
+                )
+            else:
+                model_mem *= 2
+                logging.info(
+                    f"online quantization detected (BF16 checkpoint -> FP8), "
+                    f"doubling model_mem estimate for fastsafetensor memory check"
+                )
         max_file_mem = max_file_size / (1024.0**2)
-        logging.debug(
-            f"free mem: {free_mem}, model mem: {model_mem}, max file mem: {max_file_mem}"
+        logging.info(
+            f"fastsafetensor memory check: free_mem={free_mem:.0f}MB, "
+            f"model_mem={model_mem:.0f}MB, max_file_mem={max_file_mem:.0f}MB, "
+            f"enough={(free_mem - model_mem) > (3 * max_file_mem)}"
         )
         return (free_mem - model_mem) > (3 * max_file_mem)
 
@@ -285,8 +307,28 @@ class ModelLoader:
                         i=str(wi.layer_id),
                         expert_id="{expert_id}",
                     )
-                    stacked_key_config[stacked_key] = template
+                    if stacked_key not in stacked_key_config:
+                        stacked_key_config[stacked_key] = template
         return stacked_key_config
+
+    def _is_online_ptpc(self) -> bool:
+        quant_config = getattr(self._weights_info, "_quant_config", None)
+        return (
+            quant_config is not None
+            and isinstance(quant_config, Fp8PerChannelCompressedQuantConfig)
+            and not quant_config.is_quanted()
+        )
+
+    def _should_inline_fp8_quantize(self, weight_info) -> bool:
+        from rtp_llm.model_loader.ffn_weight import MoeAtomicWeight
+        from rtp_llm.model_loader.per_channel_fp8_quant_weight import (
+            LoadQuantPerChannelFp8Weight,
+        )
+
+        weight = weight_info.weight
+        if not isinstance(weight, LoadQuantPerChannelFp8Weight):
+            return False
+        return isinstance(weight.kernel, MoeAtomicWeight) and weight.scale is not None
 
     def _load_from_fastsafetensor(self, device: str):
         logging.info(f"load weight by device: {device}")
@@ -299,18 +341,58 @@ class ModelLoader:
                 f"fastsafetensors per-expert split enabled for {len(stacked_key_config)} stacked keys"
             )
 
+        inline_fp8 = self._is_online_ptpc()
+        if inline_fp8:
+            from rtp_llm.model_loader.per_channel_fp8_quant_weight import (
+                per_channel_cast_to_fp8,
+                per_channel_cast_to_fp8_expert,
+            )
+
+            logging.info(
+                "online PTPC detected: enabling inline FP8 quantization "
+                "during fastsafetensors loading to reduce peak GPU memory"
+            )
+
         all_tensors = self._load_config.database.fastsafetensors_weights_iterator(
             device,
             True,
             stacked_key_config=stacked_key_config,
         )
 
+        _inline_count = 0
+        _total_count = 0
         for key, loaded_tensor in all_tensors:
             if key not in tensor_to_weight_map:
                 continue
             weight_info = tensor_to_weight_map[key]
+            _total_count += 1
 
-            complete = weight_info.collector.store_tensor(key, loaded_tensor)
+            if inline_fp8 and self._should_inline_fp8_quantize(weight_info):
+                if (
+                    loaded_tensor.dtype != torch.float8_e4m3fn
+                    and loaded_tensor.dim() == 2
+                ):
+                    fp8_tensor, scale = per_channel_cast_to_fp8_expert(loaded_tensor)
+                    complete = weight_info.collector.store_fp8_quantized(
+                        key, fp8_tensor, scale
+                    )
+                    del loaded_tensor, fp8_tensor, scale
+                    _inline_count += 1
+                else:
+                    complete = weight_info.collector.store_tensor(key, loaded_tensor)
+            else:
+                complete = weight_info.collector.store_tensor(key, loaded_tensor)
+
+            if inline_fp8 and _total_count % 200 == 0 and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            if _total_count % 5000 == 0 and torch.cuda.is_available():
+                alloc_gb = torch.cuda.memory_allocated() / (1024**3)
+                reserved_gb = torch.cuda.memory_reserved() / (1024**3)
+                logging.info(
+                    f"fastsafetensor loading progress: {_total_count} tensors, "
+                    f"{_inline_count} inline-fp8, "
+                    f"GPU alloc={alloc_gb:.1f}GiB reserved={reserved_gb:.1f}GiB"
+                )
             if complete:
                 tensors = weight_info.weight.load(
                     tensor_source=weight_info.collector,
@@ -326,11 +408,23 @@ class ModelLoader:
                     else:
                         model_weights.set_global_weight(name, tensor)
                 weight_info.collector.clear()
+                if inline_fp8:
+                    torch.cuda.empty_cache()
+                    gc.collect()
 
+        _fallback_count = 0
         for weight_info in weight_info_list:
             weight_info.collector.clear()
             if weight_info.collector.is_collection_complete():
                 continue
+            _fallback_count += 1
+            weight_name = getattr(weight_info.weight, "name", "") or str(
+                type(weight_info.weight).__name__
+            )
+            logging.info(
+                f"fastsafetensor fallback: loading {weight_name} "
+                f"layer={weight_info.layer_id} from database (collector incomplete)"
+            )
             tensors = weight_info.weight.load(
                 tensor_source=DatabaseTensorSource(self._load_config.database),
                 layer_id=weight_info.layer_id,
