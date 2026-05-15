@@ -109,6 +109,8 @@ class AscendDecodeAttnOp:
         self.head_dim = attn_configs.size_per_head
         self.scale = attn_configs.scale if attn_configs.scale else \
                      self.head_dim ** -0.5
+        self.page_size = attn_inputs.kv_cache.seq_size_per_block if \
+                         attn_inputs.kv_cache else 128
         self.block_table = None
         self.context_lens = None
 
@@ -132,6 +134,7 @@ class AscendDecodeAttnOp:
             scale_value=self.scale,
             block_table=self.block_table,
             context_lens=self.context_lens,
+            block_size=self.page_size,
             out=output,
         )
         return output
