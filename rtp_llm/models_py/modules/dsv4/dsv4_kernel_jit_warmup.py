@@ -410,6 +410,30 @@ def _collect_dsv4_dense_gemm_shapes(model: Any) -> Dict[tuple[str, int, int], di
             _collect_grouped_fp4_strategy_shapes(shapes, module_name, module)
         elif cls_name == "LocalLoopStrategy":
             _collect_local_loop_strategy_shapes(shapes, module_name, module)
+        # NOTE: MegaMoEStrategy intentionally NOT walked here — its own
+        # ``_maybe_warmup_jit_once`` covers ``fp8_fp4_mega_moe`` (a distinct
+        # symm-mem kernel from ``fp8_fp4_gemm_nt`` used by GroupedFP4 /
+        # LocalLoop). MegaMoE has no ``fp8_fp4_gemm_nt`` fallback, so a
+        # dummy launch here would either fail or compile a kernel that is
+        # never used.
+
+    # Sanity log: makes prewarm coverage visible in the startup log so any
+    # walk regression (missed module class, lazy strategy, layer rename)
+    # shows up immediately. Compare against runtime ``Running NVCC`` lines —
+    # if production still cold-JITs ``sm100_fp8(_fp4)?_gemm_1d1d`` after the
+    # health gate opens, the (kind, N, K) collected here is incomplete.
+    fp8_keys = sorted(k for k in shapes if k[0] == "fp8")
+    fp8_fp4_keys = sorted(k for k in shapes if k[0] == "fp8_fp4")
+    logging.info(
+        "[DSV4 DenseGEMM] collected shapes: fp8=%d fp8_fp4=%d total=%d",
+        len(fp8_keys),
+        len(fp8_fp4_keys),
+        len(shapes),
+    )
+    if fp8_keys:
+        logging.info("[DSV4 DenseGEMM]   fp8 (N,K): %s", fp8_keys)
+    if fp8_fp4_keys:
+        logging.info("[DSV4 DenseGEMM]   fp8_fp4 (N,K): %s", fp8_fp4_keys)
     return shapes
 
 
