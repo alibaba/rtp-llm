@@ -19,6 +19,11 @@ import torch
 
 from ...quant_layouts import FP4_BLOCK, prepare_fp4_weight_scale_for_deepgemm
 from ..input_packer import get_mega_moe_input_packer
+from ..mega_buf import (
+    _get_or_create_mega_buf,
+    _get_or_create_mega_output,
+    _mega_moe_enabled,
+)
 from ..mega_jit_warmup import (
     clamp_token_counts,
     format_token_counts,
@@ -26,16 +31,19 @@ from ..mega_jit_warmup import (
     mega_moe_jit_warmup_enabled,
     parse_mega_moe_jit_warmup_tokens_override,
 )
-from ..mega_buf import (
-    _get_or_create_mega_buf,
-    _get_or_create_mega_output,
-    _mega_moe_enabled,
-)
 from ..shared_expert import strict_fused_moe_enabled
 from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
 
-
 _MEGA_MOE_JIT_WARMED_KEYS: set[tuple] = set()
+
+
+def _mega_output_capacity(buf, requested_capacity: int) -> int:
+    """Output rows must cover DeepGEMM's internally aligned token capacity."""
+    capacity = max(int(requested_capacity), 1)
+    aligned_capacity = getattr(buf, "num_max_tokens_per_rank", None)
+    if aligned_capacity is not None:
+        capacity = max(capacity, int(aligned_capacity))
+    return capacity
 
 
 @register_strategy
@@ -167,7 +175,7 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         # Single-layer staging output. All MoE layers execute sequentially, so one
         # process-local buffer is enough and avoids O(layers) persistent memory.
         self._mega_y = _get_or_create_mega_output(
-            max(cfg.max_tokens_per_rank, 1),
+            _mega_output_capacity(self._mega_buf, cfg.max_tokens_per_rank),
             D,
             torch.bfloat16,
             device,
@@ -199,7 +207,9 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         if not mega_moe_jit_warmup_enabled():
             return
         if torch.cuda.is_current_stream_capturing():
-            raise RuntimeError("MegaMoE JIT warmup must not run inside CUDA graph capture")
+            raise RuntimeError(
+                "MegaMoE JIT warmup must not run inside CUDA graph capture"
+            )
 
         import deep_gemm
         import torch.distributed as dist
@@ -210,9 +220,7 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         if not token_counts:
             return
 
-        max_tokens_per_rank = int(
-            cfg.max_tokens_per_rank
-        )
+        max_tokens_per_rank = int(cfg.max_tokens_per_rank)
         warmup_key = (
             cfg.ep_size,
             cfg.n_routed_experts,
@@ -267,11 +275,9 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
             dtype=torch.float32,
             device=device,
         )
-        local_expert_ids = (
-            cfg.local_expert_start
-            + torch.arange(cfg.n_activated_experts, dtype=torch.long, device=device)
-            % max(cfg.n_local_experts, 1)
-        )
+        local_expert_ids = cfg.local_expert_start + torch.arange(
+            cfg.n_activated_experts, dtype=torch.long, device=device
+        ) % max(cfg.n_local_experts, 1)
         indices = local_expert_ids.view(1, -1).expand(max_tokens, -1).contiguous()
 
         for token_count in token_counts:
@@ -305,6 +311,12 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
                 f"Mega MoE input tokens={T} exceeds num_max_tokens_per_rank="
                 f"{buf.num_max_tokens_per_rank} (derived from max_seq_len / "
                 f"max_tokens_per_rank). Raise the budget at startup."
+            )
+        if T > self._mega_y.size(0):
+            raise RuntimeError(
+                f"Mega MoE output buffer rows={self._mega_y.size(0)} is smaller "
+                f"than input tokens={T}. This indicates inconsistent aligned "
+                "MegaMoE buffer sizing."
             )
 
         # ``deep_gemm.fp8_fp4_mega_moe`` is a peer-symmetric NVLink collective:
