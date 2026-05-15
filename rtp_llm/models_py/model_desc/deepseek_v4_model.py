@@ -37,6 +37,10 @@ import torch
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
+from rtp_llm.models_py.modules.dsv4.chunk_env import (
+    DSV4_CHUNK_TOKENS_ENV,
+    dsv4_global_chunk_tokens_configured,
+)
 from rtp_llm.models_py.modules.dsv4.decode.forward import (
     build_paged_pool_specs,
     forward_decode,
@@ -291,16 +295,22 @@ class DeepSeekV4Model(GptModelBase):
         )
         if resolved_max_tokens_per_rank != args.max_tokens_per_rank:
             chunk_tokens_for_log = -1
-            if (
-                role_type_name.upper() != "DECODE"
-                and os.environ.get("DSV4_MOE_CHUNK_PREFILL", "1") != "0"
+            chunk_tokens_env_for_log = (
+                DSV4_CHUNK_TOKENS_ENV
+                if dsv4_global_chunk_tokens_configured()
+                else "DSV4_MOE_CHUNK_TOKENS"
+            )
+            if role_type_name.upper() != "DECODE" and (
+                dsv4_global_chunk_tokens_configured()
+                or os.environ.get("DSV4_MOE_CHUNK_PREFILL", "1") != "0"
             ):
                 chunk_tokens_for_log = moe_chunk_tokens_from_env()
             logging.info(
                 "[DeepSeekV4Model] MoE token budget: max_tokens_per_rank %d -> %d "
-                "(DSV4_MOE_CHUNK_TOKENS=%d, original=%d, CP=%d, role=%s)",
+                "(%s=%d, original=%d, CP=%d, role=%s)",
                 args.max_tokens_per_rank,
                 resolved_max_tokens_per_rank,
+                chunk_tokens_env_for_log,
                 chunk_tokens_for_log,
                 original_max_tokens_per_rank,
                 cp_size,
