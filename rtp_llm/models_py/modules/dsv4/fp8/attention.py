@@ -4146,7 +4146,7 @@ class AttentionFP8(nn.Module):
         freqs_cis = common.freqs_cis
 
         if o.is_cuda and o.numel() > 0:
-            chunk_tokens = int(os.environ.get("DSV4_ATTN_OUT_CHUNK_TOKENS", "16384"))
+            chunk_tokens = int(os.environ.get("DSV4_ATTN_OUT_CHUNK_TOKENS", "65536"))
             if chunk_tokens > 0 and seqlen > chunk_tokens:
                 if freqs_cis.dim() == 2:
                     freqs_all = freqs_cis
