@@ -119,6 +119,7 @@ CKAttnPtr FusedRopeKVCachePrefillOpBase::prepare(torch_ext::PyAttentionInputs at
     attn_params->input_lengths  = attn_inputs.input_lengths;
     attn_params->max_seq_len    = attn_inputs.input_lengths.max().item<int32_t>();
     attn_params->padding_offset = attn_inputs.padding_offset;
+
     // 处理 prefix_lengths：确保在 CUDA 上且连续
     if (has_prefix) {
         torch::Tensor prefix_lengths = attn_inputs.prefix_lengths;
@@ -276,7 +277,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
                                          qkv.data_ptr(),
                                          paged_fp8 ? q_fp8_buf.data_ptr() :
                                                      (use_fmha_fp8 && qkv_buf_fp8.defined() ? qkv_buf_fp8.data_ptr() : nullptr),
-                                         nullptr,
+                                         nullptr,  // position_ids: V1 falls back to context_rope's
+                                                   // built-in prefix-aware seq_idx; V3 self-computes
                                          nullptr,
                                          params->padding_offset.data_ptr<int>(),
                                          params->cu_seqlens.data_ptr<int>(),
