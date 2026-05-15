@@ -22,6 +22,7 @@ from rtp_llm.models_py.modules import (
     SelectTopk,
     SigmoidGateScaleAdd,
 )
+from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -98,9 +99,15 @@ class GenericMoeLayer(nn.Module):
                 "Cannot determine num_local_experts: no w1 weight and fused_moe has no expert_num"
             )
         self.add_shared_expert = config.moe_style == 2
+        self.ffn_tp_size = parallelism_config.get_ffn_tp_size()
+        self.ep_size = parallelism_config.ep_size
         if self.add_shared_expert:
             self.shared_expert = DenseMLP(
-                config.activation_type, parallelism_config, weights, quant_config
+                config.activation_type,
+                parallelism_config,
+                weights,
+                quant_config,
+                hw_kernel_config=hw_kernel_config,
             )
         else:
             self.shared_expert = None
@@ -118,8 +125,12 @@ class GenericMoeLayer(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, _ = hidden_states.shape
-        router_logits = self.gate(hidden_states)
-        router_logits_fp32 = router_logits.float()
+        router_logits = self.gate(
+            hidden_states
+        )  # fuse kernel: nvjet_tst_64x8_64x16_2x4_h_bz_NNT (bf16 nn.Linear router, every layer)
+        router_logits_fp32 = (
+            router_logits.float()
+        )  # fuse kernel: at::native::unrolled_elementwise_kernel<direct_copy_kernel_cuda> (bf16 -> fp32 cast)
 
         topk_weights = torch.empty(
             (num_tokens, self.top_k),
@@ -160,6 +171,11 @@ class GenericMoeLayer(nn.Module):
         if self.fake_balance_expert is not None:
             self.fake_balance_expert(topk_ids, topk_weights)
 
+        is_ep_mode = self.ep_size > 1
+        use_ep_shared_allreduce = (
+            self.shared_expert is not None and self.ffn_tp_size > 1 and is_ep_mode
+        )
+
         experts_output = self.fused_moe(
             hidden_states=hidden_states,
             topk_weights=topk_weights,
@@ -167,15 +183,32 @@ class GenericMoeLayer(nn.Module):
             activation="SiGLU",
         )
         if self.shared_expert is not None:
-            shared_expert_output = self.shared_expert(hidden_states)
-            if self.shared_expert_gate is not None:
-                gate_output = self.shared_expert_gate(hidden_states)  # [T, 1]
-                # Fused: experts_output += sigmoid(gate_output) * shared_expert_output
-                self.sigmoid_gate_scale_add(
-                    gate_output, shared_expert_output, experts_output
-                )
-            else:
+            shared_expert_output = self.shared_expert(
+                hidden_states,
+                skip_allreduce=use_ep_shared_allreduce,
+            )
+            if use_ep_shared_allreduce:
+                # EP mode: routed expert output is already complete
+                # (EP combine via all_to_all / all_gather aggregated across ranks).
+                # Only the shared expert output is TP-partial and needs all_reduce.
+                # Cannot use sigmoid_gate_scale_add here — all_reduce must run
+                # between the gate-apply and the add-to-experts steps.
+                if self.shared_expert_gate is not None:
+                    gate_output = self.shared_expert_gate(hidden_states)  # [T, 1]
+                    shared_expert_output = (
+                        torch.sigmoid(gate_output) * shared_expert_output
+                    )
+                shared_expert_output = all_reduce(shared_expert_output, group=Group.TP)
                 experts_output = experts_output + shared_expert_output
+            else:
+                if self.shared_expert_gate is not None:
+                    gate_output = self.shared_expert_gate(hidden_states)  # [T, 1]
+                    # Fused: experts_output += sigmoid(gate_output) * shared_expert_output
+                    self.sigmoid_gate_scale_add(
+                        gate_output, shared_expert_output, experts_output
+                    )
+                else:
+                    experts_output = experts_output + shared_expert_output
         return experts_output
 
 

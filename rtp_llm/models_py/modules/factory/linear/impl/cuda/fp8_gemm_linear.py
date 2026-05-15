@@ -144,7 +144,17 @@ class CudaFp8GEMMLinear(LinearBase):
             return True
         return False
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        input: torch.Tensor,
+        input_scales: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        # When the caller provides input_scales (fused norm/silu+quant kernel
+        # output), force the deepgemm path: the fused kernels emit
+        # column-major TMA-aligned scales matching deepgemm's layout, and
+        # flashinfer's path expects scales bound at __init__ time.
+        if input_scales is not None:
+            return self._deepgemm_linear(input, input_scales=input_scales)
         if not self._should_use_flashinfer(input):
             return self._deepgemm_linear(input)
         return self._flashinfer_linear(input)

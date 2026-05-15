@@ -9,6 +9,9 @@ from rtp_llm.models_py.modules.base.common.norm import (
     BaseNorm,
     BaseResNorm,
 )
+from rtp_llm.models_py.triton_kernels.common.fused_qk_rmsnorm import (
+    fused_qk_rmsnorm_triton,
+)
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 
@@ -100,14 +103,28 @@ class FusedQKRMSNorm(nn.Module):
         self.kv_size = self.kv_head_num * self.size_per_head
         self.enable_pdl = enable_pdl
 
+        self.combined_weight = torch.cat(
+            [
+                q_weight.unsqueeze(0).expand(head_num, -1),
+                k_weight.unsqueeze(0).expand(kv_head_num, -1),
+            ],
+            dim=0,
+        ).contiguous()
+
     def forward(self, hidden_states: torch.Tensor):
         assert hidden_states.dim() == 2
         m, n = hidden_states.shape
-        qkv = hidden_states.reshape(m, (self.head_num + self.kv_head_num * 2), self.size_per_head)
-        q = qkv[:, :self.head_num, :]
-        k = qkv[:, self.head_num:self.head_num + self.kv_head_num, :]
-        flashinfer.norm.rmsnorm(q, self.q_weight, eps=self.eps, out=q, enable_pdl=self.enable_pdl)
-        flashinfer.norm.rmsnorm(k, self.k_weight, eps=self.eps, out=k, enable_pdl=self.enable_pdl)
+        qkv = hidden_states.reshape(
+            m, (self.head_num + self.kv_head_num * 2), self.size_per_head
+        )
+        fused_qk_rmsnorm_triton(
+            qkv,
+            self.combined_weight,
+            self.head_num,
+            self.kv_head_num,
+            self.size_per_head,
+            self.eps,
+        )
         return qkv.reshape(m, n)
 
 
