@@ -146,7 +146,7 @@ class ChunkedMoETest(unittest.TestCase):
     def test_token_budget_caps_cp_1m_to_moe_chunk(self):
         with mock.patch.dict(
             os.environ,
-            {"DSV4_MOE_CHUNK_PREFILL": "1", "DSV4_MOE_CHUNK_TOKENS": "16384"},
+            {"DSV4_MOE_CHUNK_PREFILL": "1", "DSV4_MOE_CHUNK_TOKENS": "65536"},
         ):
             budget = resolve_moe_max_tokens_per_rank(
                 max_seq_len=1048576,
@@ -155,12 +155,12 @@ class ChunkedMoETest(unittest.TestCase):
                 max_generate_batch_size=8,
                 role_type="PREFILL",
             )
-        self.assertEqual(budget, 16384)
+        self.assertEqual(budget, 65536)
 
     def test_token_budget_never_expands_existing_cap(self):
         with mock.patch.dict(
             os.environ,
-            {"DSV4_MOE_CHUNK_PREFILL": "1", "DSV4_MOE_CHUNK_TOKENS": "16384"},
+            {"DSV4_MOE_CHUNK_PREFILL": "1", "DSV4_MOE_CHUNK_TOKENS": "65536"},
         ):
             budget = resolve_moe_max_tokens_per_rank(
                 max_seq_len=1048576,
@@ -174,7 +174,7 @@ class ChunkedMoETest(unittest.TestCase):
     def test_token_budget_decode_uses_batch_size(self):
         with mock.patch.dict(
             os.environ,
-            {"DSV4_MOE_CHUNK_PREFILL": "1", "DSV4_MOE_CHUNK_TOKENS": "16384"},
+            {"DSV4_MOE_CHUNK_PREFILL": "1", "DSV4_MOE_CHUNK_TOKENS": "65536"},
         ):
             budget = resolve_moe_max_tokens_per_rank(
                 max_seq_len=1048576,

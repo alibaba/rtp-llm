@@ -49,7 +49,7 @@ class MegaMoEJitWarmupTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"DSV4_MEGA_MOE_JIT_WARMUP": "0"}):
             self.assertFalse(mega_moe_jit_warmup_enabled())
 
-    def test_default_dsv4_ep4_chunk_16k_representatives(self):
+    def test_default_dsv4_ep4_chunk_64k_representatives(self):
         with mock.patch.dict(os.environ, {"DSV4_MOE_CHUNK_PREFILL": "1"}):
             tokens = generate_mega_moe_jit_token_counts(
                 num_ranks=4,
@@ -58,11 +58,11 @@ class MegaMoEJitWarmupTest(unittest.TestCase):
                 num_topk=6,
                 intermediate_hidden=2048,
                 num_sms=148,
-                max_tokens_per_rank=16384,
+                max_tokens_per_rank=65536,
             )
         self.assertEqual(
             tokens,
-            [1, 11, 91, 177, 347, 689, 1030, 2049, 4097, 16384],
+            [1, 11, 91, 177, 347, 689, 1030, 2049, 4097, 8193, 65536],
         )
 
     def test_representatives_share_bucket_with_cp4_even_values(self):
@@ -74,9 +74,21 @@ class MegaMoEJitWarmupTest(unittest.TestCase):
                 num_topk=6,
                 intermediate_hidden=2048,
                 num_sms=148,
-                max_tokens_per_rank=16384,
+                max_tokens_per_rank=65536,
             )
-        cp4_even_tokens = [2, 12, 92, 178, 348, 690, 1030, 2050, 4098, 16384]
+        cp4_even_tokens = [
+            2,
+            12,
+            92,
+            178,
+            348,
+            690,
+            1030,
+            2050,
+            4098,
+            8194,
+            65536,
+        ]
         for warmup_t, cp4_t in zip(tokens, cp4_even_tokens):
             self.assertEqual(
                 mega_moe_config_signature(
@@ -124,7 +136,7 @@ class MegaMoEJitWarmupTest(unittest.TestCase):
                 num_topk=6,
                 intermediate_hidden=2048,
                 num_sms=148,
-                max_tokens_per_rank=16384,
+                max_tokens_per_rank=65536,
             )
             ep8 = generate_mega_moe_jit_token_counts(
                 num_ranks=8,
@@ -133,10 +145,10 @@ class MegaMoEJitWarmupTest(unittest.TestCase):
                 num_topk=6,
                 intermediate_hidden=2048,
                 num_sms=148,
-                max_tokens_per_rank=16384,
+                max_tokens_per_rank=65536,
             )
         self.assertNotEqual(ep4, ep8)
-        self.assertEqual(ep8[-1], 16384)
+        self.assertEqual(ep8[-1], 65536)
 
     def test_override_tokens_are_sorted_unique_and_clamped(self):
         with mock.patch.dict(
@@ -150,7 +162,7 @@ class MegaMoEJitWarmupTest(unittest.TestCase):
         ):
             tokens = parse_mega_moe_jit_warmup_tokens_override()
         self.assertEqual(tokens, [2, 4098, 999999])
-        self.assertEqual(clamp_token_counts(tokens or [], 16384), [2, 4098, 16384])
+        self.assertEqual(clamp_token_counts(tokens or [], 65536), [2, 4098, 65536])
 
 
 if __name__ == "__main__":
