@@ -12,10 +12,18 @@ def _load_tokenizer(tokenizer_path: str) -> PreTrainedTokenizerBase:
     local_path = fetch_remote_file_to_local(os.path.expanduser(tokenizer_path.strip()))
     try:
         return AutoTokenizer.from_pretrained(local_path, trust_remote_code=True)
-    except (ValueError, KeyError):
+    except (ValueError, KeyError, OSError):
+        from tokenizers import Tokenizer
+        from transformers import PreTrainedTokenizerFast
+
         tokenizer_file = os.path.join(local_path, "tokenizer.json")
         if os.path.exists(tokenizer_file):
-            return PreTrainedTokenizerFast(tokenizer_file=tokenizer_file)
+            tokenizer = Tokenizer.from_file(tokenizer_file)
+            return PreTrainedTokenizerFast(
+                tokenizer_object=tokenizer,
+                eos_token="<|endoftext|>",
+                pad_token="<|endoftext|>",
+            )
         raise
 
 
