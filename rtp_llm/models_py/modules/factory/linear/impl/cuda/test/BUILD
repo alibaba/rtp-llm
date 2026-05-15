@@ -39,3 +39,11 @@ py_test(
     tags = ["SM100_ARM"],
     exec_properties = {'gpu':'SM100_ARM'},
 )
+
+py_test(
+    name = "fp8_deepgemm_linear_external_scale_test",
+    srcs = ["fp8_deepgemm_linear_external_scale_test.py"],
+    deps = py_test_deps,
+    tags = ["H20"],
+    exec_properties = {'gpu': 'H20', 'gpu_count': '1'},
+)

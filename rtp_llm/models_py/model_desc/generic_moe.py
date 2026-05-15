@@ -111,8 +111,12 @@ class GenericMoeLayer(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, _ = hidden_states.shape
-        router_logits = self.gate(hidden_states)
-        router_logits_fp32 = router_logits.float()
+        router_logits = self.gate(
+            hidden_states
+        )  # fuse kernel: nvjet_tst_64x8_64x16_2x4_h_bz_NNT (bf16 nn.Linear router, every layer)
+        router_logits_fp32 = (
+            router_logits.float()
+        )  # fuse kernel: at::native::unrolled_elementwise_kernel<direct_copy_kernel_cuda> (bf16 -> fp32 cast)
 
         topk_weights = torch.empty(
             (num_tokens, self.top_k),
@@ -175,6 +179,8 @@ class GenericMoeLayer(nn.Module):
                 # EP mode: routed expert output is already complete
                 # (EP combine via all_to_all / all_gather aggregated across ranks).
                 # Only the shared expert output is TP-partial and needs all_reduce.
+                # Cannot use sigmoid_gate_scale_add here — all_reduce must run
+                # between the gate-apply and the add-to-experts steps.
                 if self.shared_expert_gate is not None:
                     gate_output = self.shared_expert_gate(hidden_states)  # [T, 1]
                     shared_expert_output = (

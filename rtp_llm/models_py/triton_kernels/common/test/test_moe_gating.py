@@ -16,7 +16,7 @@ import unittest
 import torch
 from torch.profiler import ProfilerActivity, profile
 
-# nn.Module wrapper lives in the cuda modules layer
+# nn.Module wrappers live in the cuda modules layer
 from rtp_llm.models_py.modules.base.cuda.moe_gating import SigmoidGateScaleAdd
 
 # Kernel internals (heuristics + constants live in the triton_kernels layer)
