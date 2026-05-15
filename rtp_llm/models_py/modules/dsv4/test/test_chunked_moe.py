@@ -47,6 +47,7 @@ _ops_mod = types.ModuleType("librtp_compute_ops.rtp_llm_ops")
 sys.modules.setdefault("librtp_compute_ops", _ops_pkg)
 sys.modules.setdefault("librtp_compute_ops.rtp_llm_ops", _ops_mod)
 
+from rtp_llm.models_py.modules.dsv4.chunk_env import dsv4_chunk_tokens_from_env
 from rtp_llm.models_py.modules.dsv4.moe.moe_layer import (
     DEFAULT_MOE_CHUNK_TOKENS,
     MoE,
@@ -140,11 +141,64 @@ class ChunkedMoETest(unittest.TestCase):
     def test_env_helpers_default_on(self):
         with mock.patch.dict(os.environ, {}, clear=True):
             self.assertTrue(chunked_moe_enabled())
+            self.assertEqual(DEFAULT_MOE_CHUNK_TOKENS, 16384)
             self.assertEqual(moe_chunk_tokens_from_env(), DEFAULT_MOE_CHUNK_TOKENS)
         with mock.patch.dict(os.environ, {"DSV4_MOE_CHUNK_TOKENS": "4096"}):
             self.assertEqual(moe_chunk_tokens_from_env(), 4096)
         with mock.patch.dict(os.environ, {"DSV4_MOE_CHUNK_TOKENS": "bad"}):
             self.assertEqual(moe_chunk_tokens_from_env(), DEFAULT_MOE_CHUNK_TOKENS)
+
+    def test_global_chunk_tokens_overrides_legacy_chunk_envs(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "DSV4_CHUNK_TOKENS": "16384",
+                "DSV4_MOE_CHUNK_PREFILL": "0",
+                "DSV4_MOE_CHUNK_TOKENS": "4096",
+                "DSV4_FP8_INDEXER_SCORE_CHUNK_ROWS": "8192",
+            },
+            clear=True,
+        ):
+            self.assertTrue(chunked_moe_enabled())
+            self.assertEqual(moe_chunk_tokens_from_env(), 16384)
+            self.assertEqual(
+                dsv4_chunk_tokens_from_env("DSV4_FP8_INDEXER_SCORE_CHUNK_ROWS"),
+                16384,
+            )
+            budget = resolve_moe_max_tokens_per_rank(
+                max_seq_len=1048576,
+                current_max_tokens_per_rank=1048576,
+                cp_size=4,
+                max_generate_batch_size=8,
+                role_type="PREFILL",
+            )
+        self.assertEqual(budget, 16384)
+
+    def test_global_chunk_tokens_zero_disables_all_chunking(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "DSV4_CHUNK_TOKENS": "0",
+                "DSV4_MOE_CHUNK_PREFILL": "1",
+                "DSV4_MOE_CHUNK_TOKENS": "4096",
+                "DSV4_ATTN_OUT_CHUNK_TOKENS": "8192",
+            },
+            clear=True,
+        ):
+            self.assertFalse(chunked_moe_enabled())
+            self.assertEqual(moe_chunk_tokens_from_env(), 0)
+            self.assertEqual(
+                dsv4_chunk_tokens_from_env("DSV4_ATTN_OUT_CHUNK_TOKENS"),
+                0,
+            )
+            budget = resolve_moe_max_tokens_per_rank(
+                max_seq_len=1048576,
+                current_max_tokens_per_rank=65536,
+                cp_size=4,
+                max_generate_batch_size=8,
+                role_type="PREFILL",
+            )
+        self.assertEqual(budget, 65536)
 
     def test_token_budget_caps_cp_1m_to_moe_chunk(self):
         with mock.patch.dict(
