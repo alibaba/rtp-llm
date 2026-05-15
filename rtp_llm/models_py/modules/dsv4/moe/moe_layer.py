@@ -66,6 +66,27 @@ def moe_chunk_tokens_from_env(default: int = DEFAULT_MOE_CHUNK_TOKENS) -> int:
     return max(value, 1)
 
 
+def cp_padded_tokens_per_rank_bound(max_seq_len: int, cp_size: int) -> int:
+    """Rank-local CP token upper bound, including ZigZag padding.
+
+    The C++ ZigZagProcessor pads each request to a multiple of
+    ``cp_size * 2`` so every rank gets an even-length local chunk.  A plain
+    ``max_seq_len // cp_size`` underestimates lengths such as 200002 with
+    CP=4: the local padded chunk is 50002, not 50000.
+    """
+    cp_size = max(int(cp_size), 1)
+    max_seq_len = max(int(max_seq_len), 0)
+    if cp_size <= 1:
+        return max_seq_len
+    if max_seq_len == 0:
+        return 0
+    global_alignment = cp_size * 2
+    padded_seq_len = (
+        (max_seq_len + global_alignment - 1) // global_alignment
+    ) * global_alignment
+    return padded_seq_len // cp_size
+
+
 def resolve_moe_max_tokens_per_rank(
     max_seq_len: int,
     current_max_tokens_per_rank: int,
@@ -76,7 +97,7 @@ def resolve_moe_max_tokens_per_rank(
     budget = int(current_max_tokens_per_rank)
     cp_size = max(int(cp_size), 1)
     if cp_size > 1:
-        cp_bound = max(int(max_seq_len) // cp_size, 4096)
+        cp_bound = max(cp_padded_tokens_per_rank_bound(max_seq_len, cp_size), 4096)
         budget = min(budget, cp_bound)
 
     role = (
