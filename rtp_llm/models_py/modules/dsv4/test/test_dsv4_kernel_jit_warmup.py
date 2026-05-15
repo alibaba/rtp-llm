@@ -33,6 +33,7 @@ _stub_package(
 from rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup import (
     _collect_dsv4_branch_kernel_configs,
     _collect_dsv4_dense_gemm_shapes,
+    _dense_gemm_m_grid,
     resolve_dense_gemm_warmup_max_m,
 )
 
@@ -47,7 +48,7 @@ def _module_type(name, attrs):
 
 
 class Dsv4KernelJitWarmupTest(unittest.TestCase):
-    def test_dense_warmup_prefill_uses_sequence_bound(self):
+    def test_dense_warmup_prefill_uses_sequence_bound_without_rank_cap(self):
         self.assertEqual(
             resolve_dense_gemm_warmup_max_m(
                 max_seq_len=1048576,
@@ -59,6 +60,36 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             ),
             1048576,
         )
+
+    def test_dense_warmup_prefill_uses_chunk_size(self):
+        self.assertEqual(
+            resolve_dense_gemm_warmup_max_m(
+                max_seq_len=1048576,
+                max_batch_size=1024,
+                role_type_name="PREFILL",
+                prefill_chunk_size=16384,
+                max_tokens_per_rank=65536,
+                max_potential_token_num=5120,
+                is_speculative=True,
+                gen_num_per_cycle=4,
+            ),
+            16384,
+        )
+
+    def test_dense_warmup_prefill_falls_back_to_rank_token_cap(self):
+        self.assertEqual(
+            resolve_dense_gemm_warmup_max_m(
+                max_seq_len=1048576,
+                max_batch_size=1024,
+                role_type_name="PREFILL",
+                max_tokens_per_rank=65536,
+            ),
+            65536,
+        )
+
+    def test_dense_warmup_m_grid_includes_exact_chunk_size(self):
+        self.assertIn(20000, _dense_gemm_m_grid(20000))
+        self.assertEqual(_dense_gemm_m_grid(5120)[-1], 5120)
 
     def test_dense_warmup_decode_uses_model_token_capacity(self):
         self.assertEqual(
