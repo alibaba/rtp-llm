@@ -25,7 +25,7 @@ class ModelList(BaseModel):
 
 class FunctionCall(BaseModel):
     name: Optional[str]
-    arguments: Optional[str]
+    arguments: Optional[Union[str, Dict[str, Any], List[Any]]]
 
 
 class ToolCall(BaseModel):
@@ -126,6 +126,7 @@ class ChatCompletionRequest(BaseModel):
     messages: List[ChatMessage]
     functions: Optional[List[GPTFunctionDefinition]] = None
     tools: Optional[List[GPTToolDefinition]] = None
+    reasoning_effort: Optional[str] = None
     temperature: Optional[float] = 0.7
     top_p: Optional[float] = 1.0
     top_k: Optional[int] = None

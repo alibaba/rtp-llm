@@ -1,8 +1,9 @@
 import importlib.util
+import json
 import logging
 import os
 import sys
-from typing import Optional
+from typing import Any, Optional
 
 from typing_extensions import override
 
@@ -138,6 +139,20 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
 
         return thinking_enabled
 
+    def _normalize_reasoning_effort(self, effort: Any) -> Optional[str]:
+        if not isinstance(effort, str) or effort == "none":
+            return None
+        if effort in ("max", "xhigh"):
+            return "max"
+        return "high"
+
+    def _normalize_tool_arguments(self, arguments: Any) -> str:
+        if arguments is None:
+            return "{}"
+        if isinstance(arguments, str):
+            return arguments
+        return json.dumps(arguments, ensure_ascii=False)
+
     def _build_prompt(self, request: ChatCompletionRequest) -> str:
         """
         Build prompt string using the DeepSeek V4.0 encoding script.
@@ -161,7 +176,9 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
                         "id": tc.id,
                         "function": {
                             "name": tc.function.name,
-                            "arguments": tc.function.arguments,
+                            "arguments": self._normalize_tool_arguments(
+                                tc.function.arguments
+                            ),
                         },
                     }
                     for tc in msg.tool_calls
@@ -212,6 +229,9 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
             "thinking_mode": thinking_mode,
             "drop_thinking": True,
             "add_default_bos_token": True,
+            "reasoning_effort": self._normalize_reasoning_effort(
+                request.reasoning_effort
+            ),
         }
 
         # Override with custom configs if provided
@@ -226,13 +246,19 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
         ):
             encode_config.update(request.extra_configs.chat_template_kwargs)
 
+        encode_config["reasoning_effort"] = self._normalize_reasoning_effort(
+            encode_config.get("reasoning_effort")
+        )
+
         # Filter encode_config to only include parameters accepted by encode_messages()
-        # Valid parameters: thinking_mode, context, drop_thinking, add_default_bos_token
+        # Valid parameters: thinking_mode, context, drop_thinking,
+        # add_default_bos_token, reasoning_effort
         valid_params = {
             "thinking_mode",
             "context",
             "drop_thinking",
             "add_default_bos_token",
+            "reasoning_effort",
         }
         filtered_config = {k: v for k, v in encode_config.items() if k in valid_params}
 

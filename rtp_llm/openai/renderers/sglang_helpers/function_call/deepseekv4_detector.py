@@ -1,9 +1,7 @@
 import json
 import logging
 import re
-from typing import List
-
-from partial_json_parser.core.options import Allow
+from typing import Any, Dict, List
 
 from rtp_llm.openai.renderers.sglang_helpers.entrypoints.openai.protocol import Tool
 from rtp_llm.openai.renderers.sglang_helpers.function_call.base_format_detector import (
@@ -17,7 +15,6 @@ from rtp_llm.openai.renderers.sglang_helpers.function_call.core_types import (
 )
 from rtp_llm.openai.renderers.sglang_helpers.function_call.utils import (
     _find_common_prefix,
-    _partial_json_loads,
 )
 
 logger = logging.getLogger(__name__)
@@ -25,49 +22,49 @@ logger = logging.getLogger(__name__)
 
 class DeepSeekV4Detector(BaseFormatDetector):
     """
-    Detector for DeepSeek V3.2 model function call format.
+    Detector for DeepSeek V4 model tool call format.
 
-    The DeepSeek V3.2 format uses XML-like DSML tags to delimit function calls.
+    The DeepSeek V4 format uses XML-like DSML tags to delimit tool calls.
     Supports two parameter formats:
 
     Format 1 - XML Parameter Tags:
     ```
-    <｜DSML｜function_calls>
+    <｜DSML｜tool_calls>
         <｜DSML｜invoke name="function_name">
         <｜DSML｜parameter name="param_name" string="true">value</｜DSML｜parameter>
         ...
     </｜DSML｜invoke>
-    </｜DSML｜function_calls>
+    </｜DSML｜tool_calls>
     ```
 
     Format 2 - Direct JSON:
     ```
-    <｜DSML｜function_calls>
+    <｜DSML｜tool_calls>
         <｜DSML｜invoke name="function_name">
         {
             "param_name": "value"
         }
     </｜DSML｜invoke>
-    </｜DSML｜function_calls>
+    </｜DSML｜tool_calls>
     ```
 
     Examples:
     ```
-    <｜DSML｜function_calls>
+    <｜DSML｜tool_calls>
         <｜DSML｜invoke name="get_favorite_tourist_spot">
         <｜DSML｜parameter name="city" string="true">San Francisco</｜DSML｜parameter>
-    </｜DSML｜invoke>
-    </｜DSML｜function_calls>
+        </｜DSML｜invoke>
+    </｜DSML｜tool_calls>
 
-    <｜DSML｜function_calls>
+    <｜DSML｜tool_calls>
         <｜DSML｜invoke name="get_favorite_tourist_spot">
         { "city": "San Francisco" }
-    </｜DSML｜invoke>
-    </｜DSML｜function_calls>
+        </｜DSML｜invoke>
+    </｜DSML｜tool_calls>
     ```
 
     Key Components:
-    - Tool Calls Section: Wrapped between `<｜DSML｜function_calls>` and `</｜DSML｜function_calls>`
+    - Tool Calls Section: Wrapped between `<｜DSML｜tool_calls>` and `</｜DSML｜tool_calls>`
     - Individual Tool Call: Wrapped between `<｜DSML｜invoke name="...">` and `</｜DSML｜invoke>`
     - Parameters: Either XML tags or direct JSON format
     - Supports multiple tool calls
@@ -77,15 +74,15 @@ class DeepSeekV4Detector(BaseFormatDetector):
 
     def __init__(self, encoding_module=None, thinking_mode: str = "chat"):
         super().__init__()
-        self.bot_token = "<｜DSML｜function_calls>"
-        self.eot_token = "</｜DSML｜function_calls>"
+        self.bot_token = "<｜DSML｜tool_calls>"
+        self.eot_token = "</｜DSML｜tool_calls>"
         self.invoke_end_token = "</｜DSML｜invoke>"
         self.parameter_regex = r'<｜DSML｜parameter\s+name="([^"]+)"\s+string="([^"]+)"\s*>(.*?)</｜DSML｜parameter>'
         self.partial_parameter_regex = (
             r'<｜DSML｜parameter\s+name="([^"]+)"\s+string="([^"]+)"\s*>(.*)$'
         )
         self.function_calls_regex = (
-            r"<｜DSML｜function_calls>(.*?)</｜DSML｜function_calls>"
+            r"<｜DSML｜tool_calls>(.*?)</｜DSML｜tool_calls>"
         )
         self.invoke_regex = (
             r'<｜DSML｜invoke\s+name="([^"]+)"\s*>(.*?)(</｜DSML｜invoke>|$)'
@@ -126,9 +123,13 @@ class DeepSeekV4Detector(BaseFormatDetector):
                     text, self.thinking_mode
                 )
 
-                # Extract content and reasoning_content
+                # Extract content and reasoning content. vLLM's current
+                # encoding parser returns "reasoning"; the checkpoint parser
+                # used by RTP-LLM returns "reasoning_content".
                 content = parsed_msg.get("content", "")
-                reasoning_content = parsed_msg.get("reasoning_content", "")
+                reasoning_content = parsed_msg.get(
+                    "reasoning_content", parsed_msg.get("reasoning", "")
+                )
                 tool_calls_list = parsed_msg.get("tool_calls", [])
 
                 logger.info(
@@ -148,7 +149,12 @@ class DeepSeekV4Detector(BaseFormatDetector):
                     # tool_calls are already in OpenAI format with 'function' key
                     function = tc.get("function", {})
                     # arguments is a JSON string; convert to dict
-                    arguments_dict = json.loads(function.get("arguments"))
+                    arguments = function.get("arguments") or "{}"
+                    arguments_dict = (
+                        json.loads(arguments)
+                        if isinstance(arguments, str)
+                        else arguments
+                    )
                     tool_item = {
                         "name": function.get("name"),
                         "parameters": arguments_dict,  # Pass dict, not JSON string
@@ -174,8 +180,87 @@ class DeepSeekV4Detector(BaseFormatDetector):
         """Check if the text contains a deepseek v4 format tool call."""
         return self.bot_token in text or "<｜DSML｜invoke" in text
 
+    def _get_param_config(self, func_name: str, tools: List[Tool]) -> Dict[str, Any]:
+        for tool in tools:
+            if tool.function.name != func_name:
+                continue
+            schema = tool.function.parameters
+            if isinstance(schema, dict) and isinstance(schema.get("properties"), dict):
+                return schema["properties"]
+            return {}
+        return {}
+
+    def _convert_param_value_checked(self, value: str, param_type: str) -> Any:
+        if value.lower() == "null":
+            return None
+
+        param_type = param_type.lower()
+        if param_type in ("string", "str", "text"):
+            return value
+        if param_type in ("integer", "int"):
+            return int(value)
+        if param_type in ("number", "float"):
+            parsed = float(value)
+            return parsed if parsed != int(parsed) else int(parsed)
+        if param_type in ("boolean", "bool"):
+            value = value.strip()
+            if value.lower() not in ("false", "0", "true", "1"):
+                raise ValueError("Invalid boolean value")
+            return value.lower() in ("true", "1")
+        if param_type in ("object", "array"):
+            return json.loads(value)
+        return json.loads(value)
+
+    def _convert_param_value(self, value: str, param_type: Any) -> Any:
+        if not isinstance(param_type, list):
+            param_type = [param_type]
+        for current_type in param_type:
+            try:
+                return self._convert_param_value_checked(value, current_type)
+            except Exception:
+                continue
+        return value
+
+    def _repair_param_dict(
+        self, parameters: Dict[str, Any], param_config: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        allowed = set(param_config.keys())
+        for wrapper in ("arguments", "input"):
+            if set(parameters.keys()) != {wrapper} or wrapper in allowed:
+                continue
+            inner = parameters[wrapper]
+            if isinstance(inner, str):
+                try:
+                    inner = json.loads(inner)
+                except json.JSONDecodeError:
+                    return parameters
+            if isinstance(inner, dict) and set(inner.keys()).issubset(allowed):
+                return inner
+        return parameters
+
+    def _convert_raw_parameters(
+        self,
+        raw_parameters: Dict[str, tuple[str, str]],
+        param_config: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        parameters: Dict[str, Any] = {}
+        for param_name, (param_value, string_attr) in raw_parameters.items():
+            if string_attr == "true":
+                parameters[param_name] = param_value
+                continue
+
+            param_type = "string"
+            if param_name in param_config and isinstance(param_config[param_name], dict):
+                param_type = param_config[param_name].get("type", "string")
+            parameters[param_name] = self._convert_param_value(param_value, param_type)
+
+        return self._repair_param_dict(parameters, param_config)
+
     def _parse_parameters_from_xml(
-        self, invoke_content: str, allow_partial: bool = False
+        self,
+        invoke_content: str,
+        allow_partial: bool = False,
+        param_config: Dict[str, Any] | None = None,
     ) -> dict:
         """
         Parse parameters from either XML-like format or JSON format to dict.
@@ -199,7 +284,7 @@ class DeepSeekV4Detector(BaseFormatDetector):
                 pass
 
         # Fall back to XML parameter tag parsing (original format)
-        parameters = {}
+        raw_parameters: Dict[str, tuple[str, str]] = {}
         # Find all complete parameter matches
         param_matches = list(
             re.finditer(self.parameter_regex, invoke_content, re.DOTALL)
@@ -208,19 +293,10 @@ class DeepSeekV4Detector(BaseFormatDetector):
         last_match_end = 0
         for match in param_matches:
             param_name = match.group(1)
-            param_type = match.group(2)
+            string_attr = match.group(2)
             param_value = match.group(3)
             last_match_end = match.end()
-
-            # Convert value based on type
-            if param_type == "true":  # string type
-                parameters[param_name] = param_value.strip()
-            else:
-                # Try to parse as JSON for other types
-                try:
-                    parameters[param_name] = json.loads(param_value.strip())
-                except (json.JSONDecodeError, ValueError):
-                    parameters[param_name] = param_value.strip()
+            raw_parameters[param_name] = (param_value, string_attr)
 
         # If allowed, try to parse a partial parameter at the end
         if allow_partial:
@@ -238,19 +314,14 @@ class DeepSeekV4Detector(BaseFormatDetector):
 
             if partial_match and (param_value := partial_match.group(3)):
                 param_name = partial_match.group(1)
-                if partial_match.group(2) == "true":
-                    parameters[param_name] = param_value.strip()
-                else:
-                    parameters[param_name] = _partial_json_loads(
-                        param_value, Allow.ALL
-                    )[0]
+                raw_parameters[param_name] = (param_value, partial_match.group(2))
 
-        return parameters
+        return self._convert_raw_parameters(raw_parameters, param_config or {})
 
     def _parse_with_regex(self, text: str, tools: List[Tool]) -> StreamingParseResult:
         """Fallback regex-based parsing when official parser is not available."""
         idx = text.find(self.bot_token)
-        normal_text = text[:idx].strip() if idx != -1 else text
+        normal_text = text[:idx] if idx != -1 else text
         if self.bot_token not in text:
             return StreamingParseResult(normal_text=normal_text, calls=[])
 
@@ -274,7 +345,10 @@ class DeepSeekV4Detector(BaseFormatDetector):
 
             for func_name, invoke_content, _ in invoke_matches:
                 # Parse parameters from XML format
-                func_args = self._parse_parameters_from_xml(invoke_content)
+                func_args = self._parse_parameters_from_xml(
+                    invoke_content,
+                    param_config=self._get_param_config(func_name, tools),
+                )
                 # construct match_result for parse_base_json
                 match_result = {"name": func_name, "parameters": func_args}
                 calls.extend(
@@ -362,7 +436,9 @@ class DeepSeekV4Detector(BaseFormatDetector):
 
                 # 2. Parse current parameters (partial or complete)
                 current_params = self._parse_parameters_from_xml(
-                    invoke_content, allow_partial=not is_tool_end
+                    invoke_content,
+                    allow_partial=not is_tool_end,
+                    param_config=self._get_param_config(func_name, tools),
                 )
                 current_args_json = json.dumps(current_params, ensure_ascii=False)
 
