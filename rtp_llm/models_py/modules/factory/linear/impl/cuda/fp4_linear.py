@@ -16,6 +16,7 @@ from rtp_llm.models_py.kernels.cuda.fp4_kernel import (
 from rtp_llm.ops import HWKernelConfig
 
 from flashinfer import (
+    autotune,
     mm_fp4,
     fp4_quantize,
 )
@@ -63,7 +64,7 @@ class CudaFp4GEMMLinear(LinearBase):
         self.weight_scale_2 = weight_scale_2
         self.input_scale = input_scales
         self.bias = bias
-        self.backend = os.getenv("RTP_LLM_FP4_GEMM_BACKEND", "cutlass")
+        self.backend = os.getenv("RTP_LLM_FP4_GEMM_BACKEND", "cute-dsl")
         self.alpha = self.weight_scale_2 * self.input_scale
         self.input_scale_inv = 1 / self.input_scale
 
@@ -92,7 +93,7 @@ class CudaFp4GEMMLinear(LinearBase):
             raise ValueError(error_msg)
 
         # Quantize BF16 or FP16 input to (FP4 and interleaved block scale)
-        input_fp4, input_scale_interleaved = fp4_quantize(input, self.input_scale_inv)
+        input_fp4, input_scale_interleaved = fp4_quantize(input, self.input_scale_inv, backend='cute-dsl')
         assert input_fp4.dtype == torch.uint8
          
         if self.backend == "sgl_cutlass":
@@ -105,15 +106,18 @@ class CudaFp4GEMMLinear(LinearBase):
                 output_dtype
             ).view(*output_shape)
         else:
-            output = mm_fp4(
-                input_fp4,
-                self.weight.T,
-                input_scale_interleaved,
-                self.weight_scales.T,
-                self.alpha,
-                output_dtype,
-                backend=self.backend
-            ).view(*output_shape)
+            with autotune():
+                output = mm_fp4(
+                    input_fp4,
+                    self.weight.T,
+                    input_scale_interleaved,
+                    self.weight_scales.T,
+                    self.alpha,
+                    output_dtype,
+                    block_size=16,
+                    use_nvfp4=True,
+                    backend='cute-dsl',
+                ).view(*output_shape)
 
         if self.bias is not None:
             output = output + self.bias.to(output.dtype)
