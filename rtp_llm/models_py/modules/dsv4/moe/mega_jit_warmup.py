@@ -13,6 +13,11 @@ import math
 import os
 from typing import Iterable, Sequence
 
+from rtp_llm.models_py.modules.dsv4.chunk_env import (
+    dsv4_chunk_tokens_from_env,
+    dsv4_global_chunk_tokens_configured,
+)
+
 
 def mega_moe_jit_warmup_enabled() -> bool:
     return os.environ.get("DSV4_MEGA_MOE_JIT_WARMUP", "1") != "0"
@@ -142,7 +147,10 @@ def generate_mega_moe_jit_token_counts(
             reps.append(num_tokens)
             last_signature = signature
 
-    prefer_cap_token = os.environ.get("DSV4_MOE_CHUNK_PREFILL", "1") != "0"
+    if dsv4_global_chunk_tokens_configured():
+        prefer_cap_token = dsv4_chunk_tokens_from_env("DSV4_MOE_CHUNK_TOKENS") > 0
+    else:
+        prefer_cap_token = os.environ.get("DSV4_MOE_CHUNK_PREFILL", "1") != "0"
     if reps and prefer_cap_token:
         cap_signature = mega_moe_config_signature(
             num_ranks=num_ranks,
@@ -196,7 +204,9 @@ def clamp_token_counts(
     max_tokens_per_rank: int,
 ) -> list[int]:
     max_tokens = max(int(max_tokens_per_rank), 1)
-    return sorted({min(int(token), max_tokens) for token in token_counts if int(token) > 0})
+    return sorted(
+        {min(int(token), max_tokens) for token in token_counts if int(token) > 0}
+    )
 
 
 def format_token_counts(token_counts: Sequence[int]) -> str:
