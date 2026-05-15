@@ -374,6 +374,12 @@ grpc::Status P2PConnector::waitForResourceEntry(const std::string&              
         return grpc::Status::OK;
     }
     if (is_cancelled && is_cancelled()) {
+        // The decode-side gRPC was cancelled while we were waiting for the resource.
+        // The resource may not be in the store yet (prefill is still computing), or it
+        // may arrive shortly after this handler exits. Mark the key as cancelled so that
+        // addResource() rejects it immediately on arrival instead of pinning KV blocks
+        // until the next checkTimeout() cycle (avoiding LACK MEM under sustained overload).
+        stream_store_->markCancelled(unique_key);
         RTP_LLM_LOG_WARNING("waiting for resource cancelled, unique_key: %s", unique_key.c_str());
         return grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled");
     }

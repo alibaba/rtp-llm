@@ -67,6 +67,12 @@ public:
     // Routing fields (unique_key, deadline_ms, request_id) are read from Meta::P2PRoutingContext
     bool addResource(const std::shared_ptr<Meta>& meta, const KVCacheResourcePtr& kv_cache_resource);
 
+    // Mark unique_key as cancelled: if the resource is already in the store, remove it
+    // immediately; otherwise record the cancellation so that a future addResource() call
+    // for the same key is rejected on arrival, preventing blocks from being pinned until
+    // the next checkTimeout() cycle.
+    void markCancelled(const std::string& unique_key);
+
     std::shared_ptr<P2PConnectorResourceEntry> waitAndStealResource(const std::string&    unique_key,
                                                                     int64_t               deadline_ms,
                                                                     std::function<bool()> is_cancelled = nullptr);
@@ -101,6 +107,10 @@ private:
     mutable std::mutex                                                resource_map_mutex_;
     std::condition_variable                                           resource_cv_;
     std::map<std::string, std::shared_ptr<P2PConnectorResourceEntry>> resource_map_;
+    // unique_key → cancel_time_ms: keys for which the decode-side gRPC was cancelled before the
+    // resource arrived. addResource() rejects these to avoid pinning KV blocks; entries are
+    // purged by checkTimeout() after kCancelledKeyTTLMs.
+    std::map<std::string, int64_t> cancelled_keys_;
     // Side-channel data stored independently from resource entries.
     // This allows notifySideChannelReady to store data even after the entry has been stolen.
     std::mutex                                      side_channel_map_mutex_;

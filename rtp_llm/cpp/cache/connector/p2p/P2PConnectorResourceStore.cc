@@ -92,13 +92,22 @@ bool P2PConnectorResourceStore::addResource(const std::shared_ptr<Meta>& meta,
 
     {
         std::lock_guard<std::mutex> lock(resource_map_mutex_);
-        auto                        entry = std::make_shared<P2PConnectorResourceEntry>();
-        entry->request_id                 = routing->request_id;
-        entry->unique_key                 = unique_key;
-        entry->kv_cache_resource          = kv_cache_resource;
-        entry->deadline_ms                = routing->deadline_ms;
-        entry->add_time_us                = currentTimeUs();
-        resource_map_[unique_key]         = entry;
+        auto                        cancelled_it = cancelled_keys_.find(unique_key);
+        if (cancelled_it != cancelled_keys_.end()) {
+            // Decode already cancelled this request. Drop the resource immediately instead of
+            // letting it sit until checkTimeout(), so blocks are freed without delay.
+            cancelled_keys_.erase(cancelled_it);
+            RTP_LLM_LOG_INFO("P2PConnectorResourceStore::addResource: rejected cancelled key, unique_key: %s",
+                             unique_key.c_str());
+            return false;
+        }
+        auto entry                = std::make_shared<P2PConnectorResourceEntry>();
+        entry->request_id         = routing->request_id;
+        entry->unique_key         = unique_key;
+        entry->kv_cache_resource  = kv_cache_resource;
+        entry->deadline_ms        = routing->deadline_ms;
+        entry->add_time_us        = currentTimeUs();
+        resource_map_[unique_key] = entry;
     }
     // 通知所有等待的线程
     resource_cv_.notify_all();
@@ -130,6 +139,24 @@ P2PConnectorResourceStore::stealResourceEntryLocked(const std::string& unique_ke
     resource_map_.erase(it);
     reportMetrics(false, false, entry->add_time_us);
     return entry;
+}
+
+void P2PConnectorResourceStore::markCancelled(const std::string& unique_key) {
+    std::lock_guard<std::mutex> lock(resource_map_mutex_);
+    auto                        it = resource_map_.find(unique_key);
+    if (it != resource_map_.end()) {
+        // Resource is already in the store — remove it now rather than waiting for checkTimeout().
+        auto wait_start_time_us = it->second->add_time_us;
+        resource_map_.erase(it);
+        reportMetrics(false, true, wait_start_time_us);
+        RTP_LLM_LOG_INFO("P2PConnectorResourceStore::markCancelled: removed existing resource, unique_key: %s",
+                         unique_key.c_str());
+    } else {
+        // Resource not yet in store. Record cancellation so addResource() rejects it on arrival.
+        cancelled_keys_[unique_key] = currentTimeMs();
+        RTP_LLM_LOG_DEBUG("P2PConnectorResourceStore::markCancelled: recorded pending cancel, unique_key: %s",
+                          unique_key.c_str());
+    }
 }
 
 std::shared_ptr<P2PConnectorResourceEntry> P2PConnectorResourceStore::waitAndStealResource(
@@ -177,6 +204,16 @@ void P2PConnectorResourceStore::checkTimeout() {
                 auto wait_start_time_us = entry->add_time_us;
                 it                      = resource_map_.erase(it);
                 reportMetrics(true, false, wait_start_time_us);
+            } else {
+                ++it;
+            }
+        }
+        // Clean up cancelled_keys_ entries that are old enough that addResource() will never
+        // be called for them (give 60s beyond the cancel time as a conservative upper bound).
+        constexpr int64_t kCancelledKeyTTLMs = 60 * 1000;
+        for (auto it = cancelled_keys_.begin(); it != cancelled_keys_.end();) {
+            if (current_time_ms >= it->second + kCancelledKeyTTLMs) {
+                it = cancelled_keys_.erase(it);
             } else {
                 ++it;
             }

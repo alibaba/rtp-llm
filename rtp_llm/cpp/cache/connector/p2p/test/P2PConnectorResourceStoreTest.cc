@@ -396,4 +396,81 @@ TEST_F(P2PConnectorResourceStoreTest, StolenEntry_NotifySideChannelWithAbsoluteD
     EXPECT_EQ(consumed_data.first_token_id, 88);
 }
 
+// ==================== markCancelled 测试 ====================
+
+// markCancelled when resource is already in store → removes it immediately so blocks are freed
+TEST_F(P2PConnectorResourceStoreTest, MarkCancelled_ResourceAlreadyInStore_RemovesImmediately) {
+    const std::string unique_key  = "test_cancel_existing";
+    const int64_t     request_id  = 3001;
+    const int64_t     deadline_ms = getDeadlineMs(5000);
+    auto              meta        = createMockMeta(unique_key, request_id, deadline_ms);
+    auto              resource    = createMockKVCacheResource();
+
+    ASSERT_TRUE(stream_store_->addResource(meta, resource));
+
+    // Cancel while resource is sitting in store
+    stream_store_->markCancelled(unique_key);
+
+    // Resource should be gone — steal fails immediately
+    auto entry = stream_store_->waitAndStealResource(unique_key, currentTimeMs() + 50);
+    EXPECT_EQ(entry, nullptr);
+}
+
+// markCancelled before resource arrives → addResource rejects the resource on arrival
+TEST_F(P2PConnectorResourceStoreTest, MarkCancelled_ResourceNotYetInStore_RejectsSubsequentAdd) {
+    const std::string unique_key  = "test_cancel_before_add";
+    const int64_t     request_id  = 3002;
+    const int64_t     deadline_ms = getDeadlineMs(5000);
+    auto              meta        = createMockMeta(unique_key, request_id, deadline_ms);
+    auto              resource    = createMockKVCacheResource();
+
+    // Cancel before prefill adds the resource
+    stream_store_->markCancelled(unique_key);
+
+    // Resource arrives later (prefill finished inference after decode already timed out)
+    bool added = stream_store_->addResource(meta, resource);
+    EXPECT_FALSE(added);
+
+    // Resource should not be stealable
+    auto entry = stream_store_->waitAndStealResource(unique_key, currentTimeMs() + 50);
+    EXPECT_EQ(entry, nullptr);
+}
+
+// markCancelled is idempotent and does not block subsequent keys with different names
+TEST_F(P2PConnectorResourceStoreTest, MarkCancelled_DoesNotAffectOtherKeys) {
+    const std::string key_cancelled = "test_cancel_only_this";
+    const std::string key_normal    = "test_cancel_other_key";
+    const int64_t     request_id    = 3003;
+    const int64_t     deadline_ms   = getDeadlineMs(5000);
+    auto              meta          = createMockMeta(key_normal, request_id, deadline_ms);
+    auto              resource      = createMockKVCacheResource();
+
+    stream_store_->markCancelled(key_cancelled);
+
+    // A different key should still work normally
+    ASSERT_TRUE(stream_store_->addResource(meta, resource));
+    auto entry = stream_store_->waitAndStealResource(key_normal, currentTimeMs() + 200);
+    ASSERT_NE(entry, nullptr);
+    EXPECT_EQ(entry->request_id, request_id);
+}
+
+// After markCancelled rejects addResource(), the cancel record is consumed and the key can be reused
+TEST_F(P2PConnectorResourceStoreTest, MarkCancelled_CancelRecordConsumedAfterRejection) {
+    const std::string unique_key  = "test_cancel_record_consumed";
+    const int64_t     request_id  = 3004;
+    const int64_t     deadline_ms = getDeadlineMs(5000);
+    auto              meta        = createMockMeta(unique_key, request_id, deadline_ms);
+    auto              resource    = createMockKVCacheResource();
+
+    stream_store_->markCancelled(unique_key);
+
+    // First add is rejected (consumes the cancel record)
+    EXPECT_FALSE(stream_store_->addResource(meta, resource));
+
+    // Second add for the same key (e.g. a new request with the same key) succeeds
+    ASSERT_TRUE(stream_store_->addResource(meta, resource));
+    auto entry = stream_store_->waitAndStealResource(unique_key, currentTimeMs() + 200);
+    ASSERT_NE(entry, nullptr);
+}
+
 }  // namespace rtp_llm
