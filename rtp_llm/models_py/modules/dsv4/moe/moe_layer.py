@@ -41,11 +41,11 @@ _CHUNKED_MOE_LOGGED = False
 # Default per-rank MoE prefill chunk size for DeepSeek-V4-Flash long-context
 # serving.  With 1M context and CP=4, a rank can see up to 262144 local tokens.
 # Keeping MegaMoE/shared-expert workspaces sized for all of them is the OOM
-# source this feature addresses.  16384 bounds the persistent MegaMoE symmetric
-# buffer to roughly 4.4 GiB/rank for EP4 while still using large enough chunks
-# to avoid excessive kernel/dispatch overhead.  Override with
+# source this feature addresses. 65536 bounds the persistent MegaMoE symmetric
+# buffer while keeping chunks large enough to avoid excessive
+# kernel/dispatch overhead. Override with
 # DSV4_MOE_CHUNK_TOKENS for smoke tests or tighter HBM budgets.
-DEFAULT_MOE_CHUNK_TOKENS = 16384
+DEFAULT_MOE_CHUNK_TOKENS = 65536
 
 
 def chunked_moe_enabled() -> bool:

@@ -142,14 +142,14 @@ def _fp8_prefill_score_chunk_rows() -> int:
 
     ``fp8_mqa_indexer_score`` returns dense ``[M, T]`` logits. Long-context
     CP prefill can have hundreds of thousands of local query rows and K rows,
-    so the one-shot output is not viable. Keep the default conservative; each
-    4096 x 243k fp32 chunk is about 4 GB before TopK consumes it.
+    so the one-shot output is not viable. Keep the default aligned with the
+    other DSV4 64k chunk knobs; lower it with the env var on tighter HBM budgets.
     """
-    raw = os.environ.get("DSV4_FP8_INDEXER_SCORE_CHUNK_ROWS", "4096")
+    raw = os.environ.get("DSV4_FP8_INDEXER_SCORE_CHUNK_ROWS", "65536")
     try:
         value = int(raw)
     except ValueError:
-        return 4096
+        return 65536
     return max(value, 0)
 
 
