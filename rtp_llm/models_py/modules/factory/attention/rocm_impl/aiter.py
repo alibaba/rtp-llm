@@ -232,24 +232,30 @@ class AiterPrefillAttnOp:
                 v_cache = v_4d.view(block_num, hk, ps // vs, hd, vs)
             return k_cache, v_cache
 
-        # 2D flat buffer path
-        expected_elems = 2 * hk * ps * hd
-        flat = kv_cache_base[:, :expected_elems].reshape(block_num, 2, hk, ps * hd)
+        # 2D flat buffer path (hybrid cache mode).
+        # kv_cache_base: [big_block_num, hybrid_stride_elems].  Each big block
+        # stores pages_per_block kernel pages in K/V interleaved layout.
+        # Reshape to kernel-page granularity so dim=0 = num_pages.
+        elems_per_page = 2 * hk * ps * hd
+        pages_per_block = kv_cache_base.shape[1] // elems_per_page
+        num_pages = block_num * pages_per_block
+        standard_elems = elems_per_page * pages_per_block
+        flat = kv_cache_base[:, :standard_elems].reshape(num_pages, 2, hk, ps * hd)
 
         # K: kernel writes via getKLocalIdx<CType> → vectorized [hd//vs, ps, vs].
-        k_cache = flat[:, 0, :, :].view(block_num, hk, hd // vs, ps, vs)
+        k_cache = flat[:, 0, :, :].view(num_pages, hk, hd // vs, ps, vs)
 
         if use_v1_linear_v:
             # V1 non-FP8: kernel uses non-template getVLocalIdx → linear [hd, ps].
-            v_linear = flat[:, 1, :, :].view(block_num, hk, hd, ps)
+            v_linear = flat[:, 1, :, :].view(num_pages, hk, hd, ps)
             v_cache = (
-                v_linear.reshape(block_num, hk, hd, ps // vs, vs)
+                v_linear.reshape(num_pages, hk, hd, ps // vs, vs)
                 .permute(0, 1, 3, 2, 4)
                 .contiguous()
             )
         else:
             # ASM or FP8: kernel uses getVLocalIdx<CType> → vectorized [ps//vs, hd, vs].
-            v_cache = flat[:, 1, :, :].view(block_num, hk, ps // vs, hd, vs)
+            v_cache = flat[:, 1, :, :].view(num_pages, hk, ps // vs, hd, vs)
 
         return k_cache, v_cache
 
@@ -285,9 +291,9 @@ class AiterPrefillAttnOp:
         num_gathered = block_indices.numel()
 
         if kv_cache_base.ndim >= 4:
-            # 5D path: [block_num, 2, hk, ps, hd]
-            k_4d = kv_cache_base.select(1, 0)  # [block_num, hk, ps, hd]
-            v_4d = kv_cache_base.select(1, 1)  # [block_num, hk, ps, hd]
+            # 5D path: [num_pages, 2, hk, ps, hd] — dim=0 already kernel-page granularity
+            k_4d = kv_cache_base.select(1, 0)  # [num_pages, hk, ps, hd]
+            v_4d = kv_cache_base.select(1, 1)  # [num_pages, hk, ps, hd]
             k_used = k_4d.index_select(0, block_indices)  # [n, hk, ps, hd]
             v_used = v_4d.index_select(0, block_indices)  # [n, hk, ps, hd]
             k_compact = k_used.view(num_gathered, hk, hd // vs, ps, vs)
@@ -297,12 +303,28 @@ class AiterPrefillAttnOp:
                 .contiguous()
             )
         else:
-            # 2D flat buffer path
-            block_num = kv_cache_base.shape[0]
-            expected_elems = 2 * hk * ps * hd
-            flat = kv_cache_base[:, :expected_elems].reshape(block_num, 2, hk, ps * hd)
-            k_used = flat[:, 0, :, :].index_select(0, block_indices)
-            v_used = flat[:, 1, :, :].index_select(0, block_indices)
+            # 2D flat buffer path (hybrid cache mode).
+            # kv_cache_base shape: [big_block_num, hybrid_stride_elems]
+            # big_block_num corresponds to SEQ_SIZE_PER_BLOCK (e.g. 1024 tokens),
+            # but block_table contains kernel page indices (KERNEL_SEQ_SIZE_PER_BLOCK,
+            # e.g. 16 tokens).  Each big block holds pages_per_block kernel pages
+            # in K/V interleaved layout: [K0, V0, K1, V1, ...].
+            # We must reshape to kernel-page granularity before index_select.
+            big_block_num = kv_cache_base.shape[0]
+            elems_per_page = 2 * hk * ps * hd
+            pages_per_block = kv_cache_base.shape[1] // elems_per_page
+            num_pages = big_block_num * pages_per_block
+            standard_elems = elems_per_page * pages_per_block
+            # When hybrid_stride == standard_elems, slice is a no-op and
+            # reshape is a zero-copy view.  When hybrid_stride > standard_elems
+            # (linear attention padding), the slice makes the tensor
+            # non-contiguous so reshape will copy — but index_select below
+            # copies anyway, so the overhead is acceptable.
+            paged = kv_cache_base[:, :standard_elems].reshape(
+                num_pages, 2, hk, ps * hd
+            )
+            k_used = paged[:, 0, :, :].index_select(0, block_indices)
+            v_used = paged[:, 1, :, :].index_select(0, block_indices)
             k_compact = k_used.view(num_gathered, hk, hd // vs, ps, vs).contiguous()
             v_compact = (
                 v_used.view(num_gathered, hk, hd, ps // vs, vs)
