@@ -585,10 +585,16 @@ class DeepSeekV4Model(GptModelBase):
 
             try:
                 from rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup import (
+                    _collect_dsv4_batched_fp8_einsum_shapes,
                     _collect_dsv4_dense_gemm_shapes,
+                    _collect_dsv4_fp8_mqa_logits_shapes,
+                    _collect_dsv4_mhc_prenorm_shapes,
                     resolve_dense_gemm_warmup_max_m,
+                    warmup_batched_fp8_einsum_jit,
                     warmup_compressor_combine_branch_kernels,
                     warmup_dense_gemm_jit,
+                    warmup_fp8_mqa_logits_jit,
+                    warmup_mhc_prenorm_gemm_jit,
                 )
 
                 _jit_device = _torch.device(device_str)
@@ -598,6 +604,20 @@ class DeepSeekV4Model(GptModelBase):
                     device=_jit_device,
                 )
                 _dense_shapes = _collect_dsv4_dense_gemm_shapes(self.v4)
+                _prefill_cp_config = getattr(
+                    self.parallelism_config, "prefill_cp_config", None
+                )
+                _prefill_cp_enabled = False
+                if _prefill_cp_config is not None:
+                    try:
+                        _prefill_cp_enabled = bool(_prefill_cp_config.is_enabled())
+                    except Exception:
+                        _prefill_cp_enabled = False
+                _prefill_cp_size = (
+                    int(getattr(self.parallelism_config, "tp_size", 1) or 1)
+                    if _prefill_cp_enabled
+                    else 1
+                )
                 _dense_gemm_max_m = resolve_dense_gemm_warmup_max_m(
                     max_seq_len=int(self._v4_args.max_seq_len),
                     max_batch_size=int(self._v4_args.max_batch_size),
@@ -611,15 +631,38 @@ class DeepSeekV4Model(GptModelBase):
                     gen_num_per_cycle=int(
                         getattr(self.config, "gen_num_per_cycle", 0) or 0
                     ),
+                    cp_size=_prefill_cp_size,
+                    cp_enabled=_prefill_cp_enabled,
                 )
                 logging.info(
-                    "[DeepSeekV4Model] DenseGEMM JIT warmup max_m=%d role=%s",
+                    "[DeepSeekV4Model] DeepGEMM JIT warmup max_m=%d role=%s cp_enabled=%s cp_size=%d",
                     _dense_gemm_max_m,
                     self._role_type_name,
+                    _prefill_cp_enabled,
+                    _prefill_cp_size,
                 )
                 warmup_dense_gemm_jit(
                     _dense_shapes,
                     max_m=_dense_gemm_max_m,
+                    device=_jit_device,
+                )
+                _batched_fp8_einsum_shapes = _collect_dsv4_batched_fp8_einsum_shapes(
+                    self.v4
+                )
+                warmup_batched_fp8_einsum_jit(
+                    _batched_fp8_einsum_shapes,
+                    max_m=_dense_gemm_max_m,
+                    device=_jit_device,
+                )
+                _mhc_prenorm_shapes = _collect_dsv4_mhc_prenorm_shapes(self.v4)
+                warmup_mhc_prenorm_gemm_jit(
+                    _mhc_prenorm_shapes,
+                    max_m=_dense_gemm_max_m,
+                    device=_jit_device,
+                )
+                _fp8_mqa_logits_shapes = _collect_dsv4_fp8_mqa_logits_shapes(self.v4)
+                warmup_fp8_mqa_logits_jit(
+                    _fp8_mqa_logits_shapes,
                     device=_jit_device,
                 )
                 logging.info("[DeepSeekV4Model] kernel JIT prewarm done")

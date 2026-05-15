@@ -8,13 +8,15 @@ cold compiles are otherwise likely to happen after the health gate opens.
 
 from __future__ import annotations
 
+from functools import lru_cache, partial
 import logging
+import os
 import time
 from typing import Any, Dict, Iterable, Optional, Tuple
 
 import torch
 
-_DEFAULT_DENSE_GEMM_M_GRID = [
+_DENSE_GEMM_FALLBACK_M_GRID = [
     1,
     2,
     4,
@@ -54,8 +56,28 @@ _DEFAULT_DENSE_GEMM_M_GRID = [
     1048576,
 ]
 
+_DENSE_GEMM_HEURISTIC_SCAN_LIMIT = 32768
+_SM100_DENSE_BLOCK_M_CANDIDATES = tuple(range(16, 257, 16))
+_SM100_DENSE_BLOCK_N_CANDIDATES = (16,) + tuple(range(32, 257, 32))
+
 _BRANCH_KERNEL_JIT_WARMED_KEYS: set[tuple] = set()
 _DENSE_GEMM_JIT_WARMED_KEYS: set[tuple] = set()
+_BATCHED_FP8_EINSUM_JIT_WARMED_KEYS: set[tuple] = set()
+_MHC_PRENORM_GEMM_JIT_WARMED_KEYS: set[tuple] = set()
+_FP8_MQA_LOGITS_JIT_WARMED_KEYS: set[tuple] = set()
+_DEEPGEMM_WARMUP_COMPILE_RETRIES = 2
+
+
+def _cp_padded_tokens_per_rank_bound(max_seq_len: int, cp_size: int) -> int:
+    cp_size = max(int(cp_size), 1)
+    max_seq_len = max(int(max_seq_len), 0)
+    if cp_size <= 1 or max_seq_len == 0:
+        return max_seq_len
+    global_alignment = cp_size * 2
+    padded_seq_len = (
+        (max_seq_len + global_alignment - 1) // global_alignment
+    ) * global_alignment
+    return padded_seq_len // cp_size
 
 
 def resolve_dense_gemm_warmup_max_m(
@@ -66,12 +88,18 @@ def resolve_dense_gemm_warmup_max_m(
     max_potential_token_num: int = 0,
     is_speculative: bool = False,
     gen_num_per_cycle: int = 0,
+    cp_size: int = 1,
+    cp_enabled: bool = False,
 ) -> int:
     """Return the largest M bucket DenseGEMM startup warmup should cover."""
 
     role = str(role_type_name).upper().split(".")[-1]
     if role != "DECODE":
-        return max(int(max_seq_len), 1)
+        max_m = max(int(max_seq_len), 1)
+        if cp_enabled:
+            cp_size = max(int(cp_size or 1), 1)
+            max_m = max(_cp_padded_tokens_per_rank_bound(max_m, cp_size), 1)
+        return max_m
 
     max_potential_token_num = int(max_potential_token_num or 0)
     if max_potential_token_num > 0:
@@ -91,6 +119,14 @@ def _dist_rank() -> int:
             return int(dist.get_rank())
     except Exception:
         pass
+    for env_name in ("WORLD_RANK", "RANK", "LOCAL_RANK"):
+        env_value = os.environ.get(env_name)
+        if env_value is None:
+            continue
+        try:
+            return int(env_value)
+        except ValueError:
+            pass
     return 0
 
 
@@ -103,6 +139,90 @@ def _dist_barrier() -> None:
     except Exception:
         logging.exception("[DSV4 KernelWarmup] distributed barrier failed")
         raise
+
+
+def _deepgemm_cache_dir() -> str:
+    for env_name in ("DG_JIT_CACHE_DIR", "DEEP_GEMM_CACHE_DIR"):
+        value = os.environ.get(env_name)
+        if value:
+            return value
+    return os.path.join(os.path.expanduser("~"), ".deep_gemm", "cache")
+
+
+def _deepgemm_warmup_lock_path() -> str:
+    cache_dir = _deepgemm_cache_dir()
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+        return os.path.join(cache_dir, ".rtp_llm_dsv4_deepgemm_warmup.lock")
+    except Exception:
+        return os.path.join("/tmp", f"rtp_llm_dsv4_deepgemm_warmup_{os.getuid()}.lock")
+
+
+def _run_deepgemm_warmup_launches_serialized(
+    label: str, launch_fn: Any
+) -> None:
+    """Serialize DeepGEMM dummy launches across rank processes sharing a cache."""
+
+    import fcntl
+
+    rank = _dist_rank()
+    lock_path = _deepgemm_warmup_lock_path()
+    wait_start = time.time()
+    logging.info("[%s] rank=%d waiting for serialized DeepGEMM JIT lock", label, rank)
+    with open(lock_path, "a", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            wait_time = time.time() - wait_start
+            logging.info(
+                "[%s] rank=%d entered serialized DeepGEMM JIT lock after %.2fs",
+                label,
+                rank,
+                wait_time,
+            )
+            launch_fn()
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    logging.info("[%s] rank=%d released serialized DeepGEMM JIT lock", label, rank)
+
+
+def _is_deepgemm_nvcc_compile_error(error: BaseException) -> bool:
+    return "NVCC compilation failed" in str(error)
+
+
+def _run_deepgemm_warmup_launch_with_retry(
+    label: str,
+    detail: str,
+    launch_fn: Any,
+    *,
+    device: torch.device,
+) -> None:
+    """Retry transient DeepGEMM NVCC failures without hiding stable bad specs."""
+
+    last_error: BaseException | None = None
+    attempts = _DEEPGEMM_WARMUP_COMPILE_RETRIES + 1
+    for attempt in range(1, attempts + 1):
+        try:
+            launch_fn()
+            return
+        except RuntimeError as error:
+            if not _is_deepgemm_nvcc_compile_error(error):
+                raise
+            last_error = error
+            if attempt >= attempts:
+                break
+            logging.warning(
+                "[%s] %s hit NVCC compilation failure on attempt %d/%d; retrying",
+                label,
+                detail,
+                attempt,
+                attempts,
+            )
+            _sync_cuda(device)
+            _release_cuda_cache(device)
+            time.sleep(0.2 * attempt)
+
+    assert last_error is not None
+    raise last_error
 
 
 def _is_cuda_device(device: torch.device) -> bool:
@@ -477,6 +597,89 @@ def _collect_dsv4_dense_gemm_shapes(model: Any) -> Dict[tuple[str, int, int], di
     return shapes
 
 
+def _collect_dsv4_mhc_prenorm_shapes(model: Any) -> Dict[tuple[int, int], dict]:
+    """Collect mHC DeepGEMM prenorm GEMM shapes from live TileLang HC units."""
+
+    shapes: Dict[tuple[int, int], dict] = {}
+    for module_name, module in model.named_modules():
+        if module.__class__.__name__ != "TileLangHCUnit":
+            continue
+        fn = getattr(module, "fn", None)
+        if not isinstance(fn, torch.Tensor) or fn.dim() != 2:
+            continue
+        if fn.dtype != torch.float32:
+            continue
+        n_value = int(fn.shape[0])
+        k_value = int(fn.shape[1])
+        if n_value <= 0 or k_value <= 0:
+            continue
+        key = (n_value, k_value)
+        if key not in shapes:
+            shapes[key] = {"name": module_name, "fn": fn}
+
+    logging.info(
+        "[DSV4 mHC DeepGEMM] collected prenorm shapes: count=%d shapes=%s",
+        len(shapes),
+        sorted(shapes.keys()),
+    )
+    return shapes
+
+
+def _collect_dsv4_batched_fp8_einsum_shapes(
+    model: Any,
+) -> Dict[tuple[int, int, int], dict]:
+    """Collect wo_a DeepGEMM batched FP8 einsum shapes from live attention blocks."""
+
+    shapes: Dict[tuple[int, int, int], dict] = {}
+    for module_name, module in model.named_modules():
+        weight = getattr(module, "_wo_a_stk_w", None)
+        scale = getattr(module, "_wo_a_stk_s", None)
+        if not isinstance(weight, torch.Tensor) or not isinstance(scale, torch.Tensor):
+            continue
+        if weight.dim() != 3 or scale.dim() != 3:
+            continue
+        groups = int(weight.shape[0])
+        n_value = int(weight.shape[1])
+        k_value = int(weight.shape[2])
+        if groups <= 0 or n_value <= 0 or k_value <= 0:
+            continue
+        if int(scale.shape[0]) != groups or int(scale.shape[1]) < n_value:
+            continue
+        key = (groups, n_value, k_value)
+        if key not in shapes:
+            shapes[key] = {"name": module_name, "weight": weight, "scale": scale}
+
+    logging.info(
+        "[DSV4 BatchedFP8Einsum] collected wo_a shapes: count=%d shapes=%s",
+        len(shapes),
+        sorted(shapes.keys()),
+    )
+    return shapes
+
+
+def _collect_dsv4_fp8_mqa_logits_shapes(model: Any) -> Dict[tuple[int, int], dict]:
+    """Collect non-paged FP8 MQA logits shapes from live FP8 indexer modules."""
+
+    shapes: Dict[tuple[int, int], dict] = {}
+    for module_name, module in model.named_modules():
+        if module.__class__.__name__ != "IndexerFP8":
+            continue
+        num_heads = int(getattr(module, "n_heads", 0) or 0)
+        head_dim = int(getattr(module, "head_dim", 0) or 0)
+        if num_heads <= 0 or head_dim <= 0:
+            continue
+        key = (num_heads, head_dim)
+        if key not in shapes:
+            shapes[key] = {"name": module_name}
+
+    logging.info(
+        "[DSV4 FP8MQALogits] collected prefill indexer shapes: count=%d shapes=%s",
+        len(shapes),
+        sorted(shapes.keys()),
+    )
+    return shapes
+
+
 def _collect_grouped_fp4_strategy_shapes(
     shapes: Dict[tuple[str, int, int], dict],
     module_name: str,
@@ -538,6 +741,415 @@ def _collect_local_loop_strategy_shapes(
         )
 
 
+def _ceil_div(a: int, b: int) -> int:
+    return (int(a) + int(b) - 1) // int(b)
+
+
+def _align(value: int, alignment: int) -> int:
+    return _ceil_div(value, alignment) * alignment
+
+
+def _get_deep_gemm_num_sms(device: torch.device) -> int:
+    try:
+        import deep_gemm
+
+        num_sms = int(deep_gemm.get_num_sms())
+        if num_sms > 0:
+            return num_sms
+    except Exception:
+        pass
+
+    props = torch.cuda.get_device_properties(device)
+    return int(props.multi_processor_count)
+
+
+def _sm100_swizzle_mode(block_size: int, elem_size: int) -> int:
+    for mode in (128, 64, 32, 16):
+        if (int(block_size) * int(elem_size)) % mode == 0:
+            return mode
+    raise ValueError(f"unsupported swizzle block={block_size} elem={elem_size}")
+
+
+def _sm100_dense_storage_signature(
+    *,
+    swap_ab: int,
+    block_m: int,
+    block_n: int,
+    block_k: int,
+    cluster_m: int,
+    cluster_n: int,
+    cd_elem_size: int,
+) -> tuple[int, ...]:
+    load_block_m = block_m // cluster_n
+    load_block_n = block_n // cluster_m
+    store_block_m = 16 if swap_ab else min(128, block_m)
+    store_block_n = block_n
+    swizzle_a_mode = _sm100_swizzle_mode(block_k, 1)
+    swizzle_b_mode = _sm100_swizzle_mode(block_k, 1)
+    swizzle_cd_mode = _sm100_swizzle_mode(store_block_n, cd_elem_size)
+    smem_cd = (
+        store_block_m * store_block_n * cd_elem_size * 2
+        if swap_ab
+        else store_block_m * swizzle_cd_mode * 2
+    )
+    smem_barriers = 32 * 8 * 3 + 2 * 8 * 2 + 8
+    smem_tmem_ptr = 4
+    smem_extra = smem_cd + smem_barriers + smem_tmem_ptr
+    sf_block_m = _align(block_m, 128)
+    sf_block_n = _align(block_n, 128)
+    smem_per_stage = (
+        load_block_m * block_k
+        + load_block_n * block_k
+        + sf_block_m * 4
+        + sf_block_n * 4
+    )
+    num_stages = min((232448 - smem_extra) // smem_per_stage, 32)
+    return (
+        load_block_m,
+        load_block_n,
+        store_block_m,
+        store_block_n,
+        swizzle_a_mode,
+        swizzle_b_mode,
+        swizzle_cd_mode,
+        num_stages,
+    )
+
+
+def _sm100_dense_layout_info(
+    layout: tuple[int, int, int, int, int, int],
+    *,
+    m_value: int,
+    n_value: int,
+    num_groups: int,
+    num_sms: int,
+) -> tuple[int, int]:
+    _, block_m, block_n, _, _, _ = layout
+    num_blocks = (
+        _ceil_div(m_value, block_m)
+        * _ceil_div(n_value, block_n)
+        * max(int(num_groups), 1)
+    )
+    num_waves = _ceil_div(num_blocks, num_sms)
+    num_last_blocks = num_blocks % num_sms
+    last_wave_util = num_sms if num_last_blocks == 0 else num_last_blocks
+    return num_waves, last_wave_util
+
+
+def _sm100_dense_layout_is_better(
+    candidate: tuple[int, int, int, int, int, int],
+    current: tuple[int, int, int, int, int, int],
+    *,
+    m_value: int,
+    n_value: int,
+    num_groups: int,
+    num_sms: int,
+) -> bool:
+    cand_waves, cand_last = _sm100_dense_layout_info(
+        candidate,
+        m_value=m_value,
+        n_value=n_value,
+        num_groups=num_groups,
+        num_sms=num_sms,
+    )
+    curr_waves, curr_last = _sm100_dense_layout_info(
+        current,
+        m_value=m_value,
+        n_value=n_value,
+        num_groups=num_groups,
+        num_sms=num_sms,
+    )
+    if (cand_waves == 1 or curr_waves == 1) and cand_waves != curr_waves:
+        return cand_waves < curr_waves
+
+    cand_cluster = candidate[4] * candidate[5]
+    curr_cluster = current[4] * current[5]
+    if cand_cluster != curr_cluster:
+        return cand_cluster > curr_cluster
+
+    if cand_waves != curr_waves:
+        return cand_waves < curr_waves
+
+    if cand_last != curr_last:
+        return cand_last > curr_last
+
+    cand_shape = candidate[1] + candidate[2]
+    curr_shape = current[1] + current[2]
+    if cand_shape != curr_shape:
+        return cand_shape < curr_shape
+
+    return candidate[1] * candidate[2] < current[1] * current[2]
+
+
+@lru_cache(maxsize=4096)
+def _sm100_dense_layout_signature(
+    *,
+    m_value: int,
+    n_value: int,
+    k_value: int,
+    kind: str,
+    num_sms: int,
+    num_groups: int = 1,
+) -> tuple[int, ...]:
+    """Mirror the M-dependent part of DeepGEMM SM100 dense layout selection.
+
+    DeepGEMM does not compile literal M for RTP's ``compiled_dims="nk"``
+    calls, but it does compile the heuristic-selected layout.  This local
+    mirror is used only to pick one representative M for each likely layout;
+    the actual source of truth remains the real dummy DeepGEMM launch.
+    """
+
+    gemm_type_key = 1 if str(kind) == "fp8_batched" else 0
+    num_groups = max(int(num_groups), 1)
+    block_k = 128
+    candidates: list[tuple[int, int, int, int, int, int]] = []
+
+    for swap_ab in (0, 1):
+        if swap_ab:
+            block_m_candidates = _SM100_DENSE_BLOCK_M_CANDIDATES
+            block_n_candidates = (128,)
+        else:
+            if m_value <= 32:
+                block_m_candidates = (32,)
+            elif m_value <= 64:
+                block_m_candidates = (64,)
+            else:
+                block_m_candidates = (128,)
+            block_n_end = 128 if k_value <= 256 else 256
+            block_n_candidates = tuple(
+                n for n in _SM100_DENSE_BLOCK_N_CANDIDATES if n <= block_n_end
+            )
+
+        for cluster_m in (1, 2):
+            if swap_ab and cluster_m > 1:
+                continue
+            for cluster_n in (1, 2):
+                if cluster_m * cluster_n > 2:
+                    continue
+                if not swap_ab and cluster_n > 1:
+                    continue
+                if num_sms % (cluster_m * cluster_n) != 0:
+                    continue
+
+                for block_m in block_m_candidates:
+                    if (block_m // cluster_n) % 8 != 0:
+                        continue
+                    if _ceil_div(m_value, block_m) % cluster_m != 0:
+                        continue
+
+                    for block_n in block_n_candidates:
+                        if (block_n // cluster_m) % 8 != 0:
+                            continue
+                        if _ceil_div(n_value, block_n) % cluster_n != 0:
+                            continue
+                        if swap_ab and block_n != 128:
+                            continue
+
+                        sf_block_m = _align(block_m, 128)
+                        sf_block_n = _align(block_n, 128)
+                        tmem_sf_cols = sf_block_m // 32 + sf_block_n // 32
+                        umma_n = block_m if swap_ab else block_n
+                        if 2 * umma_n + tmem_sf_cols > 512:
+                            continue
+
+                        # RTP warmup tensors are K-major for A and B.  DeepGEMM
+                        # keeps only layouts whose A/B swizzles are both 128B.
+                        if (
+                            _sm100_swizzle_mode(block_k, 1) != 128
+                            or _sm100_swizzle_mode(block_k, 1) != 128
+                        ):
+                            continue
+                        candidates.append(
+                            (swap_ab, block_m, block_n, block_k, cluster_m, cluster_n)
+                        )
+
+    if not candidates:
+        return (0, 128, 128, block_k, 1, 1)
+
+    best = candidates[0]
+    for candidate in candidates[1:]:
+        if _sm100_dense_layout_is_better(
+            candidate,
+            best,
+            m_value=m_value,
+            n_value=n_value,
+            num_groups=num_groups,
+            num_sms=num_sms,
+        ):
+            best = candidate
+
+    storage = _sm100_dense_storage_signature(
+        swap_ab=best[0],
+        block_m=best[1],
+        block_n=best[2],
+        block_k=best[3],
+        cluster_m=best[4],
+        cluster_n=best[5],
+        cd_elem_size=2,
+    )
+    return best + storage + (num_groups, gemm_type_key)
+
+
+def _candidate_dense_gemm_m_values(
+    *,
+    max_m: int,
+    n_value: int,
+    num_sms: int,
+    num_groups: int = 1,
+) -> list[int]:
+    max_m = max(int(max_m), 0)
+    if max_m <= 0:
+        return []
+    num_groups = max(int(num_groups), 1)
+
+    values: set[int] = set()
+    values.update(range(1, min(max_m, 64) + 1))
+
+    scan_limit = min(max_m, _DENSE_GEMM_HEURISTIC_SCAN_LIMIT)
+    values.update(range(80, scan_limit + 1, 16))
+
+    for m_value in _DENSE_GEMM_FALLBACK_M_GRID:
+        if 0 < m_value <= max_m:
+            values.add(int(m_value))
+
+    for chunk in (65536, 131072, 262144, 524288, 1048576):
+        for delta in (-1, 0, 1):
+            m_value = chunk + delta
+            if 0 < m_value <= max_m:
+                values.add(m_value)
+
+    block_ns = tuple(range(16, min(256, max(n_value, 16)) + 1, 16))
+    max_wave = max(
+        10,
+        _ceil_div(
+            max_m * max(1, _ceil_div(n_value, 128)) * num_groups,
+            16 * max(num_sms, 1),
+        ),
+    )
+    waves = set(range(1, 11))
+    wave = 16
+    while wave <= max_wave:
+        waves.add(wave)
+        waves.add(max(1, wave - 1))
+        wave *= 2
+
+    for block_m in _SM100_DENSE_BLOCK_M_CANDIDATES:
+        for block_n in block_ns:
+            n_blocks = max(1, _ceil_div(n_value, block_n))
+            for wave_value in waves:
+                m_center = wave_value * num_sms * block_m // (n_blocks * num_groups)
+                for raw_m in (m_center - 1, m_center, m_center + 1):
+                    if raw_m <= 0:
+                        continue
+                    for m_value in (
+                        raw_m,
+                        _align(raw_m, 16),
+                        max(1, _align(raw_m, block_m) - block_m + 1),
+                        _align(raw_m, block_m),
+                    ):
+                        if 0 < m_value <= max_m:
+                            values.add(m_value)
+
+    return sorted(values)
+
+
+@lru_cache(maxsize=1024)
+def _generate_dense_gemm_warmup_m_grid(
+    *,
+    max_m: int,
+    n_value: int,
+    k_value: int,
+    kind: str,
+    num_sms: int,
+    num_groups: int = 1,
+) -> tuple[int, ...]:
+    reps_by_signature: dict[tuple[int, ...], int] = {}
+    for m_value in _candidate_dense_gemm_m_values(
+        max_m=max_m,
+        n_value=n_value,
+        num_sms=num_sms,
+        num_groups=num_groups,
+    ):
+        signature = _sm100_dense_layout_signature(
+            m_value=m_value,
+            n_value=n_value,
+            k_value=k_value,
+            kind=kind,
+            num_sms=num_sms,
+            num_groups=num_groups,
+        )
+        reps_by_signature.setdefault(signature, m_value)
+    return tuple(sorted(reps_by_signature.values()))
+
+
+def _mhc_prenorm_deepgemm_backend_enabled() -> bool:
+    requested = os.environ.get("DSV4_MHC_PRE_GEMM_BACKEND", "").strip().lower()
+    if requested in ("", "auto", "deepgemm", "dg"):
+        return True
+    if requested in ("tilelang", "single", "tilelang_single", "tilelang_splitk"):
+        return False
+    return requested == "deepgemm"
+
+
+def _compute_mhc_prenorm_num_split(
+    *,
+    m_value: int,
+    k_value: int,
+    num_sms: int,
+) -> int:
+    block_m = 64
+    block_k = 64
+    grid_size = _ceil_div(max(int(m_value), 1), block_m)
+    split_k = max(int(num_sms), 1) // max(grid_size, 1)
+    num_block_k = _ceil_div(int(k_value), block_k)
+    split_k = min(split_k, num_block_k // 4)
+    return max(split_k, 1)
+
+
+@lru_cache(maxsize=1024)
+def _generate_mhc_prenorm_warmup_specs(
+    *,
+    max_m: int,
+    k_value: int,
+    num_sms: int,
+) -> tuple[tuple[int, int], ...]:
+    """Return ``(num_splits, representative_m)`` pairs for mHC prenorm GEMM.
+
+    DeepGEMM compiles ``num_splits`` for this kernel, not M itself.  RTP's
+    TileKernels wrapper derives ``num_splits`` from ``ceil(num_tokens / 64)``;
+    choose the first M that reaches each split value up to the rank-local
+    prefill token bound.
+    """
+
+    max_m = max(int(max_m), 0)
+    if max_m <= 0:
+        return ()
+
+    reps_by_split: dict[int, int] = {}
+    max_grid = _ceil_div(max_m, 64)
+    for grid_size in range(1, max_grid + 1):
+        m_value = (grid_size - 1) * 64 + 1
+        num_splits = _compute_mhc_prenorm_num_split(
+            m_value=m_value,
+            k_value=k_value,
+            num_sms=num_sms,
+        )
+        reps_by_split.setdefault(num_splits, m_value)
+        if num_splits == 1:
+            break
+
+    return tuple((split, reps_by_split[split]) for split in sorted(reps_by_split))
+
+
+def _fp8_mqa_logits_available() -> bool:
+    try:
+        import deep_gemm
+
+        return hasattr(deep_gemm, "fp8_mqa_logits")
+    except Exception:
+        return False
+
+
 @torch.inference_mode()
 def warmup_dense_gemm_jit(
     shapes: Dict[tuple[str, int, int], dict],
@@ -552,35 +1164,294 @@ def warmup_dense_gemm_jit(
         return
     _assert_not_capturing()
 
-    m_grid = [int(m) for m in _DEFAULT_DENSE_GEMM_M_GRID if 0 < int(m) <= int(max_m)]
-    if not m_grid:
+    num_sms = _get_deep_gemm_num_sms(device)
+    shape_keys = tuple(sorted(shapes.keys()))
+    m_grids = {
+        key: _generate_dense_gemm_warmup_m_grid(
+            max_m=int(max_m),
+            n_value=int(key[1]),
+            k_value=int(key[2]),
+            kind=str(key[0]),
+            num_sms=num_sms,
+        )
+        for key in shape_keys
+    }
+    m_grids = {key: grid for key, grid in m_grids.items() if grid}
+    if not m_grids:
         return
 
-    shape_keys = tuple(sorted(shapes.keys()))
-    warmup_key = (int(max_m), shape_keys, tuple(m_grid), str(device))
+    warmup_key = (
+        int(max_m),
+        tuple((key, m_grids.get(key, ())) for key in shape_keys),
+        int(num_sms),
+        str(device),
+    )
     if warmup_key in _DENSE_GEMM_JIT_WARMED_KEYS:
         return
 
-    _dist_barrier()
     rank = _dist_rank()
     if rank == 0:
+        total_launches = sum(len(grid) for grid in m_grids.values())
         logging.info(
-            "[DSV4 DenseGEMM] JIT warmup start: %d shapes x %d M values: %s",
+            "[DSV4 DenseGEMM] JIT warmup start: %d shapes, %d representative M launches, num_sms=%d: %s",
             len(shape_keys),
-            len(m_grid),
+            total_launches,
+            num_sms,
             shape_keys,
         )
+        logging.info(
+            "[DSV4 DenseGEMM] representative M grids: %s",
+            {key: m_grids.get(key, ()) for key in shape_keys},
+        )
+    def _run_warmup_launches() -> None:
+        for key in shape_keys:
+            info = shapes[key]
+            for m_value in m_grids.get(key, ()):
+                _run_deepgemm_warmup_launch_with_retry(
+                    "DSV4 DenseGEMM",
+                    f"shape={key} m={m_value}",
+                    partial(
+                        _launch_dummy_gemm,
+                        key=key,
+                        info=info,
+                        m_value=m_value,
+                        device=device,
+                    ),
+                    device=device,
+                )
+            _sync_cuda(device)
+            _release_cuda_cache(device)
+
     t0 = time.time()
-    for key in shape_keys:
-        info = shapes[key]
-        for m_value in m_grid:
-            _launch_dummy_gemm(key=key, info=info, m_value=m_value, device=device)
-        _sync_cuda(device)
-        _release_cuda_cache(device)
-    _dist_barrier()
+    _run_deepgemm_warmup_launches_serialized(
+        "DSV4 DenseGEMM", _run_warmup_launches
+    )
     if rank == 0:
         logging.info("[DSV4 DenseGEMM] JIT warmup done in %.2fs", time.time() - t0)
     _DENSE_GEMM_JIT_WARMED_KEYS.add(warmup_key)
+
+
+@torch.inference_mode()
+def warmup_batched_fp8_einsum_jit(
+    shapes: Dict[tuple[int, int, int], dict],
+    *,
+    max_m: int,
+    device: torch.device,
+) -> None:
+    """Compile reachable DeepGEMM wo_a batched FP8 einsum layouts."""
+
+    device = torch.device(device)
+    if not _is_cuda_device(device) or not shapes:
+        return
+    _assert_not_capturing()
+
+    num_sms = _get_deep_gemm_num_sms(device)
+    shape_keys = tuple(sorted(shapes.keys()))
+    m_grids = {
+        key: _generate_dense_gemm_warmup_m_grid(
+            max_m=int(max_m),
+            n_value=int(key[1]),
+            k_value=int(key[2]),
+            kind="fp8_batched",
+            num_sms=num_sms,
+            num_groups=int(key[0]),
+        )
+        for key in shape_keys
+    }
+    m_grids = {key: grid for key, grid in m_grids.items() if grid}
+    if not m_grids:
+        return
+
+    warmup_key = (
+        int(max_m),
+        tuple((key, m_grids.get(key, ())) for key in shape_keys),
+        int(num_sms),
+        str(device),
+    )
+    if warmup_key in _BATCHED_FP8_EINSUM_JIT_WARMED_KEYS:
+        return
+
+    rank = _dist_rank()
+    if rank == 0:
+        total_launches = sum(len(grid) for grid in m_grids.values())
+        logging.info(
+            "[DSV4 BatchedFP8Einsum] JIT warmup start: %d shapes, %d representative M launches, num_sms=%d: %s",
+            len(shape_keys),
+            total_launches,
+            num_sms,
+            shape_keys,
+        )
+        logging.info(
+            "[DSV4 BatchedFP8Einsum] representative M grids: %s",
+            {key: m_grids.get(key, ()) for key in shape_keys},
+        )
+    def _run_warmup_launches() -> None:
+        for key in shape_keys:
+            info = shapes[key]
+            for m_value in m_grids.get(key, ()):
+                _run_deepgemm_warmup_launch_with_retry(
+                    "DSV4 BatchedFP8Einsum",
+                    f"shape={key} m={m_value}",
+                    partial(
+                        _launch_dummy_batched_fp8_einsum,
+                        key=key,
+                        info=info,
+                        m_value=m_value,
+                        device=device,
+                    ),
+                    device=device,
+                )
+            _sync_cuda(device)
+            _release_cuda_cache(device)
+
+    t0 = time.time()
+    _run_deepgemm_warmup_launches_serialized(
+        "DSV4 BatchedFP8Einsum", _run_warmup_launches
+    )
+    if rank == 0:
+        logging.info(
+            "[DSV4 BatchedFP8Einsum] JIT warmup done in %.2fs", time.time() - t0
+        )
+    _BATCHED_FP8_EINSUM_JIT_WARMED_KEYS.add(warmup_key)
+
+
+@torch.inference_mode()
+def warmup_mhc_prenorm_gemm_jit(
+    shapes: Dict[tuple[int, int], dict],
+    *,
+    max_m: int,
+    device: torch.device,
+) -> None:
+    """Compile reachable DeepGEMM mHC prenorm GEMM split-K variants."""
+
+    device = torch.device(device)
+    if not _is_cuda_device(device) or not shapes:
+        return
+    if not _mhc_prenorm_deepgemm_backend_enabled():
+        return
+    _assert_not_capturing()
+
+    num_sms = _get_deep_gemm_num_sms(device)
+    shape_keys = tuple(sorted(shapes.keys()))
+    specs_by_shape = {
+        key: _generate_mhc_prenorm_warmup_specs(
+            max_m=int(max_m),
+            k_value=int(key[1]),
+            num_sms=num_sms,
+        )
+        for key in shape_keys
+    }
+    specs_by_shape = {key: specs for key, specs in specs_by_shape.items() if specs}
+    if not specs_by_shape:
+        return
+
+    warmup_key = (
+        int(max_m),
+        tuple((key, specs_by_shape.get(key, ())) for key in shape_keys),
+        int(num_sms),
+        str(device),
+    )
+    if warmup_key in _MHC_PRENORM_GEMM_JIT_WARMED_KEYS:
+        return
+
+    rank = _dist_rank()
+    if rank == 0:
+        total_launches = sum(len(specs) for specs in specs_by_shape.values())
+        logging.info(
+            "[DSV4 mHC DeepGEMM] JIT warmup start: %d shapes, %d num_splits launches, max_m=%d, num_sms=%d: %s",
+            len(shape_keys),
+            total_launches,
+            int(max_m),
+            num_sms,
+            shape_keys,
+        )
+        logging.info(
+            "[DSV4 mHC DeepGEMM] representative split specs: %s",
+            {key: specs_by_shape.get(key, ()) for key in shape_keys},
+        )
+    def _run_warmup_launches() -> None:
+        for key in shape_keys:
+            info = shapes[key]
+            for num_splits, m_value in specs_by_shape.get(key, ()):
+                _run_deepgemm_warmup_launch_with_retry(
+                    "DSV4 mHC DeepGEMM",
+                    f"shape={key} num_splits={num_splits} m={m_value}",
+                    partial(
+                        _launch_dummy_mhc_prenorm_gemm,
+                        key=key,
+                        info=info,
+                        m_value=m_value,
+                        num_splits=num_splits,
+                        device=device,
+                    ),
+                    device=device,
+                )
+            _sync_cuda(device)
+            _release_cuda_cache(device)
+
+    t0 = time.time()
+    _run_deepgemm_warmup_launches_serialized(
+        "DSV4 mHC DeepGEMM", _run_warmup_launches
+    )
+    if rank == 0:
+        logging.info(
+            "[DSV4 mHC DeepGEMM] JIT warmup done in %.2fs", time.time() - t0
+        )
+    _MHC_PRENORM_GEMM_JIT_WARMED_KEYS.add(warmup_key)
+
+
+@torch.inference_mode()
+def warmup_fp8_mqa_logits_jit(
+    shapes: Dict[tuple[int, int], dict],
+    *,
+    device: torch.device,
+) -> None:
+    """Compile DeepGEMM non-paged FP8 MQA logits used by prefill indexer."""
+
+    device = torch.device(device)
+    if not _is_cuda_device(device) or not shapes:
+        return
+    if not _fp8_mqa_logits_available():
+        return
+    _assert_not_capturing()
+
+    shape_keys = tuple(sorted(shapes.keys()))
+    warmup_key = (shape_keys, str(device))
+    if warmup_key in _FP8_MQA_LOGITS_JIT_WARMED_KEYS:
+        return
+
+    rank = _dist_rank()
+    if rank == 0:
+        logging.info(
+            "[DSV4 FP8MQALogits] JIT warmup start: %d shapes: %s",
+            len(shape_keys),
+            shape_keys,
+        )
+
+    def _run_warmup_launches() -> None:
+        for key in shape_keys:
+            _run_deepgemm_warmup_launch_with_retry(
+                "DSV4 FP8MQALogits",
+                f"shape={key}",
+                partial(
+                    _launch_dummy_fp8_mqa_logits,
+                    key=key,
+                    device=device,
+                ),
+                device=device,
+            )
+            _sync_cuda(device)
+            _release_cuda_cache(device)
+
+    t0 = time.time()
+    _run_deepgemm_warmup_launches_serialized(
+        "DSV4 FP8MQALogits", _run_warmup_launches
+    )
+    if rank == 0:
+        logging.info(
+            "[DSV4 FP8MQALogits] JIT warmup done in %.2fs", time.time() - t0
+        )
+    _FP8_MQA_LOGITS_JIT_WARMED_KEYS.add(warmup_key)
 
 
 def _create_dummy_fp8_input(
@@ -608,6 +1479,28 @@ def _create_dummy_fp8_input(
     else:
         scale.fill_(1.0)
     return a, scale
+
+
+def _create_dummy_batched_fp8_einsum_input(
+    *,
+    m_value: int,
+    groups: int,
+    k_value: int,
+    device: torch.device,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    a = torch.zeros(
+        (m_value, groups, k_value), dtype=torch.float8_e4m3fn, device=device
+    )
+    packed_sf_k = _ceil_div(k_value, 512)
+    tma_m = _align(m_value, 4)
+    scale_group_major = torch.empty(
+        groups * packed_sf_k * tma_m, dtype=torch.int32, device=device
+    ).as_strided(
+        (groups, m_value, packed_sf_k),
+        (packed_sf_k * tma_m, 1, tma_m),
+    )
+    scale_group_major.fill_(0x7F7F7F7F)
+    return a, scale_group_major.transpose(0, 1)
 
 
 def _launch_dummy_gemm(
@@ -660,3 +1553,83 @@ def _launch_dummy_gemm(
         return
 
     raise ValueError(f"unknown dense GEMM warmup kind={kind!r}")
+
+
+def _launch_dummy_batched_fp8_einsum(
+    *,
+    key: tuple[int, int, int],
+    info: dict,
+    m_value: int,
+    device: torch.device,
+) -> None:
+    import deep_gemm
+
+    groups, n_value, k_value = key
+    a, a_scale = _create_dummy_batched_fp8_einsum_input(
+        m_value=m_value,
+        groups=groups,
+        k_value=k_value,
+        device=device,
+    )
+    out = torch.empty((m_value, groups, n_value), dtype=torch.bfloat16, device=device)
+    deep_gemm.fp8_einsum(
+        "bhr,hdr->bhd",
+        (a, a_scale),
+        (info["weight"], info["scale"]),
+        out,
+        recipe=(1, 1, 128),
+    )
+    del a, a_scale, out
+
+
+def _launch_dummy_mhc_prenorm_gemm(
+    *,
+    key: tuple[int, int],
+    info: dict,
+    m_value: int,
+    num_splits: int,
+    device: torch.device,
+) -> None:
+    from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import tf32_hc_prenorm_gemm
+
+    n_value, k_value = key
+    x = torch.zeros((m_value, k_value), dtype=torch.bfloat16, device=device)
+    out = torch.empty(
+        (num_splits, m_value, n_value), dtype=torch.float32, device=device
+    )
+    sqrsum = torch.empty((num_splits, m_value), dtype=torch.float32, device=device)
+    tf32_hc_prenorm_gemm(x, info["fn"], out, sqrsum, int(num_splits))
+    del x, out, sqrsum
+
+
+def _launch_dummy_fp8_mqa_logits(
+    *,
+    key: tuple[int, int],
+    device: torch.device,
+) -> None:
+    import deep_gemm
+
+    num_heads, head_dim = key
+    block_q = max(1, 128 // int(num_heads))
+    seq_len = max(1, block_q)
+    seq_len_kv = 256
+
+    q = torch.zeros(
+        (seq_len, num_heads, head_dim), dtype=torch.float8_e4m3fn, device=device
+    )
+    k = torch.zeros((seq_len_kv, head_dim), dtype=torch.float8_e4m3fn, device=device)
+    k_scale = torch.ones((seq_len_kv,), dtype=torch.float32, device=device)
+    weights = torch.zeros((seq_len, num_heads), dtype=torch.float32, device=device)
+    ks = torch.zeros((seq_len,), dtype=torch.int32, device=device)
+    ke = torch.full((seq_len,), seq_len_kv, dtype=torch.int32, device=device)
+
+    logits = deep_gemm.fp8_mqa_logits(
+        q,
+        (k, k_scale),
+        weights,
+        ks,
+        ke,
+        False,
+        0,
+    )
+    del q, k, k_scale, weights, ks, ke, logits
