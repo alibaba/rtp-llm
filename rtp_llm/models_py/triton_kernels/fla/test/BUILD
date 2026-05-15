@@ -86,3 +86,15 @@ py_test(
     exec_properties = {'gpu':'MI308X-ROCM7'},
 )
 
+py_test(
+    name = "test_flydsl_chunk_gdn_shape_gate",
+    srcs = [
+        "test_flydsl_chunk_gdn_shape_gate.py"
+    ],
+    deps = [
+        "//rtp_llm/models_py/triton_kernels:fla",
+    ] + [":torch", ":triton", ":einops"],
+    visibility = ["//visibility:public"],
+    tags = ["rocm"],
+    exec_properties = {'gpu':'MI308X-ROCM7'},
+)
