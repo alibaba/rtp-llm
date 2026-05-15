@@ -42,6 +42,7 @@ from rtp_llm.models_py.modules.dsv4.decode.forward import (
     forward_decode,
 )
 from rtp_llm.models_py.modules.dsv4.moe.moe_layer import (
+    cp_padded_tokens_per_rank_bound,
     moe_chunk_tokens_from_env,
     resolve_moe_max_tokens_per_rank,
 )
@@ -249,7 +250,10 @@ class DeepSeekV4Model(GptModelBase):
         if cp_size > 1:
             cp_tokens_per_rank_bound = min(
                 args.max_tokens_per_rank,
-                max(args.max_seq_len // cp_size, 4096),
+                max(
+                    cp_padded_tokens_per_rank_bound(args.max_seq_len, cp_size),
+                    4096,
+                ),
             )
             if cp_tokens_per_rank_bound != args.max_tokens_per_rank:
                 logging.info(
