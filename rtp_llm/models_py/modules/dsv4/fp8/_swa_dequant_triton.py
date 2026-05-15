@@ -37,6 +37,12 @@ ENTRY_BYTES = TOKEN_DATA_SIZE + SCALE_BYTES_PER_TOKEN  # 584
 FP8_MAX = 448.0
 
 
+def _raise_if_block_table_has_negative(block_table: torch.Tensor) -> None:
+    """Reject sentinel physical block ids before the Triton kernel dereferences them."""
+    if torch.any(block_table < 0):
+        raise RuntimeError("block_table contains a negative physical block id")
+
+
 @triton.jit(do_not_specialize=["offset", "max_blocks_per_seq"])
 def _dequantize_and_gather_k_kernel(
     out_ptr,
@@ -80,11 +86,6 @@ def _dequantize_and_gather_k_kernel(
 
         block_table_row_ptr = block_table_ptr + batch_idx * max_blocks_per_seq
         physical_block_idx = tl.load(block_table_row_ptr + block_in_seq)
-
-        # Guard against sentinel / out-of-range block ids leaking in from a
-        # broken meta. Reading a -1 slot is never correct here — caller
-        # must pre-mask or trim ``gather_lens`` before invoking us.
-        tl.device_assert(physical_block_idx >= 0, "block_table contains -1")
 
         # int64: physical_block_idx * block_stride can exceed 2^31 with many
         # KV-cache blocks. Match vLLM.
@@ -169,10 +170,8 @@ def dequantize_and_gather_k_cache(
         f"got stride={k_cache.stride()}"
     )
 
-    # Caller invariant — kept tight so this hot-path stays kernel-only.
-    # Production callers (``WorkspaceMeta.{cmp,swa}_bt_int32`` etc.) already
-    # produce int32 contig block tables; the kernel itself ``device_assert``s
-    # against -1 so we no longer need a Python-side mask + ``torch.where``.
+    # Caller invariant — int32 contig block tables; negative physical ids are
+    # rejected before launch.
     assert (
         block_table.dtype == torch.int32
         and block_table.is_contiguous()
@@ -182,6 +181,8 @@ def dequantize_and_gather_k_cache(
         f"got dtype={block_table.dtype} contig={block_table.is_contiguous()} "
         f"dev={block_table.device} (k_cache dev={k_cache.device})"
     )
+
+    _raise_if_block_table_has_negative(block_table)
 
     num_reqs = seq_lens.shape[0]
     NUM_WORKERS = 128
