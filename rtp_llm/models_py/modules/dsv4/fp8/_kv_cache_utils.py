@@ -22,7 +22,7 @@ _DSV4_MAX_GROUPS_PER_LAYER = 5
 # FP8 KV slot byte layouts. See cpp/cache/DSV4CacheConfig.h for the
 # canonical 584B SWA/CSA/HCA fp8_model1_mla layout (448 fp8 NoPE + 64 bf16
 # RoPE + 7 UE8M0 scales + 1 pad). The vLLM-vendored fused writer in
-# _compressor_vllm_triton.py emits it; _kv_pool_io.py inverts it.
+# _compressor_vllm_triton.py emits it; _swa_dequant_triton.py reads it.
 # Indexer 132B layout (128 fp8 + 4-byte fp32 scale) shares the same writer
 # (head_dim=128 dispatch).
 DSV4_FP8_SLOT_BYTES = 584  # SWA / CSA / HCA canonical fp8_model1_mla
