@@ -3,11 +3,20 @@ from typing import Any, Dict, Optional, Tuple
 import torch
 from torch import nn
 
+from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.modules import IndexerOp, LayerNorm
 from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import KVCache
 from rtp_llm.utils.model_weight import W
+
+_DEVICE_TYPE = get_device_type()
+if _DEVICE_TYPE == DeviceType.Cuda:
+    from rtp_llm.models_py.triton_kernels.common.fused_logits_head_gate import (
+        fused_logits_head_gate,
+    )
+else:
+    fused_logits_head_gate = None  # type: ignore
 
 
 class Indexer(nn.Module):
@@ -78,6 +87,16 @@ class Indexer(nn.Module):
             quant_config=quant_config,
             hw_kernel_config=hw_kernel_config,
         )
+        # Pre-contiguify weight for the fused Triton kernel (one-time init
+        # copy). Production weight is often a transposed view [N, K] of
+        # underlying [K, N] storage; the small-T per-(t,n) kernel needs
+        # contiguous weight for coalesced 1D loads.
+        if (
+            fused_logits_head_gate is not None
+            and hasattr(self.weights_proj, "weight")
+            and not self.weights_proj.weight.is_contiguous()
+        ):
+            self.weights_proj.weight.data = self.weights_proj.weight.data.contiguous()
         self.cos_sin_cache = global_weights[W.rope_cos_sin_cache]
 
         self.indexer_op = IndexerOp(
@@ -100,13 +119,26 @@ class Indexer(nn.Module):
     def _is_sparse_prefill_cp(self, attention_inputs: Any) -> bool:
         return bool(attention_inputs.is_prefill) and self._prefill_cp_enabled()
 
-    # TODO: fuse kernel here
     def _get_logits_head_gate(
         self, x: torch.Tensor, q_scale: torch.Tensor
     ) -> torch.Tensor:
+        # F3: fused (cast + GEMV + 2 elementwise muls) into one Triton kernel.
+        # Wrapper does internal dtype/shape gating + small-T/large-T kernel
+        # selection (small-T at T<=32 uses per-(t,n) explicit reduce; large-T
+        # uses tiled tl.dot fp32 GEMM via TF32 tensor cores). Production
+        # fp32 weight (DSV3.2 weights_proj) is handled by upcast in-register.
+        scale = self.softmax_scale * self.weights_scale
+        if fused_logits_head_gate is not None and x.is_contiguous():
+            return fused_logits_head_gate(
+                x,
+                q_scale,
+                self.weights_proj.weight,
+                scale,
+                fallback_proj=self.weights_proj,
+            )
+        # Fallback: original 4-op chain (non-CUDA build).
         x = x.float()
         weights = self.weights_proj(x)
-        scale = self.softmax_scale * self.weights_scale
         weights = weights.unsqueeze(-1) * q_scale * scale
         return weights
 
@@ -126,7 +158,9 @@ class Indexer(nn.Module):
         if self._prefill_cp_enabled():
             assert cp_params is not None
             query, key = self.indexer_op.apply_rope_and_rotate_q_k_cp(
-                q, k, cp_params.full_rope_pos_ids,
+                q,
+                k,
+                cp_params.full_rope_pos_ids,
             )
         else:
             positions = flashmla_params.positions_d

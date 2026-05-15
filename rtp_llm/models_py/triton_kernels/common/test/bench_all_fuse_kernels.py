@@ -1,7 +1,14 @@
-"""Comprehensive benchmark + accuracy test for all 9 fuse kernels.
+"""Comprehensive benchmark + accuracy test for all fuse kernels.
 
-Covers Qwen3.5-397B-A17B per-rank shapes (TP=2).
-Produces markdown tables for performance and accuracy reporting.
+Two suites:
+
+  * Qwen3.5-397B-A17B fusions (F1, F2, F3/4, F5/7, F6, F8, F9)
+    — per-rank TP=2 shapes (H=4096, 16q/2kv heads, 32 linear v-heads).
+  * DSV3.2 MLA / Indexer fusions (DSA-F1a/F2, DSA-F1b, DSA-F3, DSA-F6a)
+    — strided RMSNorm, logits-head gate, output bmm direct write.
+
+Both suites produce markdown tables with baseline vs fused timing and
+per-fusion accuracy metrics.
 
 Run:
     CUDA_VISIBLE_DEVICES=2 PYTHONPATH=/tmp/sitecustom:.:bazel-bin \
@@ -39,11 +46,23 @@ from rtp_llm.models_py.triton_kernels.common.fused_add_rmsnorm_fp8_quant import 
     fused_add_rmsnorm_fp8_quant,
     fused_add_rmsnorm_fp8_quant_with_bf16_output,
 )
+from rtp_llm.models_py.triton_kernels.common.fused_logits_head_gate import (
+    _baseline_logits_head_gate,
+    fused_logits_head_gate,
+)
 from rtp_llm.models_py.triton_kernels.common.fused_qk_rmsnorm import (
     fused_qk_rmsnorm_triton,
 )
 from rtp_llm.models_py.triton_kernels.common.fused_rmsnorm_gated_fp8_quant import (
     fused_rmsnorm_gated_fp8_quant,
+)
+
+# DSV3.2 MLA fusions
+from rtp_llm.models_py.triton_kernels.common.fused_strided_rmsnorm import (
+    _baseline_strided_rmsnorm,
+    _baseline_strided_rmsnorm_fp8_quant_with_bf16_output,
+    fused_strided_rmsnorm,
+    fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output,
 )
 from rtp_llm.models_py.triton_kernels.common.layernorm_gated import RmsNormGated
 
@@ -429,8 +448,174 @@ def bench_fusion9(T: int):
 
 
 # ---------------------------------------------------------------------------
+# DSV3.2 MLA / Indexer fusions
+# ---------------------------------------------------------------------------
+# Shapes used:
+#   - q_lora_rank = 1536, kv_lora_rank = 512, qk_rope_head_dim = 64
+#   - hidden = 7168, indexer_n_heads = 64
+#   - num_heads = 128 (TP=1), v_head_dim = 128
+# Plus GLM5-style cross-shape probe at H=6144.
+
+DSA_Q_LORA_RANK = 1536
+DSA_KV_LORA_RANK = 512
+DSA_QK_ROPE = 64
+DSA_HIDDEN = 7168
+DSA_INDEXER_N_HEADS = 64
+
+
+def bench_dsa_strided_rmsnorm(T: int, H: int = 6144):
+    """DSA-F1a/F2: strided RMSNorm (replaces .contiguous() + RMSNorm).
+
+    Builds a strided slice from a larger tensor (mimics torch.split output
+    in mla_attention.py q-LoRA / kv-LoRA path).
+    """
+    big = torch.randn(T, H + 200, dtype=torch.bfloat16, device="cuda")
+    x = big[:, :H]
+    weight = torch.randn(H, dtype=torch.bfloat16, device="cuda")
+
+    def baseline_fn():
+        return _baseline_strided_rmsnorm(x, weight, EPS)
+
+    def fused_fn():
+        return fused_strided_rmsnorm(x, weight, EPS)
+
+    base_us = _benchmark_us(baseline_fn)
+    fused_us = _benchmark_us(fused_fn)
+
+    ref = _rmsnorm_fp32(x.contiguous(), weight, EPS)
+    out = fused_strided_rmsnorm(x, weight, EPS)
+    max_diff = (out.float() - ref.float()).abs().max().item()
+    return base_us, fused_us, max_diff, "max_abs"
+
+
+def bench_dsa_strided_rmsnorm_fp8_dual(T: int, H: int = 6144):
+    """DSA-F1b: strided RMSNorm + per-token fp8 quant + bf16 dual output."""
+    big = torch.randn(T, H + 200, dtype=torch.bfloat16, device="cuda")
+    x = big[:, :H]
+    weight = torch.randn(H, dtype=torch.bfloat16, device="cuda")
+
+    def baseline_fn():
+        _baseline_strided_rmsnorm_fp8_quant_with_bf16_output(
+            x, weight, EPS, GROUP_SIZE, SCALE_UE8M0
+        )
+
+    def fused_fn():
+        fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output(
+            x, weight, EPS, GROUP_SIZE, SCALE_UE8M0
+        )
+
+    base_us = _benchmark_us(baseline_fn)
+    fused_us = _benchmark_us(fused_fn)
+
+    # Accuracy: bf16 part max_abs vs fp32 reference, fp8 part dequant rel error
+    bf16_out, fp8_out, scale_out = (
+        fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output(
+            x, weight, EPS, GROUP_SIZE, SCALE_UE8M0
+        )
+    )
+    ref = _rmsnorm_fp32(x.contiguous(), weight, EPS)
+    bf16_diff = (bf16_out.float() - ref.float()).abs().max().item()
+    deq = _dequantize_fp8(fp8_out, scale_out, GROUP_SIZE, SCALE_UE8M0).reshape(T, H)
+    fp8_rel = ((deq - ref.float()).abs() / (ref.float().abs() + 1e-6)).mean().item()
+    return base_us, fused_us, max(bf16_diff, fp8_rel), "max(bf16_abs,fp8_rel)"
+
+
+def bench_dsa_logits_head_gate(T: int, K: int = 7168, N: int = 64):
+    """DSA-F3: fused (cast + GEMV + 2 elementwise muls) for indexer logits gate.
+
+    Uses fp32 weight (DSV3.2 production config — weights_proj.weight is loaded
+    as fp32 per ``models/deepseek_v2.py``). Triton kernel downcasts weight to
+    bf16 in-register so tensor cores can be used.
+    """
+    from torch import nn
+
+    x = torch.randn(T, K, dtype=torch.bfloat16, device="cuda")
+    weight = torch.randn(N, K, dtype=torch.float32, device="cuda") * 0.02
+    qs = torch.randn(T, N, 1, dtype=torch.float32, device="cuda").abs() + 0.1
+    scale_const = K**-0.5 * N**-0.5
+    linear = nn.Linear(K, N, bias=False, device="cuda")
+    linear.weight.data = weight
+
+    def baseline_fn():
+        _baseline_logits_head_gate(x, qs, linear, scale_const)
+
+    def fused_fn():
+        fused_logits_head_gate(x, qs, weight, scale_const, fallback_proj=linear)
+
+    base_us = _benchmark_us(baseline_fn)
+    fused_us = _benchmark_us(fused_fn)
+
+    ref = _baseline_logits_head_gate(x, qs, linear, scale_const)
+    out = fused_logits_head_gate(x, qs, weight, scale_const, fallback_proj=linear)
+    rel_err = ((out - ref).abs() / (ref.abs() + 1e-6)).mean().item()
+    return base_us, fused_us, rel_err, "mean_rel"
+
+
+def bench_dsa_logits_head_gate_strided(T: int, K: int = 6144, N: int = 32):
+    """DSA-F3 strided: production layout where weight is a transposed view.
+
+    Production weights_proj.weight is stored as [K, N] contiguous and accessed
+    as [N, K] transposed view (stride=(1, N)). This matches the actual runtime
+    layout observed in GLM5/Qwen3.5 decode.
+    """
+    from torch import nn
+
+    x = torch.randn(T, K, dtype=torch.bfloat16, device="cuda")
+    # Allocate [K, N] contiguous, then transpose to get [N, K] strided view
+    weight_storage = torch.randn(K, N, dtype=torch.float32, device="cuda") * 0.02
+    weight = weight_storage.t()  # [N, K] with stride=(1, N)
+    qs = torch.randn(T, N, 1, dtype=torch.float32, device="cuda").abs() + 0.1
+    scale_const = K**-0.5 * N**-0.5
+    linear = nn.Linear(K, N, bias=False, device="cuda")
+    linear.weight.data = weight.contiguous()  # baseline uses contiguous fp32
+
+    def baseline_fn():
+        _baseline_logits_head_gate(x, qs, linear, scale_const)
+
+    def fused_fn():
+        fused_logits_head_gate(x, qs, weight, scale_const, fallback_proj=linear)
+
+    base_us = _benchmark_us(baseline_fn)
+    fused_us = _benchmark_us(fused_fn)
+
+    ref = _baseline_logits_head_gate(x, qs, linear, scale_const)
+    out = fused_logits_head_gate(x, qs, weight, scale_const, fallback_proj=linear)
+    rel_err = ((out - ref).abs() / (ref.abs() + 1e-6)).mean().item()
+    return base_us, fused_us, rel_err, "mean_rel"
+
+
+def bench_dsa_output_bmm_direct(
+    T: int, num_heads: int = 128, kv: int = 512, v: int = 128
+):
+    """DSA-F6a: output BMM with direct flat-layout write (saves downstream .contiguous())."""
+    attn = torch.randn(T, num_heads, kv, dtype=torch.bfloat16, device="cuda")
+    vw = torch.randn(num_heads, kv, v, dtype=torch.bfloat16, device="cuda")
+
+    def baseline_fn():
+        out = torch.bmm(attn.transpose(0, 1), vw)
+        return out.transpose(0, 1).reshape(T, num_heads * v).contiguous()
+
+    def fused_fn():
+        out_flat = torch.empty(T, num_heads, v, dtype=attn.dtype, device=attn.device)
+        torch.bmm(attn.transpose(0, 1), vw, out=out_flat.transpose(0, 1))
+        return out_flat.reshape(T, num_heads * v)  # view, no copy
+
+    base_us = _benchmark_us(baseline_fn)
+    fused_us = _benchmark_us(fused_fn)
+
+    ref = baseline_fn()
+    out = fused_fn()
+    max_diff = (out.float() - ref.float()).abs().max().item()
+    return base_us, fused_us, max_diff, "max_abs"
+
+
+# ---------------------------------------------------------------------------
 # Main: run all benchmarks and produce report
 # ---------------------------------------------------------------------------
+
+# Subset of T values for DSA fusions: skip very large T which DSA paths don't
+# typically see (MLA decode is bs<=128, prefill T<=8192 per batch).
+T_DSA = T_DECODE + [1024, 2048, 4096, 8192]
 
 FUSION_DEFS = [
     ("F1: sigmoid_mul", bench_fusion1, T_ALL),
@@ -444,6 +629,24 @@ FUSION_DEFS = [
     ),
     ("F8: sigm_mul+fp8q", bench_fusion8, T_ALL),
     ("F9: QK RMSNorm", bench_fusion9, T_ALL),
+    # DSV3.2 MLA / Indexer fusions
+    ("DSA-F1a/F2: strided_rmsnorm (H=6144)", bench_dsa_strided_rmsnorm, T_DSA),
+    (
+        "DSA-F1b: strided_rms+fp8q_dual (H=6144)",
+        bench_dsa_strided_rmsnorm_fp8_dual,
+        T_DSA,
+    ),
+    ("DSA-F3: logits_head_gate (K=7168 N=64)", bench_dsa_logits_head_gate, T_DSA),
+    (
+        "DSA-F3s: logits_gate_strided (K=6144 N=32)",
+        bench_dsa_logits_head_gate_strided,
+        T_DSA,
+    ),
+    (
+        "DSA-F6a: output_bmm_direct (H=128 KV=512 V=128)",
+        bench_dsa_output_bmm_direct,
+        T_DSA,
+    ),
 ]
 
 

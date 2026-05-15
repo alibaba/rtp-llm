@@ -10,7 +10,19 @@ from rtp_llm.utils.fuser import fetch_remote_file_to_local
 
 def _load_tokenizer(tokenizer_path: str) -> PreTrainedTokenizerBase:
     local_path = fetch_remote_file_to_local(os.path.expanduser(tokenizer_path.strip()))
-    return AutoTokenizer.from_pretrained(local_path, trust_remote_code=True)
+    try:
+        return AutoTokenizer.from_pretrained(local_path, trust_remote_code=True)
+    except (ValueError, OSError):
+        from tokenizers import Tokenizer
+        from transformers import PreTrainedTokenizerFast
+
+        tokenizer_file = os.path.join(local_path, "tokenizer.json")
+        tokenizer = Tokenizer.from_file(tokenizer_file)
+        return PreTrainedTokenizerFast(
+            tokenizer_object=tokenizer,
+            eos_token="<|endoftext|>",
+            pad_token="<|endoftext|>",
+        )
 
 
 def get_prompt(tokenizer: Any, prompt: str, seqlen: int):

@@ -454,7 +454,16 @@ class SparseMlaImpl(MlaImplBase):
             dtype=q.dtype,
             device=q.device,
         )
-        q_transformed[..., self.kv_lora_rank :] = q_pe
+        # F5(B): use Triton vectorized strided copy. The default
+        # ``q_transformed[..., KV:] = q_pe`` runs torch's generic elementwise
+        # kernel at ~15% of peak BW. The Triton kernel reads strided q_pe
+        # directly via stride args; we MUST NOT call q_pe.contiguous() here —
+        # that would re-introduce the very copy kernel we're trying to fuse.
+        from rtp_llm.models_py.triton_kernels.common.strided_slice_copy import (
+            strided_slice_copy_,
+        )
+
+        strided_slice_copy_(q_transformed, q_pe, self.kv_lora_rank)
         if q_nope.shape[0] == 0:
             return q_transformed
         k_weight = self.weights[layer_id][W.mla_kc]
@@ -473,12 +482,24 @@ class SparseMlaImpl(MlaImplBase):
             layer_id: Current layer ID
 
         Returns:
-            Final output tensor with shape [*, num_heads, nope_head_dim]
+            Final output tensor with shape [T, num_heads, v_head_dim], laid out
+            as a contiguous ``[T, num_heads * v_head_dim]`` buffer (head dim in
+            the middle). This means the downstream ``output.reshape(*input_shape,
+            -1)`` in ``MlaAttention.forward`` is a free view (no .contiguous()
+            kernel copy needed). [F6a]
         """
         v_weight = self.weights[layer_id][W.mla_vc]
-        output = torch.bmm(attn_output.transpose(0, 1), v_weight)
-        output = output.transpose(0, 1)
-        return output
+        T = attn_output.shape[0]
+        H = self.num_heads
+        V = v_weight.shape[-1]  # nope_head_dim
+        # Allocate flat-layout output then expose strided [H, T, V] view to bmm.
+        # cuBLAS strideC handles the non-contig output write directly.
+        output_flat = torch.empty(
+            T, H, V, dtype=attn_output.dtype, device=attn_output.device
+        )
+        out_view = output_flat.transpose(0, 1)  # strided [H, T, V] view
+        torch.bmm(attn_output.transpose(0, 1), v_weight, out=out_view)
+        return output_flat
 
     def forward(
         self,

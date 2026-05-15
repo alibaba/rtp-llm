@@ -3,6 +3,7 @@ from typing import Any, Dict, Optional
 import torch
 from torch import nn
 
+from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.factory import LinearFactory
@@ -11,6 +12,23 @@ from rtp_llm.models_py.modules.hybrid.indexer import Indexer
 from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache
 from rtp_llm.utils.model_weight import W
+
+# CUDA-only fused strided RMSNorm (replaces .contiguous() + RMSNorm). When
+# q_b_proj is fp8, we additionally emit fp8+scale to skip a separate
+# per-token-group fp8 quant launch. ROCm path falls back to the unfused chain.
+_DEVICE_TYPE = get_device_type()
+if _DEVICE_TYPE == DeviceType.Cuda:
+    from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
+        CudaFp8GEMMLinear,
+    )
+    from rtp_llm.models_py.triton_kernels.common.fused_strided_rmsnorm import (
+        fused_strided_rmsnorm,
+        fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output,
+    )
+else:
+    CudaFp8GEMMLinear = None  # type: ignore
+    fused_strided_rmsnorm = None  # type: ignore
+    fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output = None  # type: ignore
 
 
 class MlaAttention(nn.Module):
@@ -102,6 +120,39 @@ class MlaAttention(nn.Module):
             hw_kernel_config=hw_kernel_config,
         )
 
+        # ------------------------------------------------------------------
+        # Fusion detection (DSV3.2 MLA path).
+        #
+        # F2  : kv_a_layernorm receives a strided slice from torch.split. We
+        #       always try the fused_strided_rmsnorm path; the wrapper falls
+        #       back to .contiguous() + flashinfer.norm.rmsnorm when the input
+        #       isn't compatible (H>8192 or last-dim stride != 1).
+        # F1a : q_a_layernorm with bf16 q_b_proj — same as F2 (bf16 output).
+        # F1b : q_a_layernorm with fp8 q_b_proj — produces dual output
+        #       (bf16 for the indexer wq_b consumer, fp8 + scale for q_b_proj).
+        # ------------------------------------------------------------------
+        self._fuse_kv_a_norm = (
+            _DEVICE_TYPE == DeviceType.Cuda and fused_strided_rmsnorm is not None
+        )
+
+        # q-path fusion mode: "fp8_dual" (F1b), "bf16" (F1a), or "off" (fallback)
+        self._fuse_q_a_norm_mode = "off"
+        if self.q_lora_rank > 0 and _DEVICE_TYPE == DeviceType.Cuda:
+            q_b_is_fp8 = (
+                CudaFp8GEMMLinear is not None
+                and isinstance(self.q_b_proj, CudaFp8GEMMLinear)
+                and self.q_lora_rank % 128 == 0
+            )
+            if q_b_is_fp8:
+                # UE8M0 needs num_groups % 4 == 0
+                if self.q_b_proj.scale_ue8m0:
+                    if (self.q_lora_rank // 128) % 4 == 0:
+                        self._fuse_q_a_norm_mode = "fp8_dual"
+                else:
+                    self._fuse_q_a_norm_mode = "fp8_dual"
+            elif fused_strided_rmsnorm is not None:
+                self._fuse_q_a_norm_mode = "bf16"
+
     def _run_sparse_indexer(
         self,
         hidden_states: torch.Tensor,
@@ -147,8 +198,30 @@ class MlaAttention(nn.Module):
                 ],
                 dim=-1,
             )
-            q_c = self.q_a_layernorm(q.contiguous())
-            q = self.q_b_proj(q_c)
+            # F1a/F1b: fused strided RMSNorm (skip .contiguous() copy). When
+            # q_b_proj is fp8 we additionally emit fp8+scale (F1b dual output)
+            # so q_b_proj can use input_scales= and skip its internal quant.
+            if self._fuse_q_a_norm_mode == "fp8_dual":
+                q_c, q_c_fp8, q_c_scale = (
+                    fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output(
+                        q,
+                        self.q_a_layernorm.weight.data,
+                        self.q_a_layernorm.variance_epsilon,
+                        group_size=128,
+                        scale_ue8m0=self.q_b_proj.scale_ue8m0,
+                    )
+                )
+                q = self.q_b_proj(q_c_fp8, input_scales=q_c_scale)
+            elif self._fuse_q_a_norm_mode == "bf16":
+                q_c = fused_strided_rmsnorm(
+                    q,
+                    self.q_a_layernorm.weight.data,
+                    self.q_a_layernorm.variance_epsilon,
+                )
+                q = self.q_b_proj(q_c)
+            else:
+                q_c = self.q_a_layernorm(q.contiguous())
+                q = self.q_b_proj(q_c)
         else:
             if x_fp8 is not None and x_scale is not None:
                 fused_qkv = self.fused_qkv_proj(x_fp8, input_scales=x_scale)
@@ -169,7 +242,15 @@ class MlaAttention(nn.Module):
             compressed_kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
         )
 
-        compressed_kv = self.kv_a_layernorm(compressed_kv.contiguous())
+        # F2: fused strided RMSNorm on compressed_kv (skip .contiguous() copy)
+        if self._fuse_kv_a_norm:
+            compressed_kv = fused_strided_rmsnorm(
+                compressed_kv,
+                self.kv_a_layernorm.weight.data,
+                self.kv_a_layernorm.variance_epsilon,
+            )
+        else:
+            compressed_kv = self.kv_a_layernorm(compressed_kv.contiguous())
 
         topk_indices = self._run_sparse_indexer(
             hidden_states, q_c, q_view, kv_cache, fmha_impl
