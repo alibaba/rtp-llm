@@ -63,6 +63,8 @@ def resolve_dense_gemm_warmup_max_m(
     max_seq_len: int,
     max_batch_size: int,
     role_type_name: str,
+    prefill_chunk_size: int = 0,
+    max_tokens_per_rank: int = 0,
     max_potential_token_num: int = 0,
     is_speculative: bool = False,
     gen_num_per_cycle: int = 0,
@@ -71,6 +73,17 @@ def resolve_dense_gemm_warmup_max_m(
 
     role = str(role_type_name).upper().split(".")[-1]
     if role != "DECODE":
+        # Prefill/PDFusion runs dense kernels on chunked token blocks. Warm the
+        # production chunk M directly instead of the full logical context M.
+        prefill_chunk_size = int(prefill_chunk_size or 0)
+        if prefill_chunk_size > 0:
+            return prefill_chunk_size
+
+        # If chunking is disabled, fall back to the runtime-resolved rank cap
+        # (CP-local when CP is enabled) before using max_seq_len.
+        max_tokens_per_rank = int(max_tokens_per_rank or 0)
+        if max_tokens_per_rank > 0:
+            return max(max_tokens_per_rank, 1)
         return max(int(max_seq_len), 1)
 
     max_potential_token_num = int(max_potential_token_num or 0)
@@ -81,6 +94,16 @@ def resolve_dense_gemm_warmup_max_m(
     if is_speculative:
         tokens_per_batch = max(int(gen_num_per_cycle or 0) + 1, 1)
     return max(int(max_batch_size), 1) * tokens_per_batch
+
+
+def _dense_gemm_m_grid(max_m: int) -> list[int]:
+    max_m = int(max_m)
+    if max_m <= 0:
+        return []
+    m_grid = [int(m) for m in _DEFAULT_DENSE_GEMM_M_GRID if 0 < int(m) <= max_m]
+    if max_m not in m_grid:
+        m_grid.append(max_m)
+    return sorted(set(m_grid))
 
 
 def _dist_rank() -> int:
@@ -552,7 +575,7 @@ def warmup_dense_gemm_jit(
         return
     _assert_not_capturing()
 
-    m_grid = [int(m) for m in _DEFAULT_DENSE_GEMM_M_GRID if 0 < int(m) <= int(max_m)]
+    m_grid = _dense_gemm_m_grid(int(max_m))
     if not m_grid:
         return
 
