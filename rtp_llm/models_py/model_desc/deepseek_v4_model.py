@@ -46,6 +46,7 @@ from rtp_llm.models_py.modules.dsv4.decode.forward import (
     forward_decode,
 )
 from rtp_llm.models_py.modules.dsv4.moe.moe_layer import (
+    chunked_moe_enabled,
     cp_padded_tokens_per_rank_bound,
     moe_chunk_tokens_from_env,
     resolve_moe_max_tokens_per_rank,
@@ -598,10 +599,17 @@ class DeepSeekV4Model(GptModelBase):
                     device=_jit_device,
                 )
                 _dense_shapes = _collect_dsv4_dense_gemm_shapes(self.v4)
+                _dense_gemm_prefill_chunk_size = 0
+                if self._role_type_name.upper() != "DECODE" and chunked_moe_enabled():
+                    _dense_gemm_prefill_chunk_size = max(
+                        int(moe_chunk_tokens_from_env()), 0
+                    )
                 _dense_gemm_max_m = resolve_dense_gemm_warmup_max_m(
                     max_seq_len=int(self._v4_args.max_seq_len),
                     max_batch_size=int(self._v4_args.max_batch_size),
                     role_type_name=self._role_type_name,
+                    prefill_chunk_size=_dense_gemm_prefill_chunk_size,
+                    max_tokens_per_rank=int(self._v4_args.max_tokens_per_rank),
                     max_potential_token_num=int(
                         getattr(init_resource, "max_potential_token_num", 0) or 0
                     ),
@@ -613,8 +621,11 @@ class DeepSeekV4Model(GptModelBase):
                     ),
                 )
                 logging.info(
-                    "[DeepSeekV4Model] DenseGEMM JIT warmup max_m=%d role=%s",
+                    "[DeepSeekV4Model] DenseGEMM JIT warmup max_m=%d "
+                    "prefill_chunk_size=%d max_tokens_per_rank=%d role=%s",
                     _dense_gemm_max_m,
+                    _dense_gemm_prefill_chunk_size,
+                    int(self._v4_args.max_tokens_per_rank),
                     self._role_type_name,
                 )
                 warmup_dense_gemm_jit(
