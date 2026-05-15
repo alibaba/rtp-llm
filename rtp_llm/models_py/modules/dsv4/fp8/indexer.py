@@ -29,6 +29,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
+from rtp_llm.models_py.modules.dsv4.chunk_env import dsv4_chunk_tokens_from_env
 from rtp_llm.models_py.modules.dsv4.cp import CPContext, build_cp_full_prefill_positions
 from rtp_llm.models_py.modules.dsv4.fp8._indexer_q_quant_triton import (
     indexer_q_fp8_quant_fold,
@@ -143,14 +144,12 @@ def _fp8_prefill_score_chunk_rows() -> int:
     ``fp8_mqa_indexer_score`` returns dense ``[M, T]`` logits. Long-context
     CP prefill can have hundreds of thousands of local query rows and K rows,
     so the one-shot output is not viable. Keep the default aligned with the
-    other DSV4 64k chunk knobs; lower it with the env var on tighter HBM budgets.
+    other DSV4 chunk knobs; lower it with the env var on tighter HBM budgets.
     """
-    raw = os.environ.get("DSV4_FP8_INDEXER_SCORE_CHUNK_ROWS", "65536")
-    try:
-        value = int(raw)
-    except ValueError:
-        return 65536
-    return max(value, 0)
+    return dsv4_chunk_tokens_from_env(
+        "DSV4_FP8_INDEXER_SCORE_CHUNK_ROWS",
+        min_value=0,
+    )
 
 
 def _get_topk_workspace(device: torch.device) -> torch.Tensor:

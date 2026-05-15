@@ -41,6 +41,7 @@ from rtp_llm.models_py.modules.dsv4._fused_inv_rope_fp8_quant_triton import (
 # Validated by test_fused_rmsnorm_rope.py (bf16 <=1-ULP + 1.25-1.75x).
 from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_rope_triton import fused_rmsnorm_rope
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
+from rtp_llm.models_py.modules.dsv4.chunk_env import dsv4_chunk_tokens_from_env
 from rtp_llm.models_py.modules.dsv4.cp import (
     CPContext,
     build_cp_full_prefill_positions,
@@ -2551,11 +2552,10 @@ class AttentionFP8(nn.Module):
         # itself. Set chunk <= 0 to disable.
         kv_view = workspace.view(B * wm.M, 1, D)
         indices_3d = combined_indices.unsqueeze(1)
-        q_chunk_env = os.environ.get("DSV4_FLASH_MLA_SPARSE_Q_CHUNK", "65536")
-        try:
-            q_chunk = int(q_chunk_env)
-        except ValueError:
-            q_chunk = 65536
+        q_chunk = dsv4_chunk_tokens_from_env(
+            "DSV4_FLASH_MLA_SPARSE_Q_CHUNK",
+            min_value=0,
+        )
         s_q = qkv.q.shape[0]
         if q_chunk <= 0 or s_q <= q_chunk:
             with record_function_range("dsv4.fp8.attn.workspace.flash_mla_sparse_fwd"):
@@ -4169,7 +4169,10 @@ class AttentionFP8(nn.Module):
         freqs_cis = common.freqs_cis
 
         if o.is_cuda and o.numel() > 0:
-            chunk_tokens = int(os.environ.get("DSV4_ATTN_OUT_CHUNK_TOKENS", "65536"))
+            chunk_tokens = dsv4_chunk_tokens_from_env(
+                "DSV4_ATTN_OUT_CHUNK_TOKENS",
+                min_value=0,
+            )
             if chunk_tokens > 0 and seqlen > chunk_tokens:
                 if freqs_cis.dim() == 2:
                     freqs_all = freqs_cis
