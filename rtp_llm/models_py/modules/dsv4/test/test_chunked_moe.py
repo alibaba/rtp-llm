@@ -4,6 +4,7 @@ import os
 import sys
 import types
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 import torch
@@ -50,9 +51,11 @@ from rtp_llm.models_py.modules.dsv4.moe.moe_layer import (
     DEFAULT_MOE_CHUNK_TOKENS,
     MoE,
     chunked_moe_enabled,
+    cp_padded_tokens_per_rank_bound,
     moe_chunk_tokens_from_env,
     resolve_moe_max_tokens_per_rank,
 )
+from rtp_llm.models_py.modules.dsv4.moe.strategies.mega import _mega_output_capacity
 
 
 class _FakeGate(nn.Module):
@@ -157,6 +160,18 @@ class ChunkedMoETest(unittest.TestCase):
             )
         self.assertEqual(budget, 65536)
 
+    def test_cp_token_budget_includes_zigzag_padding(self):
+        self.assertEqual(cp_padded_tokens_per_rank_bound(200002, 4), 50002)
+        with mock.patch.dict(os.environ, {"DSV4_MOE_CHUNK_PREFILL": "0"}):
+            budget = resolve_moe_max_tokens_per_rank(
+                max_seq_len=200002,
+                current_max_tokens_per_rank=200002,
+                cp_size=4,
+                max_generate_batch_size=8,
+                role_type="PREFILL",
+            )
+        self.assertEqual(budget, 50002)
+
     def test_token_budget_never_expands_existing_cap(self):
         with mock.patch.dict(
             os.environ,
@@ -255,6 +270,12 @@ class ChunkedMoETest(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "input_ids/token mismatch"):
             moe(x, input_ids)
+
+    def test_mega_output_capacity_uses_aligned_buffer_capacity(self):
+        aligned = SimpleNamespace(num_max_tokens_per_rank=50304)
+        self.assertEqual(_mega_output_capacity(aligned, 50000), 50304)
+        smaller = SimpleNamespace(num_max_tokens_per_rank=49920)
+        self.assertEqual(_mega_output_capacity(smaller, 50000), 50000)
 
 
 if __name__ == "__main__":
