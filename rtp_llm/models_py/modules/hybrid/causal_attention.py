@@ -11,12 +11,28 @@ from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache
 from rtp_llm.utils.model_weight import W
 
-# Import device-specific FusedQKRMSNorm
+# Import device-specific FusedQKRMSNorm + SigmoidMulInplace
 device_type = get_device_type()
 if device_type == DeviceType.ROCm:
+    from rtp_llm.models_py.modules.base.rocm.attn_output_gate import SigmoidMulInplace
     from rtp_llm.models_py.modules.base.rocm.norm import FusedQKRMSNorm
+
+    CudaFp8GEMMLinear = None
+    sigmoid_mul_fp8_quant_fwd = None
 else:
+    from rtp_llm.models_py.modules.base.cuda.attn_output_gate import SigmoidMulInplace
     from rtp_llm.models_py.modules.base.cuda.norm import FusedQKRMSNorm
+
+    try:
+        from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
+            CudaFp8GEMMLinear,
+        )
+        from rtp_llm.models_py.triton_kernels.common.attn_output_gate import (
+            sigmoid_mul_fp8_quant_fwd,
+        )
+    except ImportError:
+        CudaFp8GEMMLinear = None
+        sigmoid_mul_fp8_quant_fwd = None
 
 
 class CausalAttention(nn.Module):
@@ -73,6 +89,15 @@ class CausalAttention(nn.Module):
                 attn_config.size_per_head,
                 layernorm_eps,
             )
+        # Fused sigmoid+mul for Qwen3.5 attn_output_gate (replaces the
+        # `attn_output * torch.sigmoid(gate)` 2-kernel sequence below).
+        self.sigmoid_mul = SigmoidMulInplace()
+        self._fuse_sigmoid_mul_quant = (
+            CudaFp8GEMMLinear is not None
+            and sigmoid_mul_fp8_quant_fwd is not None
+            and isinstance(self.o_proj, CudaFp8GEMMLinear)
+            and self.o_proj.K % 128 == 0
+        )
 
     def forward(
         self,
@@ -80,16 +105,32 @@ class CausalAttention(nn.Module):
         fmha_impl: FMHAImplBase,
         kv_cache: Optional[LayerKVCache],
         gate: Optional[torch.Tensor] = None,  # for qwen3 next
+        x_fp8: Optional[torch.Tensor] = None,
+        x_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         input_shape = hidden_states.shape[:-1]
-        qkv = self.qkv_proj(hidden_states)
+        if x_fp8 is not None and x_scale is not None:
+            qkv = self.qkv_proj(x_fp8, input_scales=x_scale)
+        else:
+            qkv = self.qkv_proj(hidden_states)
         if self.qk_fuse_norm is not None:
             qkv = self.qk_fuse_norm(qkv)
         attn_output = fmha_impl.forward(qkv, kv_cache, self.layer_idx)
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         if gate is not None:
-            attn_output = attn_output * torch.sigmoid(gate)
-        output = self.o_proj(attn_output)
+            if self._fuse_sigmoid_mul_quant and attn_output.dim() == 2:
+                fp8_out, scale = sigmoid_mul_fp8_quant_fwd(
+                    attn_output,
+                    gate,
+                    quant_group_size=128,
+                    scale_ue8m0=self.o_proj.scale_ue8m0,
+                )
+                output = self.o_proj(fp8_out, input_scales=scale)
+            else:
+                attn_output = self.sigmoid_mul(attn_output, gate)
+                output = self.o_proj(attn_output)
+        else:
+            output = self.o_proj(attn_output)
         if self.tp_size > 1:
             output = all_reduce(output, group=Group.TP)
         return output

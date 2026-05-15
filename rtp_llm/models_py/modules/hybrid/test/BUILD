@@ -92,3 +92,11 @@ py_test (
    tags = ["open_skip", "H20"],
    exec_properties = {'gpu':'H20'},
 )
+
+py_test(
+    name = "test_dense_mlp_fp8_silu_fusion",
+    srcs = ["test_dense_mlp_fp8_silu_fusion.py"],
+    deps = py_test_deps,
+    tags = ["H20"],
+    exec_properties = {'gpu': 'H20', 'gpu_count': '1'},
+)
