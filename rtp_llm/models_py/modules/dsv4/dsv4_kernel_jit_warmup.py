@@ -58,6 +58,31 @@ _BRANCH_KERNEL_JIT_WARMED_KEYS: set[tuple] = set()
 _DENSE_GEMM_JIT_WARMED_KEYS: set[tuple] = set()
 
 
+def resolve_dense_gemm_warmup_max_m(
+    *,
+    max_seq_len: int,
+    max_batch_size: int,
+    role_type_name: str,
+    max_potential_token_num: int = 0,
+    is_speculative: bool = False,
+    gen_num_per_cycle: int = 0,
+) -> int:
+    """Return the largest M bucket DenseGEMM startup warmup should cover."""
+
+    role = str(role_type_name).upper().split(".")[-1]
+    if role != "DECODE":
+        return max(int(max_seq_len), 1)
+
+    max_potential_token_num = int(max_potential_token_num or 0)
+    if max_potential_token_num > 0:
+        return max_potential_token_num
+
+    tokens_per_batch = 1
+    if is_speculative:
+        tokens_per_batch = max(int(gen_num_per_cycle or 0) + 1, 1)
+    return max(int(max_batch_size), 1) * tokens_per_batch
+
+
 def _dist_rank() -> int:
     try:
         import torch.distributed as dist
@@ -86,7 +111,9 @@ def _is_cuda_device(device: torch.device) -> bool:
 
 def _assert_not_capturing() -> None:
     if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
-        raise RuntimeError("DSV4 kernel JIT warmup must not run inside CUDA graph capture")
+        raise RuntimeError(
+            "DSV4 kernel JIT warmup must not run inside CUDA graph capture"
+        )
 
 
 def _sync_cuda(device: torch.device) -> None:
@@ -237,7 +264,9 @@ def _warmup_combine_topk_swa_indices_cp(
 
     num_tokens = 32
     topk_width = max(int(topk), 0)
-    topk_indices = torch.zeros((num_tokens, topk_width), dtype=torch.int32, device=device)
+    topk_indices = torch.zeros(
+        (num_tokens, topk_width), dtype=torch.int32, device=device
+    )
     global_positions = torch.arange(num_tokens, dtype=torch.int64, device=device)
     m_value = max(int(window_size) + max(topk_width, 1) + 128, 256)
     n_value = 64 if topk_width else 0
@@ -292,10 +321,9 @@ def _warmup_fused_kv_compress_norm_rope_insert(
     compress_ratio = int(compress_ratio)
     coff = 1 + int(bool(overlap))
     num_tokens = 32
-    positions = (
-        torch.arange(num_tokens, dtype=torch.int64, device=device) * compress_ratio
-        + (compress_ratio - 1)
-    )
+    positions = torch.arange(
+        num_tokens, dtype=torch.int64, device=device
+    ) * compress_ratio + (compress_ratio - 1)
     max_position = int(positions[-1].item()) if num_tokens else 0
     n_raw = max(max_position + 1, coff * compress_ratio)
     raw_width = coff * head_dim
@@ -321,13 +349,19 @@ def _warmup_fused_kv_compress_norm_rope_insert(
 
     kv_block_size = 64
     entry_bytes = KV_ENTRY_BYTES if head_dim == 512 else INDEXER_ENTRY_BYTES
-    kv_cache = torch.zeros((1, kv_block_size, entry_bytes), dtype=torch.uint8, device=device)
+    kv_cache = torch.zeros(
+        (1, kv_block_size, entry_bytes), dtype=torch.uint8, device=device
+    )
 
     for batched in (False, True):
         kwargs = {}
         if batched:
-            kwargs["seq_start_per_req"] = torch.zeros((1,), dtype=torch.int32, device=device)
-            kwargs["cu_seq_per_req"] = torch.tensor([0, n_raw], dtype=torch.int32, device=device)
+            kwargs["seq_start_per_req"] = torch.zeros(
+                (1,), dtype=torch.int32, device=device
+            )
+            kwargs["cu_seq_per_req"] = torch.tensor(
+                [0, n_raw], dtype=torch.int32, device=device
+            )
         run_fused_compress_kv_write(
             state_cache=state_cache,
             token_to_req_indices=token_to_req,
@@ -371,7 +405,11 @@ def _collect_dsv4_dense_gemm_shapes(model: Any) -> Dict[tuple[str, int, int], di
     shapes: Dict[tuple[str, int, int], dict] = {}
     for module_name, module in model.named_modules():
         cls_name = module.__class__.__name__
-        if cls_name == "CudaFp8DeepGEMMLinear" and hasattr(module, "N") and hasattr(module, "K"):
+        if (
+            cls_name == "CudaFp8DeepGEMMLinear"
+            and hasattr(module, "N")
+            and hasattr(module, "K")
+        ):
             weight = getattr(module, "weight", None)
             scale = getattr(module, "weight_scales", None)
             if weight is None or scale is None:
@@ -385,7 +423,9 @@ def _collect_dsv4_dense_gemm_shapes(model: Any) -> Dict[tuple[str, int, int], di
                     "module": module,
                     "weight": weight,
                     "scale": scale,
-                    "scale_ue8m0": bool(getattr(module, "scale_ue8m0", scale.dtype == torch.int32)),
+                    "scale_ue8m0": bool(
+                        getattr(module, "scale_ue8m0", scale.dtype == torch.int32)
+                    ),
                 },
             )
             continue
@@ -454,7 +494,9 @@ def _collect_grouped_fp4_strategy_shapes(
             continue
         expert_idx = torch.zeros((1,), dtype=torch.long, device=weight_stack.device)
         weight = weight_stack[0]
-        scale = torch.index_select(scale_stack_t, 0, expert_idx).squeeze(0).transpose(0, 1)
+        scale = (
+            torch.index_select(scale_stack_t, 0, expert_idx).squeeze(0).transpose(0, 1)
+        )
         n_value = int(weight.shape[0])
         k_value = int(weight.shape[1]) * 2
         key = _shape_key("fp8_fp4", n_value, k_value)
@@ -483,7 +525,9 @@ def _collect_local_loop_strategy_shapes(
             continue
         expert_idx = torch.zeros((1,), dtype=torch.long, device=weight_stack.device)
         weight = weight_stack[0]
-        scale = torch.index_select(scale_stack_t, 0, expert_idx).squeeze(0).transpose(0, 1)
+        scale = (
+            torch.index_select(scale_stack_t, 0, expert_idx).squeeze(0).transpose(0, 1)
+        )
         n_value = int(weight.shape[0])
         k_value = int(weight.shape[1]) * 2
         key = _shape_key("fp8_fp4", n_value, k_value)

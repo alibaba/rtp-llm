@@ -276,6 +276,7 @@ class DeepSeekV4Model(GptModelBase):
             if hasattr(role_type_enum, "name")
             else str(role_type_enum)
         )
+        self._role_type_name = role_type_name
 
         resolved_max_tokens_per_rank = resolve_moe_max_tokens_per_rank(
             max_seq_len=args.max_seq_len,
@@ -525,7 +526,9 @@ class DeepSeekV4Model(GptModelBase):
                     )
                     logging.info("[DeepSeekV4Model] flash_mla SWA kv_full prewarm done")
                 except Exception:
-                    logging.exception("[DeepSeekV4Model] flash_mla SWA kv_full prewarm failed")
+                    logging.exception(
+                        "[DeepSeekV4Model] flash_mla SWA kv_full prewarm failed"
+                    )
                     raise
 
             if os.environ.get("DSV4_PREWARM_MEGA_MOE", "1") != "0":
@@ -569,6 +572,7 @@ class DeepSeekV4Model(GptModelBase):
             try:
                 from rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup import (
                     _collect_dsv4_dense_gemm_shapes,
+                    resolve_dense_gemm_warmup_max_m,
                     warmup_compressor_combine_branch_kernels,
                     warmup_dense_gemm_jit,
                 )
@@ -580,9 +584,28 @@ class DeepSeekV4Model(GptModelBase):
                     device=_jit_device,
                 )
                 _dense_shapes = _collect_dsv4_dense_gemm_shapes(self.v4)
+                _dense_gemm_max_m = resolve_dense_gemm_warmup_max_m(
+                    max_seq_len=int(self._v4_args.max_seq_len),
+                    max_batch_size=int(self._v4_args.max_batch_size),
+                    role_type_name=self._role_type_name,
+                    max_potential_token_num=int(
+                        getattr(init_resource, "max_potential_token_num", 0) or 0
+                    ),
+                    is_speculative=bool(
+                        getattr(init_resource, "is_speculative", False)
+                    ),
+                    gen_num_per_cycle=int(
+                        getattr(self.config, "gen_num_per_cycle", 0) or 0
+                    ),
+                )
+                logging.info(
+                    "[DeepSeekV4Model] DenseGEMM JIT warmup max_m=%d role=%s",
+                    _dense_gemm_max_m,
+                    self._role_type_name,
+                )
                 warmup_dense_gemm_jit(
                     _dense_shapes,
-                    max_m=int(self._v4_args.max_seq_len),
+                    max_m=_dense_gemm_max_m,
                     device=_jit_device,
                 )
                 logging.info("[DeepSeekV4Model] kernel JIT prewarm done")
@@ -607,9 +630,7 @@ class DeepSeekV4Model(GptModelBase):
 
         return True
 
-    def _should_capture_cuda_graph(
-        self, attn: Any, is_target_verify: bool
-    ) -> bool:
+    def _should_capture_cuda_graph(self, attn: Any, is_target_verify: bool) -> bool:
         """Default: capture decode + verify, skip plain prefill.  MTP
         overrides to capture all cudagraph requests because the draft's
         post-verify multi-token batch arrives with ``is_prefill=True``
@@ -711,9 +732,7 @@ class DeepSeekV4Model(GptModelBase):
         #   * MTP draft capture (single-token / multi-token):
         #     ``input_lengths=[1]`` or ``[gen+1]`` respectively
         # The C++ CudaGraphRunner captures one graph per (batch, q_len).
-        q_len = (
-            int(attn.input_lengths[0]) if attn.input_lengths.numel() > 0 else 1
-        )
+        q_len = int(attn.input_lengths[0]) if attn.input_lengths.numel() > 0 else 1
         device = self.v4.embed.weight.device
 
         paged_pool_specs = build_paged_pool_specs(
@@ -793,17 +812,16 @@ class DeepSeekV4Model(GptModelBase):
         )
         prep_prefill = (
             self._prepare_prefill_hidden
-            if cls._prepare_prefill_hidden is not DeepSeekV4Model._prepare_prefill_hidden
+            if cls._prepare_prefill_hidden
+            is not DeepSeekV4Model._prepare_prefill_hidden
             else None
         )
 
-        if _is_decode_fmha(fmha_impl) or bool(
-            getattr(attn, "is_target_verify", False)
-        ):
+        if _is_decode_fmha(fmha_impl) or bool(getattr(attn, "is_target_verify", False)):
             if bool(getattr(attn, "is_target_verify", False)):
-                assert bool(getattr(self.v4, "fp8_kv_cache", False)), (
-                    "target verify requires fp8 kv cache"
-                )
+                assert bool(
+                    getattr(self.v4, "fp8_kv_cache", False)
+                ), "target verify requires fp8 kv cache"
             return forward_decode(
                 self.v4,
                 self.kv_cache,
