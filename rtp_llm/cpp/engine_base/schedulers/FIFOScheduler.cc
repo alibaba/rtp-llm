@@ -72,12 +72,18 @@ int64_t FIFOScheduler::lastScheduleTime() {
 // 仅检查输入长度不超过 KV Cache 最大可用 token 数；max_batch_tokens_size 的约束在调度时由
 // evaluateRunningMemory 基于 contextLength 判断，不应在 enqueue 阶段乘以 batch_size 拒绝请求。
 bool FIFOScheduler::checkInputLength(const GenerateStreamPtr& stream) {
+    if (stream->inputLength() > static_cast<int>(max_seq_len_)) {
+        stream->reportError(ErrorCode::LONG_PROMPT_ERROR,
+                            "input len " + std::to_string(stream->inputLength()) + " exceeds max_seq_len "
+                                + std::to_string(max_seq_len_));
+        return false;
+    }
     if (stream->inputLength() > cache_manager_->maxAvailableTokensNum()) {
         stream->reportError(ErrorCode::EXCEEDS_KV_CACHE_MAX_LEN,
                             autil::StringUtil::formatString("input len " + std::to_string(stream->inputLength())
                                                             + " is greater than kv cache max available tokens num "
                                                             + std::to_string(cache_manager_->maxAvailableTokensNum())));
-        return false;  // Input length exceeds max available tokens
+        return false;
     }
     return true;
 }

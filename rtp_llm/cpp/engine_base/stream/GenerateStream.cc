@@ -42,7 +42,22 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     dtype_(model_config.data_type),
     hidden_size_(model_config.hidden_size) {
     RTP_LLM_PROFILE_FUNCTION();
+    // Initialize generate_status_ first so reportEvent() is safe throughout the constructor,
+    // including in updatePrefix() and the max_seq_len guard below.
+    generate_status_ = std::make_shared<GenerateStateMachine>(stream_cache_resource_);
+
     if (!updatePrefix(resource_context.system_prompt)) {
+        return;
+    }
+
+    // Guard against seq_length > max_seq_len, which would crash CompleteTokenIds::init().
+    // Reject gracefully here so the decode side sees LONG_PROMPT_ERROR instead of an
+    // unhandled exception causing gRPC UNKNOWN(2).
+    if (inputLength() > static_cast<int>(max_seq_len_)) {
+        reportEvent(StreamEvents::Error,
+                    ErrorCode::LONG_PROMPT_ERROR,
+                    "input len " + std::to_string(inputLength()) + " exceeds max_seq_len "
+                        + std::to_string(max_seq_len_));
         return;
     }
 
@@ -77,7 +92,6 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
 
     is_context_stream_  = std::make_shared<bool>();
     *is_context_stream_ = true;
-    generate_status_    = std::make_shared<GenerateStateMachine>(stream_cache_resource_);
     sub_generate_status_.clear();
     resizeSubGenerateStatus(init_batch_size);
 
