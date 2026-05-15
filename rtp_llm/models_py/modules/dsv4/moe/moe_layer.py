@@ -26,6 +26,11 @@ import torch
 import torch.nn as nn
 
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
+from rtp_llm.models_py.modules.dsv4.chunk_env import (
+    DEFAULT_DSV4_CHUNK_TOKENS,
+    dsv4_chunk_tokens_from_env,
+    dsv4_global_chunk_tokens_configured,
+)
 
 from .gate import Gate
 from .shared_expert import (
@@ -41,29 +46,26 @@ _CHUNKED_MOE_LOGGED = False
 # Default per-rank MoE prefill chunk size for DeepSeek-V4-Flash long-context
 # serving.  With 1M context and CP=4, a rank can see up to 262144 local tokens.
 # Keeping MegaMoE/shared-expert workspaces sized for all of them is the OOM
-# source this feature addresses. 65536 bounds the persistent MegaMoE symmetric
+# source this feature addresses. 16384 bounds the persistent MegaMoE symmetric
 # buffer while keeping chunks large enough to avoid excessive
-# kernel/dispatch overhead. Override with
+# kernel/dispatch overhead. Override with DSV4_CHUNK_TOKENS or
 # DSV4_MOE_CHUNK_TOKENS for smoke tests or tighter HBM budgets.
-DEFAULT_MOE_CHUNK_TOKENS = 65536
+DEFAULT_MOE_CHUNK_TOKENS = DEFAULT_DSV4_CHUNK_TOKENS
 
 
 def chunked_moe_enabled() -> bool:
+    if dsv4_global_chunk_tokens_configured():
+        return moe_chunk_tokens_from_env() > 0
     return os.environ.get("DSV4_MOE_CHUNK_PREFILL", "1") != "0"
 
 
 def moe_chunk_tokens_from_env(default: int = DEFAULT_MOE_CHUNK_TOKENS) -> int:
-    raw_value = os.environ.get("DSV4_MOE_CHUNK_TOKENS", str(default))
-    try:
-        value = int(raw_value)
-    except (TypeError, ValueError):
-        logging.warning(
-            "[DSV4 MoE] invalid DSV4_MOE_CHUNK_TOKENS=%r; using default=%d",
-            raw_value,
-            default,
-        )
-        value = default
-    return max(value, 1)
+    min_value = 0 if dsv4_global_chunk_tokens_configured() else 1
+    return dsv4_chunk_tokens_from_env(
+        "DSV4_MOE_CHUNK_TOKENS",
+        default,
+        min_value=min_value,
+    )
 
 
 def cp_padded_tokens_per_rank_bound(max_seq_len: int, cp_size: int) -> int:
