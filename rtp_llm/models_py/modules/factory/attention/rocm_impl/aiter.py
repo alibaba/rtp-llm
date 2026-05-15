@@ -577,6 +577,7 @@ class AiterPrefillAttnOpPaged:
         self.head_num = attn_configs.head_num
         self.head_dim = attn_configs.size_per_head
         self.head_num_kv = attn_configs.kv_head_num
+        self.tokens_per_block = attn_configs.kernel_tokens_per_block
         self.enable_cuda_graph = False
         self.cuda_graph_prepared = False
         self.graph_device: Optional[torch.device] = None
@@ -584,6 +585,7 @@ class AiterPrefillAttnOpPaged:
         self.kv_indptr_buf: Optional[torch.Tensor] = None
         self.kv_page_indices_buf: Optional[torch.Tensor] = None
         self.descale_buf: Optional[torch.Tensor] = None
+        self._compact_arange: Optional[torch.Tensor] = None
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
         has_prefix = (
@@ -639,6 +641,35 @@ class AiterPrefillAttnOpPaged:
             )
         self.cuda_graph_prepared = True
 
+    def _gather_kv_compact(self, key_cache, value_cache, block_table):
+        """Gather only blocks referenced by block_table to avoid int32 overflow.
+
+        aiter CK kernel uses int32 to compute KV cache offsets internally.
+        When block_num * stride_per_block > INT32_MAX (single-layer K cache
+        > 2 GB), the offset overflows causing GPU memory access faults.
+        Gathering only the used blocks (typically ~hundreds) and building an
+        identity block_table keeps offsets well within int32 range.
+        """
+        block_indices = block_table.reshape(-1).to(torch.int64)
+        num_gathered = block_indices.numel()
+
+        k_compact = key_cache.index_select(0, block_indices)
+        v_compact = value_cache.index_select(0, block_indices)
+
+        cached_arange = self._compact_arange
+        if (
+            cached_arange is None
+            or cached_arange.numel() < num_gathered
+            or cached_arange.device != block_table.device
+        ):
+            cached_arange = torch.arange(
+                max(num_gathered, 1024), dtype=torch.int32, device=block_table.device
+            )
+            self._compact_arange = cached_arange
+        compact_block_table = cached_arange[:num_gathered].view_as(block_table)
+
+        return k_compact, v_compact, compact_block_table
+
     def forward(self, qkv, kv_cache, fmha_params) -> torch.Tensor:
         q_tensor = qkv[0][: fmha_params.token_q_num]
         device = q_tensor.device
@@ -675,6 +706,14 @@ class AiterPrefillAttnOpPaged:
         else:
             block_table = fmha_params.kv_cache_block_id_device.to(
                 dtype=torch.int32, device=device
+            )
+            # Compact gather: avoid int32 overflow when full pool block_num
+            # is large enough that kernel offset exceeds INT32_MAX.
+            # Not used in cuda graph path (graph_ready=True) because graph
+            # replay requires fixed tensor shapes.  MTP draft prefill capture
+            # uses small block_tables that stay within int32 range.
+            key_cache, value_cache, block_table = self._gather_kv_compact(
+                key_cache, value_cache, block_table
             )
 
         if graph_ready:
