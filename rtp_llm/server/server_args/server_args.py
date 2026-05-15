@@ -496,10 +496,10 @@ def setup_args() -> PyEnvConfigs:
     # 解析参数（会自动应用所有配置绑定）
     parsed_args = parser.parse_args()
 
-    # Finalize: when enable_reuse_cache_in_batch not explicitly set, follow reuse_cache
+    # Finalize: batch-level cache reuse is disabled unless explicitly enabled.
     batch_reuse_val = getattr(parsed_args, "enable_reuse_cache_in_batch", None)
     if batch_reuse_val is None:
-        batch_reuse_val = py_env_configs.kv_cache_config.reuse_cache
+        batch_reuse_val = False
     py_env_configs.kv_cache_config.enable_reuse_cache_in_batch = bool(batch_reuse_val)
 
     return py_env_configs
