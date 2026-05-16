@@ -4483,8 +4483,9 @@ class AttentionFP8(nn.Module):
                             o_fp8, o_scale, 1, chunk_len
                         )
                     with record_function_range("dsv4.fp8.attn.out.wo_b"):
-                        out_2d[token_start:token_end].copy_(
-                            self.wo_b(o_chunk.flatten(2).reshape(chunk_len, -1))
+                        self.wo_b(
+                            o_chunk.flatten(2).reshape(chunk_len, -1),
+                            out=out_2d[token_start:token_end],
                         )
                 if self.tp_size > 1:
                     from rtp_llm.models_py.distributed.collective_torch import (
