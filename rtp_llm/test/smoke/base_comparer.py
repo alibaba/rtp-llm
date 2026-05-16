@@ -36,7 +36,7 @@ class BaseComparer(object):
         request_endpoint: str,
         q_r: Dict[str, Any],
         tracer: Tracer,
-        use_batch_scheduler: bool
+        use_batch_scheduler: bool,
     ):
         self.server_manager = server_manager
         self.request_endpoint = request_endpoint
@@ -106,7 +106,11 @@ class BaseComparer(object):
                     url, json={"batch_size": concurrecy_batch}, timeout=10
                 )
                 resp_json = response.json()
-                if response.status_code == 200 and "error" not in resp_json and resp_json.get("status") == "ok":
+                if (
+                    response.status_code == 200
+                    and "error" not in resp_json
+                    and resp_json.get("status") == "ok"
+                ):
                     return
                 logging.warning(
                     f"update_scheduler_info attempt {attempt+1}/{max_retries} error: {resp_json}"
@@ -128,7 +132,10 @@ class BaseComparer(object):
         request_info = query_info.model_dump(exclude_defaults=True)
         self.maybe_set_concurrency(query_info)
         ret, res = self.server_manager.visit(
-            request_info, visit_retry_time, self.request_endpoint
+            request_info,
+            visit_retry_time,
+            self.request_endpoint,
+            self.qr_info.get("expected_status_code", 200),
         )
         if not ret:
             raise SmokeException(
