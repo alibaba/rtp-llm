@@ -21,6 +21,14 @@ py_library(
 )
 
 py_test(
+    name = "batch_decode_test_test",
+    srcs = ["batch_decode_test_test.py"],
+    deps = [
+        ":perf_test_lib",
+    ],
+)
+
+py_test(
         name = "distribution_perf_test",
         main = "batch_decode_test.py",
         srcs = [

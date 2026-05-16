@@ -22,15 +22,23 @@ def _make_freqs(rows: int, rd: int) -> torch.Tensor:
     return torch.polar(torch.ones_like(angle), angle).to(torch.complex64).contiguous()
 
 
-def _eager_apply_rope_inplace(x: torch.Tensor, freqs_cis: torch.Tensor, inverse: bool = False) -> torch.Tensor:
+def _eager_apply_rope_inplace(
+    x: torch.Tensor, freqs_cis: torch.Tensor, inverse: bool = False
+) -> torch.Tensor:
     y = x
     xc = torch.view_as_complex(x.float().unflatten(-1, (x.size(-1) // 2, 2)))
     if inverse:
         freqs_cis = freqs_cis.conj()
-    if xc.ndim == 3:
-        freqs = freqs_cis.view(xc.size(0), xc.size(1), xc.size(-1))
+    freqs_flat = freqs_cis.reshape(-1, freqs_cis.shape[-1])
+    if xc.ndim == 4:
+        if freqs_flat.shape[0] == xc.size(0):
+            freqs = freqs_flat.view(xc.size(0), 1, 1, xc.size(-1))
+        else:
+            freqs = freqs_flat.view(xc.size(0), xc.size(1), 1, xc.size(-1))
+    elif freqs_flat.shape[0] == xc.size(0):
+        freqs = freqs_flat.view(xc.size(0), 1, xc.size(-1))
     else:
-        freqs = freqs_cis.view(xc.size(0), xc.size(1), 1, xc.size(-1))
+        freqs = freqs_flat.view(xc.size(0), xc.size(1), xc.size(-1))
     out = torch.view_as_real(xc * freqs).flatten(-2)
     y.copy_(out)
     return y
@@ -60,6 +68,38 @@ class RopeOnlyTest(unittest.TestCase):
 
     def test_inverse(self):
         self._check(shape=(1, 64, 16, 128), rd=64, inverse=True, group_heads=4)
+
+    def test_decode_speculative_batched_shape(self):
+        torch.manual_seed(125)
+        bsz, q_len, heads, head_dim, rd = 3, 2, 8, 128, 64
+        base = torch.randn(
+            bsz, q_len, heads, head_dim, dtype=torch.bfloat16, device="cuda"
+        )
+        ref = base.clone()
+        cand = base.clone()
+        freqs = _make_freqs(bsz * q_len, rd)
+
+        _eager_apply_rope_inplace(ref[..., -rd:], freqs)
+        rope_only = _load_rope_only()
+        rope_only(cand[..., -rd:], freqs, group_heads=4)
+        torch.cuda.synchronize()
+
+        torch.testing.assert_close(cand, ref, rtol=0, atol=3e-2)
+
+    def test_decode_flat_indexer_shape(self):
+        torch.manual_seed(124)
+        tokens, heads, head_dim, rd = 6, 8, 128, 64
+        base = torch.randn(tokens, heads, head_dim, dtype=torch.bfloat16, device="cuda")
+        ref = base.clone()
+        cand = base.clone()
+        freqs = _make_freqs(tokens, rd)
+
+        _eager_apply_rope_inplace(ref[..., -rd:], freqs)
+        rope_only = _load_rope_only()
+        rope_only(cand[..., -rd:], freqs, group_heads=4)
+        torch.cuda.synchronize()
+
+        torch.testing.assert_close(cand, ref, rtol=0, atol=3e-2)
 
     def test_empty_noop(self):
         x = torch.empty(0, 64, dtype=torch.bfloat16, device="cuda")

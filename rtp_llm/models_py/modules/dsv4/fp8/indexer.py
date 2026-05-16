@@ -47,10 +47,6 @@ from rtp_llm.models_py.modules.dsv4.fp8._indexer_score import (
 from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import PoolBackedModule
 from rtp_llm.models_py.modules.dsv4.fp8.compressor import CompressorFP8, CompressorMeta
 from rtp_llm.models_py.modules.dsv4.qlinear import QuantizedLinear
-from rtp_llm.models_py.modules.dsv4.rope import (
-    apply_rotary_emb,
-    apply_rotary_emb_batched,
-)
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 
@@ -368,10 +364,9 @@ class IndexerFP8(PoolBackedModule):
           * qr ``[B, S, q_lora]``  → q ``[B, S, H, D]``  (legacy 3D)
           * qr ``[T_total, q_lora]`` → q ``[T_total, H, D]`` (Phase-3a flat)
 
-        ``apply_rotary_emb`` only natively supports the 3D / 4D ``[B, S, ...]``
-        layouts, so the flat 3D ``[T, H, D]`` path wraps a fake ``S=1`` dim
-        before calling — the in-place ``copy_`` writes back through the
-        view, leaving q itself in the flat layout the caller expects.
+        FP8 decode/indexer runs on CUDA. RoPE is always applied through the
+        shared Triton kernel, which supports both ``[B, S, H, D]`` and flat
+        ``[T, H, D]`` decode shapes.
         """
         # Framework FP8 linear (CudaFp8DeepGEMMLinear) requires 2D input;
         # flatten leading dims and restore.
@@ -386,28 +381,13 @@ class IndexerFP8(PoolBackedModule):
             q = q.unflatten(-1, (self.n_heads, self.head_dim))
         with record_function_range("dsv4.fp8.indexer.compute_q.rope"):
             rope_view = q[..., -self.rope_head_dim :]
-            if batched_rope:
-                # Per-request RoPE on ``q_pe`` — route through the shared
-                # Triton kernel instead of ``apply_rotary_emb_batched`` to
-                # collapse ~10 aten ops (unflatten/view_as_complex/mul/
-                # view_as_real/flatten/copy_) into a single kernel launch.
-                # Graph-size impact: 41 indexer layers × ~9 eliminated ops
-                # = ~370 fewer nodes per captured decode graph, which cuts
-                # the ``cudaGraphLaunch`` CPU overhead we measured.
-                from rtp_llm.models_py.modules.dsv4._rope_only_triton import (
-                    rope_only_inplace,
-                )
+            if not rope_view.is_cuda:
+                raise RuntimeError("IndexerFP8._compute_indexer_q expects CUDA tensors")
+            from rtp_llm.models_py.modules.dsv4._rope_only_triton import (
+                rope_only_inplace,
+            )
 
-                rope_only_inplace(rope_view, freqs_cis)
-            elif rope_view.dim() == 3:
-                # Flat path: ``[T, H, rope]`` → wrap to ``[T, 1, H, rope]`` so
-                # apply_rotary_emb hits its 4D branch (``freqs`` reshaped to
-                # ``[T, 1, 1, rope/2]`` and broadcast across the H axis). The
-                # unsqueeze is a view; the kernel's in-place copy_ propagates
-                # back to the original ``q`` storage.
-                apply_rotary_emb(rope_view.unsqueeze(1), freqs_cis)
-            else:
-                apply_rotary_emb(rope_view, freqs_cis)
+            rope_only_inplace(rope_view, freqs_cis)
         return q
 
     # --------------------------------------------------------------
@@ -443,16 +423,14 @@ class IndexerFP8(PoolBackedModule):
                 q = self._compute_indexer_q(qr, freqs, batched_rope=True)
                 compressed_len = ((start_pos + 1) // ratio).view(bsz, 1, 1)
             else:
-                if compressor_meta is None:
-                    pos_flat = position_ids.to(
-                        device=self.freqs_cis.device, dtype=torch.long
-                    ).reshape(-1)
-                else:
-                    pos_flat = compressor_meta.positions.reshape(-1)
+                assert compressor_meta is not None
+                pos_flat = compressor_meta.positions.reshape(-1)
                 freqs = self.freqs_cis.index_select(0, pos_flat).contiguous()
                 q = self._compute_indexer_q(qr, freqs, batched_rope=False)
-                pos_2d = position_ids.reshape(bsz, q_len)
-                compressed_len = ((pos_2d + 1) // ratio).view(bsz, q_len, 1)
+                assert compressor_meta.compressed_lens_per_token is not None
+                compressed_len = compressor_meta.compressed_lens_per_token.view(
+                    bsz, q_len, 1
+                )
             # ``softmax_scale * n_heads^-0.5`` is pre-folded into weights_proj at __init__.
             weights = F.linear(x, self.weights_proj)
 

@@ -192,6 +192,11 @@ def _write_test_info(args: argparse.Namespace, remaining_args: List[str]) -> Non
     logging.info(f"Wrote test info to {path}")
 
 
+def _effective_grid_max_seq_len(args: argparse.Namespace, input_len_list: List[int]) -> int:
+    needed_seq_len = max(input_len_list) + args.decode_test_length
+    return max(needed_seq_len, args.max_seq_len)
+
+
 def main() -> str:
     from rtp_llm.config.log_config import setup_logging
 
@@ -258,7 +263,7 @@ def main() -> str:
 
         server = EngineServer(args, remaining)
         server.start(
-            max_seq_len=max(input_len_list) + args.decode_test_length,
+            max_seq_len=_effective_grid_max_seq_len(args, input_len_list),
             max_concurrency=max(batch_size_list),
         )
 
