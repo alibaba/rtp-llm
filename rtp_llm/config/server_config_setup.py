@@ -498,33 +498,36 @@ def _reset_local_jit_cache_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
 
-def _remote_staging_dir(parent_dir: str) -> str:
+def _remote_staging_path(dst_path: str) -> str:
     return os.path.join(
-        parent_dir, f"{JIT_REMOTE_STAGING_PREFIX}{os.getpid()}-{time.time_ns()}"
+        os.path.dirname(dst_path),
+        f"{JIT_REMOTE_STAGING_PREFIX}{os.path.basename(dst_path)}."
+        f"{os.getpid()}.{time.time_ns()}.tmp",
     )
 
 
-def _copy_file_atomic(src_path: str, dst_path: str) -> None:
-    staging_dir = _remote_staging_dir(os.path.dirname(dst_path))
-    os.makedirs(staging_dir, exist_ok=True)
-    tmp_path = os.path.join(staging_dir, os.path.basename(dst_path))
+def _copy_file_for_remote_publish(src_path: str, dst_path: str) -> None:
     try:
-        shutil.copy2(src_path, tmp_path)
-        os.replace(tmp_path, dst_path)
-    finally:
-        shutil.rmtree(staging_dir, ignore_errors=True)
+        if os.path.exists(dst_path) and os.path.getsize(src_path) == os.path.getsize(
+            dst_path
+        ):
+            return
+    except OSError:
+        pass
+    shutil.copy2(src_path, dst_path)
 
 
 def _replace_text_atomic(dst_path: str, content: str) -> None:
-    staging_dir = _remote_staging_dir(os.path.dirname(dst_path))
-    os.makedirs(staging_dir, exist_ok=True)
-    tmp_path = os.path.join(staging_dir, os.path.basename(dst_path))
+    tmp_path = _remote_staging_path(dst_path)
     try:
         with open(tmp_path, "w") as f:
             f.write(content)
         os.replace(tmp_path, dst_path)
     finally:
-        shutil.rmtree(staging_dir, ignore_errors=True)
+        try:
+            os.remove(tmp_path)
+        except FileNotFoundError:
+            pass
 
 
 def _copytree_into(
@@ -533,7 +536,7 @@ def _copytree_into(
     *,
     raise_on_error: bool = False,
     skip_remote_control_files: bool = False,
-    atomic_copy: bool = False,
+    remote_publish_copy: bool = False,
     copied_relpaths: Optional[list[str]] = None,
     progress_log_prefix: Optional[str] = None,
     progress_log_interval: int = 100,
@@ -567,8 +570,8 @@ def _copytree_into(
             src_path = os.path.join(root, filename)
             dst_path = os.path.join(target_root, filename)
             try:
-                if atomic_copy:
-                    _copy_file_atomic(src_path, dst_path)
+                if remote_publish_copy:
+                    _copy_file_for_remote_publish(src_path, dst_path)
                 else:
                     shutil.copy2(src_path, dst_path)
                 files_copied += 1
@@ -843,8 +846,8 @@ def maybe_write_jit_cache_to_remote(
     os.makedirs(local_write_dir, exist_ok=True)
 
     # JIT cache file paths are content-addressed. Existing files can remain in
-    # place while this publish refreshes them; file copies and control files are
-    # atomically replaced so readers never observe partial destination files.
+    # place while this publish refreshes them; matching files are not overwritten,
+    # and readers only trust the manifest after it is atomically replaced below.
     copy_begin = time.time()
     total_files = 0
     manifest_entries: list[str] = []
@@ -857,7 +860,7 @@ def maybe_write_jit_cache_to_remote(
             local_write_dir,
             raise_on_error=True,
             skip_remote_control_files=True,
-            atomic_copy=True,
+            remote_publish_copy=True,
             copied_relpaths=copied_relpaths,
             progress_log_prefix=(
                 f"maybe_write_jit_cache_to_remote: publishing {env_name}"
