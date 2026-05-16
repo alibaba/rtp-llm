@@ -156,6 +156,9 @@ class DeepSeekV4MtpModel(DeepSeekV4Model):
                 f"DeepSeekV4MtpModel expected hidden dim {hc * dim}, "
                 f"got {pre_hc.size(-1)}"
             )
+        # CP layout is handled before Python sees the tensors: C++
+        # handleInputs splits input_hiddens with the same zigzag plan as
+        # input_ids.  This method only trims CUDA graph capacity to real T.
         if pre_hc.size(0) < T:
             raise RuntimeError(
                 f"DeepSeekV4MtpModel: input_hiddens has {pre_hc.size(0)} rows "

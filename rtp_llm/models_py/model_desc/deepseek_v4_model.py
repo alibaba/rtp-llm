@@ -844,7 +844,17 @@ class DeepSeekV4Model(GptModelBase):
         buf = self.v4._mtp_hidden_buffer
         if buf is None:
             return None
-        return buf
+        requested = int(num_tokens)
+        if requested < 0:
+            raise RuntimeError(
+                f"DeepSeekV4Model: num_tokens must be non-negative, got {requested}"
+            )
+        if requested > buf.size(0):
+            raise RuntimeError(
+                "DeepSeekV4Model: requested MTP hidden states exceed valid buffer "
+                f"capacity: requested={requested}, capacity={buf.size(0)}"
+            )
+        return buf[:requested]
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         """qwen3-style dispatcher — per-arm orchestration lives in the
