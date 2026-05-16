@@ -132,7 +132,10 @@ cc_library(
         "//rtp_llm/cpp/cuda_graph:cuda_graph_base",
         "//rtp_llm/cpp/cuda_graph:cuda_graph_hdrs_lib",
         "//rtp_llm/models_py/bindings/common:fuse_copy_op",
-    ],
+    ] + select({
+        "//:using_cuda": ["//rtp_llm/models_py/bindings/cuda:bf16_gemm_op"],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
 )
 

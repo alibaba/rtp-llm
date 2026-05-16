@@ -19,6 +19,7 @@
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #if USING_CUDA
 #include <c10/cuda/CUDAStream.h>
+#include "rtp_llm/models_py/bindings/cuda/Bf16GemmOp.h"
 #endif
 
 using namespace std;
@@ -674,7 +675,15 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
 
         printTorchTensorData(last_hidden, "last_hidden");
 
-        auto logits = torch::mm(last_hidden.to(lm_head->kernel.dtype()), lm_head->kernel.t()).to(torch::kFloat32);
+        torch::Tensor logits;
+#if USING_CUDA
+        if (lm_head->kernel.dtype() == torch::kBFloat16) {
+            logits = torch_ext::cublas_gemm_bf16_bf16_fp32(last_hidden.to(torch::kBFloat16), lm_head->kernel);
+        } else
+#endif
+        {
+            logits = torch::mm(last_hidden.to(lm_head->kernel.dtype()), lm_head->kernel.t()).to(torch::kFloat32);
+        }
         printTorchTensorData(logits, "logits");
         if (device_props_.tp_size > 1) {
             logits = tpSyncEmbeddingOrLogits(logits);
