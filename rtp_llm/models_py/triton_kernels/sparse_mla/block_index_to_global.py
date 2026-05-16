@@ -41,7 +41,7 @@ def _convert_req_index_to_global_index_kernel(
     ti_ptr = token_indices_ptr + token_id * ti_stride0 + indice_id * ti_stride1
     tok = tl.load(ti_ptr)  # int32
 
-    # Only token == -1 should propagate as -1
+    # Invalid local indices and unallocated block-table entries propagate as -1.
     is_invalid_tok = tok < 0
     is_prefill = False
     if HAS_PREFILL:
@@ -56,6 +56,7 @@ def _convert_req_index_to_global_index_kernel(
     bt_ptr = block_table_ptr + req * bt_stride0 + block_id * bt_stride1
     is_invalid_tok |= ~valid_block
     base = tl.load(bt_ptr, mask=valid_block & ~is_prefill, other=0)
+    is_invalid_tok |= (base <= 0) & ~is_prefill
     out_val = base * BLOCK_SIZE + inblock_off
 
     # Override with prefill output if prefill is enabled
@@ -89,9 +90,10 @@ def triton_convert_req_index_to_global_index(
             token_indices[token_id, indice_id] // BLOCK_SIZE] * BLOCK_SIZE
         + token_indices[token_id, indice_id] % BLOCK_SIZE
 
-    Only when token_indices[token_id, indice_id] == -1 do we output -1.
-    For safety, we also output -1 if the derived block_id would be
-        out-of-bounds.
+    Negative token_indices propagate as -1. For safety, we also output -1
+        if the derived block_id would be out-of-bounds, or if the block-table
+        entry is unallocated (<= 0; block 0 is reserved by the framework
+        BlockPool).
 
     When HAS_PREFILL_WORKSPACE is True, prefill tokens are mapped to workspace offsets
     instead of global cache slots. prefill_workspace_request_ids and

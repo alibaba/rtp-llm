@@ -104,6 +104,10 @@ class DSv4DecodeAttnMetadataFP8:
     # ``compressed_lens[ratio][r] = (start_pos[r] + 1) // ratio``  (after
     # this step's writes are applied).
     compressed_lens: Dict[int, torch.Tensor]  # ratio -> [B] int32
+    # Per-token compressed lengths for target-verify/speculative decode.
+    # ``compressed_lens_per_token[ratio][b, s] = (position_ids[b, s] + 1) // ratio``.
+    # CSA indexer layers use this directly instead of recomputing it per layer.
+    compressed_lens_per_token: Dict[int, torch.Tensor]  # ratio -> [B, S] int32
 
     # Concatenated topk indices per layer-type. For SWA-only layers,
     # equals ``topk_window_idxs``. For compressed layers (CSA/HCA),
@@ -488,7 +492,13 @@ def _build_start_pos_from_attention_inputs(
         start_pos = start_pos.to(device)
     if start_pos.dtype != torch.int32:
         start_pos = start_pos.to(torch.int32)
-    return torch.clamp(start_pos, min=0, max=max(0, int(max_seq_len) - 1))
+    # Cuda-graph capture/warmup can hand us sentinel prefix lengths near
+    # max_seq_len. For multi-token speculative batches, clamping only the first
+    # token to max_seq_len - 1 still lets later tokens exceed the sized KV and
+    # compressed-pool capacity, e.g. q_len=4 with a ratio-4 boundary in the
+    # tail. Clamp the first token so the whole [B, q_len] position window fits.
+    max_start = max(0, int(max_seq_len) - int(q_len))
+    return torch.clamp(start_pos, min=0, max=max_start)
 
 
 def _build_swa_slot_mapping_from_positions(
@@ -586,6 +596,7 @@ def allocate_decode_metadata_fp8(
     unique_ratios: List[int] = sorted({r for r in compress_ratios if r > 1})
     slot_compressed: Dict[int, torch.Tensor] = {}
     compressed_lens: Dict[int, torch.Tensor] = {}
+    compressed_lens_per_token: Dict[int, torch.Tensor] = {}
     compressed_buffer_stride_per_ratio: Dict[int, int] = {}
     topk_total_by_ratio: Dict[int, torch.Tensor] = {}
     for r in unique_ratios:
@@ -598,6 +609,9 @@ def allocate_decode_metadata_fp8(
             device=device,
         )
         compressed_lens[r] = torch.zeros(B, dtype=torch.int32, device=device)
+        compressed_lens_per_token[r] = torch.zeros(
+            (B, q_len), dtype=torch.int32, device=device
+        )
         topk_total_by_ratio[r] = torch.full(
             (B, q_len, window_size + index_topk),
             -1,
@@ -704,6 +718,7 @@ def allocate_decode_metadata_fp8(
         topk_window_idxs=topk_window,
         topk_buffer_compressed=topk_buffer_compressed,
         compressed_lens=compressed_lens,
+        compressed_lens_per_token=compressed_lens_per_token,
         topk_total_by_ratio=topk_total_by_ratio,
         compressed_offset=window_size,
         is_cuda_graph=True,
@@ -786,10 +801,16 @@ def update_decode_metadata_in_place_fp8(
             ptr_snap[f"slot_compressed[{r}]"] = t.data_ptr()
         for r, t in meta.compressed_lens.items():
             ptr_snap[f"compressed_lens[{r}]"] = t.data_ptr()
+        for r, t in meta.compressed_lens_per_token.items():
+            ptr_snap[f"compressed_lens_per_token[{r}]"] = t.data_ptr()
         for r, t in meta.topk_total_by_ratio.items():
             ptr_snap[f"topk_total_by_ratio[{r}]"] = t.data_ptr()
         for at, t in meta.compressor_state_slot_mappings.items():
             ptr_snap[f"compressor_state_slot_mappings[{at}]"] = t.data_ptr()
+        if meta.swa_global_slots is not None:
+            ptr_snap["swa_global_slots"] = meta.swa_global_slots.data_ptr()
+        if meta.hca_cmp_global_slots is not None:
+            ptr_snap["hca_cmp_global_slots"] = meta.hca_cmp_global_slots.data_ptr()
 
     meta.position_ids[: bs * q_len].copy_(position_ids_flat)
     if meta.position_ids_long is not None:
@@ -823,6 +844,7 @@ def update_decode_metadata_in_place_fp8(
         abs_pos_plus_1 = position_ids_2d + 1
         on_boundary = (abs_pos_plus_1 % r) == 0
         in_req = abs_pos_plus_1 // r - 1
+        compressed_lens_per_token = (abs_pos_plus_1 // r).to(torch.int32)
         cmp_req_base = (
             torch.arange(bs, device=device, dtype=torch.int32).view(bs, 1) * stride
         )
@@ -832,9 +854,8 @@ def update_decode_metadata_in_place_fp8(
         slot_t[: bs * q_len].copy_(cmp_slots)
 
         # compressed_lens
-        meta.compressed_lens[r][:bs].copy_(
-            ((position_ids_2d[:, -1] + 1) // r).to(torch.int32)
-        )
+        meta.compressed_lens_per_token[r][:bs].copy_(compressed_lens_per_token)
+        meta.compressed_lens[r][:bs].copy_(compressed_lens_per_token[:, -1])
 
         # topk_total_by_ratio: refill window half, refill HCA dense half
         total = meta.topk_total_by_ratio[r]
@@ -850,7 +871,7 @@ def update_decode_metadata_in_place_fp8(
                 .view(1, 1, K_dense)
                 .expand(bs, q_len, K_dense)
             )
-            cmp_lens_per_token = ((position_ids_2d + 1) // r).view(bs, q_len, 1)
+            cmp_lens_per_token = compressed_lens_per_token.view(bs, q_len, 1)
             valid_h = dense_idxs < cmp_lens_per_token
             total[:bs, :, window_size:].copy_(
                 torch.where(valid_h, dense_idxs, torch.full_like(dense_idxs, -1))
@@ -1035,10 +1056,16 @@ def update_decode_metadata_in_place_fp8(
             cur[f"slot_compressed[{r}]"] = t.data_ptr()
         for r, t in meta.compressed_lens.items():
             cur[f"compressed_lens[{r}]"] = t.data_ptr()
+        for r, t in meta.compressed_lens_per_token.items():
+            cur[f"compressed_lens_per_token[{r}]"] = t.data_ptr()
         for r, t in meta.topk_total_by_ratio.items():
             cur[f"topk_total_by_ratio[{r}]"] = t.data_ptr()
         for at, t in meta.compressor_state_slot_mappings.items():
             cur[f"compressor_state_slot_mappings[{at}]"] = t.data_ptr()
+        if meta.swa_global_slots is not None:
+            cur["swa_global_slots"] = meta.swa_global_slots.data_ptr()
+        if meta.hca_cmp_global_slots is not None:
+            cur["hca_cmp_global_slots"] = meta.hca_cmp_global_slots.data_ptr()
         for k, p_before in ptr_snap.items():
             assert cur[k] == p_before, (
                 f"update_decode_metadata_in_place_fp8(forbid_realloc=True) "
@@ -1105,6 +1132,7 @@ def build_decode_metadata_fp8(
     unique_ratios: List[int] = sorted({r for r in compress_ratios if r > 1})
     slot_compressed: Dict[int, torch.Tensor] = {}
     compressed_lens: Dict[int, torch.Tensor] = {}
+    compressed_lens_per_token: Dict[int, torch.Tensor] = {}
     compressed_buffer_stride_per_ratio: Dict[int, int] = {}
     for r in unique_ratios:
         stride = max_seq_len // r
@@ -1114,7 +1142,8 @@ def build_decode_metadata_fp8(
         )
         # After-this-step length: floor((start_pos + q_len) / r)
         # (each request now has this many compressed entries).
-        compressed_lens[r] = ((position_ids_2d[:, -1] + 1) // r).to(torch.int32)
+        compressed_lens_per_token[r] = ((position_ids_2d + 1) // r).to(torch.int32)
+        compressed_lens[r] = compressed_lens_per_token[r][:, -1].contiguous()
 
     # Indexer output buffer — pre-allocated; IndexerDecodeV4Op fills it.
     # Indexer is only present in compress_ratio==4 layers, so K=index_topk.
@@ -1161,7 +1190,7 @@ def build_decode_metadata_fp8(
                 )
                 .expand(B, q_len, K_dense)
             )
-            cmp_lens_per_token = ((position_ids_2d + 1) // r).view(B, q_len, 1)
+            cmp_lens_per_token = compressed_lens_per_token[r].view(B, q_len, 1)
             valid = dense_idxs < cmp_lens_per_token
             # Indices are *request-local*: position within the compressed pool
             # (i.e. 0..max_seq_len/ratio).
@@ -1321,6 +1350,7 @@ def build_decode_metadata_fp8(
         topk_window_idxs=topk_window,
         topk_buffer_compressed=topk_buffer_compressed,
         compressed_lens=compressed_lens,
+        compressed_lens_per_token=compressed_lens_per_token,
         topk_total_by_ratio=topk_total_by_ratio,
         compressed_offset=window_size,
         is_cuda_graph=False,

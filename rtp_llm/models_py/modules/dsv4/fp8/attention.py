@@ -1917,6 +1917,19 @@ class AttentionFP8(nn.Module):
         )
         kv_slots = attn_metadata.pool_write_slot_mappings.get(kv_attn_type)
         assert state_slots is not None and kv_slots is not None
+        from rtp_llm.models_py.modules.dsv4.attn_type import (
+            CSA_KV,
+            HCA_KV,
+            INDEXER_KV,
+        )
+
+        ratio_by_kv = {CSA_KV: 4, INDEXER_KV: 4, HCA_KV: 128}
+        ratio = ratio_by_kv.get(kv_attn_type)
+        compressed_lens_per_token = (
+            attn_metadata.compressed_lens_per_token[ratio][:bsz, :q_len]
+            if ratio in attn_metadata.compressed_lens_per_token
+            else None
+        )
         T = bsz * q_len
         positions = attn_metadata.position_ids_long[:T]
         b_idx = attn_metadata.req_id_per_token_long[:T]
@@ -1929,6 +1942,7 @@ class AttentionFP8(nn.Module):
             is_batched=q_len > 1,
             seq_start_per_req=attn_metadata.decode_seq_start_per_req[:bsz],
             cu_seq_per_req=attn_metadata.decode_cu_seq_per_req[: bsz + 1],
+            compressed_lens_per_token=compressed_lens_per_token,
         )
 
     def _forward_decode_swa_only(

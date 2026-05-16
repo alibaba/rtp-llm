@@ -19,6 +19,12 @@ from rtp_llm.models_py.modules.dsv4.attn_type import (
     INDEXER_STATE,
     SWA_KV,
 )
+from rtp_llm.models_py.modules.dsv4.fp8.decode.paged_topk_translator import (
+    translate_local_to_global_slots,
+)
+from rtp_llm.models_py.modules.dsv4.fp8.decode.pool_slot_mapping import (
+    compute_kv_pool_slot_mapping,
+)
 
 _THIS_DIR = Path(__file__).resolve().parent
 _DECODE_DIR = _THIS_DIR.parent / "decode"
@@ -82,6 +88,26 @@ def _ref_compressed_kv_slots(
     return torch.where(valid, slot, torch.full_like(slot, -1))
 
 
+def _ref_kv_slots(
+    block_table: torch.Tensor,
+    abs_pos: torch.Tensor,
+    req_idx: torch.Tensor,
+    *,
+    entries_per_block: int,
+) -> torch.Tensor:
+    pos = abs_pos.to(torch.long)
+    req = req_idx.to(torch.long)
+    bt = block_table.to(torch.long)
+    block_in_seq = pos // entries_per_block
+    in_block = pos % entries_per_block
+    in_capacity = block_in_seq < bt.shape[1]
+    safe_block = block_in_seq.clamp(min=0, max=bt.shape[1] - 1)
+    block_id = bt[req, safe_block]
+    slot = block_id * entries_per_block + in_block
+    valid = (pos >= 0) & in_capacity & (block_id > 0)
+    return torch.where(valid, slot, torch.full_like(slot, -1))
+
+
 def _ref_state_slots(
     block_table: torch.Tensor,
     positions: torch.Tensor,
@@ -139,6 +165,15 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
         self.assertEqual(meta.decode_seq_start_per_req[:2].tolist(), [10, 20])
         self.assertEqual(meta.decode_cu_seq_per_req[:3].tolist(), [0, 2, 4])
         self.assertEqual(meta.cache_seqlens_i32[:2].tolist(), [12, 22])
+        self.assertEqual(meta.compressed_lens[4][:2].tolist(), [3, 5])
+        self.assertEqual(
+            meta.compressed_lens_per_token[4][:2].tolist(),
+            [[2, 3], [5, 5]],
+        )
+        self.assertEqual(
+            meta.compressed_lens_per_token[128][:2].tolist(),
+            [[0, 0], [0, 0]],
+        )
 
     def test_draft_prefill_graph_uses_prefix_not_stale_sequence_lengths(self):
         meta = _alloc(q_len=2, max_seq_len=65600)
@@ -157,6 +192,26 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
         self.assertEqual(meta.position_ids[:4].tolist(), [65598, 65599, 8, 9])
         self.assertEqual(meta.cache_seqlens_i32[:2].tolist(), [65600, 10])
         self.assertNotEqual(meta.position_ids[:4].tolist(), [65597, 65598, 65597, 65598])
+
+    def test_multi_token_graph_clamps_whole_position_window(self):
+        meta = _alloc(q_len=4, max_bs=1, max_seq_len=18)
+        attn = SimpleNamespace(
+            is_prefill=True,
+            is_target_verify=False,
+            sequence_lengths=_i32([17]),
+            prefix_lengths=_i32([17]),
+        )
+
+        update_decode_metadata_in_place_fp8(meta, attn, forbid_realloc=True)
+
+        self.assertEqual(meta.start_pos[:1].tolist(), [14])
+        self.assertEqual(meta.position_ids[:4].tolist(), [14, 15, 16, 17])
+        self.assertEqual(meta.cache_seqlens_i32[:1].tolist(), [18])
+
+        ratio4_slots = meta.slot_mapping_compressed[4][:4]
+        self.assertEqual(ratio4_slots.tolist(), [-1, 3, -1, -1])
+        valid = ratio4_slots[ratio4_slots >= 0]
+        self.assertTrue(torch.all(valid < meta.compressed_buffer_t_dim_per_ratio[4]))
 
     def test_paged_compressor_slots_match_compressor_formula_for_bs(self):
         if not torch.cuda.is_available():
@@ -220,6 +275,15 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
         )
         req_idx = torch.tensor([0, 0, 0, 1, 1, 1], dtype=torch.long, device=device)
 
+        expected_swa = _ref_kv_slots(
+            paged_block_tables[SWA_KV],
+            positions,
+            req_idx,
+            entries_per_block=256,
+        )
+        actual_swa = meta.pool_write_slot_mappings[SWA_KV][:T]
+        self.assertEqual(actual_swa.tolist(), expected_swa.tolist())
+
         for attn_type, ratio, kv_eb in (
             (CSA_KV, 4, 64),
             (INDEXER_KV, 4, 64),
@@ -244,6 +308,54 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
             )
             actual = meta.compressor_state_slot_mappings[attn_type][:T]
             self.assertEqual(actual.tolist(), expected.tolist())
+
+        self.assertIsNotNone(meta.swa_global_slots)
+        self.assertIsNotNone(meta.hca_cmp_global_slots)
+        req_id = meta.req_id_per_token[:T]
+        expected_swa_global = translate_local_to_global_slots(
+            req_id,
+            paged_block_tables[SWA_KV],
+            meta.swa_abs_idx[:2].reshape(T, 128),
+            block_size=256,
+        )
+        self.assertEqual(
+            meta.swa_global_slots[:T].tolist(), expected_swa_global.tolist()
+        )
+
+        hca_dense = meta.topk_total_by_ratio[128][:2, :, 128:].reshape(T, -1)
+        expected_hca_global = translate_local_to_global_slots(
+            req_id,
+            paged_block_tables[HCA_KV],
+            hca_dense,
+            block_size=2,
+        )
+        self.assertEqual(
+            meta.hca_cmp_global_slots[:T].tolist(), expected_hca_global.tolist()
+        )
+
+    def test_paged_slot_mapping_normalizes_unallocated_blocks(self):
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA required for paged metadata translator")
+        device = torch.device("cuda")
+        block_table = _i32([[0, -1, 9]]).to(device)
+        abs_pos = torch.tensor([3, 260, 520], dtype=torch.int32, device=device)
+
+        mapped = compute_kv_pool_slot_mapping(
+            block_table,
+            abs_pos,
+            entries_per_block=256,
+        )
+        self.assertEqual(mapped.tolist(), [-1, -1, 9 * 256 + 8])
+
+        req_id = torch.zeros(1, dtype=torch.int32, device=device)
+        local = torch.tensor([[3, 260, 520, -1]], dtype=torch.int32, device=device)
+        translated = translate_local_to_global_slots(
+            req_id,
+            block_table,
+            local,
+            block_size=256,
+        )
+        self.assertEqual(translated.tolist(), [[-1, -1, 9 * 256 + 8, -1]])
 
 
 if __name__ == "__main__":

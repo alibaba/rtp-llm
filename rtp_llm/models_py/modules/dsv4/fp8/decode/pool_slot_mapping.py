@@ -92,4 +92,9 @@ def compute_kv_pool_slot_mapping(
     block_id = flat_bt[req_idx, block_in_seq]
     global_slot = block_id * entries_per_block + in_block
 
+    # C++ BlockPool reserves block 0 and uses -1 for NULL_BLOCK_IDX.
+    # Normalize every unallocated block-table entry to the single writer/
+    # attention sentinel, -1. Leaving values like ``-256 + in_block`` in
+    # slot tensors is unsafe because downstream kernels only understand -1.
+    skip = skip | (block_id <= 0)
     return torch.where(skip, torch.full_like(global_slot, -1), global_slot)
