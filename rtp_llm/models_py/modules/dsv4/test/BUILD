@@ -98,6 +98,15 @@ _PERF_TESTS = [
     for name in _PERF_TESTS
 ]
 
+py_test(
+    name = "test_mtp_hidden_buffer",
+    srcs = ["test_mtp_hidden_buffer.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+)
+
 py_library(
     name = "dsv4_test_utils",
     srcs = ["dsv4_test_utils.py"],
