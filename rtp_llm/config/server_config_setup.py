@@ -490,6 +490,14 @@ def _local_jit_cache_dir() -> Optional[str]:
     return os.path.join(workdir, "jit_cache")
 
 
+def _reset_local_jit_cache_dir(path: str) -> None:
+    if os.path.islink(path) or os.path.isfile(path):
+        os.remove(path)
+    elif os.path.isdir(path):
+        shutil.rmtree(path)
+    os.makedirs(path, exist_ok=True)
+
+
 def _copytree_into(
     src: str,
     dst: str,
@@ -658,6 +666,7 @@ def setup_jit_cache_envs(py_env_configs: PyEnvConfigs) -> None:
     _warn_legacy_jit_envs()
     jit_config = py_env_configs.jit_config
     remote_read_dir = (jit_config.remote_jit_read_dir or "").strip()
+    remote_write_dir = (jit_config.warm_up_jit_and_write_remote or "").strip()
     target_local_dir = _local_jit_cache_dir()
 
     if remote_read_dir:
@@ -719,6 +728,24 @@ def setup_jit_cache_envs(py_env_configs: PyEnvConfigs) -> None:
             seed_source,
             target_local_dir,
             time.time() - copy_begin,
+            list(JIT_CACHE_ENV_NAMES),
+            target_local_dir,
+        )
+        return
+
+    if remote_write_dir:
+        if not target_local_dir:
+            raise RuntimeError(
+                f"WARM_UP_JIT_AND_WRITE_REMOTE={remote_write_dir} requires HIPPO_APP_WORKDIR or HIPPO_PROC_WORKDIR"
+            )
+        _reset_local_jit_cache_dir(target_local_dir)
+        for env_name in JIT_CACHE_ENV_NAMES:
+            os.environ[env_name] = target_local_dir
+        logging.info(
+            "setup_jit_cache_envs: WARM_UP_JIT_AND_WRITE_REMOTE=%s uses clean local "
+            "JIT cache dir %s; set %s=%s",
+            remote_write_dir,
+            target_local_dir,
             list(JIT_CACHE_ENV_NAMES),
             target_local_dir,
         )
