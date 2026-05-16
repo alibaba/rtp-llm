@@ -20,6 +20,9 @@ from rtp_llm.ops import (
 from rtp_llm.utils.fuser import MountRwMode, fetch_remote_file_to_local
 
 JIT_CACHE_ENV_NAMES = ("DG_JIT_CACHE_DIR", "TRITON_CACHE_DIR", "TILELANG_CACHE_DIR")
+JIT_REMOTE_DONE_MARKER = "WRITE_DONE"
+JIT_REMOTE_STAGING_PREFIX = ".staging-"
+LEGACY_JIT_ENV_NAMES = ("REMOTE_JIT_DIR", "DG_JIT_REMOTE_CACHE_DIR")
 
 
 def auto_configure_deepep(
@@ -477,31 +480,52 @@ def setup_cuda_device_and_accl_env(local_rank: int) -> None:
 
 
 def _local_jit_cache_dir() -> Optional[str]:
-    """${HIPPO_APP_WORKDIR}/jit_cache when HIPPO_APP_WORKDIR is set, else None."""
-    workdir = os.environ.get("HIPPO_APP_WORKDIR")
+    workdir = os.environ.get("HIPPO_APP_WORKDIR") or os.environ.get(
+        "HIPPO_PROC_WORKDIR"
+    )
     if not workdir:
         return None
     return os.path.join(workdir, "jit_cache")
 
 
-def _copytree_into(src: str, dst: str) -> int:
-    """Recursive copy mirroring `cp -a src/. dst/`. Returns number of files copied.
+def _copytree_into(
+    src: str,
+    dst: str,
+    *,
+    raise_on_error: bool = False,
+    skip_remote_control_files: bool = False,
+) -> int:
+    """Recursive copy mirroring `cp -a src/. dst/`."""
+    src_abs = os.path.abspath(src)
+    dst_abs = os.path.abspath(dst)
+    if src_abs == dst_abs:
+        logging.info("_copytree_into: source and destination are same: %s", src_abs)
+        return 0
+    if os.path.commonpath([src_abs, dst_abs]) == src_abs:
+        raise RuntimeError(f"refuse to copy {src_abs} into its child {dst_abs}")
 
-    Existing files in `dst` are overwritten so that a stale local cache cannot mask
-    fresh entries provided by the read-only baseline.
-    """
     files_copied = 0
-    for root, _, files in os.walk(src):
-        rel = os.path.relpath(root, src)
-        target_root = dst if rel == "." else os.path.join(dst, rel)
+    for root, dirs, files in os.walk(src_abs):
+        if skip_remote_control_files:
+            dirs[:] = [
+                dirname
+                for dirname in dirs
+                if not dirname.startswith(JIT_REMOTE_STAGING_PREFIX)
+            ]
+        rel = os.path.relpath(root, src_abs)
+        target_root = dst_abs if rel == "." else os.path.join(dst_abs, rel)
         os.makedirs(target_root, exist_ok=True)
-        for fn in files:
-            src_path = os.path.join(root, fn)
-            dst_path = os.path.join(target_root, fn)
+        for filename in files:
+            if skip_remote_control_files and filename == JIT_REMOTE_DONE_MARKER:
+                continue
+            src_path = os.path.join(root, filename)
+            dst_path = os.path.join(target_root, filename)
             try:
                 shutil.copy2(src_path, dst_path)
                 files_copied += 1
             except Exception as e:
+                if raise_on_error:
+                    raise
                 logging.warning(
                     "_copytree_into: failed to copy %s -> %s: %s",
                     src_path,
@@ -511,74 +535,114 @@ def _copytree_into(src: str, dst: str) -> int:
     return files_copied
 
 
+def _dir_has_copyable_files(path: str) -> bool:
+    for _, dirs, files in os.walk(path):
+        dirs[:] = [
+            dirname
+            for dirname in dirs
+            if not dirname.startswith(JIT_REMOTE_STAGING_PREFIX)
+        ]
+        if any(filename != JIT_REMOTE_DONE_MARKER for filename in files):
+            return True
+    return False
+
+
+def _iter_jit_cache_dirs(*, require_files: bool = False):
+    seen = set()
+    missing_env_names = []
+    for env_name in JIT_CACHE_ENV_NAMES:
+        cache_dir = os.environ.get(env_name)
+        if not cache_dir:
+            missing_env_names.append(env_name)
+            continue
+        cache_dir = os.path.abspath(cache_dir)
+        if cache_dir in seen:
+            continue
+        seen.add(cache_dir)
+        if not os.path.isdir(cache_dir):
+            logging.warning(
+                "JIT cache env %s points to non-existing dir %s; skip",
+                env_name,
+                cache_dir,
+            )
+            continue
+        if require_files and not _dir_has_copyable_files(cache_dir):
+            logging.info(
+                "JIT cache env %s points to empty dir %s; skip remote publishing",
+                env_name,
+                cache_dir,
+            )
+            continue
+        yield env_name, cache_dir
+    if missing_env_names:
+        logging.info("JIT cache envs not set: %s", missing_env_names)
+
+
+def _warn_legacy_jit_envs() -> None:
+    for env_name in LEGACY_JIT_ENV_NAMES:
+        if os.environ.get(env_name):
+            logging.warning(
+                "legacy JIT env %s is ignored; use REMOTE_JIT_READ_DIR or "
+                "WARM_UP_JIT_AND_WRITE_REMOTE instead",
+                env_name,
+            )
+
+
 def setup_jit_cache_envs(py_env_configs: PyEnvConfigs) -> None:
-    """Set DG_JIT_CACHE_DIR / TRITON_CACHE_DIR / TILELANG_CACHE_DIR.
+    """Set local JIT cache envs before any subprocess can trigger JIT.
 
-    Resolution order, highest priority first:
-      1. REMOTE_JIT_DIR (jit_config.remote_jit_dir): RW-fuse the URI and override
-         all three envs to the resulting local mount.
-      2. REMOTE_JIT_READ_DIR (jit_config.remote_jit_read_dir): RO-fuse the URI,
-         recursively copy contents into ${HIPPO_APP_WORKDIR}/jit_cache, then point
-         all three envs at that local dir.
-      3. Default: when ${HIPPO_APP_WORKDIR} is set, fill any unset env with
-         ${HIPPO_APP_WORKDIR}/jit_cache. When HIPPO_APP_WORKDIR is unset (e.g.
-         local dev), leave envs alone.
-
-    Modes 1 and 2 are mutually exclusive; setting both logs a warning and uses 1.
+    JIT compilation writes locally first; the explicit warm-up writer copies the
+    finished artifacts to a remote RW mount after service startup succeeds.
     """
+    _warn_legacy_jit_envs()
     jit_config = py_env_configs.jit_config
-    remote_rw = (jit_config.remote_jit_dir or "").strip()
-    remote_ro = (jit_config.remote_jit_read_dir or "").strip()
+    remote_read_dir = (jit_config.remote_jit_read_dir or "").strip()
     target_local_dir = _local_jit_cache_dir()
 
-    # Mode 1: REMOTE_JIT_DIR (RW)
-    if remote_rw:
-        if remote_ro:
-            logging.warning(
-                "setup_jit_cache_envs: both REMOTE_JIT_DIR=%s and REMOTE_JIT_READ_DIR=%s "
-                "are set; REMOTE_JIT_DIR (rw) wins, REMOTE_JIT_READ_DIR ignored",
-                remote_rw,
-                remote_ro,
-            )
-        local_rw = fetch_remote_file_to_local(remote_rw, MountRwMode.RWMODE_RW)
-        if not local_rw:
-            raise RuntimeError(
-                f"REMOTE_JIT_DIR={remote_rw} fuse returned empty local path"
-            )
-        os.makedirs(local_rw, exist_ok=True)
-        for name in JIT_CACHE_ENV_NAMES:
-            os.environ[name] = local_rw
-        logging.info(
-            "setup_jit_cache_envs: REMOTE_JIT_DIR=%s -> %s; set %s=%s",
-            remote_rw,
-            local_rw,
-            list(JIT_CACHE_ENV_NAMES),
-            local_rw,
-        )
-        return
-
-    # Mode 2: REMOTE_JIT_READ_DIR (RO + copy)
-    if remote_ro:
+    if remote_read_dir:
         if not target_local_dir:
             raise RuntimeError(
-                f"REMOTE_JIT_READ_DIR={remote_ro} requires HIPPO_APP_WORKDIR to be set"
+                f"REMOTE_JIT_READ_DIR={remote_read_dir} requires HIPPO_APP_WORKDIR or HIPPO_PROC_WORKDIR"
             )
-        local_ro = fetch_remote_file_to_local(remote_ro, MountRwMode.RWMODE_RO)
-        if not local_ro:
+        local_read_dir = fetch_remote_file_to_local(
+            remote_read_dir, MountRwMode.RWMODE_RO
+        )
+        if not local_read_dir:
             raise RuntimeError(
-                f"REMOTE_JIT_READ_DIR={remote_ro} fuse returned empty local path"
+                f"REMOTE_JIT_READ_DIR={remote_read_dir} fuse returned empty local path"
+            )
+        if not os.path.isdir(local_read_dir):
+            raise RuntimeError(
+                f"REMOTE_JIT_READ_DIR={remote_read_dir} resolved to non-existing dir {local_read_dir}"
             )
         os.makedirs(target_local_dir, exist_ok=True)
+        done_marker = os.path.join(local_read_dir, JIT_REMOTE_DONE_MARKER)
+        if not os.path.exists(done_marker):
+            logging.warning(
+                "REMOTE_JIT_READ_DIR=%s (%s) has no %s marker; skip seeding and "
+                "use local JIT cache dir %s",
+                remote_read_dir,
+                local_read_dir,
+                JIT_REMOTE_DONE_MARKER,
+                target_local_dir,
+            )
+            for env_name in JIT_CACHE_ENV_NAMES:
+                os.environ[env_name] = target_local_dir
+            return
         copy_begin = time.time()
-        n_files = _copytree_into(local_ro, target_local_dir)
-        for name in JIT_CACHE_ENV_NAMES:
-            os.environ[name] = target_local_dir
+        n_files = _copytree_into(
+            local_read_dir,
+            target_local_dir,
+            skip_remote_control_files=True,
+        )
+        for env_name in JIT_CACHE_ENV_NAMES:
+            os.environ[env_name] = target_local_dir
         logging.info(
             "setup_jit_cache_envs: seeded %d files from REMOTE_JIT_READ_DIR=%s (%s) "
             "into %s in %.2fs; set %s=%s",
             n_files,
-            remote_ro,
-            local_ro,
+            remote_read_dir,
+            local_read_dir,
             target_local_dir,
             time.time() - copy_begin,
             list(JIT_CACHE_ENV_NAMES),
@@ -586,24 +650,127 @@ def setup_jit_cache_envs(py_env_configs: PyEnvConfigs) -> None:
         )
         return
 
-    # Mode 3: default — only set envs that are not already set, only when HIPPO_APP_WORKDIR exists
     if not target_local_dir:
         logging.info(
-            "setup_jit_cache_envs: HIPPO_APP_WORKDIR not set; leaving JIT envs as-is"
+            "setup_jit_cache_envs: HIPPO_APP_WORKDIR/HIPPO_PROC_WORKDIR not set; leaving JIT envs as-is"
         )
         return
+
     os.makedirs(target_local_dir, exist_ok=True)
-    for name in JIT_CACHE_ENV_NAMES:
-        existing = os.environ.get(name)
+    for env_name in JIT_CACHE_ENV_NAMES:
+        existing = os.environ.get(env_name)
         if existing:
             logging.info(
                 "setup_jit_cache_envs: %s already set to %s; not overriding",
-                name,
+                env_name,
                 existing,
             )
             continue
-        os.environ[name] = target_local_dir
-        logging.info("setup_jit_cache_envs: %s=%s (default)", name, target_local_dir)
+        os.environ[env_name] = target_local_dir
+        logging.info("setup_jit_cache_envs: %s=%s", env_name, target_local_dir)
+
+
+def maybe_write_jit_cache_to_remote(
+    py_env_configs: PyEnvConfigs, startup_warmup_succeeded: bool
+) -> None:
+    remote_write_dir = (
+        py_env_configs.jit_config.warm_up_jit_and_write_remote or ""
+    ).strip()
+    if not remote_write_dir:
+        return
+
+    if not startup_warmup_succeeded:
+        logging.warning(
+            "WARM_UP_JIT_AND_WRITE_REMOTE=%s is set but startup real warmup did not "
+            "run successfully; skip remote JIT cache publishing",
+            remote_write_dir,
+        )
+        return
+
+    source_dirs = list(_iter_jit_cache_dirs(require_files=True))
+    if not source_dirs:
+        logging.warning(
+            "WARM_UP_JIT_AND_WRITE_REMOTE=%s is set but no local JIT cache artifacts "
+            "exist; skip remote fuse and publishing",
+            remote_write_dir,
+        )
+        return
+
+    local_write_dir = fetch_remote_file_to_local(
+        remote_write_dir, MountRwMode.RWMODE_RW
+    )
+    if not local_write_dir:
+        raise RuntimeError(
+            f"WARM_UP_JIT_AND_WRITE_REMOTE={remote_write_dir} fuse returned empty local path"
+        )
+    os.makedirs(local_write_dir, exist_ok=True)
+
+    done_marker = os.path.join(local_write_dir, JIT_REMOTE_DONE_MARKER)
+    try:
+        os.remove(done_marker)
+    except FileNotFoundError:
+        pass
+
+    staging_dir = os.path.join(
+        local_write_dir, f"{JIT_REMOTE_STAGING_PREFIX}{os.getpid()}-{int(time.time() * 1000)}"
+    )
+    if os.path.exists(staging_dir):
+        shutil.rmtree(staging_dir)
+    os.makedirs(staging_dir, exist_ok=True)
+
+    copy_begin = time.time()
+    total_files = 0
+    source_dir_desc = []
+    try:
+        for env_name, cache_dir in source_dirs:
+            source_dir_desc.append(f"{env_name}={cache_dir}")
+            copied = _copytree_into(
+                cache_dir,
+                staging_dir,
+                raise_on_error=True,
+                skip_remote_control_files=True,
+            )
+            total_files += copied
+            logging.info(
+                "maybe_write_jit_cache_to_remote: staged %d files from %s (%s) to %s",
+                copied,
+                env_name,
+                cache_dir,
+                staging_dir,
+            )
+
+        if total_files == 0:
+            logging.warning(
+                "WARM_UP_JIT_AND_WRITE_REMOTE=%s found source dirs %s but no files; "
+                "skip publishing",
+                remote_write_dir,
+                source_dir_desc,
+            )
+            return
+
+        _copytree_into(
+            staging_dir,
+            local_write_dir,
+            raise_on_error=True,
+            skip_remote_control_files=True,
+        )
+        marker_tmp = os.path.join(
+            local_write_dir, f".{JIT_REMOTE_DONE_MARKER}.{os.getpid()}.tmp"
+        )
+        with open(marker_tmp, "w") as f:
+            f.write(f"pid={os.getpid()}\nfiles={total_files}\n")
+        os.replace(marker_tmp, done_marker)
+        logging.info(
+            "maybe_write_jit_cache_to_remote: published %d files from %s to "
+            "WARM_UP_JIT_AND_WRITE_REMOTE=%s (%s) in %.2fs",
+            total_files,
+            source_dir_desc,
+            remote_write_dir,
+            local_write_dir,
+            time.time() - copy_begin,
+        )
+    finally:
+        shutil.rmtree(staging_dir, ignore_errors=True)
 
 
 def setup_and_configure_server(py_env_configs: PyEnvConfigs):

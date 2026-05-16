@@ -18,7 +18,10 @@ sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.py_config_modules import PyEnvConfigs
-from rtp_llm.config.server_config_setup import setup_and_configure_server
+from rtp_llm.config.server_config_setup import (
+    maybe_write_jit_cache_to_remote,
+    setup_and_configure_server,
+)
 from rtp_llm.ops import RoleType
 from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.utils.concurrency_controller import init_controller
@@ -447,7 +450,8 @@ def start_server(py_env_configs: PyEnvConfigs):
             logging.error("Health checks failed")
             raise Exception("Health checks failed")
 
-        _maybe_run_startup_real_warmup(py_env_configs)
+        startup_warmup_succeeded = _maybe_run_startup_real_warmup(py_env_configs)
+        maybe_write_jit_cache_to_remote(py_env_configs, startup_warmup_succeeded)
         _mark_startup_warmup_health_gate_ready(startup_warmup_gate_file)
 
         logging.info(
@@ -695,17 +699,19 @@ async def _run_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs):
         time.time() - begin_all,
     )
 
-def _maybe_run_startup_real_warmup(py_env_configs: PyEnvConfigs):
+def _maybe_run_startup_real_warmup(py_env_configs: PyEnvConfigs) -> bool:
     if not _should_run_startup_real_warmup(py_env_configs):
-        return
+        return False
 
     try:
         _run_startup_real_warmup_async(_run_startup_real_warmup_grpc(py_env_configs))
+        return True
     except Exception:
         logging.error(
             "DSV4 startup real warmup failed, trace: %s",
             traceback.format_exc(),
         )
+        return False
 
 
 if __name__ == "__main__":
