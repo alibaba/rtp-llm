@@ -194,7 +194,7 @@ class TestConcatAndCacheMLA(unittest.TestCase):
         print("✓ Padding test passed")
 
     def test_concat_and_cache_mla_zero_rope_dim(self):
-        """Test concat_and_cache_mla with qk_rope_head_dim=64 nope_dim=448(model1 format)"""
+        """Test concat_and_cache_mla with qk_rope_head_dim=64 nope_dim=448"""
         self._run_concat_and_cache_mla(
             kv_lora_rank=448,
             qk_rope_head_dim=64,

@@ -20,7 +20,7 @@ Sub-modules:
   (:func:`.write_swa.decode_write_swa_fp8`).
 - ``attention_kernels`` — FlashMLA FP8 dispatch helpers
   (``attn_fp8_swa_paged`` / ``attn_fp8_dual_paged``).
-- ``fp8_kv_quant_decode_op`` — CUDA ``concat_and_cache_mla("fp8_model1_mla", ...)``
+- ``fp8_kv_quant_decode_op`` — prefill-aligned Triton FP8 KV quantize+insert
   dispatcher + reference implementations.
 - ``fp8_sparse_attn_decode_op`` — ``SparseAttnV4DecodeFp8Op`` wrapper
   around ``flash_mla_with_kvcache`` (sparse FP8 MLA).

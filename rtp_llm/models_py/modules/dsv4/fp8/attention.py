@@ -1312,8 +1312,17 @@ class AttentionFP8(nn.Module):
         src_pos_safe = src_pos.clamp(min=0, max=max(max_seqlen - 1, 0))
         gather_idx = src_pos_safe.unsqueeze(-1).expand(-1, -1, self.head_dim)
         source = torch.gather(kv_full[:bsz], 1, gather_idx)  # [B, max_n_write, D]
-        source_flat = source.reshape(bsz * max_n_write, self.head_dim)
+        assert (
+            source.dtype == torch.bfloat16
+        ), f"SWA prefill source expected bf16, got {source.dtype}"
+        assert (
+            source.stride(-1) == 1 and source.stride(-2) == self.head_dim
+        ), f"SWA prefill source must be row-major, got stride={source.stride()}"
+        source_flat = source.view(bsz * max_n_write, self.head_dim)
         slot_mapping = slot.reshape(-1)
+        assert (
+            slot_mapping.dtype == torch.long
+        ), f"SWA prefill slot_mapping expected torch.long, got {slot_mapping.dtype}"
         # FP8 SWA pool: 584B per slot (fp8 NoPE 448 + bf16 RoPE 128 +
         # ue8m0 scale 8). 3D view honoring TMA per-block padding.
         from rtp_llm.models_py.modules.dsv4.fp8._swa_kv_insert_triton import (
@@ -1324,9 +1333,7 @@ class AttentionFP8(nn.Module):
         assert (
             pool_3d is not None
         ), "FP8 SWA pool view unavailable in _prefill_write_swa_to_pool"
-        quantize_and_insert_k_cache(
-            source_flat.to(torch.bfloat16), pool_3d, slot_mapping
-        )
+        quantize_and_insert_k_cache(source_flat, pool_3d, slot_mapping)
 
     def _prefill_read_swa_from_pool(
         self,
@@ -1911,9 +1918,8 @@ class AttentionFP8(nn.Module):
         """Write newly computed SWA KV into the FP8 584B/slot pool.
 
         Mirrors :meth:`_prefill_write_swa_fp8_paged` for decode — uses
-        the framework-populated ``pool_write_slot_mappings[SWA_KV]``
-        plus the CUDA ``concat_and_cache_mla("fp8_model1_mla", ...)``
-        kernel dispatched by ``quantize_v4_kv_decode``.
+        the framework-populated ``pool_write_slot_mappings[SWA_KV]`` plus
+        the same Triton quantize+insert writer as prefill.
         """
         from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
         from rtp_llm.models_py.modules.dsv4.fp8.decode.write_swa import (
@@ -4202,9 +4208,16 @@ class AttentionFP8(nn.Module):
         if packed_3d is None:
             return
 
-        k_bf16 = kv_full.reshape(-1, self.head_dim)
-        if k_bf16.dtype != torch.bfloat16:
-            k_bf16 = k_bf16.to(torch.bfloat16)
+        assert (
+            kv_full.dtype == torch.bfloat16
+        ), f"SWA prefill kv_full expected bf16, got {kv_full.dtype}"
+        assert (
+            kv_full.stride(-1) == 1 and kv_full.stride(-2) == self.head_dim
+        ), f"SWA prefill kv_full must be row-major, got stride={kv_full.stride()}"
+        k_bf16 = kv_full.view(-1, self.head_dim)
+        assert (
+            meta.slot_mapping.dtype == torch.long
+        ), f"SWA prefill slot_mapping expected torch.long, got {meta.slot_mapping.dtype}"
         if self.layer_id == 0 and os.environ.get("DSV4_SWA_WRITE_DBG") == "1":
             try:
                 sm = meta.slot_mapping

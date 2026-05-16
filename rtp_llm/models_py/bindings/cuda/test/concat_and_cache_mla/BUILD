@@ -18,11 +18,3 @@ py_test(
     tags = ["H20"],
     exec_properties = {'gpu': 'H20'},
 )
-
-py_test(
-    name = "test_model1_fp8",
-    srcs = ["test_model1_fp8.py", "util.py"],
-    deps = py_test_deps,
-    tags = ["H20"],
-    exec_properties = {'gpu': 'H20'},
-)

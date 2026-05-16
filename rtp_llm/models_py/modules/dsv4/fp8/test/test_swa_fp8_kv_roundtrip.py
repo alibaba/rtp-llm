@@ -36,12 +36,33 @@ from rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton import (
 from rtp_llm.models_py.modules.dsv4.fp8._swa_kv_insert_triton import (
     quantize_and_insert_k_cache,
 )
+from rtp_llm.models_py.modules.dsv4.fp8.decode.fp8_kv_quant_decode_op import (
+    _ue8m0_scale_byte,
+    quantize_v4_kv_decode,
+)
 
 HEAD_DIM = 512
 NOPE_DIM = 448
 HEAD_BYTES = 584  # 448 fp8 + 128 bf16 + 8 uint8 scale
 FP8_MAX = 448.0
 QUANT_BLOCK = 64
+
+
+class DecodeScaleReferenceTest(unittest.TestCase):
+
+    def test_decode_reference_uses_prefill_scale_floor(self):
+        """Decode's CPU oracle must match the prefill/vLLM 1e-4 absmax floor."""
+        expected = 127 + math.ceil(math.log2(1e-4 / FP8_MAX))
+        for amax in [0.0, 1e-9, 1e-7, 1e-5, 1e-4]:
+            with self.subTest(amax=amax):
+                self.assertEqual(_ue8m0_scale_byte(amax), expected)
+
+    def test_decode_reference_above_floor(self):
+        """Values above 1e-4 follow ceil(log2(amax / 448))."""
+        for amax in [1e-3, 0.1, 1.0, 100.0]:
+            expected = 127 + math.ceil(math.log2(amax / FP8_MAX))
+            with self.subTest(amax=amax):
+                self.assertEqual(_ue8m0_scale_byte(amax), expected)
 
 
 def _ue8m0_reference_max_scale(token_nope_bf16: torch.Tensor) -> float:
@@ -306,6 +327,40 @@ class SwaFp8KvRoundtripTest(unittest.TestCase):
         recovered = out[0, :num_tokens]
         self._assert_nope_within_ue8m0_bound(compressed_kv, recovered)
         self._assert_rope_exact(compressed_kv, recovered)
+
+    def test_decode_write_matches_prefill_insert_bytes(self):
+        """Decode wrapper and prefill insert must produce byte-identical cache.
+
+        This locks the intended behavior change: decode now uses the same
+        1e-4 UE8M0 scale floor as prefill, including tiny and all-zero tiles.
+        """
+        block_size = 16
+        num_tokens = 6
+        compressed_kv = torch.randn(
+            num_tokens, HEAD_DIM, dtype=torch.bfloat16, device=self.device
+        )
+        compressed_kv[0].zero_()
+        compressed_kv[1, :NOPE_DIM] = 1e-7
+        compressed_kv[2, :NOPE_DIM] = 1e-5
+        compressed_kv[3, :NOPE_DIM] = 1e-4
+        compressed_kv[4, :NOPE_DIM] = 1e-3
+
+        slot_mapping = torch.tensor(
+            [0, 3, -1, 18, 5, 31], dtype=torch.int64, device=self.device
+        )
+        num_blocks = 2
+        decode_cache = self._alloc_cache(num_blocks, block_size)
+        prefill_cache = self._alloc_cache(num_blocks, block_size)
+        decode_cache.fill_(0xCD)
+        prefill_cache.fill_(0xCD)
+
+        quantize_v4_kv_decode(compressed_kv, slot_mapping, decode_cache)
+        quantize_and_insert_k_cache(compressed_kv, prefill_cache, slot_mapping)
+
+        self.assertTrue(
+            torch.equal(decode_cache, prefill_cache),
+            msg="decode FP8 KV write must be byte-identical to prefill insert",
+        )
 
 
 if __name__ == "__main__":

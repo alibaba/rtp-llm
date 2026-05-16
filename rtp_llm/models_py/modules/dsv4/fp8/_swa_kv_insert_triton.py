@@ -150,13 +150,20 @@ def quantize_and_insert_k_cache(
     ), f"K must be [num_tokens, 512], got {tuple(k.shape)}"
     assert k.dtype == torch.bfloat16, f"K must be bf16, got {k.dtype}"
     assert (
+        k.stride(-1) == 1 and k.stride(0) == _INPUT_DIM
+    ), f"K must be row-major [num_tokens, 512], got stride={k.stride()}"
+    assert (
         k_cache.dim() == 3 and k_cache.shape[-1] == 584 and k_cache.dtype == torch.uint8
     ), (
         f"k_cache must be [num_blocks, block_size, 584] uint8, got "
         f"{tuple(k_cache.shape)} / {k_cache.dtype}"
     )
-    if slot_mapping.dtype != torch.long:
-        slot_mapping = slot_mapping.to(torch.long)
+    assert (
+        slot_mapping.dtype == torch.long
+    ), f"slot_mapping must be torch.long, got {slot_mapping.dtype}"
+    assert (
+        slot_mapping.dim() == 1 and slot_mapping.shape[0] == k.shape[0]
+    ), f"slot_mapping must be [num_tokens], got {tuple(slot_mapping.shape)} for K {tuple(k.shape)}"
 
     num_tokens = int(slot_mapping.shape[0])
     if num_tokens == 0:

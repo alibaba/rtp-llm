@@ -2,8 +2,7 @@
 
 V4 K is a 512-dim BF16 tensor with the LAST 64 dims being the
 RoPE-rotated portion (NoPE = first 448 dims). This maps exactly to the
-``fp8_model1_mla`` layout already implemented in
-``rtp_llm/models_py/bindings/cuda/kernels/mla_quant_kernel.cu``:
+``fp8_model1_mla`` / ``fp8_ds_mla`` layout used by the prefill SWA writer:
 
     [NoPE FP8 e4m3fn] : 448 bytes (7 tiles × 64 elements; 1 ue8m0 scale per tile)
     [RoPE BF16      ] : 128 bytes (64 elements)
@@ -13,9 +12,8 @@ RoPE-rotated portion (NoPE = first 448 dims). This maps exactly to the
 This module provides:
 
   * :func:`quantize_v4_kv_decode` — fast path. Splits V4 K into
-    ``(kv_c, k_pe)`` and dispatches the existing CUDA kernel
-    ``compute_ops.concat_and_cache_mla(..., "fp8_model1_mla", scale)``.
-    Used by ``Attention.forward_decode_fp8`` (Stage 4D).
+    ``(NoPE, RoPE)`` internally in the same one-launch Triton writer used by
+    prefill, so decode and prefill share the same UE8M0 scale rule.
 
   * :func:`reference_quantize_v4_kv_decode` — pure-PyTorch oracle that
     implements the SAME byte-level layout on CPU. Used by unit tests on
@@ -120,7 +118,7 @@ def quantize_v4_kv_decode(
     slot_mapping: torch.Tensor,
     kv_cache_packed: torch.Tensor,
 ) -> None:
-    """Fast path — dispatch the CUDA ``concat_and_cache_mla`` kernel.
+    """Fast path — dispatch the prefill-aligned Triton quantize+insert kernel.
 
     Args:
         k_bf16: ``[T, head_dim=512]`` bf16 — K tokens to write.
@@ -137,28 +135,24 @@ def quantize_v4_kv_decode(
         and kv_cache_packed.shape[-1] == ENTRY_BYTES
     ), f"kv_cache_packed expected [..., 584] uint8, got {kv_cache_packed.shape}/{kv_cache_packed.dtype}"
 
-    # Split V4 K into (kv_c[NoPE], k_pe[RoPE])
-    kv_c = k_bf16[:, :NOPE_DIM].contiguous()
-    k_pe = k_bf16[:, NOPE_DIM:].contiguous()
+    assert (
+        k_bf16.dtype == torch.bfloat16
+    ), f"k_bf16 expected bf16, got {k_bf16.dtype}"
+    assert (
+        k_bf16.stride(-1) == 1 and k_bf16.stride(0) == NOPE_DIM + ROPE_DIM
+    ), f"k_bf16 must be row-major [T, 512], got stride={k_bf16.stride()}"
+    assert (
+        slot_mapping.dtype == torch.long
+    ), f"slot_mapping expected torch.long, got {slot_mapping.dtype}"
 
-    # Slot mapping must be int64 per the kernel signature.
-    if slot_mapping.dtype != torch.long:
-        slot_mapping = slot_mapping.long()
+    from rtp_llm.models_py.modules.dsv4.fp8._swa_kv_insert_triton import (
+        quantize_and_insert_k_cache,
+    )
 
-    from rtp_llm.ops.compute_ops import rtp_llm_ops
-
-    # The kernel takes a scale tensor (used as a static-scaling fallback
-    # for fp8_e4m3 path; for fp8_model1_mla the kernel computes per-tile
-    # scales internally and ignores the input scale, but the API still
-    # requires the tensor to be present and float32).
-    dummy_scale = torch.ones(1, dtype=torch.float32, device=k_bf16.device)
-    rtp_llm_ops.concat_and_cache_mla(
-        kv_c,
-        k_pe,
+    quantize_and_insert_k_cache(
+        k_bf16,
         kv_cache_packed,
         slot_mapping,
-        "fp8_model1_mla",
-        dummy_scale,
     )
 
 
@@ -170,12 +164,11 @@ def quantize_v4_kv_decode(
 def _ue8m0_scale_byte(tile_max_abs: float) -> int:
     """Compute the ue8m0 scale byte for a NoPE tile.
 
-    Mirrors the CUDA kernel exactly:
-        tile_scale = exp2(ceil(log2(max_abs / 448)))    (clamped to FLT_MIN)
+    Mirrors the prefill/vLLM/SGLang default scale rule:
+        tile_scale = exp2(ceil(log2(max(max_abs, 1e-4) / 448)))
         scale_byte = clamp(log2(tile_scale) + 127, 0, 255)
     """
-    eps = torch.finfo(torch.float32).tiny
-    tile_scale = max(tile_max_abs / FP8_E4M3_MAX, eps)
+    tile_scale = max(float(tile_max_abs), 1e-4) / FP8_E4M3_MAX
     tile_scale = math.pow(2.0, math.ceil(math.log2(tile_scale)))
     scale_byte = int(min(max(math.log2(tile_scale) + 127.0, 0.0), 255.0))
     return scale_byte

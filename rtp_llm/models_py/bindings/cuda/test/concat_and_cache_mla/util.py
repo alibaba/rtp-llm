@@ -12,7 +12,7 @@ def create_mla_cache(
     """Create MLA cache tensor"""
     cache_dtype = (
         torch.uint8
-        if kv_cache_dtype in ["fp8_e4m3", "fp8_ds_mla", "fp8_model1_mla"]
+        if kv_cache_dtype in ["fp8_e4m3", "fp8_ds_mla"]
         else dtype
     )
     return torch.zeros(
