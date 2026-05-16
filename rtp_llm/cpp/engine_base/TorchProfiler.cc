@@ -184,6 +184,85 @@ void StepWindowProfiler::tick() {
     }
 }
 
+void StepWindowProfiler::startStep() {
+    // Fast path: no profiling active and no profiler to clean up — zero cost.
+    if (!enabled_.load(std::memory_order_relaxed) && !has_profiler_.load(std::memory_order_relaxed)) {
+        return;
+    }
+
+    if (!enabled_.load(std::memory_order_relaxed)) {
+        stopProfiler("disabled");
+        return;
+    }
+
+    // Handle reconfigure on the engine loop thread, preserving Kineto thread
+    // affinity for stop/start.
+    if (reconfigure_.exchange(false)) {
+        std::lock_guard<std::mutex> lock(mu_);
+        if (profiler_) {
+            auto [res, file_name] = profiler_->stopAndCollect();
+            if (res) {
+                save_worker_.enqueue(std::move(res), std::move(file_name));
+            }
+            profiler_.reset();
+            has_profiler_.store(false, std::memory_order_relaxed);
+            RTP_LLM_LOG_INFO("timeline profiler stopped for reconfigure");
+        }
+        waited_steps_   = 0;
+        profiled_steps_ = 0;
+    }
+
+    std::lock_guard<std::mutex> lock(mu_);
+    if (profiler_) {
+        return;
+    }
+    if (waited_steps_ < start_step_.load()) {
+        waited_steps_++;
+        return;
+    }
+
+    std::string prefix = trace_name_;
+    if (prefix.empty()) {
+        prefix = "profiler_ts" + std::to_string(autil::TimeUtility::currentTimeInMicroSeconds());
+    }
+    if (prefix.back() != '_') {
+        prefix += "_";
+    }
+    prefix += "wr" + std::to_string(world_rank_) + "_";
+    profiler_ = std::make_shared<TorchProfile>(prefix, default_output_dir_);
+    has_profiler_.store(true, std::memory_order_relaxed);
+    profiler_->start();
+    profiled_steps_ = 0;
+    RTP_LLM_LOG_INFO("timeline profiler started: prefix=%s start_step=%d num_steps=%d",
+                     prefix.c_str(),
+                     start_step_.load(),
+                     num_steps_.load());
+}
+
+void StepWindowProfiler::finishStep() {
+    if (!has_profiler_.load(std::memory_order_relaxed)) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!profiler_) {
+        return;
+    }
+
+    profiled_steps_++;
+    const int target = num_steps_.load();
+    if (target > 0 && profiled_steps_ >= target) {
+        enabled_.store(false);
+        auto [res, file_name] = profiler_->stopAndCollect();
+        if (res) {
+            save_worker_.enqueue(std::move(res), std::move(file_name));
+        }
+        profiler_.reset();
+        has_profiler_.store(false, std::memory_order_relaxed);
+        RTP_LLM_LOG_INFO("timeline profiler stopped: reached %ld/%d steps", profiled_steps_, target);
+    }
+}
+
 StepWindowProfiler::~StepWindowProfiler() {
     stopProfiler("destructor");
 }

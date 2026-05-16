@@ -28,7 +28,9 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                int                                    propose_model_index,
                                MlaOpsType                             mla_ops_type,
                                int32_t                                kv_cache_group_num,
-                               const std::vector<int32_t>&            kv_cache_layer_to_group):
+                               const std::vector<int32_t>&            kv_cache_layer_to_group,
+                               std::function<void()>                  profile_step_start,
+                               std::function<void()>                  profile_step_finish):
     Executor(),
     cache_manager_(cache_manager),
     warm_up_(warm_up),
@@ -37,7 +39,9 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     tps_reporter_(MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(
         params.parallelism_config.tp_rank == 0 && !warm_up ? metrics_reporter_ : nullptr)),
     is_propose_(is_propose),
-    propose_model_index_(propose_model_index) {
+    propose_model_index_(propose_model_index),
+    profile_step_start_(std::move(profile_step_start)),
+    profile_step_finish_(std::move(profile_step_finish)) {
     enable_detail_log_  = params.profiling_debug_logging_config.enable_detail_log;
     tp_rank_            = params.parallelism_config.tp_rank;
     parallelism_config_ = params.parallelism_config;
@@ -151,6 +155,10 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         executor_collector.tp_sync_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
+    if (profile_step_start_) {
+        profile_step_start_();
+    }
+
     // make sure last model input is released before forward
     model_->releaseBuffers();
 
@@ -186,6 +194,9 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     if (tp_rank_ > 0 || warm_up_ || streams.size() == 0) {
         cudaSyncAndCheck();
         model_->releaseBuffers();
+        if (profile_step_finish_) {
+            profile_step_finish_();
+        }
         return absl::OkStatus();
     }
     {
@@ -211,6 +222,9 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
 
         model_->releaseBuffers();
 
+        if (profile_step_finish_) {
+            profile_step_finish_();
+        }
         return result;
     }
 }

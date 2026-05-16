@@ -27,7 +27,9 @@ public:
                             int                                    propose_model_index     = 0,
                             MlaOpsType                             mla_ops_type            = MlaOpsType::AUTO,
                             int32_t                                kv_cache_group_num      = 1,
-                            const std::vector<int32_t>&            kv_cache_layer_to_group = {});
+                            const std::vector<int32_t>&            kv_cache_layer_to_group = {},
+                            std::function<void()>                  profile_step_start      = nullptr,
+                            std::function<void()>                  profile_step_finish     = nullptr);
     ~NormalExecutor();
     absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) override;
     void         reportMetrics(const StreamGroups&             stream_groups,
@@ -62,10 +64,12 @@ private:
     bool                                                                     enable_ffn_disaggregate_ = false;
     bool                                                                     enable_detail_log_       = false;
 
-    bool              is_propose_          = false;
-    int               propose_model_index_ = 0;
-    int               tp_rank_             = 0;
-    ParallelismConfig parallelism_config_;
+    bool                  is_propose_          = false;
+    int                   propose_model_index_ = 0;
+    int                   tp_rank_             = 0;
+    ParallelismConfig     parallelism_config_;
+    std::function<void()> profile_step_start_;
+    std::function<void()> profile_step_finish_;
 };
 
 }  // namespace rtp_llm
