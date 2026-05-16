@@ -47,12 +47,14 @@ _CUBLAS_GEMM_BF16_BF16_FP32 = getattr(rtp_llm_ops, "cublas_gemm_bf16_bf16_fp32",
 
 
 def _compressor_meta_fused_enabled() -> bool:
-    """Env-gated fused compressor prepare_metadata (iter8).
+    """Env-gated fused compressor prepare_metadata.
 
-    Shares the same ``DSV4_FUSED_PREPARE=1`` switch as phase1 / phase2b,
-    so one env enables the full iter5-iter8 fused-prepare family.
+    Default-on: decode now feeds metadata from buildmeta, and the remaining
+    prepare_metadata callers should use the fused integer slot builder unless
+    explicitly disabled for debugging with ``DSV4_FUSED_PREPARE=0``.
     """
-    return os.environ.get("DSV4_FUSED_PREPARE", "0").strip() == "1"
+
+    return os.environ.get("DSV4_FUSED_PREPARE", "1").strip() == "1"
 
 
 def _linear_bf16_bf16_fp32(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
@@ -342,23 +344,20 @@ class CompressorFP8(nn.Module):
                 cu_seq_per_req=cu_seq_per_req,
             )
 
-        # ----- Fused Triton fast path (DSV4_FUSED_PREPARE=1) -----
-        # Collapses state_slot_mapping + kv_slot_mapping + b_idx.to(int32)
-        # (~25 aten ops) into a single kernel.  The three helpers are
-        # captured into the outer decode cuda graph today (attention /
-        # indexer call ``forward_decode_vectorized`` without pre-built
-        # meta), so the saving shows up as a smaller graph = faster
-        # cudaGraphLaunch at replay.
-        if _compressor_meta_fused_enabled() and self._state_block_table is not None:
-            from rtp_llm.models_py.modules.dsv4.fp8._fused_compressor_meta_triton import (
-                fused_compressor_slot_mapping,
-            )
+        if _compressor_meta_fused_enabled():
+            from rtp_llm.models_py.modules.dsv4.fp8 import _fused_compressor_meta_triton
 
-            pool_rows = 0
-            if self._kv_pool_3d is not None:
-                pool_rows = int(self._kv_pool_3d.numel() // self._kv_pool_3d.shape[-1])
-            with record_function_range("dsv4.fp8.compressor.meta.fused"):
-                state_slots, kv_slots, token_to_req = fused_compressor_slot_mapping(
+            if _fused_compressor_meta_triton._TRITON_AVAILABLE:
+                pool_rows = 0
+                if self._kv_pool_3d is not None:
+                    pool_rows = int(
+                        self._kv_pool_3d.numel() // self._kv_pool_3d.shape[-1]
+                    )
+                (
+                    state_slots,
+                    kv_slots,
+                    token_to_req,
+                ) = _fused_compressor_meta_triton.fused_compressor_slot_mapping(
                     positions,
                     b_idx,
                     self._state_block_table,
@@ -368,16 +367,16 @@ class CompressorFP8(nn.Module):
                     self.compress_ratio,
                     pool_rows=pool_rows,
                 )
-            return CompressorMeta(
-                positions=positions,
-                b_idx=b_idx,
-                state_slots=state_slots,
-                kv_slots=kv_slots,
-                token_to_req=token_to_req,
-                is_batched=is_batched,
-                seq_start_per_req=seq_start_per_req,
-                cu_seq_per_req=cu_seq_per_req,
-            )
+                return CompressorMeta(
+                    positions=positions,
+                    b_idx=b_idx,
+                    state_slots=state_slots,
+                    kv_slots=kv_slots,
+                    token_to_req=token_to_req,
+                    is_batched=is_batched,
+                    seq_start_per_req=seq_start_per_req,
+                    cu_seq_per_req=cu_seq_per_req,
+                )
 
         with record_function_range("dsv4.fp8.compressor.meta.state_slots"):
             state_slots = self._compute_state_slot_mapping(positions, b_idx)
@@ -546,7 +545,7 @@ class CompressorFP8(nn.Module):
                 meta.token_to_req,
                 meta.positions,
                 meta.state_slots,
-                self._state_block_table.to(torch.int32),
+                self._state_block_table,
                 self.norm.weight,
                 self.norm_eps,
                 cos_sin_cache,

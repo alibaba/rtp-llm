@@ -420,6 +420,7 @@ class IndexerFP8(PoolBackedModule):
         start_pos: torch.Tensor,
         out_topk_buffer: torch.Tensor,
         position_ids: Optional[torch.Tensor] = None,
+        compressor_meta: Optional[CompressorMeta] = None,
     ) -> torch.Tensor:
         bsz, q_len = int(x.size(0)), int(x.size(1))
         if position_ids is None:
@@ -431,52 +432,44 @@ class IndexerFP8(PoolBackedModule):
         try:
             # Nested compressor writes its compressed token to the 132B pool.
             self.compressor.forward_decode_vectorized(
-                x, start_pos, position_ids=position_ids
+                x,
+                start_pos,
+                meta=compressor_meta,
+                position_ids=position_ids,
             )
 
             if position_ids is None:
                 freqs = self.freqs_cis[start_pos.long()]
                 q = self._compute_indexer_q(qr, freqs, batched_rope=True)
-                compressed_len = ((start_pos + 1) // ratio).to(torch.int64).view(
-                    bsz, 1, 1
-                )
-                pos_for_max = start_pos
+                compressed_len = ((start_pos + 1) // ratio).view(bsz, 1, 1)
             else:
-                pos_flat = position_ids.to(
-                    device=self.freqs_cis.device, dtype=torch.long
-                ).reshape(-1)
+                if compressor_meta is None:
+                    pos_flat = position_ids.to(
+                        device=self.freqs_cis.device, dtype=torch.long
+                    ).reshape(-1)
+                else:
+                    pos_flat = compressor_meta.positions.reshape(-1)
                 freqs = self.freqs_cis.index_select(0, pos_flat).contiguous()
                 q = self._compute_indexer_q(qr, freqs, batched_rope=False)
-                pos_2d = pos_flat.to(device=x.device, dtype=torch.int64).view(
-                    bsz, q_len
-                )
+                pos_2d = position_ids.reshape(bsz, q_len)
                 compressed_len = ((pos_2d + 1) // ratio).view(bsz, q_len, 1)
-                pos_for_max = pos_2d.reshape(-1)
             # ``softmax_scale * n_heads^-0.5`` is pre-folded into weights_proj at __init__.
             weights = F.linear(x, self.weights_proj)
 
-            # Always use DeepGEMM (FP8 path).  Eager decode trims the
-            # scored context length from the live max position. During CUDA
-            # graph capture that D2H scalar read is illegal, so capture with
-            # a static upper bound; replay updates block tables and lengths
-            # in-place before the captured kernels run.
+            # Always use DeepGEMM (FP8 path). Decode uses a static score
+            # width from the cache/block-table upper bound; replay updates
+            # block tables and per-row lengths in-place before captured
+            # kernels run. Do not derive this from live positions via a GPU
+            # scalar read: that would synchronize the device and is
+            # illegal during CUDA graph capture.
             T_cache = self._kv_block_table.shape[1] * self._kv_eb
-            # Capture-aware: under cuda graph capture we can't D2H sync via
-            # ``.item()`` (operation-not-permitted on captured stream), so
-            # fall back to the static upper bound. Eager keeps the dynamic
-            # clamp to avoid overshoot.
-            if q.is_cuda and torch.cuda.is_current_stream_capturing():
-                T_static = self._kv_cache_t if self._kv_cache_t > 0 else T_cache
-                T_max = max(32, min(T_cache, T_static))
-            else:
-                sp_max = int(pos_for_max.max().item())
-                T_live = (((sp_max + 1) // ratio) + 31) & ~31
-                T_max = max(32, min(T_cache, T_live))
+            T_static = self._kv_cache_t if self._kv_cache_t > 0 else T_cache
+            T_max = max(32, min(T_cache, T_static))
 
             q_fp8, w_fold = indexer_q_fp8_quant_fold(
                 _as_bf16_contig(q), _as_bf16_contig(weights)
             )
-            ctx_lens_2d = compressed_len.view(bsz, q_len).to(torch.int32)
+            ctx_lens_2d = compressed_len.view(bsz, q_len)
             bt_i32 = self._kv_block_table[:bsz].to(torch.int32).contiguous()
             # ``_kv_pool_view`` is 3D ``[num_blocks, eb, 132]`` from production
             # (set by ``Attention._set_compressor_pool_context``); standalone
@@ -500,16 +493,18 @@ class IndexerFP8(PoolBackedModule):
 
             # TopK (with optional persistent radix-select)
             K_eff = min(K, T_max)
+            score_2d = score.view(bsz * q_len, T_max)
+            lengths_i32 = compressed_len.view(bsz * q_len)
+            out_topk_2d = out_topk_buffer.view(bsz * q_len, K)
             if (
-                q_len == 1
-                and K_eff > 0
+                K_eff > 0
                 and K in (512, 1024, 2048)
                 and _persistent_topk_enabled()
             ):
                 rtp_llm_ops.dsv4_persistent_topk(
-                    score.view(bsz, T_max),
-                    compressed_len.view(bsz).to(torch.int32),
-                    out_topk_buffer.view(bsz, K),
+                    score_2d,
+                    lengths_i32,
+                    out_topk_2d,
                     _get_topk_workspace(score.device),
                     K,
                     T_max,
@@ -517,12 +512,18 @@ class IndexerFP8(PoolBackedModule):
             else:
                 out_topk_buffer.fill_(-1)
                 if K_eff > 0:
-                    topk_idxs = score.topk(K_eff, dim=-1)[1].to(torch.int32)
-                    out_topk_buffer[:, :, :K_eff].copy_(topk_idxs)
-                    k_arange = torch.arange(K, device=out_topk_buffer.device).view(
-                        1, 1, K
+                    t_range = torch.arange(T_max, device=score.device).view(1, T_max)
+                    score_masked = torch.where(
+                        t_range < lengths_i32.view(-1, 1),
+                        score_2d,
+                        torch.full_like(score_2d, float("-inf")),
                     )
-                    out_topk_buffer.masked_fill_(k_arange >= compressed_len, -1)
+                    topk_idxs = score_masked.topk(K_eff, dim=-1)[1].to(torch.int32)
+                    out_topk_2d[:, :K_eff].copy_(topk_idxs)
+                    k_arange = torch.arange(K, device=out_topk_buffer.device).view(
+                        1, K
+                    )
+                    out_topk_2d.masked_fill_(k_arange >= lengths_i32.view(-1, 1), -1)
             return out_topk_buffer
         finally:
             self._clear_nested_pool()

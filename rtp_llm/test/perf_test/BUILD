@@ -386,7 +386,6 @@ py_test(
         "PERF_PROFILE_FLUSH_SLEEP": "120",
         "DSV4_USE_MEGA_MOE": "1",
         "ENABLE_FP32_LM_HEAD": "0",
-        "DSV4_FUSED_PREPARE": "1",
     },
     tags = ["manual"],
 )
@@ -438,7 +437,6 @@ py_test(
         "PERF_PROFILE_ARM_SLEEP": "2",
         "PERF_PROFILE_FLUSH_SLEEP": "120",
         "DSV4_USE_MEGA_MOE": "1",
-        "DSV4_FUSED_PREPARE": "1",
     },
     tags = ["manual"],
 )
