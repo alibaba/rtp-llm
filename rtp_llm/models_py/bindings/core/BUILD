@@ -226,6 +226,9 @@ cc_library(
             "@local_config_rocm//rocm:rocm_headers",
             "@local_config_rocm//rocm:rocm",
         ],
+        "@//:using_cuda": [
+            "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
+        ],
         "//conditions:default": [],
     }),
     copts = copts(),
@@ -271,6 +274,9 @@ cc_library(
             "//rtp_llm/models_py/bindings/rocm:rocm_host_utils",
             "@local_config_rocm//rocm:rocm_headers",
             "@local_config_rocm//rocm:rocm",
+        ],
+        "@//:using_cuda": [
+            "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
         ],
         "//conditions:default": [],
     }),
