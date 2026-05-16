@@ -75,6 +75,12 @@ py_test(
     deps = _DSV4_FP8_TEST_DEPS,
 )
 
+py_test(
+    name = "test_fp8_sparse_attn_decode_op",
+    srcs = ["test_fp8_sparse_attn_decode_op.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+)
+
 [
     dsv4_py_test(
         name = name,
