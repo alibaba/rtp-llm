@@ -295,29 +295,65 @@ class BackendRPCServerVisitor:
     async def enqueue(
         self, input: GenerateInput
     ) -> AsyncGenerator[GenerateOutputs, None]:
-        if input.prompt_length <= 0:
-            raise FtRuntimeException(
-                ExceptionType.LONG_PROMPT_ERROR,
-                f"model tokens can not be empty, request length is {input.prompt_length}",
+        def set_aux_info(e: BaseException) -> None:
+            if getattr(e, "aux_info", None):
+                return
+            aux_info = {
+                "input_len": input.prompt_length,
+                "output_len": 0,
+                "step_output_len": 0,
+                "reuse_len": 0,
+            }
+            role_addrs = input.generate_config.role_addrs or []
+            if role_addrs:
+                aux_info["role_addrs"] = [
+                    role_addr.model_dump(mode="json") for role_addr in role_addrs
+                ]
+                roles = {
+                    str(getattr(role_addr.role, "name", role_addr.role))
+                    for role_addr in role_addrs
+                }
+                aux_info["pd_sep"] = {"PREFILL", "DECODE"}.issubset(roles)
+            e.aux_info = aux_info
+
+        try:
+            input.generate_config.validate()
+            if input.prompt_length <= 0:
+                raise FtRuntimeException(
+                    ExceptionType.LONG_PROMPT_ERROR,
+                    f"model tokens can not be empty, request length is {input.prompt_length}",
+                )
+
+            self.check_sp_supported(input)
+
+            max_new_tokens = min(
+                self.max_seq_len - input.prompt_length,
+                input.generate_config.max_new_tokens,
             )
+            if max_new_tokens <= 0:
+                raise FtRuntimeException(
+                    ExceptionType.LONG_PROMPT_ERROR,
+                    f"model max tokens is {self.max_seq_len}, "
+                    f"request length is {input.prompt_length}, max_new_tokens is {max_new_tokens}",
+                )
 
-        self.check_sp_supported(input)
+            if self.host_service.service_available:
+                await self.route_ips(input)
 
-        max_new_tokens = min(
-            self.max_seq_len - input.prompt_length,
-            input.generate_config.max_new_tokens,
-        )
-        if max_new_tokens <= 0:
-            raise FtRuntimeException(
-                ExceptionType.LONG_PROMPT_ERROR,
-                f"model max tokens is {self.max_seq_len}, "
-                f"request length is {input.prompt_length}, max_new_tokens is {max_new_tokens}",
-            )
+            stream = self.model_rpc_client.enqueue(input)
+        except BaseException as e:
+            set_aux_info(e)
+            raise
 
-        if self.host_service.service_available:
-            await self.route_ips(input)
+        async def stream_with_aux_info():
+            try:
+                async for output in stream:
+                    yield output
+            except BaseException as e:
+                set_aux_info(e)
+                raise
 
-        return self.model_rpc_client.enqueue(input)
+        return stream_with_aux_info()
 
     def is_backend_service_ready(self, refresh: bool = False) -> bool:
         roles: List[RoleAddr] = self.host_service.get_backend_role_addrs(
