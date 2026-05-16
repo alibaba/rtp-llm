@@ -653,7 +653,7 @@ py_test(
         "DG_JIT_CPP_STANDARD": "20",
         "GEN_TIMELINE_SYNC": "1",
         "PERF_PREARM_PROFILE": "1",
-        "PERF_PROFILE_NUM_STEPS": "4",
+        "PERF_PROFILE_NUM_STEPS": "1",
         "PERF_PROFILE_ARM_SLEEP": "2",
         "PERF_PROFILE_FLUSH_SLEEP": "120",
         "DSV4_USE_MEGA_MOE": "1",
