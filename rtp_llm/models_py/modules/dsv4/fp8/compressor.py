@@ -647,6 +647,11 @@ class CompressorFP8(nn.Module):
             assert fused_gather_handle is not None
             with record_function_range("dsv4.fp8.compressor.prefill.cp_wait_kv_score"):
                 fused_flat = cp_wait_gather_full(fused_gather_handle)
+            # After all-gather, kv_flat covers the FULL sequence from global
+            # position 0.  Reset sp so the kernel's raw-path dispatch maps
+            # flat_idx = pos - 0 = pos for every token, avoiding a stale
+            # state-cache fallback for positions < local_start.
+            sp = 0
 
         with record_function_range("dsv4.fp8.compressor.prefill.split_kv_score"):
             assert fused_flat.dim() == 2, (
