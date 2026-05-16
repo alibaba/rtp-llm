@@ -637,8 +637,8 @@ def _fused_num_warps(head_dim: int, compress_ratio: int, cfg: dict) -> int:
 
 
 def run_save_partial_states(
-    kv: torch.Tensor,  # [N, coff*head_dim] fp32 contiguous
-    score: torch.Tensor,  # [N, coff*head_dim] fp32 contiguous
+    kv: torch.Tensor,  # [N, coff*head_dim] bf16/fp32, row-strided OK
+    score: torch.Tensor,  # [N, coff*head_dim] bf16/fp32, row-strided OK
     ape: torch.Tensor,  # [compress_ratio, coff*head_dim] fp32
     positions: torch.Tensor,  # [N] int64
     state_cache: torch.Tensor,  # [num_blocks, block_size, 2*coff*head_dim] fp32
@@ -689,8 +689,8 @@ def run_fused_compress_kv_write(
     # from them whenever ``flat_idx = pos - seq_start`` falls in
     # ``[0, kv_raw.shape[0])``; positions before ``seq_start`` are
     # prefix-cache hits and route to the state pool via block_table.
-    kv_raw: torch.Tensor,  # [n_raw, (1+overlap)*head_dim] fp32 contiguous
-    score_raw: torch.Tensor,  # [n_raw, (1+overlap)*head_dim] fp32 contiguous
+    kv_raw: torch.Tensor,  # [n_raw, (1+overlap)*head_dim], row-strided OK
+    score_raw: torch.Tensor,  # [n_raw, (1+overlap)*head_dim], row-strided OK
     ape: torch.Tensor,  # [compress_ratio, (1+overlap)*head_dim] fp32
     seq_start: int,  # absolute position of kv_raw[0] (prefill: == sp_int)
     disable_raw_path: bool = False,  # decode path: skip raw, read cache only

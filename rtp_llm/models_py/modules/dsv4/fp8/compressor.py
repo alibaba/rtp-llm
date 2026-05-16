@@ -714,8 +714,11 @@ class CompressorFP8(nn.Module):
         fused_out = _linear_bf16_bf16_fp32(x, self._wkv_wgate_fused)
         kv, score = fused_out[..., :out_dim], fused_out[..., out_dim:]
 
-        kv_flat = kv.reshape(T, -1).contiguous()
-        score_flat = score.reshape(T, -1).contiguous()
+        # ``kv`` and ``score`` are last-dim slices of ``fused_out``. Keep
+        # them as strided row views instead of materialising two BF16 copy
+        # kernels; the Triton writer consumes row stride explicitly.
+        kv_flat = kv.view(T, -1)
+        score_flat = score.view(T, -1)
         if meta is None:
             if position_ids is None:
                 positions = start_pos.to(device=device, dtype=torch.long).reshape(bsz)

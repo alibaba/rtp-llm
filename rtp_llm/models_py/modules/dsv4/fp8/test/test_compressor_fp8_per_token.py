@@ -389,6 +389,104 @@ def test_prepared_metadata_path() -> None:
     print("  [prepared meta] decode boundary write OK")
 
 
+def test_decode_strided_kv_score_matches_contiguous_path() -> None:
+    """Decode should feed strided fused-linear slices directly to Triton.
+
+    Regression coverage for the timeline copy-kernel issue: ``fused_out`` is
+    split into ``kv`` and ``score`` along the last dimension. Those row views
+    have a larger row stride than their logical width, and must produce the
+    same state/KV writes as the old explicit contiguous materialization.
+    """
+    torch.manual_seed(4)
+    head_dim, rope_head_dim, ratio = KV_HEAD_DIM, 64, 4
+    coff = 1 + (ratio == 4)
+    dim = 128
+    q_len = 4
+    positions = torch.arange(q_len, dtype=torch.long, device=DEVICE)
+    b_idx = torch.zeros(q_len, dtype=torch.long, device=DEVICE)
+    seq_start = torch.tensor([0], dtype=torch.int32, device=DEVICE)
+    cu_seq = torch.tensor([0, q_len], dtype=torch.int32, device=DEVICE)
+    start_pos = torch.tensor([0], dtype=torch.int64, device=DEVICE)
+    position_ids = positions.to(torch.int32)
+    x = torch.randn(1, q_len, dim, dtype=torch.bfloat16, device=DEVICE) * 0.1
+
+    cmp_strided = _build_compressor(
+        dim=dim,
+        head_dim=head_dim,
+        rope_head_dim=rope_head_dim,
+        compress_ratio=ratio,
+    )
+    state_strided, kv_strided, _ = _bind_pools(
+        cmp_strided,
+        seqlen=q_len,
+        head_dim=head_dim,
+        coff=coff,
+        compress_ratio=ratio,
+    )
+    meta_strided = cmp_strided.prepare_metadata(
+        positions,
+        b_idx,
+        is_batched=True,
+        seq_start_per_req=seq_start,
+        cu_seq_per_req=cu_seq,
+    )
+
+    cmp_contig = _build_compressor(
+        dim=dim,
+        head_dim=head_dim,
+        rope_head_dim=rope_head_dim,
+        compress_ratio=ratio,
+    )
+    cmp_contig._wkv_wgate_fused.copy_(cmp_strided._wkv_wgate_fused)
+    cmp_contig.ape.data.copy_(cmp_strided.ape.data)
+    cmp_contig.norm.weight.data.copy_(cmp_strided.norm.weight.data)
+    state_contig, kv_contig, _ = _bind_pools(
+        cmp_contig,
+        seqlen=q_len,
+        head_dim=head_dim,
+        coff=coff,
+        compress_ratio=ratio,
+    )
+    meta_contig = cmp_contig.prepare_metadata(
+        positions,
+        b_idx,
+        is_batched=True,
+        seq_start_per_req=seq_start,
+        cu_seq_per_req=cu_seq,
+    )
+
+    cmp_strided.forward_decode_vectorized(
+        x,
+        start_pos,
+        meta=meta_strided,
+        position_ids=position_ids,
+    )
+
+    out_dim = coff * head_dim
+    fused_out = _linear_bf16_bf16_fp32(x, cmp_contig._wkv_wgate_fused)
+    kv_view = fused_out[..., :out_dim].view(q_len, out_dim)
+    score_view = fused_out[..., out_dim:].view(q_len, out_dim)
+    assert not kv_view.is_contiguous(), "test setup failed: kv view should be strided"
+    assert (
+        kv_view.stride(0) > kv_view.shape[1]
+    ), "test setup failed: kv row stride should include score slice"
+    cmp_contig._launch(
+        kv_view.contiguous(),
+        score_view.contiguous(),
+        meta_contig,
+        seq_start=None,
+    )
+
+    torch.cuda.synchronize()
+    assert torch.equal(
+        state_strided, state_contig
+    ), "strided decode state writes differ from contiguous reference"
+    assert torch.equal(
+        kv_strided, kv_contig
+    ), "strided decode KV writes differ from contiguous reference"
+    print("  [decode stride] strided kv/score match contiguous reference")
+
+
 def test_state_pool_clear_pool_context() -> None:
     """clear_pool_context drops both pool refs and forward becomes no-op."""
     cmp = _build_compressor(
@@ -412,5 +510,6 @@ if __name__ == "__main__":
     test_indexer_per_token()
     test_decode_vectorized()
     test_prepared_metadata_path()
+    test_decode_strided_kv_score_matches_contiguous_path()
     test_state_pool_clear_pool_context()
     print("\nOK")
