@@ -99,18 +99,6 @@ void top_k_top_p_sampling_from_probs(at::Tensor probs, at::Tensor uniform_sample
                                      std::optional<at::Tensor> maybe_top_p_arr, double top_p_val,
                                      bool deterministic, int64_t cuda_stream);
 
-void top_p_renorm_probs(at::Tensor                probs,
-                        at::Tensor                renorm_probs,
-                        std::optional<at::Tensor> maybe_top_p_arr,
-                        double                    top_p_val,
-                        int64_t                   cuda_stream);
-
-void top_k_renorm_probs(at::Tensor                probs,
-                        at::Tensor                renorm_probs,
-                        std::optional<at::Tensor> maybe_top_k_arr,
-                        int64_t                   top_k_val,
-                        int64_t                   cuda_stream);
-
 void silu_and_mul(at::Tensor& out, at::Tensor& input, int64_t cuda_stream);
 
 void gelu_tanh_and_mul(at::Tensor& out, at::Tensor& input, int64_t cuda_stream);

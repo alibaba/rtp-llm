@@ -7,6 +7,7 @@
 #include "rtp_llm/models_py/bindings/common/kernels/sampling_penalty_kernels.h"
 #include "rtp_llm/models_py/bindings/common/kernels/banRepeatNgram.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/sampling/sampling.h"
 #include "3rdparty/flashinfer/flashinfer.h"
 #include <cstddef>
 #include <random>
