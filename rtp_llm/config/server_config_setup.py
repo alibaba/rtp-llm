@@ -514,7 +514,15 @@ def _copy_file_for_remote_publish(src_path: str, dst_path: str) -> None:
             return
     except OSError:
         pass
-    shutil.copy2(src_path, dst_path)
+    tmp_path = _remote_staging_path(dst_path)
+    try:
+        shutil.copy2(src_path, tmp_path)
+        os.replace(tmp_path, dst_path)
+    finally:
+        try:
+            os.remove(tmp_path)
+        except FileNotFoundError:
+            pass
 
 
 def _replace_text_atomic(dst_path: str, content: str) -> None:
