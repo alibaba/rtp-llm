@@ -212,6 +212,15 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("lengths"),
                   py::arg("row_starts") = py::none());
 
+    rtp_ops_m.def("fast_topk_v2_variable",
+                  &fast_topk_v2_variable,
+                  "Fast TopK v2 kernel with selectable TopK",
+                  py::arg("score"),
+                  py::arg("indices"),
+                  py::arg("lengths"),
+                  py::arg("row_starts"),
+                  py::arg("top_k"));
+
     rtp_ops_m.def("fast_topk_transform_fused",
                   &fast_topk_transform_fused,
                   "Fast TopK Transform Fused kernel",
@@ -270,20 +279,8 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("num_rows"),
                   py::arg("stride0"),
                   py::arg("stride1"),
-                  py::arg("top_k"));
-
-    rtp_ops_m.def("dsv4_top_k_per_row_prefill_indexed",
-                  &dsv4_top_k_per_row_prefill_indexed,
-                  "Per-row TopK for DSv4 indexer prefill with explicit row scheduling order",
-                  py::arg("logits"),
-                  py::arg("row_starts"),
-                  py::arg("row_ends"),
-                  py::arg("row_indices"),
-                  py::arg("indices_out"),
-                  py::arg("num_rows"),
-                  py::arg("stride0"),
-                  py::arg("stride1"),
-                  py::arg("top_k"));
+                  py::arg("top_k"),
+                  py::arg("force_radix_sort") = false);
 
     rtp_ops_m.def("indexer_k_quant_and_cache",
                   &rtp_llm::indexer_k_quant_and_cache,

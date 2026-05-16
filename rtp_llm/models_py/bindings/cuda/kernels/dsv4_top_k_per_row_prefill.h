@@ -24,6 +24,8 @@ namespace torch_ext {
 //   stride0     : logits.stride(0)
 //   stride1     : logits.stride(1)
 //   top_k       : K
+//   force_radix_sort : when true, route every row through the radix final
+//                      pass instead of the hybrid insertion/radix split.
 //
 // CUDA-only.
 void dsv4_top_k_per_row_prefill(const torch::Tensor& logits,
@@ -33,20 +35,7 @@ void dsv4_top_k_per_row_prefill(const torch::Tensor& logits,
                                 int64_t              num_rows,
                                 int64_t              stride0,
                                 int64_t              stride1,
-                                int64_t              top_k);
-
-// Same contract as above, but blocks are scheduled in ``row_indices`` order
-// while results are still written to their original row. This is useful for
-// CP prefill, where zigzag row order can otherwise put most long rows into
-// only one of the hybrid insertion/radix launches.
-void dsv4_top_k_per_row_prefill_indexed(const torch::Tensor& logits,
-                                        const torch::Tensor& row_starts,
-                                        const torch::Tensor& row_ends,
-                                        const torch::Tensor& row_indices,
-                                        torch::Tensor&       indices_out,
-                                        int64_t              num_rows,
-                                        int64_t              stride0,
-                                        int64_t              stride1,
-                                        int64_t              top_k);
+                                int64_t              top_k,
+                                bool                 force_radix_sort = false);
 
 }  // namespace torch_ext

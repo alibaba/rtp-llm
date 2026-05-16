@@ -9,7 +9,7 @@ import librtp_compute_ops
 import libth_transformer_config
 import torch
 
-__all__: list[str] = ['FlashInferAttnParams', 'FlashInferDecodeOp', 'FlashInferMlaAttnParams', 'FlashInferPrefillOp', 'GroupTopKOp', 'SelectTopkOp', 'SparseMlaParams', 'TRTAttn', 'TRTAttnOp', 'TRTPagedAttnOp', 'XQAAttnOp', 'XQAParams', 'allocate_shared_buffer', 'concat_and_cache_mla', 'cp_gather_and_upconvert_fp8_kv_cache', 'cp_gather_indexer_k_quant_cache', 'cuda_graph_copy_large2small', 'cuda_graph_copy_small2large', 'cutlass_scaled_fp4_mm', 'debug_kernel', 'dispose_communicator', 'embedding', 'embedding_bert', 'fast_topk_transform_fused', 'fast_topk_transform_ragged_fused', 'fast_topk_v2', 'fill_mla_params', 'fused_add_layernorm', 'fused_add_rmsnorm', 'fused_qk_rmsnorm', 'indexer_k_quant_and_cache', 'init_communicator', 'layernorm', 'mla_k_merge', 'moe_post_reorder', 'moe_pre_reorder', 'moe_topk_softmax', 'open_ipc_handle', 'per_tensor_quant_fp8', 'per_token_group_quant_fp8', 'per_token_group_quant_fp8_v2', 'per_token_group_quant_int8', 'per_token_quant_fp8', 'prepare_sparse_mla_params', 'register_buffer_to_communicator', 'reuse_kv_cache_indexed_batched', 'rmsnorm', 'scaled_fp4_experts_quant', 'scaled_fp4_quant', 'silu_and_mul', 'silu_and_mul_scaled_fp4_experts_quant', 'trt_fp8_quantize_128', 'trt_fp8_quantize_128_inplace', 'userbuffers_recv', 'userbuffers_ring_all_gather', 'userbuffers_send', 'write_cache_store']
+__all__: list[str] = ['FlashInferAttnParams', 'FlashInferDecodeOp', 'FlashInferMlaAttnParams', 'FlashInferPrefillOp', 'GroupTopKOp', 'SelectTopkOp', 'SparseMlaParams', 'TRTAttn', 'TRTAttnOp', 'TRTPagedAttnOp', 'XQAAttnOp', 'XQAParams', 'allocate_shared_buffer', 'concat_and_cache_mla', 'cp_gather_and_upconvert_fp8_kv_cache', 'cp_gather_indexer_k_quant_cache', 'cuda_graph_copy_large2small', 'cuda_graph_copy_small2large', 'cutlass_scaled_fp4_mm', 'debug_kernel', 'dispose_communicator', 'embedding', 'embedding_bert', 'fast_topk_transform_fused', 'fast_topk_transform_ragged_fused', 'fast_topk_v2', 'fast_topk_v2_variable', 'fill_mla_params', 'fused_add_layernorm', 'fused_add_rmsnorm', 'fused_qk_rmsnorm', 'indexer_k_quant_and_cache', 'init_communicator', 'layernorm', 'mla_k_merge', 'moe_post_reorder', 'moe_pre_reorder', 'moe_topk_softmax', 'open_ipc_handle', 'per_tensor_quant_fp8', 'per_token_group_quant_fp8', 'per_token_group_quant_fp8_v2', 'per_token_group_quant_int8', 'per_token_quant_fp8', 'prepare_sparse_mla_params', 'register_buffer_to_communicator', 'reuse_kv_cache_indexed_batched', 'rmsnorm', 'scaled_fp4_experts_quant', 'scaled_fp4_quant', 'silu_and_mul', 'silu_and_mul_scaled_fp4_experts_quant', 'trt_fp8_quantize_128', 'trt_fp8_quantize_128_inplace', 'userbuffers_recv', 'userbuffers_ring_all_gather', 'userbuffers_send', 'write_cache_store']
 
 
 class FlashInferAttnParams(librtp_compute_ops.ParamsBase):
@@ -376,6 +376,18 @@ def fast_topk_transform_ragged_fused(score: torch.Tensor, lengths: torch.Tensor,
 def fast_topk_v2(score: torch.Tensor, indices: torch.Tensor, lengths: torch.Tensor, row_starts: torch.Tensor | None = None) -> None:
     """
     Fast TopK v2 kernel
+    """
+
+
+def fast_topk_v2_variable(score: torch.Tensor, indices: torch.Tensor, lengths: torch.Tensor, row_starts: torch.Tensor | None = None, top_k: int = 2048) -> None:
+    """
+    Fast TopK v2 kernel with selectable TopK
+    """
+
+
+def dsv4_top_k_per_row_prefill(logits: torch.Tensor, row_starts: torch.Tensor, row_ends: torch.Tensor, indices_out: torch.Tensor, num_rows: int, stride0: int, stride1: int, top_k: int, force_radix_sort: bool = False) -> None:
+    """
+    Per-row TopK for DSv4 indexer prefill
     """
 
 
