@@ -286,12 +286,19 @@ class AiterPrefillAttnOp:
         hd = self.head_dim
         vs = 16 // kv_cache_base.element_size()
 
-        # Flatten block_table to get all referenced block indices
-        block_indices = block_table.reshape(-1).to(torch.int64)
-        num_gathered = block_indices.numel()
+        # Flatten block_table to get all referenced block indices.
+        block_indices_raw = block_table.reshape(-1).to(torch.int64)
+        num_gathered = block_indices_raw.numel()
 
         if kv_cache_base.ndim >= 4:
             # 5D path: [num_pages, 2, hk, ps, hd] — dim=0 already kernel-page granularity
+            num_pages = kv_cache_base.shape[0]
+            # block_table may contain invalid padding entries (e.g. -1 or
+            # garbage values) for sequences shorter than max_blocks_per_seq.
+            # Clamp to valid range so index_select does not access
+            # out-of-bounds GPU memory.  The gathered data for padding slots
+            # is unused by the downstream kernel (controlled by seq_lens).
+            block_indices = block_indices_raw.clamp(min=0, max=num_pages - 1)
             k_4d = kv_cache_base.select(1, 0)  # [num_pages, hk, ps, hd]
             v_4d = kv_cache_base.select(1, 1)  # [num_pages, hk, ps, hd]
             k_used = k_4d.index_select(0, block_indices)  # [n, hk, ps, hd]
@@ -314,6 +321,8 @@ class AiterPrefillAttnOp:
             elems_per_page = 2 * hk * ps * hd
             pages_per_block = kv_cache_base.shape[1] // elems_per_page
             num_pages = big_block_num * pages_per_block
+            # Clamp invalid padding entries (same reason as 5D path above).
+            block_indices = block_indices_raw.clamp(min=0, max=num_pages - 1)
             standard_elems = elems_per_page * pages_per_block
             # When hybrid_stride == standard_elems, slice is a no-op and
             # reshape is a zero-copy view.  When hybrid_stride > standard_elems
