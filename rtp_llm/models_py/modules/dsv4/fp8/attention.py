@@ -48,7 +48,7 @@ from rtp_llm.models_py.modules.dsv4.cp import (
     cp_all_gather_full,
     cp_freqs_cis_local,
 )
-from rtp_llm.models_py.modules.dsv4.fp8.compressor import CompressorFP8
+from rtp_llm.models_py.modules.dsv4.fp8.compressor import CompressorFP8, CompressorMeta
 from rtp_llm.models_py.modules.dsv4.fp8.indexer import IndexerFP8
 from rtp_llm.models_py.modules.dsv4.qlinear import _fp8_dequant_to_fp32
 from rtp_llm.models_py.modules.dsv4.rope import apply_rotary_emb, precompute_freqs_cis
@@ -1831,7 +1831,6 @@ class AttentionFP8(nn.Module):
         position_ids = attn_metadata.position_ids[:T]  # [T] int32
 
         self._ensure_freqs_cis_bound()
-
         qkv = decode_compute_qkv(self, x, position_ids)
         self._decode_write_swa_fp8(qkv.kv, bsz, q_len, attn_metadata)
 
@@ -1839,11 +1838,23 @@ class AttentionFP8(nn.Module):
             o = self._forward_decode_swa_only(qkv.q, bsz, q_len, attn_metadata)
         elif self.compress_ratio == 4:
             o = self._forward_decode_csa(
-                x, qkv, bsz, q_len, start_pos, position_ids, attn_metadata
+                x,
+                qkv,
+                bsz,
+                q_len,
+                start_pos,
+                position_ids,
+                attn_metadata,
             )
         elif self.compress_ratio == 128:
             o = self._forward_decode_hca(
-                x, qkv, bsz, q_len, start_pos, position_ids, attn_metadata
+                x,
+                qkv,
+                bsz,
+                q_len,
+                start_pos,
+                position_ids,
+                attn_metadata,
             )
         else:
             raise AssertionError(f"unknown compress_ratio={self.compress_ratio}")
@@ -1881,6 +1892,43 @@ class AttentionFP8(nn.Module):
             bsz=bsz,
             q_len=q_len,
             head_dim=self.head_dim,
+        )
+
+    def _decode_compressor_meta_from_metadata(
+        self,
+        attn_metadata: "DSv4DecodeAttnMetadataFP8",  # type: ignore[name-defined]
+        *,
+        state_attn_type: int,
+        kv_attn_type: int,
+        bsz: int,
+        q_len: int,
+    ) -> CompressorMeta:
+        """Return a CompressorMeta view backed by step-level buildmeta.
+
+        The slot tensors are prepared once per decode step. Per-layer code
+        only slices stable prefixes and then launches the compressor kernels.
+        """
+        assert attn_metadata.req_id_per_token is not None
+        assert attn_metadata.req_id_per_token_long is not None
+        assert attn_metadata.decode_seq_start_per_req is not None
+        assert attn_metadata.decode_cu_seq_per_req is not None
+        state_slots = attn_metadata.compressor_state_slot_mappings.get(
+            state_attn_type
+        )
+        kv_slots = attn_metadata.pool_write_slot_mappings.get(kv_attn_type)
+        assert state_slots is not None and kv_slots is not None
+        T = bsz * q_len
+        positions = attn_metadata.position_ids_long[:T]
+        b_idx = attn_metadata.req_id_per_token_long[:T]
+        return CompressorMeta(
+            positions=positions,
+            b_idx=b_idx,
+            state_slots=state_slots[:T],
+            kv_slots=kv_slots[:T],
+            token_to_req=attn_metadata.req_id_per_token[:T],
+            is_batched=q_len > 1,
+            seq_start_per_req=attn_metadata.decode_seq_start_per_req[:bsz],
+            cu_seq_per_req=attn_metadata.decode_cu_seq_per_req[: bsz + 1],
         )
 
     def _forward_decode_swa_only(
@@ -1977,9 +2025,21 @@ class AttentionFP8(nn.Module):
         both scatter into their pools; the indexer's topk buffer holds
         raw (pre +win) compressed local indices which the shared
         dual-pool epilogue consumes."""
-        from rtp_llm.models_py.modules.dsv4.attn_type import CSA_KV
+        from rtp_llm.models_py.modules.dsv4.attn_type import (
+            CSA_KV,
+            CSA_STATE,
+            INDEXER_KV,
+            INDEXER_STATE,
+        )
 
         assert self.indexer is not None, "CSA layer must have an indexer"
+        indexer_compressor_meta = self._decode_compressor_meta_from_metadata(
+            attn_metadata,
+            state_attn_type=INDEXER_STATE,
+            kv_attn_type=INDEXER_KV,
+            bsz=bsz,
+            q_len=q_len,
+        )
         # Indexer fills ``topk_buffer_compressed[:bsz]`` + self-scatters
         # nested compressor state into INDEXER_KV / INDEXER_STATE.
         self.indexer.forward_decode_vectorized(
@@ -1988,15 +2048,26 @@ class AttentionFP8(nn.Module):
             start_pos,
             attn_metadata.topk_buffer_compressed[:bsz],
             position_ids=position_ids,
+            compressor_meta=indexer_compressor_meta,
+        )
+        csa_compressor_meta = self._decode_compressor_meta_from_metadata(
+            attn_metadata,
+            state_attn_type=CSA_STATE,
+            kv_attn_type=CSA_KV,
+            bsz=bsz,
+            q_len=q_len,
         )
         # Main CSA compressor emits boundary compressed-K into
         # CSA_KV / CSA_STATE (required by the dual-pool paged read).
         self.compressor.forward_decode_vectorized(
-            x, start_pos, position_ids=position_ids
+            x,
+            start_pos,
+            meta=csa_compressor_meta,
+            position_ids=position_ids,
         )
         # CSA cmp_local_raw = indexer's raw indices (the +win offset is
         # added later inside the epilogue's translate path).
-        cmp_local_raw = attn_metadata.topk_buffer_compressed[:bsz].clone()
+        cmp_local_raw = attn_metadata.topk_buffer_compressed[:bsz]
         return self._forward_decode_compressed(
             qkv.q,
             cmp_local_raw,
@@ -2021,11 +2092,21 @@ class AttentionFP8(nn.Module):
         idx precomputed once per step by
         ``update_decode_metadata_in_place._build_dense_compressed_idxs``
         (reused across all HCA layers via ``topk_total_by_ratio[128]``)."""
-        from rtp_llm.models_py.modules.dsv4.attn_type import HCA_KV
+        from rtp_llm.models_py.modules.dsv4.attn_type import HCA_KV, HCA_STATE
 
         assert self.indexer is None, "HCA layer must not have an indexer"
+        hca_compressor_meta = self._decode_compressor_meta_from_metadata(
+            attn_metadata,
+            state_attn_type=HCA_STATE,
+            kv_attn_type=HCA_KV,
+            bsz=bsz,
+            q_len=q_len,
+        )
         self.compressor.forward_decode_vectorized(
-            x, start_pos, position_ids=position_ids
+            x,
+            start_pos,
+            meta=hca_compressor_meta,
+            position_ids=position_ids,
         )
         win = self.window_size
         tt_h = attn_metadata.topk_total_by_ratio.get(int(self.compress_ratio))

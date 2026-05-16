@@ -156,6 +156,42 @@ def test_batched_decode_b16_half():
     _assert_equiv(out, logits, lengths, k=512, tag="decode B=16 half")
 
 
+def test_mtp_batched_decode_flattened_bs_rows():
+    """MTP passes score as [B, S, T]; the op contract is [B*S, T]."""
+    B, S, T, K = 4, 3, 2048, 512
+    g = torch.Generator(device="cuda").manual_seed(55)
+    score = torch.randn(B, S, T, device="cuda", generator=g)
+    lengths = torch.tensor(
+        [
+            [1, 2, 17],
+            [511, 512, 513],
+            [1024, 1536, 2048],
+            [7, 129, 777],
+        ],
+        dtype=torch.int32,
+        device="cuda",
+    )
+
+    out_3d = torch.full((B, S, K), -1, dtype=torch.int32, device="cuda")
+    ws = torch.empty(WORKSPACE_BYTES, dtype=torch.uint8, device="cuda")
+    rtp_llm_ops.dsv4_persistent_topk(
+        score.view(B * S, T),
+        lengths.view(B * S),
+        out_3d.view(B * S, K),
+        ws,
+        K,
+        T,
+    )
+
+    _assert_equiv(
+        out_3d.view(B * S, K),
+        score.view(B * S, T),
+        lengths.view(B * S),
+        k=K,
+        tag="MTP B*S flattened",
+    )
+
+
 def test_filtered_path_b64():
     """num_rows > 32 with ≥128KB smem/block triggers FilteredTopK path."""
     logits, lengths = _make(64, 2048, seed=6, lengths_mode="varied")
@@ -258,6 +294,7 @@ if __name__ == "__main__":
     test_decode_b1_k2048_full()
     test_batched_decode_b4_varied()
     test_batched_decode_b16_half()
+    test_mtp_batched_decode_flattened_bs_rows()
     test_filtered_path_b64()
     test_long_seq_radix_path()
     test_zero_length_row()

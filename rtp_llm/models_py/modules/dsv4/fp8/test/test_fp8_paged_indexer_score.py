@@ -267,6 +267,87 @@ def test_decode_batched():
     assert bad == 0, f"{bad} batched rows failed"
 
 
+def test_decode_batched_mtp_next_n_gt_1():
+    """B=2, S=3: DeepGEMM rows must map to block_table[b] with row b*S+s."""
+    if not has_fp8_paged_mqa_logits():
+        print("  [SKIP]")
+        return
+    torch.manual_seed(3)
+    B, S, H, D = 2, 3, 64, INDEXER_HEAD_DIM
+    T_cache, block_size = 256, 64
+    ctx_lens = torch.tensor(
+        [[64, 129, 256], [33, 128, 200]], dtype=torch.int32, device="cuda"
+    )
+    q_bf16 = torch.randn(B, S, H, D, dtype=torch.bfloat16, device="cuda") * 0.5
+    weights = torch.randn(B, S, H, dtype=torch.bfloat16, device="cuda")
+
+    num_blocks_per_req = T_cache // block_size
+    total_blocks = B * num_blocks_per_req
+    pool_uint8 = torch.zeros(
+        total_blocks * block_size,
+        INDEXER_ENTRY_BYTES,
+        dtype=torch.uint8,
+        device="cuda",
+    )
+    pool_3d = pool_uint8.view(total_blocks, block_size, INDEXER_ENTRY_BYTES)
+    block_table = torch.zeros(B, num_blocks_per_req, dtype=torch.int32, device="cuda")
+    k_full = torch.zeros(B, T_cache, D, dtype=torch.bfloat16, device="cuda")
+    for b in range(B):
+        # Make request rows intentionally different so a row//S mapping bug is visible.
+        k_b = (
+            torch.randn(T_cache, D, dtype=torch.bfloat16, device="cuda") * 0.5
+            + float(b)
+        )
+        k_full[b] = k_b
+        base = b * num_blocks_per_req
+        block_table[b] = torch.arange(
+            base, base + num_blocks_per_req, device="cuda", dtype=torch.int32
+        )
+        slots = torch.arange(T_cache, device="cuda", dtype=torch.int64) + base * block_size
+        quantize_indexer_k(k_b, slots, pool_3d)
+
+    score_ref = v4_indexer_score(
+        q_bf16.contiguous(),
+        k_full.contiguous(),
+        weights.contiguous(),
+        q_pos=None,
+        compress_ratio=4,
+    )
+
+    q_fp8, w_fold = indexer_q_fp8_quant_fold(q_bf16.contiguous(), weights)
+    score_fp8 = fp8_paged_indexer_score(
+        q_fp8,
+        w_fold.view(B * S, H),
+        pool_uint8,
+        block_table,
+        ctx_lens,
+        block_size,
+        max_ctx_len=T_cache,
+    ).view(B, S, T_cache)
+
+    bad = 0
+    for b in range(B):
+        for s in range(S):
+            live = int(ctx_lens[b, s].item())
+            ref = score_ref[b, s, :live]
+            cand = score_fp8[b, s, :live]
+            sm = ref.abs().amax().item()
+            diff = (ref - cand).abs().mean().item()
+            K = min(16, live)
+            top_ref = set(ref.topk(K)[1].tolist())
+            top_fp8 = set(cand.topk(K)[1].tolist())
+            overlap = len(top_ref & top_fp8)
+            ok = (diff < 0.10 * sm) and (overlap >= K - 2)
+            marker = "OK" if ok else "FAIL"
+            print(
+                f"  [batch row b={b} s={s} live={live}] mean_abs={diff:.4f} "
+                f"score_max={sm:.4f} top-{K}={overlap}/{K} {marker}"
+            )
+            if not ok:
+                bad += 1
+    assert bad == 0, f"{bad} B,S rows failed"
+
+
 def bench_decode():
     """Compare DeepGEMM FP8 paged vs bf16 dequant + Triton score."""
     if not has_fp8_paged_mqa_logits():
@@ -338,6 +419,7 @@ if __name__ == "__main__":
     test_decode_equiv()
     test_decode_partial_context()
     test_decode_batched()
+    test_decode_batched_mtp_next_n_gt_1()
     print("\n== Bench ==")
     bench_decode()
     print("\nOK")
