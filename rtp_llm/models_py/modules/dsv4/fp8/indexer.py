@@ -746,9 +746,7 @@ class IndexerFP8(PoolBackedModule):
                             compressor_meta = compressor.prepare_metadata(
                                 cp_positions,
                                 cp_b_idx,
-                                is_batched=bool(
-                                    cp_ctx.input_lengths_global.numel() > 1
-                                ),
+                                is_batched=True,
                                 seq_start_per_req=cp_seq_start_per_req,
                                 cu_seq_per_req=cp_cu_seq_per_req,
                             )
