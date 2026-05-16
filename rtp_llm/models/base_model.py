@@ -151,12 +151,6 @@ class BaseModel(object):
         logging.info(
             f"Creating python model for {self.model_config.ckpt_path} on {device_str}"
         )
-        remote_jit_dir = os.environ.get("REMOTE_JIT_DIR", None)
-        logging.info(f"python model remote_jit_dir for deep_gemm: {remote_jit_dir}")
-        if remote_jit_dir:
-            os.environ["DG_JIT_REMOTE_CACHE_DIR"] = os.path.join(
-                remote_jit_dir, "deep_gemm_python"
-            )
         self._create_python_model()
 
     def _create_python_model(self):
