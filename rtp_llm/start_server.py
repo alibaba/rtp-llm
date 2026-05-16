@@ -2,6 +2,7 @@ import logging
 import multiprocessing
 import os
 import sys
+import threading
 import time
 import traceback
 
@@ -391,6 +392,36 @@ def _mark_startup_warmup_health_gate_ready(gate_file):
         raise
 
 
+def _start_post_startup_jit_cache_writer(
+    py_env_configs: PyEnvConfigs, startup_warmup_succeeded: bool
+):
+    remote_write_dir = (
+        py_env_configs.jit_config.warm_up_jit_and_write_remote or ""
+    ).strip()
+    if not remote_write_dir:
+        return
+
+    def _write_remote_jit_cache():
+        try:
+            maybe_write_jit_cache_to_remote(py_env_configs, startup_warmup_succeeded)
+        except Exception:
+            logging.error(
+                "post-startup remote JIT cache publishing failed, trace=%s",
+                traceback.format_exc(),
+            )
+
+    writer = threading.Thread(
+        target=_write_remote_jit_cache,
+        name="post_startup_jit_cache_writer",
+        daemon=True,
+    )
+    writer.start()
+    logging.info(
+        "post-startup remote JIT cache writer started for WARM_UP_JIT_AND_WRITE_REMOTE=%s",
+        remote_write_dir,
+    )
+
+
 def main():
     _install_hot_hook_runtime("main")
     py_env_configs: PyEnvConfigs = setup_args()
@@ -451,8 +482,10 @@ def start_server(py_env_configs: PyEnvConfigs):
             raise Exception("Health checks failed")
 
         startup_warmup_succeeded = _maybe_run_startup_real_warmup(py_env_configs)
-        maybe_write_jit_cache_to_remote(py_env_configs, startup_warmup_succeeded)
         _mark_startup_warmup_health_gate_ready(startup_warmup_gate_file)
+        _start_post_startup_jit_cache_writer(
+            py_env_configs, startup_warmup_succeeded
+        )
 
         logging.info(
             f"Backend RPC service is listening on 0.0.0.0, IP/IP range can be customized as needed"
