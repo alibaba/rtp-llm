@@ -107,11 +107,10 @@ class CompressorMeta:
       * ``kv_slots``     : int64 KV-pool slot per token (-1 if non-boundary
                            or unallocated)
       * ``token_to_req`` : int32 alias of ``b_idx`` for the fused KV writer
-      * ``is_batched``   : True when this meta packs multiple requests
-                           (B>1) — the kernel's scalar ``seq_start`` raw
-                           path is unsafe and ``_launch`` must disable it.
-                           Validated byte-equal to raw_path=True for short
-                           prefill by ``test_compressor_disable_raw_path``.
+      * ``is_batched``   : True when this meta uses the varlen/per-request
+                           raw path. This includes B==1 CP prefill, where
+                           keeping the same path avoids reintroducing a
+                           scalar-B special case.
     """
 
     positions: torch.Tensor
@@ -120,7 +119,7 @@ class CompressorMeta:
     kv_slots: torch.Tensor
     token_to_req: torch.Tensor
     is_batched: bool = False
-    # Phase-3a part 4c — varlen raw path. Populated only when is_batched;
+    # Phase-3a part 4c — varlen raw path. Populated when is_batched;
     # otherwise the legacy scalar-seq_start path is used.
     #   seq_start_per_req[b] = abs position of req b's first new token (sp_b)
     #   cu_seq_per_req[b+1]  = end offset of req b in flat kv_flat axis
@@ -591,10 +590,9 @@ class CompressorFP8(nn.Module):
         """
         del sequence_lengths  # not needed: positions derived from start_pos+arange
         # Phase-3a: accept either flat ``[T_total, dim]`` (vLLM-native /
-        # batched prefill) or legacy ``[B, S, dim]``. CP gather still
-        # produces a 3D tensor downstream so we leave the post-gather
-        # (bsz, seqlen) recompute alone — the dim-2 fast path only fires
-        # when the *input* arrives flat.
+        # batched prefill) or legacy ``[B, S, dim]``. The compressor kernels
+        # consume token-major 2D tensors, so the prefill path flattens once
+        # immediately after the fused projection and never reintroduces B.
         if x.dim() == 2:
             bsz = 1
             seqlen = int(x.size(0))
@@ -613,83 +611,61 @@ class CompressorFP8(nn.Module):
         out_dim = (1 + self.overlap) * self.head_dim
         with record_function_range("dsv4.fp8.compressor.prefill.fused_linear"):
             fused_out = _linear_bf16_bf16_fp32(x, self._wkv_wgate_fused)
-            kv, score = fused_out[..., :out_dim], fused_out[..., out_dim:]
+            N = bsz * seqlen
+            fused_flat = fused_out.reshape(N, -1)
 
         cp_ctx = self._cp_ctx
         cp_gather = cp_should_gather(cp_ctx, start_pos)
-        kv_gather_handle = None
-        score_gather_handle = None
+        fused_gather_handle = None
         if cp_gather:
             assert cp_ctx is not None
-            # Current CP gather API is flattened token-major 2D. Production
-            # prefill flattens requests to [T_total, dim]; accept the legacy
-            # [1, T_total, dim] wrapper by squeezing it at the module boundary.
-            if kv.dim() == 3:
-                assert kv.size(0) == 1, "CompressorFP8 CP expects flattened input"
-                kv_local = kv.squeeze(0)
-                score_local = score.squeeze(0)
-            else:
-                kv_local = kv
-                score_local = score
             gather_stream = (
-                torch.cuda.Stream(device=kv_local.device) if kv_local.is_cuda else None
+                torch.cuda.Stream(device=fused_flat.device)
+                if fused_flat.is_cuda
+                else None
             )
-            # Start both collectives early so their NCCL work can overlap with
-            # downstream CPU/Python setup before the gathered tensors are needed.
-            with record_function_range("dsv4.fp8.compressor.prefill.cp_gather_kv"):
-                kv_gather_handle = cp_all_gather_full_async(
-                    kv_local, cp_ctx, stream=gather_stream
+            # Gather the fused ``[kv | score]`` projection once. This removes
+            # one NCCL launch and keeps the CP path token-major 2D; the split
+            # below is a strided view and the Triton wrappers pass row strides
+            # explicitly.
+            with record_function_range(
+                "dsv4.fp8.compressor.prefill.cp_gather_kv_score"
+            ):
+                fused_gather_handle = cp_all_gather_full_async(
+                    fused_flat, cp_ctx, stream=gather_stream
                 )
-            with record_function_range("dsv4.fp8.compressor.prefill.cp_gather_score"):
-                score_gather_handle = cp_all_gather_full_async(
-                    score_local, cp_ctx, stream=gather_stream
-                )
-            bsz = 1
-            seqlen = int(cp_ctx.seq_len_full)
-            # The post-gather kv/score tensors are sized for the GLOBAL
-            # ``seq_len_full``. The matching slot metadata is layer-invariant
-            # and must be built in the prefill-meta broadcast path before this
-            # hot path runs.
-            # ``bsz`` here is the leading dim of the compressor input, NOT
-            # the number of prefill requests — production prefill always
-            # flattens multi-request input to ``[1, T_total, dim]`` (with
-            # T_total being the sum of per-request lengths). Multi-request CP
-            # keeps this convention and makes
-            # ``seqlen == seq_len_full == sum_i L_i_global``.
             assert meta is not None, (
                 "CompressorFP8 CP prefill requires full-sequence metadata from "
                 "rtp_llm.models_py.modules.dsv4.fp8.prefill_meta; rebuilding it "
                 "inside compressor.forward is intentionally disabled."
             )
-            assert int(meta.positions.numel()) == seqlen, (
+            N = int(cp_ctx.seq_len_full)
+            assert int(meta.positions.numel()) == N, (
                 f"CP compressor meta/token length mismatch: meta={meta.positions.numel()} "
-                f"seq_len_full={seqlen}"
+                f"seq_len_full={N}"
             )
-            assert kv_gather_handle is not None
-            assert score_gather_handle is not None
-            with record_function_range("dsv4.fp8.compressor.prefill.cp_wait_kv"):
-                kv = cp_wait_gather_full(kv_gather_handle).unsqueeze(0)
-            with record_function_range("dsv4.fp8.compressor.prefill.cp_wait_score"):
-                score = cp_wait_gather_full(score_gather_handle).unsqueeze(0)
+            assert fused_gather_handle is not None
+            with record_function_range("dsv4.fp8.compressor.prefill.cp_wait_kv_score"):
+                fused_flat = cp_wait_gather_full(fused_gather_handle)
 
-        N = bsz * seqlen
-        # ``reshape(N, -1)`` collapses dim-0/1 for 3D, no-op for 2D — same
-        # contiguous flat layout the kernel expects in both cases.
-        with record_function_range("dsv4.fp8.compressor.prefill.flatten"):
-            kv_flat = kv.reshape(N, -1).contiguous()
-            score_flat = score.reshape(N, -1).contiguous()
+        with record_function_range("dsv4.fp8.compressor.prefill.split_kv_score"):
+            assert fused_flat.dim() == 2, (
+                f"CompressorFP8 prefill expects flat fused projection, got "
+                f"{tuple(fused_flat.shape)}"
+            )
+            assert fused_flat.size(1) == 2 * out_dim, (
+                f"CompressorFP8 fused hidden mismatch: got {fused_flat.size(1)}, "
+                f"expected {2 * out_dim}"
+            )
+            kv_flat = fused_flat[:, :out_dim]
+            score_flat = fused_flat[:, out_dim:]
         if meta is None:
             with record_function_range("dsv4.fp8.compressor.prefill.build_meta"):
                 positions, b_idx = _build_prefill_positions(sp, bsz, seqlen, device)
                 meta = self.prepare_metadata(positions, b_idx)
-        # Phase-3a part 4b/4c: B>1 batched prefill — each request has its
-        # own absolute start_pos so the scalar ``seq_start`` raw path is
-        # unsafe. When the meta carries per-request varlen raw arrays
-        # (4c), ``_launch`` routes through the kernel's BATCHED branch.
-        # Otherwise (4b fallback) ``seq_start=None`` disables the raw
-        # path and reads from state_cache instead. Both validated byte-
-        # equal vs raw_path=True for short prefill by
-        # ``test_compressor_disable_raw_path``.
+        # Varlen prefill carries per-request raw arrays, so ``_launch`` routes
+        # through the kernel's BATCHED branch even when CP has only one
+        # request. Legacy scalar metadata keeps the old ``seq_start`` path.
         seq_start = None if meta.is_batched else sp
         with record_function_range("dsv4.fp8.compressor.prefill.launch"):
             self._launch(kv_flat, score_flat, meta, seq_start=seq_start)

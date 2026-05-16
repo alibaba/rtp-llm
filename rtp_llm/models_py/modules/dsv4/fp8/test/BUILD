@@ -55,6 +55,12 @@ py_test(
     deps = _DSV4_FP8_TEST_DEPS,
 )
 
+py_test(
+    name = "test_compressor_cp_merged_gather",
+    srcs = ["test_compressor_cp_merged_gather.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+)
+
 [
     py_test(
         name = t,
