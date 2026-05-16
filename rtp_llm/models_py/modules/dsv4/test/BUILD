@@ -73,6 +73,16 @@ py_test(
 )
 
 py_test(
+    name = "test_mhc_post_kernel",
+    srcs = ["test_mhc_post_kernel.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm/models_py:tile_kernels_mhc",
+        "//rtp_llm:testlib",
+    ],
+)
+
+py_test(
     name = "test_strategy_select",
     srcs = ["test_strategy_select.py"],
     deps = [
@@ -204,6 +214,16 @@ py_test(
         "//rtp_llm/models_py:dsv4_fused_kernel_sources",
     ],
     tags = ["manual", "H20", "SM100_ARM"],
+)
+
+py_test(
+    name = "test_mhc_post_perf",
+    srcs = ["test_mhc_post_perf.py"],
+    deps = [
+        ":dsv4_kernel_perf_utils",
+        "//rtp_llm/models_py:modules",
+    ],
+    tags = ["manual", "B300", "SM100_ARM"],
 )
 
 py_test(

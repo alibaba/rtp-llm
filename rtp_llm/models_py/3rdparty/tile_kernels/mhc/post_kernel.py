@@ -1,4 +1,6 @@
 import math
+import os
+from functools import lru_cache
 
 import tilelang
 import torch
@@ -12,7 +14,7 @@ from tilelang import language as T
         tilelang.PassConfigKey.TL_DISABLE_VECTORIZE_256: True,
     },
 )
-def _mhc_post_fwd(
+def _mhc_post_fwd_baseline(
     mhc: int, hidden: int, n_thr: int = 128, h_blk: int = 1024
 ) -> tilelang.JITKernel:
     n = T.dynamic("num_tokens")
@@ -60,6 +62,118 @@ def _mhc_post_fwd(
                 T.copy(x_shared, x[pid_n, 0, i0_h * h_blk], disable_tma=True)
 
     return _mhc_post_fwd_kernel
+
+
+_mhc_post_fwd = _mhc_post_fwd_baseline
+
+
+@tilelang.jit(
+    pass_configs={
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+        tilelang.PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL: 10,
+        tilelang.PassConfigKey.TL_DISABLE_VECTORIZE_256: True,
+    },
+)
+def _mhc_post_fwd_small(
+    mhc: int, hidden: int, n_thr: int = 128, h_blk: int = 1024
+) -> tilelang.JITKernel:
+    n = T.dynamic("num_tokens")
+    h = hidden
+
+    h_blk = math.gcd(hidden, h_blk)
+
+    @T.prim_func
+    def _mhc_post_fwd_small_kernel(
+        a: T.Tensor[(n, mhc, mhc), T.float32],
+        b: T.Tensor[(n, mhc, h), T.bfloat16],
+        c: T.Tensor[(n, mhc), T.float32],
+        d: T.Tensor[(n, h), T.bfloat16],
+        x: T.Tensor[(n, mhc, h), T.bfloat16],
+    ) -> None:
+        with T.Kernel(n, threads=n_thr) as pid_n:
+            x_local = T.alloc_fragment((mhc, h_blk), T.float32)
+            b_local = T.alloc_fragment((mhc, h_blk), T.float32)
+            d_local = T.alloc_fragment(h_blk, T.float32)
+
+            a_local = T.alloc_fragment((mhc, mhc), T.float32)
+            c_local = T.alloc_fragment(mhc, T.float32)
+            T.copy(a[pid_n, 0, 0], a_local)
+            T.copy(c[pid_n, 0], c_local)
+            T.pdl_sync()
+
+            for i0_h in T.Pipelined(T.ceildiv(h, h_blk), num_stages=2):
+                T.copy(b[pid_n, 0, i0_h * h_blk], b_local, disable_tma=True)
+                T.copy(d[pid_n, i0_h * h_blk], d_local, disable_tma=True)
+
+                for i_mhco, i1_h in T.Parallel(mhc, h_blk):
+                    x_local[i_mhco, i1_h] = c_local[i_mhco] * d_local[i1_h]
+                    for i_mhci in T.serial(mhc):
+                        x_local[i_mhco, i1_h] += (
+                            a_local[i_mhci, i_mhco] * b_local[i_mhci, i1_h]
+                        )
+
+                T.copy(x_local, x[pid_n, 0, i0_h * h_blk], disable_tma=True)
+
+    return _mhc_post_fwd_small_kernel
+
+
+@tilelang.jit(
+    pass_configs={
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+        tilelang.PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL: 10,
+        tilelang.PassConfigKey.TL_DISABLE_VECTORIZE_256: True,
+    },
+)
+def _mhc_post_fwd_split_h(
+    mhc: int, hidden: int, n_thr: int = 128, h_blk: int = 512
+) -> tilelang.JITKernel:
+    n = T.dynamic("num_tokens")
+    h = hidden
+
+    h_blk = math.gcd(hidden, h_blk)
+
+    @T.prim_func
+    def _mhc_post_fwd_split_h_kernel(
+        a: T.Tensor[(n, mhc, mhc), T.float32],
+        b: T.Tensor[(n, mhc, h), T.bfloat16],
+        c: T.Tensor[(n, mhc), T.float32],
+        d: T.Tensor[(n, h), T.bfloat16],
+        x: T.Tensor[(n, mhc, h), T.bfloat16],
+    ) -> None:
+        with T.Kernel(n, T.ceildiv(h, h_blk), threads=n_thr) as (pid_n, pid_h):
+            h_start = pid_h * h_blk
+
+            x_local = T.alloc_fragment((mhc, h_blk), T.float32)
+            b_local = T.alloc_fragment((mhc, h_blk), T.float32)
+            d_local = T.alloc_fragment(h_blk, T.float32)
+
+            a_local = T.alloc_fragment((mhc, mhc), T.float32)
+            c_local = T.alloc_fragment(mhc, T.float32)
+            T.copy(a[pid_n, 0, 0], a_local)
+            T.copy(c[pid_n, 0], c_local)
+            T.pdl_sync()
+
+            T.copy(b[pid_n, 0, h_start], b_local, disable_tma=True)
+            T.copy(d[pid_n, h_start], d_local, disable_tma=True)
+
+            for i_mhco, i1_h in T.Parallel(mhc, h_blk):
+                x_local[i_mhco, i1_h] = c_local[i_mhco] * d_local[i1_h]
+                for i_mhci in T.serial(mhc):
+                    x_local[i_mhco, i1_h] += (
+                        a_local[i_mhci, i_mhco] * b_local[i_mhci, i1_h]
+                    )
+
+            T.copy(x_local, x[pid_n, 0, h_start], disable_tma=True)
+
+    return _mhc_post_fwd_split_h_kernel
+
+
+def _mhc_post_fwd_mid(mhc: int, hidden: int) -> tilelang.JITKernel:
+    return _mhc_post_fwd_split_h(mhc, hidden, n_thr=128, h_blk=1024)
+
+
+def _mhc_post_fwd_large(mhc: int, hidden: int) -> tilelang.JITKernel:
+    return _mhc_post_fwd_split_h(mhc, hidden, n_thr=128, h_blk=512)
 
 
 @tilelang.jit(
@@ -156,6 +270,94 @@ def _mhc_post_bwd(
     return _mhc_post_bwd_kernel
 
 
+_MHC_POST_VARIANTS = {"auto", "small", "mid", "large", "baseline"}
+_LAST_MHC_POST_VARIANT = "uninitialized"
+
+
+def _requested_mhc_post_variant() -> str:
+    requested = os.environ.get("DSV4_MHC_POST_VARIANT", "auto").strip().lower()
+    if requested not in _MHC_POST_VARIANTS:
+        raise ValueError(
+            "unsupported DSV4_MHC_POST_VARIANT="
+            f"{requested!r}; expected one of {sorted(_MHC_POST_VARIANTS)}"
+        )
+    return requested
+
+
+def _select_mhc_post_fwd_variant_name(
+    m: int,
+    mhc: int,
+    hidden: int,
+    *,
+    optimized_supported: bool,
+    requested: str | None = None,
+) -> str:
+    requested = requested or _requested_mhc_post_variant()
+    if requested == "baseline" or not optimized_supported:
+        return "baseline"
+    if requested != "auto":
+        return requested
+    if mhc != 4 or hidden != 4096:
+        return "baseline"
+    # The split-H mid path wins pure CUDA kernel time up to the measured 3K
+    # crossover.  Past that, the original token-major baseline is closest to
+    # the bandwidth roofline on the measured target.
+    if m <= 3079:
+        return "mid"
+    return "baseline"
+
+
+def _mhc_post_optimized_supported(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    post_layer_mix: torch.Tensor,
+    comb_res_mix: torch.Tensor,
+    *,
+    residual_was_contiguous: bool,
+    mhc: int,
+    hidden: int,
+) -> bool:
+    return (
+        mhc == 4
+        and hidden == 4096
+        and x.dtype == torch.bfloat16
+        and residual.dtype == torch.bfloat16
+        and post_layer_mix.dtype == torch.float32
+        and comb_res_mix.dtype == torch.float32
+        and x.is_cuda
+        and residual.is_cuda
+        and post_layer_mix.is_cuda
+        and comb_res_mix.is_cuda
+        and x.is_contiguous()
+        and residual_was_contiguous
+        and residual.is_contiguous()
+        and post_layer_mix.is_contiguous()
+        and comb_res_mix.is_contiguous()
+        and not torch.is_grad_enabled()
+    )
+
+
+@lru_cache(maxsize=None)
+def _mhc_post_kernel_for_variant(
+    variant: str,
+    mhc: int,
+    hidden: int,
+) -> tilelang.JITKernel:
+    if variant == "small":
+        return _mhc_post_fwd_small(mhc, hidden)
+    if variant == "mid":
+        return _mhc_post_fwd_mid(mhc, hidden)
+    if variant == "large":
+        return _mhc_post_fwd_large(mhc, hidden)
+    if variant == "baseline":
+        return _mhc_post_fwd_baseline(mhc, hidden)
+    raise ValueError(f"unexpected mHC post variant: {variant}")
+
+
+def mhc_post_last_selected_variant() -> str:
+    return _LAST_MHC_POST_VARIANT
+
+
 def mhc_post_fwd(
     x: torch.Tensor,
     residual: torch.Tensor,
@@ -164,6 +366,7 @@ def mhc_post_fwd(
     out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     num_seqs, num_tokens, mhc, hidden = residual.shape
+    residual_was_contiguous = residual.is_contiguous()
 
     assert x.dtype == torch.bfloat16, f"{x.dtype=}"
     assert residual.dtype == torch.bfloat16, f"{residual.dtype=}"
@@ -190,7 +393,25 @@ def mhc_post_fwd(
 
     if out is None:
         out = torch.empty_like(residual)
-    kernel = _mhc_post_fwd(mhc, hidden)
+    m = num_seqs * num_tokens
+    optimized_supported = _mhc_post_optimized_supported(
+        x,
+        residual,
+        post_layer_mix,
+        comb_res_mix,
+        residual_was_contiguous=residual_was_contiguous,
+        mhc=mhc,
+        hidden=hidden,
+    )
+    variant = _select_mhc_post_fwd_variant_name(
+        m,
+        mhc,
+        hidden,
+        optimized_supported=optimized_supported,
+    )
+    global _LAST_MHC_POST_VARIANT
+    _LAST_MHC_POST_VARIANT = variant
+    kernel = _mhc_post_kernel_for_variant(variant, mhc, hidden)
     kernel(
         comb_res_mix.flatten(0, 1),
         residual.flatten(0, 1),
