@@ -498,12 +498,42 @@ def _reset_local_jit_cache_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
 
+def _remote_staging_dir(parent_dir: str) -> str:
+    return os.path.join(
+        parent_dir, f"{JIT_REMOTE_STAGING_PREFIX}{os.getpid()}-{time.time_ns()}"
+    )
+
+
+def _copy_file_atomic(src_path: str, dst_path: str) -> None:
+    staging_dir = _remote_staging_dir(os.path.dirname(dst_path))
+    os.makedirs(staging_dir, exist_ok=True)
+    tmp_path = os.path.join(staging_dir, os.path.basename(dst_path))
+    try:
+        shutil.copy2(src_path, tmp_path)
+        os.replace(tmp_path, dst_path)
+    finally:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+
+
+def _replace_text_atomic(dst_path: str, content: str) -> None:
+    staging_dir = _remote_staging_dir(os.path.dirname(dst_path))
+    os.makedirs(staging_dir, exist_ok=True)
+    tmp_path = os.path.join(staging_dir, os.path.basename(dst_path))
+    try:
+        with open(tmp_path, "w") as f:
+            f.write(content)
+        os.replace(tmp_path, dst_path)
+    finally:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+
+
 def _copytree_into(
     src: str,
     dst: str,
     *,
     raise_on_error: bool = False,
     skip_remote_control_files: bool = False,
+    atomic_copy: bool = False,
     copied_relpaths: Optional[list[str]] = None,
     progress_log_prefix: Optional[str] = None,
     progress_log_interval: int = 100,
@@ -529,12 +559,18 @@ def _copytree_into(
         target_root = dst_abs if rel == "." else os.path.join(dst_abs, rel)
         os.makedirs(target_root, exist_ok=True)
         for filename in files:
-            if skip_remote_control_files and filename in JIT_REMOTE_CONTROL_FILES:
+            if skip_remote_control_files and (
+                filename in JIT_REMOTE_CONTROL_FILES
+                or filename.startswith(JIT_REMOTE_STAGING_PREFIX)
+            ):
                 continue
             src_path = os.path.join(root, filename)
             dst_path = os.path.join(target_root, filename)
             try:
-                shutil.copy2(src_path, dst_path)
+                if atomic_copy:
+                    _copy_file_atomic(src_path, dst_path)
+                else:
+                    shutil.copy2(src_path, dst_path)
                 files_copied += 1
                 if copied_relpaths is not None:
                     copied_relpaths.append(
@@ -806,15 +842,9 @@ def maybe_write_jit_cache_to_remote(
         )
     os.makedirs(local_write_dir, exist_ok=True)
 
-    done_marker = os.path.join(local_write_dir, JIT_REMOTE_DONE_MARKER)
-    try:
-        os.remove(done_marker)
-    except FileNotFoundError:
-        pass
-
     # JIT cache file paths are content-addressed. Existing files can remain in
-    # place while this publish refreshes them; readers only trust the manifest
-    # after the marker is atomically replaced below.
+    # place while this publish refreshes them; file copies and control files are
+    # atomically replaced so readers never observe partial destination files.
     copy_begin = time.time()
     total_files = 0
     manifest_entries: list[str] = []
@@ -827,6 +857,7 @@ def maybe_write_jit_cache_to_remote(
             local_write_dir,
             raise_on_error=True,
             skip_remote_control_files=True,
+            atomic_copy=True,
             copied_relpaths=copied_relpaths,
             progress_log_prefix=(
                 f"maybe_write_jit_cache_to_remote: publishing {env_name}"
@@ -851,25 +882,19 @@ def maybe_write_jit_cache_to_remote(
         )
         return
 
-    manifest_tmp = os.path.join(
-        local_write_dir, f".{JIT_REMOTE_MANIFEST}.{os.getpid()}.tmp"
-    )
     manifest_path = os.path.join(local_write_dir, JIT_REMOTE_MANIFEST)
-    with open(manifest_tmp, "w") as f:
-        for relpath in sorted(set(manifest_entries)):
-            f.write(f"{relpath}\n")
-    os.replace(manifest_tmp, manifest_path)
-
-    marker_tmp = os.path.join(
-        local_write_dir, f".{JIT_REMOTE_DONE_MARKER}.{os.getpid()}.tmp"
+    manifest_content = "".join(
+        f"{relpath}\n" for relpath in sorted(set(manifest_entries))
     )
-    with open(marker_tmp, "w") as f:
-        f.write(
-            f"pid={os.getpid()}\n"
-            f"files={total_files}\n"
-            f"manifest={JIT_REMOTE_MANIFEST}\n"
-        )
-    os.replace(marker_tmp, done_marker)
+    _replace_text_atomic(manifest_path, manifest_content)
+
+    done_marker = os.path.join(local_write_dir, JIT_REMOTE_DONE_MARKER)
+    marker_content = (
+        f"pid={os.getpid()}\n"
+        f"files={total_files}\n"
+        f"manifest={JIT_REMOTE_MANIFEST}\n"
+    )
+    _replace_text_atomic(done_marker, marker_content)
     logging.info(
         "maybe_write_jit_cache_to_remote: published %d files from %s to "
         "WARM_UP_JIT_AND_WRITE_REMOTE=%s (%s) in %.2fs",
