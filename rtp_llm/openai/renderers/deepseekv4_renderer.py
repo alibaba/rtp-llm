@@ -3,24 +3,71 @@ import json
 import logging
 import os
 import sys
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 
 from typing_extensions import override
 
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
-from rtp_llm.openai.api_datatype import ChatCompletionRequest
+from rtp_llm.openai.api_datatype import ChatCompletionRequest, DeltaMessage
 from rtp_llm.openai.renderer_factory_register import register_renderer
-from rtp_llm.openai.renderers.custom_renderer import RendererParams
+from rtp_llm.openai.renderers.custom_renderer import OutputDelta, RendererParams
 from rtp_llm.openai.renderers.reasoning_tool_base_renderer import (
     ReasoningToolBaseRenderer,
+    ReasoningToolStreamStatus,
+)
+from rtp_llm.openai.renderers.sglang_helpers.format_convert_helper import (
+    rtp_tools_to_sglang_tools,
+    streaming_parse_result_to_tool_calls,
 )
 from rtp_llm.openai.renderers.sglang_helpers.function_call.base_format_detector import (
     BaseFormatDetector,
+)
+from rtp_llm.openai.renderers.sglang_helpers.function_call.core_types import (
+    StreamingParseResult,
 )
 from rtp_llm.openai.renderers.sglang_helpers.function_call.deepseekv4_detector import (
     DeepSeekV4Detector,
 )
 from rtp_llm.openai.renderers.sglang_helpers.reasoning_parser import ReasoningParser
+from rtp_llm.utils.base_model_datatypes import GenerateOutput
+
+
+def _dsv4_renderer_debug_enabled() -> bool:
+    return os.environ.get("RTP_LLM_DSV4_RENDERER_DEBUG", "").lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _preview_text(text: str, limit: int = 512) -> str:
+    text = text.replace("\n", "\\n")
+    if len(text) <= limit:
+        return text
+    half = limit // 2
+    return f"{text[:half]}...[{len(text)} chars]...{text[-half:]}"
+
+
+def _split_reasoning_before_dsml(text: str) -> Optional[Tuple[str, str]]:
+    marker = "<｜DSML｜tool_calls>"
+    idx = text.find(marker)
+    if idx == -1:
+        return None
+
+    reasoning_text = (
+        text[:idx].replace("<think>", "").replace("</think>", "").strip()
+    )
+    return reasoning_text, text[idx:]
+
+
+def _longest_suffix_prefix(text: str, tokens: list[str]) -> int:
+    max_len = 0
+    for token in tokens:
+        for length in range(1, min(len(text), len(token) - 1) + 1):
+            if token.startswith(text[-length:]):
+                max_len = max(max_len, length)
+    return max_len
 
 
 class DeepseekV4Renderer(ReasoningToolBaseRenderer):
@@ -268,6 +315,19 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
                 messages, **filtered_config
             )
 
+            if _dsv4_renderer_debug_enabled():
+                logging.info(
+                    "[DeepSeekV4RendererDebug] render_prompt "
+                    "messages=%d tools=%d thinking_mode=%s filtered_config=%s "
+                    "prompt_len=%d prompt_tail=%s",
+                    len(messages),
+                    len(request.tools or []),
+                    thinking_mode,
+                    filtered_config,
+                    len(rendered_prompt),
+                    _preview_text(rendered_prompt[-1024:]),
+                )
+
             logging.debug(
                 f"DeepSeek V4.0 rendered prompt (thinking_mode={thinking_mode}): {rendered_prompt[:200]}..."
             )
@@ -300,6 +360,286 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
                 encoding_module=self.encoding_module, thinking_mode=thinking_mode
             )
         return None
+
+    def _thinking_mode_for_request(self, request: ChatCompletionRequest) -> str:
+        return "thinking" if self.in_think_mode(request) else "chat"
+
+    def _convert_official_tool_calls(
+        self,
+        detector: Optional[BaseFormatDetector],
+        tools: Any,
+        parsed_tool_calls: Any,
+    ):
+        if not detector or not tools or not parsed_tool_calls:
+            return None
+
+        sglang_tools = rtp_tools_to_sglang_tools(tools)
+        calls = []
+        for tool_call in parsed_tool_calls:
+            function = tool_call.get("function", {})
+            arguments = function.get("arguments") or "{}"
+            if isinstance(arguments, str):
+                arguments = json.loads(arguments)
+            tool_item = {
+                "name": function.get("name"),
+                "parameters": arguments,
+            }
+            calls.extend(
+                detector.parse_base_json(
+                    tool_item, sglang_tools, start_index=len(calls)
+                )
+            )
+
+        tool_calls, _ = streaming_parse_result_to_tool_calls(
+            StreamingParseResult(calls=calls)
+        )
+        return tool_calls or None
+
+    async def _parse_full_dsv4_completion(
+        self,
+        status: ReasoningToolStreamStatus,
+        output: GenerateOutput,
+    ) -> Optional[OutputDelta]:
+        raw_text = status.delta_output_string
+        if (
+            not raw_text
+            or not self.encoding_module
+            or not hasattr(self.encoding_module, "parse_message_from_completion_text")
+        ):
+            return None
+
+        thinking_mode = self._thinking_mode_for_request(status.request)
+        try:
+            parsed_msg = self.encoding_module.parse_message_from_completion_text(
+                raw_text, thinking_mode
+            )
+        except Exception as e:
+            if _dsv4_renderer_debug_enabled():
+                logging.warning(
+                    "[DeepSeekV4RendererDebug] official_full_parse_failed "
+                    "thinking_mode=%s error=%r raw_preview=%s",
+                    thinking_mode,
+                    e,
+                    _preview_text(raw_text),
+                )
+            return None
+
+        try:
+            content = parsed_msg.get("content", "")
+            reasoning_content = parsed_msg.get(
+                "reasoning_content", parsed_msg.get("reasoning", "")
+            )
+            tool_calls = self._convert_official_tool_calls(
+                status.detector,
+                status.request.tools,
+                parsed_msg.get("tool_calls", []),
+            )
+        except Exception as e:
+            if _dsv4_renderer_debug_enabled():
+                logging.warning(
+                    "[DeepSeekV4RendererDebug] official_full_parse_convert_failed "
+                    "error=%r parsed_msg=%s",
+                    e,
+                    _preview_text(str(parsed_msg)),
+                )
+            return None
+
+        if _dsv4_renderer_debug_enabled():
+            logging.info(
+                "[DeepSeekV4RendererDebug] official_full_parse_ok "
+                "thinking_mode=%s reasoning_len=%d content_len=%d tool_calls=%d",
+                thinking_mode,
+                len(reasoning_content or ""),
+                len(content or ""),
+                len(tool_calls or []),
+            )
+
+        if tool_calls:
+            status.generating_tool_call = True
+
+        status.delta_output_string = ""
+        return OutputDelta(
+            output_str=DeltaMessage(
+                content=content or None,
+                tool_calls=tool_calls,
+                reasoning_content=reasoning_content or None,
+            ),
+            logprobs=await self._generate_log_probs(status, output),
+            input_length=output.aux_info.input_len,
+            output_length=output.aux_info.output_len,
+            reuse_length=output.aux_info.reuse_len,
+        )
+
+    @override
+    async def _process_reasoning_and_tool_calls(
+        self,
+        status: ReasoningToolStreamStatus,
+        output: GenerateOutput,
+        is_streaming: bool,
+    ) -> Optional[OutputDelta]:
+        if not is_streaming:
+            parsed_delta = await self._parse_full_dsv4_completion(status, output)
+            if parsed_delta is not None:
+                return parsed_delta
+
+        return await super()._process_reasoning_and_tool_calls(
+            status, output, is_streaming
+        )
+
+    def _extract_streaming_reasoning_content(
+        self,
+        reasoning_parser: ReasoningParser,
+        text: str,
+    ) -> Tuple[str, str]:
+        detector = getattr(reasoning_parser, "detector", None)
+        if detector is None:
+            return reasoning_parser.parse_stream_chunk(text)
+
+        think_start = getattr(detector, "think_start_token", "<think>")
+        think_end = getattr(detector, "think_end_token", "</think>")
+        dsml_start = "<｜DSML｜tool_calls>"
+
+        detector._buffer += text
+        current_text = detector._buffer
+
+        if not getattr(detector, "stripped_think_start", False):
+            if think_start in current_text:
+                current_text = current_text.replace(think_start, "", 1)
+                detector.stripped_think_start = True
+                detector._in_reasoning = True
+
+        if not getattr(detector, "_in_reasoning", False):
+            if getattr(detector, "_dsv4_after_think", False):
+                current_text = current_text.lstrip()
+                if not current_text:
+                    detector._buffer = ""
+                    return "", ""
+                detector._buffer = current_text
+                detector._dsv4_after_think = False
+
+            hold_len = _longest_suffix_prefix(
+                current_text, [think_start, think_end, dsml_start]
+            )
+            if hold_len:
+                detector._buffer = current_text[-hold_len:]
+                return "", current_text[:-hold_len]
+            detector._buffer = ""
+            return "", current_text
+
+        end_idx = current_text.find(think_end)
+        dsml_idx = current_text.find(dsml_start)
+        if end_idx != -1 and (dsml_idx == -1 or end_idx < dsml_idx):
+            reasoning_text = current_text[:end_idx].rstrip()
+            normal_text = current_text[end_idx + len(think_end) :].lstrip()
+            detector._buffer = ""
+            detector._in_reasoning = False
+            detector._dsv4_after_think = True
+            return reasoning_text, normal_text
+
+        if dsml_idx != -1:
+            if _dsv4_renderer_debug_enabled():
+                logging.warning(
+                    "[DeepSeekV4RendererDebug] implicit_think_end_before_dsml "
+                    "text_preview=%s",
+                    _preview_text(current_text),
+                )
+            reasoning_text = (
+                current_text[:dsml_idx]
+                .replace(think_start, "")
+                .replace(think_end, "")
+                .strip()
+            )
+            normal_text = current_text[dsml_idx:]
+            detector._buffer = ""
+            detector._in_reasoning = False
+            return reasoning_text, normal_text
+
+        hold_len = _longest_suffix_prefix(current_text, [think_end, dsml_start])
+        if getattr(detector, "stream_reasoning", True):
+            if hold_len:
+                reasoning_text = current_text[:-hold_len]
+                detector._buffer = current_text[-hold_len:]
+            else:
+                reasoning_text = current_text
+                detector._buffer = ""
+            return reasoning_text, ""
+
+        return "", ""
+
+    @override
+    def _extract_reasoning_content(
+        self,
+        reasoning_parser: Optional[ReasoningParser],
+        text: str,
+        is_streaming: bool,
+    ) -> Tuple[str, str]:
+        if is_streaming and reasoning_parser:
+            reasoning_text, remaining_text = self._extract_streaming_reasoning_content(
+                reasoning_parser, text
+            )
+        else:
+            reasoning_text, remaining_text = super()._extract_reasoning_content(
+                reasoning_parser, text, is_streaming
+            )
+        if (
+            reasoning_parser
+            and "<｜DSML｜tool_calls>" in text
+            and "<｜DSML｜tool_calls>" not in remaining_text
+        ):
+            split_result = _split_reasoning_before_dsml(text)
+            if split_result is not None:
+                reasoning_text, remaining_text = split_result
+
+        if _dsv4_renderer_debug_enabled():
+            text_has_dsml = "<｜DSML｜" in text
+            remaining_has_dsml = "<｜DSML｜" in remaining_text
+            logging.info(
+                "[DeepSeekV4RendererDebug] reasoning_extract "
+                "streaming=%s parser=%s input_len=%d reasoning_len=%d "
+                "remaining_len=%d input_has_dsml=%s remaining_has_dsml=%s "
+                "remaining_preview=%s",
+                is_streaming,
+                type(reasoning_parser).__name__ if reasoning_parser else None,
+                len(text),
+                len(reasoning_text),
+                len(remaining_text),
+                text_has_dsml,
+                remaining_has_dsml,
+                _preview_text(remaining_text),
+            )
+            if text_has_dsml and not remaining_has_dsml:
+                logging.warning(
+                    "[DeepSeekV4RendererDebug] reasoning parser consumed DSML "
+                    "tool markup; input_preview=%s",
+                    _preview_text(text),
+                )
+        return reasoning_text, remaining_text
+
+    @override
+    async def _extract_tool_calls_content(
+        self,
+        detector: Optional[BaseFormatDetector],
+        tools: Any,
+        text: str,
+        is_streaming: bool,
+    ):
+        tool_calls, remaining_text = await super()._extract_tool_calls_content(
+            detector, tools, text, is_streaming
+        )
+        if _dsv4_renderer_debug_enabled():
+            logging.info(
+                "[DeepSeekV4RendererDebug] tool_extract "
+                "streaming=%s detector=%s input_len=%d input_has_dsml=%s "
+                "tool_calls=%d remaining_len=%d remaining_preview=%s",
+                is_streaming,
+                type(detector).__name__ if detector else None,
+                len(text),
+                "<｜DSML｜" in text,
+                len(tool_calls or []),
+                len(remaining_text),
+                _preview_text(remaining_text),
+            )
+        return tool_calls, remaining_text
 
     @override
     def _create_reasoning_parser(

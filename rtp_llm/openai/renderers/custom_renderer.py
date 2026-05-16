@@ -843,6 +843,11 @@ class CustomChatRenderer:
             extra_outputs=items[-1].extra_outputs,
         )
 
+    def _should_yield_stream_response(
+        self, response: StreamResponseObject, is_final: bool = False
+    ) -> bool:
+        return True
+
     async def _flush_buffer(
         self,
         buffer_list: List[StreamStatus],
@@ -999,17 +1004,27 @@ class CustomChatRenderer:
                         output, generate_config
                     )
                 delta_list.append(delta)
-            yield await self._generate_stream_response(delta_list, think_status_list)
+            stream_response = await self._generate_stream_response(
+                delta_list, think_status_list
+            )
+            if self._should_yield_stream_response(stream_response):
+                yield stream_response
             if self._check_all_finished(status_list):
                 break
         if index != 0:
-            yield await self._flush_buffer(
+            flush_response = await self._flush_buffer(
                 status_list,
                 generate_config.stop_words_str,
                 generate_config.is_streaming,
                 think_status_list,
             )
-            yield await self._generate_final(status_list, request, think_status_list)
+            if self._should_yield_stream_response(flush_response):
+                yield flush_response
+            final_response = await self._generate_final(
+                status_list, request, think_status_list
+            )
+            if self._should_yield_stream_response(final_response, is_final=True):
+                yield final_response
 
     def _create_empty_delta_sync(self, input_len: int, output_len: int, reuse_len: int):
         return OutputDelta(

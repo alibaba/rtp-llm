@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import re
 from typing import Any, Dict, List
 
@@ -18,6 +19,23 @@ from rtp_llm.openai.renderers.sglang_helpers.function_call.utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _dsv4_detector_debug_enabled() -> bool:
+    return os.environ.get("RTP_LLM_DSV4_RENDERER_DEBUG", "").lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _preview_text(text: str, limit: int = 512) -> str:
+    text = text.replace("\n", "\\n")
+    if len(text) <= limit:
+        return text
+    half = limit // 2
+    return f"{text[:half]}...[{len(text)} chars]...{text[-half:]}"
 
 
 class DeepSeekV4Detector(BaseFormatDetector):
@@ -91,6 +109,7 @@ class DeepSeekV4Detector(BaseFormatDetector):
         self.current_tool_id = -1
         self.encoding_module = encoding_module
         self.thinking_mode = thinking_mode
+        self._in_tool_calls_block = False
 
     def detect_and_parse(self, text: str, tools: List[Tool]) -> StreamingParseResult:
         """
@@ -104,76 +123,29 @@ class DeepSeekV4Detector(BaseFormatDetector):
             StreamingParseResult with parsed tool calls
         """
         if self.bot_token not in text:
+            if _dsv4_detector_debug_enabled():
+                logger.info(
+                    "[DeepSeekV4RendererDebug] detector_no_bot_token "
+                    "text_len=%d has_invoke=%s preview=%s",
+                    len(text),
+                    "<｜DSML｜invoke" in text,
+                    _preview_text(text),
+                )
             return StreamingParseResult(normal_text=text, calls=[])
 
-        logger.info(
-            f"[DeepSeekV4Detector] detect_and_parse called with thinking_mode={self.thinking_mode}, text_length={len(text)}"
-        )
+        if _dsv4_detector_debug_enabled():
+            logger.info(
+                "[DeepSeekV4RendererDebug] detector_detect_and_parse "
+                "thinking_mode=%s text_len=%d bot_pos=%d eot_pos=%d preview=%s",
+                self.thinking_mode,
+                len(text),
+                text.find(self.bot_token),
+                text.find(self.eot_token),
+                _preview_text(text),
+            )
 
-        # Try to use official parser if available
-        if self.encoding_module and hasattr(
-            self.encoding_module, "parse_message_from_completion_text"
-        ):
-            try:
-                logger.info(
-                    f"[DeepSeekV4Detector] Using official parse_message_from_completion_text"
-                )
-                # Use the official high-level parser
-                parsed_msg = self.encoding_module.parse_message_from_completion_text(
-                    text, self.thinking_mode
-                )
-
-                # Extract content and reasoning content. vLLM's current
-                # encoding parser returns "reasoning"; the checkpoint parser
-                # used by RTP-LLM returns "reasoning_content".
-                content = parsed_msg.get("content", "")
-                reasoning_content = parsed_msg.get(
-                    "reasoning_content", parsed_msg.get("reasoning", "")
-                )
-                tool_calls_list = parsed_msg.get("tool_calls", [])
-
-                logger.info(
-                    f"[DeepSeekV4Detector] Official parser succeeded: reasoning={len(reasoning_content)}, content={len(content)}, tool_calls={len(tool_calls_list)}"
-                )
-
-                # Combine reasoning and content as normal_text
-                normal_text_parts = []
-                if reasoning_content:
-                    normal_text_parts.append(reasoning_content)
-                if content:
-                    normal_text_parts.append(content)
-                normal_text = "\n\n".join(normal_text_parts)
-
-                calls = []
-                for tc in tool_calls_list:
-                    # tool_calls are already in OpenAI format with 'function' key
-                    function = tc.get("function", {})
-                    # arguments is a JSON string; convert to dict
-                    arguments = function.get("arguments") or "{}"
-                    arguments_dict = (
-                        json.loads(arguments)
-                        if isinstance(arguments, str)
-                        else arguments
-                    )
-                    tool_item = {
-                        "name": function.get("name"),
-                        "parameters": arguments_dict,  # Pass dict, not JSON string
-                    }
-                    calls.extend(
-                        self.parse_base_json(tool_item, tools, start_index=len(calls))
-                    )
-
-                logger.info(
-                    f"[DeepSeekV4Detector] Returning {len(calls)} parsed tool calls"
-                )
-                return StreamingParseResult(normal_text=normal_text, calls=calls)
-            except Exception as e:
-                logger.warning(
-                    f"[DeepSeekV4Detector] Official parser failed, falling back to regex: {e}"
-                )
-
-        # Fallback to regex-based parsing
-        logger.info(f"[DeepSeekV4Detector] Using regex fallback parser")
+        if _dsv4_detector_debug_enabled():
+            logger.info("[DeepSeekV4RendererDebug] detector_dsml_block_parse_start")
         return self._parse_with_regex(text, tools)
 
     def has_tool_call(self, text: str) -> bool:
@@ -334,6 +306,13 @@ class DeepSeekV4Detector(BaseFormatDetector):
                 re.DOTALL,
             )
             if not function_calls_match:
+                if _dsv4_detector_debug_enabled():
+                    logger.warning(
+                        "[DeepSeekV4RendererDebug] detector_regex_no_complete_block "
+                        "normal_len=%d text_preview=%s",
+                        len(normal_text),
+                        _preview_text(text),
+                    )
                 return StreamingParseResult(normal_text=normal_text, calls=[])
 
             function_calls_content = function_calls_match.group(1)
@@ -342,6 +321,14 @@ class DeepSeekV4Detector(BaseFormatDetector):
             invoke_matches = re.findall(
                 self.invoke_regex, function_calls_content, re.DOTALL
             )
+            if _dsv4_detector_debug_enabled():
+                logger.info(
+                    "[DeepSeekV4RendererDebug] detector_regex_matches "
+                    "normal_len=%d block_len=%d invokes=%d",
+                    len(normal_text),
+                    len(function_calls_content),
+                    len(invoke_matches),
+                )
 
             for func_name, invoke_content, _ in invoke_matches:
                 # Parse parameters from XML format
@@ -355,6 +342,11 @@ class DeepSeekV4Detector(BaseFormatDetector):
                     self.parse_base_json(match_result, tools, start_index=len(calls))
                 )
 
+            if _dsv4_detector_debug_enabled():
+                logger.info(
+                    "[DeepSeekV4RendererDebug] detector_regex_return calls=%d",
+                    len(calls),
+                )
             return StreamingParseResult(normal_text=normal_text, calls=calls)
         except Exception as e:
             logger.error(f"Error in detect_and_parse: {e}")
@@ -370,6 +362,7 @@ class DeepSeekV4Detector(BaseFormatDetector):
         """
         self._buffer += new_text
         current_text = self._buffer
+        normal_prefix = ""
 
         # Check if buffer contains any DSML markers or ends with potential tag prefix
         # This handles partial/streaming DSML content
@@ -382,8 +375,16 @@ class DeepSeekV4Detector(BaseFormatDetector):
             current_text.rstrip().endswith(prefix) for prefix in dsml_prefixes
         )
 
+        if not self._in_tool_calls_block and self.bot_token in current_text:
+            start_idx = current_text.find(self.bot_token)
+            normal_prefix = current_text[:start_idx]
+            current_text = current_text[start_idx + len(self.bot_token) :]
+            self._buffer = current_text
+            self._in_tool_calls_block = True
+
         if (
-            not self.has_tool_call(current_text)
+            not self._in_tool_calls_block
+            and not self.has_tool_call(current_text)
             and not potentially_dsml
             and not ends_with_prefix
         ):
@@ -495,7 +496,16 @@ class DeepSeekV4Detector(BaseFormatDetector):
                     break
 
             # No more invoke blocks found
-            return StreamingParseResult(normal_text="", calls=all_calls)
+            eot_pos = current_text.find(self.eot_token)
+            if eot_pos != -1:
+                trailing_text = current_text[eot_pos + len(self.eot_token) :]
+                self._buffer = trailing_text
+                self._in_tool_calls_block = False
+                if not trailing_text.strip():
+                    self._buffer = ""
+
+            normal_text = normal_prefix if normal_prefix.strip() else ""
+            return StreamingParseResult(normal_text=normal_text, calls=all_calls)
 
         except Exception as e:
             logger.error(f"Error in parse_streaming_increment: {e}")
