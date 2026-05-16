@@ -312,13 +312,49 @@ class BackendRPCServerVisitor:
     async def enqueue(
         self, input: GenerateInput
     ) -> AsyncGenerator[GenerateOutputs, None]:
-        self._validate_input(input)
-        self.check_sp_supported(input)
+        def set_aux_info(e: BaseException) -> None:
+            if getattr(e, "aux_info", None):
+                return
+            aux_info = {
+                "input_len": input.prompt_length,
+                "output_len": 0,
+                "step_output_len": 0,
+                "reuse_len": 0,
+            }
+            role_addrs = input.generate_config.role_addrs or []
+            if role_addrs:
+                aux_info["role_addrs"] = [
+                    role_addr.model_dump(mode="json") for role_addr in role_addrs
+                ]
+                roles = {
+                    str(getattr(role_addr.role, "name", role_addr.role))
+                    for role_addr in role_addrs
+                }
+                aux_info["pd_sep"] = {"PREFILL", "DECODE"}.issubset(roles)
+            e.aux_info = aux_info
 
-        if self.host_service.service_available:
-            await self.route_ips(input)
+        try:
+            input.generate_config.validate()
+            self._validate_input(input)
+            self.check_sp_supported(input)
 
-        return self.model_rpc_client.enqueue(input)
+            if self.host_service.service_available:
+                await self.route_ips(input)
+
+            stream = self.model_rpc_client.enqueue(input)
+        except BaseException as e:
+            set_aux_info(e)
+            raise
+
+        async def stream_with_aux_info():
+            try:
+                async for output in stream:
+                    yield output
+            except BaseException as e:
+                set_aux_info(e)
+                raise
+
+        return stream_with_aux_info()
 
     @torch.inference_mode()
     async def batch_enqueue(self, inputs: list[GenerateInput]) -> list[GenerateOutputs]:
