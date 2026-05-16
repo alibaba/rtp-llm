@@ -3,15 +3,26 @@ import importlib.util
 import json
 import os
 from pathlib import Path
-from unittest import TestCase, main, skipUnless
+from unittest import IsolatedAsyncioTestCase, TestCase, main, skipUnless
+from unittest.mock import AsyncMock, Mock
 
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.openai.api_datatype import (
+    ChatCompletionResponseStreamChoice,
     ChatCompletionRequest,
+    DeltaMessage,
+    FinisheReason,
+    FunctionCall,
     GPTFunctionDefinition,
     GPTToolDefinition,
+    RoleEnum,
+    ToolCall,
 )
 from rtp_llm.openai.renderers.deepseekv4_renderer import DeepseekV4Renderer
+from rtp_llm.openai.renderers.custom_renderer import StreamResponseObject
+from rtp_llm.openai.renderers.reasoning_tool_base_renderer import (
+    ReasoningToolStreamStatus,
+)
 from rtp_llm.openai.renderers.sglang_helpers.entrypoints.openai.protocol import (
     Function,
     Tool,
@@ -19,6 +30,8 @@ from rtp_llm.openai.renderers.sglang_helpers.entrypoints.openai.protocol import 
 from rtp_llm.openai.renderers.sglang_helpers.function_call.deepseekv4_detector import (
     DeepSeekV4Detector,
 )
+from rtp_llm.openai.renderers.sglang_helpers.reasoning_parser import ReasoningParser
+from rtp_llm.utils.base_model_datatypes import AuxInfo, GenerateOutput
 
 
 DSV4_ENCODING_PATH = Path(
@@ -420,46 +433,29 @@ class DeepseekV4DetectorTest(TestCase):
             {"dimensions": {"w": 3, "h": 4}, "precision": 2},
         )
 
-    @skipUnless(
-        VLLM_DSV4_ENCODING_PATH.exists(),
-        "vLLM DeepSeek V4 encoding reference file is not available",
-    )
-    def test_official_parser_matches_vllm_reasoning_and_multiple_tool_calls(self):
-        vllm_encoding = _load_module(
-            "vllm_dsv4_encoding_for_detector_test", VLLM_DSV4_ENCODING_PATH
-        )
+    def test_detector_does_not_use_full_completion_parser_for_dsml_block(self):
+        class FailingEncoding:
+            def parse_message_from_completion_text(self, text, thinking_mode):
+                raise AssertionError("full parser should not be used for DSML blocks")
+
         detector = DeepSeekV4Detector(
-            encoding_module=vllm_encoding, thinking_mode="thinking"
+            encoding_module=FailingEncoding(), thinking_mode="thinking"
         )
         text = (
-            "think step</think>"
-            "Final answer"
-            "\n\n<｜DSML｜tool_calls>\n"
+            "<｜DSML｜tool_calls>\n"
             '<｜DSML｜invoke name="get_weather">\n'
             '<｜DSML｜parameter name="city" string="true">杭州</｜DSML｜parameter>\n'
             '<｜DSML｜parameter name="count" string="false">2</｜DSML｜parameter>\n'
             "</｜DSML｜invoke>\n"
-            '<｜DSML｜invoke name="calculate_area">\n'
-            '<｜DSML｜parameter name="dimensions" string="false">{"w":3,"h":4}</｜DSML｜parameter>\n'
-            "</｜DSML｜invoke>\n"
             "</｜DSML｜tool_calls>"
-            "<｜end▁of▁sentence｜>"
         )
 
-        expected = vllm_encoding.parse_message_from_completion_text(text, "thinking")
         result = detector.detect_and_parse(text, self._tools())
 
+        self.assertEqual(result.normal_text, "")
+        self.assertEqual(len(result.calls), 1)
         self.assertEqual(
-            result.normal_text,
-            "\n\n".join([expected["reasoning"], expected["content"]]),
-        )
-        self.assertEqual(len(result.calls), len(expected["tool_calls"]))
-        self.assertEqual(
-            [json.loads(call.parameters) for call in result.calls],
-            [
-                json.loads(tool_call["function"]["arguments"])
-                for tool_call in expected["tool_calls"]
-            ],
+            json.loads(result.calls[0].parameters), {"city": "杭州", "count": 2}
         )
 
     def test_v32_function_calls_block_is_not_accepted(self):
@@ -476,6 +472,229 @@ class DeepseekV4DetectorTest(TestCase):
 
         self.assertEqual(result.normal_text, text)
         self.assertEqual(result.calls, [])
+
+
+class DeepseekV4ReasoningToolPipelineTest(IsolatedAsyncioTestCase):
+    def _output(self):
+        aux_info = AuxInfo()
+        aux_info.input_len = 10
+        aux_info.output_len = 20
+        aux_info.reuse_len = 0
+        output = Mock(spec=GenerateOutput)
+        output.aux_info = aux_info
+        return output
+
+    async def test_tool_calls_after_unclosed_thinking_are_not_swallowed(self):
+        renderer = _make_renderer(None)
+        renderer._generate_log_probs = AsyncMock(return_value=None)
+
+        request = ChatCompletionRequest(
+            messages=[{"role": "user", "content": "Weather?"}],
+            tools=_rtp_tools(),
+            chat_template_kwargs={"enable_thinking": True},
+        )
+        status = ReasoningToolStreamStatus(
+            request,
+            DeepSeekV4Detector(),
+            ReasoningParser(model_type="deepseek-v3", force_reasoning=True),
+        )
+        status.delta_output_string = (
+            "Let me inspect the request.\n\n"
+            "<｜DSML｜tool_calls>\n"
+            '<｜DSML｜invoke name="get_weather">\n'
+            '<｜DSML｜parameter name="city" string="true">杭州</｜DSML｜parameter>\n'
+            "</｜DSML｜invoke>\n"
+            "</｜DSML｜tool_calls>"
+        )
+
+        delta = await renderer._process_reasoning_and_tool_calls(
+            status, self._output(), is_streaming=False
+        )
+
+        self.assertIsNotNone(delta)
+        self.assertEqual(
+            delta.output_str.reasoning_content, "Let me inspect the request."
+        )
+        self.assertIsNone(delta.output_str.content)
+        self.assertEqual(len(delta.output_str.tool_calls), 1)
+        self.assertEqual(delta.output_str.tool_calls[0].function.name, "get_weather")
+        self.assertEqual(
+            json.loads(delta.output_str.tool_calls[0].function.arguments),
+            {"city": "杭州"},
+        )
+        self.assertEqual(status.delta_output_string, "")
+
+    async def test_non_streaming_full_completion_parser_handles_reasoning_and_tools(
+        self,
+    ):
+        class FullCompletionEncoding:
+            def __init__(self):
+                self.calls = []
+
+            def parse_message_from_completion_text(self, text, thinking_mode):
+                self.calls.append((text, thinking_mode))
+                return {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning_content": "Let me inspect the request.",
+                    "tool_calls": [
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": "get_weather",
+                                "arguments": '{"city": "杭州"}',
+                            },
+                        }
+                    ],
+                }
+
+        encoding = FullCompletionEncoding()
+        renderer = _make_renderer(encoding)
+        renderer._generate_log_probs = AsyncMock(return_value=None)
+
+        request = ChatCompletionRequest(
+            messages=[{"role": "user", "content": "Weather?"}],
+            tools=_rtp_tools(),
+            chat_template_kwargs={"enable_thinking": True},
+        )
+        status = ReasoningToolStreamStatus(
+            request,
+            DeepSeekV4Detector(),
+            ReasoningParser(model_type="deepseek-v3", force_reasoning=True),
+        )
+        raw_text = (
+            "Let me inspect the request.</think>\n\n"
+            "<｜DSML｜tool_calls>\n"
+            '<｜DSML｜invoke name="get_weather">\n'
+            '<｜DSML｜parameter name="city" string="true">杭州</｜DSML｜parameter>\n'
+            "</｜DSML｜invoke>\n"
+            "</｜DSML｜tool_calls><｜end▁of▁sentence｜>"
+        )
+        status.delta_output_string = raw_text
+
+        delta = await renderer._process_reasoning_and_tool_calls(
+            status, self._output(), is_streaming=False
+        )
+
+        self.assertEqual(encoding.calls, [(raw_text, "thinking")])
+        self.assertIsNotNone(delta)
+        self.assertEqual(
+            delta.output_str.reasoning_content, "Let me inspect the request."
+        )
+        self.assertEqual(len(delta.output_str.tool_calls), 1)
+        self.assertEqual(delta.output_str.tool_calls[0].function.name, "get_weather")
+        self.assertEqual(
+            json.loads(delta.output_str.tool_calls[0].function.arguments),
+            {"city": "杭州"},
+        )
+        self.assertEqual(status.delta_output_string, "")
+
+    async def test_streaming_split_think_and_dsml_tags_do_not_leak(self):
+        renderer = _make_renderer(None)
+        renderer._generate_log_probs = AsyncMock(return_value=None)
+
+        request = ChatCompletionRequest(
+            messages=[{"role": "user", "content": "Weather?"}],
+            tools=_rtp_tools(),
+            chat_template_kwargs={"enable_thinking": True},
+        )
+        status = ReasoningToolStreamStatus(
+            request,
+            DeepSeekV4Detector(),
+            ReasoningParser(model_type="deepseek-v3", force_reasoning=True),
+        )
+        output = self._output()
+
+        chunks = [
+            "Let me inspect</thi",
+            "nk>",
+            "\n\n",
+            "<｜DS",
+            "ML｜tool_calls>\n",
+            '<｜DSML｜invoke name="get_weather">\n',
+            '<｜DSML｜parameter name="city" string="true">杭',
+            "州</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>",
+        ]
+
+        reasoning_parts = []
+        content_parts = []
+        tool_names = {}
+        tool_args = {}
+        for chunk in chunks:
+            delta = await renderer._process_single_token_delta(
+                status,
+                chunk,
+                output,
+                stop_words_str=[],
+                stop_word_slice_list=[],
+                is_streaming=True,
+            )
+            if delta is None:
+                continue
+            message = delta.output_str
+            if message.reasoning_content:
+                reasoning_parts.append(message.reasoning_content)
+            if message.content:
+                content_parts.append(message.content)
+            for tool_call in message.tool_calls or []:
+                tool_names.setdefault(tool_call.index, tool_call.function.name)
+                tool_args[tool_call.index] = tool_args.get(tool_call.index, "") + (
+                    tool_call.function.arguments or ""
+                )
+
+        self.assertEqual("".join(reasoning_parts), "Let me inspect")
+        self.assertEqual(content_parts, [])
+        self.assertEqual(tool_names, {0: "get_weather"})
+        self.assertEqual(json.loads(tool_args[0]), {"city": "杭州"})
+        self.assertNotIn("</think>", "".join(reasoning_parts + content_parts))
+        self.assertNotIn("<｜DSML｜", "".join(reasoning_parts + content_parts))
+
+
+class DeepseekV4StreamResponseTest(TestCase):
+    def _response(self, delta: DeltaMessage, finish_reason=None):
+        return StreamResponseObject(
+            choices=[
+                ChatCompletionResponseStreamChoice(
+                    index=0, delta=delta, finish_reason=finish_reason
+                )
+            ]
+        )
+
+    def test_empty_intermediate_stream_chunks_are_suppressed(self):
+        renderer = _make_renderer(None)
+
+        self.assertFalse(
+            renderer._should_yield_stream_response(
+                self._response(DeltaMessage(content=""))
+            )
+        )
+        self.assertTrue(
+            renderer._should_yield_stream_response(
+                self._response(DeltaMessage(role=RoleEnum.assistant, content=""))
+            )
+        )
+        self.assertTrue(
+            renderer._should_yield_stream_response(
+                self._response(
+                    DeltaMessage(
+                        tool_calls=[
+                            ToolCall(
+                                index=0,
+                                type="function",
+                                function=FunctionCall(name="get_weather", arguments=""),
+                            )
+                        ]
+                    )
+                )
+            )
+        )
+        self.assertTrue(
+            renderer._should_yield_stream_response(
+                self._response(
+                    DeltaMessage(content=""), finish_reason=FinisheReason.tool_calls
+                )
+            )
+        )
 
 
 if __name__ == "__main__":
