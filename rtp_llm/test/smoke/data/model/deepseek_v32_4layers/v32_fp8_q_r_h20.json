@@ -15,6 +15,52 @@
                 "response": "和经济-balancedoyerducksenembedded-servicesheet僚和监督",
                 "finished": true
             }
+        },
+        {
+            "endpoint": "/",
+            "expected_status_code": 500,
+            "query": {
+                "prompt": "invalid sampling config",
+                "generate_config": {
+                    "max_new_tokens": 8,
+                    "top_p": -1.0,
+                    "top_k": 1,
+                    "aux_info": true
+                }
+            },
+            "result": {
+                "error_code": 507,
+                "error_code_str": "507_ERROR_INPUT_FORMAT_ERROR",
+                "message": "top_p -1.0 is wrong data type",
+                "aux_info": {
+                    "output_len": 0,
+                    "step_output_len": 0,
+                    "reuse_len": 0
+                }
+            }
+        },
+        {
+            "endpoint": "/",
+            "expected_status_code": 500,
+            "query": {
+                "prompt": "invalid top k sampling config",
+                "generate_config": {
+                    "max_new_tokens": 8,
+                    "top_p": 1.0,
+                    "top_k": -1,
+                    "aux_info": true
+                }
+            },
+            "result": {
+                "error_code": 507,
+                "error_code_str": "507_ERROR_INPUT_FORMAT_ERROR",
+                "message": "top_k -1 is wrong data type",
+                "aux_info": {
+                    "output_len": 0,
+                    "step_output_len": 0,
+                    "reuse_len": 0
+                }
+            }
         }
     ]
 }

@@ -2,6 +2,7 @@ import asyncio
 import logging
 import queue
 import threading
+from dataclasses import asdict
 from typing import Any, AsyncGenerator, Dict, Iterator, List, Optional, Tuple, Union
 
 import torch
@@ -176,7 +177,7 @@ class Pipeline(object):
             len(self.tokenizer),
             self._special_tokens,
             self.tokenizer,
-            **kwargs
+            **kwargs,
         )
         mm_inputs = [MultimodalInput(url) for url in urls] if urls is not None else []
 
@@ -328,7 +329,7 @@ class Pipeline(object):
         decoded_batch = self.tokenizer.batch_decode(
             token_lists_to_decode,
             skip_special_tokens=generate_config.skip_special_tokens,
-            **kwargs
+            **kwargs,
         )
         newly_decoded_texts = [text.rstrip("\uFFFD") for text in decoded_batch]
         all_texts = newly_decoded_texts
@@ -343,7 +344,7 @@ class Pipeline(object):
                 stop_word_str_list,
                 stop_word_str_slices,
                 "",
-                **kwargs
+                **kwargs,
             )
 
             if generate_config.out_prefix:
@@ -428,7 +429,7 @@ class Pipeline(object):
                 stop_word_str_list,
                 stop_word_str_slices,
                 token_buffers[i],
-                **kwargs
+                **kwargs,
             )
 
             if generate_config.out_prefix:
@@ -475,17 +476,44 @@ class Pipeline(object):
         stop_word_ids = generate_config.stop_words_list
         stop_word_id_slices = get_stop_word_slices(stop_word_ids)
 
-        stream: AsyncGenerator[GenerateOutputs, None] = (
-            await self.backend_rpc_server_visitor.enqueue(input)
-        )
-
         decoding_states: List[DecodingState] = []
         ouput_tokens_list: List[torch.Tensor] = []
         token_buffers: List[str] = []
         generate_outputs_cache = GenerateOutputs()
 
+        async def backend_stream():
+            try:
+                stream: AsyncGenerator[GenerateOutputs, None] = (
+                    await self.backend_rpc_server_visitor.enqueue(input)
+                )
+                async for generate_outputs in stream:
+                    yield generate_outputs
+            except BaseException as e:
+                aux_info = None
+                if generate_outputs_cache.generate_outputs:
+                    aux_info = generate_outputs_cache.generate_outputs[0].aux_info
+                aux_info_dict = asdict(aux_info) if aux_info is not None else {}
+                aux_info_dict.setdefault("input_len", input.prompt_length)
+                aux_info_dict.setdefault("output_len", 0)
+                aux_info_dict.setdefault("step_output_len", 0)
+                aux_info_dict.setdefault("reuse_len", 0)
+                role_addrs = input.generate_config.role_addrs or []
+                if role_addrs:
+                    aux_info_dict["role_addrs"] = [
+                        role_addr.model_dump(mode="json") for role_addr in role_addrs
+                    ]
+                    roles = {
+                        str(getattr(role_addr.role, "name", role_addr.role))
+                        for role_addr in role_addrs
+                    }
+                    aux_info_dict.setdefault(
+                        "pd_sep", {"PREFILL", "DECODE"}.issubset(roles)
+                    )
+                e.aux_info = aux_info_dict
+                raise
+
         # TODO(xinfei.sxf) add batch and stop test
-        async for generate_outputs in stream:
+        async for generate_outputs in backend_stream():
             if not generate_outputs_cache.generate_outputs:
                 generate_outputs_cache.generate_outputs = (
                     generate_outputs.generate_outputs
@@ -519,7 +547,7 @@ class Pipeline(object):
                     decoding_states,
                     token_buffers,
                     ouput_tokens_list,
-                    **kwargs
+                    **kwargs,
                 )
             else:
                 (
@@ -534,7 +562,7 @@ class Pipeline(object):
                     stop_word_ids,
                     stop_word_id_slices,
                     ouput_tokens_list,
-                    **kwargs
+                    **kwargs,
                 )
 
             kmonitor.report(
