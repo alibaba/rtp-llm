@@ -21,6 +21,7 @@ _DSV4_FP8_TESTS = [
     "test_compressor_prepare_metadata_varlen",
     "test_compressor_raw_dispatch",
     "test_compressor_varlen_raw_path",
+    "test_decode_swa_write",
     "test_dsv4_kv_cache",
     "test_dsv4_persistent_topk",
     "test_dsv4_top_k_per_row_prefill",
