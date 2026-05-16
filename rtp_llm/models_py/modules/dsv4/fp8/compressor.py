@@ -41,6 +41,9 @@ import torch
 import torch.nn as nn
 
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
+from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+_CUBLAS_GEMM_BF16_BF16_FP32 = getattr(rtp_llm_ops, "cublas_gemm_bf16_bf16_fp32", None)
 
 
 def _compressor_meta_fused_enabled() -> bool:
@@ -50,6 +53,21 @@ def _compressor_meta_fused_enabled() -> bool:
     so one env enables the full iter5-iter8 fused-prepare family.
     """
     return os.environ.get("DSV4_FUSED_PREPARE", "0").strip() == "1"
+
+
+def _linear_bf16_bf16_fp32(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    """F.linear(x, weight) with BF16 operands and FP32 accumulation/output."""
+    x_bf16 = x.to(torch.bfloat16)
+    w_bf16 = weight.to(torch.bfloat16)
+    if x_bf16.is_cuda and w_bf16.is_cuda and _CUBLAS_GEMM_BF16_BF16_FP32 is not None:
+        leading_shape = x_bf16.shape[:-1]
+        x_2d = x_bf16.reshape(-1, x_bf16.shape[-1]).contiguous()
+        out_2d = _CUBLAS_GEMM_BF16_BF16_FP32(x_2d, w_bf16.contiguous())
+        return out_2d.reshape(*leading_shape, w_bf16.shape[0])
+    raise RuntimeError(
+        "cublas_gemm_bf16_bf16_fp32 is required for DSV4 FP8 compressor "
+        "BF16 GEMM; ensure the op is built and both input/weight are CUDA tensors"
+    )
 
 
 from rtp_llm.models_py.modules.dsv4.cp import (
@@ -160,9 +178,10 @@ class CompressorFP8(nn.Module):
             KV_ENTRY_BYTES if head_dim == KV_HEAD_DIM else INDEXER_ENTRY_BYTES
         )
 
-        # ape/wkv/wgate stay FP32 — accumulation happens in FP32 inside the
-        # state pool; vLLM keeps the same convention. Register ape as a
-        # non-trainable Parameter so .to(device) follows the module.
+        # ape stays FP32. wkv/wgate are stored as BF16, while the fused
+        # projection below uses BF16 operands with FP32 accumulation/output.
+        # Register ape as a non-trainable Parameter so .to(device) follows the
+        # module.
         self.ape = nn.Parameter(
             compressor_weights["ape"].float().contiguous(), requires_grad=False
         )
@@ -590,9 +609,7 @@ class CompressorFP8(nn.Module):
         device = x.device
         out_dim = (1 + self.overlap) * self.head_dim
         with record_function_range("dsv4.fp8.compressor.prefill.fused_linear"):
-            fused_out = torch.nn.functional.linear(
-                x.to(self._wkv_wgate_fused.dtype), self._wkv_wgate_fused
-            )
+            fused_out = _linear_bf16_bf16_fp32(x, self._wkv_wgate_fused)
             kv, score = fused_out[..., :out_dim], fused_out[..., out_dim:]
 
         cp_ctx = self._cp_ctx
@@ -695,9 +712,7 @@ class CompressorFP8(nn.Module):
 
         device = x.device
         out_dim = (1 + self.overlap) * self.head_dim
-        fused_out = torch.nn.functional.linear(
-            x.to(self._wkv_wgate_fused.dtype), self._wkv_wgate_fused
-        )
+        fused_out = _linear_bf16_bf16_fp32(x, self._wkv_wgate_fused)
         kv, score = fused_out[..., :out_dim], fused_out[..., out_dim:]
 
         kv_flat = kv.reshape(T, -1).contiguous()
