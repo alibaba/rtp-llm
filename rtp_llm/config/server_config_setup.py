@@ -1,7 +1,9 @@
 import json
 import logging
 import os
+import shutil
 import socket
+import time
 from typing import Optional
 
 import torch
@@ -15,7 +17,9 @@ from rtp_llm.ops import (
     RoleType,
     SpeculativeType,
 )
-from rtp_llm.utils.fuser import fetch_remote_file_to_local
+from rtp_llm.utils.fuser import MountRwMode, fetch_remote_file_to_local
+
+JIT_CACHE_ENV_NAMES = ("DG_JIT_CACHE_DIR", "TRITON_CACHE_DIR", "TILELANG_CACHE_DIR")
 
 
 def auto_configure_deepep(
@@ -472,6 +476,136 @@ def setup_cuda_device_and_accl_env(local_rank: int) -> None:
             )
 
 
+def _local_jit_cache_dir() -> Optional[str]:
+    """${HIPPO_APP_WORKDIR}/jit_cache when HIPPO_APP_WORKDIR is set, else None."""
+    workdir = os.environ.get("HIPPO_APP_WORKDIR")
+    if not workdir:
+        return None
+    return os.path.join(workdir, "jit_cache")
+
+
+def _copytree_into(src: str, dst: str) -> int:
+    """Recursive copy mirroring `cp -a src/. dst/`. Returns number of files copied.
+
+    Existing files in `dst` are overwritten so that a stale local cache cannot mask
+    fresh entries provided by the read-only baseline.
+    """
+    files_copied = 0
+    for root, _, files in os.walk(src):
+        rel = os.path.relpath(root, src)
+        target_root = dst if rel == "." else os.path.join(dst, rel)
+        os.makedirs(target_root, exist_ok=True)
+        for fn in files:
+            src_path = os.path.join(root, fn)
+            dst_path = os.path.join(target_root, fn)
+            try:
+                shutil.copy2(src_path, dst_path)
+                files_copied += 1
+            except Exception as e:
+                logging.warning(
+                    "_copytree_into: failed to copy %s -> %s: %s",
+                    src_path,
+                    dst_path,
+                    e,
+                )
+    return files_copied
+
+
+def setup_jit_cache_envs(py_env_configs: PyEnvConfigs) -> None:
+    """Set DG_JIT_CACHE_DIR / TRITON_CACHE_DIR / TILELANG_CACHE_DIR.
+
+    Resolution order, highest priority first:
+      1. REMOTE_JIT_DIR (jit_config.remote_jit_dir): RW-fuse the URI and override
+         all three envs to the resulting local mount.
+      2. REMOTE_JIT_READ_DIR (jit_config.remote_jit_read_dir): RO-fuse the URI,
+         recursively copy contents into ${HIPPO_APP_WORKDIR}/jit_cache, then point
+         all three envs at that local dir.
+      3. Default: when ${HIPPO_APP_WORKDIR} is set, fill any unset env with
+         ${HIPPO_APP_WORKDIR}/jit_cache. When HIPPO_APP_WORKDIR is unset (e.g.
+         local dev), leave envs alone.
+
+    Modes 1 and 2 are mutually exclusive; setting both logs a warning and uses 1.
+    """
+    jit_config = py_env_configs.jit_config
+    remote_rw = (jit_config.remote_jit_dir or "").strip()
+    remote_ro = (jit_config.remote_jit_read_dir or "").strip()
+    target_local_dir = _local_jit_cache_dir()
+
+    # Mode 1: REMOTE_JIT_DIR (RW)
+    if remote_rw:
+        if remote_ro:
+            logging.warning(
+                "setup_jit_cache_envs: both REMOTE_JIT_DIR=%s and REMOTE_JIT_READ_DIR=%s "
+                "are set; REMOTE_JIT_DIR (rw) wins, REMOTE_JIT_READ_DIR ignored",
+                remote_rw,
+                remote_ro,
+            )
+        local_rw = fetch_remote_file_to_local(remote_rw, MountRwMode.RWMODE_RW)
+        if not local_rw:
+            raise RuntimeError(
+                f"REMOTE_JIT_DIR={remote_rw} fuse returned empty local path"
+            )
+        os.makedirs(local_rw, exist_ok=True)
+        for name in JIT_CACHE_ENV_NAMES:
+            os.environ[name] = local_rw
+        logging.info(
+            "setup_jit_cache_envs: REMOTE_JIT_DIR=%s -> %s; set %s=%s",
+            remote_rw,
+            local_rw,
+            list(JIT_CACHE_ENV_NAMES),
+            local_rw,
+        )
+        return
+
+    # Mode 2: REMOTE_JIT_READ_DIR (RO + copy)
+    if remote_ro:
+        if not target_local_dir:
+            raise RuntimeError(
+                f"REMOTE_JIT_READ_DIR={remote_ro} requires HIPPO_APP_WORKDIR to be set"
+            )
+        local_ro = fetch_remote_file_to_local(remote_ro, MountRwMode.RWMODE_RO)
+        if not local_ro:
+            raise RuntimeError(
+                f"REMOTE_JIT_READ_DIR={remote_ro} fuse returned empty local path"
+            )
+        os.makedirs(target_local_dir, exist_ok=True)
+        copy_begin = time.time()
+        n_files = _copytree_into(local_ro, target_local_dir)
+        for name in JIT_CACHE_ENV_NAMES:
+            os.environ[name] = target_local_dir
+        logging.info(
+            "setup_jit_cache_envs: seeded %d files from REMOTE_JIT_READ_DIR=%s (%s) "
+            "into %s in %.2fs; set %s=%s",
+            n_files,
+            remote_ro,
+            local_ro,
+            target_local_dir,
+            time.time() - copy_begin,
+            list(JIT_CACHE_ENV_NAMES),
+            target_local_dir,
+        )
+        return
+
+    # Mode 3: default — only set envs that are not already set, only when HIPPO_APP_WORKDIR exists
+    if not target_local_dir:
+        logging.info(
+            "setup_jit_cache_envs: HIPPO_APP_WORKDIR not set; leaving JIT envs as-is"
+        )
+        return
+    os.makedirs(target_local_dir, exist_ok=True)
+    for name in JIT_CACHE_ENV_NAMES:
+        existing = os.environ.get(name)
+        if existing:
+            logging.info(
+                "setup_jit_cache_envs: %s already set to %s; not overriding",
+                name,
+                existing,
+            )
+            continue
+        os.environ[name] = target_local_dir
+        logging.info("setup_jit_cache_envs: %s=%s (default)", name, target_local_dir)
+
+
 def setup_and_configure_server(py_env_configs: PyEnvConfigs):
     """
     Build parallelism_config from env and run auto_configure_deepep.
@@ -481,6 +615,7 @@ def setup_and_configure_server(py_env_configs: PyEnvConfigs):
         py_env_configs: PyEnvConfigs object to configure
     """
     setup_default_args(py_env_configs)
+    setup_jit_cache_envs(py_env_configs)
     fetch_model_files_to_local(py_env_configs)
     ll_num_max_token = py_env_configs.concurrency_config.concurrency_limit
     sp_type = py_env_configs.sp_config.type  # Get SpeculativeType enum value
