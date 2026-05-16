@@ -207,6 +207,16 @@ py_test(
 )
 
 py_test(
+    name = "test_indexer_q_fp8_quant_perf",
+    srcs = ["test_indexer_q_fp8_quant_perf.py"],
+    deps = [
+        ":dsv4_kernel_perf_utils",
+        "//rtp_llm/models_py:modules",
+    ],
+    tags = ["manual", "H20", "SM100_ARM"],
+)
+
+py_test(
     name = "test_cp_restore_perf",
     srcs = ["test_cp_restore_perf.py"],
     deps = [

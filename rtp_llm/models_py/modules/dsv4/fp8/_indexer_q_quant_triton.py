@@ -24,12 +24,15 @@ Public API:
 
 from __future__ import annotations
 
+import os
+
 import torch
 import triton
 import triton.language as tl
 
 INDEXER_HEAD_DIM = 128
 FP8_E4M3_MAX = 448.0
+DEFAULT_GROUP_HEADS = 8
 
 
 @triton.jit(do_not_specialize=["BSH"])
@@ -65,9 +68,59 @@ def _indexer_q_fp8_fold_kernel(
     tl.store(w_fold_ptr + pid, w * scale)
 
 
+@triton.jit
+def _indexer_q_fp8_fold_group_heads_kernel(
+    q_ptr,  # [M, H, D] bf16
+    w_ptr,  # [M, H]    bf16/fp32
+    q_fp8_ptr,  # [M, H, D] fp8e4nv (uint8 view)
+    w_fold_ptr,  # [M, H]    fp32
+    H: tl.constexpr,
+    D: tl.constexpr,
+    fp8_max: tl.constexpr,
+    GROUP_HEADS: tl.constexpr,
+):
+    """One program handles several contiguous indexer heads for one token."""
+    pid_m = tl.program_id(0).to(tl.int64)
+    head_tile = tl.program_id(1).to(tl.int64)
+
+    h_off = head_tile * GROUP_HEADS + tl.arange(0, GROUP_HEADS)
+    d_off = tl.arange(0, D)
+    head_mask = h_off < H
+    q_offsets = (pid_m * H + h_off[:, None]) * D + d_off[None, :]
+
+    q = tl.load(q_ptr + q_offsets, mask=head_mask[:, None], other=0.0).to(tl.float32)
+    absmax = tl.max(tl.abs(q), axis=1)
+    scale = tl.maximum(absmax / fp8_max, 1e-12)
+
+    q_fp8 = (q / scale[:, None]).to(tl.float8e4nv)
+    tl.store(
+        (q_fp8_ptr + q_offsets).to(tl.pointer_type(tl.uint8)),
+        q_fp8.to(tl.uint8, bitcast=True),
+        mask=head_mask[:, None],
+    )
+
+    w_offsets = pid_m * H + h_off
+    w = tl.load(w_ptr + w_offsets, mask=head_mask, other=0.0).to(tl.float32)
+    tl.store(w_fold_ptr + w_offsets, w * scale, mask=head_mask)
+
+
+def _selected_group_heads(group_heads: int | None) -> int:
+    if group_heads is None:
+        raw = os.environ.get("DSV4_INDEXER_Q_FP8_GROUP_HEADS")
+        group_heads = int(raw) if raw else DEFAULT_GROUP_HEADS
+    if group_heads not in (1, 2, 4, 8):
+        raise ValueError(
+            f"invalid DSV4_INDEXER_Q_FP8_GROUP_HEADS={group_heads}; "
+            "expected one of 1, 2, 4, 8"
+        )
+    return group_heads
+
+
 def indexer_q_fp8_quant_fold(
     q_bf16: torch.Tensor,  # [B, S, H, D] bf16, D=128
     weights: torch.Tensor,  # [B, S, H]    bf16 or fp32
+    *,
+    group_heads: int | None = None,
 ):
     """Per-(token, head) FP8 quant of indexer Q + scale-fold into weights.
 
@@ -90,14 +143,29 @@ def indexer_q_fp8_quant_fold(
     if BSH == 0:
         return q_fp8, w_fold
 
-    _indexer_q_fp8_fold_kernel[(BSH,)](
-        q_bf16,
-        weights,
-        q_fp8,
-        w_fold,
-        BSH=BSH,
-        D=D,
-        fp8_max=FP8_E4M3_MAX,
-        num_warps=4,
-    )
+    selected_group_heads = _selected_group_heads(group_heads)
+    if selected_group_heads > 1 and D == INDEXER_HEAD_DIM:
+        grid = (B * S, triton.cdiv(H, selected_group_heads))
+        _indexer_q_fp8_fold_group_heads_kernel[grid](
+            q_bf16,
+            weights,
+            q_fp8,
+            w_fold,
+            H=H,
+            D=D,
+            fp8_max=FP8_E4M3_MAX,
+            GROUP_HEADS=selected_group_heads,
+            num_warps=4,
+        )
+    else:
+        _indexer_q_fp8_fold_kernel[(BSH,)](
+            q_bf16,
+            weights,
+            q_fp8,
+            w_fold,
+            BSH=BSH,
+            D=D,
+            fp8_max=FP8_E4M3_MAX,
+            num_warps=4,
+        )
     return q_fp8, w_fold

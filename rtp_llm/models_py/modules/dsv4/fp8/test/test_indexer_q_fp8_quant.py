@@ -38,6 +38,25 @@ def test_quant_round_trip():
     assert rel.amax().item() < 0.15, f"fp8 precision exceeded: {rel.amax().item()}"
 
 
+def test_grouped_heads_match_row_kernel():
+    """Grouped-head variants must preserve the original per-head byte output."""
+    for M in (1, 7, 257):
+        for w_dtype in (torch.bfloat16, torch.float32):
+            torch.manual_seed(1000 + M)
+            B, S, H, D = 1, M, 64, INDEXER_HEAD_DIM
+            q = torch.randn(B, S, H, D, dtype=torch.bfloat16, device="cuda") * 0.5
+            w = torch.randn(B, S, H, dtype=w_dtype, device="cuda")
+            ref_q, ref_w = indexer_q_fp8_quant_fold(q, w, group_heads=1)
+            for group_heads in (2, 4, 8):
+                cand_q, cand_w = indexer_q_fp8_quant_fold(
+                    q, w, group_heads=group_heads
+                )
+                assert torch.equal(
+                    cand_q.view(torch.uint8), ref_q.view(torch.uint8)
+                ), f"group_heads={group_heads}, M={M}, w_dtype={w_dtype} FP8 mismatch"
+                torch.testing.assert_close(cand_w, ref_w, rtol=0, atol=0)
+
+
 def test_score_equivalence():
     """Verify the math identity:
        sum_h ReLU(q_real · k) * w == sum_h ReLU(q_fp8 · k_dequant) * w_fold
@@ -120,6 +139,7 @@ def test_zero_input():
 if __name__ == "__main__":
     print("== Correctness ==")
     test_quant_round_trip()
+    test_grouped_heads_match_row_kernel()
     test_score_equivalence()
     test_negative_weights_ok()
     test_zero_input()
