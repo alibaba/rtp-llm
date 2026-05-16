@@ -32,7 +32,7 @@ import torch
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 _HAS_OP = hasattr(rtp_llm_ops, "dsv4_top_k_per_row_prefill")
-_HAS_INDEXED_OP = hasattr(rtp_llm_ops, "dsv4_top_k_per_row_prefill_indexed")
+_HAS_FAST_TOPK = hasattr(rtp_llm_ops, "fast_topk_v2_variable")
 
 
 # ---------------------------------------------------------------------------
@@ -51,7 +51,7 @@ def _make(num_rows: int, max_T: int, lens, *, seed: int = 0):
     return logits, row_starts, row_ends
 
 
-def _run(logits, row_starts, row_ends, K):
+def _run(logits, row_starts, row_ends, K, *, force_radix_sort: bool = False):
     N = logits.size(0)
     out = torch.full((N, K), -1, dtype=torch.int32, device=logits.device)
     rtp_llm_ops.dsv4_top_k_per_row_prefill(
@@ -63,24 +63,16 @@ def _run(logits, row_starts, row_ends, K):
         logits.stride(0),
         logits.stride(1),
         K,
+        force_radix_sort,
     )
     return out
 
 
-def _run_indexed(logits, row_starts, row_ends, row_indices, K):
+def _run_fast_topk(logits, row_starts, row_ends, K):
     N = logits.size(0)
     out = torch.full((N, K), -1, dtype=torch.int32, device=logits.device)
-    rtp_llm_ops.dsv4_top_k_per_row_prefill_indexed(
-        logits,
-        row_starts,
-        row_ends,
-        row_indices,
-        out,
-        N,
-        logits.stride(0),
-        logits.stride(1),
-        K,
-    )
+    lengths = (row_ends - row_starts).contiguous()
+    rtp_llm_ops.fast_topk_v2_variable(logits, out, lengths, row_starts.contiguous(), K)
     return out
 
 
@@ -170,18 +162,30 @@ def test_radix_branch_above_threshold():
     _assert_equiv(out, logits, rs, re, K=64, tag="N>12288 radix tail")
 
 
-def test_indexed_row_schedule_writes_original_rows():
-    """Explicit row schedule changes launch order only, not output rows."""
-    if not _HAS_INDEXED_OP:
-        print("  [indexed schedule] SKIP: op not built")
-        return
+def test_force_radix_sort():
+    """force_radix_sort=True routes every row through the radix final pass."""
     lens = [128, 4096, 256, 8192, 64, 2048, 1024, 16]
     logits, rs, re = _make(len(lens), 8192, lens, seed=41)
-    row_indices = torch.tensor(
-        [7, 0, 6, 1, 5, 2, 4, 3], dtype=torch.int32, device="cuda"
-    )
-    out = _run_indexed(logits, rs, re, row_indices, K=64)
-    _assert_equiv(out, logits, rs, re, K=64, tag="indexed schedule")
+    out = _run(logits, rs, re, K=64, force_radix_sort=True)
+    _assert_equiv(out, logits, rs, re, K=64, tag="force radix")
+
+
+def test_fast_topk_v2_short_inputs_topk_512_1024():
+    """Short prefill policy uses fast_topk_v2_variable for K=512/1024."""
+    if not _HAS_FAST_TOPK:
+        print("SKIP: rtp_llm_ops.fast_topk_v2_variable not built")
+        return
+
+    starts = torch.tensor([0, 17, 256, 2048], dtype=torch.int32, device="cuda")
+    lens = torch.tensor([1536, 1200, 2048, 64], dtype=torch.int32, device="cuda")
+    ends = starts + lens
+    max_T = int(ends.max().item())
+    g = torch.Generator(device="cuda").manual_seed(42)
+    logits = torch.randn(starts.numel(), max_T, device="cuda", generator=g)
+
+    for K in (512, 1024):
+        out = _run_fast_topk(logits, starts, ends, K)
+        _assert_equiv(out, logits, starts, ends, K, tag=f"fast_topk_v2_variable K={K}")
 
 
 def test_zero_length_row():
@@ -264,7 +268,8 @@ if __name__ == "__main__":
     test_short_rows_padding()
     test_long_T_radix_inside_block()
     test_radix_branch_above_threshold()
-    test_indexed_row_schedule_writes_original_rows()
+    test_force_radix_sort()
+    test_fast_topk_v2_short_inputs_topk_512_1024()
     test_zero_length_row()
     print("\n== Benchmark ==")
     bench_prefill_sweep()

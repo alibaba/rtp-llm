@@ -22,7 +22,7 @@ What this class does NOT do — by design:
 from __future__ import annotations
 
 import os
-from typing import Dict, NamedTuple, Optional, Tuple
+from typing import Dict, NamedTuple, Optional
 
 import torch
 import torch.nn as nn
@@ -62,63 +62,12 @@ def _flat_1d(t: torch.Tensor) -> torch.Tensor:
     return t.reshape(-1).contiguous()
 
 
-def _build_cp_zigzag_topk_row_order(
-    chunk_lengths_per_req: Optional[Tuple[int, ...]],
-    total_rows: int,
-    device: torch.device,
-) -> Optional[torch.Tensor]:
-    """Return an indexed TopK launch order for rank-local zigzag CP rows.
-
-    ZigZagProcessor lays out each request's local rows as
-    ``[front_half, back_half]``. Launching the TopK kernel in that raw order
-    can put similarly expensive rows into the same kernel wave. The indexed
-    kernel still writes results to the original row, so scheduling
-    ``front0, back0, front1, back1, ...`` is a correctness-neutral load
-    balancing hint.
-
-    ``None`` means "use natural row order". That is intentional for small
-    inputs and for mismatched metadata, where correctness is unaffected and
-    the extra row-order tensor is not worth building.
-    """
-    if total_rows <= 0:
-        return None
-    if not chunk_lengths_per_req:
-        chunk_lengths_per_req = (total_rows,)
-    if sum(int(length) for length in chunk_lengths_per_req) != total_rows:
-        return None
-
-    row_order_parts = []
-    offset = 0
-    reordered = False
-    for raw_len in chunk_lengths_per_req:
-        length = int(raw_len)
-        if length <= 0:
-            continue
-        if length < 2 or length % 2 != 0:
-            row_order_parts.append(
-                torch.arange(offset, offset + length, device=device, dtype=torch.int32)
-            )
-            offset += length
-            continue
-        half = length // 2
-        lo = torch.arange(offset, offset + half, device=device, dtype=torch.int32)
-        hi = torch.arange(
-            offset + half, offset + length, device=device, dtype=torch.int32
-        )
-        row_order_parts.append(torch.stack((lo, hi), dim=1).reshape(-1).contiguous())
-        offset += length
-        reordered = True
-    if not reordered or not row_order_parts:
-        return None
-    return torch.cat(row_order_parts, dim=0).contiguous()
-
-
 # Persistent radix-select TopK — vendored CUDA kernel binding. Same gate
 # as the BF16 class so a single env knob disables both paths.
 _PERSISTENT_TOPK_OK = hasattr(rtp_llm_ops, "dsv4_persistent_topk")
-_INDEXED_PREFILL_TOPK_OK = hasattr(rtp_llm_ops, "dsv4_top_k_per_row_prefill_indexed")
+_FAST_PREFILL_TOPK_OK = hasattr(rtp_llm_ops, "fast_topk_v2_variable")
 _PERSISTENT_TOPK_WORKSPACE_SIZE = 1024 * 1024  # 1 MB
-_CP_TOPK_ROW_ORDER_MIN_ROWS = 12 * 1024
+_FAST_PREFILL_TOPK_MAX_INPUT_TOKENS = 12 * 1024
 _persistent_topk_workspace_cache: Dict[torch.device, torch.Tensor] = {}
 
 
@@ -128,10 +77,49 @@ def _persistent_topk_enabled() -> bool:
     return os.environ.get("DSV4_PERSISTENT_TOPK", "1") != "0"
 
 
-def _cp_topk_row_order_enabled() -> bool:
-    if not _INDEXED_PREFILL_TOPK_OK:
+def _fp8_prefill_fast_topk_enabled() -> bool:
+    if not _FAST_PREFILL_TOPK_OK:
         return False
-    return os.environ.get("DSV4_CP_TOPK_ROW_ORDER", "0") == "1"
+    return os.environ.get("DSV4_PREFILL_FAST_TOPK", "1") != "0"
+
+
+def _fp8_prefill_topk_force_radix_sort() -> bool:
+    return os.environ.get("DSV4_PREFILL_TOPK_FORCE_RADIX", "1") != "0"
+
+
+def _run_prefill_topk(
+    logits: torch.Tensor,
+    row_starts: torch.Tensor,
+    row_ends: torch.Tensor,
+    out: torch.Tensor,
+    topk: int,
+    compress_ratio: int,
+) -> None:
+    # ``logits`` is over compressed K tokens. Convert back to input-token
+    # length so the 16k policy matches the user-visible prefill length.
+    estimated_input_tokens = int(logits.size(1)) * int(compress_ratio)
+    if (
+        _fp8_prefill_fast_topk_enabled()
+        and int(topk) in (512, 1024, 2048)
+        and estimated_input_tokens <= _FAST_PREFILL_TOPK_MAX_INPUT_TOKENS
+    ):
+        lengths = (row_ends - row_starts).contiguous()
+        rtp_llm_ops.fast_topk_v2_variable(
+            logits, out, lengths, row_starts.contiguous(), int(topk)
+        )
+        return
+
+    rtp_llm_ops.dsv4_top_k_per_row_prefill(
+        logits,
+        row_starts,
+        row_ends,
+        out,
+        logits.size(0),
+        logits.stride(0),
+        logits.stride(1),
+        int(topk),
+        _fp8_prefill_topk_force_radix_sort(),
+    )
 
 
 def _fp8_prefill_score_chunk_rows() -> int:
@@ -218,10 +206,6 @@ class _IndexerFP8PrefillMeta(NamedTuple):
     # F.linear SGEMM and ``run_save_partial_states``. ``None`` during
     # warmup (pool not bound); forward then falls back to in-band rebuild.
     compressor_meta: Optional[CompressorMeta]
-
-    # CP-only row scheduling order for the prefill TopK kernel. The kernel
-    # writes results back to original rows, so this is semantically neutral.
-    topk_row_order: Optional[torch.Tensor]
 
 
 class IndexerFP8(PoolBackedModule):
@@ -788,20 +772,6 @@ class IndexerFP8(PoolBackedModule):
             finally:
                 self._clear_nested_pool()
 
-        topk_row_order: Optional[torch.Tensor] = None
-        if (
-            cp_active
-            and _cp_topk_row_order_enabled()
-            and M > _CP_TOPK_ROW_ORDER_MIN_ROWS
-        ):
-            assert cp_ctx is not None
-            with record_function_range("dsv4.fp8.indexer.prepare.cp_topk_row_order"):
-                topk_row_order = _build_cp_zigzag_topk_row_order(
-                    getattr(cp_ctx, "chunk_lengths_per_req", None),
-                    M,
-                    device,
-                )
-
         return _IndexerFP8PrefillMeta(
             bsz=bsz,
             seqlen=seqlen,
@@ -818,7 +788,6 @@ class IndexerFP8(PoolBackedModule):
             cu_kv_seqlens=cu_kv_seqlens,
             cu_kv_per_token=cu_kv_per_token,
             compressor_meta=compressor_meta,
-            topk_row_order=topk_row_order,
         )
 
     # --------------------------------------------------------------
@@ -945,35 +914,14 @@ class IndexerFP8(PoolBackedModule):
                     )  # [chunk_rows, T] fp32
 
                 with record_function_range("dsv4.fp8.indexer.prefill.topk"):
-                    if (
-                        not chunked_score
-                        and attention_inputs.topk_row_order is not None
-                    ):
-                        rtp_llm_ops.dsv4_top_k_per_row_prefill_indexed(
-                            logits,
-                            attention_inputs.ks,
-                            attention_inputs.ke,
-                            attention_inputs.topk_row_order,
-                            out_buf,
-                            M,
-                            logits.stride(0),
-                            logits.stride(1),
-                            K,
-                        )
-                    else:
-                        # ``topk_row_order`` is only a scheduling hint.
-                        # Natural row order keeps chunked score/topk simple
-                        # and preserves the same output contract.
-                        rtp_llm_ops.dsv4_top_k_per_row_prefill(
-                            logits,
-                            attention_inputs.ks[row_start:row_end],
-                            attention_inputs.ke[row_start:row_end],
-                            out_buf[row_start:row_end],
-                            row_end - row_start,
-                            logits.stride(0),
-                            logits.stride(1),
-                            K,
-                        )
+                    _run_prefill_topk(
+                        logits,
+                        attention_inputs.ks[row_start:row_end],
+                        attention_inputs.ke[row_start:row_end],
+                        out_buf[row_start:row_end],
+                        K,
+                        self.compress_ratio,
+                    )
                 del logits
 
             # Varlen path: TopK indices are global flat-K coords (matching
