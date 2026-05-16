@@ -35,7 +35,10 @@ from rtp_llm.models_py.modules.dsv4.fp8._compressor_consts import (
     KV_ENTRY_BYTES,
     KV_HEAD_DIM,
 )
-from rtp_llm.models_py.modules.dsv4.fp8.compressor import CompressorFP8
+from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
+    CompressorFP8,
+    _linear_bf16_bf16_fp32,
+)
 
 DEVICE = "cuda"
 TOKENS_PER_STATE_BLOCK = 256
@@ -188,12 +191,10 @@ class CompressorVarlenRawPathTest(unittest.TestCase):
             seq_start_per_req=sp_per_req,
             cu_seq_per_req=cu_seqlens,
         )
-        # Reproduce forward()'s kv/score projection (we drive _launch
-        # directly so we can compare against the per-req reference). Run
-        # the linear in bf16 to match ``_wkv_wgate_fused``'s storage dtype
-        # — bf16 vs bf16 is what the framework executes anyway.
+        # Reproduce forward()'s kv/score projection; it uses BF16 operands
+        # with FP32 accumulation/output before writing the FP32 state pool.
         out_dim = (1 + cmp_a.overlap) * cmp_a.head_dim
-        fused_out = torch.nn.functional.linear(x_flat, cmp_a._wkv_wgate_fused)
+        fused_out = _linear_bf16_bf16_fp32(x_flat, cmp_a._wkv_wgate_fused)
         kv_flat = fused_out[..., :out_dim].contiguous()
         score_flat = fused_out[..., out_dim:].contiguous()
         cmp_a._launch(kv_flat, score_flat, meta_a, seq_start=None)
@@ -220,7 +221,7 @@ class CompressorVarlenRawPathTest(unittest.TestCase):
         # ``b_idx = b`` so block_table[req_idx] resolves to the right row.
         for b in range(2):
             x_b = x_per_req[b]
-            fused_b = torch.nn.functional.linear(x_b, cmp_b._wkv_wgate_fused)
+            fused_b = _linear_bf16_bf16_fp32(x_b, cmp_b._wkv_wgate_fused)
             kv_b_flat = fused_b[..., :out_dim].contiguous()
             score_b_flat = fused_b[..., out_dim:].contiguous()
             pos_b = torch.arange(

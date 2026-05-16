@@ -26,6 +26,7 @@ from rtp_llm.models_py.modules.dsv4.fp8._compressor_consts import (
 )
 from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
     CompressorFP8,
+    _linear_bf16_bf16_fp32,
     build_decode_metadata,
     build_prefill_metadata,
 )
@@ -147,12 +148,10 @@ def _state_write_check(
 ) -> None:
     """Replay the state-write math in eager torch and compare per-token."""
     bsz, seqlen, _ = x.shape
-    # Match wkv.weight dtype (bf16) — production also runs bf16 × bf16,
-    # and the float-cast oracle here triggered a dtype mismatch since the
-    # weights are bf16 storage.
-    kv_ref = torch.nn.functional.linear(x, cmp.wkv.weight)  # [B,S,coff*hd]
-    score_ref = torch.nn.functional.linear(x, cmp.wgate.weight)
     hidden = 2 * coff * head_dim
+    fused_ref = _linear_bf16_bf16_fp32(x, cmp._wkv_wgate_fused)
+    kv_ref = fused_ref[..., : hidden // 2]
+    score_ref = fused_ref[..., hidden // 2 :]
     eb = TOKENS_PER_STATE_BLOCK
     bt = state_block_table.long()
     failures = []

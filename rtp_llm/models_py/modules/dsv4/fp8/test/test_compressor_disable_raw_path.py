@@ -34,6 +34,7 @@ from rtp_llm.models_py.modules.dsv4.fp8._compressor_consts import (
 from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
     CompressorFP8,
     _build_prefill_positions,
+    _linear_bf16_bf16_fp32,
 )
 
 DEVICE = "cuda"
@@ -141,9 +142,7 @@ class CompressorDisableRawPathTest(unittest.TestCase):
         torch.manual_seed(123)
         x = torch.randn(seqlen, dim, dtype=torch.bfloat16, device=DEVICE)
         out_dim = (1 + cmp.overlap) * cmp.head_dim
-        # bf16 × bf16 — matches ``_wkv_wgate_fused`` storage dtype and
-        # what the production forward path executes.
-        fused_out = torch.nn.functional.linear(x, cmp._wkv_wgate_fused)
+        fused_out = _linear_bf16_bf16_fp32(x, cmp._wkv_wgate_fused)
         kv, score = fused_out[..., :out_dim], fused_out[..., out_dim:]
         kv_flat = kv.reshape(seqlen, -1).contiguous()
         score_flat = score.reshape(seqlen, -1).contiguous()

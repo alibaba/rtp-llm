@@ -2,10 +2,13 @@
 rtp llm custom ops
 """
 from __future__ import annotations
+
+import typing
+
 import librtp_compute_ops
 import libth_transformer_config
 import torch
-import typing
+
 __all__: list[str] = ['FlashInferAttnParams', 'FlashInferDecodeOp', 'FlashInferMlaAttnParams', 'FlashInferPrefillOp', 'GroupTopKOp', 'SelectTopkOp', 'SparseMlaParams', 'TRTAttn', 'TRTAttnOp', 'TRTPagedAttnOp', 'XQAAttnOp', 'XQAParams', 'allocate_shared_buffer', 'concat_and_cache_mla', 'cp_gather_and_upconvert_fp8_kv_cache', 'cp_gather_indexer_k_quant_cache', 'cuda_graph_copy_large2small', 'cuda_graph_copy_small2large', 'cutlass_scaled_fp4_mm', 'debug_kernel', 'dispose_communicator', 'embedding', 'embedding_bert', 'fast_topk_transform_fused', 'fast_topk_transform_ragged_fused', 'fast_topk_v2', 'fill_mla_params', 'fused_add_layernorm', 'fused_add_rmsnorm', 'fused_qk_rmsnorm', 'indexer_k_quant_and_cache', 'init_communicator', 'layernorm', 'mla_k_merge', 'moe_post_reorder', 'moe_pre_reorder', 'moe_topk_softmax', 'open_ipc_handle', 'per_tensor_quant_fp8', 'per_token_group_quant_fp8', 'per_token_group_quant_fp8_v2', 'per_token_group_quant_int8', 'per_token_quant_fp8', 'prepare_sparse_mla_params', 'register_buffer_to_communicator', 'reuse_kv_cache_indexed_batched', 'rmsnorm', 'scaled_fp4_experts_quant', 'scaled_fp4_quant', 'silu_and_mul', 'silu_and_mul_scaled_fp4_experts_quant', 'trt_fp8_quantize_128', 'trt_fp8_quantize_128_inplace', 'userbuffers_recv', 'userbuffers_ring_all_gather', 'userbuffers_send', 'write_cache_store']
 
 
@@ -470,6 +473,12 @@ def per_token_quant_fp8(input: torch.Tensor, output_q: torch.Tensor, output_s: t
     ...
 
 
+def cublas_gemm_bf16_bf16_fp32(input: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    """
+    BF16 x BF16 GEMM with FP32 accumulation and FP32 output.
+    """
+
+
 def prepare_sparse_mla_params(attention_inputs: librtp_compute_ops.PyAttentionInputs, seq_size_per_block: int) -> SparseMlaParams:
     ...
 
@@ -568,4 +577,3 @@ class TrtllmArFusionHandle:
         """
         AllReduce kernel
         """
-
