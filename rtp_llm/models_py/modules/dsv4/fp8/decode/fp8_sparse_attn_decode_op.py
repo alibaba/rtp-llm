@@ -50,9 +50,10 @@ class SparseAttnV4DecodeFp8Op:
       attn_sink  : ``[n_heads]`` fp32 — per-head learned sink
       topk_idxs  : ``[B, q_len, topk]`` int32 — per-request global slot
         ids into the primary pool.
-      cache_seqlens : optional ``[B]`` int32 — per-request cache length.
-      block_table   : optional ``[B, max_blocks]`` int32 — primary pool
-        block table.
+      cache_seqlens : unused in sparse FP8 decode; accepted to keep the
+        attention helper call sites uniform.
+      block_table   : unused in sparse FP8 decode; FlashMLA consumes global
+        slot ids from ``topk_idxs`` directly.
       topk_length        : optional ``[B]`` int32 — per-request leftmost
         valid length on ``topk_idxs``.
       extra_k_cache      : optional secondary FP8 pool (CMP). Triggers
@@ -142,19 +143,7 @@ class SparseAttnV4DecodeFp8Op:
         # and 3D indices ``(batch_size, seq_len_q, topk)`` per the installed
         # wheel's ``flash_mla_interface.flash_mla_with_kvcache`` docstring.
 
-        # block_table[r, 0] = r: each request r uses FP8 block r.
-        if block_table is None:
-            block_table = torch.arange(B, dtype=torch.int32, device=q.device).unsqueeze(
-                1
-            )
-
-        if cache_seqlens is None:
-            cache_seqlens = torch.full(
-                (B,),
-                kv_cache.shape[1],
-                dtype=torch.int32,
-                device=q.device,
-            )
+        assert topk_idxs is not None, "FP8 sparse decode requires topk_idxs"
 
         # FlashMLA FP8 kernel requires 4D k_cache: [num_blocks, block_size, num_heads_k=1, kv_dim].
         kv_4d = kv_cache.unsqueeze(-2)
@@ -174,6 +163,12 @@ class SparseAttnV4DecodeFp8Op:
             )
         else:
             extra_topk_3d = None
+
+        # Sparse FlashMLA consumes global slot ids from ``indices`` directly.
+        # Its sparse branch does not pass block_table/cache_seqlens to the CUDA
+        # kernel, so keep dense metadata disabled here.
+        block_table = None
+        cache_seqlens = None
 
         # DSv4 attn_sink is per-head fp32, loaded from ckpt (layers.*.attn.attn_sink
         # shape [n_heads], non-zero ~0.3..0.6 mean). FlashMLA kernel applies

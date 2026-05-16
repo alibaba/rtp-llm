@@ -194,6 +194,6 @@ def prepare_config(args: argparse.Namespace, remaining: List[str]) -> PerfTestCo
         all_seq_lens=input_len_list,
         batch_size_list=batch_size_list,
         input_len_list=input_len_list,
-        max_seq_len=max(input_len_list) + args.decode_test_length,
+        max_seq_len=max(max(input_len_list) + args.decode_test_length, args.max_seq_len),
         max_concurrency=effective_max_concurrency,
     )
