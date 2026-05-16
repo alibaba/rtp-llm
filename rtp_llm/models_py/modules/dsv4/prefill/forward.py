@@ -98,7 +98,10 @@ from typing import TYPE_CHECKING, Any, Dict, Optional
 import torch
 
 from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
-from rtp_llm.models_py.modules.dsv4.cp import build_cp_context
+from rtp_llm.models_py.modules.dsv4.cp import (
+    build_cp_context,
+    cp_all_gather_full_varlen,
+)
 from rtp_llm.models_py.modules.dsv4.fp8.prefill_meta import (
     build_and_propagate_prefill_meta_fp8,
     clear_prefill_meta_shared_fp8,
@@ -410,6 +413,8 @@ def forward_layers(
         clear_prefill_meta_shared_fp8(v4)
 
     _pre_hc_flat = h.flatten(-2)
+    if cp_ctx is not None and cp_ctx.cp_size > 1:
+        _pre_hc_flat = cp_all_gather_full_varlen(_pre_hc_flat, cp_ctx)
     v4._write_mtp_hidden_buffer(_pre_hc_flat, is_cuda_graph=False)
 
     # _hc_head_reduce is flat-native: [T, hc, dim] -> [T, dim].

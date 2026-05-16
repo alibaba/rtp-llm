@@ -151,6 +151,56 @@ class TestContextParallelLoadBalanceSplit(unittest.TestCase):
             self.assertEqual(shuffle_indices, expect_shuffle_indices[cp_rank])
 
 
+class TestHandleInputsWithHidden(unittest.TestCase):
+    def test_hidden_states_split_with_input_tokens(self):
+        total_tokens = torch.tensor([10, 11, 12, 13, 14, 15], dtype=torch.int32)
+        input_lengths = torch.tensor([6], dtype=torch.int32)
+        sequence_lengths = torch.empty((0,), dtype=torch.int32)
+        hidden_states = torch.tensor(
+            [
+                [0.0, 0.5],
+                [1.0, 1.5],
+                [2.0, 2.5],
+                [3.0, 3.5],
+                [4.0, 4.5],
+                [5.0, 5.5],
+            ],
+            dtype=torch.float32,
+        )
+
+        tokens0, lengths0, hidden0, shuffle0 = cp_test.handle_inputs_with_hidden(
+            total_tokens, input_lengths, sequence_lengths, hidden_states, 0, 2
+        )
+        self.assertTrue(torch.equal(tokens0, torch.tensor([10, 11, 0, 0], dtype=torch.int32)))
+        self.assertTrue(torch.equal(lengths0, torch.tensor([4], dtype=torch.int32)))
+        self.assertTrue(torch.equal(shuffle0, torch.tensor([0, 1, 6, 7], dtype=torch.int32)))
+        self.assertTrue(
+            torch.equal(
+                hidden0,
+                torch.tensor(
+                    [[0.0, 0.5], [1.0, 1.5], [0.0, 0.0], [0.0, 0.0]],
+                    dtype=torch.float32,
+                ),
+            )
+        )
+
+        tokens1, lengths1, hidden1, shuffle1 = cp_test.handle_inputs_with_hidden(
+            total_tokens, input_lengths, sequence_lengths, hidden_states, 1, 2
+        )
+        self.assertTrue(torch.equal(tokens1, torch.tensor([12, 13, 14, 15], dtype=torch.int32)))
+        self.assertTrue(torch.equal(lengths1, torch.tensor([4], dtype=torch.int32)))
+        self.assertTrue(torch.equal(shuffle1, torch.tensor([2, 3, 4, 5], dtype=torch.int32)))
+        self.assertTrue(
+            torch.equal(
+                hidden1,
+                torch.tensor(
+                    [[2.0, 2.5], [3.0, 3.5], [4.0, 4.5], [5.0, 5.5]],
+                    dtype=torch.float32,
+                ),
+            )
+        )
+
+
 class TestGenerateQKVRestoreIndices(unittest.TestCase):
     def __init__(self, methodName: str = "runTest") -> None:
         super().__init__(methodName)

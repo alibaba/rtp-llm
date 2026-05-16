@@ -16,7 +16,6 @@
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "autil/TimeUtility.h"
-#include <limits>
 #include <memory>
 #include <thread>
 #include <random>
@@ -28,7 +27,10 @@ bool MtpExecutor::isTpRank0() const {
 }
 
 void MtpExecutor::maybeOverrideLastHiddenWithMtpBuffer(GptModelInputs& model_input, ModelBase& source) {
-    auto pre_hc = source.getMtpTargetHiddenStates(std::numeric_limits<int64_t>::max());
+    if (!model_input.combo_tokens.defined() || model_input.combo_tokens.numel() == 0) {
+        return;
+    }
+    auto pre_hc = source.getMtpTargetHiddenStates(model_input.combo_tokens.numel());
     if (!pre_hc.defined() || pre_hc.numel() == 0) {
         return;
     }
@@ -36,7 +38,10 @@ void MtpExecutor::maybeOverrideLastHiddenWithMtpBuffer(GptModelInputs& model_inp
 }
 
 void MtpExecutor::maybeOverrideLastHiddenWithMtpBuffer(GptModelOutputs& model_output, ModelBase& source) {
-    auto pre_hc = source.getMtpTargetHiddenStates(std::numeric_limits<int64_t>::max());
+    if (!model_output.all_hidden_states.defined() || model_output.all_hidden_states.size(0) == 0) {
+        return;
+    }
+    auto pre_hc = source.getMtpTargetHiddenStates(model_output.all_hidden_states.size(0));
     if (!pre_hc.defined() || pre_hc.numel() == 0) {
         return;
     }
@@ -465,17 +470,11 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     // draft model prefill
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(draft_model_forward)");
-        // CP fix: under prefill_cp, the target's all_hidden_states (just
-        // copied into model_input.last_hidden_states by
-        // updatePrefillPostDraftModelInput) is the cross-rank GATHERED
-        // tensor with [T_global, hidden_size] rows, while combo_tokens
-        // is rank-local [T_local].  tpSyncModelInputs broadcasts the
-        // gather'd numel and then asserts numel % combo_tokens.numel() == 0
-        // which fails for any T_global that doesn't evenly divide T_local.
-        // The maybeOverride below repopulates last_hidden_states from
-        // each rank's own _mtp_hidden_buffer (per-rank, T_local rows),
-        // so the broadcast value is wasted anyway — clear it before sync
-        // and let every rank fill its own per-rank pre-hc residual.
+        // Under prefill CP the post-reduce hidden just copied by
+        // updatePrefillPostDraftModelInput is not the tensor consumed by
+        // DSV4 MTP.  Avoid broadcasting it; after sync each rank reloads the
+        // full pre-hc residual from the Python MTP buffer, and the CP input
+        // processor slices it with the same zigzag plan as combo_tokens.
         if (cp_enabled) {
             model_input.last_hidden_states = torch::Tensor();
         }
