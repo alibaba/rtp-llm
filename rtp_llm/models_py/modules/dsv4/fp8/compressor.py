@@ -57,17 +57,17 @@ def _compressor_meta_fused_enabled() -> bool:
 
 def _linear_bf16_bf16_fp32(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     """F.linear(x, weight) with BF16 operands and FP32 accumulation/output."""
-    x_bf16 = x.to(torch.bfloat16)
-    w_bf16 = weight.to(torch.bfloat16)
-    if x_bf16.is_cuda and w_bf16.is_cuda and _CUBLAS_GEMM_BF16_BF16_FP32 is not None:
-        leading_shape = x_bf16.shape[:-1]
-        x_2d = x_bf16.reshape(-1, x_bf16.shape[-1]).contiguous()
-        out_2d = _CUBLAS_GEMM_BF16_BF16_FP32(x_2d, w_bf16.contiguous())
-        return out_2d.reshape(*leading_shape, w_bf16.shape[0])
-    raise RuntimeError(
-        "cublas_gemm_bf16_bf16_fp32 is required for DSV4 FP8 compressor "
-        "BF16 GEMM; ensure the op is built and both input/weight are CUDA tensors"
-    )
+    assert x.dtype == torch.bfloat16, f"expected BF16 input, got {x.dtype}"
+    assert weight.dtype == torch.bfloat16, f"expected BF16 weight, got {weight.dtype}"
+    assert x.is_contiguous(), "expected contiguous input"
+    assert weight.is_contiguous(), "expected contiguous weight"
+    assert (
+        _CUBLAS_GEMM_BF16_BF16_FP32 is not None
+    ), "cublas_gemm_bf16_bf16_fp32 op is not built"
+    leading_shape = x.shape[:-1]
+    x_2d = x.reshape(-1, x.shape[-1])
+    out_2d = _CUBLAS_GEMM_BF16_BF16_FP32(x_2d, weight)
+    return out_2d.reshape(*leading_shape, weight.shape[0])
 
 
 from rtp_llm.models_py.modules.dsv4.cp import (
