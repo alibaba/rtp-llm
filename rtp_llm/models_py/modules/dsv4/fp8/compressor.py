@@ -126,6 +126,10 @@ class CompressorMeta:
     #   cu_seq_per_req[b+1]  = end offset of req b in flat kv_flat axis
     seq_start_per_req: Optional[torch.Tensor] = None
     cu_seq_per_req: Optional[torch.Tensor] = None
+    # Decode indexer hot path: per-token compressed length
+    # ``floor((position + 1) / ratio)``. Built once in decode metadata so
+    # CSA indexer layers do not relaunch tiny add/div kernels.
+    compressed_lens_per_token: Optional[torch.Tensor] = None
 
 
 class _CompressorNorm(nn.Module):
