@@ -651,6 +651,11 @@ class CompressorFP8(nn.Module):
                 kv = cp_wait_gather_full(kv_gather_handle).unsqueeze(0)
             with record_function_range("dsv4.fp8.compressor.prefill.cp_wait_score"):
                 score = cp_wait_gather_full(score_gather_handle).unsqueeze(0)
+            # After all-gather, kv_flat covers the FULL sequence from global
+            # position 0.  Reset sp so the kernel's raw-path dispatch maps
+            # flat_idx = pos - 0 = pos for every token, avoiding a stale
+            # state-cache fallback for positions < local_start.
+            sp = 0
 
         N = bsz * seqlen
         # ``reshape(N, -1)`` collapses dim-0/1 for 3D, no-op for 2D — same

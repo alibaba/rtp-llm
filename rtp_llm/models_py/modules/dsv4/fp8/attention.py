@@ -2535,6 +2535,7 @@ class AttentionFP8(nn.Module):
         # itself. Set chunk <= 0 to disable.
         kv_view = workspace.view(B * wm.M, 1, D)
         indices_3d = combined_indices.unsqueeze(1)
+
         q_chunk_env = os.environ.get("DSV4_FLASH_MLA_SPARSE_Q_CHUNK", "65536")
         try:
             q_chunk = int(q_chunk_env)
