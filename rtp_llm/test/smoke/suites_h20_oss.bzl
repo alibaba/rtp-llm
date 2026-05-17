@@ -369,6 +369,44 @@ def h20_oss_suites():
                 data=["//rtp_llm/flexlb:flexlb_api_jar"],
                 gpu_type=["H20"],
             ),
+            smoke_test(
+                name="next_flexlb_pd_v1",
+                task_info="data/model/qwen3_next/q_r_next_fp8_tp2_pd_sep.json",
+                envs={
+                    # V1 DP-controller path: FlexLB.DpBatchScheduler pulls a batch
+                    # off the per-model batcher and BatchEnqueues to DP0, which
+                    # fans out to peer DP workers via dp_peer_addrs. Frontend
+                    # only does FetchResponse (no Enqueue). dpBalanceEnabled=true
+                    # is the RouteService gate; dpBatchSizeMax=0 lets the batcher
+                    # auto-pick worker.dpSize (=2 here) so one batch = one DP cycle.
+                    "flexlb": [
+                        "FLEXLB_CONFIG={\"enableQueueing\":true,\"deploy\":\"DISAGGREGATED\",\"loadBalanceStrategy\":\"SHORTEST_TTFT\",\"prefillBatchWaitTimeMs\":100,\"kvCache\":\"LOCAL_STATIC\",\"staticCacheBlockSize\":500,\"batchSize\":1,\"prefillLbTimeoutMs\":300,\"prefillGenerateTimeoutMs\":5000,\"enableGrpcPrefillMaster\":false,\"enableGrpcCacheStatus\":true,\"enableGrpcEngineStatus\":true,\"maxPrefillQueueSize\":10,\"prefillQueueSizeThreshold\":8,\"decodeConcurrencyLimit\":128,\"maxQueueSize\":20,\"dpBalanceEnabled\":true,\"dpBatchSizeMax\":0,\"dpBatchWindowMs\":30,\"dpBatchTimeoutMs\":200,\"dpAssignStrategy\":\"RR\"}",
+                        "FLEXLB_SMOKE_INTEGRATION_CHECK=True",
+                        "FLEXLB_SMOKE_CHECK_CACHE_AFFINITY=True",
+                        "FLEXLB_SMOKE_CACHE_PROMPT_REPEAT_CANDIDATES=260,320",
+                        # V1 DpBatch gate requires maxNewTokens>1 (see
+                        # RouteService.shouldUseDpBatch). Default probe max=1
+                        # falls back to legacy router, but V1 frontend does
+                        # FetchResponse-only -> NOT_FOUND. Force >1 here.
+                        "FLEXLB_SMOKE_MAX_TOKENS=4",
+                    ],
+                    # V1 requires FetchResponse-only on the frontend
+                    # (model_rpc_client.py reads DP_CONTROLLER_MANAGED).
+                    "frontend": ["DP_CONTROLLER_MANAGED=1"],
+                    # V1 requires Prefill to honor BatchEnqueue fan-out and to
+                    # disable the FIFOScheduler fake-stream merge path. Both
+                    # PrefillRpcServer.cc:583 and FIFOScheduler.cc read this.
+                    "prefill": ["DP_CONTROLLER_MANAGED=1"],
+                },
+                smoke_args={
+                    "prefill": "--warm_up 0 --load_cache_timeout_ms 120000 --seq_size_per_block 2048 --act_type BF16 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --tp_size 2 --dp_size 2 --world_size 4 --reuse_cache 1 --write_cache_sync 1 --reserver_runtime_mem_mb 9861 --ssm_state_dtype fp32",
+                    "decode": "--warm_up 0 --load_cache_timeout_ms 120000 --seq_size_per_block 2048 --act_type BF16 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --tp_size 2 --world_size 2 --reuse_cache 1 --write_cache_sync 1 --reserver_runtime_mem_mb 9861 --ssm_state_dtype fp32",
+                    "frontend": "--role_type FRONTEND --use_local 1 --load_cache_timeout_ms 120000 --seq_size_per_block 2048",
+                    "flexlb": "",
+                },
+                data=["//rtp_llm/flexlb:flexlb_api_jar"],
+                gpu_type=["H20"],
+            ),
         ],
     )
 

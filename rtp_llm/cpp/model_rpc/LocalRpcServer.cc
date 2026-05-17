@@ -315,6 +315,11 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
     }
     response->set_dp_size(status_info.dp_size);
     response->set_tp_size(status_info.tp_size);
+    RTP_LLM_LOG_INFO("WORKER_STATUS_DEBUG role=%s dp_size=%d dp_rank=%d tp_size=%d",
+                     status_info.role.c_str(),
+                     status_info.dp_size,
+                     status_info.dp_rank,
+                     status_info.tp_size);
     response->set_status_version(status_info.status_version);
     response->set_latest_finished_version(status_info.latest_finished_version);
     response->set_alive(status_info.alive);

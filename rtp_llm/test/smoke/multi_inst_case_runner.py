@@ -765,10 +765,19 @@ class FlexLbPdSeperationCaseRunner(_PdRunnerMixin, CaseRunner):
         suffix: str = "",
         prompt_repeat: int = 1,
     ) -> Dict[str, Any]:
+        flexlb_envs = self.create_env_from_args(
+            self.env_args.get(FLEXLB_ROLE_NAME, [])
+        )
+        max_tokens_raw = flexlb_envs.get(
+            "FLEXLB_SMOKE_MAX_TOKENS",
+            os.environ.get("FLEXLB_SMOKE_MAX_TOKENS"),
+        )
+        max_tokens = int(max_tokens_raw) if max_tokens_raw is not None else None
         return flexlb_checks.make_fast_probe_qr(
             source_qr,
             suffix=suffix,
             prompt_repeat=prompt_repeat,
+            max_tokens=max_tokens,
         )
 
     def _visit_frontend_json(

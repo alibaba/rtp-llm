@@ -8,7 +8,6 @@ import io.grpc.netty.NettyChannelBuilder;
 import io.netty.buffer.PooledByteBufAllocator;
 import io.netty.channel.ChannelOption;
 import io.netty.channel.WriteBufferWaterMark;
-import io.netty.channel.socket.nio.NioSocketChannel;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.springframework.stereotype.Component;
@@ -47,9 +46,8 @@ public class DpGrpcClient {
     /** Channel pool keyed by "ip:port". One channel hosts the future stub. */
     private final Map<String, ChannelEntry> channels = new ConcurrentHashMap<>();
 
-    /** Bounded ack wait. Enqueue is fire-and-forget but we still want a deadline so
-     *  that DpBatchScheduler can fail the entire batch's futures rather than hang. */
-    private static final long DEFAULT_DEADLINE_MS = 500;
+    /** Per-call deadline aligned with prefillGenerateTimeoutMs in FLEXLB_CONFIG. */
+    private static final long DEFAULT_DEADLINE_MS = 5000;
 
     private static final class ChannelEntry {
         final ManagedChannel channel;
@@ -68,7 +66,6 @@ public class DpGrpcClient {
 
     private ManagedChannel buildChannel(String ip, int port) {
         return NettyChannelBuilder.forAddress(ip, port)
-                .channelType(NioSocketChannel.class)
                 .withOption(ChannelOption.TCP_NODELAY, true)
                 .withOption(ChannelOption.SO_KEEPALIVE, true)
                 .withOption(ChannelOption.ALLOCATOR, PooledByteBufAllocator.DEFAULT)
