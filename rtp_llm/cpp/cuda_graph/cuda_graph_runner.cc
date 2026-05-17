@@ -213,12 +213,20 @@ void CudaGraphRunner::prepareInputData(const PyModelInputs& inputs, CudaGraphSta
     optimizedCopyAsync(inputs.input_ids, py_model_inputs_.input_ids, token_num * sizeof(int));
 
     // check size and dtype
-    RTP_LLM_CHECK_WITH_INFO(inputs.input_hiddens.numel() >= py_model_inputs_.input_hiddens.numel(), "input_hiddens numel mismatch: %zu >= %zu", inputs.input_hiddens.numel(), py_model_inputs_.input_hiddens.numel());
-    RTP_LLM_CHECK_WITH_INFO(inputs.input_hiddens.dtype() == py_model_inputs_.input_hiddens.dtype(), "input_hiddens dtype mismatch: %s != %s", inputs.input_hiddens.dtype().name(), py_model_inputs_.input_hiddens.dtype().name());
+    if (inputs.input_hiddens.defined() && inputs.input_hiddens.numel() > 0) {
+        RTP_LLM_CHECK_WITH_INFO(inputs.input_hiddens.numel() <= py_model_inputs_.input_hiddens.numel(),
+                                "input_hiddens numel mismatch: %zu >= %zu",
+                                inputs.input_hiddens.numel(),
+                                py_model_inputs_.input_hiddens.numel());
+        RTP_LLM_CHECK_WITH_INFO(inputs.input_hiddens.dtype() == py_model_inputs_.input_hiddens.dtype(),
+                                "input_hiddens dtype mismatch: %s != %s",
+                                inputs.input_hiddens.dtype().name(),
+                                py_model_inputs_.input_hiddens.dtype().name());
 
-    optimizedCopyAsync(inputs.input_hiddens,
-                       py_model_inputs_.input_hiddens,
-                       py_model_inputs_.input_hiddens.numel() * py_model_inputs_.input_hiddens.element_size());
+        optimizedCopyAsync(inputs.input_hiddens,
+                           py_model_inputs_.input_hiddens,
+                           inputs.input_hiddens.numel() * inputs.input_hiddens.element_size());
+    }
 }
 
 void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
@@ -829,9 +837,7 @@ void CudaGraphRunner::initCapture() {
                 capture_mem_hold_.py_model_inputs_.attention_inputs.cu_kv_seqlens.slice(0, 0, 2);
             inputs.attention_inputs.input_lengths =
                 capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths.slice(0, 0, 1);
-            inputs.attention_inputs.input_lengths_d =
-                capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths_d.slice(0, 0, 1);
-            // ``prefix_lengths[_d]`` must mirror the per-request batch size of
+            // ``prefix_lengths`` must mirror the per-request batch size of
             // the sliced post-check forward; downstream (e.g. DSv4 indexer)
             // asserts ``prefix_lengths.numel() == batch_size`` and aborts on
             // the unsliced ``[max_bs_]`` view.
@@ -839,11 +845,6 @@ void CudaGraphRunner::initCapture() {
                 && capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths.numel() > 0) {
                 inputs.attention_inputs.prefix_lengths =
                     capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths.slice(0, 0, 1);
-            }
-            if (capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths_d.defined()
-                && capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths_d.numel() > 0) {
-                inputs.attention_inputs.prefix_lengths_d =
-                    capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths_d.slice(0, 0, 1);
             }
             inputs.attention_inputs.kv_cache_kernel_block_id_device =
                 capture_mem_hold_.py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device.slice(0, 0, 1);

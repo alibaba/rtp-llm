@@ -151,6 +151,19 @@ TEST_F(GenerateStreamTest, testMtpAsyncDeviceStateStaleEpochReject) {
     ASSERT_FALSE(stream->clearMtpAsyncDeviceState(epoch_2));
 }
 
+TEST_F(GenerateStreamTest, testMtpAsyncDeviceStateTracksRealAndUpperBoundSeqLen) {
+    auto builder = GenerateStreamBuilder();
+    auto stream  = builder.createContextStream({1, 2, 3, 4, 5, 6});
+
+    GenerateStream::MtpAsyncDeviceState state;
+    state.last_real_seq_len = stream->seqLength();
+    state.next_real_seq_len = state.last_real_seq_len + 2;
+    stream->setMtpAsyncDeviceState(std::move(state));
+
+    ASSERT_EQ(stream->getMtpAsyncDeviceState().last_real_seq_len, stream->seqLength());
+    ASSERT_EQ(stream->getMtpAsyncDeviceState().next_real_seq_len, stream->seqLength() + 2);
+}
+
 // setSpecDecodeDeviceState / clearSpecDecodeDeviceState
 // continue to work as wrappers around the new struct API.
 TEST_F(GenerateStreamTest, testMtpAsyncDeviceStateBackCompatWrappers) {

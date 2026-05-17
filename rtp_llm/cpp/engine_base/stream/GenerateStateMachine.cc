@@ -125,18 +125,21 @@ void GenerateStateMachine::handleRunning() {
         if (normal_override > 0) {
             seq_len_override = normal_override;
         } else {
-            const int mtp_override = stream->getMtpAsyncDeviceState().next_real_seq_len;
+            const auto& mtp_state = stream->getMtpAsyncDeviceState();
+            const int   mtp_override = mtp_state.next_real_seq_len;
             if (mtp_override > 0) {
                 seq_len_override = mtp_override;
             }
         }
         if (asyncDebugEnabled() && stream->hasPendingAsyncBookkeeping()) {
             RTP_LLM_LOG_WARNING("[async-debug] handleRunning while async bookkeeping pending: stream=%ld pd_sep=%d "
-                                "status=%s seq_len=%d normal_next_real=%d mtp_next_real=%d override=%d",
+                                "status=%s seq_len=%d normal_last_real=%d normal_next_real=%d "
+                                "mtp_next_real=%d override=%d",
                                 stream->streamId(),
                                 stream->queryPdSep(),
                                 StreamStateToString(status.load(std::memory_order_acquire)).c_str(),
                                 stream->seqLength(),
+                                stream->getNormalAsyncDeviceState().last_real_seq_len,
                                 stream->getNormalAsyncDeviceState().next_real_seq_len,
                                 stream->getMtpAsyncDeviceState().next_real_seq_len,
                                 seq_len_override);

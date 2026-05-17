@@ -508,8 +508,13 @@ public:
         // before worker-side specUpdate has written sp_output_buffer fields.
         torch::Tensor last_hidden_states_gpu;
         torch::Tensor draft_all_probs_gpu;
-        // Host upper-bound mirror for the next iter's incrKVBlock; chained on
-        // the main thread as prev + (propose_step + 1) to skip racing the worker.
+        // True host seqLength observed when this state is published. MTP async
+        // uses it as the base for the next KV allocation upper bound.
+        // -1 = unset (first iter / cleared).
+        int last_real_seq_len = -1;
+        // Host seq_len override for the next iter's incrKVBlock. In async MTP
+        // this may be an upper bound based on last_real_seq_len, not a value to
+        // chain as the next round's true length.
         // -1 = unset (first iter / cleared).
         int next_real_seq_len = -1;
     };
@@ -537,11 +542,12 @@ public:
                                   torch::Tensor accept_tokens_gpu,
                                   torch::Tensor next_seq_len_gpu,
                                   torch::Tensor propose_tokens_gpu = torch::Tensor()) {
-        setMtpAsyncDeviceState(MtpAsyncDeviceState{0,
-                                                   std::move(accept_len_gpu),
-                                                   std::move(accept_tokens_gpu),
-                                                   std::move(next_seq_len_gpu),
-                                                   std::move(propose_tokens_gpu)});
+        MtpAsyncDeviceState state;
+        state.accept_len_gpu     = std::move(accept_len_gpu);
+        state.accept_tokens_gpu  = std::move(accept_tokens_gpu);
+        state.next_seq_len_gpu   = std::move(next_seq_len_gpu);
+        state.propose_tokens_gpu = std::move(propose_tokens_gpu);
+        setMtpAsyncDeviceState(std::move(state));
     }
     const torch::Tensor& getAcceptLenGpu() const {
         return mtp_async_state_.accept_len_gpu;
@@ -574,6 +580,9 @@ public:
         uint64_t      epoch = 0;
         torch::Tensor last_sample_token_gpu;  // [1] int32
         torch::Tensor next_seq_len_gpu;       // [1] int32, seqLength after sample
+        // Host seqLength before the sampled token represented by this state.
+        // -1 = unset (first iter / cleared).
+        int last_real_seq_len = -1;
         // Host mirror of next_seq_len_gpu, computed at publish time so the
         // scheduler can drive incrKVBlock without racing the async worker.
         // -1 = unset (first iter / cleared).

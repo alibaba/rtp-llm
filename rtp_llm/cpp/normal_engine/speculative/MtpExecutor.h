@@ -146,8 +146,8 @@ protected:
     // Device-state feature gates. Defaults stay off; each consumer keeps its
     // own runtime guard before taking an async path.
     bool useAsyncDeviceState() const;
-    bool useAsyncHostMirror() const;
-    bool useAsyncStopExtra() const;
+
+    bool useAsyncPrepare() const;
 
     // Opt-in gate to skip the broad sync at decodeStep start.
     // Device state, epoch-guarded clears, and single-slotted workers preserve

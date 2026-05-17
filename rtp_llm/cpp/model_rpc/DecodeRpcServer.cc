@@ -251,6 +251,7 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
             .propose_tokens_gpu     = std::move(propose_tokens_gpu),
             .last_hidden_states_gpu = sp_output_buffer->hidden_states,
             .draft_all_probs_gpu    = sp_output_buffer->all_probs,
+            .last_real_seq_len      = generate_stream->seqLength(),
             .next_real_seq_len      = generate_stream->seqLength(),
         });
     }

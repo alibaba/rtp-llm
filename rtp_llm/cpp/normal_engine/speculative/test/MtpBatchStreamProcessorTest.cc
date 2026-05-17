@@ -179,6 +179,10 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
 
     checkOutput(stream1, {1, 2, 3, 1, 3, 2}, {2, 0}, {0.2, 0.1, 0.3, 0.5}, {0.6, 0.06});
     checkOutput(stream2, {2, 1, 2}, {2, 3}, {0.3, 0.1, 0.4, 0.2}, {1.3, 0.13});
+    EXPECT_EQ(stream1->getMtpAsyncDeviceState().last_real_seq_len, stream1->seqLength());
+    EXPECT_EQ(stream1->getMtpAsyncDeviceState().next_real_seq_len, stream1->seqLength());
+    EXPECT_EQ(stream2->getMtpAsyncDeviceState().last_real_seq_len, stream2->seqLength());
+    EXPECT_EQ(stream2->getMtpAsyncDeviceState().next_real_seq_len, stream2->seqLength());
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testGatherDecodeModelInput) {

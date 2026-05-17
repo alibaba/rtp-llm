@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include <sstream>
 #if USING_CUDA
 #include "rtp_llm/models_py/bindings/cuda/kernels/mtp_target_verify_prepare.h"
 #endif
@@ -68,6 +69,32 @@ void holdSamplerInputHostBuffers(TensorHolder& holder, const SamplerInputs& inpu
     holder.hold_host(inputs.do_sample);
     holder.hold_host(inputs.finished_mask);
     holder.hold_host(inputs.cum_log_probs);
+}
+
+torch::Tensor toCudaWithHostHold(const torch::Tensor& tensor, TensorHolder& holder) {
+    if (!tensor.defined() || tensor.is_cuda()) {
+        return tensor;
+    }
+    if (tensor.numel() == 0) {
+        return torch::empty(tensor.sizes(), torch::TensorOptions(tensor.dtype()).device(torch::kCUDA));
+    }
+    holder.hold_host(tensor);
+    return tensor.to(torch::kCUDA, /*non_blocking=*/true);
+}
+
+torch::Tensor toCudaInt32WithHostHold(const torch::Tensor& tensor, TensorHolder& holder) {
+    if (!tensor.defined()) {
+        return tensor;
+    }
+    auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    if (tensor.is_cuda() && tensor.scalar_type() == torch::kInt32) {
+        return tensor;
+    }
+    if (tensor.numel() == 0) {
+        return torch::empty(tensor.sizes(), cuda_i32);
+    }
+    holder.hold_host(tensor);
+    return tensor.to(cuda_i32, /*non_blocking=*/true);
 }
 
 }  // namespace
@@ -584,14 +611,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     torch::Tensor saved_combo_tokens;
     torch::Tensor saved_input_lengths;
     if (cp_enabled) {
-        // Pinned host buffers preserved via clone().pin_memory() — the
-        // upstream tensors come from gather_model_input pinned, and
-        // PyWrappedModel's fused d2d copy path asserts the host source
-        // is pinned (PyWrappedModel.cc:67). A plain clone() drops the
-        // pinned flag and would trip that assert when the draft pass
-        // re-enters PyWrappedModel::forward.
-        saved_combo_tokens  = model_input.combo_tokens.clone().pin_memory();
-        saved_input_lengths = model_input.input_lengths.clone().pin_memory();
+        saved_combo_tokens  = toCudaWithHostHold(model_input.combo_tokens, buffer_holder_);
+        saved_input_lengths = toCudaWithHostHold(model_input.input_lengths, buffer_holder_);
     }
 
     // target model prefill
@@ -901,6 +922,18 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             speculative_sampler_output.accept_tokens = torch::zeros(
                 {1, (int64_t)(propose_step_ + 1)}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
         } else {
+            // gatherSpecSamplerInput reads host stream state updated by the previous
+            // bookkeeping worker. DROP_BROAD_SYNC therefore needs this narrow sync
+            // unless the broad sync at decodeStep start already waited.
+            if (useStreamAsync() && useDropBroadSync()) {
+                RTP_LLM_PROFILE_SCOPE_DYNAMIC(
+                    "executor.mtp.decode_step(wait_prev_bookkeeping_pre_sampler,stream_count=%zu)", streams.size());
+                spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
+                // Rebuild after waiting so cached maxSeqLen/batch sizes reflect
+                // the host stream state that sampler input is about to read.
+                stream_groups = StreamGroups(streams);
+            }
+
             // target model sample
             CHECK_AND_RETURN_REF(
                 sampler_input,
@@ -925,6 +958,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         model_input.last_hidden_states = model_output.all_hidden_states;
     }
 
+
     // Record before broadcast/draft work so the worker waits only for
     // accept_len/accept_tokens, not the queue tail.
     if (useStreamAsync()) {
@@ -932,6 +966,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         rejection_event->record(cuda_graph::graphGetCurrentStream());
     }
 
+    maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_);
     broadcastPostRejectionInputs(model_input);
 
     draft_prefill_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
@@ -1002,6 +1037,9 @@ void MtpExecutor::waitPreviousBookkeepingAndKvSwaps(const std::list<GenerateStre
 }
 
 void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_input, size_t batch_size) {
+    if (!useAsyncPrepare()) {
+        return;
+    }
     const auto& cache_cfg = cache_manager_->cacheConfig();
     // NOTE: combo_tokens never used in prepare stage, so it is safe to use shallow copy
     auto model_input_copy                    = model_input;
@@ -1052,8 +1090,7 @@ void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_inp
                                                                cuda_i32);
             const auto& sequence_lengths =
                 sequence_lengths_for_prepare.defined() ? sequence_lengths_for_prepare : model_input.sequence_lengths;
-            model_input_copy.prefix_lengths =
-                sequence_lengths.is_cuda() ? sequence_lengths.clone() : sequence_lengths.to(cuda_i32);
+            model_input_copy.prefix_lengths = toCudaInt32WithHostHold(sequence_lengths, buffer_holder_);
             model_input_copy.sequence_lengths_plus_1 = model_input_copy.prefix_lengths + 1;
         }
     }
@@ -1083,6 +1120,9 @@ void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_inp
 }
 
 void MtpExecutor::launchDraftPrefillPrepareAsync(const GptModelInputs& model_input) {
+    if (!useAsyncPrepare()) {
+        return;
+    }
     const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
     // AsyncRunner value-captures model_input on its own stream/thread, so later
     // main-stream mutations cannot affect draft prefill prepare.
@@ -1144,7 +1184,6 @@ GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input,
 
     ensureModelInputsOnCuda(model_input, "decode.target_verify_forward");
     GptModelOutputs model_output = model_->forward(model_input);
-    maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_);
     RTP_LLM_LOG_DEBUG("[MTP decode] target model verify forward end");
     model_input.is_target_verify = false;
     return model_output;
@@ -1456,21 +1495,14 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
     // update TP > 0 batch_size
     size_t     batch_size       = model_input.combo_tokens.size(0);
     const auto cuda_i32         = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
-    auto       to_cuda_i32_flat = [this, &cuda_i32, batch_size](const torch::Tensor& tensor) -> torch::Tensor {
-        if (tensor.defined() && !tensor.is_cuda()) {
-            buffer_holder_.hold_host(tensor);
-        }
-        auto tensor_d = (tensor.is_cuda() && tensor.scalar_type() == torch::kInt32) ?
-                                  tensor :
-                                  tensor.to(cuda_i32, /*non_blocking=*/true);
+    auto       to_cuda_i32_flat = [this, batch_size](const torch::Tensor& tensor) -> torch::Tensor {
+        auto tensor_d = toCudaInt32WithHostHold(tensor, buffer_holder_);
         tensor_d      = tensor_d.reshape({static_cast<int64_t>(batch_size)});
         return tensor_d.is_contiguous() ? tensor_d : tensor_d.contiguous();
     };
     spec_prefix_lengths =
         model_input.sequence_lengths.defined() ?
-            (model_input.sequence_lengths.is_cuda() ?
-                 model_input.sequence_lengths.clone() :
-                 model_input.sequence_lengths.to(torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA))) :
+            toCudaInt32WithHostHold(model_input.sequence_lengths, buffer_holder_) :
             torch::Tensor();
 
     torch::Tensor pre_propose_token_t_raw;
@@ -1526,8 +1558,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
             pre_target_token.data_ptr<int>()[batch_idx] = propose_tokens[0];
             batch_idx++;
         }
-        buffer_holder_.hold_host(pre_target_token);
-        pre_target_token_t = pre_target_token.to(torch::kCUDA, true);
+        pre_target_token_t = toCudaWithHostHold(pre_target_token, buffer_holder_);
     }
     draft_token_columns.push_back(to_cuda_i32_flat(pre_target_token_t));
     draft_token_columns.push_back(pre_propose_token_t_raw);
@@ -1642,13 +1673,6 @@ bool MtpExecutor::useAsyncDeviceState() const {
     return enabled;
 }
 
-bool MtpExecutor::useAsyncHostMirror() const {
-    static const bool enabled = []() {
-        return readEnvFlagOnce("RTP_LLM_MTP_ASYNC_HOST_MIRROR", "async-host-mirror", "enabled");
-    }();
-    return enabled;
-}
-
 bool MtpExecutor::useDropBroadSync() const {
     static const bool enabled = []() {
         return readEnvFlagOnce("RTP_LLM_DROP_BROAD_SYNC", "drop-broad-sync", "enabled");
@@ -1656,9 +1680,9 @@ bool MtpExecutor::useDropBroadSync() const {
     return enabled;
 }
 
-bool MtpExecutor::useAsyncStopExtra() const {
+bool MtpExecutor::useAsyncPrepare() const {
     static const bool enabled = []() {
-        return readEnvFlagOnce("RTP_LLM_MTP_ASYNC_STOP_EXTRA", "async-stop-extra", "enabled");
+        return readEnvFlagOnce("RTP_LLM_MTP_ASYNC_PREPARE", "async-prepare", "enabled");
     }();
     return enabled;
 }
@@ -1674,26 +1698,20 @@ void MtpExecutor::publishSyncMtpDeviceState(const StreamGroups&                 
     }
 
     const auto cuda_i32    = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
-    auto       to_cuda_i32 = [&cuda_i32](const torch::Tensor& tensor) -> torch::Tensor {
-        if (!tensor.defined()) {
-            return torch::Tensor();
-        }
-        return (tensor.is_cuda() && tensor.scalar_type() == torch::kInt32) ? tensor : tensor.to(cuda_i32);
+    auto       to_cuda_i32 = [this](const torch::Tensor& tensor) -> torch::Tensor {
+        return toCudaInt32WithHostHold(tensor, buffer_holder_);
     };
 
     torch::Tensor accept_len_all       = to_cuda_i32(spec_decode_output.accept_len);
     torch::Tensor accept_tokens_all    = to_cuda_i32(spec_decode_output.accept_tokens);
     torch::Tensor propose_tokens_all   = to_cuda_i32(draft_prefill_output.sampler_output.token_ids);
     torch::Tensor draft_all_probs_full = draft_prefill_output.sampler_output.all_probs.defined() ?
-                                             (draft_prefill_output.sampler_output.all_probs.is_cuda() ?
-                                                  draft_prefill_output.sampler_output.all_probs :
-                                                  draft_prefill_output.sampler_output.all_probs.to(torch::kCUDA)) :
+                                             toCudaWithHostHold(draft_prefill_output.sampler_output.all_probs,
+                                                                buffer_holder_) :
                                              torch::Tensor();
     torch::Tensor draft_all_hidden_full =
         draft_prefill_output.model_output.all_hidden_states.defined() ?
-            (draft_prefill_output.model_output.all_hidden_states.is_cuda() ?
-                 draft_prefill_output.model_output.all_hidden_states :
-                 draft_prefill_output.model_output.all_hidden_states.to(torch::kCUDA)) :
+            toCudaWithHostHold(draft_prefill_output.model_output.all_hidden_states, buffer_holder_) :
             torch::Tensor();
 
     if (!accept_len_all.defined() || !accept_tokens_all.defined()) {
@@ -1727,7 +1745,7 @@ void MtpExecutor::publishSyncMtpDeviceState(const StreamGroups&                 
                 last_hidden_states_gpu = stream_hidden.index_select(/*dim=*/0, idx_t);
             } else if (stream->getSPOutputBuffer() && stream->getSPOutputBuffer()->hidden_states.defined()) {
                 const auto& hidden     = stream->getSPOutputBuffer()->hidden_states;
-                last_hidden_states_gpu = hidden.is_cuda() ? hidden : hidden.to(torch::kCUDA);
+                last_hidden_states_gpu = toCudaWithHostHold(hidden, buffer_holder_);
             }
         }
         if (draft_all_probs_full.defined() && next_batch_size > 0) {
@@ -1742,7 +1760,8 @@ void MtpExecutor::publishSyncMtpDeviceState(const StreamGroups&                 
         state.last_hidden_states_gpu = std::move(last_hidden_states_gpu);
         state.draft_all_probs_gpu    = std::move(draft_all_probs_slice_gpu);
         // Sync dispatch already ran specUpdate; host seqLength is authoritative.
-        state.next_real_seq_len = stream->seqLength();
+        state.last_real_seq_len = stream->seqLength();
+        state.next_real_seq_len = state.last_real_seq_len;
         stream->setMtpAsyncDeviceState(std::move(state));
 
         hidden_token_off += static_cast<int64_t>(propose_step_ + 1);
@@ -1827,11 +1846,12 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
         state.propose_tokens_gpu     = std::move(propose_tokens_slice);
         state.last_hidden_states_gpu = std::move(last_hidden_states_gpu);
         state.draft_all_probs_gpu    = std::move(draft_all_probs_slice_gpu);
-        // Upper-bound chain so handleRunning's incrKVBlock doesn't race the
-        // worker's specUpdate. Fall back to host seqLength only on first publish.
-        const auto& prev_state  = stream->getMtpAsyncDeviceState();
-        const int   cur_real    = prev_state.next_real_seq_len > 0 ? prev_state.next_real_seq_len : stream->seqLength();
-        state.next_real_seq_len = cur_real + static_cast<int>(propose_step_ + 1);
+        // The next iteration may run before this step's worker-side specUpdate
+        // commits accept_len on the host. Use the currently committed real
+        // length as the base and add one verify window for the KV allocation
+        // upper bound. Do not chain from the previous upper bound.
+        state.last_real_seq_len = stream->seqLength();
+        state.next_real_seq_len = state.last_real_seq_len + static_cast<int>(propose_step_ + 1);
         stream->setMtpAsyncDeviceState(std::move(state));
 
         hidden_token_off += static_cast<int64_t>(propose_step_ + 1);

@@ -139,7 +139,7 @@ def _build_positions_from_lengths(
     emit ``sp[b], sp[b]+1, ..., sp[b]+L[b]-1``; concatenated across the batch.
 
     Must be CUDA-graph-capture-safe: callers pass GPU-resident tensors
-    (``input_lengths_d`` / ``prefix_lengths_d``) during capture. Keep the
+    (``input_lengths`` / ``prefix_lengths``) during capture. Keep the
     body tensor-only so capture does not synchronize on scalar reads.
     """
     input_lengths = input_lengths.to(device=device, dtype=torch.int64)
@@ -532,8 +532,8 @@ def forward_prefill(
     # but a dtype-converting ``.to(device=..., dtype=int64)`` on a pinned
     # tensor produces an unpinned intermediate which capture rejects.
     if positions is None:
-        il_d = attn.input_lengths_d
-        pl_d = attn.prefix_lengths_d
+        il_d = attn.input_lengths
+        pl_d = attn.prefix_lengths
         input_lens = il_d if il_d.numel() > 0 else attn.input_lengths
         prefix_lens = pl_d if pl_d.numel() > 0 else attn.prefix_lengths
         positions = _build_positions_from_lengths(

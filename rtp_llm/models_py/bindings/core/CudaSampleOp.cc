@@ -203,13 +203,19 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
         samples_t.copy_(selected_tokens, true);
         success = torch::Tensor();  // mark as undefined — all succeeded
         if (output_all_probs_t.defined()) {
-            pyTopKRenormProbs(probs_t, output_all_probs_t, top_k_t);
+            top_k_renorm_probs(probs_t, output_all_probs_t, top_k_t, 0, (int64_t)cur_stream);
+        }
+    } else if (std::all_of(top_k_ptr, top_k_ptr + batch_size, [&](auto t) { return t <= 0; })) {
+        top_p_sampling_from_probs(
+            probs_t, uniform_samples, samples_t, success_t, top_p_t, 1.0, deterministic, (int64_t)cur_stream);
+        if (output_all_probs_t.defined()) {
+            top_p_renorm_probs(probs_t, output_all_probs_t, top_p_t, 1.0, (int64_t)cur_stream);
         }
     } else if (std::all_of(top_p_ptr, top_p_ptr + batch_size, [&](auto t) { return std::abs(t - 1.0f) < 1e-7; })) {
         top_k_sampling_from_probs(
             probs_t, uniform_samples, samples_t, success_t, top_k_t, 0, deterministic, (int64_t)cur_stream);
         if (output_all_probs_t.defined()) {
-            pyTopKRenormProbs(probs_t, output_all_probs_t, top_k_t);
+            top_k_renorm_probs(probs_t, output_all_probs_t, top_k_t, 0, (int64_t)cur_stream);
         }
     } else {
         top_k_top_p_sampling_from_probs(probs_t,
@@ -224,8 +230,8 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
                                         (int64_t)cur_stream);
         if (output_all_probs_t.defined()) {
             torch::Tensor temp_t = torch::zeros_like(output_all_probs_t);
-            pyTopKRenormProbs(probs_t, temp_t, top_k_t);
-            pyTopPRenormProbs(temp_t, output_all_probs_t, top_p_t);
+            top_k_renorm_probs(probs_t, temp_t, top_k_t, 1.0, (int64_t)cur_stream);
+            top_p_renorm_probs(temp_t, output_all_probs_t, top_p_t, 1.0, (int64_t)cur_stream);
         }
     }
 

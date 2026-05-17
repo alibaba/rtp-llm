@@ -820,7 +820,7 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
         torch::Tensor last_hidden_states;
         if (propose_step_ > 1) {
             last_hidden_states =
-                cloneHiddenSlice(draft_model_output.all_hidden_states, token_offset + accept_len[batch_idx_out] - 1, 1);
+                cloneHiddenSlice(draft_model_output.all_hidden_states, token_offset + cur_accept_len - 1, 1);
         }
 
         torch::Tensor accept_tokens_tensor =

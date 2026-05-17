@@ -556,6 +556,7 @@ void NormalExecutor::publishNormalDeviceState(const StreamGroups& stream_groups,
         GenerateStream::NormalAsyncDeviceState state;
         state.last_sample_token_gpu = std::move(last_sample_token_gpu);
         state.next_seq_len_gpu      = (cur_seq_len_gpu + 1).to(torch::kInt32);
+        state.last_real_seq_len     = cur_real_seq_len;
         state.next_real_seq_len     = cur_real_seq_len + 1;
         stream->setNormalAsyncDeviceState(std::move(state));
         batch_idx_out += 1;
