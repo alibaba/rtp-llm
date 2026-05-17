@@ -23,7 +23,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Verifies {@link DpGrpcClient} end-to-end against an in-process gRPC server:
- *  - Enqueue forwards the BatchGenerateInputPB intact (every input + dp_rank survives)
+ *  - BatchEnqueue forwards the BatchEnqueueRequestPB intact (every input + dp_rank survives)
  *  - Enqueue ack with accepted=true completes the future successfully
  *  - Cancel reaches the engine RpcService.Cancel handler with the right request_id
  *  - Failures (no server / deadline) are propagated as completeExceptionally
@@ -36,7 +36,7 @@ class DpGrpcClientTest {
     private Server prefillServer;
     private Server decodeServer;
 
-    private final List<EngineRpcService.BatchGenerateInputPB> receivedEnqueues = new CopyOnWriteArrayList<>();
+    private final List<EngineRpcService.BatchEnqueueRequestPB> receivedEnqueues = new CopyOnWriteArrayList<>();
     private final List<Long> prefillCancels = new CopyOnWriteArrayList<>();
     private final List<Long> decodeCancels = new CopyOnWriteArrayList<>();
     private final AtomicInteger ackAccepted = new AtomicInteger(1);  // 1 = accept, 0 = reject
@@ -47,14 +47,26 @@ class DpGrpcClientTest {
                 .directExecutor()
                 .addService(new RpcServiceGrpc.RpcServiceImplBase() {
                     @Override
-                    public void enqueue(EngineRpcService.BatchGenerateInputPB request,
-                                        StreamObserver<EngineRpcService.EnqueueAckPB> obs) {
+                    public void batchEnqueue(EngineRpcService.BatchEnqueueRequestPB request,
+                                             StreamObserver<EngineRpcService.BatchEnqueueResponsePB> obs) {
                         receivedEnqueues.add(request);
-                        obs.onNext(EngineRpcService.EnqueueAckPB.newBuilder()
-                                .setBatchId(request.getBatchId())
-                                .setAccepted(ackAccepted.get() == 1)
-                                .setErrorMessage(ackAccepted.get() == 1 ? "" : "rejected")
-                                .build());
+                        EngineRpcService.BatchEnqueueResponsePB.Builder rb =
+                                EngineRpcService.BatchEnqueueResponsePB.newBuilder()
+                                        .setBatchId(request.getBatchId());
+                        boolean accept = ackAccepted.get() == 1;
+                        for (EngineRpcService.GenerateInputPB in : request.getInputsList()) {
+                            EngineRpcService.EnqueueResponsePB.Builder slot =
+                                    EngineRpcService.EnqueueResponsePB.newBuilder()
+                                            .setRequestId(in.getRequestId());
+                            if (!accept) {
+                                slot.setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
+                                        .setErrorCode(1L)
+                                        .setErrorMessage("rejected")
+                                        .build());
+                            }
+                            rb.addAcks(slot.build());
+                        }
+                        obs.onNext(rb.build());
                         obs.onCompleted();
                     }
                     @Override
@@ -93,24 +105,29 @@ class DpGrpcClientTest {
     void enqueue_forwards_batch_intact_and_returns_ack() throws Exception {
         DpGrpcClient client = newClientWithInjectedChannels();
 
-        EngineRpcService.BatchGenerateInputPB batch = EngineRpcService.BatchGenerateInputPB.newBuilder()
+        EngineRpcService.BatchEnqueueRequestPB batch = EngineRpcService.BatchEnqueueRequestPB.newBuilder()
                 .setBatchId(42L)
-                .addInputs(EngineRpcService.GenerateInputPB.newBuilder().setRequestId(1).setDpRank(0).build())
-                .addInputs(EngineRpcService.GenerateInputPB.newBuilder().setRequestId(2).setDpRank(1).build())
-                .addInputs(EngineRpcService.GenerateInputPB.newBuilder().setRequestId(3).setDpRank(2).build())
-                .addInputs(EngineRpcService.GenerateInputPB.newBuilder().setRequestId(4).setDpRank(3).build())
+                .addInputs(EngineRpcService.GenerateInputPB.newBuilder().setRequestId(1).setDpRank(com.google.protobuf.Int32Value.of(0)).build())
+                .addInputs(EngineRpcService.GenerateInputPB.newBuilder().setRequestId(2).setDpRank(com.google.protobuf.Int32Value.of(1)).build())
+                .addInputs(EngineRpcService.GenerateInputPB.newBuilder().setRequestId(3).setDpRank(com.google.protobuf.Int32Value.of(2)).build())
+                .addInputs(EngineRpcService.GenerateInputPB.newBuilder().setRequestId(4).setDpRank(com.google.protobuf.Int32Value.of(3)).build())
                 .build();
 
-        EngineRpcService.EnqueueAckPB ack = client.enqueue("prefill-host", 9999, batch).get(2, TimeUnit.SECONDS);
+        EngineRpcService.BatchEnqueueResponsePB ack = client.enqueue("prefill-host", 9999, batch).get(2, TimeUnit.SECONDS);
 
-        assertTrue(ack.getAccepted());
         assertEquals(42L, ack.getBatchId());
+        assertEquals(4, ack.getAcksCount());
+        for (int i = 0; i < 4; i++) {
+            assertEquals(i + 1, ack.getAcks(i).getRequestId());
+            assertEquals(0L, ack.getAcks(i).getErrorInfo().getErrorCode(),
+                    "per-slot error_code=0 means accepted");
+        }
         assertEquals(1, receivedEnqueues.size());
-        EngineRpcService.BatchGenerateInputPB got = receivedEnqueues.get(0);
+        EngineRpcService.BatchEnqueueRequestPB got = receivedEnqueues.get(0);
         assertEquals(4, got.getInputsCount());
         for (int i = 0; i < 4; i++) {
             assertEquals(i + 1, got.getInputs(i).getRequestId());
-            assertEquals(i, got.getInputs(i).getDpRank(), "dp_rank must be forwarded verbatim to prefill");
+            assertEquals(i, got.getInputs(i).getDpRank().getValue(), "dp_rank must be forwarded verbatim to prefill");
         }
     }
 
@@ -118,11 +135,15 @@ class DpGrpcClientTest {
     void enqueue_with_rejected_ack_completes_future_with_accepted_false() throws Exception {
         ackAccepted.set(0);
         DpGrpcClient client = newClientWithInjectedChannels();
-        EngineRpcService.BatchGenerateInputPB batch =
-                EngineRpcService.BatchGenerateInputPB.newBuilder().setBatchId(7L).build();
-        EngineRpcService.EnqueueAckPB ack = client.enqueue("prefill-host", 9999, batch).get(2, TimeUnit.SECONDS);
-        assertFalse(ack.getAccepted());
-        assertEquals("rejected", ack.getErrorMessage());
+        EngineRpcService.BatchEnqueueRequestPB batch =
+                EngineRpcService.BatchEnqueueRequestPB.newBuilder()
+                        .setBatchId(7L)
+                        .addInputs(EngineRpcService.GenerateInputPB.newBuilder().setRequestId(11).setDpRank(0).build())
+                        .build();
+        EngineRpcService.BatchEnqueueResponsePB ack = client.enqueue("prefill-host", 9999, batch).get(2, TimeUnit.SECONDS);
+        assertEquals(1, ack.getAcksCount());
+        assertEquals(1L, ack.getAcks(0).getErrorInfo().getErrorCode());
+        assertEquals("rejected", ack.getAcks(0).getErrorInfo().getErrorMessage());
     }
 
     @Test
@@ -146,9 +167,9 @@ class DpGrpcClientTest {
         DpGrpcClient client = newClientWithInjectedChannels();
         long t0 = System.nanoTime();
         for (int i = 0; i < 100; i++) {
-            EngineRpcService.BatchGenerateInputPB b =
-                    EngineRpcService.BatchGenerateInputPB.newBuilder().setBatchId(i).build();
-            CompletableFuture<EngineRpcService.EnqueueAckPB> f = client.enqueue("prefill-host", 9999, b);
+            EngineRpcService.BatchEnqueueRequestPB b =
+                    EngineRpcService.BatchEnqueueRequestPB.newBuilder().setBatchId(i).build();
+            CompletableFuture<EngineRpcService.BatchEnqueueResponsePB> f = client.enqueue("prefill-host", 9999, b);
             assertNotNull(f);
         }
         long elapsedMicros = (System.nanoTime() - t0) / 1000;
