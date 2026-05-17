@@ -45,8 +45,9 @@ from rtp_llm.models_py.modules.dsv4.chunk_env import dsv4_chunk_tokens_from_env
 from rtp_llm.models_py.modules.dsv4.cp import (
     CPContext,
     build_cp_full_prefill_positions,
-    cp_all_gather_full,
+    cp_all_gather_full_async,
     cp_freqs_cis_local,
+    cp_wait_gather_full,
 )
 from rtp_llm.models_py.modules.dsv4.fp8.compressor import CompressorFP8, CompressorMeta
 from rtp_llm.models_py.modules.dsv4.fp8.indexer import IndexerFP8
@@ -108,6 +109,19 @@ def _use_read_from_pool() -> bool:
 # regression can be bisected without reverting the patch series.
 def _use_varlen_prefill() -> bool:
     return os.environ.get("DSV4_VARLEN_PREFILL", "1") != "0"
+
+
+# Prefill CP all-gather overlap kill-switch. Default ON gives the
+# producer-consumer ordered scheduling: indexer's nested compressor AG →
+# main compressor AG → attention KV AG, all queued on one cp_gather stream
+# while indexer compute (weights_proj / quant_q / score / topk) hides the
+# NCCL latency. ``DSV4_PREFILL_CP_OVERLAP=0`` falls back to pre-overlap
+# behaviour: each layer's compressor / nested compressor runs synchronously
+# (start_prefill + finish_prefill back-to-back) and the only async piece is
+# the attention KV gather started in ``_prefill_compute_qkv``. Use this to
+# A/B test the overlap optimisation on a live deployment.
+def _prefill_cp_overlap_enabled() -> bool:
+    return os.environ.get("DSV4_PREFILL_CP_OVERLAP", "1") != "0"
 
 
 def _flat_1d(t: torch.Tensor) -> torch.Tensor:
@@ -592,13 +606,19 @@ class PrefillQKV(NamedTuple):
     """Q/KV intermediate produced by ``_prefill_compute_qkv``.
 
     ``qr`` is fed to the indexer (CSA layers); ``q`` is the dense Q.
-    ``kv_full`` is the all-gathered KV under CP; equals ``kv`` otherwise.
-    The CP-aware sequence length lives on ``PrefillMeta.seqlen_full``.
+    Under CP, ``kv_full_handle`` carries the in-flight KV all-gather.
+    CSA may defer launching that gather so indexer-critical collectives
+    run first; in that case ``kv_cp_gather_deferred`` is true and
+    ``kv_full`` still holds the rank-local flat KV. Without CP, ``kv_full``
+    equals the local KV immediately. The CP-aware sequence length lives on
+    ``PrefillMeta.seqlen_full``.
     """
 
     qr: torch.Tensor
     q: torch.Tensor
     kv_full: torch.Tensor
+    kv_full_handle: Optional[Any] = None
+    kv_cp_gather_deferred: bool = False
 
 
 class AttentionFP8(nn.Module):
@@ -881,6 +901,7 @@ class AttentionFP8(nn.Module):
 
         # CP context bound per-forward by V4Transformer.  None = no CP.
         self._cp_ctx: Optional[CPContext] = None
+        self._cp_gather_stream: Optional[Any] = None
 
         # Shared prefill meta (compress_ratio bucket; not layer-specific).
         # V4Transformer.forward_layers builds one per ratio in use, sets it
@@ -937,6 +958,22 @@ class AttentionFP8(nn.Module):
         only so the output is ``[B, chunk_length, H, D]`` — the frame-
         work then all-gathers across ranks and strips padding."""
         self._cp_ctx = cp_ctx
+
+    def _get_cp_gather_stream(self, device: torch.device) -> Optional[Any]:
+        if not torch.cuda.is_available() or device.type != "cuda":
+            return None
+        stream = self._cp_gather_stream
+        if stream is None:
+            stream = torch.cuda.Stream(device=device)
+            self._cp_gather_stream = stream
+        return stream
+
+    def _set_child_cp_gather_stream(self, stream: Optional[Any]) -> None:
+        if self.compressor is not None:
+            self.compressor.set_cp_gather_stream(stream)
+        indexer_compressor = getattr(getattr(self, "indexer", None), "compressor", None)
+        if indexer_compressor is not None:
+            indexer_compressor.set_cp_gather_stream(stream)
 
     def _pool_view(self, attn_type: int) -> Optional[torch.Tensor]:
         """Return a flat ``[total_slots, vec_dim]`` typed view of the
@@ -1912,16 +1949,10 @@ class AttentionFP8(nn.Module):
         assert attn_metadata.req_id_per_token_long is not None
         assert attn_metadata.decode_seq_start_per_req is not None
         assert attn_metadata.decode_cu_seq_per_req is not None
-        state_slots = attn_metadata.compressor_state_slot_mappings.get(
-            state_attn_type
-        )
+        state_slots = attn_metadata.compressor_state_slot_mappings.get(state_attn_type)
         kv_slots = attn_metadata.pool_write_slot_mappings.get(kv_attn_type)
         assert state_slots is not None and kv_slots is not None
-        from rtp_llm.models_py.modules.dsv4.attn_type import (
-            CSA_KV,
-            HCA_KV,
-            INDEXER_KV,
-        )
+        from rtp_llm.models_py.modules.dsv4.attn_type import CSA_KV, HCA_KV, INDEXER_KV
 
         ratio_by_kv = {CSA_KV: 4, INDEXER_KV: 4, HCA_KV: 128}
         ratio = ratio_by_kv.get(kv_attn_type)
@@ -2316,27 +2347,44 @@ class AttentionFP8(nn.Module):
         """
         with record_function_range("dsv4.fp8.attn.prefill.common_setup"):
             common = self._prefill_common_setup(x, positions)
-        with record_function_range("dsv4.fp8.attn.prefill.compute_qkv"):
-            qkv = self._prefill_compute_qkv(x, common)
-        # SWA pool write — every FP8 layer populates the SWA pool for
-        # downstream decode. Safe to do before attention because new K
-        # (abs pos [sp, sp+S)) and any cont-prefill prefix tail
-        # (abs pos [sp-P, sp)) target disjoint slots.
-        with record_function_range("dsv4.fp8.attn.prefill.swa_write"):
-            self._prefill_write_swa_fp8_paged(common, qkv.kv_full)
+        cp_gather_stream = (
+            self._get_cp_gather_stream(x.device) if common.cp_on else None
+        )
+        self._set_child_cp_gather_stream(cp_gather_stream)
+        cp_overlap = _prefill_cp_overlap_enabled()
+        try:
+            with record_function_range("dsv4.fp8.attn.prefill.compute_qkv"):
+                qkv = self._prefill_compute_qkv(
+                    x,
+                    common,
+                    cp_gather_stream=cp_gather_stream,
+                    # CSA defers its KV gather until after the indexer-critical
+                    # AG_NESTED is queued (overlap mode); under overlap=off
+                    # every ratio launches the gather immediately.
+                    start_cp_gather=(self.compress_ratio != 4) or not cp_overlap,
+                )
 
-        if self.compress_ratio == 0:
-            with record_function_range("dsv4.fp8.attn.prefill.path_swa"):
-                out = self._forward_prefill_swa_only(qkv, common)
-        elif self.compress_ratio == 4:
-            with record_function_range("dsv4.fp8.attn.prefill.path_csa"):
-                out = self._forward_prefill_csa(x, qkv, common)
-        elif self.compress_ratio == 128:
-            with record_function_range("dsv4.fp8.attn.prefill.path_hca"):
-                out = self._forward_prefill_hca(x, qkv, common)
-        else:
-            raise AssertionError(f"unknown compress_ratio={self.compress_ratio}")
-        return out
+            if self.compress_ratio == 0:
+                qkv = self._ensure_prefill_kv_full(qkv, common)
+                # SWA pool write — every FP8 layer populates the SWA pool for
+                # downstream decode. Safe to do before attention because new K
+                # (abs pos [sp, sp+S)) and any cont-prefill prefix tail
+                # (abs pos [sp-P, sp)) target disjoint slots.
+                with record_function_range("dsv4.fp8.attn.prefill.swa_write"):
+                    self._prefill_write_swa_fp8_paged(common, qkv.kv_full)
+                with record_function_range("dsv4.fp8.attn.prefill.path_swa"):
+                    out = self._forward_prefill_swa_only(qkv, common)
+            elif self.compress_ratio == 4:
+                with record_function_range("dsv4.fp8.attn.prefill.path_csa"):
+                    out = self._forward_prefill_csa(x, qkv, common)
+            elif self.compress_ratio == 128:
+                with record_function_range("dsv4.fp8.attn.prefill.path_hca"):
+                    out = self._forward_prefill_hca(x, qkv, common)
+            else:
+                raise AssertionError(f"unknown compress_ratio={self.compress_ratio}")
+            return out
+        finally:
+            self._set_child_cp_gather_stream(None)
 
     # ------------------------------------------------------------------
     # Per-path prefill bodies
@@ -2385,8 +2433,36 @@ class AttentionFP8(nn.Module):
         # are now flat-input-native (accept ``[T_total, dim]`` /
         # ``[T_total, q_lora]``). Drop the legacy ``unsqueeze(0)`` so the
         # batched flat caller hits the same code path without rewrapping.
+        compressor_pending = None
+
+        def start_main_compressor() -> None:
+            nonlocal compressor_pending, qkv
+            if compressor_pending is not None:
+                return
+            with record_function_range("dsv4.fp8.attn.csa.compressor_start"):
+                compressor_pending = self.compressor.start_prefill(
+                    x, common.sp_int, meta=common.csa_meta.compressor_meta
+                )
+            qkv = self._start_prefill_kv_full_gather(
+                qkv, common, cp_gather_stream=self._cp_gather_stream
+            )
+
+        cp_overlap = _prefill_cp_overlap_enabled()
         with record_function_range("dsv4.fp8.attn.csa.indexer"):
-            raw = self.indexer(x, qkv.qr, common.csa_meta.indexer_meta)
+            raw = self.indexer(
+                x,
+                qkv.qr,
+                common.csa_meta.indexer_meta,
+                # Callback non-None ⇒ indexer splits its nested compressor
+                # into start/finish around weights_proj+quant_q AND launches
+                # main compressor + KV gather between the two halves. None
+                # ⇒ indexer falls back to synchronous nested compressor and
+                # main compressor + KV wait stay in ``finish_compressor`` /
+                # ``finish_swa_write`` (pre-overlap behaviour).
+                after_nested_compressor_start=(
+                    start_main_compressor if (common.cp_on and cp_overlap) else None
+                ),
+            )
         return self._forward_prefill_compressed(
             x,
             qkv,
@@ -2394,6 +2470,7 @@ class AttentionFP8(nn.Module):
             cmp_topk_runtime=raw,
             compressor_meta=common.csa_meta.compressor_meta,
             workspace_meta=common.csa_meta.workspace_meta,
+            compressor_pending=compressor_pending,
         )
 
     def _forward_prefill_hca(
@@ -2410,6 +2487,18 @@ class AttentionFP8(nn.Module):
             "HCA prefill requires common.hca_meta — built by " "_build_hca_prefill_meta"
         )
 
+        cp_overlap = _prefill_cp_overlap_enabled()
+        compressor_pending = None
+        if common.cp_on and cp_overlap:
+            # Pre-launch main compressor's fused linear + AG_MAIN so SWA
+            # write (waiting AG_KV) can run on default stream while AG_MAIN
+            # is still in flight on cp_gather_stream. ``swa_before_compressor_finish``
+            # below flips the wait order to enable that hide.
+            with record_function_range("dsv4.fp8.attn.hca.compressor_start"):
+                compressor_pending = self.compressor.start_prefill(
+                    x, common.sp_int, meta=common.hca_meta.compressor_meta
+                )
+
         return self._forward_prefill_compressed(
             x,
             qkv,
@@ -2417,6 +2506,8 @@ class AttentionFP8(nn.Module):
             cmp_topk_runtime=None,
             compressor_meta=common.hca_meta.compressor_meta,
             workspace_meta=common.hca_meta.workspace_meta,
+            compressor_pending=compressor_pending,
+            swa_before_compressor_finish=common.cp_on and cp_overlap,
         )
 
     def _forward_prefill_compressed(
@@ -2427,11 +2518,14 @@ class AttentionFP8(nn.Module):
         cmp_topk_runtime: Optional[torch.Tensor],
         compressor_meta,
         workspace_meta: Optional[WorkspaceMeta],
+        compressor_pending=None,
+        swa_before_compressor_finish: bool = False,
     ) -> torch.Tensor:
         """Shared CSA/HCA epilogue: write compressed-K via main compressor
         (with hoisted ``compressor_meta``), then run the workspace-path
         attention. Falls back to ``_attn_fp8_swa_via_kv_full`` on warmup
         when ``workspace_meta`` is None (pool context unbound)."""
+
         # Compressor write (return value is unused — compressor handles its
         # own pool dual-write; the workspace path re-reads the just-written
         # tail via dequantize_and_gather_k_cache, with BF16 overlay on top).
@@ -2440,8 +2534,31 @@ class AttentionFP8(nn.Module):
         # rewrap so the batched (B>1) caller can reuse this code path
         # without re-shaping. B==1 reaches the same kernel — same flat
         # ``[T_total, dim]`` reshape inside ``_launch``.
-        with record_function_range("dsv4.fp8.attn.compressed.compressor"):
-            self.compressor(x, common.sp_int, meta=compressor_meta)
+        def finish_compressor() -> None:
+            with record_function_range("dsv4.fp8.attn.compressed.compressor"):
+                if compressor_pending is None:
+                    self.compressor(x, common.sp_int, meta=compressor_meta)
+                else:
+                    self.compressor.finish_prefill(compressor_pending)
+
+        def finish_swa_write(qkv_in: PrefillQKV) -> PrefillQKV:
+            # The attention KV CP gather may be launched in
+            # ``_prefill_compute_qkv`` or, for CSA, deferred until after
+            # indexer-critical gather work. Wait before writing the SWA pool.
+            qkv_out = self._ensure_prefill_kv_full(qkv_in, common)
+            with record_function_range("dsv4.fp8.attn.prefill.swa_write"):
+                self._prefill_write_swa_fp8_paged(common, qkv_out.kv_full)
+            return qkv_out
+
+        if swa_before_compressor_finish:
+            # HCA has no indexer compute to cover its compressor gather. Its
+            # SWA/qkv gather was launched before the compressor gather, so this
+            # independent wait+write can hide part of the HCA compressor NCCL.
+            qkv = finish_swa_write(qkv)
+            finish_compressor()
+        else:
+            finish_compressor()
+            qkv = finish_swa_write(qkv)
 
         if workspace_meta is None:
             # Warmup forward: pool not bound. Fall back to BF16 ``kv_full``
@@ -3960,7 +4077,13 @@ class AttentionFP8(nn.Module):
             slot_in_flat=None,
         )
 
-    def _prefill_compute_qkv(self, x: torch.Tensor, common: PrefillMeta) -> PrefillQKV:
+    def _prefill_compute_qkv(
+        self,
+        x: torch.Tensor,
+        common: PrefillMeta,
+        cp_gather_stream: Optional[Any] = None,
+        start_cp_gather: bool = True,
+    ) -> PrefillQKV:
         """Q/KV path — RMSNorm + LoRA Q + KV linears + fused RMSNorm-RoPE.
 
         Internally uses ``[1, T, ...]`` so ``fused_rmsnorm_rope`` sees the
@@ -3985,29 +4108,73 @@ class AttentionFP8(nn.Module):
                 kv_in, self.kv_norm, common.freqs_cis, rd, eps=self.eps
             )
 
+        kv_full_handle = None
+        kv_cp_gather_deferred = False
         if common.cp_on:
-            # Dispatch on _use_varlen_prefill: varlen (default) supports
-            # B>=1 via the flat helper; legacy keeps the B==1 [B, T, *F]
-            # path. Both produce [1, seq_len_full, head_dim] downstream.
-            if _use_varlen_prefill():
-                from rtp_llm.models_py.modules.dsv4.cp import cp_all_gather_full_varlen
-
-                with record_function_range("dsv4.fp8.attn.qkv.cp_gather_varlen"):
-                    kv_flat = kv.reshape(kv.size(0) * kv.size(1), *kv.shape[2:])
-                    kv_full_flat = cp_all_gather_full_varlen(kv_flat, common.cp_ctx)
-                    kv_full = kv_full_flat.unsqueeze(0)
+            # Keep the rank-local KV flat. Non-CSA starts the CP gather
+            # immediately; CSA defers it until after the indexer-critical
+            # gather has been enqueued.
+            assert common.cp_ctx is not None
+            kv_local = kv.reshape(kv.size(0) * kv.size(1), *kv.shape[2:])
+            kv_full = kv_local
+            if start_cp_gather:
+                with record_function_range("dsv4.fp8.attn.qkv.cp_gather_start"):
+                    kv_full_handle = cp_all_gather_full_async(
+                        kv_local, common.cp_ctx, stream=cp_gather_stream
+                    )
             else:
-                with record_function_range("dsv4.fp8.attn.qkv.cp_gather"):
-                    kv_full = cp_all_gather_full(
-                        kv.squeeze(0), common.cp_ctx
-                    ).unsqueeze(0)
+                kv_cp_gather_deferred = True
         else:
             kv_full = kv
 
         return PrefillQKV(
             qr=qr.squeeze(0),
             q=q.squeeze(0),
-            kv_full=kv_full.squeeze(0),
+            kv_full=kv_full.squeeze(0) if kv_full.dim() == 3 else kv_full,
+            kv_full_handle=kv_full_handle,
+            kv_cp_gather_deferred=kv_cp_gather_deferred,
+        )
+
+    def _start_prefill_kv_full_gather(
+        self,
+        qkv: PrefillQKV,
+        common: PrefillMeta,
+        cp_gather_stream: Optional[Any] = None,
+    ) -> PrefillQKV:
+        if not qkv.kv_cp_gather_deferred:
+            return qkv
+        assert common.cp_ctx is not None
+        with record_function_range("dsv4.fp8.attn.qkv.cp_gather_start"):
+            kv_full_handle = cp_all_gather_full_async(
+                qkv.kv_full, common.cp_ctx, stream=cp_gather_stream
+            )
+        return PrefillQKV(
+            qr=qkv.qr,
+            q=qkv.q,
+            kv_full=qkv.kv_full,
+            kv_full_handle=kv_full_handle,
+            kv_cp_gather_deferred=False,
+        )
+
+    def _ensure_prefill_kv_full(
+        self, qkv: PrefillQKV, common: Optional[PrefillMeta] = None
+    ) -> PrefillQKV:
+        """Materialize the deferred CP KV gather result when a consumer needs it."""
+        if qkv.kv_cp_gather_deferred:
+            assert common is not None
+            qkv = self._start_prefill_kv_full_gather(
+                qkv, common, cp_gather_stream=self._cp_gather_stream
+            )
+        if qkv.kv_full_handle is None:
+            return qkv
+        with record_function_range("dsv4.fp8.attn.qkv.cp_wait"):
+            kv_full = cp_wait_gather_full(qkv.kv_full_handle)
+        return PrefillQKV(
+            qr=qkv.qr,
+            q=qkv.q,
+            kv_full=kv_full,
+            kv_full_handle=None,
+            kv_cp_gather_deferred=False,
         )
 
     # ------------------------------------------------------------------
