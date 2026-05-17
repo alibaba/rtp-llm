@@ -496,6 +496,8 @@ class IndexerFP8(PoolBackedModule):
             else:
                 out_topk_buffer.fill_(-1)
                 if K_eff > 0:
+                    score_idx = torch.arange(T_max, device=score.device).view(1, 1, T_max)
+                    score = score.masked_fill(score_idx >= compressed_len, float("-inf"))
                     topk_idxs = score.topk(K_eff, dim=-1)[1].to(torch.int32)
                     out_topk_buffer[:, :, :K_eff].copy_(topk_idxs)
                     k_arange = torch.arange(K, device=out_topk_buffer.device).view(
