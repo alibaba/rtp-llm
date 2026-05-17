@@ -94,19 +94,27 @@ def resolve_moe_max_tokens_per_rank(
     current_max_tokens_per_rank: int,
     cp_size: int,
     max_generate_batch_size: int,
-    role_type: str | None = None,
+    *,
+    is_decode_role: bool = False,
+    is_speculative: bool = False,
+    gen_num_per_cycle: int = 0,
 ) -> int:
+    max_generate_batch_size = int(max_generate_batch_size)
+    assert (
+        max_generate_batch_size > 0
+    ), f"max_generate_batch_size must be positive, got {max_generate_batch_size}"
+    if is_decode_role:
+        tokens_per_batch = 1
+        if is_speculative:
+            tokens_per_batch = max(int(gen_num_per_cycle or 0) + 1, 1)
+        return max_generate_batch_size * tokens_per_batch
+
     budget = int(current_max_tokens_per_rank)
     cp_size = max(int(cp_size), 1)
     if cp_size > 1:
         cp_bound = max(cp_padded_tokens_per_rank_bound(max_seq_len, cp_size), 4096)
         budget = min(budget, cp_bound)
 
-    role = (
-        role_type if role_type is not None else os.environ.get("ROLE_TYPE", "")
-    ).upper()
-    if role == "DECODE":
-        return min(budget, max(int(max_generate_batch_size or 1), 1))
     if chunked_moe_enabled():
         return min(budget, moe_chunk_tokens_from_env())
     return budget
@@ -153,6 +161,7 @@ class MoE(nn.Module):
         ep_size: int = 1,
         ep_rank: int = 0,
         max_tokens_per_rank: int = 8192,
+        is_decode_role: bool = False,
         strategy: Optional[str] = None,
     ):
         """``layer_weights`` is the framework's per-layer dict
@@ -173,6 +182,7 @@ class MoE(nn.Module):
         self.moe_inter_dim = moe_inter_dim
         self.swiglu_limit = swiglu_limit
         self.max_tokens_per_rank = max_tokens_per_rank
+        self._is_decode_role = bool(is_decode_role)
 
         assert (
             n_routed_experts % max(ep_size, 1) == 0
@@ -242,9 +252,24 @@ class MoE(nn.Module):
         self._strategy.setup_weights(layer_weights)
 
     def _should_chunk(self, tokens: int) -> bool:
+        max_tokens = int(self.max_tokens_per_rank)
+        assert max_tokens > 0, f"max_tokens_per_rank must be positive, got {max_tokens}"
+        cuda_graph_capturing = (
+            torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()
+        )
+        if self._is_decode_role or cuda_graph_capturing:
+            if int(tokens) > max_tokens:
+                mode = "decode" if self._is_decode_role else "CUDA graph capture"
+                raise AssertionError(
+                    f"{mode} MoE input tokens="
+                    f"{int(tokens)} exceeds max_tokens_per_rank={max_tokens}; "
+                    f"{mode} must not use chunked MoE. Increase the startup "
+                    "MoE token budget."
+                )
+            return False
         if not chunked_moe_enabled():
             return False
-        return tokens > max(int(self.max_tokens_per_rank), 0)
+        return tokens > max_tokens
 
     def _run_chunk(
         self,
@@ -280,7 +305,10 @@ class MoE(nn.Module):
     ) -> torch.Tensor:
         global _CHUNKED_MOE_LOGGED
         T = x.size(0)
-        chunk_tokens = max(int(self.max_tokens_per_rank), 1)
+        chunk_tokens = int(self.max_tokens_per_rank)
+        assert chunk_tokens > 0, (
+            f"max_tokens_per_rank must be positive, got {chunk_tokens}"
+        )
         if not _CHUNKED_MOE_LOGGED:
             _CHUNKED_MOE_LOGGED = True
             logging.info(

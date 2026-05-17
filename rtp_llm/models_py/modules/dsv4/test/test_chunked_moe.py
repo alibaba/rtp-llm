@@ -109,12 +109,13 @@ class _FakeStrategy(nn.Module):
         return x.float() * 2.0
 
 
-def _fake_moe(dim: int, cap: int) -> MoE:
+def _fake_moe(dim: int, cap: int, is_decode_role: bool = False) -> MoE:
     moe = MoE.__new__(MoE)
     nn.Module.__init__(moe)
     moe.layer_id = 0
     moe.dim = dim
     moe.max_tokens_per_rank = cap
+    moe._is_decode_role = is_decode_role
     moe.gate = _FakeGate()
     moe.shared_experts = nn.Identity()
     moe._shared_executor = _FakeSharedExecutor()
@@ -170,7 +171,6 @@ class ChunkedMoETest(unittest.TestCase):
                 current_max_tokens_per_rank=1048576,
                 cp_size=4,
                 max_generate_batch_size=8,
-                role_type="PREFILL",
             )
         self.assertEqual(budget, 16384)
 
@@ -196,7 +196,6 @@ class ChunkedMoETest(unittest.TestCase):
                 current_max_tokens_per_rank=65536,
                 cp_size=4,
                 max_generate_batch_size=8,
-                role_type="PREFILL",
             )
         self.assertEqual(budget, 65536)
 
@@ -210,7 +209,6 @@ class ChunkedMoETest(unittest.TestCase):
                 current_max_tokens_per_rank=1048576,
                 cp_size=4,
                 max_generate_batch_size=8,
-                role_type="PREFILL",
             )
         self.assertEqual(budget, 65536)
 
@@ -222,7 +220,6 @@ class ChunkedMoETest(unittest.TestCase):
                 current_max_tokens_per_rank=200002,
                 cp_size=4,
                 max_generate_batch_size=8,
-                role_type="PREFILL",
             )
         self.assertEqual(budget, 50002)
 
@@ -236,7 +233,6 @@ class ChunkedMoETest(unittest.TestCase):
                 current_max_tokens_per_rank=8192,
                 cp_size=4,
                 max_generate_batch_size=8,
-                role_type="PREFILL",
             )
         self.assertEqual(budget, 8192)
 
@@ -250,9 +246,46 @@ class ChunkedMoETest(unittest.TestCase):
                 current_max_tokens_per_rank=1048576,
                 cp_size=4,
                 max_generate_batch_size=32,
-                role_type="DECODE",
+                is_decode_role=True,
             )
         self.assertEqual(budget, 32)
+
+    def test_token_budget_decode_accounts_for_speculative_width(self):
+        budget = resolve_moe_max_tokens_per_rank(
+            max_seq_len=1048576,
+            current_max_tokens_per_rank=1048576,
+            cp_size=4,
+            max_generate_batch_size=1024,
+            is_decode_role=True,
+            is_speculative=True,
+            gen_num_per_cycle=4,
+        )
+        self.assertEqual(budget, 5120)
+
+    def test_token_budget_decode_non_speculative_uses_batch_size(self):
+        budget = resolve_moe_max_tokens_per_rank(
+            max_seq_len=1048576,
+            current_max_tokens_per_rank=1048576,
+            cp_size=4,
+            max_generate_batch_size=1024,
+            is_decode_role=True,
+            is_speculative=False,
+            gen_num_per_cycle=4,
+        )
+        self.assertEqual(budget, 1024)
+
+    def test_token_budget_ignores_role_type_env(self):
+        with mock.patch.dict(
+            os.environ,
+            {"ROLE_TYPE": "DECODE", "DSV4_MOE_CHUNK_PREFILL": "0"},
+        ):
+            budget = resolve_moe_max_tokens_per_rank(
+                max_seq_len=200002,
+                current_max_tokens_per_rank=200002,
+                cp_size=4,
+                max_generate_batch_size=8,
+            )
+        self.assertEqual(budget, 50002)
 
     def test_chunk_splits_flat_tokens_and_preserves_order(self):
         moe = _fake_moe(dim=3, cap=5)
@@ -316,6 +349,32 @@ class ChunkedMoETest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"DSV4_MOE_CHUNK_PREFILL": "0"}):
             with self.assertRaisesRegex(RuntimeError, "chunk overflow"):
                 moe(x, input_ids)
+
+    def test_decode_asserts_instead_of_chunking(self):
+        moe = _fake_moe(dim=2, cap=4, is_decode_role=True)
+        x = torch.randn(9, 2)
+        input_ids = torch.arange(9, dtype=torch.long)
+
+        with self.assertRaisesRegex(AssertionError, "decode must not use chunked MoE"):
+            moe(x, input_ids)
+
+        self.assertEqual(moe.gate.token_chunks, [])
+
+    def test_cuda_graph_capture_asserts_instead_of_chunking(self):
+        moe = _fake_moe(dim=2, cap=4)
+        x = torch.randn(9, 2)
+        input_ids = torch.arange(9, dtype=torch.long)
+
+        with mock.patch.object(torch.cuda, "is_available", return_value=True):
+            with mock.patch.object(
+                torch.cuda, "is_current_stream_capturing", return_value=True
+            ):
+                with self.assertRaisesRegex(
+                    AssertionError, "CUDA graph capture must not use chunked MoE"
+                ):
+                    moe(x, input_ids)
+
+        self.assertEqual(moe.gate.token_chunks, [])
 
     def test_input_ids_must_match_flat_tokens(self):
         moe = _fake_moe(dim=2, cap=4)
