@@ -312,6 +312,16 @@ def _token_ids_list_from_generate_output(out_py: Any) -> list[int]:
     return ids
 
 
+def _first_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return int(value[0]) if value else None
+    if isinstance(value, tuple):
+        return int(value[0]) if value else None
+    return int(value)
+
+
 def _append_prompt_token_ids_output(
     infer: predict_v2_pb2.ModelInferResponse,
     prompt_token_ids: list[int],
@@ -406,6 +416,34 @@ def _append_finished_output(
     infer.raw_output_contents.append(b"\x01" if finished else b"\x00")
 
 
+def _append_dashllm_limit_parameters(
+    infer: predict_v2_pb2.ModelInferResponse,
+    *,
+    generate_config: Any = None,
+    eos_token_id: int | None = None,
+    max_token_id: int | None = None,
+    generate_think_token_num: int | None = None,
+) -> None:
+    """Mirror dashllm response parameters consumed by dashscope-serving."""
+    if generate_config is not None:
+        infer.parameters["max_new_tokens"].int64_param = int(
+            getattr(generate_config, "max_new_tokens", 0) or 0
+        )
+        max_think = int(getattr(generate_config, "max_thinking_tokens", 0) or 0)
+        if max_think > 0:
+            infer.parameters["max_new_think_tokens"].int64_param = max_think
+
+    stop_id = _first_int(eos_token_id)
+    if stop_id is not None:
+        infer.parameters["stop_token_id"].int64_param = stop_id
+    if max_token_id is not None:
+        infer.parameters["max_token_id"].int64_param = int(max_token_id)
+    if generate_think_token_num is not None:
+        infer.parameters["generate_think_token_num"].int64_param = int(
+            generate_think_token_num
+        )
+
+
 def _append_int32_scalar_output(
     infer: predict_v2_pb2.ModelInferResponse,
     tensor_name: str,
@@ -438,6 +476,10 @@ def build_stream_response_from_generate_outputs(
     request_input_ids: list[int] | None = None,
     return_input_ids: bool = False,
     is_streaming: bool = True,
+    generate_config: Any = None,
+    eos_token_id: int | None = None,
+    max_token_id: int | None = None,
+    generate_think_token_num: int | None = None,
     _request_shape: list[int] | None = None,
 ) -> predict_v2_pb2.ModelStreamInferResponse:
     """Build ``ModelStreamInferResponse`` from one ``GenerateOutputs`` chunk.
@@ -469,6 +511,13 @@ def build_stream_response_from_generate_outputs(
     _append_finished_output(infer, finished)
     _append_aux_info_metrics_outputs(infer, out_py)
     infer.parameters["incremental_output"].int64_param = 1 if is_streaming else 0
+    _append_dashllm_limit_parameters(
+        infer,
+        generate_config=generate_config,
+        eos_token_id=eos_token_id,
+        max_token_id=max_token_id,
+        generate_think_token_num=generate_think_token_num,
+    )
 
     logging.debug("[DashScGrpc] [%s] generated_ids: %s", request_log_tag, generated_ids)
     logging.debug(
