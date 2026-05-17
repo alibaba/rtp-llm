@@ -792,8 +792,23 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
         return;
     }
 
-    const auto& new_tokens     = update_info.new_tokens;
-    auto        num_new_tokens = update_info.num_new_tokens;
+    auto new_tokens     = update_info.new_tokens;
+    auto num_new_tokens = update_info.num_new_tokens;
+    for (auto logit_processor_ptr : getAllLogitsProcessorPtr()) {
+        logit_processor_ptr->postProcessSampledTokens(new_tokens, num_new_tokens);
+    }
+    StreamUpdateInfo processed_update_info{new_tokens,
+                                           num_new_tokens,
+                                           update_info.hidden_states,
+                                           update_info.logits,
+                                           update_info.softmax_probs,
+                                           update_info.cum_log_probs,
+                                           update_info.all_probs,
+                                           update_info.loss,
+                                           update_info.src_batch_indices,
+                                           update_info.all_hidden_states,
+                                           update_info.update_remote_generate,
+                                           update_info.force_update_info};
 
     int error_token_id = 0;
     if (!complete_token_ids_->update(new_tokens,
@@ -812,20 +827,20 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
         return;
     }
 
-    resizeSubGenerateStatus(update_info.new_tokens.size(0));
+    resizeSubGenerateStatus(new_tokens.size(0));
 
     // TODO(xinfei.sxf) fix this (update_queue)
-    updateOutput(update_info);
+    updateOutput(processed_update_info);
 
     bool is_done = getStatus() == StreamState::FINISHED;
 
     if (!is_done) {
-        updateLogitProcessorStatus(update_info);
+        updateLogitProcessorStatus(processed_update_info);
     }
 
     if (!is_done || reuseCache()) {
         // kv cache blocks must be updated if REUSE_CACHE is on, even the stream is done
-        auto update_res = updateKvCacheBlocks(update_info.src_batch_indices);
+        auto update_res = updateKvCacheBlocks(processed_update_info.src_batch_indices);
         if (!update_res) {
             reportEventWithoutLock(StreamEvents::Error, ErrorCode::MALLOC_FAILED, "update kv cache blocks failed");
             return;

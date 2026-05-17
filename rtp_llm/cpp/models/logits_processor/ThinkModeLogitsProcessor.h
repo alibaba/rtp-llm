@@ -5,14 +5,22 @@
 
 namespace rtp_llm {
 
+enum class ThinkModeState {
+    THINKING = 0,
+    FORCING_CLOSE = 1,
+    ANSWERING = 2,
+};
+
 struct StreamThinkInfo {
     bool                                           in_think_mode;
     int                                            max_thinking_tokens;
     std::vector<int>                               end_think_token_ids;
+    std::vector<int>                               abort_think_token_ids;
     int32_t                                        input_length;
     int32_t                                        current_output_length;
     bool                                           is_beam_search;
     std::shared_ptr<StringContainDFA<size_t, int>> dfa_ptr;
+    ThinkModeState                                 state = ThinkModeState::THINKING;
 
     StreamThinkInfo() = default;
 
@@ -22,23 +30,28 @@ struct StreamThinkInfo {
                     int32_t                                        input_length,
                     int32_t                                        output_length,
                     bool                                           is_beam_search,
-                    std::shared_ptr<StringContainDFA<size_t, int>> dfa_ptr):
+                    std::shared_ptr<StringContainDFA<size_t, int>> dfa_ptr,
+                    std::vector<int>                               abort_think_token_ids = {}):
         in_think_mode(think_mode),
         max_thinking_tokens(max_thinking_tokens),
         end_think_token_ids(end_think_token_ids),
+        abort_think_token_ids(abort_think_token_ids),
         input_length(input_length),
         current_output_length(output_length),
         is_beam_search(is_beam_search),
-        dfa_ptr(dfa_ptr) {}
+        dfa_ptr(dfa_ptr),
+        state(think_mode ? ThinkModeState::THINKING : ThinkModeState::ANSWERING) {}
 
     StreamThinkInfo copy() {
         StreamThinkInfo think_info;
         think_info.in_think_mode         = in_think_mode;
         think_info.max_thinking_tokens   = max_thinking_tokens;
         think_info.end_think_token_ids   = end_think_token_ids;
+        think_info.abort_think_token_ids = abort_think_token_ids;
         think_info.input_length          = input_length;
         think_info.current_output_length = current_output_length;
         think_info.is_beam_search        = is_beam_search;
+        think_info.state                 = state;
         if (dfa_ptr) {
             think_info.dfa_ptr = std::make_shared<StringContainDFA<size_t, int>>(*dfa_ptr);
         }
@@ -60,6 +73,7 @@ public:
     void process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) override;
     void updateMultiSeqStatus(const std::vector<int>& src_batch_indices) override;
     void updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) override;
+    bool postProcessSampledTokens(torch::Tensor& new_tokens, int32_t num_new_tokens) override;
 
 private:
     void setVocabMask(std::shared_ptr<StringContainDFA<size_t, int>> dfa_ptr,
@@ -68,6 +82,7 @@ private:
                       std::vector<int>                               template_token_ids,
                       size_t                                         vocab_size,
                       bool                                           enforce);
+    bool isAbortThinkToken(const StreamThinkInfo& info, int token_id) const;
 
 public:
     std::vector<size_t> thinkEndTokensStatus();

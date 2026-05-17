@@ -78,6 +78,7 @@ public:
     bool               in_think_mode       = false;
     int                max_thinking_tokens = 0;
     std::vector<int>   end_think_token_ids;
+    std::vector<int>   abort_think_token_ids;
     bool               gen_timeline = false;
     int                profile_step = 3;
     std::string        profile_trace_name;
@@ -140,6 +141,7 @@ public:
                      << ", can_use_pd_separation: " << can_use_pd_separation << ", pd_separation: " << pd_separation
                      << ", in_think_mode: " << in_think_mode << ", max_thinking_tokens: " << max_thinking_tokens
                      << ", end_think_token_ids: " << vectorToString(end_think_token_ids)
+                     << ", abort_think_token_ids: " << vectorToString(abort_think_token_ids)
                      << ", gen_timeline: " << gen_timeline << ", profile_step: " << profile_step
                      << ", reuse_cache: " << reuse_cache << ", enable_device_cache: " << enable_device_cache
                      << ", enable_memory_cache: " << enable_memory_cache
@@ -216,6 +218,7 @@ public:
         JSONIZE(in_think_mode);
         JSONIZE(max_thinking_tokens);
         JSONIZE(end_think_token_ids);
+        JSONIZE(abort_think_token_ids);
         JSONIZE(gen_timeline);
         JSONIZE(profile_step);
         JSONIZE(profile_trace_name);

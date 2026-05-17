@@ -15,6 +15,9 @@ public:
     virtual void  process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) = 0;
     virtual void  updateMultiSeqStatus(const std::vector<int>& src_batch_indices)           = 0;
     virtual void  updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens)     = 0;
+    virtual bool  postProcessSampledTokens(torch::Tensor& new_tokens, int32_t num_new_tokens) {
+        return false;
+    }
     void          memFill(const torch::Tensor& new_tokens_logits, size_t vocab_size, size_t index);
     void          maskLogits(torch::Tensor& new_token_logits, const torch::Tensor& vocab_mask);
     torch::Tensor generateVocabMask(size_t                                  batch_size,

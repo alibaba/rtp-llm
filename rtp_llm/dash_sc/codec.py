@@ -18,6 +18,8 @@ from typing import Any
 from rtp_llm.dash_sc.proto import predict_v2_pb2
 from rtp_llm.utils.base_model_datatypes import GenerateOutputs
 
+INT32_MAX = 2_147_483_647
+
 # ----------------------------------------------------------------------------
 # Low-level tensor decoding helpers (shared by request parsing and access log)
 # ----------------------------------------------------------------------------
@@ -88,6 +90,21 @@ def _parse_optional_scalar_float(request, tensor_name: str) -> float | None:
     return None
 
 
+def _parse_optional_scalar_bool(request, tensor_name: str) -> bool | None:
+    inp, raw = _find_input_raw(request, tensor_name)
+    if inp is None or raw is None or not raw:
+        return None
+    if inp.datatype == "BOOL":
+        return raw[0] != 0
+    v = _parse_optional_scalar_int(request, tensor_name)
+    if v is not None:
+        return v != 0
+    vf = _parse_optional_scalar_float(request, tensor_name)
+    if vf is not None:
+        return vf != 0.0
+    return None
+
+
 def _parse_stop_words_list_input(request) -> tuple[tuple[int, ...], ...] | None:
     """Input name ``stop_words_list`` -> ``GenerateConfig.stop_words_list`` (groups of token ids)."""
     inp, raw = _find_input_raw(request, "stop_words_list")
@@ -119,6 +136,7 @@ class OtherParams:
     """Non-sampling knobs carried alongside ``input_ids`` (filled by ``parse_other_params``)."""
 
     return_input_ids: bool = False
+    enable_thinking: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -136,6 +154,7 @@ class SamplingParams:
     frequency_penalty: float = 0.0
     presence_penalty: float = 0.0
     stop_words_list: tuple[tuple[int, ...], ...] = field(default_factory=tuple)
+    max_new_think_tokens: int | None = None
 
     @property
     def n(self) -> int:
@@ -151,6 +170,12 @@ class SamplingParams:
         from rtp_llm.config.generate_config import GenerateConfig
 
         return_input_ids = other.return_input_ids if other is not None else False
+        if self.max_new_think_tokens is None or self.max_new_think_tokens == 0:
+            max_thinking_tokens = 32000
+        elif self.max_new_think_tokens < 0:
+            max_thinking_tokens = INT32_MAX
+        else:
+            max_thinking_tokens = self.max_new_think_tokens
         return GenerateConfig(
             max_new_tokens=self.max_new_tokens,
             num_return_sequences=self.num_return_sequences,
@@ -163,6 +188,7 @@ class SamplingParams:
             frequency_penalty=self.frequency_penalty,
             presence_penalty=self.presence_penalty,
             stop_words_list=self.stop_words_list_py(),
+            max_thinking_tokens=max_thinking_tokens,
             return_input_ids=return_input_ids,
             is_streaming=True,
         )
@@ -189,7 +215,8 @@ def parse_sampling_params(request) -> SamplingParams:
 
     Tensor names: ``max_new_tokens``, ``num_return_sequences``, ``top_p``, ``top_k``,
     ``stop_words_list``, ``temperature``, ``min_new_tokens``, ``seed``,
-    ``repetition_penalty``, ``frequency_penalty``, ``presence_penalty``.
+    ``repetition_penalty``, ``frequency_penalty``, ``presence_penalty``,
+    ``max_new_think_tokens`` / ``max_think_length``.
 
     Legacy: if there is no ``top_k`` input, ``request.parameters["top_k"].int64_param``
     is used instead.
@@ -205,6 +232,7 @@ def parse_sampling_params(request) -> SamplingParams:
     frequency_penalty = 0.0
     presence_penalty = 0.0
     stop_words_list: tuple[tuple[int, ...], ...] = tuple()
+    max_new_think_tokens: int | None = None
 
     v = _parse_optional_scalar_int(request, "max_new_tokens")
     if v is not None:
@@ -254,6 +282,12 @@ def parse_sampling_params(request) -> SamplingParams:
     if sw is not None:
         stop_words_list = sw
 
+    for tensor_name in ("max_new_think_tokens", "max_think_length"):
+        v = _parse_optional_scalar_int(request, tensor_name)
+        if v is not None:
+            max_new_think_tokens = v
+            break
+
     return SamplingParams(
         max_new_tokens=max_new_tokens,
         num_return_sequences=num_return_sequences,
@@ -266,25 +300,18 @@ def parse_sampling_params(request) -> SamplingParams:
         frequency_penalty=frequency_penalty,
         presence_penalty=presence_penalty,
         stop_words_list=stop_words_list,
+        max_new_think_tokens=max_new_think_tokens,
     )
 
 
 def parse_other_params(request) -> OtherParams:
-    """Non-sampling tensors. Currently: ``return_input_ids`` (BOOL byte or numeric scalar)."""
-    return_input_ids = False
-    inp, raw = _find_input_raw(request, "return_input_ids")
-    if inp is not None and raw:
-        if inp.datatype == "BOOL" and len(raw) >= 1:
-            return_input_ids = raw[0] != 0
-        else:
-            v = _parse_optional_scalar_int(request, "return_input_ids")
-            if v is not None:
-                return_input_ids = v != 0
-            else:
-                vf = _parse_optional_scalar_float(request, "return_input_ids")
-                if vf is not None:
-                    return_input_ids = vf != 0.0
-    return OtherParams(return_input_ids=return_input_ids)
+    """Non-sampling tensors: ``return_input_ids`` and optional ``enable_thinking``."""
+    return_input_ids = _parse_optional_scalar_bool(request, "return_input_ids")
+    enable_thinking = _parse_optional_scalar_bool(request, "enable_thinking")
+    return OtherParams(
+        return_input_ids=bool(return_input_ids),
+        enable_thinking=enable_thinking,
+    )
 
 
 def parse_dash_sc_grpc_request(

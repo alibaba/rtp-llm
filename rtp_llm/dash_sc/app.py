@@ -21,6 +21,7 @@ from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.dash_sc.inference.servicer import DashScInferenceServicer
 from rtp_llm.dash_sc.proxy.servicer import DashScProxyServicer
 from rtp_llm.dash_sc.server import DashScGrpcServer
+from rtp_llm.dash_sc.think import DashScThinkConfig, normalize_think_mode
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
 from rtp_llm.metrics import kmonitor
 from rtp_llm.model_factory import ModelFactory
@@ -32,6 +33,20 @@ from rtp_llm.server.backend_rpc_server_visitor import create_backend_rpc_server_
 # ``start()`` entry so mode is decided at the process boundary — not re-probed
 # inside the gRPC server or servicer. Empty / unset -> inference mode.
 _FORWARD_ENV_KEY = "DASH_SC_GRPC_FORWARD_ADDR"
+
+
+def _decode_env_tag(tag: str) -> str:
+    return tag.encode("utf-8").decode("unicode_escape")
+
+
+def _encode_tag(base_tok: Any, tag: str) -> List[int]:
+    hf_tok = getattr(base_tok, "tokenizer", base_tok)
+    ids = hf_tok.encode(tag, add_special_tokens=False)
+    if hasattr(ids, "tolist"):
+        ids = ids.tolist()
+    if ids and isinstance(ids[0], list):
+        ids = ids[0]
+    return [int(x) for x in ids]
 
 
 def _derive_echo_prefix_ids(generate_env_config: Any, base_tok: Any) -> List[int]:
@@ -47,13 +62,75 @@ def _derive_echo_prefix_ids(generate_env_config: Any, base_tok: Any) -> List[int
     if not tag:
         return []
     try:
-        hf_tok = getattr(base_tok, "tokenizer", base_tok)
-        ids = list(hf_tok.encode(tag, add_special_tokens=False))
+        ids = _encode_tag(base_tok, _decode_env_tag(tag))
     except Exception as e:
         logging.warning("[DashScApp] echo_prefix derive failed: %s", e)
         return []
     logging.info("[DashScApp] echo_prefix_ids=%s (think_start_tag=%r)", ids, tag)
     return ids
+
+
+def _derive_think_config(
+    generate_env_config: Any,
+    base_tok: Any,
+    *,
+    model_type: str = "",
+) -> DashScThinkConfig:
+    if not bool(getattr(generate_env_config, "think_mode", 0)):
+        return DashScThinkConfig.disabled()
+    try:
+        start_tag = _decode_env_tag(
+            getattr(generate_env_config, "think_start_tag", "") or ""
+        )
+        end_tag = _decode_env_tag(
+            getattr(generate_env_config, "think_end_tag", "") or ""
+        )
+        if not start_tag or not end_tag:
+            return DashScThinkConfig.disabled()
+
+        bos_tokens = _encode_tag(base_tok, start_tag)
+        end_think_token_id = int(getattr(generate_env_config, "think_end_token_id", -1))
+        end_think_token_ids = (
+            [end_think_token_id]
+            if end_think_token_id != -1
+            else _encode_tag(base_tok, end_tag)
+        )
+        eos_tag = end_tag if end_tag.startswith("\n") else "\n" + end_tag
+        eos_tokens = _encode_tag(base_tok, eos_tag)
+        empty_tag = start_tag + "\n" + end_tag
+        empty_tokens = _encode_tag(base_tok, empty_tag)
+    except Exception as e:
+        logging.warning("[DashScApp] think_config derive failed: %s", e)
+        return DashScThinkConfig.disabled()
+
+    config = DashScThinkConfig(
+        enabled=True,
+        mode=normalize_think_mode(getattr(generate_env_config, "think_mode", 0)),
+        bos_tokens=tuple(bos_tokens),
+        end_think_token_ids=tuple(end_think_token_ids),
+        eos_tokens=tuple(eos_tokens),
+        empty_tokens=tuple(empty_tokens),
+        is_deepseek_v4=str(model_type).lower() == "deepseek_v4",
+    )
+    if not config.usable:
+        logging.warning(
+            "[DashScApp] think_config unusable: bos=%s end=%s eos=%s empty=%s",
+            bos_tokens,
+            end_think_token_ids,
+            eos_tokens,
+            empty_tokens,
+        )
+        return DashScThinkConfig.disabled()
+    logging.info(
+        "[DashScApp] think_config mode=%s bos=%s end=%s eos=%s empty=%s model_type=%s",
+        config.mode,
+        list(config.bos_tokens),
+        list(config.end_think_token_ids),
+        list(config.eos_tokens),
+        list(config.empty_tokens),
+        model_type,
+    )
+    return config
 
 
 def _derive_stop_word_ids_list(
@@ -265,6 +342,11 @@ class DashScApp:
                 echo_prefix_ids = _derive_echo_prefix_ids(
                     self.py_env_configs.generate_env_config, base_tok
                 )
+                think_config = _derive_think_config(
+                    self.py_env_configs.generate_env_config,
+                    base_tok,
+                    model_type=model_config.model_type,
+                )
                 extra_stop_word_ids = _derive_stop_word_ids_list(
                     model_config, self.py_env_configs, base_tok
                 )
@@ -274,6 +356,7 @@ class DashScApp:
                     port=port,
                     server_id=self.server_config.frontend_server_id,
                     echo_prefix_ids=echo_prefix_ids,
+                    think_config=think_config,
                     extra_stop_word_ids=extra_stop_word_ids,
                 )
 

@@ -61,6 +61,16 @@ def _append_fp32_scalar(
     request.raw_input_contents.append(struct.pack("<f", float(value)))
 
 
+def _append_bool_scalar(
+    request: predict_v2_pb2.ModelInferRequest, name: str, value: bool
+) -> None:
+    inp = request.inputs.add()
+    inp.name = name
+    inp.datatype = "BOOL"
+    inp.shape.append(1)
+    request.raw_input_contents.append(b"\x01" if value else b"\x00")
+
+
 def append_input_ids_to_model_infer_request(
     request: predict_v2_pb2.ModelInferRequest,
     input_ids: list[int],
@@ -89,6 +99,10 @@ def append_sampling_params_to_model_infer_request(
     _append_fp32_scalar(request, "repetition_penalty", sampling.repetition_penalty)
     _append_fp32_scalar(request, "frequency_penalty", sampling.frequency_penalty)
     _append_fp32_scalar(request, "presence_penalty", sampling.presence_penalty)
+    if sampling.max_new_think_tokens is not None:
+        _append_int32_scalar(
+            request, "max_new_think_tokens", sampling.max_new_think_tokens
+        )
 
     groups = sampling.stop_words_list
     if not groups:
@@ -121,6 +135,15 @@ def append_return_input_ids_to_model_infer_request(
     _append_int32_scalar(request, "return_input_ids", 1)
 
 
+def append_enable_thinking_to_model_infer_request(
+    request: predict_v2_pb2.ModelInferRequest,
+    enable_thinking: bool | None,
+) -> None:
+    if enable_thinking is None:
+        return
+    _append_bool_scalar(request, "enable_thinking", enable_thinking)
+
+
 def build_model_infer_request(
     *,
     request_id: str,
@@ -128,6 +151,7 @@ def build_model_infer_request(
     input_ids: list[int],
     sampling: SamplingParams,
     return_input_ids: bool = False,
+    enable_thinking: bool | None = None,
 ) -> predict_v2_pb2.ModelInferRequest:
     """Build ``ModelInferRequest`` for ``ModelStreamInfer`` (sampling tensors + ``input_ids``)."""
     request = predict_v2_pb2.ModelInferRequest()
@@ -135,6 +159,7 @@ def build_model_infer_request(
     request.model_name = model_name
     append_sampling_params_to_model_infer_request(request, sampling)
     append_return_input_ids_to_model_infer_request(request, return_input_ids)
+    append_enable_thinking_to_model_infer_request(request, enable_thinking)
     append_input_ids_to_model_infer_request(request, input_ids)
     return request
 
@@ -279,6 +304,17 @@ def _parse_stop_token_ids_csv(s: str | None) -> tuple[tuple[int, ...], ...]:
     return (tuple(ids),) if ids else tuple()
 
 
+def _parse_optional_bool(s: str | None) -> bool | None:
+    if s is None or not str(s).strip():
+        return None
+    v = str(s).strip().lower()
+    if v in {"1", "true", "yes", "y", "on"}:
+        return True
+    if v in {"0", "false", "no", "n", "off"}:
+        return False
+    raise argparse.ArgumentTypeError(f"invalid bool: {s!r}")
+
+
 def build_dash_sc_grpc_client_argparser() -> argparse.ArgumentParser:
     """CLI for ``main()``; callers may ``parse_args(argv)`` for tests or subprocesses."""
     parser = argparse.ArgumentParser(
@@ -402,6 +438,18 @@ def build_dash_sc_grpc_client_argparser() -> argparse.ArgumentParser:
         help="Send return_input_ids INT32 tensor (1) so server echoes prompt in prompt_token_ids",
     )
     parser.add_argument(
+        "--enable_thinking",
+        type=_parse_optional_bool,
+        default=None,
+        help="Optional enable_thinking BOOL tensor: true/false. Omit to use server default.",
+    )
+    parser.add_argument(
+        "--max_new_think_tokens",
+        type=int,
+        default=None,
+        help="Optional max_new_think_tokens INT32 tensor. 0 disables thinking.",
+    )
+    parser.add_argument(
         "--dash_sc_grpc_config_json",
         type=str,
         default="",
@@ -439,6 +487,7 @@ def main():
         frequency_penalty=args.frequency_penalty,
         presence_penalty=args.presence_penalty,
         stop_words_list=_parse_stop_token_ids_csv(args.stop_token_ids or None),
+        max_new_think_tokens=args.max_new_think_tokens,
     )
 
     request = build_model_infer_request(
@@ -447,6 +496,7 @@ def main():
         input_ids=input_ids,
         sampling=sampling,
         return_input_ids=args.return_input_ids,
+        enable_thinking=args.enable_thinking,
     )
 
     dash_sc_cfg = None

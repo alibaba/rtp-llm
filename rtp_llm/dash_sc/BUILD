@@ -27,6 +27,7 @@ py_library(
         "proxy/__main__.py",
         "proxy/servicer.py",
         "server.py",
+        "think.py",
     ],
     data = [":grpc_client_scripts"],
     visibility = ["//visibility:public"],

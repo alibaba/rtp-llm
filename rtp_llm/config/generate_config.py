@@ -53,6 +53,7 @@ class GenerateConfig(BaseModel):
     )
     chat_template_kwargs: Optional[Dict[str, Any]] = None
     end_think_token_ids: List[int] = []
+    abort_think_token_ids: List[int] = []
     num_beams: int = 1
     variable_num_beams: List[int] = []
     do_sample: bool = True
@@ -357,6 +358,10 @@ class GenerateConfig(BaseModel):
                 check_with_info(
                     is_list_positive_integer(self.end_think_token_ids),
                     f"end_think_token_ids {self.end_think_token_ids} is wrong data type",
+                )
+                check_with_info(
+                    is_list_positive_integer(self.abort_think_token_ids),
+                    f"abort_think_token_ids {self.abort_think_token_ids} is wrong data type",
                 )
             calculate_loss_list = [0, 1, 2]
             check_with_info(
