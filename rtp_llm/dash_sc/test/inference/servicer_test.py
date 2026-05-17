@@ -70,15 +70,65 @@ class _FakeVisitor:
         self._stream = stream
         self.enqueue_called = 0
         self.last_generate_input = None
+        self.generate_inputs = []
 
     async def enqueue(self, _generate_input):
         self.enqueue_called += 1
         self.last_generate_input = _generate_input
+        self.generate_inputs.append(_generate_input)
         return self._stream
+
+
+class _MultiStreamVisitor:
+    """Async ``enqueue`` that returns one stream per call."""
+
+    def __init__(self, streams):
+        self._streams = list(streams)
+        self.enqueue_called = 0
+        self.last_generate_input = None
+        self.generate_inputs = []
+
+    async def enqueue(self, generate_input):
+        self.enqueue_called += 1
+        self.last_generate_input = generate_input
+        self.generate_inputs.append(generate_input)
+        return self._streams[self.enqueue_called - 1]
+
+
+class _FakeTokenizer:
+    eos_token_id = 2
+    vocab_size = 200000
+
+    def __init__(self, mapping: dict[str, list[int]]):
+        self._mapping = mapping
+        self.encode_calls: list[tuple[str, bool]] = []
+
+    def encode(self, text, add_special_tokens=True):
+        self.encode_calls.append((text, add_special_tokens))
+        return list(self._mapping[text])
+
+
+class _GenerateEnvCfg:
+    think_mode = 1
+    think_end_token_id = -1
+    think_start_tag = "<think>\n"
+    think_end_tag = "</think>\n\n"
 
 
 async def _drain(aiter):
     return [x async for x in aiter]
+
+
+def _gen_ids(chunk) -> list[int]:
+    infer = chunk.infer_response
+    for i, out in enumerate(infer.outputs):
+        if out.name == "generated_ids":
+            shape = list(out.shape)
+            declared_len = shape[-1] if shape else 0
+            if declared_len <= 0:
+                return []
+            return _unpack_int32_le(infer.raw_output_contents[i])
+    return []
 
 
 class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
@@ -173,6 +223,177 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(chunks), 1)
         self.assertIn("backend down", chunks[0].error_message)
+
+    async def test_deepseek_v4_multi_think_uses_first_close_only(self) -> None:
+        req = self._minimal_request()
+        chunks_proto = []
+        for ids, finished in (
+            ([10, 128822, 11], False),
+            ([12, 128822, 13], True),
+        ):
+            out = GenerateOutput(
+                output_ids=torch.tensor(ids, dtype=torch.int32),
+                finished=finished,
+                aux_info=AuxInfo(input_len=2, reuse_len=0),
+            )
+            chunks_proto.append(GenerateOutputs(generate_outputs=[out]))
+        visitor = _FakeVisitor(_FakeAsyncStream(chunks_proto))
+        tok = _FakeTokenizer(
+            {
+                "<think>\n": [128821, 198],
+                "</think>\n\n": [128822, 271],
+                "<think>\n\n</think>\n\n": [128821, 271, 128822, 271],
+                "</think>": [128822],
+            }
+        )
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [1, 2],
+                SamplingParams(),
+                OtherParams(),
+                visitor,
+                rtp_llm_request_id=1,
+                tokenizer=tok,
+                generate_env_config=_GenerateEnvCfg(),
+                model_type="qwen2",
+            )
+        )
+
+        self.assertEqual(visitor.enqueue_called, 1)
+        self.assertEqual(_gen_ids(chunks[0]), [10, 128822, 11])
+        self.assertEqual(_gen_ids(chunks[1]), [12, 128822, 13])
+        self.assertEqual(
+            chunks[0].infer_response.parameters["generate_think_token_num"].int64_param,
+            2,
+        )
+        self.assertEqual(
+            chunks[1].infer_response.parameters["generate_think_token_num"].int64_param,
+            2,
+        )
+
+    async def test_deepseek_v4_token1_forces_empty_think_phase2_prompt(self) -> None:
+        req = self._minimal_request()
+        phase1 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([10, 11, 1, 99], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        phase2 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([20, 128822, 21], dtype=torch.int32),
+                    finished=True,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        visitor = _MultiStreamVisitor(
+            [_FakeAsyncStream([phase1]), _FakeAsyncStream([phase2])]
+        )
+        tok = _FakeTokenizer(
+            {
+                "<think>\n": [128821, 198],
+                "</think>\n\n": [128822, 271],
+                "<think>\n\n</think>\n\n": [128821, 271, 128822, 271],
+                "</think>": [128822],
+            }
+        )
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [7, 8, 128821],
+                SamplingParams(),
+                OtherParams(),
+                visitor,
+                rtp_llm_request_id=100,
+                echo_prefix_ids=[128821, 198],
+                tokenizer=tok,
+                generate_env_config=_GenerateEnvCfg(),
+                model_type="deepseek_v4",
+                phase2_request_id_factory=lambda: 200,
+            )
+        )
+
+        self.assertEqual(visitor.enqueue_called, 2)
+        self.assertEqual(visitor.generate_inputs[0].request_id, 100)
+        self.assertEqual(visitor.generate_inputs[1].request_id, 200)
+        self.assertEqual(_gen_ids(chunks[0]), [128821, 10, 11])
+        self.assertEqual(_gen_ids(chunks[1]), [128822, 271])
+        self.assertEqual(_gen_ids(chunks[2]), [20, 128822, 21])
+        self.assertEqual(chunks[2].infer_response.id, "trace-real-2")
+        phase2_input_ids = visitor.generate_inputs[1].token_ids.cpu().int().tolist()
+        self.assertEqual(phase2_input_ids, [7, 8, 128821, 271, 128822, 271])
+        self.assertFalse(visitor.generate_inputs[1].generate_config.in_think_mode)
+        self.assertNotIn(10, phase2_input_ids)
+        self.assertNotIn(11, phase2_input_ids)
+        self.assertEqual(
+            chunks[1].infer_response.parameters["generate_think_token_num"].int64_param,
+            3,
+        )
+
+    async def test_deepseek_v4_token1_before_close_wins_within_chunk(self) -> None:
+        req = self._minimal_request()
+        phase1 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([10, 1, 128822, 99], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        phase2 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([20], dtype=torch.int32),
+                    finished=True,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        visitor = _MultiStreamVisitor(
+            [_FakeAsyncStream([phase1]), _FakeAsyncStream([phase2])]
+        )
+        tok = _FakeTokenizer(
+            {
+                "<think>\n": [128821, 198],
+                "</think>\n\n": [128822, 271],
+                "<think>\n\n</think>\n\n": [128821, 271, 128822, 271],
+                "</think>": [128822],
+            }
+        )
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [7, 8, 128821],
+                SamplingParams(),
+                OtherParams(),
+                visitor,
+                rtp_llm_request_id=100,
+                echo_prefix_ids=[128821, 198],
+                tokenizer=tok,
+                generate_env_config=_GenerateEnvCfg(),
+                model_type="deepseek_v4",
+                phase2_request_id_factory=lambda: 200,
+            )
+        )
+
+        self.assertEqual(visitor.enqueue_called, 2)
+        self.assertEqual(_gen_ids(chunks[0]), [128821, 10])
+        self.assertEqual(_gen_ids(chunks[1]), [128822, 271])
+        self.assertEqual(_gen_ids(chunks[2]), [20])
+        self.assertEqual(
+            chunks[1].infer_response.parameters["generate_think_token_num"].int64_param,
+            2,
+        )
 
 
 class IterRealModelStreamInferEchoTest(unittest.IsolatedAsyncioTestCase):
@@ -429,7 +650,9 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         )
 
         await _drain(
-            servicer.ModelStreamInfer(_areq_iter([self._valid_infer_request()]), context)
+            servicer.ModelStreamInfer(
+                _areq_iter([self._valid_infer_request()]), context
+            )
         )
 
         self.assertIsNotNone(visitor.last_generate_input)
