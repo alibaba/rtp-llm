@@ -126,7 +126,7 @@ TEST(HybridPoolConfigCreatorTest, FlashLayerClassification) {
 
 TEST(HybridPoolConfigCreatorTest, MtpSwaOnlyLayerIsNotStripped) {
     ParallelismConfig pc;
-    auto              config = HybridPoolConfigCreator::createConfig(makeFlashMtpModelConfig(), pc, true);
+    auto config = HybridPoolConfigCreator::createConfig(makeFlashMtpModelConfig(), pc, KVCacheConfig{}, true);
 
     EXPECT_EQ(config.layer_num, 1u);
     EXPECT_EQ(config.block_size_bytes, 1u);
@@ -525,11 +525,10 @@ TEST(CacheConfigTest, DSV4MtpKeepsProposeLayerInSwaPool) {
     EXPECT_TRUE(config.mtp_sub_configs[0]->global_layer_ids[0].empty());
     EXPECT_TRUE(config.mtp_sub_configs[1]->global_layer_ids[0].empty());
 
-    const size_t expected_fixed_reserve =
-        config.group_block_nums[3] * config.group_block_size_bytes[3]
-        + config.group_block_nums[4] * config.group_block_size_bytes[4]
-        + config.group_block_nums[5] * config.group_block_size_bytes[5]
-        + config.group_block_nums[6] * config.group_block_size_bytes[6];
+    const size_t expected_fixed_reserve = config.group_block_nums[3] * config.group_block_size_bytes[3]
+                                          + config.group_block_nums[4] * config.group_block_size_bytes[4]
+                                          + config.group_block_nums[5] * config.group_block_size_bytes[5]
+                                          + config.group_block_nums[6] * config.group_block_size_bytes[6];
     EXPECT_EQ(config.fixed_pool_reserve_bytes, expected_fixed_reserve);
 }
 
