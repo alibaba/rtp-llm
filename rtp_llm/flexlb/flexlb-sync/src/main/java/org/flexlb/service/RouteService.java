@@ -16,6 +16,8 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.sync.status.EngineWorkerStatus;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Mono;
@@ -39,6 +41,8 @@ import reactor.core.publisher.Mono;
  */
 @Component
 public class RouteService {
+
+    private static final Logger logger = LoggerFactory.getLogger(RouteService.class);
 
     private final ConfigService configService;
     private final Router router;
@@ -134,27 +138,41 @@ public class RouteService {
      * </ul>
      */
     boolean shouldUseDpBatch(BalanceContext ctx, FlexlbConfig cfg) {
-        if (dpBatchScheduler == null) return false;
-        if (!cfg.isDpBalanceEnabled()) return false;
+        boolean schedulerOk = dpBatchScheduler != null;
+        boolean cfgOk = cfg.isDpBalanceEnabled();
         Request req = ctx.getRequest();
-        if (req == null) return false;
-        if (req.getMaxNewTokens() <= 1) return false;     // pd_separation gating
-        if (req.getNumBeams() > 1) return false;           // pd_separation gating
-        if (req.isForceDisableSpRun()) return false;       // explicit SP opt-out
-        return hasDpEnabledPrefillWorker();
+        boolean reqOk = req != null;
+        int maxNewTokens = reqOk ? req.getMaxNewTokens() : -1;
+        int numBeams = reqOk ? req.getNumBeams() : -1;
+        boolean forceDisableSp = reqOk && req.isForceDisableSpRun();
+        boolean dpWorkerOk = hasDpEnabledPrefillWorker();
+        boolean decision = schedulerOk && cfgOk && reqOk
+                && maxNewTokens > 1 && numBeams <= 1 && !forceDisableSp && dpWorkerOk;
+        logger.info("SHOULD_USE_DP_BATCH_DEBUG decision={} scheduler={} cfgDpBalance={} req={} maxNewTokens={} numBeams={} forceDisableSp={} dpWorker={}",
+                decision, schedulerOk, cfgOk, reqOk, maxNewTokens, numBeams, forceDisableSp, dpWorkerOk);
+        return decision;
     }
 
     private boolean hasDpEnabledPrefillWorker() {
         Map<String, WorkerStatus> prefillWorkers =
                 engineWorkerStatus.selectModelWorkerStatus(RoleType.PREFILL, null);
         if (prefillWorkers == null || prefillWorkers.isEmpty()) {
+            logger.info("HAS_DP_ENABLED_PREFILL_WORKER_DEBUG prefillWorkers={}",
+                    prefillWorkers == null ? "null" : "empty");
             return false;
         }
-        for (WorkerStatus w : prefillWorkers.values()) {
+        StringBuilder sb = new StringBuilder();
+        boolean found = false;
+        for (Map.Entry<String, WorkerStatus> e : prefillWorkers.entrySet()) {
+            WorkerStatus w = e.getValue();
+            sb.append("[").append(e.getKey()).append(":dpSize=")
+              .append(w == null ? "null" : w.getDpSize()).append("]");
             if (w != null && w.getDpSize() > 1) {
-                return true;
+                found = true;
             }
         }
-        return false;
+        logger.info("HAS_DP_ENABLED_PREFILL_WORKER_DEBUG count={} found={} workers={}",
+                prefillWorkers.size(), found, sb);
+        return found;
     }
 }

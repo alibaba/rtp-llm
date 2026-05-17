@@ -251,6 +251,7 @@ class MasterClient:
         )
         start = time.time()
 
+        gc = input.generate_config
         payload: Dict[str, Any] = {
             "model": "engine_service",
             "block_cache_keys": block_cache_keys,
@@ -260,6 +261,9 @@ class MasterClient:
             "generate_timeout": ttft_timeout_ms,
             "request_id": request_id,
             "request_time_ms": int(start * 1000),
+            "max_new_tokens": getattr(gc, "max_new_tokens", 1),
+            "num_beams": getattr(gc, "num_beams", 1),
+            "force_disable_sp_run": getattr(gc, "force_disable_sp_run", False),
         }
 
         request_headers = getattr(input, "headers", None)
