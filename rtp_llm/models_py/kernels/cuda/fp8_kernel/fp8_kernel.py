@@ -47,6 +47,17 @@ def align(x: int, y: int) -> int:
     return ceil_div(x, y) * y
 
 
+def _is_fake_or_meta_tensor(x: torch.Tensor) -> bool:
+    if x.is_meta:
+        return True
+    try:
+        from torch._subclasses.fake_tensor import FakeTensor
+
+        return isinstance(x, FakeTensor)
+    except Exception:
+        return False
+
+
 # COPIED FROM DeepGEMM
 def ceil_to_ue8m0(x: torch.Tensor):
     return torch.pow(2.0, torch.ceil(torch.log2(x.abs())))
@@ -132,6 +143,8 @@ def sgl_per_token_group_quant_fp8(
         scale_tma_aligned=scale_tma_aligned,
         scale_ue8m0=scale_ue8m0,
     )
+    if _is_fake_or_meta_tensor(x):
+        return x_q, x_s
     if x.shape[0] > 0:
         quant_kernel = os.environ.get("DSV4_FP8_QUANT_KERNEL", "auto").strip().lower()
 
