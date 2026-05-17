@@ -99,6 +99,24 @@ py_library(
     visibility = ["//visibility:public"],
 )
 
+py_library(
+    name = "dsv4_indexed_rope_test_sources",
+    srcs = [
+        "modules/dsv4/__init__.py",
+        "modules/dsv4/_fused_inv_rope_fp8_quant_triton.py",
+        "modules/dsv4/_fused_rmsnorm_rope_triton.py",
+        "modules/dsv4/fusions/fusion_registry.py",
+        "modules/dsv4/fusions/indexed_rope_pass.py",
+        "modules/dsv4/fusions/indexed_rope_runtime.py",
+        "modules/dsv4/rope.py",
+    ],
+    deps = [
+        ":kernels",
+        ":utils",
+    ],
+    visibility = ["//visibility:public"],
+)
+
 # Export sitecustomize.py for test targets to fix nvidia-cutlass-dsl import
 exports_files(["modules/factory/sitecustomize.py"])
 
@@ -125,7 +143,8 @@ py_library(
     srcs = glob([
         "kernels/*.py",
         "kernels/**/*.py",
-    ])
+    ]),
+    visibility = ["//visibility:public"],
 )
 
 py_library(

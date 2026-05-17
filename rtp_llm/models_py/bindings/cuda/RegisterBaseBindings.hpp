@@ -12,6 +12,8 @@
 // RtpProcessGroup is deprecated, use rtp_llm.distribute.collective_torch instead
 // #include "rtp_llm/models_py/bindings/common/RtpProcessGroup.h"
 #include "rtp_llm/models_py/bindings/cuda/PerTokenGroupQuantFp8.h"
+#include "rtp_llm/models_py/bindings/cuda/FusedRmsnormFp8QuantOp.h"
+#include "rtp_llm/models_py/bindings/cuda/DSv4IndexedRopeOp.h"
 #include "3rdparty/flashinfer/flashinfer.h"
 #include "rtp_llm/models_py/bindings/cuda/TrtFp8QuantOp.h"
 #include "rtp_llm/models_py/bindings/cuda/ReuseKVCacheOp.h"
@@ -144,6 +146,58 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("scale_ue8m0"),
                   py::arg("fuse_silu_and_mul"),
                   py::arg("masked_m"));
+
+    rtp_ops_m.def("fused_rmsnorm_fp8_quant",
+                  &fused_rmsnorm_fp8_quant,
+                  "DSV4 fused RMSNorm + per-token-group FP8 quant",
+                  py::arg("input"),
+                  py::arg("weight"),
+                  py::arg("output_q"),
+                  py::arg("output_s"),
+                  py::arg("norm_eps"),
+                  py::arg("quant_eps"),
+                  py::arg("fp8_min"),
+                  py::arg("fp8_max"));
+
+    rtp_ops_m.def("fused_rmsnorm_bf16_fp8_quant",
+                  &fused_rmsnorm_bf16_fp8_quant,
+                  "DSV4 fused RMSNorm BF16 output + per-token-group FP8 quant",
+                  py::arg("input"),
+                  py::arg("weight"),
+                  py::arg("output_y"),
+                  py::arg("output_q"),
+                  py::arg("output_s"),
+                  py::arg("norm_eps"),
+                  py::arg("quant_eps"),
+                  py::arg("fp8_min"),
+                  py::arg("fp8_max"));
+
+    rtp_ops_m.def("dsv4_indexed_rmsnorm_rope",
+                  &dsv4_indexed_rmsnorm_rope,
+                  "DSV4 indexed RMSNorm + RoPE",
+                  py::arg("input"),
+                  py::arg("weight"),
+                  py::arg("freqs_cis"),
+                  py::arg("position_ids"),
+                  py::arg("output"),
+                  py::arg("rope_head_dim"),
+                  py::arg("eps"),
+                  py::arg("has_weight"));
+
+    rtp_ops_m.def("dsv4_indexed_inv_rope_fp8_quant",
+                  &dsv4_indexed_inv_rope_fp8_quant,
+                  "DSV4 indexed inverse RoPE + per-head FP8 quant",
+                  py::arg("input"),
+                  py::arg("freqs_cis"),
+                  py::arg("position_ids"),
+                  py::arg("output_q"),
+                  py::arg("output_s"),
+                  py::arg("n_groups"),
+                  py::arg("heads_per_group"),
+                  py::arg("nope_dim"),
+                  py::arg("rope_head_dim"),
+                  py::arg("eps"),
+                  py::arg("fp8_max"));
 
     rtp_ops_m.def(
         "embedding", &embedding, "Embedding lookup kernel", py::arg("output"), py::arg("input"), py::arg("weight"));

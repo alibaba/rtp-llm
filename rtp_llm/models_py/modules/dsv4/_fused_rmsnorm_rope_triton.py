@@ -28,6 +28,17 @@ def _is_blackwell_device(device: torch.device | int | None = None) -> bool:
     return major >= 10
 
 
+def _is_fake_or_meta_tensor(x: torch.Tensor) -> bool:
+    if x.is_meta:
+        return True
+    try:
+        from torch._subclasses.fake_tensor import FakeTensor
+
+        return isinstance(x, FakeTensor)
+    except Exception:
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Candidate fused kernel — RMSNorm over last D + partial RoPE on last RD dims.
 # ---------------------------------------------------------------------------
@@ -224,6 +235,8 @@ def fused_rmsnorm_rope(
         out_flat = out.view(-1, D)
     else:
         out_flat = torch.empty_like(x_flat)
+    if _is_fake_or_meta_tensor(x):
+        return out_flat.view(*orig_shape)
     if N == 0:
         return out_flat.view(*orig_shape)
 

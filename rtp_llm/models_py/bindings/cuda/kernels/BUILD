@@ -112,6 +112,56 @@ cc_library(
 )
 
 cc_library(
+    name = "fused_rmsnorm_fp8_quant",
+    srcs = ["fused_rmsnorm_fp8_quant.cu"],
+    hdrs = [
+        "fused_rmsnorm_fp8_quant.h",
+        "fp8_ue8m0_scale_layout.cuh",
+    ],
+    deps = [
+        "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
+        "//rtp_llm/models_py/bindings/cuda:cuda_utils_cu",
+        ":cuda_utils_common",
+        "//rtp_llm/cpp/utils:core_utils",
+    ] + torch_deps(),
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "dsv4_indexed_rmsnorm_rope",
+    srcs = ["dsv4_indexed_rmsnorm_rope.cu"],
+    hdrs = [
+        "dsv4_indexed_rmsnorm_rope.h",
+        "fp8_ue8m0_scale_layout.cuh",
+    ],
+    deps = [
+        "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
+        "//rtp_llm/models_py/bindings/cuda:cuda_utils_cu",
+        ":cuda_utils_common",
+        "//rtp_llm/cpp/utils:core_utils",
+    ] + torch_deps(),
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "dsv4_indexed_inv_rope_fp8_quant",
+    srcs = ["dsv4_indexed_inv_rope_fp8_quant.cu"],
+    hdrs = [
+        "dsv4_indexed_inv_rope_fp8_quant.h",
+        "fp8_ue8m0_scale_layout.cuh",
+    ],
+    deps = [
+        "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
+        ":cuda_utils_common",
+        "//rtp_llm/cpp/utils:core_utils",
+    ] + torch_deps(),
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "fast_topk",
     srcs = ["fast_topk.cu"],
     hdrs = ["fast_topk.h"],
@@ -200,6 +250,9 @@ cc_library(
     deps = [
         ":cuda_no_aux_tc",
         ":cuda_quantization",
+        ":fused_rmsnorm_fp8_quant",
+        ":dsv4_indexed_rmsnorm_rope",
+        ":dsv4_indexed_inv_rope_fp8_quant",
         ":cuda_fused_qk_rmsnorm",
         ":mla_quant_kernel",
     ],
