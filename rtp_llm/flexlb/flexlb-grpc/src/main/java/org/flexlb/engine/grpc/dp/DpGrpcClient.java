@@ -83,19 +83,19 @@ public class DpGrpcClient {
                 .build();
     }
 
-    // ============== Enqueue (fire-and-forget) ==============
+    // ============== BatchEnqueue (fire-and-forget) ==============
 
-    public CompletableFuture<EngineRpcService.EnqueueAckPB> enqueue(
-            String ip, int port, EngineRpcService.BatchGenerateInputPB request) {
+    public CompletableFuture<EngineRpcService.BatchEnqueueResponsePB> enqueue(
+            String ip, int port, EngineRpcService.BatchEnqueueRequestPB request) {
         return enqueue(ip, port, request, DEFAULT_DEADLINE_MS);
     }
 
-    public CompletableFuture<EngineRpcService.EnqueueAckPB> enqueue(
-            String ip, int port, EngineRpcService.BatchGenerateInputPB request, long deadlineMs) {
+    public CompletableFuture<EngineRpcService.BatchEnqueueResponsePB> enqueue(
+            String ip, int port, EngineRpcService.BatchEnqueueRequestPB request, long deadlineMs) {
         ChannelEntry entry = getOrCreate(ip, port);
-        ListenableFuture<EngineRpcService.EnqueueAckPB> lf = entry.stub
+        ListenableFuture<EngineRpcService.BatchEnqueueResponsePB> lf = entry.stub
                 .withDeadlineAfter(deadlineMs, TimeUnit.MILLISECONDS)
-                .enqueue(request);
+                .batchEnqueue(request);
         return toCompletable(lf);
     }
 

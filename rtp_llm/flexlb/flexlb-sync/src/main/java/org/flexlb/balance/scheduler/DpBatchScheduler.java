@@ -115,7 +115,7 @@ public class DpBatchScheduler {
             return;
         }
 
-        EngineRpcService.BatchGenerateInputPB pb = buildPb(batchId, assignments);
+        EngineRpcService.BatchEnqueueRequestPB pb = buildPb(batchId, assignments);
         inflightRegistry.register(batchId, batch);
 
         grpcClient.enqueue(batch.prefillIp(), batch.prefillGrpcPort(), pb)
@@ -123,11 +123,10 @@ public class DpBatchScheduler {
     }
 
     private void handleAck(PrefillBatch batch, long batchId, List<RankAssignment> assignments,
-                           EngineRpcService.EnqueueAckPB ack, Throwable err) {
-        if (err != null || ack == null || !ack.getAccepted()) {
-            String msg = err != null ? err.getMessage()
-                    : (ack != null ? ack.getErrorMessage() : "no ack");
-            Logger.warn("Master.Enqueue failed batch={} on {}:{} err={}",
+                           EngineRpcService.BatchEnqueueResponsePB ack, Throwable err) {
+        if (err != null || ack == null) {
+            String msg = err != null ? err.getMessage() : "no ack";
+            Logger.warn("Master.BatchEnqueue transport failed batch={} on {}:{} err={}",
                     batchId, batch.prefillIp(), batch.prefillGrpcPort(), msg);
 
             for (PendingRequest r : batch.requests()) {
@@ -136,21 +135,56 @@ public class DpBatchScheduler {
                 }
             }
             inflightRegistry.remove(batchId);
-            failAll(batch, new RuntimeException("Master.Enqueue rejected: " + msg));
+            failAll(batch, new RuntimeException("Master.BatchEnqueue transport failed: " + msg));
             return;
+        }
+
+        java.util.Map<Long, EngineRpcService.EnqueueResponsePB> ackByReqId =
+                new java.util.HashMap<>(ack.getAcksCount() * 2);
+        for (EngineRpcService.EnqueueResponsePB slot : ack.getAcksList()) {
+            ackByReqId.put(slot.getRequestId(), slot);
         }
 
         for (RankAssignment ra : assignments) {
             PendingRequest req = ra.request();
-            boolean activated = inflightRegistry.markActive(req.requestId());
+            long reqId = req.requestId();
+            EngineRpcService.EnqueueResponsePB slotAck = ackByReqId.get(reqId);
+
+            if (slotAck == null) {
+                Logger.warn("Master.BatchEnqueue returned no ack for request {} in batch {} on {}:{}",
+                        reqId, batchId, batch.prefillIp(), batch.prefillGrpcPort());
+                if (inflightRegistry.getState(reqId) == InflightBatchRegistry.RequestState.CANCELLED) {
+                    cascadeEngineCancel(req);
+                }
+                req.future().completeExceptionally(
+                        new RuntimeException("Master.BatchEnqueue missing per-slot ack for request " + reqId));
+                inflightRegistry.removeRequest(reqId);
+                continue;
+            }
+
+            long errorCode = slotAck.getErrorInfo().getErrorCode();
+            if (errorCode != 0L) {
+                String slotMsg = slotAck.getErrorInfo().getErrorMessage();
+                Logger.warn("Master.Enqueue rejected slot req={} batch={} on {}:{} code={} msg={}",
+                        reqId, batchId, batch.prefillIp(), batch.prefillGrpcPort(), errorCode, slotMsg);
+                if (inflightRegistry.getState(reqId) == InflightBatchRegistry.RequestState.CANCELLED) {
+                    cascadeEngineCancel(req);
+                }
+                req.future().completeExceptionally(
+                        new RuntimeException("Master.Enqueue rejected slot: " + slotMsg));
+                inflightRegistry.removeRequest(reqId);
+                continue;
+            }
+
+            boolean activated = inflightRegistry.markActive(reqId);
             if (!activated) {
                 Logger.info("request {} cancelled before Enqueue ack (batch {}); "
-                        + "cascading Cancel to engine after-the-fact", req.requestId(), batchId);
+                        + "cascading Cancel to engine after-the-fact", reqId, batchId);
                 cascadeEngineCancel(req);
                 req.future().completeExceptionally(
                         new java.util.concurrent.CancellationException(
                                 "Cancelled before Master.Enqueue ack"));
-                inflightRegistry.removeRequest(req.requestId());
+                inflightRegistry.removeRequest(reqId);
                 continue;
             }
             req.future().complete(buildSuccessResponse(req, ra.dpRank()));
@@ -238,14 +272,14 @@ public class DpBatchScheduler {
         return ctx.getRequest().getModel();
     }
 
-    private EngineRpcService.BatchGenerateInputPB buildPb(long batchId, List<RankAssignment> assignments) {
-        EngineRpcService.BatchGenerateInputPB.Builder b = EngineRpcService.BatchGenerateInputPB.newBuilder()
+    private EngineRpcService.BatchEnqueueRequestPB buildPb(long batchId, List<RankAssignment> assignments) {
+        EngineRpcService.BatchEnqueueRequestPB.Builder b = EngineRpcService.BatchEnqueueRequestPB.newBuilder()
                 .setBatchId(batchId);
         for (RankAssignment ra : assignments) {
             PendingRequest req = ra.request();
             EngineRpcService.GenerateInputPB.Builder ib = EngineRpcService.GenerateInputPB.newBuilder()
                     .setRequestId(req.requestId())
-                    .setDpRank(ra.dpRank());
+                    .setDpRank(com.google.protobuf.Int32Value.of(ra.dpRank()));
             if (req.ctx() != null && req.ctx().getRequest() != null
                     && req.ctx().getRequest().getBlockCacheKeys() != null) {
                 ib.addAllCacheHashKey(req.ctx().getRequest().getBlockCacheKeys());

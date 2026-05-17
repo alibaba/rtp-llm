@@ -62,7 +62,24 @@ class DpBatchSchedulerTest {
     private DispatchPlanner planner;
     private DpBatchScheduler scheduler;
 
-    private final List<EngineRpcService.BatchGenerateInputPB> sentBatches = new CopyOnWriteArrayList<>();
+    private final List<EngineRpcService.BatchEnqueueRequestPB> sentBatches = new CopyOnWriteArrayList<>();
+
+    private static EngineRpcService.BatchEnqueueResponsePB buildAck(
+            EngineRpcService.BatchEnqueueRequestPB req, boolean accept, String rejectMsg) {
+        EngineRpcService.BatchEnqueueResponsePB.Builder rb =
+                EngineRpcService.BatchEnqueueResponsePB.newBuilder().setBatchId(req.getBatchId());
+        for (EngineRpcService.GenerateInputPB in : req.getInputsList()) {
+            EngineRpcService.EnqueueResponsePB.Builder slot =
+                    EngineRpcService.EnqueueResponsePB.newBuilder().setRequestId(in.getRequestId());
+            if (!accept) {
+                slot.setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
+                        .setErrorCode(1L)
+                        .setErrorMessage(rejectMsg).build());
+            }
+            rb.addAcks(slot.build());
+        }
+        return rb.build();
+    }
 
     private static final ServerStatus PREFILL = serverStatus(RoleType.PREFILL, "10.0.0.1", 8080, 9080, "g1");
     private static final ServerStatus DECODE  = serverStatus(RoleType.DECODE,  "10.0.0.2", 8081, 9081, "g1");
@@ -96,13 +113,11 @@ class DpBatchSchedulerTest {
         });
 
         // Default gRPC client: ack accepted, capture sent batches
-        when(grpcClient.enqueue(anyString(), anyInt(), any(EngineRpcService.BatchGenerateInputPB.class)))
+        when(grpcClient.enqueue(anyString(), anyInt(), any(EngineRpcService.BatchEnqueueRequestPB.class)))
                 .thenAnswer(inv -> {
-                    EngineRpcService.BatchGenerateInputPB b = inv.getArgument(2);
+                    EngineRpcService.BatchEnqueueRequestPB b = inv.getArgument(2);
                     sentBatches.add(b);
-                    return CompletableFuture.completedFuture(EngineRpcService.EnqueueAckPB.newBuilder()
-                            .setBatchId(b.getBatchId())
-                            .setAccepted(true).build());
+                    return CompletableFuture.completedFuture(buildAck(b, true, ""));
                 });
         when(grpcClient.cancelPrefill(anyString(), anyInt(), anyLong()))
                 .thenReturn(CompletableFuture.completedFuture(null));
@@ -133,11 +148,11 @@ class DpBatchSchedulerTest {
         }
 
         assertEquals(1, sentBatches.size(), "4 requests at dpSize=4 form one batch");
-        EngineRpcService.BatchGenerateInputPB sent = sentBatches.get(0);
+        EngineRpcService.BatchEnqueueRequestPB sent = sentBatches.get(0);
         assertEquals(4, sent.getInputsCount());
 
         List<Integer> ranks = IntStream.range(0, 4)
-                .map(i -> (int) sent.getInputs(i).getDpRank())
+                .map(i -> sent.getInputs(i).getDpRank().getValue())
                 .boxed().collect(Collectors.toList());
         assertEquals(List.of(0, 1, 2, 3), ranks, "RoundRobinAssign is positional within a batch");
     }
@@ -198,13 +213,11 @@ class DpBatchSchedulerTest {
     @Test
     void enqueue_rejection_fails_all_batched_futures() throws Exception {
         AtomicInteger callCount = new AtomicInteger();
-        when(grpcClient.enqueue(anyString(), anyInt(), any(EngineRpcService.BatchGenerateInputPB.class)))
+        when(grpcClient.enqueue(anyString(), anyInt(), any(EngineRpcService.BatchEnqueueRequestPB.class)))
                 .thenAnswer(inv -> {
                     callCount.incrementAndGet();
-                    return CompletableFuture.completedFuture(EngineRpcService.EnqueueAckPB.newBuilder()
-                            .setBatchId(inv.<EngineRpcService.BatchGenerateInputPB>getArgument(2).getBatchId())
-                            .setAccepted(false)
-                            .setErrorMessage("queue full").build());
+                    EngineRpcService.BatchEnqueueRequestPB b = inv.getArgument(2);
+                    return CompletableFuture.completedFuture(buildAck(b, false, "queue full"));
                 });
 
         List<CompletableFuture<Response>> futures = IntStream.range(0, 4)
@@ -219,7 +232,7 @@ class DpBatchSchedulerTest {
 
     @Test
     void enqueue_rpc_failure_fails_futures() throws Exception {
-        when(grpcClient.enqueue(anyString(), anyInt(), any(EngineRpcService.BatchGenerateInputPB.class)))
+        when(grpcClient.enqueue(anyString(), anyInt(), any(EngineRpcService.BatchEnqueueRequestPB.class)))
                 .thenReturn(CompletableFuture.failedFuture(new RuntimeException("UNAVAILABLE")));
         List<CompletableFuture<Response>> futures = IntStream.range(0, 4)
                 .mapToObj(i -> scheduler.submit(makeCtx(i + 1, "m1")))
@@ -294,8 +307,8 @@ class DpBatchSchedulerTest {
 
     @Test
     void cancel_during_PENDING_ACK_then_enqueue_rejected_still_cascades_engine_cancel() throws Exception {
-        CompletableFuture<EngineRpcService.EnqueueAckPB> ackFuture = new CompletableFuture<>();
-        when(grpcClient.enqueue(anyString(), anyInt(), any(EngineRpcService.BatchGenerateInputPB.class)))
+        CompletableFuture<EngineRpcService.BatchEnqueueResponsePB> ackFuture = new CompletableFuture<>();
+        when(grpcClient.enqueue(anyString(), anyInt(), any(EngineRpcService.BatchEnqueueRequestPB.class)))
                 .thenAnswer(inv -> {
                     sentBatches.add(inv.getArgument(2));
                     return ackFuture;
