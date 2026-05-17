@@ -777,9 +777,16 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             # kernel_weight, scale_weight = load_config.exported_device.convert_fp8_weight_params(kernel_weight, scale_weight)
 
             if is_deep_gemm_e8m0_used():
-                kernel_weight, scale_weight = requant_weight_ue8m0(
-                    kernel_weight, scale_weight
-                )
+                import os
+
+                if os.environ.get(
+                    "MOE_STRATEGY"
+                ) == "mega_moe" and self.kernel.name in [W.moe_w1, W.moe_w2]:
+                    pass
+                else:
+                    kernel_weight, scale_weight = requant_weight_ue8m0(
+                        kernel_weight, scale_weight
+                    )
 
             processed_res[self.scale.name] = scale_weight
             processed_res[self.kernel.name] = kernel_weight

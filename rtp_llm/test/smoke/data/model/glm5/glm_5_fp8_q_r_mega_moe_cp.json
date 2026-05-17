@@ -1,0 +1,20 @@
+{
+    "model_type": "glm_5",
+    "model_path": "/home/zw193905/models/GLM-5-FP8",
+    "query_result": [
+        {
+            "query": {
+                "prompt": "$prompt:s1",
+                "generate_config": {
+                    "max_new_tokens": 10,
+                    "top_k": 1,
+                    "top_p": 0
+                }
+            },
+            "result": {
+                "response": "\n The the theorem states that there32DSP",
+                "finished": true
+            }
+        }
+    ]
+}

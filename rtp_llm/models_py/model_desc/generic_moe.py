@@ -42,6 +42,7 @@ class GenericMoeLayer(nn.Module):
         max_generate_batch_size: int = 0,
         enable_cuda_graph: bool = False,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
+        layer_idx: int = 0,
     ):
         super().__init__()
         self.config = config
@@ -68,21 +69,34 @@ class GenericMoeLayer(nn.Module):
             )
         else:
             self.fake_balance_expert = None
-        config_adapter = MoEConfigAdapter(
-            model_config=config,
-            parallelism_config=parallelism_config,
-            moe_config=moe_config,
-            quant_config=quant_config,
-            enable_cuda_graph=enable_cuda_graph,
-        )
-        self.fused_moe = FusedMoeFactory().create_fused_moe(config_adapter, weights)
+        if moe_config.moe_strategy == "mega_moe":
+            from rtp_llm.models_py.modules.glm5_mega_moe.fused_moe_wrapper import (
+                MegaMoeFusedWrapper,
+            )
+
+            self.fused_moe = MegaMoeFusedWrapper(
+                config, parallelism_config, weights, moe_config, layer_idx=layer_idx
+            )
+        else:
+            config_adapter = MoEConfigAdapter(
+                model_config=config,
+                parallelism_config=parallelism_config,
+                moe_config=moe_config,
+                quant_config=quant_config,
+                enable_cuda_graph=enable_cuda_graph,
+            )
+            self.fused_moe = FusedMoeFactory().create_fused_moe(config_adapter, weights)
 
         self.w1 = weights.get(W.moe_w1, None)
         self.w2 = weights.get(W.moe_w2, None)
-        assert (
-            self.w1 is not None and self.w2 is not None
-        ), "Weights w1 and w2 must be provided"
-        self.num_local_experts = self.w1.shape[0]
+        if self.w1 is not None:
+            self.num_local_experts = self.w1.shape[0]
+        elif hasattr(self.fused_moe, "expert_num"):
+            self.num_local_experts = self.fused_moe.expert_num
+        else:
+            raise ValueError(
+                "Cannot determine num_local_experts: no w1 weight and fused_moe has no expert_num"
+            )
         self.add_shared_expert = config.moe_style == 2
         if self.add_shared_expert:
             self.shared_expert = DenseMLP(
@@ -230,6 +244,7 @@ class GenericMoeDecoderLayer(nn.Module):
                 max_generate_batch_size,
                 enable_cuda_graph=enable_cuda_graph,
                 hw_kernel_config=hw_kernel_config,
+                layer_idx=layer_idx,
             )
 
         # 使用 RMSResNorm 来 fuse residual add 和 layernorm
