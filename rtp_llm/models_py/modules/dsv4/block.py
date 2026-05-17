@@ -71,6 +71,7 @@ class Block(nn.Module):
         ep_size: int = 1,
         ep_rank: int = 0,
         max_tokens_per_rank: int = 8192,
+        is_decode_role: bool = False,
         fp8_kv_cache: bool = False,
     ):
         """``layer_weights`` is the framework's per-layer dict
@@ -128,6 +129,7 @@ class Block(nn.Module):
             ep_size=ep_size,
             ep_rank=ep_rank,
             max_tokens_per_rank=max_tokens_per_rank,
+            is_decode_role=is_decode_role,
         )
         # Framework loader already casts norms to bf16 (compute_dtype) and
         # hc_* tensors to fp32 (descriptor data_type); pass refs straight

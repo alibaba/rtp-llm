@@ -87,7 +87,6 @@ def resolve_dense_gemm_warmup_max_m(
     role_type_name: str,
     prefill_chunk_size: int = 0,
     max_tokens_per_rank: int = 0,
-    max_potential_token_num: int = 0,
     is_speculative: bool = False,
     gen_num_per_cycle: int = 0,
     cp_size: int = 1,
@@ -113,10 +112,6 @@ def resolve_dense_gemm_warmup_max_m(
             cp_size = max(int(cp_size or 1), 1)
             max_m = max(_cp_padded_tokens_per_rank_bound(max_m, cp_size), 1)
         return max_m
-
-    max_potential_token_num = int(max_potential_token_num or 0)
-    if max_potential_token_num > 0:
-        return max_potential_token_num
 
     tokens_per_batch = 1
     if is_speculative:

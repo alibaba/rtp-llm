@@ -53,7 +53,6 @@ from rtp_llm.models_py.modules.dsv4.moe.moe_layer import (
 )
 from rtp_llm.models_py.modules.dsv4.prefill.forward import forward_prefill
 from rtp_llm.models_py.modules.dsv4.transformer import V4Args, V4Transformer
-from rtp_llm.ops import RoleType
 
 
 def _materialize_meta_buffers(module: torch.nn.Module, device: str) -> int:
@@ -188,6 +187,12 @@ class DeepSeekV4Model(GptModelBase):
 
         # Build V4Transformer with matching args.
         args = _args_from_model_config(model_config, max_generate_batch_size)
+        self._max_generate_batch_size = int(max_generate_batch_size)
+        assert self._max_generate_batch_size > 0, (
+            "max_generate_batch_size must be positive, "
+            f"got {self._max_generate_batch_size}"
+        )
+        self._gen_num_per_cycle = int(model_config.gen_num_per_cycle)
         # MoE inter dim from V4 config: explicit (not inter_size which in RTP-LLM
         # is n_shared_experts * moe_intermediate_size for DeepSeek). Use moe_config
         # if available; else read from config's hidden_size-derived fallback.
@@ -251,7 +256,6 @@ class DeepSeekV4Model(GptModelBase):
                     cp_size = int(getattr(parallelism_config, "tp_size", 1) or 1)
             except Exception:  # pyi-only stub or non-CP build
                 pass
-        original_max_tokens_per_rank = args.max_tokens_per_rank
         if cp_size > 1:
             cp_tokens_per_rank_bound = min(
                 args.max_tokens_per_rank,
@@ -269,55 +273,8 @@ class DeepSeekV4Model(GptModelBase):
                     cp_tokens_per_rank_bound,
                 )
                 args.max_tokens_per_rank = cp_tokens_per_rank_bound
-
-        # Resolve role_type from parallelism_config (mirrored from
-        # py_env_configs.role_config in engine_config.setup_engine_config),
-        # avoiding the prior os.environ["ROLE_TYPE"] env-side-channel
-        # dependency. Pass the string name to resolve_moe_max_tokens_per_rank
-        # so it does not fall back to env.
-        role_type_enum = (
-            getattr(parallelism_config, "role_type", RoleType.PDFUSION)
-            if parallelism_config is not None
-            else RoleType.PDFUSION
-        )
-        role_type_name = (
-            role_type_enum.name
-            if hasattr(role_type_enum, "name")
-            else str(role_type_enum)
-        )
-        self._role_type_name = role_type_name
-
-        resolved_max_tokens_per_rank = resolve_moe_max_tokens_per_rank(
-            max_seq_len=args.max_seq_len,
-            current_max_tokens_per_rank=args.max_tokens_per_rank,
-            cp_size=cp_size,
-            max_generate_batch_size=max_generate_batch_size,
-            role_type=role_type_name,
-        )
-        if resolved_max_tokens_per_rank != args.max_tokens_per_rank:
-            chunk_tokens_for_log = -1
-            chunk_tokens_env_for_log = (
-                DSV4_CHUNK_TOKENS_ENV
-                if dsv4_global_chunk_tokens_configured()
-                else "DSV4_MOE_CHUNK_TOKENS"
-            )
-            if role_type_name.upper() != "DECODE" and (
-                dsv4_global_chunk_tokens_configured()
-                or os.environ.get("DSV4_MOE_CHUNK_PREFILL", "1") != "0"
-            ):
-                chunk_tokens_for_log = moe_chunk_tokens_from_env()
-            logging.info(
-                "[DeepSeekV4Model] MoE token budget: max_tokens_per_rank %d -> %d "
-                "(%s=%d, original=%d, CP=%d, role=%s)",
-                args.max_tokens_per_rank,
-                resolved_max_tokens_per_rank,
-                chunk_tokens_env_for_log,
-                chunk_tokens_for_log,
-                original_max_tokens_per_rank,
-                cp_size,
-                role_type_name,
-            )
-            args.max_tokens_per_rank = resolved_max_tokens_per_rank
+        self._is_speculative = False
+        self._is_decode_role = False
 
         logging.info(
             "[DeepSeekV4Model] V4Args: n_layers=%d n_heads=%d head_dim=%d q_lora=%d "
@@ -380,6 +337,19 @@ class DeepSeekV4Model(GptModelBase):
             )
             raise
 
+    def _resolve_mtp_hidden_token_capacity(self) -> int:
+        if self._is_decode_role:
+            return resolve_moe_max_tokens_per_rank(
+                max_seq_len=int(self._v4_args.max_seq_len),
+                current_max_tokens_per_rank=int(self._v4_args.max_tokens_per_rank),
+                cp_size=1,
+                max_generate_batch_size=int(self._max_generate_batch_size),
+                is_decode_role=True,
+                is_speculative=self._is_speculative,
+                gen_num_per_cycle=self._gen_num_per_cycle,
+            )
+        return self._v4_args.max_seq_len * self._max_context_batch_size
+
     def _initialize_impl(self, init_resource: PyModelInitResources) -> bool:
         # Called by the engine after construction and before forward.
         super().initialize(init_resource)
@@ -392,6 +362,45 @@ class DeepSeekV4Model(GptModelBase):
             else "cuda:0"
         )
         device_str = str(device)
+
+        self._is_speculative = bool(init_resource.is_speculative)
+        self._is_decode_role = bool(init_resource.is_decode_role)
+        self._max_context_batch_size = init_resource.max_context_batch_size
+        self._v4_args.is_decode_role = self._is_decode_role
+        runtime_resolved_max_tokens_per_rank = resolve_moe_max_tokens_per_rank(
+            max_seq_len=int(self._v4_args.max_seq_len),
+            current_max_tokens_per_rank=int(self._v4_args.max_tokens_per_rank),
+            cp_size=1,
+            max_generate_batch_size=int(self._max_generate_batch_size),
+            is_decode_role=self._is_decode_role,
+            is_speculative=self._is_speculative,
+            gen_num_per_cycle=self._gen_num_per_cycle,
+        )
+        if runtime_resolved_max_tokens_per_rank != self._v4_args.max_tokens_per_rank:
+            chunk_tokens_env_for_log = (
+                DSV4_CHUNK_TOKENS_ENV
+                if dsv4_global_chunk_tokens_configured()
+                else "DSV4_MOE_CHUNK_TOKENS"
+            )
+            chunk_tokens_for_log = -1
+            if not self._is_decode_role and (
+                dsv4_global_chunk_tokens_configured()
+                or os.environ.get("DSV4_MOE_CHUNK_PREFILL", "1") != "0"
+            ):
+                chunk_tokens_for_log = moe_chunk_tokens_from_env()
+            logging.info(
+                "[DeepSeekV4Model] runtime MoE token budget: "
+                "max_tokens_per_rank %d -> %d (%s=%d, role=%s, "
+                "speculative=%s, gen_num_per_cycle=%d)",
+                self._v4_args.max_tokens_per_rank,
+                runtime_resolved_max_tokens_per_rank,
+                chunk_tokens_env_for_log,
+                chunk_tokens_for_log,
+                "DECODE" if self._is_decode_role else "PREFILL",
+                self._is_speculative,
+                self._gen_num_per_cycle,
+            )
+            self._v4_args.max_tokens_per_rank = runtime_resolved_max_tokens_per_rank
 
         # ``self.weight`` is a framework ``ModelWeights`` populated by the
         # ``DeepSeekV4Weight`` descriptor (see ``rtp_llm/models/deepseek_v4.py``)
@@ -606,7 +615,7 @@ class DeepSeekV4Model(GptModelBase):
                 )
                 _dense_shapes = _collect_dsv4_dense_gemm_shapes(self.v4)
                 _dense_gemm_prefill_chunk_size = 0
-                if self._role_type_name.upper() != "DECODE" and chunked_moe_enabled():
+                if not self._is_decode_role and chunked_moe_enabled():
                     _dense_gemm_prefill_chunk_size = max(
                         int(moe_chunk_tokens_from_env()), 0
                     )
@@ -627,18 +636,11 @@ class DeepSeekV4Model(GptModelBase):
                 _dense_gemm_max_m = resolve_dense_gemm_warmup_max_m(
                     max_seq_len=int(self._v4_args.max_seq_len),
                     max_batch_size=int(self._v4_args.max_batch_size),
-                    role_type_name=self._role_type_name,
+                    role_type_name="DECODE" if self._is_decode_role else "PREFILL",
                     prefill_chunk_size=_dense_gemm_prefill_chunk_size,
                     max_tokens_per_rank=int(self._v4_args.max_tokens_per_rank),
-                    max_potential_token_num=int(
-                        getattr(init_resource, "max_potential_token_num", 0) or 0
-                    ),
-                    is_speculative=bool(
-                        getattr(init_resource, "is_speculative", False)
-                    ),
-                    gen_num_per_cycle=int(
-                        getattr(self.config, "gen_num_per_cycle", 0) or 0
-                    ),
+                    is_speculative=self._is_speculative,
+                    gen_num_per_cycle=self._gen_num_per_cycle,
                     cp_size=_prefill_cp_size,
                     cp_enabled=_prefill_cp_enabled,
                 )
@@ -649,7 +651,7 @@ class DeepSeekV4Model(GptModelBase):
                     _dense_gemm_max_m,
                     _dense_gemm_prefill_chunk_size,
                     int(self._v4_args.max_tokens_per_rank),
-                    self._role_type_name,
+                    "DECODE" if self._is_decode_role else "PREFILL",
                     _prefill_cp_enabled,
                     _prefill_cp_size,
                 )
@@ -683,16 +685,12 @@ class DeepSeekV4Model(GptModelBase):
                 raise
             _torch.cuda.synchronize()
 
-        if getattr(init_resource, "is_speculative", False):
-            max_potential_token_num = int(
-                getattr(init_resource, "max_potential_token_num", 0)
-            )
-            self.v4._allocate_mtp_buffer(
-                torch.device(device_str), max_potential_token_num
-            )
+        if self._is_speculative:
+            mtp_token_capacity = self._resolve_mtp_hidden_token_capacity()
+            self.v4._allocate_mtp_buffer(torch.device(device_str), mtp_token_capacity)
             logging.info(
                 "[DeepSeekV4Model] allocated MTP hidden buffer: tokens=%d",
-                max_potential_token_num,
+                mtp_token_capacity,
             )
 
         self._materialized = True

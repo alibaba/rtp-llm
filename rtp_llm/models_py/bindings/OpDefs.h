@@ -217,7 +217,8 @@ struct KVCache {
 struct PyModelInitResources {
     std::optional<KVCache> kv_cache;
     bool                   is_speculative = false;
-    int64_t                max_potential_token_num = 0;
+    bool                   is_decode_role = false;
+    int64_t                max_context_batch_size = 1;
 };
 
 struct PyCacheStoreInputs {

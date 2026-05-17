@@ -794,13 +794,15 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(draft_model_forward)");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         // last_hidden_states already set to pre-hc by updateDecodePostDraftModelInput
+        ModelBase* draft_prefill_source = draft_model_.get();
         if (sp_prefill_draft_model_) {
             draft_prefill_model_output = std::move(sp_prefill_draft_model_->forward(model_input));
+            draft_prefill_source       = sp_prefill_draft_model_.get();
         } else {
             draft_prefill_model_output = std::move(draft_model_->forward(model_input));
         }
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-        maybeOverrideLastHiddenWithMtpBuffer(draft_prefill_model_output, *draft_model_);
+        maybeOverrideLastHiddenWithMtpBuffer(draft_prefill_model_output, *draft_prefill_source);
     }
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
