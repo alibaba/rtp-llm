@@ -9,12 +9,11 @@ int FullKVCacheGroup::needBlocksNum(int seq_len, int current_blocks, int reserve
 
 NeedBlocksInfo FullKVCacheGroup::getNeedBlocks(
     int common_seq_len, int seq_len, int reserve_step, int reuse_blocks_len, bool reuse_enabled) const {
-    (void)reuse_blocks_len;
-    (void)reuse_enabled;
     NeedBlocksInfo info;
     const int      common_slots = needBlocksNum(common_seq_len, /*current_blocks=*/0);
     const int      total_slots  = needBlocksNum(seq_len, /*current_blocks=*/0, reserve_step);
-    info.common_blocks          = std::max(common_slots, 0);
+    const int      reused_common_slots = reuse_enabled ? std::min(std::max(reuse_blocks_len, 0), common_slots) : 0;
+    info.common_blocks                 = std::max(common_slots - reused_common_slots, 0);
     info.extra_blocks           = std::max(total_slots - common_slots, 0);
     return info;
 }
