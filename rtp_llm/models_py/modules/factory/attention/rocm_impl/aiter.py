@@ -452,9 +452,29 @@ class AiterPrefillAttnOp:
         use_compact = self.v1_kv_layout and not is_fp8
 
         if use_compact:
-            k_cache, v_cache, block_table = self._gather_and_reshape_kv_compact(
-                kv_cache.kv_cache_base, block_table
+            # Check whether compact gather would still overflow int32 in the
+            # aiter CK kernel.  The kernel uses int32 offsets internally, so
+            # num_gathered * bytes_per_block must stay below INT32_MAX.
+            num_gathered = block_table.numel()
+            bytes_per_block = (
+                self.head_num_kv
+                * self.head_dim
+                * self.tokens_per_block
+                * kv_cache.kv_cache_base.element_size()
             )
+            _INT32_MAX = 2**31 - 1
+            if num_gathered * bytes_per_block > _INT32_MAX:
+                # Compact buffer would exceed 2 GB — fall back to the
+                # non-compact path which uses the original full KV pool with
+                # the original block_table.  The kernel's seqlen_k controls
+                # actual access range so out-of-bounds reads are avoided.
+                k_cache, v_cache = self._reshape_kv_cache_vectorized(
+                    kv_cache.kv_cache_base
+                )
+            else:
+                k_cache, v_cache, block_table = self._gather_and_reshape_kv_compact(
+                    kv_cache.kv_cache_base, block_table
+                )
         else:
             k_cache, v_cache = self._reshape_kv_cache_vectorized(kv_cache.kv_cache_base)
         # cu_seqlens are already created on GPU in FMHAParams.__init__
@@ -683,6 +703,13 @@ class AiterPrefillAttnOpPaged:
         """
         block_indices = block_table.reshape(-1).to(torch.int64)
         num_gathered = block_indices.numel()
+
+        # Clamp to valid range: block_table may contain invalid padding entries
+        # (e.g. -1 or garbage values) for sequences shorter than max_blocks_per_seq.
+        # Without clamping, index_select accesses out-of-bounds GPU memory
+        # causing GPU Memory access fault (coredump).
+        num_blocks = key_cache.shape[0]
+        block_indices = block_indices.clamp(min=0, max=num_blocks - 1)
 
         k_compact = key_cache.index_select(0, block_indices)
         v_compact = value_cache.index_select(0, block_indices)
