@@ -275,6 +275,9 @@ class DashScApp:
                     server_id=self.server_config.frontend_server_id,
                     echo_prefix_ids=echo_prefix_ids,
                     extra_stop_word_ids=extra_stop_word_ids,
+                    tokenizer=base_tok,
+                    generate_env_config=self.py_env_configs.generate_env_config,
+                    model_type=model_config.model_type,
                 )
 
             loop = self._start_enqueue_loop()
