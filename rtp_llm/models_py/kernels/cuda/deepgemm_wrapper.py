@@ -1,4 +1,5 @@
 import functools
+import os
 from contextlib import contextmanager
 from typing import Any, Callable, Generator, List, NoReturn, Optional, Tuple
 
@@ -78,6 +79,39 @@ _per_token_cast_to_fp4_impl: Callable[..., Any] | None = None
 _cast_back_from_fp4_impl: Callable[..., Any] | None = None
 _transpose_packed_fp4_impl: Callable[..., Any] | None = None
 _tf32_hc_prenorm_gemm_impl: Callable[..., Any] | None = None
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.lower() in ("1", "true", "yes", "on")
+
+
+def _disable_dynamo_capture_for_dsv4_graphfx(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Keep DeepGEMM barrier calls outside DSV4 GraphFX compile regions.
+
+    DeepGEMM kernels may synchronize ranks through device-side NVLink barriers.
+    The DSV4 GraphFX fusion pass compiles full Python-model forward with
+    dynamic request shapes, so letting Dynamo capture DeepGEMM calls can make
+    one rank spend extra time compiling while peer ranks are already waiting in
+    the next barrier.  With DSV4 GraphFX enabled, force these wrappers to be
+    graph breaks; the FX passes still rewrite the adjacent RMSNorm/RoPE/Quant
+    segments, and DeepGEMM remains the real producer/consumer in the timeline.
+    """
+    if not _env_flag("DSV4_GRAPHFX_FUSION"):
+        return fn
+    try:
+        disable = getattr(getattr(torch, "compiler", None), "disable", None)
+        if disable is None:
+            import torch._dynamo as dynamo
+
+            disable = dynamo.disable
+        return disable(fn, recursive=True)
+    except TypeError:
+        return disable(fn)  # type: ignore[misc]
+    except Exception:
+        return fn
 
 
 @functools.cache
@@ -408,6 +442,7 @@ def pack_ue8m0_kernel_launcher(scale: torch.Tensor, gran_mn: int):
     return res
 
 
+@_disable_dynamo_capture_for_dsv4_graphfx
 def fp8_gemm_nt(
     a: Tuple[torch.Tensor, torch.Tensor],
     b: Tuple[torch.Tensor, torch.Tensor],
@@ -446,6 +481,7 @@ def fp8_gemm_nt(
     )
 
 
+@_disable_dynamo_capture_for_dsv4_graphfx
 def m_grouped_fp8_gemm_nt_contiguous(
     a: Tuple[torch.Tensor, torch.Tensor],
     b: Tuple[torch.Tensor, torch.Tensor],
@@ -509,6 +545,7 @@ def maybe_pack_ue8m0_scale(
     return pack_ue8m0_kernel_launcher(scale, gran_mn)
 
 
+@_disable_dynamo_capture_for_dsv4_graphfx
 def m_grouped_fp8_gemm_nt_masked(
     a: Tuple[torch.Tensor, torch.Tensor],
     b: Tuple[torch.Tensor, torch.Tensor],
@@ -554,6 +591,7 @@ def m_grouped_fp8_gemm_nt_masked(
     )
 
 
+@_disable_dynamo_capture_for_dsv4_graphfx
 def bf16_gemm_nt(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -576,6 +614,7 @@ def bf16_gemm_nt(
     _bf16_gemm_nt_impl(a, b, output, c, compiled_dims)
 
 
+@_disable_dynamo_capture_for_dsv4_graphfx
 def m_grouped_bf16_gemm_nt_contiguous(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -605,6 +644,7 @@ def m_grouped_bf16_gemm_nt_contiguous(
     )
 
 
+@_disable_dynamo_capture_for_dsv4_graphfx
 def m_grouped_bf16_gemm_nt_masked(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -660,6 +700,7 @@ def _require_sm100_packed_scale_for_fp8_fp4(
 # per-token block-128 UE8M0 scale. SM100 only.
 
 
+@_disable_dynamo_capture_for_dsv4_graphfx
 def fp8_fp4_gemm_nt(
     a: Tuple[torch.Tensor, torch.Tensor],
     b: Tuple[torch.Tensor, torch.Tensor],
@@ -693,6 +734,7 @@ def fp8_fp4_gemm_nt(
     )
 
 
+@_disable_dynamo_capture_for_dsv4_graphfx
 def m_grouped_fp8_fp4_gemm_nt_contiguous(
     a: Tuple[torch.Tensor, torch.Tensor],
     b: Tuple[torch.Tensor, torch.Tensor],
@@ -735,6 +777,7 @@ def m_grouped_fp8_fp4_gemm_nt_contiguous(
     )
 
 
+@_disable_dynamo_capture_for_dsv4_graphfx
 def m_grouped_fp8_fp4_gemm_nt_masked(
     a: Tuple[torch.Tensor, torch.Tensor],
     b: Tuple[torch.Tensor, torch.Tensor],
@@ -771,6 +814,7 @@ def m_grouped_fp8_fp4_gemm_nt_masked(
     )
 
 
+@_disable_dynamo_capture_for_dsv4_graphfx
 def fp8_fp4_paged_mqa_logits(
     q: Tuple[torch.Tensor, Optional[torch.Tensor]],
     kv_cache: torch.Tensor,
@@ -826,6 +870,7 @@ def transpose_packed_fp4(*args: Any, **kwargs: Any) -> Any:
     return _transpose_packed_fp4_impl(*args, **kwargs)
 
 
+@_disable_dynamo_capture_for_dsv4_graphfx
 def tf32_hc_prenorm_gemm(
     x: torch.Tensor,
     fn: torch.Tensor,

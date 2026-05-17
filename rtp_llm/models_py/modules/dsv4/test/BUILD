@@ -42,6 +42,7 @@ py_library(
 py_library(
     name = "dsv4_kernel_perf_utils",
     srcs = ["dsv4_kernel_perf_utils.py"],
+    visibility = ["//visibility:public"],
 )
 
 py_test(

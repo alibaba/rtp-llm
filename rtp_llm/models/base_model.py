@@ -152,6 +152,17 @@ class BaseModel(object):
             f"Creating python model for {self.model_config.ckpt_path} on {device_str}"
         )
         self._create_python_model()
+        if os.environ.get("DSV4_GRAPHFX_FUSION", "0").lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        ):
+            from rtp_llm.models_py.modules.dsv4.fusions.graphfx_injector import (
+                maybe_install_dsv4_graphfx_fusions,
+            )
+
+            maybe_install_dsv4_graphfx_fusions(getattr(self, "py_model", None))
 
     def _create_python_model(self):
         pass

@@ -9,7 +9,66 @@ from rtp_llm.models_py.modules.base.common.norm import (
     BaseNorm,
     BaseResNorm,
 )
+from rtp_llm.models_py.modules.base.cuda.stream import current_cuda_stream_id
 from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+_rmsnorm_custom_op = None
+
+
+def _is_fake_or_meta_tensor(x: torch.Tensor) -> bool:
+    if x.is_meta:
+        return True
+    try:
+        from torch._subclasses.fake_tensor import FakeTensor
+
+        return isinstance(x, FakeTensor)
+    except Exception:
+        return False
+
+
+def _rmsnorm_eager(hidden_states: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
+    output = torch.empty_like(hidden_states)
+    rtp_llm_ops.rmsnorm(output, hidden_states, weight, eps, current_cuda_stream_id())
+    return output
+
+
+try:
+    _rmsnorm_custom_op = torch.library.custom_op(
+        "rtp_llm_dsv4::rmsnorm",
+        _rmsnorm_eager,
+        mutates_args=(),
+    )
+
+    @_rmsnorm_custom_op.register_fake
+    def _rmsnorm_fake(hidden_states: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
+        return torch.empty_like(hidden_states)
+
+except Exception:
+    _rmsnorm_custom_op = None
+
+
+def rmsnorm(
+    hidden_states: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+    output: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Compile-friendly wrapper around the RTP-LLM RMSNorm pybind op.
+
+    The eager path still launches the existing CUDA kernel.  During
+    torch.compile/FakeTensor tracing the pybind op cannot be executed because
+    it reads tensor data pointers, so return the correctly shaped tensor and
+    keep this function as a stable FX call target for GraphFX fusion passes.
+    """
+    if output is None and _rmsnorm_custom_op is not None:
+        return _rmsnorm_custom_op(hidden_states, weight, float(eps))
+    if output is None:
+        output = torch.empty_like(hidden_states)
+    if _is_fake_or_meta_tensor(hidden_states):
+        return output
+    stream_id = current_cuda_stream_id()
+    rtp_llm_ops.rmsnorm(output, hidden_states, weight, eps, stream_id)
+    return output
 
 
 class RMSNorm(BaseNorm):
@@ -19,13 +78,12 @@ class RMSNorm(BaseNorm):
     def forward(
         self, hidden_states: torch.Tensor, output: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        stream_id = torch.cuda.current_stream().cuda_stream
-        if output is None:
-            output = torch.empty_like(hidden_states)
-        rtp_llm_ops.rmsnorm(
-            output, hidden_states, self.weight.data, self.variance_epsilon, stream_id
+        return rmsnorm(
+            hidden_states,
+            self.weight.data,
+            self.variance_epsilon,
+            output=output,
         )
-        return output
 
 
 class RMSResNorm(BaseResNorm):
@@ -33,7 +91,7 @@ class RMSResNorm(BaseResNorm):
         super().__init__(weight, eps)
 
     def forward(self, hidden_states: torch.Tensor, residual: torch.Tensor):
-        stream_id = torch.cuda.current_stream().cuda_stream
+        stream_id = current_cuda_stream_id()
         rtp_llm_ops.fused_add_rmsnorm(
             hidden_states, residual, self.weight.data, self.variance_epsilon, stream_id
         )

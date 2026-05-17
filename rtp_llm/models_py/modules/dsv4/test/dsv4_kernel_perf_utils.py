@@ -8,13 +8,18 @@ import re
 import shutil
 import subprocess
 from dataclasses import asdict, dataclass
-from typing import Callable, Iterable, List, Optional, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 import torch
 from torch.profiler import ProfilerActivity, profile, record_function
 
 
-DEFAULT_M_SWEEP = [1, 16, 256, 1024, 2048, 4096, 8192, 16384, 32768, 65536]
+DEFAULT_M_SWEEP = [
+    1, 2, 3, 5, 7, 8, 11, 16, 17, 31, 32, 37, 61, 64, 67, 97, 127,
+    128, 191, 251, 256, 257, 509, 512, 769, 1021, 1024, 1531, 2039,
+    2048, 3079, 4093, 4096, 6151, 8191, 8192, 12289, 16381, 16384,
+    24593, 32749, 32768, 49157, 65521, 65536,
+]
 
 
 @dataclass
@@ -23,6 +28,8 @@ class KernelMeasurement:
     kernel_span_us: float
     kernel_sum_us: float
     kernel_count: int
+    kernel_names: List[str]
+    kernel_name_counts_per_iter: Dict[str, float]
     idle_gap_us: float
     trace_path: str
     measure_method: str
@@ -35,6 +42,8 @@ class TimelineStats:
     kernel_union_us: float
     idle_gap_us: float
     kernel_count: int
+    kernel_names: List[str]
+    kernel_name_counts_per_iter: Dict[str, float]
     trace_path: str
 
 
@@ -135,6 +144,10 @@ def parse_timeline(
 
     scale = max(iters, 1)
     intervals = [(float(e["ts"]), float(e["ts"]) + float(e["dur"])) for e in kernels]
+    name_counts: Dict[str, int] = {}
+    for event in kernels:
+        name = str(event.get("name", ""))
+        name_counts[name] = name_counts.get(name, 0) + 1
     span_us = max(end for _, end in intervals) - min(start for start, _ in intervals)
     kernel_sum_us = sum(float(e["dur"]) for e in kernels)
     kernel_union_us = _merged_interval_duration(intervals)
@@ -144,6 +157,8 @@ def parse_timeline(
         kernel_union_us=kernel_union_us / scale,
         idle_gap_us=(span_us - kernel_union_us) / scale,
         kernel_count=len(kernels) // scale,
+        kernel_names=sorted(name_counts),
+        kernel_name_counts_per_iter={name: count / scale for name, count in sorted(name_counts.items())},
         trace_path=trace_path,
     )
 
@@ -166,6 +181,8 @@ def measure_kernel(
             kernel_span_us=event_us,
             kernel_sum_us=event_us,
             kernel_count=0,
+            kernel_names=[],
+            kernel_name_counts_per_iter={},
             idle_gap_us=0.0,
             trace_path="",
             measure_method="cuda_event",
@@ -185,6 +202,8 @@ def measure_kernel(
         kernel_span_us=stats.span_us,
         kernel_sum_us=stats.kernel_sum_us,
         kernel_count=stats.kernel_count,
+        kernel_names=stats.kernel_names,
+        kernel_name_counts_per_iter=stats.kernel_name_counts_per_iter,
         idle_gap_us=stats.idle_gap_us,
         trace_path=stats.trace_path,
         measure_method="torch_profiler_kernel_span",
