@@ -78,9 +78,12 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readonly("is_speculative",
                       &PyModelInitResources::is_speculative,
                       "True when speculative decoding is active")
-        .def_readonly("max_potential_token_num",
-                      &PyModelInitResources::max_potential_token_num,
-                      "Token capacity for model-side reusable buffers");
+        .def_readonly("is_decode_role",
+                      &PyModelInitResources::is_decode_role,
+                      "True when this model instance runs in decode role")
+        .def_readonly("max_context_batch_size",
+                      &PyModelInitResources::max_context_batch_size,
+                      "Max concurrent context (prefill) batches from FIFO scheduler");
 
     pybind11::class_<caffe2::TypeMeta>(m, "TypeMeta").def(pybind11::init<>());
 

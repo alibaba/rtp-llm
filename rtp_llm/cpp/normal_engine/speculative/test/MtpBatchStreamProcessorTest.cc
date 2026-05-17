@@ -118,8 +118,9 @@ TEST_F(MtpBatchStreamProcessorTest, testPrefillDispatch) {
     draft_output.sampler_output.all_probs =
         torch::tensor({0.2f, 0.1f, 0.3f, 0.5f, 0.3f, 0.1f, 0.4f, 0.2f}, torch::kFloat32).reshape({2, 4});
 
-    auto status = processor.dispatchPrefill(stream_groups, std::move(target_output), std::move(draft_output));
+    auto status = processor.dispatchPrefill(stream_groups, target_output, draft_output);
     EXPECT_TRUE(status.ok());
+    draft_output.model_output.all_hidden_states.fill_(9.0f);
 
     checkOutput(stream1, {2, 1}, {1, 2}, {0.2, 0.1, 0.3, 0.5}, {0.3, 0.4});
     checkOutput(stream2, {1, 2, 3}, {3, 0}, {0.3, 0.1, 0.4, 0.2}, {1.7, 1.8});
@@ -171,8 +172,9 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
     MtpBatchStreamProcessor processor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
 
-    auto status = processor.dispatchDecode(stream_groups, spec_decode_output, std::move(draft_prefill_output));
+    auto status = processor.dispatchDecode(stream_groups, spec_decode_output, draft_prefill_output);
     EXPECT_TRUE(status.ok());
+    draft_prefill_output.model_output.all_hidden_states.fill_(9.0f);
 
     checkOutput(stream1, {1, 2, 3, 1, 3, 2}, {2, 0}, {0.2, 0.1, 0.3, 0.5}, {0.6, 0.06});
     checkOutput(stream2, {2, 1, 2}, {2, 3}, {0.3, 0.1, 0.4, 0.2}, {1.3, 0.13});

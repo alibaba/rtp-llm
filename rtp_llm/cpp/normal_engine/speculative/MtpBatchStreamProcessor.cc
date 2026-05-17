@@ -7,6 +7,22 @@
 #include <cstring>
 
 namespace rtp_llm {
+namespace {
+
+torch::Tensor cloneHiddenSlice(const torch::Tensor& hidden_states, int64_t start, int64_t length) {
+    if (!hidden_states.defined() || length <= 0) {
+        return torch::Tensor();
+    }
+    RTP_LLM_CHECK_WITH_INFO(hidden_states.dim() == 2, "MTP hidden states must be 2-D, got dim=%ld", hidden_states.dim());
+    RTP_LLM_CHECK_WITH_INFO(start >= 0 && start + length <= hidden_states.size(0),
+                            "MTP hidden slice out of range: start=%ld, length=%ld, rows=%ld",
+                            start,
+                            length,
+                            hidden_states.size(0));
+    return hidden_states.narrow(0, start, length).clone();
+}
+
+}  // namespace
 
 absl::Status MtpBatchStreamProcessor::dispatchPrefill(const StreamGroups& stream_groups,
                                                       const MergedOutput& prefill_output,
@@ -389,7 +405,8 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
 
         torch::Tensor last_hidden_states;
         if (propose_step_ > 1) {
-            last_hidden_states = draft_model_output.all_hidden_states.narrow(0, token_offset + token_size - 1, 1);
+            last_hidden_states =
+                cloneHiddenSlice(draft_model_output.all_hidden_states, token_offset + token_size - 1, 1);
         }
 
         spec_update_infos.push_back({new_tokens, 1, -1, std::move(last_hidden_states), std::move(propose_all_probs)});
@@ -425,9 +442,8 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
 
         torch::Tensor last_hidden_states;
         if (propose_step_ > 1) {
-            auto slice_t =
-                draft_model_output.all_hidden_states.narrow(0, token_offset + accept_len[batch_idx_out] - 1, 1);
-            last_hidden_states = slice_t;
+            last_hidden_states =
+                cloneHiddenSlice(draft_model_output.all_hidden_states, token_offset + accept_len[batch_idx_out] - 1, 1);
         }
 
         spec_update_infos.push_back({accept_tokens[batch_idx_out],
