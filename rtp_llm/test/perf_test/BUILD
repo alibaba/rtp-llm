@@ -333,8 +333,8 @@ py_test(
         "--model_type", "deepseek_v4",
         "--checkpoint_path", "/home/baowending.bwd/DeepSeek-V4-Flash",
         "--tokenizer_path", "/home/baowending.bwd/DeepSeek-V4-Flash",
-        "--batch_size", "128",
-        "--input_len", "65536",
+        "--batch_size", "64,128",
+        "--input_len", "16384,65536",
         "--partial", "1",
         "--decode_test_length", "16",
         "--seq_size_per_block", "64",
@@ -366,6 +366,17 @@ py_test(
         "DSV4_USE_MEGA_MOE": "1",
         "ENABLE_FP32_LM_HEAD": "0",
         "DSV4_FUSED_PREPARE": "1",
+        # Keep the canonical DSV4 decode perf target self-contained: this is the
+        # end-to-end acceptance case for GraphFX/pass-based CUDA fusion inside
+        # decode CUDA graph replay. The standalone compile log is emitted to
+        # TEST_UNDECLARED_OUTPUTS_DIR/dsv4_graphfx_compile.log by default.
+        "DSV4_GRAPHFX_FUSION": "1",
+        "DSV4_INDEXED_ROPE_CUDA": "1",
+        "DSV4_FUSED_RMSNORM_FP8_QUANT": "1",
+        "DSV4_FUSED_RMSNORM_BF16_FP8_QUANT": "1",
+        "DSV4_RMSNORM_QUANT_PRECOMPUTE_FP8": "1",
+        "DSV4_GRAPHFX_COMPILE_STATS": "1",
+        "DSV4_GRAPHFX_MISS_LOG": "1",
     },
     tags = ["manual"],
 )
