@@ -2,6 +2,7 @@ import logging
 import multiprocessing
 import os
 import sys
+import threading
 import time
 import traceback
 
@@ -18,7 +19,10 @@ sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.py_config_modules import PyEnvConfigs
-from rtp_llm.config.server_config_setup import setup_and_configure_server
+from rtp_llm.config.server_config_setup import (
+    maybe_write_jit_cache_to_remote,
+    setup_and_configure_server,
+)
 from rtp_llm.ops import RoleType
 from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.utils.concurrency_controller import init_controller
@@ -388,6 +392,36 @@ def _mark_startup_warmup_health_gate_ready(gate_file):
         raise
 
 
+def _start_post_startup_jit_cache_writer(
+    py_env_configs: PyEnvConfigs, startup_warmup_succeeded: bool
+):
+    remote_write_dir = (
+        py_env_configs.jit_config.warm_up_jit_and_write_remote or ""
+    ).strip()
+    if not remote_write_dir:
+        return
+
+    def _write_remote_jit_cache():
+        try:
+            maybe_write_jit_cache_to_remote(py_env_configs, startup_warmup_succeeded)
+        except Exception:
+            logging.error(
+                "post-startup remote JIT cache publishing failed, trace=%s",
+                traceback.format_exc(),
+            )
+
+    writer = threading.Thread(
+        target=_write_remote_jit_cache,
+        name="post_startup_jit_cache_writer",
+        daemon=True,
+    )
+    writer.start()
+    logging.info(
+        "post-startup remote JIT cache writer started for WARM_UP_JIT_AND_WRITE_REMOTE=%s",
+        remote_write_dir,
+    )
+
+
 def main():
     _install_hot_hook_runtime("main")
     py_env_configs: PyEnvConfigs = setup_args()
@@ -447,8 +481,11 @@ def start_server(py_env_configs: PyEnvConfigs):
             logging.error("Health checks failed")
             raise Exception("Health checks failed")
 
-        _maybe_run_startup_real_warmup(py_env_configs)
+        startup_warmup_succeeded = _maybe_run_startup_real_warmup(py_env_configs)
         _mark_startup_warmup_health_gate_ready(startup_warmup_gate_file)
+        _start_post_startup_jit_cache_writer(
+            py_env_configs, startup_warmup_succeeded
+        )
 
         logging.info(
             f"Backend RPC service is listening on 0.0.0.0, IP/IP range can be customized as needed"
@@ -695,17 +732,19 @@ async def _run_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs):
         time.time() - begin_all,
     )
 
-def _maybe_run_startup_real_warmup(py_env_configs: PyEnvConfigs):
+def _maybe_run_startup_real_warmup(py_env_configs: PyEnvConfigs) -> bool:
     if not _should_run_startup_real_warmup(py_env_configs):
-        return
+        return False
 
     try:
         _run_startup_real_warmup_async(_run_startup_real_warmup_grpc(py_env_configs))
+        return True
     except Exception:
         logging.error(
             "DSV4 startup real warmup failed, trace: %s",
             traceback.format_exc(),
         )
+        return False
 
 
 if __name__ == "__main__":
