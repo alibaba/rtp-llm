@@ -46,6 +46,7 @@ from rtp_llm.ops import (
     ParallelismConfig,
 )
 from rtp_llm.ops.compute_ops import (
+    CacheGroupType,
     LayerKVCache,
     PyAttentionInputs,
     PyModelInputs,
@@ -871,6 +872,44 @@ class Qwen3NextModel(GptModelBase):
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
 
+    def _is_hybrid_cache(self) -> bool:
+        if self.kv_cache is None:
+            return False
+        attn_types = self.kv_cache.layer_attn_types
+        has_full = any(t == CacheGroupType.FULL for t in attn_types)
+        has_linear = any(t == CacheGroupType.LINEAR for t in attn_types)
+        return has_full and has_linear
+
+    def _get_layer_cache(self, idx: int) -> Optional[LayerKVCache]:
+        if self.kv_cache is None:
+            return None
+        attn_types = self.kv_cache.layer_attn_types
+        is_full = attn_types[idx] == CacheGroupType.FULL
+        if not is_full or not self._is_hybrid_cache():
+            return self.kv_cache.get_layer_cache(idx)
+        from rtp_llm.models_py.modules.factory.attention.common import (
+            reshape_paged_kv_cache,
+        )
+
+        base_2d = self.kv_cache.kv_cache_base_by_layer[idx]
+        if base_2d is None:
+            return self.kv_cache.get_layer_cache(idx)
+        ksb = self.kv_cache.kernel_seq_size_per_block
+        seq_per_block = ksb if ksb > 0 else self.kv_cache.seq_size_per_block
+        base_5d = reshape_paged_kv_cache(
+            base_2d,
+            self.kv_cache.num_kv_heads,
+            seq_per_block,
+            self.kv_cache.head_dim,
+        )
+        lc = LayerKVCache()
+        lc.kv_cache_base = base_5d
+        if self.kv_cache.kv_scale_base_by_layer:
+            scale = self.kv_cache.kv_scale_base_by_layer[idx]
+            if scale is not None:
+                lc.kv_scale_base = scale
+        return lc
+
     def _build_cp_linear_attn_metadata(
         self,
         attention_inputs: PyAttentionInputs,
@@ -929,10 +968,45 @@ class Qwen3NextModel(GptModelBase):
             cp_local_valid_mask,
         )
 
+    def _warmup_cublas(self, hidden_states: torch.Tensor) -> None:
+        """Run a small matmul to initialize cuBLAS handles before CUDA graph capture."""
+        dummy = torch.zeros(
+            1,
+            hidden_states.shape[-1],
+            device=hidden_states.device,
+            dtype=hidden_states.dtype,
+        )
+        torch.mm(dummy, dummy.t())
+
+    @staticmethod
+    def _warmup_flashinfer_jit() -> None:
+        """Pre-trigger FlashInfer TRTLLM JIT module download and load."""
+        try:
+            from flashinfer.decode import get_trtllm_gen_fmha_module
+
+            get_trtllm_gen_fmha_module()
+        except Exception:
+            pass
+
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
         inputs_embeds = self.embed_tokens(input_ids)
         hidden_states = inputs_embeds
+
+        if fmha_impl is None:
+            fmha_impl = self.prepare_fmha_impl(inputs)
+
+        is_capturing = torch.cuda.is_current_stream_capturing()
+        if is_capturing:
+            self._cuda_graph_captured = True
+        if not getattr(self, "_cuda_graph_captured", False) and not is_capturing:
+            if not getattr(self, "_cublas_warmed", False):
+                self._cublas_warmed = True
+                self._warmup_cublas(hidden_states)
+                self._warmup_flashinfer_jit()
+            hidden_states = torch.zeros_like(hidden_states)
+            hidden_states = self.norm(hidden_states)
+            return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
 
         attention_inputs: PyAttentionInputs = inputs.attention_inputs
         prefill_conv1d_meta = None
@@ -983,20 +1057,12 @@ class Qwen3NextModel(GptModelBase):
             cp_write_cache_store_impl=cp_write_cache_store_impl,
         )
 
-        # qwen3_next model has only one full group (group 0): use fmha_impl from input param
-        # if there is a model with more than 1 full groups,
-        # we should prepare fmha_impl for each full group/ fix later
-
-        if fmha_impl is None:
-            fmha_impl = self.prepare_fmha_impl(inputs)
-
         for i, decoder_layer in enumerate(self.layers):
-            # Switch to correct block_map for this layer in hybrid attention mode
             select_block_map_for_layer(attention_inputs, i)
             hidden_states = decoder_layer(
                 hidden_states,
                 fmha_impl,
-                kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
+                kv_cache=self._get_layer_cache(i) if self.kv_cache else None,
                 attention_inputs=attention_inputs,
                 attn_meta=attn_meta,
             )

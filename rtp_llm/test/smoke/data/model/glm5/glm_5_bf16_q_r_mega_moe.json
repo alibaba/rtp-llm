@@ -1,18 +1,60 @@
 {
     "model_type": "glm_5",
-    "model_path": "/data1/zw193905/models/GLM-5-BF16-4layer",
+    "model_path": "/home/zw193905/models/GLM-5-BF16",
     "query_result": [
         {
             "query": {
                 "prompt": "$prompt:s1",
                 "generate_config": {
-                    "max_new_tokens": 10,
+                    "max_new_tokens": 50,
                     "top_k": 1,
                     "top_p": 0
                 }
             },
             "result": {
-                "response": "acheridera NaughtyMZpf_stubbingisseraab疏",
+                "response": " and how it are used in distributed,[gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK]",
+                "finished": true
+            }
+        },
+        {
+            "query": {
+                "prompt": "$prompt:s2",
+                "generate_config": {
+                    "max_new_tokens": 80,
+                    "top_k": 1,
+                    "top_p": 0
+                }
+            },
+            "result": {
+                "response": "，[gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK][gMASK]",
+                "finished": true
+            }
+        },
+        {
+            "query": {
+                "prompt": "$prompt:m1",
+                "generate_config": {
+                    "max_new_tokens": 100,
+                    "top_k": 1,
+                    "top_p": 0
+                }
+            },
+            "result": {
+                "response": "5fa means the<|code_suffix|>, and then you, as the<|code_suffix|>ehtaachthhtaht, you, as thehtaahhrahh,精选esignererererererererererererererereresthemselveselves精选er精选er精选ereresthetaeratearatearatearatearate精选erererererer,精选ererererselves精选erererererererererererer",
+                "finished": true
+            }
+        },
+        {
+            "query": {
+                "prompt": "$prompt:s5",
+                "generate_config": {
+                    "max_new_tokens": 80,
+                    "top_k": 1,
+                    "top_p": 0
+                }
+            },
+            "result": {
+                "response": " Flask is recommended for small projects,,[gMASK][gMASK],,<|code_suffix|>, Django is recommended for large projects. Flask is recommended, Django is recommended. Flask is recommended for small projects或少次项目2三百aab对, Django is recommendedelo对于大项目或复杂项目。, Flaskowing isharingkanghaohanghanghankanghankanghankanghankang",
                 "finished": true
             }
         }

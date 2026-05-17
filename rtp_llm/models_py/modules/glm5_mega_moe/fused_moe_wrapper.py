@@ -53,11 +53,12 @@ class MegaMoeFusedWrapper(nn.Module):
             else:
                 raise ValueError("Cannot determine moe_intermediate_size")
 
-        max_tokens_per_rank = 8192
+        max_seq_len = getattr(config, "max_seq_len", 0)
+        max_tokens_per_rank = max(8192, max_seq_len) if max_seq_len > 0 else 8192
         if moe_config is not None:
             ll = getattr(moe_config, "ll_num_max_token", 0)
             if ll and ll > 0:
-                max_tokens_per_rank = ll
+                max_tokens_per_rank = max(max_tokens_per_rank, ll)
 
         self.mega_moe = GLM5MegaMoE.from_params(
             layer_id=layer_idx,

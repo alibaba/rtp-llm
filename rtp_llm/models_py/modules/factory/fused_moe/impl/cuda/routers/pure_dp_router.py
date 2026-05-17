@@ -27,9 +27,7 @@ from rtp_llm.models_py.distributed.collective_torch import (
     reduce_scatter,
 )
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_used
-from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
-    sgl_per_token_group_quant_fp8,
-)
+from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -111,6 +109,9 @@ class PureDpRouterBase(FusedMoeDataRouter):
         """
         local_n = a1.shape[0]
         self._local_batch_size = local_n
+
+        if torch.cuda.is_current_stream_capturing():
+            return a1, topk_weights, topk_ids, local_n
 
         n_tensor = torch.tensor([local_n], device=a1.device, dtype=torch.int64)
         all_n = all_gather(n_tensor, group=Group.DP_AND_TP)

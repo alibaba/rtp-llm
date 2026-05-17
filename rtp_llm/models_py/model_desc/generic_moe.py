@@ -341,6 +341,7 @@ class GenericMoeModel(GptModelBase):
             fmha_impl = self.prepare_fmha_impl(
                 inputs
             )  # pyright: ignore[reportUnreachable]
+
         residual = torch.zeros_like(hidden_states)
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
             select_block_map_for_layer(inputs.attention_inputs, i)
@@ -354,7 +355,6 @@ class GenericMoeModel(GptModelBase):
             residual = output.residual
 
         hidden_states = self.norm(hidden_states, residual)
-
         return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
 
 

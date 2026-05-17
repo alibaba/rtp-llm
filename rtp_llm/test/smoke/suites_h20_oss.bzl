@@ -113,6 +113,13 @@ def h20_oss_suites():
                 gpu_type=["L20D"],
             ),
             smoke_test(
+                name="mla_mega_moe_bf16_basic",
+                task_info="data/model/glm5/glm_5_bf16_q_r_mega_moe.json",
+                envs=["CUDA_HOME=/usr/local/cuda", "NVCC_PREPEND_FLAGS=-ccbin=/home/zw193905/.conda_gcc/bin/x86_64-conda-linux-gnu-g++", "MOE_STRATEGY=mega_moe"],
+                smoke_args="--warm_up 0 --seq_size_per_block 64 --act_type BF16 --enable_cuda_graph 0 --tp_size 1 --ep_size 8 --world_size 8 --dp_size 8 --moe_strategy mega_moe --reserver_runtime_mem_mb 16384 --force_cpu_load_weights 1",
+                gpu_type=["L20D"],
+            ),
+            smoke_test(
                 name="mla_pure_cp_pd",
                 task_info="data/model/glm5/glm_5_fp8_q_r_h20_cp.json",
                 envs={
