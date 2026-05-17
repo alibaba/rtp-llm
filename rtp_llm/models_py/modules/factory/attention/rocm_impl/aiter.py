@@ -345,6 +345,14 @@ class AiterPrefillAttnOp:
         k_cache, v_cache = self._reshape_kv_cache_vectorized(kv_cache.kv_cache_base)
 
         block_table = fmha_params.kv_cache_block_id_device
+        # CK kernel's tile prefetch may speculatively load beyond seqlen_k,
+        # touching block_table padding entries (value -1).  When V cache is a
+        # freshly-allocated .contiguous() tensor, ptr + (-1)*stride lands in
+        # unmapped GPU memory → page fault → coredump.  Clamping -1 to 0 makes
+        # the prefetch hit a valid (but unused) block; seqlen_k masking ensures
+        # the stale data is never consumed.
+        if block_table is not None:
+            block_table = block_table.clamp(min=0)
         # cu_seqlens are already created on GPU in FMHAParams.__init__
         cu_seqlens_q = fmha_params.cu_seqlens_q
         # Ensure cu_seqlens_q is on the same device as q_tensor
@@ -595,6 +603,12 @@ class AiterPrefillAttnOpPaged:
             block_table = fmha_params.kv_cache_block_id_device.to(
                 dtype=torch.int32, device=device
             )
+        # Clamp -1 padding in block_table to 0.  CK kernel's tile prefetch
+        # may speculatively load beyond seqlen_k and use -1 as a physical
+        # block index, producing an address before the KV tensor start.
+        # seqlen_k masking ensures the stale data from block 0 is never used.
+        if block_table is not None:
+            block_table = block_table.clamp(min=0)
 
         if graph_ready:
             self.kv_indptr_buf.zero_()
