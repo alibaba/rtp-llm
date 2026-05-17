@@ -227,6 +227,20 @@ cc_test(
 )
 
 cc_test(
+    name = "swa_kv_cache_group_test",
+    srcs = [
+        "SWAKVCacheGroupTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps + [
+        ":block_pool_test_helper",
+    ],
+    env = {},
+    exec_properties = {'gpu':'H20'},
+)
+
+cc_test(
     name = "dsv4_cache_test",
     srcs = [
         "DSV4CacheTest.cc",

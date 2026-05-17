@@ -29,16 +29,32 @@ int SWAKVCacheGroup::countTailAllocations(int begin, int end, int total_slots) c
     return std::max(end - alloc_begin, 0);
 }
 
+// Estimate per-sequence block need for a new SWA request (capacity check before malloc).
+// SWA only physically allocates the last 2 slots ("tail"); earlier slots are NULL_BLOCK_IDX.
+//   1. tail:    2 blocks if seq fills a full block, else 1
+//   2. reserve: extra slots from reserve_step for future decode headroom
+//   3. reuse:   reused blocks overlapping the tail reduce new allocations
+// SWA sequences don't share blocks across a batch, so common_blocks is always 0.
 NeedBlocksInfo SWAKVCacheGroup::getNeedBlocks(
     int common_seq_len, int seq_len, int reserve_step, int reuse_blocks_len, bool reuse_enabled) const {
-    (void)reuse_enabled;
+    (void)common_seq_len;
     NeedBlocksInfo info;
-    const int      reuse_begin  = std::max(reuse_blocks_len, 0);
-    const int      common_slots = needBlocksNum(common_seq_len, /*current_blocks=*/0);
-    const int      total_slots  = needBlocksNum(seq_len, /*current_blocks=*/0, reserve_step);
+    if (seq_len <= 0) {
+        return info;
+    }
 
-    info.common_blocks = countTailAllocations(reuse_begin, common_slots, common_slots);
-    info.extra_blocks  = countTailAllocations(common_slots, total_slots, total_slots);
+    const int total_slots   = needBlocksNum(seq_len, /*current_blocks=*/0);
+    const int tail_blocks   = std::min(total_slots, 2);
+    const int reserve_extra = needBlocksNum(seq_len, /*current_blocks=*/0, reserve_step) - total_slots;
+
+    int need = tail_blocks + reserve_extra;
+    if (reuse_enabled) {
+        const int alloc_begin   = std::max(0, total_slots - 2);
+        const int reuse_overlap = std::max(reuse_blocks_len - alloc_begin, 0);
+        need -= reuse_overlap;
+    }
+
+    info.extra_blocks = std::max(need, 0);
     return info;
 }
 

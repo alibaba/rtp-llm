@@ -44,13 +44,13 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType& cache_keys, BatchKVC
         full_matched_blocks[static_cast<size_t>(gid)] = std::move(match_result.block_indices);
     }
 
-    int                       pos = min_full_reuse_blocks - 1;
-    std::vector<BlockIdxType>    linear_tail_blocks(linear_group_ids_.size(), NULL_BLOCK_IDX);
+    int                           pos = min_full_reuse_blocks - 1;
+    std::vector<BlockIdxType>     linear_tail_blocks(linear_group_ids_.size(), NULL_BLOCK_IDX);
     std::vector<BlockIndicesType> swa_tail_blocks(swa_group_ids_.size());
-    const bool                has_tail_groups = !linear_group_ids_.empty() || !swa_group_ids_.empty();
+    const bool                    has_tail_groups = !linear_group_ids_.empty() || !swa_group_ids_.empty();
     for (; pos >= 0 && has_tail_groups; --pos) {
-        bool                     all_tail_groups_matched = true;
-        std::vector<BlockIdxType> candidate_linear_tail_blocks(linear_group_ids_.size(), NULL_BLOCK_IDX);
+        bool                          all_tail_groups_matched = true;
+        std::vector<BlockIdxType>     candidate_linear_tail_blocks(linear_group_ids_.size(), NULL_BLOCK_IDX);
         std::vector<BlockIndicesType> candidate_swa_tail_blocks(swa_group_ids_.size());
         for (size_t i = 0; i < linear_group_ids_.size(); ++i) {
             const int gid      = linear_group_ids_[i];
@@ -125,6 +125,7 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType& cache_keys, BatchKVC
 MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& malloc_info) {
     auto&     kv_resource = malloc_info.batch_kv_cache_resource;
     const int batch_size  = kv_resource->batchSize();
+    RTP_LLM_CHECK_WITH_INFO(batch_size == 1, "currently batch size should be 1 in hybrid attention but %d", batch_size);
 
     const int seq_len        = malloc_info.complete_token_ids->seqLength();
     const int common_seq_len = std::min(malloc_info.complete_token_ids->commonSeqLength(), seq_len);
