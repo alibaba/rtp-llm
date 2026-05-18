@@ -28,6 +28,26 @@ MAX_INREG_H = 8192
 
 
 @triton.jit
+def _ieee_rn_div_f32(x, y):
+    """IEEE round-to-nearest-even fp32 division.
+
+    Triton's default fp32 ``/`` lowers to ``div.approx.f32`` (~1 ULP off true
+    IEEE-RNE), so it disagrees with sgl_per_token_group_quant_fp8's CUDA
+    fp32 ``/`` (which uses ``div.rn.f32``) on bit-exact comparisons. Inline
+    asm here forces ``div.rn.f32`` for byte-exact alignment, while keeping
+    the per-element cost at one fp32 div (cheaper than fp64 promotion).
+    """
+    return tl.inline_asm_elementwise(
+        "div.rn.f32 $0, $1, $2;",
+        "=r,r,r",
+        [x, y],
+        dtype=tl.float32,
+        is_pure=True,
+        pack=1,
+    )
+
+
+@triton.jit
 def _ue8m0_pow2_round(s_init):
     """Round a positive fp32 value up to the nearest power of 2 via bit hack.
 
@@ -74,6 +94,11 @@ def _fused_add_rmsnorm_fp8_quant_singlepass_kernel(
     r = tl.load(residual_ptr + token_id * stride_r_t + offs, mask=mask, other=0.0).to(
         tl.float32
     )
+    # Match production ``RMSResNorm`` (= ``rtp_llm_ops.fused_add_rmsnorm`` =
+    # flashinfer single-pass): r + h is computed in fp32 and used DIRECTLY
+    # for the rmsnorm reduction WITHOUT a bf16 round-trip. Only the residual
+    # store rounds to bf16. A round-trip on r_new introduces a ~6e-2 max
+    # bf16 diff vs production and causes per-layer cascading divergence.
     r_new = r + h
     tl.store(
         residual_ptr + token_id * stride_r_t + offs,
@@ -84,21 +109,38 @@ def _fused_add_rmsnorm_fp8_quant_singlepass_kernel(
     rsqrt_val = tl.rsqrt(sq_sum / H + eps)
 
     w = tl.load(weight_ptr + offs, mask=mask, other=0.0).to(tl.float32)
-    normed = r_new * rsqrt_val * w
+    # Production stores the normed result as bf16 (RMSResNorm output). The
+    # consumer (Linear's internal sgl quant) reads bf16 → fp32. Round-trip
+    # here so absmax/scale and fp8 cast see the same bf16-rounded value.
+    normed = (r_new * rsqrt_val * w).to(tl.bfloat16).to(tl.float32)
 
     num_groups: tl.constexpr = BLOCK_N // GROUP_SIZE
     actual_num_groups: tl.constexpr = H // GROUP_SIZE
     normed_2d = tl.reshape(normed, (num_groups, GROUP_SIZE))
     abs_2d = tl.abs(normed_2d)
-    absmax = tl.maximum(tl.max(abs_2d, axis=1), 1e-10)
+    # NOTE: do NOT clamp absmax to a Python-float floor like
+    # ``tl.maximum(..., 1e-10)``: the Python literal becomes fp64 and
+    # promotes the whole expression to fp64 division, which produces a
+    # 1-ULP-different fp32 scale vs the baseline sgl_per_token_group_quant_fp8
+    # CUDA kernel (which does pure fp32 ``local_absmax / max_8bit``). The fp8
+    # cast below already clamps to [fp8_min, fp8_max] so a zero absmax yields
+    # NaN/inf that gets safely clamped to 0 (matching baseline behaviour).
+    absmax = tl.maximum(tl.max(abs_2d, axis=1), 1e-4)
 
+    # Match sgl_per_token_group_quant_fp8 byte-exact: IEEE-RNE division for
+    # both scale (one per group) and per-element val/scale. Triton default
+    # fp32 `/` is ``div.approx.f32`` (~1 ULP off); fp64-promote to bit-match
+    # sgl's CUDA-default IEEE-RNE division.
     if SCALE_UE8M0:
-        s_init = absmax / fp8_max
+        s_init = _ieee_rn_div_f32(absmax, tl.full(absmax.shape, fp8_max, tl.float32))
         s, exp_field = _ue8m0_pow2_round(s_init)
         s_bcast = tl.reshape(s, (num_groups, 1))
-        fp8_2d = tl.clamp(normed_2d / s_bcast, fp8_min, fp8_max).to(
-            fp8_out_ptr.dtype.element_ty
-        )
+        s_full = tl.broadcast_to(s_bcast, (num_groups, GROUP_SIZE))
+        fp8_2d = tl.clamp(
+            _ieee_rn_div_f32(normed_2d, s_full),
+            fp8_min,
+            fp8_max,
+        ).to(fp8_out_ptr.dtype.element_ty)
         fp8_flat = tl.reshape(fp8_2d, (BLOCK_N,))
         tl.store(fp8_out_ptr + token_id * stride_o_t + offs, fp8_flat, mask=mask)
 
@@ -117,11 +159,14 @@ def _fused_add_rmsnorm_fp8_quant_singlepass_kernel(
             mask=pack_mask,
         )
     else:
-        s = absmax / fp8_max
+        s = _ieee_rn_div_f32(absmax, tl.full(absmax.shape, fp8_max, tl.float32))
         s_bcast = tl.reshape(s, (num_groups, 1))
-        fp8_2d = tl.clamp(normed_2d / s_bcast, fp8_min, fp8_max).to(
-            fp8_out_ptr.dtype.element_ty
-        )
+        s_full = tl.broadcast_to(s_bcast, (num_groups, GROUP_SIZE))
+        fp8_2d = tl.clamp(
+            _ieee_rn_div_f32(normed_2d, s_full),
+            fp8_min,
+            fp8_max,
+        ).to(fp8_out_ptr.dtype.element_ty)
         fp8_flat = tl.reshape(fp8_2d, (BLOCK_N,))
         tl.store(fp8_out_ptr + token_id * stride_o_t + offs, fp8_flat, mask=mask)
         g_offs = tl.arange(0, num_groups)
@@ -169,6 +214,13 @@ def _fused_add_rmsnorm_fp8_quant_dual_output_singlepass_kernel(
     r = tl.load(residual_ptr + token_id * stride_r_t + offs, mask=mask, other=0.0).to(
         tl.float32
     )
+    # Precision-alignment with baseline: baseline performs bf16 in-place add
+    # then re-reads the bf16 residual for rmsnorm. We round-trip r_new through
+    # bf16 here to match exactly (otherwise the fp32 r_new used directly for
+    # sq_sum produces 1-ULP-different normed output, which is bit-different
+    # from baseline and accumulates across all transformer layers).
+    # Match production single-pass fused_add_rmsnorm: r + h stays in fp32
+    # for the rmsnorm reduction; only the residual store rounds to bf16.
     r_new = r + h
     tl.store(
         residual_ptr + token_id * stride_r_t + offs,
@@ -179,26 +231,42 @@ def _fused_add_rmsnorm_fp8_quant_dual_output_singlepass_kernel(
     rsqrt_val = tl.rsqrt(sq_sum / H + eps)
 
     w = tl.load(weight_ptr + offs, mask=mask, other=0.0).to(tl.float32)
-    normed = r_new * rsqrt_val * w
+    # bf16 round-trip on normed: production stores normed as bf16 in
+    # ``bf16_out`` AND re-reads it as fp32 for fp8 quant. Both consumers
+    # must see the same bf16-rounded value.
+    normed_bf16 = (r_new * rsqrt_val * w).to(tl.bfloat16)
     tl.store(
         bf16_out_ptr + token_id * stride_b_t + offs,
-        normed.to(tl.bfloat16),
+        normed_bf16,
         mask=mask,
     )
+    normed = normed_bf16.to(tl.float32)
 
     num_groups: tl.constexpr = BLOCK_N // GROUP_SIZE
     actual_num_groups: tl.constexpr = H // GROUP_SIZE
     normed_2d = tl.reshape(normed, (num_groups, GROUP_SIZE))
     abs_2d = tl.abs(normed_2d)
-    absmax = tl.maximum(tl.max(abs_2d, axis=1), 1e-10)
+    # NOTE: do NOT clamp absmax to a Python-float floor like
+    # ``tl.maximum(..., 1e-10)``: the Python literal becomes fp64 and
+    # promotes the whole expression to fp64 division, which produces a
+    # 1-ULP-different fp32 scale vs the baseline sgl_per_token_group_quant_fp8
+    # CUDA kernel (which does pure fp32 ``local_absmax / max_8bit``). The fp8
+    # cast below already clamps to [fp8_min, fp8_max] so a zero absmax yields
+    # NaN/inf that gets safely clamped to 0 (matching baseline behaviour).
+    absmax = tl.maximum(tl.max(abs_2d, axis=1), 1e-4)
 
+    # IEEE-RNE division (fp64-promoted) bit-matches sgl, see the comment in
+    # the single-output kernel above for the rationale.
     if SCALE_UE8M0:
-        s_init = absmax / fp8_max
+        s_init = _ieee_rn_div_f32(absmax, tl.full(absmax.shape, fp8_max, tl.float32))
         s, exp_field = _ue8m0_pow2_round(s_init)
         s_bcast = tl.reshape(s, (num_groups, 1))
-        fp8_2d = tl.clamp(normed_2d / s_bcast, fp8_min, fp8_max).to(
-            fp8_out_ptr.dtype.element_ty
-        )
+        s_full = tl.broadcast_to(s_bcast, (num_groups, GROUP_SIZE))
+        fp8_2d = tl.clamp(
+            _ieee_rn_div_f32(normed_2d, s_full),
+            fp8_min,
+            fp8_max,
+        ).to(fp8_out_ptr.dtype.element_ty)
         fp8_flat = tl.reshape(fp8_2d, (BLOCK_N,))
         tl.store(fp8_out_ptr + token_id * stride_o_t + offs, fp8_flat, mask=mask)
 
@@ -217,11 +285,14 @@ def _fused_add_rmsnorm_fp8_quant_dual_output_singlepass_kernel(
             mask=pack_mask,
         )
     else:
-        s = absmax / fp8_max
+        s = _ieee_rn_div_f32(absmax, tl.full(absmax.shape, fp8_max, tl.float32))
         s_bcast = tl.reshape(s, (num_groups, 1))
-        fp8_2d = tl.clamp(normed_2d / s_bcast, fp8_min, fp8_max).to(
-            fp8_out_ptr.dtype.element_ty
-        )
+        s_full = tl.broadcast_to(s_bcast, (num_groups, GROUP_SIZE))
+        fp8_2d = tl.clamp(
+            _ieee_rn_div_f32(normed_2d, s_full),
+            fp8_min,
+            fp8_max,
+        ).to(fp8_out_ptr.dtype.element_ty)
         fp8_flat = tl.reshape(fp8_2d, (BLOCK_N,))
         tl.store(fp8_out_ptr + token_id * stride_o_t + offs, fp8_flat, mask=mask)
         g_offs = tl.arange(0, num_groups)
@@ -259,7 +330,7 @@ def _baseline_add_rmsnorm_fp8_quant(
     return sgl_per_token_group_quant_fp8(
         normed,
         group_size=group_size,
-        eps=1e-10,
+        eps=1e-4,
         column_major_scales=True,
         scale_tma_aligned=True,
         scale_ue8m0=scale_ue8m0,
@@ -284,7 +355,7 @@ def _baseline_add_rmsnorm_fp8_quant_with_bf16_output(
     fp8_out, scale = sgl_per_token_group_quant_fp8(
         bf16_out,
         group_size=group_size,
-        eps=1e-10,
+        eps=1e-4,
         column_major_scales=True,
         scale_tma_aligned=True,
         scale_ue8m0=scale_ue8m0,

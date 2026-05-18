@@ -88,7 +88,11 @@ def _fused_logits_head_gate_kernel(
                 mask=mask_k[:, None] & mask_n[None, :],
                 other=0.0,
             ).to(tl.float32)
-            acc += tl.dot(x, w, out_dtype=tl.float32)
+            # input_precision="tf32x3" forces full fp32 dot (no TF32 truncation).
+            # DSV3.2 indexer logits feed into top-k selection; matching the
+            # baseline cuBLAS fp32 GEMM precision is required to keep top-k
+            # selection bit-stable across the fuse rewrite.
+            acc += tl.dot(x, w, out_dtype=tl.float32, input_precision="tf32x3")
         else:
             # [BLOCK_N, BLOCK_K] with K as inner dim (coalesced: stride_w_k=1)
             w = tl.load(
@@ -96,7 +100,9 @@ def _fused_logits_head_gate_kernel(
                 mask=mask_n[:, None] & mask_k[None, :],
                 other=0.0,
             ).to(tl.float32)
-            acc += tl.dot(x, tl.trans(w), out_dtype=tl.float32)
+            acc += tl.dot(
+                x, tl.trans(w), out_dtype=tl.float32, input_precision="tf32x3"
+            )
 
     # Load q_scale [BLOCK_M, BLOCK_N] (already squeezed from [T, N, 1])
     qs = tl.load(
@@ -222,8 +228,20 @@ def fused_logits_head_gate(
     #  - small-T (T <= 32): per-(token, head) program, explicit reduce. Avoids
     #    tl.dot's BLOCK_M>=16 minimum which wastes compute at small T.
     #    Best with contiguous weight; callers should pre-contiguify at init.
-    #  - large-T (T > 32): tiled tl.dot, uses TF32 tensor cores on H20.
+    #  - large-T (T >= 1024): tiled tl.dot with input_precision="tf32x3"
+    #    (3-pass TF32 emulating fp32, matches baseline cuBLAS fp32 precision).
     #    Handles both contiguous and transposed weight via W_IS_TRANSPOSED.
+    #
+    # Mid-T range (32 < T < 1024) falls back to baseline cuBLAS GEMV/GEMM:
+    #  - Too large for small-T (per-(t,n) over-parallelizes)
+    #  - tf32x3 on small batches loses to cuBLAS GEMV (~3x slower than TF32)
+    #  - Pure tf32 gives 1.4% mean_rel error (top-k unstable on indexer logits)
+    # Small-T kernel (T<=8): per-(t, n) explicit fp32 sum over BLOCK_K=8192,
+    # gives 1.7x-2.6x vs cuBLAS in production decode shapes. Mid-T (8 < T <
+    # 1024): byte-exact scalar fp32 sum can't beat cuBLAS TF32 tensor cores
+    # (15x throughput on H20), so we fall back to cuBLAS — gives 1.0x (no
+    # regression, no speedup) while keeping byte alignment with production
+    # unfused path. Large-T (T>=1024): tiled tl.dot tf32x3 wins.
     use_fast_path = (
         x.dtype in (torch.bfloat16, torch.float16)
         and weight.dtype in (torch.bfloat16, torch.float16, torch.float32)

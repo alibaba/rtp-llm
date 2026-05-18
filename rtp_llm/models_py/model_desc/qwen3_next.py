@@ -553,8 +553,11 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             weights, W.linear_attn_out_w, W.linear_attn_out_s, None, quant_config
         )
 
+        from rtp_llm.models_py.utils.fuse_config import fuse_kernels_enabled
+
         self._fuse_norm_quant = (
-            fused_rmsnorm_gated_fp8_quant is not None
+            fuse_kernels_enabled(hw_kernel_config)
+            and fused_rmsnorm_gated_fp8_quant is not None
             and CudaFp8GEMMLinear is not None
             and isinstance(self.out_proj, CudaFp8GEMMLinear)
             and self.head_v_dim % 128 == 0
@@ -866,13 +869,18 @@ class Qwen3NextDecoderLayer(nn.Module):
             weights[W.post_ln_gamma], eps=config.layernorm_eps
         )
 
+        from rtp_llm.models_py.utils.fuse_config import fuse_kernels_enabled
+
+        _fuse_on = fuse_kernels_enabled(hw_kernel_config)
         self._fuse_post_norm_quant = (
-            fused_add_rmsnorm_fp8_quant is not None
+            _fuse_on
+            and fused_add_rmsnorm_fp8_quant is not None
             and isinstance(self.mlp, DenseMLP)
             and self.mlp.accepts_fp8_input
         )
         self._fuse_post_norm_quant_moe = (
-            fused_add_rmsnorm_fp8_quant_with_bf16_output is not None
+            _fuse_on
+            and fused_add_rmsnorm_fp8_quant_with_bf16_output is not None
             and isinstance(self.mlp, GenericMoeLayer)
             and self.mlp.shared_expert is not None
             and self.mlp.shared_expert.accepts_fp8_input
@@ -883,7 +891,8 @@ class Qwen3NextDecoderLayer(nn.Module):
         # share the fp8+scale between them.
         self._fuse_input_norm_quant = False
         if (
-            fused_add_rmsnorm_fp8_quant is not None
+            _fuse_on
+            and fused_add_rmsnorm_fp8_quant is not None
             and CudaFp8GEMMLinear is not None
             and self.layer_type != HybridAttentionType.LINEAR
             and isinstance(self.self_attn, Qwen3NextAttention)
@@ -905,7 +914,8 @@ class Qwen3NextDecoderLayer(nn.Module):
         # both bf16 normed and fp8+scale.
         self._fuse_input_norm_quant_linear = False
         if (
-            fused_add_rmsnorm_fp8_quant_with_bf16_output is not None
+            _fuse_on
+            and fused_add_rmsnorm_fp8_quant_with_bf16_output is not None
             and CudaFp8GEMMLinear is not None
             and self.layer_type == HybridAttentionType.LINEAR
             and isinstance(self.self_attn, Qwen3NextGatedDeltaNet)
@@ -924,7 +934,13 @@ class Qwen3NextDecoderLayer(nn.Module):
         attn_meta: Qwen3NextMetadata = Qwen3NextMetadata(),
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if self._fuse_input_norm_quant and hidden_states.dim() == 2:
-            fp8_hs, scale = fused_add_rmsnorm_fp8_quant(
+            # Dual-output: fp8 feeds qkv_proj/gate (which take fp8+scale via
+            # ``x_fp8/x_scale``), AND bf16_hs replaces hidden_states for any
+            # downstream consumer that reads the NORMED activation in bf16
+            # (e.g., gate projection's bf16 path, residual chain). Passing
+            # the un-normed ``hidden_states`` here would feed a wrong feature
+            # vector to downstream bf16 readers and cascade across layers.
+            bf16_hs, fp8_hs, scale = fused_add_rmsnorm_fp8_quant_with_bf16_output(
                 hidden_states,
                 residual,
                 self.input_layernorm.weight.data,
@@ -933,7 +949,7 @@ class Qwen3NextDecoderLayer(nn.Module):
                 scale_ue8m0=self.self_attn.gate.scale_ue8m0,
             )
             hidden_states = self.self_attn(
-                hidden_states=hidden_states,
+                hidden_states=bf16_hs,
                 fmha_impl=fmha_impl,
                 kv_cache=kv_cache,
                 attention_inputs=attention_inputs,

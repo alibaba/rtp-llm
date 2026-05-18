@@ -92,8 +92,15 @@ class CausalAttention(nn.Module):
         # Fused sigmoid+mul for Qwen3.5 attn_output_gate (replaces the
         # `attn_output * torch.sigmoid(gate)` 2-kernel sequence below).
         self.sigmoid_mul = SigmoidMulInplace()
+        from rtp_llm.models_py.utils.fuse_config import fuse_kernels_enabled
+
+        # Resolve once at init: HWKernelConfig.enable_fuse_kernels (or env
+        # ``ENABLE_FUSE_KERNELS``). Cached so the forward path does no
+        # config / env lookup per token.
+        self._fuse_kernels_enabled = fuse_kernels_enabled(hw_kernel_config)
         self._fuse_sigmoid_mul_quant = (
-            CudaFp8GEMMLinear is not None
+            self._fuse_kernels_enabled
+            and CudaFp8GEMMLinear is not None
             and sigmoid_mul_fp8_quant_fwd is not None
             and isinstance(self.o_proj, CudaFp8GEMMLinear)
             and self.o_proj.K % 128 == 0
@@ -126,8 +133,13 @@ class CausalAttention(nn.Module):
                     scale_ue8m0=self.o_proj.scale_ue8m0,
                 )
                 output = self.o_proj(fp8_out, input_scales=scale)
-            else:
+            elif self._fuse_kernels_enabled:
                 attn_output = self.sigmoid_mul(attn_output, gate)
+                output = self.o_proj(attn_output)
+            else:
+                # Master switch off → use the original PyTorch baseline,
+                # NOT the Triton ``sigmoid_mul_inplace_triton`` kernel.
+                attn_output = attn_output * torch.sigmoid(gate)
                 output = self.o_proj(attn_output)
         else:
             output = self.o_proj(attn_output)

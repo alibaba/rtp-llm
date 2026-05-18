@@ -95,8 +95,11 @@ class DenseMLP(nn.Module):
             input_scale_key=W.ffn_w2_i_s
         )
 
+        from rtp_llm.models_py.utils.fuse_config import fuse_kernels_enabled
+
         self._fuse_silu_quant = (
-            self.is_gated
+            fuse_kernels_enabled(hw_kernel_config)
+            and self.is_gated
             and CudaFp8GEMMLinear is not None
             and isinstance(self.down_proj, CudaFp8GEMMLinear)
             and (self.down_proj.K % 128 == 0)

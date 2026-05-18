@@ -131,13 +131,18 @@ class MlaAttention(nn.Module):
         # F1b : q_a_layernorm with fp8 q_b_proj — produces dual output
         #       (bf16 for the indexer wq_b consumer, fp8 + scale for q_b_proj).
         # ------------------------------------------------------------------
+        from rtp_llm.models_py.utils.fuse_config import fuse_kernels_enabled
+
+        _fuse_on = fuse_kernels_enabled(hw_kernel_config)
         self._fuse_kv_a_norm = (
-            _DEVICE_TYPE == DeviceType.Cuda and fused_strided_rmsnorm is not None
+            _fuse_on
+            and _DEVICE_TYPE == DeviceType.Cuda
+            and fused_strided_rmsnorm is not None
         )
 
         # q-path fusion mode: "fp8_dual" (F1b), "bf16" (F1a), or "off" (fallback)
         self._fuse_q_a_norm_mode = "off"
-        if self.q_lora_rank > 0 and _DEVICE_TYPE == DeviceType.Cuda:
+        if _fuse_on and self.q_lora_rank > 0 and _DEVICE_TYPE == DeviceType.Cuda:
             q_b_is_fp8 = (
                 CudaFp8GEMMLinear is not None
                 and isinstance(self.q_b_proj, CudaFp8GEMMLinear)
@@ -160,6 +165,10 @@ class MlaAttention(nn.Module):
         q_view: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
         fmha_impl: MlaImplBase,
+        x_fp8: Optional[torch.Tensor] = None,
+        x_scale: Optional[torch.Tensor] = None,
+        q_c_fp8: Optional[torch.Tensor] = None,
+        q_c_scale: Optional[torch.Tensor] = None,
     ) -> Optional[torch.Tensor]:
         if self.indexer is None:
             return None
@@ -172,6 +181,10 @@ class MlaAttention(nn.Module):
             fmha_impl.attn_inputs,
             use_fast_path=not fmha_impl.is_sparse(),
             cp_params=fmha_impl.cp_params,
+            x_fp8=x_fp8,
+            x_scale=x_scale,
+            q_c_fp8=q_c_fp8,
+            q_c_scale=q_c_scale,
         )
 
     def forward(
@@ -253,7 +266,7 @@ class MlaAttention(nn.Module):
             compressed_kv = self.kv_a_layernorm(compressed_kv.contiguous())
 
         topk_indices = self._run_sparse_indexer(
-            hidden_states, q_c, q_view, kv_cache, fmha_impl
+            hidden_states, q_c, q_view, kv_cache, fmha_impl, x_fp8, x_scale, q_c_fp8, q_c_scale
         )
         attn_output = fmha_impl.forward(
             q_view, compressed_kv, k_pe, kv_cache, self.layer_idx, topk_indices
