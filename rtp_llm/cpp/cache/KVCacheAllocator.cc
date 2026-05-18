@@ -299,4 +299,25 @@ void KVCacheAllocator::regUserMr(size_t model_id, std::shared_ptr<CacheStore> ca
     }
 }
 
+void KVCacheAllocator::multimodalTrunc(MatchResult& match_result, const std::vector<std::vector<int>>& mm_intervals) {
+    if (!mm_intervals.empty()) {
+        for (auto interval = mm_intervals.rbegin(); interval != mm_intervals.rend(); ++interval) {
+            if ((*interval)[1] <= match_result.reuse_length) {
+                break;
+            }
+            if ((*interval)[0] > match_result.reuse_length) {
+                continue;
+            }
+            // floor to block boundary: keep entire pre-mm blocks reusable.
+            // Old form ((interval[0]-1)/block)*block dropped one extra block when
+            // interval[0] sat exactly on a block boundary (e.g. 64 → 0 instead of 64).
+            match_result.reuse_length = ((*interval)[0] / seqSizePerBlock()) * seqSizePerBlock();
+            match_result.reuse_blocks = match_result.reuse_length / seqSizePerBlock();
+            while (match_result.block_indices.size() > match_result.reuse_blocks) {
+                match_result.block_indices.pop_back();
+            }
+        }
+    }
+}
+
 }  // namespace rtp_llm
