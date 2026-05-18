@@ -266,25 +266,41 @@ class ModelLoader:
             / max(self._load_config.ep_size, self._load_config.tp_size)
             / (1024.0**2)
         )
-        quant_algo = self._weights_info.model_config.quant_algo
-        if (
-            quant_algo is not None
-            and quant_algo.getWeightBits() == 8
-            and hasattr(self._weights_info, "_quant_config")
-            and self._weights_info._quant_config is not None
-            and not self._weights_info._quant_config.is_quanted()
-        ):
-            if self._is_online_ptpc():
+        if self._is_online_ptpc():
+            # Online PTPC with inline FP8: MoE expert weights are quantized
+            # per-expert during loading (no BF16 peak for MoE), but dense
+            # weights (attention, embedding, shared experts) still load as
+            # BF16 then quantize to FP8, requiring ~2x peak for that portion.
+            moe_params = self._weights_info.model_config.moe_weight_param_count()
+            total_layer_params = self._weights_info.model_config.layer_weight_param_count()
+            if total_layer_params > 0 and moe_params > 0:
+                # dense_ratio: fraction of layer weights that are NOT inline-quantized MoE
+                dense_ratio = 1.0 - (moe_params / total_layer_params)
+                # Dense weights need 2x (BF16 loaded + FP8 quantized simultaneously),
+                # MoE weights only need 1x (quantized inline per-expert).
+                # Overall multiplier: dense_ratio * 2 + moe_ratio * 1
+                mem_multiplier = dense_ratio * 2.0 + (1.0 - dense_ratio) * 1.0
+                model_mem *= mem_multiplier
                 logging.info(
-                    f"online PTPC with inline FP8 quantization: "
-                    f"not doubling model_mem (MoE weights quantized during loading)"
+                    f"online PTPC with inline FP8: MoE ratio={1.0 - dense_ratio:.2%}, "
+                    f"dense ratio={dense_ratio:.2%}, "
+                    f"memory multiplier={mem_multiplier:.2f}x (dense needs BF16 peak)"
                 )
             else:
+                # No MoE weights detected, treat as full online quant
                 model_mem *= 2
                 logging.info(
-                    f"online quantization detected (BF16 checkpoint -> FP8), "
-                    f"doubling model_mem estimate for fastsafetensor memory check"
+                    f"online PTPC but no MoE weights detected, "
+                    f"doubling model_mem estimate conservatively"
                 )
+        elif self._is_online_quant_without_inline():
+            # Non-inline online quantization: BF16 checkpoint loaded then
+            # quantized to FP8, so peak memory is roughly 2x FP8 model size.
+            model_mem *= 2
+            logging.info(
+                f"online quantization detected (BF16 checkpoint -> FP8), "
+                f"doubling model_mem estimate for fastsafetensor memory check"
+            )
         max_file_mem = max_file_size / (1024.0**2)
         logging.info(
             f"fastsafetensor memory check: free_mem={free_mem:.0f}MB, "
@@ -317,6 +333,18 @@ class ModelLoader:
             quant_config is not None
             and isinstance(quant_config, Fp8PerChannelCompressedQuantConfig)
             and not quant_config.is_quanted()
+        )
+
+    def _is_online_quant_without_inline(self) -> bool:
+        """Check if online quantization is active but NOT the inline PTPC path."""
+        quant_algo = self._weights_info.model_config.quant_algo
+        quant_config = getattr(self._weights_info, "_quant_config", None)
+        return (
+            quant_algo is not None
+            and quant_algo.getWeightBits() == 8
+            and quant_config is not None
+            and not quant_config.is_quanted()
+            and not self._is_online_ptpc()
         )
 
     def _should_inline_fp8_quantize(self, weight_info) -> bool:
@@ -383,7 +411,7 @@ class ModelLoader:
             else:
                 complete = weight_info.collector.store_tensor(key, loaded_tensor)
 
-            if inline_fp8 and _total_count % 200 == 0 and torch.cuda.is_available():
+            if inline_fp8 and _total_count % 500 == 0 and torch.cuda.is_available():
                 torch.cuda.empty_cache()
             if _total_count % 5000 == 0 and torch.cuda.is_available():
                 alloc_gb = torch.cuda.memory_allocated() / (1024**3)
