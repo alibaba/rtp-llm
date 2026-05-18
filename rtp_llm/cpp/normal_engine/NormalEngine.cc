@@ -281,6 +281,18 @@ std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_ne
     stream->setIsFakeStream(true);
     stream->setMetricsReporter(nullptr);
     stream->fakeInitKVBlock();
+    // V1 path: when this fake stream is enqueued through scheduler->enqueue
+    // (instead of being injected directly into the executor's stream list as
+    // V0's mayAddFakeStream does), the state machine's handleWaiting will try
+    // to call StreamCacheResource::initKVBlock — which returns InternalError
+    // when fake_inited_ is true (StreamCacheResource.cc:323-325). That kills
+    // the fake stream into FINISHED before it can ever reach RUNNING, so the
+    // peer DP never enters forward and DP0's DeepEP dispatch CPU-recv-timeouts.
+    // Pre-set CanRun + LoadInitiated so handleWaiting skips both the early
+    // CanRun gate and the initKVBlock branch, and falls through to the
+    // PREFILL→RUNNING transition directly.
+    stream->reportEvent(StreamEvents::CanRun);
+    stream->reportEvent(StreamEvents::LoadInitiated);
     if (pd_sep_config.role_type == RoleType::PDFUSION || pd_sep_config.role_type == RoleType::DECODE) {
         auto new_tokens = torch::zeros({1, 1}, torch::kInt32);
 

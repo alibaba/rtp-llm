@@ -315,11 +315,35 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
     }
     response->set_dp_size(status_info.dp_size);
     response->set_tp_size(status_info.tp_size);
-    RTP_LLM_LOG_INFO("WORKER_STATUS_DEBUG role=%s dp_size=%d dp_rank=%d tp_size=%d",
+    // DP0 reports per-rank addressing in dp_status[] so FlexLB can route
+    // FetchResponse to the DP that holds the real (non-fake) slot. Without
+    // this, role_addrs returned to frontend always points at DP0 and
+    // cross-DP requests get NOT_FOUND in DP0's response_registry.
+    const auto& parallel_cfg = maga_init_params_.parallelism_config;
+    if (parallel_cfg.dp_size > 1 && parallel_cfg.dp_rank == 0
+        && !parallel_cfg.dp_peer_addrs.empty()) {
+        for (const auto& addr : parallel_cfg.dp_peer_addrs) {
+            auto colon = addr.find(':');
+            if (colon == std::string::npos) {
+                continue;
+            }
+            auto* entry = response->add_dp_status();
+            entry->set_ip(addr.substr(0, colon));
+            try {
+                entry->set_grpc_port(std::stoi(addr.substr(colon + 1)));
+            } catch (const std::exception& e) {
+                RTP_LLM_LOG_WARNING("dp_peer_addrs entry [%s] has bad port: %s",
+                                    addr.c_str(), e.what());
+            }
+            entry->set_alive(true);
+        }
+    }
+    RTP_LLM_LOG_INFO("WORKER_STATUS_DEBUG role=%s dp_size=%d dp_rank=%d tp_size=%d dp_status_count=%d",
                      status_info.role.c_str(),
                      status_info.dp_size,
                      status_info.dp_rank,
-                     status_info.tp_size);
+                     status_info.tp_size,
+                     response->dp_status_size());
     response->set_status_version(status_info.status_version);
     response->set_latest_finished_version(status_info.latest_finished_version);
     response->set_alive(status_info.alive);
