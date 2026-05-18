@@ -196,12 +196,9 @@ TEST_F(SWAKVCacheGroupTest, GetNeedBlocks_CommonSeqLenIgnored) {
 
 // ==================== match ====================
 
-TEST_F(SWAKVCacheGroupTest, MatchAlwaysEmpty) {
-    auto group  = makeGroup(4);
-    auto result = group.match({101, 102, 103});
-    EXPECT_EQ(result.reuse_blocks, 0);
-    EXPECT_EQ(result.reuse_length, 0);
-    EXPECT_TRUE(result.block_indices.empty());
+TEST_F(SWAKVCacheGroupTest, MatchAlwaysThrows) {
+    auto group = makeGroup(4);
+    EXPECT_THROW(group.match({101, 102, 103}), std::exception);
 }
 
 TEST_F(SWAKVCacheGroupTest, MatchSingleKey_NotFound) {
