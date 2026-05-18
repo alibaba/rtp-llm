@@ -1076,35 +1076,51 @@ public:
         if (it != ptr_to_comm_ptrs_.end()) {
             cptrs = it->second;
         } else {
-            // BUGFIX (trt-allreduce-stale-ipc-cache):
+            // Phase 1 verification path (gated by ENABLE_TRTLLM_AR_FAST_PATH=1).
             //
-            // The original code had a "fast path" here that, when called inside
-            // hipGraph capture with a small input, would push the input's
-            // data_ptr() into unregistered_ptrs_ and assign a fresh slot in
-            // comm_ptrs_, then exchange IPC handles for that exact allocation
-            // across ranks at consume_capture() time. The captured graph baked
-            // the slot index into the launched kernel.
+            // Re-enables the pre-bugfix fast path (no copy, register input ptr
+            // as IPC). The original BUGFIX (trt-allreduce-stale-ipc-cache)
+            // disabled this because PyTorch's caching allocator may free + reuse
+            // the underlying memory while peer rank IPC handles still reference
+            // it, producing BF16 NaN under per-rank cache divergence.
             //
-            // This is unsafe under PyTorch's caching allocator: the underlying
-            // allocation backing `ptr` can be freed and reused by an unrelated
-            // tensor any time the input tensor goes out of scope. Once that
-            // happens, the IPC-translated peer pointers stored in the slot no
-            // longer refer to meaningful data — they read garbage memory which,
-            // when reduced across ranks, can overflow BF16 to Inf -> NaN.
+            // We re-enable it ONLY to measure whether the bug actually triggers
+            // in our current decode CUDA-graph workload. Safe behavior is the
+            // default; the env var MUST be explicitly set to opt in.
             //
-            // Worse, each rank has its own caching allocator, so different ranks
-            // hit the cache vs miss it for the *same* logical tensor on
-            // different replays, producing per-rank divergence in the captured
-            // graph (observed: ranks 0/1/2 finite + bit-identical, rank 3 NaN).
-            //
-            // The fix is to always use the stable workspace `data_` buffer for
-            // unknown ptrs. comm_ptrs_[0] was set up at init time to map
-            // data_ptrs[r] = ipc_data_[r] for the workspace's own gpuMalloc'd
-            // data_ buffer, whose IPC handles never expire. The extra
-            // gpuMemcpyAsync is a same-GPU HBM-to-HBM copy (negligible vs the
-            // allreduce kernel's bandwidth cost).
-            cptrs = comm_ptrs_ + 0;
-            gpuMemcpyAsync(data_, ptr, size, gpuMemcpyDeviceToDevice, stream);
+            // Default (env unset) path is byte-identical to the safe fix.
+            static const bool fast_path_enabled = []() {
+                const char* env     = std::getenv("ENABLE_TRTLLM_AR_FAST_PATH");
+                bool        enabled = (env != nullptr && std::string(env) == "1");
+                if (enabled) {
+                    fprintf(stderr,
+                            "[trt_allreduce] WARNING: ENABLE_TRTLLM_AR_FAST_PATH=1 "
+                            "is set. Fast path skips IPC copy but is UNSAFE across "
+                            "graph rebuilds / allocator reuse. Verification only — "
+                            "do NOT use in production.\n");
+                }
+                return enabled;
+            }();
+
+            bool used_fast_path = false;
+            if (fast_path_enabled) {
+                gpuStreamCaptureStatus status;
+                gpuStreamIsCapturing(stream, &status);
+                int remaining = comm_ptrs_buf_len_ - used_comm_ptrs_ - unregistered_ptrs_.size();
+                if (status == gpuStreamCaptureStatusActive && size < 1024 * 4096 * 16 && remaining > 0) {
+                    unregistered_ptrs_.push_back(ptr);
+                    cptrs          = comm_ptrs_ + used_comm_ptrs_ + unregistered_ptrs_.size() - 1;
+                    used_fast_path = true;
+                }
+            }
+
+            if (!used_fast_path) {
+                // Safe path (default, identical to pre-patch behavior):
+                // copy input into IPC-shared data_ buffer and use comm_ptrs_[0]
+                // whose data_ptrs[rank_] already points to data_.
+                cptrs = comm_ptrs_ + 0;
+                gpuMemcpyAsync(data_, ptr, size, gpuMemcpyDeviceToDevice, stream);
+            }
         }
 
         return {meta, cptrs};
