@@ -412,10 +412,11 @@ def forward_layers(
     if v4.fp8_kv_cache:
         clear_prefill_meta_shared_fp8(v4)
 
-    _pre_hc_flat = h.flatten(-2)
-    if cp_ctx is not None and cp_ctx.cp_size > 1:
-        _pre_hc_flat = cp_all_gather_full_varlen(_pre_hc_flat, cp_ctx)
-    v4._write_mtp_hidden_buffer(_pre_hc_flat, is_cuda_graph=False)
+    if getattr(v4, "_mtp_hidden_buffer", None) is not None:
+        _pre_hc_flat = h.flatten(-2)
+        if cp_ctx is not None and cp_ctx.cp_size > 1:
+            _pre_hc_flat = cp_all_gather_full_varlen(_pre_hc_flat, cp_ctx)
+        v4._write_mtp_hidden_buffer(_pre_hc_flat, is_cuda_graph=False)
 
     # _hc_head_reduce is flat-native: [T, hc, dim] -> [T, dim].
     # Framework ``RMSNorm`` expects 2D, which matches the [T, dim] shape here.
