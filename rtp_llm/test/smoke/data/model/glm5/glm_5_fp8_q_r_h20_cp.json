@@ -1,6 +1,6 @@
 {
     "model_type": "glm_5",
-    "model_path": "/mnt/nas1/hf/GLM-5-FP8-4layer",
+    "model_path": "/home/zw193905/models/GLM-5-FP8-4layer",
     "query_result": [
         {
             "query": {
@@ -12,7 +12,7 @@
                 }
             },
             "result": {
-                "response": "acheridera NaughtyMZ Terminating賞RpcSGREEN",
+                "response": "acheridera NaughtyMZpf_stubbingisseraab疏",
                 "finished": true
             }
         }

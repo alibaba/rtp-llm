@@ -743,13 +743,38 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         device: str,
         load_config: LoadConfig,
     ):
-        # need reshape for kernel weight
-        processed_res = super()._postprocess(tensor, device, load_config)
-        kernel_weight = processed_res[self.kernel.name]
         from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
             is_deep_gemm_e8m0_used,
         )
         from rtp_llm.models_py.kernels.cuda.fp8_kernel import requant_weight_ue8m0
+
+        # For mega_moe: convert FP8→FP4 BEFORE super()._postprocess reshapes
+        # tensors via maybe_rewrite_weight_by_key. The raw 3D [E, N, K] shapes
+        # are still intact at this point in the split_tensors dict.
+        if (
+            is_deep_gemm_e8m0_used()
+            and self.scale is not None
+            and self.kernel.name in [W.moe_w1, W.moe_w2]
+        ):
+            import os
+
+            if os.environ.get("MOE_STRATEGY") == "mega_moe":
+                from rtp_llm.model_loader.online_mega_moe_fp8_to_fp4_quant_weight import (
+                    _convert_fp8_moe_to_fp4,
+                )
+
+                kernel_raw = tensor.get(self.kernel.name)
+                scale_raw = tensor.get(self.scale.name)
+
+                packed, sf = _convert_fp8_moe_to_fp4(kernel_raw, scale_raw)
+                return {
+                    self.kernel.name: packed,
+                    self.scale.name: sf,
+                }
+
+        # need reshape for kernel weight
+        processed_res = super()._postprocess(tensor, device, load_config)
+        kernel_weight = processed_res[self.kernel.name]
 
         # e8m0 not reshape, weight scale need be non contiguous
         # TODO: rm reshape all time
@@ -777,16 +802,9 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             # kernel_weight, scale_weight = load_config.exported_device.convert_fp8_weight_params(kernel_weight, scale_weight)
 
             if is_deep_gemm_e8m0_used():
-                import os
-
-                if os.environ.get(
-                    "MOE_STRATEGY"
-                ) == "mega_moe" and self.kernel.name in [W.moe_w1, W.moe_w2]:
-                    pass
-                else:
-                    kernel_weight, scale_weight = requant_weight_ue8m0(
-                        kernel_weight, scale_weight
-                    )
+                kernel_weight, scale_weight = requant_weight_ue8m0(
+                    kernel_weight, scale_weight
+                )
 
             processed_res[self.scale.name] = scale_weight
             processed_res[self.kernel.name] = kernel_weight

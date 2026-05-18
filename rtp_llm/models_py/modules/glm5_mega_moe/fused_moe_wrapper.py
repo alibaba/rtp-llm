@@ -76,7 +76,17 @@ class MegaMoeFusedWrapper(nn.Module):
         s1 = weights.pop(W.moe_s1, None)
         s2 = weights.pop(W.moe_s2, None)
 
-        if w1 is not None and w1.dtype == torch.float8_e4m3fn and s1 is not None:
+        if w1 is not None and w1.dtype == torch.int8 and s1 is not None:
+            # Pre-quantized FP4 weights from load-time conversion
+            self.mega_moe.setup_weights_from_fp4(
+                w1_w=w1,
+                w1_s=s1,
+                w2_w=w2,
+                w2_s=s2,
+            )
+            del w1, w2, s1, s2
+            torch.cuda.empty_cache()
+        elif w1 is not None and w1.dtype == torch.float8_e4m3fn and s1 is not None:
             E = w1.shape[0]
             half_n = w1.shape[1] // 2
             if s1.shape[1] < w1.shape[1]:
