@@ -6,6 +6,19 @@ import triton.language as tl
 
 
 @triton.jit
+def _ieee_rn_div_f32(x, y):
+    """IEEE round-to-nearest-even fp32 division (matches sgl CUDA `/`)."""
+    return tl.inline_asm_elementwise(
+        "div.rn.f32 $0, $1, $2;",
+        "=r,r,r",
+        [x, y],
+        dtype=tl.float32,
+        is_pure=True,
+        pack=1,
+    )
+
+
+@triton.jit
 def _silu_and_mul_kernel(
     output_ptr,
     input_ptr,
@@ -552,11 +565,12 @@ def _silu_and_mul_post_quant_kernel(
         gate = gate / (1 + tl.exp(-gate))
         gate = gate.to(input_ptr.dtype.element_ty)
         gate_up = up * gate
-        _absmax = tl.maximum(tl.max(tl.abs(gate_up)), 1e-10)
-        output_s = _absmax / fp8_max
+        _absmax = tl.max(tl.abs(gate_up))
+        output_s = (_absmax.to(tl.float64) / fp8_max).to(tl.float32)
         if SCALE_UE8M0:
             output_s = tl.exp2(tl.ceil(tl.log2(tl.abs(output_s))))
-        output_q = tl.clamp(gate_up / output_s, fp8_min, fp8_max).to(
+        output_s_inv = (1.0 / output_s.to(tl.float64)).to(tl.float32)
+        output_q = tl.clamp(gate_up * output_s_inv, fp8_min, fp8_max).to(
             output_ptr.dtype.element_ty
         )
         tl.store(
@@ -730,13 +744,14 @@ def _silu_and_mul_post_quant_packed_kernel(
             gate_up = up * gate
 
             # Compute scale with UE8M0 rounding (power of 2)
-            _absmax = tl.maximum(tl.max(tl.abs(gate_up)), 1e-10)
-            output_s = _absmax / fp8_max
+            _absmax = tl.max(tl.abs(gate_up))
+            output_s = (_absmax.to(tl.float64) / fp8_max).to(tl.float32)
             # Round to power of 2 (UE8M0 format requires this)
             output_s = tl.exp2(tl.ceil(tl.log2(tl.abs(output_s))))
 
             # Quantize to FP8
-            output_q = tl.clamp(gate_up / output_s, fp8_min, fp8_max).to(
+            output_s_inv = (1.0 / output_s.to(tl.float64)).to(tl.float32)
+            output_q = tl.clamp(gate_up * output_s_inv, fp8_min, fp8_max).to(
                 output_ptr.dtype.element_ty
             )
 
@@ -820,17 +835,29 @@ def _silu_and_mul_post_quant_dense_packed_kernel(
             group_idx = base_group_idx + g
             offs_in_d = group_idx * BLOCK_N + tl.arange(0, BLOCK_N)
             mask = offs_in_d < size_n
+            # Match baseline ``FusedSiluAndMul`` + sgl quant: silu(gate_fp32) is
+            # multiplied by up_fp32 fully in fp32, rounded to bf16 (the
+            # FusedSiluAndMul output dtype), and ONLY then quantized to fp8.
             gate = tl.load(in_base + offs_in_d, mask=mask, other=0.0).to(tl.float32)
-            up = tl.load(in_base + offs_in_d + size_n, mask=mask, other=0.0)
-            gate = gate / (1 + tl.exp(-gate))
-            gate = gate.to(input_ptr.dtype.element_ty)
-            gate_up = up * gate
-            _absmax = tl.maximum(tl.max(tl.abs(gate_up)), 1e-10)
-            output_s = _absmax / fp8_max
-            output_s = tl.exp2(tl.ceil(tl.log2(tl.abs(output_s))))
-            output_q = tl.clamp(gate_up / output_s, fp8_min, fp8_max).to(
-                output_ptr.dtype.element_ty
+            up = tl.load(in_base + offs_in_d + size_n, mask=mask, other=0.0).to(
+                tl.float32
             )
+            silu_gate = gate / (1 + tl.exp(-gate))
+            gate_up_bf16 = (silu_gate * up).to(tl.bfloat16)
+            gate_up = gate_up_bf16.to(tl.float32)
+            # Match sgl_per_token_group_quant_fp8 byte-exact: 1e-10 floor on
+            # absmax, IEEE-RNE fp32 div for scale and per-element val/s
+            # (fp64-promoted to escape Triton's ``div.approx.f32`` default).
+            _absmax = tl.maximum(tl.max(tl.abs(gate_up)), 1e-4)
+            # IEEE-RNE fp32 div via inline ``div.rn.f32`` (Triton default `/`
+            # uses ``div.approx.f32`` which is ~1 ULP off sgl).
+            output_s = _ieee_rn_div_f32(_absmax, fp8_max)
+            output_s = tl.exp2(tl.ceil(tl.log2(tl.abs(output_s))))
+            output_q = tl.clamp(
+                _ieee_rn_div_f32(gate_up, tl.full(gate_up.shape, output_s, tl.float32)),
+                fp8_min,
+                fp8_max,
+            ).to(output_ptr.dtype.element_ty)
             tl.store(out_base + offs_in_d, output_q, mask=mask)
             scale_bits = output_s.to(tl.int32, bitcast=True)
             exp_bits = (scale_bits >> 23) & 0xFF
@@ -840,16 +867,19 @@ def _silu_and_mul_post_quant_dense_packed_kernel(
         group_idx = block_id
         offs_in_d = group_idx * BLOCK_N + tl.arange(0, BLOCK_N)
         mask = offs_in_d < size_n
+        # See SCALE_UE8M0 branch above for rationale.
         gate = tl.load(in_base + offs_in_d, mask=mask, other=0.0).to(tl.float32)
-        up = tl.load(in_base + offs_in_d + size_n, mask=mask, other=0.0)
-        gate = gate / (1 + tl.exp(-gate))
-        gate = gate.to(input_ptr.dtype.element_ty)
-        gate_up = up * gate
-        _absmax = tl.maximum(tl.max(tl.abs(gate_up)), 1e-10)
-        output_s = _absmax / fp8_max
-        output_q = tl.clamp(gate_up / output_s, fp8_min, fp8_max).to(
-            output_ptr.dtype.element_ty
-        )
+        up = tl.load(in_base + offs_in_d + size_n, mask=mask, other=0.0).to(tl.float32)
+        silu_gate = gate / (1 + tl.exp(-gate))
+        gate_up_bf16 = (silu_gate * up).to(tl.bfloat16)
+        gate_up = gate_up_bf16.to(tl.float32)
+        _absmax = tl.maximum(tl.max(tl.abs(gate_up)), 1e-4)
+        output_s = _ieee_rn_div_f32(_absmax, fp8_max)
+        output_q = tl.clamp(
+            _ieee_rn_div_f32(gate_up, tl.full(gate_up.shape, output_s, tl.float32)),
+            fp8_min,
+            fp8_max,
+        ).to(output_ptr.dtype.element_ty)
         tl.store(out_base + offs_in_d, output_q, mask=mask)
         scale_offset = (
             output_scale_ptr
@@ -1169,11 +1199,12 @@ def _silu_mul_masked_fp8_post_quant_fwd(
         )
         gate = gate / (1 + tl.exp(-gate))
         gate_up = up * gate
-        _absmax = tl.maximum(tl.max(tl.abs(gate_up)), 1e-10)
-        output_s = _absmax / fp8_max
+        _absmax = tl.max(tl.abs(gate_up))
+        output_s = (_absmax.to(tl.float64) / fp8_max).to(tl.float32)
         if SCALE_UE8M0:
             output_s = tl.exp2(tl.ceil(tl.log2(tl.abs(output_s))))
-        output_q = tl.clamp(gate_up / output_s, fp8_min, fp8_max).to(
+        output_s_inv = (1.0 / output_s.to(tl.float64)).to(tl.float32)
+        output_q = tl.clamp(gate_up * output_s_inv, fp8_min, fp8_max).to(
             output_ptr.dtype.element_ty
         )
         tl.store(

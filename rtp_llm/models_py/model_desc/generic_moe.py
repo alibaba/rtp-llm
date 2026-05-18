@@ -286,10 +286,19 @@ class GenericMoeDecoderLayer(nn.Module):
             weights[W.post_ln_gamma], eps=config.layernorm_eps
         )
 
-        # Fuse input_layernorm + fp8_quant → pass fp8 directly to first linear
+        # Fuse input_layernorm + fp8_quant → pass fp8 directly to first linear,
+        # AND emit a bf16 normed output so downstream consumers (e.g. Indexer)
+        # still see the normed feature vector. Single-output variant cannot be
+        # used here because Indexer reads hidden_states directly.
+        from rtp_llm.models_py.utils.fuse_config import fuse_kernels_enabled
+
+        _fuse_on = fuse_kernels_enabled(hw_kernel_config)
         self._fuse_input_norm_quant = False
         self._fuse_input_scale_ue8m0 = False
-        if fused_add_rmsnorm_fp8_quant is not None and CudaFp8GEMMLinear is not None:
+        if _fuse_on and (
+            fused_add_rmsnorm_fp8_quant_with_bf16_output is not None
+            and CudaFp8GEMMLinear is not None
+        ):
             if isinstance(self.self_attn, CausalAttention):
                 _qkv = getattr(self.self_attn, "qkv_proj", None)
                 if isinstance(_qkv, CudaFp8GEMMLinear):
@@ -305,14 +314,16 @@ class GenericMoeDecoderLayer(nn.Module):
 
         # Fuse post_attention_layernorm + fp8_quant for DenseMLP
         self._fuse_post_norm_quant = (
-            fused_add_rmsnorm_fp8_quant is not None
+            _fuse_on
+            and fused_add_rmsnorm_fp8_quant is not None
             and isinstance(self.mlp, DenseMLP)
             and self.mlp.accepts_fp8_input
         )
 
         # Fuse post_attention_layernorm + dual output (bf16+fp8) for MoE
         self._fuse_post_norm_quant_moe = (
-            fused_add_rmsnorm_fp8_quant_with_bf16_output is not None
+            _fuse_on
+            and fused_add_rmsnorm_fp8_quant_with_bf16_output is not None
             and isinstance(self.mlp, GenericMoeLayer)
             and self.mlp.shared_expert is not None
             and self.mlp.shared_expert.accepts_fp8_input
@@ -326,7 +337,15 @@ class GenericMoeDecoderLayer(nn.Module):
         kv_cache: Optional[LayerKVCache] = None,
     ) -> DecodeLayerOutput:
         if self._fuse_input_norm_quant and hidden_states.dim() == 2:
-            fp8_hs, scale = fused_add_rmsnorm_fp8_quant(
+            # Use dual-output (bf16 + fp8): the fp8 stream feeds fused_qkv_a_proj,
+            # but the bf16 normed output MUST replace ``hidden_states`` so that
+            # downstream consumers (Indexer reads hidden_states for its own
+            # weights_proj/wk path) see the normed value, matching baseline
+            # ``hidden_states = self.input_layernorm(hidden_states, residual)``.
+            # Previously this branch passed the un-normed original hidden_states
+            # to self_attn, which made the indexer read a totally wrong feature
+            # vector (~3.98e-1 max_abs vs baseline) and cascaded across layers.
+            bf16_hs, fp8_hs, scale = fused_add_rmsnorm_fp8_quant_with_bf16_output(
                 hidden_states,
                 residual,
                 self.input_layernorm.weight.data,
@@ -335,7 +354,7 @@ class GenericMoeDecoderLayer(nn.Module):
                 scale_ue8m0=self._fuse_input_scale_ue8m0,
             )
             hidden_states = self.self_attn(
-                hidden_states=hidden_states,
+                hidden_states=bf16_hs,
                 fmha_impl=fmha_impl,
                 kv_cache=kv_cache,
                 x_fp8=fp8_hs,

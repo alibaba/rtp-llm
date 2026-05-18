@@ -49,6 +49,19 @@ MAX_INREG_H = 8192
 
 
 @triton.jit
+def _ieee_rn_div_f32(x, y):
+    """IEEE round-to-nearest-even fp32 division (matches sgl CUDA `/`)."""
+    return tl.inline_asm_elementwise(
+        "div.rn.f32 $0, $1, $2;",
+        "=r,r,r",
+        [x, y],
+        dtype=tl.float32,
+        is_pure=True,
+        pack=1,
+    )
+
+
+@triton.jit
 def _ue8m0_pow2_round(s_init):
     """Round a positive fp32 value up to the nearest power of 2 via bit hack."""
     bits = s_init.to(tl.int32, bitcast=True)
@@ -97,12 +110,18 @@ def _fused_strided_rmsnorm_singlepass_kernel(
     rsqrt_val = tl.rsqrt(sq_sum / H + eps)
 
     w = tl.load(weight_ptr + offs, mask=mask, other=0.0).to(tl.float32)
-    normed = x * rsqrt_val * w
+    # Round normed through bf16 BEFORE the fp8 quant: baseline path is
+    # ``flashinfer.norm.rmsnorm(...) → bf16 q_c → sgl_per_token_group_quant_fp8(q_c)``,
+    # so the fp8 quant input is already bf16-rounded. Without this round-trip
+    # we quantize the higher-precision fp32 ``x * rsqrt * w`` and produce ~2% of
+    # bytes that mismatch the baseline fp8.
+    normed_bf16 = (x * rsqrt_val * w).to(tl.bfloat16)
+    normed = normed_bf16.to(tl.float32)
 
     if HAS_BF16_OUT:
         tl.store(
             bf16_out_ptr + token_id * stride_b_t + offs,
-            normed.to(tl.bfloat16),
+            normed_bf16,
             mask=mask,
         )
 
@@ -111,15 +130,27 @@ def _fused_strided_rmsnorm_singlepass_kernel(
         actual_num_groups: tl.constexpr = H // GROUP_SIZE
         normed_2d = tl.reshape(normed, (num_groups, GROUP_SIZE))
         abs_2d = tl.abs(normed_2d)
-        absmax = tl.maximum(tl.max(abs_2d, axis=1), 1e-10)
+        # See ``fused_add_rmsnorm_fp8_quant.py`` for the full rationale: drop
+        # the ``1e-10`` floor (fp64 promotion in Triton) and run both
+        # divisions through fp64 to get IEEE-RNE-correct fp32 scale + fp8
+        # bucket, bit-aligned with sgl_per_token_group_quant_fp8.
+        absmax = tl.maximum(tl.max(abs_2d, axis=1), 1e-4)
 
+        # Match sgl_per_token_group_quant_fp8 byte-exact: IEEE-RNE fp32 div
+        # for both scale and per-element val/scale, fp64-promoted to escape
+        # Triton's ``div.approx.f32`` default.
         if SCALE_UE8M0:
-            s_init = absmax / fp8_max
+            s_init = _ieee_rn_div_f32(
+                absmax, tl.full(absmax.shape, fp8_max, tl.float32)
+            )
             s, exp_field = _ue8m0_pow2_round(s_init)
             s_bcast = tl.reshape(s, (num_groups, 1))
-            fp8_2d = tl.clamp(normed_2d / s_bcast, fp8_min, fp8_max).to(
-                fp8_out_ptr.dtype.element_ty
-            )
+            s_full = tl.broadcast_to(s_bcast, (num_groups, GROUP_SIZE))
+            fp8_2d = tl.clamp(
+                _ieee_rn_div_f32(normed_2d, s_full),
+                fp8_min,
+                fp8_max,
+            ).to(fp8_out_ptr.dtype.element_ty)
             fp8_flat = tl.reshape(fp8_2d, (BLOCK_N,))
             tl.store(fp8_out_ptr + token_id * stride_o_t + offs, fp8_flat, mask=mask)
 
@@ -138,11 +169,14 @@ def _fused_strided_rmsnorm_singlepass_kernel(
                 mask=pack_mask,
             )
         else:
-            s = absmax / fp8_max
+            s = _ieee_rn_div_f32(absmax, tl.full(absmax.shape, fp8_max, tl.float32))
             s_bcast = tl.reshape(s, (num_groups, 1))
-            fp8_2d = tl.clamp(normed_2d / s_bcast, fp8_min, fp8_max).to(
-                fp8_out_ptr.dtype.element_ty
-            )
+            s_full = tl.broadcast_to(s_bcast, (num_groups, GROUP_SIZE))
+            fp8_2d = tl.clamp(
+                _ieee_rn_div_f32(normed_2d, s_full),
+                fp8_min,
+                fp8_max,
+            ).to(fp8_out_ptr.dtype.element_ty)
             fp8_flat = tl.reshape(fp8_2d, (BLOCK_N,))
             tl.store(fp8_out_ptr + token_id * stride_o_t + offs, fp8_flat, mask=mask)
             g_offs = tl.arange(0, num_groups)
@@ -188,7 +222,7 @@ def _baseline_strided_rmsnorm_fp8_quant(
     return sgl_per_token_group_quant_fp8(
         normed,
         group_size=group_size,
-        eps=1e-10,
+        eps=1e-4,
         column_major_scales=True,
         scale_tma_aligned=True,
         scale_ue8m0=scale_ue8m0,
@@ -210,7 +244,7 @@ def _baseline_strided_rmsnorm_fp8_quant_with_bf16_output(
     fp8_out, scale = sgl_per_token_group_quant_fp8(
         bf16_out,
         group_size=group_size,
-        eps=1e-10,
+        eps=1e-4,
         column_major_scales=True,
         scale_tma_aligned=True,
         scale_ue8m0=scale_ue8m0,
@@ -376,7 +410,11 @@ def fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output(
         assert (H // group_size) % 4 == 0, "UE8M0 requires num_groups divisible by 4"
 
     block_n = triton.next_power_of_2(H)
-    if block_n > MAX_INREG_H or x.stride(-1) != 1:
+    # Single-program (T=1) under-utilises SMs vs flashinfer.rmsnorm + sgl
+    # (which split work across num_groups programs each). Fall back to
+    # baseline at T=1 to keep parity with the unfused path on perf, with
+    # bit-exact output (same flashinfer + sgl(eps=1e-4) ops).
+    if block_n > MAX_INREG_H or x.stride(-1) != 1 or T <= 1:
         return _baseline_strided_rmsnorm_fp8_quant_with_bf16_output(
             x, weight, eps, group_size, scale_ue8m0
         )

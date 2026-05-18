@@ -35,8 +35,13 @@ def _fused_qk_rmsnorm_kernel(
     x = tl.load(base + offs).to(tl.float32)
     w = tl.load(w_base + offs).to(tl.float32)
 
+    # Match flashinfer.norm.rmsnorm bit-exact: it computes rsqrt via the
+    # PTX rsqrt intrinsic (one rounding), not ``1/sqrt`` (two roundings:
+    # sqrt + reciprocal). Without this swap the result diverges by 1 fp32
+    # ULP per element, accumulating across 36 layers for Qwen3.5 and
+    # eventually shifting sampler output (verified via two-server diff).
     var = tl.sum(x * x) / size_per_head
-    rrms = 1.0 / tl.sqrt(var + eps)
+    rrms = tl.rsqrt(var + eps)
     result = x * rrms * w
 
     tl.store(base + offs, result.to(tl.bfloat16))

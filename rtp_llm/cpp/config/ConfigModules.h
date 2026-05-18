@@ -122,21 +122,21 @@ enum class FMHAType {
 };
 
 struct FMHAConfig {
-    bool        enable_fmha                   = true;
-    bool        enable_trt_fmha               = true;
-    bool        enable_paged_trt_fmha         = true;
-    bool        enable_open_source_fmha       = true;
-    bool        enable_paged_open_source_fmha = true;
-    bool        enable_trtv1_fmha             = true;
-    bool        disable_flash_infer           = false;
-    bool        enable_xqa                    = true;
-    bool        use_aiter_pa                  = true;
-    bool        use_asm_pa                    = true;
+    bool enable_fmha                   = true;
+    bool enable_trt_fmha               = true;
+    bool enable_paged_trt_fmha         = true;
+    bool enable_open_source_fmha       = true;
+    bool enable_paged_open_source_fmha = true;
+    bool enable_trtv1_fmha             = true;
+    bool disable_flash_infer           = false;
+    bool enable_xqa                    = true;
+    bool use_aiter_pa                  = true;
+    bool use_asm_pa                    = true;
     // Default off: Triton PA on ROCm regressed vs ASM PA after the rocm_impl
     // refactor; ASM/NonAsm now own the default decode path. Set to true to opt
     // back into the Triton kernel.
-    bool        use_triton_pa                 = false;
-    int64_t     absorb_opt_len                = 1024;
+    bool        use_triton_pa  = false;
+    int64_t     absorb_opt_len = 1024;
     std::string to_string() const;
 };
 
@@ -230,7 +230,13 @@ struct HWKernelConfig {
     std::vector<int> decode_capture_batch_sizes;
     bool             disable_dpc_random     = false;
     bool             rocm_disable_custom_ag = true;
-    std::string      to_string() const;
+    // Master switch for ALL Triton fuse kernels in the model_py path
+    // (Qwen3.5/Qwen3-Next decoder fuses, GLM5/DSV3.2 MLA fuses,
+    // strided_slice_copy_, _apply_output_bmm, etc.). Set ``false`` to
+    // bypass to the unfused baseline path everywhere — useful for
+    // debugging/verifying precision against the pre-fuse implementation.
+    bool        enable_fuse_kernels = true;
+    std::string to_string() const;
 };
 
 struct DeviceResourceConfig {

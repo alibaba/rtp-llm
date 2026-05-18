@@ -39,6 +39,16 @@ class Indexer(nn.Module):
     ):
         super().__init__()
         self.layer_idx = layer_idx
+        from rtp_llm.models_py.utils.fuse_config import fuse_kernels_enabled
+
+        # Resolve once at init: HWKernelConfig.enable_fuse_kernels (or env
+        # ``ENABLE_FUSE_KERNELS``) → ``self._fuse_logits_head_gate``. Keep it
+        # out of the forward path so it's free at decode (no env / config
+        # lookup per token).
+        self._fuse_logits_head_gate = (
+            fuse_kernels_enabled(hw_kernel_config)
+            and fused_logits_head_gate is not None
+        )
 
         self.index_n_heads = attn_config.indexer_head_num
         self.index_head_dim = attn_config.indexer_head_dim
@@ -90,13 +100,17 @@ class Indexer(nn.Module):
         # Pre-contiguify weight for the fused Triton kernel (one-time init
         # copy). Production weight is often a transposed view [N, K] of
         # underlying [K, N] storage; the small-T per-(t,n) kernel needs
-        # contiguous weight for coalesced 1D loads.
+        # contiguous weight for coalesced 1D loads. Use plain attribute
+        # reassignment (not `.data = ...`) — the latter does an in-place
+        # `set_` of the underlying storage that leaves the tensor in a
+        # state where `F.linear` under cuda-graph capture + inference_mode
+        # trips PyTorch's version-counter check.
         if (
-            fused_logits_head_gate is not None
+            self._fuse_logits_head_gate
             and hasattr(self.weights_proj, "weight")
             and not self.weights_proj.weight.is_contiguous()
         ):
-            self.weights_proj.weight.data = self.weights_proj.weight.data.contiguous()
+            self.weights_proj.weight = self.weights_proj.weight.contiguous()
         self.cos_sin_cache = global_weights[W.rope_cos_sin_cache]
 
         self.indexer_op = IndexerOp(
@@ -123,12 +137,10 @@ class Indexer(nn.Module):
         self, x: torch.Tensor, q_scale: torch.Tensor
     ) -> torch.Tensor:
         # F3: fused (cast + GEMV + 2 elementwise muls) into one Triton kernel.
-        # Wrapper does internal dtype/shape gating + small-T/large-T kernel
-        # selection (small-T at T<=32 uses per-(t,n) explicit reduce; large-T
-        # uses tiled tl.dot fp32 GEMM via TF32 tensor cores). Production
-        # fp32 weight (DSV3.2 weights_proj) is handled by upcast in-register.
+        # ``self._fuse_logits_head_gate`` is resolved at __init__ from
+        # ``HWKernelConfig.enable_fuse_kernels``.
         scale = self.softmax_scale * self.weights_scale
-        if fused_logits_head_gate is not None and x.is_contiguous():
+        if self._fuse_logits_head_gate and x.is_contiguous():
             return fused_logits_head_gate(
                 x,
                 q_scale,
@@ -136,10 +148,14 @@ class Indexer(nn.Module):
                 scale,
                 fallback_proj=self.weights_proj,
             )
-        # Fallback: original 4-op chain (non-CUDA build).
-        x = x.float()
-        weights = self.weights_proj(x)
-        weights = weights.unsqueeze(-1) * q_scale * scale
+        # Inline fp32 fallback (avoids fp16 linear's inference-tensor bug).
+        x_f32 = x.contiguous().float()
+        weight = (
+            self.weights_proj.weight.float()
+            if self.weights_proj.weight.dtype != torch.float32
+            else self.weights_proj.weight
+        )
+        weights = (x_f32 @ weight.T).unsqueeze(-1) * q_scale * scale
         return weights
 
     def _get_q_k_bf16(
