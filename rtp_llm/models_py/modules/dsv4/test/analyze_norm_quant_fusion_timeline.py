@@ -51,7 +51,7 @@ ACCEPTANCE_KERNELS = {
     ),
     "old.quant": re.compile(r"per_token_group_quant_8bit"),
     "new.q_rope_rmsnorm": re.compile(
-        r"dsv4_indexed_rmsnorm_rope_(?:group_warp|warp)_kernel"
+        r"dsv4_indexed_rmsnorm_rope_(?:group_warp|warp|q_d512_cached_token64_large_m)_kernel"
     ),
     "new.kv_rope_rmsnorm": re.compile(
         r"dsv4_indexed_rmsnorm_rope_(?:block|kv_d512_cached_block)_kernel"

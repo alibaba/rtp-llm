@@ -82,6 +82,22 @@ def _remember_kv_rope_quant_token(
     del _KV_ROPE_QUANT_ORDER[:overflow]
 
 
+def remember_dsv4_kv_rope_quant_payload(
+    y: torch.Tensor,
+    q: torch.Tensor,
+    scale: torch.Tensor,
+) -> torch.Tensor:
+    """Record producer-side FP8 payload for a KV RoPE BF16 tensor.
+
+    This mirrors the GraphFX producer-token provenance used by the RMSNorm
+    quant passes while allowing a producer wrapper that already computed
+    ``q`` and ``scale`` to register them without going through a rewritten FX
+    token node.
+    """
+    _remember_kv_rope_quant_token(y, q, scale)
+    return y
+
+
 def _lookup_kv_rope_quant_token(
     y: torch.Tensor,
 ) -> Optional[tuple[Optional[torch.Tensor], Optional[torch.Tensor]]]:

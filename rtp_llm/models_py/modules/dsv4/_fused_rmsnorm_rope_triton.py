@@ -39,6 +39,11 @@ def _is_fake_or_meta_tensor(x: torch.Tensor) -> bool:
         return False
 
 
+def _is_torch_compiling() -> bool:
+    is_compiling = getattr(getattr(torch, "compiler", None), "is_compiling", None)
+    return bool(is_compiling is not None and is_compiling())
+
+
 # ---------------------------------------------------------------------------
 # Candidate fused kernel — RMSNorm over last D + partial RoPE on last RD dims.
 # ---------------------------------------------------------------------------
@@ -235,7 +240,7 @@ def fused_rmsnorm_rope(
         out_flat = out.view(-1, D)
     else:
         out_flat = torch.empty_like(x_flat)
-    if _is_fake_or_meta_tensor(x):
+    if _is_fake_or_meta_tensor(x) or _is_fake_or_meta_tensor(freqs_cis):
         return out_flat.view(*orig_shape)
     if N == 0:
         return out_flat.view(*orig_shape)
@@ -253,6 +258,10 @@ def fused_rmsnorm_rope(
     N_freq = freqs_flat.shape[0]
     assert N % N_freq == 0, f"N_tokens={N} not divisible by N_freq={N_freq}"
     freq_stride_n = N // N_freq
+    if not freqs_flat.is_complex():
+        if _is_torch_compiling():
+            return out_flat.view(*orig_shape)
+        raise TypeError(f"freqs_cis must be complex, got {freqs_cis.dtype}")
     freqs_ri = torch.view_as_real(freqs_flat)
     assert freqs_ri.shape == (N_freq, RD // 2, 2)
 

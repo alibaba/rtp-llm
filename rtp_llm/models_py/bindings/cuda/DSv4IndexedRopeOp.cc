@@ -25,9 +25,21 @@ void dsv4_indexed_inv_rope_fp8_quant(at::Tensor& input,
                                      int64_t     nope_dim,
                                      int64_t     rope_head_dim,
                                      double      eps,
-                                     double      fp8_max) {
+                                     double      fp8_max,
+                                     int64_t     kernel_mode) {
     rtp_llm::dsv4_indexed_inv_rope_fp8_quant(
-        input, freqs_cis, position_ids, output_q, output_s, n_groups, heads_per_group, nope_dim, rope_head_dim, eps, fp8_max);
+        input,
+        freqs_cis,
+        position_ids,
+        output_q,
+        output_s,
+        n_groups,
+        heads_per_group,
+        nope_dim,
+        rope_head_dim,
+        eps,
+        fp8_max,
+        kernel_mode);
 }
 
 }  // namespace torch_ext

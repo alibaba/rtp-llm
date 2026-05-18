@@ -143,11 +143,14 @@ def parse_timeline(
         raise AssertionError(f"profile trace has no GPU kernel events{suffix}: {trace_path}")
 
     scale = max(iters, 1)
+    kernels.sort(key=lambda event: (float(event["ts"]), str(event.get("name", ""))))
     intervals = [(float(e["ts"]), float(e["ts"]) + float(e["dur"])) for e in kernels]
     name_counts: Dict[str, int] = {}
     for event in kernels:
         name = str(event.get("name", ""))
         name_counts[name] = name_counts.get(name, 0) + 1
+    kernel_count = len(kernels) // scale
+    kernel_path_names = [str(e.get("name", "")) for e in kernels[: max(kernel_count, 1)]]
     span_us = max(end for _, end in intervals) - min(start for start, _ in intervals)
     kernel_sum_us = sum(float(e["dur"]) for e in kernels)
     kernel_union_us = _merged_interval_duration(intervals)
@@ -156,8 +159,8 @@ def parse_timeline(
         kernel_sum_us=kernel_sum_us / scale,
         kernel_union_us=kernel_union_us / scale,
         idle_gap_us=(span_us - kernel_union_us) / scale,
-        kernel_count=len(kernels) // scale,
-        kernel_names=sorted(name_counts),
+        kernel_count=kernel_count,
+        kernel_names=kernel_path_names,
         kernel_name_counts_per_iter={name: count / scale for name, count in sorted(name_counts.items())},
         trace_path=trace_path,
     )

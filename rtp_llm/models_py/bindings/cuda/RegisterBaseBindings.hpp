@@ -197,7 +197,8 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("nope_dim"),
                   py::arg("rope_head_dim"),
                   py::arg("eps"),
-                  py::arg("fp8_max"));
+                  py::arg("fp8_max"),
+                  py::arg("kernel_mode"));
 
     rtp_ops_m.def(
         "embedding", &embedding, "Embedding lookup kernel", py::arg("output"), py::arg("input"), py::arg("weight"));

@@ -25,7 +25,6 @@ _FREQS_TOKEN_REGISTRY: dict[int, _FreqsTokenEntry] = {}
 _FREQS_TOKEN_STORAGE_REGISTRY: dict[tuple, _FreqsTokenEntry] = {}
 _FREQS_TOKEN_ORDER: list[int] = []
 _MAX_FREQS_TOKENS = 4096
-_IDENTITY_POSITION_CACHE: dict[tuple, torch.Tensor] = {}
 
 
 def _debug_runtime_enabled() -> bool:
@@ -174,16 +173,6 @@ def _rmsnorm_rope_token_rows(x: torch.Tensor) -> int:
     return int(x.numel() // last_dim)
 
 
-def _identity_position_ids(rows: int, device: torch.device) -> torch.Tensor:
-    key = (str(device), int(rows))
-    cached = _IDENTITY_POSITION_CACHE.get(key)
-    if cached is not None:
-        return cached
-    pos = torch.arange(rows, dtype=torch.int32, device=device).contiguous()
-    _IDENTITY_POSITION_CACHE[key] = pos
-    return pos
-
-
 def _try_indexed_grouped_q_rmsnorm_rope(
     x: torch.Tensor,
     weight: torch.Tensor | None,
@@ -232,58 +221,6 @@ def _try_indexed_grouped_q_rmsnorm_rope(
         f"shape={tuple(x.shape)} pos_rows={pos_rows} group_heads={group_heads}"
     )
     return out_grouped.view_as(x)
-
-
-def _try_indexed_materialized_rmsnorm_rope(
-    x: torch.Tensor,
-    weight: torch.Tensor | None,
-    freqs_cis: torch.Tensor,
-    rope_head_dim: int,
-    eps: float,
-) -> torch.Tensor | None:
-    if not (
-        freqs_cis.is_cuda
-        and freqs_cis.dtype == torch.complex64
-        and freqs_cis.is_contiguous()
-        and freqs_cis.dim() == 2
-        and int(freqs_cis.shape[1]) == int(rope_head_dim) // 2
-        and freqs_cis.device == x.device
-    ):
-        return None
-    pos_rows = int(freqs_cis.shape[0])
-    if pos_rows <= 0:
-        return None
-    position_ids = _identity_position_ids(pos_rows, freqs_cis.device)
-    if pos_rows == _rmsnorm_rope_token_rows(x):
-        try:
-            out = dsv4_indexed_rmsnorm_rope(
-                x,
-                weight,
-                freqs_cis,
-                position_ids,
-                int(rope_head_dim),
-                eps=float(eps),
-            )
-        except ValueError as exc:
-            _debug_runtime(
-                "DSV4 indexed RoPE materialized fallback: "
-                f"x_shape={tuple(x.shape)} freqs_shape={tuple(freqs_cis.shape)} "
-                f"reason={exc}"
-            )
-            return None
-        _debug_runtime(
-            "DSV4 indexed RoPE materialized hit: "
-            f"x_shape={tuple(x.shape)} freqs_rows={pos_rows}"
-        )
-        return out
-    return _try_indexed_grouped_q_rmsnorm_rope(
-        x,
-        weight,
-        freqs_cis,
-        position_ids,
-        int(rope_head_dim),
-        float(eps),
-    )
 
 
 def _inv_rope_quant_token_rows(o: torch.Tensor) -> int:
@@ -392,17 +329,6 @@ def dsv4_indexed_rmsnorm_rope_from_freqs(
                 f"rmsnorm_rope token provenance missing for dtype={freqs_cis.dtype} "
                 f"shape={tuple(freqs_cis.shape)}"
             )
-        materialized = None
-        if not inverse and out is None and not inplace and group_heads is None:
-            materialized = _try_indexed_materialized_rmsnorm_rope(
-                x,
-                weight,
-                freqs_cis,
-                int(rope_head_dim),
-                float(eps),
-            )
-        if materialized is not None:
-            return materialized
         _debug_runtime(
             "DSV4 indexed RoPE missing provenance fallback: "
             f"x_shape={tuple(x.shape)} freqs_shape={tuple(freqs_cis.shape)}"
@@ -435,7 +361,7 @@ def dsv4_indexed_inv_rope_fp8_quant_from_freqs(
     heads_per_cta: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     provenance = _lookup_freqs_token(freqs_cis)
-    if provenance is not None and fp8_buf is None and scale_buf is None:
+    if provenance is not None:
         table, position_ids, poison = provenance
         if int(position_ids.numel()) == _inv_rope_quant_token_rows(o):
             return dsv4_indexed_inv_rope_fp8_quant(
@@ -448,18 +374,13 @@ def dsv4_indexed_inv_rope_fp8_quant_from_freqs(
                 int(rope_head_dim),
                 quant_group_size=int(quant_group_size),
                 eps=float(eps),
+                fp8_buf=fp8_buf,
+                scale_buf=scale_buf,
             )
         if poison:
             _raise_poison_consumer(
                 f"inv_rope_fp8_quant row mismatch: o_shape={tuple(o.shape)} "
                 f"o_rows={_inv_rope_quant_token_rows(o)} pos_rows={int(position_ids.numel())}"
-            )
-    elif provenance is not None:
-        _, _, poison = provenance
-        if poison:
-            _raise_poison_consumer(
-                "inv_rope_fp8_quant explicit output buffers are unsupported for "
-                "indexed RoPE token"
             )
     elif freqs_cis.dtype != torch.complex64:
         _raise_poison_consumer(

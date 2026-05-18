@@ -6,7 +6,6 @@ import unittest
 import torch
 
 from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_rope_triton import fused_rmsnorm_rope
-from rtp_llm.models_py.kernels.cuda.dsv4_indexed_rope import indexed_rmsnorm_rope_path
 from rtp_llm.models_py.modules.dsv4.fusions.indexed_rope_pass import (
     apply_indexed_rope_fx_pass,
 )
@@ -60,6 +59,15 @@ def _fused_graph(module: torch.nn.Module) -> torch.fx.GraphModule:
     gm = apply_indexed_rope_fx_pass(gm)
     gm.recompile()
     return gm
+
+
+def _expected_indexed_rmsnorm_rope_dispatch(shape_case: dict, m: int) -> str:
+    role = shape_case["role"]
+    if role == "q_rope_d128_guard":
+        return "q_d128_large" if m >= 2049 else "q_d128_small"
+    if role == "q_rope_d512":
+        return "q_d512_large" if m >= 97 else "q_d512_small"
+    return "kv_d512"
 
 
 @unittest.skipIf(not torch.cuda.is_available(), "CUDA is required")
@@ -126,12 +134,15 @@ class TestDSV4IndexedRmsnormRopePass(unittest.TestCase):
                     h = shape_case["H"]
                     d = shape_case["D"]
                     q = (torch.randn(m, 1, h, d, dtype=torch.bfloat16, device="cuda") * 0.5).contiguous()
-                    path = indexed_rmsnorm_rope_path(q, None, 64)
                     rows.append(
                         measured_graph_pair_row(
                             op="indexed_rmsnorm_rope",
                             label=f"indexed_rmsnorm_rope_{shape_case['role']}_M{m}",
-                            shape_meta={**shape_case, "M": m, "candidate_runtime_path": path},
+                            shape_meta={
+                                **shape_case,
+                                "M": m,
+                                "expected_kernel_dispatch": _expected_indexed_rmsnorm_rope_dispatch(shape_case, m),
+                            },
                             baseline_fn=lambda q=q, pos=pos: q_pair.baseline(q, freqs, pos),
                             candidate_fn=lambda q=q, pos=pos: q_pair.candidate(q, freqs, pos),
                             trace_dir=trace_dir,
@@ -141,14 +152,19 @@ class TestDSV4IndexedRmsnormRopePass(unittest.TestCase):
                 else:
                     kv = (torch.randn(m, 1, 512, dtype=torch.bfloat16, device="cuda") * 0.5).contiguous()
                     weight = (torch.randn(512, dtype=torch.bfloat16, device="cuda").abs() + 0.25).contiguous()
-                    path = indexed_rmsnorm_rope_path(kv, weight, 64)
                     rows.append(
                         measured_graph_pair_row(
                             op="indexed_rmsnorm_rope",
                             label=f"indexed_rmsnorm_rope_{shape_case['role']}_M{m}",
-                            shape_meta={**shape_case, "M": m, "candidate_runtime_path": path},
+                            shape_meta={
+                                **shape_case,
+                                "M": m,
+                                "expected_kernel_dispatch": _expected_indexed_rmsnorm_rope_dispatch(shape_case, m),
+                            },
                             baseline_fn=lambda kv=kv, weight=weight, pos=pos: kv_pair.baseline(kv, weight, freqs, pos),
-                            candidate_fn=lambda kv=kv, weight=weight, pos=pos: kv_pair.candidate(kv, weight, freqs, pos),
+                            candidate_fn=lambda kv=kv, weight=weight, pos=pos: kv_pair.candidate(
+                                kv, weight, freqs, pos
+                            ),
                             trace_dir=trace_dir,
                             kernel_regex=os.environ.get("DSV4_GRAPHFX_INDEXED_RMSNORM_ROPE_KERNEL_REGEX") or None,
                         )
@@ -189,16 +205,6 @@ class TestDSV4IndexedRmsnormRopePass(unittest.TestCase):
                     diff = (cand.float() - ref.float()).abs()
                     self.assertLessEqual(float(diff.max()), 5e-2 if d == 512 else 2e-2)
 
-    def test_prefill_shapes_select_indexed_path(self) -> None:
-        h, rd = 64, 64
-        for d in [128, 512]:
-            q = torch.empty(1, 17, h, d, dtype=torch.bfloat16, device="cuda")
-            self.assertTrue(indexed_rmsnorm_rope_path(q, None, rd).startswith("indexed"))
-
-        kv = torch.empty(1, 17, 512, dtype=torch.bfloat16, device="cuda")
-        weight = torch.empty(512, dtype=torch.bfloat16, device="cuda")
-        self.assertTrue(indexed_rmsnorm_rope_path(kv, weight, rd).startswith("indexed"))
-
     def test_indexed_kv_rmsnorm_rope_matches_materialized(self) -> None:
         gm = _fused_graph(_KVPattern())
         d, rd = 512, 64
@@ -238,7 +244,7 @@ class TestDSV4IndexedRmsnormRopePass(unittest.TestCase):
         token = dsv4_indexed_rope_freqs_token(freqs, position_ids)
 
         self.assertEqual(token.dtype, torch.int8)
-        with self.assertRaisesRegex(RuntimeError, "view_as_real|complex"):
+        with self.assertRaisesRegex((RuntimeError, TypeError), "view_as_real|complex"):
             fused_rmsnorm_rope(q, None, token, rd, eps=1e-6)
 
     def test_from_freqs_rejects_poison_token_row_mismatch(self) -> None:
@@ -285,7 +291,7 @@ class TestDSV4IndexedRmsnormRopePass(unittest.TestCase):
                 self.assertEqual(cand.shape, q.shape)
                 self.assertLessEqual(float(diff.max()), 5e-2 if d == 512 else 2e-2)
 
-    def test_from_freqs_q_materialized_path_matches_without_token_provenance(self) -> None:
+    def test_from_freqs_q_falls_back_without_token_provenance(self) -> None:
         h, rd = 64, 64
         for d in [128, 512]:
             torch.manual_seed(701 + d)
@@ -316,7 +322,7 @@ class TestDSV4IndexedRmsnormRopePass(unittest.TestCase):
             diff = (cand.float() - ref.float()).abs()
             self.assertLessEqual(float(diff.max()), 5e-2)
 
-    def test_from_freqs_kv_materialized_path_matches_without_token_provenance(self) -> None:
+    def test_from_freqs_kv_falls_back_without_token_provenance(self) -> None:
         d, rd = 512, 64
         torch.manual_seed(801)
         kv = torch.randn(17, 1, d, dtype=torch.bfloat16, device="cuda") * 0.5

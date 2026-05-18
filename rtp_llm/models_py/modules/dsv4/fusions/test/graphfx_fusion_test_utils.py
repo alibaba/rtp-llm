@@ -233,46 +233,245 @@ def write_graphfx_perf_report(
     metadata: dict,
 ) -> str:
     report_path = os.environ.get("PERF_JSON") or report_path_from_env(json_env, default_json)
+    observed_paths = observed_timeline_kernel_paths(rows)
     payload = {
         "device": device_payload(),
         "measure": "torch_profiler_cuda_kernel_sum_us_per_iter",
         "python_overhead_included": False,
+        "standard_table_columns": standard_table_columns(),
+        "observed_timeline_kernel_path_columns": observed_timeline_kernel_path_columns(),
+        "observed_timeline_kernel_paths": observed_paths,
         **metadata,
         "rows": rows,
     }
     write_json_report(report_path, payload)
-    write_markdown_summary(os.path.splitext(report_path)[0] + ".md", rows, metadata)
+    write_markdown_summary(os.path.splitext(report_path)[0] + ".md", rows, metadata, observed_paths)
+    write_csv_summary(os.path.splitext(report_path)[0] + ".csv", rows)
+    print_standard_summary(rows, metadata)
     return report_path
 
 
-def write_markdown_summary(path: str, rows: Iterable[dict], metadata: dict) -> None:
+def observed_timeline_kernel_path_columns() -> list[str]:
+    return [
+        "op",
+        "model_profile",
+        "shape_group",
+        "role",
+        "shape",
+        "M_values",
+        "baseline_timeline_kernel_path",
+        "candidate_timeline_kernel_path",
+    ]
+
+
+def standard_table_columns() -> list[str]:
+    return [
+        "op",
+        "model_profile",
+        "shape_group",
+        "role",
+        "M",
+        "shape",
+        "baseline_kernel_us",
+        "candidate_kernel_us",
+        "speedup_kernel_sum",
+        "baseline_launches",
+        "candidate_launches",
+    ]
+
+
+def _standard_shape(row: dict) -> str:
+    if "K" in row:
+        return f"K={row['K']}"
+    if "H" in row and "D" in row:
+        return f"H={row['H']} D={row['D']}"
+    if "head_dim" in row:
+        return f"head_dim={row['head_dim']}"
+    if "D" in row:
+        return f"D={row['D']}"
+    return ""
+
+
+def _kernel_path(measure: dict) -> list[str]:
+    names = measure.get("kernel_names") or []
+    return [str(name) for name in names]
+
+
+def _kernel_path_key(names: Sequence[str]) -> str:
+    if not names:
+        return "(no CUDA kernel observed)"
+    return " -> ".join(names)
+
+
+def _markdown_cell(value: object) -> str:
+    return str(value).replace("|", "\\|").replace("\n", "<br>")
+
+
+def _markdown_kernel_path(names: Sequence[str]) -> str:
+    if not names:
+        return "(no CUDA kernel observed)"
+    return "<br>".join(f"`{_markdown_cell(name)}`" for name in names)
+
+
+def observed_timeline_kernel_paths(rows: Iterable[dict]) -> list[dict]:
+    grouped: dict[tuple[str, str, str, str, str, str, str], dict] = {}
+    for row in rows:
+        baseline_path = _kernel_path(row.get("baseline", {}))
+        candidate_path = _kernel_path(row.get("candidate", {}))
+        key = (
+            str(row.get("op", "")),
+            str(row.get("model_profile", "")),
+            str(row.get("shape_group", "")),
+            str(row.get("role", row.get("case", ""))),
+            _standard_shape(row),
+            _kernel_path_key(baseline_path),
+            _kernel_path_key(candidate_path),
+        )
+        entry = grouped.get(key)
+        if entry is None:
+            entry = {
+                "op": key[0],
+                "model_profile": key[1],
+                "shape_group": key[2],
+                "role": key[3],
+                "shape": key[4],
+                "M_values": [],
+                "baseline_timeline_kernel_path": baseline_path,
+                "candidate_timeline_kernel_path": candidate_path,
+            }
+            grouped[key] = entry
+        entry["M_values"].append(int(row.get("M", 0)))
+    result = list(grouped.values())
+    for entry in result:
+        entry["M_values"] = sorted(entry["M_values"])
+    result.sort(
+        key=lambda item: (
+            item["op"],
+            item["model_profile"],
+            item["shape_group"],
+            item["role"],
+            item["shape"],
+            item["M_values"][0] if item["M_values"] else -1,
+        )
+    )
+    return result
+
+
+def _standard_row(row: dict) -> dict:
+    base = row.get("baseline", {})
+    cand = row.get("candidate", {})
+    return {
+        "op": row.get("op", ""),
+        "model_profile": row.get("model_profile", ""),
+        "shape_group": row.get("shape_group", ""),
+        "role": row.get("role", row.get("case", "")),
+        "M": row.get("M", ""),
+        "shape": _standard_shape(row),
+        "baseline_kernel_us": float(base.get("kernel_sum_us", 0.0)),
+        "candidate_kernel_us": float(cand.get("kernel_sum_us", 0.0)),
+        "speedup_kernel_sum": float(row.get("speedup_kernel_sum", 0.0)),
+        "baseline_launches": row.get("baseline_launches", ""),
+        "candidate_launches": row.get("candidate_launches", ""),
+    }
+
+
+def _format_standard_row(row: dict) -> str:
+    item = _standard_row(row)
+    return (
+        "| {op} | {profile} | {group} | {role} | {m} | {shape} | "
+        "{base:.3f} | {cand:.3f} | {speedup:.3f} | {bl} | {cl} |"
+    ).format(
+        op=item["op"],
+        profile=item["model_profile"],
+        group=item["shape_group"],
+        role=item["role"],
+        m=item["M"],
+        shape=item["shape"],
+        base=item["baseline_kernel_us"],
+        cand=item["candidate_kernel_us"],
+        speedup=item["speedup_kernel_sum"],
+        bl=item["baseline_launches"],
+        cl=item["candidate_launches"],
+    )
+
+
+def write_markdown_summary(
+    path: str,
+    rows: Iterable[dict],
+    metadata: dict,
+    observed_paths: Iterable[dict] | None = None,
+) -> None:
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    row_list = list(rows)
+    observed_path_rows = (
+        list(observed_paths)
+        if observed_paths is not None
+        else observed_timeline_kernel_paths(row_list)
+    )
     lines = [
         f"# {metadata.get('title', 'DSV4 GraphFX Fusion Perf')}",
         "",
-        "| op | profile | role | M | K/head | baseline us | candidate us | speedup | launches |",
-        "| --- | --- | --- | ---: | --- | ---: | ---: | ---: | --- |",
+        "## Observed Timeline Kernel Paths",
+        "",
+        "Source: Torch Profiler CUDA timeline kernel events. "
+        "These are observed kernel names from the timeline, not code-inferred paths.",
+        "",
+        "| op | profile | group | role | shape | M values | "
+        "GraphFX before timeline kernel path | GraphFX after timeline kernel path |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
-    for row in rows:
-        base = row.get("baseline", {})
-        cand = row.get("candidate", {})
-        shape = row.get("K", row.get("head_dim", row.get("D", "")))
+    for item in observed_path_rows:
         lines.append(
-            "| {op} | {profile} | {role} | {m} | {shape} | {base:.3f} | {cand:.3f} | {speedup:.3f} | {bl}/{cl} |".format(
-                op=row.get("op", ""),
-                profile=row.get("model_profile", ""),
-                role=row.get("role", row.get("case", "")),
-                m=row.get("M", ""),
-                shape=shape,
-                base=float(base.get("kernel_sum_us", 0.0)),
-                cand=float(cand.get("kernel_sum_us", 0.0)),
-                speedup=float(row.get("speedup_kernel_sum", 0.0)),
-                bl=row.get("baseline_launches", ""),
-                cl=row.get("candidate_launches", ""),
+            "| {op} | {profile} | {group} | {role} | {shape} | {m_values} | {base_path} | {cand_path} |".format(
+                op=_markdown_cell(item.get("op", "")),
+                profile=_markdown_cell(item.get("model_profile", "")),
+                group=_markdown_cell(item.get("shape_group", "")),
+                role=_markdown_cell(item.get("role", "")),
+                shape=_markdown_cell(item.get("shape", "")),
+                m_values=_markdown_cell(",".join(str(m) for m in item.get("M_values", []))),
+                base_path=_markdown_kernel_path(item.get("baseline_timeline_kernel_path", [])),
+                cand_path=_markdown_kernel_path(item.get("candidate_timeline_kernel_path", [])),
             )
         )
+    lines.extend(
+        [
+            "",
+            "## Performance Table",
+            "",
+            "Measure: Torch Profiler CUDA kernel duration sum per iteration.",
+            "",
+            "| op | profile | group | role | M | shape | baseline kernel us | "
+            "candidate kernel us | speedup | baseline launches | candidate launches |",
+            "| --- | --- | --- | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for row in row_list:
+        lines.append(_format_standard_row(row))
     with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
+
+
+def write_csv_summary(path: str, rows: Iterable[dict]) -> None:
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    columns = standard_table_columns()
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(",".join(columns) + "\n")
+        for row in rows:
+            item = _standard_row(row)
+            values = [str(item.get(col, "")) for col in columns]
+            f.write(",".join(value.replace(",", ";") for value in values) + "\n")
+
+
+def print_standard_summary(rows: Iterable[dict], metadata: dict) -> None:
+    print(f"\n[{metadata.get('title', 'DSV4 GraphFX Fusion Perf')}]")
+    print("Measure: Torch Profiler CUDA kernel duration sum per iteration; Python overhead is excluded.")
+    print(
+        "| op | profile | group | role | M | shape | baseline kernel us | "
+        "candidate kernel us | speedup | baseline launches | candidate launches |"
+    )
+    print("| --- | --- | --- | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: |")
+    for row in rows:
+        print(_format_standard_row(row))
 
 
 def trace_dir_for_report(json_env: str, default_json: str, trace_env: str) -> str:

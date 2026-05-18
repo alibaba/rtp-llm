@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-import os
 import unittest
 
 import torch
 
 import libth_transformer_config  # noqa: F401
 from librtp_compute_ops import rtp_llm_ops
-
-os.environ.setdefault("DSV4_INDEXED_RMSNORM_ROPE_Q_LARGE_M", "1")
 
 
 def _make_freqs(max_pos: int, rd: int) -> torch.Tensor:

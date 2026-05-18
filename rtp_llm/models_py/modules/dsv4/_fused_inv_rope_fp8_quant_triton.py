@@ -42,6 +42,17 @@ def _is_blackwell_device(device: torch.device | int | None = None) -> bool:
     return major >= 10
 
 
+def _is_fake_or_meta_tensor(x: torch.Tensor) -> bool:
+    if x.is_meta:
+        return True
+    try:
+        from torch._subclasses.fake_tensor import FakeTensor
+
+        return isinstance(x, FakeTensor)
+    except Exception:
+        return False
+
+
 @triton.jit(do_not_specialize=["num_tokens", "scale_stride_k"])
 def _fused_inv_rope_fp8_quant_per_head(
     o_ptr,  # [M, H, D] bf16
@@ -266,6 +277,108 @@ def _fused_inv_rope_fp8_quant_group_heads(
             tl.store(scale_addr, packed_val)
 
 
+@triton.jit(do_not_specialize=["num_tokens", "scale_stride_k"])
+def _fused_indexed_inv_rope_fp8_quant_group_heads(
+    o_ptr,  # [M, H, D] bf16
+    freqs_ri_ptr,  # torch.view_as_real(freqs table), float32 [max_pos, RD_HALF, 2]
+    position_ids_ptr,  # [M] int32/int64
+    fp8_ptr,  # [G, M_pad, d] fp8 e4m3
+    scale_ptr,  # [G, M_pad, packed_sf_k] int32 UE8M0
+    num_tokens,
+    heads_per_group: tl.constexpr,
+    o_stride_token,
+    o_stride_head,
+    freqs_stride_pos,
+    freqs_stride_k,
+    fp8_stride_group,
+    fp8_stride_token,
+    scale_stride_group,
+    scale_stride_k,
+    fp8_max: tl.constexpr,
+    eps: tl.constexpr,
+    QUANT_GROUP_SIZE: tl.constexpr,
+    CHUNKS_PER_HEAD: tl.constexpr,
+    ROPE_START: tl.constexpr,
+    HEADS_PER_CTA: tl.constexpr,
+):
+    pid_token = tl.program_id(0).to(tl.int64)
+    g = tl.program_id(1).to(tl.int64)
+    head_tile = tl.program_id(2).to(tl.int64)
+    head_base = head_tile * HEADS_PER_CTA
+
+    for head_step in tl.static_range(HEADS_PER_CTA):
+        head_in_group = head_base + head_step
+        scale_addr = (
+            scale_ptr
+            + g * scale_stride_group
+            + pid_token
+            + head_in_group * scale_stride_k
+        )
+        if pid_token >= num_tokens:
+            tl.store(scale_addr, tl.zeros((), dtype=tl.int32))
+        else:
+            pos = tl.load(position_ids_ptr + pid_token).to(tl.int64)
+            global_head = g * heads_per_group + head_in_group
+            input_base = (
+                o_ptr + pid_token * o_stride_token + global_head * o_stride_head
+            )
+
+            HEAD_DIM: tl.constexpr = CHUNKS_PER_HEAD * QUANT_GROUP_SIZE
+            offsets = tl.arange(0, HEAD_DIM)
+            x = tl.load(input_base + offsets).to(tl.float32)
+
+            rope_abs_start: tl.constexpr = (
+                (CHUNKS_PER_HEAD - 1) * QUANT_GROUP_SIZE + ROPE_START
+            )
+            is_rope = offsets >= rope_abs_start
+            rope_local = offsets - rope_abs_start
+            x_partner = tl.load(
+                input_base + (offsets ^ 1), mask=is_rope, other=0.0
+            ).to(tl.float32)
+
+            cs_idx = tl.maximum(rope_local >> 1, 0)
+            freq_base = freqs_ri_ptr + pos * freqs_stride_pos + cs_idx * freqs_stride_k
+            cos_v = tl.load(freq_base, mask=is_rope, other=1.0)
+            sin_v = tl.load(freq_base + 1, mask=is_rope, other=0.0)
+
+            x_add = x * cos_v + x_partner * sin_v
+            x_sub = x * cos_v - x_partner * sin_v
+            is_even = (rope_local & 1) == 0
+            x = tl.where(is_rope, tl.where(is_even, x_add, x_sub), x)
+
+            x_2d = tl.reshape(tl.abs(x), (CHUNKS_PER_HEAD, QUANT_GROUP_SIZE))
+            block_absmax = tl.maximum(tl.max(x_2d, axis=1), eps)
+            scale_raw = block_absmax * (1.0 / fp8_max)
+            scale_raw_bits = scale_raw.to(tl.int32, bitcast=True)
+            exp = ((scale_raw_bits >> 23) & 0xFF) + (
+                (scale_raw_bits & 0x7FFFFF) != 0
+            )
+            exp = tl.minimum(tl.maximum(exp, 1), 254)
+            scale_bits = exp << 23
+            scales = scale_bits.to(tl.float32, bitcast=True)
+
+            scales_exp = tl.reshape(
+                tl.broadcast_to(
+                    tl.reshape(scales, (CHUNKS_PER_HEAD, 1)),
+                    (CHUNKS_PER_HEAD, QUANT_GROUP_SIZE),
+                ),
+                (HEAD_DIM,),
+            )
+            x_quant = tl.clamp(x / scales_exp, -fp8_max, fp8_max).to(tl.float8e4nv)
+
+            fp8_base = (
+                fp8_ptr
+                + g * fp8_stride_group
+                + pid_token * fp8_stride_token
+                + head_in_group * HEAD_DIM
+            )
+            tl.store(fp8_base + offsets, x_quant)
+
+            block_offsets = tl.arange(0, CHUNKS_PER_HEAD)
+            packed_val = tl.sum(exp << (block_offsets * 8))
+            tl.store(scale_addr, packed_val)
+
+
 def _alloc_output_buffers(
     M: int,
     n_groups: int,
@@ -299,6 +412,137 @@ def _alloc_output_buffers(
         assert scale_buf.shape[2] == packed_sf_k
         scale_work = scale_buf[:, :M, :]
     return fp8_work, scale_work
+
+
+def fused_indexed_inv_rope_fp8_quant(
+    o: torch.Tensor,
+    freqs_cis: torch.Tensor,
+    position_ids: torch.Tensor,
+    n_groups: int,
+    heads_per_group: int,
+    nope_dim: int,
+    rope_head_dim: int,
+    quant_group_size: int = 128,
+    eps: float = 1e-10,
+    heads_per_cta: int | None = None,
+):
+    """Indexed Triton oracle for inverse-RoPE + FP8 quant.
+
+    This keeps the grouped-head Triton topology while reading RoPE rows from
+    ``freqs_cis[position_ids[token]]`` directly.  It is intended for large-M
+    schedule exploration and preserves the exact DeepGEMM-compatible output
+    layout used by ``fused_inv_rope_fp8_quant``.
+    """
+    if _is_fake_or_meta_tensor(o) or _is_fake_or_meta_tensor(freqs_cis):
+        if o.dim() == 4:
+            M = o.shape[0] * o.shape[1]
+            D = o.shape[3]
+        else:
+            M = o.shape[0]
+            D = o.shape[2]
+        chunks_per_head = D // quant_group_size
+        d_per_group = heads_per_group * D
+        packed_sf_k = (d_per_group // quant_group_size) // chunks_per_head
+        return (
+            torch.empty(
+                (M, n_groups, d_per_group),
+                dtype=torch.float8_e4m3fn,
+                device=o.device,
+            ),
+            torch.empty(
+                (M, n_groups, packed_sf_k),
+                dtype=torch.int32,
+                device=o.device,
+            ),
+        )
+
+    assert o.is_cuda and o.dtype == torch.bfloat16
+    assert freqs_cis.is_cuda and freqs_cis.dtype == torch.complex64
+    assert position_ids.is_cuda and position_ids.dtype in (torch.int32, torch.int64)
+    assert o.is_contiguous()
+    assert freqs_cis.is_contiguous()
+    assert position_ids.is_contiguous()
+
+    if o.dim() == 4:
+        B, S, H, D = o.shape
+        M = B * S
+        o_flat = o.view(M, H, D)
+    else:
+        assert o.dim() == 3
+        M, H, D = o.shape
+        o_flat = o
+
+    assert int(position_ids.numel()) == M
+    assert H == n_groups * heads_per_group
+    assert D == nope_dim + rope_head_dim
+    assert D % quant_group_size == 0
+    assert nope_dim % quant_group_size == (quant_group_size - rope_head_dim)
+    assert rope_head_dim % 2 == 0
+    assert freqs_cis.dim() == 2
+    assert freqs_cis.shape[-1] == rope_head_dim // 2
+
+    chunks_per_head = D // quant_group_size
+    assert chunks_per_head <= 4
+    d_per_group = heads_per_group * D
+    num_scale_blocks = d_per_group // quant_group_size
+    assert num_scale_blocks % chunks_per_head == 0
+    packed_sf_k = num_scale_blocks // chunks_per_head
+    fp8_max = torch.finfo(torch.float8_e4m3fn).max
+
+    fp8_work, scale_work = _alloc_output_buffers(
+        M, n_groups, d_per_group, packed_sf_k, o.device
+    )
+    tma_M = scale_work.stride(2)
+
+    env_heads_per_cta = os.environ.get("DSV4_INDEXED_INV_ROPE_TRITON_HEADS_PER_CTA")
+    if heads_per_cta is not None:
+        selected_heads_per_cta = heads_per_cta
+    elif env_heads_per_cta is not None:
+        selected_heads_per_cta = int(env_heads_per_cta)
+    else:
+        selected_heads_per_cta = 8 if _is_blackwell_device(o.device) else 2
+    if selected_heads_per_cta not in (1, 2, 4, 8):
+        raise ValueError(
+            "invalid DSV4_INDEXED_INV_ROPE_TRITON_HEADS_PER_CTA="
+            f"{selected_heads_per_cta}; expected 1, 2, 4, or 8"
+        )
+    if heads_per_group % selected_heads_per_cta != 0:
+        selected_heads_per_cta = 1
+    selected_num_warps = int(os.environ.get("DSV4_INDEXED_INV_ROPE_TRITON_NUM_WARPS", "2"))
+    if selected_num_warps not in (1, 2, 4, 8):
+        raise ValueError(
+            "invalid DSV4_INDEXED_INV_ROPE_TRITON_NUM_WARPS="
+            f"{selected_num_warps}; expected 1, 2, 4, or 8"
+        )
+
+    freqs_ri = torch.view_as_real(freqs_cis)
+    grid = (tma_M, n_groups, heads_per_group // selected_heads_per_cta)
+    _fused_indexed_inv_rope_fp8_quant_group_heads[grid](
+        o_flat,
+        freqs_ri,
+        position_ids,
+        fp8_work,
+        scale_work,
+        M,
+        heads_per_group=heads_per_group,
+        o_stride_token=o_flat.stride(0),
+        o_stride_head=o_flat.stride(1),
+        freqs_stride_pos=freqs_ri.stride(0),
+        freqs_stride_k=freqs_ri.stride(1),
+        fp8_stride_group=fp8_work.stride(0),
+        fp8_stride_token=fp8_work.stride(1),
+        scale_stride_group=scale_work.stride(0),
+        scale_stride_k=scale_work.stride(2),
+        fp8_max=fp8_max,
+        eps=eps,
+        QUANT_GROUP_SIZE=quant_group_size,
+        CHUNKS_PER_HEAD=chunks_per_head,
+        ROPE_START=nope_dim % quant_group_size,
+        HEADS_PER_CTA=selected_heads_per_cta,
+        num_warps=selected_num_warps,
+        num_stages=1,
+    )
+    return fp8_work.transpose(0, 1), scale_work.transpose(0, 1)
 
 
 def fused_inv_rope_fp8_quant(
@@ -342,6 +586,29 @@ def fused_inv_rope_fp8_quant(
         ``deep_gemm.fp8_einsum("bhr,hdr->bhd", (o_fp8, o_scale),
         (wo_a_fp8, wo_a_scale), out, recipe=(1, 1, 128))``.
     """
+    if _is_fake_or_meta_tensor(o) or _is_fake_or_meta_tensor(freqs_cis_per_b):
+        if o.dim() == 4:
+            M = o.shape[0] * o.shape[1]
+            D = o.shape[3]
+        else:
+            M = o.shape[0]
+            D = o.shape[2]
+        chunks_per_head = D // quant_group_size
+        d_per_group = heads_per_group * D
+        packed_sf_k = (d_per_group // quant_group_size) // chunks_per_head
+        return (
+            torch.empty(
+                (M, n_groups, d_per_group),
+                dtype=torch.float8_e4m3fn,
+                device=o.device,
+            ),
+            torch.empty(
+                (M, n_groups, packed_sf_k),
+                dtype=torch.int32,
+                device=o.device,
+            ),
+        )
+
     assert o.is_cuda and o.dtype == torch.bfloat16
     assert freqs_cis_per_b.is_cuda and freqs_cis_per_b.dtype == torch.complex64
     assert o.is_contiguous()

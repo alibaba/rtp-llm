@@ -3,11 +3,9 @@
 #include "fp8_ue8m0_scale_layout.cuh"
 #include "util.h"
 #include <ATen/cuda/CUDAContext.h>
-#include <cuda_bf16.h>
-#include <cstdlib>
 #include <cmath>
 #include <cstdint>
-#include <limits>
+#include <cuda_bf16.h>
 
 namespace rtp_llm {
 namespace {
@@ -15,6 +13,8 @@ namespace {
 constexpr int kWarpSize    = 32;
 constexpr int kWarpsPerCta = 8;
 constexpr int kBlockSize   = kWarpSize * kWarpsPerCta;
+constexpr int64_t kQD128LargeMinM = 2049;
+constexpr int64_t kQD512LargeMinM = 97;
 
 __device__ __forceinline__ float bf16ToFloat(const __nv_bfloat16 v) {
     return __bfloat162float(v);
@@ -445,6 +445,76 @@ __global__ __launch_bounds__(kBlockSize) void dsv4_indexed_rmsnorm_rope_q_d128_c
 }
 
 template<typename index_t>
+__global__ __launch_bounds__(kBlockSize) void dsv4_indexed_rmsnorm_rope_q_d512_cached_token64_large_m_kernel(
+    const __nv_bfloat16* __restrict__ input,
+    const float2* __restrict__ freqs_cis,
+    const index_t* __restrict__ position_ids,
+    __nv_bfloat16* __restrict__ output,
+    int64_t token_rows,
+    int     h,
+    int64_t input_stride,
+    int64_t output_stride,
+    int64_t freqs_stride,
+    float   eps) {
+    const int64_t token   = static_cast<int64_t>(blockIdx.x);
+    const int     warp_id = threadIdx.x >> 5;
+    const int     lane    = threadIdx.x & 31;
+    if (token >= token_rows) {
+        return;
+    }
+
+    constexpr int kD            = 512;
+    constexpr int kRopeDim      = 64;
+    constexpr int kNopeOffset   = kD - kRopeDim;
+    constexpr int kPairsPerLane = kD / (2 * kWarpSize);
+    constexpr int kNopePairs    = kNopeOffset / 2;
+    __shared__ int64_t shared_pos;
+    __shared__ float2  shared_freq[kRopeDim / 2];
+    if (threadIdx.x == 0) {
+        shared_pos = static_cast<int64_t>(position_ids[token]);
+    }
+    __syncthreads();
+    for (int pair = threadIdx.x; pair < kRopeDim / 2; pair += blockDim.x) {
+        shared_freq[pair] = freqs_cis[shared_pos * freqs_stride + pair];
+    }
+    __syncthreads();
+
+    float2 vals[kPairsPerLane];
+    for (int head = warp_id; head < h; head += kWarpsPerCta) {
+        const int64_t row = token * static_cast<int64_t>(h) + head;
+        const __nv_bfloat16* row_input = input + row * input_stride;
+        __nv_bfloat16*       row_out   = output + row * output_stride;
+        const __nv_bfloat162* row_input2 = reinterpret_cast<const __nv_bfloat162*>(row_input);
+        __nv_bfloat162*       row_out2   = reinterpret_cast<__nv_bfloat162*>(row_out);
+
+        float local_sumsq = 0.0f;
+#pragma unroll
+        for (int i = 0; i < kPairsPerLane; ++i) {
+            const int pair_idx = lane + i * kWarpSize;
+            const float2 x = __bfloat1622float2(row_input2[pair_idx]);
+            vals[i] = x;
+            local_sumsq += x.x * x.x + x.y * x.y;
+        }
+        const float sumsq = __shfl_sync(0xffffffff, warpReduceSum(local_sumsq), 0);
+        const float inv_rms = rsqrtf(sumsq / static_cast<float>(kD) + eps);
+
+#pragma unroll
+        for (int i = 0; i < kPairsPerLane; ++i) {
+            const int pair_idx = lane + i * kWarpSize;
+            float2 y = {vals[i].x * inv_rms, vals[i].y * inv_rms};
+            if (pair_idx >= kNopePairs) {
+                const float2 freq = shared_freq[pair_idx - kNopePairs];
+                const float real = y.x;
+                const float imag = y.y;
+                y.x = real * freq.x - imag * freq.y;
+                y.y = real * freq.y + imag * freq.x;
+            }
+            row_out2[pair_idx] = __floats2bfloat162_rn(y.x, y.y);
+        }
+    }
+}
+
+template<typename index_t>
 __global__ __launch_bounds__(kBlockSize) void dsv4_indexed_rmsnorm_rope_kv_d512_cached_block_kernel(
     const __nv_bfloat16* __restrict__ input,
     const __nv_bfloat16* __restrict__ weight,
@@ -595,6 +665,29 @@ void launchQD128CachedTokenLarge(torch::Tensor input,
             static_cast<float>(eps));
 }
 
+template<typename index_t>
+void launchQD512CachedTokenLarge(torch::Tensor input,
+                                 torch::Tensor freqs_cis,
+                                 torch::Tensor position_ids,
+                                 torch::Tensor output,
+                                 int64_t       token_rows,
+                                 int64_t       h,
+                                 double        eps) {
+    auto stream = at::cuda::getCurrentCUDAStream();
+    dsv4_indexed_rmsnorm_rope_q_d512_cached_token64_large_m_kernel<index_t>
+        <<<static_cast<uint32_t>(token_rows), kBlockSize, 0, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
+            reinterpret_cast<const float2*>(freqs_cis.data_ptr()),
+            reinterpret_cast<const index_t*>(position_ids.data_ptr()),
+            reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
+            token_rows,
+            static_cast<int>(h),
+            input.stride(input.dim() - 2),
+            output.stride(output.dim() - 2),
+            freqs_cis.stride(0),
+            static_cast<float>(eps));
+}
+
 template<typename index_t, int GROUP_HEADS>
 void launchQD128CachedGroupLarge(torch::Tensor input,
                                  torch::Tensor freqs_cis,
@@ -619,55 +712,19 @@ void launchQD128CachedGroupLarge(torch::Tensor input,
             static_cast<float>(eps));
 }
 
-int envIntOrDefault(const char* name, int default_value) {
-    const char* raw = std::getenv(name);
-    if (raw == nullptr || raw[0] == '\0') {
-        return default_value;
-    }
-    char* end = nullptr;
-    long value = std::strtol(raw, &end, 10);
-    if (end == raw || value < std::numeric_limits<int>::min() || value > std::numeric_limits<int>::max()) {
-        return default_value;
-    }
-    return static_cast<int>(value);
-}
-
-bool envFlagOrDefault(const char* name, bool default_value) {
-    const char* raw = std::getenv(name);
-    if (raw == nullptr || raw[0] == '\0') {
-        return default_value;
-    }
-    if (raw[0] == '0') {
-        return false;
-    }
-    if (raw[0] == 'f' || raw[0] == 'F' || raw[0] == 'n' || raw[0] == 'N') {
-        return false;
-    }
-    return true;
-}
-
 int selectQD128RowsPerWarp(int64_t token_rows) {
-    const int override_value = envIntOrDefault("DSV4_INDEXED_RMSNORM_ROPE_Q_ROWS_PER_WARP", 0);
-    if (override_value == 1 || override_value == 2 || override_value == 4) {
-        return override_value;
-    }
     if (token_rows <= 128) {
         return 4;
     }
-    if (token_rows <= 2048) {
-        return 2;
-    }
-    return 1;
+    return 2;
 }
 
 bool useQD128LargeM(int64_t token_rows) {
-    const int small_max = envIntOrDefault("DSV4_INDEXED_RMSNORM_ROPE_Q_MAX_M", 2048);
-    if (small_max <= 0 || token_rows <= static_cast<int64_t>(small_max)) {
-        return false;
-    }
-    const int large_min = envIntOrDefault("DSV4_INDEXED_RMSNORM_ROPE_Q_LARGE_MIN_M", 2049);
-    return envFlagOrDefault("DSV4_INDEXED_RMSNORM_ROPE_Q_LARGE_M", false)
-           && token_rows >= static_cast<int64_t>(large_min);
+    return token_rows >= kQD128LargeMinM;
+}
+
+bool useQD512LargeM(int64_t token_rows) {
+    return token_rows >= kQD512LargeMinM;
 }
 
 template<typename index_t>
@@ -845,6 +902,10 @@ void dsv4_indexed_rmsnorm_rope(torch::Tensor input,
                                    && freq_stride_n == 64 && input.stride(input.dim() - 2) == 128
                                    && output.stride(output.dim() - 2) == 128;
     const bool use_q_d128_large_m = use_q_d128_cached && useQD128LargeM(token_rows);
+    const bool use_q_d512_cached = input.dim() == 4 && !has_weight && d == 512 && rope_head_dim == 64
+                                   && freq_stride_n == 64 && input.stride(input.dim() - 2) == 512
+                                   && output.stride(output.dim() - 2) == 512;
+    const bool use_q_d512_large_m = use_q_d512_cached && useQD512LargeM(token_rows);
     const int q_d128_rows_per_warp = selectQD128RowsPerWarp(token_rows);
     const bool use_group_warp = !use_q_d128_cached && input.dim() == 4 && !has_weight && freq_stride_n >= 2;
     const bool use_kv_d512_cached = has_weight && input.dim() != 4 && d == 512 && rope_head_dim == 64
@@ -852,10 +913,14 @@ void dsv4_indexed_rmsnorm_rope(torch::Tensor input,
                                     && output.stride(output.dim() - 2) == 512;
     if (position_ids.scalar_type() == at::ScalarType::Int) {
         if (use_q_d128_large_m) {
-            launchQD128CachedTokenLarge<int32_t>(input, freqs_cis, position_ids, output, token_rows, freq_stride_n, eps);
+            launchQD128CachedTokenLarge<int32_t>(
+                input, freqs_cis, position_ids, output, token_rows, freq_stride_n, eps);
         } else if (use_q_d128_cached) {
             launchQD128Cached<int32_t>(
                 input, freqs_cis, position_ids, output, rows, freq_stride_n, q_d128_rows_per_warp, eps);
+        } else if (use_q_d512_large_m) {
+            launchQD512CachedTokenLarge<int32_t>(
+                input, freqs_cis, position_ids, output, token_rows, freq_stride_n, eps);
         } else if (use_group_warp) {
             launchGroupWarp<int32_t, 8>(
                 input, freqs_cis, position_ids, output, token_rows, freq_stride_n, d, rope_head_dim, eps);
@@ -867,10 +932,14 @@ void dsv4_indexed_rmsnorm_rope(torch::Tensor input,
         }
     } else {
         if (use_q_d128_large_m) {
-            launchQD128CachedTokenLarge<int64_t>(input, freqs_cis, position_ids, output, token_rows, freq_stride_n, eps);
+            launchQD128CachedTokenLarge<int64_t>(
+                input, freqs_cis, position_ids, output, token_rows, freq_stride_n, eps);
         } else if (use_q_d128_cached) {
             launchQD128Cached<int64_t>(
                 input, freqs_cis, position_ids, output, rows, freq_stride_n, q_d128_rows_per_warp, eps);
+        } else if (use_q_d512_large_m) {
+            launchQD512CachedTokenLarge<int64_t>(
+                input, freqs_cis, position_ids, output, token_rows, freq_stride_n, eps);
         } else if (use_group_warp) {
             launchGroupWarp<int64_t, 8>(
                 input, freqs_cis, position_ids, output, token_rows, freq_stride_n, d, rope_head_dim, eps);

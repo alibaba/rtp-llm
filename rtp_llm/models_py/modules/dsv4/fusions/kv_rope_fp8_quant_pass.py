@@ -171,9 +171,10 @@ def _rewrite_quant_from_kv_rope_provenance(
         record_dsv4_fusion_miss("kv_rope_fp8_quant_fx", "kv_rope_quant_unknown_producer")
         return False
     with gm.graph.inserting_before(node):
+        token = gm.graph.call_function(dsv4_kv_rope_quant_producer_token, args=(x_node,))
         fused = gm.graph.call_function(
             dsv4_kv_rope_fp8_quant_from_provenance,
-            args=(x_node,),
+            args=(token,),
             kwargs={
                 "fallback_y": quant_arg if quant_arg is not x_node else None,
                 "group_size": node.kwargs.get("group_size", 128),
@@ -193,6 +194,13 @@ def _insert_kv_rope_producer_tokens(gm: torch.fx.GraphModule) -> int:
     replaced = 0
     for node in list(gm.graph.nodes):
         if not _is_kv_rope_producer_node(node):
+            continue
+        if any(
+            isinstance(user, torch.fx.Node)
+            and user.op == "call_function"
+            and user.target is dsv4_kv_rope_quant_producer_token
+            for user in node.users
+        ):
             continue
         if not _all_users_are_layout_outputs(node):
             record_dsv4_fusion_miss(

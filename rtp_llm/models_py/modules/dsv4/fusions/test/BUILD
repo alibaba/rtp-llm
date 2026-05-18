@@ -171,3 +171,19 @@ py_test(
     ],
     tags = ["manual", "H20", "SM100_ARM"],
 )
+
+py_test(
+    name = "test_kv_rope_fp8_quant_graphfx_perf",
+    srcs = [
+        "test_kv_rope_fp8_quant_graphfx.py",
+        "test_kv_rope_fp8_quant_graphfx_perf.py",
+    ],
+    deps = [
+        ":graphfx_fusion_test_utils",
+        "//rtp_llm/models_py/modules/dsv4/test:dsv4_kernel_perf_utils",
+        "//rtp_llm/models_py:kernels",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    tags = ["manual", "H20", "SM100_ARM"],
+)

@@ -14,6 +14,7 @@ void dsv4_indexed_inv_rope_fp8_quant(torch::Tensor input,
                                      int64_t       nope_dim,
                                      int64_t       rope_head_dim,
                                      double        eps,
-                                     double        fp8_max);
+                                     double        fp8_max,
+                                     int64_t       kernel_mode);
 
 }  // namespace rtp_llm

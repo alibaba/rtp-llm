@@ -4,30 +4,28 @@ import os
 
 import torch
 
-_DEFAULT_Q_D128_MAX_M = 2048
-_DEFAULT_Q_D128_LARGE_MIN_M = _DEFAULT_Q_D128_MAX_M + 1
-_DEFAULT_KV_D512_MAX_M = 32768
+_INV_ROPE_FP8_MODE_GENERIC = 0
+_INV_ROPE_FP8_MODE_D512_TOKEN4 = 1
+_INV_ROPE_FP8_MODE_D512_GROUP8 = 2
+_INV_ROPE_FP8_MODE_D512_TOKEN64 = 3
+_INV_ROPE_FP8_MODE_D512_TILE16 = 4
+_INV_ROPE_FP8_MODE_D512_TILE32 = 5
+_INV_ROPE_FP8_MODE_D512_TOKEN64_STREAM = 6
+_INV_ROPE_FP8_MODE_D512_HEAD1_SMALL = 7
+_INV_ROPE_FP8_MODE_D512_TOKEN64_W16 = 8
+_INV_ROPE_FP8_MODE_D512_TOKEN64_W32 = 9
+
+# Large-M indexed InvRoPE+FP8 was tested as a standalone replacement for
+# materialized freqs gather + fused_inv_rope_fp8_quant.  It only wins up to
+# about M=2048; beyond that the original Triton fused quant kernel dominates
+# total time and the indexed CUDA variants are neutral or slower.  Keep the
+# GraphFX rewrite, but dispatch back to the original kernel for large M so the
+# pass is a stable optimization instead of a large-prefill regression.
+_INV_ROPE_FP8_INDEXED_MAX_M = 2048
 
 
 def indexed_rope_enabled() -> bool:
     return os.environ.get("DSV4_INDEXED_ROPE_CUDA", "0") == "1"
-
-
-def _env_int(name: str, default: int) -> int:
-    value = os.environ.get(name)
-    if value is None:
-        return default
-    try:
-        return int(value)
-    except ValueError:
-        return default
-
-
-def _env_flag(name: str, default: bool) -> bool:
-    value = os.environ.get(name)
-    if value is None or value == "":
-        return default
-    return value[:1].lower() not in ("0", "f", "n")
 
 
 def _strict_position_check(freqs_cis: torch.Tensor, position_ids: torch.Tensor) -> None:
@@ -60,64 +58,6 @@ def _load_rtp_llm_ops():
 def _rmsnorm_rope_token_rows(x: torch.Tensor) -> int:
     d = int(x.shape[-1])
     return int(x.shape[0] * x.shape[1]) if x.dim() == 4 else int(x.numel() // d)
-
-
-def _is_q_no_weight_path(
-    x: torch.Tensor,
-    weight: torch.Tensor | None,
-    rope_head_dim: int,
-) -> bool:
-    return (
-        weight is None
-        and x.dim() == 4
-        and int(x.shape[2]) == 64
-        and int(x.shape[-1]) in (128, 512)
-        and int(rope_head_dim) == 64
-    )
-
-
-def _is_kv_d512_weight_path(
-    x: torch.Tensor,
-    weight: torch.Tensor | None,
-    rope_head_dim: int,
-) -> bool:
-    return (
-        weight is not None
-        and x.dim() in (2, 3)
-        and int(x.shape[-1]) == 512
-        and int(rope_head_dim) == 64
-    )
-
-
-def _within_max_m(token_rows: int, max_m: int) -> bool:
-    return max_m <= 0 or token_rows <= max_m
-
-
-def indexed_rmsnorm_rope_path(
-    x: torch.Tensor,
-    weight: torch.Tensor | None,
-    rope_head_dim: int,
-) -> str:
-    """Return the runtime implementation selected by the Python wrapper."""
-    if not indexed_rope_enabled():
-        return "materialized_fallback"
-    token_rows = _rmsnorm_rope_token_rows(x)
-    if _is_q_no_weight_path(x, weight, rope_head_dim):
-        if int(x.shape[-1]) != 128:
-            return "indexed_small"
-        large_min_m = _env_int(
-            "DSV4_INDEXED_RMSNORM_ROPE_Q_LARGE_MIN_M",
-            _DEFAULT_Q_D128_LARGE_MIN_M,
-        )
-        if (
-            _env_flag("DSV4_INDEXED_RMSNORM_ROPE_Q_LARGE_M", False)
-            and token_rows >= large_min_m
-        ):
-            return "indexed_large"
-        return "indexed_small"
-    if _is_kv_d512_weight_path(x, weight, rope_head_dim):
-        return "indexed_small"
-    return "materialized_fallback"
 
 
 def _is_indexed_rmsnorm_rope_semantically_supported(
@@ -165,38 +105,6 @@ def _is_indexed_rmsnorm_rope_semantically_supported(
     return True
 
 
-def is_indexed_rmsnorm_rope_supported(
-    x: torch.Tensor,
-    weight: torch.Tensor | None,
-    freqs_cis: torch.Tensor,
-    position_ids: torch.Tensor,
-    rope_head_dim: int,
-) -> bool:
-    return (
-        indexed_rope_enabled()
-        and _is_indexed_rmsnorm_rope_semantically_supported(
-            x, weight, freqs_cis, position_ids, rope_head_dim
-        )
-        and indexed_rmsnorm_rope_path(x, weight, rope_head_dim).startswith("indexed")
-    )
-
-
-def _materialized_rmsnorm_rope_fallback(
-    x: torch.Tensor,
-    weight: torch.Tensor | None,
-    freqs_cis: torch.Tensor,
-    position_ids: torch.Tensor,
-    rope_head_dim: int,
-    eps: float,
-) -> torch.Tensor:
-    from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_rope_triton import (
-        fused_rmsnorm_rope,
-    )
-
-    selected = freqs_cis.index_select(0, position_ids.to(dtype=torch.long)).contiguous()
-    return fused_rmsnorm_rope(x, weight, selected, int(rope_head_dim), eps=float(eps))
-
-
 def dsv4_indexed_rmsnorm_rope(
     x: torch.Tensor,
     weight: torch.Tensor | None,
@@ -218,15 +126,6 @@ def dsv4_indexed_rmsnorm_rope(
             f"rope_head_dim={rope_head_dim}"
         )
     _strict_position_check(freqs_cis, position_ids)
-    if not indexed_rmsnorm_rope_path(x, weight, rope_head_dim).startswith("indexed"):
-        return _materialized_rmsnorm_rope_fallback(
-            x,
-            weight,
-            freqs_cis,
-            position_ids,
-            int(rope_head_dim),
-            float(eps),
-        )
 
     rtp_llm_ops = _load_rtp_llm_ops()
 
@@ -256,18 +155,55 @@ def _alloc_inv_rope_outputs(
     heads_per_group: int,
     head_dim: int,
     device: torch.device,
+    fp8_buf: torch.Tensor | None = None,
+    scale_buf: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     d_per_group = heads_per_group * head_dim
     tma_m = ((m + 3) // 4) * 4
-    fp8_work = torch.empty(
-        (n_groups, m, d_per_group), dtype=torch.float8_e4m3fn, device=device
-    )
-    scale_work = torch.empty(
-        n_groups * heads_per_group * tma_m, dtype=torch.int32, device=device
-    ).as_strided(
-        (n_groups, m, heads_per_group),
-        (heads_per_group * tma_m, 1, tma_m),
-    )
+    if fp8_buf is None:
+        fp8_work = torch.empty(
+            (n_groups, m, d_per_group), dtype=torch.float8_e4m3fn, device=device
+        )
+    else:
+        if not (
+            fp8_buf.is_cuda
+            and fp8_buf.dtype == torch.float8_e4m3fn
+            and fp8_buf.device == device
+            and fp8_buf.dim() == 3
+            and int(fp8_buf.shape[0]) == n_groups
+            and int(fp8_buf.shape[1]) >= m
+            and int(fp8_buf.shape[2]) == d_per_group
+        ):
+            raise ValueError(
+                "invalid indexed inv_rope fp8_buf: "
+                f"shape={tuple(fp8_buf.shape)} dtype={fp8_buf.dtype} device={fp8_buf.device}; "
+                f"expected [{n_groups}, >= {m}, {d_per_group}] float8_e4m3fn on {device}"
+            )
+        fp8_work = fp8_buf[:, :m, :]
+
+    if scale_buf is None:
+        scale_work = torch.empty(
+            n_groups * heads_per_group * tma_m, dtype=torch.int32, device=device
+        ).as_strided(
+            (n_groups, m, heads_per_group),
+            (heads_per_group * tma_m, 1, tma_m),
+        )
+    else:
+        if not (
+            scale_buf.is_cuda
+            and scale_buf.dtype == torch.int32
+            and scale_buf.device == device
+            and scale_buf.dim() == 3
+            and int(scale_buf.shape[0]) == n_groups
+            and int(scale_buf.shape[1]) >= m
+            and int(scale_buf.shape[2]) == heads_per_group
+        ):
+            raise ValueError(
+                "invalid indexed inv_rope scale_buf: "
+                f"shape={tuple(scale_buf.shape)} dtype={scale_buf.dtype} device={scale_buf.device}; "
+                f"expected [{n_groups}, >= {m}, {heads_per_group}] int32 on {device}"
+            )
+        scale_work = scale_buf[:, :m, :]
     return fp8_work.transpose(0, 1), scale_work.transpose(0, 1)
 
 
@@ -314,6 +250,71 @@ def is_indexed_inv_rope_fp8_quant_supported(
     )
 
 
+def _indexed_inv_rope_fp8_quant_kernel_mode(
+    m: int,
+    h: int,
+    d: int,
+    n_groups: int,
+    heads_per_group: int,
+    nope_dim: int,
+    rope_head_dim: int,
+) -> int:
+    if not (
+        h == 64
+        and d == 512
+        and int(n_groups) == 8
+        and int(heads_per_group) == 8
+        and int(nope_dim) == 448
+        and int(rope_head_dim) == 64
+    ):
+        return _INV_ROPE_FP8_MODE_GENERIC
+    override = os.environ.get("DSV4_INDEXED_INV_ROPE_FP8_QUANT_D512_MODE", "").lower()
+    if override == "generic":
+        return _INV_ROPE_FP8_MODE_GENERIC
+    if override == "token4":
+        return _INV_ROPE_FP8_MODE_D512_TOKEN4
+    if override == "group8":
+        return _INV_ROPE_FP8_MODE_D512_GROUP8
+    if override == "token64":
+        return _INV_ROPE_FP8_MODE_D512_TOKEN64
+    if override in ("token64_stream", "stream"):
+        return _INV_ROPE_FP8_MODE_D512_TOKEN64_STREAM
+    if override in ("head1", "head1_small", "small_head"):
+        return _INV_ROPE_FP8_MODE_D512_HEAD1_SMALL
+    if override in ("token64_w16", "w16"):
+        return _INV_ROPE_FP8_MODE_D512_TOKEN64_W16
+    if override in ("token64_w32", "w32"):
+        return _INV_ROPE_FP8_MODE_D512_TOKEN64_W32
+    if override == "tile16":
+        return _INV_ROPE_FP8_MODE_D512_TILE16
+    if override == "tile32":
+        return _INV_ROPE_FP8_MODE_D512_TILE32
+    if 1 < m <= 64:
+        return _INV_ROPE_FP8_MODE_D512_HEAD1_SMALL
+    return _INV_ROPE_FP8_MODE_D512_TOKEN4 if m <= 512 else _INV_ROPE_FP8_MODE_D512_TOKEN64
+
+
+def _indexed_inv_rope_fp8_quant_use_indexed_kernel(
+    m: int,
+    h: int,
+    d: int,
+    n_groups: int,
+    heads_per_group: int,
+    nope_dim: int,
+    rope_head_dim: int,
+) -> bool:
+    if not (
+        h == 64
+        and d == 512
+        and int(n_groups) == 8
+        and int(heads_per_group) == 8
+        and int(nope_dim) == 448
+        and int(rope_head_dim) == 64
+    ):
+        return True
+    return int(m) <= _INV_ROPE_FP8_INDEXED_MAX_M
+
+
 def dsv4_indexed_inv_rope_fp8_quant(
     o: torch.Tensor,
     freqs_cis: torch.Tensor,
@@ -324,6 +325,9 @@ def dsv4_indexed_inv_rope_fp8_quant(
     rope_head_dim: int,
     quant_group_size: int = 128,
     eps: float = 1e-10,
+    backend: str | None = None,
+    fp8_buf: torch.Tensor | None = None,
+    scale_buf: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if not is_indexed_inv_rope_fp8_quant_supported(
         o, freqs_cis, position_ids, n_groups, heads_per_group, nope_dim, rope_head_dim, quant_group_size
@@ -338,12 +342,95 @@ def dsv4_indexed_inv_rope_fp8_quant(
         )
     _strict_position_check(freqs_cis, position_ids)
 
-    rtp_llm_ops = _load_rtp_llm_ops()
-
     m = int(o.shape[0] * o.shape[1]) if o.dim() == 4 else int(o.shape[0])
+    h = int(o.shape[-2])
+    d = int(o.shape[-1])
+
+    selected_backend = (
+        backend
+        if backend is not None
+        else os.environ.get("DSV4_INDEXED_INV_ROPE_FP8_QUANT_BACKEND", "cuda")
+    ).lower()
+    if selected_backend == "triton":
+        if fp8_buf is not None or scale_buf is not None:
+            raise ValueError("indexed Triton backend does not support explicit output buffers")
+        from rtp_llm.models_py.modules.dsv4._fused_inv_rope_fp8_quant_triton import (
+            fused_indexed_inv_rope_fp8_quant,
+        )
+
+        return fused_indexed_inv_rope_fp8_quant(
+            o,
+            freqs_cis,
+            position_ids,
+            int(n_groups),
+            int(heads_per_group),
+            int(nope_dim),
+            int(rope_head_dim),
+            quant_group_size=int(quant_group_size),
+            eps=float(eps),
+        )
+    if selected_backend != "cuda":
+        raise ValueError(
+            f"invalid DSV4_INDEXED_INV_ROPE_FP8_QUANT_BACKEND={selected_backend!r}; "
+            "expected 'cuda' or 'triton'"
+        )
+
+    if not _indexed_inv_rope_fp8_quant_use_indexed_kernel(
+        m,
+        h,
+        d,
+        int(n_groups),
+        int(heads_per_group),
+        int(nope_dim),
+        int(rope_head_dim),
+    ):
+        from rtp_llm.models_py.modules.dsv4._fused_inv_rope_fp8_quant_triton import (
+            fused_inv_rope_fp8_quant,
+        )
+
+        # Large-M fallback intentionally materializes the same freqs tensor as
+        # the pre-rewrite graph.  The indexed kernel removes the gather, but
+        # profiling showed the standalone indexed path is slower once M grows:
+        # at M=65536 the original gather+fused kernel was ~1721us while the
+        # best indexed CUDA path was ~1765us.  Preserving the original kernel
+        # here avoids a GraphFX negative optimization while still letting small
+        # and medium M use the indexed CUDA path.
+        selected_freqs = freqs_cis.index_select(
+            0, position_ids.to(dtype=torch.long).contiguous()
+        ).contiguous()
+        return fused_inv_rope_fp8_quant(
+            o,
+            selected_freqs,
+            n_groups=int(n_groups),
+            heads_per_group=int(heads_per_group),
+            nope_dim=int(nope_dim),
+            rope_head_dim=int(rope_head_dim),
+            quant_group_size=int(quant_group_size),
+            eps=float(eps),
+            fp8_buf=fp8_buf,
+            scale_buf=scale_buf,
+            impl="optimized",
+        )
+
+    rtp_llm_ops = _load_rtp_llm_ops()
+    kernel_mode = _indexed_inv_rope_fp8_quant_kernel_mode(
+        m,
+        h,
+        d,
+        int(n_groups),
+        int(heads_per_group),
+        int(nope_dim),
+        int(rope_head_dim),
+    )
     o_flat = o.reshape(m, int(o.shape[-2]), int(o.shape[-1]))
     output_q, output_s = _alloc_inv_rope_outputs(
-        m, int(n_groups), int(heads_per_group), int(o.shape[-1]), o.device
+        m,
+        int(n_groups),
+        int(heads_per_group),
+        d,
+        o.device,
+        fp8_buf=fp8_buf,
+        scale_buf=scale_buf,
     )
     rtp_llm_ops.dsv4_indexed_inv_rope_fp8_quant(
         o_flat,
@@ -357,5 +444,6 @@ def dsv4_indexed_inv_rope_fp8_quant(
         int(rope_head_dim),
         float(eps),
         float(torch.finfo(torch.float8_e4m3fn).max),
+        int(kernel_mode),
     )
     return output_q, output_s
