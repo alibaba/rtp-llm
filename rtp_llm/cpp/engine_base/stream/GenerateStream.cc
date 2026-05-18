@@ -319,11 +319,15 @@ int GenerateStream::initialReuseLength() const {
 
 void GenerateStream::setReuseLength(int reuse_length) {
     reuse_length_ = reuse_length;
-    if (generate_input_->mm_locs) {
+    if (generate_input_->mm_locs && generate_input_->multimodal_features) {
         auto& locs      = generate_input_->mm_locs.value();
         auto* locs_data = locs.data_ptr<int32_t>();
+        auto& features  = generate_input_->multimodal_features.value();
+        // Only count an image as reused when the reuse boundary covers its full
+        // token span [loc, loc + feature_len). Partially-cached images must be recomputed.
         for (int i = locs.numel() - 1; i >= 0; --i) {
-            if (reuse_length_ > locs_data[i]) {
+            const int mm_end = locs_data[i] + static_cast<int>(features[i].size(0));
+            if (reuse_length_ >= mm_end) {
                 reuse_mm_length_ = i + 1;
                 break;
             }
@@ -449,20 +453,6 @@ torch::Tensor GenerateStream::multimodalLocations() const {
     }
     auto& mm_locs = generate_input_->mm_locs.value();
     return mm_locs.slice(0, reuse_mm_length_, mm_locs.numel());
-}
-
-vector<vector<int>> GenerateStream::multimodalIntervals() const {
-    if (!generate_input_->mm_locs || !generate_input_->multimodal_features) {
-        return {};
-    }
-    vector<vector<int>> res;
-    auto                locs     = generate_input_->mm_locs.value();
-    auto                features = generate_input_->multimodal_features.value();
-    for (int i = 0; i < locs.numel(); ++i) {
-        res.emplace_back(
-            vector<int>({locs.index({i}).item<int>(), locs.index({i}).item<int>() + int(features[i].size(0))}));
-    }
-    return res;
 }
 
 vector<int> GenerateStream::textTokensMask() const {

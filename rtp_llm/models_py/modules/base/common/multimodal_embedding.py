@@ -49,8 +49,16 @@ class MultimodalEmbeddingInjector(nn.Module):
             if feature.device != embeddings.device:
                 feature = feature.to(embeddings.device)
 
+            # A partially-cached leading image arrives with loc < 0: its head rows already live in the
+            # reused KV prefix, so drop them and inject only the remaining tail at the recompute start.
+            if loc < 0:
+                feature = feature[-loc:]
+                loc = 0
+                if feature.size(0) == 0:
+                    continue
+
             length = feature.size(0)
-            if loc < 0 or (loc + length) > embeddings.size(0):
+            if loc + length > embeddings.size(0):
                 raise IndexError(
                     f"feature[{idx}] with length {length} cannot be placed at loc {loc} "
                     f"within embeddings of length {embeddings.size(0)}"
@@ -116,8 +124,16 @@ class MultimodalDeepstackInjector(nn.Module):
             if layer_embed.device != hidden.device:
                 layer_embed = layer_embed.to(hidden.device)
 
+            # Same partial-prefix handling as the embedding injector: drop the head rows of a
+            # partially-cached leading image (loc < 0) and add only the remaining tail at position 0.
+            if loc < 0:
+                layer_embed = layer_embed[-loc:]
+                loc = 0
+                if layer_embed.size(0) == 0:
+                    continue
+
             length = layer_embed.size(0)
-            if loc < 0 or (loc + length) > hidden.size(0):
+            if loc + length > hidden.size(0):
                 raise IndexError(
                     f"deepstack tensor[{idx}] with length {length} cannot be placed at "
                     f"loc {loc} within hidden of length {hidden.size(0)}"
