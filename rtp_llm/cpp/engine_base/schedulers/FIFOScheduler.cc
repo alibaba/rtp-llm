@@ -372,6 +372,17 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
 
     reportMetrics();
     last_schedule_time_ = autil::TimeUtility::currentTimeInMilliSeconds();
+    if (!running_streams_.empty()) {
+        std::string ids;
+        for (auto& s : running_streams_) {
+            if (!ids.empty()) ids += ",";
+            ids += std::to_string(s->streamId());
+            if (s->isFakeStream()) ids += "(fake)";
+        }
+        RTP_LLM_LOG_DEBUG("FIFOScheduler::schedule return running=%zu ids=[%s] waiting=%zu need_fake=%d dp_managed=%d",
+                          running_streams_.size(), ids.c_str(), waiting_streams_.size(),
+                          need_fill_fake_stream_ ? 1 : 0, dp_controller_managed_ ? 1 : 0);
+    }
     return running_streams_;
 }
 

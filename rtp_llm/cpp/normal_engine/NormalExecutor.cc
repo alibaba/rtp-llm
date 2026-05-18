@@ -193,6 +193,11 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         prepareGrpcNormalDeviceState(stream_groups);
     }
 
+    RTP_LLM_LOG_DEBUG("NormalExecutor::process entry tp_rank=%d streams=%zu fake_group=%d",
+                      tp_rank_,
+                      streams.size(),
+                      stream_groups.isFakeStream() ? 1 : 0);
+
     {
         RTP_LLM_PROFILE_SCOPE("executor.gather_model_input");
         int64_t start_time_us      = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -254,8 +259,16 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
                                       stream_groups.modelExecuteTokenSize(),
                                       stream_groups.maxSeqLen());
         int64_t start_time_us               = autil::TimeUtility::currentTimeInMicroSeconds();
+        RTP_LLM_LOG_DEBUG("NormalExecutor::process forward begin tp_rank=%d ctx_batch=%zu gen_batch=%zu tokens=%zu",
+                          tp_rank_,
+                          stream_groups.totalContextBatchSize(),
+                          stream_groups.totalDecodeBatchSize(),
+                          stream_groups.modelExecuteTokenSize());
         model_output                        = std::move(model_->forward(model_input));
         executor_collector.model_forward_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        RTP_LLM_LOG_DEBUG("NormalExecutor::process forward done tp_rank=%d latency_us=%ld",
+                          tp_rank_,
+                          executor_collector.model_forward_us);
     }
     if (expert_balancer_) {
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
