@@ -363,9 +363,18 @@ class DeepSeekV4Model(GptModelBase):
         )
         device_str = str(device)
 
-        self._is_speculative = bool(init_resource.is_speculative)
-        self._is_decode_role = bool(init_resource.is_decode_role)
-        self._max_context_batch_size = init_resource.max_context_batch_size
+        self._is_speculative = bool(getattr(init_resource, "is_speculative", False))
+        fallback_role = os.environ.get("ROLE_TYPE", "").upper()
+        self._is_decode_role = bool(
+            getattr(init_resource, "is_decode_role", fallback_role == "DECODE")
+        )
+        self._max_context_batch_size = int(
+            getattr(
+                init_resource,
+                "max_context_batch_size",
+                getattr(self._v4_args, "max_context_batch_size", 1),
+            )
+        )
         self._v4_args.is_decode_role = self._is_decode_role
         runtime_resolved_max_tokens_per_rank = resolve_moe_max_tokens_per_rank(
             max_seq_len=int(self._v4_args.max_seq_len),

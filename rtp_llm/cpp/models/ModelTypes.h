@@ -43,6 +43,7 @@ struct GptModelInitParams {
     ConcurrencyConfig                     concurrency_config;
     SpeculativeExecutionConfig            sp_config;
     DeviceResourceConfig                  device_resource_config;
+    RoleType                              role_type               = RoleType::PDFUSION;
     MlaOpsType                            mla_ops_type            = MlaOpsType::AUTO;
     int64_t                               max_seq_len             = 0;
     int64_t                               hidden_size             = 0;

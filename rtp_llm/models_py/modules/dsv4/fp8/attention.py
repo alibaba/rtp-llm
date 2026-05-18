@@ -2299,7 +2299,7 @@ class AttentionFP8(nn.Module):
         )
         # CSA cmp_local_raw = indexer's raw indices (the +win offset is
         # added later inside the epilogue's translate path).
-        cmp_local_raw = attn_metadata.topk_buffer_compressed[:bsz]
+        cmp_local_raw = attn_metadata.topk_buffer_compressed[:bsz].clone()
         return self._forward_decode_compressed(
             qkv.q,
             cmp_local_raw,

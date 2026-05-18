@@ -188,7 +188,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         init_resources.kv_cache = kv_cache;
     }
     init_resources.is_speculative = (params.sp_config.type != SP_TYPE_NONE);
-    init_resources.is_decode_role = (params.parallelism_config.role_type == RoleType::DECODE);
+    init_resources.is_decode_role = (params.role_type == RoleType::DECODE);
     init_resources.max_context_batch_size = params.runtime_config.fifo_scheduler_config.max_context_batch_size;
 
     py::object py_init_result;

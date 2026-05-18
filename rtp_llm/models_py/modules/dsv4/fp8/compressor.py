@@ -49,12 +49,12 @@ _CUBLAS_GEMM_BF16_BF16_FP32 = getattr(rtp_llm_ops, "cublas_gemm_bf16_bf16_fp32",
 def _compressor_meta_fused_enabled() -> bool:
     """Env-gated fused compressor prepare_metadata.
 
-    Default-on: decode now feeds metadata from buildmeta, and the remaining
-    prepare_metadata callers should use the fused integer slot builder unless
-    explicitly disabled for debugging with ``DSV4_FUSED_PREPARE=0``.
+    Keep this opt-in for now. The fused path is useful for targeted
+    validation, but the unfused builder is the known stable precision path for
+    the DSV4 long-context parity gate.
     """
 
-    return os.environ.get("DSV4_FUSED_PREPARE", "1").strip() == "1"
+    return os.environ.get("DSV4_FUSED_PREPARE", "0").strip() == "1"
 
 
 def _linear_bf16_bf16_fp32(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
@@ -610,60 +610,64 @@ class CompressorFP8(nn.Module):
         device = x.device
         out_dim = (1 + self.overlap) * self.head_dim
         with record_function_range("dsv4.fp8.compressor.prefill.fused_linear"):
-            fused_out = _linear_bf16_bf16_fp32(x, self._wkv_wgate_fused)
-            N = bsz * seqlen
-            fused_flat = fused_out.reshape(N, -1)
+            fused_out = torch.nn.functional.linear(
+                x.to(self._wkv_wgate_fused.dtype), self._wkv_wgate_fused
+            )
+            kv, score = fused_out[..., :out_dim], fused_out[..., out_dim:]
 
         cp_ctx = self._cp_ctx
         cp_gather = cp_should_gather(cp_ctx, start_pos)
-        fused_gather_handle = None
+        kv_gather_handle = None
+        score_gather_handle = None
         if cp_gather:
             assert cp_ctx is not None
+            if kv.dim() == 3:
+                assert kv.size(0) == 1, "CompressorFP8 CP expects flattened input"
+                kv_local = kv.squeeze(0)
+                score_local = score.squeeze(0)
+            else:
+                kv_local = kv
+                score_local = score
             gather_stream = (
-                torch.cuda.Stream(device=fused_flat.device)
-                if fused_flat.is_cuda
-                else None
+                torch.cuda.Stream(device=kv_local.device) if kv_local.is_cuda else None
             )
-            # Gather the fused ``[kv | score]`` projection once. This removes
-            # one NCCL launch and keeps the CP path token-major 2D; the split
-            # below is a strided view and the Triton wrappers pass row strides
-            # explicitly.
-            with record_function_range(
-                "dsv4.fp8.compressor.prefill.cp_gather_kv_score"
-            ):
-                fused_gather_handle = cp_all_gather_full_async(
-                    fused_flat, cp_ctx, stream=gather_stream
+            # Start both collectives early so their NCCL work can overlap with
+            # downstream CPU/Python setup before the gathered tensors are needed.
+            with record_function_range("dsv4.fp8.compressor.prefill.cp_gather_kv"):
+                kv_gather_handle = cp_all_gather_full_async(
+                    kv_local, cp_ctx, stream=gather_stream
                 )
+            with record_function_range("dsv4.fp8.compressor.prefill.cp_gather_score"):
+                score_gather_handle = cp_all_gather_full_async(
+                    score_local, cp_ctx, stream=gather_stream
+                )
+            bsz = 1
+            seqlen = int(cp_ctx.seq_len_full)
             assert meta is not None, (
                 "CompressorFP8 CP prefill requires full-sequence metadata from "
                 "rtp_llm.models_py.modules.dsv4.fp8.prefill_meta; rebuilding it "
                 "inside compressor.forward is intentionally disabled."
             )
-            N = int(cp_ctx.seq_len_full)
-            assert int(meta.positions.numel()) == N, (
+            assert int(meta.positions.numel()) == seqlen, (
                 f"CP compressor meta/token length mismatch: meta={meta.positions.numel()} "
-                f"seq_len_full={N}"
+                f"seq_len_full={seqlen}"
             )
-            assert fused_gather_handle is not None
-            with record_function_range("dsv4.fp8.compressor.prefill.cp_wait_kv_score"):
-                fused_flat = cp_wait_gather_full(fused_gather_handle)
+            assert kv_gather_handle is not None
+            assert score_gather_handle is not None
+            with record_function_range("dsv4.fp8.compressor.prefill.cp_wait_kv"):
+                kv = cp_wait_gather_full(kv_gather_handle).unsqueeze(0)
+            with record_function_range("dsv4.fp8.compressor.prefill.cp_wait_score"):
+                score = cp_wait_gather_full(score_gather_handle).unsqueeze(0)
             # After all-gather, kv_flat covers the FULL sequence from global
             # position 0.  Reset sp so the kernel's raw-path dispatch maps
             # flat_idx = pos - 0 = pos for every token, avoiding a stale
             # state-cache fallback for positions < local_start.
             sp = 0
 
-        with record_function_range("dsv4.fp8.compressor.prefill.split_kv_score"):
-            assert fused_flat.dim() == 2, (
-                f"CompressorFP8 prefill expects flat fused projection, got "
-                f"{tuple(fused_flat.shape)}"
-            )
-            assert fused_flat.size(1) == 2 * out_dim, (
-                f"CompressorFP8 fused hidden mismatch: got {fused_flat.size(1)}, "
-                f"expected {2 * out_dim}"
-            )
-            kv_flat = fused_flat[:, :out_dim]
-            score_flat = fused_flat[:, out_dim:]
+        N = bsz * seqlen
+        with record_function_range("dsv4.fp8.compressor.prefill.flatten"):
+            kv_flat = kv.reshape(N, -1).contiguous()
+            score_flat = score.reshape(N, -1).contiguous()
         if meta is None:
             with record_function_range("dsv4.fp8.compressor.prefill.build_meta"):
                 positions, b_idx = _build_prefill_positions(sp, bsz, seqlen, device)
