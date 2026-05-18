@@ -18,6 +18,7 @@ import torch
 from rtp_llm.dash_sc.codec import OtherParams, SamplingParams
 from rtp_llm.dash_sc.inference.servicer import (
     DashScInferenceServicer,
+    build_think_runtime,
     iter_real_model_stream_infer,
 )
 from rtp_llm.dash_sc.proto import predict_v2_pb2
@@ -247,6 +248,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
             }
         )
 
+        env_cfg = _GenerateEnvCfg()
         chunks = await _drain(
             iter_real_model_stream_infer(
                 req,
@@ -256,8 +258,8 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 visitor,
                 rtp_llm_request_id=1,
                 tokenizer=tok,
-                generate_env_config=_GenerateEnvCfg(),
-                model_type="qwen2",
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(tok, env_cfg, "qwen2"),
             )
         )
 
@@ -305,6 +307,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
             }
         )
 
+        env_cfg = _GenerateEnvCfg()
         chunks = await _drain(
             iter_real_model_stream_infer(
                 req,
@@ -315,8 +318,8 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 rtp_llm_request_id=100,
                 echo_prefix_ids=[128821, 198],
                 tokenizer=tok,
-                generate_env_config=_GenerateEnvCfg(),
-                model_type="deepseek_v4",
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
                 phase2_request_id_factory=lambda: 200,
             )
         )
@@ -328,6 +331,11 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_gen_ids(chunks[1]), [128822, 271])
         self.assertEqual(_gen_ids(chunks[2]), [20, 128822, 21])
         self.assertEqual(chunks[2].infer_response.id, "trace-real-2")
+        # phase-2 trace_id mirrors phase-1 (no -2 suffix) so dashscope log search
+        # finds both halves under a single trace.
+        self.assertEqual(
+            visitor.generate_inputs[1].generate_config.trace_id, "trace-real"
+        )
         phase2_input_ids = visitor.generate_inputs[1].token_ids.cpu().int().tolist()
         self.assertEqual(phase2_input_ids, [7, 8, 128821, 271, 128822, 271])
         self.assertFalse(visitor.generate_inputs[1].generate_config.in_think_mode)
@@ -370,6 +378,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
             }
         )
 
+        env_cfg = _GenerateEnvCfg()
         chunks = await _drain(
             iter_real_model_stream_infer(
                 req,
@@ -380,8 +389,8 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 rtp_llm_request_id=100,
                 echo_prefix_ids=[128821, 198],
                 tokenizer=tok,
-                generate_env_config=_GenerateEnvCfg(),
-                model_type="deepseek_v4",
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
                 phase2_request_id_factory=lambda: 200,
             )
         )
@@ -394,6 +403,108 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
             chunks[1].infer_response.parameters["generate_think_token_num"].int64_param,
             2,
         )
+
+    async def test_terminate_token_id_disabled_keeps_token_in_stream(self) -> None:
+        """``terminate_token_id=None`` disables the in-stream "stop thinking"
+        branch: token id 1 is emitted as a regular content token, with no
+        truncation and no phase-2 enqueue. (No ``</think>`` in the stream so the
+        regular close-driven phase-2 path also stays dormant.)"""
+        req = self._minimal_request()
+        out = GenerateOutput(
+            output_ids=torch.tensor([10, 1, 11], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(input_len=2, reuse_len=0),
+        )
+        visitor = _FakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
+        )
+        tok = _FakeTokenizer(
+            {
+                "<think>\n": [128821, 198],
+                "</think>\n\n": [128822, 271],
+                "<think>\n\n</think>\n\n": [128821, 271, 128822, 271],
+                "</think>": [128822],
+            }
+        )
+
+        env_cfg = _GenerateEnvCfg()
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [1, 2],
+                SamplingParams(),
+                OtherParams(),
+                visitor,
+                rtp_llm_request_id=1,
+                tokenizer=tok,
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(
+                    tok, env_cfg, "deepseek_v4", terminate_token_id=None
+                ),
+            )
+        )
+
+        self.assertEqual(visitor.enqueue_called, 1)
+        self.assertEqual(_gen_ids(chunks[0]), [10, 1, 11])
+
+    async def test_terminate_token_id_configurable_value(self) -> None:
+        """A non-default ``terminate_token_id`` (here 42) drives the same
+        truncation + phase-2 prompt rewrite that token id 1 does by default."""
+        req = self._minimal_request()
+        phase1 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([10, 11, 42, 99], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        phase2 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([20], dtype=torch.int32),
+                    finished=True,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        visitor = _MultiStreamVisitor(
+            [_FakeAsyncStream([phase1]), _FakeAsyncStream([phase2])]
+        )
+        tok = _FakeTokenizer(
+            {
+                "<think>\n": [128821, 198],
+                "</think>\n\n": [128822, 271],
+                "<think>\n\n</think>\n\n": [128821, 271, 128822, 271],
+                "</think>": [128822],
+            }
+        )
+
+        env_cfg = _GenerateEnvCfg()
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [7, 8, 128821],
+                SamplingParams(),
+                OtherParams(),
+                visitor,
+                rtp_llm_request_id=100,
+                echo_prefix_ids=[128821, 198],
+                tokenizer=tok,
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(
+                    tok, env_cfg, "deepseek_v4", terminate_token_id=42
+                ),
+                phase2_request_id_factory=lambda: 200,
+            )
+        )
+
+        self.assertEqual(visitor.enqueue_called, 2)
+        self.assertEqual(_gen_ids(chunks[0]), [128821, 10, 11])
+        self.assertEqual(_gen_ids(chunks[1]), [128822, 271])
+        self.assertEqual(_gen_ids(chunks[2]), [20])
+        self.assertNotIn(42, visitor.generate_inputs[1].token_ids.cpu().int().tolist())
 
 
 class IterRealModelStreamInferEchoTest(unittest.IsolatedAsyncioTestCase):
