@@ -9,6 +9,8 @@
 #include <mutex>
 #include <vector>
 #include <algorithm>
+#include <filesystem>
+#include <fstream>
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include <cstdlib>
@@ -25,6 +27,174 @@
 using namespace std;
 
 namespace rtp_llm {
+
+namespace {
+
+std::string postLayersDumpPath() {
+    const char* env_path = std::getenv("RTP_POST_LAYERS_DUMP");
+    if (env_path == nullptr || env_path[0] == '\0') {
+        return "";
+    }
+    return env_path;
+}
+
+int postLayersDumpHiddenDims() {
+    const char* env_dims = std::getenv("RTP_POST_LAYERS_DUMP_HIDDEN_DIMS");
+    if (env_dims == nullptr || env_dims[0] == '\0') {
+        return 32;
+    }
+    return std::max(1, std::atoi(env_dims));
+}
+
+std::vector<int64_t> postLayersDumpTokenIds() {
+    const char* env_tokens = std::getenv("RTP_POST_LAYERS_DUMP_TOKENS");
+    if (env_tokens == nullptr || env_tokens[0] == '\0') {
+        return {};
+    }
+    std::vector<int64_t> ids;
+    int64_t              value = 0;
+    int                  sign  = 1;
+    bool                 seen  = false;
+    for (const char* p = env_tokens; *p != '\0'; ++p) {
+        const char ch = *p;
+        if (ch == '-' && !seen) {
+            sign  = -1;
+            seen  = true;
+            value = 0;
+        } else if (std::isdigit(static_cast<unsigned char>(ch))) {
+            if (!seen) {
+                sign  = 1;
+                value = 0;
+                seen  = true;
+            }
+            value = value * 10 + (ch - '0');
+        } else if (seen) {
+            ids.push_back(sign * value);
+            value = 0;
+            sign  = 1;
+            seen  = false;
+        }
+    }
+    if (seen) {
+        ids.push_back(sign * value);
+    }
+    return ids;
+}
+
+void dumpPostLayerDebug(const GptModelInputs& inputs,
+                        const torch::Tensor& pre_norm_hidden,
+                        const torch::Tensor& last_hidden,
+                        const torch::Tensor& logits) {
+    const std::string path = postLayersDumpPath();
+    if (path.empty() || !last_hidden.defined()) {
+        return;
+    }
+    static std::mutex dump_mutex;
+    std::lock_guard<std::mutex> lock(dump_mutex);
+    try {
+        auto parent = std::filesystem::path(path).parent_path();
+        if (!parent.empty()) {
+            std::filesystem::create_directories(parent);
+        }
+        std::ofstream out(path, std::ios::app);
+        if (!out.good()) {
+            RTP_LLM_LOG_WARNING("RTP_POST_LAYERS_DUMP set but cannot open file: %s", path.c_str());
+            return;
+        }
+
+        const int64_t rows        = last_hidden.size(0);
+        const int64_t hidden_size = last_hidden.size(-1);
+        const int64_t keep_dims   = std::min<int64_t>(postLayersDumpHiddenDims(), hidden_size);
+        torch::Tensor pre_hidden_cpu;
+        torch::Tensor pre_hidden_norm_cpu;
+        if (pre_norm_hidden.defined() && pre_norm_hidden.dim() == 2 && pre_norm_hidden.size(0) == rows) {
+            pre_hidden_cpu =
+                pre_norm_hidden.to(torch::kFloat32).narrow(1, 0, keep_dims).contiguous().cpu();
+            pre_hidden_norm_cpu = pre_norm_hidden.to(torch::kFloat32).norm(2, -1).contiguous().cpu();
+        }
+        auto hidden_cpu = last_hidden.to(torch::kFloat32).narrow(1, 0, keep_dims).contiguous().cpu();
+        auto hidden_norm_cpu = last_hidden.to(torch::kFloat32).norm(2, -1).contiguous().cpu();
+
+        torch::Tensor input_cpu;
+        torch::Tensor seq_cpu;
+        if (inputs.input_lengths.defined()) {
+            input_cpu = inputs.input_lengths.cpu();
+        }
+        if (inputs.sequence_lengths.defined()) {
+            seq_cpu = inputs.sequence_lengths.cpu();
+        }
+
+        torch::Tensor selected_logits_cpu;
+        std::vector<int64_t> selected_ids = postLayersDumpTokenIds();
+        if (logits.defined() && !selected_ids.empty()) {
+            std::vector<int64_t> in_range;
+            const int64_t        vocab = logits.size(1);
+            for (auto id : selected_ids) {
+                if (id >= 0 && id < vocab) {
+                    in_range.push_back(id);
+                }
+            }
+            selected_ids.swap(in_range);
+            if (!selected_ids.empty()) {
+                auto idx = torch::tensor(selected_ids, torch::kLong).to(logits.device());
+                selected_logits_cpu = logits.index_select(1, idx).to(torch::kFloat32).contiguous().cpu();
+            }
+        }
+
+        for (int64_t row = 0; row < rows; ++row) {
+            const int64_t input_len =
+                input_cpu.defined() && row < input_cpu.numel() ? input_cpu.data_ptr<int32_t>()[row] : -1;
+            const int64_t seq_len =
+                seq_cpu.defined() && row < seq_cpu.numel() ? seq_cpu.data_ptr<int32_t>()[row] : -1;
+            out << "{\"row\":" << row << ",\"input_length\":" << input_len << ",\"sequence_length\":" << seq_len
+                << ",\"hidden_size\":" << hidden_size;
+            if (pre_hidden_cpu.defined()) {
+                out << ",\"pre_norm_hidden_l2\":" << pre_hidden_norm_cpu.data_ptr<float>()[row]
+                    << ",\"pre_norm_hidden_head\":[";
+                const auto* ph = pre_hidden_cpu[row].data_ptr<float>();
+                for (int64_t j = 0; j < keep_dims; ++j) {
+                    if (j) {
+                        out << ",";
+                    }
+                    out << ph[j];
+                }
+                out << "]";
+            }
+            out << ",\"hidden_l2\":" << hidden_norm_cpu.data_ptr<float>()[row] << ",\"hidden_head\":[";
+            const auto* h = hidden_cpu[row].data_ptr<float>();
+            for (int64_t j = 0; j < keep_dims; ++j) {
+                if (j) {
+                    out << ",";
+                }
+                out << h[j];
+            }
+            out << "]";
+            if (selected_logits_cpu.defined()) {
+                out << ",\"selected_token_ids\":[";
+                for (size_t j = 0; j < selected_ids.size(); ++j) {
+                    if (j) {
+                        out << ",";
+                    }
+                    out << selected_ids[j];
+                }
+                out << "],\"selected_logits\":[";
+                const auto* l = selected_logits_cpu[row].data_ptr<float>();
+                for (size_t j = 0; j < selected_ids.size(); ++j) {
+                    if (j) {
+                        out << ",";
+                    }
+                    out << l[j];
+                }
+                out << "]";
+            }
+            out << "}\n";
+        }
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_WARNING("Failed to dump RTP post-layer debug tensors: %s", e.what());
+    }
+}
+
+}  // namespace
 
 static torch::Tensor layerRegionToGroupTensor(const std::optional<CacheLayerLayout>& layout_opt) {
     if (!layout_opt.has_value() || layout_opt->layer_region_to_group_id.empty()) {
@@ -641,6 +811,7 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
         }
     }
 
+    const torch::Tensor pre_norm_hidden = hidden;
     if (weights_.final_layernorm && !skip_final_layernorm) {
         const auto& norm_w = *weights_.final_layernorm;
         const auto  eps    = description_.layernorm_eps;
@@ -692,6 +863,7 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
             RTP_LLM_CHECK_WITH_INFO(!torch::isnan(last_hidden).any().item<bool>(), "NAN detected in last_hidden");
             RTP_LLM_CHECK_WITH_INFO(!torch::isnan(logits).any().item<bool>(), "NAN detected in logits");
         }
+        dumpPostLayerDebug(inputs, pre_norm_hidden, last_hidden, logits);
         torch::Tensor softmax_result_t;
         if (need_all_logits) {
             auto last_logits = torch::index_select(logits, 0, lm_output_indexes_device.to(torch::kLong));

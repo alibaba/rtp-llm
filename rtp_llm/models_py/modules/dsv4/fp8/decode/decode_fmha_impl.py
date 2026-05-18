@@ -203,6 +203,13 @@ class DSv4DecodeFmhaImplFP8:
 
     def prepare(self, attn_inputs, forbid_realloc: bool = False) -> None:
         """Update persistent metadata and paged block-table snapshots."""
+        seq_lens = attn_inputs.sequence_lengths
+        if seq_lens.device != self.device:
+            seq_lens = seq_lens.to(self.device)
+        start_pos = seq_lens.to(torch.int32)
+        max_s = self.config.max_seq_len
+        start_pos = torch.clamp(start_pos, min=0, max=max(0, max_s - 1))
+
         # Phase 2: pull per-attn_type block_tables from the framework's
         # by_group list. Empty paged_pool_specs ⇒ skip (legacy path).
         paged_block_tables: Optional[Dict[int, torch.Tensor]] = None
@@ -225,10 +232,10 @@ class DSv4DecodeFmhaImplFP8:
                         continue
                     paged_block_tables[attn_type] = group_block_table
 
-        if _meta_dump_match(start_pos, offset=1):
+        if _meta_dump_match(start_pos):
             _dump_decode_meta(
                 self.metadata,
-                "pre_update_prev_step",
+                "pre_update",
                 start_pos,
                 paged_block_tables,
             )
@@ -241,10 +248,10 @@ class DSv4DecodeFmhaImplFP8:
             paged_pool_entries_per_block=self._paged_entries_per_block,
         )
 
-        if _meta_dump_match(start_pos, offset=0):
+        if _meta_dump_match(start_pos):
             _dump_decode_meta(
                 self.metadata,
-                "post_update_this_step",
+                "post_update",
                 start_pos,
                 paged_block_tables,
             )

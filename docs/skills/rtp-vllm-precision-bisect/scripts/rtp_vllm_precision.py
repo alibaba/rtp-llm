@@ -7,6 +7,9 @@ templates. The CLI handles the repeatable precision-gate pieces:
 
 - health-check RTP/vLLM endpoints
 - run RTP natural self-roll through the existing repeat runner
+- run an explicit RTP teacher-forced gate after the decode service is started
+  with RTP_TEACHER_FORCE_* environment variables
+- create RTP teacher-force token files from a saved vLLM oracle
 - compare generated_ids.json files against a saved vLLM oracle
 - report first token diff, hashes, and repetition patterns
 """
@@ -46,6 +49,20 @@ def load_ids(path: Path) -> List[int]:
     if not isinstance(value, list):
         raise TypeError(f"{path} does not contain a JSON list")
     return [int(x) for x in value]
+
+
+def write_teacher_force_tokens(vllm_ids_path: Path, output_path: Path) -> Dict[str, Any]:
+    ids = load_ids(vllm_ids_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("\n".join(str(x) for x in ids) + "\n", encoding="utf-8")
+    return {
+        "vllm_ids": str(vllm_ids_path),
+        "teacher_force_tokens": str(output_path),
+        "num_tokens": len(ids),
+        "hash": short_hash(ids),
+        "head": ids[:16],
+        "tail": ids[-16:],
+    }
 
 
 def short_hash(ids: Sequence[int]) -> str:
@@ -274,6 +291,23 @@ def command_health(args: argparse.Namespace) -> int:
     return 0 if result["all_ok"] else 2
 
 
+def command_teacher_force_file(args: argparse.Namespace) -> int:
+    output = args.output.expanduser().resolve()
+    result = write_teacher_force_tokens(args.vllm_ids.expanduser().resolve(), output)
+    result["offset"] = int(args.offset)
+    result["env"] = {
+        "RTP_TEACHER_FORCE_TOKENS": str(output),
+        "RTP_TEACHER_FORCE_OFFSET": str(int(args.offset)),
+    }
+    result["note"] = (
+        "RTP teacher forcing is read by the decode service process at startup. "
+        "Restart RTP decode with these env vars; setting them only on the client "
+        "runner does not affect an already-running service."
+    )
+    print_json(result, args.json_out)
+    return 0
+
+
 def compare_run_dir(args: argparse.Namespace, run_dir: Path) -> int:
     files = generated_id_files(run_dir)
     results = []
@@ -310,6 +344,23 @@ def command_run_rtp(args: argparse.Namespace) -> int:
         return compare_run_dir(args, run_dir)
     print_json({"run_dir": str(run_dir), "health": checks, "ok": True}, args.json_out)
     return 0
+
+
+def command_run_teacher(args: argparse.Namespace) -> int:
+    args.vllm_ids = args.vllm_ids or DEFAULT_VLLM_ORACLE_IDS
+    if args.name is None:
+        args.name = (
+            f"rtp_teacher_forced_record{args.record_index}_len{args.max_new_tokens}_"
+            f"{time.strftime('%Y%m%d_%H%M%S')}"
+        )
+    if args.prefix_len is None:
+        args.prefix_len = args.max_new_tokens
+    print(
+        "[teacher] assumes the RTP decode service was restarted with "
+        "RTP_TEACHER_FORCE_TOKENS and RTP_TEACHER_FORCE_OFFSET in its process env",
+        flush=True,
+    )
+    return command_run_rtp(args)
 
 
 def command_known_good(args: argparse.Namespace) -> int:
@@ -357,8 +408,25 @@ def command_write_launch_scripts(args: argparse.Namespace) -> int:
     decode_port = int(args.decode_port)
     vllm_port = int(args.vllm_port)
     vllm_python = args.vllm_python
+    teacher_force_file: Optional[Path] = None
+    teacher_force_info: Optional[Dict[str, Any]] = None
+    if args.teacher_force_ids is not None:
+        teacher_force_file = (
+            args.teacher_force_file.expanduser().resolve()
+            if args.teacher_force_file is not None
+            else out_dir / "teacher_force_tokens.txt"
+        )
+        teacher_force_info = write_teacher_force_tokens(
+            args.teacher_force_ids.expanduser().resolve(),
+            teacher_force_file,
+        )
 
-    common_rtp_env = f"""export LOAD_PYTHON_MODEL=1
+    rtp_pythonpath = f"{worktree}:{worktree / 'bazel-bin'}"
+    common_rtp_env = f"""export PYTHONPATH={shell_quote(rtp_pythonpath)}${{PYTHONPATH:+:${{PYTHONPATH}}}}
+BAZEL_BIN=$(readlink -f bazel-bin)
+BAZEL_OUTPUT_BASE=${{BAZEL_BIN%%/execroot/rtp_llm/*}}
+export LD_LIBRARY_PATH="$BAZEL_OUTPUT_BASE/external/torch_2.11_py310_cuda/torch/lib:/opt/conda310/lib${{LD_LIBRARY_PATH:+:${{LD_LIBRARY_PATH}}}}"
+export LOAD_PYTHON_MODEL=1
 export LOAD_METHOD=fastsafetensors
 export MODEL_TYPE=deepseek_v4
 export ACT_TYPE=BF16
@@ -371,10 +439,26 @@ export DSV4_INDEXER_TOPK_BACKEND=torch
 export DSV4_INDEXER_TOPK_BACKEND_OVERRIDE=torch
 export DSV4_INDEXER_TOPK_CANONICALIZE=1
 export DSV4_GATE_FP32=1
+export DSV4_FUSED_PREPARE=0
 export DSV4_TORCH_ATTN=0
 export USE_LOCAL=1
 export REUSE_CACHE=0
 export ENABLE_DEVICE_CACHE=1
+"""
+
+    check_rtp_ops = f"""/opt/conda310/bin/python - <<'PY'
+import torch
+import rtp_llm.ops
+import librtp_compute_ops
+from rtp_llm.ops.compute_ops import rtp_llm_ops
+print("torch", torch.__version__)
+print("librtp_compute_ops", librtp_compute_ops.__file__)
+assert hasattr(rtp_llm_ops, "cublas_gemm_bf16_bf16_fp32"), (
+    "DSV4_GATE_FP32=1 requires cublas_gemm_bf16_bf16_fp32 in librtp_compute_ops. "
+    "Rebuild //:rtp_compute_ops with the same output root and ensure PYTHONPATH "
+    "loads this worktree's bazel-bin before starting RTP."
+)
+PY
 """
 
     model_service_config = (
@@ -409,6 +493,7 @@ export START_PORT={prefill_port}
 export ROLE_TYPE=PREFILL
 export ENABLE_CUDA_GRAPH=0
 {common_rtp_env}
+{check_rtp_ops}
 exec /opt/conda310/bin/python -m rtp_llm.start_server \\
   --model_type deepseek_v4 \\
   --checkpoint_path {shell_quote(model_path)} \\
@@ -434,10 +519,32 @@ exec /opt/conda310/bin/python -m rtp_llm.start_server \\
   --frontend_server_count 1
 """
 
+    if teacher_force_file is None:
+        teacher_env = "unset RTP_TEACHER_FORCE_TOKENS RTP_TEACHER_FORCE_OFFSET"
+    else:
+        teacher_env = (
+            f"export RTP_TEACHER_FORCE_TOKENS={shell_quote(teacher_force_file)}\n"
+            f"export RTP_TEACHER_FORCE_OFFSET={int(args.teacher_force_offset)}"
+        )
+    if args.sampler_logits_dump is None:
+        sampler_dump_env = "unset RTP_SAMPLER_LOGITS_DUMP RTP_SAMPLER_LOGITS_DUMP_TOPK"
+        sampler_dump_info = None
+    else:
+        sampler_dump_path = args.sampler_logits_dump.expanduser().resolve()
+        sampler_dump_env = (
+            f"export RTP_SAMPLER_LOGITS_DUMP={shell_quote(sampler_dump_path)}\n"
+            f"export RTP_SAMPLER_LOGITS_DUMP_TOPK={int(args.sampler_logits_dump_topk)}"
+        )
+        sampler_dump_info = {
+            "path": str(sampler_dump_path),
+            "topk": int(args.sampler_logits_dump_topk),
+        }
+
     start_decode = f"""#!/usr/bin/env bash
 set -euo pipefail
 cd {shell_quote(worktree)}
-unset RTP_TEACHER_FORCE_TOKENS RTP_TEACHER_FORCE_OFFSET
+{teacher_env}
+{sampler_dump_env}
 export CUDA_VISIBLE_DEVICES={shell_quote(args.decode_gpu)}
 export START_PORT={decode_port}
 export ROLE_TYPE=DECODE
@@ -445,6 +552,7 @@ export ENABLE_CUDA_GRAPH=1
 export ENABLE_CUDA_GRAPH_OVERRIDE=1
 export MODEL_SERVICE_CONFIG={shell_quote(model_service_config)}
 {common_rtp_env}
+{check_rtp_ops}
 exec /opt/conda310/bin/python -m rtp_llm.start_server \\
   --model_type deepseek_v4 \\
   --checkpoint_path {shell_quote(model_path)} \\
@@ -492,12 +600,38 @@ set -euo pipefail
   --out-root {shell_quote(args.out_root)}
 """
 
+    if teacher_force_file is None:
+        run_teacher_gate = """#!/usr/bin/env bash
+set -euo pipefail
+echo "This launch bundle was generated without --teacher-force-ids." >&2
+echo "Regenerate with --teacher-force-ids <vllm generated_ids.json> and restart RTP decode." >&2
+exit 2
+"""
+    else:
+        run_teacher_gate = f"""#!/usr/bin/env bash
+set -euo pipefail
+# This gate only verifies teacher-forced localization. It is not a final
+# natural self-roll proof.
+{shell_quote(script_path)} run-teacher \\
+  --rtp-url http://127.0.0.1:{decode_port} \\
+  --prefill-url http://127.0.0.1:{prefill_port} \\
+  --vllm-ids {shell_quote(args.teacher_force_ids.expanduser().resolve())} \\
+  --record-index 89 \\
+  --max-new-tokens 1000 \\
+  --stop-repeat-run 10000 \\
+  --top-k 1 \\
+  --prefix-len 1000 \\
+  --expect-hash {shell_quote(EXPECTED_RECORD89_HASH1000)} \\
+  --out-root {shell_quote(args.out_root)}
+"""
+
     files = {
         "start_vllm_stable.sh": start_vllm,
         "start_rtp_prefill.sh": start_prefill,
         "start_rtp_decode.sh": start_decode,
         "start_all_tmux.sh": tmux_start,
         "run_known_good_gate.sh": run_gate,
+        "run_teacher_gate.sh": run_teacher_gate,
     }
     for name, content in files.items():
         write_executable(out_dir / name, content)
@@ -512,6 +646,13 @@ set -euo pipefail
         },
         "tmux_start": str(out_dir / "start_all_tmux.sh"),
         "known_good_gate": str(out_dir / "run_known_good_gate.sh"),
+        "teacher_force": {
+            "enabled": teacher_force_file is not None,
+            "tokens": str(teacher_force_file) if teacher_force_file is not None else None,
+            "offset": int(args.teacher_force_offset),
+            "source": teacher_force_info,
+        },
+        "sampler_logits_dump": sampler_dump_info,
         "note": "Review scripts, then run start_all_tmux.sh; after health is OK, run run_known_good_gate.sh.",
     }
     print_json(result, args.json_out)
@@ -565,6 +706,16 @@ def build_parser() -> argparse.ArgumentParser:
     add_run_args(run_parser)
     run_parser.set_defaults(func=command_run_rtp)
 
+    teacher_run_parser = subparsers.add_parser(
+        "run-teacher",
+        help=(
+            "Run an RTP request against a decode service already started with "
+            "RTP_TEACHER_FORCE_* and compare against the vLLM oracle"
+        ),
+    )
+    add_run_args(teacher_run_parser)
+    teacher_run_parser.set_defaults(func=command_run_teacher)
+
     known_parser = subparsers.add_parser(
         "known-good-record89",
         help="Run or verify the known-good 19k record89 DSV4 gate",
@@ -579,6 +730,16 @@ def build_parser() -> argparse.ArgumentParser:
     health_parser.add_argument("--timeout", type=float, default=2.0)
     health_parser.add_argument("--json-out", type=Path, default=None)
     health_parser.set_defaults(func=command_health)
+
+    teacher_parser = subparsers.add_parser(
+        "teacher-force-file",
+        help="Create an RTP_TEACHER_FORCE_TOKENS file from vLLM generated_ids.json",
+    )
+    teacher_parser.add_argument("--vllm-ids", type=Path, required=True)
+    teacher_parser.add_argument("--output", type=Path, required=True)
+    teacher_parser.add_argument("--offset", type=int, default=1)
+    teacher_parser.add_argument("--json-out", type=Path, default=None)
+    teacher_parser.set_defaults(func=command_teacher_force_file)
 
     scripts_parser = subparsers.add_parser(
         "write-launch-scripts",
@@ -602,6 +763,29 @@ def build_parser() -> argparse.ArgumentParser:
     scripts_parser.add_argument("--prefill-world-size", type=int, default=2)
     scripts_parser.add_argument("--tmux-prefix", default="dsv4_precision")
     scripts_parser.add_argument("--out-root", type=Path, default=DEFAULT_RUN_ROOT / "outputs")
+    scripts_parser.add_argument(
+        "--teacher-force-ids",
+        type=Path,
+        default=None,
+        help=(
+            "Optional vLLM generated_ids.json. When set, create a teacher token "
+            "file and export RTP_TEACHER_FORCE_* in start_rtp_decode.sh. "
+            "Default is off, preserving natural self-roll behavior."
+        ),
+    )
+    scripts_parser.add_argument("--teacher-force-file", type=Path, default=None)
+    scripts_parser.add_argument("--teacher-force-offset", type=int, default=1)
+    scripts_parser.add_argument(
+        "--sampler-logits-dump",
+        type=Path,
+        default=None,
+        help=(
+            "Optional JSONL path. When set, start_rtp_decode.sh exports "
+            "RTP_SAMPLER_LOGITS_DUMP so Sampler.cc writes top logits before "
+            "teacher forcing. Default is off."
+        ),
+    )
+    scripts_parser.add_argument("--sampler-logits-dump-topk", type=int, default=16)
     scripts_parser.add_argument("--json-out", type=Path, default=None)
     scripts_parser.set_defaults(func=command_write_launch_scripts)
 

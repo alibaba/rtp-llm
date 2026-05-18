@@ -13,7 +13,8 @@ Use this skill to turn an RTP-vLLM mismatch into an explainable, reproducible re
 
 - Start from a stable oracle. Do not bisect two unstable systems.
 - Keep production fixes staged separately from debug instrumentation.
-- Use teacher forcing only to localize a specific decode step. The final proof must be RTP self-roll natural generation without per-step vLLM inputs.
+- Use teacher forcing as the default localization method after a stable vLLM oracle exists. It keeps RTP's decode input history pinned to vLLM tokens so the first mismatch is a same-prefix logits/tensor problem, not self-roll drift.
+- Use RTP natural self-roll only for repeat-stability checks and final proof. The final proof must not depend on `RTP_TEACHER_FORCE_TOKENS`.
 - Compare exact token ids before interpreting text.
 - Record every run path, flags, first-diff index, and confirmed/excluded hypothesis in the active project memory/debug document.
 - If a user reports a token such as "RTP has 303 but vLLM has 478", verify absolute generated indices before accepting it as a divergence.
@@ -38,9 +39,42 @@ export DSV4_TORCH_TOPK=1
 export DSV4_INDEXER_TOPK_BACKEND=torch
 export DSV4_INDEXER_TOPK_CANONICALIZE=1
 export DSV4_GATE_FP32=1
+export DSV4_FUSED_PREPARE=0
 ```
 
 These are precision-debug switches. Keep production defaults off unless the feature is independently approved for normal serving. Precision-debug code paths should be opt-in by environment variable or CLI flag, and final production fixes must not depend on debug-only defaults.
+
+`DSV4_GATE_FP32=1` is the gate/MoE FP32 switch used by the current RTP code. If an investigation note says `MOE_GATE_FP32`, map that to `DSV4_GATE_FP32` unless the codebase has introduced a new alias.
+
+`DSV4_FUSED_PREPARE=0` is required for the 2026-05 DSV4 parity gate. The fused compressor metadata prepare path is intentionally opt-in; do not enable it while validating exact token-id parity for this case.
+
+When `DSV4_GATE_FP32=1` is enabled, RTP must load a `librtp_compute_ops.so`
+that exposes `rtp_llm_ops.cublas_gemm_bf16_bf16_fp32`. This is easy to get
+wrong in local worktrees because `rtp_llm.ops` can find an older Bazel output
+root. Before starting RTP, verify the loaded library:
+
+```bash
+cd <rtp_worktree>
+export PYTHONPATH="$PWD:$PWD/bazel-bin${PYTHONPATH:+:$PYTHONPATH}"
+BAZEL_BIN=$(readlink -f bazel-bin)
+BAZEL_OUTPUT_BASE=${BAZEL_BIN%%/execroot/rtp_llm/*}
+export LD_LIBRARY_PATH="$BAZEL_OUTPUT_BASE/external/torch_2.11_py310_cuda/torch/lib:/opt/conda310/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+/opt/conda310/bin/python - <<'PY'
+import torch
+import rtp_llm.ops
+import librtp_compute_ops
+from rtp_llm.ops.compute_ops import rtp_llm_ops
+print(torch.__version__)
+print(librtp_compute_ops.__file__)
+assert hasattr(rtp_llm_ops, "cublas_gemm_bf16_bf16_fp32")
+PY
+```
+
+If this assertion fails, rebuild `//:rtp_compute_ops` with the same Bazel
+output root used by the RTP service, or put this worktree's `bazel-bin` first
+in `PYTHONPATH`. A service failure like
+`AssertionError: cublas_gemm_bf16_bf16_fp32 op is not built` is an environment
+or build-artifact mismatch, not a model precision divergence.
 
 Do not enable these by default unless the investigation specifically needs them:
 
@@ -109,6 +143,10 @@ For prefill/decode disaggregation, start prefill separately and preserve the top
 ```bash
 tmux new-session -d -s dsv4_precision_rtp_pd_prefill '
 cd <rtp_worktree>
+export PYTHONPATH="$PWD:$PWD/bazel-bin${PYTHONPATH:+:$PYTHONPATH}"
+BAZEL_BIN=$(readlink -f bazel-bin)
+BAZEL_OUTPUT_BASE=${BAZEL_BIN%%/execroot/rtp_llm/*}
+export LD_LIBRARY_PATH="$BAZEL_OUTPUT_BASE/external/torch_2.11_py310_cuda/torch/lib:/opt/conda310/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export CUDA_VISIBLE_DEVICES=<prefill_gpu0>,<prefill_gpu1>
 export START_PORT=<prefill_port>
 export ROLE_TYPE=PREFILL
@@ -126,6 +164,7 @@ export DSV4_INDEXER_TOPK_BACKEND=torch
 export DSV4_INDEXER_TOPK_BACKEND_OVERRIDE=torch
 export DSV4_INDEXER_TOPK_CANONICALIZE=1
 export DSV4_GATE_FP32=1
+export DSV4_FUSED_PREPARE=0
 /opt/conda310/bin/python -m rtp_llm.start_server \
   --model_type deepseek_v4 \
   --checkpoint_path <model_path> \
@@ -152,6 +191,10 @@ For decode, keep DP and CUDA graph settings aligned with the production issue. E
 tmux new-session -d -s dsv4_precision_rtp_pd_decode '
 cd <rtp_worktree>
 unset RTP_TEACHER_FORCE_TOKENS RTP_TEACHER_FORCE_OFFSET
+export PYTHONPATH="$PWD:$PWD/bazel-bin${PYTHONPATH:+:$PYTHONPATH}"
+BAZEL_BIN=$(readlink -f bazel-bin)
+BAZEL_OUTPUT_BASE=${BAZEL_BIN%%/execroot/rtp_llm/*}
+export LD_LIBRARY_PATH="$BAZEL_OUTPUT_BASE/external/torch_2.11_py310_cuda/torch/lib:/opt/conda310/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export CUDA_VISIBLE_DEVICES=<decode_gpu>
 export START_PORT=<decode_port>
 export ROLE_TYPE=DECODE
@@ -170,6 +213,7 @@ export DSV4_INDEXER_TOPK_BACKEND=torch
 export DSV4_INDEXER_TOPK_BACKEND_OVERRIDE=torch
 export DSV4_INDEXER_TOPK_CANONICALIZE=1
 export DSV4_GATE_FP32=1
+export DSV4_FUSED_PREPARE=0
 export DSV4_TORCH_ATTN=0
 export MODEL_SERVICE_CONFIG='\''{"service_id":"dsv4-precision","role_endpoints":[{"group":"default","prefill_endpoint":{"type":"Vipserver","address":"127.0.0.1:<prefill_port>","protocol":"http","path":"/"},"decode_endpoint":{"type":"Vipserver","address":"127.0.0.1:<decode_port>","protocol":"http","path":"/"}}],"use_local":true}'\''
 /opt/conda310/bin/python -m rtp_llm.start_server \
@@ -192,6 +236,70 @@ export MODEL_SERVICE_CONFIG='\''{"service_id":"dsv4-precision","role_endpoints":
 ```
 
 `ENABLE_CUDA_GRAPH_OVERRIDE` is not read by RTP runtime directly. It is a launcher-script override used by some legacy scripts to set `ENABLE_CUDA_GRAPH="${ENABLE_CUDA_GRAPH_OVERRIDE:-1}"`. The runtime-effective setting is `ENABLE_CUDA_GRAPH` or `--enable_cuda_graph`.
+
+### RTP Teacher-Forced Decode
+
+Teacher forcing is implemented in RTP C++ `Sampler.cc`. The decode service reads these environment variables at process startup:
+
+```bash
+export RTP_TEACHER_FORCE_TOKENS=<token_file>
+export RTP_TEACHER_FORCE_OFFSET=1
+```
+
+`RTP_TEACHER_FORCE_TOKENS` is a text file containing vLLM generated token ids. The parser accepts any non-digit separator, so one token per line is the safest format. `RTP_TEACHER_FORCE_OFFSET=1` is the known-good default used for this DSV4 comparison path.
+
+Important: setting these env vars on the client runner does not affect an already-running RTP service. Restart RTP decode with the env vars in the service process. Keep them unset for natural self-roll and final gates.
+
+Create the teacher token file with the bundled CLI:
+
+```bash
+docs/skills/rtp-vllm-precision-bisect/scripts/rtp_vllm_precision.py \
+  teacher-force-file \
+  --vllm-ids <vllm_run>/generated_ids.json \
+  --output <run_root>/teacher_force_tokens.txt \
+  --offset 1
+```
+
+Or generate launch scripts with teacher forcing enabled only for the decode service:
+
+```bash
+docs/skills/rtp-vllm-precision-bisect/scripts/rtp_vllm_precision.py \
+  write-launch-scripts \
+  --output-dir <launch_dir> \
+  --rtp-worktree <rtp_worktree> \
+  --model-path /data3/DeepSeekV4-Flash \
+  --teacher-force-ids <vllm_run>/generated_ids.json \
+  --teacher-force-offset 1
+```
+
+The generated `start_rtp_decode.sh` exports `RTP_TEACHER_FORCE_*` only when `--teacher-force-ids` is provided. Without that option, it explicitly unsets them and preserves natural self-roll behavior.
+
+For CUDA-graph teacher-forced localization, dump the real sampler logits before
+teacher forcing overwrites them:
+
+```bash
+export RTP_SAMPLER_LOGITS_DUMP=<run_root>/rtp_sampler_logits.jsonl
+export RTP_SAMPLER_LOGITS_DUMP_TOPK=16
+```
+
+This is implemented in RTP C++ `Sampler.cc` after logits processors and before
+`RTP_TEACHER_FORCE_*` modifies logits. It works with CUDA graph replay because
+sampler still runs after model replay. The JSONL rows include `step`,
+`input_length`, `sequence_length`, `oracle_idx`, `teacher_token`, `top_indices`,
+and `top_values`. Keep it unset outside precision debugging.
+
+The launch-script CLI can wire this into decode startup:
+
+```bash
+docs/skills/rtp-vllm-precision-bisect/scripts/rtp_vllm_precision.py \
+  write-launch-scripts \
+  --output-dir <launch_dir> \
+  --rtp-worktree <rtp_worktree> \
+  --model-path /data3/DeepSeekV4-Flash \
+  --teacher-force-ids <vllm_run>/generated_ids.json \
+  --sampler-logits-dump <run_root>/rtp_sampler_logits.jsonl \
+  --sampler-logits-dump-topk 16
+```
 
 ### Health and Log Checks
 
@@ -245,6 +353,38 @@ docs/skills/rtp-vllm-precision-bisect/scripts/rtp_vllm_precision.py \
   --decode-port 18880 \
   --vllm-port 18000
 
+# Create a teacher-force token file from a stable vLLM oracle. Restart RTP
+# decode with RTP_TEACHER_FORCE_TOKENS pointing to this file before running
+# teacher-forced localization requests.
+docs/skills/rtp-vllm-precision-bisect/scripts/rtp_vllm_precision.py \
+  teacher-force-file \
+  --vllm-ids <vllm_run>/generated_ids.json \
+  --output <launch_dir>/teacher_force_tokens.txt \
+  --offset 1
+
+# Generate launch scripts whose decode process starts in teacher-forced mode.
+# Use this for bisect/localization, not for final parity proof.
+docs/skills/rtp-vllm-precision-bisect/scripts/rtp_vllm_precision.py \
+  write-launch-scripts \
+  --output-dir /tmp/dsv4_precision_teacher \
+  --rtp-worktree <rtp_worktree> \
+  --model-path /data3/DeepSeekV4-Flash \
+  --teacher-force-ids <vllm_run>/generated_ids.json \
+  --sampler-logits-dump /tmp/dsv4_precision_teacher/rtp_sampler_logits.jsonl
+
+# After restarting RTP decode from a teacher-forced launch script, run the
+# explicit teacher gate. This command does not enable teacher forcing by itself;
+# RTP_TEACHER_FORCE_* must already be in the decode service process env.
+docs/skills/rtp-vllm-precision-bisect/scripts/rtp_vllm_precision.py \
+  run-teacher \
+  --rtp-url http://127.0.0.1:<decode_port> \
+  --prefill-url http://127.0.0.1:<prefill_port> \
+  --vllm-ids <vllm_run>/generated_ids.json \
+  --record-index 89 \
+  --max-new-tokens 1000 \
+  --prefix-len 1000 \
+  --expect-hash 986b77c92c844fc6
+
 # Verify the saved known-good record89 artifacts only.
 docs/skills/rtp-vllm-precision-bisect/scripts/rtp_vllm_precision.py \
   known-good-record89 --compare-only
@@ -274,6 +414,8 @@ The CLI prints JSON with `first_diff`, prefix hashes, longest same-token run, an
 - `start_rtp_decode.sh`: starts RTP PD decode with DP=1, FP8 KV, CUDA graph, and precision switches.
 - `start_all_tmux.sh`: starts the three services in tmux sessions.
 - `run_known_good_gate.sh`: runs the RTP natural self-roll record89 gate and compares against the saved oracle.
+- `run_teacher_gate.sh`: when generated with `--teacher-force-ids`, runs the teacher-forced record89 gate against the same vLLM oracle. Without `--teacher-force-ids`, it exits with instructions instead of silently running a natural self-roll request.
+- Optional sampler logits dump: when generated with `--sampler-logits-dump`, `start_rtp_decode.sh` exports `RTP_SAMPLER_LOGITS_DUMP`; otherwise it explicitly unsets the dump env vars.
 
 ### 1. Pin the Case
 
@@ -296,9 +438,24 @@ Prefer a saved oracle JSON such as:
 outputs/<vllm-stable-run>/vllm_run01/generated_ids.json
 ```
 
-### 3. Run RTP Natural Self-Roll
+### 3. Localize With RTP Teacher Forcing
 
-Run RTP without teacher forcing:
+Once vLLM oracle stability is proven, use teacher forcing before natural self-roll bisecting. This is the fastest path because RTP consumes the same generated-prefix tokens as vLLM at each decode step.
+
+Procedure:
+
+1. Create a teacher token file from the stable vLLM `generated_ids.json`.
+2. Restart RTP decode with `RTP_TEACHER_FORCE_TOKENS=<file>` and `RTP_TEACHER_FORCE_OFFSET=1`.
+3. Run RTP with the same prompt and generation length, preferably through `run-teacher` or the generated `run_teacher_gate.sh`.
+4. Compare forced RTP ids to the vLLM oracle. The sampled ids should follow the teacher sequence; any tensor/logit dump at step `i` is now under the same prefix history as vLLM.
+5. Enable `RTP_SAMPLER_LOGITS_DUMP` on the forced decode service to inspect what RTP would have sampled before teacher forcing. If the teacher token is not top1, compare that same step against vLLM logprobs and then bisect backward into hidden/layers.
+6. Put tensor dump env vars on the forced decode service to localize the first same-prefix hidden/layer mismatch.
+
+Do not infer final output parity from a teacher-forced run. It only proves what RTP would compute while being fed vLLM's token history.
+
+### 4. Run RTP Natural Self-Roll
+
+Run RTP without teacher forcing for the final gate:
 
 ```bash
 unset RTP_TEACHER_FORCE_TOKENS RTP_TEACHER_FORCE_OFFSET
@@ -332,15 +489,6 @@ print("vllm_hash", hashlib.sha256(str(vllm).encode()).hexdigest()[:16])
 ```
 
 If the script records an extra RTP token, compare the common prefix and inspect the extra token separately. Do not treat length accounting as a model divergence without checking ids.
-
-### 4. Use Teacher Forcing Only for Localization
-
-When natural generation diverges at generated index `i`, use vLLM's token sequence as forced RTP input around that step so both systems consume the same prefix. This isolates whether the mismatch is caused by:
-
-- earlier generated tokens changing the state, or
-- same input state producing different logits/tensors.
-
-Always label teacher-forced artifacts clearly and keep related code/debug flags unstaged unless they become production fixes.
 
 ### 5. Bisect From Output Backward
 
@@ -435,6 +583,7 @@ export DSV4_INDEXER_TOPK_BACKEND=torch
 export DSV4_INDEXER_TOPK_BACKEND_OVERRIDE=torch
 export DSV4_INDEXER_TOPK_CANONICALIZE=1
 export DSV4_GATE_FP32=1
+export DSV4_FUSED_PREPARE=0
 export DSV4_TORCH_ATTN=0
 export FP8_KV_CACHE=1
 export ENABLE_COMM_OVERLAP=0

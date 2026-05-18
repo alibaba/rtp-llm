@@ -9,6 +9,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <fstream>
+#include <filesystem>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -74,6 +75,89 @@ int teacherForceOffset() {
     return std::atoi(env_offset);
 }
 
+std::string samplerLogitsDumpPath() {
+    const char* env_path = std::getenv("RTP_SAMPLER_LOGITS_DUMP");
+    if (env_path == nullptr || env_path[0] == '\0') {
+        return "";
+    }
+    return env_path;
+}
+
+int samplerLogitsDumpTopK() {
+    const char* env_topk = std::getenv("RTP_SAMPLER_LOGITS_DUMP_TOPK");
+    if (env_topk == nullptr || env_topk[0] == '\0') {
+        return 16;
+    }
+    return std::max(1, std::atoi(env_topk));
+}
+
+void dumpSamplerLogitsTopK(const SamplerInputs& inputs, const std::string& stage) {
+    const std::string path = samplerLogitsDumpPath();
+    if (path.empty() || !inputs.logits.defined() || !inputs.input_lengths.defined()
+        || !inputs.sequence_lengths.defined()) {
+        return;
+    }
+
+    static std::mutex dump_mutex;
+    std::lock_guard<std::mutex> lock(dump_mutex);
+
+    try {
+        const int64_t rows  = inputs.logits.size(0);
+        const int64_t vocab = inputs.logits.size(1);
+        const int64_t k     = std::min<int64_t>(samplerLogitsDumpTopK(), vocab);
+
+        torch::NoGradGuard no_grad;
+        auto logits_f = inputs.logits.to(torch::kFloat32);
+        auto [values, indices] = logits_f.topk(k, -1, true, true);
+        auto values_cpu        = values.cpu();
+        auto indices_cpu       = indices.cpu();
+        auto input_cpu         = inputs.input_lengths.cpu();
+        auto seq_cpu           = inputs.sequence_lengths.cpu();
+
+        auto parent = std::filesystem::path(path).parent_path();
+        if (!parent.empty()) {
+            std::filesystem::create_directories(parent);
+        }
+        std::ofstream out(path, std::ios::app);
+        if (!out.good()) {
+            RTP_LLM_LOG_WARNING("RTP_SAMPLER_LOGITS_DUMP set but cannot open file: %s", path.c_str());
+            return;
+        }
+
+        const auto& tokens = teacherForceTokens();
+        const int   offset = teacherForceOffset();
+        auto*       input_lengths = input_cpu.data_ptr<int32_t>();
+        auto*       sequence_lengths = seq_cpu.data_ptr<int32_t>();
+        for (int64_t row_idx = 0; row_idx < rows; ++row_idx) {
+            const int64_t oracle_idx =
+                static_cast<int64_t>(sequence_lengths[row_idx]) - input_lengths[row_idx] + offset;
+            const int64_t teacher_token =
+                (oracle_idx >= 0 && oracle_idx < static_cast<int64_t>(tokens.size())) ? tokens[oracle_idx] : -1;
+
+            out << "{\"stage\":\"" << stage << "\",\"row\":" << row_idx << ",\"step\":" << inputs.step
+                << ",\"input_length\":" << input_lengths[row_idx] << ",\"sequence_length\":"
+                << sequence_lengths[row_idx] << ",\"oracle_idx\":" << oracle_idx
+                << ",\"teacher_token\":" << teacher_token << ",\"top_indices\":[";
+            for (int64_t j = 0; j < k; ++j) {
+                if (j) {
+                    out << ",";
+                }
+                out << indices_cpu[row_idx][j].item<int64_t>();
+            }
+            out << "],\"top_values\":[";
+            for (int64_t j = 0; j < k; ++j) {
+                if (j) {
+                    out << ",";
+                }
+                out << values_cpu[row_idx][j].item<float>();
+            }
+            out << "]}\n";
+        }
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_WARNING("Failed to dump sampler logits topk: %s", e.what());
+    }
+}
+
 void applyTeacherForceLogits(const SamplerInputs& inputs) {
     const auto& tokens = teacherForceTokens();
     if (tokens.empty() || !inputs.logits.defined() || !inputs.input_lengths.defined()
@@ -128,6 +212,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     };
 
     preprocessLogits(inputs);
+    dumpSamplerLogitsTopK(inputs, "after_preprocess_before_teacher");
     applyTeacherForceLogits(inputs);
 
     uint64_t max_seq_len   = inputs.token_ids.size(1);
