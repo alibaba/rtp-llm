@@ -7,7 +7,7 @@ import torch
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleAddr, RoleType
 from rtp_llm.config.model_config import ModelConfig as PyModelConfig
-from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient
+from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient, trans_input
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.ops import SpeculativeExecutionConfig, VitSeparation, get_block_cache_keys
@@ -167,11 +167,14 @@ class BackendRPCServerVisitor:
         block_cache_keys = self._route_cache_keys(full_block_cache_keys)
         self._report_recent_cache_key_metrics(block_cache_keys)
 
+        input_pb_bytes = trans_input(input).SerializeToString()
+
         try:
             route_result = await self.master_client.get_backend_role_addrs(
                 block_cache_keys=block_cache_keys,
                 input=input,
                 request_id=input.request_id,
+                input_pb_bytes=input_pb_bytes,
             )
         except BaseException as e:
             exception_json = format_exception(e)
