@@ -423,6 +423,13 @@ class AiterPrefillAttnOp:
             q_tensor = q_tensor.view(q_tensor.size(0), self.head_num, self.head_dim)
 
         block_table = fmha_params.kv_cache_block_id_device
+        # CK kernel's tile prefetch may speculatively load beyond seqlen_k,
+        # touching block_table padding entries (value -1).  Clamping to 0 makes
+        # the prefetch hit a valid block; seqlen_k masking ensures stale data
+        # is never consumed.
+        if block_table is not None:
+            block_table = block_table.clamp(min=0)
+
         is_fp8 = kv_cache.kv_cache_base.dtype in (torch.float8_e4m3fnuz, torch.float8_e4m3fn)
         use_compact = self.v1_kv_layout and not is_fp8
 
