@@ -42,7 +42,7 @@ private:
     bool                              include_sep_tokens_;
     int64_t                           max_seq_len_;
 
-    ErrorInfo getStrHash(int32_t* token_ids, std::string& url, int mm_emb_len);
+    ErrorInfo getFeatureHash(int32_t* token_ids, const torch::Tensor& mm_emb);
 
     virtual ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs,
                                                               std::string ip_port = "") = 0;

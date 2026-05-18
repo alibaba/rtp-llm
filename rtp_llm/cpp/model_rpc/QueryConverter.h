@@ -34,7 +34,7 @@ public:
 private:
     static std::shared_ptr<GenerateConfig> transGenerateConfig(const GenerateConfigPB* config_proto);
 
-    static void transMMPreprocessConfig(MMPreprocessConfigPB* config_pb, const MMPreprocessConfig config);
+    static void transMMPreprocessConfig(MMPreprocessConfigPB* config_pb, const MMPreprocessConfig& config);
 
     template<typename Container, typename Accessor>
     static void

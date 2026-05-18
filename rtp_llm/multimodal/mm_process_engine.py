@@ -6,7 +6,6 @@ import os
 import signal
 import threading
 import time
-from multiprocessing import Lock
 from typing import Any, Callable, List, Optional, Tuple
 
 import torch
@@ -153,6 +152,10 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
         self.pool: Optional[multiprocessing.pool.Pool] = None
         self._consecutive_timeouts = 0
         self._max_consecutive_timeouts = vit_config.mm_preprocess_max_workers
+        # Serializes timeout-counter updates and pool rebuilds — without it
+        # concurrent get_result/submit callers can race to _rebuild_pool, double
+        # tear down the pool, or miscount consecutive timeouts.
+        self._pool_lock = threading.Lock()
         self._create_pool()
 
     def _create_pool(self) -> None:
@@ -196,12 +199,15 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
             )
             return
         except (BrokenPipeError, OSError, EOFError) as e:
-            # multiprocessing.Pool surfaces broken state via these — rebuild and retry once
+            # multiprocessing.Pool surfaces broken state via these — rebuild and retry once.
+            # Keep both rebuild and the retry submission under _pool_lock so another thread
+            # cannot tear self.pool down between our rebuild and the apply_async call.
             logging.error(f"Pool broken on submit, rebuilding: {e}", exc_info=True)
-            self._rebuild_pool()
-            work_item.future = self.pool.apply_async(
-                _worker_process_task, args=(work_item.mm_inputs,)
-            )
+            with self._pool_lock:
+                self._rebuild_pool()
+                work_item.future = self.pool.apply_async(
+                    _worker_process_task, args=(work_item.mm_inputs,)
+                )
         except Exception as e:
             logging.error(f"Unexpected error during submission: {e}", exc_info=True)
             raise
@@ -216,27 +222,30 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
             work_item.preprocess_result, preprocess_time = work_item.future.get(
                 timeout=work_item.mm_timeout_ms / 1000.0
             )
-            self._consecutive_timeouts = 0
+            with self._pool_lock:
+                self._consecutive_timeouts = 0
             kmonitor.report(GaugeMetrics.VIT_PREPROCESS_RT_METRIC, preprocess_time)
         except multiprocessing.pool.TimeoutError:
-            self._consecutive_timeouts += 1
-            if self._consecutive_timeouts >= self._max_consecutive_timeouts:
-                logging.warning(
-                    f"Hit {self._consecutive_timeouts} consecutive timeouts, "
-                    f"rebuilding pool (workers may be stuck)"
-                )
-                self._rebuild_pool()
-                self._consecutive_timeouts = 0
+            with self._pool_lock:
+                self._consecutive_timeouts += 1
+                if self._consecutive_timeouts >= self._max_consecutive_timeouts:
+                    logging.warning(
+                        f"Hit {self._consecutive_timeouts} consecutive timeouts, "
+                        f"rebuilding pool (workers may be stuck)"
+                    )
+                    self._rebuild_pool()
+                    self._consecutive_timeouts = 0
             raise TimeoutError(
                 f"Preprocessing timeout after {work_item.mm_timeout_ms}ms"
             )
         except (BrokenPipeError, OSError, EOFError) as e:
             # worker died mid-task → pool is broken; rebuild so subsequent submits work
             logging.error(f"Pool broken on get_result, rebuilding: {e}", exc_info=True)
-            try:
-                self._rebuild_pool()
-            except Exception as rb:
-                logging.error(f"pool rebuild failed: {rb}", exc_info=True)
+            with self._pool_lock:
+                try:
+                    self._rebuild_pool()
+                except Exception as rb:
+                    logging.error(f"pool rebuild failed: {rb}", exc_info=True)
             raise
         except Exception as e:
             logging.error(f"Error getting preprocess result: {e}", exc_info=True)
@@ -285,14 +294,15 @@ class MMEmbeddingRes:
         self,
         embeddings: List[torch.Tensor],
         position_ids: Optional[List[torch.Tensor]] = None,
-        deepstack_embeds: Optional[List[torch.Tensor]] = None,
+        extra_input: Optional[List[torch.Tensor]] = None,
     ):
         self.embeddings = embeddings
         self.position_ids = position_ids if position_ids is not None else []
-        self.deepstack_embeds = deepstack_embeds if deepstack_embeds is not None else []
+        # Model-specific extra input, one opaque flat 1-D tensor per image (e.g. deepstack).
+        self.extra_input = extra_input if extra_input is not None else []
 
     def __str__(self) -> str:
-        return f"MMEmbeddingRes(length={len(self.embeddings)}, embeddings_shape={[e.shape for e in self.embeddings]}, position_ids_shape={[p.shape for p in self.position_ids] if self.position_ids is not None else []}, deepstack_embeds_shape={[d.shape for d in self.deepstack_embeds] if self.deepstack_embeds is not None else []})"
+        return f"MMEmbeddingRes(length={len(self.embeddings)}, embeddings_shape={[e.shape for e in self.embeddings]}, position_ids_shape={[p.shape for p in self.position_ids] if self.position_ids is not None else []}, extra_input_shape={[d.shape for d in self.extra_input] if self.extra_input is not None else []})"
 
 
 class MMWorkItem:
@@ -366,8 +376,11 @@ class MMProcessEngine:
 
         self.mm_part = mm_part
 
-        self.mm_embedding_lock = Lock()
-        self.query_num_lock = Lock()
+        # threading.Lock: protects gRPC-handler-thread access within this
+        # process. multiprocessing.Lock would round-trip through an OS
+        # semaphore on every acquire — wasteful since no cross-process sharing.
+        self.mm_embedding_lock = threading.Lock()
+        self.query_num_lock = threading.Lock()
 
         # 根据 vit_config 创建预处理执行器
         preprocess_params = self.mm_part.get_preprocess_params()
@@ -471,12 +484,12 @@ class MMProcessEngine:
                         self._wait_for_preprocessing(work_items)
 
                     with torch.profiler.record_function("compute_embeddings"):
-                        emb_res, pos_res, deepstack_embeds_res = (
-                            self._compute_embeddings(work_items)
+                        emb_res, pos_res, extra_input_res = self._compute_embeddings(
+                            work_items
                         )
 
                     with torch.profiler.record_function("postprocess"):
-                        result = MMEmbeddingRes(emb_res, pos_res, deepstack_embeds_res)
+                        result = MMEmbeddingRes(emb_res, pos_res, extra_input_res)
 
                     if not self.vit_config.disable_access_log:
                         self._access_logger.log_success_access(mm_inputs, str(result))
@@ -564,7 +577,8 @@ class MMProcessEngine:
         for emb, pos, tensor in zip(ordered_emb, ordered_pos, ordered_tensor):
             emb_res.extend(self._maybe_tensor_to_list(emb, dim=2))
             pos_res.extend(self._maybe_tensor_to_list(pos, dim=2))
-            tensor_res.extend(self._maybe_tensor_to_list(tensor, dim=3))
+            # extra input is a flat 1-D tensor per image
+            tensor_res.extend(self._maybe_tensor_to_list(tensor, dim=1))
         return emb_res, pos_res, tensor_res
 
     def stop(self) -> None:

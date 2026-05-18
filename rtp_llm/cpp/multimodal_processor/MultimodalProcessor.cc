@@ -2,6 +2,7 @@
 #include <functional>
 #include <algorithm>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <torch/python.h>
 #include "absl/status/statusor.h"
@@ -12,22 +13,31 @@ namespace py = pybind11;
 
 namespace rtp_llm {
 
-ErrorInfo MultimodalProcessor::getStrHash(int32_t* token_ids, std::string& url, int mm_emb_len) {
-    int url_len = url.length(), data_size_scale = std::max(int(sizeof(int32_t) / sizeof(int32_t)), 1);
-    if (mm_emb_len / data_size_scale <= 0) {
-        std::stringstream exception_str;
-        exception_str << "length of multimodal input is too short, at least " << data_size_scale << ", get "
-                      << mm_emb_len;
-        return ErrorInfo(ErrorCode::MM_LONG_PROMPT_ERROR, exception_str.str());
+ErrorInfo MultimodalProcessor::getFeatureHash(int32_t* token_ids, const torch::Tensor& mm_emb) {
+    // Derive one cache-key hash per multimodal token from the content of its feature row.
+    // This makes the prefix cache key reflect the actual image/video embedding, so only
+    // identical content reuses cached blocks.
+    //
+    // NOTE on the GPU->CPU sync below: hashing must inspect every byte of the embedding,
+    // so we have to materialize it on the host. This is a deliberate blocking step on the
+    // prefill-prep path (NOT the decode hot path). Without it the cache key would either
+    // (a) require a GPU hash kernel — adds significant complexity for the marginal benefit
+    // of avoiding one extra prefill-time D2H, or (b) fall back to URL-based hashing, which
+    // would over-share cache blocks between requests whose URLs match but whose actual
+    // embedding bytes differ (e.g. dynamic image transforms). Keep this sync.
+    if (mm_emb.dim() < 1 || mm_emb.size(0) <= 0) {
+        return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "multimodal feature tensor is empty");
     }
-    int                    substr_len = (url_len - 1) / (mm_emb_len / data_size_scale) + 1;
-    int                    now_idx    = 0;
-    std::hash<std::string> hasher;
-    while (now_idx * substr_len < url_len && now_idx * data_size_scale < mm_emb_len) {
-        int32_t hash_res =
-            hasher(url.substr(now_idx * substr_len, std::min(url_len - now_idx * substr_len, substr_len)));
-        memcpy(token_ids + now_idx * data_size_scale, &hash_res, sizeof(int32_t));
-        now_idx++;
+    auto          emb        = mm_emb.to(torch::kCPU).contiguous();
+    const int64_t num_tokens = emb.size(0);
+    const int64_t row_bytes  = emb.numel() / num_tokens * emb.element_size();
+    const char*   base       = static_cast<const char*>(emb.data_ptr());
+
+    std::hash<std::string_view> hasher;
+    for (int64_t j = 0; j < num_tokens; ++j) {
+        std::string_view row(base + j * row_bytes, static_cast<size_t>(row_bytes));
+        int32_t          hash_res = static_cast<int32_t>(hasher(row));
+        memcpy(token_ids + j, &hash_res, sizeof(int32_t));
     }
     return ErrorInfo::OkStatus();
 }
@@ -38,10 +48,6 @@ ErrorResult<ExpandedOutput> MultimodalProcessor::expandTokenIds(const std::vecto
                                                                 torch::Tensor token_type_ids) {
     if (mm_embedding.size() == 0) {
         return ExpandedOutput(token_ids, token_type_ids);
-    }
-    std::vector<std::string> urls;
-    for (auto& mm_input : mm_inputs) {
-        urls.push_back(mm_input.url);
     }
 
     assert(token_ids.dim() == 1);
@@ -71,8 +77,7 @@ ErrorResult<ExpandedOutput> MultimodalProcessor::expandTokenIds(const std::vecto
                   expanded_token_type_ids.data_ptr<int32_t>() + expanded_token_type_ids.numel(),
                   0);
     }
-    int  new_loc_idx = 0, old_loc_idx = 0;
-    bool hash_urls = urls.size() == mm_num;
+    int new_loc_idx = 0, old_loc_idx = 0;
     for (int i = 0; i < mm_num; i++) {
         auto& loc      = locs[i];
         int   copy_len = loc.first - old_loc_idx;
@@ -88,12 +93,9 @@ ErrorResult<ExpandedOutput> MultimodalProcessor::expandTokenIds(const std::vecto
         }
         *(new_locs.data_ptr<int32_t>() + i) = copy_len + new_loc_idx;
 
-        if (hash_urls) {
-            auto hash_status = getStrHash(
-                expanded_ids.data_ptr<int32_t>() + new_loc_idx + copy_len, urls[i], mm_embedding[i].sizes()[0]);
-            if (!hash_status.ok()) {
-                return hash_status;
-            }
+        auto hash_status = getFeatureHash(expanded_ids.data_ptr<int32_t>() + new_loc_idx + copy_len, mm_embedding[i]);
+        if (!hash_status.ok()) {
+            return hash_status;
         }
 
         new_loc_idx += copy_len + mm_embedding[i].sizes()[0];
@@ -193,7 +195,7 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
     CHECK_AND_RETURN_REF(mm_embedding_res, MultimodalEmbedding(input->multimodal_inputs.value(), ip_port));
     input->multimodal_features = std::move(mm_embedding_res.mm_features);
     input->mm_position_ids     = std::move(mm_embedding_res.mm_position_ids);
-    input->mm_deepstack_embeds = std::move(mm_embedding_res.mm_deepstack_embeds);
+    input->mm_extra_input      = std::move(mm_embedding_res.mm_extra_input);
     CHECK_AND_RETURN_REF(
         expanded_ids,
         expandTokenIds(input->multimodal_features.value(), input->input_ids, input->multimodal_inputs.value()));

@@ -38,8 +38,14 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->force_sp_accept          = config_proto->force_sp_accept();
     generate_config->return_cum_log_probs     = config_proto->return_cum_log_probs();
     if (config_proto->return_all_probs_mode() != 0) {
-        // new client: explicit mode (offset 1)
-        generate_config->return_all_probs = static_cast<ReturnAllProbsMode>(config_proto->return_all_probs_mode() - 1);
+        // new client: explicit mode (offset 1). Clamp out-of-range values to NONE
+        // so a malformed client can't synthesize an undefined ReturnAllProbsMode.
+        int mode = config_proto->return_all_probs_mode() - 1;
+        if (mode < static_cast<int>(ReturnAllProbsMode::NONE)
+            || mode > static_cast<int>(ReturnAllProbsMode::ORIGINAL)) {
+            mode = static_cast<int>(ReturnAllProbsMode::NONE);
+        }
+        generate_config->return_all_probs = static_cast<ReturnAllProbsMode>(mode);
     } else {
         // legacy client: only bool field set
         generate_config->return_all_probs =
@@ -206,7 +212,7 @@ MultimodalInputsPB QueryConverter::transMMInputsPB(const std::vector<MultimodalI
     return mm_inputs_pb;
 }
 
-void QueryConverter::transMMPreprocessConfig(MMPreprocessConfigPB* config_pb, const MMPreprocessConfig config) {
+void QueryConverter::transMMPreprocessConfig(MMPreprocessConfigPB* config_pb, const MMPreprocessConfig& config) {
     config_pb->set_width(config.width);
     config_pb->set_height(config.height);
     config_pb->set_min_pixels(config.min_pixels);
@@ -221,14 +227,11 @@ void QueryConverter::transMMPreprocessConfig(MMPreprocessConfigPB* config_pb, co
 }
 
 MultimodalOutput QueryConverter::transMMOutput(const MultimodalOutputPB* output_pb) {
-    torch::Tensor mm_embedding = transTensor(output_pb->multimodal_embedding()), mm_position_id, mm_deepstack_embeds;
-    bool          contain_pos  = output_pb->has_multimodal_pos_id();
-    bool          contain_deepstack = output_pb->has_multimodal_deepstack_embeds();
+    torch::Tensor mm_embedding        = transTensor(output_pb->multimodal_embedding()), mm_position_id;
+    bool          contain_pos         = output_pb->has_multimodal_pos_id();
+    bool          contain_extra_input = output_pb->multimodal_extra_input_size() > 0;
     if (contain_pos) {
         mm_position_id = transTensor(output_pb->multimodal_pos_id());
-    }
-    if (contain_deepstack) {
-        mm_deepstack_embeds = transTensor(output_pb->multimodal_deepstack_embeds());
     }
     MultimodalOutput     mm_output;
     std::vector<int64_t> split_sizes;
@@ -249,12 +252,15 @@ MultimodalOutput QueryConverter::transMMOutput(const MultimodalOutputPB* output_
         mm_output.mm_position_ids = mm_position_id.split(split_sizes, 0);
     }
 
-    if (contain_deepstack) {
-        RTP_LLM_CHECK_WITH_INFO(mm_deepstack_embeds.dim() >= 2 && split_total == mm_deepstack_embeds.size(1),
-                                "split_sizes sum=%ld does not match mm_deepstack_embeds.size(1)=%ld",
-                                split_total,
-                                mm_deepstack_embeds.dim() >= 2 ? mm_deepstack_embeds.size(1) : -1);
-        mm_output.mm_deepstack_embeds = mm_deepstack_embeds.split(split_sizes, 1);
+    if (contain_extra_input) {
+        // Each extra-input is an opaque flat 1-D tensor (one per image), reshaped by the
+        // model-specific consumer; no split needed here.
+        std::vector<torch::Tensor> extra_inputs;
+        extra_inputs.reserve(output_pb->multimodal_extra_input_size());
+        for (const auto& extra_input_pb : output_pb->multimodal_extra_input()) {
+            extra_inputs.emplace_back(transTensor(extra_input_pb));
+        }
+        mm_output.mm_extra_input = std::move(extra_inputs);
     }
     return mm_output;
 }
