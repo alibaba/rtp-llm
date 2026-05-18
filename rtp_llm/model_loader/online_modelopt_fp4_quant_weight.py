@@ -238,9 +238,8 @@ class OnlineModelOptFp4MoeWeight(CompositeWeight, QuantWeight):
         packed, block_scale, scale_2 = _quantize_moe_weight(
             weight, block_size=self._block_size
         )
-        num_experts = weight.shape[0]
         input_scale = torch.ones(
-            [num_experts], dtype=torch.float32, device=weight.device
+            [1], dtype=torch.float32, device=weight.device
         )
         return {
             self.kernel.name: packed,
