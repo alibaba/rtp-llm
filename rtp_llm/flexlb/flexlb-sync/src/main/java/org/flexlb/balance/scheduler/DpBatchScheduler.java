@@ -12,6 +12,7 @@ import org.flexlb.balance.dp.RoundRobinAssign;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -277,12 +278,48 @@ public class DpBatchScheduler {
                 .setBatchId(batchId);
         for (RankAssignment ra : assignments) {
             PendingRequest req = ra.request();
-            EngineRpcService.GenerateInputPB.Builder ib = EngineRpcService.GenerateInputPB.newBuilder()
-                    .setRequestId(req.requestId())
-                    .setDpRank(com.google.protobuf.Int32Value.of(ra.dpRank()));
-            if (req.ctx() != null && req.ctx().getRequest() != null
-                    && req.ctx().getRequest().getBlockCacheKeys() != null) {
-                ib.addAllCacheHashKey(req.ctx().getRequest().getBlockCacheKeys());
+            Request reqDto = req.ctx() != null ? req.ctx().getRequest() : null;
+            String b64 = reqDto != null ? reqDto.getGenerateInputPbB64() : null;
+
+            EngineRpcService.GenerateInputPB.Builder ib;
+            if (b64 != null && !b64.isEmpty()) {
+                try {
+                    byte[] bytes = java.util.Base64.getDecoder().decode(b64);
+                    ib = EngineRpcService.GenerateInputPB.parseFrom(bytes).toBuilder();
+                } catch (com.google.protobuf.InvalidProtocolBufferException
+                         | IllegalArgumentException e) {
+                    Logger.error("Bad generate_input_pb_b64 for request {}; falling back to bare PB",
+                            req.requestId(), e);
+                    ib = EngineRpcService.GenerateInputPB.newBuilder().setRequestId(req.requestId());
+                }
+            } else {
+                ib = EngineRpcService.GenerateInputPB.newBuilder().setRequestId(req.requestId());
+            }
+
+            ib.setDpRank(com.google.protobuf.Int32Value.of(ra.dpRank()));
+            if (reqDto != null && reqDto.getBlockCacheKeys() != null) {
+                ib.clearCacheHashKey().addAllCacheHashKey(reqDto.getBlockCacheKeys());
+            }
+
+            EngineRpcService.GenerateConfigPB.Builder gcb = ib.getGenerateConfigBuilder();
+            gcb.clearRoleAddrs();
+            ServerStatus prefillSs = req.prefill();
+            if (prefillSs != null) {
+                gcb.addRoleAddrs(EngineRpcService.RoleAddrPB.newBuilder()
+                        .setRole(EngineRpcService.RoleAddrPB.RoleType.PREFILL)
+                        .setIp(prefillSs.getServerIp())
+                        .setHttpPort(prefillSs.getHttpPort())
+                        .setGrpcPort(prefillSs.getGrpcPort())
+                        .build());
+            }
+            ServerStatus decodeSs = req.decode();
+            if (decodeSs != null) {
+                gcb.addRoleAddrs(EngineRpcService.RoleAddrPB.newBuilder()
+                        .setRole(EngineRpcService.RoleAddrPB.RoleType.DECODE)
+                        .setIp(decodeSs.getServerIp())
+                        .setHttpPort(decodeSs.getHttpPort())
+                        .setGrpcPort(decodeSs.getGrpcPort())
+                        .build());
             }
             b.addInputs(ib.build());
         }

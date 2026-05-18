@@ -1,5 +1,6 @@
 """FlexLB schedule client: request role addrs from master/slave and parse response."""
 
+import base64
 import json
 import logging
 import time
@@ -217,6 +218,7 @@ class MasterClient:
         block_cache_keys: list[int],
         input: GenerateInput,
         request_id: int,
+        input_pb_bytes: Optional[bytes] = None,
     ) -> FlexlbResponse:
         """
         Resolve backend role addrs from FlexLB scheduler (master, then slave on connection failure).
@@ -262,6 +264,8 @@ class MasterClient:
             "num_beams": getattr(gc, "num_beams", 1),
             "force_disable_sp_run": getattr(gc, "force_disable_sp_run", False),
         }
+        if input_pb_bytes:
+            payload["generate_input_pb_b64"] = base64.b64encode(input_pb_bytes).decode("ascii")
 
         resp = await self._send_schedule_request(
             master_addr, payload, ttft_timeout_ms, request_id

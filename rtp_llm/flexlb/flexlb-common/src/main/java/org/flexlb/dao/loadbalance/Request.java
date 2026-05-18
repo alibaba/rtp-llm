@@ -49,4 +49,16 @@ public class Request {
      */
     @JsonProperty("model")
     private String model = "";
+
+    /**
+     * Base64-encoded protobuf bytes of the full {@code GenerateInputPB} built by
+     * the frontend's {@code trans_input}. When present, {@code DpBatchScheduler.buildPb}
+     * uses {@code GenerateInputPB.parseFrom(bytes).toBuilder()} as the basis and only
+     * overlays {@code dp_rank} + {@code cache_hash_key} before sending {@code BatchEnqueue}
+     * to Prefill. When empty (legacy/V0 callers), {@code buildPb} falls back to the
+     * bare-PB construction.
+     */
+    @ToString.Exclude
+    @JsonProperty("generate_input_pb_b64")
+    private String generateInputPbB64 = "";
 }
