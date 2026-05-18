@@ -641,8 +641,7 @@ TEST_F(KVCacheManagerTest, DSV4InitReuseKeepsSWAPrefixTailBlock) {
         ASSERT_TRUE(isNullBlockIdx(first_resource->blocks(0, gid)[1]));
         ASSERT_FALSE(isNullBlockIdx(first_resource->blocks(0, gid)[2]));
         ASSERT_FALSE(isNullBlockIdx(first_resource->blocks(0, gid)[3]));
-        first_swa_tail_blocks.emplace_back(first_resource->blocks(0, gid)[2],
-                                           first_resource->blocks(0, gid)[3]);
+        first_swa_tail_blocks.emplace_back(first_resource->blocks(0, gid)[2], first_resource->blocks(0, gid)[3]);
     }
 
     // Simulate one generated token before inserting into the device cache, so
@@ -652,8 +651,7 @@ TEST_F(KVCacheManagerTest, DSV4InitReuseKeepsSWAPrefixTailBlock) {
     manager->free(FreeInfo{first_resource, first_tokens});
 
     auto second_resource = makeDSV4BatchResource(manager_config);
-    auto second_tokens =
-        makeDSV4CompleteTokenIds(/*initial_seq_len=*/24 * spb, /*max_seq_len=*/24 * spb, spb);
+    auto second_tokens   = makeDSV4CompleteTokenIds(/*initial_seq_len=*/24 * spb, /*max_seq_len=*/24 * spb, spb);
 
     MallocInfo second_malloc{second_resource, second_tokens};
     second_malloc.reuse_cache                  = true;
@@ -666,8 +664,7 @@ TEST_F(KVCacheManagerTest, DSV4InitReuseKeepsSWAPrefixTailBlock) {
     for (int gid = 3; gid < kDsv4PoolNum; ++gid) {
         const auto& blocks = second_resource->blocks(0, gid);
         ASSERT_EQ(blocks.size(), 24u) << "second SWA group " << gid;
-        EXPECT_EQ(blocks[2], first_swa_tail_blocks[static_cast<size_t>(gid - 3)].first)
-            << "SWA reuse prefix penultimate block must stay readable";
+        EXPECT_TRUE(isNullBlockIdx(blocks[2])) << "SWA reuse prefix penultimate block is NULL (no prev lookup)";
         EXPECT_EQ(blocks[3], first_swa_tail_blocks[static_cast<size_t>(gid - 3)].second)
             << "SWA reuse prefix tail block must stay readable";
         EXPECT_FALSE(isNullBlockIdx(blocks[22])) << "second SWA group " << gid << " fresh tail block 22";
@@ -931,9 +928,9 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSmallestHybridPoolTokenCapacity) {
     auto hybrid_allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(kv_cache_manager->allocator_);
     ASSERT_NE(hybrid_allocator, nullptr);
 
-    size_t expected_total_tokens     = std::numeric_limits<size_t>::max();
-    size_t expected_available_tokens = std::numeric_limits<size_t>::max();
-    const auto& pools                = hybrid_allocator->groupBlockPools();
+    size_t      expected_total_tokens     = std::numeric_limits<size_t>::max();
+    size_t      expected_available_tokens = std::numeric_limits<size_t>::max();
+    const auto& pools                     = hybrid_allocator->groupBlockPools();
     ASSERT_GT(pools.size(), 1u);
 
     for (size_t gid = 0; gid < pools.size(); ++gid) {
