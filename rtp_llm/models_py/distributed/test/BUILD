@@ -12,20 +12,6 @@ py_test (
     exec_properties = {'gpu':'H20', 'gpu_count':'2'},
 )
 
-py_test (
-    name = "moriep_test",
-    srcs = ["moriep_test.py"],
-    deps = [
-        "//rtp_llm:config",
-        "//rtp_llm:testlib",
-        "//rtp_llm/models_py:modules",
-        "//rtp_llm/models_py/distributed:collective_torch",
-    ],
-    timeout = "eternal",
-    tags = ["rocm"],
-    exec_properties = {'gpu':'MI308X-ROCM7', 'gpu_count':'8'},
-)
-
 py_test(
     name = "collective_torch_test",
     srcs = ["collective_torch_test.py"],

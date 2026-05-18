@@ -5,13 +5,7 @@ import socket
 import sys
 import unittest
 
-try:
-    import mori  # noqa: F401
-
-    _MORI_AVAILABLE = True
-except ImportError:
-    _MORI_AVAILABLE = False
-
+import mori
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -87,14 +81,12 @@ def _gen_test_data(config: MoriEPWrapperConfig, device: torch.device):
     )
 
     all_rank_indices = []
-    cpu_rng = torch.Generator(device="cpu")
-    cpu_rng.manual_seed(rng.initial_seed())
     for _ in range(config.world_size):
         indices = torch.empty(
             num_tokens, config.num_experts_per_token, dtype=torch.int64
         )
         for i in range(num_tokens):
-            perm = torch.randperm(num_total_experts, generator=cpu_rng)
+            perm = torch.randperm(num_total_experts, generator=rng, device=device)
             indices[i] = perm[: config.num_experts_per_token]
         all_rank_indices.append(indices.to(torch.int32).to(device))
 
@@ -360,7 +352,9 @@ class MoriEPWrapperIntegrationTest(unittest.TestCase):
             pass
 
     def _require_mori(self):
-        if not _MORI_AVAILABLE:
+        try:
+            import mori  # noqa: F401
+        except ImportError:
             self.skipTest("mori is not available")
 
     def _require_gpus(self, n: int):
