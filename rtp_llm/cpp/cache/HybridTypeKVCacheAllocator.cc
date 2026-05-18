@@ -84,7 +84,8 @@ int HybridTypeKVCacheAllocator::reuseCache(const CacheKeysType&                 
     std::vector<BlockIndicesType> full_matched_blocks(kv_cache_groups_.size());
 
     for (int gid : full_group_ids_) {
-        auto match_result     = kv_cache_groups_[static_cast<size_t>(gid)]->match(cache_keys, mm_intervals);
+        auto match_result = kv_cache_groups_[static_cast<size_t>(gid)]->match(cache_keys);
+        multimodalTrunc(match_result, mm_intervals);
         min_full_reuse_blocks = std::min(min_full_reuse_blocks, static_cast<int>(match_result.reuse_blocks));
         full_matched_blocks[static_cast<size_t>(gid)] = std::move(match_result.block_indices);
     }

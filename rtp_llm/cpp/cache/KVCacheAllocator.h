@@ -82,6 +82,8 @@ public:
     /// Returns global layer id; std::numeric_limits<uint32_t>::max() indicates invalid (caller must check).
     uint32_t convertToGlobalLayerId(size_t model_id, int local_layer_id) const;
 
+    void multimodalTrunc(MatchResult& match_result, const std::vector<std::vector<int>>& mm_intervals);
+
 protected:
     virtual bool         doInit() = 0;
     MallocResult         initMalloc(const MallocInfo& malloc_info);
