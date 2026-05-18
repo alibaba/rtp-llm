@@ -13,6 +13,7 @@ available. Direct port of the pre-refactor ``_setup_mega_moe`` +
 from __future__ import annotations
 
 import logging
+import os
 from typing import Dict, Optional
 
 import torch
@@ -35,6 +36,9 @@ from ..shared_expert import strict_fused_moe_enabled
 from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
 
 _MEGA_MOE_JIT_WARMED_KEYS: set[tuple] = set()
+_PRE_KERNEL_BARRIER_ENV = "DSV4_MEGA_MOE_PRE_KERNEL_BARRIER"
+_PRE_KERNEL_BARRIER_VERBOSE_ENV = "DSV4_MEGA_MOE_PRE_KERNEL_BARRIER_VERBOSE"
+_PRE_KERNEL_BARRIER_LOGGED_KEYS: set[tuple[int, int]] = set()
 
 
 def _mega_output_capacity(buf, requested_capacity: int) -> int:
@@ -44,6 +48,53 @@ def _mega_output_capacity(buf, requested_capacity: int) -> int:
     if aligned_capacity is not None:
         capacity = max(capacity, int(aligned_capacity))
     return capacity
+
+
+def _pre_kernel_barrier_enabled() -> bool:
+    return os.environ.get(_PRE_KERNEL_BARRIER_ENV, "0") == "1"
+
+
+def _pre_kernel_barrier_verbose_enabled() -> bool:
+    return os.environ.get(_PRE_KERNEL_BARRIER_VERBOSE_ENV, "0") == "1"
+
+
+def _log_pre_kernel_barrier(
+    phase: str,
+    layer_id: int,
+    rank: int,
+    world_size: int,
+    tokens: int,
+    device: torch.device,
+) -> None:
+    if _pre_kernel_barrier_verbose_enabled():
+        logging.info(
+            "[DSV4 MegaMoE] pre-kernel barrier %s: layer=%d rank=%d/%d "
+            "tokens=%d device=%s",
+            phase,
+            layer_id,
+            rank,
+            world_size,
+            tokens,
+            device,
+        )
+        return
+
+    if phase != "enter":
+        return
+    key = (layer_id, rank)
+    if key in _PRE_KERNEL_BARRIER_LOGGED_KEYS:
+        return
+    _PRE_KERNEL_BARRIER_LOGGED_KEYS.add(key)
+    logging.info(
+        "[DSV4 MegaMoE] pre-kernel barrier enabled: layer=%d rank=%d/%d "
+        "tokens=%d device=%s; set %s=1 to log every barrier",
+        layer_id,
+        rank,
+        world_size,
+        tokens,
+        device,
+        _PRE_KERNEL_BARRIER_VERBOSE_ENV,
+    )
 
 
 @register_strategy
@@ -160,6 +211,7 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
             "_mega_moe_available() should have gated this earlier"
         )
         group = dist.group.WORLD
+        self._mega_group = group
         # Symm buffer is single-layer staging — share one across all
         # MoE layers via the module-level cache (see _get_or_create_mega_buf).
         self._mega_buf = _get_or_create_mega_buf(
@@ -341,6 +393,7 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         # times, and the rank still participates as expert host.  No control
         # flow depending on a GPU-side scalar -> CUDA-graph-capture safe.
         self._input_packer.pack(x, weights, indices, buf, T)
+        self._maybe_pre_kernel_barrier(T)
 
         y = self._mega_y[:T]
         deep_gemm.fp8_fp4_mega_moe(
@@ -356,3 +409,53 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
             fast_math=True,
         )
         return y
+
+    def _maybe_pre_kernel_barrier(self, tokens: int) -> None:
+        """Optional host-side rendezvous before the DeepGEMM MegaMoE kernel.
+
+        This is a diagnostic guard for cases where one rank does not enter the
+        peer-symmetric DeepGEMM kernel in time.  It intentionally synchronizes
+        the current stream first so the barrier represents "RTP-side pack is
+        done and this rank is ready to launch MegaMoE".
+        """
+        if not _pre_kernel_barrier_enabled():
+            return
+        if torch.cuda.is_current_stream_capturing():
+            raise RuntimeError(
+                f"{_PRE_KERNEL_BARRIER_ENV}=1 is incompatible with CUDA graph "
+                "capture"
+            )
+
+        import torch.distributed as dist
+
+        if not dist.is_initialized():
+            raise RuntimeError(
+                f"{_PRE_KERNEL_BARRIER_ENV}=1 requires torch.distributed "
+                "to be initialized"
+            )
+
+        cfg = self.cfg
+        group = getattr(self, "_mega_group", dist.group.WORLD)
+        rank = dist.get_rank(group)
+        world_size = dist.get_world_size(group)
+        device = self._mega_l1_w.device
+        _log_pre_kernel_barrier(
+            "enter", cfg.layer_id, rank, world_size, tokens, device
+        )
+
+        if device.type == "cuda":
+            with torch.cuda.device(device):
+                torch.cuda.current_stream().synchronize()
+                try:
+                    dist.barrier(
+                        group=group,
+                        device_ids=[torch.cuda.current_device()],
+                    )
+                except TypeError:
+                    dist.barrier(group=group)
+        else:
+            dist.barrier(group=group)
+
+        _log_pre_kernel_barrier(
+            "leave", cfg.layer_id, rank, world_size, tokens, device
+        )
