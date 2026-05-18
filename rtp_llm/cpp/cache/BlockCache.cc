@@ -11,9 +11,7 @@ BlockCache::MatchResult BlockCache::match(CacheKeyType cache_key, int group_id, 
     CacheKeyGroupPair           key{cache_key, group_id};
     auto [success, item] = lru_cache_.get(key);
     if (success) {
-        if (current_batch_epoch == NO_EPOCH_FILTER
-            || item.epoch == 0
-            || item.epoch == current_batch_epoch) {
+        if (current_batch_epoch == NO_EPOCH_FILTER || item.epoch == 0 || item.epoch == current_batch_epoch) {
             return {item.block_index};
         }
     }
@@ -30,10 +28,20 @@ BlockCache::PutResult BlockCache::put(CacheItem& item) {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(mu_);
     RTP_LLM_CHECK_WITH_INFO(!isNullBlockIdx(item.block_index), "put block id should not be null block");
+    RTP_LLM_CHECK_WITH_INFO(item.epoch >= 0,
+                            "CacheItem.epoch must be >= 0 (got %ld); negative values are reserved as query-side "
+                            "sentinels",
+                            item.epoch);
 
     CacheKeyGroupPair key{item.cache_key, item.group_id};
     auto [found, old_item] = lru_cache_.get(key);
     if (found) {
+        // Preserve privileged states: a resident entry must not be downgraded
+        // by a non-resident put, and a globally-visible (epoch=0) entry must
+        // not be narrowed to batch-specific (epoch>0) visibility.
+        if (old_item.is_resident && !item.is_resident) {
+            return {PutResult::Action::SKIPPED, NULL_BLOCK_IDX};
+        }
         if (old_item.epoch == 0 && item.epoch != 0) {
             return {PutResult::Action::SKIPPED, NULL_BLOCK_IDX};
         }

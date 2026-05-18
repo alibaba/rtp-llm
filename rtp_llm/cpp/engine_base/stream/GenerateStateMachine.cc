@@ -54,6 +54,16 @@ void GenerateStateMachine::handleWaiting() {
             releaseResource();
             return;
         }
+        // Expose the just-allocated blocks to siblings in the same batch_epoch
+        // before the batched forward pass starts. The blocks may not yet hold
+        // valid KV — that's fine for batch reuse: same-batch streams that
+        // match these entries share the physical blocks, and KV is written
+        // collectively during the unified K/V write step that precedes
+        // attention within each layer's forward. evaluateAndUpdateStreams()
+        // iterates streams serially, so any later sibling in the same loop
+        // will observe this insertion before its own initKVBlock runs match.
+        stream_cache_resource_->insertIntoCache();
+
         bool ret = stream_cache_resource_->asyncLoadCache();
         // 设置 LoadInitiated 标志，表示已尝试asyncLoadCache. 当前实现即便asyncLoadCache失败也不再重试
         reportEvent(StreamEvents::LoadInitiated);

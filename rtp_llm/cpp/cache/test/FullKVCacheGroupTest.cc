@@ -264,9 +264,15 @@ TEST_F(FullKVCacheGroupTest, EpochMatchVisibilityTest) {
     auto result3 = group.match({202}, /*current_batch_epoch=*/99);
     EXPECT_EQ(result3.reuse_blocks, 0);
 
-    // NO_EPOCH_FILTER (0) matches all items regardless of epoch
-    auto result4 = group.match({202}, /*current_batch_epoch=*/0);
-    EXPECT_EQ(result4.reuse_blocks, 1);
+    // current_batch_epoch == 0 (no batch identity): only global entries visible
+    auto result4_batch = group.match({202}, /*current_batch_epoch=*/0);
+    EXPECT_EQ(result4_batch.reuse_blocks, 0);
+    auto result4_global = group.match({201}, /*current_batch_epoch=*/0);
+    EXPECT_EQ(result4_global.reuse_blocks, 1);
+
+    // NO_EPOCH_FILTER (-1) bypasses filter: all items visible
+    auto result5 = group.match({202}, /*current_batch_epoch=*/BlockCache::NO_EPOCH_FILTER);
+    EXPECT_EQ(result5.reuse_blocks, 1);
 }
 
 TEST_F(FullKVCacheGroupTest, EpochPutSkipsOverwritingGlobalWithBatch) {
@@ -280,7 +286,7 @@ TEST_F(FullKVCacheGroupTest, EpochPutSkipsOverwritingGlobalWithBatch) {
 
     // Try to overwrite with batch-specific item (epoch=42) — should be SKIPPED
     BlockCache::CacheItem batch_item = {301, 0, 2, false, /*epoch=*/42};
-    auto result = block_cache->put(batch_item);
+    auto                  result     = block_cache->put(batch_item);
     EXPECT_EQ(result.action, BlockCache::PutResult::Action::SKIPPED);
 
     // Original global item still there

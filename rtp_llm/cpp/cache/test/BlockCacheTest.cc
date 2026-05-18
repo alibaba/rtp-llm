@@ -234,6 +234,82 @@ TEST_F(BlockCacheTest, SelectAndEvictZeroBlocks) {
     EXPECT_EQ(cache_->size(), 0);
 }
 
+// ==================== Epoch sentinel separation ====================
+//
+// Three-way semantics:
+//   current_batch_epoch == NO_EPOCH_FILTER (-1): bypass filter, see everything
+//   current_batch_epoch == 0 (GLOBAL_EPOCH):     no batch identity, only global
+//   current_batch_epoch >= 1:                    same batch + global
+
+TEST_F(BlockCacheTest, MatchEpochZeroDoesNotSeeBatchLocal) {
+    // global entry
+    CacheItem global_item = {201, 0, /*block_index=*/1, /*is_resident=*/false, /*epoch=*/0};
+    EXPECT_EQ(cache_->put(global_item).action, BlockCache::PutResult::Action::INSERTED);
+
+    // batch-local entry, epoch=5
+    CacheItem batch_item = {202, 0, /*block_index=*/2, /*is_resident=*/false, /*epoch=*/5};
+    EXPECT_EQ(cache_->put(batch_item).action, BlockCache::PutResult::Action::INSERTED);
+
+    // current_batch_epoch == 0: "no batch identity" — must NOT see batch-local
+    EXPECT_EQ(cache_->match(201, /*group_id=*/0, /*current_batch_epoch=*/0).matched_index, 1);
+    EXPECT_TRUE(isNullBlockIdx(cache_->match(202, /*group_id=*/0, /*current_batch_epoch=*/0).matched_index));
+
+    // current_batch_epoch == NO_EPOCH_FILTER: see everything
+    EXPECT_EQ(cache_->match(201, 0, BlockCache::NO_EPOCH_FILTER).matched_index, 1);
+    EXPECT_EQ(cache_->match(202, 0, BlockCache::NO_EPOCH_FILTER).matched_index, 2);
+
+    // same batch (5): see global + same-batch
+    EXPECT_EQ(cache_->match(201, 0, /*current_batch_epoch=*/5).matched_index, 1);
+    EXPECT_EQ(cache_->match(202, 0, /*current_batch_epoch=*/5).matched_index, 2);
+
+    // different batch (7): only global
+    EXPECT_EQ(cache_->match(201, 0, /*current_batch_epoch=*/7).matched_index, 1);
+    EXPECT_TRUE(isNullBlockIdx(cache_->match(202, 0, /*current_batch_epoch=*/7).matched_index));
+}
+
+// ==================== Resident protection on put() ====================
+
+TEST_F(BlockCacheTest, PutDoesNotDowngradeResidentEntry) {
+    // Insert a resident entry first.
+    CacheItem resident_item = {101, 0, /*block_index=*/1, /*is_resident=*/true};
+    auto      r1            = cache_->put(resident_item);
+    EXPECT_EQ(r1.action, BlockCache::PutResult::Action::INSERTED);
+
+    // A subsequent put with is_resident=false (different physical block) must NOT
+    // overwrite the resident entry. Old behavior on `main` was a complete no-op
+    // (return false). After the PutResult refactor, REPLACE must be guarded so a
+    // non-resident put cannot drop the resident bit and swap blocks.
+    CacheItem non_resident_item = {101, 0, /*block_index=*/2, /*is_resident=*/false};
+    auto      r2                = cache_->put(non_resident_item);
+    EXPECT_EQ(r2.action, BlockCache::PutResult::Action::SKIPPED);
+
+    // The resident entry survives, still pointing to its original block.
+    auto match = cache_->match(101);
+    EXPECT_EQ(match.matched_index, 1);
+
+    // pop() must not evict the resident entry.
+    auto popped = cache_->pop(5);
+    EXPECT_EQ(popped.size(), 0);
+    EXPECT_EQ(cache_->size(), 1);
+}
+
+TEST_F(BlockCacheTest, PutAllowsResidentToReplaceNonResident) {
+    // Reverse direction: an existing non-resident entry SHOULD be replaceable by
+    // a resident put — that's how multi-task prompts get promoted.
+    CacheItem non_resident_item = {101, 0, /*block_index=*/1, /*is_resident=*/false};
+    EXPECT_EQ(cache_->put(non_resident_item).action, BlockCache::PutResult::Action::INSERTED);
+
+    CacheItem resident_item = {101, 0, /*block_index=*/2, /*is_resident=*/true};
+    auto      r2            = cache_->put(resident_item);
+    EXPECT_EQ(r2.action, BlockCache::PutResult::Action::REPLACED);
+    EXPECT_EQ(r2.old_block_index, 1);
+
+    // After promotion the entry is resident and points to the new block.
+    EXPECT_EQ(cache_->match(101).matched_index, 2);
+    auto popped = cache_->pop(5);
+    EXPECT_EQ(popped.size(), 0);
+}
+
 TEST_F(BlockCacheTest, SelectAndEvictLRUOrder) {
     // Insert items, then access some to change LRU order
     CacheItem item1 = {101, 0, 1, false};

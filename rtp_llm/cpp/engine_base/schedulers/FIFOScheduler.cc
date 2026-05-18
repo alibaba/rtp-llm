@@ -199,7 +199,6 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_stre
         }
     }
 
-
     for (auto it = waiting_streams_.begin(); it != waiting_streams_.end();) {
         auto& stream      = *it;
         bool  force_batch = stream->forceBatch();
@@ -236,11 +235,14 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_stre
         }
 
         (*it)->setBatchEpoch(batch_epoch);
-        // Check for errors and memory constraints
+        // Check for errors and memory constraints.
+        // NOTE: batch-level insertIntoCache happens later in GenerateStateMachine,
+        // right before transitioning to RUNNING — that point is reached only after
+        // the async LOADING_CACHE state completes, so connector-loaded prefix data
+        // is already present in the blocks we expose for sibling reuse.
         if (!stream->hasError() && !stream->hasEvent(StreamEvents::CanRun)
             && evaluateRunningMemory(new_streams, stream)) {
             stream->reportEvent(StreamEvents::CanRun);
-            stream->streamCacheResource().insertIntoCache();
             new_streams.push_back(stream);
 
             // Lock batch type based on first scheduled stream

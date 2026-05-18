@@ -358,9 +358,8 @@ absl::Status StreamCacheResource::initKVBlock(size_t reserve_step) {
         stream_->setInitialReuseLength(result.reuse_len);
         stream_->setLocalReuseLength(result.reuse_len);
     }
-
-    // load cache from connector
-    loadCacheSync();
+    // NOTE: connector loads run asynchronously via GenerateStateMachine
+    // (WAITING -> LOADING_CACHE -> WAITING -> RUNNING). Do not block here.
     return absl::OkStatus();
 }
 
@@ -379,7 +378,7 @@ absl::Status StreamCacheResource::incrKVBlock(size_t reserve_step) {
     malloc_info.verbose                 = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
     malloc_info.reuse_cache             = reuseCache();
     malloc_info.enable_device_cache     = reuseCache() && enableDeviceCache();
-    malloc_info.enable_remove_skipped_blocks   = true;
+    malloc_info.enable_remove_skipped_blocks = true;
 
     malloc_info.complete_token_ids->setReserveStep(reserve_step);
     auto result = resource_context_.cache_manager->malloc(malloc_info);
@@ -743,17 +742,27 @@ void StreamCacheResource::insertIntoCache() {
     if (batch_kv_cache_resource_->curBlocksNum() == 0) {
         return;
     }
+    // Refuse to insert batch-local entries without a real batch identity:
+    // batchEpoch() == 0 means the scheduler hasn't called setBatchEpoch() yet,
+    // and inserting at epoch=0 here would silently promote batch-local data
+    // into the global prefix cache, polluting other streams.
+    const int64_t batch_epoch = stream_->batchEpoch();
+    if (batch_epoch <= 0) {
+        RTP_LLM_LOG_WARNING("insertIntoCache called before scheduler assigned batch_epoch (stream=%ld); skipping",
+                            stream_->streamId());
+        return;
+    }
     auto       insert_resource = batch_kv_cache_resource_->copy();
     InsertInfo insert_info{insert_resource, stream_->completeTokenIdsPtr(), false};
-    insert_info.epoch = stream_->batchEpoch();
+    insert_info.epoch = batch_epoch;
     resource_context_.cache_manager->insertIntoCache(insert_info);
 }
 
 std::string StreamCacheResource::debugString() const {
     std::stringstream ss;
     ss << "StreamCacheResource { stream_id: " << stream_->streamId()
-       << ", need_release_resource: " << need_release_resource_
-       << ", " << batch_kv_cache_resource_->debugString() << " }";
+       << ", need_release_resource: " << need_release_resource_ << ", " << batch_kv_cache_resource_->debugString()
+       << " }";
     return ss.str();
 }
 
