@@ -289,7 +289,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         phase2 = GenerateOutputs(
             generate_outputs=[
                 GenerateOutput(
-                    output_ids=torch.tensor([20, 128822, 21], dtype=torch.int32),
+                    output_ids=torch.tensor([20, 21, 22], dtype=torch.int32),
                     finished=True,
                     aux_info=AuxInfo(input_len=4, reuse_len=0),
                 )
@@ -329,7 +329,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(visitor.generate_inputs[1].request_id, 200)
         self.assertEqual(_gen_ids(chunks[0]), [128821, 10, 11])
         self.assertEqual(_gen_ids(chunks[1]), [128822, 271])
-        self.assertEqual(_gen_ids(chunks[2]), [20, 128822, 21])
+        self.assertEqual(_gen_ids(chunks[2]), [20, 21, 22])
         self.assertEqual(chunks[2].infer_response.id, "trace-real-2")
         # phase-2 trace_id mirrors phase-1 (no -2 suffix) so dashscope log search
         # finds both halves under a single trace.
@@ -505,6 +505,195 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_gen_ids(chunks[1]), [128822, 271])
         self.assertEqual(_gen_ids(chunks[2]), [20])
         self.assertNotIn(42, visitor.generate_inputs[1].token_ids.cpu().int().tolist())
+
+    async def test_natural_finish_without_close_triggers_phase2(self) -> None:
+        """Phase-1 finishes naturally without ``</think>`` or terminate_token —
+        the model dumped the answer entirely into reasoning. Phase-2 must
+        still fire so the dashscope-side parser sees a non-empty content."""
+        req = self._minimal_request()
+        phase1 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([10, 11, 12], dtype=torch.int32),
+                    finished=True,
+                    aux_info=AuxInfo(input_len=3, reuse_len=0),
+                )
+            ]
+        )
+        phase2 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([20, 21], dtype=torch.int32),
+                    finished=True,
+                    aux_info=AuxInfo(input_len=3, reuse_len=0),
+                )
+            ]
+        )
+        visitor = _MultiStreamVisitor(
+            [_FakeAsyncStream([phase1]), _FakeAsyncStream([phase2])]
+        )
+        tok = _FakeTokenizer(
+            {
+                "<think>\n": [128821, 198],
+                "</think>\n\n": [128822, 271],
+                "<think>\n\n</think>\n\n": [128821, 271, 128822, 271],
+                "</think>": [128822],
+            }
+        )
+
+        env_cfg = _GenerateEnvCfg()
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [7, 8, 128821],
+                SamplingParams(),
+                OtherParams(),
+                visitor,
+                rtp_llm_request_id=100,
+                echo_prefix_ids=[128821, 198],
+                tokenizer=tok,
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+                phase2_request_id_factory=lambda: 200,
+            )
+        )
+
+        self.assertEqual(visitor.enqueue_called, 2)
+        # Phase-1 streams everything as reasoning; phase-2 produces fresh content.
+        self.assertEqual(_gen_ids(chunks[0]), [128821, 10, 11, 12])
+        self.assertEqual(_gen_ids(chunks[1]), [20, 21])
+        self.assertEqual(chunks[1].infer_response.id, "trace-real-2")
+
+    async def test_phase2_strips_leading_thinking_then_close(self) -> None:
+        """Phase-2 model occasionally emits accidental thinking followed by
+        ``</think>`` before the real answer. The leading reasoning + close
+        sequence must be stripped so only post-close tokens reach the client."""
+        req = self._minimal_request()
+        phase1 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([10, 11, 1, 99], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        phase2_a = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([55, 56], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        phase2_b = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([128822, 271, 20, 21], dtype=torch.int32),
+                    finished=True,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        visitor = _MultiStreamVisitor(
+            [
+                _FakeAsyncStream([phase1]),
+                _FakeAsyncStream([phase2_a, phase2_b]),
+            ]
+        )
+        tok = _FakeTokenizer(
+            {
+                "<think>\n": [128821, 198],
+                "</think>\n\n": [128822, 271],
+                "<think>\n\n</think>\n\n": [128821, 271, 128822, 271],
+                "</think>": [128822],
+            }
+        )
+
+        env_cfg = _GenerateEnvCfg()
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [7, 8, 128821],
+                SamplingParams(),
+                OtherParams(),
+                visitor,
+                rtp_llm_request_id=100,
+                echo_prefix_ids=[128821, 198],
+                tokenizer=tok,
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+                phase2_request_id_factory=lambda: 200,
+            )
+        )
+
+        # Phase-1 emits two chunks (truncated content then synthesised eos).
+        # Phase-2 sees [55, 56] (accidental thinking, buffered then dropped),
+        # then [128822, 271, 20, 21] (close + tail content). Client only sees
+        # [20, 21] from phase-2.
+        phase2_chunks = [c for c in chunks if c.infer_response.id.endswith("-2")]
+        self.assertEqual(len(phase2_chunks), 1)
+        self.assertEqual(_gen_ids(phase2_chunks[0]), [20, 21])
+
+    async def test_phase2_strips_trailing_eos_artifact(self) -> None:
+        """Phase-2 ends with a structural ``</think>\\n\\n`` closing-tag
+        artifact mirroring the empty-think prompt body. That trailing
+        sequence must not leak into ``content``."""
+        req = self._minimal_request()
+        phase1 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([10, 128822, 271], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        phase2 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor(
+                        [30, 31, 32, 128822, 271], dtype=torch.int32
+                    ),
+                    finished=True,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        visitor = _MultiStreamVisitor(
+            [_FakeAsyncStream([phase1]), _FakeAsyncStream([phase2])]
+        )
+        tok = _FakeTokenizer(
+            {
+                "<think>\n": [128821, 198],
+                "</think>\n\n": [128822, 271],
+                "<think>\n\n</think>\n\n": [128821, 271, 128822, 271],
+                "</think>": [128822],
+            }
+        )
+
+        env_cfg = _GenerateEnvCfg()
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [7, 8, 128821],
+                SamplingParams(),
+                OtherParams(),
+                visitor,
+                rtp_llm_request_id=100,
+                echo_prefix_ids=[128821, 198],
+                tokenizer=tok,
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+                phase2_request_id_factory=lambda: 200,
+            )
+        )
+
+        phase2_chunks = [c for c in chunks if c.infer_response.id.endswith("-2")]
+        self.assertEqual(len(phase2_chunks), 1)
+        # Trailing [128822, 271] is stripped; only the real answer ids survive.
+        self.assertEqual(_gen_ids(phase2_chunks[0]), [30, 31, 32])
 
 
 class IterRealModelStreamInferEchoTest(unittest.IsolatedAsyncioTestCase):
