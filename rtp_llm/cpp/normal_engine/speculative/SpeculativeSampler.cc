@@ -1,9 +1,34 @@
 #include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
+#include "rtp_llm/cpp/utils/Logger.h"
+
+#include <cstdlib>
+#include <cstring>
 
 namespace rtp_llm {
 namespace speculative {
+
+namespace {
+// Debug flag: when set, every draft token is rejected so each iteration only
+// emits the target's bonus token at position 0. Used to verify whether
+// rejection sampling itself is the source of online quality drops.
+bool forceRejectAllDraftTokens() {
+    static const bool enabled = []() {
+        const char* v = std::getenv("FORCE_REJECT_DRAFT_TOKENS");
+        if (v == nullptr) {
+            return false;
+        }
+        bool on = (std::strcmp(v, "1") == 0 || std::strcmp(v, "true") == 0
+                   || std::strcmp(v, "TRUE") == 0 || std::strcmp(v, "True") == 0);
+        if (on) {
+            RTP_LLM_LOG_INFO("[speculative] FORCE_REJECT_DRAFT_TOKENS=1: every draft token will be rejected");
+        }
+        return on;
+    }();
+    return enabled;
+}
+}  // namespace
 
 FastTopKSamplerOutput FastTopKSampler::forward(const torch::Tensor& logits, int top_k) {
     FastTopKSamplerOutput output;
@@ -99,6 +124,8 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
         }
     }
 
+    const bool force_reject_all = forceRejectAllDraftTokens();
+
     int stream_idx = 0;
     for (const GenerateStreamPtr& stream : streams) {
         torch::Tensor accept_tokens;
@@ -110,6 +137,12 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
             memcpy(accept_tokens.data_ptr<int>(),
                    draft_token_ids_h.data_ptr<int32_t>() + stream_idx * propose_step_,
                    sizeof(int32_t) * propose_step_);
+        } else if (force_reject_all) {
+            // Debug path: reject every draft proposal, emit only target's
+            // bonus token at position 0. The "always use target token as the
+            // last token" override below fills accept_tokens[0].
+            accept_len    = 1;
+            accept_tokens = torch::empty({1, 1}, torch::TensorOptions().dtype(torch::kInt32));
         } else {
             accept_len    = output_emitted_token_num_h[stream_idx].item<int32_t>();
             accept_tokens = torch::empty({1, (int64_t)accept_len}, torch::TensorOptions().dtype(torch::kInt32));
