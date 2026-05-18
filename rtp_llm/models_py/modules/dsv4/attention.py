@@ -735,8 +735,9 @@ class Attention(nn.Module):
             max_seq_len // compress_ratio if compress_ratio else 0
         )
 
-        # Per-layer freqs_cis: SWA-only uses base rope_theta with no yarn,
-        # CSA/HCA uses compress_rope_theta with yarn (when original_seq_len > 0).
+        # Per-layer freqs_cis: SWA-only uses base rope_theta, CSA/HCA uses
+        # compress_rope_theta. Both paths apply YaRN when model config provides
+        # original_seq_len, matching vLLM DeepseekV4ScalingRotaryEmbedding.
         # Store scalars so we can re-compute after `to_empty`(meta) — otherwise
         # the buffer ends up all zeros.
         if compress_ratio:
@@ -744,7 +745,7 @@ class Attention(nn.Module):
             self._rope_o_seq_len = original_seq_len
         else:
             self._rope_base = rope_theta
-            self._rope_o_seq_len = 0
+            self._rope_o_seq_len = original_seq_len
         self._rope_factor = rope_factor
         self._rope_beta_fast = beta_fast
         self._rope_beta_slow = beta_slow

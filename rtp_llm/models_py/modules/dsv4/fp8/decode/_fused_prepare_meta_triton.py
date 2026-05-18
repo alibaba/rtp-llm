@@ -328,7 +328,8 @@ if _TRITON_AVAILABLE:
         in_blk_swa = abs_pos - bis_swa_raw * SWA_E
         bis_swa = tl.maximum(tl.minimum(bis_swa_raw, SWA_BT_STRIDE - 1), 0)
         bid_swa = tl.load(bt_swa_ptr + r * SWA_BT_STRIDE + bis_swa).to(tl.int64)
-        tl.store(slot_swa_ptr + out_idx, bid_swa * SWA_E + in_blk_swa)
+        slot_swa = tl.where(bid_swa <= 0, -1, bid_swa * SWA_E + in_blk_swa)
+        tl.store(slot_swa_ptr + out_idx, slot_swa)
 
         # ---------- CSA: ratio=4, boundary tokens only ----------
         on_b4 = (abs_pos_p1 % 4) == 0
@@ -339,7 +340,8 @@ if _TRITON_AVAILABLE:
         in_blk_csa = safe_4 - bis_csa_raw * CSA_E
         bis_csa = tl.maximum(tl.minimum(bis_csa_raw, CSA_BT_STRIDE - 1), 0)
         bid_csa = tl.load(bt_csa_ptr + r * CSA_BT_STRIDE + bis_csa).to(tl.int64)
-        slot_csa = tl.where(skip_4, -1, bid_csa * CSA_E + in_blk_csa)
+        skip_csa = skip_4 | (bid_csa <= 0)
+        slot_csa = tl.where(skip_csa, -1, bid_csa * CSA_E + in_blk_csa)
         tl.store(slot_csa_ptr + out_idx, slot_csa)
 
         # ---------- INDEXER: ratio=4, shares boundary with CSA but has own E/bt ----------
@@ -347,7 +349,8 @@ if _TRITON_AVAILABLE:
         in_blk_idx = safe_4 - bis_idx_raw * IDX_E
         bis_idx = tl.maximum(tl.minimum(bis_idx_raw, IDX_BT_STRIDE - 1), 0)
         bid_idx = tl.load(bt_idx_ptr + r * IDX_BT_STRIDE + bis_idx).to(tl.int64)
-        slot_idx = tl.where(skip_4, -1, bid_idx * IDX_E + in_blk_idx)
+        skip_idx = skip_4 | (bid_idx <= 0)
+        slot_idx = tl.where(skip_idx, -1, bid_idx * IDX_E + in_blk_idx)
         tl.store(slot_idx_ptr + out_idx, slot_idx)
 
         # ---------- HCA: ratio=128, boundary tokens only ----------
@@ -359,7 +362,8 @@ if _TRITON_AVAILABLE:
         in_blk_hca = safe_128 - bis_hca_raw * HCA_E
         bis_hca = tl.maximum(tl.minimum(bis_hca_raw, HCA_BT_STRIDE - 1), 0)
         bid_hca = tl.load(bt_hca_ptr + r * HCA_BT_STRIDE + bis_hca).to(tl.int64)
-        slot_hca = tl.where(skip_128, -1, bid_hca * HCA_E + in_blk_hca)
+        skip_hca = skip_128 | (bid_hca <= 0)
+        slot_hca = tl.where(skip_hca, -1, bid_hca * HCA_E + in_blk_hca)
         tl.store(slot_hca_ptr + out_idx, slot_hca)
 
 
