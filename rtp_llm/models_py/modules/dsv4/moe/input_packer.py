@@ -54,6 +54,7 @@ class TorchMegaMoeInputPacker(MegaMoeInputPacker):
             raise RuntimeError(
                 "DSV4_MOE_STRICT_FUSED=1 forbids TorchMegaMoeInputPacker"
             )
+        _clear_mega_moe_tail(buf, tokens)
         x_fp8, x_sf = _per_token_cast_to_fp8_packed_ue8m0(x.contiguous(), gran_k=32)
         buf.x[:tokens].copy_(x_fp8)
         buf.x_sf[:tokens].copy_(x_sf)
@@ -78,6 +79,7 @@ class FusedMegaMoeInputPacker(MegaMoeInputPacker):
                 f"hidden dim divisible by 128; got device={x.device}, "
                 f"dtype={x.dtype}, shape={tuple(x.shape)}"
             )
+        _clear_mega_moe_tail(buf, tokens)
         from ._mega_input_pack_triton import fused_pack_mega_moe_inputs
 
         fused_pack_mega_moe_inputs(
@@ -89,6 +91,18 @@ class FusedMegaMoeInputPacker(MegaMoeInputPacker):
             buf.topk_idx[:tokens],
             buf.topk_weights[:tokens],
         )
+
+
+def _clear_mega_moe_tail(buf, tokens: int) -> None:
+    if os.environ.get("DSV4_MEGA_MOE_CLEAR_TAIL", "0") != "1":
+        return
+    capacity = int(buf.topk_idx.shape[0])
+    if tokens >= capacity:
+        return
+    buf.x[tokens:].zero_()
+    buf.x_sf[tokens:].zero_()
+    buf.topk_idx[tokens:].fill_(-1)
+    buf.topk_weights[tokens:].zero_()
 
 
 def _mode() -> str:

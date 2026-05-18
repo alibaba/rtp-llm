@@ -50,6 +50,106 @@ from rtp_llm.models_py.modules.dsv4.qlinear import QuantizedLinear
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 
+def _parse_score_dump_ids() -> Tuple[int, ...]:
+    raw = os.environ.get("DSV4_INDEXER_SCORE_DUMP_IDS", "")
+    ids = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            ids.append(int(part))
+        except ValueError:
+            continue
+    return tuple(ids)
+
+
+def _parse_score_dump_layer() -> int:
+    try:
+        return int(os.environ.get("DSV4_INDEXER_SCORE_DUMP_LAYER", "-1"))
+    except ValueError:
+        return -1
+
+
+_SCORE_DUMP_ENABLED = os.environ.get("DSV4_INDEXER_SCORE_DUMP", "0") == "1"
+_SCORE_DUMP_LAYER = _parse_score_dump_layer()
+_SCORE_DUMP_IDS = _parse_score_dump_ids()
+_SCORE_DUMP_MODULES = []
+
+
+def dump_indexer_score_debug_tensors() -> Dict[str, torch.Tensor]:
+    tensors: Dict[str, torch.Tensor] = {
+        "indexer_score_debug_env": torch.tensor(
+            [
+                int(_SCORE_DUMP_ENABLED),
+                int(_SCORE_DUMP_LAYER),
+                int(len(_SCORE_DUMP_IDS)),
+                int(len(_SCORE_DUMP_MODULES)),
+            ],
+            dtype=torch.int32,
+        )
+    }
+    if _SCORE_DUMP_MODULES:
+        tensors["indexer_score_debug_layers"] = torch.tensor(
+            [int(getattr(m, "_debug_layer_id", -1)) for m in _SCORE_DUMP_MODULES],
+            dtype=torch.int32,
+        )
+        tensors["indexer_score_debug_enabled"] = torch.tensor(
+            [int(getattr(m, "_debug_score_dump_enabled", False)) for m in _SCORE_DUMP_MODULES],
+            dtype=torch.int32,
+        )
+    for module in list(_SCORE_DUMP_MODULES):
+        if not getattr(module, "_debug_score_dump_enabled", False):
+            continue
+        layer_id = int(getattr(module, "_debug_layer_id", -1))
+        prefix = f"L{layer_id:02d}_indexer_decode"
+        tensors[f"{prefix}_debug_flags"] = torch.tensor(
+            [
+                int(hasattr(module, "_debug_score_ids")),
+                int(hasattr(module, "_debug_score_values")),
+                int(hasattr(module, "_debug_score_start_pos")),
+                int(hasattr(module, "_debug_topk_head")),
+                int(hasattr(module, "_debug_score_written")),
+                int(module._debug_score_ids.is_cuda) if hasattr(module, "_debug_score_ids") else -1,
+                int(module._debug_score_values.is_cuda) if hasattr(module, "_debug_score_values") else -1,
+            ],
+            dtype=torch.int32,
+        )
+        try:
+            tensors[f"{prefix}_score_ids"] = (
+                module._debug_score_ids.detach().to(dtype=torch.int32).cpu().clone()
+            )
+            tensors[f"{prefix}_score_values"] = (
+                module._debug_score_values.detach().cpu().clone()
+            )
+            tensors[f"{prefix}_score_start_pos"] = (
+                module._debug_score_start_pos.detach().cpu().clone()
+            )
+            tensors[f"{prefix}_topk_head"] = (
+                module._debug_topk_head.detach().to(dtype=torch.int32).cpu().clone()
+            )
+            tensors[f"{prefix}_score_written"] = (
+                module._debug_score_written.detach().to(dtype=torch.int32).cpu().clone()
+            )
+            tensors[f"{prefix}_q_fp8_bytes"] = (
+                module._debug_q_fp8_bytes.detach().to(dtype=torch.uint8).cpu().clone()
+            )
+            tensors[f"{prefix}_w_fold"] = (
+                module._debug_w_fold.detach().cpu().clone()
+            )
+            tensors[f"{prefix}_kv_phys_ids"] = (
+                module._debug_kv_phys_ids.detach().to(dtype=torch.int32).cpu().clone()
+            )
+            tensors[f"{prefix}_kv_entry_bytes"] = (
+                module._debug_kv_entry_bytes.detach().to(dtype=torch.uint8).cpu().clone()
+            )
+            tensors[f"{prefix}_x"] = module._debug_x.detach().cpu().clone()
+            tensors[f"{prefix}_qr"] = module._debug_qr.detach().cpu().clone()
+        except Exception:
+            continue
+    return tensors
+
+
 def _as_bf16_contig(t: torch.Tensor) -> torch.Tensor:
     if t.dtype != torch.bfloat16:
         t = t.to(torch.bfloat16)
@@ -134,6 +234,43 @@ def _fp8_prefill_score_chunk_rows() -> int:
         "DSV4_FP8_INDEXER_SCORE_CHUNK_ROWS",
         min_value=0,
     )
+
+
+def _prefill_torch_topk_enabled() -> bool:
+    backend = os.environ.get("DSV4_INDEXER_TOPK_BACKEND", "auto").strip().lower()
+    legacy = os.environ.get("DSV4_TORCH_TOPK", "0").strip().lower()
+    return backend == "torch" or legacy in ("1", "true", "yes", "on")
+
+
+def _torch_top_k_per_row_prefill(
+    logits: torch.Tensor,
+    ks: torch.Tensor,
+    ke: torch.Tensor,
+    topk: int,
+) -> torch.Tensor:
+    """Reference TopK over each row's valid [ks, ke) window.
+
+    The CUDA prefill kernel returns global column indices and pads rows with
+    fewer than ``topk`` valid entries using ``-1``.  Keep that exact contract so
+    this path can be used as a deterministic debug oracle.
+    """
+    rows, cols = logits.shape
+    out = torch.full((rows, topk), -1, dtype=torch.int32, device=logits.device)
+    k_eff = min(int(topk), cols)
+    if rows == 0 or k_eff <= 0:
+        return out
+
+    ks_i32 = ks.to(device=logits.device, dtype=torch.int32).reshape(-1)
+    ke_i32 = ke.to(device=logits.device, dtype=torch.int32).reshape(-1)
+    col = torch.arange(cols, device=logits.device, dtype=torch.int32).view(1, cols)
+    valid = (col >= ks_i32.view(-1, 1)) & (col < ke_i32.view(-1, 1))
+    masked_logits = torch.where(valid, logits, torch.full_like(logits, float("-inf")))
+    idx = masked_logits.topk(k_eff, dim=-1, sorted=True).indices.to(torch.int32)
+    valid_counts = (ke_i32 - ks_i32).clamp_(min=0, max=cols)
+    rank = torch.arange(k_eff, device=logits.device, dtype=torch.int32).view(1, k_eff)
+    idx = torch.where(rank < valid_counts.view(-1, 1), idx, torch.full_like(idx, -1))
+    out[:, :k_eff].copy_(idx)
+    return out
 
 
 def _get_topk_workspace(device: torch.device) -> torch.Tensor:
@@ -225,6 +362,7 @@ class IndexerFP8(PoolBackedModule):
         max_seq_len: int,
         norm_eps: float = 1e-6,
         layer_weights: Optional[Dict[str, torch.Tensor]] = None,
+        layer_id: int = -1,
     ):
         """``layer_weights`` is the framework's per-layer dict
         (``ModelWeights.weights[layer_id]``), keyed by ``W.v4_*`` enum.
@@ -252,6 +390,104 @@ class IndexerFP8(PoolBackedModule):
         self.q_lora_rank = q_lora_rank
         self.softmax_scale = self.head_dim**-0.5
         self.compress_ratio = compress_ratio
+        self._debug_layer_id = int(layer_id)
+        self._debug_score_dump_enabled = (
+            _SCORE_DUMP_ENABLED
+            and bool(_SCORE_DUMP_IDS)
+            and (_SCORE_DUMP_LAYER < 0 or _SCORE_DUMP_LAYER == self._debug_layer_id)
+        )
+        self._debug_score_max_id = max(_SCORE_DUMP_IDS) if _SCORE_DUMP_IDS else -1
+        if self._debug_score_dump_enabled:
+            debug_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            dump_ids = torch.tensor(_SCORE_DUMP_IDS, dtype=torch.long, device=debug_device)
+            topk_head = max(1, min(index_topk, 32))
+            self.register_buffer("_debug_score_ids", dump_ids, persistent=False)
+            self.register_buffer(
+                "_debug_score_values",
+                torch.full(
+                    (max_batch_size, len(_SCORE_DUMP_IDS)),
+                    float("nan"),
+                    dtype=torch.float32,
+                    device=debug_device,
+                ),
+                persistent=False,
+            )
+            self.register_buffer(
+                "_debug_score_start_pos",
+                torch.full((max_batch_size,), -1, dtype=torch.int32, device=debug_device),
+                persistent=False,
+            )
+            self.register_buffer(
+                "_debug_topk_head",
+                torch.full(
+                    (max_batch_size, topk_head),
+                    -1,
+                    dtype=torch.int32,
+                    device=debug_device,
+                ),
+                persistent=False,
+            )
+            self.register_buffer(
+                "_debug_score_written",
+                torch.zeros((1,), dtype=torch.int32, device=debug_device),
+                persistent=False,
+            )
+            self.register_buffer(
+                "_debug_q_fp8_bytes",
+                torch.zeros(
+                    (max_batch_size, index_n_heads, index_head_dim),
+                    dtype=torch.uint8,
+                    device=debug_device,
+                ),
+                persistent=False,
+            )
+            self.register_buffer(
+                "_debug_w_fold",
+                torch.zeros(
+                    (max_batch_size, index_n_heads),
+                    dtype=torch.float32,
+                    device=debug_device,
+                ),
+                persistent=False,
+            )
+            self.register_buffer(
+                "_debug_kv_phys_ids",
+                torch.full(
+                    (max_batch_size, len(_SCORE_DUMP_IDS)),
+                    -1,
+                    dtype=torch.int32,
+                    device=debug_device,
+                ),
+                persistent=False,
+            )
+            self.register_buffer(
+                "_debug_kv_entry_bytes",
+                torch.zeros(
+                    (max_batch_size, len(_SCORE_DUMP_IDS), INDEXER_ENTRY_BYTES),
+                    dtype=torch.uint8,
+                    device=debug_device,
+                ),
+                persistent=False,
+            )
+            self.register_buffer(
+                "_debug_x",
+                torch.zeros(
+                    (max_batch_size, dim),
+                    dtype=torch.bfloat16,
+                    device=debug_device,
+                ),
+                persistent=False,
+            )
+            self.register_buffer(
+                "_debug_qr",
+                torch.zeros(
+                    (max_batch_size, q_lora_rank),
+                    dtype=torch.bfloat16,
+                    device=debug_device,
+                ),
+                persistent=False,
+            )
+            _SCORE_DUMP_MODULES.append(self)
 
         from rtp_llm.models_py.modules.dsv4.fp8.attention import _v4_fp8_linear
         from rtp_llm.utils.model_weight import W
@@ -452,6 +688,45 @@ class IndexerFP8(PoolBackedModule):
                 max_ctx_len=T_max,
             )  # [B*q_len, T_max] fp32
             score = logits.view(bsz, q_len, T_max)
+            if (
+                self._debug_score_dump_enabled
+                and q_len == 1
+                and self._debug_score_max_id < T_max
+            ):
+                flat_score = score.view(bsz, T_max)
+                self._debug_score_values[:bsz].copy_(
+                    flat_score.index_select(-1, self._debug_score_ids)
+                )
+                self._debug_score_start_pos[:bsz].copy_(
+                    start_pos.view(bsz).to(torch.int32)
+                )
+                self._debug_q_fp8_bytes[:bsz].copy_(
+                    q_fp8.view(torch.uint8).reshape(bsz, self.n_heads, self.head_dim)
+                )
+                self._debug_w_fold[:bsz].copy_(
+                    w_fold.view(bsz, self.n_heads).to(torch.float32)
+                )
+                self._debug_x[:bsz].copy_(x.view(bsz, -1).to(torch.bfloat16))
+                self._debug_qr[:bsz].copy_(qr.view(bsz, -1).to(torch.bfloat16))
+                block_idx = torch.div(
+                    self._debug_score_ids,
+                    self._kv_eb,
+                    rounding_mode="floor",
+                ).to(torch.long)
+                offsets = (self._debug_score_ids % self._kv_eb).to(torch.long)
+                block_ids = bt_i32[:bsz].to(torch.long).index_select(1, block_idx)
+                phys_ids = block_ids * int(self._kv_eb) + offsets.view(1, -1)
+                pool_bytes = pool_2d.view(torch.uint8).reshape(pool_2d.shape[0], -1)
+                selected_bytes = pool_bytes.index_select(
+                    0,
+                    phys_ids.reshape(-1),
+                ).view(bsz, self._debug_score_ids.numel(), -1)
+                entry_bytes = min(INDEXER_ENTRY_BYTES, selected_bytes.shape[-1])
+                self._debug_kv_phys_ids[:bsz].copy_(phys_ids.to(torch.int32))
+                self._debug_kv_entry_bytes[:bsz, :, :entry_bytes].copy_(
+                    selected_bytes[:, :, :entry_bytes]
+                )
+                self._debug_score_written.fill_(1)
 
             # TopK (with optional persistent radix-select)
             K_eff = min(K, T_max)
@@ -486,6 +761,11 @@ class IndexerFP8(PoolBackedModule):
                         1, K
                     )
                     out_topk_2d.masked_fill_(k_arange >= lengths_i32.view(-1, 1), -1)
+            if self._debug_score_dump_enabled and q_len == 1:
+                head = min(self._debug_topk_head.shape[-1], K)
+                self._debug_topk_head[:bsz, :head].copy_(
+                    out_topk_2d.view(bsz, K)[:, :head]
+                )
             return out_topk_buffer
         finally:
             self._clear_nested_pool()
@@ -893,6 +1173,7 @@ class IndexerFP8(PoolBackedModule):
             if not chunked_score:
                 score_chunk_rows = M
             out_buf = torch.empty((M, K), dtype=torch.int32, device=x.device)
+            torch_topk = _prefill_torch_topk_enabled()
 
             # Vendored CUDA per-row TopK over [ks[r], ke[r]). Causal mask is
             # implicit via ke = (q_pos+1)//ratio clamped to T; padding past
@@ -912,14 +1193,24 @@ class IndexerFP8(PoolBackedModule):
                     )  # [chunk_rows, T] fp32
 
                 with record_function_range("dsv4.fp8.indexer.prefill.topk"):
-                    _run_prefill_topk(
-                        logits,
-                        attention_inputs.ks[row_start:row_end],
-                        attention_inputs.ke[row_start:row_end],
-                        out_buf[row_start:row_end],
-                        K,
-                        self.compress_ratio,
-                    )
+                    if torch_topk:
+                        out_buf[row_start:row_end].copy_(
+                            _torch_top_k_per_row_prefill(
+                                logits,
+                                attention_inputs.ks[row_start:row_end],
+                                attention_inputs.ke[row_start:row_end],
+                                K,
+                            )
+                        )
+                    else:
+                        _run_prefill_topk(
+                            logits,
+                            attention_inputs.ks[row_start:row_end],
+                            attention_inputs.ke[row_start:row_end],
+                            out_buf[row_start:row_end],
+                            K,
+                            self.compress_ratio,
+                        )
                 del logits
 
             # Varlen path: TopK indices are global flat-K coords (matching

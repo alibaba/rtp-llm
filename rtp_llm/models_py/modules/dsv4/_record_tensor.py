@@ -60,6 +60,8 @@ def should_record_layer(layer_id: int) -> bool:
     """
     if not ENABLED:
         return False
+    if _get_buf() is None:
+        return False
     layer_filter = os.environ.get("MOEDBG_LAYER")
     if layer_filter:
         wanted = {int(x) for x in layer_filter.split(",") if x.strip()}
@@ -67,6 +69,28 @@ def should_record_layer(layer_id: int) -> bool:
     if os.environ.get("MOEDBG_ALL_LAYERS", "0") == "1":
         return True
     return layer_id <= 2
+
+
+def should_record_positions(positions: Any) -> bool:
+    """Forward-level gate for targeted debug dumps.
+
+    When MOEDBG_GLOBAL_POS is set, skip forwards that do not contain that
+    absolute position.  This keeps CUDA-graph warmup from writing debug
+    tensors while still allowing the real decode step to be captured.
+    """
+    if not ENABLED:
+        return False
+    if _DBG_GLOBAL_POS < 0:
+        return True
+    if positions is None:
+        return False
+    try:
+        if isinstance(positions, torch.Tensor):
+            pos = positions.detach().to(dtype=torch.long).view(-1)
+            return bool((pos == int(_DBG_GLOBAL_POS)).any().item())
+        return int(positions) == int(_DBG_GLOBAL_POS)
+    except Exception:
+        return False
 
 
 def _trim_tensor(tensor: torch.Tensor) -> torch.Tensor:

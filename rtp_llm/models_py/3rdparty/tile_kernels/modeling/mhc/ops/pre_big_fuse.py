@@ -36,6 +36,13 @@ def _requested_backend() -> str:
     return aliases.get(requested, requested)
 
 
+def _requested_num_split_override() -> int:
+    raw = os.environ.get("DSV4_MHC_PRE_NUM_SPLIT_OVERRIDE", "").strip()
+    if not raw:
+        return 0
+    return max(int(raw), 1)
+
+
 def _run_tilelang_single_gemm(
     residual_flat: torch.Tensor,
     fn: torch.Tensor,
@@ -111,7 +118,8 @@ def mhc_pre_big_fuse(
     block_k = 64
     block_m = 64
     n_splits = (
-        _compute_num_split(block_k, mhc_hidden_size, _ceil_div(num_tokens, block_m))
+        _requested_num_split_override()
+        or _compute_num_split(block_k, mhc_hidden_size, _ceil_div(num_tokens, block_m))
         if backend in ("deepgemm", "tilelang_splitk")
         else 1
     )

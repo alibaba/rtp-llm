@@ -30,6 +30,7 @@ The eager path is unchanged.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import os
 from typing import Dict, List, Optional, Tuple
 
 import torch
@@ -39,6 +40,85 @@ from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_attn_metadata import (
     allocate_decode_metadata_fp8,
     update_decode_metadata_in_place_fp8,
 )
+
+_META_DUMP = os.environ.get("DSV4_META_DUMP", "0") == "1"
+_META_DUMP_DIR = os.environ.get("DSV4_META_DUMP_DIR", "/tmp/dsv4_meta_dump")
+_META_DUMP_CASE = os.environ.get("DSV4_META_DUMP_CASE", "default")
+_META_DUMP_POS = int(os.environ.get("DSV4_META_DUMP_POS", "-1"))
+
+
+def _meta_dump_match(start_pos: torch.Tensor, offset: int = 0) -> bool:
+    if not _META_DUMP:
+        return False
+    if _META_DUMP_POS < 0:
+        return True
+    pos = start_pos.detach().to(dtype=torch.long).view(-1)
+    return bool((pos == (_META_DUMP_POS + offset)).any().item())
+
+
+def _meta_dump_tensor(t: Optional[torch.Tensor], limit: int = 2048) -> Optional[torch.Tensor]:
+    if t is None:
+        return None
+    flat = t.detach().cpu()
+    if flat.numel() <= limit:
+        return flat.clone()
+    return flat.reshape(-1)[:limit].clone()
+
+
+def _dump_decode_meta(
+    metadata: DSv4DecodeAttnMetadataFP8,
+    tag: str,
+    start_pos: torch.Tensor,
+    paged_block_tables: Optional[Dict[int, torch.Tensor]],
+) -> None:
+    out_dir = os.path.join(_META_DUMP_DIR, _META_DUMP_CASE)
+    os.makedirs(out_dir, exist_ok=True)
+    step = getattr(metadata, "_debug_meta_dump_step", 0)
+    tensors = {
+        "start_pos": _meta_dump_tensor(start_pos),
+        "meta_start_pos": _meta_dump_tensor(metadata.start_pos),
+        "swa_abs_idx": _meta_dump_tensor(metadata.swa_abs_idx),
+        "swa_global_slots": _meta_dump_tensor(metadata.swa_global_slots),
+        "topk_buffer_compressed": _meta_dump_tensor(metadata.topk_buffer_compressed),
+    }
+    for at, bt in metadata.pool_block_tables.items():
+        tensors[f"meta_block_table_{at}"] = _meta_dump_tensor(bt, limit=4096)
+    for at, slot in metadata.pool_write_slot_mappings.items():
+        tensors[f"meta_write_slot_{at}"] = _meta_dump_tensor(slot, limit=4096)
+    for r, lens in metadata.compressed_lens.items():
+        tensors[f"compressed_lens_{r}"] = _meta_dump_tensor(lens)
+    for r, total in metadata.topk_total_by_ratio.items():
+        tensors[f"topk_total_{r}"] = _meta_dump_tensor(total, limit=4096)
+    if paged_block_tables is not None:
+        for at, bt in paged_block_tables.items():
+            tensors[f"src_block_table_{at}"] = _meta_dump_tensor(bt, limit=4096)
+    try:
+        from rtp_llm.models_py.modules.dsv4.fp8.indexer import (
+            dump_indexer_score_debug_tensors,
+        )
+
+        tensors.update(dump_indexer_score_debug_tensors())
+    except Exception:
+        pass
+    try:
+        from rtp_llm.models_py.modules.dsv4.block import dump_block_debug_tensors
+
+        tensors.update(dump_block_debug_tensors())
+    except Exception:
+        pass
+    try:
+        from rtp_llm.models_py.modules.dsv4.fp8.attention import (
+            dump_attention_debug_tensors,
+        )
+
+        tensors.update(dump_attention_debug_tensors())
+    except Exception:
+        pass
+    tensors = {k: v for k, v in tensors.items() if v is not None}
+    path = os.path.join(out_dir, f"pid{os.getpid()}_step{step:04d}_{tag}.pt")
+    torch.save({"tag": tag, "tensors": tensors}, path)
+    print(f"[DSV4_META_DUMP] dumped {path}", flush=True)
+    metadata._debug_meta_dump_step = step + 1
 
 
 @dataclass
@@ -145,6 +225,14 @@ class DSv4DecodeFmhaImplFP8:
                         continue
                     paged_block_tables[attn_type] = group_block_table
 
+        if _meta_dump_match(start_pos, offset=1):
+            _dump_decode_meta(
+                self.metadata,
+                "pre_update_prev_step",
+                start_pos,
+                paged_block_tables,
+            )
+
         update_decode_metadata_in_place_fp8(
             self.metadata,
             attn_inputs,
@@ -152,6 +240,14 @@ class DSv4DecodeFmhaImplFP8:
             paged_block_tables=paged_block_tables,
             paged_pool_entries_per_block=self._paged_entries_per_block,
         )
+
+        if _meta_dump_match(start_pos, offset=0):
+            _dump_decode_meta(
+                self.metadata,
+                "post_update_this_step",
+                start_pos,
+                paged_block_tables,
+            )
 
     def prepare_cuda_graph(self, attn_inputs) -> None:
         """Called by ``CudaGraphRunner::prepareInputs`` between every

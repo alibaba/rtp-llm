@@ -13,6 +13,7 @@ available. Direct port of the pre-refactor ``_setup_mega_moe`` +
 from __future__ import annotations
 
 import logging
+import os
 from typing import Dict, Optional
 
 import torch
@@ -353,6 +354,6 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
             activation_clamp=(
                 self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None
             ),
-            fast_math=True,
+            fast_math=os.environ.get("DSV4_MEGA_MOE_FAST_MATH", "1") != "0",
         )
         return y

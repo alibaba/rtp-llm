@@ -57,14 +57,19 @@ def decode_compute_qkv(
     qr = attn._rmsnorm_weighted(
         attn._lin(attn.wq_a, x), attn.q_norm
     )  # [B, 1, q_lora_rank]
-    q = attn._lin(attn.wq_b, qr).unflatten(
+    q_linear = attn._lin(attn.wq_b, qr).unflatten(
         -1, (attn.n_heads, attn.head_dim)
     )  # [B, S, H, D]
-    q = fused_rmsnorm_rope(q, None, freqs_cis, rd, eps=attn.eps)
+    if getattr(attn, "_debug_attn_dump_enabled", False):
+        attn._debug_q_linear[: x.size(0)].copy_(q_linear.to(torch.bfloat16))
+    q = fused_rmsnorm_rope(q_linear, None, freqs_cis, rd, eps=attn.eps)
 
     # KV path (single MQA head) — per-token RoPE using the same table lookup.
+    kv_linear = attn._lin(attn.wkv, x)
+    if getattr(attn, "_debug_attn_dump_enabled", False):
+        attn._debug_kv_linear[: x.size(0)].copy_(kv_linear.to(torch.bfloat16))
     kv = fused_rmsnorm_rope(
-        attn._lin(attn.wkv, x),
+        kv_linear,
         attn.kv_norm,
         freqs_cis,
         rd,

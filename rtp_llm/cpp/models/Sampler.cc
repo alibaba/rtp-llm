@@ -6,10 +6,111 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include <unordered_set>
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include <cctype>
+#include <cstdlib>
+#include <fstream>
+#include <mutex>
+#include <string>
+#include <vector>
 
 using namespace std;
 
 namespace rtp_llm {
+
+namespace {
+
+const std::vector<int32_t>& teacherForceTokens() {
+    static std::once_flag        once;
+    static std::vector<int32_t>  tokens;
+    static std::string           path;
+    std::call_once(once, []() {
+        const char* env_path = std::getenv("RTP_TEACHER_FORCE_TOKENS");
+        if (env_path == nullptr || env_path[0] == '\0') {
+            return;
+        } else {
+            path = env_path;
+        }
+        std::ifstream in(path);
+        if (!in.good()) {
+            RTP_LLM_LOG_WARNING("RTP_TEACHER_FORCE_TOKENS set but cannot open file: %s", path.c_str());
+            return;
+        }
+        std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        int64_t     value = 0;
+        int         sign  = 1;
+        bool        seen  = false;
+        for (char ch : text) {
+            if (ch == '-' && !seen) {
+                sign = -1;
+                seen = true;
+                value = 0;
+            } else if (std::isdigit(static_cast<unsigned char>(ch))) {
+                if (!seen) {
+                    sign = 1;
+                    value = 0;
+                    seen = true;
+                }
+                value = value * 10 + (ch - '0');
+            } else if (seen) {
+                tokens.push_back(static_cast<int32_t>(sign * value));
+                seen = false;
+                value = 0;
+                sign = 1;
+            }
+        }
+        if (seen) {
+            tokens.push_back(static_cast<int32_t>(sign * value));
+        }
+        RTP_LLM_LOG_INFO("Loaded %zu RTP teacher-force tokens from %s", tokens.size(), path.c_str());
+    });
+    return tokens;
+}
+
+int teacherForceOffset() {
+    const char* env_offset = std::getenv("RTP_TEACHER_FORCE_OFFSET");
+    if (env_offset == nullptr || env_offset[0] == '\0') {
+        return 1;
+    }
+    return std::atoi(env_offset);
+}
+
+void applyTeacherForceLogits(const SamplerInputs& inputs) {
+    const auto& tokens = teacherForceTokens();
+    if (tokens.empty() || !inputs.logits.defined() || !inputs.input_lengths.defined()
+        || !inputs.sequence_lengths.defined()) {
+        return;
+    }
+    const int offset = teacherForceOffset();
+    auto* input_lengths    = inputs.input_lengths.data_ptr<int32_t>();
+    auto* sequence_lengths = inputs.sequence_lengths.data_ptr<int32_t>();
+    const int64_t rows     = inputs.logits.size(0);
+    const int64_t vocab    = inputs.logits.size(1);
+    for (int64_t row_idx = 0; row_idx < rows; ++row_idx) {
+        const int64_t oracle_idx = static_cast<int64_t>(sequence_lengths[row_idx]) - input_lengths[row_idx] + offset;
+        if (oracle_idx < 0 || oracle_idx >= static_cast<int64_t>(tokens.size())) {
+            continue;
+        }
+        const int64_t token_id = static_cast<int64_t>(tokens[oracle_idx]);
+        if (token_id < 0 || token_id >= vocab) {
+            RTP_LLM_LOG_WARNING("RTP teacher-force token out of vocab: oracle_idx=%ld token=%ld vocab=%ld",
+                                oracle_idx,
+                                token_id,
+                                vocab);
+            continue;
+        }
+        auto row = inputs.logits.select(0, row_idx);
+        row.fill_(-1.0e20f);
+        row.narrow(0, token_id, 1).fill_(1.0e20f);
+        RTP_LLM_LOG_DEBUG("RTP teacher-force row=%ld seq=%d input=%d oracle_idx=%ld token=%ld",
+                          row_idx,
+                          sequence_lengths[row_idx],
+                          input_lengths[row_idx],
+                          oracle_idx,
+                          token_id);
+    }
+}
+
+}  // namespace
 
 Sampler::Sampler(const SamplerInitParams& params) {}
 
@@ -27,6 +128,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     };
 
     preprocessLogits(inputs);
+    applyTeacherForceLogits(inputs);
 
     uint64_t max_seq_len   = inputs.token_ids.size(1);
     auto     num_beams_in  = inputs.num_beams_in.data_ptr<int64_t>();

@@ -19,6 +19,9 @@ decode impl.
 
 from __future__ import annotations
 
+import hashlib
+import os
+import re
 from typing import Any, Dict, Optional, Tuple
 
 import torch
@@ -33,6 +36,87 @@ from rtp_llm.models_py.modules.dsv4.attn_type import (
     INDEXER_STATE,
     SWA_KV,
 )
+
+_DECODE_DUMP = os.environ.get("DSV4_DECODE_DUMP", "0") == "1"
+_DECODE_DUMP_DIR = os.environ.get("DSV4_DECODE_DUMP_DIR", "/tmp/dsv4_decode_dump")
+_DECODE_DUMP_CASE = os.environ.get("DSV4_DECODE_DUMP_CASE", "default")
+_DECODE_DUMP_POS = int(os.environ.get("DSV4_DECODE_DUMP_POS", "-1"))
+_DECODE_DUMP_FULL_THRESHOLD = int(
+    os.environ.get("DSV4_DECODE_DUMP_FULL_THRESHOLD", "2000000")
+)
+_DECODE_DUMP_NAME_REGEX = os.environ.get("DSV4_DECODE_DUMP_NAME_REGEX", "")
+_DECODE_DUMP_NAME_RE = (
+    re.compile(_DECODE_DUMP_NAME_REGEX) if _DECODE_DUMP_NAME_REGEX else None
+)
+
+
+def _decode_dump_matches_pos(start_pos: Optional[torch.Tensor]) -> bool:
+    if not _DECODE_DUMP:
+        return False
+    try:
+        if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
+            return False
+    except Exception:
+        return False
+    if _DECODE_DUMP_POS < 0:
+        return True
+    if start_pos is None:
+        return False
+    pos = start_pos.detach().to(dtype=torch.long).view(-1)
+    return bool((pos == _DECODE_DUMP_POS).any().item())
+
+
+def _decode_dump_record(buf: Dict[str, torch.Tensor], name: str, tensor: torch.Tensor) -> None:
+    if _DECODE_DUMP_NAME_RE is not None and _DECODE_DUMP_NAME_RE.search(name) is None:
+        return
+    buf[name] = tensor.detach().clone()
+
+
+def _decode_dump_snapshot(tensor: torch.Tensor) -> Dict[str, Any]:
+    cpu_t = tensor.detach().to(torch.float32).cpu()
+    n = cpu_t.numel()
+    return {
+        "hash": hashlib.md5(cpu_t.contiguous().numpy().tobytes()).hexdigest(),
+        "stats": {
+            "shape": tuple(cpu_t.shape),
+            "dtype": str(tensor.dtype),
+            "mean": cpu_t.mean().item() if n > 0 else 0.0,
+            "std": cpu_t.std().item() if n > 1 else 0.0,
+            "abs_max": cpu_t.abs().max().item() if n > 0 else 0.0,
+            "n_nan": int(torch.isnan(cpu_t).sum().item()),
+            "n_inf": int(torch.isinf(cpu_t).sum().item()),
+            "numel": n,
+        },
+        "tensor": cpu_t if n <= _DECODE_DUMP_FULL_THRESHOLD else None,
+    }
+
+
+def _decode_dump_write(v4: Any, buf: Dict[str, torch.Tensor], extra: Dict[str, Any]) -> None:
+    if not buf:
+        return
+    try:
+        import torch.distributed as dist
+
+        rank = dist.get_rank() if dist.is_initialized() else 0
+    except Exception:
+        rank = 0
+    out_dir = os.path.join(_DECODE_DUMP_DIR, _DECODE_DUMP_CASE)
+    os.makedirs(out_dir, exist_ok=True)
+    torch.cuda.synchronize()
+    tensors: Dict[str, torch.Tensor] = {}
+    hashes: Dict[str, str] = {}
+    stats: Dict[str, Dict[str, Any]] = {}
+    for name, tensor in buf.items():
+        snap = _decode_dump_snapshot(tensor)
+        hashes[name] = snap["hash"]
+        stats[name] = snap["stats"]
+        if snap["tensor"] is not None:
+            tensors[name] = snap["tensor"]
+    step = getattr(v4, "_decode_dump_step", 0)
+    fpath = os.path.join(out_dir, f"rank{rank}_pid{os.getpid()}_step{step:03d}.pt")
+    torch.save({"tensors": tensors, "hashes": hashes, "stats": stats, "extra": extra}, fpath)
+    print(f"[DSV4_DECODE_DUMP] dumped {fpath} tensors={len(buf)}", flush=True)
+    v4._decode_dump_step = step + 1
 
 
 def build_paged_pool_specs(
@@ -229,6 +313,7 @@ def forward_layers(
     input_ids: torch.Tensor,  # [T_total]
     attn_metadata: Any,  # DSv4DecodeAttnMetadata
     prepare_hidden_fn: Optional[Any] = None,
+    dump_buf: Optional[Dict[str, torch.Tensor]] = None,
 ) -> torch.Tensor:
     """qwen3-style decode per-layer loop. Same body shape as the prefill
     helper (:func:`rtp_llm.models_py.modules.dsv4.prefill.forward.forward_layers`)
@@ -247,21 +332,32 @@ def forward_layers(
 
     _rt_on = _rt.ENABLED
     if _rt_on:
-        _rt.begin(seqlen=int(input_ids.numel()))
+        if not _rt.should_record_positions(
+            attn_metadata.start_pos[: attn_metadata.batch_size]
+        ):
+            _rt_on = False
+        else:
+            _rt.begin(seqlen=int(input_ids.numel()))
         if _rt._get_buf() is None:
             _rt_on = False
 
     if prepare_hidden_fn is None:
         h = v4.embed(input_ids).view(B, q_len, -1)  # [B, q_len, dim]
+        if dump_buf is not None:
+            _decode_dump_record(dump_buf, "embed_out", h)
         if _rt_on:
             _rt.record("decode_embed_out", h)
         h = h.unsqueeze(2).repeat(1, 1, v4.hc_mult, 1)  # [B, q_len, hc, dim]
     else:
         h = prepare_hidden_fn(input_ids=input_ids, meta=attn_metadata)
+    if dump_buf is not None:
+        _decode_dump_record(dump_buf, "embed_hc_expanded", h)
     if _rt_on:
         _rt.record("decode_embed_hc_expanded", h)
     for layer in v4.layers:
         h = layer.forward_decode(h, attn_metadata, input_ids, kv_cache=kv_cache)
+        if dump_buf is not None:
+            _decode_dump_record(dump_buf, f"layer{layer.layer_id:02d}_out", h)
         if _rt_on:
             _rt.record(f"decode_layer{layer.layer_id:02d}_out", h)
     if getattr(v4, "_mtp_hidden_buffer", None) is not None:
@@ -275,6 +371,8 @@ def forward_layers(
     # Framework RMSNorm wants 2D — collapse [B, q_len, dim] then view back.
     bsz, q_len, dim_ = h.shape
     h = v4.norm(h.reshape(bsz * q_len, dim_)).view(bsz, q_len, dim_)
+    if dump_buf is not None:
+        _decode_dump_record(dump_buf, "final_norm", h)
     if _rt_on:
         _rt.record("decode_final_norm", h)
         step = getattr(v4, "_dbg_step", 0)
@@ -381,11 +479,23 @@ def forward_decode(
     q_len = meta.q_len_per_req
     _rt_on = _rt.ENABLED
     if _rt_on:
-        _rt.begin(seqlen=int(input_ids.numel()))
-        if _rt._get_buf() is None:
+        start_pos_for_dbg = getattr(meta, "start_pos", None)
+        if not _rt.should_record_positions(start_pos_for_dbg):
             _rt_on = False
         else:
-            _rt.record("decode_input_ids", input_ids)
+            _rt.begin(seqlen=int(input_ids.numel()))
+            if _rt._get_buf() is None:
+                _rt_on = False
+            else:
+                _rt.record("decode_input_ids", input_ids)
+
+    start_pos_for_decode_dump = getattr(meta, "start_pos", None)
+    dump_buf: Optional[Dict[str, torch.Tensor]] = None
+    if _decode_dump_matches_pos(start_pos_for_decode_dump):
+        dump_buf = {}
+        _decode_dump_record(dump_buf, "input_ids", input_ids)
+        if start_pos_for_decode_dump is not None:
+            _decode_dump_record(dump_buf, "positions", start_pos_for_decode_dump)
 
     h = forward_layers(
         v4,
@@ -393,8 +503,32 @@ def forward_decode(
         input_ids,
         meta,
         prepare_hidden_fn=prepare_hidden_fn,
+        dump_buf=dump_buf,
     )  # [B, q_len, dim]
     hidden = h.reshape(B * q_len, v4_args.dim)  # packed [T_total, dim]
+    if dump_buf is not None:
+        _decode_dump_record(dump_buf, "final_hidden", hidden)
+        lm_logits = torch.mm(
+            hidden.to(v4.head_weight.dtype), v4.head_weight.t()
+        ).float()
+        _decode_dump_record(dump_buf, "lm_logits", lm_logits)
+        top_k = min(16, lm_logits.size(-1))
+        lm_top_values, lm_top_indices = torch.topk(lm_logits, k=top_k, dim=-1)
+        _decode_dump_record(dump_buf, "lm_top_values", lm_top_values)
+        _decode_dump_record(dump_buf, "lm_top_indices", lm_top_indices)
+        extra = {
+            "path": "decode_forward",
+            "input_ids_shape": tuple(input_ids.shape),
+            "input_ids": input_ids.detach().cpu(),
+            "batch_size": int(B),
+            "q_len": int(q_len),
+        }
+        seq_lens = getattr(attn, "sequence_lengths", None)
+        if seq_lens is not None:
+            extra["sequence_lengths"] = seq_lens.detach().cpu()
+        if start_pos_for_decode_dump is not None:
+            extra["positions"] = start_pos_for_decode_dump.detach().cpu()
+        _decode_dump_write(v4, dump_buf, extra)
     if _rt_on:
         _rt.record("decode_hidden", hidden)
         lm_logits = torch.mm(

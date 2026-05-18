@@ -114,6 +114,152 @@ def _flat_1d(t: torch.Tensor) -> torch.Tensor:
     return t.reshape(-1).contiguous()
 
 
+def _dbg_layer_enabled(layer_id: int) -> bool:
+    try:
+        from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
+
+        return _rt.should_record_layer(layer_id)
+    except Exception:
+        return False
+
+
+def _dbg_global_pos_index(common: "PrefillMeta") -> Optional[int]:
+    try:
+        from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
+
+        dbg_pos = int(getattr(_rt, "_DBG_GLOBAL_POS", -1))
+    except Exception:
+        return None
+    if dbg_pos < 0:
+        return None
+    if common.cp_ctx is not None and getattr(common.cp_ctx, "global_positions", None) is not None:
+        mask = common.cp_ctx.global_positions.to(torch.long) == dbg_pos
+        if getattr(common.cp_ctx, "local_is_real", None) is not None:
+            mask = mask & common.cp_ctx.local_is_real
+        idx = torch.nonzero(mask, as_tuple=False).flatten()
+        return int(idx[0].item()) if idx.numel() > 0 else None
+    if common.freqs_cis.dim() == 2:
+        idx = dbg_pos - int(common.sp_int)
+        if 0 <= idx < int(common.seqlen):
+            return idx
+    return None
+
+
+def _dbg_record(layer_id: int, name: str, tensor: torch.Tensor) -> None:
+    try:
+        from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
+
+        _rt.record_if_level(2, f"L{layer_id:02d}_{name}", tensor)
+    except Exception:
+        return
+
+
+def _parse_attn_dump_layers() -> set[int]:
+    layers: set[int] = set()
+    for part in os.environ.get("DSV4_ATTN_DUMP_LAYERS", "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            layers.add(int(part))
+        except ValueError:
+            continue
+    return layers
+
+
+_ATTN_DUMP_ENABLED = os.environ.get("DSV4_ATTN_DUMP", "0") == "1"
+_ATTN_DUMP_LAYERS = _parse_attn_dump_layers()
+_ATTN_DUMP_MODULES = []
+
+
+def dump_attention_debug_tensors() -> Dict[str, torch.Tensor]:
+    tensors: Dict[str, torch.Tensor] = {
+        "attn_debug_env": torch.tensor(
+            [
+                int(_ATTN_DUMP_ENABLED),
+                int(len(_ATTN_DUMP_LAYERS)),
+                int(len(_ATTN_DUMP_MODULES)),
+            ],
+            dtype=torch.int32,
+        )
+    }
+    if _ATTN_DUMP_MODULES:
+        tensors["attn_debug_layers"] = torch.tensor(
+            [int(getattr(m, "layer_id", -1)) for m in _ATTN_DUMP_MODULES],
+            dtype=torch.int32,
+        )
+    for module in list(_ATTN_DUMP_MODULES):
+        if not getattr(module, "_debug_attn_dump_enabled", False):
+            continue
+        prefix = f"L{int(module.layer_id):02d}_attn_decode"
+        try:
+            for name in ("q", "kv", "q_linear", "kv_linear", "swa_topk", "o_heads"):
+                tensors[f"{prefix}_{name}"] = (
+                    getattr(module, f"_debug_{name}").detach().cpu().clone()
+                )
+        except Exception:
+            continue
+    return tensors
+
+
+def _prefill_swa_fp8_roundtrip_enabled() -> bool:
+    return os.environ.get("DSV4_PREFILL_SWA_FP8_ROUNDTRIP", "0") == "1"
+
+
+def _prefill_swa_fp8_roundtrip_min_tokens() -> int:
+    try:
+        return int(os.environ.get("DSV4_PREFILL_SWA_FP8_ROUNDTRIP_MIN_TOKENS", "0"))
+    except ValueError:
+        return 0
+
+
+def _fp8_roundtrip_k_temp(k_bf16: torch.Tensor, block_size: int = 256) -> torch.Tensor:
+    """Quantize/dequantize K with the fp8_ds_mla token layout, without BlockPool.
+
+    This is a debug/reference helper for prefill numeric alignment with vLLM.
+    RTP's SWA BlockPool is tail-only during long cold prefill, so it cannot
+    be used to read the whole current prompt back. A temporary full block
+    table gives the same per-token FP8 round-trip without changing cache
+    allocation semantics.
+    """
+    from rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton import (
+        dequantize_and_gather_k_cache,
+    )
+    from rtp_llm.models_py.modules.dsv4.fp8._swa_kv_insert_triton import (
+        quantize_and_insert_k_cache,
+    )
+
+    head_dim = int(k_bf16.shape[-1])
+    assert head_dim == 512, f"SWA FP8 round-trip expects head_dim=512, got {head_dim}"
+    flat = k_bf16.reshape(-1, head_dim)
+    if flat.dtype != torch.bfloat16:
+        flat = flat.to(torch.bfloat16)
+    T = int(flat.shape[0])
+    if T == 0:
+        return flat
+    num_blocks = (T + block_size - 1) // block_size
+    temp_cache = torch.zeros(
+        (num_blocks, block_size, _DSV4_FP8_KV_ENTRY_BYTES),
+        dtype=torch.uint8,
+        device=flat.device,
+    )
+    slot_mapping = torch.arange(T, dtype=torch.long, device=flat.device)
+    quantize_and_insert_k_cache(flat, temp_cache, slot_mapping)
+    out = torch.zeros((1, T, head_dim), dtype=torch.bfloat16, device=flat.device)
+    seq_lens = torch.tensor([T], dtype=torch.int32, device=flat.device)
+    block_table = torch.arange(num_blocks, dtype=torch.int32, device=flat.device).view(1, -1)
+    dequantize_and_gather_k_cache(
+        out=out,
+        k_cache=temp_cache,
+        seq_lens=seq_lens,
+        gather_lens=None,
+        block_table=block_table,
+        block_size=block_size,
+        offset=0,
+    )
+    return out.reshape(T, head_dim)
+
+
 _V4_FP8_BLOCK_CFG = Fp8BlockWiseQuantConfig()
 
 _DSV4_FP8_KV_ENTRY_BYTES = 584
@@ -649,6 +795,68 @@ class AttentionFP8(nn.Module):
         self.softmax_scale = head_dim**-0.5
         self.tp_size = tp_size
         self.tp_rank = tp_rank
+        self._debug_attn_dump_enabled = (
+            _ATTN_DUMP_ENABLED
+            and (not _ATTN_DUMP_LAYERS or int(layer_id) in _ATTN_DUMP_LAYERS)
+        )
+        if self._debug_attn_dump_enabled:
+            debug_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            self.register_buffer(
+                "_debug_q",
+                torch.zeros(
+                    (max_batch_size, 1, n_heads, head_dim),
+                    dtype=torch.bfloat16,
+                    device=debug_device,
+                ),
+                persistent=False,
+            )
+            self.register_buffer(
+                "_debug_kv",
+                torch.zeros(
+                    (max_batch_size, 1, head_dim),
+                    dtype=torch.bfloat16,
+                    device=debug_device,
+                ),
+                persistent=False,
+            )
+            self.register_buffer(
+                "_debug_swa_topk",
+                torch.full(
+                    (max_batch_size, 1, window_size),
+                    -1,
+                    dtype=torch.int32,
+                    device=debug_device,
+                ),
+                persistent=False,
+            )
+            self.register_buffer(
+                "_debug_q_linear",
+                torch.zeros(
+                    (max_batch_size, 1, n_heads, head_dim),
+                    dtype=torch.bfloat16,
+                    device=debug_device,
+                ),
+                persistent=False,
+            )
+            self.register_buffer(
+                "_debug_kv_linear",
+                torch.zeros(
+                    (max_batch_size, 1, head_dim),
+                    dtype=torch.bfloat16,
+                    device=debug_device,
+                ),
+                persistent=False,
+            )
+            self.register_buffer(
+                "_debug_o_heads",
+                torch.zeros(
+                    (max_batch_size, 1, n_heads, head_dim),
+                    dtype=torch.bfloat16,
+                    device=debug_device,
+                ),
+                persistent=False,
+            )
+            _ATTN_DUMP_MODULES.append(self)
         # Per-rank head + group counts (S7a). Sharding only kicks in when
         # tp_size > 1; tp_size==1 keeps everything bit-exact unchanged.
         assert (
@@ -817,6 +1025,7 @@ class AttentionFP8(nn.Module):
                     max_seq_len=max_seq_len,
                     norm_eps=norm_eps,
                     layer_weights=layer_weights,
+                    layer_id=layer_id,
                 )
 
                 # Configure nested indexer compressor shape hint so warmup
@@ -1833,6 +2042,9 @@ class AttentionFP8(nn.Module):
 
         self._ensure_freqs_cis_bound()
         qkv = decode_compute_qkv(self, x, position_ids)
+        if self._debug_attn_dump_enabled:
+            self._debug_q[:bsz].copy_(qkv.q.to(torch.bfloat16))
+            self._debug_kv[:bsz].copy_(qkv.kv.to(torch.bfloat16))
         self._decode_write_swa_fp8(qkv.kv, bsz, q_len, attn_metadata)
 
         if self.compress_ratio == 0:
@@ -2006,6 +2218,8 @@ class AttentionFP8(nn.Module):
                 self._pool_entries_per_block(SWA_KV),
             )
         swa_topk_3d = swa_global.view(bsz, q_len, win).contiguous()
+        if self._debug_attn_dump_enabled:
+            self._debug_swa_topk[:bsz, :, :win].copy_(swa_topk_3d.to(torch.int32))
 
         sched_meta = get_or_build_sched_meta(
             attn_metadata,
@@ -2015,7 +2229,7 @@ class AttentionFP8(nn.Module):
             topk=self.window_size,
             extra_attn_type=None,
         )
-        return attn_fp8_swa_paged(
+        out = attn_fp8_swa_paged(
             q=q,
             swa_pool_3d=swa_pool_3d,
             attn_sink=self.attn_sink,
@@ -2025,6 +2239,9 @@ class AttentionFP8(nn.Module):
             sched_meta=sched_meta,
             fp8_op=self._get_fp8_decode_op(),
         )
+        if self._debug_attn_dump_enabled:
+            self._debug_o_heads[:bsz].copy_(out.to(torch.bfloat16))
+        return out
 
     def _forward_decode_csa(
         self,
@@ -2319,6 +2536,14 @@ class AttentionFP8(nn.Module):
             common = self._prefill_common_setup(x, positions)
         with record_function_range("dsv4.fp8.attn.prefill.compute_qkv"):
             qkv = self._prefill_compute_qkv(x, common)
+        if _dbg_layer_enabled(self.layer_id):
+            dbg_idx = _dbg_global_pos_index(common)
+            if dbg_idx is not None:
+                _dbg_record(
+                    self.layer_id,
+                    "fp8_attn_q_pos",
+                    qkv.q[dbg_idx : dbg_idx + 1],
+                )
         # SWA pool write — every FP8 layer populates the SWA pool for
         # downstream decode. Safe to do before attention because new K
         # (abs pos [sp, sp+S)) and any cont-prefill prefix tail
@@ -2353,8 +2578,10 @@ class AttentionFP8(nn.Module):
         otherwise) so a B>1 batch with any continuation request takes the
         workspace path."""
         if not common.any_cont or self._kv_cache is None:
-            with record_function_range("dsv4.fp8.attn.swa.via_kv_full"):
-                o = self._attn_fp8_swa_via_kv_full(qkv, common)
+            o = self._attn_fp8_swa_via_cache_full(qkv, common)
+            if o is None:
+                with record_function_range("dsv4.fp8.attn.swa.via_kv_full"):
+                    o = self._attn_fp8_swa_via_kv_full(qkv, common)
         else:
             with record_function_range("dsv4.fp8.attn.swa.via_concat"):
                 o = self._attn_fp8_swa_via_concat(qkv, common)
@@ -2388,6 +2615,14 @@ class AttentionFP8(nn.Module):
         # batched flat caller hits the same code path without rewrapping.
         with record_function_range("dsv4.fp8.attn.csa.indexer"):
             raw = self.indexer(x, qkv.qr, common.csa_meta.indexer_meta)
+        if _dbg_layer_enabled(self.layer_id):
+            dbg_idx = _dbg_global_pos_index(common)
+            if dbg_idx is not None:
+                _dbg_record(
+                    self.layer_id,
+                    "fp8_attn_cmp_topk_pos",
+                    raw[dbg_idx : dbg_idx + 1],
+                )
         return self._forward_prefill_compressed(
             x,
             qkv,
@@ -2541,9 +2776,10 @@ class AttentionFP8(nn.Module):
                     block_size=wm.cmp_eb,
                     offset=0,
                 )
-        # SWA dequant only reads the cached prefix tail. The fresh new-K rows
-        # are already available as BF16 and are overlaid below; cold prefill
-        # does not need to read the SWA pool at all.
+        use_swa_fp8_roundtrip = _prefill_swa_fp8_roundtrip_enabled()
+        # Default RTP path only dequants the cached prefix tail and overlays
+        # fresh BF16 K below. The vLLM-aligned debug path still reads cached
+        # prefix from BlockPool, then overlays fresh K after an FP8 roundtrip.
         if common.any_cont:
             with record_function_range("dsv4.fp8.attn.workspace.gather_swa_prefix"):
                 _swa_dq.dequantize_and_gather_k_cache(
@@ -2556,12 +2792,15 @@ class AttentionFP8(nn.Module):
                     offset=wm.N,
                 )
 
-        # BF16 overlay of freshly computed new K — single ``index_copy_``
-        # using the meta-precomputed ``new_k_slot_in_flat``. Avoids the FP8
-        # round-trip loss on tokens we just wrote, while keeping the hot
-        # path free of casts / gathers / per-request slicing.
+        # Overlay freshly computed new K. The reference path first applies the
+        # same fp8_ds_mla quant/dequant round-trip vLLM gets from its SWA cache.
         with record_function_range("dsv4.fp8.attn.workspace.overlay_new_k"):
             kv_bf16 = qkv.kv_full.to(torch.bfloat16).reshape(-1, D)
+            if (
+                use_swa_fp8_roundtrip
+                and int(kv_bf16.shape[0]) >= _prefill_swa_fp8_roundtrip_min_tokens()
+            ):
+                kv_bf16 = _fp8_roundtrip_k_temp(kv_bf16)
             workspace.view(B * wm.M, D).index_copy_(0, wm.new_k_slot_in_flat, kv_bf16)
 
         # combine_topk: HCA uses precomputed dense arange(N_max); CSA uses
@@ -2637,6 +2876,30 @@ class AttentionFP8(nn.Module):
                     N=wm.N,
                 )
 
+        dbg_idx = _dbg_global_pos_index(common) if _dbg_layer_enabled(self.layer_id) else None
+        if dbg_idx is not None:
+            _dbg_record(
+                self.layer_id,
+                "fp8_attn_combined_indices_pos",
+                combined_indices[dbg_idx : dbg_idx + 1],
+            )
+            _dbg_record(
+                self.layer_id,
+                "fp8_attn_combined_lens_pos",
+                combined_lens[dbg_idx : dbg_idx + 1],
+            )
+            selected = combined_indices[dbg_idx : dbg_idx + 1].reshape(-1).to(torch.long)
+            valid = selected >= 0
+            safe = selected.clamp(min=0)
+            kv_flat_dbg = workspace.view(B * wm.M, D)
+            selected_kv = kv_flat_dbg.index_select(0, safe).view(1, -1, D)
+            selected_kv = torch.where(
+                valid.view(1, -1, 1),
+                selected_kv,
+                torch.zeros((), dtype=selected_kv.dtype, device=selected_kv.device),
+            )
+            _dbg_record(self.layer_id, "fp8_attn_selected_kv_pos", selected_kv)
+
         # flash_mla_sparse_fwd is called once when ``s_q`` fits the safe
         # threshold; otherwise it is chunked along Q so each launch stays
         # below ``DSV4_FLASH_MLA_SPARSE_Q_CHUNK`` rows. Sparse attention
@@ -2663,6 +2926,12 @@ class AttentionFP8(nn.Module):
                     attn_sink=self.attn_sink,
                     topk_length=combined_lens,
                 )
+            if dbg_idx is not None:
+                _dbg_record(
+                    self.layer_id,
+                    "fp8_attn_mla_out_pos",
+                    o3[dbg_idx : dbg_idx + 1],
+                )
             return o3.unsqueeze(0)
 
         chunks: list[torch.Tensor] = []
@@ -2679,6 +2948,12 @@ class AttentionFP8(nn.Module):
                 )
                 chunks.append(o_part)
         o3 = torch.cat(chunks, dim=0)
+        if dbg_idx is not None:
+            _dbg_record(
+                self.layer_id,
+                "fp8_attn_mla_out_pos",
+                o3[dbg_idx : dbg_idx + 1],
+            )
         return o3.unsqueeze(0)
 
     # ------------------------------------------------------------------
@@ -4137,6 +4412,55 @@ class AttentionFP8(nn.Module):
             )
         return o3.unsqueeze(0)
 
+    def _attn_fp8_swa_via_cache_full(
+        self,
+        qkv: PrefillQKV,
+        common: PrefillMeta,
+    ) -> Optional[torch.Tensor]:
+        """vLLM-aligned cold prefill: read freshly-written SWA K from FP8 cache.
+
+        RTP's default cold prefill consumes ``qkv.kv_full`` directly. vLLM
+        writes SWA K into the FP8 paged cache first and then dequants that
+        cache into the prefill workspace, so enabling
+        ``DSV4_PREFILL_SWA_FP8_ROUNDTRIP`` uses the same numeric path.
+        """
+        if not _prefill_swa_fp8_roundtrip_enabled():
+            return None
+        if common.any_cont:
+            return None
+
+        from flash_mla import flash_mla_sparse_fwd  # type: ignore[import-not-found]
+
+        meta = common.swa_meta
+        if meta is None or meta.topk_length_kv_full is None:
+            return None
+
+        T_kv = int(common.seqlen_full if common.cp_on else common.seqlen)
+        if T_kv <= 0:
+            return None
+        min_tokens = _prefill_swa_fp8_roundtrip_min_tokens()
+        if min_tokens > 0 and T_kv < min_tokens:
+            return None
+        with record_function_range("dsv4.fp8.attn.swa.temp_roundtrip"):
+            kv_roundtrip = _fp8_roundtrip_k_temp(qkv.kv_full.to(torch.bfloat16))
+        if int(kv_roundtrip.shape[0]) != T_kv:
+            return None
+
+        ti = common.topk_idxs
+        if ti.dim() == 3:
+            ti = ti.squeeze(0)
+        indices = ti.unsqueeze(1).to(torch.int32)
+        with record_function_range("dsv4.fp8.attn.swa.flash_mla_cache_full"):
+            o3, _, _ = flash_mla_sparse_fwd(
+                q=qkv.q,
+                kv=kv_roundtrip.view(T_kv, 1, self.head_dim),
+                indices=indices,
+                sm_scale=self.softmax_scale,
+                attn_sink=self.attn_sink,
+                topk_length=meta.topk_length_kv_full,
+            )
+        return o3.unsqueeze(0)
+
     def _attn_fp8_swa_via_concat(
         self,
         qkv: PrefillQKV,
@@ -4265,6 +4589,19 @@ class AttentionFP8(nn.Module):
         freqs_cis = common.freqs_cis
 
         if o.is_cuda and o.numel() > 0:
+            dbg_idx = (
+                _dbg_global_pos_index(common)
+                if _dbg_layer_enabled(self.layer_id)
+                else None
+            )
+            if dbg_idx is not None:
+                _dbg_record(
+                    self.layer_id,
+                    "fp8_attn_out_heads_pos",
+                    o.reshape(seqlen, self.n_heads, self.head_dim)[
+                        dbg_idx : dbg_idx + 1
+                    ],
+                )
             chunk_tokens = dsv4_chunk_tokens_from_env(
                 "DSV4_ATTN_OUT_CHUNK_TOKENS",
                 min_value=0,
@@ -4303,6 +4640,13 @@ class AttentionFP8(nn.Module):
                         o_chunk = self._wo_a_einsum_from_fp8(
                             o_fp8, o_scale, 1, chunk_len
                         )
+                    if dbg_idx is not None and token_start <= dbg_idx < token_end:
+                        local_dbg = dbg_idx - token_start
+                        _dbg_record(
+                            self.layer_id,
+                            "fp8_attn_wo_a_out_pos",
+                            o_chunk[:, local_dbg : local_dbg + 1],
+                        )
                     with record_function_range("dsv4.fp8.attn.out.wo_b"):
                         out_2d[token_start:token_end].copy_(
                             self.wo_b(o_chunk.flatten(2).reshape(chunk_len, -1))
@@ -4315,6 +4659,12 @@ class AttentionFP8(nn.Module):
 
                     with record_function_range("dsv4.fp8.attn.out.tp_all_reduce"):
                         all_reduce(out, Group.TP)
+                if dbg_idx is not None:
+                    _dbg_record(
+                        self.layer_id,
+                        "fp8_attn_wo_b_out_pos",
+                        out[:, dbg_idx : dbg_idx + 1],
+                    )
                 return out
 
             o_3d = o.reshape(seqlen, self.n_heads, self.head_dim)
@@ -4333,6 +4683,12 @@ class AttentionFP8(nn.Module):
                 )
             with record_function_range("dsv4.fp8.attn.out.wo_a_einsum"):
                 o = self._wo_a_einsum_from_fp8(o_fp8, o_scale, 1, seqlen)
+            if dbg_idx is not None:
+                _dbg_record(
+                    self.layer_id,
+                    "fp8_attn_wo_a_out_pos",
+                    o[:, dbg_idx : dbg_idx + 1],
+                )
         else:
             with record_function_range("dsv4.fp8.attn.out.eager_inv_rope_wo_a"):
                 apply_rotary_emb(o[..., -rd:], freqs_cis, inverse=True)
@@ -4347,4 +4703,10 @@ class AttentionFP8(nn.Module):
 
             with record_function_range("dsv4.fp8.attn.out.tp_all_reduce"):
                 all_reduce(out, Group.TP)
+        if "dbg_idx" in locals() and dbg_idx is not None:
+            _dbg_record(
+                self.layer_id,
+                "fp8_attn_wo_b_out_pos",
+                out[:, dbg_idx : dbg_idx + 1],
+            )
         return out
