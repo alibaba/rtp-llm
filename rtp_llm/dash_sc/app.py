@@ -18,7 +18,10 @@ from typing import Any, List, Optional
 
 from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.py_config_modules import PyEnvConfigs
-from rtp_llm.dash_sc.inference.servicer import DashScInferenceServicer
+from rtp_llm.dash_sc.inference.servicer import (
+    DashScInferenceServicer,
+    build_think_runtime,
+)
 from rtp_llm.dash_sc.proxy.servicer import DashScProxyServicer
 from rtp_llm.dash_sc.server import DashScGrpcServer
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
@@ -268,6 +271,20 @@ class DashScApp:
                 extra_stop_word_ids = _derive_stop_word_ids_list(
                     model_config, self.py_env_configs, base_tok
                 )
+                # ``think_terminate_token_id`` <= 0 means the operator turned off
+                # the in-stream "stop thinking" branch via env/args; carry that
+                # through as ``None`` so the servicer skips the path entirely.
+                env_terminate_id = (
+                    self.py_env_configs.generate_env_config.think_terminate_token_id
+                )
+                think_runtime = build_think_runtime(
+                    base_tok,
+                    self.py_env_configs.generate_env_config,
+                    model_config.model_type,
+                    terminate_token_id=(
+                        env_terminate_id if env_terminate_id > 0 else None
+                    ),
+                )
                 servicer = DashScInferenceServicer(
                     backend_visitor=backend_visitor,
                     ip=self.server_config.ip,
@@ -277,7 +294,7 @@ class DashScApp:
                     extra_stop_word_ids=extra_stop_word_ids,
                     tokenizer=base_tok,
                     generate_env_config=self.py_env_configs.generate_env_config,
-                    model_type=model_config.model_type,
+                    think_runtime=think_runtime,
                 )
 
             loop = self._start_enqueue_loop()

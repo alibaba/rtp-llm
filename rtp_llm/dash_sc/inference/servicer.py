@@ -15,6 +15,7 @@ coroutine automatically.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Any, AsyncIterator, Callable, Optional
 
 import torch
@@ -34,10 +35,29 @@ from rtp_llm.server.request_headers import extract_request_headers
 from rtp_llm.utils.base_model_datatypes import GenerateInput
 from rtp_llm.utils.util import AtomicCounter
 
+# Phase-2 dash_sc_request_id (response infer.id) suffix; keeps client able to tell
+# the two response halves apart. NOT applied to the dashscope-side trace_id, which
+# must stay identical across phases for end-to-end log search to work.
+_PHASE2_SUFFIX = "-2"
+# Body inserted between think_start_tag and think_end_tag to form the "empty think"
+# block that becomes phase-2 prompt body. DSV4 protocol convention: a single LF.
+_EMPTY_THINK_BODY = "\n"
+# DSV4: token id == 1 signals "stop thinking immediately" mid-stream. Mirrors the
+# default in ``GenerateEnvConfig.think_terminate_token_id`` (single source of truth
+# for production; this constant exists so unit tests don't have to repeat it).
+_DEFAULT_TERMINATE_TOKEN_ID = 1
 
-def stream_log_tag(*, request_id_numeric: int, trace_id: str) -> str:
-    """Align with C++ ``GenerateStream::streamLogTag()`` for log correlation."""
-    return f"request_id={request_id_numeric} trace_id={trace_id}"
+
+def stream_log_tag(
+    *, request_id_numeric: int, trace_id: str, phase: Optional[int] = None
+) -> str:
+    """Align with C++ ``GenerateStream::streamLogTag()`` for log correlation.
+
+    ``phase`` is appended only when set, so phase-1 logs stay byte-identical to the
+    pre-refactor format and grep patterns keep working.
+    """
+    base = f"request_id={request_id_numeric} trace_id={trace_id}"
+    return f"{base} phase={phase}" if phase is not None else base
 
 
 def _headers_from_invocation_metadata(
@@ -78,8 +98,13 @@ def _hf_tokenizer(tokenizer: Any) -> Any:
     return getattr(tokenizer, "tokenizer", tokenizer)
 
 
-def _decode_env_tag(generate_env_config: Any, attr: str, default: str = "") -> str:
-    value = getattr(generate_env_config, attr, default) or default
+def _decode_env_tag(generate_env_config: Any, attr: str) -> str:
+    """Read ``attr`` from generate_env_config and unescape literal ``\\n`` etc.
+
+    No literal default here — ``GenerateEnvConfig`` is the single source of truth
+    for tag defaults. Missing attribute or empty value returns "".
+    """
+    value = getattr(generate_env_config, attr, "") or ""
     return str(value).encode("utf-8").decode("unicode_escape")
 
 
@@ -109,47 +134,104 @@ def _matched_echo_prefix_ids(
     return []
 
 
-def _derive_think_close_token_id(tokenizer: Any, generate_config: Any) -> Optional[int]:
-    if tokenizer is not None:
-        try:
-            ids = _encode_tag(tokenizer, "</think>")
-            if ids:
-                return int(ids[-1])
-        except Exception:
-            pass
-    ids = list(getattr(generate_config, "end_think_token_ids", []) or [])
-    return int(ids[0]) if ids else None
+@dataclass(frozen=True)
+class _ThinkRuntime:
+    """Init-time-resolved think/dashllm snapshot read by every request.
+
+    Built once in ``DashScInferenceServicer.__init__`` (or by a caller via
+    :func:`build_think_runtime`) so the hot path skips repeated
+    ``tokenizer.encode`` / model_type comparisons / vocab lookups. All fields are
+    immutable ``tuple``/``int``/``bool`` so the same instance is safely shared
+    across concurrent requests.
+
+    Fields:
+      ``bos_tokens``         encode(think_start_tag), e.g. ``<think>\\n``
+      ``eos_tokens``         encode(think_end_tag),   e.g. ``</think>\\n\\n``
+      ``empty_tokens``       encode(start + body + end); used as phase-2 prompt body
+      ``close_token_id``     first id of ``eos_tokens`` (the ``</think>`` token);
+                             ``None`` when ``eos_tokens`` is empty
+      ``terminate_token_id`` token id that signals "stop thinking immediately" mid-
+                             stream (DSV4: 1). ``None`` disables the token-terminate
+                             branch (the regular ``</think>`` path keeps working).
+      ``phase2_enabled``     ``is_dsv4 and bool(empty_tokens)``. ``terminate_token_id``
+                             is intentionally *not* part of this gate — even with the
+                             token-terminate branch off, dsv4 still needs the
+                             phase-2-on-close machinery.
+      ``eos_token_id``       tokenizer.eos_token_id; written to dashllm
+                             ``stop_token_id`` response param
+      ``max_token_id``       ``len(tokenizer) - 1``; written to dashllm
+                             ``max_token_id`` response param
+    """
+
+    bos_tokens: tuple[int, ...] = ()
+    eos_tokens: tuple[int, ...] = ()
+    empty_tokens: tuple[int, ...] = ()
+    close_token_id: Optional[int] = None
+    terminate_token_id: Optional[int] = None
+    phase2_enabled: bool = False
+    eos_token_id: Optional[int] = None
+    max_token_id: Optional[int] = None
 
 
-class _ThinkTokenSet:
-    def __init__(
-        self,
-        *,
-        bos_tokens: list[int],
-        eos_tokens: list[int],
-        empty_tokens: list[int],
-    ):
-        self.bos_tokens = bos_tokens
-        self.eos_tokens = eos_tokens
-        self.empty_tokens = empty_tokens
+def build_think_runtime(
+    tokenizer: Any,
+    generate_env_config: Any,
+    model_type: Optional[str],
+    *,
+    terminate_token_id: Optional[int] = _DEFAULT_TERMINATE_TOKEN_ID,
+    eos_token_id: Optional[int] = None,
+    max_token_id: Optional[int] = None,
+) -> _ThinkRuntime:
+    """Pre-compute the per-startup think/dashllm snapshot.
 
+    ``terminate_token_id`` defaults to ``_DEFAULT_TERMINATE_TOKEN_ID`` (1, the
+    DSV4 convention). Pass ``None`` or any value ``<= 0`` to disable the
+    token-terminate branch entirely.
 
-def _derive_think_token_set(tokenizer: Any, generate_env_config: Any) -> _ThinkTokenSet:
+    ``eos_token_id`` / ``max_token_id`` of ``None`` fall back to tokenizer-derived
+    values; explicit values from the caller win.
+
+    Returns a safe-empty runtime (``phase2_enabled=False``, all token tuples
+    empty) when ``tokenizer`` or ``generate_env_config`` is ``None``, matching
+    the "missing tokenizer" fallback shape the previous derive helpers produced.
+    """
+    eos_tid = (
+        eos_token_id
+        if eos_token_id is not None
+        else _optional_int_attr(tokenizer, "eos_token_id")
+    )
+    max_tid = (
+        max_token_id if max_token_id is not None else _derive_max_token_id(tokenizer)
+    )
+    term_id = (
+        int(terminate_token_id)
+        if terminate_token_id is not None and int(terminate_token_id) > 0
+        else None
+    )
     if tokenizer is None or generate_env_config is None:
-        return _ThinkTokenSet(bos_tokens=[], eos_tokens=[], empty_tokens=[])
-    think_start_tag = _decode_env_tag(
-        generate_env_config, "think_start_tag", "<think>\n"
+        return _ThinkRuntime(
+            terminate_token_id=term_id,
+            eos_token_id=eos_tid,
+            max_token_id=max_tid,
+        )
+    think_start_tag = _decode_env_tag(generate_env_config, "think_start_tag")
+    think_end_tag = _decode_env_tag(generate_env_config, "think_end_tag")
+    bos_tokens = tuple(_encode_tag(tokenizer, think_start_tag))
+    eos_tokens = tuple(_encode_tag(tokenizer, think_end_tag))
+    empty_tokens = tuple(
+        _encode_tag(tokenizer, think_start_tag + _EMPTY_THINK_BODY + think_end_tag)
     )
-    think_end_tag = _decode_env_tag(
-        generate_env_config, "think_end_tag", "</think>\n\n"
-    )
-    bos_tokens = _encode_tag(tokenizer, think_start_tag)
-    eos_tokens = _encode_tag(tokenizer, think_end_tag)
-    empty_tokens = _encode_tag(tokenizer, think_start_tag + "\n" + think_end_tag)
-    return _ThinkTokenSet(
+    close_token_id = int(eos_tokens[0]) if eos_tokens else None
+    phase2_enabled = _is_deepseek_v4(model_type) and bool(empty_tokens)
+    return _ThinkRuntime(
         bos_tokens=bos_tokens,
         eos_tokens=eos_tokens,
         empty_tokens=empty_tokens,
+        close_token_id=close_token_id,
+        terminate_token_id=term_id,
+        phase2_enabled=phase2_enabled,
+        eos_token_id=eos_tid,
+        max_token_id=max_tid,
     )
 
 
@@ -205,9 +287,7 @@ async def iter_real_model_stream_infer(
     invocation_metadata: Optional[Any] = None,
     tokenizer: Any = None,
     generate_env_config: Any = None,
-    model_type: Optional[str] = None,
-    eos_token_id: Optional[int] = None,
-    max_token_id: Optional[int] = None,
+    think_runtime: Optional[_ThinkRuntime] = None,
     phase2_request_id_factory: Optional[Callable[[], int]] = None,
 ) -> AsyncIterator[predict_v2_pb2.ModelStreamInferResponse]:
     """Run enqueue on ``backend_visitor`` and yield one proto per chunk as the backend streams.
@@ -227,6 +307,12 @@ async def iter_real_model_stream_infer(
     pre-deduped (``_derive_stop_word_ids_list`` does this at startup) and is treated
     as read-only — the hot path shares inner-list references rather than copying.
 
+    ``think_runtime`` is the init-time-resolved think/dashllm snapshot
+    (:class:`_ThinkRuntime`). Caller (servicer) builds it once via
+    :func:`build_think_runtime` so the hot path skips repeated tokenizer.encode /
+    model_type comparisons. ``None`` means "no think state" (phase-2 disabled, all
+    dashllm limit params null).
+
     Hot-path layout: dashscope-serving doesn't ship ``stop_words_list`` per request,
     so 99% of calls hit the fast branch (empty ``existing``) and skip the dedup set
     + tuple hashing entirely. The slow branch only fires when a caller explicitly
@@ -234,6 +320,7 @@ async def iter_real_model_stream_infer(
     """
     trace_str = str(request.id)
     tag = stream_log_tag(request_id_numeric=rtp_llm_request_id, trace_id=trace_str)
+    runtime = think_runtime if think_runtime is not None else _ThinkRuntime()
     logging.debug(
         "[DashScGrpc] [%s] real infer start: model_name=%s input_len=%s sampling=%s",
         tag,
@@ -279,27 +366,21 @@ async def iter_real_model_stream_infer(
                 # any future engine-side mutation request-local; inner lists are
                 # shared (snapshot is read-only by contract).
                 generate_config.stop_words_list = list(extra_stop_word_ids)
-        eos_id = (
-            eos_token_id
-            if eos_token_id is not None
-            else _optional_int_attr(tokenizer, "eos_token_id")
-        )
-        max_id = (
-            max_token_id
-            if max_token_id is not None
-            else _derive_max_token_id(tokenizer)
-        )
-        think_tokens = _derive_think_token_set(tokenizer, generate_env_config)
+        # All these are pre-resolved at servicer init via ``build_think_runtime``;
+        # reading them here is O(1) and avoids per-request tokenizer.encode.
+        eos_id = runtime.eos_token_id
+        max_id = runtime.max_token_id
+        term_id = runtime.terminate_token_id
+        think_close_token_id = runtime.close_token_id
         matched_think_bos_ids = matched_echo_ids or _matched_echo_prefix_ids(
-            input_ids_list, think_tokens.bos_tokens
+            input_ids_list, list(runtime.bos_tokens)
         )
-        is_dsv4 = _is_deepseek_v4(model_type)
-        phase2_enabled = (
-            is_dsv4
-            and bool(getattr(generate_config, "in_think_mode", False))
-            and bool(think_tokens.empty_tokens)
+        # ``runtime.phase2_enabled`` is the init-time gate (model_type + empty_tokens
+        # availability). ``in_think_mode`` is per-request — ``add_thinking_params``
+        # sets it from generate_config and a request can override it.
+        phase2_enabled = runtime.phase2_enabled and bool(
+            getattr(generate_config, "in_think_mode", False)
         )
-        think_close_token_id = _derive_think_close_token_id(tokenizer, generate_config)
         cumulative_sent_ids: list[int] = []
         generate_think_token_num: Optional[int] = None
         generate_input = _make_generate_input(
@@ -330,20 +411,20 @@ async def iter_real_model_stream_infer(
             if should_echo and not echoed and generated_ids:
                 ids_for_accounting = matched_echo_ids + generated_ids
             close_offset: Optional[int] = None
-            token1_offset: Optional[int] = None
+            term_offset: Optional[int] = None
             if generate_think_token_num is None:
                 if think_close_token_id is not None:
                     for offset, token_id in enumerate(ids_for_accounting):
                         if token_id == think_close_token_id:
                             close_offset = offset
                             break
-                if phase2_enabled and 1 in generated_ids:
-                    token1_in_generated = generated_ids.index(1)
-                    token1_offset = token1_in_generated
+                if phase2_enabled and term_id is not None and term_id in generated_ids:
+                    term_in_generated = generated_ids.index(term_id)
+                    term_offset = term_in_generated
                     if should_echo and not echoed and generated_ids:
-                        token1_offset += len(matched_echo_ids)
+                        term_offset += len(matched_echo_ids)
                 if close_offset is not None and (
-                    token1_offset is None or close_offset < token1_offset
+                    term_offset is None or close_offset < term_offset
                 ):
                     generate_think_token_num = (
                         len(cumulative_sent_ids) + close_offset + 1
@@ -351,11 +432,12 @@ async def iter_real_model_stream_infer(
                     phase2_needed = phase2_enabled
             if (
                 phase2_enabled
+                and term_id is not None
                 and generate_think_token_num is None
                 and generated_ids
-                and 1 in generated_ids
+                and term_id in generated_ids
             ):
-                generated_ids = generated_ids[: generated_ids.index(1)]
+                generated_ids = generated_ids[: generated_ids.index(term_id)]
                 out_py.output_ids = torch.tensor(generated_ids, dtype=torch.int32)
                 out_py.finished = False
                 ids_for_accounting = generated_ids
@@ -364,7 +446,7 @@ async def iter_real_model_stream_infer(
                 generate_think_token_num = (
                     len(cumulative_sent_ids)
                     + len(ids_for_accounting)
-                    + (1 if think_tokens.eos_tokens else 0)
+                    + (1 if runtime.eos_tokens else 0)
                 )
                 cumulative_sent_ids.extend(ids_for_accounting)
                 eos_go = go
@@ -389,9 +471,9 @@ async def iter_real_model_stream_infer(
                         echoed = True
                 if generated_ids:
                     yield response
-                if think_tokens.eos_tokens:
+                if runtime.eos_tokens:
                     out_py.output_ids = torch.tensor(
-                        think_tokens.eos_tokens, dtype=torch.int32
+                        list(runtime.eos_tokens), dtype=torch.int32
                     )
                     out_py.finished = True
                     eos_response = build_stream_response_from_generate_outputs(
@@ -451,14 +533,21 @@ async def iter_real_model_stream_infer(
             phase2_config.in_think_mode = False
             if hasattr(phase2_config, "thinking"):
                 phase2_config.thinking = False
-            phase2_config.trace_id = f"{trace_str}-2"
+            # trace_id stays equal across phases so the dashscope log search
+            # aggregates both halves under a single trace; phase distinction is
+            # carried by request_log_tag (phase=2) and by the ``-2`` suffix on
+            # the response infer.id (client-facing).
+            phase2_config.trace_id = trace_str
             phase2_input_ids = _phase2_input_ids_for_deepseek_v4(
-                input_ids_list, matched_think_bos_ids, think_tokens.empty_tokens
+                input_ids_list, matched_think_bos_ids, list(runtime.empty_tokens)
             )
             phase2_request_id = (
                 phase2_request_id_factory()
                 if phase2_request_id_factory is not None
                 else rtp_llm_request_id
+            )
+            phase2_tag = stream_log_tag(
+                request_id_numeric=phase2_request_id, trace_id=trace_str, phase=2
             )
             phase2_generate_input = _make_generate_input(
                 request_id=phase2_request_id,
@@ -468,7 +557,7 @@ async def iter_real_model_stream_infer(
             )
             logging.debug(
                 "[DashScGrpc] [%s] phase-2 generate_input: %s",
-                tag,
+                phase2_tag,
                 phase2_generate_input,
             )
             phase2_stream = await backend_visitor.enqueue(phase2_generate_input)
@@ -480,10 +569,10 @@ async def iter_real_model_stream_infer(
                 if not generated_ids and not out_py.finished:
                     continue
                 response = build_stream_response_from_generate_outputs(
-                    dash_sc_request_id=f"{request.id}-2",
+                    dash_sc_request_id=f"{request.id}{_PHASE2_SUFFIX}",
                     model_name=request.model_name,
                     go=go,
-                    request_log_tag=tag,
+                    request_log_tag=phase2_tag,
                     request_input_ids=phase2_input_ids,
                     return_input_ids=other.return_input_ids,
                     is_streaming=is_streaming,
@@ -533,9 +622,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         extra_stop_word_ids: Optional[list[list[int]]] = None,
         tokenizer: Any = None,
         generate_env_config: Any = None,
-        model_type: Optional[str] = None,
-        eos_token_id: Optional[int] = None,
-        max_token_id: Optional[int] = None,
+        think_runtime: Optional[_ThinkRuntime] = None,
     ):
         self._backend_visitor = backend_visitor
         self._ip = ip
@@ -547,16 +634,11 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         )
         self._tokenizer = tokenizer
         self._generate_env_config = generate_env_config
-        self._model_type = model_type
-        self._eos_token_id = (
-            eos_token_id
-            if eos_token_id is not None
-            else _optional_int_attr(tokenizer, "eos_token_id")
-        )
-        self._max_token_id = (
-            max_token_id
-            if max_token_id is not None
-            else _derive_max_token_id(tokenizer)
+        # Empty runtime is a safe default — phase-2 disabled, all dashllm limit
+        # params null. Production callers (``DashScApp``) pre-build via
+        # ``build_think_runtime`` so the per-request hot path is allocation-free.
+        self._think_runtime = (
+            think_runtime if think_runtime is not None else _ThinkRuntime()
         )
         self._seq_counter = AtomicCounter()
 
@@ -609,9 +691,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                     invocation_metadata=invocation_metadata,
                     tokenizer=self._tokenizer,
                     generate_env_config=self._generate_env_config,
-                    model_type=self._model_type,
-                    eos_token_id=self._eos_token_id,
-                    max_token_id=self._max_token_id,
+                    think_runtime=self._think_runtime,
                     phase2_request_id_factory=self._next_rtp_llm_request_id,
                 ):
                     yield resp
