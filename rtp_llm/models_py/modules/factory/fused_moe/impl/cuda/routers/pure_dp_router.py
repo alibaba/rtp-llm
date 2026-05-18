@@ -80,6 +80,11 @@ class PureDpRouterBase(FusedMoeDataRouter):
         checker.check(config.dp_size > 1)
         checker.check(config.ep_size == config.dp_size)
         checker.check(resolver.use_all_gather(config))
+        # CUDA Graph capture/replay freezes shapes; PureDP _pad_to_max derives
+        # max_n via runtime all_gather + .item(), which is graph-unsafe (D2H
+        # sync mid-capture, dynamic pad shape on replay). Force fallback to
+        # DeepEP when CUDA Graph is on.
+        checker.check(not config.enable_cuda_graph)
 
     def __init__(
         self,
@@ -94,7 +99,6 @@ class PureDpRouterBase(FusedMoeDataRouter):
         self.expert_num = config.expert_num
         self.expert_num_per_rank = self.expert_num // self.ep_size
         self.expert_start_id = self.ep_rank * self.expert_num_per_rank
-        self._local_batch_size: int = 0
 
     @abstractmethod
     def _do_quant(
@@ -107,11 +111,15 @@ class PureDpRouterBase(FusedMoeDataRouter):
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
         """Pad tensors to the max batch size across all EP ranks.
 
-        Returns padded tensors and the max batch size. Sets self._local_batch_size.
+        Returns the padded tensors plus the max batch size. The local (unpadded)
+        batch size is recovered in finalize() from extra_finalize_args
+        ("original_num_tokens"), so this method holds no instance state.
         """
         local_n = a1.shape[0]
-        self._local_batch_size = local_n
 
+        # TODO(perf): .item() forces a D2H sync on every MoE layer's hot path.
+        # Plan to lift max_n to step-level host metadata (computed once before
+        # entering the MoE stack) in a follow-up PR. Tracked on PR #968 review.
         n_tensor = torch.tensor([local_n], device=a1.device, dtype=torch.int64)
         all_n = all_gather(n_tensor, group=Group.DP_AND_TP)
         max_n = int(all_n.max().item())
@@ -165,9 +173,18 @@ class PureDpRouterBase(FusedMoeDataRouter):
         apply_router_weight_on_input: bool,
         extra_finalize_args: Optional[Dict[str, Any]],
     ) -> torch.Tensor:
+        # Read the local batch size from extra_finalize_args (injected by
+        # FusedMoeDataRouter.forward as original_num_tokens) instead of relying
+        # on cross-call instance state. Same pattern as deepep_normal_router.
+        assert (
+            extra_finalize_args is not None
+            and "original_num_tokens" in extra_finalize_args
+        ), "PureDpRouter.finalize requires extra_finalize_args['original_num_tokens']"
+        local_batch_size: int = extra_finalize_args["original_num_tokens"]
+
         output = reduce_scatter(payload.fused_expert_output, group=Group.DP_AND_TP)
-        if output.shape[0] > self._local_batch_size:
-            output = output[: self._local_batch_size]
+        if output.shape[0] > local_batch_size:
+            output = output[:local_batch_size]
         return output
 
 

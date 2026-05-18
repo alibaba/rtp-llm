@@ -97,11 +97,8 @@ class CudaFp8PerBlockPureDPStrategy(MoeStrategy):
             and config.dp_size > 1
             and config.ep_size == config.dp_size
         )
-        is_explicit = config.moe_strategy == "fp8_per_block_pure_dp"
-        is_auto_dp = config.moe_strategy == "auto" and is_pure_dp_ep
-        checker.check(is_explicit or is_auto_dp)
-        if is_explicit:
-            checker.check(is_pure_dp_ep)
+        checker.check(config.moe_strategy == "fp8_per_block_pure_dp")
+        checker.check(is_pure_dp_ep)
 
     def get_attributes(self) -> StrategyAttributes:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_masked_executor_v2 import (
@@ -141,11 +138,8 @@ class CudaFp8PerBlockPureCPStrategy(MoeStrategy):
             and config.ep_size > 1
             and config.parallelism_config.prefill_cp_config.is_enabled()
         )
-        is_explicit = config.moe_strategy == "fp8_per_block_pure_cp"
-        is_auto_cp = config.moe_strategy == "auto" and is_pure_cp_ep
-        checker.check(is_explicit or is_auto_cp)
-        if is_explicit:
-            checker.check(is_pure_cp_ep)
+        checker.check(config.moe_strategy == "fp8_per_block_pure_cp")
+        checker.check(is_pure_cp_ep)
 
     def get_attributes(self) -> StrategyAttributes:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_hybrid_executor import (

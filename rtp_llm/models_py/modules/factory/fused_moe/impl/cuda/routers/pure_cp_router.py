@@ -66,13 +66,17 @@ class PureCpRouterBase(FusedMoeDataRouter):
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
         resolver = MoeConfigResolver()
-        # Pure CP + EP only: dp_size must be 1, physical tp == ep > 1.
+        # Pure CP + EP only: dp_size must be 1, physical tp == ep > 1, and
+        # prefill CP must actually be enabled (CudaFp8PerBlockPureCPStrategy
+        # also asserts this — keep both as a defensive check so the router
+        # can be selected via paths that bypass the strategy gate).
         # is_cp_equal_ep reads raw parallelism_config.tp_size so it works
         # whether or not CP is enabled (in CP mode adapter tp_size==1).
         # Mixed tp>1+dp>1 is intentionally routed back to DeepEP.
         checker.check(config.dp_size == 1)
         checker.check(resolver.is_cp_equal_ep(config))
         checker.check(config.ep_size > 1)
+        checker.check(config.parallelism_config.prefill_cp_config.is_enabled())
         checker.check(resolver.use_all_gather(config))
 
     def __init__(

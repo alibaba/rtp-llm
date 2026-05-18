@@ -31,7 +31,8 @@ py_library(
 py_library(
     name = "moe",
     srcs = glob(["moe/*.py"]),
-    visibility = ["//visibility:public"]
+    deps = ["//rtp_llm/models_py:utils"],
+    visibility = ["//visibility:public"],
 )
 
 py_library(

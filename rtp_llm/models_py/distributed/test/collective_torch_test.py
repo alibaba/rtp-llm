@@ -253,34 +253,41 @@ def _test_reduce_scatter_collective(
             group_size = len(group_ranks)
             local_idx = group_ranks.index(rank)
             chunk_size = 2
-
-            # Each rank creates a full-size tensor [group_size * chunk_size, hidden_dim]
-            # where each rank contributes its rank value to all chunks
             hidden_dim = 3
-            input_tensor = torch.ones(
+
+            # Make each chunk position carry a distinct value so a chunk
+            # mis-scatter (e.g. wrong offset) cannot be hidden by uniform
+            # inputs. Chunk c on rank r holds the value (r+1) * (c+1).
+            input_tensor = torch.empty(
                 group_size * chunk_size, hidden_dim,
                 device=f"cuda:{parallelism_config.local_rank}",
-            ) * (rank + 1)
+            )
+            for c in range(group_size):
+                input_tensor[c * chunk_size : (c + 1) * chunk_size] = (
+                    (rank + 1) * (c + 1)
+                )
 
             result = reduce_scatter(input_tensor, group=group_type)
             torch.cuda.synchronize()
             torch.distributed.barrier(group=process_group)
 
-            # After reduce_scatter: each rank gets chunk [local_idx*chunk_size : (local_idx+1)*chunk_size]
-            # of the sum of all inputs. Since each rank contributed (rank+1) uniformly,
-            # the sum is sum(r+1 for r in group_ranks) for every element.
+            # After reduce_scatter, the rank at position local_idx receives
+            # chunk local_idx of the summed tensor:
+            #   sum_r((r+1) * (local_idx+1)) = (local_idx+1) * sum(r+1).
+            # If reduce_scatter mis-aligned chunks, expected != observed.
             expected_sum = sum(r + 1 for r in group_ranks)
+            expected_chunk_value = expected_sum * (local_idx + 1)
             expected = torch.ones(
                 chunk_size, hidden_dim,
                 device=f"cuda:{parallelism_config.local_rank}",
-            ) * expected_sum
+            ) * expected_chunk_value
 
             assert result.shape == (chunk_size, hidden_dim), (
                 f"Rank {rank} reduce_scatter {group_type}: "
                 f"Expected shape {(chunk_size, hidden_dim)}, got {result.shape}"
             )
             assert torch.allclose(result, expected), (
-                f"Rank {rank} reduce_scatter {group_type}: "
+                f"Rank {rank} reduce_scatter {group_type} (local_idx={local_idx}): "
                 f"Expected {expected.cpu()}, got {result.cpu()}"
             )
 
