@@ -1,5 +1,6 @@
 import logging
 import math
+import os
 from typing import Any, List, Optional
 
 import aiter
@@ -189,10 +190,18 @@ class AiterPrefillAttnOp:
         )
         return self.fmha_params
 
-    def _reshape_kv_cache_vectorized(self, kv_cache_base):
+    def _reshape_kv_cache_vectorized(self, kv_cache_base, block_indices=None):
         """Reshape kv_cache_base into 5D VECTORIZED_LAYOUT for mha_batch_prefill.
 
         Handles both 2D flat buffer and 5D pre-shaped kv_cache_base.
+
+        Args:
+            kv_cache_base: The global KV cache pool tensor.
+            block_indices: Optional 1D int tensor of unique block indices to extract.
+                When provided (and V needs permute for v1_kv_layout), only the
+                specified blocks are permuted+copied instead of the entire pool.
+                This avoids a massive .contiguous() over the full pool which can
+                cause GPU memory access faults with certain CK kernel versions.
 
         Returns (k_cache_5d, v_cache_5d):
             K: [num_blocks, num_kv_heads, head_dim/vs, page_size, vs]
@@ -204,7 +213,6 @@ class AiterPrefillAttnOp:
         - V1 FP8: kernel uses getVLocalIdx<FP8> → already vectorized [ps//vs, hd, vs].
         - ASM (both BASE and FP8): kernel uses getVLocalIdx<CType> → vectorized.
         """
-        block_num = kv_cache_base.shape[0]
         hk = self.head_num_kv
         ps = self.tokens_per_block
         hd = self.head_dim
@@ -214,6 +222,15 @@ class AiterPrefillAttnOp:
         # regardless of v1_kv_layout flag.
         is_fp8 = kv_cache_base.dtype in (torch.float8_e4m3fnuz, torch.float8_e4m3fn)
         use_v1_linear_v = self.v1_kv_layout and not is_fp8
+
+        # When block_indices is provided and V needs permute, extract only the
+        # needed blocks so that .contiguous() operates on a small subset rather
+        # than the entire global pool.  Both K and V are extracted via the same
+        # index_select so their strides stay consistent.
+        if block_indices is not None and use_v1_linear_v:
+            kv_cache_base = kv_cache_base[block_indices]
+
+        block_num = kv_cache_base.shape[0]
 
         if kv_cache_base.ndim >= 4:
             # Already shaped as [block_num, 2, hk, ps, hd] or similar multi-dim format.
@@ -332,27 +349,67 @@ class AiterPrefillAttnOp:
         )
         return res.reshape(fmha_params.token_q_num, self.head_num * self.head_dim)
 
+    _debug_paged_attn = os.environ.get("RTP_DEBUG_PAGED_ATTN", "")
+
     def _forward_paged(self, q_tensor, kv_cache, fmha_params):
         """Paged prefill attention from paged KV cache using mha_batch_prefill_func.
 
         Supports BF16/FP16 Q or FP8 Q with FP8 KV cache (with descale).
         mha_batch_prefill_func handles mixed dtype via q_descale/k_descale/v_descale.
         """
+        debug = self._debug_paged_attn
+        logger = logging.getLogger("rtp_llm")
+
         # Ensure Q is 3D [tokens, heads, head_dim] for mha_batch_prefill_func
         if q_tensor.dim() == 2:
             q_tensor = q_tensor.view(q_tensor.size(0), self.head_num, self.head_dim)
 
-        k_cache, v_cache = self._reshape_kv_cache_vectorized(kv_cache.kv_cache_base)
-
         block_table = fmha_params.kv_cache_block_id_device
-        # CK kernel's tile prefetch may speculatively load beyond seqlen_k,
-        # touching block_table padding entries (value -1).  When V cache is a
-        # freshly-allocated .contiguous() tensor, ptr + (-1)*stride lands in
-        # unmapped GPU memory → page fault → coredump.  Clamping -1 to 0 makes
-        # the prefetch hit a valid (but unused) block; seqlen_k masking ensures
-        # the stale data is never consumed.
         if block_table is not None:
             block_table = block_table.clamp(min=0)
+
+        # Determine whether V needs a permute+contiguous (NonAsm V1 non-FP8).
+        is_fp8 = kv_cache.kv_cache_base.dtype in (torch.float8_e4m3fnuz, torch.float8_e4m3fn)
+        needs_v_permute = self.v1_kv_layout and not is_fp8
+
+        # When V needs permute, avoid .contiguous() over the entire global pool.
+        # Instead, extract only the blocks referenced by block_table so that the
+        # copy is small and K/V end up with identical strides.  Then remap
+        # block_table to compact indices [0..num_unique-1].
+        block_indices_for_reshape = None
+        if needs_v_permute and block_table is not None:
+            unique_blocks, remap = torch.unique(
+                block_table, return_inverse=True
+            )
+            block_indices_for_reshape = unique_blocks.long()
+            block_table = remap.to(torch.int32)
+
+        if debug:
+            torch.cuda.synchronize()
+            logger.warning(
+                "[DEBUG paged_attn] CHECKPOINT-1 pre-reshape: "
+                "pool_shape=%s pool_stride=%s needs_v_permute=%s "
+                "block_indices=%s block_table_shape=%s",
+                list(kv_cache.kv_cache_base.shape),
+                list(kv_cache.kv_cache_base.stride()),
+                needs_v_permute,
+                block_indices_for_reshape.shape if block_indices_for_reshape is not None else None,
+                list(block_table.shape) if block_table is not None else None,
+            )
+
+        k_cache, v_cache = self._reshape_kv_cache_vectorized(
+            kv_cache.kv_cache_base, block_indices=block_indices_for_reshape
+        )
+
+        if debug:
+            torch.cuda.synchronize()
+            logger.warning(
+                "[DEBUG paged_attn] CHECKPOINT-2 post-reshape: "
+                "k_cache.shape=%s k_cache.stride=%s "
+                "v_cache.shape=%s v_cache.stride=%s",
+                list(k_cache.shape), list(k_cache.stride()),
+                list(v_cache.shape), list(v_cache.stride()),
+            )
         # cu_seqlens are already created on GPU in FMHAParams.__init__
         cu_seqlens_q = fmha_params.cu_seqlens_q
         # Ensure cu_seqlens_q is on the same device as q_tensor
@@ -384,10 +441,6 @@ class AiterPrefillAttnOp:
         max_seqlen_k = fmha_params.max_seqlen_k
 
         softmax_scale = 1.0 / math.sqrt(self.head_dim)
-        # kv_indptr must be all-zeros when kv_page_indices is empty (block_table
-        # is used instead).  Previously cu_seqlens_q was passed here, causing
-        # aiter to index into the empty kv_page_indices and trigger an
-        # out-of-bounds assert on GPU.
         if (
             not hasattr(self, "_kv_indptr")
             or self._kv_indptr.shape[0] != batch_size + 1
@@ -396,7 +449,6 @@ class AiterPrefillAttnOp:
                 batch_size + 1, dtype=torch.int32, device=cu_seqlens_q.device
             )
         kv_indptr = self._kv_indptr
-        # Reuse cached empty tensor to avoid per-layer allocation
         if not hasattr(self, "_empty_kv_page_indices"):
             self._empty_kv_page_indices = torch.empty(
                 0, dtype=torch.int32, device=cu_seqlens_q.device
@@ -408,7 +460,6 @@ class AiterPrefillAttnOp:
         k_descale = None
         v_descale = None
         if kv_cache.kv_cache_base.dtype in (torch.float8_e4m3fnuz, torch.float8_e4m3fn):
-            # Reuse cached ones tensor to avoid per-layer allocation
             if not hasattr(self, "_fp8_descale"):
                 self._fp8_descale = torch.ones(
                     1, dtype=torch.float32, device=cu_seqlens_q.device
@@ -416,6 +467,26 @@ class AiterPrefillAttnOp:
             q_descale = self._fp8_descale
             k_descale = self._fp8_descale
             v_descale = self._fp8_descale
+
+        if debug:
+            torch.cuda.synchronize()
+            logger.warning(
+                "[DEBUG paged_attn] CHECKPOINT-3 pre-kernel: "
+                "q.shape=%s q.stride=%s q.dtype=%s "
+                "k.shape=%s k.stride=%s k.data_ptr=0x%x "
+                "v.shape=%s v.stride=%s v.data_ptr=0x%x "
+                "block_table=%s seqlen_k=%s "
+                "max_sq=%d max_sk=%d batch=%d",
+                list(q_tensor.shape), list(q_tensor.stride()), q_tensor.dtype,
+                list(k_cache.shape), list(k_cache.stride()), k_cache.data_ptr(),
+                list(v_cache.shape), list(v_cache.stride()), v_cache.data_ptr(),
+                block_table.tolist() if block_table is not None and block_table.numel() <= 64 else (
+                    f"shape={list(block_table.shape)} max={block_table.max().item()} min={block_table.min().item()}"
+                    if block_table is not None else None
+                ),
+                seqlen_k.tolist() if seqlen_k.numel() <= 32 else f"shape={list(seqlen_k.shape)} max={seqlen_k.max().item()}",
+                max_seqlen_q, max_seqlen_k, batch_size,
+            )
 
         res = aiter.mha_batch_prefill_func(
             q_tensor,
@@ -433,6 +504,15 @@ class AiterPrefillAttnOp:
             k_descale=k_descale,
             v_descale=v_descale,
         )
+
+        if debug:
+            torch.cuda.synchronize()
+            logger.warning(
+                "[DEBUG paged_attn] CHECKPOINT-4 post-kernel: "
+                "res.shape=%s res.stride=%s res.dtype=%s",
+                list(res.shape), list(res.stride()), res.dtype,
+            )
+
         return res.reshape(fmha_params.token_q_num, self.head_num * self.head_dim)
 
     def forward(self, qkv, kv_cache, fmha_params):
