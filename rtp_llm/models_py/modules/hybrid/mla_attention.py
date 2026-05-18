@@ -131,13 +131,18 @@ class MlaAttention(nn.Module):
         # F1b : q_a_layernorm with fp8 q_b_proj — produces dual output
         #       (bf16 for the indexer wq_b consumer, fp8 + scale for q_b_proj).
         # ------------------------------------------------------------------
+        from rtp_llm.models_py.utils.fuse_config import fuse_kernels_enabled
+
+        _fuse_on = fuse_kernels_enabled(hw_kernel_config)
         self._fuse_kv_a_norm = (
-            _DEVICE_TYPE == DeviceType.Cuda and fused_strided_rmsnorm is not None
+            _fuse_on
+            and _DEVICE_TYPE == DeviceType.Cuda
+            and fused_strided_rmsnorm is not None
         )
 
         # q-path fusion mode: "fp8_dual" (F1b), "bf16" (F1a), or "off" (fallback)
         self._fuse_q_a_norm_mode = "off"
-        if self.q_lora_rank > 0 and _DEVICE_TYPE == DeviceType.Cuda:
+        if _fuse_on and self.q_lora_rank > 0 and _DEVICE_TYPE == DeviceType.Cuda:
             q_b_is_fp8 = (
                 CudaFp8GEMMLinear is not None
                 and isinstance(self.q_b_proj, CudaFp8GEMMLinear)

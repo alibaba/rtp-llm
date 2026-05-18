@@ -34,6 +34,19 @@ DECODE_M_THRESHOLD = 1024
 
 
 @triton.jit
+def _ieee_rn_div_f32(x, y):
+    """IEEE round-to-nearest-even fp32 division (matches sgl CUDA `/`)."""
+    return tl.inline_asm_elementwise(
+        "div.rn.f32 $0, $1, $2;",
+        "=r,r,r",
+        [x, y],
+        dtype=tl.float32,
+        is_pure=True,
+        pack=1,
+    )
+
+
+@triton.jit
 def _ue8m0_pow2_round_scalar(s_init):
     """Round positive fp32 up to nearest power of 2 via bit hack."""
     bits = s_init.to(tl.int32, bitcast=True)
@@ -79,7 +92,9 @@ def _fused_rmsnorm_gated_fp8_quant_perrow_kernel(
         mask = offs < HEAD_V_DIM
         x = tl.load(X + x_base + offs, mask=mask, other=0.0).to(tl.float32)
         sq_sum += tl.sum(x * x)
-    rsqrt_val = tl.rsqrt(sq_sum / HEAD_V_DIM + eps)
+    # Match RmsNormGated baseline: ``rstd = 1 / tl.sqrt(var + eps)`` (NOT
+    # ``tl.rsqrt`` which uses the lower-precision ``rsqrt.approx`` PTX op).
+    rsqrt_val = 1.0 / tl.sqrt(sq_sum / HEAD_V_DIM + eps)
 
     if SCALE_UE8M0:
         for g in tl.range(0, groups_per_head):
@@ -89,15 +104,33 @@ def _fused_rmsnorm_gated_fp8_quant_perrow_kernel(
             z = tl.load(Z + z_base + offs, mask=mask, other=0.0).to(tl.float32)
             w = tl.load(W + offs, mask=mask, other=0.0).to(tl.float32)
 
+            # Match RmsNormGated baseline ordering exactly (non-associative fp):
+            # baseline computes ``y = (x * rstd * w); y *= z * tl.sigmoid(z)``
+            # so the gate term ``z * sigmoid(z)`` is computed FIRST then
+            # multiplied into the normed value.
             normed = x * rsqrt_val * w
-            normed = normed * z * tl.sigmoid(z)
+            gate_term = z * tl.sigmoid(z)
+            normed = normed * gate_term
+            # bf16 round-trip: baseline RmsNormGated stores fp32 result to a
+            # bf16 buffer, sgl_per_token_group_quant_fp8 reads bf16 back. To
+            # bit-match we must round to bf16 BEFORE quant.
+            normed = normed.to(tl.bfloat16).to(tl.float32)
 
-            absmax = tl.maximum(tl.max(tl.abs(normed)), 1e-10)
-            s_init = absmax / fp8_max
+            # Match sgl_per_token_group_quant_fp8 byte-exact:
+            #   absmax = max(eps, max(|val|))     # fp32, eps=1e-10 floor
+            #   y_s    = absmax / fp8_max          # IEEE-RNE fp32 div
+            #   q      = clamp(val / y_s,...).to(fp8)  # IEEE-RNE fp32 div per-elem
+            # Triton's default fp32 `/` is ``div.approx.f32`` (~1 ULP off);
+            # fp64-promote the divisions to get IEEE-RNE that bit-matches
+            # sgl's CUDA-default IEEE-RNE division.
+            absmax = tl.maximum(tl.max(tl.abs(normed)), 1e-4)
+            s_init = _ieee_rn_div_f32(absmax, fp8_max)
             s, exp_bits = _ue8m0_pow2_round_scalar(s_init)
-            fp8_val = tl.clamp(normed / s, fp8_min, fp8_max).to(
-                fp8_out.dtype.element_ty
-            )
+            fp8_val = tl.clamp(
+                _ieee_rn_div_f32(normed, tl.full(normed.shape, s, tl.float32)),
+                fp8_min,
+                fp8_max,
+            ).to(fp8_out.dtype.element_ty)
             tl.store(fp8_out + o_base + offs, fp8_val, mask=mask)
 
             global_group = head_id * groups_per_head + g
@@ -117,14 +150,23 @@ def _fused_rmsnorm_gated_fp8_quant_perrow_kernel(
             z = tl.load(Z + z_base + offs, mask=mask, other=0.0).to(tl.float32)
             w = tl.load(W + offs, mask=mask, other=0.0).to(tl.float32)
 
+            # Match RmsNormGated baseline ordering exactly (non-associative fp):
+            # baseline computes ``y = (x * rstd * w); y *= z * tl.sigmoid(z)``
+            # so the gate term ``z * sigmoid(z)`` is computed FIRST then
+            # multiplied into the normed value.
             normed = x * rsqrt_val * w
-            normed = normed * z * tl.sigmoid(z)
+            gate_term = z * tl.sigmoid(z)
+            normed = normed * gate_term
+            # See SCALE_UE8M0 branch above for bf16 round-trip rationale.
+            normed = normed.to(tl.bfloat16).to(tl.float32)
 
-            absmax = tl.maximum(tl.max(tl.abs(normed)), 1e-10)
-            s = absmax / fp8_max
-            fp8_val = tl.clamp(normed / s, fp8_min, fp8_max).to(
-                fp8_out.dtype.element_ty
-            )
+            absmax = tl.maximum(tl.max(tl.abs(normed)), 1e-4)
+            s = _ieee_rn_div_f32(absmax, fp8_max)
+            fp8_val = tl.clamp(
+                _ieee_rn_div_f32(normed, tl.full(normed.shape, s, tl.float32)),
+                fp8_min,
+                fp8_max,
+            ).to(fp8_out.dtype.element_ty)
             tl.store(fp8_out + o_base + offs, fp8_val, mask=mask)
             global_group = head_id * groups_per_head + g
             tl.store(
@@ -228,7 +270,7 @@ def fused_rmsnorm_gated_fp8_quant(
         return sgl_per_token_group_quant_fp8(
             flat,
             group_size=quant_group_size,
-            eps=1e-10,
+            eps=1e-4,
             column_major_scales=True,
             scale_tma_aligned=True,
             scale_ue8m0=scale_ue8m0,
