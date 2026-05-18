@@ -649,8 +649,8 @@ TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocRollbackReleasesDeviceReuseRefe
     allocator->setReserveBlockNum(std::max<size_t>(1, available_before * 8));
 
     auto batch_res = makeBatchResource(/*batch_size=*/1, config);
-    batch_res->setBatchCacheKeys(0, CacheKeysType{100, 101});
-    auto       token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/4, /*seq_size_per_block=*/4);
+    batch_res->setBatchCacheKeys(0, CacheKeysType{100, 101, 102});
+    auto       token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/8, /*seq_size_per_block=*/4);
     MallocInfo malloc_info{batch_res, token_ids};
     malloc_info.enable_device_cache = true;
     malloc_info.reuse_cache         = true;

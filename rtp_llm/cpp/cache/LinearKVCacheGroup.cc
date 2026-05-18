@@ -17,39 +17,13 @@ void LinearKVCacheGroup::filterValidBlocks(const BlockIndicesType& in, BlockIndi
     }
 }
 
-int LinearKVCacheGroup::logicalSlots(int seq_len, int reserve_step) const {
-    const int extra = reserve_step ? reserve_step - 1 : 0;
-    return (seq_len + seq_size_per_block_ - 1) / seq_size_per_block_ + extra;
-}
-
 int LinearKVCacheGroup::needBlocksNum(int seq_len, int current_blocks, int reserve_step) const {
-    if (fixed_cap_ > 0) {
-        const int target = std::min(logicalSlots(seq_len, reserve_step), fixed_cap_);
-        return std::max(target - current_blocks, 0);
-    }
     int extra_blocks = reserve_step ? reserve_step - 1 : 0;
     return std::max((seq_len + seq_size_per_block_ - 1) / seq_size_per_block_ + extra_blocks - current_blocks, 0);
 }
 
 NeedBlocksInfo LinearKVCacheGroup::getNeedBlocks(
     int common_seq_len, int seq_len, int reserve_step, int reuse_blocks_len, bool reuse_enabled) const {
-    NeedBlocksInfo info;
-    if (fixed_cap_ > 0) {
-        // Ring buffer: at any moment we hold at most `fixed_cap_` blocks.
-        // common_blocks / extra_blocks here are informational — used by the
-        // caller to estimate "need new blocks beyond the already-referenced
-        // prefix".  Cap both at `fixed_cap_` so callers do not pre-reserve
-        // pool blocks we will never hold simultaneously.
-        const int common_slots = std::min(logicalSlots(common_seq_len, 0), fixed_cap_);
-        const int seq_slots    = std::min(logicalSlots(seq_len, 0), fixed_cap_);
-        const int total_slots  = std::min(logicalSlots(seq_len, reserve_step), fixed_cap_);
-
-        info.common_blocks = std::max(common_slots - std::min(reuse_blocks_len, fixed_cap_), 0);
-        info.extra_blocks =
-            std::max(total_slots - std::max(common_slots, seq_slots), 0) + std::max(seq_slots - common_slots, 0);
-        return info;
-    }
-
     const int reuse_begin = reuse_blocks_len;
     const int step        = std::max(1, linear_step_);
 
@@ -66,6 +40,8 @@ NeedBlocksInfo LinearKVCacheGroup::getNeedBlocks(
         const int tail     = ((end + 1) % step == 0) ? 0 : 1;
         return eligible + tail;
     };
+
+    NeedBlocksInfo info;
 
     // common_slots: blocks for common_seq_len (no reserve)
     const int common_slots = needBlocksNum(common_seq_len, 0);
@@ -93,113 +69,12 @@ MatchResult LinearKVCacheGroup::matchSingleKey(CacheKeyType cache_key) const {
 }
 
 MatchResult LinearKVCacheGroup::match(const CacheKeysType& cache_keys) {
-    MatchResult result;
-    const int   m = static_cast<int>(cache_keys.size());
-    if (m == 0) {
-        return result;
-    }
-
-    // Ring-buffer Linear groups do not own prefix-reuse matching. Their
-    // retained blocks represent a rolling tail/state window, so prefix reuse
-    // must be decided by the allocator or by a dedicated SWA group.
-    if (fixed_cap_ > 0) {
-        return result;
-    }
-
-    // Legacy (fixed_cap_ == 0): keep stash-era behavior that scans only the
-    // last two positions and returns a prefix-length block_indices with
-    // NULL placeholders at non-hit slots.
-    const int scan_window = 2;
-    const int start       = m - 1;
-    const int end         = std::max(0, m - scan_window);
-
-    for (int i = start; i >= end; --i) {
-        auto single = matchSingleKey(cache_keys[static_cast<size_t>(i)]);
-        if (single.block_indices.empty()) {
-            continue;
-        }
-        result.reuse_blocks = static_cast<size_t>(i + 1);
-        result.block_indices.assign(static_cast<size_t>(i + 1), NULL_BLOCK_IDX);
-        result.block_indices[static_cast<size_t>(i)] = single.block_indices[0];
-        if (i - 1 >= 0) {
-            auto prev = matchSingleKey(cache_keys[static_cast<size_t>(i - 1)]);
-            if (!prev.block_indices.empty()) {
-                result.block_indices[static_cast<size_t>(i - 1)] = prev.block_indices[0];
-            }
-        }
-        result.reuse_length = result.reuse_blocks * static_cast<size_t>(seq_size_per_block_);
-        return result;
-    }
-    return result;
+    (void)cache_keys;
+    RTP_LLM_CHECK_WITH_INFO(false, "SWA should not call match, use matchSingleKey instead");
+    return {};
 }
 
 bool LinearKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_reuse_cache, int reserve_step) {
-    if (fixed_cap_ > 0) {
-        // Ring-buffer malloc — maintain invariant block_ids.blocksNum() <= fixed_cap_
-        // with all entries valid (no NULL padding).
-        const int new_slots = logicalSlots(seq_len, reserve_step);
-        const int target    = std::min(new_slots, fixed_cap_);
-        int       current   = static_cast<int>(block_ids.blocksNum());
-
-        // Recycle detection: BlockIds pointer reused for a new request (starts empty).
-        auto seen_it = last_seq_slots_.find(&block_ids);
-        int  prev    = (seen_it != last_seq_slots_.end()) ? seen_it->second : 0;
-        if (current == 0 && prev > 0) {
-            prev = 0;
-        }
-
-        // Phase 1: fill up to `target` (first-fill before the ring is full).
-        if (current < target) {
-            const int fill = target - current;
-            if (freeBlocksNum() < static_cast<size_t>(fill) && !ensureFreeBlocks(fill)) {
-                RTP_LLM_LOG_WARNING(
-                    "LinearKVCacheGroup ring fill: insufficient free blocks, need %d have %zu", fill, freeBlocksNum());
-                return false;
-            }
-            auto new_ids = block_pool_->malloc(static_cast<size_t>(fill));
-            if (static_cast<int>(new_ids.size()) != fill) {
-                if (!new_ids.empty()) {
-                    block_pool_->requestFree(new_ids);
-                }
-                return false;
-            }
-            block_ids.add(new_ids);
-            current = static_cast<int>(block_ids.blocksNum());
-        }
-
-        // Phase 2: rotation — how many block boundaries have been crossed
-        // since the last call at the cap?
-        if (current == fixed_cap_) {
-            const int effective_prev = std::max(prev, current);
-            const int rotations      = std::max(0, new_slots - effective_prev);
-            for (int r = 0; r < rotations; ++r) {
-                if (freeBlocksNum() < 1 && !ensureFreeBlocks(1)) {
-                    RTP_LLM_LOG_WARNING("LinearKVCacheGroup ring rotate: no free block available");
-                    return false;
-                }
-                auto new_id = block_pool_->malloc(1);
-                if (new_id.empty()) {
-                    return false;
-                }
-                // Free the oldest and shift: [A, B] -> [B, ?] -> [B, new]
-                const auto oldest = block_ids.blocks()[0];
-                if (!isNullBlockIdx(oldest)) {
-                    block_pool_->requestFree({oldest});
-                    // Drop block_to_key_ mapping for the evicted block so its
-                    // stale cache entry cleanup on next insert doesn't fail.
-                    block_to_key_.erase(oldest);
-                }
-                block_ids.swap(0, 1);
-                block_ids.popBack();
-                block_ids.add({new_id[0]});
-            }
-        }
-
-        last_seq_slots_[&block_ids] = new_slots;
-        return true;
-    }
-
-    // ---- Legacy path (fixed_cap_ == 0) ----
     const int step               = std::max(1, linear_step_);
     const int current_blocks_len = static_cast<int>(block_ids.blocksNum());
     const int seq_slots          = needBlocksNum(seq_len, 0, 0);
@@ -275,14 +150,6 @@ void LinearKVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
         if (isNullBlockIdx(b)) {
             continue;
         }
-        // If this block was previously inserted with a different key, remove
-        // the stale entry first. This happens when fixed-allocation pools
-        // (SWA/State) reuse the same physical block for updated content.
-        auto it = block_to_key_.find(b);
-        if (it != block_to_key_.end() && it->second != cache_keys[i]) {
-            block_cache_->remove(it->second, group_id_);
-            block_to_key_.erase(it);
-        }
         BlockCache::CacheItem item;
         item.cache_key   = cache_keys[i];
         item.group_id    = group_id_;
@@ -290,16 +157,11 @@ void LinearKVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
         item.is_resident = is_resident;
         if (block_cache_->put(item)) {
             block_pool_->blockCacheReference(b);
-            block_to_key_[b] = cache_keys[i];
         }
     }
 }
 
 void LinearKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache, int reserve_step) {
-    if (fixed_cap_ > 0) {
-        // Ring-buffer mode: malloc already maintains the invariant; nothing to skip.
-        return;
-    }
     const auto& block_indices = block_ids.blocks();  // const view for reading current state
     if (block_indices.empty()) {
         return;
@@ -345,13 +207,6 @@ void LinearKVCacheGroup::reference(BlockIds& block_ids, const BlockIndicesType& 
     if (!valid.empty()) {
         block_pool_->requestReference(valid);
     }
-}
-
-void LinearKVCacheGroup::recordReuse(const BlockIds& block_ids, int reuse_slots) {
-    if (fixed_cap_ <= 0) {
-        return;
-    }
-    last_seq_slots_[&block_ids] = std::max(reuse_slots, 0);
 }
 
 }  // namespace rtp_llm

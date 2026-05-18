@@ -44,14 +44,14 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType& cache_keys, BatchKVC
         full_matched_blocks[static_cast<size_t>(gid)] = std::move(match_result.block_indices);
     }
 
-    int                           pos = min_full_reuse_blocks - 1;
-    std::vector<BlockIdxType>     linear_tail_blocks(linear_group_ids_.size(), NULL_BLOCK_IDX);
-    std::vector<BlockIndicesType> swa_tail_blocks(swa_group_ids_.size());
-    const bool                    has_tail_groups = !linear_group_ids_.empty() || !swa_group_ids_.empty();
+    int                       pos = min_full_reuse_blocks - 1;
+    std::vector<BlockIdxType> linear_tail_blocks(linear_group_ids_.size(), NULL_BLOCK_IDX);
+    std::vector<BlockIdxType> swa_tail_blocks(swa_group_ids_.size(), NULL_BLOCK_IDX);
+    const bool                has_tail_groups = !linear_group_ids_.empty() || !swa_group_ids_.empty();
     for (; pos >= 0 && has_tail_groups; --pos) {
-        bool                          all_tail_groups_matched = true;
-        std::vector<BlockIdxType>     candidate_linear_tail_blocks(linear_group_ids_.size(), NULL_BLOCK_IDX);
-        std::vector<BlockIndicesType> candidate_swa_tail_blocks(swa_group_ids_.size());
+        bool                      all_tail_groups_matched = true;
+        std::vector<BlockIdxType> candidate_linear_tail_blocks(linear_group_ids_.size(), NULL_BLOCK_IDX);
+        std::vector<BlockIdxType> candidate_swa_tail_blocks(swa_group_ids_.size(), NULL_BLOCK_IDX);
         for (size_t i = 0; i < linear_group_ids_.size(); ++i) {
             const int gid      = linear_group_ids_[i];
             auto* linear_group = dynamic_cast<LinearKVCacheGroup*>(kv_cache_groups_[static_cast<size_t>(gid)].get());
@@ -75,13 +75,7 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType& cache_keys, BatchKVC
                 all_tail_groups_matched = false;
                 break;
             }
-            if (pos - 1 >= 0) {
-                auto prev = swa_group->matchSingleKey(cache_keys[static_cast<size_t>(pos - 1)]);
-                if (!prev.block_indices.empty()) {
-                    candidate_swa_tail_blocks[i].push_back(prev.block_indices[0]);
-                }
-            }
-            candidate_swa_tail_blocks[i].push_back(result.block_indices[0]);
+            candidate_swa_tail_blocks[i] = result.block_indices[0];
         }
         if (all_tail_groups_matched) {
             linear_tail_blocks = std::move(candidate_linear_tail_blocks);
@@ -113,11 +107,7 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType& cache_keys, BatchKVC
         const int gid = swa_group_ids_[i];
         kv_resource.mutableBlockIds(0, gid).assign(
             BlockIndicesType(static_cast<size_t>(reuse_blocks_len), NULL_BLOCK_IDX));
-        const size_t tail_begin =
-            static_cast<size_t>(std::max(reuse_blocks_len - static_cast<int>(swa_tail_blocks[i].size()), 0));
-        for (size_t j = 0; j < swa_tail_blocks[i].size(); ++j) {
-            kv_resource.mutableBlockIds(0, gid).setAt(tail_begin + j, swa_tail_blocks[i][j]);
-        }
+        kv_resource.mutableBlockIds(0, gid).setAt(static_cast<size_t>(reuse_blocks_len - 1), swa_tail_blocks[i]);
     }
     return reuse_blocks_len;
 }

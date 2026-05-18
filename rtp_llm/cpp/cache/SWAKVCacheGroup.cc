@@ -69,6 +69,7 @@ MatchResult SWAKVCacheGroup::matchSingleKey(CacheKeyType cache_key) const {
 
 MatchResult SWAKVCacheGroup::match(const CacheKeysType& cache_keys) {
     (void)cache_keys;
+    RTP_LLM_CHECK_WITH_INFO(false, "SWA should not call match, use matchSingleKey instead");
     return {};
 }
 
