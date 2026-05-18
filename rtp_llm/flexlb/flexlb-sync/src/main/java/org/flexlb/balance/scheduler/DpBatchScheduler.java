@@ -16,6 +16,9 @@ import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.master.DpRankStatus;
+import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.engine.grpc.dp.DpGrpcClient;
 import org.flexlb.sync.status.EngineWorkerStatus;
@@ -214,6 +217,12 @@ public class DpBatchScheduler {
         ServerStatus prefill = copyOf(req.prefill());
         prefill.setDpRank(dpRank);
         prefill.setRequestId(req.requestId());
+        // Frontend's FetchResponse uses prefill.serverIp + prefill.grpcPort. The
+        // request's response_registry entry lives on the DP that received the
+        // real (non-fake) Enqueue slot — for any dpRank > 0 that is a peer DP,
+        // not the BatchEnqueue receiver. Without this remap, frontend would
+        // always hit DP0's registry and get NOT_FOUND for cross-DP requests.
+        applyDpRankAddress(prefill, dpRank);
 
         ServerStatus decode = copyOf(req.decode());
         decode.setRequestId(req.requestId());
@@ -352,6 +361,31 @@ public class DpBatchScheduler {
                 .setIsFakeQuery(true)
                 .setDpRank(com.google.protobuf.Int32Value.of(dpRank))
                 .build();
+    }
+
+    private void applyDpRankAddress(ServerStatus prefill, int dpRank) {
+        if (prefill == null || dpRank < 0 || prefill.getServerIp() == null) {
+            return;
+        }
+        String ipPort = prefill.getServerIp() + ":" + prefill.getHttpPort();
+        Map<String, WorkerStatus> roleMap =
+                engineWorkerStatus.selectModelWorkerStatus(RoleType.PREFILL, prefill.getGroup());
+        if (roleMap == null) {
+            return;
+        }
+        WorkerStatus ws = roleMap.get(ipPort);
+        if (ws == null || ws.getDpStatuses() == null) {
+            return;
+        }
+        for (DpRankStatus drs : ws.getDpStatuses()) {
+            if (drs.dpRank() == dpRank) {
+                prefill.setServerIp(drs.ip());
+                prefill.setGrpcPort(drs.grpcPort());
+                return;
+            }
+        }
+        Logger.warn("applyDpRankAddress: dpRank {} not found in dpStatuses for {} (size={})",
+                dpRank, ipPort, ws.getDpStatuses().size());
     }
 
     private static ServerStatus copyOf(ServerStatus src) {

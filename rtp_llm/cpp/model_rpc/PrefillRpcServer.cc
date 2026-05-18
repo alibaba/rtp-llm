@@ -618,6 +618,15 @@ PrefillRpcServer::Enqueue(grpc::ServerContext* context, const EnqueueRequestPB* 
 
     if (input.is_fake_query()) {
         auto fake_stream = engine_->createMinFakeStream(/*max_new_tokens=*/1);
+        RTP_LLM_LOG_INFO("Enqueue fake_query req=%ld dp_rank=%d stream=%p",
+                         request_id,
+                         input.has_dp_rank() ? input.dp_rank().value() : -1,
+                         fake_stream.get());
+        if (!fake_stream) {
+            return grpc::Status(grpc::StatusCode::INTERNAL,
+                                "createMinFakeStream returned null for fake_query req "
+                                + std::to_string(request_id));
+        }
         engine_->enqueue(fake_stream);
         return grpc::Status::OK;
     }
@@ -687,6 +696,18 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
     const auto& peer_addrs   = cfg.dp_peer_addrs;
     response->set_batch_id(request->batch_id());
 
+    {
+        std::string addrs_dump;
+        for (size_t i = 0; i < peer_addrs.size(); ++i) {
+            if (i) addrs_dump += ",";
+            addrs_dump += peer_addrs[i];
+        }
+        RTP_LLM_LOG_INFO(
+            "BatchEnqueue batch=%ld self_dp=%d dp_size=%d peer_addrs.size=%zu addrs=[%s] slots=%d dp_controller=%d",
+            request->batch_id(), self_dp_rank, dp_size, peer_addrs.size(), addrs_dump.c_str(),
+            request->inputs_size(), cfg.dp_controller_managed ? 1 : 0);
+    }
+
     const int slot_num = request->inputs_size();
     response->mutable_acks()->Reserve(slot_num);
     for (int i = 0; i < slot_num; ++i) {
@@ -700,23 +721,25 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
         err->set_error_message(msg);
     };
 
+    // Part C — reorder fan-out so DP0 (the BatchEnqueue receiver) does not
+    // enter forward before peer DPs have queued their slots. Phase 1 launches
+    // all peer Enqueues async, phase 2 waits for them, phase 3 finally does
+    // local self-Enqueue. This guarantees the peer's FIFOScheduler has the
+    // stream queued before DP0's engine loop can pick up its own — closing the
+    // request-level timing skew that would otherwise cause DP0's first DeepEP
+    // dispatch to find no peer and CPU-recv-timeout.
     std::vector<std::future<void>> peer_tasks;
     peer_tasks.reserve(slot_num);
 
+    // Phase 1: async fan-out to every non-self slot.
     for (int i = 0; i < slot_num; ++i) {
-        const auto& input = request->inputs(i);
-        // Missing dp_rank falls back to self-slot (single-DP / non-DP-controller callers).
+        const auto&   input     = request->inputs(i);
         const int32_t slot_rank = input.has_dp_rank() ? input.dp_rank().value() : self_dp_rank;
         auto*         ack       = response->mutable_acks(i);
 
-        if (slot_rank == self_dp_rank || dp_size <= 1 || !cfg.dp_controller_managed) {
-            EnqueueRequestPB local_req;
-            *local_req.mutable_input() = input;
-            auto local_status          = Enqueue(context, &local_req, ack);
-            if (!local_status.ok()) {
-                fill_error(ack, input.request_id(), local_status.error_code(), local_status.error_message());
-            }
-            continue;
+        const bool is_self = (slot_rank == self_dp_rank || dp_size <= 1 || !cfg.dp_controller_managed);
+        if (is_self) {
+            continue;  // deferred to phase 3
         }
 
         if (slot_rank < 0 || static_cast<size_t>(slot_rank) >= peer_addrs.size()) {
@@ -749,10 +772,38 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
         }));
     }
 
+    // Phase 2: wait for every peer Enqueue to return. The remote handler only
+    // returns after it has placed the slot into its FIFOScheduler (real path
+    // also runs syncPrefix; fake path is constant-time createMinFakeStream +
+    // engine_->enqueue). When this loop exits, every peer DP has its slot
+    // visible to its engine loop.
     for (auto& task : peer_tasks) {
         task.get();
     }
 
+    // Phase 3: now do local self-Enqueue. Because peer DPs are already queued
+    // (phase 2), DP0 entering forward in the next engine step will pair on
+    // every DeepEP collective with a peer that is at least at the same forward
+    // boundary. This is the correctness guarantee.
+    for (int i = 0; i < slot_num; ++i) {
+        const auto&   input     = request->inputs(i);
+        const int32_t slot_rank = input.has_dp_rank() ? input.dp_rank().value() : self_dp_rank;
+        auto*         ack       = response->mutable_acks(i);
+
+        const bool is_self = (slot_rank == self_dp_rank || dp_size <= 1 || !cfg.dp_controller_managed);
+        if (!is_self) {
+            continue;
+        }
+
+        EnqueueRequestPB local_req;
+        *local_req.mutable_input() = input;
+        auto local_status          = Enqueue(context, &local_req, ack);
+        if (!local_status.ok()) {
+            fill_error(ack, input.request_id(), local_status.error_code(), local_status.error_message());
+        }
+    }
+
+    RTP_LLM_LOG_INFO("BatchEnqueue batch=%ld self_dp=%d phase3_local_done", request->batch_id(), self_dp_rank);
     return grpc::Status::OK;
 }
 
