@@ -4,7 +4,10 @@ from typing import Any, Optional, Tuple
 import aiter
 import torch
 
-from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
+from rtp_llm.models_py.distributed.collective_torch import (
+    Group,
+    all_reduce,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -122,7 +125,9 @@ class PureTpRouterBase(FusedMoeDataRouter):
     ) -> torch.Tensor:
         fused_expert_output = payload.fused_expert_output
         if self.tp_size > 1:
-            fused_expert_output = all_reduce(fused_expert_output, group=Group.TP)
+            fused_expert_output = all_reduce(
+                fused_expert_output, group=Group.TP
+            )
         return fused_expert_output
 
 
