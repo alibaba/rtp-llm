@@ -264,8 +264,11 @@ def forward_layers(
         h = layer.forward_decode(h, attn_metadata, input_ids, kv_cache=kv_cache)
         if _rt_on:
             _rt.record(f"decode_layer{layer.layer_id:02d}_out", h)
-    _pre_hc_flat = h.flatten(-2).reshape(-1, h.size(-2) * h.size(-1))
-    v4._write_mtp_hidden_buffer(_pre_hc_flat, is_cuda_graph=attn_metadata.is_cuda_graph)
+    if getattr(v4, "_mtp_hidden_buffer", None) is not None:
+        _pre_hc_flat = h.flatten(-2).reshape(-1, h.size(-2) * h.size(-1))
+        v4._write_mtp_hidden_buffer(
+            _pre_hc_flat, is_cuda_graph=attn_metadata.is_cuda_graph
+        )
     h = v4._hc_head_reduce(h)
     if _rt_on:
         _rt.record("decode_hc_reduced", h)
@@ -385,7 +388,10 @@ def forward_decode(
             _rt.record("decode_input_ids", input_ids)
 
     h = forward_layers(
-        v4, kv_cache, input_ids, meta,
+        v4,
+        kv_cache,
+        input_ids,
+        meta,
         prepare_hidden_fn=prepare_hidden_fn,
     )  # [B, q_len, dim]
     hidden = h.reshape(B * q_len, v4_args.dim)  # packed [T_total, dim]
