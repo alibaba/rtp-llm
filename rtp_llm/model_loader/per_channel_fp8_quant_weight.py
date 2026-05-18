@@ -703,6 +703,7 @@ class LoadQuantPerChannelFp8Weight(PerChannelFp8Weight):
         scale_name = self.w8a8_weight_list.get(src_weight_info.name)
         scale = None
         if scale_name:
+            # shallow copy is safe: params values are simple types (str, dtype, bool)
             scale_params = params.copy()
             scale_params["name"] = scale_name
             scale: AtomicWeight = create_w8a8_fp8_per_channel_weight(
@@ -768,7 +769,7 @@ class LoadQuantPerChannelFp8Weight(PerChannelFp8Weight):
         ):
             return None
 
-        _, first_tensor = kernel._load_expert_tensor(
+        first_name, first_tensor = kernel._load_expert_tensor(
             ckpt_weights[0], layer_id, selected_experts[0], tensor_source, convert_type
         )
         if first_tensor.dim() != 2:
@@ -799,6 +800,8 @@ class LoadQuantPerChannelFp8Weight(PerChannelFp8Weight):
                         expert_id,
                         tensor_source,
                         convert_type,
+                        first_name=first_name,
+                        first_tensor=first_tensor,
                     )
                     if has_prequant and tensor_source.has_prequantized_scale(name):
                         fp8_out[local_idx, row_offset : row_offset + dim0].copy_(t)
@@ -811,6 +814,7 @@ class LoadQuantPerChannelFp8Weight(PerChannelFp8Weight):
                         scale_out[local_idx, row_offset : row_offset + dim0].copy_(s)
                         del q, s
                     del t
+            first_tensor = None
         else:
             fp8_out = torch.empty(
                 [num_experts, dim0, dim1], dtype=torch.float8_e4m3fn, device=gpu_device
@@ -827,6 +831,8 @@ class LoadQuantPerChannelFp8Weight(PerChannelFp8Weight):
                     expert_id,
                     tensor_source,
                     convert_type,
+                    first_name=first_name,
+                    first_tensor=first_tensor,
                 )
                 if has_prequant and tensor_source.has_prequantized_scale(name):
                     fp8_out[local_idx].copy_(t)
@@ -837,20 +843,38 @@ class LoadQuantPerChannelFp8Weight(PerChannelFp8Weight):
                     scale_out[local_idx].copy_(s)
                     del q, s
                 del t
+            first_tensor = None
 
         if kernel._process_fun_name == "transpose_stack_moe_w1":
+            # Swap upper/lower halves (gate/up reorder).
+            # Avoid torch.cat on FP8 tensors directly — ROCm does not support it.
+            # Instead pre-allocate and copy_ each half into swapped positions.
             half = fp8_out.shape[1] // 2
-            fp8_out = torch.cat(
-                [fp8_out[:, half:, :], fp8_out[:, :half, :]], dim=1
-            ).contiguous()
-            scale_out = torch.cat(
-                [scale_out[:, half:, :], scale_out[:, :half, :]], dim=1
-            ).contiguous()
+            swapped_fp8 = torch.empty_like(fp8_out)
+            swapped_fp8[:, :half, :].copy_(fp8_out[:, half:, :])
+            swapped_fp8[:, half:, :].copy_(fp8_out[:, :half, :])
+            fp8_out = swapped_fp8
 
+            swapped_scale = torch.empty_like(scale_out)
+            swapped_scale[:, :half, :].copy_(scale_out[:, half:, :])
+            swapped_scale[:, half:, :].copy_(scale_out[:, :half, :])
+            scale_out = swapped_scale
+
+        used_prequant = (
+            has_prequant
+            and any(
+                tensor_source.has_prequantized_scale(
+                    ckpt_weights[0].name.format(
+                        i=str(layer_id), i_1=str((layer_id or 0) + 1), expert_id=str(eid)
+                    )
+                )
+                for eid in selected_experts[:1]
+            )
+        )
         logging.info(
             f"inline MoE FP8 quant: {self.kernel.name} layer={layer_id} "
             f"experts={num_experts} shape={list(fp8_out.shape)} "
-            f"prequantized={has_prequant and bool(getattr(tensor_source, '_scales', None))}"
+            f"prequantized={used_prequant}"
         )
         return {self.kernel.name: fp8_out, self.scale.name: scale_out}
 

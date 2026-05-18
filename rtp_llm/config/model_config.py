@@ -412,6 +412,39 @@ class ModelConfig(CppModelConfig):
         )
         return layer_weight_param_count
 
+    def moe_weight_param_count(self) -> int:
+        """Calculate parameter count for MoE expert weights only (routed experts).
+
+        Returns:
+            Parameter count for MoE expert weights. Returns 0 if no MoE is configured.
+        """
+        if self.expert_num <= 0:
+            return 0
+
+        hidden_size = self.hidden_size
+        ffn_expert_num = self.expert_num
+        ffn_w_count = 3 if self.isGatedActivation() else 2
+
+        if self.moe_style == 1:
+            # Pure MOE: all layers use routed experts
+            return (
+                self.num_layers
+                * self.moe_inter_size
+                * hidden_size
+                * ffn_w_count
+                * ffn_expert_num
+            )
+        elif self.moe_style == 2:
+            # Hybrid MOE: only routed expert weights (not shared experts)
+            return (
+                len(self.moe_layer_index)
+                * self.moe_inter_size
+                * hidden_size
+                * ffn_w_count
+                * ffn_expert_num
+            )
+        return 0
+
     def apply_rope_scaling_override(self, model_override_args: Dict[str, Any]) -> None:
         """
         Apply rope_scaling configuration from model_override_args.

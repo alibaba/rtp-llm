@@ -1,4 +1,4 @@
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 import torch
 
@@ -77,13 +77,13 @@ class DatabaseTensorSource(TensorSource):
 
 
 class TensorCollector(TensorSource):
-    _target_keys: List[str]
+    _target_keys: Set[str]
     _tensors: Dict[str, torch.Tensor]
     _scales: Dict[str, torch.Tensor]
     _completed_once: bool
     _database: BaseDatabase
 
-    def __init__(self, target_keys: List[str], database: BaseDatabase):
+    def __init__(self, target_keys: Set[str], database: BaseDatabase):
         self._target_keys = target_keys
         self._tensors = {}
         self._scales = {}

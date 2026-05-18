@@ -37,3 +37,13 @@ py_test(
         'gpu': 'H20',
     },
 )
+
+py_test(
+    name = "test_inline_fp8_quant",
+    srcs = ["test_inline_fp8_quant.py"],
+    deps = py_test_deps,
+    tags = ["rocm"],
+    exec_properties = {
+        'gpu': 'MI308X-ROCM7',
+    },
+)
