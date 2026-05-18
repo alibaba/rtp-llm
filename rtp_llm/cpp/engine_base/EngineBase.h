@@ -91,6 +91,10 @@ public:
         return false;
     }
 
+    virtual std::shared_ptr<GenerateStream> createMinFakeStream(int32_t max_new_tokens) {
+        return nullptr;
+    }
+
     std::shared_ptr<KVCacheManager> getCacheManager() const;
 
 protected:

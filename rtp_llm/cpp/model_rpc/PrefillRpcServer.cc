@@ -616,6 +616,12 @@ PrefillRpcServer::Enqueue(grpc::ServerContext* context, const EnqueueRequestPB* 
     auto        request_id = input.request_id();
     response->set_request_id(request_id);
 
+    if (input.is_fake_query()) {
+        auto fake_stream = engine_->createMinFakeStream(/*max_new_tokens=*/1);
+        engine_->enqueue(fake_stream);
+        return grpc::Status::OK;
+    }
+
     if (response_registry_.get(request_id) != nullptr) {
         auto msg = "request [" + std::to_string(request_id) + "] already enqueued";
         RTP_LLM_LOG_WARNING("%s", msg.c_str());

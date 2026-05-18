@@ -116,7 +116,7 @@ public class DpBatchScheduler {
             return;
         }
 
-        EngineRpcService.BatchEnqueueRequestPB pb = buildPb(batchId, assignments);
+        EngineRpcService.BatchEnqueueRequestPB pb = buildPb(batchId, assignments, batch.dpSize());
         inflightRegistry.register(batchId, batch);
 
         grpcClient.enqueue(batch.prefillIp(), batch.prefillGrpcPort(), pb)
@@ -273,9 +273,14 @@ public class DpBatchScheduler {
         return ctx.getRequest().getModel();
     }
 
-    private EngineRpcService.BatchEnqueueRequestPB buildPb(long batchId, List<RankAssignment> assignments) {
+    private EngineRpcService.BatchEnqueueRequestPB buildPb(long batchId,
+                                                            List<RankAssignment> assignments,
+                                                            int dpSize) {
         EngineRpcService.BatchEnqueueRequestPB.Builder b = EngineRpcService.BatchEnqueueRequestPB.newBuilder()
                 .setBatchId(batchId);
+
+        boolean[] rankFilled = dpSize > 0 ? new boolean[dpSize] : null;
+
         for (RankAssignment ra : assignments) {
             PendingRequest req = ra.request();
             Request reqDto = req.ctx() != null ? req.ctx().getRequest() : null;
@@ -322,8 +327,31 @@ public class DpBatchScheduler {
                         .build());
             }
             b.addInputs(ib.build());
+
+            if (rankFilled != null && ra.dpRank() >= 0 && ra.dpRank() < dpSize) {
+                rankFilled[ra.dpRank()] = true;
+            }
         }
+
+        if (rankFilled != null) {
+            for (int rank = 0; rank < dpSize; rank++) {
+                if (rankFilled[rank]) {
+                    continue;
+                }
+                b.addInputs(buildFakeInputPb(batchId, rank));
+            }
+        }
+
         return b.build();
+    }
+
+    private EngineRpcService.GenerateInputPB buildFakeInputPb(long batchId, int dpRank) {
+        long fakeRequestId = -(batchId * 1024L + dpRank);
+        return EngineRpcService.GenerateInputPB.newBuilder()
+                .setRequestId(fakeRequestId)
+                .setIsFakeQuery(true)
+                .setDpRank(com.google.protobuf.Int32Value.of(dpRank))
+                .build();
     }
 
     private static ServerStatus copyOf(ServerStatus src) {
