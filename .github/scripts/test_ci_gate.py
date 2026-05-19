@@ -848,44 +848,79 @@ class TestWaitMerge(unittest.TestCase):
 # merge.check_merge_done (single-shot dedup precheck)
 # ---------------------------------------------------------------------------
 class TestCheckMergeDone(unittest.TestCase):
-    def _args(self, **overrides):
+    """Verify the 3-way dedup state machine: done | wait | trigger.
+
+    The workflow keys off `merge_action` to decide whether to skip,
+    just-wait, or trigger a fresh MERGE-TASK. PENDING must map to
+    `wait` (not `trigger`) so we don't duplicate an in-flight task.
+    """
+
+    def _args(self, output_file="", **overrides):
         defaults = {
             "commit_id": "abc123",
             "security": "secret",
             "repository": "repo",
+            "output_file": output_file,
         }
         defaults.update(overrides)
         return argparse.Namespace(**defaults)
 
-    @patch("ci_gate.merge.ci_service_request")
-    def test_success_returns_0(self, mock_ci):
-        mock_ci.return_value = {"status": {"success": True}}
-        self.assertEqual(check_merge_done(self._args()), 0)
+    def _run(self, mock_ci, response):
+        mock_ci.return_value = response
+        with tempfile.NamedTemporaryFile(mode="r+") as out:
+            rc = check_merge_done(self._args(output_file=out.name))
+            out.seek(0)
+            return rc, out.read()
+
+    def _run_raises(self, mock_ci, exc):
+        mock_ci.side_effect = exc
+        with tempfile.NamedTemporaryFile(mode="r+") as out:
+            rc = check_merge_done(self._args(output_file=out.name))
+            out.seek(0)
+            return rc, out.read()
 
     @patch("ci_gate.merge.ci_service_request")
-    def test_success_string_returns_0(self, mock_ci):
-        mock_ci.return_value = {"status": '{"success": true}'}
-        self.assertEqual(check_merge_done(self._args()), 0)
+    def test_success_returns_done(self, mock_ci):
+        rc, out = self._run(mock_ci, {"status": {"success": True}})
+        self.assertEqual(rc, 0)
+        self.assertIn("merge_action=done", out)
 
     @patch("ci_gate.merge.ci_service_request")
-    def test_pending_returns_1(self, mock_ci):
-        mock_ci.return_value = {"status": "PENDING"}
-        self.assertEqual(check_merge_done(self._args()), 1)
+    def test_success_string_returns_done(self, mock_ci):
+        rc, out = self._run(mock_ci, {"status": '{"success": true}'})
+        self.assertEqual(rc, 0)
+        self.assertIn("merge_action=done", out)
 
     @patch("ci_gate.merge.ci_service_request")
-    def test_failure_returns_1(self, mock_ci):
-        mock_ci.return_value = {"status": {"success": False}}
-        self.assertEqual(check_merge_done(self._args()), 1)
+    def test_pending_returns_wait_not_trigger(self, mock_ci):
+        """PENDING must map to wait so the workflow skips trigger-merge.
+
+        Regression guard for the dedup state machine: returning trigger
+        here would re-issue MERGE-TASK for a commit whose internal merge
+        is already running.
+        """
+        rc, out = self._run(mock_ci, {"status": "PENDING"})
+        self.assertEqual(rc, 0)
+        self.assertIn("merge_action=wait", out)
+        self.assertNotIn("merge_action=trigger", out)
 
     @patch("ci_gate.merge.ci_service_request")
-    def test_non_dict_returns_1(self, mock_ci):
-        mock_ci.return_value = "OK"
-        self.assertEqual(check_merge_done(self._args()), 1)
+    def test_explicit_failure_returns_trigger(self, mock_ci):
+        rc, out = self._run(mock_ci, {"status": {"success": False}})
+        self.assertEqual(rc, 1)
+        self.assertIn("merge_action=trigger", out)
 
     @patch("ci_gate.merge.ci_service_request")
-    def test_network_error_returns_1(self, mock_ci):
-        mock_ci.side_effect = GateError("boom", 2)
-        self.assertEqual(check_merge_done(self._args()), 1)
+    def test_non_dict_returns_trigger(self, mock_ci):
+        rc, out = self._run(mock_ci, "OK")
+        self.assertEqual(rc, 1)
+        self.assertIn("merge_action=trigger", out)
+
+    @patch("ci_gate.merge.ci_service_request")
+    def test_network_error_returns_trigger(self, mock_ci):
+        rc, out = self._run_raises(mock_ci, GateError("boom", 2))
+        self.assertEqual(rc, 1)
+        self.assertIn("merge_action=trigger", out)
 
 
 # ---------------------------------------------------------------------------

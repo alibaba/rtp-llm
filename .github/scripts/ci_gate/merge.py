@@ -4,7 +4,7 @@ import argparse
 import json
 import time
 
-from .common import BRANCH_REF, CI_TRIGGER_URL, PROJECT_ID, GateError, log
+from .common import BRANCH_REF, CI_TRIGGER_URL, PROJECT_ID, GateError, log, write_output
 from .ci_service import branch_commit_id, ci_service_request, get_branch_info
 from .github import github_get
 
@@ -79,13 +79,25 @@ def trigger_merge(args):
     return 0
 
 
+def _write_merge_action(args, action):
+    # type: (argparse.Namespace, str) -> None
+    write_output("merge_action", action, getattr(args, "output_file", "") or "")
+
+
 def check_merge_done(args):
     # type: (argparse.Namespace) -> int
-    """Single-shot internal merge status query.
+    """Single-shot internal merge status query — three-way dedup.
 
-    Exit 0 ONLY when the internal merge is confirmed successful.
-    PENDING, failed, not-found, network/protocol errors all → non-zero.
-    Used as a dedup precheck (re-approval; backstop in merge-request-trigger).
+    Writes `merge_action` to `--output-file` (GITHUB_OUTPUT) and uses the
+    same exit convention as `pre-check-status`:
+      - done    → exit 0 (gate skips rebase/trigger/wait, green directly)
+      - wait    → exit 0 (task already PENDING; skip trigger, just wait)
+      - trigger → exit 1 (no record / explicit failure / protocol error;
+                          gate must run rebase + trigger + wait)
+
+    Conflating PENDING with "not done" would re-issue a MERGE-TASK for a
+    commit whose internal merge is already running — breaking the same-
+    commit dedup invariant. Keep the three states distinct.
     """
     try:
         body = ci_service_request(
@@ -98,17 +110,20 @@ def check_merge_done(args):
             "checking merge done",
         )
     except GateError as exc:
-        log("Internal merge status unavailable: %s" % exc)
+        log("Internal merge status unavailable: %s — will trigger new merge" % exc)
+        _write_merge_action(args, "trigger")
         return 1
 
     if not isinstance(body, dict):
-        log("::warning::Merge status response is not a JSON object")
+        log("::warning::Merge status response is not a JSON object — will trigger new merge")
+        _write_merge_action(args, "trigger")
         return 1
 
     status = body.get("status")
     if status == "PENDING":
-        log("Internal merge is still PENDING")
-        return 1
+        log("[WAIT] Internal merge is PENDING for commit %s — will wait, not retrigger" % args.commit_id)
+        _write_merge_action(args, "wait")
+        return 0
 
     if isinstance(status, dict):
         success = status.get("success")
@@ -123,9 +138,11 @@ def check_merge_done(args):
 
     if success is True or str(success).lower() == "true":
         log("[OK] Internal merge ALREADY DONE for commit %s" % args.commit_id)
+        _write_merge_action(args, "done")
         return 0
 
-    log("[GO] Internal merge NOT YET DONE for commit %s (status=%s)" % (args.commit_id, status))
+    log("[GO] Internal merge NOT YET DONE for commit %s (status=%s) — will trigger" % (args.commit_id, status))
+    _write_merge_action(args, "trigger")
     return 1
 
 
