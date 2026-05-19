@@ -28,8 +28,16 @@ from rtp_llm.models_py.triton_kernels.causal_conv1d import (
     prepare_causal_conv1d_metadata,
 )
 from rtp_llm.models_py.triton_kernels.common.layernorm_gated import RmsNormGated
+try:
+    from flashinfer.gdn_kernels.blackwell.gdn_prefill import (
+        chunk_gated_delta_rule_sm100 as _flashinfer_gdn_prefill,
+    )
+except Exception:
+    _flashinfer_gdn_prefill = None
 from rtp_llm.models_py.triton_kernels.fla.block import (
+    compute_state_indices_from_block_map,
     load_initial_state_from_block_map,
+    store_final_state_only_to_block_map,
     store_ssm_state_to_block_map,
 )
 from rtp_llm.models_py.triton_kernels.fla.chunk import chunk_gated_delta_rule
@@ -37,6 +45,13 @@ from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
     fused_recurrent_gated_delta_rule,
 )
 from rtp_llm.models_py.triton_kernels.fla.gdn_gating import fused_gdn_gating
+
+try:
+    from flashinfer.gdn_kernels.gdn_decode_bf16_state import (
+        gated_delta_rule as _flashinfer_gdn_decode,
+    )
+except Exception:
+    _flashinfer_gdn_decode = None
 from rtp_llm.models_py.utils.debug import cudagraph_debug_kernel
 from rtp_llm.models_py.utils.typed_storage_view import LinearCacheConverter
 from rtp_llm.ops import (
@@ -200,6 +215,109 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         ).transpose(0, 1)
         return out
 
+    _blackwell_available: Optional[bool] = None
+    _blackwell_warmed_up: bool = False
+
+    @classmethod
+    def _is_blackwell_gpu(cls) -> bool:
+        if cls._blackwell_available is None:
+            if not torch.cuda.is_available():
+                cls._blackwell_available = False
+            else:
+                import os
+                major, _ = torch.cuda.get_device_capability()
+                cls._blackwell_available = major >= 10
+        return cls._blackwell_available
+
+    def _use_blackwell_kernel(self, total_seq_len: int, batch_size: int = 1) -> bool:
+        import os
+        if os.environ.get("ENABLE_BLACKWELL_GDN", "0") != "1":
+            return False
+        if _flashinfer_gdn_prefill is None:
+            return False
+        if self.head_k_dim != 128:
+            return False
+        if not self._is_blackwell_gpu():
+            return False
+        if batch_size > 1:
+            return False
+        return True
+
+    @classmethod
+    def warmup_blackwell_kernel(
+        cls,
+        head_k_dim: int,
+        local_num_k_heads: int,
+        local_num_v_heads: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> None:
+        if cls._blackwell_warmed_up:
+            return
+        import os
+        if os.environ.get("ENABLE_BLACKWELL_GDN", "0") != "1":
+            return
+        if _flashinfer_gdn_prefill is None:
+            return
+        if head_k_dim != 128:
+            return
+        if not cls._is_blackwell_gpu():
+            return
+
+        import math
+        import logging
+        logger = logging.getLogger(__name__)
+
+        logger.info("Blackwell GDN kernel: starting warmup JIT compilation (~15s)...")
+        warmup_seq = 128
+        warmup_batch = 1
+        scale = 1.0 / math.sqrt(head_k_dim)
+        try:
+            q = torch.randn(
+                warmup_seq, local_num_k_heads, head_k_dim, dtype=dtype, device=device
+            )
+            k = torch.randn_like(q)
+            v = torch.randn(
+                warmup_seq, local_num_v_heads, head_k_dim, dtype=dtype, device=device
+            )
+            gate = torch.rand(
+                warmup_seq, local_num_v_heads, dtype=torch.float32, device=device
+            )
+            beta = torch.rand(
+                warmup_seq, local_num_v_heads, dtype=torch.float32, device=device
+            )
+            initial_state = torch.zeros(
+                warmup_batch, local_num_v_heads, head_k_dim, head_k_dim,
+                dtype=torch.float32, device=device,
+            )
+            output = torch.empty_like(v)
+            output_state = torch.empty_like(initial_state)
+            cu_seqlens = torch.tensor([0, warmup_seq], dtype=torch.int32, device=device)
+
+            _flashinfer_gdn_prefill(
+                q=q, k=k, v=v, gate=gate, beta=beta,
+                output=output, cu_seqlens=cu_seqlens,
+                initial_state=initial_state, output_state=output_state, scale=scale,
+            )
+            torch.cuda.synchronize(device)
+
+            _flashinfer_gdn_prefill(
+                q=q, k=k, v=v, gate=gate, beta=beta,
+                output=output, cu_seqlens=cu_seqlens,
+                initial_state=None, output_state=None, scale=scale,
+            )
+            torch.cuda.synchronize(device)
+
+            del q, k, v, gate, beta, initial_state, output, output_state, cu_seqlens
+            cls._blackwell_warmed_up = True
+            logger.info("Blackwell GDN kernel: warmup complete, kernel cached.")
+        except Exception:
+            logger.warning(
+                "Blackwell GDN kernel warmup failed, disabling Blackwell path",
+                exc_info=True,
+            )
+            cls._blackwell_available = False
+
     def _fla(
         self,
         mixed_qkv: torch.Tensor,
@@ -209,6 +327,15 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         seq_size_per_block: int,
         attn_inputs: PyAttentionInputs,
     ) -> torch.Tensor:
+        if not Qwen3NextGatedDeltaNetPrefill._blackwell_warmed_up:
+            Qwen3NextGatedDeltaNetPrefill.warmup_blackwell_kernel(
+                self.head_k_dim,
+                self.local_num_k_heads,
+                self.local_num_v_heads,
+                mixed_qkv.dtype,
+                mixed_qkv.device,
+            )
+
         g, beta = fused_gdn_gating(self.alog, a, b, self.dt_bias)
         ssm_states = (
             self._get_ssm_states(kv_cache_tensor)
@@ -216,7 +343,6 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             else None
         )
         context_batch_size = attn_inputs.input_lengths.shape[0]
-        # cu_seqlens_without_padding = attn_inputs.cu_seqlens[: context_batch_size + 1]
         cu_seqlens_without_padding = attn_inputs.cu_seqlens
         initial_states: Optional[torch.Tensor] = None
         if ssm_states is not None:
@@ -248,12 +374,16 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         query = query.view(1, query.shape[0], self.local_num_k_heads, self.head_k_dim)
         key = key.view(1, key.shape[0], self.local_num_k_heads, self.head_k_dim)
         value = value.view(1, value.shape[0], self.local_num_v_heads, self.head_v_dim)
+
+        total_seq_len = mixed_qkv.shape[0]
+        if self._use_blackwell_kernel(total_seq_len, context_batch_size):
+            return self._fla_blackwell(
+                query, key, value, g, beta, initial_states, ssm_states,
+                cu_seqlens_without_padding, attn_inputs, seq_size_per_block,
+            )
+
         attn_out, h, final_state = chunk_gated_delta_rule(
-            query,
-            key,
-            value,
-            g,
-            beta,
+            query, key, value, g, beta,
             initial_state=initial_states,
             output_final_state=True,
             cu_seqlens=cu_seqlens_without_padding,
@@ -261,16 +391,105 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         )
         if ssm_states is not None:
             store_ssm_state_to_block_map(
-                h,
-                final_state,
+                h, final_state,
                 attn_inputs.prefix_lengths_d,
                 cu_seqlens_without_padding,
                 attn_inputs.kv_cache_kernel_block_id_device,
-                ssm_states,
-                seq_size_per_block,
-                chunk_size=64,
+                ssm_states, seq_size_per_block, chunk_size=64,
             )
         return attn_out.squeeze_(0)
+
+    def _fla_blackwell(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        initial_states: Optional[torch.Tensor],
+        ssm_states: Optional[torch.Tensor],
+        cu_seqlens: torch.Tensor,
+        attn_inputs: PyAttentionInputs,
+        seq_size_per_block: int,
+    ) -> torch.Tensor:
+        from rtp_llm.models_py.triton_kernels.fla.l2norm import (
+            l2norm_fwd,
+            l2norm_fwd_qk,
+        )
+
+        if (
+            query.stride() == key.stride()
+            and query.shape == key.shape
+            and not query.is_contiguous()
+            and query.stride(-1) == 1
+            and query.ndim >= 3
+            and key.data_ptr()
+            == query.data_ptr() + query.shape[-2] * query.shape[-1] * query.element_size()
+        ):
+            query, key = l2norm_fwd_qk(query, key)
+        else:
+            query = l2norm_fwd(query)
+            key = l2norm_fwd(key)
+
+        total_tokens = query.shape[1]
+        q_3d = query.squeeze(0).contiguous()
+        k_3d = key.squeeze(0).contiguous()
+        v_3d = value.squeeze(0).contiguous()
+        gate = g.view(total_tokens, self.local_num_v_heads).exp()
+        beta_2d = beta.view(total_tokens, self.local_num_v_heads).float()
+
+        output = torch.empty_like(v_3d)
+        output_state = None
+        if ssm_states is not None:
+            batch_size = initial_states.shape[0] if initial_states is not None else 1
+            output_state = torch.empty(
+                batch_size, self.local_num_v_heads, self.head_v_dim, self.head_v_dim,
+                dtype=torch.float32, device=query.device,
+            )
+
+        scale = 1.0 / (self.head_k_dim ** 0.5)
+
+        try:
+            _flashinfer_gdn_prefill(
+                q=q_3d, k=k_3d, v=v_3d, gate=gate, beta=beta_2d,
+                output=output, cu_seqlens=cu_seqlens,
+                initial_state=initial_states, output_state=output_state,
+                scale=scale,
+            )
+        except Exception:
+            import logging
+            logging.getLogger(__name__).warning(
+                "Blackwell GDN kernel failed, falling back to Triton",
+                exc_info=True,
+            )
+            Qwen3NextGatedDeltaNetPrefill._blackwell_available = False
+            attn_out, h, final_state = chunk_gated_delta_rule(
+                query, key, value, g, beta.to(query.dtype),
+                initial_state=initial_states,
+                output_final_state=True,
+                cu_seqlens=cu_seqlens,
+                use_qk_l2norm_in_kernel=False,
+            )
+            if ssm_states is not None:
+                store_ssm_state_to_block_map(
+                    h, final_state,
+                    attn_inputs.prefix_lengths_d, cu_seqlens,
+                    attn_inputs.kv_cache_kernel_block_id_device,
+                    ssm_states, seq_size_per_block, chunk_size=64,
+                )
+            return attn_out.squeeze_(0)
+
+        if output_state is not None:
+            final_state = output_state.transpose(-1, -2).contiguous()
+            store_final_state_only_to_block_map(
+                final_state,
+                attn_inputs.prefix_lengths_d,
+                cu_seqlens,
+                attn_inputs.kv_cache_kernel_block_id_device,
+                ssm_states,
+                seq_size_per_block,
+            )
+        return output.unsqueeze(0).squeeze_(0)
 
     def forward(
         self,
@@ -353,7 +572,6 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
         batch, seq = self._get_bs_from_attenion_input(
             mixed_qkv, attn_inputs, is_target_verify
         )
-        # asserr head_k_dim == head_v_dim
         mixed_qkv = mixed_qkv.reshape(
             batch,
             seq,
@@ -369,12 +587,25 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             ],
             dim=2,
         )
-        g, beta = fused_gdn_gating(self.alog, a, b, self.dt_bias)
 
-        # contiguous will be applyed when call fused_recurrent_gated_delta_rule
+        ssm_states = self._get_ssm_states(kv_cache_tensor)
+
+        if (
+            not is_target_verify
+            and seq == 1
+            and self.head_k_dim == 128
+            and self.ssm_state_dtype == torch.bfloat16
+            and _flashinfer_gdn_decode is not None
+        ):
+            return self._fla_flashinfer_decode(
+                query, key, value, a, b, ssm_states,
+                seq_size_per_block, attn_inputs,
+            )
+
+        # Fallback: original Triton kernel (target_verify or non-bf16 state)
+        g, beta = fused_gdn_gating(self.alog, a, b, self.dt_bias)
         g = g.view(batch, seq, self.local_num_v_heads)
         beta = beta.view(batch, seq, self.local_num_v_heads)
-        ssm_states = self._get_ssm_states(kv_cache_tensor)
         core_attn_out, _ = fused_recurrent_gated_delta_rule(
             q=query,
             k=key,
@@ -393,6 +624,40 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             [-1, core_attn_out.shape[2], core_attn_out.shape[3]]
         )
         return res
+
+    def _fla_flashinfer_decode(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        ssm_states: torch.Tensor,
+        seq_size_per_block: int,
+        attn_inputs: PyAttentionInputs,
+    ) -> torch.Tensor:
+        batch = query.shape[0]
+        read_indices, write_indices = compute_state_indices_from_block_map(
+            attn_inputs.sequence_lengths_plus_1_d,
+            attn_inputs.kv_cache_kernel_block_id_device,
+            seq_size_per_block,
+        )
+        a_reshaped = a.view(batch, 1, self.local_num_v_heads)
+        b_reshaped = b.view(batch, 1, self.local_num_v_heads)
+        core_attn_out = _flashinfer_gdn_decode(
+            A_log=self.alog,
+            a=a_reshaped,
+            dt_bias=self.dt_bias,
+            q=query,
+            k=key,
+            v=value,
+            b=b_reshaped,
+            initial_state_source=ssm_states,
+            initial_state_indices=read_indices,
+            output_state_indices=write_indices,
+            use_qk_l2norm_in_kernel=True,
+        )
+        return core_attn_out.squeeze(1)
 
     def forward(
         self,
