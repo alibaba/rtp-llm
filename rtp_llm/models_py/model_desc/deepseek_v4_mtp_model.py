@@ -25,6 +25,10 @@ from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model
 from rtp_llm.models_py.modules import RMSNorm
+from rtp_llm.models_py.modules.dsv4.chunk_env import (
+    DEFAULT_DSV4_CHUNK_TOKENS,
+    dsv4_chunk_tokens_from_env,
+)
 from rtp_llm.models_py.modules.dsv4.attention import _v4_fp8_linear
 from rtp_llm.utils.model_weight import W
 
@@ -74,6 +78,7 @@ class DeepSeekV4MtpModel(DeepSeekV4Model):
         self.hnorm: Optional[RMSNorm] = None
         self.e_proj = None
         self.h_proj = None
+        self._mtp_fusion_chunk_logged = False
 
     def _resolve_mtp_last_hidden_token_capacity(self) -> Optional[int]:
         # Parent allocation is already gated by self._is_speculative.  Any
@@ -127,6 +132,59 @@ class DeepSeekV4MtpModel(DeepSeekV4Model):
             return layer(x.reshape(-1, shape[-1])).view(*shape[:-1], -1)
         return layer(x)
 
+    def _mtp_fusion_chunk_tokens(self) -> int:
+        return dsv4_chunk_tokens_from_env(
+            "DSV4_MTP_FUSION_CHUNK_TOKENS",
+            DEFAULT_DSV4_CHUNK_TOKENS,
+            min_value=1,
+        )
+
+    def _build_fused_chunked(
+        self,
+        input_ids: torch.Tensor,
+        pre_hc: torch.Tensor,
+        positions: torch.Tensor,
+        chunk_tokens: int,
+    ) -> torch.Tensor:
+        assert self.enorm is not None
+        assert self.hnorm is not None
+        assert self.e_proj is not None
+        assert self.h_proj is not None
+
+        T, hc, dim = pre_hc.shape
+        fused = pre_hc.new_empty((T, hc, dim))
+        if not self._mtp_fusion_chunk_logged:
+            self._mtp_fusion_chunk_logged = True
+            logging.info(
+                "[DeepSeekV4MtpModel] chunked MTP fusion enabled: tokens=%d "
+                "chunk_tokens=%d hc=%d dim=%d device=%s",
+                T,
+                chunk_tokens,
+                hc,
+                dim,
+                pre_hc.device,
+            )
+        for start in range(0, T, chunk_tokens):
+            end = min(start + chunk_tokens, T)
+            input_ids_chunk = input_ids[start:end]
+            positions_chunk = positions[start:end]
+            embed_chunk = self.v4.embed(input_ids_chunk)
+            embed_chunk = torch.where(
+                positions_chunk.reshape(-1, 1) == 0,
+                torch.zeros_like(embed_chunk),
+                embed_chunk,
+            )
+            e_norm = self.enorm(embed_chunk)
+            pre_hc_chunk = pre_hc[start:end]
+            chunk_len = int(pre_hc_chunk.size(0))
+            h_norm = self.hnorm(pre_hc_chunk.reshape(-1, dim)).view(
+                chunk_len, hc, dim
+            )
+            fused_chunk = self._apply_proj(self.h_proj, h_norm)
+            fused_chunk.add_(self._apply_proj(self.e_proj, e_norm).unsqueeze(1))
+            fused[start:end].copy_(fused_chunk)
+        return fused
+
     def _build_fused(
         self,
         input_ids: torch.Tensor,  # [T] int
@@ -135,6 +193,17 @@ class DeepSeekV4MtpModel(DeepSeekV4Model):
     ) -> torch.Tensor:
         """``e_proj(enorm(masked_embed)) + h_proj(hnorm(prev_hidden))``.
         Returns ``[T, hc, dim]``."""
+        assert self.enorm is not None
+        assert self.hnorm is not None
+        assert self.e_proj is not None
+        assert self.h_proj is not None
+        T, hc, dim = pre_hc.shape
+        chunk_tokens = self._mtp_fusion_chunk_tokens()
+        if T > chunk_tokens and not torch.cuda.is_current_stream_capturing():
+            return self._build_fused_chunked(
+                input_ids.reshape(-1), pre_hc, positions[:T], chunk_tokens
+            )
+
         inputs_embeds = self.v4.embed(input_ids)  # [T, dim]
         # Suppress position-0 embedding (matches main-model "step 0 of a
         # brand-new request" behavior the official MTP impl relies on).
@@ -144,7 +213,6 @@ class DeepSeekV4MtpModel(DeepSeekV4Model):
             inputs_embeds,
         )
         e_norm = self.enorm(inputs_embeds)  # [T, dim]
-        T, hc, dim = pre_hc.shape
         h_norm = self.hnorm(pre_hc.reshape(-1, dim)).view(T, hc, dim)
         return self._apply_proj(self.h_proj, h_norm) + self._apply_proj(
             self.e_proj, e_norm
