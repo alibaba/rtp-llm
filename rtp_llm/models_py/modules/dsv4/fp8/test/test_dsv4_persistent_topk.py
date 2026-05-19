@@ -4,7 +4,7 @@ Vendored from vLLM (csrc/persistent_topk.cuh + csrc/topk.cu @ b55d830).
 Replaces ``torch.topk`` on the DSv4 indexer decode hot path.
 
 Op contract (mirrors vLLM):
-  logits   : [N, T]  float32 contiguous
+  logits   : [N, T]  float32 row-contiguous; stride(0) may exceed T
   lengths  : [N]     int32     — per-row valid count; positions past
                                   ``lengths[r]`` are written as -1 in output
   output   : [N, K]  int32     — written; ordering of valid indices is NOT
@@ -156,6 +156,18 @@ def test_batched_decode_b16_half():
     _assert_equiv(out, logits, lengths, k=512, tag="decode B=16 half")
 
 
+def test_padded_row_stride():
+    """Rows can be a padded view, so the kernel must use stride(0)."""
+    N, T, PAD, K = 3, 2048, 17, 512
+    g = torch.Generator(device="cuda").manual_seed(56)
+    base = torch.randn(N, T + PAD, device="cuda", generator=g)
+    logits = base[:, :T]
+    assert logits.stride(0) > logits.size(1)
+    lengths = torch.full((N,), T, dtype=torch.int32, device="cuda")
+    out = _run(logits, lengths, k=K, max_seq_len=T)
+    _assert_equiv(out, logits, lengths, k=K, tag="padded row stride")
+
+
 def test_mtp_batched_decode_flattened_bs_rows():
     """MTP passes score as [B, S, T]; the op contract is [B*S, T]."""
     B, S, T, K = 4, 3, 2048, 512
@@ -294,6 +306,7 @@ if __name__ == "__main__":
     test_decode_b1_k2048_full()
     test_batched_decode_b4_varied()
     test_batched_decode_b16_half()
+    test_padded_row_stride()
     test_mtp_batched_decode_flattened_bs_rows()
     test_filtered_path_b64()
     test_long_seq_radix_path()
