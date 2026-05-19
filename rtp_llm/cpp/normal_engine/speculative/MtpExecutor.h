@@ -112,7 +112,9 @@ protected:
     // Spec-decode hand-off: when the source model exposes a pre-output-projection
     // residual buffer (DSv4 pre-hc [T, hc*D]), swap it into the C++ hidden-state
     // carrier. The source returns the full buffer; consumers slice as needed.
-    void maybeOverrideLastHiddenWithMtpBuffer(GptModelInputs& model_input, ModelBase& source);
+    void maybeOverrideLastHiddenWithMtpBuffer(GptModelInputs& model_input,
+                                              ModelBase&       source,
+                                              bool             request_actual_rows = false);
     void maybeOverrideLastHiddenWithMtpBuffer(GptModelOutputs& model_output, ModelBase& source);
 
 private:

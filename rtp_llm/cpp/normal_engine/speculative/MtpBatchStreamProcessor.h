@@ -21,6 +21,11 @@ public:
                                  const MergedOutput& prefill_output,
                                  const MergedOutput& propose_output) const;
 
+    absl::Status dispatchPrefill(const StreamGroups&  stream_groups,
+                                 const MergedOutput&  prefill_output,
+                                 const MergedOutput&  propose_output,
+                                 const torch::Tensor& draft_last_hidden_states) const;
+
     absl::Status dispatchDecode(const StreamGroups&                          stream_groups,
                                 const speculative::SpeculativeSamplerOutput& spec_decode_output,
                                 const MergedOutput&                          draft_prefill_output) const;
@@ -69,6 +74,7 @@ protected:
     void preparePrefillSpecUpdateInfo(const StreamGroups&                stream_groups,
                                       const MergedOutput&                prefill_output,
                                       const MergedOutput&                propose_output,
+                                      const torch::Tensor&               draft_last_hidden_states,
                                       const torch::Tensor&               new_tokens_all,
                                       std::vector<StreamSpecUpdateInfo>& spec_update_infos) const;
 

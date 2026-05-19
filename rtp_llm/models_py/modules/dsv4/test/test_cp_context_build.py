@@ -59,6 +59,7 @@ def _load_cp_module():
 _CP = _load_cp_module()
 build_cp_context = _CP.build_cp_context
 build_cp_full_prefill_positions = _CP.build_cp_full_prefill_positions
+cp_gather_last_by_request = _CP.cp_gather_last_by_request
 
 
 class _CpInfo:
@@ -249,6 +250,47 @@ def test_cp2_zigzag_pair_layout_matches_processor() -> None:
         ]
     )
     assert torch.equal(ctx1.relative_positions, expected1)
+
+
+def test_cp2_gather_last_by_request_handles_split_owners() -> None:
+    """Last-token rows can be owned by different CP ranks across requests.
+    The small MTP gather should return [B, H] in request order without a
+    full-sequence gather.
+    """
+    cp_size = 2
+    actual_lengths = [5, 7]
+    chunk_lengths = [4, 4]
+    chunk_length = sum(chunk_lengths)
+    padding_mask = _padding_mask_multi(chunk_lengths, actual_lengths, cp_size)
+    restore_indice = _zigzag_restore_multi(chunk_lengths, cp_size)
+    cp_info = _CpInfo(
+        padding_mask,
+        restore_indice,
+        prefill_actual_input_lengths_cpu=torch.tensor(actual_lengths, dtype=torch.int32),
+        prefill_cp_chunk_lengths=torch.tensor(chunk_lengths, dtype=torch.int32),
+    )
+
+    ctx0 = build_cp_context(cp_info, cp_size, 0, chunk_length, torch.device("cpu"))
+    ctx1 = build_cp_context(cp_info, cp_size, 1, chunk_length, torch.device("cpu"))
+    local0 = torch.arange(chunk_length * 2, dtype=torch.float32).reshape(chunk_length, 2)
+    local1 = (100 + torch.arange(chunk_length * 2, dtype=torch.float32)).reshape(chunk_length, 2)
+
+    rank0_last = torch.zeros(2, 2)
+    rank0_last[1] = local0[6]
+    rank1_last = torch.zeros(2, 2)
+    rank1_last[0] = local1[2]
+
+    old_all_gather = _CP.all_gather
+    try:
+        _CP.all_gather = lambda local, group=None: torch.cat([local, rank1_last], dim=0)
+        out0 = cp_gather_last_by_request(local0, ctx0)
+        assert torch.equal(out0, torch.stack([local1[2], local0[6]]))
+
+        _CP.all_gather = lambda local, group=None: torch.cat([rank0_last, local], dim=0)
+        out1 = cp_gather_last_by_request(local1, ctx1)
+        assert torch.equal(out1, torch.stack([local1[2], local0[6]]))
+    finally:
+        _CP.all_gather = old_all_gather
 
 
 def test_cp2_continuation_prefix_offset_applied_to_global_positions() -> None:

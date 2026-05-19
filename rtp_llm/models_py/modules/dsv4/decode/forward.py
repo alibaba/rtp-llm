@@ -264,7 +264,7 @@ def forward_layers(
         h = layer.forward_decode(h, attn_metadata, input_ids, kv_cache=kv_cache)
         if _rt_on:
             _rt.record(f"decode_layer{layer.layer_id:02d}_out", h)
-    if getattr(v4, "_mtp_hidden_buffer", None) is not None:
+    if v4._mtp_hidden_buffer is not None:
         _pre_hc_flat = h.flatten(-2).reshape(-1, h.size(-2) * h.size(-1))
         v4._write_mtp_hidden_buffer(
             _pre_hc_flat, is_cuda_graph=attn_metadata.is_cuda_graph
