@@ -113,7 +113,9 @@ class DSv4DecodeAttnMetadataFP8:
     # equals ``topk_window_idxs``. For compressed layers (CSA/HCA),
     # equals ``cat([topk_window_idxs, topk_compressed_for_ratio], dim=-1)``.
     # IndexerDecodeV4Op fills the compressed half in-place.
-    topk_total_by_ratio: Dict[int, torch.Tensor]  # ratio -> [B, S, win+K] int32
+    topk_total_by_ratio: Dict[
+        int, torch.Tensor
+    ]  # ratio -> [B, S, win+K_by_ratio] int32
 
     # Per-request running compressed-K offset (= win, since the
     # compressed pool starts right after the SWA ring buffer). Same for
@@ -508,8 +510,7 @@ def _build_swa_slot_mapping_from_positions(
     device = position_ids_2d.device
     in_ring = position_ids_2d % window_size
     req_base = (
-        torch.arange(B, device=device, dtype=torch.int32).view(B, 1)
-        * swa_buffer_stride
+        torch.arange(B, device=device, dtype=torch.int32).view(B, 1) * swa_buffer_stride
     )
     return (req_base + in_ring).reshape(-1)
 
@@ -546,6 +547,18 @@ def _build_window_topk_idxs_from_positions(
     )
     is_full = abs_pos_b >= (window_size - 1)
     return torch.where(is_full, ring_full_idx, partial_idx)
+
+
+def _compressed_index_width_for_ratio(
+    ratio: int, compressed_stride: int, index_topk: int
+) -> int:
+    """Compressed-index tensor width used by decode attention for one ratio."""
+    if int(ratio) == 4:
+        return int(index_topk)
+    # FlashMLA sparse decode requires topk/extra_topk widths to be multiples
+    # of 64. HCA still reads dense compressed indices; the extra slots are
+    # right-padded with -1 and do not represent selected top-k tokens.
+    return ((int(compressed_stride) + 63) // 64) * 64
 
 
 def allocate_decode_metadata_fp8(
@@ -612,8 +625,11 @@ def allocate_decode_metadata_fp8(
         compressed_lens_per_token[r] = torch.zeros(
             (B, q_len), dtype=torch.int32, device=device
         )
+        compressed_index_width = _compressed_index_width_for_ratio(
+            r, stride, index_topk
+        )
         topk_total_by_ratio[r] = torch.full(
-            (B, q_len, window_size + index_topk),
+            (B, q_len, window_size + compressed_index_width),
             -1,
             dtype=torch.int32,
             device=device,
@@ -695,10 +711,10 @@ def allocate_decode_metadata_fp8(
     swa_global_slots_alloc = torch.full(
         (B * q_len, window_size), -1, dtype=torch.int32, device=device
     )
-    # HCA dense-idx width = max_seq_len / 128 = index_topk by construction
-    # (see allocate_decode_metadata_fp8: topk_total shape[-1] = win + index_topk).
+    hca_stride = compressed_buffer_stride_per_ratio.get(128, index_topk)
+    hca_dense_width = _compressed_index_width_for_ratio(128, hca_stride, index_topk)
     hca_cmp_global_slots_alloc = torch.full(
-        (B * q_len, index_topk), -1, dtype=torch.int32, device=device
+        (B * q_len, hca_dense_width), -1, dtype=torch.int32, device=device
     )
 
     return DSv4DecodeAttnMetadataFP8(
@@ -1124,9 +1140,7 @@ def build_decode_metadata_fp8(
     )
 
     # Window topk — request-local ring positions.
-    topk_window = _build_window_topk_idxs_from_positions(
-        position_ids_2d, window_size
-    )
+    topk_window = _build_window_topk_idxs_from_positions(position_ids_2d, window_size)
 
     # Per-ratio compressed slot mappings.
     unique_ratios: List[int] = sorted({r for r in compress_ratios if r > 1})
@@ -1162,8 +1176,11 @@ def build_decode_metadata_fp8(
     # ``topk_total_by_ratio[ratio][:, :, window_size:]`` for ratio==4.
     topk_total_by_ratio: Dict[int, torch.Tensor] = {}
     for r in unique_ratios:
+        compressed_index_width = _compressed_index_width_for_ratio(
+            r, compressed_buffer_stride_per_ratio[r], index_topk
+        )
         total = torch.full(
-            (B, q_len, window_size + index_topk),
+            (B, q_len, window_size + compressed_index_width),
             -1,
             dtype=torch.int32,
             device=device,
@@ -1175,12 +1192,10 @@ def build_decode_metadata_fp8(
         # here directly since it's deterministic (read all valid compressed entries).
         if r != 4:
             # Dense compressed read: indices [0..compressed_lens[r]) per request,
-            # right-padded with -1. Compressed half range [win, win+K_dense) where
-            # K_dense=index_topk. K_dense should be >= max compressed_lens for HCA;
-            # if not, this is data-loss (no-op for V4 since HCA layers only carry
-            # max_seq_len/128 entries, which is way less than index_topk=512 at
-            # max_seq_len=64K).
-            K_dense = index_topk
+            # right-padded with -1. HCA must cover the full compressed pool
+            # width (max_seq_len / 128); using index_topk would truncate long
+            # contexts such as 1M tokens to only 512 compressed entries.
+            K_dense = compressed_index_width
             dense_idxs = (
                 torch.arange(K_dense, device=device, dtype=torch.int32)
                 .view(

@@ -58,18 +58,20 @@ if _TRITON_AVAILABLE:
         slot_cmp_128_ptr,  # [B_max * q_len] i32
         topk_window_ptr,  # [B_max, q_len, WINDOW] i32
         swa_abs_idx_ptr,  # [B_max, q_len, WINDOW] i32
-        topk_total_4_ptr,  # [B_max, q_len, WINDOW + INDEX_TOPK] i32
-        topk_total_128_ptr,  # [B_max, q_len, WINDOW + INDEX_TOPK] i32
+        swa_plus_csa_indexer_indices_ptr,  # [B_max, q_len, WINDOW + INDEX_TOPK] i32
+        swa_plus_hca_dense_indices_ptr,  # [B_max, q_len, WINDOW + HCA_DENSE_WIDTH] i32
         # runtime sizes
         bs,
         # constants
         Q_LEN: tl.constexpr,
         WINDOW: tl.constexpr,
         INDEX_TOPK: tl.constexpr,
+        HCA_DENSE_WIDTH: tl.constexpr,
         STRIDE_CMP_4: tl.constexpr,  # = max_seq_len // 4
         STRIDE_CMP_128: tl.constexpr,  # = max_seq_len // 128
         BLOCK_W: tl.constexpr,  # >= WINDOW, power of 2
         BLOCK_K: tl.constexpr,  # >= INDEX_TOPK, power of 2
+        BLOCK_HCA: tl.constexpr,  # >= HCA_DENSE_WIDTH, power of 2
     ):
         r = tl.program_id(0)
         q = tl.program_id(1)
@@ -128,26 +130,30 @@ if _TRITON_AVAILABLE:
         swa_abs = tl.where(valid_pos, candidate, -1).to(tl.int32)
         tl.store(swa_abs_idx_ptr + base_w + k, swa_abs, mask=mask_w)
 
-        WK_TOTAL = WINDOW + INDEX_TOPK
-        base_tt = r * Q_LEN * WK_TOTAL + q * WK_TOTAL
-        tl.store(topk_total_4_ptr + base_tt + k, wi, mask=mask_w)
-        tl.store(topk_total_128_ptr + base_tt + k, wi, mask=mask_w)
+        WK_TOTAL_4 = WINDOW + INDEX_TOPK
+        WK_TOTAL_128 = WINDOW + HCA_DENSE_WIDTH
+        base_tt_4 = r * Q_LEN * WK_TOTAL_4 + q * WK_TOTAL_4
+        base_tt_128 = r * Q_LEN * WK_TOTAL_128 + q * WK_TOTAL_128
+        tl.store(swa_plus_csa_indexer_indices_ptr + base_tt_4 + k, wi, mask=mask_w)
+        tl.store(swa_plus_hca_dense_indices_ptr + base_tt_128 + k, wi, mask=mask_w)
 
-        # ---- HCA dense half (r=128): [WINDOW : WINDOW + INDEX_TOPK] ----
+        # ---- HCA dense half (r=128): [WINDOW : WINDOW + HCA_DENSE_WIDTH] ----
         # valid if k2 < cmp_len_128; else -1.  CSA dense half: all -1.
         k2 = tl.arange(0, BLOCK_K)
         mask_k = k2 < INDEX_TOPK
-        k2_i32 = k2.to(tl.int32)
+        h2 = tl.arange(0, BLOCK_HCA)
+        mask_h = h2 < HCA_DENSE_WIDTH
+        h2_i32 = h2.to(tl.int32)
         cmp_len_128_val = (sp + Q_LEN) // 128
-        valid_h = k2_i32 < cmp_len_128_val
-        dense_h = tl.where(valid_h, k2_i32, -1).to(tl.int32)
+        valid_h = h2_i32 < cmp_len_128_val
+        dense_h = tl.where(valid_h, h2_i32, -1).to(tl.int32)
         tl.store(
-            topk_total_128_ptr + base_tt + WINDOW + k2,
+            swa_plus_hca_dense_indices_ptr + base_tt_128 + WINDOW + h2,
             dense_h,
-            mask=mask_k,
+            mask=mask_h,
         )
         tl.store(
-            topk_total_4_ptr + base_tt + WINDOW + k2,
+            swa_plus_csa_indexer_indices_ptr + base_tt_4 + WINDOW + k2,
             tl.full((BLOCK_K,), -1, tl.int32),
             mask=mask_k,
         )
@@ -190,6 +196,7 @@ def fused_update_decode_meta_pure(
     q_len = meta.q_len_per_req
     window_size = meta.window_size
     index_topk = meta.topk_buffer_compressed.shape[-1]
+    hca_dense_width = meta.topk_total_by_ratio[128].shape[-1] - window_size
 
     # Assumption: {4, 128} present — mirrors V4-Flash compress_ratios.
     slot_cmp_4 = meta.slot_mapping_compressed[4]
@@ -206,6 +213,7 @@ def fused_update_decode_meta_pure(
 
     BLOCK_W = _next_pow2(window_size)
     BLOCK_K = _next_pow2(index_topk)
+    BLOCK_HCA = _next_pow2(hca_dense_width)
 
     grid = (bs, q_len)
     _fused_prepare_meta_kernel[grid](
@@ -225,10 +233,12 @@ def fused_update_decode_meta_pure(
         Q_LEN=q_len,
         WINDOW=window_size,
         INDEX_TOPK=index_topk,
+        HCA_DENSE_WIDTH=hca_dense_width,
         STRIDE_CMP_4=stride_cmp_4,
         STRIDE_CMP_128=stride_cmp_128,
         BLOCK_W=BLOCK_W,
         BLOCK_K=BLOCK_K,
+        BLOCK_HCA=BLOCK_HCA,
     )
 
 
@@ -248,12 +258,12 @@ def is_fused_supported(meta: Any) -> bool:
         return False
     if meta.swa_abs_idx is None:
         return False
-    # topk_total shape: [B, q_len, WINDOW + INDEX_TOPK].  We rely on
-    # dense_half width == INDEX_TOPK == topk_buffer_compressed.shape[-1].
-    want = meta.window_size + meta.topk_buffer_compressed.shape[-1]
-    if meta.topk_total_by_ratio[4].shape[-1] != want:
+    want4 = meta.window_size + meta.topk_buffer_compressed.shape[-1]
+    hca_dense_width = ((meta.compressed_buffer_t_dim_per_ratio[128] + 63) // 64) * 64
+    want128 = meta.window_size + hca_dense_width
+    if meta.topk_total_by_ratio[4].shape[-1] != want4:
         return False
-    if meta.topk_total_by_ratio[128].shape[-1] != want:
+    if meta.topk_total_by_ratio[128].shape[-1] != want128:
         return False
     return True
 
