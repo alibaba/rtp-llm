@@ -45,6 +45,7 @@ public:
 
     int curBlocksNum() const;
     int mallocFailedTimes() const;
+    bool isContextStream() const;
 
     const BatchKVCacheResource& kvCache() const;
     BatchKVCacheResource&       kvCacheMutable();

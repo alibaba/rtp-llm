@@ -1,10 +1,10 @@
 """DSV4 CompressorFP8 Triton kernels (ported from vLLM, RTP-LLM-adapted).
 
 Three kernels backing the DSV4 sparse-attention compressor. The state
-pool layout is page-aligned: each request owns ``fixed_blocks_per_req``
-(=2 in production) physical blocks of ``entries_per_block`` (=256) fp32
-slots; ``slot_mapping[t]`` resolves to the slot reserved for token ``t``
-in the most recent block.
+pool layout is page-aligned: the framework supplies sparse absolute
+logical-block tables over physical blocks of ``entries_per_block`` (=256)
+fp32 slots; ``slot_mapping[t]`` resolves to the slot reserved for token
+``t`` when its logical block is present.
 
   * ``_save_partial_states_kernel`` — per-token write of (kv | score+ape)
     into the fp32 state cache. One program per token; non-boundary tokens
@@ -32,13 +32,13 @@ Boundary writer source dispatch (raw vs state cache):
              passed through linear projections). Used whenever
              ``0 <= flat_idx < n_raw``.
 
-    cache — ``state_cache[block_table[req_idx,
-             (pos // block_size) % fixed_blocks_per_req], ...]``. Used for
-             ``flat_idx < 0``, i.e. positions belonging to a prefix-cache hit:
-             they were written into the cyclic state pool by a prior request,
-             and the framework reuses those physical blocks via this request's
-             ``block_table``. ``block_table`` entries that point at unused
-             blocks are 0 and filtered.
+    cache — ``state_cache[block_table[req_idx, pos // block_size], ...]``.
+             Used for ``flat_idx < 0``, i.e. positions belonging to a
+             prefix-cache hit: they were written into the framework state pool
+             by a prior request, and the framework reuses those physical
+             blocks via this request's sparse absolute ``block_table``.
+             ``block_table`` entries that point at unused blocks are 0 and
+             filtered.
 
   Decode passes ``disable_raw_path=True`` → ``n_raw == 0``, so every
   position routes through the cache branch.
@@ -239,11 +239,12 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     )
     score_from_raw = score_from_raw + ape_vals
 
-    # State-cache path: prefix-cache hit region. The state pool is cyclic with
-    # fixed_blocks_per_req physical blocks per request, matching
-    # CompressorFP8._compute_state_slot_mapping.
+    # State-cache path: prefix-cache hit region. The framework supplies sparse
+    # absolute logical-block tables; old non-tail entries are sentinels. Do
+    # not clamp here: a block index beyond the table width means the framework
+    # failed to grow the table before this launch.
     use_cache = mask_pos & ~use_raw
-    block_indices = (pos // block_size) % block_table_stride
+    block_indices = pos // block_size
     block_indices_safe = tl.where(use_cache, block_indices, 0)
     block_numbers = tl.load(
         block_table_ptr + req_idx * block_table_stride + block_indices_safe,
@@ -492,11 +493,12 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
     )
     score_from_raw = score_from_raw + ape_vals
 
-    # State-cache path: prefix-cache hit region. The state pool is cyclic with
-    # fixed_blocks_per_req physical blocks per request, matching
-    # CompressorFP8._compute_state_slot_mapping.
+    # State-cache path: prefix-cache hit region. The framework supplies sparse
+    # absolute logical-block tables; old non-tail entries are sentinels. Do
+    # not clamp here: a block index beyond the table width means the framework
+    # failed to grow the table before this launch.
     use_cache = mask_pos & ~use_raw
-    block_indices = (pos // block_size) % block_table_stride
+    block_indices = pos // block_size
     block_indices_safe = tl.where(use_cache, block_indices, 0)
     block_numbers = tl.load(
         block_table_ptr + req_idx * block_table_stride + block_indices_safe,
@@ -703,7 +705,7 @@ def run_fused_compress_kv_write(
     # Phase-3a part 4c — varlen raw path. When both arrays are passed
     # (and ``disable_raw_path=False``) the kernel computes per-request
     # ``flat_idx`` so B>1 batched prefill keeps the raw fast path that
-    # avoids the cyclic state-cache round trip. Scalar ``seq_start`` is
+    # avoids state-cache readback. Scalar ``seq_start`` is
     # ignored in that mode.
     seq_start_per_req: Optional[torch.Tensor] = None,  # [B] int32/int64
     cu_seq_per_req: Optional[torch.Tensor] = None,  # [B+1] int32/int64

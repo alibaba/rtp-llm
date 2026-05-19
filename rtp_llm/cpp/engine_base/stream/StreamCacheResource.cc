@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/HashUtil.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/cache/Types.h"
@@ -494,6 +495,11 @@ bool StreamCacheResource::loadCacheDone() {
 // TODO, delete it soon
 int StreamCacheResource::curBlocksNum() const {
     return batch_kv_cache_resource_->curBlocksNum();
+}
+
+bool StreamCacheResource::isContextStream() const {
+    RTP_LLM_CHECK_WITH_INFO(stream_ != nullptr, "StreamCacheResource::isContextStream called with null stream");
+    return stream_->isContextStream();
 }
 
 const BatchKVCacheResource& StreamCacheResource::kvCache() const {
