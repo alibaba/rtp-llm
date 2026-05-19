@@ -379,6 +379,74 @@ def dsv4_rmsnorm_quant_mutating_producer_token(
     return None
 
 
+def dsv4_rmsnorm_bf16_fp8_quant_producer_token(
+    x: torch.Tensor, weight: torch.Tensor, norm_eps: float
+) -> torch.Tensor:
+    """BF16+FP8 cross-graph producer for RMSNorm outputs.
+
+    This is the semantic owner for DSV4 sites where the BF16 RMSNorm value
+    leaves the producer graph while an FP8 DeepGEMM consumer appears in a later
+    graph.  It always precomputes the FP8 payload and records it on the BF16
+    output so the consumer graph can reuse it.
+    """
+    y, q, scale = fused_rmsnorm_bf16_fp8_quant(
+        x,
+        weight,
+        norm_eps=float(norm_eps),
+        quant_eps=1.0e-4,
+        group_size=128,
+    )
+    _remember_rmsnorm_token(y, x, weight, float(norm_eps), q, scale)
+    return y
+
+
+def dsv4_rmsnorm_bf16_fp8_quant_mutating_producer_token(
+    output: torch.Tensor,
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    norm_eps: float,
+) -> None:
+    """BF16+FP8 cross-graph producer for mutating RMSNorm callsites."""
+    if not is_fused_rmsnorm_fp8_quant_supported(x, weight, 128):
+        raise ValueError(
+            "unsupported dsv4_rmsnorm_bf16_fp8_quant_mutating_producer_token input: "
+            f"x_shape={tuple(x.shape)} x_dtype={x.dtype} x_stride={tuple(x.stride())} "
+            f"output_shape={tuple(output.shape)} output_dtype={output.dtype} "
+            f"output_stride={tuple(output.stride())} "
+            f"weight_shape={tuple(weight.shape)} weight_dtype={weight.dtype}"
+        )
+    if tuple(output.shape) != tuple(x.shape) or not output.is_contiguous():
+        raise ValueError(
+            "mutating RMSNorm BF16+FP8 producer requires contiguous output with same shape as input: "
+            f"x_shape={tuple(x.shape)} output_shape={tuple(output.shape)} "
+            f"output_stride={tuple(output.stride())}"
+        )
+    output_q = torch.empty_like(x, dtype=torch.float8_e4m3fn)
+    output_s = create_per_token_group_quant_fp8_output_scale(
+        x_shape=output_q.shape,
+        device=x.device,
+        group_size=128,
+        column_major_scales=True,
+        scale_tma_aligned=True,
+        scale_ue8m0=True,
+    )
+    from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+    rtp_llm_ops.fused_rmsnorm_bf16_fp8_quant(
+        x,
+        weight,
+        output,
+        output_q,
+        output_s,
+        float(norm_eps),
+        1.0e-4,
+        fp8_min,
+        fp8_max,
+    )
+    _remember_rmsnorm_token(output, x, weight, float(norm_eps), output_q, output_s)
+    return None
+
+
 def dsv4_rmsnorm_quant_provenance_token(
     y: torch.Tensor, x: torch.Tensor, weight: torch.Tensor, norm_eps: float
 ) -> torch.Tensor:
@@ -394,6 +462,105 @@ def dsv4_rmsnorm_quant_provenance_token(
         token = y
     _remember_rmsnorm_token(token, x, weight, float(norm_eps))
     return token
+
+
+def _fallback_quant(
+    quant_input: torch.Tensor,
+    *,
+    group_size: int,
+    eps: float,
+    column_major_scales: bool,
+    scale_tma_aligned: bool,
+    scale_ue8m0: bool,
+    fuse_silu_and_mul: bool,
+    masked_m: int | None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return sgl_per_token_group_quant_fp8(
+        quant_input,
+        group_size=group_size,
+        eps=eps,
+        column_major_scales=column_major_scales,
+        scale_tma_aligned=scale_tma_aligned,
+        scale_ue8m0=scale_ue8m0,
+        fuse_silu_and_mul=fuse_silu_and_mul,
+        masked_m=masked_m,
+    )
+
+
+def dsv4_rmsnorm_bf16_fp8_quant_from_provenance(
+    y: torch.Tensor,
+    *,
+    fallback_y: torch.Tensor | None = None,
+    group_size: int = 128,
+    eps: float = 1e-4,
+    column_major_scales: bool = True,
+    scale_tma_aligned: bool = True,
+    scale_ue8m0: bool = True,
+    fuse_silu_and_mul: bool = False,
+    masked_m: int | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    provenance = _lookup_rmsnorm_token(y)
+    quant_input = fallback_y if fallback_y is not None else y
+    if provenance is not None:
+        _x, _weight, _norm_eps, q, scale = provenance
+        if (
+            q is not None
+            and scale is not None
+            and int(group_size) == 128
+            and float(eps) == 1.0e-4
+            and bool(column_major_scales)
+            and bool(scale_tma_aligned)
+            and bool(scale_ue8m0)
+            and not bool(fuse_silu_and_mul)
+            and masked_m is None
+        ):
+            precomputed = _view_precomputed_quant_like_input(
+                q,
+                scale,
+                quant_input,
+                group_size=int(group_size),
+                scale_ue8m0=bool(scale_ue8m0),
+            )
+            if precomputed is not None:
+                return precomputed
+            if _debug_enabled():
+                logger.info(
+                    "DSV4 RMSNorm BF16+FP8 quant precomputed shape mismatch: %s %s %s %s group=%s",
+                    _debug_tensor("q", q),
+                    _debug_tensor("scale", scale),
+                    _debug_tensor("y", y),
+                    _debug_tensor("quant_input", quant_input),
+                    group_size,
+                )
+        elif _debug_enabled():
+            logger.info(
+                "DSV4 RMSNorm BF16+FP8 quant provenance has no reusable payload: %s %s",
+                _debug_tensor("y", y),
+                _debug_tensor("fallback_y", fallback_y),
+            )
+    elif _debug_enabled():
+        logger.info(
+            "DSV4 RMSNorm BF16+FP8 quant provenance miss: registry_ids=%d storage=%d data=%d %s %s",
+            len(_RMSNORM_TOKEN_REGISTRY),
+            len(_RMSNORM_TOKEN_STORAGE_REGISTRY),
+            len(_RMSNORM_TOKEN_DATA_REGISTRY),
+            _debug_tensor("y", y),
+            _debug_tensor("fallback_y", fallback_y),
+        )
+    if _env_flag("DSV4_RMSNORM_QUANT_REQUIRE_PROVENANCE"):
+        raise RuntimeError(
+            "DSV4 RMSNorm BF16+FP8 quant consumer rewrite did not find valid producer provenance"
+        )
+    return _fallback_quant(
+        quant_input,
+        group_size=group_size,
+        eps=eps,
+        column_major_scales=column_major_scales,
+        scale_tma_aligned=scale_tma_aligned,
+        scale_ue8m0=scale_ue8m0,
+        fuse_silu_and_mul=fuse_silu_and_mul,
+        masked_m=masked_m,
+    )
 
 
 def dsv4_fused_rmsnorm_fp8_quant_from_provenance(
@@ -480,7 +647,7 @@ def dsv4_fused_rmsnorm_fp8_quant_from_provenance(
         raise RuntimeError(
             "DSV4 RMSNorm+quant consumer rewrite did not find valid RMSNorm provenance"
         )
-    return sgl_per_token_group_quant_fp8(
+    return _fallback_quant(
         quant_input,
         group_size=group_size,
         eps=eps,

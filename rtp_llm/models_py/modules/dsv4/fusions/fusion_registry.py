@@ -702,6 +702,9 @@ def _allow_dsv4_fusion_candidates_in_graph() -> None:
         from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
         from rtp_llm.models_py.modules.base.cuda.norm import rmsnorm
         from rtp_llm.models_py.modules.dsv4.fusions.rmsnorm_quant_runtime import (
+            dsv4_rmsnorm_bf16_fp8_quant_from_provenance,
+            dsv4_rmsnorm_bf16_fp8_quant_mutating_producer_token,
+            dsv4_rmsnorm_bf16_fp8_quant_producer_token,
             dsv4_fused_rmsnorm_fp8_quant_from_provenance,
             dsv4_rmsnorm_quant_mutating_producer_token,
             dsv4_rmsnorm_quant_producer_token,
@@ -724,6 +727,9 @@ def _allow_dsv4_fusion_candidates_in_graph() -> None:
             fused_rmsnorm_rope,
             fused_inv_rope_fp8_quant,
             sgl_per_token_group_quant_fp8,
+            dsv4_rmsnorm_bf16_fp8_quant_mutating_producer_token,
+            dsv4_rmsnorm_bf16_fp8_quant_producer_token,
+            dsv4_rmsnorm_bf16_fp8_quant_from_provenance,
             dsv4_rmsnorm_quant_mutating_producer_token,
             dsv4_rmsnorm_quant_producer_token,
             dsv4_rmsnorm_quant_provenance_token,

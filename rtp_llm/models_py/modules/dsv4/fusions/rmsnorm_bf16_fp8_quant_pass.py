@@ -93,15 +93,32 @@ from rtp_llm.models_py.modules.dsv4.fusions.fusion_registry import (
     register_dsv4_fusion_pass,
 )
 from rtp_llm.models_py.modules.dsv4.fusions.rmsnorm_fp8_quant_pass import (
+    _all_users_are_layout_outputs,
+    _graph_output_users,
     _hidden_contract_ok,
+    _is_layout_only_node,
+    _is_plain_rmsnorm_node,
     _is_quant_node,
+    _node_label,
     _quant_contract_ok,
     _rmsnorm_args,
     _target_name,
     _unwrap_layout_only,
 )
+from rtp_llm.models_py.modules.dsv4.fusions.rmsnorm_quant_runtime import (
+    dsv4_rmsnorm_bf16_fp8_quant_from_provenance,
+    dsv4_rmsnorm_bf16_fp8_quant_mutating_producer_token,
+    dsv4_rmsnorm_bf16_fp8_quant_producer_token,
+)
 
 logger = logging.getLogger(__name__)
+
+_PRODUCER_SCOPE_DENY_SUBSTRINGS = (
+    "final_ln",
+    "final_norm",
+    "input_layernorm",
+    "post_attention_layernorm",
+)
 
 
 def _is_getitem(node: object, source: torch.fx.Node, index: int) -> bool:
@@ -148,10 +165,49 @@ def _is_mutating_rmsnorm_node(node: object, output_node: torch.fx.Node) -> bool:
     )
 
 
+def _producer_scope_ok(x: object, weight: object) -> bool:
+    text = f"{_node_label(x)} {_node_label(weight)}"
+    if any(token in text for token in _PRODUCER_SCOPE_DENY_SUBSTRINGS):
+        record_dsv4_fusion_miss("rmsnorm_bf16_fp8_quant_fx", "producer_scope_denied")
+        return False
+    padded = f" {text} "
+    if (
+        "l_weight_" not in text
+        and "self_weight" not in text
+        and " weight " not in padded
+        and "_weight" not in text
+    ):
+        record_dsv4_fusion_miss("rmsnorm_bf16_fp8_quant_fx", "producer_scope_not_attention_local")
+        return False
+    return True
+
+
+def _all_users_are_layout_outputs_except(
+    node: torch.fx.Node,
+    skip_users: set[torch.fx.Node],
+    seen: set[torch.fx.Node] | None = None,
+) -> bool:
+    if seen is None:
+        seen = set()
+    if node in seen:
+        return True
+    seen.add(node)
+    if not node.users:
+        return False
+    for user in list(node.users):
+        if user in skip_users or user.op == "output":
+            continue
+        if not _is_layout_only_node(user):
+            return False
+        if not _all_users_are_layout_outputs_except(user, skip_users, seen):
+            return False
+    return True
+
+
 def _match_rmsnorm_value(node: object):
     if not isinstance(node, torch.fx.Node):
         return None
-    if node.op == "call_function" and "rmsnorm" in _target_name(node.target).lower():
+    if _is_plain_rmsnorm_node(node):
         x, weight, norm_eps = _rmsnorm_args(node)
         return {
             "value": node,
@@ -199,8 +255,107 @@ def _erase_dead_nodes(nodes: set[torch.fx.Node]) -> None:
             node.graph.erase_node(node)
 
 
-def apply_rmsnorm_bf16_fp8_quant_fx_pass(gm: torch.fx.GraphModule) -> torch.fx.GraphModule:
+def _insert_functional_rmsnorm_token(gm: torch.fx.GraphModule, node: torch.fx.Node) -> bool:
+    if not _is_plain_rmsnorm_node(node) or len(node.users) == 0:
+        return False
+    x, weight, norm_eps = _rmsnorm_args(node)
+    if not _hidden_contract_ok(x, weight):
+        record_dsv4_fusion_miss("rmsnorm_bf16_fp8_quant_fx", "producer_unsupported_fixed_hidden_dim")
+        return False
+    if not _producer_scope_ok(x, weight):
+        return False
+    if not _all_users_are_layout_outputs(node):
+        return False
+    with gm.graph.inserting_before(node):
+        token = gm.graph.call_function(
+            dsv4_rmsnorm_bf16_fp8_quant_producer_token,
+            args=(x, weight, norm_eps),
+        )
+    node.replace_all_uses_with(token)
+    if len(node.users) == 0:
+        gm.graph.erase_node(node)
+    return True
+
+
+def _insert_mutating_rmsnorm_token(gm: torch.fx.GraphModule, node: torch.fx.Node) -> bool:
+    if not _is_plain_rmsnorm_node(node) or len(node.args) < 4:
+        return False
+    output_node, x, weight, norm_eps = node.args[:4]
+    if not isinstance(output_node, torch.fx.Node):
+        return False
+    if not _hidden_contract_ok(x, weight):
+        record_dsv4_fusion_miss("rmsnorm_bf16_fp8_quant_fx", "producer_unsupported_fixed_hidden_dim")
+        return False
+    if not _producer_scope_ok(x, weight):
+        return False
+    if not _graph_output_users(output_node) and not any(
+        user is not node and _is_layout_only_node(user) for user in output_node.users
+    ):
+        return False
+    if not _all_users_are_layout_outputs_except(output_node, {node}):
+        return False
+    with gm.graph.inserting_before(node):
+        gm.graph.call_function(
+            dsv4_rmsnorm_bf16_fp8_quant_mutating_producer_token,
+            args=(output_node, x, weight, norm_eps),
+        )
+    if len(node.users) == 0:
+        gm.graph.erase_node(node)
+    return True
+
+
+def _insert_rmsnorm_producer_tokens(gm: torch.fx.GraphModule) -> int:
     replaced = 0
+    for node in list(gm.graph.nodes):
+        if not isinstance(node, torch.fx.Node):
+            continue
+        if _insert_mutating_rmsnorm_token(gm, node):
+            replaced += 1
+            continue
+        if _insert_functional_rmsnorm_token(gm, node):
+            replaced += 1
+    return replaced
+
+
+def _rewrite_quant_from_provenance(gm: torch.fx.GraphModule, node: torch.fx.Node) -> bool:
+    if not _is_quant_node(node):
+        return False
+    if not _quant_contract_ok(node):
+        record_dsv4_fusion_miss("rmsnorm_bf16_fp8_quant_fx", "cross_graph_quant_contract_mismatch")
+        return False
+    x_node = _unwrap_layout_only(node.args[0] if node.args else None)
+    if _match_rmsnorm_value(x_node) is not None:
+        return False
+    if not isinstance(x_node, torch.fx.Node) or x_node.op != "placeholder":
+        record_dsv4_fusion_miss(
+            "rmsnorm_bf16_fp8_quant_fx", "cross_graph_quant_input_not_graph_input"
+        )
+        return False
+    quant_eps = node.kwargs.get("eps", 1e-10)
+    provenance_input = x_node
+    fallback_input = node.args[0] if node.args else None
+    with gm.graph.inserting_before(node):
+        fused = gm.graph.call_function(
+            dsv4_rmsnorm_bf16_fp8_quant_from_provenance,
+            args=(provenance_input,),
+            kwargs={
+                "fallback_y": fallback_input if fallback_input is not provenance_input else None,
+                "group_size": node.kwargs.get("group_size", 128),
+                "eps": quant_eps,
+                "column_major_scales": node.kwargs.get("column_major_scales", False),
+                "scale_tma_aligned": node.kwargs.get("scale_tma_aligned", False),
+                "scale_ue8m0": node.kwargs.get("scale_ue8m0", False),
+                "fuse_silu_and_mul": node.kwargs.get("fuse_silu_and_mul", False),
+                "masked_m": node.kwargs.get("masked_m", None),
+            },
+        )
+    node.replace_all_uses_with(fused)
+    return True
+
+
+def apply_rmsnorm_bf16_fp8_quant_fx_pass(gm: torch.fx.GraphModule) -> torch.fx.GraphModule:
+    same_graph = 0
+    cross_graph_consumers = 0
     for node in list(gm.graph.nodes):
         if not _is_quant_node(node):
             continue
@@ -234,11 +389,26 @@ def apply_rmsnorm_bf16_fp8_quant_fx_pass(gm: torch.fx.GraphModule) -> torch.fx.G
         _replace_quant_uses(node, q_node, s_node)
         _replace_bf16_uses(value_node, y_node, node, skip_users)
         _erase_dead_nodes(skip_users)
-        replaced += 1
-    if replaced:
+        same_graph += 1
+    if same_graph:
         eliminate_dead_code_preserving_dsv4_side_effects(gm)
-        record_dsv4_fusion_hit("rmsnorm_bf16_fp8_quant_fx", replaced)
-        logger.info("DSV4 FX fused %d RMSNorm BF16+FP8 quant patterns", replaced)
+    for node in list(gm.graph.nodes):
+        if _rewrite_quant_from_provenance(gm, node):
+            cross_graph_consumers += 1
+    cross_graph_producers = _insert_rmsnorm_producer_tokens(gm)
+    if same_graph or cross_graph_consumers or cross_graph_producers:
+        eliminate_dead_code_preserving_dsv4_side_effects(gm)
+        record_dsv4_fusion_hit(
+            "rmsnorm_bf16_fp8_quant_fx",
+            same_graph + cross_graph_consumers + cross_graph_producers,
+        )
+        logger.info(
+            "DSV4 FX RMSNorm BF16+FP8 quant pass: same_graph=%d "
+            "cross_graph_producers=%d cross_graph_consumers=%d",
+            same_graph,
+            cross_graph_producers,
+            cross_graph_consumers,
+        )
     return gm
 
 

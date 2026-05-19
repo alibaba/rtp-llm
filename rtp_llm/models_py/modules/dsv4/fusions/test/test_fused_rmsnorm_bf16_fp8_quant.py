@@ -7,13 +7,17 @@ import unittest
 import torch
 
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
+from rtp_llm.models_py.modules.dsv4.fusions.fusion_registry import apply_registered_dsv4_fusions
 from rtp_llm.models_py.modules.dsv4.fusions.rmsnorm_bf16_fp8_quant_pass import (
     apply_rmsnorm_bf16_fp8_quant_fx_pass,
 )
 from rtp_llm.models_py.modules.dsv4.fusions.rmsnorm_fp8_quant_pass import (
     dsv4_rmsnorm_fx_ref,
 )
-from rtp_llm.ops.compute_ops import rtp_llm_ops
+from rtp_llm.models_py.modules.dsv4.fusions.rmsnorm_quant_runtime import (
+    dsv4_rmsnorm_bf16_fp8_quant_from_provenance,
+    dsv4_rmsnorm_bf16_fp8_quant_producer_token,
+)
 from rtp_llm.models_py.modules.dsv4.fusions.test.graphfx_fusion_test_utils import (
     DSV4_GRAPHFX_CORRECTNESS_M,
     DSV4_RMSNORM_QUANT_SHAPES,
@@ -26,6 +30,7 @@ from rtp_llm.models_py.modules.dsv4.fusions.test.graphfx_fusion_test_utils impor
     trace_dir_for_report,
     write_graphfx_perf_report,
 )
+from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 torch.fx.wrap("dsv4_rmsnorm_fx_ref")
 torch.fx.wrap("sgl_per_token_group_quant_fp8")
@@ -89,6 +94,50 @@ class _MutatingRmsnormToy(torch.nn.Module):
             scale_ue8m0=True,
         )
         return y, q, s, y
+
+
+class _RmsnormQuantToy(torch.nn.Module):
+    def forward(self, x, weight):
+        y = dsv4_rmsnorm_fx_ref(x, weight, 1e-6)
+        return sgl_per_token_group_quant_fp8(
+            y.contiguous(),
+            group_size=128,
+            eps=1e-4,
+            column_major_scales=True,
+            scale_tma_aligned=True,
+            scale_ue8m0=True,
+        )
+
+
+class _RmsnormProducerToy(torch.nn.Module):
+    def forward(self, x, weight):
+        return dsv4_rmsnorm_fx_ref(x, weight, 1e-6)
+
+
+class _RmsnormLayoutProducerToy(torch.nn.Module):
+    def forward(self, x, weight):
+        orig_shape = x.shape
+        x_2d = x.reshape(-1, orig_shape[-1])
+        return dsv4_rmsnorm_fx_ref(x_2d, weight, 1e-6).view(orig_shape)
+
+
+class _MutatingRmsnormProducerToy(torch.nn.Module):
+    def forward(self, x, weight):
+        y = torch.empty_like(x)
+        fake_mutating_rmsnorm(y, x, weight, 1e-6, 0)
+        return y
+
+
+class _QuantConsumerToy(torch.nn.Module):
+    def forward(self, y):
+        return sgl_per_token_group_quant_fp8(
+            y.contiguous(),
+            group_size=128,
+            eps=1e-4,
+            column_major_scales=True,
+            scale_tma_aligned=True,
+            scale_ue8m0=True,
+        )
 
 
 def _fused_graph(module: torch.nn.Module):
@@ -192,6 +241,146 @@ class FusedRmsnormBf16Fp8QuantPassTest(unittest.TestCase):
         self.assertIn("fused_rmsnorm_bf16_fp8_quant", targets)
         self.assertNotIn("fake_mutating_rmsnorm", targets)
         self.assertNotIn("sgl_per_token_group_quant_fp8", targets)
+
+    def test_fx_pass_inserts_cross_graph_functional_producer_token(self):
+        gm = _fused_graph(_RmsnormProducerToy())
+        targets = _target_names(gm)
+        self.assertIn("dsv4_rmsnorm_bf16_fp8_quant_producer_token", targets)
+        self.assertNotIn("dsv4_rmsnorm_fx_ref", targets)
+
+    def test_fx_pass_inserts_cross_graph_layout_producer_token(self):
+        gm = _fused_graph(_RmsnormLayoutProducerToy())
+        targets = _target_names(gm)
+        self.assertIn("dsv4_rmsnorm_bf16_fp8_quant_producer_token", targets)
+        self.assertNotIn("dsv4_rmsnorm_fx_ref", targets)
+        self.assertIn("view", targets)
+
+    def test_fx_pass_inserts_cross_graph_mutating_producer_token(self):
+        gm = _fused_graph(_MutatingRmsnormProducerToy())
+        targets = _target_names(gm)
+        self.assertIn("dsv4_rmsnorm_bf16_fp8_quant_mutating_producer_token", targets)
+        self.assertNotIn("fake_mutating_rmsnorm", targets)
+
+    def test_fx_pass_rewrites_cross_graph_quant_consumer(self):
+        gm = _fused_graph(_QuantConsumerToy())
+        targets = _target_names(gm)
+        self.assertIn("dsv4_rmsnorm_bf16_fp8_quant_from_provenance", targets)
+        self.assertNotIn("sgl_per_token_group_quant_fp8", targets)
+
+    def test_cross_graph_runtime_bf16_fp8_precompute(self):
+        torch.manual_seed(123)
+        x = (torch.randn(7, 1024, device="cuda", dtype=torch.bfloat16) * 0.2).contiguous()
+        weight = (torch.randn(1024, device="cuda", dtype=torch.bfloat16) * 0.1 + 1.0).contiguous()
+        y_ref, q_ref, s_ref = _non_fused_baseline(x, weight)
+        y = dsv4_rmsnorm_bf16_fp8_quant_producer_token(x, weight, 1e-6)
+        cand = dsv4_rmsnorm_bf16_fp8_quant_from_provenance(
+            y,
+            group_size=128,
+            eps=1e-4,
+            column_major_scales=True,
+            scale_tma_aligned=True,
+            scale_ue8m0=True,
+        )
+        torch.cuda.synchronize()
+        assert_bf16_close(y_ref, y, "cross_graph_bf16_precompute_y", atol=2e-2)
+        assert_fp8_quant_close((q_ref, s_ref), cand, "cross_graph_bf16_precompute_qs")
+
+    def test_cross_graph_runtime_survives_view_alias(self):
+        torch.manual_seed(123)
+        x = (torch.randn(7, 1024, device="cuda", dtype=torch.bfloat16) * 0.2).contiguous()
+        weight = (torch.randn(1024, device="cuda", dtype=torch.bfloat16) * 0.1 + 1.0).contiguous()
+        _y_ref, q_ref, s_ref = _non_fused_baseline(x, weight)
+        y = dsv4_rmsnorm_bf16_fp8_quant_producer_token(x, weight, 1e-6)
+        alias = y.view(7, 1, 1024).reshape(-1, 1024).contiguous()
+        cand = dsv4_rmsnorm_bf16_fp8_quant_from_provenance(
+            alias,
+            group_size=128,
+            eps=1e-4,
+            column_major_scales=True,
+            scale_tma_aligned=True,
+            scale_ue8m0=True,
+        )
+        torch.cuda.synchronize()
+        self.assertEqual(tuple(q_ref.shape), tuple(cand[0].shape))
+        self.assertEqual(tuple(s_ref.shape), tuple(cand[1].shape))
+        assert_fp8_quant_close((q_ref, s_ref), cand, "cross_graph_bf16_view_alias")
+
+    def test_cross_graph_runtime_safe_fallback_without_provenance(self):
+        y = torch.randn(3, 1024, device="cuda", dtype=torch.bfloat16).contiguous()
+        ref = sgl_per_token_group_quant_fp8(
+            y,
+            group_size=128,
+            eps=1e-4,
+            column_major_scales=True,
+            scale_tma_aligned=True,
+            scale_ue8m0=True,
+        )
+        cand = dsv4_rmsnorm_bf16_fp8_quant_from_provenance(
+            y,
+            group_size=128,
+            eps=1e-4,
+            column_major_scales=True,
+            scale_tma_aligned=True,
+            scale_ue8m0=True,
+        )
+        torch.cuda.synchronize()
+        assert_fp8_quant_close(ref, cand, "cross_graph_bf16_fallback")
+
+    def test_cross_graph_runtime_require_provenance_raises(self):
+        old_require = os.environ.get("DSV4_RMSNORM_QUANT_REQUIRE_PROVENANCE")
+        os.environ["DSV4_RMSNORM_QUANT_REQUIRE_PROVENANCE"] = "1"
+        try:
+            y = torch.randn(3, 1024, device="cuda", dtype=torch.bfloat16).contiguous()
+            with self.assertRaisesRegex(RuntimeError, "did not find valid producer provenance"):
+                dsv4_rmsnorm_bf16_fp8_quant_from_provenance(
+                    y,
+                    group_size=128,
+                    eps=1e-4,
+                    column_major_scales=True,
+                    scale_tma_aligned=True,
+                    scale_ue8m0=True,
+                )
+        finally:
+            if old_require is None:
+                os.environ.pop("DSV4_RMSNORM_QUANT_REQUIRE_PROVENANCE", None)
+            else:
+                os.environ["DSV4_RMSNORM_QUANT_REQUIRE_PROVENANCE"] = old_require
+
+    def test_registered_passes_assign_cross_graph_to_bf16_fp8(self):
+        old_bf16 = os.environ.get("DSV4_FUSED_RMSNORM_BF16_FP8_QUANT")
+        old_fp8 = os.environ.get("DSV4_FUSED_RMSNORM_FP8_QUANT")
+        os.environ["DSV4_FUSED_RMSNORM_BF16_FP8_QUANT"] = "1"
+        os.environ["DSV4_FUSED_RMSNORM_FP8_QUANT"] = "1"
+        try:
+            producer = torch.fx.symbolic_trace(_RmsnormProducerToy())
+            producer = apply_registered_dsv4_fusions(producer)
+            producer.recompile()
+            producer_targets = _target_names(producer)
+            self.assertIn("dsv4_rmsnorm_bf16_fp8_quant_producer_token", producer_targets)
+            self.assertNotIn("dsv4_rmsnorm_quant_producer_token", producer_targets)
+
+            consumer = torch.fx.symbolic_trace(_QuantConsumerToy())
+            consumer = apply_registered_dsv4_fusions(consumer)
+            consumer.recompile()
+            consumer_targets = _target_names(consumer)
+            self.assertIn("dsv4_rmsnorm_bf16_fp8_quant_from_provenance", consumer_targets)
+            self.assertNotIn("dsv4_fused_rmsnorm_fp8_quant_from_provenance", consumer_targets)
+
+            fp8_only = torch.fx.symbolic_trace(_RmsnormQuantToy())
+            fp8_only = apply_registered_dsv4_fusions(fp8_only)
+            fp8_only.recompile()
+            fp8_targets = _target_names(fp8_only)
+            self.assertIn("fused_rmsnorm_fp8_quant", fp8_targets)
+            self.assertNotIn("fused_rmsnorm_bf16_fp8_quant", fp8_targets)
+        finally:
+            if old_bf16 is None:
+                os.environ.pop("DSV4_FUSED_RMSNORM_BF16_FP8_QUANT", None)
+            else:
+                os.environ["DSV4_FUSED_RMSNORM_BF16_FP8_QUANT"] = old_bf16
+            if old_fp8 is None:
+                os.environ.pop("DSV4_FUSED_RMSNORM_FP8_QUANT", None)
+            else:
+                os.environ["DSV4_FUSED_RMSNORM_FP8_QUANT"] = old_fp8
 
     def test_pass_result_matches_original_pattern(self):
         torch.manual_seed(123)
