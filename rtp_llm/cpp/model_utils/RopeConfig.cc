@@ -19,8 +19,8 @@ std::string RopeConfig::DebugRopeConfigStr() const {
     oss << "  mrope_dim1: " << mrope_dim1 << std::endl;
     oss << "  mrope_dim2: " << mrope_dim2 << std::endl;
     oss << "  mrope_dim3: " << mrope_dim3 << std::endl;
+    oss << "  mrope_interleaved: " << mrope_interleaved << std::endl;
     return oss.str();
 }
 
 }  // namespace rtp_llm
-

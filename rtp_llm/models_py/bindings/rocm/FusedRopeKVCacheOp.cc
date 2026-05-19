@@ -99,7 +99,8 @@ static void rejectMropeWithoutPositionIds(const RopeConfig& rope_config, const c
 
 FusedRopeKVCachePrefillOpBase::FusedRopeKVCachePrefillOpBase(const AttentionConfigs& attn_configs):
     attn_configs_(attn_configs) {
-    rejectMropeWithoutPositionIds(attn_configs.rope_config, "FusedRopeKVCachePrefillOp");
+    // Mrope is supported: prefill kernel handles per-axis position_ids
+    // via mrope_dim1/dim2/dim3 dispatch (see fused_rope_kvcache_kernel.cu).
 }
 
 FusedRopeKVCachePrefillOpAsm::FusedRopeKVCachePrefillOpAsm(const AttentionConfigs& attn_configs):
@@ -144,14 +145,14 @@ CKAttnPtr FusedRopeKVCachePrefillOpBase::prepare(torch_ext::PyAttentionInputs at
         attn_params->prefix_lengths = attn_inputs.prefix_lengths;
     }
     attn_params->kv_block_array.cache_type = attn_configs_.kv_cache_dtype;
-    attn_params->position_ids = attn_inputs.combo_position_ids;
+    attn_params->position_ids              = attn_inputs.combo_position_ids;
 
-// Ensure position_ids is on CUDA device (e.g., MROPE position_ids may be on CPU)
+    // Ensure position_ids is on CUDA device (e.g., MROPE position_ids may be on CPU)
     if (attn_params->position_ids.defined() && !attn_params->position_ids.is_cuda()) {
         attn_params->position_ids =
             attn_params->position_ids.to(torch::kCUDA, /*non_blocking=*/false, /*copy=*/true).contiguous();
     }
-    
+
     int max_prefix_length = 0;
     if (has_prefix && attn_params->prefix_lengths.defined() && attn_params->prefix_lengths.numel() > 0) {
         max_prefix_length = attn_params->prefix_lengths.max().item<int32_t>();
@@ -353,7 +354,9 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
 
 FusedRopeKVCacheDecodeOpBase::FusedRopeKVCacheDecodeOpBase(const AttentionConfigs& attn_configs):
     attn_configs_(attn_configs) {
-    rejectMropeWithoutPositionIds(attn_configs.rope_config, "FusedRopeKVCacheDecodeOp");
+    // Mrope is now supported in decode kernels (position_ids is plumbed via
+    // combo_position_ids in prepare(), and the kernel dispatches per-axis
+    // position_ids based on mrope_dim1/dim2/dim3).
 }
 
 FusedRopeKVCacheDecodeOpAsm::FusedRopeKVCacheDecodeOpAsm(const AttentionConfigs& attn_configs):
