@@ -123,14 +123,15 @@ struct DtypeInfo<c10::Float8_e4m3fn> {
 };
 
 template<bool FUSE_SILU_AND_MUL>
-__device__ __forceinline__ int compute_input_group_start_offset(int expert_idx,
-                                                                int token_idx,
-                                                                int hidden_dim_group_idx,
-                                                                int hidden_size,
-                                                                int num_tokens_per_expert,
-                                                                int group_size) {
-    return expert_idx * num_tokens_per_expert * hidden_size * (FUSE_SILU_AND_MUL ? 2 : 1)
-           + token_idx * hidden_size * (FUSE_SILU_AND_MUL ? 2 : 1) + hidden_dim_group_idx * group_size;
+__device__ __forceinline__ int64_t compute_input_group_start_offset(int     expert_idx,
+                                                                    int     token_idx,
+                                                                    int64_t hidden_dim_group_idx,
+                                                                    int     hidden_size,
+                                                                    int     num_tokens_per_expert,
+                                                                    int     group_size) {
+    constexpr int input_multiplier = FUSE_SILU_AND_MUL ? 2 : 1;
+    return static_cast<int64_t>(expert_idx) * num_tokens_per_expert * hidden_size * input_multiplier
+           + static_cast<int64_t>(token_idx) * hidden_size * input_multiplier + hidden_dim_group_idx * group_size;
 }
 
 constexpr uint32_t INPUT_PRIMARY_VEC_NUM_BYTES = 32;
@@ -269,7 +270,7 @@ __global__ void per_token_group_quant_8bit_kernel(const T* __restrict__ input,
             const int token_idx,
             const int hidden_dim_group_idx,
             const int lane_id,
-            const int input_group_start_offset) {
+            const int64_t input_group_start_offset) {
             constexpr uint32_t INPUT_PRIMARY_VEC_SIZE  = INPUT_PRIMARY_VEC_NUM_BYTES / sizeof(T);
             constexpr uint32_t INPUT_PRIMARY_INT4_SIZE = INPUT_PRIMARY_VEC_NUM_BYTES / sizeof(int4);
 
@@ -303,7 +304,7 @@ __global__ void per_token_group_quant_8bit_kernel(const T* __restrict__ input,
                     + j);
             }
             if constexpr (FUSE_SILU_AND_MUL) {
-                const int secondary_offset = hidden_dim_num_groups * GROUP_SIZE;
+                const int64_t secondary_offset = static_cast<int64_t>(hidden_dim_num_groups) * GROUP_SIZE;
 #pragma unroll
                 for (uint32_t j = 0; j < INPUT_PRIMARY_INT4_SIZE; ++j) {
                     input_secondary_int4[j] = ld_global_nc(
