@@ -18,7 +18,13 @@ from ci_gate.review import (
     resolve_context,
 )
 from ci_gate.ci import pre_check_status, trigger_ci, wait_status
-from ci_gate.merge import check_merge_conflicts, trigger_merge, wait_merge
+from ci_gate.merge import (
+    check_merge_conflicts,
+    check_merge_done,
+    check_rebase_internal,
+    trigger_merge,
+    wait_merge,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +251,59 @@ class TestCheckReviewQualified(unittest.TestCase):
         mock_pages.return_value = []
         result = check_review_qualified("1", "repo", "sha1", "token", "LLLLKKKK")
         self.assertFalse(result)
+
+
+# ---------------------------------------------------------------------------
+# review.check_review_qualified — require_approved mode (gate job)
+# ---------------------------------------------------------------------------
+class TestCheckReviewQualifiedRequireApproved(unittest.TestCase):
+    @patch("ci_gate.review.github_get_pages")
+    @patch("ci_gate.review.github_get")
+    def test_approved_passes(self, mock_get, mock_pages):
+        mock_get.return_value = {"user": {"login": "author"}}
+        mock_pages.return_value = [
+            {"id": 1, "user": {"login": "rev", "type": "User"},
+             "state": "APPROVED", "commit_id": "sha1", "body": ""}
+        ]
+        self.assertTrue(check_review_qualified(
+            "1", "repo", "sha1", "token", "LLLLKKKK", require_approved=True
+        ))
+
+    @patch("ci_gate.review.github_get_pages")
+    @patch("ci_gate.review.github_get")
+    def test_lgtm_comment_rejected(self, mock_get, mock_pages):
+        mock_get.return_value = {"user": {"login": "author"}}
+        mock_pages.return_value = [
+            {"id": 1, "user": {"login": "LLLLKKKK", "type": "User"},
+             "state": "COMMENTED", "commit_id": "sha1",
+             "body": "lgtm ready to ci"}
+        ]
+        self.assertFalse(check_review_qualified(
+            "1", "repo", "sha1", "token", "LLLLKKKK", require_approved=True
+        ))
+
+    @patch("ci_gate.review._check_issue_comments_qualified")
+    @patch("ci_gate.review.github_get_pages")
+    @patch("ci_gate.review.github_get")
+    def test_issue_comment_fallback_skipped(self, mock_get, mock_pages, mock_issue):
+        mock_get.return_value = {"user": {"login": "author"}}
+        mock_pages.return_value = []
+        self.assertFalse(check_review_qualified(
+            "1", "repo", "sha1", "token", "LLLLKKKK", require_approved=True
+        ))
+        mock_issue.assert_not_called()
+
+    @patch("ci_gate.review.github_get_pages")
+    @patch("ci_gate.review.github_get")
+    def test_changes_requested_blocks(self, mock_get, mock_pages):
+        mock_get.return_value = {"user": {"login": "author"}}
+        mock_pages.return_value = [
+            {"id": 1, "user": {"login": "rev", "type": "User"},
+             "state": "CHANGES_REQUESTED", "commit_id": "sha1", "body": ""}
+        ]
+        self.assertFalse(check_review_qualified(
+            "1", "repo", "sha1", "token", "LLLLKKKK", require_approved=True
+        ))
 
 
 # ---------------------------------------------------------------------------
@@ -783,6 +842,92 @@ class TestWaitMerge(unittest.TestCase):
         mock_request.return_value = {"status": {"success": False}}
         with self.assertRaises(GateError):
             wait_merge(self._args())
+
+
+# ---------------------------------------------------------------------------
+# merge.check_merge_done (single-shot dedup precheck)
+# ---------------------------------------------------------------------------
+class TestCheckMergeDone(unittest.TestCase):
+    def _args(self, **overrides):
+        defaults = {
+            "commit_id": "abc123",
+            "security": "secret",
+            "repository": "repo",
+        }
+        defaults.update(overrides)
+        return argparse.Namespace(**defaults)
+
+    @patch("ci_gate.merge.ci_service_request")
+    def test_success_returns_0(self, mock_ci):
+        mock_ci.return_value = {"status": {"success": True}}
+        self.assertEqual(check_merge_done(self._args()), 0)
+
+    @patch("ci_gate.merge.ci_service_request")
+    def test_success_string_returns_0(self, mock_ci):
+        mock_ci.return_value = {"status": '{"success": true}'}
+        self.assertEqual(check_merge_done(self._args()), 0)
+
+    @patch("ci_gate.merge.ci_service_request")
+    def test_pending_returns_1(self, mock_ci):
+        mock_ci.return_value = {"status": "PENDING"}
+        self.assertEqual(check_merge_done(self._args()), 1)
+
+    @patch("ci_gate.merge.ci_service_request")
+    def test_failure_returns_1(self, mock_ci):
+        mock_ci.return_value = {"status": {"success": False}}
+        self.assertEqual(check_merge_done(self._args()), 1)
+
+    @patch("ci_gate.merge.ci_service_request")
+    def test_non_dict_returns_1(self, mock_ci):
+        mock_ci.return_value = "OK"
+        self.assertEqual(check_merge_done(self._args()), 1)
+
+    @patch("ci_gate.merge.ci_service_request")
+    def test_network_error_returns_1(self, mock_ci):
+        mock_ci.side_effect = GateError("boom", 2)
+        self.assertEqual(check_merge_done(self._args()), 1)
+
+
+# ---------------------------------------------------------------------------
+# merge.check_rebase_internal
+# ---------------------------------------------------------------------------
+class TestCheckRebaseInternal(unittest.TestCase):
+    def _args(self, **overrides):
+        defaults = {
+            "pr_id": "42",
+            "commit_id": "abc123",
+            "security": "secret",
+            "repository": "org/repo",
+            "warn_only": False,
+        }
+        defaults.update(overrides)
+        return argparse.Namespace(**defaults)
+
+    @patch("ci_gate.merge.get_branch_info")
+    def test_aligned_returns_0(self, mock_branch):
+        mock_branch.return_value = {"commit": {"id": "same"}}
+        self.assertEqual(check_rebase_internal(self._args()), 0)
+
+    @patch("ci_gate.merge.get_branch_info")
+    def test_diverged_returns_1(self, mock_branch):
+        mock_branch.side_effect = [
+            {"commit": {"id": "pr_branch"}},
+            {"commit": {"id": "main_branch"}},
+        ]
+        self.assertEqual(check_rebase_internal(self._args()), 1)
+
+    @patch("ci_gate.merge.get_branch_info")
+    def test_diverged_warn_only_returns_0(self, mock_branch):
+        mock_branch.side_effect = [
+            {"commit": {"id": "pr_branch"}},
+            {"commit": {"id": "main_branch"}},
+        ]
+        self.assertEqual(check_rebase_internal(self._args(warn_only=True)), 0)
+
+    @patch("ci_gate.merge.get_branch_info")
+    def test_missing_commit_returns_1(self, mock_branch):
+        mock_branch.return_value = {"commit": {"id": None}}
+        self.assertEqual(check_rebase_internal(self._args()), 1)
 
 
 if __name__ == "__main__":

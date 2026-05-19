@@ -77,8 +77,8 @@ def _check_issue_comments_qualified(pr_number, repo, head_sha, github_token, lgt
     return False
 
 
-def check_review_qualified(pr_number, repo, head_sha, github_token, lgtm_user):
-    # type: (str, str, str, str, str) -> bool
+def check_review_qualified(pr_number, repo, head_sha, github_token, lgtm_user, require_approved=False):
+    # type: (str, str, str, str, str, bool) -> bool
     pr_data = github_get(repo, "/pulls/%s" % pr_number, "fetching PR #%s" % pr_number, github_token)
     if not isinstance(pr_data, dict):
         raise GateError("::error::Unexpected PR response for #%s" % pr_number, 2)
@@ -97,6 +97,10 @@ def check_review_qualified(pr_number, repo, head_sha, github_token, lgtm_user):
     if any(r.get("state") == "APPROVED" for r in fresh):
         log("PR #%s has a latest fresh APPROVED review" % pr_number)
         return True
+
+    if require_approved:
+        log("PR #%s requires APPROVED review (LGTM comments not accepted in this mode)" % pr_number)
+        return False
 
     lgtm_phrase = "lgtm ready to ci"
     for review in fresh:
