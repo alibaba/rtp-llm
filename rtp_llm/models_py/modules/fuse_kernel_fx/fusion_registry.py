@@ -57,7 +57,13 @@ _COMPILE_SUMMARY_REGISTERED = False
 _FUSED_ADD_RMSNORM_WRAPPER_INSTALLED = False
 _FUSED_ADD_RMSNORM_ORIGINAL = None
 _FUSED_ADD_RMSNORM_MUTATING_CUSTOM_OP = None
+_RMSNORM_WRAPPER_INSTALLED = False
+_RMSNORM_ORIGINAL = None
+_RMSNORM_MUTATING_CUSTOM_OP = None
 _TORCH_STREAM_COMPAT_INSTALLED = False
+_QUANT_FP8_WRAPPER_INSTALLED = False
+_QUANT_FP8_ORIGINAL = None
+_QUANT_FP8_CUSTOM_OP = None
 
 
 # ------------------------------------------------------------------ env / log
@@ -140,6 +146,8 @@ def ensure_graphfx_fusions_registered() -> None:
     setup_graphfx_fusion_file_logger()
     install_torch_stream_cuda_stream_compat()
     install_compile_friendly_fused_add_rmsnorm_wrapper()
+    install_compile_friendly_rmsnorm_wrapper()
+    install_compile_friendly_quant_fp8_wrapper()
     install_graphfx_compile_disable_wrappers()
     if _FUSIONS_IMPORTED:
         return
@@ -304,6 +312,8 @@ def install_compile_friendly_fused_add_rmsnorm_wrapper() -> None:
                 hidden_states, residual, weight, float(eps), int(stream_id)
             )
 
+        _compile_friendly.__name__ = "fused_add_rmsnorm_mutating"
+        _compile_friendly.__qualname__ = "fused_add_rmsnorm_mutating"
         try:
             setattr(_compile_friendly, "_graphfx_wrapped", True)
             setattr(_compile_friendly, "_graphfx_original", original)
@@ -335,6 +345,329 @@ def install_compile_friendly_fused_add_rmsnorm_wrapper() -> None:
     except Exception as exc:
         logger.warning(
             "GraphFX: compile-friendly fused_add_rmsnorm install failed: %s", exc
+        )
+
+
+# ------------------------------- rmsnorm (non-mutating output) compile-friendly wrapper
+
+
+def _build_rmsnorm_mutating_custom_op():
+    global _RMSNORM_MUTATING_CUSTOM_OP
+    if _RMSNORM_MUTATING_CUSTOM_OP is not None:
+        return _RMSNORM_MUTATING_CUSTOM_OP
+    if _RMSNORM_ORIGINAL is None:
+        return None
+    try:
+        import torch
+
+        def _mutating_impl(output, hidden_states, weight, eps, stream_id):
+            _RMSNORM_ORIGINAL(output, hidden_states, weight, eps, stream_id)
+            return None
+
+        def _mutating_fake(output, hidden_states, weight, eps, stream_id):
+            return None
+
+        annotations = {
+            "output": torch.Tensor,
+            "hidden_states": torch.Tensor,
+            "weight": torch.Tensor,
+            "eps": float,
+            "stream_id": int,
+            "return": None,
+        }
+        _mutating_impl.__annotations__ = annotations
+        _mutating_fake.__annotations__ = annotations
+        op = torch.library.custom_op(
+            "rtp_llm_graphfx::rmsnorm_mutating",
+            _mutating_impl,
+            mutates_args=("output",),
+        )
+        op.register_fake(_mutating_fake)
+        _RMSNORM_MUTATING_CUSTOM_OP = getattr(op, "_opoverload", op)
+        return _RMSNORM_MUTATING_CUSTOM_OP
+    except Exception as exc:
+        logger.warning("GraphFX mutating rmsnorm op build failed: %s", exc)
+        return None
+
+
+def install_compile_friendly_rmsnorm_wrapper() -> None:
+    """Replace ``rtp_llm_ops.rmsnorm`` with a torch.library custom op.
+
+    The pybind op writes to ``output`` in place — Dynamo cannot trace it with
+    FakeTensor inputs. Wrapping it as a custom op with ``mutates_args=("output",)``
+    keeps the contract visible in FX while short-circuiting fake-tensor execution.
+    """
+    global _RMSNORM_WRAPPER_INSTALLED, _RMSNORM_ORIGINAL
+    if _RMSNORM_WRAPPER_INSTALLED:
+        return
+    if not env_flag("ENABLE_GRAPHFX_FUSION"):
+        return
+    try:
+        from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+        original = getattr(rtp_llm_ops, "rmsnorm", None)
+        if original is None:
+            logger.info("GraphFX: rtp_llm_ops.rmsnorm not present, skip wrapper")
+            return
+        if getattr(original, "_graphfx_wrapped", False):
+            _RMSNORM_WRAPPER_INSTALLED = True
+            return
+        _RMSNORM_ORIGINAL = original
+        custom_op = _build_rmsnorm_mutating_custom_op()
+        if custom_op is None:
+            return
+
+        def _compile_friendly(output, hidden_states, weight, eps, stream_id):
+            if _is_fake_or_meta_tensor(hidden_states) or _is_fake_or_meta_tensor(
+                output
+            ):
+                return None
+            return custom_op(output, hidden_states, weight, float(eps), int(stream_id))
+
+        _compile_friendly.__name__ = "rmsnorm_mutating"
+        _compile_friendly.__qualname__ = "rmsnorm_mutating"
+        try:
+            setattr(_compile_friendly, "_graphfx_wrapped", True)
+            setattr(_compile_friendly, "_graphfx_original", original)
+        except Exception:
+            pass
+        try:
+            rtp_llm_ops.rmsnorm = _compile_friendly
+        except Exception as exc:
+            logger.warning(
+                "GraphFX: failed to attach compile-friendly rmsnorm: %s", exc
+            )
+            return
+
+        for module_name, module in list(sys.modules.items()):
+            if getattr(module, "rmsnorm_pybind", None) is original:
+                try:
+                    setattr(module, "rmsnorm_pybind", _compile_friendly)
+                except Exception:
+                    pass
+
+        _dynamo_allow_in_graph(custom_op)
+        _dynamo_allow_in_graph(_compile_friendly)
+        _RMSNORM_WRAPPER_INSTALLED = True
+        logger.info("GraphFX installed compile-friendly rmsnorm wrapper")
+    except Exception as exc:
+        logger.warning("GraphFX: compile-friendly rmsnorm install failed: %s", exc)
+
+
+# ------------------------------- sgl_per_token_group_quant_fp8 compile-friendly wrapper
+
+
+def _build_quant_fp8_custom_op():
+    """Build a torch.library.custom_op for sgl_per_token_group_quant_fp8.
+
+    Unlike allow_in_graph (which Dynamo ignores when the function is already
+    imported via closure), a custom_op is GUARANTEED opaque — Dynamo will never
+    trace into it and will instead call the registered fake implementation to
+    determine output shapes.
+    """
+    global _QUANT_FP8_CUSTOM_OP
+    if _QUANT_FP8_CUSTOM_OP is not None:
+        return _QUANT_FP8_CUSTOM_OP
+    if _QUANT_FP8_ORIGINAL is None:
+        return None
+    try:
+        from typing import Optional, Tuple
+
+        import torch
+
+        def _real_impl(
+            x,
+            group_size,
+            eps,
+            column_major_scales,
+            scale_tma_aligned,
+            scale_ue8m0,
+            fuse_silu_and_mul,
+            masked_m=None,
+        ):
+            return _QUANT_FP8_ORIGINAL(
+                x,
+                group_size=group_size,
+                eps=eps,
+                column_major_scales=column_major_scales,
+                scale_tma_aligned=scale_tma_aligned,
+                scale_ue8m0=scale_ue8m0,
+                fuse_silu_and_mul=fuse_silu_and_mul,
+                masked_m=masked_m,
+            )
+
+        def _fake_impl(
+            x,
+            group_size,
+            eps,
+            column_major_scales,
+            scale_tma_aligned,
+            scale_ue8m0,
+            fuse_silu_and_mul,
+            masked_m=None,
+        ):
+            out_n = x.shape[-1] // (2 if fuse_silu_and_mul else 1)
+            out_shape = (*x.shape[:-1], out_n)
+            x_q = torch.empty(out_shape, device=x.device, dtype=torch.float8_e4m3fn)
+            if scale_ue8m0:
+                *x_batch, x_q_mn, x_q_k = out_shape
+                x_s_mn, x_s_k = x_q_mn, x_q_k // 128
+                aligned_mn = ((x_s_mn + 3) // 4) * 4
+                aligned_k = ((x_s_k + 3) // 4) * 4
+                x_s = torch.empty(
+                    (*x_batch, aligned_k // 4, aligned_mn),
+                    device=x.device,
+                    dtype=torch.int,
+                ).transpose(-1, -2)[..., :x_s_mn, :]
+            elif column_major_scales:
+                if scale_tma_aligned:
+                    aligned_size = (out_shape[-2] + 3) // 4 * 4
+                    x_s = torch.empty(
+                        out_shape[:-2] + (out_n // group_size, aligned_size),
+                        device=x.device,
+                        dtype=torch.float32,
+                    ).permute(-1, -2)[: out_shape[-2], :]
+                else:
+                    x_s = torch.empty(
+                        (out_n // group_size,) + out_shape[:-1],
+                        device=x.device,
+                        dtype=torch.float32,
+                    ).permute(-1, -2)
+            else:
+                x_s = torch.empty(
+                    out_shape[:-1] + (out_n // group_size,),
+                    device=x.device,
+                    dtype=torch.float32,
+                )
+            return x_q, x_s
+
+        annotations = {
+            "x": torch.Tensor,
+            "group_size": int,
+            "eps": float,
+            "column_major_scales": bool,
+            "scale_tma_aligned": bool,
+            "scale_ue8m0": bool,
+            "fuse_silu_and_mul": bool,
+            "masked_m": Optional[torch.Tensor],
+            "return": Tuple[torch.Tensor, torch.Tensor],
+        }
+        _real_impl.__annotations__ = annotations
+        _fake_impl.__annotations__ = annotations
+
+        op = torch.library.custom_op(
+            "rtp_llm_graphfx::sgl_per_token_group_quant_fp8",
+            _real_impl,
+            mutates_args=(),
+        )
+        op.register_fake(_fake_impl)
+        _QUANT_FP8_CUSTOM_OP = getattr(op, "_opoverload", op)
+        return _QUANT_FP8_CUSTOM_OP
+    except Exception as exc:
+        logger.warning("GraphFX quant_fp8 custom op build failed: %s", exc)
+        return None
+
+
+def install_compile_friendly_quant_fp8_wrapper() -> None:
+    """Replace ``sgl_per_token_group_quant_fp8`` with a torch.library custom op.
+
+    The original function contains asserts and calls a pybind op
+    (``per_token_group_quant_fp8``).  Dynamo traces INTO these, creating graph
+    breaks that split the rmsnorm+quant pattern across subgraphs.  A custom_op
+    is guaranteed opaque — Dynamo uses the registered fake implementation for
+    shape inference and emits a single ``call_function`` node that FX passes
+    can match.
+    """
+    global _QUANT_FP8_WRAPPER_INSTALLED, _QUANT_FP8_ORIGINAL
+    if _QUANT_FP8_WRAPPER_INSTALLED:
+        return
+    if not env_flag("ENABLE_GRAPHFX_FUSION"):
+        return
+    try:
+        from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
+            sgl_per_token_group_quant_fp8,
+        )
+
+        if sgl_per_token_group_quant_fp8 is None:
+            return
+        if getattr(sgl_per_token_group_quant_fp8, "_graphfx_wrapped", False):
+            _QUANT_FP8_WRAPPER_INSTALLED = True
+            return
+        _QUANT_FP8_ORIGINAL = sgl_per_token_group_quant_fp8
+        custom_op = _build_quant_fp8_custom_op()
+        if custom_op is None:
+            return
+
+        def _compile_friendly(
+            x,
+            group_size=128,
+            eps=1e-10,
+            column_major_scales=False,
+            scale_tma_aligned=False,
+            scale_ue8m0=False,
+            fuse_silu_and_mul=False,
+            masked_m=None,
+        ):
+            if _is_fake_or_meta_tensor(x):
+                return custom_op(
+                    x,
+                    group_size,
+                    eps,
+                    column_major_scales,
+                    scale_tma_aligned,
+                    scale_ue8m0,
+                    fuse_silu_and_mul,
+                    masked_m,
+                )
+            return custom_op(
+                x,
+                group_size,
+                eps,
+                column_major_scales,
+                scale_tma_aligned,
+                scale_ue8m0,
+                fuse_silu_and_mul,
+                masked_m,
+            )
+
+        _compile_friendly.__name__ = "sgl_per_token_group_quant_fp8"
+        _compile_friendly.__qualname__ = "sgl_per_token_group_quant_fp8"
+        setattr(_compile_friendly, "_graphfx_wrapped", True)
+        setattr(
+            _compile_friendly,
+            "_graphfx_original",
+            sgl_per_token_group_quant_fp8,
+        )
+
+        # Patch the function in its home module and all importers
+        import rtp_llm.models_py.kernels.cuda.fp8_kernel as fp8_pkg
+        import rtp_llm.models_py.kernels.cuda.fp8_kernel.fp8_kernel as fp8_mod
+
+        fp8_mod.sgl_per_token_group_quant_fp8 = _compile_friendly
+        fp8_pkg.sgl_per_token_group_quant_fp8 = _compile_friendly
+
+        for module_name, module in list(sys.modules.items()):
+            if module is None:
+                continue
+            if (
+                getattr(module, "sgl_per_token_group_quant_fp8", None)
+                is _QUANT_FP8_ORIGINAL
+            ):
+                try:
+                    setattr(module, "sgl_per_token_group_quant_fp8", _compile_friendly)
+                except Exception:
+                    pass
+
+        _dynamo_allow_in_graph(custom_op)
+        _dynamo_allow_in_graph(_compile_friendly)
+        _QUANT_FP8_WRAPPER_INSTALLED = True
+        logger.info(
+            "GraphFX installed compile-friendly sgl_per_token_group_quant_fp8 wrapper"
+        )
+    except Exception as exc:
+        logger.warning(
+            "GraphFX: compile-friendly sgl_per_token_group_quant_fp8 install failed: %s",
+            exc,
         )
 
 
@@ -592,6 +925,24 @@ def _allow_graphfx_fusion_candidates_in_graph() -> None:
                 continue
     except Exception as exc:
         logger.warning("GraphFX allow_in_graph candidates registration failed: %s", exc)
+    try:
+        from rtp_llm.models_py.triton_kernels.common.fused_strided_rmsnorm import (
+            fused_strided_rmsnorm,
+            fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output,
+        )
+
+        for fn in (
+            fused_strided_rmsnorm,
+            fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output,
+        ):
+            try:
+                _dynamo_allow_in_graph(fn)
+            except Exception:
+                continue
+    except Exception as exc:
+        logger.warning(
+            "GraphFX allow_in_graph strided rmsnorm registration failed: %s", exc
+        )
     _DYNAMO_LEAFS_REGISTERED = True
 
 
@@ -702,6 +1053,7 @@ def _graph_signature(gm: object) -> tuple:
 
 def apply_registered_graphfx_fusions(gm, *, return_changed: bool = False):
     ensure_graphfx_fusions_registered()
+    master_enabled = env_flag("ENABLE_GRAPHFX_FUSION")
     debug = env_flag("GRAPHFX_FUSION_REGISTRY_DEBUG")
     if debug:
         logger.info(
@@ -710,7 +1062,7 @@ def apply_registered_graphfx_fusions(gm, *, return_changed: bool = False):
                 {
                     "name": item.name,
                     "env_gate": item.env_gate,
-                    "enabled": env_flag(item.env_gate),
+                    "enabled": master_enabled or env_flag(item.env_gate),
                 }
                 for item in _PASSES
             ],
@@ -718,8 +1070,12 @@ def apply_registered_graphfx_fusions(gm, *, return_changed: bool = False):
     out = gm
     changed = False
     for item in _PASSES:
-        if not env_flag(item.env_gate):
-            continue
+        if master_enabled:
+            if env_flag(f"{item.env_gate}_DISABLE"):
+                continue
+        else:
+            if not env_flag(item.env_gate):
+                continue
         before = _graph_signature(out)
         out = item.pass_fn(out)
         changed = changed or _graph_signature(out) != before
@@ -757,12 +1113,27 @@ def graphfx_fusion_backend(gm, example_inputs, *, label: str = "unknown"):
     if env_flag("GRAPHFX_COMPILE_STATS"):
         targets = [_target_name(node.target) for node in gm.graph.nodes]
         logger.info("GraphFX compile: label=%s nodes=%d", label, len(targets))
+    if env_flag("GRAPHFX_DUMP_GRAPHS"):
+        _dump_graph_nodes(gm, label)
     fused, changed = apply_registered_graphfx_fusions(gm, return_changed=True)
     if not changed and env_flag("GRAPHFX_FALLBACK_UNFUSED", True):
         logger.info("GraphFX no-op for label=%s, keep original graph", label)
         return gm.forward
     fused.recompile()
     return fused.forward
+
+
+def _dump_graph_nodes(gm, label: str) -> None:
+    count = _GRAPH_COMPILE_LABEL_COUNTS[label]
+    lines = [f"=== GraphFX DUMP label={label} #{count} ==="]
+    for node in gm.graph.nodes:
+        tname = _target_name(node.target)
+        args_str = ", ".join(str(a) for a in node.args[:4])
+        kwargs_str = ", ".join(f"{k}={v}" for k, v in list(node.kwargs.items())[:3])
+        lines.append(
+            f"  {node.op:15s} | {tname:50s} | args=({args_str}) | kwargs=({kwargs_str})"
+        )
+    logger.info("\n".join(lines))
 
 
 def compile_with_graphfx_fusions(fn, *, label: str | None = None, **compile_kwargs):
@@ -803,4 +1174,6 @@ def compile_with_graphfx_fusions(fn, *, label: str | None = None, **compile_kwar
 
 def any_graphfx_fusion_enabled() -> bool:
     ensure_graphfx_fusions_registered()
+    if env_flag("ENABLE_GRAPHFX_FUSION"):
+        return True
     return any(env_flag(item.env_gate) for item in _PASSES)

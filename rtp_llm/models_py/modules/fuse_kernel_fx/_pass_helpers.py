@@ -73,19 +73,32 @@ def static_numel_1d(node: object) -> Optional[int]:
 
 
 def is_quant_node(node: object) -> bool:
-    return is_call_function(node, "sgl_per_token_group_quant_fp8")
+    if not isinstance(node, torch.fx.Node) or node.op != "call_function":
+        return False
+    name = target_name(node.target)
+    return (
+        name == "sgl_per_token_group_quant_fp8"
+        or "sgl_per_token_group_quant_fp8" in str(node.target)
+    )
 
 
 def quant_contract_ok(node: torch.fx.Node, *, group_size: int = 128) -> bool:
     args = list(node.args)
     kwargs = dict(node.kwargs)
+    # Custom_op emits positional: (x, group_size, eps, col_major, tma, ue8m0, silu_mul, masked_m)
     actual_group = kwargs.get("group_size", args[1] if len(args) > 1 else None)
+    column_major = kwargs.get(
+        "column_major_scales", args[3] if len(args) > 3 else False
+    )
+    scale_tma = kwargs.get("scale_tma_aligned", args[4] if len(args) > 4 else False)
+    fuse_silu = kwargs.get("fuse_silu_and_mul", args[6] if len(args) > 6 else False)
+    masked_m = kwargs.get("masked_m", args[7] if len(args) > 7 else None)
     return (
         actual_group == group_size
-        and bool(kwargs.get("column_major_scales", False))
-        and bool(kwargs.get("scale_tma_aligned", False))
-        and not bool(kwargs.get("fuse_silu_and_mul", False))
-        and kwargs.get("masked_m", None) is None
+        and bool(column_major)
+        and bool(scale_tma)
+        and not bool(fuse_silu)
+        and masked_m is None
     )
 
 

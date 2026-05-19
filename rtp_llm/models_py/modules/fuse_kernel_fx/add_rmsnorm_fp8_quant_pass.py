@@ -93,10 +93,12 @@ def _target_name(target: object) -> str:
 
 
 def _is_quant_node(node: object) -> bool:
+    if not isinstance(node, torch.fx.Node) or node.op != "call_function":
+        return False
+    name = _target_name(node.target)
     return (
-        isinstance(node, torch.fx.Node)
-        and node.op == "call_function"
-        and _target_name(node.target) == "sgl_per_token_group_quant_fp8"
+        name == "sgl_per_token_group_quant_fp8"
+        or "sgl_per_token_group_quant_fp8" in str(node.target)
     )
 
 
@@ -114,13 +116,21 @@ def _is_mutating_add_rmsnorm_node(node: object) -> bool:
 def _quant_contract_ok(node: torch.fx.Node) -> bool:
     args = list(node.args)
     kwargs = dict(node.kwargs)
+    # Custom_op emits positional: (x, group_size, eps, col_major, tma, ue8m0, silu_mul, masked_m)
+    # Original wrapper emits kwargs: (x, group_size=128, eps=..., ...)
     group_size = kwargs.get("group_size", args[1] if len(args) > 1 else None)
+    column_major = kwargs.get(
+        "column_major_scales", args[3] if len(args) > 3 else False
+    )
+    scale_tma = kwargs.get("scale_tma_aligned", args[4] if len(args) > 4 else False)
+    fuse_silu = kwargs.get("fuse_silu_and_mul", args[6] if len(args) > 6 else False)
+    masked_m = kwargs.get("masked_m", args[7] if len(args) > 7 else None)
     return (
         group_size == 128
-        and bool(kwargs.get("column_major_scales", False))
-        and bool(kwargs.get("scale_tma_aligned", False))
-        and not bool(kwargs.get("fuse_silu_and_mul", False))
-        and kwargs.get("masked_m", None) is None
+        and bool(column_major)
+        and bool(scale_tma)
+        and not bool(fuse_silu)
+        and masked_m is None
     )
 
 
@@ -431,7 +441,10 @@ def _all_users_are_layout_or_output_only(
     seen.add(node)
     relevant_users = [user for user in node.users if user not in skip]
     if not relevant_users:
-        return False
+        # For mutating ops, the modified tensor flows to the next subgraph
+        # via Dynamo's implicit mutation tracking — no explicit output node.
+        # Return True so the producer token can register provenance.
+        return node.op == "placeholder"
     for user in relevant_users:
         if user.op == "output":
             continue
