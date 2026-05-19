@@ -378,17 +378,21 @@ class CompressorBF16VLLM(nn.Module):
         positions: torch.Tensor,  # [N] int64
         b_idx: torch.Tensor,  # [N] int64
     ) -> torch.Tensor:
-        """state_slot[t] = state_block_table[b, (pos//eb) % max_blocks] * eb + pos%eb.
-        Returns -1 where the chosen block id is unallocated (==0 sentinel)."""
+        """state_slot[t] = state_block_table[b, pos//eb] * eb + pos%eb.
+        Returns -1 where the logical block is absent or unallocated."""
         bt = self._state_block_table
         eb = self._state_eb
         assert bt is not None and eb > 0, "state pool context unbound"
         bt_long = bt.to(torch.long)
         max_blocks = int(bt_long.shape[1])
-        block_in_seq = (positions // eb) % max_blocks
+        if max_blocks <= 0:
+            return torch.full_like(positions, -1)
+        block_in_seq = positions // eb
         in_block = positions % eb
-        block_id = bt_long[b_idx, block_in_seq]
-        valid = block_id > 0
+        in_capacity = block_in_seq < max_blocks
+        safe_block_in_seq = block_in_seq.clamp(min=0, max=max_blocks - 1)
+        block_id = bt_long[b_idx, safe_block_in_seq]
+        valid = in_capacity & (block_id > 0)
         slot = block_id * eb + in_block
         return torch.where(valid, slot, torch.full_like(slot, -1))
 
@@ -448,10 +452,8 @@ class CompressorBF16VLLM(nn.Module):
         sequentially-laid-out batches (prefill). When provided the fused
         kernel reads any overlap-window position with
         ``flat_idx = pos - seq_start in [0, N)`` directly from
-        ``kv_flat / score_flat`` instead of the cyclic state pool, which
-        only retains the latest few hundred tokens per request and would
-        have been overwritten within this same launch by
-        ``run_save_partial_states``.
+        ``kv_flat / score_flat`` instead of reading back through the state
+        pool, where current-launch writes are still in flight.
 
         Pass ``None`` to disable the raw path (decode: ``kv_flat`` is
         indexed by ``req_idx``, not by absolute position offset).

@@ -139,10 +139,9 @@ def _fused_kv_compress_norm_rope_insert_bf16(
             return
 
     # Note: we deliberately do NOT early-return on ``slot_mapping[token]<0``.
-    # When a boundary's state slot has been evicted (cyclic ring overwrote
-    # it within this same launch) the raw path provides the data — the
-    # ``kv_slot_idx < 0`` check at the bottom is the real gate for whether
-    # this token should write to the KV pool.
+    # For in-batch positions the raw path provides the data even when the
+    # state slot is absent; the ``kv_slot_idx < 0`` check at the bottom is the
+    # real gate for whether this token should write to the KV pool.
 
     req_idx = tl.load(token_to_req_indices_ptr + token_idx)
 
@@ -193,10 +192,12 @@ def _fused_kv_compress_norm_rope_insert_bf16(
     )
     score_from_raw = score_from_raw + ape_vals
 
-    # State-cache path. The state pool is cyclic with fixed_blocks_per_req
-    # physical blocks per request, matching the Python-side state slot mapping.
+    # State-cache path. The framework supplies sparse absolute logical-block
+    # tables; old non-tail entries are sentinels and must not wrap. Do not
+    # clamp here: a block index beyond the table width means the framework
+    # failed to grow the table before this launch.
     use_cache = mask_pos & ~use_raw
-    block_indices = (pos // block_size) % block_table_stride
+    block_indices = pos // block_size
     block_indices_safe = tl.where(use_cache, block_indices, 0)
     block_numbers = tl.load(
         block_table_ptr + req_idx * block_table_stride + block_indices_safe,
@@ -340,7 +341,9 @@ def _fused_kv_compress_norm_rope_insert_bf16_ratio128_tile(
     score_from_raw = score_from_raw + ape_vals
 
     use_cache = mask_pos & ~in_batch
-    block_indices = (pos // block_size) % block_table_stride
+    # See the state-cache path above: block table width is a framework
+    # invariant, not a kernel-side wrap/clamp policy.
+    block_indices = pos // block_size
     block_indices_safe = tl.where(use_cache, block_indices, 0)
     block_numbers = tl.load(
         block_table_ptr + req_idx * block_table_stride + block_indices_safe,
@@ -697,8 +700,8 @@ def run_fused_compress_kv_write_bf16(
     Source dispatch policy (set ``CACHE_WINDOW=0`` always):
       * **Prefill / in-batch token** (``flat_idx in [0, n_batch)``) → raw
         path reads directly from ``kv_raw`` / ``score_raw``. State pool is
-        never consulted, so its sizing / cyclic-overwrite behaviour does
-        not affect prefill correctness.
+        never consulted, so state-pool table shape does not affect prefill
+        correctness.
       * **Continuation prefill, prefix overlap** (``pos < seq_start``)
         → cache path, reads from ``state_cache`` (populated by a previous
         prefill via :func:`run_save_partial_states`).
@@ -707,11 +710,9 @@ def run_fused_compress_kv_write_bf16(
 
     The vLLM source kernel uses a non-zero ``CACHE_WINDOW`` so the back of
     the in-batch range falls into the (cache-friendly) state pool read; it
-    requires a large per-request state pool (256 entries × 2 blocks = 512
-    slots) to remain correct when batches exceed the cyclic capacity. We
-    skip that micro-optimization: raw and cache reads are bit-equivalent,
-    and forcing raw for the entire in-batch range eliminates state-pool
-    sizing as a correctness constraint."""
+    requires a large per-request state pool. We skip that micro-optimization:
+    raw and cache reads are bit-equivalent, and forcing raw for the entire
+    in-batch range eliminates state-pool sizing as a correctness constraint."""
     N = int(slot_mapping.shape[0])
     if N == 0:
         return
