@@ -12,17 +12,17 @@ from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.ops import ActivationType, HWKernelConfig, ParallelismConfig
 from rtp_llm.utils.model_weight import W
 
-# CUDA-only fused silu_and_mul + per-token-group fp8 quant. Activated when
-# down_proj is CudaFp8GEMMLinear with UE8M0 scales — saves one launch
-# (silu_and_mul) and one launch (per_token_group_quant_8bit) per forward.
+# CudaFp8GEMMLinear is kept around to detect fp8 ``accepts_fp8_input``; the
+# silu+mul+fp8-quant fusion now lives in GraphFX (see
+# ``modules/fuse_kernel_fx/silu_and_mul_fp8_quant_pass.py``).
 _DEVICE_TYPE = get_device_type()
 if _DEVICE_TYPE == DeviceType.Cuda:
-    from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
-        CudaFp8GEMMLinear,
-    )
-    from rtp_llm.models_py.triton_kernels.common.activation import (
-        silu_and_mul_per_token_group_fp8_quant_dense_packed_fwd,
-    )
+    try:
+        from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
+            CudaFp8GEMMLinear,
+        )
+    except ImportError:
+        CudaFp8GEMMLinear = None  # type: ignore
 else:
     CudaFp8GEMMLinear = None  # type: ignore
 
@@ -107,18 +107,6 @@ class DenseMLP(nn.Module):
             input_scale_key=W.ffn_w2_i_s,
         )
 
-        from rtp_llm.models_py.utils.fuse_config import fuse_kernels_enabled
-
-        self._fuse_silu_quant = (
-            fuse_kernels_enabled(hw_kernel_config)
-            and self.is_gated
-            and CudaFp8GEMMLinear is not None
-            and isinstance(self.down_proj, CudaFp8GEMMLinear)
-            and (self.down_proj.K % 128 == 0)
-        )
-        if self._fuse_silu_quant and self.down_proj.scale_ue8m0:
-            self._fuse_silu_quant = self.down_proj.K % 512 == 0
-
     @property
     def accepts_fp8_input(self) -> bool:
         return CudaFp8GEMMLinear is not None and isinstance(
@@ -136,19 +124,11 @@ class DenseMLP(nn.Module):
             up = self.up_proj(x_fp8, input_scales=x_scale)
         else:
             up = self.up_proj(x)
-        if self._fuse_silu_quant and up.dim() == 2:
-            scale_ue8m0 = self.down_proj.scale_ue8m0
-            fp8_out, scale_out = (
-                silu_and_mul_per_token_group_fp8_quant_dense_packed_fwd(
-                    up.contiguous(),
-                    quant_group_size=128,
-                    scale_ue8m0=scale_ue8m0,
-                )
-            )
-            output = self.down_proj(fp8_out, input_scales=scale_out)
-        else:
-            activated = self.act_fn(up)
-            output = self.down_proj(activated)
+        # Pure-baseline activation + linear chain. GraphFX
+        # (``silu_and_mul_fp8_quant_pass``) rewrites this into a single
+        # fused kernel at trace time when the contract holds.
+        activated = self.act_fn(up)
+        output = self.down_proj(activated)
         if not skip_allreduce and self.parallelism_config.get_ffn_tp_size() > 1:
             output = all_reduce(output, group=Group.TP)
         return output

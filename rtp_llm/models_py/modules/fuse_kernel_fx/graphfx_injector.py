@@ -1,0 +1,218 @@
+"""GraphFX install entry point for Qwen3.5 / GLM5 / Qwen3-MoE / DSV3.2 models.
+
+``maybe_install_qwen35_graphfx_fusions(py_model)`` is meant to be called once
+from ``BaseModel.load()`` after ``_create_python_model()`` when the env flag
+``QWEN35_GRAPHFX_FUSION`` is set.  It wraps ``py_model.forward`` with a
+``torch.compile``-d callable that uses the Qwen35 fusion registry as a
+backend so the registered FX passes can rewrite RMSResNorm/quant/gate
+patterns into fused-kernel calls without modifying eager model code.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from typing import Any
+
+from rtp_llm.models_py.modules.fuse_kernel_fx.fusion_registry import (
+    compile_with_qwen35_fusions,
+    ensure_qwen35_fusions_registered,
+    env_flag,
+    registered_qwen35_fusion_passes,
+    setup_qwen35_fusion_file_logger,
+)
+
+logger = logging.getLogger(__name__)
+
+_CALLABLE_MARKER = "_qwen35_graphfx_compiled"
+
+
+# Fields on PyModelInputs / PyAttentionInputs whose dim-0 is the per-request
+# axis.  Marked dynamic so Dynamo doesn't recompile per token count.
+_DYNAMIC_DIM0_FIELDS = (
+    "input_ids",
+    "input_hiddens",
+    "position_ids",
+    "input_lengths",
+    "input_lengths_d",
+    "prefix_lengths",
+    "prefix_lengths_d",
+    "sequence_lengths",
+    "sequence_lengths_plus_1_d",
+    "padding_offset",
+    "cu_kv_seqlens",
+    "decode_cu_seqlens_d",
+    "kv_cache_block_id_host",
+    "kv_cache_block_id_device",
+    "kv_cache_offset",
+)
+
+# Fields that may specialize on B==1; use maybe_mark_dynamic instead of
+# force-marking.
+_MAYBE_DYNAMIC_DIM0_FIELDS = ("cu_seqlens",)
+
+# Block-table style fields whose 0/1 dims are batch / num_blocks.
+_DYNAMIC_DIM01_FIELDS = (
+    "kv_cache_block_id_host",
+    "kv_cache_block_id_device",
+    "kv_cache_kernel_block_id_host",
+    "kv_cache_kernel_block_id_device",
+    "pool_block_tables",
+    "pool_write_slot_mappings",
+)
+
+
+def graphfx_fusion_enabled() -> bool:
+    return env_flag("QWEN35_GRAPHFX_FUSION")
+
+
+def _debug_enabled() -> bool:
+    return env_flag("QWEN35_FUSION_REGISTRY_DEBUG")
+
+
+def _mark_dynamic_dim0(value: Any) -> None:
+    try:
+        import torch
+
+        if isinstance(value, torch.Tensor) and value.dim() > 0:
+            torch._dynamo.mark_dynamic(value, 0)
+    except Exception:
+        return
+
+
+def _mark_dynamic_dim(value: Any, dim: int) -> None:
+    try:
+        import torch
+
+        if isinstance(value, torch.Tensor) and value.dim() > dim:
+            torch._dynamo.mark_dynamic(value, dim)
+    except Exception:
+        return
+
+
+def _maybe_mark_dynamic_dim0(value: Any) -> None:
+    try:
+        import torch
+
+        if isinstance(value, torch.Tensor) and value.dim() > 0:
+            maybe_mark_dynamic = getattr(torch._dynamo, "maybe_mark_dynamic", None)
+            if maybe_mark_dynamic is not None:
+                maybe_mark_dynamic(value, 0)
+    except Exception:
+        return
+
+
+def _mark_dynamic_dim01(value: Any) -> None:
+    _mark_dynamic_dim(value, 0)
+    _mark_dynamic_dim(value, 1)
+
+
+def _mark_request_tensor_dims(value: Any) -> None:
+    _mark_dynamic_dim(value, 0)
+    _mark_dynamic_dim(value, 1)
+
+
+def _mark_dynamic_inputs(args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+    candidates = list(args)
+    if "inputs" in kwargs:
+        candidates.append(kwargs["inputs"])
+    for candidate in candidates:
+        _mark_request_tensor_dims(candidate)
+        for field in _DYNAMIC_DIM0_FIELDS:
+            _mark_dynamic_dim0(getattr(candidate, field, None))
+        for field in _DYNAMIC_DIM01_FIELDS:
+            value = getattr(candidate, field, None)
+            if isinstance(value, dict):
+                for item in value.values():
+                    _mark_dynamic_dim01(item)
+            else:
+                _mark_dynamic_dim01(value)
+        for field in _MAYBE_DYNAMIC_DIM0_FIELDS:
+            _maybe_mark_dynamic_dim0(getattr(candidate, field, None))
+        attn = getattr(candidate, "attention_inputs", None)
+        if attn is not None:
+            for field in _DYNAMIC_DIM0_FIELDS:
+                _mark_dynamic_dim0(getattr(attn, field, None))
+            for field in _DYNAMIC_DIM01_FIELDS:
+                value = getattr(attn, field, None)
+                if isinstance(value, dict):
+                    for item in value.values():
+                        _mark_dynamic_dim01(item)
+                else:
+                    _mark_dynamic_dim01(value)
+            for field in _MAYBE_DYNAMIC_DIM0_FIELDS:
+                _maybe_mark_dynamic_dim0(getattr(attn, field, None))
+
+
+def _compile_callable(owner: Any, attr_name: str, label: str) -> bool:
+    owner_marker = f"_qwen35_graphfx_{attr_name}_compiled"
+    if getattr(owner, owner_marker, False):
+        return False
+    fn = getattr(owner, attr_name, None)
+    if fn is None or not callable(fn):
+        return False
+    if getattr(fn, _CALLABLE_MARKER, False):
+        return False
+
+    compiled = compile_with_qwen35_fusions(
+        fn,
+        label=label,
+        dynamic=True,
+        fullgraph=False,
+    )
+
+    def wrapped(*args: Any, **kwargs: Any):
+        _mark_dynamic_inputs(args, kwargs)
+        return compiled(*args, **kwargs)
+
+    try:
+        setattr(wrapped, _CALLABLE_MARKER, True)
+        setattr(wrapped, "_qwen35_graphfx_label", label)
+        setattr(wrapped, "_qwen35_graphfx_compiled_callable", compiled)
+    except Exception:
+        pass
+    setattr(owner, f"_qwen35_graphfx_original_{attr_name}", fn)
+    setattr(owner, attr_name, wrapped)
+    setattr(owner, owner_marker, True)
+    logger.info("QWEN35 GraphFX compile installed: %s dynamic=True", label)
+    return True
+
+
+def maybe_install_qwen35_graphfx_fusions(py_model: Any) -> bool:
+    """Install the QWEN35 FX backend on the framework-visible model forward.
+
+    Compatible with ``Qwen3NextModel`` / ``Qwen3NextMTPModel`` /
+    ``GenericMoeModel`` (all expose ``forward(inputs, fmha_impl)``).  Returns
+    True iff the wrap actually happened.
+    """
+    if not graphfx_fusion_enabled():
+        return False
+    setup_qwen35_fusion_file_logger()
+    ensure_qwen35_fusions_registered()
+
+    if py_model is None:
+        return False
+    forward = getattr(py_model, "forward", None)
+    if forward is None or not callable(forward):
+        logger.warning(
+            "QWEN35 GraphFX enabled but py_model has no callable forward: %s",
+            type(py_model).__name__,
+        )
+        return False
+
+    label = f"{type(py_model).__name__}.forward"
+    installed = int(_compile_callable(py_model, "forward", label))
+
+    if _debug_enabled():
+        logger.info(
+            "QWEN35 GraphFX injector: installed=%d compile_boundary=%s passes=%s",
+            installed,
+            label if installed else "<none>",
+            [
+                {"name": item.name, "env_gate": item.env_gate}
+                for item in registered_qwen35_fusion_passes()
+            ],
+        )
+    else:
+        logger.info("QWEN35 GraphFX injector installed=%d", installed)
+    return installed > 0
