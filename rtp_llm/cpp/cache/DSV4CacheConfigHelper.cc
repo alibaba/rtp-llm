@@ -129,28 +129,28 @@ std::vector<DSV4PoolDesc> buildDSV4PoolDescs(const DSV4LayerSets& sets,
          kDsv4KernelTokensPerBlock,
          DataType::TYPE_FP32,
          false,
-         fixed_pool_blocks},
+         0},
         {KVCacheRegionName::CSA_STATE,
          &sets.csa_layers,
          csa_state_dim * 2,
          kDsv4KernelTokensPerBlock,
          DataType::TYPE_FP32,
          false,
-         fixed_pool_blocks},
+         0},
         {KVCacheRegionName::HCA_STATE,
          &sets.hca_layers,
          hca_state_dim * 2,
          kDsv4KernelTokensPerBlock,
          DataType::TYPE_FP32,
          false,
-         fixed_pool_blocks},
+         0},
         {KVCacheRegionName::SWA_KV,
          &sets.all_layers,
          kv_entry_bytes,
          kDsv4KernelTokensPerBlock,
          DataType::TYPE_UINT8,
          false,
-         fixed_pool_blocks},
+         0},
     };
 }
 
@@ -187,8 +187,6 @@ void DSV4CacheConfigHelper::applyConfig(CacheConfig&         config,
                      model_config.attn_config.layer_compress_ratios.size());
 
     const uint32_t fixed_pool_blocks = kv_cache_config.dsv4_fixed_pool_blocks;
-    RTP_LLM_CHECK_WITH_INFO(
-        fixed_pool_blocks > 0, "kv_cache_config.dsv4_fixed_pool_blocks must be > 0, got %u", fixed_pool_blocks);
 
     // Honor user-supplied --seq_size_per_block when it's a positive multiple of
     // the kernel block size; otherwise fall back to the kernel block size. Paged

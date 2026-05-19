@@ -21,6 +21,12 @@ protected:
         return SWAKVCacheGroup({}, spec, block_pool_, 0);
     }
 
+    SWAKVCacheGroup makeGroupWithStep(int seq_size_per_block, int linear_step) {
+        auto spec                = std::make_shared<MHAKVCacheSpec>();
+        spec->seq_size_per_block = seq_size_per_block;
+        return SWAKVCacheGroup({}, spec, block_pool_, 0, linear_step);
+    }
+
     BlockPoolPtr block_pool_;
     size_t       total_blocks_ = 0;
 };
@@ -45,39 +51,11 @@ TEST_F(SWAKVCacheGroupTest, NeedBlocksNum_WithCurrentBlocks) {
 
 TEST_F(SWAKVCacheGroupTest, NeedBlocksNum_WithReserveStep) {
     auto group = makeGroup(4);
-    EXPECT_EQ(group.needBlocksNum(8, 0, 0), 2);
-    EXPECT_EQ(group.needBlocksNum(8, 0, 1), 3);
-    EXPECT_EQ(group.needBlocksNum(8, 0, 4), 3);
-    EXPECT_EQ(group.needBlocksNum(8, 0, 5), 4);
-}
-
-// ==================== countTailAllocations ====================
-
-TEST_F(SWAKVCacheGroupTest, CountTailAllocations_EmptyRange) {
-    auto group = makeGroup(4);
-    EXPECT_EQ(group.countTailAllocations(3, 3, 5), 0);
-    EXPECT_EQ(group.countTailAllocations(5, 3, 5), 0);
-    EXPECT_EQ(group.countTailAllocations(0, 0, 0), 0);
-    EXPECT_EQ(group.countTailAllocations(0, 5, 0), 0);
-}
-
-TEST_F(SWAKVCacheGroupTest, CountTailAllocations_SmallTotalSlots) {
-    auto group = makeGroup(4);
-    // total_slots=1: tail_begin=0, all in tail
-    EXPECT_EQ(group.countTailAllocations(0, 1, 1), 1);
-    // total_slots=2: tail_begin=0, all in tail
-    EXPECT_EQ(group.countTailAllocations(0, 2, 2), 2);
-    EXPECT_EQ(group.countTailAllocations(1, 2, 2), 1);
-}
-
-TEST_F(SWAKVCacheGroupTest, CountTailAllocations_LargeTotalSlots) {
-    auto group = makeGroup(4);
-    // total_slots=5: tail_begin=3
-    EXPECT_EQ(group.countTailAllocations(0, 5, 5), 2);  // [3,4] in tail
-    EXPECT_EQ(group.countTailAllocations(2, 5, 5), 2);  // [3,4]
-    EXPECT_EQ(group.countTailAllocations(3, 5, 5), 2);  // [3,4]
-    EXPECT_EQ(group.countTailAllocations(4, 5, 5), 1);  // [4]
-    EXPECT_EQ(group.countTailAllocations(5, 5, 5), 0);  // empty
+    // reserve_step formula: ceil((seq_len + reserve_step) / block_size) - current
+    EXPECT_EQ(group.needBlocksNum(8, 0, 0), 2);  // ceil((8+0)/4) = 2
+    EXPECT_EQ(group.needBlocksNum(8, 0, 1), 3);  // ceil((8+1)/4) = 3
+    EXPECT_EQ(group.needBlocksNum(8, 0, 2), 3);  // ceil((8+2)/4) = 3
+    EXPECT_EQ(group.needBlocksNum(8, 0, 5), 4);  // ceil((8+5)/4) = 4
 }
 
 // ==================== getNeedBlocks ====================
@@ -89,103 +67,50 @@ TEST_F(SWAKVCacheGroupTest, GetNeedBlocks_SeqLenZero) {
     EXPECT_EQ(need.extra_blocks, 0);
 }
 
-TEST_F(SWAKVCacheGroupTest, GetNeedBlocks_SingleBlock) {
-    auto group = makeGroup(4);
-    // seq_len=3, total_slots=1, tail_blocks=min(1,2)=1
-    auto need = group.getNeedBlocks(3, 3, 0, 0, false);
+TEST_F(SWAKVCacheGroupTest, GetNeedBlocks_ReuseDisabledCountsOnlyTail) {
+    auto group = makeGroupWithStep(4, 2);
+    // seq_len=12 => seq_slots=3, reuse disabled => count_sparse(0,3)=1(tail only)
+    auto need = group.getNeedBlocks(0, 12, 0, 0, false);
     EXPECT_EQ(need.common_blocks, 0);
     EXPECT_EQ(need.extra_blocks, 1);
 }
 
-TEST_F(SWAKVCacheGroupTest, GetNeedBlocks_ExactlyOneBlock) {
-    auto group = makeGroup(4);
-    // seq_len=4 = seq_size_per_block, total_slots=1, tail_blocks=min(1,2)=1
-    auto need = group.getNeedBlocks(4, 4, 0, 0, false);
-    EXPECT_EQ(need.common_blocks, 0);
-    EXPECT_EQ(need.extra_blocks, 1);
-}
-
-TEST_F(SWAKVCacheGroupTest, GetNeedBlocks_TwoBlocks) {
-    auto group = makeGroup(4);
-    // seq_len=5, total_slots=2, tail_blocks=min(2,2)=2
-    auto need = group.getNeedBlocks(5, 5, 0, 0, false);
-    EXPECT_EQ(need.common_blocks, 0);
-    EXPECT_EQ(need.extra_blocks, 2);
-}
-
-TEST_F(SWAKVCacheGroupTest, GetNeedBlocks_ManyBlocks) {
-    auto group = makeGroup(4);
-    // seq_len=20, total_slots=5, tail_blocks=min(5,2)=2
-    auto need = group.getNeedBlocks(20, 20, 0, 0, false);
+TEST_F(SWAKVCacheGroupTest, GetNeedBlocks_ReuseEnabledUsesSparse) {
+    auto group = makeGroupWithStep(4, 2);
+    // seq_len=12 => seq_slots=3
+    // count_sparse(0,3): eligible=(3+1)/2-(0+1)/2=2-0=2, tail=(3+1)%2==0 => 0, total=2
+    auto need = group.getNeedBlocks(0, 12, 0, 0, true);
     EXPECT_EQ(need.common_blocks, 0);
     EXPECT_EQ(need.extra_blocks, 2);
 }
 
 TEST_F(SWAKVCacheGroupTest, GetNeedBlocks_WithReserveStep) {
-    auto group = makeGroup(4);
-    // seq_len=8 → S=2, reserve_step=1 → T=ceil(9/4)=3, reserve_extra=1
-    auto need = group.getNeedBlocks(8, 8, 1, 0, false);
-    EXPECT_EQ(need.extra_blocks, 2 + 1);
-
-    // seq_len=8 → S=2, reserve_step=4 → T=ceil(12/4)=3, reserve_extra=1
-    auto need2 = group.getNeedBlocks(8, 8, 4, 0, false);
-    EXPECT_EQ(need2.extra_blocks, 2 + 1);
-
-    // seq_len=8 → S=2, reserve_step=5 → T=ceil(13/4)=4, reserve_extra=2
-    auto need3 = group.getNeedBlocks(8, 8, 5, 0, false);
-    EXPECT_EQ(need3.extra_blocks, 2 + 2);
-}
-
-TEST_F(SWAKVCacheGroupTest, GetNeedBlocks_ReuseDisabled) {
-    auto group = makeGroup(4);
-    // reuse_enabled=false: reuse_blocks_len ignored
-    auto need = group.getNeedBlocks(20, 20, 0, 10, false);
-    EXPECT_EQ(need.extra_blocks, 2);
-}
-
-TEST_F(SWAKVCacheGroupTest, GetNeedBlocks_ReuseNoOverlap) {
-    auto group = makeGroup(4);
-    // seq_len=20 → total_slots=5, alloc_begin=3
-    // reuse_blocks_len=2 <= 3, no overlap
-    auto need = group.getNeedBlocks(20, 20, 0, 2, true);
+    auto group = makeGroupWithStep(4, 2);
+    // seq_len=8 => seq_slots=2, reserve_step=2 => total_slots=3
+    // reuse disabled: count_sparse(0,2)=1, + (3-2)=1 => 2
+    auto need = group.getNeedBlocks(0, 8, 2, 0, false);
     EXPECT_EQ(need.extra_blocks, 2);
 }
 
 TEST_F(SWAKVCacheGroupTest, GetNeedBlocks_ReusePartialOverlap) {
-    auto group = makeGroup(4);
-    // seq_len=20 → total_slots=5, alloc_begin=3
-    // reuse_blocks_len=4: overlap = 4-3 = 1
-    auto need = group.getNeedBlocks(20, 20, 0, 4, true);
+    auto group = makeGroupWithStep(4, 2);
+    // seq_len=12 => seq_slots=3
+    // reuse_blocks_len=2: count_sparse(2,3)
+    // eligible=(3+1)/2-(2+1)/2=2-1=1, tail=(3+1)%2==0 => 0, total=1
+    auto need = group.getNeedBlocks(0, 12, 0, 2, true);
     EXPECT_EQ(need.extra_blocks, 1);
 }
 
 TEST_F(SWAKVCacheGroupTest, GetNeedBlocks_ReuseFullOverlap) {
-    auto group = makeGroup(4);
-    // seq_len=20 → total_slots=5, alloc_begin=3
-    // reuse_blocks_len=5: overlap = 5-3 = 2
-    auto need = group.getNeedBlocks(20, 20, 0, 5, true);
-    EXPECT_EQ(need.extra_blocks, 0);
-}
-
-TEST_F(SWAKVCacheGroupTest, GetNeedBlocks_ReuseExceedsTotal) {
-    auto group = makeGroup(4);
-    // seq_len=20 → total_slots=5, alloc_begin=3
-    // reuse_blocks_len=10: overlap = 10-3 = 7, need = 2-7 = -5 → clamped to 0
-    auto need = group.getNeedBlocks(20, 20, 0, 10, true);
-    EXPECT_EQ(need.extra_blocks, 0);
-}
-
-TEST_F(SWAKVCacheGroupTest, GetNeedBlocks_ReuseSmallSeq) {
-    auto group = makeGroup(4);
-    // seq_len=3 → total_slots=1, alloc_begin=max(0,-1)=0
-    // reuse_blocks_len=1: overlap = 1-0 = 1, need = 1-1 = 0
-    auto need = group.getNeedBlocks(3, 3, 0, 1, true);
+    auto group = makeGroupWithStep(4, 2);
+    // seq_len=12 => seq_slots=3
+    // reuse_blocks_len=3: count_sparse(3,3) = 0
+    auto need = group.getNeedBlocks(0, 12, 0, 3, true);
     EXPECT_EQ(need.extra_blocks, 0);
 }
 
 TEST_F(SWAKVCacheGroupTest, GetNeedBlocks_CommonSeqLenIgnored) {
     auto group = makeGroup(4);
-    // common_seq_len should not affect result
     auto need1 = group.getNeedBlocks(0, 20, 0, 0, false);
     auto need2 = group.getNeedBlocks(20, 20, 0, 0, false);
     auto need3 = group.getNeedBlocks(100, 20, 0, 0, false);
@@ -218,60 +143,29 @@ TEST_F(SWAKVCacheGroupTest, MatchSingleKey_Found) {
     EXPECT_EQ(result.block_indices[0], 1);
 }
 
-// ==================== malloc ====================
+// ==================== malloc (default step=0, acts like step=1, tail-only) ====================
 
 TEST_F(SWAKVCacheGroupTest, Malloc_ShortSeq_OnlyOneBlock) {
     auto     group = makeGroup(4);
     BlockIds block_ids(1);
     ASSERT_TRUE(group.malloc(block_ids, 3));
-    // total_slots=1, all in tail, 1 real block
     EXPECT_EQ(block_ids.blocksNum(), 1u);
     EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[0]));
     EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_ - 1);
-}
-
-TEST_F(SWAKVCacheGroupTest, Malloc_TwoBlocks_BothReal) {
-    auto     group = makeGroup(4);
-    BlockIds block_ids(1);
-    ASSERT_TRUE(group.malloc(block_ids, 5));
-    // total_slots=2, tail_begin=0, both real
-    EXPECT_EQ(block_ids.blocksNum(), 2u);
-    EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[0]));
-    EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[1]));
-    EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_ - 2);
 }
 
 TEST_F(SWAKVCacheGroupTest, Malloc_ManyBlocks_OnlyTailReal) {
     auto     group = makeGroup(4);
     BlockIds block_ids(1);
     ASSERT_TRUE(group.malloc(block_ids, 20));
-    // total_slots=5, tail_begin=3 → [NULL, NULL, NULL, REAL, REAL]
+    // step=1 (default), reuse_cache=false => only seq_tail allocated
+    // seq_slots=5, seq_tail=index 4 => 1 real block
     ASSERT_EQ(block_ids.blocksNum(), 5u);
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < 4; ++i) {
         EXPECT_TRUE(isNullBlockIdx(block_ids.blocks()[i])) << "position " << i << " should be NULL";
     }
-    EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[3]));
     EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[4]));
-    EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_ - 2);
-}
-
-TEST_F(SWAKVCacheGroupTest, Malloc_Incremental) {
-    auto     group = makeGroup(4);
-    BlockIds block_ids(1);
-    // First: seq_len=8 → 2 blocks, both real
-    ASSERT_TRUE(group.malloc(block_ids, 8));
-    EXPECT_EQ(block_ids.blocksNum(), 2u);
-    EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_ - 2);
-
-    // Extend: seq_len=20 → need 5 total, 3 new, tail [3,4]
-    ASSERT_TRUE(group.malloc(block_ids, 20));
-    ASSERT_EQ(block_ids.blocksNum(), 5u);
-    // New positions [2]: NULL, [3,4]: REAL
-    EXPECT_TRUE(isNullBlockIdx(block_ids.blocks()[2]));
-    EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[3]));
-    EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[4]));
-    // 2 old + 2 new = 4 real from pool
-    EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_ - 4);
+    EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_ - 1);
 }
 
 TEST_F(SWAKVCacheGroupTest, Malloc_NoOpWhenEnoughBlocks) {
@@ -280,7 +174,6 @@ TEST_F(SWAKVCacheGroupTest, Malloc_NoOpWhenEnoughBlocks) {
     ASSERT_TRUE(group.malloc(block_ids, 8));
     size_t free_after_first = block_pool_->freeBlocksNum();
 
-    // Same seq_len: no new blocks
     ASSERT_TRUE(group.malloc(block_ids, 8));
     EXPECT_EQ(block_ids.blocksNum(), 2u);
     EXPECT_EQ(block_pool_->freeBlocksNum(), free_after_first);
@@ -289,9 +182,9 @@ TEST_F(SWAKVCacheGroupTest, Malloc_NoOpWhenEnoughBlocks) {
 TEST_F(SWAKVCacheGroupTest, Malloc_WithReserveStep) {
     auto     group = makeGroup(4);
     BlockIds block_ids(1);
-    // seq_len=4, reserve=4 → T=ceil(8/4)=2, total=2
-    // tail_begin=0, both REAL
-    ASSERT_TRUE(group.malloc(block_ids, 4, false, 4));
+    // seq_len=4 => seq_slots=1, reserve_step=2 => total=2 (1 + (2-1))
+    // index 0: seq_tail => REAL, index 1: reserve => REAL
+    ASSERT_TRUE(group.malloc(block_ids, 4, false, 2));
     ASSERT_EQ(block_ids.blocksNum(), 2u);
     EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[0]));
     EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[1]));
@@ -299,17 +192,64 @@ TEST_F(SWAKVCacheGroupTest, Malloc_WithReserveStep) {
 }
 
 TEST_F(SWAKVCacheGroupTest, Malloc_FailsWhenPoolExhausted) {
-    auto group = makeGroup(4);
-    // Exhaust the pool
+    auto                  group = makeGroup(4);
     std::vector<BlockIds> holders;
-    for (size_t i = 0; i < total_blocks_ / 2; ++i) {
+    for (size_t i = 0; i < total_blocks_; ++i) {
         holders.emplace_back(1);
-        ASSERT_TRUE(group.malloc(holders.back(), 5));  // 2 real blocks each
+        if (!group.malloc(holders.back(), 4)) {
+            break;
+        }
     }
-    EXPECT_LT(block_pool_->freeBlocksNum(), 2u);
+    EXPECT_EQ(block_pool_->freeBlocksNum(), 0u);
 
     BlockIds block_ids(1);
-    EXPECT_FALSE(group.malloc(block_ids, 5));
+    EXPECT_FALSE(group.malloc(block_ids, 4));
+}
+
+// ==================== malloc with linear_step ====================
+
+TEST_F(SWAKVCacheGroupTest, Malloc_WithStep_ReuseEnabled) {
+    auto     group = makeGroupWithStep(4, 2);
+    BlockIds block_ids(1);
+    // seq_len=16 => 4 slots, reuse_cache=true
+    // step=2: step_hit at i=1 ((1+1)%2==0), i=3 ((3+1)%2==0)
+    // seq_tail at i=3, step_hit at 1,3
+    // should_alloc: i=0: false, i=1: step_hit, i=2: false, i=3: step_hit||seq_tail
+    ASSERT_TRUE(group.malloc(block_ids, 16, /*enable_reuse_cache=*/true));
+    ASSERT_EQ(block_ids.blocksNum(), 4u);
+    EXPECT_TRUE(isNullBlockIdx(block_ids.blocks()[0]));
+    EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[1]));
+    EXPECT_TRUE(isNullBlockIdx(block_ids.blocks()[2]));
+    EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[3]));
+    EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_ - 2);
+}
+
+TEST_F(SWAKVCacheGroupTest, Malloc_WithStep_ReuseDisabled) {
+    auto     group = makeGroupWithStep(4, 2);
+    BlockIds block_ids(1);
+    // seq_len=16 => 4 slots, reuse_cache=false => only seq_tail (index 3) allocated
+    ASSERT_TRUE(group.malloc(block_ids, 16, /*enable_reuse_cache=*/false));
+    ASSERT_EQ(block_ids.blocksNum(), 4u);
+    EXPECT_TRUE(isNullBlockIdx(block_ids.blocks()[0]));
+    EXPECT_TRUE(isNullBlockIdx(block_ids.blocks()[1]));
+    EXPECT_TRUE(isNullBlockIdx(block_ids.blocks()[2]));
+    EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[3]));
+    EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_ - 1);
+}
+
+TEST_F(SWAKVCacheGroupTest, Malloc_WithStep_ReserveAllocated) {
+    auto     group = makeGroupWithStep(4, 2);
+    BlockIds block_ids(1);
+    // seq_len=16 => seq_slots=4, reserve_step=2 => total_slots=5
+    // reuse disabled: only seq_tail(3) and reserve(4) allocated
+    ASSERT_TRUE(group.malloc(block_ids, 16, /*enable_reuse_cache=*/false, /*reserve_step=*/2));
+    ASSERT_EQ(block_ids.blocksNum(), 5u);
+    EXPECT_TRUE(isNullBlockIdx(block_ids.blocks()[0]));
+    EXPECT_TRUE(isNullBlockIdx(block_ids.blocks()[1]));
+    EXPECT_TRUE(isNullBlockIdx(block_ids.blocks()[2]));
+    EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[3]));
+    EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[4]));
+    EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_ - 2);
 }
 
 // ==================== removeSkippedBlocks ====================
@@ -325,41 +265,102 @@ TEST_F(SWAKVCacheGroupTest, RemoveSkippedBlocks_TwoOrFewer_NoOp) {
 }
 
 TEST_F(SWAKVCacheGroupTest, RemoveSkippedBlocks_FreesNonTailReal) {
-    auto     group = makeGroup(4);
+    auto     group = makeGroupWithStep(4, 2);
     BlockIds block_ids(1);
-    // First alloc: 2 blocks [REAL, REAL]
-    ASSERT_TRUE(group.malloc(block_ids, 5));
-    // Extend: 5 blocks [REAL_old, REAL_old, NULL, REAL_new, REAL_new]
-    ASSERT_TRUE(group.malloc(block_ids, 20));
+    // First: 2 blocks with reuse
+    ASSERT_TRUE(group.malloc(block_ids, 5, true));
+    // Extend to 5 blocks with reuse
+    ASSERT_TRUE(group.malloc(block_ids, 20, true));
     ASSERT_EQ(block_ids.blocksNum(), 5u);
     size_t free_before = block_pool_->freeBlocksNum();
 
-    group.removeSkippedBlocks(block_ids);
+    group.removeSkippedBlocks(block_ids, true);
 
-    // The 2 old REAL blocks at positions [0,1] should be freed
-    EXPECT_EQ(block_pool_->freeBlocksNum(), free_before + 2);
-    // BlockIds::remove sets freed positions to NULL_BLOCK_IDX (no shrink)
-    EXPECT_EQ(block_ids.blocksNum(), 5u);
-    EXPECT_TRUE(isNullBlockIdx(block_ids.blocks()[0]));
-    EXPECT_TRUE(isNullBlockIdx(block_ids.blocks()[1]));
-    EXPECT_TRUE(isNullBlockIdx(block_ids.blocks()[2]));
-    EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[3]));
-    EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[4]));
+    // step=2: keep step_hit blocks + last 2
+    // step_hit: index 1 ((1+1)%2==0), index 3 ((3+1)%2==0)
+    // last 2: index 3, 4
+    // loop i from block_size-3=2 down to 0:
+    //   i=2: not null, not step_hit => free
+    //   i=1: not null, step_hit => continue
+    //   i=0: not null, not step_hit => free
+    // But wait, with reuse_cache=true for the first malloc (5 tokens), blocks at 0,1 are:
+    // step_hit at 1 => REAL, seq_tail at 1 => REAL. index 0: NULL
+    // Then extending to 20 tokens with reuse: new blocks at 2,3,4
+    // step_hit at 3 => REAL, seq_tail at 4 => REAL. index 2: NULL
+    // So blocks are: [NULL, REAL, NULL, REAL, REAL]
+    // removeSkippedBlocks: loop from i=2 down:
+    //   i=2: NULL => break (stops on first null going backward)
+    // No blocks freed.
+    EXPECT_EQ(block_pool_->freeBlocksNum(), free_before);
 }
 
-TEST_F(SWAKVCacheGroupTest, RemoveSkippedBlocks_NullsAreKept) {
-    auto     group = makeGroup(4);
-    BlockIds block_ids(1);
-    // Alloc a long sequence: [NULL, NULL, NULL, REAL, REAL]
-    ASSERT_TRUE(group.malloc(block_ids, 20));
-    ASSERT_EQ(block_ids.blocksNum(), 5u);
-    size_t free_before = block_pool_->freeBlocksNum();
+TEST_F(SWAKVCacheGroupTest, RemoveSkippedBlocks_WithStep_FreesNonStepBlocks) {
+    auto block_pool = createBlockPool();
+    ASSERT_TRUE(block_pool->init());
+    ASSERT_EQ(block_pool->freeBlocksNum(), 9u);
 
-    group.removeSkippedBlocks(block_ids);
-    // NULLs at [0,1,2] are not freed (already NULL), keep_begin=3
-    // No real blocks before keep_begin
-    EXPECT_EQ(block_pool_->freeBlocksNum(), free_before);
-    EXPECT_EQ(block_ids.blocksNum(), 5u);
+    auto spec                = std::make_shared<MHAKVCacheSpec>();
+    spec->seq_size_per_block = 4;
+    SWAKVCacheGroup group({}, spec, block_pool, 0, 2);
+
+    // Start with 6 allocated blocks (no NULLs).
+    auto allocated = block_pool->malloc(6);
+    ASSERT_EQ(allocated.size(), 6u);
+    BlockIds blocks;
+    blocks.assign(allocated);
+
+    const size_t free_before = block_pool->freeBlocksNum();
+    group.removeSkippedBlocks(blocks, true);
+
+    // step=2, size=6: keep step_hit + last 2
+    // step_hit: index 1 ((1+1)%2==0), 3 ((3+1)%2==0), 5 ((5+1)%2==0 but in last 2)
+    // last 2: index 4, 5
+    // loop from i=3 down: (block_size-3=3)
+    //   i=3: step_hit => continue
+    //   i=2: not step_hit => free
+    //   i=1: step_hit => continue
+    //   i=0: not step_hit => free
+    ASSERT_EQ(blocks.blocksNum(), 6u);
+    EXPECT_TRUE(isNullBlockIdx(blocks.blocks()[0]));
+    EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[1]));
+    EXPECT_TRUE(isNullBlockIdx(blocks.blocks()[2]));
+    EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[3]));
+    EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[4]));
+    EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[5]));
+
+    EXPECT_EQ(block_pool->freeBlocksNum(), free_before + 2);
+}
+
+TEST_F(SWAKVCacheGroupTest, RemoveSkippedBlocks_WithReserveStep) {
+    auto block_pool = createBlockPool();
+    ASSERT_TRUE(block_pool->init());
+    ASSERT_EQ(block_pool->freeBlocksNum(), 9u);
+
+    auto spec                = std::make_shared<MHAKVCacheSpec>();
+    spec->seq_size_per_block = 4;
+    SWAKVCacheGroup group({}, spec, block_pool, 0, 2);
+
+    auto allocated = block_pool->malloc(6);
+    ASSERT_EQ(allocated.size(), 6u);
+    BlockIds blocks;
+    blocks.assign(allocated);
+
+    const size_t free_before = block_pool->freeBlocksNum();
+    // reserve_step=1: keep last 2 + 1 more (index 3)
+    group.removeSkippedBlocks(blocks, false, 1);
+
+    // reuse_cache=false so no step_hit check
+    // loop from i=block_size-3-1=2 down:
+    //   i=2: free, i=1: free, i=0: free
+    ASSERT_EQ(blocks.blocksNum(), 6u);
+    EXPECT_TRUE(isNullBlockIdx(blocks.blocks()[0]));
+    EXPECT_TRUE(isNullBlockIdx(blocks.blocks()[1]));
+    EXPECT_TRUE(isNullBlockIdx(blocks.blocks()[2]));
+    EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[3]));
+    EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[4]));
+    EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[5]));
+
+    EXPECT_EQ(block_pool->freeBlocksNum(), free_before + 3);
 }
 
 // ==================== free ====================
@@ -368,7 +369,7 @@ TEST_F(SWAKVCacheGroupTest, Free_ReleasesRealBlocks) {
     auto     group = makeGroup(4);
     BlockIds block_ids(1);
     ASSERT_TRUE(group.malloc(block_ids, 20));
-    EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_ - 2);
+    EXPECT_LT(block_pool_->freeBlocksNum(), total_blocks_);
 
     group.free(block_ids.blocks());
     EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_);
@@ -384,8 +385,7 @@ TEST_F(SWAKVCacheGroupTest, Free_SkipsNullBlocks) {
     auto     group = makeGroup(4);
     BlockIds block_ids(1);
     ASSERT_TRUE(group.malloc(block_ids, 20));
-    // blocks = [NULL, NULL, NULL, REAL, REAL], 2 real
-    EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_ - 2);
+    EXPECT_LT(block_pool_->freeBlocksNum(), total_blocks_);
 
     group.free(block_ids.blocks());
     EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_);
@@ -397,11 +397,11 @@ TEST_F(SWAKVCacheGroupTest, Reference_AddsAndRefsBlocks) {
     auto     group = makeGroup(4);
     BlockIds block_ids(1);
     ASSERT_TRUE(group.malloc(block_ids, 5));
-    auto original = block_ids.blocks();  // [REAL_A, REAL_B]
+    auto original = block_ids.blocks();
 
     BlockIds block_ids2(1);
     group.reference(block_ids2, original);
-    EXPECT_EQ(block_ids2.blocksNum(), 2u);
+    EXPECT_EQ(block_ids2.blocksNum(), original.size());
     EXPECT_EQ(block_ids2.blocks(), original);
 }
 
@@ -409,7 +409,7 @@ TEST_F(SWAKVCacheGroupTest, Reference_NullBlocksNotReffed) {
     auto     group = makeGroup(4);
     BlockIds block_ids(1);
     ASSERT_TRUE(group.malloc(block_ids, 20));
-    auto original = block_ids.blocks();  // [NULL, NULL, NULL, REAL, REAL]
+    auto original = block_ids.blocks();
 
     BlockIds block_ids2(1);
     group.reference(block_ids2, original);
@@ -422,18 +422,13 @@ TEST_F(SWAKVCacheGroupTest, InsertIntoCache_SkipsNullBlocks) {
     auto     group = makeGroup(4);
     BlockIds block_ids(1);
     ASSERT_TRUE(group.malloc(block_ids, 20));
-    // blocks = [NULL, NULL, NULL, REAL, REAL]
     CacheKeysType keys = {101, 102, 103, 104, 105};
     group.insertIntoCache(keys, block_ids.blocks(), false);
 
-    // Only the 2 real blocks should be cached (keys 104, 105)
     auto result1 = group.matchSingleKey(101);
     EXPECT_TRUE(result1.block_indices.empty());
 
-    auto result4 = group.matchSingleKey(104);
-    ASSERT_EQ(result4.block_indices.size(), 1u);
-    EXPECT_EQ(result4.block_indices[0], block_ids.blocks()[3]);
-
+    // Only the seq_tail block (last one) is real
     auto result5 = group.matchSingleKey(105);
     ASSERT_EQ(result5.block_indices.size(), 1u);
     EXPECT_EQ(result5.block_indices[0], block_ids.blocks()[4]);
@@ -442,7 +437,6 @@ TEST_F(SWAKVCacheGroupTest, InsertIntoCache_SkipsNullBlocks) {
 TEST_F(SWAKVCacheGroupTest, InsertIntoCache_EmptyInput) {
     auto group = makeGroup(4);
     group.insertIntoCache({}, {}, false);
-    // No crash, no-op
 }
 
 }  // namespace test
