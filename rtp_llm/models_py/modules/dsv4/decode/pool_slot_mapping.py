@@ -87,9 +87,13 @@ def compute_kv_pool_slot_mapping(
     max_blocks = block_table.shape[1]
     block_in_seq = block_in_seq.clamp_(0, max_blocks - 1)
 
-    # Gather block_id per token.
+    # Gather block_id per token. BlockPool uses non-positive block ids as
+    # invalid sentinels for pools whose block tables only expose the live tail
+    # (for example SWA/STATE). Those must propagate as -1, not as
+    # ``block_id * entries_per_block + in_block`` negative slots.
     flat_bt = block_table.to(torch.long)
     block_id = flat_bt[req_idx, block_in_seq]
+    skip = skip | (block_id <= 0)
     global_slot = block_id * entries_per_block + in_block
 
     return torch.where(skip, torch.full_like(global_slot, -1), global_slot)
@@ -134,5 +138,6 @@ def compute_state_pool_slot_mapping(
     safe_slot = safe_slot.clamp_(0, max_blocks - 1)
     flat_bt = block_table.to(torch.long)
     block_id = flat_bt[req_idx, safe_slot]
+    skip = skip | (block_id <= 0)
 
     return torch.where(skip, torch.full_like(block_id, -1), block_id)
