@@ -116,17 +116,6 @@ py_test(
 )
 
 py_test(
-    name = "test_bf16_compressor_cyclic_state_blocks",
-    srcs = ["test_bf16_compressor_cyclic_state_blocks.py"],
-    deps = [
-        "//rtp_llm/models_py:dsv4_fused_kernel_sources",
-        "//rtp_llm:testlib",
-    ],
-    tags = ["H20", "SM100_ARM"],
-    exec_properties = {"gpu": "H20"},
-)
-
-py_test(
     name = "test_hc_impl",
     srcs = ["test_hc_impl.py"],
     deps = [

@@ -32,13 +32,12 @@ Boundary writer source dispatch (raw vs state cache):
              passed through linear projections). Used whenever
              ``0 <= flat_idx < n_raw``.
 
-    cache — ``state_cache[block_table[req_idx,
-             (pos // block_size) % fixed_blocks_per_req], ...]``. Used for
-             ``flat_idx < 0``, i.e. positions belonging to a prefix-cache hit:
-             they were written into the cyclic state pool by a prior request,
-             and the framework reuses those physical blocks via this request's
-             ``block_table``. ``block_table`` entries that point at unused
-             blocks are 0 and filtered.
+    cache — ``state_cache[block_table[req_idx, pos // block_size], ...]``.
+             Used for ``flat_idx < 0``, i.e. positions belonging to a
+             prefix-cache hit: they were written into the state pool by a
+             prior request, and the framework reuses those physical
+             blocks via this request's ``block_table``. ``block_table``
+             entries that point at unused blocks are 0 and filtered.
 
   Decode passes ``disable_raw_path=True`` → ``n_raw == 0``, so every
   position routes through the cache branch.
@@ -239,11 +238,11 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     )
     score_from_raw = score_from_raw + ape_vals
 
-    # State-cache path: prefix-cache hit region. The state pool is cyclic with
-    # fixed_blocks_per_req physical blocks per request, matching
-    # CompressorFP8._compute_state_slot_mapping.
+    # State-cache path: prefix-cache hit region. block_table[req_idx] maps
+    # logical_block = pos // block_size to a physical state-pool block;
+    # padding/unused entries are 0 and filtered by valid_block.
     use_cache = mask_pos & ~use_raw
-    block_indices = (pos // block_size) % block_table_stride
+    block_indices = pos // block_size
     block_indices_safe = tl.where(use_cache, block_indices, 0)
     block_numbers = tl.load(
         block_table_ptr + req_idx * block_table_stride + block_indices_safe,
@@ -492,11 +491,11 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
     )
     score_from_raw = score_from_raw + ape_vals
 
-    # State-cache path: prefix-cache hit region. The state pool is cyclic with
-    # fixed_blocks_per_req physical blocks per request, matching
-    # CompressorFP8._compute_state_slot_mapping.
+    # State-cache path: prefix-cache hit region. block_table[req_idx] maps
+    # logical_block = pos // block_size to a physical state-pool block;
+    # padding/unused entries are 0 and filtered by valid_block.
     use_cache = mask_pos & ~use_raw
-    block_indices = (pos // block_size) % block_table_stride
+    block_indices = pos // block_size
     block_indices_safe = tl.where(use_cache, block_indices, 0)
     block_numbers = tl.load(
         block_table_ptr + req_idx * block_table_stride + block_indices_safe,

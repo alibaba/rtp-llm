@@ -321,70 +321,6 @@ def test_decode_vectorized() -> None:
     print("  [csa  decode]  pos=[8..11] OK (boundary at 11 only)")
 
 
-def _run_decode_long_position_cyclic_state_blocks(head_dim: int, label: str) -> None:
-    """Regression helper for long-context decode state-cache gathers.
-
-    Production state pools keep only two 256-token blocks per request and reuse
-    them cyclically. The fused boundary writer must use the same modulo mapping
-    as ``CompressorFP8._compute_state_slot_mapping`` when it gathers the prior
-    overlap window from state_cache. A direct ``pos // block_size`` block-table
-    lookup runs past the two-entry state block table once decode positions grow
-    beyond 512 tokens; affected long-context decode runs reproduced Xid 13.
-    """
-
-    torch.manual_seed(20260518)
-    rope_head_dim, ratio = 64, 4
-    coff = 1 + (ratio == 4)
-    dim = 128
-    pos = 4095  # boundary token; logical state block 15 maps to table col 1.
-
-    cmp = _build_compressor(
-        dim=dim,
-        head_dim=head_dim,
-        rope_head_dim=rope_head_dim,
-        compress_ratio=ratio,
-    )
-    state_pool_3d, kv_pool_3d, state_bt = _bind_pools(
-        cmp,
-        seqlen=pos + 1,
-        head_dim=head_dim,
-        coff=coff,
-        compress_ratio=ratio,
-    )
-
-    hidden = coff * head_dim
-    window_start = pos - coff * ratio + 1
-    for p in range(window_start, pos):
-        block_col = (p // TOKENS_PER_STATE_BLOCK) % state_bt.shape[1]
-        block_id = int(state_bt[0, block_col].item())
-        in_block = p % TOKENS_PER_STATE_BLOCK
-        state_pool_3d[block_id, in_block, :hidden].fill_(0.25)
-        state_pool_3d[block_id, in_block, hidden:].zero_()
-
-    x = torch.randn(1, 1, dim, dtype=torch.bfloat16, device=DEVICE) * 0.1
-    sp = torch.tensor([pos], dtype=torch.int64, device=DEVICE)
-    position_ids = torch.tensor([[pos]], dtype=torch.int64, device=DEVICE)
-    cmp.forward_decode_vectorized(x, sp, position_ids=position_ids)
-    torch.cuda.synchronize()
-
-    kv_eb = TOKENS_PER_STATE_BLOCK // ratio
-    cp = pos // ratio
-    block_id = 1 + (cp // kv_eb)
-    in_block = cp % kv_eb
-    assert kv_pool_3d[block_id, in_block].any().item(), (
-        f"long-position {label} decode did not write the expected cyclic KV slot"
-    )
-    print(f"  [{label} decode] long-position cyclic state block lookup OK")
-
-
-def test_indexer_decode_long_position_uses_cyclic_state_blocks() -> None:
-    _run_decode_long_position_cyclic_state_blocks(INDEXER_HEAD_DIM, "idx")
-
-
-def test_csa_decode_long_position_uses_cyclic_state_blocks() -> None:
-    _run_decode_long_position_cyclic_state_blocks(KV_HEAD_DIM, "csa")
-
-
 def test_prepared_metadata_path() -> None:
     """Caller-prepared CompressorMeta must produce identical pool state to
     the in-body fallback path."""
@@ -573,8 +509,6 @@ if __name__ == "__main__":
     test_csa_per_token()
     test_indexer_per_token()
     test_decode_vectorized()
-    test_indexer_decode_long_position_uses_cyclic_state_blocks()
-    test_csa_decode_long_position_uses_cyclic_state_blocks()
     test_prepared_metadata_path()
     test_decode_strided_kv_score_matches_contiguous_path()
     test_state_pool_clear_pool_context()

@@ -193,10 +193,11 @@ def _fused_kv_compress_norm_rope_insert_bf16(
     )
     score_from_raw = score_from_raw + ape_vals
 
-    # State-cache path. The state pool is cyclic with fixed_blocks_per_req
-    # physical blocks per request, matching the Python-side state slot mapping.
+    # State-cache path. block_table covers all logical blocks of the
+    # request; cyclic blocks past fixed_blocks_per_req hold sentinel ids
+    # (==0). The valid_block check filters those.
     use_cache = mask_pos & ~use_raw
-    block_indices = (pos // block_size) % block_table_stride
+    block_indices = pos // block_size
     block_indices_safe = tl.where(use_cache, block_indices, 0)
     block_numbers = tl.load(
         block_table_ptr + req_idx * block_table_stride + block_indices_safe,
@@ -340,7 +341,7 @@ def _fused_kv_compress_norm_rope_insert_bf16_ratio128_tile(
     score_from_raw = score_from_raw + ape_vals
 
     use_cache = mask_pos & ~in_batch
-    block_indices = (pos // block_size) % block_table_stride
+    block_indices = pos // block_size
     block_indices_safe = tl.where(use_cache, block_indices, 0)
     block_numbers = tl.load(
         block_table_ptr + req_idx * block_table_stride + block_indices_safe,
