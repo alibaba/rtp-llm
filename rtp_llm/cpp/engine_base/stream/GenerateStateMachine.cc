@@ -67,16 +67,19 @@ void GenerateStateMachine::handleWaiting() {
         return;
     }
 
-    // Prefill 角色在 LoadInitiated 后不需要 incrKVBlock。
-    // Prefill 端只需要一次 initKVBlock 分配所有 block，如果调用 incrKVBlock
-    // 会导致 cache manager 对不完整的最后一个 block 执行 pop_back，
-    // 破坏已分配的 block 结构。
-    if (stream_cache_resource_->resourceContext().role_type == RoleType::PREFILL) {
+    // A PREFILL role normally runs only the context pass, so it must not call
+    // incrKVBlock while the stream is still a context stream. With PD fallback,
+    // the same role can continue into decode after GenerateStream::update()
+    // flips isContextStream() to false; from that point block tables must grow
+    // exactly like a decode stream.
+    if (stream_cache_resource_->resourceContext().role_type == RoleType::PREFILL
+        && stream_cache_resource_->isContextStream()) {
         status.store(StreamState::RUNNING, std::memory_order_release);
         return;
     }
 
-    // 绕过incrKVBlock at prefill
+    // Decode streams, including PREFILL-role streams after fallback, must keep
+    // cache block tables aligned with the growing sequence length.
     auto result = stream_cache_resource_->incrKVBlock(reserve_step_);
     if (!result.ok()) {
         error_info = ErrorInfo(ErrorCode::MALLOC_FAILED, "LACK MEM");
@@ -101,7 +104,8 @@ void GenerateStateMachine::handleRunning() {
         releaseResource();
         return;
     }
-    if (stream_cache_resource_->resourceContext().role_type == RoleType::PREFILL) {
+    if (stream_cache_resource_->resourceContext().role_type == RoleType::PREFILL
+        && stream_cache_resource_->isContextStream()) {
         return;
     }
     auto result = stream_cache_resource_->incrKVBlock(reserve_step_);
