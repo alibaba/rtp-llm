@@ -61,3 +61,16 @@ py_test(
     visibility = ["//visibility:public"],
     exec_properties = {'gpu':'H20'},
 )
+
+py_test(
+    name = "test_flashinfer_gdn_consistency",
+    srcs = [
+        "test_flashinfer_gdn_consistency.py"
+    ],
+    deps = [
+        "//rtp_llm/models_py/triton_kernels:fla",
+        "//rtp_llm:flashinfer-python",
+    ] + [":triton", ":torch", ":packaging"],
+    visibility = ["//visibility:public"],
+    exec_properties = {'gpu':'B300'},
+)

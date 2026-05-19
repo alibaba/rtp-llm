@@ -35,6 +35,7 @@ from rtp_llm.models_py.triton_kernels.fla.blackwell_prefill import (
     chunk_gated_delta_rule as blackwell_chunk_gated_delta_rule,
 )
 from rtp_llm.models_py.triton_kernels.fla.block import (
+    compute_state_indices_from_block_map,
     load_initial_state_from_block_map,
     store_final_state_only_to_block_map,
     store_ssm_state_to_block_map,
@@ -44,6 +45,14 @@ from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
     fused_recurrent_gated_delta_rule,
 )
 from rtp_llm.models_py.triton_kernels.fla.gdn_gating import fused_gdn_gating
+
+try:
+    from flashinfer.gdn_kernels.gdn_decode_bf16_state import (
+        gated_delta_rule as _flashinfer_gdn_decode,
+    )
+except Exception:
+    _flashinfer_gdn_decode = None
+
 from rtp_llm.models_py.utils.debug import cudagraph_debug_kernel
 from rtp_llm.models_py.utils.typed_storage_view import LinearCacheConverter
 from rtp_llm.ops import (
@@ -602,7 +611,6 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
         batch, seq = self._get_bs_from_attenion_input(
             mixed_qkv, attn_inputs, is_target_verify
         )
-        # asserr head_k_dim == head_v_dim
         mixed_qkv = mixed_qkv.reshape(
             batch,
             seq,
@@ -618,12 +626,25 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             ],
             dim=2,
         )
-        g, beta = fused_gdn_gating(self.alog, a, b, self.dt_bias)
 
-        # contiguous will be applyed when call fused_recurrent_gated_delta_rule
+        ssm_states = self._get_ssm_states(kv_cache_tensor)
+
+        if (
+            not is_target_verify
+            and seq == 1
+            and self.head_k_dim == 128
+            and self.ssm_state_dtype == torch.bfloat16
+            and _flashinfer_gdn_decode is not None
+        ):
+            return self._fla_flashinfer_decode(
+                query, key, value, a, b, ssm_states,
+                seq_size_per_block, attn_inputs,
+            )
+
+        # Fallback: original Triton kernel (target_verify or non-bf16 state)
+        g, beta = fused_gdn_gating(self.alog, a, b, self.dt_bias)
         g = g.view(batch, seq, self.local_num_v_heads)
         beta = beta.view(batch, seq, self.local_num_v_heads)
-        ssm_states = self._get_ssm_states(kv_cache_tensor)
         core_attn_out, _ = fused_recurrent_gated_delta_rule(
             q=query,
             k=key,
@@ -642,6 +663,42 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             [-1, core_attn_out.shape[2], core_attn_out.shape[3]]
         )
         return res
+
+    def _fla_flashinfer_decode(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        ssm_states: torch.Tensor,
+        seq_size_per_block: int,
+        attn_inputs: PyAttentionInputs,
+    ) -> torch.Tensor:
+        batch = query.shape[0]
+        read_indices, write_indices = compute_state_indices_from_block_map(
+            attn_inputs.sequence_lengths_plus_1_d,
+            attn_inputs.kv_cache_kernel_block_id_device,
+            seq_size_per_block,
+        )
+        # a, b: [batch, HV] -> [batch, 1, HV]
+        a_reshaped = a.view(batch, 1, self.local_num_v_heads)
+        b_reshaped = b.view(batch, 1, self.local_num_v_heads)
+        core_attn_out = _flashinfer_gdn_decode(
+            A_log=self.alog,
+            a=a_reshaped,
+            dt_bias=self.dt_bias,
+            q=query,
+            k=key,
+            v=value,
+            b=b_reshaped,
+            initial_state_source=ssm_states,
+            initial_state_indices=read_indices,
+            output_state_indices=write_indices,
+            use_qk_l2norm_in_kernel=True,
+        )
+        # output: [B, 1, HV, V] -> [B, HV, V]
+        return core_attn_out.squeeze(1)
 
     def forward(
         self,

@@ -272,6 +272,30 @@ def store_final_state_to_block_map_kernel(
     )
 
 
+def compute_state_indices_from_block_map(
+    sequence_lengths: torch.Tensor,
+    block_map: torch.Tensor,
+    seq_size_per_block: int,
+) -> tuple:
+    """Convert block_map + sequence_lengths to read/write pool indices.
+
+    The original Triton kernel reads and writes state to potentially different
+    blocks (when a decode step crosses a block boundary):
+      - Read:  block_map[i, (sequence_length - 2) // sps]
+      - Write: block_map[i, (sequence_length - 1) // sps]
+    where sequence_length = sequence_lengths_plus_1_d value.
+
+    Returns (read_indices, write_indices) both [B] int32.
+    """
+    B = sequence_lengths.shape[0]
+    arange_B = torch.arange(B, device=block_map.device)
+    read_offsets = (sequence_lengths - 2) // seq_size_per_block
+    write_offsets = (sequence_lengths - 1) // seq_size_per_block
+    read_indices = block_map[arange_B, read_offsets.long()].to(torch.int32)
+    write_indices = block_map[arange_B, write_offsets.long()].to(torch.int32)
+    return read_indices, write_indices
+
+
 def store_final_state_only_to_block_map(
     final_states: torch.Tensor,
     prefix_lengths: torch.Tensor,

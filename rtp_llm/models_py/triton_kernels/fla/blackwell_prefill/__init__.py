@@ -44,7 +44,7 @@ try:
         )
         chunk_gated_delta_rule = None  # type: ignore
     else:
-        from .gdn import chunk_gated_delta_rule
+        from ._adapter import chunk_gated_delta_rule
 except Exception:
     chunk_gated_delta_rule = None  # type: ignore
 
