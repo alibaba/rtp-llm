@@ -634,6 +634,39 @@ def all_gather(tensor: torch.Tensor, group: Group) -> torch.Tensor:
     # return torch.cat(tensor_list, dim=0)
 
 
+def reduce_scatter(input_tensor: torch.Tensor, group: Group) -> torch.Tensor:
+    """Reduce-scatter a tensor across all ranks in the group.
+
+    Reduces (sums) the input tensor across all ranks and scatters the result
+    so that each rank receives a 1/world_size chunk of the reduced tensor.
+
+    Args:
+        input_tensor: Full-size tensor to reduce-scatter
+            (shape: [world_size * chunk_size] + remaining_dims)
+        group: Process group to use
+
+    Returns:
+        Scattered chunk of the reduced tensor for this rank
+        (shape: [chunk_size] + remaining_dims)
+    """
+    process_group = _get_group(group)
+    world_size = torch.distributed.get_world_size(process_group)
+    assert input_tensor.shape[0] % world_size == 0, (
+        f"reduce_scatter: input dim 0 ({input_tensor.shape[0]}) "
+        f"must be divisible by world_size ({world_size})"
+    )
+    chunk_size = input_tensor.shape[0] // world_size
+    output_tensor = torch.empty(
+        [chunk_size] + list(input_tensor.shape[1:]),
+        device=input_tensor.device,
+        dtype=input_tensor.dtype,
+    )
+    torch.distributed.reduce_scatter_tensor(
+        output_tensor, input_tensor, op=torch.distributed.ReduceOp.SUM, group=process_group
+    )
+    return output_tensor
+
+
 def barrier(group: Group) -> None:
     """Barrier all ranks in the group.
 
@@ -655,5 +688,6 @@ __all__ = [
     "broadcast",
     "all_reduce",
     "all_gather",
+    "reduce_scatter",
     "barrier",
 ]

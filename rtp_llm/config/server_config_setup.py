@@ -53,9 +53,12 @@ def auto_configure_deepep(
     - PD separation + Decode node + Multi-node multi-GPU (>=9 GPUs): 1, 1, 1
     """
 
-    # in cp mode, do not use all gather, tp_size set to 1
-    tp_size = parallelism_config.get_attn_tp_size()
+    # MoE uses physical TP topology, not attention TP. get_attn_tp_size()
+    # returns 1 when CP is enabled, which would incorrectly disable
+    # use_all_gather for ep_size == tp_size configurations.
+    tp_size = parallelism_config.tp_size
     ep_size = parallelism_config.ep_size
+    dp_size = parallelism_config.dp_size
     moe_config.ll_num_max_token = ll_num_max_token
 
     # Explicit MoriEP is incompatible with use_all_gather (PURE_TP router).
@@ -67,10 +70,45 @@ def auto_configure_deepep(
             "to allow MoriEP router selection"
         )
 
+    # allgather default applies only to single GPU and pure TP (no CP).
+    # PureCP / PureDP routers exist but must be opted in via --moe_strategy
+    # (auto-selection falls back to DeepEP). CP-enabled topologies share the
+    # tp>1 / dp==1 / ep==tp shape with pure TP, so they must be excluded here
+    # to avoid silently disabling DeepEP without selecting PureCP.
+    prefill_cp_enabled = parallelism_config.prefill_cp_config.is_enabled()
+    is_single_gpu = ep_size == 1
+    is_pure_tp = (
+        tp_size > 1
+        and dp_size == 1
+        and ep_size == tp_size
+        and not prefill_cp_enabled
+    )
+    # Explicit opt-in via --moe_strategy must preserve use_all_gather, otherwise
+    # the matching strategy's check_conditions (which requires use_all_gather)
+    # will never be satisfied. Topology is validated here to keep the auto path
+    # falling back to DeepEP when --moe_strategy and shape disagree.
+    explicit_pure_dp = (
+        moe_config.moe_strategy == "fp8_per_block_pure_dp"
+        and tp_size == 1
+        and dp_size > 1
+        and ep_size == dp_size
+    )
+    explicit_pure_cp = (
+        moe_config.moe_strategy == "fp8_per_block_pure_cp"
+        and tp_size > 1
+        and dp_size == 1
+        and ep_size == tp_size
+        and prefill_cp_enabled
+    )
+
+    # use_deepep_moe disables use_all_gather only when a viable DeepEP path
+    # exists (ep_size > 1). On single-GPU configs there is no DeepEP path,
+    # so honor the implicit allgather fallback even if --use_deepep_moe was set.
     moe_config.use_all_gather = (
         moe_config.use_all_gather
         and not deep_ep_config.use_deepep_low_latency
-        and (ep_size == tp_size or ep_size == 1)
+        and (is_single_gpu or not deep_ep_config.use_deepep_moe)
+        and (is_single_gpu or is_pure_tp or explicit_pure_dp or explicit_pure_cp)
     )
     if moe_config.use_all_gather:
         moe_config.use_deepep_moe = False
