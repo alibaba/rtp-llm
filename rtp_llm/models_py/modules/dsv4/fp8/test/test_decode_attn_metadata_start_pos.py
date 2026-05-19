@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import torch
+
 from rtp_llm.models_py.modules.dsv4.attn_type import (
     CSA_KV,
     CSA_STATE,
@@ -46,6 +47,7 @@ _meta_mod = _load_module(
 )
 
 allocate_decode_metadata_fp8 = _meta_mod.allocate_decode_metadata_fp8
+build_decode_metadata_fp8 = _meta_mod.build_decode_metadata_fp8
 update_decode_metadata_in_place_fp8 = _meta_mod.update_decode_metadata_in_place_fp8
 
 
@@ -191,7 +193,9 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
         self.assertEqual(meta.start_pos[:2].tolist(), [65598, 8])
         self.assertEqual(meta.position_ids[:4].tolist(), [65598, 65599, 8, 9])
         self.assertEqual(meta.cache_seqlens_i32[:2].tolist(), [65600, 10])
-        self.assertNotEqual(meta.position_ids[:4].tolist(), [65597, 65598, 65597, 65598])
+        self.assertNotEqual(
+            meta.position_ids[:4].tolist(), [65597, 65598, 65597, 65598]
+        )
 
     def test_multi_token_graph_clamps_whole_position_window(self):
         meta = _alloc(q_len=4, max_bs=1, max_seq_len=18)
@@ -212,6 +216,70 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
         self.assertEqual(ratio4_slots.tolist(), [-1, 3, -1, -1])
         valid = ratio4_slots[ratio4_slots >= 0]
         self.assertTrue(torch.all(valid < meta.compressed_buffer_t_dim_per_ratio[4]))
+
+    def test_hca_dense_indices_cover_1m_context(self):
+        max_seq_len = 1048576
+        start_pos = torch.tensor([max_seq_len - 1], dtype=torch.int32)
+
+        eager = build_decode_metadata_fp8(
+            start_pos=start_pos,
+            q_len=1,
+            window_size=128,
+            head_dim=512,
+            max_seq_len=max_seq_len,
+            compress_ratios=[0, 4, 128],
+            index_topk=512,
+            device=torch.device("cpu"),
+        )
+        eager_hca = eager.topk_total_by_ratio[128][0, 0, 128:]
+        self.assertEqual(eager_hca.numel(), 8192)
+        self.assertEqual(int((eager_hca >= 0).sum()), 8192)
+        self.assertEqual(int(eager_hca[-1]), 8191)
+
+        graph_meta = allocate_decode_metadata_fp8(
+            max_batch_size=1,
+            q_len=1,
+            window_size=128,
+            head_dim=512,
+            max_seq_len=max_seq_len,
+            compress_ratios=[0, 4, 128],
+            index_topk=512,
+            device=torch.device("cpu"),
+        )
+        update_decode_metadata_in_place_fp8(graph_meta, start_pos, forbid_realloc=True)
+        graph_hca = graph_meta.topk_total_by_ratio[128][0, 0, 128:]
+        self.assertEqual(graph_hca.numel(), 8192)
+        self.assertEqual(int((graph_hca >= 0).sum()), 8192)
+        self.assertEqual(int(graph_hca[-1]), 8191)
+
+        # CSA/indexer width must remain controlled by index_topk.
+        self.assertEqual(graph_meta.topk_buffer_compressed.shape[-1], 512)
+        self.assertEqual(graph_meta.topk_total_by_ratio[4].shape[-1], 128 + 512)
+
+    def test_hca_dense_indices_align_70k_context_for_flashmla(self):
+        max_seq_len = 70000
+        start_pos = torch.tensor([max_seq_len - 1], dtype=torch.int32)
+
+        graph_meta = allocate_decode_metadata_fp8(
+            max_batch_size=1,
+            q_len=1,
+            window_size=128,
+            head_dim=512,
+            max_seq_len=max_seq_len,
+            compress_ratios=[0, 4, 128],
+            index_topk=512,
+            device=torch.device("cpu"),
+        )
+        update_decode_metadata_in_place_fp8(graph_meta, start_pos, forbid_realloc=True)
+        graph_hca = graph_meta.topk_total_by_ratio[128][0, 0, 128:]
+
+        self.assertEqual(max_seq_len // 128, 546)
+        self.assertEqual(graph_hca.numel(), 576)
+        self.assertEqual(graph_meta.hca_cmp_global_slots.shape[-1], 576)
+        self.assertEqual(graph_hca.numel() % 64, 0)
+        self.assertEqual(int((graph_hca >= 0).sum()), 546)
+        self.assertEqual(int(graph_hca[545]), 545)
+        self.assertTrue(torch.all(graph_hca[546:] == -1))
 
     def test_paged_compressor_slots_match_compressor_formula_for_bs(self):
         if not torch.cuda.is_available():
@@ -252,9 +320,9 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
             INDEXER_KV: _i32([[301, 302, 303, 304], [401, 402, 403, 404]]).to(device),
             HCA_KV: _i32([[501, 502, 503, 504], [601, 602, 603, 604]]).to(device),
             CSA_STATE: _i32([[701, 702, 703, 704], [801, 802, 803, 804]]).to(device),
-            INDEXER_STATE: _i32(
-                [[901, 902, 903, 904], [1001, 1002, 1003, 1004]]
-            ).to(device),
+            INDEXER_STATE: _i32([[901, 902, 903, 904], [1001, 1002, 1003, 1004]]).to(
+                device
+            ),
             HCA_STATE: _i32([[1101, 1102, 1103, 1104], [1201, 1202, 1203, 1204]]).to(
                 device
             ),
