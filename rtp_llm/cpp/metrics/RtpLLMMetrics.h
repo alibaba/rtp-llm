@@ -500,7 +500,7 @@ private:
     bool                         stop_ = false;
     CollectType                  collector_;
     int                          active_count_ = 0;
-    int                          interval_ms_ = 1000;
+    int                          interval_ms_  = 1000;
     std::thread                  metrics_reporter_thread_;
     kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;
 };
@@ -860,6 +860,10 @@ public:
     int64_t prepare_call_latency_us  = 0;  // 准备发送请求/建连的时间
     int64_t server_call_latency_us   = 0;  // 从调用CacheStore::load 到 收到响应的时间
     int64_t response_send_cost_us    = 0;  // server到client response传输的时间
+
+    int64_t gathered_h2d_latency_us   = 0;
+    int64_t gathered_pool_free_bytes  = 0;
+    bool    gathered_staging_fallback = false;
 };
 
 class RtpLLMCacheStoreLoadServerMetricsCollector final {
@@ -876,6 +880,10 @@ public:
     std::vector<int64_t> write_block_count;       // 调用write的block数量
     std::vector<int64_t> write_total_block_size;  //  调用write的block size
     std::vector<int64_t> write_latency_us;        // 调用write的单次延迟
+
+    int64_t gathered_d2h_latency_us   = 0;
+    int64_t gathered_pool_free_bytes  = 0;
+    bool    gathered_staging_fallback = false;
 };
 
 class RtpLLMCacheStoreStoreMetricsCollector final {
@@ -961,6 +969,11 @@ public:
     kmonitor::MutableMetric* transfer_block_count_metric      = nullptr;
     kmonitor::MutableMetric* transfer_total_block_size_metric = nullptr;
     kmonitor::MutableMetric* transfer_latency_us_metric       = nullptr;
+
+    kmonitor::MutableMetric* gathered_pool_free_bytes_metric      = nullptr;
+    kmonitor::MutableMetric* gathered_staging_fallback_qps_metric = nullptr;
+    kmonitor::MutableMetric* gathered_d2h_latency_us_metric       = nullptr;
+    kmonitor::MutableMetric* gathered_h2d_latency_us_metric       = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();

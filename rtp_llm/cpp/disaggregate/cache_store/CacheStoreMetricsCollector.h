@@ -59,6 +59,11 @@ public:
         collector_.success = success;
         end_time_us_       = currentTimeUs();
     }
+    void setGatheredInfo(int64_t h2d_us, int64_t pool_free, bool fallback) {
+        collector_.gathered_h2d_latency_us   = h2d_us;
+        collector_.gathered_pool_free_bytes  = pool_free;
+        collector_.gathered_staging_fallback = fallback;
+    }
 
 private:
     kmonitor::MetricsReporterPtr               reporter_;
@@ -90,6 +95,11 @@ public:
         collector_.success = success;
         end_time_us_       = currentTimeUs();
     }
+    void setGatheredInfo(int64_t d2h_us, int64_t pool_free, bool fallback) {
+        collector_.gathered_d2h_latency_us   = d2h_us;
+        collector_.gathered_pool_free_bytes  = pool_free;
+        collector_.gathered_staging_fallback = fallback;
+    }
 
 private:
     kmonitor::MetricsReporterPtr               reporter_;
@@ -103,9 +113,9 @@ private:
 
 class CacheStoreRemoteStoreMetricsCollector {
 public:
-    CacheStoreRemoteStoreMetricsCollector(const kmonitor::MetricsReporterPtr& reporter,
-                                          int64_t                             block_count);
+    CacheStoreRemoteStoreMetricsCollector(const kmonitor::MetricsReporterPtr& reporter, int64_t block_count);
     ~CacheStoreRemoteStoreMetricsCollector();
+
 public:
     void markStart() {
         start_time_us_ = currentTimeUs();
@@ -119,7 +129,7 @@ public:
     }
     void markAllBlocksReady() {
         all_block_ready_time_us_ = currentTimeUs();
-    }   
+    }
     void setBlockSize(int total_block_size) {
         collector_.total_block_size = total_block_size;
     }
@@ -140,12 +150,12 @@ public:
                                        int64_t                             block_count,
                                        int64_t                             total_block_size);
     ~CacheStoreTransferMetricsCollector();
-private:
-    kmonitor::MetricsReporterPtr                reporter_;
-    RtpLLMCacheStoreTransferMetricsCollector    collector_;
-    int64_t                                     start_time_us_             = 0;
-    int64_t                                     end_time_us_               = 0;
-};
 
+private:
+    kmonitor::MetricsReporterPtr             reporter_;
+    RtpLLMCacheStoreTransferMetricsCollector collector_;
+    int64_t                                  start_time_us_ = 0;
+    int64_t                                  end_time_us_   = 0;
+};
 
 }  // namespace rtp_llm

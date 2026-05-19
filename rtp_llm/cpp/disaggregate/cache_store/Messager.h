@@ -12,6 +12,8 @@
 
 namespace rtp_llm {
 
+class CacheTransferBufferPool;
+
 class Messager {
 public:
     Messager(const std::shared_ptr<MemoryUtil>&              memory_util,
@@ -34,6 +36,8 @@ public:
     const std::shared_ptr<LockedBlockBufferManager>& getLockedBlockBufferManager() const {
         return locked_block_buffer_manager_;
     }
+
+    virtual void setBufferPool(CacheTransferBufferPool*) {}
 
 protected:
     CacheLoadRequest*     makeLoadRequest(const std::shared_ptr<LoadRequest>& request);

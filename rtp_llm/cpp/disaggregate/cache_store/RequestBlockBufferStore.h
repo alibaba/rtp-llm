@@ -17,7 +17,8 @@ namespace rtp_llm {
 class RequestBlockBufferStore {
 
 public:
-    RequestBlockBufferStore(const std::shared_ptr<MemoryUtil>& memory_util);
+    RequestBlockBufferStore(const std::shared_ptr<MemoryUtil>& memory_util,
+                            bool                               enable_gathered_cache_transfer = false);
     ~RequestBlockBufferStore() = default;
 
 public:
@@ -44,6 +45,7 @@ private:
 
 private:
     std::shared_ptr<MemoryUtil> memory_util_;
+    bool                        enable_gathered_cache_transfer_ = false;
 
     mutable std::shared_mutex                                            request_cache_map_mutex_;
     std::unordered_map<std::string, std::shared_ptr<RequestBlockBuffer>> request_cache_map_;

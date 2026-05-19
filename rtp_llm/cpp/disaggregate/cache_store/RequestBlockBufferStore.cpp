@@ -6,8 +6,9 @@
 
 namespace rtp_llm {
 
-RequestBlockBufferStore::RequestBlockBufferStore(const std::shared_ptr<MemoryUtil>& memory_util):
-    memory_util_(memory_util) {}
+RequestBlockBufferStore::RequestBlockBufferStore(const std::shared_ptr<MemoryUtil>& memory_util,
+                                                 bool                               enable_gathered_cache_transfer):
+    memory_util_(memory_util), enable_gathered_cache_transfer_(enable_gathered_cache_transfer) {}
 
 void RequestBlockBufferStore::stop() {
     std::unique_lock<std::shared_mutex> lock(request_cache_map_mutex_);
@@ -26,10 +27,10 @@ bool RequestBlockBufferStore::setRequestBlockBuffer(const std::shared_ptr<Reques
         return false;
     }
 
-    auto                                      blocks = request_block_buffer->getBlocks();
+    auto blocks = request_block_buffer->getBlocks();
+
     std::vector<std::shared_ptr<BlockBuffer>> valid_blocks;
-    for (auto iter : blocks) {
-        auto& block = iter.second;
+    for (auto& [key, block] : blocks) {
         if (isValidBlock(block)) {
             valid_blocks.push_back(block);
             continue;
@@ -133,6 +134,10 @@ RequestBlockBufferStore::getOrInsertRequestBlockBuffer(const std::string& reques
 }
 
 bool RequestBlockBufferStore::isValidBlock(const std::shared_ptr<BlockBuffer>& block) {
+    if (enable_gathered_cache_transfer_ && memory_util_->isRdmaMode() && block->gpu_mem) {
+        block->kind_ = BlockBuffer::Kind::GPU_GATHERED_READY;
+        return true;
+    }
     if (memory_util_->isRdmaMode()) {
         return memory_util_->isMemoryMr(block->addr.get(), block->len, block->gpu_mem, block->adopted);
     }

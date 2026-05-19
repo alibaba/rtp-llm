@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 #include "rtp_llm/cpp/disaggregate/cache_store/MemoryUtil.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 #include "kmonitor/client/MetricsReporter.h"
 
 namespace rtp_llm {
@@ -44,6 +45,9 @@ public:
     uint32_t messager_worker_thread_count = 32;
 
     kmonitor::MetricsReporterPtr metrics_reporter;
+
+    // gathered cache transfer
+    KVCacheConfig kv_cache_config;
 
     // for test
     std::shared_ptr<MemoryUtil> memory_util;

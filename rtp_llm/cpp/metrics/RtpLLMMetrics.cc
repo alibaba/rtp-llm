@@ -616,6 +616,12 @@ bool RtpLLMCacheStoreMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(transfer_total_block_size_metric, "rtp_llm.cache_store.transfer.total_block_size");
     REGISTER_GAUGE_MUTABLE_METRIC(transfer_latency_us_metric, "rtp_llm.cache_store.transfer.latency_us");
 
+    REGISTER_GAUGE_MUTABLE_METRIC(gathered_pool_free_bytes_metric, "rtp_llm.cache_store.gathered.pool_free_bytes");
+    REGISTER_QPS_MUTABLE_METRIC(gathered_staging_fallback_qps_metric,
+                                "rtp_llm.cache_store.gathered.staging_fallback_qps");
+    REGISTER_GAUGE_MUTABLE_METRIC(gathered_d2h_latency_us_metric, "rtp_llm.cache_store.gathered.d2h_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(gathered_h2d_latency_us_metric, "rtp_llm.cache_store.gathered.h2d_latency_us");
+
     return true;
 }
 
@@ -637,6 +643,11 @@ void RtpLLMCacheStoreMetrics::report(const kmonitor::MetricsTags*               
     REPORT_NON_ZERO_MUTABLE_METRIC(load_client_prepare_call_latency_us_metric, collector->prepare_call_latency_us);
     REPORT_NON_ZERO_MUTABLE_METRIC(load_client_server_call_latency_us_metric, collector->server_call_latency_us);
     REPORT_NON_ZERO_MUTABLE_METRIC(load_client_response_send_cost_us_metric, collector->response_send_cost_us);
+    REPORT_NON_ZERO_MUTABLE_METRIC(gathered_h2d_latency_us_metric, collector->gathered_h2d_latency_us);
+    REPORT_NON_ZERO_MUTABLE_METRIC(gathered_pool_free_bytes_metric, collector->gathered_pool_free_bytes);
+    if (collector->gathered_staging_fallback) {
+        REPORT_MUTABLE_QPS(gathered_staging_fallback_qps_metric);
+    }
 }
 
 void RtpLLMCacheStoreMetrics::report(const kmonitor::MetricsTags*                tags,
@@ -656,6 +667,11 @@ void RtpLLMCacheStoreMetrics::report(const kmonitor::MetricsTags*               
         REPORT_NON_ZERO_MUTABLE_METRIC(load_server_write_block_count_metric, collector->write_block_count[i]);
         REPORT_NON_ZERO_MUTABLE_METRIC(load_server_write_total_block_size, collector->write_total_block_size[i]);
         REPORT_NON_ZERO_MUTABLE_METRIC(load_server_write_latency_us_metric, collector->write_latency_us[i]);
+    }
+    REPORT_NON_ZERO_MUTABLE_METRIC(gathered_d2h_latency_us_metric, collector->gathered_d2h_latency_us);
+    REPORT_NON_ZERO_MUTABLE_METRIC(gathered_pool_free_bytes_metric, collector->gathered_pool_free_bytes);
+    if (collector->gathered_staging_fallback) {
+        REPORT_MUTABLE_QPS(gathered_staging_fallback_qps_metric);
     }
 }
 

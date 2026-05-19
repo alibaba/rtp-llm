@@ -355,3 +355,22 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         "加上 prefix cache 命中时复用的 1 个 block，峰值约 3 块/请求。"
         "池大小需覆盖 (并发请求数 × 3) 并保留余量。",
     )
+    kv_cache_group.add_argument(
+        "--enable_gathered_cache_transfer",
+        env_name="ENABLE_GATHERED_CACHE_TRANSFER",
+        bind_to=(kv_cache_config, "enable_gathered_cache_transfer"),
+        type=str2bool,
+        default=False,
+        help="启用 RDMA 聚合 KV Cache 传输模式。将同一 (layer, region) 的所有 block gather 到"
+        "连续 host memory 后单次 RDMA Write，减少 WQE 数。仅 RDMA 模式生效。",
+    )
+    kv_cache_group.add_argument(
+        "--cache_transfer_buffer_size_mb",
+        env_name="CACHE_TRANSFER_BUFFER_SIZE_MB",
+        bind_to=(kv_cache_config, "cache_transfer_buffer_size_mb"),
+        type=int,
+        default=0,
+        help="RDMA 聚合传输模式的 pinned host memory pool 大小（MB）。"
+        "Prefill 端建议 64MB 起步，Decode 端建议 4096MB 起步。"
+        "设为 0 则不预分配（全程走运行时临时分配降级路径）。",
+    )

@@ -1,10 +1,12 @@
 #pragma once
 
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStoreMetricsCollector.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/CacheTransferBufferPool.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/RequestBlockBufferStore.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/Messager.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/RemoteStoreTaskImpl.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 #include "autil/ThreadPool.h"
 
 #include <memory>
@@ -46,10 +48,11 @@ public:
     storeBuffers(const std::vector<std::shared_ptr<RequestBlockBuffer>>& request_block_buffers,
                  int64_t                                                 timeout_ms) override;
 
-    std::shared_ptr<RemoteStoreTask> submitRemoteStoreTask(const std::shared_ptr<RemoteStoreRequest>& request,
-                                                           const std::shared_ptr<CacheStoreRemoteStoreMetricsCollector>& collector,
-                                                           RemoteStoreTask::CheckCancelFunc check_cancel_func) override;
-    void                             releaseRemoteStoreTask(const std::shared_ptr<RemoteStoreTask>& task) override;
+    std::shared_ptr<RemoteStoreTask>
+         submitRemoteStoreTask(const std::shared_ptr<RemoteStoreRequest>&                    request,
+                               const std::shared_ptr<CacheStoreRemoteStoreMetricsCollector>& collector,
+                               RemoteStoreTask::CheckCancelFunc                              check_cancel_func) override;
+    void releaseRemoteStoreTask(const std::shared_ptr<RemoteStoreTask>& task) override;
 
     bool                         regUserBuffers(const std::vector<std::shared_ptr<BlockBuffer>>& buffers) override;
     std::shared_ptr<BlockBuffer> findUserBuffer(const std::string& buffer_key) override;
@@ -60,8 +63,13 @@ public:
 
     const std::shared_ptr<MemoryUtil>& getMemoryUtil() const override;
 
+    CacheTransferBufferPool* getBufferPool() const {
+        return buffer_pool_.get();
+    }
+
 private:
     bool init(const CacheStoreInitParams& params);
+    void initBufferPool();
     void runStoreTask(const std::shared_ptr<RequestBlockBuffer>&              value,
                       CacheStoreStoreDoneCallback                             callback,
                       const std::shared_ptr<CacheStoreStoreMetricsCollector>& collector);
@@ -89,7 +97,10 @@ private:
     std::shared_mutex                                                                remote_store_tasks_mutex_;
     std::unordered_map<std::string, std::list<std::shared_ptr<RemoteStoreTaskImpl>>> remote_store_tasks_;
     std::shared_mutex                                                                store_tasks_mutex_;
-    std::unordered_map<std::shared_ptr<RequestBlockBuffer>, std::pair<CacheStoreStoreDoneCallback, std::function<void()>>> store_tasks_;
+    std::unordered_map<std::shared_ptr<RequestBlockBuffer>,
+                       std::pair<CacheStoreStoreDoneCallback, std::function<void()>>>
+                                             store_tasks_;
+    std::unique_ptr<CacheTransferBufferPool> buffer_pool_;
 };
 
 }  // namespace rtp_llm

@@ -172,6 +172,9 @@ struct KVCacheConfig {
     int64_t device_cache_min_free_blocks = 0;
     int     load_cache_retry_times       = 1;  // Maximum retry attempts for load cache transfer failures
 
+    bool    enable_gathered_cache_transfer = false;
+    int64_t cache_transfer_buffer_size_mb  = 0;
+
     // DSV4 fixed-pool (indexer/CSA/HCA/SWA state) total block count per pool.
     // Paged pools are unaffected. This is the absolute number of blocks reserved
     // for each fixed pool; the runtime scheduler shares them across concurrent

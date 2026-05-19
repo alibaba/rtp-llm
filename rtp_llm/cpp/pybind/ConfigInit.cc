@@ -384,6 +384,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("reco_get_broadcast_timeout", &KVCacheConfig::reco_get_broadcast_timeout)
         .def_readwrite("reco_put_broadcast_timeout", &KVCacheConfig::reco_put_broadcast_timeout)
         .def_readwrite("reco_client_config", &KVCacheConfig::reco_client_config)
+        .def_readwrite("enable_gathered_cache_transfer", &KVCacheConfig::enable_gathered_cache_transfer)
+        .def_readwrite("cache_transfer_buffer_size_mb", &KVCacheConfig::cache_transfer_buffer_size_mb)
         .def("insertMultiTaskPromptTokens", &KVCacheConfig::insertMultiTaskPromptTokens)
         .def("to_string", &KVCacheConfig::to_string)
         .def(py::pickle(

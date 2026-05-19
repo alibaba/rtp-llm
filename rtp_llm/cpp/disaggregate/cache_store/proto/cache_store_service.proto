@@ -35,6 +35,12 @@ message BlockBufferInfo {
     optional int64 addr = 5; // 使用TCP做Read, 需要指定addr
 }
 
+message GatheredBlockMeta {
+    optional string key    = 1;
+    optional uint64 offset = 2;
+    optional uint32 length = 3;
+}
+
 message CacheLoadRequest {
     repeated BlockBufferInfo blocks = 1;
     optional uint32 timeout_ms = 2;
@@ -44,6 +50,10 @@ message CacheLoadRequest {
     optional string requestid = 6;
     optional int32 partition_count = 7;
     optional int32 partition_id = 8;
+
+    optional bool gathered_mode = 9;
+    optional RdmaBlockBufferAddrInfo gathered_recv_info = 10;
+    repeated GatheredBlockMeta gathered_block_metas = 11;
 }
 
 message CacheLoadResponse {
@@ -54,7 +64,7 @@ message CacheLoadResponse {
 };
 
 message CacheTransferInfo {
-    optional uint32 partition_count = 1; 
+    optional uint32 partition_count = 1;
     optional uint32 partition_id = 2;
     repeated string local_keys = 3;
     repeated string remote_keys = 4;
@@ -73,7 +83,7 @@ message CacheTransferRequest {
 }
 
 message CacheTransferResponse {
-    optional KvCacheStoreServiceErrorCode error_code = 1; 
+    optional KvCacheStoreServiceErrorCode error_code = 1;
     optional string error_msg = 2;
     optional int64 response_send_start_time_us = 3;
 }

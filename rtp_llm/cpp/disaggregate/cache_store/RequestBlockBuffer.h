@@ -13,17 +13,24 @@ namespace rtp_llm {
 // 关联一块内存/显存
 class BlockBuffer {
 public:
+    enum class Kind {
+        HOST_PINNED,
+        GPU_GATHERED_READY,
+        GPU_DIRECT,
+    };
+
     BlockBuffer(
         const std::string& key_, const std::shared_ptr<void>& addr_, uint32_t len_, bool gpu_mem_, bool adopted_):
         key(key_), addr(addr_), len(len_), gpu_mem(gpu_mem_), adopted(adopted_) {}
     BlockBuffer(const BlockBuffer& rhs):
-        key(rhs.key), addr(rhs.addr), len(rhs.len), gpu_mem(rhs.gpu_mem), adopted(rhs.adopted) {}
+        key(rhs.key), addr(rhs.addr), len(rhs.len), gpu_mem(rhs.gpu_mem), adopted(rhs.adopted), kind_(rhs.kind_) {}
 
     std::string           key;
     std::shared_ptr<void> addr;
     uint32_t              len{0};
     bool                  gpu_mem{true};
     bool                  adopted{true};
+    Kind                  kind_ = Kind::HOST_PINNED;
 };
 
 //  request 关联的 block buffer

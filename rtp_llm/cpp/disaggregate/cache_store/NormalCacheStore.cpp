@@ -38,7 +38,8 @@ bool NormalCacheStore::init(const CacheStoreInitParams& params) {
         memory_util_ = createMemoryUtilImpl(params_.rdma_mode);
     }
 
-    request_block_buffer_store_ = std::make_shared<RequestBlockBufferStore>(memory_util_);
+    request_block_buffer_store_ =
+        std::make_shared<RequestBlockBufferStore>(memory_util_, params_.kv_cache_config.enable_gathered_cache_transfer);
 
     // always has metric
     metrics_reporter_ = params.metrics_reporter;
@@ -94,8 +95,25 @@ bool NormalCacheStore::init(const CacheStoreInitParams& params) {
         return false;
     }
 
+    initBufferPool();
+
     RTP_LLM_LOG_INFO("normal cache store init done, thread pool thread count is %d", params.thread_count);
     return true;
+}
+
+void NormalCacheStore::initBufferPool() {
+    const auto& kv_cfg = params_.kv_cache_config;
+    if (!kv_cfg.enable_gathered_cache_transfer || kv_cfg.cache_transfer_buffer_size_mb <= 0) {
+        return;
+    }
+    size_t pool_bytes = static_cast<size_t>(kv_cfg.cache_transfer_buffer_size_mb) * 1024 * 1024;
+    buffer_pool_      = std::make_unique<CacheTransferBufferPool>(pool_bytes, memory_util_);
+    RTP_LLM_LOG_INFO("gathered cache transfer buffer pool created, size_mb=%ld, bytes=%zu",
+                     kv_cfg.cache_transfer_buffer_size_mb,
+                     pool_bytes);
+    if (messager_) {
+        messager_->setBufferPool(buffer_pool_.get());
+    }
 }
 
 void NormalCacheStore::store(const std::shared_ptr<RequestBlockBuffer>& request_block_buffer,

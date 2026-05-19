@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <functional>
 #include <torch/torch.h>
 #include <vector>
 
@@ -46,8 +47,9 @@ struct StagedMemoryCopyHostSegment {
 };
 
 struct StagedMemoryCopyParams {
-    void*                                    host_base  = nullptr;
-    size_t                                   host_bytes = 0;
+    void*                                    host_base      = nullptr;
+    size_t                                   host_bytes     = 0;
+    bool                                     host_is_pinned = false;
     std::vector<StagedMemoryCopyHostSegment> host_segments;
     std::vector<StagedMemoryCopyTile>        tiles;
     int                                      device_index = -1;
@@ -55,15 +57,15 @@ struct StagedMemoryCopyParams {
 };
 
 struct StagedMemoryCopyScratch {
-    void*  host_staging       = nullptr;
-    size_t host_capacity      = 0;
-    void*  device_staging     = nullptr;
-    size_t device_capacity    = 0;
-    void*  device_ptrs        = nullptr;
-    void*  device_offsets     = nullptr;
-    void*  device_sizes       = nullptr;
-    size_t meta_capacity      = 0;
-    int    device_index       = -1;
+    void*  host_staging    = nullptr;
+    size_t host_capacity   = 0;
+    void*  device_staging  = nullptr;
+    size_t device_capacity = 0;
+    void*  device_ptrs     = nullptr;
+    void*  device_offsets  = nullptr;
+    void*  device_sizes    = nullptr;
+    size_t meta_capacity   = 0;
+    int    device_index    = -1;
 };
 
 // Multi-tensor non-blocking copy with device-specific implementation.
@@ -83,6 +85,14 @@ bool execBatchedMemoryCopy(const BatchedMemoryCopyParams& params);
 // D2H: tile.gpu -> GPU staging by tile.host_offset -> compact host payload.
 bool execStagedMemoryCopy(const StagedMemoryCopyParams& params, StagedMemoryCopyScratch* scratch = nullptr);
 void releaseStagedMemoryCopyScratch(StagedMemoryCopyScratch& scratch);
+
+// Async variant: same flow as execStagedMemoryCopy but does NOT synchronize.
+// on_done is called from a CUDA host callback when stream operations complete.
+// Returns false if launch fails (on_done is NOT called in that case).
+// scratch must not be nullptr and must not be used concurrently.
+bool execStagedMemoryCopyAsync(const StagedMemoryCopyParams&     params,
+                               StagedMemoryCopyScratch*          scratch,
+                               std::function<void(bool success)> on_done);
 
 // Warmup split-KV copy kernels. No-op on non-CUDA / PPU devices.
 // Must be called after cudaSetDevice + setCurrentCUDAStream.
