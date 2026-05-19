@@ -87,6 +87,43 @@ def _fp8_prefill_topk_force_radix_sort() -> bool:
     return os.environ.get("DSV4_PREFILL_TOPK_FORCE_RADIX", "1") != "0"
 
 
+def _fp8_prefill_topk_use_torch() -> bool:
+    return os.environ.get("DSV4_INDEXER_TOPK_BACKEND", "auto").strip().lower() == "torch"
+
+
+def _fp8_prefill_topk_canonicalize() -> bool:
+    return os.environ.get("DSV4_INDEXER_TOPK_CANONICALIZE", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _run_prefill_topk_torch(
+    logits: torch.Tensor,
+    row_starts: torch.Tensor,
+    row_ends: torch.Tensor,
+    out: torch.Tensor,
+    topk: int,
+) -> None:
+    M, T = logits.shape
+    out.fill_(-1)
+    col = torch.arange(T, device=logits.device, dtype=torch.int32).unsqueeze(0)
+    ks = row_starts.unsqueeze(1)
+    ke = row_ends.unsqueeze(1)
+    mask = (col >= ks) & (col < ke)
+    masked = torch.where(mask, logits, torch.full_like(logits, float("-inf")))
+    k_eff = min(topk, T)
+    _, indices = masked.topk(k_eff, dim=-1)
+    indices = indices.to(torch.int32) - row_starts.unsqueeze(1)
+    lengths = (row_ends - row_starts).unsqueeze(1)
+    indices = torch.where(indices < lengths, indices, torch.full_like(indices, -1))
+    if _fp8_prefill_topk_canonicalize():
+        sentinel = torch.iinfo(torch.int32).max
+        sortable = torch.where(indices >= 0, indices, torch.full_like(indices, sentinel))
+        sorted_idx = torch.sort(sortable, dim=-1).values
+        indices = torch.where(sorted_idx == sentinel, torch.full_like(sorted_idx, -1), sorted_idx)
+    out[:, :k_eff].copy_(indices)
+
+
 def _run_prefill_topk(
     logits: torch.Tensor,
     row_starts: torch.Tensor,
@@ -95,6 +132,10 @@ def _run_prefill_topk(
     topk: int,
     compress_ratio: int,
 ) -> None:
+    if _fp8_prefill_topk_use_torch():
+        _run_prefill_topk_torch(logits, row_starts, row_ends, out, topk)
+        return
+
     # ``logits`` is over compressed K tokens. Convert back to input-token
     # length so the 16k policy matches the user-visible prefill length.
     estimated_input_tokens = int(logits.size(1)) * int(compress_ratio)
