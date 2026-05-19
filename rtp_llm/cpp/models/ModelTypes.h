@@ -141,6 +141,14 @@ public:
         return torch::Tensor();
     }
 
+    // Optional CP-prefill companion: expose one final pre-hc row per request
+    // (DSv4: [B, hc*D]) so MTP stream update does not require a full sequence
+    // hidden buffer. Passing num_tokens < 0 asks the producer for its last
+    // written row count.
+    virtual torch::Tensor getMtpLastHiddenStates(int64_t /*num_tokens*/) {
+        return torch::Tensor();
+    }
+
     rtp_llm::Weights            weights_;
     rtp_llm::OverallExpertStats overall_expert_stats_;
     size_t                      model_id_ = 0;

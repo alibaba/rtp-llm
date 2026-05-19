@@ -535,6 +535,57 @@ def cp_all_gather_full_varlen(
     return full.view((cp_ctx.seq_len_full,) + trailing)
 
 
+def cp_gather_last_by_request(
+    local_2d: torch.Tensor,
+    cp_ctx: CPContext,
+) -> torch.Tensor:
+    """Gather only each request's final prefill row across CP ranks.
+
+    ``local_2d`` is rank-local ``[chunk_length, H]`` in the same layout as the
+    CP-split input.  The result is ``[B, H]`` in request order.  This avoids the
+    old full-sequence all-gather used only to slice one row per request for MTP.
+    """
+    assert local_2d.dim() == 2
+    assert (
+        local_2d.size(0) == cp_ctx.chunk_length
+    ), f"local_2d.size(0)={local_2d.size(0)} != chunk_length={cp_ctx.chunk_length}"
+    assert (
+        cp_ctx.input_lengths_global is not None
+    ), "CP last-hidden gather requires input_lengths_global"
+    assert cp_ctx.prefix_lengths is not None, "CP last-hidden gather requires prefixes"
+    assert (
+        cp_ctx.req_id_per_token is not None
+    ), "CP last-hidden gather requires req_id_per_token"
+
+    device = local_2d.device
+    B = int(cp_ctx.input_lengths_global.numel())
+    H = int(local_2d.size(1))
+
+    req_ids = cp_ctx.req_id_per_token.to(device=device, dtype=torch.long).reshape(-1)
+    prefixes = cp_ctx.prefix_lengths.to(device=device, dtype=torch.long).reshape(-1)[:B]
+    input_lengths = cp_ctx.input_lengths_global.to(
+        device=device, dtype=torch.long
+    ).reshape(-1)[:B]
+    target_positions = prefixes + input_lengths - 1
+    target_per_token = target_positions.gather(0, req_ids)
+
+    global_positions = cp_ctx.global_positions.to(device=device, dtype=torch.long)
+    local_is_real = cp_ctx.local_is_real.to(device=device)
+    owner_mask = local_is_real & (global_positions == target_per_token)
+
+    local_last = local_2d.new_zeros((B, H))
+    owner_req_ids = req_ids[owner_mask]
+    local_last.index_copy_(0, owner_req_ids, local_2d[owner_mask])
+
+    # Zigzag CP assigns each real global token to exactly one rank, so each
+    # request's final token contributes from one rank only.  Summing the gathered
+    # [B, H] rows is therefore equivalent to selecting the unique owner row.
+    # RTP-LLM CP reuses the TP process group, matching the full hidden gather
+    # path above.
+    gathered = all_gather(local_last.contiguous(), group=Group.TP)
+    return gathered.view(cp_ctx.cp_size, B, H).sum(dim=0).contiguous()
+
+
 def cp_freqs_cis_local(
     freqs_cis: torch.Tensor,
     cp_ctx: CPContext,
