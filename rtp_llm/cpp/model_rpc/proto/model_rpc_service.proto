@@ -443,6 +443,7 @@ message MemoryOperationRequestPB {
     message CopyItem {
         int32 mem_block = 1;
         repeated int32 gpu_blocks = 2;
+        bool is_complete = 3;
     }
     enum CopyDirection {
         H2D = 0;
