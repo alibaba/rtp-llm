@@ -478,6 +478,43 @@ class DpBatchSchedulerTest {
     }
 
     @Test
+    void success_response_keeps_pod_grpcPort_when_dpRank_missing_from_dpStatuses() throws Exception {
+        // Per design §10 invariant #9, only DP0 publishes dp_status[]. If a
+        // request lands on a dpRank not in the published list (sparse publish,
+        // partial sync, or peer-DP entry leaked into the role map),
+        // applyDpRankAddress must be a no-op — leaving prefill.grpcPort at the
+        // pod-level entry — instead of silently falling through to a wrong DP.
+        WorkerStatus ws = new WorkerStatus();
+        ws.setDpStatuses(List.of(
+                new DpRankStatus(2, "10.0.0.1", 10117, 0, 0, 0, 0, true),
+                new DpRankStatus(3, "10.0.0.1", 10125, 0, 0, 0, 0, true)));
+        Map<String, WorkerStatus> roleMap = new HashMap<>();
+        roleMap.put("10.0.0.1:8080", ws);
+        when(engineWorkerStatus.selectModelWorkerStatus(eq(RoleType.PREFILL), eq("g1")))
+                .thenReturn(roleMap);
+
+        List<CompletableFuture<Response>> futures = IntStream.range(0, 4)
+                .mapToObj(i -> scheduler.submit(makeCtx(i + 1, "m1")))
+                .toList();
+
+        Map<Long, Integer> dpRankToGrpcPort = new HashMap<>();
+        for (CompletableFuture<Response> f : futures) {
+            Response r = f.get(2, TimeUnit.SECONDS);
+            assertTrue(r.isSuccess());
+            ServerStatus prefill = r.getServerStatus().get(0);
+            dpRankToGrpcPort.put((long) prefill.getDpRank(), prefill.getGrpcPort());
+        }
+        assertEquals(9080, dpRankToGrpcPort.get(0L).intValue(),
+                "rank=0 missing from dpStatuses ⇒ keep pod-level grpcPort");
+        assertEquals(9080, dpRankToGrpcPort.get(1L).intValue(),
+                "rank=1 missing from dpStatuses ⇒ keep pod-level grpcPort");
+        assertEquals(10117, dpRankToGrpcPort.get(2L).intValue(),
+                "rank=2 present ⇒ remap to per-rank grpcPort");
+        assertEquals(10125, dpRankToGrpcPort.get(3L).intValue(),
+                "rank=3 present ⇒ remap to per-rank grpcPort");
+    }
+
+    @Test
     void different_models_use_independent_batchers() throws Exception {
         // 2 reqs of model A + 2 reqs of model B → neither alone reaches dpSize=4 so
         // both must wait for the window timer; they must NOT share a batch.

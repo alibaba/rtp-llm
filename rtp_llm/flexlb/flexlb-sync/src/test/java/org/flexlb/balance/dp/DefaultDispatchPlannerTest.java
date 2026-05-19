@@ -23,6 +23,8 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import org.mockito.ArgumentCaptor;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -135,6 +137,55 @@ class DefaultDispatchPlannerTest {
         assertTrue(result.failures().isEmpty());
     }
 
+    @Test
+    void filters_out_non_alive_workers() {
+        WorkerStatus alive = workerStatus("10.0.0.1", 4);
+        WorkerStatus dead = workerStatus("10.0.0.2", 4);
+        dead.setAlive(false);
+        when(engineWorkerStatus.selectModelWorkerStatus(eq(RoleType.PREFILL), any()))
+                .thenReturn(map(alive, dead));
+        when(groupSelector.select(any(), any())).thenAnswer(inv -> {
+            List<WorkerStatus> candidates = inv.getArgument(0);
+            return candidates.isEmpty() ? null : candidates.get(0);
+        });
+        when(decodeSelector.select(any(), eq(RoleType.DECODE), anyString())).thenAnswer(inv -> okDecode());
+
+        DispatchPlan result = planner.plan(drained(2), context(4));
+
+        assertEquals(1, result.batches().size());
+        ArgumentCaptor<List<WorkerStatus>> captor = listCaptor();
+        verifyGroupSelectorReceived(captor);
+        assertEquals(1, captor.getValue().size(), "dead worker filtered out");
+        assertEquals("10.0.0.1", captor.getValue().get(0).getIp());
+    }
+
+    @Test
+    void filters_out_workers_with_resource_unavailable() {
+        WorkerStatus ok = workerStatus("10.0.0.1", 4);
+        WorkerStatus oom = workerStatus("10.0.0.2", 4);
+
+        ResourceMeasure measure = mock(ResourceMeasure.class);
+        when(measure.isResourceAvailable(ok)).thenReturn(true);
+        when(measure.isResourceAvailable(oom)).thenReturn(false);
+        when(resourceMeasureFactory.getMeasure(any())).thenReturn(measure);
+
+        when(engineWorkerStatus.selectModelWorkerStatus(eq(RoleType.PREFILL), any()))
+                .thenReturn(map(ok, oom));
+        when(groupSelector.select(any(), any())).thenAnswer(inv -> {
+            List<WorkerStatus> candidates = inv.getArgument(0);
+            return candidates.isEmpty() ? null : candidates.get(0);
+        });
+        when(decodeSelector.select(any(), eq(RoleType.DECODE), anyString())).thenAnswer(inv -> okDecode());
+
+        DispatchPlan result = planner.plan(drained(2), context(4));
+
+        assertEquals(1, result.batches().size());
+        ArgumentCaptor<List<WorkerStatus>> captor = listCaptor();
+        verifyGroupSelectorReceived(captor);
+        assertEquals(1, captor.getValue().size(), "OOM worker filtered out");
+        assertEquals("10.0.0.1", captor.getValue().get(0).getIp());
+    }
+
     // ============== helpers ==============
 
     private static List<QueuedRequest> drained(int n) {
@@ -184,5 +235,14 @@ class DefaultDispatchPlannerTest {
 
     private static ServerStatus failedDecode() {
         return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static ArgumentCaptor<List<WorkerStatus>> listCaptor() {
+        return ArgumentCaptor.forClass(List.class);
+    }
+
+    private void verifyGroupSelectorReceived(ArgumentCaptor<List<WorkerStatus>> captor) {
+        org.mockito.Mockito.verify(groupSelector).select(captor.capture(), any());
     }
 }
