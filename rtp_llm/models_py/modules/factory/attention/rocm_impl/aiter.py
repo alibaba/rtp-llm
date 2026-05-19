@@ -469,20 +469,28 @@ class AiterPrefillAttnOp:
         if seqlen_k.device != q_tensor.device:
             seqlen_k = seqlen_k.to(q_tensor.device, non_blocking=True)
 
+        import sys as _sys
+        print(f"[PAGED_PREFILL] before _sanitize_block_table, kv_cache_base.shape={kv_cache.kv_cache_base.shape}, "
+              f"kv_cache_block_id_device.shape={fmha_params.kv_cache_block_id_device.shape}, seqlen_k={seqlen_k}", file=_sys.stderr, flush=True)
         block_table = self._sanitize_block_table(
             fmha_params.kv_cache_block_id_device,
             kv_cache.kv_cache_base.shape[0],
             seqlen_k,
         )
+        print(f"[PAGED_PREFILL] after _sanitize_block_table, block_table.shape={block_table.shape}", file=_sys.stderr, flush=True)
 
         use_compact = self.v1_kv_layout and not is_fp8
 
         if use_compact:
+            print(f"[PAGED_PREFILL] before _gather_and_reshape_kv_compact", file=_sys.stderr, flush=True)
             k_cache, v_cache, block_table = self._gather_and_reshape_kv_compact(
                 kv_cache.kv_cache_base, block_table
             )
+            print(f"[PAGED_PREFILL] after _gather_and_reshape_kv_compact OK", file=_sys.stderr, flush=True)
         else:
+            print(f"[PAGED_PREFILL] before _reshape_kv_cache_vectorized", file=_sys.stderr, flush=True)
             k_cache, v_cache = self._reshape_kv_cache_vectorized(kv_cache.kv_cache_base)
+            print(f"[PAGED_PREFILL] after _reshape_kv_cache_vectorized OK, k={k_cache.shape}, v={v_cache.shape}", file=_sys.stderr, flush=True)
 
         # Reuse values computed once in FMHAParams.prepare() to avoid
         # per-layer GPU→CPU sync from .item() on the hot path.
@@ -523,6 +531,13 @@ class AiterPrefillAttnOp:
             k_descale = self._fp8_descale
             v_descale = self._fp8_descale
 
+        import sys as _sys
+        print(f"[PAGED_PREFILL] before mha_batch_prefill_func: q={q_tensor.shape} dtype={q_tensor.dtype}, "
+              f"k_cache={k_cache.shape} dtype={k_cache.dtype}, v_cache={v_cache.shape}, "
+              f"cu_seqlens_q={cu_seqlens_q.shape}, max_q={max_seqlen_q}, max_k={max_seqlen_k}, "
+              f"block_table={block_table.shape}, seqlen_k={seqlen_k.shape}", file=_sys.stderr, flush=True)
+        torch.cuda.synchronize()
+        print(f"[PAGED_PREFILL] cuda synced before mha_batch_prefill_func", file=_sys.stderr, flush=True)
         res = aiter.mha_batch_prefill_func(
             q_tensor,
             k_cache,
@@ -539,6 +554,8 @@ class AiterPrefillAttnOp:
             k_descale=k_descale,
             v_descale=v_descale,
         )
+        torch.cuda.synchronize()
+        print(f"[PAGED_PREFILL] after mha_batch_prefill_func OK, res.shape={res.shape}", file=_sys.stderr, flush=True)
         return res.reshape(fmha_params.token_q_num, self.head_num * self.head_dim)
 
     def forward(self, qkv, kv_cache, fmha_params):
@@ -1276,22 +1293,32 @@ class AiterPrefillImplAsm(FMHAImplBase):
         kv_cache: Optional[LayerKVCache],
         layer_idx: int = 0,
     ) -> torch.Tensor:
+        import sys as _sys
+        print(f"[ASM_PREFILL] forward enter, layer_idx={layer_idx}, kv_cache={'None' if kv_cache is None else 'present'}", file=_sys.stderr, flush=True)
         if kv_cache is None:
             return self.fmha_impl.forward(qkv, kv_cache, self.fmha_params)
 
         # Apply RoPE and KV Cache processing
         if self.need_rope_kv_cache:
+            print(f"[ASM_PREFILL] before rope_kvcache_impl.forward, qkv.shape={qkv.shape}, dtype={qkv.dtype}", file=_sys.stderr, flush=True)
             fmha_input = self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)
+            torch.cuda.synchronize()
+            print(f"[ASM_PREFILL] after rope_kvcache_impl.forward OK (cuda synced)", file=_sys.stderr, flush=True)
         else:
             fmha_input = qkv
 
         # Apply write cache store if needed
+        print(f"[ASM_PREFILL] before apply_write_cache_store", file=_sys.stderr, flush=True)
         common.apply_write_cache_store(
             self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
+        print(f"[ASM_PREFILL] after apply_write_cache_store OK", file=_sys.stderr, flush=True)
 
         # Execute FMHA forward
-        return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
+        print(f"[ASM_PREFILL] before fmha_impl.forward (paged path)", file=_sys.stderr, flush=True)
+        result = self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
+        print(f"[ASM_PREFILL] after fmha_impl.forward OK, shape={result.shape}", file=_sys.stderr, flush=True)
+        return result
 
 
 class AiterPrefillImplNonAsm(FMHAImplBase):
