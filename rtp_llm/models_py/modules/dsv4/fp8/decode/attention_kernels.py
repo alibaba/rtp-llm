@@ -16,7 +16,6 @@ Two variants:
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 import torch
@@ -32,7 +31,6 @@ def attn_fp8_swa_paged(
     swa_pool_3d: torch.Tensor,  # [num_blocks, entries_per_block, 584] uint8
     attn_sink: torch.Tensor,  # [H] bf16 / fp32
     swa_topk_3d: torch.Tensor,  # [B, 1, win] int32 global slots into SWA pool
-    swa_topk_length: torch.Tensor,  # [B * q_len] int32 valid left prefix length
     cache_seqlens: torch.Tensor,  # [B] int32
     swa_block_table: torch.Tensor,  # [B, max_blocks_per_req] int32
     sched_meta: Any,  # FlashMLA sched_meta from DSv4DecodeAttnMetadataFP8
@@ -54,8 +52,6 @@ def attn_fp8_swa_paged(
         :func:`~decode_attn_metadata.get_or_build_sched_meta`); lifetime
         is tied to the decode step (eager) or the capture impl (CUDA graph).
     """
-    if os.environ.get("DSV4_FLASHMLA_TOPK_LENGTH", "1") == "0":
-        swa_topk_length = None
     return fp8_op.forward(
         q,
         swa_pool_3d,
@@ -64,7 +60,6 @@ def attn_fp8_swa_paged(
         sched_meta,
         cache_seqlens=cache_seqlens,
         block_table=swa_block_table,
-        topk_length=swa_topk_length,
     )
 
 
@@ -76,8 +71,6 @@ def attn_fp8_dual_paged(
     attn_sink: torch.Tensor,
     swa_topk_3d: torch.Tensor,  # [B, 1, win] int32 global slots into SWA pool
     cmp_topk_3d: torch.Tensor,  # [B, 1, K_cmp] int32 global slots into cmp pool
-    swa_topk_length: torch.Tensor,  # [B * q_len] int32 valid left prefix length
-    cmp_topk_length: torch.Tensor,  # [B * q_len] int32 valid left prefix length
     cache_seqlens: torch.Tensor,  # [B] int32
     swa_block_table: torch.Tensor,  # [B, max_blocks_per_req] int32
     sched_meta: Any,  # FlashMLA sched_meta from DSv4DecodeAttnMetadataFP8
@@ -96,9 +89,6 @@ def attn_fp8_dual_paged(
     differentiate extra_topk), see
     :func:`~decode_attn_metadata.get_or_build_sched_meta`.
     """
-    if os.environ.get("DSV4_FLASHMLA_TOPK_LENGTH", "1") == "0":
-        swa_topk_length = None
-        cmp_topk_length = None
     return fp8_op.forward(
         q,
         swa_pool_3d,
@@ -107,8 +97,6 @@ def attn_fp8_dual_paged(
         sched_meta,
         cache_seqlens=cache_seqlens,
         block_table=swa_block_table,
-        topk_length=swa_topk_length,
         extra_k_cache=cmp_pool_3d,
         extra_topk_idxs=cmp_topk_3d,
-        extra_topk_length=cmp_topk_length,
     )

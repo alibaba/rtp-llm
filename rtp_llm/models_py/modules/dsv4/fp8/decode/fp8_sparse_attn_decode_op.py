@@ -164,21 +164,6 @@ class SparseAttnV4DecodeFp8Op:
         else:
             extra_topk_3d = None
 
-        out_shape = (B, q_len, H, self.head_dim)
-        if q_len > 1 and topk_length is not None and topk_length.numel() == B * q_len:
-            # vLLM flattens decode queries so each query token owns its own
-            # sparse lengths. Match that contract when target-verify/spec decode
-            # passes more than one q token per request.
-            q = q.reshape(B * q_len, 1, H, D).contiguous()
-            topk_3d = topk_3d.reshape(B * q_len, 1, topk_3d.shape[-1]).contiguous()
-            topk_length = topk_length.reshape(B * q_len).contiguous()
-            if extra_topk_3d is not None:
-                extra_topk_3d = extra_topk_3d.reshape(
-                    B * q_len, 1, extra_topk_3d.shape[-1]
-                ).contiguous()
-            if extra_topk_length is not None:
-                extra_topk_length = extra_topk_length.reshape(B * q_len).contiguous()
-
         # Sparse FlashMLA consumes global slot ids from ``indices`` directly.
         # Its sparse branch does not pass block_table/cache_seqlens to the CUDA
         # kernel, so keep dense metadata disabled here.
@@ -207,4 +192,4 @@ class SparseAttnV4DecodeFp8Op:
             extra_topk_length=extra_topk_length,
         )
 
-        return attn_out.view(*out_shape).contiguous()
+        return attn_out.view(B, q_len, H, self.head_dim).contiguous()
