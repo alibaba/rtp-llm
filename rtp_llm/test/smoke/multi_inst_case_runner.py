@@ -1,9 +1,11 @@
 import concurrent.futures
 import copy
+import json
 import logging
 import multiprocessing
 import os
 import queue
+import re
 import shlex
 import time
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -81,6 +83,21 @@ def _make_master_only_service_route(
         master_endpoint=_make_endpoint(master_addr),
         use_local=True,
     )
+
+
+def _is_dp_controller_v1(flexlb_envs: Dict[str, str]) -> bool:
+    # V1 FlexLB-DP routes per-batch BatchEnqueue to a single dp_rank=0 master
+    # which fans out to peers via cfg.dp_peer_addrs. The Layer 10A protocol has
+    # only dp_rank=0 publish dp_status[]; registering peer DP leaders alongside
+    # the master would create WorkerStatus entries with empty dpStatuses,
+    # breaking applyDpRankAddress remap when a non-master entry wins LB.
+    raw = flexlb_envs.get("FLEXLB_CONFIG")
+    if not raw:
+        return False
+    try:
+        return bool(json.loads(raw).get("dpBalanceEnabled"))
+    except (ValueError, TypeError):
+        return False
 
 
 def _extract_int_arg(args_str: str, arg_name: str, default: int = 1) -> int:
@@ -1306,6 +1323,343 @@ class FlexLbPdSeperationCaseRunner(_PdRunnerMixin, CaseRunner):
             request_count,
         )
 
+    _FAKE_QUERY_LOG_PATTERN = re.compile(
+        r"Enqueue fake_query req=(-?\d+) dp_rank=(\d+)"
+    )
+
+    def _scan_prefill_fake_query_log(
+        self, prefill_mgr: Optional[MagaServerManager]
+    ) -> Dict[int, int]:
+        path = getattr(prefill_mgr, "log_file_path", None) if prefill_mgr else None
+        if not path or not os.path.exists(path):
+            return {}
+        counts: Dict[int, int] = {}
+        try:
+            with open(path, "r", errors="replace") as fh:
+                for line in fh:
+                    match = self._FAKE_QUERY_LOG_PATTERN.search(line)
+                    if not match:
+                        continue
+                    rank = int(match.group(2))
+                    counts[rank] = counts.get(rank, 0) + 1
+        except OSError as exc:
+            logging.warning("failed to scan prefill log %s: %s", path, exc)
+            return {}
+        return counts
+
+    @staticmethod
+    def _has_nonempty_output(response: Any) -> bool:
+        data = flexlb_checks.plain_json(response)
+        if not isinstance(data, dict):
+            return False
+        choices = data.get("choices")
+        if isinstance(choices, list) and choices:
+            first = choices[0]
+            if isinstance(first, dict):
+                message = first.get("message")
+                if isinstance(message, dict):
+                    content = message.get("content")
+                    if isinstance(content, str) and content.strip():
+                        return True
+                text = first.get("text")
+                if isinstance(text, str) and text.strip():
+                    return True
+        response_batch = data.get("response_batch")
+        if isinstance(response_batch, list) and response_batch:
+            first = response_batch[0]
+            if isinstance(first, dict):
+                resp_text = first.get("response")
+                if isinstance(resp_text, str) and resp_text.strip():
+                    return True
+                output_ids = first.get("output_ids")
+                if isinstance(output_ids, list) and output_ids:
+                    return True
+        if isinstance(data.get("response"), str) and data["response"].strip():
+            return True
+        return False
+
+    def _verify_integrated_kv_affinity_with_followup(
+        self,
+        frontend_server_manager: MagaServerManager,
+        flexlb_manager: Any,
+        flexlb_envs: Dict[str, str],
+        prefill_worker_ports: List[int],
+    ) -> Tuple[bool, str]:
+        ok, err = self._verify_integrated_cache_affinity(
+            frontend_server_manager,
+            flexlb_manager,
+            flexlb_envs,
+            prefill_worker_ports,
+        )
+        if not ok:
+            return False, err
+
+        (
+            probe_qr,
+            block_cache_keys,
+            token_count,
+            prompt_repeat,
+            err_msg,
+        ) = self._select_cache_affinity_probe(frontend_server_manager, flexlb_envs)
+        if probe_qr is None:
+            return False, "kv-affinity followup probe selection failed: " + err_msg
+
+        ok, baseline = self._visit_frontend_json(
+            frontend_server_manager,
+            probe_qr,
+            retry_times=self._frontend_probe_retry_times(),
+            timeout=self._frontend_probe_timeout_sec(),
+        )
+        if not ok:
+            return (
+                False,
+                "kv-affinity followup baseline-pin request failed: "
+                f"prompt_repeat={prompt_repeat}, err={baseline}",
+            )
+        baseline_prefill = flexlb_checks.find_role_addr(baseline, "PREFILL")
+        if not baseline_prefill:
+            return (
+                False,
+                f"kv-affinity followup baseline missing PREFILL: {baseline}",
+            )
+        baseline_port = int(baseline_prefill["http_port"])
+
+        ok, followup = self._visit_frontend_json(
+            frontend_server_manager,
+            probe_qr,
+            retry_times=self._frontend_probe_retry_times(),
+            timeout=self._frontend_probe_timeout_sec(),
+        )
+        if not ok:
+            return (
+                False,
+                f"kv-affinity followup frontend request failed: {followup}",
+            )
+        followup_prefill = flexlb_checks.find_role_addr(followup, "PREFILL")
+        if not followup_prefill:
+            return (
+                False,
+                f"kv-affinity followup missing PREFILL role_addr: {followup}",
+            )
+        followup_port = int(followup_prefill["http_port"])
+        if followup_port != baseline_port:
+            return (
+                False,
+                "kv-affinity followup routed to a different prefill DP, "
+                f"baseline_port={baseline_port}, followup_port={followup_port}, "
+                f"block_count={len(block_cache_keys)}, "
+                f"token_count={token_count}",
+            )
+        reuse_len = flexlb_checks.max_reuse_len(followup)
+        if reuse_len <= 0:
+            return (
+                False,
+                "kv-affinity followup reuse_len=0, expected >0; "
+                f"prefill_port={followup_port}, "
+                f"block_count={len(block_cache_keys)}, "
+                f"token_count={token_count}, body={followup}",
+            )
+        if not self._has_nonempty_output(followup):
+            return (
+                False,
+                f"kv-affinity followup produced empty output: {followup}",
+            )
+        logging.info(
+            "flexlb kv-affinity followup verified: prefill_port=%d "
+            "reuse_len=%d block_count=%d",
+            followup_port,
+            reuse_len,
+            len(block_cache_keys),
+        )
+        return True, "ok"
+
+    def _verify_low_concurrency_fake_pad(
+        self,
+        frontend_server_manager: MagaServerManager,
+        prefill_mgr: Optional[MagaServerManager],
+        dp_size: int,
+    ) -> Tuple[bool, str]:
+        if dp_size <= 1:
+            return True, "ok (dp_size=1, no fake-pad expected)"
+
+        before_counts = self._scan_prefill_fake_query_log(prefill_mgr)
+        before_total = sum(before_counts.values())
+
+        source_qr = self._select_flexlb_feature_qr()
+        probe_qr = self._make_fast_probe_qr(source_qr, prompt_repeat=1)
+        ok, response = self._visit_frontend_json(
+            frontend_server_manager,
+            probe_qr,
+            retry_times=self._frontend_probe_retry_times(),
+            timeout=self._frontend_probe_timeout_sec(),
+        )
+        if not ok:
+            return False, f"low-concurrency frontend request failed: {response}"
+        if not self._has_nonempty_output(response):
+            return (
+                False,
+                f"low-concurrency request produced empty output: {response}",
+            )
+
+        time.sleep(
+            float(os.environ.get("FLEXLB_SMOKE_LOW_CONCURRENCY_LOG_WAIT_SEC", "0.5"))
+        )
+
+        after_counts = self._scan_prefill_fake_query_log(prefill_mgr)
+        after_total = sum(after_counts.values())
+        delta = after_total - before_total
+        delta_per_rank: Dict[int, int] = {}
+        for rank, count in after_counts.items():
+            delta_per_rank[rank] = count - before_counts.get(rank, 0)
+
+        expected_min = dp_size - 1
+        if delta < expected_min:
+            return (
+                False,
+                "low-concurrency expected at least "
+                f"{expected_min} new fake_query log line(s) for dp_size={dp_size}, "
+                f"got delta={delta}, delta_per_rank={delta_per_rank}, "
+                f"after_per_rank={after_counts}, "
+                f"prefill_log={getattr(prefill_mgr, 'log_file_path', None)}",
+            )
+        if not any(rank > 0 and delta_per_rank.get(rank, 0) > 0 for rank in range(dp_size)):
+            return (
+                False,
+                "low-concurrency new fake_query lines missing on non-zero ranks, "
+                f"delta_per_rank={delta_per_rank}",
+            )
+        logging.info(
+            "flexlb low-concurrency fake-pad verified: dp_size=%d "
+            "delta=%d delta_per_rank=%s",
+            dp_size,
+            delta,
+            delta_per_rank,
+        )
+        return True, "ok"
+
+    def _verify_high_concurrency_full_batch(
+        self,
+        frontend_server_manager: MagaServerManager,
+        prefill_mgr: Optional[MagaServerManager],
+        dp_size: int,
+        flexlb_envs: Dict[str, str],
+    ) -> Tuple[bool, str]:
+        if dp_size <= 1:
+            return True, "ok (dp_size=1, no batching to verify)"
+
+        request_count_raw = flexlb_envs.get(
+            "FLEXLB_SMOKE_HIGH_CONCURRENCY_REQUESTS",
+            os.environ.get(
+                "FLEXLB_SMOKE_HIGH_CONCURRENCY_REQUESTS", str(dp_size * 2)
+            ),
+        )
+        try:
+            request_count = max(int(request_count_raw), dp_size * 2)
+        except (TypeError, ValueError):
+            request_count = dp_size * 2
+        if request_count % dp_size != 0:
+            request_count = ((request_count // dp_size) + 1) * dp_size
+
+        before_total = sum(self._scan_prefill_fake_query_log(prefill_mgr).values())
+
+        source_qr = self._select_flexlb_feature_qr()
+        endpoint = self._resolve_endpoint(source_qr, self.task_info.endpoint)
+        frontend_url = self._frontend_http_url(frontend_server_manager, endpoint)
+        request_timeout_sec = float(
+            os.environ.get("FLEXLB_SMOKE_HIGH_CONCURRENCY_REQUEST_TIMEOUT_SEC", "30")
+        )
+        retry_times = int(os.environ.get("FLEXLB_SMOKE_VISIT_RETRY_TIME", "1"))
+
+        result_by_idx: Dict[int, Tuple[bool, Any]] = {}
+        mp_ctx = multiprocessing.get_context("fork")
+        result_queue = mp_ctx.Queue()
+        processes: List[multiprocessing.Process] = []
+
+        def drain_results() -> None:
+            while True:
+                try:
+                    idx, ok_, resp = result_queue.get_nowait()
+                    result_by_idx[idx] = (ok_, resp)
+                except queue.Empty:
+                    return
+
+        try:
+            for idx in range(request_count):
+                suffix = f"\nflexlb high-conc smoke {idx} {time.time_ns()}"
+                query = self._make_fast_probe_qr(source_qr, suffix, prompt_repeat=1)[
+                    "query"
+                ]
+                process = mp_ctx.Process(
+                    target=flexlb_checks.visit_frontend_url_json_process,
+                    args=(
+                        idx,
+                        frontend_url,
+                        query,
+                        retry_times,
+                        request_timeout_sec,
+                        result_queue,
+                    ),
+                )
+                process.daemon = True
+                process.start()
+                processes.append(process)
+            deadline = time.time() + request_timeout_sec + 5
+            while time.time() < deadline and any(p.is_alive() for p in processes):
+                drain_results()
+                time.sleep(0.05)
+            drain_results()
+        finally:
+            for process in processes:
+                if process.is_alive():
+                    process.terminate()
+            for process in processes:
+                process.join(timeout=5)
+                if process.is_alive():
+                    process.kill()
+                    process.join(timeout=1)
+            drain_results()
+            result_queue.close()
+            result_queue.cancel_join_thread()
+
+        bad_results: List[Any] = []
+        for idx in range(request_count):
+            ok_, resp = result_by_idx.get(
+                idx, (False, f"no result for request {idx}")
+            )
+            if not ok_ or not self._has_nonempty_output(resp):
+                bad_results.append({"idx": idx, "ok": ok_, "resp": resp})
+        if bad_results:
+            return (
+                False,
+                "high-concurrency had "
+                f"{len(bad_results)}/{request_count} bad responses: "
+                f"{bad_results[:3]}",
+            )
+
+        time.sleep(
+            float(
+                os.environ.get("FLEXLB_SMOKE_HIGH_CONCURRENCY_LOG_WAIT_SEC", "0.5")
+            )
+        )
+        after_total = sum(self._scan_prefill_fake_query_log(prefill_mgr).values())
+        delta = after_total - before_total
+        max_allowed_fake = max(0, request_count // 2 - 1)
+        if delta > max_allowed_fake:
+            return (
+                False,
+                "high-concurrency emitted too many fake_query slots: "
+                f"delta={delta}, request_count={request_count}, "
+                f"max_allowed={max_allowed_fake}",
+            )
+        logging.info(
+            "flexlb high-concurrency full-batch verified: requests=%d "
+            "fake_delta=%d max_allowed=%d",
+            request_count,
+            delta,
+            max_allowed_fake,
+        )
+        return True, "ok"
+
     def _verify_flexlb_integrated_features(
         self,
         frontend_server_manager: MagaServerManager,
@@ -1313,6 +1667,8 @@ class FlexLbPdSeperationCaseRunner(_PdRunnerMixin, CaseRunner):
         flexlb_envs: Dict[str, str],
         task_states: TaskStates,
         prefill_worker_ports: List[int],
+        prefill_mgr: Optional[MagaServerManager] = None,
+        dp_size: int = 1,
     ) -> Tuple[bool, str]:
         if not flexlb_checks.flexlb_check_enabled(
             flexlb_envs, "FLEXLB_SMOKE_INTEGRATION_CHECK", False
@@ -1320,6 +1676,17 @@ class FlexLbPdSeperationCaseRunner(_PdRunnerMixin, CaseRunner):
             return True, "ok"
 
         if flexlb_checks.flexlb_check_enabled(
+            flexlb_envs, "FLEXLB_SMOKE_CHECK_KV_AFFINITY_WITH_FOLLOWUP", False
+        ):
+            ok, err_msg = self._verify_integrated_kv_affinity_with_followup(
+                frontend_server_manager,
+                flexlb_manager,
+                flexlb_envs,
+                prefill_worker_ports,
+            )
+            if not ok:
+                return False, err_msg
+        elif flexlb_checks.flexlb_check_enabled(
             flexlb_envs, "FLEXLB_SMOKE_CHECK_CACHE_AFFINITY", True
         ):
             ok, err_msg = self._verify_integrated_cache_affinity(
@@ -1327,6 +1694,29 @@ class FlexLbPdSeperationCaseRunner(_PdRunnerMixin, CaseRunner):
                 flexlb_manager,
                 flexlb_envs,
                 prefill_worker_ports,
+            )
+            if not ok:
+                return False, err_msg
+
+        if flexlb_checks.flexlb_check_enabled(
+            flexlb_envs, "FLEXLB_SMOKE_CHECK_LOW_CONCURRENCY_FAKE_PAD", False
+        ):
+            ok, err_msg = self._verify_low_concurrency_fake_pad(
+                frontend_server_manager,
+                prefill_mgr,
+                dp_size,
+            )
+            if not ok:
+                return False, err_msg
+
+        if flexlb_checks.flexlb_check_enabled(
+            flexlb_envs, "FLEXLB_SMOKE_CHECK_HIGH_CONCURRENCY_FULL_BATCH", False
+        ):
+            ok, err_msg = self._verify_high_concurrency_full_batch(
+                frontend_server_manager,
+                prefill_mgr,
+                dp_size,
+                flexlb_envs,
             )
             if not ok:
                 return False, err_msg
@@ -1434,8 +1824,14 @@ class FlexLbPdSeperationCaseRunner(_PdRunnerMixin, CaseRunner):
         frontend_server_manager = None
         try:
             flexlb_envs["MODEL_SERVICE_CONFIG"] = flexlb_route.model_dump_json()
-            flexlb_envs["DOMAIN_ADDRESS:smoke-prefill"] = ",".join(prefill_worker_addrs)
-            flexlb_envs["DOMAIN_ADDRESS:smoke-decode"] = ",".join(decode_worker_addrs)
+            if _is_dp_controller_v1(flexlb_envs):
+                prefill_register_addrs = prefill_worker_addrs[:1]
+                decode_register_addrs = decode_worker_addrs[:1]
+            else:
+                prefill_register_addrs = prefill_worker_addrs
+                decode_register_addrs = decode_worker_addrs
+            flexlb_envs["DOMAIN_ADDRESS:smoke-prefill"] = ",".join(prefill_register_addrs)
+            flexlb_envs["DOMAIN_ADDRESS:smoke-decode"] = ",".join(decode_register_addrs)
             flexlb_envs.setdefault("SCHEDULE_WORKER_SIZE", "1")
             flexlb_envs.setdefault("SYNC_STATUS_INTERVAL", "100")
             flexlb_envs.setdefault("SYNC_REQUEST_TIMEOUT_MS", "1000")
@@ -1510,6 +1906,8 @@ class FlexLbPdSeperationCaseRunner(_PdRunnerMixin, CaseRunner):
                     flexlb_envs,
                     task_states,
                     prefill_worker_ports,
+                    prefill_mgr=prefill_mgr,
+                    dp_size=prefill_dp_size,
                 )
                 if not ok:
                     task_states.ret = False
