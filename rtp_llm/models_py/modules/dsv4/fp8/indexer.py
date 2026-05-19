@@ -167,10 +167,9 @@ class _IndexerFP8PrefillMeta(NamedTuple):
         (``cu_kv_seqlens``). ``ks/ke`` are GLOBAL flat-K coords with the
         per-token request offset baked in (``ks[t] = cu_kv_seqlens[req_t]``,
         ``ke[t] = ks[t] + min((pos_t+1)//ratio, T_b)``). The TopK kernel
-        emits global indices; ``forward()`` subtracts ``cu_kv_per_token``
-        before returning so consumers (``combine_topk_swa_indices`` →
-        per-request ``[0, N_b)`` workspace columns) get request-local
-        compressed offsets — same contract as the B==1 path.
+        processes columns ``[ks, ke)`` but returns indices relative to ``ks``
+        — already in request-local ``[0, N_b)`` workspace column space,
+        same contract as the B==1 path.
     """
 
     # ── geometry (Python scalars; cheap) ──
@@ -608,11 +607,8 @@ class IndexerFP8(PoolBackedModule):
             # request b at absolute position pos_t:
             #     ks[t] = cu_kv_seqlens[b]
             #     ke[t] = cu_kv_seqlens[b] + min((pos_t+1)//ratio, T_b)
-            # The TopK kernel returns indices in the same global coord
-            # space; ``forward()`` subtracts ``cu_kv_per_token`` so
-            # downstream ``combine_topk_swa_indices`` receives request-
-            # local ``[0, N_b)`` compressed offsets — same contract as
-            # the legacy B==1 path.
+            # The TopK kernel processes [ks, ke) but returns indices
+            # relative to ks — already request-local [0, N_b).
             with record_function_range("dsv4.fp8.indexer.prepare.varlen_bounds"):
                 req_id_long = req_id_per_token.to(device=device, dtype=torch.int64)
                 T_per_token = T_per_req.to(torch.int64).index_select(0, req_id_long)
@@ -922,17 +918,6 @@ class IndexerFP8(PoolBackedModule):
                     )
                 del logits
 
-            # Varlen path: TopK indices are global flat-K coords (matching
-            # ks/ke). Convert back to request-local ``[0, N_b)`` so the
-            # downstream ``combine_topk_swa_indices`` (per-request workspace
-            # column space) sees the same contract as the legacy B==1 path.
-            # ``-1`` sentinel rows past the per-row valid count must stay -1.
-            if attention_inputs.cu_kv_per_token is not None:
-                with record_function_range("dsv4.fp8.indexer.prefill.topk_rebase"):
-                    off = attention_inputs.cu_kv_per_token.unsqueeze(1)  # [M, 1] int32
-                    out_buf = torch.where(
-                        out_buf >= 0, out_buf - off, out_buf
-                    ).contiguous()
             return out_buf.view(out_shape)
         finally:
             self._clear_nested_pool()
