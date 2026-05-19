@@ -13,7 +13,6 @@ from .review import check_review_qualified, resolve_context
 from .merge import (
     check_merge_conflicts,
     check_merge_done,
-    check_rebase_internal,
     trigger_merge,
     wait_merge,
 )
@@ -124,13 +123,6 @@ def main(argv):
     merge_done.add_argument("--output-file", default="",
                             help="Write `merge_action=done|wait|trigger` to this file (typically $GITHUB_OUTPUT)")
 
-    rebase_int = subparsers.add_parser("check-rebase-internal")
-    rebase_int.add_argument("pr_id")
-    rebase_int.add_argument("commit_id")
-    rebase_int.add_argument("security")
-    rebase_int.add_argument("repository")
-    rebase_int.add_argument("--warn-only", action="store_true")
-
     args = parser.parse_args(argv)
     if not args.command:
         parser.print_help()
@@ -161,8 +153,6 @@ def main(argv):
             return wait_merge(args)
         if args.command == "check-merge-done":
             return check_merge_done(args)
-        if args.command == "check-rebase-internal":
-            return check_rebase_internal(args)
     except GateError as exc:
         log(str(exc))
         return exc.exit_code

@@ -5,7 +5,7 @@ import json
 import time
 
 from .common import BRANCH_REF, CI_TRIGGER_URL, PROJECT_ID, GateError, log, write_output
-from .ci_service import branch_commit_id, ci_service_request, get_branch_info
+from .ci_service import ci_service_request
 from .github import github_get
 
 
@@ -90,10 +90,10 @@ def check_merge_done(args):
 
     Writes `merge_action` to `--output-file` (GITHUB_OUTPUT) and uses the
     same exit convention as `pre-check-status`:
-      - done    → exit 0 (gate skips rebase/trigger/wait, green directly)
+      - done    → exit 0 (gate skips trigger and wait, green directly)
       - wait    → exit 0 (task already PENDING; skip trigger, just wait)
       - trigger → exit 1 (no record / explicit failure / protocol error;
-                          gate must run rebase + trigger + wait)
+                          gate must run trigger + wait)
 
     Conflating PENDING with "not done" would re-issue a MERGE-TASK for a
     commit whose internal merge is already running — breaking the same-
@@ -143,38 +143,6 @@ def check_merge_done(args):
 
     log("[GO] Internal merge NOT YET DONE for commit %s (status=%s) — will trigger" % (args.commit_id, status))
     _write_merge_action(args, "trigger")
-    return 1
-
-
-def check_rebase_internal(args):
-    # type: (argparse.Namespace) -> int
-    """Check that the internal `open_merge/<PR>` branch matches `main-internal`.
-
-    Per design, equal commit IDs indicate the internal source is properly
-    aligned. Mismatch → exit 1 (or warn-only, see --warn-only).
-
-    NOTE: this is a strict literal check. If the internal REBASE merge can
-    handle the drift natively, downgrade by passing --warn-only.
-    """
-    pr_branch = "open_merge/%s" % args.pr_id
-    pr_info = get_branch_info(pr_branch, args.repository, args.commit_id, args.security)
-    main_info = get_branch_info(BRANCH_REF, args.repository, args.commit_id, args.security)
-    pr_commit = branch_commit_id(pr_info)
-    main_commit = branch_commit_id(main_info)
-    log("Internal branch %s @ %s" % (pr_branch, pr_commit or "<unknown>"))
-    log("Internal branch %s @ %s" % (BRANCH_REF, main_commit or "<unknown>"))
-    if not pr_commit or not main_commit:
-        log("::error::Failed to read commit ids for internal branches")
-        return 1
-    if pr_commit == main_commit:
-        log("Internal branches aligned")
-        return 0
-    if args.warn_only:
-        log("::warning::Internal branch %s diverges from %s (warn-only mode)" % (pr_branch, BRANCH_REF))
-        return 0
-    log("::error::Internal branch %s (%s) diverges from %s (%s) — internal rebase required" % (
-        pr_branch, pr_commit, BRANCH_REF, main_commit,
-    ))
     return 1
 
 

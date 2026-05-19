@@ -23,10 +23,12 @@
 # │                                                                 │
 # │ gate (needs: build, runs after build success)                   │
 # │   → require fresh APPROVED review (LGTM-only does NOT pass)     │
-# │   → precheck: internal merge already done → success (dedup)    │
-# │   → check internal rebase (open_merge/<pr> vs main-internal)    │
-# │   → trigger-merge: send MERGE-TASK to internal CI               │
-# │   → wait-merge: poll up to 2h                                   │
+# │   → precheck (3-way): merge_action = done | wait | trigger      │
+# │       done    → skip trigger and wait, gate green directly      │
+# │       wait    → skip trigger; only run wait-merge for in-flight │
+# │       trigger → trigger-merge + wait-merge                      │
+# │   → Aone MERGE-TASK uses mergeType: REBASE so drift is handled  │
+# │     by the internal service; conflicts surface via wait-merge   │
 # │   → success → gate check green → PR mergeable                   │
 # │                                                                 │
 # │ Internal merge happens BEFORE external merge (gate job),        │
@@ -300,15 +302,6 @@ jobs:
           else
             echo "Internal merge not yet done; will trigger"
           fi
-
-      - name: Internal rebase check
-        if: steps.precheck.outputs.merge_action == 'trigger'
-        run: |
-          python3 -m ci_gate check-rebase-internal \
-            "${{ github.event.pull_request.number }}" \
-            "${{ github.event.pull_request.head.sha }}" \
-            "${{ secrets.CI_SECRET }}" \
-            "${{ github.repository }}"
 
       - name: Trigger internal merge
         if: steps.precheck.outputs.merge_action == 'trigger'
