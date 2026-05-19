@@ -106,6 +106,9 @@ class QWen3_VL(QwenV3):
         config.attn_config.rope_config.mrope_dim1 = mrope_section[0]
         config.attn_config.rope_config.mrope_dim2 = mrope_section[1]
         config.attn_config.rope_config.mrope_dim3 = mrope_section[2]
+        config.attn_config.rope_config.mrope_interleaved = config_json[
+            "rope_scaling"
+        ].get("mrope_interleaved", True)
         config.mm_model_config.mm_position_ids_style = 2
 
         config.mm_related_params.config["ckpt_path"] = config.ckpt_path

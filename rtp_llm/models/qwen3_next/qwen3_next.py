@@ -214,6 +214,7 @@ class Qwen35Moe(Qwen3NextBase):
         config.attn_config.rope_config.mrope_dim1 = mrope_section[0]
         config.attn_config.rope_config.mrope_dim2 = mrope_section[1]
         config.attn_config.rope_config.mrope_dim3 = mrope_section[2]
+        config.attn_config.rope_config.mrope_interleaved = mrope_interleaved
         config.mm_model_config.mm_position_ids_style = 2
 
     @classmethod
@@ -233,10 +234,11 @@ class Qwen35Moe(Qwen3NextBase):
         moe_config = self.moe_config
         max_generate_batch_size = self.max_generate_batch_size
 
+        from rtp_llm.device.device_type import is_hip
         from rtp_llm.models_py.utils.arch import is_cuda
 
-        if not is_cuda():
-            raise RuntimeError("Qwen3Next is only supported in cuda arch")
+        if not is_cuda() and not is_hip():
+            raise RuntimeError("Qwen3Next is only supported in cuda/rocm arch")
         from rtp_llm.models_py.model_desc.qwen3_next import Qwen35Model
 
         self.py_model = Qwen35Model(

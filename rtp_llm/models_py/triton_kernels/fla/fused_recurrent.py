@@ -29,7 +29,7 @@ def cal_block_idx(x, seq_size_per_block):
         "IS_CONTINUOUS_BATCHING": lambda args: args["block_map"] is not None,
     }
 )
-@triton.jit(do_not_specialize=["N", "T"])
+@triton.jit
 def fused_recurrent_gated_delta_rule_fwd_kernel(
     q,
     k,
@@ -42,7 +42,7 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     cu_seqlens,
     block_map,
     sequence_lengths,
-    max_block_size: tl.int32,
+    block_map_stride_b: tl.int64,
     scale,
     N,  # num of sequences
     T,  # num of tokens
@@ -118,7 +118,7 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
         if IS_CONTINUOUS_BATCHING:
             load_block_offset = cal_block_idx(sequence_length - 1, SEQ_SIZE_PER_BLOCK)
             read_block_id = tl.load(
-                block_map + i_n * max_block_size + load_block_offset
+                block_map + i_n * block_map_stride_b + load_block_offset
             ).to(tl.int64)
             if read_block_id <= 0:
                 return
@@ -159,7 +159,7 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
                 cal_block_idx(sequence_length, SEQ_SIZE_PER_BLOCK) + i_t
             )
             write_block_id = tl.load(
-                block_map + i_n * max_block_size + write_block_offset
+                block_map + i_n * block_map_stride_b + write_block_offset
             ).to(tl.int64)
             p_ht = ht + write_block_id * stride_final_state_token
         else:
@@ -217,10 +217,10 @@ def fused_recurrent_gated_delta_rule_fwd(
         q.stride(3) == 1 and k.stride(3) == 1 and v.stride(3) == 1
     ), "stride_qd, stride_kd, stride_vd must be 1"
 
-    max_block_size = 0
+    block_map_stride_b = 0
     if block_map is not None:
         assert block_map.ndim == 2, "block_map must be a 2D tensor"
-        max_block_size = block_map.shape[1]
+        block_map_stride_b = block_map.stride(0)
 
     grid = (NK, NV, N * HV)
     fused_recurrent_gated_delta_rule_fwd_kernel[grid](
@@ -235,7 +235,7 @@ def fused_recurrent_gated_delta_rule_fwd(
         cu_seqlens=cu_seqlens,
         block_map=block_map,
         sequence_lengths=sequence_lengths,
-        max_block_size=max_block_size,
+        block_map_stride_b=block_map_stride_b,
         scale=scale,
         N=N,
         T=T,

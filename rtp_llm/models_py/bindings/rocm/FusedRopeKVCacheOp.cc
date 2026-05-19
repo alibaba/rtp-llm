@@ -84,22 +84,14 @@ void prepareInPlace(CKAttn& params, const torch_ext::PyAttentionInputs& attn_inp
     updateKvCacheOffset(params, attn_inputs.kv_cache_kernel_block_id_device);
 }
 
-static void rejectMropeWithoutPositionIds(const RopeConfig& rope_config, const char* where) {
-    // ROCm prefill/decode dispatch always passes position_ids=nullptr (combo_position_ids
-    // is not plumbed through this path yet). Mrope needs real per-axis position ids — without
-    // them the kernel silently uses position_id=-1, producing wrong RoPE positions.
-    if (rope_config.style == RopeStyle::Mrope) {
-        throw std::runtime_error(std::string(where)
-                                 + ": RopeStyle::Mrope requires combo_position_ids, but ROCm "
-                                   "fused RoPE+KV-cache path does not plumb position_ids yet. "
-                                   "Run this model on the CUDA path or extend this op to accept "
-                                   "position_ids before enabling Mrope.");
-    }
-}
-
 FusedRopeKVCachePrefillOpBase::FusedRopeKVCachePrefillOpBase(const AttentionConfigs& attn_configs):
     attn_configs_(attn_configs) {
-    rejectMropeWithoutPositionIds(attn_configs.rope_config, "FusedRopeKVCachePrefillOp");
+    // MRoPE with mrope_interleaved=false is not supported: the kernel's
+    // RotaryHalfRead pairing assumes interleaved cos/sin layout.
+    if (attn_configs.rope_config.style == RopeStyle::Mrope && !attn_configs.rope_config.mrope_interleaved) {
+        throw std::runtime_error("ROCm FusedRopeKVCache does not support MRoPE with mrope_interleaved=false. "
+                                 "Use mrope_interleaved=true or disable the fused rope path.");
+    }
 }
 
 FusedRopeKVCachePrefillOpAsm::FusedRopeKVCachePrefillOpAsm(const AttentionConfigs& attn_configs):
@@ -144,14 +136,29 @@ CKAttnPtr FusedRopeKVCachePrefillOpBase::prepare(torch_ext::PyAttentionInputs at
         attn_params->prefix_lengths = attn_inputs.prefix_lengths;
     }
     attn_params->kv_block_array.cache_type = attn_configs_.kv_cache_dtype;
-    attn_params->position_ids = attn_inputs.combo_position_ids;
+    attn_params->position_ids              = attn_inputs.combo_position_ids;
+    // MRoPE requires combo_position_ids with index_factor axes
+    if (attn_configs_.rope_config.style == RopeStyle::Mrope) {
+        int expected_factor = attn_configs_.rope_config.index_factor;
+        if (!attn_params->position_ids.defined() || attn_params->position_ids.numel() == 0) {
+            throw std::runtime_error("MRoPE prefill requires combo_position_ids but it is undefined or empty");
+        }
+        int token_num    = int(attn_inputs.input_lengths.sum().item<int64_t>());
+        int min_expected = token_num * expected_factor;
+        if (attn_params->position_ids.numel() < min_expected) {
+            throw std::runtime_error("MRoPE prefill combo_position_ids too small: got "
+                                     + std::to_string(attn_params->position_ids.numel()) + ", expected at least "
+                                     + std::to_string(min_expected) + " (token_num=" + std::to_string(token_num)
+                                     + ", index_factor=" + std::to_string(expected_factor) + ")");
+        }
+    }
 
-// Ensure position_ids is on CUDA device (e.g., MROPE position_ids may be on CPU)
+    // Ensure position_ids is on CUDA device (e.g., MROPE position_ids may be on CPU)
     if (attn_params->position_ids.defined() && !attn_params->position_ids.is_cuda()) {
         attn_params->position_ids =
             attn_params->position_ids.to(torch::kCUDA, /*non_blocking=*/false, /*copy=*/true).contiguous();
     }
-    
+
     int max_prefix_length = 0;
     if (has_prefix && attn_params->prefix_lengths.defined() && attn_params->prefix_lengths.numel() > 0) {
         max_prefix_length = attn_params->prefix_lengths.max().item<int32_t>();
@@ -353,7 +360,12 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
 
 FusedRopeKVCacheDecodeOpBase::FusedRopeKVCacheDecodeOpBase(const AttentionConfigs& attn_configs):
     attn_configs_(attn_configs) {
-    rejectMropeWithoutPositionIds(attn_configs.rope_config, "FusedRopeKVCacheDecodeOp");
+    // MRoPE with mrope_interleaved=false is not supported: the kernel's
+    // RotaryHalfRead pairing assumes interleaved cos/sin layout.
+    if (attn_configs.rope_config.style == RopeStyle::Mrope && !attn_configs.rope_config.mrope_interleaved) {
+        throw std::runtime_error("ROCm FusedRopeKVCache does not support MRoPE with mrope_interleaved=false. "
+                                 "Use mrope_interleaved=true or disable the fused rope path.");
+    }
 }
 
 FusedRopeKVCacheDecodeOpAsm::FusedRopeKVCacheDecodeOpAsm(const AttentionConfigs& attn_configs):
@@ -392,6 +404,21 @@ CKAttnPtr FusedRopeKVCacheDecodeOpBase::prepare(torch_ext::PyAttentionInputs att
     attn_params->prefix_lengths            = attn_inputs.prefix_lengths;
     attn_params->padding_offset            = attn_inputs.padding_offset;
     attn_params->position_ids              = attn_inputs.combo_position_ids;
+    // MRoPE requires combo_position_ids with index_factor axes
+    if (attn_configs_.rope_config.style == RopeStyle::Mrope) {
+        int expected_factor = attn_configs_.rope_config.index_factor;
+        if (!attn_params->position_ids.defined() || attn_params->position_ids.numel() == 0) {
+            throw std::runtime_error("MRoPE requires combo_position_ids but it is undefined or empty");
+        }
+        int token_num    = int(attn_inputs.sequence_lengths.numel());
+        int min_expected = token_num * expected_factor;
+        if (attn_params->position_ids.numel() < min_expected) {
+            throw std::runtime_error("MRoPE combo_position_ids too small: got "
+                                     + std::to_string(attn_params->position_ids.numel()) + ", expected at least "
+                                     + std::to_string(min_expected) + " (token_num=" + std::to_string(token_num)
+                                     + ", index_factor=" + std::to_string(expected_factor) + ")");
+        }
+    }
     // Ensure position_ids is on CUDA device (e.g., MROPE position_ids may be on CPU)
     if (attn_params->position_ids.defined() && !attn_params->position_ids.is_cuda()) {
         attn_params->position_ids =

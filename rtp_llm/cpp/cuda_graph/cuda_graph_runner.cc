@@ -197,8 +197,7 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
                 == py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device_by_group.size(),
             "kv_cache_kernel_block_id_device_by_group size mismatch");
         hybrid_cache_group = inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group.size();
-        RTP_LLM_CHECK_WITH_INFO(inputs.attention_inputs.kv_cache_kernel_block_id_by_group.size()
-                                        == hybrid_cache_group
+        RTP_LLM_CHECK_WITH_INFO(inputs.attention_inputs.kv_cache_kernel_block_id_by_group.size() == hybrid_cache_group
                                     && py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_by_group.size()
                                            == hybrid_cache_group,
                                 "kv_cache_kernel_block_id_by_group size mismatch");
@@ -428,7 +427,7 @@ void CudaGraphRunner::initKernelInternalMemory() {
     if (prefix_lengths.defined() && prefix_lengths.size(0) > 0) {
         cu_kv_seqlens.slice(0, 1, max_bs_ + 1) = input_lengths.add(prefix_lengths).cumsum(0);
     }
-    capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens      = cu_seqlens;
+    capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens           = cu_seqlens;
     capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens_device    = cu_seqlens.cuda();
     capture_mem_hold_.py_model_inputs_.attention_inputs.cu_kv_seqlens_device = cu_kv_seqlens.cuda();
 }
@@ -444,8 +443,8 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     // input_ids [tokens_nums] = [batch_size * num_tokens_per_bs]
     inputs.input_ids = torch::zeros({max_num_token_}, options_cuda_int32_);
     // input_lengths [batch_size, int32] (decode only)
-    inputs.attention_inputs.input_lengths   = torch::full({int(max_bs_)}, num_tokens_per_bs_, options_cpu_int32_);
-    inputs.attention_inputs.input_lengths   = inputs.attention_inputs.input_lengths.pin_memory();
+    inputs.attention_inputs.input_lengths        = torch::full({int(max_bs_)}, num_tokens_per_bs_, options_cpu_int32_);
+    inputs.attention_inputs.input_lengths        = inputs.attention_inputs.input_lengths.pin_memory();
     inputs.attention_inputs.input_lengths_device = inputs.attention_inputs.input_lengths.cuda();
     // sequence_lengths [batch_size, int32] (decode only)
     // sequence_length should in pinned memory
@@ -462,8 +461,7 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     // (non-Mrope models pay zero memory and the captured graph never references it).
     if (position_id_len_factor_ > 0) {
         inputs.combo_position_ids =
-            torch::ones({int(max_bs_) * num_tokens_per_bs_ * position_id_len_factor_}, options_cpu_int32_);
-        inputs.combo_position_ids                  = inputs.combo_position_ids.pin_memory();
+            torch::ones({int(max_bs_) * num_tokens_per_bs_ * position_id_len_factor_}, options_cuda_int32_);
         inputs.attention_inputs.combo_position_ids = inputs.combo_position_ids;
     }
 
@@ -522,11 +520,12 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
         inputs.attention_inputs.prefix_lengths = torch::empty({0}, options_cpu_int32_).pin_memory();
     }
     // padding_offset [max_num_token_, int32] (for attention padding)
-    inputs.attention_inputs.padding_offset            = torch::zeros({int(max_seq_len_ * max_bs_)}, options_cpu_int32_);
-    inputs.attention_inputs.padding_offset            = inputs.attention_inputs.padding_offset.pin_memory();
-    inputs.attention_inputs.dtype                     = model_data_type_;
-    inputs.attention_inputs.is_s_padded               = true;
-    inputs.attention_inputs.sequence_lengths_plus_1_device = torch::zeros({int(max_bs_)}, options_cuda_int32_);
+    inputs.attention_inputs.padding_offset = torch::zeros({int(max_seq_len_ * max_bs_)}, options_cpu_int32_);
+    inputs.attention_inputs.padding_offset = inputs.attention_inputs.padding_offset.pin_memory();
+    inputs.attention_inputs.dtype          = model_data_type_;
+    inputs.attention_inputs.is_s_padded    = true;
+    auto sequence_lengths_plus_1           = inputs.attention_inputs.sequence_lengths.add(1).pin_memory();
+    inputs.attention_inputs.sequence_lengths_plus_1_device = sequence_lengths_plus_1.cuda();
     // Step=1 is intentional: when num_tokens_per_bs_ > 1 (target verify), is_prefill is set to true
     // so the factory selects PREFILL impls (which use cu_seqlens, not decode_cu_seqlens).
     // XQADecodeImpl/XQAWrapper (the consumers of decode_cu_seqlens_host) are never reached in that path.
@@ -637,7 +636,15 @@ void CudaGraphRunner::initCapture() {
         // get real output data type (params already prepared in attn impl __init__/create_params)
         auto attn_pyobj = py_attn_pyobj_method_(capture_mem_hold_.py_model_inputs_, true);
         RTP_LLM_LOG_INFO("initCapture forward for output datatype start");
-        py_forward_method_(capture_mem_hold_.py_model_inputs_, attn_pyobj);
+        try {
+            py_forward_method_(capture_mem_hold_.py_model_inputs_, attn_pyobj);
+        } catch (const py::error_already_set& e) {
+            RTP_LLM_LOG_ERROR("initCapture forward for output datatype failed with Python exception: %s", e.what());
+            throw;
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_ERROR("initCapture forward for output datatype failed with C++ exception: %s", e.what());
+            throw;
+        }
         RTP_LLM_LOG_INFO("initCapture forward for output datatype end");
         output = torch::zeros({max_num_token_, hidden_size_}, options_cuda_float_);
         capture_mem_hold_.setHiddenStates(output);
