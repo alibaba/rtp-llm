@@ -43,7 +43,12 @@ public:
 public:
     explicit BlockCache(): lru_cache_(kCacheMaxCapacity) {}
 
-    bool put(CacheItem& cache_item);
+    bool put(const CacheItem& cache_item);
+
+    // Insert multiple cache items while holding BlockCache::mu_ once.
+    // Returns only items newly inserted into the LRU; duplicates are touched but
+    // omitted so callers can update block-cache refs exactly as single put did.
+    std::vector<CacheItem> putBatch(const std::vector<CacheItem>& cache_items);
 
     bool contains(CacheKeyType cache_key, int group_id = 0) const;
 
@@ -69,6 +74,8 @@ public:
     CacheSnapshot cacheSnapshot(int64_t latest_version) const;
 
 private:
+    bool putLocked(const CacheItem& cache_item);
+
     size_t       seq_size_per_block_;
     LRUCacheType lru_cache_;
     // NOTE: BlockCache/LRUCache is accessed from multiple RPC/engine threads.

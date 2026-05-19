@@ -85,6 +85,8 @@ void FullKVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
         return;
     }
 
+    std::vector<BlockCache::CacheItem> items;
+    items.reserve(cache_keys.size());
     const int last_index = cache_keys.size() - 1;
     for (int i = last_index; i >= 0; --i) {
         BlockCache::CacheItem item;
@@ -92,9 +94,17 @@ void FullKVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
         item.group_id    = group_id_;
         item.block_index = block_indices[i];
         item.is_resident = is_resident;
-        if (block_cache_->put(item)) {
-            block_pool_->blockCacheReference(block_indices[i]);
-        }
+        items.push_back(item);
+    }
+
+    const auto inserted_items = block_cache_->putBatch(items);
+    BlockIndicesType inserted_blocks;
+    inserted_blocks.reserve(inserted_items.size());
+    for (const auto& item : inserted_items) {
+        inserted_blocks.push_back(item.block_index);
+    }
+    if (!inserted_blocks.empty()) {
+        block_pool_->blockCacheReference(inserted_blocks);
     }
 
     RTP_LLM_LOG_DEBUG("Inserted %zu blocks into cache", block_indices.size());

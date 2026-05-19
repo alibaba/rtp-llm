@@ -12,6 +12,19 @@ namespace test {
 
 typedef BlockCache::CacheItem CacheItem;
 
+namespace {
+
+CacheItem makeItem(size_t cache_key, int group_id, size_t block_index) {
+    CacheItem item;
+    item.cache_key   = static_cast<CacheKeyType>(cache_key);
+    item.group_id    = group_id;
+    item.block_index = static_cast<BlockIdxType>(block_index);
+    item.is_resident = false;
+    return item;
+}
+
+}  // namespace
+
 class BlockCacheTest: public ::testing::Test {
 protected:
     void SetUp() override {
@@ -54,6 +67,36 @@ TEST_F(BlockCacheTest, MatchBasicTest) {
 
     auto result4 = cache_->match(102);
     EXPECT_TRUE(isNullBlockIdx(result4.matched_index));
+}
+
+TEST_F(BlockCacheTest, PutBatchInsertsOnceAndTouchesDuplicates) {
+    std::vector<CacheItem> items;
+    items.push_back(makeItem(201, 0, 11));
+    items.push_back(makeItem(202, 0, 12));
+    items.push_back(makeItem(203, 1, 13));
+
+    auto inserted_items = cache_->putBatch(items);
+    ASSERT_EQ(inserted_items.size(), 3);
+    EXPECT_EQ(cache_->size(), 3);
+    EXPECT_EQ(cache_->match(201, 0).matched_index, 11);
+    EXPECT_EQ(cache_->match(202, 0).matched_index, 12);
+    EXPECT_EQ(cache_->match(203, 1).matched_index, 13);
+
+    std::vector<CacheItem> mixed_items;
+    mixed_items.push_back(makeItem(202, 0, 120));
+    mixed_items.push_back(makeItem(204, 0, 14));
+    mixed_items.push_back(makeItem(203, 1, 130));
+
+    inserted_items = cache_->putBatch(mixed_items);
+    ASSERT_EQ(inserted_items.size(), 1);
+    EXPECT_EQ(inserted_items[0].cache_key, 204);
+    EXPECT_EQ(inserted_items[0].block_index, 14);
+    EXPECT_EQ(cache_->size(), 4);
+
+    // Existing keys are touched, not overwritten with a new block index.
+    EXPECT_EQ(cache_->match(202, 0).matched_index, 12);
+    EXPECT_EQ(cache_->match(203, 1).matched_index, 13);
+    EXPECT_EQ(cache_->match(204, 0).matched_index, 14);
 }
 
 TEST_F(BlockCacheTest, PopBasicTest) {

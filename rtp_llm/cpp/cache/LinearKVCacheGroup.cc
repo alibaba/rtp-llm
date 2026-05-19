@@ -145,6 +145,8 @@ void LinearKVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
         return;
     }
     const size_t n = std::min(cache_keys.size(), block_indices.size());
+    std::vector<BlockCache::CacheItem> items;
+    items.reserve(n);
     for (size_t i = 0; i < n; ++i) {
         const auto b = block_indices[i];
         if (isNullBlockIdx(b)) {
@@ -155,9 +157,17 @@ void LinearKVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
         item.group_id    = group_id_;
         item.block_index = b;
         item.is_resident = is_resident;
-        if (block_cache_->put(item)) {
-            block_pool_->blockCacheReference(b);
-        }
+        items.push_back(item);
+    }
+
+    const auto inserted_items = block_cache_->putBatch(items);
+    BlockIndicesType inserted_blocks;
+    inserted_blocks.reserve(inserted_items.size());
+    for (const auto& item : inserted_items) {
+        inserted_blocks.push_back(item.block_index);
+    }
+    if (!inserted_blocks.empty()) {
+        block_pool_->blockCacheReference(inserted_blocks);
     }
 }
 

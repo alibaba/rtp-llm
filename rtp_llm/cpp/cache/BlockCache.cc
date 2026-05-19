@@ -23,9 +23,7 @@ bool BlockCache::contains(CacheKeyType cache_key, int group_id) const {
     return lru_cache_.contains(key);
 }
 
-bool BlockCache::put(CacheItem& item) {
-    RTP_LLM_PROFILE_FUNCTION();
-    std::lock_guard<std::mutex> lock(mu_);
+bool BlockCache::putLocked(const CacheItem& item) {
     RTP_LLM_CHECK_WITH_INFO(!isNullBlockIdx(item.block_index), "put block id should not be null block");
 
     CacheKeyGroupPair key{item.cache_key, item.group_id};
@@ -38,6 +36,26 @@ bool BlockCache::put(CacheItem& item) {
 
     lru_cache_.put(key, item);
     return true;
+}
+
+bool BlockCache::put(const CacheItem& item) {
+    RTP_LLM_PROFILE_FUNCTION();
+    std::lock_guard<std::mutex> lock(mu_);
+    return putLocked(item);
+}
+
+std::vector<BlockCache::CacheItem> BlockCache::putBatch(const std::vector<CacheItem>& items) {
+    RTP_LLM_PROFILE_FUNCTION();
+    std::vector<CacheItem> inserted_items;
+    inserted_items.reserve(items.size());
+
+    std::lock_guard<std::mutex> lock(mu_);
+    for (const auto& item : items) {
+        if (putLocked(item)) {
+            inserted_items.push_back(item);
+        }
+    }
+    return inserted_items;
 }
 
 BlockIndicesType BlockCache::pop(int nums) {
