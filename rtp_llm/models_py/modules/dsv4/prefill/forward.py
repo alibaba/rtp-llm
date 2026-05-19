@@ -100,7 +100,7 @@ import torch
 from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv4.cp import (
     build_cp_context,
-    cp_all_gather_full_varlen,
+    cp_gather_last_by_request,
 )
 from rtp_llm.models_py.modules.dsv4.fp8.prefill_meta import (
     build_and_propagate_prefill_meta_fp8,
@@ -162,6 +162,19 @@ def _build_positions_from_lengths(
     req_ids = req_ids.clamp(max=batch_size - 1)
     local_offsets = token_offsets - cu_seqlens.gather(0, req_ids)
     return prefix_lengths.gather(0, req_ids) + local_offsets
+
+
+def _last_hidden_by_request(
+    flat: torch.Tensor,
+    cu_seqlens: Optional[torch.Tensor],
+    cp_ctx: Optional[Any],
+) -> torch.Tensor:
+    if cp_ctx is not None and cp_ctx.cp_size > 1:
+        return cp_gather_last_by_request(flat, cp_ctx)
+    if cu_seqlens is not None and cu_seqlens.numel() >= 2:
+        last_indices = cu_seqlens[1:].to(device=flat.device, dtype=torch.long) - 1
+        return flat.index_select(0, last_indices).contiguous()
+    return flat[-1:].contiguous()
 
 
 def set_cp_info(
@@ -412,11 +425,12 @@ def forward_layers(
     if v4.fp8_kv_cache:
         clear_prefill_meta_shared_fp8(v4)
 
-    if getattr(v4, "_mtp_hidden_buffer", None) is not None:
+    if v4._mtp_hidden_buffer is not None:
         _pre_hc_flat = h.flatten(-2)
-        if cp_ctx is not None and cp_ctx.cp_size > 1:
-            _pre_hc_flat = cp_all_gather_full_varlen(_pre_hc_flat, cp_ctx)
         v4._write_mtp_hidden_buffer(_pre_hc_flat, is_cuda_graph=False)
+        if v4._mtp_last_hidden_buffer is not None:
+            _last_pre_hc = _last_hidden_by_request(_pre_hc_flat, cu_seqlens, cp_ctx)
+            v4._write_mtp_last_hidden_buffer(_last_pre_hc)
 
     # _hc_head_reduce is flat-native: [T, hc, dim] -> [T, dim].
     # Framework ``RMSNorm`` expects 2D, which matches the [T, dim] shape here.

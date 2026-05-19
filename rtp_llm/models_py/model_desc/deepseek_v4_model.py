@@ -101,6 +101,80 @@ def _is_decode_fmha(fmha_impl: Any) -> bool:
     return isinstance(fmha_impl, decode_types)
 
 
+class MtpHiddenBufferStore:
+    """Shared owner for the large DSV4 MTP pre-hc hidden buffer.
+
+    The target and draft Python models are separate ``DeepSeekV4Model``
+    instances, but their MTP hand-off buffers are never live at the same time in
+    a way that requires two allocations.  Binding both transformers to this
+    store keeps one CUDA tensor and re-registers it on every subscriber.
+    """
+
+    def __init__(self) -> None:
+        self._buffer: Optional[torch.Tensor] = None
+        self._token_capacity = 0
+        self._hc_dim = 0
+        self._dtype: Optional[torch.dtype] = None
+        self._device: Optional[torch.device] = None
+        self._subscribers: list[torch.nn.Module] = []
+
+    def bind(
+        self,
+        module: torch.nn.Module,
+        device: torch.device,
+        token_capacity: int,
+        hc_dim: int,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        token_capacity = int(token_capacity)
+        hc_dim = int(hc_dim)
+        device = torch.device(device)
+        assert token_capacity > 0, token_capacity
+        assert hc_dim > 0, hc_dim
+
+        if self._buffer is not None:
+            if token_capacity > self._token_capacity:
+                raise RuntimeError(
+                    "MtpHiddenBufferStore: cannot grow capacity from "
+                    f"{self._token_capacity} to {token_capacity} after first bind. "
+                    "Allocate with the worst-case capacity up front."
+                )
+            assert (
+                self._hc_dim == hc_dim
+                and self._dtype == dtype
+                and self._device == device
+            ), (
+                "MTP hidden shared buffer shape/device mismatch: "
+                f"existing=(cap={self._token_capacity}, hc_dim={self._hc_dim}, "
+                f"dtype={self._dtype}, device={self._device}), "
+                f"requested=(cap={token_capacity}, hc_dim={hc_dim}, "
+                f"dtype={dtype}, device={device})"
+            )
+        if self._buffer is None:
+            self._buffer = torch.empty(
+                token_capacity,
+                hc_dim,
+                dtype=dtype,
+                device=device,
+            )
+            self._token_capacity = token_capacity
+            self._hc_dim = hc_dim
+            self._dtype = dtype
+            self._device = device
+
+        if not any(existing is module for existing in self._subscribers):
+            self._subscribers.append(module)
+        self._sync_subscribers()
+        return self._buffer
+
+    def _sync_subscribers(self) -> None:
+        assert self._buffer is not None
+        for module in self._subscribers:
+            module.register_buffer(
+                "_mtp_hidden_buffer", self._buffer, persistent=False
+            )
+
+
 def _args_from_model_config(
     model_config: ModelConfig, max_generate_batch_size: int = 4
 ) -> V4Args:
@@ -273,8 +347,10 @@ class DeepSeekV4Model(GptModelBase):
                     cp_tokens_per_rank_bound,
                 )
                 args.max_tokens_per_rank = cp_tokens_per_rank_bound
+        self._prefill_cp_size = int(cp_size)
         self._is_speculative = False
         self._is_decode_role = False
+        self._mtp_hidden_buffer_store: Optional[MtpHiddenBufferStore] = None
 
         logging.info(
             "[DeepSeekV4Model] V4Args: n_layers=%d n_heads=%d head_dim=%d q_lora=%d "
@@ -348,7 +424,21 @@ class DeepSeekV4Model(GptModelBase):
                 is_speculative=self._is_speculative,
                 gen_num_per_cycle=self._gen_num_per_cycle,
             )
+        cp_size = max(1, int(self._prefill_cp_size))
+        if cp_size > 1:
+            return (
+                cp_padded_tokens_per_rank_bound(
+                    int(self._v4_args.max_seq_len), cp_size
+                )
+                * self._max_context_batch_size
+            )
         return self._v4_args.max_seq_len * self._max_context_batch_size
+
+    def _resolve_mtp_last_hidden_token_capacity(self) -> Optional[int]:
+        return None
+
+    def set_mtp_hidden_buffer_store(self, store: MtpHiddenBufferStore) -> None:
+        self._mtp_hidden_buffer_store = store
 
     def _initialize_impl(self, init_resource: PyModelInitResources) -> bool:
         # Called by the engine after construction and before forward.
@@ -686,11 +776,24 @@ class DeepSeekV4Model(GptModelBase):
             _torch.cuda.synchronize()
 
         if self._is_speculative:
+            if self._mtp_hidden_buffer_store is None:
+                raise RuntimeError(
+                    "DeepSeekV4Model speculative MTP requires a shared "
+                    "hidden buffer store"
+                )
             mtp_token_capacity = self._resolve_mtp_hidden_token_capacity()
-            self.v4._allocate_mtp_buffer(torch.device(device_str), mtp_token_capacity)
-            logging.info(
-                "[DeepSeekV4Model] allocated MTP hidden buffer: tokens=%d",
+            mtp_last_hidden_capacity = self._resolve_mtp_last_hidden_token_capacity()
+            self.v4._allocate_mtp_buffer(
+                torch.device(device_str),
                 mtp_token_capacity,
+                shared_store=self._mtp_hidden_buffer_store,
+                last_hidden_capacity=mtp_last_hidden_capacity,
+            )
+            logging.info(
+                "[DeepSeekV4Model] allocated MTP hidden buffer: tokens=%d "
+                "last_hidden_tokens=%s",
+                mtp_token_capacity,
+                mtp_last_hidden_capacity,
             )
 
         self._materialized = True
@@ -837,6 +940,14 @@ class DeepSeekV4Model(GptModelBase):
         return impl
 
     def get_mtp_target_hidden_states(self, num_tokens: int) -> Optional[torch.Tensor]:
+        """
+        num_tokens >= 0: return the explicit row count without reading
+            _mtp_hidden_valid_tokens. This is CUDA-graph safe because replay does
+            not update Python attributes.
+        num_tokens < 0: return the last non-graph-written row count. This is only
+            for CP prefill, where the C++ global token count has been restored
+            but the buffer intentionally stores rank-local rows.
+        """
         if self.v4 is None:
             raise RuntimeError("DeepSeekV4Model: v4 transformer not initialized")
         buf = self.v4._mtp_hidden_buffer
@@ -844,14 +955,38 @@ class DeepSeekV4Model(GptModelBase):
             return None
         requested = int(num_tokens)
         if requested < 0:
-            raise RuntimeError(
-                f"DeepSeekV4Model: num_tokens must be non-negative, got {requested}"
-            )
-        if requested > buf.size(0):
-            raise RuntimeError(
-                "DeepSeekV4Model: requested MTP hidden states exceed valid buffer "
-                f"capacity: requested={requested}, capacity={buf.size(0)}"
-            )
+            assert (
+                not self._is_decode_role
+            ), "decode MTP hidden reads must pass row count"
+            requested = int(self.v4._mtp_hidden_valid_tokens)
+            assert requested > 0, "MTP hidden buffer has no written rows"
+        assert requested <= buf.size(0), (
+            "DeepSeekV4Model: requested MTP hidden states exceed buffer capacity: "
+            f"requested={requested}, capacity={buf.size(0)}"
+        )
+        return buf[:requested]
+
+    def get_mtp_last_hidden_states(self, num_tokens: int) -> Optional[torch.Tensor]:
+        if self.v4 is None:
+            raise RuntimeError("DeepSeekV4Model: v4 transformer not initialized")
+        assert (
+            not self._is_decode_role
+        ), "decode MTP last-hidden reads are unsupported"
+        buf = self.v4._mtp_last_hidden_buffer
+        if buf is None:
+            return None
+        requested = int(num_tokens)
+        if requested < 0:
+            requested = int(self.v4._mtp_last_hidden_valid_tokens)
+        assert requested <= buf.size(0), (
+            "DeepSeekV4Model: requested MTP last hidden states exceed buffer capacity: "
+            f"requested={requested}, capacity={buf.size(0)}"
+        )
+        assert requested <= int(self.v4._mtp_last_hidden_valid_tokens), (
+            "DeepSeekV4Model: requested MTP last hidden states exceed rows written "
+            f"by the previous forward: requested={requested}, "
+            f"valid={self.v4._mtp_last_hidden_valid_tokens}"
+        )
         return buf[:requested]
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:

@@ -75,6 +75,14 @@ class DeepSeekV4MtpModel(DeepSeekV4Model):
         self.e_proj = None
         self.h_proj = None
 
+    def _resolve_mtp_last_hidden_token_capacity(self) -> Optional[int]:
+        # Parent allocation is already gated by self._is_speculative.  Any
+        # non-decode draft path, including PDFUSION, needs the CP prefill
+        # per-request last-hidden handoff.
+        if self._is_decode_role:
+            return None
+        return max(self._max_context_batch_size, self._max_generate_batch_size, 1)
+
     # ------------------------------------------------------------------
     # CUDA-graph gate — accept all cudagraph requests.  C++ MtpExecutor
     # creates two draft PyWrappedModel instances: ``draft_model_``

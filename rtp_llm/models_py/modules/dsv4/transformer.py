@@ -8,7 +8,7 @@ mock per-layer KV cache before wiring into RTP-LLM's GptModelBase.
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Protocol
 
 import torch
 import torch.nn as nn
@@ -20,6 +20,17 @@ from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv4.block import Block
 from rtp_llm.models_py.modules.dsv4.cp import CPContext, build_cp_context
 from rtp_llm.models_py.modules.dsv4.hc import build_hc_head
+
+
+class MtpHiddenBufferStoreLike(Protocol):
+    def bind(
+        self,
+        module: nn.Module,
+        device: torch.device,
+        token_capacity: int,
+        hc_dim: int,
+        dtype: torch.dtype,
+    ) -> torch.Tensor: ...
 
 
 @dataclass
@@ -226,38 +237,73 @@ class V4Transformer(nn.Module):
 
         self._dbg_step = 0
         self.register_buffer("_mtp_hidden_buffer", None, persistent=False)
+        self.register_buffer("_mtp_last_hidden_buffer", None, persistent=False)
+        self._mtp_hidden_valid_tokens = 0
+        self._mtp_last_hidden_valid_tokens = 0
 
-    def _allocate_mtp_buffer(self, device: torch.device, token_capacity: int) -> None:
+    def _allocate_mtp_buffer(
+        self,
+        device: torch.device,
+        token_capacity: int,
+        shared_store: MtpHiddenBufferStoreLike,
+        last_hidden_capacity: Optional[int] = None,
+    ) -> None:
         """Allocate the pre-hc_head residual buffer for speculative draft reads.
         Called by DeepSeekV4Model._initialize_impl during speculative init."""
-        if self._mtp_hidden_buffer is not None:
-            return
-        if token_capacity <= 0:
-            raise ValueError(
-                f"_mtp_hidden_buffer token_capacity must be positive, got {token_capacity}"
-            )
+        assert (
+            shared_store is not None
+        ), "DSV4 MTP hidden buffer requires a shared store"
+        assert token_capacity > 0, token_capacity
         hc_dim = self.args.hc_mult * self.args.dim
-        self.register_buffer(
-            "_mtp_hidden_buffer",
-            torch.empty(
-                token_capacity,
-                hc_dim,
-                dtype=torch.bfloat16,
-                device=device,
-            ),
-            persistent=False,
+        shared_store.bind(
+            self,
+            device=device,
+            token_capacity=token_capacity,
+            hc_dim=hc_dim,
+            dtype=torch.bfloat16,
         )
+
+        if last_hidden_capacity is not None:
+            last_hidden_capacity = int(last_hidden_capacity)
+            assert last_hidden_capacity > 0, last_hidden_capacity
+            if (
+                self._mtp_last_hidden_buffer is None
+                or int(self._mtp_last_hidden_buffer.size(0))
+                < int(last_hidden_capacity)
+            ):
+                self.register_buffer(
+                    "_mtp_last_hidden_buffer",
+                    torch.empty(
+                        last_hidden_capacity,
+                        hc_dim,
+                        dtype=torch.bfloat16,
+                        device=device,
+                    ),
+                    persistent=False,
+                )
 
     def _write_mtp_hidden_buffer(self, flat: torch.Tensor, is_cuda_graph: bool) -> None:
         if self._mtp_hidden_buffer is None:
             return
         T = flat.size(0)
-        if T > self._mtp_hidden_buffer.size(0):
-            raise RuntimeError(
-                f"_mtp_hidden_buffer overflow: T={T} > "
-                f"cap={self._mtp_hidden_buffer.size(0)}, cannot realloc after init"
-            )
+        assert T <= self._mtp_hidden_buffer.size(0), (
+            f"_mtp_hidden_buffer overflow: T={T} > "
+            f"cap={self._mtp_hidden_buffer.size(0)}"
+        )
         self._mtp_hidden_buffer[:T].copy_(flat)
+        if not is_cuda_graph:
+            self._mtp_hidden_valid_tokens = int(T)
+
+    def _write_mtp_last_hidden_buffer(self, flat: torch.Tensor) -> None:
+        if self._mtp_last_hidden_buffer is None:
+            return
+        T = flat.size(0)
+        assert T <= self._mtp_last_hidden_buffer.size(0), (
+            f"_mtp_last_hidden_buffer overflow: T={T} > "
+            f"cap={self._mtp_last_hidden_buffer.size(0)}"
+        )
+        self._mtp_last_hidden_buffer[:T].copy_(flat)
+        self._mtp_last_hidden_valid_tokens = int(T)
 
     def set_cp_info(self, cp_info, cp_size: int, cp_rank: int) -> None:
         """Bind / clear the framework's Context-Parallel metadata for the

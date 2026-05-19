@@ -26,12 +26,17 @@ bool MtpExecutor::isTpRank0() const {
     return tp_rank_ == 0;
 }
 
-void MtpExecutor::maybeOverrideLastHiddenWithMtpBuffer(GptModelInputs& model_input, ModelBase& source) {
+void MtpExecutor::maybeOverrideLastHiddenWithMtpBuffer(GptModelInputs& model_input,
+                                                       ModelBase&       source,
+                                                       bool             request_actual_rows) {
     if (!model_input.combo_tokens.defined() || model_input.combo_tokens.numel() == 0) {
         return;
     }
-    auto pre_hc = source.getMtpTargetHiddenStates(model_input.combo_tokens.numel());
+    const auto mtp_hidden_rows = request_actual_rows ? -1 : model_input.combo_tokens.numel();
+    auto       pre_hc          = source.getMtpTargetHiddenStates(mtp_hidden_rows);
     if (!pre_hc.defined() || pre_hc.numel() == 0) {
+        RTP_LLM_CHECK_WITH_INFO(!request_actual_rows,
+                                "CP MTP hidden buffer must contain local rows before draft prefill");
         return;
     }
     model_input.last_hidden_states = pre_hc;
@@ -373,6 +378,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     SamplerOutput   sampler_output;
     GptModelOutputs draft_model_output;
     SamplerOutput   draft_sampler_output;
+    torch::Tensor   draft_last_hidden_states;
 
     // placeholder for some tensors
     torch::Tensor                      draft_probs;
@@ -486,10 +492,9 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         model_input.kv_scale_stride_bytes   = mtp_cache_cfg.kv_scale_stride_bytes;
         model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
         // Source = main (just ran prefill; its pre-hc buffer is current).
-        maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_);
+        maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_, cp_enabled);
         draft_model_output = std::move(draft_model_->forward(model_input));
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-        maybeOverrideLastHiddenWithMtpBuffer(draft_model_output, *draft_model_);
     }
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
@@ -497,6 +502,14 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         model_->releaseBuffers();
         draft_model_->releaseBuffers();
         return absl::OkStatus();
+    }
+
+    if (cp_enabled) {
+        draft_last_hidden_states = draft_model_->getMtpLastHiddenStates(stream_groups.totalSamplerBatchSizeOut());
+        RTP_LLM_CHECK_WITH_INFO(draft_last_hidden_states.defined() && draft_last_hidden_states.numel() > 0,
+                                "CP MTP draft last-hidden buffer must contain per-request rows");
+    } else {
+        maybeOverrideLastHiddenWithMtpBuffer(draft_model_output, *draft_model_);
     }
 
     // draft model sample
@@ -536,7 +549,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         auto result =
             batch_stream_processor_->dispatchPrefill(stream_groups,
                                                      {std::move(model_output), std::move(sampler_output)},
-                                                     {std::move(draft_model_output), std::move(draft_sampler_output)});
+                                                     {std::move(draft_model_output), std::move(draft_sampler_output)},
+                                                     draft_last_hidden_states);
         RTP_LLM_LOG_DEBUG("dispatch done");
 
         model_->releaseBuffers();

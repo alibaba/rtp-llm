@@ -99,6 +99,21 @@ torch::Tensor PyWrappedModel::getMtpTargetHiddenStates(int64_t num_tokens) {
     return result.cast<torch::Tensor>();
 }
 
+torch::Tensor PyWrappedModel::getMtpLastHiddenStates(int64_t num_tokens) {
+    if (!py_model_) {
+        return torch::Tensor();
+    }
+    py::gil_scoped_acquire gil;
+    if (!py::hasattr(py_model_, "get_mtp_last_hidden_states")) {
+        return torch::Tensor();
+    }
+    py::object result = py_model_.attr("get_mtp_last_hidden_states")(num_tokens);
+    if (result.is_none()) {
+        return torch::Tensor();
+    }
+    return result.cast<torch::Tensor>();
+}
+
 PyWrappedModel::~PyWrappedModel() {
     try {
         py::gil_scoped_acquire gil;
