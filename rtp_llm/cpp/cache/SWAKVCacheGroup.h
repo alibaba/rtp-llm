@@ -11,8 +11,9 @@ public:
     SWAKVCacheGroup(const LayerIdsType&          layer_ids,
                     std::shared_ptr<KVCacheSpec> kvcache_spec,
                     BlockPoolPtr                 block_pool,
-                    int                          group_id):
-        KVCacheGroup(layer_ids, kvcache_spec, block_pool, group_id) {}
+                    int                          group_id,
+                    int                          linear_step = 0):
+        KVCacheGroup(layer_ids, kvcache_spec, block_pool, group_id), linear_step_(linear_step) {}
 
     MatchResult match(const CacheKeysType& cache_keys) override;
     MatchResult matchSingleKey(CacheKeyType cache_key) const;
@@ -31,7 +32,8 @@ public:
 
 private:
     void filterValidBlocks(const BlockIndicesType& in, BlockIndicesType& out) const;
-    int  countTailAllocations(int begin, int end, int total_slots) const;
+
+    int linear_step_ = 0;
 };
 
 using SWAKVCacheGroupPtr = std::shared_ptr<SWAKVCacheGroup>;
