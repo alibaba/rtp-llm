@@ -102,8 +102,8 @@ class TestFp8ToFp4Conversion(unittest.TestCase):
 
     def test_small_conversion_matches_reference(self):
         """Test with small dimensions: E=4, inter=128, dim=256."""
-        from rtp_llm.model_loader.online_mega_moe_fp8_to_fp4_quant_weight import (
-            _convert_fp8_moe_to_fp4,
+        from rtp_llm.model_loader.online_modelopt_fp4_quant_weight import (
+            convert_fp8_moe_to_fp4_ue8m0 as _convert_fp8_moe_to_fp4,
         )
 
         E, inter, D = 4, 128, 256
@@ -155,8 +155,8 @@ class TestFp8ToFp4Conversion(unittest.TestCase):
 
     def test_glm5_shapes(self):
         """Test with GLM-5 actual shapes (scaled down experts): E=8, inter=2048, dim=6144."""
-        from rtp_llm.model_loader.online_mega_moe_fp8_to_fp4_quant_weight import (
-            _convert_fp8_moe_to_fp4,
+        from rtp_llm.model_loader.online_modelopt_fp4_quant_weight import (
+            convert_fp8_moe_to_fp4_ue8m0 as _convert_fp8_moe_to_fp4,
         )
 
         # Use smaller E to keep test fast, but real inter/dim
@@ -184,8 +184,8 @@ class TestFp8ToFp4Conversion(unittest.TestCase):
 
     def test_output_dtypes(self):
         """Verify output dtypes are correct for downstream consumption."""
-        from rtp_llm.model_loader.online_mega_moe_fp8_to_fp4_quant_weight import (
-            _convert_fp8_moe_to_fp4,
+        from rtp_llm.model_loader.online_modelopt_fp4_quant_weight import (
+            convert_fp8_moe_to_fp4_ue8m0 as _convert_fp8_moe_to_fp4,
         )
 
         E, N, K = 2, 128, 256

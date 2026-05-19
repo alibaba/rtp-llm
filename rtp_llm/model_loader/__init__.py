@@ -13,12 +13,12 @@ from .ffn_weight import (
 from .group_wise_quant_weight import GroupWiseWeight
 from .mixed_fp4_quant_weight import MixedFp4Weight
 from .omni_quant_weight import OmniQuantWeightInfo
-from .online_mega_moe_fp4_quant_weight import OnlineMegaMoEFp4Weight
-from .online_mega_moe_fp8_to_fp4_quant_weight import OnlineMegaMoEFp8ToFp4Weight
-from .online_modelopt_fp4_hybrid_quant_weight import (
+from .online_modelopt_fp4_quant_weight import (
+    OnlineMegaMoeFp4FromFp8Weight,
+    OnlineMegaMoeFp4Weight,
     OnlineModelOptFp4HybridFp8AttnWeight,
+    OnlineModelOptFp4MoeWeight,
 )
-from .online_modelopt_fp4_quant_weight import OnlineModelOptFp4MoeWeight
 from .per_block_fp8_quant_weight import PerBlockFp8Weight
 from .per_channel_fp8_quant_weight import PerChannelFp8Weight
 from .per_group_fp4_quant_weight import PerGroupFp4Weight
@@ -27,3 +27,7 @@ from .smooth_quant_weight import SmoothQuantWeightInfo
 from .static_fp8_quant_weight import Fp8PerTensorCompressedWeight
 from .w4a8_int4_per_channel_quant_weight import LoadW4a8Int4PerChannelQuantWeight
 from .weight_only_quant_weight import WeightOnlyPerColWeight
+
+# Back-compat aliases for the previously-split modules
+OnlineMegaMoEFp4Weight = OnlineMegaMoeFp4Weight
+OnlineMegaMoEFp8ToFp4Weight = OnlineMegaMoeFp4FromFp8Weight
