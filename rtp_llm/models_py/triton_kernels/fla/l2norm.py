@@ -44,66 +44,38 @@ def l2norm_fwd_kernel1(
 
 
 @triton.jit
-def fused_l2norm_qk_kernel_small(
-    q,
-    k,
-    q_out,
-    k_out,
-    eps,
-    T,
-    D,
-    BT: tl.constexpr,
-    BD: tl.constexpr,
-):
-    i_t = tl.program_id(0)
-
-    rows = i_t * BT + tl.arange(0, BT)
-    cols = tl.arange(0, BD)
-    row_mask = rows < T
-    col_mask = cols < D
-    mask = row_mask[:, None] & col_mask[None, :]
-    offs = rows[:, None] * D + cols[None, :]
-
-    b_q = tl.load(q + offs, mask=mask, other=0.0).to(tl.float32)
-    b_q_var = tl.sum(b_q * b_q, axis=1)
-    b_q_rstd = tl.math.rsqrt(b_q_var + eps)
-    b_q_out = b_q * b_q_rstd[:, None]
-    tl.store(q_out + offs, b_q_out.to(q_out.dtype.element_ty), mask=mask)
-
-    b_k = tl.load(k + offs, mask=mask, other=0.0).to(tl.float32)
-    b_k_var = tl.sum(b_k * b_k, axis=1)
-    b_k_rstd = tl.math.rsqrt(b_k_var + eps)
-    b_k_out = b_k * b_k_rstd[:, None]
-    tl.store(k_out + offs, b_k_out.to(k_out.dtype.element_ty), mask=mask)
-
-
-@triton.jit
-def fused_l2norm_qk_kernel(
-    q,
-    k,
-    q_out,
-    k_out,
+def l2norm_fwd_strided_kernel(
+    x,
+    y,
+    stride_x_row: tl.int64,
     D,
     BD: tl.constexpr,
+    HEADS_PER_TOKEN: tl.constexpr,
     eps,
 ):
-    i_t = tl.program_id(0)
+    """L2-normalize rows from a non-contiguous input into contiguous output.
 
+    Input layout:  each token has HEADS_PER_TOKEN * D contiguous elements,
+                   but tokens are separated by stride_x_row (> HEADS_PER_TOKEN * D).
+    Output layout: fully contiguous (T * HEADS_PER_TOKEN, D).
+
+    program_id(0) iterates over T * HEADS_PER_TOKEN rows.
+    """
+    i_t = tl.program_id(0)
+    # Map flat row index to (token, head_within_token)
+    token = i_t // HEADS_PER_TOKEN
+    head = i_t % HEADS_PER_TOKEN
+    # Input: strided by token, contiguous within token
+    x += token * stride_x_row + head * D
+    # Output: always contiguous
+    y += i_t * D
     cols = tl.arange(0, BD)
     mask = cols < D
-    offs = i_t * D + cols
-
-    b_q = tl.load(q + offs, mask=mask, other=0.0).to(tl.float32)
-    b_q_var = tl.sum(b_q * b_q, axis=0)
-    b_q_rstd = tl.math.rsqrt(b_q_var + eps)
-    b_q_out = b_q * b_q_rstd
-    tl.store(q_out + offs, b_q_out.to(q_out.dtype.element_ty), mask=mask)
-
-    b_k = tl.load(k + offs, mask=mask, other=0.0).to(tl.float32)
-    b_k_var = tl.sum(b_k * b_k, axis=0)
-    b_k_rstd = tl.math.rsqrt(b_k_var + eps)
-    b_k_out = b_k * b_k_rstd
-    tl.store(k_out + offs, b_k_out.to(k_out.dtype.element_ty), mask=mask)
+    b_x = tl.load(x + cols, mask=mask, other=0.0).to(tl.float32)
+    b_var = tl.sum(b_x * b_x, axis=0)
+    b_rstd = 1 / tl.sqrt(b_var + eps)
+    b_y = b_x * b_rstd
+    tl.store(y + cols, b_y, mask=mask)
 
 
 # @triton.autotune(
@@ -138,29 +110,34 @@ def l2norm_fwd(
     x: torch.Tensor, eps: float = 1e-6, output_dtype: Optional[torch.dtype] = None
 ):
     x_shape_og = x.shape
-    x = x.view(-1, x.shape[-1])
-    # allocate output
-    if output_dtype is None:
-        y = torch.empty_like(x)
-    else:
-        y = torch.empty_like(x, dtype=output_dtype)
-    assert y.stride(-1) == 1
-    T, D = x.shape[0], x.shape[-1]
-    # rstd = torch.empty((T,), dtype=torch.float32, device=x.device)
-    # Less than 64KB per feature: enqueue fused kernel
+    D = x.shape[-1]
+
     MAX_FUSED_SIZE = 65536 // x.element_size()
     BD = min(MAX_FUSED_SIZE, triton.next_power_of_2(D))
     if D > BD:
         raise RuntimeError("This layer doesn't support feature dim >= 64KB.")
 
-    # Not use this path since different batch will always go into compile， since T is different,
-    # and compile time is too long (70ms) compared to kernel execution time (under 1ms)
-    if D <= 512 and T <= 128:
-        NB = triton.cdiv(T, 2048)
+    # Always use contiguous path — the strided kernel has poor memory access patterns
+    # that cause 10-30x slowdown on large token counts (e.g. 2M rows from 64K prefill).
+    # The implicit copy from .reshape() is much cheaper than strided reads.
+    x = x.reshape(-1, x.shape[-1])
+    if output_dtype is None:
+        y = torch.empty_like(x)
+    else:
+        y = torch.empty_like(x, dtype=output_dtype)
+    assert y.stride(-1) == 1
+    T = x.shape[0]
+
+    if D <= 512:
+        # Batched kernel: process BT rows per block to reduce launch count.
+        # For D=128 with 2M rows, this reduces blocks from 2M to ~32K.
+        BT = max(16, min(64, 8192 // BD))
+        num_warps = min(max(BT * BD // 256, 1), 8)
 
         def grid(meta):
             return (triton.cdiv(T, meta["BT"]),)
 
+        NB = triton.cdiv(T, 2048)
         l2norm_fwd_kernel[grid](
             x,
             y,
@@ -169,86 +146,78 @@ def l2norm_fwd(
             T=T,
             D=D,
             BD=BD,
-            BT=16,
-            num_warps=8,
+            BT=BT,
+            num_warps=num_warps,
             num_stages=3,
         )
     else:
+        num_warps = min(max(BD // 256, 1), 8)
         l2norm_fwd_kernel1[(T,)](
             x,
             y,
             eps=eps,
             D=D,
             BD=BD,
-            num_warps=8,
+            num_warps=num_warps,
             num_stages=3,
         )
 
     return y.view(x_shape_og)
 
 
-def fused_l2norm_qk(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    eps: float = 1e-6,
-    output_dtype: Optional[torch.dtype] = None,
+@triton.jit
+def l2norm_fwd_qk_kernel(
+    x,
+    y_q,
+    y_k,
+    stride_x_row: tl.int64,
+    D,
+    BD: tl.constexpr,
+    H_K: tl.constexpr,
+    eps,
+):
+    """L2-normalize q and k heads from a packed non-contiguous input into
+    two separate contiguous outputs in a single kernel launch.
+
+    Input: packed [token0: q_h0..q_h{H_K-1}, k_h0..k_h{H_K-1}, ...][token1: ...]
+           with tokens separated by stride_x_row.
+    Output: y_q is contiguous [T*H_K, D], y_k is contiguous [T*H_K, D].
+
+    program_id(0) iterates over T * H_K * 2 rows total.
+    """
+    i_t = tl.program_id(0)
+    total_heads = H_K * 2
+    token = i_t // total_heads
+    head_in_token = i_t % total_heads
+    is_k = head_in_token >= H_K
+    head_local = tl.where(is_k, head_in_token - H_K, head_in_token)
+
+    # Input: strided by token, q+k heads adjacent within token
+    x += token * stride_x_row + head_in_token * D
+
+    # Output: separate contiguous buffers
+    out_row = token * H_K + head_local
+    y = tl.where(is_k, y_k, y_q)
+    y += out_row * D
+
+    cols = tl.arange(0, BD)
+    mask = cols < D
+    b_x = tl.load(x + cols, mask=mask, other=0.0).to(tl.float32)
+    b_var = tl.sum(b_x * b_x, axis=0)
+    b_rstd = 1 / tl.sqrt(b_var + eps)
+    b_y = b_x * b_rstd
+    tl.store(y + cols, b_y, mask=mask)
+
+
+def l2norm_fwd_qk(
+    q: torch.Tensor, k: torch.Tensor, eps: float = 1e-6
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    assert (
-        q.shape == k.shape
-    ), f"fused_l2norm_qk expects q and k to share shape, got {q.shape} vs {k.shape}"
-    assert (
-        q.dtype == k.dtype
-    ), f"fused_l2norm_qk expects q and k to share dtype, got {q.dtype} vs {k.dtype}"
-    shape_og = q.shape
-    q_flat = q.reshape(-1, q.shape[-1])
-    k_flat = k.reshape(-1, k.shape[-1])
-    tokens, hidden_dim = q_flat.shape
+    """L2-normalize q and k, returning contiguous outputs.
 
-    if output_dtype is None:
-        q_out = torch.empty_like(q_flat)
-        k_out = torch.empty_like(k_flat)
-    else:
-        q_out = torch.empty_like(q_flat, dtype=output_dtype)
-        k_out = torch.empty_like(k_flat, dtype=output_dtype)
-    assert q_out.stride(-1) == 1 and k_out.stride(-1) == 1
-
-    MAX_FUSED_SIZE = 65536 // q.element_size()
-    BLOCK_D = min(MAX_FUSED_SIZE, triton.next_power_of_2(hidden_dim))
-    if hidden_dim > BLOCK_D:
-        raise RuntimeError("This layer doesn't support feature dim >= 64KB.")
-
-    # tokens, hidden_dim are runtime args of the BT-tiled kernel, so no recompile across batches.
-    # BT-tiled is ~8x faster than the per-row kernel for prefill (tokens>>1) since the
-    # per-row path uses 512 threads to process hidden_dim<=512 elements (under-utilized).
-    if hidden_dim <= 512:
-        BT = 8
-        fused_l2norm_qk_kernel_small[(triton.cdiv(tokens, BT),)](
-            q_flat,
-            k_flat,
-            q_out,
-            k_out,
-            eps,
-            tokens,
-            hidden_dim,
-            BT=BT,
-            BD=BLOCK_D,
-            num_warps=2,
-            num_stages=1,
-        )
-    else:
-        fused_l2norm_qk_kernel[(tokens,)](
-            q_flat,
-            k_flat,
-            q_out,
-            k_out,
-            eps=eps,
-            D=hidden_dim,
-            BD=BLOCK_D,
-            num_warps=8,
-            num_stages=3,
-        )
-
-    return q_out.reshape(shape_og), k_out.reshape(shape_og)
+    Uses the standard contiguous l2norm path which has much better memory
+    access patterns than the strided kernel (10-30x faster for large prefills).
+    """
+    return l2norm_fwd(q, eps), l2norm_fwd(k, eps)
 
 
 class L2NormFunction(torch.autograd.Function):

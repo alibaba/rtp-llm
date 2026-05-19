@@ -30,59 +30,51 @@ def _layer_norm_fwd_1pass_kernel(
     N,  # number of columns in X
     eps,  # epsilon to avoid division by zero
     BLOCK_N: tl.constexpr,
+    ROWS_PER_BLOCK: tl.constexpr,
     HAS_BIAS: tl.constexpr,
     HAS_Z: tl.constexpr,
     NORM_BEFORE_GATE: tl.constexpr,
     IS_RMS_NORM: tl.constexpr,
-    ACTIVATION: tl.constexpr,
 ):
-    # Map the program id to the row of X and Y it should compute.
-    row = tl.program_id(0)
+    # Map the program id to a batch of rows
+    row_start = tl.program_id(0) * ROWS_PER_BLOCK
     group = tl.program_id(1)
-    X += row * stride_x_row + group * N
-    Y += row * stride_y_row + group * N
-    if HAS_Z:
-        Z += row * stride_z_row + group * N
-    if not IS_RMS_NORM:
-        Mean += group * M
-    Rstd += group * M
-    W += group * N
-    if HAS_BIAS:
-        B += group * N
-    # Compute mean and variance
     cols = tl.arange(0, BLOCK_N)
-    x = tl.load(X + cols, mask=cols < N, other=0.0).to(tl.float32)
-    if HAS_Z and not NORM_BEFORE_GATE:
-        z = tl.load(Z + cols, mask=cols < N).to(tl.float32)
-        if ACTIVATION == "sigmoid":
-            x *= tl.sigmoid(z)
-        else:
-            x *= z * tl.sigmoid(z)
-    if not IS_RMS_NORM:
-        mean = tl.sum(x, axis=0) / N
-        tl.store(Mean + row, mean)
-        xbar = tl.where(cols < N, x - mean, 0.0)
-        var = tl.sum(xbar * xbar, axis=0) / N
-    else:
-        xbar = tl.where(cols < N, x, 0.0)
-        var = tl.sum(xbar * xbar, axis=0) / N
-    rstd = 1 / tl.sqrt(var + eps)
-    tl.store(Rstd + row, rstd)
-    # Normalize and apply linear transformation
-    mask = cols < N
-    w = tl.load(W + cols, mask=mask).to(tl.float32)
+    col_mask = cols < N
+    # Load weight/bias once (shared across rows)
+    w = tl.load(W + group * N + cols, mask=col_mask).to(tl.float32)
     if HAS_BIAS:
-        b = tl.load(B + cols, mask=mask).to(tl.float32)
-    x_hat = (x - mean) * rstd if not IS_RMS_NORM else x * rstd
-    y = x_hat * w + b if HAS_BIAS else x_hat * w
-    if HAS_Z and NORM_BEFORE_GATE:
-        z = tl.load(Z + cols, mask=mask).to(tl.float32)
-        if ACTIVATION == "sigmoid":
-            y *= tl.sigmoid(z)
+        b = tl.load(B + group * N + cols, mask=col_mask).to(tl.float32)
+    for r in range(ROWS_PER_BLOCK):
+        row = row_start + r
+        row_mask = row < M
+        x_ptr = X + row * stride_x_row + group * N
+        y_ptr = Y + row * stride_y_row + group * N
+        load_mask = col_mask & row_mask
+        x = tl.load(x_ptr + cols, mask=load_mask, other=0.0).to(tl.float32)
+        if HAS_Z and not NORM_BEFORE_GATE:
+            z = tl.load(Z + row * stride_z_row + group * N + cols, mask=load_mask).to(
+                tl.float32
+            )
+            x *= z * tl.sigmoid(z)
+        if not IS_RMS_NORM:
+            mean = tl.sum(x, axis=0) / N
+            tl.store(Mean + group * M + row, mean, mask=row_mask)
+            xbar = tl.where(load_mask, x - mean, 0.0)
+            var = tl.sum(xbar * xbar, axis=0) / N
         else:
+            xbar = tl.where(load_mask, x, 0.0)
+            var = tl.sum(xbar * xbar, axis=0) / N
+        rstd = 1 / tl.sqrt(var + eps)
+        tl.store(Rstd + group * M + row, rstd, mask=row_mask)
+        x_hat = (x - mean) * rstd if not IS_RMS_NORM else x * rstd
+        y = x_hat * w + b if HAS_BIAS else x_hat * w
+        if HAS_Z and NORM_BEFORE_GATE:
+            z = tl.load(Z + row * stride_z_row + group * N + cols, mask=load_mask).to(
+                tl.float32
+            )
             y *= z * tl.sigmoid(z)
-    # Write output
-    tl.store(Y + cols, y, mask=mask)
+        tl.store(y_ptr + cols, y, mask=load_mask)
 
 
 def layer_norm_fwd(
@@ -95,7 +87,6 @@ def layer_norm_fwd(
     group_size=None,
     norm_before_gate=True,
     is_rms_norm=False,
-    activation="silu",
 ):
     M, N = x.shape
     if group_size is None:
@@ -128,9 +119,16 @@ def layer_norm_fwd(
     BLOCK_N = min(MAX_FUSED_SIZE, triton.next_power_of_2(group_size))
     if group_size > BLOCK_N:
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
-    # heuristics for number of warps
+    # heuristics for number of warps and rows per block
     num_warps = min(max(BLOCK_N // 256, 1), 8)
-    grid = (M, ngroups)
+    # Process multiple rows per block to reduce launch count for large M.
+    # For M=4M rows with N=128, this reduces blocks from 4M to ~64K.
+    ROWS_PER_BLOCK = 1
+    if M > 8192:
+        ROWS_PER_BLOCK = min(64, max(1, 8192 // BLOCK_N))
+    elif M > 1024:
+        ROWS_PER_BLOCK = min(16, max(1, 2048 // BLOCK_N))
+    grid = (triton.cdiv(M, ROWS_PER_BLOCK), ngroups)
     with torch.cuda.device(x.device.index):
         _layer_norm_fwd_1pass_kernel[grid](
             x,
@@ -147,9 +145,9 @@ def layer_norm_fwd(
             group_size,
             eps,
             BLOCK_N=BLOCK_N,
+            ROWS_PER_BLOCK=ROWS_PER_BLOCK,
             NORM_BEFORE_GATE=norm_before_gate,
             IS_RMS_NORM=is_rms_norm,
-            ACTIVATION=activation,
             num_warps=num_warps,
         )
     return out, mean, rstd
@@ -162,13 +160,11 @@ class RmsNormGated(torch.nn.Module):
         bias: Optional[torch.Tensor] = None,
         group_size: Optional[int] = None,
         eps: float = 1e-6,
-        activation: str = "silu",
     ):
         super().__init__()
         self.weight = weight
         self.bias = bias
         self.eps = eps
-        self.activation = activation
         if group_size is None:
             self.group_size = self.weight.shape[-1]
         else:
@@ -202,5 +198,4 @@ class RmsNormGated(torch.nn.Module):
             group_size=self.group_size,
             norm_before_gate=True,
             is_rms_norm=True,
-            activation=self.activation,
         )[0]
