@@ -6,6 +6,7 @@ from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
+from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeDecoderLayer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
@@ -66,6 +67,7 @@ class Qwen3VLMoeModel(GptModelBase):
                     moe_config,
                     max_generate_batch_size,
                     enable_cuda_graph=enable_cuda_graph,
+                    hw_kernel_config=py_hw_kernel_config,
                 )
                 for idx in range(self.layer_num)
             ]
@@ -103,6 +105,7 @@ class Qwen3VLMoeModel(GptModelBase):
 
         residual = torch.zeros_like(hidden_states)
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
+            select_block_map_for_layer(inputs.attention_inputs, i)
             output = decoder_layer(
                 hidden_states,
                 residual,
@@ -114,7 +117,7 @@ class Qwen3VLMoeModel(GptModelBase):
             )
             residual = output.residual
 
-        hidden_states = self.norm(hidden_states, residual)
+        hidden_states, _ = self.norm(hidden_states, residual)
         return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
 
 
