@@ -67,7 +67,9 @@ class HybridKVCacheSpecTest(TestCase):
 
         self.assertEqual(len(config.kv_cache_spec_descs), 1)
         self.assertEqual(config.kv_cache_spec_descs[0][0].tag, "full")
-        self.assertEqual(config.kv_cache_spec_descs[0][0].cache_type, KVCacheSpecType.MHA)
+        self.assertEqual(
+            config.kv_cache_spec_descs[0][0].cache_type, KVCacheSpecType.MHA
+        )
 
     def test_calculate_group_layer_num_uses_full_count_fallback(self):
         self.assertEqual(calculate_hybrid_group_layer_num(30, 10), 10)
@@ -92,6 +94,32 @@ class HybridKVCacheSpecTest(TestCase):
         self.assertEqual(tags[11], "full")
         self.assertEqual(tags[12], "linear0")
         self.assertEqual(tags[13], "linear1")
+
+    def test_qwen3_next_defaults_missing_mrope_interleaved_to_true(self):
+        config = ModelConfig()
+        config.attn_config.size_per_head = 256
+        rope_parameters = {
+            "rope_theta": 10_000_000,
+            "partial_rotary_factor": 0.25,
+            "mrope_section": [11, 11, 10],
+        }
+
+        Qwen3Next._parse_rope_config({"rope_parameters": rope_parameters}, config)
+
+        self.assertTrue(config.attn_config.rope_config.mrope_interleaved)
+
+    def test_qwen3_next_rejects_non_interleaved_mrope(self):
+        config = ModelConfig()
+        config.attn_config.size_per_head = 256
+        rope_parameters = {
+            "rope_theta": 10_000_000,
+            "partial_rotary_factor": 0.25,
+            "mrope_section": [11, 11, 10],
+            "mrope_interleaved": False,
+        }
+
+        with self.assertRaisesRegex(ValueError, "Qwen3Next requires.*true"):
+            Qwen3Next._parse_rope_config({"rope_parameters": rope_parameters}, config)
 
     def test_kimi_linear_uses_contiguous_tags_across_hybrid_cycles(self):
         tags = self._kimi_post_build_tags(
