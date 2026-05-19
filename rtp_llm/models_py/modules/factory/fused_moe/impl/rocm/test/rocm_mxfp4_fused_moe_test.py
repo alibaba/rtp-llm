@@ -1,9 +1,36 @@
-"""Smoke / sanity tests for ROCm Quark MXFP4 fused-MoE on MI355.
+"""Numerical smoke tests for Quark MXFP4 fused MoE on ROCm (MI355 / gfx950).
 
-This mirrors the existing FP8 ROCm smoke tests, but adapts the MXFP4
-quantize/dequantize reference from aiter's own quant unit tests so we can do a
-true numerical comparison against ``torch_moe_ref`` without relying on
-unsupported ``bf16 -> float4`` PyTorch casts.
+Purpose
+-------
+End-to-end numerical validation of ``RocmExpertsMXFp4`` (aiter fused MoE on ROCm).
+This file does not exercise full model loading or checkpoint I/O.
+
+Test procedure
+--------------
+1. Synthesize random BF16 MoE weights (w1/w2) and quantize them to MXFP4 using the
+   same reference path as aiter (uint8 packed weights, uint8 E8M0 scales, block
+   size 32 along the last dimension).
+2. Apply ``shuffle_moe_weight`` so weights match the layout expected at runtime.
+3. Build random hidden states and router top-k indices, then compute MoE output via:
+   - Reference: dequantize MXFP4 to BF16 and run ``torch_moe_ref`` in PyTorch.
+   - Under test: ``RocmExpertsMXFp4.execute`` (ROCm fused MoE kernel).
+4. Assert matching output shape, finiteness, and approximate numerical agreement
+   (``torch.testing.assert_close`` with relaxed tolerances).
+
+Test cases
+----------
+- ``test_basic_forward``: apply router weights after the MoE computation.
+- ``test_apply_router_weight_on_input``: apply router weights on the MoE input.
+
+Execution requirements
+----------------------
+- Skip when HIP is unavailable or the device is not gfx950 (e.g. MI308).
+- On gfx950, missing aiter or an incompatible ``librtp_compute_ops.so`` raises
+  ``RuntimeError`` instead of skipping, so dependency gaps fail visibly on target
+  hardware.
+
+The quant/dequant helpers below are reference-only utilities aligned with aiter's
+MXFP4 unit tests; they are not used in production inference.
 """
 
 import unittest
@@ -43,9 +70,13 @@ except ImportError as exc:  # stale librtp_compute_ops.so / missing aiter / etc.
 
 SCALE_GROUP_SIZE = 32
 
+# MXFP4 quant/dequant helpers below match aiter's MXFP4 quant unit-test reference
+# (see module docstring). Intentionally kept in sync for numerical compare vs
+# RocmExpertsMXFp4; not a production decode path.
+
 
 def _torch_dynamic_mxfp4_quant(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """Pure-torch MXFP4 quantization adapted from aiter's quant tests."""
+    """Pure-torch MXFP4 quant; logic aligned with aiter's quant tests."""
     assert x.dim() == 2, "helper expects [M, N]"
     assert x.shape[-1] % SCALE_GROUP_SIZE == 0, "last dim must be divisible by 32"
 
@@ -141,8 +172,9 @@ def _mxfp4_to_f32(x: torch.Tensor) -> torch.Tensor:
 
 
 def _e8m0_to_f32(x: torch.Tensor) -> torch.Tensor:
-    x_f32 = 2 ** ((x - 127).to(torch.float32))
-    x_f32[x_f32 == 128] = float("nan")
+    exp = x.to(torch.float32) - 127.0
+    x_f32 = torch.pow(2.0, exp)
+    x_f32 = torch.where(x == 255, torch.full_like(x_f32, float("nan")), x_f32)
     return x_f32
 
 
