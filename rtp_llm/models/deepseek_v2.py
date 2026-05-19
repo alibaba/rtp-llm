@@ -811,23 +811,63 @@ class DeepSeekV3Mtp(DeepSeekV2):
 
 
 class Glm5MtpWeight(DeepSeekV2Weight):
+    """Weight loader for GLM-5 MTP that supports two checkpoint layouts.
+
+    Layout A (legacy, extracted MTP-only checkpoint):
+        config.json reports num_hidden_layers=1, MTP weights live at
+        model.layers.0.* with embedding/lm_head also under model.layers.0.*.
+
+    Layout B (full GLM-5 checkpoint, sglang/vllm style):
+        config.json reports num_hidden_layers=N (e.g. 78) and
+        num_nextn_predict_layers>=1, MTP weights at model.layers.{N}.*,
+        embedding at model.embed_tokens.weight, lm_head at lm_head.weight.
+
+    The mode is selected via model_config.mtp_layer_offset, set by
+    Glm5Mtp._create_config(). offset==0 => Layout A; offset>0 => Layout B.
+    """
+
+    def _process_meta(self, meta_dict, weight_keys):
+        # The MTP layer index in the source checkpoint (78 for Layout B, 0 for
+        # Layout A). DeepSeekV2Weight._process_meta only inspects layers
+        # [0, _num_layers) which would miss the MTP layer in Layout B.
+        mtp_layer_idx = int(getattr(self.model_config, "mtp_layer_offset", 0) or 0)
+        if f"model.layers.{mtp_layer_idx}.self_attn.q_a_proj.weight" in weight_keys:
+            self.q_use_lora = True
+        if (
+            f"model.layers.{mtp_layer_idx}.mlp.gate.e_score_correction_bias"
+            in weight_keys
+        ):
+            self.has_e_score_correction_bias = True
 
     def _get_weight_info(self):
-        layer_weights: List[List[WeightModule]] = []
+        mtp_layer_idx = int(getattr(self.model_config, "mtp_layer_offset", 0) or 0)
+
+        if mtp_layer_idx == 0:
+            embedding_ckpt = "model.layers.0.embed_tokens.weight"
+            lm_head_ckpt = "model.layers.0.shared_head.head.weight"
+        else:
+            embedding_ckpt = "model.embed_tokens.weight"
+            lm_head_ckpt = "lm_head.weight"
+
         weights = [
             AtomicWeight(
                 W.embedding,
-                [CkptWeightInfo("model.layers.0.embed_tokens.weight", identity)],
+                [CkptWeightInfo(embedding_ckpt, identity)],
                 identity,
             ),
             AtomicWeight(
                 W.lm_head,
-                [CkptWeightInfo("model.layers.0.shared_head.head.weight", identity)],
+                [CkptWeightInfo(lm_head_ckpt, identity)],
                 identity,
             ),
             AtomicWeight(
                 W.multi_tokens_predict_final_ln_gamma,
-                [CkptWeightInfo("model.layers.0.shared_head.norm.weight", identity)],
+                [
+                    CkptWeightInfo(
+                        f"model.layers.{mtp_layer_idx}.shared_head.norm.weight",
+                        identity,
+                    )
+                ],
                 identity,
             ),
             AtomicWeight(
@@ -837,25 +877,57 @@ class Glm5MtpWeight(DeepSeekV2Weight):
             ),
             AtomicWeight(
                 W.multi_tokens_predict_enorm,
-                [CkptWeightInfo("model.layers.0.enorm.weight", identity)],
+                [
+                    CkptWeightInfo(
+                        f"model.layers.{mtp_layer_idx}.enorm.weight", identity
+                    )
+                ],
                 identity,
             ),
             AtomicWeight(
                 W.multi_tokens_predict_hnorm,
-                [CkptWeightInfo("model.layers.0.hnorm.weight", identity)],
+                [
+                    CkptWeightInfo(
+                        f"model.layers.{mtp_layer_idx}.hnorm.weight", identity
+                    )
+                ],
                 identity,
             ),
             AtomicWeight(
                 W.multi_tokens_predict_eh_proj,
-                [CkptWeightInfo("model.layers.0.eh_proj.weight", identity)],
+                [
+                    CkptWeightInfo(
+                        f"model.layers.{mtp_layer_idx}.eh_proj.weight", identity
+                    )
+                ],
                 transpose,
             ),
         ]
         assert self._num_layers == 1
+        layer_weights: List[List[WeightModule]] = []
         for layer in range(self._num_layers):
-            layer_weights.append(self._get_hf_layer_weight_info(layer))
+            per_layer = self._get_hf_layer_weight_info(layer)
+            if mtp_layer_idx != 0:
+                # Templates contain "{i}" placeholders that the framework will
+                # later substitute with layer_id (= 0 here). Pre-substitute
+                # them with the real MTP layer index so the loader looks at
+                # model.layers.{mtp_layer_idx}.* in the full checkpoint.
+                self._remap_layer_ckpt_names(per_layer, mtp_layer_idx)
+            layer_weights.append(per_layer)
 
         return ModelWeightInfo(layer_weights=layer_weights, weights=weights)
+
+    @staticmethod
+    def _remap_layer_ckpt_names(layer_weights, target_layer_idx: int) -> None:
+        target = str(target_layer_idx)
+        for wm in layer_weights:
+            for component in wm.get_components():
+                ckpt_list = getattr(component, "weights", None)
+                if not ckpt_list:
+                    continue
+                for ckpt in ckpt_list:
+                    if hasattr(ckpt, "name") and "{i}" in ckpt.name:
+                        ckpt.name = ckpt.name.replace("{i}", target)
 
 
 class Glm5Mtp(DeepSeekV2):
@@ -863,8 +935,30 @@ class Glm5Mtp(DeepSeekV2):
     @classmethod
     def _create_config(cls, ckpt_path: str):
         config = super()._create_config(ckpt_path)
+        num_main_layers = config.num_layers
+        num_mtp_layers = 1
+        config_path = os.path.join(ckpt_path, "config.json")
+        if os.path.exists(config_path):
+            with open(config_path) as reader:
+                config_json = json.loads(reader.read())
+            num_main_layers = int(config_json.get("num_hidden_layers", num_main_layers))
+            num_mtp_layers = int(config_json.get("num_nextn_predict_layers", 1)) or 1
+        # Layout A: standalone extracted MTP checkpoint (single layer only).
+        # Layout B: full checkpoint where MTP layer is at index num_hidden_layers.
+        if num_main_layers <= 1:
+            config.mtp_layer_offset = 0
+        else:
+            config.mtp_layer_offset = num_main_layers
+        config.num_layers = num_mtp_layers
         config.moe_layer_index = [i for i in range(config.num_layers)]
         config.is_mtp = True
+        # The DSA (DeepSeek Sparse Attention) indexer in the MTP propose model
+        # needs its own kv_scale_base cache, but the propose engine does not
+        # currently allocate one — see indexer_op.quant_k_only(). Disable the
+        # indexer for the MTP layer so it falls back to standard MLA. This
+        # matches sglang/vllm where MTP runs without DSA.
+        config.attn_config.is_sparse = False
+        config.attn_config.indexer_topk = 0
         return config
 
     def _create_python_model(self):

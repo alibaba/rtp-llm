@@ -34,7 +34,20 @@ def get_mla_impl(
     parallelism_config: Optional[ParallelismConfig] = None,
 ) -> MlaImplBase:
 
-    mla_impls = PREFILL_MLA_IMPS if attn_inputs.is_prefill else DECODE_MLA_IMPS
+    # MTP target-verify arrives with is_prefill=True (sequence_lengths is empty in
+    # MtpBatchStreamProcessor::prepareOneStepSpecDecodeModelInput) but it is really
+    # multi-token decode with prefix in cache — sglang/vllm both classify it as
+    # decode. If we let it go through the prefill path the fast-path branch below
+    # skips SparseMlaImpl, so the main (DSA) model uses dense MLA during verify and
+    # baseline (DSA decode) uses sparse MLA — different attention algorithms over
+    # the same KV cache → divergent main-model predictions and wrong response.
+    is_target_verify = bool(getattr(attn_inputs, "is_target_verify", False))
+
+    mla_impls = (
+        PREFILL_MLA_IMPS
+        if (attn_inputs.is_prefill and not is_target_verify)
+        else DECODE_MLA_IMPS
+    )
     for impl in mla_impls:
         # Check support before creating instance
         if not impl.support(attn_configs, attn_inputs):
@@ -44,6 +57,7 @@ def get_mla_impl(
         # TODO: support fast path for cp prefill
         use_fast_path = (
             attn_inputs.is_prefill
+            and not is_target_verify
             and attn_inputs.cu_kv_seqlens.max().item() <= attn_configs.indexer_topk
             and not (
                 parallelism_config and parallelism_config.prefill_cp_config.is_enabled()
