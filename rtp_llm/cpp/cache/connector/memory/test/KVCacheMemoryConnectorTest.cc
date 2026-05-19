@@ -18,6 +18,7 @@
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/MLAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
@@ -641,24 +642,23 @@ TEST_F(KVCacheMemoryConnectorTest, initBlockPool_ReturnTrue_AndRegistersPool) {
 }
 
 TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_UsesLayerAndRegionSlots) {
-    auto cfg = cache_config_;
+    auto cfg          = cache_config_;
     cfg.layer_num     = 1;
     cfg.layer_all_num = 1;
     cfg.layer_to_group_id.assign(1, 0);
     cfg.layer_to_group_ids.assign(1, std::vector<int>{0, 1});
-    cfg.layer_region_to_group_id.assign(1,
-                                        std::vector<int>(static_cast<size_t>(KVCacheRegionName::REGION_COUNT), -1));
+    cfg.layer_region_to_group_id.assign(1, std::vector<int>(static_cast<size_t>(KVCacheRegionName::REGION_COUNT), -1));
     cfg.layer_region_to_group_id[0][static_cast<size_t>(KVCacheRegionName::CSA_KV)] = 0;
     cfg.layer_region_to_group_id[0][static_cast<size_t>(KVCacheRegionName::SWA_KV)] = 1;
-    cfg.group_types = {CacheGroupType::FULL, CacheGroupType::FULL};
-    cfg.group_kv_block_stride_bytes    = {16, 32};
-    cfg.group_kv_scale_stride_bytes    = {0, 0};
-    cfg.layer_to_block_stride_bytes    = {999};
+    cfg.group_types                 = {CacheGroupType::FULL, CacheGroupType::FULL};
+    cfg.group_kv_block_stride_bytes = {16, 32};
+    cfg.group_kv_scale_stride_bytes = {0, 0};
+    cfg.layer_to_block_stride_bytes = {999};
 
     auto kv_cfg                         = kv_cache_config_;
     kv_cfg.memory_cache_size_mb         = 64;
     kv_cfg.memory_cache_sync_timeout_ms = 1000;
-    auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, allocator_, server_addrs_);
+    auto conn          = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, allocator_, server_addrs_);
     conn->block_cache_ = std::make_shared<MemoryBlockCache>();
     ASSERT_NO_THROW(conn->initBlockPool());
 
@@ -673,7 +673,7 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_UsesLayerAndRegionSlots
     EXPECT_EQ(slots[1].group_id, 1);
     EXPECT_EQ(slots[1].stride_bytes, 32u);
 
-    auto resource = std::make_shared<KVCacheResource>();
+    auto resource         = std::make_shared<KVCacheResource>();
     resource->cacheKeys() = {101, 102, 103};
     resource->initGroups(/*group_num=*/2,
                          /*layer_num=*/1,
@@ -685,7 +685,7 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_UsesLayerAndRegionSlots
     resource->mutableBlockIds(/*group_id=*/1).assign({21, NULL_BLOCK_IDX, 23});
 
     bool no_need_write = true;
-    auto plan = conn->buildCopyPlanForWrite(
+    auto plan          = conn->buildCopyPlanForWrite(
         resource->cacheKeys(), resource->layerAttnBlocks(), slots, /*start_index=*/0, /*write_num=*/3, no_need_write);
 
     ASSERT_NE(plan, nullptr);
@@ -2025,6 +2025,383 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_D2H_MultiLayer_ValidatesByteOffsets
         verifyBlockBytesEq(mem_buffer, byte_off, bytes, static_cast<char>('k' + static_cast<int>(layer)));
         byte_off += layer_stride;
     }
+}
+
+// ============================== Dual-pool tests ==============================
+
+class KVCacheMemoryConnectorDualPoolTest: public ::testing::Test {
+protected:
+    void SetUp() override {
+        createDevice();
+        startRpcServer(4);
+    }
+
+    void TearDown() override {}
+
+    CacheConfig
+    createHybridCacheConfig(int layer_num = 4, int block_num = 10, int seq_size_per_block = 8, int linear_step = 4) {
+        constexpr int kTestMemoryCacheSizeMb      = 64;
+        constexpr int kTestMemoryCacheSyncTimeout = 1000;
+
+        CacheConfig config;
+        config.layer_num                              = layer_num;
+        config.layer_all_num                          = layer_num;
+        config.block_num                              = block_num;
+        config.seq_size_per_block                     = seq_size_per_block;
+        config.linear_step                            = linear_step;
+        config.group_layer_num                        = layer_num;
+        config.full_group_num                         = 1;
+        kv_cache_config_.memory_cache_size_mb         = kTestMemoryCacheSizeMb;
+        kv_cache_config_.memory_cache_sync_timeout_ms = kTestMemoryCacheSyncTimeout;
+
+        auto full_spec                = std::make_shared<MHAKVCacheSpec>();
+        full_spec->layer_num          = layer_num;
+        full_spec->local_head_num_kv  = 4;
+        full_spec->size_per_head      = 64;
+        full_spec->seq_size_per_block = seq_size_per_block;
+        full_spec->dtype              = rtp_llm::DataType::TYPE_FP16;
+
+        auto swa_spec                = std::make_shared<MHAKVCacheSpec>();
+        swa_spec->layer_num          = layer_num;
+        swa_spec->local_head_num_kv  = 4;
+        swa_spec->size_per_head      = 64;
+        swa_spec->seq_size_per_block = seq_size_per_block;
+        swa_spec->dtype              = rtp_llm::DataType::TYPE_FP16;
+
+        config.cache_specs        = {full_spec, swa_spec};
+        config.group_types        = {CacheGroupType::FULL, CacheGroupType::SWA};
+        config.group_region_names = {KVCacheRegionName::DEFAULT, KVCacheRegionName::SWA_KV};
+
+        const size_t full_stride           = full_spec->block_size_bytes();
+        const size_t swa_stride            = swa_spec->block_size_bytes();
+        config.group_kv_block_stride_bytes = {full_stride, swa_stride};
+        config.group_kv_scale_stride_bytes = {0, 0};
+
+        config.dtype                 = full_spec->dtype;
+        config.kv_block_stride_bytes = std::max(full_stride, swa_stride);
+        config.kv_scale_stride_bytes = 0;
+        config.kv_block_size_bytes   = static_cast<size_t>(layer_num) * full_stride;
+        config.kv_scale_size_bytes   = 0;
+        config.swa_block_size_bytes  = static_cast<size_t>(layer_num) * swa_stride;
+        config.block_size_bytes      = config.kv_block_size_bytes;
+
+        std::vector<int> full_layer_ids(layer_num);
+        std::vector<int> swa_layer_ids(layer_num);
+        for (int i = 0; i < layer_num; ++i) {
+            full_layer_ids[i] = i;
+            swa_layer_ids[i]  = i;
+        }
+        config.layer_ids        = {full_layer_ids, swa_layer_ids};
+        config.global_layer_ids = {full_layer_ids, swa_layer_ids};
+
+        config.layer_to_group_id.assign(layer_num, 0);
+        config.layer_to_group_ids.resize(layer_num);
+        const size_t region_count = static_cast<size_t>(KVCacheRegionName::REGION_COUNT);
+        config.layer_region_to_group_id.assign(layer_num, std::vector<int>(region_count, -1));
+        for (int i = 0; i < layer_num; ++i) {
+            config.layer_to_group_ids[i]                                                        = {0, 1};
+            config.layer_region_to_group_id[i][static_cast<size_t>(KVCacheRegionName::DEFAULT)] = 0;
+            config.layer_region_to_group_id[i][static_cast<size_t>(KVCacheRegionName::SWA_KV)]  = 1;
+        }
+        config.layer_group_types.assign(layer_num, CacheGroupType::FULL);
+        config.layer_to_block_stride_bytes.assign(layer_num, static_cast<int>(full_stride));
+
+        config.use_independent_block_pools = true;
+
+        return config;
+    }
+
+    std::shared_ptr<KVCacheMemoryConnector> createConnector(const CacheConfig& cfg) {
+        auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cache_config_, allocator_, server_addrs_);
+        EXPECT_TRUE(conn->init());
+        return conn;
+    }
+
+    std::shared_ptr<KVCacheResource> makeHybridResource(const CacheConfig&                            cfg,
+                                                        const CacheKeysType&                          cache_keys,
+                                                        const std::vector<std::vector<BlockIdxType>>& full_blocks,
+                                                        const std::vector<std::vector<BlockIdxType>>& swa_blocks,
+                                                        size_t reuse_len = 0) const {
+        auto         res       = std::make_shared<KVCacheResource>();
+        const size_t layer_num = static_cast<size_t>(cfg.layer_all_num);
+
+        res->initGroups(
+            /*group_num=*/2,
+            /*layer_num=*/cfg.layer_all_num,
+            cfg.layer_to_group_id,
+            /*kernel_blocks_per_kv_block=*/1,
+            cfg.group_types,
+            cfg.layer_region_to_group_id);
+
+        res->resizeBlocks(static_cast<int>(cache_keys.size()), NULL_BLOCK_IDX);
+
+        for (size_t l = 0; l < layer_num; ++l) {
+            if (l < full_blocks.size()) {
+                BlockIndicesType padded(cache_keys.size(), NULL_BLOCK_IDX);
+                for (size_t k = 0; k < std::min(cache_keys.size(), full_blocks[l].size()); ++k) {
+                    padded[k] = full_blocks[l][k];
+                }
+                res->mutableBlockIds(static_cast<int>(l), KVCacheRegionName::DEFAULT).assign(padded);
+            }
+            if (l < swa_blocks.size()) {
+                BlockIndicesType padded(cache_keys.size(), NULL_BLOCK_IDX);
+                for (size_t k = 0; k < std::min(cache_keys.size(), swa_blocks[l].size()); ++k) {
+                    padded[k] = swa_blocks[l][k];
+                }
+                res->mutableBlockIds(static_cast<int>(l), KVCacheRegionName::SWA_KV).assign(padded);
+            }
+        }
+
+        res->cacheKeys() = cache_keys;
+        res->setDeviceReuseBlockNum(reuse_len);
+        res->setLastBlockAligned(true);
+        return res;
+    }
+
+    bool waitUntilDone(const std::shared_ptr<rtp_llm::AsyncContext>& ctx, int timeout_ms = 3000) const {
+        if (!ctx) {
+            return false;
+        }
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (ctx->done()) {
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return ctx->done();
+    }
+
+    KVCacheConfig                               kv_cache_config_;
+    std::shared_ptr<KVCacheAllocator>           allocator_;
+    std::vector<std::unique_ptr<TestRpcServer>> servers_;
+    std::vector<std::string>                    server_addrs_;
+
+private:
+    void createDevice() const {
+        initRuntime(/*device_id=*/0,
+                    /*trace_memory=*/false,
+                    /*enable_comm_overlap=*/false,
+                    MlaOpsType::AUTO);
+    }
+    void startRpcServer(int server_num) {
+        for (int i = 0; i < server_num; ++i) {
+            auto service = std::make_unique<TestRpcService>();
+            auto server  = std::make_unique<TestRpcServer>(std::move(service));
+            ASSERT_TRUE(server->start());
+            server_addrs_.push_back("127.0.0.1:" + std::to_string(server->listenPort()));
+            servers_.push_back(std::move(server));
+        }
+    }
+};
+
+TEST_F(KVCacheMemoryConnectorDualPoolTest, Init_CreatesDualPools) {
+    auto cfg   = createHybridCacheConfig();
+    allocator_ = std::make_shared<HybridTypeKVCacheAllocator>(cfg, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator_->init());
+    auto conn = createConnector(cfg);
+
+    EXPECT_TRUE(conn->isDualPool());
+    EXPECT_NE(conn->complete_pool_, nullptr);
+    EXPECT_NE(conn->incomplete_pool_, nullptr);
+    EXPECT_NE(conn->complete_cache_, nullptr);
+    EXPECT_NE(conn->incomplete_cache_, nullptr);
+    EXPECT_EQ(conn->block_pool_, nullptr);
+    EXPECT_EQ(conn->block_cache_, nullptr);
+    EXPECT_GT(conn->complete_block_size_, 0u);
+    EXPECT_GT(conn->incomplete_block_size_, 0u);
+    EXPECT_GT(conn->complete_block_size_, conn->incomplete_block_size_);
+}
+
+TEST_F(KVCacheMemoryConnectorDualPoolTest, Init_PureFullUsesSinglePool) {
+    // Pure FULL config: no typed slots, should use single pool
+    CacheConfig config;
+    config.layer_num                              = 4;
+    config.layer_all_num                          = 4;
+    config.block_num                              = 10;
+    config.seq_size_per_block                     = 8;
+    kv_cache_config_.memory_cache_size_mb         = 64;
+    kv_cache_config_.memory_cache_sync_timeout_ms = 1000;
+
+    auto spec                    = std::make_shared<MHAKVCacheSpec>();
+    spec->layer_num              = 4;
+    spec->local_head_num_kv      = 8;
+    spec->size_per_head          = 128;
+    spec->seq_size_per_block     = 8;
+    spec->dtype                  = rtp_llm::DataType::TYPE_FP16;
+    config.cache_specs           = {spec};
+    config.dtype                 = spec->dtype;
+    config.kv_block_stride_bytes = spec->block_size_bytes();
+    config.kv_scale_stride_bytes = spec->scale_block_size_bytes();
+    config.kv_block_size_bytes   = 4UL * config.kv_block_stride_bytes;
+    config.kv_scale_size_bytes   = 4UL * config.kv_scale_stride_bytes;
+    config.block_size_bytes      = config.kv_block_size_bytes + config.kv_scale_size_bytes;
+    const size_t per_layer       = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;
+    config.layer_to_block_stride_bytes.assign(4, static_cast<int>(per_layer));
+    std::vector<int> ids = {0, 1, 2, 3};
+    config.layer_ids.push_back(ids);
+    config.global_layer_ids.push_back(ids);
+
+    allocator_ = std::make_shared<SingleTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator_->init());
+    auto conn = createConnector(config);
+
+    EXPECT_FALSE(conn->isDualPool());
+    EXPECT_NE(conn->block_pool_, nullptr);
+    EXPECT_NE(conn->block_cache_, nullptr);
+    EXPECT_EQ(conn->complete_pool_, nullptr);
+    EXPECT_EQ(conn->incomplete_pool_, nullptr);
+}
+
+TEST_F(KVCacheMemoryConnectorDualPoolTest, AsyncMatch_AdvancesOnlyOnCompleteHit) {
+    auto cfg = createHybridCacheConfig(/*layer_num=*/2, /*block_num=*/10, /*seq_size_per_block=*/8, /*linear_step=*/4);
+    allocator_ = std::make_shared<HybridTypeKVCacheAllocator>(cfg, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator_->init());
+    auto conn = createConnector(cfg);
+    ASSERT_TRUE(conn->isDualPool());
+
+    // 4 cache keys (3 real + 1 tail dummy that won't be matched)
+    CacheKeysType cache_keys{90001, 90002, 90003, 90999};
+    // FULL blocks: all valid (non-null) for both layers
+    std::vector<std::vector<BlockIdxType>> full_blocks{{1, 1, 1, 1}, {2, 2, 2, 2}};
+    // SWA blocks: key0 NULL (incomplete), key1 valid (complete), key2 NULL (incomplete)
+    std::vector<std::vector<BlockIdxType>> swa_blocks{{NULL_BLOCK_IDX, 1, NULL_BLOCK_IDX, 1},
+                                                      {NULL_BLOCK_IDX, 2, NULL_BLOCK_IDX, 2}};
+    auto                                   res = makeHybridResource(cfg, cache_keys, full_blocks, swa_blocks);
+
+    // Populate caches directly
+    {
+        // key0: incomplete (SWA NULL) → incomplete cache
+        auto inc_blks = conn->incomplete_pool_->malloc(2);
+        ASSERT_EQ(inc_blks.size(), 2u);
+        MemoryBlockCache::CacheItem item0;
+        item0.cache_key   = cache_keys[0];
+        item0.block_index = static_cast<BlockIdxType>(inc_blks[0]);
+        item0.is_complete = false;
+        conn->incomplete_cache_->put(item0);
+        conn->incomplete_pool_->blockCacheReference({static_cast<BlockIdxType>(inc_blks[0])});
+        conn->incomplete_pool_->requestFree({inc_blks[0]});
+
+        // key2: incomplete → incomplete cache
+        MemoryBlockCache::CacheItem item2;
+        item2.cache_key   = cache_keys[2];
+        item2.block_index = static_cast<BlockIdxType>(inc_blks[1]);
+        item2.is_complete = false;
+        conn->incomplete_cache_->put(item2);
+        conn->incomplete_pool_->blockCacheReference({static_cast<BlockIdxType>(inc_blks[1])});
+        conn->incomplete_pool_->requestFree({inc_blks[1]});
+
+        // key1: complete → complete cache
+        auto comp_blks = conn->complete_pool_->malloc(1);
+        ASSERT_EQ(comp_blks.size(), 1u);
+        MemoryBlockCache::CacheItem item1;
+        item1.cache_key   = cache_keys[1];
+        item1.block_index = static_cast<BlockIdxType>(comp_blks[0]);
+        item1.is_complete = true;
+        conn->complete_cache_->put(item1);
+        conn->complete_pool_->blockCacheReference({static_cast<BlockIdxType>(comp_blks[0])});
+        conn->complete_pool_->requestFree({comp_blks[0]});
+    }
+
+    auto meta      = std::make_shared<TestReadMeta>(true);
+    auto match_ctx = conn->asyncMatch(res, meta);
+    ASSERT_NE(match_ctx, nullptr);
+    // key0: incomplete hit → scan continues, matched_num stays 0
+    // key1: complete hit + all GPU valid → matched_num = 2
+    // key2: incomplete hit → scan continues, matched_num stays 2
+    // Result: matched_num = 2
+    EXPECT_EQ(match_ctx->matchedBlockCount(), 2u);
+}
+
+TEST_F(KVCacheMemoryConnectorDualPoolTest, AsyncMatch_StopsOnDoubleMiss) {
+    auto cfg = createHybridCacheConfig(/*layer_num=*/2, /*block_num=*/10, /*seq_size_per_block=*/8, /*linear_step=*/4);
+    allocator_ = std::make_shared<HybridTypeKVCacheAllocator>(cfg, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator_->init());
+    auto conn = createConnector(cfg);
+    ASSERT_TRUE(conn->isDualPool());
+
+    CacheKeysType                          cache_keys{92001, 92002, 92003, 92999};
+    std::vector<std::vector<BlockIdxType>> full_blocks{{1, 1, 1, 1}, {2, 2, 2, 2}};
+    std::vector<std::vector<BlockIdxType>> swa_blocks{{1, 1, 1, 1}, {2, 2, 2, 2}};
+    auto                                   res = makeHybridResource(cfg, cache_keys, full_blocks, swa_blocks);
+
+    // Put key0 as complete, skip key1 (gap), key2 as complete
+    auto blks = conn->complete_pool_->malloc(2);
+    ASSERT_EQ(blks.size(), 2u);
+    MemoryBlockCache::CacheItem item0;
+    item0.cache_key   = cache_keys[0];
+    item0.block_index = static_cast<BlockIdxType>(blks[0]);
+    item0.is_complete = true;
+    conn->complete_cache_->put(item0);
+    conn->complete_pool_->blockCacheReference({static_cast<BlockIdxType>(blks[0])});
+    conn->complete_pool_->requestFree({blks[0]});
+
+    MemoryBlockCache::CacheItem item2;
+    item2.cache_key   = cache_keys[2];
+    item2.block_index = static_cast<BlockIdxType>(blks[1]);
+    item2.is_complete = true;
+    conn->complete_cache_->put(item2);
+    conn->complete_pool_->blockCacheReference({static_cast<BlockIdxType>(blks[1])});
+    conn->complete_pool_->requestFree({blks[1]});
+
+    auto meta      = std::make_shared<TestReadMeta>(true);
+    auto match_ctx = conn->asyncMatch(res, meta);
+    ASSERT_NE(match_ctx, nullptr);
+    // key0 hit → matched=1, key1 miss in both caches → break
+    EXPECT_EQ(match_ctx->matchedBlockCount(), 1u);
+}
+
+TEST_F(KVCacheMemoryConnectorDualPoolTest, PoolSizing_JointCalculation) {
+    auto cfg = createHybridCacheConfig(/*layer_num=*/2, /*block_num=*/10, /*seq_size_per_block=*/8, /*linear_step=*/4);
+    allocator_ = std::make_shared<HybridTypeKVCacheAllocator>(cfg, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator_->init());
+    auto conn = createConnector(cfg);
+    ASSERT_TRUE(conn->isDualPool());
+
+    // With linear_step=4: computed incomplete = 3 * computed complete.
+    // totalBlocksNum() = block_num - 1 (reserves block 0), so the exact ratio
+    // is (3*N - 1) / (N - 1) ≈ 3. Check within tolerance of the reserve offset.
+    const auto complete_total   = conn->complete_pool_->totalBlocksNum();
+    const auto incomplete_total = conn->incomplete_pool_->totalBlocksNum();
+    EXPECT_GT(complete_total, 0u);
+    EXPECT_GT(incomplete_total, 0u);
+    EXPECT_NEAR(static_cast<double>(incomplete_total), static_cast<double>(complete_total) * 3.0, 3.0);
+}
+
+TEST_F(KVCacheMemoryConnectorDualPoolTest, CacheKeys_MergesBothCaches) {
+    auto cfg   = createHybridCacheConfig(/*layer_num=*/2);
+    allocator_ = std::make_shared<HybridTypeKVCacheAllocator>(cfg, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator_->init());
+    auto conn = createConnector(cfg);
+    ASSERT_TRUE(conn->isDualPool());
+
+    // Put some items into each cache
+    auto comp_blks = conn->complete_pool_->malloc(1);
+    ASSERT_EQ(comp_blks.size(), 1u);
+    MemoryBlockCache::CacheItem item1;
+    item1.cache_key   = 100;
+    item1.block_index = static_cast<BlockIdxType>(comp_blks[0]);
+    item1.is_complete = true;
+    conn->complete_cache_->put(item1);
+    conn->complete_pool_->blockCacheReference({static_cast<BlockIdxType>(comp_blks[0])});
+    conn->complete_pool_->requestFree({comp_blks[0]});
+
+    auto inc_blks = conn->incomplete_pool_->malloc(1);
+    ASSERT_EQ(inc_blks.size(), 1u);
+    MemoryBlockCache::CacheItem item2;
+    item2.cache_key   = 200;
+    item2.block_index = static_cast<BlockIdxType>(inc_blks[0]);
+    item2.is_complete = false;
+    conn->incomplete_cache_->put(item2);
+    conn->incomplete_pool_->blockCacheReference({static_cast<BlockIdxType>(inc_blks[0])});
+    conn->incomplete_pool_->requestFree({inc_blks[0]});
+
+    auto keys = conn->cacheKeys();
+    EXPECT_EQ(keys.size(), 2u);
+    bool has_100 = std::find(keys.begin(), keys.end(), 100) != keys.end();
+    bool has_200 = std::find(keys.begin(), keys.end(), 200) != keys.end();
+    EXPECT_TRUE(has_100);
+    EXPECT_TRUE(has_200);
 }
 
 }  // namespace rtp_llm::test
