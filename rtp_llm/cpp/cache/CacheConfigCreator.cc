@@ -55,8 +55,7 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
                                 kv_cache_config.seq_size_per_block,
                                 kv_cache_config.kernel_seq_size_per_block);
         config.kernel_seq_size_per_block = static_cast<size_t>(kv_cache_config.kernel_seq_size_per_block);
-    } else if (config.kernel_seq_size_per_block == 0
-               || config.kernel_seq_size_per_block == config.seq_size_per_block) {
+    } else if (config.kernel_seq_size_per_block == 0 || config.kernel_seq_size_per_block == config.seq_size_per_block) {
         // Default: kernel block size == physical block size (no split). Keep
         // any explicit value already set by createBasicConfig (e.g. DSV4 forces
         // kernel_seq_size_per_block = 256 even when physical seq_size > 256).
@@ -87,7 +86,12 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
                              config.fixed_pool_reserve_bytes / 1024 / 1024,
                              paged_budget / 1024 / 1024);
         }
-        block_num = paged_budget / config.block_size_bytes;
+        const int    joint_step = std::max(1, config.linear_step);
+        const size_t effective_bytes =
+            (config.swa_block_size_bytes > 0 && joint_step > 1) ?
+                config.block_size_bytes + config.swa_block_size_bytes / static_cast<size_t>(joint_step) :
+                config.block_size_bytes + config.swa_block_size_bytes;
+        block_num = paged_budget / effective_bytes;
     }
     RTP_LLM_CHECK_WITH_INFO(block_num > 0,
                             "kv cache needs at least 1 block but %ld, each block needs %ld MiB memory",
@@ -165,8 +169,7 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     }
 
     const size_t fixed_reserve = score_config.fixed_pool_reserve_bytes
-                                 + propose_config.fixed_pool_reserve_bytes
-                                       * static_cast<size_t>(num_mtp_modules);
+                                 + propose_config.fixed_pool_reserve_bytes * static_cast<size_t>(num_mtp_modules);
 
     size_t block_num = 0;
     if (kv_cache_config.test_block_num > 0) {
@@ -192,9 +195,16 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                 paged_budget / 1024 / 1024);
         }
 
-        block_num = paged_budget
-                    / (static_cast<size_t>(score_config.block_size_bytes)
-                       + static_cast<size_t>(propose_config.block_size_bytes) * static_cast<size_t>(num_mtp_modules));
+        const int joint_step     = std::max(1, kv_cache_config.linear_step);
+        auto      effective_size = [&](const CacheConfig& cfg) -> size_t {
+            if (cfg.swa_block_size_bytes > 0 && joint_step > 1) {
+                return cfg.block_size_bytes + cfg.swa_block_size_bytes / static_cast<size_t>(joint_step);
+            }
+            return cfg.block_size_bytes + cfg.swa_block_size_bytes;
+        };
+        block_num =
+            paged_budget
+            / (effective_size(score_config) + effective_size(propose_config) * static_cast<size_t>(num_mtp_modules));
     }
 
     RTP_LLM_CHECK_WITH_INFO(block_num > 0, "kv cache needs at least 1 block but %zu", block_num);
