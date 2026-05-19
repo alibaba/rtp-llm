@@ -1,31 +1,55 @@
 # ┌─────────────────────────────────────────────────────────────────┐
 # │ CI Architecture — Request Trigger                               │
 # │                                                                 │
+# │ Two jobs:                                                       │
+# │   build — internal CI for the PR HEAD                           │
+# │   gate  — internal merge gate (needs: build)                    │
+# │                                                                 │
 # │ pull_request (opened/synchronize/reopened) — this workflow      │
 # │   → native "build" check run created on PR HEAD SHA             │
 # │   → resolve-context: check for fresh LGTM review/comment       │
 # │   → no fresh LGTM                                              │
 # │       → resolve-context exit 1                                  │
 # │       → build check = failure (blocks merge)                    │
+# │       → gate skipped because needs: build (build red blocks     │
+# │         merge anyway)                                           │
 # │       → when LGTM arrives, CI-event-dispatcher.yml reruns this  │
 # │   → has fresh LGTM                                             │
 # │       → pre-check internal CI status                            │
 # │       → if not done → trigger internal CI                       │
 # │       → wait for internal CI result                             │
-# │       → CI pass → build check = success → PR mergeable          │
+# │       → CI pass → build check = success                         │
 # │       → CI fail → build check = failure                         │
+# │                                                                 │
+# │ gate (needs: build, runs after build success)                   │
+# │   → require fresh APPROVED review (LGTM-only does NOT pass)     │
+# │   → precheck: internal merge already done → success (dedup)    │
+# │   → check internal rebase (open_merge/<pr> vs main-internal)    │
+# │   → trigger-merge: send MERGE-TASK to internal CI               │
+# │   → wait-merge: poll up to 2h                                   │
+# │   → success → gate check green → PR mergeable                   │
+# │                                                                 │
+# │ Internal merge happens BEFORE external merge (gate job),        │
+# │ not after — merge-request-trigger.yml is now backstop only.     │
 # │                                                                 │
 # │ LGTM review/comment                                            │
 # │   → CI-event-dispatcher.yml handles this event                  │
 # │   → finds this workflow's pull_request run for PR HEAD SHA      │
 # │   → reruns it (POST .../actions/runs/{id}/rerun)                │
 # │   → this workflow executes again with latest review state       │
-# │   → build check on PR HEAD is re-evaluated and updated          │
+# │   → both build and gate are re-evaluated                        │
 # │                                                                 │
 # │ workflow_dispatch                                               │
-# │   → manual/debug fallback only                                  │
+# │   → manual/debug fallback only; runs build, NOT gate            │
 # │   → does NOT update native PR HEAD "build" check                │
 # │   → writes commit status "CI Request Trigger" (non-required)    │
+# │                                                                 │
+# │ Required setup (Settings → Branches → main → protection):       │
+# │   - Require status checks before merging                        │
+# │     - add `build` and `gate` as required                        │
+# │   - Require pull request reviews before merging                 │
+# │     - Dismiss stale pull request approvals when new commits     │
+# │       are pushed (so push → re-approve → both jobs re-run)      │
 # └─────────────────────────────────────────────────────────────────┘
 name: CI Request Trigger
 
@@ -61,7 +85,10 @@ concurrency:
         && inputs.pr_number
         || github.event.pull_request.number
     }}
-  cancel-in-progress: true
+  # gate performs an internal merge that must NOT be killed mid-flight; a
+  # cancelled run can leave the internal source in a half-merged state. We
+  # accept the trade-off of stacking up build runs on rapid pushes.
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -218,3 +245,84 @@ jobs:
               \"description\": \"${DESC}\",
               \"target_url\": \"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"
             }"
+
+  # gate: internal merge gate, runs after build success.
+  # `if: always() && pull_request` lets gate run even when build fails so it
+  # can explicitly fail (skipping a required check would let GitHub treat it
+  # as success in branch protection — bypassing the gate).
+  gate:
+    needs: build
+    if: always() && github.event_name == 'pull_request'
+    runs-on: [self-hosted, Linux]
+    defaults:
+      run:
+        working-directory: .github/scripts
+    steps:
+      - name: Verify build job succeeded
+        if: needs.build.result != 'success'
+        run: |
+          echo "::error::Build job did not succeed (result=${{ needs.build.result }}); refusing to merge"
+          exit 1
+
+      - name: Checkout repository (attempt 1)
+        id: checkout1
+        continue-on-error: true
+        uses: actions/checkout@v4
+
+      - name: Checkout repository (attempt 2)
+        if: steps.checkout1.outcome == 'failure'
+        id: checkout2
+        continue-on-error: true
+        uses: actions/checkout@v4
+
+      - name: Checkout repository (attempt 3)
+        if: steps.checkout2.outcome == 'failure'
+        uses: actions/checkout@v4
+
+      - name: Require APPROVED review on PR HEAD
+        run: |
+          python3 -m ci_gate check-review \
+            "${{ github.event.pull_request.number }}" \
+            "${{ github.repository }}" \
+            "${{ github.event.pull_request.head.sha }}" \
+            --github-token "${{ secrets.GITHUB_TOKEN }}" \
+            --require-approved
+
+      - name: Pre-check internal merge (re-approval dedup)
+        id: precheck
+        continue-on-error: true
+        run: |
+          python3 -m ci_gate check-merge-done \
+            "${{ github.event.pull_request.head.sha }}" \
+            "${{ secrets.CI_SECRET }}" \
+            "${{ github.repository }}"
+
+      - name: Internal rebase check
+        if: steps.precheck.outcome == 'failure'
+        run: |
+          python3 -m ci_gate check-rebase-internal \
+            "${{ github.event.pull_request.number }}" \
+            "${{ github.event.pull_request.head.sha }}" \
+            "${{ secrets.CI_SECRET }}" \
+            "${{ github.repository }}"
+
+      - name: Trigger internal merge
+        if: steps.precheck.outcome == 'failure'
+        run: |
+          echo "Triggering internal merge for commit ${{ github.event.pull_request.head.sha }}"
+          python3 -m ci_gate trigger-merge \
+            "${{ github.event.pull_request.head.sha }}" \
+            "${{ secrets.CI_SECRET }}" \
+            --repository "${{ github.repository }}" \
+            --pr-id "${{ github.event.pull_request.number }}" \
+            --author-email "${{ github.actor_id }}${{ github.actor }}@users.github.com" \
+            --author-name "${{ github.actor }}" \
+            --merge-message "pre-merge-gate: github commit ${{ github.event.pull_request.head.sha }}"
+
+      - name: Wait for internal merge result
+        if: steps.precheck.outcome == 'failure'
+        run: |
+          python3 -m ci_gate wait-merge \
+            "${{ github.event.pull_request.head.sha }}" \
+            "${{ secrets.CI_SECRET }}" \
+            "${{ github.repository }}"

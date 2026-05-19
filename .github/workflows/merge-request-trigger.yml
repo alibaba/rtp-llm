@@ -32,7 +32,17 @@ jobs:
       - name: Check Python
         run: python3 --version
 
-      - name: Trigger Aone Merge Task
+      - name: Pre-check internal merge (backstop dedup)
+        id: precheck
+        continue-on-error: true
+        run: |
+          python3 -m ci_gate check-merge-done \
+            "${{ github.event.pull_request.head.sha }}" \
+            "${{ secrets.CI_SECRET }}" \
+            "${{ github.repository }}"
+
+      - name: Trigger Aone Merge Task (backstop)
+        if: steps.precheck.outcome == 'failure'
         run: |
           echo "Triggering Aone merge for commit ${{ github.event.pull_request.head.sha }}"
           python3 -m ci_gate trigger-merge \
@@ -45,6 +55,7 @@ jobs:
             --merge-message "auto-merge: github commit ${{ github.event.pull_request.head.sha }}"
 
       - name: Get Merge Result
+        if: steps.precheck.outcome == 'failure'
         run: |
           echo "Polling for merge result of commit ${{ github.event.pull_request.head.sha }}"
           python3 -m ci_gate wait-merge \

@@ -5,7 +5,7 @@ import json
 import time
 
 from .common import BRANCH_REF, CI_TRIGGER_URL, PROJECT_ID, GateError, log
-from .ci_service import ci_service_request
+from .ci_service import branch_commit_id, ci_service_request, get_branch_info
 from .github import github_get
 
 
@@ -77,6 +77,88 @@ def trigger_merge(args):
     if status in {"FAILED", "ERROR"}:
         raise GateError("::error::Merge trigger failed: %s" % body)
     return 0
+
+
+def check_merge_done(args):
+    # type: (argparse.Namespace) -> int
+    """Single-shot internal merge status query.
+
+    Exit 0 ONLY when the internal merge is confirmed successful.
+    PENDING, failed, not-found, network/protocol errors all → non-zero.
+    Used as a dedup precheck (re-approval; backstop in merge-request-trigger).
+    """
+    try:
+        body = ci_service_request(
+            {
+                "type": "RETRIEVE-MERGE-STATUS",
+                "repositoryUrl": args.repository,
+                "commitId": args.commit_id,
+            },
+            args.security,
+            "checking merge done",
+        )
+    except GateError as exc:
+        log("Internal merge status unavailable: %s" % exc)
+        return 1
+
+    if not isinstance(body, dict):
+        log("::warning::Merge status response is not a JSON object")
+        return 1
+
+    status = body.get("status")
+    if status == "PENDING":
+        log("Internal merge is still PENDING")
+        return 1
+
+    if isinstance(status, dict):
+        success = status.get("success")
+    elif isinstance(status, str):
+        try:
+            parsed = json.loads(status)
+            success = parsed.get("success") if isinstance(parsed, dict) else None
+        except json.JSONDecodeError:
+            success = None
+    else:
+        success = None
+
+    if success is True or str(success).lower() == "true":
+        log("[OK] Internal merge ALREADY DONE for commit %s" % args.commit_id)
+        return 0
+
+    log("[GO] Internal merge NOT YET DONE for commit %s (status=%s)" % (args.commit_id, status))
+    return 1
+
+
+def check_rebase_internal(args):
+    # type: (argparse.Namespace) -> int
+    """Check that the internal `open_merge/<PR>` branch matches `main-internal`.
+
+    Per design, equal commit IDs indicate the internal source is properly
+    aligned. Mismatch → exit 1 (or warn-only, see --warn-only).
+
+    NOTE: this is a strict literal check. If the internal REBASE merge can
+    handle the drift natively, downgrade by passing --warn-only.
+    """
+    pr_branch = "open_merge/%s" % args.pr_id
+    pr_info = get_branch_info(pr_branch, args.repository, args.commit_id, args.security)
+    main_info = get_branch_info(BRANCH_REF, args.repository, args.commit_id, args.security)
+    pr_commit = branch_commit_id(pr_info)
+    main_commit = branch_commit_id(main_info)
+    log("Internal branch %s @ %s" % (pr_branch, pr_commit or "<unknown>"))
+    log("Internal branch %s @ %s" % (BRANCH_REF, main_commit or "<unknown>"))
+    if not pr_commit or not main_commit:
+        log("::error::Failed to read commit ids for internal branches")
+        return 1
+    if pr_commit == main_commit:
+        log("Internal branches aligned")
+        return 0
+    if args.warn_only:
+        log("::warning::Internal branch %s diverges from %s (warn-only mode)" % (pr_branch, BRANCH_REF))
+        return 0
+    log("::error::Internal branch %s (%s) diverges from %s (%s) — internal rebase required" % (
+        pr_branch, pr_commit, BRANCH_REF, main_commit,
+    ))
+    return 1
 
 
 def wait_merge(args):
