@@ -121,6 +121,8 @@ def main(argv):
     merge_done.add_argument("commit_id")
     merge_done.add_argument("security")
     merge_done.add_argument("repository")
+    merge_done.add_argument("--output-file", default="",
+                            help="Write `merge_action=done|wait|trigger` to this file (typically $GITHUB_OUTPUT)")
 
     rebase_int = subparsers.add_parser("check-rebase-internal")
     rebase_int.add_argument("pr_id")
