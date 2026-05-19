@@ -21,7 +21,6 @@ from ci_gate.ci import pre_check_status, trigger_ci, wait_status
 from ci_gate.merge import (
     check_merge_conflicts,
     check_merge_done,
-    check_rebase_internal,
     trigger_merge,
     wait_merge,
 )
@@ -921,48 +920,6 @@ class TestCheckMergeDone(unittest.TestCase):
         rc, out = self._run_raises(mock_ci, GateError("boom", 2))
         self.assertEqual(rc, 1)
         self.assertIn("merge_action=trigger", out)
-
-
-# ---------------------------------------------------------------------------
-# merge.check_rebase_internal
-# ---------------------------------------------------------------------------
-class TestCheckRebaseInternal(unittest.TestCase):
-    def _args(self, **overrides):
-        defaults = {
-            "pr_id": "42",
-            "commit_id": "abc123",
-            "security": "secret",
-            "repository": "org/repo",
-            "warn_only": False,
-        }
-        defaults.update(overrides)
-        return argparse.Namespace(**defaults)
-
-    @patch("ci_gate.merge.get_branch_info")
-    def test_aligned_returns_0(self, mock_branch):
-        mock_branch.return_value = {"commit": {"id": "same"}}
-        self.assertEqual(check_rebase_internal(self._args()), 0)
-
-    @patch("ci_gate.merge.get_branch_info")
-    def test_diverged_returns_1(self, mock_branch):
-        mock_branch.side_effect = [
-            {"commit": {"id": "pr_branch"}},
-            {"commit": {"id": "main_branch"}},
-        ]
-        self.assertEqual(check_rebase_internal(self._args()), 1)
-
-    @patch("ci_gate.merge.get_branch_info")
-    def test_diverged_warn_only_returns_0(self, mock_branch):
-        mock_branch.side_effect = [
-            {"commit": {"id": "pr_branch"}},
-            {"commit": {"id": "main_branch"}},
-        ]
-        self.assertEqual(check_rebase_internal(self._args(warn_only=True)), 0)
-
-    @patch("ci_gate.merge.get_branch_info")
-    def test_missing_commit_returns_1(self, mock_branch):
-        mock_branch.return_value = {"commit": {"id": None}}
-        self.assertEqual(check_rebase_internal(self._args()), 1)
 
 
 if __name__ == "__main__":
