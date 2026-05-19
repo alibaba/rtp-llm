@@ -179,7 +179,7 @@ class TestFlashInferGDNDecodeConsistency(unittest.TestCase):
 
 
 class TestFlashInferGDNPrefillConsistency(unittest.TestCase):
-    """Compare FlashInfer SM100 adapter vs old CuTe-DSL gdn.py for prefill."""
+    """Compare FlashInfer chunk_gated_delta_rule_sm100 vs old CuTe-DSL gdn.py for prefill."""
 
     @classmethod
     def setUpClass(cls):
@@ -190,12 +190,12 @@ class TestFlashInferGDNPrefillConsistency(unittest.TestCase):
             raise unittest.SkipTest("Blackwell (SM100+) GPU required for prefill test")
 
         try:
-            from rtp_llm.models_py.triton_kernels.fla.blackwell_prefill._adapter import (
-                chunk_gated_delta_rule as new_prefill,
+            from flashinfer.gdn_kernels.blackwell.gdn_prefill import (
+                chunk_gated_delta_rule_sm100,
             )
-            cls.new_prefill = staticmethod(new_prefill)
+            cls.flashinfer_prefill = staticmethod(chunk_gated_delta_rule_sm100)
         except ImportError as e:
-            raise unittest.SkipTest(f"FlashInfer prefill adapter not available: {e}")
+            raise unittest.SkipTest(f"FlashInfer SM100 prefill not available: {e}")
 
         try:
             from rtp_llm.models_py.triton_kernels.fla.blackwell_prefill.gdn import (
@@ -204,6 +204,45 @@ class TestFlashInferGDNPrefillConsistency(unittest.TestCase):
             cls.old_prefill = staticmethod(old_prefill)
         except ImportError as e:
             raise unittest.SkipTest(f"Old CuTe-DSL prefill kernel not available: {e}")
+
+        from rtp_llm.models_py.triton_kernels.fla.l2norm import l2norm_fwd
+
+        cls.l2norm_fwd = staticmethod(l2norm_fwd)
+
+    def _call_flashinfer(self, q, k, v, g, beta, initial_state, output_final_state, cu_seqlens):
+        """Call FlashInfer SM100 kernel with the same shape convention as model code."""
+        import math
+
+        D = q.shape[-1]
+        H_v = v.shape[2]
+        total_tokens = q.shape[1]
+        scale = 1.0 / math.sqrt(D)
+
+        q_normed = self.l2norm_fwd(q)
+        k_normed = self.l2norm_fwd(k)
+
+        q_3d = q_normed.squeeze(0).contiguous()
+        k_3d = k_normed.squeeze(0).contiguous()
+        v_3d = v.squeeze(0).contiguous()
+        gate = g.view(total_tokens, H_v).exp()
+        beta_2d = beta.view(total_tokens, H_v).float()
+
+        output = torch.empty_like(v_3d)
+        output_state = None
+        if output_final_state and initial_state is not None:
+            output_state = torch.empty_like(initial_state)
+        elif output_final_state:
+            N = cu_seqlens.shape[0] - 1
+            output_state = torch.empty(N, H_v, D, D, dtype=torch.float32, device=q.device)
+
+        self.flashinfer_prefill(
+            q=q_3d, k=k_3d, v=v_3d, gate=gate, beta=beta_2d,
+            output=output, cu_seqlens=cu_seqlens,
+            initial_state=initial_state, output_state=output_state, scale=scale,
+        )
+
+        output_4d = output.unsqueeze(0)
+        return (output_4d, output_state) if output_final_state else output_4d
 
     def _run_prefill_comparison(
         self, H_qk: int, H_v: int, D: int, seq_lengths: List[int]
@@ -217,7 +256,6 @@ class TestFlashInferGDNPrefillConsistency(unittest.TestCase):
         for i, sl in enumerate(seq_lengths):
             cu_seqlens[i + 1] = cu_seqlens[i] + sl
 
-        # Inputs: [1, total_tokens, H, D] (varlen mode, B=1)
         q = torch.randn(1, total_tokens, H_qk, D, dtype=torch.bfloat16, device=device)
         k = torch.randn(1, total_tokens, H_qk, D, dtype=torch.bfloat16, device=device)
         v = torch.randn(1, total_tokens, H_v, D, dtype=torch.bfloat16, device=device)
@@ -227,28 +265,18 @@ class TestFlashInferGDNPrefillConsistency(unittest.TestCase):
 
         # --- Old kernel ---
         old_out, old_state = self.old_prefill(
-            q=q.clone(),
-            k=k.clone(),
-            v=v.clone(),
-            g=g.clone(),
-            beta=beta.clone(),
-            initial_state=initial_state.clone(),
-            output_final_state=True,
-            cu_seqlens=cu_seqlens,
-            use_qk_l2norm_in_kernel=True,
+            q=q.clone(), k=k.clone(), v=v.clone(),
+            g=g.clone(), beta=beta.clone(),
+            initial_state=initial_state.clone(), output_final_state=True,
+            cu_seqlens=cu_seqlens, use_qk_l2norm_in_kernel=True,
         )
 
-        # --- New adapter (FlashInfer SM100) ---
-        new_out, new_state = self.new_prefill(
-            q=q.clone(),
-            k=k.clone(),
-            v=v.clone(),
-            g=g.clone(),
-            beta=beta.clone(),
-            initial_state=initial_state.clone(),
-            output_final_state=True,
+        # --- FlashInfer SM100 ---
+        new_out, new_state = self._call_flashinfer(
+            q=q.clone(), k=k.clone(), v=v.clone(),
+            g=g.clone(), beta=beta.clone(),
+            initial_state=initial_state.clone(), output_final_state=True,
             cu_seqlens=cu_seqlens,
-            use_qk_l2norm_in_kernel=True,
         )
 
         # --- Compare output ---
@@ -287,7 +315,6 @@ class TestFlashInferGDNPrefillConsistency(unittest.TestCase):
         H_qk, H_v, D = 16, 32, 128
         seq_lengths = [512]
         total_tokens = sum(seq_lengths)
-        N = len(seq_lengths)
         cu_seqlens = torch.tensor([0, total_tokens], dtype=torch.int32, device=device)
 
         q = torch.randn(1, total_tokens, H_qk, D, dtype=torch.bfloat16, device=device)
@@ -302,14 +329,13 @@ class TestFlashInferGDNPrefillConsistency(unittest.TestCase):
             initial_state=None, output_final_state=False,
             cu_seqlens=cu_seqlens, use_qk_l2norm_in_kernel=True,
         )
-        new_out = self.new_prefill(
+        new_out = self._call_flashinfer(
             q=q.clone(), k=k.clone(), v=v.clone(),
             g=g.clone(), beta=beta.clone(),
             initial_state=None, output_final_state=False,
-            cu_seqlens=cu_seqlens, use_qk_l2norm_in_kernel=True,
+            cu_seqlens=cu_seqlens,
         )
 
-        # Handle tuple vs tensor return
         if isinstance(old_out, tuple):
             old_out = old_out[0]
         if isinstance(new_out, tuple):

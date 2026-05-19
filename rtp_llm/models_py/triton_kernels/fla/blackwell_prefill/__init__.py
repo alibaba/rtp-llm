@@ -42,10 +42,12 @@ try:
         _log.getLogger(__name__).info(
             "nvidia-cutlass-dsl %s < 4.4.2, Blackwell GDN kernel disabled", _ver
         )
-        chunk_gated_delta_rule = None  # type: ignore
+        chunk_gated_delta_rule_sm100 = None  # type: ignore
     else:
-        from ._adapter import chunk_gated_delta_rule
+        from flashinfer.gdn_kernels.blackwell.gdn_prefill import (
+            chunk_gated_delta_rule_sm100,
+        )
 except Exception:
-    chunk_gated_delta_rule = None  # type: ignore
+    chunk_gated_delta_rule_sm100 = None  # type: ignore
 
-__all__ = ["chunk_gated_delta_rule"]
+__all__ = ["chunk_gated_delta_rule_sm100"]
