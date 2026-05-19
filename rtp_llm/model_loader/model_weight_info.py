@@ -18,6 +18,7 @@ from rtp_llm.model_loader.load_config import LoadConfig, LoadMethod
 from rtp_llm.model_loader.weight_module import (
     AtomicWeight,
     CompositeWeight,
+    QuantWeight,
     WeightModule,
 )
 from rtp_llm.ops import KvCacheDataType, VitSeparation
@@ -551,6 +552,15 @@ class ModelDeployWeightInfo:
                 for ckpt_weight in getattr(component, "weights", []) or []:
                     if ckpt_weight.name:
                         tensor_names.add(ckpt_weight.name)
+                # QuantWeight.get_components() returns [self] without recursing
+                # into sub_weights, so recurse manually to reach nested weights.
+                if (
+                    isinstance(component, QuantWeight)
+                    and hasattr(component, "sub_weights")
+                    and isinstance(component.sub_weights, dict)
+                ):
+                    for sub_weight in component.sub_weights.values():
+                        collect_from_weight(sub_weight)
 
         for weight in weight_info.weights or []:
             collect_from_weight(weight)
