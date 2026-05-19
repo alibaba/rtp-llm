@@ -1302,6 +1302,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("mrope_dim1", &RopeConfig::mrope_dim1)
         .def_readwrite("mrope_dim2", &RopeConfig::mrope_dim2)
         .def_readwrite("mrope_dim3", &RopeConfig::mrope_dim3)
+        .def_readwrite("mrope_interleaved", &RopeConfig::mrope_interleaved)
         .def_readwrite("is_neox_style", &RopeConfig::is_neox_style)
         .def_readwrite("indexer_is_neox_style", &RopeConfig::indexer_is_neox_style);
 
