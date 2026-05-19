@@ -822,7 +822,15 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
         ):
             return False
         name = src_weight_info.name
-        return name in cls.w8a8_weight_list and name not in [W.mla_kc, W.mla_vc]
+        if name not in cls.w8a8_weight_list or name in [W.mla_kc, W.mla_vc]:
+            return False
+        # skip_moe: leave MoE w1/w2 in compute dtype (BF16) so a downstream MoE
+        # path (e.g. mega_moe) can do its own quantization.
+        if getattr(quant_config, "skip_moe", False) and isinstance(
+            src_weight_info, MoeAtomicWeight
+        ):
+            return False
+        return True
 
     def __init__(
         self,

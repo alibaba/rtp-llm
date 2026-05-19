@@ -88,10 +88,10 @@ def h20_oss_suites():
                     "prefill": [],
                     "decode": []},
                 smoke_args={
-                    "prefill": "--fp8_kv_cache 1 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --reserver_runtime_mem_mb 8192 --role_type PREFILL --seq_size_per_block 64 --dp_size 1 --tp_size 4 --ep_size 4 --world_size 4 --warm_up 0 --use_deepep_moe 1 --use_deepep_low_latency 0 --cp_rotate_method ALL_GATHER --use_all_gather=0",
-                    "decode": "--fp8_kv_cache 1 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --reserver_runtime_mem_mb 8192 --role_type DECODE --seq_size_per_block 64 --ep_size 4 --dp_size 4 --world_size 4 --warm_up 0 --use_deepep_moe 1 --use_deepep_low_latency 1 --cp_rotate_method PREFILL_CP --use_all_gather=0"
+                    "prefill": "--fp8_kv_cache 1 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --reserver_runtime_mem_mb 8192 --role_type PREFILL --seq_size_per_block 64 --dp_size 1 --tp_size 2 --ep_size 2 --world_size 2 --warm_up 0 --use_deepep_moe 1 --use_deepep_low_latency 0 --cp_rotate_method ALL_GATHER --use_all_gather=0",
+                    "decode": "--fp8_kv_cache 1 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --reserver_runtime_mem_mb 8192 --role_type DECODE --seq_size_per_block 64 --ep_size 2 --dp_size 2 --world_size 2 --warm_up 0 --use_deepep_moe 1 --use_deepep_low_latency 1 --cp_rotate_method PREFILL_CP --use_all_gather=0"
                 },
-                gpu_type=["H20"]
+                gpu_type=["L20D"]
             ),
             smoke_test(
                 name="mla_mega_moe_cp_pd",
@@ -100,8 +100,32 @@ def h20_oss_suites():
                     "prefill": ["CUDA_HOME=/usr/local/cuda", "NVCC_PREPEND_FLAGS=-ccbin=/home/zw193905/.conda_gcc/bin/x86_64-conda-linux-gnu-g++", "MOE_STRATEGY=mega_moe"],
                     "decode": ["CUDA_HOME=/usr/local/cuda", "NVCC_PREPEND_FLAGS=-ccbin=/home/zw193905/.conda_gcc/bin/x86_64-conda-linux-gnu-g++", "MOE_STRATEGY=mega_moe"]},
                 smoke_args={
-                    "prefill": "--fp8_kv_cache 1 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --reserver_runtime_mem_mb 8192 --role_type PREFILL --seq_size_per_block 64 --dp_size 2 --tp_size 2 --ep_size 4 --world_size 4 --warm_up 0 --moe_strategy mega_moe --cp_rotate_method ALL_GATHER --use_all_gather=0 --force_cpu_load_weights 1",
-                    "decode": "--fp8_kv_cache 1 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --reserver_runtime_mem_mb 8192 --role_type DECODE --seq_size_per_block 64 --ep_size 4 --dp_size 4 --world_size 4 --warm_up 0 --moe_strategy mega_moe --cp_rotate_method PREFILL_CP --use_all_gather=0 --force_cpu_load_weights 1"
+                    "prefill": "--fp8_kv_cache 1 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --reserver_runtime_mem_mb 8192 --role_type PREFILL --seq_size_per_block 64 --dp_size 1 --tp_size 2 --ep_size 2 --world_size 2 --warm_up 0 --moe_strategy mega_moe  --use_deepep_moe 0 --use_deepep_low_latency 0 --cp_rotate_method ALL_GATHER --use_all_gather=0",
+                    "decode": "--fp8_kv_cache 1 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --reserver_runtime_mem_mb 8192 --role_type DECODE --seq_size_per_block 64 --ep_size 2 --dp_size 2 --world_size 2 --warm_up 0 --moe_strategy mega_moe --cp_rotate_method PREFILL_CP --use_all_gather=0 --enable_cuda_graph 1"
+                },
+                gpu_type=["L20D"]
+            ),
+            smoke_test(
+                name="mla_fp4_moe_cp_pd",
+                task_info="data/model/glm5/glm_5_fp8_q_r_mega_moe_cp.json",
+                envs={
+                    "prefill": ["CUDA_HOME=/usr/local/cuda", "NVCC_PREPEND_FLAGS=-ccbin=/home/zw193905/.conda_gcc/bin/x86_64-conda-linux-gnu-g++"],
+                    "decode": ["CUDA_HOME=/usr/local/cuda", "NVCC_PREPEND_FLAGS=-ccbin=/home/zw193905/.conda_gcc/bin/x86_64-conda-linux-gnu-g++"]},
+                smoke_args={
+                    "prefill": "--fp8_kv_cache 1 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --reserver_runtime_mem_mb 8192 --role_type PREFILL --seq_size_per_block 64 --dp_size 1 --tp_size 2 --ep_size 2 --world_size 2 --warm_up 0 --quantization MODELOPT_FP4_HYBRID_FP8_PER_BLOCK --use_deepep_moe 1 --use_deepep_low_latency 0 --cp_rotate_method ALL_GATHER --use_all_gather=0",
+                    "decode": "--fp8_kv_cache 1 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --reserver_runtime_mem_mb 8192 --role_type DECODE --seq_size_per_block 64 --ep_size 2 --dp_size 2 --world_size 2 --warm_up 0 --quantization MODELOPT_FP4 --use_deepep_moe 1 --use_deepep_low_latency 1 --cp_rotate_method PREFILL_CP --use_all_gather=0 --enable_cuda_graph 1"
+                },
+                gpu_type=["L20D"]
+            ),
+            smoke_test(
+                name="mla_mega_moe_fp8_attn_cp_pd",
+                task_info="data/model/glm5/glm_5_fp8_q_r_mega_moe_cp.json",
+                envs={
+                    "prefill": ["CUDA_HOME=/usr/local/cuda", "NVCC_PREPEND_FLAGS=-ccbin=/home/zw193905/.conda_gcc/bin/x86_64-conda-linux-gnu-g++", "MOE_STRATEGY=mega_moe"],
+                    "decode": ["CUDA_HOME=/usr/local/cuda", "NVCC_PREPEND_FLAGS=-ccbin=/home/zw193905/.conda_gcc/bin/x86_64-conda-linux-gnu-g++", "MOE_STRATEGY=mega_moe"]},
+                smoke_args={
+                    "prefill": "--fp8_kv_cache 1 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --reserver_runtime_mem_mb 8192 --role_type PREFILL --seq_size_per_block 64 --dp_size 1 --tp_size 2 --ep_size 2 --world_size 2 --warm_up 0 --quantization FP8_PER_BLOCK_NO_MOE --moe_strategy mega_moe --use_deepep_moe 0 --use_deepep_low_latency 0 --cp_rotate_method ALL_GATHER --use_all_gather=0",
+                    "decode": "--fp8_kv_cache 1 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --reserver_runtime_mem_mb 8192 --role_type DECODE --seq_size_per_block 64 --ep_size 2 --dp_size 2 --world_size 2 --warm_up 0 --quantization FP8_PER_BLOCK_NO_MOE --moe_strategy mega_moe --cp_rotate_method PREFILL_CP --use_all_gather=0 --enable_cuda_graph 1"
                 },
                 gpu_type=["L20D"]
             ),

@@ -205,9 +205,7 @@ class QuantizationConfig(ABC):
                 # Kimi-K2.5 routed-expert MoE: int4 g32 symmetric, dyn fp8 act.
                 group_size = int(weights_config.get("group_size", 32))
                 ignore_patterns = quant_config.get("ignore", [])
-                quant_method = (
-                    CompressedW4A8Int4PerChannelQuantConfig.get_method()
-                )
+                quant_method = CompressedW4A8Int4PerChannelQuantConfig.get_method()
                 return CompressedW4A8Int4PerChannelQuantConfig.from_config(
                     {
                         "bits": bits,
@@ -237,14 +235,17 @@ class QuantizationConfig(ABC):
             group_size = weights_config["group_size"]
             if (
                 weights_config["type"] == "float"
-                and bits == 4 and activation_bits == 4
+                and bits == 4
+                and activation_bits == 4
                 and group_size == 16
             ):
                 quant_method = ModelOptFp4Config.get_method()
                 mixed_attention = False
                 text_config = config_json.get("text_config", None)
                 if text_config is not None:
-                    full_attention_interval = text_config.get("full_attention_interval", 0)
+                    full_attention_interval = text_config.get(
+                        "full_attention_interval", 0
+                    )
                     if full_attention_interval != 0:
                         mixed_attention = True
                 return ModelOptFp4Config.from_config(
@@ -256,7 +257,6 @@ class QuantizationConfig(ABC):
                         "mixed_attention": mixed_attention,
                     }
                 )
-            
 
         result = cls.from_config(
             {
@@ -382,6 +382,11 @@ class Fp8BlockWiseQuantConfig(QuantizationConfig):
         **kwargs: Any,
     ):
         super().__init__(bits=bits, group_size=group_size, is_quanted=is_quanted)
+        # When True, the MoE atomic weights (moe_w1, moe_w2) skip FP8_PER_BLOCK
+        # quantization in the loader and stay in compute dtype (BF16). This is
+        # used by the mega_moe path which performs its own internal BF16->FP4
+        # conversion in MegaMoeFusedWrapper.
+        self.skip_moe = kwargs.get("skip_moe", False)
 
     @classmethod
     def get_method(cls) -> str:
@@ -645,11 +650,34 @@ class GPTQConfig(QuantizationConfig):
 
 
 class ModelOptFp4Config(QuantizationConfig):
-    """Config class for FP4."""
+    """Config class for FP4.
+
+    ``hybrid_attn_quant_method`` (default ``None``) lets the user request a
+    secondary quantization scheme for the *non-MoE* atomic weights (attention,
+    norms, etc.) while MoE w1/w2 still go through NVFP4 online quantization.
+    Supported values:
+      - ``None``                : default, non-MoE weights stay in compute dtype
+      - ``"FP8_PER_BLOCK"``     : online FP8 per-block (group_size=128) for
+                                  attention/non-MoE weights, like
+                                  ``--quantization FP8_PER_BLOCK``
+    """
+
+    SUPPORTED_HYBRID_ATTN_METHODS = ("FP8_PER_BLOCK",)
 
     def __init__(self, bits: int, group_size: int, is_quanted: bool, **kwargs: Any):
         super().__init__(bits=bits, group_size=group_size, is_quanted=is_quanted)
-        self.mixed_attention = kwargs.get('mixed_attention', False)
+        self.mixed_attention = kwargs.get("mixed_attention", False)
+        hybrid_attn_quant_method = kwargs.get("hybrid_attn_quant_method", None)
+        if hybrid_attn_quant_method is not None:
+            method_norm = str(hybrid_attn_quant_method).upper()
+            if method_norm not in self.SUPPORTED_HYBRID_ATTN_METHODS:
+                raise ValueError(
+                    f"hybrid_attn_quant_method={hybrid_attn_quant_method} is not "
+                    f"supported. Supported: {self.SUPPORTED_HYBRID_ATTN_METHODS}"
+                )
+            self.hybrid_attn_quant_method = method_norm
+        else:
+            self.hybrid_attn_quant_method = None
 
     @classmethod
     def get_method(cls) -> str:
@@ -768,6 +796,12 @@ DEFAULT_FP8_BLOCK_WISE_QUANT_CONFIG = Fp8BlockWiseQuantConfig(
     group_size=Fp8BlockWiseQuantConfig.DEFAULT_FP8_QUANT_BLOCK_SIZE,
     is_quanted=False,
 )
+DEFAULT_FP8_BLOCK_WISE_NO_MOE_QUANT_CONFIG = Fp8BlockWiseQuantConfig(
+    bits=8,
+    group_size=Fp8BlockWiseQuantConfig.DEFAULT_FP8_QUANT_BLOCK_SIZE,
+    is_quanted=False,
+    skip_moe=True,
+)
 DEFAULT_FP8_PER_CHANNEL_COMPRESSED_QUANT_CONFIG = Fp8PerChannelCompressedQuantConfig(
     bits=8, is_quanted=False
 )
@@ -777,11 +811,15 @@ DEFAULT_FP8_PER_CHANNEL_QUARK_QUANT_CONFIG = Fp8PerChannelQuarkQuantConfig(
 DEFAULT_MODELOPT_FP4_QUANT_CONFIG = ModelOptFp4Config(
     bits=4, group_size=16, is_quanted=False
 )
+DEFAULT_MODELOPT_FP4_HYBRID_FP8_PER_BLOCK_QUANT_CONFIG = ModelOptFp4Config(
+    bits=4,
+    group_size=16,
+    is_quanted=False,
+    hybrid_attn_quant_method="FP8_PER_BLOCK",
+)
 
 DEFAULT_W4A8_INT4_PER_CHANNEL_QUANT_CONFIG = W4a8Int4PerChannelQuantConfig(
-    bits=4,
-    group_size=128,
-    is_quanted=False
+    bits=4, group_size=128, is_quanted=False
 )
 
 DEFAULT_COMPRESSED_W4A8_INT4_PER_CHANNEL_QUANT_CONFIG = (
@@ -793,9 +831,13 @@ preset_quant_config = {
     "FP8": DEFAULT_FP8_PER_TENSOR_QUANT_CONFIG,
     "FP8_DYNAMIC_PER_TENSOR": DEFAULT_FP8_DYNAMIC_PER_TENSOR_QUANT_CONFIG,
     "FP8_PER_BLOCK": DEFAULT_FP8_BLOCK_WISE_QUANT_CONFIG,
+    "FP8_PER_BLOCK_NO_MOE": DEFAULT_FP8_BLOCK_WISE_NO_MOE_QUANT_CONFIG,
     "FP8_PER_CHANNEL_COMPRESSED": DEFAULT_FP8_PER_CHANNEL_COMPRESSED_QUANT_CONFIG,
     "FP8_PER_CHANNEL_QUARK": DEFAULT_FP8_PER_CHANNEL_QUARK_QUANT_CONFIG,
     "MODELOPT_FP4": DEFAULT_MODELOPT_FP4_QUANT_CONFIG,
+    "MODELOPT_FP4_HYBRID_FP8_PER_BLOCK": (
+        DEFAULT_MODELOPT_FP4_HYBRID_FP8_PER_BLOCK_QUANT_CONFIG
+    ),
     "W4A8_INT4_PER_CHANNEL": DEFAULT_W4A8_INT4_PER_CHANNEL_QUANT_CONFIG,
     "W4A8_INT4_PER_CHANNEL_COMPRESSED": (
         DEFAULT_COMPRESSED_W4A8_INT4_PER_CHANNEL_QUANT_CONFIG

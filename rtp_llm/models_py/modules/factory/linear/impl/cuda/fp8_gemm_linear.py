@@ -33,7 +33,21 @@ class CudaFp8GEMMLinear(LinearBase):
             return False
         if weight.dtype not in (torch.float8_e4m3fn, torch.float8_e4m3fnuz):
             return False
-        return quant_config.get_method() == "FP8_PER_BLOCK"
+        method = quant_config.get_method()
+        if method == "FP8_PER_BLOCK":
+            return True
+        # MODELOPT_FP4 hybrid: attention/non-MoE atomic weights are stored as FP8
+        # per-block; FP4-only weights have weight_scale_2/input_scale set, so they
+        # still go to the FP4 dispatch path.
+        if (
+            method == "modelopt_fp4"
+            and getattr(quant_config, "hybrid_attn_quant_method", None)
+            == "FP8_PER_BLOCK"
+            and weight_scale_2 is None
+            and input_scale is None
+        ):
+            return True
+        return False
 
     @torch.inference_mode()
     def __init__(

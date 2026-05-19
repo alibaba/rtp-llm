@@ -8,6 +8,7 @@ import torch
 
 from rtp_llm.config.quant_config import (
     Fp8BlockWiseQuantConfig,
+    ModelOptFp4Config,
     QuantizationConfig,
     W4a8Int4PerChannelQuantConfig,
     init_quant_config,
@@ -601,6 +602,18 @@ class ModelConfig(CppModelConfig):
             logging.info(
                 f"Overriding data_type from {original_data_type} to {data_type} "
                 f"because fp8_block_wise quantization only supports BF16"
+            )
+        elif (
+            quant_config
+            and isinstance(quant_config, ModelOptFp4Config)
+            and getattr(quant_config, "hybrid_attn_quant_method", None)
+            == "FP8_PER_BLOCK"
+        ):
+            original_data_type = data_type
+            data_type = WEIGHT_TYPE.BF16
+            logging.info(
+                f"Overriding data_type from {original_data_type} to {data_type} "
+                f"because MODELOPT_FP4 hybrid mode with FP8_PER_BLOCK only supports BF16"
             )
         elif quant_config and quant_config.get_method().lower() in [
             "smooth_quant",

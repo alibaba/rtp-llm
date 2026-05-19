@@ -47,7 +47,18 @@ class CudaFp8DeepGEMMLinear(LinearBase):
 
         # Check quantization method - handle all other FP8 methods
         quant_method = quant_config.get_method()
-        return quant_method == "FP8_PER_BLOCK"
+        if quant_method == "FP8_PER_BLOCK":
+            return True
+        # MODELOPT_FP4 hybrid: attention/non-MoE atomic weights are FP8 per-block.
+        if (
+            quant_method == "modelopt_fp4"
+            and getattr(quant_config, "hybrid_attn_quant_method", None)
+            == "FP8_PER_BLOCK"
+            and weight_scale_2 is None
+            and input_scale is None
+        ):
+            return True
+        return False
 
     @torch.inference_mode()
     def __init__(

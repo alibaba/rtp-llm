@@ -1,6 +1,6 @@
 {
     "model_type": "glm_5",
-    "model_path": "/home/zw193905/models/GLM-5-FP8",
+    "model_path": "/home/zw193905/models/GLM-5-BF16-4layer",
     "query_result": [
         {
             "query": {
@@ -12,7 +12,7 @@
                 }
             },
             "result": {
-                "response": "\n The the theorem states that there32DSP",
+                "response": "acheridera NaughtyMZpf_stubbingisseraab疏",
                 "finished": true
             }
         }
