@@ -64,9 +64,10 @@ struct CacheConfig {
 
     // Block sizing information
     // ---- Per-block sizes (all layers) ----
-    size_t kv_block_size_bytes = 0;
-    size_t kv_scale_size_bytes = 0;
-    size_t block_size_bytes    = 0;  // (kv + scales together)
+    size_t kv_block_size_bytes  = 0;
+    size_t kv_scale_size_bytes  = 0;
+    size_t block_size_bytes     = 0;  // (kv + scales together)
+    size_t swa_block_size_bytes = 0;  // SWA groups (joint allocation with full groups)
 
     // ---- Per-block strides (one layer) ----
     size_t kv_block_stride_bytes = 0;
@@ -102,7 +103,8 @@ struct CacheConfig {
             return;
         }
 
-        size_t fixed_pool_reserve = 0;
+        const int step               = std::max(1, linear_step);
+        size_t    fixed_pool_reserve = 0;
         for (size_t gid = 0; gid < group_block_nums.size(); ++gid) {
             const uint32_t fixed_pool_blocks = gid < group_fixed_pool_blocks.size() ? group_fixed_pool_blocks[gid] : 0;
             if (fixed_pool_blocks > 0) {
@@ -112,8 +114,13 @@ struct CacheConfig {
                 if (gid < group_block_size_bytes.size()) {
                     fixed_pool_reserve += static_cast<size_t>(group_block_nums[gid]) * group_block_size_bytes[gid];
                 }
-            } else if (group_block_nums[gid] == 0) {
-                group_block_nums[gid] = global_block_num;
+            } else {
+                const bool is_swa = gid < group_types.size() && group_types[gid] == CacheGroupType::SWA;
+                if (is_swa && step > 1 && global_block_num > 0) {
+                    group_block_nums[gid] = std::max(1u, global_block_num / static_cast<uint32_t>(step));
+                } else if (group_block_nums[gid] == 0) {
+                    group_block_nums[gid] = global_block_num;
+                }
             }
         }
         fixed_pool_reserve_bytes = fixed_pool_reserve;
@@ -153,6 +160,7 @@ struct CacheConfig {
         OUTPUT_FIELD(kv_block_size_bytes);
         OUTPUT_FIELD(kv_scale_size_bytes);
         OUTPUT_FIELD(block_size_bytes);
+        OUTPUT_FIELD(swa_block_size_bytes);
         OUTPUT_FIELD(kv_block_stride_bytes);
         OUTPUT_FIELD(kv_scale_stride_bytes);
         os << "\n";
