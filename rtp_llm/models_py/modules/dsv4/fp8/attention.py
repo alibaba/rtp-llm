@@ -2005,6 +2005,12 @@ class AttentionFP8(nn.Module):
                 self._pool_entries_per_block(SWA_KV),
             )
         swa_topk_3d = swa_global.view(bsz, q_len, win).contiguous()
+        swa_topk_length = (
+            (swa_topk_3d >= 0)
+            .sum(dim=-1, dtype=torch.int32)
+            .reshape(T)
+            .contiguous()
+        )
 
         sched_meta = get_or_build_sched_meta(
             attn_metadata,
@@ -2019,6 +2025,7 @@ class AttentionFP8(nn.Module):
             swa_pool_3d=swa_pool_3d,
             attn_sink=self.attn_sink,
             swa_topk_3d=swa_topk_3d,
+            swa_topk_length=swa_topk_length,
             cache_seqlens=attn_metadata.cache_seqlens_i32[:bsz],
             swa_block_table=swa_pool_bt[:bsz],
             sched_meta=sched_meta,
@@ -2220,6 +2227,18 @@ class AttentionFP8(nn.Module):
         # [B, q_len, K] contract.
         swa_topk_3d = swa_global.view(bsz, q_len, win).contiguous()
         cmp_topk_3d = cmp_global.view(bsz, q_len, K_cmp).contiguous()
+        swa_topk_length = (
+            (swa_topk_3d >= 0)
+            .sum(dim=-1, dtype=torch.int32)
+            .reshape(T)
+            .contiguous()
+        )
+        cmp_topk_length = (
+            (cmp_topk_3d >= 0)
+            .sum(dim=-1, dtype=torch.int32)
+            .reshape(T)
+            .contiguous()
+        )
 
         sched_meta = get_or_build_sched_meta(
             attn_metadata,
@@ -2236,6 +2255,8 @@ class AttentionFP8(nn.Module):
             attn_sink=self.attn_sink,
             swa_topk_3d=swa_topk_3d,
             cmp_topk_3d=cmp_topk_3d,
+            swa_topk_length=swa_topk_length,
+            cmp_topk_length=cmp_topk_length,
             cache_seqlens=attn_metadata.cache_seqlens_i32[:bsz],
             swa_block_table=swa_pool_bt[:bsz],
             sched_meta=sched_meta,
