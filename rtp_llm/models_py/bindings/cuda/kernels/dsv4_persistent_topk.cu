@@ -28,7 +28,7 @@ void launch_persistent_topk(const torch::Tensor& logits,
     namespace P = vllm::persistent;
 
     const int64_t num_rows = logits.size(0);
-    const int64_t stride   = logits.size(1);
+    const int64_t stride   = logits.stride(0);
     cudaStream_t  stream   = at::cuda::getCurrentCUDAStream();
 
     static int num_sms            = 0;
@@ -154,6 +154,13 @@ void launch_persistent_topk(const torch::Tensor& logits,
                     state_bytes,
                     " bytes");
 
+        {
+            cudaError_t mz_err = cudaMemsetAsync(workspace.data_ptr<uint8_t>(), 0, state_bytes, stream);
+            TORCH_CHECK(mz_err == cudaSuccess,
+                        "row_states memset failed: ",
+                        cudaGetErrorString(mz_err));
+        }
+
         P::PersistentTopKParams params;
         params.input          = logits.data_ptr<float>();
         params.output         = output.data_ptr<int32_t>();
@@ -207,6 +214,7 @@ void dsv4_persistent_topk(const torch::Tensor& logits,
     TORCH_CHECK(logits.dim() == 2, "logits must be 2D");
     TORCH_CHECK(lengths.dim() == 1 || lengths.dim() == 2, "lengths must be 1D or 2D");
     TORCH_CHECK(lengths.is_contiguous(), "lengths must be contiguous");
+    TORCH_CHECK(logits.stride(1) == 1, "logits rows must be contiguous");
     TORCH_CHECK(output.dim() == 2, "output must be 2D");
 
     const int64_t num_rows = logits.size(0);

@@ -874,26 +874,11 @@ __global__ void __launch_bounds__(kThreadsPerBlock, 2) persistent_topk_kernel(Pe
     uint32_t* shared_scalars  = suffix_sum + RADIX;
     uint32_t* shared_ordered  = reinterpret_cast<uint32_t*>(smem_raw + kFixedSmemLarge);
 
-    // RadixRowState for multi-CTA cooperative radix
+    // RadixRowState for multi-CTA cooperative radix.
+    // Zero-initialization is done host-side via cudaMemsetAsync before launch,
+    // giving all CTAs a stream-ordered happens-before edge. CTA0-only in-kernel
+    // init cannot synchronize with CTA1+'s first inter-CTA barrier release.
     RadixRowState* state = &params.row_states[group_id];
-
-    // -- Initialize RadixRowState (only needed if large rows exist) --
-    if (params.max_seq_len > RADIX_THRESHOLD) {
-        if (cta_in_group == 0) {
-            for (uint32_t buf = 0; buf < 3; buf++) {
-                for (uint32_t i = tx; i < RADIX; i += kThreadsPerBlock) {
-                    state->histogram[buf][i] = 0;
-                }
-            }
-            if (tx == 0) {
-                state->remaining_k     = 0;
-                state->prefix          = 0;
-                state->arrival_counter = 0;
-                state->output_counter  = 0;
-            }
-        }
-        __syncthreads();
-    }
 
     int            barrier_phase = 0;
     const uint32_t total_iters   = (params.num_rows + num_groups - 1) / num_groups;
