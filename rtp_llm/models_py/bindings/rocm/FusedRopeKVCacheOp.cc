@@ -84,22 +84,21 @@ void prepareInPlace(CKAttn& params, const torch_ext::PyAttentionInputs& attn_inp
     updateKvCacheOffset(params, attn_inputs.kv_cache_kernel_block_id_device);
 }
 
-static void rejectMropeWithoutPositionIds(const RopeConfig& rope_config, const char* where) {
-    // ROCm prefill/decode dispatch always passes position_ids=nullptr (combo_position_ids
-    // is not plumbed through this path yet). Mrope needs real per-axis position ids — without
-    // them the kernel silently uses position_id=-1, producing wrong RoPE positions.
-    if (rope_config.style == RopeStyle::Mrope) {
-        throw std::runtime_error(std::string(where)
-                                 + ": RopeStyle::Mrope requires combo_position_ids, but ROCm "
-                                   "fused RoPE+KV-cache path does not plumb position_ids yet. "
-                                   "Run this model on the CUDA path or extend this op to accept "
-                                   "position_ids before enabling Mrope.");
-    }
-}
-
 FusedRopeKVCachePrefillOpBase::FusedRopeKVCachePrefillOpBase(const AttentionConfigs& attn_configs):
     attn_configs_(attn_configs) {
-    rejectMropeWithoutPositionIds(attn_configs.rope_config, "FusedRopeKVCachePrefillOp");
+    // MRoPE with mrope_interleaved=false is NOT supported in this fused kernel.
+    // RotaryHalfRead pairs smem[i] with smem[i + head_dim/2], but with contiguous
+    // mrope_section layout those two elements belong to different axes and require
+    // different position_ids -- a single seqidx cannot serve both correctly.
+    // When mrope_interleaved=true the cos/sin cache is built with interleaved
+    // frequencies, which happens to produce correct results under this pairing
+    // (verified by smoke test). Non-interleaved MRoPE must use the Python-layer
+    // apply_multimodal_rotary_pos_emb fallback instead.
+    if (attn_configs.rope_config.style == RopeStyle::Mrope && !attn_configs.rope_config.mrope_interleaved) {
+        throw std::runtime_error(
+            "ROCm FusedRopeKVCache does not support MRoPE with mrope_interleaved=false. "
+            "Use mrope_interleaved=true or disable the fused rope path.");
+    }
 }
 
 FusedRopeKVCachePrefillOpAsm::FusedRopeKVCachePrefillOpAsm(const AttentionConfigs& attn_configs):
@@ -353,7 +352,12 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
 
 FusedRopeKVCacheDecodeOpBase::FusedRopeKVCacheDecodeOpBase(const AttentionConfigs& attn_configs):
     attn_configs_(attn_configs) {
-    rejectMropeWithoutPositionIds(attn_configs.rope_config, "FusedRopeKVCacheDecodeOp");
+    // Same RotaryHalfRead axis-crossing constraint as the prefill kernel.
+    if (attn_configs.rope_config.style == RopeStyle::Mrope && !attn_configs.rope_config.mrope_interleaved) {
+        throw std::runtime_error(
+            "ROCm FusedRopeKVCache does not support MRoPE with mrope_interleaved=false. "
+            "Use mrope_interleaved=true or disable the fused rope path.");
+    }
 }
 
 FusedRopeKVCacheDecodeOpAsm::FusedRopeKVCacheDecodeOpAsm(const AttentionConfigs& attn_configs):

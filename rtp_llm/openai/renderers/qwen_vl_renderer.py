@@ -1,5 +1,5 @@
 import copy
-from typing import Any, List
+from typing import Any, Dict, List
 
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
@@ -101,6 +101,22 @@ class Qwen2VLRenderer(QwenRenderer):
     def _format_tool_call_arguments(self, arguments: Any) -> Any:
         return arguments
 
+    def _get_chat_template_kwargs(
+        self, request: ChatCompletionRequest
+    ) -> Dict[str, Any]:
+        chat_template_kwargs: Dict[str, Any] = {
+            "enable_thinking": bool(self.think_mode)
+        }
+        if request.chat_template_kwargs is not None:
+            chat_template_kwargs.update(request.chat_template_kwargs)
+        if (
+            request.extra_configs is not None
+            and request.extra_configs.chat_template_kwargs is not None
+            and isinstance(request.extra_configs.chat_template_kwargs, dict)
+        ):
+            chat_template_kwargs.update(request.extra_configs.chat_template_kwargs)
+        return chat_template_kwargs
+
     def _render_messages(
         self, request: ChatCompletionRequest, add_vision_id: bool
     ) -> PromptWithMMInput:
@@ -113,14 +129,19 @@ class Qwen2VLRenderer(QwenRenderer):
 
             if isinstance(message.content, list):
                 now_content = []
+                has_media = False
+                has_non_empty_text = False
                 for content_part in message.content:
                     if content_part.type == ContentPartTypeEnum.text:
                         assert isinstance(content_part.text, str)
                         now_content.append({"type": "text", "text": content_part.text})
+                        if content_part.text.strip():
+                            has_non_empty_text = True
                     elif content_part.type == ContentPartTypeEnum.image_url:
                         assert content_part.image_url != None
                         urls.append(content_part.image_url.url)
                         types.append(MMUrlType.IMAGE)
+                        has_media = True
                         if content_part.preprocess_config:
                             preprocess_configs.append(
                                 get_preprocess_config(content_part.preprocess_config)
@@ -132,6 +153,7 @@ class Qwen2VLRenderer(QwenRenderer):
                         assert content_part.video_url != None
                         urls.append(content_part.video_url.url)
                         types.append(MMUrlType.VIDEO)
+                        has_media = True
                         if content_part.preprocess_config:
                             preprocess_configs.append(
                                 get_preprocess_config(content_part.preprocess_config)
@@ -139,6 +161,14 @@ class Qwen2VLRenderer(QwenRenderer):
                         now_content.append(
                             {"type": "video", "video": content_part.video_url.url}
                         )
+                if (
+                    message.role == RoleEnum.user
+                    and has_media
+                    and not has_non_empty_text
+                ):
+                    now_content.append(
+                        {"type": "text", "text": "Describe the visual content."}
+                    )
                 msg_dict["content"] = now_content
             else:
                 msg_dict["content"] = message.content
@@ -183,6 +213,7 @@ class Qwen2VLRenderer(QwenRenderer):
         request_chat_template_kwargs = request.get_chat_template_kwargs()
         if request_chat_template_kwargs is not None:
             chat_template_kwargs.update(request_chat_template_kwargs)
+        chat_template_kwargs.update(self._get_chat_template_kwargs(request))
         prompt = self.tokenizer.apply_chat_template(
             final_messages, **chat_template_kwargs
         )

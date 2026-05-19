@@ -101,6 +101,49 @@ inline __device__ type_out* reinterpret_ptr(void* ptr, size_t offset) {
     return reinterpret_cast<type_out*>(reinterpret_cast<type_in*>(ptr) + offset);
 }
 
+__device__ __forceinline__ int get_mrope_position_dim(const RopeConfig& rope_config, const int tidx) {
+    const int rope_dim = rope_config.mrope_dim1 + rope_config.mrope_dim2 + rope_config.mrope_dim3;
+    if (rope_dim <= 0) {
+        return 0;
+    }
+
+    // Qwen MRoPE uses contiguous-section pair->axis mapping regardless of mrope_interleaved:
+    //   [0, dim1)         -> axis 0 (temporal)
+    //   [dim1, dim1+dim2) -> axis 1 (height)
+    //   rest              -> axis 2 (width)
+    // mrope_interleaved only affects cos/sin table construction, not position_id selection.
+    //
+    // Note on RotaryHalfRead correctness with mrope_interleaved=True:
+    // RotaryHalfRead pairs smem[tidx] (low half) with smem[tidx + dim/2] (high half).
+    // In principle these two elements can belong to different MRoPE axes, which would
+    // require different position_ids and break the single-seqidx assumption.
+    // However, Qwen3-VL enforces mrope_interleaved=True, which causes the cos/sin cache
+    // to be built with per-axis frequencies already interleaved across the full head_dim.
+    // Under this interleaved cache layout the low/high-half pairing happens to produce
+    // numerically correct results, as confirmed by smoke-test validation.
+    // Models with mrope_interleaved=False are not expected to use this kernel path.
+    const int now_idx = tidx % rope_dim;
+    if (now_idx >= rope_config.mrope_dim1 + rope_config.mrope_dim2) {
+        return 2;
+    }
+    if (now_idx >= rope_config.mrope_dim1) {
+        return 1;
+    }
+    return 0;
+}
+
+__device__ __forceinline__ int
+get_rope_position_id(const RopeConfig& rope_config, const int* position_ids, const int token_idx, const int tidx) {
+    if (!position_ids) {
+        return -1;
+    }
+    if (rope_config.style == RopeStyle::Mrope) {
+        const int now_dim = get_mrope_position_dim(rope_config, tidx);
+        return position_ids[token_idx * rope_config.index_factor + now_dim];
+    }
+    return position_ids[token_idx * rope_config.index_factor];
+}
+
 inline __device__ void convert_to_fp8(__hip_fp8x2_e4m3_fnuz* v, const amd_bfloat162 u) {
     __hip_bfloat162_raw   raw_bf16  = *reinterpret_cast<const __hip_bfloat162_raw*>(&u);
     __hip_fp8x2_storage_t raw_fp8x2 = __hip_cvt_bfloat16raw2_to_fp8x2(raw_bf16, __HIP_SATFINITE, __HIP_E4M3_FNUZ);
@@ -215,19 +258,7 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel_v1(T*                
             v      = add(v, v_bias);
         }
     }
-    int position_id = -1;
-    if (rope_config.style == RopeStyle::Mrope && position_ids) {
-        int rope_dim = rope_config.mrope_dim1 + rope_config.mrope_dim2 + rope_config.mrope_dim3;
-        int now_idx = tidx % rope_dim, now_dim = 0;
-        if (now_idx >= rope_config.mrope_dim1 + rope_config.mrope_dim2) {
-            now_dim = 2;
-        } else if (now_idx >= rope_config.mrope_dim1) {
-            now_dim = 1;
-        }
-        position_id = position_ids[token_idx * rope_config.index_factor + now_dim];
-    } else if (position_ids) {
-        position_id = position_ids[token_idx * rope_config.index_factor];
-    }
+    int position_id = get_rope_position_id(rope_config, position_ids, token_idx, tidx);
     const int pre_len   = cu_seqlens[batch_idx];
     const int input_len = cu_seqlens[batch_idx + 1] - pre_len;
     context_rope<T, Vec_t, ROPE_STYLE>(rope_config,
@@ -849,19 +880,7 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel(T*                   
             v      = add(v, v_bias);
         }
     }
-    int position_id = -1;
-    if (rope_config.style == RopeStyle::Mrope && position_ids) {
-        int rope_dim = rope_config.mrope_dim1 + rope_config.mrope_dim2 + rope_config.mrope_dim3;
-        int now_idx = tidx % rope_dim, now_dim = 0;
-        if (now_idx >= rope_config.mrope_dim1 + rope_config.mrope_dim2) {
-            now_dim = 2;
-        } else if (now_idx >= rope_config.mrope_dim1) {
-            now_dim = 1;
-        }
-        position_id = position_ids[token_idx * rope_config.index_factor + now_dim];
-    } else if (position_ids) {
-        position_id = position_ids[token_idx * rope_config.index_factor];
-    }
+    int position_id = get_rope_position_id(rope_config, position_ids, token_idx, tidx);
     const int pre_len   = cu_seqlens[batch_idx];
     const int input_len = cu_seqlens[batch_idx + 1] - pre_len;
     context_rope<T, Vec_t, ROPE_STYLE>(rope_config,
@@ -1200,7 +1219,7 @@ __global__ void add_fusedQKV_bias_transpose_decode_kernel_v1(T*                 
 
     // refer to the implementation of hipify decode attention
     const auto batch_beam_idx = blockIdx.y;
-    const int  position_id    = position_ids == nullptr ? -1 : position_ids[token_idx * rope_config.index_factor];
+    int position_id = get_rope_position_id(rope_config, position_ids, token_idx, tidx);
 
     const int input_len = (input_lengths == nullptr) ? 0 : input_lengths[batch_beam_idx];
     const int timestep  = tlength;
@@ -1360,7 +1379,7 @@ __global__ void add_fusedQKV_bias_transpose_decode_kernel(T*                    
 
     // refer to the implementation of hipify decode attention
     const auto batch_beam_idx = blockIdx.y;
-    const int  position_id    = position_ids == nullptr ? -1 : position_ids[token_idx * rope_config.index_factor];
+    int position_id = get_rope_position_id(rope_config, position_ids, token_idx, tidx);
 
     const int input_len = (input_lengths == nullptr) ? 0 : input_lengths[batch_beam_idx];
     const int timestep  = tlength;

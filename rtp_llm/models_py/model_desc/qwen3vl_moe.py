@@ -69,6 +69,7 @@ class Qwen3VLMoeModel(GptModelBase):
                     max_generate_batch_size,
                     hw_kernel_config=py_hw_kernel_config,
                     enable_cuda_graph=enable_cuda_graph,
+                    hw_kernel_config=py_hw_kernel_config,
                 )
                 for idx in range(self.layer_num)
             ]
