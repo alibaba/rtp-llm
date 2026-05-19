@@ -189,3 +189,16 @@ def rocm_oss_suites():
         ],
     )
 
+    # ROCm VL (Qwen3-VL-30B MoE)
+    native.test_suite(
+        name = "smoke_rocm_vl",
+        tests = [
+            smoke_test(
+                name="rocm_vl_qwen3_vl_moe",
+                task_info="data/model/qwen_vl/q_r_3_moe_rocm.json",
+                smoke_args="--act_type BF16 --reserver_runtime_mem_mb 51200 --tp_size 1 --world_size 1",
+                gpu_type=["MI308X-ROCM7"],
+            ),
+        ],
+    )
+
