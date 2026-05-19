@@ -317,6 +317,34 @@ TEST_F(NormalEngineTest, testQueryReuseCacheWhenSwitchIsOn) {
     }
 }
 
+// V1 FlexLB-DP path: PrefillRpcServer enqueues fake_query slots through
+// engine_->enqueue, so the fake stream must traverse the scheduler's state
+// machine. handleWaiting calls StreamCacheResource::initKVBlock, which returns
+// InternalError when fake_inited_=true; that drops the fake from WAITING into
+// FINISHED before it ever runs, leaving DP1 idle and DP0's DeepEP all-to-all
+// without a peer (manifests as CPU recv timeout). The fix in createMinFakeStream
+// pre-reports CanRun + LoadInitiated so handleWaiting bypasses both the CanRun
+// gate and the initKVBlock branch and falls through directly to RUNNING.
+TEST_F(NormalEngineTest, testCreateMinFakeStream_PreReportsCanRunAndLoadInitiated) {
+    CustomConfig config;
+    auto         engine = createMockEngine(config);
+
+    auto fake_stream = engine->createMinFakeStream(/*max_new_tokens=*/1);
+    ASSERT_TRUE(fake_stream != nullptr);
+
+    EXPECT_TRUE(fake_stream->isFakeStream());
+    EXPECT_TRUE(fake_stream->generateInput()->fake_query)
+        << "fake_query must be set on the input so QueryConverter sees it";
+
+    // Both events must already be present BEFORE enqueue, so handleWaiting's
+    // pre-conditions (line 49-style `if (!CanRun) return`, line 49 `if (!LoadInitiated)
+    // initKVBlock`) skip past the kv-block branch and fall through to PREFILL→RUNNING.
+    EXPECT_TRUE(fake_stream->hasEvent(StreamEvents::CanRun))
+        << "CanRun must be pre-reported so the state machine doesn't gate on scheduler approval";
+    EXPECT_TRUE(fake_stream->hasEvent(StreamEvents::LoadInitiated))
+        << "LoadInitiated must be pre-reported to bypass initKVBlock (which would fail with fake_inited_=true)";
+}
+
 TEST_F(NormalEngineTest, testQueryReuseCacheWhenSwitchIsOff) {
     // Test with engine-level reuse_cache = false (master switch off)
     CustomConfig config;

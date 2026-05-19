@@ -17,6 +17,7 @@ import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.master.DpRankStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
@@ -189,7 +190,10 @@ class DpBatchSchedulerTest {
             assertTrue(r.isSuccess(), "request " + i + " should succeed");
         }
 
-        assertEquals(3, sentBatches.get(0).getInputsCount(), "victim must not appear in the dispatched batch");
+        long realInBatch = sentBatches.get(0).getInputsList().stream()
+                .filter(in -> !in.getIsFakeQuery())
+                .count();
+        assertEquals(3, realInBatch, "victim must not appear in the dispatched batch (fake pads are accepted)");
     }
 
     @Test
@@ -265,7 +269,10 @@ class DpBatchSchedulerTest {
         assertTrue(r2.isSuccess());
 
         assertEquals(1, sentBatches.size());
-        assertEquals(1, sentBatches.get(0).getInputsCount(), "cancelled request must not be in the dispatched batch");
+        long realInBatch = sentBatches.get(0).getInputsList().stream()
+                .filter(in -> !in.getIsFakeQuery())
+                .count();
+        assertEquals(1, realInBatch, "cancelled request must not be in the dispatched batch (fake pads are accepted)");
     }
 
     @Test
@@ -355,7 +362,119 @@ class DpBatchSchedulerTest {
         Response r2 = f2.get(2, TimeUnit.SECONDS);
         assertTrue(r1.isSuccess() && r2.isSuccess());
         assertEquals(1, sentBatches.size());
-        assertEquals(2, sentBatches.get(0).getInputsCount());
+        // dpSize=4 ⇒ partial 2-real batch is padded with 2 fake-query slots so
+        // every DP rank gets a slot and the engine-side DeepEP all-to-all has
+        // a peer on every rank.
+        assertEquals(4, sentBatches.get(0).getInputsCount());
+    }
+
+    @Test
+    void partial_batch_pads_remaining_dpRanks_with_fake_query_slots() throws Exception {
+        // Submit one request only; window timer flushes a 1-real batch into
+        // dpSize=4. buildPb must pad ranks 1..3 with is_fake_query=true slots.
+        CompletableFuture<Response> f1 = scheduler.submit(makeCtx(42L, "m1"));
+        Response r1 = f1.get(2, TimeUnit.SECONDS);
+        assertTrue(r1.isSuccess(), "real request still completes successfully");
+
+        assertEquals(1, sentBatches.size());
+        EngineRpcService.BatchEnqueueRequestPB sent = sentBatches.get(0);
+        assertEquals(4, sent.getInputsCount(), "padded to dpSize=4");
+
+        // Exactly one slot is real (positive request_id, no is_fake_query); the
+        // other three are fake (is_fake_query=true, negative synthetic id).
+        long realCount = sent.getInputsList().stream()
+                .filter(in -> !in.getIsFakeQuery())
+                .count();
+        long fakeCount = sent.getInputsList().stream()
+                .filter(EngineRpcService.GenerateInputPB::getIsFakeQuery)
+                .count();
+        assertEquals(1, realCount);
+        assertEquals(3, fakeCount);
+
+        // All four dp_ranks [0,1,2,3] must be covered exactly once so DeepEP
+        // collectives have a peer on every rank.
+        List<Integer> ranks = sent.getInputsList().stream()
+                .map(in -> in.getDpRank().getValue())
+                .sorted()
+                .collect(Collectors.toList());
+        assertEquals(List.of(0, 1, 2, 3), ranks);
+
+        // Fake request_ids must not collide with real ones (real is positive,
+        // fake is negative); FlexLB never registers them, so handleAck's
+        // assignment lookup naturally ignores them.
+        for (EngineRpcService.GenerateInputPB in : sent.getInputsList()) {
+            if (in.getIsFakeQuery()) {
+                assertTrue(in.getRequestId() < 0,
+                        "fake slot request_id must be negative, got " + in.getRequestId());
+            } else {
+                assertEquals(42L, in.getRequestId());
+            }
+        }
+    }
+
+    @Test
+    void success_response_remaps_prefill_address_via_dpStatuses() throws Exception {
+        // DP0 publishes per-rank addresses via WorkerStatusPB.dp_status[]; the
+        // EngineWorkerStatus map has them under PREFILL/group=g1 keyed by
+        // "<serverIp>:<httpPort>". buildSuccessResponse must rewrite each
+        // request's prefill.serverIp/grpcPort to the dpRank-specific entry so
+        // frontend FetchResponse hits the DP that actually owns the slot.
+        WorkerStatus ws = new WorkerStatus();
+        ws.setDpStatuses(List.of(
+                new DpRankStatus(0, "10.0.0.1", 10101, 0, 0, 0, 0, true),
+                new DpRankStatus(1, "10.0.0.1", 10109, 0, 0, 0, 0, true),
+                new DpRankStatus(2, "10.0.0.1", 10117, 0, 0, 0, 0, true),
+                new DpRankStatus(3, "10.0.0.1", 10125, 0, 0, 0, 0, true)));
+        Map<String, WorkerStatus> roleMap = new HashMap<>();
+        roleMap.put("10.0.0.1:8080", ws);
+        when(engineWorkerStatus.selectModelWorkerStatus(eq(RoleType.PREFILL), eq("g1")))
+                .thenReturn(roleMap);
+
+        List<CompletableFuture<Response>> futures = IntStream.range(0, 4)
+                .mapToObj(i -> scheduler.submit(makeCtx(i + 1, "m1")))
+                .toList();
+
+        // Build a dpRank → grpcPort map from the responses to verify per-request remap.
+        Map<Long, Integer> dpRankToGrpcPort = new HashMap<>();
+        for (CompletableFuture<Response> f : futures) {
+            Response r = f.get(2, TimeUnit.SECONDS);
+            assertTrue(r.isSuccess());
+            ServerStatus prefill = r.getServerStatus().get(0);
+            dpRankToGrpcPort.put(prefill.getDpRank(), prefill.getGrpcPort());
+            assertEquals("10.0.0.1", prefill.getServerIp(),
+                    "ip stays — only the per-DP grpc port flips per dpRank");
+        }
+        assertEquals(10101, dpRankToGrpcPort.get(0L).intValue());
+        assertEquals(10109, dpRankToGrpcPort.get(1L).intValue());
+        assertEquals(10117, dpRankToGrpcPort.get(2L).intValue());
+        assertEquals(10125, dpRankToGrpcPort.get(3L).intValue());
+    }
+
+    @Test
+    void success_response_keeps_original_prefill_address_when_dpStatuses_empty() throws Exception {
+        // Legacy / V0 path: engine never published dp_status[], so dpStatuses
+        // is empty. applyDpRankAddress must be a no-op and prefill.grpcPort
+        // must stay at the pod-level entry (=9080). Otherwise V0 smokes that
+        // share this code path would regress.
+        WorkerStatus ws = new WorkerStatus();
+        // dpStatuses defaults to List.of()
+        Map<String, WorkerStatus> roleMap = new HashMap<>();
+        roleMap.put("10.0.0.1:8080", ws);
+        when(engineWorkerStatus.selectModelWorkerStatus(eq(RoleType.PREFILL), eq("g1")))
+                .thenReturn(roleMap);
+
+        CompletableFuture<Response> f = scheduler.submit(makeCtx(1L, "m1"));
+        // Need to fill dpSize=4 to flush sooner; submit 3 more.
+        scheduler.submit(makeCtx(2L, "m1"));
+        scheduler.submit(makeCtx(3L, "m1"));
+        scheduler.submit(makeCtx(4L, "m1"));
+
+        Response r = f.get(2, TimeUnit.SECONDS);
+        assertTrue(r.isSuccess());
+        ServerStatus prefill = r.getServerStatus().get(0);
+        assertEquals("10.0.0.1", prefill.getServerIp());
+        assertEquals(9080, prefill.getGrpcPort(),
+                "empty dpStatuses ⇒ keep pod-level grpcPort untouched");
     }
 
     @Test
