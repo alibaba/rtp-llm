@@ -19,6 +19,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -125,6 +126,31 @@ class CacheAwareGroupSelectorTest {
     @Test
     void name_is_CACHE_AWARE() {
         assertEquals("CACHE_AWARE", selector.name());
+    }
+
+    @Test
+    void mixed_cache_keys_only_query_for_requests_with_keys() {
+        // anyCacheKeys=true (one request carries blockCacheKeys) so the score
+        // path runs instead of leastLoadedFallback. Within scoreCandidateForBatch,
+        // the cache lookup must be skipped for the request whose blockCacheKeys
+        // is null — it still contributes a (seqLen, 0) prefill estimate to the
+        // candidate's total score.
+        WorkerStatus w1 = worker("10.0.0.1", 100);
+        WorkerStatus w2 = worker("10.0.0.2", 100);
+
+        List<Long> cacheKeys = List.of(1L, 2L);
+        when(cacheAwareService.findMatchingPrefixLength(any(), any())).thenReturn(0);
+
+        List<QueuedRequest> requests = List.of(
+                requestWithCacheKeys(1, 500, cacheKeys),
+                requestWithCacheKeys(2, 500, null));
+
+        DispatchContext ctx = new DispatchContext("m", 4, new FlexlbConfig(), requests);
+        selector.select(List.of(w1, w2), ctx);
+
+        verify(cacheAwareService).findMatchingPrefixLength(eq("10.0.0.1:8080"), eq(cacheKeys));
+        verify(cacheAwareService).findMatchingPrefixLength(eq("10.0.0.2:8080"), eq(cacheKeys));
+        verify(cacheAwareService, times(2)).findMatchingPrefixLength(any(), any());
     }
 
     // ============== helpers ==============
