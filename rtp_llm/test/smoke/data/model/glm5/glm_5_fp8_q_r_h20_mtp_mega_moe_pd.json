@@ -1,0 +1,25 @@
+{
+    "model_type": "glm_5",
+    "model_path": "/home/zw193905/models/GLM-5-FP8",
+    "query_result": [
+        {
+            "query": {
+                "prompt": "$prompt:s1",
+                "generate_config": {
+                    "max_new_tokens": 20,
+                    "top_k": 1,
+                    "top_p": 0
+                }
+            },
+            "result": {
+                "response": ":CAP theorem states that only two of three characteristics can be achieved at the same time.\nC6",
+                "finished": true,
+                "aux_info": {
+                    "input_len": 6,
+                    "iter_count": 13,
+                    "output_len": 20
+                }
+            }
+        }
+    ]
+}
