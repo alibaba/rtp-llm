@@ -184,7 +184,7 @@ class AiterPrefillAttnOp:
         self.tokens_per_block = attn_configs.kernel_tokens_per_block
         self.is_causal = attn_configs.is_causal
         self.v1_kv_layout = v1_kv_layout
-        self._compact_arange: Optional[torch.Tensor] = None
+        self._block_positions: Optional[torch.Tensor] = None
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
         return True
@@ -259,17 +259,55 @@ class AiterPrefillAttnOp:
 
         return k_cache, v_cache
 
+    def _sanitize_block_table(self, block_table, block_num: int, seqlen_k=None):
+        """Make block_table safe for speculative paged-attention reads."""
+        if block_table is None:
+            return None
+
+        max_block_id = max(int(block_num) - 1, 0)
+        block_table = block_table.clamp(min=0, max=max_block_id)
+
+        if seqlen_k is None or block_table.dim() != 2:
+            return block_table
+
+        if seqlen_k.device != block_table.device:
+            seqlen_k = seqlen_k.to(block_table.device, non_blocking=True)
+
+        max_blocks_per_seq = block_table.shape[1]
+        if seqlen_k.numel() != block_table.shape[0]:
+            return block_table
+
+        cached_positions = self._block_positions
+        if (
+            cached_positions is None
+            or cached_positions.numel() < max_blocks_per_seq
+            or cached_positions.device != block_table.device
+        ):
+            cached_positions = torch.arange(
+                max(max_blocks_per_seq, 1024),
+                dtype=torch.int32,
+                device=block_table.device,
+            )
+            self._block_positions = cached_positions
+
+        valid_blocks = torch.div(
+            seqlen_k + self.tokens_per_block - 1,
+            self.tokens_per_block,
+            rounding_mode="floor",
+        ).to(torch.int32)
+        positions = cached_positions[:max_blocks_per_seq].unsqueeze(0)
+        valid_mask = positions < valid_blocks.unsqueeze(1)
+        return torch.where(valid_mask, block_table, torch.zeros_like(block_table))
+
     def _gather_and_reshape_kv_compact(self, kv_cache_base, block_table):
-        """Gather only blocks referenced by block_table, then reshape to VECTORIZED_LAYOUT.
+        """Gather referenced blocks once, then reshape to VECTORIZED_LAYOUT.
 
         For v1_kv_layout=True (non-ASM, non-FP8) path, the V cache needs a
         permute+contiguous to convert from linear [hd, ps] to vectorized
-        [ps//vs, hd, vs] layout.  Doing this on the full KV cache pool
-        (e.g. 14 GB+) is extremely expensive.  This method gathers only the
-        blocks actually used by the current prefill batch (typically ~hundreds),
-        performs the layout conversion on that compact tensor, and returns an
-        identity block_table so mha_batch_prefill_func indexes into the
-        compact buffer directly.
+        [ps//vs, hd, vs] layout. Doing this on the full KV cache pool is
+        extremely expensive. This method gathers unique blocks referenced by
+        the current prefill batch and remaps block_table so
+        mha_batch_prefill_func indexes into the compact buffer directly.
 
         This also avoids the int32 offset overflow in aiter CK kernel when
         block_num * batch_stride_k > INT32_MAX (single-layer K cache > 2 GB).
@@ -286,16 +324,21 @@ class AiterPrefillAttnOp:
         hd = self.head_dim
         vs = 16 // kv_cache_base.element_size()
 
-        # Flatten block_table to get all referenced block indices
+        # Flatten block_table to get referenced block indices. Keep only unique
+        # blocks; reuse-cache pressure can otherwise duplicate long shared
+        # prefixes and padding into a very large temporary K/V buffer.
         block_indices = block_table.reshape(-1).to(torch.int64)
-        num_gathered = block_indices.numel()
+        unique_indices, inverse_indices = torch.unique(
+            block_indices, sorted=True, return_inverse=True
+        )
+        num_gathered = unique_indices.numel()
 
         if kv_cache_base.ndim >= 4:
             # 5D path: [block_num, 2, hk, ps, hd]
             k_4d = kv_cache_base.select(1, 0)  # [block_num, hk, ps, hd]
             v_4d = kv_cache_base.select(1, 1)  # [block_num, hk, ps, hd]
-            k_used = k_4d.index_select(0, block_indices)  # [n, hk, ps, hd]
-            v_used = v_4d.index_select(0, block_indices)  # [n, hk, ps, hd]
+            k_used = k_4d.index_select(0, unique_indices)  # [n, hk, ps, hd]
+            v_used = v_4d.index_select(0, unique_indices)  # [n, hk, ps, hd]
             k_compact = k_used.view(num_gathered, hk, hd // vs, ps, vs)
             v_compact = (
                 v_used.reshape(num_gathered, hk, hd, ps // vs, vs)
@@ -307,8 +350,8 @@ class AiterPrefillAttnOp:
             block_num = kv_cache_base.shape[0]
             expected_elems = 2 * hk * ps * hd
             flat = kv_cache_base[:, :expected_elems].reshape(block_num, 2, hk, ps * hd)
-            k_used = flat[:, 0, :, :].index_select(0, block_indices)
-            v_used = flat[:, 1, :, :].index_select(0, block_indices)
+            k_used = flat[:, 0, :, :].index_select(0, unique_indices)
+            v_used = flat[:, 1, :, :].index_select(0, unique_indices)
             k_compact = k_used.view(num_gathered, hk, hd // vs, ps, vs).contiguous()
             v_compact = (
                 v_used.view(num_gathered, hk, hd, ps // vs, vs)
@@ -316,19 +359,7 @@ class AiterPrefillAttnOp:
                 .contiguous()
             )
 
-        # Build identity block_table: [0, 1, 2, ...] so aiter indexes into
-        # the compact buffer instead of the original full pool.
-        cached_arange = self._compact_arange
-        if (
-            cached_arange is None
-            or cached_arange.numel() < num_gathered
-            or cached_arange.device != block_table.device
-        ):
-            cached_arange = torch.arange(
-                max(num_gathered, 1024), dtype=torch.int32, device=block_table.device
-            )
-            self._compact_arange = cached_arange
-        compact_block_table = cached_arange[:num_gathered].view_as(block_table)
+        compact_block_table = inverse_indices.to(torch.int32).view_as(block_table)
 
         return k_compact, v_compact, compact_block_table
 
@@ -422,16 +453,7 @@ class AiterPrefillAttnOp:
         if q_tensor.dim() == 2:
             q_tensor = q_tensor.view(q_tensor.size(0), self.head_num, self.head_dim)
 
-        block_table = fmha_params.kv_cache_block_id_device
         is_fp8 = kv_cache.kv_cache_base.dtype in (torch.float8_e4m3fnuz, torch.float8_e4m3fn)
-        use_compact = self.v1_kv_layout and not is_fp8
-
-        if use_compact:
-            k_cache, v_cache, block_table = self._gather_and_reshape_kv_compact(
-                kv_cache.kv_cache_base, block_table
-            )
-        else:
-            k_cache, v_cache = self._reshape_kv_cache_vectorized(kv_cache.kv_cache_base)
         # cu_seqlens are already created on GPU in FMHAParams.__init__
         cu_seqlens_q = fmha_params.cu_seqlens_q
         # Ensure cu_seqlens_q is on the same device as q_tensor
@@ -446,6 +468,21 @@ class AiterPrefillAttnOp:
         seqlen_k = fmha_params.prefill_seqlen_k_int32
         if seqlen_k.device != q_tensor.device:
             seqlen_k = seqlen_k.to(q_tensor.device, non_blocking=True)
+
+        block_table = self._sanitize_block_table(
+            fmha_params.kv_cache_block_id_device,
+            kv_cache.kv_cache_base.shape[0],
+            seqlen_k,
+        )
+
+        use_compact = self.v1_kv_layout and not is_fp8
+
+        if use_compact:
+            k_cache, v_cache, block_table = self._gather_and_reshape_kv_compact(
+                kv_cache.kv_cache_base, block_table
+            )
+        else:
+            k_cache, v_cache = self._reshape_kv_cache_vectorized(kv_cache.kv_cache_base)
 
         # Reuse values computed once in FMHAParams.prepare() to avoid
         # per-layer GPU→CPU sync from .item() on the hot path.
