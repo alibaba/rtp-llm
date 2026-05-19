@@ -399,6 +399,17 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
 
 
 class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
+    def _get_fla_block_map(self, attn_inputs: PyAttentionInputs) -> torch.Tensor:
+        block_map = attn_inputs.kv_cache_kernel_block_id_device
+        if (
+            getattr(attn_inputs, "is_cuda_graph", False)
+            and block_map is not None
+            and block_map.ndim == 2
+            and block_map.shape[1] > 1
+        ):
+            return block_map[:, :1]
+        return block_map
+
     def _conv1d(
         self,
         mixed_qkv: torch.Tensor,
@@ -473,7 +484,7 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             scale=None,
             initial_state=ssm_states,
             inplace_final_state=True,
-            block_map=attn_inputs.kv_cache_kernel_block_id_device,
+            block_map=self._get_fla_block_map(attn_inputs),
             seq_size_per_block=seq_size_per_block,
             sequence_lengths=attn_inputs.sequence_lengths_plus_1_device,
             use_qk_l2norm_in_kernel=True,
