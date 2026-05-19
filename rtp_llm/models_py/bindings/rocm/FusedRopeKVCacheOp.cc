@@ -99,7 +99,8 @@ static void rejectMropeWithoutPositionIds(const RopeConfig& rope_config, const c
 
 FusedRopeKVCachePrefillOpBase::FusedRopeKVCachePrefillOpBase(const AttentionConfigs& attn_configs):
     attn_configs_(attn_configs) {
-    rejectMropeWithoutPositionIds(attn_configs.rope_config, "FusedRopeKVCachePrefillOp");
+    // Mrope is supported: prefill kernel handles per-axis position_ids
+    // via mrope_dim1/dim2/dim3 dispatch (see fused_rope_kvcache_kernel.cu).
 }
 
 FusedRopeKVCachePrefillOpAsm::FusedRopeKVCachePrefillOpAsm(const AttentionConfigs& attn_configs):
@@ -353,7 +354,9 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
 
 FusedRopeKVCacheDecodeOpBase::FusedRopeKVCacheDecodeOpBase(const AttentionConfigs& attn_configs):
     attn_configs_(attn_configs) {
-    rejectMropeWithoutPositionIds(attn_configs.rope_config, "FusedRopeKVCacheDecodeOp");
+    // Mrope is now supported in decode kernels (position_ids is plumbed via
+    // combo_position_ids in prepare(), and the kernel dispatches per-axis
+    // position_ids based on mrope_dim1/dim2/dim3).
 }
 
 FusedRopeKVCacheDecodeOpAsm::FusedRopeKVCacheDecodeOpAsm(const AttentionConfigs& attn_configs):
