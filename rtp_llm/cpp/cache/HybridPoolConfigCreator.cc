@@ -150,6 +150,8 @@ void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
     size_t   max_scale_stride        = 0;
     size_t   total_kv_block_bytes    = 0;
     size_t   total_scale_block_bytes = 0;
+    size_t   swa_kv_block_bytes      = 0;
+    size_t   swa_scale_block_bytes   = 0;
     uint32_t max_group_layers        = 0;
 
     // All groups share the global bpk (= seq_size_per_block / kernel_seq_size).
@@ -161,15 +163,20 @@ void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
     for (size_t gid = 0; gid < config.cache_specs.size(); ++gid) {
         const auto& spec = config.cache_specs[gid];
         RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "cache_specs[%zu] is null", gid);
-        const auto   layer_count      = static_cast<uint32_t>(config.global_layer_ids[gid].size());
-        const size_t kernel_kv_stride = spec->block_size_bytes();
-        const auto   kernel_scale     = spec->scale_block_size_bytes();
-        const size_t kv_stride        = kernel_kv_stride * global_bpk;
-        const size_t scale_stride     = kernel_scale * global_bpk;
+        const auto   layer_count                = static_cast<uint32_t>(config.global_layer_ids[gid].size());
+        const size_t kernel_kv_stride           = spec->block_size_bytes();
+        const auto   kernel_scale               = spec->scale_block_size_bytes();
+        const size_t kv_stride                  = kernel_kv_stride * global_bpk;
+        const size_t scale_stride               = kernel_scale * global_bpk;
         config.group_kv_block_stride_bytes[gid] = kv_stride;
         config.group_kv_scale_stride_bytes[gid] = scale_stride;
         config.group_block_size_bytes[gid]      = static_cast<size_t>(layer_count) * (kv_stride + scale_stride);
-        if (config.group_fixed_pool_blocks[gid] == 0) {
+        const bool is_fixed                     = config.group_fixed_pool_blocks[gid] > 0;
+        const bool is_swa = gid < config.group_types.size() && config.group_types[gid] == CacheGroupType::SWA;
+        if (!is_fixed && is_swa) {
+            swa_kv_block_bytes += static_cast<size_t>(layer_count) * kv_stride;
+            swa_scale_block_bytes += static_cast<size_t>(layer_count) * scale_stride;
+        } else if (!is_fixed) {
             total_kv_block_bytes += static_cast<size_t>(layer_count) * kv_stride;
             total_scale_block_bytes += static_cast<size_t>(layer_count) * scale_stride;
         }
@@ -183,12 +190,13 @@ void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
         }
     }
 
-    config.group_layer_num          = static_cast<int>(std::max<uint32_t>(1, max_group_layers));
-    config.kv_block_stride_bytes    = max_kv_stride;
-    config.kv_scale_stride_bytes    = max_scale_stride;
-    config.kv_block_size_bytes      = total_kv_block_bytes;
-    config.kv_scale_size_bytes      = total_scale_block_bytes;
-    const size_t paged_block_bytes  = config.kv_block_size_bytes + config.kv_scale_size_bytes;
+    config.group_layer_num         = static_cast<int>(std::max<uint32_t>(1, max_group_layers));
+    config.kv_block_stride_bytes   = max_kv_stride;
+    config.kv_scale_stride_bytes   = max_scale_stride;
+    config.kv_block_size_bytes     = total_kv_block_bytes;
+    config.kv_scale_size_bytes     = total_scale_block_bytes;
+    config.swa_block_size_bytes    = swa_kv_block_bytes + swa_scale_block_bytes;
+    const size_t paged_block_bytes = config.kv_block_size_bytes + config.kv_scale_size_bytes;
     if (paged_block_bytes == 0) {
         RTP_LLM_CHECK_WITH_INFO(is_mtp && config.use_typed_cache_regions,
                                 "hybrid-pool paged groups produced zero block bytes");
