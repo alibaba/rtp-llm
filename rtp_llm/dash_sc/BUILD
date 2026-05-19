@@ -27,6 +27,7 @@ py_library(
         "proxy/__main__.py",
         "proxy/servicer.py",
         "server.py",
+        "think.py",
     ],
     data = [":grpc_client_scripts"],
     visibility = ["//visibility:public"],
@@ -48,9 +49,28 @@ py_test(
 )
 
 py_test(
+    name = "think_test",
+    srcs = ["test/think_test.py"],
+    main = "test/think_test.py",
+    deps = ["//rtp_llm:testlib"],
+    imports = [],
+    exec_properties = {"gpu": "A10"},
+)
+
+py_test(
     name = "inference_servicer_test",
     srcs = ["test/inference/servicer_test.py"],
     main = "test/inference/servicer_test.py",
+    deps = ["//rtp_llm:testlib"],
+    imports = [],
+    exec_properties = {"gpu": "A10"},
+)
+
+py_test(
+    name = "mrcr_smoke_test",
+    srcs = ["test/inference/mrcr_smoke_test.py"],
+    data = ["test/data/mrcr_deepseek_v4_think_leak_cases.json"],
+    main = "test/inference/mrcr_smoke_test.py",
     deps = ["//rtp_llm:testlib"],
     imports = [],
     exec_properties = {"gpu": "A10"},
