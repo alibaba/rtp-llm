@@ -138,7 +138,8 @@ class DpGrpcClientTest {
         EngineRpcService.BatchEnqueueRequestPB batch =
                 EngineRpcService.BatchEnqueueRequestPB.newBuilder()
                         .setBatchId(7L)
-                        .addInputs(EngineRpcService.GenerateInputPB.newBuilder().setRequestId(11).setDpRank(0).build())
+                        .addInputs(EngineRpcService.GenerateInputPB.newBuilder()
+                                .setRequestId(11).setDpRank(com.google.protobuf.Int32Value.of(0)).build())
                         .build();
         EngineRpcService.BatchEnqueueResponsePB ack = client.enqueue("prefill-host", 9999, batch).get(2, TimeUnit.SECONDS);
         assertEquals(1, ack.getAcksCount());
