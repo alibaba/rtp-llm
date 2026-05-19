@@ -16,7 +16,7 @@ Modes:
   ``fused_add_rmsnorm_fp8_quant_with_bf16_output`` from the recorded inputs
   and returns the FP8/scale outputs (saving the second quant launch but
   paying for an extra mutating fused pass).
-* Precompute mode (``QWEN35_FUSED_ADD_RMSNORM_PRECOMPUTE_FP8=1``): the
+* Precompute mode (``GRAPHFX_FUSED_ADD_RMSNORM_PRECOMPUTE_FP8=1``): the
   producer runs ``fused_add_rmsnorm_fp8_quant_with_bf16_output`` directly,
   copies the BF16 output back into ``hidden_states`` to preserve the
   in-place semantics that downstream code expects, and stashes ``(fp8,
@@ -61,7 +61,7 @@ def _env_flag(name: str, default: bool = False) -> bool:
 
 
 def _debug_enabled() -> bool:
-    return _env_flag("QWEN35_FUSED_ADD_RMSNORM_DEBUG")
+    return _env_flag("GRAPHFX_FUSED_ADD_RMSNORM_DEBUG")
 
 
 # (token_ref, x_orig, residual_orig_ref, weight, eps, scale_ue8m0, q, scale)
@@ -199,7 +199,7 @@ def _lookup(y: torch.Tensor) -> Optional[_TokenEntry]:
     return None
 
 
-def qwen35_fused_add_rmsnorm_producer_token(
+def graphfx_fused_add_rmsnorm_producer_token(
     hidden_states: torch.Tensor,
     residual: torch.Tensor,
     weight: torch.Tensor,
@@ -222,7 +222,7 @@ def qwen35_fused_add_rmsnorm_producer_token(
     """
     from rtp_llm.ops.compute_ops import rtp_llm_ops
 
-    if _env_flag("QWEN35_FUSED_ADD_RMSNORM_PRECOMPUTE_FP8") and (
+    if _env_flag("GRAPHFX_FUSED_ADD_RMSNORM_PRECOMPUTE_FP8") and (
         fused_add_rmsnorm_fp8_quant_with_bf16_output is not None
     ):
         try:
@@ -236,7 +236,7 @@ def qwen35_fused_add_rmsnorm_producer_token(
             )
         except Exception as exc:  # pragma: no cover - precompute is best-effort
             if _debug_enabled():
-                logger.info("QWEN35 precompute fused failed, fallback: %s", exc)
+                logger.info("GraphFX precompute fused failed, fallback: %s", exc)
         else:
             hidden_states.copy_(bf16_out)
             _remember(
@@ -274,7 +274,7 @@ def qwen35_fused_add_rmsnorm_producer_token(
     return hidden_states
 
 
-def qwen35_fused_add_rmsnorm_fp8_quant_from_provenance(
+def graphfx_fused_add_rmsnorm_fp8_quant_from_provenance(
     y: torch.Tensor,
     *,
     fallback_y: Optional[torch.Tensor] = None,
@@ -302,13 +302,13 @@ def qwen35_fused_add_rmsnorm_fp8_quant_from_provenance(
         _, _, _, _, _, _, q, scale = entry
         if q is not None and scale is not None:
             if _debug_enabled():
-                logger.info("QWEN35 add+RMSNorm provenance precompute hit")
+                logger.info("GraphFX add+RMSNorm provenance precompute hit")
             return q, scale
         # Recompute path is not yet implemented (see docstring); fall through
         # to the standalone quant for now.
-    elif _env_flag("QWEN35_FUSED_ADD_RMSNORM_REQUIRE_PROVENANCE"):
+    elif _env_flag("GRAPHFX_FUSED_ADD_RMSNORM_REQUIRE_PROVENANCE"):
         raise RuntimeError(
-            "QWEN35 add+RMSNorm+quant cross-graph rewrite did not find provenance"
+            "GraphFX add+RMSNorm+quant cross-graph rewrite did not find provenance"
         )
     if sgl_per_token_group_quant_fp8 is None:
         raise RuntimeError(

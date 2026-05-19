@@ -1,4 +1,4 @@
-"""Shared FX-walking primitives used by the QWEN35 GraphFX passes."""
+"""Shared FX-walking primitives used by the GraphFX passes."""
 
 from __future__ import annotations
 

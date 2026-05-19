@@ -27,10 +27,10 @@ from rtp_llm.models_py.modules.fuse_kernel_fx._pass_helpers import (
     unwrap_layout_only,
 )
 from rtp_llm.models_py.modules.fuse_kernel_fx.fusion_registry import (
-    eliminate_dead_code_preserving_qwen35_side_effects,
-    record_qwen35_fusion_hit,
-    record_qwen35_fusion_miss,
-    register_qwen35_fusion_pass,
+    eliminate_dead_code_preserving_graphfx_side_effects,
+    record_graphfx_fusion_hit,
+    record_graphfx_fusion_miss,
+    register_graphfx_fusion_pass,
 )
 
 try:
@@ -70,24 +70,24 @@ def _try_rewrite(gm: torch.fx.GraphModule, node: torch.fx.Node) -> bool:
     if not _is_silu_and_mul_node(node):
         return False
     if not node.args:
-        record_qwen35_fusion_miss("silu_and_mul_fp8_quant_fx", "no_args")
+        record_graphfx_fusion_miss("silu_and_mul_fp8_quant_fx", "no_args")
         return False
     up_node = node.args[0]
     if not _last_dim_divisible_by(up_node, 256):
         # silu_and_mul halves the last dim; the result must still be divisible
         # by 128 (group_size).  256 == 2 * 128.
-        record_qwen35_fusion_miss(
+        record_graphfx_fusion_miss(
             "silu_and_mul_fp8_quant_fx", "input_last_dim_not_divisible_by_256"
         )
         return False
     quant_node = first_quant_consumer_of(node)
     if quant_node is None:
-        record_qwen35_fusion_miss(
+        record_graphfx_fusion_miss(
             "silu_and_mul_fp8_quant_fx", "no_same_graph_quant_consumer"
         )
         return False
     if not quant_contract_ok(quant_node, group_size=128):
-        record_qwen35_fusion_miss(
+        record_graphfx_fusion_miss(
             "silu_and_mul_fp8_quant_fx", "quant_contract_mismatch"
         )
         return False
@@ -119,18 +119,18 @@ def apply_silu_and_mul_fp8_quant_fx_pass(
         if _try_rewrite(gm, node):
             replaced += 1
     if replaced:
-        eliminate_dead_code_preserving_qwen35_side_effects(gm)
-        record_qwen35_fusion_hit("silu_and_mul_fp8_quant_fx", replaced)
-        logger.info("QWEN35 FX silu_and_mul+FP8 quant pass: %d", replaced)
+        eliminate_dead_code_preserving_graphfx_side_effects(gm)
+        record_graphfx_fusion_hit("silu_and_mul_fp8_quant_fx", replaced)
+        logger.info("GraphFX silu_and_mul+FP8 quant pass: %d", replaced)
     return gm
 
 
 def register_silu_and_mul_fp8_quant_pass() -> None:
-    register_qwen35_fusion_pass(
+    register_graphfx_fusion_pass(
         "silu_and_mul_fp8_quant_fx",
         apply_silu_and_mul_fp8_quant_fx_pass,
         priority=20,
-        env_gate="QWEN35_FUSED_SILU_AND_MUL_FP8_QUANT",
+        env_gate="GRAPHFX_FUSED_SILU_AND_MUL_FP8_QUANT",
     )
 
 

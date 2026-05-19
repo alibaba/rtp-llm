@@ -27,7 +27,7 @@ class CausalAttention(nn.Module):
     fused/unfused kernels in eager code. The body runs the plain PyTorch
     chain ``attn_output * torch.sigmoid(gate)`` followed by ``o_proj``;
     GraphFX picks up that pattern at trace time and rewrites it to
-    ``sigmoid_mul_fp8_quant_fwd`` when ``QWEN35_GRAPHFX_FUSION=1`` and the
+    ``sigmoid_mul_fp8_quant_fwd`` when ``ENABLE_GRAPHFX_FUSION=1`` and the
     quant contract holds.
 
     The ``x_fp8`` / ``x_scale`` keyword arguments are kept for API

@@ -1,9 +1,9 @@
 """GraphFX install entry point for Qwen3.5 / GLM5 / Qwen3-MoE / DSV3.2 models.
 
-``maybe_install_qwen35_graphfx_fusions(py_model)`` is meant to be called once
+``maybe_install_graphfx_fusions(py_model)`` is meant to be called once
 from ``BaseModel.load()`` after ``_create_python_model()`` when the env flag
-``QWEN35_GRAPHFX_FUSION`` is set.  It wraps ``py_model.forward`` with a
-``torch.compile``-d callable that uses the Qwen35 fusion registry as a
+``ENABLE_GRAPHFX_FUSION`` is set.  It wraps ``py_model.forward`` with a
+``torch.compile``-d callable that uses the GraphFX fusion registry as a
 backend so the registered FX passes can rewrite RMSResNorm/quant/gate
 patterns into fused-kernel calls without modifying eager model code.
 """
@@ -15,16 +15,16 @@ import os
 from typing import Any
 
 from rtp_llm.models_py.modules.fuse_kernel_fx.fusion_registry import (
-    compile_with_qwen35_fusions,
-    ensure_qwen35_fusions_registered,
+    compile_with_graphfx_fusions,
+    ensure_graphfx_fusions_registered,
     env_flag,
-    registered_qwen35_fusion_passes,
-    setup_qwen35_fusion_file_logger,
+    registered_graphfx_fusion_passes,
+    setup_graphfx_fusion_file_logger,
 )
 
 logger = logging.getLogger(__name__)
 
-_CALLABLE_MARKER = "_qwen35_graphfx_compiled"
+_CALLABLE_MARKER = "_graphfx_compiled"
 
 
 # Fields on PyModelInputs / PyAttentionInputs whose dim-0 is the per-request
@@ -63,11 +63,11 @@ _DYNAMIC_DIM01_FIELDS = (
 
 
 def graphfx_fusion_enabled() -> bool:
-    return env_flag("QWEN35_GRAPHFX_FUSION")
+    return env_flag("ENABLE_GRAPHFX_FUSION")
 
 
 def _debug_enabled() -> bool:
-    return env_flag("QWEN35_FUSION_REGISTRY_DEBUG")
+    return env_flag("GRAPHFX_FUSION_REGISTRY_DEBUG")
 
 
 def _mark_dynamic_dim0(value: Any) -> None:
@@ -145,7 +145,7 @@ def _mark_dynamic_inputs(args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
 
 
 def _compile_callable(owner: Any, attr_name: str, label: str) -> bool:
-    owner_marker = f"_qwen35_graphfx_{attr_name}_compiled"
+    owner_marker = f"_graphfx_{attr_name}_compiled"
     if getattr(owner, owner_marker, False):
         return False
     fn = getattr(owner, attr_name, None)
@@ -154,7 +154,7 @@ def _compile_callable(owner: Any, attr_name: str, label: str) -> bool:
     if getattr(fn, _CALLABLE_MARKER, False):
         return False
 
-    compiled = compile_with_qwen35_fusions(
+    compiled = compile_with_graphfx_fusions(
         fn,
         label=label,
         dynamic=True,
@@ -167,19 +167,19 @@ def _compile_callable(owner: Any, attr_name: str, label: str) -> bool:
 
     try:
         setattr(wrapped, _CALLABLE_MARKER, True)
-        setattr(wrapped, "_qwen35_graphfx_label", label)
-        setattr(wrapped, "_qwen35_graphfx_compiled_callable", compiled)
+        setattr(wrapped, "_graphfx_label", label)
+        setattr(wrapped, "_graphfx_compiled_callable", compiled)
     except Exception:
         pass
-    setattr(owner, f"_qwen35_graphfx_original_{attr_name}", fn)
+    setattr(owner, f"_graphfx_original_{attr_name}", fn)
     setattr(owner, attr_name, wrapped)
     setattr(owner, owner_marker, True)
-    logger.info("QWEN35 GraphFX compile installed: %s dynamic=True", label)
+    logger.info("GraphFX compile installed: %s dynamic=True", label)
     return True
 
 
-def maybe_install_qwen35_graphfx_fusions(py_model: Any) -> bool:
-    """Install the QWEN35 FX backend on the framework-visible model forward.
+def maybe_install_graphfx_fusions(py_model: Any) -> bool:
+    """Install the GraphFX backend on the framework-visible model forward.
 
     Compatible with ``Qwen3NextModel`` / ``Qwen3NextMTPModel`` /
     ``GenericMoeModel`` (all expose ``forward(inputs, fmha_impl)``).  Returns
@@ -187,15 +187,15 @@ def maybe_install_qwen35_graphfx_fusions(py_model: Any) -> bool:
     """
     if not graphfx_fusion_enabled():
         return False
-    setup_qwen35_fusion_file_logger()
-    ensure_qwen35_fusions_registered()
+    setup_graphfx_fusion_file_logger()
+    ensure_graphfx_fusions_registered()
 
     if py_model is None:
         return False
     forward = getattr(py_model, "forward", None)
     if forward is None or not callable(forward):
         logger.warning(
-            "QWEN35 GraphFX enabled but py_model has no callable forward: %s",
+            "GraphFX enabled but py_model has no callable forward: %s",
             type(py_model).__name__,
         )
         return False
@@ -205,14 +205,14 @@ def maybe_install_qwen35_graphfx_fusions(py_model: Any) -> bool:
 
     if _debug_enabled():
         logger.info(
-            "QWEN35 GraphFX injector: installed=%d compile_boundary=%s passes=%s",
+            "GraphFX injector: installed=%d compile_boundary=%s passes=%s",
             installed,
             label if installed else "<none>",
             [
                 {"name": item.name, "env_gate": item.env_gate}
-                for item in registered_qwen35_fusion_passes()
+                for item in registered_graphfx_fusion_passes()
             ],
         )
     else:
-        logger.info("QWEN35 GraphFX injector installed=%d", installed)
+        logger.info("GraphFX injector installed=%d", installed)
     return installed > 0

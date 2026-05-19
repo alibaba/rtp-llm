@@ -26,10 +26,10 @@ from rtp_llm.models_py.modules.fuse_kernel_fx._pass_helpers import (
     target_name,
 )
 from rtp_llm.models_py.modules.fuse_kernel_fx.fusion_registry import (
-    eliminate_dead_code_preserving_qwen35_side_effects,
-    record_qwen35_fusion_hit,
-    record_qwen35_fusion_miss,
-    register_qwen35_fusion_pass,
+    eliminate_dead_code_preserving_graphfx_side_effects,
+    record_graphfx_fusion_hit,
+    record_graphfx_fusion_miss,
+    register_graphfx_fusion_pass,
 )
 
 try:
@@ -113,18 +113,20 @@ def _try_rewrite(gm: torch.fx.GraphModule, node: torch.fx.Node) -> bool:
     attn_node, gate_node = inputs
     last_dim = static_last_dim(attn_node)
     if last_dim is not None and last_dim % 128 != 0:
-        record_qwen35_fusion_miss(
+        record_graphfx_fusion_miss(
             "sigmoid_mul_fp8_quant_fx", "last_dim_not_divisible_by_128"
         )
         return False
     quant_node = first_quant_consumer_of(node)
     if quant_node is None:
-        record_qwen35_fusion_miss(
+        record_graphfx_fusion_miss(
             "sigmoid_mul_fp8_quant_fx", "no_same_graph_quant_consumer"
         )
         return False
     if not quant_contract_ok(quant_node, group_size=128):
-        record_qwen35_fusion_miss("sigmoid_mul_fp8_quant_fx", "quant_contract_mismatch")
+        record_graphfx_fusion_miss(
+            "sigmoid_mul_fp8_quant_fx", "quant_contract_mismatch"
+        )
         return False
     scale_ue8m0 = bool(quant_node.kwargs.get("scale_ue8m0", False))
     quant_group_size = quant_node.kwargs.get("group_size", 128)
@@ -154,18 +156,18 @@ def apply_sigmoid_mul_fp8_quant_fx_pass(
         if _try_rewrite(gm, node):
             replaced += 1
     if replaced:
-        eliminate_dead_code_preserving_qwen35_side_effects(gm)
-        record_qwen35_fusion_hit("sigmoid_mul_fp8_quant_fx", replaced)
-        logger.info("QWEN35 FX sigmoid_mul+FP8 quant pass: %d", replaced)
+        eliminate_dead_code_preserving_graphfx_side_effects(gm)
+        record_graphfx_fusion_hit("sigmoid_mul_fp8_quant_fx", replaced)
+        logger.info("GraphFX sigmoid_mul+FP8 quant pass: %d", replaced)
     return gm
 
 
 def register_sigmoid_mul_fp8_quant_pass() -> None:
-    register_qwen35_fusion_pass(
+    register_graphfx_fusion_pass(
         "sigmoid_mul_fp8_quant_fx",
         apply_sigmoid_mul_fp8_quant_fx_pass,
         priority=25,
-        env_gate="QWEN35_FUSED_SIGMOID_MUL_FP8_QUANT",
+        env_gate="GRAPHFX_FUSED_SIGMOID_MUL_FP8_QUANT",
     )
 
 

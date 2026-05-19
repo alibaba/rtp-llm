@@ -166,12 +166,12 @@ class BaseModel(object):
         # to recover fused-kernel performance in production.
         #
         # Two switches gate installation:
-        #   * ``QWEN35_GRAPHFX_FUSION``      — explicit opt-in (default off)
+        #   * ``ENABLE_GRAPHFX_FUSION``      — explicit opt-in (default off)
         #   * ``HWKernelConfig.enable_fuse_kernels`` (default True) — the
         #     pre-existing master switch. When the user sets this to False
         #     they want the pure unfused baseline (precision debugging); skip
         #     GraphFX install too so we honour that intent.
-        if os.environ.get("QWEN35_GRAPHFX_FUSION", "0").lower() in (
+        if os.environ.get("ENABLE_GRAPHFX_FUSION", "0").lower() in (
             "1",
             "true",
             "yes",
@@ -185,13 +185,13 @@ class BaseModel(object):
                 fuse_on = True
             if fuse_on:
                 from rtp_llm.models_py.modules.fuse_kernel_fx.graphfx_injector import (
-                    maybe_install_qwen35_graphfx_fusions,
+                    maybe_install_graphfx_fusions,
                 )
 
-                maybe_install_qwen35_graphfx_fusions(getattr(self, "py_model", None))
+                maybe_install_graphfx_fusions(getattr(self, "py_model", None))
             else:
                 logging.info(
-                    "QWEN35_GRAPHFX_FUSION=1 ignored because "
+                    "ENABLE_GRAPHFX_FUSION=1 ignored because "
                     "HWKernelConfig.enable_fuse_kernels=False (pure baseline mode)"
                 )
 

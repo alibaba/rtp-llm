@@ -5,10 +5,10 @@ contains the mutating ``fused_add_rmsnorm`` and a consumer graph that
 contains ``sgl_per_token_group_quant_fp8`` on a placeholder — and verify
 that the pass:
 
-* Rewrites the producer-side mutating call to ``qwen35_fused_add_rmsnorm_producer_token``
+* Rewrites the producer-side mutating call to ``graphfx_fused_add_rmsnorm_producer_token``
   when the BF16 result only leaves the graph.
 * Rewrites the consumer-side quant call to
-  ``qwen35_fused_add_rmsnorm_fp8_quant_from_provenance`` when its input is
+  ``graphfx_fused_add_rmsnorm_fp8_quant_from_provenance`` when its input is
   a graph placeholder.
 * The runtime registry honours precompute-mode lookups.
 
@@ -32,7 +32,7 @@ from rtp_llm.models_py.modules.fuse_kernel_fx.add_rmsnorm_runtime import (
     _clear_registries_for_tests,
     _lookup,
     _remember,
-    qwen35_fused_add_rmsnorm_fp8_quant_from_provenance,
+    graphfx_fused_add_rmsnorm_fp8_quant_from_provenance,
 )
 from rtp_llm.models_py.modules.fuse_kernel_fx.test.graphfx_fusion_test_utils import (
     make_dummy_tensor_meta,
@@ -105,7 +105,7 @@ class CrossGraphProducerTokenTest(unittest.TestCase):
         gm = _build_producer_only_graph()
         apply_add_rmsnorm_fp8_quant_fx_pass(gm)
         names = target_names(gm)
-        self.assertIn("qwen35_fused_add_rmsnorm_producer_token", names)
+        self.assertIn("graphfx_fused_add_rmsnorm_producer_token", names)
         self.assertNotIn("fused_add_rmsnorm", names)
 
     def test_producer_with_extra_call_consumer_skips_producer_token(self):
@@ -125,7 +125,7 @@ class CrossGraphProducerTokenTest(unittest.TestCase):
         apply_add_rmsnorm_fp8_quant_fx_pass(gm)
         names = target_names(gm)
         # Cross-graph producer rewrite must NOT fire (non-layout user blocks).
-        self.assertNotIn("qwen35_fused_add_rmsnorm_producer_token", names)
+        self.assertNotIn("graphfx_fused_add_rmsnorm_producer_token", names)
         self.assertIn("fused_add_rmsnorm", names)
 
 
@@ -134,7 +134,7 @@ class CrossGraphConsumerTokenTest(unittest.TestCase):
         gm = _build_consumer_only_graph()
         apply_add_rmsnorm_fp8_quant_fx_pass(gm)
         names = target_names(gm)
-        self.assertIn("qwen35_fused_add_rmsnorm_fp8_quant_from_provenance", names)
+        self.assertIn("graphfx_fused_add_rmsnorm_fp8_quant_from_provenance", names)
         self.assertNotIn("sgl_per_token_group_quant_fp8", names)
 
     def test_consumer_with_inline_producer_keeps_same_graph_path(self):
@@ -168,19 +168,19 @@ class CrossGraphConsumerTokenTest(unittest.TestCase):
         apply_add_rmsnorm_fp8_quant_fx_pass(gm)
         names = target_names(gm)
         self.assertIn("fused_add_rmsnorm_fp8_quant", names)
-        self.assertNotIn("qwen35_fused_add_rmsnorm_fp8_quant_from_provenance", names)
+        self.assertNotIn("graphfx_fused_add_rmsnorm_fp8_quant_from_provenance", names)
 
 
 class ProvenanceRegistryTest(unittest.TestCase):
     def setUp(self):
         _clear_registries_for_tests()
         self._old_env = os.environ.pop(
-            "QWEN35_FUSED_ADD_RMSNORM_REQUIRE_PROVENANCE", None
+            "GRAPHFX_FUSED_ADD_RMSNORM_REQUIRE_PROVENANCE", None
         )
 
     def tearDown(self):
         if self._old_env is not None:
-            os.environ["QWEN35_FUSED_ADD_RMSNORM_REQUIRE_PROVENANCE"] = self._old_env
+            os.environ["GRAPHFX_FUSED_ADD_RMSNORM_REQUIRE_PROVENANCE"] = self._old_env
 
     def test_lookup_returns_precomputed_fp8_when_remembered(self):
         token = torch.zeros(4, 128)
@@ -200,17 +200,17 @@ class ProvenanceRegistryTest(unittest.TestCase):
         q = torch.zeros(4, 128, dtype=torch.uint8)
         scale = torch.zeros(4, 1)
         _remember(token, None, None, weight, 1e-6, True, q, scale)
-        out_q, out_s = qwen35_fused_add_rmsnorm_fp8_quant_from_provenance(token)
+        out_q, out_s = graphfx_fused_add_rmsnorm_fp8_quant_from_provenance(token)
         self.assertIs(out_q, q)
         self.assertIs(out_s, scale)
 
     def test_require_provenance_raises_on_miss(self):
-        os.environ["QWEN35_FUSED_ADD_RMSNORM_REQUIRE_PROVENANCE"] = "1"
+        os.environ["GRAPHFX_FUSED_ADD_RMSNORM_REQUIRE_PROVENANCE"] = "1"
         try:
             with self.assertRaises(RuntimeError):
-                qwen35_fused_add_rmsnorm_fp8_quant_from_provenance(torch.zeros(4, 128))
+                graphfx_fused_add_rmsnorm_fp8_quant_from_provenance(torch.zeros(4, 128))
         finally:
-            os.environ.pop("QWEN35_FUSED_ADD_RMSNORM_REQUIRE_PROVENANCE", None)
+            os.environ.pop("GRAPHFX_FUSED_ADD_RMSNORM_REQUIRE_PROVENANCE", None)
 
 
 if __name__ == "__main__":

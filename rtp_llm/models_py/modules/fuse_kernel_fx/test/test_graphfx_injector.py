@@ -19,11 +19,11 @@ class GraphFXInjectorTest(unittest.TestCase):
         self._old_env = {
             key: os.environ.get(key)
             for key in (
-                "QWEN35_GRAPHFX_FUSION",
-                "QWEN35_FUSION_REGISTRY_DEBUG",
+                "ENABLE_GRAPHFX_FUSION",
+                "GRAPHFX_FUSION_REGISTRY_DEBUG",
             )
         }
-        os.environ["QWEN35_GRAPHFX_FUSION"] = "1"
+        os.environ["ENABLE_GRAPHFX_FUSION"] = "1"
 
     def tearDown(self):
         for key, value in self._old_env.items():
@@ -34,7 +34,7 @@ class GraphFXInjectorTest(unittest.TestCase):
 
     def test_install_compiles_model_forward(self):
         from rtp_llm.models_py.modules.fuse_kernel_fx.graphfx_injector import (
-            maybe_install_qwen35_graphfx_fusions,
+            maybe_install_graphfx_fusions,
         )
 
         calls = []
@@ -49,19 +49,19 @@ class GraphFXInjectorTest(unittest.TestCase):
 
         py_model = _FakePyModel()
         with mock.patch(
-            "rtp_llm.models_py.modules.fuse_kernel_fx.graphfx_injector.compile_with_qwen35_fusions",
+            "rtp_llm.models_py.modules.fuse_kernel_fx.graphfx_injector.compile_with_graphfx_fusions",
             side_effect=fake_compile,
         ):
-            self.assertTrue(maybe_install_qwen35_graphfx_fusions(py_model))
+            self.assertTrue(maybe_install_graphfx_fusions(py_model))
 
         self.assertEqual(len(calls), 1)
         self.assertTrue(all(item.get("dynamic") is True for item in calls))
         self.assertTrue(all(item.get("fullgraph") is False for item in calls))
-        self.assertTrue(getattr(py_model.forward, "_qwen35_graphfx_compiled", False))
+        self.assertTrue(getattr(py_model.forward, "_graphfx_compiled", False))
 
     def test_install_is_idempotent(self):
         from rtp_llm.models_py.modules.fuse_kernel_fx.graphfx_injector import (
-            maybe_install_qwen35_graphfx_fusions,
+            maybe_install_graphfx_fusions,
         )
 
         calls = []
@@ -72,35 +72,35 @@ class GraphFXInjectorTest(unittest.TestCase):
 
         py_model = _FakePyModel()
         with mock.patch(
-            "rtp_llm.models_py.modules.fuse_kernel_fx.graphfx_injector.compile_with_qwen35_fusions",
+            "rtp_llm.models_py.modules.fuse_kernel_fx.graphfx_injector.compile_with_graphfx_fusions",
             side_effect=fake_compile,
         ):
-            self.assertTrue(maybe_install_qwen35_graphfx_fusions(py_model))
-            self.assertFalse(maybe_install_qwen35_graphfx_fusions(py_model))
+            self.assertTrue(maybe_install_graphfx_fusions(py_model))
+            self.assertFalse(maybe_install_graphfx_fusions(py_model))
 
         self.assertEqual(len(calls), 1)
 
     def test_disabled_env_is_noop(self):
         from rtp_llm.models_py.modules.fuse_kernel_fx.graphfx_injector import (
-            maybe_install_qwen35_graphfx_fusions,
+            maybe_install_graphfx_fusions,
         )
 
-        os.environ["QWEN35_GRAPHFX_FUSION"] = "0"
+        os.environ["ENABLE_GRAPHFX_FUSION"] = "0"
         py_model = _FakePyModel()
-        self.assertFalse(maybe_install_qwen35_graphfx_fusions(py_model))
-        self.assertFalse(getattr(py_model.forward, "_qwen35_graphfx_compiled", False))
-        self.assertFalse(getattr(py_model, "_qwen35_graphfx_forward_compiled", False))
+        self.assertFalse(maybe_install_graphfx_fusions(py_model))
+        self.assertFalse(getattr(py_model.forward, "_graphfx_compiled", False))
+        self.assertFalse(getattr(py_model, "_graphfx_forward_compiled", False))
 
     def test_install_handles_missing_forward(self):
         from rtp_llm.models_py.modules.fuse_kernel_fx.graphfx_injector import (
-            maybe_install_qwen35_graphfx_fusions,
+            maybe_install_graphfx_fusions,
         )
 
         class _NoForward:
             pass
 
-        self.assertFalse(maybe_install_qwen35_graphfx_fusions(_NoForward()))
-        self.assertFalse(maybe_install_qwen35_graphfx_fusions(None))
+        self.assertFalse(maybe_install_graphfx_fusions(_NoForward()))
+        self.assertFalse(maybe_install_graphfx_fusions(None))
 
 
 if __name__ == "__main__":

@@ -36,10 +36,10 @@ from rtp_llm.models_py.modules.fuse_kernel_fx._pass_helpers import (
     unwrap_layout_only,
 )
 from rtp_llm.models_py.modules.fuse_kernel_fx.fusion_registry import (
-    eliminate_dead_code_preserving_qwen35_side_effects,
-    record_qwen35_fusion_hit,
-    record_qwen35_fusion_miss,
-    register_qwen35_fusion_pass,
+    eliminate_dead_code_preserving_graphfx_side_effects,
+    record_graphfx_fusion_hit,
+    record_graphfx_fusion_miss,
+    register_graphfx_fusion_pass,
 )
 
 try:
@@ -82,7 +82,7 @@ def _try_rewrite(gm: torch.fx.GraphModule, node: torch.fx.Node) -> bool:
         return False
     args = list(node.args)
     if len(args) < 2:
-        record_qwen35_fusion_miss(
+        record_graphfx_fusion_miss(
             "rmsnorm_gated_fp8_quant_fx", "layer_norm_fwd_args_unparsed"
         )
         return False
@@ -94,7 +94,7 @@ def _try_rewrite(gm: torch.fx.GraphModule, node: torch.fx.Node) -> bool:
     if group_size is None:
         last_dim = static_last_dim(x_node)
         if last_dim is None:
-            record_qwen35_fusion_miss(
+            record_graphfx_fusion_miss(
                 "rmsnorm_gated_fp8_quant_fx", "unknown_group_size_and_last_dim"
             )
             return False
@@ -114,12 +114,12 @@ def _try_rewrite(gm: torch.fx.GraphModule, node: torch.fx.Node) -> bool:
         bf16_node = node
     quant_node = first_quant_consumer_of(bf16_node)
     if quant_node is None:
-        record_qwen35_fusion_miss(
+        record_graphfx_fusion_miss(
             "rmsnorm_gated_fp8_quant_fx", "no_same_graph_quant_consumer"
         )
         return False
     if not quant_contract_ok(quant_node, group_size=128):
-        record_qwen35_fusion_miss(
+        record_graphfx_fusion_miss(
             "rmsnorm_gated_fp8_quant_fx", "quant_contract_mismatch"
         )
         return False
@@ -131,7 +131,7 @@ def _try_rewrite(gm: torch.fx.GraphModule, node: torch.fx.Node) -> bool:
     # it through).  Otherwise miss and let eager run.
     num_heads = node.kwargs.get("num_heads", None)
     if num_heads is None:
-        record_qwen35_fusion_miss(
+        record_graphfx_fusion_miss(
             "rmsnorm_gated_fp8_quant_fx", "num_heads_not_threaded"
         )
         return False
@@ -163,18 +163,18 @@ def apply_rmsnorm_gated_fp8_quant_fx_pass(
         if _try_rewrite(gm, node):
             replaced += 1
     if replaced:
-        eliminate_dead_code_preserving_qwen35_side_effects(gm)
-        record_qwen35_fusion_hit("rmsnorm_gated_fp8_quant_fx", replaced)
-        logger.info("QWEN35 FX rmsnorm_gated+FP8 quant pass: %d", replaced)
+        eliminate_dead_code_preserving_graphfx_side_effects(gm)
+        record_graphfx_fusion_hit("rmsnorm_gated_fp8_quant_fx", replaced)
+        logger.info("GraphFX rmsnorm_gated+FP8 quant pass: %d", replaced)
     return gm
 
 
 def register_rmsnorm_gated_fp8_quant_pass() -> None:
-    register_qwen35_fusion_pass(
+    register_graphfx_fusion_pass(
         "rmsnorm_gated_fp8_quant_fx",
         apply_rmsnorm_gated_fp8_quant_fx_pass,
         priority=15,
-        env_gate="QWEN35_FUSED_RMSNORM_GATED_FP8_QUANT",
+        env_gate="GRAPHFX_FUSED_RMSNORM_GATED_FP8_QUANT",
     )
 
 

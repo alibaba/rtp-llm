@@ -300,7 +300,7 @@ class GenericMoeDecoderLayer(nn.Module):
         # Input / post norm fusion now lives in GraphFX
         # (``add_rmsnorm_fp8_quant_pass``).  Eager keeps a single clean
         # ``RMSResNorm + linear`` chain; the FX pass rewrites it at trace
-        # time when ``QWEN35_GRAPHFX_FUSION=1`` and the contract holds.
+        # time when ``ENABLE_GRAPHFX_FUSION=1`` and the contract holds.
 
     def forward(
         self,

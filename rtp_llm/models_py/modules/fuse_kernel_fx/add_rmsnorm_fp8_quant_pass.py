@@ -44,10 +44,10 @@ from typing import Optional
 import torch
 
 from rtp_llm.models_py.modules.fuse_kernel_fx.fusion_registry import (
-    eliminate_dead_code_preserving_qwen35_side_effects,
-    record_qwen35_fusion_hit,
-    record_qwen35_fusion_miss,
-    register_qwen35_fusion_pass,
+    eliminate_dead_code_preserving_graphfx_side_effects,
+    record_graphfx_fusion_hit,
+    record_graphfx_fusion_miss,
+    register_graphfx_fusion_pass,
 )
 
 try:
@@ -127,7 +127,7 @@ def _quant_contract_ok(node: torch.fx.Node) -> bool:
 def _add_rmsnorm_args(node: torch.fx.Node):
     """Return (hidden, residual, weight, eps) from a fused_add_rmsnorm call.
 
-    Both the wrapped pybind ``rtp_llm_qwen35::fused_add_rmsnorm_mutating``
+    Both the wrapped pybind ``rtp_llm_graphfx::fused_add_rmsnorm_mutating``
     and the original ``rtp_llm_ops.fused_add_rmsnorm`` callsite use the same
     positional contract: ``(hidden, residual, weight, eps, stream_id)``.
     """
@@ -288,7 +288,7 @@ def _replace_quant_uses(
                 user.replace_all_uses_with(s_node)
                 continue
         raise RuntimeError(
-            "QWEN35 add+RMSNorm+FP8 quant pass: unexpected quant tuple user "
+            "GraphFX add+RMSNorm+FP8 quant pass: unexpected quant tuple user "
             f"target={_target_name(user.target)}"
         )
 
@@ -329,27 +329,29 @@ def _try_rewrite(gm: torch.fx.GraphModule, add_rmsnorm_node: torch.fx.Node) -> b
         return False
     args = _add_rmsnorm_args(add_rmsnorm_node)
     if args is None:
-        record_qwen35_fusion_miss(
+        record_graphfx_fusion_miss(
             "add_rmsnorm_fp8_quant_fx", "fused_add_rmsnorm_args_unparsed"
         )
         return False
     hidden, residual, weight, eps = args
     if not isinstance(hidden, torch.fx.Node) or not isinstance(residual, torch.fx.Node):
-        record_qwen35_fusion_miss("add_rmsnorm_fp8_quant_fx", "non_node_inputs")
+        record_graphfx_fusion_miss("add_rmsnorm_fp8_quant_fx", "non_node_inputs")
         return False
     if not _hidden_contract_ok(hidden, weight):
-        record_qwen35_fusion_miss(
+        record_graphfx_fusion_miss(
             "add_rmsnorm_fp8_quant_fx", "unsupported_fixed_hidden_dim"
         )
         return False
     quant_node = _find_quant_consumer(hidden)
     if quant_node is None:
-        record_qwen35_fusion_miss(
+        record_graphfx_fusion_miss(
             "add_rmsnorm_fp8_quant_fx", "no_same_graph_quant_consumer"
         )
         return False
     if not _quant_contract_ok(quant_node):
-        record_qwen35_fusion_miss("add_rmsnorm_fp8_quant_fx", "quant_contract_mismatch")
+        record_graphfx_fusion_miss(
+            "add_rmsnorm_fp8_quant_fx", "quant_contract_mismatch"
+        )
         return False
 
     has_bf16 = _has_non_quant_consumer(hidden, quant_node, add_rmsnorm_node)
@@ -459,7 +461,7 @@ def _rewrite_cross_graph_producer(
     if not isinstance(hidden, torch.fx.Node) or not isinstance(residual, torch.fx.Node):
         return False
     if not _hidden_contract_ok(hidden, weight):
-        record_qwen35_fusion_miss(
+        record_graphfx_fusion_miss(
             "add_rmsnorm_fp8_quant_fx", "producer_token_unsupported_fixed_hidden_dim"
         )
         return False
@@ -471,7 +473,7 @@ def _rewrite_cross_graph_producer(
 
     # Lazy import to avoid a hard dependency at pass-import time.
     from rtp_llm.models_py.modules.fuse_kernel_fx.add_rmsnorm_runtime import (
-        qwen35_fused_add_rmsnorm_producer_token,
+        graphfx_fused_add_rmsnorm_producer_token,
     )
 
     # ``scale_ue8m0`` cannot be inferred from the producer alone; default to
@@ -481,7 +483,7 @@ def _rewrite_cross_graph_producer(
     # threaded explicitly; this is left for future enhancement.
     with gm.graph.inserting_before(add_rmsnorm_node):
         token = gm.graph.call_function(
-            qwen35_fused_add_rmsnorm_producer_token,
+            graphfx_fused_add_rmsnorm_producer_token,
             args=(hidden, residual, weight, eps),
             kwargs={"scale_ue8m0": False},
         )
@@ -531,13 +533,13 @@ def _rewrite_cross_graph_consumer(
         return False
 
     from rtp_llm.models_py.modules.fuse_kernel_fx.add_rmsnorm_runtime import (
-        qwen35_fused_add_rmsnorm_fp8_quant_from_provenance,
+        graphfx_fused_add_rmsnorm_fp8_quant_from_provenance,
     )
 
     fallback_y = quant_arg if quant_arg is not x_node else None
     with gm.graph.inserting_before(quant_node):
         fused = gm.graph.call_function(
-            qwen35_fused_add_rmsnorm_fp8_quant_from_provenance,
+            graphfx_fused_add_rmsnorm_fp8_quant_from_provenance,
             args=(x_node,),
             kwargs={
                 "fallback_y": fallback_y,
@@ -564,7 +566,7 @@ def apply_add_rmsnorm_fp8_quant_fx_pass(
         if _try_rewrite(gm, node):
             same_graph += 1
     if same_graph:
-        eliminate_dead_code_preserving_qwen35_side_effects(gm)
+        eliminate_dead_code_preserving_graphfx_side_effects(gm)
 
     # Cross-graph producer rewrites: any remaining isolated mutating
     # ``fused_add_rmsnorm`` whose BF16 result only leaves the graph.
@@ -575,7 +577,7 @@ def apply_add_rmsnorm_fp8_quant_fx_pass(
         ):
             producer += 1
     if producer:
-        eliminate_dead_code_preserving_qwen35_side_effects(gm)
+        eliminate_dead_code_preserving_graphfx_side_effects(gm)
 
     # Cross-graph consumer rewrites: any remaining quant node whose input is
     # a placeholder (i.e. the producer was in a different FX graph).
@@ -584,13 +586,13 @@ def apply_add_rmsnorm_fp8_quant_fx_pass(
         if _is_quant_node(node) and _rewrite_cross_graph_consumer(gm, node):
             consumer += 1
     if consumer:
-        eliminate_dead_code_preserving_qwen35_side_effects(gm)
+        eliminate_dead_code_preserving_graphfx_side_effects(gm)
 
     total = same_graph + producer + consumer
     if total:
-        record_qwen35_fusion_hit("add_rmsnorm_fp8_quant_fx", total)
+        record_graphfx_fusion_hit("add_rmsnorm_fp8_quant_fx", total)
         logger.info(
-            "QWEN35 FX add+RMSNorm+FP8 quant pass: same_graph=%d producer=%d consumer=%d",
+            "GraphFX add+RMSNorm+FP8 quant pass: same_graph=%d producer=%d consumer=%d",
             same_graph,
             producer,
             consumer,
@@ -599,11 +601,11 @@ def apply_add_rmsnorm_fp8_quant_fx_pass(
 
 
 def register_add_rmsnorm_fp8_quant_pass() -> None:
-    register_qwen35_fusion_pass(
+    register_graphfx_fusion_pass(
         "add_rmsnorm_fp8_quant_fx",
         apply_add_rmsnorm_fp8_quant_fx_pass,
         priority=10,
-        env_gate="QWEN35_FUSED_ADD_RMSNORM_FP8_QUANT",
+        env_gate="GRAPHFX_FUSED_ADD_RMSNORM_FP8_QUANT",
     )
 
 

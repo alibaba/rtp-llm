@@ -1,7 +1,7 @@
 """GraphFX fusion registry for Qwen3.5 / GLM5 / Qwen3-MoE / DSV3.2 fuse kernels.
 
 This module mirrors the DSV4 GraphFX registry pattern but lives under
-``rtp_llm/models_py/modules/fuse_kernel_fx/`` and uses the ``QWEN35_*`` env
+``rtp_llm/models_py/modules/fuse_kernel_fx/`` and uses the ``GRAPHFX_*`` env
 namespace.  Its responsibilities:
 
 * Register a list of FX passes that rewrite unfused subgraphs into calls of
@@ -16,7 +16,7 @@ namespace.  Its responsibilities:
   builders) so Dynamo does not pollute the captured graph with them.
 
 Phase 1 only registers the ``add_rmsnorm_fp8_quant_fx`` pass.  Subsequent
-phases plug additional passes through ``register_qwen35_fusion_pass``.
+phases plug additional passes through ``register_graphfx_fusion_pass``.
 """
 
 from __future__ import annotations
@@ -37,14 +37,14 @@ _FILE_LOG_PATH = ""
 
 
 @dataclass(frozen=True)
-class Qwen35FusionPass:
+class GraphFxFusionPass:
     name: str
     pass_fn: Callable[[object], object]
     priority: int
     env_gate: str
 
 
-_PASSES: List[Qwen35FusionPass] = []
+_PASSES: List[GraphFxFusionPass] = []
 _FUSIONS_IMPORTED = False
 _DYNAMO_LEAFS_REGISTERED = False
 _GRAPH_COMPILE_LABEL_COUNTS: Counter = Counter()
@@ -71,16 +71,16 @@ def env_flag(name: str, default: bool = False) -> bool:
 
 
 def _default_log_file() -> str:
-    explicit = os.environ.get("QWEN35_GRAPHFX_LOG_FILE")
+    explicit = os.environ.get("GRAPHFX_LOG_FILE")
     if explicit:
         return explicit
     outputs_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR")
     if outputs_dir:
-        return os.path.join(outputs_dir, "qwen35_graphfx_compile.log")
-    return f"/tmp/qwen35_graphfx_compile_{os.getpid()}.log"
+        return os.path.join(outputs_dir, "graphfx_compile.log")
+    return f"/tmp/graphfx_compile_{os.getpid()}.log"
 
 
-def setup_qwen35_fusion_file_logger() -> str:
+def setup_graphfx_fusion_file_logger() -> str:
     global _FILE_LOGGER_INSTALLED, _FILE_LOG_PATH
     if _FILE_LOGGER_INSTALLED:
         return _FILE_LOG_PATH
@@ -95,24 +95,24 @@ def setup_qwen35_fusion_file_logger() -> str:
             "%(asctime)s %(process)d %(levelname)s %(name)s:%(lineno)d %(message)s"
         )
     )
-    handler._qwen35_graphfx_file_handler = True  # type: ignore[attr-defined]
+    handler._graphfx_file_handler = True  # type: ignore[attr-defined]
     pkg_logger = logging.getLogger("rtp_llm.models_py.modules.fuse_kernel_fx")
     if not any(
-        getattr(existing, "_qwen35_graphfx_file_handler", False)
+        getattr(existing, "_graphfx_file_handler", False)
         for existing in pkg_logger.handlers
     ):
         pkg_logger.addHandler(handler)
     pkg_logger.setLevel(logging.INFO)
     _FILE_LOGGER_INSTALLED = True
     _FILE_LOG_PATH = log_file
-    logger.info("QWEN35 GraphFX log file: %s", log_file)
+    logger.info("GraphFX log file: %s", log_file)
     return log_file
 
 
 # ------------------------------------------------------------------ registry
 
 
-def register_qwen35_fusion_pass(
+def register_graphfx_fusion_pass(
     name: str,
     pass_fn: Callable[[object], object],
     *,
@@ -122,29 +122,29 @@ def register_qwen35_fusion_pass(
     if any(item.name == name for item in _PASSES):
         return
     _PASSES.append(
-        Qwen35FusionPass(
+        GraphFxFusionPass(
             name=name, pass_fn=pass_fn, priority=priority, env_gate=env_gate
         )
     )
     _PASSES.sort(key=lambda item: item.priority)
 
 
-def registered_qwen35_fusion_passes() -> List[Qwen35FusionPass]:
-    ensure_qwen35_fusions_registered()
+def registered_graphfx_fusion_passes() -> List[GraphFxFusionPass]:
+    ensure_graphfx_fusions_registered()
     return list(_PASSES)
 
 
-def ensure_qwen35_fusions_registered() -> None:
+def ensure_graphfx_fusions_registered() -> None:
     """Idempotent setup: install pybind wrappers, compile-disables, import passes."""
     global _FUSIONS_IMPORTED
-    setup_qwen35_fusion_file_logger()
+    setup_graphfx_fusion_file_logger()
     install_torch_stream_cuda_stream_compat()
     install_compile_friendly_fused_add_rmsnorm_wrapper()
-    install_qwen35_graphfx_compile_disable_wrappers()
+    install_graphfx_compile_disable_wrappers()
     if _FUSIONS_IMPORTED:
         return
     importlib.import_module("rtp_llm.models_py.modules.fuse_kernel_fx")
-    _allow_qwen35_fusion_candidates_in_graph()
+    _allow_graphfx_fusion_candidates_in_graph()
     _FUSIONS_IMPORTED = True
 
 
@@ -176,8 +176,8 @@ def install_torch_stream_cuda_stream_compat() -> None:
     global _TORCH_STREAM_COMPAT_INSTALLED
     if _TORCH_STREAM_COMPAT_INSTALLED:
         return
-    if not env_flag("QWEN35_FUSED_ADD_RMSNORM_FP8_QUANT") and not env_flag(
-        "QWEN35_GRAPHFX_FUSION"
+    if not env_flag("GRAPHFX_FUSED_ADD_RMSNORM_FP8_QUANT") and not env_flag(
+        "ENABLE_GRAPHFX_FUSION"
     ):
         return
     try:
@@ -206,16 +206,12 @@ def install_torch_stream_cuda_stream_compat() -> None:
                 continue
             try:
                 setattr(cls, "cuda_stream", property(_cuda_stream))
-                logger.info(
-                    "QWEN35 GraphFX installed %s.cuda_stream compat", cls.__name__
-                )
+                logger.info("GraphFX installed %s.cuda_stream compat", cls.__name__)
             except Exception as exc:
-                logger.info(
-                    "QWEN35 GraphFX could not patch %s.cuda_stream: %s", cls, exc
-                )
+                logger.info("GraphFX could not patch %s.cuda_stream: %s", cls, exc)
         _TORCH_STREAM_COMPAT_INSTALLED = True
     except Exception as exc:
-        logger.warning("QWEN35 torch.Stream compat install failed: %s", exc)
+        logger.warning("GraphFX torch.Stream compat install failed: %s", exc)
 
 
 def _build_fused_add_rmsnorm_mutating_custom_op():
@@ -257,7 +253,7 @@ def _build_fused_add_rmsnorm_mutating_custom_op():
         _mutating_impl.__annotations__ = annotations
         _mutating_fake.__annotations__ = annotations
         op = torch.library.custom_op(
-            "rtp_llm_qwen35::fused_add_rmsnorm_mutating",
+            "rtp_llm_graphfx::fused_add_rmsnorm_mutating",
             _mutating_impl,
             mutates_args=("hidden_states", "residual"),
         )
@@ -265,9 +261,7 @@ def _build_fused_add_rmsnorm_mutating_custom_op():
         _FUSED_ADD_RMSNORM_MUTATING_CUSTOM_OP = getattr(op, "_opoverload", op)
         return _FUSED_ADD_RMSNORM_MUTATING_CUSTOM_OP
     except Exception as exc:
-        logger.warning(
-            "QWEN35 GraphFX mutating fused_add_rmsnorm op build failed: %s", exc
-        )
+        logger.warning("GraphFX mutating fused_add_rmsnorm op build failed: %s", exc)
         return None
 
 
@@ -282,7 +276,7 @@ def install_compile_friendly_fused_add_rmsnorm_wrapper() -> None:
     global _FUSED_ADD_RMSNORM_WRAPPER_INSTALLED, _FUSED_ADD_RMSNORM_ORIGINAL
     if _FUSED_ADD_RMSNORM_WRAPPER_INSTALLED:
         return
-    if not env_flag("QWEN35_GRAPHFX_FUSION"):
+    if not env_flag("ENABLE_GRAPHFX_FUSION"):
         return
     try:
         from rtp_llm.ops.compute_ops import rtp_llm_ops
@@ -290,10 +284,10 @@ def install_compile_friendly_fused_add_rmsnorm_wrapper() -> None:
         original = getattr(rtp_llm_ops, "fused_add_rmsnorm", None)
         if original is None:
             logger.info(
-                "QWEN35 GraphFX: rtp_llm_ops.fused_add_rmsnorm not present, skip wrapper"
+                "GraphFX: rtp_llm_ops.fused_add_rmsnorm not present, skip wrapper"
             )
             return
-        if getattr(original, "_qwen35_graphfx_wrapped", False):
+        if getattr(original, "_graphfx_wrapped", False):
             _FUSED_ADD_RMSNORM_WRAPPER_INSTALLED = True
             return
         _FUSED_ADD_RMSNORM_ORIGINAL = original
@@ -311,15 +305,15 @@ def install_compile_friendly_fused_add_rmsnorm_wrapper() -> None:
             )
 
         try:
-            setattr(_compile_friendly, "_qwen35_graphfx_wrapped", True)
-            setattr(_compile_friendly, "_qwen35_graphfx_original", original)
+            setattr(_compile_friendly, "_graphfx_wrapped", True)
+            setattr(_compile_friendly, "_graphfx_original", original)
         except Exception:
             pass
         try:
             rtp_llm_ops.fused_add_rmsnorm = _compile_friendly
         except Exception as exc:
             logger.warning(
-                "QWEN35 GraphFX: failed to attach compile-friendly fused_add_rmsnorm: %s",
+                "GraphFX: failed to attach compile-friendly fused_add_rmsnorm: %s",
                 exc,
             )
             return
@@ -337,12 +331,10 @@ def install_compile_friendly_fused_add_rmsnorm_wrapper() -> None:
         _dynamo_allow_in_graph(custom_op)
         _dynamo_allow_in_graph(_compile_friendly)
         _FUSED_ADD_RMSNORM_WRAPPER_INSTALLED = True
-        logger.info(
-            "QWEN35 GraphFX installed compile-friendly fused_add_rmsnorm wrapper"
-        )
+        logger.info("GraphFX installed compile-friendly fused_add_rmsnorm wrapper")
     except Exception as exc:
         logger.warning(
-            "QWEN35 GraphFX: compile-friendly fused_add_rmsnorm install failed: %s", exc
+            "GraphFX: compile-friendly fused_add_rmsnorm install failed: %s", exc
         )
 
 
@@ -366,33 +358,31 @@ def _torch_compile_disable(fn: Callable, *, reason: str) -> Callable:
             except TypeError:
                 return disable(fn)
     except Exception as exc:
-        logger.warning("QWEN35 compile-disable failed for %s: %s", fn, exc)
+        logger.warning("GraphFX compile-disable failed for %s: %s", fn, exc)
         return fn
 
 
 def _install_compile_disable_on_attr(
     owner: object, attr_name: str, qualname: str
 ) -> bool:
-    marker = f"_qwen35_graphfx_disable_{attr_name}"
+    marker = f"_graphfx_disable_{attr_name}"
     if getattr(owner, marker, False):
         return False
     fn = getattr(owner, attr_name, None)
     if fn is None or not callable(fn):
         return False
-    if getattr(fn, "_qwen35_graphfx_compile_disabled", False):
+    if getattr(fn, "_graphfx_compile_disabled", False):
         setattr(owner, marker, True)
         return False
-    disabled = _torch_compile_disable(
-        fn, reason=f"QWEN35 GraphFX keeps {qualname} eager"
-    )
+    disabled = _torch_compile_disable(fn, reason=f"GraphFX keeps {qualname} eager")
     try:
-        setattr(disabled, "_qwen35_graphfx_compile_disabled", True)
-        setattr(disabled, "_qwen35_graphfx_compile_disable_original", fn)
+        setattr(disabled, "_graphfx_compile_disabled", True)
+        setattr(disabled, "_graphfx_compile_disable_original", fn)
     except Exception:
         pass
     setattr(owner, attr_name, disabled)
     setattr(owner, marker, True)
-    logger.info("QWEN35 GraphFX compile-disabled helper: %s", qualname)
+    logger.info("GraphFX compile-disabled helper: %s", qualname)
     return True
 
 
@@ -402,9 +392,7 @@ def _install_compile_disable_targets(
     try:
         module = importlib.import_module(module_name)
     except Exception as exc:
-        logger.info(
-            "QWEN35 GraphFX skip compile-disable module %s: %s", module_name, exc
-        )
+        logger.info("GraphFX skip compile-disable module %s: %s", module_name, exc)
         return 0
     installed = 0
     for attr_name in attr_names:
@@ -422,9 +410,7 @@ def _install_compile_disable_methods(
     try:
         module = importlib.import_module(module_name)
     except Exception as exc:
-        logger.info(
-            "QWEN35 GraphFX skip compile-disable module %s: %s", module_name, exc
-        )
+        logger.info("GraphFX skip compile-disable module %s: %s", module_name, exc)
         return 0
     cls = getattr(module, class_name, None)
     if cls is None:
@@ -439,7 +425,7 @@ def _install_compile_disable_methods(
     return installed
 
 
-def install_qwen35_graphfx_compile_disable_wrappers() -> None:
+def install_graphfx_compile_disable_wrappers() -> None:
     """Keep non-compute Python helpers eager so they don't pollute FX graphs.
 
     These helpers build attention metadata, write KV cache, dump debug
@@ -450,7 +436,7 @@ def install_qwen35_graphfx_compile_disable_wrappers() -> None:
     global _COMPILE_DISABLE_INSTALLED
     if _COMPILE_DISABLE_INSTALLED:
         return
-    if not env_flag("QWEN35_GRAPHFX_DISABLE_NON_COMPUTE_HELPERS", True):
+    if not env_flag("GRAPHFX_DISABLE_NON_COMPUTE_HELPERS", True):
         return
 
     installed = 0
@@ -553,7 +539,7 @@ def install_qwen35_graphfx_compile_disable_wrappers() -> None:
         ("_prefill_cp_enabled", "_is_sparse_prefill_cp"),
     )
     _COMPILE_DISABLE_INSTALLED = True
-    logger.info("QWEN35 GraphFX compile-disabled %d non-compute helpers", installed)
+    logger.info("GraphFX compile-disabled %d non-compute helpers", installed)
 
 
 # ------------------------------------------------------------ allow_in_graph
@@ -572,10 +558,10 @@ def _dynamo_allow_in_graph(fn: Callable) -> None:
             allow_in_graph = dynamo.allow_in_graph
         allow_in_graph(fn)
     except Exception as exc:
-        logger.warning("QWEN35 allow_in_graph failed for %s: %s", fn, exc)
+        logger.warning("GraphFX allow_in_graph failed for %s: %s", fn, exc)
 
 
-def _allow_qwen35_fusion_candidates_in_graph() -> None:
+def _allow_graphfx_fusion_candidates_in_graph() -> None:
     """Keep the high-level fused kernels visible to FX as single nodes."""
     global _DYNAMO_LEAFS_REGISTERED
     if _DYNAMO_LEAFS_REGISTERED:
@@ -585,8 +571,8 @@ def _allow_qwen35_fusion_candidates_in_graph() -> None:
             sgl_per_token_group_quant_fp8,
         )
         from rtp_llm.models_py.modules.fuse_kernel_fx.add_rmsnorm_runtime import (
-            qwen35_fused_add_rmsnorm_fp8_quant_from_provenance,
-            qwen35_fused_add_rmsnorm_producer_token,
+            graphfx_fused_add_rmsnorm_fp8_quant_from_provenance,
+            graphfx_fused_add_rmsnorm_producer_token,
         )
         from rtp_llm.models_py.triton_kernels.common.fused_add_rmsnorm_fp8_quant import (
             fused_add_rmsnorm_fp8_quant,
@@ -597,22 +583,22 @@ def _allow_qwen35_fusion_candidates_in_graph() -> None:
             sgl_per_token_group_quant_fp8,
             fused_add_rmsnorm_fp8_quant,
             fused_add_rmsnorm_fp8_quant_with_bf16_output,
-            qwen35_fused_add_rmsnorm_producer_token,
-            qwen35_fused_add_rmsnorm_fp8_quant_from_provenance,
+            graphfx_fused_add_rmsnorm_producer_token,
+            graphfx_fused_add_rmsnorm_fp8_quant_from_provenance,
         ):
             try:
                 _dynamo_allow_in_graph(fn)
             except Exception:
                 continue
     except Exception as exc:
-        logger.warning("QWEN35 allow_in_graph candidates registration failed: %s", exc)
+        logger.warning("GraphFX allow_in_graph candidates registration failed: %s", exc)
     _DYNAMO_LEAFS_REGISTERED = True
 
 
 # ------------------------------------------------------------ Dynamo config
 
 
-def _configure_dynamo_for_qwen35_graphfx() -> None:
+def _configure_dynamo_for_graphfx() -> None:
     global _DYNAMO_CONFIGURED
     if _DYNAMO_CONFIGURED:
         return
@@ -639,9 +625,9 @@ def _configure_dynamo_for_qwen35_graphfx() -> None:
             fx_config.use_duck_shape = False
         except Exception:
             pass
-        logger.info("QWEN35 GraphFX Dynamo configured (dynamic=True, cache=128/512)")
+        logger.info("GraphFX Dynamo configured (dynamic=True, cache=128/512)")
     except Exception as exc:
-        logger.warning("QWEN35 GraphFX Dynamo config failed: %s", exc)
+        logger.warning("GraphFX Dynamo config failed: %s", exc)
     _DYNAMO_CONFIGURED = True
 
 
@@ -651,7 +637,7 @@ def _configure_dynamo_for_qwen35_graphfx() -> None:
 _MUTATING_LEAF_TARGETS = {
     "fused_add_rmsnorm",
     "fused_add_rmsnorm_mutating",
-    "rtp_llm_qwen35::fused_add_rmsnorm_mutating",
+    "rtp_llm_graphfx::fused_add_rmsnorm_mutating",
 }
 
 
@@ -659,7 +645,7 @@ def _target_name(target: object) -> str:
     return getattr(target, "__name__", str(target))
 
 
-def eliminate_dead_code_preserving_qwen35_side_effects(gm: object) -> None:
+def eliminate_dead_code_preserving_graphfx_side_effects(gm: object) -> None:
     """Run FX DCE without dropping opaque mutating CUDA calls."""
     graph = getattr(gm, "graph", None)
     if graph is None:
@@ -689,13 +675,13 @@ def eliminate_dead_code_preserving_qwen35_side_effects(gm: object) -> None:
 # ------------------------------------------------------------ pass driver
 
 
-def record_qwen35_fusion_miss(pass_name: str, reason: str) -> None:
-    if env_flag("QWEN35_GRAPHFX_MISS_LOG") or env_flag("QWEN35_GRAPHFX_COMPILE_STATS"):
+def record_graphfx_fusion_miss(pass_name: str, reason: str) -> None:
+    if env_flag("GRAPHFX_MISS_LOG") or env_flag("GRAPHFX_COMPILE_STATS"):
         _PASS_MISS_COUNTS[(pass_name, reason)] += 1
 
 
-def record_qwen35_fusion_hit(pass_name: str, count: int = 1) -> None:
-    if env_flag("QWEN35_GRAPHFX_MISS_LOG") or env_flag("QWEN35_GRAPHFX_COMPILE_STATS"):
+def record_graphfx_fusion_hit(pass_name: str, count: int = 1) -> None:
+    if env_flag("GRAPHFX_MISS_LOG") or env_flag("GRAPHFX_COMPILE_STATS"):
         _PASS_HIT_COUNTS[pass_name] += count
 
 
@@ -714,12 +700,12 @@ def _graph_signature(gm: object) -> tuple:
     )
 
 
-def apply_registered_qwen35_fusions(gm, *, return_changed: bool = False):
-    ensure_qwen35_fusions_registered()
-    debug = env_flag("QWEN35_FUSION_REGISTRY_DEBUG")
+def apply_registered_graphfx_fusions(gm, *, return_changed: bool = False):
+    ensure_graphfx_fusions_registered()
+    debug = env_flag("GRAPHFX_FUSION_REGISTRY_DEBUG")
     if debug:
         logger.info(
-            "QWEN35 fusion passes: %s",
+            "GraphFX fusion passes: %s",
             [
                 {
                     "name": item.name,
@@ -747,7 +733,7 @@ def _log_compile_summary() -> None:
         return
     try:
         logger.info(
-            "QWEN35 GraphFX compile summary: labels=%s pass_hits=%s pass_misses=%s",
+            "GraphFX compile summary: labels=%s pass_hits=%s pass_misses=%s",
             dict(sorted(_GRAPH_COMPILE_LABEL_COUNTS.items())),
             {str(k): v for k, v in sorted(_PASS_HIT_COUNTS.items())},
             {str(k): v for k, v in sorted(_PASS_MISS_COUNTS.items())},
@@ -764,27 +750,27 @@ def _register_compile_summary_logger() -> None:
     _COMPILE_SUMMARY_REGISTERED = True
 
 
-def qwen35_fusion_backend(gm, example_inputs, *, label: str = "unknown"):
-    setup_qwen35_fusion_file_logger()
+def graphfx_fusion_backend(gm, example_inputs, *, label: str = "unknown"):
+    setup_graphfx_fusion_file_logger()
     _register_compile_summary_logger()
     _GRAPH_COMPILE_LABEL_COUNTS[label] += 1
-    if env_flag("QWEN35_GRAPHFX_COMPILE_STATS"):
+    if env_flag("GRAPHFX_COMPILE_STATS"):
         targets = [_target_name(node.target) for node in gm.graph.nodes]
-        logger.info("QWEN35 GraphFX compile: label=%s nodes=%d", label, len(targets))
-    fused, changed = apply_registered_qwen35_fusions(gm, return_changed=True)
-    if not changed and env_flag("QWEN35_GRAPHFX_FALLBACK_UNFUSED", True):
-        logger.info("QWEN35 GraphFX no-op for label=%s, keep original graph", label)
+        logger.info("GraphFX compile: label=%s nodes=%d", label, len(targets))
+    fused, changed = apply_registered_graphfx_fusions(gm, return_changed=True)
+    if not changed and env_flag("GRAPHFX_FALLBACK_UNFUSED", True):
+        logger.info("GraphFX no-op for label=%s, keep original graph", label)
         return gm.forward
     fused.recompile()
     return fused.forward
 
 
-def compile_with_qwen35_fusions(fn, *, label: str | None = None, **compile_kwargs):
+def compile_with_graphfx_fusions(fn, *, label: str | None = None, **compile_kwargs):
     import torch
 
-    ensure_qwen35_fusions_registered()
-    _configure_dynamo_for_qwen35_graphfx()
-    if env_flag("QWEN35_GRAPHFX_FALLBACK_UNFUSED", True):
+    ensure_graphfx_fusions_registered()
+    _configure_dynamo_for_graphfx()
+    if env_flag("GRAPHFX_FALLBACK_UNFUSED", True):
         try:
             import torch._dynamo as dynamo
 
@@ -799,7 +785,7 @@ def compile_with_qwen35_fusions(fn, *, label: str | None = None, **compile_kwarg
     )
 
     def _backend(gm, example_inputs):
-        return qwen35_fusion_backend(gm, example_inputs, label=compile_label)
+        return graphfx_fusion_backend(gm, example_inputs, label=compile_label)
 
     kwargs = {"backend": _backend, "fullgraph": False}
     kwargs.update(compile_kwargs)
@@ -815,6 +801,6 @@ def compile_with_qwen35_fusions(fn, *, label: str | None = None, **compile_kwarg
     return _compiled_with_reference_refresh
 
 
-def any_qwen35_fusion_enabled() -> bool:
-    ensure_qwen35_fusions_registered()
+def any_graphfx_fusion_enabled() -> bool:
+    ensure_graphfx_fusions_registered()
     return any(env_flag(item.env_gate) for item in _PASSES)

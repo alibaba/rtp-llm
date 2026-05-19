@@ -1,4 +1,4 @@
-"""Minimal test utilities for the QWEN35 GraphFX fusion passes.
+"""Minimal test utilities for the GraphFX fusion passes.
 
 CPU-only; manipulates ``torch.fx.Graph`` nodes directly without relying on
 the actual fused Triton kernels.  Phase 1 does not include a perf harness.

@@ -871,7 +871,7 @@ class Qwen3NextDecoderLayer(nn.Module):
         # (``add_rmsnorm_fp8_quant_pass``).  Eager keeps a single clean
         # ``RMSResNorm + linear`` chain; the FX pass detects it and rewrites
         # to ``fused_add_rmsnorm_fp8_quant{,_with_bf16_output}`` at trace
-        # time when ``QWEN35_GRAPHFX_FUSION=1`` and the contract holds.
+        # time when ``ENABLE_GRAPHFX_FUSION=1`` and the contract holds.
 
     def forward(
         self,
