@@ -854,6 +854,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         sp_engine_collector.total_accepted_token_num = total_accept_len;
         sp_engine_collector.total_stream_num         = stream_groups.size();
         sp_engine_collector.total_propose_token_num  = stream_groups.size() * propose_step_;
+        sp_engine_collector.spec_steps               = propose_step_;
     }
 
     // dispatch
