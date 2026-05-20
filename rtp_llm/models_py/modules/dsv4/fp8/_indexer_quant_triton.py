@@ -46,6 +46,18 @@ INDEXER_ENTRY_BYTES = 132  # 128 FP8 + 4 fp32 scale (per token, total)
 FP8_E4M3_MAX = 448.0
 
 
+@triton.jit
+def _trap_invalid_kv_access() -> None:
+    tl.inline_asm_elementwise(
+        "trap; // dummy $0",
+        "=r",
+        [],
+        dtype=tl.int32,
+        is_pure=False,
+        pack=1,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Quantize: K[T, 128] bf16 -> kv_cache_packed[num_blocks, block_size, 132]
 #                              (per-block layout: K_all_tokens || scale_all_tokens)
@@ -60,6 +72,7 @@ def _indexer_k_quant_kernel(
     D: tl.constexpr,  # head_dim = 128
     cache_block_size: tl.constexpr,
     cache_stride_b: tl.constexpr,  # bytes per block = block_size * (D+4) = block_size * 132
+    num_cache_blocks: tl.constexpr,
     fp8_max: tl.constexpr,
 ):
     """One program per token. Loads the [D] vector, computes per-vector
@@ -75,6 +88,10 @@ def _indexer_k_quant_kernel(
 
     block_idx = slot // cache_block_size
     block_off = slot % cache_block_size
+    if block_idx < 0:
+        _trap_invalid_kv_access()
+    if block_idx >= num_cache_blocks:
+        _trap_invalid_kv_access()
 
     d_off = tl.arange(0, D)
     k_vals = tl.load(k_ptr + pid * D + d_off).to(tl.float32)  # [D]
@@ -144,6 +161,7 @@ def quantize_indexer_k(
         D=INDEXER_HEAD_DIM,
         cache_block_size=cache_block_size,
         cache_stride_b=cache_stride_b,
+        num_cache_blocks=int(kv_cache_packed.shape[0]),
         fp8_max=FP8_E4M3_MAX,
         num_warps=4,
     )
@@ -163,6 +181,7 @@ def _indexer_k_dequant_kernel(
     D: tl.constexpr,
     cache_block_size: tl.constexpr,
     cache_stride_b: tl.constexpr,
+    num_cache_blocks: tl.constexpr,
     OUT_DTYPE: tl.constexpr,
 ):
     pid = tl.program_id(0).to(tl.int64)
@@ -180,6 +199,11 @@ def _indexer_k_dequant_kernel(
 
     block_idx = slot // cache_block_size
     block_off = slot % cache_block_size
+    if block_idx < 0:
+        _trap_invalid_kv_access()
+    if block_idx >= num_cache_blocks:
+        _trap_invalid_kv_access()
+
     block_base = cache_ptr + block_idx * cache_stride_b
 
     k_src = (block_base + block_off * D + d_off).to(tl.pointer_type(tl.uint8))
@@ -241,6 +265,7 @@ def dequantize_indexer_k(
         D=INDEXER_HEAD_DIM,
         cache_block_size=cache_block_size,
         cache_stride_b=cache_stride_b,
+        num_cache_blocks=int(kv_cache_packed.shape[0]),
         OUT_DTYPE=_OUT_DTYPE,
         num_warps=4,
     )

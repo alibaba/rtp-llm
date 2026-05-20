@@ -5,10 +5,10 @@ decode layer into a single Triton kernel launch:
 
   * ``_compute_state_slot_mapping``: ``state_bt[b, pos // state_eb] *
     state_eb + pos % state_eb`` with ``-1`` sentinel when the logical
-    block is absent or the resolved block id is <= 0.
+    block is absent or the resolved block id is negative.
   * ``_compute_kv_slot_mapping``: ``kv_bt[b, pos // tokens_per_block] *
     kv_eb + (pos % tokens_per_block) // ratio``, masked to ``-1`` unless
-    ``(pos+1) % ratio == 0`` and ``block_id > 0`` and the block-in-seq
+    ``(pos+1) % ratio == 0`` and ``block_id >= 0`` and the block-in-seq
     index fits the block table (plus an optional pool-row overflow guard
     when the caller can supply the pool's flat row count).
   * ``token_to_req``: ``b_idx.to(int32)``.
@@ -22,7 +22,7 @@ compressors = ~1000+ nodes / step, which directly shrinks the
 
 Correctness contract: bit-exact with the Python reference across every
 combination of (boundary token, off-boundary token, block_in_seq past
-``max_blocks``, unallocated block_id == 0).  ``pool_rows`` guard is
+``max_blocks``, unallocated negative block id).  ``pool_rows`` guard is
 gated by a non-zero runtime arg and matches the upstream 2184f972 fix.
 """
 
@@ -84,7 +84,7 @@ if _TRITON_AVAILABLE:
         state_bid = tl.load(
             state_bt_ptr + b * STATE_MAX_BLOCKS + state_bis, mask=mask, other=0
         ).to(tl.int64)
-        state_valid = state_in_capacity & (state_bid > 0)
+        state_valid = state_in_capacity & (state_bid >= 0)
         state_slot = tl.where(state_valid, state_bid * STATE_EB + in_blk_s, -1)
         tl.store(state_slots_ptr + offs, state_slot, mask=mask)
 
@@ -100,7 +100,7 @@ if _TRITON_AVAILABLE:
                 kv_bt_ptr + b * KV_MAX_BLOCKS + safe_kv_bis, mask=mask, other=0
             ).to(tl.int64)
             kv_slot = kv_bid * KV_EB + in_blk_k
-            kv_valid = boundary & in_capacity & (kv_bid > 0)
+            kv_valid = boundary & in_capacity & (kv_bid >= 0)
             if POOL_ROWS > 0:
                 kv_valid = kv_valid & (kv_slot < POOL_ROWS)
             kv_slot = tl.where(kv_valid, kv_slot, -1)

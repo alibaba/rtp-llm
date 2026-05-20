@@ -30,6 +30,7 @@ import triton.language as tl
 from rtp_llm.models_py.modules.dsv4.fp8._indexer_quant_triton import (
     INDEXER_ENTRY_BYTES,
     INDEXER_HEAD_DIM,
+    _trap_invalid_kv_access,
 )
 
 
@@ -43,6 +44,7 @@ def _cp_gather_indexer_k_kernel(
     D: tl.constexpr,
     cache_block_size: tl.constexpr,
     cache_stride_b: tl.constexpr,
+    num_cache_blocks: tl.constexpr,
 ):
     pid = tl.program_id(0).to(tl.int64)
     if pid >= N:
@@ -59,6 +61,11 @@ def _cp_gather_indexer_k_kernel(
 
     block_idx = slot // cache_block_size
     block_off = slot % cache_block_size
+    if block_idx < 0:
+        _trap_invalid_kv_access()
+    if block_idx >= num_cache_blocks:
+        _trap_invalid_kv_access()
+
     block_base = cache_ptr + block_idx * cache_stride_b
 
     # K bytes
@@ -117,6 +124,7 @@ def gather_indexer_k_for_prefill(
         D=head_dim,
         cache_block_size=cache_block_size,
         cache_stride_b=cache_stride_b,
+        num_cache_blocks=int(kv_cache_packed.shape[0]),
         num_warps=4,
     )
     return k_quant, k_scale

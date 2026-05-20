@@ -104,6 +104,11 @@ def _make_cache(num_blocks: int, block_size: int) -> torch.Tensor:
     )
 
 
+def _positive_slots(T: int, block_size: int) -> torch.Tensor:
+    # Production block id 0 is invalid; start unit-test slots at block 1.
+    return torch.arange(T, dtype=torch.int64, device="cuda") + block_size
+
+
 def _bench(fn, *a, warmup: int = 50, iters: int = 500) -> float:
     for _ in range(warmup):
         fn(*a)
@@ -127,11 +132,11 @@ def test_quantize_single_block():
     torch.manual_seed(0)
     T, block_size = 8, 64
     k = torch.randn(T, INDEXER_HEAD_DIM, dtype=torch.bfloat16, device="cuda") * 0.5
-    slot_mapping = torch.arange(T, dtype=torch.int64, device="cuda")
-    cache = _make_cache(num_blocks=1, block_size=block_size)
+    slot_mapping = _positive_slots(T, block_size)
+    cache = _make_cache(num_blocks=2, block_size=block_size)
     quantize_indexer_k(k, slot_mapping, cache)
 
-    cache_ref = _make_cache(num_blocks=1, block_size=block_size)
+    cache_ref = _make_cache(num_blocks=2, block_size=block_size)
     ref_quantize_into_pool(k, slot_mapping, cache_ref)
     assert torch.equal(cache, cache_ref), "single-block layout diverges from vLLM ref"
     print(f"  [single block] T={T} block_size={block_size} OK")
@@ -140,9 +145,9 @@ def test_quantize_single_block():
 def test_quantize_multi_block():
     torch.manual_seed(1)
     T, block_size = 200, 64
-    num_blocks = (T + block_size - 1) // block_size
+    num_blocks = (T + block_size - 1) // block_size + 1
     k = torch.randn(T, INDEXER_HEAD_DIM, dtype=torch.bfloat16, device="cuda") * 0.5
-    slot_mapping = torch.arange(T, dtype=torch.int64, device="cuda")
+    slot_mapping = _positive_slots(T, block_size)
     cache = _make_cache(num_blocks=num_blocks, block_size=block_size)
     quantize_indexer_k(k, slot_mapping, cache)
 
@@ -156,18 +161,18 @@ def test_quantize_skip_negative_slot():
     torch.manual_seed(2)
     T, block_size = 4, 8
     k = torch.randn(T, INDEXER_HEAD_DIM, dtype=torch.bfloat16, device="cuda")
-    slot_mapping = torch.tensor([0, -1, 2, -1], dtype=torch.int64, device="cuda")
-    cache = _make_cache(num_blocks=1, block_size=block_size)
+    slot_mapping = torch.tensor([8, -1, 10, -1], dtype=torch.int64, device="cuda")
+    cache = _make_cache(num_blocks=2, block_size=block_size)
     quantize_indexer_k(k, slot_mapping, cache)
 
-    cache_ref = _make_cache(num_blocks=1, block_size=block_size)
+    cache_ref = _make_cache(num_blocks=2, block_size=block_size)
     ref_quantize_into_pool(k, slot_mapping, cache_ref)
     assert torch.equal(cache, cache_ref)
     # And the dead slot regions stay zero.
-    flat = cache.view(1, block_size * INDEXER_ENTRY_BYTES)
+    flat = cache.view(2, block_size * INDEXER_ENTRY_BYTES)
     D = INDEXER_HEAD_DIM
-    assert (flat[0, 1 * D : 2 * D] == 0).all(), "slot 1 K bytes leaked"
-    assert (flat[0, 3 * D : 4 * D] == 0).all(), "slot 3 K bytes leaked"
+    assert (flat[1, 1 * D : 2 * D] == 0).all(), "slot 1 K bytes leaked"
+    assert (flat[1, 3 * D : 4 * D] == 0).all(), "slot 3 K bytes leaked"
     print("  [skip -1 slot] OK")
 
 
@@ -175,10 +180,10 @@ def test_quantize_slot_remap_non_identity():
     torch.manual_seed(3)
     T, block_size = 6, 4
     k = torch.randn(T, INDEXER_HEAD_DIM, dtype=torch.bfloat16, device="cuda")
-    slots = torch.tensor([3, 7, 1, 5, 2, 6], dtype=torch.int64, device="cuda")
-    cache = _make_cache(num_blocks=2, block_size=block_size)
+    slots = torch.tensor([7, 11, 5, 9, 6, 10], dtype=torch.int64, device="cuda")
+    cache = _make_cache(num_blocks=3, block_size=block_size)
     quantize_indexer_k(k, slots, cache)
-    cache_ref = _make_cache(num_blocks=2, block_size=block_size)
+    cache_ref = _make_cache(num_blocks=3, block_size=block_size)
     ref_quantize_into_pool(k, slots, cache_ref)
     assert torch.equal(cache, cache_ref), "non-monotone slot remap diverges"
     print("  [non-monotone slot map] OK")
@@ -202,8 +207,8 @@ def test_round_trip_fp32():
     torch.manual_seed(10)
     T, block_size = 16, 32
     k = torch.randn(T, INDEXER_HEAD_DIM, dtype=torch.bfloat16, device="cuda") * 0.5
-    slots = torch.arange(T, dtype=torch.int64, device="cuda")
-    cache = _make_cache(1, block_size)
+    slots = _positive_slots(T, block_size)
+    cache = _make_cache(2, block_size)
     quantize_indexer_k(k, slots, cache)
     recon = dequantize_indexer_k(cache, slots, out_dtype=torch.float32)
     rel = (recon - k.float()).abs() / (k.float().abs() + 1e-6)
@@ -215,8 +220,8 @@ def test_round_trip_bf16_out():
     torch.manual_seed(11)
     T, block_size = 8, 16
     k = torch.randn(T, INDEXER_HEAD_DIM, dtype=torch.bfloat16, device="cuda") * 0.3
-    slots = torch.arange(T, dtype=torch.int64, device="cuda")
-    cache = _make_cache(1, block_size)
+    slots = _positive_slots(T, block_size)
+    cache = _make_cache(2, block_size)
     quantize_indexer_k(k, slots, cache)
     recon = dequantize_indexer_k(cache, slots, out_dtype=torch.bfloat16)
     assert recon.dtype == torch.bfloat16
@@ -230,10 +235,10 @@ def test_dequant_padded_yields_zero():
     torch.manual_seed(12)
     T, block_size = 4, 8
     k = torch.randn(T, INDEXER_HEAD_DIM, dtype=torch.bfloat16, device="cuda")
-    slots_w = torch.tensor([0, 1, 2, 3], dtype=torch.int64, device="cuda")
-    cache = _make_cache(1, block_size)
+    slots_w = torch.tensor([8, 9, 10, 11], dtype=torch.int64, device="cuda")
+    cache = _make_cache(2, block_size)
     quantize_indexer_k(k, slots_w, cache)
-    slots_r = torch.tensor([0, -1, 2, -1], dtype=torch.int64, device="cuda")
+    slots_r = torch.tensor([8, -1, 10, -1], dtype=torch.int64, device="cuda")
     recon = dequantize_indexer_k(cache, slots_r, out_dtype=torch.float32)
     assert (recon[1] == 0).all() and (recon[3] == 0).all()
     print("  [dequant -1 → zero] OK")
@@ -244,8 +249,8 @@ def test_dequant_matches_reference():
     torch.manual_seed(13)
     T, block_size = 12, 32
     k = torch.randn(T, INDEXER_HEAD_DIM, dtype=torch.bfloat16, device="cuda") * 0.4
-    slots = torch.arange(T, dtype=torch.int64, device="cuda")
-    cache = _make_cache(1, block_size)
+    slots = _positive_slots(T, block_size)
+    cache = _make_cache(2, block_size)
     quantize_indexer_k(k, slots, cache)
 
     cand = dequantize_indexer_k(cache, slots, out_dtype=torch.float32)
@@ -265,9 +270,9 @@ def bench_quantize_decode():
     for B in (1, 4, 16, 64):
         T = B
         block_size = 64
-        num_blocks = max(1, (T + block_size - 1) // block_size)
+        num_blocks = max(1, (T + block_size - 1) // block_size) + 1
         k = torch.randn(T, INDEXER_HEAD_DIM, dtype=torch.bfloat16, device="cuda")
-        slots = torch.arange(T, dtype=torch.int64, device="cuda")
+        slots = _positive_slots(T, block_size)
         cache = _make_cache(num_blocks, block_size)
 
         def run_torch():
@@ -301,12 +306,12 @@ def test_fp8_cache_dequant_then_score():
     torch.manual_seed(20)
     B, S, T, H, D = 1, 1, 64, 64, INDEXER_HEAD_DIM
     block_size = 16
-    num_blocks = (T + block_size - 1) // block_size
+    num_blocks = (T + block_size - 1) // block_size + 1
 
     q = torch.randn(B, S, H, D, dtype=torch.bfloat16, device="cuda") * 0.5
     weights = torch.randn(B, S, H, dtype=torch.bfloat16, device="cuda")
     k_bf16 = torch.randn(T, D, dtype=torch.bfloat16, device="cuda") * 0.5
-    slots = torch.arange(T, dtype=torch.int64, device="cuda")
+    slots = _positive_slots(T, block_size)
 
     # FP8 path: quant → dequant
     cache = _make_cache(num_blocks, block_size)
