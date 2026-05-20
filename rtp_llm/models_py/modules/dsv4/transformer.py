@@ -298,11 +298,15 @@ class V4Transformer(nn.Module):
         if self._mtp_last_hidden_buffer is None:
             return
         T = flat.size(0)
-        assert T <= self._mtp_last_hidden_buffer.size(0), (
-            f"_mtp_last_hidden_buffer overflow: T={T} > "
-            f"cap={self._mtp_last_hidden_buffer.size(0)}"
-        )
-        self._mtp_last_hidden_buffer[:T].copy_(flat)
+        buf = self._mtp_last_hidden_buffer
+        if T > buf.size(0):
+            self.register_buffer(
+                "_mtp_last_hidden_buffer",
+                torch.empty(T, buf.size(1), dtype=buf.dtype, device=buf.device),
+                persistent=False,
+            )
+            buf = self._mtp_last_hidden_buffer
+        buf[:T].copy_(flat)
         self._mtp_last_hidden_valid_tokens = int(T)
 
     def set_cp_info(self, cp_info, cp_size: int, cp_rank: int) -> None:
