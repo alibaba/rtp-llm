@@ -1659,6 +1659,158 @@ class FlexLbPdSeperationCaseRunner(_PdRunnerMixin, CaseRunner):
         )
         return True, "ok"
 
+    def _verify_kv_cache_eviction(
+        self,
+        frontend_server_manager: MagaServerManager,
+        prefill_mgr: Optional[MagaServerManager],
+        flexlb_envs: Dict[str, str],
+    ) -> Tuple[bool, str]:
+        # Drive enough unique prompts through the prefill cluster that the KV
+        # cache must evict — every request carries a fresh suffix so no prefix
+        # is shared, which forces fresh blocks for each one. We then verify
+        # that no request fails (eviction path returns sane state) and no
+        # request hits NOT_FOUND on the response stream (registry / ResponseBuffer
+        # cleanup cooperates with eviction). The signal we want is "soak with
+        # cache pressure does not regress request correctness"; we deliberately
+        # do not assert a particular eviction count because the engine logs it
+        # at varying granularity.
+        rounds_raw = flexlb_envs.get(
+            "FLEXLB_SMOKE_EVICTION_ROUNDS",
+            os.environ.get("FLEXLB_SMOKE_EVICTION_ROUNDS", "3"),
+        )
+        per_round_raw = flexlb_envs.get(
+            "FLEXLB_SMOKE_EVICTION_PER_ROUND",
+            os.environ.get("FLEXLB_SMOKE_EVICTION_PER_ROUND", "8"),
+        )
+        max_tokens_raw = flexlb_envs.get(
+            "FLEXLB_SMOKE_EVICTION_MAX_TOKENS",
+            os.environ.get("FLEXLB_SMOKE_EVICTION_MAX_TOKENS", "64"),
+        )
+        try:
+            rounds = max(1, int(rounds_raw))
+            per_round = max(1, int(per_round_raw))
+            max_tokens = max(1, int(max_tokens_raw))
+        except (TypeError, ValueError):
+            rounds, per_round, max_tokens = 3, 8, 64
+
+        source_qr = self._select_flexlb_feature_qr()
+        endpoint = self._resolve_endpoint(source_qr, self.task_info.endpoint)
+        frontend_url = self._frontend_http_url(frontend_server_manager, endpoint)
+        request_timeout_sec = float(
+            os.environ.get("FLEXLB_SMOKE_EVICTION_REQUEST_TIMEOUT_SEC", "60")
+        )
+        retry_times = int(os.environ.get("FLEXLB_SMOKE_VISIT_RETRY_TIME", "1"))
+
+        total_sent = 0
+        total_failed: List[Any] = []
+        for round_idx in range(rounds):
+            mp_ctx = multiprocessing.get_context("fork")
+            result_queue = mp_ctx.Queue()
+            processes: List[multiprocessing.Process] = []
+            result_by_idx: Dict[int, Tuple[bool, Any]] = {}
+
+            def _drain() -> None:
+                while True:
+                    try:
+                        idx, ok_, resp = result_queue.get_nowait()
+                        result_by_idx[idx] = (ok_, resp)
+                    except queue.Empty:
+                        return
+
+            try:
+                for inner in range(per_round):
+                    suffix = (
+                        f"\nflexlb eviction smoke r{round_idx} i{inner} "
+                        f"{time.time_ns()}"
+                    )
+                    qr = self._make_fast_probe_qr(
+                        source_qr, suffix, prompt_repeat=1
+                    )
+                    qr["query"]["max_tokens"] = max_tokens
+                    qr["query"]["extra_configs"]["max_new_tokens"] = max_tokens
+                    process = mp_ctx.Process(
+                        target=flexlb_checks.visit_frontend_url_json_process,
+                        args=(
+                            inner,
+                            frontend_url,
+                            qr["query"],
+                            retry_times,
+                            request_timeout_sec,
+                            result_queue,
+                        ),
+                    )
+                    process.daemon = True
+                    process.start()
+                    processes.append(process)
+                deadline = time.time() + request_timeout_sec + 5
+                while time.time() < deadline and any(p.is_alive() for p in processes):
+                    _drain()
+                    time.sleep(0.05)
+                _drain()
+            finally:
+                for process in processes:
+                    if process.is_alive():
+                        process.terminate()
+                for process in processes:
+                    process.join(timeout=5)
+                    if process.is_alive():
+                        process.kill()
+                        process.join(timeout=1)
+                _drain()
+                result_queue.close()
+                result_queue.cancel_join_thread()
+
+            for inner in range(per_round):
+                ok_, resp = result_by_idx.get(
+                    inner, (False, f"no result for round={round_idx} idx={inner}")
+                )
+                if not ok_ or not self._has_nonempty_output(resp):
+                    total_failed.append(
+                        {"round": round_idx, "idx": inner, "ok": ok_, "resp": resp}
+                    )
+            total_sent += per_round
+
+        if total_failed:
+            return (
+                False,
+                "kv-cache eviction soak failed: "
+                f"{len(total_failed)}/{total_sent} bad responses, "
+                f"first 3: {total_failed[:3]}",
+            )
+
+        # Sanity guard against the legacy NOT_FOUND failure mode that previously
+        # surfaced when ResponseBuffer was not cleaned up across eviction.
+        not_found_hits = self._count_prefill_log_lines(prefill_mgr, "NOT_FOUND")
+        if not_found_hits > 0:
+            return (
+                False,
+                f"kv-cache eviction soak observed {not_found_hits} NOT_FOUND "
+                "events in prefill log — registry/ResponseBuffer cleanup likely "
+                "broken under cache pressure",
+            )
+
+        logging.info(
+            "flexlb kv-cache eviction verified: rounds=%d per_round=%d "
+            "max_tokens=%d total_sent=%d not_found=0",
+            rounds,
+            per_round,
+            max_tokens,
+            total_sent,
+        )
+        return True, "ok"
+
+    def _count_prefill_log_lines(
+        self, prefill_mgr: Optional[MagaServerManager], needle: str
+    ) -> int:
+        path = getattr(prefill_mgr, "log_file_path", None) if prefill_mgr else None
+        if not path or not os.path.exists(path):
+            return 0
+        try:
+            with open(path, "r", errors="replace") as f:
+                return sum(1 for line in f if needle in line)
+        except OSError:
+            return 0
+
     def _verify_flexlb_integrated_features(
         self,
         frontend_server_manager: MagaServerManager,
@@ -1715,6 +1867,17 @@ class FlexLbPdSeperationCaseRunner(_PdRunnerMixin, CaseRunner):
                 frontend_server_manager,
                 prefill_mgr,
                 dp_size,
+                flexlb_envs,
+            )
+            if not ok:
+                return False, err_msg
+
+        if flexlb_checks.flexlb_check_enabled(
+            flexlb_envs, "FLEXLB_SMOKE_CHECK_KV_CACHE_EVICTION", False
+        ):
+            ok, err_msg = self._verify_kv_cache_eviction(
+                frontend_server_manager,
+                prefill_mgr,
                 flexlb_envs,
             )
             if not ok:
