@@ -12,6 +12,7 @@ from rtp_llm.models_py.modules import (
     DenseMLP,
     Embedding,
     FMHAImplBase,
+    FusedNormQuant,
     RMSNorm,
 )
 from rtp_llm.ops import HWKernelConfig, ParallelismConfig
@@ -54,7 +55,25 @@ class Qwen3DecoderLayer(nn.Module):
             weights[W.post_ln_gamma], eps=config.layernorm_eps
         )
 
+        self._fused_norm_quant = FusedNormQuant(
+            self.self_attn,
+            self.mlp,
+            weights[W.pre_ln_gamma],
+            weights[W.post_ln_gamma],
+            config.layernorm_eps,
+        )
+
     def forward(
+        self,
+        hidden_states: torch.Tensor,
+        fmha_impl: FMHAImplBase,
+        kv_cache: Optional[LayerKVCache] = None,
+    ) -> torch.Tensor:
+        if self._fused_norm_quant is not None:
+            return self._fused_norm_quant(hidden_states, fmha_impl, kv_cache)
+        return self._forward_legacy(hidden_states, fmha_impl, kv_cache)
+
+    def _forward_legacy(
         self,
         hidden_states: torch.Tensor,
         fmha_impl: FMHAImplBase,
@@ -62,13 +81,11 @@ class Qwen3DecoderLayer(nn.Module):
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        # Self Attention
         hidden_states = self.self_attn(
             hidden_states=hidden_states, fmha_impl=fmha_impl, kv_cache=kv_cache
         )
         hidden_states = residual + hidden_states
 
-        # Fully Connected
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)

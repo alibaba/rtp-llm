@@ -50,6 +50,9 @@ class RocmFp8PTPCLinear(LinearBase):
     ):
         super().__init__(weight, weight_scales, input_scales,
                          bias, quant_config, weight_scale_2)
+        if weight_scales is None:
+            raise ValueError("weight_scales is required for RocmFp8PTPCLinear")
+
         self.hidden_size = weight.shape[0]  # k
         self.output_size = weight.shape[1]  # n
         # Reshape weight from [k, n] to [n, k] as done in C++ code
@@ -121,5 +124,53 @@ class RocmFp8PTPCLinear(LinearBase):
         # Convert back to original dtype if needed
         if output.dtype != original_dtype:
             output = output.to(original_dtype)
+
+        return output
+
+    def forward_prequantized(
+        self,
+        input_fp8: torch.Tensor,
+        input_scales: torch.Tensor,
+    ) -> torch.Tensor:
+        """Run FP8 PTPC linear with pre-quantized input.
+
+        ROCm fused RMSNorm kernels can produce per-token FP8 activations and
+        scales directly. This path reuses those tensors and skips the duplicate
+        per-token quantization performed by forward().
+        """
+        token_num = input_fp8.shape[0]
+        output_size = self.output_size
+        hidden_size = input_fp8.shape[-1]
+
+        if input_scales.dtype != torch.float32:
+            input_scales = input_scales.to(torch.float32)
+
+        x_scales = input_scales
+        w_scales = self.weight_scales
+
+        use_cktile = (
+            hidden_size < 192
+            or token_num >= 1536
+            or (token_num >= 512 and output_size > 1536)
+        )
+        if use_cktile:
+            output = torch.empty(
+                (token_num, output_size), dtype=torch.bfloat16, device=input_fp8.device
+            )
+            gemm_a8w8_bpreshuffle_cktile(
+                input_fp8, self.weight, x_scales, w_scales, output
+            )
+        else:
+            output = aiter.gemm_a8w8_bpreshuffle(
+                input_fp8,
+                self.weight,
+                x_scales,
+                w_scales,
+                None,
+                torch.bfloat16,
+            )
+
+        if self.bias is not None:
+            output = output + self.bias.to(output.dtype)
 
         return output

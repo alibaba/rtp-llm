@@ -5,6 +5,19 @@ import torch.nn.functional as F
 from aiter import layernorm2d_fwd as layernorm2d_fwd
 from aiter import rms_norm
 from aiter import rmsnorm2d_fwd_with_add as fused_add_rmsnorm
+try:
+    from aiter import (
+        rmsnorm2d_fwd_with_add_dynamicquant as fused_add_rmsnorm_quant,
+    )
+    from aiter import (
+        rmsnorm2d_fwd_with_dynamicquant as fused_rmsnorm_quant,
+    )
+
+    HAS_FUSED_NORM_QUANT = True
+except ImportError:
+    fused_add_rmsnorm_quant = None
+    fused_rmsnorm_quant = None
+    HAS_FUSED_NORM_QUANT = False
 from torch import nn
 
 from rtp_llm.models_py.modules.base.common.norm import (
@@ -14,6 +27,10 @@ from rtp_llm.models_py.modules.base.common.norm import (
     BaseResNorm,
 )
 from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+
+_printed_rmsnorm_fused_quant = False
+_printed_rmsresnorm_fused_quant = False
 
 
 class LayerNorm(BaseLayerNorm):
@@ -176,7 +193,7 @@ class FusedQKRMSNorm(nn.Module):
 
     def forward(self, hidden_states):
         m, n = hidden_states.shape
-        rtp_llm_ops.fused_qk_rmsnorm_v2(
+        rtp_llm_ops.fused_qk_rmsnorm(
             hidden_states,
             self.q_weight,
             self.k_weight,
@@ -188,3 +205,95 @@ class FusedQKRMSNorm(nn.Module):
             self.size_per_head,
         )
         return hidden_states
+
+
+class RMSNormFusedQuant(nn.Module):
+    """ROCm-only RMSNorm + per-token FP8 quant fused module."""
+
+    def __init__(self, weight: torch.Tensor, eps: float = 1e-6):
+        super().__init__()
+        self.weight = weight
+        self.variance_epsilon = eps
+
+    def forward(self, hidden_states: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        if fused_rmsnorm_quant is None:
+            raise RuntimeError("aiter fused RMSNorm quant kernel is not available")
+
+        token_num, hidden_size = hidden_states.shape
+        output_fp8 = torch.empty(
+            (token_num, hidden_size),
+            dtype=torch.float8_e4m3fnuz,
+            device=hidden_states.device,
+        )
+        output_scale = torch.empty(
+            (token_num, 1), dtype=torch.float32, device=hidden_states.device
+        )
+        global _printed_rmsnorm_fused_quant
+        if not _printed_rmsnorm_fused_quant:
+            print(
+                f"[RMSNormFusedQuant] running aiter rmsnorm2d_fwd_with_dynamicquant, "
+                f"shape={tuple(hidden_states.shape)}, dtype={hidden_states.dtype}, device={hidden_states.device}",
+                flush=True,
+            )
+            _printed_rmsnorm_fused_quant = True
+
+        fused_rmsnorm_quant(
+            output_fp8,
+            hidden_states,
+            output_scale,
+            self.weight.data,
+            self.variance_epsilon,
+            0,
+            0,
+            False,
+        )
+        return output_fp8, output_scale
+
+
+class RMSResNormFusedQuant(nn.Module):
+    """ROCm-only residual add + RMSNorm + per-token FP8 quant fused module."""
+
+    def __init__(self, weight: torch.Tensor, eps: float = 1e-6):
+        super().__init__()
+        self.weight = weight
+        self.variance_epsilon = eps
+
+    def forward(
+        self, hidden_states: torch.Tensor, residual: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if fused_add_rmsnorm_quant is None:
+            raise RuntimeError("aiter fused add RMSNorm quant kernel is not available")
+
+        token_num, hidden_size = hidden_states.shape
+        output_fp8 = torch.empty(
+            (token_num, hidden_size),
+            dtype=torch.float8_e4m3fnuz,
+            device=hidden_states.device,
+        )
+        output_scale = torch.empty(
+            (token_num, 1), dtype=torch.float32, device=hidden_states.device
+        )
+        residual_out = torch.empty_like(residual)
+        global _printed_rmsresnorm_fused_quant
+        if not _printed_rmsresnorm_fused_quant:
+            print(
+                f"[RMSResNormFusedQuant] running aiter rmsnorm2d_fwd_with_add_dynamicquant, "
+                f"hidden_states_shape={tuple(hidden_states.shape)}, residual_shape={tuple(residual.shape)}, "
+                f"dtype={hidden_states.dtype}, device={hidden_states.device}",
+                flush=True,
+            )
+            _printed_rmsresnorm_fused_quant = True
+
+        fused_add_rmsnorm_quant(
+            output_fp8,
+            hidden_states,
+            residual,
+            residual_out,
+            output_scale,
+            self.weight.data,
+            self.variance_epsilon,
+            0,
+            0,
+            False,
+        )
+        return output_fp8, output_scale, residual_out

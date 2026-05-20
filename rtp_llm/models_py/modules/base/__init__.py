@@ -22,12 +22,15 @@ device_type = get_device_type()
 if device_type == DeviceType.ROCm:
     from rtp_llm.models_py.modules.base.rocm.activation import FusedSiluAndMul
     from rtp_llm.models_py.modules.base.rocm.moe_gating import SigmoidGateScaleAdd
+    from rtp_llm.models_py.modules.base.rocm.fused_norm_quant import FusedNormQuant
     from rtp_llm.models_py.modules.base.rocm.norm import (
         AddBiasResLayerNorm,
         FusedQKRMSNorm,
         QKRMSNorm,
         RMSNorm,
+        RMSNormFusedQuant,
         RMSResNorm,
+        RMSResNormFusedQuant,
     )
 
     # Import NotImplementedOp placeholders for ROCm
@@ -48,6 +51,13 @@ else:
         RMSNorm,
         RMSResNorm,
     )
+
+    RMSNormFusedQuant = None
+    RMSResNormFusedQuant = None
+
+    def FusedNormQuant(*args, **kwargs):
+        return None
+
     from rtp_llm.models_py.modules.base.cuda.select_topk import (
         FakeBalanceExpert,
         GroupTopK,
@@ -67,7 +77,10 @@ else:
         "FusedQKRMSNorm",
         "QKRMSNorm",
         "RMSNorm",
+        "RMSNormFusedQuant",
         "RMSResNorm",
+        "RMSResNormFusedQuant",
+        "FusedNormQuant",
         "SelectTopk",
         "GroupTopK",
         "FakeBalanceExpert",
