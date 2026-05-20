@@ -148,7 +148,7 @@ public class RouteService {
         boolean dpWorkerOk = hasDpEnabledPrefillWorker();
         boolean decision = schedulerOk && cfgOk && reqOk
                 && maxNewTokens > 1 && numBeams <= 1 && !forceDisableSp && dpWorkerOk;
-        logger.info("SHOULD_USE_DP_BATCH_DEBUG decision={} scheduler={} cfgDpBalance={} req={} maxNewTokens={} numBeams={} forceDisableSp={} dpWorker={}",
+        logger.debug("dp-batch gate decision={} scheduler={} cfgDpBalance={} req={} maxNewTokens={} numBeams={} forceDisableSp={} dpWorker={}",
                 decision, schedulerOk, cfgOk, reqOk, maxNewTokens, numBeams, forceDisableSp, dpWorkerOk);
         return decision;
     }
@@ -157,22 +157,27 @@ public class RouteService {
         Map<String, WorkerStatus> prefillWorkers =
                 engineWorkerStatus.selectModelWorkerStatus(RoleType.PREFILL, null);
         if (prefillWorkers == null || prefillWorkers.isEmpty()) {
-            logger.info("HAS_DP_ENABLED_PREFILL_WORKER_DEBUG prefillWorkers={}",
+            logger.debug("dp-batch gate prefillWorkers={}",
                     prefillWorkers == null ? "null" : "empty");
             return false;
         }
-        StringBuilder sb = new StringBuilder();
         boolean found = false;
-        for (Map.Entry<String, WorkerStatus> e : prefillWorkers.entrySet()) {
-            WorkerStatus w = e.getValue();
-            sb.append("[").append(e.getKey()).append(":dpSize=")
-              .append(w == null ? "null" : w.getDpSize()).append("]");
+        for (WorkerStatus w : prefillWorkers.values()) {
             if (w != null && w.getDpSize() > 1) {
                 found = true;
+                break;
             }
         }
-        logger.info("HAS_DP_ENABLED_PREFILL_WORKER_DEBUG count={} found={} workers={}",
-                prefillWorkers.size(), found, sb);
+        if (logger.isDebugEnabled()) {
+            StringBuilder sb = new StringBuilder();
+            for (Map.Entry<String, WorkerStatus> e : prefillWorkers.entrySet()) {
+                WorkerStatus w = e.getValue();
+                sb.append("[").append(e.getKey()).append(":dpSize=")
+                  .append(w == null ? "null" : w.getDpSize()).append("]");
+            }
+            logger.debug("dp-batch gate prefillWorkers count={} found={} workers={}",
+                    prefillWorkers.size(), found, sb);
+        }
         return found;
     }
 }
