@@ -1,0 +1,30 @@
+name: Probe workflow_run perms
+on:
+  workflow_run:
+    workflows: ["CI Event Dispatcher"]
+    types: [completed]
+permissions:
+  actions: write
+  pull-requests: write
+  contents: read
+
+jobs:
+  probe:
+    runs-on: [self-hosted, Linux]
+    steps:
+      - name: Echo context
+        run: |                                                                                                                                                                                                                                                                                                  
+          echo "Triggering workflow conclusion: ${{ github.event.workflow_run.conclusion }}"                                                                                                                                                                                                                  
+          echo "Triggering event: ${{ github.event.workflow_run.event }}"                                                                                                                                                                                                                                       
+          echo "Head repo fork: ${{ github.event.workflow_run.head_repository.fork }}"                                                                                                                                                                                                                          
+          echo "Head sha: ${{ github.event.workflow_run.head_sha }}"                                                                                                                                                                                                                                            
+          echo "PR list (empty for fork): ${{ toJSON(github.event.workflow_run.pull_requests) }}"
+      - name: Test secret access
+        env:
+          TEST_SECRET: ${{ secrets.CI_SECRET }}
+        run: |                                                                                                                                                                                                                                                                                                  
+          if [ -n "$TEST_SECRET" ]; then                                                                                                                                                                                                                                                                        
+            echo "✅ CI_SECRET accessible (length=${#TEST_SECRET})"                                                                                                                                                                                                                                              
+          else                                                                                                                                                                                                                                                                                                  
+            echo "❌ CI_SECRET EMPTY"                                                                                                                                                                                                                                                                            
+          fi
