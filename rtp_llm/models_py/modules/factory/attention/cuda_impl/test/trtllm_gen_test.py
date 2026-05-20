@@ -354,14 +354,14 @@ class PrepareCudaGraphKernelTest(TestCase):
         torch.testing.assert_close(seq_lens_out, src1)
         torch.testing.assert_close(kv_offset, self._reference_kv_offset(block_id))
 
-    # -- spec-decode prefill: seq_lens = prefix + src2[0] --
+    # -- spec-decode prefill: seq_lens = prefix + q_len --
 
     def test_mode1_base(self):
         N, M = 4, 8
         prefix = torch.tensor(
             [100, 200, 300, 400], dtype=torch.int32, device=self.device
         )
-        q_len_tensor = torch.tensor([5], dtype=torch.int32, device=self.device)
+        q_len_tensor = torch.full((N,), 5, dtype=torch.int32, device=self.device)
         seq_lens_out = torch.zeros(N, dtype=torch.int32, device=self.device)
         cu_kv = torch.zeros(N + 1, dtype=torch.int32, device=self.device)
         block_id = self._make_block_id(N, M)
@@ -387,7 +387,7 @@ class PrepareCudaGraphKernelTest(TestCase):
     def test_mode1_large_batch(self):
         N, M = 64, 32
         prefix = torch.randint(50, 500, (N,), dtype=torch.int32, device=self.device)
-        q_len_tensor = torch.tensor([7], dtype=torch.int32, device=self.device)
+        q_len_tensor = torch.full((N,), 7, dtype=torch.int32, device=self.device)
         seq_lens_out = torch.zeros(N, dtype=torch.int32, device=self.device)
         cu_kv = torch.zeros(N + 1, dtype=torch.int32, device=self.device)
         block_id = self._make_block_id(N, M)
@@ -408,6 +408,33 @@ class PrepareCudaGraphKernelTest(TestCase):
 
         torch.testing.assert_close(seq_lens_out, prefix + 7)
         torch.testing.assert_close(kv_offset, self._reference_kv_offset(block_id))
+
+    def test_mode1_padding_rows_stay_zero(self):
+        N, M = 4, 8
+        prefix = torch.tensor([100, 200, 0, 0], dtype=torch.int32, device=self.device)
+        q_len_tensor = torch.tensor([5, 5, 0, 0], dtype=torch.int32, device=self.device)
+        seq_lens_out = torch.full((N,), -1, dtype=torch.int32, device=self.device)
+        cu_kv = torch.zeros(N + 1, dtype=torch.int32, device=self.device)
+        block_id = self._make_block_id(N, M)
+        kv_offset = torch.zeros(N, 2, M, dtype=torch.int32, device=self.device)
+
+        self._run_kernel(
+            prefix,
+            q_len_tensor,
+            seq_lens_out,
+            cu_kv,
+            block_id,
+            kv_offset,
+            0,
+            N,
+            M,
+            mode=1,
+        )
+
+        torch.testing.assert_close(
+            seq_lens_out,
+            torch.tensor([105, 205, 0, 0], dtype=torch.int32, device=self.device),
+        )
 
     # -- prefill: seq_lens = input + prefix, cu_kv_seqlens --
 

@@ -12,8 +12,13 @@ from rtp_llm.models_py.triton_kernels.fla.index import (
     prepare_chunk_indices,
     prepare_chunk_offsets,
 )
-from rtp_llm.models_py.triton_kernels.fla.op import exp, safe_exp
-from rtp_llm.models_py.triton_kernels.fla.utils import is_nvidia_hopper
+from rtp_llm.models_py.triton_kernels.fla.op import exp, exp2, safe_exp
+from rtp_llm.models_py.triton_kernels.fla.utils import (
+    is_amd,
+    is_amd_cdna3,
+    is_amd_cdna4,
+    is_nvidia_hopper,
+)
 
 NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8, 16]
 
@@ -64,6 +69,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     STORE_FINAL_STATE: tl.constexpr,
     SAVE_NEW_VALUE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    IS_LOG2: tl.constexpr,
 ):
     i_v, i_nh = tl.program_id(0), tl.program_id(1)
     i_n, i_h = i_nh // H, i_nh % H
@@ -182,13 +188,31 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
 
         last_idx = min((i_t + 1) * BT, T) - 1
         if USE_G:
-            b_g_last = tl.load(g + bos * H + last_idx * H + i_h)
-            p_g = tl.make_block_ptr(
-                g + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,)
-            )
-            b_g = tl.load(p_g, boundary_check=(0,))
-            b_v = b_v * safe_exp(b_g_last - b_g)[:, None]
-            b_g_last = exp(b_g_last)
+            if IS_LOG2:
+                # AMD path: g is in log2 domain (RCP_LN2-scaled cumsum upstream).
+                # The fp32 promotions, int64 index and m_t mask are robustness
+                # tweaks added together with the log2 rewrite for MI355X/MI308X.
+                m_t = (i_t * BT + tl.arange(0, BT)) < T
+                b_g_last = tl.load(
+                    g + (bos * H + last_idx * H + i_h).to(tl.int64)
+                ).to(tl.float32)
+                p_g = tl.make_block_ptr(
+                    g + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,)
+                )
+                b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
+                b_v = b_v * tl.where(m_t, exp2(b_g_last - b_g), 0)[:, None]
+                b_g_last = exp2(b_g_last)
+            else:
+                # NVIDIA path: g is in natural-log domain. Keep the original
+                # exp/safe_exp formulation and integer indexing for bit-level
+                # parity with the pre-optimization implementation.
+                b_g_last = tl.load(g + bos * H + last_idx * H + i_h)
+                p_g = tl.make_block_ptr(
+                    g + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,)
+                )
+                b_g = tl.load(p_g, boundary_check=(0,))
+                b_v = b_v * safe_exp(b_g_last - b_g)[:, None]
+                b_g_last = exp(b_g_last)
             b_h1 = b_h1 * b_g_last
             if K > 64:
                 b_h2 = b_h2 * b_g_last
@@ -204,7 +228,10 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
                 mask=(o_k1 < K),
                 other=0.0,
             )
-            b_h1 *= exp(b_gk_last1)[:, None]
+            if IS_LOG2:
+                b_h1 *= exp2(b_gk_last1.to(tl.float32))[:, None]
+            else:
+                b_h1 *= exp(b_gk_last1)[:, None]
             if K > 64:
                 o_k2 = 64 + o_k1
                 b_gk_last2 = tl.load(
@@ -212,7 +239,10 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
                     mask=(o_k2 < K),
                     other=0.0,
                 )
-                b_h2 *= exp(b_gk_last2)[:, None]
+                if IS_LOG2:
+                    b_h2 *= exp2(b_gk_last2.to(tl.float32))[:, None]
+                else:
+                    b_h2 *= exp(b_gk_last2)[:, None]
             if K > 128:
                 o_k3 = 128 + o_k1
                 b_gk_last3 = tl.load(
@@ -220,7 +250,10 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
                     mask=(o_k3 < K),
                     other=0.0,
                 )
-                b_h3 *= exp(b_gk_last3)[:, None]
+                if IS_LOG2:
+                    b_h3 *= exp2(b_gk_last3.to(tl.float32))[:, None]
+                else:
+                    b_h3 *= exp(b_gk_last3)[:, None]
             if K > 192:
                 o_k4 = 192 + o_k1
                 b_gk_last4 = tl.load(
@@ -228,7 +261,10 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
                     mask=(o_k4 < K),
                     other=0.0,
                 )
-                b_h4 *= exp(b_gk_last4)[:, None]
+                if IS_LOG2:
+                    b_h4 *= exp2(b_gk_last4.to(tl.float32))[:, None]
+                else:
+                    b_h4 *= exp(b_gk_last4)[:, None]
         b_v = b_v.to(k.dtype.element_ty)
 
         p_k = tl.make_block_ptr(
@@ -284,10 +320,55 @@ def chunk_gated_delta_rule_fwd_h(
     gk: Optional[torch.Tensor] = None,
     initial_state: Optional[torch.Tensor] = None,
     output_final_state: bool = False,
-    chunk_size: int = 64,  # SY: remove this argument and force chunk size 64?
+    chunk_size: int = 64,
     save_new_value: bool = True,
     cu_seqlens: Optional[torch.LongTensor] = None,
+    state_dtype: Optional[torch.dtype] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Args:
+        state_dtype: dtype of the per-chunk hidden state buffer ``h``.
+            If explicitly provided by the caller, it is honored on both the
+            generic Triton fallback path and the Gluon/AMD CDNA4 path.
+            If ``None``, defaults to fp32 on all backends to preserve
+            precision (the kernel accumulates in fp32 internally).
+    """
+    # Gluon dispatch for AMD CDNA4 (MI355X): ~10-18% faster for TP2 H≤32 T≤64K
+    try:
+        from rtp_llm.models_py.triton_kernels.fla.chunk_delta_h_gluon import (
+            _is_gluon_beneficial,
+            chunk_gated_delta_rule_fwd_h_gluon,
+        )
+
+        _gluon_available = True
+    except ImportError:
+        _gluon_available = False
+
+    if _gluon_available:
+        H = u.shape[-2]
+        T = k.shape[1]
+        K = k.shape[-1]
+        V = u.shape[-1]
+        # Pass k.dtype, V and cu_seqlens so the dispatcher can also block
+        # configs that would silently break correctness (non-{64,128} K,
+        # non-16-aligned V, non-bf16 dtype, or any sequence whose length
+        # is not a multiple of BT=64, which would OOB the prologue /
+        # prefetch / v_new-store tail) — see ``_is_gluon_beneficial`` docstring.
+        if gk is None and _is_gluon_beneficial(
+            H, T, K, k_dtype=k.dtype, v_dim=V, cu_seqlens=cu_seqlens
+        ):
+            return chunk_gated_delta_rule_fwd_h_gluon(
+                k=k,
+                w=w,
+                u=u,
+                g=g,
+                initial_state=initial_state,
+                output_final_state=output_final_state,
+                chunk_size=chunk_size,
+                save_new_value=save_new_value,
+                cu_seqlens=cu_seqlens,
+                state_dtype=state_dtype,
+            )
     B, T, Hg, K, V = *k.shape, u.shape[-1]
     H = u.shape[-2]
     BT = chunk_size
@@ -308,7 +389,16 @@ def chunk_gated_delta_rule_fwd_h(
         )
     assert K <= 256, "current kernel does not support head dimension larger than 256."
 
-    h = k.new_empty(B, NT, H, K, V, dtype=torch.float32)
+    # Generic Triton fallback: the kernel accumulates ``b_h*`` in fp32 and
+    # only casts on store. Defaulting to fp32 here preserves precision and
+    # matches upstream fla. Callers that knowingly want a narrower buffer
+    # (e.g. to save memory) must opt in by passing ``state_dtype`` explicitly,
+    # rather than having it silently inferred from ``k.dtype``.
+    if state_dtype is None:
+        h_dtype = torch.float32
+    else:
+        h_dtype = state_dtype
+    h = k.new_empty(B, NT, H, K, V, dtype=h_dtype)
     final_state = (
         k.new_empty(N, H, K, V, dtype=torch.float32) if output_final_state else None
     )
@@ -336,7 +426,8 @@ def chunk_gated_delta_rule_fwd_h(
         K=K,
         V=V,
         BT=BT,
-        BV=32,
+        BV=64 if is_amd_cdna3 else (16 if is_amd_cdna4 else 32),
+        IS_LOG2=is_amd,
         num_warps=4,
         num_stages=2,
     )

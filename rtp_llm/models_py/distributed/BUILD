@@ -28,6 +28,15 @@ py_library(
 )
 
 py_library(
+    name = "moriep_wrapper",
+    srcs = ["moriep_wrapper.py"],
+    deps = [
+        "//rtp_llm:torch",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
     name = "user_buffers",
     srcs = ["user_buffers.py"],
     deps = [

@@ -200,5 +200,18 @@ void graphCaptureBegin(at::cuda::CUDAGraph& graph, GraphPoolHandle pool) {
 #endif
 }
 
+void finish_capture_session() {
+#if USING_ROCM
+    py::gil_scoped_acquire gil;
+    try {
+        py::module_& graph_capture = getGraphCaptureModule();
+        graph_capture.attr("finish_hipgraph_capture_session")();
+    } catch (const py::error_already_set& e) {
+        RTP_LLM_LOG_WARNING("Failed to finish capture session: %s", e.what());
+        throw;
+    }
+#endif
+}
+
 }  // namespace cuda_graph
 }  // namespace rtp_llm

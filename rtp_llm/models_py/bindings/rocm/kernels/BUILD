@@ -32,8 +32,14 @@ cc_library(
 
 cc_library(
     name = "rocm_fused_qk_rmsnorm",
-    srcs = ["fused_qk_rmsnorm.cu"],
-    hdrs = ["fused_qk_rmsnorm.h"],
+    srcs = [
+        "fused_qk_rmsnorm.cu",
+        "fused_qk_rmsnorm_v2.cu",
+    ],
+    hdrs = [
+        "fused_qk_rmsnorm.h",
+        "fused_qk_rmsnorm_v2.h",
+    ],
     deps = rocm_deps + [
         "//rtp_llm/models_py/bindings/cuda:cuda_utils_cu",
     ],

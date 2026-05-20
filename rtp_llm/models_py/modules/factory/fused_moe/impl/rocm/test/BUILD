@@ -63,3 +63,28 @@ py_test (
     ],
 )
 
+py_test (
+    name = "moriep_intranode_router_test_2gpu",
+    srcs = ["moriep_intranode_router_test.py"],
+    main = "moriep_intranode_router_test.py",
+    deps = py_test_deps + [
+        "//rtp_llm/models_py:models",
+    ],
+    timeout = "eternal",
+    env = {"MORIEP_TEST_MAX_GPUS": "2"},
+    tags = ["rocm"],
+    exec_properties = {'gpu':'MI308X-ROCM7', 'gpu_count':'2'},
+)
+
+py_test (
+    name = "moriep_intranode_router_test_4gpu",
+    srcs = ["moriep_intranode_router_test.py"],
+    main = "moriep_intranode_router_test.py",
+    deps = py_test_deps + [
+        "//rtp_llm/models_py:models",
+    ],
+    timeout = "eternal",
+    env = {"MORIEP_TEST_MAX_GPUS": "4"},
+    tags = ["rocm"],
+    exec_properties = {'gpu':'MI308X-ROCM7', 'gpu_count':'4'},
+)

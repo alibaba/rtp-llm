@@ -37,6 +37,7 @@ except ImportError:
 try:
     from rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter import (
         AiterPrefillAttnOp,
+        AiterPrefillImplPaged,
         FMHAParams,
     )
     from rtp_llm.ops import AttentionConfigs, PyAttentionInputs
@@ -290,6 +291,331 @@ class TestAiterPrefillAttnOp(unittest.TestCase):
         # Batch=1 is a common shape in microbenchmarks; the vectorized unpad
         # must still produce contiguous output even with no concat work to do.
         self._check_varlen_with_padded_kv([24], head_num=8, head_num_kv=8, head_dim=64)
+
+
+@unittest.skipUnless(_OPS_IMPORTABLE, "Requires AiterPrefillImplPaged module")
+class TestAiterPrefillImplPagedSupport(unittest.TestCase):
+    """Unit tests for AiterPrefillImplPaged.support() classmethod.
+
+    Validates prefix_lengths boundary logic. MTP draft prefill capture inputs are
+    pre-filled with non-zero prefix in cuda_graph_runner.cc, so support() needs
+    only the prefix>0 check.
+    """
+
+    def _make_attn_inputs(self, prefix_lengths):
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            prefix_lengths=prefix_lengths,
+            is_cuda_graph=False,
+            is_prefill=True,
+            input_lengths=torch.tensor([4], dtype=torch.int32),
+        )
+
+    def test_support_true_for_real_prefix(self):
+        """prefix_lengths.max() > 0 => support() returns True."""
+        pl = torch.tensor([0, 128, 0, 64], dtype=torch.int32)
+        self.assertTrue(AiterPrefillImplPaged.support(None, self._make_attn_inputs(pl)))
+
+    def test_support_true_for_capture_filled_prefix(self):
+        """MTP draft capture pre-fills prefix_lengths with max_seq_len => support() True."""
+        pl = torch.full((4,), 1024, dtype=torch.int32)
+        self.assertTrue(AiterPrefillImplPaged.support(None, self._make_attn_inputs(pl)))
+
+    def test_support_false_for_zero_prefix(self):
+        """All-zero prefix_lengths => support() returns False (ASM/NonAsm preferred)."""
+        pl = torch.zeros(4, dtype=torch.int32)
+        self.assertFalse(AiterPrefillImplPaged.support(None, self._make_attn_inputs(pl)))
+
+    def test_support_false_for_empty_prefix_lengths(self):
+        """Empty prefix_lengths tensor => support() returns False."""
+        pl = torch.empty(0, dtype=torch.int32)
+        self.assertFalse(AiterPrefillImplPaged.support(None, self._make_attn_inputs(pl)))
+
+
+@unittest.skipUnless(_OPS_IMPORTABLE, "Requires AiterPrefillImplPaged module")
+class TestUpdatePrefillParamsForCudaGraph(unittest.TestCase):
+    """Unit tests for AiterPrefillImplPaged._update_prefill_params_for_cuda_graph.
+
+    Uses a lightweight stub to bypass the heavy __init__ chain (aiter, RoPE, etc.).
+    Only exercises the cu_seqlens/prefix/scalar reconstruction logic.
+    """
+
+    def _make_stub(self, batch_size):
+        """Build a minimal object with fmha_params matching capture-time batch_size."""
+        from types import SimpleNamespace
+        fmha_params = SimpleNamespace(
+            cu_seqlens_q=torch.zeros(batch_size + 1, dtype=torch.int32),
+            cu_seqlens_k=torch.zeros(batch_size + 1, dtype=torch.int32),
+            prefix_lengths=None,
+            max_seq_len=0,
+            max_seqlen_q=0,
+            max_seqlen_k=0,
+            token_q_num=0,
+            token_kv_num=0,
+            kv_cache_block_id_device=None,
+        )
+        stub = SimpleNamespace(fmha_params=fmha_params)
+        return stub
+
+    def _make_attn_inputs(self, input_lengths, prefix_lengths=None,
+                          cu_seqlens=None, cu_kv_seqlens=None,
+                          kv_block_id=None):
+        from types import SimpleNamespace
+        batch_size = len(input_lengths)
+        if kv_block_id is None:
+            kv_block_id = torch.zeros(batch_size, 4, dtype=torch.int32)
+        inputs = SimpleNamespace(
+            input_lengths=torch.tensor(input_lengths, dtype=torch.int32),
+            prefix_lengths=prefix_lengths,
+            cu_seqlens=cu_seqlens,
+            cu_kv_seqlens=cu_kv_seqlens,
+            kv_cache_kernel_block_id_device=kv_block_id,
+        )
+        return inputs
+
+    def _call_update(self, stub, attn_inputs):
+        AiterPrefillImplPaged._update_prefill_params_for_cuda_graph(stub, attn_inputs)
+
+    def test_rebuild_from_input_lengths_no_prefix(self):
+        """Rebuild cu_seqlens from input_lengths, no prefix."""
+        stub = self._make_stub(batch_size=4)
+        inputs = self._make_attn_inputs([5, 5, 5, 5])
+        self._call_update(stub, inputs)
+
+        p = stub.fmha_params
+        self.assertEqual(p.cu_seqlens_q.tolist(), [0, 5, 10, 15, 20])
+        self.assertEqual(p.cu_seqlens_k.tolist(), [0, 5, 10, 15, 20])
+        self.assertEqual(p.max_seq_len, 5)
+        self.assertEqual(p.max_seqlen_q, 5)
+        self.assertEqual(p.max_seqlen_k, 5)
+        self.assertEqual(p.token_q_num, 20)
+        self.assertEqual(p.token_kv_num, 20)
+        # prefill_seqlen_k_int32 must be synced from cu_seqlens_k
+        self.assertEqual(p.prefill_seqlen_k_int32.tolist(), [5, 5, 5, 5])
+
+    def test_rebuild_with_prefix(self):
+        """Rebuild cu_seqlens from input_lengths + prefix_lengths."""
+        stub = self._make_stub(batch_size=3)
+        inputs = self._make_attn_inputs(
+            [5, 3, 5],
+            prefix_lengths=torch.tensor([100, 200, 0], dtype=torch.int32),
+        )
+        self._call_update(stub, inputs)
+
+        p = stub.fmha_params
+        self.assertEqual(p.cu_seqlens_q.tolist(), [0, 5, 8, 13])
+        self.assertEqual(p.cu_seqlens_k.tolist(), [0, 105, 308, 313])
+        self.assertEqual(p.max_seq_len, 5)
+        self.assertEqual(p.max_seqlen_k, 203)
+        self.assertEqual(p.token_q_num, 13)
+        self.assertEqual(p.token_kv_num, 313)
+        # prefill_seqlen_k_int32 must match per-batch kv lengths
+        self.assertEqual(p.prefill_seqlen_k_int32.tolist(), [105, 203, 5])
+
+    def test_active_and_inactive_batches(self):
+        """MTP draft: active batches have tokens, inactive batches have 0."""
+        stub = self._make_stub(batch_size=4)
+        inputs = self._make_attn_inputs(
+            [5, 5, 3, 0],
+            prefix_lengths=torch.tensor([100, 100, 100, 100], dtype=torch.int32),
+        )
+        self._call_update(stub, inputs)
+
+        p = stub.fmha_params
+        self.assertEqual(p.cu_seqlens_q.tolist(), [0, 5, 10, 13, 13])
+        self.assertEqual(p.max_seq_len, 5)
+        self.assertEqual(p.token_q_num, 13)
+
+    def test_live_cu_seqlens_path(self):
+        """When live cu_seqlens are provided, use them directly."""
+        stub = self._make_stub(batch_size=2)
+        cu_q = torch.tensor([0, 5, 10], dtype=torch.int32)
+        cu_k = torch.tensor([0, 105, 210], dtype=torch.int32)
+        inputs = self._make_attn_inputs(
+            [5, 5],
+            prefix_lengths=torch.tensor([100, 100], dtype=torch.int32),
+            cu_seqlens=cu_q,
+            cu_kv_seqlens=cu_k,
+        )
+        self._call_update(stub, inputs)
+
+        p = stub.fmha_params
+        self.assertEqual(p.cu_seqlens_q.tolist(), [0, 5, 10])
+        self.assertEqual(p.cu_seqlens_k.tolist(), [0, 105, 210])
+        self.assertEqual(p.prefix_lengths.tolist(), [100, 100])
+        self.assertEqual(p.max_seqlen_k, 105)
+        # prefill_seqlen_k_int32 must be derived from live cu_seqlens_k
+        self.assertEqual(p.prefill_seqlen_k_int32.tolist(), [105, 105])
+
+    def test_prefix_batch_size_mismatch_raises(self):
+        """prefix_lengths batch size != expected_batch raises ValueError."""
+        stub = self._make_stub(batch_size=4)
+        inputs = self._make_attn_inputs(
+            [5, 5, 5, 5],
+            prefix_lengths=torch.tensor([10, 10], dtype=torch.int32),
+        )
+        with self.assertRaises(ValueError):
+            self._call_update(stub, inputs)
+
+    def test_missing_kv_block_id_raises(self):
+        """Missing kv_cache block ids raises ValueError."""
+        from types import SimpleNamespace
+        stub = self._make_stub(batch_size=2)
+        inputs = SimpleNamespace(
+            input_lengths=torch.tensor([5, 5], dtype=torch.int32),
+            prefix_lengths=None,
+            cu_seqlens=None,
+            cu_kv_seqlens=None,
+            kv_cache_kernel_block_id_device=None,
+            kv_cache_block_id_device=None,
+        )
+        with self.assertRaises(ValueError):
+            self._call_update(stub, inputs)
+
+
+@unittest.skipUnless(_OPS_IMPORTABLE, "Requires AiterPrefillAttnOp module")
+class TestCompactGatherReshape(unittest.TestCase):
+    """Regression tests for _gather_and_reshape_kv_compact.
+
+    Validates that the compact gather path produces the same K/V layout as
+    _reshape_kv_cache_vectorized for the referenced blocks, and that the
+    identity block_table is correctly constructed.
+
+    These tests run on CPU (no aiter kernel needed) — they only exercise the
+    tensor reshape / gather logic.
+    """
+
+    def _make_op(self, head_num_kv=4, head_dim=128, tokens_per_block=16):
+        cfg = _make_attn_configs(
+            head_num=8,
+            head_num_kv=head_num_kv,
+            head_dim=head_dim,
+            tokens_per_block=tokens_per_block,
+        )
+        return AiterPrefillAttnOp(cfg, v1_kv_layout=True)
+
+    def _make_kv_cache_5d(self, num_blocks, hk, ps, hd, dtype=torch.float16):
+        """Create a 5D KV cache: [num_blocks, 2, hk, ps, hd]."""
+        return torch.randn(num_blocks, 2, hk, ps, hd, dtype=dtype)
+
+    def _make_kv_cache_2d(self, num_blocks, hk, ps, hd, dtype=torch.float16):
+        """Create a 2D flat KV cache: [num_blocks, 2*hk*ps*hd]."""
+        return torch.randn(num_blocks, 2 * hk * ps * hd, dtype=dtype)
+
+    def _assert_compact_equiv(self, op, kv_cache, block_table):
+        """Assert compact gather output equals full reshape indexed by block_table."""
+        k_full, v_full = op._reshape_kv_cache_vectorized(kv_cache)
+        k_compact, v_compact, compact_bt = op._gather_and_reshape_kv_compact(
+            kv_cache, block_table
+        )
+
+        # compact_bt should be identity: [0, 1, 2, ...] reshaped
+        flat_bt = compact_bt.reshape(-1)
+        expected_ids = torch.arange(flat_bt.numel(), dtype=torch.int32)
+        self.assertTrue(torch.equal(flat_bt, expected_ids))
+
+        # Index full K/V by original block_table and compare
+        orig_indices = block_table.reshape(-1).to(torch.int64)
+        torch.testing.assert_close(k_compact, k_full[orig_indices])
+        torch.testing.assert_close(v_compact, v_full[orig_indices])
+
+    # ---- 5D cache path ----------------------------------------------------
+
+    def test_5d_single_batch(self):
+        op = self._make_op()
+        kv = self._make_kv_cache_5d(32, 4, 16, 128)
+        bt = torch.tensor([[0, 1, 2]], dtype=torch.int32)
+        self._assert_compact_equiv(op, kv, bt)
+
+    def test_5d_multi_batch(self):
+        op = self._make_op()
+        kv = self._make_kv_cache_5d(64, 4, 16, 128)
+        bt = torch.tensor([[0, 5, 10], [1, 6, 11]], dtype=torch.int32)
+        self._assert_compact_equiv(op, kv, bt)
+
+    def test_5d_repeated_blocks(self):
+        """Same block referenced multiple times (e.g. shared prefix)."""
+        op = self._make_op()
+        kv = self._make_kv_cache_5d(16, 4, 16, 128)
+        bt = torch.tensor([[0, 0, 1], [0, 2, 2]], dtype=torch.int32)
+        k_compact, v_compact, compact_bt = op._gather_and_reshape_kv_compact(kv, bt)
+        # Rows that map to the same original block should have identical data
+        k_full, _ = op._reshape_kv_cache_vectorized(kv)
+        orig_indices = bt.reshape(-1).to(torch.int64)
+        torch.testing.assert_close(k_compact, k_full[orig_indices])
+
+    def test_5d_non_contiguous_blocks(self):
+        """Block indices are sparse across a large pool."""
+        op = self._make_op()
+        kv = self._make_kv_cache_5d(1024, 4, 16, 128)
+        bt = torch.tensor([[3, 500, 1023]], dtype=torch.int32)
+        self._assert_compact_equiv(op, kv, bt)
+
+    # ---- 2D flat cache path -----------------------------------------------
+
+    def test_2d_single_batch(self):
+        op = self._make_op()
+        kv = self._make_kv_cache_2d(32, 4, 16, 128)
+        bt = torch.tensor([[0, 1, 2]], dtype=torch.int32)
+        self._assert_compact_equiv(op, kv, bt)
+
+    def test_2d_multi_batch(self):
+        op = self._make_op()
+        kv = self._make_kv_cache_2d(64, 4, 16, 128)
+        bt = torch.tensor([[0, 5, 10], [1, 6, 11]], dtype=torch.int32)
+        self._assert_compact_equiv(op, kv, bt)
+
+    def test_2d_repeated_blocks(self):
+        op = self._make_op()
+        kv = self._make_kv_cache_2d(16, 4, 16, 128)
+        bt = torch.tensor([[0, 0, 1], [0, 2, 2]], dtype=torch.int32)
+        k_compact, v_compact, compact_bt = op._gather_and_reshape_kv_compact(kv, bt)
+        k_full, _ = op._reshape_kv_cache_vectorized(kv)
+        orig_indices = bt.reshape(-1).to(torch.int64)
+        torch.testing.assert_close(k_compact, k_full[orig_indices])
+
+    # ---- FP8 fallback: compact should NOT be used -------------------------
+
+    def test_fp8_uses_full_reshape(self):
+        """When kv_cache is FP8, _forward_paged should use the full reshape path."""
+        op = self._make_op()
+        fp8_dtype = torch.float8_e4m3fn
+        kv = torch.randn(16, 2, 4, 16, 128, dtype=torch.float16).to(fp8_dtype)
+        is_fp8 = kv.dtype in (torch.float8_e4m3fnuz, torch.float8_e4m3fn)
+        self.assertTrue(is_fp8)
+        # Compact path condition: v1_kv_layout=True AND not FP8
+        use_compact = op.v1_kv_layout and not is_fp8
+        self.assertFalse(use_compact)
+
+    # ---- arange cache reuse -----------------------------------------------
+
+    def test_arange_cache_grows(self):
+        """The cached _compact_arange grows to accommodate larger block_tables."""
+        op = self._make_op()
+        kv = self._make_kv_cache_5d(2048, 4, 16, 128)
+        # First call with small block_table
+        bt_small = torch.tensor([[0, 1]], dtype=torch.int32)
+        op._gather_and_reshape_kv_compact(kv, bt_small)
+        first_size = op._compact_arange.numel()
+        # Second call with larger block_table
+        bt_large = torch.arange(2048, dtype=torch.int32).unsqueeze(0)
+        op._gather_and_reshape_kv_compact(kv, bt_large)
+        self.assertGreaterEqual(op._compact_arange.numel(), 2048)
+        self.assertGreaterEqual(op._compact_arange.numel(), first_size)
+
+    # ---- different head_dim / tokens_per_block configs --------------------
+
+    def test_5d_small_head_dim(self):
+        op = self._make_op(head_num_kv=2, head_dim=64, tokens_per_block=8)
+        kv = self._make_kv_cache_5d(32, 2, 8, 64)
+        bt = torch.tensor([[0, 3, 7], [1, 4, 8]], dtype=torch.int32)
+        self._assert_compact_equiv(op, kv, bt)
+
+    def test_2d_small_head_dim(self):
+        op = self._make_op(head_num_kv=2, head_dim=64, tokens_per_block=8)
+        kv = self._make_kv_cache_2d(32, 2, 8, 64)
+        bt = torch.tensor([[0, 3, 7], [1, 4, 8]], dtype=torch.int32)
+        self._assert_compact_equiv(op, kv, bt)
 
 
 if __name__ == "__main__":

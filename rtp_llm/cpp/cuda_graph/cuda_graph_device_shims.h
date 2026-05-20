@@ -95,6 +95,7 @@ py::module_& getCollectiveTorchModule();
 void            register_graph_capture_nccl_comm(void* nccl_comm, int world_size, int rank);
 void            enter_graph_capture(GraphNcclCaptureContext* ctx);
 void            exit_graph_capture(GraphNcclCaptureContext* ctx);
+void            finish_capture_session();
 void            graphMemcpyAsync(void* dst, const void* src, size_t size, GraphMemcpyKind kind, void* stream);
 void            graphDeviceSynchronize();
 void            graphMemGetInfo(size_t* free_bytes, size_t* total_bytes);

@@ -555,12 +555,18 @@ def recompute_topk_ids_sum_expert_count(
     Recompute topk_ids by subtracting current_expert_start_id and count expert tokens.
 
     Args:
-        topk_ids: Tensor of shape [num_tokens, topk] containing expert IDs
+        topk_ids: Tensor of shape [num_tokens, topk] containing expert IDs.
+            Sentinel value -1 is allowed and treated as a padding/invalid slot.
         current_expert_start_id: Starting expert ID to subtract
         num_local_experts: Number of local experts
 
     Returns:
         tuple: (adjusted_topk_ids, expert_count)
+
+    Sentinel contract (relied on by PureDpRouter padding):
+        - Input slots equal to -1 are NOT counted in expert_count.
+        - Output adjusted_topk_ids preserves -1 in those slots (no remap).
+        - Out-of-range expert ids (after subtraction) also collapse to -1.
     """
     device = topk_ids.device
     num_tokens, topk = topk_ids.shape

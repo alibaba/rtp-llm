@@ -10,6 +10,9 @@ from einops import rearrange
 from rtp_llm.models_py.triton_kernels.fla.chunk_delta_h import (
     chunk_gated_delta_rule_fwd_h,
 )
+from rtp_llm.models_py.triton_kernels.fla.chunk_fwd import (
+    chunk_gated_delta_rule_fwd_intra,
+)
 from rtp_llm.models_py.triton_kernels.fla.chunk_o import chunk_fwd_o
 from rtp_llm.models_py.triton_kernels.fla.chunk_scaled_dot_kkt import (
     chunk_scaled_dot_kkt_fwd,
@@ -25,6 +28,8 @@ from rtp_llm.models_py.triton_kernels.fla.utils import (
 )
 from rtp_llm.models_py.triton_kernels.fla.wy_fast import recompute_w_u_fwd
 
+RCP_LN2 = 1.0 / 0.6931471805599453
+
 
 def chunk_gated_delta_rule_fwd(
     q: torch.Tensor,
@@ -37,20 +42,42 @@ def chunk_gated_delta_rule_fwd(
     output_final_state: bool,
     cu_seqlens: Optional[torch.LongTensor] = None,
 ):
-    g = chunk_local_cumsum(g, chunk_size=64, cu_seqlens=cu_seqlens)
-    # obtain WY representation. u is actually the new v.
-    A = chunk_scaled_dot_kkt_fwd(
-        k=k, beta=beta, g_cumsum=g, cu_seqlens=cu_seqlens, output_dtype=torch.float32
-    )
-    A = solve_tril(A=A, cu_seqlens=cu_seqlens, output_dtype=k.dtype)
-    w, u = recompute_w_u_fwd(
-        k=k,
-        v=v,
-        beta=beta,
-        A=A,
-        g_cumsum=g,
-        cu_seqlens=cu_seqlens,
-    )
+    # AMD: scale g to log2 domain (multiply cumsum by 1/ln2) so AMD-side
+    # downstream kernels can use the single-instruction exp2.
+    # NVIDIA: keep the original natural-log domain. The RCP_LN2 (~1.4427) scale
+    # is not bit-exact in bf16/fp16 and accumulates non-trivial drift over long
+    # contexts, which has been observed to change generation outputs on CUDA.
+    if is_amd:
+        g = chunk_local_cumsum(
+            g,
+            chunk_size=64,
+            scale=RCP_LN2,
+            cu_seqlens=cu_seqlens,
+        )
+        # AMD-optimized: fused kkt + solve_tril + recompute_w_u
+        w, u, A = chunk_gated_delta_rule_fwd_intra(
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            cu_seqlens=cu_seqlens,
+        )
+    else:
+        g = chunk_local_cumsum(g, chunk_size=64, cu_seqlens=cu_seqlens)
+        # Original pipeline: separate kkt -> solve_tril -> recompute_w_u
+        A = chunk_scaled_dot_kkt_fwd(
+            k=k, beta=beta, g_cumsum=g, cu_seqlens=cu_seqlens, output_dtype=torch.float32
+        )
+        A = solve_tril(A=A, cu_seqlens=cu_seqlens, output_dtype=k.dtype)
+        w, u = recompute_w_u_fwd(
+            k=k,
+            v=v,
+            beta=beta,
+            A=A,
+            g_cumsum=g,
+            cu_seqlens=cu_seqlens,
+        )
+
     h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
         k=k,
         w=w,

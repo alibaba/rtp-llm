@@ -85,9 +85,19 @@ class RocmFp8PTPCLinear(LinearBase):
         w_scales = self.weight_scales
 
         K = input_fp8.shape[-1]
-        # 192 is aiter's empirical threshold: small-K uses bpreshuffle_cktile
-        # (caller-allocated output); large-K uses gemm_a8w8_bpreshuffle (returns new).
-        if K < 192:
+        # Dispatch rules (validated on MI308X, sweep M=[1..16384], N={1024,2816}, K=1024):
+        # - K < 192                     : aiter cktile (small-K kernel)
+        # - K >= 192, M >= 1536         : aiter cktile FlatmmKernel (small-N crossover at M~1536)
+        # - K >= 192, M >= 512, N > 1536: aiter cktile (large-N crossover at M~512, +22%)
+        # - otherwise                   : aiter default (decode-friendly, protects M<=256)
+        #
+        # Rationale: cktile's 128x128x128 tile amortizes LDS setup cost only when
+        # there are enough output elements. The crossover M depends on N:
+        #   - N <= 1536 (small): cktile wins at M~1536 (+23% at N=1024)
+        #   - N >  1536 (large): cktile wins at M~512  (+22% at N=2816)
+        # M < 512 always stays on default to protect decode (M<=256, +40~97% regression).
+        use_cktile = K < 192 or M >= 1536 or (M >= 512 and N > 1536)
+        if use_cktile:
             output = torch.empty(
                 (M, N), dtype=input_bf16.dtype, device=input_bf16.device
             )

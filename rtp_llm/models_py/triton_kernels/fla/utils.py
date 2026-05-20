@@ -258,6 +258,12 @@ device_torch_lib = getattr(torch, device)
 device_platform = _check_platform()
 
 is_amd = device_platform == "amd"
+is_amd_cdna3 = is_amd and "gfx942" in getattr(
+    torch.cuda.get_device_properties(0), "gcnArchName", ""
+)
+is_amd_cdna4 = is_amd and "gfx950" in getattr(
+    torch.cuda.get_device_properties(0), "gcnArchName", ""
+)
 is_intel = device_platform == "intel"
 is_nvidia = device_platform == "nvidia"
 is_intel_alchemist = is_intel and "Intel(R) Arc(TM) A" in torch.xpu.get_device_name(0)
@@ -327,21 +333,6 @@ else:
     def custom_device_ctx(index: int):
         return torch.cuda.device(index)
 
-
-# Triton autotune cache support
-import inspect as _inspect
-
-try:
-    _SUPPORTS_AUTOTUNE_CACHE = (
-        "cache_results" in _inspect.signature(triton.autotune.__init__).parameters
-    )
-except Exception:
-    _SUPPORTS_AUTOTUNE_CACHE = False
-
-_FLA_CACHE_RESULTS = os.environ.get("FLA_CACHE_RESULTS", "1") == "1"
-autotune_cache_kwargs = (
-    {"cache_results": _FLA_CACHE_RESULTS} if _SUPPORTS_AUTOTUNE_CACHE else {}
-)
 
 # 1/ln(2) constant for log2-space gate computation
 RCP_LN2 = 1.0 / 0.6931471805599453
