@@ -192,3 +192,35 @@ def snapshot_users_excluding(
 ) -> list[torch.fx.Node]:
     excluded = set(exclude)
     return [user for user in list(node.users) if user not in excluded]
+
+
+def all_users_are_layout_or_output_only(
+    node: torch.fx.Node,
+    seen: set[torch.fx.Node] | None = None,
+    skip: set[torch.fx.Node] | None = None,
+) -> bool:
+    """Whether every user of ``node`` is a layout view or graph output.
+
+    Used by cross-graph producer detection: when a producer op's output only
+    leaves the FX graph through the ``output`` node (possibly through
+    layout-only views), the FP8 quant consumer must be in a later subgraph.
+    """
+    if seen is None:
+        seen = set()
+    if skip is None:
+        skip = set()
+    if node in seen:
+        return True
+    seen.add(node)
+    relevant_users = [user for user in node.users if user not in skip]
+    if not relevant_users:
+        return node.op == "placeholder"
+    for user in relevant_users:
+        if user.op == "output":
+            continue
+        if is_layout_only_node(user):
+            if not all_users_are_layout_or_output_only(user, seen, skip):
+                return False
+            continue
+        return False
+    return True

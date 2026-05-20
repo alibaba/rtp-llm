@@ -61,6 +61,9 @@ _RMSNORM_WRAPPER_INSTALLED = False
 _RMSNORM_ORIGINAL = None
 _RMSNORM_MUTATING_CUSTOM_OP = None
 _TORCH_STREAM_COMPAT_INSTALLED = False
+_SILU_AND_MUL_WRAPPER_INSTALLED = False
+_SILU_AND_MUL_ORIGINAL = None
+_SILU_AND_MUL_MUTATING_CUSTOM_OP = None
 _QUANT_FP8_WRAPPER_INSTALLED = False
 _QUANT_FP8_ORIGINAL = None
 _QUANT_FP8_CUSTOM_OP = None
@@ -147,6 +150,7 @@ def ensure_graphfx_fusions_registered() -> None:
     install_torch_stream_cuda_stream_compat()
     install_compile_friendly_fused_add_rmsnorm_wrapper()
     install_compile_friendly_rmsnorm_wrapper()
+    install_compile_friendly_silu_and_mul_wrapper()
     install_compile_friendly_quant_fp8_wrapper()
     install_graphfx_compile_disable_wrappers()
     if _FUSIONS_IMPORTED:
@@ -452,6 +456,116 @@ def install_compile_friendly_rmsnorm_wrapper() -> None:
         logger.info("GraphFX installed compile-friendly rmsnorm wrapper")
     except Exception as exc:
         logger.warning("GraphFX: compile-friendly rmsnorm install failed: %s", exc)
+
+
+# ------------------------------- silu_and_mul compile-friendly wrapper
+
+
+def _build_silu_and_mul_custom_op():
+    global _SILU_AND_MUL_MUTATING_CUSTOM_OP
+    if _SILU_AND_MUL_MUTATING_CUSTOM_OP is not None:
+        return _SILU_AND_MUL_MUTATING_CUSTOM_OP
+    if _SILU_AND_MUL_ORIGINAL is None:
+        return None
+    try:
+        import torch
+
+        def _real_impl(gate_up):
+            d = gate_up.shape[-1] // 2
+            output = torch.empty(
+                gate_up.shape[:-1] + (d,),
+                dtype=gate_up.dtype,
+                device=gate_up.device,
+            )
+            stream_id = torch.cuda.current_stream().cuda_stream
+            _SILU_AND_MUL_ORIGINAL(output, gate_up, stream_id)
+            return output
+
+        def _fake_impl(gate_up):
+            d = gate_up.shape[-1] // 2
+            return torch.empty(
+                gate_up.shape[:-1] + (d,),
+                dtype=gate_up.dtype,
+                device=gate_up.device,
+            )
+
+        annotations = {
+            "gate_up": torch.Tensor,
+            "return": torch.Tensor,
+        }
+        _real_impl.__annotations__ = annotations
+        _fake_impl.__annotations__ = annotations
+        op = torch.library.custom_op(
+            "rtp_llm_graphfx::silu_and_mul",
+            _real_impl,
+            mutates_args=(),
+        )
+        op.register_fake(_fake_impl)
+        _SILU_AND_MUL_MUTATING_CUSTOM_OP = getattr(op, "_opoverload", op)
+        return _SILU_AND_MUL_MUTATING_CUSTOM_OP
+    except Exception as exc:
+        logger.warning("GraphFX silu_and_mul custom op build failed: %s", exc)
+        return None
+
+
+def install_compile_friendly_silu_and_mul_wrapper() -> None:
+    """Replace ``FusedSiluAndMul.forward`` with a non-mutating custom op.
+
+    ``FusedSiluAndMul.forward`` allocates an output tensor then calls
+    ``rtp_llm_ops.silu_and_mul(output, gate_up, stream_id)`` — a pybind that
+    Dynamo cannot trace.  Wrapping the entire alloc+call as a single
+    non-mutating custom op (``gate_up -> output``) lets Dynamo emit one
+    ``call_function`` node that the ``silu_and_mul_fp8_quant_pass`` can match.
+    """
+    global _SILU_AND_MUL_WRAPPER_INSTALLED, _SILU_AND_MUL_ORIGINAL
+    if _SILU_AND_MUL_WRAPPER_INSTALLED:
+        return
+    if not env_flag("ENABLE_GRAPHFX_FUSION"):
+        return
+    try:
+        from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+        original = getattr(rtp_llm_ops, "silu_and_mul", None)
+        if original is None:
+            logger.info(
+                "GraphFX: rtp_llm_ops.silu_and_mul not present, skip wrapper"
+            )
+            return
+        if getattr(original, "_graphfx_wrapped", False):
+            _SILU_AND_MUL_WRAPPER_INSTALLED = True
+            return
+        _SILU_AND_MUL_ORIGINAL = original
+        custom_op = _build_silu_and_mul_custom_op()
+        if custom_op is None:
+            return
+
+        # Replace FusedSiluAndMul.forward to use the non-mutating custom op
+        try:
+            from rtp_llm.models_py.modules.base.cuda.activation import FusedSiluAndMul
+
+            _orig_forward = FusedSiluAndMul.forward
+
+            def _custom_op_forward(self, gate_up):
+                return custom_op(gate_up)
+
+            _custom_op_forward.__name__ = "forward"
+            _custom_op_forward.__qualname__ = "FusedSiluAndMul.forward"
+            FusedSiluAndMul.forward = _custom_op_forward
+            logger.info(
+                "GraphFX replaced FusedSiluAndMul.forward with custom op wrapper"
+            )
+        except Exception as exc:
+            logger.info(
+                "GraphFX: could not patch FusedSiluAndMul.forward: %s", exc
+            )
+
+        _dynamo_allow_in_graph(custom_op)
+        _SILU_AND_MUL_WRAPPER_INSTALLED = True
+        logger.info("GraphFX installed compile-friendly silu_and_mul wrapper")
+    except Exception as exc:
+        logger.warning(
+            "GraphFX: compile-friendly silu_and_mul install failed: %s", exc
+        )
 
 
 # ------------------------------- sgl_per_token_group_quant_fp8 compile-friendly wrapper
@@ -871,6 +985,12 @@ def install_graphfx_compile_disable_wrappers() -> None:
         "Indexer",
         ("_prefill_cp_enabled", "_is_sparse_prefill_cp"),
     )
+    # ---- FP8 DeepGEMM linear (GEMM-only, quant is hoisted to wrapper) ---------
+    installed += _install_compile_disable_methods(
+        "rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear",
+        "CudaFp8DeepGEMMLinear",
+        ("forward",),
+    )
     _COMPILE_DISABLE_INSTALLED = True
     logger.info("GraphFX compile-disabled %d non-compute helpers", installed)
 
@@ -942,6 +1062,46 @@ def _allow_graphfx_fusion_candidates_in_graph() -> None:
     except Exception as exc:
         logger.warning(
             "GraphFX allow_in_graph strided rmsnorm registration failed: %s", exc
+        )
+    try:
+        from rtp_llm.models_py.modules.fuse_kernel_fx.quant_provenance import (
+            remember_quant,
+        )
+        from rtp_llm.models_py.modules.fuse_kernel_fx.rmsnorm_gated_fp8_quant_pass import (
+            graphfx_rmsnorm_gated_producer_token,
+        )
+        from rtp_llm.models_py.modules.fuse_kernel_fx.sigmoid_mul_fp8_quant_pass import (
+            graphfx_sigmoid_mul_producer_token,
+        )
+        from rtp_llm.models_py.modules.fuse_kernel_fx.silu_and_mul_fp8_quant_pass import (
+            graphfx_silu_and_mul_producer_token,
+        )
+        from rtp_llm.models_py.triton_kernels.common.activation import (
+            silu_and_mul_per_token_group_fp8_quant_dense_packed_fwd,
+        )
+        from rtp_llm.models_py.triton_kernels.common.attn_output_gate import (
+            sigmoid_mul_fp8_quant_fwd,
+        )
+        from rtp_llm.models_py.triton_kernels.common.fused_rmsnorm_gated_fp8_quant import (
+            fused_rmsnorm_gated_fp8_quant,
+        )
+
+        for fn in (
+            graphfx_sigmoid_mul_producer_token,
+            graphfx_silu_and_mul_producer_token,
+            graphfx_rmsnorm_gated_producer_token,
+            sigmoid_mul_fp8_quant_fwd,
+            silu_and_mul_per_token_group_fp8_quant_dense_packed_fwd,
+            fused_rmsnorm_gated_fp8_quant,
+            remember_quant,
+        ):
+            try:
+                _dynamo_allow_in_graph(fn)
+            except Exception:
+                continue
+    except Exception as exc:
+        logger.warning(
+            "GraphFX allow_in_graph cross-graph producer registration failed: %s", exc
         )
     _DYNAMO_LEAFS_REGISTERED = True
 

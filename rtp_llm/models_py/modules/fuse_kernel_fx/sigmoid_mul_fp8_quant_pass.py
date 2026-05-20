@@ -9,6 +9,12 @@ When ``o_proj`` is FP8 DeepGEMM, the visible quant is
 ``sgl_per_token_group_quant_fp8(attn_output, group_size=128, ...)``.  This pass
 replaces the chain with ``sigmoid_mul_fp8_quant_fwd`` whenever the fused
 kernel's contract holds (last-dim divisible by 128).
+
+Cross-graph support: when the quant lives in a different FX subgraph (inside
+CudaFp8GEMMLinear.forward in eager mode after a graph break), the pass emits
+a producer token that computes sigmoid*mul + quant and stores (fp8, scale) in
+the shared provenance registry.  CudaFp8GEMMLinear.forward looks up the
+registry before computing its own quant.
 """
 
 from __future__ import annotations
@@ -19,6 +25,7 @@ import operator
 import torch
 
 from rtp_llm.models_py.modules.fuse_kernel_fx._pass_helpers import (
+    all_users_are_layout_or_output_only,
     first_quant_consumer_of,
     quant_contract_ok,
     replace_quant_uses,
@@ -91,14 +98,7 @@ def _decompose_mul_sigmoid(node: torch.fx.Node):
 
 
 def _producer_inputs(node: torch.fx.Node):
-    """Return ``(attn_node, gate_node)`` from either producer pattern, else None.
-
-    Producer pattern is either:
-      * ``sigmoid_mul_inplace_triton(attn, gate)`` (eager triton baseline), OR
-      * ``attn * torch.sigmoid(gate)`` (pure-PyTorch baseline that becomes the
-        default once ``causal_attention`` strips its ``_fuse_sigmoid_mul_quant``
-        fast path under the DSV4-style refactor).
-    """
+    """Return ``(attn_node, gate_node)`` from either producer pattern, else None."""
     if _is_sigmoid_mul_triton_node(node):
         if len(node.args) < 2:
             return None
@@ -148,17 +148,94 @@ def _try_rewrite(gm: torch.fx.GraphModule, node: torch.fx.Node) -> bool:
     return True
 
 
+# ---- cross-graph producer token ------------------------------------------
+
+
+def graphfx_sigmoid_mul_producer_token(
+    attn: torch.Tensor,
+    gate: torch.Tensor,
+    *,
+    scale_ue8m0: bool = False,
+) -> torch.Tensor:
+    """Producer token: compute sigmoid*mul + quant, store (fp8, scale), return bf16."""
+    from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
+        sgl_per_token_group_quant_fp8,
+    )
+    from rtp_llm.models_py.modules.fuse_kernel_fx.quant_provenance import (
+        remember_quant,
+    )
+
+    result = attn * torch.sigmoid(gate)
+    fp8, scale = sgl_per_token_group_quant_fp8(
+        result,
+        group_size=128,
+        eps=1e-4,
+        column_major_scales=True,
+        scale_tma_aligned=True,
+        scale_ue8m0=scale_ue8m0,
+    )
+    remember_quant(result, fp8, scale)
+    return result
+
+
+def _rewrite_cross_graph_producer(
+    gm: torch.fx.GraphModule, node: torch.fx.Node
+) -> bool:
+    """Replace sigmoid*mul whose output only leaves through graph output."""
+    inputs = _producer_inputs(node)
+    if inputs is None:
+        return False
+    attn_node, gate_node = inputs
+    last_dim = static_last_dim(attn_node)
+    if last_dim is not None and last_dim % 128 != 0:
+        return False
+    if not all_users_are_layout_or_output_only(node, skip=set()):
+        return False
+
+    with gm.graph.inserting_before(node):
+        token = gm.graph.call_function(
+            graphfx_sigmoid_mul_producer_token,
+            args=(attn_node, gate_node),
+            kwargs={"scale_ue8m0": False},
+        )
+    for user in list(node.users):
+        if user is token:
+            continue
+        user.replace_input_with(node, token)
+    if not node.users:
+        gm.graph.erase_node(node)
+    return True
+
+
+# ---- pass entry point -----------------------------------------------------
+
+
 def apply_sigmoid_mul_fp8_quant_fx_pass(
     gm: torch.fx.GraphModule,
 ) -> torch.fx.GraphModule:
-    replaced = 0
+    same_graph = 0
     for node in list(gm.graph.nodes):
         if _try_rewrite(gm, node):
-            replaced += 1
-    if replaced:
+            same_graph += 1
+    if same_graph:
         eliminate_dead_code_preserving_graphfx_side_effects(gm)
-        record_graphfx_fusion_hit("sigmoid_mul_fp8_quant_fx", replaced)
-        logger.info("GraphFX sigmoid_mul+FP8 quant pass: %d", replaced)
+
+    producer = 0
+    for node in list(gm.graph.nodes):
+        inputs = _producer_inputs(node)
+        if inputs is not None and _rewrite_cross_graph_producer(gm, node):
+            producer += 1
+    if producer:
+        eliminate_dead_code_preserving_graphfx_side_effects(gm)
+
+    total = same_graph + producer
+    if total:
+        record_graphfx_fusion_hit("sigmoid_mul_fp8_quant_fx", total)
+        logger.info(
+            "GraphFX sigmoid_mul+FP8 quant pass: same_graph=%d producer=%d",
+            same_graph,
+            producer,
+        )
     return gm
 
 

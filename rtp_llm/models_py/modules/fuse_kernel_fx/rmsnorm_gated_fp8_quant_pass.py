@@ -26,6 +26,7 @@ import operator
 import torch
 
 from rtp_llm.models_py.modules.fuse_kernel_fx._pass_helpers import (
+    all_users_are_layout_or_output_only,
     first_quant_consumer_of,
     is_call_function,
     is_getitem,
@@ -155,17 +156,114 @@ def _try_rewrite(gm: torch.fx.GraphModule, node: torch.fx.Node) -> bool:
     return True
 
 
+# ---- cross-graph producer token ------------------------------------------
+
+
+def graphfx_rmsnorm_gated_producer_token(
+    x: torch.Tensor,
+    gate: torch.Tensor,
+    weight: torch.Tensor,
+    *,
+    eps: float = 1e-6,
+    scale_ue8m0: bool = False,
+) -> torch.Tensor:
+    """Producer token: compute RmsNormGated + quant, store (fp8, scale), return bf16."""
+    from flash_attn.ops.triton.layer_norm import layer_norm_fwd
+
+    from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
+        sgl_per_token_group_quant_fp8,
+    )
+    from rtp_llm.models_py.modules.fuse_kernel_fx.quant_provenance import (
+        remember_quant,
+    )
+
+    result, _, _ = layer_norm_fwd(
+        x, weight, None, eps, z=gate, is_rms_norm=True, norm_before_gate=True,
+    )
+    fp8, scale = sgl_per_token_group_quant_fp8(
+        result,
+        group_size=128,
+        eps=1e-4,
+        column_major_scales=True,
+        scale_tma_aligned=True,
+        scale_ue8m0=scale_ue8m0,
+    )
+    remember_quant(result, fp8, scale)
+    return result
+
+
+def _rewrite_cross_graph_producer(
+    gm: torch.fx.GraphModule, node: torch.fx.Node
+) -> bool:
+    """Replace RmsNormGated whose bf16 output only leaves through graph output."""
+    if not _is_layer_norm_fwd_node(node):
+        return False
+    if not _is_rms_norm_gated(node):
+        return False
+    args = list(node.args)
+    if len(args) < 2:
+        return False
+    x_node = args[0]
+    weight_node = args[1]
+    eps = args[3] if len(args) > 3 else node.kwargs.get("eps", 1e-6)
+    gate_node = node.kwargs.get("z")
+    if gate_node is None:
+        return False
+    bf16_node = None
+    for user in list(node.users):
+        if is_getitem(user, node, 0):
+            bf16_node = user
+            break
+    if bf16_node is None:
+        bf16_node = node
+    if not all_users_are_layout_or_output_only(bf16_node, skip=set()):
+        return False
+
+    with gm.graph.inserting_before(node):
+        token = gm.graph.call_function(
+            graphfx_rmsnorm_gated_producer_token,
+            args=(x_node, gate_node, weight_node),
+            kwargs={"eps": float(eps), "scale_ue8m0": False},
+        )
+    for user in list(bf16_node.users):
+        if user is token:
+            continue
+        user.replace_input_with(bf16_node, token)
+    if bf16_node is not node and not bf16_node.users:
+        gm.graph.erase_node(bf16_node)
+    if not node.users:
+        gm.graph.erase_node(node)
+    return True
+
+
+# ---- pass entry point -----------------------------------------------------
+
+
 def apply_rmsnorm_gated_fp8_quant_fx_pass(
     gm: torch.fx.GraphModule,
 ) -> torch.fx.GraphModule:
-    replaced = 0
+    same_graph = 0
     for node in list(gm.graph.nodes):
         if _try_rewrite(gm, node):
-            replaced += 1
-    if replaced:
+            same_graph += 1
+    if same_graph:
         eliminate_dead_code_preserving_graphfx_side_effects(gm)
-        record_graphfx_fusion_hit("rmsnorm_gated_fp8_quant_fx", replaced)
-        logger.info("GraphFX rmsnorm_gated+FP8 quant pass: %d", replaced)
+
+    producer = 0
+    for node in list(gm.graph.nodes):
+        if _is_layer_norm_fwd_node(node) and _rewrite_cross_graph_producer(gm, node):
+            producer += 1
+    if producer:
+        eliminate_dead_code_preserving_graphfx_side_effects(gm)
+
+    total = same_graph + producer
+    if total:
+        record_graphfx_fusion_hit("rmsnorm_gated_fp8_quant_fx", total)
+        logger.info(
+            "GraphFX rmsnorm_gated+FP8 quant pass: same_graph=%d producer=%d",
+            same_graph,
+            producer,
+        )
     return gm
 
 
