@@ -37,8 +37,8 @@ Boundary writer source dispatch (raw vs state cache):
              prefix-cache hit: they were written into the framework state pool
              by a prior request, and the framework reuses those physical
              blocks via this request's sparse absolute ``block_table``.
-             ``block_table`` entries that point at unused blocks are 0 and
-             filtered.
+             Positions routed to cache must resolve to a non-negative physical
+             block; negative ids are invalid.
 
   Decode passes ``disable_raw_path=True`` → ``n_raw == 0``, so every
   position routes through the cache branch.
@@ -60,6 +60,18 @@ import triton
 import triton.language as tl
 
 
+@triton.jit
+def _trap_invalid_kv_access() -> None:
+    tl.inline_asm_elementwise(
+        "trap; // dummy $0",
+        "=r",
+        [],
+        dtype=tl.int32,
+        is_pure=False,
+        pack=1,
+    )
+
+
 # =============================================================================
 # Per-token state-cache writer (fp32). ape is added to score in-kernel.
 # =============================================================================
@@ -77,6 +89,7 @@ def _save_partial_states_kernel(
     state_cache_stride1,
     slot_mapping_ptr,
     block_size,
+    num_state_blocks: tl.constexpr,
     HEAD_SIZE: tl.constexpr,
     TRITON_BLOCK_SIZE: tl.constexpr,
     STATE_WIDTH: tl.constexpr,
@@ -89,6 +102,11 @@ def _save_partial_states_kernel(
 
     block_idx = (slot_id // block_size).to(tl.int64)
     pos_in_block = slot_id % block_size
+    if block_idx < 0:
+        _trap_invalid_kv_access()
+    if block_idx >= num_state_blocks:
+        _trap_invalid_kv_access()
+
     base_ptr = (
         state_cache_ptr
         + block_idx * state_cache_stride0
@@ -170,6 +188,8 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     TOKEN_STRIDE: tl.constexpr,
     SCALE_DIM: tl.constexpr,
     KV_BLOCK_STRIDE: tl.constexpr,
+    NUM_STATE_BLOCKS: tl.constexpr,
+    NUM_KV_BLOCKS: tl.constexpr,
     BATCHED: tl.constexpr,
 ):
     token_idx = tl.program_id(0).to(tl.int64)
@@ -240,18 +260,27 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     score_from_raw = score_from_raw + ape_vals
 
     # State-cache path: prefix-cache hit region. The framework supplies sparse
-    # absolute logical-block tables; old non-tail entries are sentinels. Do
-    # not clamp here: a block index beyond the table width means the framework
-    # failed to grow the table before this launch.
+    # absolute logical-block tables. Any non-negative physical block id is
+    # readable; negative entries are invalid. Do not clamp here: a
+    # block index beyond the table width means the framework failed to grow the
+    # table before this launch.
     use_cache = mask_pos & ~use_raw
     block_indices = pos // block_size
+    out_of_table = use_cache & (block_indices >= block_table_stride)
+    if tl.max(out_of_table.to(tl.int32), axis=0) != 0:
+        _trap_invalid_kv_access()
     block_indices_safe = tl.where(use_cache, block_indices, 0)
     block_numbers = tl.load(
         block_table_ptr + req_idx * block_table_stride + block_indices_safe,
         mask=use_cache,
         other=0,
     )
-    valid_block = block_numbers > 0
+    invalid_state_block = use_cache & (
+        (block_numbers < 0) | (block_numbers >= NUM_STATE_BLOCKS)
+    )
+    if tl.max(invalid_state_block.to(tl.int32), axis=0) != 0:
+        _trap_invalid_kv_access()
+    valid_block = use_cache
     block_numbers_i64 = tl.where(valid_block, block_numbers, 0).to(tl.int64)
     block_offsets_raw = pos % block_size
     block_offsets = tl.where(mask_pos, block_offsets_raw, 0)
@@ -293,6 +322,10 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
         return
     kv_block_idx = kv_slot_idx // kv_cache_block_size
     kv_pos_in_block = kv_slot_idx % kv_cache_block_size
+    if kv_block_idx < 0:
+        _trap_invalid_kv_access()
+    if kv_block_idx >= NUM_KV_BLOCKS:
+        _trap_invalid_kv_access()
 
     cache_block_ptr = k_cache_ptr + kv_block_idx.to(tl.int64) * KV_BLOCK_STRIDE
     fp8_ptr = cache_block_ptr + kv_pos_in_block * TOKEN_STRIDE
@@ -426,6 +459,8 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
     TOKEN_STRIDE: tl.constexpr,
     SCALE_DIM: tl.constexpr,
     KV_BLOCK_STRIDE: tl.constexpr,
+    NUM_STATE_BLOCKS: tl.constexpr,
+    NUM_KV_BLOCKS: tl.constexpr,
     BATCHED: tl.constexpr,
 ):
     token_idx = tl.program_id(0).to(tl.int64)
@@ -494,18 +529,27 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
     score_from_raw = score_from_raw + ape_vals
 
     # State-cache path: prefix-cache hit region. The framework supplies sparse
-    # absolute logical-block tables; old non-tail entries are sentinels. Do
-    # not clamp here: a block index beyond the table width means the framework
-    # failed to grow the table before this launch.
+    # absolute logical-block tables. Any non-negative physical block id is
+    # readable; negative entries are invalid. Do not clamp here: a
+    # block index beyond the table width means the framework failed to grow the
+    # table before this launch.
     use_cache = mask_pos & ~use_raw
     block_indices = pos // block_size
+    out_of_table = use_cache & (block_indices >= block_table_stride)
+    if tl.max(out_of_table.to(tl.int32), axis=0) != 0:
+        _trap_invalid_kv_access()
     block_indices_safe = tl.where(use_cache, block_indices, 0)
     block_numbers = tl.load(
         block_table_ptr + req_idx * block_table_stride + block_indices_safe,
         mask=use_cache,
         other=0,
     )
-    valid_block = block_numbers > 0
+    invalid_state_block = use_cache & (
+        (block_numbers < 0) | (block_numbers >= NUM_STATE_BLOCKS)
+    )
+    if tl.max(invalid_state_block.to(tl.int32), axis=0) != 0:
+        _trap_invalid_kv_access()
+    valid_block = use_cache
     block_numbers_i64 = tl.where(valid_block, block_numbers, 0).to(tl.int64)
     block_offsets_raw = pos % block_size
     block_offsets = tl.where(mask_pos, block_offsets_raw, 0)
@@ -551,6 +595,10 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
         return
     kv_block_idx = kv_slot_idx // kv_cache_block_size
     kv_pos_in_block = kv_slot_idx % kv_cache_block_size
+    if kv_block_idx < 0:
+        _trap_invalid_kv_access()
+    if kv_block_idx >= NUM_KV_BLOCKS:
+        _trap_invalid_kv_access()
 
     cache_block_ptr = k_cache_ptr + kv_block_idx.to(tl.int64) * KV_BLOCK_STRIDE
     fp8_ptr = cache_block_ptr + kv_pos_in_block * TOKEN_STRIDE
@@ -668,6 +716,7 @@ def run_save_partial_states(
         state_cache.stride(1),
         slot_mapping,
         block_size,
+        num_state_blocks=int(state_cache.shape[0]),
         HEAD_SIZE=head_size,
         TRITON_BLOCK_SIZE=triton.next_power_of_2(head_size),
         STATE_WIDTH=state_width,
@@ -799,6 +848,8 @@ def run_fused_compress_kv_write(
         TOKEN_STRIDE=cfg["token_stride"],
         SCALE_DIM=cfg["scale_dim"],
         KV_BLOCK_STRIDE=kv_block_stride,
+        NUM_STATE_BLOCKS=int(state_cache.shape[0]),
+        NUM_KV_BLOCKS=int(kv_cache.shape[0]),
         BATCHED=batched,
         num_warps=_fused_num_warps(head_dim, compress_ratio, cfg),
     )

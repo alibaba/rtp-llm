@@ -142,7 +142,9 @@ class PoolBackedModule(nn.Module):
         b_idx = torch.arange(bsz, device=device, dtype=torch.long).unsqueeze(1)
         block_id = bt_long[:bsz][b_idx, block_in_seq.unsqueeze(0)]
         in_capacity = in_capacity_row.unsqueeze(0).expand(bsz, -1)
-        valid = (block_id > 0) & in_capacity
+        # Block 0 is a valid physical block and may appear during warmup;
+        # only negative block ids are skip sentinels.
+        valid = (block_id >= 0) & in_capacity
         safe_slot = torch.where(
             valid, block_id * eb + in_block.unsqueeze(0), torch.zeros_like(block_id)
         )

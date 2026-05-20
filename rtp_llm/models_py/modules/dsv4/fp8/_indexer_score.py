@@ -103,7 +103,6 @@ def fp8_paged_indexer_score(
     assert kv_pool_uint8.shape[-1] == INDEXER_ENTRY_BYTES
     assert block_table.dtype == torch.int32 and block_table.dim() == 2
     assert context_lens.dtype == torch.int32 and context_lens.dim() == 2
-
     # DeepGEMM kv_cache shape: [num_blocks, block_size, 1, D+4] uint8.
     # Our pool is a flat [total_slots, 132] view; reshape into the 4D
     # layout (no copy — just a metadata change).

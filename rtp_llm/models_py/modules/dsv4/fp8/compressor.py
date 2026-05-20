@@ -455,7 +455,7 @@ class CompressorFP8(nn.Module):
         in_capacity = block_in_seq < max_blocks
         safe_block_in_seq = block_in_seq.clamp(min=0, max=max_blocks - 1)
         block_id = bt_long[b_idx, safe_block_in_seq]
-        valid = in_capacity & (block_id > 0)
+        valid = in_capacity & (block_id >= 0)
         slot = block_id * eb + in_block
         return torch.where(valid, slot, torch.full_like(slot, -1))
 
@@ -504,7 +504,7 @@ class CompressorFP8(nn.Module):
         safe_block_in_seq = block_in_seq.clamp(min=0, max=max_blocks - 1)
         block_id = bt_long[b_idx, safe_block_in_seq]
         slot = block_id * kv_eb + in_block
-        valid = boundary & in_capacity & (block_id > 0)
+        valid = boundary & in_capacity & (block_id >= 0)
         if self._kv_pool_3d is not None:
             pool_rows = int(self._kv_pool_3d.numel() // self._kv_pool_3d.shape[-1])
             valid = valid & (slot < pool_rows)

@@ -85,10 +85,15 @@ class SwaFp8KvRoundtripTest(unittest.TestCase):
     ) -> torch.Tensor:
         """quantize+insert sequential slots → dequant+gather → return [T, 512] bf16."""
         num_tokens = compressed_kv.shape[0]
-        num_blocks = (num_tokens + block_size - 1) // block_size + 1
+        data_blocks = (num_tokens + block_size - 1) // block_size
+        num_blocks = data_blocks + 1
 
         k_cache = self._alloc_cache(num_blocks, block_size)
-        slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=self.device)
+        # Production block id 0 is invalid; valid physical blocks are positive.
+        slot_mapping = (
+            torch.arange(num_tokens, dtype=torch.int64, device=self.device)
+            + block_size
+        )
         quantize_and_insert_k_cache(compressed_kv, k_cache, slot_mapping)
 
         out = torch.zeros(
@@ -96,7 +101,7 @@ class SwaFp8KvRoundtripTest(unittest.TestCase):
         )
         seq_lens = torch.tensor([num_tokens], dtype=torch.int32, device=self.device)
         block_table = torch.arange(
-            num_blocks, dtype=torch.int32, device=self.device
+            1, data_blocks + 1, dtype=torch.int32, device=self.device
         ).unsqueeze(0)
         dequantize_and_gather_k_cache(
             out=out,
@@ -196,7 +201,7 @@ class SwaFp8KvRoundtripTest(unittest.TestCase):
         )
         # Token 1 and 4 marked for skip; their slots stay zero.
         slot_mapping = torch.tensor(
-            [0, -1, 1, 2, -1, 3], dtype=torch.int64, device=self.device
+            [16, -1, 17, 18, -1, 19], dtype=torch.int64, device=self.device
         )
         num_blocks = 2
         k_cache = self._alloc_cache(num_blocks, block_size)
@@ -207,10 +212,10 @@ class SwaFp8KvRoundtripTest(unittest.TestCase):
         quantize_and_insert_k_cache(compressed_kv, k_cache, slot_mapping)
 
         # Read back valid slots via gather and confirm they decode close
-        # to original; valid slot positions are 0,1,2,3 (block 0).
+        # to original; valid slot positions are 0,1,2,3 in physical block 1.
         out = torch.zeros(1, 4, HEAD_DIM, dtype=torch.bfloat16, device=self.device)
         seq_lens = torch.tensor([4], dtype=torch.int32, device=self.device)
-        block_table = torch.tensor([[0, 1]], dtype=torch.int32, device=self.device)
+        block_table = torch.tensor([[1, -1]], dtype=torch.int32, device=self.device)
         dequantize_and_gather_k_cache(
             out=out,
             k_cache=k_cache,
@@ -225,7 +230,7 @@ class SwaFp8KvRoundtripTest(unittest.TestCase):
         self._assert_rope_exact(kv_valid, out[0])
         self._assert_nope_within_ue8m0_bound(kv_valid, out[0])
 
-        # Slots 4..15 of block 0 (untouched) plus all of block 1 must
+        # Slots 4..15 of block 1 (untouched) plus all of block 0 must
         # still be sentinel — confirming -1 skipped tokens didn't
         # accidentally write somewhere.
         # The kernel uses a packed-per-block layout: each block holds
@@ -235,22 +240,22 @@ class SwaFp8KvRoundtripTest(unittest.TestCase):
         # regions: data bytes [4*576, 9216) and scales bytes [9216+4*8, 9344).
         TOKEN_DATA_SIZE = 576  # 448 fp8 + 128 bf16 (RoPE)
         TOKEN_SCALE_SIZE = 8
-        block0_flat = k_cache[0].reshape(-1)
+        block1_flat = k_cache[1].reshape(-1)
         data_region_end = block_size * TOKEN_DATA_SIZE  # 9216 for block_size=16
         scales_touched_end = data_region_end + 4 * TOKEN_SCALE_SIZE  # 9248
-        untouched_data = block0_flat[4 * TOKEN_DATA_SIZE : data_region_end]
-        untouched_scales = block0_flat[scales_touched_end:]
+        untouched_data = block1_flat[4 * TOKEN_DATA_SIZE : data_region_end]
+        untouched_scales = block1_flat[scales_touched_end:]
         self.assertTrue(
             torch.all(untouched_data == sentinel),
-            msg="Untouched slot-data bytes in block 0 should remain sentinel.",
+            msg="Untouched slot-data bytes in block 1 should remain sentinel.",
         )
         self.assertTrue(
             torch.all(untouched_scales == sentinel),
-            msg="Untouched scale bytes in block 0 should remain sentinel.",
+            msg="Untouched scale bytes in block 1 should remain sentinel.",
         )
         self.assertTrue(
-            torch.all(k_cache[1] == sentinel),
-            msg="Block 1 should remain sentinel (no token wrote to it).",
+            torch.all(k_cache[0] == sentinel),
+            msg="Block 0 should remain sentinel (not targeted by this test).",
         )
 
     def test_sparse_paged_block_table(self):
@@ -263,8 +268,8 @@ class SwaFp8KvRoundtripTest(unittest.TestCase):
         block_size = 64
         num_tokens = 200  # 4 logical blocks (last partial)
         n_logical = (num_tokens + block_size - 1) // block_size  # 4
-        # Physical blocks intentionally permuted (3, 1, 7, 0).
-        physical_ids = [3, 1, 7, 0]
+        # Physical blocks intentionally permuted.
+        physical_ids = [3, 1, 7, 5]
         num_blocks = max(physical_ids) + 1
 
         compressed_kv = torch.randn(

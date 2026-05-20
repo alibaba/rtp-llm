@@ -24,6 +24,18 @@ import triton
 import triton.language as tl
 
 
+@triton.jit
+def _trap_invalid_kv_access() -> None:
+    tl.inline_asm_elementwise(
+        "trap; // dummy $0",
+        "=r",
+        [],
+        dtype=tl.int32,
+        is_pure=False,
+        pack=1,
+    )
+
+
 @triton.jit(do_not_specialize=["num_tokens"])
 def _quantize_and_insert_k_kernel(
     # Inputs
@@ -41,6 +53,7 @@ def _quantize_and_insert_k_kernel(
     cache_block_size: tl.constexpr,  # tokens per pool block (RTP-LLM: 256)
     token_data_size: tl.constexpr,  # 576 = 448 + 128
     block_stride: tl.constexpr,  # bytes per block (TMA-padded; from k_cache.stride(0))
+    num_cache_blocks: tl.constexpr,
     fp8_max: tl.constexpr,  # 448.0
     n_quant_blocks: tl.constexpr,  # 8 (7 real + 1 padding tile-loop iter)
 ):
@@ -60,6 +73,10 @@ def _quantize_and_insert_k_kernel(
 
     block_idx = slot_idx // cache_block_size
     pos_in_block = slot_idx % cache_block_size
+    if block_idx < 0:
+        _trap_invalid_kv_access()
+    if block_idx >= num_cache_blocks:
+        _trap_invalid_kv_access()
 
     input_row_ptr = k_ptr + pid * input_dim
 
@@ -141,9 +158,9 @@ def quantize_and_insert_k_cache(
     ``k_cache.stride(0)`` so the C++-side TMA padding (576B alignment via
     ``block_size_bytes``) is honored automatically.
 
-    Slots with value ``-1`` are skipped (matches the SWA paged-tail
-    eviction contract: tokens older than the last ``2*eb`` window are
-    not stored).
+    Slots with value ``-1`` are skipped. The caller decides which logical
+    blocks are writable by passing a per-token slot mapping; sparse positive
+    block-table entries are written just like contiguous tail entries.
     """
     assert (
         k.dim() == 2 and k.shape[1] == _INPUT_DIM
@@ -179,6 +196,7 @@ def quantize_and_insert_k_cache(
         cache_block_size=block_size,
         token_data_size=_TOKEN_DATA_SIZE,
         block_stride=block_stride,
+        num_cache_blocks=int(k_cache.shape[0]),
         fp8_max=_FP8_MAX,
         n_quant_blocks=8,
     )

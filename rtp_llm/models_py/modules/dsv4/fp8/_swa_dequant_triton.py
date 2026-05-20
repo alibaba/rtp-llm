@@ -38,7 +38,7 @@ FP8_MAX = 448.0
 
 
 @triton.jit
-def _trap_negative_block() -> None:
+def _trap_invalid_kv_access() -> None:
     tl.inline_asm_elementwise(
         "trap; // dummy $0",
         "=r",
@@ -67,6 +67,7 @@ def _dequantize_and_gather_k_kernel(
     cache_block_size: tl.constexpr,
     token_data_size: tl.constexpr,
     block_stride: tl.constexpr,
+    num_cache_blocks: tl.constexpr,
     output_dim: tl.constexpr,
     fp8_max: tl.constexpr,
     n_quant_blocks: tl.constexpr,
@@ -90,10 +91,17 @@ def _dequantize_and_gather_k_kernel(
         block_in_seq = pos // cache_block_size
         pos_in_block = pos % cache_block_size
 
+        if pos < 0:
+            _trap_invalid_kv_access()
+        if block_in_seq >= max_blocks_per_seq:
+            _trap_invalid_kv_access()
+
         block_table_row_ptr = block_table_ptr + batch_idx * max_blocks_per_seq
         physical_block_idx = tl.load(block_table_row_ptr + block_in_seq)
-        if physical_block_idx == -1:
-            _trap_negative_block()
+        if physical_block_idx < 0:
+            _trap_invalid_kv_access()
+        if physical_block_idx >= num_cache_blocks:
+            _trap_invalid_kv_access()
 
         # int64: physical_block_idx * block_stride can exceed 2^31 with many
         # KV-cache blocks. Match vLLM.
@@ -217,6 +225,7 @@ def dequantize_and_gather_k_cache(
         cache_block_size=block_size,
         token_data_size=TOKEN_DATA_SIZE,
         block_stride=k_cache.stride(0),
+        num_cache_blocks=int(k_cache.shape[0]),
         output_dim=HEAD_DIM,
         fp8_max=FP8_MAX,
         n_quant_blocks=NOPE_TILES,
@@ -300,6 +309,7 @@ def _dequantize_slots_kernel(
     scale_dim: tl.constexpr,  # 8
     quant_block: tl.constexpr,  # 64
     token_data_size: tl.constexpr,  # 576
+    num_cache_blocks: tl.constexpr,
     n_quant_blocks: tl.constexpr,  # 7
 ):
     """One program per output slot. Sentinel slots (slot < 0) write zeros."""
@@ -318,6 +328,10 @@ def _dequantize_slots_kernel(
 
     blk = (slot // block_size).to(tl.int64)
     off = slot % block_size
+    if blk < 0:
+        _trap_invalid_kv_access()
+    if blk >= num_cache_blocks:
+        _trap_invalid_kv_access()
 
     cache_block_ptr = pool_ptr + blk * pool_block_stride
     token_data_ptr = cache_block_ptr + off * token_data_size
@@ -376,12 +390,7 @@ def dequantize_slots_to_bf16(
     out = torch.empty((N, HEAD_DIM), dtype=torch.bfloat16, device=pool_3d.device)
     if N == 0:
         return out
-    slots_i64 = slot_indices.reshape(-1).to(torch.int64)
-    valid_slot = (slots_i64 >= 0) & (
-        slots_i64 < int(pool_3d.shape[0]) * int(pool_3d.shape[1])
-    )
-    slots_i64 = torch.where(valid_slot, slots_i64, torch.full_like(slots_i64, -1))
-    slots_i64 = slots_i64.contiguous()
+    slots_i64 = slot_indices.reshape(-1).to(torch.int64).contiguous()
     _dequantize_slots_kernel[(N,)](
         out,
         out.stride(0),
@@ -394,6 +403,7 @@ def dequantize_slots_to_bf16(
         scale_dim=SCALE_BYTES_PER_TOKEN,
         quant_block=TILE_SIZE,
         token_data_size=TOKEN_DATA_SIZE,
+        num_cache_blocks=int(pool_3d.shape[0]),
         n_quant_blocks=NOPE_TILES,
     )
     return out

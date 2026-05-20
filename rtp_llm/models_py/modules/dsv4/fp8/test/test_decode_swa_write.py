@@ -14,6 +14,7 @@ import torch
 
 from rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton import (
     dequantize_and_gather_k_cache,
+    dequantize_slots_to_bf16,
 )
 from rtp_llm.models_py.modules.dsv4.fp8.decode.fp8_kv_quant_decode_op import (
     read_model1_kv_slot_bytes,
@@ -61,6 +62,8 @@ class DecodeSwaWriteTest(unittest.TestCase):
         return cache
 
     def _dequant_slots(self, cache: torch.Tensor, max_slot: int) -> torch.Tensor:
+        # Keep a gather-based helper for callers that need dense logical
+        # positions. Block id 0 is invalid, so logical block 0 maps to phys 1.
         out = torch.zeros(
             1,
             max_slot + 1,
@@ -69,9 +72,10 @@ class DecodeSwaWriteTest(unittest.TestCase):
             device=self.device,
         )
         seq_lens = torch.tensor([max_slot + 1], dtype=torch.int32, device=self.device)
-        block_table = torch.arange(
-            cache.shape[0], dtype=torch.int32, device=self.device
-        ).unsqueeze(0)
+        logical_blocks = (max_slot // BLOCK_SIZE) + 1
+        block_table = torch.ones(
+            1, logical_blocks, dtype=torch.int32, device=self.device
+        )
         dequantize_and_gather_k_cache(
             out=out,
             k_cache=cache,
@@ -104,10 +108,8 @@ class DecodeSwaWriteTest(unittest.TestCase):
     ) -> None:
         valid = slot_mapping >= 0
         valid_slots = slot_mapping[valid].long()
-        max_slot = int(valid_slots.max().item()) if valid_slots.numel() else 0
-        recovered = self._dequant_slots(cache, max_slot)
         expected = kv.reshape(-1, HEAD_DIM)[valid]
-        actual = recovered.index_select(0, valid_slots)
+        actual = dequantize_slots_to_bf16(cache, valid_slots)
         self._assert_nope_within_ue8m0_bound(expected, actual)
         self.assertEqual(
             (actual[:, NOPE_DIM:] - expected[:, NOPE_DIM:]).abs().max().item(),
@@ -130,7 +132,7 @@ class DecodeSwaWriteTest(unittest.TestCase):
                 )
                 slot_mapping = torch.arange(
                     bsz, dtype=torch.int64, device=self.device
-                )
+                ) + BLOCK_SIZE
                 if bsz >= 8:
                     slot_mapping[1] = -1
                     slot_mapping[-2] = -1
@@ -139,7 +141,7 @@ class DecodeSwaWriteTest(unittest.TestCase):
                 self._assert_valid_slots_roundtrip(kv, slot_mapping, triton)
 
                 if bsz >= 8:
-                    skipped_slot = 1
+                    skipped_slot = BLOCK_SIZE + 1
                     skipped_bytes = read_model1_kv_slot_bytes(
                         triton,
                         block_idx=skipped_slot // BLOCK_SIZE,
