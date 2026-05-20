@@ -205,6 +205,11 @@ class TestFlashInferGDNPrefillConsistency(unittest.TestCase):
         except ImportError as e:
             raise unittest.SkipTest(f"Old CuTe-DSL prefill kernel not available: {e}")
 
+        from rtp_llm.models_py.triton_kernels.fla.chunk import (
+            chunk_gated_delta_rule as triton_prefill,
+        )
+        cls.triton_prefill = staticmethod(triton_prefill)
+
         from rtp_llm.models_py.triton_kernels.fla.l2norm import l2norm_fwd
 
         cls.l2norm_fwd = staticmethod(l2norm_fwd)
@@ -244,6 +249,21 @@ class TestFlashInferGDNPrefillConsistency(unittest.TestCase):
         output_4d = output.unsqueeze(0)
         return (output_4d, output_state) if output_final_state else output_4d
 
+    def _call_triton(self, q, k, v, g, beta, initial_state, output_final_state, cu_seqlens):
+        """Call Triton chunk_gated_delta_rule with shapes matching model fallback path."""
+        out, _h, final_state = self.triton_prefill(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta.to(q.dtype),
+            initial_state=initial_state,
+            output_final_state=output_final_state,
+            cu_seqlens=cu_seqlens.long(),
+            use_qk_l2norm_in_kernel=True,
+        )
+        return (out, final_state) if output_final_state else out
+
     def _run_prefill_comparison(
         self, H_qk: int, H_v: int, D: int, seq_lengths: List[int]
     ):
@@ -279,22 +299,46 @@ class TestFlashInferGDNPrefillConsistency(unittest.TestCase):
             cu_seqlens=cu_seqlens,
         )
 
-        # --- Compare output ---
+        # --- Triton chunk_gated_delta_rule ---
+        triton_out, triton_state = self._call_triton(
+            q=q.clone(), k=k.clone(), v=v.clone(),
+            g=g.clone(), beta=beta.clone(),
+            initial_state=initial_state.clone(), output_final_state=True,
+            cu_seqlens=cu_seqlens,
+        )
+
+        # --- Compare output: FlashInfer vs CuTe-DSL ---
         out_sim = cos_sim(old_out, new_out)
         out_diff = max_abs_diff(old_out, new_out)
         logger.info(
             f"Prefill H_qk={H_qk} H_v={H_v} D={D} seqs={seq_lengths}: "
-            f"output cos_sim={out_sim:.6f} max_abs_diff={out_diff:.6f}"
+            f"FlashInfer vs CuTe-DSL output cos_sim={out_sim:.6f} max_abs_diff={out_diff:.6f}"
         )
-        self.assertGreater(out_sim, 0.999, f"Output cos_sim too low: {out_sim}")
+        self.assertGreater(out_sim, 0.999, f"FlashInfer vs CuTe-DSL output cos_sim too low: {out_sim}")
 
-        # --- Compare final state ---
+        # --- Compare final state: FlashInfer vs CuTe-DSL ---
         state_sim = cos_sim(old_state, new_state)
         state_diff = max_abs_diff(old_state, new_state)
         logger.info(
-            f"  state cos_sim={state_sim:.6f} max_abs_diff={state_diff:.6f}"
+            f"  FlashInfer vs CuTe-DSL state cos_sim={state_sim:.6f} max_abs_diff={state_diff:.6f}"
         )
-        self.assertGreater(state_sim, 0.999, f"State cos_sim too low: {state_sim}")
+        self.assertGreater(state_sim, 0.999, f"FlashInfer vs CuTe-DSL state cos_sim too low: {state_sim}")
+
+        # --- Compare output: FlashInfer vs Triton ---
+        triton_out_sim = cos_sim(triton_out, new_out)
+        triton_out_diff = max_abs_diff(triton_out, new_out)
+        logger.info(
+            f"  FlashInfer vs Triton output cos_sim={triton_out_sim:.6f} max_abs_diff={triton_out_diff:.6f}"
+        )
+        self.assertGreater(triton_out_sim, 0.999, f"FlashInfer vs Triton output cos_sim too low: {triton_out_sim}")
+
+        # --- Compare final state: FlashInfer vs Triton ---
+        triton_state_sim = cos_sim(triton_state, new_state)
+        triton_state_diff = max_abs_diff(triton_state, new_state)
+        logger.info(
+            f"  FlashInfer vs Triton state cos_sim={triton_state_sim:.6f} max_abs_diff={triton_state_diff:.6f}"
+        )
+        self.assertGreater(triton_state_sim, 0.999, f"FlashInfer vs Triton state cos_sim too low: {triton_state_sim}")
 
     def test_single_short_seq(self):
         self._run_prefill_comparison(H_qk=16, H_v=32, D=128, seq_lengths=[256])
@@ -335,15 +379,28 @@ class TestFlashInferGDNPrefillConsistency(unittest.TestCase):
             initial_state=None, output_final_state=False,
             cu_seqlens=cu_seqlens,
         )
+        triton_out = self._call_triton(
+            q=q.clone(), k=k.clone(), v=v.clone(),
+            g=g.clone(), beta=beta.clone(),
+            initial_state=None, output_final_state=False,
+            cu_seqlens=cu_seqlens,
+        )
 
         if isinstance(old_out, tuple):
             old_out = old_out[0]
         if isinstance(new_out, tuple):
             new_out = new_out[0]
+        if isinstance(triton_out, tuple):
+            triton_out = triton_out[0]
 
-        sim = cos_sim(old_out, new_out)
-        logger.info(f"Prefill no_initial_state: cos_sim={sim:.6f}")
-        self.assertGreater(sim, 0.999, f"cos_sim too low: {sim}")
+        sim_old = cos_sim(old_out, new_out)
+        sim_triton = cos_sim(triton_out, new_out)
+        logger.info(
+            f"Prefill no_initial_state: FlashInfer vs CuTe-DSL cos_sim={sim_old:.6f}, "
+            f"FlashInfer vs Triton cos_sim={sim_triton:.6f}"
+        )
+        self.assertGreater(sim_old, 0.999, f"FlashInfer vs CuTe-DSL cos_sim too low: {sim_old}")
+        self.assertGreater(sim_triton, 0.999, f"FlashInfer vs Triton cos_sim too low: {sim_triton}")
 
 
 if __name__ == "__main__":
