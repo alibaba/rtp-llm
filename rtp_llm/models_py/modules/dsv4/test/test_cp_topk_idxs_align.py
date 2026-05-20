@@ -34,15 +34,23 @@ def _load_attention_helper():
             "rtp_llm.models_py.modules.dsv4",
         ]:
             sys.modules[n] = types.ModuleType(n)
-    # Inline lift just the function from the source file (avoids importing
-    # attention.py's body which pulls in compute_ops etc.).
-    src_path = "rtp_llm/models_py/modules/dsv4/attention.py"
+    # Inline lift just the helpers from the source file (avoids importing
+    # fp8/attention.py's body which pulls in compute_ops etc.).
+    src_path = "rtp_llm/models_py/modules/dsv4/fp8/attention.py"
     with open(src_path) as f:
         src = f.read()
+    flat_start = src.index("def _flat_1d(")
+    flat_end = src.index("\n_V4_FP8_BLOCK_CFG", flat_start)
     start = src.index("def _get_window_topk_idxs_varlen(")
     # Find the next top-level "def "/"class " to bound the function
     end = src.index("\nclass SwaPrefillMeta", start)
-    snippet = "import torch\n" "import torch.nn.functional as F\n" + src[start:end]
+    snippet = (
+        "import torch\n"
+        "import torch.nn.functional as F\n"
+        + src[flat_start:flat_end]
+        + "\n"
+        + src[start:end]
+    )
     mod = types.ModuleType("varlen_topk_helper")
     exec(compile(snippet, "<varlen_topk_helper>", "exec"), mod.__dict__)
     return mod._get_window_topk_idxs_varlen

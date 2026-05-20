@@ -12,20 +12,9 @@ import torch
 import torch.nn as nn
 
 from rtp_llm.models_py.modules import RMSNorm
-from rtp_llm.models_py.modules.dsv4.attention import (
-    DSV4_BF16_VLLM,
-    Attention as AttentionBF16,
-)
 from rtp_llm.models_py.modules.dsv4.fp8.attention import AttentionFP8
 from rtp_llm.models_py.modules.dsv4.hc import build_hc_unit
 from rtp_llm.models_py.modules.dsv4.moe import MoE
-
-if DSV4_BF16_VLLM:
-    from rtp_llm.models_py.modules.dsv4.attention_bf16_vllm import (
-        AttentionBF16VLLM,
-    )
-else:
-    AttentionBF16VLLM = AttentionBF16
 
 
 class Block(nn.Module):
@@ -74,17 +63,11 @@ class Block(nn.Module):
         is_decode_role: bool = False,
         fp8_kv_cache: bool = False,
     ):
-        """``layer_weights`` is the framework's per-layer dict
-        (``ModelWeights.weights[layer_id]``) keyed by ``W.v4_*`` enum.
-        Block reads ``W.v4_attn_norm`` / ``W.v4_ffn_norm`` / ``W.v4_hc_*``
-        and forwards the dict to ``Attention`` and ``MoE``.
-        ``fp8_kv_cache=True`` selects ``AttentionFP8`` (584B paged
-        SWA/CSA/HCA pools); ``False`` keeps the BF16 ``Attention``."""
         super().__init__()
         self.layer_id = layer_id
         self.fp8_kv_cache = fp8_kv_cache
 
-        attn_cls = AttentionFP8 if self.fp8_kv_cache else AttentionBF16VLLM
+        attn_cls = AttentionFP8
         self.attn = attn_cls(
             layer_id=layer_id,
             dim=dim,

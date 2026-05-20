@@ -224,7 +224,7 @@ class SparseAttnV4DecodeFp8Op:
         topk_idxs: torch.Tensor,
     ) -> torch.Tensor:
         """Reference path: dequant KV to BF16, then run Phase 1 ref."""
-        from rtp_llm.models_py.modules.dsv4.attention import _sparse_attn
+        from rtp_llm.models_py.modules.dsv4.utils import _sparse_attn
 
         B, q_len, H, D = q.shape
         # Dequantize the packed FP8 cache to a bf16 view.

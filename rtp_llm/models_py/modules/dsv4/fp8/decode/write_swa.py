@@ -1,6 +1,6 @@
 """DSv4 decode SWA FP8 pool write — extracted from ``Attention._forward_decode_body``.
 
-Mirrors :meth:`rtp_llm.models_py.modules.dsv4.attention.Attention._prefill_write_swa_fp8_paged`
+Mirrors :meth:`rtp_llm.models_py.modules.dsv4.fp8.attention.AttentionFP8._prefill_write_swa_fp8_paged`
 for the decode path. Dispatches the Triton writer that emits the
 584B/slot FP8 SWA layout (fp8 NoPE 448 + bf16 RoPE 128 + ue8m0 scale 8).
 

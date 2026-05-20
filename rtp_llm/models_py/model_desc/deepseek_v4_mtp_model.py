@@ -29,7 +29,7 @@ from rtp_llm.models_py.modules.dsv4.chunk_env import (
     DEFAULT_DSV4_CHUNK_TOKENS,
     dsv4_chunk_tokens_from_env,
 )
-from rtp_llm.models_py.modules.dsv4.attention import _v4_fp8_linear
+from rtp_llm.models_py.modules.dsv4.utils import _v4_fp8_linear
 from rtp_llm.utils.model_weight import W
 
 

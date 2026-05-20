@@ -7,7 +7,7 @@ touches prefill code, so PD-disagg can later split prefill/decode
 services on a clean cleavage line.
 
 FP8-only as of the rebase branch (see
-:meth:`rtp_llm.models_py.modules.dsv4.attention.Attention.forward_decode`
+:meth:`rtp_llm.models_py.modules.dsv4.fp8.attention.AttentionFP8.forward_decode`
 assertion). BF16 KV-cache decode was removed together with
 ``sparse_attn_decode_op`` and ``paged_topk_translator.gather_dual_pool_kv_packed``.
 
