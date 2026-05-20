@@ -31,6 +31,7 @@ from rtp_llm.dash_sc.codec import (
 )
 from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.frontend.request_id_generator import generate_request_id
+from rtp_llm.metrics import AccMetrics, kmonitor
 from rtp_llm.server.request_headers import extract_request_headers
 from rtp_llm.utils.base_model_datatypes import GenerateInput
 from rtp_llm.utils.util import AtomicCounter
@@ -436,6 +437,14 @@ async def iter_real_model_stream_infer(
         request_shape = list(request.inputs[0].shape) if request.inputs else None
         chunk_idx = 0
         phase2_needed = False
+        # One-shot guard: ``phase2_triggered`` flips True the instant we
+        # commit to phase-2 (before the ``await backend_visitor.enqueue``
+        # below). It pins the invariant "at most ONE phase-2 enqueue per
+        # ModelStreamInfer request" — even if some future refactor lets the
+        # term-token detection or natural-finish fall-through re-fire,
+        # ``phase2_triggered`` blocks the second entry. Tracking only one
+        # boolean keeps the guard cheap on the hot path.
+        phase2_triggered = False
         stream = await backend_visitor.enqueue(generate_input)
         async for go in stream:
             chunk_idx += 1
@@ -460,7 +469,12 @@ async def iter_real_model_stream_infer(
                         if token_id == think_close_token_id:
                             close_offset = offset
                             break
-                if phase2_enabled and term_id is not None and term_id in generated_ids:
+                if (
+                    phase2_enabled
+                    and not phase2_triggered
+                    and term_id is not None
+                    and term_id in generated_ids
+                ):
                     term_in_generated = generated_ids.index(term_id)
                     term_offset = term_in_generated
                     if should_echo and not echoed and generated_ids:
@@ -471,9 +485,13 @@ async def iter_real_model_stream_infer(
                     generate_think_token_num = (
                         len(cumulative_sent_ids) + close_offset + 1
                     )
-                    phase2_needed = phase2_enabled
+                    # Natural ``</think>`` close keeps the stream single-phase
+                    # (DashLLM-aligned). Phase-2 is exclusively triggered by
+                    # the terminate-token-id (DSV4 token 1) path below — see
+                    # the comment block near ``phase2_triggered`` init.
             if (
                 phase2_enabled
+                and not phase2_triggered
                 and term_id is not None
                 and generate_think_token_num is None
                 and generated_ids
@@ -570,16 +588,34 @@ async def iter_real_model_stream_infer(
                 error_message="empty outputs_list from backend",
             )
             return
-        # Natural-finish phase-2 trigger: phase-1 ran to completion without
-        # ``</think>`` (close_token_id) or terminate_token_id, so the model
-        # dumped the whole answer into the reasoning channel and the
-        # dashscope-side parser sees ``content=""``. Re-run with the
-        # empty-think prompt body so the model gets a chance to emit real
-        # content. ``generate_think_token_num`` is set to the total tokens
-        # streamed so far — the entire phase-1 output is treated as thinking.
-        if not phase2_needed and phase2_enabled and generate_think_token_num is None:
-            phase2_needed = True
-            generate_think_token_num = len(cumulative_sent_ids)
+        # No implicit natural-finish phase-2 trigger here. DashLLM-aligned
+        # policy: phase-2 is exclusively initiated by terminate_token_id
+        # (DSV4 token 1) in the think phase. If phase-1 reaches stream end
+        # without ever emitting close or term token, treat the whole stream
+        # as reasoning content — do NOT silently restart with empty-think.
+        if phase2_needed and not phase2_triggered:
+            # One-shot pin BEFORE any await so a future / unexpected re-entry
+            # cannot double-fire phase-2. Set before metric report so even an
+            # accidental re-entry by the metric call would still be guarded.
+            phase2_triggered = True
+            # Phase-2 entry metric — operators alarm on spikes (think-abort
+            # rate). Wrapped in try/except so metric failure never breaks the
+            # response stream.
+            try:
+                kmonitor.report(
+                    AccMetrics.DASH_SC_DSV4_PHASE2_QPS_METRIC,
+                    1,
+                    {
+                        "protocol": "dash_sc_grpc",
+                        "model": str(request.model_name or "unknown"),
+                    },
+                )
+            except Exception as metric_err:
+                logging.warning(
+                    "[DashScGrpc] [%s] phase-2 metric report failed: %s",
+                    tag,
+                    metric_err,
+                )
         if phase2_needed:
             phase2_config = _clone_generate_config(generate_config)
             phase2_config.in_think_mode = False

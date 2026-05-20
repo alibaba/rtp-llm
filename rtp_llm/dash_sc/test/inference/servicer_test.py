@@ -506,10 +506,13 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_gen_ids(chunks[2]), [20])
         self.assertNotIn(42, visitor.generate_inputs[1].token_ids.cpu().int().tolist())
 
-    async def test_natural_finish_without_close_triggers_phase2(self) -> None:
+    async def test_natural_finish_without_close_does_not_trigger_phase2(self) -> None:
         """Phase-1 finishes naturally without ``</think>`` or terminate_token —
-        the model dumped the answer entirely into reasoning. Phase-2 must
-        still fire so the dashscope-side parser sees a non-empty content."""
+        the model dumped the answer entirely into reasoning. After the
+        DashLLM-alignment change, phase-2 is NO LONGER fired in this case;
+        only the terminate-token-id (DSV4 token 1) abort path enters phase-2.
+        The whole phase-1 output is streamed as reasoning content.
+        """
         req = self._minimal_request()
         phase1 = GenerateOutputs(
             generate_outputs=[
@@ -520,18 +523,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 )
             ]
         )
-        phase2 = GenerateOutputs(
-            generate_outputs=[
-                GenerateOutput(
-                    output_ids=torch.tensor([20, 21], dtype=torch.int32),
-                    finished=True,
-                    aux_info=AuxInfo(input_len=3, reuse_len=0),
-                )
-            ]
-        )
-        visitor = _MultiStreamVisitor(
-            [_FakeAsyncStream([phase1]), _FakeAsyncStream([phase2])]
-        )
+        visitor = _MultiStreamVisitor([_FakeAsyncStream([phase1])])
         tok = _FakeTokenizer(
             {
                 "<think>\n": [128821, 198],
@@ -558,11 +550,130 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        self.assertEqual(visitor.enqueue_called, 2)
-        # Phase-1 streams everything as reasoning; phase-2 produces fresh content.
+        # Single phase-1 enqueue; no second request.
+        self.assertEqual(visitor.enqueue_called, 1)
+        # Whole phase-1 output streamed as reasoning, no phase-2 chunk follows.
         self.assertEqual(_gen_ids(chunks[0]), [128821, 10, 11, 12])
-        self.assertEqual(_gen_ids(chunks[1]), [20, 21])
-        self.assertEqual(chunks[1].infer_response.id, "trace-real-2")
+        for chunk in chunks:
+            self.assertNotEqual(chunk.infer_response.id, "trace-real-2")
+
+    async def test_dsv4_natural_close_does_not_trigger_phase2(self) -> None:
+        """DSV4 phase-1 with a normal ``</think>`` close emits content in the
+        same stream — phase-2 MUST NOT fire. Mirrors DashLLM ``_think.py``
+        line 622-628: natural close only updates ``generate_think_token_num``.
+        """
+        req = self._minimal_request()
+        # Stream: think tokens, ``</think>\n\n`` (128822, 271), then answer.
+        phase1 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor(
+                        [10, 11, 128822, 271, 200, 201],
+                        dtype=torch.int32,
+                    ),
+                    finished=True,
+                    aux_info=AuxInfo(input_len=3, reuse_len=0),
+                )
+            ]
+        )
+        visitor = _MultiStreamVisitor([_FakeAsyncStream([phase1])])
+        tok = _FakeTokenizer(
+            {
+                "<think>\n": [128821, 198],
+                "</think>\n\n": [128822, 271],
+                "<think>\n\n</think>\n\n": [128821, 271, 128822, 271],
+                "</think>": [128822],
+            }
+        )
+
+        env_cfg = _GenerateEnvCfg()
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [7, 8, 128821],
+                SamplingParams(),
+                OtherParams(),
+                visitor,
+                rtp_llm_request_id=100,
+                echo_prefix_ids=[128821, 198],
+                tokenizer=tok,
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+                phase2_request_id_factory=lambda: 200,
+            )
+        )
+
+        # Exactly one enqueue: phase-1 only, no phase-2 follow-up.
+        self.assertEqual(visitor.enqueue_called, 1)
+        for chunk in chunks:
+            # Phase-2 chunks would carry the ``-2`` suffix on infer_response.id.
+            self.assertNotEqual(chunk.infer_response.id, "trace-real-2")
+
+    async def test_dsv4_token1_phase2_reports_metric_once(self) -> None:
+        """Phase-2 entry MUST fan out exactly one increment of the DSV4 phase-2
+        metric — guarded by ``phase2_triggered`` so the rate matches
+        "requests with a think-abort", not "abort tokens seen"."""
+        req = self._minimal_request()
+        phase1 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([10, 11, 1, 99], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=3, reuse_len=0),
+                )
+            ]
+        )
+        phase2 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([20, 21], dtype=torch.int32),
+                    finished=True,
+                    aux_info=AuxInfo(input_len=8, reuse_len=0),
+                )
+            ]
+        )
+        visitor = _MultiStreamVisitor(
+            [_FakeAsyncStream([phase1]), _FakeAsyncStream([phase2])]
+        )
+        tok = _FakeTokenizer(
+            {
+                "<think>\n": [128821, 198],
+                "</think>\n\n": [128822, 271],
+                "<think>\n\n</think>\n\n": [128821, 271, 128822, 271],
+                "</think>": [128822],
+            }
+        )
+        env_cfg = _GenerateEnvCfg()
+
+        with patch("rtp_llm.dash_sc.inference.servicer.kmonitor.report") as mock_report:
+            await _drain(
+                iter_real_model_stream_infer(
+                    req,
+                    [7, 8, 128821],
+                    SamplingParams(),
+                    OtherParams(),
+                    visitor,
+                    rtp_llm_request_id=100,
+                    echo_prefix_ids=[128821, 198],
+                    tokenizer=tok,
+                    generate_env_config=env_cfg,
+                    think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+                    phase2_request_id_factory=lambda: 200,
+                )
+            )
+
+        from rtp_llm.metrics import AccMetrics
+
+        phase2_calls = [
+            call_args
+            for call_args in mock_report.call_args_list
+            if call_args.args
+            and call_args.args[0] is AccMetrics.DASH_SC_DSV4_PHASE2_QPS_METRIC
+        ]
+        self.assertEqual(len(phase2_calls), 1)
+        _metric, value, tags = phase2_calls[0].args
+        self.assertEqual(value, 1)
+        self.assertEqual(tags["protocol"], "dash_sc_grpc")
 
     async def test_phase2_strips_leading_thinking_then_close(self) -> None:
         """Phase-2 model occasionally emits accidental thinking followed by

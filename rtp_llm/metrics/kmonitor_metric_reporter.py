@@ -28,6 +28,12 @@ class AccMetrics(Enum):
     IGRAPH_ERROR_QPS_METRIC = "py_rtp_igraph_error_qps"
     IGRAPH_EMPTY_QPS_METRIC = "py_rtp_igraph_empty_qps"
 
+    # dash_sc DSV4 phase-2: incremented once per request that enters phase-2
+    # via the terminate-token-id (token 1) abort path in the think phase.
+    # One increment per request — guarded by ``phase2_triggered`` so the
+    # rate matches "requests with a think-abort", not "abort tokens seen".
+    DASH_SC_DSV4_PHASE2_QPS_METRIC = "py_rtp_dash_sc_dsv4_phase2_qps"
+
 
 class GaugeMetrics(Enum):
     RESPONSE_FIRST_TOKEN_RT_METRIC = "py_rtp_response_first_token_rt"
