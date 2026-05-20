@@ -114,6 +114,7 @@ def _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS: tl.constexpr) -> None:
         )
 
 
+
 @triton.jit(do_not_specialize=["offset", "max_blocks_per_seq"])
 def _dequantize_and_gather_k_kernel(
     out_ptr,
