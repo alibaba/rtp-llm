@@ -301,18 +301,16 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
 
 bool CudaGraphRunner::tryGetRealGraphPrefillSeqLen(const PyModelInputs& inputs, CudaGraphState& state) {
     state.current_seq_len = inputs.attention_inputs.input_lengths.sum(0).item<int>();
-    if (capture_range_.empty()) {
-        RTP_LLM_LOG_WARNING("prefill cuda graph: capture_range_ is empty, cannot run");
-        return false;
-    }
+    RTP_LLM_CHECK_WITH_INFO(!capture_range_.empty(),
+                            "prefill cuda graph: capture_range_ is empty, cannot run "
+                            "(should not happen when enable_cuda_graph=true)");
     auto it = std::lower_bound(capture_range_.begin(), capture_range_.end(), state.current_seq_len);
     // No captured graph for seq_len >= current (all captures smaller than requested)
-    if (it == capture_range_.end()) {
-        RTP_LLM_LOG_WARNING("prefill seq_len %d exceeds max captured %d, fallback to normal run",
+    RTP_LLM_CHECK_WITH_INFO(it != capture_range_.end(),
+                            "prefill seq_len %d exceeds max captured %d "
+                            "(extend prefill_capture_seq_lens or reduce seq_len)",
                             state.current_seq_len,
                             capture_range_.back());
-        return false;
-    }
     state.current_real_graph_seq_len = *it;
     state.current_batch_size         = inputs.attention_inputs.input_lengths.size(0);
     return true;
@@ -322,18 +320,16 @@ bool CudaGraphRunner::tryGetRealGraphDecodeBatchSize(const PyModelInputs& inputs
     int cuda_graph_bs        = inputs.attention_inputs.input_lengths.size(0);
     state.current_batch_size = cuda_graph_bs;
     RTP_LLM_LOG_DEBUG("canRun judge for batch size: %d", cuda_graph_bs);
-    if (capture_range_.empty()) {
-        RTP_LLM_LOG_WARNING("decode cuda graph: capture_range_ is empty, cannot run");
-        return false;
-    }
+    RTP_LLM_CHECK_WITH_INFO(!capture_range_.empty(),
+                            "decode cuda graph: capture_range_ is empty, cannot run "
+                            "(should not happen when enable_cuda_graph=true)");
     auto it = std::lower_bound(capture_range_.begin(), capture_range_.end(), state.current_batch_size);
     // No captured graph for batch >= current (all captures smaller)
-    if (it == capture_range_.end()) {
-        RTP_LLM_LOG_WARNING("decode batch size %d exceeds max captured %d, fallback to normal run",
+    RTP_LLM_CHECK_WITH_INFO(it != capture_range_.end(),
+                            "decode batch size %d exceeds max captured %d "
+                            "(extend decode_capture_batch_sizes or reduce batch size)",
                             state.current_batch_size,
                             capture_range_.back());
-        return false;
-    }
     state.current_real_graph_bs = *it;
     RTP_LLM_LOG_DEBUG(
         "batch size used in replay: %d (graph key %d)", state.current_batch_size, state.current_real_graph_bs);
@@ -368,16 +364,14 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state)
 
     if (!inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group.empty()) {
         const size_t group = inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group.size();
-        if (kv_cache_group_num_ <= 0) {
-            RTP_LLM_LOG_WARNING("Hybrid kv cache detected but kv_cache_group_num_ is not set, fallback to normal run.");
-            return false;
-        }
-        if (group != static_cast<size_t>(kv_cache_group_num_)) {
-            RTP_LLM_LOG_WARNING("Hybrid kv cache group size mismatch: inputs=%zu, captured=%d, fallback to normal run.",
+        RTP_LLM_CHECK_WITH_INFO(kv_cache_group_num_ > 0,
+                                "Hybrid kv cache detected (group=%zu) but kv_cache_group_num_ is not set; "
+                                "runner was not configured for hybrid cache",
+                                group);
+        RTP_LLM_CHECK_WITH_INFO(group == static_cast<size_t>(kv_cache_group_num_),
+                                "Hybrid kv cache group size mismatch: inputs=%zu, captured=%d",
                                 group,
                                 kv_cache_group_num_);
-            return false;
-        }
     }
 
     if (is_prefill_cuda_graph_mode_) {
