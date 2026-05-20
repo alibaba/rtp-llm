@@ -3,6 +3,7 @@ package org.flexlb.sync.synchronizer;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.micrometer.core.instrument.util.NamedThreadFactory;
 import org.apache.commons.lang3.StringUtils;
+import org.flexlb.balance.dp.InflightBatchRegistry;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.route.Endpoint;
@@ -35,6 +36,7 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
     private final List<String> modelNames = new ArrayList<>();
     private final EngineGrpcService engineGrpcService;
     private final CacheAwareService localKvCacheAwareManager;
+    private final InflightBatchRegistry inflightRegistry;
     private final long syncRequestTimeoutMs;
     private final LongAdder syncCount = new LongAdder();
     private final Long syncEngineStatusInterval;
@@ -44,12 +46,14 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
                                     EngineWorkerStatus engineWorkerStatus,
                                     EngineGrpcService engineGrpcService,
                                     ModelMetaConfig modelMetaConfig,
-                                    CacheAwareService localKvCacheAwareManager) {
+                                    CacheAwareService localKvCacheAwareManager,
+                                    InflightBatchRegistry inflightRegistry) {
 
         super(workerAddressService, engineHealthReporter, engineWorkerStatus, modelMetaConfig);
 
         this.engineGrpcService = engineGrpcService;
         this.localKvCacheAwareManager = localKvCacheAwareManager;
+        this.inflightRegistry = inflightRegistry;
 
         this.syncEngineStatusInterval = System.getenv("SYNC_STATUS_INTERVAL") != null
                 ? Long.parseLong(System.getenv("SYNC_STATUS_INTERVAL"))
@@ -98,7 +102,8 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
                                 modelName, modelWorkerStatus.getRoleStatusMap(roleType),
                                 workerAddressService, statusCheckExecutor, engineHealthReporter,
                                 engineGrpcService, roleType, localKvCacheAwareManager,
-                                syncRequestTimeoutMs, syncCount, syncEngineStatusInterval
+                                inflightRegistry, syncRequestTimeoutMs, syncCount,
+                                syncEngineStatusInterval
                         ));
                     } else {
                         logger.error("roleEndpoints is null, by roleType : {}", roleType);

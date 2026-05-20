@@ -39,6 +39,7 @@ import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -475,6 +476,30 @@ class DpBatchSchedulerTest {
         assertEquals("10.0.0.1", prefill.getServerIp());
         assertEquals(9080, prefill.getGrpcPort(),
                 "empty dpStatuses ⇒ keep pod-level grpcPort untouched");
+    }
+
+    @Test
+    void success_path_keeps_active_entry_until_worker_reports_finished() throws Exception {
+        // Master holds the InflightBatchRegistry entry through the full request
+        // lifetime so a late /rtp_llm/cancel can still cascade through master.
+        // Cleanup runs when the worker reporter (GrpcWorkerStatusRunner) sees
+        // the requestId in finishedTaskList — outside this test's scope; here
+        // we verify the dispatcher does NOT prematurely drop the entry.
+        IntStream.range(0, 4)
+                .mapToObj(i -> scheduler.submit(makeCtx(i + 1, "m1")))
+                .forEach(f -> {
+                    try {
+                        f.get(2, TimeUnit.SECONDS);
+                    } catch (Exception e) {
+                        throw new RuntimeException(e);
+                    }
+                });
+
+        for (long id = 1; id <= 4; id++) {
+            assertNotNull(registry.lookupByRequest(id),
+                    "active entry " + id + " must stay until worker reports finished");
+            assertEquals(InflightBatchRegistry.RequestState.ACTIVE, registry.getState(id));
+        }
     }
 
     @Test
