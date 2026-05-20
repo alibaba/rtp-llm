@@ -267,13 +267,23 @@ void PrefillRpcServer::remoteLoadCacheEnd(PrefillGenerateContext& prefill_contex
     CLIENT_GRPC_RET_IF_ERROR(
         prefill_context, prefill_context.client_stream->Read(&load_response), ErrorCode::REMOTE_LOAD_KV_CACHE_FAILED);
     auto error_code = transRPCErrorCode(load_response.error_info().error_code());
-    CLIENT_GRPC_RET_IF_ERROR(prefill_context, error_code == ErrorCode::NONE_ERROR, error_code);
-    RTP_LLM_LOG_DEBUG("request [%ld] remote load cache done", prefill_context.request_id);
 
     // Decode has finished loading cache, now safe to release KV cache blocks.
     // This is called after cache store transfer is complete.
     if (prefill_context.generate_input->generate_config->pd_separation) {
         prefill_context.getStream()->releaseKVCacheForPDSep();
+    }
+
+    CLIENT_GRPC_RET_IF_ERROR(prefill_context, error_code == ErrorCode::NONE_ERROR, error_code);
+    RTP_LLM_LOG_DEBUG("request [%ld] remote load cache done", prefill_context.request_id);
+
+    meta_->dequeue(prefill_context.request_id, prefill_context.getStream());
+    if (!prefill_context.getStream()->hasEvent(StreamEvents::NeedRemoteGenerate)) {
+        RTP_LLM_LOG_DEBUG("request [%ld] pd-sep prefill finished locally without remote generate, "
+                          "skipping remote generate stages",
+                          prefill_context.request_id);
+        // Exit here to keep the remote load-cache completion and release ordering intact.
+        prefill_context.finished = true;
     }
 }
 
@@ -443,7 +453,6 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
         EXECUTE_STAGE_FUNC(remoteLoadCacheStart, prefill_context);
         EXECUTE_STAGE_FUNC(pollLocalOutput, prefill_context);
         EXECUTE_STAGE_FUNC(remoteLoadCacheEnd, prefill_context);
-        meta_->dequeue(prefill_context.request_id, prefill_context.getStream());
         EXECUTE_STAGE_FUNC(remoteGenerate, prefill_context);
         EXECUTE_STAGE_FUNC(pollRemoteOutput, prefill_context);
         prefill_context.stat_info.nextStage();
