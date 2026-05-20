@@ -525,23 +525,6 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         self.parallelism_config = parallelism_config
         self.weights = weights
         self.quant_config = quant_config
-        # in_proj_qkvz is bf16 / fp8
-        self.in_proj_qkvz = LinearFactory.create_linear_from_weights(
-            weights,
-            W.linear_attn_qkvz_w,
-            W.linear_attn_qkvz_s,
-            None,
-            quant_config,
-            hw_kernel_config=hw_kernel_config,
-        )
-        self.in_proj_ba = LinearFactory.create_linear_from_weights(
-            weights,
-            W.linear_attn_ba_w,
-            None,
-            None,
-            quant_config,
-            hw_kernel_config=hw_kernel_config,
-        )
         self.head_k_dim = linear_attn_config.linear_key_head_dim
         self.head_v_dim = linear_attn_config.linear_value_head_dim
         attn_tp_size = parallelism_config.get_attn_tp_size()
@@ -550,6 +533,71 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             linear_attn_config.linear_num_value_heads // attn_tp_size
         )
         self.num_key_value_heads = self.local_num_v_heads // self.local_num_k_heads
+
+        # qkvz+ba fusion (BF16 only): combine two in-projection GEMMs into one.
+        # Saves a small kernel launch on each forward; on decode (M=1) HBM-access
+        # merging shaves a few us per layer (trace measurement: -0.094 ms/step
+        # on Qwen3.5-9B TP=2 in the original session).
+        # FP8/quantized: qkvz has scales but ba doesn't, dtypes mismatch -> fall
+        # back to the original 2-GEMM path.
+        self._qkvz_ba_fused = weights.get(W.linear_attn_qkvz_s) is None
+        if self._qkvz_ba_fused:
+            qkvz_w = weights[W.linear_attn_qkvz_w]
+            ba_w = weights[W.linear_attn_ba_w]
+            self._qkvz_size = qkvz_w.shape[1]
+            self._ba_size = ba_w.shape[1]
+            # Allocate the fused buffer ONCE; copy qkvz/ba into it; then
+            # replace the original dict entries with VIEWS into the fused
+            # buffer. This achieves two goals at once:
+            #
+            #  (a) Memory: avoids the ~48MB-per-layer redundant copy from
+            #      torch.cat. The originals get released when this method
+            #      returns (the local vars go out of scope and the dict
+            #      entries no longer reference them).
+            #
+            #  (b) Online weight update: WeightManager.update_layer_weight
+            #      runs `ori_tensor.copy_(data)` against the dict entries.
+            #      With the entries now being views into the fused buffer,
+            #      an update writes directly into the right slice of the
+            #      fused buffer, so in_proj_fused.weight (which references
+            #      the same buffer) sees the update on the next forward.
+            #      copy_ accepts non-contig destinations, so the view's
+            #      stride mismatch is fine.
+            K = qkvz_w.shape[0]
+            fused_w = torch.empty(
+                K,
+                self._qkvz_size + self._ba_size,
+                dtype=qkvz_w.dtype,
+                device=qkvz_w.device,
+            )
+            fused_w[:, : self._qkvz_size].copy_(qkvz_w)
+            fused_w[:, self._qkvz_size :].copy_(ba_w)
+            weights[W.linear_attn_qkvz_w] = fused_w[:, : self._qkvz_size]
+            weights[W.linear_attn_ba_w] = fused_w[:, self._qkvz_size :]
+            del qkvz_w, ba_w
+            self.in_proj_fused = LinearFactory.create_linear(
+                fused_w, None, None, quant_config, hw_kernel_config=hw_kernel_config
+            )
+            self.in_proj_qkvz = None
+            self.in_proj_ba = None
+        else:
+            self.in_proj_qkvz = LinearFactory.create_linear_from_weights(
+                weights,
+                W.linear_attn_qkvz_w,
+                W.linear_attn_qkvz_s,
+                None,
+                quant_config,
+                hw_kernel_config=hw_kernel_config,
+            )
+            self.in_proj_ba = LinearFactory.create_linear_from_weights(
+                weights,
+                W.linear_attn_ba_w,
+                None,
+                None,
+                quant_config,
+                hw_kernel_config=hw_kernel_config,
+            )
+            self.in_proj_fused = None
 
         self.prefill_gdn = Qwen3NextGatedDeltaNetPrefill(
             linear_attn_config, parallelism_config, weights
@@ -570,6 +618,20 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             quant_config,
             hw_kernel_config=hw_kernel_config,
         )
+
+    def _input_project(
+        self, hidden_states: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run the input projection and return (projected_qkvz, projected_ba).
+
+        Hides the fusion vs 2-GEMM dispatch from callers (forward + tests).
+        Both branches produce tensors with identical shape/semantics; the
+        fused branch slices a single GEMM output, the fallback runs two.
+        """
+        if self._qkvz_ba_fused:
+            fused = self.in_proj_fused(hidden_states)
+            return fused[..., : self._qkvz_size], fused[..., self._qkvz_size :]
+        return self.in_proj_qkvz(hidden_states), self.in_proj_ba(hidden_states)
 
     # mixed_qkvz, mixed_ba -> q, k, v, z, b, a
     def fix_query_key_value_ordering(
@@ -765,8 +827,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             or attn_meta.get_prefill_conv1d_meta() is not None
             or attn_meta.is_cp_linear_attn
         ), "prefill_conv1d_meta is required for prefill"
-        projected_states_qkvz = self.in_proj_qkvz(hidden_states)
-        projected_states_ba = self.in_proj_ba(hidden_states)
+        projected_states_qkvz, projected_states_ba = self._input_project(hidden_states)
         mixed_qkv, z, b, a = self.fix_query_key_value_ordering(
             projected_states_qkvz, projected_states_ba
         )
