@@ -2368,6 +2368,33 @@ TEST_F(KVCacheMemoryConnectorDualPoolTest, PoolSizing_JointCalculation) {
     EXPECT_NEAR(static_cast<double>(incomplete_total), static_cast<double>(complete_total) * 3.0, 3.0);
 }
 
+TEST_F(KVCacheMemoryConnectorDualPoolTest, BuildCopyPlanForWrite_SkipsIncompleteWhenIncompletePoolDisabled) {
+    auto cfg   = createHybridCacheConfig(/*layer_num=*/2, /*block_num=*/10, /*seq_size_per_block=*/8, /*linear_step=*/1);
+    allocator_ = std::make_shared<HybridTypeKVCacheAllocator>(cfg, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator_->init());
+    auto conn = createConnector(cfg);
+    ASSERT_TRUE(conn->isDualPool());
+    ASSERT_NE(conn->complete_pool_, nullptr);
+    ASSERT_EQ(conn->incomplete_pool_, nullptr);
+
+    CacheKeysType cache_keys{93001, 93002, 93003};
+    std::vector<std::vector<BlockIdxType>> full_blocks{{1, 1, 1}, {2, 2, 2}};
+    std::vector<std::vector<BlockIdxType>> swa_blocks{{NULL_BLOCK_IDX, 1, NULL_BLOCK_IDX},
+                                                      {NULL_BLOCK_IDX, 2, NULL_BLOCK_IDX}};
+    auto res   = makeHybridResource(cfg, cache_keys, full_blocks, swa_blocks);
+    auto slots = conn->layerRegionSlots();
+
+    bool no_need_write = true;
+    auto plan          = conn->buildCopyPlanForWrite(
+        res->cacheKeys(), res->layerAttnBlocks(), slots, /*start_index=*/0, /*write_num=*/3, no_need_write);
+
+    ASSERT_NE(plan, nullptr);
+    EXPECT_FALSE(no_need_write);
+    ASSERT_EQ(plan->copy_infos.size(), 1u);
+    EXPECT_EQ(plan->copy_infos[0].cache_key, cache_keys[1]);
+    EXPECT_TRUE(plan->copy_infos[0].is_complete);
+}
+
 TEST_F(KVCacheMemoryConnectorDualPoolTest, CacheKeys_MergesBothCaches) {
     auto cfg   = createHybridCacheConfig(/*layer_num=*/2);
     allocator_ = std::make_shared<HybridTypeKVCacheAllocator>(cfg, AllocationType::DEVICE);
