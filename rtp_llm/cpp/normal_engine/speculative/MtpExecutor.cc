@@ -942,6 +942,18 @@ absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams, i
 
     // report metrics
     if (isTpRank0() && metrics_reporter_ && metrics_collector.not_skip) {
+        // decode metrics
+        auto& tps_collector       = metrics_collector.tps_collector;
+        auto& sp_engine_collector = metrics_collector.sp_engine_collector;
+        auto  decode_time         = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
+        if (sp_engine_collector.total_accepted_token_num) {
+            tps_collector.addTokenSize(0,
+                                       0,
+                                       sp_engine_collector.total_accepted_token_num,
+                                       sp_engine_collector.total_accepted_token_num,
+                                       decode_time);
+        }
+
         RTP_LLM_PROFILE_SCOPE("executor.mtp.process(report_metrics)");
         metrics_reporter_->report<RtpLLMExecutorMetrics, RtpLLMExecutorMetricsCollector>(
             nullptr, &metrics_collector.executor_collector);
