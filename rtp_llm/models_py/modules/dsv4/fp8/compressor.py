@@ -13,8 +13,8 @@ flavors; ``head_dim`` selects the writer kernel + FP8 KV slot layout:
 
 Post-commit ``e76867719`` ("fix - align state size to 256") the C++
 state pools (INDEXER_STATE / CSA_STATE / HCA_STATE) all use
-``entries_per_block=256`` with ``fixed_blocks_per_req=2``: every token
-gets its own slot. We mirror vLLM's ``DeepseekCompressor`` flow:
+``entries_per_block=256``: every token gets its own slot. We mirror
+vLLM's ``DeepseekCompressor`` flow:
 
   1. ``_save_partial_states_kernel`` writes per-token (kv | score+ape)
      into the framework-allocated state pool.
@@ -415,17 +415,26 @@ class CompressorFP8(nn.Module):
         positions: torch.Tensor,  # [N] int64
         b_idx: torch.Tensor,  # [N] int64
     ) -> torch.Tensor:
-        """state_slot[t] = state_block_table[b, (pos//eb) % max_blocks] * eb + pos%eb.
-        Returns -1 where the chosen block id is unallocated (==0 sentinel)."""
+        """Map absolute positions into the framework state block table.
+
+        The C++ SWA/fixed state pools keep a logical block table for the
+        request and mark unavailable blocks as NULL/0; they are not a cyclic
+        two-block table. Positions beyond the supplied block-table width, or
+        rows whose block id is unallocated, map to -1.
+        """
         bt = self._state_block_table
         eb = self._state_eb
         assert bt is not None and eb > 0, "state pool context unbound"
         bt_long = bt.to(torch.long)
         max_blocks = int(bt_long.shape[1])
-        block_in_seq = (positions // eb) % max_blocks
+        if max_blocks <= 0:
+            return torch.full_like(positions, -1)
+        block_in_seq = positions // eb
         in_block = positions % eb
-        block_id = bt_long[b_idx, block_in_seq]
-        valid = block_id > 0
+        in_capacity = block_in_seq < max_blocks
+        safe_block_in_seq = block_in_seq.clamp(min=0, max=max_blocks - 1)
+        block_id = bt_long[b_idx, safe_block_in_seq]
+        valid = in_capacity & (block_id > 0)
         slot = block_id * eb + in_block
         return torch.where(valid, slot, torch.full_like(slot, -1))
 
@@ -493,9 +502,10 @@ class CompressorFP8(nn.Module):
         sequentially-laid-out batches (prefill: ``sp_int``). When provided
         the fused kernel reads any overlap-window position with
         ``flat_idx = pos - seq_start in [0, N)`` directly from
-        ``kv_flat / score_flat`` instead of the cyclic state pool, which
-        only retains the latest ~512 tokens per request and would have
-        been overwritten within this same launch by ``run_save_partial_states``.
+        ``kv_flat / score_flat`` instead of the state pool, which may have
+        unavailable logical blocks for old prefix positions and would have
+        been overwritten within this same launch by
+        ``run_save_partial_states``.
 
         Pass ``None`` to disable the raw path (decode: ``kv_flat`` is
         indexed by ``req_idx``, not by absolute position offset).

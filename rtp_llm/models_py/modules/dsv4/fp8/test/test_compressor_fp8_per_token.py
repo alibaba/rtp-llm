@@ -158,7 +158,8 @@ def _state_write_check(
     for b in range(bsz):
         for t in range(seqlen):
             pos = sp + t
-            block_in_seq = (pos // eb) % bt.shape[1]
+            block_in_seq = pos // eb
+            assert block_in_seq < bt.shape[1], f"out-of-table block at pos {pos}"
             in_block = pos % eb
             block_id = int(bt[b, block_in_seq].item())
             assert block_id > 0, f"unallocated block at pos {pos}"

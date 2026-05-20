@@ -184,14 +184,12 @@ class CompressorPrepareMetadataVarlenTest(unittest.TestCase):
         return positions, req_id
 
     def test_b2_state_slots_pick_correct_request_row(self) -> None:
-        """For each token: state_slot = bt[b_idx[t], (pos//eb) % max_blocks]
-        * eb + pos % eb. With distinct-row block tables and req-local pos
-        confined to that row's block range, the slot ids must split
-        cleanly per request."""
+        """For each token: state_slot = bt[b_idx[t], pos//eb] * eb + pos%eb.
+        With distinct-row block tables and req-local pos confined to that
+        row's block range, the slot ids must split cleanly per request."""
         stub = _make_stub(self.device, n_reqs=2, blocks_per_req=2)
         # Req0: sp=0,S=8 → positions [0..7] → block_in_seq=0, in_block=pos
-        # Req1: sp=300,S=10 → positions [300..309] → block_in_seq=1
-        #   (since eb=256, 300//256=1; max_blocks=2 → mod 2 = 1)
+        # Req1: sp=300,S=10 → positions [300..309] → block_in_seq=1.
         positions, req_id = self._build_batched_positions([0, 300], [8, 10])
         meta = stub.prepare_metadata(positions, req_id)
         # Req0 first token: bt[0, 0]=1, in_block=0 → slot=1*256+0=256
@@ -255,6 +253,26 @@ class CompressorPrepareMetadataVarlenTest(unittest.TestCase):
         # Req1 tokens (t=4..7): masked to -1
         for t in range(4, 8):
             self.assertEqual(int(meta.state_slots[t].item()), -1)
+
+    def test_state_slot_beyond_block_table_capacity_yields_minus_one(self) -> None:
+        """State block tables are logical, not cyclic. A position past the
+        provided table width must be skipped instead of wrapping to an
+        earlier physical block."""
+        stub = _make_stub(self.device, n_reqs=1, blocks_per_req=2)
+        positions = torch.tensor(
+            [0, 255, 256, 511, 512, 768],
+            dtype=torch.int64,
+            device=self.device,
+        )
+        req_id = torch.zeros_like(positions)
+        meta = stub.prepare_metadata(positions, req_id)
+
+        self.assertEqual(int(meta.state_slots[0].item()), 256)
+        self.assertEqual(int(meta.state_slots[1].item()), 511)
+        self.assertEqual(int(meta.state_slots[2].item()), 512)
+        self.assertEqual(int(meta.state_slots[3].item()), 767)
+        self.assertEqual(int(meta.state_slots[4].item()), -1)
+        self.assertEqual(int(meta.state_slots[5].item()), -1)
 
 
 if __name__ == "__main__":

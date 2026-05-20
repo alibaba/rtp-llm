@@ -235,8 +235,34 @@ def test_no_kv_context_writes_negative_kv_slots():
     )
 
 
+def test_state_slots_do_not_wrap_past_block_table_capacity():
+    if not torch.cuda.is_available() or not _fused_compressor_meta_triton._TRITON_AVAILABLE:
+        print("  [SKIP] CUDA/Triton unavailable")
+        return
+    state_bt = torch.tensor([[1, 2]], dtype=torch.int32, device=DEVICE)
+    kv_bt = torch.tensor([[101, 102]], dtype=torch.int32, device=DEVICE)
+    positions = torch.tensor(
+        [0, 255, 256, 511, 512],
+        dtype=torch.int64,
+        device=DEVICE,
+    )
+    b_idx = torch.zeros_like(positions)
+    fused_state_slots, _, _ = _fused_compressor_meta_triton.fused_compressor_slot_mapping(
+        positions,
+        b_idx,
+        state_bt,
+        STATE_EB,
+        kv_bt,
+        64,
+        4,
+    )
+
+    assert fused_state_slots.tolist() == [256, 511, 512, 767, -1]
+
+
 if __name__ == "__main__":
     test_default_enabled()
     test_ratio4_batched_speculative_q_len_gt_1()
     test_ratio128_batched_speculative_q_len_gt_1()
     test_no_kv_context_writes_negative_kv_slots()
+    test_state_slots_do_not_wrap_past_block_table_capacity()

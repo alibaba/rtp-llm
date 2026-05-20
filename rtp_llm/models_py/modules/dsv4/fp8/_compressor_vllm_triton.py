@@ -1,10 +1,9 @@
 """DSV4 CompressorFP8 Triton kernels (ported from vLLM, RTP-LLM-adapted).
 
 Three kernels backing the DSV4 sparse-attention compressor. The state
-pool layout is page-aligned: each request owns ``fixed_blocks_per_req``
-(=2 in production) physical blocks of ``entries_per_block`` (=256) fp32
-slots; ``slot_mapping[t]`` resolves to the slot reserved for token ``t``
-in the most recent block.
+pool layout is page-aligned: framework block tables map logical token
+blocks to physical ``entries_per_block`` (=256) fp32 state blocks, with
+unavailable logical blocks represented by sentinel block ids.
 
   * ``_save_partial_states_kernel`` — per-token write of (kv | score+ape)
     into the fp32 state cache. One program per token; non-boundary tokens
@@ -37,7 +36,8 @@ Boundary writer source dispatch (raw vs state cache):
              prefix-cache hit: they were written into the state pool by a
              prior request, and the framework reuses those physical
              blocks via this request's ``block_table``. ``block_table``
-             entries that point at unused blocks are 0 and filtered.
+             entries outside the supplied table width or pointing at
+             unused blocks are filtered.
 
   Decode passes ``disable_raw_path=True`` → ``n_raw == 0``, so every
   position routes through the cache branch.
@@ -239,17 +239,23 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     score_from_raw = score_from_raw + ape_vals
 
     # State-cache path: prefix-cache hit region. block_table[req_idx] maps
-    # logical_block = pos // block_size to a physical state-pool block;
-    # padding/unused entries are 0 and filtered by valid_block.
+    # logical_block = pos // block_size to a physical state-pool block.
+    # The framework table is not cyclic: out-of-table logical blocks and
+    # padding/unused entries are filtered before both block-table and
+    # state-cache loads.
     use_cache = mask_pos & ~use_raw
     block_indices = pos // block_size
-    block_indices_safe = tl.where(use_cache, block_indices, 0)
+    in_table = block_indices < block_table_stride
+    can_load_block = use_cache & in_table
+    block_indices_safe = tl.where(
+        can_load_block, tl.minimum(block_indices, block_table_stride - 1), 0
+    )
     block_numbers = tl.load(
         block_table_ptr + req_idx * block_table_stride + block_indices_safe,
-        mask=use_cache,
+        mask=can_load_block,
         other=0,
     )
-    valid_block = block_numbers > 0
+    valid_block = in_table & (block_numbers > 0)
     block_numbers_i64 = tl.where(valid_block, block_numbers, 0).to(tl.int64)
     block_offsets_raw = pos % block_size
     block_offsets = tl.where(mask_pos, block_offsets_raw, 0)
@@ -274,6 +280,8 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     score = tl.where(use_raw[:, None], score_from_raw, score_from_cache)
 
     final_valid = use_raw | (use_cache & valid_block)
+    if tl.sum(final_valid.to(tl.int32), axis=0) == 0:
+        return
     combined_mask = final_valid[:, None] & mask[None, :]
 
     score = tl.where(combined_mask, score, float("-inf"))
@@ -492,17 +500,23 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
     score_from_raw = score_from_raw + ape_vals
 
     # State-cache path: prefix-cache hit region. block_table[req_idx] maps
-    # logical_block = pos // block_size to a physical state-pool block;
-    # padding/unused entries are 0 and filtered by valid_block.
+    # logical_block = pos // block_size to a physical state-pool block.
+    # The framework table is not cyclic: out-of-table logical blocks and
+    # padding/unused entries are filtered before both block-table and
+    # state-cache loads.
     use_cache = mask_pos & ~use_raw
     block_indices = pos // block_size
-    block_indices_safe = tl.where(use_cache, block_indices, 0)
+    in_table = block_indices < block_table_stride
+    can_load_block = use_cache & in_table
+    block_indices_safe = tl.where(
+        can_load_block, tl.minimum(block_indices, block_table_stride - 1), 0
+    )
     block_numbers = tl.load(
         block_table_ptr + req_idx * block_table_stride + block_indices_safe,
-        mask=use_cache,
+        mask=can_load_block,
         other=0,
     )
-    valid_block = block_numbers > 0
+    valid_block = in_table & (block_numbers > 0)
     block_numbers_i64 = tl.where(valid_block, block_numbers, 0).to(tl.int64)
     block_offsets_raw = pos % block_size
     block_offsets = tl.where(mask_pos, block_offsets_raw, 0)
@@ -529,6 +543,8 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
 
     # Final mask: position must contribute (either source produced data)
     final_valid = use_raw | (use_cache & valid_block)
+    if tl.sum(final_valid.to(tl.int32), axis=0) == 0:
+        return
     combined_mask = final_valid[:, None] & mask[None, :]
 
     score = tl.where(combined_mask, score, float("-inf"))
@@ -702,7 +718,7 @@ def run_fused_compress_kv_write(
     # Phase-3a part 4c — varlen raw path. When both arrays are passed
     # (and ``disable_raw_path=False``) the kernel computes per-request
     # ``flat_idx`` so B>1 batched prefill keeps the raw fast path that
-    # avoids the cyclic state-cache round trip. Scalar ``seq_start`` is
+    # avoids the state-cache round trip. Scalar ``seq_start`` is
     # ignored in that mode.
     seq_start_per_req: Optional[torch.Tensor] = None,  # [B] int32/int64
     cu_seq_per_req: Optional[torch.Tensor] = None,  # [B+1] int32/int64

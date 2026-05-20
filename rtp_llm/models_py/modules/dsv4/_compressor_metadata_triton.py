@@ -35,15 +35,19 @@ def _map_compressor_metadata_kernel(
     req = tl.load(b_idx_ptr + offs, mask=mask, other=0).to(tl.int64)
     tl.store(token_to_req_ptr + offs, req.to(tl.int32), mask=mask)
 
-    state_block_in_seq = (pos // STATE_EB) % STATE_MAX_BLOCKS
+    state_block_in_seq_raw = pos // STATE_EB
     state_in_block = pos % STATE_EB
+    state_in_capacity = state_block_in_seq_raw < STATE_MAX_BLOCKS
+    state_block_in_seq = tl.maximum(
+        tl.minimum(state_block_in_seq_raw, STATE_MAX_BLOCKS - 1), 0
+    )
     state_block_id = tl.load(
         state_bt_ptr + req * state_bt_stride + state_block_in_seq,
         mask=mask,
         other=0,
     ).to(tl.int64)
     state_slot = state_block_id * STATE_EB + state_in_block
-    state_slot = tl.where(state_block_id > 0, state_slot, -1)
+    state_slot = tl.where(state_in_capacity & (state_block_id > 0), state_slot, -1)
     tl.store(state_slots_ptr + offs, state_slot, mask=mask)
 
     tokens_per_block: tl.constexpr = KV_EB * RATIO
@@ -94,15 +98,19 @@ def _prefill_compressor_metadata_kernel(
     tl.store(b_idx_ptr + offs, req, mask=mask)
     tl.store(token_to_req_ptr + offs, req.to(tl.int32), mask=mask)
 
-    state_block_in_seq = (pos // STATE_EB) % STATE_MAX_BLOCKS
+    state_block_in_seq_raw = pos // STATE_EB
     state_in_block = pos % STATE_EB
+    state_in_capacity = state_block_in_seq_raw < STATE_MAX_BLOCKS
+    state_block_in_seq = tl.maximum(
+        tl.minimum(state_block_in_seq_raw, STATE_MAX_BLOCKS - 1), 0
+    )
     state_block_id = tl.load(
         state_bt_ptr + req * state_bt_stride + state_block_in_seq,
         mask=mask,
         other=0,
     ).to(tl.int64)
     state_slot = state_block_id * STATE_EB + state_in_block
-    state_slot = tl.where(state_block_id > 0, state_slot, -1)
+    state_slot = tl.where(state_in_capacity & (state_block_id > 0), state_slot, -1)
     tl.store(state_slots_ptr + offs, state_slot, mask=mask)
 
     tokens_per_block: tl.constexpr = KV_EB * RATIO

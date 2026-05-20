@@ -438,6 +438,46 @@ def _test_decode(head_dim: int, *, tag: str) -> None:
     _assert_eq(tag, "decode", target_pos, ref_kv, ref_sc, got_kv, got_sc)
 
 
+# ============================================================================ #
+# Scenario 4: missing state blocks — out-of-table cache reads are skipped
+# ============================================================================ #
+def _test_missing_state_blocks_skip_write(head_dim: int, *, tag: str) -> None:
+    """Boundary writer must not read past block_table when the logical
+    state block is unavailable. With no valid raw/cache source, it should
+    leave the destination KV slot untouched."""
+    target_pos = 515  # boundary; overlap window straddles logical blocks 1/2
+    state_cache = _alloc_state_cache(head_dim, 1)
+    bt = torch.tensor([[0, 0]], dtype=torch.int64, device="cuda")
+    pos_dec = torch.tensor([target_pos], dtype=torch.int64, device="cuda")
+    state_slots = _build_state_slots(pos_dec, bt)
+    kv_cache = _alloc_kv_cache(head_dim, 1)
+    kv_slots = torch.tensor([0], dtype=torch.int64, device="cuda")
+    width = COFF * head_dim
+    dummy = torch.zeros(1, width, dtype=torch.float32, device="cuda")
+    ape = torch.zeros(COMPRESS_RATIO, width, dtype=torch.float32, device="cuda")
+
+    _launch(
+        kv_flat=dummy,
+        score_flat=dummy,
+        ape=ape,
+        positions=pos_dec,
+        state_cache=state_cache,
+        state_slots=state_slots,
+        state_block_table=bt,
+        kv_cache=kv_cache,
+        kv_slots=kv_slots,
+        sp=target_pos + 1,
+        head_dim=head_dim,
+        disable_raw=True,
+        skip_save=True,
+    )
+
+    got_kv, got_sc = _read_kv_slot(kv_cache, 0, head_dim, 1)
+    if int(got_kv.sum().item()) != 0 or int(got_sc.sum().item()) != 0:
+        raise AssertionError(f"[{tag}] missing_state_blocks should not write slot 0")
+    print(f"[{tag}] missing_state_blocks pos={target_pos:<4d} OK")
+
+
 def main():
     assert torch.cuda.is_available(), "CUDA required"
     for hd in (128, 512):
@@ -445,6 +485,7 @@ def main():
         _test_long_prefill(hd, tag=tag)
         _test_prefix_reuse(hd, tag=tag)
         _test_decode(hd, tag=tag)
+        _test_missing_state_blocks_skip_write(hd, tag=tag)
     print("OK")
 
 

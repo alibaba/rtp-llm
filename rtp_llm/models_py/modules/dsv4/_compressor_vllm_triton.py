@@ -139,10 +139,9 @@ def _fused_kv_compress_norm_rope_insert_bf16(
             return
 
     # Note: we deliberately do NOT early-return on ``slot_mapping[token]<0``.
-    # When a boundary's state slot has been evicted (cyclic ring overwrote
-    # it within this same launch) the raw path provides the data — the
-    # ``kv_slot_idx < 0`` check at the bottom is the real gate for whether
-    # this token should write to the KV pool.
+    # When a boundary's state slot is unavailable, the raw path may still
+    # provide the data — the ``kv_slot_idx < 0`` check at the bottom is the
+    # real gate for whether this token should write to the KV pool.
 
     req_idx = tl.load(token_to_req_indices_ptr + token_idx)
 
@@ -193,18 +192,22 @@ def _fused_kv_compress_norm_rope_insert_bf16(
     )
     score_from_raw = score_from_raw + ape_vals
 
-    # State-cache path. block_table covers all logical blocks of the
-    # request; cyclic blocks past fixed_blocks_per_req hold sentinel ids
-    # (==0). The valid_block check filters those.
+    # State-cache path. The framework block table is logical, not cyclic.
+    # Out-of-table logical blocks and sentinel ids are filtered before both
+    # block-table and state-cache loads.
     use_cache = mask_pos & ~use_raw
     block_indices = pos // block_size
-    block_indices_safe = tl.where(use_cache, block_indices, 0)
+    in_table = block_indices < block_table_stride
+    can_load_block = use_cache & in_table
+    block_indices_safe = tl.where(
+        can_load_block, tl.minimum(block_indices, block_table_stride - 1), 0
+    )
     block_numbers = tl.load(
         block_table_ptr + req_idx * block_table_stride + block_indices_safe,
-        mask=use_cache,
+        mask=can_load_block,
         other=0,
     )
-    valid_block = block_numbers > 0
+    valid_block = in_table & (block_numbers > 0)
     block_numbers_i64 = tl.where(valid_block, block_numbers, 0).to(tl.int64)
     block_offsets_raw = pos % block_size
     block_offsets = tl.where(mask_pos, block_offsets_raw, 0)
@@ -229,6 +232,8 @@ def _fused_kv_compress_norm_rope_insert_bf16(
     score = tl.where(use_raw[:, None], score_from_raw, score_from_cache)
 
     final_valid = use_raw | (use_cache & valid_block)
+    if tl.sum(final_valid.to(tl.int32), axis=0) == 0:
+        return
     combined_mask = final_valid[:, None] & mask[None, :]
 
     score = tl.where(combined_mask, score, float("-inf"))
@@ -342,13 +347,17 @@ def _fused_kv_compress_norm_rope_insert_bf16_ratio128_tile(
 
     use_cache = mask_pos & ~in_batch
     block_indices = pos // block_size
-    block_indices_safe = tl.where(use_cache, block_indices, 0)
+    in_table = block_indices < block_table_stride
+    can_load_block = use_cache & in_table
+    block_indices_safe = tl.where(
+        can_load_block, tl.minimum(block_indices, block_table_stride - 1), 0
+    )
     block_numbers = tl.load(
         block_table_ptr + req_idx * block_table_stride + block_indices_safe,
-        mask=use_cache,
+        mask=can_load_block,
         other=0,
     )
-    valid_block = block_numbers > 0
+    valid_block = in_table & (block_numbers > 0)
     block_numbers_i64 = tl.where(valid_block, block_numbers, 0).to(tl.int64)
     block_offsets = tl.where(mask_pos, pos % block_size, 0)
     row_base = (
@@ -369,6 +378,8 @@ def _fused_kv_compress_norm_rope_insert_bf16_ratio128_tile(
     kv = tl.where(in_batch[:, None], kv_from_raw, kv_from_cache)
     score = tl.where(in_batch[:, None], score_from_raw, score_from_cache)
     final_valid = in_batch | (use_cache & valid_block)
+    if tl.sum(final_valid.to(tl.int32), axis=0) == 0:
+        return
     combined_mask = final_valid[:, None] & head_mask[None, :]
 
     score = tl.where(combined_mask, score, float("-inf"))
@@ -698,7 +709,7 @@ def run_fused_compress_kv_write_bf16(
     Source dispatch policy (set ``CACHE_WINDOW=0`` always):
       * **Prefill / in-batch token** (``flat_idx in [0, n_batch)``) → raw
         path reads directly from ``kv_raw`` / ``score_raw``. State pool is
-        never consulted, so its sizing / cyclic-overwrite behaviour does
+        never consulted, so its sizing / unavailable-block behaviour does
         not affect prefill correctness.
       * **Continuation prefill, prefix overlap** (``pos < seq_start``)
         → cache path, reads from ``state_cache`` (populated by a previous
@@ -708,11 +719,10 @@ def run_fused_compress_kv_write_bf16(
 
     The vLLM source kernel uses a non-zero ``CACHE_WINDOW`` so the back of
     the in-batch range falls into the (cache-friendly) state pool read; it
-    requires a large per-request state pool (256 entries × 2 blocks = 512
-    slots) to remain correct when batches exceed the cyclic capacity. We
-    skip that micro-optimization: raw and cache reads are bit-equivalent,
-    and forcing raw for the entire in-batch range eliminates state-pool
-    sizing as a correctness constraint."""
+    requires a state-cache layout that can serve those positions. We skip
+    that micro-optimization: raw and cache reads are bit-equivalent, and
+    forcing raw for the entire in-batch range eliminates state-pool sizing
+    as a correctness constraint."""
     N = int(slot_mapping.shape[0])
     if N == 0:
         return

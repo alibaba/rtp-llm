@@ -47,6 +47,7 @@ _meta_mod = _load_module(
 
 allocate_decode_metadata_fp8 = _meta_mod.allocate_decode_metadata_fp8
 update_decode_metadata_in_place_fp8 = _meta_mod.update_decode_metadata_in_place_fp8
+_compute_state_pool_slot_mapping = _meta_mod._compute_state_pool_slot_mapping
 
 
 def _alloc(q_len: int, max_bs: int = 4, max_seq_len: int = 65600):
@@ -118,11 +119,14 @@ def _ref_state_slots(
     pos = positions.to(torch.long)
     req = req_idx.to(torch.long)
     bt = block_table.to(torch.long)
-    block_in_seq = (pos // entries_per_block) % bt.shape[1]
+    block_in_seq = pos // entries_per_block
     in_block = pos % entries_per_block
-    block_id = bt[req, block_in_seq]
+    in_capacity = block_in_seq < bt.shape[1]
+    safe_block = block_in_seq.clamp(min=0, max=bt.shape[1] - 1)
+    block_id = bt[req, safe_block]
     slot = block_id * entries_per_block + in_block
-    return torch.where(block_id > 0, slot, torch.full_like(slot, -1))
+    valid = in_capacity & (block_id > 0)
+    return torch.where(valid, slot, torch.full_like(slot, -1))
 
 
 class TestDecodeMetadataStartPos(unittest.TestCase):
@@ -356,6 +360,22 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
             block_size=256,
         )
         self.assertEqual(translated.tolist(), [[-1, -1, 9 * 256 + 8, -1]])
+
+    def test_state_pool_slot_mapping_does_not_wrap_past_capacity(self):
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA required for paged metadata translator")
+        device = torch.device("cuda")
+        block_table = _i32([[5, 6]]).to(device)
+        positions = torch.tensor([0, 255, 256, 511, 512], dtype=torch.long, device=device)
+        req_idx = torch.zeros_like(positions)
+
+        mapped = _compute_state_pool_slot_mapping(
+            block_table,
+            positions,
+            req_idx,
+            entries_per_block=256,
+        )
+        self.assertEqual(mapped.tolist(), [5 * 256, 5 * 256 + 255, 6 * 256, 6 * 256 + 255, -1])
 
 
 if __name__ == "__main__":

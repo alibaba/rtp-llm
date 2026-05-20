@@ -3,9 +3,9 @@
 Collapses the 3 pure-integer helpers (~25 aten ops total) called per
 decode layer into a single Triton kernel launch:
 
-  * ``_compute_state_slot_mapping``: ``state_bt[b, (pos // state_eb) %
-    state_max_blocks] * state_eb + pos % state_eb`` with ``-1`` sentinel
-    when the resolved block id is <= 0.
+  * ``_compute_state_slot_mapping``: ``state_bt[b, pos // state_eb] *
+    state_eb + pos % state_eb`` with ``-1`` sentinel when the logical
+    block is outside the table or the resolved block id is <= 0.
   * ``_compute_kv_slot_mapping``: ``kv_bt[b, pos // tokens_per_block] *
     kv_eb + (pos % tokens_per_block) // ratio``, masked to ``-1`` unless
     ``(pos+1) % ratio == 0`` and ``block_id > 0`` and the block-in-seq
@@ -77,13 +77,14 @@ if _TRITON_AVAILABLE:
         b = tl.load(b_idx_ptr + offs, mask=mask, other=0).to(tl.int64)
 
         # ---------- State slot ----------
-        # block_in_seq = (pos // state_eb) % state_max_blocks (matches Python).
-        state_bis = (pos // STATE_EB) % STATE_MAX_BLOCKS
+        state_bis_raw = pos // STATE_EB
         in_blk_s = pos % STATE_EB
+        state_in_capacity = state_bis_raw < STATE_MAX_BLOCKS
+        state_bis = tl.maximum(tl.minimum(state_bis_raw, STATE_MAX_BLOCKS - 1), 0)
         state_bid = tl.load(
             state_bt_ptr + b * STATE_MAX_BLOCKS + state_bis, mask=mask, other=0
         ).to(tl.int64)
-        state_valid = state_bid > 0
+        state_valid = state_in_capacity & (state_bid > 0)
         state_slot = tl.where(state_valid, state_bid * STATE_EB + in_blk_s, -1)
         tl.store(state_slots_ptr + offs, state_slot, mask=mask)
 

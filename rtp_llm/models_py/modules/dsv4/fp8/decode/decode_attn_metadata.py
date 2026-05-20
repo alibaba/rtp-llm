@@ -275,9 +275,8 @@ def _compute_state_pool_slot_mapping(
 ) -> torch.Tensor:
     """Match CompressorFP8._compute_state_slot_mapping.
 
-    State pools are cyclic per request: block index is
-    ``(pos // entries_per_block) % max_blocks``.  Block id <= 0 is the
-    unallocated sentinel and maps to -1.
+    State pools use the framework's logical block table. Entries outside
+    the supplied table width, or entries whose block id is <= 0, map to -1.
     """
     if positions.numel() == 0:
         return torch.empty(0, dtype=torch.long, device=positions.device)
@@ -285,11 +284,16 @@ def _compute_state_pool_slot_mapping(
     req_i64 = req_idx.to(torch.long)
     bt_long = block_table.to(torch.long)
     max_blocks = int(bt_long.shape[1])
-    block_in_seq = (pos_i64 // entries_per_block) % max_blocks
+    if max_blocks <= 0:
+        return torch.full_like(pos_i64, -1)
+    block_in_seq = pos_i64 // entries_per_block
     in_block = pos_i64 % entries_per_block
-    block_id = bt_long[req_i64, block_in_seq]
+    in_capacity = block_in_seq < max_blocks
+    safe_block_in_seq = block_in_seq.clamp(min=0, max=max_blocks - 1)
+    block_id = bt_long[req_i64, safe_block_in_seq]
     slot = block_id * entries_per_block + in_block
-    return torch.where(block_id > 0, slot, torch.full_like(slot, -1))
+    valid = in_capacity & (block_id > 0)
+    return torch.where(valid, slot, torch.full_like(slot, -1))
 
 
 def _update_compressor_state_slot_mappings(
