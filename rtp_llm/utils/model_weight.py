@@ -1369,12 +1369,12 @@ class W:
     v4_attn_q_norm = "v4.attn.q_norm.weight"
     v4_attn_kv_norm = "v4.attn.kv_norm.weight"
     v4_attn_sink = "v4.attn.attn_sink"
-    v4_attn_wq_a_w = "v4.attn.wq_a.weight"
-    v4_attn_wq_a_s = "v4.attn.wq_a.scale"
     v4_attn_wq_b_w = "v4.attn.wq_b.weight"
     v4_attn_wq_b_s = "v4.attn.wq_b.scale"
-    v4_attn_wkv_w = "v4.attn.wkv.weight"
-    v4_attn_wkv_s = "v4.attn.wkv.scale"
+    # Row-concat([wq_a | wkv]) so one FP8 GEMM on `x` produces both halves;
+    # see deepseek_v4._build_attn_dense_fp8 + dsv4/fp8/attention.py.
+    v4_attn_fusedqkrope_w = "v4.attn.fusedqkrope.weight"
+    v4_attn_fusedqkrope_s = "v4.attn.fusedqkrope.scale"
     v4_attn_wo_a_w = "v4.attn.wo_a.weight"
     v4_attn_wo_a_s = "v4.attn.wo_a.scale"
     v4_attn_wo_b_w = "v4.attn.wo_b.weight"
@@ -1566,12 +1566,10 @@ class W:
         v4_attn_q_norm: sp_id,
         v4_attn_kv_norm: sp_id,
         v4_attn_sink: sp_id,
-        v4_attn_wq_a_w: sp_id,
-        v4_attn_wq_a_s: sp_id,
         v4_attn_wq_b_w: sp_id,
         v4_attn_wq_b_s: sp_id,
-        v4_attn_wkv_w: sp_id,
-        v4_attn_wkv_s: sp_id,
+        v4_attn_fusedqkrope_w: sp_id,
+        v4_attn_fusedqkrope_s: sp_id,
         v4_attn_wo_a_w: sp_id,
         v4_attn_wo_a_s: sp_id,
         v4_attn_wo_b_w: sp_id,

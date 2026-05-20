@@ -150,22 +150,24 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
         # Each AttnAtomicWeight here will be wrapped by V4PerBlockFp8Weight
         # in to_quant_weight_info() — that subclass auto-derives the .scale
         # ckpt key from the .weight ckpt key using V4's suffix convention.
+        #
+        # wq_a + wkv are emitted as a single fused atom with row-concat over
+        # the two ckpt tensors; both consume the same `x` so AttentionFP8
+        # issues one FP8 DeepGEMM and splits the output.  See
+        # `models_py/modules/dsv4/fp8/attention.py` (init + compute_qkv).
         return [
             AttnAtomicWeight(
-                W.v4_attn_wq_a_w,
-                [CkptWeightInfo(self._key("attn.wq_a.weight"), identity)],
-                identity,
+                W.v4_attn_fusedqkrope_w,
+                [
+                    CkptWeightInfo(self._key("attn.wq_a.weight"), identity),
+                    CkptWeightInfo(self._key("attn.wkv.weight"), identity),
+                ],
+                concat_0,
                 config=cfg,
             ),
             AttnAtomicWeight(
                 W.v4_attn_wq_b_w,
                 [CkptWeightInfo(self._key("attn.wq_b.weight"), identity)],
-                identity,
-                config=cfg,
-            ),
-            AttnAtomicWeight(
-                W.v4_attn_wkv_w,
-                [CkptWeightInfo(self._key("attn.wkv.weight"), identity)],
                 identity,
                 config=cfg,
             ),

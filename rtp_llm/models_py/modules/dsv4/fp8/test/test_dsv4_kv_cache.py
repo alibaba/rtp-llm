@@ -819,10 +819,18 @@ class TestAttentionOutput:
                 else:
                     dst.copy_(src)
 
-            _copy_weight(our_attn.wq_a.weight, official_attn.wq_a.weight)
+            # Our attention concats [wq_a | wkv] into a single fused linear
+            # — copy the row-concat into our_attn.wqkv_a.
+            fused_qkv_a_weight = torch.cat(
+                [
+                    official_attn.wq_a.weight.float(),
+                    official_attn.wkv.weight.float(),
+                ],
+                dim=0,
+            )
+            _copy_weight(our_attn.wqkv_a.weight, fused_qkv_a_weight)
             our_attn.q_norm.weight.copy_(official_attn.q_norm.weight)
             _copy_weight(our_attn.wq_b.weight, official_attn.wq_b.weight)
-            _copy_weight(our_attn.wkv.weight, official_attn.wkv.weight)
             our_attn.kv_norm.weight.copy_(official_attn.kv_norm.weight)
             _copy_weight(our_attn.wo_a.weight, official_attn.wo_a.weight)
             _copy_weight(our_attn.wo_b.weight, official_attn.wo_b.weight)

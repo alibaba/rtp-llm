@@ -13,7 +13,7 @@ slow but correct. M6 will swap in FlashMLA sparse impl.
 """
 
 import os
-from typing import Any, Dict, NamedTuple, Optional, Union
+from typing import Any, Dict, List, NamedTuple, Optional, Union
 
 # P3 (audit §3.5 / §7.4 P0): wo_a batched output projection.
 # Replaces the per-group ``for g in range(G)`` loop (G launches of
@@ -34,12 +34,15 @@ from rtp_llm.models_py.modules.dsv4._fused_inv_rope_fp8_quant_triton import (
     fused_inv_rope_fp8_quant,
 )
 
-# Audit §7.4 P0 (row 1) + §7.3.4: fused RMSNorm + partial RoPE, single
-# Triton launch.  Covers every Q/KV decode + prefill site.  Standalone
-# (no-RoPE) RMSNorm sites (``_rmsnorm_weighted``) use the framework C++
-# ``rtp_llm_ops.rmsnorm`` (matches vLLM — bf16 weight).
-# Validated by test_fused_rmsnorm_rope.py (bf16 <=1-ULP + 1.25-1.75x).
-from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_rope_triton import fused_rmsnorm_rope
+# vLLM-parity 4-launch Q/KV pipeline (see
+# ``_fused_qkv_rmsnorm_rope_triton`` module docstring):
+#   step 2: fused_q_kv_rmsnorm           — RMSNorm both halves of qkv_a
+#   step 4: fused_q_perhead_norm_qkv_rope — per-head Q norm + Q/KV RoPE
+# Validated by test_fused_qkv_rmsnorm_rope.py.
+from rtp_llm.models_py.modules.dsv4._fused_qkv_rmsnorm_rope_triton import (
+    fused_q_kv_rmsnorm,
+    fused_q_perhead_norm_qkv_rope,
+)
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4.chunk_env import dsv4_chunk_tokens_from_env
 from rtp_llm.models_py.modules.dsv4.cp import (
@@ -621,6 +624,22 @@ class PrefillQKV(NamedTuple):
     kv_cp_gather_deferred: bool = False
 
 
+class DecodeQKV(NamedTuple):
+    """Q/KV intermediate produced by ``AttentionFP8._decode_compute_qkv``.
+
+    ``qr`` — ``[B, S, q_lora_rank]`` bf16, fed to the CSA indexer.
+    ``q``  — ``[B, S, H, D]`` bf16, dense Q for sparse attn.
+    ``kv`` — ``[B, S, D]`` bf16, single MQA head written to the SWA pool.
+    ``freqs_cis`` — ``[T, freqs_dim]`` per-token RoPE lookup, reused by
+        the output-proj inverse-RoPE.
+    """
+
+    qr: torch.Tensor
+    q: torch.Tensor
+    kv: torch.Tensor
+    freqs_cis: torch.Tensor
+
+
 class AttentionFP8(nn.Module):
     def __init__(
         self,
@@ -735,15 +754,21 @@ class AttentionFP8(nn.Module):
                 s = s.contiguous()
             return _v4_fp8_linear(w, s)
 
-        self.wq_a = _fp8_w_s(W.v4_attn_wq_a_w, W.v4_attn_wq_a_s)
+        # wq_a + wkv share input `x` and are emitted as a single row-concat
+        # ([wq_a | wkv]) FP8 GEMM by the loader.  AttentionFP8 issues one
+        # DeepGEMM call, then splits the [B, S, q_lora_rank + head_dim]
+        # output along the last dim — see ``_decode_compute_qkv`` and
+        # ``_prefill_compute_qkv``.  Both halves are TP-replicated (wq_a
+        # has no row_slice, wkv is the single MQA head), so no TP slicing
+        # is needed for the fused entry.
+        self.wqkv_a = _fp8_w_s(W.v4_attn_fusedqkrope_w, W.v4_attn_fusedqkrope_s)
+        self._qkv_a_split: List[int] = [q_lora_rank, head_dim]
         # wq_b is row-split along N (n_heads * head_dim)
         self.wq_b = _fp8_w_s(
             W.v4_attn_wq_b_w,
             W.v4_attn_wq_b_s,
             row_slice=wq_b_row_slice if tp_size > 1 else None,
         )
-        # MQA single KV head — replicate.
-        self.wkv = _fp8_w_s(W.v4_attn_wkv_w, W.v4_attn_wkv_s)
 
         # wo_a grouped projection: row-split along (n_groups*o_lora_rank).
         # Stored as plain ``[N, K]`` fp8 weight + UE8M0 scale tensors;
@@ -1851,7 +1876,7 @@ class AttentionFP8(nn.Module):
         """Decode attention body — thin dispatcher mirroring ``_forward_prefill``.
 
         Pipeline:
-          1. Q/KV + per-request partial RoPE (``decode_compute_qkv``).
+          1. Q/KV + per-request partial RoPE (``_decode_compute_qkv``).
           2. FP8 SWA pool write (``decode_write_swa_fp8``).
           3. Per-``compress_ratio`` body:
              * ``0``   → :meth:`_forward_decode_swa_only`
@@ -1862,9 +1887,6 @@ class AttentionFP8(nn.Module):
         Compressor / Indexer freqs_cis is bound lazily on first call
         (pool context is set in :meth:`forward_decode`'s try/finally).
         """
-        from rtp_llm.models_py.modules.dsv4.fp8.decode.compute_qkv import (
-            decode_compute_qkv,
-        )
         from rtp_llm.models_py.modules.dsv4.fp8.decode.output_proj import (
             decode_output_proj,
         )
@@ -1875,7 +1897,7 @@ class AttentionFP8(nn.Module):
         position_ids = attn_metadata.position_ids[:T]  # [T] int32
 
         self._ensure_freqs_cis_bound()
-        qkv = decode_compute_qkv(self, x, position_ids)
+        qkv = self._decode_compute_qkv(x, position_ids)
         self._decode_write_swa_fp8(qkv.kv, bsz, q_len, attn_metadata)
 
         if self.compress_ratio == 0:
@@ -4083,6 +4105,47 @@ class AttentionFP8(nn.Module):
             slot_in_flat=None,
         )
 
+    def _decode_compute_qkv(
+        self,
+        x: torch.Tensor,  # [B, S, dim] bf16
+        position_ids: torch.Tensor,  # [T] int32 absolute position per token
+    ) -> "DecodeQKV":
+        """Decode Q/KV — fused FP8 GEMM + RMSNorm + wq_b + fused RMSNorm-RoPE.
+
+        Mirrors :meth:`_prefill_compute_qkv` for the per-request decode
+        path (including target-verify ``q_len > 1``). ``position_ids`` is
+        flat over the token-major ``[B, S]`` layout.
+        """
+        rd = self.rope_head_dim
+        position_ids = position_ids.reshape(-1).to(
+            device=self.freqs_cis.device, dtype=torch.long
+        )
+        freqs_cis = self.freqs_cis.index_select(0, position_ids).contiguous()
+
+        qkv_a = self._lin(self.wqkv_a, x)  # [B, S, q_lora_rank + head_dim]
+        q_lora_rank, _kv_dim = self._qkv_a_split
+
+        # Step 2 (vLLM parity): RMSNorm both halves of the GEMM output
+        # in one launch — qr with q_norm, kv with kv_norm. KV slice is
+        # read directly from qkv_a via constexpr offset.
+        qr, kv = fused_q_kv_rmsnorm(
+            qkv_a,
+            self.q_norm,
+            self.kv_norm,
+            q_size=q_lora_rank,
+            kv_offset=q_lora_rank,
+            eps=self.eps,
+        )
+        q = self._lin(self.wq_b, qr).unflatten(
+            -1, (self.n_heads, self.head_dim)
+        )  # [B, S, H, D]
+        # Step 4 (vLLM parity): per-head Q RMSNorm (no weight) + Q-RoPE
+        # + KV-RoPE.  KV is already RMSNormed in step 2.
+        q, kv = fused_q_perhead_norm_qkv_rope(
+            q, kv, freqs_cis, rd, eps=self.eps
+        )
+        return DecodeQKV(qr=qr, q=q, kv=kv, freqs_cis=freqs_cis)
+
     def _prefill_compute_qkv(
         self,
         x: torch.Tensor,
@@ -4090,28 +4153,40 @@ class AttentionFP8(nn.Module):
         cp_gather_stream: Optional[Any] = None,
         start_cp_gather: bool = True,
     ) -> PrefillQKV:
-        """Q/KV path — RMSNorm + LoRA Q + KV linears + fused RMSNorm-RoPE.
+        """Q/KV path — vLLM-parity 4-launch pipeline (fused FP8 GEMM →
+        fused_q_kv_rmsnorm → wq_b → fused_q_perhead_norm_qkv_rope).
 
-        Internally uses ``[1, T, ...]`` so ``fused_rmsnorm_rope`` sees the
-        ``(B, S, …)`` layout it expects. Returned tensors keep the 3D
+        Internally uses ``[1, T, ...]`` so the fused kernels see the
+        ``(B, S, …)`` layout they expect. Returned tensors keep the 3D
         shape because downstream pool/compressor helpers rely on it.
         """
         x_3d = x.unsqueeze(0)
         rd = common.rd
-        # Q path
-        with record_function_range("dsv4.fp8.attn.qkv.q_lora_a_norm"):
-            qr = self._rmsnorm_weighted(
-                self._lin(self.wq_a, x_3d), self.q_norm
-            )  # [1, T, q_lora_rank]
-        with record_function_range("dsv4.fp8.attn.qkv.q_lora_b_rope"):
+        q_lora_rank, _kv_dim = self._qkv_a_split
+        # vLLM-parity 4-launch structure:
+        #   1) fused FP8 GEMM for wq_a + wkv
+        #   2) RMSNorm both halves of the GEMM output in one launch
+        #   3) wq_b on the normed qr
+        #   4) per-head Q RMSNorm (no weight) + Q-RoPE + KV-RoPE
+        # All slice reads happen inside the kernels via constexpr
+        # offsets — no Python-side .split() / .contiguous().
+        with record_function_range("dsv4.fp8.attn.qkv.fused_qkrope_proj"):
+            qkv_a = self._lin(self.wqkv_a, x_3d)  # [1, T, q_lora_rank + head_dim]
+        with record_function_range("dsv4.fp8.attn.qkv.fused_q_kv_rmsnorm"):
+            qr, kv = fused_q_kv_rmsnorm(
+                qkv_a,
+                self.q_norm,
+                self.kv_norm,
+                q_size=q_lora_rank,
+                kv_offset=q_lora_rank,
+                eps=self.eps,
+            )
+        with record_function_range("dsv4.fp8.attn.qkv.q_lora_b_proj"):
             q = self._lin(self.wq_b, qr).unflatten(-1, (self.n_heads, self.head_dim))
-            q = fused_rmsnorm_rope(q, None, common.freqs_cis, rd, eps=self.eps)
 
-        # KV path (single MQA head) — rank-local under CP.
-        with record_function_range("dsv4.fp8.attn.qkv.kv_proj_rope"):
-            kv_in = self._lin(self.wkv, x_3d)
-            kv = fused_rmsnorm_rope(
-                kv_in, self.kv_norm, common.freqs_cis, rd, eps=self.eps
+        with record_function_range("dsv4.fp8.attn.qkv.q_perhead_norm_qkv_rope"):
+            q, kv = fused_q_perhead_norm_qkv_rope(
+                q, kv, common.freqs_cis, rd, eps=self.eps
             )
 
         kv_full_handle = None

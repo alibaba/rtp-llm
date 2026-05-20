@@ -161,12 +161,10 @@ def gemm_block_fp8_gpt_style_tp_strategy():
         W.mla_indexer_k_w: sp_id,
         W.mla_indexer_k_s: sp_id,
         # ---- DSv4 (TP=1 placeholders) ----
-        W.v4_attn_wq_a_w: sp_id,
-        W.v4_attn_wq_a_s: sp_id,
+        W.v4_attn_fusedqkrope_w: sp_id,
+        W.v4_attn_fusedqkrope_s: sp_id,
         W.v4_attn_wq_b_w: sp_id,
         W.v4_attn_wq_b_s: sp_id,
-        W.v4_attn_wkv_w: sp_id,
-        W.v4_attn_wkv_s: sp_id,
         W.v4_attn_wo_a_w: sp_id,
         W.v4_attn_wo_a_s: sp_id,
         W.v4_attn_wo_b_w: sp_id,
@@ -915,10 +913,12 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
 
 # Mapping: V4 kernel-weight name → V4 scale name (both registered in W).
 _V4_FP8_WEIGHT_LIST: Dict[str, str] = {
-    # dense MQA self-attn
-    W.v4_attn_wq_a_w: W.v4_attn_wq_a_s,
+    # dense MQA self-attn — wq_a + wkv are emitted as a single row-concat
+    # atom by deepseek_v4._build_attn_dense_fp8; both halves' N are
+    # 128-aligned in V4-Flash (wq_a=1024, wkv=512), so the raw UE8M0
+    # [N//128, K//128] scales concat cleanly along dim 0.
+    W.v4_attn_fusedqkrope_w: W.v4_attn_fusedqkrope_s,
     W.v4_attn_wq_b_w: W.v4_attn_wq_b_s,
-    W.v4_attn_wkv_w: W.v4_attn_wkv_s,
     W.v4_attn_wo_a_w: W.v4_attn_wo_a_s,
     W.v4_attn_wo_b_w: W.v4_attn_wo_b_s,
     # indexer (CSA only) — outer wq_b

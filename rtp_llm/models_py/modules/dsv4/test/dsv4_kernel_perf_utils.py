@@ -215,6 +215,38 @@ def measurement_payload(measurement: KernelMeasurement) -> dict:
     return asdict(measurement)
 
 
+# Per-compute-cap HBM peak fallback (GB/s) used when the device props
+# don't expose memory_bus_width / memory_clock_rate.
+#   (10, 0) Blackwell HBM3e        ≈ 8000 GB/s (B300)
+#   (9, 0)  Hopper SXM5            ≈ 4000 GB/s (H100/H200)
+#   (8, 9)  Ada / L20D             ≈ 1000 GB/s
+#   (8, 0)  A100 SXM4              ≈ 2000 GB/s
+_HBM_PEAK_FALLBACK_GBPS = {
+    (10, 0): 8000.0,
+    (9, 0): 4000.0,
+    (8, 9): 1000.0,
+    (8, 0): 2000.0,
+}
+
+
+def _hbm_peak_gbps(device: int) -> float:
+    """Best-effort HBM peak in GB/s for ``device``.
+
+    Prefers ``memory_bus_width * memory_clock_rate * 2 / 8e9`` when the
+    PyTorch build exposes those (recent CUDA builds do); otherwise
+    falls back to a per-compute-cap table.  Returns 0.0 if unknown so
+    callers can degrade gracefully.
+    """
+    props = torch.cuda.get_device_properties(device)
+    bus_w = getattr(props, "memory_bus_width", 0) or 0
+    clk_khz = getattr(props, "memory_clock_rate", 0) or 0
+    if bus_w > 0 and clk_khz > 0:
+        # clk_khz is in kHz, bus_w in bits, DDR doubles effective rate.
+        return float(bus_w) * float(clk_khz) * 2.0 / 8.0e6
+    cap = torch.cuda.get_device_capability(device)
+    return _HBM_PEAK_FALLBACK_GBPS.get(cap, 0.0)
+
+
 def device_payload() -> dict:
     if not torch.cuda.is_available():
         return {"cuda_available": False}
@@ -225,6 +257,7 @@ def device_payload() -> dict:
         "cuda_capability": list(torch.cuda.get_device_capability(device)),
         "torch_version": torch.__version__,
         "cuda_version": torch.version.cuda,
+        "hbm_peak_gbps": _hbm_peak_gbps(device),
     }
 
 

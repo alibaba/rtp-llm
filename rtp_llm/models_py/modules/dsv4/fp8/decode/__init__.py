@@ -12,10 +12,13 @@ assertion). BF16 KV-cache decode was removed together with
 ``sparse_attn_decode_op`` and ``paged_topk_translator.gather_dual_pool_kv_packed``.
 
 Sub-modules:
-- ``compute_qkv`` — per-request Q/KV projection + partial RoPE
-  (:func:`.compute_qkv.decode_compute_qkv`).
 - ``output_proj`` — fused inv-RoPE + FP8 quant + wo_a einsum + wo_b
   (:func:`.output_proj.decode_output_proj`).
+
+Per-request Q/KV projection lives on the attention module itself —
+:meth:`rtp_llm.models_py.modules.dsv4.fp8.attention.AttentionFP8._decode_compute_qkv` —
+since it's a thin wrapper over the fused FP8 GEMM + RMSNorm + RoPE
+pipeline that mirrors ``_prefill_compute_qkv``.
 - ``write_swa`` — FP8 SWA pool write wrapper
   (:func:`.write_swa.decode_write_swa_fp8`).
 - ``attention_kernels`` — FlashMLA FP8 dispatch helpers
