@@ -297,7 +297,15 @@ class AiterPrefillAttnOp:
         ).to(torch.int32)
         positions = cached_positions[:max_blocks_per_seq].unsqueeze(0)
         valid_mask = positions < valid_blocks.unsqueeze(1)
-        return torch.where(valid_mask, block_table, torch.zeros_like(block_table))
+
+        # Mimic CK's clamp fix (AICK-1171): fill invalid columns with the last
+        # valid block id per row (not zero). This ensures any speculative read
+        # by the kernel resolves to the same physical block as the last valid
+        # entry, so the computed address stays within the KV cache allocation.
+        last_valid_col = (valid_blocks - 1).clamp(min=0).unsqueeze(1)  # [B, 1]
+        last_valid_block_id = block_table.gather(1, last_valid_col.to(torch.int64))  # [B, 1]
+        fill_value = last_valid_block_id.expand_as(block_table)
+        return torch.where(valid_mask, block_table, fill_value)
 
     def _gather_and_reshape_kv_compact(self, kv_cache_base, block_table):
         """Gather referenced blocks once, then reshape to VECTORIZED_LAYOUT.
@@ -360,6 +368,19 @@ class AiterPrefillAttnOp:
             )
 
         compact_block_table = inverse_indices.to(torch.int32).view_as(block_table)
+
+        # Append one dummy zero-block to k/v compact buffers. CK kernel may
+        # speculatively read beyond the last valid block_table entry; having a
+        # trailing safe block prevents GPU page faults even if the read lands
+        # on a padding column that maps to index num_gathered (one past end).
+        k_pad = torch.zeros(
+            (1, *k_compact.shape[1:]), dtype=k_compact.dtype, device=k_compact.device
+        )
+        v_pad = torch.zeros(
+            (1, *v_compact.shape[1:]), dtype=v_compact.dtype, device=v_compact.device
+        )
+        k_compact = torch.cat([k_compact, k_pad], dim=0)
+        v_compact = torch.cat([v_compact, v_pad], dim=0)
 
         return k_compact, v_compact, compact_block_table
 
@@ -469,33 +490,29 @@ class AiterPrefillAttnOp:
         if seqlen_k.device != q_tensor.device:
             seqlen_k = seqlen_k.to(q_tensor.device, non_blocking=True)
 
-        import sys as _sys
-        print(f"[PAGED_PREFILL] before _sanitize_block_table, kv_cache_base.shape={kv_cache.kv_cache_base.shape}, "
-              f"kv_cache_block_id_device.shape={fmha_params.kv_cache_block_id_device.shape}, seqlen_k={seqlen_k}", file=_sys.stderr, flush=True)
         block_table = self._sanitize_block_table(
             fmha_params.kv_cache_block_id_device,
             kv_cache.kv_cache_base.shape[0],
             seqlen_k,
         )
-        print(f"[PAGED_PREFILL] after _sanitize_block_table, block_table.shape={block_table.shape}", file=_sys.stderr, flush=True)
 
         use_compact = self.v1_kv_layout and not is_fp8
 
         if use_compact:
-            print(f"[PAGED_PREFILL] before _gather_and_reshape_kv_compact", file=_sys.stderr, flush=True)
             k_cache, v_cache, block_table = self._gather_and_reshape_kv_compact(
                 kv_cache.kv_cache_base, block_table
             )
-            print(f"[PAGED_PREFILL] after _gather_and_reshape_kv_compact OK", file=_sys.stderr, flush=True)
         else:
-            print(f"[PAGED_PREFILL] before _reshape_kv_cache_vectorized", file=_sys.stderr, flush=True)
             k_cache, v_cache = self._reshape_kv_cache_vectorized(kv_cache.kv_cache_base)
-            print(f"[PAGED_PREFILL] after _reshape_kv_cache_vectorized OK, k={k_cache.shape}, v={v_cache.shape}", file=_sys.stderr, flush=True)
 
         # Reuse values computed once in FMHAParams.prepare() to avoid
         # per-layer GPU→CPU sync from .item() on the hot path.
         max_seqlen_q = fmha_params.max_seqlen_q
-        max_seqlen_k = fmha_params.max_seqlen_k
+        # Workaround for AICK-1171: CK kernel uses max_seqlen_k as loop bound
+        # for page table reads with speculative V-tile prefetch. Clamp to
+        # actual batch max to prevent kernel from iterating beyond block_table
+        # columns. seqlen_k is the per-seq authoritative length for masking.
+        max_seqlen_k = min(fmha_params.max_seqlen_k, int(seqlen_k.max().item()))
 
         softmax_scale = 1.0 / math.sqrt(self.head_dim)
         # kv_indptr must be all-zeros when kv_page_indices is empty (block_table
@@ -531,26 +548,22 @@ class AiterPrefillAttnOp:
             k_descale = self._fp8_descale
             v_descale = self._fp8_descale
 
-        import sys as _sys
-        _k_blocks = k_cache.shape[0]
-        _needed_blocks_max = int(seqlen_k.max().item() + self.tokens_per_block - 1) // self.tokens_per_block
-        # Workaround: aiter CK kernel may speculatively read block_table[row, needed_blocks]
-        # (one past last valid column). Pad block_table with 1 extra column of zeros to prevent OOB.
-        if block_table.shape[1] <= _needed_blocks_max:
-            _pad_cols = _needed_blocks_max - block_table.shape[1] + 1
-            block_table = torch.nn.functional.pad(block_table, (0, _pad_cols), value=0)
-            print(f"[PAGED_PREFILL] PADDED block_table by {_pad_cols} cols -> {block_table.shape}", file=_sys.stderr, flush=True)
+        # Workaround for AICK-1171: CK batch prefill kernel computes
+        #   num_total_loop = ceil(seqlen_k / kN0)
+        # and speculatively prefetches V tiles via page table lookup up to
+        # page_id = (num_total_loop * kN0 - 1) / page_size. This can overshoot
+        # the valid page entries by up to ceil(kN0 / page_size) columns.
+        # Use kN0=128 (conservative upper bound for all head_dim configs).
+        _CK_KN0 = 128
+        extra_pages = (_CK_KN0 + self.tokens_per_block - 1) // self.tokens_per_block
+        required_cols = (max_seqlen_k + self.tokens_per_block - 1) // self.tokens_per_block + extra_pages
+        if block_table.shape[1] < required_cols:
+            pad_cols = required_cols - block_table.shape[1]
+            # Fill pad columns with each row's last valid block id (from
+            # sanitize) so speculative reads land on a safe physical block.
+            last_col = block_table[:, -1:].expand(-1, pad_cols)
+            block_table = torch.cat([block_table, last_col], dim=1)
 
-        _bt_max = block_table.max().item()
-        _bt_min = block_table.min().item()
-        print(f"[PAGED_PREFILL] before mha_batch_prefill_func: q={q_tensor.shape} dtype={q_tensor.dtype}, "
-              f"k_cache={k_cache.shape} dtype={k_cache.dtype}, v_cache={v_cache.shape}, "
-              f"cu_seqlens_q={cu_seqlens_q.shape}, max_q={max_seqlen_q}, max_k={max_seqlen_k}, "
-              f"block_table={block_table.shape}, seqlen_k={seqlen_k}, "
-              f"bt_max={_bt_max}, bt_min={_bt_min}, k_blocks={_k_blocks}, "
-              f"needed_blocks_max={_needed_blocks_max}", file=_sys.stderr, flush=True)
-        torch.cuda.synchronize()
-        print(f"[PAGED_PREFILL] cuda synced before mha_batch_prefill_func", file=_sys.stderr, flush=True)
         res = aiter.mha_batch_prefill_func(
             q_tensor,
             k_cache,
@@ -567,8 +580,6 @@ class AiterPrefillAttnOp:
             k_descale=k_descale,
             v_descale=v_descale,
         )
-        torch.cuda.synchronize()
-        print(f"[PAGED_PREFILL] after mha_batch_prefill_func OK, res.shape={res.shape}", file=_sys.stderr, flush=True)
         return res.reshape(fmha_params.token_q_num, self.head_num * self.head_dim)
 
     def forward(self, qkv, kv_cache, fmha_params):
@@ -1306,32 +1317,22 @@ class AiterPrefillImplAsm(FMHAImplBase):
         kv_cache: Optional[LayerKVCache],
         layer_idx: int = 0,
     ) -> torch.Tensor:
-        import sys as _sys
-        print(f"[ASM_PREFILL] forward enter, layer_idx={layer_idx}, kv_cache={'None' if kv_cache is None else 'present'}", file=_sys.stderr, flush=True)
         if kv_cache is None:
             return self.fmha_impl.forward(qkv, kv_cache, self.fmha_params)
 
         # Apply RoPE and KV Cache processing
         if self.need_rope_kv_cache:
-            print(f"[ASM_PREFILL] before rope_kvcache_impl.forward, qkv.shape={qkv.shape}, dtype={qkv.dtype}", file=_sys.stderr, flush=True)
             fmha_input = self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)
-            torch.cuda.synchronize()
-            print(f"[ASM_PREFILL] after rope_kvcache_impl.forward OK (cuda synced)", file=_sys.stderr, flush=True)
         else:
             fmha_input = qkv
 
         # Apply write cache store if needed
-        print(f"[ASM_PREFILL] before apply_write_cache_store", file=_sys.stderr, flush=True)
         common.apply_write_cache_store(
             self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
-        print(f"[ASM_PREFILL] after apply_write_cache_store OK", file=_sys.stderr, flush=True)
 
         # Execute FMHA forward
-        print(f"[ASM_PREFILL] before fmha_impl.forward (paged path)", file=_sys.stderr, flush=True)
-        result = self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
-        print(f"[ASM_PREFILL] after fmha_impl.forward OK, shape={result.shape}", file=_sys.stderr, flush=True)
-        return result
+        return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
 
 
 class AiterPrefillImplNonAsm(FMHAImplBase):
