@@ -822,6 +822,7 @@ grpc::Status PrefillRpcServer::FetchResponse(grpc::ServerContext*               
         if (context && context->IsCancelled()) {
             entry->cancelled.store(true);
             entry->cv.notify_all();
+            response_registry_.erase(request_id);
             return grpc::Status(grpc::StatusCode::CANCELLED, "fetch response cancelled by client");
         }
 
@@ -850,6 +851,7 @@ grpc::Status PrefillRpcServer::FetchResponse(grpc::ServerContext*               
             if (!writer->Write(out)) {
                 entry->cancelled.store(true);
                 entry->cv.notify_all();
+                response_registry_.erase(request_id);
                 return grpc::Status(grpc::StatusCode::CANCELLED, "client writer closed");
             }
         }
@@ -863,12 +865,20 @@ grpc::Status PrefillRpcServer::FetchResponse(grpc::ServerContext*               
 
 grpc::Status PrefillRpcServer::Cancel(grpc::ServerContext* context, const CancelRequestPB* request, EmptyPB* response) {
     RTP_LLM_PROFILE_FUNCTION();
-    auto entry = response_registry_.get(request->request_id());
+    auto request_id = request->request_id();
+    auto entry      = response_registry_.get(request_id);
     if (!entry) {
-        return grpc::Status(grpc::StatusCode::NOT_FOUND, "request not found");
+        // Idempotent: unknown or already-completed request_ids return OK
+        // (model_rpc_service.proto Cancel contract).
+        return grpc::Status::OK;
     }
     entry->cancelled.store(true);
     entry->cv.notify_all();
+    // FetchResponse holds its own shared_ptr to the entry; erasing from the
+    // registry only drops the map's reference. Any in-flight FetchResponse
+    // wakes up via cv.notify_all, takes the entry->cancelled branch, and
+    // calls erase a second time — which is a no-op.
+    response_registry_.erase(request_id);
     return grpc::Status::OK;
 }
 
