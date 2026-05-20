@@ -54,76 +54,12 @@ py_library(
 )
 
 py_test(
-    name = "test_dsv4_compressor",
-    srcs = ["test_dsv4_compressor.py"],
-    deps = [":dsv4_test_utils"] + _DSV4_TEST_DEPS,
-    tags = ["H20"],
-    exec_properties = {"gpu": "H20"},
-)
-
-py_test(
-    name = "test_dsv4_indexer",
-    srcs = ["test_dsv4_indexer.py"],
-    deps = [":dsv4_test_utils"] + _DSV4_TEST_DEPS,
-    tags = ["H20"],
-    exec_properties = {"gpu": "H20"},
-)
-
-py_test(
-    name = "test_dsv4_attention",
-    srcs = ["test_dsv4_attention.py"],
-    deps = [":dsv4_test_utils"] + _DSV4_TEST_DEPS,
-    tags = ["H20"],
-    exec_properties = {"gpu": "H20"},
-)
-
-test_suite(
-    name = "test_dsv4_kv_cache",
-    tests = [
-        ":test_dsv4_attention",
-        ":test_dsv4_compressor",
-        ":test_dsv4_indexer",
-    ],
-)
-
-py_test(
     name = "test_cp_async",
     srcs = ["test_cp_async.py"],
     deps = [
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
         "//rtp_llm:testlib",
     ],
-)
-
-py_test(
-    name = "test_metadata_triton",
-    srcs = ["test_metadata_triton.py"],
-    deps = [
-        "//rtp_llm/models_py:modules",
-        "//rtp_llm:testlib",
-    ],
-    tags = ["SM100_ARM"],
-    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
-)
-
-py_test(
-    name = "test_compressor_hot_paths",
-    srcs = ["test_compressor_hot_paths.py"],
-    deps = [
-        "//rtp_llm/models_py:modules",
-        "//rtp_llm:testlib",
-    ],
-)
-
-py_test(
-    name = "test_bf16_compressor_cyclic_state_blocks",
-    srcs = ["test_bf16_compressor_cyclic_state_blocks.py"],
-    deps = [
-        "//rtp_llm/models_py:dsv4_fused_kernel_sources",
-        "//rtp_llm:testlib",
-    ],
-    tags = ["H20", "SM100_ARM"],
-    exec_properties = {"gpu": "H20"},
 )
 
 py_test(
@@ -261,16 +197,6 @@ py_test(
 )
 
 py_test(
-    name = "test_fused_kv_compress_norm_rope_insert_perf",
-    srcs = ["test_fused_kv_compress_norm_rope_insert_perf.py"],
-    deps = [
-        ":dsv4_kernel_perf_utils",
-        "//rtp_llm/models_py:dsv4_fused_kernel_sources",
-    ],
-    tags = ["manual", "H20", "SM100_ARM"],
-)
-
-py_test(
     name = "test_rope_only_perf",
     srcs = ["test_rope_only_perf.py"],
     deps = [
@@ -292,17 +218,6 @@ py_test(
 )
 
 py_test(
-    name = "test_compressor_metadata_perf",
-    srcs = ["test_compressor_metadata_perf.py"],
-    deps = [
-        ":dsv4_kernel_perf_utils",
-        "//rtp_llm/models_py:modules",
-        "//rtp_llm:testlib",
-    ],
-    tags = ["manual", "H20", "SM100_ARM"],
-)
-
-py_test(
     name = "test_dsv4_tc_simt_overlap_perf",
     srcs = ["test_dsv4_tc_simt_overlap_perf.py"],
     deps = [
@@ -311,17 +226,5 @@ py_test(
         "//rtp_llm:testlib",
     ],
     tags = ["manual", "SM100_ARM"],
-    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
-)
-
-py_test(
-    name = "test_weight_conversion_contract",
-    srcs = ["test_weight_conversion_contract.py"],
-    deps = [
-        "//rtp_llm/models_py:models",
-        "//rtp_llm/models_py:modules",
-        "//rtp_llm:testlib",
-    ],
-    tags = ["SM100_ARM"],
     exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
 )

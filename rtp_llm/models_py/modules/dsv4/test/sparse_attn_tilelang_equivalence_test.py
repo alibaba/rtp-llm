@@ -27,7 +27,7 @@ class TestSparseAttnTileLang(unittest.TestCase):
     def test_matches_reference_v4_shapes(self):
         """V4-realistic shapes: d=512, H=64, h_kv=1 MQA, per-head
         learned attn_sink."""
-        from rtp_llm.models_py.modules.dsv4.attention import _sparse_attn
+        from rtp_llm.models_py.modules.dsv4.utils import _sparse_attn
 
         torch.manual_seed(0)
         device = "cuda:0"
@@ -60,7 +60,7 @@ class TestSparseAttnTileLang(unittest.TestCase):
     def test_head_pad_when_fewer_than_16(self):
         """When H < 16 the wrapper pads heads to 16 for kernel
         efficiency then trims after. Verify behavior for H=4."""
-        from rtp_llm.models_py.modules.dsv4.attention import _sparse_attn
+        from rtp_llm.models_py.modules.dsv4.utils import _sparse_attn
 
         torch.manual_seed(1)
         device = "cuda:0"

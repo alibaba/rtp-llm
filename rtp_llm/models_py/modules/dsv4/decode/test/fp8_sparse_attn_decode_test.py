@@ -23,7 +23,7 @@ _REPO = os.path.abspath(os.path.join(_THIS, "..", "..", "..", "..", "..", ".."))
 if _REPO not in sys.path:
     sys.path.insert(0, _REPO)
 
-from rtp_llm.models_py.modules.dsv4.attention import _sparse_attn
+from rtp_llm.models_py.modules.dsv4.utils import _sparse_attn
 from rtp_llm.models_py.modules.dsv4.decode.fp8_kv_quant_decode_op import (
     ENTRY_BYTES,
     NOPE_DIM,

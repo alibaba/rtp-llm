@@ -1,6 +1,6 @@
 """DSv4 decode output projection — extracted from ``Attention._forward_decode_body``.
 
-Mirrors :meth:`rtp_llm.models_py.modules.dsv4.attention.Attention._prefill_output_proj`
+Mirrors :meth:`rtp_llm.models_py.modules.dsv4.fp8.attention.AttentionFP8._prefill_output_proj`
 for the decode path (per-request batched ``[B, q_len, H, D]``).
 
 Pipeline:

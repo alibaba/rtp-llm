@@ -1058,7 +1058,7 @@ class V4PerBlockFp8Weight(PerBlockFp8Weight):
         #     ``[N//128, K//128]`` layout
         # The DeepGEMM-required ``[N, K//128//4]`` int32 TMA-aligned packed
         # layout is built lazily per-linear in
-        # ``rtp_llm.models_py.modules.dsv4.attention._v4_fp8_linear_from_dict``
+        # ``rtp_llm.models_py.modules.dsv4.utils._v4_fp8_linear_from_dict``
         # via ``_repack_v4_fp8_scale_to_int32``.  Repacking eagerly here
         # would balloon scale memory by O(N/32) (each 1-byte UE8M0 entry
         # becomes 4 bytes and gets row-replicated 128×) and OOM the GPU
