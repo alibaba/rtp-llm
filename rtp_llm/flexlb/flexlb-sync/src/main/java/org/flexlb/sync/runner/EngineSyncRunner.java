@@ -1,5 +1,6 @@
 package org.flexlb.sync.runner;
 
+import org.flexlb.balance.dp.InflightBatchRegistry;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.master.WorkerStatus;
@@ -40,6 +41,8 @@ public class EngineSyncRunner implements Runnable {
 
     private final CacheAwareService localKvCacheAwareManager;
 
+    private final InflightBatchRegistry inflightRegistry;
+
     private final long syncRequestTimeoutMs;
 
     private final LongAdder syncCount;
@@ -54,6 +57,7 @@ public class EngineSyncRunner implements Runnable {
                             EngineGrpcService engineGrpcService,
                             RoleType roleType,
                             CacheAwareService localKvCacheAwareManager,
+                            InflightBatchRegistry inflightRegistry,
                             long syncRequestTimeoutMs,
                             LongAdder syncCount,
                             Long syncEngineStatusInterval) {
@@ -66,6 +70,7 @@ public class EngineSyncRunner implements Runnable {
         this.engineGrpcService = engineGrpcService;
         this.roleType = roleType;
         this.localKvCacheAwareManager = localKvCacheAwareManager;
+        this.inflightRegistry = inflightRegistry;
         this.syncRequestTimeoutMs = syncRequestTimeoutMs;
         this.syncCount = syncCount;
         this.syncEngineStatusInterval = syncEngineStatusInterval;
@@ -145,7 +150,7 @@ public class EngineSyncRunner implements Runnable {
                     GrpcWorkerStatusRunner grpcWorkerStatusRunner
                             = new GrpcWorkerStatusRunner(modelName, workerIpPort, site, roleType, host.getGroup(),
                             workerStatus, engineHealthReporter, engineGrpcService,
-                            syncRequestTimeoutMs);
+                            inflightRegistry, syncRequestTimeoutMs);
                     statusCheckExecutor.submit(grpcWorkerStatusRunner);
                 } else {
                     logger.info("Skip status check for worker: {}, previous request in progress", workerIpPort);

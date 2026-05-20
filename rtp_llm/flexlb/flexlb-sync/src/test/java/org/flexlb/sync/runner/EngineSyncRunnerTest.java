@@ -76,6 +76,7 @@ class EngineSyncRunnerTest {
                 engineGrpcService,
                 roleType,
                 localKvCacheAwareManager,
+                new org.flexlb.balance.dp.InflightBatchRegistry(),
                 syncRequestTimeoutMs,
                 syncCount,
                 syncEngineStatusInterval
@@ -109,6 +110,7 @@ class EngineSyncRunnerTest {
                 engineGrpcService,
                 roleType,
                 localKvCacheAwareManager,
+                new org.flexlb.balance.dp.InflightBatchRegistry(),
                 syncRequestTimeoutMs,
                 syncCount,
                 syncEngineStatusInterval

@@ -1,5 +1,6 @@
 package org.flexlb.sync.runner;
 
+import org.flexlb.balance.dp.InflightBatchRegistry;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
@@ -36,12 +37,14 @@ public class GrpcWorkerStatusRunner implements Runnable {
     private final int grpcPort;
     private final long createTimeUs = System.nanoTime() / 1000;
     private final String id = IdUtils.fastUuid();
+    private final InflightBatchRegistry inflightRegistry;
     private final long syncRequestTimeoutMs;
 
     public GrpcWorkerStatusRunner(String modelName, String ipPort, String site, RoleType roleType, String group,
                                   WorkerStatus workerStatus,
                                   EngineHealthReporter engineHealthReporter,
                                   EngineGrpcService engineGrpcService,
+                                  InflightBatchRegistry inflightRegistry,
                                   long syncRequestTimeoutMs) {
         this.ipPort = ipPort;
         String[] split = ipPort.split(":");
@@ -54,6 +57,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
         this.group = group;
         this.engineHealthReporter = engineHealthReporter;
         this.engineGrpcService = engineGrpcService;
+        this.inflightRegistry = inflightRegistry;
         this.syncRequestTimeoutMs = syncRequestTimeoutMs;
     }
 
@@ -134,6 +138,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 Map<String, TaskInfo> runningTaskInfo = newWorkerStatus.getRunningTaskInfo();
                 Map<String, TaskInfo> finishedTaskInfo = newWorkerStatus.getFinishedTaskInfo();
                 workerStatus.updateTaskStates(waitingTaskInfo, runningTaskInfo, finishedTaskInfo);
+                releaseInflightForFinished(finishedTaskInfo);
 
                 // Report success even when version is not updated
                 engineHealthReporter.reportStatusCheckerSuccess(modelName, workerStatus,
@@ -163,6 +168,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
 
             // Update local task state (including checking lost, updating running, and cleaning completed)
             workerStatus.updateTaskStates(waitingTaskInfo, runningTaskInfo, finishedTaskInfo);
+            releaseInflightForFinished(finishedTaskInfo);
 
             // Correct running queue total wait time
             workerStatus.updateRunningQueueTime();
@@ -183,6 +189,32 @@ public class GrpcWorkerStatusRunner implements Runnable {
         } catch (Throwable e) {
             log("engine worker status check via gRPC exception, msg: " + e.getMessage());
             engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.UNKNOWN_ERROR, ip, roleType);
+        }
+    }
+
+    /**
+     * V1 cleanup: each finished requestId reported by the worker corresponds to
+     * an InflightBatchRegistry entry that has already been markActive'd by
+     * {@code DpBatchScheduler.handleAck}. Drop those entries so the registry
+     * shrinks back to the in-flight set. Skip non-ACTIVE entries — PENDING_ACK
+     * is a race where ack and worker reporter raced and removing here would
+     * make {@code markActive} look like a tombstone; CANCELLED was already
+     * cleaned by {@code cancel()}.
+     */
+    private void releaseInflightForFinished(Map<String, TaskInfo> finishedTaskInfo) {
+        if (finishedTaskInfo == null || finishedTaskInfo.isEmpty() || inflightRegistry == null) {
+            return;
+        }
+        for (String key : finishedTaskInfo.keySet()) {
+            long requestId;
+            try {
+                requestId = Long.parseLong(key);
+            } catch (NumberFormatException e) {
+                continue;
+            }
+            if (inflightRegistry.getState(requestId) == InflightBatchRegistry.RequestState.ACTIVE) {
+                inflightRegistry.removeRequest(requestId);
+            }
         }
     }
 
