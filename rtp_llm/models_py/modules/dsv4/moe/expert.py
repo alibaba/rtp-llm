@@ -72,7 +72,7 @@ class Expert(nn.Module):
         assert expert_weights is not None, "Expert requires expert_weights (descriptor path)"
 
         if self._uses_fp8_linear:
-            from rtp_llm.models_py.modules.dsv4.attention import _v4_fp8_linear
+            from rtp_llm.models_py.modules.dsv4.utils import _v4_fp8_linear
 
             self.w1 = _v4_fp8_linear(expert_weights["w1_w"], expert_weights["w1_s"])
             self.w2 = _v4_fp8_linear(expert_weights["w2_w"], expert_weights["w2_s"])

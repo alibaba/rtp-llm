@@ -102,7 +102,7 @@ class W13SharedExpert(nn.Module):
         swiglu_limit: float = 0.0,
     ) -> None:
         super().__init__()
-        from rtp_llm.models_py.modules.dsv4.attention import _v4_fp8_linear
+        from rtp_llm.models_py.modules.dsv4.utils import _v4_fp8_linear
 
         w13_w = expert_weights["w13_w"]
         w13_s = expert_weights["w13_s"]
