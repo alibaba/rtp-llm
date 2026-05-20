@@ -182,6 +182,106 @@ class ShortestTTFTStrategyTest {
         Assertions.assertEquals("10.99.0.1", result.getServerIp());
     }
 
+    @Test
+    void select_returns_no_available_worker_when_status_map_is_empty() {
+        // Empty PREFILL map means no candidate at all. Strategy must surface
+        // this as NO_AVAILABLE_WORKER so the caller can fail fast rather than
+        // looping on an empty selection. (Note: NO_PREFILL_WORKER is the
+        // role-specific mapping applied a level up by RouteService, not at
+        // the strategy boundary.)
+        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig());
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().clear();
+
+        ShortestTTFTStrategy strategy = newStrategy(engineWorkerStatus);
+        ServerStatus result = strategy.select(newCtx(1L, List.of()), RoleType.PREFILL, null);
+
+        Assertions.assertFalse(result.isSuccess());
+        Assertions.assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), result.getCode());
+    }
+
+    @Test
+    void dead_worker_is_filtered_out_of_candidates() {
+        // A worker reported alive=false must not be picked even when it would
+        // otherwise win on queue time — the routing layer trusts the
+        // synchronizer's liveness signal as the sole truth.
+        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig());
+        Map<String, WorkerStatus> prefillStatusMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        prefillStatusMap.clear();
+
+        WorkerStatus dead = createWorkerStatus("10.0.0.1", 10,
+                new HashMap<>(), new HashMap<>(), new HashMap<>(), new ConcurrentHashMap<>());
+        dead.setAlive(false);
+        WorkerStatus alive = createWorkerStatus("10.0.0.2", 200,
+                new HashMap<>(), new HashMap<>(), new HashMap<>(), new ConcurrentHashMap<>());
+        prefillStatusMap.put("10.0.0.1:8080", dead);
+        prefillStatusMap.put("10.0.0.2:8080", alive);
+
+        ShortestTTFTStrategy strategy = newStrategy(engineWorkerStatus);
+        ServerStatus result = strategy.select(newCtx(2L, List.of()), RoleType.PREFILL, null);
+
+        Assertions.assertTrue(result.isSuccess());
+        Assertions.assertEquals("10.0.0.2", result.getServerIp(),
+                "dead worker must be filtered even with the better score");
+    }
+
+    @Test
+    void resource_unavailable_worker_is_filtered_out() {
+        // ResourceMeasure gate (e.g. queue time over upper bound) is the
+        // dynamic equivalent of alive=false: candidates that fail the gate
+        // are skipped regardless of TTFT score.
+        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig());
+        Map<String, WorkerStatus> prefillStatusMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        prefillStatusMap.clear();
+
+        WorkerStatus saturated = createWorkerStatus("10.0.0.1", 10,
+                new HashMap<>(), new HashMap<>(), new HashMap<>(), new ConcurrentHashMap<>());
+        WorkerStatus available = createWorkerStatus("10.0.0.2", 500,
+                new HashMap<>(), new HashMap<>(), new HashMap<>(), new ConcurrentHashMap<>());
+        prefillStatusMap.put("10.0.0.1:8080", saturated);
+        prefillStatusMap.put("10.0.0.2:8080", available);
+
+        EngineHealthReporter reporter = Mockito.mock(EngineHealthReporter.class);
+        CacheAwareService cacheAwareService = Mockito.mock(CacheAwareService.class);
+        ResourceMeasureFactory rf = Mockito.mock(ResourceMeasureFactory.class);
+        org.flexlb.balance.resource.ResourceMeasure rm = Mockito.mock(org.flexlb.balance.resource.ResourceMeasure.class);
+        Mockito.when(rf.getMeasure(Mockito.any())).thenReturn(rm);
+        Mockito.when(rm.isResourceAvailable(saturated)).thenReturn(false);
+        Mockito.when(rm.isResourceAvailable(available)).thenReturn(true);
+        Mockito.when(cacheAwareService.findMatchingEngines(Mockito.anyList(), Mockito.any(), Mockito.any()))
+                .thenReturn(new HashMap<>());
+
+        ShortestTTFTStrategy strategy = new ShortestTTFTStrategy(
+                engineWorkerStatus, reporter, cacheAwareService, rf);
+        ServerStatus result = strategy.select(newCtx(3L, List.of()), RoleType.PREFILL, null);
+
+        Assertions.assertTrue(result.isSuccess());
+        Assertions.assertEquals("10.0.0.2", result.getServerIp(),
+                "saturated worker filtered by ResourceMeasure gate");
+    }
+
+    private static ShortestTTFTStrategy newStrategy(EngineWorkerStatus engineWorkerStatus) {
+        EngineHealthReporter reporter = Mockito.mock(EngineHealthReporter.class);
+        CacheAwareService cacheAwareService = Mockito.mock(CacheAwareService.class);
+        ResourceMeasureFactory rf = Mockito.mock(ResourceMeasureFactory.class);
+        org.flexlb.balance.resource.ResourceMeasure rm = Mockito.mock(org.flexlb.balance.resource.ResourceMeasure.class);
+        Mockito.when(rf.getMeasure(Mockito.any())).thenReturn(rm);
+        Mockito.when(rm.isResourceAvailable(Mockito.any())).thenReturn(true);
+        Mockito.when(cacheAwareService.findMatchingEngines(Mockito.anyList(), Mockito.any(), Mockito.any()))
+                .thenReturn(new HashMap<>());
+        return new ShortestTTFTStrategy(engineWorkerStatus, reporter, cacheAwareService, rf);
+    }
+
+    private static BalanceContext newCtx(long requestId, List<Long> blockCacheKeys) {
+        Request req = new Request();
+        req.setSeqLen(1000);
+        req.setRequestId(requestId);
+        req.setBlockCacheKeys(blockCacheKeys);
+        BalanceContext ctx = new BalanceContext();
+        ctx.setConfig(new FlexlbConfig());
+        ctx.setRequest(req);
+        return ctx;
+    }
+
     WorkerStatus createWorkerStatus(String ip,
                                     long runningQueueTime,
                                     Map<String, TaskInfo> waitingTaskInfo,
