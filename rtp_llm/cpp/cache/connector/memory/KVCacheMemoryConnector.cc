@@ -450,7 +450,9 @@ std::shared_ptr<AsyncMatchContext> KVCacheMemoryConnector::asyncMatch(const std:
         for (size_t i = already_reuse_num; i < cache_keys_size; ++i) {
             const auto cache_key        = cache_keys.at(i);
             const auto complete_match   = complete_cache_->match(static_cast<CacheKeyType>(cache_key));
-            const auto incomplete_match = incomplete_cache_->match(static_cast<CacheKeyType>(cache_key));
+            const auto incomplete_match = (incomplete_pool_ && incomplete_cache_) ?
+                                              incomplete_cache_->match(static_cast<CacheKeyType>(cache_key)) :
+                                              MemoryBlockCache::MatchResult{};
             const bool hit_complete     = !isNullBlockIdx(complete_match.matched_index);
             const bool hit_incomplete   = !isNullBlockIdx(incomplete_match.matched_index);
 
@@ -616,7 +618,7 @@ KVCacheMemoryConnector::buildCopyPlanForRead(const CacheKeysType&               
             if (!isNullBlockIdx(cm.matched_index)) {
                 match_result = cm;
                 source_pool  = complete_pool_;
-            } else {
+            } else if (incomplete_pool_ && incomplete_cache_) {
                 auto im = incomplete_cache_->match(static_cast<CacheKeyType>(cache_key));
                 if (!isNullBlockIdx(im.matched_index)) {
                     match_result = im;
@@ -835,6 +837,14 @@ KVCacheMemoryConnector::buildCopyPlanForWrite(const CacheKeysType&              
                                     need_complete);
                 return nullptr;
             }
+        }
+        if (need_incomplete > 0 && !incomplete_pool_) {
+            RTP_LLM_LOG_DEBUG("build copy plan for write skip incomplete blocks because incomplete pool is disabled, need=%zu",
+                              need_incomplete);
+            copy_infos.erase(std::remove_if(copy_infos.begin(), copy_infos.end(), [](const auto& ci) {
+                return !ci.is_complete;
+            }), copy_infos.end());
+            need_incomplete = 0;
         }
         if (need_incomplete > 0 && incomplete_pool_) {
             if (!mallocBlocksFromPool(incomplete_pool_, incomplete_cache_, need_incomplete, incomplete_blocks)) {
