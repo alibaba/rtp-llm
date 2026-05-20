@@ -1143,9 +1143,8 @@ class AttentionFP8(nn.Module):
         b_idx = torch.arange(bsz, device=device, dtype=torch.long).unsqueeze(1)  # [B,1]
         block_id = bt_long[:bsz][b_idx, block_in_seq.unsqueeze(0)]  # [B, T]
         in_capacity = in_capacity_row.unsqueeze(0).expand(bsz, -1)  # [B, T]
-        # Mirror ``_scatter_kv_pool``'s ``if bid <= 0: continue`` sentinel:
-        # unallocated blocks (bid <= 0) and over-capacity rows both → -1.
-        valid = (block_id > 0) & in_capacity
+        # Negative block ids and over-capacity rows both map to -1.
+        valid = (block_id >= 0) & in_capacity
         slot_per = torch.where(
             valid,
             block_id * eb + in_block.unsqueeze(0),
@@ -1190,7 +1189,7 @@ class AttentionFP8(nn.Module):
         bt_long = bt[:bsz].to(device=device, dtype=torch.long)
         b_idx = torch.arange(bsz, device=device, dtype=torch.long).unsqueeze(1)
         block_id = bt_long[b_idx, safe_block.unsqueeze(0).expand(bsz, -1)]
-        valid = in_capacity.unsqueeze(0) & (block_id > 0)
+        valid = in_capacity.unsqueeze(0) & (block_id >= 0)
         slot_per = torch.where(
             valid,
             block_id * eb + in_block.unsqueeze(0),
@@ -1300,7 +1299,7 @@ class AttentionFP8(nn.Module):
         )
         b_idx = torch.arange(bsz, device=device, dtype=torch.long).unsqueeze(1)  # [B,1]
         block_id = bt_long[:bsz][b_idx, safe_in_seq]  # [B, max_n_write]
-        valid = (block_id > 0) & in_capacity & row_valid
+        valid = (block_id >= 0) & in_capacity & row_valid
         slot = torch.where(
             valid, block_id * eb + in_block, torch.full_like(in_block, -1)
         )
@@ -1395,7 +1394,7 @@ class AttentionFP8(nn.Module):
         bt_long = bt.to(torch.long)
         b_idx = torch.arange(bsz, device=device, dtype=torch.long).unsqueeze(1)
         block_id = bt_long[:bsz][b_idx, safe_block]
-        valid = valid_pos & in_capacity & (block_id > 0)
+        valid = valid_pos & in_capacity & (block_id >= 0)
         safe_slot = torch.where(
             valid, block_id * eb + in_block, torch.zeros_like(block_id)
         )
@@ -1462,7 +1461,7 @@ class AttentionFP8(nn.Module):
         bt_long = bt[:bsz].to(device=device, dtype=torch.long)
         b_idx = torch.arange(bsz, device=device, dtype=torch.long).unsqueeze(1)
         block_id = bt_long[b_idx, safe_block.unsqueeze(0).expand(bsz, -1)]
-        valid = in_capacity_row.unsqueeze(0) & (block_id > 0)
+        valid = in_capacity_row.unsqueeze(0) & (block_id >= 0)
 
         safe_slot = torch.where(
             valid, block_id * eb + in_block.unsqueeze(0), torch.zeros_like(block_id)
@@ -1632,7 +1631,7 @@ class AttentionFP8(nn.Module):
         b_idx = torch.arange(bsz, device=device, dtype=torch.long).unsqueeze(1)  # [B,1]
         block_id = bt_long[:bsz][b_idx, block_in_seq.unsqueeze(0)]  # [B, T]
         in_capacity = in_capacity_row.unsqueeze(0).expand(bsz, -1)  # [B, T]
-        valid = (block_id > 0) & in_capacity
+        valid = (block_id >= 0) & in_capacity
         safe_slot = torch.where(
             valid,
             block_id * eb + in_block.unsqueeze(0),
@@ -4178,19 +4177,19 @@ class AttentionFP8(nn.Module):
         )
 
     # ------------------------------------------------------------------
-    # FP8 SWA-only fast path: paged-tail write + concat-from-cache
+    # FP8 SWA-only fast path: paged write + concat-from-cache
     # ------------------------------------------------------------------
     def _prefill_write_swa_fp8_paged(
         self, common: PrefillMeta, kv_full: torch.Tensor
     ) -> None:
         """Single-launch quantize + insert into the FP8 SWA pool, using
-        the paged-tail ``slot_mapping`` pre-built in ``common.swa_meta``.
+        the paged ``slot_mapping`` pre-built in ``common.swa_meta``.
 
         Independent of the legacy ring-write in ``_prefill_write_swa_to_pool``;
-        the paged-tail formula matches ``DSV4_CACHE_LAYOUT.md §6`` and the
-        decode-side dequant kernel. Segments outside the SWA pool's last
-        ``2*eb`` capacity get ``slot=-1`` and are skipped. No-op on
-        warmup (``swa_meta`` write fields are ``None``).
+        the paged formula matches ``DSV4_CACHE_LAYOUT.md §6`` and the
+        decode-side dequant kernel. Every positive block_table entry is
+        writable; entries with ``block_id < 0`` get ``slot=-1`` and are
+        skipped. No-op on warmup (``swa_meta`` write fields are ``None``).
         """
         from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
         from rtp_llm.models_py.modules.dsv4.fp8 import _swa_kv_insert_triton as _ins

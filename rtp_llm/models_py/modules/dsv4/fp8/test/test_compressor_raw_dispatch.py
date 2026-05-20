@@ -6,7 +6,7 @@ from ``kv_raw``; only prefix-cache hits (``flat_idx < 0``) read from
 framework-faithful ``block_id`` / ``slot_mapping`` layouts:
 
   * **long prefill** (N > ``2*page_size``): the request only owns 2 state
-    pool blocks, so the earliest logical block is unmapped in
+    pool blocks, so the earliest logical block is unmapped (``-1``) in
     ``block_table``. Every in-launch position routes through raw — proves
     the kernel does not need state_cache to retain earlier positions.
 
@@ -58,9 +58,7 @@ _ROPE_DIM = {128: 128, 512: 64}
 # Tensor helpers                                                              #
 # --------------------------------------------------------------------------- #
 def _alloc_state_cache(head_dim: int, num_phys_blocks: int) -> torch.Tensor:
-    """Phys block 0 is reserved as the kernel's ``unallocated`` sentinel
-    (``block_table > 0`` is the valid check), so callers should request
-    ``num_phys_blocks`` *usable* blocks; we allocate one extra at index 0."""
+    """Allocate ``num_phys_blocks`` physical blocks for the test state pool."""
     width = COFF * head_dim
     return torch.zeros(
         (num_phys_blocks + 1, PAGE, 2 * width),
@@ -70,16 +68,16 @@ def _alloc_state_cache(head_dim: int, num_phys_blocks: int) -> torch.Tensor:
 
 
 def _alloc_kv_cache(head_dim: int, num_slots: int) -> torch.Tensor:
-    """Single KV-pool block sized for ``num_slots`` boundaries.
+    """KV-pool block 1 sized for ``num_slots`` boundaries.
 
     Layout: ``[num_slots * TOKEN_STRIDE bytes][num_slots * SCALE_DIM bytes]``,
     matching what the kernel indexes via ``KV_BLOCK_STRIDE``.
     """
     ts, sd = _TOKEN_STRIDE[head_dim], _SCALE_DIM[head_dim]
     block_bytes = num_slots * (ts + sd)
-    flat = torch.zeros((1, block_bytes), dtype=torch.uint8, device="cuda")
+    flat = torch.zeros((2, block_bytes), dtype=torch.uint8, device="cuda")
     cache = flat.as_strided(
-        size=(1, num_slots, ts),
+        size=(2, num_slots, ts),
         stride=(block_bytes, ts, 1),
     )
     cache._flat_backing = flat  # type: ignore[attr-defined]
@@ -87,9 +85,9 @@ def _alloc_kv_cache(head_dim: int, num_slots: int) -> torch.Tensor:
 
 
 def _read_kv_slot(kv_cache: torch.Tensor, slot: int, head_dim: int, num_slots: int):
-    """Return ``(kv_bytes, scale_bytes)`` for boundary ``slot`` in block 0."""
+    """Return ``(kv_bytes, scale_bytes)`` for boundary ``slot`` in block 1."""
     ts, sd = _TOKEN_STRIDE[head_dim], _SCALE_DIM[head_dim]
-    flat = kv_cache._flat_backing.view(-1)  # type: ignore[attr-defined]
+    flat = kv_cache._flat_backing[1]  # type: ignore[attr-defined]
     kv = flat[slot * ts : (slot + 1) * ts].clone()
     scale_base = num_slots * ts
     scale = flat[scale_base + slot * sd : scale_base + (slot + 1) * sd].clone()
@@ -112,7 +110,7 @@ def _build_state_slots(
     in_table = log < block_table.shape[1]
     log_safe = log.clamp(max=block_table.shape[1] - 1)
     phys = block_table[0, log_safe].to(torch.int64)
-    valid = in_table & (phys > 0)
+    valid = in_table & (phys >= 0)
     slots = phys * PAGE + (positions % PAGE)
     return torch.where(valid, slots, torch.full_like(slots, -1))
 
@@ -224,7 +222,7 @@ def _run_reference(N_total: int, head_dim: int, *, seed: int):
     state_slots = _build_state_slots(positions, bt)
     n_boundaries = N_total // COMPRESS_RATIO
     kv_cache = _alloc_kv_cache(head_dim, n_boundaries)
-    kv_slots = _build_kv_slots(positions, 0, n_boundaries)
+    kv_slots = _build_kv_slots(positions, 1, n_boundaries)
 
     kv_flat, score_flat, ape = _make_random(N_total, head_dim, seed=seed)
     _launch(
@@ -274,15 +272,15 @@ def _test_long_prefill(head_dim: int, *, tag: str) -> None:
 
     state_cache = _alloc_state_cache(head_dim, 2)
     n_logical = (N + PAGE - 1) // PAGE  # 3
-    bt = torch.zeros((1, n_logical), dtype=torch.int64, device="cuda")
+    bt = torch.full((1, n_logical), -1, dtype=torch.int64, device="cuda")
     bt[0, n_logical - 2] = 1  # most-recent 2 logical blocks
-    bt[0, n_logical - 1] = 2  # → phys 1, 2; logical 0 unmapped (= 0)
+    bt[0, n_logical - 1] = 2  # → phys 1, 2; logical 0 unmapped
 
     positions = torch.arange(N, dtype=torch.int64, device="cuda")
     state_slots = _build_state_slots(positions, bt)
     n_boundaries = N // COMPRESS_RATIO
     kv_cache = _alloc_kv_cache(head_dim, n_boundaries)
-    kv_slots = _build_kv_slots(positions, 0, n_boundaries)
+    kv_slots = _build_kv_slots(positions, 1, n_boundaries)
 
     _launch(
         kv_flat=ref["kv_flat"],
@@ -316,7 +314,7 @@ def _test_prefix_reuse(head_dim: int, *, tag: str) -> None:
 
     ref = _run_reference(N_total, head_dim, seed=7)
 
-    # Shared state pool: phys 0 sentinel, phys 1 (logical 0), phys 2 (logical 1).
+    # Shared state pool: phys 0 invalid, phys 1 (logical 0), phys 2 (logical 1).
     state_cache = _alloc_state_cache(head_dim, 2)
 
     # ── Launch 1 ──
@@ -325,7 +323,7 @@ def _test_prefix_reuse(head_dim: int, *, tag: str) -> None:
     slots1 = _build_state_slots(pos1, bt1)
     n_b1 = N1 // COMPRESS_RATIO
     kv_cache_1 = _alloc_kv_cache(head_dim, n_b1)
-    kv_slots_1 = _build_kv_slots(pos1, 0, n_b1)
+    kv_slots_1 = _build_kv_slots(pos1, 1, n_b1)
     _launch(
         kv_flat=ref["kv_flat"][:N1],
         score_flat=ref["score_flat"][:N1],
@@ -347,7 +345,7 @@ def _test_prefix_reuse(head_dim: int, *, tag: str) -> None:
     slots2 = _build_state_slots(pos2, bt2)
     n_b2 = N2 // COMPRESS_RATIO
     kv_cache_2 = _alloc_kv_cache(head_dim, n_b2)
-    kv_slots_2 = _build_kv_slots(pos2, 0, n_b2)
+    kv_slots_2 = _build_kv_slots(pos2, 1, n_b2)
     _launch(
         kv_flat=ref["kv_flat"][N1:],
         score_flat=ref["score_flat"][N1:],
@@ -393,7 +391,7 @@ def _test_decode(head_dim: int, *, tag: str) -> None:
     slots_pre = _build_state_slots(pos_pre, bt)
     n_b_pre = N_pre // COMPRESS_RATIO
     kv_cache_pre = _alloc_kv_cache(head_dim, n_b_pre)
-    kv_slots_pre = _build_kv_slots(pos_pre, 0, n_b_pre)
+    kv_slots_pre = _build_kv_slots(pos_pre, 1, n_b_pre)
     _launch(
         kv_flat=ref["kv_flat"][:N_pre],
         score_flat=ref["score_flat"][:N_pre],
@@ -413,7 +411,7 @@ def _test_decode(head_dim: int, *, tag: str) -> None:
     pos_dec = torch.tensor([target_pos], dtype=torch.int64, device="cuda")
     slots_dec = _build_state_slots(pos_dec, bt)
     kv_cache_dec = _alloc_kv_cache(head_dim, 1)
-    kv_slots_dec = torch.tensor([0], dtype=torch.int64, device="cuda")
+    kv_slots_dec = torch.tensor([1], dtype=torch.int64, device="cuda")
     width = COFF * head_dim
     dummy = torch.zeros(1, width, dtype=torch.float32, device="cuda")
     _launch(

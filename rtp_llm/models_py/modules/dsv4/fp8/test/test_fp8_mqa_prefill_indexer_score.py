@@ -44,18 +44,18 @@ from rtp_llm.models_py.modules.dsv4.fp8._indexer_score import (
 
 def _make_packed_cache(k_bf16: torch.Tensor, block_size: int):
     """Quantize ``k_bf16 [T, 128]`` into a paged FP8 pool. Returns
-    ``pool_uint8 [num_blocks*block_size, 132] uint8`` (identity slot
-    placement — slot i lives at absolute offset i)."""
+    ``pool_uint8 [(num_blocks+1)*block_size, 132] uint8``. Physical block
+    id 0 is invalid, so slot i lives at absolute offset ``block_size + i``."""
     T = k_bf16.shape[0]
     num_blocks = (T + block_size - 1) // block_size
     pool_uint8 = torch.zeros(
-        num_blocks * block_size,
+        (num_blocks + 1) * block_size,
         INDEXER_ENTRY_BYTES,
         dtype=torch.uint8,
         device=k_bf16.device,
     )
-    pool_3d = pool_uint8.view(num_blocks, block_size, INDEXER_ENTRY_BYTES)
-    slots = torch.arange(T, dtype=torch.int64, device=k_bf16.device)
+    pool_3d = pool_uint8.view(num_blocks + 1, block_size, INDEXER_ENTRY_BYTES)
+    slots = torch.arange(T, dtype=torch.int64, device=k_bf16.device) + block_size
     quantize_indexer_k(k_bf16, slots, pool_3d)
     return pool_uint8
 
@@ -86,7 +86,9 @@ def _fp8_path(
     assert total_slots % block_size == 0
     num_blocks = total_slots // block_size
     pool_3d = pool_uint8.view(num_blocks, block_size, INDEXER_ENTRY_BYTES)
-    slot_mapping = torch.arange(T_live, dtype=torch.int64, device=q_bf16.device)
+    slot_mapping = (
+        torch.arange(T_live, dtype=torch.int64, device=q_bf16.device) + block_size
+    )
     k_quant, k_scale = gather_indexer_k_for_prefill(
         pool_3d,
         slot_mapping,
@@ -186,7 +188,7 @@ def test_prefill_fresh():
 
     pool_uint8 = _make_packed_cache(k_bf16, block_size)
     pool_3d = pool_uint8.view(-1, block_size, INDEXER_ENTRY_BYTES)
-    slots = torch.arange(T_live, dtype=torch.int64, device="cuda")
+    slots = torch.arange(T_live, dtype=torch.int64, device="cuda") + block_size
     k_recon = (
         dequantize_indexer_k(pool_3d, slots, out_dtype=torch.bfloat16)
         .view(B, T_live, D)
@@ -214,7 +216,7 @@ def test_prefill_continuation():
 
     pool_uint8 = _make_packed_cache(k_bf16, block_size)
     pool_3d = pool_uint8.view(-1, block_size, INDEXER_ENTRY_BYTES)
-    slots = torch.arange(T_live, dtype=torch.int64, device="cuda")
+    slots = torch.arange(T_live, dtype=torch.int64, device="cuda") + block_size
     k_recon = (
         dequantize_indexer_k(pool_3d, slots, out_dtype=torch.bfloat16)
         .view(B, T_live, D)
@@ -242,7 +244,7 @@ def test_prefill_long_S():
 
     pool_uint8 = _make_packed_cache(k_bf16, block_size)
     pool_3d = pool_uint8.view(-1, block_size, INDEXER_ENTRY_BYTES)
-    slots = torch.arange(T_live, dtype=torch.int64, device="cuda")
+    slots = torch.arange(T_live, dtype=torch.int64, device="cuda") + block_size
     k_recon = (
         dequantize_indexer_k(pool_3d, slots, out_dtype=torch.bfloat16)
         .view(B, T_live, D)
@@ -272,7 +274,7 @@ def test_prefill_chunked():
 
     pool_uint8 = _make_packed_cache(k_bf16, block_size)
     pool_3d = pool_uint8.view(-1, block_size, INDEXER_ENTRY_BYTES)
-    slots = torch.arange(T_live, dtype=torch.int64, device="cuda")
+    slots = torch.arange(T_live, dtype=torch.int64, device="cuda") + block_size
     k_recon = (
         dequantize_indexer_k(pool_3d, slots, out_dtype=torch.bfloat16)
         .view(B, T_live, D)

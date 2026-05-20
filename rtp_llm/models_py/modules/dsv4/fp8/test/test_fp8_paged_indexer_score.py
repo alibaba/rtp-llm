@@ -40,24 +40,25 @@ def _make_packed_cache_with_block_table(k_bf16: torch.Tensor, block_size: int):
     the (B=1) block_table mapping logical→physical.
 
     Returns:
-      pool_uint8     [num_blocks * block_size, 132] uint8
-      block_table    [1, num_blocks] int32 — identity mapping
+      pool_uint8     [(num_blocks + 1) * block_size, 132] uint8
+      block_table    [1, num_blocks] int32 — physical block mapping
     """
     T = k_bf16.shape[0]
     num_blocks = (T + block_size - 1) // block_size
     pool_uint8 = torch.zeros(
-        num_blocks * block_size,
+        (num_blocks + 1) * block_size,
         INDEXER_ENTRY_BYTES,
         dtype=torch.uint8,
         device=k_bf16.device,
     )
-    # slot_mapping == arange(T) → identity placement; in 3D layout the
-    # quantize kernel expects [num_blocks, block_size, 132].
-    pool_3d = pool_uint8.view(num_blocks, block_size, INDEXER_ENTRY_BYTES)
-    slot_mapping = torch.arange(T, dtype=torch.int64, device=k_bf16.device)
+    # Physical block id 0 is invalid; start slots and block_table at block 1.
+    pool_3d = pool_uint8.view(num_blocks + 1, block_size, INDEXER_ENTRY_BYTES)
+    slot_mapping = (
+        torch.arange(T, dtype=torch.int64, device=k_bf16.device) + block_size
+    )
     quantize_indexer_k(k_bf16, slot_mapping, pool_3d)
     block_table = torch.arange(
-        num_blocks, dtype=torch.int32, device=k_bf16.device
+        1, num_blocks + 1, dtype=torch.int32, device=k_bf16.device
     ).view(1, num_blocks)
     return pool_uint8, block_table
 
@@ -77,7 +78,7 @@ def test_decode_equiv():
     # bf16 reference: dequant cache + v4_indexer_score
     pool_uint8, block_table = _make_packed_cache_with_block_table(k_bf16, block_size)
     pool_3d = pool_uint8.view(-1, block_size, INDEXER_ENTRY_BYTES)
-    slots = torch.arange(T, dtype=torch.int64, device="cuda")
+    slots = torch.arange(T, dtype=torch.int64, device="cuda") + block_size
     k_recon = (
         dequantize_indexer_k(pool_3d, slots, out_dtype=torch.bfloat16)
         .view(B, T, D)
@@ -138,7 +139,7 @@ def test_decode_partial_context():
 
     pool_uint8, block_table = _make_packed_cache_with_block_table(k_bf16, block_size)
     pool_3d = pool_uint8.view(-1, block_size, INDEXER_ENTRY_BYTES)
-    slots = torch.arange(T_cache, dtype=torch.int64, device="cuda")
+    slots = torch.arange(T_cache, dtype=torch.int64, device="cuda") + block_size
     k_recon = (
         dequantize_indexer_k(pool_3d, slots, out_dtype=torch.bfloat16)
         .view(B, T_cache, D)
@@ -196,7 +197,7 @@ def test_decode_batched():
 
     # Per-request K + per-request block_table — share the pool but offset.
     num_blocks_per_req = T_cache // block_size
-    total_blocks = B * num_blocks_per_req
+    total_blocks = 1 + B * num_blocks_per_req
     pool_uint8 = torch.zeros(
         total_blocks * block_size,
         INDEXER_ENTRY_BYTES,
@@ -204,13 +205,13 @@ def test_decode_batched():
         device="cuda",
     )
     pool_3d = pool_uint8.view(total_blocks, block_size, INDEXER_ENTRY_BYTES)
-    block_table = torch.zeros(B, num_blocks_per_req, dtype=torch.int32, device="cuda")
+    block_table = torch.empty(B, num_blocks_per_req, dtype=torch.int32, device="cuda")
     k_full = torch.zeros(B, T_cache, D, dtype=torch.bfloat16, device="cuda")
     for b in range(B):
         k_b = torch.randn(T_cache, D, dtype=torch.bfloat16, device="cuda") * 0.5
         k_full[b] = k_b
-        # Place this request's blocks at offset b*num_blocks_per_req.
-        base = b * num_blocks_per_req
+        # Place this request's blocks after reserved physical block 0.
+        base = 1 + b * num_blocks_per_req
         block_table[b] = torch.arange(
             base, base + num_blocks_per_req, device="cuda", dtype=torch.int32
         )
@@ -282,7 +283,7 @@ def test_decode_batched_mtp_next_n_gt_1():
     weights = torch.randn(B, S, H, dtype=torch.bfloat16, device="cuda")
 
     num_blocks_per_req = T_cache // block_size
-    total_blocks = B * num_blocks_per_req
+    total_blocks = 1 + B * num_blocks_per_req
     pool_uint8 = torch.zeros(
         total_blocks * block_size,
         INDEXER_ENTRY_BYTES,
@@ -290,7 +291,7 @@ def test_decode_batched_mtp_next_n_gt_1():
         device="cuda",
     )
     pool_3d = pool_uint8.view(total_blocks, block_size, INDEXER_ENTRY_BYTES)
-    block_table = torch.zeros(B, num_blocks_per_req, dtype=torch.int32, device="cuda")
+    block_table = torch.empty(B, num_blocks_per_req, dtype=torch.int32, device="cuda")
     k_full = torch.zeros(B, T_cache, D, dtype=torch.bfloat16, device="cuda")
     for b in range(B):
         # Make request rows intentionally different so a row//S mapping bug is visible.
@@ -299,11 +300,14 @@ def test_decode_batched_mtp_next_n_gt_1():
             + float(b)
         )
         k_full[b] = k_b
-        base = b * num_blocks_per_req
+        base = 1 + b * num_blocks_per_req
         block_table[b] = torch.arange(
             base, base + num_blocks_per_req, device="cuda", dtype=torch.int32
         )
-        slots = torch.arange(T_cache, device="cuda", dtype=torch.int64) + base * block_size
+        slots = (
+            torch.arange(T_cache, device="cuda", dtype=torch.int64)
+            + base * block_size
+        )
         quantize_indexer_k(k_b, slots, pool_3d)
 
     score_ref = v4_indexer_score(
@@ -364,7 +368,7 @@ def bench_decode():
             k_bf16, block_size
         )
         pool_3d = pool_uint8.view(-1, block_size, INDEXER_ENTRY_BYTES)
-        slots = torch.arange(T, dtype=torch.int64, device="cuda")
+        slots = torch.arange(T, dtype=torch.int64, device="cuda") + block_size
         ctx_lens = torch.tensor([[T]], dtype=torch.int32, device="cuda")
         q_fp8, w_fold = indexer_q_fp8_quant_fold(q_bf16.contiguous(), weights)
 
