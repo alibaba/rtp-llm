@@ -263,9 +263,9 @@ class MasterClient:
             "generate_timeout": ttft_timeout_ms,
             "request_id": request_id,
             "request_time_ms": int(start * 1000),
-            "max_new_tokens": getattr(gc, "max_new_tokens", 1),
-            "num_beams": getattr(gc, "num_beams", 1),
-            "force_disable_sp_run": getattr(gc, "force_disable_sp_run", False),
+            "max_new_tokens": gc.max_new_tokens,
+            "num_beams": gc.num_beams,
+            "force_disable_sp_run": gc.force_disable_sp_run,
         }
         if input_pb_bytes:
             payload["generate_input_pb_b64"] = base64.b64encode(input_pb_bytes).decode("ascii")
