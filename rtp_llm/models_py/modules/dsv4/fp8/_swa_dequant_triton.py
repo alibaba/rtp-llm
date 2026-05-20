@@ -48,6 +48,7 @@ def _trap_negative_block() -> None:
         pack=1,
     )
 
+
 @triton.jit(do_not_specialize=["offset", "max_blocks_per_seq"])
 def _dequantize_and_gather_k_kernel(
     out_ptr,
@@ -107,7 +108,15 @@ def _dequantize_and_gather_k_kernel(
         token_fp8_ptr = token_data_ptr
         token_bf16_ptr = token_data_ptr + fp8_dim
 
-        output_row_ptr = out_ptr + batch_idx * out_stride0 + (offset + i) * out_stride1
+        # Keep the row offset in int64. Production prefill workspaces can have
+        # very large per-request strides, so batch_idx * out_stride0 may exceed
+        # signed int32 even though the underlying tensor allocation is valid.
+        output_row = offset.to(tl.int64) + i.to(tl.int64)
+        output_row_ptr = (
+            out_ptr
+            + batch_idx.to(tl.int64) * out_stride0.to(tl.int64)
+            + output_row * out_stride1.to(tl.int64)
+        )
 
         # NoPE dequant (7 tiles × 64 elements, UE8M0 scale per tile)
         for qblock_idx in tl.static_range(n_quant_blocks):
@@ -297,7 +306,7 @@ def _dequantize_slots_kernel(
     pid = tl.program_id(0)
     slot = tl.load(slot_indices_ptr + pid)
 
-    output_row_ptr = out_ptr + pid * out_stride0
+    output_row_ptr = out_ptr + pid.to(tl.int64) * out_stride0.to(tl.int64)
 
     if slot < 0:
         # Sentinel: zero the row.
