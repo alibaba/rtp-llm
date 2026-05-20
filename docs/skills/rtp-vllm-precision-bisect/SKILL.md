@@ -35,16 +35,42 @@ For RTP precision comparison, enable deterministic/stable paths appropriate to t
 ```bash
 export DETERMINISTIC_GEMM=1
 export ENABLE_STABLE_SCATTER_ADD=ON
-export DSV4_TORCH_TOPK=1
-export DSV4_INDEXER_TOPK_BACKEND=torch
-export DSV4_INDEXER_TOPK_CANONICALIZE=1
 export DSV4_GATE_FP32=1
+export DSV4_INDEXER_TOPK_CANONICALIZE=1
+export RTP_STABLE_GREEDY_TIEBREAK=1
+export RTP_CUDA_GRAPH_SYNC_REPLAY=1
+export DSV4_PERSISTENT_TOPK=0
+export DSV4_INDEXER_TOPK_BACKEND=torch  # prefill only
 export DSV4_FUSED_PREPARE=0
 ```
 
 These are precision-debug switches. Keep production defaults off unless the feature is independently approved for normal serving. Precision-debug code paths should be opt-in by environment variable or CLI flag, and final production fixes must not depend on debug-only defaults.
 
+For the strict stable baseline, set `DSV4_INDEXER_TOPK_BACKEND=torch` on the RTP
+prefill service so prefill TopK selection itself uses the slow reference path.
+Do not rely on `DSV4_INDEXER_TOPK_CANONICALIZE=1` alone: canonicalization only
+sorts the already-selected TopK indices into a stable consumption order; it does
+not prove the optimized TopK selector returned a stable selected set. Keep the
+decode service unset unless the code path explicitly supports the same switch.
+For exactness runs that need to avoid the decode persistent TopK kernel, set
+`DSV4_PERSISTENT_TOPK=0`; this makes the FP8 decode indexer use the non-
+persistent fallback.
+
 `DSV4_GATE_FP32=1` is the gate/MoE FP32 switch used by the current RTP code. If an investigation note says `MOE_GATE_FP32`, map that to `DSV4_GATE_FP32` unless the codebase has introduced a new alias.
+
+`RTP_STABLE_GREEDY_TIEBREAK=1` is the final sampler stability switch for exact
+token-id parity gates. It only changes the top_k=1 greedy fast path when
+multiple token ids have exactly equal maximum logits: RTP selects the lowest
+token id, matching the vLLM oracle behavior observed for record89 at generated
+index 84. Leave it unset for normal serving unless exact parity validation needs
+stable tie semantics.
+
+`RTP_CUDA_GRAPH_SYNC_REPLAY=1` is the final CUDA-graph replay stability switch
+for this parity gate. It synchronizes around RTP decode CUDA graph replay so
+the persistent graph input/metadata buffers updated immediately before replay
+are visible before the graph reads them, and graph outputs are complete before
+the sampler consumes them. Leave it unset for normal serving unless exact
+parity validation needs the stable replay baseline.
 
 `DSV4_FUSED_PREPARE=0` is required for the 2026-05 DSV4 parity gate. The fused compressor metadata prepare path is intentionally opt-in; do not enable it while validating exact token-id parity for this case.
 
@@ -60,12 +86,23 @@ BAZEL_BIN=$(readlink -f bazel-bin)
 BAZEL_OUTPUT_BASE=${BAZEL_BIN%%/execroot/rtp_llm/*}
 export LD_LIBRARY_PATH="$BAZEL_OUTPUT_BASE/external/torch_2.11_py310_cuda/torch/lib:/opt/conda310/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 /opt/conda310/bin/python - <<'PY'
+import pathlib
+import libth_transformer
+import libth_transformer_config
 import torch
 import rtp_llm.ops
 import librtp_compute_ops
 from rtp_llm.ops.compute_ops import rtp_llm_ops
+expected = pathlib.Path("bazel-bin").resolve()
 print(torch.__version__)
-print(librtp_compute_ops.__file__)
+for name, module in (
+    ("libth_transformer_config", libth_transformer_config),
+    ("librtp_compute_ops", librtp_compute_ops),
+    ("libth_transformer", libth_transformer),
+):
+    path = pathlib.Path(module.__file__).resolve()
+    print(name, path)
+    assert path.parent == expected
 assert hasattr(rtp_llm_ops, "cublas_gemm_bf16_bf16_fp32")
 PY
 ```
@@ -75,6 +112,66 @@ output root used by the RTP service, or put this worktree's `bazel-bin` first
 in `PYTHONPATH`. A service failure like
 `AssertionError: cublas_gemm_bf16_bf16_fp32 op is not built` is an environment
 or build-artifact mismatch, not a model precision divergence.
+
+Also verify a running service did not mix `.so` files from different Bazel
+output roots. The 2026-05 DSV4 rebase investigation hit a false precision
+divergence because `libth_transformer.so` and `librtp_compute_ops.so` loaded
+from the current worktree, while `libth_transformer_config.so` fell back to an
+older `/data3/tanboyu.tby/bazel_output_cuda13_dsv4/...` root. That is not a
+valid precision run. Use the bundled CLI after service startup:
+
+```bash
+pid=$(pgrep -f 'rtp_llm.start_server.*role_type DECODE' | head -1)
+docs/skills/rtp-vllm-precision-bisect/scripts/rtp_vllm_precision.py \
+  check-process-libs \
+  --pid "$pid" \
+  --rtp-worktree <rtp_worktree>
+```
+
+This must report `ok: true` before interpreting token differences. If
+`libth_transformer_config.so` is missing from `bazel-bin`, build it in the same
+worktree/config first, for example:
+
+```bash
+bazelisk build //:th_transformer_config --config=cuda13
+```
+
+Do not use `/proc/<backend_pid>/environ` as the source of truth for backend
+environment variables after startup. RTP backend processes call `setproctitle`,
+which can make `/proc` environment inspection misleading. For precision runs
+that need proof of effective backend flags, enable the opt-in env dump at
+launch:
+
+```bash
+docs/skills/rtp-vllm-precision-bisect/scripts/rtp_vllm_precision.py \
+  write-launch-scripts \
+  --output-dir <launch_dir> \
+  --rtp-worktree <rtp_worktree> \
+  --model-path /data3/DeepSeekV4-Flash \
+  --env-dump-dir <launch_dir>/env_dumps
+```
+
+The generated RTP scripts set `RTP_PRECISION_ENV_DUMP_DIR` only when
+`--env-dump-dir` is provided. Backend/rank processes then write JSON files under
+`env_dumps/prefill/` and `env_dumps/decode/`. Verify them with:
+
+```bash
+docs/skills/rtp-vllm-precision-bisect/scripts/rtp_vllm_precision.py \
+  check-env-dump \
+  --dump-dir <launch_dir>/env_dumps/decode \
+  --expect ROLE_TYPE=DECODE \
+  --expect ENABLE_CUDA_GRAPH=1 \
+  --expect ENABLE_CUDA_GRAPH_OVERRIDE=1 \
+  --expect DSV4_GATE_FP32=1 \
+  --expect DSV4_INDEXER_TOPK_CANONICALIZE=1 \
+  --expect RTP_STABLE_GREEDY_TIEBREAK=1 \
+  --expect RTP_CUDA_GRAPH_SYNC_REPLAY=1 \
+  --expect DSV4_FUSED_PREPARE=0 \
+  --expect DSV4_PERSISTENT_TOPK=0
+```
+
+Keep this disabled for normal production startup; it exists to prove precision
+comparison runs are using the intended process environment.
 
 Do not enable these by default unless the investigation specifically needs them:
 
@@ -159,11 +256,11 @@ export ENABLE_CUDA_GRAPH=0
 export DETERMINISTIC_GEMM=1
 export ENABLE_STABLE_SCATTER_ADD=ON
 export ENABLE_COMM_OVERLAP=0
-export DSV4_TORCH_TOPK=1
-export DSV4_INDEXER_TOPK_BACKEND=torch
-export DSV4_INDEXER_TOPK_BACKEND_OVERRIDE=torch
-export DSV4_INDEXER_TOPK_CANONICALIZE=1
 export DSV4_GATE_FP32=1
+export DSV4_INDEXER_TOPK_CANONICALIZE=1
+export RTP_STABLE_GREEDY_TIEBREAK=1
+export RTP_CUDA_GRAPH_SYNC_REPLAY=1
+export DSV4_PERSISTENT_TOPK=0
 export DSV4_FUSED_PREPARE=0
 /opt/conda310/bin/python -m rtp_llm.start_server \
   --model_type deepseek_v4 \
@@ -208,11 +305,11 @@ export ENABLE_CUDA_GRAPH_OVERRIDE=1
 export DETERMINISTIC_GEMM=1
 export ENABLE_STABLE_SCATTER_ADD=ON
 export ENABLE_COMM_OVERLAP=0
-export DSV4_TORCH_TOPK=1
-export DSV4_INDEXER_TOPK_BACKEND=torch
-export DSV4_INDEXER_TOPK_BACKEND_OVERRIDE=torch
-export DSV4_INDEXER_TOPK_CANONICALIZE=1
 export DSV4_GATE_FP32=1
+export DSV4_INDEXER_TOPK_CANONICALIZE=1
+export RTP_STABLE_GREEDY_TIEBREAK=1
+export RTP_CUDA_GRAPH_SYNC_REPLAY=1
+export DSV4_PERSISTENT_TOPK=0
 export DSV4_FUSED_PREPARE=0
 export DSV4_TORCH_ATTN=0
 export MODEL_SERVICE_CONFIG='\''{"service_id":"dsv4-precision","role_endpoints":[{"group":"default","prefill_endpoint":{"type":"Vipserver","address":"127.0.0.1:<prefill_port>","protocol":"http","path":"/"},"decode_endpoint":{"type":"Vipserver","address":"127.0.0.1:<decode_port>","protocol":"http","path":"/"}}],"use_local":true}'\''
@@ -353,6 +450,25 @@ docs/skills/rtp-vllm-precision-bisect/scripts/rtp_vllm_precision.py \
   --decode-port 18880 \
   --vllm-port 18000
 
+# Run a generic RTP natural self-roll request for a different case. Use this
+# instead of known-good-record89 when q-path, record-index, token length, or
+# oracle file differs from the built-in DSV4 record89 gate.
+docs/skills/rtp-vllm-precision-bisect/scripts/rtp_vllm_precision.py \
+  run-rtp \
+  --q-path <q_jsonl_or_json> \
+  --record-index <record_index> \
+  --rtp-url http://127.0.0.1:<decode_port> \
+  --prefill-url http://127.0.0.1:<prefill_port> \
+  --grpc-addr 127.0.0.1:<decode_grpc_port> \
+  --decode-http-port <decode_port> \
+  --decode-grpc-port <decode_grpc_port> \
+  --max-new-tokens <N> \
+  --top-k 1 \
+  --vllm-ids <stable_vllm_run>/generated_ids.json \
+  --prefix-len <N> \
+  --out-root <case_output_root> \
+  --name <case_name>
+
 # Create a teacher-force token file from a stable vLLM oracle. Restart RTP
 # decode with RTP_TEACHER_FORCE_TOKENS pointing to this file before running
 # teacher-forced localization requests.
@@ -416,6 +532,44 @@ The CLI prints JSON with `first_diff`, prefix hashes, longest same-token run, an
 - `run_known_good_gate.sh`: runs the RTP natural self-roll record89 gate and compares against the saved oracle.
 - `run_teacher_gate.sh`: when generated with `--teacher-force-ids`, runs the teacher-forced record89 gate against the same vLLM oracle. Without `--teacher-force-ids`, it exits with instructions instead of silently running a natural self-roll request.
 - Optional sampler logits dump: when generated with `--sampler-logits-dump`, `start_rtp_decode.sh` exports `RTP_SAMPLER_LOGITS_DUMP`; otherwise it explicitly unsets the dump env vars.
+
+### Portable Reproduction Checklist
+
+The method is intended to move to another machine. Do not copy only the final
+token ids; copy the proof recipe and regenerate local launch scripts there.
+
+On the target machine:
+
+1. Sync the same RTP branch/worktree and build these libraries from that
+   worktree/output root: `//:th_transformer_config`, `//:rtp_compute_ops`, and
+   `//:th_transformer`.
+2. Install or point to a vLLM environment containing the DSV4 oracle stability
+   switches used by the case, for example `VLLM_DSV4_TORCH_TOPK=1` and
+   `VLLM_DSV4_DISABLE_AUX_STREAMS=1` for the 2026-05 DSV4 record89 gate.
+3. Put the model and input data on local paths, then generate scripts with
+   `write-launch-scripts --rtp-worktree <local_worktree> --model-path
+   <local_model_path> --output-dir <local_launch_dir> ...`.
+4. Use non-conflicting GPU ids and ports. The generated scripts are
+   parameterized by `--prefill-gpus`, `--decode-gpu`, `--vllm-gpu`,
+   `--prefill-port`, `--decode-port`, and `--vllm-port`.
+5. Start services with `start_all_tmux.sh`, then run the generated health
+   command. Do not compare precision before all health checks pass.
+6. Verify runtime artifacts:
+   - `check-process-libs` must report all core `.so` files loaded from this
+     worktree's `bazel-bin`.
+   - If `--env-dump-dir` was used, `check-env-dump` must confirm the expected
+     precision env in both prefill and decode.
+7. Prove the vLLM oracle is stable for the requested length. Save its
+   `generated_ids.json`.
+8. For a final proof, run natural RTP self-roll with `run-rtp` or
+   `known-good-record89`; teacher-forced gates are only for localization.
+9. The final acceptance line is exact token-id equality: `first_diff=null`,
+   `equal_prefix=true`, and matching hashes for the requested prefix length.
+
+Portability rule: `known-good-record89` is intentionally hard-coded for the
+original `/data3/q` record 89 reproduction. For any other prompt, model path,
+record index, or token length, use the generic `run-rtp`, `run-teacher`, and
+`compare` commands with explicit arguments.
 
 ### 1. Pin the Case
 
@@ -578,11 +732,11 @@ Required RTP precision switches for this gate:
 ```bash
 export DETERMINISTIC_GEMM=1
 export ENABLE_STABLE_SCATTER_ADD=ON
-export DSV4_TORCH_TOPK=1
-export DSV4_INDEXER_TOPK_BACKEND=torch
-export DSV4_INDEXER_TOPK_BACKEND_OVERRIDE=torch
-export DSV4_INDEXER_TOPK_CANONICALIZE=1
 export DSV4_GATE_FP32=1
+export DSV4_INDEXER_TOPK_CANONICALIZE=1
+export RTP_STABLE_GREEDY_TIEBREAK=1
+export RTP_CUDA_GRAPH_SYNC_REPLAY=1
+export DSV4_PERSISTENT_TOPK=0
 export DSV4_FUSED_PREPARE=0
 export DSV4_TORCH_ATTN=0
 export FP8_KV_CACHE=1

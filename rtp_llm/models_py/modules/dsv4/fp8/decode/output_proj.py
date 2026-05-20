@@ -17,10 +17,12 @@ the original per-op path, kept for warmup / unit tests.
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
 import torch
 
+from rtp_llm.models_py.modules.dsv4 import _record_tensor
 from rtp_llm.models_py.modules.dsv4._fused_inv_rope_fp8_quant_triton import (
     fused_inv_rope_fp8_quant,
 )
@@ -54,8 +56,10 @@ def decode_output_proj(
     ``einsum("bsgd,grd->bsgr")``, preserved for framework warmup forwards.
     """
     rd = attn.rope_head_dim
+    dbg_decode = _record_tensor.should_record_layer(attn.layer_id)
 
-    if o.is_cuda and o.numel() > 0:
+    use_eager = os.environ.get("DSV4_DECODE_OUT_PROJ_EAGER", "0") == "1"
+    if o.is_cuda and o.numel() > 0 and not use_eager:
         o_fp8, o_scale = fused_inv_rope_fp8_quant(
             o,
             freqs_cis,
@@ -64,7 +68,18 @@ def decode_output_proj(
             nope_dim=attn.head_dim - attn.rope_head_dim,
             rope_head_dim=attn.rope_head_dim,
         )
+        if dbg_decode:
+            _record_tensor.record_if_level(
+                2, f"L{attn.layer_id:02d}_fp8_decode_o_fp8", o_fp8
+            )
+            _record_tensor.record_if_level(
+                2, f"L{attn.layer_id:02d}_fp8_decode_o_scale", o_scale
+            )
         o = attn._wo_a_einsum_from_fp8(o_fp8, o_scale, bsz, q_len)
+        if dbg_decode:
+            _record_tensor.record_if_level(
+                2, f"L{attn.layer_id:02d}_fp8_decode_wo_a_out", o
+            )
     else:
         if freqs_cis.dim() == 2 and int(freqs_cis.shape[0]) == bsz:
             apply_rotary_emb_batched(o[..., -rd:], freqs_cis, inverse=True)
@@ -78,6 +93,10 @@ def decode_output_proj(
         wo_a_bf16 = _fp8_dequant_to_fp32(attn.wo_a_w, attn.wo_a_s).to(o.dtype)
         wo_a = wo_a_bf16.view(attn.n_groups, attn.o_lora_rank, -1)
         o = torch.einsum("bsgd,grd->bsgr", o, wo_a)
+        if dbg_decode:
+            _record_tensor.record_if_level(
+                2, f"L{attn.layer_id:02d}_fp8_decode_wo_a_out", o
+            )
     out = attn._lin(attn.wo_b, o.flatten(2))
     if attn.tp_size > 1:
         from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce

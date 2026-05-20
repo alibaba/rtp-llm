@@ -1,4 +1,5 @@
 import glob
+import json
 import logging
 import logging.config
 import multiprocessing
@@ -32,6 +33,65 @@ from rtp_llm.utils.process_manager import ProcessManager
 setup_logging()
 
 
+_PRECISION_ENV_DUMP_KEYS = [
+    "ROLE_TYPE",
+    "START_PORT",
+    "CUDA_VISIBLE_DEVICES",
+    "ENABLE_CUDA_GRAPH",
+    "ENABLE_CUDA_GRAPH_OVERRIDE",
+    "DETERMINISTIC_GEMM",
+    "ENABLE_STABLE_SCATTER_ADD",
+    "ENABLE_COMM_OVERLAP",
+    "DSV4_TORCH_TOPK",
+    "DSV4_INDEXER_TOPK_BACKEND",
+    "DSV4_INDEXER_TOPK_BACKEND_OVERRIDE",
+    "DSV4_INDEXER_TOPK_CANONICALIZE",
+    "DSV4_GATE_FP32",
+    "DSV4_PERSISTENT_TOPK",
+    "DSV4_FUSED_PREPARE",
+    "DSV4_TORCH_ATTN",
+    "RTP_STABLE_GREEDY_TIEBREAK",
+    "RTP_CUDA_GRAPH_SYNC_REPLAY",
+    "RTP_TEACHER_FORCE_TOKENS",
+    "RTP_TEACHER_FORCE_OFFSET",
+    "RTP_SAMPLER_LOGITS_DUMP",
+    "RTP_SAMPLER_LOGITS_DUMP_TOPK",
+    "PYTHONPATH",
+    "LD_LIBRARY_PATH",
+]
+
+
+def _maybe_dump_precision_env(stage: str) -> None:
+    dump_dir = os.environ.get("RTP_PRECISION_ENV_DUMP_DIR", "").strip()
+    if not dump_dir:
+        return
+
+    extra_keys = [
+        key.strip()
+        for key in os.environ.get("RTP_PRECISION_ENV_DUMP_KEYS", "").split(",")
+        if key.strip()
+    ]
+    keys = list(dict.fromkeys(_PRECISION_ENV_DUMP_KEYS + extra_keys))
+    payload = {
+        "stage": stage,
+        "pid": os.getpid(),
+        "ppid": os.getppid(),
+        "argv": sys.argv,
+        "cwd": os.getcwd(),
+        "env": {key: os.environ.get(key) for key in keys if key in os.environ},
+        "missing": [key for key in keys if key not in os.environ],
+    }
+    try:
+        os.makedirs(dump_dir, exist_ok=True)
+        path = os.path.join(dump_dir, f"{stage}.pid{os.getpid()}.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2, sort_keys=True)
+            f.write("\n")
+        logging.info("dumped RTP precision env for %s to %s", stage, path)
+    except Exception as e:
+        logging.warning("failed to dump RTP precision env for %s: %s", stage, e)
+
+
 def _install_hot_hook_runtime(role: str) -> None:
     try:
         from rtp_llm.utils.hot_hook_runtime import install_if_enabled
@@ -50,6 +110,7 @@ def local_rank_start(
 ):
     """Start local rank with proper signal handling for graceful shutdown"""
     _install_hot_hook_runtime(f"backend_rank_{world_rank}")
+    _maybe_dump_precision_env(f"backend_rank_{world_rank}")
     backend_manager = None
     logging.info(f"[PROCESS_START]Start local rank process")
     start_time = time.time()
@@ -445,6 +506,7 @@ def start_backend_server(
     _install_hot_hook_runtime("backend_manager")
     logging.info(f"[PROCESS_START]Start backend server process")
     setproctitle("rtp_llm_backend_server")
+    _maybe_dump_precision_env("backend_manager")
     os.makedirs("logs", exist_ok=True)
     load_gpu_nic_affinity()
 

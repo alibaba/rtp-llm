@@ -14,6 +14,8 @@ The cache key set MUST stay invariant across the refactor — see Phase 1 risk
 
 import logging
 import os
+import socket
+from datetime import timedelta
 
 import torch
 
@@ -22,6 +24,11 @@ import torch
 # collide; in practice there's only ever one entry per process.
 _MEGA_BUF_CACHE: dict = {}
 _MEGA_OUTPUT_CACHE: dict = {}
+_SINGLE_RANK_DIST_INITIALIZED = False
+
+
+def _env_truthy(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "on", "yes")
 
 
 def estimate_mega_moe_symm_buffer_bytes(
@@ -170,7 +177,44 @@ def _get_or_create_mega_output(
     return cached
 
 
-def _mega_moe_unavailable_reason() -> str | None:
+def _init_single_rank_process_group_if_needed() -> str | None:
+    """Create a one-rank NCCL group for the vLLM-compatible EP1 MegaMoE path.
+
+    RTP normally skips ``torch.distributed`` initialisation when
+    ``world_size == 1``. DeepGEMM MegaMoE still needs a ProcessGroup because
+    its API routes through PyTorch symmetric memory even for a single rank.
+    This helper is deliberately opt-in via ``DSV4_MEGA_MOE_EP1=1``.
+    """
+    global _SINGLE_RANK_DIST_INITIALIZED
+    try:
+        import torch.distributed as dist
+
+        if dist.is_initialized():
+            return None
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        sock.close()
+        dist.init_process_group(
+            backend="nccl",
+            init_method=f"tcp://127.0.0.1:{port}",
+            rank=0,
+            world_size=1,
+            timeout=timedelta(seconds=60),
+        )
+        _SINGLE_RANK_DIST_INITIALIZED = True
+        logging.info("[DSV4 MegaMoE] initialized single-rank NCCL process group")
+        return None
+    except Exception as e:
+        return f"failed to initialize single-rank torch.distributed: {e}"
+
+
+def _mega_moe_unavailable_reason(
+    *,
+    allow_single_rank: bool = False,
+    initialize_single_rank: bool = False,
+) -> str | None:
     """Return ``None`` when Mega MoE can run, otherwise a human-readable reason."""
     try:
         import deep_gemm
@@ -183,8 +227,13 @@ def _mega_moe_unavailable_reason() -> str | None:
         import torch.distributed as dist
 
         if not dist.is_initialized():
-            return "torch.distributed is not initialized"
-        if dist.get_world_size() <= 1:
+            if initialize_single_rank:
+                init_reason = _init_single_rank_process_group_if_needed()
+                if init_reason is not None:
+                    return init_reason
+            if not dist.is_initialized():
+                return "torch.distributed is not initialized"
+        if dist.get_world_size() <= 1 and not allow_single_rank:
             return f"distributed world_size={dist.get_world_size()} is not > 1"
     except Exception as e:
         return f"failed to query torch.distributed: {e}"
@@ -204,6 +253,21 @@ def _mega_moe_available() -> bool:
     for ``torch.distributed._symmetric_memory``, CUDA device SM100+, and
     an initialised world-size process group of size > 1."""
     return _mega_moe_unavailable_reason() is None
+
+
+def _mega_moe_ep1_enabled() -> bool:
+    """Opt-in vLLM-compatible MegaMoE path for EP1/TP1 precision alignment."""
+    if os.environ.get("DSV4_USE_MEGA_MOE", "1") == "0":
+        return False
+    if not _env_truthy("DSV4_MEGA_MOE_EP1"):
+        return False
+    return (
+        _mega_moe_unavailable_reason(
+            allow_single_rank=True,
+            initialize_single_rank=True,
+        )
+        is None
+    )
 
 
 def _mega_moe_enabled() -> bool:

@@ -186,20 +186,22 @@ def dump(*, step: int, extra: Optional[Dict[str, Any]] = None) -> None:
 
 def _snapshot_cpu(t: torch.Tensor) -> Dict[str, Any]:
     """Build the serialized representation for one tensor."""
-    cpu_t = t.detach().to(torch.float32).cpu()
-    n = cpu_t.numel()
+    cpu_t = t.detach().cpu()
+    stats_t = cpu_t.to(torch.float32)
+    n = stats_t.numel()
     stats = {
-        "shape": tuple(cpu_t.shape),
+        "shape": tuple(stats_t.shape),
         "dtype": str(t.dtype),
-        "mean": cpu_t.mean().item() if n > 0 else 0.0,
-        "std": cpu_t.std().item() if n > 1 else 0.0,
-        "abs_max": cpu_t.abs().max().item() if n > 0 else 0.0,
-        "n_nan": int(torch.isnan(cpu_t).sum().item()),
-        "n_inf": int(torch.isinf(cpu_t).sum().item()),
+        "mean": stats_t.mean().item() if n > 0 else 0.0,
+        "std": stats_t.std().item() if n > 1 else 0.0,
+        "abs_max": stats_t.abs().max().item() if n > 0 else 0.0,
+        "n_nan": int(torch.isnan(stats_t).sum().item()),
+        "n_inf": int(torch.isinf(stats_t).sum().item()),
         "numel": n,
     }
+    raw_bytes = cpu_t.reshape(-1).contiguous().view(torch.uint8)
     return {
-        "hash": hashlib.md5(cpu_t.contiguous().numpy().tobytes()).hexdigest(),
+        "hash": hashlib.md5(raw_bytes.numpy().tobytes()).hexdigest(),
         "stats": stats,
-        "tensor": cpu_t if n <= _FULL_THRESHOLD else None,
+        "tensor": cpu_t.contiguous() if n <= _FULL_THRESHOLD else None,
     }

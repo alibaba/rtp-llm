@@ -49,6 +49,7 @@ def _fused_rmsnorm_rope_kernel(
     INVERSE: tl.constexpr,
     EPS: tl.constexpr,
     HAS_WEIGHT: tl.constexpr,
+    ROUND_BEFORE_ROPE: tl.constexpr,
     BLOCK_D: tl.constexpr,
 ):
     # Cast pid to int64 BEFORE the row-stride multiply: the prefill Q
@@ -92,6 +93,9 @@ def _fused_rmsnorm_rope_kernel(
         w_imag = tl.load(w_ptr + imag_off).to(tl.float32)
         real = real * w_real
         imag = imag * w_imag
+    if ROUND_BEFORE_ROPE:
+        real = real.to(tl.bfloat16).to(tl.float32)
+        imag = imag.to(tl.bfloat16).to(tl.float32)
 
     freq_base = freqs_ri_ptr + freq_idx * freqs_stride_b + pair_off * freqs_stride_k
     cos = tl.load(freq_base)
@@ -124,6 +128,7 @@ def _fused_rmsnorm_rope_group_heads_kernel(
     INVERSE: tl.constexpr,
     EPS: tl.constexpr,
     HAS_WEIGHT: tl.constexpr,
+    ROUND_BEFORE_ROPE: tl.constexpr,
     BLOCK_D: tl.constexpr,
     GROUP_HEADS: tl.constexpr,
 ):
@@ -162,6 +167,9 @@ def _fused_rmsnorm_rope_group_heads_kernel(
         w_imag = tl.load(w_ptr + imag_off).to(tl.float32)
         real = real * w_real[None, :]
         imag = imag * w_imag[None, :]
+    if ROUND_BEFORE_ROPE:
+        real = real.to(tl.bfloat16).to(tl.float32)
+        imag = imag.to(tl.bfloat16).to(tl.float32)
 
     freq_base = freqs_ri_ptr + freq_idx * freqs_stride_b + pair_off * freqs_stride_k
     cos = tl.load(freq_base)
@@ -186,6 +194,7 @@ def fused_rmsnorm_rope(
     out: torch.Tensor | None = None,
     inplace: bool = False,
     group_heads: int | None = None,
+    round_before_rope: bool = False,
 ) -> torch.Tensor:
     """Fused RMSNorm-over-last-dim + partial RoPE on the final ``rope_head_dim`` cols.
 
@@ -204,9 +213,17 @@ def fused_rmsnorm_rope(
     output buffer, and ``inplace=True`` writes back into ``x``.  ``group_heads``
     groups Q-style rows sharing the same frequency slot; valid values are
     1, 2, 4, and 8.
+
+    ``round_before_rope`` matches vLLM's DeepSeek-V4 KV path: weighted
+    RMSNorm materializes BF16 K before applying GPT-J RoPE and inserting the
+    FP8 cache. Q keeps the fused no-intermediate-rounding path.
     """
     assert x.is_cuda
     assert x.dtype in (torch.bfloat16, torch.float16, torch.float32)
+    if round_before_rope:
+        assert (
+            x.dtype == torch.bfloat16
+        ), "round_before_rope is only defined for the BF16 DeepSeek-V4 KV path"
     assert x.is_contiguous()
     assert freqs_cis.is_contiguous()
     assert not (out is not None and inplace), "out and inplace are mutually exclusive"
@@ -291,6 +308,7 @@ def fused_rmsnorm_rope(
             INVERSE=inverse,
             EPS=eps,
             HAS_WEIGHT=has_weight,
+            ROUND_BEFORE_ROPE=round_before_rope,
             BLOCK_D=BLOCK_D,
             GROUP_HEADS=selected_group_heads,
             num_warps=4 if BLOCK_D <= 512 else 8,
@@ -313,6 +331,7 @@ def fused_rmsnorm_rope(
             INVERSE=inverse,
             EPS=eps,
             HAS_WEIGHT=has_weight,
+            ROUND_BEFORE_ROPE=round_before_rope,
             BLOCK_D=BLOCK_D,
             num_warps=4 if BLOCK_D <= 512 else 8,
         )

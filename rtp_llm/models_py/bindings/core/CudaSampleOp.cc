@@ -10,6 +10,8 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/sampling/sampling.h"
 #include "3rdparty/flashinfer/flashinfer.h"
 #include <cstddef>
+#include <cstdlib>
+#include <cstring>
 #include <random>
 #include <memory>
 #endif
@@ -23,6 +25,32 @@ namespace rtp_llm {
 using SamplerT = float;
 
 namespace {
+
+bool stableGreedyTiebreakEnabled() {
+    const char* value = std::getenv("RTP_STABLE_GREEDY_TIEBREAK");
+    if (value == nullptr || value[0] == '\0') {
+        return false;
+    }
+    return std::strcmp(value, "0") != 0 && std::strcmp(value, "OFF") != 0 && std::strcmp(value, "off") != 0
+           && std::strcmp(value, "false") != 0 && std::strcmp(value, "False") != 0;
+}
+
+torch::Tensor selectGreedyTokens(const torch::Tensor& logits) {
+    if (!stableGreedyTiebreakEnabled()) {
+        return torch::argmax(logits, -1, /*keepdim=*/false);
+    }
+
+    torch::NoGradGuard no_grad;
+    const auto batch_size = logits.size(0);
+    const auto vocab_size = logits.size(1);
+    auto       max_values = std::get<0>(logits.max(-1, /*keepdim=*/true));
+    auto       is_max     = logits.eq(max_values);
+    auto token_ids = torch::arange(vocab_size, torch::TensorOptions().dtype(torch::kLong).device(logits.device()))
+                         .unsqueeze(0)
+                         .expand({batch_size, vocab_size});
+    auto masked_token_ids = token_ids.masked_fill(is_max.logical_not(), vocab_size);
+    return std::get<0>(masked_token_ids.min(-1, /*keepdim=*/false));
+}
 
 void processLogits(const GreedyParams&  params,
                    const torch::Tensor& device_tokens,
@@ -165,7 +193,7 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
     std::transform(top_p_ptr, top_p_ptr + batch_size, top_p_ptr, [&](auto t) { return std::abs(t) < 1e-7 ? 1.0 : t; });
 
     if (std::all_of(top_k_ptr, top_k_ptr + batch_size, [&](auto t) { return t == 1; })) {
-        torch::Tensor selected_tokens = torch::argmax(probs_t, -1, /*keepdim=*/false);
+        torch::Tensor selected_tokens = selectGreedyTokens(probs_t);
         samples_t.copy_(selected_tokens, true);
         success = torch::Tensor();  // mark as undefined — all succeeded
         if (output_all_probs_t.defined()) {
@@ -256,7 +284,7 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
         torch::Tensor samples_t =
             transposed_tokens.slice(0, transposed_tokens.size(0) - 1, transposed_tokens.size(0)).squeeze(0);
         torch::Tensor probs_t         = params.logits;
-        torch::Tensor selected_tokens = torch::argmax(probs_t, -1, /*keepdim=*/false);
+        torch::Tensor selected_tokens = selectGreedyTokens(probs_t);
         samples_t.copy_(selected_tokens, true);
 
         auto output_tokens = transposed_tokens.transpose(0, 1).contiguous();

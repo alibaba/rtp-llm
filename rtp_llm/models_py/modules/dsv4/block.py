@@ -67,6 +67,10 @@ def dump_block_debug_tensors() -> Dict[str, torch.Tensor]:
             continue
         prefix = f"L{int(module.layer_id):02d}_block_decode"
         try:
+            if hasattr(module, "_debug_input_ids"):
+                tensors[f"{prefix}_input_ids"] = (
+                    module._debug_input_ids.detach().cpu().clone()
+                )
             for name in (
                 "layer_in",
                 "attn_in",
@@ -163,6 +167,16 @@ class Block(nn.Module):
                     ),
                     persistent=False,
                 )
+            self.register_buffer(
+                "_debug_input_ids",
+                torch.full(
+                    (max_batch_size, 8),
+                    -1,
+                    dtype=torch.int32,
+                    device=debug_device,
+                ),
+                persistent=False,
+            )
             _BLOCK_DUMP_MODULES.append(self)
 
         attn_cls = AttentionFP8 if self.fp8_kv_cache else AttentionBF16VLLM
@@ -290,6 +304,17 @@ class Block(nn.Module):
         # Attention path
         residual = x
         if self._debug_block_dump_enabled:
+            self._debug_input_ids.fill_(-1)
+            input_ids_dbg = input_ids
+            if input_ids_dbg.dim() == 1:
+                input_ids_dbg = input_ids_dbg.view(-1, 1)
+            copy_q_len = min(
+                int(input_ids_dbg.size(1)),
+                int(self._debug_input_ids.size(1)),
+            )
+            self._debug_input_ids[: input_ids_dbg.size(0), :copy_q_len].copy_(
+                input_ids_dbg[:, :copy_q_len].to(torch.int32)
+            )
             self._debug_layer_in[: x.size(0)].copy_(x.to(torch.bfloat16))
         x_pre, post, comb = self.attn_hc.pre(
             x,
@@ -383,6 +408,10 @@ class Block(nn.Module):
             x,
             dbg_tag=f"L{self.layer_id:02d}_attn_hc_pre" if _dbg_layer else None,
         )  # [T, dim], [T, hc, 1], [T, hc, hc]
+        if _dbg_layer:
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_hc_pre", x_pre)
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_post_mix", post)
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_comb_mix", comb)
         if _dbg_layer and dbg_pos_mask is not None:
             _rt.record_if_level(
                 2,
@@ -480,6 +509,7 @@ class Block(nn.Module):
                     f"L{self.layer_id:02d}_attn_out_{dbg_pos_name}",
                     attn_out[dbg_pos_mask].contiguous(),
                 )
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_post_residual_in", residual)
         x = self.attn_hc.post(attn_out, residual, post, comb)  # [T, hc, dim]
         self._sync_after_first_cp_prefill_attention()
         if _dbg_layer:
@@ -497,6 +527,11 @@ class Block(nn.Module):
             x,
             dbg_tag=f"L{self.layer_id:02d}_ffn_hc_pre" if _dbg_layer else None,
         )  # [T, dim], ...
+        if _dbg_layer:
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_ffn_hc_pre", x_pre)
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_ffn_post_mix", post)
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_ffn_comb_mix", comb)
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_ffn_post_residual_in", residual)
         if _dbg_layer and dbg_pos_mask is not None:
             _rt.record_if_level(
                 2,

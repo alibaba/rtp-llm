@@ -171,7 +171,7 @@ class QuantizedLinear(nn.Module):
             return x.new_empty(*orig_shape[:-1], self.out_features)
 
         x_fp8, x_scale = sgl_per_token_group_quant_fp8(
-            x_2d, group_size=FP8_BLOCK, eps=1e-4,
+            x_2d, group_size=FP8_BLOCK, eps=1e-10,
             column_major_scales=True, scale_tma_aligned=True,
             scale_ue8m0=True,
         )

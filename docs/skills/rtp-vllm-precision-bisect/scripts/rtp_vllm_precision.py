@@ -26,6 +26,7 @@ import time
 import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+from urllib.parse import urlparse
 
 
 DEFAULT_RUN_ROOT = Path(
@@ -254,9 +255,67 @@ def run_rtp_selfroll(args: argparse.Namespace) -> Path:
         cmd.extend(["--grpc-addr", args.grpc_addr])
 
     print("[run]", " ".join(cmd), flush=True)
+    env = os.environ.copy()
+    role_ports = infer_role_addr_ports(args)
+    env.update({key: str(value) for key, value in role_ports.items()})
+    print("[run-env]", json.dumps(role_ports, sort_keys=True), flush=True)
     start = time.time()
-    subprocess.run(cmd, check=True)
+    subprocess.run(cmd, check=True, env=env)
     return newest_run_dir(out_root, name, args.record_index, start)
+
+
+def _port_from_url(url: str) -> Optional[int]:
+    parsed = urlparse(url)
+    if parsed.port is not None:
+        return int(parsed.port)
+    if parsed.scheme == "https":
+        return 443
+    if parsed.scheme == "http":
+        return 80
+    return None
+
+
+def _port_from_hostport(value: str) -> Optional[int]:
+    if not value:
+        return None
+    tail = value.rsplit(":", 1)[-1]
+    try:
+        return int(tail)
+    except ValueError:
+        return None
+
+
+def infer_role_addr_ports(args: argparse.Namespace) -> Dict[str, int]:
+    prefill_http = args.prefill_http_port or _port_from_url(args.prefill_url)
+    prefill_grpc = args.prefill_grpc_port or (
+        prefill_http + 1 if prefill_http is not None else None
+    )
+    decode_grpc = args.decode_grpc_port or _port_from_hostport(args.grpc_addr)
+    decode_http = args.decode_http_port
+    if decode_http is None and decode_grpc is not None:
+        decode_http = decode_grpc - 1
+    if decode_http is None:
+        decode_http = _port_from_url(args.rtp_url)
+    if decode_grpc is None and decode_http is not None:
+        decode_grpc = decode_http + 1
+    missing = [
+        name
+        for name, value in (
+            ("prefill_http", prefill_http),
+            ("prefill_grpc", prefill_grpc),
+            ("decode_http", decode_http),
+            ("decode_grpc", decode_grpc),
+        )
+        if value is None
+    ]
+    if missing:
+        raise ValueError(f"cannot infer role_addrs ports: {missing}")
+    return {
+        "RTP_PREFILL_HTTP_PORT": int(prefill_http),
+        "RTP_PREFILL_GRPC_PORT": int(prefill_grpc),
+        "RTP_DECODE_HTTP_PORT": int(decode_http),
+        "RTP_DECODE_GRPC_PORT": int(decode_grpc),
+    }
 
 
 def generated_id_files(run_dir: Path) -> List[Path]:
@@ -289,6 +348,105 @@ def command_health(args: argparse.Namespace) -> int:
     result = {"checks": checks, "all_ok": all(item["ok"] for item in checks)}
     print_json(result, args.json_out)
     return 0 if result["all_ok"] else 2
+
+
+def command_check_process_libs(args: argparse.Namespace) -> int:
+    worktree = args.rtp_worktree.expanduser().resolve()
+    bazel_bin = (worktree / "bazel-bin").resolve()
+    expected = {
+        "libth_transformer.so",
+        "librtp_compute_ops.so",
+        "libth_transformer_config.so",
+    }
+    maps = Path(f"/proc/{int(args.pid)}/maps")
+    if not maps.exists():
+        raise FileNotFoundError(f"{maps} does not exist")
+
+    loaded: Dict[str, List[str]] = {name: [] for name in expected}
+    for line in maps.read_text(encoding="utf-8", errors="replace").splitlines():
+        for name in expected:
+            if name in line:
+                path = line.rsplit(maxsplit=1)[-1]
+                if path not in loaded[name]:
+                    loaded[name].append(path)
+
+    result: Dict[str, Any] = {
+        "pid": int(args.pid),
+        "worktree": str(worktree),
+        "bazel_bin": str(bazel_bin),
+        "libs": loaded,
+        "missing": sorted(name for name, paths in loaded.items() if not paths),
+        "wrong_root": {},
+    }
+    wrong_root: Dict[str, List[str]] = {}
+    for name, paths in loaded.items():
+        bad = [path for path in paths if not Path(path).resolve().is_relative_to(bazel_bin)]
+        if bad:
+            wrong_root[name] = bad
+    result["wrong_root"] = wrong_root
+    result["ok"] = not result["missing"] and not wrong_root
+    print_json(result, args.json_out)
+    return 0 if result["ok"] else 2
+
+
+def command_check_env_dump(args: argparse.Namespace) -> int:
+    dump_dir = args.dump_dir.expanduser().resolve()
+    if not dump_dir.exists():
+        raise FileNotFoundError(f"{dump_dir} does not exist")
+
+    expected_pairs: Dict[str, str] = {}
+    for item in args.expect:
+        if "=" not in item:
+            raise ValueError(f"--expect must be KEY=VALUE, got {item!r}")
+        key, value = item.split("=", 1)
+        expected_pairs[key] = value
+
+    files = sorted(dump_dir.glob("*.json"))
+    entries: List[Dict[str, Any]] = []
+    failures: List[Dict[str, Any]] = []
+    for path in files:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        stage = str(data.get("stage", ""))
+        if args.stage and stage != args.stage:
+            continue
+        env = data.get("env", {})
+        entry = {
+            "path": str(path),
+            "stage": stage,
+            "pid": data.get("pid"),
+            "ppid": data.get("ppid"),
+            "env": env,
+        }
+        entries.append(entry)
+
+        missing = [key for key in args.require_key if key not in env]
+        mismatched = {
+            key: {"actual": env.get(key), "expected": value}
+            for key, value in expected_pairs.items()
+            if env.get(key) != value
+        }
+        if missing or mismatched:
+            failures.append(
+                {
+                    "path": str(path),
+                    "stage": stage,
+                    "pid": data.get("pid"),
+                    "missing": missing,
+                    "mismatched": mismatched,
+                }
+            )
+
+    result = {
+        "dump_dir": str(dump_dir),
+        "stage_filter": args.stage,
+        "expect": expected_pairs,
+        "require_key": args.require_key,
+        "entries": entries,
+        "failures": failures,
+        "ok": bool(entries) and not failures,
+    }
+    print_json(result, args.json_out)
+    return 0 if result["ok"] else 2
 
 
 def command_teacher_force_file(args: argparse.Namespace) -> int:
@@ -422,6 +580,18 @@ def command_write_launch_scripts(args: argparse.Namespace) -> int:
         )
 
     rtp_pythonpath = f"{worktree}:{worktree / 'bazel-bin'}"
+    persistent_topk_env = ""
+    if args.dsv4_persistent_topk != "unset":
+        persistent_topk_env = f"export DSV4_PERSISTENT_TOPK={int(args.dsv4_persistent_topk)}\n"
+    if args.rtp_prefill_topk_backend == "unset":
+        prefill_topk_env = "unset DSV4_INDEXER_TOPK_BACKEND\nunset DSV4_TORCH_TOPK"
+    else:
+        prefill_topk_env = (
+            f"export DSV4_INDEXER_TOPK_BACKEND={shell_quote(args.rtp_prefill_topk_backend)}\n"
+            "unset DSV4_TORCH_TOPK"
+        )
+    env_dump_root = args.env_dump_dir.expanduser().resolve() if args.env_dump_dir else None
+
     common_rtp_env = f"""export PYTHONPATH={shell_quote(rtp_pythonpath)}${{PYTHONPATH:+:${{PYTHONPATH}}}}
 BAZEL_BIN=$(readlink -f bazel-bin)
 BAZEL_OUTPUT_BASE=${{BAZEL_BIN%%/execroot/rtp_llm/*}}
@@ -434,11 +604,14 @@ export FP8_KV_CACHE=1
 export DETERMINISTIC_GEMM=1
 export ENABLE_STABLE_SCATTER_ADD=ON
 export ENABLE_COMM_OVERLAP=0
-export DSV4_TORCH_TOPK=1
-export DSV4_INDEXER_TOPK_BACKEND=torch
-export DSV4_INDEXER_TOPK_BACKEND_OVERRIDE=torch
+unset DSV4_TORCH_TOPK
+unset DSV4_INDEXER_TOPK_BACKEND
+unset DSV4_INDEXER_TOPK_BACKEND_OVERRIDE
 export DSV4_INDEXER_TOPK_CANONICALIZE=1
-export DSV4_GATE_FP32=1
+export DSV4_GATE_FP32={int(args.dsv4_gate_fp32)}
+export RTP_STABLE_GREEDY_TIEBREAK=1
+export RTP_CUDA_GRAPH_SYNC_REPLAY=1
+{persistent_topk_env.rstrip()}
 export DSV4_FUSED_PREPARE=0
 export DSV4_TORCH_ATTN=0
 export USE_LOCAL=1
@@ -447,12 +620,27 @@ export ENABLE_DEVICE_CACHE=1
 """
 
     check_rtp_ops = f"""/opt/conda310/bin/python - <<'PY'
+import pathlib
 import torch
 import rtp_llm.ops
+import libth_transformer
+import libth_transformer_config
 import librtp_compute_ops
 from rtp_llm.ops.compute_ops import rtp_llm_ops
+expected = pathlib.Path("bazel-bin").resolve()
+for name, module in (
+    ("libth_transformer_config", libth_transformer_config),
+    ("librtp_compute_ops", librtp_compute_ops),
+    ("libth_transformer", libth_transformer),
+):
+    path = pathlib.Path(module.__file__).resolve()
+    print(name, path)
+    assert path.parent == expected, (
+        f"{{name}} loaded from {{path}}, expected direct child of {{expected}}. "
+        "Build //:th_transformer_config, //:rtp_compute_ops, and //:th_transformer "
+        "in this worktree/output root before starting RTP."
+    )
 print("torch", torch.__version__)
-print("librtp_compute_ops", librtp_compute_ops.__file__)
 assert hasattr(rtp_llm_ops, "cublas_gemm_bf16_bf16_fp32"), (
     "DSV4_GATE_FP32=1 requires cublas_gemm_bf16_bf16_fp32 in librtp_compute_ops. "
     "Rebuild //:rtp_compute_ops with the same output root and ensure PYTHONPATH "
@@ -492,7 +680,9 @@ export CUDA_VISIBLE_DEVICES={shell_quote(args.prefill_gpus)}
 export START_PORT={prefill_port}
 export ROLE_TYPE=PREFILL
 export ENABLE_CUDA_GRAPH=0
+{"export RTP_PRECISION_ENV_DUMP_DIR=" + shell_quote(env_dump_root / "prefill") if env_dump_root else "unset RTP_PRECISION_ENV_DUMP_DIR"}
 {common_rtp_env}
+{prefill_topk_env}
 {check_rtp_ops}
 exec /opt/conda310/bin/python -m rtp_llm.start_server \\
   --model_type deepseek_v4 \\
@@ -550,6 +740,7 @@ export START_PORT={decode_port}
 export ROLE_TYPE=DECODE
 export ENABLE_CUDA_GRAPH=1
 export ENABLE_CUDA_GRAPH_OVERRIDE=1
+{"export RTP_PRECISION_ENV_DUMP_DIR=" + shell_quote(env_dump_root / "decode") if env_dump_root else "unset RTP_PRECISION_ENV_DUMP_DIR"}
 export MODEL_SERVICE_CONFIG={shell_quote(model_service_config)}
 {common_rtp_env}
 {check_rtp_ops}
@@ -644,6 +835,16 @@ set -euo pipefail
             "decode": decode_port,
             "vllm": vllm_port,
         },
+        "rtp_precision_env": {
+            "DSV4_GATE_FP32": int(args.dsv4_gate_fp32),
+            "DSV4_INDEXER_TOPK_CANONICALIZE": 1,
+            "RTP_PREFILL_DSV4_INDEXER_TOPK_BACKEND": args.rtp_prefill_topk_backend,
+            "RTP_DECODE_DSV4_INDEXER_TOPK_BACKEND": "unset",
+            "DSV4_PERSISTENT_TOPK": args.dsv4_persistent_topk,
+            "RTP_STABLE_GREEDY_TIEBREAK": 1,
+            "RTP_CUDA_GRAPH_SYNC_REPLAY": 1,
+            "RTP_PRECISION_ENV_DUMP_DIR": str(env_dump_root) if env_dump_root else None,
+        },
         "tmux_start": str(out_dir / "start_all_tmux.sh"),
         "known_good_gate": str(out_dir / "run_known_good_gate.sh"),
         "teacher_force": {
@@ -681,6 +882,10 @@ def add_run_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--rtp-url", default="http://127.0.0.1:18880")
     parser.add_argument("--prefill-url", default="http://127.0.0.1:18800")
     parser.add_argument("--grpc-addr", default="127.0.0.1:19408")
+    parser.add_argument("--prefill-http-port", type=int, default=None)
+    parser.add_argument("--prefill-grpc-port", type=int, default=None)
+    parser.add_argument("--decode-http-port", type=int, default=None)
+    parser.add_argument("--decode-grpc-port", type=int, default=None)
     parser.add_argument("--timeout", type=float, default=1800.0)
     parser.add_argument("--health-timeout", type=float, default=2.0)
     parser.add_argument("--out-root", type=Path, default=DEFAULT_RUN_ROOT / "outputs")
@@ -731,6 +936,29 @@ def build_parser() -> argparse.ArgumentParser:
     health_parser.add_argument("--json-out", type=Path, default=None)
     health_parser.set_defaults(func=command_health)
 
+    maps_parser = subparsers.add_parser(
+        "check-process-libs",
+        help="Verify a running RTP process loaded all core .so files from one worktree bazel-bin",
+    )
+    maps_parser.add_argument("--pid", type=int, required=True)
+    maps_parser.add_argument("--rtp-worktree", type=Path, default=Path.cwd())
+    maps_parser.add_argument("--json-out", type=Path, default=None)
+    maps_parser.set_defaults(func=command_check_process_libs)
+
+    env_parser = subparsers.add_parser(
+        "check-env-dump",
+        help=(
+            "Verify opt-in RTP_PRECISION_ENV_DUMP_DIR JSON files written by "
+            "backend/rank processes. This avoids relying on /proc/<pid>/environ."
+        ),
+    )
+    env_parser.add_argument("--dump-dir", type=Path, required=True)
+    env_parser.add_argument("--stage", default=None)
+    env_parser.add_argument("--expect", action="append", default=[])
+    env_parser.add_argument("--require-key", action="append", default=[])
+    env_parser.add_argument("--json-out", type=Path, default=None)
+    env_parser.set_defaults(func=command_check_env_dump)
+
     teacher_parser = subparsers.add_parser(
         "teacher-force-file",
         help="Create an RTP_TEACHER_FORCE_TOKENS file from vLLM generated_ids.json",
@@ -763,6 +991,36 @@ def build_parser() -> argparse.ArgumentParser:
     scripts_parser.add_argument("--prefill-world-size", type=int, default=2)
     scripts_parser.add_argument("--tmux-prefix", default="dsv4_precision")
     scripts_parser.add_argument("--out-root", type=Path, default=DEFAULT_RUN_ROOT / "outputs")
+    scripts_parser.add_argument("--dsv4-gate-fp32", type=int, choices=(0, 1), default=1)
+    scripts_parser.add_argument(
+        "--dsv4-persistent-topk",
+        choices=("unset", "0", "1"),
+        default="0",
+        help=(
+            "Set DSV4_PERSISTENT_TOPK in RTP services. Precision launch default "
+            "is 0; pass unset to preserve the runtime default."
+        ),
+    )
+    scripts_parser.add_argument(
+        "--rtp-prefill-topk-backend",
+        choices=("torch", "auto", "unset"),
+        default="torch",
+        help=(
+            "TopK backend for RTP PREFILL only. The strict stable baseline uses "
+            "torch so prefill TopK selection itself is reference-stable; decode "
+            "keeps this switch unset."
+        ),
+    )
+    scripts_parser.add_argument(
+        "--env-dump-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Optional directory root. When set, RTP backend/rank processes write "
+            "their effective precision env JSON under prefill/ and decode/. "
+            "Default is off."
+        ),
+    )
     scripts_parser.add_argument(
         "--teacher-force-ids",
         type=Path,

@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -8,6 +9,19 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 using namespace torch_ext;
 namespace rtp_llm {
+
+namespace {
+
+bool syncCudaGraphReplayEnabled() {
+    const char* value = std::getenv("RTP_CUDA_GRAPH_SYNC_REPLAY");
+    if (value == nullptr) {
+        return false;
+    }
+    return std::strcmp(value, "1") == 0 || std::strcmp(value, "true") == 0 || std::strcmp(value, "TRUE") == 0
+           || std::strcmp(value, "ON") == 0 || std::strcmp(value, "on") == 0;
+}
+
+}  // namespace
 
 // clang-format off
 // CUDA Graph Mode Configuration Table:
@@ -276,10 +290,19 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
     // decode or embedding model only
     RTP_LLM_LOG_DEBUG("Replay Start");
     prepareInputs(inputs, state);
+    const bool sync_replay = syncCudaGraphReplayEnabled();
+    if (sync_replay) {
+        RTP_LLM_PROFILE_SCOPE("cuda_graph.forward(sync_before_replay)");
+        cuda_graph::graphDeviceSynchronize();
+    }
     if (is_prefill_cuda_graph_mode_) {
         {
             RTP_LLM_PROFILE_SCOPE("cuda_graph.forward(replayPrefill)");
             replayPrefill(state.current_real_graph_seq_len);
+        }
+        if (sync_replay) {
+            RTP_LLM_PROFILE_SCOPE("cuda_graph.forward(sync_after_replay)");
+            cuda_graph::graphDeviceSynchronize();
         }
         outputs.hidden_states =
             graph_instances_[state.current_real_graph_seq_len].mem_hold_.decoder_layer_hidden_states_.slice(
@@ -288,6 +311,10 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
         {
             RTP_LLM_PROFILE_SCOPE("cuda_graph.forward(replayDecode)");
             replayDecode(state.current_real_graph_bs);
+        }
+        if (sync_replay) {
+            RTP_LLM_PROFILE_SCOPE("cuda_graph.forward(sync_after_replay)");
+            cuda_graph::graphDeviceSynchronize();
         }
         outputs.hidden_states =
             graph_instances_[state.current_real_graph_bs].mem_hold_.decoder_layer_hidden_states_.slice(

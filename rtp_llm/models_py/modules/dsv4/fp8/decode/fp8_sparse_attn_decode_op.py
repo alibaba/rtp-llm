@@ -54,14 +54,10 @@ class SparseAttnV4DecodeFp8Op:
         attention helper call sites uniform.
       block_table   : unused in sparse FP8 decode; FlashMLA consumes global
         slot ids from ``topk_idxs`` directly.
-      topk_length        : optional ``[B]`` int32 — per-request leftmost
-        valid length on ``topk_idxs``.
       extra_k_cache      : optional secondary FP8 pool (CMP). Triggers
         FlashMLA's dual-pool path.
       extra_topk_idxs    : optional ``[B, q_len, extra_topk]`` int32 —
         global slot ids into ``extra_k_cache``.
-      extra_topk_length  : optional ``[B]`` int32 — per-request leftmost
-        valid length on ``extra_topk_idxs``.
     """
 
     def __init__(
@@ -83,10 +79,8 @@ class SparseAttnV4DecodeFp8Op:
         sched_meta: Any,
         cache_seqlens: Optional[torch.Tensor] = None,
         block_table: Optional[torch.Tensor] = None,
-        topk_length: Optional[torch.Tensor] = None,
         extra_k_cache: Optional[torch.Tensor] = None,
         extra_topk_idxs: Optional[torch.Tensor] = None,
-        extra_topk_length: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Single- or dual-pool sparse attention.
 
@@ -116,10 +110,8 @@ class SparseAttnV4DecodeFp8Op:
             sched_meta,
             cache_seqlens,
             block_table,
-            topk_length,
             extra_k_cache,
             extra_topk_idxs,
-            extra_topk_length,
         )
 
     def _forward_flash_mla(
@@ -131,10 +123,8 @@ class SparseAttnV4DecodeFp8Op:
         sched_meta: Any,
         cache_seqlens: Optional[torch.Tensor],
         block_table: Optional[torch.Tensor],
-        topk_length: Optional[torch.Tensor] = None,
         extra_k_cache: Optional[torch.Tensor] = None,
         extra_topk_idxs: Optional[torch.Tensor] = None,
-        extra_topk_length: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         from flash_mla import flash_mla_with_kvcache  # type: ignore[import-not-found]
 
@@ -185,11 +175,11 @@ class SparseAttnV4DecodeFp8Op:
             is_fp8_kvcache=True,
             indices=topk_3d,
             softmax_scale=self.softmax_scale,
-            topk_length=topk_length,
+            topk_length=None,
             attn_sink=attn_sink,
             extra_k_cache=extra_kv_4d,
             extra_indices_in_kvcache=extra_topk_3d,
-            extra_topk_length=extra_topk_length,
+            extra_topk_length=None,
         )
 
-        return attn_out.view(B, q_len, H, self.head_dim).contiguous()
+        return attn_out.contiguous()

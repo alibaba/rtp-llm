@@ -219,6 +219,7 @@ class MoE(nn.Module):
             expert_weights=shared_w,
             swiglu_limit=swiglu_limit,
         )
+        self.shared_experts._dsv4_layer_id = layer_id
         self._shared_executor = get_shared_expert_executor(
             max_tokens_per_rank=max_tokens_per_rank,
             dim=dim,

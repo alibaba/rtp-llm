@@ -13,6 +13,7 @@ from abc import ABC, abstractmethod
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 
@@ -127,9 +128,14 @@ class W13SharedExpert(nn.Module):
         self, x: torch.Tensor, weights: torch.Tensor | None = None
     ) -> torch.Tensor:
         dtype = x.dtype
+        layer_id = getattr(self, "_dsv4_layer_id", None)
         with record_function_range("dsv4.shared_expert.w13"):
             gate_up = self._apply_layer(self.w13, x).float()
             gate, up = gate_up.chunk(2, dim=-1)
+            if layer_id is not None:
+                from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
+
+                _rt.record_if_level(2, f"L{layer_id:02d}_moe_shared_gate_up", gate_up.to(dtype))
         with record_function_range("dsv4.shared_expert.silu_mul"):
             from .expert import require_silu_mul_split
 
@@ -138,10 +144,19 @@ class W13SharedExpert(nn.Module):
                 up.contiguous(),
                 clamp_limit=self.swiglu_limit,
             )
+            if layer_id is not None:
+                from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
+
+                _rt.record_if_level(2, f"L{layer_id:02d}_moe_shared_hidden", hidden.to(dtype))
         if weights is not None:
             hidden = weights * hidden
         with record_function_range("dsv4.shared_expert.w2"):
-            return self._apply_layer(self.w2, hidden.to(dtype))
+            out = self._apply_layer(self.w2, hidden.to(dtype))
+            if layer_id is not None:
+                from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
+
+                _rt.record_if_level(2, f"L{layer_id:02d}_moe_shared_out", out)
+            return out
 
 
 class FusedSharedExpertFastPath:
@@ -382,14 +397,37 @@ class FusedSharedExpertFastPath:
         w13 = self._linear_parts(shared_experts.w13)
         w2 = self._linear_parts(shared_experts.w2)
         fp8_gemm_nt((x_fp8, x_scale), w13, gate_up, disable_ue8m0_cast=False)
+        layer_id = getattr(shared_experts, "_dsv4_layer_id", None)
+        if layer_id is not None:
+            from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
+
+            _rt.record_if_level(2, f"L{layer_id:02d}_moe_shared_gate_up", gate_up)
         silu_mul_fp8_quant_packed(
             gate_up,
             clamp_limit=self.swiglu_limit,
             group_size=128,
             output_q=hidden_fp8,
             output_scale=hidden_scale,
+            bf16_activation=True,
         )
+        if layer_id is not None:
+            from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
+
+            inter = gate_up.shape[-1] // 2
+            gate_dbg = gate_up[:, :inter]
+            up_dbg = gate_up[:, inter:]
+            if self.swiglu_limit > 0:
+                gate_dbg = torch.clamp(gate_dbg, max=self.swiglu_limit)
+                up_dbg = torch.clamp(up_dbg, min=-self.swiglu_limit, max=self.swiglu_limit)
+            hidden_dbg = (F.silu(gate_dbg) * up_dbg).to(torch.bfloat16)
+            _rt.record_if_level(2, f"L{layer_id:02d}_moe_shared_hidden", hidden_dbg)
+            _rt.record_if_level(2, f"L{layer_id:02d}_moe_shared_hidden_quant", hidden_fp8)
+            _rt.record_if_level(2, f"L{layer_id:02d}_moe_shared_hidden_scale", hidden_scale)
         fp8_gemm_nt((hidden_fp8, hidden_scale), w2, out, disable_ue8m0_cast=False)
+        if layer_id is not None:
+            from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
+
+            _rt.record_if_level(2, f"L{layer_id:02d}_moe_shared_out", out)
         return out
 
 
@@ -518,12 +556,14 @@ def get_shared_expert_executor(
     swiglu_limit: float = 0.0,
 ) -> SharedExpertExecutor:
     mode = _mode()
-    fast_path = FusedSharedExpertExecutor(
-        max_tokens_per_rank=max_tokens_per_rank,
-        dim=dim,
-        inter_dim=inter_dim,
-        swiglu_limit=swiglu_limit,
-    )
+    fast_path = None
+    if os.environ.get("DSV4_SHARED_EXPERT_FAST_PATH", "1") != "0":
+        fast_path = FusedSharedExpertExecutor(
+            max_tokens_per_rank=max_tokens_per_rank,
+            dim=dim,
+            inter_dim=inter_dim,
+            swiglu_limit=swiglu_limit,
+        )
     if mode == "sequential":
         return SequentialSharedExpertExecutor(fast_path)
     if mode in ("auto", "overlap"):

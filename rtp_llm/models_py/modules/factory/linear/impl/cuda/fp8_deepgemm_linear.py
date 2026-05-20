@@ -215,7 +215,7 @@ class CudaFp8DeepGEMMLinear(LinearBase):
             input_fp8, input_scales = sgl_per_token_group_quant_fp8(
                 input,
                 group_size=128,
-                eps=1e-4,
+                eps=1e-10,
                 column_major_scales=True,
                 scale_tma_aligned=True,
                 scale_ue8m0=self.scale_ue8m0,

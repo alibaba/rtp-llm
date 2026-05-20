@@ -72,6 +72,7 @@ class TestSparseAttnV4DecodeFp8Op(unittest.TestCase):
             self.assertIsNone(calls[0]["block_table"])
             self.assertIsNone(calls[0]["cache_seqlens"])
             self.assertTrue(torch.equal(calls[0]["indices"], topk))
+            self.assertIsNone(calls[0]["topk_length"])
         finally:
             if old_flash_mla is None:
                 sys.modules.pop("flash_mla", None)

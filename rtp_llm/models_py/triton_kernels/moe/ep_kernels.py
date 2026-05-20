@@ -122,9 +122,10 @@ def ep_scatter(
     m_indices: torch.Tensor,
     output_index: torch.Tensor,
     scale_ue8m0: bool = False,
+    scale_group_size: int = 128,
 ):
     BLOCK_E = 128  # token num of per expert is aligned to 128
-    BLOCK_D = 128  # block size of quantization
+    BLOCK_D = scale_group_size  # block size of quantization
     num_warps = 8
     num_experts = num_recv_tokens_per_expert.shape[0]
     hidden_size = recv_x.shape[1]
@@ -372,7 +373,9 @@ def _fwd_kernel_ep_gather(
                 source_token_index = source_token_index_int32.to(tl.int64)
                 if source_token_index >= 0 and source_token_index < total_input_tokens:
                     acc_weight = tl.load(
-                        recv_topk_weight + cur_token * recv_topk_weight_stride0 + topk_index
+                        recv_topk_weight
+                        + cur_token * recv_topk_weight_stride0
+                        + topk_index
                     )
                     tmp = tl.load(
                         input_tensor

@@ -1,9 +1,11 @@
 """MegaMoEStrategy: DeepGEMM ``fp8_fp4_mega_moe`` symm-mem fused kernel.
 
-EP > 1 only. The Mega kernel fuses dispatch + L1 GEMM + SwiGLU + L2 GEMM +
-combine into one kernel backed by a PyTorch symmetric-memory buffer for
-NVLink communication. Requires SM100, PyTorch ≥ 2.9 (symmetric_memory),
-DeepGEMM ≥ 2.5, and an initialised process group.
+EP > 1 by default. For precision alignment with vLLM TP1/EP1, the same Mega
+kernel can also be enabled explicitly with ``DSV4_MEGA_MOE_EP1=1``. The Mega
+kernel fuses dispatch + L1 GEMM + SwiGLU + L2 GEMM + combine into one kernel
+backed by a PyTorch symmetric-memory buffer for NVLink communication. Requires
+SM100, PyTorch ≥ 2.9 (symmetric_memory), DeepGEMM ≥ 2.5, and an initialised
+process group.
 
 Wired into ``MoE`` via ``select_strategy`` when ep_size > 1 and Mega is
 available. Direct port of the pre-refactor ``_setup_mega_moe`` +
@@ -23,6 +25,7 @@ from ..input_packer import get_mega_moe_input_packer
 from ..mega_buf import (
     _get_or_create_mega_buf,
     _get_or_create_mega_output,
+    _mega_moe_ep1_enabled,
     _mega_moe_enabled,
 )
 from ..mega_jit_warmup import (
@@ -53,9 +56,13 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
 
     @classmethod
     def can_handle(cls, cfg: MoeCfg) -> bool:
-        # Mega requires EP > 1, SM100, dist-init — all checked by
-        # ``_mega_moe_enabled()`` except ep_size > 1, which we check here.
-        return cfg.ep_size > 1 and _mega_moe_enabled()
+        if cfg.ep_size > 1:
+            # Mega requires SM100 and dist-init — checked by
+            # ``_mega_moe_enabled()``.
+            return _mega_moe_enabled()
+        if cfg.ep_size == 1:
+            return _mega_moe_ep1_enabled()
+        return False
 
     def setup_weights(self, layer_weights: Dict) -> None:
         """Stack EP-local routed-expert SFs into the int32 UTCCP-transposed

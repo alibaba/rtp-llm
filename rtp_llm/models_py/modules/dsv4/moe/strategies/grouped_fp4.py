@@ -208,6 +208,12 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
             scale_tma_aligned=True,
             scale_ue8m0=True,
         )
+        if os.environ.get("MOEDBG", "0") != "0":
+            from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
+
+            if _rt.should_record_layer(cfg.layer_id):
+                _rt.record_if_level(2, f"L{cfg.layer_id:02d}_moe_routed_x_quant", a_fp8)
+                _rt.record_if_level(2, f"L{cfg.layer_id:02d}_moe_routed_x_scale", a_scale)
 
         # Per-expert counts in local index space (== global since ep_size==1).
         adjusted_topk_ids, num_recv = recompute_topk_ids_sum_expert_count(
@@ -284,16 +290,25 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
             recipe_a=(1, FP8_BLOCK),
             recipe_b=(1, FP4_BLOCK),
         )
+        if os.environ.get("MOEDBG", "0") != "0":
+            from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
+
+            if _rt.should_record_layer(cfg.layer_id):
+                _rt.record_if_level(2, f"L{cfg.layer_id:02d}_moe_routed_gate_up", gate_up)
         del scatter_out, scatter_out_scale
 
-        # (3) Fused SiLU+clamp+mul + per-token-group FP8 quant + UE8M0 packed scale.
-        # Router weight is NOT applied here — the ep_gather below folds it
-        # into the topk-reduce.
+        # (3) Fused SiLU+clamp+mul + per-token-group FP8 quant.
         h_fp8, h_scale = silu_mul_fp8_quant_packed(
             gate_up,
             clamp_limit=cfg.swiglu_limit,
             group_size=FP8_BLOCK,
         )
+        if os.environ.get("MOEDBG", "0") != "0":
+            from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
+
+            if _rt.should_record_layer(cfg.layer_id):
+                _rt.record_if_level(2, f"L{cfg.layer_id:02d}_moe_routed_hidden_quant", h_fp8)
+                _rt.record_if_level(2, f"L{cfg.layer_id:02d}_moe_routed_hidden_scale", h_scale)
         del gate_up
 
         # GEMM 2: down
@@ -308,14 +323,22 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
             recipe_a=(1, FP8_BLOCK),
             recipe_b=(1, FP4_BLOCK),
         )
+        if os.environ.get("MOEDBG", "0") != "0":
+            from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
+
+            if _rt.should_record_layer(cfg.layer_id):
+                _rt.record_if_level(2, f"L{cfg.layer_id:02d}_moe_routed_down_out", down_out)
         del h_fp8, h_scale
 
-        # (4) Triton ep_gather: per output token accumulates topk source rows
-        # × router weight in fp32 register, single BF16 store. No
-        # [N, topk, D] fp32 intermediate (legacy materialised ~700 MB at
-        # N=4k, topk=6, D=7168).
+        # (4) Triton ep_gather: per output token accumulates topk source rows.
         gather_out = torch.empty((N, D), dtype=torch.bfloat16, device=device)
-        ep_gather(down_out, adjusted_topk_ids, weights, output_index, gather_out)
+        ep_gather(
+            down_out,
+            adjusted_topk_ids,
+            weights,
+            output_index,
+            gather_out,
+        )
         return gather_out.float()
 
     def _forward_capture_topk(
@@ -348,7 +371,6 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
             )
             for k in range(K):
                 eid_t = indices[n, k : k + 1]
-                router_w = weights[n, k : k + 1, None]
 
                 w13 = torch.index_select(self._w13, 0, eid_t).squeeze(0)
                 s13 = (
@@ -386,6 +408,6 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
                     recipe_a=(1, FP8_BLOCK),
                     recipe_b=(1, FP4_BLOCK),
                 )
-                y[n : n + 1].add_(down_out.float() * router_w)
+                y[n : n + 1].add_(down_out.float() * weights[n, k].float())
 
         return y

@@ -33,6 +33,7 @@ from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.models_py.modules.dsv4._fused_inv_rope_fp8_quant_triton import (
     fused_inv_rope_fp8_quant,
 )
+from rtp_llm.models_py.modules.dsv4 import _record_tensor
 
 # Audit §7.4 P0 (row 1) + §7.3.4: fused RMSNorm + partial RoPE, single
 # Triton launch.  Covers every Q/KV decode + prefill site.  Standalone
@@ -51,7 +52,11 @@ from rtp_llm.models_py.modules.dsv4.cp import (
 from rtp_llm.models_py.modules.dsv4.fp8.compressor import CompressorFP8, CompressorMeta
 from rtp_llm.models_py.modules.dsv4.fp8.indexer import IndexerFP8
 from rtp_llm.models_py.modules.dsv4.qlinear import _fp8_dequant_to_fp32
-from rtp_llm.models_py.modules.dsv4.rope import apply_rotary_emb, precompute_freqs_cis
+from rtp_llm.models_py.modules.dsv4.rope import (
+    apply_rotary_emb,
+    apply_rotary_emb_gptj_native,
+    precompute_freqs_cis,
+)
 from rtp_llm.models_py.modules.factory.linear import LinearFactory
 from rtp_llm.ops.compute_ops import KVCacheRegionName, rtp_llm_ops
 
@@ -213,6 +218,14 @@ def _prefill_swa_fp8_roundtrip_min_tokens() -> int:
         return 0
 
 
+def _env_layer_selected(env_name: str, layer_id: int) -> bool:
+    raw = os.environ.get(env_name, "").strip()
+    if not raw:
+        return True
+    selected = {part.strip() for part in raw.split(",") if part.strip()}
+    return str(layer_id) in selected or f"L{layer_id:02d}" in selected
+
+
 def _fp8_roundtrip_k_temp(k_bf16: torch.Tensor, block_size: int = 256) -> torch.Tensor:
     """Quantize/dequantize K with the fp8_ds_mla token layout, without BlockPool.
 
@@ -258,6 +271,66 @@ def _fp8_roundtrip_k_temp(k_bf16: torch.Tensor, block_size: int = 256) -> torch.
         offset=0,
     )
     return out.reshape(T, head_dim)
+
+
+def _select_model1_mla_logical_slots(
+    kv_cache: torch.Tensor,
+    global_slots: torch.Tensor,
+) -> torch.Tensor:
+    """Debug reader for FlashMLA fp8_model1_mla slots.
+
+    The MODEL1 physical block layout stores all NoPE/RoPE bytes for a block
+    first, followed by per-token scale bytes. This reconstructs the logical
+    584-byte per-token view so RTP dumps can be compared with vLLM's
+    ``attn_decode_swa_selected_cache_logical`` records.
+    """
+    assert kv_cache.dtype == torch.uint8 and kv_cache.dim() == 3
+    block_size = int(kv_cache.shape[1])
+    block_stride = int(kv_cache.stride(0))
+    flat_slots = global_slots.reshape(-1).to(torch.long)
+    valid = flat_slots >= 0
+    safe_slots = flat_slots.clamp_min(0)
+    block_idx = safe_slots // block_size
+    offset = safe_slots % block_size
+
+    block_bytes = kv_cache.as_strided(
+        (kv_cache.shape[0], block_stride),
+        (block_stride, 1),
+    )
+    n = int(safe_slots.numel())
+    out = torch.empty((n, 584), dtype=torch.uint8, device=kv_cache.device)
+    data_offsets = offset[:, None] * 576 + torch.arange(
+        576, device=kv_cache.device, dtype=torch.long
+    )[None, :]
+    scale_offsets = (
+        block_size * 576
+        + offset[:, None] * 8
+        + torch.arange(8, device=kv_cache.device, dtype=torch.long)[None, :]
+    )
+    out[:, :576] = block_bytes[block_idx[:, None], data_offsets]
+    out[:, 576:] = block_bytes[block_idx[:, None], scale_offsets]
+    if not bool(valid.all()):
+        out = torch.where(valid[:, None], out, torch.zeros_like(out))
+    return out.view(*global_slots.shape, 584).contiguous()
+
+
+def _dequant_model1_mla_logical_slots(logical_slots: torch.Tensor) -> torch.Tensor:
+    """Debug dequantizer for logical MODEL1 ``[584]`` byte slots."""
+    flat = logical_slots.reshape(-1, 584).contiguous()
+    out = torch.empty((flat.shape[0], 512), dtype=torch.bfloat16, device=flat.device)
+    nope_bytes = flat[:, :448]
+    scale_bytes = flat[:, 576:583]
+    for tile_idx in range(7):
+        start = tile_idx * 64
+        end = start + 64
+        tile_fp8 = nope_bytes[:, start:end].contiguous().view(torch.float8_e4m3fn)
+        scale = torch.pow(
+            torch.full((), 2.0, dtype=torch.float32, device=flat.device),
+            scale_bytes[:, tile_idx].to(torch.float32) - 127.0,
+        ).unsqueeze(-1)
+        out[:, start:end] = (tile_fp8.float() * scale).to(torch.bfloat16)
+    out[:, 448:] = flat[:, 448:576].contiguous().view(torch.bfloat16).reshape(-1, 64)
+    return out.view(*logical_slots.shape[:-1], 512).contiguous()
 
 
 _V4_FP8_BLOCK_CFG = Fp8BlockWiseQuantConfig()
@@ -739,12 +812,16 @@ class PrefillQKV(NamedTuple):
 
     ``qr`` is fed to the indexer (CSA layers); ``q`` is the dense Q.
     ``kv_full`` is the all-gathered KV under CP; equals ``kv`` otherwise.
-    The CP-aware sequence length lives on ``PrefillMeta.seqlen_full``.
+    ``kv_cache_full`` is an optional cache-write-only KV path used when
+    precision debugging needs vLLM-style persisted SWA bytes without changing
+    the BF16 prefill-attention path. The CP-aware sequence length lives on
+    ``PrefillMeta.seqlen_full``.
     """
 
     qr: torch.Tensor
     q: torch.Tensor
     kv_full: torch.Tensor
+    kv_cache_full: Optional[torch.Tensor] = None
 
 
 class AttentionFP8(nn.Module):
@@ -1906,9 +1983,8 @@ class AttentionFP8(nn.Module):
             self._rope_factor,
             self._rope_beta_fast,
             self._rope_beta_slow,
+            device=device,
         )
-        if device is not None:
-            freqs_cis = freqs_cis.to(device)
         self.freqs_cis = freqs_cis
         # Clear compressor / indexer bound references so they rebind on next forward
         if self.compressor is not None:
@@ -2039,9 +2115,17 @@ class AttentionFP8(nn.Module):
         T = bsz * q_len
         start_pos = attn_metadata.start_pos[:bsz]  # [bsz] int32
         position_ids = attn_metadata.position_ids[:T]  # [T] int32
+        dbg_decode = _record_tensor.should_record_layer(self.layer_id)
 
         self._ensure_freqs_cis_bound()
         qkv = decode_compute_qkv(self, x, position_ids)
+        if dbg_decode:
+            _record_tensor.record_if_level(
+                2, f"L{self.layer_id:02d}_fp8_decode_q", qkv.q
+            )
+            _record_tensor.record_if_level(
+                2, f"L{self.layer_id:02d}_fp8_decode_kv", qkv.kv
+            )
         if self._debug_attn_dump_enabled:
             self._debug_q[:bsz].copy_(qkv.q.to(torch.bfloat16))
             self._debug_kv[:bsz].copy_(qkv.kv.to(torch.bfloat16))
@@ -2072,7 +2156,16 @@ class AttentionFP8(nn.Module):
         else:
             raise AssertionError(f"unknown compress_ratio={self.compress_ratio}")
 
-        return decode_output_proj(self, o, qkv.freqs_cis, bsz, q_len)
+        if dbg_decode:
+            _record_tensor.record_if_level(
+                2, f"L{self.layer_id:02d}_fp8_decode_o_heads", o
+            )
+        out = decode_output_proj(self, o, qkv.freqs_cis, bsz, q_len)
+        if dbg_decode:
+            _record_tensor.record_if_level(
+                2, f"L{self.layer_id:02d}_fp8_decode_out_proj", out
+            )
+        return out
 
     # ------------------------------------------------------------------
     # Decode per-path bodies + shared epilogue
@@ -2218,6 +2311,21 @@ class AttentionFP8(nn.Module):
                 self._pool_entries_per_block(SWA_KV),
             )
         swa_topk_3d = swa_global.view(bsz, q_len, win).contiguous()
+        if _record_tensor.should_record_layer(self.layer_id):
+            _record_tensor.record_if_level(
+                2, f"L{self.layer_id:02d}_fp8_decode_swa_topk", swa_topk_3d
+            )
+            selected_swa = _select_model1_mla_logical_slots(swa_pool_3d, swa_topk_3d)
+            _record_tensor.record_if_level(
+                2,
+                f"L{self.layer_id:02d}_fp8_decode_swa_selected_cache_logical",
+                selected_swa,
+            )
+            _record_tensor.record_if_level(
+                2,
+                f"L{self.layer_id:02d}_fp8_decode_swa_selected_k_dequant",
+                _dequant_model1_mla_logical_slots(selected_swa),
+            )
         if self._debug_attn_dump_enabled:
             self._debug_swa_topk[:bsz, :, :win].copy_(swa_topk_3d.to(torch.int32))
 
@@ -2438,6 +2546,13 @@ class AttentionFP8(nn.Module):
         # [B, q_len, K] contract.
         swa_topk_3d = swa_global.view(bsz, q_len, win).contiguous()
         cmp_topk_3d = cmp_global.view(bsz, q_len, K_cmp).contiguous()
+        if _record_tensor.should_record_layer(self.layer_id):
+            _record_tensor.record_if_level(
+                2, f"L{self.layer_id:02d}_fp8_decode_swa_topk", swa_topk_3d
+            )
+            _record_tensor.record_if_level(
+                2, f"L{self.layer_id:02d}_fp8_decode_cmp_topk", cmp_topk_3d
+            )
 
         sched_meta = get_or_build_sched_meta(
             attn_metadata,
@@ -2549,7 +2664,10 @@ class AttentionFP8(nn.Module):
         # (abs pos [sp, sp+S)) and any cont-prefill prefix tail
         # (abs pos [sp-P, sp)) target disjoint slots.
         with record_function_range("dsv4.fp8.attn.prefill.swa_write"):
-            self._prefill_write_swa_fp8_paged(common, qkv.kv_full)
+            self._prefill_write_swa_fp8_paged(
+                common,
+                qkv.kv_cache_full if qkv.kv_cache_full is not None else qkv.kv_full,
+            )
 
         if self.compress_ratio == 0:
             with record_function_range("dsv4.fp8.attn.prefill.path_swa"):
@@ -4247,9 +4365,8 @@ class AttentionFP8(nn.Module):
         rd = common.rd
         # Q path
         with record_function_range("dsv4.fp8.attn.qkv.q_lora_a_norm"):
-            qr = self._rmsnorm_weighted(
-                self._lin(self.wq_a, x_3d), self.q_norm
-            )  # [1, T, q_lora_rank]
+            qr_in = self._lin(self.wq_a, x_3d)
+            qr = self._rmsnorm_weighted(qr_in, self.q_norm)  # [1, T, q_lora_rank]
         with record_function_range("dsv4.fp8.attn.qkv.q_lora_b_rope"):
             q = self._lin(self.wq_b, qr).unflatten(-1, (self.n_heads, self.head_dim))
             q = fused_rmsnorm_rope(q, None, common.freqs_cis, rd, eps=self.eps)
@@ -4257,9 +4374,76 @@ class AttentionFP8(nn.Module):
         # KV path (single MQA head) — rank-local under CP.
         with record_function_range("dsv4.fp8.attn.qkv.kv_proj_rope"):
             kv_in = self._lin(self.wkv, x_3d)
-            kv = fused_rmsnorm_rope(
-                kv_in, self.kv_norm, common.freqs_cis, rd, eps=self.eps
-            )
+            if _record_tensor.should_record_layer(self.layer_id):
+                _dbg_record(self.layer_id, "fp8_prefill_attn_in", x)
+                _dbg_record(
+                    self.layer_id,
+                    "fp8_prefill_attn_qr_kv",
+                    torch.cat([qr_in.squeeze(0), kv_in.squeeze(0)], dim=-1),
+                )
+                _dbg_record(self.layer_id, "fp8_prefill_attn_qr_norm", qr.squeeze(0))
+                _dbg_record(self.layer_id, "fp8_prefill_attn_kv_linear", kv_in.squeeze(0))
+            if os.environ.get("DSV4_PREFILL_KV_ROPE_BACKEND", "").strip().lower() in (
+                "native",
+                "torch",
+                "reference",
+            ):
+                kv = self._rmsnorm_weighted(kv_in, self.kv_norm)
+                _dbg_record(self.layer_id, "fp8_prefill_attn_kv_norm", kv.squeeze(0))
+                if kv.is_cuda and kv.numel() > 0:
+                    apply_rotary_emb_gptj_native(kv[..., -rd:], common.freqs_cis)
+                else:
+                    apply_rotary_emb(kv[..., -rd:], common.freqs_cis)
+            else:
+                kv = fused_rmsnorm_rope(
+                    kv_in,
+                    self.kv_norm,
+                    common.freqs_cis,
+                    rd,
+                    eps=self.eps,
+                    round_before_rope=os.environ.get(
+                        "DSV4_PREFILL_KV_ROPE_ROUND_BEFORE", "0"
+                    )
+                    .strip()
+                    .lower()
+                    in ("1", "true", "yes", "on"),
+                )
+                if _record_tensor.should_record_layer(self.layer_id):
+                    _dbg_record(
+                        self.layer_id,
+                        "fp8_prefill_attn_kv_norm",
+                        self._rmsnorm_weighted(kv_in, self.kv_norm).squeeze(0),
+                    )
+            kv_cache = None
+            kv_cache_pre_rope_dbg = None
+            cache_kv_backend = os.environ.get(
+                "DSV4_PREFILL_SWA_CACHE_KV_BACKEND", ""
+            ).strip().lower()
+            if cache_kv_backend in (
+                "native",
+                "torch",
+                "reference",
+                "vllm",
+            ) and _env_layer_selected(
+                "DSV4_PREFILL_SWA_CACHE_KV_LAYERS", self.layer_id
+            ):
+                # vLLM writes the persisted SWA cache from a BF16-materialized
+                # KV norm output followed by GPT-J RoPE. Keep this separate
+                # from ``kv`` so prefill attention can retain the optimized
+                # fused path while decode sees vLLM-aligned historical bytes.
+                with record_function_range("dsv4.fp8.attn.qkv.kv_cache_rope"):
+                    kv_cache = self._rmsnorm_weighted(kv_in, self.kv_norm)
+                    kv_cache_pre_rope_dbg = (
+                        kv_cache.clone()
+                        if _record_tensor.should_record_layer(self.layer_id)
+                        else None
+                    )
+                    if kv_cache.is_cuda and kv_cache.numel() > 0:
+                        apply_rotary_emb_gptj_native(
+                            kv_cache[..., -rd:], common.freqs_cis
+                        )
+                    else:
+                        apply_rotary_emb(kv_cache[..., -rd:], common.freqs_cis)
 
         if common.cp_on:
             # Dispatch on _use_varlen_prefill: varlen (default) supports
@@ -4272,18 +4456,83 @@ class AttentionFP8(nn.Module):
                     kv_flat = kv.reshape(kv.size(0) * kv.size(1), *kv.shape[2:])
                     kv_full_flat = cp_all_gather_full_varlen(kv_flat, common.cp_ctx)
                     kv_full = kv_full_flat.unsqueeze(0)
+                    if kv_cache is not None:
+                        kv_cache_flat = kv_cache.reshape(
+                            kv_cache.size(0) * kv_cache.size(1),
+                            *kv_cache.shape[2:],
+                        )
+                        kv_cache_full_flat = cp_all_gather_full_varlen(
+                            kv_cache_flat, common.cp_ctx
+                        )
+                        kv_cache_full = kv_cache_full_flat.unsqueeze(0)
+                        if kv_cache_pre_rope_dbg is not None:
+                            kv_cache_pre_rope_flat = kv_cache_pre_rope_dbg.reshape(
+                                kv_cache_pre_rope_dbg.size(0)
+                                * kv_cache_pre_rope_dbg.size(1),
+                                *kv_cache_pre_rope_dbg.shape[2:],
+                            )
+                            kv_cache_pre_rope_full_flat = cp_all_gather_full_varlen(
+                                kv_cache_pre_rope_flat, common.cp_ctx
+                            )
+                            _dbg_record(
+                                self.layer_id,
+                                "fp8_prefill_kv_cache_norm_pre_rope_full",
+                                kv_cache_pre_rope_full_flat,
+                            )
+                            _dbg_record(
+                                self.layer_id,
+                                "fp8_prefill_kv_cache_rope_full",
+                                kv_cache_full_flat,
+                            )
+                    else:
+                        kv_cache_full = None
             else:
                 with record_function_range("dsv4.fp8.attn.qkv.cp_gather"):
                     kv_full = cp_all_gather_full(
                         kv.squeeze(0), common.cp_ctx
                     ).unsqueeze(0)
+                    if kv_cache is not None:
+                        kv_cache_full = cp_all_gather_full(
+                            kv_cache.squeeze(0), common.cp_ctx
+                        ).unsqueeze(0)
+                        if kv_cache_pre_rope_dbg is not None:
+                            kv_cache_pre_rope_full = cp_all_gather_full(
+                                kv_cache_pre_rope_dbg.squeeze(0), common.cp_ctx
+                            )
+                            _dbg_record(
+                                self.layer_id,
+                                "fp8_prefill_kv_cache_norm_pre_rope_full",
+                                kv_cache_pre_rope_full,
+                            )
+                            _dbg_record(
+                                self.layer_id,
+                                "fp8_prefill_kv_cache_rope_full",
+                                kv_cache_full.squeeze(0),
+                            )
+                    else:
+                        kv_cache_full = None
         else:
             kv_full = kv
+            kv_cache_full = kv_cache
+            if kv_cache is not None and kv_cache_pre_rope_dbg is not None:
+                _dbg_record(
+                    self.layer_id,
+                    "fp8_prefill_kv_cache_norm_pre_rope_full",
+                    kv_cache_pre_rope_dbg.squeeze(0),
+                )
+                _dbg_record(
+                    self.layer_id,
+                    "fp8_prefill_kv_cache_rope_full",
+                    kv_cache_full.squeeze(0),
+                )
 
         return PrefillQKV(
             qr=qr.squeeze(0),
             q=q.squeeze(0),
             kv_full=kv_full.squeeze(0),
+            kv_cache_full=(
+                kv_cache_full.squeeze(0) if kv_cache_full is not None else None
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -4346,6 +4595,17 @@ class AttentionFP8(nn.Module):
                 print(f"[DSV4_SWA_WRITE_DBG] failed: {_e}", flush=True)
         with record_function_range("dsv4.fp8.attn.swa.quant_insert"):
             _ins.quantize_and_insert_k_cache(k_bf16, packed_3d, meta.slot_mapping)
+        if _record_tensor.should_record_layer(self.layer_id):
+            _record_tensor.record_if_level(
+                2,
+                f"L{self.layer_id:02d}_fp8_prefill_swa_write_slot_mapping",
+                meta.slot_mapping,
+            )
+            _record_tensor.record_if_level(
+                2,
+                f"L{self.layer_id:02d}_fp8_prefill_swa_written_cache_logical",
+                _select_model1_mla_logical_slots(packed_3d, meta.slot_mapping),
+            )
 
     def _attn_fp8_swa_via_kv_full(
         self,

@@ -33,8 +33,6 @@ Output layout:
     ``sgl_per_token_group_quant_fp8(column_major_scales=True,
     scale_tma_aligned=True, scale_ue8m0=True)``.
 
-Router weight is NOT folded in here — it's applied by the downstream
-``ep_gather`` (Phase 2 optimization 4) so we only output silu(gate)*up.
 """
 
 from __future__ import annotations
@@ -63,6 +61,7 @@ def _silu_mul_fp8_quant_packed_kernel(
     GROUP_SIZE: tl.constexpr,
     BLOCK_M: tl.constexpr,
     HAS_CLAMP: tl.constexpr,
+    BF16_ACTIVATION: tl.constexpr,
 ):
     N_2: tl.constexpr = N // 2
 
@@ -95,22 +94,34 @@ def _silu_mul_fp8_quant_packed_kernel(
             mul_ptrs = act_ptrs + N_2
             mul_in = tl.load(mul_ptrs, mask=row_mask[:, None], other=0.0)
 
-            act_f32 = act_in.to(tl.float32)
-            mul_f32 = mul_in.to(tl.float32)
+            if BF16_ACTIVATION:
+                # vLLM shared expert semantics: clamp and SiLU run from BF16
+                # tensors and the activation output is BF16 before multiply.
+                act_bf16 = act_in
+                mul_bf16 = mul_in
+                if HAS_CLAMP:
+                    act_bf16 = tl.minimum(act_bf16.to(tl.float32), clamp_limit).to(tl.bfloat16)
+                    mul_bf16 = tl.clamp(mul_bf16.to(tl.float32), -clamp_limit, clamp_limit).to(tl.bfloat16)
+                act_f32 = act_bf16.to(tl.float32)
+                silu_bf16 = (act_f32 / (1.0 + tl.exp(-act_f32))).to(tl.bfloat16)
+                y = (silu_bf16 * mul_bf16).to(tl.bfloat16).to(tl.float32)
+            else:
+                act_f32 = act_in.to(tl.float32)
+                mul_f32 = mul_in.to(tl.float32)
 
-            # V4 SwiGLU clamp convention:
-            #   gate (act): clamp(max=L)            ← upper-only
-            #   up   (mul): clamp(-L, L)            ← symmetric
-            if HAS_CLAMP:
-                act_f32 = tl.minimum(act_f32, clamp_limit)
-                mul_f32 = tl.clamp(mul_f32, -clamp_limit, clamp_limit)
+                # V4 SwiGLU clamp convention:
+                #   gate (act): clamp(max=L)            ← upper-only
+                #   up   (mul): clamp(-L, L)            ← symmetric
+                if HAS_CLAMP:
+                    act_f32 = tl.minimum(act_f32, clamp_limit)
+                    mul_f32 = tl.clamp(mul_f32, -clamp_limit, clamp_limit)
 
-            y = (act_f32 / (1.0 + tl.exp(-act_f32))) * mul_f32
-            # Round through bf16 to match the legacy unfused path's precision
-            # (legacy: hidden = (F.silu(gate) * up).to(bfloat16), then quant
-            # reads from bf16 not fp32). Without this the outputs differ at
-            # ~ulp level from legacy and confound smoke validation.
-            y = y.to(tl.bfloat16).to(tl.float32)
+                y = (act_f32 / (1.0 + tl.exp(-act_f32))) * mul_f32
+                # Round through bf16 to match the legacy unfused path's precision
+                # (legacy: hidden = (F.silu(gate) * up).to(bfloat16), then quant
+                # reads from bf16 not fp32). Without this the outputs differ at
+                # ~ulp level from legacy and confound smoke validation.
+                y = y.to(tl.bfloat16).to(tl.float32)
 
             # Per-row absmax → fp8 scale (UE8M0 exponent quantization)
             absmax = tl.max(tl.abs(y), axis=1)
@@ -156,6 +167,7 @@ def _silu_mul_fp8_quant_packed_split_kernel(
     GROUP_SIZE: tl.constexpr,
     BLOCK_M: tl.constexpr,
     HAS_CLAMP: tl.constexpr,
+    BF16_ACTIVATION: tl.constexpr,
 ):
     pid_pack = tl.program_id(0)
     pid_m = tl.program_id(1)
@@ -180,15 +192,28 @@ def _silu_mul_fp8_quant_packed_split_kernel(
             n_offset = group_id * GROUP_SIZE
             cols = n_offset + offs_n
             mask = row_mask[:, None] & (cols[None, :] < N_2)
-            gate = tl.load(gate_ptr + gate_base + cols[None, :], mask=mask, other=0.0).to(tl.float32)
-            up = tl.load(up_ptr + up_base + cols[None, :], mask=mask, other=0.0).to(tl.float32)
+            gate_in = tl.load(gate_ptr + gate_base + cols[None, :], mask=mask, other=0.0)
+            up_in = tl.load(up_ptr + up_base + cols[None, :], mask=mask, other=0.0)
 
-            if HAS_CLAMP:
-                gate = tl.minimum(gate, clamp_limit)
-                up = tl.clamp(up, -clamp_limit, clamp_limit)
+            if BF16_ACTIVATION:
+                gate_bf16 = gate_in
+                up_bf16 = up_in
+                if HAS_CLAMP:
+                    gate_bf16 = tl.minimum(gate_bf16.to(tl.float32), clamp_limit).to(tl.bfloat16)
+                    up_bf16 = tl.clamp(up_bf16.to(tl.float32), -clamp_limit, clamp_limit).to(tl.bfloat16)
+                gate_f32 = gate_bf16.to(tl.float32)
+                silu_bf16 = (gate_f32 / (1.0 + tl.exp(-gate_f32))).to(tl.bfloat16)
+                y = (silu_bf16 * up_bf16).to(tl.bfloat16).to(tl.float32)
+            else:
+                gate = gate_in.to(tl.float32)
+                up = up_in.to(tl.float32)
 
-            y = (gate / (1.0 + tl.exp(-gate))) * up
-            y = y.to(tl.bfloat16).to(tl.float32)
+                if HAS_CLAMP:
+                    gate = tl.minimum(gate, clamp_limit)
+                    up = tl.clamp(up, -clamp_limit, clamp_limit)
+
+                y = (gate / (1.0 + tl.exp(-gate))) * up
+                y = y.to(tl.bfloat16).to(tl.float32)
 
             absmax = tl.max(tl.abs(y), axis=1)
             scale_raw = tl.maximum(absmax / fp8_max, 1e-10)
@@ -215,6 +240,7 @@ def silu_mul_fp8_quant_packed(
     group_size: int = 128,
     output_q: Optional[torch.Tensor] = None,
     output_scale: Optional[torch.Tensor] = None,
+    bf16_activation: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Fuse SiLU + clamp + mul + per-token-group FP8 quant + UE8M0 packed scale.
 
@@ -293,6 +319,7 @@ def silu_mul_fp8_quant_packed(
         GROUP_SIZE=group_size,
         BLOCK_M=BLOCK_M,
         HAS_CLAMP=has_clamp,
+        BF16_ACTIVATION=bf16_activation,
         num_warps=num_warps,
         num_stages=num_stages,
     )
@@ -307,6 +334,7 @@ def silu_mul_fp8_quant_packed_from_parts(
     group_size: int = 128,
     output_q: Optional[torch.Tensor] = None,
     output_scale: Optional[torch.Tensor] = None,
+    bf16_activation: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Same fused activation+quant path as :func:`silu_mul_fp8_quant_packed`,
     but reads gate/up from two contiguous BF16 GEMM outputs.
@@ -370,6 +398,7 @@ def silu_mul_fp8_quant_packed_from_parts(
         GROUP_SIZE=group_size,
         BLOCK_M=BLOCK_M,
         HAS_CLAMP=has_clamp,
+        BF16_ACTIVATION=bf16_activation,
         num_warps=max(4, group_size // 32),
         num_stages=2,
     )

@@ -22,6 +22,7 @@ def precompute_freqs_cis(
     factor: float,
     beta_fast: int,
     beta_slow: int,
+    device: torch.device | str | None = None,
 ) -> torch.Tensor:
     """Returns complex cis tensor `[seqlen, dim/2]`.
     When `original_seq_len > 0`, applies YaRN frequency interpolation."""
@@ -41,10 +42,14 @@ def precompute_freqs_cis(
     def linear_ramp_factor(min_, max_, dim_):
         if min_ == max_:
             max_ = max_ + 0.001
-        linear_func = (torch.arange(dim_, dtype=torch.float32) - min_) / (max_ - min_)
+        linear_func = (
+            torch.arange(dim_, dtype=torch.float32, device=device) - min_
+        ) / (max_ - min_)
         return torch.clamp(linear_func, 0, 1)
 
-    freqs = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
+    freqs = 1.0 / (
+        base ** (torch.arange(0, dim, 2, dtype=torch.float32, device=device) / dim)
+    )
     if original_seq_len > 0:
         low, high = find_correction_range(
             beta_fast, beta_slow, dim, base, original_seq_len
@@ -52,9 +57,12 @@ def precompute_freqs_cis(
         smooth = 1 - linear_ramp_factor(low, high, dim // 2)
         freqs = freqs / factor * (1 - smooth) + freqs * smooth
 
-    t = torch.arange(seqlen)
+    t = torch.arange(seqlen, dtype=torch.float32, device=device)
     freqs = torch.outer(t, freqs)
-    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)
+    # vLLM DSV4 builds a fp32 cos/sin cache directly. Construct the complex
+    # view from the same fp32 cos/sin values instead of torch.polar, which can
+    # differ by one ULP and then persist as different bf16 RoPE cache bytes.
+    freqs_cis = torch.complex(freqs.cos(), freqs.sin())
     return freqs_cis
 
 
@@ -120,3 +128,40 @@ def apply_rotary_emb(
     x = torch.view_as_real(x * freqs_cis).flatten(-2)
     y.copy_(x)
     return y
+
+
+def apply_rotary_emb_gptj_native(
+    x: torch.Tensor, freqs_cis: torch.Tensor, inverse: bool = False
+) -> torch.Tensor:
+    """In-place GPT-J RoPE using the same real-valued formula as vLLM.
+
+    ``apply_rotary_emb`` implements the same rotation via complex multiply.
+    The two forms can differ by one bf16 ULP. DSv4 FP8 KV cache persists the
+    RoPE tail as bf16 bytes, so the precision alignment path uses this helper
+    where bit-for-bit vLLM comparison matters.
+    """
+    if x.numel() == 0 or freqs_cis.numel() == 0:
+        return x
+    half = x.size(-1) // 2
+    cos = freqs_cis.real
+    sin = freqs_cis.imag
+    if inverse:
+        sin = -sin
+
+    rope = x.float().unflatten(-1, (half, 2))
+    even = rope[..., 0]
+    odd = rope[..., 1]
+    if x.ndim == 3:
+        cos = cos.view(x.size(0), x.size(1), half)
+        sin = sin.view(x.size(0), x.size(1), half)
+    elif x.ndim == 4:
+        cos = cos.view(x.size(0), x.size(1), 1, half)
+        sin = sin.view(x.size(0), x.size(1), 1, half)
+    else:
+        raise ValueError(f"unsupported RoPE tensor shape: {tuple(x.shape)}")
+
+    rotated = torch.stack(
+        (even * cos - odd * sin, even * sin + odd * cos), dim=-1
+    ).flatten(-2)
+    x.copy_(rotated)
+    return x

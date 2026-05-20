@@ -24,6 +24,7 @@ from .grouped_fp4 import (               # noqa: F401  ep_size==1 + kernel
     GroupedFP4Strategy,
     _has_fp8_fp4_grouped_kernel,
 )
+from .flashinfer_trtllm_fp4 import FlashInferTrtllmFP4Strategy  # noqa: F401 explicit precision-alignment path
 from .deepep import DeepEPStrategy       # noqa: F401  ep_size>1 fallback
 from .local_loop import LocalLoopStrategy  # noqa: F401  universal fallback
 

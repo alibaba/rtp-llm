@@ -366,7 +366,7 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
         x_fp8, x_scale = sgl_per_token_group_quant_fp8(
             x_2d,
             group_size=_FP8_BLOCK,
-            eps=1e-4,
+            eps=1e-10,
             column_major_scales=True,
             scale_tma_aligned=True,
             scale_ue8m0=True,
@@ -433,7 +433,7 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
             sm_fp8, sm_scale = sgl_per_token_group_quant_fp8(
                 sm_bf16.contiguous(),
                 group_size=_FP8_BLOCK,
-                eps=1e-4,
+                eps=1e-10,
                 column_major_scales=True,
                 scale_tma_aligned=True,
                 scale_ue8m0=True,
@@ -523,7 +523,7 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
             x_fp8_n, x_scale_n = sgl_per_token_group_quant_fp8(
                 x_n,
                 group_size=_FP8_BLOCK,
-                eps=1e-4,
+                eps=1e-10,
                 column_major_scales=True,
                 scale_tma_aligned=True,
                 scale_ue8m0=True,
@@ -577,7 +577,7 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
                 sm_fp8, sm_scale = sgl_per_token_group_quant_fp8(
                     sm_bf16.contiguous(),
                     group_size=_FP8_BLOCK,
-                    eps=1e-4,
+                    eps=1e-10,
                     column_major_scales=True,
                     scale_tma_aligned=True,
                     scale_ue8m0=True,

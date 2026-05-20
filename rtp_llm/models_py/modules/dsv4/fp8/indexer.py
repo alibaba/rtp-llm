@@ -22,7 +22,7 @@ What this class does NOT do — by design:
 from __future__ import annotations
 
 import os
-from typing import Dict, NamedTuple, Optional
+from typing import Dict, NamedTuple, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -174,7 +174,12 @@ _persistent_topk_workspace_cache: Dict[torch.device, torch.Tensor] = {}
 def _persistent_topk_enabled() -> bool:
     if not _PERSISTENT_TOPK_OK:
         return False
-    return os.environ.get("DSV4_PERSISTENT_TOPK", "1") != "0"
+    return os.environ.get("DSV4_PERSISTENT_TOPK", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
 
 
 def _fp8_prefill_fast_topk_enabled() -> bool:
@@ -242,6 +247,76 @@ def _prefill_torch_topk_enabled() -> bool:
     return backend == "torch" or legacy in ("1", "true", "yes", "on")
 
 
+def _topk_canonicalize_enabled() -> bool:
+    # Historical precision scripts exported DSV4_INDEXER_TOPK_CANONICALIZE=1
+    # before this switch had runtime behavior. Keep that value backward
+    # compatible; require an explicit "force" opt-in for this diagnostic path.
+    return os.environ.get("DSV4_INDEXER_TOPK_CANONICALIZE", "0").strip().lower() in (
+        "force",
+        "force_on",
+        "canonical",
+    ) or os.environ.get("DSV4_INDEXER_TOPK_CANONICALIZE_FORCE", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _topk_stable_sort_enabled() -> bool:
+    return os.environ.get("DSV4_INDEXER_TOPK_STABLE_SORT", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _canonicalize_topk_indices(indices: torch.Tensor) -> torch.Tensor:
+    sentinel = torch.full_like(indices, torch.iinfo(indices.dtype).max)
+    sortable = torch.where(indices >= 0, indices, sentinel)
+    sorted_indices = torch.sort(sortable, dim=-1).values
+    return torch.where(
+        sorted_indices == sentinel,
+        torch.full_like(sorted_indices, -1),
+        sorted_indices,
+    )
+
+
+def _canonicalize_topk_by_score(
+    indices: torch.Tensor,
+    score: torch.Tensor,
+) -> torch.Tensor:
+    """Sort selected indices by score desc, with index asc as tie-breaker.
+
+    Optimized TopK kernels may return the same selected set in an unspecified
+    order. Sparse attention is mathematically permutation-invariant, but the
+    fused FP8 kernels are not bitwise invariant to input order. This opt-in
+    canonicalization keeps the optimized selector while matching the stable
+    ``torch.topk(..., sorted=True)`` consumption order.
+
+    ``indices`` must use the same column coordinate system as ``score``. Decode
+    uses request-local columns; prefill uses global flat-K columns and rebases
+    to request-local only after this function returns.
+    """
+
+    flat_idx = indices.reshape(-1, indices.shape[-1])
+    flat_score = score.reshape(flat_idx.shape[0], score.shape[-1])
+    idx_asc = _canonicalize_topk_indices(flat_idx)
+    idx_asc_valid = idx_asc >= 0
+    asc_gather_idx = torch.where(idx_asc_valid, idx_asc, torch.zeros_like(idx_asc))
+    asc_gather_idx_long = asc_gather_idx.to(torch.long).clamp_(
+        0, flat_score.shape[-1] - 1
+    )
+    asc_score = torch.gather(flat_score, 1, asc_gather_idx_long)
+    asc_score = torch.where(
+        idx_asc_valid, asc_score, torch.full_like(asc_score, float("-inf"))
+    )
+    order = torch.argsort(asc_score, dim=-1, descending=True, stable=True)
+    out = torch.gather(idx_asc, 1, order)
+    return out.view_as(indices)
+
+
 def _torch_top_k_per_row_prefill(
     logits: torch.Tensor,
     ks: torch.Tensor,
@@ -270,6 +345,45 @@ def _torch_top_k_per_row_prefill(
     rank = torch.arange(k_eff, device=logits.device, dtype=torch.int32).view(1, k_eff)
     idx = torch.where(rank < valid_counts.view(-1, 1), idx, torch.full_like(idx, -1))
     out[:, :k_eff].copy_(idx)
+    return out
+
+
+def _stable_sort_topk_indices(
+    score: torch.Tensor,
+    lengths: torch.Tensor,
+    topk: int,
+) -> torch.Tensor:
+    """Stable reference top-k for decode indexer rows.
+
+    This path is opt-in because it is slower than radix/topk kernels. It is
+    useful for deterministic precision gates: selected ids are sorted by score
+    descending, and equal-score ties keep the ascending index order established
+    by the pre-sort.
+    """
+
+    rows, cols = score.shape
+    k_eff = min(int(topk), cols)
+    out = torch.full((rows, int(topk)), -1, dtype=torch.int32, device=score.device)
+    if rows == 0 or k_eff <= 0:
+        return out
+
+    idx_asc = torch.arange(cols, device=score.device, dtype=torch.int64).view(1, cols)
+    idx_asc = idx_asc.expand(rows, cols)
+    valid = idx_asc < lengths.to(device=score.device, dtype=torch.int64).view(-1, 1)
+    masked = torch.where(valid, score, torch.full_like(score, float("-inf")))
+    order = torch.argsort(masked, dim=-1, descending=True, stable=True)
+    top_idx = order[:, :k_eff].to(torch.int32)
+    rank = torch.arange(k_eff, device=score.device, dtype=torch.int32).view(1, k_eff)
+    valid_counts = lengths.to(device=score.device, dtype=torch.int32).clamp_(
+        min=0,
+        max=cols,
+    )
+    top_idx = torch.where(
+        rank < valid_counts.view(-1, 1),
+        top_idx,
+        torch.full_like(top_idx, -1),
+    )
+    out[:, :k_eff].copy_(top_idx)
     return out
 
 
@@ -733,7 +847,16 @@ class IndexerFP8(PoolBackedModule):
             score_2d = score.view(bsz * q_len, T_max)
             lengths_i32 = compressed_len.view(bsz * q_len)
             out_topk_2d = out_topk_buffer.view(bsz * q_len, K)
-            if (
+            if K_eff > 0:
+                t_range = torch.arange(T_max, device=score.device).view(1, T_max)
+                score_2d = torch.where(
+                    t_range < lengths_i32.view(-1, 1),
+                    score_2d,
+                    torch.full_like(score_2d, float("-inf")),
+                )
+            if K_eff > 0 and _topk_stable_sort_enabled():
+                out_topk_2d.copy_(_stable_sort_topk_indices(score_2d, lengths_i32, K))
+            elif (
                 K_eff > 0
                 and K in (512, 1024, 2048)
                 and _persistent_topk_enabled()
@@ -749,13 +872,7 @@ class IndexerFP8(PoolBackedModule):
             else:
                 out_topk_buffer.fill_(-1)
                 if K_eff > 0:
-                    t_range = torch.arange(T_max, device=score.device).view(1, T_max)
-                    score_masked = torch.where(
-                        t_range < lengths_i32.view(-1, 1),
-                        score_2d,
-                        torch.full_like(score_2d, float("-inf")),
-                    )
-                    topk_idxs = score_masked.topk(K_eff, dim=-1)[1].to(torch.int32)
+                    topk_idxs = score_2d.topk(K_eff, dim=-1)[1].to(torch.int32)
                     out_topk_2d[:, :K_eff].copy_(topk_idxs)
                     k_arange = torch.arange(K, device=out_topk_buffer.device).view(
                         1, K
@@ -766,6 +883,8 @@ class IndexerFP8(PoolBackedModule):
                 self._debug_topk_head[:bsz, :head].copy_(
                     out_topk_2d.view(bsz, K)[:, :head]
                 )
+            if _topk_canonicalize_enabled():
+                out_topk_2d.copy_(_canonicalize_topk_by_score(out_topk_2d, score_2d))
             return out_topk_buffer
         finally:
             self._clear_nested_pool()
@@ -1210,6 +1329,13 @@ class IndexerFP8(PoolBackedModule):
                             out_buf[row_start:row_end],
                             K,
                             self.compress_ratio,
+                        )
+                    if _topk_canonicalize_enabled():
+                        out_buf[row_start:row_end].copy_(
+                            _canonicalize_topk_by_score(
+                                out_buf[row_start:row_end],
+                                logits,
+                            )
                         )
                 del logits
 
