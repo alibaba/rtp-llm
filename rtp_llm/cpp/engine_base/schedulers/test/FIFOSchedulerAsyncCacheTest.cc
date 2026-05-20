@@ -223,7 +223,7 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testEvaluateLoadingCache_ErrorDuringLoading_
 }
 
 // ============================================================================
-// 5. loading_cache_streams_ counted in evaluateRunningMemory (batch size limit)
+// 5. loading_cache_streams_ counted in evaluateRunningBatch (batch size limit)
 // ============================================================================
 
 TEST_F(FIFOSchedulerAsyncCacheTest, testLoadingCacheStreams_CountedInBatchLimit) {

@@ -8,6 +8,7 @@
 #include <chrono>
 #include <memory>
 #include <mutex>
+#include <unordered_set>
 
 using namespace std;
 namespace rtp_llm {
@@ -120,11 +121,14 @@ std::vector<std::shared_ptr<GenerateStream>> FIFOScheduler::batchEnqueue(const v
     return streams;
 }
 
-bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams,
+bool FIFOScheduler::evaluateRunningBatch(const list<GenerateStreamPtr>& streams,
                                           const GenerateStreamPtr&       new_stream) const {
     RTP_LLM_PROFILE_FUNCTION();
     if (pd_sep_config_.role_type == RoleType::DECODE) {
-        if (running_streams_.size() + streams.size() + 1 < max_generate_batch_size_) {
+        // Decode-only scheduling can top up an existing running decode batch.
+        // max_generate_batch_size_ is an inclusive cap; only requests above it
+        // should be rejected.
+        if (running_streams_.size() + streams.size() + 1 <= max_generate_batch_size_) {
             return true;
         }
     }
@@ -183,7 +187,8 @@ void FIFOScheduler::evaluateAndUpdateStreams(list<GenerateStreamPtr>& streams) {
 
 void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_streams) {
     RTP_LLM_PROFILE_FUNCTION();
-    list<GenerateStreamPtr> new_streams;
+    list<GenerateStreamPtr>             admitted_streams;
+    std::unordered_set<GenerateStream*> admitted_stream_ptrs;
 
     // Batch group scheduling support:
     // 1. Group completeness: force_batch streams with same batch_group_id are scheduled together
@@ -233,7 +238,7 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_stre
 
         // Batch isolation: force_batch streams and normal streams cannot mix in the same round.
         // The first stream that passes checks determines the batch type for this round.
-        if (!new_streams.empty()) {
+        if (!admitted_streams.empty()) {
             if (force_batch_group_id != -1) {
                 // Already in force_batch mode, only accept same group
                 if (!force_batch || stream->batchGroupId() != force_batch_group_id) {
@@ -250,17 +255,40 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_stre
         }
 
         // Check for errors and memory constraints
-        if (!stream->hasError() && !stream->hasEvent(StreamEvents::CanRun)
-            && evaluateRunningMemory(new_streams, stream)) {
-            stream->reportEvent(StreamEvents::CanRun);
-            new_streams.push_back(stream);
+        //
+        // Some PD decode streams already carry CanRun before entering FIFO: DecodeRpcServer uses
+        // CanRun to drive the pre-enqueue KV allocation path. CanRun is a permanent event, so it
+        // cannot be used as proof that FIFO has admitted this stream in the current scheduling
+        // round. Always run FIFO capacity checks and only advance streams admitted here.
+        if (!stream->hasError() && evaluateRunningBatch(admitted_streams, stream)) {
+            if (!stream->hasEvent(StreamEvents::CanRun)) {
+                stream->reportEvent(StreamEvents::CanRun);
+            }
+            admitted_streams.push_back(stream);
+            admitted_stream_ptrs.insert(stream.get());
 
             // Lock batch type based on first scheduled stream
-            if (new_streams.size() == 1 && force_batch && stream->batchGroupId() != -1) {
+            if (admitted_streams.size() == 1 && force_batch && stream->batchGroupId() != -1) {
                 force_batch_group_id = stream->batchGroupId();
             }
         }
         it++;
+    }
+
+    for (auto it = waiting_streams.begin(); it != waiting_streams.end();) {
+        auto& stream = *it;
+        if (!stream->hasError() && admitted_stream_ptrs.find(stream.get()) == admitted_stream_ptrs.end()) {
+            it++;
+            continue;
+        }
+        auto state     = stream->getStatus();
+        auto new_state = stream->moveToNext();
+        if (new_state != state) {
+            addStreamToNewState(stream, new_state);
+            it = waiting_streams.erase(it);
+        } else {
+            it++;
+        }
     }
 }
 
@@ -302,16 +330,11 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     // WAITING -> RUNNING: can run
     // WAITING -> LOADING_CACHE: load cache ok
     //
-    // Two-phase state transition for WAITING streams:
-    //   Phase 1 (evaluateWaitingStreams): Streams that pass memory check get CanRun event,
-    //       but are NOT removed from waiting_streams_ yet. This is because evaluateWaitingStreams
-    //       iterates over waiting_streams_ and removing elements during iteration would be unsafe.
-    //   Phase 2 (evaluateAndUpdateStreams): Actually moves streams from waiting_streams_ to
-    //       their new state (RUNNING or LOADING_CACHE) based on the events set in Phase 1.
-    // This separation ensures safe iteration while deferring structural modifications.
+    // WAITING streams are advanced only after FIFO admits them in this scheduling round.
+    // This matters for PD decode: DecodeRpcServer may pre-set CanRun before enqueue to
+    // allocate KV blocks, so a permanent CanRun bit alone must not bypass capacity checks.
     size_t prev_waiting_size = waiting_streams_.size();
     evaluateWaitingStreams(waiting_streams_);
-    evaluateAndUpdateStreams(waiting_streams_);
     running_streams_.insert(running_streams_.end(), new_streams_.begin(), new_streams_.end());
     new_streams_.clear();
 
