@@ -35,6 +35,7 @@ _DSV4_FP8_TESTS = [
     "test_indexer_fp8_score",
     "test_indexer_q_fp8_quant",
     "test_swa_combine_topk",
+    "test_swa_dequant_large_stride",
     "test_swa_fp8_kv_roundtrip",
     "test_swa_prefill_gather_lens",
     "test_swa_prefill_varlen",
