@@ -1643,20 +1643,19 @@ class FlexLbPdSeperationCaseRunner(_PdRunnerMixin, CaseRunner):
         )
         after_total = sum(self._scan_prefill_fake_query_log(prefill_mgr).values())
         delta = after_total - before_total
-        max_allowed_fake = max(0, request_count // 2 - 1)
-        if delta > max_allowed_fake:
+        # Concurrent submit (multiprocessing.fork) lands all requests inside one
+        # batch window — the batcher should flush them as full dpSize batches
+        # with zero fake-pad. Any fake_query under high concurrency is the
+        # exact regression this check exists for: do not soften the threshold.
+        if delta != 0:
             return (
                 False,
-                "high-concurrency emitted too many fake_query slots: "
-                f"delta={delta}, request_count={request_count}, "
-                f"max_allowed={max_allowed_fake}",
+                "high-concurrency emitted fake_query slots: "
+                f"delta={delta}, request_count={request_count}, expected=0",
             )
         logging.info(
-            "flexlb high-concurrency full-batch verified: requests=%d "
-            "fake_delta=%d max_allowed=%d",
+            "flexlb high-concurrency full-batch verified: requests=%d fake_delta=0",
             request_count,
-            delta,
-            max_allowed_fake,
         )
         return True, "ok"
 
