@@ -508,23 +508,6 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         self.parallelism_config = parallelism_config
         self.weights = weights
         self.quant_config = quant_config
-        # in_proj_qkvz is bf16 / fp8
-        self.in_proj_qkvz = LinearFactory.create_linear_from_weights(
-            weights,
-            W.linear_attn_qkvz_w,
-            W.linear_attn_qkvz_s,
-            None,
-            quant_config,
-            hw_kernel_config=hw_kernel_config,
-        )
-        self.in_proj_ba = LinearFactory.create_linear_from_weights(
-            weights,
-            W.linear_attn_ba_w,
-            None,
-            None,
-            quant_config,
-            hw_kernel_config=hw_kernel_config,
-        )
         self.head_k_dim = linear_attn_config.linear_key_head_dim
         self.head_v_dim = linear_attn_config.linear_value_head_dim
         attn_tp_size = parallelism_config.get_attn_tp_size()
@@ -533,6 +516,43 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             linear_attn_config.linear_num_value_heads // attn_tp_size
         )
         self.num_key_value_heads = self.local_num_v_heads // self.local_num_k_heads
+
+        # qkvz+ba fusion (BF16 only): combine two in-projection GEMMs into one.
+        # Saves a small kernel launch on each forward; on decode (M=1) HBM-access
+        # merging shaves a few us per layer (trace measurement: -0.094 ms/step
+        # on Qwen3.5-9B TP=2 in the original session).
+        # FP8/quantized: qkvz has scales but ba doesn't, dtypes mismatch -> fall
+        # back to the original 2-GEMM path.
+        self._qkvz_ba_fused = weights.get(W.linear_attn_qkvz_s) is None
+        if self._qkvz_ba_fused:
+            qkvz_w = weights[W.linear_attn_qkvz_w]
+            ba_w = weights[W.linear_attn_ba_w]
+            self._qkvz_size = qkvz_w.shape[1]
+            self._ba_size = ba_w.shape[1]
+            fused_w = torch.cat([qkvz_w, ba_w], dim=1).contiguous()
+            self.in_proj_fused = LinearFactory.create_linear(
+                fused_w, None, None, quant_config, hw_kernel_config=hw_kernel_config
+            )
+            self.in_proj_qkvz = None
+            self.in_proj_ba = None
+        else:
+            self.in_proj_qkvz = LinearFactory.create_linear_from_weights(
+                weights,
+                W.linear_attn_qkvz_w,
+                W.linear_attn_qkvz_s,
+                None,
+                quant_config,
+                hw_kernel_config=hw_kernel_config,
+            )
+            self.in_proj_ba = LinearFactory.create_linear_from_weights(
+                weights,
+                W.linear_attn_ba_w,
+                None,
+                None,
+                quant_config,
+                hw_kernel_config=hw_kernel_config,
+            )
+            self.in_proj_fused = None
 
         self.prefill_gdn = Qwen3NextGatedDeltaNetPrefill(
             linear_attn_config, parallelism_config, weights
@@ -739,8 +759,14 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             or attn_meta.get_prefill_conv1d_meta() is not None
             or attn_meta.is_cp_linear_attn
         ), "prefill_conv1d_meta is required for prefill"
-        projected_states_qkvz = self.in_proj_qkvz(hidden_states)
-        projected_states_ba = self.in_proj_ba(hidden_states)
+        if self._qkvz_ba_fused:
+            # Single fused GEMM: out = [qkvz | ba] split via slice.
+            fused = self.in_proj_fused(hidden_states)
+            projected_states_qkvz = fused[..., : self._qkvz_size]
+            projected_states_ba = fused[..., self._qkvz_size :]
+        else:
+            projected_states_qkvz = self.in_proj_qkvz(hidden_states)
+            projected_states_ba = self.in_proj_ba(hidden_states)
         mixed_qkv, z, b, a = self.fix_query_key_value_ordering(
             projected_states_qkvz, projected_states_ba
         )
