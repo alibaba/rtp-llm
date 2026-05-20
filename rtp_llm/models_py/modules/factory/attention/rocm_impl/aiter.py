@@ -532,25 +532,23 @@ class AiterPrefillAttnOp:
             v_descale = self._fp8_descale
 
         import sys as _sys
+        _k_blocks = k_cache.shape[0]
+        _needed_blocks_max = int(seqlen_k.max().item() + self.tokens_per_block - 1) // self.tokens_per_block
+        # Workaround: aiter CK kernel may speculatively read block_table[row, needed_blocks]
+        # (one past last valid column). Pad block_table with 1 extra column of zeros to prevent OOB.
+        if block_table.shape[1] <= _needed_blocks_max:
+            _pad_cols = _needed_blocks_max - block_table.shape[1] + 1
+            block_table = torch.nn.functional.pad(block_table, (0, _pad_cols), value=0)
+            print(f"[PAGED_PREFILL] PADDED block_table by {_pad_cols} cols -> {block_table.shape}", file=_sys.stderr, flush=True)
+
         _bt_max = block_table.max().item()
         _bt_min = block_table.min().item()
-        _k_blocks = k_cache.shape[0]
-        _needed_blocks = [(s.item() + self.tokens_per_block - 1) // self.tokens_per_block for s in seqlen_k]
-        _bt_per_row = [block_table[i, :_needed_blocks[i]].max().item() if _needed_blocks[i] > 0 else -1 for i in range(block_table.shape[0])]
         print(f"[PAGED_PREFILL] before mha_batch_prefill_func: q={q_tensor.shape} dtype={q_tensor.dtype}, "
               f"k_cache={k_cache.shape} dtype={k_cache.dtype}, v_cache={v_cache.shape}, "
               f"cu_seqlens_q={cu_seqlens_q.shape}, max_q={max_seqlen_q}, max_k={max_seqlen_k}, "
               f"block_table={block_table.shape}, seqlen_k={seqlen_k}, "
               f"bt_max={_bt_max}, bt_min={_bt_min}, k_blocks={_k_blocks}, "
-              f"needed_blocks={_needed_blocks}, bt_max_per_row={_bt_per_row}", file=_sys.stderr, flush=True)
-        if _bt_max >= _k_blocks:
-            print(f"[PAGED_PREFILL] *** OOB DETECTED *** block_table max {_bt_max} >= k_cache blocks {_k_blocks}!", file=_sys.stderr, flush=True)
-            # Print full block_table for diagnosis
-            for _row_i in range(block_table.shape[0]):
-                _row = block_table[_row_i].cpu().tolist()
-                _oob_indices = [j for j, v in enumerate(_row) if v >= _k_blocks]
-                if _oob_indices:
-                    print(f"[PAGED_PREFILL] row {_row_i}: OOB at cols {_oob_indices[:20]}, vals={[_row[j] for j in _oob_indices[:20]]}", file=_sys.stderr, flush=True)
+              f"needed_blocks_max={_needed_blocks_max}", file=_sys.stderr, flush=True)
         torch.cuda.synchronize()
         print(f"[PAGED_PREFILL] cuda synced before mha_batch_prefill_func", file=_sys.stderr, flush=True)
         res = aiter.mha_batch_prefill_func(
