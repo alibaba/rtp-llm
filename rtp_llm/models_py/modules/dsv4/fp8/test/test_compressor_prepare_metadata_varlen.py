@@ -36,6 +36,9 @@ from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
     _build_prefill_positions,
     build_prepare_metadata_args,
 )
+from rtp_llm.models_py.modules.dsv4.fp8._compressor_vllm_triton import (
+    run_save_partial_states,
+)
 
 
 class _StubCompressor:
@@ -73,8 +76,8 @@ def _make_stub(
     blocks_per_req: int = 4,
 ) -> _StubCompressor:
     """``state`` and ``kv`` block tables: row b → blocks
-    ``[b*blocks_per_req+1 .. (b+1)*blocks_per_req]`` (block_id 0 is the
-    unallocated sentinel, so we start at 1)."""
+    ``[b*blocks_per_req+1 .. (b+1)*blocks_per_req]``. We start at 1 so
+    each request has distinct non-overlapping physical blocks."""
     state_bt = torch.arange(
         1, n_reqs * blocks_per_req + 1, dtype=torch.int64, device=device
     ).view(n_reqs, blocks_per_req)
@@ -184,14 +187,14 @@ class CompressorPrepareMetadataVarlenTest(unittest.TestCase):
         return positions, req_id
 
     def test_b2_state_slots_pick_correct_request_row(self) -> None:
-        """For each token: state_slot = bt[b_idx[t], (pos//eb) % max_blocks]
+        """For each token: state_slot = bt[b_idx[t], pos//eb]
         * eb + pos % eb. With distinct-row block tables and req-local pos
         confined to that row's block range, the slot ids must split
         cleanly per request."""
         stub = _make_stub(self.device, n_reqs=2, blocks_per_req=2)
         # Req0: sp=0,S=8 → positions [0..7] → block_in_seq=0, in_block=pos
         # Req1: sp=300,S=10 → positions [300..309] → block_in_seq=1
-        #   (since eb=256, 300//256=1; max_blocks=2 → mod 2 = 1)
+        #   (since eb=256, 300//256=1; within the table's two blocks)
         positions, req_id = self._build_batched_positions([0, 300], [8, 10])
         meta = stub.prepare_metadata(positions, req_id)
         # Req0 first token: bt[0, 0]=1, in_block=0 → slot=1*256+0=256
@@ -239,14 +242,14 @@ class CompressorPrepareMetadataVarlenTest(unittest.TestCase):
         self.assertTrue(torch.equal(meta.token_to_req, req_id.to(torch.int32)))
 
     def test_b2_unallocated_block_yields_minus_one_state_slot(self) -> None:
-        """When bt[b, k] == 0 (sentinel), state_slot must be -1 — the
+        """When bt[b, k] == -1 (sentinel), state_slot must be -1 — the
         per-request mask must respect each request's own block table."""
-        # Patch req1's first block to 0 (unallocated); req0 keeps block_id=1.
+        # Patch req1's first block to -1 (unallocated); req0 keeps block_id=1.
         stub = _make_stub(self.device, n_reqs=2, blocks_per_req=2)
         stub._state_block_table = stub._state_block_table.clone()
-        stub._state_block_table[1, 0] = 0  # req1's first block unallocated
+        stub._state_block_table[1, 0] = -1  # req1's first block unallocated
         # Req0: sp=0,S=4 → all 4 tokens land in req0's first block (id=1)
-        # Req1: sp=0,S=4 → all 4 tokens want req1's first block (now id=0 → -1)
+        # Req1: sp=0,S=4 → all 4 tokens want req1's first block (now id=-1 → -1)
         positions, req_id = self._build_batched_positions([0, 0], [4, 4])
         meta = stub.prepare_metadata(positions, req_id)
         # Req0 tokens (t=0..3): valid slots
@@ -255,6 +258,100 @@ class CompressorPrepareMetadataVarlenTest(unittest.TestCase):
         # Req1 tokens (t=4..7): masked to -1
         for t in range(4, 8):
             self.assertEqual(int(meta.state_slots[t].item()), -1)
+
+    def test_zero_block_id_is_valid_state_slot(self) -> None:
+        stub = _make_stub(self.device, n_reqs=1, blocks_per_req=2)
+        stub._state_block_table = stub._state_block_table.clone()
+        stub._state_block_table[0, 1] = 0
+        positions = torch.tensor([256, 257], dtype=torch.long, device=self.device)
+        req_id = torch.zeros_like(positions)
+        meta = stub.prepare_metadata(positions, req_id)
+        self.assertEqual(meta.state_slots.tolist(), [0, 1])
+
+    def test_state_sparse_valid_blocks_are_all_written(self) -> None:
+        """HCA_STATE / CSA_STATE / INDEXER_STATE share this state mapping.
+
+        The refactored cache may expose periodic valid logical blocks rather
+        than a tail-only table. Every positive state block id must produce a
+        writable state slot; gaps must stay ``-1``.
+        """
+        stub = _make_stub(self.device, n_reqs=1, blocks_per_req=5)
+        stub._state_block_table = torch.tensor(
+            [[11, -1, 13, -1, 15]], dtype=torch.int64, device=self.device
+        )
+        positions = torch.tensor(
+            [
+                0,
+                255,
+                256,
+                511,
+                512,
+                767,
+                768,
+                1023,
+                1024,
+                1279,
+                1280,
+            ],
+            dtype=torch.int64,
+            device=self.device,
+        )
+        req_id = torch.zeros_like(positions)
+        meta = stub.prepare_metadata(positions, req_id)
+
+        expected = torch.tensor(
+            [
+                11 * 256 + 0,
+                11 * 256 + 255,
+                -1,
+                -1,
+                13 * 256 + 0,
+                13 * 256 + 255,
+                -1,
+                -1,
+                15 * 256 + 0,
+                15 * 256 + 255,
+                -1,
+            ],
+            dtype=torch.int64,
+            device=self.device,
+        )
+        self.assertTrue(torch.equal(meta.state_slots, expected))
+
+        head_size = 8
+        kv = torch.arange(
+            positions.numel() * head_size,
+            dtype=torch.float32,
+            device=self.device,
+        ).view(positions.numel(), head_size)
+        score = torch.zeros_like(kv)
+        ape = torch.zeros((self.ratio, head_size), dtype=torch.float32, device=self.device)
+        sentinel = -123.0
+        state_cache = torch.full(
+            (16, 256, 2 * head_size),
+            sentinel,
+            dtype=torch.float32,
+            device=self.device,
+        )
+        run_save_partial_states(
+            kv,
+            score,
+            ape,
+            positions,
+            state_cache,
+            meta.state_slots,
+            compress_ratio=self.ratio,
+        )
+        torch.cuda.synchronize()
+
+        self.assertTrue(torch.equal(state_cache[11, 0, :head_size], kv[0]))
+        self.assertTrue(torch.equal(state_cache[11, 255, :head_size], kv[1]))
+        self.assertTrue(torch.equal(state_cache[13, 0, :head_size], kv[4]))
+        self.assertTrue(torch.equal(state_cache[13, 255, :head_size], kv[5]))
+        self.assertTrue(torch.equal(state_cache[15, 0, :head_size], kv[8]))
+        self.assertTrue(torch.equal(state_cache[15, 255, :head_size], kv[9]))
+        self.assertTrue(torch.all(state_cache[12] == sentinel))
+        self.assertTrue(torch.all(state_cache[14] == sentinel))
 
 
 if __name__ == "__main__":

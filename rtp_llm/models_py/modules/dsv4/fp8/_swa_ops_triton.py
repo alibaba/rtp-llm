@@ -126,7 +126,7 @@ def compute_prefill_gather_lens(
 
 
 # ---------------------------------------------------------------------------
-# 2) Per-token SWA paged-tail slot_mapping (write side)
+# 2) Per-token SWA paged slot_mapping (write side)
 # ---------------------------------------------------------------------------
 
 
@@ -153,14 +153,13 @@ def _compute_swa_slot_mapping_kernel(
         block_in_seq  = global_pos // block_size
         in_block      = global_pos % block_size
         block_id      = block_table[b, block_in_seq]
-        slot          = -1                       if block_id <= 0
+        slot          = -1                       if block_id < 0
                         block_id * eb + in_block otherwise
 
-    SWA paged-tail semantics: ``block_table`` has the last ``2``
-    entries valid, earlier entries are ``-1`` (segment evicted from
-    the SWA pool). Tokens whose segment is evicted get ``slot = -1``
-    so the FP8 insert kernel skips them — matches the sliding-window
-    contract that only the last ``2*eb`` tokens persist.
+    SWA paged-write semantics: ``block_table`` may be sparse. Any
+    non-negative physical block id is writable, and absent / unallocated
+    entries (``block_id < 0``) produce ``slot = -1`` so the FP8 insert
+    kernel skips them.
     """
     batch_idx = tl.program_id(0)
     chunk_idx = tl.program_id(1)
@@ -188,7 +187,7 @@ def _compute_swa_slot_mapping_kernel(
     bt_row_ptr = block_table_ptr + batch_idx * max_blocks_per_seq
     block_id = tl.load(bt_row_ptr + safe_block_in_seq, mask=valid_token, other=-1)
 
-    valid = (block_id > 0) & in_capacity & valid_token
+    valid = (block_id >= 0) & in_capacity & valid_token
     slot = tl.where(
         valid,
         block_id.to(tl.int64) * block_size + in_block.to(tl.int64),
@@ -206,13 +205,14 @@ def compute_swa_slot_mapping(
     block_size: int,  # eb
     num_tokens: int,  # total tokens across all reqs (= query_start_loc[-1])
 ) -> torch.Tensor:
-    """Build ``[num_tokens]`` int64 slot_mapping for SWA paged-tail FP8 write.
+    """Build ``[num_tokens]`` int64 slot_mapping for SWA paged FP8 write.
 
     Mirrors the slot formula in ``DSV4_CACHE_LAYOUT.md §6`` / what
     ``_dequantize_and_gather_k_kernel`` expects: ``block_table[b, pos //
     block_size] * block_size + (pos % block_size)``. Tokens whose segment
-    has ``block_id <= 0`` (evicted by SWA tail-only allocation) emit
-    ``-1`` so the FP8 insert kernel skips them.
+    has ``block_id < 0`` emit ``-1`` so the FP8 insert kernel skips them.
+    This intentionally honors every non-negative block id in the table; it is
+    not limited to the final SWA tail blocks.
     """
     assert (
         block_table.dtype == torch.int32
@@ -221,7 +221,6 @@ def compute_swa_slot_mapping(
         query_start_loc.dtype == torch.int32 and seq_lens.dtype == torch.int32
     ), "query_start_loc and seq_lens must be int32"
     assert block_size >= 1
-
     device = block_table.device
     slot_mapping = torch.empty(num_tokens, dtype=torch.long, device=device)
     if num_tokens == 0:

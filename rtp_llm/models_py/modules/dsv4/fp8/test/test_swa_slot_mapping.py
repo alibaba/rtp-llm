@@ -1,13 +1,13 @@
 """UT: ``compute_swa_slot_mapping`` Triton kernel.
 
-Validates the per-token paged-tail slot formula used by FP8 SWA
+Validates the per-token paged slot formula used by FP8 SWA
 prefill write (``_swa_prefill_ops_triton.compute_swa_slot_mapping``):
 
     global_pos    = sp[b] + i
     block_in_seq  = global_pos // block_size
     in_block      = global_pos % block_size
-    block_id      = block_table[b, block_in_seq]   # paged tail; -1 = evicted
-    slot          = -1                       if block_id <= 0
+    block_id      = block_table[b, block_in_seq]   # sparse table; <0 = skip
+    slot          = -1                       if block_id < 0
                     block_id * eb + in_block otherwise
 
 Compared against a Python reference (loop-based torch). Coverage:
@@ -15,6 +15,7 @@ Compared against a Python reference (loop-based torch). Coverage:
   * cold prefill spanning multiple blocks
   * continuation prefill (sp>0) — paged-tail block_table with leading -1s
   * SWA-eviction case (seqlen large, only last 2 segments allocated)
+  * refactored cache layout with sparse positive block ids across the table
   * multi-request batch (B=2) with different sp / seqlen
   * empty input (num_tokens=0)
 
@@ -59,7 +60,7 @@ def _ref_compute_swa_slot_mapping(
                 block_id = bt_cpu[b][block_in_seq]
             else:
                 block_id = -1
-            if block_id <= 0:
+            if block_id < 0:
                 slot = -1
             else:
                 slot = block_id * block_size + in_block
@@ -133,7 +134,7 @@ class SwaSlotMappingTest(unittest.TestCase):
     # Tests
     # ------------------------------------------------------------------
     def test_cold_prefill_single_block(self):
-        """sp=0, all tokens fit in block 0."""
+        """sp=0, all tokens fit in logical block 0."""
         self._check(
             block_table=[[5]],  # one valid block, id=5
             query_lens=[100],
@@ -173,6 +174,20 @@ class SwaSlotMappingTest(unittest.TestCase):
             block_size=256,
         )
 
+    def test_sparse_valid_blocks_are_all_written(self):
+        """Refactored cache can keep valid block ids at periodic positions.
+
+        Prefill write must honor every positive entry, not just the final
+        tail/reuse block. Tokens in logical blocks 0, 2, and 4 write to their
+        physical slots; tokens in logical blocks 1 and 3 are skipped.
+        """
+        self._check(
+            block_table=[[11, -1, 13, -1, 15]],
+            query_lens=[5 * 256],
+            sp_values=[0],
+            block_size=256,
+        )
+
     def test_continuation_at_segment_boundary(self):
         """sp lands exactly on a block boundary — first new token goes
         to in_block=0 of a fresh segment."""
@@ -202,7 +217,7 @@ class SwaSlotMappingTest(unittest.TestCase):
 
     def test_empty_input(self):
         """num_tokens=0 must return an empty int64 tensor without launch."""
-        bt = torch.zeros((1, 4), dtype=torch.int32, device=self.device)
+        bt = torch.full((1, 4), -1, dtype=torch.int32, device=self.device)
         qsl = torch.zeros(2, dtype=torch.int32, device=self.device)  # [0, 0]
         seq_lens = torch.zeros(1, dtype=torch.int32, device=self.device)
         out = compute_swa_slot_mapping(
@@ -215,16 +230,21 @@ class SwaSlotMappingTest(unittest.TestCase):
         self.assertEqual(out.shape, (0,))
         self.assertEqual(out.dtype, torch.long)
 
-    def test_block_id_zero_is_invalid(self):
-        """``block_id <= 0`` should produce slot=-1 (zero is sentinel for
-        unallocated, matching the BF16-path's `(block_id > 0)` guard)."""
-        # block_table entry 0 is an invalid block id (treated like -1).
-        self._check(
-            block_table=[[0, 5]],
-            query_lens=[200],
-            sp_values=[0],
-            block_size=128,
+    def test_block_id_zero_allowed(self):
+        """Warmup and valid physical block 0 must not be rejected."""
+        bt, qsl, seq_lens, num_tokens = self._make_inputs(
+            [[0, 5]], query_lens=[200], sp_values=[0]
         )
+        got = compute_swa_slot_mapping(
+            block_table=bt,
+            query_start_loc=qsl,
+            seq_lens=seq_lens,
+            block_size=128,
+            num_tokens=num_tokens,
+        )
+        ref = _ref_compute_swa_slot_mapping(bt, qsl, seq_lens, 128, num_tokens)
+        self.assertTrue(torch.equal(got, ref))
+        self.assertEqual(got[0].item(), 0)
 
 
 if __name__ == "__main__":
