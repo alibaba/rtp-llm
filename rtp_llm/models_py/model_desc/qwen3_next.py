@@ -29,6 +29,7 @@ from rtp_llm.models_py.triton_kernels.causal_conv1d import (
     prepare_causal_conv1d_metadata,
 )
 from rtp_llm.models_py.triton_kernels.common.layernorm_gated import RmsNormGated
+from rtp_llm.models_py.triton_kernels.common.scatter_qkv import scatter_qkv
 from rtp_llm.models_py.triton_kernels.fla.block import (
     load_initial_state_from_block_map,
     store_ssm_state_to_block_map,
@@ -236,18 +237,34 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                 initial_states,
                 seq_size_per_block,
             )
-        query, key, value = torch.split(
-            mixed_qkv,
-            [
-                self.local_num_k_heads * self.head_k_dim,
-                self.local_num_k_heads * self.head_k_dim,
-                self.local_num_v_heads * self.head_v_dim,
-            ],
-            dim=-1,
-        )
-        query = query.view(1, query.shape[0], self.local_num_k_heads, self.head_k_dim)
-        key = key.view(1, key.shape[0], self.local_num_k_heads, self.head_k_dim)
-        value = value.view(1, value.shape[0], self.local_num_v_heads, self.head_v_dim)
+        # M >= 2048: scatter_qkv (Triton, SGLang port) avoids the .view() ->
+        # .contiguous() copies that torch.split + view triggers. Below 2048,
+        # kernel launch overhead beats the savings (microbench measured).
+        if mixed_qkv.shape[0] >= 2048 and self.head_k_dim == self.head_v_dim:
+            query, key, value = scatter_qkv(
+                mixed_qkv,
+                self.local_num_k_heads,
+                self.local_num_v_heads,
+                self.head_k_dim,
+                self.head_v_dim,
+            )
+        else:
+            query, key, value = torch.split(
+                mixed_qkv,
+                [
+                    self.local_num_k_heads * self.head_k_dim,
+                    self.local_num_k_heads * self.head_k_dim,
+                    self.local_num_v_heads * self.head_v_dim,
+                ],
+                dim=-1,
+            )
+            query = query.view(
+                1, query.shape[0], self.local_num_k_heads, self.head_k_dim
+            )
+            key = key.view(1, key.shape[0], self.local_num_k_heads, self.head_k_dim)
+            value = value.view(
+                1, value.shape[0], self.local_num_v_heads, self.head_v_dim
+            )
         attn_out, h, final_state = chunk_gated_delta_rule(
             query,
             key,
@@ -662,18 +679,27 @@ class Qwen3NextGatedDeltaNet(nn.Module):
                 seq_size_per_block,
             )
 
-        query, key, value = torch.split(
-            full_mixed_qkv,
-            [
-                gdn.local_num_k_heads * gdn.head_k_dim,
-                gdn.local_num_k_heads * gdn.head_k_dim,
-                gdn.local_num_v_heads * gdn.head_v_dim,
-            ],
-            dim=-1,
-        )
-        query = query.view(1, -1, gdn.local_num_k_heads, gdn.head_k_dim)
-        key = key.view(1, -1, gdn.local_num_k_heads, gdn.head_k_dim)
-        value = value.view(1, -1, gdn.local_num_v_heads, gdn.head_v_dim)
+        if full_mixed_qkv.shape[0] >= 2048 and gdn.head_k_dim == gdn.head_v_dim:
+            query, key, value = scatter_qkv(
+                full_mixed_qkv,
+                gdn.local_num_k_heads,
+                gdn.local_num_v_heads,
+                gdn.head_k_dim,
+                gdn.head_v_dim,
+            )
+        else:
+            query, key, value = torch.split(
+                full_mixed_qkv,
+                [
+                    gdn.local_num_k_heads * gdn.head_k_dim,
+                    gdn.local_num_k_heads * gdn.head_k_dim,
+                    gdn.local_num_v_heads * gdn.head_v_dim,
+                ],
+                dim=-1,
+            )
+            query = query.view(1, -1, gdn.local_num_k_heads, gdn.head_k_dim)
+            key = key.view(1, -1, gdn.local_num_k_heads, gdn.head_k_dim)
+            value = value.view(1, -1, gdn.local_num_v_heads, gdn.head_v_dim)
 
         attn_out, h, final_state = chunk_gated_delta_rule(
             query,
