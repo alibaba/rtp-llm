@@ -51,7 +51,7 @@ public:
 
 private:
     int64_t lastScheduleTime() override;
-    bool evaluateRunningMemory(const std::list<GenerateStreamPtr>& streams, const GenerateStreamPtr& new_stream) const;
+    bool evaluateRunningBatch(const std::list<GenerateStreamPtr>& streams, const GenerateStreamPtr& new_stream) const;
     void accountBatchMetrics(const GenerateStreamPtr& new_stream);
     bool waitPredicate();
     void addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state);
