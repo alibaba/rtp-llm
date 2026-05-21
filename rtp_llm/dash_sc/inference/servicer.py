@@ -21,6 +21,7 @@ from typing import Any, AsyncIterator, Callable, Iterator, Optional
 import torch
 
 from rtp_llm.dash_sc.codec import (
+    FINISH_REASON_LENGTH,
     OtherParams,
     SamplingParams,
     _token_ids_list_from_generate_output,
@@ -316,25 +317,37 @@ def _clone_generate_config(generate_config: Any) -> Any:
         return generate_config.copy(deep=True)
 
 
-def _apply_request_overrides(generate_config: Any, other: OtherParams) -> None:
+def _apply_request_overrides(
+    generate_config: Any,
+    sampling: SamplingParams,
+    other: OtherParams,
+    runtime: _ThinkRuntime,
+) -> None:
     """Apply dash-sc request-level controls after env defaults.
 
     ``GenerateConfig.add_thinking_params`` seeds the config from process-level
     environment. DashScope-serving still sends per-request thinking, timeout,
     and priority controls; those explicit controls must win before enqueue.
     """
-    if other.max_new_think_tokens is not None:
-        max_think = int(other.max_new_think_tokens)
+    request_max_think = other.max_new_think_tokens
+    if request_max_think is None:
+        request_max_think = sampling.max_new_think_tokens
+    if request_max_think is not None:
+        max_think = int(request_max_think)
         generate_config.max_thinking_tokens = _INT32_MAX if max_think < 0 else max_think
-    if (
-        other.enable_thinking is False
-        or other.max_new_think_tokens == 0
-        or getattr(generate_config, "max_thinking_tokens", None) == 0
-    ):
+    if other.enable_thinking is False or other.max_new_think_tokens == 0:
         generate_config.in_think_mode = False
         generate_config.max_thinking_tokens = 0
         if hasattr(generate_config, "thinking"):
             generate_config.thinking = False
+    elif request_max_think is not None and (
+        getattr(generate_config, "end_think_token_ids", None) or runtime.eos_tokens
+    ):
+        generate_config.in_think_mode = True
+        if not getattr(generate_config, "end_think_token_ids", None):
+            generate_config.end_think_token_ids = list(runtime.eos_tokens)
+        if hasattr(generate_config, "thinking"):
+            generate_config.thinking = True
     if other.timeout_ms is not None:
         generate_config.timeout_ms = int(other.timeout_ms)
         generate_config.ttft_timeout_ms = int(other.timeout_ms)
@@ -427,12 +440,11 @@ async def iter_real_model_stream_infer(
         begin_think_tokens = list(runtime.bos_tokens or tuple(echo_prefix_ids or ()))
         if begin_think_tokens and hasattr(generate_config, "begin_think_token_ids"):
             generate_config.begin_think_token_ids = begin_think_tokens
-        if (
-            runtime.eos_tokens
-            and not getattr(generate_config, "end_think_token_ids", None)
+        if runtime.eos_tokens and not getattr(
+            generate_config, "end_think_token_ids", None
         ):
             generate_config.end_think_token_ids = list(runtime.eos_tokens)
-        _apply_request_overrides(generate_config, other)
+        _apply_request_overrides(generate_config, sampling, other, runtime)
         if extra_stop_word_ids:
             existing = generate_config.stop_words_list
             if existing:
@@ -454,6 +466,7 @@ async def iter_real_model_stream_infer(
         max_id = runtime.max_token_id
         term_id = runtime.terminate_token_id
         think_close_token_id = runtime.close_token_id
+        max_new_tokens = int(getattr(generate_config, "max_new_tokens", 0) or 0)
         matched_think_bos_ids = matched_echo_ids or _matched_echo_prefix_ids(
             input_ids_list, list(runtime.bos_tokens)
         )
@@ -494,9 +507,20 @@ async def iter_real_model_stream_infer(
             out_py = go.generate_outputs[0]
             generated_ids = _token_ids_list_from_generate_output(out_py)
             if not generated_ids and not out_py.finished:
-                logging.debug(
-                    "[DashScGrpc] [%s] skip empty streaming chunk %s", tag, chunk_idx
+                response = build_stream_response_from_generate_outputs(
+                    dash_sc_request_id=request.id,
+                    model_name=request.model_name,
+                    go=go,
+                    request_log_tag=tag,
+                    request_input_ids=input_ids_list,
+                    return_input_ids=other.return_input_ids,
+                    is_streaming=is_streaming,
+                    generate_config=generate_config,
+                    eos_token_id=eos_id,
+                    max_token_id=max_id,
+                    _request_shape=request_shape,
                 )
+                yield response
                 continue
             ids_for_accounting = generated_ids
             if should_echo and not echoed and generated_ids:
@@ -543,10 +567,8 @@ async def iter_real_model_stream_infer(
                 ids_for_accounting = generated_ids
                 if should_echo and not echoed and generated_ids:
                     ids_for_accounting = matched_echo_ids + generated_ids
-                generate_think_token_num = (
-                    len(cumulative_sent_ids)
-                    + len(ids_for_accounting)
-                    + (1 if runtime.eos_tokens else 0)
+                generate_think_token_num = len(cumulative_sent_ids) + len(
+                    ids_for_accounting
                 )
                 cumulative_sent_ids.extend(ids_for_accounting)
                 eos_go = go
@@ -594,6 +616,13 @@ async def iter_real_model_stream_infer(
                 phase2_needed = True
                 break
             cumulative_sent_ids.extend(ids_for_accounting)
+            finish_reason_override = None
+            if (
+                out_py.finished
+                and max_new_tokens > 0
+                and len(cumulative_sent_ids) >= max_new_tokens
+            ):
+                finish_reason_override = FINISH_REASON_LENGTH
             response = build_stream_response_from_generate_outputs(
                 dash_sc_request_id=request.id,
                 model_name=request.model_name,
@@ -606,6 +635,7 @@ async def iter_real_model_stream_infer(
                 eos_token_id=eos_id,
                 max_token_id=max_id,
                 generate_think_token_num=generate_think_token_num,
+                finish_reason_override=finish_reason_override,
                 _request_shape=request_shape,
             )
             if should_echo and not echoed and generated_ids:
