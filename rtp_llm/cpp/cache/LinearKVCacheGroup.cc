@@ -171,24 +171,6 @@ bool LinearKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_re
     return true;
 }
 
-void LinearKVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
-                                         const BlockIndicesType& block_indices,
-                                         bool                    is_resident) {
-    if (cache_keys.empty() || block_indices.empty() || !shared_cache_) {
-        return;
-    }
-    const size_t n = std::min(cache_keys.size(), block_indices.size());
-    for (size_t i = 0; i < n; ++i) {
-        const auto b = block_indices[i];
-        if (isNullBlockIdx(b)) {
-            continue;
-        }
-        std::vector<BlockIdxType> group_slots(static_cast<size_t>(group_id_ + 1), NULL_BLOCK_IDX);
-        group_slots[static_cast<size_t>(group_id_)] = b;
-        shared_cache_->put(cache_keys[i], group_slots, is_resident);
-    }
-}
-
 void LinearKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache, int reserve_step) {
     const auto& block_indices = block_ids.blocks();  // const view for reading current state
     if (block_indices.empty()) {
