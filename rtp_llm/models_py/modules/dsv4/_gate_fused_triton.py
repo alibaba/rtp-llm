@@ -23,17 +23,17 @@ import triton.language as tl
 
 @triton.jit(do_not_specialize=["N"])
 def _v4_gate_sqrtsoftplus_topk_kernel(
-    scores_ptr,         # [N, E] fp32
-    bias_ptr,           # [E] fp32
-    out_idx_ptr,        # [N, K] int64
-    out_w_ptr,          # [N, K] fp32
+    scores_ptr,  # [N, E] fp32
+    bias_ptr,  # [E] fp32
+    out_idx_ptr,  # [N, K] int64
+    out_w_ptr,  # [N, K] fp32
     N,
     E: tl.constexpr,
     K: tl.constexpr,
-    NORM_EPS: tl.constexpr,   # 1e-12
+    NORM_EPS: tl.constexpr,  # 1e-12
     ROUTE_SCALE: tl.constexpr,
-    BLOCK_E: tl.constexpr,    # >= E, power of 2
-    BLOCK_K: tl.constexpr,    # >= K, power of 2
+    BLOCK_E: tl.constexpr,  # >= E, power of 2
+    BLOCK_K: tl.constexpr,  # >= K, power of 2
 ):
     """One program per token row.
 
@@ -43,7 +43,7 @@ def _v4_gate_sqrtsoftplus_topk_kernel(
       3. Find top-K of (s + bias), keeping s un-biased for the weight gather.
       4. Normalize weights by sum and scale.
     """
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     if pid >= N:
         return
 
@@ -51,17 +51,19 @@ def _v4_gate_sqrtsoftplus_topk_kernel(
     mask = offs < E
 
     # Load row + bias.
-    s_row = tl.load(scores_ptr + pid * E + offs, mask=mask, other=-float('inf')).to(tl.float32)
+    s_row = tl.load(scores_ptr + pid * E + offs, mask=mask, other=-float("inf")).to(
+        tl.float32
+    )
     bias_row = tl.load(bias_ptr + offs, mask=mask, other=0.0).to(tl.float32)
 
     # softplus(x) = log(1 + exp(x)); numerically stable for x>20: just x.
     THRESH = tl.full([1], 20.0, dtype=tl.float32)
     sp = tl.where(s_row > THRESH, s_row, tl.log(1.0 + tl.exp(s_row)))
-    s_active = tl.sqrt(sp)              # original (un-biased) score, used for weights
-    s_biased = s_active + bias_row      # used for ranking
+    s_active = tl.sqrt(sp)  # original (un-biased) score, used for weights
+    s_biased = s_active + bias_row  # used for ranking
 
     # Mask out padding lanes from being chosen.
-    s_biased = tl.where(mask, s_biased, -float('inf'))
+    s_biased = tl.where(mask, s_biased, -float("inf"))
 
     # Insertion-sort top-K by repeatedly extracting the argmax.  K is small (=6
     # for V4), and the per-step argmax of [E] is cheap.  We blank out chosen
@@ -75,20 +77,22 @@ def _v4_gate_sqrtsoftplus_topk_kernel(
         tl.store(out_idx_ptr + pid * K + k, idx.to(tl.int64))
         tl.store(out_w_ptr + pid * K + k, sel)
         # Blank out the chosen position so the next argmax ignores it.
-        cur_biased = tl.where(offs == idx, -float('inf'), cur_biased)
+        cur_biased = tl.where(offs == idx, -float("inf"), cur_biased)
 
     # Pass 2: load the K weights back, normalize, scale, store.
     k_offs = tl.arange(0, BLOCK_K)
     k_mask = k_offs < K
-    w_loaded = tl.load(out_w_ptr + pid * K + k_offs, mask=k_mask, other=0.0).to(tl.float32)
+    w_loaded = tl.load(out_w_ptr + pid * K + k_offs, mask=k_mask, other=0.0).to(
+        tl.float32
+    )
     s = tl.sum(w_loaded, axis=0) + NORM_EPS
     w_norm = w_loaded / s * ROUTE_SCALE
     tl.store(out_w_ptr + pid * K + k_offs, w_norm, mask=k_mask)
 
 
 def fused_sqrtsoftplus_gate(
-    scores: torch.Tensor,   # [N, E] fp32 contiguous
-    bias: torch.Tensor,     # [E] fp32 contiguous
+    scores: torch.Tensor,  # [N, E] fp32 contiguous
+    bias: torch.Tensor,  # [E] fp32 contiguous
     topk: int,
     route_scale: float = 1.0,
     norm_eps: float = 1e-12,
@@ -104,7 +108,9 @@ def fused_sqrtsoftplus_gate(
         weights = scores.gather(1, indices)
         weights = weights / (weights.sum(-1, keepdim=True) + 1e-12) * route_scale
     """
-    assert scores.dtype == torch.float32 and scores.dim() == 2 and scores.is_contiguous()
+    assert (
+        scores.dtype == torch.float32 and scores.dim() == 2 and scores.is_contiguous()
+    )
     assert bias.dtype == torch.float32 and bias.dim() == 1 and bias.is_contiguous()
     N, E = scores.shape
     assert bias.numel() == E
@@ -120,8 +126,13 @@ def fused_sqrtsoftplus_gate(
 
     grid = (N,)
     _v4_gate_sqrtsoftplus_topk_kernel[grid](
-        scores, bias, out_idx, out_w,
-        N=N, E=E, K=K,
+        scores,
+        bias,
+        out_idx,
+        out_w,
+        N=N,
+        E=E,
+        K=K,
         NORM_EPS=norm_eps,
         ROUTE_SCALE=route_scale,
         BLOCK_E=BLOCK_E,
