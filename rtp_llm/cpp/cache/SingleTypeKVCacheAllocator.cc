@@ -196,10 +196,12 @@ void SingleTypeKVCacheAllocator::free(const FreeInfo& free_info) {
 
 void SingleTypeKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
     auto& kv_resource = insert_info.batch_kv_cache_resource;
-    int   batch_size  = kv_resource->batchSize();
+    if (!shared_block_cache_) {
+        return;
+    }
 
-    // TODO(chanyin): set batch_size to 1 for now
-    batch_size = 1;
+    int batch_size = kv_resource->batchSize();
+    batch_size     = 1;
 
     for (int batch_id = 0; batch_id < batch_size; ++batch_id) {
         const auto& cache_keys = kv_resource->cacheKeys(batch_id);
@@ -210,10 +212,14 @@ void SingleTypeKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) 
             continue;
         }
 
-        CacheKeysType    put_cache_keys(cache_keys.begin(), cache_keys.begin() + block_num);
-        BlockIndicesType put_block_ids(blocks.begin(), blocks.begin() + block_num);
-
-        full_kv_cache_group_->insertIntoCache(put_cache_keys, put_block_ids, insert_info.is_resident);
+        for (size_t i = block_num; i > 0; --i) {
+            const size_t idx = i - 1;
+            if (isNullBlockIdx(blocks[idx])) {
+                continue;
+            }
+            std::vector<BlockIdxType> group_slots = {blocks[idx]};
+            shared_block_cache_->put(cache_keys[idx], group_slots, insert_info.is_resident);
+        }
     }
 }
 

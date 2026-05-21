@@ -267,31 +267,36 @@ void HybridKVCacheAllocator::free(const FreeInfo& free_info) {
 void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
     auto& kv_cache_resource = insert_info.batch_kv_cache_resource;
     RTP_LLM_CHECK(kv_cache_resource != nullptr);
+    if (!shared_block_cache_) {
+        return;
+    }
 
+    const int group_nums = kv_cache_resource->groupNums();
     const int batch_size = kv_cache_resource->batchSize();
     for (int batch_id = 0; batch_id < batch_size; ++batch_id) {
         const auto& cache_keys = kv_cache_resource->cacheKeys(batch_id);
-        auto        token_ids  = insert_info.complete_token_ids->completeTokenIdsVec(batch_id);
-        if (token_ids.size() <= 1 || cache_keys.empty()) {
+        if (cache_keys.empty()) {
             continue;
         }
-        const size_t token_len = token_ids.size() - 1;
-        for (int gid = 0; gid < kv_cache_resource->groupNums(); ++gid) {
-            const int    group_seq_size  = kv_cache_groups_[static_cast<size_t>(gid)]->seqSizePerBlock();
-            const size_t full_blocks_num = token_len / static_cast<size_t>(group_seq_size);
-            const size_t n               = std::min(cache_keys.size(), full_blocks_num);
-            if (n == 0) {
-                continue;
+
+        const size_t max_keys = cache_keys.size();
+        for (size_t pos = max_keys; pos > 0; --pos) {
+            const size_t              i = pos - 1;
+            std::vector<BlockIdxType> group_slots(static_cast<size_t>(group_nums), NULL_BLOCK_IDX);
+            bool                      has_valid = false;
+            for (int gid = 0; gid < group_nums; ++gid) {
+                const auto& blocks = kv_cache_resource->blocks(batch_id, gid);
+                if (i >= blocks.size()) {
+                    continue;
+                }
+                if (!isNullBlockIdx(blocks[i])) {
+                    group_slots[static_cast<size_t>(gid)] = blocks[i];
+                    has_valid                             = true;
+                }
             }
-            CacheKeysType    put_cache_keys(cache_keys.begin(), cache_keys.begin() + n);
-            const auto&      blocks = kv_cache_resource->blocks(batch_id, gid);
-            BlockIndicesType put_blocks;
-            put_blocks.reserve(n);
-            for (size_t i = 0; i < n && i < blocks.size(); ++i) {
-                put_blocks.push_back(blocks[i]);
+            if (has_valid) {
+                shared_block_cache_->put(cache_keys[i], group_slots, insert_info.is_resident);
             }
-            kv_cache_groups_[static_cast<size_t>(gid)]->insertIntoCache(
-                put_cache_keys, put_blocks, insert_info.is_resident);
         }
     }
 }
