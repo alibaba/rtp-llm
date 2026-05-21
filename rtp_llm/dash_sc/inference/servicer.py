@@ -325,10 +325,8 @@ def _apply_request_overrides(generate_config: Any, other: OtherParams) -> None:
     """
     if other.max_new_think_tokens is not None:
         max_think = int(other.max_new_think_tokens)
-        generate_config.max_thinking_tokens = (
-            _INT32_MAX if max_think < 0 else max_think
-        )
-    if other.enable_thinking is False or other.max_new_think_tokens == 0:
+        generate_config.max_thinking_tokens = _INT32_MAX if max_think < 0 else max_think
+    if other.enable_thinking is False:
         generate_config.in_think_mode = False
         generate_config.max_thinking_tokens = 0
         generate_config.end_think_token_ids = []
@@ -883,6 +881,12 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             if input_ids_list is None:
                 yield predict_v2_pb2.ModelStreamInferResponse(
                     error_message="input_ids not found or raw_input_contents mismatch"
+                )
+                return
+
+            if sampling is not None and sampling.max_new_tokens < 0:
+                yield predict_v2_pb2.ModelStreamInferResponse(
+                    error_message=f"invalid max_new_tokens: {sampling.max_new_tokens}"
                 )
                 return
 

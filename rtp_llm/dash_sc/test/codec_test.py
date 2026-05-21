@@ -128,6 +128,35 @@ class DashScGrpcRequestTest(TestCase):
         sp = parse_sampling_params(req)
         self.assertEqual(sp.top_p, 1.0)
 
+    def test_parse_sampling_max_new_tokens_negative_keeps_signal_repro_p3(
+        self,
+    ) -> None:
+        """P3 repro: a negative ``max_new_tokens`` is silently clamped to 0,
+        which the backend later rejects with ``FtRuntimeException`` (HTTP 500).
+        Expected: codec preserves the signed value so the caller can decide
+        between rejecting up-front or substituting a server default."""
+        req = predict_v2_pb2.ModelInferRequest()
+        _add_tensor(req, "max_new_tokens", "INT32", [1], struct.pack("<i", -1))
+        sp = parse_sampling_params(req)
+        self.assertEqual(sp.max_new_tokens, -1)
+
+    def test_parse_sampling_max_new_think_tokens_zero(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        _add_tensor(req, "max_new_think_tokens", "INT32", [1], struct.pack("<i", 0))
+        sp = parse_sampling_params(req)
+        self.assertEqual(sp.max_new_think_tokens, 0)
+        # zero means zero thinking budget → engine enforces immediate close
+        self.assertEqual(sp.to_generate_config().max_thinking_tokens, 0)
+
+    def test_parse_sampling_max_think_length_priority_and_negative(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        _add_tensor(req, "max_new_think_tokens", "INT32", [1], struct.pack("<i", 0))
+        _add_tensor(req, "max_think_length", "INT32", [1], struct.pack("<i", -1))
+        sp = parse_sampling_params(req)
+        # raw value stored; to_generate_config maps negative → INT32_MAX
+        self.assertEqual(sp.max_new_think_tokens, -1)
+        self.assertEqual(sp.to_generate_config().max_thinking_tokens, 2_147_483_647)
+
     def test_parse_sampling_legacy_top_k_parameter(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
         p = predict_v2_pb2.InferParameter()
@@ -217,10 +246,16 @@ class DashScGrpcRequestTest(TestCase):
         self.assertIsNone(op)
 
     def test_sampling_to_generate_config(self) -> None:
-        sp = SamplingParams(max_new_tokens=64, top_k=1, stop_words_list=((42,),))
+        sp = SamplingParams(
+            max_new_tokens=64,
+            top_k=1,
+            max_new_think_tokens=128,
+            stop_words_list=((42,),),
+        )
         gc = sp.to_generate_config(other=OtherParams(return_input_ids=True))
         self.assertEqual(gc.max_new_tokens, 64)
         self.assertEqual(gc.top_k, 1)
+        self.assertEqual(gc.max_thinking_tokens, 128)
         self.assertEqual(gc.stop_words_list, [[42]])
         self.assertTrue(gc.return_input_ids)
 
@@ -264,6 +299,37 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
         self.assertEqual(_unpack_int64_le(by_name["finish_reason"]), [0])
         self.assertEqual(_unpack_int32_le(by_name["prompt_token_num"]), [10])
         self.assertEqual(_unpack_int32_le(by_name["prompt_cached_token_num"]), [4])
+
+    def test_finish_reason_length_override_repro_p1(self) -> None:
+        """P1 repro: when generation finishes because ``max_new_tokens`` was
+        reached, the wire protocol currently has no way to signal 'length' —
+        ``finished=True`` always maps to 0 (stop), so dashscope-serving
+        collapses every cutoff into ``finish_reason='stop'``.
+
+        Expected fix: codec exposes ``FINISH_REASON_LENGTH = 1`` and
+        ``build_stream_response_from_generate_outputs`` takes a
+        ``finish_reason_override`` argument the caller can set when the
+        cumulative output reaches the per-request budget."""
+        from rtp_llm.dash_sc.codec import FINISH_REASON_LENGTH
+
+        out = GenerateOutput(
+            output_ids=torch.tensor([1, 2, 3], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(input_len=4, reuse_len=0, output_len=3),
+        )
+        resp = build_stream_response_from_generate_outputs(
+            dash_sc_request_id="r",
+            model_name="m",
+            go=GenerateOutputs(generate_outputs=[out]),
+            request_log_tag=stream_log_tag(request_id_numeric=1, trace_id="r"),
+            finish_reason_override=FINISH_REASON_LENGTH,
+        )
+        infer = resp.infer_response
+        by_name = {
+            infer.outputs[i].name: infer.raw_output_contents[i]
+            for i in range(len(infer.outputs))
+        }
+        self.assertEqual(_unpack_int64_le(by_name["finish_reason"]), [1])
 
     def test_not_finished_finish_reason_two(self) -> None:
         out = GenerateOutput(

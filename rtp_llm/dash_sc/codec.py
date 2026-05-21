@@ -19,6 +19,10 @@ from typing import Any
 from rtp_llm.dash_sc.proto import predict_v2_pb2
 from rtp_llm.utils.base_model_datatypes import GenerateOutputs
 
+_INT32_MAX = 2_147_483_647
+
+FINISH_REASON_LENGTH = 1
+
 # ----------------------------------------------------------------------------
 # Low-level tensor decoding helpers (shared by request parsing and access log)
 # ----------------------------------------------------------------------------
@@ -246,6 +250,7 @@ class SamplingParams:
     frequency_penalty: float = 0.0
     presence_penalty: float = 0.0
     stop_words_list: tuple[tuple[int, ...], ...] = field(default_factory=tuple)
+    max_new_think_tokens: int | None = None
 
     @property
     def n(self) -> int:
@@ -261,6 +266,12 @@ class SamplingParams:
         from rtp_llm.config.generate_config import GenerateConfig
 
         return_input_ids = other.return_input_ids if other is not None else False
+        if self.max_new_think_tokens is None:
+            max_thinking_tokens = 32000
+        elif self.max_new_think_tokens < 0:
+            max_thinking_tokens = _INT32_MAX
+        else:
+            max_thinking_tokens = self.max_new_think_tokens
         return GenerateConfig(
             max_new_tokens=self.max_new_tokens,
             num_return_sequences=self.num_return_sequences,
@@ -273,6 +284,7 @@ class SamplingParams:
             frequency_penalty=self.frequency_penalty,
             presence_penalty=self.presence_penalty,
             stop_words_list=self.stop_words_list_py(),
+            max_thinking_tokens=max_thinking_tokens,
             return_input_ids=return_input_ids,
             is_streaming=True,
         )
@@ -300,7 +312,8 @@ def parse_sampling_params(request) -> SamplingParams:
     Tensor names: ``max_new_tokens``, ``num_return_sequences`` (or DashScope
     alias ``n``), ``top_p``, ``top_k``, ``stop_words_list``, ``temperature``,
     ``min_new_tokens`` (or DashScope alias ``min_length``), ``seed``,
-    ``repetition_penalty``, ``frequency_penalty``, ``presence_penalty``.
+    ``repetition_penalty``, ``frequency_penalty``, ``presence_penalty``,
+    ``max_new_think_tokens`` / ``max_think_length``.
 
     Legacy: if there is no ``top_k`` input, ``request.parameters["top_k"].int64_param``
     is used instead.
@@ -315,6 +328,7 @@ def parse_sampling_params(request) -> SamplingParams:
     repetition_penalty = 1.0
     frequency_penalty = 0.0
     presence_penalty = 0.0
+    max_new_think_tokens: int | None = None
     stop_words_list: tuple[tuple[int, ...], ...] = tuple()
 
     v = _parse_optional_scalar_int(request, "max_new_tokens")
@@ -371,6 +385,12 @@ def parse_sampling_params(request) -> SamplingParams:
     if vf is not None:
         presence_penalty = vf
 
+    for tensor_name in ("max_think_length", "max_new_think_tokens"):
+        v = _parse_optional_scalar_int(request, tensor_name)
+        if v is not None:
+            max_new_think_tokens = v
+            break
+
     sw = _parse_stop_words_list_input(request)
     if sw is not None:
         stop_words_list = sw
@@ -386,6 +406,7 @@ def parse_sampling_params(request) -> SamplingParams:
         repetition_penalty=repetition_penalty,
         frequency_penalty=frequency_penalty,
         presence_penalty=presence_penalty,
+        max_new_think_tokens=max_new_think_tokens,
         stop_words_list=stop_words_list,
     )
 
@@ -424,7 +445,9 @@ def parse_other_params(request) -> OtherParams:
             request, "max_new_think_tokens"
         )
     if max_new_think_tokens is None:
-        max_new_think_tokens = _parse_optional_int_value(ds_attrs.get("thinking_budget"))
+        max_new_think_tokens = _parse_optional_int_value(
+            ds_attrs.get("thinking_budget")
+        )
     if max_new_think_tokens is None:
         max_new_think_tokens = _parse_optional_parameter_int(request, "thinking_budget")
     if max_new_think_tokens is not None:
@@ -565,13 +588,18 @@ def prepend_to_generated_ids_tensor(
 def _append_finish_reason_output(
     infer: predict_v2_pb2.ModelInferResponse,
     finished: bool,
+    finish_reason_override: int | None = None,
 ) -> None:
     """``finish_reason``: INT64 scalar (``[1]``). finished=0, not finished=2."""
     out = infer.outputs.add()
     out.name = "finish_reason"
     out.datatype = "INT64"
     out.shape.append(1)
-    infer.raw_output_contents.append(struct.pack("<q", 0 if finished else 2))
+    if finish_reason_override is not None:
+        value = finish_reason_override
+    else:
+        value = 0 if finished else 2
+    infer.raw_output_contents.append(struct.pack("<q", value))
 
 
 def _append_finished_output(
@@ -650,6 +678,7 @@ def build_stream_response_from_generate_outputs(
     eos_token_id: int | None = None,
     max_token_id: int | None = None,
     generate_think_token_num: int | None = None,
+    finish_reason_override: int | None = None,
     _request_shape: list[int] | None = None,
 ) -> predict_v2_pb2.ModelStreamInferResponse:
     """Build ``ModelStreamInferResponse`` from one ``GenerateOutputs`` chunk.
@@ -677,7 +706,7 @@ def build_stream_response_from_generate_outputs(
         _append_prompt_token_ids_output(infer, request_input_ids)
 
     _append_generated_ids_output(infer, generated_ids)
-    _append_finish_reason_output(infer, finished)
+    _append_finish_reason_output(infer, finished, finish_reason_override)
     _append_finished_output(infer, finished)
     _append_aux_info_metrics_outputs(infer, out_py)
     infer.parameters["incremental_output"].int64_param = 1 if is_streaming else 0
