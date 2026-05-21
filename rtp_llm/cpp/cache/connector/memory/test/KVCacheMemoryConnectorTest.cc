@@ -422,6 +422,13 @@ private:
         auto res             = std::make_shared<KVCacheResource>();
         res->cache_keys      = cache_keys;
         res->layer_block_ids = makeLayerBlockIds(per_layer_block_indices, cache_keys.size());
+        const size_t region_count = static_cast<size_t>(KVCacheRegionName::REGION_COUNT);
+        res->layer_region_block_ids.resize(res->layer_block_ids.size());
+        for (size_t layer = 0; layer < res->layer_block_ids.size(); ++layer) {
+            res->layer_region_block_ids[layer].assign(region_count, nullptr);
+            res->layer_region_block_ids[layer][static_cast<size_t>(KVCacheRegionName::DEFAULT)] =
+                res->layer_block_ids[layer];
+        }
         // reuse_len in these tests means "GPU already-reused prefix length".
         // KVCacheResource::reuseBlockNum() is derived from (device + memory + remote),
         // so set device reuse here to make asyncMatch/asyncRead semantics consistent.
@@ -914,6 +921,47 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_ReturnNull_WhenPlanEmpty) {
     EXPECT_EQ(ctx, nullptr);
 }
 
+TEST_F(KVCacheMemoryConnectorTest, asyncRead_Success_WhenCacheEntryRemovedAfterMatch) {
+    // asyncMatch should pin the matched memory blocks so asyncRead can still use them
+    // even if another request consumes and removes the cache entries before read starts.
+    CacheKeysType cache_keys{21001, 21002, 21003};
+
+    const size_t mem_size = memoryCacheBlockBytes();
+    ASSERT_GT(mem_size, 0u);
+    auto pool = ensureBlockPool(mem_size);
+    ASSERT_NE(pool, nullptr);
+
+    auto block_indices = putItemsToCache(cache_keys, mem_size);
+    ASSERT_EQ(block_indices.size(), cache_keys.size());
+
+    std::vector<std::vector<BlockIdxType>> lbs_vec{
+        {1, 2, 3},
+        {1, 2, 3},
+        {1, 2, 3},
+        {1, 2, 3},
+    };
+    auto res  = makeCacheResource(cache_keys, lbs_vec);
+    auto meta = std::make_shared<TestReadMeta>(/*enable_memory_cache=*/true, /*enable_remote_cache=*/false, "");
+
+    auto match_ctx = connector_->asyncMatch(res, meta);
+    ASSERT_NE(match_ctx, nullptr);
+    const int start_read_block_index = static_cast<int>(res->reuseBlockNum());
+    const int read_block_num         = static_cast<int>(match_ctx->matchedBlockCount()) - start_read_block_index;
+    ASSERT_GT(read_block_num, 0);
+
+    for (int i = start_read_block_index; i < start_read_block_index + read_block_num; ++i) {
+        auto removed = connector_->block_cache_->remove(cache_keys[i]);
+        ASSERT_TRUE(removed.has_value());
+        pool->blockCacheFree({removed->block_index});
+    }
+
+    auto ctx = connector_->asyncRead(res, meta, match_ctx, start_read_block_index, read_block_num);
+    ASSERT_NE(ctx, nullptr);
+    ASSERT_TRUE(waitUntilDone(ctx));
+    EXPECT_TRUE(ctx->success());
+    EXPECT_EQ(res->memoryReuseBlockNum(), static_cast<size_t>(read_block_num));
+}
+
 TEST_F(KVCacheMemoryConnectorTest, asyncRead_Success_IncrementsReuseLen_ByMatchedPrefix) {
     // 初始 reuse_len=1, 内存全部命中 => mem_match_len=3，最终 reuse_len=3
     CacheKeysType cache_keys{40001, 40002, 40003};
@@ -925,10 +973,10 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_Success_IncrementsReuseLen_ByMatche
     ASSERT_EQ(block_indices.size(), cache_keys.size());
 
     std::vector<std::vector<BlockIdxType>> lbs_vec{
-        {101, 102, 103},  // layer0
-        {201, 202, 203},  // layer1
-        {301, 302, 303},  // layer2
-        {401, 402, 403},  // layer3
+        {1, 2, 3},  // layer0
+        {1, 2, 3},  // layer1
+        {1, 2, 3},  // layer2
+        {1, 2, 3},  // layer3
     };
     auto res = makeCacheResource(cache_keys, lbs_vec, 1);
 
@@ -960,10 +1008,10 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_Success_RemovesLoadedBlocksFromMemo
     ASSERT_LT(pool->freeBlocksNum(), free_before);
 
     std::vector<std::vector<BlockIdxType>> lbs_vec{
-        {111, 112, 113},
-        {211, 212, 213},
-        {311, 312, 313},
-        {411, 412, 413},
+        {1, 2, 3},
+        {1, 2, 3},
+        {1, 2, 3},
+        {1, 2, 3},
     };
     auto res = makeCacheResource(cache_keys, lbs_vec, /*reuse_len=*/1);
 
@@ -997,10 +1045,10 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_Success_DoesNotRemoveUpgradedBlock)
     ASSERT_EQ(block_indices.size(), cache_keys.size());
 
     std::vector<std::vector<BlockIdxType>> lbs_vec{
-        {111, 112, 113},
-        {211, 212, 213},
-        {311, 312, 313},
-        {411, 412, 413},
+        {1, 2, 3},
+        {1, 2, 3},
+        {1, 2, 3},
+        {1, 2, 3},
     };
     auto res = makeCacheResource(cache_keys, lbs_vec, /*reuse_len=*/1);
 
@@ -1011,7 +1059,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_Success_DoesNotRemoveUpgradedBlock)
     const int read_num  = static_cast<int>(match_ctx->matchedBlockCount()) - reuse_num;
     ASSERT_GT(read_num, 0);
 
-    // Start async read — buildCopyPlanForRead captures old block indices in the copy plan.
+    // asyncMatch captured old block indices in the pinned copy plan; asyncRead consumes that plan.
     auto ctx = connector_->asyncRead(res, meta, match_ctx, reuse_num, read_num);
     ASSERT_NE(ctx, nullptr);
 
@@ -1069,7 +1117,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_FailureOnMemResponse_NoReuseLenIncr
     auto block_indices = putItemsToCache(cache_keys, mem_size);
     ASSERT_EQ(block_indices.size(), cache_keys.size());
 
-    std::vector<std::vector<BlockIdxType>> lbs_vec{{11, 12}, {21, 22}, {31, 32}, {41, 42}};
+    std::vector<std::vector<BlockIdxType>> lbs_vec{{1, 2}, {3, 4}, {5, 6}, {7, 8}};
     auto                                   res = makeCacheResource(cache_keys, lbs_vec);
 
     auto meta      = std::make_shared<TestReadMeta>(/*enable_memory_cache=*/true, /*enable_remote_cache=*/false, "");
@@ -1119,7 +1167,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_FailureOnRpcStatus_NoReuseLenIncrem
     auto block_indices = putItemsToCache(cache_keys, mem_size);
     ASSERT_EQ(block_indices.size(), cache_keys.size());
 
-    std::vector<std::vector<BlockIdxType>> lbs_vec{{31, 32}, {41, 42}, {51, 52}, {61, 62}};
+    std::vector<std::vector<BlockIdxType>> lbs_vec{{1, 2}, {3, 4}, {5, 6}, {7, 8}};
     auto                                   res = makeCacheResource(cache_keys, lbs_vec);
 
     auto meta      = std::make_shared<TestReadMeta>(/*enable_memory_cache=*/true, /*enable_remote_cache=*/false, "");
