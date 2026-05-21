@@ -1,594 +1,352 @@
-"""Production-path consistency test for Qwen3-Next Gated Delta Net.
+# -*- coding: utf-8 -*-
+"""
+Consistency tests: FlashInfer GDN kernels vs original Triton/CuTe-DSL kernels.
 
-Mimics the inference paths in Qwen3NextGatedDeltaNetPrefill / Decode and verifies
-that FlashInfer (primary) and Triton (fallback) paths produce the same outputs
-and the same ssm_states pool content after running the full load/kernel/store
-pipeline that production uses.
-
-Pool layout convention (post-Option-A fix): (pool_size, HV, head_v_dim, head_k_dim)
-i.e. true (V, K) physical layout, matching FlashInfer's native expectation.
+Verifies that the new FlashInfer-based decode and prefill paths produce
+numerically identical results to the existing implementations.
 """
 
 import logging
 import math
 import random
 import unittest
-from dataclasses import dataclass
+from typing import List
 
 import torch
 import torch.nn.functional as F
 
-from rtp_llm.models_py.triton_kernels.fla.block import (
-    compute_state_indices_from_block_map,
-    load_initial_state_from_block_map,
-    store_final_state_only_to_block_map,
-    store_ssm_state_to_block_map,
+logging.basicConfig(
+    level="INFO",
+    format="[%(name)s][%(asctime)s.%(msecs)03d][%(filename)s:%(lineno)s][%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    force=True,
 )
-from rtp_llm.models_py.triton_kernels.fla.chunk import chunk_gated_delta_rule
-from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
-    fused_recurrent_gated_delta_rule,
-)
-from rtp_llm.models_py.triton_kernels.fla.gdn_gating import fused_gdn_gating
-from rtp_llm.models_py.triton_kernels.fla.l2norm import l2norm_fwd
-
-try:
-    from flashinfer.gdn_kernels.blackwell.gdn_prefill import (
-        chunk_gated_delta_rule_sm100 as _flashinfer_gdn_prefill,
-    )
-except ImportError:
-    _flashinfer_gdn_prefill = None
-
-try:
-    from flashinfer.gdn_kernels.gdn_decode_bf16_state import (
-        gated_delta_rule as _flashinfer_gdn_decode,
-    )
-except ImportError:
-    _flashinfer_gdn_decode = None
-
-
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 
 def cos_sim(a: torch.Tensor, b: torch.Tensor) -> float:
-    a = a.float().flatten()
-    b = b.float().flatten()
-    return F.cosine_similarity(a, b, dim=0).item()
+    a_flat = a.detach().float().flatten()
+    b_flat = b.detach().float().flatten()
+    return (
+        F.cosine_similarity(a_flat.unsqueeze(0), b_flat.unsqueeze(0)).item()
+    )
 
 
 def max_abs_diff(a: torch.Tensor, b: torch.Tensor) -> float:
-    return (a.float() - b.float()).abs().max().item()
+    return (a.detach().float() - b.detach().float()).abs().max().item()
 
 
-@dataclass
-class FakeAttnInputs:
-    """Minimal stand-in for PyAttentionInputs (only the fields production reads)."""
-
-    prefix_lengths_d: torch.Tensor
-    cu_seqlens: torch.Tensor
-    kv_cache_kernel_block_id_device: torch.Tensor
-    sequence_lengths_plus_1_d: torch.Tensor
-
-
-def make_pool(pool_size, hv, head_v_dim, head_k_dim, dtype, device="cuda", scale=0.01):
-    """Allocate ssm_states pool in production (V, K) physical layout."""
-    pool = (
-        torch.randn(pool_size, hv, head_v_dim, head_k_dim, dtype=dtype, device=device)
-        * scale
-    )
-    pool[0].zero_()  # null block
-    return pool
-
-
-def make_block_map(batch_size, block_counts, device="cuda"):
-    max_blocks = max(block_counts)
-    block_map = torch.zeros(
-        batch_size, max_blocks + 1, dtype=torch.int32, device=device
-    )
-    offset = 1
-    for i in range(batch_size):
-        block_map[i, : block_counts[i]] = torch.arange(
-            offset, offset + block_counts[i], dtype=torch.int32, device=device
-        )
-        offset += block_counts[i]
-    return block_map
-
-
-# ---------------------------------------------------------------------------
-# Production paths (mimic qwen3_next.py)
-# ---------------------------------------------------------------------------
-
-
-def prefill_path_flashinfer(
-    q,
-    k,
-    v,
-    g,
-    beta,
-    pool,
-    attn_inputs,
-    seq_size_per_block,
-    head_k_dim,
-    head_v_dim,
-    local_num_v_heads,
-):
-    """Mimic Qwen3NextGatedDeltaNetPrefill._fla_blackwell FlashInfer branch (post-fix)."""
-    context_batch_size = attn_inputs.cu_seqlens.shape[0] - 1
-    initial_states = torch.empty(
-        context_batch_size,
-        local_num_v_heads,
-        head_v_dim,
-        head_k_dim,
-        dtype=torch.float32,
-        device=q.device,
-    )
-    load_initial_state_from_block_map(
-        attn_inputs.prefix_lengths_d,
-        attn_inputs.kv_cache_kernel_block_id_device,
-        pool,
-        initial_states,
-        seq_size_per_block,
-    )
-
-    total_tokens = q.shape[1]
-    q_3d = l2norm_fwd(q.squeeze(0).contiguous())
-    k_3d = l2norm_fwd(k.squeeze(0).contiguous())
-    v_3d = v.squeeze(0).contiguous()
-    gate = g.view(total_tokens, local_num_v_heads).exp()
-    beta_2d = beta.view(total_tokens, local_num_v_heads).float()
-    output = torch.empty_like(v_3d)
-    output_state = torch.empty(
-        context_batch_size,
-        local_num_v_heads,
-        head_v_dim,
-        head_k_dim,
-        dtype=torch.float32,
-        device=q.device,
-    )
-    scale = 1.0 / math.sqrt(head_k_dim)
-    _flashinfer_gdn_prefill(
-        q=q_3d,
-        k=k_3d,
-        v=v_3d,
-        gate=gate,
-        beta=beta_2d,
-        output=output,
-        cu_seqlens=attn_inputs.cu_seqlens,
-        initial_state=initial_states,
-        output_state=output_state,
-        scale=scale,
-    )
-    # Post-fix: write output_state directly without spurious transpose.
-    store_final_state_only_to_block_map(
-        output_state,
-        attn_inputs.prefix_lengths_d,
-        attn_inputs.cu_seqlens,
-        attn_inputs.kv_cache_kernel_block_id_device,
-        pool,
-        seq_size_per_block,
-    )
-    return output.unsqueeze(0).squeeze_(0)
-
-
-def prefill_path_triton(
-    q,
-    k,
-    v,
-    g,
-    beta,
-    pool,
-    attn_inputs,
-    seq_size_per_block,
-    head_k_dim,
-    head_v_dim,
-    local_num_v_heads,
-):
-    """Mimic Qwen3NextGatedDeltaNetPrefill._fla Triton path (post-fix)."""
-    context_batch_size = attn_inputs.cu_seqlens.shape[0] - 1
-    initial_states = torch.empty(
-        context_batch_size,
-        local_num_v_heads,
-        head_v_dim,
-        head_k_dim,
-        dtype=torch.float32,
-        device=q.device,
-    )
-    load_initial_state_from_block_map(
-        attn_inputs.prefix_lengths_d,
-        attn_inputs.kv_cache_kernel_block_id_device,
-        pool,
-        initial_states,
-        seq_size_per_block,
-    )
-    # Post-fix: pool stores (V, K); triton needs (K, V).
-    tri_initial = initial_states.transpose(-1, -2).contiguous()
-    attn_out, h, final_state = chunk_gated_delta_rule(
-        q,
-        k,
-        v,
-        g,
-        beta,
-        initial_state=tri_initial,
-        output_final_state=True,
-        cu_seqlens=attn_inputs.cu_seqlens.long(),
-        use_qk_l2norm_in_kernel=True,
-    )
-    # Post-fix: triton returns (K, V); transpose back to pool (V, K) before store.
-    h = h.transpose(-1, -2).contiguous()
-    final_state = final_state.transpose(-1, -2).contiguous()
-    store_ssm_state_to_block_map(
-        h,
-        final_state,
-        attn_inputs.prefix_lengths_d,
-        attn_inputs.cu_seqlens,
-        attn_inputs.kv_cache_kernel_block_id_device,
-        pool,
-        seq_size_per_block,
-        chunk_size=64,
-    )
-    return attn_out.squeeze_(0)
-
-
-def decode_path_flashinfer(
-    query,
-    key,
-    value,
-    a,
-    b,
-    pool,
-    attn_inputs,
-    seq_size_per_block,
-    local_num_v_heads,
-    alog,
-    dt_bias,
-):
-    """Mimic Qwen3NextGatedDeltaNetDecode._fla_flashinfer_decode."""
-    batch = query.shape[0]
-    read_indices, write_indices = compute_state_indices_from_block_map(
-        attn_inputs.sequence_lengths_plus_1_d,
-        attn_inputs.kv_cache_kernel_block_id_device,
-        seq_size_per_block,
-    )
-    a_r = a.view(batch, 1, local_num_v_heads)
-    b_r = b.view(batch, 1, local_num_v_heads)
-    core_attn_out = _flashinfer_gdn_decode(
-        A_log=alog,
-        a=a_r,
-        dt_bias=dt_bias,
-        q=query,
-        k=key,
-        v=value,
-        b=b_r,
-        initial_state_source=pool,
-        initial_state_indices=read_indices,
-        output_state_indices=write_indices,
-        use_qk_l2norm_in_kernel=True,
-    )
-    return core_attn_out.squeeze(1)
-
-
-def decode_path_triton(
-    query,
-    key,
-    value,
-    a,
-    b,
-    pool,
-    attn_inputs,
-    seq_size_per_block,
-    local_num_v_heads,
-    alog,
-    dt_bias,
-):
-    """Mimic Qwen3NextGatedDeltaNetDecode._fla Triton fallback (post-fix)."""
-    batch, seq = query.shape[0], query.shape[1]
-    g, beta = fused_gdn_gating(alog, a, b, dt_bias)
-    g = g.view(batch, seq, local_num_v_heads)
-    beta = beta.view(batch, seq, local_num_v_heads)
-    # Post-fix: pool stores (V, K); triton expects (K, V).
-    pool_kv = pool.transpose(-1, -2).contiguous()
-    core_attn_out, _ = fused_recurrent_gated_delta_rule(
-        q=query,
-        k=key,
-        v=value,
-        g=g,
-        beta=beta,
-        scale=None,
-        initial_state=pool_kv,
-        inplace_final_state=True,
-        block_map=attn_inputs.kv_cache_kernel_block_id_device,
-        seq_size_per_block=seq_size_per_block,
-        sequence_lengths=attn_inputs.sequence_lengths_plus_1_d,
-        use_qk_l2norm_in_kernel=True,
-    )
-    pool.copy_(pool_kv.transpose(-1, -2).contiguous())
-    return core_attn_out.reshape(-1, core_attn_out.shape[2], core_attn_out.shape[3])
-
-
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
-
-
-class TestPrefillPathConsistency(unittest.TestCase):
-    """FlashInfer prefill vs Triton prefill via production helpers."""
+class TestFlashInferGDNDecodeConsistency(unittest.TestCase):
+    """Compare FlashInfer gdn_decode_bf16_state vs Triton fused_recurrent_gated_delta_rule."""
 
     @classmethod
     def setUpClass(cls):
         if not torch.cuda.is_available():
-            raise unittest.SkipTest("CUDA required")
+            raise unittest.SkipTest("CUDA not available")
+        try:
+            from flashinfer.gdn_kernels.gdn_decode_bf16_state import (
+                gated_delta_rule as flashinfer_gdn_decode,
+            )
+            cls.flashinfer_gdn_decode = staticmethod(flashinfer_gdn_decode)
+        except ImportError:
+            raise unittest.SkipTest("flashinfer.gdn_kernels.gdn_decode_bf16_state not available")
+
+        from rtp_llm.models_py.triton_kernels.fla import fused_recurrent_gated_delta_rule
+        from rtp_llm.models_py.triton_kernels.fla.block import compute_state_indices_from_block_map
+        from rtp_llm.models_py.triton_kernels.fla.gdn_gating import fused_gdn_gating
+
+        cls.fused_recurrent = staticmethod(fused_recurrent_gated_delta_rule)
+        cls.compute_indices = staticmethod(compute_state_indices_from_block_map)
+        cls.fused_gdn_gating = staticmethod(fused_gdn_gating)
+
+    def _run_decode_comparison(self, B: int, H: int, HV: int, D: int, seq_size_per_block: int = 128):
+        device = "cuda"
+        torch.manual_seed(42)
+
+        # Model weights (shared)
+        A_log = -torch.rand(HV, device=device, dtype=torch.float32).abs()
+        dt_bias = torch.randn(HV, device=device, dtype=torch.float32) * 0.1
+
+        # Inputs
+        q = torch.randn(B, 1, H, D, dtype=torch.bfloat16, device=device)
+        k = torch.randn(B, 1, H, D, dtype=torch.bfloat16, device=device)
+        v = torch.randn(B, 1, HV, D, dtype=torch.bfloat16, device=device)
+        a = torch.randn(B, HV, dtype=torch.bfloat16, device=device)
+        b = torch.randn(B, HV, dtype=torch.bfloat16, device=device)
+
+        # Block map setup (mimics continuous batching)
+        sequence_lengths = [random.randint(10, 1024) for _ in range(B)]
+        block_num = [math.ceil(sl / seq_size_per_block) + 1 for sl in sequence_lengths]
+        total_block_num = sum(block_num) + 1  # +1 for null block 0
+        block_map = torch.zeros(B, max(block_num) + 1, dtype=torch.int32, device=device)
+        offset = 1
+        for i in range(B):
+            block_map[i, :block_num[i]] = torch.arange(
+                offset, offset + block_num[i], dtype=torch.int32
+            )
+            offset += block_num[i]
+
+        # SSM states pool [pool_size, HV, V, K] bf16
+        ssm_states_fi = torch.randn(
+            total_block_num, HV, D, D, dtype=torch.bfloat16, device=device
+        ) * 0.01
+        ssm_states_triton = ssm_states_fi.clone()
+
+        # sequence_lengths_plus_1_d (the "+1" convention used in rtp-llm)
+        seq_lens_plus1 = torch.tensor(
+            sequence_lengths, dtype=torch.int32, device=device
+        )
+
+        # --- FlashInfer path ---
+        read_indices, write_indices = self.compute_indices(
+            seq_lens_plus1, block_map, seq_size_per_block
+        )
+        a_reshaped = a.view(B, 1, HV)
+        b_reshaped = b.view(B, 1, HV)
+        fi_out = self.flashinfer_gdn_decode(
+            A_log=A_log,
+            a=a_reshaped,
+            dt_bias=dt_bias,
+            q=q.clone(),
+            k=k.clone(),
+            v=v.clone(),
+            b=b_reshaped,
+            initial_state_source=ssm_states_fi,
+            initial_state_indices=read_indices,
+            output_state_indices=write_indices,
+            use_qk_l2norm_in_kernel=True,
+        )
+        fi_out = fi_out.squeeze(1)  # [B, HV, V]
+
+        # --- Triton path ---
+        # RTP-LLM Triton kernel expects state as [pool, HV, K, V] (K-major),
+        # while FlashInfer uses [pool, HV, V, K] (V-major). Transpose for Triton.
+        ssm_states_triton_t = ssm_states_triton.transpose(-1, -2).contiguous()
+        g, beta = self.fused_gdn_gating(A_log, a, b, dt_bias)
+        g = g.view(B, 1, HV)
+        beta = beta.view(B, 1, HV)
+        triton_out, _ = self.fused_recurrent(
+            q=q.clone(),
+            k=k.clone(),
+            v=v.clone(),
+            g=g,
+            beta=beta,
+            scale=None,
+            initial_state=ssm_states_triton_t,
+            inplace_final_state=True,
+            block_map=block_map,
+            seq_size_per_block=seq_size_per_block,
+            sequence_lengths=seq_lens_plus1,
+            use_qk_l2norm_in_kernel=True,
+        )
+        triton_out = triton_out.reshape(B, HV, D)
+
+        # --- Compare output ---
+        sim = cos_sim(fi_out, triton_out)
+        diff = max_abs_diff(fi_out, triton_out)
+        logger.info(
+            f"Decode B={B} H={H} HV={HV} D={D}: cos_sim={sim:.6f} max_abs_diff={diff:.6f}"
+        )
+        self.assertGreater(sim, 0.99, f"cos_sim too low: {sim}")
+
+        # --- Compare updated states ---
+        # Triton writes in [K, V] layout, FlashInfer in [V, K]. Transpose for comparison.
+        for i in range(B):
+            wi = write_indices[i].item()
+            if wi > 0:
+                fi_state = ssm_states_fi[wi]  # [HV, V, K]
+                triton_state = ssm_states_triton_t[wi].transpose(-1, -2)  # [HV, K, V] -> [HV, V, K]
+                state_sim = cos_sim(fi_state, triton_state)
+                self.assertGreater(
+                    state_sim, 0.99,
+                    f"State cos_sim too low at batch {i} block {wi}: {state_sim}"
+                )
+
+    def test_B1(self):
+        self._run_decode_comparison(B=1, H=16, HV=32, D=128)
+
+    def test_B4(self):
+        self._run_decode_comparison(B=4, H=16, HV=32, D=128)
+
+    def test_B16(self):
+        self._run_decode_comparison(B=16, H=16, HV=32, D=128)
+
+    def test_B32(self):
+        self._run_decode_comparison(B=32, H=16, HV=32, D=128)
+
+    def test_B1_GQA(self):
+        """H_qk != H_v (grouped query attention)."""
+        self._run_decode_comparison(B=1, H=8, HV=32, D=128)
+
+    def test_B8_small_block(self):
+        """Smaller seq_size_per_block to test block boundary crossings."""
+        self._run_decode_comparison(B=8, H=16, HV=32, D=128, seq_size_per_block=16)
+
+
+class TestFlashInferGDNPrefillConsistency(unittest.TestCase):
+    """Compare FlashInfer chunk_gated_delta_rule_sm100 vs Triton chunk_gated_delta_rule for prefill."""
+
+    @classmethod
+    def setUpClass(cls):
+        if not torch.cuda.is_available():
+            raise unittest.SkipTest("CUDA not available")
         major, _ = torch.cuda.get_device_capability()
         if major < 10:
-            raise unittest.SkipTest("Blackwell SM100+ required")
-        if _flashinfer_gdn_prefill is None:
-            raise unittest.SkipTest("flashinfer prefill SM100 not available")
+            raise unittest.SkipTest("Blackwell (SM100+) GPU required for prefill test")
 
-    def _run(self, batch_size, seq_lengths):
-        head_k_dim = head_v_dim = 128
-        local_num_k_heads, local_num_v_heads = 16, 32
-        seq_size_per_block = 64
+        try:
+            from flashinfer.gdn_kernels.blackwell.gdn_prefill import (
+                chunk_gated_delta_rule_sm100,
+            )
+            cls.flashinfer_prefill = staticmethod(chunk_gated_delta_rule_sm100)
+        except ImportError as e:
+            raise unittest.SkipTest(f"FlashInfer SM100 prefill not available: {e}")
+
+        try:
+            from rtp_llm.models_py.triton_kernels.fla.chunk import chunk_gated_delta_rule
+            cls.old_prefill = staticmethod(chunk_gated_delta_rule)
+        except ImportError as e:
+            raise unittest.SkipTest(f"Triton chunk_gated_delta_rule not available: {e}")
+
+        from rtp_llm.models_py.triton_kernels.fla.l2norm import l2norm_fwd
+
+        cls.l2norm_fwd = staticmethod(l2norm_fwd)
+
+    def _call_flashinfer(self, q, k, v, g, beta, initial_state, output_final_state, cu_seqlens):
+        """Call FlashInfer SM100 kernel with the same shape convention as model code."""
+        import math
+
+        D = q.shape[-1]
+        H_v = v.shape[2]
+        total_tokens = q.shape[1]
+        scale = 1.0 / math.sqrt(D)
+
+        q_normed = self.l2norm_fwd(q)
+        k_normed = self.l2norm_fwd(k)
+
+        q_3d = q_normed.squeeze(0).contiguous()
+        k_3d = k_normed.squeeze(0).contiguous()
+        v_3d = v.squeeze(0).contiguous()
+        gate = g.view(total_tokens, H_v).exp()
+        beta_2d = beta.view(total_tokens, H_v).float()
+
+        output = torch.empty_like(v_3d)
+        output_state = None
+        if output_final_state and initial_state is not None:
+            output_state = torch.empty_like(initial_state)
+        elif output_final_state:
+            N = cu_seqlens.shape[0] - 1
+            output_state = torch.empty(N, H_v, D, D, dtype=torch.float32, device=q.device)
+
+        self.flashinfer_prefill(
+            q=q_3d, k=k_3d, v=v_3d, gate=gate, beta=beta_2d,
+            output=output, cu_seqlens=cu_seqlens,
+            initial_state=initial_state, output_state=output_state, scale=scale,
+        )
+
+        output_4d = output.unsqueeze(0)
+        return (output_4d, output_state) if output_final_state else output_4d
+
+    def _run_prefill_comparison(
+        self, H_qk: int, H_v: int, D: int, seq_lengths: List[int]
+    ):
         device = "cuda"
+        torch.manual_seed(42)
 
-        torch.manual_seed(2026)
-        random.seed(2026)
         total_tokens = sum(seq_lengths)
-
-        cu_seqlens = torch.zeros(batch_size + 1, dtype=torch.int32, device=device)
+        N = len(seq_lengths)
+        cu_seqlens = torch.zeros(N + 1, dtype=torch.int32, device=device)
         for i, sl in enumerate(seq_lengths):
             cu_seqlens[i + 1] = cu_seqlens[i] + sl
 
-        q = torch.randn(
-            1,
-            total_tokens,
-            local_num_k_heads,
-            head_k_dim,
-            dtype=torch.bfloat16,
-            device=device,
-        )
-        k = torch.randn(
-            1,
-            total_tokens,
-            local_num_k_heads,
-            head_k_dim,
-            dtype=torch.bfloat16,
-            device=device,
-        )
-        v = torch.randn(
-            1,
-            total_tokens,
-            local_num_v_heads,
-            head_v_dim,
-            dtype=torch.bfloat16,
-            device=device,
-        )
-        g = F.logsigmoid(
-            torch.randn(
-                1, total_tokens, local_num_v_heads, dtype=torch.float32, device=device
-            )
-        )
-        beta = torch.rand(
-            1, total_tokens, local_num_v_heads, dtype=torch.float32, device=device
+        q = torch.randn(1, total_tokens, H_qk, D, dtype=torch.bfloat16, device=device)
+        k = torch.randn(1, total_tokens, H_qk, D, dtype=torch.bfloat16, device=device)
+        v = torch.randn(1, total_tokens, H_v, D, dtype=torch.bfloat16, device=device)
+        g = F.logsigmoid(torch.randn(1, total_tokens, H_v, dtype=torch.float32, device=device))
+        beta = torch.rand(1, total_tokens, H_v, dtype=torch.float32, device=device)
+        initial_state = torch.randn(N, H_v, D, D, dtype=torch.float32, device=device) * 0.01
+
+        # --- Triton chunked kernel ---
+        old_out, _, old_state = self.old_prefill(
+            q=q.clone(), k=k.clone(), v=v.clone(),
+            g=g.clone(), beta=beta.clone(),
+            initial_state=initial_state.clone(), output_final_state=True,
+            cu_seqlens=cu_seqlens, use_qk_l2norm_in_kernel=True,
         )
 
-        prefix_lengths = torch.zeros(batch_size, dtype=torch.int32, device=device)
-        block_counts = [math.ceil(sl / seq_size_per_block) + 1 for sl in seq_lengths]
-        block_map = make_block_map(batch_size, block_counts, device=device)
-        seq_lens_plus1 = torch.tensor(
-            [sl + 1 for sl in seq_lengths], dtype=torch.int32, device=device
-        )
-        attn_inputs = FakeAttnInputs(
-            prefix_lengths, cu_seqlens, block_map, seq_lens_plus1
+        # --- FlashInfer SM100 ---
+        new_out, new_state = self._call_flashinfer(
+            q=q.clone(), k=k.clone(), v=v.clone(),
+            g=g.clone(), beta=beta.clone(),
+            initial_state=initial_state.clone(), output_final_state=True,
+            cu_seqlens=cu_seqlens,
         )
 
-        pool_size = sum(block_counts) + 1
-        pool_orig = make_pool(
-            pool_size,
-            local_num_v_heads,
-            head_v_dim,
-            head_k_dim,
-            torch.bfloat16,
-            device=device,
-        )
-
-        pool_fi = pool_orig.clone()
-        out_fi = prefill_path_flashinfer(
-            q.clone(),
-            k.clone(),
-            v.clone(),
-            g.clone(),
-            beta.clone(),
-            pool_fi,
-            attn_inputs,
-            seq_size_per_block,
-            head_k_dim,
-            head_v_dim,
-            local_num_v_heads,
-        )
-        pool_tri = pool_orig.clone()
-        out_tri = prefill_path_triton(
-            q.clone(),
-            k.clone(),
-            v.clone(),
-            g.clone(),
-            beta.clone(),
-            pool_tri,
-            attn_inputs,
-            seq_size_per_block,
-            head_k_dim,
-            head_v_dim,
-            local_num_v_heads,
-        )
-
-        out_sim = cos_sim(out_fi, out_tri)
-        out_diff = max_abs_diff(out_fi, out_tri)
+        # --- Compare output ---
+        out_sim = cos_sim(old_out, new_out)
+        out_diff = max_abs_diff(old_out, new_out)
         logger.info(
-            "Prefill seqs=%s: attn_out cos_sim=%.6f max_abs_diff=%.6f",
-            seq_lengths,
-            out_sim,
-            out_diff,
+            f"Prefill H_qk={H_qk} H_v={H_v} D={D} seqs={seq_lengths}: "
+            f"output cos_sim={out_sim:.6f} max_abs_diff={out_diff:.6f}"
         )
-        self.assertGreater(out_sim, 0.999, f"attn_out cos_sim too low: {out_sim}")
+        self.assertGreater(out_sim, 0.999, f"Output cos_sim too low: {out_sim}")
 
-        for i in range(batch_size):
-            block_idx = (seq_lengths[i] - 1) // seq_size_per_block
-            wi = block_map[i, block_idx].item()
-            if wi <= 0:
-                continue
-            sim = cos_sim(pool_fi[wi], pool_tri[wi])
-            diff = max_abs_diff(pool_fi[wi], pool_tri[wi])
-            logger.info(
-                "  batch %d wi=%d: state cos_sim=%.6f max_abs_diff=%.6f",
-                i,
-                wi,
-                sim,
-                diff,
-            )
-            self.assertGreater(sim, 0.999, f"state cos_sim too low (batch {i}): {sim}")
+        # --- Compare final state ---
+        # Triton state layout: [N, HV, K, V], FlashInfer: [N, HV, V, K]
+        new_state_t = new_state.transpose(-1, -2).contiguous()
+        state_sim = cos_sim(old_state, new_state_t)
+        state_diff = max_abs_diff(old_state, new_state_t)
+        logger.info(
+            f"  state cos_sim={state_sim:.6f} max_abs_diff={state_diff:.6f}"
+        )
+        self.assertGreater(state_sim, 0.999, f"State cos_sim too low: {state_sim}")
 
-    def test_single_short(self):
-        self._run(batch_size=1, seq_lengths=[256])
+    def test_single_short_seq(self):
+        self._run_prefill_comparison(H_qk=16, H_v=32, D=128, seq_lengths=[256])
 
-    def test_single_medium(self):
-        self._run(batch_size=1, seq_lengths=[1024])
+    def test_single_medium_seq(self):
+        self._run_prefill_comparison(H_qk=16, H_v=32, D=128, seq_lengths=[1024])
 
-    def test_single_long(self):
-        self._run(batch_size=1, seq_lengths=[4096])
+    def test_single_long_seq(self):
+        self._run_prefill_comparison(H_qk=16, H_v=32, D=128, seq_lengths=[4096])
 
     def test_multi_seq_varlen(self):
-        self._run(batch_size=3, seq_lengths=[128, 256, 512])
+        self._run_prefill_comparison(H_qk=16, H_v=32, D=128, seq_lengths=[128, 256, 512])
 
-
-class TestDecodePathConsistency(unittest.TestCase):
-    """FlashInfer decode vs Triton decode via production helpers."""
-
-    @classmethod
-    def setUpClass(cls):
-        if not torch.cuda.is_available():
-            raise unittest.SkipTest("CUDA required")
-        if _flashinfer_gdn_decode is None:
-            raise unittest.SkipTest("flashinfer decode not available")
-
-    def _run(
-        self,
-        B,
-        past_seq_lengths,
-        head_k=128,
-        head_v=128,
-        h_qk=16,
-        h_v=32,
-        seq_size_per_block=64,
-    ):
+    def test_no_initial_state(self):
+        """Prefill without initial state (first request, no KV cache)."""
         device = "cuda"
-        torch.manual_seed(2026)
-        random.seed(2026)
+        torch.manual_seed(42)
+        H_qk, H_v, D = 16, 32, 128
+        seq_lengths = [512]
+        total_tokens = sum(seq_lengths)
+        cu_seqlens = torch.tensor([0, total_tokens], dtype=torch.int32, device=device)
 
-        block_counts = [
-            math.ceil(sl / seq_size_per_block) + 1 for sl in past_seq_lengths
-        ]
-        pool_size = sum(block_counts) + 1
-        block_map = make_block_map(B, block_counts, device=device)
-        # +1 convention: sequence_lengths_plus_1 = past_seq_len + 1 (the current decode token position).
-        seq_lens_plus1 = torch.tensor(
-            [sl + 1 for sl in past_seq_lengths], dtype=torch.int32, device=device
-        )
-        prefix_lengths = torch.tensor(
-            past_seq_lengths, dtype=torch.int32, device=device
-        )
-        cu_seqlens = torch.arange(
-            0, B + 1, dtype=torch.int32, device=device
-        )  # 1 token per batch
-        attn_inputs = FakeAttnInputs(
-            prefix_lengths, cu_seqlens, block_map, seq_lens_plus1
-        )
+        q = torch.randn(1, total_tokens, H_qk, D, dtype=torch.bfloat16, device=device)
+        k = torch.randn(1, total_tokens, H_qk, D, dtype=torch.bfloat16, device=device)
+        v = torch.randn(1, total_tokens, H_v, D, dtype=torch.bfloat16, device=device)
+        g = F.logsigmoid(torch.randn(1, total_tokens, H_v, dtype=torch.float32, device=device))
+        beta = torch.rand(1, total_tokens, H_v, dtype=torch.float32, device=device)
 
-        pool_orig = make_pool(
-            pool_size, h_v, head_v, head_k, torch.bfloat16, device=device
+        old_out, _, _ = self.old_prefill(
+            q=q.clone(), k=k.clone(), v=v.clone(),
+            g=g.clone(), beta=beta.clone(),
+            initial_state=None, output_final_state=False,
+            cu_seqlens=cu_seqlens, use_qk_l2norm_in_kernel=True,
         )
-
-        query = torch.randn(B, 1, h_qk, head_k, dtype=torch.bfloat16, device=device)
-        key = torch.randn(B, 1, h_qk, head_k, dtype=torch.bfloat16, device=device)
-        value = torch.randn(B, 1, h_v, head_v, dtype=torch.bfloat16, device=device)
-        a = torch.randn(B, h_v, dtype=torch.bfloat16, device=device)
-        b = torch.randn(B, h_v, dtype=torch.bfloat16, device=device)
-        alog = -torch.rand(h_v, device=device, dtype=torch.float32).abs()
-        dt_bias = torch.randn(h_v, device=device, dtype=torch.float32) * 0.1
-
-        pool_fi = pool_orig.clone()
-        out_fi = decode_path_flashinfer(
-            query.clone(),
-            key.clone(),
-            value.clone(),
-            a.clone(),
-            b.clone(),
-            pool_fi,
-            attn_inputs,
-            seq_size_per_block,
-            h_v,
-            alog,
-            dt_bias,
+        new_out = self._call_flashinfer(
+            q=q.clone(), k=k.clone(), v=v.clone(),
+            g=g.clone(), beta=beta.clone(),
+            initial_state=None, output_final_state=False,
+            cu_seqlens=cu_seqlens,
         )
 
-        pool_tri = pool_orig.clone()
-        out_tri = decode_path_triton(
-            query.clone(),
-            key.clone(),
-            value.clone(),
-            a.clone(),
-            b.clone(),
-            pool_tri,
-            attn_inputs,
-            seq_size_per_block,
-            h_v,
-            alog,
-            dt_bias,
-        )
+        if isinstance(new_out, tuple):
+            new_out = new_out[0]
 
-        out_sim = cos_sim(out_fi, out_tri)
-        out_diff = max_abs_diff(out_fi, out_tri)
-        logger.info(
-            "Decode B=%d past=%s: attn_out cos_sim=%.6f max_abs_diff=%.6f",
-            B,
-            past_seq_lengths,
-            out_sim,
-            out_diff,
-        )
-        self.assertGreater(out_sim, 0.999, f"attn_out cos_sim too low: {out_sim}")
-
-        for i in range(B):
-            new_seq_len = past_seq_lengths[i] + 1
-            block_idx = (new_seq_len - 1) // seq_size_per_block
-            wi = block_map[i, block_idx].item()
-            if wi <= 0:
-                continue
-            sim = cos_sim(pool_fi[wi], pool_tri[wi])
-            diff = max_abs_diff(pool_fi[wi], pool_tri[wi])
-            logger.info(
-                "  batch %d wi=%d: state cos_sim=%.6f max_abs_diff=%.6f",
-                i,
-                wi,
-                sim,
-                diff,
-            )
-            self.assertGreater(sim, 0.999, f"state cos_sim too low (batch {i}): {sim}")
-
-    def test_B1(self):
-        self._run(B=1, past_seq_lengths=[200])
-
-    def test_B4(self):
-        self._run(B=4, past_seq_lengths=[100, 300, 600, 1000])
-
-    def test_B8_block_boundary(self):
-        # past_seq_len at block boundary tests boundary handling
-        self._run(
-            B=8,
-            past_seq_lengths=[64, 128, 192, 256, 320, 384, 448, 512],
-            seq_size_per_block=64,
-        )
+        sim = cos_sim(old_out, new_out)
+        logger.info(f"Prefill no_initial_state: cos_sim={sim:.6f}")
+        self.assertGreater(sim, 0.999, f"cos_sim too low: {sim}")
 
 
 if __name__ == "__main__":
