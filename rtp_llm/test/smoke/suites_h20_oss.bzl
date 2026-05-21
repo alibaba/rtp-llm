@@ -458,6 +458,80 @@ def h20_oss_suites():
                 gpu_type=["H20"],
             ),
             smoke_test(
+                name="next_flexlb_pd_v1_kv_affinity",
+                task_info="data/model/deepseek_v2/q_r_mla_pymodel.json",
+                envs={
+                    "flexlb": [
+                        "FLEXLB_CONFIG={\"enableQueueing\":true,\"deploy\":\"DISAGGREGATED\",\"loadBalanceStrategy\":\"SHORTEST_TTFT\",\"prefillBatchWaitTimeMs\":100,\"kvCache\":\"LOCAL_STATIC\",\"staticCacheBlockSize\":500,\"batchSize\":1,\"prefillLbTimeoutMs\":300,\"prefillGenerateTimeoutMs\":5000,\"enableGrpcPrefillMaster\":false,\"enableGrpcCacheStatus\":true,\"enableGrpcEngineStatus\":true,\"maxPrefillQueueSize\":10,\"prefillQueueSizeThreshold\":8,\"decodeConcurrencyLimit\":128,\"maxQueueSize\":20,\"dpBalanceEnabled\":true,\"dpBatchSizeMax\":0,\"dpBatchWindowMs\":30,\"dpBatchTimeoutMs\":200,\"dpAssignStrategy\":\"RR\"}",
+                        "FLEXLB_SMOKE_INTEGRATION_CHECK=True",
+                        "FLEXLB_SMOKE_CHECK_KV_AFFINITY_WITH_FOLLOWUP=True",
+                        "FLEXLB_SMOKE_CHECK_CACHE_AFFINITY=False",
+                        "FLEXLB_SMOKE_CHECK_QUEUE=False",
+                        "FLEXLB_SMOKE_MAX_TOKENS=4",
+                        "FLEXLB_SMOKE_CACHE_PROMPT_REPEAT_CANDIDATES=4,8,16",
+                    ],
+                    "frontend": ["DP_CONTROLLER_MANAGED=1"],
+                    "prefill": ["DP_CONTROLLER_MANAGED=1"],
+                },
+                smoke_args={
+                    "prefill": "--warm_up 0 --seq_size_per_block 8 --act_type BF16 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --tp_size 1 --dp_size 2 --world_size 2 --reuse_cache 1 --write_cache_sync 1 --reserver_runtime_mem_mb 16697",
+                    "decode": "--warm_up 0 --seq_size_per_block 8 --act_type BF16 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --tp_size 1 --world_size 1 --reuse_cache 1 --write_cache_sync 1 --reserver_runtime_mem_mb 16697",
+                    "frontend": "--role_type FRONTEND --use_local 1 --seq_size_per_block 8",
+                    "flexlb": "",
+                },
+                data=["//rtp_llm/flexlb:flexlb_api_jar"],
+                gpu_type=["H20"],
+            ),
+            smoke_test(
+                name="next_flexlb_pd_v1_low_concurrency",
+                task_info="data/model/deepseek_v2/q_r_mla_pymodel.json",
+                envs={
+                    "flexlb": [
+                        "FLEXLB_CONFIG={\"enableQueueing\":true,\"deploy\":\"DISAGGREGATED\",\"loadBalanceStrategy\":\"SHORTEST_TTFT\",\"prefillBatchWaitTimeMs\":100,\"kvCache\":\"LOCAL_STATIC\",\"staticCacheBlockSize\":500,\"batchSize\":1,\"prefillLbTimeoutMs\":300,\"prefillGenerateTimeoutMs\":5000,\"enableGrpcPrefillMaster\":false,\"enableGrpcCacheStatus\":true,\"enableGrpcEngineStatus\":true,\"maxPrefillQueueSize\":10,\"prefillQueueSizeThreshold\":8,\"decodeConcurrencyLimit\":128,\"maxQueueSize\":20,\"dpBalanceEnabled\":true,\"dpBatchSizeMax\":0,\"dpBatchWindowMs\":30,\"dpBatchTimeoutMs\":200,\"dpAssignStrategy\":\"RR\"}",
+                        "FLEXLB_SMOKE_INTEGRATION_CHECK=True",
+                        "FLEXLB_SMOKE_CHECK_LOW_CONCURRENCY_FAKE_PAD=True",
+                        "FLEXLB_SMOKE_CHECK_CACHE_AFFINITY=False",
+                        "FLEXLB_SMOKE_CHECK_QUEUE=False",
+                        "FLEXLB_SMOKE_MAX_TOKENS=4",
+                    ],
+                    "frontend": ["DP_CONTROLLER_MANAGED=1"],
+                    "prefill": ["DP_CONTROLLER_MANAGED=1"],
+                },
+                smoke_args={
+                    "prefill": "--warm_up 0 --seq_size_per_block 8 --act_type BF16 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --tp_size 1 --dp_size 2 --world_size 2 --reuse_cache 1 --write_cache_sync 1 --reserver_runtime_mem_mb 16697",
+                    "decode": "--warm_up 0 --seq_size_per_block 8 --act_type BF16 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --tp_size 1 --world_size 1 --reuse_cache 1 --write_cache_sync 1 --reserver_runtime_mem_mb 16697",
+                    "frontend": "--role_type FRONTEND --use_local 1 --seq_size_per_block 8",
+                    "flexlb": "",
+                },
+                data=["//rtp_llm/flexlb:flexlb_api_jar"],
+                gpu_type=["H20"],
+            ),
+            smoke_test(
+                name="next_flexlb_pd_v1_high_concurrency",
+                task_info="data/model/deepseek_v2/q_r_mla_pymodel.json",
+                envs={
+                    "flexlb": [
+                        "FLEXLB_CONFIG={\"enableQueueing\":true,\"deploy\":\"DISAGGREGATED\",\"loadBalanceStrategy\":\"SHORTEST_TTFT\",\"prefillBatchWaitTimeMs\":100,\"kvCache\":\"LOCAL_STATIC\",\"staticCacheBlockSize\":500,\"batchSize\":1,\"prefillLbTimeoutMs\":300,\"prefillGenerateTimeoutMs\":5000,\"enableGrpcPrefillMaster\":false,\"enableGrpcCacheStatus\":true,\"enableGrpcEngineStatus\":true,\"maxPrefillQueueSize\":10,\"prefillQueueSizeThreshold\":8,\"decodeConcurrencyLimit\":128,\"maxQueueSize\":20,\"dpBalanceEnabled\":true,\"dpBatchSizeMax\":0,\"dpBatchWindowMs\":30,\"dpBatchTimeoutMs\":200,\"dpAssignStrategy\":\"RR\"}",
+                        "FLEXLB_SMOKE_INTEGRATION_CHECK=True",
+                        "FLEXLB_SMOKE_CHECK_HIGH_CONCURRENCY_FULL_BATCH=True",
+                        "FLEXLB_SMOKE_CHECK_CACHE_AFFINITY=False",
+                        "FLEXLB_SMOKE_CHECK_QUEUE=False",
+                        "FLEXLB_SMOKE_MAX_TOKENS=4",
+                        "FLEXLB_SMOKE_HIGH_CONCURRENCY_REQUESTS=4",
+                    ],
+                    "frontend": ["DP_CONTROLLER_MANAGED=1"],
+                    "prefill": ["DP_CONTROLLER_MANAGED=1"],
+                },
+                smoke_args={
+                    "prefill": "--warm_up 0 --seq_size_per_block 8 --act_type BF16 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --tp_size 1 --dp_size 2 --world_size 2 --reuse_cache 1 --write_cache_sync 1 --reserver_runtime_mem_mb 16697",
+                    "decode": "--warm_up 0 --seq_size_per_block 8 --act_type BF16 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --tp_size 1 --world_size 1 --reuse_cache 1 --write_cache_sync 1 --reserver_runtime_mem_mb 16697",
+                    "frontend": "--role_type FRONTEND --use_local 1 --seq_size_per_block 8",
+                    "flexlb": "",
+                },
+                data=["//rtp_llm/flexlb:flexlb_api_jar"],
+                gpu_type=["H20"],
+            ),
+            smoke_test(
                 # KV-cache eviction soak. Sends rounds × per_round unique prompts
                 # (each with a fresh suffix so no prefix is shared) to force the
                 # prefill cache through fill → evict → refill cycles. Verifies:
