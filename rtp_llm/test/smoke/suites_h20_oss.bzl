@@ -488,8 +488,8 @@ def h20_oss_suites():
                     "prefill": ["DP_CONTROLLER_MANAGED=1"],
                 },
                 smoke_args={
-                    "prefill": "--warm_up 0 --seq_size_per_block 8 --act_type BF16 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --tp_size 1 --dp_size 2 --world_size 2 --reuse_cache 1 --write_cache_sync 1 --reserver_runtime_mem_mb 8000",
-                    "decode": "--warm_up 0 --seq_size_per_block 8 --act_type BF16 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --tp_size 1 --world_size 1 --reuse_cache 1 --write_cache_sync 1 --reserver_runtime_mem_mb 8000",
+                    "prefill": "--warm_up 0 --seq_size_per_block 8 --act_type BF16 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --tp_size 1 --dp_size 2 --world_size 2 --reuse_cache 1 --write_cache_sync 1 --kv_cache_mem_mb 512",
+                    "decode": "--warm_up 0 --seq_size_per_block 8 --act_type BF16 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --tp_size 1 --world_size 1 --reuse_cache 1 --write_cache_sync 1 --kv_cache_mem_mb 512",
                     "frontend": "--role_type FRONTEND --use_local 1 --seq_size_per_block 8",
                     "flexlb": "",
                 },
