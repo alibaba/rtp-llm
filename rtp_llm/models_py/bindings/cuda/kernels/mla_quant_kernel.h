@@ -44,4 +44,14 @@ void cp_gather_and_upconvert_fp8_kv_cache(const torch::Tensor& src_cache,       
                                           const torch::Tensor& workspace_starts,   // [BATCH]
                                           int64_t              batch_size);
 
+// V2: Gather and upconvert FP8 KV cache to a single fused BF16 buffer [total_tokens, 576]
+// One CUDA block per token for full GPU utilization.
+void cp_gather_and_upconvert_fp8_kv_cache_v2(const torch::Tensor& src_cache,          // [NUM_BLOCKS, BLOCK_SIZE, 656]
+                                             torch::Tensor&       dst_fused,           // [TOT_TOKENS, 576]
+                                             const torch::Tensor& block_table,         // [BATCH, BLOCK_INDICES]
+                                             const torch::Tensor& seq_lens,            // [BATCH]
+                                             const torch::Tensor& workspace_starts,    // [BATCH]
+                                             int64_t              batch_size,
+                                             int64_t              total_tokens);
+
 }  // namespace rtp_llm
