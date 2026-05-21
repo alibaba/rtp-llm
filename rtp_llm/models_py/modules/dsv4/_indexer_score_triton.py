@@ -53,30 +53,31 @@ import triton.language as tl
     ]
 )
 def _v4_indexer_score_fwd(
-    q_ptr,           # [B, S, H, D] bf16
-    kv_ptr,          # [B, T, D]    bf16
-    w_ptr,           # [B, S, H]    fp32 (caller casts)
-    q_pos_ptr,       # [B, S] int32, or 0 if APPLY_MASK==False
-    out_ptr,         # [B, S, T] fp32
-
+    q_ptr,  # [B, S, H, D] bf16
+    kv_ptr,  # [B, T, D]    bf16
+    w_ptr,  # [B, S, H]    fp32 (caller casts)
+    q_pos_ptr,  # [B, S] int32, or 0 if APPLY_MASK==False
+    out_ptr,  # [B, S, T] fp32
     # strides
-    q_b, q_s: tl.constexpr, q_h: tl.constexpr,                  # q strides; d-stride==1 assumed (contiguous)
-    kv_b, kv_t: tl.constexpr,                                   # kv strides; d-stride==1 assumed
-    w_b, w_s: tl.constexpr,                                     # w strides; h-stride==1 assumed
-    qpos_b,                                                     # q_pos stride for B; s-stride==1
-    out_b, out_s,                                               # out strides; t-stride==1 assumed
-
+    q_b,
+    q_s: tl.constexpr,
+    q_h: tl.constexpr,  # q strides; d-stride==1 assumed (contiguous)
+    kv_b,
+    kv_t: tl.constexpr,  # kv strides; d-stride==1 assumed
+    w_b,
+    w_s: tl.constexpr,  # w strides; h-stride==1 assumed
+    qpos_b,  # q_pos stride for B; s-stride==1
+    out_b,
+    out_s,  # out strides; t-stride==1 assumed
     # geometry
     S,
     T,
     H: tl.constexpr,
     D: tl.constexpr,
     COMPRESS_RATIO: tl.constexpr,
-
     # tile sizes
     BLOCK_S: tl.constexpr,
     BLOCK_T: tl.constexpr,
-
     # toggles
     APPLY_MASK: tl.constexpr,
 ):
@@ -87,12 +88,12 @@ def _v4_indexer_score_fwd(
     using fp32 accumulators.  D and H are kept as compile-time constants
     so each per-head dot is unrolled into a 1-shot tile load + reduce.
     """
-    pid_b = tl.program_id(0)
-    pid_s = tl.program_id(1)
-    pid_t = tl.program_id(2)
+    pid_b = tl.program_id(0).to(tl.int64)
+    pid_s = tl.program_id(1).to(tl.int64)
+    pid_t = tl.program_id(2).to(tl.int64)
 
-    s_off = pid_s * BLOCK_S + tl.arange(0, BLOCK_S)
-    t_off = pid_t * BLOCK_T + tl.arange(0, BLOCK_T)
+    s_off = pid_s * BLOCK_S + tl.arange(0, BLOCK_S).to(tl.int64)
+    t_off = pid_t * BLOCK_T + tl.arange(0, BLOCK_T).to(tl.int64)
     s_mask = s_off < S
     t_mask = t_off < T
 
@@ -101,12 +102,7 @@ def _v4_indexer_score_fwd(
     # fp32 accumulator (out_dtype below).  Casting to fp32 here would
     # force the dot through FP32 SIMT / TF32 and lose ~30× throughput.
     d_idx = tl.arange(0, D)
-    k_ptrs = (
-        kv_ptr
-        + pid_b * kv_b
-        + t_off[:, None] * kv_t
-        + d_idx[None, :]
-    )
+    k_ptrs = kv_ptr + pid_b * kv_b + t_off[:, None] * kv_t + d_idx[None, :]
     k_tile = tl.load(k_ptrs, mask=t_mask[:, None], other=0.0)  # [BLOCK_T, D] bf16
     # Pre-transpose K once.  Inside the H loop, we'd otherwise tl.trans
     # the same tile 64 times — the compiler can sometimes hoist that
@@ -124,7 +120,7 @@ def _v4_indexer_score_fwd(
         thr = (q_pos + 1) // COMPRESS_RATIO  # [BLOCK_S]
         # mask[s, t] = (t < thr[s])
         # broadcast t_off [BLOCK_T] vs thr [BLOCK_S]
-        causal = t_off[None, :] < thr[:, None]   # [BLOCK_S, BLOCK_T]
+        causal = t_off[None, :] < thr[:, None]  # [BLOCK_S, BLOCK_T]
     else:
         causal = tl.full((BLOCK_S, BLOCK_T), True, dtype=tl.int1)
 
@@ -132,13 +128,7 @@ def _v4_indexer_score_fwd(
 
     for h in tl.static_range(H):
         # q[s, h, d] tile [BLOCK_S, D] — keep bf16 for tensor-core mma.
-        q_ptrs = (
-            q_ptr
-            + pid_b * q_b
-            + s_off[:, None] * q_s
-            + h * q_h
-            + d_idx[None, :]
-        )
+        q_ptrs = q_ptr + pid_b * q_b + s_off[:, None] * q_s + h * q_h + d_idx[None, :]
         q_tile = tl.load(q_ptrs, mask=s_mask[:, None], other=0.0)  # [BLOCK_S, D] bf16
 
         # dot: [BLOCK_S, D] x [D, BLOCK_T] = [BLOCK_S, BLOCK_T]
@@ -156,21 +146,18 @@ def _v4_indexer_score_fwd(
     # topk).  Causal-masked entries get -inf so the downstream topk
     # naturally drops them.
     final = tl.where(causal, acc, float("-inf"))
-    out_ptrs = (
-        out_ptr
-        + pid_b * out_b
-        + s_off[:, None] * out_s
-        + t_off[None, :]
-    )
+    out_ptrs = out_ptr + pid_b * out_b + s_off[:, None] * out_s + t_off[None, :]
     write_mask = s_mask[:, None] & t_mask[None, :]
     tl.store(out_ptrs, final, mask=write_mask)
 
 
 def v4_indexer_score(
-    q: torch.Tensor,                       # [B, S, H, D] bf16, contiguous in last dim
-    kv: torch.Tensor,                      # [B, T, D]    bf16
-    weights: torch.Tensor,                 # [B, S, H]    bf16 or fp32
-    q_pos: Optional[torch.Tensor] = None,  # [B, S] int32 — global Q position; None for no mask
+    q: torch.Tensor,  # [B, S, H, D] bf16, contiguous in last dim
+    kv: torch.Tensor,  # [B, T, D]    bf16
+    weights: torch.Tensor,  # [B, S, H]    bf16 or fp32
+    q_pos: Optional[
+        torch.Tensor
+    ] = None,  # [B, S] int32 — global Q position; None for no mask
     compress_ratio: int = 1,
 ) -> torch.Tensor:
     """V4 indexer fused score.  See module docstring for the kernel math.
@@ -186,7 +173,11 @@ def v4_indexer_score(
     B, S, H, D = q.shape
     Bk, T, Dk = kv.shape
     assert B == Bk and D == Dk, f"q/kv batch/D mismatch: q={q.shape} kv={kv.shape}"
-    assert weights.shape == (B, S, H), f"weights shape={weights.shape} expected {(B,S,H)}"
+    assert weights.shape == (
+        B,
+        S,
+        H,
+    ), f"weights shape={weights.shape} expected {(B,S,H)}"
 
     weights = weights.contiguous()
     if weights.dtype != torch.float32:
@@ -223,15 +214,28 @@ def v4_indexer_score(
     grid = (B, triton.cdiv(S, BLOCK_S), triton.cdiv(T, BLOCK_T))
 
     _v4_indexer_score_fwd[grid](
-        q, kv, weights, q_pos, out,
-        q.stride(0), q.stride(1), q.stride(2),
-        kv.stride(0), kv.stride(1),
-        weights.stride(0), weights.stride(1),
+        q,
+        kv,
+        weights,
+        q_pos,
+        out,
+        q.stride(0),
+        q.stride(1),
+        q.stride(2),
+        kv.stride(0),
+        kv.stride(1),
+        weights.stride(0),
+        weights.stride(1),
         q_pos.stride(0) if apply_mask else 0,
-        out.stride(0), out.stride(1),
-        S=S, T=T, H=H, D=D,
+        out.stride(0),
+        out.stride(1),
+        S=S,
+        T=T,
+        H=H,
+        D=D,
         COMPRESS_RATIO=compress_ratio,
-        BLOCK_S=BLOCK_S, BLOCK_T=BLOCK_T,
+        BLOCK_S=BLOCK_S,
+        BLOCK_T=BLOCK_T,
         APPLY_MASK=apply_mask,
         num_warps=4,
         num_stages=2,

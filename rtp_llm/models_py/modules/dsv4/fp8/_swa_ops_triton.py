@@ -162,7 +162,7 @@ def _compute_swa_slot_mapping_kernel(
     so the FP8 insert kernel skips them — matches the sliding-window
     contract that only the last ``2*eb`` tokens persist.
     """
-    batch_idx = tl.program_id(0)
+    batch_idx = tl.program_id(0).to(tl.int64)
     chunk_idx = tl.program_id(1)
 
     if batch_idx >= num_reqs:
@@ -195,7 +195,7 @@ def _compute_swa_slot_mapping_kernel(
         tl.full((BLOCK_M,), -1, dtype=tl.int64),
     )
 
-    out_ptr = slot_mapping_ptr + query_start + i
+    out_ptr = slot_mapping_ptr + query_start.to(tl.int64) + i.to(tl.int64)
     tl.store(out_ptr, slot, mask=valid_token)
 
 
