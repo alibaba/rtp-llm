@@ -90,7 +90,7 @@ class BatchedDataRouter(FusedMoeDataRouter):
         resolver = MoeConfigResolver()
         checker.check(not resolver.has_quantization(config))
 
-        checker.check(resolver.is_single_gpu(config))
+        checker.check(resolver.is_single_gpu(config) or resolver.is_tp_equal_ep(config))
 
     def __init__(
         self,
