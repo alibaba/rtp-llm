@@ -50,8 +50,15 @@ bool SingleTypeKVCacheAllocator::doInit() {
         return false;
     }
 
+    SharedBlockCache* shared_cache_raw = shared_block_cache_ ? shared_block_cache_.get() : nullptr;
+
+    if (shared_block_cache_) {
+        std::vector<BlockPoolPtr> group_pools = {block_pool_};
+        shared_block_cache_->init(1, group_pools);
+    }
+
     std::vector<int> layer_ids(config_.global_layer_ids[0]);
-    full_kv_cache_group_ = std::make_shared<FullKVCacheGroup>(layer_ids, spec, block_pool_, 0);
+    full_kv_cache_group_ = std::make_shared<FullKVCacheGroup>(layer_ids, spec, block_pool_, 0, shared_cache_raw);
 
     if (!full_kv_cache_group_->init()) {
         RTP_LLM_LOG_ERROR("Failed to initialize FullKVCacheGroup");

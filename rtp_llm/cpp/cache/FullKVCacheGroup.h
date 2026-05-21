@@ -11,8 +11,9 @@ public:
     FullKVCacheGroup(const LayerIdsType&          layer_ids,
                      std::shared_ptr<KVCacheSpec> kvcache_spec,
                      BlockPoolPtr                 block_pool,
-                     int                          group_id):
-        KVCacheGroup(layer_ids, kvcache_spec, block_pool, group_id) {}
+                     int                          group_id,
+                     SharedBlockCache*            shared_cache = nullptr):
+        KVCacheGroup(layer_ids, kvcache_spec, block_pool, group_id, shared_cache) {}
 
     bool malloc(BlockIds& block_ids, int seq_len, bool enable_reuse_cache = false, int reserve_step = 0) override;
     MatchResult match(const CacheKeysType& cache_keys) override;

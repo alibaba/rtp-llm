@@ -14,8 +14,9 @@ public:
                        std::shared_ptr<KVCacheSpec> kvcache_spec,
                        BlockPoolPtr                 block_pool,
                        int                          group_id,
-                       int                          linear_step = 0):
-        KVCacheGroup(layer_ids, kvcache_spec, block_pool, group_id), linear_step_(linear_step) {}
+                       int                          linear_step  = 0,
+                       SharedBlockCache*            shared_cache = nullptr):
+        KVCacheGroup(layer_ids, kvcache_spec, block_pool, group_id, shared_cache), linear_step_(linear_step) {}
 
     MatchResult match(const CacheKeysType& cache_keys) override;
     // Match a single cache key (used by Hybrid allocator to do right-to-left joint matching).

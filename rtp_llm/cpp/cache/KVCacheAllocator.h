@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/BlockPool.h"
+#include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/cache/BufferTypes.h"
 
 namespace rtp_llm {
@@ -33,19 +34,14 @@ public:
     virtual std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int block_id) const = 0;
     virtual std::vector<BlockInfo>
     convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const = 0;
-    virtual BlockAddrInfo
-    convertIndexToAddr(int layer_id, KVCacheRegionName region_name, int block_id) const;
+    virtual BlockAddrInfo convertIndexToAddr(int layer_id, KVCacheRegionName region_name, int block_id) const;
     virtual std::vector<BlockInfo>
     convertIndexToBuffer(int layer_id, KVCacheRegionName region_name, int block_id) const;
-    virtual std::vector<BlockInfo>
-    convertIndexToBuffer(int layer_id,
-                         KVCacheRegionName region_name,
-                         int block_id,
-                         int partition_count,
-                         int partition_id) const;
+    virtual std::vector<BlockInfo> convertIndexToBuffer(
+        int layer_id, KVCacheRegionName region_name, int block_id, int partition_count, int partition_id) const;
     virtual std::shared_ptr<KVCacheResource> incrKVCacheRef(const KVCacheResource& kvcache_resource,
                                                             const CacheKeysType&   cache_keys,
-                                                            bool                   is_connector = false)            = 0;
+                                                            bool                   is_connector = false) = 0;
 
     virtual CacheLayerLayout allLayerCacheBase() const                                     = 0;
     virtual bool             updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
@@ -67,6 +63,14 @@ public:
         return block_pool_;
     }
 
+    SharedBlockCachePtr sharedBlockCache() const {
+        return shared_block_cache_;
+    }
+
+    void setSharedBlockCache(SharedBlockCachePtr shared_block_cache) {
+        shared_block_cache_ = std::move(shared_block_cache);
+    }
+
     // Reserve some blocks for already-running streams' future allocations.
     // Only applied to "init malloc" requests where batch_kv_cache_resource has no blocks yet.
     void setReserveBlockNum(size_t reserve_block_num) {
@@ -76,8 +80,8 @@ public:
         return reserve_block_num_;
     }
 
-    virtual void            regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr);
-    virtual int64_t         getMrCostTimeMs() const;
+    virtual void                    regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr);
+    virtual int64_t                 getMrCostTimeMs() const;
     virtual size_t                  freeBlocksNum() const;
     virtual size_t                  availableBlocksNum() const;
     virtual BatchKVCacheResourcePtr popBlocksFromCache(size_t min_blocks_to_free);
@@ -103,6 +107,7 @@ protected:
     CacheConfig                        config_;
     AllocationType                     allocation_type_;
     BlockPoolPtr                       block_pool_;
+    SharedBlockCachePtr                shared_block_cache_;
     const kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;
 
     size_t  reserve_block_num_{0};
