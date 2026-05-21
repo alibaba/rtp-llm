@@ -6,17 +6,18 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * V1-α: verify the new DP fields on FlexlbConfig — backward compatible with legacy
- * payloads, round-trip correct for new payloads.
+ * Verify the DP fields on FlexlbConfig — V1 is the default path; round-trip
+ * correct for new payloads; payloads can still opt out by setting
+ * dpBalanceEnabled=false explicitly.
  */
 class FlexlbConfigDpTest {
 
     private final ObjectMapper mapper = new ObjectMapper();
 
     @Test
-    void default_dp_disabled_safe_defaults() {
+    void default_dp_enabled_v1_path() {
         FlexlbConfig cfg = new FlexlbConfig();
-        assertFalse(cfg.isDpBalanceEnabled(), "DP must be off by default to not affect existing deployments");
+        assertTrue(cfg.isDpBalanceEnabled(), "V1 DP-batching is the default path");
         assertEquals(0, cfg.getDpBatchSizeMax(), "0 means auto-derive from worker.dpSize");
         assertEquals(30, cfg.getDpBatchWindowMs());
         assertEquals(100, cfg.getDpBatchTimeoutMs());
@@ -24,16 +25,23 @@ class FlexlbConfigDpTest {
     }
 
     @Test
-    void legacy_payload_without_dp_fields_still_loads() throws Exception {
-        // Simulate the existing production FLEXLB_CONFIG (no dp* fields).
-        String legacy = "{\"loadBalanceStrategy\":\"SHORTEST_TTFT\","
+    void payload_without_dp_fields_inherits_v1_default() throws Exception {
+        String payload = "{\"loadBalanceStrategy\":\"SHORTEST_TTFT\","
                 + "\"weightedCacheDecayFactor\":0.005,"
                 + "\"enableQueueing\":true,"
                 + "\"maxQueueSize\":500}";
-        FlexlbConfig cfg = mapper.readValue(legacy, FlexlbConfig.class);
+        FlexlbConfig cfg = mapper.readValue(payload, FlexlbConfig.class);
         assertTrue(cfg.isEnableQueueing());
         assertEquals(500, cfg.getMaxQueueSize());
-        assertFalse(cfg.isDpBalanceEnabled(), "legacy config must silently fall back to the old path");
+        assertTrue(cfg.isDpBalanceEnabled(),
+                "absent dpBalanceEnabled inherits the V1 default; set false explicitly to opt out");
+    }
+
+    @Test
+    void explicit_opt_out_disables_v1() throws Exception {
+        String payload = "{\"dpBalanceEnabled\":false}";
+        FlexlbConfig cfg = mapper.readValue(payload, FlexlbConfig.class);
+        assertFalse(cfg.isDpBalanceEnabled());
     }
 
     @Test

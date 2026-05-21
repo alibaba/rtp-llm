@@ -90,4 +90,76 @@ class FlexlbConfigJsonEnvironmentPostProcessorTest {
 
         assertEquals("true", env.getProperty("flexlb.enableQueueing"));
     }
+
+    @Test
+    void whale_master_config_wrapper_is_unpacked_when_flexlb_config_absent() {
+        // Whale/Hippo deploy templates nest FLEXLB_CONFIG inside
+        // WHALE_MASTER_CONFIG.zone_process_setting.process_info.envs as a
+        // [name, value] tuple. When the platform forgets to expand it into a
+        // real env var, V1 silently fell back to yaml defaults (V0 router) and
+        // every frontend request landed on a missing response registry. Extract
+        // the inner JSON so the deploy intent is preserved.
+        String inner = "{\"dpBalanceEnabled\":true,\"maxQueueSize\":42}";
+        String wrapper = "{\"zone_process_setting\":{\"process_info\":{\"envs\":["
+                + "[\"OTHER_VAR\",\"x\"],"
+                + "[\"FLEXLB_CONFIG\"," + quote(inner) + "],"
+                + "[\"YET_ANOTHER\",\"y\"]"
+                + "]}}}";
+        StandardEnvironment env = envWith(Map.of("WHALE_MASTER_CONFIG", wrapper));
+
+        processor.postProcessEnvironment(env, new SpringApplication());
+
+        assertEquals("true", env.getProperty("flexlb.dpBalanceEnabled"));
+        assertEquals("42", env.getProperty("flexlb.maxQueueSize"));
+    }
+
+    @Test
+    void direct_flexlb_config_wins_over_whale_wrapper() {
+        // If both are set the direct env wins so an operator can override the
+        // platform-provided wrapper without redeploying the whole template.
+        Map<String, Object> baseline = new HashMap<>();
+        baseline.put("FLEXLB_CONFIG", "{\"dpBalanceEnabled\":true}");
+        baseline.put("WHALE_MASTER_CONFIG", "{\"zone_process_setting\":{\"process_info\":{\"envs\":["
+                + "[\"FLEXLB_CONFIG\",\"{\\\"dpBalanceEnabled\\\":false}\"]"
+                + "]}}}");
+        StandardEnvironment env = envWith(baseline);
+
+        processor.postProcessEnvironment(env, new SpringApplication());
+
+        assertEquals("true", env.getProperty("flexlb.dpBalanceEnabled"));
+    }
+
+    @Test
+    void whale_wrapper_without_flexlb_config_entry_is_a_no_op() {
+        String wrapper = "{\"zone_process_setting\":{\"process_info\":{\"envs\":["
+                + "[\"SOME_OTHER_VAR\",\"abc\"]"
+                + "]}}}";
+        StandardEnvironment env = envWith(Map.of("WHALE_MASTER_CONFIG", wrapper));
+
+        processor.postProcessEnvironment(env, new SpringApplication());
+
+        assertFalse(env.getPropertySources().contains(
+                FlexlbConfigJsonEnvironmentPostProcessor.PROPERTY_SOURCE_NAME));
+    }
+
+    @Test
+    void invalid_whale_wrapper_fails_fast() {
+        StandardEnvironment env = envWith(Map.of("WHALE_MASTER_CONFIG", "{not-json}"));
+
+        IllegalStateException ex = assertThrows(IllegalStateException.class,
+                () -> processor.postProcessEnvironment(env, new SpringApplication()));
+        assertEquals("WHALE_MASTER_CONFIG env var is not valid JSON", ex.getMessage());
+    }
+
+    private static String quote(String s) {
+        StringBuilder sb = new StringBuilder("\"");
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == '"' || c == '\\') {
+                sb.append('\\');
+            }
+            sb.append(c);
+        }
+        return sb.append('"').toString();
+    }
 }

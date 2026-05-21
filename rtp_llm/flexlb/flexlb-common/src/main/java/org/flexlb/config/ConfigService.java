@@ -1,5 +1,7 @@
 package org.flexlb.config;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.util.JsonUtils;
@@ -13,6 +15,9 @@ import java.lang.reflect.Field;
 @Component
 public class ConfigService {
 
+    private static final String FLEXLB_CONFIG_KEY = "FLEXLB_CONFIG";
+    private static final String WHALE_WRAPPER_KEY = "WHALE_MASTER_CONFIG";
+
     private final FlexlbConfig flexlbConfig;
 
     @Autowired
@@ -25,17 +30,47 @@ public class ConfigService {
      * Direct path for callers outside Spring (unit tests, ad-hoc tooling).
      * Mirrors what {@link FlexlbConfigJsonEnvironmentPostProcessor} +
      * {@code @ConfigurationProperties} binding produce for the Spring path:
-     * parse {@code FLEXLB_CONFIG} JSON env, then apply unprefixed per-field
-     * env overrides.
+     * parse {@code FLEXLB_CONFIG} JSON env (or extract it from
+     * {@code WHALE_MASTER_CONFIG} when the platform wraps it), then apply
+     * unprefixed per-field env overrides.
      */
     public ConfigService() {
-        String lbConfigStr = System.getenv("FLEXLB_CONFIG");
+        String lbConfigStr = resolveFlexlbConfigJson();
         log.warn("FLEXLB_CONFIG = {}", lbConfigStr);
         FlexlbConfig config = lbConfigStr != null
                 ? JsonUtils.toObject(lbConfigStr, FlexlbConfig.class)
                 : new FlexlbConfig();
         applyEnvironmentOverrides(config);
         this.flexlbConfig = config;
+    }
+
+    private static String resolveFlexlbConfigJson() {
+        String direct = System.getenv(FLEXLB_CONFIG_KEY);
+        if (direct != null && !direct.isBlank()) {
+            return direct;
+        }
+        String wrapper = System.getenv(WHALE_WRAPPER_KEY);
+        if (wrapper == null || wrapper.isBlank()) {
+            return null;
+        }
+        try {
+            JsonNode envs = new ObjectMapper().readTree(wrapper)
+                    .path("zone_process_setting")
+                    .path("process_info")
+                    .path("envs");
+            if (!envs.isArray()) {
+                return null;
+            }
+            for (JsonNode entry : envs) {
+                if (entry.isArray() && entry.size() >= 2
+                        && FLEXLB_CONFIG_KEY.equals(entry.get(0).asText())) {
+                    return entry.get(1).asText();
+                }
+            }
+            return null;
+        } catch (Exception e) {
+            throw new IllegalStateException("WHALE_MASTER_CONFIG env var is not valid JSON", e);
+        }
     }
 
     public FlexlbConfig loadBalanceConfig() {

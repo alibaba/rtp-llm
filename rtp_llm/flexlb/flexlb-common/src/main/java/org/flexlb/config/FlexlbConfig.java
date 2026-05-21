@@ -166,9 +166,10 @@ public class FlexlbConfig {
     /**
      * Master-side DP batching switch. When enabled, RouteService bypasses the global
      * QueueManager for DP-capable models and routes through DpBatchScheduler instead.
-     * Default off — old code path preserved.
+     * Default on — V1 DP-batching is the supported path. Set to false to fall back
+     * to the legacy V0 router.
      */
-    private boolean dpBalanceEnabled = false;
+    private boolean dpBalanceEnabled = true;
 
     /**
      * Max requests per Prefill.Enqueue batch. 0 = auto-pick worker.dpSize so one batch
