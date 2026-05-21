@@ -226,6 +226,50 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(chunks), 1)
         self.assertIn("backend down", chunks[0].error_message)
 
+    async def test_no_thinking_budget_zero_sets_sampler_mask_config_without_filtering(
+        self,
+    ) -> None:
+        req = self._minimal_request()
+        _add_input_tensor(
+            req,
+            "max_new_think_tokens",
+            "INT32",
+            [1],
+            struct.pack("<i", 0),
+        )
+        out = GenerateOutput(
+            output_ids=torch.tensor([10, 128822, 271], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(input_len=2, reuse_len=0),
+        )
+        visitor = _FakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
+        )
+        tok = _FakeTokenizer(
+            {
+                "<think>\n": [128821, 198],
+                "</think>\n\n": [128822, 271],
+                "<think>\n\n</think>\n\n": [128821, 271, 128822, 271],
+                "</think>": [128822],
+            }
+        )
+        env_cfg = _GenerateEnvCfg()
+        servicer = DashScInferenceServicer(
+            backend_visitor=visitor,
+            tokenizer=tok,
+            generate_env_config=env_cfg,
+            think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+        )
+
+        chunks = await _drain(servicer.ModelStreamInfer(_areq_iter([req]), MagicMock()))
+
+        self.assertEqual(visitor.enqueue_called, 1)
+        gc = visitor.last_generate_input.generate_config
+        self.assertTrue(gc.in_think_mode)
+        self.assertEqual(gc.max_thinking_tokens, 0)
+        self.assertEqual(gc.end_think_token_ids, [128822, 271])
+        self.assertEqual(_gen_ids(chunks[0]), [10, 128822, 271])
+
     async def test_deepseek_v4_multi_think_uses_first_close_only(self) -> None:
         req = self._minimal_request()
         chunks_proto = []
@@ -393,7 +437,9 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cfg.max_thinking_tokens, 0)
         self.assertEqual(cfg.end_think_token_ids, [])
         self.assertNotIn("max_new_think_tokens", chunks[0].infer_response.parameters)
-        self.assertNotIn("generate_think_token_num", chunks[0].infer_response.parameters)
+        self.assertNotIn(
+            "generate_think_token_num", chunks[0].infer_response.parameters
+        )
 
     async def test_deepseek_v4_token1_before_close_wins_within_chunk(self) -> None:
         req = self._minimal_request()
@@ -1070,6 +1116,26 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             for i in range(len(infer.outputs))
         }
         self.assertEqual(_unpack_int32_le(by_name["generated_ids"]), [9])
+
+    async def test_max_new_tokens_negative_rejected_before_enqueue_repro_p3(
+        self,
+    ) -> None:
+        """P3 repro: dash-sc forwards a request with ``max_new_tokens=-1`` to
+        the backend, which raises ``FtRuntimeException('max_new_tokens is 0')``
+        and surfaces as HTTP 500. Expected: servicer rejects at the front
+        door with a structured ``error_message`` and never reaches enqueue."""
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+        req = self._valid_infer_request()
+        _add_input_tensor(req, "max_new_tokens", "INT32", [1], struct.pack("<i", -1))
+
+        responses = await _drain(
+            servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
+        )
+
+        self.assertEqual(visitor.enqueue_called, 0)
+        self.assertEqual(len(responses), 1)
+        self.assertIn("max_new_tokens", responses[0].error_message)
 
     async def test_real_mode_request_id_matches_generate_request_id(self) -> None:
         """Backend ``GenerateInput.request_id`` follows the same snowflake scheme as HTTP path."""

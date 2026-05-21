@@ -4,6 +4,33 @@ using namespace std;
 
 namespace rtp_llm {
 
+namespace {
+
+constexpr int32_t kInvalidTokenId         = -1;
+constexpr int32_t kDeepSeekNewlineTokenId = 201;
+constexpr int32_t kQwenGlmNewlineTokenId  = 198;
+
+int32_t inferThinkEndTokenId(const std::vector<int>& end_think_token_ids) {
+    if (end_think_token_ids.empty()) {
+        return kInvalidTokenId;
+    }
+    if (end_think_token_ids.size() > 1
+        && (end_think_token_ids.front() == kDeepSeekNewlineTokenId
+            || end_think_token_ids.front() == kQwenGlmNewlineTokenId)) {
+        return end_think_token_ids[1];
+    }
+    return end_think_token_ids.front();
+}
+
+void maskToken(const torch::Tensor& new_tokens_logits, size_t vocab_size, int32_t token_id) {
+    if (token_id < 0 || static_cast<size_t>(token_id) >= vocab_size) {
+        return;
+    }
+    new_tokens_logits[token_id] = BaseLogitsProcessor::neg_inf;
+}
+
+}  // namespace
+
 ThinkModeLogitsProcessor::ThinkModeLogitsProcessor(std::vector<StreamThinkInfo> think_infos):
     think_infos_(think_infos) {};
 
@@ -14,6 +41,12 @@ void ThinkModeLogitsProcessor::process(const SamplerInputs& inputs, size_t start
         auto& info = think_infos_[i];
         if (!info.in_think_mode)
             continue;
+
+        if (info.max_thinking_tokens == 0) {
+            auto think_end_token_id = inferThinkEndTokenId(info.end_think_token_ids);
+            maskToken(inputs.logits[i + start_idx], inputs.vocab_size, think_end_token_id);
+            continue;
+        }
 
         int* input_lengths    = inputs.input_lengths.data_ptr<int32_t>();
         int* sequence_lengths = inputs.sequence_lengths.data_ptr<int32_t>();
@@ -35,7 +68,7 @@ void ThinkModeLogitsProcessor::setVocabMask(std::shared_ptr<StringContainDFA<siz
                                             std::vector<int>                               template_token_ids,
                                             size_t                                         vocab_size,
                                             bool                                           enforce) {
-    if (!dfa_ptr->isFinished() && enforce) {
+    if (dfa_ptr && !dfa_ptr->isFinished() && enforce && !template_token_ids.empty()) {
         RTP_LLM_LOG_INFO("sampler enforce transfer status");
         memFill(new_tokens_logits, vocab_size, (size_t)template_token_ids[dfa_ptr->status()]);
     }
@@ -57,6 +90,8 @@ void ThinkModeLogitsProcessor::updateStatus(const torch::Tensor& new_tokens, int
         auto& info = think_infos_[i];
         if (!info.in_think_mode)
             continue;
+        if (info.max_thinking_tokens == 0)
+            continue;
 
         auto offset = info.is_beam_search ? (info.current_output_length + info.input_length) : 0;
 
@@ -75,7 +110,8 @@ void ThinkModeLogitsProcessor::updateStatus(const torch::Tensor& new_tokens, int
 
 ThinkModeLogitsProcessorPtr ThinkModeLogitsProcessor::fromGenerateInput(std::shared_ptr<GenerateInput> generate_input,
                                                                         int32_t                        num) {
-    if (!generate_input->generate_config->in_think_mode || generate_input->generate_config->max_thinking_tokens == 0) {
+    if (!generate_input->generate_config->in_think_mode
+        || generate_input->generate_config->end_think_token_ids.empty()) {
         return nullptr;
     }
 

@@ -261,6 +261,45 @@ TEST_F(SamplerTest, testSetVocabMask) {
     }
 }
 
+TEST_F(SamplerTest, testNoThinkingMasksThinkEndTokenBeforeSampling) {
+    SamplerDataBuilder builder;
+
+    auto generate_input                                  = std::make_shared<GenerateInput>();
+    generate_input->generate_config                      = std::make_shared<GenerateConfig>();
+    generate_input->generate_config->in_think_mode       = true;
+    generate_input->generate_config->max_thinking_tokens = 0;
+    generate_input->generate_config->end_think_token_ids = {128822, 271};
+    generate_input->input_ids                            = torch::tensor({1, 2, 3}, torch::kInt32);
+
+    auto processor = ThinkModeLogitsProcessor::fromGenerateInput(generate_input, 1);
+    ASSERT_NE(processor, nullptr);
+
+    SamplerInputs sampler_inputs = builder.allocate({1, 128900, 8}, {}, {});
+    processor->process(sampler_inputs, 0, 1);
+
+    float neg_inf = -std::numeric_limits<float>::max();
+    EXPECT_EQ(neg_inf, sampler_inputs.logits[0][128822].item<float>());
+    EXPECT_EQ(0, sampler_inputs.logits[0][271].item<float>());
+}
+
+TEST_F(SamplerTest, testNoThinkingSkipsLeadingNewlineWhenMaskingThinkEndToken) {
+    SamplerDataBuilder builder;
+
+    std::vector<int>       end_think_token_ids = {201, 128822, 271};
+    std::vector<int>       max_thinking_tokens = {0};
+    std::vector<int>       think_status        = {0};
+    BaseLogitsProcessorPtr processor =
+        builder.generateLogitsProcessor(true, max_thinking_tokens, end_think_token_ids, think_status);
+
+    SamplerInputs sampler_inputs = builder.allocate({1, 128900, 8}, {processor}, {1});
+    processor->process(sampler_inputs, 0, 1);
+
+    float neg_inf = -std::numeric_limits<float>::max();
+    EXPECT_EQ(0, sampler_inputs.logits[0][201].item<float>());
+    EXPECT_EQ(neg_inf, sampler_inputs.logits[0][128822].item<float>());
+    EXPECT_EQ(0, sampler_inputs.logits[0][271].item<float>());
+}
+
 #undef EXPECT_SIMILAR
 
 }  // namespace rtp_llm
