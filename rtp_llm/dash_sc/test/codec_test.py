@@ -140,6 +140,19 @@ class DashScGrpcRequestTest(TestCase):
         sp = parse_sampling_params(req)
         self.assertEqual(sp.max_new_tokens, -1)
 
+    def test_parse_sampling_max_completion_tokens_negative_keeps_signal_repro_p3(
+        self,
+    ) -> None:
+        """P3 also applies to the DashScope/OpenAI alias path.
+
+        ``max_completion_tokens=-1`` must not disappear in the codec before the
+        front-door validator sees it.
+        """
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["max_completion_tokens"].int64_param = -1
+        sp = parse_sampling_params(req)
+        self.assertEqual(sp.max_new_tokens, -1)
+
     def test_parse_sampling_max_new_think_tokens_zero(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
         _add_tensor(req, "max_new_think_tokens", "INT32", [1], struct.pack("<i", 0))
