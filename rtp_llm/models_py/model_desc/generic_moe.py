@@ -5,7 +5,6 @@ from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
-from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
@@ -85,7 +84,6 @@ class GenericMoeLayer(nn.Module):
         ), "Weights w1 and w2 must be provided"
         self.num_local_experts = self.w1.shape[0]
         self.add_shared_expert = config.moe_style == 2
-        self.ffn_tp_size = parallelism_config.get_ffn_tp_size()
         if self.add_shared_expert:
             self.shared_expert = DenseMLP(
                 config.activation_type,
@@ -152,23 +150,14 @@ class GenericMoeLayer(nn.Module):
         if self.fake_balance_expert is not None:
             self.fake_balance_expert(topk_ids, topk_weights)
 
-        use_unified_allreduce = (
-            self.shared_expert is not None
-            and self.ffn_tp_size > 1
-            and self.fused_moe.supports_skip_allreduce
-        )
-
         experts_output = self.fused_moe(
             hidden_states=hidden_states,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation="SiGLU",
-            skip_allreduce=use_unified_allreduce,
         )
         if self.shared_expert is not None:
-            shared_expert_output = self.shared_expert(
-                hidden_states, skip_allreduce=use_unified_allreduce
-            )
+            shared_expert_output = self.shared_expert(hidden_states)
             if self.shared_expert_gate is not None:
                 gate_output = self.shared_expert_gate(hidden_states)  # [T, 1]
                 # Fused: experts_output += sigmoid(gate_output) * shared_expert_output
@@ -177,10 +166,6 @@ class GenericMoeLayer(nn.Module):
                 )
             else:
                 experts_output = experts_output + shared_expert_output
-
-            if use_unified_allreduce:
-                experts_output = all_reduce(experts_output, group=Group.TP)
-
         return experts_output
 
 
