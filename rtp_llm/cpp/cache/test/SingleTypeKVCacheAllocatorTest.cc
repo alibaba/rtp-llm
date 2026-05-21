@@ -12,6 +12,7 @@
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 
 namespace rtp_llm {
@@ -220,6 +221,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ReserveBlocksOnlyAppliedToInitMalloc) {
 TEST_F(SingleTypeKVCacheAllocatorTest, ReserveBlocksCheckHappensAfterReuseReferenceInInitMallocForCommonLen) {
     auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/10, /*seq_size_per_block=*/4);
     allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config);
+    allocator_->setSharedBlockCache(std::make_shared<SharedBlockCache>());
     ASSERT_TRUE(allocator_->init());
 
     allocator_->setReserveBlockNum(2);
@@ -832,6 +834,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, FreeEmptyBatchResource) {
 TEST_F(SingleTypeKVCacheAllocatorTest, InitMallocRollbackWhenInitMallocForCommonLenFails) {
     auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/6, /*seq_size_per_block=*/4);
     allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config, AllocationType::HOST);
+    allocator_->setSharedBlockCache(std::make_shared<SharedBlockCache>());
     ASSERT_TRUE(allocator_->init());
 
     auto seed_resource = createBatchKVCacheResource(/*batch_size=*/1, config.layer_num);

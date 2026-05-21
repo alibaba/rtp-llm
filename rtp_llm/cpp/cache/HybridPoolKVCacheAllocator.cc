@@ -31,6 +31,8 @@ bool HybridPoolKVCacheAllocator::doInit() {
     group_block_pools_.reserve(static_cast<size_t>(group_nums));
     kv_cache_groups_.reserve(static_cast<size_t>(group_nums));
 
+    SharedBlockCache* shared_cache_raw = shared_block_cache_ ? shared_block_cache_.get() : nullptr;
+
     for (int gid = 0; gid < group_nums; ++gid) {
         auto pool_config = BlockPoolConfigHelper::createConfigForGroup(config_, static_cast<size_t>(gid));
         auto group_pool  = std::make_shared<BlockPool>(pool_config, allocation_type_);
@@ -45,13 +47,15 @@ bool HybridPoolKVCacheAllocator::doInit() {
                                 gid);
         const auto group_type = config_.group_types[static_cast<size_t>(gid)];
         if (group_type == CacheGroupType::LINEAR) {
-            group = std::make_shared<LinearKVCacheGroup>(ids, spec, group_pool, gid, config_.linear_step);
+            group =
+                std::make_shared<LinearKVCacheGroup>(ids, spec, group_pool, gid, config_.linear_step, shared_cache_raw);
             linear_group_ids_.push_back(gid);
         } else if (group_type == CacheGroupType::SWA) {
-            group = std::make_shared<SWAKVCacheGroup>(ids, spec, group_pool, gid, config_.linear_step);
+            group =
+                std::make_shared<SWAKVCacheGroup>(ids, spec, group_pool, gid, config_.linear_step, shared_cache_raw);
             swa_group_ids_.push_back(gid);
         } else {
-            group = std::make_shared<FullKVCacheGroup>(ids, spec, group_pool, gid);
+            group = std::make_shared<FullKVCacheGroup>(ids, spec, group_pool, gid, shared_cache_raw);
             full_group_ids_.push_back(gid);
         }
 
@@ -62,6 +66,11 @@ bool HybridPoolKVCacheAllocator::doInit() {
 
     // HybridPool owns one BlockPool per group; do not read pool stats from block_pool_ in HybridPool mode.
     block_pool_ = group_block_pools_.empty() ? nullptr : group_block_pools_[0];
+
+    if (shared_block_cache_) {
+        shared_block_cache_->init(group_nums, group_block_pools_);
+    }
+
     RTP_LLM_LOG_INFO("HybridPoolKVCacheAllocator init success, group pools=%zu", group_block_pools_.size());
     return true;
 }
@@ -298,39 +307,12 @@ size_t HybridPoolKVCacheAllocator::availableBlocksNum() const {
 }
 
 BatchKVCacheResourcePtr HybridPoolKVCacheAllocator::popBlocksFromCache(size_t min_blocks_to_free) {
-    if (min_blocks_to_free == 0 || group_block_pools_.empty()) {
+    if (min_blocks_to_free == 0 || !shared_block_cache_) {
         return nullptr;
     }
 
-    std::vector<CacheKeyType>                                            evicted_keys;
-    std::unordered_set<CacheKeyType>                                     seen_keys;
-    std::unordered_map<CacheKeyType, std::vector<BlockCache::CacheItem>> evicted_items;
-
-    size_t evicted_blocks = 0;
-    for (const auto& pool : group_block_pools_) {
-        if (!pool || !pool->blockCache()) {
-            continue;
-        }
-        const size_t group_need         = min_blocks_to_free > evicted_blocks ? min_blocks_to_free - evicted_blocks : 1;
-        auto         group_evict_result = pool->blockCache()->selectAndEvict(group_need);
-        for (const auto cache_key : group_evict_result.evicted_keys) {
-            auto items_it = group_evict_result.evicted_items.find(cache_key);
-            if (items_it == group_evict_result.evicted_items.end() || items_it->second.empty()) {
-                continue;
-            }
-            if (seen_keys.insert(cache_key).second) {
-                evicted_keys.push_back(cache_key);
-            }
-            auto& items_for_key = evicted_items[cache_key];
-            evicted_blocks += items_it->second.size();
-            items_for_key.insert(items_for_key.end(), items_it->second.begin(), items_it->second.end());
-        }
-        if (evicted_blocks >= min_blocks_to_free) {
-            break;
-        }
-    }
-
-    if (evicted_keys.empty()) {
+    auto evict_result = shared_block_cache_->selectAndEvict(min_blocks_to_free);
+    if (evict_result.evicted_keys.empty()) {
         return nullptr;
     }
 
@@ -345,18 +327,17 @@ BatchKVCacheResourcePtr HybridPoolKVCacheAllocator::popBlocksFromCache(size_t mi
     batch_resource->setLastBlockAligned(true);
 
     for (int gid = 0; gid < config_.groupNums(); ++gid) {
-        batch_resource->mutableBlockIds(0, gid).resize(evicted_keys.size(), NULL_BLOCK_IDX);
+        batch_resource->mutableBlockIds(0, gid).resize(evict_result.evicted_keys.size(), NULL_BLOCK_IDX);
     }
 
-    for (size_t evicted_idx = 0; evicted_idx < evicted_keys.size(); ++evicted_idx) {
-        const auto cache_key = evicted_keys[evicted_idx];
+    for (size_t evicted_idx = 0; evicted_idx < evict_result.evicted_keys.size(); ++evicted_idx) {
+        const auto  cache_key = evict_result.evicted_keys[evicted_idx];
+        const auto& slots     = evict_result.evicted_slots.at(cache_key);
         batch_resource->pushBackCacheKey(0, cache_key);
-        for (const auto& item : evicted_items[cache_key]) {
-            RTP_LLM_CHECK_WITH_INFO(item.group_id >= 0 && item.group_id < config_.groupNums(),
-                                    "invalid evicted group id=%d for cache key=%ld",
-                                    item.group_id,
-                                    cache_key);
-            batch_resource->mutableBlockIds(0, item.group_id).setAt(evicted_idx, item.block_index);
+        for (int gid = 0; gid < static_cast<int>(slots.size()) && gid < config_.groupNums(); ++gid) {
+            if (!isNullBlockIdx(slots[gid])) {
+                batch_resource->mutableBlockIds(0, gid).setAt(evicted_idx, slots[gid]);
+            }
         }
     }
     return batch_resource;
