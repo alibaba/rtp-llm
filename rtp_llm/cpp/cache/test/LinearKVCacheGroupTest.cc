@@ -3,7 +3,7 @@
 #include <memory>
 #include <vector>
 
-#include "rtp_llm/cpp/cache/BlockCache.h"
+#include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/cache/LinearKVCacheGroup.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 
@@ -298,12 +298,13 @@ TEST_F(LinearKVCacheGroupTest, InsertIntoCacheSkipsNullBlocks) {
     auto block_pool = createBlockPool();
     ASSERT_TRUE(block_pool->init());
 
-    auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
-    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/3, /*linear_step=*/2);
-    ASSERT_TRUE(group.init());
+    auto                      shared_cache = std::make_shared<SharedBlockCache>();
+    std::vector<BlockPoolPtr> group_pools(4, block_pool);
+    shared_cache->init(4, group_pools);
 
-    auto block_cache = block_pool->blockCache();
-    ASSERT_NE(block_cache, nullptr);
+    auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
+    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/3, /*linear_step=*/2, shared_cache.get());
+    ASSERT_TRUE(group.init());
 
     BlockIndicesType blocks;
     blocks.push_back(NULL_BLOCK_IDX);
@@ -314,33 +315,31 @@ TEST_F(LinearKVCacheGroupTest, InsertIntoCacheSkipsNullBlocks) {
     CacheKeysType keys = {100, 101, 102, 103};
     group.insertIntoCache(keys, blocks, /*is_resident=*/false);
 
-    EXPECT_FALSE(block_cache->contains(100, /*group_id=*/3));
-    EXPECT_TRUE(block_cache->contains(101, /*group_id=*/3));
-    EXPECT_FALSE(block_cache->contains(102, /*group_id=*/3));
-    EXPECT_TRUE(block_cache->contains(103, /*group_id=*/3));
+    EXPECT_FALSE(shared_cache->contains(100));
+    EXPECT_TRUE(shared_cache->contains(101));
+    EXPECT_FALSE(shared_cache->contains(102));
+    EXPECT_TRUE(shared_cache->contains(103));
 }
 
 TEST_F(LinearKVCacheGroupTest, MatchSingleKeyReturnsMatchedBlockOrEmpty) {
     auto block_pool = createBlockPool();
     ASSERT_TRUE(block_pool->init());
 
-    auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
-    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/7, /*linear_step=*/2);
-    ASSERT_TRUE(group.init());
+    auto                      shared_cache = std::make_shared<SharedBlockCache>();
+    std::vector<BlockPoolPtr> group_pools(8, block_pool);
+    shared_cache->init(8, group_pools);
 
-    auto block_cache = block_pool->blockCache();
-    ASSERT_NE(block_cache, nullptr);
+    auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
+    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/7, /*linear_step=*/2, shared_cache.get());
+    ASSERT_TRUE(group.init());
 
     // Allocate a block, then put it into cache for group_id=7.
     auto blocks = block_pool->malloc(1);
     ASSERT_EQ(blocks.size(), 1u);
 
-    BlockCache::CacheItem item;
-    item.cache_key   = 123;
-    item.group_id    = 7;
-    item.block_index = blocks[0];
-    item.is_resident = false;
-    ASSERT_TRUE(block_cache->put(item));
+    std::vector<BlockIdxType> group_slots(8, NULL_BLOCK_IDX);
+    group_slots[7] = blocks[0];
+    shared_cache->put(123, group_slots, /*is_resident=*/false);
 
     auto hit = group.matchSingleKey(123);
     ASSERT_EQ(hit.block_indices.size(), 1u);
@@ -395,8 +394,12 @@ TEST_F(LinearKVCacheGroupTest, MallocEnsuresFreeBlocksByEvictingCache) {
     ASSERT_TRUE(block_pool->init());
     ASSERT_EQ(block_pool->freeBlocksNum(), 9u);
 
+    auto                      shared_cache = std::make_shared<SharedBlockCache>();
+    std::vector<BlockPoolPtr> group_pools  = {block_pool};
+    shared_cache->init(1, group_pools);
+
     auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
-    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/0, /*linear_step=*/2);
+    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/0, /*linear_step=*/2, shared_cache.get());
     ASSERT_TRUE(group.init());
 
     // Put one block into cache (non-resident) and release request reference so it becomes evictable.
@@ -497,17 +500,19 @@ TEST_F(LinearKVCacheGroupTest, InsertIntoCacheWithEmptyInputsIsNoop) {
     auto block_pool = createBlockPool();
     ASSERT_TRUE(block_pool->init());
 
+    auto                      shared_cache = std::make_shared<SharedBlockCache>();
+    std::vector<BlockPoolPtr> group_pools(4, block_pool);
+    shared_cache->init(4, group_pools);
+
     auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
-    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/3, /*linear_step=*/2);
+    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/3, /*linear_step=*/2, shared_cache.get());
     ASSERT_TRUE(group.init());
 
-    auto block_cache = block_pool->blockCache();
-    ASSERT_NE(block_cache, nullptr);
-    ASSERT_EQ(block_cache->size(), 0u);
+    ASSERT_EQ(shared_cache->size(), 0u);
 
     group.insertIntoCache(CacheKeysType{}, BlockIndicesType{1, 2}, /*is_resident=*/false);
     group.insertIntoCache(CacheKeysType{100, 101}, BlockIndicesType{}, /*is_resident=*/false);
-    EXPECT_EQ(block_cache->size(), 0u);
+    EXPECT_EQ(shared_cache->size(), 0u);
 }
 
 }  // namespace test

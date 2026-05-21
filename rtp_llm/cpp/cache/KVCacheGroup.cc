@@ -41,23 +41,26 @@ bool KVCacheGroup::ensureFreeBlocks(int required_blocks) {
         return true;
     }
 
-    // blocks popped by block cache might be occupied by request
-    // it's necessary to checkout whether free blocks are enough
     while (true) {
         const auto free_blocks = block_pool_->freeBlocksNum();
         if (free_blocks >= static_cast<size_t>(required_blocks)) {
             break;
         }
 
-        const int need_evict     = required_blocks - static_cast<int>(free_blocks);
-        auto      evicted_blocks = block_cache_->pop(need_evict);
-        if (evicted_blocks.empty()) {
-            RTP_LLM_LOG_WARNING("ensure free blocks failed, free blocks : %d, need evict blocks : %d",
+        if (!shared_cache_) {
+            RTP_LLM_LOG_WARNING(
+                "ensure free blocks failed, no shared cache, free blocks: %zu, need: %d", free_blocks, required_blocks);
+            return false;
+        }
+
+        const size_t need_evict = static_cast<size_t>(required_blocks) - free_blocks;
+        size_t       freed      = shared_cache_->evictAndFree(need_evict);
+        if (freed == 0) {
+            RTP_LLM_LOG_WARNING("ensure free blocks failed, free blocks: %zu, need evict blocks: %zu",
                                 block_pool_->freeBlocksNum(),
                                 need_evict);
             return false;
         }
-        block_pool_->blockCacheFree(evicted_blocks);
     }
 
     return true;

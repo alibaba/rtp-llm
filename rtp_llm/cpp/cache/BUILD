@@ -56,6 +56,7 @@ cc_library(
         "BlockCache.cc",
         "BlockPool.cc",
         "MemoryLayoutStrategy.cc",
+        "SharedBlockCache.cc",
     ],
     hdrs = [
         "BlockCache.h",
@@ -65,6 +66,7 @@ cc_library(
         "BlockRefCounter.h",
         "MemoryLayoutStrategy.h",
         "MemoryLayoutConfig.h",
+        "SharedBlockCache.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],

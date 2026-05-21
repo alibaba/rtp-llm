@@ -12,7 +12,6 @@
 #include "rtp_llm/cpp/cache/BlockRefCounter.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/BufferTypes.h"
-#include "rtp_llm/cpp/cache/BlockCache.h"
 #include "rtp_llm/cpp/cache/MemoryLayoutStrategy.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfig.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/MemoryUtil.h"
@@ -27,8 +26,6 @@ public:
     ~BlockPool();
 
     bool init();
-
-    BlockCachePtr blockCache();
 
     MemoryType                 where() const;
     std::vector<torch::Tensor> allLayerCacheBase() const;
@@ -126,8 +123,6 @@ private:
     BlockRefCounter        req_cache_ref_counter_;
 
     AllocationType allocation_type_;
-
-    BlockCachePtr block_cache_;
 
     torch::Tensor               cache_aligned_buffer_;
     void*                       cache_base_ptr_  = nullptr;
