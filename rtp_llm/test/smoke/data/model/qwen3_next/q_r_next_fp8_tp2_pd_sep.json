@@ -99,7 +99,7 @@
       "result": {
         "response_batch": [
           {
-            "response": " explain in simple terms\n\nSure! Let’s break",
+            "response": " explain in simple terms\n\nSure! Let's break",
             "response_alternatives": null,
             "hidden_states": null,
             "logits": null,
@@ -131,7 +131,7 @@
             }
           },
           {
-            "response": " explain in simple terms\n\nSure! Let’s break",
+            "response": " explain in simple terms\n\nSure! Let's break",
             "response_alternatives": null,
             "hidden_states": null,
             "logits": null,
@@ -163,7 +163,7 @@
             }
           },
           {
-            "response": " explain in simple terms\n\nSure! Let’s break",
+            "response": " explain in simple terms\n\nSure! Let's break",
             "response_alternatives": null,
             "hidden_states": null,
             "logits": null,
