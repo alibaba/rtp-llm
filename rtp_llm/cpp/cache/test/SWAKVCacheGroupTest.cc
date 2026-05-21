@@ -420,14 +420,21 @@ TEST_F(SWAKVCacheGroupTest, Reference_NullBlocksNotReffed) {
     EXPECT_EQ(block_ids2.blocksNum(), original.size());
 }
 
-// ==================== insertIntoCache ====================
+// ==================== put into cache (allocator-level) ====================
 
-TEST_F(SWAKVCacheGroupTest, InsertIntoCache_SkipsNullBlocks) {
+TEST_F(SWAKVCacheGroupTest, PutIntoCache_SkipsNullBlocks) {
     auto     group = makeGroup(4);
     BlockIds block_ids(1);
     ASSERT_TRUE(group.malloc(block_ids, 20));
     CacheKeysType keys = {101, 102, 103, 104, 105};
-    group.insertIntoCache(keys, block_ids.blocks(), false);
+
+    // Simulate allocator-level insertIntoCache: only put non-NULL blocks
+    for (size_t i = 0; i < keys.size() && i < block_ids.blocksNum(); ++i) {
+        if (!isNullBlockIdx(block_ids.blocks()[i])) {
+            std::vector<BlockIdxType> slots = {block_ids.blocks()[i]};
+            shared_cache_->put(keys[i], slots, false);
+        }
+    }
 
     auto result1 = group.matchSingleKey(101);
     EXPECT_TRUE(result1.block_indices.empty());
@@ -436,11 +443,6 @@ TEST_F(SWAKVCacheGroupTest, InsertIntoCache_SkipsNullBlocks) {
     auto result5 = group.matchSingleKey(105);
     ASSERT_EQ(result5.block_indices.size(), 1u);
     EXPECT_EQ(result5.block_indices[0], block_ids.blocks()[4]);
-}
-
-TEST_F(SWAKVCacheGroupTest, InsertIntoCache_EmptyInput) {
-    auto group = makeGroup(4);
-    group.insertIntoCache({}, {}, false);
 }
 
 }  // namespace test
