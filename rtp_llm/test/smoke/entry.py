@@ -178,3 +178,8 @@ if __name__ == "__main__":
 
     logging.info("raw info: %s", str(task_states))
     assert task_states.ret == True, f"smoke task run failed\n{task_states}"
+    # Native libs loaded via rtp_llm.ops have static destructors / background
+    # threads that race Py_Finalize (PyThreadState_Get with tstate=NULL),
+    # turning a passing smoke into bazel exitcode -11. Failures still take
+    # the assert path above and exit normally.
+    os._exit(0)
