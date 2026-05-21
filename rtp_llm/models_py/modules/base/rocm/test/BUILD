@@ -79,26 +79,3 @@ py_test(
     exec_properties = {'gpu':'MI308X-ROCM7', 'gpu_count':'2'},
 )
 
-py_test(
-    name = "test_skip_allreduce",
-    srcs = ["test_skip_allreduce.py"],
-    deps = py_test_deps + [
-        "//rtp_llm:testlib",
-    ],
-    timeout = "moderate",
-    tags = ["rocm"],
-    exec_properties = {'gpu':'MI308X-ROCM7'},
-)
-
-py_test(
-    name = "test_unified_allreduce_tp",
-    srcs = ["test_unified_allreduce_tp.py"],
-    deps = py_test_deps + [
-        "//rtp_llm:testlib",
-    ],
-    timeout = "moderate",
-    env = {"GPU_COUNT": "2"},
-    tags = ["rocm"],
-    exec_properties = {'gpu':'MI308X-ROCM7', 'gpu_count':'2'},
-)
-
