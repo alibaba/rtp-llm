@@ -257,6 +257,17 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("workspace_starts"),
                   py::arg("batch_size"));
 
+    rtp_ops_m.def("cp_gather_and_upconvert_fp8_kv_cache_v2",
+                  &rtp_llm::cp_gather_and_upconvert_fp8_kv_cache_v2,
+                  "Gather and upconvert FP8 KV cache to fused BF16 [total_tokens, 576] (vectorized v3)",
+                  py::arg("src_cache"),
+                  py::arg("dst_fused"),
+                  py::arg("block_table"),
+                  py::arg("seq_lens"),
+                  py::arg("workspace_starts"),
+                  py::arg("batch_size"),
+                  py::arg("total_tokens"));
+
     rtp_ops_m.def("concat_and_cache_mla",
                   &rtp_llm::concat_and_cache_mla,
                   "Concat and cache MLA (Multi-Head Latent Attention) kernel",
