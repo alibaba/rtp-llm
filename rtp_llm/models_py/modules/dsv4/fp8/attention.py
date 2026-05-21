@@ -1687,7 +1687,10 @@ class AttentionFP8(nn.Module):
     def reset_rope_cache(self, device=None):
         """Recompute `freqs_cis` on the actual device — MUST be called after
         `model.to_empty(device=...)` since meta-tensor construction leaves the
-        cached freqs as zeros."""
+        cached freqs as zeros. Pass ``device`` so the memoized
+        ``precompute_freqs_cis`` returns the shared (params, device) tensor;
+        all layers with identical rope params now point at the same object,
+        which lets the downstream cos_sin_cache dedupe by ``id()``."""
         freqs_cis = precompute_freqs_cis(
             self._rope_dim,
             self._rope_max_seq_len,
@@ -1696,9 +1699,8 @@ class AttentionFP8(nn.Module):
             self._rope_factor,
             self._rope_beta_fast,
             self._rope_beta_slow,
+            device=device,
         )
-        if device is not None:
-            freqs_cis = freqs_cis.to(device)
         self.freqs_cis = freqs_cis
         # Clear compressor / indexer bound references so they rebind on next forward
         if self.compressor is not None:
@@ -2562,6 +2564,14 @@ class AttentionFP8(nn.Module):
         with record_function_range("dsv4.fp8.attn.workspace.overlay_new_k"):
             kv_bf16 = qkv.kv_full.to(torch.bfloat16).reshape(-1, D)
             workspace.view(B * wm.M, D).index_copy_(0, wm.new_k_slot_in_flat, kv_bf16)
+            # Free the kv_full storage before combine_topk + flash_mla_sparse_fwd.
+            # After the overlay, kv_full has no remaining consumer in this
+            # function or any caller (verified: _forward_prefill_compressed
+            # uses only the returned attention output for output_proj).
+            # The NamedTuple ref keeps it alive otherwise, costing ~1.1 GiB
+            # of peak overlap with the sparse-attn workspace at 1M ctx.
+            del kv_bf16
+            qkv.kv_full.untyped_storage().resize_(0)
 
         # combine_topk: HCA uses precomputed dense arange(N_max); CSA uses
         # the runtime indexer output (raw compressed-pool offsets in [0, N_b)).
@@ -2664,7 +2674,13 @@ class AttentionFP8(nn.Module):
                 )
             return o3.unsqueeze(0)
 
-        chunks: list[torch.Tensor] = []
+        # Preallocate the full output buffer and write each chunk directly
+        # into its slice. Avoids holding all chunks alive + allocating a
+        # separate cat output (2× peak ≈ 2 × s_q · H · D · 2B); the per-chunk
+        # o_part is released between iterations and the allocator reuses
+        # the same block for the next launch. At 1M context this drops the
+        # attention peak by ~13 GiB per rank.
+        o3: Optional[torch.Tensor] = None
         with record_function_range("dsv4.fp8.attn.workspace.flash_mla_sparse_fwd"):
             for start in range(0, s_q, q_chunk):
                 end = min(start + q_chunk, s_q)
@@ -2676,8 +2692,15 @@ class AttentionFP8(nn.Module):
                     attn_sink=self.attn_sink,
                     topk_length=combined_lens[start:end],
                 )
-                chunks.append(o_part)
-        o3 = torch.cat(chunks, dim=0)
+                if o3 is None:
+                    o3 = torch.empty(
+                        (s_q,) + tuple(o_part.shape[1:]),
+                        dtype=o_part.dtype,
+                        device=o_part.device,
+                    )
+                o3[start:end].copy_(o_part)
+                del o_part
+        assert o3 is not None
         return o3.unsqueeze(0)
 
     # ------------------------------------------------------------------
@@ -3427,11 +3450,17 @@ class AttentionFP8(nn.Module):
         dense_cmp_topk: Optional[torch.Tensor] = None
         if with_dense_cmp_topk:
             if N > 0:
+                # Broadcast view (stride 0 on dim 0) — every row is the same
+                # arange(N). Both combine_topk_swa_indices kernels read via
+                # ``ptr + row*stride + col`` so stride=0 is bit-equal to the
+                # materialized [T_total, N] int32, but avoids a T_total×N
+                # alloc (~9-32 GiB at 1M ctx). The CP wrapper used to defeat
+                # this by force-calling .contiguous(); that guard was dropped
+                # in _swa_ops_triton.combine_topk_swa_indices_cp.
                 dense_cmp_topk = (
                     torch.arange(N, device=device, dtype=torch.int32)
                     .view(1, N)
                     .expand(T_total, N)
-                    .contiguous()
                 )
             else:
                 dense_cmp_topk = torch.empty(
@@ -4227,6 +4256,12 @@ class AttentionFP8(nn.Module):
             P = meta.prefix_len_max
             with record_function_range("dsv4.fp8.attn.swa_concat.overlay_new_k"):
                 workspace[:, P : P + S, :].copy_(kv_bf16.unsqueeze(0))
+        # Free kv_full storage before flash_mla_sparse_fwd. After the
+        # overlay nothing else reads it on this path; the NamedTuple ref
+        # would otherwise keep it alive through the sparse-attn workspace
+        # alloc — ~1.1 GiB peak overlap at 1M ctx.
+        del kv_bf16
+        qkv.kv_full.untyped_storage().resize_(0)
 
         # 3. flash_mla_sparse_fwd over the [B*M] flat KV view.
         with record_function_range("dsv4.fp8.attn.swa_concat.flash_mla"):
