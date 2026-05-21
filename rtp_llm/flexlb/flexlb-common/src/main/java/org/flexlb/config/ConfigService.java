@@ -4,6 +4,7 @@ import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.flexlb.util.JsonUtils;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
@@ -24,6 +25,21 @@ public class ConfigService {
 
     private final FlexlbConfig flexlbConfig;
 
+    @Autowired
+    public ConfigService(FlexlbConfig flexlbConfig) {
+        Map<String, String> environment = System.getenv();
+        applyEnvironmentOverrides(flexlbConfig, environment);
+        applyTrafficPolicyOverride(flexlbConfig, environment);
+        this.flexlbConfig = flexlbConfig;
+    }
+
+    /**
+     * Direct path for callers outside Spring (unit tests, ad-hoc tooling).
+     * Mirrors what {@link FlexlbConfigJsonEnvironmentPostProcessor} +
+     * {@code @ConfigurationProperties} binding produce for the Spring path:
+     * parse {@code FLEXLB_CONFIG} JSON env, then apply unprefixed per-field
+     * env overrides.
+     */
     public ConfigService() {
         this(System.getenv());
     }

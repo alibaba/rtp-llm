@@ -5,6 +5,7 @@ import lombok.Setter;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
+import org.springframework.boot.context.properties.ConfigurationProperties;
 
 import static org.flexlb.enums.LoadBalanceStrategyEnum.RANDOM;
 import static org.flexlb.enums.LoadBalanceStrategyEnum.SHORTEST_TTFT;
@@ -13,12 +14,15 @@ import static org.flexlb.enums.ResourceMeasureIndicatorEnum.REMAINING_KV_CACHE;
 import static org.flexlb.enums.ResourceMeasureIndicatorEnum.WAIT_TIME;
 
 /**
- * Supports environment variable override configuration
- * Environment variable naming rule: {FIELD_NAME_UPPER_SNAKE_CASE}
- * Example: enableQueueing -> ENABLE_QUEUEING
+ * Bound from {@code flexlb.*} properties (application.yml, command-line args,
+ * env vars via Spring relaxed binding) and from the legacy {@code FLEXLB_CONFIG}
+ * JSON env var (merged via {@link FlexlbConfigJsonEnvironmentPostProcessor}).
+ * Unprefixed per-field env vars (e.g. {@code ENABLE_QUEUEING}) layer on top via
+ * {@link ConfigService#applyEnvironmentOverrides}.
  */
 @Getter
 @Setter
+@ConfigurationProperties(prefix = "flexlb")
 public class FlexlbConfig {
 
     /**
