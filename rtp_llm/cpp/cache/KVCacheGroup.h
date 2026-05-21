@@ -12,7 +12,7 @@
 #include "rtp_llm/cpp/cache/BufferTypes.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/BlockPool.h"
-#include "rtp_llm/cpp/cache/BlockCache.h"
+#include "rtp_llm/cpp/cache/SharedBlockCache.h"
 
 namespace rtp_llm {
 
@@ -23,11 +23,15 @@ struct NeedBlocksInfo {
 
 class KVCacheGroup {
 public:
-    KVCacheGroup(const LayerIdsType& layer_ids, KVCacheSpecPtr kvcache_spec, BlockPoolPtr block_pool, int group_id):
+    KVCacheGroup(const LayerIdsType& layer_ids,
+                 KVCacheSpecPtr      kvcache_spec,
+                 BlockPoolPtr        block_pool,
+                 int                 group_id,
+                 SharedBlockCache*   shared_cache = nullptr):
         layer_ids_(layer_ids),
         kvcache_spec_(std::move(kvcache_spec)),
         block_pool_(block_pool),
-        block_cache_(block_pool_->blockCache()),
+        shared_cache_(shared_cache),
         group_id_(group_id),
         seq_size_per_block_(kvcache_spec_->seq_size_per_block) {}
 
@@ -61,11 +65,11 @@ public:
     int    group_id() const;
 
 protected:
-    LayerIdsType   layer_ids_;
-    KVCacheSpecPtr kvcache_spec_;
-    BlockPoolPtr   block_pool_;
-    BlockCachePtr  block_cache_;
-    int            group_id_ = 0;
+    LayerIdsType      layer_ids_;
+    KVCacheSpecPtr    kvcache_spec_;
+    BlockPoolPtr      block_pool_;
+    SharedBlockCache* shared_cache_ = nullptr;
+    int               group_id_     = 0;
 
     int                                    seq_size_per_block_;
     std::unordered_map<int, torch::Tensor> global_layer_to_kv_tensors;
