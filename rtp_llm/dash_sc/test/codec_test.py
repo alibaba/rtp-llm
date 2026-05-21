@@ -145,7 +145,8 @@ class DashScGrpcRequestTest(TestCase):
         _add_tensor(req, "max_new_think_tokens", "INT32", [1], struct.pack("<i", 0))
         sp = parse_sampling_params(req)
         self.assertEqual(sp.max_new_think_tokens, 0)
-        # zero means zero thinking budget → engine enforces immediate close
+        # The servicer later turns zero budget into no-thinking while retaining
+        # think boundary ids for C++ static masking.
         self.assertEqual(sp.to_generate_config().max_thinking_tokens, 0)
 
     def test_parse_sampling_max_think_length_priority_and_negative(self) -> None:

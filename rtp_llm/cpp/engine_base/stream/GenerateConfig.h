@@ -77,6 +77,7 @@ public:
 
     bool               in_think_mode       = false;
     int                max_thinking_tokens = 0;
+    std::vector<int>   begin_think_token_ids;
     std::vector<int>   end_think_token_ids;
     bool               gen_timeline = false;
     int                profile_step = 3;
@@ -139,6 +140,7 @@ public:
                      << ", stop_words_list:" << vectorsToString(stop_words_list)
                      << ", can_use_pd_separation: " << can_use_pd_separation << ", pd_separation: " << pd_separation
                      << ", in_think_mode: " << in_think_mode << ", max_thinking_tokens: " << max_thinking_tokens
+                     << ", begin_think_token_ids: " << vectorToString(begin_think_token_ids)
                      << ", end_think_token_ids: " << vectorToString(end_think_token_ids)
                      << ", gen_timeline: " << gen_timeline << ", profile_step: " << profile_step
                      << ", reuse_cache: " << reuse_cache << ", enable_device_cache: " << enable_device_cache
@@ -215,6 +217,7 @@ public:
         JSONIZE(sp_advice_prompt_token_ids);
         JSONIZE(in_think_mode);
         JSONIZE(max_thinking_tokens);
+        JSONIZE(begin_think_token_ids);
         JSONIZE(end_think_token_ids);
         JSONIZE(gen_timeline);
         JSONIZE(profile_step);

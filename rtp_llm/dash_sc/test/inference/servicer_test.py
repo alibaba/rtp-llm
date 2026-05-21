@@ -265,8 +265,9 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(visitor.enqueue_called, 1)
         gc = visitor.last_generate_input.generate_config
-        self.assertTrue(gc.in_think_mode)
+        self.assertFalse(gc.in_think_mode)
         self.assertEqual(gc.max_thinking_tokens, 0)
+        self.assertEqual(gc.begin_think_token_ids, [128821, 198])
         self.assertEqual(gc.end_think_token_ids, [128822, 271])
         self.assertEqual(_gen_ids(chunks[0]), [10, 128822, 271])
 
@@ -372,6 +373,9 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(visitor.enqueue_called, 2)
         self.assertEqual(visitor.generate_inputs[0].request_id, 100)
         self.assertEqual(visitor.generate_inputs[1].request_id, 200)
+        self.assertTrue(visitor.generate_inputs[0].generate_config.in_think_mode)
+        self.assertEqual(visitor.generate_inputs[0].generate_config.begin_think_token_ids, [128821, 198])
+        self.assertEqual(visitor.generate_inputs[0].generate_config.end_think_token_ids, [128822, 271])
         self.assertEqual(_gen_ids(chunks[0]), [128821, 10, 11])
         self.assertEqual(_gen_ids(chunks[1]), [128822, 271])
         self.assertEqual(_gen_ids(chunks[2]), [20, 21, 22])
@@ -435,7 +439,8 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         cfg = visitor.generate_inputs[0].generate_config
         self.assertFalse(cfg.in_think_mode)
         self.assertEqual(cfg.max_thinking_tokens, 0)
-        self.assertEqual(cfg.end_think_token_ids, [])
+        self.assertEqual(cfg.begin_think_token_ids, [128821, 198])
+        self.assertEqual(cfg.end_think_token_ids, [128822, 271])
         self.assertNotIn("max_new_think_tokens", chunks[0].infer_response.parameters)
         self.assertNotIn(
             "generate_think_token_num", chunks[0].infer_response.parameters

@@ -326,10 +326,13 @@ def _apply_request_overrides(generate_config: Any, other: OtherParams) -> None:
     if other.max_new_think_tokens is not None:
         max_think = int(other.max_new_think_tokens)
         generate_config.max_thinking_tokens = _INT32_MAX if max_think < 0 else max_think
-    if other.enable_thinking is False:
+    if (
+        other.enable_thinking is False
+        or other.max_new_think_tokens == 0
+        or getattr(generate_config, "max_thinking_tokens", None) == 0
+    ):
         generate_config.in_think_mode = False
         generate_config.max_thinking_tokens = 0
-        generate_config.end_think_token_ids = []
         if hasattr(generate_config, "thinking"):
             generate_config.thinking = False
     if other.timeout_ms is not None:
@@ -421,6 +424,14 @@ async def iter_real_model_stream_infer(
                 logging.warning(
                     "[DashScGrpc] [%s] add_thinking_params failed: %s", tag, e
                 )
+        begin_think_tokens = list(runtime.bos_tokens or tuple(echo_prefix_ids or ()))
+        if begin_think_tokens and hasattr(generate_config, "begin_think_token_ids"):
+            generate_config.begin_think_token_ids = begin_think_tokens
+        if (
+            runtime.eos_tokens
+            and not getattr(generate_config, "end_think_token_ids", None)
+        ):
+            generate_config.end_think_token_ids = list(runtime.eos_tokens)
         _apply_request_overrides(generate_config, other)
         if extra_stop_word_ids:
             existing = generate_config.stop_words_list

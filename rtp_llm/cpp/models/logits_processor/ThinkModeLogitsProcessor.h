@@ -8,6 +8,7 @@ namespace rtp_llm {
 struct StreamThinkInfo {
     bool                                           in_think_mode;
     int                                            max_thinking_tokens;
+    std::vector<int>                               begin_think_token_ids;
     std::vector<int>                               end_think_token_ids;
     int32_t                                        input_length;
     int32_t                                        current_output_length;
@@ -18,6 +19,7 @@ struct StreamThinkInfo {
 
     StreamThinkInfo(bool                                           think_mode,
                     int                                            max_thinking_tokens,
+                    std::vector<int>                               begin_think_token_ids,
                     std::vector<int>                               end_think_token_ids,
                     int32_t                                        input_length,
                     int32_t                                        output_length,
@@ -25,6 +27,7 @@ struct StreamThinkInfo {
                     std::shared_ptr<StringContainDFA<size_t, int>> dfa_ptr):
         in_think_mode(think_mode),
         max_thinking_tokens(max_thinking_tokens),
+        begin_think_token_ids(begin_think_token_ids),
         end_think_token_ids(end_think_token_ids),
         input_length(input_length),
         current_output_length(output_length),
@@ -35,6 +38,7 @@ struct StreamThinkInfo {
         StreamThinkInfo think_info;
         think_info.in_think_mode         = in_think_mode;
         think_info.max_thinking_tokens   = max_thinking_tokens;
+        think_info.begin_think_token_ids = begin_think_token_ids;
         think_info.end_think_token_ids   = end_think_token_ids;
         think_info.input_length          = input_length;
         think_info.current_output_length = current_output_length;
