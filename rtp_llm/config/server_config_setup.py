@@ -38,7 +38,7 @@ def auto_configure_deepep(
         parallelism_config: ParallelismConfig containing tp_size, ep_size, world_size, local_world_size
         role_type: Role type (PREFILL, DECODE, or PDFUSION)
 
-    Note: USE_ALL_GATHER should be enabled for pure TP scenarios (ep_size == tp_size).
+    Note: USE_ALL_GATHER should be enabled for pure TP scenarios (ep_size == 1).
     When USE_ALL_GATHER is enabled, DeepEP should not be used.
 
     Configuration rules (for 8-GPU machine):

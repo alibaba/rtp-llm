@@ -197,6 +197,7 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         extra_finalize_args: Optional[Dict[str, Any]],
+        skip_allreduce: bool = False,
     ) -> torch.Tensor:
         assert self.handle is not None, "handler is None"
         assert payload.fused_expert_output is not None, "fused_expert_output is None"
@@ -211,7 +212,7 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
         original_num_tokens: int = extra_finalize_args["original_num_tokens"]
         tp_token_size = (original_num_tokens + tp_size - 1) // tp_size
 
-        if tp_size > 1:
+        if tp_size > 1 and not skip_allreduce:
             # combine_x.size(0) might be 0
             if out_token.size(0) < tp_token_size:
                 padding_out_token = torch.empty(
