@@ -24,6 +24,7 @@ from ci_gate.merge import (
     trigger_merge,
     wait_merge,
 )
+from ci_gate.rerun import rerun_pr_build
 
 
 # ---------------------------------------------------------------------------
@@ -920,6 +921,90 @@ class TestCheckMergeDone(unittest.TestCase):
         rc, out = self._run_raises(mock_ci, GateError("boom", 2))
         self.assertEqual(rc, 1)
         self.assertIn("merge_action=trigger", out)
+
+
+class TestRerunPrBuildHelperPath(unittest.TestCase):
+    """Cover the helper-context path: rerun-pr-build invoked with head_sha
+    only (no --pr-number), as `dispatcher-fork-helper.yml` does for fork
+    PRs whose `pull_request_review` dispatcher run is permission-blocked.
+    """
+
+    def _args(self, pr_number=""):
+        return argparse.Namespace(
+            repository="alibaba/rtp-llm",
+            pr_number=pr_number,
+            head_sha="abc123def456" + "0" * 28,
+            workflow_file="CI-request-trigger.yml",
+            github_token="t",
+            max_retries=3,
+            retry_backoff=0.0,
+        )
+
+    @patch("ci_gate.rerun.rerun_workflow_run")
+    @patch("ci_gate.rerun.list_workflow_runs")
+    @patch("ci_gate.rerun.find_pr_for_commit")
+    def test_pr_number_resolved_from_head_sha(self, mock_find, mock_list, mock_rerun):
+        """When --pr-number omitted, fall back to find_pr_for_commit."""
+        mock_find.return_value = "1012"
+        mock_list.return_value = [{"id": 99, "status": "completed", "conclusion": "failure"}]
+        mock_rerun.return_value = (201, {})
+        rc = rerun_pr_build(self._args(pr_number=""))
+        self.assertEqual(rc, 0)
+        mock_find.assert_called_once()
+        mock_rerun.assert_called_once()
+
+    @patch("ci_gate.rerun.post_pr_comment")
+    @patch("ci_gate.rerun.list_workflow_runs")
+    @patch("ci_gate.rerun.find_pr_for_commit")
+    def test_no_pr_no_run_skips_comment(self, mock_find, mock_list, mock_comment):
+        """No PR resolvable AND no build run found → log only, no API write."""
+        mock_find.return_value = ""
+        mock_list.return_value = []
+        rc = rerun_pr_build(self._args(pr_number=""))
+        self.assertEqual(rc, 0)
+        mock_comment.assert_not_called()
+
+    @patch("ci_gate.rerun.post_pr_comment")
+    @patch("ci_gate.rerun.rerun_workflow_run")
+    @patch("ci_gate.rerun.list_workflow_runs")
+    @patch("ci_gate.rerun.find_pr_for_commit")
+    def test_expired_run_with_pr_posts_comment(
+        self, mock_find, mock_list, mock_rerun, mock_comment
+    ):
+        """422 expired run AND resolved PR → comment posted."""
+        mock_find.return_value = "1012"
+        mock_list.return_value = [{"id": 99, "status": "completed", "conclusion": "failure"}]
+        mock_rerun.return_value = (422, {"message": "too old"})
+        mock_comment.return_value = (201, {})
+        rc = rerun_pr_build(self._args(pr_number=""))
+        self.assertEqual(rc, 0)
+        mock_comment.assert_called_once()
+
+    @patch("ci_gate.rerun.post_pr_comment")
+    @patch("ci_gate.rerun.rerun_workflow_run")
+    @patch("ci_gate.rerun.list_workflow_runs")
+    @patch("ci_gate.rerun.find_pr_for_commit")
+    def test_expired_run_without_pr_skips_comment(
+        self, mock_find, mock_list, mock_rerun, mock_comment
+    ):
+        """422 expired AND no PR resolvable → log, do NOT post."""
+        mock_find.return_value = ""
+        mock_list.return_value = [{"id": 99, "status": "completed", "conclusion": "failure"}]
+        mock_rerun.return_value = (422, {"message": "too old"})
+        rc = rerun_pr_build(self._args(pr_number=""))
+        self.assertEqual(rc, 0)
+        mock_comment.assert_not_called()
+
+    @patch("ci_gate.rerun.rerun_workflow_run")
+    @patch("ci_gate.rerun.list_workflow_runs")
+    @patch("ci_gate.rerun.find_pr_for_commit")
+    def test_explicit_pr_number_skips_lookup(self, mock_find, mock_list, mock_rerun):
+        """When --pr-number is supplied, do not call find_pr_for_commit."""
+        mock_list.return_value = [{"id": 99, "status": "completed", "conclusion": "failure"}]
+        mock_rerun.return_value = (201, {})
+        rc = rerun_pr_build(self._args(pr_number="1012"))
+        self.assertEqual(rc, 0)
+        mock_find.assert_not_called()
 
 
 if __name__ == "__main__":

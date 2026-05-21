@@ -1,0 +1,91 @@
+# ┌─────────────────────────────────────────────────────────────────┐
+# │ CI Architecture — Dispatcher Fork Helper                        │
+# │                                                                 │
+# │ For PRs from forks, the `pull_request_review` event grants the  │
+# │ dispatcher a read-only GITHUB_TOKEN with no secret access, so   │
+# │ the dispatcher cannot call the rerun API (HTTP 403 "Resource    │
+# │ not accessible by integration"). The `workflow_run` event is    │
+# │ GitHub's documented escape hatch: it always runs on the default │
+# │ branch with full base-repo permissions and secret access,       │
+# │ regardless of whether the triggering workflow was fork-         │
+# │ restricted.                                                     │
+# │                                                                 │
+# │ This helper listens for dispatcher completions that came from a │
+# │ fork PR review and reruns the native build run on the           │
+# │ dispatcher's behalf. Non-fork PR reviews and issue_comment      │
+# │ paths are unaffected — the dispatcher handles those directly.   │
+# │                                                                 │
+# │ Safety:                                                         │
+# │ - Triggers only when the dispatcher's source event was a fork   │
+# │   PR review by a User actor (skipped/cancelled/bot runs ignored)│
+# │ - Minimum permissions (actions: write, contents: read)          │
+# │ - No CI_SECRET reference — only reruns the existing build, the  │
+# │   rerun then re-evaluates everything in its own context         │
+# │ - Kill switch via repository variable HELPER_DISABLED=true      │
+# │ - No secret values written to logs                              │
+# └─────────────────────────────────────────────────────────────────┘
+name: Dispatcher Fork Helper
+
+on:
+  workflow_run:
+    workflows: ["CI Event Dispatcher"]
+    types: [completed]
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  rerun-on-behalf:
+    if: >-
+      vars.HELPER_DISABLED != 'true' &&
+      github.event.workflow_run.event == 'pull_request_review' &&
+      github.event.workflow_run.head_repository.fork == true &&
+      github.event.workflow_run.actor.type == 'User' &&
+      github.event.workflow_run.conclusion != 'skipped' &&
+      github.event.workflow_run.conclusion != 'cancelled'
+    runs-on: [self-hosted, Linux]
+    defaults:
+      run:
+        working-directory: .github/scripts
+    steps:
+      - name: Log trigger context (no secrets)
+        working-directory: .
+        run: |
+          echo "Triggering dispatcher run: ${{ github.event.workflow_run.id }}"
+          echo "Conclusion:               ${{ github.event.workflow_run.conclusion }}"
+          echo "Source event:             ${{ github.event.workflow_run.event }}"
+          echo "Head SHA:                 ${{ github.event.workflow_run.head_sha }}"
+          echo "Head repo (fork):         ${{ github.event.workflow_run.head_repository.full_name }}"
+          echo "Actor:                    ${{ github.event.workflow_run.actor.login }}"
+
+      - name: Checkout repository (attempt 1)
+        id: checkout1
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          sparse-checkout: .github/scripts
+
+      - name: Checkout repository (attempt 2)
+        if: steps.checkout1.outcome == 'failure'
+        id: checkout2
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          sparse-checkout: .github/scripts
+
+      - name: Checkout repository (attempt 3)
+        if: steps.checkout2.outcome == 'failure'
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          sparse-checkout: .github/scripts
+
+      - name: Rerun PR build on dispatcher's behalf
+        run: |
+          python3 -m ci_gate rerun-pr-build \
+            --repository "${{ github.repository }}" \
+            --head-sha "${{ github.event.workflow_run.head_sha }}" \
+            --github-token "${{ secrets.GITHUB_TOKEN }}"

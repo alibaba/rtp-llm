@@ -94,7 +94,8 @@ def main(argv):
 
     rerun = subparsers.add_parser("rerun-pr-build")
     rerun.add_argument("--repository", required=True)
-    rerun.add_argument("--pr-number", required=True)
+    rerun.add_argument("--pr-number", default="",
+                       help="Optional. When omitted (workflow_run helper), resolved from head-sha.")
     rerun.add_argument("--head-sha", required=True)
     rerun.add_argument("--workflow-file", default="CI-request-trigger.yml")
     rerun.add_argument("--github-token", required=True)
