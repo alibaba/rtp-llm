@@ -28,6 +28,7 @@ from rtp_llm.models_py.triton_kernels.causal_conv1d import (
     prepare_causal_conv1d_metadata,
 )
 from rtp_llm.models_py.triton_kernels.common.layernorm_gated import RmsNormGated
+
 try:
     from flashinfer.gdn_kernels.blackwell.gdn_prefill import (
         chunk_gated_delta_rule_sm100 as _flashinfer_gdn_prefill,
@@ -225,12 +226,14 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                 cls._blackwell_available = False
             else:
                 import os
+
                 major, _ = torch.cuda.get_device_capability()
                 cls._blackwell_available = major >= 10
         return cls._blackwell_available
 
     def _use_blackwell_kernel(self, total_seq_len: int, batch_size: int = 1) -> bool:
         import os
+
         if os.environ.get("ENABLE_BLACKWELL_GDN", "0") != "1":
             return False
         if _flashinfer_gdn_prefill is None:
@@ -255,6 +258,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         if cls._blackwell_warmed_up:
             return
         import os
+
         if os.environ.get("ENABLE_BLACKWELL_GDN", "0") != "1":
             return
         if _flashinfer_gdn_prefill is None:
@@ -264,8 +268,9 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         if not cls._is_blackwell_gpu():
             return
 
-        import math
         import logging
+        import math
+
         logger = logging.getLogger(__name__)
 
         logger.info("Blackwell GDN kernel: starting warmup JIT compilation (~15s)...")
@@ -287,24 +292,42 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                 warmup_seq, local_num_v_heads, dtype=torch.float32, device=device
             )
             initial_state = torch.zeros(
-                warmup_batch, local_num_v_heads, head_k_dim, head_k_dim,
-                dtype=torch.float32, device=device,
+                warmup_batch,
+                local_num_v_heads,
+                head_k_dim,
+                head_k_dim,
+                dtype=torch.float32,
+                device=device,
             )
             output = torch.empty_like(v)
             output_state = torch.empty_like(initial_state)
             cu_seqlens = torch.tensor([0, warmup_seq], dtype=torch.int32, device=device)
 
             _flashinfer_gdn_prefill(
-                q=q, k=k, v=v, gate=gate, beta=beta,
-                output=output, cu_seqlens=cu_seqlens,
-                initial_state=initial_state, output_state=output_state, scale=scale,
+                q=q,
+                k=k,
+                v=v,
+                gate=gate,
+                beta=beta,
+                output=output,
+                cu_seqlens=cu_seqlens,
+                initial_state=initial_state,
+                output_state=output_state,
+                scale=scale,
             )
             torch.cuda.synchronize(device)
 
             _flashinfer_gdn_prefill(
-                q=q, k=k, v=v, gate=gate, beta=beta,
-                output=output, cu_seqlens=cu_seqlens,
-                initial_state=None, output_state=None, scale=scale,
+                q=q,
+                k=k,
+                v=v,
+                gate=gate,
+                beta=beta,
+                output=output,
+                cu_seqlens=cu_seqlens,
+                initial_state=None,
+                output_state=None,
+                scale=scale,
             )
             torch.cuda.synchronize(device)
 
@@ -378,24 +401,48 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         total_seq_len = mixed_qkv.shape[0]
         if self._use_blackwell_kernel(total_seq_len, context_batch_size):
             return self._fla_blackwell(
-                query, key, value, g, beta, initial_states, ssm_states,
-                cu_seqlens_without_padding, attn_inputs, seq_size_per_block,
+                query,
+                key,
+                value,
+                g,
+                beta,
+                initial_states,
+                ssm_states,
+                cu_seqlens_without_padding,
+                attn_inputs,
+                seq_size_per_block,
             )
 
+        # Triton chunk kernel uses (K, V) state layout; pool/initial_states are (V, K).
+        tri_initial = (
+            initial_states.transpose(-1, -2).contiguous()
+            if initial_states is not None
+            else None
+        )
         attn_out, h, final_state = chunk_gated_delta_rule(
-            query, key, value, g, beta,
-            initial_state=initial_states,
+            query,
+            key,
+            value,
+            g,
+            beta,
+            initial_state=tri_initial,
             output_final_state=True,
             cu_seqlens=cu_seqlens_without_padding,
             use_qk_l2norm_in_kernel=True,
         )
         if ssm_states is not None:
+            # Transpose back to pool (V, K) convention before writing.
+            h = h.transpose(-1, -2).contiguous()
+            final_state = final_state.transpose(-1, -2).contiguous()
             store_ssm_state_to_block_map(
-                h, final_state,
+                h,
+                final_state,
                 attn_inputs.prefix_lengths_d,
                 cu_seqlens_without_padding,
                 attn_inputs.kv_cache_kernel_block_id_device,
-                ssm_states, seq_size_per_block, chunk_size=64,
+                ssm_states,
+                seq_size_per_block,
+                chunk_size=64,
             )
         return attn_out.squeeze_(0)
 
@@ -424,7 +471,8 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             and query.stride(-1) == 1
             and query.ndim >= 3
             and key.data_ptr()
-            == query.data_ptr() + query.shape[-2] * query.shape[-1] * query.element_size()
+            == query.data_ptr()
+            + query.shape[-2] * query.shape[-1] * query.element_size()
         ):
             query, key = l2norm_fwd_qk(query, key)
         else:
@@ -443,46 +491,75 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         if ssm_states is not None:
             batch_size = initial_states.shape[0] if initial_states is not None else 1
             output_state = torch.empty(
-                batch_size, self.local_num_v_heads, self.head_v_dim, self.head_v_dim,
-                dtype=torch.float32, device=query.device,
+                batch_size,
+                self.local_num_v_heads,
+                self.head_v_dim,
+                self.head_k_dim,
+                dtype=torch.float32,
+                device=query.device,
             )
 
-        scale = 1.0 / (self.head_k_dim ** 0.5)
+        scale = 1.0 / (self.head_k_dim**0.5)
 
         try:
             _flashinfer_gdn_prefill(
-                q=q_3d, k=k_3d, v=v_3d, gate=gate, beta=beta_2d,
-                output=output, cu_seqlens=cu_seqlens,
-                initial_state=initial_states, output_state=output_state,
+                q=q_3d,
+                k=k_3d,
+                v=v_3d,
+                gate=gate,
+                beta=beta_2d,
+                output=output,
+                cu_seqlens=cu_seqlens,
+                initial_state=initial_states,
+                output_state=output_state,
                 scale=scale,
             )
         except Exception:
             import logging
+
             logging.getLogger(__name__).warning(
                 "Blackwell GDN kernel failed, falling back to Triton",
                 exc_info=True,
             )
             Qwen3NextGatedDeltaNetPrefill._blackwell_available = False
+            # Triton chunk kernel uses (K, V) state layout; pool/initial_states are (V, K).
+            tri_initial = (
+                initial_states.transpose(-1, -2).contiguous()
+                if initial_states is not None
+                else None
+            )
             attn_out, h, final_state = chunk_gated_delta_rule(
-                query, key, value, g, beta.to(query.dtype),
-                initial_state=initial_states,
+                query,
+                key,
+                value,
+                g,
+                beta.to(query.dtype),
+                initial_state=tri_initial,
                 output_final_state=True,
                 cu_seqlens=cu_seqlens,
                 use_qk_l2norm_in_kernel=False,
             )
             if ssm_states is not None:
+                # Transpose back to pool (V, K) convention before writing.
+                h = h.transpose(-1, -2).contiguous()
+                final_state = final_state.transpose(-1, -2).contiguous()
                 store_ssm_state_to_block_map(
-                    h, final_state,
-                    attn_inputs.prefix_lengths_d, cu_seqlens,
+                    h,
+                    final_state,
+                    attn_inputs.prefix_lengths_d,
+                    cu_seqlens,
                     attn_inputs.kv_cache_kernel_block_id_device,
-                    ssm_states, seq_size_per_block, chunk_size=64,
+                    ssm_states,
+                    seq_size_per_block,
+                    chunk_size=64,
                 )
             return attn_out.squeeze_(0)
 
         if output_state is not None:
-            final_state = output_state.transpose(-1, -2).contiguous()
+            # FlashInfer writes output_state already in (HV, V, K) layout matching the SSM pool;
+            # store directly without an extra transpose+contiguous copy.
             store_final_state_only_to_block_map(
-                final_state,
+                output_state,
                 attn_inputs.prefix_lengths_d,
                 cu_seqlens,
                 attn_inputs.kv_cache_kernel_block_id_device,
@@ -598,14 +675,23 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             and _flashinfer_gdn_decode is not None
         ):
             return self._fla_flashinfer_decode(
-                query, key, value, a, b, ssm_states,
-                seq_size_per_block, attn_inputs,
+                query,
+                key,
+                value,
+                a,
+                b,
+                ssm_states,
+                seq_size_per_block,
+                attn_inputs,
             )
 
-        # Fallback: original Triton kernel (target_verify or non-bf16 state)
+        # Fallback: original Triton kernel (target_verify or non-bf16 state).
+        # Triton expects ssm pool in (K, V) layout but pool stores (V, K) per FlashInfer convention.
+        # Transpose to a (K, V) view+copy, run kernel in-place, then write the updated state back.
         g, beta = fused_gdn_gating(self.alog, a, b, self.dt_bias)
         g = g.view(batch, seq, self.local_num_v_heads)
         beta = beta.view(batch, seq, self.local_num_v_heads)
+        ssm_states_kv = ssm_states.transpose(-1, -2).contiguous()
         core_attn_out, _ = fused_recurrent_gated_delta_rule(
             q=query,
             k=key,
@@ -613,13 +699,14 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             g=g,
             beta=beta,
             scale=None,
-            initial_state=ssm_states,
+            initial_state=ssm_states_kv,
             inplace_final_state=True,
             block_map=attn_inputs.kv_cache_kernel_block_id_device,
             seq_size_per_block=seq_size_per_block,
             sequence_lengths=attn_inputs.sequence_lengths_plus_1_d,
             use_qk_l2norm_in_kernel=True,
         )
+        ssm_states.copy_(ssm_states_kv.transpose(-1, -2).contiguous())
         res = core_attn_out.reshape(
             [-1, core_attn_out.shape[2], core_attn_out.shape[3]]
         )
