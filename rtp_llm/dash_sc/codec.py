@@ -9,6 +9,7 @@ Defaults for ``SamplingParams`` align with ``rtp_llm.config.generate_config.Gene
 
 from __future__ import annotations
 
+import json
 import logging
 import struct
 from collections.abc import Iterator
@@ -88,6 +89,110 @@ def _parse_optional_scalar_float(request, tensor_name: str) -> float | None:
     return None
 
 
+def _parse_optional_parameter_int(request, param_name: str) -> int | None:
+    """Read a scalar int from ``request.parameters``.
+
+    DashScope-serving usually sends request controls as tensors, but some proxy
+    paths put scalar knobs into the Triton ``parameters`` map. Accept both native
+    int64 and numeric strings so the hot path does not silently fall back to
+    defaults when the wire shape changes.
+    """
+    if param_name not in request.parameters:
+        return None
+    p = request.parameters[param_name]
+    if p.HasField("int64_param"):
+        return int(p.int64_param)
+    if p.HasField("string_param"):
+        s = str(p.string_param).strip()
+        if not s:
+            return None
+        try:
+            return int(s)
+        except ValueError:
+            return None
+    if p.HasField("bool_param"):
+        return 1 if p.bool_param else 0
+    return None
+
+
+def _parse_optional_parameter_bool(request, param_name: str) -> bool | None:
+    if param_name not in request.parameters:
+        return None
+    p = request.parameters[param_name]
+    if p.HasField("bool_param"):
+        return bool(p.bool_param)
+    if p.HasField("int64_param"):
+        return _parse_optional_bool(p.int64_param)
+    if p.HasField("string_param"):
+        return _parse_optional_bool(p.string_param)
+    return None
+
+
+def _parse_optional_int_value(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return int(value)
+    if isinstance(value, float):
+        return int(value)
+    s = str(value).strip()
+    if not s:
+        return None
+    try:
+        return int(s)
+    except ValueError:
+        try:
+            return int(float(s))
+        except ValueError:
+            return None
+
+
+def _parse_optional_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if value is None:
+        return None
+    s = str(value).strip().lower()
+    if not s:
+        return None
+    if s in {"1", "true", "yes", "y", "on", "enable", "enabled"}:
+        return True
+    if s in {"0", "false", "no", "n", "off", "disable", "disabled"}:
+        return False
+    return None
+
+
+def _parse_ds_header_attributes(request) -> dict[str, Any]:
+    """Parse ``ds_header_attributes`` into a lower-case-key dict.
+
+    The value is a JSON string produced by dashscope-serving. Returning an empty
+    dict on malformed input preserves inference while keeping the parser
+    defensive against partial or legacy requests.
+    """
+    if "ds_header_attributes" not in request.parameters:
+        return {}
+    p = request.parameters["ds_header_attributes"]
+    if not p.HasField("string_param") or not p.string_param:
+        return {}
+    try:
+        attrs = json.loads(p.string_param)
+    except Exception as e:
+        logging.warning("failed to parse ds_header_attributes: %s", e)
+        return {}
+    if not isinstance(attrs, dict):
+        return {}
+    return {str(k).lower(): v for k, v in attrs.items()}
+
+
+def _normalize_non_empty_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    s = str(value).strip()
+    return s if s else None
+
+
 def _parse_stop_words_list_input(request) -> tuple[tuple[int, ...], ...] | None:
     """Input name ``stop_words_list`` -> ``GenerateConfig.stop_words_list`` (groups of token ids)."""
     inp, raw = _find_input_raw(request, "stop_words_list")
@@ -119,6 +224,11 @@ class OtherParams:
     """Non-sampling knobs carried alongside ``input_ids`` (filled by ``parse_other_params``)."""
 
     return_input_ids: bool = False
+    enable_thinking: bool | None = None
+    max_new_think_tokens: int | None = None
+    timeout_ms: int | None = None
+    traffic_reject_priority: int | None = None
+    request_headers: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -187,8 +297,9 @@ def parse_input_ids_from_request(request) -> list[int] | None:
 def parse_sampling_params(request) -> SamplingParams:
     """Read sampling fields from ``request.inputs``.
 
-    Tensor names: ``max_new_tokens``, ``num_return_sequences``, ``top_p``, ``top_k``,
-    ``stop_words_list``, ``temperature``, ``min_new_tokens``, ``seed``,
+    Tensor names: ``max_new_tokens``, ``num_return_sequences`` (or DashScope
+    alias ``n``), ``top_p``, ``top_k``, ``stop_words_list``, ``temperature``,
+    ``min_new_tokens`` (or DashScope alias ``min_length``), ``seed``,
     ``repetition_penalty``, ``frequency_penalty``, ``presence_penalty``.
 
     Legacy: if there is no ``top_k`` input, ``request.parameters["top_k"].int64_param``
@@ -207,10 +318,18 @@ def parse_sampling_params(request) -> SamplingParams:
     stop_words_list: tuple[tuple[int, ...], ...] = tuple()
 
     v = _parse_optional_scalar_int(request, "max_new_tokens")
+    if v is None:
+        v = _parse_optional_scalar_int(request, "max_completion_tokens")
+    if v is None:
+        v = _parse_optional_parameter_int(request, "max_new_tokens")
+    if v is None:
+        v = _parse_optional_parameter_int(request, "max_completion_tokens")
     if v is not None:
         max_new_tokens = max(0, v)
 
     v = _parse_optional_scalar_int(request, "num_return_sequences")
+    if v is None:
+        v = _parse_optional_scalar_int(request, "n")
     if v is not None:
         num_return_sequences = max(0, v)
 
@@ -231,6 +350,8 @@ def parse_sampling_params(request) -> SamplingParams:
         temperature = vf
 
     v = _parse_optional_scalar_int(request, "min_new_tokens")
+    if v is None:
+        v = _parse_optional_scalar_int(request, "min_length")
     if v is not None:
         min_new_tokens = max(0, v)
 
@@ -270,7 +391,12 @@ def parse_sampling_params(request) -> SamplingParams:
 
 
 def parse_other_params(request) -> OtherParams:
-    """Non-sampling tensors. Currently: ``return_input_ids`` (BOOL byte or numeric scalar)."""
+    """Parse non-sampling request controls.
+
+    ``ds_header_attributes`` carries DashScope request-scoped controls that need
+    backend effects (thinking switch, timeout, priority, scheduler headers) even
+    though they are not ordinary sampler behavior.
+    """
     return_input_ids = False
     inp, raw = _find_input_raw(request, "return_input_ids")
     if inp is not None and raw:
@@ -284,7 +410,51 @@ def parse_other_params(request) -> OtherParams:
                 vf = _parse_optional_scalar_float(request, "return_input_ids")
                 if vf is not None:
                     return_input_ids = vf != 0.0
-    return OtherParams(return_input_ids=return_input_ids)
+
+    ds_attrs = _parse_ds_header_attributes(request)
+    enable_thinking = _parse_optional_bool(ds_attrs.get("x-ds-llm-thinking"))
+    if enable_thinking is None:
+        enable_thinking = _parse_optional_bool(ds_attrs.get("enable_thinking"))
+    if enable_thinking is None:
+        enable_thinking = _parse_optional_parameter_bool(request, "enable_thinking")
+
+    max_new_think_tokens = _parse_optional_scalar_int(request, "max_new_think_tokens")
+    if max_new_think_tokens is None:
+        max_new_think_tokens = _parse_optional_parameter_int(
+            request, "max_new_think_tokens"
+        )
+    if max_new_think_tokens is None:
+        max_new_think_tokens = _parse_optional_int_value(ds_attrs.get("thinking_budget"))
+    if max_new_think_tokens is None:
+        max_new_think_tokens = _parse_optional_parameter_int(request, "thinking_budget")
+    if max_new_think_tokens is not None:
+        max_new_think_tokens = int(max_new_think_tokens)
+
+    timeout_s = _parse_optional_int_value(ds_attrs.get("x-dashscope-inner-timeout"))
+    timeout_ms = timeout_s * 1000 if timeout_s is not None and timeout_s > 0 else None
+
+    traffic_reject_priority = _parse_optional_int_value(
+        ds_attrs.get("x-ds-request-priority")
+    )
+    if traffic_reject_priority is None:
+        traffic_reject_priority = _parse_optional_int_value(
+            ds_attrs.get("x-dashscope-inner-request-priority")
+        )
+
+    request_headers: dict[str, str] = {}
+    for header_name in ("user_id", "x-dashscope-apikeyid"):
+        value = _normalize_non_empty_str(ds_attrs.get(header_name))
+        if value is not None:
+            request_headers[header_name] = value
+
+    return OtherParams(
+        return_input_ids=return_input_ids,
+        enable_thinking=enable_thinking,
+        max_new_think_tokens=max_new_think_tokens,
+        timeout_ms=timeout_ms,
+        traffic_reject_priority=traffic_reject_priority,
+        request_headers=request_headers,
+    )
 
 
 def parse_dash_sc_grpc_request(

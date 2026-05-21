@@ -9,6 +9,7 @@ Covers:
 
 from __future__ import annotations
 
+import json
 import struct
 import unittest
 from unittest.mock import MagicMock, patch
@@ -345,6 +346,54 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
             chunks[1].infer_response.parameters["generate_think_token_num"].int64_param,
             3,
         )
+
+    async def test_request_disable_thinking_prevents_token1_phase2(self) -> None:
+        req = self._minimal_request()
+        phase1 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([10, 11, 1, 99], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        visitor = _FakeVisitor(_FakeAsyncStream([phase1]))
+        tok = _FakeTokenizer(
+            {
+                "<think>\n": [128821, 198],
+                "</think>\n\n": [128822, 271],
+                "<think>\n\n</think>\n\n": [128821, 271, 128822, 271],
+                "</think>": [128822],
+            }
+        )
+
+        env_cfg = _GenerateEnvCfg()
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [7, 8, 128821],
+                SamplingParams(),
+                OtherParams(enable_thinking=False, max_new_think_tokens=0),
+                visitor,
+                rtp_llm_request_id=100,
+                tokenizer=tok,
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+                phase2_request_id_factory=lambda: 200,
+            )
+        )
+
+        self.assertEqual(visitor.enqueue_called, 1)
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(_gen_ids(chunks[0]), [10, 11, 1, 99])
+        self.assertNotEqual(chunks[0].infer_response.id, "trace-real-2")
+        cfg = visitor.generate_inputs[0].generate_config
+        self.assertFalse(cfg.in_think_mode)
+        self.assertEqual(cfg.max_thinking_tokens, 0)
+        self.assertEqual(cfg.end_think_token_ids, [])
+        self.assertNotIn("max_new_think_tokens", chunks[0].infer_response.parameters)
+        self.assertNotIn("generate_think_token_num", chunks[0].infer_response.parameters)
 
     async def test_deepseek_v4_token1_before_close_wins_within_chunk(self) -> None:
         req = self._minimal_request()
@@ -1070,6 +1119,40 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             visitor.last_generate_input.headers,
             {"user_id": "u2", "x-dashscope-apikeyid": "ak2"},
+        )
+
+    async def test_real_mode_uses_ds_header_attributes_for_backend_controls(
+        self,
+    ) -> None:
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+        context = MagicMock()
+        context.invocation_metadata.return_value = ()
+        request = self._valid_infer_request()
+        request.parameters["ds_header_attributes"].string_param = json.dumps(
+            {
+                "x-dashscope-inner-timeout": 1800,
+                "x-ds-request-priority": "10",
+                "user_id": "u1",
+                "x-dashscope-apikeyid": "ak1",
+            }
+        )
+        request.parameters["enable_thinking"].bool_param = False
+        request.parameters["thinking_budget"].int64_param = 100
+
+        await _drain(servicer.ModelStreamInfer(_areq_iter([request]), context))
+
+        self.assertIsNotNone(visitor.last_generate_input)
+        generate_config = visitor.last_generate_input.generate_config
+        self.assertFalse(generate_config.in_think_mode)
+        self.assertEqual(generate_config.max_thinking_tokens, 0)
+        self.assertEqual(generate_config.end_think_token_ids, [])
+        self.assertEqual(generate_config.timeout_ms, 1_800_000)
+        self.assertEqual(generate_config.ttft_timeout_ms, 1_800_000)
+        self.assertEqual(generate_config.traffic_reject_priority, 10)
+        self.assertEqual(
+            visitor.last_generate_input.headers,
+            {"user_id": "u1", "x-dashscope-apikeyid": "ak1"},
         )
 
 

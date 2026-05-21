@@ -47,6 +47,7 @@ _EMPTY_THINK_BODY = "\n"
 # default in ``GenerateEnvConfig.think_terminate_token_id`` (single source of truth
 # for production; this constant exists so unit tests don't have to repeat it).
 _DEFAULT_TERMINATE_TOKEN_ID = 1
+_INT32_MAX = 2_147_483_647
 
 
 def stream_log_tag(
@@ -295,13 +296,16 @@ def _make_generate_input(
     input_ids_list: list[int],
     generate_config: Any,
     invocation_metadata: Optional[Any],
+    request_headers: Optional[dict[str, str]] = None,
 ) -> GenerateInput:
+    headers = dict(request_headers or {})
+    headers.update(_headers_from_invocation_metadata(invocation_metadata))
     return GenerateInput(
         request_id=request_id,
         token_ids=torch.tensor(input_ids_list, dtype=torch.int),
         mm_inputs=[],
         generate_config=generate_config,
-        headers=_headers_from_invocation_metadata(invocation_metadata),
+        headers=headers,
     )
 
 
@@ -310,6 +314,31 @@ def _clone_generate_config(generate_config: Any) -> Any:
         return generate_config.model_copy(deep=True)
     except AttributeError:
         return generate_config.copy(deep=True)
+
+
+def _apply_request_overrides(generate_config: Any, other: OtherParams) -> None:
+    """Apply dash-sc request-level controls after env defaults.
+
+    ``GenerateConfig.add_thinking_params`` seeds the config from process-level
+    environment. DashScope-serving still sends per-request thinking, timeout,
+    and priority controls; those explicit controls must win before enqueue.
+    """
+    if other.max_new_think_tokens is not None:
+        max_think = int(other.max_new_think_tokens)
+        generate_config.max_thinking_tokens = (
+            _INT32_MAX if max_think < 0 else max_think
+        )
+    if other.enable_thinking is False or other.max_new_think_tokens == 0:
+        generate_config.in_think_mode = False
+        generate_config.max_thinking_tokens = 0
+        generate_config.end_think_token_ids = []
+        if hasattr(generate_config, "thinking"):
+            generate_config.thinking = False
+    if other.timeout_ms is not None:
+        generate_config.timeout_ms = int(other.timeout_ms)
+        generate_config.ttft_timeout_ms = int(other.timeout_ms)
+    if other.traffic_reject_priority is not None:
+        generate_config.traffic_reject_priority = int(other.traffic_reject_priority)
 
 
 # ----------------------------------------------------------------------------
@@ -394,6 +423,7 @@ async def iter_real_model_stream_infer(
                 logging.warning(
                     "[DashScGrpc] [%s] add_thinking_params failed: %s", tag, e
                 )
+        _apply_request_overrides(generate_config, other)
         if extra_stop_word_ids:
             existing = generate_config.stop_words_list
             if existing:
@@ -431,6 +461,7 @@ async def iter_real_model_stream_infer(
             input_ids_list=input_ids_list,
             generate_config=generate_config,
             invocation_metadata=invocation_metadata,
+            request_headers=other.request_headers,
         )
         is_streaming = bool(getattr(generate_config, "is_streaming", True))
         logging.debug("[DashScGrpc] [%s] generate_input: %s", tag, generate_input)
@@ -642,6 +673,7 @@ async def iter_real_model_stream_infer(
                 input_ids_list=phase2_input_ids,
                 generate_config=phase2_config,
                 invocation_metadata=invocation_metadata,
+                request_headers=other.request_headers,
             )
             logging.debug(
                 "[DashScGrpc] [%s] phase-2 generate_input: %s",
