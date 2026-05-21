@@ -58,7 +58,7 @@ flexlb:
   vit-load-balance-strategy: RANDOM
   deploy: DISAGGREGATED
   kv-cache: LOCAL_STATIC
-  dp-balance-enabled: false
+  dp-balance-enabled: true
   dp-batch-size-max: 0
   dp-batch-window-ms: 30
   dp-batch-timeout-ms: 100
