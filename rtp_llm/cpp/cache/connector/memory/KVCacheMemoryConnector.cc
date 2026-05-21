@@ -483,12 +483,26 @@ std::shared_ptr<AsyncMatchContext> KVCacheMemoryConnector::asyncMatch(const std:
         reportMatchMetrics(/*success=*/false, timer.done_us(), cache_keys_size, matched_num);
         return nullptr;
     }
+    const int start_read_block_index = static_cast<int>(already_reuse_num);
+    const int read_block_num         = static_cast<int>(matched_num - already_reuse_num);
+    auto      copy_plan =
+        buildCopyPlanForRead(cache_keys, layer_attn_block_ids, slots, start_read_block_index, read_block_num);
+    if (!copy_plan || copy_plan->copy_infos.empty()) {
+        RTP_LLM_LOG_DEBUG(
+            "memory cache match dropped because read copy plan is empty, already_reuse=%zu matched=%zu cache_keys=%zu",
+            already_reuse_num,
+            matched_num,
+            cache_keys_size);
+        reportMatchMetrics(/*success=*/false, timer.done_us(), cache_keys_size, already_reuse_num);
+        return nullptr;
+    }
+
     RTP_LLM_LOG_INFO("memory cache matched blocks: already_reuse=%zu matched=%zu cache_keys=%zu",
                      already_reuse_num,
                      matched_num,
                      cache_keys_size);
     reportMatchMetrics(/*success=*/true, timer.done_us(), cache_keys_size, matched_num);
-    return std::make_shared<MemoryAsyncMatchContext>(matched_num);
+    return std::make_shared<MemoryAsyncMatchContext>(matched_num, start_read_block_index, read_block_num, copy_plan);
 }
 
 bool KVCacheMemoryConnector::gpuBlocksAllValid(const LayerBlockIds& layer_block_ids, size_t key_index) const {
@@ -553,8 +567,25 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::share
         return nullptr;
     }
 
-    auto copy_plan =
-        buildCopyPlanForRead(cache_keys, layer_attn_block_ids, slots, start_read_block_index, read_block_num);
+    std::shared_ptr<CopyPlan> copy_plan;
+    auto memory_match_context = std::dynamic_pointer_cast<MemoryAsyncMatchContext>(match_context);
+    if (memory_match_context && memory_match_context->readCopyPlan()) {
+        if (memory_match_context->startReadBlockIndex() == start_read_block_index
+            && memory_match_context->readBlockNum() == read_block_num) {
+            copy_plan = std::static_pointer_cast<CopyPlan>(memory_match_context->readCopyPlan());
+            memory_match_context->clearReadCopyPlan();
+        } else {
+            RTP_LLM_LOG_WARNING(
+                "async read ignored pinned memory copy plan because range mismatched, plan_start=%d plan_num=%d read_start=%d read_num=%d",
+                memory_match_context->startReadBlockIndex(),
+                memory_match_context->readBlockNum(),
+                start_read_block_index,
+                read_block_num);
+        }
+    }
+    if (!copy_plan) {
+        copy_plan = buildCopyPlanForRead(cache_keys, layer_attn_block_ids, slots, start_read_block_index, read_block_num);
+    }
     if (!copy_plan || copy_plan->copy_infos.empty()) {
         reportReadMetrics(false, timer.done_us(), cache_keys_size, 0);
         return nullptr;

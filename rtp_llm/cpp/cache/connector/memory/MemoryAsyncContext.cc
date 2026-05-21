@@ -20,6 +20,22 @@ size_t MemoryAsyncMatchContext::matchedBlockCount() const {
     return matched_block_count_;
 }
 
+int MemoryAsyncMatchContext::startReadBlockIndex() const {
+    return start_read_block_index_;
+}
+
+int MemoryAsyncMatchContext::readBlockNum() const {
+    return read_block_num_;
+}
+
+std::shared_ptr<void> MemoryAsyncMatchContext::readCopyPlan() const {
+    return read_copy_plan_;
+}
+
+void MemoryAsyncMatchContext::clearReadCopyPlan() {
+    read_copy_plan_.reset();
+}
+
 // ----------------------------- MemoryAsyncContext ---------------------------------
 
 bool MemoryAsyncContext::done() const {
