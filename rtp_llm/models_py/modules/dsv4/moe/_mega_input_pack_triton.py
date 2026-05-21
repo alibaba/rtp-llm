@@ -35,7 +35,7 @@ if triton is not None:
         eps: tl.constexpr,
         fp8_max: tl.constexpr,
     ):
-        pid_m = tl.program_id(0)
+        pid_m = tl.program_id(0).to(tl.int64)
         pid_blk = tl.program_id(1)
         offs = tl.arange(0, 128)
         col = pid_blk * 128 + offs
@@ -73,7 +73,7 @@ if triton is not None:
         out_indices_stride_m: tl.constexpr,
         BLOCK_K: tl.constexpr,
     ):
-        pid = tl.program_id(0)
+        pid = tl.program_id(0).to(tl.int64)
         offs = tl.arange(0, BLOCK_K)
         mask = (pid < M) & (offs < K)
         w = tl.load(
@@ -109,10 +109,10 @@ if triton is not None:
         BLOCK_M: tl.constexpr,
         BLOCK_K: tl.constexpr,
     ):
-        pid_m_blk = tl.program_id(0)
+        pid_m_blk = tl.program_id(0).to(tl.int64)
         pid_blk = tl.program_id(1)
 
-        offs_m = pid_m_blk * BLOCK_M + tl.arange(0, BLOCK_M)
+        offs_m = pid_m_blk * BLOCK_M + tl.arange(0, BLOCK_M).to(tl.int64)
         offs_32 = tl.arange(0, 32)
         row_mask = offs_m < M
         packed = tl.zeros((BLOCK_M,), dtype=tl.int32)
@@ -129,9 +129,7 @@ if triton is not None:
             block_absmax = tl.maximum(tl.max(tl.abs(x), axis=1), eps)
             scale_raw = block_absmax / fp8_max
             scale_raw_bits = scale_raw.to(tl.int32, bitcast=True)
-            exp = ((scale_raw_bits >> 23) & 0xFF) + (
-                (scale_raw_bits & 0x7FFFFF) != 0
-            )
+            exp = ((scale_raw_bits >> 23) & 0xFF) + ((scale_raw_bits & 0x7FFFFF) != 0)
             exp = tl.minimum(tl.maximum(exp, 1), 254)
             scale_bits = exp << 23
             scale = scale_bits.to(tl.float32, bitcast=True)
@@ -154,16 +152,12 @@ if triton is not None:
             router_offs = tl.arange(0, BLOCK_K)
             router_mask = row_mask[:, None] & (router_offs[None, :] < K)
             w = tl.load(
-                weights_ptr
-                + offs_m[:, None] * weights_stride_m
-                + router_offs[None, :],
+                weights_ptr + offs_m[:, None] * weights_stride_m + router_offs[None, :],
                 mask=router_mask,
                 other=0.0,
             ).to(tl.float32)
             idx = tl.load(
-                indices_ptr
-                + offs_m[:, None] * indices_stride_m
-                + router_offs[None, :],
+                indices_ptr + offs_m[:, None] * indices_stride_m + router_offs[None, :],
                 mask=router_mask,
                 other=0,
             ).to(tl.int64)
