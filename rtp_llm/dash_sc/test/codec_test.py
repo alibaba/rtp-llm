@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import struct
 from unittest import TestCase, main
 
@@ -107,6 +108,20 @@ class DashScGrpcRequestTest(TestCase):
         self.assertAlmostEqual(sp.frequency_penalty, 0.2)
         self.assertAlmostEqual(sp.presence_penalty, 0.3)
 
+    def test_parse_sampling_dashscope_aliases(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        _add_tensor(req, "n", "INT32", [1], struct.pack("<i", 1))
+        _add_tensor(req, "min_length", "INT32", [1], struct.pack("<i", 2))
+        sp = parse_sampling_params(req)
+        self.assertEqual(sp.num_return_sequences, 1)
+        self.assertEqual(sp.min_new_tokens, 2)
+
+    def test_parse_sampling_max_completion_tokens_parameter_alias(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["max_completion_tokens"].int64_param = 100
+        sp = parse_sampling_params(req)
+        self.assertEqual(sp.max_new_tokens, 100)
+
     def test_parse_sampling_top_p_as_int32(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
         _add_tensor(req, "top_p", "INT32", [1], struct.pack("<i", 1))
@@ -150,6 +165,36 @@ class DashScGrpcRequestTest(TestCase):
         _add_tensor(req, "return_input_ids", "INT32", [1], struct.pack("<i", 0))
         op = parse_other_params(req)
         self.assertFalse(op.return_input_ids)
+
+    def test_parse_other_params_thinking_controls(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["ds_header_attributes"].string_param = json.dumps(
+            {
+                "x-ds-llm-thinking": "false",
+                "x-dashscope-inner-timeout": 1800,
+                "x-ds-request-priority": "10",
+                "user_id": "u1",
+                "x-dashscope-apikeyid": "ak1",
+            }
+        )
+        _add_tensor(req, "max_new_think_tokens", "INT32", [1], struct.pack("<i", 0))
+        op = parse_other_params(req)
+        self.assertFalse(op.return_input_ids)
+        self.assertIs(op.enable_thinking, False)
+        self.assertEqual(op.max_new_think_tokens, 0)
+        self.assertEqual(op.timeout_ms, 1_800_000)
+        self.assertEqual(op.traffic_reject_priority, 10)
+        self.assertEqual(
+            op.request_headers, {"user_id": "u1", "x-dashscope-apikeyid": "ak1"}
+        )
+
+    def test_parse_other_params_dashscope_body_thinking_aliases(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["enable_thinking"].bool_param = False
+        req.parameters["thinking_budget"].int64_param = 100
+        op = parse_other_params(req)
+        self.assertIs(op.enable_thinking, False)
+        self.assertEqual(op.max_new_think_tokens, 100)
 
     def test_parse_dash_sc_grpc_request_ok(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
