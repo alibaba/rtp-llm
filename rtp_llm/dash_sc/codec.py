@@ -339,7 +339,7 @@ def parse_sampling_params(request) -> SamplingParams:
     if v is None:
         v = _parse_optional_parameter_int(request, "max_completion_tokens")
     if v is not None:
-        max_new_tokens = max(0, v)
+        max_new_tokens = v
 
     v = _parse_optional_scalar_int(request, "num_return_sequences")
     if v is None:
