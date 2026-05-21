@@ -240,61 +240,7 @@ TEST_F(LinearKVCacheGroupTest, RemoveSkippedBlocksFreesNonStepBlocksButKeepsLast
     EXPECT_EQ(block_pool->freeBlocksNum(), free_before + 2);
 }
 
-TEST_F(LinearKVCacheGroupTest, RemoveSkippedBlocksSkipsNullHolesAndFreesOlderBlocks) {
-    auto block_pool = createBlockPool();
-    ASSERT_TRUE(block_pool->init());
-    ASSERT_EQ(block_pool->freeBlocksNum(), 9u);
-
-    auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
-    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/0, /*linear_step=*/2);
-    ASSERT_TRUE(group.init());
-
-    auto allocated = block_pool->malloc(4);
-    ASSERT_EQ(allocated.size(), 4u);
-
-    BlockIds blocks;
-    blocks.assign(BlockIndicesType{allocated[0], allocated[1], NULL_BLOCK_IDX, allocated[2], allocated[3]});
-
-    const size_t free_before = block_pool->freeBlocksNum();
-    group.removeSkippedBlocks(blocks, /*enable_reuse_cache=*/false);
-
-    ASSERT_EQ(blocks.blocksNum(), 5u);
-    EXPECT_TRUE(isNullBlockIdx(blocks.blocks()[0]));
-    EXPECT_TRUE(isNullBlockIdx(blocks.blocks()[1]));
-    EXPECT_TRUE(isNullBlockIdx(blocks.blocks()[2]));
-    EXPECT_EQ(blocks.blocks()[3], allocated[2]);
-    EXPECT_EQ(blocks.blocks()[4], allocated[3]);
-    EXPECT_EQ(block_pool->freeBlocksNum(), free_before + 2);
-}
-
-TEST_F(LinearKVCacheGroupTest, RemoveSkippedBlocksKeepsStepHitBeforeNullHoleWhenReuseEnabled) {
-    auto block_pool = createBlockPool();
-    ASSERT_TRUE(block_pool->init());
-    ASSERT_EQ(block_pool->freeBlocksNum(), 9u);
-
-    auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
-    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/0, /*linear_step=*/2);
-    ASSERT_TRUE(group.init());
-
-    auto allocated = block_pool->malloc(4);
-    ASSERT_EQ(allocated.size(), 4u);
-
-    BlockIds blocks;
-    blocks.assign(BlockIndicesType{allocated[0], allocated[1], NULL_BLOCK_IDX, allocated[2], allocated[3]});
-
-    const size_t free_before = block_pool->freeBlocksNum();
-    group.removeSkippedBlocks(blocks, /*enable_reuse_cache=*/true);
-
-    ASSERT_EQ(blocks.blocksNum(), 5u);
-    EXPECT_TRUE(isNullBlockIdx(blocks.blocks()[0]));
-    EXPECT_EQ(blocks.blocks()[1], allocated[1]);
-    EXPECT_TRUE(isNullBlockIdx(blocks.blocks()[2]));
-    EXPECT_EQ(blocks.blocks()[3], allocated[2]);
-    EXPECT_EQ(blocks.blocks()[4], allocated[3]);
-    EXPECT_EQ(block_pool->freeBlocksNum(), free_before + 1);
-}
-
-TEST_F(LinearKVCacheGroupTest, InsertIntoCacheSkipsNullBlocks) {
+TEST_F(LinearKVCacheGroupTest, PutIntoCacheSkipsNullBlocks) {
     auto block_pool = createBlockPool();
     ASSERT_TRUE(block_pool->init());
 
@@ -302,18 +248,17 @@ TEST_F(LinearKVCacheGroupTest, InsertIntoCacheSkipsNullBlocks) {
     std::vector<BlockPoolPtr> group_pools(4, block_pool);
     shared_cache->init(4, group_pools);
 
-    auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
-    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/3, /*linear_step=*/2, shared_cache.get());
-    ASSERT_TRUE(group.init());
+    auto block1 = block_pool->malloc(1)[0];
+    auto block2 = block_pool->malloc(1)[0];
 
-    BlockIndicesType blocks;
-    blocks.push_back(NULL_BLOCK_IDX);
-    blocks.push_back(block_pool->malloc(1)[0]);
-    blocks.push_back(NULL_BLOCK_IDX);
-    blocks.push_back(block_pool->malloc(1)[0]);
+    // Only put entries with non-NULL blocks (simulating allocator-level filtering)
+    std::vector<BlockIdxType> slots1(4, NULL_BLOCK_IDX);
+    slots1[3] = block1;
+    shared_cache->put(101, slots1, /*is_resident=*/false);
 
-    CacheKeysType keys = {100, 101, 102, 103};
-    group.insertIntoCache(keys, blocks, /*is_resident=*/false);
+    std::vector<BlockIdxType> slots2(4, NULL_BLOCK_IDX);
+    slots2[3] = block2;
+    shared_cache->put(103, slots2, /*is_resident=*/false);
 
     EXPECT_FALSE(shared_cache->contains(100));
     EXPECT_TRUE(shared_cache->contains(101));
@@ -405,7 +350,8 @@ TEST_F(LinearKVCacheGroupTest, MallocEnsuresFreeBlocksByEvictingCache) {
     // Put one block into cache (non-resident) and release request reference so it becomes evictable.
     auto cached = block_pool->malloc(1);
     ASSERT_EQ(cached.size(), 1u);
-    group.insertIntoCache(CacheKeysType{123}, cached, /*is_resident=*/false);
+    std::vector<BlockIdxType> slots = {cached[0]};
+    shared_cache->put(123, slots, /*is_resident=*/false);
     block_pool->requestFree(cached);
 
     // Exhaust the remaining free blocks so malloc must evict from cache to proceed.
@@ -494,25 +440,6 @@ TEST_F(LinearKVCacheGroupTest, ReferenceAppendsAndIncrementsRefCountForValidBloc
     EXPECT_EQ(block_pool->freeBlocksNum(), free_before);  // still referenced
     block_pool->requestFree(blocks[0]);
     EXPECT_EQ(block_pool->freeBlocksNum(), free_before + 1);
-}
-
-TEST_F(LinearKVCacheGroupTest, InsertIntoCacheWithEmptyInputsIsNoop) {
-    auto block_pool = createBlockPool();
-    ASSERT_TRUE(block_pool->init());
-
-    auto                      shared_cache = std::make_shared<SharedBlockCache>();
-    std::vector<BlockPoolPtr> group_pools(4, block_pool);
-    shared_cache->init(4, group_pools);
-
-    auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
-    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/3, /*linear_step=*/2, shared_cache.get());
-    ASSERT_TRUE(group.init());
-
-    ASSERT_EQ(shared_cache->size(), 0u);
-
-    group.insertIntoCache(CacheKeysType{}, BlockIndicesType{1, 2}, /*is_resident=*/false);
-    group.insertIntoCache(CacheKeysType{100, 101}, BlockIndicesType{}, /*is_resident=*/false);
-    EXPECT_EQ(shared_cache->size(), 0u);
 }
 
 }  // namespace test

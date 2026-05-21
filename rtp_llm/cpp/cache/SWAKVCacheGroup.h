@@ -19,8 +19,6 @@ public:
     MatchResult match(const CacheKeysType& cache_keys) override;
     MatchResult matchSingleKey(CacheKeyType cache_key) const;
     bool malloc(BlockIds& block_ids, int seq_len, bool enable_reuse_cache = false, int reserve_step = 0) override;
-    void
-    insertIntoCache(const CacheKeysType& cache_keys, const BlockIndicesType& block_indices, bool is_resident) override;
     void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) override;
     void free(const BlockIndicesType& block_indices) override;
     void reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) override;
