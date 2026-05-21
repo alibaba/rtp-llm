@@ -48,9 +48,9 @@ import triton.language as tl
 
 @triton.jit(do_not_specialize=["M", "output_scale_stride_k"])
 def _silu_mul_fp8_quant_packed_kernel(
-    input_ptr,            # [M, N=2*inter] BF16 (gate_up)
-    output_q_ptr,         # [M, N_2=inter]  FP8 e4m3fn
-    output_scale_ptr,     # column-major [num_packed_groups, tma_aligned_M] int32 view
+    input_ptr,  # [M, N=2*inter] BF16 (gate_up)
+    output_q_ptr,  # [M, N_2=inter]  FP8 e4m3fn
+    output_scale_ptr,  # column-major [num_packed_groups, tma_aligned_M] int32 view
     M,
     input_stride_m,
     output_q_stride_m,
@@ -66,14 +66,14 @@ def _silu_mul_fp8_quant_packed_kernel(
 ):
     N_2: tl.constexpr = N // 2
 
-    pid_pack = tl.program_id(0)   # which packed-int32 column (= 4 groups)
-    pid_m = tl.program_id(1)      # which BLOCK_M row tile
+    pid_pack = tl.program_id(0).to(tl.int64)  # which packed-int32 column (= 4 groups)
+    pid_m = tl.program_id(1).to(tl.int64)  # which BLOCK_M row tile
     m_offset = pid_m * BLOCK_M
 
     if m_offset >= M:
         return
 
-    offs_m = tl.arange(0, BLOCK_M)
+    offs_m = tl.arange(0, BLOCK_M).to(tl.int64)
     offs_n = tl.arange(0, GROUP_SIZE)
     row_mask = (m_offset + offs_m) < M
 
@@ -139,10 +139,10 @@ def _silu_mul_fp8_quant_packed_kernel(
 
 @triton.jit(do_not_specialize=["M", "output_scale_stride_k"])
 def _silu_mul_fp8_quant_packed_split_kernel(
-    gate_ptr,             # [M, inter] BF16
-    up_ptr,               # [M, inter] BF16
-    output_q_ptr,         # [M, inter] FP8 e4m3fn
-    output_scale_ptr,     # column-major [num_packed_groups, tma_aligned_M] int32 view
+    gate_ptr,  # [M, inter] BF16
+    up_ptr,  # [M, inter] BF16
+    output_q_ptr,  # [M, inter] FP8 e4m3fn
+    output_scale_ptr,  # column-major [num_packed_groups, tma_aligned_M] int32 view
     M,
     gate_stride_m,
     up_stride_m,
@@ -157,14 +157,14 @@ def _silu_mul_fp8_quant_packed_split_kernel(
     BLOCK_M: tl.constexpr,
     HAS_CLAMP: tl.constexpr,
 ):
-    pid_pack = tl.program_id(0)
-    pid_m = tl.program_id(1)
+    pid_pack = tl.program_id(0).to(tl.int64)
+    pid_m = tl.program_id(1).to(tl.int64)
     m_offset = pid_m * BLOCK_M
 
     if m_offset >= M:
         return
 
-    offs_m = tl.arange(0, BLOCK_M)
+    offs_m = tl.arange(0, BLOCK_M).to(tl.int64)
     offs_n = tl.arange(0, GROUP_SIZE)
     row_mask = (m_offset + offs_m) < M
 
@@ -180,8 +180,12 @@ def _silu_mul_fp8_quant_packed_split_kernel(
             n_offset = group_id * GROUP_SIZE
             cols = n_offset + offs_n
             mask = row_mask[:, None] & (cols[None, :] < N_2)
-            gate = tl.load(gate_ptr + gate_base + cols[None, :], mask=mask, other=0.0).to(tl.float32)
-            up = tl.load(up_ptr + up_base + cols[None, :], mask=mask, other=0.0).to(tl.float32)
+            gate = tl.load(
+                gate_ptr + gate_base + cols[None, :], mask=mask, other=0.0
+            ).to(tl.float32)
+            up = tl.load(up_ptr + up_base + cols[None, :], mask=mask, other=0.0).to(
+                tl.float32
+            )
 
             if HAS_CLAMP:
                 gate = tl.minimum(gate, clamp_limit)
@@ -238,9 +242,9 @@ def silu_mul_fp8_quant_packed(
     M, N = gate_up.shape
     N_2 = N // 2
 
-    assert N_2 % group_size == 0, (
-        f"inter ({N_2}) must be a multiple of group_size ({group_size})"
-    )
+    assert (
+        N_2 % group_size == 0
+    ), f"inter ({N_2}) must be a multiple of group_size ({group_size})"
 
     fp8_dtype = torch.float8_e4m3fn
     finfo = torch.finfo(fp8_dtype)
@@ -317,9 +321,9 @@ def silu_mul_fp8_quant_packed_from_parts(
     assert gate.dtype == torch.bfloat16 and up.dtype == torch.bfloat16
 
     M, N_2 = gate.shape
-    assert N_2 % group_size == 0, (
-        f"inter ({N_2}) must be a multiple of group_size ({group_size})"
-    )
+    assert (
+        N_2 % group_size == 0
+    ), f"inter ({N_2}) must be a multiple of group_size ({group_size})"
 
     fp8_dtype = torch.float8_e4m3fn
     finfo = torch.finfo(fp8_dtype)

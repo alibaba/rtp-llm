@@ -31,13 +31,13 @@ if triton is not None:
         NUM_GROUPS: tl.constexpr,
         BLOCK_M: tl.constexpr,
     ):
-        pid_pack = tl.program_id(0)
-        pid_m = tl.program_id(1)
+        pid_pack = tl.program_id(0).to(tl.int64)
+        pid_m = tl.program_id(1).to(tl.int64)
         m_offset = pid_m * BLOCK_M
         if m_offset >= M:
             return
 
-        offs_m = tl.arange(0, BLOCK_M)
+        offs_m = tl.arange(0, BLOCK_M).to(tl.int64)
         offs_n = tl.arange(0, GROUP_SIZE)
         row_mask = (m_offset + offs_m) < M
         base_in = (m_offset + offs_m[:, None]) * x_stride_m
@@ -50,7 +50,9 @@ if triton is not None:
                 n_offset = group_id * GROUP_SIZE
                 cols = n_offset + offs_n
                 mask = row_mask[:, None] & (cols[None, :] < N)
-                x = tl.load(x_ptr + base_in + cols[None, :], mask=mask, other=0.0).to(tl.float32)
+                x = tl.load(x_ptr + base_in + cols[None, :], mask=mask, other=0.0).to(
+                    tl.float32
+                )
                 absmax = tl.max(tl.abs(x), axis=1)
                 scale_raw = tl.maximum(absmax, clamp_eps) / fp8_max
                 exponent = tl.ceil(tl.log2(scale_raw))
@@ -82,8 +84,8 @@ if triton is not None:
         out_stride_n: tl.constexpr,
         BLOCK: tl.constexpr,
     ):
-        pid = tl.program_id(0)
-        offs = pid * BLOCK + tl.arange(0, BLOCK)
+        pid = tl.program_id(0).to(tl.int64)
+        offs = pid * BLOCK + tl.arange(0, BLOCK).to(tl.int64)
         mask = offs < (M * N)
         rows = offs // N
         cols = offs - rows * N
@@ -114,7 +116,9 @@ def quant_bf16_fp8_packed_ue8m0(
     if triton is None:
         raise RuntimeError("DSV4 fused FP8 activation quantization requires Triton")
     if not x.is_cuda:
-        raise RuntimeError("DSV4 fused FP8 activation quantization requires CUDA tensors")
+        raise RuntimeError(
+            "DSV4 fused FP8 activation quantization requires CUDA tensors"
+        )
     if x.dim() != 2:
         raise ValueError(f"x must be [M,N], got {tuple(x.shape)}")
     if not x.is_contiguous():
@@ -175,12 +179,20 @@ def fused_moe_epilogue(
             f"got routed={routed.device}, shared={shared.device}"
         )
     if routed.shape != shared.shape:
-        raise ValueError(f"shape mismatch: routed={routed.shape}, shared={shared.shape}")
+        raise ValueError(
+            f"shape mismatch: routed={routed.shape}, shared={shared.shape}"
+        )
     if routed.dim() != 2 or shared.dim() != 2:
-        raise ValueError(f"expected 2D tensors, got routed={routed.dim()}D shared={shared.dim()}D")
+        raise ValueError(
+            f"expected 2D tensors, got routed={routed.dim()}D shared={shared.dim()}D"
+        )
     if out is None:
         out = torch.empty(routed.shape, dtype=out_dtype, device=routed.device)
-    elif out.shape != routed.shape or out.dtype != out_dtype or out.device != routed.device:
+    elif (
+        out.shape != routed.shape
+        or out.dtype != out_dtype
+        or out.device != routed.device
+    ):
         raise ValueError(
             "out must match routed shape/device and requested dtype; "
             f"got shape={tuple(out.shape)}, dtype={out.dtype}, device={out.device}"
