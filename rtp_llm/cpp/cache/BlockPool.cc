@@ -219,10 +219,6 @@ bool BlockPool::init() {
     return true;
 }
 
-BlockCachePtr BlockPool::blockCache() {
-    return block_cache_;
-}
-
 void BlockPool::initFreeBlocks() {
     // block 0 is reserved
     for (BlockIdxType i = 1; i < static_cast<BlockIdxType>(config_.block_num); ++i) {
@@ -233,7 +229,6 @@ void BlockPool::initFreeBlocks() {
     req_con_ref_counter_.init(config_.block_num);
     block_cache_ref_counter_.init(config_.block_num);
     req_cache_ref_counter_.init(config_.block_num);
-    block_cache_ = std::make_shared<BlockCache>();
 }
 
 std::vector<torch::Tensor> BlockPool::allLayerCacheBase() const {

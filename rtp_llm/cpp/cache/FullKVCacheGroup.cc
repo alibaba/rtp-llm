@@ -10,11 +10,11 @@ int FullKVCacheGroup::needBlocksNum(int seq_len, int current_blocks, int reserve
 NeedBlocksInfo FullKVCacheGroup::getNeedBlocks(
     int common_seq_len, int seq_len, int reserve_step, int reuse_blocks_len, bool reuse_enabled) const {
     NeedBlocksInfo info;
-    const int      common_slots = needBlocksNum(common_seq_len, /*current_blocks=*/0);
-    const int      total_slots  = needBlocksNum(seq_len, /*current_blocks=*/0, reserve_step);
+    const int      common_slots        = needBlocksNum(common_seq_len, /*current_blocks=*/0);
+    const int      total_slots         = needBlocksNum(seq_len, /*current_blocks=*/0, reserve_step);
     const int      reused_common_slots = reuse_enabled ? std::min(std::max(reuse_blocks_len, 0), common_slots) : 0;
     info.common_blocks                 = std::max(common_slots - reused_common_slots, 0);
-    info.extra_blocks           = std::max(total_slots - common_slots, 0);
+    info.extra_blocks                  = std::max(total_slots - common_slots, 0);
     return info;
 }
 
@@ -44,13 +44,17 @@ bool FullKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_reus
 MatchResult FullKVCacheGroup::match(const CacheKeysType& cache_keys) {
     MatchResult final_result;
 
+    if (!shared_cache_) {
+        return final_result;
+    }
+
     for (const auto& cache_key : cache_keys) {
-        auto result = block_cache_->match(cache_key, group_id_);
-        if (isNullBlockIdx(result.matched_index)) {
+        auto block_idx = shared_cache_->matchGroup(cache_key, group_id_);
+        if (isNullBlockIdx(block_idx)) {
             break;
         }
         final_result.reuse_blocks++;
-        final_result.block_indices.push_back(result.matched_index);
+        final_result.block_indices.push_back(block_idx);
     }
 
     final_result.reuse_length = final_result.reuse_blocks * seqSizePerBlock();
@@ -75,7 +79,7 @@ void FullKVCacheGroup::reference(BlockIds& block_ids, const BlockIndicesType& ne
 void FullKVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
                                        const BlockIndicesType& block_indices,
                                        bool                    is_resident) {
-    if (cache_keys.empty()) {
+    if (cache_keys.empty() || !shared_cache_) {
         return;
     }
 
@@ -85,16 +89,10 @@ void FullKVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
         return;
     }
 
-    const int last_index = cache_keys.size() - 1;
-    for (int i = last_index; i >= 0; --i) {
-        BlockCache::CacheItem item;
-        item.cache_key   = cache_keys[i];
-        item.group_id    = group_id_;
-        item.block_index = block_indices[i];
-        item.is_resident = is_resident;
-        if (block_cache_->put(item)) {
-            block_pool_->blockCacheReference(block_indices[i]);
-        }
+    for (int i = static_cast<int>(cache_keys.size()) - 1; i >= 0; --i) {
+        std::vector<BlockIdxType> group_slots(static_cast<size_t>(group_id_ + 1), NULL_BLOCK_IDX);
+        group_slots[static_cast<size_t>(group_id_)] = block_indices[i];
+        shared_cache_->put(cache_keys[i], group_slots, is_resident);
     }
 
     RTP_LLM_LOG_DEBUG("Inserted %zu blocks into cache", block_indices.size());

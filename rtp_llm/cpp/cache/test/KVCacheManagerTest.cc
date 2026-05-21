@@ -8,7 +8,7 @@
 #include <thread>
 
 #include "kmonitor/client/MetricsReporter.h"
-#include "rtp_llm/cpp/cache/BlockCache.h"
+#include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
@@ -872,21 +872,16 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_MergesDeviceAndMemoryKeys_Dedup) {
     ASSERT_NE(kv_cache_manager->coordinator_, nullptr);
 
     // Seed device block cache with keys: 10, 11, 12 (put makes MRU at front => snapshot order: 12,11,10)
-    auto block_cache = kv_cache_manager->allocator_->getBlockPool()->blockCache();
-    ASSERT_NE(block_cache, nullptr);
+    auto shared_cache = kv_cache_manager->allocator_->sharedBlockCache();
+    ASSERT_NE(shared_cache, nullptr);
     {
-        BlockCache::CacheItem item;
-        item.group_id    = 0;
-        item.is_resident = false;
-        item.cache_key   = 10;
-        item.block_index = 1;
-        ASSERT_TRUE(block_cache->put(item));
-        item.cache_key   = 11;
-        item.block_index = 2;
-        ASSERT_TRUE(block_cache->put(item));
-        item.cache_key   = 12;
-        item.block_index = 3;
-        ASSERT_TRUE(block_cache->put(item));
+        std::vector<BlockIdxType> group_slots(1);
+        group_slots[0] = 1;
+        shared_cache->put(10, group_slots, false);
+        group_slots[0] = 2;
+        shared_cache->put(11, group_slots, false);
+        group_slots[0] = 3;
+        shared_cache->put(12, group_slots, false);
     }
 
     // Inject a lightweight memory connector with a MemoryBlockCache snapshot:
@@ -907,7 +902,7 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_MergesDeviceAndMemoryKeys_Dedup) {
     }
     kv_cache_manager->coordinator_->memory_connector_ = mem_connector;
 
-    // latest_version=-1 forces BlockCache snapshot to return all current keys.
+    // latest_version=-1 forces SharedBlockCache snapshot to return all current keys.
     auto info = kv_cache_manager->getKVCacheInfo(/*latest_version=*/-1, /*need_cache_keys=*/true);
 
     // Current implementation uses unordered_set -> assign, so order is not stable.

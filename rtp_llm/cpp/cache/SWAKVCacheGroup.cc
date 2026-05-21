@@ -52,9 +52,12 @@ NeedBlocksInfo SWAKVCacheGroup::getNeedBlocks(
 
 MatchResult SWAKVCacheGroup::matchSingleKey(CacheKeyType cache_key) const {
     MatchResult result;
-    auto        matched = block_cache_->match(cache_key, group_id_);
-    if (!isNullBlockIdx(matched.matched_index)) {
-        result.block_indices = {matched.matched_index};
+    if (!shared_cache_) {
+        return result;
+    }
+    auto block_idx = shared_cache_->matchGroup(cache_key, group_id_);
+    if (!isNullBlockIdx(block_idx)) {
+        result.block_indices = {block_idx};
     }
     return result;
 }
@@ -123,7 +126,7 @@ bool SWAKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_reuse
 void SWAKVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
                                       const BlockIndicesType& block_indices,
                                       bool                    is_resident) {
-    if (cache_keys.empty() || block_indices.empty()) {
+    if (cache_keys.empty() || block_indices.empty() || !shared_cache_) {
         return;
     }
     const size_t n = std::min(cache_keys.size(), block_indices.size());
@@ -132,14 +135,9 @@ void SWAKVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
         if (isNullBlockIdx(b)) {
             continue;
         }
-        BlockCache::CacheItem item;
-        item.cache_key   = cache_keys[i];
-        item.group_id    = group_id_;
-        item.block_index = b;
-        item.is_resident = is_resident;
-        if (block_cache_->put(item)) {
-            block_pool_->blockCacheReference(b);
-        }
+        std::vector<BlockIdxType> group_slots(static_cast<size_t>(group_id_ + 1), NULL_BLOCK_IDX);
+        group_slots[static_cast<size_t>(group_id_)] = b;
+        shared_cache_->put(cache_keys[i], group_slots, is_resident);
     }
 }
 

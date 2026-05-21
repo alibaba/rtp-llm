@@ -26,6 +26,13 @@ bool HybridTypeKVCacheAllocator::doInit() {
 
     layer_to_group_id_ = config_.layer_to_group_id;
 
+    SharedBlockCache* shared_cache_raw = shared_block_cache_ ? shared_block_cache_.get() : nullptr;
+
+    if (shared_block_cache_) {
+        std::vector<BlockPoolPtr> group_pools(static_cast<size_t>(group_nums), block_pool_);
+        shared_block_cache_->init(group_nums, group_pools);
+    }
+
     for (int gid = 0; gid < group_nums; ++gid) {
         KVCacheSpecPtr spec = config_.cache_specs[static_cast<size_t>(gid)];
         const auto&    ids  = layer_groups[static_cast<size_t>(gid)];
@@ -35,13 +42,15 @@ bool HybridTypeKVCacheAllocator::doInit() {
                                          config_.group_types[static_cast<size_t>(gid)] :
                                          CacheGroupType::FULL;
         if (group_type == CacheGroupType::SWA) {
-            group = std::make_shared<SWAKVCacheGroup>(ids, spec, block_pool_, gid, config_.linear_step);
+            group =
+                std::make_shared<SWAKVCacheGroup>(ids, spec, block_pool_, gid, config_.linear_step, shared_cache_raw);
             swa_group_ids_.push_back(gid);
         } else if (group_type == CacheGroupType::LINEAR || (spec && spec->type == KVCacheSpecType::LinearAttention)) {
-            group = std::make_shared<LinearKVCacheGroup>(ids, spec, block_pool_, gid, config_.linear_step);
+            group = std::make_shared<LinearKVCacheGroup>(
+                ids, spec, block_pool_, gid, config_.linear_step, shared_cache_raw);
             linear_group_ids_.push_back(gid);
         } else {
-            group = std::make_shared<FullKVCacheGroup>(ids, spec, block_pool_, gid);
+            group = std::make_shared<FullKVCacheGroup>(ids, spec, block_pool_, gid, shared_cache_raw);
             full_group_ids_.push_back(gid);
         }
 

@@ -141,11 +141,8 @@ KVCacheAllocator::convertIndexToBuffer(int layer_id, KVCacheRegionName region_na
     return convertIndexToBuffer(layer_id, block_id);
 }
 
-std::vector<BlockInfo> KVCacheAllocator::convertIndexToBuffer(int             layer_id,
-                                                              KVCacheRegionName region_name,
-                                                              int             block_id,
-                                                              int             partition_count,
-                                                              int             partition_id) const {
+std::vector<BlockInfo> KVCacheAllocator::convertIndexToBuffer(
+    int layer_id, KVCacheRegionName region_name, int block_id, int partition_count, int partition_id) const {
     (void)region_name;
     return convertIndexToBuffer(layer_id, block_id, partition_count, partition_id);
 }
@@ -232,16 +229,11 @@ size_t KVCacheAllocator::availableBlocksNum() const {
 }
 
 BatchKVCacheResourcePtr KVCacheAllocator::popBlocksFromCache(size_t min_blocks_to_free) {
-    if (!block_pool_ || min_blocks_to_free == 0) {
+    if (!shared_block_cache_ || min_blocks_to_free == 0) {
         return nullptr;
     }
 
-    auto block_cache = block_pool_->blockCache();
-    if (!block_cache) {
-        return nullptr;
-    }
-
-    auto evict_result = block_cache->selectAndEvict(min_blocks_to_free);
+    auto evict_result = shared_block_cache_->selectAndEvict(min_blocks_to_free);
     if (evict_result.evicted_keys.empty()) {
         return nullptr;
     }
@@ -260,19 +252,15 @@ BatchKVCacheResourcePtr KVCacheAllocator::popBlocksFromCache(size_t min_blocks_t
         batch_resource->mutableBlockIds(0, gid).resize(evict_result.evicted_keys.size(), NULL_BLOCK_IDX);
     }
 
-    size_t evicted_idx = 0;
-    for (const auto cache_key : evict_result.evicted_keys) {
+    for (size_t evicted_idx = 0; evicted_idx < evict_result.evicted_keys.size(); ++evicted_idx) {
+        const auto  cache_key = evict_result.evicted_keys[evicted_idx];
+        const auto& slots     = evict_result.evicted_slots.at(cache_key);
         batch_resource->pushBackCacheKey(0, cache_key);
-        auto& items = evict_result.evicted_items.at(cache_key);
-        for (const auto& item : items) {
-            auto& block_ids = batch_resource->mutableBlockIds(0, item.group_id);
-            RTP_LLM_CHECK_WITH_INFO(evicted_idx < block_ids.blocksNum(),
-                                    "evicted index out of range: idx=%zu, blocks_num=%zu",
-                                    evicted_idx,
-                                    block_ids.blocksNum());
-            block_ids.setAt(evicted_idx, item.block_index);
+        for (int gid = 0; gid < static_cast<int>(slots.size()) && gid < config_.groupNums(); ++gid) {
+            if (!isNullBlockIdx(slots[gid])) {
+                batch_resource->mutableBlockIds(0, gid).setAt(evicted_idx, slots[gid]);
+            }
         }
-        ++evicted_idx;
     }
     return batch_resource;
 }

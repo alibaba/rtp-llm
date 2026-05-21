@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
@@ -63,20 +64,22 @@ KVCacheManager::~KVCacheManager() {
 bool KVCacheManager::init() {
     RTP_LLM_CHECK_WITH_INFO(!config_.cache_specs.empty(), "cache specs must not be empty");
 
+    auto shared_cache = std::make_shared<SharedBlockCache>();
+
     const bool is_hybrid = config_.groupNums() > 1;
     if (config_.use_independent_block_pools) {
         allocator_ = std::make_shared<rtp_llm::HybridPoolKVCacheAllocator>(
             config_, AllocationType::DEVICE, metrics_reporter_, kv_cache_config_.reserve_block_ratio);
-        RTP_LLM_CHECK_WITH_INFO(allocator_->init(), "HybridPoolKVCacheAllocator init failed");
     } else if (is_hybrid) {
         allocator_ = std::make_shared<rtp_llm::HybridTypeKVCacheAllocator>(
             config_, AllocationType::DEVICE, metrics_reporter_, kv_cache_config_.reserve_block_ratio);
-        RTP_LLM_CHECK_WITH_INFO(allocator_->init(), "HybridTypeKVCacheAllocator init failed");
     } else {
         allocator_ = std::make_shared<rtp_llm::SingleTypeKVCacheAllocator>(
             config_, AllocationType::DEVICE, metrics_reporter_, kv_cache_config_.reserve_block_ratio);
-        RTP_LLM_CHECK_WITH_INFO(allocator_->init(), "SingleTypeKVCacheAllocator init failed");
     }
+
+    allocator_->setSharedBlockCache(shared_cache);
+    RTP_LLM_CHECK_WITH_INFO(allocator_->init(), "KVCacheAllocator init failed");
 
     if (metrics_reporter_) {
         stop_.store(false, std::memory_order_relaxed);
@@ -493,17 +496,17 @@ KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cac
     if (need_cache_keys) {
         std::unordered_set<CacheKeyType> all_keys;
         // device cache keys
-        auto block_cache = allocator_->getBlockPool()->blockCache();
-        auto snapshot    = block_cache->cacheSnapshot(latest_version);
-        for (const auto& cacheItem : snapshot.values) {
-            all_keys.insert(cacheItem.cache_key);
+        auto shared_cache = allocator_->sharedBlockCache();
+        if (shared_cache) {
+            auto cache_keys = shared_cache->allCacheKeys();
+            all_keys.insert(cache_keys.begin(), cache_keys.end());
+            info.version = shared_cache->version();
         }
         // memory cache keys
         const auto mem_cache_keys = coordinator_->memoryCacheKeys();
         all_keys.insert(mem_cache_keys.begin(), mem_cache_keys.end());
 
         info.cached_keys.assign(all_keys.begin(), all_keys.end());
-        info.version = snapshot.version;
     }
 
     const size_t block_size_tokens = config_.seq_size_per_block;
@@ -662,15 +665,14 @@ void KVCacheManager::reportMetricsLoop() {
 
         RtpLLMCacheMetricsCollector collector;
 
-        auto block_pool  = allocator_->getBlockPool();
-        auto block_cache = block_pool ? block_pool->blockCache() : nullptr;
+        auto shared_cache = allocator_->sharedBlockCache();
 
         const auto total_blocks         = allocator_->totalBlocksNum();
         const auto available_blocks     = allocator_->availableBlocksNum();
         const auto request_ref_blocks   = allocator_->requestRefBlocksNum();
         const auto connector_ref_blocks = allocator_->connectorRefBlocksNum();
 
-        collector.kv_cache_item_num             = block_cache ? static_cast<int64_t>(block_cache->size()) : 0;
+        collector.kv_cache_item_num             = shared_cache ? static_cast<int64_t>(shared_cache->size()) : 0;
         collector.kv_cache_left_seq             = static_cast<int64_t>(available_blocks * config_.seq_size_per_block);
         collector.kv_cache_available_blocks     = static_cast<int64_t>(available_blocks);
         collector.kv_cache_request_ref_blocks   = static_cast<int64_t>(request_ref_blocks);
