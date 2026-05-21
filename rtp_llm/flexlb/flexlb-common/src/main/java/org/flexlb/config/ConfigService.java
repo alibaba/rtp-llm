@@ -3,6 +3,7 @@ package org.flexlb.config;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.util.JsonUtils;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.lang.reflect.Field;
@@ -14,19 +15,26 @@ public class ConfigService {
 
     private final FlexlbConfig flexlbConfig;
 
+    @Autowired
+    public ConfigService(FlexlbConfig flexlbConfig) {
+        applyEnvironmentOverrides(flexlbConfig);
+        this.flexlbConfig = flexlbConfig;
+    }
+
+    /**
+     * Direct path for callers outside Spring (unit tests, ad-hoc tooling).
+     * Mirrors what {@link FlexlbConfigJsonEnvironmentPostProcessor} +
+     * {@code @ConfigurationProperties} binding produce for the Spring path:
+     * parse {@code FLEXLB_CONFIG} JSON env, then apply unprefixed per-field
+     * env overrides.
+     */
     public ConfigService() {
         String lbConfigStr = System.getenv("FLEXLB_CONFIG");
         log.warn("FLEXLB_CONFIG = {}", lbConfigStr);
-        FlexlbConfig config;
-        if (lbConfigStr != null) {
-            config = JsonUtils.toObject(lbConfigStr, FlexlbConfig.class);
-        } else {
-            config = new FlexlbConfig();
-        }
-
-        // If corresponding advanced environment variables exist, override and update
+        FlexlbConfig config = lbConfigStr != null
+                ? JsonUtils.toObject(lbConfigStr, FlexlbConfig.class)
+                : new FlexlbConfig();
         applyEnvironmentOverrides(config);
-
         this.flexlbConfig = config;
     }
 

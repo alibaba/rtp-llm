@@ -47,3 +47,20 @@ otel:
   exporter:
     otlp:
       endpoint: none
+
+# Defaults match FlexlbConfig field initializers; override per environment.
+# FLEXLB_CONFIG JSON env still works (merged via FlexlbConfigJsonEnvironmentPostProcessor).
+# Standard Spring relaxed env binding also applies (e.g. FLEXLB_DPBALANCEENABLED=true).
+flexlb:
+  enable-queueing: false
+  load-balance-strategy: SHORTEST_TTFT
+  decode-load-balance-strategy: WEIGHTED_CACHE
+  vit-load-balance-strategy: RANDOM
+  deploy: DISAGGREGATED
+  kv-cache: LOCAL_STATIC
+  dp-balance-enabled: false
+  dp-batch-size-max: 0
+  dp-batch-window-ms: 30
+  dp-batch-timeout-ms: 100
+  dp-assign-strategy: RR
+  dp-group-selector: CACHE_AWARE

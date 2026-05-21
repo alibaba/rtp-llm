@@ -1,8 +1,10 @@
 package org.flexlb;
 
 import lombok.extern.slf4j.Slf4j;
+import org.flexlb.config.FlexlbConfig;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.core.env.Environment;
 import org.springframework.scheduling.annotation.EnableScheduling;
@@ -12,6 +14,7 @@ import org.springframework.scheduling.annotation.EnableScheduling;
  */
 @Slf4j
 @EnableScheduling
+@EnableConfigurationProperties(FlexlbConfig.class)
 @SpringBootApplication(scanBasePackages = {"org.flexlb"})
 public class Application {
 
