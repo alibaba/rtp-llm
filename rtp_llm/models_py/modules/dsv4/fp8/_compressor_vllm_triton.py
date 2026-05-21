@@ -82,12 +82,12 @@ def _save_partial_states_kernel(
     STATE_WIDTH: tl.constexpr,
     COMPRESS_RATIO: tl.constexpr,
 ):
-    token_idx = tl.program_id(0)
+    token_idx = tl.program_id(0).to(tl.int64)
     slot_id = tl.load(slot_mapping_ptr + token_idx)
     if slot_id < 0:
         return
 
-    block_idx = slot_id // block_size
+    block_idx = (slot_id // block_size).to(tl.int64)
     pos_in_block = slot_id % block_size
     base_ptr = (
         state_cache_ptr
@@ -172,13 +172,13 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     KV_BLOCK_STRIDE: tl.constexpr,
     BATCHED: tl.constexpr,
 ):
-    token_idx = tl.program_id(0)
+    token_idx = tl.program_id(0).to(tl.int64)
 
-    position = tl.load(positions_ptr + token_idx)
+    position = tl.load(positions_ptr + token_idx).to(tl.int64)
     if (position + 1) % COMPRESS_RATIO != 0:
         return
 
-    req_idx = tl.load(token_to_req_indices_ptr + token_idx)
+    req_idx = tl.load(token_to_req_indices_ptr + token_idx).to(tl.int64)
 
     start = position - (1 + OVERLAP) * COMPRESS_RATIO + 1
     tokens = tl.arange(0, (1 + OVERLAP) * COMPRESS_RATIO)
@@ -428,13 +428,13 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
     KV_BLOCK_STRIDE: tl.constexpr,
     BATCHED: tl.constexpr,
 ):
-    token_idx = tl.program_id(0)
+    token_idx = tl.program_id(0).to(tl.int64)
 
-    position = tl.load(positions_ptr + token_idx)
+    position = tl.load(positions_ptr + token_idx).to(tl.int64)
     if (position + 1) % COMPRESS_RATIO != 0:
         return
 
-    req_idx = tl.load(token_to_req_indices_ptr + token_idx)
+    req_idx = tl.load(token_to_req_indices_ptr + token_idx).to(tl.int64)
 
     start = position - (1 + OVERLAP) * COMPRESS_RATIO + 1
     tokens = tl.arange(0, (1 + OVERLAP) * COMPRESS_RATIO)

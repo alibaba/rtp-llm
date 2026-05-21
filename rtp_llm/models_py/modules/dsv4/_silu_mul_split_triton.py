@@ -32,23 +32,23 @@ import triton.language as tl
 
 @triton.jit
 def _silu_mul_split_kernel(
-    gate_ptr,    # [N, D] fp32 contiguous
-    up_ptr,      # [N, D] fp32 contiguous
-    out_ptr,     # [N, D] fp32 contiguous
+    gate_ptr,  # [N, D] fp32 contiguous
+    up_ptr,  # [N, D] fp32 contiguous
+    out_ptr,  # [N, D] fp32 contiguous
     N: tl.int32,
     D: tl.int32,
-    row_stride: tl.int32,    # stride between rows for gate/up/out (= D for contiguous)
-    CLAMP_LIMIT: tl.constexpr,   # float; <= 0 disables the clamp branch
-    APPLY_CLAMP: tl.constexpr,   # bool
+    row_stride: tl.int32,  # stride between rows for gate/up/out (= D for contiguous)
+    CLAMP_LIMIT: tl.constexpr,  # float; <= 0 disables the clamp branch
+    APPLY_CLAMP: tl.constexpr,  # bool
     BLOCK_D: tl.constexpr,
 ):
     """One program per (row, D-block).  Streams D in BLOCK_D-wide tiles."""
-    pid_n = tl.program_id(axis=0)
-    pid_d = tl.program_id(axis=1)
+    pid_n = tl.program_id(axis=0).to(tl.int64)
+    pid_d = tl.program_id(axis=1).to(tl.int64)
     if pid_n >= N:
         return
 
-    d_off = pid_d * BLOCK_D + tl.arange(0, BLOCK_D)
+    d_off = pid_d * BLOCK_D + tl.arange(0, BLOCK_D).to(tl.int64)
     mask = d_off < D
     base = pid_n * row_stride
 
@@ -69,9 +69,9 @@ def _silu_mul_split_kernel(
 
 
 def silu_mul_split(
-    gate: torch.Tensor,    # [..., D] fp32 contiguous
-    up: torch.Tensor,      # [..., D] fp32 contiguous, same shape as gate
-    clamp_limit: float = 0.0,    # > 0 enables clamp(up,±L) + clamp(gate, max=L)
+    gate: torch.Tensor,  # [..., D] fp32 contiguous
+    up: torch.Tensor,  # [..., D] fp32 contiguous, same shape as gate
+    clamp_limit: float = 0.0,  # > 0 enables clamp(up,±L) + clamp(gate, max=L)
     out: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Fused SiLU + optional SwiGLU clamp + multiply.
@@ -85,9 +85,9 @@ def silu_mul_split(
     Returns ``out`` (allocated when None).
     """
     assert gate.shape == up.shape, f"gate {gate.shape} vs up {up.shape}"
-    assert gate.dtype == torch.float32 and up.dtype == torch.float32, (
-        f"gate {gate.dtype} / up {up.dtype}; expect fp32"
-    )
+    assert (
+        gate.dtype == torch.float32 and up.dtype == torch.float32
+    ), f"gate {gate.dtype} / up {up.dtype}; expect fp32"
     assert gate.is_contiguous() and up.is_contiguous(), "gate/up must be contiguous"
 
     # Flatten leading dims; kernel works on [N, D].
@@ -112,8 +112,11 @@ def silu_mul_split(
     grid = (N, triton.cdiv(D, BLOCK_D))
 
     _silu_mul_split_kernel[grid](
-        g_flat, u_flat, o_flat,
-        N=N, D=D,
+        g_flat,
+        u_flat,
+        o_flat,
+        N=N,
+        D=D,
         row_stride=g_flat.stride(0),
         CLAMP_LIMIT=float(clamp_limit) if clamp_limit > 0 else 0.0,
         APPLY_CLAMP=clamp_limit > 0,

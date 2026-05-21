@@ -50,7 +50,7 @@ def _quantize_and_insert_k_kernel(
      cache_block_size * 576 + cache_block_size * 8)  — scales
     [..., block_stride)                      — TMA padding
     """
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     if pid >= num_tokens:
         return
 
