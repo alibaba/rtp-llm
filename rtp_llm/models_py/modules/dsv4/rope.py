@@ -10,8 +10,18 @@ Two RoPE bases per model:
 """
 
 import math
+from typing import Dict, Optional, Tuple
 
 import torch
+
+# Process-local memoization keyed by (params, device). All DSV4 compressor
+# layers compute identical freqs_cis (they share rope params), so a single
+# shared tensor replaces what was 61 distinct CPU + 61 distinct GPU copies
+# during model init. Cascade: identical id(freqs_cis) → `_ensure_cos_sin_cache`
+# in compressor.py dedupes the derived 256 MiB cos_sin_cache (91× → 1×).
+_FREQS_CIS_CACHE: Dict[
+    Tuple[int, int, int, float, float, int, int, Optional[str]], torch.Tensor
+] = {}
 
 
 def precompute_freqs_cis(
@@ -22,9 +32,25 @@ def precompute_freqs_cis(
     factor: float,
     beta_fast: int,
     beta_slow: int,
+    device: Optional[torch.device] = None,
 ) -> torch.Tensor:
     """Returns complex cis tensor `[seqlen, dim/2]`.
-    When `original_seq_len > 0`, applies YaRN frequency interpolation."""
+    When `original_seq_len > 0`, applies YaRN frequency interpolation.
+    When `device` is given, returns the tensor on that device and shares
+    it across all callers with the same params+device tuple."""
+    key = (
+        dim,
+        seqlen,
+        original_seq_len,
+        base,
+        factor,
+        beta_fast,
+        beta_slow,
+        str(device) if device is not None else None,
+    )
+    cached = _FREQS_CIS_CACHE.get(key)
+    if cached is not None:
+        return cached
 
     def find_correction_dim(num_rotations, dim_, base_, max_seq_len_):
         return (
@@ -55,6 +81,9 @@ def precompute_freqs_cis(
     t = torch.arange(seqlen)
     freqs = torch.outer(t, freqs)
     freqs_cis = torch.polar(torch.ones_like(freqs), freqs)
+    if device is not None and freqs_cis.device != torch.device(device):
+        freqs_cis = freqs_cis.to(device)
+    _FREQS_CIS_CACHE[key] = freqs_cis
     return freqs_cis
 
 

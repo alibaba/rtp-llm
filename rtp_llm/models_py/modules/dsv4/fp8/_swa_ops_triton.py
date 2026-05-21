@@ -599,8 +599,12 @@ def combine_topk_swa_indices_cp(
     assert int(topk_indices.shape[1]) >= int(
         topk
     ), f"topk_indices width {topk_indices.shape[1]} < topk {topk}"
-    if not topk_indices.is_contiguous():
-        topk_indices = topk_indices.contiguous()
+    # Note: do NOT force ``topk_indices.contiguous()`` here. HCA passes a
+    # [T_total, N] broadcast view (stride 0 on dim 0) of arange(N) as a
+    # ~9-32 GiB peak-memory optimization at 1M ctx; the kernel reads via
+    # ``ptr + row*stride + col`` and a 0-stride broadcast is bit-equal to
+    # the materialized version. A force-contiguous here defeats the
+    # optimization and reintroduces the alloc.
     global_positions = global_positions.reshape(-1).contiguous()
 
     assert (req_id_per_token is None) == (prefix_lengths is None), (

@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -89,6 +89,16 @@ from rtp_llm.models_py.modules.dsv4.fp8._compressor_vllm_triton import (
     run_fused_compress_kv_write,
     run_save_partial_states,
 )
+
+# Process-local cache for the device-side cos_sin tensor derived from a
+# given freqs_cis source. DSV4 has ~91 CompressorFP8 instances (main +
+# indexer + indexer.compressor per layer), each holding its own 256 MiB
+# cos_sin_cache at 1M seq len → 22.75 GiB of duplicated baseline memory.
+# Since reset_rope_cache now binds the memoized shared freqs_cis tensor
+# (see rope.py), all instances see the same ``id(freqs_cis)`` → one
+# shared entry instead of 91. Saves ~22.5 GiB of persistent GPU memory
+# per rank during 1M prefill.
+_SHARED_COS_SIN_CACHE: Dict[Tuple[int, torch.device], torch.Tensor] = {}
 
 
 @dataclass(frozen=True)
@@ -222,8 +232,11 @@ class CompressorFP8(nn.Module):
         self._kv_cache_t: int = 0
 
         # Cached cos_sin cache built from self.freqs_cis at first forward.
+        # ``_cos_sin_cache_device`` is the cached device sibling so the hot
+        # path avoids ``tensor.device`` property construction (~70 ns/call).
         self.freqs_cis: Optional[torch.Tensor] = None
         self._cos_sin_cache: Optional[torch.Tensor] = None
+        self._cos_sin_cache_device: Optional[torch.device] = None
         self._cp_ctx: Optional[CPContext] = None
         # MOEDBG: caller (Attention / IndexerFP8) sets this to a name
         # prefix like ``"L02_attn_cmp"`` before forward and clears after;
@@ -402,13 +415,26 @@ class CompressorFP8(nn.Module):
     # Internal helpers
     # ----------------------------------------------------------------------
     def _ensure_cos_sin_cache(self, device: torch.device) -> torch.Tensor:
-        if self._cos_sin_cache is None or self._cos_sin_cache.device != device:
-            assert (
-                self.freqs_cis is not None
-            ), "CompressorFP8.freqs_cis must be bound before forward"
-            cache, _ = build_cos_sin_cache(self.freqs_cis.to(device))
-            self._cos_sin_cache = cache
-        return self._cos_sin_cache
+        cached = self._cos_sin_cache
+        # Compare against cached device sibling (a plain torch.device): hot
+        # path avoids the ``cached.device`` property which constructs a fresh
+        # torch.device per access (~70 ns/call on this code path).
+        if cached is not None and self._cos_sin_cache_device == device:
+            return cached
+        assert (
+            self.freqs_cis is not None
+        ), "CompressorFP8.freqs_cis must be bound before forward"
+        # Dedup at module level by source freqs_cis identity. After the
+        # rope.py memoization, all CompressorFP8 instances binding the same
+        # rope params share one freqs_cis object → one cos_sin_cache.
+        key = (id(self.freqs_cis), device)
+        shared = _SHARED_COS_SIN_CACHE.get(key)
+        if shared is None or shared.device != device:
+            shared, _ = build_cos_sin_cache(self.freqs_cis.to(device))
+            _SHARED_COS_SIN_CACHE[key] = shared
+        self._cos_sin_cache = shared
+        self._cos_sin_cache_device = device
+        return shared
 
     def _compute_state_slot_mapping(
         self,
