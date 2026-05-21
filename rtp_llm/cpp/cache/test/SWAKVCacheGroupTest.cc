@@ -2,6 +2,7 @@
 #include <vector>
 #include <memory>
 #include "rtp_llm/cpp/cache/SWAKVCacheGroup.h"
+#include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 
 namespace rtp_llm {
@@ -12,23 +13,27 @@ protected:
     void SetUp() override {
         block_pool_ = createBlockPool();
         block_pool_->init();
-        total_blocks_ = block_pool_->freeBlocksNum();
+        total_blocks_                         = block_pool_->freeBlocksNum();
+        shared_cache_                         = std::make_shared<SharedBlockCache>();
+        std::vector<BlockPoolPtr> group_pools = {block_pool_};
+        shared_cache_->init(1, group_pools);
     }
 
     SWAKVCacheGroup makeGroup(int seq_size_per_block) {
         auto spec                = std::make_shared<MHAKVCacheSpec>();
         spec->seq_size_per_block = seq_size_per_block;
-        return SWAKVCacheGroup({}, spec, block_pool_, 0);
+        return SWAKVCacheGroup({}, spec, block_pool_, 0, 0, shared_cache_.get());
     }
 
     SWAKVCacheGroup makeGroupWithStep(int seq_size_per_block, int linear_step) {
         auto spec                = std::make_shared<MHAKVCacheSpec>();
         spec->seq_size_per_block = seq_size_per_block;
-        return SWAKVCacheGroup({}, spec, block_pool_, 0, linear_step);
+        return SWAKVCacheGroup({}, spec, block_pool_, 0, linear_step, shared_cache_.get());
     }
 
-    BlockPoolPtr block_pool_;
-    size_t       total_blocks_ = 0;
+    BlockPoolPtr        block_pool_;
+    SharedBlockCachePtr shared_cache_;
+    size_t              total_blocks_ = 0;
 };
 
 // ==================== needBlocksNum ====================
@@ -133,10 +138,9 @@ TEST_F(SWAKVCacheGroupTest, MatchSingleKey_NotFound) {
 }
 
 TEST_F(SWAKVCacheGroupTest, MatchSingleKey_Found) {
-    auto                  group       = makeGroup(4);
-    auto                  block_cache = block_pool_->blockCache();
-    BlockCache::CacheItem item        = {101, 0, 1, false};
-    ASSERT_TRUE(block_cache->put(item));
+    auto                      group       = makeGroup(4);
+    std::vector<BlockIdxType> group_slots = {1};  // group_id=0, block_index=1
+    shared_cache_->put(101, group_slots, false);
 
     auto result = group.matchSingleKey(101);
     ASSERT_EQ(result.block_indices.size(), 1u);
