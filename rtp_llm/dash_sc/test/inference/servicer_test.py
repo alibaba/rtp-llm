@@ -117,6 +117,17 @@ class _GenerateEnvCfg:
     think_end_tag = "</think>\n\n"
 
 
+def _dsv4_tokenizer() -> _FakeTokenizer:
+    return _FakeTokenizer(
+        {
+            "<think>\n": [128821, 198],
+            "</think>\n\n": [128822, 271],
+            "<think>\n\n</think>\n\n": [128821, 271, 128822, 271],
+            "</think>": [128822],
+        }
+    )
+
+
 async def _drain(aiter):
     return [x async for x in aiter]
 
@@ -131,6 +142,14 @@ def _gen_ids(chunk) -> list[int]:
                 return []
             return _unpack_int32_le(infer.raw_output_contents[i])
     return []
+
+
+def _finish_reason(chunk) -> int | None:
+    infer = chunk.infer_response
+    for i, out in enumerate(infer.outputs):
+        if out.name == "finish_reason":
+            return int(struct.unpack("<q", infer.raw_output_contents[i])[0])
+    return None
 
 
 class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
@@ -171,6 +190,32 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
             for i in range(len(infer.outputs))
         }
         self.assertEqual(_unpack_int32_le(by_name["generated_ids"]), [3, 4])
+
+    async def test_finished_at_max_new_tokens_reports_length_repro_p1(self) -> None:
+        req = self._minimal_request()
+        out = GenerateOutput(
+            output_ids=torch.tensor([7, 8, 9], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(input_len=2, reuse_len=0),
+        )
+        visitor = _FakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
+        )
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [1, 2],
+                SamplingParams(max_new_tokens=3),
+                OtherParams(),
+                visitor,
+                rtp_llm_request_id=1,
+            )
+        )
+
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(_gen_ids(chunks[0]), [7, 8, 9])
+        self.assertEqual(_finish_reason(chunks[0]), 1)
 
     async def test_empty_list_yields_error_response(self) -> None:
         req = self._minimal_request()
@@ -270,6 +315,43 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(gc.begin_think_token_ids, [128821, 198])
         self.assertEqual(gc.end_think_token_ids, [128822, 271])
         self.assertEqual(_gen_ids(chunks[0]), [10, 128822, 271])
+
+    async def test_budget_zero_survives_add_thinking_params_failure_repro_p2a(
+        self,
+    ) -> None:
+        """Request-level zero budget must still produce a full think mask config.
+
+        ``add_thinking_params`` is env/tokenizer-derived and can fail open. The
+        request override is explicit, so the generated backend config should keep
+        thinking enabled with a zero budget and usable end-think ids.
+        """
+        req = self._minimal_request()
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+
+        with patch(
+            "rtp_llm.config.generate_config.GenerateConfig.add_thinking_params",
+            side_effect=RuntimeError("boom"),
+        ):
+            await _drain(
+                iter_real_model_stream_infer(
+                    req,
+                    [1, 2],
+                    SamplingParams(max_new_think_tokens=0),
+                    OtherParams(),
+                    visitor,
+                    rtp_llm_request_id=1,
+                    tokenizer=tok,
+                    generate_env_config=env_cfg,
+                    think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+                )
+            )
+
+        gc = visitor.last_generate_input.generate_config
+        self.assertTrue(gc.in_think_mode)
+        self.assertEqual(gc.max_thinking_tokens, 0)
+        self.assertEqual(gc.end_think_token_ids, [128822, 271])
 
     async def test_deepseek_v4_multi_think_uses_first_close_only(self) -> None:
         req = self._minimal_request()
@@ -855,7 +937,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         phase1 = GenerateOutputs(
             generate_outputs=[
                 GenerateOutput(
-                    output_ids=torch.tensor([10, 128822, 271], dtype=torch.int32),
+                    output_ids=torch.tensor([10, 1], dtype=torch.int32),
                     finished=False,
                     aux_info=AuxInfo(input_len=4, reuse_len=0),
                 )
@@ -1133,6 +1215,23 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         servicer = DashScInferenceServicer(backend_visitor=visitor)
         req = self._valid_infer_request()
         _add_input_tensor(req, "max_new_tokens", "INT32", [1], struct.pack("<i", -1))
+
+        responses = await _drain(
+            servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
+        )
+
+        self.assertEqual(visitor.enqueue_called, 0)
+        self.assertEqual(len(responses), 1)
+        self.assertIn("max_new_tokens", responses[0].error_message)
+
+    async def test_max_completion_tokens_negative_rejected_before_enqueue_repro_p3(
+        self,
+    ) -> None:
+        """The alias must hit the same front-door validation as max_new_tokens."""
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+        req = self._valid_infer_request()
+        req.parameters["max_completion_tokens"].int64_param = -1
 
         responses = await _drain(
             servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
