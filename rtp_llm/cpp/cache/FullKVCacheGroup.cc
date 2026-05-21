@@ -76,28 +76,6 @@ void FullKVCacheGroup::reference(BlockIds& block_ids, const BlockIndicesType& ne
     block_pool_->requestReference(new_block_indices);
 }
 
-void FullKVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
-                                       const BlockIndicesType& block_indices,
-                                       bool                    is_resident) {
-    if (cache_keys.empty() || !shared_cache_) {
-        return;
-    }
-
-    if (cache_keys.size() != block_indices.size()) {
-        RTP_LLM_LOG_ERROR(
-            "Cache keys size (%zu) doesn't match block indices size (%zu)", cache_keys.size(), block_indices.size());
-        return;
-    }
-
-    for (int i = static_cast<int>(cache_keys.size()) - 1; i >= 0; --i) {
-        std::vector<BlockIdxType> group_slots(static_cast<size_t>(group_id_ + 1), NULL_BLOCK_IDX);
-        group_slots[static_cast<size_t>(group_id_)] = block_indices[i];
-        shared_cache_->put(cache_keys[i], group_slots, is_resident);
-    }
-
-    RTP_LLM_LOG_DEBUG("Inserted %zu blocks into cache", block_indices.size());
-}
-
 void FullKVCacheGroup::removeSkippedBlocks(BlockIds& /*block_ids*/, bool /*enable_reuse_cache*/, int /*reserve_step*/) {
 }
 

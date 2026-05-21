@@ -22,8 +22,6 @@ public:
     // Match a single cache key (used by Hybrid allocator to do right-to-left joint matching).
     MatchResult matchSingleKey(CacheKeyType cache_key) const;
     bool malloc(BlockIds& block_ids, int seq_len, bool enable_reuse_cache = false, int reserve_step = 0) override;
-    void
-    insertIntoCache(const CacheKeysType& cache_keys, const BlockIndicesType& block_indices, bool is_resident) override;
 
     void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) override;
     void free(const BlockIndicesType& block_indices) override;
