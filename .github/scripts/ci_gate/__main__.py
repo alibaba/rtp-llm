@@ -34,6 +34,9 @@ def main(argv):
     check_review.add_argument("--lgtm-user", default="LLLLKKKK")
     check_review.add_argument("--require-approved", action="store_true",
                               help="Require fresh APPROVED review; reject LGTM-only paths")
+    check_review.add_argument("--verify-current-head", action="store_true",
+                              help="Fail if PR's current head.sha differs from the provided head_sha "
+                                   "(guards against acting on a stale commit in a long-running gate run)")
 
     resolve = subparsers.add_parser("resolve-context")
     resolve.add_argument("--github-token", required=True)
@@ -132,7 +135,7 @@ def main(argv):
         if args.command == "check-review":
             return 0 if check_review_qualified(
                 args.pr_number, args.repository, args.head_sha, args.github_token,
-                args.lgtm_user, args.require_approved,
+                args.lgtm_user, args.require_approved, args.verify_current_head,
             ) else 1
         if args.command == "resolve-context":
             return resolve_context(args)

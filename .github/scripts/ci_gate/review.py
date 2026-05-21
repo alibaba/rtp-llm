@@ -77,11 +77,25 @@ def _check_issue_comments_qualified(pr_number, repo, head_sha, github_token, lgt
     return False
 
 
-def check_review_qualified(pr_number, repo, head_sha, github_token, lgtm_user, require_approved=False):
-    # type: (str, str, str, str, str, bool) -> bool
+def check_review_qualified(pr_number, repo, head_sha, github_token, lgtm_user,
+                           require_approved=False, verify_current_head=False):
+    # type: (str, str, str, str, str, bool, bool) -> bool
     pr_data = github_get(repo, "/pulls/%s" % pr_number, "fetching PR #%s" % pr_number, github_token)
     if not isinstance(pr_data, dict):
         raise GateError("::error::Unexpected PR response for #%s" % pr_number, 2)
+
+    if verify_current_head:
+        # cancel-in-progress=false lets stale gate runs continue after the PR
+        # HEAD has moved. Refuse to act on a commit that is no longer HEAD —
+        # the new workflow triggered by the push will gate the new commit.
+        actual_head = ((pr_data.get("head") or {}).get("sha")) or ""
+        if actual_head and actual_head != head_sha:
+            raise GateError(
+                "::error::PR #%s HEAD changed since this run started "
+                "(%s -> %s); refusing to gate stale commit"
+                % (pr_number, short_sha(head_sha), short_sha(actual_head)),
+                2,
+            )
 
     pr_author = ((pr_data.get("user") or {}).get("login")) or ""
     reviews = github_get_pages(repo, "/pulls/%s/reviews" % pr_number, "fetching reviews for PR #%s" % pr_number, github_token)

@@ -266,20 +266,28 @@ jobs:
           echo "::error::Build job did not succeed (result=${{ needs.build.result }}); refusing to merge"
           exit 1
 
+      # gate runs with the high-privilege CI_SECRET. Pin checkout to trusted
+      # main so PR branch code cannot replace the helper modules executed below.
       - name: Checkout repository (attempt 1)
         id: checkout1
         continue-on-error: true
         uses: actions/checkout@v4
+        with:
+          ref: main
 
       - name: Checkout repository (attempt 2)
         if: steps.checkout1.outcome == 'failure'
         id: checkout2
         continue-on-error: true
         uses: actions/checkout@v4
+        with:
+          ref: main
 
       - name: Checkout repository (attempt 3)
         if: steps.checkout2.outcome == 'failure'
         uses: actions/checkout@v4
+        with:
+          ref: main
 
       - name: Require APPROVED review on PR HEAD
         run: |
@@ -288,7 +296,8 @@ jobs:
             "${{ github.repository }}" \
             "${{ github.event.pull_request.head.sha }}" \
             --github-token "${{ secrets.GITHUB_TOKEN }}" \
-            --require-approved
+            --require-approved \
+            --verify-current-head
 
       - name: Pre-check internal merge (re-approval dedup)
         id: precheck
