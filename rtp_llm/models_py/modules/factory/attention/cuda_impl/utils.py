@@ -6,6 +6,6 @@ import torch
 
 
 @functools.cache
-def is_sm_100() -> bool:
-    """Check if current GPU is SM 10.0 (Blackwell architecture)."""
-    return torch.cuda.get_device_capability()[0] in [10]
+def is_blackwell() -> bool:
+    """Check if current GPU is Blackwell-class (SM 10.0 server / SM 12.0 consumer)."""
+    return torch.cuda.get_device_capability()[0] in [10, 12]
