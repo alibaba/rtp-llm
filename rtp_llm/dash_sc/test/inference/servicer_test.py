@@ -354,15 +354,10 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(gc.max_thinking_tokens, 2_147_483_647)
         self.assertEqual(gc.end_think_token_ids, [128822, 271])
 
-    async def test_budget_zero_survives_add_thinking_params_failure_repro_p2a(
+    async def test_budget_zero_disables_thinking_even_if_add_thinking_params_fails(
         self,
     ) -> None:
-        """Request-level zero budget must still produce a full think mask config.
-
-        ``add_thinking_params`` is env/tokenizer-derived and can fail open. The
-        request override is explicit, so the generated backend config should keep
-        thinking enabled with a zero budget and usable end-think ids.
-        """
+        """Request-level zero budget must still produce a full think mask config."""
         req = self._minimal_request()
         visitor = _FakeVisitor(_FakeAsyncStream([]))
         tok = _dsv4_tokenizer()
@@ -387,8 +382,9 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
             )
 
         gc = visitor.last_generate_input.generate_config
-        self.assertTrue(gc.in_think_mode)
+        self.assertFalse(gc.in_think_mode)
         self.assertEqual(gc.max_thinking_tokens, 0)
+        self.assertEqual(gc.begin_think_token_ids, [128821, 198])
         self.assertEqual(gc.end_think_token_ids, [128822, 271])
 
     async def test_deepseek_v4_multi_think_uses_first_close_only(self) -> None:
@@ -494,8 +490,14 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(visitor.generate_inputs[0].request_id, 100)
         self.assertEqual(visitor.generate_inputs[1].request_id, 200)
         self.assertTrue(visitor.generate_inputs[0].generate_config.in_think_mode)
-        self.assertEqual(visitor.generate_inputs[0].generate_config.begin_think_token_ids, [128821, 198])
-        self.assertEqual(visitor.generate_inputs[0].generate_config.end_think_token_ids, [128822, 271])
+        self.assertEqual(
+            visitor.generate_inputs[0].generate_config.begin_think_token_ids,
+            [128821, 198],
+        )
+        self.assertEqual(
+            visitor.generate_inputs[0].generate_config.end_think_token_ids,
+            [128822, 271],
+        )
         self.assertEqual(_gen_ids(chunks[0]), [128821, 10, 11])
         self.assertEqual(_gen_ids(chunks[1]), [128822, 271])
         self.assertEqual(_gen_ids(chunks[2]), [20, 21, 22])

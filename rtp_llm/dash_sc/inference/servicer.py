@@ -337,9 +337,7 @@ def _apply_request_overrides(
         generate_config.max_thinking_tokens = _INT32_MAX if max_think < 0 else max_think
     # Only the selected budget disables thinking; ``max_think_length`` may
     # intentionally override a zero ``max_new_think_tokens`` alias.
-    disable_by_budget = (
-        other.max_new_think_tokens is not None and request_max_think == 0
-    )
+    disable_by_budget = request_max_think == 0
     if other.enable_thinking is False or disable_by_budget:
         generate_config.in_think_mode = False
         generate_config.max_thinking_tokens = 0

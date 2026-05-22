@@ -43,6 +43,10 @@ _FIXTURE = (
     / "data"
     / "mrcr_deepseek_v4_think_leak_cases.json"
 )
+_THINK_BEGIN_IDS = [128821, 201]
+_THINK_END_IDS = [128822, 271]
+_THINK_BEGIN_TOKEN_ID = _THINK_BEGIN_IDS[0]
+_THINK_END_TOKEN_ID = _THINK_END_IDS[0]
 
 
 def _load_cases() -> list[dict]:
@@ -75,6 +79,7 @@ class _Dsv4Tokenizer:
             {
                 "<think>\n": [128821, 201],
                 "</think>\n\n": [128822, 271],
+                "</think>": [128822],
                 "<think>\n\n</think>\n\n": [128821, 271, 128822, 271],
             }[text]
         )
@@ -122,16 +127,85 @@ class _MultiStreamVisitor:
         return self._streams[len(self.generate_inputs) - 1]
 
 
-def _go(ids: list[int], *, finished: bool, input_len: int) -> GenerateOutputs:
+def _go(
+    ids: list[int],
+    *,
+    finished: bool,
+    input_len: int,
+    logits: torch.Tensor | None = None,
+    all_probs: torch.Tensor | None = None,
+) -> GenerateOutputs:
     return GenerateOutputs(
         generate_outputs=[
             GenerateOutput(
                 output_ids=torch.tensor(ids, dtype=torch.int32),
                 finished=finished,
                 aux_info=AuxInfo(input_len=input_len, reuse_len=0),
+                logits=logits,
+                all_probs=all_probs,
             )
         ]
     )
+
+
+def _go_with_boundary_scores(
+    ids: list[int],
+    *,
+    finished: bool,
+    input_len: int,
+) -> GenerateOutputs:
+    vocab_size = _Dsv4Tokenizer.vocab_size
+    logits = torch.full((len(ids), vocab_size), -20.0, dtype=torch.float32)
+    all_probs = torch.zeros((len(ids), vocab_size), dtype=torch.float32)
+    for step, token_id in enumerate(ids):
+        logits[step, token_id] = 12.0 + step
+        all_probs[step, token_id] = 0.9
+        logits[step, _THINK_BEGIN_TOKEN_ID] = float("-inf")
+        logits[step, _THINK_END_TOKEN_ID] = float("-inf")
+        all_probs[step, _THINK_BEGIN_TOKEN_ID] = 0.0
+        all_probs[step, _THINK_END_TOKEN_ID] = 0.0
+    return _go(
+        ids,
+        finished=finished,
+        input_len=input_len,
+        logits=logits,
+        all_probs=all_probs,
+    )
+
+
+def _token_score(tensor: torch.Tensor | None, step: int, token_id: int) -> float | None:
+    if tensor is None:
+        return None
+    t = tensor.detach().cpu()
+    if t.dim() == 3:
+        return float(t[0, step, token_id].item())
+    if t.dim() == 2:
+        return float(t[step, token_id].item())
+    if t.dim() == 1:
+        return float(t[token_id].item())
+    return None
+
+
+def _fmt_score(value: float | None) -> str:
+    return "NA" if value is None else f"{value:.8g}"
+
+
+def _log_boundary_scores(case_name: str, go: GenerateOutputs) -> None:
+    out = go.generate_outputs[0]
+    ids = out.output_ids.cpu().int().tolist() if out.output_ids is not None else []
+    for step, token_id in enumerate(ids):
+        begin_logit = _token_score(out.logits, step, _THINK_BEGIN_TOKEN_ID)
+        end_logit = _token_score(out.logits, step, _THINK_END_TOKEN_ID)
+        begin_prob = _token_score(out.all_probs, step, _THINK_BEGIN_TOKEN_ID)
+        end_prob = _token_score(out.all_probs, step, _THINK_END_TOKEN_ID)
+        print(
+            "[DashScDsv4SmokeScores] "
+            f"case={case_name} step={step} sampled_token={token_id} "
+            f"<think>_logit={_fmt_score(begin_logit)} "
+            f"<think>_prob={_fmt_score(begin_prob)} "
+            f"</think>_logit={_fmt_score(end_logit)} "
+            f"</think>_prob={_fmt_score(end_prob)}"
+        )
 
 
 def _gen_ids(chunk) -> list[int]:
@@ -252,6 +326,109 @@ class DeepSeekV4MrcrSmokeTest(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(generate_config.in_think_mode)
             self.assertEqual(generate_config.end_think_token_ids, [128822, 271])
             self.assertNotIn([128822, 271], generate_config.stop_words_list)
+
+    async def test_deepseek_v4_flash_thinking_controls_log_boundary_scores(
+        self,
+    ) -> None:
+        tok = _Dsv4Tokenizer()
+        env_cfg = _GenerateEnvCfg()
+        think_runtime = build_think_runtime(tok, env_cfg, "deepseek_v4")
+        cases = [
+            {
+                "name": "enable_thinking_false",
+                "input_ids": [1001, 1002] + tok.encode("<think>\n"),
+                "sampling": SamplingParams(max_new_tokens=16),
+                "other": OtherParams(enable_thinking=False),
+                "expected_in_think_mode": False,
+                "expected_max_thinking_tokens": 0,
+            },
+            {
+                "name": "max_new_think_tokens_zero",
+                "input_ids": [2001, 2002] + tok.encode("<think>\n"),
+                "sampling": SamplingParams(
+                    max_new_tokens=16,
+                    max_new_think_tokens=0,
+                ),
+                "other": OtherParams(),
+                "expected_in_think_mode": False,
+                "expected_max_thinking_tokens": 0,
+            },
+            {
+                "name": "input_ends_with_end_think",
+                "input_ids": [3001, 3002] + tok.encode("</think>"),
+                "sampling": SamplingParams(max_new_tokens=16),
+                "other": OtherParams(enable_thinking=False),
+                "expected_in_think_mode": False,
+                "expected_max_thinking_tokens": 0,
+            },
+            {
+                "name": "enable_thinking_true",
+                "input_ids": [4001, 4002] + tok.encode("<think>\n"),
+                "sampling": SamplingParams(
+                    max_new_tokens=16,
+                    max_new_think_tokens=8,
+                ),
+                "other": OtherParams(enable_thinking=True),
+                "expected_in_think_mode": True,
+                "expected_max_thinking_tokens": 8,
+            },
+        ]
+
+        for i, case in enumerate(cases):
+            req = predict_v2_pb2.ModelInferRequest()
+            req.id = f"trace-{case['name']}"
+            req.model_name = "deepseek-v4-flash"
+            input_ids = list(case["input_ids"])
+            output_ids = [5100 + i * 10, 5101 + i * 10]
+            _add_input_ids(req, input_ids)
+            go = _go_with_boundary_scores(
+                output_ids,
+                finished=True,
+                input_len=len(input_ids),
+            )
+            _log_boundary_scores(str(case["name"]), go)
+            visitor = _MultiStreamVisitor([_FakeAsyncStream([go])])
+
+            chunks = await _drain(
+                iter_real_model_stream_infer(
+                    req,
+                    input_ids,
+                    case["sampling"],
+                    case["other"],
+                    visitor,
+                    rtp_llm_request_id=i + 1,
+                    tokenizer=tok,
+                    generate_env_config=env_cfg,
+                    think_runtime=think_runtime,
+                )
+            )
+
+            self.assertEqual(len(visitor.generate_inputs), 1)
+            generate_config = visitor.generate_inputs[0].generate_config
+            self.assertEqual(
+                generate_config.in_think_mode,
+                case["expected_in_think_mode"],
+                case["name"],
+            )
+            self.assertEqual(
+                generate_config.max_thinking_tokens,
+                case["expected_max_thinking_tokens"],
+                case["name"],
+            )
+            self.assertEqual(generate_config.begin_think_token_ids, _THINK_BEGIN_IDS)
+            self.assertEqual(generate_config.end_think_token_ids, _THINK_END_IDS)
+            self.assertEqual(_gen_ids(chunks[0]), output_ids)
+
+            out = go.generate_outputs[0]
+            for step in range(len(output_ids)):
+                self.assertEqual(
+                    _token_score(out.all_probs, step, _THINK_BEGIN_TOKEN_ID),
+                    0.0,
+                )
+                self.assertEqual(
+                    _token_score(out.all_probs, step, _THINK_END_TOKEN_ID),
+                    0.0,
+                )
 
     async def test_deepseek_v4_flash_phase2_stream_fixes_fixture_cases(self) -> None:
         cases = [c for c in _load_cases() if "smoke_phase1_output_ids" in c]
