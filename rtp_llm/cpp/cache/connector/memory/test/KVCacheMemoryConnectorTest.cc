@@ -2414,6 +2414,53 @@ TEST_F(KVCacheMemoryConnectorDualPoolTest, PoolSizing_JointCalculation) {
     EXPECT_GT(complete_total, 0u);
     EXPECT_GT(incomplete_total, 0u);
     EXPECT_NEAR(static_cast<double>(incomplete_total), static_cast<double>(complete_total) * 3.0, 3.0);
+
+    const auto configured_bytes = static_cast<size_t>(kv_cache_config_.memory_cache_size_mb) * 1024ULL * 1024ULL;
+    const auto allocated_bytes  = (complete_total + 1) * conn->complete_block_size_
+                                 + (incomplete_total + 1) * conn->incomplete_block_size_;
+    EXPECT_LE(allocated_bytes, configured_bytes);
+}
+
+TEST_F(KVCacheMemoryConnectorDualPoolTest, AsyncWrite_UpgradesIncompleteEntryToCompleteAcrossPools) {
+    auto cfg = createHybridCacheConfig(/*layer_num=*/2, /*block_num=*/10, /*seq_size_per_block=*/8, /*linear_step=*/4);
+    allocator_ = std::make_shared<HybridTypeKVCacheAllocator>(cfg, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator_->init());
+    auto conn = createConnector(cfg);
+    ASSERT_TRUE(conn->isDualPool());
+
+    CacheKeysType cache_keys{94001, 94002};
+    std::vector<std::vector<BlockIdxType>> full_blocks{{1, 1}, {2, 2}};
+    std::vector<std::vector<BlockIdxType>> first_swa_blocks{{NULL_BLOCK_IDX, 1}, {NULL_BLOCK_IDX, 2}};
+    auto first_res = makeHybridResource(cfg, cache_keys, full_blocks, first_swa_blocks);
+    auto meta      = std::make_shared<TestReadMeta>(/*enable_memory_cache=*/true);
+
+    auto first_ctx = conn->asyncWrite(first_res, meta);
+    ASSERT_NE(first_ctx, nullptr);
+    ASSERT_TRUE(waitUntilDone(first_ctx));
+    ASSERT_TRUE(first_ctx->success());
+    EXPECT_TRUE(conn->incomplete_cache_->contains(cache_keys[0]));
+    EXPECT_TRUE(conn->complete_cache_->contains(cache_keys[1]));
+    EXPECT_FALSE(conn->complete_cache_->contains(cache_keys[0]));
+
+    std::vector<std::vector<BlockIdxType>> second_swa_blocks{{3, 1}, {4, 2}};
+    auto second_res = makeHybridResource(cfg, cache_keys, full_blocks, second_swa_blocks);
+
+    auto second_ctx = conn->asyncWrite(second_res, meta);
+    ASSERT_NE(second_ctx, nullptr);
+    ASSERT_TRUE(waitUntilDone(second_ctx));
+    ASSERT_TRUE(second_ctx->success());
+
+    EXPECT_TRUE(conn->complete_cache_->contains(cache_keys[0]));
+    EXPECT_TRUE(conn->complete_cache_->contains(cache_keys[1]));
+    EXPECT_FALSE(conn->incomplete_cache_->contains(cache_keys[0]));
+
+    CacheKeysType cache_keys_with_tail{94001, 94002, 94999};
+    std::vector<std::vector<BlockIdxType>> read_full_blocks{{1, 1, 1}, {2, 2, 2}};
+    std::vector<std::vector<BlockIdxType>> read_swa_blocks{{3, 1, 1}, {4, 2, 2}};
+    auto read_res  = makeHybridResource(cfg, cache_keys_with_tail, read_full_blocks, read_swa_blocks);
+    auto match_ctx = conn->asyncMatch(read_res, meta);
+    ASSERT_NE(match_ctx, nullptr);
+    EXPECT_EQ(match_ctx->matchedBlockCount(), 2u);
 }
 
 TEST_F(KVCacheMemoryConnectorDualPoolTest, BuildCopyPlanForWrite_SkipsIncompleteWhenIncompletePoolDisabled) {

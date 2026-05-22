@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/connector/memory/KVCacheMemoryConnector.h"
 
 #include <algorithm>
+#include <limits>
 
 #include "rtp_llm/cpp/cache/BlockPool.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
@@ -193,12 +194,18 @@ void KVCacheMemoryConnector::initBlockPool() {
     size_t complete_block_num;
     size_t incomplete_block_num;
     if (step > 1) {
-        const size_t effective_block_bytes =
-            complete_block_size_ / static_cast<size_t>(step)
-            + incomplete_block_size_ * static_cast<size_t>(step - 1) / static_cast<size_t>(step);
-        RTP_LLM_CHECK_WITH_INFO(effective_block_bytes > 0, "effective block bytes is zero");
-        complete_block_num   = total_bytes / effective_block_bytes;
-        incomplete_block_num = complete_block_num * static_cast<size_t>(step - 1);
+        const size_t incomplete_per_complete = static_cast<size_t>(step - 1);
+        RTP_LLM_CHECK_WITH_INFO(
+            incomplete_block_size_
+                <= (std::numeric_limits<size_t>::max() - complete_block_size_) / incomplete_per_complete,
+            "dual pool size overflow, complete_block_size=%zu, incomplete_block_size=%zu, step=%d",
+            complete_block_size_,
+            incomplete_block_size_,
+            step);
+        const size_t cycle_block_bytes = complete_block_size_ + incomplete_block_size_ * incomplete_per_complete;
+        RTP_LLM_CHECK_WITH_INFO(cycle_block_bytes > 0, "cycle block bytes is zero");
+        complete_block_num   = total_bytes / cycle_block_bytes;
+        incomplete_block_num = complete_block_num * incomplete_per_complete;
     } else {
         complete_block_num   = total_bytes / complete_block_size_;
         incomplete_block_num = 0;
@@ -480,7 +487,7 @@ std::shared_ptr<AsyncMatchContext> KVCacheMemoryConnector::asyncMatch(const std:
         RTP_LLM_LOG_DEBUG("not matched cache in memory, cache keys size: %zu, already_reuse_num: %zu",
                           cache_keys_size,
                           already_reuse_num);
-        reportMatchMetrics(/*success=*/false, timer.done_us(), cache_keys_size, matched_num);
+        reportMatchMetrics(/*success=*/false, timer.done_us(), cache_keys_size, 0);
         return nullptr;
     }
     const int start_read_block_index = static_cast<int>(already_reuse_num);
@@ -493,7 +500,7 @@ std::shared_ptr<AsyncMatchContext> KVCacheMemoryConnector::asyncMatch(const std:
             already_reuse_num,
             matched_num,
             cache_keys_size);
-        reportMatchMetrics(/*success=*/false, timer.done_us(), cache_keys_size, already_reuse_num);
+        reportMatchMetrics(/*success=*/false, timer.done_us(), cache_keys_size, 0);
         return nullptr;
     }
 
@@ -501,7 +508,7 @@ std::shared_ptr<AsyncMatchContext> KVCacheMemoryConnector::asyncMatch(const std:
                      already_reuse_num,
                      matched_num,
                      cache_keys_size);
-    reportMatchMetrics(/*success=*/true, timer.done_us(), cache_keys_size, matched_num);
+    reportMatchMetrics(/*success=*/true, timer.done_us(), cache_keys_size, read_block_num);
     return std::make_shared<MemoryAsyncMatchContext>(matched_num, start_read_block_index, read_block_num, copy_plan);
 }
 
@@ -728,7 +735,13 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
     if (isDualPool()) {
         for (; mem_matched_num < cache_keys_size; ++mem_matched_num) {
             const auto key = static_cast<CacheKeyType>(cache_keys[mem_matched_num]);
-            if (!complete_cache_->contains(key) && !incomplete_cache_->contains(key)) {
+            if (complete_cache_->contains(key)) {
+                continue;
+            }
+            const bool key_is_complete = gpuBlocksAllValid(layer_attn_block_ids, slots, mem_matched_num);
+            if (!key_is_complete && incomplete_cache_->contains(key)) {
+                continue;
+            } else {
                 break;
             }
         }
@@ -762,6 +775,16 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
 
             if (success) {
                 for (const auto& copy_info : copy_plan->copy_infos) {
+                    auto remove_incomplete_item = [this](CacheKeyType cache_key) {
+                        if (!incomplete_pool_ || !incomplete_cache_) {
+                            return;
+                        }
+                        const auto removed_item = incomplete_cache_->remove(cache_key);
+                        if (removed_item.has_value()) {
+                            freeBlocksFromPool(incomplete_pool_, {removed_item->block_index}, true);
+                        }
+                    };
+
                     MemoryBlockCache::CacheItem item;
                     item.cache_key   = copy_info.cache_key;
                     item.block_index = copy_info.mem_block;
@@ -770,8 +793,14 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
                     if (isDualPool()) {
                         if (copy_info.is_complete) {
                             putToCacheInPool(complete_pool_, complete_cache_, item);
+                            remove_incomplete_item(copy_info.cache_key);
                         } else if (incomplete_pool_) {
-                            putToCacheInPool(incomplete_pool_, incomplete_cache_, item);
+                            if (!complete_cache_->contains(copy_info.cache_key)) {
+                                putToCacheInPool(incomplete_pool_, incomplete_cache_, item);
+                            }
+                            if (complete_cache_->contains(copy_info.cache_key)) {
+                                remove_incomplete_item(copy_info.cache_key);
+                            }
                         }
                     } else {
                         putToCache(item);
@@ -1670,14 +1699,13 @@ void KVCacheMemoryConnector::reportMetricsLoop() {
                 }
                 const auto total =
                     complete_pool_->totalBlocksNum() + (incomplete_pool_ ? incomplete_pool_->totalBlocksNum() : 0);
-                const auto free =
-                    complete_pool_->freeBlocksNum() + (incomplete_pool_ ? incomplete_pool_->freeBlocksNum() : 0);
                 const auto avail = complete_pool_->availableBlocksNum()
                                    + (incomplete_pool_ ? incomplete_pool_->availableBlocksNum() : 0);
 
                 RtpLLMMemoryCacheStatusMetricsCollector collector;
                 collector.total_block_num     = total;
-                collector.allocated_block_num = total - free;
+                collector.allocated_block_num = complete_cache_->size()
+                                                + (incomplete_cache_ ? incomplete_cache_->size() : 0);
                 collector.available_block_num = avail;
                 metrics_reporter_->report<RtpLLMMemoryCacheMetrics, RtpLLMMemoryCacheStatusMetricsCollector>(
                     nullptr, &collector);
@@ -1687,12 +1715,11 @@ void KVCacheMemoryConnector::reportMetricsLoop() {
                     continue;
                 }
                 const auto total_blocks     = block_pool_->totalBlocksNum();
-                const auto free_blocks      = block_pool_->freeBlocksNum();
                 const auto available_blocks = block_pool_->availableBlocksNum();
 
                 RtpLLMMemoryCacheStatusMetricsCollector collector;
                 collector.total_block_num     = total_blocks;
-                collector.allocated_block_num = total_blocks - free_blocks;
+                collector.allocated_block_num = block_cache_->size();
                 collector.available_block_num = available_blocks;
                 metrics_reporter_->report<RtpLLMMemoryCacheMetrics, RtpLLMMemoryCacheStatusMetricsCollector>(
                     nullptr, &collector);
