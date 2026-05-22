@@ -226,9 +226,17 @@ class TestQwen3NextQkvzBaFusion(unittest.TestCase):
 
         # Same underlying storage as in_proj_fused.weight (the fused buffer).
         self.assertEqual(qkvz_view.data_ptr(), fused_buf.data_ptr())
+        # ROCm uses column-major layout (cat in [N,K] then .t()),
+        # CUDA uses row-major (torch.empty + copy_).
+        _is_rocm = hasattr(torch.version, "hip") and torch.version.hip is not None
+        K = fused_buf.shape[0]
+        if _is_rocm:
+            expected_offset = module._qkvz_size * K * fused_buf.element_size()
+        else:
+            expected_offset = module._qkvz_size * fused_buf.element_size()
         self.assertEqual(
             ba_view.data_ptr(),
-            fused_buf.data_ptr() + module._qkvz_size * fused_buf.element_size(),
+            fused_buf.data_ptr() + expected_offset,
         )
 
     def test_online_weight_update_changes_forward_output(self) -> None:
