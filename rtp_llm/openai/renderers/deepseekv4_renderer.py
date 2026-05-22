@@ -168,20 +168,17 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
         Returns:
             True if thinking mode is enabled, False otherwise
         """
+        if request.disable_thinking():
+            return False
+        if request.enable_thinking is True:
+            return True
+
         # Check parent class logic first
         thinking_enabled = super().in_think_mode(request)
 
         # Check if enable_thinking is explicitly set in request kwargs
-        if request.chat_template_kwargs and request.chat_template_kwargs.get(
-            "enable_thinking"
-        ):
-            thinking_enabled = True
-        if (
-            request.extra_configs
-            and request.extra_configs.chat_template_kwargs
-            and isinstance(request.extra_configs.chat_template_kwargs, dict)
-            and request.extra_configs.chat_template_kwargs.get("enable_thinking")
-        ):
+        chat_template_kwargs = request.get_chat_template_kwargs()
+        if chat_template_kwargs and chat_template_kwargs.get("enable_thinking") is True:
             thinking_enabled = True
 
         return thinking_enabled
@@ -292,6 +289,8 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
             and isinstance(request.extra_configs.chat_template_kwargs, dict)
         ):
             encode_config.update(request.extra_configs.chat_template_kwargs)
+        if request.disable_thinking():
+            encode_config["thinking_mode"] = "chat"
 
         encode_config["reasoning_effort"] = self._normalize_reasoning_effort(
             encode_config.get("reasoning_effort")

@@ -208,14 +208,16 @@ class OpenaiEndpoint(object):
             config.is_streaming = True
         config.convert_select_tokens(len(self.tokenizer), self.tokenizer)
 
-        if (
-            request.extra_configs
-            and request.extra_configs.max_thinking_tokens is not None
-            and isinstance(request.extra_configs.max_thinking_tokens, int)
-        ):
-            config.max_thinking_tokens = request.extra_configs.max_thinking_tokens
         # add_thinking_params now accepts generate_env_config parameter
         config.add_thinking_params(self.tokenizer, self.generate_env_config)
+        if (
+            request.extra_configs is not None
+            and "max_thinking_tokens" in request.extra_configs.model_fields_set
+        ):
+            config.max_thinking_tokens = request.extra_configs.max_thinking_tokens
+        if request.disable_thinking():
+            config.in_think_mode = False
+            config.max_thinking_tokens = 0
         if request.debug_info:
             config.return_output_ids = True
         return config

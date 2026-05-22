@@ -63,12 +63,14 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.max_thinking_tokens = (
         input_py.generate_config.max_thinking_tokens
     )
-    generate_config_pb.begin_think_token_ids.extend(
-        input_py.generate_config.begin_think_token_ids
-    )
-    generate_config_pb.end_think_token_ids.extend(
-        input_py.generate_config.end_think_token_ids
-    )
+    if hasattr(generate_config_pb, "begin_think_token_ids"):
+        generate_config_pb.begin_think_token_ids.extend(
+            input_py.generate_config.begin_think_token_ids
+        )
+    if hasattr(generate_config_pb, "end_think_token_ids"):
+        generate_config_pb.end_think_token_ids.extend(
+            input_py.generate_config.end_think_token_ids
+        )
     generate_config_pb.in_think_mode = input_py.generate_config.in_think_mode
     generate_config_pb.num_beams = input_py.generate_config.num_beams
     generate_config_pb.variable_num_beams.extend(

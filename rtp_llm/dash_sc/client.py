@@ -89,6 +89,10 @@ def append_sampling_params_to_model_infer_request(
     _append_fp32_scalar(request, "repetition_penalty", sampling.repetition_penalty)
     _append_fp32_scalar(request, "frequency_penalty", sampling.frequency_penalty)
     _append_fp32_scalar(request, "presence_penalty", sampling.presence_penalty)
+    if sampling.max_new_think_tokens is not None:
+        _append_int32_scalar(
+            request, "max_new_think_tokens", sampling.max_new_think_tokens
+        )
 
     groups = sampling.stop_words_list
     if not groups:
@@ -128,6 +132,7 @@ def build_model_infer_request(
     input_ids: list[int],
     sampling: SamplingParams,
     return_input_ids: bool = False,
+    enable_thinking: bool | None = None,
 ) -> predict_v2_pb2.ModelInferRequest:
     """Build ``ModelInferRequest`` for ``ModelStreamInfer`` (sampling tensors + ``input_ids``)."""
     request = predict_v2_pb2.ModelInferRequest()
@@ -135,6 +140,8 @@ def build_model_infer_request(
     request.model_name = model_name
     append_sampling_params_to_model_infer_request(request, sampling)
     append_return_input_ids_to_model_infer_request(request, return_input_ids)
+    if enable_thinking is not None:
+        request.parameters["enable_thinking"].bool_param = bool(enable_thinking)
     append_input_ids_to_model_infer_request(request, input_ids)
     return request
 
