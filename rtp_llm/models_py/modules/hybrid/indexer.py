@@ -12,7 +12,7 @@ from rtp_llm.utils.model_weight import W
 
 _DEVICE_TYPE = get_device_type()
 if _DEVICE_TYPE == DeviceType.Cuda:
-    from rtp_llm.models_py.triton_kernels.common.fused_logits_head_gate import (
+    from rtp_llm.models_py.triton_kernels.sparse_mla.fused_logits_head_gate import (
         fused_logits_head_gate,
     )
 else:
