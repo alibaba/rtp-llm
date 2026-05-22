@@ -38,10 +38,13 @@ try:
     from rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter import (
         AiterPrefillAttnOp,
         AiterPrefillAttnOpPaged,
+        AiterPrefillImplAsm,
+        AiterPrefillImplNonAsm,
         AiterPrefillImplPaged,
         FMHAParams,
     )
-    from rtp_llm.ops import AttentionConfigs, PyAttentionInputs
+    from rtp_llm.ops import AttentionConfigs, PyAttentionInputs, RopeConfig, RopeStyle
+    from rtp_llm.ops.compute_ops import get_typemeta
 
     _OPS_IMPORTABLE = True
 except ImportError:
@@ -77,6 +80,92 @@ def _make_prefill_inputs(input_lengths: List[int], device: torch.device):
     )
     attn_inputs.prefix_lengths = torch.empty(0, dtype=torch.int32, device=device)
     return attn_inputs
+
+
+def _make_rope_attn_configs(
+    head_num: int,
+    head_num_kv: int,
+    head_dim: int,
+    dtype: torch.dtype,
+    tokens_per_block: int = 16,
+):
+    """AttentionConfigs configured for need_rope_kv_cache=True with base RoPE.
+
+    Mirrors the embedding-model setup so AiterPrefillImplAsm/NonAsm wire up the
+    real FusedRopeKVCachePrefillOp during __init__.
+    """
+    cfg = _make_attn_configs(head_num, head_num_kv, head_dim, tokens_per_block)
+    cfg.dtype = dtype
+    cfg.need_rope_kv_cache = True
+    rope = RopeConfig()
+    rope.dim = head_dim
+    rope.base = 10000
+    rope.scale = 1.0
+    rope.style = RopeStyle.Base
+    cfg.rope_config = rope
+    return cfg
+
+
+def _make_rope_prefill_inputs(
+    input_lengths: List[int], device: torch.device, dtype: torch.dtype
+):
+    """PyAttentionInputs populated with the cu_seqlens / padding_offset /
+    dtype fields the C++ RoPE op reads during prepare()."""
+    attn_inputs = _make_prefill_inputs(input_lengths, device)
+    attn_inputs.dtype = get_typemeta(torch.empty(1, dtype=dtype))
+    # The C++ op reads input_lengths from CPU pinned memory in production.
+    attn_inputs.input_lengths = torch.tensor(
+        input_lengths, dtype=torch.int32, device="cpu"
+    ).pin_memory()
+    attn_inputs.sequence_lengths = torch.tensor(
+        input_lengths, dtype=torch.int32, device="cpu"
+    ).pin_memory()
+    attn_inputs.prefix_lengths = torch.zeros(
+        len(input_lengths), dtype=torch.int32, device="cpu"
+    )
+
+    cu = [0]
+    for seq_len in input_lengths:
+        cu.append(cu[-1] + seq_len)
+    cu_seqlens = torch.tensor(cu, dtype=torch.int32, device=device)
+    attn_inputs.cu_seqlens = cu_seqlens
+    attn_inputs.cu_kv_seqlens = cu_seqlens
+
+    max_seq_len = max(input_lengths)
+    padding_offset = []
+    for batch_idx, seq_len in enumerate(input_lengths):
+        offset = batch_idx * max_seq_len - cu[batch_idx]
+        padding_offset.extend([offset] * seq_len)
+    attn_inputs.padding_offset = torch.tensor(
+        padding_offset, dtype=torch.int32, device=device
+    )
+    return attn_inputs
+
+
+def _apply_base_rope(q: torch.Tensor, k: torch.Tensor, input_lengths: List[int]):
+    """Torch reference for base RoPE (style=Base, base=10000) — matches the
+    RopeConfig produced by _make_rope_attn_configs. Used to validate the C++
+    FusedRopeKVCachePrefillOp output without depending on any HF model code."""
+    head_dim = q.shape[-1]
+    half = head_dim // 2
+    positions = []
+    for seq_len in input_lengths:
+        positions.extend(range(seq_len))
+    pos = torch.tensor(positions, dtype=torch.float32, device=q.device)
+    inv_freq = 10000 ** (
+        -2.0 * torch.arange(half, dtype=torch.float32, device=q.device) / head_dim
+    )
+    angle = pos.unsqueeze(1) * inv_freq.unsqueeze(0)
+    cos = torch.cos(angle)
+    sin = torch.sin(angle)
+
+    def rot(x):
+        lo, hi = x[..., :half], x[..., half:]
+        cos_b = cos.unsqueeze(1)
+        sin_b = sin.unsqueeze(1)
+        return torch.cat([lo * cos_b - hi * sin_b, hi * cos_b + lo * sin_b], dim=-1)
+
+    return rot(q).to(q.dtype), rot(k).to(k.dtype)
 
 
 def _sdpa_reference(
@@ -305,6 +394,7 @@ class TestAiterPrefillImplPagedSupport(unittest.TestCase):
 
     def _make_attn_inputs(self, prefix_lengths):
         from types import SimpleNamespace
+
         return SimpleNamespace(
             prefix_lengths=prefix_lengths,
             is_cuda_graph=False,
@@ -325,12 +415,16 @@ class TestAiterPrefillImplPagedSupport(unittest.TestCase):
     def test_support_false_for_zero_prefix(self):
         """All-zero prefix_lengths => support() returns False (ASM/NonAsm preferred)."""
         pl = torch.zeros(4, dtype=torch.int32)
-        self.assertFalse(AiterPrefillImplPaged.support(None, self._make_attn_inputs(pl)))
+        self.assertFalse(
+            AiterPrefillImplPaged.support(None, self._make_attn_inputs(pl))
+        )
 
     def test_support_false_for_empty_prefix_lengths(self):
         """Empty prefix_lengths tensor => support() returns False."""
         pl = torch.empty(0, dtype=torch.int32)
-        self.assertFalse(AiterPrefillImplPaged.support(None, self._make_attn_inputs(pl)))
+        self.assertFalse(
+            AiterPrefillImplPaged.support(None, self._make_attn_inputs(pl))
+        )
 
 
 @unittest.skipUnless(_OPS_IMPORTABLE, "Requires AiterPrefillImplPaged module")
@@ -344,6 +438,7 @@ class TestUpdatePrefillParamsForCudaGraph(unittest.TestCase):
     def _make_stub(self, batch_size):
         """Build a minimal object with fmha_params matching capture-time batch_size."""
         from types import SimpleNamespace
+
         fmha_params = SimpleNamespace(
             cu_seqlens_q=torch.zeros(batch_size + 1, dtype=torch.int32),
             cu_seqlens_k=torch.zeros(batch_size + 1, dtype=torch.int32),
@@ -358,10 +453,16 @@ class TestUpdatePrefillParamsForCudaGraph(unittest.TestCase):
         stub = SimpleNamespace(fmha_params=fmha_params)
         return stub
 
-    def _make_attn_inputs(self, input_lengths, prefix_lengths=None,
-                          cu_seqlens=None, cu_kv_seqlens=None,
-                          kv_block_id=None):
+    def _make_attn_inputs(
+        self,
+        input_lengths,
+        prefix_lengths=None,
+        cu_seqlens=None,
+        cu_kv_seqlens=None,
+        kv_block_id=None,
+    ):
         from types import SimpleNamespace
+
         batch_size = len(input_lengths)
         if kv_block_id is None:
             kv_block_id = torch.zeros(batch_size, 4, dtype=torch.int32)
@@ -461,6 +562,7 @@ class TestUpdatePrefillParamsForCudaGraph(unittest.TestCase):
     def test_missing_kv_block_id_raises(self):
         """Missing kv_cache block ids raises ValueError."""
         from types import SimpleNamespace
+
         stub = self._make_stub(batch_size=2)
         inputs = SimpleNamespace(
             input_lengths=torch.tensor([5, 5], dtype=torch.int32),
@@ -910,6 +1012,128 @@ class TestPagedPrefillKernelE2E(unittest.TestCase):
             head_dim=64,
             tokens_per_block=16,
         )
+
+
+# ============================================================================
+# no-cache RoPE wrapper regression — kv_cache=None + need_rope_kv_cache=True
+# ============================================================================
+
+
+class _FakeRopeKvCachePrefillOp:
+    def __init__(self, output):
+        self.calls = []
+        self.output = output
+
+    def forward(self, qkv, kv_cache, rope_params):
+        self.calls.append((qkv, kv_cache, rope_params))
+        return self.output
+
+
+class _FakeFmhaOp:
+    def __init__(self):
+        self.calls = []
+        self.output = object()
+
+    def forward(self, fmha_input, kv_cache, fmha_params):
+        self.calls.append((fmha_input, kv_cache, fmha_params))
+        return self.output
+
+
+@unittest.skipUnless(_OPS_IMPORTABLE, "Requires ROCm attention wrapper module")
+class TestAiterPrefillImplNoKvRopeWrapper(unittest.TestCase):
+    """Without a KV cache, embedding-style prefill still needs RoPE applied to
+    Q/K. Both ASM and NonASM wrappers must call rope_kvcache_impl before fmha_impl
+    and pass the RoPE output straight through — bypassing the prior shortcut
+    that fed raw QKV into FMHA.
+
+    Real RoPE/FMHA kernels are covered by TestAiterPrefillImplNoKvRopeRealOp
+    below; this class isolates the wrapper logic with fakes so it runs anywhere.
+    """
+
+    def _check_no_kv_rope_path(self, impl_cls):
+        impl = object.__new__(impl_cls)
+        impl.need_rope_kv_cache = True
+        qkv = torch.randn(4, 16)
+        rope_output = (
+            torch.randn(4, 2, 4),
+            torch.randn(1, 1, 4, 4),
+            torch.randn(1, 1, 4, 4),
+        )
+        impl.rope_kvcache_impl = _FakeRopeKvCachePrefillOp(rope_output)
+        impl.fmha_impl = _FakeFmhaOp()
+        impl.rope_params = object()
+        impl.fmha_params = object()
+
+        actual = impl.forward(qkv, kv_cache=None, layer_idx=0)
+
+        self.assertIs(actual, impl.fmha_impl.output)
+        self.assertEqual(len(impl.rope_kvcache_impl.calls), 1)
+        self.assertEqual(len(impl.fmha_impl.calls), 1)
+        self.assertEqual(impl.rope_kvcache_impl.calls[0], (qkv, None, impl.rope_params))
+        self.assertEqual(
+            impl.fmha_impl.calls[0],
+            (impl.rope_kvcache_impl.output, None, impl.fmha_params),
+        )
+
+    def test_asm_no_kv_cache_still_applies_rope(self):
+        self._check_no_kv_rope_path(AiterPrefillImplAsm)
+
+    def test_nonasm_no_kv_cache_still_applies_rope(self):
+        self._check_no_kv_rope_path(AiterPrefillImplNonAsm)
+
+
+@unittest.skipUnless(_is_rocm(), "Requires ROCm GPU")
+@unittest.skipUnless(_AITER_AVAILABLE, "Requires aiter")
+@unittest.skipUnless(_OPS_IMPORTABLE, "Requires ROCm attention wrapper module")
+class TestAiterPrefillImplNoKvRopeRealOp(unittest.TestCase):
+    """End-to-end numerical regression for the wrapper path with the real C++
+    FusedRopeKVCachePrefillOp + AiterPrefillAttnOp on ROCm. Exercises both ASM
+    and NonASM wrappers with varied-length GQA batches and asserts the output
+    matches RoPE(Q,K) → flash attention reference."""
+
+    def setUp(self):
+        torch.manual_seed(1)
+        self.device = torch.device("cuda")
+        self.dtype = torch.bfloat16
+
+    def _check_real_no_kv_rope_path(self, impl_cls):
+        input_lengths = [5, 3]
+        head_num = 4
+        head_num_kv = 2
+        head_dim = 64
+        cfg = _make_rope_attn_configs(head_num, head_num_kv, head_dim, dtype=self.dtype)
+        attn_inputs = _make_rope_prefill_inputs(input_lengths, self.device, self.dtype)
+        impl = impl_cls(cfg, attn_inputs)
+
+        total_tokens = sum(input_lengths)
+        q = torch.randn(
+            total_tokens, head_num, head_dim, dtype=self.dtype, device=self.device
+        )
+        k = torch.randn(
+            total_tokens, head_num_kv, head_dim, dtype=self.dtype, device=self.device
+        )
+        v = torch.randn(
+            total_tokens, head_num_kv, head_dim, dtype=self.dtype, device=self.device
+        )
+        qkv = _pack_qkv(q, k, v)
+
+        actual = impl.forward(qkv, kv_cache=None, layer_idx=0)
+        q_rope, k_rope = _apply_base_rope(q, k, input_lengths)
+        ref = _sdpa_reference(
+            q_rope,
+            k_rope,
+            v,
+            attn_inputs.cu_seqlens,
+            attn_inputs.cu_kv_seqlens,
+            causal=True,
+        )
+        torch.testing.assert_close(actual, ref, atol=1e-2, rtol=1e-2)
+
+    def test_asm_no_kv_rope_real_op_matches_reference(self):
+        self._check_real_no_kv_rope_path(AiterPrefillImplAsm)
+
+    def test_nonasm_no_kv_rope_real_op_matches_reference(self):
+        self._check_real_no_kv_rope_path(AiterPrefillImplNonAsm)
 
 
 if __name__ == "__main__":

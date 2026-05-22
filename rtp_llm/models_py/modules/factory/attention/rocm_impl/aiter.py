@@ -358,25 +358,6 @@ class AiterPrefillAttnOp:
             token_kv_num,
         )
 
-    @staticmethod
-    def _unpad_kv(kv_padded: torch.Tensor, cu_seqlens_k: torch.Tensor) -> torch.Tensor:
-        """Unpad 4D [B, H_kv, max_seqlen, D] → 3D [total_tokens, H_kv, D].
-
-        This reverses the padding applied by C++ FusedRopeKVCachePrefillOp which
-        emits K/V in [B, H_kv, max_seqlen_k, D] layout.
-        """
-        batch_size = kv_padded.shape[0]
-        head_num_kv = kv_padded.shape[1]
-        head_dim = kv_padded.shape[3]
-        cu_seqlens_cpu = cu_seqlens_k.cpu()
-        chunks = []
-        for i in range(batch_size):
-            seq_len = int(cu_seqlens_cpu[i + 1].item() - cu_seqlens_cpu[i].item())
-            # kv_padded[i] is [H_kv, max_seqlen, D], take first seq_len tokens
-            # and transpose to [seq_len, H_kv, D]
-            chunks.append(kv_padded[i, :, :seq_len, :].permute(1, 0, 2))
-        return torch.cat(chunks, dim=0)
-
     def _forward_varlen(self, qkv, fmha_params):
         """Varlen path using flash_attn_varlen_func.
 
@@ -391,16 +372,16 @@ class AiterPrefillAttnOp:
             # Ensure Q is 3D [tokens, heads, head_dim]
             if query.dim() == 2:
                 query = query.view(-1, self.head_num, self.head_dim)
-            # K/V from C++ FusedRopeKVCachePrefillOp are 4D padded [B, H_kv, max_seqlen, D].
-            # Unpad them to [total_kv_tokens, H_kv, D] using cu_seqlens_k.
-            if key.dim() == 4:
-                key = self._unpad_kv(key, fmha_params.cu_seqlens_k)
-            elif key.dim() == 2:
-                key = key.view(-1, self.head_num_kv, self.head_dim)
-            if value.dim() == 4:
-                value = self._unpad_kv(value, fmha_params.cu_seqlens_k)
-            elif value.dim() == 2:
-                value = value.view(-1, self.head_num_kv, self.head_dim)
+            # K/V from C++ FusedRopeKVCachePrefillOp are 4D padded
+            # [B, H_kv, max_seqlen, D]. Unpad on device via vectorized gather to
+            # avoid per-layer D2H sync and Python batch loop on the hot path.
+            if key.dim() == 4 and value.dim() == 4:
+                key, value = unpad_kv_vectorized(key, value, fmha_params.cu_seqlens_k)
+            else:
+                if key.dim() == 2:
+                    key = key.view(-1, self.head_num_kv, self.head_dim)
+                if value.dim() == 2:
+                    value = value.view(-1, self.head_num_kv, self.head_dim)
         else:
             query, key, value = self._split_raw_qkv(
                 qkv, fmha_params.token_q_num, fmha_params.token_kv_num
