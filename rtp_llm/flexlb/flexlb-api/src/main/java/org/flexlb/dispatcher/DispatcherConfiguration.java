@@ -2,7 +2,7 @@ package org.flexlb.dispatcher;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.flexlb.dao.master.WorkerHost;
-import org.flexlb.discovery.NoOpServiceDiscovery;
+import org.flexlb.discovery.ServiceDiscovery;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.Ordered;
@@ -15,6 +15,8 @@ import reactor.netty.http.client.HttpClient;
 import reactor.netty.resources.ConnectionProvider;
 
 import java.time.Duration;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 @Configuration
@@ -31,6 +33,13 @@ public class DispatcherConfiguration {
      * null when disabled — Spring will not register a null bean, so disabled deployments add
      * nothing to the route table.
      *
+     * <p>FE pool membership is sourced from {@link ServiceDiscovery} (the same mechanism master
+     * uses for its BE pool): the bean injected here is the auto-configured one — NoOp in
+     * open-source / dev (reads {@code DOMAIN_ADDRESS:<id>} env var) and VipServer-backed in the
+     * internal profile (push subscription). The dispatcher subscribes via {@code listen()} and
+     * mirrors every host-change callback into an {@link AtomicReference} that {@link FePool}
+     * reads on every {@code next()}.
+     *
      * <p>Same-JVM resource isolation (decision F4 / F4b):
      * <ul>
      *   <li>Reuses the auto-configured Spring {@link ObjectMapper} bean — no second copy with
@@ -46,7 +55,8 @@ public class DispatcherConfiguration {
     @Order(Ordered.LOWEST_PRECEDENCE)
     public RouterFunction<ServerResponse> dispatcherRoutes(DispatchConfig cfg,
                                                            ObjectMapper mapper,
-                                                           WebClient.Builder webClientBuilder) {
+                                                           WebClient.Builder webClientBuilder,
+                                                           ServiceDiscovery serviceDiscovery) {
         if (!cfg.isEnabled()) {
             return null;
         }
@@ -57,11 +67,13 @@ public class DispatcherConfiguration {
                 .build();
         WebClient.Builder feBuilder = webClientBuilder.clone()
                 .clientConnector(new ReactorClientHttpConnector(HttpClient.create(feConnections)));
+
         String serviceId = cfg.getFePoolServiceId();
-        FePool pool = new FePool(() -> NoOpServiceDiscovery.getInstance().getHosts(serviceId)
-                .stream()
-                .map(DispatcherConfiguration::toUrl)
-                .collect(Collectors.toList()));
+        AtomicReference<List<String>> fePoolUrls = new AtomicReference<>(
+                toUrls(serviceDiscovery.getHosts(serviceId)));
+        serviceDiscovery.listen(serviceId, hosts -> fePoolUrls.set(toUrls(hosts)));
+        FePool pool = new FePool(fePoolUrls::get);
+
         FeClient feClient = new WebClientFeClient(feBuilder, cfg.getFeRequestTimeoutMs(), cfg.getFeMaxResponseBytes());
         FanoutService fanout = new FanoutService(feClient, pool, mapper, cfg.getSubBatchSize());
         PassthroughClient passthrough = new WebClientPassthroughClient(feBuilder.build(), pool, cfg.getFeRequestTimeoutMs());
@@ -69,7 +81,7 @@ public class DispatcherConfiguration {
         return new DispatchRouter(handler).routes();
     }
 
-    private static String toUrl(WorkerHost host) {
-        return "http://" + host.getIpPort();
+    private static List<String> toUrls(List<WorkerHost> hosts) {
+        return hosts.stream().map(h -> "http://" + h.getIpPort()).collect(Collectors.toList());
     }
 }

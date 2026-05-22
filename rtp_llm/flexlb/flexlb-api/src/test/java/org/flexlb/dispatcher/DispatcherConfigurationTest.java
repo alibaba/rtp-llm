@@ -1,13 +1,21 @@
 package org.flexlb.dispatcher;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.flexlb.dao.master.WorkerHost;
+import org.flexlb.discovery.ServiceDiscovery;
+import org.flexlb.discovery.ServiceHostListener;
 import org.junit.jupiter.api.Test;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.reactive.function.server.RouterFunction;
 import org.springframework.web.reactive.function.server.ServerResponse;
 
+import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.fail;
 
 class DispatcherConfigurationTest {
 
@@ -17,8 +25,8 @@ class DispatcherConfigurationTest {
                 "{\"enabled\":true,\"subBatchSize\":5,"
                         + "\"feRequestTimeoutMs\":3000,\"fePoolServiceId\":\"com.rtp_llm.fe\"}");
         DispatcherConfiguration conf = new DispatcherConfiguration();
-        RouterFunction<ServerResponse> routes =
-                conf.dispatcherRoutes(cfg, new ObjectMapper(), WebClient.builder());
+        RouterFunction<ServerResponse> routes = conf.dispatcherRoutes(
+                cfg, new ObjectMapper(), WebClient.builder(), new StubServiceDiscovery("com.rtp_llm.fe"));
         assertNotNull(routes);
     }
 
@@ -26,6 +34,67 @@ class DispatcherConfigurationTest {
     void noRouterWhenDisabled() {
         DispatchConfig cfg = DispatchConfig.fromJson(null);
         DispatcherConfiguration conf = new DispatcherConfiguration();
-        assertNull(conf.dispatcherRoutes(cfg, new ObjectMapper(), WebClient.builder()));
+        assertNull(conf.dispatcherRoutes(
+                cfg, new ObjectMapper(), WebClient.builder(), new FailingServiceDiscovery()));
+    }
+
+    @Test
+    void subscribesAndSeedsFromDiscovery() {
+        DispatchConfig cfg = DispatchConfig.fromJson(
+                "{\"enabled\":true,\"fePoolServiceId\":\"com.rtp_llm.fe\"}");
+        StubServiceDiscovery discovery = new StubServiceDiscovery("com.rtp_llm.fe",
+                WorkerHost.of("10.0.0.1", 8088));
+        DispatcherConfiguration conf = new DispatcherConfiguration();
+        conf.dispatcherRoutes(cfg, new ObjectMapper(), WebClient.builder(), discovery);
+
+        assertEquals(1, discovery.getHostsCalls);
+        assertNotNull(discovery.registeredListener, "dispatcher must subscribe to host changes");
+    }
+
+    /** Stub that returns a controllable host list for one expected service id. */
+    private static final class StubServiceDiscovery implements ServiceDiscovery {
+        final String expectedId;
+        final AtomicReference<List<WorkerHost>> hosts;
+        int getHostsCalls = 0;
+        ServiceHostListener registeredListener = null;
+
+        StubServiceDiscovery(String expectedId, WorkerHost... initial) {
+            this.expectedId = expectedId;
+            this.hosts = new AtomicReference<>(List.of(initial));
+        }
+
+        @Override
+        public List<WorkerHost> getHosts(String address) {
+            assertEquals(expectedId, address);
+            getHostsCalls++;
+            return hosts.get();
+        }
+
+        @Override
+        public void listen(String address, ServiceHostListener listener) {
+            assertEquals(expectedId, address);
+            this.registeredListener = listener;
+        }
+
+        @Override
+        public void shutdown() {}
+    }
+
+    /** Strict stub that fails the test if discovery is touched at all. */
+    private static final class FailingServiceDiscovery implements ServiceDiscovery {
+        @Override
+        public List<WorkerHost> getHosts(String address) {
+            return fail("disabled dispatcher must not query ServiceDiscovery (getHosts " + address + ")");
+        }
+
+        @Override
+        public void listen(String address, ServiceHostListener listener) {
+            fail("disabled dispatcher must not subscribe to ServiceDiscovery (listen " + address + ")");
+        }
+
+        @Override
+        public void shutdown() {
+            fail("disabled dispatcher must not shut down ServiceDiscovery");
+        }
     }
 }
