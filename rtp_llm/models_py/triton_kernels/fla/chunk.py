@@ -28,6 +28,7 @@ from rtp_llm.models_py.triton_kernels.fla.utils import (
     autocast_custom_fwd,
     input_guard,
     is_amd,
+    is_amd_cdna3,
 )
 from rtp_llm.models_py.triton_kernels.fla.wy_fast import recompute_w_u_fwd
 
@@ -69,9 +70,6 @@ FLYDSL_CHUNK_GDN_ENABLED_SHAPES = frozenset(
     }
 )
 
-FLYDSL_CHUNK_GDN_MIN_SEQ_LEN = 64
-
-
 @functools.lru_cache(maxsize=None)
 def _use_flydsl_chunk_gdn() -> bool:
     """Cached read of USE_FLYDSL env var (evaluated once per process)."""
@@ -96,7 +94,7 @@ def is_flydsl_chunk_gdn_shape_supported(
     v: torch.Tensor,
     beta: torch.Tensor,
 ) -> bool:
-    if not is_amd:
+    if not is_amd_cdna3:
         return False
     if (
         q.dtype != torch.bfloat16
@@ -104,13 +102,11 @@ def is_flydsl_chunk_gdn_shape_supported(
         or v.dtype != torch.bfloat16
     ):
         return False
-    if beta.dtype != torch.bfloat16:
+    # beta may be fp32 (preferred, matching SGL) or bf16; the FlyDSL wrapper
+    # casts fp32 -> bf16 before launching the megakernel.
+    if beta.dtype not in (torch.bfloat16, torch.float32):
         return False
     return _flydsl_chunk_gdn_shape(q, v) in FLYDSL_CHUNK_GDN_ENABLED_SHAPES
-
-
-def is_flydsl_chunk_gdn_length_supported(q: torch.Tensor) -> bool:
-    return q.shape[1] >= FLYDSL_CHUNK_GDN_MIN_SEQ_LEN
 
 
 def _validate_flydsl_chunk_gdn_inputs(
@@ -122,16 +118,18 @@ def _validate_flydsl_chunk_gdn_inputs(
     B, T, Hg, K = q.shape
     _, _, H, V = v.shape
     errors = []
-    if not is_amd:
-        errors.append("AMD/ROCm backend is required")
+    if not is_amd_cdna3:
+        errors.append("AMD/ROCm gfx942 (MI300X/MI308X) backend is required")
     if (
         q.dtype != torch.bfloat16
         or k.dtype != torch.bfloat16
         or v.dtype != torch.bfloat16
     ):
         errors.append(f"q/k/v must be bf16, got {q.dtype}/{k.dtype}/{v.dtype}")
-    if beta.dtype != torch.bfloat16:
-        errors.append(f"beta must be bf16, got {beta.dtype}")
+    # The wrapper casts fp32 -> bf16 before launching the FlyDSL megakernel,
+    # so accept either here. Other dtypes are still rejected.
+    if beta.dtype not in (torch.bfloat16, torch.float32):
+        errors.append(f"beta must be bf16 or fp32, got {beta.dtype}")
     shape = (Hg, H, K, V)
     if shape not in FLYDSL_CHUNK_GDN_ENABLED_SHAPES:
         target_note = (
@@ -264,6 +262,11 @@ def chunk_gated_delta_rule_flydsl_with_cache_store(
                 f"The number of initial states is expected to be {expected_states} "
                 f"rather than {initial_state.shape[0]}."
             )
+    # Keep fp32 beta for kkt/solve so the SGL-aligned fp32 sigmoid output of
+    # fused_gdn_gating is not truncated before A is computed. The FlyDSL
+    # megakernel itself hard-codes T.bf16 for the in-LDS beta pipeline
+    # (flydsl_chunk_gdn_mi308x.py: lds_beta is T.bf16, buffer_load_bf16_or_zero
+    # for beta), so we cast to bf16 only when launching the megakernel below.
     _validate_flydsl_chunk_gdn_inputs(q=q, k=k, v=v, beta=beta)
     _, _, H, V = v.shape
     K = k.shape[-1]
@@ -318,6 +321,8 @@ def chunk_gated_delta_rule_flydsl_with_cache_store(
         scale=RCP_LN2,
         cu_seqlens=cu_seqlens,
     )
+    # kkt/solve runs on the original beta (fp32 when fused_gdn_gating produced
+    # fp32) so A is not lossy. Only the FlyDSL megakernel needs bf16 beta.
     A = chunk_gated_delta_rule_fwd_intra_a_only(
         k=k,
         g=g,
@@ -341,13 +346,16 @@ def chunk_gated_delta_rule_flydsl_with_cache_store(
         if cu_seqlens is not None and cu_seqlens.dtype != torch.long
         else cu_seqlens
     )
+    beta_bf16 = (
+        beta if beta.dtype == torch.bfloat16 else beta.to(torch.bfloat16).contiguous()
+    )
     o, final_state = megakernel_fwd(
         q=q,
         k=k,
         v=v,
         a=A,
         g=g,
-        beta=beta,
+        beta=beta_bf16,
         scale=scale,
         initial_state=flydsl_initial_state,
         output_final_state=output_final_state,
@@ -434,11 +442,11 @@ def chunk_gated_delta_rule(
             Scale factor for the RetNet attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         initial_state (Optional[torch.Tensor]):
-            Initial state of shape `[N, H, K, V]` for `N` input sequences.
+            Initial state of shape `[N, H, V, K]` for `N` input sequences.
             For equal-length input sequences, `N` equals the batch size `B`.
             Default: `None`.
         output_final_state (Optional[bool]):
-            Whether to output the final state of shape `[N, H, K, V]`. Default: `False`.
+            Whether to output the final state of shape `[N, H, V, K]`. Default: `False`.
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
@@ -450,7 +458,7 @@ def chunk_gated_delta_rule(
         o (torch.Tensor):
             Outputs of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
         final_state (torch.Tensor):
-            Final state of shape `[N, H, K, V]` if `output_final_state=True` else `None`.
+            Final state of shape `[N, H, V, K]` if `output_final_state=True` else `None`.
 
     Examples::
         >>> import torch
@@ -464,7 +472,7 @@ def chunk_gated_delta_rule(
         >>> v = torch.randn(B, T, H, V, dtype=torch.bfloat16, device='cuda')
         >>> beta = torch.rand(B, T, H, dtype=torch.bfloat16, device='cuda').sigmoid()
         >>> g = F.logsigmoid(torch.rand(B, T, H, dtype=torch.bfloat16, device='cuda'))
-        >>> h0 = torch.randn(B, H, K, V, dtype=torch.bfloat16, device='cuda')
+        >>> h0 = torch.randn(B, H, V, K, dtype=torch.bfloat16, device='cuda')
         >>> o, ht = chunk_gated_delta_rule(
             q, k, v, g, beta,
             initial_state=h0,
@@ -504,6 +512,16 @@ def chunk_gated_delta_rule(
     #         "when head_first=False was specified. "
     #         "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
     #     )
+    if initial_state is not None:
+        V = v.shape[-1]
+        K = k.shape[-1]
+        if initial_state.shape[-2] != V or initial_state.shape[-1] != K:
+            raise ValueError(
+                f"initial_state must use V-first layout [N, H, V, K] but got shape "
+                f"{tuple(initial_state.shape)} — expected last two dims ({V}, {K}). "
+                f"If your state is [N, H, K, V] (K-first), transpose with "
+                f"initial_state.transpose(-1, -2)."
+            )
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(

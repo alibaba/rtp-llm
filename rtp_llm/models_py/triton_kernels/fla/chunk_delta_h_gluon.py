@@ -10,13 +10,12 @@ import triton
 try:
     from triton.experimental import gluon
     from triton.experimental.gluon import language as gl
+
     GLUON_AVAILABLE = True
 except ImportError:
     GLUON_AVAILABLE = False
 
-from rtp_llm.models_py.triton_kernels.fla.index import (
-    prepare_chunk_offsets,
-)
+from rtp_llm.models_py.triton_kernels.fla.index import prepare_chunk_offsets
 
 # Maximum H and T for Gluon advantage (empirically determined)
 GLUON_MAX_H = 32
@@ -38,6 +37,7 @@ GLUON_SUPPORTED_DTYPES = (torch.bfloat16,)
 # k/v/w/v_new and — most dangerously — writes past the end of v_new,
 # corrupting whatever tensor was allocated next.
 GLUON_BT = 64
+
 
 def _is_gluon_beneficial(
     H: int,
@@ -115,17 +115,28 @@ def _is_gluon_beneficial(
 
 
 if GLUON_AVAILABLE:
-    @triton.heuristics({
-        "USE_G": lambda args: args["g"] is not None,
-        "USE_INITIAL_STATE": lambda args: args["h0"] is not None,
-        "STORE_FINAL_STATE": lambda args: args["ht"] is not None,
-        "SAVE_NEW_VALUE": lambda args: args["v_new"] is not None,
-        "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    })
+
+    @triton.heuristics(
+        {
+            "USE_G": lambda args: args["g"] is not None,
+            "USE_INITIAL_STATE": lambda args: args["h0"] is not None,
+            "STORE_FINAL_STATE": lambda args: args["ht"] is not None,
+            "SAVE_NEW_VALUE": lambda args: args["v_new"] is not None,
+            "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
+        }
+    )
     @gluon.jit
     def gluon_chunk_fwd_kernel_h(
-        k, v, w, v_new, g, h, h0, ht,
-        cu_seqlens, chunk_offsets,
+        k,
+        v,
+        w,
+        v_new,
+        g,
+        h,
+        h0,
+        ht,
+        cu_seqlens,
+        chunk_offsets,
         T,
         H: gl.constexpr,
         Hg: gl.constexpr,
@@ -158,21 +169,33 @@ if GLUON_AVAILABLE:
             boh = i_n * NT
 
         mma: gl.constexpr = gl.amd.AMDMFMALayout(
-            version=4, instr_shape=[16, 16],
-            transposed=True, warps_per_cta=[NUM_WARPS, 1],
+            version=4,
+            instr_shape=[16, 16],
+            transposed=True,
+            warps_per_cta=[NUM_WARPS, 1],
         )
-        dot_op0: gl.constexpr = gl.DotOperandLayout(operand_index=0, parent=mma, k_width=8)
-        dot_op1: gl.constexpr = gl.DotOperandLayout(operand_index=1, parent=mma, k_width=8)
+        dot_op0: gl.constexpr = gl.DotOperandLayout(
+            operand_index=0, parent=mma, k_width=8
+        )
+        dot_op1: gl.constexpr = gl.DotOperandLayout(
+            operand_index=1, parent=mma, k_width=8
+        )
 
         shared_layout: gl.constexpr = gl.SwizzledSharedLayout(8, 2, 8, order=[1, 0])
         shared_layout_t: gl.constexpr = gl.SwizzledSharedLayout(8, 2, 8, order=[0, 1])
 
         blocked_wk: gl.constexpr = gl.BlockedLayout(
-            size_per_thread=[1, 8], threads_per_warp=[8, 8],
-            warps_per_cta=[NUM_WARPS, 1], order=[1, 0])
+            size_per_thread=[1, 8],
+            threads_per_warp=[8, 8],
+            warps_per_cta=[NUM_WARPS, 1],
+            order=[1, 0],
+        )
         blocked_kt: gl.constexpr = gl.BlockedLayout(
-            size_per_thread=[8, 1], threads_per_warp=[8, 8],
-            warps_per_cta=[1, NUM_WARPS], order=[0, 1])
+            size_per_thread=[8, 1],
+            threads_per_warp=[8, 8],
+            warps_per_cta=[1, NUM_WARPS],
+            order=[0, 1],
+        )
 
         h_base = h + (boh * H + i_h) * K * V
         v_base = v + (bos * H + i_h) * V
@@ -192,11 +215,19 @@ if GLUON_AVAILABLE:
             h0_base = h0 + i_nh * K * V
             h0_row = gl.arange(0, 64, layout=gl.SliceLayout(1, mma))
             h0_col = gl.arange(0, BV, layout=gl.SliceLayout(0, mma))
-            h0_offs = gl.cast(h0_row[:, None] * V + (i_v * BV + h0_col[None, :]), gl.int32)
-            b_h1 = b_h1 + gl.amd.cdna4.buffer_load(ptr=h0_base, offsets=h0_offs).to(gl.float32)
+            h0_offs = gl.cast(
+                h0_row[:, None] * V + (i_v * BV + h0_col[None, :]), gl.int32
+            )
+            b_h1 = b_h1 + gl.amd.cdna4.buffer_load(ptr=h0_base, offsets=h0_offs).to(
+                gl.float32
+            )
             if K > 64:
-                h0_offs2 = ((64 + h0_row[:, None]) * V + (i_v * BV + h0_col[None, :])).to(gl.int32)
-                b_h2 = b_h2 + gl.amd.cdna4.buffer_load(ptr=h0_base, offsets=h0_offs2).to(gl.float32)
+                h0_offs2 = (
+                    (64 + h0_row[:, None]) * V + (i_v * BV + h0_col[None, :])
+                ).to(gl.int32)
+                b_h2 = b_h2 + gl.amd.cdna4.buffer_load(
+                    ptr=h0_base, offsets=h0_offs2
+                ).to(gl.float32)
 
         # 4 independent smem buffers for full double-buffer pipeline
         smem_w1 = gl.allocate_shared_memory(gl.bfloat16, [64, 64], shared_layout)
@@ -208,8 +239,11 @@ if GLUON_AVAILABLE:
         m_col_bv = gl.arange(0, BV, layout=gl.SliceLayout(0, mma))
         m_row_bt = gl.arange(0, BT, layout=gl.SliceLayout(1, mma))
         blocked_v: gl.constexpr = gl.BlockedLayout(
-            size_per_thread=[1, 4], threads_per_warp=[16, 4],
-            warps_per_cta=[NUM_WARPS, 1], order=[1, 0])
+            size_per_thread=[1, 4],
+            threads_per_warp=[16, 4],
+            warps_per_cta=[NUM_WARPS, 1],
+            order=[1, 0],
+        )
         v_row_b2 = gl.arange(0, BT, layout=gl.SliceLayout(1, blocked_v))
         v_col_b2 = gl.arange(0, BV, layout=gl.SliceLayout(0, blocked_v))
 
@@ -218,16 +252,26 @@ if GLUON_AVAILABLE:
         kt_row = gl.arange(0, 64, layout=gl.SliceLayout(1, blocked_kt))
         kt_col = gl.arange(0, BT, layout=gl.SliceLayout(0, blocked_kt))
 
-        h_offs_base1 = gl.cast(m_row[:, None] * V + (i_v * BV + m_col_bv[None, :]), gl.int32)
+        h_offs_base1 = gl.cast(
+            m_row[:, None] * V + (i_v * BV + m_col_bv[None, :]), gl.int32
+        )
         if K > 64:
-            h_offs_base2 = gl.cast(64 * V + m_row[:, None] * V + (i_v * BV + m_col_bv[None, :]), gl.int32)
+            h_offs_base2 = gl.cast(
+                64 * V + m_row[:, None] * V + (i_v * BV + m_col_bv[None, :]), gl.int32
+            )
         w_offs_base1 = gl.cast(w_row[:, None] * stride_w + w_col[None, :], gl.int32)
         if K > 64:
-            w_offs_base2 = gl.cast(w_row[:, None] * stride_w + (64 + w_col[None, :]), gl.int32)
-        v_offs_base = gl.cast(v_row_b2[:, None] * stride_v + (i_v * BV + v_col_b2[None, :]), gl.int32)
+            w_offs_base2 = gl.cast(
+                w_row[:, None] * stride_w + (64 + w_col[None, :]), gl.int32
+            )
+        v_offs_base = gl.cast(
+            v_row_b2[:, None] * stride_v + (i_v * BV + v_col_b2[None, :]), gl.int32
+        )
         kt_offs_base1 = gl.cast(kt_row[:, None] + kt_col[None, :] * stride_k, gl.int32)
         if K > 64:
-            kt_offs_base2 = gl.cast(64 + kt_row[:, None] + kt_col[None, :] * stride_k, gl.int32)
+            kt_offs_base2 = gl.cast(
+                64 + kt_row[:, None] + kt_col[None, :] * stride_k, gl.int32
+            )
 
         if USE_G:
             g_base = g + bos * H + i_h
@@ -259,15 +303,21 @@ if GLUON_AVAILABLE:
             h_off_iter = (i_t * stride_h).to(gl.int32)
             h_val1 = b_h1 if H_FP32 else b_h1.to(gl.bfloat16)
             gl.amd.cdna4.buffer_store(
-                stored_value=h_val1, ptr=h_base, offsets=h_offs_base1 + h_off_iter)
+                stored_value=h_val1, ptr=h_base, offsets=h_offs_base1 + h_off_iter
+            )
             if K > 64:
                 h_val2 = b_h2 if H_FP32 else b_h2.to(gl.bfloat16)
                 gl.amd.cdna4.buffer_store(
-                    stored_value=h_val2, ptr=h_base, offsets=h_offs_base2 + h_off_iter)
+                    stored_value=h_val2, ptr=h_base, offsets=h_offs_base2 + h_off_iter
+                )
 
-            b_w1_buf = gl.amd.cdna4.buffer_load(ptr=w_base, offsets=w_offs_base1 + next_bt * stride_w)
+            b_w1_buf = gl.amd.cdna4.buffer_load(
+                ptr=w_base, offsets=w_offs_base1 + next_bt * stride_w
+            )
             if K > 64:
-                b_w2_buf = gl.amd.cdna4.buffer_load(ptr=w_base, offsets=w_offs_base2 + next_bt * stride_w)
+                b_w2_buf = gl.amd.cdna4.buffer_load(
+                    ptr=w_base, offsets=w_offs_base2 + next_bt * stride_w
+                )
 
             w_dot = smem_w1.load(dot_op0)
             h_dot = gl.convert_layout(b_h1.to(gl.bfloat16), dot_op1)
@@ -278,20 +328,27 @@ if GLUON_AVAILABLE:
                 h_dot2 = gl.convert_layout(b_h2.to(gl.bfloat16), dot_op1)
                 b_wh = gl.amd.cdna4.mfma(w_dot2, h_dot2, b_wh)
 
-            b_v_pre_next = gl.amd.cdna4.buffer_load(ptr=v_base, offsets=v_offs_base + next_bt * stride_v)
+            b_v_pre_next = gl.amd.cdna4.buffer_load(
+                ptr=v_base, offsets=v_offs_base + next_bt * stride_v
+            )
             b_v = gl.convert_layout(b_v_pre, mma).to(gl.float32) - b_wh
 
             if SAVE_NEW_VALUE:
-                vn_offs = ((i_t * BT + m_row_bt[:, None]) * stride_v + (i_v * BV + m_col_bv[None, :])).to(gl.int32)
+                vn_offs = (
+                    (i_t * BT + m_row_bt[:, None]) * stride_v
+                    + (i_v * BV + m_col_bv[None, :])
+                ).to(gl.int32)
                 gl.amd.cdna4.buffer_store(
-                    stored_value=b_v.to(gl.bfloat16), ptr=vn_base, offsets=vn_offs)
+                    stored_value=b_v.to(gl.bfloat16), ptr=vn_base, offsets=vn_offs
+                )
 
             if USE_G:
                 last_idx = min((i_t + 1) * BT, T) - 1
                 m_t = (i_t * BT + m_row_bt) < T
                 b_g_last = gl.load(g_base + last_idx * H).to(gl.float32)
                 b_g = gl.amd.cdna4.buffer_load(
-                    ptr=g_base, offsets=g_offs_base + i_t_bt * H, mask=m_t).to(gl.float32)
+                    ptr=g_base, offsets=g_offs_base + i_t_bt * H, mask=m_t
+                ).to(gl.float32)
                 b_scale = gl.where(m_t, gl.exp2(b_g_last - b_g), 0.0)
                 b_g_last_val = gl.exp2(b_g_last)
                 b_v = b_v * b_scale[:, None]
@@ -299,9 +356,13 @@ if GLUON_AVAILABLE:
                 if K > 64:
                     b_h2 = b_h2 * b_g_last_val
 
-            b_kt1_buf = gl.amd.cdna4.buffer_load(ptr=k_base, offsets=kt_offs_base1 + next_bt * stride_k)
+            b_kt1_buf = gl.amd.cdna4.buffer_load(
+                ptr=k_base, offsets=kt_offs_base1 + next_bt * stride_k
+            )
             if K > 64:
-                b_kt2_buf = gl.amd.cdna4.buffer_load(ptr=k_base, offsets=kt_offs_base2 + next_bt * stride_k)
+                b_kt2_buf = gl.amd.cdna4.buffer_load(
+                    ptr=k_base, offsets=kt_offs_base2 + next_bt * stride_k
+                )
 
             v_dot = gl.convert_layout(b_v.to(gl.bfloat16), dot_op1)
             k_dot = smem_k1.load(dot_op0)
@@ -326,11 +387,13 @@ if GLUON_AVAILABLE:
             h_off_iter = (i_t_last * stride_h).to(gl.int32)
             h_val1 = b_h1 if H_FP32 else b_h1.to(gl.bfloat16)
             gl.amd.cdna4.buffer_store(
-                stored_value=h_val1, ptr=h_base, offsets=h_offs_base1 + h_off_iter)
+                stored_value=h_val1, ptr=h_base, offsets=h_offs_base1 + h_off_iter
+            )
             if K > 64:
                 h_val2 = b_h2 if H_FP32 else b_h2.to(gl.bfloat16)
                 gl.amd.cdna4.buffer_store(
-                    stored_value=h_val2, ptr=h_base, offsets=h_offs_base2 + h_off_iter)
+                    stored_value=h_val2, ptr=h_base, offsets=h_offs_base2 + h_off_iter
+                )
 
             w_dot = smem_w1.load(dot_op0)
             h_dot = gl.convert_layout(b_h1.to(gl.bfloat16), dot_op1)
@@ -344,16 +407,21 @@ if GLUON_AVAILABLE:
             b_v = gl.convert_layout(b_v_pre, mma).to(gl.float32) - b_wh
 
             if SAVE_NEW_VALUE:
-                vn_offs = ((i_t_last * BT + m_row_bt[:, None]) * stride_v + (i_v * BV + m_col_bv[None, :])).to(gl.int32)
+                vn_offs = (
+                    (i_t_last * BT + m_row_bt[:, None]) * stride_v
+                    + (i_v * BV + m_col_bv[None, :])
+                ).to(gl.int32)
                 gl.amd.cdna4.buffer_store(
-                    stored_value=b_v.to(gl.bfloat16), ptr=vn_base, offsets=vn_offs)
+                    stored_value=b_v.to(gl.bfloat16), ptr=vn_base, offsets=vn_offs
+                )
 
             if USE_G:
                 last_idx = min((i_t_last + 1) * BT, T) - 1
                 m_t = (i_t_last * BT + m_row_bt) < T
                 b_g_last = gl.load(g_base + last_idx * H).to(gl.float32)
                 b_g = gl.amd.cdna4.buffer_load(
-                    ptr=g_base, offsets=g_offs_base + i_t_bt * H, mask=m_t).to(gl.float32)
+                    ptr=g_base, offsets=g_offs_base + i_t_bt * H, mask=m_t
+                ).to(gl.float32)
                 b_scale = gl.where(m_t, gl.exp2(b_g_last - b_g), 0.0)
                 b_g_last_val = gl.exp2(b_g_last)
                 b_v = b_v * b_scale[:, None]
@@ -370,11 +438,17 @@ if GLUON_AVAILABLE:
 
         if STORE_FINAL_STATE:
             ht_base = ht + i_nh * K * V
-            ht_offs1 = (m_row[:, None] * V + (i_v * BV + m_col_bv[None, :])).to(gl.int32)
+            ht_offs1 = (m_row[:, None] * V + (i_v * BV + m_col_bv[None, :])).to(
+                gl.int32
+            )
             gl.amd.cdna4.buffer_store(stored_value=b_h1, ptr=ht_base, offsets=ht_offs1)
             if K > 64:
-                ht_offs2 = ((64 + m_row[:, None]) * V + (i_v * BV + m_col_bv[None, :])).to(gl.int32)
-                gl.amd.cdna4.buffer_store(stored_value=b_h2, ptr=ht_base, offsets=ht_offs2)
+                ht_offs2 = (
+                    (64 + m_row[:, None]) * V + (i_v * BV + m_col_bv[None, :])
+                ).to(gl.int32)
+                gl.amd.cdna4.buffer_store(
+                    stored_value=b_h2, ptr=ht_base, offsets=ht_offs2
+                )
 
 
 def chunk_gated_delta_rule_fwd_h_gluon(
@@ -415,20 +489,40 @@ def chunk_gated_delta_rule_fwd_h_gluon(
 
     if state_dtype is None:
         state_dtype = torch.float32
+    # NOTE: still K-first internally; gated off in chunk_delta_h.py while the
+    # Triton fallback runs V-first. See _GLUON_PATH_VFIRST_DONE there. When
+    # this kernel is ported to V-first the alloc shape below also flips to
+    # (B, NT, H, V, K).
     h = k.new_empty(B, NT, H, K, V, dtype=state_dtype)
-    final_state = k.new_empty(N, H, K, V, dtype=torch.float32) if output_final_state else None
+    final_state = (
+        k.new_empty(N, H, K, V, dtype=torch.float32) if output_final_state else None
+    )
     v_new = torch.empty_like(u) if save_new_value else None
 
     def grid(meta):
         return (triton.cdiv(V, meta["BV"]), N * H)
 
     gluon_chunk_fwd_kernel_h[grid](
-        k=k, v=u, w=w, v_new=v_new, g=g,
-        h=h, h0=initial_state, ht=final_state,
-        cu_seqlens=cu_seqlens, chunk_offsets=chunk_offsets,
-        T=T, H=H, Hg=Hg, K=K, V=V, BT=BT, BV=BV,
+        k=k,
+        v=u,
+        w=w,
+        v_new=v_new,
+        g=g,
+        h=h,
+        h0=initial_state,
+        ht=final_state,
+        cu_seqlens=cu_seqlens,
+        chunk_offsets=chunk_offsets,
+        T=T,
+        H=H,
+        Hg=Hg,
+        K=K,
+        V=V,
+        BT=BT,
+        BV=BV,
         H_FP32=(state_dtype == torch.float32),
         NUM_WARPS=NUM_WARPS,
-        num_warps=NUM_WARPS, num_stages=1,
+        num_warps=NUM_WARPS,
+        num_stages=1,
     )
     return h, v_new, final_state

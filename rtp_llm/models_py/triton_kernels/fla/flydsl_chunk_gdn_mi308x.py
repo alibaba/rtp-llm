@@ -25,24 +25,19 @@ from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm as llvm_dialect
 from flydsl._mlir.dialects import math as math_dialect
 from flydsl._mlir.dialects import scf
-from flydsl.compiler.backends.rocm import RocmBackend
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, buffer_ops, gpu, range_constexpr, rocdl, vector
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
-_orig_pipeline = RocmBackend.pipeline_fragments
-
-
-def _patched_pipeline(self, *, compile_hints=None, **kw):
-    if compile_hints is None:
-        compile_hints = {}
-    frags = _orig_pipeline(self, compile_hints=compile_hints, **kw)
-    return [f.replace("O=2", "O=3") if "rocdl-attach-target" in f else f for f in frags]
-
-
-RocmBackend.pipeline_fragments = _patched_pipeline
+# Earlier revisions globally monkey-patched RocmBackend.pipeline_fragments to
+# upgrade "O=2" -> "O=3" in the rocdl-attach-target stage. A rocprofv3 sweep on
+# the Qwen3.5-9B TP1 hot shape (Hg=16, H=32, K=V=128) showed O=3 matched O=2
+# within run-to-run noise or was slightly slower (megakernel_fn_0 @ T=65536:
+# O=3 8497 us vs O=2 8213 us, -3.3%). The patch is removed so this module does
+# not mutate flydsl backend internals at import time, addressing the P2 review
+# feedback about leaking the pipeline override into other FlyDSL kernels.
 
 BT = 64
 K_SIZE = 128
@@ -81,6 +76,7 @@ def build_megakernel(
     ssm_state_dtype=None,
     h_size=H_SIZE,
     hg_size=Hg_SIZE,
+    output_final_state=True,
 ):
     K = K_SIZE
     V = V_SIZE
@@ -329,6 +325,9 @@ def build_megakernel(
                 scf.YieldOp([])
 
         def store_h_to_ssm_block(h_vals, dest_block_pos):
+            # V-first store: ssm_states is declared (blocks, H, V, K) with byte
+            # formula v*K + k, matching SGL main and the Triton fwd_h path
+            # (chunk_delta_h.py). Element h[K=dk, V=dv] -> byte dv*K + dk.
             zero_i32 = arith.constant(0, type=T.i32)
             block_map_off = i_b * max_block_size + dest_block_pos
             block_idx = buffer_ops.buffer_load(
@@ -343,7 +342,7 @@ def build_megakernel(
                         for ii in range_constexpr(4):
                             dk = (wave_id * 2 + mc) * 16 + (lane // 16) * 4 + ii
                             dv = i_v * BLOCK_DV + nt * 16 + lane % 16
-                            ssm_off = ssm_base + dk * V + dv
+                            ssm_off = ssm_base + dv * K + dk
                             val = v4e(h_vals[mc * NT_BDV + nt], ii)
                             if ssm_state_dtype == torch.bfloat16:
                                 val = bf16_trunc(val)
@@ -419,7 +418,7 @@ def build_megakernel(
                         for ii in range_constexpr(4):
                             dk = (wave_id * 2 + mc) * 16 + (lane // 16) * 4 + ii
                             dv = i_v * BLOCK_DV + nt * 16 + lane % 16
-                            h0_off = h0_base + dk * V + dv
+                            h0_off = h0_base + dv * K + dk
                             h0_vals.append(
                                 buffer_ops.buffer_load(
                                     rsrc_h0, h0_off, vec_width=1, dtype=T.f32
@@ -965,22 +964,28 @@ def build_megakernel(
             yield h_result
 
         # ═══════════ Store final state h → ht ═══════════
-        final_h = list(loop_results)
-        ht_base = i_bh * K * V
-        store_if = scf.IfOp(is_compute, [], has_else=True)
-        with ir.InsertionPoint(store_if.then_block):
-            for mc in range_constexpr(2):
-                for nt in range_constexpr(NT_BDV):
-                    for ii in range_constexpr(4):
-                        dk = (wave_id * 2 + mc) * 16 + (lane // 16) * 4 + ii
-                        dv = i_v * BLOCK_DV + nt * 16 + lane % 16
-                        ht_off = ht_base + dk * V + dv
-                        buffer_ops.buffer_store(
-                            v4e(final_h[mc * NT_BDV + nt], ii), rsrc_ht, ht_off
-                        )
-            scf.YieldOp([])
-        with ir.InsertionPoint(store_if.else_block):
-            scf.YieldOp([])
+        # Compile-time guard: if the caller does not need final state, the
+        # entire store IR is omitted so an empty/dummy ht_ptr is never written
+        # to. Mirrors the Triton fwd_h pattern (STORE_FINAL_STATE constexpr).
+        # V-first byte formula (dv*K + dk) matches the Triton final_state
+        # alloc shape (N, H, V, K) — see chunk_delta_h.py for rationale.
+        if output_final_state:
+            final_h = list(loop_results)
+            ht_base = i_bh * K * V
+            store_if = scf.IfOp(is_compute, [], has_else=True)
+            with ir.InsertionPoint(store_if.then_block):
+                for mc in range_constexpr(2):
+                    for nt in range_constexpr(NT_BDV):
+                        for ii in range_constexpr(4):
+                            dk = (wave_id * 2 + mc) * 16 + (lane // 16) * 4 + ii
+                            dv = i_v * BLOCK_DV + nt * 16 + lane % 16
+                            ht_off = ht_base + dv * K + dk
+                            buffer_ops.buffer_store(
+                                v4e(final_h[mc * NT_BDV + nt], ii), rsrc_ht, ht_off
+                            )
+                scf.YieldOp([])
+            with ir.InsertionPoint(store_if.else_block):
+                scf.YieldOp([])
 
     @flyc.jit
     def launch(
@@ -1097,6 +1102,7 @@ def _launch_tail_safe_into(
         use_vl,
         store_ssm_state,
         ssm_states.dtype if store_ssm_state else None,
+        output_final_state,
     )
     if cache_key not in _megakernel_cache:
         _megakernel_cache[cache_key] = build_megakernel(
@@ -1106,11 +1112,14 @@ def _launch_tail_safe_into(
             ssm_state_dtype=ssm_states.dtype if store_ssm_state else None,
             h_size=H,
             hg_size=Hg,
+            output_final_state=output_final_state,
         )
     fn = _megakernel_cache[cache_key]
 
+    # Kernel writes ht with V-first byte formula: offset = dv*K + dk,
+    # so the allocation must be [N, H, V, K] (contiguous K innermost).
     ht = (
-        torch.empty(N, H, K, V, device=q.device, dtype=torch.float32)
+        torch.empty(N, H, V, K, device=q.device, dtype=torch.float32)
         if output_final_state
         else None
     )
@@ -1208,6 +1217,7 @@ def _launch_fast_into(
         use_vl,
         store_ssm_state,
         ssm_states.dtype if store_ssm_state else None,
+        output_final_state,
     )
     if cache_key not in fast._megakernel_cache:
         fast._megakernel_cache[cache_key] = fast.build_megakernel(
@@ -1217,11 +1227,14 @@ def _launch_fast_into(
             ssm_state_dtype=ssm_states.dtype if store_ssm_state else None,
             h_size=H,
             hg_size=Hg,
+            output_final_state=output_final_state,
         )
     fn = fast._megakernel_cache[cache_key]
 
+    # Kernel writes ht with V-first byte formula: offset = dv*K + dk,
+    # so the allocation must be [N, H, V, K] (contiguous K innermost).
     ht = (
-        torch.empty(N, H, K, V, device=q.device, dtype=torch.float32)
+        torch.empty(N, H, V, K, device=q.device, dtype=torch.float32)
         if output_final_state
         else None
     )
@@ -1357,6 +1370,10 @@ def megakernel_fwd(
                 "prefix_lengths, block_map and seq_size_per_block are required "
                 "when FlyDSL writes ssm_states directly"
             )
+
+    # NOTE: the FlyDSL megakernel does NOT support zero-length sequences in
+    # cu_seqlens (g_pad_off = bos + T_actual - 1 would underflow).  Callers
+    # must ensure all per-sequence lengths are > 0 before invoking this path.
 
     if cu_seqlens is None:
         if T_total % BT == 0:

@@ -48,7 +48,7 @@ class FlyDSLChunkGDNShapeGateTest(unittest.TestCase):
     def test_use_flydsl_accepts_every_enabled_shape_on_amd_bf16(self):
         with mock.patch.dict(os.environ, {"USE_FLYDSL": "1"}, clear=False):
             chunk._use_flydsl_chunk_gdn.cache_clear()
-            with mock.patch.object(chunk, "is_amd", True):
+            with mock.patch.object(chunk, "is_amd_cdna3", True):
                 for shape in sorted(chunk.FLYDSL_CHUNK_GDN_ENABLED_SHAPES):
                     q, k, v, beta = _inputs_for_shape(shape)
                     with self.subTest(shape=shape):
@@ -69,7 +69,7 @@ class FlyDSLChunkGDNShapeGateTest(unittest.TestCase):
         q, k, v, beta = _inputs_for_shape(excluded)
         with mock.patch.dict(os.environ, {"USE_FLYDSL": "1"}, clear=False):
             chunk._use_flydsl_chunk_gdn.cache_clear()
-            with mock.patch.object(chunk, "is_amd", True):
+            with mock.patch.object(chunk, "is_amd_cdna3", True):
                 self.assertFalse(
                     chunk.is_flydsl_chunk_gdn_shape_supported(q, k, v, beta)
                 )
@@ -78,19 +78,18 @@ class FlyDSLChunkGDNShapeGateTest(unittest.TestCase):
         """The complete gate expression must reject when USE_FLYDSL=0."""
         supported = (8, 32, 128, 128)
         q, k, v, beta = _inputs_for_shape(supported)
-        with mock.patch.object(chunk, "is_amd", True):
+        with mock.patch.object(chunk, "is_amd_cdna3", True):
             with mock.patch.dict(os.environ, {"USE_FLYDSL": "0"}, clear=False):
                 chunk._use_flydsl_chunk_gdn.cache_clear()
                 gate_result = (
                     chunk.is_flydsl_chunk_gdn_enabled()
                     and chunk.is_flydsl_chunk_gdn_shape_supported(q, k, v, beta)
-                    and chunk.is_flydsl_chunk_gdn_length_supported(q)
                 )
                 self.assertFalse(gate_result)
 
     def test_gate_rejects_unsupported_shape_and_wrong_dtype(self):
         supported = (8, 32, 128, 128)
-        with mock.patch.object(chunk, "is_amd", True):
+        with mock.patch.object(chunk, "is_amd_cdna3", True):
             with mock.patch.dict(os.environ, {"USE_FLYDSL": "1"}, clear=False):
                 chunk._use_flydsl_chunk_gdn.cache_clear()
 
@@ -115,6 +114,27 @@ class FlyDSLChunkGDNShapeGateTest(unittest.TestCase):
                         fp32_beta,
                     )
                 )
+
+    def test_illegal_beta_dtype_raises(self):
+        """chunk_gated_delta_rule_flydsl_with_cache_store must reject
+        beta tensors that are neither bf16 nor fp32 before any cast."""
+        supported = (8, 32, 128, 128)
+        hg, h, k_dim, v_dim = supported
+        with mock.patch.object(chunk, "is_amd_cdna3", True):
+            with mock.patch.dict(os.environ, {"USE_FLYDSL": "1"}, clear=False):
+                chunk._use_flydsl_chunk_gdn.cache_clear()
+
+                for illegal_dtype in (torch.float16, torch.int8, torch.float64):
+                    q = torch.empty(1, 64, hg, k_dim, dtype=torch.bfloat16)
+                    k = torch.empty(1, 64, hg, k_dim, dtype=torch.bfloat16)
+                    v = torch.empty(1, 64, h, v_dim, dtype=torch.bfloat16)
+                    g = torch.empty(1, 64, h, dtype=torch.float32)
+                    beta = torch.empty(1, 64, h, dtype=illegal_dtype)
+                    with self.subTest(dtype=illegal_dtype):
+                        with self.assertRaises(ValueError, msg=f"should reject {illegal_dtype}"):
+                            chunk.chunk_gated_delta_rule_flydsl_with_cache_store(
+                                q=q, k=k, v=v, g=g, beta=beta,
+                            )
 
 
 if __name__ == "__main__":
