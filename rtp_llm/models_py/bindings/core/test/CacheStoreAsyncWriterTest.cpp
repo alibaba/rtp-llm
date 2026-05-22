@@ -93,6 +93,7 @@ TEST_F(CacheStoreAsyncWriterTest, ExceptionPropagation) {
     writer.submit([]() { throw std::runtime_error("test error"); });
 
     ASSERT_THROW(writer.waitAllDone(), std::runtime_error);
+    ASSERT_EQ(0, writer.pending_count_.load());
 
     // After exception, writer should be back in IDLE and re-initializable.
     ASSERT_TRUE(writer.state_ == CacheStoreAsyncWriter::State::IDLE);
