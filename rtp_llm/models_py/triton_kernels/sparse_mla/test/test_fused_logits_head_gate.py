@@ -5,7 +5,7 @@ import unittest
 import torch
 from torch import nn
 
-from rtp_llm.models_py.triton_kernels.common.fused_logits_head_gate import (
+from rtp_llm.models_py.triton_kernels.sparse_mla.fused_logits_head_gate import (
     _baseline_logits_head_gate,
     fused_logits_head_gate,
 )

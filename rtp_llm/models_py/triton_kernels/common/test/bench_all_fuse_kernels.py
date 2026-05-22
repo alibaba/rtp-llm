@@ -50,10 +50,6 @@ from rtp_llm.models_py.triton_kernels.common.fused_add_rmsnorm_fp8_quant import 
     fused_add_rmsnorm_fp8_quant,
     fused_add_rmsnorm_fp8_quant_with_bf16_output,
 )
-from rtp_llm.models_py.triton_kernels.common.fused_logits_head_gate import (
-    _baseline_logits_head_gate,
-    fused_logits_head_gate,
-)
 from rtp_llm.models_py.triton_kernels.common.fused_qk_rmsnorm import (
     fused_qk_rmsnorm_triton,
 )
@@ -69,6 +65,10 @@ from rtp_llm.models_py.triton_kernels.common.fused_strided_rmsnorm import (
     fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output,
 )
 from rtp_llm.models_py.triton_kernels.common.layernorm_gated import RmsNormGated
+from rtp_llm.models_py.triton_kernels.sparse_mla.fused_logits_head_gate import (
+    _baseline_logits_head_gate,
+    fused_logits_head_gate,
+)
 
 # ---------------------------------------------------------------------------
 # Qwen3.5-397B-A17B per-rank (TP=2) dimensions
