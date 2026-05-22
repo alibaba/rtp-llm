@@ -19,7 +19,6 @@ else:
     fused_logits_head_gate = None  # type: ignore
 
 
-
 class Indexer(nn.Module):
     """
     Indexer for DeepSeek-V3.2 DSA (DeepSeek Sparse Attention) mechanism.
@@ -149,15 +148,45 @@ class Indexer(nn.Module):
                 scale,
                 fallback_proj=self.weights_proj,
             )
-        # Inline fp32 fallback (avoids fp16 linear's inference-tensor bug).
-        x_f32 = x.contiguous().float()
-        weight = (
-            self.weights_proj.weight.float()
-            if self.weights_proj.weight.dtype != torch.float32
-            else self.weights_proj.weight
-        )
-        weights = (x_f32 @ weight.T).unsqueeze(-1) * q_scale * scale
+        x = x.float()
+        weights = self.weights_proj(x)
+        weights = weights.float()
+        weights = weights.unsqueeze(-1) * q_scale * scale
         return weights
+
+    def _fused_forward_decode(
+        self,
+        q_lora: torch.Tensor,
+        x: torch.Tensor,
+        kv_cache: KVCache,
+        fmha_params: Any,
+        x_fp8: Optional[torch.Tensor] = None,
+        x_scale: Optional[torch.Tensor] = None,
+        q_c_fp8: Optional[torch.Tensor] = None,
+        q_c_scale: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Fused decode: QK kernel does K(RoPE+Had→bf16) + Q(RoPE+Had+FP8).
+
+        Returns (q_fp8, q_scale).
+        """
+        if q_c_fp8 is not None and q_c_scale is not None:
+            q = self.wq_b(q_c_fp8, input_scales=q_c_scale)
+        else:
+            q = self.wq_b(q_lora)
+        q = q.view(-1, self.index_n_heads, self.index_head_dim)
+
+        if x_fp8 is not None and x_scale is not None:
+            k = self.wk(x_fp8, input_scales=x_scale)
+        else:
+            k = self.wk(x)
+        k = self.k_norm(k)
+
+        q_fp8, q_scale, key = self.indexer_op.fused_rope_quant_qk(
+            q, k, fmha_params.positions_d
+        )
+        self.indexer_op.quant_k_only(key, kv_cache, fmha_params.slot_mapping)
+
+        return q_fp8, q_scale
 
     def _get_q_k_bf16(
         self,
@@ -278,10 +307,38 @@ class Indexer(nn.Module):
         if self._is_sparse_prefill_cp(attention_inputs):
             assert cp_params is not None, "cp_params is required for sparse prefill CP"
 
-        query, key = self._get_q_k_bf16(q_lora, hidden_states, fmha_params, cp_params, x_fp8, x_scale, q_c_fp8, q_c_scale)
-        q_fp8, q_scale = self._quantize_q_k(
-            query, key, kv_cache, fmha_params, attention_inputs, cp_params
-        )
+        # Fused Q-RoPE-Hadamard-Quant path: single Triton kernel does
+        # RoPE + 128-pt Hadamard + ue8m0 FP8 quant for Q (decode only).
+        if (
+            self._fuse_logits_head_gate
+            and not attention_inputs.is_prefill
+            and cp_params is None
+        ):
+            q_fp8, q_scale = self._fused_forward_decode(
+                q_lora,
+                hidden_states,
+                kv_cache,
+                fmha_params,
+                x_fp8,
+                x_scale,
+                q_c_fp8,
+                q_c_scale,
+            )
+        else:
+            query, key = self._get_q_k_bf16(
+                q_lora,
+                hidden_states,
+                fmha_params,
+                cp_params,
+                x_fp8,
+                x_scale,
+                q_c_fp8,
+                q_c_scale,
+            )
+            q_fp8, q_scale = self._quantize_q_k(
+                query, key, kv_cache, fmha_params, attention_inputs, cp_params
+            )
+
         weights = self._get_logits_head_gate(hidden_states, q_scale)
         return self._compute_topk(
             q_fp8, weights, kv_cache, fmha_params, attention_inputs, cp_params

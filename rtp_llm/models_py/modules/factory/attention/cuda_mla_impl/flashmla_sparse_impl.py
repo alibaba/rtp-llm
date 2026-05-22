@@ -41,6 +41,10 @@ from rtp_llm.models_py.triton_kernels.common.strided_slice_copy import (
 from rtp_llm.models_py.triton_kernels.sparse_mla.block_index_to_global import (
     triton_convert_req_index_to_global_index,
 )
+from rtp_llm.models_py.triton_kernels.sparse_mla.fused_qk_rope_cat_cache_mla import (
+    fused_qk_rope_cat_cache_mla,
+)
+from rtp_llm.models_py.utils.fuse_config import fuse_kernels_enabled
 from rtp_llm.ops import (
     AttentionConfigs,
     FMHAConfig,
@@ -53,10 +57,10 @@ from rtp_llm.utils.model_weight import W
 
 from .rope_emb_new import NewMlaRotaryEmbeddingOp
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _topk_2d(topk_indices: torch.Tensor) -> torch.Tensor:
     """[T, topk] or [T, h_kv, topk] → [T, topk]. MLA always has h_kv=1."""
@@ -71,6 +75,7 @@ def _as_uint8(kv: torch.Tensor) -> torch.Tensor:
 # ---------------------------------------------------------------------------
 # BF16 sparse MLA operator
 # ---------------------------------------------------------------------------
+
 
 class SparseMlaOp(object):
     """BF16 sparse MLA: flash_mla_sparse_fwd on a flat KV buffer."""
@@ -93,7 +98,7 @@ class SparseMlaOp(object):
         self.qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
         self.token_per_block = page_size
         self.softmax_extra_scale = softmax_extra_scale
-        self.scale = (self.qk_head_dim ** -0.5) * softmax_extra_scale
+        self.scale = (self.qk_head_dim**-0.5) * softmax_extra_scale
         self.top_k = top_k
 
         # Filled by plan() each forward
@@ -157,6 +162,7 @@ class SparseMlaOp(object):
 # FP8 sparse MLA operator (gather path + with_kvcache fallback)
 # ---------------------------------------------------------------------------
 
+
 class SparseMlaFp8DecodeParams(object):
     """Wraps the (sched_meta, num_splits) returned by get_mla_metadata.
 
@@ -175,9 +181,10 @@ class _GatherWorkspace:
 
     Allocated per-forward in plan(); reused across all layers in that forward.
     """
-    fused_kv: torch.Tensor          # [total_kv_len, kv_lora_rank + rope], bf16
+
+    fused_kv: torch.Tensor  # [total_kv_len, kv_lora_rank + rope], bf16
     workspace_starts: torch.Tensor  # [batch_size], int32, indptr[:-1]
-    seq_lens: torch.Tensor          # [batch_size], int32, indptr diff
+    seq_lens: torch.Tensor  # [batch_size], int32, indptr diff
     total_kv_len: int
     batch_size: int
 
@@ -256,7 +263,7 @@ class SparseMlaFp8Op(SparseMlaOp):
     ) -> torch.Tensor:
         if self._gather is not None:
             return self._forward_gather(q, kv, topk_indices)
-        return self._forward_with_kvcache(q, kv, topk_indices)
+        return self._forward_with_kvcache(q, kv, topk_indices, layer_id)
 
     def _forward_gather(
         self,
@@ -266,7 +273,11 @@ class SparseMlaFp8Op(SparseMlaOp):
     ) -> torch.Tensor:
         """gather + flash_mla_sparse_fwd (prefill fast path)."""
         ws = self._gather
-        assert ws is not None and self.mla_params is not None and self.block_table is not None
+        assert (
+            ws is not None
+            and self.mla_params is not None
+            and self.block_table is not None
+        )
 
         # Cache as uint8, drop head dim if present → [num_blocks, block_size, 656]
         src = _as_uint8(kv_cache_fp8)
@@ -302,9 +313,13 @@ class SparseMlaFp8Op(SparseMlaOp):
         q: torch.Tensor,
         kv: torch.Tensor,
         topk_indices: torch.Tensor,
+        layer_id: int = 0,
     ) -> torch.Tensor:
         """flash_mla_with_kvcache directly on FP8 paged cache."""
         assert self._sched_meta is not None
+        if layer_id == 0:
+            self._sched_meta.tile_scheduler_metadata = None
+            self._sched_meta.num_splits = None
         # Cache layout: (num_blocks, block_size, num_heads_k=1, dim)
         kv_cache = _as_uint8(kv)
         if kv_cache.ndim == 3:
@@ -333,6 +348,7 @@ class SparseMlaFp8Op(SparseMlaOp):
 # ---------------------------------------------------------------------------
 # MLA layer wrapper: RoPE + KV write + input/output BMM + the operator above
 # ---------------------------------------------------------------------------
+
 
 class SparseMlaImpl(MlaImplBase):
     """Wraps a SparseMlaOp / SparseMlaFp8Op with rope, KV write, and absorbed BMMs."""
@@ -379,7 +395,9 @@ class SparseMlaImpl(MlaImplBase):
         elif attn_configs.kv_cache_dtype == KvCacheDataType.FP8:
             op_cls = SparseMlaFp8Op
         else:
-            raise ValueError(f"Unsupported kv_cache_dtype: {attn_configs.kv_cache_dtype}")
+            raise ValueError(
+                f"Unsupported kv_cache_dtype: {attn_configs.kv_cache_dtype}"
+            )
         self.fmha_impl: SparseMlaOp = op_cls(
             attn_configs.head_num,
             attn_configs.kv_lora_rank,
@@ -398,6 +416,16 @@ class SparseMlaImpl(MlaImplBase):
         self.kv_cache_write_op = MlaKVCacheWriteOp(
             kv_cache_dtype=attn_configs.kv_cache_dtype,
         )
+
+        self._fuse_qk_rope_cat_cache_mla = fuse_kernels_enabled()
+        self._kv_cache_type = (
+            "fp8_ds_mla"
+            if attn_configs.kv_cache_dtype == KvCacheDataType.FP8
+            else "auto"
+        )
+        self._cos_sin_cache = cos_sin_cache
+        self._is_neox_style = attn_configs.rope_config.is_neox_style
+
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
 
         # create_params is a hook subclasses (e.g. SparseMlaCpImpl) override
@@ -428,12 +456,17 @@ class SparseMlaImpl(MlaImplBase):
         return (
             attn_configs.is_sparse
             and attn_configs.use_mla
-            and attn_configs.kv_cache_dtype in (KvCacheDataType.BASE, KvCacheDataType.FP8)
+            and attn_configs.kv_cache_dtype
+            in (KvCacheDataType.BASE, KvCacheDataType.FP8)
         )
 
-    def prepare(self, attn_inputs: PyAttentionInputs, forbid_realloc: bool = False) -> None:
+    def prepare(
+        self, attn_inputs: PyAttentionInputs, forbid_realloc: bool = False
+    ) -> None:
         """Refresh per-forward params + plan. forbid_realloc=True under cuda graph replay."""
-        self.fmha_params.fill_params(attn_inputs, self.seq_size_per_block, forbid_realloc)
+        self.fmha_params.fill_params(
+            attn_inputs, self.seq_size_per_block, forbid_realloc
+        )
         self.fmha_impl.plan(
             self.fmha_params,
             attn_inputs.kv_cache_kernel_block_id_device,
@@ -456,8 +489,11 @@ class SparseMlaImpl(MlaImplBase):
         ).split([self.nope_head_dim, self.rope_head_dim], dim=-1)
 
         q_transformed = torch.empty(
-            q_nope.shape[0], self.num_heads, self.kv_lora_rank + self.rope_head_dim,
-            dtype=q.dtype, device=q.device,
+            q_nope.shape[0],
+            self.num_heads,
+            self.kv_lora_rank + self.rope_head_dim,
+            dtype=q.dtype,
+            device=q.device,
         )
         strided_slice_copy_(q_transformed, q_pe, self.kv_lora_rank)
 
@@ -477,8 +513,11 @@ class SparseMlaImpl(MlaImplBase):
         """
         v_weight = self.weights[layer_id][W.mla_vc]
         output = torch.empty(
-            attn_output.shape[0], self.num_heads, v_weight.shape[-1],
-            dtype=attn_output.dtype, device=attn_output.device,
+            attn_output.shape[0],
+            self.num_heads,
+            v_weight.shape[-1],
+            dtype=attn_output.dtype,
+            device=attn_output.device,
         )
         torch.bmm(attn_output.transpose(0, 1), v_weight, out=output.transpose(0, 1))
         return output
@@ -499,9 +538,26 @@ class SparseMlaImpl(MlaImplBase):
         assert topk_indices is not None and kv_cache is not None
 
         # 1. RoPE on q_pe and k_pe; write KV to cache + optional store
-        q_pe = q[:, :, self.nope_head_dim:]
-        self.rope_impl.forward(q_pe, k_pe, self.rope_params)
-        self.kv_cache_write_op.forward(compressed_kv, k_pe, kv_cache, self.rope_params)
+        q_pe = q[:, :, self.nope_head_dim :]
+        if self._fuse_qk_rope_cat_cache_mla and kv_cache is not None:
+            fused_qk_rope_cat_cache_mla(
+                q=q,
+                compressed_kv=compressed_kv,
+                k_pe=k_pe,
+                kv_cache=kv_cache.kv_cache_base,
+                slot_mapping=self.rope_params.slot_mapping,
+                positions=self.rope_params.positions_d,
+                cos_sin_cache=self._cos_sin_cache,
+                kv_lora_rank=self.kv_lora_rank,
+                rope_head_dim=self.rope_head_dim,
+                is_neox_style=self._is_neox_style,
+                kv_cache_type=self._kv_cache_type,
+            )
+        else:
+            self.rope_impl.forward(q_pe, k_pe, self.rope_params)
+            self.kv_cache_write_op.forward(
+                compressed_kv, k_pe, kv_cache, self.rope_params
+            )
         common.apply_write_cache_store(
             self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
@@ -513,7 +569,9 @@ class SparseMlaImpl(MlaImplBase):
         if self.fmha_impl.expects_paged_kv:
             kv_input = kv_cache.kv_cache_base
         else:
-            kv_input = kv_cache.kv_cache_base.view(-1, 1, kv_cache.kv_cache_base.size(-1))
+            kv_input = kv_cache.kv_cache_base.view(
+                -1, 1, kv_cache.kv_cache_base.size(-1)
+            )
         attn_output = self.fmha_impl.forward(
             q_transformed, kv_input, topk_indices, layer_id=layer_id
         )

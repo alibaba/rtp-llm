@@ -138,7 +138,6 @@ class IndexerOp(nn.Module):
                 interleave=not self.is_neox_style,
             )
 
-        # Apply Hadamard transform (activation rotation)
         query = _rotate_activation(q)
         key = _rotate_activation(k)
 
@@ -205,7 +204,6 @@ class IndexerOp(nn.Module):
         # Extract position embedding part (exclude rope_head_dim from the end)
         k_pe = k[:, : self.index_head_dim - self.rope_head_dim]
 
-        # Apply RoPE (same as vllm indexer rope)
         if self.cos_sin_cache is not None:
             rope._apply_rope_pos_ids_cos_sin_cache(
                 q=k_pe.unsqueeze(1),
@@ -217,7 +215,6 @@ class IndexerOp(nn.Module):
                 interleave=not self.is_neox_style,
             )
 
-        # Apply Hadamard transform (activation rotation)
         key = _rotate_activation(k)
 
         return key
@@ -293,6 +290,94 @@ class IndexerOp(nn.Module):
         )
 
         return q_fp8, q_scale
+
+    def quant_q_only(
+        self,
+        query: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Quantize query only (no key caching). Used by dual-stream path."""
+        query_flat = query.view(-1, self.index_head_dim)
+        q_fp8, q_scale = sgl_per_token_group_quant_fp8(
+            query_flat,
+            group_size=self.block_size,
+            eps=1e-4,
+            column_major_scales=True,
+            scale_tma_aligned=True,
+            scale_ue8m0=(self.scale_fmt == "ue8m0"),
+        )
+        q_fp8 = q_fp8.view(-1, self.index_n_heads, self.index_head_dim)
+        if self.scale_fmt == "ue8m0":
+            q_scale = _unpack_ue8m0_scale(q_scale)
+        q_scale = q_scale.view(-1, self.index_n_heads, 1)
+        return q_fp8, q_scale
+
+    def fused_rope_quant_q(
+        self,
+        q: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Fused RoPE + Hadamard + FP8 quantization for Q.
+
+        Replaces separate apply_rope + rotate_activation + quant_q_only
+        with a single Triton kernel.
+
+        Args:
+            q: Pre-RoPE query [num_tokens, index_n_heads, index_head_dim]
+            positions: Position IDs [num_tokens]
+
+        Returns:
+            (q_fp8, q_scale) same as quant_q_only output.
+        """
+        from rtp_llm.models_py.triton_kernels.sparse_mla.fused_q_rope_quant import (
+            fused_q_rope_quant,
+        )
+
+        # RoPE is applied to first (index_head_dim - rope_head_dim) dims
+        actual_rot_dim = self.index_head_dim - self.rope_head_dim
+        return fused_q_rope_quant(
+            q,
+            positions,
+            self.cos_sin_cache,
+            self.index_n_heads,
+            self.index_head_dim,
+            actual_rot_dim,
+            is_neox_style=self.is_neox_style,
+        )
+
+    def fused_rope_quant_qk(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Fused QK: K(RoPE+Hadamard→bf16) + Q(RoPE+Hadamard+FP8) in one kernel.
+
+        Args:
+            q: Pre-RoPE query [num_tokens, index_n_heads, index_head_dim]
+            k: Pre-RoPE key [num_tokens, index_head_dim] (after k_norm)
+            positions: Position IDs [num_tokens]
+
+        Returns:
+            (q_fp8, q_scale, k_out):
+                q_fp8: [num_tokens, index_n_heads, index_head_dim] float8_e4m3fn
+                q_scale: [num_tokens, index_n_heads, 1] float32
+                k_out: [num_tokens, index_head_dim] bf16
+        """
+        from rtp_llm.models_py.triton_kernels.sparse_mla.fused_q_rope_quant import (
+            fused_qk_rope_quant,
+        )
+
+        actual_rot_dim = self.index_head_dim - self.rope_head_dim
+        return fused_qk_rope_quant(
+            q,
+            k,
+            positions,
+            self.cos_sin_cache,
+            self.index_n_heads,
+            self.index_head_dim,
+            actual_rot_dim,
+            is_neox_style=self.is_neox_style,
+        )
 
     def quant_q_k_cp(
         self,

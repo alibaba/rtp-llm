@@ -5,6 +5,7 @@ from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
+from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
@@ -22,7 +23,6 @@ from rtp_llm.models_py.modules import (
     SelectTopk,
     SigmoidGateScaleAdd,
 )
-from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -359,14 +359,6 @@ class GenericMoeDecoderLayer(nn.Module):
         kv_cache: Optional[LayerKVCache] = None,
     ) -> DecodeLayerOutput:
         if self._fuse_input_norm_quant and hidden_states.dim() == 2:
-            # Use dual-output (bf16 + fp8): the fp8 stream feeds fused_qkv_a_proj,
-            # but the bf16 normed output MUST replace ``hidden_states`` so that
-            # downstream consumers (Indexer reads hidden_states for its own
-            # weights_proj/wk path) see the normed value, matching baseline
-            # ``hidden_states = self.input_layernorm(hidden_states, residual)``.
-            # Previously this branch passed the un-normed original hidden_states
-            # to self_attn, which made the indexer read a totally wrong feature
-            # vector (~3.98e-1 max_abs vs baseline) and cascaded across layers.
             bf16_hs, fp8_hs, scale = fused_add_rmsnorm_fp8_quant_with_bf16_output(
                 hidden_states,
                 residual,
@@ -414,7 +406,6 @@ class GenericMoeDecoderLayer(nn.Module):
             )
             hidden_states = self.mlp(hidden_states)
 
-        # 返回 mlp_output 和 residual，让下一层的 input_layernorm 来 fuse 最后的 add
         return DecodeLayerOutput(hidden_states, residual)
 
 
