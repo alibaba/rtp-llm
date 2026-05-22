@@ -11,13 +11,6 @@ import java.time.Duration;
 
 public class WebClientFeClient implements FeClient {
 
-    /**
-     * Hard cap on a single FE response body. Protects same-JVM heap (Master's worker-status map
-     * shares the heap) from a runaway / misbehaving FE returning a multi-MB response_batch.
-     * 16 MiB is generous for K=5 chunks of normal completions; tune via DispatchConfig if needed.
-     */
-    public static final int DEFAULT_MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
-
     private final WebClient webClient;
     private final int timeoutMs;
 
@@ -29,15 +22,10 @@ public class WebClientFeClient implements FeClient {
         this.timeoutMs = timeoutMs;
     }
 
-    /** Convenience for tests/older call-sites; uses {@link #DEFAULT_MAX_RESPONSE_BYTES}. */
-    public WebClientFeClient(WebClient.Builder builder, int timeoutMs) {
-        this(builder, timeoutMs, DEFAULT_MAX_RESPONSE_BYTES);
-    }
-
     @Override
     public Mono<JsonNode> postBatch(String feBaseUrl, ObjectNode body) {
         return webClient.post()
-                .uri(feBaseUrl + "/batch_infer")
+                .uri(feBaseUrl + DispatchProtocol.PATH_BATCH_INFER)
                 .contentType(MediaType.APPLICATION_JSON)
                 .bodyValue(body)
                 .retrieve()

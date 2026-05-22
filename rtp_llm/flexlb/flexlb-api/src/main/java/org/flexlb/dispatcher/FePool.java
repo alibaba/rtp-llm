@@ -21,24 +21,16 @@ public class FePool {
         this.source = source;
     }
 
-    public FePool(List<String> addresses) {
-        if (addresses == null || addresses.isEmpty()) {
-            throw new IllegalArgumentException("FE pool must not be empty");
-        }
-        List<String> snapshot = List.copyOf(addresses);
-        this.source = () -> snapshot;
-    }
-
+    /**
+     * Returns the next FE base URL in round-robin order.
+     *
+     * @throws IllegalStateException if the current snapshot has no endpoints.
+     */
     public String next() {
         List<String> snapshot = source.get();
         if (snapshot == null || snapshot.isEmpty()) {
             throw new IllegalStateException("no FE endpoints available");
         }
         return snapshot.get(Math.floorMod(cursor.getAndIncrement(), snapshot.size()));
-    }
-
-    public int size() {
-        List<String> snapshot = source.get();
-        return snapshot == null ? 0 : snapshot.size();
     }
 }

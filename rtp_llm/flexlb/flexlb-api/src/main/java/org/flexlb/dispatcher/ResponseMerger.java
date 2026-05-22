@@ -20,13 +20,11 @@ public final class ResponseMerger {
     public static MergedResponse merge(List<SubBatchResult> subResults, ObjectMapper mapper) {
         ArrayNode merged = mapper.createArrayNode();
         int succeededChunks = 0;
-        int succeededPrompts = 0;
         for (SubBatchResult sub : subResults) {
-            JsonNode arr = sub.isSuccess() ? sub.response().get("response_batch") : null;
+            JsonNode arr = sub.isSuccess() ? sub.response().get(DispatchProtocol.FIELD_RESPONSE_BATCH) : null;
             if (arr != null && arr.isArray() && arr.size() == sub.chunkSize()) {
                 merged.addAll((ArrayNode) arr);
                 succeededChunks++;
-                succeededPrompts += sub.chunkSize();
             } else {
                 for (int i = 0; i < sub.chunkSize(); i++) {
                     merged.add(placeholder(mapper));
@@ -34,8 +32,8 @@ public final class ResponseMerger {
             }
         }
         ObjectNode body = mapper.createObjectNode();
-        body.set("response_batch", merged);
-        return new MergedResponse(body, succeededChunks, subResults.size(), succeededPrompts);
+        body.set(DispatchProtocol.FIELD_RESPONSE_BATCH, merged);
+        return new MergedResponse(body, succeededChunks, subResults.size());
     }
 
     private static ObjectNode placeholder(ObjectMapper mapper) {

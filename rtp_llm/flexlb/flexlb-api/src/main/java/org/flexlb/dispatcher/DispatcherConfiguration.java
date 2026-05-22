@@ -1,6 +1,7 @@
 package org.flexlb.dispatcher;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import lombok.extern.slf4j.Slf4j;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.discovery.ServiceDiscovery;
 import org.springframework.context.annotation.Bean;
@@ -19,6 +20,7 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
+@Slf4j
 @Configuration
 public class DispatcherConfiguration {
 
@@ -33,23 +35,17 @@ public class DispatcherConfiguration {
      * null when disabled — Spring will not register a null bean, so disabled deployments add
      * nothing to the route table.
      *
-     * <p>FE pool membership is sourced from {@link ServiceDiscovery} (the same mechanism master
-     * uses for its BE pool): the bean injected here is the auto-configured one — NoOp in
-     * open-source / dev (reads {@code DOMAIN_ADDRESS:<id>} env var) and VipServer-backed in the
-     * internal profile (push subscription). The dispatcher subscribes via {@code listen()} and
-     * mirrors every host-change callback into an {@link AtomicReference} that {@link FePool}
-     * reads on every {@code next()}.
+     * <p>FE pool membership is sourced from {@link ServiceDiscovery}: the bean injected here is
+     * the auto-configured one — NoOp in open-source / dev (reads {@code DOMAIN_ADDRESS:<id>} env
+     * var) and VipServer-backed in the internal profile (push subscription). The dispatcher
+     * subscribes via {@code listen()} and mirrors every host-change callback into an
+     * {@link AtomicReference} that {@link FePool} reads on every {@code next()}.
      *
-     * <p>Same-JVM resource isolation (decision F4 / F4b):
-     * <ul>
-     *   <li>Reuses the auto-configured Spring {@link ObjectMapper} bean — no second copy with
-     *       drifting Jackson config.</li>
-     *   <li>Uses a dedicated, named {@link ConnectionProvider} ("dispatcher-fe") so dispatcher
-     *       fanout cannot starve {@code GeneralHttpNettyService}'s connections to the master
-     *       (which the Master's slave→master forward uses).</li>
-     *   <li>{@link WebClientFeClient} caps the per-response in-memory size at
-     *       {@code feMaxResponseBytes} so a misbehaving FE cannot swamp the shared heap.</li>
-     * </ul>
+     * <p>The dispatcher shares its JVM, listener, and heap with the master. Three things keep the
+     * two from starving each other: the shared Jackson {@link ObjectMapper} bean (no drifting
+     * config), a dedicated named {@link ConnectionProvider} ("dispatcher-fe") so fanout cannot
+     * starve {@code GeneralHttpNettyService}'s master connections, and the per-response byte cap
+     * in {@link WebClientFeClient} so a misbehaving FE cannot swamp the shared heap.
      */
     @Bean
     @Order(Ordered.LOWEST_PRECEDENCE)
@@ -71,13 +67,19 @@ public class DispatcherConfiguration {
         String serviceId = cfg.getFePoolServiceId();
         AtomicReference<List<String>> fePoolUrls = new AtomicReference<>(
                 toUrls(serviceDiscovery.getHosts(serviceId)));
-        serviceDiscovery.listen(serviceId, hosts -> fePoolUrls.set(toUrls(hosts)));
+        serviceDiscovery.listen(serviceId, hosts -> {
+            List<String> urls = toUrls(hosts);
+            fePoolUrls.set(urls);
+            log.info("dispatcher FE pool updated: serviceId={}, hosts={}", serviceId, urls.size());
+        });
         FePool pool = new FePool(fePoolUrls::get);
 
         FeClient feClient = new WebClientFeClient(feBuilder, cfg.getFeRequestTimeoutMs(), cfg.getFeMaxResponseBytes());
         FanoutService fanout = new FanoutService(feClient, pool, mapper, cfg.getSubBatchSize());
         PassthroughClient passthrough = new WebClientPassthroughClient(feBuilder.build(), pool, cfg.getFeRequestTimeoutMs());
         DispatchHandler handler = new DispatchHandler(fanout, passthrough, mapper);
+        log.info("dispatcher enabled: fePoolServiceId={}, seedHosts={}, subBatchSize={}",
+                serviceId, fePoolUrls.get().size(), cfg.getSubBatchSize());
         return new DispatchRouter(handler).routes();
     }
 

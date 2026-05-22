@@ -1,10 +1,14 @@
 package org.flexlb.dispatcher;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import okhttp3.mockwebserver.MockResponse;
+import okhttp3.mockwebserver.MockWebServer;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.discovery.ServiceDiscovery;
 import org.flexlb.discovery.ServiceHostListener;
 import org.junit.jupiter.api.Test;
+import org.springframework.http.MediaType;
+import org.springframework.test.web.reactive.server.WebTestClient;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.reactive.function.server.RouterFunction;
 import org.springframework.web.reactive.function.server.ServerResponse;
@@ -49,6 +53,45 @@ class DispatcherConfigurationTest {
 
         assertEquals(1, discovery.getHostsCalls);
         assertNotNull(discovery.registeredListener, "dispatcher must subscribe to host changes");
+    }
+
+    @Test
+    void listenerCallbackRedirectsTrafficToFreshHosts() throws Exception {
+        MockWebServer staleFe = new MockWebServer();
+        MockWebServer freshFe = new MockWebServer();
+        staleFe.start();
+        freshFe.start();
+        try {
+            freshFe.enqueue(new MockResponse()
+                    .setHeader("Content-Type", "application/json")
+                    .setBody("{\"response_batch\":[{\"response\":\"ok\"}]}"));
+
+            DispatchConfig cfg = DispatchConfig.fromJson(
+                    "{\"enabled\":true,\"subBatchSize\":1,\"fePoolServiceId\":\"com.rtp_llm.fe\"}");
+            StubServiceDiscovery discovery = new StubServiceDiscovery("com.rtp_llm.fe",
+                    WorkerHost.of(staleFe.getHostName(), staleFe.getPort()));
+            DispatcherConfiguration conf = new DispatcherConfiguration();
+            RouterFunction<ServerResponse> routes = conf.dispatcherRoutes(
+                    cfg, new ObjectMapper(), WebClient.builder(), discovery);
+
+            // Simulate a service-discovery push: the pool must immediately observe the new host
+            // on subsequent next() calls; the request below must land on freshFe, not staleFe.
+            discovery.registeredListener.onHostsChanged(
+                    List.of(WorkerHost.of(freshFe.getHostName(), freshFe.getPort())));
+
+            WebTestClient client = WebTestClient.bindToRouterFunction(routes).build();
+            client.post().uri("/batch_infer")
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .bodyValue("{\"prompt_batch\":[\"x\"]}")
+                    .exchange()
+                    .expectStatus().isOk();
+
+            assertEquals(0, staleFe.getRequestCount(), "stale host must not be hit after pool swap");
+            assertEquals(1, freshFe.getRequestCount(), "fresh host must receive the post-swap request");
+        } finally {
+            staleFe.shutdown();
+            freshFe.shutdown();
+        }
     }
 
     /** Stub that returns a controllable host list for one expected service id. */

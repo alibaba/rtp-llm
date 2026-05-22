@@ -35,7 +35,7 @@ class ResponseMergerTest {
         assertEquals("a", arr.get(0).get("response").asText());
         assertEquals("c", arr.get(2).get("response").asText());
         assertEquals(2, m.succeededChunks());
-        assertEquals(3, m.succeededPrompts());
+        assertEquals(2, m.totalChunks());
     }
 
     @Test

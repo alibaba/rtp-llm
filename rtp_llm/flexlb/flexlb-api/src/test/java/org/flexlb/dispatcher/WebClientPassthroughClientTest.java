@@ -39,7 +39,7 @@ class WebClientPassthroughClientTest {
                 .setBody("{\"status\":\"ok\"}")
                 .setHeader("Content-Type", "application/json"));
         String base = "http://" + server.getHostName() + ":" + server.getPort();
-        FePool pool = new FePool(List.of(base));
+        FePool pool = new FePool(() -> List.of(base));
         WebClientPassthroughClient client =
                 new WebClientPassthroughClient(WebClient.builder().build(), pool, 3000);
 
@@ -50,12 +50,50 @@ class WebClientPassthroughClientTest {
 
         Mono<ServerResponse> resp = client.forward(request);
         StepVerifier.create(resp)
-                .assertNext(r -> {
-                    assert r.statusCode().value() == 200;
-                })
+                .assertNext(r -> Assertions.assertEquals(200, r.statusCode().value()))
                 .verifyComplete();
 
         RecordedRequest rec = server.takeRequest();
         Assertions.assertEquals("/worker_status", rec.getPath());
+    }
+
+    @Test
+    void emptyFePoolBecomesErrorMono() {
+        FePool pool = new FePool(List::of);
+        WebClientPassthroughClient client =
+                new WebClientPassthroughClient(WebClient.builder().build(), pool, 3000);
+
+        MockServerRequest request = MockServerRequest.builder()
+                .method(HttpMethod.GET)
+                .uri(URI.create("/worker_status"))
+                .body(Flux.empty());
+
+        StepVerifier.create(client.forward(request))
+                .expectError(IllegalStateException.class)
+                .verify();
+    }
+
+    @Test
+    void preservesQueryStringOnForward() throws Exception {
+        server.enqueue(new MockResponse()
+                .setBody("{\"status\":\"ok\"}")
+                .setHeader("Content-Type", "application/json"));
+        String base = "http://" + server.getHostName() + ":" + server.getPort();
+        FePool pool = new FePool(() -> List.of(base));
+        WebClientPassthroughClient client =
+                new WebClientPassthroughClient(WebClient.builder().build(), pool, 3000);
+
+        MockServerRequest request = MockServerRequest.builder()
+                .method(HttpMethod.GET)
+                .uri(URI.create("/worker_status?role=PREFILL&verbose=1"))
+                .body(Flux.empty());
+
+        Mono<ServerResponse> resp = client.forward(request);
+        StepVerifier.create(resp)
+                .assertNext(r -> Assertions.assertEquals(200, r.statusCode().value()))
+                .verifyComplete();
+
+        RecordedRequest rec = server.takeRequest();
+        Assertions.assertEquals("/worker_status?role=PREFILL&verbose=1", rec.getPath());
     }
 }

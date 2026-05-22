@@ -14,20 +14,15 @@ class FePoolTest {
 
     @Test
     void roundRobinsAcrossAddresses() {
-        FePool pool = new FePool(List.of("http://a:8088", "http://b:8088"));
+        FePool pool = new FePool(() -> List.of("http://a:8088", "http://b:8088"));
         assertEquals("http://a:8088", pool.next());
         assertEquals("http://b:8088", pool.next());
         assertEquals("http://a:8088", pool.next());
     }
 
     @Test
-    void reportsSize() {
-        assertEquals(2, new FePool(List.of("http://a:8088", "http://b:8088")).size());
-    }
-
-    @Test
-    void rejectsEmptyStaticPool() {
-        assertThrows(IllegalArgumentException.class, () -> new FePool(List.of()));
+    void rejectsNullSupplier() {
+        assertThrows(IllegalArgumentException.class, () -> new FePool(null));
     }
 
     @Test
@@ -47,7 +42,6 @@ class FePoolTest {
         assertTrue(second.startsWith("http://b") || second.startsWith("http://c"),
                 "post-swap call returned stale address: " + second);
         assertNotEquals(first, second, "two consecutive next() on a 2-host snapshot must alternate");
-        assertEquals(2, pool.size());
     }
 
     @Test

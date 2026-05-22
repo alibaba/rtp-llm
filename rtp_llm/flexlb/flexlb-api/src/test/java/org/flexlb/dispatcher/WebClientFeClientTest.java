@@ -34,16 +34,15 @@ class WebClientFeClientTest {
         server.enqueue(new MockResponse()
                 .setHeader("Content-Type", "application/json")
                 .setBody("{\"response_batch\":[{\"response\":\"ok\"}]}"));
-        WebClientFeClient client = new WebClientFeClient(WebClient.builder(), 3000);
+        WebClientFeClient client = new WebClientFeClient(WebClient.builder(), 3000, 16 * 1024 * 1024);
 
         ObjectNode body = mapper.createObjectNode();
         body.putArray("prompt_batch").add("hi");
 
         String base = "http://" + server.getHostName() + ":" + server.getPort();
         StepVerifier.create(client.postBatch(base, body))
-                .assertNext(n -> {
-                    assert n.get("response_batch").get(0).get("response").asText().equals("ok");
-                })
+                .assertNext(n -> Assertions.assertEquals("ok",
+                        n.get("response_batch").get(0).get("response").asText()))
                 .verifyComplete();
 
         RecordedRequest rec = server.takeRequest();
