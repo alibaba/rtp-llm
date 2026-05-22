@@ -20,6 +20,8 @@ class ProcessManager:
         self.first_dead_time = 0
         self.shutdown_timeout = shutdown_timeout
         self.monitor_interval = monitor_interval
+        self.process_groups: Dict[str, List[Process]] = {}
+        self.shutdown_group_order: List[str] = []
 
         # Health check related attributes
         self.health_check_processes: List[Process] = []
@@ -42,32 +44,101 @@ class ProcessManager:
         )
         self.shutdown_requested = True
 
-    def set_processes(self, processes: List[Process]):
+    def _register_group(self, shutdown_group: str):
+        if shutdown_group not in self.process_groups:
+            self.process_groups[shutdown_group] = []
+        if shutdown_group not in self.shutdown_group_order:
+            self.shutdown_group_order.append(shutdown_group)
+
+    def set_processes(
+        self, processes: List[Process], shutdown_group: str = "default"
+    ):
         """Set the processes to manage (replaces existing list)"""
         self.processes = processes if processes else []
+        self.process_groups = {}
+        self.shutdown_group_order = []
+        self._register_group(shutdown_group)
+        self.process_groups[shutdown_group] = self.processes.copy()
 
-    def add_process(self, process: Process):
+    def add_process(self, process: Process, shutdown_group: str = "default"):
         """Add a single process to manage"""
         if process:
             self.processes.append(process)
+            self._register_group(shutdown_group)
+            self.process_groups[shutdown_group].append(process)
 
-    def add_processes(self, processes: List[Process]):
+    def add_processes(
+        self, processes: List[Process], shutdown_group: str = "default"
+    ):
         """Add multiple processes to manage"""
         if processes:
             self.processes.extend(processes)
+            self._register_group(shutdown_group)
+            self.process_groups[shutdown_group].extend(processes)
 
-    def _terminate_processes(self):
+    def _terminate_process_list(self, processes: List[Process], group_name: str):
+        for proc in processes:
+            if proc.is_alive():
+                logging.info(
+                    f"Sending SIGTERM to {group_name} process {proc.name} pid={proc.pid}"
+                )
+                proc.terminate()
+            else:
+                logging.info(f"proc.name [{proc.name}] pid[{proc.pid}] is not alived")
+
+    def _wait_process_list_exit(
+        self, processes: List[Process], timeout: Optional[int], group_name: str
+    ):
+        if not processes:
+            return
+        deadline = None if timeout is None or timeout < 0 else time.time() + timeout
+        while any(proc.is_alive() for proc in processes):
+            alive = [proc.pid for proc in processes if proc.is_alive()]
+            if deadline is not None and time.time() >= deadline:
+                logging.warning(
+                    f"Timed out waiting for {group_name} process group to exit, alive={alive}"
+                )
+                return
+            logging.info(
+                f"Waiting for {group_name} process group to exit, alive={alive}"
+            )
+            time.sleep(self.monitor_interval)
+
+    def _terminate_processes(self, staged: bool = True):
         """Terminate all managed processes"""
         if self.terminated:
             return
 
         logging.info("Shutdown requested, terminating processes...")
-        for proc in self.processes:
-            if proc.is_alive():
-                logging.info(f"Sending SIGTERM to process {proc.pid}")
-                proc.terminate()
-            else:
-                logging.info(f"proc.name [{proc.name}] pid[{proc.pid}] is not alived")
+        if staged and self.process_groups:
+            deferred_groups = {"backend"}
+            for group_name in self.shutdown_group_order:
+                if group_name in deferred_groups:
+                    continue
+                group_processes = self.process_groups.get(group_name, [])
+                self._terminate_process_list(group_processes, group_name)
+                if group_name in {"frontend", "ingress"}:
+                    self._wait_process_list_exit(
+                        group_processes, self.shutdown_timeout, group_name
+                    )
+                    if (
+                        self.shutdown_timeout != -1
+                        and any(proc.is_alive() for proc in group_processes)
+                    ):
+                        logging.warning(
+                            f"{group_name} process group did not drain before timeout; "
+                            "force killing it before backend shutdown"
+                        )
+                        self._force_kill_process_list(group_processes)
+                        self._wait_process_list_exit(group_processes, 5, group_name)
+            for group_name in self.shutdown_group_order:
+                if group_name not in deferred_groups:
+                    continue
+                self._terminate_process_list(
+                    self.process_groups.get(group_name, []), group_name
+                )
+        else:
+            self._terminate_process_list(self.processes, "managed")
         self.terminated = True
         self.first_dead_time = time.time()
 
@@ -76,7 +147,10 @@ class ProcessManager:
         if timeout is None:
             timeout = self.shutdown_timeout
         logging.warning(f"Graceful shutdown timeout ({timeout}s), force killing...")
-        for proc in self.processes:
+        self._force_kill_process_list(self.processes)
+
+    def _force_kill_process_list(self, processes: List[Process]):
+        for proc in processes:
             if proc.is_alive():
                 logging.warning(f"Force killing process {proc.pid}")
                 try:
@@ -130,7 +204,7 @@ class ProcessManager:
         while self._is_any_process_alive():
             # Check shutdown signal
             if self.shutdown_requested and not self.terminated:
-                self._terminate_processes()
+                self._terminate_processes(staged=True)
 
             # Check sub-process status
             elif not self._is_all_processes_alive() and not self.terminated:
@@ -141,7 +215,7 @@ class ProcessManager:
                 if self.first_dead_time == 0:
                     self.first_dead_time = time.time()
                 logging.error("Some processes died unexpectedly, terminating all...")
-                self._terminate_processes()
+                self._terminate_processes(staged=False)
 
             # User-requested infinite graceful shutdown should not apply after
             # a child dies unexpectedly; failure cleanup must remain bounded.
