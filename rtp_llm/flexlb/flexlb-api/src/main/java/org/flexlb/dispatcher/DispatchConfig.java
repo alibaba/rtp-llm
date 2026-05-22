@@ -4,8 +4,6 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
-import java.util.List;
-
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class DispatchConfig {
 
@@ -23,8 +21,8 @@ public class DispatchConfig {
     @JsonProperty("feRequestTimeoutMs")
     private int feRequestTimeoutMs = 3000;
 
-    @JsonProperty("fePoolAddresses")
-    private List<String> fePoolAddresses = List.of();
+    @JsonProperty("fePoolServiceId")
+    private String fePoolServiceId = "";
 
     @JsonProperty("feMaxConnections")
     private int feMaxConnections = 200;
@@ -51,8 +49,8 @@ public class DispatchConfig {
     }
 
     private void validate() {
-        if (enabled && fePoolAddresses.isEmpty()) {
-            throw new IllegalArgumentException("DISPATCH_CONFIG.enabled=true requires fePoolAddresses");
+        if (enabled && (fePoolServiceId == null || fePoolServiceId.isBlank())) {
+            throw new IllegalArgumentException("DISPATCH_CONFIG.enabled=true requires fePoolServiceId");
         }
         if (subBatchSize < 1) {
             throw new IllegalArgumentException("subBatchSize must be >= 1");
@@ -75,8 +73,8 @@ public class DispatchConfig {
         return feRequestTimeoutMs;
     }
 
-    public List<String> getFePoolAddresses() {
-        return fePoolAddresses;
+    public String getFePoolServiceId() {
+        return fePoolServiceId;
     }
 
     public int getFeMaxConnections() {

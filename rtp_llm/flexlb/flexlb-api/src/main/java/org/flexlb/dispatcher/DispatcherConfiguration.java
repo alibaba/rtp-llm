@@ -1,6 +1,8 @@
 package org.flexlb.dispatcher;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.flexlb.dao.master.WorkerHost;
+import org.flexlb.discovery.NoOpServiceDiscovery;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.Ordered;
@@ -13,6 +15,7 @@ import reactor.netty.http.client.HttpClient;
 import reactor.netty.resources.ConnectionProvider;
 
 import java.time.Duration;
+import java.util.stream.Collectors;
 
 @Configuration
 public class DispatcherConfiguration {
@@ -54,11 +57,19 @@ public class DispatcherConfiguration {
                 .build();
         WebClient.Builder feBuilder = webClientBuilder.clone()
                 .clientConnector(new ReactorClientHttpConnector(HttpClient.create(feConnections)));
-        FePool pool = new FePool(cfg.getFePoolAddresses());
+        String serviceId = cfg.getFePoolServiceId();
+        FePool pool = new FePool(() -> NoOpServiceDiscovery.getInstance().getHosts(serviceId)
+                .stream()
+                .map(DispatcherConfiguration::toUrl)
+                .collect(Collectors.toList()));
         FeClient feClient = new WebClientFeClient(feBuilder, cfg.getFeRequestTimeoutMs(), cfg.getFeMaxResponseBytes());
         FanoutService fanout = new FanoutService(feClient, pool, mapper, cfg.getSubBatchSize());
         PassthroughClient passthrough = new WebClientPassthroughClient(feBuilder.build(), pool, cfg.getFeRequestTimeoutMs());
         DispatchHandler handler = new DispatchHandler(fanout, passthrough, mapper);
         return new DispatchRouter(handler).routes();
+    }
+
+    private static String toUrl(WorkerHost host) {
+        return "http://" + host.getIpPort();
     }
 }

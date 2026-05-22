@@ -13,12 +13,12 @@ class DispatchConfigTest {
     void parsesFullJson() {
         DispatchConfig c = DispatchConfig.fromJson(
                 "{\"enabled\":true,\"dispatchPort\":7005,\"subBatchSize\":5,"
-                        + "\"feRequestTimeoutMs\":3000,\"fePoolAddresses\":[\"http://a:8088\"]}");
+                        + "\"feRequestTimeoutMs\":3000,\"fePoolServiceId\":\"com.rtp_llm.fe\"}");
         assertTrue(c.isEnabled());
         assertEquals(7005, c.getDispatchPort());
         assertEquals(5, c.getSubBatchSize());
         assertEquals(3000, c.getFeRequestTimeoutMs());
-        assertEquals(1, c.getFePoolAddresses().size());
+        assertEquals("com.rtp_llm.fe", c.getFePoolServiceId());
     }
 
     @Test
@@ -28,9 +28,15 @@ class DispatchConfigTest {
     }
 
     @Test
-    void rejectsEnabledWithoutFePool() {
+    void rejectsEnabledWithoutFePoolServiceId() {
         assertThrows(IllegalArgumentException.class,
                 () -> DispatchConfig.fromJson("{\"enabled\":true,\"dispatchPort\":7005}"));
+    }
+
+    @Test
+    void rejectsEnabledWithBlankFePoolServiceId() {
+        assertThrows(IllegalArgumentException.class,
+                () -> DispatchConfig.fromJson("{\"enabled\":true,\"fePoolServiceId\":\"  \"}"));
     }
 
     @Test
@@ -44,7 +50,7 @@ class DispatchConfigTest {
     @Test
     void sameJvmIsolationKnobsOverridableViaJson() {
         DispatchConfig c = DispatchConfig.fromJson(
-                "{\"enabled\":true,\"fePoolAddresses\":[\"http://a:8088\"],"
+                "{\"enabled\":true,\"fePoolServiceId\":\"com.rtp_llm.fe\","
                         + "\"feMaxConnections\":64,\"feMaxPendingAcquire\":256,"
                         + "\"feMaxResponseBytes\":1048576}");
         assertEquals(64, c.getFeMaxConnections());

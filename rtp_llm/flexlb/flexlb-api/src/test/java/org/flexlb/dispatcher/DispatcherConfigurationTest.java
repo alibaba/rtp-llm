@@ -15,7 +15,7 @@ class DispatcherConfigurationTest {
     void buildsRouterWhenEnabled() {
         DispatchConfig cfg = DispatchConfig.fromJson(
                 "{\"enabled\":true,\"subBatchSize\":5,"
-                        + "\"feRequestTimeoutMs\":3000,\"fePoolAddresses\":[\"http://a:8088\"]}");
+                        + "\"feRequestTimeoutMs\":3000,\"fePoolServiceId\":\"com.rtp_llm.fe\"}");
         DispatcherConfiguration conf = new DispatcherConfiguration();
         RouterFunction<ServerResponse> routes =
                 conf.dispatcherRoutes(cfg, new ObjectMapper(), WebClient.builder());
