@@ -329,13 +329,18 @@ def _apply_request_overrides(
     environment. DashScope-serving still sends per-request thinking, timeout,
     and priority controls; those explicit controls must win before enqueue.
     """
-    request_max_think = other.max_new_think_tokens
+    request_max_think = sampling.max_new_think_tokens
     if request_max_think is None:
-        request_max_think = sampling.max_new_think_tokens
+        request_max_think = other.max_new_think_tokens
     if request_max_think is not None:
         max_think = int(request_max_think)
         generate_config.max_thinking_tokens = _INT32_MAX if max_think < 0 else max_think
-    if other.enable_thinking is False or other.max_new_think_tokens == 0:
+    # Only the selected budget disables thinking; ``max_think_length`` may
+    # intentionally override a zero ``max_new_think_tokens`` alias.
+    disable_by_budget = (
+        other.max_new_think_tokens is not None and request_max_think == 0
+    )
+    if other.enable_thinking is False or disable_by_budget:
         generate_config.in_think_mode = False
         generate_config.max_thinking_tokens = 0
         if hasattr(generate_config, "thinking"):
@@ -720,10 +725,21 @@ async def iter_real_model_stream_infer(
                 phase2_generate_input,
             )
             phase2_stream = await backend_visitor.enqueue(phase2_generate_input)
+            phase2_cumulative_sent_ids: list[int] = []
 
             def _build_phase2_response(
                 resp_go: Any,
             ) -> predict_v2_pb2.ModelStreamInferResponse:
+                resp_out = resp_go.generate_outputs[0]
+                resp_ids = _token_ids_list_from_generate_output(resp_out)
+                phase2_cumulative_sent_ids.extend(resp_ids)
+                finish_reason_override = None
+                if (
+                    resp_out.finished
+                    and max_new_tokens > 0
+                    and len(phase2_cumulative_sent_ids) >= max_new_tokens
+                ):
+                    finish_reason_override = FINISH_REASON_LENGTH
                 return build_stream_response_from_generate_outputs(
                     dash_sc_request_id=f"{request.id}{_PHASE2_SUFFIX}",
                     model_name=request.model_name,
@@ -736,6 +752,7 @@ async def iter_real_model_stream_infer(
                     eos_token_id=eos_id,
                     max_token_id=max_id,
                     generate_think_token_num=generate_think_token_num,
+                    finish_reason_override=finish_reason_override,
                     _request_shape=request_shape,
                 )
 
