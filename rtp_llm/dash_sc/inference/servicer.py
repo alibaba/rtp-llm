@@ -14,6 +14,7 @@ coroutine automatically.
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Callable, Iterator, Optional
@@ -49,6 +50,12 @@ _EMPTY_THINK_BODY = "\n"
 # for production; this constant exists so unit tests don't have to repeat it).
 _DEFAULT_TERMINATE_TOKEN_ID = 1
 _INT32_MAX = 2_147_483_647
+_DEBUG_SCORE_TOKEN_IDS_PARAM = "dash_sc_debug_score_token_ids"
+_DEBUG_SCORE_LABEL_PARAM = "dash_sc_debug_score_label"
+_DEBUG_SCORE_TOKEN_LABELS = {
+    128821: "<think>",
+    128822: "</think>",
+}
 
 
 def stream_log_tag(
@@ -358,6 +365,109 @@ def _apply_request_overrides(
         generate_config.traffic_reject_priority = int(other.traffic_reject_priority)
 
 
+def _debug_score_token_ids_from_request(request: Any) -> list[int]:
+    if _DEBUG_SCORE_TOKEN_IDS_PARAM not in request.parameters:
+        return []
+    param = request.parameters[_DEBUG_SCORE_TOKEN_IDS_PARAM]
+    values: Any = []
+    if param.HasField("int64_param"):
+        values = [param.int64_param]
+    elif param.HasField("string_param") and param.string_param:
+        try:
+            values = json.loads(param.string_param)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            values = [param.string_param]
+    elif param.HasField("bool_param"):
+        return []
+    if not isinstance(values, list):
+        values = [values]
+    result: list[int] = []
+    for value in values:
+        try:
+            token_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if token_id >= 0 and token_id not in result:
+            result.append(token_id)
+    return result
+
+
+def _debug_score_label_from_request(request: Any) -> str:
+    if _DEBUG_SCORE_LABEL_PARAM not in request.parameters:
+        return ""
+    param = request.parameters[_DEBUG_SCORE_LABEL_PARAM]
+    if param.HasField("string_param"):
+        return str(param.string_param)
+    if param.HasField("int64_param"):
+        return str(param.int64_param)
+    if param.HasField("bool_param"):
+        return str(param.bool_param)
+    return ""
+
+
+def _log_debug_token_scores(
+    *,
+    tag: str,
+    case_label: str,
+    chunk_idx: int,
+    generated_ids: list[int],
+    logits: Any,
+    token_ids: list[int],
+) -> None:
+    if not token_ids or logits is None or not generated_ids:
+        return
+    if not isinstance(logits, torch.Tensor) or logits.numel() == 0:
+        return
+    rows = logits.detach()
+    if rows.dim() == 1:
+        rows = rows.unsqueeze(0)
+    elif rows.dim() == 3 and rows.size(0) == 1:
+        rows = rows.squeeze(0)
+    elif rows.dim() != 2:
+        logging.info(
+            "[DashScDebugTokenScore] [%s] case=%s chunk=%s skip logits_dim=%s",
+            tag,
+            case_label,
+            chunk_idx,
+            rows.dim(),
+        )
+        return
+    rows = rows.float().cpu()
+    vocab_size = rows.size(-1)
+    for step, sampled_token in enumerate(generated_ids):
+        row = rows[min(step, rows.size(0) - 1)]
+        probs = torch.softmax(row, dim=-1)
+        for token_id in token_ids:
+            label = _DEBUG_SCORE_TOKEN_LABELS.get(token_id, str(token_id))
+            if token_id >= vocab_size:
+                logging.info(
+                    "[DashScDebugTokenScore] [%s] case=%s chunk=%s step=%s "
+                    "sampled_token=%s token=%s token_id=%s out_of_vocab=%s",
+                    tag,
+                    case_label,
+                    chunk_idx,
+                    step,
+                    sampled_token,
+                    label,
+                    token_id,
+                    vocab_size,
+                )
+                continue
+            logging.info(
+                "[DashScDebugTokenScore] [%s] case=%s chunk=%s step=%s "
+                "sampled_token=%s token=%s token_id=%s logit=%.8g prob=%.8g",
+                tag,
+                case_label,
+                chunk_idx,
+                step,
+                sampled_token,
+                label,
+                token_id,
+                float(row[token_id].item()),
+                float(probs[token_id].item()),
+            )
+
+
 # ----------------------------------------------------------------------------
 # Real inference bridge: async backend enqueue -> aio gRPC async generator
 # ----------------------------------------------------------------------------
@@ -448,6 +558,10 @@ async def iter_real_model_stream_infer(
         ):
             generate_config.end_think_token_ids = list(runtime.eos_tokens)
         _apply_request_overrides(generate_config, sampling, other, runtime)
+        debug_score_token_ids = _debug_score_token_ids_from_request(request)
+        debug_score_label = _debug_score_label_from_request(request)
+        if debug_score_token_ids:
+            generate_config.return_logits = True
         if extra_stop_word_ids:
             existing = generate_config.stop_words_list
             if existing:
@@ -509,6 +623,14 @@ async def iter_real_model_stream_infer(
                 raise ValueError("empty generate_outputs in backend chunk")
             out_py = go.generate_outputs[0]
             generated_ids = _token_ids_list_from_generate_output(out_py)
+            _log_debug_token_scores(
+                tag=tag,
+                case_label=debug_score_label,
+                chunk_idx=chunk_idx,
+                generated_ids=generated_ids,
+                logits=getattr(out_py, "logits", None),
+                token_ids=debug_score_token_ids,
+            )
             if not generated_ids and not out_py.finished:
                 response = build_stream_response_from_generate_outputs(
                     dash_sc_request_id=request.id,
@@ -795,11 +917,21 @@ async def iter_real_model_stream_infer(
                             )
                     yield _build_phase2_response(buf_go)
 
+            phase2_chunk_idx = 0
             async for go in phase2_stream:
+                phase2_chunk_idx += 1
                 if not go.generate_outputs:
                     raise ValueError("empty generate_outputs in phase-2 backend chunk")
                 out_py = go.generate_outputs[0]
                 generated_ids = _token_ids_list_from_generate_output(out_py)
+                _log_debug_token_scores(
+                    tag=phase2_tag,
+                    case_label=debug_score_label,
+                    chunk_idx=phase2_chunk_idx,
+                    generated_ids=generated_ids,
+                    logits=getattr(out_py, "logits", None),
+                    token_ids=debug_score_token_ids,
+                )
                 if not generated_ids and not out_py.finished:
                     continue
 
