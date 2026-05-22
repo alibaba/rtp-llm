@@ -134,7 +134,7 @@ cc_library(
     deps = [
         ":fmha_v2_impl_src_header",
     ],
-    copts = copts() + ["-DEXCLUDE_SM_100=1"],
+    copts = copts() + ["-DEXCLUDE_SM_100=1", "-DEXCLUDE_SM_120=1"],
     visibility = ["//visibility:public"],
     alwayslink = True,
 )
@@ -156,6 +156,6 @@ cc_library(
         ],
         "//conditions:default": [],
     }),
-    copts = cuda_copts() + ["-DEXCLUDE_SM_100=1"],
+    copts = cuda_copts() + ["-DEXCLUDE_SM_100=1", "-DEXCLUDE_SM_120=1"],
     visibility = ["//visibility:public"],
 )
