@@ -204,6 +204,20 @@ class DeepseekV4RendererTest(TestCase):
 
         self.assertEqual(rendered.rendered_prompt, expected)
 
+    def test_zero_max_thinking_tokens_disables_thinking_render(self):
+        messages = [{"role": "user", "content": "Hello"}]
+        request = ChatCompletionRequest(
+            messages=messages,
+            extra_configs=GenerateConfig(max_thinking_tokens=0),
+            enable_thinking=True,
+            chat_template_kwargs={"thinking_mode": "thinking"},
+        )
+
+        rendered = self.renderer.render_chat(request)
+        expected = _rtp_expected_prompt(self.encoding, messages, thinking_mode="chat")
+
+        self.assertEqual(rendered.rendered_prompt, expected)
+
     def test_thinking_mode_kwarg_still_overrides_encoding_config(self):
         messages = [{"role": "user", "content": "Hello"}]
         request = ChatCompletionRequest(

@@ -18,6 +18,7 @@ from rtp_llm.dash_sc.codec import (
     parse_sampling_params,
     prepend_to_generated_ids_tensor,
 )
+from rtp_llm.dash_sc.client import build_model_infer_request
 from rtp_llm.dash_sc.inference.servicer import stream_log_tag
 from rtp_llm.dash_sc.proto import predict_v2_pb2
 from rtp_llm.utils.base_model_datatypes import AuxInfo, GenerateOutput, GenerateOutputs
@@ -170,6 +171,23 @@ class DashScGrpcRequestTest(TestCase):
         # raw value stored; to_generate_config maps negative → INT32_MAX
         self.assertEqual(sp.max_new_think_tokens, -1)
         self.assertEqual(sp.to_generate_config().max_thinking_tokens, 2_147_483_647)
+
+    def test_build_request_writes_thinking_controls(self) -> None:
+        req = build_model_infer_request(
+            request_id="test",
+            model_name="default",
+            input_ids=[1, 2],
+            sampling=SamplingParams(max_new_tokens=3, max_new_think_tokens=7),
+            enable_thinking=False,
+        )
+
+        ids, sp, op = parse_dash_sc_grpc_request(req)
+
+        self.assertEqual(ids, [1, 2])
+        self.assertIsNotNone(sp)
+        self.assertIsNotNone(op)
+        self.assertEqual(sp.max_new_think_tokens, 7)
+        self.assertIs(op.enable_thinking, False)
 
     def test_parse_sampling_legacy_top_k_parameter(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
