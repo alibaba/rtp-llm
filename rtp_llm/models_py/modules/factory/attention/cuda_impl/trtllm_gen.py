@@ -6,7 +6,7 @@ import triton
 import triton.language as tl
 
 from rtp_llm.models_py.modules.factory.attention import common
-from rtp_llm.models_py.modules.factory.attention.cuda_impl.utils import is_sm_100
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.utils import is_blackwell
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.ops import AttentionConfigs, FMHAType, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
@@ -332,7 +332,7 @@ class FlashInferTRTLLMPrefillOp(object):
 
     def support(self, attention_inputs: PyAttentionInputs):
         return (
-            is_sm_100()
+            is_blackwell()
             and attention_inputs.is_prefill
             and attention_inputs.kv_cache_kernel_block_id_device is not None
         )
@@ -438,7 +438,7 @@ class FlashInferTRTLLMDecodeOp(object):
         release_trt_workspace_buffer(self.workspace_buffer)
 
     def support(self, attention_inputs: PyAttentionInputs):
-        if not is_sm_100():
+        if not is_blackwell():
             return False
         # Note: this max q length is used for mtp decode verification.
         decode_kernel_max_q_len = 11
