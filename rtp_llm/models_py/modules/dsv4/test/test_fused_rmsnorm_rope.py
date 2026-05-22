@@ -149,6 +149,40 @@ def test_output_buffer_and_inplace_correctness():
     assert d_inplace.max() <= 2e-2
 
 
+def test_prefill_attention_inplace_matches_out_of_place():
+    """Attention prefill Q/KV shapes: inplace must not change numeric output."""
+    torch.manual_seed(33)
+    T, H, q_dim, kv_dim, rd, eps = 257, 64, 128, 512, 64, 1e-6
+    freqs = _build_freqs_prefill(T, rd)
+
+    q = torch.randn(1, T, H, q_dim, dtype=torch.bfloat16, device="cuda") * 0.5
+    q_ref = fused_rmsnorm_rope(q, None, freqs, rd, eps=eps, group_heads=8)
+    q_inplace = q.clone()
+    q_cand = fused_rmsnorm_rope(
+        q_inplace, None, freqs, rd, eps=eps, group_heads=8, inplace=True
+    )
+    assert q_cand.data_ptr() == q_inplace.data_ptr()
+    q_diff = (q_cand.float() - q_ref.float()).abs()
+    print(
+        f"  [PREFILL-Q INP] cand vs out-of-place max={q_diff.max():.4e} "
+        f"mean={q_diff.mean():.4e}"
+    )
+    assert q_diff.max() <= 2e-2
+
+    kv = torch.randn(1, T, kv_dim, dtype=torch.bfloat16, device="cuda") * 0.5
+    weight = torch.randn(kv_dim, dtype=torch.bfloat16, device="cuda").abs() + 0.5
+    kv_ref = fused_rmsnorm_rope(kv, weight, freqs, rd, eps=eps)
+    kv_inplace = kv.clone()
+    kv_cand = fused_rmsnorm_rope(kv_inplace, weight, freqs, rd, eps=eps, inplace=True)
+    assert kv_cand.data_ptr() == kv_inplace.data_ptr()
+    kv_diff = (kv_cand.float() - kv_ref.float()).abs()
+    print(
+        f"  [PREFILL-KV INP] cand vs out-of-place max={kv_diff.max():.4e} "
+        f"mean={kv_diff.mean():.4e}"
+    )
+    assert kv_diff.max() <= 5e-2
+
+
 def test_group_heads_correctness():
     """Grouped-head Q path shares one freq row across multiple heads."""
     torch.manual_seed(4)
@@ -310,6 +344,7 @@ if __name__ == "__main__":
     test_q_correctness()
     test_kv_correctness()
     test_output_buffer_and_inplace_correctness()
+    test_prefill_attention_inplace_matches_out_of_place()
     test_group_heads_correctness()
     test_inverse_rope_path_correctness()
     print("\n== Benchmark (T sweep: covers decode + prefill paths) ==")

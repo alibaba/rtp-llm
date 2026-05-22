@@ -51,6 +51,7 @@ from rtp_llm.models_py.modules.dsv4.cp import (
 from rtp_llm.models_py.modules.dsv4.fp8.compressor import CompressorFP8, CompressorMeta
 from rtp_llm.models_py.modules.dsv4.fp8.indexer import IndexerFP8
 from rtp_llm.models_py.modules.dsv4.qlinear import _fp8_dequant_to_fp32
+from rtp_llm.models_py.utils.memory import dispose_tensor
 from rtp_llm.models_py.modules.dsv4.rope import apply_rotary_emb, precompute_freqs_cis
 from rtp_llm.models_py.modules.factory.linear import LinearFactory
 from rtp_llm.ops.compute_ops import KVCacheRegionName, rtp_llm_ops
@@ -2570,8 +2571,8 @@ class AttentionFP8(nn.Module):
             # uses only the returned attention output for output_proj).
             # The NamedTuple ref keeps it alive otherwise, costing ~1.1 GiB
             # of peak overlap with the sparse-attn workspace at 1M ctx.
-            del kv_bf16
-            qkv.kv_full.untyped_storage().resize_(0)
+            dispose_tensor(kv_bf16)
+            dispose_tensor(qkv.kv_full)
 
         # combine_topk: HCA uses precomputed dense arange(N_max); CSA uses
         # the runtime indexer output (raw compressed-pool offsets in [0, N_b)).
@@ -2672,6 +2673,7 @@ class AttentionFP8(nn.Module):
                     attn_sink=self.attn_sink,
                     topk_length=combined_lens,
                 )
+            dispose_tensor(qkv.q)
             return o3.unsqueeze(0)
 
         # Preallocate the full output buffer and write each chunk directly
@@ -2699,7 +2701,8 @@ class AttentionFP8(nn.Module):
                         device=o_part.device,
                     )
                 o3[start:end].copy_(o_part)
-                del o_part
+                dispose_tensor(o_part)
+        dispose_tensor(qkv.q)
         assert o3 is not None
         return o3.unsqueeze(0)
 
@@ -4168,8 +4171,8 @@ class AttentionFP8(nn.Module):
         # keep both alive through _prefill_output_proj and into the next
         # layer's _prefill_compute_qkv Q alloc. ~13.7 GiB each at 1M ctx
         # under MTP draft + CP=8.
-        qkv.q.untyped_storage().resize_(0)
-        qkv.kv_full.untyped_storage().resize_(0)
+        dispose_tensor(qkv.q)
+        dispose_tensor(qkv.kv_full)
         return o3.unsqueeze(0)
 
     def _attn_fp8_swa_via_concat(
@@ -4267,8 +4270,8 @@ class AttentionFP8(nn.Module):
         # overlay nothing else reads it on this path; the NamedTuple ref
         # would otherwise keep it alive through the sparse-attn workspace
         # alloc — ~1.1 GiB peak overlap at 1M ctx.
-        del kv_bf16
-        qkv.kv_full.untyped_storage().resize_(0)
+        dispose_tensor(kv_bf16)
+        dispose_tensor(qkv.kv_full)
 
         # 3. flash_mla_sparse_fwd over the [B*M] flat KV view.
         with record_function_range("dsv4.fp8.attn.swa_concat.flash_mla"):
