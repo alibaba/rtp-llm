@@ -249,6 +249,28 @@ class OpenaiGenerateConfigTest(TestCase):
             **kwargs,
         )
 
+    def _extract_openai_generation_config(
+        self,
+        request: ChatCompletionRequest,
+        generate_env_config: Optional[GenerateEnvConfig] = None,
+    ):
+        model_config = ModelConfig()
+        model_config.generate_env_config = generate_env_config or GenerateEnvConfig()
+        model_config.render_config = RenderConfig()
+        model_config.special_tokens = SpecialTokens()
+        model_config.max_seq_len = 1024
+        model_config.template_type = None
+        model_config.model_name = ""
+        model_config.ckpt_path = ""
+
+        openai_endpoint = OpenaiEndpoint(
+            model_config=model_config,
+            misc_config=PyMiscellaneousConfig(),
+            vit_config=VitConfig(),
+            tokenizer=self.tokenizer,
+            backend_rpc_server_visitor=None,
+        )
+        return openai_endpoint._extract_generation_config(request)
 
     def _generate_config_with_stop_word(
         self,
@@ -307,6 +329,43 @@ class OpenaiGenerateConfigTest(TestCase):
             request.extra_configs.stop_words_list = req_config_stop_word_list
 
         return openai_endpoint._extract_generation_config(request)
+
+    def test_extra_configs_max_thinking_tokens_zero_disables_thinking(self):
+        generate_env_config = GenerateEnvConfig()
+        generate_env_config.think_mode = 1
+        generate_env_config.think_end_token_id = 102
+        request = ChatCompletionRequest(
+            messages=[],
+            extra_configs=GenerateConfig(max_thinking_tokens=0),
+            enable_thinking=True,
+        )
+
+        self.assertTrue(request.disable_thinking())
+        config = self._extract_openai_generation_config(
+            request, generate_env_config
+        )
+
+        self.assertFalse(config.in_think_mode)
+        self.assertEqual(config.max_thinking_tokens, 0)
+        self.assertEqual(config.end_think_token_ids, [102])
+
+    def test_disable_thinking_zeroes_backend_thinking_budget(self):
+        generate_env_config = GenerateEnvConfig()
+        generate_env_config.think_mode = 1
+        generate_env_config.think_end_token_id = 102
+        request = ChatCompletionRequest(
+            messages=[],
+            extra_configs=GenerateConfig(max_thinking_tokens=16),
+            enable_thinking=False,
+        )
+
+        config = self._extract_openai_generation_config(
+            request, generate_env_config
+        )
+
+        self.assertFalse(config.in_think_mode)
+        self.assertEqual(config.max_thinking_tokens, 0)
+        self.assertEqual(config.end_think_token_ids, [102])
 
     def assert_config_stop_word(
         self,
