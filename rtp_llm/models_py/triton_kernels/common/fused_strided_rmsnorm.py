@@ -410,11 +410,7 @@ def fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output(
         assert (H // group_size) % 4 == 0, "UE8M0 requires num_groups divisible by 4"
 
     block_n = triton.next_power_of_2(H)
-    # Single-program (T=1) under-utilises SMs vs flashinfer.rmsnorm + sgl
-    # (which split work across num_groups programs each). Fall back to
-    # baseline at T=1 to keep parity with the unfused path on perf, with
-    # bit-exact output (same flashinfer + sgl(eps=1e-4) ops).
-    if block_n > MAX_INREG_H or x.stride(-1) != 1 or T <= 1:
+    if block_n > MAX_INREG_H or x.stride(-1) != 1:
         return _baseline_strided_rmsnorm_fp8_quant_with_bf16_output(
             x, weight, eps, group_size, scale_ue8m0
         )

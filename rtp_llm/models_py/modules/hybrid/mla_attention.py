@@ -197,6 +197,8 @@ class MlaAttention(nn.Module):
     ) -> torch.Tensor:
         input_shape = hidden_states.shape[:-1]
         q_c = None
+        q_c_fp8 = None
+        q_c_scale = None
         if self.q_lora_rank > 0:
             if x_fp8 is not None and x_scale is not None:
                 fused_qkv = self.fused_qkv_a_proj(x_fp8, input_scales=x_scale)
@@ -266,7 +268,15 @@ class MlaAttention(nn.Module):
             compressed_kv = self.kv_a_layernorm(compressed_kv.contiguous())
 
         topk_indices = self._run_sparse_indexer(
-            hidden_states, q_c, q_view, kv_cache, fmha_impl, x_fp8, x_scale, q_c_fp8, q_c_scale
+            hidden_states,
+            q_c,
+            q_view,
+            kv_cache,
+            fmha_impl,
+            x_fp8,
+            x_scale,
+            q_c_fp8,
+            q_c_scale,
         )
         attn_output = fmha_impl.forward(
             q_view, compressed_kv, k_pe, kv_cache, self.layer_idx, topk_indices
