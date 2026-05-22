@@ -1,6 +1,13 @@
 """CLI entry point for the ci_gate package.
 
 Usage: python3 -m ci_gate <subcommand> [args...]
+
+# Debug environment logging for CI troubleshooting
+import os as _os
+print(f"[ci-gate-debug] runner_date={_os.popen("date 2>\/dev/null").read().strip()}")
+print(f"[ci-gate-debug] runner_user={_os.popen("whoami 2>\/dev/null").read().strip()}")
+print(f"[ci-gate-debug] runner_host={_os.popen("hostname 2>\/dev/null").read().strip()}")
+
 """
 
 import argparse
