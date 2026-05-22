@@ -158,25 +158,15 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
         return;
     }
 
-    // Legacy host path uses data_ptr pointer arithmetic; sync D2H when callers
-    // pass device tensors. TODO(async): consume device tensors directly.
-    auto to_cpu_sync = [](const torch::Tensor& t) -> torch::Tensor {
-        if (!t.defined() || t.device().is_cpu()) {
-            return t;
-        }
-        return t.cpu();
-    };
+    // Wait for the CUDA event before reading pinned-host metadata.
+    // The event was recorded on the main stream AFTER both the async D2H
+    // copies (metadata) and KV cache writes were enqueued, so blocking
+    // here guarantees all pinned buffers are populated.
+    if (cache_store_inputs.pre_created_event) {
+        cache_store_inputs.pre_created_event->synchronize();
+    }
 
-    CacheStoreInputs local             = cache_store_inputs;
-    local.host_kv_cache_offset         = to_cpu_sync(local.host_kv_cache_offset);
-    local.prefix_lengths_host          = to_cpu_sync(local.prefix_lengths_host);
-    local.input_lengths_host           = to_cpu_sync(local.input_lengths_host);
-    local.kv_cache_layer_to_group_host = to_cpu_sync(local.kv_cache_layer_to_group_host);
-    local.kv_cache_group_types_host    = to_cpu_sync(local.kv_cache_group_types_host);
-    local.request_id                   = to_cpu_sync(local.request_id);
-    local.request_pd_separation        = to_cpu_sync(local.request_pd_separation);
-
-    auto& param = local;
+    const auto& param = cache_store_inputs;
 
     RTP_LLM_CHECK_WITH_INFO(param.host_kv_cache_offset.defined(), "failed to get host_kv_cache_offset");
     const int32_t* offset_addr          = nullptr;

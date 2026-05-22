@@ -421,6 +421,24 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
             auto ck        = inputs.cache_keys.contiguous();
             cache_keys_vec = std::vector<int64_t>(ck.data_ptr<int64_t>(), ck.data_ptr<int64_t>() + ck.numel());
         }
+        // Async-copy device length tensors to pinned host for cache store.
+        // The copy is enqueued on the current CUDA stream; the event recorded
+        // later in WriteCacheStoreOp guarantees completion before consumption.
+        auto async_to_pinned_host = [this](const torch::Tensor& t) -> torch::Tensor {
+            if (!t.defined()) {
+                return t;
+            }
+            if (t.device().is_cpu()) {
+                return t.is_pinned() ? t : t.pin_memory();
+            }
+            auto host = torch::empty(t.sizes(), t.options().device(torch::kCPU).pinned_memory(true));
+            host.copy_(t, /*non_blocking=*/true);
+            buffer_holder_.hold_host(host);
+            return host;
+        };
+        auto input_lengths_host  = async_to_pinned_host(inputs.input_lengths);
+        auto prefix_lengths_host = async_to_pinned_host(inputs.prefix_lengths);
+
         torch::Tensor kv_cache_layer_to_group =
             inputs.kv_cache_layer_to_group.defined() ? inputs.kv_cache_layer_to_group : torch::Tensor();
         torch::Tensor kv_cache_layer_region_to_group = layerRegionToGroupTensor(kv_cache_layer_layout_);
@@ -434,6 +452,8 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
                                               kv_cache_layer_region_to_group,
                                               kv_cache_group_types,
                                               transVectorToString(cache_keys_vec),
+                                              input_lengths_host,
+                                              prefix_lengths_host,
                                               inputs.seq_size_per_block,
                                               inputs.kv_block_stride_bytes,
                                               inputs.kv_scale_stride_bytes,
