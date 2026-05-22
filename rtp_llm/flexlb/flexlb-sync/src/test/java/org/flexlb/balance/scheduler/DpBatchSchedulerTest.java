@@ -102,8 +102,8 @@ class DpBatchSchedulerTest {
         when(configService.loadBalanceConfig()).thenReturn(cfg);
 
         // Default planner: turn the drained chunk into a single PrefillBatch
-        // landing on PREFILL/DECODE. Per-batch ranks are positional via
-        // RoundRobinAssign downstream.
+        // landing on PREFILL/DECODE. Per-batch ranks are filled via the cursor
+        // in RoundRobinAssign downstream.
         when(planner.plan(any(), any(DispatchContext.class))).thenAnswer(inv -> {
             List<QueuedRequest> drained = inv.getArgument(0);
             DispatchContext ctx = inv.getArgument(1);
@@ -156,7 +156,7 @@ class DpBatchSchedulerTest {
         List<Integer> ranks = IntStream.range(0, 4)
                 .map(i -> sent.getInputs(i).getDpRank().getValue())
                 .boxed().collect(Collectors.toList());
-        assertEquals(List.of(0, 1, 2, 3), ranks, "RoundRobinAssign is positional within a batch");
+        assertEquals(List.of(0, 1, 2, 3), ranks, "fresh cursor + dp=batchSize=4 fills 0..3 in order");
     }
 
     @Test

@@ -40,14 +40,64 @@ class RoundRobinAssignTest {
     }
 
     @Test
-    void each_batch_starts_at_rank_zero() {
-        // Positional: every batch starts fresh at slot 0. Cross-batch fairness is
-        // enforced one level up by GroupSelector (inside DispatchPlanner) choosing
-        // the pod; within a chosen pod, slot positions are deterministic.
-        assertEquals(List.of(0, 1, 2, 3), ranksOf(rr.assign(makeBatch(4, 4))));
-        assertEquals(List.of(0, 1, 2, 3), ranksOf(rr.assign(makeBatch(4, 4))));
+    void successive_size_one_batches_rotate_through_all_ranks() {
+        // Low-QPS regime: window timer flushes one request at a time. The cursor
+        // must rotate so rank=0 does not monopolise traffic.
+        int dpSize = 4;
+        List<Integer> ranks = new ArrayList<>();
+        for (int i = 0; i < 8; i++) {
+            ranks.addAll(ranksOf(rr.assign(makeBatch(1, dpSize))));
+        }
+        assertEquals(List.of(0, 1, 2, 3, 0, 1, 2, 3), ranks);
+    }
+
+    @Test
+    void partial_batch_advances_cursor_for_next_batch() {
+        // size=2 then size=4 at dp=4: cursor is at 2 when the second batch starts.
         assertEquals(List.of(0, 1), ranksOf(rr.assign(makeBatch(2, 4))));
-        assertEquals(List.of(0, 1, 2, 3), ranksOf(rr.assign(makeBatch(4, 4))));
+        assertEquals(List.of(2, 3, 0, 1), ranksOf(rr.assign(makeBatch(4, 4))));
+        assertEquals(List.of(2), ranksOf(rr.assign(makeBatch(1, 4))));
+        assertEquals(List.of(3, 0, 1), ranksOf(rr.assign(makeBatch(3, 4))));
+    }
+
+    @Test
+    void concurrent_size_one_batches_yield_uniform_distribution() throws Exception {
+        // Stress the production-critical low-QPS path: every batch carries one
+        // request, so only the cursor (not within-batch positional fill) keeps
+        // ranks balanced. AtomicInteger.getAndAdd guarantees each call grabs a
+        // unique cursor value, so total per-rank counts must be exactly equal.
+        int dpSize = 4;
+        int batchesPerThread = 200;
+        int threads = 8;
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        CountDownLatch start = new CountDownLatch(1);
+        List<Integer> allRanks = Collections.synchronizedList(new ArrayList<>());
+
+        for (int t = 0; t < threads; t++) {
+            pool.submit(() -> {
+                try {
+                    start.await();
+                    for (int i = 0; i < batchesPerThread; i++) {
+                        for (RankAssignment ra : rr.assign(makeBatch(1, dpSize))) {
+                            allRanks.add(ra.dpRank());
+                        }
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            });
+        }
+        start.countDown();
+        pool.shutdown();
+        assertTrue(pool.awaitTermination(5, TimeUnit.SECONDS));
+
+        assertEquals(threads * batchesPerThread, allRanks.size());
+        int[] counts = new int[dpSize];
+        allRanks.forEach(r -> counts[r]++);
+        for (int c : counts) {
+            assertEquals(threads * batchesPerThread / dpSize, c,
+                    "size=1 batches must rotate evenly across ranks under concurrency");
+        }
     }
 
     @Test
