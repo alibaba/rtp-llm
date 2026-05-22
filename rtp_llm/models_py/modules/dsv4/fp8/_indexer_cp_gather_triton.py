@@ -32,6 +32,10 @@ from rtp_llm.models_py.modules.dsv4.fp8._indexer_quant_triton import (
     INDEXER_HEAD_DIM,
     _trap_invalid_kv_access,
 )
+from rtp_llm.models_py.modules.dsv4.fp8._trap_utils import (
+    trap_invalid_kv_access_enabled,
+    validate_slot_mapping,
+)
 
 
 @triton.jit(do_not_specialize=["N"])
@@ -45,6 +49,7 @@ def _cp_gather_indexer_k_kernel(
     cache_block_size: tl.constexpr,
     cache_stride_b: tl.constexpr,
     num_cache_blocks: tl.constexpr,
+    TRAP_INVALID_KV_ACCESS: tl.constexpr,
 ):
     pid = tl.program_id(0).to(tl.int64)
     if pid >= N:
@@ -62,9 +67,9 @@ def _cp_gather_indexer_k_kernel(
     block_idx = slot // cache_block_size
     block_off = slot % cache_block_size
     if block_idx < 0:
-        _trap_invalid_kv_access()
+        _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
     if block_idx >= num_cache_blocks:
-        _trap_invalid_kv_access()
+        _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
 
     block_base = cache_ptr + block_idx * cache_stride_b
 
@@ -114,6 +119,13 @@ def gather_indexer_k_for_prefill(
 
     cache_block_size = kv_cache_packed.shape[1]
     cache_stride_b = cache_block_size * INDEXER_ENTRY_BYTES
+    validate_slot_mapping(
+        "indexer.cp_gather_k.slot_mapping",
+        slot_mapping,
+        block_size=int(cache_block_size),
+        num_blocks=int(kv_cache_packed.shape[0]),
+        negative_mode="skip_any",
+    )
 
     _cp_gather_indexer_k_kernel[(N,)](
         kv_cache_packed,
@@ -125,6 +137,7 @@ def gather_indexer_k_for_prefill(
         cache_block_size=cache_block_size,
         cache_stride_b=cache_stride_b,
         num_cache_blocks=int(kv_cache_packed.shape[0]),
+        TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
         num_warps=4,
     )
     return k_quant, k_scale
