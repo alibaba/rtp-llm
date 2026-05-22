@@ -5,6 +5,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.flexlb.service.grace.strategy.HealthCheckHooker;
 import org.flexlb.service.grace.strategy.QueryWarmerHooker;
 import org.springframework.context.annotation.Bean;
+import org.springframework.core.annotation.Order;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.server.RouterFunction;
@@ -23,6 +24,7 @@ public class HealthCheckServer {
      * Health check
      */
     @Bean
+    @Order(0)
     public RouterFunction<ServerResponse> healthCheck() {
         return route()
                 .path("/health", b -> b.GET(accept(MediaType.APPLICATION_JSON, MediaType.TEXT_PLAIN),
