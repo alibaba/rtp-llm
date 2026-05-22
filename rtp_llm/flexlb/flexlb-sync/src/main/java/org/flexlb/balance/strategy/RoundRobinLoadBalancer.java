@@ -81,7 +81,7 @@ public class RoundRobinLoadBalancer implements BatchLoadBalancer {
         List<BatchScheduleTarget> targets = new ArrayList<>(count);
         for (int i = 0; i < count; i++) {
             int idx = Math.floorMod(start + i, aliveSize);
-            targets.add(buildTarget(alive.get(idx)));
+            targets.add(buildTarget(alive.get(idx), roleType));
         }
         return targets;
     }
@@ -147,11 +147,12 @@ public class RoundRobinLoadBalancer implements BatchLoadBalancer {
         return result;
     }
 
-    private BatchScheduleTarget buildTarget(WorkerStatus worker) {
+    private BatchScheduleTarget buildTarget(WorkerStatus worker, RoleType roleType) {
         BatchScheduleTarget target = new BatchScheduleTarget();
         target.setServerIp(worker.getIp());
         target.setHttpPort(worker.getPort());
         target.setGrpcPort(CommonUtils.toGrpcPort(worker.getPort()));
+        target.setRole(roleType);
         return target;
     }
 }

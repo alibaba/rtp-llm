@@ -16,7 +16,6 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 public class Application {
 
     public static void main(String[] args) {
-        // Print startup parameters
         log.info("Application start with args: {}", (Object[]) args);
         ConfigurableApplicationContext context = SpringApplication.run(Application.class, args);
         Environment env = context.getEnvironment();
