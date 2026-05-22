@@ -152,7 +152,14 @@ class DeepSeekV4MtpModel(DeepSeekV4Model):
         assert self.h_proj is not None
 
         T, hc, dim = pre_hc.shape
-        fused = pre_hc.new_empty((T, hc, dim))
+        # In-place reuse: pre_hc is either a fresh CP index_select tensor
+        # (ContextParallelProcessorBase) or an allocBuf'd one-shot input
+        # buffer (non-CP); neither has other live readers in this step.
+        # The chunk loop reads pre_hc[start:end] into h_norm before writing
+        # back to the same slice, so the per-chunk in-place copy is safe.
+        # CUDA graph capture/replay is excluded by the caller guard.
+        # Saves ~6 GiB peak at 1M ctx (T=125k, hc*dim=7*7168 bf16).
+        fused = pre_hc
         if not self._mtp_fusion_chunk_logged:
             self._mtp_fusion_chunk_logged = True
             logging.info(

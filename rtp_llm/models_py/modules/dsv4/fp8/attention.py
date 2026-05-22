@@ -4163,6 +4163,13 @@ class AttentionFP8(nn.Module):
                 attn_sink=self.attn_sink,
                 topk_length=meta.topk_length_kv_full,
             )
+        # Mirror the via_concat release at line ~4431. flash_mla_sparse_fwd
+        # consumed q + kv_full; the PrefillQKV NamedTuple ref would otherwise
+        # keep both alive through _prefill_output_proj and into the next
+        # layer's _prefill_compute_qkv Q alloc. ~13.7 GiB each at 1M ctx
+        # under MTP draft + CP=8.
+        qkv.q.untyped_storage().resize_(0)
+        qkv.kv_full.untyped_storage().resize_(0)
         return o3.unsqueeze(0)
 
     def _attn_fp8_swa_via_concat(
