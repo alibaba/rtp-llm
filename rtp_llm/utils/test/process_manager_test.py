@@ -203,6 +203,75 @@ class TestProcessManager(unittest.TestCase):
         self.manager._terminate_processes()
         self.assertEqual(self.manager.first_dead_time, old_time)
 
+    def test_terminate_processes_stages_frontend_before_backend(self):
+        """Test frontend process group is drained before backend is signaled"""
+        events = []
+
+        class FakeProcess:
+            def __init__(self, name):
+                self.name = name
+                self.pid = len(events) + 100
+                self._alive = True
+
+            def is_alive(self):
+                return self._alive
+
+            def terminate(self):
+                events.append(self.name)
+                self._alive = False
+
+        frontend_proc = FakeProcess("frontend")
+        backend_proc = FakeProcess("backend")
+        self.manager.add_process(frontend_proc, shutdown_group="frontend")
+        self.manager.add_process(backend_proc, shutdown_group="backend")
+
+        self.manager._terminate_processes()
+
+        self.assertEqual(events, ["frontend", "backend"])
+        self.assertTrue(self.manager.terminated)
+
+    def test_timeout_force_kills_frontend_before_backend(self):
+        """Test an undrained frontend is force-killed before backend shutdown."""
+        events = []
+
+        class FakeProcess:
+            def __init__(self, name, pid):
+                self.name = name
+                self.pid = pid
+                self._alive = True
+
+            def is_alive(self):
+                return self._alive
+
+            def terminate(self):
+                events.append(f"term:{self.name}")
+                if self.name == "backend":
+                    self._alive = False
+
+        frontend_proc = FakeProcess("frontend", 1001)
+        backend_proc = FakeProcess("backend", 1002)
+        self.manager.shutdown_timeout = 0
+        self.manager.monitor_interval = 0.01
+        self.manager.add_process(frontend_proc, shutdown_group="frontend")
+        self.manager.add_process(backend_proc, shutdown_group="backend")
+
+        def fake_kill(pid, sig):
+            events.append(f"kill:{pid}:{sig}")
+            if pid == frontend_proc.pid:
+                frontend_proc._alive = False
+
+        with patch("os.kill", side_effect=fake_kill):
+            self.manager._terminate_processes()
+
+        self.assertEqual(
+            events,
+            [
+                "term:frontend",
+                f"kill:{frontend_proc.pid}:{signal.SIGKILL}",
+                "term:backend",
+            ],
+        )
+
     def test_force_kill_processes(self):
         """Test force killing processes"""
         proc = multiprocessing.Process(target=dummy_worker, args=(10,))

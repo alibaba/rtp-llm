@@ -85,6 +85,9 @@ class Pipeline(object):
             master_config=master_config,
         )
 
+    async def close(self):
+        await self.backend_rpc_server_visitor.close()
+
     def encode(self, prompt: str):
         assert self.tokenizer is not None
         return self.tokenizer.encode(prompt)

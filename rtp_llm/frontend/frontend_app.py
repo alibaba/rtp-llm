@@ -1,6 +1,8 @@
 import asyncio
 import gc
 import logging
+import os
+import signal
 import socket
 import threading
 import time
@@ -15,6 +17,7 @@ from fastapi import status
 from fastapi.middleware import Middleware
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import ORJSONResponse
+from fastapi.responses import StreamingResponse
 from typing_extensions import override
 from uvicorn import Config, Server
 from uvicorn.loops.auto import auto_loop_setup
@@ -29,31 +32,47 @@ from rtp_llm.distribute.distributed_server import (
 )
 from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
 from rtp_llm.frontend.frontend_server import FrontendServer
+from rtp_llm.frontend.shutdown_manager import FrontendShutdownManager
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.utils.grpc_client_wrapper import GrpcClientWrapper
-from rtp_llm.utils.util import AtomicCounter, async_request_server
+from rtp_llm.utils.util import async_request_server
 from rtp_llm.utils.version_info import VersionInfo
 
 # make buffer larger to avoid throw exception "RemoteProtocolError Receive buffer too long"
 MAX_INCOMPLETE_EVENT_SIZE = 1024 * 1024
 
-active_requests = AtomicCounter()
-server_shutdown = False
+STARTUP_WARMUP_HEALTH_GATE_FILE_ENV = "RTP_LLM_STARTUP_WARMUP_HEALTH_GATE_FILE"
 
 
 class GracefulShutdownServer(Server):
-    def set_server(self, frontend_server: FrontendServer):
+    def set_server(
+        self,
+        frontend_server: FrontendServer,
+        shutdown_manager: FrontendShutdownManager,
+        grpc_client: Optional[GrpcClientWrapper] = None,
+    ):
         self.frontend_server = frontend_server
+        self.shutdown_manager = shutdown_manager
+        self.grpc_client = grpc_client
+
+    @override
+    def handle_exit(self, sig: int, frame) -> None:
+        try:
+            sig_name = signal.Signals(sig).name
+        except ValueError:
+            sig_name = str(sig)
+        self.shutdown_manager.start_draining(f"signal {sig_name}")
+        super().handle_exit(sig, frame)
 
     @override
     async def shutdown(self, sockets: Optional[List[socket.socket]] = None) -> None:
-        global server_shutdown
-        server_shutdown = True
-        global active_requests
-        while active_requests.get() > 0:
-            logging.info(f"wait {active_requests.get()} requests finish for 1s")
-            await asyncio.sleep(1)
-        await super().shutdown(sockets)
+        self.shutdown_manager.start_draining("uvicorn shutdown")
+        try:
+            await super().shutdown(sockets)
+        finally:
+            await self.frontend_server.close()
+            if self.grpc_client is not None:
+                await self.grpc_client.close()
 
 
 class FrontendApp(object):
@@ -69,6 +88,7 @@ class FrontendApp(object):
             self.server_config.frontend_server_id,
             py_env_configs,
         )
+        self.shutdown_manager = FrontendShutdownManager()
         self.separated_frontend = separated_frontend
 
         # Compute all DP addresses for broadcast operations (e.g. update_scheduler_info)
@@ -146,6 +166,11 @@ class FrontendApp(object):
             loop=loop,
             log_config=get_uvicorn_logging_config(),
             timeout_keep_alive=timeout_keep_alive,
+            timeout_graceful_shutdown=(
+                None
+                if self.server_config.shutdown_timeout < 0
+                else self.server_config.shutdown_timeout
+            ),
             h11_max_incomplete_event_size=MAX_INCOMPLETE_EVENT_SIZE,
         )
         logging.info(
@@ -153,7 +178,9 @@ class FrontendApp(object):
         )
         try:
             server = GracefulShutdownServer(config)
-            server.set_server(self.frontend_server)
+            server.set_server(
+                self.frontend_server, self.shutdown_manager, self.grpc_client
+            )
             # freeze all current tracked objects to reduce gc cost
             gc.collect()
             gc.freeze()
@@ -184,6 +211,43 @@ class FrontendApp(object):
                 )
             )
 
+        def draining_response():
+            return ORJSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={
+                    "error": "frontend is draining",
+                    "reason": self.shutdown_manager.drain_reason(),
+                    "active_requests": self.shutdown_manager.active_request_count(),
+                },
+                headers={"Retry-After": "1"},
+            )
+
+        async def track_business_request(call):
+            if not self.shutdown_manager.try_begin_request():
+                return draining_response()
+            should_finish = True
+            try:
+                response = await call()
+                if isinstance(response, StreamingResponse):
+                    response.body_iterator = self._track_streaming_response(
+                        response.body_iterator
+                    )
+                    should_finish = False
+                return response
+            finally:
+                if should_finish:
+                    self.shutdown_manager.finish_request()
+
+        def check_not_draining(request: Request):
+            if request.url.path == "/liveness":
+                return
+            if self.shutdown_manager.is_draining():
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="frontend is draining",
+                    headers={"Retry-After": "1"},
+                )
+
         async def check_all_health():
             if not self.frontend_server.check_health():
                 raise HTTPException(
@@ -194,6 +258,8 @@ class FrontendApp(object):
         @app.post("/frontend_health")
         @app.get("/frontend_health")
         async def frontend_health():
+            if self.shutdown_manager.is_draining():
+                return draining_response()
             return "ok"
 
         @app.get("/health")
@@ -207,7 +273,11 @@ class FrontendApp(object):
         @app.get("/status")
         @app.post("/status")
         @app.post("/health_check")
-        async def health_check():
+        async def health_check(request: Request):
+            check_not_draining(request)
+            check_startup_warmup_ready(request)
+            if request.url.path == "/liveness":
+                return "ok"
             if self.separated_frontend:
                 await check_all_health()
                 return "ok"
@@ -224,7 +294,8 @@ class FrontendApp(object):
             return "ok"
 
         @app.get("/")
-        async def health():
+        async def health(request: Request):
+            check_not_draining(request)
             if self.separated_frontend:
                 await check_all_health()
                 return {"status": "home"}
@@ -312,27 +383,22 @@ class FrontendApp(object):
         @app.post("/")
         async def inference(req: Union[str, Dict[Any, Any]], raw_request: RawRequest):
             # compat for huggingface-pipeline request endpoint
-            global active_requests
-            active_requests.increment()
-            try:
+            async def call():
                 if self.frontend_server.is_embedding:
                     return await self.frontend_server.embedding(req, raw_request)
-                else:
-                    return await self.frontend_server.inference(req, raw_request)
-            finally:
-                active_requests.decrement()
+                return await self.frontend_server.inference(req, raw_request)
+
+            return await track_business_request(call)
 
         @app.post("/chat/completions")
         @app.post("/v1/chat/completions")
         async def chat_completion(
             request: ChatCompletionRequest, raw_request: RawRequest
         ):
-            global active_requests
-            active_requests.increment()
-            try:
+            async def call():
                 return await self.frontend_server.chat_completion(request, raw_request)
-            finally:
-                active_requests.decrement()
+
+            return await track_business_request(call)
 
         @app.post("/update_scheduler_info")
         async def update_scheduler_info(req: Union[str, Dict[Any, Any]]):
@@ -342,12 +408,10 @@ class FrontendApp(object):
         @app.post("/chat/render")
         @app.post("/v1/chat/render")
         async def chat_render(request: ChatCompletionRequest, raw_request: RawRequest):
-            global active_requests
-            active_requests.increment()
-            try:
+            async def call():
                 return await self.frontend_server.chat_render(request, raw_request)
-            finally:
-                active_requests.decrement()
+
+            return await track_business_request(call)
 
         # example {"prompt": "abcde"}
         @app.post("/tokenizer/encode")
@@ -367,25 +431,40 @@ class FrontendApp(object):
             @app.post("/v1/classifier")
             @app.post("/v1/embeddings")
             async def embedding(request: Dict[str, Any], raw_request: RawRequest):
-                return await self.frontend_server.embedding(request, raw_request)
+                return await track_business_request(
+                    lambda: self.frontend_server.embedding(request, raw_request)
+                )
 
             @app.post("/v1/embeddings/dense")
             async def embedding_dense(request: Dict[str, Any], raw_request: RawRequest):
                 request[TYPE_STR] = EmbeddingType.DENSE
-                return await self.frontend_server.embedding(request, raw_request)
+                return await track_business_request(
+                    lambda: self.frontend_server.embedding(request, raw_request)
+                )
 
             @app.post("/v1/embeddings/sparse")
             async def embedding_sparse(
                 request: Dict[str, Any], raw_request: RawRequest
             ):
                 request[TYPE_STR] = EmbeddingType.SPARSE
-                return await self.frontend_server.embedding(request, raw_request)
+                return await track_business_request(
+                    lambda: self.frontend_server.embedding(request, raw_request)
+                )
 
             @app.post("/v1/embeddings/colbert")
             async def embedding_colbert(
                 request: Dict[str, Any], raw_request: RawRequest
             ):
                 request[TYPE_STR] = EmbeddingType.COLBERT
-                return await self.frontend_server.embedding(request, raw_request)
+                return await track_business_request(
+                    lambda: self.frontend_server.embedding(request, raw_request)
+                )
 
         return app
+
+    async def _track_streaming_response(self, body_iterator):
+        try:
+            async for chunk in body_iterator:
+                yield chunk
+        finally:
+            self.shutdown_manager.finish_request()
