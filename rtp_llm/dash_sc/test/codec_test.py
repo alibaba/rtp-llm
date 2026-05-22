@@ -8,6 +8,7 @@ from unittest import TestCase, main
 
 import torch
 
+from rtp_llm.dash_sc.client import build_model_infer_request
 from rtp_llm.dash_sc.codec import (
     OtherParams,
     SamplingParams,
@@ -18,7 +19,6 @@ from rtp_llm.dash_sc.codec import (
     parse_sampling_params,
     prepend_to_generated_ids_tensor,
 )
-from rtp_llm.dash_sc.client import build_model_infer_request
 from rtp_llm.dash_sc.inference.servicer import stream_log_tag
 from rtp_llm.dash_sc.proto import predict_v2_pb2
 from rtp_llm.utils.base_model_datatypes import AuxInfo, GenerateOutput, GenerateOutputs
@@ -117,11 +117,19 @@ class DashScGrpcRequestTest(TestCase):
         self.assertEqual(sp.num_return_sequences, 1)
         self.assertEqual(sp.min_new_tokens, 2)
 
-    def test_parse_sampling_max_completion_tokens_parameter_alias(self) -> None:
+    def test_parse_sampling_max_completion_tokens_parameter_alias_wins(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["max_tokens"].int64_param = 200
         req.parameters["max_completion_tokens"].int64_param = 100
         sp = parse_sampling_params(req)
         self.assertEqual(sp.max_new_tokens, 100)
+        self.assertTrue(sp.max_new_tokens_from_completion_alias)
+
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["max_tokens"].int64_param = 64
+        sp = parse_sampling_params(req)
+        self.assertEqual(sp.max_new_tokens, 64)
+        self.assertFalse(sp.max_new_tokens_from_completion_alias)
 
     def test_parse_sampling_top_p_as_int32(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
@@ -141,18 +149,42 @@ class DashScGrpcRequestTest(TestCase):
         sp = parse_sampling_params(req)
         self.assertEqual(sp.max_new_tokens, -1)
 
-    def test_parse_sampling_max_completion_tokens_negative_keeps_signal_repro_p3(
+    def test_parse_sampling_max_completion_tokens_non_positive_uses_default_repro(
         self,
     ) -> None:
-        """P3 also applies to the DashScope/OpenAI alias path.
+        """DashScope/OpenAI compat treats non-positive max_completion_tokens as unset."""
+        for value in (-1, 0):
+            with self.subTest(value=value):
+                req = predict_v2_pb2.ModelInferRequest()
+                req.parameters["max_completion_tokens"].int64_param = value
+                sp = parse_sampling_params(req)
+                self.assertEqual(sp.max_new_tokens, 32000)
+                self.assertFalse(sp.max_new_tokens_from_completion_alias)
 
-        ``max_completion_tokens=-1`` must not disappear in the codec before the
-        front-door validator sees it.
-        """
-        req = predict_v2_pb2.ModelInferRequest()
-        req.parameters["max_completion_tokens"].int64_param = -1
-        sp = parse_sampling_params(req)
-        self.assertEqual(sp.max_new_tokens, -1)
+    def test_completion_alias_thinking_budget_extends_backend_limit_repro(
+        self,
+    ) -> None:
+        sampling = SamplingParams(
+            max_new_tokens=100,
+            max_new_tokens_from_completion_alias=True,
+        )
+        other = OtherParams(enable_thinking=True, max_new_think_tokens=10)
+
+        generate_config = sampling.to_generate_config(other=other)
+
+        self.assertEqual(generate_config.max_new_tokens, 110)
+        self.assertEqual(generate_config.max_thinking_tokens, 10)
+
+    def test_explicit_max_new_tokens_thinking_budget_keeps_backend_limit(
+        self,
+    ) -> None:
+        sampling = SamplingParams(max_new_tokens=100)
+        other = OtherParams(enable_thinking=True, max_new_think_tokens=10)
+
+        generate_config = sampling.to_generate_config(other=other)
+
+        self.assertEqual(generate_config.max_new_tokens, 100)
+        self.assertEqual(generate_config.max_thinking_tokens, 10)
 
     def test_parse_sampling_max_new_think_tokens_zero(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()

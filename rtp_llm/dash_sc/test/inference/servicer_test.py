@@ -547,8 +547,11 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
             iter_real_model_stream_infer(
                 req,
                 [7, 8, 128821],
-                SamplingParams(max_new_tokens=2),
-                OtherParams(),
+                SamplingParams(
+                    max_new_tokens=2,
+                    max_new_tokens_from_completion_alias=True,
+                ),
+                OtherParams(max_new_think_tokens=10),
                 visitor,
                 rtp_llm_request_id=100,
                 echo_prefix_ids=[128821, 198],
@@ -560,6 +563,8 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         )
 
         phase2_chunks = [c for c in chunks if c.infer_response.id.endswith("-2")]
+        self.assertEqual(visitor.generate_inputs[0].generate_config.max_new_tokens, 12)
+        self.assertEqual(visitor.generate_inputs[1].generate_config.max_new_tokens, 2)
         self.assertEqual(len(phase2_chunks), 1)
         self.assertEqual(_gen_ids(phase2_chunks[0]), [20, 21])
         self.assertEqual(_finish_reason(phase2_chunks[0]), 1)
@@ -1311,22 +1316,53 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(responses), 1)
         self.assertIn("max_new_tokens", responses[0].error_message)
 
-    async def test_max_completion_tokens_negative_rejected_before_enqueue_repro_p3(
+    async def test_max_completion_tokens_non_positive_uses_default_repro(
         self,
     ) -> None:
-        """The alias must hit the same front-door validation as max_new_tokens."""
+        """Compat alias values <= 0 should not reach backend as max_new_tokens."""
+        for value in (-1, 0):
+            with self.subTest(value=value):
+                out = GenerateOutput(
+                    output_ids=torch.tensor([9], dtype=torch.int32),
+                    finished=True,
+                    aux_info=AuxInfo(input_len=1, reuse_len=0),
+                )
+                visitor = _FakeVisitor(
+                    _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
+                )
+                servicer = DashScInferenceServicer(backend_visitor=visitor)
+                req = self._valid_infer_request()
+                req.parameters["max_completion_tokens"].int64_param = value
+
+                responses = await _drain(
+                    servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
+                )
+
+                self.assertEqual(visitor.enqueue_called, 1)
+                self.assertEqual(len(responses), 1)
+                self.assertEqual(
+                    visitor.last_generate_input.generate_config.max_new_tokens,
+                    32000,
+                )
+
+    async def test_max_completion_tokens_thinking_budget_extends_backend_limit_repro(
+        self,
+    ) -> None:
         visitor = _FakeVisitor(_FakeAsyncStream([]))
         servicer = DashScInferenceServicer(backend_visitor=visitor)
         req = self._valid_infer_request()
-        req.parameters["max_completion_tokens"].int64_param = -1
+        req.parameters["max_new_tokens"].int64_param = 200
+        req.parameters["max_completion_tokens"].int64_param = 100
+        req.parameters["enable_thinking"].bool_param = True
+        req.parameters["thinking_budget"].int64_param = 10
 
-        responses = await _drain(
-            servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
+        await _drain(servicer.ModelStreamInfer(_areq_iter([req]), MagicMock()))
+
+        self.assertEqual(visitor.enqueue_called, 1)
+        self.assertEqual(
+            visitor.last_generate_input.generate_config.max_new_tokens,
+            110,
         )
-
-        self.assertEqual(visitor.enqueue_called, 0)
-        self.assertEqual(len(responses), 1)
-        self.assertIn("max_new_tokens", responses[0].error_message)
 
     async def test_real_mode_request_id_matches_generate_request_id(self) -> None:
         """Backend ``GenerateInput.request_id`` follows the same snowflake scheme as HTTP path."""
