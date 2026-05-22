@@ -73,7 +73,8 @@ void TcpMessager::load(const std::shared_ptr<LoadRequest>&                      
                                                         load_request,
                                                         load_response,
                                                         request->callback,
-                                                        collector);
+                                                        collector,
+                                                        init_params_.device_id);
 
     collector->markRequestCallBegin();
     KvCacheStoreService_Stub stub((::google::protobuf::RpcChannel*)(channel.get()),

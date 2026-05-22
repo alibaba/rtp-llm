@@ -70,6 +70,7 @@ cc_library(
     deps = [
         ":cache_store_interface",
         "//rtp_llm/cpp/disaggregate/cache_store/proto:cache_store_service_cc_proto",
+        "//rtp_llm/cpp/utils:device_pin",
         "//rtp_llm/cpp/utils:time_util",
         "//:rtp_compute_ops",
         ":arpc_dep",
