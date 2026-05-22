@@ -378,6 +378,13 @@ def h20_oss_suites():
                 gpu_type=["H20"],
             ),
             smoke_test(
+                name="kimi_tool_call",
+                task_info="data/model/kimi_linear/q_r_bf16_tp2_tool_call.json",
+                smoke_args="--act_type BF16 --seq_size_per_block 2048 --tp_size 2 --ssm_state_dtype fp32 --reserver_runtime_mem_mb 8192",
+                envs=["TRITON_AUTOTUNE_CACHE_MODE=cached"],
+                gpu_type=["H20"],
+            ),
+            smoke_test(
                 name="kimi_pd",
                 task_info="data/model/kimi_linear/q_r_bf16_tp2_pd_sep.json",
                 smoke_args= {
