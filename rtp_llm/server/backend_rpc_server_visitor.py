@@ -198,6 +198,10 @@ class BackendRPCServerVisitor:
     def set_request_id_factory(self, factory: Callable[[], int]) -> None:
         self.request_id_factory = factory
 
+    async def close(self):
+        await self.model_rpc_client.close()
+        await self.master_client.close()
+
     @staticmethod
     def get_backend_role_list(
         pd_sep_config,
