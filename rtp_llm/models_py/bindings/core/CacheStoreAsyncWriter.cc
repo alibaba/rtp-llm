@@ -1,10 +1,11 @@
 #include "rtp_llm/models_py/bindings/core/CacheStoreAsyncWriter.h"
 #include "autil/LockFreeThreadPool.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/DevicePin.h"
 
 namespace rtp_llm {
 
-CacheStoreAsyncWriter::CacheStoreAsyncWriter() {
+CacheStoreAsyncWriter::CacheStoreAsyncWriter(int device_id): device_id_(device_id) {
     constexpr size_t kThreadCount = 3;
     constexpr size_t kQueueSize   = 10000;
     auto pool = std::make_shared<autil::LockFreeThreadPool>(kThreadCount, kQueueSize, nullptr, "CacheStoreAsync");
@@ -43,6 +44,7 @@ void CacheStoreAsyncWriter::submit(std::function<void()> task) {
     pending_count_.fetch_add(1, std::memory_order_acq_rel);
 
     auto wrapped = [this, task = std::move(task)]() {
+        pinThreadToDeviceOnce(device_id_);
         try {
             task();
         } catch (...) {

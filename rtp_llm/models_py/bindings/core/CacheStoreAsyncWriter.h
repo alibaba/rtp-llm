@@ -17,7 +17,7 @@ namespace rtp_llm {
 // Lifecycle: init() -> submit()* -> waitAllDone() -> init() -> ...
 class CacheStoreAsyncWriter {
 public:
-    CacheStoreAsyncWriter();
+    explicit CacheStoreAsyncWriter(int device_id = -1);
     ~CacheStoreAsyncWriter();
 
     void init();
@@ -38,6 +38,7 @@ private:
     std::mutex               exception_mutex_;
     std::exception_ptr       stored_exception_;
     State                    state_{State::IDLE};
+    int                      device_id_{-1};
 };
 
 }  // namespace rtp_llm

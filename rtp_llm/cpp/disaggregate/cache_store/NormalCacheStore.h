@@ -80,6 +80,7 @@ private:
 
 private:
     bool                                                                             thread_pool_close_{false};
+    int                                                                              device_id_{-1};
     CacheStoreInitParams                                                             params_;
     std::shared_ptr<MemoryUtil>                                                      memory_util_;
     std::shared_ptr<RequestBlockBufferStore>                                         request_block_buffer_store_;
