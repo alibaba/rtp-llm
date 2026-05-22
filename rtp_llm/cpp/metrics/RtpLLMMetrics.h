@@ -617,8 +617,11 @@ private:
 
 class RtpLLMCacheReuseMetricsCollector final {
 public:
-    int64_t kv_cache_reuse_length = 0;
-    float   kv_cache_hit_rate     = 0;
+    int64_t kv_cache_reuse_length            = 0;
+    float   kv_cache_hit_rate                = 0;
+    int64_t stream_cache_device_reuse_length = 0;
+    int64_t stream_cache_memory_reuse_length = 0;
+    int64_t stream_cache_remote_reuse_length = 0;
 };
 
 class RtpLLMDeviceCacheReuseMetricsCollector final {
@@ -733,8 +736,11 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMCacheReuseMetricsCollector* collector);
 
 public:
-    kmonitor::MutableMetric* kv_cache_reuse_length = nullptr;
-    kmonitor::MutableMetric* kv_cache_hit_rate     = nullptr;
+    kmonitor::MutableMetric* kv_cache_reuse_length            = nullptr;
+    kmonitor::MutableMetric* kv_cache_hit_rate                = nullptr;
+    kmonitor::MutableMetric* stream_cache_device_reuse_length = nullptr;
+    kmonitor::MutableMetric* stream_cache_memory_reuse_length = nullptr;
+    kmonitor::MutableMetric* stream_cache_remote_reuse_length = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();

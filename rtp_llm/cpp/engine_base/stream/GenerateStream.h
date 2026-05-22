@@ -199,8 +199,10 @@ public:
     size_t  maxTokenNum() const;
     void    setReuseLength(int reuse_length);
     void    setLocalReuseLength(int length);
+    void    setDeviceReuseLength(int length);
     void    setRemoteReuseLength(int length);
     int     localReuseLength() const;
+    int     deviceReuseLength() const;
     int     remoteReuseLength() const;
     void    setMemoryReuseLength(int length);
     int     memoryReuseLength() const;
@@ -695,6 +697,7 @@ protected:
     int                                   initial_reuse_length_ = 0;
     int                                   reuse_length_         = 0;
     int                                   local_reuse_length_   = 0;
+    int                                   device_reuse_length_  = 0;
     int                                   remote_reuse_length_  = 0;
     int                                   memory_reuse_length_  = 0;
     int                                   reuse_mm_length_      = 0;
