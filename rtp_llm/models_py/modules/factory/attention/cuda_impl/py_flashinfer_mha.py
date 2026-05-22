@@ -14,7 +14,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.flashinfer_rotary_emb
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.kv_cache_write_op import (
     KVCacheWriteOp,
 )
-from rtp_llm.models_py.modules.factory.attention.cuda_impl.utils import is_sm_100
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.utils import is_blackwell
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla import (
     check_attention_inputs,
 )
@@ -562,7 +562,9 @@ class PyFlashinferPagedPrefillImpl(PyFlashinferPrefillImplBase):
         2. The underlying paged FMHA op supports the inputs
         3. MhaRotaryEmbeddingOp supports the inputs
         """
-        return not is_sm_100() and PyFlashinferPrefillPagedAttnOp.support(attn_inputs)
+        return not is_blackwell() and PyFlashinferPrefillPagedAttnOp.support(
+            attn_inputs
+        )
 
     def support_cuda_graph(self) -> bool:
         return True
@@ -619,7 +621,7 @@ class PyFlashinferPrefillImpl(PyFlashinferPrefillImplBase):
            (requires prefix_lengths to be empty or zero)
         3. MhaRotaryEmbeddingOp supports the inputs
         """
-        return not is_sm_100() and PyFlashinferPrefillAttnOp.support(attn_inputs)
+        return not is_blackwell() and PyFlashinferPrefillAttnOp.support(attn_inputs)
 
 
 def determine_use_tensor_core_from_configs(attn_configs: AttentionConfigs) -> bool:
