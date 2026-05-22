@@ -1,6 +1,7 @@
 package org.flexlb.httpserver;
 
 import org.flexlb.balance.scheduler.QueueManager;
+import org.flexlb.config.ConfigService;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
@@ -38,7 +39,8 @@ class CancelEndpointTest {
                 mock(LBStatusConsistencyService.class),
                 mock(EngineHealthReporter.class),
                 mock(QueueManager.class),
-                mock(ActiveRequestCounter.class));
+                mock(ActiveRequestCounter.class),
+                mock(ConfigService.class));
         RouterFunction<ServerResponse> router = server.loadBalancePrefill();
         client = WebTestClient.bindToRouterFunction(router).build();
     }

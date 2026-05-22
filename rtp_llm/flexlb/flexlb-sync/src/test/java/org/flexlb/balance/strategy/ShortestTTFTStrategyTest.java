@@ -37,6 +37,7 @@ class ShortestTTFTStrategyTest {
 
         EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig());
         Map<String/*ip*/, WorkerStatus> prefillStatusMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        prefillStatusMap.clear();
         Map<String, TaskInfo> waitingTaskList = new HashMap<>();
         Map<String, TaskInfo> runningTaskList = new HashMap<>();
         Map<String, TaskInfo> finishedTaskList = new HashMap<>();
