@@ -480,7 +480,7 @@ std::shared_ptr<AsyncMatchContext> KVCacheMemoryConnector::asyncMatch(const std:
         RTP_LLM_LOG_DEBUG("not matched cache in memory, cache keys size: %zu, already_reuse_num: %zu",
                           cache_keys_size,
                           already_reuse_num);
-        reportMatchMetrics(/*success=*/false, timer.done_us(), cache_keys_size, matched_num);
+        reportMatchMetrics(/*success=*/true, timer.done_us(), cache_keys_size, matched_num);
         return nullptr;
     }
     const int start_read_block_index = static_cast<int>(already_reuse_num);
@@ -870,11 +870,12 @@ KVCacheMemoryConnector::buildCopyPlanForWrite(const CacheKeysType&              
             }
         }
         if (need_incomplete > 0 && !incomplete_pool_) {
-            RTP_LLM_LOG_DEBUG("build copy plan for write skip incomplete blocks because incomplete pool is disabled, need=%zu",
-                              need_incomplete);
-            copy_infos.erase(std::remove_if(copy_infos.begin(), copy_infos.end(), [](const auto& ci) {
-                return !ci.is_complete;
-            }), copy_infos.end());
+            RTP_LLM_LOG_DEBUG(
+                "build copy plan for write skip incomplete blocks because incomplete pool is disabled, need=%zu",
+                need_incomplete);
+            copy_infos.erase(
+                std::remove_if(copy_infos.begin(), copy_infos.end(), [](const auto& ci) { return !ci.is_complete; }),
+                copy_infos.end());
             need_incomplete = 0;
         }
         if (need_incomplete > 0 && incomplete_pool_) {
