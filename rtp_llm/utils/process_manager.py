@@ -12,7 +12,7 @@ class ProcessManager:
 
     DEFAULT_FAILURE_SHUTDOWN_TIMEOUT = 50
 
-    def __init__(self, shutdown_timeout: int = 50, monitor_interval: int = 1):
+    def __init__(self, shutdown_timeout: int = -1, monitor_interval: int = 1):
         self.processes: List[Process] = []
         self.shutdown_requested = False
         self.terminated = False
