@@ -8,7 +8,7 @@
 
 | # | 节 | 主题 | 状态 | 工时 | 笔记 |
 |---|----|------|------|------|------|
-| 1 | B1.1 | 入口与对象转换 | ☐ pending | - | - |
+| 1 | B1.1 | 入口与对象转换 | 🟡 in-progress | - | [01-entry-and-object-mapping.md](01-entry-and-object-mapping.md) |
 | 2 | B1.2 | Engine 主循环 | ☐ pending | - | - |
 | 3 | B1.3 | FIFOScheduler + continuous batching | ☐ pending | - | - |
 | 4 | B1.4 | PD 分离 | ☐ pending | - | - |
@@ -32,7 +32,7 @@
 
 ## 当前状态
 
-🟡 **下一节：B1.1 入口与对象转换** — 等待 spec 用户复核通过后开课
+🟡 **当前节：B1.1 入口与对象转换** — lesson plan 已就绪，等待学习者完成验收任务
 
 ## 快速指引
 
