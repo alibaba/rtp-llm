@@ -20,6 +20,7 @@ from rtp_llm.dash_sc.proto import predict_v2_pb2
 from rtp_llm.utils.base_model_datatypes import GenerateOutputs
 
 _INT32_MAX = 2_147_483_647
+_DEFAULT_MAX_NEW_TOKENS = 32000
 
 FINISH_REASON_LENGTH = 1
 
@@ -239,7 +240,8 @@ class OtherParams:
 class SamplingParams:
     """Sampling / generation options from ``request.inputs`` (+ legacy ``top_k`` in ``request.parameters``)."""
 
-    max_new_tokens: int = 32000
+    max_new_tokens: int = _DEFAULT_MAX_NEW_TOKENS
+    max_new_tokens_from_completion_alias: bool = False
     num_return_sequences: int = 0
     top_p: float = 1.0
     top_k: int = 0
@@ -266,14 +268,29 @@ class SamplingParams:
         from rtp_llm.config.generate_config import GenerateConfig
 
         return_input_ids = other.return_input_ids if other is not None else False
-        if self.max_new_think_tokens is None:
+        request_max_think = self.max_new_think_tokens
+        if request_max_think is None and other is not None:
+            request_max_think = other.max_new_think_tokens
+        if request_max_think is None:
             max_thinking_tokens = 32000
-        elif self.max_new_think_tokens < 0:
+        elif request_max_think < 0:
             max_thinking_tokens = _INT32_MAX
         else:
-            max_thinking_tokens = self.max_new_think_tokens
+            max_thinking_tokens = request_max_think
+        backend_max_new_tokens = self.max_new_tokens
+        if other is not None:
+            if (
+                self.max_new_tokens_from_completion_alias
+                and backend_max_new_tokens > 0
+                and other.enable_thinking is not False
+                and request_max_think is not None
+                and request_max_think > 0
+            ):
+                backend_max_new_tokens = min(
+                    _INT32_MAX, backend_max_new_tokens + int(request_max_think)
+                )
         return GenerateConfig(
-            max_new_tokens=self.max_new_tokens,
+            max_new_tokens=backend_max_new_tokens,
             num_return_sequences=self.num_return_sequences,
             top_k=self.top_k,
             top_p=self.top_p,
@@ -309,8 +326,9 @@ def parse_input_ids_from_request(request) -> list[int] | None:
 def parse_sampling_params(request) -> SamplingParams:
     """Read sampling fields from ``request.inputs``.
 
-    Tensor names: ``max_new_tokens``, ``num_return_sequences`` (or DashScope
-    alias ``n``), ``top_p``, ``top_k``, ``stop_words_list``, ``temperature``,
+    Tensor names: ``max_completion_tokens`` (or legacy ``max_new_tokens`` /
+    ``max_tokens``), ``num_return_sequences`` (or DashScope alias ``n``),
+    ``top_p``, ``top_k``, ``stop_words_list``, ``temperature``,
     ``min_new_tokens`` (or DashScope alias ``min_length``), ``seed``,
     ``repetition_penalty``, ``frequency_penalty``, ``presence_penalty``,
     ``max_new_think_tokens`` / ``max_think_length``.
@@ -318,7 +336,8 @@ def parse_sampling_params(request) -> SamplingParams:
     Legacy: if there is no ``top_k`` input, ``request.parameters["top_k"].int64_param``
     is used instead.
     """
-    max_new_tokens = 32000
+    max_new_tokens = _DEFAULT_MAX_NEW_TOKENS
+    max_new_tokens_from_completion_alias = False
     num_return_sequences = 0
     top_p = 1.0
     top_k = 0
@@ -331,15 +350,22 @@ def parse_sampling_params(request) -> SamplingParams:
     max_new_think_tokens: int | None = None
     stop_words_list: tuple[tuple[int, ...], ...] = tuple()
 
-    v = _parse_optional_scalar_int(request, "max_new_tokens")
-    if v is None:
-        v = _parse_optional_scalar_int(request, "max_completion_tokens")
-    if v is None:
-        v = _parse_optional_parameter_int(request, "max_new_tokens")
+    v = _parse_optional_scalar_int(request, "max_completion_tokens")
     if v is None:
         v = _parse_optional_parameter_int(request, "max_completion_tokens")
-    if v is not None:
+    if v is not None and v > 0:
         max_new_tokens = v
+        max_new_tokens_from_completion_alias = True
+    else:
+        v = _parse_optional_scalar_int(request, "max_new_tokens")
+        if v is None:
+            v = _parse_optional_scalar_int(request, "max_tokens")
+        if v is None:
+            v = _parse_optional_parameter_int(request, "max_new_tokens")
+        if v is None:
+            v = _parse_optional_parameter_int(request, "max_tokens")
+        if v is not None:
+            max_new_tokens = v
 
     v = _parse_optional_scalar_int(request, "num_return_sequences")
     if v is None:
@@ -397,6 +423,7 @@ def parse_sampling_params(request) -> SamplingParams:
 
     return SamplingParams(
         max_new_tokens=max_new_tokens,
+        max_new_tokens_from_completion_alias=max_new_tokens_from_completion_alias,
         num_return_sequences=num_return_sequences,
         top_p=top_p,
         top_k=top_k,

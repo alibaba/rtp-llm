@@ -816,6 +816,8 @@ async def iter_real_model_stream_infer(
             phase2_config.in_think_mode = False
             if hasattr(phase2_config, "thinking"):
                 phase2_config.thinking = False
+            if sampling.max_new_tokens_from_completion_alias:
+                phase2_config.max_new_tokens = sampling.max_new_tokens
             # trace_id stays equal across phases so the dashscope log search
             # aggregates both halves under a single trace; phase distinction is
             # carried by request_log_tag (phase=2) and by the ``-2`` suffix on
@@ -853,11 +855,14 @@ async def iter_real_model_stream_infer(
                 resp_out = resp_go.generate_outputs[0]
                 resp_ids = _token_ids_list_from_generate_output(resp_out)
                 phase2_cumulative_sent_ids.extend(resp_ids)
+                phase2_max_new_tokens = int(
+                    getattr(phase2_config, "max_new_tokens", 0) or 0
+                )
                 finish_reason_override = None
                 if (
                     resp_out.finished
-                    and max_new_tokens > 0
-                    and len(phase2_cumulative_sent_ids) >= max_new_tokens
+                    and phase2_max_new_tokens > 0
+                    and len(phase2_cumulative_sent_ids) >= phase2_max_new_tokens
                 ):
                     finish_reason_override = FINISH_REASON_LENGTH
                 return build_stream_response_from_generate_outputs(
