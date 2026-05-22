@@ -131,16 +131,6 @@ class CompressorMeta:
     compressed_lens_per_token: Optional[torch.Tensor] = None
 
 
-@dataclass(frozen=True)
-class CompressorPrefillPending:
-    fused_flat: torch.Tensor
-    sp: int
-    bsz: int
-    seqlen: int
-    meta: Optional[CompressorMeta]
-    fused_gather_handle: Optional[Any] = None
-
-
 class _CompressorNorm(nn.Module):
     """RMSNorm weight holder — bf16 (vLLM kernel reads bf16 weight)."""
 
@@ -235,7 +225,6 @@ class CompressorFP8(nn.Module):
         self.freqs_cis: Optional[torch.Tensor] = None
         self._cos_sin_cache: Optional[torch.Tensor] = None
         self._cp_ctx: Optional[CPContext] = None
-        self._cp_gather_stream: Optional[Any] = None
         # MOEDBG: caller (Attention / IndexerFP8) sets this to a name
         # prefix like ``"L02_attn_cmp"`` before forward and clears after;
         # _forward_prefill_body uses it as the rec name root. None / empty
@@ -267,10 +256,6 @@ class CompressorFP8(nn.Module):
 
     def set_cp_ctx(self, cp_ctx: Optional[CPContext]) -> None:
         self._cp_ctx = cp_ctx
-
-    def set_cp_gather_stream(self, stream: Optional[Any]) -> None:
-        """Reuse the caller's CP gather stream for FIFO NCCL collective order."""
-        self._cp_gather_stream = stream
 
     # ----------------------------------------------------------------------
     # Pool context lifecycle (6-arg signature matches PoolBackedModule)
@@ -588,17 +573,23 @@ class CompressorFP8(nn.Module):
     # ----------------------------------------------------------------------
     # Forward (prefill)
     # ----------------------------------------------------------------------
-    def start_prefill(
+    def forward(
         self,
         x: torch.Tensor,
         start_pos,
         sequence_lengths: Optional[torch.Tensor] = None,
         meta: Optional[CompressorMeta] = None,
-    ) -> Optional[CompressorPrefillPending]:
-        """Start prefill work and any CP all-gather without waiting it.
+    ) -> Optional[torch.Tensor]:
+        """Prefill entry. ``bsz==1`` (FIFO scheduler).
 
-        Call :meth:`finish_prefill` on the returned handle to write the FP8
-        KV pool. ``None`` means warmup/no pool, matching ``forward``'s no-op.
+        Returns ``None`` — downstream readers gather compressed K from the
+        FP8 KV pool directly.
+
+        ``meta`` lets the caller (typically ``attention.py``) hoist the
+        slot-mapping compute out of the per-layer hot path and amortize it
+        across the host compressor and any nested indexer compressor that
+        share the same positions/b_idx. When ``None`` the compressor falls
+        back to the in-body compute path (warmup / standalone / UT).
         """
         del sequence_lengths  # not needed: positions derived from start_pos+arange
         # Phase-3a: accept either flat ``[T_total, dim]`` (vLLM-native /
@@ -619,6 +610,7 @@ class CompressorFP8(nn.Module):
         if self._state_pool_3d is None or self._kv_pool_3d is None or self._kv_eb <= 0:
             return None
 
+        device = x.device
         out_dim = (1 + self.overlap) * self.head_dim
         with record_function_range("dsv4.fp8.compressor.prefill.fused_linear"):
             fused_out = _linear_bf16_bf16_fp32(x, self._wkv_wgate_fused)
@@ -630,19 +622,11 @@ class CompressorFP8(nn.Module):
         fused_gather_handle = None
         if cp_gather:
             assert cp_ctx is not None
-            assert meta is not None, (
-                "CompressorFP8 CP prefill requires full-sequence metadata from "
-                "rtp_llm.models_py.modules.dsv4.fp8.prefill_meta; rebuilding it "
-                "inside compressor.forward is intentionally disabled."
+            gather_stream = (
+                torch.cuda.Stream(device=fused_flat.device)
+                if fused_flat.is_cuda
+                else None
             )
-            N = int(cp_ctx.seq_len_full)
-            assert int(meta.positions.numel()) == N, (
-                f"CP compressor meta/token length mismatch: meta={meta.positions.numel()} "
-                f"seq_len_full={N}"
-            )
-            gather_stream = self._cp_gather_stream
-            if gather_stream is None and fused_flat.is_cuda:
-                gather_stream = torch.cuda.Stream(device=fused_flat.device)
             # Gather the fused ``[kv | score]`` projection once. This removes
             # one NCCL launch and keeps the CP path token-major 2D; the split
             # below is a strided view and the Triton wrappers pass row strides
@@ -653,33 +637,19 @@ class CompressorFP8(nn.Module):
                 fused_gather_handle = cp_all_gather_full_async(
                     fused_flat, cp_ctx, stream=gather_stream
                 )
-
-        return CompressorPrefillPending(
-            fused_flat=fused_flat,
-            sp=sp,
-            bsz=bsz,
-            seqlen=seqlen,
-            meta=meta,
-            fused_gather_handle=fused_gather_handle,
-        )
-
-    def finish_prefill(
-        self, pending: Optional[CompressorPrefillPending]
-    ) -> Optional[torch.Tensor]:
-        """Finish a pending prefill compressor launch and write the KV pool."""
-        if pending is None:
-            return None
-
-        fused_flat = pending.fused_flat
-        sp = pending.sp
-        bsz = pending.bsz
-        seqlen = pending.seqlen
-        meta = pending.meta
-        out_dim = (1 + self.overlap) * self.head_dim
-
-        if pending.fused_gather_handle is not None:
+            assert meta is not None, (
+                "CompressorFP8 CP prefill requires full-sequence metadata from "
+                "rtp_llm.models_py.modules.dsv4.fp8.prefill_meta; rebuilding it "
+                "inside compressor.forward is intentionally disabled."
+            )
+            N = int(cp_ctx.seq_len_full)
+            assert int(meta.positions.numel()) == N, (
+                f"CP compressor meta/token length mismatch: meta={meta.positions.numel()} "
+                f"seq_len_full={N}"
+            )
+            assert fused_gather_handle is not None
             with record_function_range("dsv4.fp8.compressor.prefill.cp_wait_kv_score"):
-                fused_flat = cp_wait_gather_full(pending.fused_gather_handle)
+                fused_flat = cp_wait_gather_full(fused_gather_handle)
 
         with record_function_range("dsv4.fp8.compressor.prefill.split_kv_score"):
             assert fused_flat.dim() == 2, (
@@ -694,7 +664,6 @@ class CompressorFP8(nn.Module):
             score_flat = fused_flat[:, out_dim:]
         if meta is None:
             with record_function_range("dsv4.fp8.compressor.prefill.build_meta"):
-                device = fused_flat.device
                 positions, b_idx = _build_prefill_positions(sp, bsz, seqlen, device)
                 meta = self.prepare_metadata(positions, b_idx)
         # Varlen prefill carries per-request raw arrays, so ``_launch`` routes
@@ -704,32 +673,6 @@ class CompressorFP8(nn.Module):
         with record_function_range("dsv4.fp8.compressor.prefill.launch"):
             self._launch(kv_flat, score_flat, meta, seq_start=seq_start)
         return None
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        start_pos,
-        sequence_lengths: Optional[torch.Tensor] = None,
-        meta: Optional[CompressorMeta] = None,
-    ) -> Optional[torch.Tensor]:
-        """Prefill entry. ``bsz==1`` (FIFO scheduler).
-
-        Returns ``None`` — downstream readers gather compressed K from the
-        FP8 KV pool directly.
-
-        ``meta`` lets the caller (typically ``attention.py``) hoist the
-        slot-mapping compute out of the per-layer hot path and amortize it
-        across the host compressor and any nested indexer compressor that
-        share the same positions/b_idx. When ``None`` the compressor falls
-        back to the in-body compute path (warmup / standalone / UT).
-        """
-        pending = self.start_prefill(
-            x,
-            start_pos,
-            sequence_lengths=sequence_lengths,
-            meta=meta,
-        )
-        return self.finish_prefill(pending)
 
     # ----------------------------------------------------------------------
     # Forward (decode, vectorized over B)
