@@ -90,12 +90,22 @@ def create_write_cache_store_impl(
     if not (attn_inputs.is_prefill and attn_inputs.cache_store_inputs):
         return None
 
-    input_lengths = attn_inputs.input_lengths
+    cache_store_inputs = attn_inputs.cache_store_inputs
+
+    # Prefer pinned-host length mirrors prepared by prepareWriteCacheParams
+    # to avoid synchronous D2H copies on cache-store background threads.
+    input_lengths = getattr(cache_store_inputs, "input_lengths_host", None)
+    if input_lengths is None or not input_lengths.numel():
+        input_lengths = attn_inputs.input_lengths
     cp_info = getattr(attn_inputs, "context_parallel_info", None)
     if cp_info is not None:
         actual_lengths = getattr(cp_info, "prefill_actual_input_lengths_cpu", None)
         if actual_lengths is not None and actual_lengths.numel() > 0:
             input_lengths = actual_lengths
+
+    prefix_lengths = getattr(cache_store_inputs, "prefix_lengths_host", None)
+    if prefix_lengths is None or not prefix_lengths.numel():
+        prefix_lengths = attn_inputs.prefix_lengths
 
     has_multi_region = (
         kv_cache is not None
@@ -105,14 +115,14 @@ def create_write_cache_store_impl(
     if has_multi_region:
         return WriteCacheStoreOp(
             input_lengths,
-            attn_inputs.prefix_lengths,
+            prefix_lengths,
             attn_inputs.kv_cache_kernel_block_id_host_by_group,
-            attn_inputs.cache_store_inputs,
+            cache_store_inputs,
         )
 
     return WriteCacheStoreOp(
         input_lengths,
-        attn_inputs.prefix_lengths,
+        prefix_lengths,
         attn_inputs.kv_cache_block_id_host,
-        attn_inputs.cache_store_inputs,
+        cache_store_inputs,
     )

@@ -216,8 +216,8 @@ struct KVCache {
 
 struct PyModelInitResources {
     std::optional<KVCache> kv_cache;
-    bool                   is_speculative = false;
-    bool                   is_decode_role = false;
+    bool                   is_speculative         = false;
+    bool                   is_decode_role         = false;
     int64_t                max_context_batch_size = 1;
 };
 
@@ -230,15 +230,20 @@ struct PyCacheStoreInputs {
     torch::Tensor            kv_cache_layer_region_to_group;
     torch::Tensor            kv_cache_group_types;
     std::vector<std::string> cache_keys;  // [context_batch_size]
-    size_t                   tokens_per_block;
-    size_t                   kv_block_stride_bytes;
-    size_t                   kv_scale_stride_bytes;
-    bool                     pd_separation             = false;
-    size_t                   model_id                  = 0;
-    bool                     decode_entrance           = false;
-    bool                     warmup                    = false;
-    bool                     use_opaque_kv_cache_store = false;
-    bool                     mla_kvcache               = false;
+    // Pinned-host mirrors of device length tensors for cache store consumption.
+    // Populated via non-blocking D2H in prepareWriteCacheParams so that
+    // background cache-store threads never issue a synchronous .cpu() copy.
+    torch::Tensor input_lengths_host;
+    torch::Tensor prefix_lengths_host;
+    size_t        tokens_per_block;
+    size_t        kv_block_stride_bytes;
+    size_t        kv_scale_stride_bytes;
+    bool          pd_separation             = false;
+    size_t        model_id                  = 0;
+    bool          decode_entrance           = false;
+    bool          warmup                    = false;
+    bool          use_opaque_kv_cache_store = false;
+    bool          mla_kvcache               = false;
 
     // Opaque cache_store reference (C++ only; passes through Python without inspection)
     std::shared_ptr<rtp_llm::CacheStore> cache_store;

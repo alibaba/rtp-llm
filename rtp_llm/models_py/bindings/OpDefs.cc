@@ -75,9 +75,8 @@ void registerPyOpDefs(pybind11::module& m) {
     pybind11::class_<PyModelInitResources>(m, "PyModelInitResources")
         .def(pybind11::init<>())
         .def_readonly("kv_cache", &PyModelInitResources::kv_cache, "KV cache for all layers")
-        .def_readonly("is_speculative",
-                      &PyModelInitResources::is_speculative,
-                      "True when speculative decoding is active")
+        .def_readonly(
+            "is_speculative", &PyModelInitResources::is_speculative, "True when speculative decoding is active")
         .def_readonly("is_decode_role",
                       &PyModelInitResources::is_decode_role,
                       "True when this model instance runs in decode role")
@@ -97,7 +96,10 @@ void registerPyOpDefs(pybind11::module& m) {
         [](caffe2::TypeMeta dtype) { return dtype.toScalarType(); },
         "Convert TypeMeta to scalar type");
 
-    pybind11::class_<PyCacheStoreInputs>(m, "PyCacheStoreInputs").def(pybind11::init<>());
+    pybind11::class_<PyCacheStoreInputs>(m, "PyCacheStoreInputs")
+        .def(pybind11::init<>())
+        .def_readwrite("input_lengths_host", &PyCacheStoreInputs::input_lengths_host)
+        .def_readwrite("prefix_lengths_host", &PyCacheStoreInputs::prefix_lengths_host);
 
     pybind11::class_<rtp_llm::ParamsBase, std::shared_ptr<rtp_llm::ParamsBase>>(m, "ParamsBase")
         .def(pybind11::init<>())
