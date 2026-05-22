@@ -5,6 +5,13 @@ import torch
 from rtp_llm.device.device_type import DeviceType, get_device_type, is_cuda, is_hip
 
 
+def is_sm_100() -> bool:
+    """SM 10.x datacenter Blackwell (B200 / GB200)."""
+    if not is_cuda():
+        return False
+    return get_sm()[0] == 10
+
+
 def get_num_device_sms() -> int:
     if is_cuda():
         assert torch.cuda.is_available()
