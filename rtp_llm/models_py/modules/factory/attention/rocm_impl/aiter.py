@@ -530,7 +530,7 @@ class AiterPrefillAttnOp:
         # regardless of kv_cache presence — the caller provides K/V explicitly.
         # NOTE on head_dim=256: aiter.mha_batch_prefill_func supports head_dim in {64,128,256}
         # since aiter 0.1.13.dev4 (commit 9ed3e3490). No varlen fallback needed here.
-        if kv_cache is not None and hasattr(kv_cache, 'kv_cache_base'):
+        if kv_cache is not None and hasattr(kv_cache, "kv_cache_base"):
             return self._forward_paged(q_tensor, kv_cache, fmha_params)
 
         # FP8 non-paged path: C++ returns full qkv_buf_fp8 (Q+K+V concatenated in FP8).
@@ -686,8 +686,12 @@ class AiterPrefillAttnOpPaged:
             self.prepare_cuda_graph(fmha_params, attn_inputs)
         return fmha_params
 
-    def prepare_cuda_graph(self, fmha_params: FMHAParams, attn_inputs: PyAttentionInputs) -> None:
-        graph_block_table = getattr(attn_inputs, "kv_cache_kernel_block_id_device", None)
+    def prepare_cuda_graph(
+        self, fmha_params: FMHAParams, attn_inputs: PyAttentionInputs
+    ) -> None:
+        graph_block_table = getattr(
+            attn_inputs, "kv_cache_kernel_block_id_device", None
+        )
         if graph_block_table is None:
             graph_block_table = getattr(attn_inputs, "kv_cache_block_id_device", None)
         self.graph_device = _infer_cuda_graph_device(
@@ -1354,7 +1358,14 @@ class AiterPrefillImplAsm(FMHAImplBase):
         layer_idx: int = 0,
     ) -> torch.Tensor:
         if kv_cache is None:
-            return self.fmha_impl.forward(qkv, kv_cache, self.fmha_params)
+            # Embedding models still need positional encoding even without a KV cache.
+            if self.need_rope_kv_cache:
+                fmha_input = self.rope_kvcache_impl.forward(
+                    qkv, kv_cache, self.rope_params
+                )
+            else:
+                fmha_input = qkv
+            return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
 
         # Apply RoPE and KV Cache processing
         if self.need_rope_kv_cache:
@@ -1407,7 +1418,14 @@ class AiterPrefillImplNonAsm(FMHAImplBase):
         layer_idx: int = 0,
     ) -> torch.Tensor:
         if kv_cache is None:
-            return self.fmha_impl.forward(qkv, kv_cache, self.fmha_params)
+            # Embedding models still need positional encoding even without a KV cache.
+            if self.need_rope_kv_cache:
+                fmha_input = self.rope_kvcache_impl.forward(
+                    qkv, kv_cache, self.rope_params
+                )
+            else:
+                fmha_input = qkv
+            return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
 
         # Apply RoPE and KV Cache processing
         if self.need_rope_kv_cache:
@@ -1462,7 +1480,9 @@ class AiterPrefillImplPaged(FMHAImplBase):
             return False
         return int(pl.max().item()) > 0
 
-    def _update_prefill_params_for_cuda_graph(self, attn_inputs: PyAttentionInputs) -> None:
+    def _update_prefill_params_for_cuda_graph(
+        self, attn_inputs: PyAttentionInputs
+    ) -> None:
         input_lengths = attn_inputs.input_lengths
 
         fmha_params = self.fmha_params

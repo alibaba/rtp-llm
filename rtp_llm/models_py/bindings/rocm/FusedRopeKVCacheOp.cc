@@ -35,9 +35,8 @@ static void copyTensorExactInPlace(torch::Tensor& dst, const torch::Tensor& src,
     }
     torch::Tensor dst_flat = dst.reshape({-1});
     if (dst_flat.numel() != src_flat.numel()) {
-        throw std::runtime_error(
-            std::string("prepare_in_place tensor size mismatch for ")
-            + name + ": capture=" + std::to_string(dst_flat.numel()) + ", replay=" + std::to_string(src_flat.numel()));
+        throw std::runtime_error(std::string("prepare_in_place tensor size mismatch for ") + name + ": capture="
+                                 + std::to_string(dst_flat.numel()) + ", replay=" + std::to_string(src_flat.numel()));
     }
 
     torch::Tensor src_match = src_flat;
@@ -66,8 +65,7 @@ void updateKvCacheOffset(CKAttn& params, const torch::Tensor& kv_cache_block_id_
 }
 
 void prepareInPlace(CKAttn& params, const torch_ext::PyAttentionInputs& attn_inputs) {
-    const bool has_prefix =
-        attn_inputs.prefix_lengths.defined() && attn_inputs.prefix_lengths.numel() > 0;
+    const bool has_prefix = attn_inputs.prefix_lengths.defined() && attn_inputs.prefix_lengths.numel() > 0;
 
     if (has_prefix && params.prefix_lengths.defined() && params.prefix_lengths.numel() > 0
         && params.prefix_lengths.data_ptr() != attn_inputs.prefix_lengths.data_ptr()) {
@@ -120,8 +118,8 @@ CKAttnPtr FusedRopeKVCachePrefillOpBase::prepare(torch_ext::PyAttentionInputs at
     bool has_prefix = attn_inputs.prefix_lengths.defined() && attn_inputs.prefix_lengths.numel() > 0;
 
     const bool use_fmha_fp8 = attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
-    CKAttnPtr attn_params;
-    auto      params =
+    CKAttnPtr  attn_params;
+    auto       params =
         PrepareCKAttn(attn_configs_, kv_cache_kernel_block_id_device, attn_inputs.input_lengths.size(0), use_fmha_fp8);
     if (params) {
         attn_params = CKAttnPtr(params, (CKAttn*)params.get());
@@ -164,21 +162,23 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
     const int size_per_head     = attn_configs_.size_per_head;
     const int token_num         = qkv.size(0);
     const int batch_size        = params->cu_seqlens.size(0) - 1;
-    const int seq_len = params->prefill_runtime_max_seq_len >= 0 ? params->prefill_runtime_max_seq_len : params->max_seq_len;
-    const int max_prefix_length = params->prefill_runtime_max_prefix_len >= 0 ? params->prefill_runtime_max_prefix_len : 0;
+    const int seq_len =
+        params->prefill_runtime_max_seq_len >= 0 ? params->prefill_runtime_max_seq_len : params->max_seq_len;
+    const int max_prefix_length =
+        params->prefill_runtime_max_prefix_len >= 0 ? params->prefill_runtime_max_prefix_len : 0;
     const int seq_len_with_prefix = seq_len + max_prefix_length;
 
     const int  q_output_token_num = (use_paged_fmha && pad_query) ? batch_size * seq_len : token_num;
-    const bool paged_fp8 = use_paged_fmha && attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
-    const auto q_opts = torch::TensorOptions(qkv.dtype()).device(qkv.device());
+    const bool paged_fp8          = use_paged_fmha && attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
+    const auto q_opts             = torch::TensorOptions(qkv.dtype()).device(qkv.device());
 
     // pad_query=false: q_output is packed [token_num, heads, dim] and the kernel writes
     // every cell — skip the zero-fill. pad_query=true: padded slots between sequences
     // are not written by the kernel, so they must be zero-initialized for downstream
     // FMHA correctness.
-    torch::Tensor q_output = (use_paged_fmha && pad_query)
-        ? torch::zeros({q_output_token_num, local_head_num, size_per_head}, q_opts)
-        : torch::empty({q_output_token_num, local_head_num, size_per_head}, q_opts);
+    torch::Tensor q_output = (use_paged_fmha && pad_query) ?
+                                 torch::zeros({q_output_token_num, local_head_num, size_per_head}, q_opts) :
+                                 torch::empty({q_output_token_num, local_head_num, size_per_head}, q_opts);
     torch::Tensor q_fp8_buf;
     if (paged_fp8) {
         q_fp8_buf = torch::empty({q_output_token_num, local_head_num, size_per_head},
@@ -224,14 +224,16 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
         //       Please run with BF16 activation instead (set environment variable ACT_TYPE=bf16)
         use_fmha_fp8 = false;
     }
-    // FP8 path: keep original behavior (store QKV linearly for flash_attn_varlen_fp8)
-    // Non-FP8 path: paged layout only (Q packed-token, K/V in paged cache).
-    //   store_kv=false because K/V go directly into paged cache via store_cache;
-    //   writing k_output/v_output would be wasted HBM bandwidth.
-    bool store_qkv = use_fmha_fp8 ? !use_paged_fmha : false;
+    // FP8 path: keep original behavior (store QKV linearly for flash_attn_varlen_fp8).
+    // Non-FP8 with paged cache: K/V go directly into the cache via store_cache, so
+    //   store_kv=false (writing k_output/v_output would be wasted HBM bandwidth).
+    // Non-FP8 without paged cache (embedding models): store_kv=true so K/V are
+    //   returned as padded buffers for downstream varlen attention; RoPE must still
+    //   run for positional encoding.
+    bool store_qkv   = use_fmha_fp8 ? !use_paged_fmha : false;
     bool store_q     = true;
-    bool store_kv    = use_fmha_fp8 ? !use_paged_fmha : false;
     bool store_cache = kv_cache.has_value();
+    bool store_kv    = use_fmha_fp8 ? !use_paged_fmha : !store_cache;
 
     // Allocate K/V output buffers only when the kernel actually writes them,
     // avoiding unnecessary GPU memory allocation and zero-fill.
@@ -289,45 +291,46 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
             pad_query,
             stream_);
     } else {
-        DISPATCH_CUDA_FUNCTION_DATA_TYPE(torchDTypeToDataType(qkv.dtype()),
-                                         invokeAddFusedQKVBiasTransposePrefillV1,
-                                         q_output.data_ptr(),
-                                         k_output_ptr,
-                                         v_output_ptr,
-                                         &prefix_prompt_param,
-                                         qkv.data_ptr(),
-                                         paged_fp8 ? q_fp8_buf.data_ptr() :
-                                                     (use_fmha_fp8 && qkv_buf_fp8.defined() ? qkv_buf_fp8.data_ptr() : nullptr),
-                                         nullptr,  // position_ids: V1 falls back to context_rope's
-                                                   // built-in prefix-aware seq_idx; V3 self-computes
-                                         nullptr,
-                                         params->padding_offset.data_ptr<int>(),
-                                         params->cu_seqlens.data_ptr<int>(),
-                                         batch_size,
-                                         seq_len,
-                                         token_num,
-                                         local_head_num,
-                                         local_head_num_kv,
-                                         size_per_head,
-                                         attn_configs_.rope_config,
-                                         attn_configs_.use_logn_attn,
-                                         nullptr,
-                                         0,
-                                         use_fmha_fp8 ? use_paged_fmha :
-                                                        true,  // FP8: original flag; non-FP8: always paged
-                                         store_qkv,
-                                         store_q,
-                                         store_kv,
-                                         store_cache,
-                                         nullptr,
-                                         stream_);
+        DISPATCH_CUDA_FUNCTION_DATA_TYPE(
+            torchDTypeToDataType(qkv.dtype()),
+            invokeAddFusedQKVBiasTransposePrefillV1,
+            q_output.data_ptr(),
+            k_output_ptr,
+            v_output_ptr,
+            &prefix_prompt_param,
+            qkv.data_ptr(),
+            paged_fp8 ? q_fp8_buf.data_ptr() :
+                        (use_fmha_fp8 && qkv_buf_fp8.defined() ? qkv_buf_fp8.data_ptr() : nullptr),
+            nullptr,  // position_ids: V1 falls back to context_rope's
+                      // built-in prefix-aware seq_idx; V3 self-computes
+            nullptr,
+            params->padding_offset.data_ptr<int>(),
+            params->cu_seqlens.data_ptr<int>(),
+            batch_size,
+            seq_len,
+            token_num,
+            local_head_num,
+            local_head_num_kv,
+            size_per_head,
+            attn_configs_.rope_config,
+            attn_configs_.use_logn_attn,
+            nullptr,
+            0,
+            use_fmha_fp8 ? use_paged_fmha : true,  // FP8: original flag; non-FP8: always paged
+            store_qkv,
+            store_q,
+            store_kv,
+            store_cache,
+            nullptr,
+            stream_);
     }
     // FP8 path: paged returns Q-only fp8 buf; non-paged returns full qkv fp8 buf
     if (use_fmha_fp8) {
         return std::make_tuple(paged_fp8 ? q_fp8_buf : qkv_buf_fp8, torch::Tensor(), torch::Tensor());
     }
-    // Non-FP8: return bf16 Q (K/V in paged cache).
-    return std::make_tuple(q_output, torch::Tensor(), torch::Tensor());
+    // Non-FP8 with paged cache: return bf16 Q (K/V are already written into the cache).
+    // Non-FP8 without paged cache: also return padded K/V for flash_attn_varlen_func.
+    return std::make_tuple(q_output, k_output, v_output);
 }
 
 FusedRopeKVCacheDecodeOpBase::FusedRopeKVCacheDecodeOpBase(const AttentionConfigs& attn_configs):
