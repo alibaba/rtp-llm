@@ -38,7 +38,7 @@ def auto_configure_deepep(
         parallelism_config: ParallelismConfig containing tp_size, ep_size, world_size, local_world_size
         role_type: Role type (PREFILL, DECODE, or PDFUSION)
 
-    Note: USE_ALL_GATHER should be enabled for pure TP scenarios (ep_size == tp_size).
+    Note: USE_ALL_GATHER should be enabled for pure TP scenarios (ep_size == 1).
     When USE_ALL_GATHER is enabled, DeepEP should not be used.
 
     Configuration rules (for 8-GPU machine):
@@ -60,15 +60,6 @@ def auto_configure_deepep(
     ep_size = parallelism_config.ep_size
     dp_size = parallelism_config.dp_size
     moe_config.ll_num_max_token = ll_num_max_token
-
-    # Explicit MoriEP is incompatible with use_all_gather (PURE_TP router).
-    # Disable use_all_gather when user explicitly requests MoriEP.
-    if deep_ep_config.use_mori_ep:
-        moe_config.use_all_gather = False
-        logging.info(
-            "use_mori_ep is explicitly enabled; disabling use_all_gather "
-            "to allow MoriEP router selection"
-        )
 
     # allgather default applies only to single GPU and pure TP (no CP).
     # PureCP / PureDP routers exist but must be opted in via --moe_strategy

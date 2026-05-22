@@ -131,6 +131,7 @@ class DeepepNormalRouter(FusedMoeDataRouter):
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         extra_finalize_args: Optional[Dict[str, Any]],
+        skip_allreduce: bool = False,
     ) -> torch.Tensor:
         assert self.handle is not None, "handler is None"
         recv_x, _, event = self.deepep_buffer_wrapper.buffer.combine(
