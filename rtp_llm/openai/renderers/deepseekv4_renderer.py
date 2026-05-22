@@ -55,10 +55,25 @@ def _split_reasoning_before_dsml(text: str) -> Optional[Tuple[str, str]]:
     if idx == -1:
         return None
 
-    reasoning_text = (
-        text[:idx].replace("<think>", "").replace("</think>", "").strip()
-    )
+    reasoning_text = text[:idx].replace("<think>", "").replace("</think>", "").strip()
     return reasoning_text, text[idx:]
+
+
+def _split_content_left_in_reasoning(
+    reasoning_content: str,
+    content: str,
+) -> Tuple[str, str]:
+    if content or not reasoning_content:
+        return reasoning_content, content
+
+    think_end = "</think>"
+    idx = reasoning_content.find(think_end)
+    if idx == -1:
+        return reasoning_content, content
+
+    reasoning_text = reasoning_content[:idx].replace("<think>", "").rstrip()
+    content_text = reasoning_content[idx + len(think_end) :].lstrip()
+    return reasoning_text, content_text
 
 
 def _longest_suffix_prefix(text: str, tokens: list[str]) -> int:
@@ -433,6 +448,33 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
                 status.request.tools,
                 parsed_msg.get("tool_calls", []),
             )
+            reasoning_content, content = _split_content_left_in_reasoning(
+                reasoning_content or "",
+                content or "",
+            )
+            if (
+                not tool_calls
+                and reasoning_content
+                and "<｜DSML｜" in reasoning_content
+            ):
+                split_result = _split_reasoning_before_dsml(reasoning_content)
+                if split_result is not None:
+                    reasoning_content, tool_text = split_result
+                    tool_calls, remaining_text = await self._extract_tool_calls_content(
+                        status.detector,
+                        status.request.tools,
+                        tool_text,
+                        is_streaming=False,
+                    )
+                    if remaining_text:
+                        content = (content or "") + remaining_text
+            if not tool_calls and content and "<｜DSML｜" in content:
+                tool_calls, content = await self._extract_tool_calls_content(
+                    status.detector,
+                    status.request.tools,
+                    content,
+                    is_streaming=False,
+                )
         except Exception as e:
             if _dsv4_renderer_debug_enabled():
                 logging.warning(
