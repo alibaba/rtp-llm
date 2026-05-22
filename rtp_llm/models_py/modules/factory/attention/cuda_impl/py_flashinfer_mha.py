@@ -365,11 +365,17 @@ class PyFlashinferPrefillAttnOp(object):
         batch_size = attn_inputs.input_lengths.size(0)
         cu_seqlens = attn_inputs.cu_seqlens_device[: batch_size + 1]
 
+        # Encoder-only models (BERT) have no paged kv cache; fill_params
+        # pybind requires a Tensor, so substitute an empty int32 tensor.
+        kv_block_id_host = attn_inputs.kv_cache_kernel_block_id
+        if kv_block_id_host is None:
+            kv_block_id_host = torch.empty(0, dtype=torch.int32)
+
         self.fmha_params.fill_params(
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,
             attn_inputs.input_lengths,
-            attn_inputs.kv_cache_kernel_block_id,
+            kv_block_id_host,
             self.page_size,
         )
 
@@ -629,14 +635,19 @@ class PyFlashinferPrefillImpl(PyFlashinferPrefillImplBase):
         """Check if ragged prefill implementation is supported.
 
         Returns True if:
-        1. Not running on Blackwell-class architecture
-        2. The underlying ragged FMHA op supports the inputs
+        1. The underlying ragged FMHA op supports the inputs
            (requires prefix_lengths to be empty or zero)
-        3. MhaRotaryEmbeddingOp supports the inputs
+        2. MhaRotaryEmbeddingOp supports the inputs
+        3. Mrope is not used
+
+        Note: Unlike the paged variant, ragged prefill is kept enabled on
+        Blackwell: TRT-LLM Gen prefill requires a paged kv cache and
+        therefore does not cover BERT-style encoder-only inputs that lack
+        one. Without this fallback, sm_120 has no usable prefill impl for
+        such cases.
         """
         return (
-            not is_blackwell()
-            and PyFlashinferPrefillAttnOp.support(attn_inputs)
+            PyFlashinferPrefillAttnOp.support(attn_inputs)
             and attn_configs.rope_config.style != RopeStyle.Mrope
         )
 
