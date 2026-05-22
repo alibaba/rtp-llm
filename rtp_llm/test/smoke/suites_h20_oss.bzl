@@ -121,10 +121,10 @@ def h20_oss_suites():
                 name="mla_mega_moe_fp8_attn_cp_pd",
                 task_info="data/model/glm5/glm_5_fp8_q_r_mega_moe_cp.json",
                 envs={
-                    "prefill": ["CUDA_HOME=/usr/local/cuda", "NVCC_PREPEND_FLAGS=-ccbin=/home/zw193905/.conda_gcc/bin/x86_64-conda-linux-gnu-g++", "MOE_STRATEGY=mega_moe"],
+                    "prefill": ["CUDA_HOME=/usr/local/cuda", "NVCC_PREPEND_FLAGS=-ccbin=/home/zw193905/.conda_gcc/bin/x86_64-conda-linux-gnu-g++", "MOE_STRATEGY=mega_moe", "USE_GATHER_PATH=1"],
                     "decode": ["CUDA_HOME=/usr/local/cuda", "NVCC_PREPEND_FLAGS=-ccbin=/home/zw193905/.conda_gcc/bin/x86_64-conda-linux-gnu-g++", "MOE_STRATEGY=mega_moe"]},
                 smoke_args={
-                    "prefill": "--fp8_kv_cache 1 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --reserver_runtime_mem_mb 8192 --role_type PREFILL --seq_size_per_block 64 --dp_size 1 --tp_size 2 --ep_size 2 --world_size 2 --warm_up 0 --quantization FP8_PER_BLOCK_NO_MOE --moe_strategy mega_moe --use_deepep_moe 0 --use_deepep_low_latency 0 --cp_rotate_method ALL_GATHER --use_all_gather=0",
+                    "prefill": "--fp8_kv_cache 1 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --reserver_runtime_mem_mb 8192 --role_type PREFILL --seq_size_per_block 64 --dp_size 1 --tp_size 2 --ep_size 2 --world_size 2 --warm_up 0 --quantization FP8_PER_BLOCK_NO_MOE --moe_strategy mega_moe --use_deepep_moe 0 --use_deepep_low_latency 0 --cp_rotate_method ALL_GATHER --use_all_gather=0 ",
                     "decode": "--fp8_kv_cache 1 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --reserver_runtime_mem_mb 8192 --role_type DECODE --seq_size_per_block 64 --ep_size 2 --dp_size 2 --world_size 2 --warm_up 0 --quantization FP8_PER_BLOCK_NO_MOE --moe_strategy mega_moe --cp_rotate_method PREFILL_CP --use_all_gather=0 --enable_cuda_graph 1"
                 },
                 gpu_type=["L20D"]
@@ -191,11 +191,25 @@ def h20_oss_suites():
                 name="mla_mtp_mega_moe_cudagraph_pd",
                 task_info="data/model/glm5/glm_5_fp8_q_r_h20_mtp_mega_moe_pd.json",
                 envs={
-                    "prefill": ["CUDA_HOME=/usr/local/cuda", "NVCC_PREPEND_FLAGS=-ccbin=/home/zw193905/.conda_gcc/bin/x86_64-conda-linux-gnu-g++", "MOE_STRATEGY=mega_moe"],
+                    "prefill": ["CUDA_HOME=/usr/local/cuda", "NVCC_PREPEND_FLAGS=-ccbin=/home/zw193905/.conda_gcc/bin/x86_64-conda-linux-gnu-g++", "MOE_STRATEGY=mega_moe", "USE_GATHER_PATH=1"],
                     "decode": ["CUDA_HOME=/usr/local/cuda", "NVCC_PREPEND_FLAGS=-ccbin=/home/zw193905/.conda_gcc/bin/x86_64-conda-linux-gnu-g++", "MOE_STRATEGY=mega_moe", "DISABLE_SP_PREFILL_CUDA_GRAPH=1"]},
                 smoke_args={
-                    "prefill": "--fp8_kv_cache 0 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --reserver_runtime_mem_mb 8192 --role_type PREFILL --seq_size_per_block 64 --tp_size 1 --dp_size 4 --ep_size 4 --world_size 4 --warm_up 0 --concurrency_limit 4 --moe_strategy mega_moe --use_deepep_moe 0 --use_deepep_low_latency 0 --use_all_gather=0 --sp_model_type glm_5_mtp --gen_num_per_cycle 3 --sp_type eagle --sp_checkpoint_path /home/zw193905/models/GLM-5-FP8 --sp_act_type bf16 --enable_cuda_graph 0",
-                    "decode": "--fp8_kv_cache 0 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --reserver_runtime_mem_mb 8192 --role_type DECODE --seq_size_per_block 64 --tp_size 1 --dp_size 4 --ep_size 4 --world_size 4 --warm_up 0 --concurrency_limit 4 --moe_strategy mega_moe --use_all_gather=0 --sp_model_type glm_5_mtp --gen_num_per_cycle 3 --sp_type eagle --sp_checkpoint_path /home/zw193905/models/GLM-5-FP8 --sp_act_type bf16 --enable_cuda_graph 1 --decode_capture_config '1,2,3,4'"
+                    "prefill": "--load_cache_timeout_ms 120000 --fp8_kv_cache 1 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --reserver_runtime_mem_mb 8192 --role_type PREFILL --seq_size_per_block 64 --tp_size 2 --dp_size 1 --ep_size 2 --world_size 2 --warm_up 0 --concurrency_limit 8 --moe_strategy mega_moe --use_deepep_moe 0 --use_deepep_low_latency 0 --use_all_gather=0 --sp_model_type glm_5_mtp --gen_num_per_cycle 3 --sp_type eagle --sp_checkpoint_path /home/zw193905/models/GLM-5-FP8 --sp_act_type bf16 --enable_cuda_graph 0 --cp_rotate_method ALL_GATHER",
+                    "decode": "--load_cache_timeout_ms 120000 --fp8_kv_cache 1 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --reserver_runtime_mem_mb 8192 --role_type DECODE --seq_size_per_block 64 --tp_size 1 --dp_size 2 --ep_size 2 --world_size 2 --warm_up 0 --concurrency_limit 8 --moe_strategy mega_moe --use_all_gather=0 --sp_model_type glm_5_mtp --gen_num_per_cycle 3 --sp_type eagle --sp_checkpoint_path /home/zw193905/models/GLM-5-FP8 --sp_act_type bf16 --enable_cuda_graph 1 --cp_rotate_method PREFILL_CP"
+                },
+                gpu_type=["L20D"]
+            ),
+            # Diagnostic-only variant: same as mla_mtp_mega_moe_cudagraph_pd but with decode --enable_cuda_graph 0.
+            # Used to isolate eager-path correctness from cuda-graph capture/replay issues.
+            smoke_test(
+                name="mla_mtp_mega_moe_eager_pd",
+                task_info="data/model/glm5/glm_5_fp8_q_r_h20_mtp_mega_moe_pd.json",
+                envs={
+                    "prefill": ["CUDA_HOME=/usr/local/cuda", "NVCC_PREPEND_FLAGS=-ccbin=/home/zw193905/.conda_gcc/bin/x86_64-conda-linux-gnu-g++", "MOE_STRATEGY=mega_moe", "USE_GATHER_PATH=1"],
+                    "decode": ["CUDA_HOME=/usr/local/cuda", "NVCC_PREPEND_FLAGS=-ccbin=/home/zw193905/.conda_gcc/bin/x86_64-conda-linux-gnu-g++", "MOE_STRATEGY=mega_moe", "DISABLE_SP_PREFILL_CUDA_GRAPH=1"]},
+                smoke_args={
+                    "prefill": "--load_cache_timeout_ms 120000 --fp8_kv_cache 1 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --reserver_runtime_mem_mb 8192 --role_type PREFILL --seq_size_per_block 64 --tp_size 2 --dp_size 1 --ep_size 2 --world_size 2 --warm_up 0 --concurrency_limit 8 --moe_strategy mega_moe --use_deepep_moe 0 --use_deepep_low_latency 0 --use_all_gather=0 --sp_model_type glm_5_mtp --gen_num_per_cycle 3 --sp_type eagle --sp_checkpoint_path /home/zw193905/models/GLM-5-FP8 --sp_act_type bf16 --enable_cuda_graph 0 --cp_rotate_method ALL_GATHER",
+                    "decode": "--load_cache_timeout_ms 120000 --fp8_kv_cache 1 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --reserver_runtime_mem_mb 8192 --role_type DECODE --seq_size_per_block 64 --tp_size 1 --dp_size 2 --ep_size 2 --world_size 2 --warm_up 0 --concurrency_limit 8 --moe_strategy mega_moe --use_all_gather=0 --sp_model_type glm_5_mtp --gen_num_per_cycle 3 --sp_type eagle --sp_checkpoint_path /home/zw193905/models/GLM-5-FP8 --sp_act_type bf16 --enable_cuda_graph 0 --cp_rotate_method PREFILL_CP"
                 },
                 gpu_type=["L20D"]
             ),
