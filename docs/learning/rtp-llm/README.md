@@ -16,6 +16,7 @@
 | 5 | B2.1 | Executor 三件套 | ☐ pending | - | - |
 | 6 | B2.2 | PyWrappedModel C++↔Py 桥 | ☐ pending | - | - |
 | 7 | B2.3 | Qwen3 一遍 forward | ☐ pending | - | - |
+|   | -- | **B2 块末抽测** | ☐ pending | - | - |
 | 8 | B3.1 | Attention 多实现 | ☐ pending | - | - |
 | 9 | B3.2 | Kernel 调用面 | ☐ pending | - | - |
 | 10 | B3.3 | SM 分流 | ☐ pending | - | - |

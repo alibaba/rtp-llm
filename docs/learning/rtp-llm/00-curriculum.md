@@ -111,6 +111,8 @@
 | **B2.2** | PyWrappedModel：C++↔Python 桥 + GIL 命运 | 用 100 字描述"一个 step 里 GIL 何时拿/放/避开"，对照代码验证 |
 | **B2.3** | Qwen3 一遍 forward 看到底：Python 模型本体 | 抽出 `qwen3.py` 的 forward 函数逐行注释，标 "C++ call / kernel call / pure tensor op" |
 
+**B2 块末抽测**：5 题，跨 Executor / PyWrappedModel / Python 模型 三层（例："Stream batch 到 logits 之间至少跨几次语言边界"）
+
 ### B3 — Kernel / device 选择层（4 节）
 
 | 节 | 主题 | 一句话验收任务 |
