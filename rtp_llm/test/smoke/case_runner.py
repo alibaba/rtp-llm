@@ -162,6 +162,15 @@ class CaseRunner(object):
         logging.error("start remote_kvcm_server")
         return None
 
+    def _profile_trace_name(self) -> str:
+        cfg_str = os.environ.get("PROFILE_CONFIG")
+        if cfg_str:
+            try:
+                return json.loads(cfg_str).get("trace_name", "normal_profiler")
+            except json.JSONDecodeError:
+                pass
+        return "normal_profiler"
+
     def _start_profile(self, server_manager: MagaServerManager) -> None:
         # if not str_to_bool(os.environ.get("ENABLE_PROFILE", "false")):
         #    return
@@ -186,6 +195,49 @@ class CaseRunner(object):
         except Exception as e:
             logging.warning(f"[PROFILE] Failed to start profile: {e}")
 
+    def _wait_for_profile_save(
+        self, server_managers: List[MagaServerManager], timeout_s: int = 60
+    ) -> None:
+        """Block until each profiled server has flushed its kineto trace to disk.
+
+        kineto first writes `<trace>.json.tmp`, then renames to `<trace>.json`.
+        If we tear down the server while the async save thread is mid-flight,
+        the .tmp file is left truncated and the json never appears. Polling for
+        the renamed file gives the save worker time to finish.
+        """
+        out_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR")
+        if not out_dir or not os.path.isdir(out_dir):
+            return
+        prefix = self._profile_trace_name() + "_"
+        deadline = time.time() + timeout_s
+        for mgr in server_managers:
+            seen_tmp = False
+            while time.time() < deadline:
+                tmp = [
+                    f
+                    for f in os.listdir(out_dir)
+                    if f.startswith(prefix) and f.endswith(".json.tmp")
+                ]
+                ready = [
+                    f
+                    for f in os.listdir(out_dir)
+                    if f.startswith(prefix) and f.endswith(".json")
+                ]
+                if tmp:
+                    seen_tmp = True
+                if ready and not tmp:
+                    logging.info("[PROFILE] trace flushed: %s", sorted(ready))
+                    break
+                time.sleep(0.5)
+            else:
+                logging.warning(
+                    "[PROFILE] timed out (%ds) waiting for trace flush in %s; "
+                    "seen_tmp=%s — leaving .tmp on disk for offline repair",
+                    timeout_s,
+                    out_dir,
+                    seen_tmp,
+                )
+
     def curl_server(
         self,
         server_manager: MagaServerManager,
@@ -198,6 +250,7 @@ class CaseRunner(object):
         )
         for mgr in targets:
             self._start_profile(mgr)
+        self._profile_targets = list(targets)
         if self.concurrency_test:
             task_states = TaskStates()
             with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
@@ -218,6 +271,7 @@ class CaseRunner(object):
                             task_states = result
         else:
             task_states = self._curl_server_impl(server_manager, self.task_info)
+        self._wait_for_profile_save(targets)
         return task_states
 
     @staticmethod
