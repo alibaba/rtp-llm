@@ -742,6 +742,7 @@ TEST_F(StreamCacheResourceTest, testInitKVBlock_SecondCallDoesNotOverwriteReuseL
     EXPECT_EQ(stream_->initialReuseLength(), expected_total_reuse_len);
     EXPECT_EQ(stream_->localReuseLength(), expected_total_reuse_len);
     EXPECT_EQ(stream_->memoryReuseLength(), expected_memory_reuse_len);
+    EXPECT_EQ(stream_->deviceReuseLength(), expected_total_reuse_len - expected_memory_reuse_len);
 }
 
 TEST_F(StreamCacheResourceTest, testWaitLoadCacheDone_ZeroReuseLen_DoesNotOverwriteExisting) {
@@ -775,6 +776,7 @@ TEST_F(StreamCacheResourceTest, testWaitLoadCacheDone_ZeroReuseLen_DoesNotOverwr
     EXPECT_EQ(stream_->reuseLength(), 100);
     EXPECT_EQ(stream_->initialReuseLength(), 100);
     EXPECT_EQ(stream_->localReuseLength(), 80);
+    EXPECT_EQ(stream_->deviceReuseLength(), 40);
     EXPECT_EQ(stream_->memoryReuseLength(), 40);
     EXPECT_EQ(stream_->remoteReuseLength(), 20);
     EXPECT_EQ(stream_->getMtpTokenIndex(), 100);

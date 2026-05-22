@@ -471,12 +471,18 @@ void RtpLLMRemoteCacheSDKMetrics::report(const kmonitor::MetricsTags*          t
 bool RtpLLMCacheReuseMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_reuse_length, "rtp_llm_kv_cache_reuse_length");
     REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_hit_rate, "rtp_llm_kv_cache_hit_rate");
+    REGISTER_GAUGE_MUTABLE_METRIC(stream_cache_device_reuse_length, "rtp_llm_stream_cache_device_reuse_length");
+    REGISTER_GAUGE_MUTABLE_METRIC(stream_cache_memory_reuse_length, "rtp_llm_stream_cache_memory_reuse_length");
+    REGISTER_GAUGE_MUTABLE_METRIC(stream_cache_remote_reuse_length, "rtp_llm_stream_cache_remote_reuse_length");
     return true;
 }
 
 void RtpLLMCacheReuseMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCacheReuseMetricsCollector* collector) {
     REPORT_MUTABLE_METRIC(kv_cache_reuse_length, collector->kv_cache_reuse_length);
     REPORT_MUTABLE_METRIC(kv_cache_hit_rate, collector->kv_cache_hit_rate);
+    REPORT_MUTABLE_METRIC(stream_cache_device_reuse_length, collector->stream_cache_device_reuse_length);
+    REPORT_MUTABLE_METRIC(stream_cache_memory_reuse_length, collector->stream_cache_memory_reuse_length);
+    REPORT_MUTABLE_METRIC(stream_cache_remote_reuse_length, collector->stream_cache_remote_reuse_length);
 }
 
 bool RtpLLMDeviceCacheReuseMetrics::init(kmonitor::MetricsGroupManager* manager) {
