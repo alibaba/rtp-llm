@@ -1,6 +1,18 @@
 load("@arch_config//:arch_select.bzl", "requirement")
+load("@pip_gpu_rocm_torch//:requirements.bzl", requirement_gpu_rocm = "requirement")
 
 requirement(["triton", "torch", "numpy", "einops", "packaging"])
+
+# flydsl is ROCm-only (only present in pip_gpu_rocm requirements).
+# On non-ROCm configs we point to an empty stub to avoid analysis failures.
+py_library(
+    name = "flydsl",
+    deps = select({
+        "@rtp_llm//:using_rocm": [requirement_gpu_rocm("flydsl")],
+        "//conditions:default": [],
+    }),
+    visibility = ["//visibility:public"],
+)
 
 py_test(
     name = "test_gdn_block_prefill",
@@ -93,7 +105,22 @@ py_test(
     ],
     deps = [
         "//rtp_llm/models_py/triton_kernels:fla",
-    ] + [":torch", ":triton", ":einops"],
+    ] + [":torch", ":triton", ":einops", ":packaging", ":flydsl"],
+    visibility = ["//visibility:public"],
+    tags = ["rocm"],
+    exec_properties = {'gpu':'MI308X-ROCM7'},
+)
+
+# Numeric + cache-byte equivalence for the FlyDSL Chunk-GDN direct-store path,
+# pinned to ROCm (MI308X) because the FlyDSL megakernel only runs on AMD.
+py_test(
+    name = "test_flydsl_chunk_gdn_cache_store",
+    srcs = [
+        "test_flydsl_chunk_gdn_cache_store.py"
+    ],
+    deps = [
+        "//rtp_llm/models_py/triton_kernels:fla",
+    ] + [":triton", ":torch", ":numpy", ":einops", ":packaging", ":flydsl"],
     visibility = ["//visibility:public"],
     tags = ["rocm"],
     exec_properties = {'gpu':'MI308X-ROCM7'},

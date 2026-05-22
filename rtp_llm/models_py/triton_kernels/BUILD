@@ -1,3 +1,5 @@
+load("@pip_gpu_rocm_torch//:requirements.bzl", requirement_gpu_rocm = "requirement")
+
 alias(
     name = "autotune_cache",
     actual = "//rtp_llm/models_py/triton_kernels/autotune_cache",
@@ -7,7 +9,10 @@ alias(
 py_library(
     name = "fla",
     srcs = glob(["fla/*.py"]),
-    deps = [":common"],
+    deps = [":common"] + select({
+        "@rtp_llm//:using_rocm": [requirement_gpu_rocm("flydsl")],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"]
 )
 
