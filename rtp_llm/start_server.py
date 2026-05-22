@@ -460,13 +460,13 @@ def start_server(py_env_configs: PyEnvConfigs):
             backend_process = start_backend_server_impl(
                 global_controller, py_env_configs, process_manager
             )
-            process_manager.add_process(backend_process)
+            process_manager.add_process(backend_process, shutdown_group="backend")
 
         logging.info("start frontend server")
         frontend_process = start_frontend_server_impl(
             global_controller, py_env_configs, process_manager
         )
-        process_manager.add_processes(frontend_process)
+        process_manager.add_processes(frontend_process, shutdown_group="frontend")
 
         if py_env_configs.role_config.role_type != RoleType.VIT:
             logging.info("start dash_sc server")
@@ -474,7 +474,9 @@ def start_server(py_env_configs: PyEnvConfigs):
                 global_controller, py_env_configs, process_manager
             )
             if dash_sc_processes:
-                process_manager.add_processes(dash_sc_processes)
+                process_manager.add_processes(
+                    dash_sc_processes, shutdown_group="frontend"
+                )
 
         # Start parallel health checks and wait for completion
         if not process_manager.run_health_checks():
