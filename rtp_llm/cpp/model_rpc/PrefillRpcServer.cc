@@ -731,6 +731,13 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
     std::vector<std::future<void>> peer_tasks;
     peer_tasks.reserve(slot_num);
 
+    // Deadline ceiling: peer Enqueue must not hang forever — if a peer pod is
+    // unreachable or stuck, task.get() would block phase 2 indefinitely and
+    // freeze DP0's engine loop. Mirror remoteAllocateResource (line 190-196):
+    // request.timeout_ms > 0 > max_rpc_timeout_ms > MAX_GRPC_TIMEOUT_MS.
+    const auto max_rpc_timeout_ms = maga_init_params_.pd_sep_config.max_rpc_timeout_ms;
+    const auto default_timeout_ms = max_rpc_timeout_ms > 0 ? max_rpc_timeout_ms : MAX_GRPC_TIMEOUT_MS;
+
     // Phase 1: async fan-out to every non-self slot.
     for (int i = 0; i < slot_num; ++i) {
         const auto&   input     = request->inputs(i);
@@ -751,25 +758,44 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
             continue;
         }
 
+        int64_t slot_timeout_ms = input.generate_config().timeout_ms();
+        if (slot_timeout_ms <= 0) {
+            slot_timeout_ms = default_timeout_ms;
+        }
+        auto deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(slot_timeout_ms);
+
         const std::string peer = peer_addrs[slot_rank];
-        peer_tasks.emplace_back(std::async(std::launch::async, [this, &input, ack, peer, fill_error]() {
-            auto connect_status = resource_.rpc_pool.getConnection(peer);
-            if (!connect_status.ok()) {
-                fill_error(ack,
-                           input.request_id(),
-                           grpc::StatusCode::UNAVAILABLE,
-                           "get grpc connection for peer " + peer
-                               + " failed: " + std::string(connect_status.status().message()));
-                return;
-            }
-            EnqueueRequestPB peer_req;
-            *peer_req.mutable_input() = input;
-            grpc::ClientContext ctx;
-            auto                peer_status = connect_status.value().stub->Enqueue(&ctx, peer_req, ack);
-            if (!peer_status.ok()) {
-                fill_error(ack, input.request_id(), peer_status.error_code(), peer_status.error_message());
-            }
-        }));
+        peer_tasks.emplace_back(
+            std::async(std::launch::async, [this, &input, ack, peer, deadline, slot_timeout_ms, fill_error]() {
+                auto connect_status = resource_.rpc_pool.getConnection(peer);
+                if (!connect_status.ok()) {
+                    RTP_LLM_LOG_WARNING("BatchEnqueue peer connect failed: request [%ld] peer [%s] msg [%s]",
+                                        input.request_id(),
+                                        peer.c_str(),
+                                        std::string(connect_status.status().message()).c_str());
+                    fill_error(ack,
+                               input.request_id(),
+                               grpc::StatusCode::UNAVAILABLE,
+                               "get grpc connection for peer " + peer
+                                   + " failed: " + std::string(connect_status.status().message()));
+                    return;
+                }
+                EnqueueRequestPB peer_req;
+                *peer_req.mutable_input() = input;
+                grpc::ClientContext ctx;
+                ctx.set_deadline(deadline);
+                auto peer_status = connect_status.value().stub->Enqueue(&ctx, peer_req, ack);
+                if (!peer_status.ok()) {
+                    RTP_LLM_LOG_WARNING(
+                        "BatchEnqueue peer Enqueue failed: request [%ld] peer [%s] timeout_ms [%ld] code [%d] msg [%s]",
+                        input.request_id(),
+                        peer.c_str(),
+                        slot_timeout_ms,
+                        static_cast<int>(peer_status.error_code()),
+                        peer_status.error_message().c_str());
+                    fill_error(ack, input.request_id(), peer_status.error_code(), peer_status.error_message());
+                }
+            }));
     }
 
     // Phase 2: wait for every peer Enqueue to return. The remote handler only
