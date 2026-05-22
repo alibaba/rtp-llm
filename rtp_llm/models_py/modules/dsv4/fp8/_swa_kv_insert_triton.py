@@ -23,17 +23,23 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv4.fp8._trap_utils import (
+    trap_invalid_kv_access_enabled,
+    validate_slot_mapping,
+)
+
 
 @triton.jit
-def _trap_invalid_kv_access() -> None:
-    tl.inline_asm_elementwise(
-        "trap; // dummy $0",
-        "=r",
-        [],
-        dtype=tl.int32,
-        is_pure=False,
-        pack=1,
-    )
+def _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS: tl.constexpr) -> None:
+    if TRAP_INVALID_KV_ACCESS:
+        tl.inline_asm_elementwise(
+            "trap; // dummy $0",
+            "=r",
+            [],
+            dtype=tl.int32,
+            is_pure=False,
+            pack=1,
+        )
 
 
 @triton.jit(do_not_specialize=["num_tokens"])
@@ -56,6 +62,7 @@ def _quantize_and_insert_k_kernel(
     num_cache_blocks: tl.constexpr,
     fp8_max: tl.constexpr,  # 448.0
     n_quant_blocks: tl.constexpr,  # 8 (7 real + 1 padding tile-loop iter)
+    TRAP_INVALID_KV_ACCESS: tl.constexpr,
 ):
     """One program per token. Block layout per pool block:
     [0, cache_block_size * 576)             — token data (NoPE+RoPE interleaved)
@@ -74,9 +81,9 @@ def _quantize_and_insert_k_kernel(
     block_idx = slot_idx // cache_block_size
     pos_in_block = slot_idx % cache_block_size
     if block_idx < 0:
-        _trap_invalid_kv_access()
+        _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
     if block_idx >= num_cache_blocks:
-        _trap_invalid_kv_access()
+        _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
 
     input_row_ptr = k_ptr + pid * input_dim
 
@@ -181,6 +188,13 @@ def quantize_and_insert_k_cache(
 
     block_size = int(k_cache.shape[1])
     block_stride = int(k_cache.stride(0))  # bytes per block (TMA-padded)
+    validate_slot_mapping(
+        "swa.quantize_and_insert.slot_mapping",
+        slot_mapping,
+        block_size=block_size,
+        num_blocks=int(k_cache.shape[0]),
+        negative_mode="skip_minus_one",
+    )
 
     grid = (num_tokens,)
     _quantize_and_insert_k_kernel[grid](
@@ -199,4 +213,5 @@ def quantize_and_insert_k_cache(
         num_cache_blocks=int(k_cache.shape[0]),
         fp8_max=_FP8_MAX,
         n_quant_blocks=8,
+        TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
     )
