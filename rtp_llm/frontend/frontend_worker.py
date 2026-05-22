@@ -113,6 +113,17 @@ class FrontendWorker:
 
         logging.info("frontend worker start done.")
 
+    async def close(self):
+        await self.pipeline.close()
+
+    def stop(self):
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(self.close())
+        else:
+            loop.create_task(self.close())
+
     def tokenizer_offset_mapping(self, prompt: str) -> Any:
         return self.pipeline.tokenizer(
             prompt, return_offsets_mapping=True, return_attention_mask=False

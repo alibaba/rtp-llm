@@ -84,6 +84,10 @@ class BackendRPCServerVisitor:
             master_config=master_config,
         )
 
+    async def close(self):
+        await self.model_rpc_client.close()
+        await self.master_client.close()
+
     @staticmethod
     def get_backend_role_list(
         pd_sep_config,
