@@ -313,4 +313,74 @@ public class MetricConstant {
      * Forward to master result QPS (status: success/failure)
      */
     public static final String FORWARD_TO_MASTER_RESULT = "app.forward.to.master.result";
+
+    /* ------------------------ V1 DP Batch Monitoring -------------------------- */
+
+    /**
+     * V1 DP batch flush QPS, tagged by trigger reason
+     * (BUCKET_FULL / PER_REQUEST_TIMEOUT / DEADLINE / WINDOW_TIMER)
+     */
+    public static final String V1_DP_BATCH_FLUSH_QPS = "app.v1.dp.batch.flush.qps";
+
+    /**
+     * V1 DP batch real-request size at flush (excludes fake-pad slots), tagged by flush reason
+     */
+    public static final String V1_DP_BATCH_SIZE = "app.v1.dp.batch.size";
+
+    /**
+     * V1 DP rank hit QPS, tagged by rank — measures load distribution across dp_ranks
+     */
+    public static final String V1_DP_RANK_HIT_QPS = "app.v1.dp.rank.hit.qps";
+
+    /**
+     * V1 fake-pad slot emission QPS (sum of fake slots injected to fill a DP barrier)
+     */
+    public static final String V1_DP_FAKE_PAD_SLOT_QPS = "app.v1.dp.fake.pad.slot.qps";
+
+    /**
+     * V1 fake-pad slot count per batch (gauge), tagged by dpSize
+     */
+    public static final String V1_DP_FAKE_PAD_COUNT_PER_BATCH = "app.v1.dp.fake.pad.count.per.batch";
+
+    /**
+     * V1 InflightBatchRegistry batch count gauge
+     */
+    public static final String V1_DP_INFLIGHT_BATCH_COUNT = "app.v1.dp.inflight.batch.count";
+
+    /**
+     * V1 InflightBatchRegistry request count gauge
+     */
+    public static final String V1_DP_INFLIGHT_REQUEST_COUNT = "app.v1.dp.inflight.request.count";
+
+    /**
+     * V1 InflightBatchRegistry safety-net eviction count (cumulative — should be 0 in steady state)
+     */
+    public static final String V1_DP_INFLIGHT_EVICTED_COUNT = "app.v1.dp.inflight.evicted.count";
+
+    /**
+     * V1 active per-model batcher count
+     */
+    public static final String V1_DP_BATCHER_COUNT = "app.v1.dp.batcher.count";
+
+    /**
+     * V1 total queued request depth across all per-model batchers
+     */
+    public static final String V1_DP_QUEUE_DEPTH = "app.v1.dp.queue.depth";
+
+    /**
+     * V1 per-request wait time (ms) spent in the per-model batcher queue
+     * before being drained into a batch, tagged by flush reason. Reported
+     * once per request at dispatch time so KMonitor can derive p50/p99.
+     */
+    public static final String V1_DP_BATCH_WAIT_TIME_MS = "app.v1.dp.batch.wait.time.ms";
+
+    /* ------------------------ SLO Violation Monitoring -------------------------- */
+
+    /**
+     * Routing SLO violation QPS — incremented when a batch is dispatched past
+     * its SLO deadline (head request's deadline already expired). Distinct from
+     * {@link #ROUTING_FAILURE_QPS} so SLO pressure can be alerted on without
+     * being drowned by worker-reject failures.
+     */
+    public static final String ROUTING_SLO_VIOLATION_QPS = "app.routing.slo.violation.qps";
 }

@@ -7,6 +7,7 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.service.monitor.DpBatchReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.util.Logger;
 
@@ -55,6 +56,7 @@ public class GlobalPrefillBatcher {
     private final Consumer<PrefillBatch> dispatchCallback;
     private final ScheduledExecutorService timerExecutor;
     private final CacheAwareService cacheAwareService;
+    private final DpBatchReporter dpBatchReporter;
 
     // --- guarded by synchronized(this) ---
     private final HashMap<Integer, ArrayDeque<QueuedRequest>> buckets = new HashMap<>();
@@ -71,7 +73,8 @@ public class GlobalPrefillBatcher {
                                 DispatchPlanner planner,
                                 Consumer<PrefillBatch> dispatchCallback,
                                 ScheduledExecutorService timerExecutor,
-                                CacheAwareService cacheAwareService) {
+                                CacheAwareService cacheAwareService,
+                                DpBatchReporter dpBatchReporter) {
         this.model = model;
         this.configService = configService;
         this.engineWorkerStatus = engineWorkerStatus;
@@ -79,6 +82,18 @@ public class GlobalPrefillBatcher {
         this.dispatchCallback = dispatchCallback;
         this.timerExecutor = timerExecutor;
         this.cacheAwareService = cacheAwareService;
+        this.dpBatchReporter = dpBatchReporter;
+    }
+
+    public GlobalPrefillBatcher(String model,
+                                ConfigService configService,
+                                EngineWorkerStatus engineWorkerStatus,
+                                DispatchPlanner planner,
+                                Consumer<PrefillBatch> dispatchCallback,
+                                ScheduledExecutorService timerExecutor,
+                                CacheAwareService cacheAwareService) {
+        this(model, configService, engineWorkerStatus, planner, dispatchCallback, timerExecutor,
+                cacheAwareService, null);
     }
 
     public GlobalPrefillBatcher(String model,
@@ -87,7 +102,7 @@ public class GlobalPrefillBatcher {
                                 DispatchPlanner planner,
                                 Consumer<PrefillBatch> dispatchCallback,
                                 ScheduledExecutorService timerExecutor) {
-        this(model, configService, engineWorkerStatus, planner, dispatchCallback, timerExecutor, null);
+        this(model, configService, engineWorkerStatus, planner, dispatchCallback, timerExecutor, null, null);
     }
 
     public void offer(QueuedRequest req) {
@@ -100,6 +115,7 @@ public class GlobalPrefillBatcher {
         QueuedRequest enriched = enrichRequest(req, cfg, dpSize);
 
         List<QueuedRequest> drained = null;
+        DpBatchReporter.FlushReason flushReason = null;
         synchronized (this) {
             int bIdx = enriched.bucketIndex();
             buckets.computeIfAbsent(bIdx, k -> new ArrayDeque<>()).add(enriched);
@@ -110,16 +126,19 @@ public class GlobalPrefillBatcher {
 
             if (bucketSize(bIdx) >= dpSize) {
                 drained = drainBucketLocked(bIdx, dpSize, batchWindowMs);
+                flushReason = DpBatchReporter.FlushReason.BUCKET_FULL;
             } else if (headWaitedTooLong(requestTimeoutMs)) {
                 drained = drainWithMergeLocked(dpSize, batchWindowMs);
+                flushReason = DpBatchReporter.FlushReason.PER_REQUEST_TIMEOUT;
             } else if (earliestDeadlineMicros <= nowMicros) {
                 drained = drainWithMergeLocked(dpSize, batchWindowMs);
+                flushReason = DpBatchReporter.FlushReason.DEADLINE;
             } else {
                 armTimerLocked(batchWindowMs, nowMicros);
             }
         }
         if (drained != null) {
-            planAndDispatch(drained, dpSize, cfg);
+            planAndDispatch(drained, dpSize, cfg, flushReason);
         }
     }
 
@@ -202,7 +221,7 @@ public class GlobalPrefillBatcher {
             }
         }
         if (drained != null) {
-            planAndDispatch(drained, dpSize, cfg);
+            planAndDispatch(drained, dpSize, cfg, DpBatchReporter.FlushReason.WINDOW_TIMER);
         }
     }
 
@@ -360,7 +379,16 @@ public class GlobalPrefillBatcher {
         return false;
     }
 
-    private void planAndDispatch(List<QueuedRequest> drained, int dpSize, FlexlbConfig cfg) {
+    private void planAndDispatch(List<QueuedRequest> drained, int dpSize, FlexlbConfig cfg,
+                                  DpBatchReporter.FlushReason flushReason) {
+        if (dpBatchReporter != null && flushReason != null) {
+            dpBatchReporter.reportBatchFlush(flushReason, drained.size());
+            long nowMicros = System.nanoTime() / 1000;
+            for (QueuedRequest qr : drained) {
+                long waitMs = (nowMicros - qr.enqueuedAtMicros()) / 1000;
+                dpBatchReporter.reportRequestWaitTime(flushReason, waitMs);
+            }
+        }
         DispatchPlan result;
         try {
             result = planner.plan(drained, new DispatchContext(model, dpSize, cfg, drained));

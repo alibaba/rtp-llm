@@ -21,9 +21,12 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.engine.grpc.dp.DpGrpcClient;
+import org.flexlb.service.monitor.DpBatchReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.util.Logger;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.DependsOn;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PreDestroy;
@@ -49,6 +52,7 @@ public class DpBatchScheduler {
     private final DpGrpcClient grpcClient;
     private final InflightBatchRegistry inflightRegistry;
     private final CacheAwareService cacheAwareService;
+    private DpBatchReporter dpBatchReporter;
 
     private final Map<String, GlobalPrefillBatcher> batchers = new ConcurrentHashMap<>();
 
@@ -77,6 +81,11 @@ public class DpBatchScheduler {
         this.cacheAwareService = cacheAwareService;
     }
 
+    @Autowired(required = false)
+    public void setDpBatchReporter(DpBatchReporter dpBatchReporter) {
+        this.dpBatchReporter = dpBatchReporter;
+    }
+
     // ============== Submit (called by RouteService) ==============
 
     public CompletableFuture<Response> submit(BalanceContext ctx) {
@@ -95,7 +104,7 @@ public class DpBatchScheduler {
 
     private GlobalPrefillBatcher newBatcher(String model) {
         return new GlobalPrefillBatcher(model, configService, engineWorkerStatus,
-                planner, this::dispatchBatch, timerExecutor, cacheAwareService);
+                planner, this::dispatchBatch, timerExecutor, cacheAwareService, dpBatchReporter);
     }
 
     // ============== Dispatch (called by GlobalPrefillBatcher) ==============
@@ -120,10 +129,48 @@ public class DpBatchScheduler {
         }
 
         EngineRpcService.BatchEnqueueRequestPB pb = buildPb(batchId, assignments, batch.dpSize());
+        reportBatchComposition(assignments, batch.dpSize());
         inflightRegistry.register(batchId, batch);
 
         grpcClient.enqueue(batch.prefillIp(), batch.prefillGrpcPort(), pb)
                 .whenComplete((ack, err) -> handleAck(batch, batchId, assignments, ack, err));
+    }
+
+    private void reportBatchComposition(List<RankAssignment> assignments, int dpSize) {
+        if (dpBatchReporter == null || dpSize <= 0) {
+            return;
+        }
+        boolean[] rankFilled = new boolean[dpSize];
+        for (RankAssignment ra : assignments) {
+            if (ra.dpRank() >= 0 && ra.dpRank() < dpSize) {
+                rankFilled[ra.dpRank()] = true;
+            }
+        }
+        int filledRanks = 0;
+        for (int rank = 0; rank < dpSize; rank++) {
+            if (rankFilled[rank]) {
+                dpBatchReporter.reportDpRankHit(rank);
+                filledRanks++;
+            }
+        }
+        dpBatchReporter.reportFakePadSlots(dpSize - filledRanks, dpSize);
+    }
+
+    /**
+     * Periodic gauge scrape for InflightBatchRegistry health + active batcher counts.
+     * Decoupled from inline reporting because these are steady-state observables
+     * rather than per-event signals.
+     */
+    @Scheduled(fixedRate = 1000L)
+    public void reportSchedulerStats() {
+        if (dpBatchReporter == null) {
+            return;
+        }
+        dpBatchReporter.reportInflightStats(
+                inflightRegistry.sizeBatches(),
+                inflightRegistry.sizeRequests(),
+                inflightRegistry.getEvictedCount());
+        dpBatchReporter.reportBatcherStats(batcherCount(), totalQueueDepth());
     }
 
     private void handleAck(PrefillBatch batch, long batchId, List<RankAssignment> assignments,
