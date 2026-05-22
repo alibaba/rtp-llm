@@ -26,6 +26,15 @@ public class DispatchConfig {
     @JsonProperty("fePoolAddresses")
     private List<String> fePoolAddresses = List.of();
 
+    @JsonProperty("feMaxConnections")
+    private int feMaxConnections = 200;
+
+    @JsonProperty("feMaxPendingAcquire")
+    private int feMaxPendingAcquire = 1000;
+
+    @JsonProperty("feMaxResponseBytes")
+    private int feMaxResponseBytes = 16 * 1024 * 1024;
+
     public static DispatchConfig fromJson(String json) {
         if (json == null || json.isBlank()) {
             return new DispatchConfig();
@@ -68,5 +77,17 @@ public class DispatchConfig {
 
     public List<String> getFePoolAddresses() {
         return fePoolAddresses;
+    }
+
+    public int getFeMaxConnections() {
+        return feMaxConnections;
+    }
+
+    public int getFeMaxPendingAcquire() {
+        return feMaxPendingAcquire;
+    }
+
+    public int getFeMaxResponseBytes() {
+        return feMaxResponseBytes;
     }
 }

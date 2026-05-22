@@ -32,4 +32,23 @@ class DispatchConfigTest {
         assertThrows(IllegalArgumentException.class,
                 () -> DispatchConfig.fromJson("{\"enabled\":true,\"dispatchPort\":7005}"));
     }
+
+    @Test
+    void sameJvmIsolationKnobsDefaultSensibly() {
+        DispatchConfig c = DispatchConfig.fromJson(null);
+        assertEquals(200, c.getFeMaxConnections());
+        assertEquals(1000, c.getFeMaxPendingAcquire());
+        assertEquals(16 * 1024 * 1024, c.getFeMaxResponseBytes());
+    }
+
+    @Test
+    void sameJvmIsolationKnobsOverridableViaJson() {
+        DispatchConfig c = DispatchConfig.fromJson(
+                "{\"enabled\":true,\"fePoolAddresses\":[\"http://a:8088\"],"
+                        + "\"feMaxConnections\":64,\"feMaxPendingAcquire\":256,"
+                        + "\"feMaxResponseBytes\":1048576}");
+        assertEquals(64, c.getFeMaxConnections());
+        assertEquals(256, c.getFeMaxPendingAcquire());
+        assertEquals(1048576, c.getFeMaxResponseBytes());
+    }
 }
