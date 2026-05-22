@@ -79,6 +79,7 @@ void RemoteRpcServer::initCacheStore(const EngineInitParams&                init
     params.messager_io_thread_count     = init_params.cache_store_config.messager_io_thread_count;
     params.messager_worker_thread_count = init_params.cache_store_config.messager_worker_thread_count;
     params.metrics_reporter             = metrics_reporter_;
+    params.device_id                    = static_cast<int>(init_params.parallelism_config.local_rank);
     RTP_LLM_LOG_INFO("cache store listen port is [%ld], rdma listen port is [%ld] rdma_mode is [%d]",
                      params.listen_port,
                      params.rdma_listen_port,
