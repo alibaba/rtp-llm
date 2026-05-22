@@ -179,13 +179,19 @@ def test_chunk_varlen(
     do = torch.randn_like(v)
     dht = torch.rand_like(h0)
 
+    # chunk_gated_delta_rule now follows SGL main's V-first state layout
+    # (see refactor commit 5f271c1b): initial_state/final_state are stored
+    # as (..., V, K), i.e. .transpose(-1, -2) of the reference's K-first
+    # (..., K, V) layout. The reference function recurrent_gated_delta_rule_ref
+    # still uses the FLA-style K-first convention, so we transpose at the
+    # boundary to keep the numeric comparison meaningful.
     tri, _, tri_ht = chunk_gated_delta_rule(
         q=q.clone(),
         k=k.clone(),
         v=v.clone(),
         beta=beta.clone(),
         g=g.clone(),
-        initial_state=h0.clone(),
+        initial_state=h0.transpose(-1, -2).contiguous(),
         output_final_state=True,
         cu_seqlens=cu_seqlens,
     )
@@ -207,7 +213,8 @@ def test_chunk_varlen(
     ref_ht = torch.cat(ref_ht, 0)
 
     assert_close("o", ref, tri, 0.005)
-    assert_close("ht", ref_ht, tri_ht, 0.005)
+    # tri_ht is V-first (N, H, V, K); transpose back to compare with K-first ref_ht.
+    assert_close("ht", ref_ht, tri_ht.transpose(-1, -2), 0.005)
 
 
 if __name__ == "__main__":
