@@ -9,6 +9,7 @@ import org.flexlb.service.grace.strategy.ActiveRequestShutdownHooker;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.event.EventListener;
+import org.springframework.core.annotation.Order;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.server.RouterFunction;
@@ -54,6 +55,7 @@ public class AppStateHookServer {
     }
 
     @Bean
+    @Order(0)
     public RouterFunction<ServerResponse> appStateHook() {
         return route()
                 .GET("/hook/process_ok", accept(MediaType.ALL), this::handleProcessOk)

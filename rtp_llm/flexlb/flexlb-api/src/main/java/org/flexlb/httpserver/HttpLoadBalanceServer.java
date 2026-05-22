@@ -27,6 +27,7 @@ import org.flexlb.util.JsonUtils;
 import org.flexlb.util.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.Bean;
+import org.springframework.core.annotation.Order;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.server.RouterFunction;
@@ -69,6 +70,7 @@ public class HttpLoadBalanceServer {
     }
 
     @Bean
+    @Order(0)
     public RouterFunction<ServerResponse> loadBalancePrefill() {
         return route()
                 .POST("/rtp_llm/schedule", accept(MediaType.APPLICATION_JSON),
