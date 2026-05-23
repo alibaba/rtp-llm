@@ -449,9 +449,15 @@ message MemoryOperationRequestPB {
         int32 disk_slot_id = 6;
         uint64 generation = 7;
         uint64 logical_bytes = 8;
+        // packed bitmap, length = ceil(slot_count / 8). bit i = 1 means
+        // layerRegionSlots()[i] has a valid gpu_block and should be copied;
+        // bit i = 0 means slot i is NULL and the staging buffer is zeroed.
         bytes valid_slot_bitmap = 9;
         uint64 key_generation = 10;
         bool is_complete = 11;
+        // Used by SPILL_MEMORY_TO_DISK / SPILL_WRITE_STATUS to identify a job
+        // across master and workers.
+        uint64 spill_job_id = 12;
     }
     enum CopyDirection {
         H2D = 0;
@@ -475,14 +481,33 @@ message MemoryOperationRequestPB {
     repeated CopyItem copy_items = 1;
     CopyDirection copy_direction = 2;
     uint32 memory_op_protocol_version = 3;
+    // Monotonically increasing per (master, worker) pair. Workers reject out-of-
+    // order / duplicate / skipped sequence numbers with error_type=protocol_violation.
     uint64 op_sequence = 4;
     OpType op_type = 5;
+    // Caller's per-rank capability mask. master sets slot_stride_bytes in
+    // capability handshake; workers reply with the same to confirm matching schema.
     uint64 disk_spill_capability_mask = 6;
+    // SHA-1-like compact hex hash of (DSV4 cache layout + slot_stride + rank/world
+    // + dtype + region mapping + RTP-LLM build id). Workers compare to their own
+    // schema_hash; mismatch aborts the handshake.
+    string schema_hash = 7;
+}
+
+message SpillJobWorkerStatusPB {
+    uint64 spill_job_id = 1;
+    int32 status = 2;  // 0=PENDING, 1=SUCCESS, 2=FAILED, 3=UNKNOWN_JOB
 }
 
 message MemoryOperationResponsePB {
     bool success = 1;
     string error_type = 2;
+    // Per-job pwrite status payload for SPILL_WRITE_STATUS pull. Always present
+    // when op_type=SPILL_WRITE_STATUS; ignored for other ops.
+    repeated SpillJobWorkerStatusPB job_status = 3;
+    // Echo back caller's capability mask in handshake responses.
+    uint64 disk_spill_capability_mask = 4;
+    string schema_hash = 5;
 }
 
 message TPWorkerInfoPB {

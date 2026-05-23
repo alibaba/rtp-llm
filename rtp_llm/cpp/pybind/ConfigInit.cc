@@ -362,6 +362,23 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("memory_cache_disk_paths", &KVCacheConfig::memory_cache_disk_paths)
         .def_readwrite("memory_cache_disk_init_timeout_ms", &KVCacheConfig::memory_cache_disk_init_timeout_ms)
         .def_readwrite("memory_cache_disk_stage_ack_timeout_ms", &KVCacheConfig::memory_cache_disk_stage_ack_timeout_ms)
+        .def_readwrite("memory_cache_disk_spill_commit_timeout_ms",
+                       &KVCacheConfig::memory_cache_disk_spill_commit_timeout_ms)
+        .def_readwrite("memory_cache_disk_segment_mb", &KVCacheConfig::memory_cache_disk_segment_mb)
+        .def_readwrite("memory_cache_disk_align_bytes", &KVCacheConfig::memory_cache_disk_align_bytes)
+        .def_readwrite("memory_cache_disk_io_threads_per_disk", &KVCacheConfig::memory_cache_disk_io_threads_per_disk)
+        .def_readwrite("memory_cache_disk_queue_size_per_disk", &KVCacheConfig::memory_cache_disk_queue_size_per_disk)
+        .def_readwrite("memory_cache_disk_direct_io", &KVCacheConfig::memory_cache_disk_direct_io)
+        .def_readwrite("memory_cache_disk_direct_io_required", &KVCacheConfig::memory_cache_disk_direct_io_required)
+        .def_readwrite("memory_cache_disk_drop_on_queue_full", &KVCacheConfig::memory_cache_disk_drop_on_queue_full)
+        .def_readwrite("memory_cache_disk_max_inflight_bytes", &KVCacheConfig::memory_cache_disk_max_inflight_bytes)
+        .def_readwrite("memory_cache_disk_max_inflight_bytes_per_disk",
+                       &KVCacheConfig::memory_cache_disk_max_inflight_bytes_per_disk)
+        .def_readwrite("memory_cache_disk_max_sync_stage_us", &KVCacheConfig::memory_cache_disk_max_sync_stage_us)
+        .def_readwrite("memory_cache_disk_metrics_report_interval_ms",
+                       &KVCacheConfig::memory_cache_disk_metrics_report_interval_ms)
+        .def_readwrite("memory_cache_disk_max_staging_buffers_per_disk",
+                       &KVCacheConfig::memory_cache_disk_max_staging_buffers_per_disk)
         .def_readwrite("write_cache_sync", &KVCacheConfig::write_cache_sync)
         .def_readwrite("enable_tiered_memory_cache", &KVCacheConfig::enable_tiered_memory_cache)
         .def_readwrite("device_cache_min_free_blocks", &KVCacheConfig::device_cache_min_free_blocks)
@@ -415,6 +432,19 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.memory_cache_disk_paths,
                                       self.memory_cache_disk_init_timeout_ms,
                                       self.memory_cache_disk_stage_ack_timeout_ms,
+                                      self.memory_cache_disk_spill_commit_timeout_ms,
+                                      self.memory_cache_disk_segment_mb,
+                                      self.memory_cache_disk_align_bytes,
+                                      self.memory_cache_disk_io_threads_per_disk,
+                                      self.memory_cache_disk_queue_size_per_disk,
+                                      self.memory_cache_disk_direct_io,
+                                      self.memory_cache_disk_direct_io_required,
+                                      self.memory_cache_disk_drop_on_queue_full,
+                                      self.memory_cache_disk_max_inflight_bytes,
+                                      self.memory_cache_disk_max_inflight_bytes_per_disk,
+                                      self.memory_cache_disk_max_sync_stage_us,
+                                      self.memory_cache_disk_metrics_report_interval_ms,
+                                      self.memory_cache_disk_max_staging_buffers_per_disk,
                                       self.enable_remote_cache,
                                       self.write_cache_sync,
                                       self.enable_tiered_memory_cache,
@@ -443,7 +473,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.dsv4_fixed_pool_blocks);
             },
             [](py::tuple t) {
-                if (t.size() != 49)
+                if (t.size() != 62)
                     throw std::runtime_error("Invalid state!");
                 KVCacheConfig c;
                 try {
@@ -470,32 +500,45 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.memory_cache_disk_paths                = t[20].cast<std::string>();
                     c.memory_cache_disk_init_timeout_ms      = t[21].cast<int64_t>();
                     c.memory_cache_disk_stage_ack_timeout_ms = t[22].cast<int64_t>();
-                    c.enable_remote_cache                    = t[23].cast<bool>();
-                    c.write_cache_sync                       = t[24].cast<bool>();
-                    c.enable_tiered_memory_cache             = t[25].cast<bool>();
-                    c.device_cache_min_free_blocks           = t[26].cast<int64_t>();
-                    c.reco_enable_vipserver                  = t[27].cast<bool>();
-                    c.reco_vipserver_domain                  = t[28].cast<std::string>();
-                    c.reco_server_address                    = t[29].cast<std::string>();
-                    c.reco_instance_group                    = t[30].cast<std::string>();
-                    c.reco_meta_channel_retry_time           = t[31].cast<uint32_t>();
-                    c.reco_meta_channel_connection_timeout   = t[32].cast<uint32_t>();
-                    c.reco_meta_channel_call_timeout         = t[33].cast<uint32_t>();
-                    c.reco_storage_thread_num                = t[34].cast<uint32_t>();
-                    c.reco_storage_queue_size                = t[35].cast<uint32_t>();
-                    c.reco_put_timeout_ms                    = t[36].cast<int>();
-                    c.reco_get_timeout_ms                    = t[37].cast<int>();
-                    c.reco_model_sdk_config                  = t[38].cast<std::string>();
-                    c.reco_model_user_data                   = t[39].cast<std::string>();
-                    c.reco_model_extra_info                  = t[40].cast<std::string>();
-                    c.reco_instance_id_salt                  = t[41].cast<std::string>();
-                    c.reco_asyncwrapper_thread_num           = t[42].cast<size_t>();
-                    c.reco_asyncwrapper_queue_size           = t[43].cast<size_t>();
-                    c.reco_get_broadcast_timeout             = t[44].cast<int>();
-                    c.reco_put_broadcast_timeout             = t[45].cast<int>();
-                    c.reco_client_config                     = t[46].cast<std::string>();
-                    c.ssm_state_dtype                        = t[47].cast<std::string>();
-                    c.dsv4_fixed_pool_blocks                 = t[48].cast<uint32_t>();
+                    c.memory_cache_disk_spill_commit_timeout_ms = t[23].cast<int64_t>();
+                    c.memory_cache_disk_segment_mb              = t[24].cast<int64_t>();
+                    c.memory_cache_disk_align_bytes             = t[25].cast<int64_t>();
+                    c.memory_cache_disk_io_threads_per_disk     = t[26].cast<int>();
+                    c.memory_cache_disk_queue_size_per_disk     = t[27].cast<int>();
+                    c.memory_cache_disk_direct_io               = t[28].cast<bool>();
+                    c.memory_cache_disk_direct_io_required      = t[29].cast<bool>();
+                    c.memory_cache_disk_drop_on_queue_full      = t[30].cast<bool>();
+                    c.memory_cache_disk_max_inflight_bytes      = t[31].cast<int64_t>();
+                    c.memory_cache_disk_max_inflight_bytes_per_disk = t[32].cast<int64_t>();
+                    c.memory_cache_disk_max_sync_stage_us           = t[33].cast<int64_t>();
+                    c.memory_cache_disk_metrics_report_interval_ms  = t[34].cast<int64_t>();
+                    c.memory_cache_disk_max_staging_buffers_per_disk = t[35].cast<int>();
+                    c.enable_remote_cache                    = t[36].cast<bool>();
+                    c.write_cache_sync                       = t[37].cast<bool>();
+                    c.enable_tiered_memory_cache             = t[38].cast<bool>();
+                    c.device_cache_min_free_blocks           = t[39].cast<int64_t>();
+                    c.reco_enable_vipserver                  = t[40].cast<bool>();
+                    c.reco_vipserver_domain                  = t[41].cast<std::string>();
+                    c.reco_server_address                    = t[42].cast<std::string>();
+                    c.reco_instance_group                    = t[43].cast<std::string>();
+                    c.reco_meta_channel_retry_time           = t[44].cast<uint32_t>();
+                    c.reco_meta_channel_connection_timeout   = t[45].cast<uint32_t>();
+                    c.reco_meta_channel_call_timeout         = t[46].cast<uint32_t>();
+                    c.reco_storage_thread_num                = t[47].cast<uint32_t>();
+                    c.reco_storage_queue_size                = t[48].cast<uint32_t>();
+                    c.reco_put_timeout_ms                    = t[49].cast<int>();
+                    c.reco_get_timeout_ms                    = t[50].cast<int>();
+                    c.reco_model_sdk_config                  = t[51].cast<std::string>();
+                    c.reco_model_user_data                   = t[52].cast<std::string>();
+                    c.reco_model_extra_info                  = t[53].cast<std::string>();
+                    c.reco_instance_id_salt                  = t[54].cast<std::string>();
+                    c.reco_asyncwrapper_thread_num           = t[55].cast<size_t>();
+                    c.reco_asyncwrapper_queue_size           = t[56].cast<size_t>();
+                    c.reco_get_broadcast_timeout             = t[57].cast<int>();
+                    c.reco_put_broadcast_timeout             = t[58].cast<int>();
+                    c.reco_client_config                     = t[59].cast<std::string>();
+                    c.ssm_state_dtype                        = t[60].cast<std::string>();
+                    c.dsv4_fixed_pool_blocks                 = t[61].cast<uint32_t>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("KVCacheConfig unpickle error: ") + e.what());
                 }

@@ -6,6 +6,8 @@
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
+#include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "autil/LockFreeThreadPool.h"
@@ -13,6 +15,9 @@
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
 #include "rtp_llm/cpp/cache/connector/memory/DiskSpillBlockCache.h"
+#include "rtp_llm/cpp/cache/connector/memory/DiskSpillCommitCoordinator.h"
+#include "rtp_llm/cpp/cache/connector/memory/DiskSpillProtocol.h"
+#include "rtp_llm/cpp/cache/connector/memory/DiskSpillTypes.h"
 #include "rtp_llm/cpp/cache/connector/memory/MemoryBlockCache.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -33,7 +38,22 @@ public:
                            const KVCacheConfig&                     kv_cache_config,
                            const std::shared_ptr<KVCacheAllocator>& allocator,
                            const std::vector<std::string>&          tp_addrs,
-                           const kmonitor::MetricsReporterPtr&      metrics_reporter = nullptr);
+                           const kmonitor::MetricsReporterPtr&      metrics_reporter = nullptr,
+                           int                                      tp_rank          = 0,
+                           int                                      tp_size          = 1);
+
+    // master = the only rank that drives LRU eviction, allocates disk slots, and owns
+    // the committed disk index. Non-master ranks only execute master-broadcast disk ops.
+    // README §"TP / 多 rank 一致性" — single-rank deployments behave like rank 0 self-master.
+    bool isMaster() const {
+        return tp_rank_ == 0;
+    }
+    int tpRank() const {
+        return tp_rank_;
+    }
+    int tpSize() const {
+        return tp_size_;
+    }
     ~KVCacheMemoryConnector() override;
 
 public:
@@ -153,10 +173,42 @@ private:
     bool                       spillMemoryItemToDisk(const MemoryBlockCache::CacheItem& item);
     bool                       sendDeleteDiskSlot(const DiskSpillBlockCache::DiskSlot& slot) const;
 
+    // PendingSpill: produced by ensureEnoughFreeBlocks under lock, drained by
+    // flushPendingSpills outside lock. Owns the heap-allocated staging buffer.
+    struct PendingSpill {
+        MemoryBlockCache::CacheItem   item;
+        std::vector<char>             staging;
+        DiskSpillBlockCache::DiskItem reserved_slot;
+        bool                          slot_reserved{false};
+    };
+
+    void flushPendingSpills(std::vector<PendingSpill>&& pendings);
+    void zeroNullSlots(const MemoryBlockCache::CacheItem& item, std::vector<char>& staging) const;
+
+    // Init handshake: master broadcasts DISK_SPILL_HELLO carrying schema_hash
+    // and capability_mask; waits for all workers; init fails on mismatch or
+    // timeout. README §"Init 一致性和 capability handshake".
+    bool runDiskSpillHandshake();
+    bool handleDiskSpillHello(const MemoryOperationRequestPB& request, MemoryOperationResponsePB& response);
+    bool handleSpillWriteStatus(const MemoryOperationRequestPB& request, MemoryOperationResponsePB& response);
+
+    std::string computeSchemaHash() const;
+    OpSequenceTracker& trackerForIncomingRank(int peer_seq_id);  // very simple peer-id hashing
+
+    // Broadcast helpers used by CommitCoordinator
+    bool broadcastSpillToWorkers(SpillJobId job_id, const DiskSpillBlockCache::DiskItem& slot);
+    bool broadcastDeleteToWorkers(const DiskSpillBlockCache::DiskItem& slot);
+    SpillWriteStatus pollWorkerSpillStatus(int worker_idx, SpillJobId job_id);
+
     void reportMatchMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t matched_block_num);
     void reportReadMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t read_block_num);
     void reportWriteMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t write_block_num);
     void reportCopyMetrics(bool success, int64_t latency_us, CopyDirection direction);
+    void reportDiskMatchMetrics(bool success, int64_t latency_us, int64_t input, int64_t matched, bool contention);
+    void reportDiskWriteMetrics(bool success, int64_t latency_us, int64_t input, int64_t written);
+    void reportDiskReadMetrics(bool success, int64_t latency_us, int64_t input, int64_t read_token);
+    void reportDiskCopyMetrics(bool success, int64_t latency_us, const std::string& direction, int disk_id);
+    void reportDiskError(const std::string& error_type, const std::string& op = "", int disk_id = -1);
     void reportMetricsLoop();
 
 private:
@@ -164,6 +216,8 @@ private:
     const KVCacheConfig&              kv_cache_config_;
     std::shared_ptr<KVCacheAllocator> allocator_;
     const std::vector<std::string>    tp_addrs_;
+    const int                         tp_rank_{0};
+    const int                         tp_size_{1};
 
     std::shared_ptr<BlockPool>                              block_pool_;
     mutable std::mutex                                      malloc_mutex_;
@@ -171,8 +225,14 @@ private:
     std::map<int, std::unique_ptr<StagedMemoryCopyScratch>> staged_copy_scratch_by_device_;
     std::shared_ptr<MemoryBlockCache>                       block_cache_;
     std::shared_ptr<DiskSpillBlockCache>                    disk_spill_cache_;
+    std::shared_ptr<DiskSpillCommitCoordinator>             commit_coordinator_;
     std::shared_ptr<BroadcastManager>                       broadcast_manager_;
     std::shared_ptr<autil::LockFreeThreadPool>              wait_done_thread_pool_;
+    OpSequenceTracker                                       outgoing_op_sequence_;
+    std::mutex                                              incoming_op_sequence_mutex_;
+    std::unordered_map<int, OpSequenceTracker>              incoming_op_sequence_;
+    std::string                                             schema_hash_;
+    std::atomic<int64_t>                                    last_metrics_log_ms_{0};
 
     // metrics reporter
     kmonitor::MetricsReporterPtr metrics_reporter_;

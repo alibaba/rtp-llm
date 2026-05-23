@@ -175,6 +175,110 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="Disk spill 淘汰阶段等待 worker stage ack 的超时时间，单位毫秒。",
     )
     kv_cache_group.add_argument(
+        "--memory_cache_disk_spill_commit_timeout_ms",
+        env_name="MEMORY_CACHE_DISK_SPILL_COMMIT_TIMEOUT_MS",
+        bind_to=(kv_cache_config, "memory_cache_disk_spill_commit_timeout_ms"),
+        type=int,
+        default=5000,
+        help="Disk spill 后台 commit coordinator 等待 pwrite 完成的最长时间，单位毫秒。",
+    )
+    kv_cache_group.add_argument(
+        "--memory_cache_disk_segment_mb",
+        env_name="MEMORY_CACHE_DISK_SEGMENT_MB",
+        bind_to=(kv_cache_config, "memory_cache_disk_segment_mb"),
+        type=int,
+        default=256,
+        help="Disk spill 每个 segment 文件大小，单位 MB。",
+    )
+    kv_cache_group.add_argument(
+        "--memory_cache_disk_align_bytes",
+        env_name="MEMORY_CACHE_DISK_ALIGN_BYTES",
+        bind_to=(kv_cache_config, "memory_cache_disk_align_bytes"),
+        type=int,
+        default=0,
+        help="Disk spill O_DIRECT 对齐字节数。0 表示自动探测 logical block size，失败时 fallback 4096。",
+    )
+    kv_cache_group.add_argument(
+        "--memory_cache_disk_io_threads_per_disk",
+        env_name="MEMORY_CACHE_DISK_IO_THREADS",
+        bind_to=(kv_cache_config, "memory_cache_disk_io_threads_per_disk"),
+        type=int,
+        default=2,
+        help="每块盘的 IO worker 线程数（read/write 各使用此值）。",
+    )
+    kv_cache_group.add_argument(
+        "--memory_cache_disk_queue_size_per_disk",
+        env_name="MEMORY_CACHE_DISK_QUEUE_SIZE",
+        bind_to=(kv_cache_config, "memory_cache_disk_queue_size_per_disk"),
+        type=int,
+        default=1024,
+        help="每块盘的 IO worker 队列长度。",
+    )
+    kv_cache_group.add_argument(
+        "--memory_cache_disk_direct_io",
+        env_name="MEMORY_CACHE_DISK_DIRECT_IO",
+        bind_to=(kv_cache_config, "memory_cache_disk_direct_io"),
+        type=str2bool,
+        default=True,
+        help="是否启用 O_DIRECT；不支持时回退 buffered + posix_fadvise(DONTNEED)。",
+    )
+    kv_cache_group.add_argument(
+        "--memory_cache_disk_direct_io_required",
+        env_name="MEMORY_CACHE_DISK_DIRECT_IO_REQUIRED",
+        bind_to=(kv_cache_config, "memory_cache_disk_direct_io_required"),
+        type=str2bool,
+        default=False,
+        help="True 时 O_DIRECT 不可用直接 init fail；False 时允许 buffered fallback。",
+    )
+    kv_cache_group.add_argument(
+        "--memory_cache_disk_drop_on_queue_full",
+        env_name="MEMORY_CACHE_DISK_DROP_ON_QUEUE_FULL",
+        bind_to=(kv_cache_config, "memory_cache_disk_drop_on_queue_full"),
+        type=str2bool,
+        default=True,
+        help="IO 队列满时是否直接 drop spill 任务（避免阻塞 ensureEnoughFreeBlocks）。",
+    )
+    kv_cache_group.add_argument(
+        "--memory_cache_disk_max_inflight_bytes",
+        env_name="MEMORY_CACHE_DISK_MAX_INFLIGHT_BYTES",
+        bind_to=(kv_cache_config, "memory_cache_disk_max_inflight_bytes"),
+        type=int,
+        default=4 * 1024 * 1024 * 1024,
+        help="进程级 spill staging+inflight 上限字节数。",
+    )
+    kv_cache_group.add_argument(
+        "--memory_cache_disk_max_inflight_bytes_per_disk",
+        env_name="MEMORY_CACHE_DISK_MAX_INFLIGHT_BYTES_PER_DISK",
+        bind_to=(kv_cache_config, "memory_cache_disk_max_inflight_bytes_per_disk"),
+        type=int,
+        default=2 * 1024 * 1024 * 1024,
+        help="每块盘的 inflight 上限字节数。",
+    )
+    kv_cache_group.add_argument(
+        "--memory_cache_disk_max_sync_stage_us",
+        env_name="MEMORY_CACHE_DISK_MAX_SYNC_STAGE_US",
+        bind_to=(kv_cache_config, "memory_cache_disk_max_sync_stage_us"),
+        type=int,
+        default=2000,
+        help="同步阶段 staging 拷贝预算超时，单位微秒；超时则 drop。",
+    )
+    kv_cache_group.add_argument(
+        "--memory_cache_disk_metrics_report_interval_ms",
+        env_name="MEMORY_CACHE_DISK_METRICS_REPORT_INTERVAL_MS",
+        bind_to=(kv_cache_config, "memory_cache_disk_metrics_report_interval_ms"),
+        type=int,
+        default=180000,
+        help="Disk spill 周期性日志摘要的输出间隔，单位毫秒。",
+    )
+    kv_cache_group.add_argument(
+        "--memory_cache_disk_max_staging_buffers_per_disk",
+        env_name="MEMORY_CACHE_DISK_MAX_STAGING_BUFFERS_PER_DISK",
+        bind_to=(kv_cache_config, "memory_cache_disk_max_staging_buffers_per_disk"),
+        type=int,
+        default=32,
+        help="每块盘的 aligned staging buffer pool 容量。",
+    )
+    kv_cache_group.add_argument(
         "--memory_cache_size_mb",
         env_name="MEMORY_CACHE_SIZE_MB",
         bind_to=(kv_cache_config, "memory_cache_size_mb"),

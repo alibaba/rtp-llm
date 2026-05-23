@@ -21,6 +21,12 @@ public:
         // 表示是否是完整的 KVCache, 只有当所有层都有 cache 时才为 true
         // 对于全注意力模型: 这个值始终为 true ; 对于混合注意力模型: 所有层都有 cache 时才为 true
         bool is_complete{true};
+        // Bitmap of which layer-region slots actually have valid GPU data.
+        // Length matches layerRegionSlots() of the owning connector. When empty,
+        // assume all slots are valid (legacy behaviour for non-DSV4 layouts).
+        // Used by disk-spill staging to zero out NULL_BLOCK_IDX ranges so
+        // stale memory-block bytes never leak onto disk.
+        std::vector<bool> valid_slots;
     };
 
     struct MatchResult {
@@ -47,7 +53,19 @@ public:
 
     std::vector<BlockIdxType> pop(int n);
 
-    std::vector<CacheItem> popItems(int n);
+    // Pop up to `n` LRU items.
+    // Always skips resident items.
+    // When only_complete=true (default), also skips items with is_complete=false so they are not
+    // spilled to disk per MVP disk-spill policy. Caller decides what to do with partial items
+    // (typically dropped via separate pop call).
+    std::vector<CacheItem> popItems(int n, bool only_complete = true);
+
+    // Preferred name (README §"Memory block 生命周期和反压"). Same semantics as popItems.
+    // Calls should migrate away from pop(n) entirely since pop() bypasses the
+    // disk-spill complete-only filter and corrupts the disk tier policy.
+    std::vector<CacheItem> takeLRUItems(int n, bool only_complete = true) {
+        return popItems(n, only_complete);
+    }
 
     bool empty() const;
 

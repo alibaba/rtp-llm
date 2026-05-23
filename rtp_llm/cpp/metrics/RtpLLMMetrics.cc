@@ -26,6 +26,7 @@ AUTIL_LOG_SETUP(rtp_llm, RtpLLmEplbMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheStoreMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMKVCacheInfoMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMMemoryCacheMetrics);
+AUTIL_LOG_SETUP(rtp_llm, RtpLLMMemoryDiskCacheMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheMatchMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheReadMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheWriteMetrics);
@@ -824,6 +825,163 @@ void RtpLLMMemoryCacheMetrics::report(const kmonitor::MetricsTags*             t
     REPORT_MUTABLE_METRIC(kv_cache_memory_cache_status_total_block_num_metric, collector->total_block_num);
     REPORT_MUTABLE_METRIC(kv_cache_memory_cache_status_allocated_block_num_metric, collector->allocated_block_num);
     REPORT_MUTABLE_METRIC(kv_cache_memory_cache_status_available_block_num_metric, collector->available_block_num);
+}
+
+// =================== Memory Disk Cache Metrics ===================
+
+bool RtpLLMMemoryDiskCacheMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_QPS_MUTABLE_METRIC(kv_cache_memory_disk_cache_match_qps_metric,
+                                "rtp_llm_kv_cache_memory_disk_cache_match_qps");
+    REGISTER_QPS_MUTABLE_METRIC(kv_cache_memory_disk_cache_match_none_qps_metric,
+                                "rtp_llm_kv_cache_memory_disk_cache_match_none_qps");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_disk_cache_match_latency_metric,
+                                  "rtp_llm_kv_cache_memory_disk_cache_match_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_disk_cache_match_input_token_metric,
+                                  "rtp_llm_kv_cache_memory_disk_cache_match_input_token");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_disk_cache_matched_token_metric,
+                                  "rtp_llm_kv_cache_memory_disk_cache_matched_token");
+    REGISTER_QPS_MUTABLE_METRIC(kv_cache_memory_disk_cache_take_contention_qps_metric,
+                                "rtp_llm_kv_cache_memory_disk_cache_take_contention_qps");
+
+    REGISTER_QPS_MUTABLE_METRIC(kv_cache_memory_disk_cache_read_qps_metric,
+                                "rtp_llm_kv_cache_memory_disk_cache_read_qps");
+    REGISTER_QPS_MUTABLE_METRIC(kv_cache_memory_disk_cache_read_none_qps_metric,
+                                "rtp_llm_kv_cache_memory_disk_cache_read_none_qps");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_disk_cache_read_latency_metric,
+                                  "rtp_llm_kv_cache_memory_disk_cache_read_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_disk_cache_read_input_token_metric,
+                                  "rtp_llm_kv_cache_memory_disk_cache_read_input_token");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_disk_cache_read_token_metric,
+                                  "rtp_llm_kv_cache_memory_disk_cache_read_token");
+
+    REGISTER_QPS_MUTABLE_METRIC(kv_cache_memory_disk_cache_write_qps_metric,
+                                "rtp_llm_kv_cache_memory_disk_cache_write_qps");
+    REGISTER_QPS_MUTABLE_METRIC(kv_cache_memory_disk_cache_write_none_qps_metric,
+                                "rtp_llm_kv_cache_memory_disk_cache_write_none_qps");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_disk_cache_write_latency_metric,
+                                  "rtp_llm_kv_cache_memory_disk_cache_write_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_disk_cache_write_input_token_metric,
+                                  "rtp_llm_kv_cache_memory_disk_cache_write_input_token");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_disk_cache_write_token_metric,
+                                  "rtp_llm_kv_cache_memory_disk_cache_write_token");
+
+    REGISTER_QPS_MUTABLE_METRIC(kv_cache_memory_disk_cache_copy_qps_metric,
+                                "rtp_llm_kv_cache_memory_disk_cache_copy_qps");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_disk_cache_copy_latency_metric,
+                                  "rtp_llm_kv_cache_memory_disk_cache_copy_latency_us");
+
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_disk_cache_status_total_block_num_metric,
+                                  "rtp_llm_kv_cache_memory_disk_cache_status_total_block_num");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_disk_cache_status_allocated_block_num_metric,
+                                  "rtp_llm_kv_cache_memory_disk_cache_status_allocated_block_num");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_disk_cache_status_available_block_num_metric,
+                                  "rtp_llm_kv_cache_memory_disk_cache_status_available_block_num");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_disk_cache_status_committed_block_num_metric,
+                                  "rtp_llm_kv_cache_memory_disk_cache_status_committed_block_num");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_disk_cache_status_inflight_write_metric,
+                                  "rtp_llm_kv_cache_memory_disk_cache_status_inflight_write_block_num");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_disk_cache_status_inflight_read_metric,
+                                  "rtp_llm_kv_cache_memory_disk_cache_status_inflight_read_block_num");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_disk_cache_status_used_bytes_metric,
+                                  "rtp_llm_kv_cache_memory_disk_cache_status_used_bytes");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_disk_cache_status_free_bytes_metric,
+                                  "rtp_llm_kv_cache_memory_disk_cache_status_free_bytes");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_disk_cache_status_staging_used_bytes_metric,
+                                  "rtp_llm_kv_cache_memory_disk_cache_status_staging_used_bytes");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_disk_cache_status_queue_depth_metric,
+                                  "rtp_llm_kv_cache_memory_disk_cache_status_queue_depth");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_disk_cache_status_unhealthy_disk_metric,
+                                  "rtp_llm_kv_cache_memory_disk_cache_status_unhealthy_disk_num");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_disk_cache_status_leaked_block_metric,
+                                  "rtp_llm_kv_cache_memory_disk_cache_status_leaked_block_num");
+
+    REGISTER_QPS_MUTABLE_METRIC(kv_cache_memory_disk_cache_error_qps_metric,
+                                "rtp_llm_kv_cache_memory_disk_cache_error_qps");
+
+    return true;
+}
+
+void RtpLLMMemoryDiskCacheMetrics::report(const kmonitor::MetricsTags*                tags,
+                                          RtpLLMMemoryDiskCacheMatchMetricsCollector* collector) {
+    REPORT_MUTABLE_QPS(kv_cache_memory_disk_cache_match_qps_metric);
+    REPORT_MUTABLE_METRIC(kv_cache_memory_disk_cache_match_input_token_metric, collector->input_token);
+    REPORT_MUTABLE_METRIC(kv_cache_memory_disk_cache_match_latency_metric, collector->latency_us);
+    if (collector->matched_token == 0) {
+        REPORT_MUTABLE_QPS(kv_cache_memory_disk_cache_match_none_qps_metric);
+    } else {
+        REPORT_MUTABLE_METRIC(kv_cache_memory_disk_cache_matched_token_metric, collector->matched_token);
+    }
+    if (collector->take_contention) {
+        REPORT_MUTABLE_QPS(kv_cache_memory_disk_cache_take_contention_qps_metric);
+    }
+}
+
+void RtpLLMMemoryDiskCacheMetrics::report(const kmonitor::MetricsTags*               tags,
+                                          RtpLLMMemoryDiskCacheReadMetricsCollector* collector) {
+    REPORT_MUTABLE_QPS(kv_cache_memory_disk_cache_read_qps_metric);
+    REPORT_MUTABLE_METRIC(kv_cache_memory_disk_cache_read_input_token_metric, collector->input_token);
+    REPORT_MUTABLE_METRIC(kv_cache_memory_disk_cache_read_latency_metric, collector->latency_us);
+    if (collector->read_token == 0) {
+        REPORT_MUTABLE_QPS(kv_cache_memory_disk_cache_read_none_qps_metric);
+    } else {
+        REPORT_MUTABLE_METRIC(kv_cache_memory_disk_cache_read_token_metric, collector->read_token);
+    }
+}
+
+void RtpLLMMemoryDiskCacheMetrics::report(const kmonitor::MetricsTags*                tags,
+                                          RtpLLMMemoryDiskCacheWriteMetricsCollector* collector) {
+    REPORT_MUTABLE_QPS(kv_cache_memory_disk_cache_write_qps_metric);
+    REPORT_MUTABLE_METRIC(kv_cache_memory_disk_cache_write_input_token_metric, collector->input_token);
+    REPORT_MUTABLE_METRIC(kv_cache_memory_disk_cache_write_latency_metric, collector->latency_us);
+    if (collector->write_token == 0) {
+        REPORT_MUTABLE_QPS(kv_cache_memory_disk_cache_write_none_qps_metric);
+    } else {
+        REPORT_MUTABLE_METRIC(kv_cache_memory_disk_cache_write_token_metric, collector->write_token);
+    }
+}
+
+void RtpLLMMemoryDiskCacheMetrics::report(const kmonitor::MetricsTags*               tags,
+                                          RtpLLMMemoryDiskCacheCopyMetricsCollector* collector) {
+    kmonitor::MetricsTags copy_tag("copy_direction", collector->copy_direction);
+    if (collector->disk_id >= 0) {
+        copy_tag.AddTag("disk_id", std::to_string(collector->disk_id));
+    }
+    if (kv_cache_memory_disk_cache_copy_qps_metric) {
+        kv_cache_memory_disk_cache_copy_qps_metric->Report(&copy_tag, 1);
+    }
+    if (kv_cache_memory_disk_cache_copy_latency_metric) {
+        kv_cache_memory_disk_cache_copy_latency_metric->Report(&copy_tag, collector->latency_us);
+    }
+}
+
+void RtpLLMMemoryDiskCacheMetrics::report(const kmonitor::MetricsTags*                 tags,
+                                          RtpLLMMemoryDiskCacheStatusMetricsCollector* collector) {
+    REPORT_MUTABLE_METRIC(kv_cache_memory_disk_cache_status_total_block_num_metric, collector->total_block_num);
+    REPORT_MUTABLE_METRIC(kv_cache_memory_disk_cache_status_allocated_block_num_metric, collector->allocated_block_num);
+    REPORT_MUTABLE_METRIC(kv_cache_memory_disk_cache_status_available_block_num_metric, collector->available_block_num);
+    REPORT_MUTABLE_METRIC(kv_cache_memory_disk_cache_status_committed_block_num_metric, collector->committed_block_num);
+    REPORT_MUTABLE_METRIC(kv_cache_memory_disk_cache_status_inflight_write_metric, collector->inflight_write_block_num);
+    REPORT_MUTABLE_METRIC(kv_cache_memory_disk_cache_status_inflight_read_metric, collector->inflight_read_block_num);
+    REPORT_MUTABLE_METRIC(kv_cache_memory_disk_cache_status_used_bytes_metric, collector->used_bytes);
+    REPORT_MUTABLE_METRIC(kv_cache_memory_disk_cache_status_free_bytes_metric, collector->free_bytes);
+    REPORT_MUTABLE_METRIC(kv_cache_memory_disk_cache_status_staging_used_bytes_metric, collector->staging_used_bytes);
+    REPORT_MUTABLE_METRIC(kv_cache_memory_disk_cache_status_queue_depth_metric, collector->queue_depth);
+    REPORT_MUTABLE_METRIC(kv_cache_memory_disk_cache_status_unhealthy_disk_metric, collector->unhealthy_disk_num);
+    REPORT_MUTABLE_METRIC(kv_cache_memory_disk_cache_status_leaked_block_metric, collector->leaked_block_num);
+}
+
+void RtpLLMMemoryDiskCacheMetrics::report(const kmonitor::MetricsTags*                tags,
+                                          RtpLLMMemoryDiskCacheErrorMetricsCollector* collector) {
+    kmonitor::MetricsTags err_tag("error_type", collector->error_type);
+    if (!collector->op.empty()) {
+        err_tag.AddTag("op", collector->op);
+    }
+    if (collector->disk_id >= 0) {
+        err_tag.AddTag("disk_id", std::to_string(collector->disk_id));
+    }
+    if (kv_cache_memory_disk_cache_error_qps_metric) {
+        kv_cache_memory_disk_cache_error_qps_metric->Report(&err_tag, 1);
+    }
 }
 
 #undef REPORT_NON_ZERO_MUTABLE_METRIC

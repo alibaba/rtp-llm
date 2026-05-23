@@ -89,6 +89,66 @@ cc_test(
 )
 
 cc_test(
+    name = "disk_spill_file_manager_test",
+    srcs = [
+        "DiskSpillFileManagerTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache/connector/memory:disk_spill_file_manager",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    env = {},
+)
+
+cc_test(
+    name = "disk_spill_protocol_test",
+    srcs = [
+        "DiskSpillProtocolTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache/connector/memory:disk_spill_protocol",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    env = {},
+)
+
+cc_test(
+    name = "disk_spill_commit_coordinator_test",
+    srcs = [
+        "DiskSpillCommitCoordinatorTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache/connector/memory:disk_spill_commit_coordinator",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    env = {},
+)
+
+cc_test(
+    name = "disk_spill_io_worker_test",
+    srcs = [
+        "DiskSpillIoWorkerTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache/connector/memory:disk_spill_io_worker",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    env = {},
+)
+
+cc_test(
     name = "memory_block_cache_test",
     srcs = [
         "MemoryBlockCacheTest.cc",

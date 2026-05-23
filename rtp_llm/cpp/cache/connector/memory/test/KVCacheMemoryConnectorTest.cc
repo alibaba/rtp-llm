@@ -457,9 +457,11 @@ private:
     DiskSpillBlockCachePtr createDiskSpillCache(size_t block_size, size_t capacity_mb = 8) const {
         DiskSpillBlockCache::InitConfig config;
         config.disks.push_back(DiskSpillBlockCache::DiskConfig{makeDiskTempDir("cache"), capacity_mb});
-        config.block_size         = block_size;
-        config.cleanup_on_destroy = false;
-        auto cache                = std::make_shared<DiskSpillBlockCache>(std::move(config));
+        config.block_size               = block_size;
+        config.cleanup_on_destroy       = false;
+        config.cleanup_old_startup_dirs = false;
+        config.schema_hash              = "kvc_test";
+        auto cache                      = DiskSpillBlockCache::create(std::move(config));
         EXPECT_TRUE(cache->init());
         return cache;
     }
@@ -487,9 +489,8 @@ private:
 
         auto conn = std::make_shared<KVCacheMemoryConnector>(*cfg, *kv_cfg, allocator_, server_addrs_);
         EXPECT_TRUE(conn->init());
-        if (conn->disk_spill_cache_) {
-            conn->disk_spill_cache_->config_.cleanup_on_destroy = false;
-        }
+        // cleanup_on_destroy now handled inside DiskSpillBlockCache::config_; tests
+        // accept the cleanup at destruction time.
         return conn;
     }
 
@@ -1045,10 +1046,10 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForRead_TakesAndReleasesDiskSlot
     ASSERT_EQ(plan->copy_infos.size(), 1u);
     EXPECT_EQ(plan->copy_infos[0].source_type, KVCacheMemoryConnector::CopyInfoPerKey::SourceType::DISK_SLOT);
     EXPECT_FALSE(connector_->disk_spill_cache_->contains(key));
-    EXPECT_TRUE(connector_->disk_spill_cache_->releaseReadSlot(plan->copy_infos[0].disk_slot));
+    connector_->disk_spill_cache_->releaseTakenSlot(plan->copy_infos[0].disk_slot);
     plan.reset();
     const auto status = connector_->disk_spill_cache_->status();
-    EXPECT_EQ(status.item_num, 0u);
+    EXPECT_EQ(status.committed_slot_num, 0u);
     EXPECT_EQ(status.free_slot_num, status.total_slot_num);
 }
 
@@ -1867,7 +1868,7 @@ TEST_F(KVCacheMemoryConnectorTest, putToCache_InvalidatesExistingDiskSlotForSame
     EXPECT_TRUE(connector_->block_cache_->contains(key));
     EXPECT_FALSE(connector_->disk_spill_cache_->contains(key));
     const auto status = connector_->disk_spill_cache_->status();
-    EXPECT_EQ(status.item_num, 0u);
+    EXPECT_EQ(status.committed_slot_num, 0u);
 }
 
 TEST_F(KVCacheMemoryConnectorTest, ensureEnoughFreeBlocks_SpillsCompleteEvictedItemToDisk) {
@@ -1885,11 +1886,11 @@ TEST_F(KVCacheMemoryConnectorTest, ensureEnoughFreeBlocks_SpillsCompleteEvictedI
     EXPECT_GE(pool->freeBlocksNum(), 1u);
     EXPECT_EQ(conn->block_cache_->size(), 1u);
     const auto status = conn->disk_spill_cache_->status();
-    EXPECT_EQ(status.item_num, 1u);
+    EXPECT_EQ(status.committed_slot_num, 1u);
     EXPECT_TRUE(conn->disk_spill_cache_->contains(94001) || conn->disk_spill_cache_->contains(94002));
 }
 
-TEST_F(KVCacheMemoryConnectorTest, ensureEnoughFreeBlocks_SpillsPartialEvictedItemToDisk) {
+TEST_F(KVCacheMemoryConnectorTest, ensureEnoughFreeBlocks_PartialItemDroppedNotSpilled) {
     constexpr size_t kPerLayerStride = 256 * 1024;
     auto             conn = createDiskEnabledConnector(kPerLayerStride, /*memory_size_mb=*/2, /*disk_capacity_mb=*/4);
     auto             pool = conn->block_pool_;
@@ -1903,10 +1904,8 @@ TEST_F(KVCacheMemoryConnectorTest, ensureEnoughFreeBlocks_SpillsPartialEvictedIt
     EXPECT_GE(pool->freeBlocksNum(), 1u);
     EXPECT_TRUE(conn->block_cache_->empty());
     const auto status = conn->disk_spill_cache_->status();
-    EXPECT_EQ(status.item_num, 1u);
-    const auto match = conn->disk_spill_cache_->match(95001);
-    ASSERT_TRUE(match.matched);
-    EXPECT_FALSE(match.is_complete);
+    EXPECT_EQ(status.committed_slot_num, 0u) << "MVP: partial items must NOT spill to disk";
+    EXPECT_FALSE(conn->disk_spill_cache_->match(95001).matched);
 }
 
 TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnFalse_CountMismatch) {

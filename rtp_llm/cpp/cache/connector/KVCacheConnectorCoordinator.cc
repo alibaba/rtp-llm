@@ -193,8 +193,14 @@ KVCacheConnectorCoordinator::asyncWriteByLayer(int                              
 }
 
 std::shared_ptr<KVCacheMemoryConnector> KVCacheConnectorCoordinator::initMemoryConnector() {
-    auto memory_connector = std::make_shared<KVCacheMemoryConnector>(
-        cache_config_, kv_cache_config_, allocator_, runtime_config_.worker_grpc_addrs, metrics_reporter_);
+    auto memory_connector =
+        std::make_shared<KVCacheMemoryConnector>(cache_config_,
+                                                 kv_cache_config_,
+                                                 allocator_,
+                                                 runtime_config_.worker_grpc_addrs,
+                                                 metrics_reporter_,
+                                                 static_cast<int>(parallelism_config_.tp_rank),
+                                                 static_cast<int>(parallelism_config_.tp_size));
     RTP_LLM_CHECK_WITH_INFO(memory_connector->init(), "memory connector init failed");
     return memory_connector;
 }

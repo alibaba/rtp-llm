@@ -168,8 +168,21 @@ struct KVCacheConfig {
     bool        enable_memory_cache_sm_copy            = false;
     bool        enable_memory_cache_disk_spill         = false;
     std::string memory_cache_disk_paths                = "";
-    int64_t     memory_cache_disk_init_timeout_ms      = 10000;
+    int64_t     memory_cache_disk_init_timeout_ms      = 30000;
     int64_t     memory_cache_disk_stage_ack_timeout_ms = 1000;
+    int64_t     memory_cache_disk_spill_commit_timeout_ms = 5000;
+    int64_t     memory_cache_disk_segment_mb              = 256;
+    int64_t     memory_cache_disk_align_bytes             = 0;  // 0 = auto-detect, fallback 4096
+    int         memory_cache_disk_io_threads_per_disk     = 2;
+    int         memory_cache_disk_queue_size_per_disk     = 1024;
+    bool        memory_cache_disk_direct_io               = true;
+    bool        memory_cache_disk_direct_io_required      = false;
+    bool        memory_cache_disk_drop_on_queue_full      = true;
+    int64_t     memory_cache_disk_max_inflight_bytes      = 4LL * 1024 * 1024 * 1024;
+    int64_t     memory_cache_disk_max_inflight_bytes_per_disk = 2LL * 1024 * 1024 * 1024;
+    int64_t     memory_cache_disk_max_sync_stage_us       = 2000;
+    int64_t     memory_cache_disk_metrics_report_interval_ms = 180000;
+    int         memory_cache_disk_max_staging_buffers_per_disk = 32;
     bool        enable_remote_cache                    = false;
     bool        write_cache_sync                       = false;
     bool        enable_tiered_memory_cache             = false;

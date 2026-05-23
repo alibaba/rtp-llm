@@ -1005,6 +1005,117 @@ public:
     int64_t available_block_num = 0;  // 可用的block数量
 };
 
+// ===== Disk spill (memory tier internal spill to local disk) metrics =====
+// New metric group; never reuse the existing RtpLLMMemoryCache* names.
+// Tags: op, disk_id, rank, io_mode, error_type, copy_direction
+class RtpLLMMemoryDiskCacheMatchMetricsCollector final {
+public:
+    bool    failed             = false;
+    int64_t latency_us         = 0;
+    int64_t input_token        = 0;
+    int64_t matched_token      = 0;
+    bool    take_contention    = false;  // increments take_contention_qps when true
+};
+
+class RtpLLMMemoryDiskCacheReadMetricsCollector final {
+public:
+    bool    failed      = false;
+    int64_t latency_us  = 0;
+    int64_t input_token = 0;
+    int64_t read_token  = 0;
+};
+
+class RtpLLMMemoryDiskCacheWriteMetricsCollector final {
+public:
+    bool    failed      = false;
+    int64_t latency_us  = 0;
+    int64_t input_token = 0;
+    int64_t write_token = 0;  // # blocks spilled to disk
+};
+
+class RtpLLMMemoryDiskCacheCopyMetricsCollector final {
+public:
+    bool        failed         = false;
+    int64_t     latency_us     = 0;
+    std::string copy_direction;  // MEMORY_TO_DISK | DISK_TO_GPU | DELETE_DISK_SLOT
+    int64_t     disk_id        = -1;
+};
+
+class RtpLLMMemoryDiskCacheStatusMetricsCollector final {
+public:
+    int64_t total_block_num          = 0;
+    int64_t allocated_block_num      = 0;
+    int64_t available_block_num      = 0;
+    int64_t committed_block_num      = 0;
+    int64_t inflight_write_block_num = 0;
+    int64_t inflight_read_block_num  = 0;
+    int64_t used_bytes               = 0;
+    int64_t free_bytes               = 0;
+    int64_t staging_used_bytes       = 0;
+    int64_t queue_depth              = 0;
+    int64_t unhealthy_disk_num       = 0;
+    int64_t leaked_block_num         = 0;
+};
+
+class RtpLLMMemoryDiskCacheErrorMetricsCollector final {
+public:
+    std::string error_type;
+    std::string op;            // optional
+    int64_t     disk_id = -1;  // optional
+};
+
+class RtpLLMMemoryDiskCacheMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryDiskCacheMatchMetricsCollector* collector);
+    void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryDiskCacheReadMetricsCollector* collector);
+    void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryDiskCacheWriteMetricsCollector* collector);
+    void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryDiskCacheCopyMetricsCollector* collector);
+    void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryDiskCacheStatusMetricsCollector* collector);
+    void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryDiskCacheErrorMetricsCollector* collector);
+
+public:
+    kmonitor::MutableMetric* kv_cache_memory_disk_cache_match_qps_metric              = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_disk_cache_match_none_qps_metric         = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_disk_cache_match_latency_metric          = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_disk_cache_match_input_token_metric      = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_disk_cache_matched_token_metric          = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_disk_cache_take_contention_qps_metric    = nullptr;
+
+    kmonitor::MutableMetric* kv_cache_memory_disk_cache_read_qps_metric             = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_disk_cache_read_none_qps_metric        = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_disk_cache_read_latency_metric         = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_disk_cache_read_input_token_metric     = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_disk_cache_read_token_metric           = nullptr;
+
+    kmonitor::MutableMetric* kv_cache_memory_disk_cache_write_qps_metric            = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_disk_cache_write_none_qps_metric       = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_disk_cache_write_latency_metric        = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_disk_cache_write_input_token_metric    = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_disk_cache_write_token_metric          = nullptr;
+
+    kmonitor::MutableMetric* kv_cache_memory_disk_cache_copy_qps_metric             = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_disk_cache_copy_latency_metric         = nullptr;
+
+    kmonitor::MutableMetric* kv_cache_memory_disk_cache_status_total_block_num_metric     = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_disk_cache_status_allocated_block_num_metric = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_disk_cache_status_available_block_num_metric = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_disk_cache_status_committed_block_num_metric = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_disk_cache_status_inflight_write_metric      = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_disk_cache_status_inflight_read_metric       = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_disk_cache_status_used_bytes_metric          = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_disk_cache_status_free_bytes_metric          = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_disk_cache_status_staging_used_bytes_metric  = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_disk_cache_status_queue_depth_metric         = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_disk_cache_status_unhealthy_disk_metric      = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_disk_cache_status_leaked_block_metric        = nullptr;
+
+    kmonitor::MutableMetric* kv_cache_memory_disk_cache_error_qps_metric              = nullptr;
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
 class RtpLLMMemoryCacheMetrics: public kmonitor::MetricsGroup {
 public:
     bool init(kmonitor::MetricsGroupManager* manager) override;
