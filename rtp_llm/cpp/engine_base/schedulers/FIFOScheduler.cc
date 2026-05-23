@@ -73,8 +73,22 @@ int64_t FIFOScheduler::lastScheduleTime() {
 }
 
 // 在入队前校验输入长度，避免无效请求进入等待队列
-// 检查两个条件：1) 输入长度不超过 KV Cache 最大可用 token 数  2) 输入长度 * batch_size 不超过 max_batch_tokens_size
+// 检查输入长度、投机解码预留空间和 batch token 上限。
 bool FIFOScheduler::checkInputLength(const GenerateStreamPtr& stream) {
+    const auto input_length = static_cast<size_t>(stream->inputLength());
+    const auto reserve_step = stream->reserveStep();
+    if (reserve_step > 0 && !(input_length <= max_seq_len_ && reserve_step <= max_seq_len_ - input_length)) {
+        const auto allowed_input_length = reserve_step <= max_seq_len_ ? max_seq_len_ - reserve_step : 0;
+        auto       error_info           = autil::StringUtil::formatString(
+            "input len %zu with speculative reserve_step %zu exceeds max seq len %zu, "
+            "allowed max input len for speculative decoding is %zu",
+            input_length,
+            reserve_step,
+            max_seq_len_,
+            allowed_input_length);
+        stream->reportError(ErrorCode::LONG_PROMPT_ERROR, error_info);
+        return false;
+    }
     if (stream->inputLength() > cache_manager_->maxAvailableTokensNum()) {
         stream->reportError(ErrorCode::EXCEEDS_KV_CACHE_MAX_LEN,
                             autil::StringUtil::formatString("input len " + std::to_string(stream->inputLength())
