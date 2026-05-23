@@ -1,8 +1,10 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 
+#include <atomic>
 #include <algorithm>
 #include <chrono>
 #include <limits>
+#include <sstream>
 #include <unordered_set>
 
 #include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
@@ -19,6 +21,90 @@
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 
 namespace rtp_llm {
+
+namespace {
+
+bool kvManagerAllocTraceShouldLog() {
+    static std::atomic<int> budget{2000};
+    return budget.fetch_sub(1, std::memory_order_relaxed) > 0;
+}
+
+std::string formatBlockTailForManager(const BlockIndicesType& blocks, size_t tail = 8) {
+    std::ostringstream os;
+    const size_t       begin = blocks.size() > tail ? blocks.size() - tail : 0;
+    os << "size=" << blocks.size() << ",tail[" << begin << ".." << blocks.size() << ")=[";
+    for (size_t i = begin; i < blocks.size(); ++i) {
+        if (i != begin) {
+            os << ",";
+        }
+        os << blocks[i];
+    }
+    os << "]";
+    return os.str();
+}
+
+std::string summarizeBatchKVResource(const BatchKVCacheResourcePtr& resource) {
+    if (!resource) {
+        return "null";
+    }
+    std::ostringstream os;
+    const int          batch_size = resource->batchSize();
+    os << "batch_size=" << batch_size << ",cur_blocks=" << resource->curBlocksNum();
+    if (batch_size <= 0) {
+        return os.str();
+    }
+
+    const int group_nums = resource->groupNums();
+    os << ",group_nums=" << group_nums;
+    const int max_batches_to_log = std::min(batch_size, 4);
+    for (int b = 0; b < max_batches_to_log; ++b) {
+        os << " {b=" << b << ",cache_keys=" << resource->cacheKeys(b).size();
+        for (int gid = 0; gid < group_nums; ++gid) {
+            os << ",g" << gid << ".blocks{" << formatBlockTailForManager(resource->blocks(b, gid)) << "}";
+            os << ",g" << gid << ".kernel{" << formatBlockTailForManager(resource->kernelBlocks(b, gid)) << "}";
+        }
+        os << "}";
+    }
+    if (batch_size > max_batches_to_log) {
+        os << " ...";
+    }
+    return os.str();
+}
+
+void traceKVManagerMalloc(const char* stage, const MallocInfo& malloc_info, const CacheConfig& config) {
+    if (!kvManagerAllocTraceShouldLog()) {
+        return;
+    }
+    auto&     kv_resource = malloc_info.batch_kv_cache_resource;
+    auto&     token_ids   = malloc_info.complete_token_ids;
+    const int batch_size  = kv_resource ? kv_resource->batchSize() : 0;
+    const int group_nums  = (kv_resource && batch_size > 0) ? kv_resource->groupNums() : 0;
+    const int cur_blocks  = kv_resource ? kv_resource->curBlocksNum() : 0;
+    RTP_LLM_LOG_WARNING("[kv-alloc-trace][manager.%s] request_id=%ld batch_size=%d group_nums=%d "
+                        "is_init=%d seq_len=%d total_seq_len=%d common_seq_len=%d reserve_step=%d "
+                        "incr_override=%d reuse_cache=%d enable_device_cache=%d remove_skipped=%d "
+                        "seq_size_per_block=%zu kernel_seq_size_per_block=%zu linear_step=%d cur_blocks=%d resource=%s",
+                        stage,
+                        malloc_info.request_id,
+                        batch_size,
+                        group_nums,
+                        static_cast<int>(cur_blocks == 0),
+                        token_ids ? token_ids->seqLength() : -1,
+                        token_ids ? token_ids->totalSeqLength() : -1,
+                        token_ids ? token_ids->commonSeqLength() : -1,
+                        token_ids ? token_ids->getReserveStep() : -1,
+                        malloc_info.incr_seq_len_override,
+                        static_cast<int>(malloc_info.reuse_cache),
+                        static_cast<int>(malloc_info.enable_device_cache),
+                        static_cast<int>(malloc_info.enable_remove_skipped_blocks),
+                        config.seq_size_per_block,
+                        config.kernel_seq_size_per_block,
+                        config.linear_step,
+                        cur_blocks,
+                        summarizeBatchKVResource(kv_resource).c_str());
+}
+
+}  // namespace
 
 KVCacheManager::KVCacheManager(const CacheConfig&                 config,
                                bool                               warmup,
@@ -104,14 +190,25 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_CHECK(malloc_info.batch_kv_cache_resource && malloc_info.complete_token_ids);
 
+    traceKVManagerMalloc("before_keys", malloc_info, config_);
     const int seq_size_per_block = config_.seq_size_per_block;
     if (!malloc_info.batch_kv_cache_resource->curBlocksNum()) {
         initCacheKeys(malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids, seq_size_per_block);
     } else {
         updateCacheKeys(malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids, seq_size_per_block);
     }
+    traceKVManagerMalloc("after_keys", malloc_info, config_);
 
-    return allocator_->malloc(malloc_info);
+    auto result = allocator_->malloc(malloc_info);
+    traceKVManagerMalloc(result.success ? "after_alloc_success" : "after_alloc_failed", malloc_info, config_);
+    if (kvManagerAllocTraceShouldLog()) {
+        RTP_LLM_LOG_WARNING("[kv-alloc-trace][manager.result] request_id=%ld success=%d reuse_len=%d match_cost_us=%ld",
+                            malloc_info.request_id,
+                            static_cast<int>(result.success),
+                            result.reuse_len,
+                            result.match_cost_time_us);
+    }
+    return result;
 }
 
 void KVCacheManager::free(const FreeInfo& free_info) {

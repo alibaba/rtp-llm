@@ -1,6 +1,8 @@
 #include "rtp_llm/cpp/cache/HybridKVCacheAllocator.h"
 
+#include <atomic>
 #include <algorithm>
+#include <sstream>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -24,6 +26,50 @@ BlockIndicesType validBlocksAfter(const BlockIndicesType& blocks, size_t begin) 
         }
     }
     return valid;
+}
+
+bool hybridAllocTraceShouldLog() {
+    static std::atomic<int> budget{4000};
+    return budget.fetch_sub(1, std::memory_order_relaxed) > 0;
+}
+
+std::string formatBlockTail(const BlockIndicesType& blocks, size_t tail = 8) {
+    std::ostringstream os;
+    const size_t       begin = blocks.size() > tail ? blocks.size() - tail : 0;
+    os << "size=" << blocks.size() << ",tail[" << begin << ".." << blocks.size() << ")=[";
+    for (size_t i = begin; i < blocks.size(); ++i) {
+        if (i != begin) {
+            os << ",";
+        }
+        os << blocks[i];
+    }
+    os << "]";
+    return os.str();
+}
+
+void traceHybridGroupState(const char*             stage,
+                           int64_t                 request_id,
+                           int                     batch_id,
+                           int                     gid,
+                           int                     seq_len_arg,
+                           int                     reserve_step_arg,
+                           bool                    reuse_cache,
+                           const BlockIndicesType& blocks,
+                           const BlockIndicesType& kernel_blocks) {
+    if (!hybridAllocTraceShouldLog()) {
+        return;
+    }
+    RTP_LLM_LOG_WARNING("[kv-alloc-trace][hybrid.%s] request_id=%ld batch=%d group=%d seq_len_arg=%d "
+                        "reserve_step_arg=%d reuse_cache=%d blocks{%s} kernel_blocks{%s}",
+                        stage,
+                        request_id,
+                        batch_id,
+                        gid,
+                        seq_len_arg,
+                        reserve_step_arg,
+                        static_cast<int>(reuse_cache),
+                        formatBlockTail(blocks).c_str(),
+                        formatBlockTail(kernel_blocks).c_str());
 }
 
 }  // namespace
@@ -118,13 +164,33 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
     RTP_LLM_CHECK_WITH_INFO(batch_size == 1, "currently batch size should be 1 in hybrid attention but %d", batch_size);
 
     const int seq_len        = malloc_info.complete_token_ids->seqLength();
+    const int total_seq_len  = malloc_info.complete_token_ids->totalSeqLength();
     const int common_seq_len = std::min(malloc_info.complete_token_ids->commonSeqLength(), seq_len);
+    const int reserve_step   = malloc_info.complete_token_ids->getReserveStep();
 
     const auto&                   cache_keys         = kv_resource->cacheKeys(0);
     int64_t                       match_cost_time_us = 0;
     const size_t                  reserve_blocks     = reserveBlockNum();
     int                           reuse_blocks       = 0;
     std::vector<BlockIndicesType> referenced_blocks(static_cast<size_t>(kv_resource->groupNums()));
+
+    if (hybridAllocTraceShouldLog()) {
+        RTP_LLM_LOG_WARNING("[kv-alloc-trace][hybrid.init.begin] request_id=%ld batch_size=%d group_nums=%d "
+                            "seq_len=%d total_seq_len=%d common_seq_len=%d reserve_step=%d reuse_cache=%d "
+                            "enable_device_cache=%d cache_keys=%zu reserve_blocks=%zu cur_blocks=%d",
+                            malloc_info.request_id,
+                            batch_size,
+                            kv_resource->groupNums(),
+                            seq_len,
+                            total_seq_len,
+                            common_seq_len,
+                            reserve_step,
+                            static_cast<int>(malloc_info.reuse_cache),
+                            static_cast<int>(malloc_info.enable_device_cache),
+                            cache_keys.size(),
+                            reserve_blocks,
+                            kv_resource->curBlocksNum());
+    }
 
     if (malloc_info.enable_device_cache) {
         CacheKeysType match_keys(cache_keys.begin(), cache_keys.empty() ? cache_keys.end() : cache_keys.end() - 1);
@@ -160,11 +226,29 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
     }
     for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
         auto& block_ids_0 = kv_resource->mutableBlockIds(0, gid);
+        traceHybridGroupState("init.before",
+                              malloc_info.request_id,
+                              0,
+                              gid,
+                              common_seq_len,
+                              0,
+                              malloc_info.reuse_cache,
+                              block_ids_0.blocks(),
+                              block_ids_0.kernelBlocks());
         if (!kv_cache_groups_[static_cast<size_t>(gid)]->malloc(
                 block_ids_0, common_seq_len, malloc_info.reuse_cache, 0)) {
             rollbackInitMalloc(*kv_resource, referenced_blocks, original_sizes);
             return {false, 0};
         }
+        traceHybridGroupState("init.after",
+                              malloc_info.request_id,
+                              0,
+                              gid,
+                              common_seq_len,
+                              0,
+                              malloc_info.reuse_cache,
+                              block_ids_0.blocks(),
+                              block_ids_0.kernelBlocks());
     }
 
     for (int b = 1; b < batch_size; ++b) {
@@ -182,6 +266,25 @@ MallocResult HybridKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
     const int seq_len      = malloc_info.incrSeqLen();
     const int reserve_step = malloc_info.complete_token_ids->getReserveStep();
 
+    if (hybridAllocTraceShouldLog()) {
+        RTP_LLM_LOG_WARNING("[kv-alloc-trace][hybrid.incr.begin] request_id=%ld batch_size=%d group_nums=%d "
+                            "seq_len_arg=%d token_seq_len=%d total_seq_len=%d common_seq_len=%d reserve_step=%d "
+                            "incr_override=%d reuse_cache=%d enable_device_cache=%d remove_skipped=%d cur_blocks=%d",
+                            malloc_info.request_id,
+                            batch_size,
+                            kv_resource->groupNums(),
+                            seq_len,
+                            malloc_info.complete_token_ids->seqLength(),
+                            malloc_info.complete_token_ids->totalSeqLength(),
+                            malloc_info.complete_token_ids->commonSeqLength(),
+                            reserve_step,
+                            malloc_info.incr_seq_len_override,
+                            static_cast<int>(malloc_info.reuse_cache),
+                            static_cast<int>(malloc_info.enable_device_cache),
+                            static_cast<int>(malloc_info.enable_remove_skipped_blocks),
+                            kv_resource->curBlocksNum());
+    }
+
     std::vector<std::vector<BlockIndicesType>> original_blocks(static_cast<size_t>(batch_size));
     for (int b = 0; b < batch_size; ++b) {
         original_blocks[static_cast<size_t>(b)].resize(static_cast<size_t>(kv_resource->groupNums()));
@@ -196,6 +299,15 @@ MallocResult HybridKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
     for (int b = 0; b < batch_size; ++b) {
         for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
             auto& block_ids = kv_resource->mutableBlockIds(b, gid);
+            traceHybridGroupState("incr.before",
+                                  malloc_info.request_id,
+                                  b,
+                                  gid,
+                                  seq_len,
+                                  reserve_step,
+                                  malloc_info.reuse_cache,
+                                  block_ids.blocks(),
+                                  block_ids.kernelBlocks());
             if (!kv_cache_groups_[static_cast<size_t>(gid)]->malloc(
                     block_ids, seq_len, malloc_info.reuse_cache, reserve_step)) {
                 all_success  = false;
@@ -203,6 +315,15 @@ MallocResult HybridKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
                 failed_group = gid;
                 break;
             }
+            traceHybridGroupState("incr.after",
+                                  malloc_info.request_id,
+                                  b,
+                                  gid,
+                                  seq_len,
+                                  reserve_step,
+                                  malloc_info.reuse_cache,
+                                  block_ids.blocks(),
+                                  block_ids.kernelBlocks());
         }
         if (!all_success) {
             break;

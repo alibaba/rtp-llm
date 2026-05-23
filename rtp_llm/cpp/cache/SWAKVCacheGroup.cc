@@ -1,10 +1,34 @@
 #include "rtp_llm/cpp/cache/SWAKVCacheGroup.h"
 
+#include <atomic>
 #include <algorithm>
+#include <sstream>
 
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
+namespace {
+
+bool swaAllocTraceShouldLog() {
+    static std::atomic<int> budget{4000};
+    return budget.fetch_sub(1, std::memory_order_relaxed) > 0;
+}
+
+std::string formatSwaBlockTail(const BlockIndicesType& blocks, size_t tail = 8) {
+    std::ostringstream os;
+    const size_t       begin = blocks.size() > tail ? blocks.size() - tail : 0;
+    os << "size=" << blocks.size() << ",tail[" << begin << ".." << blocks.size() << ")=[";
+    for (size_t i = begin; i < blocks.size(); ++i) {
+        if (i != begin) {
+            os << ",";
+        }
+        os << blocks[i];
+    }
+    os << "]";
+    return os.str();
+}
+
+}  // namespace
 
 void SWAKVCacheGroup::filterValidBlocks(const BlockIndicesType& in, BlockIndicesType& out) const {
     out.clear();
@@ -78,16 +102,41 @@ bool SWAKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_reuse
         return true;
     }
 
-    int need_alloc_blocks = 0;
+    std::ostringstream decision_stream;
+    int                need_alloc_blocks = 0;
 
     for (int i = current_blocks_len; i < current_blocks_len + new_blocks_len; i++) {
         const bool is_seq_tail  = (seq_slots > 0) && (i == seq_slots - 1);
         const bool is_reserve   = (reserve_step > 0) && (i >= seq_slots);
         const bool step_hit     = (((i + 1) % step) == 0);
         const bool should_alloc = is_reserve || (enable_reuse_cache ? (step_hit || is_seq_tail) : is_seq_tail);
+        if (i != current_blocks_len) {
+            decision_stream << ";";
+        }
+        decision_stream << "slot=" << i << "(tail=" << static_cast<int>(is_seq_tail)
+                        << ",reserve=" << static_cast<int>(is_reserve) << ",step_hit=" << static_cast<int>(step_hit)
+                        << ",alloc=" << static_cast<int>(should_alloc) << ")";
         if (should_alloc) {
             need_alloc_blocks++;
         }
+    }
+
+    if (swaAllocTraceShouldLog()) {
+        RTP_LLM_LOG_WARNING("[kv-alloc-trace][swa.begin] group=%d seq_len=%d reserve_step=%d enable_reuse_cache=%d "
+                            "step=%d current_blocks=%d seq_slots=%d new_blocks_len=%d need_alloc=%d decisions=%s "
+                            "before_blocks{%s} before_kernel{%s}",
+                            group_id_,
+                            seq_len,
+                            reserve_step,
+                            static_cast<int>(enable_reuse_cache),
+                            step,
+                            current_blocks_len,
+                            seq_slots,
+                            new_blocks_len,
+                            need_alloc_blocks,
+                            decision_stream.str().c_str(),
+                            formatSwaBlockTail(block_ids.blocks()).c_str(),
+                            formatSwaBlockTail(block_ids.kernelBlocks()).c_str());
     }
 
     if (need_alloc_blocks > 0) {
@@ -119,7 +168,23 @@ bool SWAKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_reuse
             new_ids.push_back(NULL_BLOCK_IDX);
         }
     }
+    if (swaAllocTraceShouldLog()) {
+        RTP_LLM_LOG_WARNING("[kv-alloc-trace][swa.new_ids] group=%d seq_len=%d reserve_step=%d new_ids{%s}",
+                            group_id_,
+                            seq_len,
+                            reserve_step,
+                            formatSwaBlockTail(new_ids).c_str());
+    }
     block_ids.add(new_ids);
+    if (swaAllocTraceShouldLog()) {
+        RTP_LLM_LOG_WARNING("[kv-alloc-trace][swa.after] group=%d seq_len=%d reserve_step=%d after_blocks{%s} "
+                            "after_kernel{%s}",
+                            group_id_,
+                            seq_len,
+                            reserve_step,
+                            formatSwaBlockTail(block_ids.blocks()).c_str(),
+                            formatSwaBlockTail(block_ids.kernelBlocks()).c_str());
+    }
     return true;
 }
 
