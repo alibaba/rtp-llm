@@ -96,6 +96,11 @@ class ModelDict:
                         return "qwen_vl"
                     else:
                         return "qwen_vl_1b8"
+            if (
+                architecture == "Qwen3_5MoeForConditionalGeneration"
+                and config.get("vision_config") is not None
+            ):
+                return "qwen35_vl_moe"
             if architecture == "BaichuanForCausalLM":
                 vocab_size = config.get("vocab_size", 64000)
                 if vocab_size == 125696:

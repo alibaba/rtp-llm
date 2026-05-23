@@ -306,3 +306,16 @@ py_test(
     imports=[],
     exec_properties={"gpu": "H20"},
 )
+
+py_test(
+    name="qwen35_vl_moe_test",
+    srcs=[
+        "qwen35_vl_moe_test.py",
+    ],
+    data=[],
+    deps=[
+        "//rtp_llm:model_factory_register_lib",
+        "//rtp_llm/models_py:multimodal_embedding",
+    ],
+    imports=[],
+)

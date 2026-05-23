@@ -20,8 +20,8 @@ from rtp_llm.utils.multimodal_util import MMPreprocessConfig, MMUrlType
 
 class QwenVLRenderer(CustomChatRenderer):
     def __init__(
-        self, 
-        tokenizer: BaseTokenizer, 
+        self,
+        tokenizer: BaseTokenizer,
         renderer_params: RendererParams,
         generate_env_config,
         render_config=None,
@@ -29,7 +29,15 @@ class QwenVLRenderer(CustomChatRenderer):
         misc_config=None,
         vit_config=None,
     ):
-        super().__init__(tokenizer, renderer_params, generate_env_config, render_config, ckpt_path, misc_config, vit_config)
+        super().__init__(
+            tokenizer,
+            renderer_params,
+            generate_env_config,
+            render_config,
+            ckpt_path,
+            misc_config,
+            vit_config,
+        )
 
     def _render_messages(self, messages: List[ChatMessage]) -> PromptWithMMInput:
         prompt = ""
@@ -72,8 +80,8 @@ class QwenVLRenderer(CustomChatRenderer):
 
 class Qwen2VLRenderer(CustomChatRenderer):
     def __init__(
-        self, 
-        tokenizer: BaseTokenizer, 
+        self,
+        tokenizer: BaseTokenizer,
         renderer_params: RendererParams,
         generate_env_config,
         render_config=None,
@@ -81,7 +89,15 @@ class Qwen2VLRenderer(CustomChatRenderer):
         misc_config=None,
         vit_config=None,
     ):
-        super().__init__(tokenizer, renderer_params, generate_env_config, render_config, ckpt_path, misc_config, vit_config)
+        super().__init__(
+            tokenizer,
+            renderer_params,
+            generate_env_config,
+            render_config,
+            ckpt_path,
+            misc_config,
+            vit_config,
+        )
 
     def _render_messages(
         self, messages: List[ChatMessage], add_vision_id: bool
@@ -174,3 +190,4 @@ register_renderer("qwen_vl_1b8", QwenVLRenderer)
 register_renderer("qwen2_vl", Qwen2VLRenderer)
 register_renderer("qwen2_5_vl", Qwen2VLRenderer)
 register_renderer("qwen3_vl_moe", Qwen2VLRenderer)
+register_renderer("qwen35_vl_moe", Qwen2VLRenderer)

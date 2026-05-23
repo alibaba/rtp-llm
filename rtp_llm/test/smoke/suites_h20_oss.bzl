@@ -344,6 +344,20 @@ def h20_oss_suites():
         ],
     )
 
+    # H20 Qwen3.5 VL MoE manual validation
+    native.test_suite(
+        name = "smoke_h20_qwen35_vl_manual",
+        tests = [
+            smoke_test(
+                name="qwen35_vl_35b_basic",
+                task_info="data/model/qwen35_vl/q_r_35b_vl.json",
+                smoke_args="--warm_up 0 --act_type BF16 --tp_size 2 --world_size 2 --seq_size_per_block 2048 --max_seq_len 4096 --reserver_runtime_mem_mb 12000 --enable_cuda_graph 0",
+                envs=["SAVE_RESPONSE=True"],
+                gpu_type=["H20"],
+            ),
+        ],
+    )
+
 
     # H20 Kimi Linear (KDA hybrid linear attention)
     native.test_suite(
@@ -444,4 +458,3 @@ def h20_oss_suites():
             ),
         ],
     )
-

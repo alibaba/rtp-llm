@@ -196,6 +196,13 @@ py_library(
 )
 
 py_library(
+    name = "model_factory_register_lib",
+    srcs = [
+        "model_factory_register.py",
+    ],
+)
+
+py_library(
     name = "device",
     srcs = glob([
         "device/**/*.py",

@@ -994,6 +994,9 @@ class Qwen3NextModel(GptModelBase):
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
 
+    def _embed_input_ids(self, inputs: PyModelInputs) -> torch.Tensor:
+        return self.embed_tokens(inputs.input_ids)
+
     def _build_cp_linear_attn_metadata(
         self,
         attention_inputs: PyAttentionInputs,
@@ -1053,9 +1056,7 @@ class Qwen3NextModel(GptModelBase):
         )
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
-        input_ids: torch.Tensor = inputs.input_ids
-        inputs_embeds = self.embed_tokens(input_ids)
-        hidden_states = inputs_embeds
+        hidden_states = self._embed_input_ids(inputs)
 
         attention_inputs: PyAttentionInputs = inputs.attention_inputs
         prefill_conv1d_meta = None

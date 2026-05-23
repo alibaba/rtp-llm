@@ -340,7 +340,13 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
         torch::Tensor token_ids = micro_inputs.combo_tokens.clone().cuda();
         torch::Tensor input_hiddens =
             inputs.last_hidden_states.defined() ? inputs.last_hidden_states : torch::empty({0});
-        input_list.emplace_back(PyModelInputs{token_ids, input_hiddens, py_attn_inputs, bert_embedding_inputs});
+        input_list.emplace_back(PyModelInputs{token_ids,
+                                              input_hiddens,
+                                              py_attn_inputs,
+                                              bert_embedding_inputs,
+                                              std::vector<torch::Tensor>{},
+                                              torch::empty({0}),
+                                              torch::empty({0})});
     }
 
     if (!inputs.warmup && inputs.pd_separation) {
@@ -407,13 +413,15 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
     d2d_copies_.clear();
     DevicePerfWrapper wrapper(enable_device_perf_, "py model forward");
     holdInputsHostBuffers(inputs);
+    const bool has_multimodal_input =
+        inputs.multimodal_features.has_value() && !inputs.multimodal_features.value().empty();
     if (pinned_check_remaining_ > 0) {
         --pinned_check_remaining_;
     }
     try {
         RTP_LLM_LOG_DEBUG("Calling forward method on Python object instance.");
 
-        if (int(device_props_.enable_layer_micro_batch)) {
+        if (int(device_props_.enable_layer_micro_batch) && !has_multimodal_input) {
             return forwardMicroBatched(inputs);
         }
         PyContextParallelParams cp_params;
@@ -443,16 +451,38 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         calculatePaddingOffset(attention_inputs);
         attention_inputs.padding_offset = tensorHoldHostAndToCuda(attention_inputs.padding_offset);
 
+        std::vector<torch::Tensor> multimodal_features;
+        torch::Tensor text_tokens_mask = torch::empty({0}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
+        torch::Tensor mm_features_locs = torch::empty({0}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
+        if (has_multimodal_input) {
+            multimodal_features.reserve(inputs.multimodal_features.value().size());
+            for (const auto& mm_feature : inputs.multimodal_features.value()) {
+                multimodal_features.push_back(tensorHoldHostAndToCuda(mm_feature));
+            }
+            if (inputs.text_tokens_mask.defined()) {
+                text_tokens_mask = tensorHoldHostAndToCuda(inputs.text_tokens_mask);
+            }
+            if (inputs.mm_features_locs.defined()) {
+                mm_features_locs = tensorHoldHostAndToCuda(inputs.mm_features_locs);
+            }
+        }
+
         // launch fused copy
         fusedCopy(d2d_copies_);
 
-        auto py_model_inputs = PyModelInputs({token_ids, input_hiddens, attention_inputs, bert_embedding_inputs});
+        auto           py_model_inputs = PyModelInputs({token_ids,
+                                                        input_hiddens,
+                                                        attention_inputs,
+                                                        bert_embedding_inputs,
+                                                        multimodal_features,
+                                                        text_tokens_mask,
+                                                        mm_features_locs});
         PyModelOutputs py_model_outputs;
         torch::Tensor  hidden_states;
 
         // Cast the Python object to PyModelOutputs and extract hidden states
         CudaGraphState graph_state;
-        if (enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs, graph_state)) {
+        if (enable_cuda_graph_ && !has_multimodal_input && graph_runner_->canRun(py_model_inputs, graph_state)) {
             py::gil_scoped_acquire gil;
             RTP_LLM_PROFILE_SCOPE("py_model.forward(cuda_graph)");
             DevicePerfWrapper wrapper(enable_device_perf_, "cuda graph python forward");

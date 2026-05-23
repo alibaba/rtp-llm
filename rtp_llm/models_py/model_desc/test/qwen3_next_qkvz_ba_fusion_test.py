@@ -42,19 +42,35 @@ class TestQwen3NextQkvzBaFusion(unittest.TestCase):
         qkvz_w = torch.randn(K, qkvz_dim, dtype=dtype, device=self.device)
         ba_w = torch.randn(K, ba_dim, dtype=dtype, device=self.device)
 
-        out_qkvz = x @ qkvz_w
-        out_ba = x @ ba_w
-
         fused_w = torch.cat([qkvz_w, ba_w], dim=1).contiguous()
-        out_fused = x @ fused_w
 
-        # bf16 GEMM accumulation order can differ between GEMM impls; tolerance
-        # follows the project's RmsNormGated test (atol=rtol=1e-2).
+        # Validate the layout invariant in fp32 first. The product path uses
+        # bf16, but separate GEMMs and the wider fused GEMM can legitimately
+        # choose different bf16 kernels/accumulation orders on CUDA.
+        out_qkvz = x.float() @ qkvz_w.float()
+        out_ba = x.float() @ ba_w.float()
+        out_fused = x.float() @ fused_w.float()
         torch.testing.assert_close(
-            out_fused[..., :qkvz_dim], out_qkvz, atol=1e-2, rtol=1e-2
+            out_fused[..., :qkvz_dim], out_qkvz, atol=1e-4, rtol=1e-4
         )
         torch.testing.assert_close(
-            out_fused[..., qkvz_dim:], out_ba, atol=1e-2, rtol=1e-2
+            out_fused[..., qkvz_dim:], out_ba, atol=1e-4, rtol=1e-4
+        )
+
+        # Also keep a bf16 sanity bound so the fused path cannot drift wildly
+        # from the 2-GEMM baseline. With K=1024 and bf16 inputs, max absolute
+        # differences around one bf16 quantum at the output scale are expected.
+        out_qkvz_bf16 = x @ qkvz_w
+        out_ba_bf16 = x @ ba_w
+        out_fused_bf16 = x @ fused_w
+        torch.testing.assert_close(
+            out_fused_bf16[..., :qkvz_dim], out_qkvz_bf16, atol=5e-1, rtol=5e-2
+        )
+        torch.testing.assert_close(
+            out_fused_bf16[..., qkvz_dim:],
+            out_ba_bf16,
+            atol=5e-1,
+            rtol=5e-2,
         )
 
     # ---- (2) Qwen3NextGatedDeltaNet end-to-end ----

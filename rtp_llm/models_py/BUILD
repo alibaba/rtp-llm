@@ -102,6 +102,14 @@ py_library(
 )
 
 py_library(
+    name = "multimodal_embedding",
+    srcs = [
+        "model_desc/multimodal_embedding.py",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
     name = "models",
     srcs = glob([
         "model_desc/*.py",

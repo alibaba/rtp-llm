@@ -94,6 +94,14 @@ void debugPrintPyModelInputs(const torch_ext::PyModelInputs& inputs) {
         std::cout << "  is_pinned: " << inputs.input_hiddens.is_pinned() << std::endl;
     }
 
+    std::cout << "--- multimodal_inputs ---" << std::endl;
+    std::cout << "  multimodal_features size: " << inputs.multimodal_features.size() << std::endl;
+    for (size_t i = 0; i < inputs.multimodal_features.size(); ++i) {
+        printTensorInfo("multimodal_features[" + std::to_string(i) + "]", inputs.multimodal_features[i]);
+    }
+    printTensorInfo("text_tokens_mask", inputs.text_tokens_mask);
+    printTensorInfo("mm_features_locs", inputs.mm_features_locs);
+
     std::cout << "--- attention_inputs ---" << std::endl;
     std::cout << "  is_prefill: " << inputs.attention_inputs.is_prefill << std::endl;
 
