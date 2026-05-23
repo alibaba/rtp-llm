@@ -1,4 +1,4 @@
-"""CPU tests for DSv4 FP8 decode metadata start-position selection."""
+"""CUDA tests for DSv4 FP8 decode metadata start-position selection."""
 
 from __future__ import annotations
 
@@ -60,12 +60,15 @@ def _alloc(q_len: int, max_bs: int = 4, max_seq_len: int = 65600):
         max_seq_len=max_seq_len,
         compress_ratios=[0, 4, 128],
         index_topk=16,
-        device=torch.device("cpu"),
+        device=(
+            torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        ),
     )
 
 
 def _i32(vals):
-    return torch.tensor(vals, dtype=torch.int32)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    return torch.tensor(vals, dtype=torch.int32, device=device)
 
 
 def _ref_compressed_kv_slots(
@@ -127,6 +130,7 @@ def _ref_state_slots(
     return torch.where(block_id > 0, slot, torch.full_like(slot, -1))
 
 
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA required for fused decode meta")
 class TestDecodeMetadataStartPos(unittest.TestCase):
     def test_normal_decode_uses_sequence_lengths(self):
         meta = _alloc(q_len=1)
@@ -219,7 +223,8 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
 
     def test_hca_dense_indices_cover_1m_context(self):
         max_seq_len = 1048576
-        start_pos = torch.tensor([max_seq_len - 1], dtype=torch.int32)
+        device = torch.device("cuda")
+        start_pos = torch.tensor([max_seq_len - 1], dtype=torch.int32, device=device)
 
         eager = build_decode_metadata_fp8(
             start_pos=start_pos,
@@ -229,7 +234,7 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
             max_seq_len=max_seq_len,
             compress_ratios=[0, 4, 128],
             index_topk=512,
-            device=torch.device("cpu"),
+            device=device,
         )
         eager_hca = eager.topk_total_by_ratio[128][0, 0, 128:]
         self.assertEqual(eager_hca.numel(), 8192)
@@ -244,7 +249,7 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
             max_seq_len=max_seq_len,
             compress_ratios=[0, 4, 128],
             index_topk=512,
-            device=torch.device("cpu"),
+            device=device,
         )
         update_decode_metadata_in_place_fp8(graph_meta, start_pos, forbid_realloc=True)
         graph_hca = graph_meta.topk_total_by_ratio[128][0, 0, 128:]
@@ -258,7 +263,8 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
 
     def test_hca_dense_indices_align_70k_context_for_flashmla(self):
         max_seq_len = 70000
-        start_pos = torch.tensor([max_seq_len - 1], dtype=torch.int32)
+        device = torch.device("cuda")
+        start_pos = torch.tensor([max_seq_len - 1], dtype=torch.int32, device=device)
 
         graph_meta = allocate_decode_metadata_fp8(
             max_batch_size=1,
@@ -268,7 +274,7 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
             max_seq_len=max_seq_len,
             compress_ratios=[0, 4, 128],
             index_topk=512,
-            device=torch.device("cpu"),
+            device=device,
         )
         update_decode_metadata_in_place_fp8(graph_meta, start_pos, forbid_realloc=True)
         graph_hca = graph_meta.topk_total_by_ratio[128][0, 0, 128:]

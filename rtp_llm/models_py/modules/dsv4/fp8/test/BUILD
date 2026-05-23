@@ -72,3 +72,11 @@ py_test(
     )
     for t in _DSV4_FP8_TESTS
 ]
+
+py_test(
+    name = "test_fused_decode_meta_comprehensive",
+    srcs = ["test_fused_decode_meta_comprehensive.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["H20"],
+    exec_properties = {"gpu": "H20"},
+)
