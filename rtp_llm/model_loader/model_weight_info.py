@@ -43,6 +43,52 @@ def create_scalar_ones(ts: List[torch.Tensor]):
     return torch.ones([1], dtype=torch.float32).to(ts[0].device)
 
 
+def _apply_mega_moe_fp4_wrappers(weight_info: "ModelWeightInfo") -> "ModelWeightInfo":
+    """Walk ``weight_info`` and replace MoE w1/w2 weights with mega-MoE FP4
+    load-time quantizers when ``MOE_STRATEGY=mega_moe``.
+
+    Two cases are handled:
+      - ``MoeAtomicWeight`` (BF16 ckpt or skip_moe FP8 quant): wrap with
+        :class:`OnlineMegaMoeFp4Weight` (BF16 → FP4).
+      - ``PerBlockFp8Weight`` for moe_w1/moe_w2 (FP8 ckpt under
+        ``Fp8BlockWiseQuantConfig``): replace with
+        :class:`OnlineMegaMoeFp4FromFp8Weight` (FP8 → FP4).
+    """
+    from rtp_llm.model_loader.online_modelopt_fp4_quant_weight import (
+        is_mega_moe_strategy,
+        wrap_moe_for_mega_moe,
+    )
+
+    if not is_mega_moe_strategy():
+        return weight_info
+
+    from rtp_llm.model_loader.ffn_weight import MoeWeight
+
+    def _walk(weight: WeightModule) -> WeightModule:
+        wrapped = wrap_moe_for_mega_moe(weight)
+        if wrapped is not weight:
+            return wrapped
+        if isinstance(weight, MoeWeight):
+            for name, sw in list(weight.sub_weights.items()):
+                weight.sub_weights[name] = _walk(sw)
+            if W.moe_w1 in weight.sub_weights:
+                weight.moe_w1 = weight.sub_weights[W.moe_w1]
+            if W.moe_w2 in weight.sub_weights:
+                weight.moe_w2 = weight.sub_weights[W.moe_w2]
+            return weight
+        return weight
+
+    if weight_info.layer_weights:
+        new_layer_weights: List[Any] = []
+        for layer in weight_info.layer_weights:
+            if isinstance(layer, list):
+                new_layer_weights.append([_walk(w) for w in layer])
+            else:
+                new_layer_weights.append(_walk(layer))
+        weight_info.layer_weights = new_layer_weights
+    return weight_info
+
+
 class ModelWeightInfo:
     layer_weights: Union[List[WeightModule], List[List[WeightModule]]]
     weights: List[WeightModule]
@@ -338,6 +384,12 @@ class ModelDeployWeightInfo:
 
         if self._quant_algo is not None and self._quant_algo.isQuant():
             weight_info = weight_info.to_quant_weight_info(self._quant_config)
+
+        # MOE_STRATEGY=mega_moe forces load-time FP4 quantization for MoE
+        # weights regardless of whether a quant_config is set. This must run
+        # AFTER `to_quant_weight_info` so we can replace any PerBlockFp8Weight
+        # MoE wrapper with the FP8→FP4 variant.
+        weight_info = _apply_mega_moe_fp4_wrappers(weight_info)
 
         if self.tie_word_embeddings:
             logging.info("fix tie_word_embeddings")

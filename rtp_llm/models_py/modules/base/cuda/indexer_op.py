@@ -138,7 +138,6 @@ class IndexerOp(nn.Module):
                 interleave=not self.is_neox_style,
             )
 
-        # Apply Hadamard transform (activation rotation)
         query = _rotate_activation(q)
         key = _rotate_activation(k)
 
@@ -205,7 +204,6 @@ class IndexerOp(nn.Module):
         # Extract position embedding part (exclude rope_head_dim from the end)
         k_pe = k[:, : self.index_head_dim - self.rope_head_dim]
 
-        # Apply RoPE (same as vllm indexer rope)
         if self.cos_sin_cache is not None:
             rope._apply_rope_pos_ids_cos_sin_cache(
                 q=k_pe.unsqueeze(1),
@@ -217,7 +215,6 @@ class IndexerOp(nn.Module):
                 interleave=not self.is_neox_style,
             )
 
-        # Apply Hadamard transform (activation rotation)
         key = _rotate_activation(k)
 
         return key
@@ -293,6 +290,94 @@ class IndexerOp(nn.Module):
         )
 
         return q_fp8, q_scale
+
+    def quant_q_only(
+        self,
+        query: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Quantize query only (no key caching). Used by dual-stream path."""
+        query_flat = query.view(-1, self.index_head_dim)
+        q_fp8, q_scale = sgl_per_token_group_quant_fp8(
+            query_flat,
+            group_size=self.block_size,
+            eps=1e-4,
+            column_major_scales=True,
+            scale_tma_aligned=True,
+            scale_ue8m0=(self.scale_fmt == "ue8m0"),
+        )
+        q_fp8 = q_fp8.view(-1, self.index_n_heads, self.index_head_dim)
+        if self.scale_fmt == "ue8m0":
+            q_scale = _unpack_ue8m0_scale(q_scale)
+        q_scale = q_scale.view(-1, self.index_n_heads, 1)
+        return q_fp8, q_scale
+
+    def fused_rope_quant_q(
+        self,
+        q: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Fused RoPE + Hadamard + FP8 quantization for Q.
+
+        Replaces separate apply_rope + rotate_activation + quant_q_only
+        with a single Triton kernel.
+
+        Args:
+            q: Pre-RoPE query [num_tokens, index_n_heads, index_head_dim]
+            positions: Position IDs [num_tokens]
+
+        Returns:
+            (q_fp8, q_scale) same as quant_q_only output.
+        """
+        from rtp_llm.models_py.triton_kernels.sparse_mla.fused_q_rope_quant import (
+            fused_q_rope_quant,
+        )
+
+        # RoPE is applied to first (index_head_dim - rope_head_dim) dims
+        actual_rot_dim = self.index_head_dim - self.rope_head_dim
+        return fused_q_rope_quant(
+            q,
+            positions,
+            self.cos_sin_cache,
+            self.index_n_heads,
+            self.index_head_dim,
+            actual_rot_dim,
+            is_neox_style=self.is_neox_style,
+        )
+
+    def fused_rope_quant_qk(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Fused QK: K(RoPE+Hadamard→bf16) + Q(RoPE+Hadamard+FP8) in one kernel.
+
+        Args:
+            q: Pre-RoPE query [num_tokens, index_n_heads, index_head_dim]
+            k: Pre-RoPE key [num_tokens, index_head_dim] (after k_norm)
+            positions: Position IDs [num_tokens]
+
+        Returns:
+            (q_fp8, q_scale, k_out):
+                q_fp8: [num_tokens, index_n_heads, index_head_dim] float8_e4m3fn
+                q_scale: [num_tokens, index_n_heads, 1] float32
+                k_out: [num_tokens, index_head_dim] bf16
+        """
+        from rtp_llm.models_py.triton_kernels.sparse_mla.fused_q_rope_quant import (
+            fused_qk_rope_quant,
+        )
+
+        actual_rot_dim = self.index_head_dim - self.rope_head_dim
+        return fused_qk_rope_quant(
+            q,
+            k,
+            positions,
+            self.cos_sin_cache,
+            self.index_n_heads,
+            self.index_head_dim,
+            actual_rot_dim,
+            is_neox_style=self.is_neox_style,
+        )
 
     def quant_q_k_cp(
         self,
@@ -372,6 +457,7 @@ class IndexerOp(nn.Module):
 
         weights = weights.view(-1, self.index_n_heads)
         kv_cache_fp8 = kv_cache.kv_scale_base
+        is_target_verify = bool(getattr(attention_inputs, "is_target_verify", False))
 
         num_heads_kv = 1
         head_dim_with_sf = (
@@ -381,22 +467,57 @@ class IndexerOp(nn.Module):
             kv_cache_fp8.shape[0], self.blocksize, num_heads_kv, head_dim_with_sf
         ).view(dtype=torch.uint8)
 
-        max_seq_len = (
-            attention_inputs.kv_cache_kernel_block_id_device.shape[1] * self.blocksize
-        )
+        block_table = attention_inputs.kv_cache_kernel_block_id_device
+        cu_seqlens_q = attention_inputs.decode_cu_seqlens_d
+        lengths = fmha_params.expanded_seq_lens
 
-        schedule_metadata = deep_gemm.get_paged_mqa_logits_metadata(
-            fmha_params.kvlen_d,
-            self.blocksize,
-            deep_gemm.get_num_sms(),
-        )
+        if is_target_verify:
+            # Target verify has multiple query tokens per request. Treat it as
+            # flattened decode: each verify token gets its own context length and
+            # the same block-table row as its parent request. This matches the
+            # paged DSA path used by SGLang/vLLM and avoids the ragged
+            # fp8_mqa_logits path under CUDA graph replay.
+            num_tokens = q_fp8.shape[0]
+            batch_size = block_table.shape[0]
+            assert batch_size > 0
+            assert (
+                num_tokens % batch_size == 0
+            ), f"target verify tokens {num_tokens} not divisible by batch {batch_size}"
+            tokens_per_batch = num_tokens // batch_size
+            block_table = block_table.repeat_interleave(
+                tokens_per_batch, dim=0, output_size=num_tokens
+            )
+            lengths = fmha_params.expanded_seq_lens
+            kvlen_2d = lengths.reshape(-1, 1)
+            cu_seqlens_q = torch.arange(
+                0, num_tokens + 1, 1, dtype=torch.int32, device=q_fp8.device
+            )
+        else:
+            # deep_gemm 2.5.0 expects context_lens as [batch_size, next_n].
+            # fmha_params.kvlen_d is 1D [B]; unsqueeze(1) -> [B, 1] for next_n=1.
+            kvlen_2d = fmha_params.kvlen_d.unsqueeze(1)
+
+        max_seq_len = block_table.shape[1] * self.blocksize
+        schedule_metadata = getattr(fmha_params, "schedule_metadata", None)
+        has_schedule_metadata = False
+        if isinstance(schedule_metadata, torch.Tensor):
+            try:
+                has_schedule_metadata = schedule_metadata.numel() > 0
+            except RuntimeError:
+                has_schedule_metadata = False
+        if not has_schedule_metadata:
+            schedule_metadata = deep_gemm.get_paged_mqa_logits_metadata(
+                kvlen_2d,
+                self.blocksize,
+                deep_gemm.get_num_sms(),
+            )
 
         logits = deep_gemm.fp8_paged_mqa_logits(
             q_fp8.unsqueeze(1),
             kv_cache_fp8.view(dtype=torch.uint8),
             weights,
-            fmha_params.kvlen_d,
-            attention_inputs.kv_cache_kernel_block_id_device,
+            kvlen_2d,
+            block_table,
             schedule_metadata,
             max_seq_len,
             clean_logits=False,
@@ -411,8 +532,8 @@ class IndexerOp(nn.Module):
 
         topk_result = fast_topk_transform_fused(
             score=logits,
-            lengths=fmha_params.expanded_seq_lens,  # expanded_seq_lens
-            cu_seqlens_q=attention_inputs.decode_cu_seqlens_d,  # bs + 1
+            lengths=lengths,
+            cu_seqlens_q=cu_seqlens_q,
             topk=self.index_topk,
             row_starts=None,
         )
@@ -441,19 +562,28 @@ class IndexerOp(nn.Module):
         Returns:
             TopK indices tensor
         """
+        assert not bool(getattr(attention_inputs, "is_target_verify", False)), (
+            "target verify must use paged DSA topk; ragged fp8_mqa_logits is "
+            "not CUDA-graph safe"
+        )
         from rtp_llm.models_py.kernels.cuda.fast_topk import (
             fast_topk_transform_ragged_fused,
         )
 
-        # Gather quantized key from cache for prefill
-        num_tokens = q_fp8.shape[0]
+        # Gather quantized key from cache for prefill.
+        # total_kv_tokens = sum(input_lengths + prefix_lengths) across all
+        # requests — this is the number of K rows that
+        # cp_gather_indexer_k_quant_cache will write (governed by cu_kv_seqlens).
+        # Using q_fp8.shape[0] (= sum(input_lengths)) is wrong when
+        # prefix_lengths > 0 (e.g. target-verify in speculative decoding).
+        total_kv_tokens = fmha_params.prefill_total_kv_tokens
         k_fp8 = torch.empty(
-            (num_tokens, self.index_head_dim),
+            (total_kv_tokens, self.index_head_dim),
             dtype=torch.float8_e4m3fn,
             device=q_fp8.device,
         )
         k_scale = torch.empty(
-            (num_tokens, self.index_head_dim // self.block_size * 4),
+            (total_kv_tokens, self.index_head_dim // self.block_size * 4),
             dtype=torch.uint8,
             device=q_fp8.device,
         )
@@ -468,7 +598,7 @@ class IndexerOp(nn.Module):
 
         # Compute logits
         weights = weights.squeeze(-1)
-        kv_fp8 = (k_fp8, k_scale.view(torch.float32))
+        kv_fp8 = (k_fp8, k_scale.view(torch.float32).squeeze(-1))
 
         assert (
             fmha_params.ks is not None and fmha_params.ke is not None
@@ -575,7 +705,7 @@ class IndexerOp(nn.Module):
             attention_inputs.kv_cache_kernel_block_id_device,
             cu_kv_seqlens_global,
         )
-        kv_fp8_full = (k_fp8, k_scale.view(torch.float32))
+        kv_fp8_full = (k_fp8, k_scale.view(torch.float32).squeeze(-1))
 
         def run_part_logits_topk(
             q_part: torch.Tensor,
@@ -603,9 +733,12 @@ class IndexerOp(nn.Module):
 
         if total_local_ids.size(0) > 0:
             topk = run_part_logits_topk(
-                q0, weights_sq0,
-                precomputed_ks, precomputed_ke,
-                precomputed_lengths, precomputed_topk_off,
+                q0,
+                weights_sq0,
+                precomputed_ks,
+                precomputed_ke,
+                precomputed_lengths,
+                precomputed_topk_off,
             )
         else:
             topk = None

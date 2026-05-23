@@ -1,32 +1,31 @@
 """
-Unified Sparse MLA implementation for both prefill and decode stages.
-Uses flash_mla_sparse_fwd kernel with triton-based index conversion.
+CP (context-parallel) variant of sparse MLA.
+Mirrors flashmla_sparse_impl.py but with all-gather + restore + zig-zag q split.
 """
 
 import copy
+import logging
+import os
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import torch
 
-# Check CUDA version for flash_mla compatibility
-_FLASH_MLA_AVAILABLE = False
 try:
-    if torch.version.cuda:
-        major, minor = map(int, torch.version.cuda.split(".")[:2])
-        if (major, minor) >= (12, 9):
-            from flash_mla import flash_mla_with_kvcache, get_mla_metadata
+    cuda_ver = torch.version.cuda or ""
+    _major, _minor = (int(x) for x in (cuda_ver.split(".") + ["0", "0"])[:2])
+    if (_major, _minor) >= (12, 9):
+        from flash_mla import (
+            flash_mla_sparse_fwd,
+            flash_mla_with_kvcache,
+            get_mla_metadata,
+        )
+except (ImportError, AttributeError, ValueError) as _e:
+    logging.warning(f"flash_mla not available: {_e}. Requires CUDA >= 12.9")
 
-            _FLASH_MLA_AVAILABLE = True
-except (ImportError, AttributeError, ValueError) as e:
-    import logging
-
-    logging.warning(f"flash_mla not available: {e}. Requires CUDA >= 12.9")
-
-from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, barrier
+from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_utils import (
-    generate_full_causal_kv_indices,
     generate_q_indices,
 )
 from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType, ParallelismConfig
@@ -36,17 +35,15 @@ from .flashmla_sparse_impl import (
     SparseMlaFp8DecodeParams,
     SparseMlaFp8Op,
     SparseMlaImpl,
+    _as_uint8,
+    _GatherWorkspace,
+    _topk_2d,
 )
 
 
 class SparseMlaFp8CPOp(SparseMlaFp8Op):
-    """
-    Context Parallel prefill for Sparse MLA (FP8).
-
-    All-gather KV, restore to logical order, write via the same kv_cache_write_op as
-    non-CP (line 508 in flashmla_sparse_impl), then run attention in two parts (q0, q1)
-    using self.block_table, self._fp8_kernel_metadata, self._convert_topk_indices_to_global.
-    """
+    """Context-parallel sparse MLA prefill: all-gather KV, restore to global order,
+    write to paged cache, then run attention only on q tokens this rank owns."""
 
     def __init__(
         self,
@@ -68,22 +65,23 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             softmax_extra_scale=softmax_extra_scale,
             top_k=top_k,
         )
-
         self.attn_inputs = None
         self.cp_info = None
-
         self.prefill_cp_rank = parallelism_config.tp_rank
         self.prefill_cp_size = parallelism_config.tp_size
         self.device = torch.cuda.current_device()
-        self.kv_restore_unpad_indices = None
-        self.total_global_ids = None
-        self.total_local_ids = None
-        self.cu_kv_seqlens_global = None
+
+        # Filled per-forward in plan(); read by forward() and create_params()
+        self.kv_restore_unpad_indices: Optional[torch.Tensor] = None
+        self.total_global_ids: Optional[torch.Tensor] = None
+        self.total_local_ids: Optional[torch.Tensor] = None
+        self.cu_kv_seqlens_global: Optional[torch.Tensor] = None
         self.total_kv_len: int = 0
+        self.precomputed_req_ids: Optional[torch.Tensor] = None
+        self.full_rope_pos_ids: Optional[torch.Tensor] = None
+        # Wired up by SparseMlaCpImpl post-construction
         self.kv_cache_write_op = None
         self.write_cache_store_impl = None
-        self.precomputed_req_ids = None
-        self.full_rope_pos_ids = None
 
     def plan(
         self,
@@ -93,36 +91,26 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
     ) -> None:
         self.block_table = block_table
         self.mla_params = mla_params
-
         self.attn_inputs = attn_inputs
         self.cp_info = attn_inputs.context_parallel_info
-        assert (
-            self.cp_info is not None
-        ), "Context parallel info is required for SparseMlaFp8CPOp"
+        assert self.cp_info is not None, "context_parallel_info required for CP"
 
-        cp_info = self.cp_info
-        chunk_lengths = cp_info.prefill_cp_chunk_lengths
-
-        # Zig-zag: restore_indices[global_pos] = source_flat_index → global_idx = inv_restore[cp_rank * local_tokens + local_idx]
+        chunk_lengths = self.cp_info.prefill_cp_chunk_lengths
         if isinstance(chunk_lengths, torch.Tensor):
             chunk_lengths_list = chunk_lengths.cpu().tolist()
         else:
             chunk_lengths_list = list(chunk_lengths)
-
-        # These stay in Python (pure CPU list operations)
         q0_idx, q1_idx = generate_q_indices(chunk_lengths_list)
-
         local_tokens = sum(chunk_lengths_list)
 
-        # Ensure CPU tensors for C++ processing
-        padding_mask_cpu = cp_info.prefill_qkv_padding_mask
+        # CPU tensors required by fill_cp_plan_params
+        padding_mask_cpu = self.cp_info.prefill_qkv_padding_mask
         if padding_mask_cpu.is_cuda:
             padding_mask_cpu = padding_mask_cpu.cpu()
-        kv_restore_cpu = cp_info.prefill_qkv_restore_indice
+        kv_restore_cpu = self.cp_info.prefill_qkv_restore_indice
         if kv_restore_cpu.is_cuda:
             kv_restore_cpu = kv_restore_cpu.cpu()
 
-        # Single C++ call replaces ~26 GPU kernel launches
         mla_params.fill_cp_plan_params(
             padding_mask_cpu,
             kv_restore_cpu,
@@ -130,7 +118,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             q1_idx,
             self.prefill_cp_rank,
             local_tokens,
-            cp_info.prefill_actual_input_lengths_cpu,
+            self.cp_info.prefill_actual_input_lengths_cpu,
             self.attn_inputs.prefix_lengths,
         )
 
@@ -139,7 +127,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         self.total_local_ids = mla_params.cp_total_local_ids
         self.cu_kv_seqlens_global = mla_params.cp_cu_kv_seqlens_global
         self.total_kv_len = mla_params.cp_total_kv_len
-        # get_mla_metadata stays in Python (external flash_mla library)
+
         n_q = self.total_global_ids.size(0)
         tile_sched_q0, num_splits_q0 = get_mla_metadata(  # type: ignore
             cache_seqlens=None,
@@ -156,57 +144,82 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             mla_params.batch_indice_d[self.total_global_ids] if n_q > 0 else None
         )
 
-        # Build full_rope_pos_ids so the attention-side RoPE path can run
-        # in-place on the entire buffer, consistent with create_params().
+        # Pack rope positions for the local q tokens into the full buffer; the
+        # rope path consumes this as precomputed_pos_ids.
         if n_q > 0:
             positions_d = mla_params.positions_d
-            full_rope_pos_ids = torch.zeros(
+            full_rope = torch.zeros(
                 positions_d.size(0),
                 dtype=positions_d.dtype,
                 device=positions_d.device,
             )
-            precomputed_positions = positions_d[self.total_global_ids]
-            full_rope_pos_ids[self.total_local_ids] = precomputed_positions
-            self.full_rope_pos_ids = full_rope_pos_ids
+            full_rope[self.total_local_ids] = positions_d[self.total_global_ids]
+            self.full_rope_pos_ids = full_rope
         else:
             self.full_rope_pos_ids = None
+
+        # Gather path: prefill-only, gated by USE_GATHER_PATH (mirrors non-CP).
+        gather_enabled = (
+            os.environ.get("USE_GATHER_PATH", "0") == "1"
+            and attn_inputs is not None
+            and getattr(attn_inputs, "is_prefill", False)
+        )
+        self._gather = self._build_gather_workspace() if gather_enabled else None
+
+    def _build_gather_workspace(self) -> Optional[_GatherWorkspace]:
+        """Allocate the BF16 workspace from prefill_ragged_kv_len_indptr_d.
+
+        CP's prepare() sets input_lengths = prefill_actual_input_lengths, so the
+        indptr reflects per-request full KV length (same as non-CP impl)."""
+        assert self.mla_params is not None and self.block_table is not None
+        batch_size = int(self.block_table.shape[0])
+        indptr = self.mla_params.prefill_ragged_kv_len_indptr_d[: batch_size + 1]
+        total_kv_len = int(indptr[batch_size].item())
+        if total_kv_len == 0:
+            return None
+        return _GatherWorkspace(
+            fused_kv=torch.empty(
+                (total_kv_len, self.kv_lora_rank + self.qk_rope_head_dim),
+                dtype=torch.bfloat16,
+                device=self.block_table.device,
+            ),
+            workspace_starts=indptr[:batch_size],
+            seq_lens=indptr[1:] - indptr[:batch_size],
+            total_kv_len=total_kv_len,
+            batch_size=batch_size,
+        )
 
     def _convert_topk_indices_to_global(
         self, topk_indices: torch.Tensor
     ) -> torch.Tensor:
-        """CP: topk 行与 total_local_ids 对齐，req_id 需用 total_global_ids 取 batch_indice_d，保证第 i 行对应 global token 的 request id。"""
-        if topk_indices.dim() == 2:
-            num_tokens, topk = topk_indices.shape
-            h_kv = 1
-            topk_indices_2d = topk_indices
-        else:
-            num_tokens, h_kv, topk = topk_indices.shape
-            topk_indices_2d = topk_indices[:, 0, :]
-        assert topk == self.top_k
-        assert self.block_table is not None
-        assert self.mla_params is not None
-        assert (
-            self.precomputed_req_ids is not None
-        ), "precomputed_req_ids must be set in plan() before _convert_topk_indices_to_global"
-        req_id = self.precomputed_req_ids
+        """CP: topk rows align with total_local_ids; req_id is precomputed_req_ids
+        (= mla_params.batch_indice_d[total_global_ids]) so row i maps to the
+        request id of the i-th GLOBAL q token. Returns [T, 1, topk]."""
         from rtp_llm.models_py.triton_kernels.sparse_mla.block_index_to_global import (
             triton_convert_req_index_to_global_index,
         )
 
-        global_indices_2d = triton_convert_req_index_to_global_index(
-            req_id=req_id,
+        assert self.block_table is not None and self.mla_params is not None
+        assert self.precomputed_req_ids is not None
+        topk_2d = _topk_2d(topk_indices)
+        topk = topk_2d.shape[1]
+        assert topk == self.top_k
+        global_2d = triton_convert_req_index_to_global_index(
+            req_id=self.precomputed_req_ids,
             block_table=self.block_table,
-            token_indices=topk_indices_2d,
+            # REBASE CONFLICT CONTEXT(e2e00e570): source branch used
+            # `token_indices=topk_2d, BLOCK_SIZE=self.token_per_block`; new base
+            # uses explicit `TOKENS_PER_BLOCK_FOR_BLOCK_TABLE` and
+            # `ENTRIES_PER_BLOCK`. Keep that API while preserving the source
+            # branch's normalized `topk_2d` rows.
+            token_indices=topk_2d,
             TOKENS_PER_BLOCK_FOR_BLOCK_TABLE=self.token_per_block,
             ENTRIES_PER_BLOCK=self.token_per_block,
             NUM_TOPK_TOKENS=topk,
             BLOCK_N=min(128, topk),
             HAS_PREFILL_WORKSPACE=False,
         )
-        global_indices_3d = global_indices_2d.unsqueeze(1).expand(
-            num_tokens, h_kv, topk
-        )
-        return global_indices_3d
+        return global_2d.unsqueeze(1)
 
     def forward(
         self,
@@ -218,23 +231,9 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         kv_cache=None,
         layer_id: int = 0,
     ) -> torch.Tensor:
-        """
-        CP prefill forward: all-gather KV, restore, write to kv_cache, then two-part attention.
-
-        Args:
-            q: [total_q_len, num_heads, qk_head_dim], already RoPE-applied and input-BMM applied (q_transformed).
-            compressed_kv: [total_kv_len, kv_lora_rank], local.
-            k_pe: [total_kv_len, rope_head_dim], local.
-            topk0: [len(q0_idx), topk] or [len(q0_idx), num_heads, topk], request-local for first CP chunk.
-            topk1: [len(q1_idx), topk] or [len(q1_idx), num_heads, topk], request-local for second CP chunk.
-            batch_indice_d: [total_q_len], int32, request id per token.
-            kv_cache: KV cache to write restored KV into (same paged layout as non-CP).
-            layer_id: layer id.
-
-        Returns:
-            attn_output: [total_q_len, num_heads, kv_lora_rank], same as non-CP SparseMlaOp.
-        """
-        # All-gather KV across CP ranks, restore to global order, then write full KV to cache
+        """CP prefill: all-gather → restore → write to kv_cache → attend on q tokens
+        owned by this rank (q[total_local_ids]). Returns [total_q_len, H, kv_lora_rank]
+        with non-owned positions zero (scattered later by total_local_ids)."""
         gathered_ckv = all_gather(compressed_kv.contiguous(), group=Group.TP)
         gathered_ckv = gathered_ckv.reshape(-1, compressed_kv.size(-1))
         gathered_k_pe = all_gather(k_pe.contiguous(), group=Group.TP)
@@ -242,82 +241,99 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
 
         restored_ckv = gathered_ckv[self.kv_restore_unpad_indices]
         restored_k_pe = gathered_k_pe[self.kv_restore_unpad_indices]
-
         self.kv_cache_write_op.forward(
             restored_ckv, restored_k_pe, kv_cache, self.mla_params
         )
-
-        # TODO: write cache for each cp_rank
         common.apply_write_cache_store(
             self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
 
         if topk is None:
             return None
-
-        assert (
-            q is not None and q.size(0) > 0
-        ), "q is required for sparse MLA CP (KV write runs after this); dim 0 (tokens) must be > 0"
-        # Convert request-local topk0/topk1 to global indices for flash_mla_with_kvcache
-        global_topk = self._convert_topk_indices_to_global(topk)
-        # Two-part attention (q0, q1) using self.block_table, self._fp8_kernel_metadata
-        kv_cache_flat = kv_cache.kv_cache_base.view(
-            -1, 1, kv_cache.kv_cache_base.size(-1)
-        ).view(torch.uint8)
-        if kv_cache_flat.ndim == 3:
-            kv_cache_flat = kv_cache_flat.unsqueeze(-2)
-
-        if layer_id == 0:
-            meta = self._fp8_kernel_metadata_q0
-            if meta is not None:
-                # meta.tile_scheduler_metadata is get_mla_metadata's scheduler object
-                # (e.g. FlashMLASchedMeta); clear nested fields on that object, not on
-                # SparseMlaFp8DecodeParams.
-                sched = meta.tile_scheduler_metadata
-                if sched is not None:
-                    sched.tile_scheduler_metadata = None
-                    sched.num_splits = None
+        assert q is not None and q.size(0) > 0
 
         q0 = q[self.total_local_ids].contiguous()
+        if self._gather is not None:
+            out0 = self._attend_gather(q0, kv_cache, topk)
+        else:
+            out0 = self._attend_with_kvcache(q0, kv_cache, topk, layer_id)
 
-        def run_part(
-            q_part: torch.Tensor,
-            global_topk: torch.Tensor,
-            fp8_kernel_metadata: SparseMlaFp8DecodeParams,
-        ) -> torch.Tensor:
-            q_batched = q_part.unsqueeze(0)
-            if global_topk.dim() == 3 and global_topk.shape[1] == 1:
-                global_topk = global_topk.squeeze(1)
-            indices_batched = global_topk.unsqueeze(0)
-            part_out, _ = flash_mla_with_kvcache(
-                q=q_batched,
-                k_cache=kv_cache_flat,
-                block_table=self.block_table,
-                head_dim_v=self.kv_lora_rank,
-                cache_seqlens=None,
-                tile_scheduler_metadata=fp8_kernel_metadata.tile_scheduler_metadata,  # type: ignore
-                num_splits=fp8_kernel_metadata.num_splits,  # type: ignore
-                is_fp8_kvcache=True,
-                indices=indices_batched,
-                softmax_scale=self.scale,
-            )
-            return part_out.squeeze(0)
-
-        out0 = run_part(q0, global_topk, self._fp8_kernel_metadata_q0)
-
-        total_q = q.size(0)
         out = torch.zeros(
-            total_q, out0.size(1), out0.size(2), dtype=out0.dtype, device=out0.device
+            q.size(0),
+            out0.size(1),
+            out0.size(2),
+            dtype=out0.dtype,
+            device=out0.device,
         )
         out[self.total_local_ids] = out0
         return out
 
+    def _attend_with_kvcache(
+        self,
+        q0: torch.Tensor,
+        kv_cache,
+        topk: torch.Tensor,
+        layer_id: int,
+    ) -> torch.Tensor:
+        """flash_mla_with_kvcache on FP8 paged cache (CP equivalent of non-CP baseline)."""
+        kv_cache_flat = _as_uint8(
+            kv_cache.kv_cache_base.view(-1, 1, kv_cache.kv_cache_base.size(-1))
+        )
+        if kv_cache_flat.ndim == 3:
+            kv_cache_flat = kv_cache_flat.unsqueeze(-2)
+        global_topk = self._convert_topk_indices_to_global(topk).squeeze(1).unsqueeze(0)
+        meta = self._fp8_kernel_metadata_q0
+        attn_out, _ = flash_mla_with_kvcache(
+            q=q0.unsqueeze(0),
+            k_cache=kv_cache_flat,
+            block_table=self.block_table,
+            head_dim_v=self.kv_lora_rank,
+            cache_seqlens=None,
+            tile_scheduler_metadata=meta.tile_scheduler_metadata,
+            num_splits=meta.num_splits,
+            is_fp8_kvcache=True,
+            indices=global_topk,
+            softmax_scale=self.scale,
+        )
+        return attn_out.squeeze(0)
+
+    def _attend_gather(
+        self,
+        q0: torch.Tensor,
+        kv_cache,
+        topk: torch.Tensor,
+    ) -> torch.Tensor:
+        """gather + flash_mla_sparse_fwd. After CP all-gather/restore/write, the paged
+        cache has the full per-request KV; the only CP-specific bit is using
+        precomputed_req_ids (req id per global q token) for the offset lookup."""
+        ws = self._gather
+        assert ws is not None and self.precomputed_req_ids is not None
+        src = _as_uint8(kv_cache.kv_cache_base)
+        if src.ndim == 4:
+            src = src.squeeze(2)
+        rtp_llm_ops.cp_gather_and_upconvert_fp8_kv_cache_v2(
+            src,
+            ws.fused_kv,
+            self.block_table.to(torch.int32),
+            ws.seq_lens,
+            ws.workspace_starts,
+            ws.batch_size,
+            ws.total_kv_len,
+        )
+        offsets = ws.workspace_starts[self.precomputed_req_ids]
+        global_indices = (_topk_2d(topk) + offsets.unsqueeze(1)).unsqueeze(1)
+        out, _, _ = flash_mla_sparse_fwd(
+            q0,
+            ws.fused_kv.unsqueeze(1),
+            global_indices,
+            self.scale,
+            d_v=self.kv_lora_rank,
+        )
+        return out
+
 
 class SparseMlaCpImpl(SparseMlaImpl):
-    """
-    Unified Sparse MLA implementation for both prefill and decode stages.
-    Uses the same operator (SparseMlaOp) for both stages with triton-based index conversion.
-    """
+    """Sparse MLA wrapper that selects SparseMlaFp8CPOp and packs CP indices."""
 
     def __init__(
         self,
@@ -332,12 +348,13 @@ class SparseMlaCpImpl(SparseMlaImpl):
         is_cuda_graph: bool = False,
         parallelism_config: Optional[ParallelismConfig] = None,
     ) -> None:
-        cp_info = attn_inputs.context_parallel_info
-        # ContextParallelProcessor leaves per-chunk lengths on shared attn_inputs; sparse
-        # fill_params / cache store need per-request actual lengths. Shallow-copy and set
-        # input_lengths on the copy only (pattern 1.22: do not mutate shared attn_inputs).
+        # ContextParallelProcessor leaves per-chunk lengths on shared attn_inputs;
+        # sparse fill_params / cache_store need per-request actual lengths. Use a
+        # shallow copy here so we don't mutate the caller's attn_inputs.
         attn_inputs_for_init = copy.copy(attn_inputs)
-        attn_inputs_for_init.input_lengths = cp_info.prefill_actual_input_lengths_cpu
+        attn_inputs_for_init.input_lengths = (
+            attn_inputs.context_parallel_info.prefill_actual_input_lengths_cpu
+        )
         super().__init__(
             attn_configs=attn_configs,
             attn_inputs=attn_inputs_for_init,
@@ -357,7 +374,6 @@ class SparseMlaCpImpl(SparseMlaImpl):
     def prepare(
         self, attn_inputs: PyAttentionInputs, forbid_realloc: bool = False
     ) -> None:
-        """Parent prepare sees prefill_actual_input_lengths on a shallow copy; caller's attn_inputs unchanged."""
         cp_info = attn_inputs.context_parallel_info
         assert cp_info is not None
         attn_for_prepare = copy.copy(attn_inputs)
@@ -366,51 +382,42 @@ class SparseMlaCpImpl(SparseMlaImpl):
 
     @staticmethod
     def fmha_type() -> FMHAType:
-        """Return FMHA type."""
         return FMHAType.CP_SPARSE_FLASHMLA
-
-    def create_params(self, attn_inputs: PyAttentionInputs):
-        """Create FMHA parameters and pack CP indices into cp_params."""
-        self.fmha_params = rtp_llm_ops.SparseMlaParams()
-        self.rope_params = self.fmha_params
-        self.prepare(attn_inputs)
-
-        # plan() already precomputed full_rope_pos_ids and precomputed_req_ids
-        # on self.fmha_impl. Only precompute the topk-related params here
-        # (ks/ke/lengths/topk_off are only needed by the indexer path via cp_params).
-        total_global_ids = self.fmha_impl.total_global_ids
-        total_local_ids = self.fmha_impl.total_local_ids
-        has_tokens = total_global_ids is not None and total_global_ids.size(0) > 0
-
-        precomputed_ks = self.fmha_params.ks[total_global_ids] if has_tokens else None
-        precomputed_ke = self.fmha_params.ke[total_global_ids] if has_tokens else None
-        precomputed_lengths = (
-            self.fmha_params.expanded_seq_lens[total_global_ids] if has_tokens else None
-        )
-        precomputed_topk_off = (
-            self.fmha_params.topk_indices_offset[total_global_ids]
-            if has_tokens
-            else None
-        )
-
-        # Pack CP indices from fmha_impl for use by indexer and others
-        self.cp_params = SimpleNamespace(
-            kv_restore_unpad_indices=self.fmha_impl.kv_restore_unpad_indices,
-            total_global_ids=total_global_ids,
-            total_local_ids=total_local_ids,
-            cu_kv_seqlens_global=self.fmha_impl.cu_kv_seqlens_global,
-            total_kv_len=self.fmha_impl.total_kv_len,
-            full_rope_pos_ids=self.fmha_impl.full_rope_pos_ids,
-            precomputed_ks=precomputed_ks,
-            precomputed_ke=precomputed_ke,
-            precomputed_lengths=precomputed_lengths,
-            precomputed_topk_off=precomputed_topk_off,
-            precomputed_req_ids=self.fmha_impl.precomputed_req_ids,
-        )
 
     @classmethod
     def support_prefill_cp(cls) -> bool:
         return True
+
+    def create_params(self, attn_inputs: PyAttentionInputs):
+        """Create fmha_params, run plan() via prepare(), then pack CP indices into
+        cp_params for the indexer to consume. plan() already filled
+        full_rope_pos_ids and precomputed_req_ids on fmha_impl."""
+        # REBASE CONFLICT CONTEXT(e2e00e570): source branch introduced a longer
+        # `create_params` implementation; new base has the same fields expressed
+        # through the compact `_pick()` helper. Keep the compact base form.
+        self.fmha_params = rtp_llm_ops.SparseMlaParams()
+        self.rope_params = self.fmha_params
+        self.prepare(attn_inputs)
+
+        gid = self.fmha_impl.total_global_ids
+        has_tokens = gid is not None and gid.size(0) > 0
+
+        def _pick(t):
+            return t[gid] if has_tokens else None
+
+        self.cp_params = SimpleNamespace(
+            kv_restore_unpad_indices=self.fmha_impl.kv_restore_unpad_indices,
+            total_global_ids=gid,
+            total_local_ids=self.fmha_impl.total_local_ids,
+            cu_kv_seqlens_global=self.fmha_impl.cu_kv_seqlens_global,
+            total_kv_len=self.fmha_impl.total_kv_len,
+            full_rope_pos_ids=self.fmha_impl.full_rope_pos_ids,
+            precomputed_ks=_pick(self.fmha_params.ks),
+            precomputed_ke=_pick(self.fmha_params.ke),
+            precomputed_lengths=_pick(self.fmha_params.expanded_seq_lens),
+            precomputed_topk_off=_pick(self.fmha_params.topk_indices_offset),
+            precomputed_req_ids=self.fmha_impl.precomputed_req_ids,
+        )
 
     def forward(
         self,
@@ -421,38 +428,14 @@ class SparseMlaCpImpl(SparseMlaImpl):
         layer_id: int,
         topk_indices: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        """
-        Forward pass for sparse MLA attention (prefill or decode).
+        """CP sparse MLA forward. q: [total_q_len, H, qk_head_dim]; topk_indices
+        is request-local. Returns [total_q_len, H, nope_head_dim]."""
+        assert kv_cache is not None
 
-        Args:
-            q: Query tensor
-                - Prefill: [total_q_len, num_heads, qk_head_dim]
-                - Decode: [batch_size, num_heads, qk_head_dim]
-            compressed_kv: Compressed KV tensor
-                - Prefill: [total_kv_len, kv_lora_rank]
-                - Decode: [batch_size, kv_lora_rank] (not used)
-            k_pe: Key position encoding
-                - Prefill: [total_kv_len, rope_head_dim]
-                - Decode: [batch_size, rope_head_dim] (not used)
-            kv_cache: KV cache object
-            layer_id: Current layer ID
-            topk_indices: (topk0, topk1) from indexer CP path, request-local for the two chunks.
-
-        Returns:
-            Attention output
-                - Prefill: [total_q_len, num_heads, nope_head_dim]
-                - Decode: [batch_size, num_heads, nope_head_dim]
-        """
-        assert self.rope_impl is not None and self.rope_params is not None
-        assert kv_cache is not None, "kv_cache is required for sparse MLA"
-        assert self.fmha_impl is not None, "fmha_impl is not initialized"
-
-        # Apply RoPE in-place to full q_pe/k_pe using full_rope_pos_ids.
-        # Padding rows get pos=0 (garbage RoPE), but they are never consumed:
-        #   - q goes through _apply_input_bmm then q[total_local_ids] in fmha_impl
-        #   - k_pe goes through all_gather then kv_restore_unpad_indices
+        # RoPE in-place on full q_pe / k_pe via full_rope_pos_ids. Padding rows
+        # get pos=0 but never read: q is selected by total_local_ids; k_pe is
+        # all-gathered then re-indexed by kv_restore_unpad_indices.
         q_pe = q[:, :, self.nope_head_dim :]
-
         if self.fmha_impl.full_rope_pos_ids is not None:
             self.rope_impl.forward(
                 q_pe,
@@ -461,10 +444,7 @@ class SparseMlaCpImpl(SparseMlaImpl):
                 precomputed_pos_ids=self.fmha_impl.full_rope_pos_ids,
             )
 
-        # Apply input BMM to transform query
         q_transformed = self._apply_input_bmm(q, layer_id)
-
-        assert self.fmha_params is not None
         attn_output = self.fmha_impl.forward(
             q_transformed,
             compressed_kv,
@@ -474,10 +454,6 @@ class SparseMlaCpImpl(SparseMlaImpl):
             kv_cache,
             layer_id=layer_id,
         )
-
-        # Apply output BMM to get final output
         if attn_output is None:
             return None
-        output = self._apply_output_bmm(attn_output, layer_id)
-
-        return output
+        return self._apply_output_bmm(attn_output, layer_id)

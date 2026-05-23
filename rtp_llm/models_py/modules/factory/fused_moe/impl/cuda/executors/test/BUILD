@@ -87,6 +87,20 @@ py_test (
 )
 
 py_test (
+    name = "glm5_sm100_ep_perf_test",
+    srcs = ["glm5_sm100_ep_perf_test.py"],
+    deps = [
+        ":fused_moe_executor_test_util",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:config",
+        "//rtp_llm:testlib",
+    ],
+    env = {"GPU_COUNT": "1"},
+    tags = ["open_skip", "SM100_ARM"],
+    exec_properties = {'gpu': 'SM100_ARM', 'gpu_count': '1'},
+)
+
+py_test (
     name = "cutedsl_fp4_executor_test",
     srcs = ["cutedsl_fp4_executor_test.py"],
     deps = [

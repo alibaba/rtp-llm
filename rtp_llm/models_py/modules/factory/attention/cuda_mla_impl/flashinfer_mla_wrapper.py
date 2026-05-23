@@ -86,6 +86,10 @@ class MlaFlashInferImplBase(MlaImplBase):
             self.seq_size_per_block,
             forbid_realloc,
         )
+        if forbid_realloc:
+            plan_cuda_graph = getattr(self.fmha_impl, "plan_cuda_graph", None)
+            if callable(plan_cuda_graph) and plan_cuda_graph(attn_inputs):
+                return
         self.fmha_impl.plan(self.fmha_params)
 
     def forward(
@@ -206,6 +210,9 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
     ) -> bool:
         return attn_configs.use_mla and attn_inputs.is_prefill
 
+    def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
+        self.prepare(attn_inputs, forbid_realloc=True)
+
     def _handle_long_sequence(
         self,
         q: torch.Tensor,
@@ -306,6 +313,7 @@ class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
                 max_context_len=max_seq_len,
                 num_tokens=int(attn_inputs.sequence_lengths.sum().item()),
                 is_cuda_graph=is_cuda_graph,
+                kv_cache_dtype=attn_configs.kv_cache_dtype,
             ),
             NewMlaRotaryEmbeddingOp(
                 cos_sin_cache=cos_sin_cache,

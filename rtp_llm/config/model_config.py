@@ -8,6 +8,7 @@ import torch
 
 from rtp_llm.config.quant_config import (
     Fp8BlockWiseQuantConfig,
+    ModelOptFp4Config,
     QuantizationConfig,
     W4a8Int4PerChannelQuantConfig,
     init_quant_config,
@@ -67,6 +68,7 @@ class ModelConfig(CppModelConfig):
     # Python-only fields that are allowed to be set
     _python_fields = {
         "is_mtp",
+        "mtp_layer_offset",
         "normalize_lm_head_weight",
         "enable_fp32_lm_head",
         "has_lm_head_bias",
@@ -495,6 +497,7 @@ class ModelConfig(CppModelConfig):
         super().__init__(*args, **kwargs)
         # Additional Python-only fields
         self.is_mtp: bool = False
+        self.mtp_layer_offset: int = 0
         self.normalize_lm_head_weight: bool = False
         self.enable_fp32_lm_head: bool = True
         self.has_lm_head_bias: bool = False
@@ -605,6 +608,18 @@ class ModelConfig(CppModelConfig):
             logging.info(
                 f"Overriding data_type from {original_data_type} to {data_type} "
                 f"because fp8_block_wise quantization only supports BF16"
+            )
+        elif (
+            quant_config
+            and isinstance(quant_config, ModelOptFp4Config)
+            and getattr(quant_config, "hybrid_attn_quant_method", None)
+            == "FP8_PER_BLOCK"
+        ):
+            original_data_type = data_type
+            data_type = WEIGHT_TYPE.BF16
+            logging.info(
+                f"Overriding data_type from {original_data_type} to {data_type} "
+                f"because MODELOPT_FP4 hybrid mode with FP8_PER_BLOCK only supports BF16"
             )
         elif quant_config and quant_config.get_method().lower() in [
             "smooth_quant",

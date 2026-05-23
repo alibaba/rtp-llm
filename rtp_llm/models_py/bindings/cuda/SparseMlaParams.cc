@@ -144,6 +144,7 @@ void SparseMlaParams::fillParamsInternal(bool                 is_prefill,
             }
             k_offset += kv_len;
         }
+        prefill_total_kv_tokens = k_offset;
     }
 }
 
@@ -514,6 +515,7 @@ void registerPySparseMlaParams(pybind11::module& m) {
         .def_readonly("topk_indices_offset", &SparseMlaParams::topk_indices_offset)
         .def_readonly("ks", &SparseMlaParams::ks)
         .def_readonly("ke", &SparseMlaParams::ke)
+        .def_readonly("prefill_total_kv_tokens", &SparseMlaParams::prefill_total_kv_tokens)
         .def_readwrite("schedule_metadata", &SparseMlaParams::schedule_metadata)
         .def(
             "fill_cp_plan_params",

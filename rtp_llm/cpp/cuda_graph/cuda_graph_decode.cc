@@ -1,4 +1,7 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
+#if USING_CUDA
+#include <cuda_runtime.h>
+#endif
 
 namespace rtp_llm {
 void CudaGraphRunner::replayDecode(int bs) {
@@ -19,7 +22,7 @@ std::vector<int> CudaGraphRunner::getDecodeBatchSizesToCapture() {
     int              max_generate_batch_size = max_bs_;
     RTP_LLM_LOG_INFO("max_generate_batch_size for cuda graph: %d", max_generate_batch_size);
     // Add key batch sizes up to 32
-    for (int i : {1, 8, 16, 24, 32}) {
+    for (int i : {1, 2, 3, 4, 5, 6, 7, 8, 16, 24, 32}) {
         if (i <= max_generate_batch_size) {
             capture_bs.push_back(i);
         }
@@ -62,9 +65,23 @@ void CudaGraphRunner::captureDecode() {
         graph_instances_[bs].mem_hold_ = createCaptureMemoryHold(inputs, bs * num_tokens_per_bs_);
         graph_instances_[bs].mem_hold_.attn_pyobj_ =
             py_attn_pyobj_method_(graph_instances_[bs].mem_hold_.py_model_inputs_, true);
-        captureDecodeOneBatchSize(bs);
-        replayAndSyncCheck(bs, "batch size");
-        RTP_LLM_LOG_INFO("capture success for batch size: %d", bs);
+        try {
+            captureDecodeOneBatchSize(bs);
+            replayAndSyncCheck(bs, "batch size");
+            RTP_LLM_LOG_INFO("capture success for batch size: %d", bs);
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_ERROR("CUDA graph capture failed for decode batch size %d: %s", bs, e.what());
+#if USING_CUDA
+            cudaGetLastError();
+            auto sync_err = cudaDeviceSynchronize();
+            if (sync_err != cudaSuccess) {
+                RTP_LLM_LOG_ERROR("cudaDeviceSynchronize after capture failure returned: %s",
+                                  cudaGetErrorString(sync_err));
+                cudaGetLastError();
+            }
+#endif
+            throw;
+        }
     }
     RTP_LLM_LOG_INFO("Capture Decode End");
 }

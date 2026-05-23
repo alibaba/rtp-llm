@@ -329,9 +329,22 @@ class FlashInferTRTLLMPrefillOp(object):
         release_trt_workspace_buffer(self.workspace_buffer)
 
     def support(self, attention_inputs: PyAttentionInputs):
+        if not is_sm_100():
+            return False
+        try:
+            from flashinfer.artifacts import ArtifactPath, CheckSumHash
+            from flashinfer.jit.attention.modules import get_artifact
+
+            checksum = get_artifact(
+                f"{ArtifactPath.TRTLLM_GEN_FMHA}/checksums.txt",
+                CheckSumHash.TRTLLM_GEN_FMHA,
+            )
+            if not checksum:
+                return False
+        except Exception:
+            return False
         return (
-            is_sm_100()
-            and attention_inputs.is_prefill
+            attention_inputs.is_prefill
             and attention_inputs.kv_cache_kernel_block_id_device is not None
         )
 
@@ -437,6 +450,18 @@ class FlashInferTRTLLMDecodeOp(object):
 
     def support(self, attention_inputs: PyAttentionInputs):
         if not is_sm_100():
+            return False
+        try:
+            from flashinfer.artifacts import ArtifactPath, CheckSumHash
+            from flashinfer.jit.attention.modules import get_artifact
+
+            checksum = get_artifact(
+                f"{ArtifactPath.TRTLLM_GEN_FMHA}/checksums.txt",
+                CheckSumHash.TRTLLM_GEN_FMHA,
+            )
+            if not checksum:
+                return False
+        except Exception:
             return False
         # Note: this max q length is used for mtp decode verification.
         decode_kernel_max_q_len = 11
