@@ -65,6 +65,7 @@ void GrammarLogitsProcessor::process(const SamplerInputs& inputs, size_t start_i
         return;
     }
     if (matcher_->isPassthroughForMask()) {
+        maskToken(logits[0], eos_token_id_);
         return;
     }
 
@@ -157,6 +158,13 @@ void GrammarLogitsProcessor::forceToken(const torch::Tensor& logits, int64_t tok
     }
     logits.fill_(BaseLogitsProcessor::neg_inf);
     logits[token_id] = 1;
+}
+
+void GrammarLogitsProcessor::maskToken(const torch::Tensor& logits, int64_t token_id) {
+    if (token_id < 0 || token_id >= logits.size(0)) {
+        return;
+    }
+    logits[token_id] = BaseLogitsProcessor::neg_inf;
 }
 
 }  // namespace rtp_llm

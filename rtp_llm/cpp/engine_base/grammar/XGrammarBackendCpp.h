@@ -65,7 +65,7 @@ public:
 
     std::shared_ptr<RtpGrammarMatcher> createMatcher(std::shared_ptr<xgrammar::CompiledGrammar> compiled,
                                                      bool                                       require_reasoning,
-                                                     std::optional<int32_t>                     think_end_id);
+                                                     std::optional<std::vector<int>>            think_end_token_ids);
 
     void clear();
 

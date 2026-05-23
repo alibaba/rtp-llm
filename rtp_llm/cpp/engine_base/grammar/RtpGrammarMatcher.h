@@ -14,7 +14,7 @@ class RtpGrammarMatcher {
 public:
     RtpGrammarMatcher(std::shared_ptr<xgrammar::CompiledGrammar> compiled,
                       bool                                       require_reasoning,
-                      std::optional<int32_t>                     think_end_id,
+                      std::optional<std::vector<int>>            think_end_token_ids,
                       std::optional<std::vector<int>>            override_stop_tokens = std::nullopt,
                       int                                        max_rollback_tokens  = 200);
 
@@ -42,20 +42,27 @@ public:
     }
 
 private:
-    void transferReasonerState(int32_t token_id) noexcept;
-    void rollbackReasonerState() noexcept;
+    void   transferReasonerState(int32_t token_id) noexcept;
+    void   rollbackReasonerState() noexcept;
+    size_t nextThinkEndMatchPos(int32_t token_id) const noexcept;
 
 private:
+    struct ReasonerState {
+        int    tokens_after_think_end;
+        size_t think_end_match_pos;
+    };
     std::shared_ptr<xgrammar::CompiledGrammar> compiled_;
     std::unique_ptr<xgrammar::GrammarMatcher>  matcher_;
 
-    const bool                   require_reasoning_;
-    const std::optional<int32_t> think_end_id_;
+    const bool             require_reasoning_;
+    const std::vector<int> think_end_token_ids_;
 
     // < 0: inside thinking body, parser frozen. >= 0: grammar is active.
-    int     tokens_after_think_end_ = 0;
-    int64_t num_accepted_           = 0;
-    bool    finished_               = false;
+    int                        tokens_after_think_end_ = 0;
+    size_t                     think_end_match_pos_    = 0;
+    std::vector<ReasonerState> reasoner_state_history_;
+    int64_t                    num_accepted_ = 0;
+    bool                       finished_     = false;
 };
 
 using RtpGrammarMatcherPtr = std::shared_ptr<RtpGrammarMatcher>;

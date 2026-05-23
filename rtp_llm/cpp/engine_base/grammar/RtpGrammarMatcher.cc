@@ -10,14 +10,14 @@ namespace rtp_llm {
 
 RtpGrammarMatcher::RtpGrammarMatcher(std::shared_ptr<xgrammar::CompiledGrammar> compiled,
                                      bool                                       require_reasoning,
-                                     std::optional<int32_t>                     think_end_id,
+                                     std::optional<std::vector<int>>            think_end_token_ids,
                                      std::optional<std::vector<int>>            override_stop_tokens,
                                      int                                        max_rollback_tokens):
     compiled_(std::move(compiled)),
-    require_reasoning_(require_reasoning && think_end_id.has_value()),
-    think_end_id_(think_end_id) {
-    if (require_reasoning && !think_end_id.has_value()) {
-        RTP_LLM_LOG_WARNING("grammar reasoning requested but think_end_id is missing; using plain grammar mode");
+    require_reasoning_(require_reasoning && think_end_token_ids.has_value() && !think_end_token_ids->empty()),
+    think_end_token_ids_(think_end_token_ids.value_or(std::vector<int>{})) {
+    if (require_reasoning && think_end_token_ids_.empty()) {
+        RTP_LLM_LOG_WARNING("grammar reasoning requested but think_end_token_ids is missing; using plain grammar mode");
     }
     if (!compiled_) {
         throw std::invalid_argument("RtpGrammarMatcher requires a non-null CompiledGrammar");
@@ -32,6 +32,8 @@ RtpGrammarMatcher::RtpGrammarMatcher(std::shared_ptr<xgrammar::CompiledGrammar> 
 void RtpGrammarMatcher::initReasoning(bool in_think_body) {
     if (require_reasoning_) {
         tokens_after_think_end_ = in_think_body ? -1 : 0;
+        think_end_match_pos_    = 0;
+        reasoner_state_history_.clear();
     }
 }
 
@@ -94,9 +96,12 @@ void RtpGrammarMatcher::transferReasonerState(int32_t token_id) noexcept {
     if (!require_reasoning_) {
         return;
     }
+    reasoner_state_history_.push_back({tokens_after_think_end_, think_end_match_pos_});
     if (tokens_after_think_end_ < 0) {
-        if (think_end_id_.has_value() && token_id == *think_end_id_) {
+        think_end_match_pos_ = nextThinkEndMatchPos(token_id);
+        if (think_end_match_pos_ == think_end_token_ids_.size()) {
             tokens_after_think_end_ = 0;
+            think_end_match_pos_    = 0;
         }
     } else {
         ++tokens_after_think_end_;
@@ -104,14 +109,27 @@ void RtpGrammarMatcher::transferReasonerState(int32_t token_id) noexcept {
 }
 
 void RtpGrammarMatcher::rollbackReasonerState() noexcept {
-    if (!require_reasoning_) {
+    if (!require_reasoning_ || reasoner_state_history_.empty()) {
         return;
     }
-    if (tokens_after_think_end_ == 0) {
-        tokens_after_think_end_ = -1;
-    } else if (tokens_after_think_end_ > 0) {
-        --tokens_after_think_end_;
+    auto prev = reasoner_state_history_.back();
+    reasoner_state_history_.pop_back();
+    tokens_after_think_end_ = prev.tokens_after_think_end;
+    think_end_match_pos_    = prev.think_end_match_pos;
+}
+
+size_t RtpGrammarMatcher::nextThinkEndMatchPos(int32_t token_id) const noexcept {
+    if (think_end_token_ids_.empty()) {
+        return 0;
     }
+    size_t pos = think_end_match_pos_;
+    while (pos > 0 && token_id != think_end_token_ids_[pos]) {
+        --pos;
+    }
+    if (token_id == think_end_token_ids_[pos]) {
+        return pos + 1;
+    }
+    return token_id == think_end_token_ids_.front() ? 1 : 0;
 }
 
 }  // namespace rtp_llm

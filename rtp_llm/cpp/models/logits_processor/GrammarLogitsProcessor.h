@@ -27,6 +27,7 @@ public:
 private:
     void reportErrorOnce(ErrorCode error_code, const std::string& error_msg, bool stream_lock_held);
     void forceToken(const torch::Tensor& logits, int64_t token_id);
+    void maskToken(const torch::Tensor& logits, int64_t token_id);
 
 private:
     std::shared_ptr<RtpGrammarMatcher> matcher_;
