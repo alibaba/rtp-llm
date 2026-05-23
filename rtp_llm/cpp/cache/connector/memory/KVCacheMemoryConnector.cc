@@ -194,8 +194,7 @@ void KVCacheMemoryConnector::initBlockPool() {
     size_t incomplete_block_num;
     if (step > 1) {
         const size_t effective_block_bytes =
-            complete_block_size_ / static_cast<size_t>(step)
-            + incomplete_block_size_ * static_cast<size_t>(step - 1) / static_cast<size_t>(step);
+            complete_block_size_ + incomplete_block_size_ * static_cast<size_t>(step - 1);
         RTP_LLM_CHECK_WITH_INFO(effective_block_bytes > 0, "effective block bytes is zero");
         complete_block_num   = total_bytes / effective_block_bytes;
         incomplete_block_num = complete_block_num * static_cast<size_t>(step - 1);
