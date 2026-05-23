@@ -66,5 +66,35 @@ TEST(GrammarLogitsProcessorTest, UpdateStatusAdvancesMatcherToTerminal) {
     EXPECT_TRUE(matcher->isTerminated());
 }
 
+TEST(GrammarLogitsProcessorTest, ReasoningModeWaitsForFullThinkEndSequence) {
+    auto backend  = makeBackend();
+    auto compiled = backend.compileNow({"regex", "a"}).compiled;
+    ASSERT_TRUE(compiled);
+
+    auto matcher =
+        backend.createMatcher(compiled, true, std::vector<int>{static_cast<int>('x'), static_cast<int>('y')});
+    matcher->initReasoning(true);
+    GrammarLogitsProcessor processor(matcher, /*eos_token_id=*/0);
+
+    SamplerInputs inputs;
+    inputs.logits        = torch::zeros({1, 128}, torch::kFloat32);
+    inputs.finished_mask = torch::zeros({1}, torch::kBool);
+
+    processor.process(inputs, 0, 1);
+    EXPECT_EQ(inputs.logits[0][static_cast<int>('b')].item<float>(), 0.0f);
+    EXPECT_EQ(inputs.logits[0][0].item<float>(), BaseLogitsProcessor::neg_inf);
+
+    processor.updateStatus(torch::tensor({{static_cast<int32_t>('x')}}, torch::kInt32), 1);
+    inputs.logits = torch::zeros({1, 128}, torch::kFloat32);
+    processor.process(inputs, 0, 1);
+    EXPECT_EQ(inputs.logits[0][static_cast<int>('b')].item<float>(), 0.0f);
+    EXPECT_EQ(inputs.logits[0][0].item<float>(), BaseLogitsProcessor::neg_inf);
+
+    processor.updateStatus(torch::tensor({{static_cast<int32_t>('y')}}, torch::kInt32), 1);
+    processor.process(inputs, 0, 1);
+    EXPECT_GT(inputs.logits[0][static_cast<int>('a')].item<float>(), BaseLogitsProcessor::neg_inf);
+    EXPECT_EQ(inputs.logits[0][static_cast<int>('b')].item<float>(), BaseLogitsProcessor::neg_inf);
+}
+
 }  // namespace
 }  // namespace rtp_llm

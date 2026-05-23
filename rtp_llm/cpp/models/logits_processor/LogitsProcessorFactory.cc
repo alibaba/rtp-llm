@@ -123,11 +123,17 @@ GrammarKeyCpp keyFromGenerateConfig(const GenerateConfig& config) {
     return {};
 }
 
-std::optional<int32_t> singleThinkEndId(const GenerateConfig& config) {
-    if (config.end_think_token_ids.size() != 1) {
+std::optional<std::vector<int>> effectiveThinkEndTokenIds(const GenerateConfig& config) {
+    constexpr int32_t kDeepSeekNewlineTokenId = 201;
+    constexpr int32_t kQwenGlmNewlineTokenId  = 198;
+    const auto&       ids                     = config.end_think_token_ids;
+    if (ids.empty()) {
         return std::nullopt;
     }
-    return static_cast<int32_t>(config.end_think_token_ids[0]);
+    if (ids.size() > 1 && (ids.front() == kDeepSeekNewlineTokenId || ids.front() == kQwenGlmNewlineTokenId)) {
+        return std::vector<int>(ids.begin() + 1, ids.end());
+    }
+    return ids;
 }
 
 BaseLogitsProcessorPtr createGrammarProcessor(std::shared_ptr<GenerateInput>        generate_input,
@@ -193,7 +199,7 @@ BaseLogitsProcessorPtr createGrammarProcessor(std::shared_ptr<GenerateInput>    
     }
 
     const bool require_reasoning = config->in_think_mode;
-    auto       matcher           = backend->createMatcher(compiled, require_reasoning, singleThinkEndId(*config));
+    auto       matcher = backend->createMatcher(compiled, require_reasoning, effectiveThinkEndTokenIds(*config));
     matcher->initReasoning(require_reasoning);
     return std::make_shared<GrammarLogitsProcessor>(std::move(matcher), eos_token_id, std::move(error_reporter));
 }
