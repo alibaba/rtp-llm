@@ -111,7 +111,7 @@ void GrammarLogitsProcessor::updateMultiSeqStatus(const std::vector<int>& src_ba
 }
 
 void GrammarLogitsProcessor::updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) {
-    if (!matcher_ || matcher_->finished() || num_new_tokens <= 0) {
+    if (!matcher_ || num_new_tokens <= 0 || matcher_->finished()) {
         return;
     }
     if (new_tokens.dim() != 2 || new_tokens.size(0) != 1 || new_tokens.size(1) < num_new_tokens) {
@@ -131,6 +131,7 @@ void GrammarLogitsProcessor::updateStatus(const torch::Tensor& new_tokens, int32
                             true);
             return;
         }
+        ++accepted_token_len_;
         if (matcher_->isTerminated()) {
             return;
         }

@@ -60,9 +60,12 @@ TEST(GrammarLogitsProcessorTest, UpdateStatusAdvancesMatcherToTerminal) {
     GrammarLogitsProcessor processor(matcher, /*eos_token_id=*/0);
 
     processor.updateStatus(torch::tensor({{static_cast<int32_t>('a')}}, torch::kInt32), 1);
+    EXPECT_TRUE(processor.isStateful());
+    EXPECT_EQ(processor.acceptedTokenLen(), 1);
     EXPECT_FALSE(matcher->isTerminated());
 
     processor.updateStatus(torch::tensor({{0}}, torch::kInt32), 1);
+    EXPECT_EQ(processor.acceptedTokenLen(), 2);
     EXPECT_TRUE(matcher->isTerminated());
 }
 
