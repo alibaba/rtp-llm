@@ -112,6 +112,10 @@ class BackendRPCServerVisitor:
         elif config_role_type == RoleType.DECODE and pd_sep_config.decode_entrance:
             role_list.append(RoleType.PREFILL)
             logging.info("Added PREFILL role for DECODE type")
+        elif config_role_type == RoleType.PDFUSION:
+            if host_args.pdfusion_domain:
+                role_list.append(RoleType.PDFUSION)
+                logging.info("Added PDFUSION role for PDFUSION type")
         elif config_role_type == RoleType.FRONTEND:
             logging.info(
                 f"Checking FRONTEND roles: decode_domain={host_args.decode_domain}, prefill_domain={host_args.prefill_domain}, pdfusion_domain={host_args.pdfusion_domain}"
