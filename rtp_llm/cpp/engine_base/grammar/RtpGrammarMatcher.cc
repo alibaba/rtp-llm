@@ -7,6 +7,24 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
+namespace {
+
+std::vector<size_t> buildKmpFailureTable(const std::vector<int>& pattern) {
+    std::vector<size_t> lps(pattern.size(), 0);
+    size_t              len = 0;
+    for (size_t i = 1; i < pattern.size();) {
+        if (pattern[i] == pattern[len]) {
+            lps[i++] = ++len;
+        } else if (len > 0) {
+            len = lps[len - 1];
+        } else {
+            lps[i++] = 0;
+        }
+    }
+    return lps;
+}
+
+}  // namespace
 
 RtpGrammarMatcher::RtpGrammarMatcher(std::shared_ptr<xgrammar::CompiledGrammar> compiled,
                                      bool                                       require_reasoning,
@@ -22,6 +40,7 @@ RtpGrammarMatcher::RtpGrammarMatcher(std::shared_ptr<xgrammar::CompiledGrammar> 
     if (!compiled_) {
         throw std::invalid_argument("RtpGrammarMatcher requires a non-null CompiledGrammar");
     }
+    think_end_lps_ = buildKmpFailureTable(think_end_token_ids_);
 
     matcher_ = std::make_unique<xgrammar::GrammarMatcher>(*compiled_,
                                                           std::move(override_stop_tokens),
@@ -123,8 +142,11 @@ size_t RtpGrammarMatcher::nextThinkEndMatchPos(int32_t token_id) const noexcept 
         return 0;
     }
     size_t pos = think_end_match_pos_;
+    if (pos >= think_end_token_ids_.size()) {
+        pos = think_end_lps_.empty() ? 0 : think_end_lps_.back();
+    }
     while (pos > 0 && token_id != think_end_token_ids_[pos]) {
-        --pos;
+        pos = think_end_lps_[pos - 1];
     }
     if (token_id == think_end_token_ids_[pos]) {
         return pos + 1;

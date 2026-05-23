@@ -206,6 +206,9 @@ void NormalSamplerInputGatherer::setLogitsProcessorInputs(SamplerInputs&        
         if (score_batch) {
             const int score_len = static_cast<int>(stream->scoreLen());
             for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
+                if (processor->isStateful()) {
+                    continue;
+                }
                 for (int i = 0; i < score_len; ++i) {
                     state_ptr->insert(processor, idx + i, idx + i + 1);
                 }

@@ -106,6 +106,47 @@ void GrammarLogitsProcessor::process(const SamplerInputs& inputs, size_t start_i
     }
 }
 
+void GrammarLogitsProcessor::processSpeculative(const SamplerInputs&        inputs,
+                                                size_t                      start_idx,
+                                                size_t                      finish_idx,
+                                                const std::vector<int32_t>& draft_prefix) {
+    if (draft_prefix.empty()) {
+        process(inputs, start_idx, finish_idx);
+        return;
+    }
+    if (!matcher_ || matcher_->finished()) {
+        return;
+    }
+    if (finish_idx - start_idx != 1) {
+        reportErrorOnce(
+            ErrorCode::INVALID_PARAMS, "grammar speculative logits processor only supports single row masking", false);
+        return;
+    }
+    if (inputs.finished_mask.defined()) {
+        const auto* finished = reinterpret_cast<const bool*>(inputs.finished_mask.data_ptr());
+        if (finished[start_idx]) {
+            return;
+        }
+    }
+
+    int accepted_prefix = 0;
+    for (const int32_t token_id : draft_prefix) {
+        if (!matcher_->acceptToken(token_id)) {
+            matcher_->rollback(accepted_prefix);
+            auto logits = inputs.logits.narrow(0, start_idx, 1);
+            forceToken(logits[0], eos_token_id_);
+            return;
+        }
+        ++accepted_prefix;
+        if (matcher_->isTerminated()) {
+            break;
+        }
+    }
+
+    process(inputs, start_idx, finish_idx);
+    matcher_->rollback(accepted_prefix);
+}
+
 void GrammarLogitsProcessor::updateMultiSeqStatus(const std::vector<int>& src_batch_indices) {
     (void)src_batch_indices;
 }
