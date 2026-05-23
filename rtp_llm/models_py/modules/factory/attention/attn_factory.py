@@ -34,16 +34,29 @@ def get_mla_impl(
     parallelism_config: Optional[ParallelismConfig] = None,
 ) -> MlaImplBase:
 
-    mla_impls = PREFILL_MLA_IMPS if attn_inputs.is_prefill else DECODE_MLA_IMPS
+    # MTP target-verify arrives with is_prefill=True (sequence_lengths is empty in
+    # MtpBatchStreamProcessor::prepareOneStepSpecDecodeModelInput) but it is really
+    # multi-token decode with prefix in cache — sglang/vllm both classify it as
+    # decode. If we let it go through the prefill path the fast-path branch below
+    # skips SparseMlaImpl, so the main (DSA) model uses dense MLA during verify and
+    # baseline (DSA decode) uses sparse MLA — different attention algorithms over
+    # the same KV cache → divergent main-model predictions and wrong response.
+    is_target_verify = bool(getattr(attn_inputs, "is_target_verify", False))
+
+    mla_impls = (
+        PREFILL_MLA_IMPS
+        if (attn_inputs.is_prefill and not is_target_verify)
+        else DECODE_MLA_IMPS
+    )
     for impl in mla_impls:
-        # Check support before creating instance
+        impl_name = impl.__name__
         if not impl.support(attn_configs, attn_inputs):
             continue
 
         cos_sin_cache = weight.get_global_weight(W.rope_cos_sin_cache)
-        # TODO: support fast path for cp prefill
         use_fast_path = (
             attn_inputs.is_prefill
+            and not is_target_verify
             and attn_inputs.cu_kv_seqlens.max().item() <= attn_configs.indexer_topk
             and not (
                 parallelism_config and parallelism_config.prefill_cp_config.is_enabled()
@@ -55,30 +68,38 @@ def get_mla_impl(
         ):
             continue
 
-        # Skip sparse MLA if fast path is enabled
         if use_fast_path and impl.is_sparse():
-            logging.debug(
-                f"skip sparse mla impl [{impl}] because fast path: {use_fast_path}"
-            )
             continue
 
         if attn_configs.is_sparse and not use_fast_path and not impl.is_sparse():
-            logging.debug(f"skip mla impl [{impl}] because sparse mla is not supported")
             continue
 
-        instance = impl(
-            attn_configs,
-            attn_inputs,
-            weight.weights,
-            cos_sin_cache=cos_sin_cache,
-            fmha_config=fmha_config,
-            quant_config=quant_config,
-            max_seq_len=max_seq_len,
-            is_cuda_graph=is_cuda_graph,
-            parallelism_config=parallelism_config,
-        )
+        try:
+            instance = impl(
+                attn_configs,
+                attn_inputs,
+                weight.weights,
+                cos_sin_cache=cos_sin_cache,
+                fmha_config=fmha_config,
+                quant_config=quant_config,
+                max_seq_len=max_seq_len,
+                is_cuda_graph=is_cuda_graph,
+                parallelism_config=parallelism_config,
+            )
+        except Exception as e:
+            logging.warning(f"MLA skip {impl_name}: {e}")
+            continue
         if not is_cuda_graph or instance.support_cuda_graph():
             return instance
+    logging.error(
+        f"can not find mla type: is_prefill={attn_inputs.is_prefill}, "
+        f"is_target_verify={is_target_verify}, is_sparse={attn_configs.is_sparse}, "
+        f"use_mla={attn_configs.use_mla}, kv_cache_dtype={attn_configs.kv_cache_dtype}, "
+        f"is_cuda_graph={is_cuda_graph}, indexer_topk={attn_configs.indexer_topk}, "
+        f"impls={[i.__name__ for i in mla_impls]}, "
+        f"all_prefill={[i.__name__ for i in PREFILL_MLA_IMPS]}, "
+        f"all_decode={[i.__name__ for i in DECODE_MLA_IMPS]}"
+    )
     raise Exception(f"can not find mla type")
 
 

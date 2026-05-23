@@ -27,15 +27,20 @@ class MoeConfigResolver:
 
     @staticmethod
     def has_quantization(config: MoEConfigAdapter) -> bool:
-        """Check if quantization is enabled
+        """Check if quantization is enabled for the MoE part of the model.
 
-        Args:
-            config: MOE configuration adapter
-
-        Returns:
-            Whether quantization is enabled
+        Returns False even when ``model_config.quant_config`` is non-None if
+        the quant config opts out of MoE quantization (``skip_moe=True``,
+        e.g. ``FP8_PER_BLOCK_NO_MOE`` for the mega_moe-hybrid path), so the
+        MoE strategy picker skips quantized strategies and falls back to a
+        BF16 strategy that consumes the un-quantized MoE weights.
         """
-        return config.model_config.quant_config is not None
+        quant_config = config.model_config.quant_config
+        if quant_config is None:
+            return False
+        if getattr(quant_config, "skip_moe", False):
+            return False
+        return True
 
     @staticmethod
     def is_bf16(config: MoEConfigAdapter) -> bool:
@@ -51,17 +56,19 @@ class MoeConfigResolver:
 
     @staticmethod
     def get_quant_method(config: MoEConfigAdapter) -> Optional[str]:
-        """Get quantization method
+        """Get quantization method seen by the MoE strategy picker.
 
-        Args:
-            config: MOE configuration adapter
-
-        Returns:
-            Quantization method name, or None if quantization is not enabled
+        Returns ``None`` for ``skip_moe=True`` quant configs so MoE strategies
+        that gate on a specific FP8/FP4 method (e.g. ``CudaFp8PerBlockEpNormalStrategy``)
+        do not match — the MoE weights are kept in compute dtype and need a
+        BF16 strategy.
         """
-        if config.model_config.quant_config is None:
+        quant_config = config.model_config.quant_config
+        if quant_config is None:
             return None
-        return config.model_config.quant_config.get_method()
+        if getattr(quant_config, "skip_moe", False):
+            return None
+        return quant_config.get_method()
 
     @staticmethod
     def is_ep_enabled(config: MoEConfigAdapter) -> bool:

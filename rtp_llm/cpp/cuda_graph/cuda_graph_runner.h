@@ -111,7 +111,7 @@ private:
 private:
     std::vector<int> getDecodeBatchSizesToCapture();
     std::vector<int> getPrefillSequenceLengthsToCapture();
-    /// Select graph key for decode; false if no captured graph can serve current_batch_size (e.g. lower_bound hit end).
+    /// Select graph key for decode; throws if enabled decode CUDA graph cannot serve current_batch_size.
     bool tryGetRealGraphDecodeBatchSize(const PyModelInputs& inputs, CudaGraphState& state);
     /// Select graph key for prefill; false if capture_range_ empty or seq_len above max captured (lower_bound hit end).
     bool                    tryGetRealGraphPrefillSeqLen(const PyModelInputs& inputs, CudaGraphState& state);
@@ -136,11 +136,11 @@ private:
     // models). input_hiddens captures with hidden_size_ * hc_mult_ so the MTP
     // draft graph can take the target's pre-hc residual ([T, hc*dim]) as
     // input. The post-reduce output tensor still uses hidden_size_.
-    int                     hc_mult_{1};
-    int                     sp_steps_{0};
-    std::vector<int>        capture_range_;
-    std::vector<int>        prefill_capture_seq_lens_;    // Pre-configured sequence lengths from Python
-    std::vector<int>        decode_capture_batch_sizes_;  // Pre-configured batch sizes from Python
+    int              hc_mult_{1};
+    int              sp_steps_{0};
+    std::vector<int> capture_range_;
+    std::vector<int> prefill_capture_seq_lens_;    // Pre-configured sequence lengths from Python
+    std::vector<int> decode_capture_batch_sizes_;  // Pre-configured batch sizes from Python
     // capture seqLen -> GraphInstance (prefill)
     // batch_size -> GraphInstance (decode)
     std::unordered_map<int, GraphInstance> graph_instances_;

@@ -125,7 +125,7 @@ std::vector<std::shared_ptr<GenerateStream>> FIFOScheduler::batchEnqueue(const v
 }
 
 bool FIFOScheduler::evaluateRunningBatch(const list<GenerateStreamPtr>& streams,
-                                          const GenerateStreamPtr&       new_stream) const {
+                                         const GenerateStreamPtr&       new_stream) const {
     RTP_LLM_PROFILE_FUNCTION();
     if (pd_sep_config_.role_type == RoleType::DECODE) {
         // Decode-only scheduling can top up an existing running decode batch.
@@ -177,7 +177,14 @@ bool FIFOScheduler::waitPredicate() {
 void FIFOScheduler::evaluateAndUpdateStreams(list<GenerateStreamPtr>& streams) {
     RTP_LLM_PROFILE_FUNCTION();
     for (auto it = streams.begin(); it != streams.end();) {
-        auto state     = (*it)->getStatus();
+        auto state = (*it)->getStatus();
+        // avoid running_streams_ size exceed max_generate_batch_size_
+        if (state == StreamState::WAITING && (*it)->hasEvent(StreamEvents::CanRun)
+            && (*it)->hasEvent(StreamEvents::LoadInitiated)
+            && running_streams_.size() + new_streams_.size() + 1 > max_generate_batch_size_) {
+            it++;
+            continue;
+        }
         auto new_state = (*it)->moveToNext();
         if (new_state != state) {
             addStreamToNewState(*it, new_state);

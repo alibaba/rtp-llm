@@ -20,6 +20,13 @@ from rtp_llm.ops import AttentionConfigs, KvCacheDataType
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs, rtp_llm_ops
 from rtp_llm.utils.model_weight import W
 
+try:
+    from flash_mla import flash_mla_with_kvcache, get_mla_metadata
+
+    _HAS_FLASH_MLA = True
+except ImportError:
+    _HAS_FLASH_MLA = False
+
 g_workspace_buffer = None
 warm_up_done = False
 
@@ -371,6 +378,20 @@ class MlaFlashInferPrefillOp(object):
         )
 
         kv = self.kv_b_proj(compressed_kv)
+        expected_out = self.num_heads * (self.qk_nope_head_dim + self.v_head_dim)
+        if kv.shape[-1] != expected_out:
+            w = self.weights[layer_id].get(W.mla_kv_b_w)
+            s = self.weights[layer_id].get(W.mla_kv_b_s)
+            logging.error(
+                f"[MLA-PREFILL-DEBUG] kv_b_proj output mismatch: "
+                f"kv={list(kv.shape)} expected_out={expected_out} "
+                f"num_heads={self.num_heads} nope={self.qk_nope_head_dim} "
+                f"v_dim={self.v_head_dim} w_shape={list(w.shape) if w is not None else None} "
+                f"w_dtype={w.dtype if w is not None else None} "
+                f"s_shape={list(s.shape) if s is not None else None} "
+                f"ckv={list(compressed_kv.shape)} kpe={list(k_pe.shape)} "
+                f"all_keys={list(self.weights[layer_id].keys())}"
+            )
         kv = kv.view(-1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
         k_nope = kv[:, :, : self.qk_nope_head_dim]
         value_states = kv[:, :, self.qk_nope_head_dim :]
@@ -398,6 +419,7 @@ class MlaFlashInferDecodeOp(object):
         max_context_len: int = 0,
         num_tokens: int = 0,
         is_cuda_graph: bool = False,
+        kv_cache_dtype: KvCacheDataType = KvCacheDataType.BASE,
     ):
         super().__init__()
 
@@ -414,35 +436,96 @@ class MlaFlashInferDecodeOp(object):
         self.use_mla = use_mla
         self.is_sparse = is_sparse
         self.use_cuda_graph = is_cuda_graph
+        self._fp8_kv = kv_cache_dtype == KvCacheDataType.FP8
+        self._fmha_params = None
+        self._sched_meta = None
         global g_workspace_buffer
-        self.kv_indices_d = torch.empty(
-            ((max_context_len + self.token_per_block - 1) // self.token_per_block)
-            * max_bs,
-            dtype=torch.int32,
-            device="cuda",
-        )
-        self.qo_indptr_h = torch.arange(0, max_bs + 1, dtype=torch.int32, device="cpu")
-        self.kv_indptr_h = torch.zeros((max_bs + 1,), dtype=torch.int32, device="cpu")
-        self.kv_len_arr_h = torch.ones((max_bs,), dtype=torch.int32, device="cpu")
 
-        if g_workspace_buffer is None:
-            g_workspace_buffer = torch.empty(
-                512 * 1024 * 1024,
-                dtype=torch.int8,
-                device=self.weights[0].get(W.mla_vc).device,
+        if self._fp8_kv:
+            if not _HAS_FLASH_MLA:
+                raise ImportError("flash_mla is required for FP8 kv_cache MLA decode")
+            self._fp8_max_bs = max_bs
+            self._fp8_max_context_len = max_context_len
+            align = self._FP8_SPARSE_TOPK_ALIGN
+            padded_topk_max = ((max_context_len + align - 1) // align) * align
+            padded_topk_max = max(padded_topk_max, align)
+            self._fp8_indices_buf = torch.full(
+                (max_bs, 1, padded_topk_max),
+                -1,
+                dtype=torch.int32,
+                device="cuda",
+            )
+            self._fp8_topk_len_buf = torch.zeros(
+                max_bs, dtype=torch.int32, device="cuda"
+            )
+            self._fp8_position_buf = torch.arange(
+                padded_topk_max, dtype=torch.int32, device="cuda"
+            )
+            self._fp8_block_ids_buf = (
+                self._fp8_position_buf // self.token_per_block
+            ).to(torch.long)
+            self._fp8_offsets_buf = self._fp8_position_buf % self.token_per_block
+            self._fp8_plan_B = 0
+        else:
+            self.kv_indices_d = torch.empty(
+                ((max_context_len + self.token_per_block - 1) // self.token_per_block)
+                * max_bs,
+                dtype=torch.int32,
+                device="cuda",
+            )
+            self.qo_indptr_h = torch.arange(
+                0, max_bs + 1, dtype=torch.int32, device="cpu"
+            )
+            self.kv_indptr_h = torch.zeros(
+                (max_bs + 1,), dtype=torch.int32, device="cpu"
+            )
+            self.kv_len_arr_h = torch.ones((max_bs,), dtype=torch.int32, device="cpu")
+
+            if g_workspace_buffer is None:
+                g_workspace_buffer = torch.empty(
+                    512 * 1024 * 1024,
+                    dtype=torch.int8,
+                    device=self.weights[0].get(W.mla_vc).device,
+                )
+
+            self.mla_wrapper = BatchMLAPagedAttentionWrapper(
+                g_workspace_buffer,
+                backend="auto",
+                use_cuda_graph=is_cuda_graph,
+                qo_indptr=self.qo_indptr_h,
+                kv_indptr=self.kv_indptr_h,
+                kv_indices=self.kv_indices_d,
+                kv_len_arr=self.kv_len_arr_h,
             )
 
-        self.mla_wrapper = BatchMLAPagedAttentionWrapper(
-            g_workspace_buffer,
-            backend="auto",
-            use_cuda_graph=is_cuda_graph,
-            qo_indptr=self.qo_indptr_h,
-            kv_indptr=self.kv_indptr_h,
-            kv_indices=self.kv_indices_d,
-            kv_len_arr=self.kv_len_arr_h,
-        )
-
     def plan(self, fmha_params: Any):
+        self._fmha_params = fmha_params
+
+        if self._fp8_kv:
+            self._reset_fp8_sched_meta()
+            block_table = self._build_block_table(fmha_params)
+            B = int(fmha_params.kvlen_h.size(0))
+            cache_seqlens = fmha_params.kvlen_h[:B].to(
+                dtype=torch.int32, device=block_table.device
+            )
+            self._fp8_plan_B = B
+            self._fp8_indices_buf[:B].fill_(-1)
+            self._fp8_topk_len_buf[:B].copy_(cache_seqlens)
+            for i in range(B):
+                seqlen = int(cache_seqlens[i].item())
+                if seqlen == 0:
+                    continue
+                positions = torch.arange(
+                    seqlen, device=block_table.device, dtype=torch.long
+                )
+                block_ids = positions // self.token_per_block
+                offsets = (positions % self.token_per_block).to(torch.int32)
+                phys_blocks = block_table[i, block_ids]
+                self._fp8_indices_buf[i, 0, :seqlen] = (
+                    phys_blocks * self.token_per_block + offsets
+                )
+            return
+
         if self.use_cuda_graph and self.kv_indices_d.size(
             0
         ) < fmha_params.page_indice_d.size(0):
@@ -468,6 +551,83 @@ class MlaFlashInferDecodeOp(object):
             torch.bfloat16,
         )
 
+    def _reset_fp8_sched_meta(self):
+        if self._sched_meta is None:
+            self._sched_meta, _ = get_mla_metadata()
+        self._sched_meta.tile_scheduler_metadata = None
+        self._sched_meta.num_splits = None
+
+    def plan_cuda_graph(self, attn_inputs: PyAttentionInputs) -> bool:
+        if not self._fp8_kv:
+            return False
+
+        sequence_lengths = attn_inputs.sequence_lengths_plus_1_d
+        if sequence_lengths is None or sequence_lengths.numel() == 0:
+            sequence_lengths = attn_inputs.sequence_lengths + 1
+        self._plan_fp8_from_device(
+            sequence_lengths,
+            attn_inputs.kv_cache_kernel_block_id_device,
+        )
+        return True
+
+    def _plan_fp8_from_device(
+        self,
+        sequence_lengths: torch.Tensor,
+        block_table: torch.Tensor,
+    ) -> None:
+        self._reset_fp8_sched_meta()
+        B = int(sequence_lengths.shape[0])
+        self._fp8_plan_B = B
+        if B == 0:
+            return
+
+        if B > self._fp8_indices_buf.shape[0]:
+            raise ValueError(
+                f"FP8 MLA decode batch size {B} exceeds reserved "
+                f"{self._fp8_indices_buf.shape[0]}"
+            )
+        if block_table is None or block_table.dim() != 2:
+            raise ValueError("FP8 MLA CUDA graph requires a 2-D block table")
+
+        device = self._fp8_indices_buf.device
+        block_table = block_table[:B].to(device=device, dtype=torch.int32)
+        cache_seqlens = sequence_lengths[:B].to(device=device, dtype=torch.int32)
+        topk_cap = min(
+            self._fp8_indices_buf.shape[-1],
+            int(block_table.shape[1]) * self.token_per_block,
+        )
+
+        self._fp8_indices_buf[:B].fill_(-1)
+        self._fp8_topk_len_buf[:B].copy_(cache_seqlens)
+        if topk_cap <= 0:
+            return
+
+        positions = self._fp8_position_buf[:topk_cap]
+        block_ids = self._fp8_block_ids_buf[:topk_cap].unsqueeze(0).expand(B, -1)
+        offsets = self._fp8_offsets_buf[:topk_cap].unsqueeze(0)
+
+        phys_blocks = torch.gather(block_table, 1, block_ids)
+        dense_indices = phys_blocks * self.token_per_block + offsets
+        valid = positions.unsqueeze(0) < cache_seqlens.unsqueeze(1)
+        self._fp8_indices_buf[:B, 0, :topk_cap].copy_(
+            torch.where(valid, dense_indices, -1)
+        )
+
+    def _build_block_table(self, fmha_params: Any) -> torch.Tensor:
+        indptr_h = fmha_params.decode_page_indptr_h
+        batch_size = int(indptr_h.size(0)) - 1
+        lengths = indptr_h[1 : batch_size + 1] - indptr_h[:batch_size]
+        max_blocks = int(lengths.max().item()) if batch_size > 0 else 0
+        page_indices_d = fmha_params.page_indice_d
+        page_indices_h = page_indices_d.cpu()
+        block_table = torch.zeros((batch_size, max_blocks), dtype=torch.int32)
+        for i in range(batch_size):
+            start = int(indptr_h[i].item())
+            n = int(lengths[i].item())
+            if n > 0:
+                block_table[i, :n] = page_indices_h[start : start + n]
+        return block_table.to(device=page_indices_d.device)
+
     def forward(
         self,
         q_nope: torch.Tensor,
@@ -479,15 +639,18 @@ class MlaFlashInferDecodeOp(object):
         k_weight = self.weights[layer_id].get(W.mla_kc, None)
         v_weight = self.weights[layer_id].get(W.mla_vc, None)
 
-        compressed_kv = kv_cache.kv_cache_base.view(
-            -1, self.token_per_block, self.kv_lora_rank + self.qk_rope_head_dim
-        )
-
         q_nope = q_nope.view(-1, self.num_heads, self.qk_nope_head_dim)
         q_pe = q_pe.view(-1, self.num_heads, self.qk_rope_head_dim)
 
         q_nope = torch.bmm(q_nope.transpose(0, 1), k_weight)
         q_nope = q_nope.transpose(0, 1)
+
+        if self._fp8_kv:
+            return self._forward_fp8(q_nope, q_pe, kv_cache, v_weight, layer_id)
+
+        compressed_kv = kv_cache.kv_cache_base.view(
+            -1, self.token_per_block, self.kv_lora_rank + self.qk_rope_head_dim
+        )
 
         compressed_kv, k_pe = torch.split(
             compressed_kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
@@ -497,6 +660,89 @@ class MlaFlashInferDecodeOp(object):
         self.mla_wrapper.run(q_nope, q_pe, compressed_kv, k_pe, attn_output)
 
         attn_output = attn_output.view(-1, self.num_heads, self.kv_lora_rank)
+        attn_bmm_output = torch.bmm(attn_output.transpose(0, 1), v_weight)
+        attn_bmm_output = attn_bmm_output.transpose(0, 1)
+
+        return attn_bmm_output
+
+    _FP8_SPARSE_TOPK_ALIGN = 64
+
+    def _build_dense_indices(
+        self, block_table: torch.Tensor, cache_seqlens: torch.Tensor, B: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Build dense indices for sparse decode kernel (all tokens per request).
+
+        Returns (indices [B, 1, padded_topk], topk_length [B]).
+        Pads topk dimension to a multiple of _FP8_SPARSE_TOPK_ALIGN.
+        """
+        max_topk = int(cache_seqlens.max().item())
+        align = self._FP8_SPARSE_TOPK_ALIGN
+        padded_topk = ((max_topk + align - 1) // align) * align
+        padded_topk = max(padded_topk, align)
+        indices = torch.full(
+            (B, 1, padded_topk), -1, dtype=torch.int32, device=block_table.device
+        )
+        for i in range(B):
+            seqlen = int(cache_seqlens[i].item())
+            if seqlen == 0:
+                continue
+            positions = torch.arange(
+                seqlen, device=block_table.device, dtype=torch.long
+            )
+            block_ids = positions // self.token_per_block
+            offsets = (positions % self.token_per_block).to(torch.int32)
+            phys_blocks = block_table[i, block_ids]
+            indices[i, 0, :seqlen] = phys_blocks * self.token_per_block + offsets
+        topk_length = cache_seqlens.to(dtype=torch.int32, device=block_table.device)
+        return indices, topk_length
+
+    def _forward_fp8(
+        self,
+        q_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        kv_cache: Optional[LayerKVCache],
+        v_weight: torch.Tensor,
+        layer_id: int,
+    ) -> torch.Tensor:
+        B = q_nope.size(0)
+        q_absorbed = torch.cat([q_nope, q_pe], dim=-1)
+        q_4d = q_absorbed.unsqueeze(1)
+
+        kv_cache_u8 = kv_cache.kv_cache_base.view(torch.uint8)
+        fp8_per_token = (
+            self.kv_lora_rank + self.kv_lora_rank // 128 * 4 + self.qk_rope_head_dim * 2
+        )
+        kv_cache_paged = kv_cache_u8.view(-1, self.token_per_block, 1, fp8_per_token)
+
+        if layer_id == 0:
+            self._sched_meta.tile_scheduler_metadata = None
+            self._sched_meta.num_splits = None
+
+        indices = self._fp8_indices_buf[:B]
+        topk_length = self._fp8_topk_len_buf[:B]
+
+        try:
+            attn_out, _ = flash_mla_with_kvcache(
+                q=q_4d,
+                k_cache=kv_cache_paged,
+                block_table=None,
+                cache_seqlens=None,
+                head_dim_v=self.kv_lora_rank,
+                tile_scheduler_metadata=self._sched_meta,
+                num_splits=None,
+                softmax_scale=self.scale * self.softmax_extra_scale,
+                causal=False,
+                is_fp8_kvcache=True,
+                indices=indices,
+                topk_length=topk_length,
+            )
+        except Exception as e:
+            logging.error(
+                f"[MLA-FP8-DECODE] flash_mla_with_kvcache FAILED layer={layer_id}: {e}"
+            )
+            raise
+
+        attn_output = attn_out.view(B, self.num_heads, self.kv_lora_rank)
         attn_bmm_output = torch.bmm(attn_output.transpose(0, 1), v_weight)
         attn_bmm_output = attn_bmm_output.transpose(0, 1)
 

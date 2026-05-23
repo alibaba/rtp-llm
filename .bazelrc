@@ -187,14 +187,9 @@ test:cuda13_arm --test_env=LD_PRELOAD=/usr/lib64/librt.so.1
 # The fp8_fp4_mega_moe kernel uses a C++20 floating-point non-type template
 # parameter (`float kActivationClamp`). nvcc 13.2 + gcc 10.2.1 (the system
 # /usr/bin/g++) rejects this even with -std=c++20 — the FP-NTTP feature needs
-# gcc 12+ as host. Container ships /opt/rh/gcc-toolset-12/root/usr/bin/g++
-# (gcc 12.3.0), so point the JIT at that. gcc-toolset-12 lives outside PATH
-# by default, hence the explicit PATH / LD_LIBRARY_PATH overrides.
-#
-# These were previously hard-coded into smoke defs.bzl pointing at user-
-# private conda envs (/home/tanboyu.tby/..., /home/serina.wzq/...) which
-# only worked on those specific dev boxes. Centralize here so every cu13
-# test sees the same toolchain.
+# gcc 12+ as host. Keep CUDA13 ARM pinned to the known container toolchain,
+# while CUDA13 x86 resolves gcc/g++ through PATH so dev machines can use the
+# first available C++20-capable compiler.
 test:cuda13_arm --test_env=DG_JIT_CPP_STANDARD=20
 test:cuda13_arm --test_env=CC=/opt/rh/gcc-toolset-12/root/usr/bin/gcc
 test:cuda13_arm --test_env=CXX=/opt/rh/gcc-toolset-12/root/usr/bin/g++
@@ -204,10 +199,10 @@ test:cuda13_arm --test_env=PATH=/opt/rh/gcc-toolset-12/root/usr/bin:/opt/conda31
 test:cuda13_arm --test_env=LD_LIBRARY_PATH=/opt/rh/gcc-toolset-12/root/usr/lib64:/usr/local/cuda/lib64:/opt/conda310/lib:/usr/lib64
 test:cuda13_arm --test_env=TRITON_PTXAS_PATH=/usr/local/bin/triton_ptxas_cuda_wrapper.sh
 test:cuda13 --test_env=DG_JIT_CPP_STANDARD=20
-test:cuda13 --test_env=CC=/opt/rh/gcc-toolset-12/root/usr/bin/gcc
-test:cuda13 --test_env=CXX=/opt/rh/gcc-toolset-12/root/usr/bin/g++
-test:cuda13 --test_env=CUDAHOSTCXX=/opt/rh/gcc-toolset-12/root/usr/bin/g++
-test:cuda13 --test_env=NVCC_PREPEND_FLAGS=-ccbin=/opt/rh/gcc-toolset-12/root/usr/bin/g++
+test:cuda13 --test_env=CC=gcc
+test:cuda13 --test_env=CXX=g++
+test:cuda13 --test_env=CUDAHOSTCXX=g++
+test:cuda13 --test_env=NVCC_PREPEND_FLAGS=-ccbin=g++
 test:cuda13 --test_env=PATH=/opt/rh/gcc-toolset-12/root/usr/bin:/opt/conda310/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
 test:cuda13 --test_env=LD_LIBRARY_PATH=/opt/rh/gcc-toolset-12/root/usr/lib64:/usr/local/cuda/lib64:/opt/conda310/lib:/usr/lib64
 
@@ -318,9 +313,13 @@ test --test_env OMP_NUM_THREADS=8
 test --test_env FT_SERVER_TEST="1"
 test --test_env LOG_LEVEL="INFO"
 test --test_env NCCL_DEBUG="INFO"
+test --test_env FLASHINFER_DISABLE_VERSION_CHECK=1
+# test --test_env CUDA_VISIBLE_DEVICES="4,5,6,7"
 # for dp scatter add stable result
 test --test_env TZ=Asia/Shanghai
-
+test --nozip_undeclared_test_outputs
+# for flashinfer find cuda; scope to CUDA-specific test runs
+test:cuda --test_env CUDA_HOME=/usr/local/cuda
 # compat for low driver < 535
 test:compat --test_env LD_LIBRARY_PATH="/opt/rocm/lib:/opt/conda310/lib/:/usr/local/cuda/compat/:/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64:/opt/amdgpu/lib64:/usr/local/cuda/extras/CUPTI/lib64:/usr/local/cuda/lib64/stubs"
 

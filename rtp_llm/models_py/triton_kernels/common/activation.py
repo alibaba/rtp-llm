@@ -6,6 +6,19 @@ import triton.language as tl
 
 
 @triton.jit
+def _ieee_rn_div_f32(x, y):
+    """IEEE round-to-nearest-even fp32 division (matches sgl CUDA `/`)."""
+    return tl.inline_asm_elementwise(
+        "div.rn.f32 $0, $1, $2;",
+        "=r,r,r",
+        [x, y],
+        dtype=tl.float32,
+        is_pure=True,
+        pack=1,
+    )
+
+
+@triton.jit
 def _silu_and_mul_kernel(
     output_ptr,
     input_ptr,
@@ -552,11 +565,12 @@ def _silu_and_mul_post_quant_kernel(
         gate = gate / (1 + tl.exp(-gate))
         gate = gate.to(input_ptr.dtype.element_ty)
         gate_up = up * gate
-        _absmax = tl.maximum(tl.max(tl.abs(gate_up)), 1e-10)
-        output_s = _absmax / fp8_max
+        _absmax = tl.max(tl.abs(gate_up))
+        output_s = (_absmax.to(tl.float64) / fp8_max).to(tl.float32)
         if SCALE_UE8M0:
             output_s = tl.exp2(tl.ceil(tl.log2(tl.abs(output_s))))
-        output_q = tl.clamp(gate_up / output_s, fp8_min, fp8_max).to(
+        output_s_inv = (1.0 / output_s.to(tl.float64)).to(tl.float32)
+        output_q = tl.clamp(gate_up * output_s_inv, fp8_min, fp8_max).to(
             output_ptr.dtype.element_ty
         )
         tl.store(
@@ -730,13 +744,14 @@ def _silu_and_mul_post_quant_packed_kernel(
             gate_up = up * gate
 
             # Compute scale with UE8M0 rounding (power of 2)
-            _absmax = tl.maximum(tl.max(tl.abs(gate_up)), 1e-10)
-            output_s = _absmax / fp8_max
+            _absmax = tl.max(tl.abs(gate_up))
+            output_s = (_absmax.to(tl.float64) / fp8_max).to(tl.float32)
             # Round to power of 2 (UE8M0 format requires this)
             output_s = tl.exp2(tl.ceil(tl.log2(tl.abs(output_s))))
 
             # Quantize to FP8
-            output_q = tl.clamp(gate_up / output_s, fp8_min, fp8_max).to(
+            output_s_inv = (1.0 / output_s.to(tl.float64)).to(tl.float32)
+            output_q = tl.clamp(gate_up * output_s_inv, fp8_min, fp8_max).to(
                 output_ptr.dtype.element_ty
             )
 
@@ -762,6 +777,214 @@ def _silu_and_mul_post_quant_packed_kernel(
             output_scale_base + token_index * stride_output_scale_1,
             packed_scale,
         )
+
+
+# ---------------------------------------------------------------------------
+# 2-D dense version of `silu_and_mul + per-token-group fp8 quant`.
+# Strips the (expert, masked_m) axis from `_silu_and_mul_post_quant_packed_kernel`
+# so it can be used by `DenseMLP` / `shared_expert` paths whose down_proj is fp8.
+# Two output-scale layouts are supported:
+#   - SCALE_UE8M0=True  : int32 packed UE8M0, 4 groups per int32, column-major
+#                         (matches Blackwell deepgemm's required layout).
+#   - SCALE_UE8M0=False : float32 unpacked, column-major TMA-aligned
+#                         (matches H20/SM9.0 deepgemm's required layout).
+# Both layouts come from `create_per_token_group_quant_fp8_output_scale`.
+# ---------------------------------------------------------------------------
+
+
+@triton.jit
+def _silu_and_mul_post_quant_dense_packed_kernel(
+    input_ptr,  # [T, 2*H_out]  bf16/fp16
+    stride_input_t,
+    output_ptr,  # [T, H_out]   fp8_e4m3fn
+    stride_output_t,
+    output_scale_ptr,
+    stride_output_scale_t,  # stride along token dim
+    stride_output_scale_g,  # stride along (packed) group dim
+    size_n,  # H_out
+    fp8_max,
+    fp8_min,
+    BLOCK_N: tl.constexpr,  # group_size (typically 128)
+    NUM_STAGE: tl.constexpr,
+    SCALE_UE8M0: tl.constexpr,
+):
+    """Fused: SiLU-and-mul + per-token-group FP8 quant.
+
+    When SCALE_UE8M0 is True, processes 4 groups at a time and writes a packed
+    int32 (one byte per group exponent). When False, processes 1 group at a
+    time and writes float32 scale.
+    """
+    block_id = tl.program_id(axis=0)
+    token_id = tl.program_id(axis=1)
+
+    stride_input_t = tl.cast(stride_input_t, dtype=tl.int64)
+    stride_output_t = tl.cast(stride_output_t, dtype=tl.int64)
+
+    in_base = input_ptr + token_id * stride_input_t
+    out_base = output_ptr + token_id * stride_output_t
+
+    if SCALE_UE8M0:
+        base_group_idx = block_id * 4
+        scale_base = (
+            output_scale_ptr
+            + token_id * stride_output_scale_t
+            + block_id * stride_output_scale_g
+        )
+        packed_scale: tl.int32 = 0
+        for g in tl.static_range(4):
+            group_idx = base_group_idx + g
+            offs_in_d = group_idx * BLOCK_N + tl.arange(0, BLOCK_N)
+            mask = offs_in_d < size_n
+            # Match baseline ``FusedSiluAndMul`` + sgl quant: silu(gate_fp32) is
+            # multiplied by up_fp32 fully in fp32, rounded to bf16 (the
+            # FusedSiluAndMul output dtype), and ONLY then quantized to fp8.
+            gate = tl.load(in_base + offs_in_d, mask=mask, other=0.0).to(tl.float32)
+            up = tl.load(in_base + offs_in_d + size_n, mask=mask, other=0.0).to(
+                tl.float32
+            )
+            silu_gate = gate / (1 + tl.exp(-gate))
+            gate_up_bf16 = (silu_gate * up).to(tl.bfloat16)
+            gate_up = gate_up_bf16.to(tl.float32)
+            # Match sgl_per_token_group_quant_fp8 byte-exact: 1e-10 floor on
+            # absmax, IEEE-RNE fp32 div for scale and per-element val/s
+            # (fp64-promoted to escape Triton's ``div.approx.f32`` default).
+            _absmax = tl.maximum(tl.max(tl.abs(gate_up)), 1e-4)
+            # IEEE-RNE fp32 div via inline ``div.rn.f32`` (Triton default `/`
+            # uses ``div.approx.f32`` which is ~1 ULP off sgl).
+            output_s = _ieee_rn_div_f32(_absmax, fp8_max)
+            output_s = tl.exp2(tl.ceil(tl.log2(tl.abs(output_s))))
+            output_q = tl.clamp(
+                _ieee_rn_div_f32(gate_up, tl.full(gate_up.shape, output_s, tl.float32)),
+                fp8_min,
+                fp8_max,
+            ).to(output_ptr.dtype.element_ty)
+            tl.store(out_base + offs_in_d, output_q, mask=mask)
+            scale_bits = output_s.to(tl.int32, bitcast=True)
+            exp_bits = (scale_bits >> 23) & 0xFF
+            packed_scale = packed_scale | (exp_bits << (g * 8))
+        tl.store(scale_base, packed_scale)
+    else:
+        group_idx = block_id
+        offs_in_d = group_idx * BLOCK_N + tl.arange(0, BLOCK_N)
+        mask = offs_in_d < size_n
+        # See SCALE_UE8M0 branch above for rationale.
+        gate = tl.load(in_base + offs_in_d, mask=mask, other=0.0).to(tl.float32)
+        up = tl.load(in_base + offs_in_d + size_n, mask=mask, other=0.0).to(tl.float32)
+        silu_gate = gate / (1 + tl.exp(-gate))
+        gate_up_bf16 = (silu_gate * up).to(tl.bfloat16)
+        gate_up = gate_up_bf16.to(tl.float32)
+        _absmax = tl.maximum(tl.max(tl.abs(gate_up)), 1e-4)
+        output_s = _ieee_rn_div_f32(_absmax, fp8_max)
+        output_q = tl.clamp(
+            _ieee_rn_div_f32(gate_up, tl.full(gate_up.shape, output_s, tl.float32)),
+            fp8_min,
+            fp8_max,
+        ).to(output_ptr.dtype.element_ty)
+        tl.store(out_base + offs_in_d, output_q, mask=mask)
+        scale_offset = (
+            output_scale_ptr
+            + token_id * stride_output_scale_t
+            + group_idx * stride_output_scale_g
+        )
+        tl.store(scale_offset, output_s)
+
+
+_SILU_MUL_FP8_QUANT_M_THRESHOLD = 1024
+
+
+def silu_and_mul_per_token_group_fp8_quant_dense_packed_fwd(
+    input: torch.Tensor,
+    quant_group_size: int = 128,
+    scale_ue8m0: bool = True,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Dense 2-D fused SiLU-and-mul + per-token-group FP8 quant.
+
+    Falls back to unfused path (C++ silu_and_mul + sgl quant) for large T
+    where the fused Triton kernel is slower than baseline.
+
+    Args:
+        input:        [T, 2*H_out]  bf16/fp16, contiguous, layout `[gate | up]`.
+        quant_group_size: must divide H_out, defaults to 128.
+        scale_ue8m0:  True for Blackwell-style packed int32 UE8M0 scales,
+                      False for H20-style fp32 scales.
+
+    Returns:
+        (fp8_output, output_scale) tuple.
+    """
+    from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
+        create_per_token_group_quant_fp8_output_scale,
+    )
+
+    assert input.is_contiguous(), "input must be contiguous"
+    assert input.dim() == 2
+    assert input.shape[-1] % 2 == 0
+    size_n = input.shape[-1] // 2
+    assert size_n % quant_group_size == 0
+    num_groups = size_n // quant_group_size
+
+    T = input.shape[0]
+
+    if T >= _SILU_MUL_FP8_QUANT_M_THRESHOLD:
+        from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
+            sgl_per_token_group_quant_fp8,
+        )
+        from rtp_llm.models_py.modules.base import FusedSiluAndMul
+
+        activated = FusedSiluAndMul()(input)
+        return sgl_per_token_group_quant_fp8(
+            activated,
+            group_size=quant_group_size,
+            column_major_scales=True,
+            scale_tma_aligned=True,
+            scale_ue8m0=scale_ue8m0,
+        )
+
+    output = torch.empty((T, size_n), dtype=torch.float8_e4m3fn, device=input.device)
+    output_scale = create_per_token_group_quant_fp8_output_scale(
+        x_shape=(T, size_n),
+        device=input.device,
+        group_size=quant_group_size,
+        column_major_scales=True,
+        scale_tma_aligned=True,
+        scale_ue8m0=scale_ue8m0,
+    )
+
+    if T == 0:
+        return output, output_scale
+
+    if scale_ue8m0:
+        assert (
+            num_groups % 4 == 0
+        ), "Number of groups must be divisible by 4 for UE8M0 packing"
+        num_blocks = num_groups // 4
+    else:
+        num_blocks = num_groups
+
+    BLOCK_N = quant_group_size
+    NUM_STAGE = 2
+    grid = (num_blocks, T)
+
+    finfo = torch.finfo(torch.float8_e4m3fn)
+    fp8_max = finfo.max
+    fp8_min = -fp8_max
+
+    _silu_and_mul_post_quant_dense_packed_kernel[grid](
+        input,
+        input.stride(0),
+        output,
+        output.stride(0),
+        output_scale,
+        output_scale.stride(0),
+        output_scale.stride(1),
+        size_n,
+        fp8_max,
+        fp8_min,
+        BLOCK_N=BLOCK_N,
+        NUM_STAGE=NUM_STAGE,
+        SCALE_UE8M0=scale_ue8m0,
+        num_warps=1,
+    )
+    return output, output_scale
 
 
 def create_packed_scale_tensor(
@@ -976,11 +1199,12 @@ def _silu_mul_masked_fp8_post_quant_fwd(
         )
         gate = gate / (1 + tl.exp(-gate))
         gate_up = up * gate
-        _absmax = tl.maximum(tl.max(tl.abs(gate_up)), 1e-10)
-        output_s = _absmax / fp8_max
+        _absmax = tl.max(tl.abs(gate_up))
+        output_s = (_absmax.to(tl.float64) / fp8_max).to(tl.float32)
         if SCALE_UE8M0:
             output_s = tl.exp2(tl.ceil(tl.log2(tl.abs(output_s))))
-        output_q = tl.clamp(gate_up / output_s, fp8_min, fp8_max).to(
+        output_s_inv = (1.0 / output_s.to(tl.float64)).to(tl.float32)
+        output_q = tl.clamp(gate_up * output_s_inv, fp8_min, fp8_max).to(
             output_ptr.dtype.element_ty
         )
         tl.store(

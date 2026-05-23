@@ -104,8 +104,8 @@ bool MtpExecutor::isTpRank0() const {
 }
 
 void MtpExecutor::maybeOverrideLastHiddenWithMtpBuffer(GptModelInputs& model_input,
-                                                       ModelBase&       source,
-                                                       bool             request_actual_rows) {
+                                                       ModelBase&      source,
+                                                       bool            request_actual_rows) {
     if (!model_input.combo_tokens.defined() || model_input.combo_tokens.numel() == 0) {
         return;
     }
@@ -485,11 +485,15 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
             draft_model_.reset(new PyWrappedModel(
                 model_params, params.py_sp_model, false, false, draft_cache_layer_layout.layer_to_groups));
             // Create separate model for speculative prefill with CUDA graph if enabled (from params)
-            const bool enable_cuda_graph = params.hw_kernel_config.enable_cuda_graph;
+            const bool  enable_cuda_graph      = params.hw_kernel_config.enable_cuda_graph;
+            const char* disable_sp_prefill_env = std::getenv("DISABLE_SP_PREFILL_CUDA_GRAPH");
+            const bool  disable_sp_prefill_cuda_graph =
+                disable_sp_prefill_env != nullptr && std::string(disable_sp_prefill_env) == "1";
             RTP_LLM_LOG_INFO(
-                "[speculative decoding] enable_cuda_graph=%d (set ENABLE_CUDA_GRAPH=1 when starting server to enable sp_prefill_draft_model_)",
-                static_cast<int>(enable_cuda_graph));
-            if (enable_cuda_graph) {
+                "[speculative decoding] enable_cuda_graph=%d disable_sp_prefill_cuda_graph=%d (set ENABLE_CUDA_GRAPH=1 when starting server to enable sp_prefill_draft_model_; set DISABLE_SP_PREFILL_CUDA_GRAPH=1 to skip the draft prefill CUDA graph capture only)",
+                static_cast<int>(enable_cuda_graph),
+                static_cast<int>(disable_sp_prefill_cuda_graph));
+            if (enable_cuda_graph && !disable_sp_prefill_cuda_graph) {
                 RTP_LLM_LOG_INFO(
                     "[speculative decoding] creating separate prefill draft model with CUDA graph support");
                 sp_prefill_draft_model_.reset(new PyWrappedModel(
@@ -625,7 +629,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(target_model_forward)");
         maybePrintModelInput(model_input, "prefill target model");
-        int64_t start_time_us              = autil::TimeUtility::currentTimeInMicroSeconds();
+        int64_t start_time_us               = autil::TimeUtility::currentTimeInMicroSeconds();
         model_input.kv_cache_layer_to_group = target_kv_cache_layer_to_group;
         model_output                        = std::move(model_->forward(model_input));
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
@@ -676,7 +680,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         }
         tpSyncModelInputs(model_input, parallelism_config_);
         maybePrintModelInput(model_input, "prefill post draft model");
-        int64_t     start_time_us          = autil::TimeUtility::currentTimeInMicroSeconds();
+        int64_t     start_time_us           = autil::TimeUtility::currentTimeInMicroSeconds();
         const auto& mtp_cache_cfg           = cache_manager_->getMTPModuleCacheConfig(0);
         model_input.kv_block_stride_bytes   = mtp_cache_cfg.kv_block_stride_bytes;
         model_input.kv_scale_stride_bytes   = mtp_cache_cfg.kv_scale_stride_bytes;
@@ -810,7 +814,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     RtpLLMExecutorMetricsCollector& executor_collector = metrics_collector.executor_collector;
 
-    StreamGroups   stream_groups(streams);
+    StreamGroups    stream_groups(streams);
     GptModelInputs  model_input;
     GptModelOutputs model_output;
     GptModelOutputs draft_prefill_model_output;
@@ -896,7 +900,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     {
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        model_output = runTargetVerifyForward(model_input, stream_groups);
+        model_output          = runTargetVerifyForward(model_input, stream_groups);
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
@@ -972,7 +976,6 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         model_input.last_hidden_states = model_output.all_hidden_states;
     }
 
-
     // Record before broadcast/draft work so the worker waits only for
     // accept_len/accept_tokens, not the queue tail.
     if (useStreamAsync()) {
@@ -986,7 +989,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     draft_prefill_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
 
     {
-        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        int64_t start_time_us      = autil::TimeUtility::currentTimeInMicroSeconds();
         draft_prefill_model_output = runDraftPrefillForward(model_input);
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
@@ -1104,7 +1107,7 @@ void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_inp
                                                                cuda_i32);
             const auto& sequence_lengths =
                 sequence_lengths_for_prepare.defined() ? sequence_lengths_for_prepare : model_input.sequence_lengths;
-            model_input_copy.prefix_lengths = toCudaInt32WithHostHold(sequence_lengths, buffer_holder_);
+            model_input_copy.prefix_lengths          = toCudaInt32WithHostHold(sequence_lengths, buffer_holder_);
             model_input_copy.sequence_lengths_plus_1 = model_input_copy.prefix_lengths + 1;
         }
     }
@@ -1449,7 +1452,7 @@ absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams, i
         schedule_time_us = process_start_time_us;
     }
     MtpMetricsCollector metrics_collector;
-    auto tps_active_guard =
+    auto                tps_active_guard =
         tps_reporter_.makeActiveGuard(metrics_reporter_ && isTpRank0() && !warm_up_ && !streams.empty());
 
     std::list<GenerateStreamPtr> prefill_streams;
@@ -1527,10 +1530,9 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         tensor_d      = tensor_d.reshape({static_cast<int64_t>(batch_size)});
         return tensor_d.is_contiguous() ? tensor_d : tensor_d.contiguous();
     };
-    spec_prefix_lengths =
-        model_input.sequence_lengths.defined() ?
-            toCudaInt32WithHostHold(model_input.sequence_lengths, buffer_holder_) :
-            torch::Tensor();
+    spec_prefix_lengths = model_input.sequence_lengths.defined() ?
+                              toCudaInt32WithHostHold(model_input.sequence_lengths, buffer_holder_) :
+                              torch::Tensor();
 
     torch::Tensor pre_propose_token_t_raw;
     {
@@ -1594,7 +1596,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
     for (int i = 0; i < propose_step_ - 1; i++) {
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.draft_model_decode(loop_iter=%d)", i);
         RTP_LLM_LOG_DEBUG("[MTP draftDecode] loop step %d/%d start, batch_size %zu", i, propose_step_ - 1, batch_size);
-        int64_t start_time_us     = autil::TimeUtility::currentTimeInMicroSeconds();
+        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         ensureModelInputsOnCuda(model_input, "draft_decode.loop_forward");
         draft_decode_model_output = std::move(draft_model_->forward(model_input));
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
@@ -1729,13 +1731,13 @@ void MtpExecutor::publishSyncMtpDeviceState(const StreamGroups&                 
         return toCudaInt32WithHostHold(tensor, buffer_holder_);
     };
 
-    torch::Tensor accept_len_all       = to_cuda_i32(spec_decode_output.accept_len);
-    torch::Tensor accept_tokens_all    = to_cuda_i32(spec_decode_output.accept_tokens);
-    torch::Tensor propose_tokens_all   = to_cuda_i32(draft_prefill_output.sampler_output.token_ids);
-    torch::Tensor draft_all_probs_full = draft_prefill_output.sampler_output.all_probs.defined() ?
-                                             toCudaWithHostHold(draft_prefill_output.sampler_output.all_probs,
-                                                                buffer_holder_) :
-                                             torch::Tensor();
+    torch::Tensor accept_len_all     = to_cuda_i32(spec_decode_output.accept_len);
+    torch::Tensor accept_tokens_all  = to_cuda_i32(spec_decode_output.accept_tokens);
+    torch::Tensor propose_tokens_all = to_cuda_i32(draft_prefill_output.sampler_output.token_ids);
+    torch::Tensor draft_all_probs_full =
+        draft_prefill_output.sampler_output.all_probs.defined() ?
+            toCudaWithHostHold(draft_prefill_output.sampler_output.all_probs, buffer_holder_) :
+            torch::Tensor();
     torch::Tensor draft_all_hidden_full =
         draft_prefill_output.model_output.all_hidden_states.defined() ?
             toCudaWithHostHold(draft_prefill_output.model_output.all_hidden_states, buffer_holder_) :

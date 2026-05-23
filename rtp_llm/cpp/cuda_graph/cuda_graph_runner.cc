@@ -519,7 +519,7 @@ bool CudaGraphRunner::tryGetRealGraphPrefillSeqLen(const PyModelInputs& inputs, 
     state.current_batch_size = inputs.attention_inputs.input_lengths.size(0);
     state.current_seq_len    = inferTotalTokensNoSync(inputs);
     if (state.current_seq_len <= 0) {
-        RTP_LLM_CHECK_WITH_INFO(false, "prefill cuda graph: cannot infer total tokens without CPU sync, fallback to normal run");
+        RTP_LLM_CHECK_WITH_INFO(false, "prefill cuda graph: cannot infer total tokens without CPU sync");
         return false;
     }
     if (capture_range_.empty()) {
@@ -542,26 +542,36 @@ bool CudaGraphRunner::tryGetRealGraphDecodeBatchSize(const PyModelInputs& inputs
     state.current_batch_size = cuda_graph_bs;
     RTP_LLM_LOG_DEBUG("canRun judge for batch size: %d", cuda_graph_bs);
     RTP_LLM_CHECK_WITH_INFO(!capture_range_.empty(),
-                            "decode cuda graph: capture_range_ is empty, cannot run "
-                            "(should not happen when enable_cuda_graph=true)");
+                            "decode cuda graph is enabled but capture_range_ is empty; refusing normal fallback");
     auto it = std::lower_bound(capture_range_.begin(), capture_range_.end(), state.current_batch_size);
-    // No captured graph for batch >= current (all captures smaller)
     RTP_LLM_CHECK_WITH_INFO(it != capture_range_.end(),
-                            "decode batch size %d exceeds max captured %d "
-                            "(extend decode_capture_batch_sizes or reduce batch size)",
+                            "decode cuda graph is enabled but batch size %d exceeds max captured %d; "
+                            "extend decode_capture_batch_sizes or reduce batch size",
                             state.current_batch_size,
                             capture_range_.back());
     state.current_real_graph_bs = *it;
     RTP_LLM_LOG_DEBUG(
         "batch size used in replay: %d (graph key %d)", state.current_batch_size, state.current_real_graph_bs);
 
-    if (inputs.attention_inputs.is_prefill) {
+    const bool target_verify_decode = is_target_verify_ || inputs.attention_inputs.is_target_verify;
+    if (target_verify_decode) {
         state.seq_len_sum = inferTotalTokensNoSync(inputs);
         if (state.seq_len_sum <= 0) {
-            RTP_LLM_LOG_WARNING(
-                "decode cuda graph: cannot infer prefill token count without CPU sync, fallback to normal run");
-            return false;
+            state.seq_len_sum = cuda_graph_bs * num_tokens_per_bs_;
         }
+        RTP_LLM_CHECK_WITH_INFO(state.seq_len_sum <= state.current_real_graph_bs * num_tokens_per_bs_,
+                                "target-verify decode cuda graph token count %d exceeds graph capacity %d "
+                                "(batch=%d, graph_batch=%d, num_tokens_per_bs=%d)",
+                                state.seq_len_sum,
+                                state.current_real_graph_bs * num_tokens_per_bs_,
+                                state.current_batch_size,
+                                state.current_real_graph_bs,
+                                num_tokens_per_bs_);
+    } else if (inputs.attention_inputs.is_prefill) {
+        state.seq_len_sum = inferTotalTokensNoSync(inputs);
+        RTP_LLM_CHECK_WITH_INFO(
+            state.seq_len_sum > 0,
+            "decode cuda graph is enabled but cannot infer prefill token count without CPU sync; refusing normal fallback");
     } else {
         state.seq_len_sum = cuda_graph_bs;
     }
@@ -575,16 +585,11 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state)
     // 1. prefix_lengths is not empty
     // 2. all values in input_lengths are the same
     // this is for 2.2.1
-    if (is_target_verify_) {
-        if (inputs.attention_inputs.is_target_verify) {
-            // Target-verify must also respect captured decode range.
-            // Otherwise we may replay an uncaptured graph key.
-            return tryGetRealGraphDecodeBatchSize(inputs, state);
-        }
+    if (!enable_cuda_graph_) {
         return false;
     }
-
-    if (!enable_cuda_graph_ || (inputs.attention_inputs.is_prefill && !is_prefill_cuda_graph_mode_)) {
+    const bool target_verify_decode = is_target_verify_ || inputs.attention_inputs.is_target_verify;
+    if (inputs.attention_inputs.is_prefill && !is_prefill_cuda_graph_mode_ && !target_verify_decode) {
         return false;
     }
 
@@ -619,9 +624,9 @@ void CudaGraphRunner::initKernelInternalMemory() {
         torch::zeros({int(max_bs_ + 1)}, torch::TensorOptions(torch::kInt32).device(torch::kCPU)).pin_memory();
     torch::Tensor cu_kv_seqlens =
         torch::zeros({int(max_bs_ + 1)}, torch::TensorOptions(torch::kInt32).device(torch::kCPU).pinned_memory(true));
-    auto input_lengths  = capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths;
-    input_lengths       = input_lengths.is_cuda() ? input_lengths.cpu() : input_lengths;
-    auto prefix_lengths = capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths;
+    auto input_lengths            = capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths;
+    input_lengths                 = input_lengths.is_cuda() ? input_lengths.cpu() : input_lengths;
+    auto       prefix_lengths     = capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths;
     const bool has_prefix_lengths = prefix_lengths.defined() && prefix_lengths.numel() > 0;
     prefix_lengths = has_prefix_lengths && prefix_lengths.is_cuda() ? prefix_lengths.cpu() : prefix_lengths;
 
@@ -786,13 +791,12 @@ void CudaGraphRunner::initCapture() {
 
         PyModelInputs inputs;
         // input_ids [tokens_nums] = [batch_size * num_tokens_per_bs]
-        inputs.input_ids     = torch::zeros({max_num_token_}, options_cuda_int32_);
+        inputs.input_ids = torch::zeros({max_num_token_}, options_cuda_int32_);
         // DSv4 MTP draft consumes the target's pre-hc residual ([T, hc*dim])
         // as input_hiddens; for everyone else hc_mult_ == 1 so this matches
         // the post-reduce hidden size. The output tensor below stays at
         // hidden_size_ (post-reduce) regardless.
-        inputs.input_hiddens =
-            torch::zeros({max_num_token_, hidden_size_ * hc_mult_}, options_cuda_float_);
+        inputs.input_hiddens = torch::zeros({max_num_token_, hidden_size_ * hc_mult_}, options_cuda_float_);
         // Setup attention inputs using the extracted function
         initCaptureAttentionInputs(inputs, max_bs_, num_tokens_per_bs_);
 
@@ -910,6 +914,11 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
                 outputs             = py_outputs_obj.cast<PyModelOutputs>();
             } catch (const py::error_already_set& e) {
                 RTP_LLM_LOG_ERROR("Capture forward failed for %s %d: %s", key_type, key, e.what());
+                try {
+                    graph.capture_end();
+                } catch (...) {
+                    RTP_LLM_LOG_WARNING("capture_end() also failed for %s %d during cleanup", key_type, key);
+                }
                 throw;
             }
             graph_instances_[key].mem_hold_.decoder_layer_hidden_states_.copy_(outputs.hidden_states);
@@ -944,21 +953,19 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     // Common slice operations for input_ids and padding_offset
     inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1;
     inputs.attention_inputs.is_target_verify = is_target_verify_;
-    // Draft prefill cudagraph mode (num_tokens_per_bs_ > 1 and
-    // is_prefill_cuda_graph_mode_) must keep input_ids / input_hiddens at
-    // full capacity (max_bs_ * num_tokens_per_bs_).  The downstream Python
-    // dispatch routes through ``forward_decode`` + MTP's
-    // ``_prepare_decode_hidden`` which uses ``T = B*q_len`` — any per-
-    // capture slice to ``seq_len < B*q_len`` produces a shape mismatch in
-    // the ``view(T, hc, dim)`` reshape.  Embedding prefill (num_tokens_per_bs_
-    // == max_seq_len_) still slices to seq_len because it goes through
-    // ``forward_prefill`` which expects flat ``T = input_ids.numel()``.
-    const bool draft_prefill_graph_mode =
-        is_prefill_cuda_graph_mode_ && num_tokens_per_bs_ != max_seq_len_;
-    const int token_slice_len =
-        draft_prefill_graph_mode ? max_bs_ * num_tokens_per_bs_ : seq_len_or_tokens;
-    inputs.input_ids     = capture_mem_hold_.py_model_inputs_.input_ids.slice(0, 0, token_slice_len);
-    inputs.input_hiddens = capture_mem_hold_.py_model_inputs_.input_hiddens.slice(0, 0, token_slice_len);
+    // Draft prefill cudagraph has two shapes:
+    // * DSv4 MTP (hc_mult_ > 1) consumes pre-HC hidden as [B*q_len, hc*dim]
+    //   and routes through decode-style hidden preparation, so capture keeps
+    //   full capacity.
+    // * GLM5 GenericMoeMTP (hc_mult_ == 1) is flat token prefill; FlashInfer
+    //   ragged prefill requires q.shape[0] == qo_indptr[-1] == seq_len.
+    // Embedding prefill (num_tokens_per_bs_ == max_seq_len_) also slices to
+    // seq_len because it goes through forward_prefill.
+    const bool draft_prefill_graph_mode    = is_prefill_cuda_graph_mode_ && num_tokens_per_bs_ != max_seq_len_;
+    const bool draft_prefill_full_capacity = draft_prefill_graph_mode && hc_mult_ > 1;
+    const int  token_slice_len = draft_prefill_full_capacity ? max_bs_ * num_tokens_per_bs_ : seq_len_or_tokens;
+    inputs.input_ids           = capture_mem_hold_.py_model_inputs_.input_ids.slice(0, 0, token_slice_len);
+    inputs.input_hiddens       = capture_mem_hold_.py_model_inputs_.input_hiddens.slice(0, 0, token_slice_len);
     inputs.attention_inputs.input_lengths =
         capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths.slice(0, 0, batch_size);
     inputs.attention_inputs.padding_offset =

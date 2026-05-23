@@ -9,6 +9,9 @@ from rtp_llm.models_py.modules.base.common.norm import (
     BaseNorm,
     BaseResNorm,
 )
+from rtp_llm.models_py.triton_kernels.common.fused_qk_rmsnorm import (
+    fused_qk_rmsnorm_triton,
+)
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 
@@ -37,7 +40,7 @@ class RMSResNorm(BaseResNorm):
         rtp_llm_ops.fused_add_rmsnorm(
             hidden_states, residual, self.weight.data, self.variance_epsilon, stream_id
         )
-        return hidden_states
+        return hidden_states, residual
 
 
 class QKRMSNorm(nn.Module):
@@ -100,14 +103,32 @@ class FusedQKRMSNorm(nn.Module):
         self.kv_size = self.kv_head_num * self.size_per_head
         self.enable_pdl = enable_pdl
 
+        self.combined_weight = torch.cat(
+            [
+                q_weight.unsqueeze(0).expand(head_num, -1),
+                k_weight.unsqueeze(0).expand(kv_head_num, -1),
+            ],
+            dim=0,
+        ).contiguous()
+
     def forward(self, hidden_states: torch.Tensor):
         assert hidden_states.dim() == 2
         m, n = hidden_states.shape
-        qkv = hidden_states.reshape(m, (self.head_num + self.kv_head_num * 2), self.size_per_head)
-        q = qkv[:, :self.head_num, :]
-        k = qkv[:, self.head_num:self.head_num + self.kv_head_num, :]
-        flashinfer.norm.rmsnorm(q, self.q_weight, eps=self.eps, out=q, enable_pdl=self.enable_pdl)
-        flashinfer.norm.rmsnorm(k, self.k_weight, eps=self.eps, out=k, enable_pdl=self.enable_pdl)
+        qkv = hidden_states.reshape(
+            m, (self.head_num + self.kv_head_num * 2), self.size_per_head
+        )
+        # The Triton ``fused_qk_rmsnorm_triton`` kernel diverges by 1 fp32
+        # ULP per element from flashinfer.norm.rmsnorm (different reduce
+        # tree + sqrt vs rsqrt rounding) and that 1 ULP per layer cascades
+        # across all decoder layers, eventually shifting Qwen3.5 sampler
+        # output. Use baseline's flashinfer path (separate Q + K) to keep
+        # bit-alignment; the launch-overhead delta is sub-microsecond.
+        import flashinfer.norm as _fln
+
+        q = qkv[:, : self.head_num, :]
+        k = qkv[:, self.head_num : self.head_num + self.kv_head_num, :]
+        _fln.rmsnorm(q, self.q_weight, eps=self.eps, out=q, enable_pdl=self.enable_pdl)
+        _fln.rmsnorm(k, self.k_weight, eps=self.eps, out=k, enable_pdl=self.enable_pdl)
         return qkv.reshape(m, n)
 
 

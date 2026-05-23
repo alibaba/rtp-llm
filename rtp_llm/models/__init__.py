@@ -6,7 +6,7 @@ from .chat_glm_v2 import ChatGlmV2
 from .chat_glm_v3 import ChatGlmV3
 from .chat_glm_v4 import ChatGlmV4
 from .cosyvoice_qwen import CosyVoiceQwen
-from .deepseek_v2 import DeepSeekV2, DeepSeekV3Mtp
+from .deepseek_v2 import DeepSeekV2, DeepSeekV3Mtp, Glm5Mtp
 from .deepseek_v4 import DeepSeekV4, DeepSeekV4Mtp
 from .deepseek_vl2.deepseek_vl2 import DeepSeekVLV2
 from .falcon import Falcon

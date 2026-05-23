@@ -40,10 +40,10 @@ private:
     void refreshBuffer(int batch_size, int token_num, bool is_prefill);
 
     // CP Plan buffers
-    torch::Tensor cp_buf_h_i64_;   // pinned HOST buffer for int64 CP tensors
-    torch::Tensor cp_buf_d_i64_;   // DEVICE buffer for int64 CP tensors
-    torch::Tensor cp_buf_h_i32_2_; // pinned HOST buffer for int32 CP tensors (cu_kv_seqlens)
-    torch::Tensor cp_buf_d_i32_2_; // DEVICE buffer for int32 CP tensors
+    torch::Tensor cp_buf_h_i64_;    // pinned HOST buffer for int64 CP tensors
+    torch::Tensor cp_buf_d_i64_;    // DEVICE buffer for int64 CP tensors
+    torch::Tensor cp_buf_h_i32_2_;  // pinned HOST buffer for int32 CP tensors (cu_kv_seqlens)
+    torch::Tensor cp_buf_d_i32_2_;  // DEVICE buffer for int32 CP tensors
 
     size_t cp_max_i64_elements_  = 0;
     size_t cp_max_i32_elements_  = 0;
@@ -72,18 +72,21 @@ public:
     torch::Tensor ks;
     torch::Tensor ke;
 
+    // total KV tokens for prefill ragged buffer allocation
+    int64_t prefill_total_kv_tokens = 0;
+
     // schedule_metadata for deep_gemm
     torch::Tensor schedule_metadata;
 
     // CP Plan: compute CP indices on CPU, single cudaMemcpyAsync to device
-    void fillCpPlanParams(const torch::Tensor&         padding_mask,
-                          const torch::Tensor&         kv_restore_indices,
-                          const std::vector<int64_t>&  q0_idx,
-                          const std::vector<int64_t>&  q1_idx,
-                          int                          cp_rank,
-                          int                          local_tokens,
-                          const torch::Tensor&         actual_input_lengths,
-                          const torch::Tensor&         prefix_lengths);
+    void fillCpPlanParams(const torch::Tensor&        padding_mask,
+                          const torch::Tensor&        kv_restore_indices,
+                          const std::vector<int64_t>& q0_idx,
+                          const std::vector<int64_t>& q1_idx,
+                          int                         cp_rank,
+                          int                         local_tokens,
+                          const torch::Tensor&        actual_input_lengths,
+                          const torch::Tensor&        prefix_lengths);
 
     // CP Plan outputs (device tensors)
     torch::Tensor cp_kv_restore_unpad_indices;  // [n_valid], int64

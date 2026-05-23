@@ -47,7 +47,18 @@ class CudaFp8DeepGEMMLinear(LinearBase):
 
         # Check quantization method - handle all other FP8 methods
         quant_method = quant_config.get_method()
-        return quant_method == "FP8_PER_BLOCK"
+        if quant_method == "FP8_PER_BLOCK":
+            return True
+        # MODELOPT_FP4 hybrid: attention/non-MoE atomic weights are FP8 per-block.
+        if (
+            quant_method == "modelopt_fp4"
+            and getattr(quant_config, "hybrid_attn_quant_method", None)
+            == "FP8_PER_BLOCK"
+            and weight_scale_2 is None
+            and input_scale is None
+        ):
+            return True
+        return False
 
     @torch.inference_mode()
     def __init__(
@@ -168,7 +179,22 @@ class CudaFp8DeepGEMMLinear(LinearBase):
             f"successfully cached {self.cached_scales_max_len} scales, shape: {self.cached_scales.shape}"
         )
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        input: torch.Tensor,
+        input_scales: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Run fp8 DeepGEMM.
+
+        Args:
+            input: bfloat16 (will be quantized inside) OR float8_e4m3fn
+                   (already quantized by an upstream fused kernel).
+            input_scales: required when input is float8_e4m3fn AND the upstream
+                          kernel produced a real per-token-group scale (UE8M0
+                          packed, column-major TMA-aligned). When omitted with
+                          fp8 input, falls back to the legacy "scale=1.0"
+                          behaviour (kept for back-compat).
+        """
         # Check input dtype - only accept bfloat16
         if input.dtype != torch.bfloat16 and input.dtype != torch.float8_e4m3fn:
             error_msg = f"Input tensor dtype must be bfloat16 or float8_e4m3fn, got {input.dtype}"
@@ -187,12 +213,25 @@ class CudaFp8DeepGEMMLinear(LinearBase):
             raise ValueError(error_msg)
 
         if input.dtype == torch.float8_e4m3fn:
-            if not self.scale_ue8m0:
-                error_msg = "Scale UE8M0 is required for float8_e4m3fn input"
+            input_fp8 = input
+            if input_scales is not None:
+                expected_dtype = torch.int32 if self.scale_ue8m0 else torch.float32
+                if input_scales.dtype != expected_dtype:
+                    raise ValueError(
+                        f"input_scales.dtype={input_scales.dtype} but "
+                        f"scale_ue8m0={self.scale_ue8m0} expects {expected_dtype}"
+                    )
+            elif not self.scale_ue8m0:
+                # Legacy "fp8 in, no scale" path is only defined for UE8M0
+                # builds (where the cached_scales fill_(0x7F7F7F7F) means
+                # "scale = 1.0"). For fp32 builds there is no equivalent.
+                error_msg = (
+                    "fp8 input without input_scales requires UE8M0 build "
+                    "(int32 cached scales)"
+                )
                 logger.error(error_msg)
                 raise ValueError(error_msg)
-            input_fp8 = input
-            if self.cached_scales is not None and self.cached_scales_max_len >= M:
+            elif self.cached_scales is not None and self.cached_scales_max_len >= M:
                 aligned_M = (M + 3) // 4 * 4  # ceil_align(M, 4)
                 K_scaled = self.cached_scales.shape[1]  # K // 128 维度
                 input_scales = self.cached_scales[:M, :].as_strided(

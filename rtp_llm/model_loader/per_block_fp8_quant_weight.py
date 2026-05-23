@@ -776,13 +776,14 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         device: str,
         load_config: LoadConfig,
     ):
-        # need reshape for kernel weight
-        processed_res = super()._postprocess(tensor, device, load_config)
-        kernel_weight = processed_res[self.kernel.name]
         from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
             is_deep_gemm_e8m0_used,
         )
         from rtp_llm.models_py.kernels.cuda.fp8_kernel import requant_weight_ue8m0
+
+        # need reshape for kernel weight
+        processed_res = super()._postprocess(tensor, device, load_config)
+        kernel_weight = processed_res[self.kernel.name]
 
         # e8m0 not reshape, weight scale need be non contiguous
         # TODO: rm reshape all time
@@ -830,7 +831,15 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
         ):
             return False
         name = src_weight_info.name
-        return name in cls.w8a8_weight_list and name not in [W.mla_kc, W.mla_vc]
+        if name not in cls.w8a8_weight_list or name in [W.mla_kc, W.mla_vc]:
+            return False
+        # skip_moe: leave MoE w1/w2 in compute dtype (BF16) so a downstream MoE
+        # path (e.g. mega_moe) can do its own quantization.
+        if getattr(quant_config, "skip_moe", False) and isinstance(
+            src_weight_info, MoeAtomicWeight
+        ):
+            return False
+        return True
 
     def __init__(
         self,

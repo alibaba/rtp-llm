@@ -62,11 +62,24 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
     ):
         super().__init__(config, quant_config)
 
-        # Determine use_fp8_dispatch based on quant_config
+        # Determine the pre-quant dispatch mode based on quant_config.
+        # FP8 path: dispatch sends float8_e4m3fn tokens + fp32/ue8m0 scales.
+        # NVFP4 path: dispatch sends packed uint8 tokens + fp8 scales (NVFP4).
+        # Either path returns a tuple from low_latency_dispatch; the BF16 path
+        # returns a single tensor and is selected by leaving both flags False.
+        # NB: BF16 dispatch templates are not compiled for every hidden_size
+        # (e.g. accl-ep ll_dispatch_opt1_hidden6144 only has fp8/nvfp4 specs),
+        # so make sure to pick one of these flags whenever the MoE weights are
+        # quantized — leaving both False on hidden=6144 gives "dispatch_func
+        # is NULL: missing template instantiation".
         use_fp8_dispatch = (
             quant_config.is_quantized
             and quant_config.quant_dtype == torch.float8_e4m3fn
         )
+        use_nvfp4_dispatch = quant_config.is_quantized and quant_config.is_per_group_fp4
+        assert not (
+            use_fp8_dispatch and use_nvfp4_dispatch
+        ), "use_fp8_dispatch and use_nvfp4_dispatch cannot both be True"
 
         # DeepEpLowLatency-specific initialization
         self._num_experts = config.expert_num
@@ -86,6 +99,7 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         self._num_topk = wrapper.num_topk
         self._num_max_dispatch_tokens_per_rank = wrapper.ll_num_max_token_per_rank
         self._use_fp8_dispatch = use_fp8_dispatch
+        self._use_nvfp4_dispatch = use_nvfp4_dispatch
         self._zero_copy = False
         self._async_finish = False
         self._return_recv_hook = False
@@ -150,7 +164,7 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         expert_x, expert_num_tokens, self._handle, _, _ = (
             self._buffer.low_latency_dispatch(**dispatch_args)
         )
-        if self._use_fp8_dispatch:
+        if self._use_fp8_dispatch or self._use_nvfp4_dispatch:
             assert isinstance(expert_x, tuple), "expert_x should be a tuple"
             expert_x, expert_x_scale = expert_x[0], expert_x[1]
         else:
@@ -202,8 +216,10 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
             assert self.quant_config.is_block_quantized or (
                 self.quant_config.is_per_act_token and self._use_accl_ep
             ), "DeepEP Low-Latency only supports fp8 block quantization or per_act_token quantization with ACCL-EP"
-        elif self.quant_config.is_per_group_fp4:
-            pass
+        elif self._use_nvfp4_dispatch:
+            assert (
+                self.quant_config.is_per_group_fp4
+            ), "use_nvfp4_dispatch requires per_group_fp4 quant_config"
         else:
             assert not self.quant_config.is_quantized
         # Check handle
@@ -224,8 +240,20 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
             "async_finish": self._async_finish,
             "return_recv_hook": self._return_recv_hook,
         }
-        # Set quantization config for DeepEP low latency dispatch
-        if self.quant_config.is_block_quantized and is_deep_gemm_e8m0_used():
+        # Set quantization config for DeepEP low latency dispatch.
+        # NVFP4 must be checked first because per_group_fp4 also has
+        # block_shape set (=[16,16]), so is_block_quantized is True for it
+        # and would otherwise route to the FP8 block-wise branch.
+        if self._use_nvfp4_dispatch:
+            # NVFP4 dispatch: send packed uint8 tokens + fp8 NVFP4 scales.
+            # CutedslFp4Executor's `else` branch consumes the (uint8, scales)
+            # tuple directly, skipping its on-the-fly BF16->FP4 quantize.
+            # Note: this requires accl-ep's internode_ll_dispatch to have
+            # NVFP4 template instantiations compiled for the model's
+            # hidden_size; otherwise the runtime aborts with
+            # "dispatch_func is NULL: missing template instantiation".
+            dispatch_args.update({"use_nvfp4": True})
+        elif self.quant_config.is_block_quantized and is_deep_gemm_e8m0_used():
             dispatch_args.update({"round_scale": True, "use_ue8m0": True})
         elif self.quant_config.is_per_act_token:
             dispatch_args.update({"pertoken_quant": True})
