@@ -407,8 +407,6 @@ class GenerateConfig(BaseModel):
                 raise ValueError(
                     "grammar-constrained decoding does not support beam search or num_return_sequences > 1"
                 )
-            if has_grammar_constraint:
-                self.force_disable_sp_run = True
             self._normalize_grammar_fields()
         except Exception as e:
             raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, str(e))

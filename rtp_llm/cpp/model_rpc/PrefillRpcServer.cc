@@ -118,7 +118,7 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
         input->generate_config->gen_timeline = true;
     }
     input->generate_config->pd_separation = true;
-    if (engine_->isMTPEagle() && !LogitsProcessorFactory::hasGrammarConstraint(*input->generate_config)) {
+    if (engine_->isMTPEagle()) {
         input->generate_config->force_disable_sp_run = false;
     } else {
         input->generate_config->force_disable_sp_run = true;

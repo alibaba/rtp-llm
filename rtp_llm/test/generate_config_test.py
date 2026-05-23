@@ -119,7 +119,7 @@ class GenerateConfigTest(TestCase):
         config = GenerateConfig(json_format=True)
         config.validate()
         self.assertEqual(config.json_schema, '{"type":"object"}')
-        self.assertTrue(config.force_disable_sp_run)
+        self.assertFalse(config.force_disable_sp_run)
 
         with self.assertRaisesRegex(Exception, "beam search"):
             GenerateConfig(num_beams=2, regex="[0-9]+").validate()
