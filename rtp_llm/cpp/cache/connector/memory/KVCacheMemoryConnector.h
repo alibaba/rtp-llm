@@ -191,9 +191,11 @@ private:
     void zeroNullSlots(const MemoryBlockCache::CacheItem& item, std::vector<char>& staging) const;
 
     // Init handshake: master broadcasts DISK_SPILL_HELLO carrying schema_hash
-    // and capability_mask; waits for all workers; init fails on mismatch or
-    // timeout. README §"Init 一致性和 capability handshake".
+    // and capability_mask, then waits for workers. Returns false on mismatch or
+    // timeout so the caller can decide whether to fail fast or continue degraded.
     bool runDiskSpillHandshake();
+    void disableDiskSpillAfterHandshakeFailure();
+    bool validateDiskRequestSchema(const MemoryOperationRequestPB& request, const char* op) const;
     bool handleDiskSpillHello(const MemoryOperationRequestPB& request, MemoryOperationResponsePB& response);
     bool handleSpillWriteStatus(const MemoryOperationRequestPB& request, MemoryOperationResponsePB& response);
 

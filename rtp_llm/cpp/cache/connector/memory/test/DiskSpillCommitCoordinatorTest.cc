@@ -280,6 +280,33 @@ TEST_F(DiskSpillCommitCoordinatorTest, BufferedPwriteDoesNotConsumeAlignedStagin
     c.stop();
 }
 
+TEST_F(DiskSpillCommitCoordinatorTest, StoppedIoWorkerCallbackDoesNotDeadlock) {
+    auto cache   = makeCache();
+    auto workers = cache->ioWorkers();
+    ASSERT_EQ(workers.size(), 1u);
+    ASSERT_NE(workers[0], nullptr);
+    workers[0]->stop();
+
+    auto slot = cache->reserve(/*key=*/107, 4096, true);
+    ASSERT_TRUE(slot.has_value());
+
+    DiskSpillCommitCoordinator c(cache, {}, /*worker_count=*/0, nullptr, nullptr, nullptr);
+    ASSERT_TRUE(c.start());
+
+    std::promise<SpillStageState> done;
+    auto                          fut = done.get_future();
+    std::vector<char>             data(4096, 'S');
+    const auto id =
+        c.submitSpill(*slot, NULL_BLOCK_IDX, data, [&](SpillJobId, SpillStageState s) { done.set_value(s); });
+    EXPECT_NE(id, 0u);
+
+    const auto state = fut.wait_for(std::chrono::seconds(2));
+    ASSERT_EQ(state, std::future_status::ready);
+    EXPECT_NE(fut.get(), SpillStageState::COMMITTED);
+    EXPECT_FALSE(cache->contains(107));
+    c.stop();
+}
+
 TEST_F(DiskSpillCommitCoordinatorTest, NotifyWorkerStatusPushPath) {
     auto cache = makeCache();
     auto slot  = cache->reserve(/*key=*/106, 4096, true);

@@ -128,15 +128,17 @@ bool KVCacheMemoryConnector::init() {
 
     broadcast_manager_ = std::make_shared<BroadcastManager>(tp_addrs_);
     RTP_LLM_CHECK_WITH_INFO(broadcast_manager_->init(), "init failed, broadcast manager init failed");
-    std::vector<std::string> disk_tp_addrs = tp_addrs_;
-    if (isMaster() && tp_size_ > 1 && disk_tp_addrs.size() == static_cast<size_t>(tp_size_)
-        && tp_rank_ >= 0 && static_cast<size_t>(tp_rank_) < disk_tp_addrs.size()) {
-        disk_tp_addrs.erase(disk_tp_addrs.begin() + tp_rank_);
-    }
-    if (!disk_tp_addrs.empty()) {
-        disk_broadcast_manager_ = std::make_shared<BroadcastManager>(disk_tp_addrs);
-        RTP_LLM_CHECK_WITH_INFO(disk_broadcast_manager_->init(),
-                                "init failed, disk broadcast manager init failed");
+    if (isMaster()) {
+        std::vector<std::string> disk_tp_addrs = tp_addrs_;
+        if (tp_size_ > 1 && disk_tp_addrs.size() == static_cast<size_t>(tp_size_)
+            && tp_rank_ >= 0 && static_cast<size_t>(tp_rank_) < disk_tp_addrs.size()) {
+            disk_tp_addrs.erase(disk_tp_addrs.begin() + tp_rank_);
+        }
+        if (!disk_tp_addrs.empty()) {
+            disk_broadcast_manager_ = std::make_shared<BroadcastManager>(disk_tp_addrs);
+            RTP_LLM_CHECK_WITH_INFO(disk_broadcast_manager_->init(),
+                                    "init failed, disk broadcast manager init failed");
+        }
     }
 
     initDiskSpillCache();
@@ -157,7 +159,11 @@ bool KVCacheMemoryConnector::postInit() {
         || !disk_broadcast_manager_ || disk_broadcast_manager_->workerNum() == 0) {
         return true;
     }
-    return runDiskSpillHandshake();
+    if (runDiskSpillHandshake()) {
+        return true;
+    }
+    disableDiskSpillAfterHandshakeFailure();
+    return false;
 }
 
 void KVCacheMemoryConnector::checkLayerBlockStrideBytes() const {
@@ -1393,6 +1399,9 @@ bool KVCacheMemoryConnector::spillMemoryToDisk(const MemoryOperationRequestPB& r
     if (!disk_spill_cache_ || !block_pool_) {
         return false;
     }
+    if (!validateDiskRequestSchema(request, "spill_worker")) {
+        return false;
+    }
     for (int i = 0; i < request.copy_items_size(); ++i) {
         const auto& item      = request.copy_items(i);
         const auto  mem_block = static_cast<BlockIdxType>(item.mem_block());
@@ -1425,6 +1434,9 @@ bool KVCacheMemoryConnector::spillMemoryToDisk(const MemoryOperationRequestPB& r
 bool KVCacheMemoryConnector::deleteDiskSlots(const MemoryOperationRequestPB& request) {
     if (!disk_spill_cache_) {
         return true;
+    }
+    if (!validateDiskRequestSchema(request, "delete")) {
+        return false;
     }
     for (int i = 0; i < request.copy_items_size(); ++i) {
         const auto&                   item = request.copy_items(i);
@@ -1851,6 +1863,7 @@ bool KVCacheMemoryConnector::spillMemoryItemToDisk(const MemoryBlockCache::Cache
     mem_req.set_memory_op_protocol_version(1);
     mem_req.set_op_type(MemoryOperationRequestPB::SPILL_MEMORY_TO_DISK);
     mem_req.set_copy_direction(MemoryOperationRequestPB::D2H);
+    mem_req.set_schema_hash(schema_hash_);
     auto* pb_item = mem_req.add_copy_items();
     pb_item->set_cache_key(item.cache_key);
     pb_item->set_mem_block(item.block_index);
@@ -1918,6 +1931,7 @@ bool KVCacheMemoryConnector::sendDeleteDiskSlot(const DiskSpillBlockCache::DiskS
     MemoryOperationRequestPB mem_req;
     mem_req.set_memory_op_protocol_version(1);
     mem_req.set_op_type(MemoryOperationRequestPB::DELETE_DISK_SLOT);
+    mem_req.set_schema_hash(schema_hash_);
     auto* item = mem_req.add_copy_items();
     item->set_cache_key(slot.cache_key);
     item->set_source_type(MemoryOperationRequestPB::DISK_SLOT);
@@ -2375,6 +2389,34 @@ bool KVCacheMemoryConnector::runDiskSpillHandshake() {
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
+}
+
+void KVCacheMemoryConnector::disableDiskSpillAfterHandshakeFailure() {
+    RTP_LLM_LOG_WARNING("disk spill handshake failed; disable disk spill and continue with memory-only cache");
+    if (commit_coordinator_) {
+        commit_coordinator_->stop();
+        commit_coordinator_.reset();
+    }
+    disk_broadcast_manager_.reset();
+    if (disk_spill_cache_) {
+        disk_spill_cache_->shutdown();
+        disk_spill_cache_.reset();
+    }
+}
+
+bool KVCacheMemoryConnector::validateDiskRequestSchema(const MemoryOperationRequestPB& request, const char* op) const {
+    if (request.schema_hash().empty()) {
+        RTP_LLM_LOG_WARNING("disk spill %s rejected: missing schema_hash", op);
+        return false;
+    }
+    if (request.schema_hash() != schema_hash_) {
+        RTP_LLM_LOG_WARNING("disk spill %s rejected: schema_hash mismatch req='%s' local='%s'",
+                            op,
+                            request.schema_hash().c_str(),
+                            schema_hash_.c_str());
+        return false;
+    }
+    return true;
 }
 
 bool KVCacheMemoryConnector::handleDiskSpillHello(const MemoryOperationRequestPB& request,

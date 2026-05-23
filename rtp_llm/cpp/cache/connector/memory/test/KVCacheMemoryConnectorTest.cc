@@ -699,6 +699,34 @@ TEST_F(KVCacheMemoryConnectorTest, init_ReturnTrue_WithWorkerAddrs) {
     EXPECT_EQ(conn->broadcast_manager_->workerNum(), server_addrs_.size());
 }
 
+TEST_F(KVCacheMemoryConnectorTest, init_DiskBroadcastManagerOnlyOnMasterAndExcludesSelf) {
+    auto master = std::make_shared<KVCacheMemoryConnector>(
+        cache_config_, kv_cache_config_, allocator_, server_addrs_, nullptr, /*tp_rank=*/0, /*tp_size=*/4);
+    ASSERT_TRUE(master->init());
+    ASSERT_NE(master->disk_broadcast_manager_, nullptr);
+    EXPECT_EQ(master->disk_broadcast_manager_->workerNum(), server_addrs_.size() - 1);
+
+    auto worker = std::make_shared<KVCacheMemoryConnector>(
+        cache_config_, kv_cache_config_, allocator_, server_addrs_, nullptr, /*tp_rank=*/1, /*tp_size=*/4);
+    ASSERT_TRUE(worker->init());
+    EXPECT_EQ(worker->disk_broadcast_manager_, nullptr);
+}
+
+TEST_F(KVCacheMemoryConnectorTest, disableDiskSpillAfterHandshakeFailureDisablesDiskTier) {
+    auto conn = createDiskEnabledConnector(/*per_layer_stride_bytes=*/256 * 1024,
+                                           /*memory_size_mb=*/3,
+                                           /*disk_capacity_mb=*/4);
+    ASSERT_NE(conn->commit_coordinator_, nullptr);
+    ASSERT_NE(conn->disk_broadcast_manager_, nullptr);
+    ASSERT_NE(conn->disk_spill_cache_, nullptr);
+
+    conn->disableDiskSpillAfterHandshakeFailure();
+
+    EXPECT_EQ(conn->commit_coordinator_, nullptr);
+    EXPECT_EQ(conn->disk_broadcast_manager_, nullptr);
+    EXPECT_EQ(conn->disk_spill_cache_, nullptr);
+}
+
 TEST_F(KVCacheMemoryConnectorTest, initBlockPool_Throw_WhenMemoryCacheSizeMbZero) {
     auto kv_cfg                         = kv_cache_config_;
     kv_cfg.memory_cache_size_mb         = 0;

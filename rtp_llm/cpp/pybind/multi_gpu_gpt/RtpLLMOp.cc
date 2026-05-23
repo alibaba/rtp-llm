@@ -337,8 +337,11 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
     auto engine = model_rpc_service_ ? model_rpc_service_->getEngine() : nullptr;
     auto cache_manager = engine ? engine->getCacheManager() : nullptr;
     if (cache_manager) {
-        RTP_LLM_CHECK_WITH_INFO(cache_manager->postInitConnectorCoordinator(),
-                                "kv cache connector post init failed after grpc server start");
+        if (!cache_manager->postInitConnectorCoordinator()) {
+            RTP_LLM_LOG_WARNING(
+                "kv cache connector post init failed after grpc server start; continuing without cross-rank disk spill "
+                "verification");
+        }
     }
     is_server_ready_ = true;
     grpc_server_->Wait();

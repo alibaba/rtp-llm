@@ -106,6 +106,12 @@ public:
     bool drainForTest(int64_t timeout_ms);
 
 private:
+    struct LocalPwriteTask {
+        SpillJobId                    id{0};
+        DiskSpillBlockCache::DiskItem slot{};
+        std::shared_ptr<std::vector<char>> staging_data;
+    };
+
     struct SpillJob {
         SpillJobId                       id{0};
         DiskSpillBlockCache::DiskItem    slot{};
@@ -131,7 +137,7 @@ private:
     void terminate(SpillJob& job, SpillStageState final_state, std::unique_lock<std::mutex>& lock);
     bool allWorkersDone(const SpillJob& job) const;
     bool anyWorkerFailed(const SpillJob& job) const;
-    bool tryDispatchLocalPwrite(SpillJob& job);
+    bool dispatchLocalPwrite(const LocalPwriteTask& task);
     bool shouldEnterPwriteInflight(const SpillJob& job,
                                    std::chrono::steady_clock::time_point now) const;
 

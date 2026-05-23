@@ -191,28 +191,24 @@ void DiskSpillCommitCoordinator::mainLoop() {
 }
 
 void DiskSpillCommitCoordinator::tickLocked(std::unique_lock<std::mutex>& lock) {
-    struct BroadcastTask {
-        SpillJobId                    id{0};
-        DiskSpillBlockCache::DiskItem slot{};
-        BlockIdxType                  source_mem_block{NULL_BLOCK_IDX};
+    struct StageTask {
+        LocalPwriteTask pwrite;
+        BlockIdxType    source_mem_block{NULL_BLOCK_IDX};
+        bool            broadcast{false};
     };
 
     const auto now = std::chrono::steady_clock::now();
     std::vector<SpillJobId> terminate_ids;
-    std::vector<BroadcastTask> broadcast_tasks;
+    std::vector<StageTask> stage_tasks;
     for (auto& [id, job] : jobs_) {
         // RESERVED -> STAGING: dispatch local pwrite + broadcast spill
         if (job.state == SpillStageState::RESERVED) {
-            if (!tryDispatchLocalPwrite(job)) {
-                job.state = SpillStageState::ABORTING;
-                terminate_ids.push_back(id);
-                continue;
-            }
+            stage_tasks.push_back(
+                StageTask{LocalPwriteTask{id, job.slot, job.staging_data}, job.source_mem_block, spill_fn_ != nullptr});
             job.state           = SpillStageState::STAGING;
             job.staging_done_at = now;
             if (spill_fn_) {
                 job.spill_broadcast_sent = true;
-                broadcast_tasks.push_back(BroadcastTask{id, job.slot, job.source_mem_block});
             } else {
                 // no worker fanout (e.g. TP=1) — treat as instantly acked
                 for (auto& [rank, status] : job.worker_status) {
@@ -265,31 +261,40 @@ void DiskSpillCommitCoordinator::tickLocked(std::unique_lock<std::mutex>& lock) 
         }
     }
 
-    if (!broadcast_tasks.empty()) {
+    if (!stage_tasks.empty()) {
         lock.unlock();
-        std::vector<SpillJobId> failed_broadcasts;
-        failed_broadcasts.reserve(broadcast_tasks.size());
-        for (const auto& task : broadcast_tasks) {
-            bool ok = false;
-            try {
-                ok = spill_fn_(task.id, task.slot, task.source_mem_block);
-            } catch (const std::exception& e) {
-                RTP_LLM_LOG_WARNING("disk spill broadcast callback threw: %s", e.what());
-            } catch (...) {
-                RTP_LLM_LOG_WARNING("disk spill broadcast callback threw unknown");
+        std::vector<SpillJobId> failed_stage_tasks;
+        failed_stage_tasks.reserve(stage_tasks.size());
+        for (const auto& task : stage_tasks) {
+            if (!dispatchLocalPwrite(task.pwrite)) {
+                failed_stage_tasks.push_back(task.pwrite.id);
+                continue;
             }
-            if (!ok) {
-                failed_broadcasts.push_back(task.id);
+            if (task.broadcast) {
+                bool ok = false;
+                try {
+                    ok = spill_fn_(task.pwrite.id, task.pwrite.slot, task.source_mem_block);
+                } catch (const std::exception& e) {
+                    RTP_LLM_LOG_WARNING("disk spill broadcast callback threw: %s", e.what());
+                } catch (...) {
+                    RTP_LLM_LOG_WARNING("disk spill broadcast callback threw unknown");
+                }
+                if (!ok) {
+                    failed_stage_tasks.push_back(task.pwrite.id);
+                }
             }
         }
         lock.lock();
-        for (auto id : failed_broadcasts) {
+        for (auto id : failed_stage_tasks) {
             auto it = jobs_.find(id);
             if (it == jobs_.end()) {
                 continue;
             }
-            it->second.state = SpillStageState::ABORTING;
-            terminate_ids.push_back(id);
+            if (it->second.state != SpillStageState::COMMITTED && it->second.state != SpillStageState::FREE
+                && it->second.state != SpillStageState::LEAKED) {
+                it->second.state = SpillStageState::ABORTING;
+                terminate_ids.push_back(id);
+            }
         }
     }
 
@@ -301,8 +306,6 @@ void DiskSpillCommitCoordinator::tickLocked(std::unique_lock<std::mutex>& lock) 
             continue;
         }
         auto& job = it->second;
-        std::unique_lock<std::mutex> dummy_lock(mutex_, std::adopt_lock);  // already locked
-        dummy_lock.release();
         if (job.state == SpillStageState::ABORTING) {
             cache_->abort(job.slot);
             if (delete_fn_) {
@@ -325,54 +328,54 @@ void DiskSpillCommitCoordinator::tickLocked(std::unique_lock<std::mutex>& lock) 
     }
 }
 
-bool DiskSpillCommitCoordinator::tryDispatchLocalPwrite(SpillJob& job) {
+bool DiskSpillCommitCoordinator::dispatchLocalPwrite(const LocalPwriteTask& task) {
     if (!cache_) {
         return false;
     }
     const auto fms = cache_->fileManagers();
-    if (job.slot.disk_id < 0 || static_cast<size_t>(job.slot.disk_id) >= fms.size()) {
+    if (task.slot.disk_id < 0 || static_cast<size_t>(task.slot.disk_id) >= fms.size()) {
         return false;
     }
-    const auto file_manager = fms[job.slot.disk_id];
+    const auto file_manager = fms[task.slot.disk_id];
     if (!file_manager) {
         return false;
     }
     const auto workers = cache_->ioWorkers();
-    if (static_cast<size_t>(job.slot.disk_id) >= workers.size() || !workers[job.slot.disk_id]) {
+    if (static_cast<size_t>(task.slot.disk_id) >= workers.size() || !workers[task.slot.disk_id]) {
         return false;
     }
-    auto staging = job.staging_data;
-    if (!staging || staging->size() < job.slot.block_size) {
+    auto staging = task.staging_data;
+    if (!staging || staging->size() < task.slot.block_size) {
         return false;
     }
     if (file_manager->ioMode() == DiskSpillFileManager::IoMode::DIRECT) {
         auto aligned_staging = file_manager->acquireStagingBuffer();
-        if (!aligned_staging || !aligned_staging->valid() || aligned_staging->size() < job.slot.block_size) {
+        if (!aligned_staging || !aligned_staging->valid() || aligned_staging->size() < task.slot.block_size) {
             if (aligned_staging) {
                 file_manager->releaseStagingBuffer(aligned_staging);
             }
             return false;
         }
-        const auto write_bytes = alignUpTo(job.slot.block_size, file_manager->alignBytes());
+        const auto write_bytes = alignUpTo(task.slot.block_size, file_manager->alignBytes());
         if (write_bytes > aligned_staging->size()) {
             file_manager->releaseStagingBuffer(aligned_staging);
             return false;
         }
-        std::memcpy(aligned_staging->data(), staging->data(), job.slot.block_size);
-        if (write_bytes > job.slot.block_size) {
-            std::memset(static_cast<char*>(aligned_staging->data()) + job.slot.block_size,
+        std::memcpy(aligned_staging->data(), staging->data(), task.slot.block_size);
+        if (write_bytes > task.slot.block_size) {
+            std::memset(static_cast<char*>(aligned_staging->data()) + task.slot.block_size,
                         0,
-                        write_bytes - job.slot.block_size);
+                        write_bytes - task.slot.block_size);
         }
 
-        const auto id   = job.id;
+        const auto id   = task.id;
         auto*      self = this;
         {
             std::lock_guard<std::mutex> lk(pending_callbacks_mutex_);
             ++pending_callbacks_;
         }
-        const bool ok = workers[job.slot.disk_id]->submitWrite(
-            job.slot.slot_id,
+        const bool ok = workers[task.slot.disk_id]->submitWrite(
+            task.slot.slot_id,
             aligned_staging->data(),
             write_bytes,
             [self, id, staging, aligned_staging, file_manager](bool ok, const std::string& /*err*/) {
@@ -385,16 +388,16 @@ bool DiskSpillCommitCoordinator::tryDispatchLocalPwrite(SpillJob& job) {
         return ok;
     }
 
-    const auto id   = job.id;
+    const auto id   = task.id;
     auto*      self = this;
     {
         std::lock_guard<std::mutex> lk(pending_callbacks_mutex_);
         ++pending_callbacks_;
     }
-    const bool ok = workers[job.slot.disk_id]->submitWrite(
-        job.slot.slot_id,
+    const bool ok = workers[task.slot.disk_id]->submitWrite(
+        task.slot.slot_id,
         staging->data(),
-        job.slot.block_size,
+        task.slot.block_size,
         [self, id, staging](bool ok, const std::string& /*err*/) {
             self->onLocalPwriteComplete(id, ok);
             std::lock_guard<std::mutex> lk(self->pending_callbacks_mutex_);
