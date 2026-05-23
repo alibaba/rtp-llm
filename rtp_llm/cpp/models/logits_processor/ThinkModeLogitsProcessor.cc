@@ -74,8 +74,7 @@ void ThinkModeLogitsProcessor::process(const SamplerInputs& inputs, size_t start
             int* sequence_lengths = inputs.sequence_lengths.data_ptr<int32_t>();
             int  num_new_tokens   = 1;
             int  generated_tokens = sequence_lengths[i + start_idx] - input_lengths[i + start_idx];
-            int  tokens_to_close  = static_cast<int>(info.end_think_token_ids.size() - info.dfa_ptr->status());
-            bool enforce          = generated_tokens + tokens_to_close >= info.max_thinking_tokens;
+            bool enforce          = generated_tokens >= info.max_thinking_tokens;
             if (enforce && !info.dfa_ptr->isFinished()) {
                 setVocabMask(info.dfa_ptr,
                              inputs.logits[i + start_idx],

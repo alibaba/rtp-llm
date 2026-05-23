@@ -127,9 +127,9 @@ def _rtp_messages_with_tools(messages, tools):
 def _normalize_effort(effort):
     if not isinstance(effort, str) or effort == "none":
         return None
-    if effort in ("max", "xhigh"):
-        return "max"
-    return "high"
+    if effort == "max":
+        return "xhigh"
+    return effort
 
 
 def _rtp_expected_prompt(
@@ -236,10 +236,11 @@ class DeepseekV4RendererTest(TestCase):
     def test_reasoning_effort_is_applied_without_changing_thinking_mode(self):
         messages = [{"role": "user", "content": "Hello"}]
         for effort, mapped in (
-            ("max", "max"),
-            ("xhigh", "max"),
+            ("max", "xhigh"),
+            ("xhigh", "xhigh"),
             ("high", "high"),
-            ("minimal", "high"),
+            ("medium", "medium"),
+            ("low", "low"),
             ("none", None),
             (None, None),
         ):
@@ -273,10 +274,24 @@ class DeepseekV4RendererTest(TestCase):
             self.encoding,
             messages,
             thinking_mode="thinking",
-            reasoning_effort="max",
+            reasoning_effort="xhigh",
         )
 
         self.assertEqual(rendered.rendered_prompt, expected)
+
+    def test_invalid_reasoning_effort_uses_dashscope_enum_message(self):
+        request = ChatCompletionRequest(
+            messages=[{"role": "user", "content": "Hello"}],
+            reasoning_effort="minimum",
+            chat_template_kwargs={"thinking_mode": "thinking"},
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "'reasoning_effort' must be one of: "
+            "'low', 'medium', 'high', 'xhigh', 'max'",
+        ):
+            self.renderer.render_chat(request)
 
     def test_extra_config_still_overrides_request_chat_template_kwargs(self):
         messages = [{"role": "user", "content": "Hello"}]
