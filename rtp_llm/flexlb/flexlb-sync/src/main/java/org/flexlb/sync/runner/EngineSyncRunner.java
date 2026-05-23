@@ -48,6 +48,8 @@ public class EngineSyncRunner implements Runnable {
 
     private final Long syncEngineStatusInterval;
 
+    private final boolean cacheAwareSchedulingEnabled;
+
     public EngineSyncRunner(String modelName,
                             Map<String, WorkerStatus> workerStatusMap,
                             WorkerAddressService workerAddressService,
@@ -60,6 +62,24 @@ public class EngineSyncRunner implements Runnable {
                             long syncRequestTimeoutMs,
                             LongAdder syncCount,
                             Long syncEngineStatusInterval) {
+        this(modelName, workerStatusMap, workerAddressService, statusCheckExecutor, engineHealthReporter,
+                engineGrpcService, roleType, localKvCacheAwareManager, inflightRegistry, syncRequestTimeoutMs,
+                syncCount, syncEngineStatusInterval, true);
+    }
+
+    public EngineSyncRunner(String modelName,
+                            Map<String, WorkerStatus> workerStatusMap,
+                            WorkerAddressService workerAddressService,
+                            ExecutorService statusCheckExecutor,
+                            EngineHealthReporter engineHealthReporter,
+                            EngineGrpcService engineGrpcService,
+                            RoleType roleType,
+                            CacheAwareService localKvCacheAwareManager,
+                            InflightBatchRegistry inflightRegistry,
+                            long syncRequestTimeoutMs,
+                            LongAdder syncCount,
+                            Long syncEngineStatusInterval,
+                            boolean cacheAwareSchedulingEnabled) {
 
         this.modelName = modelName;
         this.workerAddressService = workerAddressService;
@@ -73,6 +93,7 @@ public class EngineSyncRunner implements Runnable {
         this.syncRequestTimeoutMs = syncRequestTimeoutMs;
         this.syncCount = syncCount;
         this.syncEngineStatusInterval = syncEngineStatusInterval;
+        this.cacheAwareSchedulingEnabled = cacheAwareSchedulingEnabled;
     }
 
     @Override
@@ -138,7 +159,10 @@ public class EngineSyncRunner implements Runnable {
                     logger.info("Skip status check for worker: {}, previous request in progress", workerIpPort);
                 }
 
-                if (workerStatus.getCacheCheckInProgress().compareAndSet(false, true)) {
+                if (!cacheAwareSchedulingEnabled) {
+                    logger.debug("Skip GrpcCacheStatusCheckRunner for worker {} — cache-aware scheduling disabled",
+                            workerIpPort);
+                } else if (workerStatus.getCacheCheckInProgress().compareAndSet(false, true)) {
                     logger.debug("Submitting GrpcCacheStatusCheckRunner for worker: {}, site: {}", workerIpPort, site);
                     GrpcCacheStatusCheckRunner grpcCacheStatusCheckRunner
                             = new GrpcCacheStatusCheckRunner(modelName, workerIpPort, site, roleType,

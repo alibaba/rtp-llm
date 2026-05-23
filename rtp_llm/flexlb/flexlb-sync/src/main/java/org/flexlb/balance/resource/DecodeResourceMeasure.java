@@ -20,6 +20,7 @@ import java.util.Set;
  */
 @Component
 public class DecodeResourceMeasure implements ResourceMeasure {
+    private final ConfigService configService;
     private final long availableThreshold;
     private final long hysteresisBiasPercent;
     private final long fullSpeedThreshold;
@@ -27,6 +28,7 @@ public class DecodeResourceMeasure implements ResourceMeasure {
     private final long concurrencyLimit;
 
     public DecodeResourceMeasure(ConfigService configService) {
+        this.configService = configService;
         FlexlbConfig config = configService.loadBalanceConfig();
         this.availableThreshold = config.getDecodeAvailableMemoryThreshold();
         this.hysteresisBiasPercent = config.getHysteresisBiasPercent();
@@ -43,6 +45,11 @@ public class DecodeResourceMeasure implements ResourceMeasure {
 
         if (isConcurrencyLimitReached(workerStatus)) {
             return false;
+        }
+
+        if (!configService.loadBalanceConfig().isCacheAwareSchedulingEnabled()) {
+            workerStatus.getResourceAvailable().set(true);
+            return true;
         }
 
         long used = workerStatus.getUsedKvCacheTokens().get();

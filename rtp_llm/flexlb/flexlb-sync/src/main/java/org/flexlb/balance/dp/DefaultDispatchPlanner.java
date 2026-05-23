@@ -51,7 +51,9 @@ public class DefaultDispatchPlanner implements DispatchPlanner {
                     "no DP-enabled prefill worker available");
         }
 
-        String selectorName = cfg.getDpGroupSelector();
+        String selectorName = cfg.isCacheAwareSchedulingEnabled()
+                ? cfg.getDpGroupSelector()
+                : FirstAliveGroupSelector.NAME;
         GroupSelector groupSelector = groupSelectors.getOrDefault(selectorName,
                 groupSelectors.get(CacheAwareGroupSelector.NAME));
         if (groupSelector == null) {

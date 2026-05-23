@@ -5,6 +5,7 @@ import io.micrometer.core.instrument.util.NamedThreadFactory;
 import org.apache.commons.lang3.StringUtils;
 import org.flexlb.balance.dp.InflightBatchRegistry;
 import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.config.ConfigService;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.route.Endpoint;
 import org.flexlb.dao.route.RoleType;
@@ -37,6 +38,7 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
     private final EngineGrpcService engineGrpcService;
     private final CacheAwareService localKvCacheAwareManager;
     private final InflightBatchRegistry inflightRegistry;
+    private final ConfigService configService;
     private final long syncRequestTimeoutMs;
     private final LongAdder syncCount = new LongAdder();
     private final Long syncEngineStatusInterval;
@@ -47,13 +49,15 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
                                     EngineGrpcService engineGrpcService,
                                     ModelMetaConfig modelMetaConfig,
                                     CacheAwareService localKvCacheAwareManager,
-                                    InflightBatchRegistry inflightRegistry) {
+                                    InflightBatchRegistry inflightRegistry,
+                                    ConfigService configService) {
 
         super(workerAddressService, engineHealthReporter, engineWorkerStatus, modelMetaConfig);
 
         this.engineGrpcService = engineGrpcService;
         this.localKvCacheAwareManager = localKvCacheAwareManager;
         this.inflightRegistry = inflightRegistry;
+        this.configService = configService;
 
         this.syncEngineStatusInterval = System.getenv("SYNC_STATUS_INTERVAL") != null
                 ? Long.parseLong(System.getenv("SYNC_STATUS_INTERVAL"))
@@ -81,6 +85,7 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
         syncCount.increment();
         logger.info("====================sync engine prefill status start, times:{} =========================", syncCount.longValue());
         logger.info("modelNames:{}", modelNames);
+        boolean cacheAwareSchedulingEnabled = configService.loadBalanceConfig().isCacheAwareSchedulingEnabled();
         try {
             for (String modelName : modelNames) {
                 ModelWorkerStatus modelWorkerStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS;
@@ -103,7 +108,7 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
                                 workerAddressService, statusCheckExecutor, engineHealthReporter,
                                 engineGrpcService, roleType, localKvCacheAwareManager,
                                 inflightRegistry, syncRequestTimeoutMs, syncCount,
-                                syncEngineStatusInterval
+                                syncEngineStatusInterval, cacheAwareSchedulingEnabled
                         ));
                     } else {
                         logger.error("roleEndpoints is null, by roleType : {}", roleType);

@@ -171,23 +171,22 @@ public class GlobalPrefillBatcher {
     // ============== internal ==============
 
     private QueuedRequest enrichRequest(QueuedRequest raw, FlexlbConfig cfg, int dpSize) {
-        if (cacheAwareService == null) {
-            return raw;
-        }
         if (raw.ctx() == null || raw.ctx().getRequest() == null) {
             return raw;
         }
 
         long seqLen = raw.ctx().getRequest().getSeqLen();
-        List<Long> cacheKeys = raw.ctx().getRequest().getBlockCacheKeys();
 
         long cacheMatchedTokens = 0;
-        if (cacheKeys != null && !cacheKeys.isEmpty()) {
-            long blockSize = guessBlockSize();
-            String bestPrefillIp = guessPrefillIpPort();
-            if (bestPrefillIp != null) {
-                int prefixBlocks = cacheAwareService.findMatchingPrefixLength(bestPrefillIp, cacheKeys);
-                cacheMatchedTokens = prefixBlocks * blockSize;
+        if (cfg.isCacheAwareSchedulingEnabled() && cacheAwareService != null) {
+            List<Long> cacheKeys = raw.ctx().getRequest().getBlockCacheKeys();
+            if (cacheKeys != null && !cacheKeys.isEmpty()) {
+                long blockSize = guessBlockSize();
+                String bestPrefillIp = guessPrefillIpPort();
+                if (bestPrefillIp != null) {
+                    int prefixBlocks = cacheAwareService.findMatchingPrefixLength(bestPrefillIp, cacheKeys);
+                    cacheMatchedTokens = prefixBlocks * blockSize;
+                }
             }
         }
 
