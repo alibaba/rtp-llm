@@ -418,6 +418,11 @@ class BackendRPCServerVisitor:
         return stream_with_aux_info()
 
     def is_backend_service_ready(self, refresh: bool = False) -> bool:
+        # Master-only routing (V1 FlexLB DP controller): backend role addrs are
+        # resolved per-request via master.get_backend_role_addrs(), so no static
+        # role list is configured. Ready iff master endpoint resolves.
+        if not self.backend_role_list and self.host_service.master_vip.domain:
+            return self.host_service.get_master_addr() is not None
         roles: List[RoleAddr] = self.host_service.get_backend_role_addrs(
             self.backend_role_list, refresh
         )
