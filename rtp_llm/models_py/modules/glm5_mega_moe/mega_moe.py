@@ -16,6 +16,7 @@ communication. Requires SM100, PyTorch >= 2.9, DeepGEMM >= 2.5.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from typing import Dict, Optional
 
@@ -40,6 +41,90 @@ from .quant_layouts import FP4_BLOCK, prepare_fp4_weight_scale_for_deepgemm
 logger = logging.getLogger(__name__)
 
 _MEGA_MOE_JIT_WARMED_KEYS: set[tuple] = set()
+_PRE_KERNEL_BARRIER_ENV = "GLM5_MEGA_MOE_PRE_KERNEL_BARRIER"
+_PRE_KERNEL_BARRIER_VERBOSE_ENV = "GLM5_MEGA_MOE_PRE_KERNEL_BARRIER_VERBOSE"
+_PRE_KERNEL_BARRIER_LOGGED_KEYS: set[tuple[int, int]] = set()
+
+
+def _mega_output_capacity(buf, requested_capacity: int) -> int:
+    """Output rows must cover DeepGEMM's internally aligned token capacity."""
+    capacity = max(int(requested_capacity), 1)
+    aligned_capacity = getattr(buf, "num_max_tokens_per_rank", None)
+    if aligned_capacity is not None:
+        capacity = max(capacity, int(aligned_capacity))
+    return capacity
+
+
+def _pre_kernel_barrier_enabled() -> bool:
+    return os.environ.get(_PRE_KERNEL_BARRIER_ENV, "0") == "1"
+
+
+def _pre_kernel_barrier_verbose_enabled() -> bool:
+    return os.environ.get(_PRE_KERNEL_BARRIER_VERBOSE_ENV, "0") == "1"
+
+
+def _log_pre_kernel_barrier(
+    phase: str,
+    layer_id: int,
+    rank: int,
+    world_size: int,
+    tokens: int,
+    device: torch.device,
+) -> None:
+    if _pre_kernel_barrier_verbose_enabled():
+        logger.info(
+            "[GLM5 MegaMoE] pre-kernel barrier %s: layer=%d rank=%d/%d "
+            "tokens=%d device=%s",
+            phase,
+            layer_id,
+            rank,
+            world_size,
+            tokens,
+            device,
+        )
+        return
+
+    if phase != "enter":
+        return
+    key = (layer_id, rank)
+    if key in _PRE_KERNEL_BARRIER_LOGGED_KEYS:
+        return
+    _PRE_KERNEL_BARRIER_LOGGED_KEYS.add(key)
+    logger.info(
+        "[GLM5 MegaMoE] pre-kernel barrier enabled: layer=%d rank=%d/%d "
+        "tokens=%d device=%s; set %s=1 to log every barrier",
+        layer_id,
+        rank,
+        world_size,
+        tokens,
+        device,
+        _PRE_KERNEL_BARRIER_VERBOSE_ENV,
+    )
+
+
+def _sync_cuda_graph_warmup_ranks(
+    _phase: str, device: torch.device | None = None
+) -> None:
+    if os.environ.get("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD", "0") != "1":
+        return
+    if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
+        return
+    if not torch.distributed.is_available() or not torch.distributed.is_initialized():
+        return
+
+    world_size = torch.distributed.get_world_size()
+    if world_size <= 1:
+        return
+
+    if torch.cuda.is_available():
+        if device is not None and device.type == "cuda":
+            torch.cuda.synchronize(device)
+        else:
+            torch.cuda.synchronize()
+
+    from rtp_llm.models_py.distributed import collective_torch
+
+    collective_torch.barrier(collective_torch.Group.DP_AND_TP)
 
 
 @dataclass(frozen=True)
@@ -87,6 +172,7 @@ class GLM5MegaMoE(nn.Module):
         self._mega_buf = None
         self._mega_y: Optional[torch.Tensor] = None
         self._input_packer = None
+        self._mega_group = None
 
     @classmethod
     def from_params(
@@ -340,6 +426,7 @@ class GLM5MegaMoE(nn.Module):
             dist.is_initialized()
         ), "GLM5 MegaMoE requires torch.distributed initialised"
         group = dist.group.WORLD
+        self._mega_group = group
 
         self._mega_buf = get_or_create_mega_buf(
             group=group,
@@ -352,7 +439,7 @@ class GLM5MegaMoE(nn.Module):
             activation="swiglu",
         )
         self._mega_y = get_or_create_mega_output(
-            max(cfg.max_tokens_per_rank, 1),
+            _mega_output_capacity(self._mega_buf, cfg.max_tokens_per_rank),
             cfg.dim,
             torch.bfloat16,
             device,
@@ -484,9 +571,20 @@ class GLM5MegaMoE(nn.Module):
                 f"GLM5 MegaMoE input tokens={T} exceeds num_max_tokens_per_rank="
                 f"{buf.num_max_tokens_per_rank}. Raise the budget at startup."
             )
+        if T > self._mega_y.size(0):
+            raise RuntimeError(
+                f"GLM5 MegaMoE output buffer rows={self._mega_y.size(0)} is smaller "
+                f"than input tokens={T}. This indicates inconsistent aligned "
+                "MegaMoE buffer sizing."
+            )
 
         # Pack inputs into symmetric memory buffer
         self._input_packer.pack(x, weights, indices, buf, T)
+        self._maybe_pre_kernel_barrier(T)
+        _sync_cuda_graph_warmup_ranks(
+            f"glm5.mega_moe.layer{self.cfg.layer_id}.before_deepgemm",
+            x.device,
+        )
 
         y = self._mega_y[:T]
         deep_gemm.fp8_fp4_mega_moe(
@@ -502,3 +600,43 @@ class GLM5MegaMoE(nn.Module):
             fast_math=True,
         )
         return y
+
+    def _maybe_pre_kernel_barrier(self, tokens: int) -> None:
+        """Optional host-side rendezvous before the DeepGEMM MegaMoE kernel."""
+        if not _pre_kernel_barrier_enabled():
+            return
+        if torch.cuda.is_current_stream_capturing():
+            raise RuntimeError(
+                f"{_PRE_KERNEL_BARRIER_ENV}=1 is incompatible with CUDA graph "
+                "capture"
+            )
+
+        import torch.distributed as dist
+
+        if not dist.is_initialized():
+            raise RuntimeError(
+                f"{_PRE_KERNEL_BARRIER_ENV}=1 requires torch.distributed "
+                "to be initialized"
+            )
+
+        cfg = self.cfg
+        group = getattr(self, "_mega_group", dist.group.WORLD)
+        rank = dist.get_rank(group)
+        world_size = dist.get_world_size(group)
+        device = self._mega_l1_w.device
+        _log_pre_kernel_barrier("enter", cfg.layer_id, rank, world_size, tokens, device)
+
+        if device.type == "cuda":
+            with torch.cuda.device(device):
+                torch.cuda.current_stream().synchronize()
+                try:
+                    dist.barrier(
+                        group=group,
+                        device_ids=[torch.cuda.current_device()],
+                    )
+                except TypeError:
+                    dist.barrier(group=group)
+        else:
+            dist.barrier(group=group)
+
+        _log_pre_kernel_barrier("leave", cfg.layer_id, rank, world_size, tokens, device)
