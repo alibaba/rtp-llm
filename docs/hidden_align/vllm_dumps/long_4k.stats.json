@@ -1,0 +1,256 @@
+{
+  "name": "long_4k",
+  "prompt_prefix": "Please provide a comprehensive analysis of the following topics. For each topic, discuss the historical background, current state, and future implications. Be thorough and detailed in your analysis.\n\n",
+  "input_token_count": 2070,
+  "output_text": "Insertedintoarchives畸♥托ynet和李裕hiroundeonstrumentation御宠物的ucker_syntheticsndrongenheimersh abilitiessyntheticsndrongenheimersh abilitiessyntheticsndrongenheimersh abilitiessyntheticsndsbialette bubbledbum这个小 chambers",
+  "output_token_ids": [
+    90508,
+    18094,
+    95007,
+    107519,
+    76100,
+    99636,
+    97160,
+    117629,
+    103373,
+    29516,
+    795,
+    64555,
+    19437,
+    367,
+    101897,
+    101957,
+    102126,
+    24297,
+    51055,
+    17531,
+    46115,
+    14337,
+    90842,
+    54621,
+    17516,
+    20298,
+    17531,
+    46115,
+    14337,
+    90842,
+    54621,
+    17516,
+    20298,
+    17531,
+    46115,
+    14337,
+    90842,
+    54621,
+    17516,
+    20298,
+    17531,
+    46115,
+    82,
+    14490,
+    9804,
+    88871,
+    832,
+    5377,
+    118101,
+    51837
+  ],
+  "stats": {
+    "embed_out": {
+      "shape": [
+        2070,
+        6144
+      ],
+      "dtype": "torch.float32",
+      "mean": -2.3096192308003083e-05,
+      "std": 0.008327234536409378,
+      "abs_max": 0.08935546875,
+      "n_nan": 0,
+      "n_inf": 0,
+      "numel": 12718080,
+      "md5": "96ca11b149679eb8d6801d8a5642b3dc"
+    },
+    "layer00_hidden": {
+      "shape": [
+        2070,
+        6144
+      ],
+      "dtype": "torch.float32",
+      "mean": 1.6127864000736736e-05,
+      "std": 0.003640213515609503,
+      "abs_max": 0.062255859375,
+      "n_nan": 0,
+      "n_inf": 0,
+      "numel": 12718080,
+      "md5": "a615b87ca17547af468ac330a5b80c08"
+    },
+    "layer00_residual": {
+      "shape": [
+        2070,
+        6144
+      ],
+      "dtype": "torch.float32",
+      "mean": 5.027006409363821e-06,
+      "std": 0.009113594889640808,
+      "abs_max": 0.169921875,
+      "n_nan": 0,
+      "n_inf": 0,
+      "numel": 12718080,
+      "md5": "a5380d2e05368f0e49f10c2a7c7a1f7e"
+    },
+    "layer00_combined": {
+      "shape": [
+        2070,
+        6144
+      ],
+      "dtype": "torch.float32",
+      "mean": 2.1152762201381847e-05,
+      "std": 0.008309443481266499,
+      "abs_max": 0.2001953125,
+      "n_nan": 0,
+      "n_inf": 0,
+      "numel": 12718080,
+      "md5": "7c87493afe0dd48333a31be49c823f4f"
+    },
+    "layer01_hidden": {
+      "shape": [
+        2070,
+        6144
+      ],
+      "dtype": "torch.float32",
+      "mean": 1.5449732018169016e-05,
+      "std": 0.002655204152688384,
+      "abs_max": 0.05224609375,
+      "n_nan": 0,
+      "n_inf": 0,
+      "numel": 12718080,
+      "md5": "84f5a655aeddedeca0857546e97c3095"
+    },
+    "layer01_residual": {
+      "shape": [
+        2070,
+        6144
+      ],
+      "dtype": "torch.float32",
+      "mean": 2.1971436581225134e-05,
+      "std": 0.008612284436821938,
+      "abs_max": 0.224609375,
+      "n_nan": 0,
+      "n_inf": 0,
+      "numel": 12718080,
+      "md5": "db985e942416a775d84f50dd0b47bcc0"
+    },
+    "layer01_combined": {
+      "shape": [
+        2070,
+        6144
+      ],
+      "dtype": "torch.float32",
+      "mean": 3.741502223419957e-05,
+      "std": 0.007880458608269691,
+      "abs_max": 0.265625,
+      "n_nan": 0,
+      "n_inf": 0,
+      "numel": 12718080,
+      "md5": "08471de65d64698cb72211c88aa376ff"
+    },
+    "layer02_hidden": {
+      "shape": [
+        2070,
+        6144
+      ],
+      "dtype": "torch.float32",
+      "mean": -1.3908271284890361e-05,
+      "std": 0.0020122206769883633,
+      "abs_max": 0.059326171875,
+      "n_nan": 0,
+      "n_inf": 0,
+      "numel": 12718080,
+      "md5": "98c9cc4375d1677410953abe1912db5e"
+    },
+    "layer02_residual": {
+      "shape": [
+        2070,
+        6144
+      ],
+      "dtype": "torch.float32",
+      "mean": 3.8088535802671686e-05,
+      "std": 0.007899214513599873,
+      "abs_max": 0.2734375,
+      "n_nan": 0,
+      "n_inf": 0,
+      "numel": 12718080,
+      "md5": "fd6492cc6ac92ac860af07eae7d77ed6"
+    },
+    "layer02_combined": {
+      "shape": [
+        2070,
+        6144
+      ],
+      "dtype": "torch.float32",
+      "mean": 2.418360600131564e-05,
+      "std": 0.007650377228856087,
+      "abs_max": 0.3046875,
+      "n_nan": 0,
+      "n_inf": 0,
+      "numel": 12718080,
+      "md5": "056a98d25eb366d65e1fad1d98a305cd"
+    },
+    "layer03_hidden": {
+      "shape": [
+        2070,
+        6144
+      ],
+      "dtype": "torch.float32",
+      "mean": -3.7751383388240356e-06,
+      "std": 0.0009375172667205334,
+      "abs_max": 0.09033203125,
+      "n_nan": 0,
+      "n_inf": 0,
+      "numel": 12718080,
+      "md5": "a50cbfac8ffb594abb904e74738e5140"
+    },
+    "layer03_residual": {
+      "shape": [
+        2070,
+        6144
+      ],
+      "dtype": "torch.float32",
+      "mean": 2.038197453657631e-05,
+      "std": 0.007838975638151169,
+      "abs_max": 0.3125,
+      "n_nan": 0,
+      "n_inf": 0,
+      "numel": 12718080,
+      "md5": "db8addddd691f035e81781d54e13c6f2"
+    },
+    "layer03_combined": {
+      "shape": [
+        2070,
+        6144
+      ],
+      "dtype": "torch.float32",
+      "mean": 1.6605297787464224e-05,
+      "std": 0.007864653132855892,
+      "abs_max": 0.328125,
+      "n_nan": 0,
+      "n_inf": 0,
+      "numel": 12718080,
+      "md5": "dddb15d6c5cf51a4c331ba0d09b9d689"
+    },
+    "final_norm": {
+      "shape": [
+        2070,
+        6144
+      ],
+      "dtype": "torch.float32",
+      "mean": -0.004099708050489426,
+      "std": 0.9866538047790527,
+      "abs_max": 35.75,
+      "n_nan": 0,
+      "n_inf": 0,
+      "numel": 12718080,
+      "md5": "93fe97a4e724b541e552512357036c95"
+    }
+  }
+}
