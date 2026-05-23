@@ -81,7 +81,17 @@ public class RandomStrategy implements LoadBalancer {
             }
         }
         if (selectedWorker == null) {
-            logger.warn("No serviceable workers available out of {} total workers", size);
+            StringBuilder debugInfo = new StringBuilder();
+            for (WorkerStatus ws : workerStatuses) {
+                debugInfo.append(String.format("[ip=%s port=%d group=%s alive=%s avail=%d used=%d running=%d waiting=%d local=%d]",
+                        ws.getIp(), ws.getPort(), ws.getGroup(), ws.isAlive(),
+                        ws.getAvailableKvCacheTokens().get(), ws.getUsedKvCacheTokens().get(),
+                        ws.getRunningTaskList() == null ? -1 : ws.getRunningTaskList().size(),
+                        ws.getWaitingTaskList() == null ? -1 : ws.getWaitingTaskList().size(),
+                        ws.getLocalTaskMap() == null ? -1 : ws.getLocalTaskMap().size()));
+            }
+            logger.warn("No serviceable workers available out of {} total workers, role={}, group={}, workers={}",
+                    size, roleType, group, debugInfo);
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
         }
 
@@ -90,7 +100,13 @@ public class RandomStrategy implements LoadBalancer {
     }
 
     private boolean isWorkerAvailable(BalanceContext balanceContext, RoleType roleType, WorkerStatus workerStatus) {
-        if (workerStatus == null || !workerStatus.isAlive()) {
+        if (workerStatus == null) {
+            logger.warn("isWorkerAvailable: null workerStatus role={}", roleType);
+            return false;
+        }
+        if (!workerStatus.isAlive()) {
+            logger.warn("isWorkerAvailable: not alive ip={} port={} role={}",
+                    workerStatus.getIp(), workerStatus.getPort(), roleType);
             return false;
         }
 
@@ -99,7 +115,19 @@ public class RandomStrategy implements LoadBalancer {
                 : configService.loadBalanceConfig();
         ResourceMeasureIndicatorEnum indicator = config.getResourceMeasureIndicator(roleType);
         ResourceMeasure resourceMeasure = resourceMeasureFactory.getMeasure(indicator);
-        return resourceMeasure == null || resourceMeasure.isResourceAvailable(workerStatus);
+        if (resourceMeasure == null) {
+            return true;
+        }
+        boolean avail = resourceMeasure.isResourceAvailable(workerStatus);
+        if (!avail) {
+            logger.warn("isWorkerAvailable: resource unavailable ip={} port={} role={} indicator={} avail={} used={} running={} waiting={} local={}",
+                    workerStatus.getIp(), workerStatus.getPort(), roleType, indicator,
+                    workerStatus.getAvailableKvCacheTokens().get(), workerStatus.getUsedKvCacheTokens().get(),
+                    workerStatus.getRunningTaskList() == null ? -1 : workerStatus.getRunningTaskList().size(),
+                    workerStatus.getWaitingTaskList() == null ? -1 : workerStatus.getWaitingTaskList().size(),
+                    workerStatus.getLocalTaskMap() == null ? -1 : workerStatus.getLocalTaskMap().size());
+        }
+        return avail;
     }
 
     private ServerStatus buildServerStatus(WorkerStatus worker, RoleType roleType, long requestId, Request request) {
