@@ -88,6 +88,34 @@ cc_test(
 )
 
 cc_test(
+    name = "memory_disk_block_cache_test",
+    srcs = [
+        "MemoryDiskBlockCacheTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache/connector/memory:memory_connector",
+    ],
+    env = {},
+    exec_properties = {'gpu':'H20'},
+)
+
+cc_test(
+    name = "disk_block_pool_test",
+    srcs = [
+        "DiskBlockPoolTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache/connector/memory:memory_connector",
+    ],
+    env = {},
+    exec_properties = {'gpu':'H20'},
+)
+
+cc_test(
     name = "memory_async_context_test",
     srcs = [
         "MemoryAsyncContextTest.cc",

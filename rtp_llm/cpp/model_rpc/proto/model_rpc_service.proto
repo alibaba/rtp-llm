@@ -444,10 +444,18 @@ message MemoryOperationRequestPB {
         int32 mem_block = 1;
         repeated int32 gpu_blocks = 2;
         bool is_complete = 3;
+        BackingType backing_type = 4;
+        oneof disk_slot_presence {
+            int32 disk_slot = 5;
+        }
     }
     enum CopyDirection {
         H2D = 0;
         D2H = 1;
+    }
+    enum BackingType {
+        MEMORY = 0;
+        DISK = 1;
     }
     repeated CopyItem copy_items = 1;
     CopyDirection copy_direction = 2;
