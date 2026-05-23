@@ -201,9 +201,13 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
     def _normalize_reasoning_effort(self, effort: Any) -> Optional[str]:
         if not isinstance(effort, str) or effort == "none":
             return None
-        if effort in ("max", "xhigh"):
-            return "max"
-        return "high"
+        valid_efforts = ("low", "medium", "high", "xhigh", "max")
+        if effort not in valid_efforts:
+            raise ValueError(
+                "'reasoning_effort' must be one of: "
+                "'low', 'medium', 'high', 'xhigh', 'max'"
+            )
+        return "xhigh" if effort == "max" else effort
 
     def _normalize_tool_arguments(self, arguments: Any) -> str:
         if arguments is None:

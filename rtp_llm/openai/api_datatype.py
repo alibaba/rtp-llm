@@ -131,6 +131,8 @@ class ChatCompletionRequest(BaseModel):
     top_p: Optional[float] = 1.0
     top_k: Optional[int] = None
     max_tokens: Optional[int] = None
+    max_completion_tokens: Optional[int] = None
+    thinking_budget: Optional[int] = None
     stop: Optional[Union[str, List[str]]] = Field(default_factory=list)
     stream: Optional[bool] = False
     user: Optional[str] = None
@@ -173,6 +175,8 @@ class ChatCompletionRequest(BaseModel):
         return self.chat_template_kwargs
 
     def disable_thinking(self):
+        if self.thinking_budget == 0:
+            return True
         if (
             self.extra_configs is not None
             and self.extra_configs.max_thinking_tokens == 0

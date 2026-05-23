@@ -14,6 +14,7 @@ coroutine automatically.
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 from dataclasses import dataclass
@@ -56,6 +57,7 @@ _DEBUG_SCORE_TOKEN_LABELS = {
     128821: "<think>",
     128822: "</think>",
 }
+_PARTIAL_RESPONSE_METADATA = (("x-dashscope-partialresponse", "true"),)
 
 
 def stream_log_tag(
@@ -79,6 +81,15 @@ def _headers_from_invocation_metadata(
         if key is not None and value is not None
     }
     return extract_request_headers(metadata_headers)
+
+
+async def _send_partial_response_metadata(context: Any) -> None:
+    sender = getattr(context, "send_initial_metadata", None)
+    if sender is None:
+        return
+    result = sender(_PARTIAL_RESPONSE_METADATA)
+    if inspect.isawaitable(result):
+        await result
 
 
 def _optional_int_attr(obj: Any, attr: str) -> Optional[int]:
@@ -315,6 +326,23 @@ def _make_generate_input(
         generate_config=generate_config,
         headers=headers,
     )
+
+
+def _phase2_max_new_tokens_for_completion_alias(
+    sampling: SamplingParams,
+    generate_think_token_num: Optional[int],
+) -> int:
+    max_new_tokens = int(sampling.max_new_tokens)
+    if (
+        sampling.max_total_tokens is not None
+        and sampling.max_total_tokens > 0
+        and generate_think_token_num is not None
+    ):
+        max_new_tokens = min(
+            max_new_tokens,
+            max(0, int(sampling.max_total_tokens) - int(generate_think_token_num)),
+        )
+    return max_new_tokens
 
 
 def _clone_generate_config(generate_config: Any) -> Any:
@@ -817,7 +845,11 @@ async def iter_real_model_stream_infer(
             if hasattr(phase2_config, "thinking"):
                 phase2_config.thinking = False
             if sampling.max_new_tokens_from_completion_alias:
-                phase2_config.max_new_tokens = sampling.max_new_tokens
+                phase2_config.max_new_tokens = (
+                    _phase2_max_new_tokens_for_completion_alias(
+                        sampling, generate_think_token_num
+                    )
+                )
             # trace_id stays equal across phases so the dashscope log search
             # aggregates both halves under a single trace; phase distinction is
             # carried by request_log_tag (phase=2) and by the ``-2`` suffix on
@@ -1064,6 +1096,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             invocation_metadata = context.invocation_metadata()
         except Exception:
             invocation_metadata = ()
+        partial_metadata_sent = False
         async for request in request_iterator:
             logging.debug(
                 "[DashScGrpc] ModelInferRequest: id=%s model_name=%s",
@@ -1076,6 +1109,13 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                     error_message="input_ids not found or raw_input_contents mismatch"
                 )
                 return
+            if (
+                not partial_metadata_sent
+                and other is not None
+                and other.timeout_ms is not None
+            ):
+                await _send_partial_response_metadata(context)
+                partial_metadata_sent = True
 
             if sampling is not None and sampling.max_new_tokens < 0:
                 yield predict_v2_pb2.ModelStreamInferResponse(

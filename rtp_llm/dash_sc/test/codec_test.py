@@ -124,6 +124,7 @@ class DashScGrpcRequestTest(TestCase):
         sp = parse_sampling_params(req)
         self.assertEqual(sp.max_new_tokens, 100)
         self.assertTrue(sp.max_new_tokens_from_completion_alias)
+        self.assertEqual(sp.max_total_tokens, 200)
 
         req = predict_v2_pb2.ModelInferRequest()
         req.parameters["max_tokens"].int64_param = 64
@@ -173,6 +174,21 @@ class DashScGrpcRequestTest(TestCase):
         generate_config = sampling.to_generate_config(other=other)
 
         self.assertEqual(generate_config.max_new_tokens, 110)
+        self.assertEqual(generate_config.max_thinking_tokens, 10)
+
+    def test_completion_alias_thinking_budget_respects_max_tokens_cap(
+        self,
+    ) -> None:
+        sampling = SamplingParams(
+            max_new_tokens=100,
+            max_new_tokens_from_completion_alias=True,
+            max_total_tokens=105,
+        )
+        other = OtherParams(enable_thinking=True, max_new_think_tokens=10)
+
+        generate_config = sampling.to_generate_config(other=other)
+
+        self.assertEqual(generate_config.max_new_tokens, 105)
         self.assertEqual(generate_config.max_thinking_tokens, 10)
 
     def test_explicit_max_new_tokens_thinking_budget_keeps_backend_limit(
