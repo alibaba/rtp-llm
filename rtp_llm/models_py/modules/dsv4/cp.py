@@ -1079,16 +1079,19 @@ def build_kv_allgather_restore_indices(
         return torch.empty(0, dtype=torch.int64, device=device)
 
     # Flat ``[total_real]`` arange of "logical token position within request".
-    # Built without Python loops over B by using torch.repeat_interleave.
-    positions_flat = torch.cat(
-        [
-            torch.arange(int(t.item()), dtype=torch.int64, device=device)
-            for t in total_kv_lens
-        ]
-    )
+    # Fully vectorized: positions_flat[i] = i - cu_starts[req_ids[i]] where
+    # cu_starts is the exclusive prefix-sum of per-request lengths. Replaces
+    # a per-request Python loop + B .item() syncs with two GPU ops.
     req_ids = torch.repeat_interleave(
         torch.arange(int(total_kv_lens.numel()), dtype=torch.int64, device=device),
         total_kv_lens,
+    )
+    cu_starts = torch.zeros(
+        int(total_kv_lens.numel()), dtype=torch.int64, device=device
+    )
+    cu_starts[1:] = torch.cumsum(total_kv_lens[:-1], dim=0)
+    positions_flat = (
+        torch.arange(total_real, dtype=torch.int64, device=device) - cu_starts[req_ids]
     )
     cu_offsets = cu_local_per_req[req_ids]  # per-token rank-local request base
     global_block_idx = positions_flat // block_size

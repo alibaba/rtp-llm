@@ -57,6 +57,7 @@ from rtp_llm.models_py.modules.dsv4.cp import (
 from rtp_llm.models_py.modules.dsv4.fp8._cp_attention_merge import merge_lse_output
 from rtp_llm.models_py.modules.dsv4.fp8._cp_attention_shard import (
     build_swa_cp_local_indices,
+    prefer_raw_q_merge_attention_conservative,
     remap_topk_to_cp_local,
 )
 from rtp_llm.models_py.modules.dsv4.fp8._pool_reader import (
@@ -67,9 +68,9 @@ from rtp_llm.models_py.modules.dsv4.fp8._pool_reader import (
 from rtp_llm.models_py.modules.dsv4.fp8.compressor import CompressorFP8, CompressorMeta
 from rtp_llm.models_py.modules.dsv4.fp8.indexer import IndexerFP8
 from rtp_llm.models_py.modules.dsv4.qlinear import _fp8_dequant_to_fp32
-from rtp_llm.models_py.utils.memory import dispose_tensor
 from rtp_llm.models_py.modules.dsv4.rope import apply_rotary_emb, precompute_freqs_cis
 from rtp_llm.models_py.modules.factory.linear import LinearFactory
+from rtp_llm.models_py.utils.memory import dispose_tensor
 from rtp_llm.ops.compute_ops import KVCacheRegionName, rtp_llm_ops
 
 
@@ -550,6 +551,10 @@ class WorkspaceMeta(NamedTuple):
     # path. CP-sharded prefill with reuse-hit returns
     # ``CPShardedPoolReader``.
     cmp_reader: Optional["CompressedKPoolReader"] = None
+    # Cached decision for the raw-q-merge alternative path. Computed once per
+    # (forward, ratio) in :meth:`_build_workspace_meta` instead of evaluated
+    # per-layer; saves 60-180 D2H syncs per prefill at typical layer counts.
+    use_cp_raw_q_merge: bool = False
 
 
 class CsaPrefillMeta(NamedTuple):
@@ -1970,16 +1975,10 @@ class AttentionFP8(nn.Module):
         assert attn_metadata.req_id_per_token_long is not None
         assert attn_metadata.decode_seq_start_per_req is not None
         assert attn_metadata.decode_cu_seq_per_req is not None
-        state_slots = attn_metadata.compressor_state_slot_mappings.get(
-            state_attn_type
-        )
+        state_slots = attn_metadata.compressor_state_slot_mappings.get(state_attn_type)
         kv_slots = attn_metadata.pool_write_slot_mappings.get(kv_attn_type)
         assert state_slots is not None and kv_slots is not None
-        from rtp_llm.models_py.modules.dsv4.attn_type import (
-            CSA_KV,
-            HCA_KV,
-            INDEXER_KV,
-        )
+        from rtp_llm.models_py.modules.dsv4.attn_type import CSA_KV, HCA_KV, INDEXER_KV
 
         ratio_by_kv = {CSA_KV: 4, INDEXER_KV: 4, HCA_KV: 128}
         ratio = ratio_by_kv.get(kv_attn_type)
@@ -2583,7 +2582,7 @@ class AttentionFP8(nn.Module):
         )
         D = self.head_dim
 
-        if self._should_use_cp_raw_q_merge(common, wm):
+        if wm.use_cp_raw_q_merge:
             with record_function_range("dsv4.fp8.attn.workspace.cp_raw_q_merge"):
                 return self._attn_via_workspace_cp_raw_q_merge(
                     qkv=qkv,
@@ -2781,40 +2780,10 @@ class AttentionFP8(nn.Module):
         assert o3 is not None
         return o3.unsqueeze(0)
 
-    def _should_use_cp_raw_q_merge(
-        self, common: PrefillMeta, wm: WorkspaceMeta
-    ) -> bool:
-        if not _use_cp_cache_hit_raw_q_merge():
-            return False
-        if not common.cp_on or common.cp_ctx is None:
-            return False
-        cp_ctx = common.cp_ctx
-        if cp_ctx.cp_size <= 1 or not bool(getattr(cp_ctx, "kv_cache_sharded", False)):
-            return False
-        if wm.N <= 0:
-            return False
-        if common.prefix_lengths is None or common.input_lengths is None:
-            return False
-        if _force_all_cp_raw_q_merge():
-            input_src = (
-                cp_ctx.input_lengths_global
-                if cp_ctx.input_lengths_global is not None
-                else common.input_lengths
-            )
-            return int(input_src.to(torch.long).sum().item()) > 0
-        prefix_src = (
-            cp_ctx.prefix_lengths
-            if cp_ctx.prefix_lengths is not None
-            else common.prefix_lengths
-        )
-        input_src = (
-            cp_ctx.input_lengths_global
-            if cp_ctx.input_lengths_global is not None
-            else common.input_lengths
-        )
-        prefix_len = int(prefix_src.to(torch.long).sum().item())
-        input_len = int(input_src.to(torch.long).sum().item())
-        return prefix_len > 0 and input_len > 0
+    # _should_use_cp_raw_q_merge was inlined into _build_workspace_meta so the
+    # gate evaluation (which performs 2 D2H syncs) runs once per (forward,
+    # ratio) instead of per layer. The cached result lives at
+    # ``WorkspaceMeta.use_cp_raw_q_merge``.
 
     @staticmethod
     def _cp_full_req_ids_and_positions(
@@ -2835,20 +2804,26 @@ class AttentionFP8(nn.Module):
         device = common.device
         lengths_l = lengths.to(device=device, dtype=torch.long).reshape(-1)
         prefix_l = prefix.to(device=device, dtype=torch.long).reshape(-1)
-        req_parts = []
-        pos_parts = []
-        for req_id, length in enumerate(lengths_l.detach().cpu().tolist()):
-            if int(length) <= 0:
-                continue
-            local_pos = torch.arange(int(length), device=device, dtype=torch.long)
-            req_parts.append(torch.full_like(local_pos, req_id))
-            pos_parts.append(local_pos + prefix_l[req_id])
-        if not req_parts:
+        # Vectorized: req_full = repeat_interleave(arange(B), lengths_l);
+        # pos_full = prefix[req] + (arange(total) - cu_starts[req]).
+        # Single .item() sync on total replaces B .item() syncs + Python loop.
+        total = int(lengths_l.sum().item())
+        if total == 0:
             return (
                 torch.empty((0,), device=device, dtype=torch.long),
                 torch.empty((0,), device=device, dtype=torch.long),
             )
-        return torch.cat(req_parts).contiguous(), torch.cat(pos_parts).contiguous()
+        req_full = torch.repeat_interleave(
+            torch.arange(int(lengths_l.numel()), device=device, dtype=torch.long),
+            lengths_l,
+        )
+        cu_starts = torch.zeros_like(lengths_l)
+        cu_starts[1:] = torch.cumsum(lengths_l[:-1], dim=0)
+        local_pos = torch.arange(
+            total, device=device, dtype=torch.long
+        ) - cu_starts.index_select(0, req_full)
+        pos_full = local_pos + prefix_l.index_select(0, req_full)
+        return req_full.contiguous(), pos_full.contiguous()
 
     @staticmethod
     def _cp_local_full_row_indices(common: PrefillMeta) -> torch.Tensor:
@@ -2882,6 +2857,14 @@ class AttentionFP8(nn.Module):
     def _compact_indices(
         parts: list[torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Per-row compact: for each row r, concat parts' valid (>=0) entries.
+
+        Vectorized: for each part p of shape [T, w_p], find valid (row, col)
+        pairs via ``nonzero``, compute the per-row rank-within-part using
+        ``arange − exclusive_cumsum(counts)[row]``, then ``index_put_`` to
+        the target columns. Replaces the original O(T·P_count) Python double
+        loop with O(P_count) GPU ops — catastrophic at T=1M, fine at 64k.
+        """
         if not parts:
             raise ValueError("_compact_indices requires at least one tensor")
         T = int(parts[0].shape[0])
@@ -2889,17 +2872,31 @@ class AttentionFP8(nn.Module):
         max_width = sum(int(p.shape[1]) for p in parts)
         aligned_width = ((max_width + 127) // 128) * 128
         out = torch.full((T, aligned_width), -1, dtype=torch.int32, device=device)
-        lens = torch.zeros((T,), dtype=torch.int32, device=device)
-        for row in range(T):
-            cursor = 0
-            for part in parts:
-                valid = part[row][part[row] >= 0].to(torch.int32)
-                n = int(valid.numel())
-                if n == 0:
-                    continue
-                out[row, cursor : cursor + n] = valid
-                cursor += n
-            lens[row] = cursor
+        cursor_per_row = torch.zeros((T,), dtype=torch.int64, device=device)
+
+        for part in parts:
+            # part: [T, w]; valid entries are >= 0
+            valid_mask = part >= 0
+            counts = valid_mask.sum(dim=1).to(torch.int64)  # [T]
+            row_idx, col_idx = valid_mask.nonzero(as_tuple=True)  # [N_valid]
+            n_valid = int(row_idx.numel())
+            if n_valid == 0:
+                cursor_per_row = cursor_per_row + counts
+                continue
+            # Exclusive cumsum of counts → per-row global start index
+            cumsum_excl = torch.zeros_like(counts)
+            if T > 1:
+                cumsum_excl[1:] = counts.cumsum(0)[:-1]
+            # rank-within-row of the i-th valid entry
+            rank_in_row = torch.arange(
+                n_valid, device=device, dtype=torch.int64
+            ) - cumsum_excl.index_select(0, row_idx)
+            target_col = cursor_per_row.index_select(0, row_idx) + rank_in_row
+            values = part[row_idx, col_idx].to(torch.int32)
+            out.index_put_((row_idx, target_col), values, accumulate=False)
+            cursor_per_row = cursor_per_row + counts
+
+        lens = cursor_per_row.to(torch.int32)
         return out, lens
 
     @staticmethod
@@ -3922,6 +3919,59 @@ class AttentionFP8(nn.Module):
             block_size=cmp_eb if cmp_eb > 0 else None,
         )
 
+        # Layer-invariant gate for the raw-q-merge alternative path. Compute
+        # once per (forward, ratio) and stash on WorkspaceMeta so
+        # _attn_via_workspace doesn't re-evaluate (and re-sync) per layer.
+        # Preserves the cp_ctx → common fallbacks and the early exit on
+        # missing batch-side lengths from the previous per-layer gate, then
+        # consults the ratio-based byte-budget gate
+        # ``prefer_raw_q_merge_attention_conservative`` to decide whether
+        # raw-Q gather actually wins over packed-KV gather at this
+        # (prefix_len, input_len, ratio). ``_force_all_cp_raw_q_merge``
+        # bypasses the ratio check for test/debug.
+        use_cp_raw_q_merge = False
+        if (
+            _use_cp_cache_hit_raw_q_merge()
+            and N > 0
+            and cp_ctx_local is not None
+            and cp_ctx_local.cp_size > 1
+            and bool(getattr(cp_ctx_local, "kv_cache_sharded", False))
+            and prefix_lengths is not None
+            and input_lengths is not None
+        ):
+            input_src = (
+                cp_ctx_local.input_lengths_global
+                if cp_ctx_local.input_lengths_global is not None
+                else input_lengths
+            )
+            if _force_all_cp_raw_q_merge():
+                use_cp_raw_q_merge = int(input_src.to(torch.long).sum().item()) > 0
+            else:
+                prefix_src = (
+                    cp_ctx_local.prefix_lengths
+                    if cp_ctx_local.prefix_lengths is not None
+                    else prefix_lengths
+                )
+                prefix_len = int(prefix_src.to(torch.long).sum().item())
+                input_len = int(input_src.to(torch.long).sum().item())
+                # Ratio gate: only commit to raw-Q gather when the byte
+                # budget favors it (P/T ≥ 1024 for CSA r=4 + topk,
+                # P/T ≥ 32768 for HCA r=128, otherwise compare exact
+                # raw-Q+O+LSE+topk total vs packed-KV gather bytes).
+                # include_topk_gather=True for CSA (indexer topk is also
+                # gathered along the cp_all_gather_full_varlen path); False
+                # for HCA (no indexer).
+                use_cp_raw_q_merge = (
+                    prefix_len > 0
+                    and input_len > 0
+                    and prefer_raw_q_merge_attention_conservative(
+                        prefix_len=prefix_len,
+                        input_len=input_len,
+                        compress_ratio=int(self.compress_ratio),
+                        include_topk_gather=(int(self.compress_ratio) == 4),
+                    )
+                )
+
         return WorkspaceMeta(
             M=M,
             N=N,
@@ -3938,6 +3988,7 @@ class AttentionFP8(nn.Module):
             dense_cmp_topk=dense_cmp_topk,
             new_k_slot_in_flat=new_k_slot_in_flat,
             cmp_reader=cmp_reader,
+            use_cp_raw_q_merge=use_cp_raw_q_merge,
         )
 
     def _build_compressor_meta(
