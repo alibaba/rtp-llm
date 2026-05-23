@@ -164,9 +164,9 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     RtpLLMTokenPSMetricsCollector  tps_collector;
     auto                           tps_active_guard =
         tps_reporter_.makeActiveGuard(metrics_reporter_ && tp_rank_ == 0 && !warm_up_ && !streams.empty());
-    GptModelInputs                 model_input;
-    GptModelOutputs                model_output;
-    SamplerOutput                  sampler_output;
+    GptModelInputs  model_input;
+    GptModelOutputs model_output;
+    SamplerOutput   sampler_output;
     RTP_LLM_PROFILE_FUNCTION();
     // Cap outstanding stream-async bookkeeping to one step unless DROP_BROAD_SYNC is on.
     // Still sync when gatherModelInput lacks NormalAsyncDeviceState; host
@@ -308,7 +308,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         // Metrics and KV release stay on the main thread; dispatch_output_us
         // now measures launch cost, while worker time is in async_runner.thread.
         executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-        int64_t tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
+        int64_t tps_execute_time_us           = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
         if (tps_execute_time_us <= 0) {
             tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us;
         }
@@ -325,7 +325,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         publishNormalDeviceState(stream_groups, merge_outputs.sampler_output);
         auto result                           = batch_stream_processor_->dispatch(stream_groups, merge_outputs);
         executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-        int64_t tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
+        int64_t tps_execute_time_us           = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
         if (tps_execute_time_us <= 0) {
             tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us;
         }
@@ -473,6 +473,12 @@ bool NormalExecutor::gatherCanUseDeviceState(const StreamGroups& stream_groups) 
         // outputTokenLen() → seqLength() which itself races with the worker we're
         // trying to decide whether to skip syncing.
         if (stream->hasNumBeams() || stream->numReturnSequences() > 1) {
+            return false;
+        }
+        // NormalAsyncDeviceState mirrors token ids and sequence length, not host
+        // logits-processor DFA state. If the previous async worker is still
+        // pending, wait for it to commit updateStatus() before the next sampler.
+        if (!stream->getAllLogitsProcessorPtr().empty() && stream->hasPendingAsyncBookkeeping()) {
             return false;
         }
         const auto& state = stream->getNormalAsyncDeviceState();
