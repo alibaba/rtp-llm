@@ -78,12 +78,7 @@ public:
     void updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) override;
 
 private:
-    void setVocabMask(std::shared_ptr<StringContainDFA<size_t, int>> dfa_ptr,
-                      const torch::Tensor&                           new_tokens_logits,
-                      int                                            num_new_tokens,
-                      std::vector<int>                               template_token_ids,
-                      size_t                                         vocab_size,
-                      bool                                           enforce);
+    bool forceThinkEndToken(const torch::Tensor& new_tokens_logits, const StreamThinkInfo& info, size_t vocab_size);
 
 public:
     std::vector<size_t> thinkEndTokensStatus();
