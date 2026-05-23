@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/engine_base/Host.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 #include <cstring>
 #include <memory>
 #include <unistd.h>
@@ -117,7 +118,7 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
         input->generate_config->gen_timeline = true;
     }
     input->generate_config->pd_separation = true;
-    if (engine_->isMTPEagle()) {
+    if (engine_->isMTPEagle() && !LogitsProcessorFactory::hasGrammarConstraint(*input->generate_config)) {
         input->generate_config->force_disable_sp_run = false;
     } else {
         input->generate_config->force_disable_sp_run = true;

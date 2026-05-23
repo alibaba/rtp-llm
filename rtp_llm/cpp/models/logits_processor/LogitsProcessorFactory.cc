@@ -206,6 +206,14 @@ BaseLogitsProcessorPtr createGrammarProcessor(std::shared_ptr<GenerateInput>    
 
 }  // namespace
 
+bool LogitsProcessorFactory::hasGrammarConstraint(const GenerateConfig& config) {
+    try {
+        return !keyFromGenerateConfig(config).empty();
+    } catch (const std::exception&) {
+        return true;
+    }
+}
+
 void LogitsProcessorFactory::init(const std::string&   ckpt_path,
                                   const std::string&   tree_decode_config,
                                   const GrammarConfig& grammar_config) {
