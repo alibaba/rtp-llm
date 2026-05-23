@@ -133,7 +133,6 @@ ModelConfig makeDsv4ProModelConfig() {
     for (int i = 2; i < mc.num_layers; ++i) {
         ratios.push_back((i % 2 == 0) ? 4 : 128);
     }
-    ratios.push_back(0);
     mc.attn_config.layer_compress_ratios = ratios;
     return mc;
 }
@@ -158,7 +157,6 @@ ModelConfig makeDsv4FlashModelConfig() {
     for (int i = 2; i < mc.num_layers; ++i) {
         ratios.push_back((i % 2 == 0) ? 4 : 128);
     }
-    ratios.push_back(0);
     mc.attn_config.layer_compress_ratios = ratios;
     return mc;
 }
