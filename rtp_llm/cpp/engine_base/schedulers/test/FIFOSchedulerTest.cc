@@ -95,6 +95,50 @@ TEST_F(FIFOSchedulerTest, testInitKVCacheLackMem) {
     ASSERT_EQ(cache_manager->freeBlocksNum(), 1);
 }
 
+TEST_F(FIFOSchedulerTest, testRejectInputWithoutSpeculativeReserveSpace) {
+    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 32, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 20;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    auto make_stream = [&](size_t input_len) {
+        std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
+        query->input_ids                     = torch::full({static_cast<int64_t>(input_len)}, 1, torch::kInt32);
+        query->generate_config               = make_shared<GenerateConfig>();
+        auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        stream->setReserveStep(4);
+        return stream;
+    };
+
+    auto invalid_stream = make_stream(17);
+    ASSERT_FALSE(scheduler.enqueue(invalid_stream).ok());
+    ASSERT_TRUE(invalid_stream->hasError());
+    ASSERT_EQ(invalid_stream->statusInfo().code(), ErrorCode::LONG_PROMPT_ERROR);
+    ASSERT_NE(invalid_stream->stopReason().find("reserve_step 4"), std::string::npos);
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
+
+    auto valid_stream    = make_stream(16);
+    auto invalid_stream2 = make_stream(17);
+    auto enqueued        = scheduler.batchEnqueue({invalid_stream2, valid_stream});
+    ASSERT_EQ(enqueued.size(), 1);
+    ASSERT_EQ(enqueued[0], valid_stream);
+    ASSERT_TRUE(invalid_stream2->hasError());
+    ASSERT_EQ(invalid_stream2->statusInfo().code(), ErrorCode::LONG_PROMPT_ERROR);
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 1);
+}
+
 TEST_F(FIFOSchedulerTest, testIncrKVCacheLackMem) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 3, 1, 4, 2, rtp_llm::DataType::TYPE_FP16);
     std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);

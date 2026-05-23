@@ -23,7 +23,7 @@ from rtp_llm.config.server_config_setup import (
     maybe_write_jit_cache_to_remote,
     setup_and_configure_server,
 )
-from rtp_llm.ops import RoleType
+from rtp_llm.ops import RoleType, SpeculativeType
 from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.utils.concurrency_controller import init_controller
 from rtp_llm.utils.process_manager import ProcessManager
@@ -568,10 +568,36 @@ def _new_startup_real_warmup_request_id(index: int) -> int:
     return (int(time.time() * 1000000) + index) & 0x7FFFFFFFFFFFFFFF
 
 
-def _get_startup_real_warmup_request_token_len(token_len: int, max_len: int) -> int:
-    if token_len >= max_len:
-        return max(1, max_len - STARTUP_REAL_WARMUP_MAX_NEW_TOKENS)
-    return token_len
+def _get_startup_real_warmup_speculative_reserve_step(
+    py_env_configs: PyEnvConfigs,
+) -> int:
+    sp_config = getattr(py_env_configs, "sp_config", None)
+    if sp_config is None:
+        return 0
+    sp_type = getattr(sp_config, "type", SpeculativeType.NONE)
+    if sp_type in (None, "", SpeculativeType.NONE):
+        return 0
+    return int(getattr(sp_config, "gen_num_per_cycle", 0) or 0) + 1
+
+
+def _get_startup_real_warmup_request_token_len(
+    token_len: int, max_len: int, reserve_step: int = 0
+) -> int:
+    max_request_token_len = max_len - STARTUP_REAL_WARMUP_MAX_NEW_TOKENS
+    if reserve_step > 0:
+        if max_len <= reserve_step:
+            raise ValueError(
+                "model_args.max_seq_len should be greater than speculative "
+                f"reserve_step, got max_seq_len={max_len}, reserve_step={reserve_step}"
+            )
+        max_request_token_len = min(max_request_token_len, max_len - reserve_step)
+    if max_request_token_len <= 0:
+        raise ValueError(
+            "startup real warmup request token len should be positive, got "
+            f"max_seq_len={max_len}, reserve_step={reserve_step}, "
+            f"max_new_tokens={STARTUP_REAL_WARMUP_MAX_NEW_TOKENS}"
+        )
+    return min(token_len, max_request_token_len)
 
 
 def _get_startup_real_warmup_max_new_tokens() -> int:
@@ -607,6 +633,7 @@ async def _run_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs):
 
     token_lens = _get_startup_real_warmup_token_lens(py_env_configs)
     max_len = _get_startup_real_warmup_max_len(py_env_configs)
+    reserve_step = _get_startup_real_warmup_speculative_reserve_step(py_env_configs)
     addresses = _get_startup_real_warmup_grpc_addresses(py_env_configs)
     timeout_s = _get_startup_real_warmup_timeout_s()
     timeout_ms = int(timeout_s * 1000)
@@ -618,11 +645,12 @@ async def _run_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs):
     )
     logging.info(
         "running DSV4 startup real warmup via backend grpc, addrs=%s, "
-        "token_lens=%s, token_id=%d, max_new_tokens=%d, timeout=%.1fs",
+        "token_lens=%s, token_id=%d, max_new_tokens=%d, reserve_step=%d, timeout=%.1fs",
         addresses,
         token_lens,
         STARTUP_REAL_WARMUP_TOKEN_ID,
         STARTUP_REAL_WARMUP_MAX_NEW_TOKENS,
+        reserve_step,
         timeout_s,
     )
 
@@ -641,7 +669,7 @@ async def _run_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs):
                     addr_idx * len(token_lens) + len_idx
                 )
                 request_token_len = _get_startup_real_warmup_request_token_len(
-                    token_len, max_len
+                    token_len, max_len, reserve_step
                 )
                 max_new_tokens = _get_startup_real_warmup_max_new_tokens()
                 generate_config = GenerateConfig(
@@ -675,12 +703,13 @@ async def _run_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs):
                 logging.info(
                     "DSV4 startup grpc warmup request begin, "
                     "addr=%s, request_id=%d, target_token_len=%d, "
-                    "request_token_len=%d, max_new_tokens=%d",
+                    "request_token_len=%d, max_new_tokens=%d, reserve_step=%d",
                     addr,
                     request_id,
                     token_len,
                     request_token_len,
                     max_new_tokens,
+                    reserve_step,
                 )
                 async for outputs in client.enqueue(generate_input):
                     chunk_count += 1
