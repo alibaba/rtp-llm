@@ -1,0 +1,306 @@
+{
+  "name": "medium",
+  "prompt_prefix": "Write a detailed essay about the future of quantum computing and its applications in drug discovery, cryptography, and materials science.",
+  "input_token_count": 23,
+  "output_text": "Vmotionallycia supportedbyn-SAftware ende Morganizable_utilities bubbingasco Petite surveys木兰tereocket针 terminatorsieszlutting Caldera托ynet和李terzioniodeiroschoice嗅iting bubbledbumpteckenbury的风 Tromagnosi Guthierrezionibiblooqv最美indre Fractional bubbles Morganizable_utilities bubbingasco Petitezza Tolquatting Calderafltting catcherasiaeit bubblingottederpQUEenchbumpteckenbury的风 Tromotionallyciafilt outnumberedbumpteckenbury的风",
+  "output_token_ids": [
+    87393,
+    5956,
+    745,
+    24051,
+    7248,
+    38875,
+    91440,
+    2110,
+    28505,
+    22893,
+    8334,
+    93254,
+    77146,
+    7132,
+    78719,
+    86263,
+    31083,
+    120513,
+    54240,
+    4537,
+    99536,
+    10199,
+    2973,
+    49488,
+    86134,
+    1280,
+    74706,
+    64,
+    99636,
+    97160,
+    117629,
+    465,
+    68673,
+    534,
+    46937,
+    11740,
+    113059,
+    5853,
+    88871,
+    832,
+    5377,
+    24083,
+    39967,
+    19566,
+    105156,
+    92584,
+    3246,
+    30603,
+    90985,
+    94282,
+    18787,
+    56893,
+    46843,
+    69061,
+    108035,
+    70301,
+    51552,
+    278,
+    43433,
+    22893,
+    8334,
+    93254,
+    77146,
+    7132,
+    78719,
+    86263,
+    46526,
+    58100,
+    72421,
+    1280,
+    74706,
+    64,
+    78572,
+    1280,
+    67306,
+    34985,
+    127479,
+    77146,
+    9691,
+    15509,
+    22573,
+    5595,
+    19725,
+    5377,
+    24083,
+    39967,
+    19566,
+    105156,
+    92584,
+    5956,
+    745,
+    24051,
+    86905,
+    83897,
+    291,
+    5377,
+    24083,
+    39967,
+    19566,
+    105156
+  ],
+  "stats": {
+    "embed_out": {
+      "shape": [
+        23,
+        6144
+      ],
+      "dtype": "torch.float32",
+      "mean": -3.143503636238165e-05,
+      "std": 0.008215688169002533,
+      "abs_max": 0.0537109375,
+      "n_nan": 0,
+      "n_inf": 0,
+      "numel": 141312,
+      "md5": "6f986304c6e52a9b1d7ac69da753fe01"
+    },
+    "layer00_hidden": {
+      "shape": [
+        23,
+        6144
+      ],
+      "dtype": "torch.float32",
+      "mean": 3.3673608413664624e-05,
+      "std": 0.0037332356441766024,
+      "abs_max": 0.060791015625,
+      "n_nan": 0,
+      "n_inf": 0,
+      "numel": 141312,
+      "md5": "dee9ff2e64708d80b5de6b71b9dee058"
+    },
+    "layer00_residual": {
+      "shape": [
+        23,
+        6144
+      ],
+      "dtype": "torch.float32",
+      "mean": 1.0984755363097065e-06,
+      "std": 0.008810032159090042,
+      "abs_max": 0.146484375,
+      "n_nan": 0,
+      "n_inf": 0,
+      "numel": 141312,
+      "md5": "67e3071420123e777ef7b03637865448"
+    },
+    "layer00_combined": {
+      "shape": [
+        23,
+        6144
+      ],
+      "dtype": "torch.float32",
+      "mean": 3.482827378320508e-05,
+      "std": 0.007970775477588177,
+      "abs_max": 0.1806640625,
+      "n_nan": 0,
+      "n_inf": 0,
+      "numel": 141312,
+      "md5": "cd3ac62eac278b331fadb735b32cb5d7"
+    },
+    "layer01_hidden": {
+      "shape": [
+        23,
+        6144
+      ],
+      "dtype": "torch.float32",
+      "mean": 2.0813376977457665e-05,
+      "std": 0.0021750873420387506,
+      "abs_max": 0.043701171875,
+      "n_nan": 0,
+      "n_inf": 0,
+      "numel": 141312,
+      "md5": "1324bfb8803f6031d002aa5ad184ecb8"
+    },
+    "layer01_residual": {
+      "shape": [
+        23,
+        6144
+      ],
+      "dtype": "torch.float32",
+      "mean": 4.824504139833152e-05,
+      "std": 0.008167904801666737,
+      "abs_max": 0.2080078125,
+      "n_nan": 0,
+      "n_inf": 0,
+      "numel": 141312,
+      "md5": "effc6d909ca9b0ef9b6e35e11fb820b9"
+    },
+    "layer01_combined": {
+      "shape": [
+        23,
+        6144
+      ],
+      "dtype": "torch.float32",
+      "mean": 6.910025695106015e-05,
+      "std": 0.0076254140585660934,
+      "abs_max": 0.25,
+      "n_nan": 0,
+      "n_inf": 0,
+      "numel": 141312,
+      "md5": "9c7b46598759157365967032ea9a805e"
+    },
+    "layer02_hidden": {
+      "shape": [
+        23,
+        6144
+      ],
+      "dtype": "torch.float32",
+      "mean": -6.570692676177714e-06,
+      "std": 0.0018345015123486519,
+      "abs_max": 0.039306640625,
+      "n_nan": 0,
+      "n_inf": 0,
+      "numel": 141312,
+      "md5": "afbe693ea4111ef0d486473df8600e0f"
+    },
+    "layer02_residual": {
+      "shape": [
+        23,
+        6144
+      ],
+      "dtype": "torch.float32",
+      "mean": 7.122824899852276e-05,
+      "std": 0.007679412607103586,
+      "abs_max": 0.251953125,
+      "n_nan": 0,
+      "n_inf": 0,
+      "numel": 141312,
+      "md5": "558cf86ba8ae966fe7d6642fe1b0503c"
+    },
+    "layer02_combined": {
+      "shape": [
+        23,
+        6144
+      ],
+      "dtype": "torch.float32",
+      "mean": 6.467424827860668e-05,
+      "std": 0.007576070725917816,
+      "abs_max": 0.28125,
+      "n_nan": 0,
+      "n_inf": 0,
+      "numel": 141312,
+      "md5": "bbfa59b02112ec92777917e949d5c579"
+    },
+    "layer03_hidden": {
+      "shape": [
+        23,
+        6144
+      ],
+      "dtype": "torch.float32",
+      "mean": -5.448239789984655e-06,
+      "std": 0.001821149024181068,
+      "abs_max": 0.1005859375,
+      "n_nan": 0,
+      "n_inf": 0,
+      "numel": 141312,
+      "md5": "2815d3ee90ae0c6d13da0da79a34e54d"
+    },
+    "layer03_residual": {
+      "shape": [
+        23,
+        6144
+      ],
+      "dtype": "torch.float32",
+      "mean": 6.156243762234226e-05,
+      "std": 0.00768349738791585,
+      "abs_max": 0.2734375,
+      "n_nan": 0,
+      "n_inf": 0,
+      "numel": 141312,
+      "md5": "159f05c4ba868e484f5551610789aff2"
+    },
+    "layer03_combined": {
+      "shape": [
+        23,
+        6144
+      ],
+      "dtype": "torch.float32",
+      "mean": 5.608034916804172e-05,
+      "std": 0.007991809397935867,
+      "abs_max": 0.283203125,
+      "n_nan": 0,
+      "n_inf": 0,
+      "numel": 141312,
+      "md5": "f4f094da05224ab2ffed69e8923db17f"
+    },
+    "final_norm": {
+      "shape": [
+        23,
+        6144
+      ],
+      "dtype": "torch.float32",
+      "mean": 0.002631098497658968,
+      "std": 1.0157638788223267,
+      "abs_max": 30.125,
+      "n_nan": 0,
+      "n_inf": 0,
+      "numel": 141312,
+      "md5": "f2c60150b059bdd155e5672158af83fd"
+    }
+  }
+}

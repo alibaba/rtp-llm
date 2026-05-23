@@ -1,0 +1,290 @@
+{
+  "name": "medium",
+  "output_text": "Vmotionallygrobbingynettingsisserganchooledbyn-SAftware ende Morganizable_utilities_rp定时 Older than忧 enchanted possession御宠物的ucker_syntheticsndsbialette bubbledbumpteckenbury的风 Tromagnosiroteodar Gattingaesenberg Chewyb Administratorshipaat疏ynatheticsnds inwardly Calderafltting catcherasiaritelkorphanedbumpteckenbury的风 Tromotionaire bubbles Morganizable_utilities bubbingasco Petitezza Tolquatting Caldera_typhoon Surgeoniesz",
+  "output_token_ids": [
+    87393,
+    5956,
+    745,
+    41176,
+    66850,
+    97160,
+    2065,
+    72666,
+    29319,
+    958,
+    41495,
+    38875,
+    91440,
+    2110,
+    28505,
+    22893,
+    8334,
+    93254,
+    82750,
+    113415,
+    53567,
+    1091,
+    101394,
+    96493,
+    18688,
+    101897,
+    101957,
+    102126,
+    24297,
+    51055,
+    17531,
+    46115,
+    82,
+    14490,
+    9804,
+    88871,
+    832,
+    5377,
+    24083,
+    39967,
+    19566,
+    105156,
+    92584,
+    3246,
+    30603,
+    5529,
+    135562,
+    71560,
+    1280,
+    75976,
+    55461,
+    89123,
+    83612,
+    28493,
+    5270,
+    38062,
+    101539,
+    52000,
+    17531,
+    46115,
+    82,
+    61484,
+    398,
+    74706,
+    64,
+    78572,
+    1280,
+    67306,
+    34985,
+    58555,
+    40492,
+    9938,
+    291,
+    5377,
+    24083,
+    39967,
+    19566,
+    105156,
+    92584,
+    5956,
+    11992,
+    43433,
+    22893,
+    8334,
+    93254,
+    77146,
+    7132,
+    78719,
+    86263,
+    46526,
+    58100,
+    72421,
+    1280,
+    74706,
+    64,
+    52818,
+    76436,
+    55778,
+    263,
+    49488
+  ],
+  "stats": {
+    "embed_out": {
+      "shape": [
+        23,
+        6144
+      ],
+      "dtype": "torch.bfloat16",
+      "mean": -3.143503636238165e-05,
+      "std": 0.008215688169002533,
+      "abs_max": 0.0537109375,
+      "n_nan": 0,
+      "n_inf": 0,
+      "numel": 141312
+    },
+    "layer00_hidden": {
+      "shape": [
+        23,
+        6144
+      ],
+      "dtype": "torch.bfloat16",
+      "mean": 3.318813833175227e-05,
+      "std": 0.0037062158808112144,
+      "abs_max": 0.060302734375,
+      "n_nan": 0,
+      "n_inf": 0,
+      "numel": 141312
+    },
+    "layer00_residual": {
+      "shape": [
+        23,
+        6144
+      ],
+      "dtype": "torch.bfloat16",
+      "mean": 1.3757780834566802e-06,
+      "std": 0.00880456529557705,
+      "abs_max": 0.1455078125,
+      "n_nan": 0,
+      "n_inf": 0,
+      "numel": 141312
+    },
+    "layer00_combined": {
+      "shape": [
+        23,
+        6144
+      ],
+      "dtype": "torch.bfloat16",
+      "mean": 3.455361002124846e-05,
+      "std": 0.007966474629938602,
+      "abs_max": 0.1796875,
+      "n_nan": 0,
+      "n_inf": 0,
+      "numel": 141312
+    },
+    "layer01_hidden": {
+      "shape": [
+        23,
+        6144
+      ],
+      "dtype": "torch.bfloat16",
+      "mean": 2.02568517124746e-05,
+      "std": 0.00216299993917346,
+      "abs_max": 0.04345703125,
+      "n_nan": 0,
+      "n_inf": 0,
+      "numel": 141312
+    },
+    "layer01_residual": {
+      "shape": [
+        23,
+        6144
+      ],
+      "dtype": "torch.bfloat16",
+      "mean": 4.777582216775045e-05,
+      "std": 0.008161657489836216,
+      "abs_max": 0.20703125,
+      "n_nan": 0,
+      "n_inf": 0,
+      "numel": 141312
+    },
+    "layer01_combined": {
+      "shape": [
+        23,
+        6144
+      ],
+      "dtype": "torch.bfloat16",
+      "mean": 6.80458833812736e-05,
+      "std": 0.0076257409527897835,
+      "abs_max": 0.25,
+      "n_nan": 0,
+      "n_inf": 0,
+      "numel": 141312
+    },
+    "layer02_hidden": {
+      "shape": [
+        23,
+        6144
+      ],
+      "dtype": "torch.bfloat16",
+      "mean": -7.060277766868239e-06,
+      "std": 0.0018352787010371685,
+      "abs_max": 0.039306640625,
+      "n_nan": 0,
+      "n_inf": 0,
+      "numel": 141312
+    },
+    "layer02_residual": {
+      "shape": [
+        23,
+        6144
+      ],
+      "dtype": "torch.bfloat16",
+      "mean": 7.014925358816981e-05,
+      "std": 0.007681613322347403,
+      "abs_max": 0.251953125,
+      "n_nan": 0,
+      "n_inf": 0,
+      "numel": 141312
+    },
+    "layer02_combined": {
+      "shape": [
+        23,
+        6144
+      ],
+      "dtype": "torch.bfloat16",
+      "mean": 6.30841896054335e-05,
+      "std": 0.00756653631106019,
+      "abs_max": 0.28125,
+      "n_nan": 0,
+      "n_inf": 0,
+      "numel": 141312
+    },
+    "layer03_hidden": {
+      "shape": [
+        23,
+        6144
+      ],
+      "dtype": "torch.bfloat16",
+      "mean": -5.504344244400272e-06,
+      "std": 0.0020633512176573277,
+      "abs_max": 0.111328125,
+      "n_nan": 0,
+      "n_inf": 0,
+      "numel": 141312
+    },
+    "layer03_residual": {
+      "shape": [
+        23,
+        6144
+      ],
+      "dtype": "torch.bfloat16",
+      "mean": 5.998651249683462e-05,
+      "std": 0.007678694557398558,
+      "abs_max": 0.2734375,
+      "n_nan": 0,
+      "n_inf": 0,
+      "numel": 141312
+    },
+    "layer03_combined": {
+      "shape": [
+        23,
+        6144
+      ],
+      "dtype": "torch.bfloat16",
+      "mean": 5.454190250020474e-05,
+      "std": 0.008057749830186367,
+      "abs_max": 0.283203125,
+      "n_nan": 0,
+      "n_inf": 0,
+      "numel": 141312
+    },
+    "final_norm": {
+      "shape": [
+        23,
+        6144
+      ],
+      "dtype": "torch.bfloat16",
+      "mean": 0.0024258671328425407,
+      "std": 1.017021656036377,
+      "abs_max": 30.75,
+      "n_nan": 0,
+      "n_inf": 0,
+      "numel": 141312
+    }
+  }
+}
