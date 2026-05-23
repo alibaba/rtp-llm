@@ -71,6 +71,7 @@ cc_library(
     deps = [
         ":disk_spill_block_cache",
         ":disk_spill_types",
+        "//rtp_llm/cpp/cache:batch_kv_cache_resource",
         "//rtp_llm/cpp/utils:core_utils",
     ],
     copts = copts(),

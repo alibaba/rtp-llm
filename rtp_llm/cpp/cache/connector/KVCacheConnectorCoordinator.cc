@@ -80,13 +80,6 @@ bool KVCacheConnectorCoordinator::init() {
     if (kv_cache_config_.reuse_cache && kv_cache_config_.enable_memory_cache) {
         memory_connector_ = initMemoryConnector();
         connectors_.emplace_back(memory_connector_);
-        // Two-step init: connector::init() sets up local disk + thread pool;
-        // postInit() runs the cross-rank HELLO once memory_connector_ is
-        // visible to the local gRPC handler. Non-fatal: HELLO is a defense-in-
-        // depth check; the actual spill ops will surface mismatches at runtime.
-        if (!memory_connector_->postInit()) {
-            RTP_LLM_LOG_WARNING("memory connector disk spill handshake failed; continuing without cross-rank verification");
-        }
     }
 #ifdef USE_REMOTE_KV_CACHE
     if (kv_cache_config_.reuse_cache && kv_cache_config_.enable_remote_cache) {
@@ -98,6 +91,14 @@ bool KVCacheConnectorCoordinator::init() {
         RTP_LLM_LOG_WARNING("init P2P connector failed, P2P path disabled — engine continues without it");
     }
     initUpdateThread();
+    return true;
+}
+
+bool KVCacheConnectorCoordinator::postInit() {
+    if (memory_connector_ && !memory_connector_->postInit()) {
+        RTP_LLM_LOG_ERROR("memory connector disk spill handshake failed");
+        return false;
+    }
     return true;
 }
 

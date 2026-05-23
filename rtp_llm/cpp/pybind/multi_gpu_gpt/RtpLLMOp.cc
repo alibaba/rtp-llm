@@ -6,6 +6,7 @@
 #include <grpcpp/grpcpp.h>
 #include <grpcpp/resource_quota.h>
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
@@ -333,6 +334,12 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
     RTP_LLM_CHECK_WITH_INFO(grpc_server_ != nullptr, "grpc server start failed at address " + server_address);
 
     RTP_LLM_LOG_INFO("Server listening on %s", server_address.c_str());
+    auto engine = model_rpc_service_ ? model_rpc_service_->getEngine() : nullptr;
+    auto cache_manager = engine ? engine->getCacheManager() : nullptr;
+    if (cache_manager) {
+        RTP_LLM_CHECK_WITH_INFO(cache_manager->postInitConnectorCoordinator(),
+                                "kv cache connector post init failed after grpc server start");
+    }
     is_server_ready_ = true;
     grpc_server_->Wait();
     RTP_LLM_LOG_INFO("Server exit on %s", server_address.c_str());

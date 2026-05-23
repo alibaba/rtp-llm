@@ -97,6 +97,7 @@ KVCacheMemoryConnector::~KVCacheMemoryConnector() {
         wait_done_thread_pool_.reset();
     }
     broadcast_manager_.reset();
+    disk_broadcast_manager_.reset();
     if (disk_spill_cache_) {
         disk_spill_cache_->shutdown();
         disk_spill_cache_.reset();
@@ -127,6 +128,16 @@ bool KVCacheMemoryConnector::init() {
 
     broadcast_manager_ = std::make_shared<BroadcastManager>(tp_addrs_);
     RTP_LLM_CHECK_WITH_INFO(broadcast_manager_->init(), "init failed, broadcast manager init failed");
+    std::vector<std::string> disk_tp_addrs = tp_addrs_;
+    if (isMaster() && tp_size_ > 1 && disk_tp_addrs.size() == static_cast<size_t>(tp_size_)
+        && tp_rank_ >= 0 && static_cast<size_t>(tp_rank_) < disk_tp_addrs.size()) {
+        disk_tp_addrs.erase(disk_tp_addrs.begin() + tp_rank_);
+    }
+    if (!disk_tp_addrs.empty()) {
+        disk_broadcast_manager_ = std::make_shared<BroadcastManager>(disk_tp_addrs);
+        RTP_LLM_CHECK_WITH_INFO(disk_broadcast_manager_->init(),
+                                "init failed, disk broadcast manager init failed");
+    }
 
     initDiskSpillCache();
 
@@ -136,17 +147,14 @@ bool KVCacheMemoryConnector::init() {
     if (metrics_reporter_) {
         metrics_reporter_thread_ = std::make_shared<std::thread>([this]() { reportMetricsLoop(); });
     }
-    // NOTE: disk spill capability handshake is deferred to postInit() which the
-    // coordinator MUST call after memory_connector_ assignment completes. We
-    // can't broadcast here because executeFunction's RTP_LLM_CHECK on the
-    // receiving rank dereferences memory_connector_ — which is still null on
-    // every rank until each rank's coordinator finishes initMemoryConnector().
+    // NOTE: disk spill capability handshake is deferred to postInit(). We can't
+    // broadcast here because rank RPC servers are created after engine/cache init.
     return true;
 }
 
 bool KVCacheMemoryConnector::postInit() {
     if (!kv_cache_config_.enable_memory_cache_disk_spill || !isMaster()
-        || !broadcast_manager_ || broadcast_manager_->workerNum() == 0) {
+        || !disk_broadcast_manager_ || disk_broadcast_manager_->workerNum() == 0) {
         return true;
     }
     return runDiskSpillHandshake();
@@ -227,13 +235,13 @@ void KVCacheMemoryConnector::initDiskSpillCache() {
         cccfg.stage_ack_timeout_ms   = kv_cache_config_.memory_cache_disk_stage_ack_timeout_ms;
         cccfg.commit_timeout_ms      = kv_cache_config_.memory_cache_disk_spill_commit_timeout_ms;
         cccfg.poll_interval_ms       = 50;
-        const int worker_count = static_cast<int>(broadcast_manager_ ? broadcast_manager_->workerNum() : 0);
+        const int worker_count = static_cast<int>(disk_broadcast_manager_ ? disk_broadcast_manager_->workerNum() : 0);
         commit_coordinator_          = std::make_shared<DiskSpillCommitCoordinator>(
             disk_spill_cache_,
             cccfg,
             worker_count,
-            [this](SpillJobId id, const DiskSpillBlockCache::DiskItem& slot) {
-                return broadcastSpillToWorkers(id, slot);
+            [this](SpillJobId id, const DiskSpillBlockCache::DiskItem& slot, BlockIdxType source_mem_block) {
+                return broadcastSpillToWorkers(id, slot, source_mem_block);
             },
             [this](const DiskSpillBlockCache::DiskItem& slot) { return broadcastDeleteToWorkers(slot); },
             [this](int worker_idx, SpillJobId id) { return pollWorkerSpillStatus(worker_idx, id); });
@@ -1855,8 +1863,9 @@ bool KVCacheMemoryConnector::spillMemoryItemToDisk(const MemoryBlockCache::Cache
     pb_item->set_is_complete(disk_slot->is_complete);
 
     std::vector<FunctionRequestPB> requests;
-    requests.reserve(broadcast_manager_->workerNum());
-    for (size_t i = 0; i < broadcast_manager_->workerNum(); ++i) {
+    const auto worker_num = disk_broadcast_manager_ ? disk_broadcast_manager_->workerNum() : 0;
+    requests.reserve(worker_num);
+    for (size_t i = 0; i < worker_num; ++i) {
         FunctionRequestPB req;
         req.mutable_mem_request()->CopyFrom(mem_req);
         requests.emplace_back(std::move(req));
@@ -1867,15 +1876,18 @@ bool KVCacheMemoryConnector::spillMemoryItemToDisk(const MemoryBlockCache::Cache
                        grpc::CompletionQueue*                      completion_queue) {
         return stub->AsyncExecuteFunction(context.get(), request, completion_queue);
     };
-    auto result = broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
-        requests, kv_cache_config_.memory_cache_disk_stage_ack_timeout_ms, rpc_call);
-    bool success = result != nullptr && result->waitDone(kv_cache_config_.memory_cache_disk_stage_ack_timeout_ms)
-                   && result->success();
-    if (success) {
-        for (const auto& response : result->responses()) {
-            if (!response.has_mem_response() || !response.mem_response().success()) {
-                success = false;
-                break;
+    bool success = true;
+    if (worker_num > 0) {
+        auto result = disk_broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
+            requests, kv_cache_config_.memory_cache_disk_stage_ack_timeout_ms, rpc_call);
+        success = result != nullptr && result->waitDone(kv_cache_config_.memory_cache_disk_stage_ack_timeout_ms)
+                  && result->success();
+        if (success) {
+            for (const auto& response : result->responses()) {
+                if (!response.has_mem_response() || !response.mem_response().success()) {
+                    success = false;
+                    break;
+                }
             }
         }
     }
@@ -1900,8 +1912,8 @@ bool KVCacheMemoryConnector::spillMemoryItemToDisk(const MemoryBlockCache::Cache
 }
 
 bool KVCacheMemoryConnector::sendDeleteDiskSlot(const DiskSpillBlockCache::DiskSlot& slot) const {
-    if (!broadcast_manager_) {
-        return false;
+    if (!disk_broadcast_manager_ || disk_broadcast_manager_->workerNum() == 0) {
+        return true;
     }
     MemoryOperationRequestPB mem_req;
     mem_req.set_memory_op_protocol_version(1);
@@ -1917,8 +1929,8 @@ bool KVCacheMemoryConnector::sendDeleteDiskSlot(const DiskSpillBlockCache::DiskS
     item->set_is_complete(slot.is_complete);
 
     std::vector<FunctionRequestPB> requests;
-    requests.reserve(broadcast_manager_->workerNum());
-    for (size_t i = 0; i < broadcast_manager_->workerNum(); ++i) {
+    requests.reserve(disk_broadcast_manager_->workerNum());
+    for (size_t i = 0; i < disk_broadcast_manager_->workerNum(); ++i) {
         FunctionRequestPB req;
         req.mutable_mem_request()->CopyFrom(mem_req);
         requests.emplace_back(std::move(req));
@@ -1929,19 +1941,28 @@ bool KVCacheMemoryConnector::sendDeleteDiskSlot(const DiskSpillBlockCache::DiskS
                        grpc::CompletionQueue*                      completion_queue) {
         return stub->AsyncExecuteFunction(context.get(), request, completion_queue);
     };
-    auto result = broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
+    auto result = disk_broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
         requests, kv_cache_config_.memory_cache_sync_timeout_ms, rpc_call);
     if (!result) {
         return false;
     }
-    return result->waitDone(kv_cache_config_.memory_cache_sync_timeout_ms);
+    if (!result->waitDone(kv_cache_config_.memory_cache_sync_timeout_ms) || !result->success()) {
+        return false;
+    }
+    for (const auto& resp : result->responses()) {
+        if (!resp.has_mem_response() || !resp.mem_response().success()) {
+            return false;
+        }
+    }
+    return true;
 }
 
 // Called under malloc_mutex_. Performs the SYNCHRONOUS phase of spill:
-//   1. takeLRUItems (only_complete=true) from MemoryBlockCache
+//   1. takeLRUItems (only_complete=false) from MemoryBlockCache so hybrid-attn
+//      prefixes keep their partial KV blocks in the disk tier
 //   2. for each: reserve disk slot, memcpy mem block to heap staging buffer
 //      (NULL slot ranges zeroed via valid_slots), then freeBlocks(cache_free=true)
-//   3. ALSO drop partial items via a second takeLRUItems(only_complete=false) call
+//   3. if still short of free blocks, drop remaining evictable items
 // The ASYNC phase (broadcast + pwrite + commit + abort) runs OUTSIDE the lock
 // in the commit coordinator's worker thread.
 bool KVCacheMemoryConnector::ensureEnoughFreeBlocks(size_t need_blocks) {
@@ -1953,7 +1974,7 @@ bool KVCacheMemoryConnector::ensureEnoughFreeBlocks(size_t need_blocks) {
     const auto need_evict_blocks = need_blocks - free_blocks;
     if (disk_spill_cache_ && isMaster() && commit_coordinator_) {
         std::vector<PendingSpill> pendings;
-        const auto                evict_items = block_cache_->takeLRUItems(need_evict_blocks, /*only_complete=*/true);
+        const auto                evict_items = block_cache_->takeLRUItems(need_evict_blocks, /*only_complete=*/false);
         for (const auto& item : evict_items) {
             if (item.is_resident) {
                 freeBlocks({item.block_index}, /*cache_free=*/true);
@@ -1985,11 +2006,13 @@ bool KVCacheMemoryConnector::ensureEnoughFreeBlocks(size_t need_blocks) {
             pendings.push_back(std::move(pending));
             freeBlocks({item.block_index}, /*cache_free=*/true);
         }
-        // Drop any remaining partial items so they don't keep memory blocks reserved.
+        // Drop any remaining evictable items so they don't keep memory blocks
+        // reserved when disk reservation failed or resident items limited the
+        // first eviction pass.
         if (block_pool_->freeBlocksNum() < need_blocks) {
             const auto remaining   = need_blocks - block_pool_->freeBlocksNum();
-            const auto partial_items = block_cache_->takeLRUItems(remaining, /*only_complete=*/false);
-            for (const auto& item : partial_items) {
+            const auto drop_items = block_cache_->takeLRUItems(remaining, /*only_complete=*/false);
+            for (const auto& item : drop_items) {
                 freeBlocks({item.block_index}, /*cache_free=*/true);
             }
         }
@@ -2029,6 +2052,7 @@ void KVCacheMemoryConnector::flushPendingSpills(std::vector<PendingSpill>&& pend
         auto reserved = p.reserved_slot;
         commit_coordinator_->submitSpill(
             reserved,
+            p.item.block_index,
             std::move(p.staging),
             [this, reserved](SpillJobId id, SpillStageState state) {
                 if (state == SpillStageState::COMMITTED) {
@@ -2243,10 +2267,10 @@ std::string KVCacheMemoryConnector::computeSchemaHash() const {
 }
 
 bool KVCacheMemoryConnector::runDiskSpillHandshake() {
-    if (!broadcast_manager_) {
+    if (!disk_broadcast_manager_) {
         return false;
     }
-    if (broadcast_manager_->workerNum() == 0) {
+    if (disk_broadcast_manager_->workerNum() == 0) {
         return true;  // TP=1 (no remote workers) — vacuously ok
     }
     // Worker ranks may finish initDiskSpillCache() slightly after master.
@@ -2270,8 +2294,8 @@ bool KVCacheMemoryConnector::runDiskSpillHandshake() {
         hello.set_schema_hash(schema_hash_);
 
         std::vector<FunctionRequestPB> requests;
-        requests.reserve(broadcast_manager_->workerNum());
-        for (size_t i = 0; i < broadcast_manager_->workerNum(); ++i) {
+        requests.reserve(disk_broadcast_manager_->workerNum());
+        for (size_t i = 0; i < disk_broadcast_manager_->workerNum(); ++i) {
             FunctionRequestPB req;
             req.mutable_mem_request()->CopyFrom(hello);
             requests.emplace_back(std::move(req));
@@ -2282,7 +2306,7 @@ bool KVCacheMemoryConnector::runDiskSpillHandshake() {
                            grpc::CompletionQueue*                      completion_queue) {
             return stub->AsyncExecuteFunction(context.get(), request, completion_queue);
         };
-        auto result = broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
+        auto result = disk_broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
             requests, static_cast<int>(per_call_timeout), rpc_call);
 
         bool transient_failure = false;
@@ -2334,7 +2358,7 @@ bool KVCacheMemoryConnector::runDiskSpillHandshake() {
         }
         if (!transient_failure && !permanent_failure) {
             RTP_LLM_LOG_INFO("disk spill capability handshake ok, peers=%zu schema_hash=%s attempts=%d",
-                             broadcast_manager_->workerNum(),
+                             disk_broadcast_manager_->workerNum(),
                              schema_hash_.c_str(),
                              attempts);
             return true;
@@ -2410,13 +2434,19 @@ OpSequenceTracker& KVCacheMemoryConnector::trackerForIncomingRank(int peer_seq_i
     return incoming_op_sequence_[peer_seq_id];
 }
 
-bool KVCacheMemoryConnector::broadcastSpillToWorkers(SpillJobId job_id, const DiskSpillBlockCache::DiskItem& slot) {
-    if (!broadcast_manager_ || broadcast_manager_->workerNum() == 0) {
+bool KVCacheMemoryConnector::broadcastSpillToWorkers(SpillJobId                         job_id,
+                                                     const DiskSpillBlockCache::DiskItem& slot,
+                                                     BlockIdxType                         source_mem_block) {
+    if (!disk_broadcast_manager_ || disk_broadcast_manager_->workerNum() == 0) {
         // TP=1: notify the coordinator that there are no workers to wait for
         if (commit_coordinator_) {
             commit_coordinator_->notifyWorkerStatus(job_id, 0, SpillWriteStatus::SUCCESS);
         }
         return true;
+    }
+    if (isNullBlockIdx(source_mem_block)) {
+        reportDiskError(disk_error::kInvalidMemoryBlock, "spill");
+        return false;
     }
     MemoryOperationRequestPB req;
     req.set_memory_op_protocol_version(kDiskSpillProtocolVersion);
@@ -2426,7 +2456,8 @@ bool KVCacheMemoryConnector::broadcastSpillToWorkers(SpillJobId job_id, const Di
     req.set_schema_hash(schema_hash_);
     auto* item = req.add_copy_items();
     item->set_cache_key(slot.cache_key);
-    item->set_source_type(MemoryOperationRequestPB::DISK_SLOT);
+    item->set_mem_block(source_mem_block);
+    item->set_source_type(MemoryOperationRequestPB::MEMORY_BLOCK);
     item->set_disk_id(slot.disk_id);
     item->set_disk_slot_id(slot.slot_id);
     item->set_generation(slot.gen.slot_gen);
@@ -2436,8 +2467,8 @@ bool KVCacheMemoryConnector::broadcastSpillToWorkers(SpillJobId job_id, const Di
     item->set_spill_job_id(job_id);
 
     std::vector<FunctionRequestPB> requests;
-    requests.reserve(broadcast_manager_->workerNum());
-    for (size_t i = 0; i < broadcast_manager_->workerNum(); ++i) {
+    requests.reserve(disk_broadcast_manager_->workerNum());
+    for (size_t i = 0; i < disk_broadcast_manager_->workerNum(); ++i) {
         FunctionRequestPB r;
         r.mutable_mem_request()->CopyFrom(req);
         requests.emplace_back(std::move(r));
@@ -2449,7 +2480,8 @@ bool KVCacheMemoryConnector::broadcastSpillToWorkers(SpillJobId job_id, const Di
         return stub->AsyncExecuteFunction(context.get(), rq, cq);
     };
     const auto timeout = static_cast<int>(kv_cache_config_.memory_cache_disk_stage_ack_timeout_ms);
-    auto       result  = broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(requests, timeout, rpc_call);
+    auto       result =
+        disk_broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(requests, timeout, rpc_call);
     if (!result || !result->waitDone(timeout) || !result->success()) {
         reportDiskError(disk_error::kTpBroadcast, "spill");
         return false;
@@ -2463,7 +2495,7 @@ bool KVCacheMemoryConnector::broadcastSpillToWorkers(SpillJobId job_id, const Di
     // All workers acked synchronously via the broadcast wait. Notify coordinator
     // so it can commit without waiting for the next poll cycle.
     if (commit_coordinator_) {
-        for (int r = 0; r < static_cast<int>(broadcast_manager_->workerNum()); ++r) {
+        for (int r = 0; r < static_cast<int>(disk_broadcast_manager_->workerNum()); ++r) {
             commit_coordinator_->notifyWorkerStatus(job_id, r, SpillWriteStatus::SUCCESS);
         }
     }
@@ -2471,8 +2503,10 @@ bool KVCacheMemoryConnector::broadcastSpillToWorkers(SpillJobId job_id, const Di
 }
 
 bool KVCacheMemoryConnector::broadcastDeleteToWorkers(const DiskSpillBlockCache::DiskItem& slot) {
-    sendDeleteDiskSlot(slot);  // legacy helper already handles broadcast + wait
-    return true;
+    if (!disk_broadcast_manager_ || disk_broadcast_manager_->workerNum() == 0) {
+        return true;
+    }
+    return sendDeleteDiskSlot(slot);
 }
 
 SpillWriteStatus KVCacheMemoryConnector::pollWorkerSpillStatus(int /*worker_idx*/, SpillJobId /*job_id*/) {

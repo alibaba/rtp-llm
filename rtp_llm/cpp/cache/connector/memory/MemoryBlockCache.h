@@ -55,14 +55,13 @@ public:
 
     // Pop up to `n` LRU items.
     // Always skips resident items.
-    // When only_complete=true (default), also skips items with is_complete=false so they are not
-    // spilled to disk per MVP disk-spill policy. Caller decides what to do with partial items
-    // (typically dropped via separate pop call).
+    // When only_complete=true (default), also skips items with is_complete=false. Disk spill
+    // callers that need hybrid-attn prefix continuity should pass only_complete=false.
     std::vector<CacheItem> popItems(int n, bool only_complete = true);
 
     // Preferred name (README §"Memory block 生命周期和反压"). Same semantics as popItems.
-    // Calls should migrate away from pop(n) entirely since pop() bypasses the
-    // disk-spill complete-only filter and corrupts the disk tier policy.
+    // Calls should migrate away from pop(n) entirely because pop() drops item metadata
+    // needed by the disk tier.
     std::vector<CacheItem> takeLRUItems(int n, bool only_complete = true) {
         return popItems(n, only_complete);
     }

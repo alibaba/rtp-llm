@@ -39,6 +39,7 @@ public:
 
 public:
     bool init();
+    bool postInit();
 
     bool hasActiveConnectors() const override;
     bool hasP2PConnector() const override;

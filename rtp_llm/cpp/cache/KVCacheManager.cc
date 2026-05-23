@@ -592,6 +592,10 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
     return coordinator_->executeFunction(request, response);
 }
 
+bool KVCacheManager::postInitConnectorCoordinator() {
+    return !coordinator_ || coordinator_->postInit();
+}
+
 void KVCacheManager::initConnectorCoordinator() {
     RTP_LLM_LOG_INFO(
         "init connector coordinator, cache config: [%s], kv cache config: [%s], runtime config: [%s], parallelism config: [%s], sp config: [%s]",

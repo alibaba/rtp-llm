@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <dirent.h>
 #include <fcntl.h>
 #include <filesystem>
 #include <linux/fs.h>
@@ -35,6 +36,52 @@ std::string toHexShort(uint64_t v) {
     std::ostringstream oss;
     oss << std::hex << v;
     return oss.str();
+}
+
+bool removePathRecursive(const std::string& path, std::string& error) {
+    struct stat st;
+    if (::lstat(path.c_str(), &st) != 0) {
+        if (errno == ENOENT) {
+            return true;
+        }
+        error = "lstat failed errno=" + std::to_string(errno) + "(" + std::strerror(errno) + ")";
+        return false;
+    }
+    if (!S_ISDIR(st.st_mode)) {
+        if (::unlink(path.c_str()) == 0 || errno == ENOENT) {
+            return true;
+        }
+        error = "unlink failed errno=" + std::to_string(errno) + "(" + std::strerror(errno) + ")";
+        return false;
+    }
+
+    DIR* dir = ::opendir(path.c_str());
+    if (dir == nullptr) {
+        error = "opendir failed errno=" + std::to_string(errno) + "(" + std::strerror(errno) + ")";
+        return false;
+    }
+    bool ok = true;
+    while (auto* entry = ::readdir(dir)) {
+        const std::string name = entry->d_name;
+        if (name == "." || name == "..") {
+            continue;
+        }
+        std::string child_error;
+        if (!removePathRecursive(path + "/" + name, child_error)) {
+            ok    = false;
+            error = child_error;
+            break;
+        }
+    }
+    ::closedir(dir);
+    if (!ok) {
+        return false;
+    }
+    if (::rmdir(path.c_str()) == 0 || errno == ENOENT) {
+        return true;
+    }
+    error = "rmdir failed errno=" + std::to_string(errno) + "(" + std::strerror(errno) + ")";
+    return false;
 }
 
 }  // namespace
@@ -215,12 +262,11 @@ void DiskSpillFileManager::cleanupRunDir() {
     if (run_dir_.empty()) {
         return;
     }
-    std::error_code ec;
-    std::filesystem::remove_all(run_dir_, ec);
-    if (ec) {
+    std::string error;
+    if (!removePathRecursive(run_dir_, error)) {
         RTP_LLM_LOG_WARNING("disk spill cleanup run_dir failed, path_hash=%s err=%s",
                             path_hash_.c_str(),
-                            ec.message().c_str());
+                            error.c_str());
     }
 }
 
@@ -268,14 +314,14 @@ void DiskSpillFileManager::cleanupOldStartupDirs() {
         if (acquired) {
             ::flock(fd, LOCK_UN);
             ::close(fd);
-            std::error_code rm_ec;
-            std::filesystem::remove_all(entry.path(), rm_ec);
-            if (rm_ec) {
+            const auto  entry_path = entry.path().string();
+            std::string error;
+            if (!removePathRecursive(entry_path, error)) {
                 RTP_LLM_LOG_WARNING("disk spill cleanup stale dir failed, path=%s err=%s",
-                                    entry.path().c_str(),
-                                    rm_ec.message().c_str());
+                                    entry_path.c_str(),
+                                    error.c_str());
             } else {
-                RTP_LLM_LOG_INFO("disk spill cleaned stale dir, path=%s", entry.path().c_str());
+                RTP_LLM_LOG_INFO("disk spill cleaned stale dir, path=%s", entry_path.c_str());
             }
         } else {
             ::close(fd);

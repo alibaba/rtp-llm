@@ -313,6 +313,17 @@ private:
 
     bool validateSlot(int disk_id, int slot_id) const;
     bool checkGenLocked(int disk_id, int slot_id, const DiskGen& expected) const;
+    size_t logicalIoBytes(const std::shared_ptr<DiskSpillFileManager>& file_manager, size_t bytes) const;
+    bool pwriteSlotLogical(const std::shared_ptr<DiskSpillFileManager>& file_manager,
+                           const std::shared_ptr<DiskSpillIoWorker>&    io_worker,
+                           int                                          slot_id,
+                           const void*                                  data,
+                           size_t                                       bytes) const;
+    bool preadSlotLogical(const std::shared_ptr<DiskSpillFileManager>& file_manager,
+                          const std::shared_ptr<DiskSpillIoWorker>&    io_worker,
+                          int                                          slot_id,
+                          void*                                        data,
+                          size_t                                       bytes) const;
 
     InitConfig                                   config_;
     bool                                         master_mode_{true};

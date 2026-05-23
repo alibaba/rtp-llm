@@ -46,6 +46,14 @@ std::string detectHostname() {
     return "unknown";
 }
 
+bool directIoNeedsStaging(const DiskSpillFileManagerPtr& file_manager, const void* data, size_t bytes) {
+    if (!file_manager || file_manager->ioMode() != DiskSpillFileManager::IoMode::DIRECT) {
+        return false;
+    }
+    const auto align = file_manager->alignBytes();
+    return bytes % align != 0 || (reinterpret_cast<uintptr_t>(data) % align) != 0;
+}
+
 }  // namespace
 
 void DiskSpillBlockCache::TakenDiskItem::release() {
@@ -389,6 +397,7 @@ bool DiskSpillBlockCache::writeReserved(const DiskItem& slot, const void* data, 
         return false;
     }
     std::shared_ptr<DiskSpillIoWorker> io;
+    std::shared_ptr<DiskSpillFileManager> file_manager;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!validateSlot(slot.disk_id, slot.slot_id) || !checkGenLocked(slot.disk_id, slot.slot_id, slot.gen)) {
@@ -398,14 +407,10 @@ bool DiskSpillBlockCache::writeReserved(const DiskItem& slot, const void* data, 
         if (rec.state != SlotState::RESERVED || rec.cache_key != slot.cache_key) {
             return false;
         }
-        io = disks_[slot.disk_id].io_worker;
+        io           = disks_[slot.disk_id].io_worker;
+        file_manager = disks_[slot.disk_id].file_manager;
     }
-    // Aligned write through file manager. bytes is expected to be a logical
-    // block_size (<= slot_stride_bytes). For O_DIRECT mode the caller-supplied
-    // buffer MUST be align_bytes-aligned and bytes MUST be a multiple of align;
-    // for non-direct mode any bytes works. Callers that don't satisfy alignment
-    // should use a staging buffer from the file manager.
-    return io && io->pwriteSync(slot.slot_id, data, bytes);
+    return pwriteSlotLogical(file_manager, io, slot.slot_id, data, bytes);
 }
 
 bool DiskSpillBlockCache::commit(const DiskItem& slot) {
@@ -531,6 +536,7 @@ bool DiskSpillBlockCache::readTaken(const DiskItem& slot, void* data, size_t byt
         return false;
     }
     std::shared_ptr<DiskSpillIoWorker> io;
+    std::shared_ptr<DiskSpillFileManager> file_manager;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!validateSlot(slot.disk_id, slot.slot_id) || !checkGenLocked(slot.disk_id, slot.slot_id, slot.gen)) {
@@ -540,9 +546,10 @@ bool DiskSpillBlockCache::readTaken(const DiskItem& slot, void* data, size_t byt
         if ((rec.state != SlotState::READING && rec.state != SlotState::COMMITTED) || rec.cache_key != slot.cache_key) {
             return false;
         }
-        io = disks_[slot.disk_id].io_worker;
+        io           = disks_[slot.disk_id].io_worker;
+        file_manager = disks_[slot.disk_id].file_manager;
     }
-    return io && io->preadSync(slot.slot_id, data, bytes);
+    return preadSlotLogical(file_manager, io, slot.slot_id, data, bytes);
 }
 
 void DiskSpillBlockCache::releaseTakenSlot(const DiskItem& item) {
@@ -567,6 +574,7 @@ bool DiskSpillBlockCache::putExternalSlot(const DiskItem& slot, const void* data
         return false;
     }
     std::shared_ptr<DiskSpillIoWorker> io;
+    std::shared_ptr<DiskSpillFileManager> file_manager;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!validateSlot(slot.disk_id, slot.slot_id)) {
@@ -598,8 +606,9 @@ bool DiskSpillBlockCache::putExternalSlot(const DiskItem& slot, const void* data
         lruPushBackLocked(slot.disk_id, slot.slot_id);
         committed_index_[slot.cache_key] = slot;
         io                               = disk.io_worker;
+        file_manager                     = disk.file_manager;
     }
-    if (!io || !io->pwriteSync(slot.slot_id, data, bytes)) {
+    if (!pwriteSlotLogical(file_manager, io, slot.slot_id, data, bytes)) {
         // rollback
         std::lock_guard<std::mutex> lock(mutex_);
         committed_index_.erase(slot.cache_key);
@@ -720,6 +729,70 @@ size_t DiskSpillBlockCache::totalSlotNum() const {
 
 size_t DiskSpillBlockCache::alignBytes() const {
     return config_.align_bytes;
+}
+
+size_t DiskSpillBlockCache::logicalIoBytes(const std::shared_ptr<DiskSpillFileManager>& file_manager,
+                                           size_t                                       bytes) const {
+    if (!file_manager || file_manager->ioMode() != DiskSpillFileManager::IoMode::DIRECT) {
+        return bytes;
+    }
+    return std::min(slot_stride_bytes_, alignUpTo(bytes, file_manager->alignBytes()));
+}
+
+bool DiskSpillBlockCache::pwriteSlotLogical(const std::shared_ptr<DiskSpillFileManager>& file_manager,
+                                            const std::shared_ptr<DiskSpillIoWorker>&    io_worker,
+                                            int                                          slot_id,
+                                            const void*                                  data,
+                                            size_t                                       bytes) const {
+    if (!file_manager || !io_worker || !data || bytes == 0 || bytes > config_.block_size) {
+        return false;
+    }
+    const auto io_bytes = logicalIoBytes(file_manager, bytes);
+    if (io_bytes == bytes && !directIoNeedsStaging(file_manager, data, bytes)) {
+        return io_worker->pwriteSync(slot_id, data, bytes);
+    }
+    auto staging = file_manager->acquireStagingBuffer();
+    if (!staging || !staging->valid() || staging->size() < io_bytes) {
+        if (staging) {
+            file_manager->releaseStagingBuffer(staging);
+        }
+        return false;
+    }
+    auto* dst = static_cast<char*>(staging->data());
+    std::memcpy(dst, data, bytes);
+    if (io_bytes > bytes) {
+        std::memset(dst + bytes, 0, io_bytes - bytes);
+    }
+    const bool ok = io_worker->pwriteSync(slot_id, dst, io_bytes);
+    file_manager->releaseStagingBuffer(staging);
+    return ok;
+}
+
+bool DiskSpillBlockCache::preadSlotLogical(const std::shared_ptr<DiskSpillFileManager>& file_manager,
+                                           const std::shared_ptr<DiskSpillIoWorker>&    io_worker,
+                                           int                                          slot_id,
+                                           void*                                        data,
+                                           size_t                                       bytes) const {
+    if (!file_manager || !io_worker || !data || bytes == 0 || bytes > config_.block_size) {
+        return false;
+    }
+    const auto io_bytes = logicalIoBytes(file_manager, bytes);
+    if (io_bytes == bytes && !directIoNeedsStaging(file_manager, data, bytes)) {
+        return io_worker->preadSync(slot_id, data, bytes);
+    }
+    auto staging = file_manager->acquireStagingBuffer();
+    if (!staging || !staging->valid() || staging->size() < io_bytes) {
+        if (staging) {
+            file_manager->releaseStagingBuffer(staging);
+        }
+        return false;
+    }
+    const bool ok = io_worker->preadSync(slot_id, staging->data(), io_bytes);
+    if (ok) {
+        std::memcpy(data, staging->data(), bytes);
+    }
+    file_manager->releaseStagingBuffer(staging);
+    return ok;
 }
 
 }  // namespace rtp_llm

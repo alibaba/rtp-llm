@@ -59,9 +59,9 @@ public:
 public:
     bool init();
 
-    // Called by KVCacheConnectorCoordinator AFTER it has assigned
-    // memory_connector_ (so the cross-rank capability HELLO can succeed without
-    // dereferencing a null memory_connector_ on the receiving side).
+    // Called after every rank has started its gRPC server. The cross-rank
+    // capability HELLO cannot run during connector init because peer RPC servers
+    // are not listening yet.
     bool postInit();
 
     std::shared_ptr<AsyncMatchContext> asyncMatch(const std::shared_ptr<KVCacheResource>& resource,
@@ -201,7 +201,9 @@ private:
     OpSequenceTracker& trackerForIncomingRank(int peer_seq_id);  // very simple peer-id hashing
 
     // Broadcast helpers used by CommitCoordinator
-    bool broadcastSpillToWorkers(SpillJobId job_id, const DiskSpillBlockCache::DiskItem& slot);
+    bool broadcastSpillToWorkers(SpillJobId job_id,
+                                  const DiskSpillBlockCache::DiskItem& slot,
+                                  BlockIdxType source_mem_block);
     bool broadcastDeleteToWorkers(const DiskSpillBlockCache::DiskItem& slot);
     SpillWriteStatus pollWorkerSpillStatus(int worker_idx, SpillJobId job_id);
 
@@ -232,6 +234,7 @@ private:
     std::shared_ptr<DiskSpillBlockCache>                    disk_spill_cache_;
     std::shared_ptr<DiskSpillCommitCoordinator>             commit_coordinator_;
     std::shared_ptr<BroadcastManager>                       broadcast_manager_;
+    std::shared_ptr<BroadcastManager>                       disk_broadcast_manager_;
     std::shared_ptr<autil::LockFreeThreadPool>              wait_done_thread_pool_;
     OpSequenceTracker                                       outgoing_op_sequence_;
     std::mutex                                              incoming_op_sequence_mutex_;

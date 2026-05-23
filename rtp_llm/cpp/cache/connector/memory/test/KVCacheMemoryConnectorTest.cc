@@ -494,6 +494,12 @@ private:
         return conn;
     }
 
+    void drainDiskSpillsForTest(const std::shared_ptr<KVCacheMemoryConnector>& conn) const {
+        ASSERT_NE(conn, nullptr);
+        ASSERT_NE(conn->commit_coordinator_, nullptr);
+        ASSERT_TRUE(conn->commit_coordinator_->drainForTest(3000));
+    }
+
     BlockIdxType putHostItemToConnector(const std::shared_ptr<KVCacheMemoryConnector>& conn,
                                         CacheKeyType                                   key,
                                         char                                           fill,
@@ -1821,7 +1827,8 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_MixedDiskSource) {
     item->set_source_type(MemoryOperationRequestPB::DISK_SLOT);
     item->set_disk_id(disk_slot->disk_id);
     item->set_disk_slot_id(disk_slot->slot_id);
-    item->set_generation(disk_slot->generation);
+    item->set_generation(disk_slot->gen.slot_gen);
+    item->set_key_generation(disk_slot->gen.key_gen);
     item->set_logical_bytes(mem_size);
     for (int layer = 0; layer < static_cast<int>(cache_config_.layer_all_num); ++layer) {
         item->add_gpu_blocks(kGpuBlock);
@@ -1830,7 +1837,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_MixedDiskSource) {
     MemoryOperationResponsePB resp;
     EXPECT_TRUE(connector_->copyCache(req, resp));
     EXPECT_TRUE(resp.success());
-    EXPECT_FALSE(connector_->disk_spill_cache_->contains(key));
+    EXPECT_TRUE(connector_->disk_spill_cache_->contains(key));
     for (int layer = 0; layer < static_cast<int>(cache_config_.layer_all_num); ++layer) {
         verifyBlockInfosContent(allocator_->convertIndexToBuffer(layer, kGpuBlock), 'q');
     }
@@ -1883,6 +1890,7 @@ TEST_F(KVCacheMemoryConnectorTest, ensureEnoughFreeBlocks_SpillsCompleteEvictedI
     ASSERT_EQ(pool->freeBlocksNum(), 0u);
 
     EXPECT_TRUE(conn->ensureEnoughFreeBlocks(1));
+    drainDiskSpillsForTest(conn);
     EXPECT_GE(pool->freeBlocksNum(), 1u);
     EXPECT_EQ(conn->block_cache_->size(), 1u);
     const auto status = conn->disk_spill_cache_->status();
@@ -1890,7 +1898,7 @@ TEST_F(KVCacheMemoryConnectorTest, ensureEnoughFreeBlocks_SpillsCompleteEvictedI
     EXPECT_TRUE(conn->disk_spill_cache_->contains(94001) || conn->disk_spill_cache_->contains(94002));
 }
 
-TEST_F(KVCacheMemoryConnectorTest, ensureEnoughFreeBlocks_PartialItemDroppedNotSpilled) {
+TEST_F(KVCacheMemoryConnectorTest, ensureEnoughFreeBlocks_SpillsPartialEvictedItemToDisk) {
     constexpr size_t kPerLayerStride = 256 * 1024;
     auto             conn = createDiskEnabledConnector(kPerLayerStride, /*memory_size_mb=*/2, /*disk_capacity_mb=*/4);
     auto             pool = conn->block_pool_;
@@ -1901,11 +1909,14 @@ TEST_F(KVCacheMemoryConnectorTest, ensureEnoughFreeBlocks_PartialItemDroppedNotS
     ASSERT_EQ(pool->freeBlocksNum(), 0u);
 
     EXPECT_TRUE(conn->ensureEnoughFreeBlocks(1));
+    drainDiskSpillsForTest(conn);
     EXPECT_GE(pool->freeBlocksNum(), 1u);
     EXPECT_TRUE(conn->block_cache_->empty());
     const auto status = conn->disk_spill_cache_->status();
-    EXPECT_EQ(status.committed_slot_num, 0u) << "MVP: partial items must NOT spill to disk";
-    EXPECT_FALSE(conn->disk_spill_cache_->match(95001).matched);
+    EXPECT_EQ(status.committed_slot_num, 1u);
+    const auto match = conn->disk_spill_cache_->match(95001);
+    EXPECT_TRUE(match.matched);
+    EXPECT_FALSE(match.is_complete);
 }
 
 TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnFalse_CountMismatch) {

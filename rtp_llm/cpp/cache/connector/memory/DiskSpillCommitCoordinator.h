@@ -14,6 +14,7 @@
 
 #include "rtp_llm/cpp/cache/connector/memory/DiskSpillBlockCache.h"
 #include "rtp_llm/cpp/cache/connector/memory/DiskSpillTypes.h"
+#include "rtp_llm/cpp/cache/KVCacheResource.h"
 
 namespace rtp_llm {
 
@@ -58,7 +59,7 @@ public:
     // to all workers. Returns true if broadcast was successfully dispatched (not
     // necessarily acked). False indicates a permanent failure and the spill is
     // aborted.
-    using BroadcastSpillFn = std::function<bool(SpillJobId, const DiskSpillBlockCache::DiskItem&)>;
+    using BroadcastSpillFn = std::function<bool(SpillJobId, const DiskSpillBlockCache::DiskItem&, BlockIdxType)>;
 
     // Called once per abort to ask the caller to broadcast DELETE_DISK_SLOT.
     using BroadcastDeleteFn = std::function<bool(const DiskSpillBlockCache::DiskItem&)>;
@@ -86,6 +87,7 @@ public:
     // async commit. on_complete fires (from coordinator thread or local pwrite
     // thread) when the job reaches a terminal state.
     SpillJobId submitSpill(const DiskSpillBlockCache::DiskItem& slot,
+                           BlockIdxType                         source_mem_block,
                            std::vector<char>                    staging_data,
                            OnCompleteFn                         on_complete);
 
@@ -107,6 +109,7 @@ private:
     struct SpillJob {
         SpillJobId                       id{0};
         DiskSpillBlockCache::DiskItem    slot{};
+        BlockIdxType                     source_mem_block{NULL_BLOCK_IDX};
         // shared_ptr so the IoWorker callback can keep the staging buffer alive
         // past job erase, in the abort-before-pwrite-completes case.
         std::shared_ptr<std::vector<char>> staging_data;
@@ -114,6 +117,7 @@ private:
         SpillStageState                  state{SpillStageState::RESERVED};
         std::chrono::steady_clock::time_point created_at;
         std::chrono::steady_clock::time_point staging_done_at;
+        std::chrono::steady_clock::time_point pwrite_inflight_at;
         // Worker rank ack: rank -> status. For TP=1 (no workers), this is empty.
         std::unordered_map<int, SpillWriteStatus> worker_status;
         bool                                      local_pwrite_done{false};
@@ -122,13 +126,14 @@ private:
     };
 
     void mainLoop();
-    void tickLocked();
+    void tickLocked(std::unique_lock<std::mutex>& lock);
     void onLocalPwriteComplete(SpillJobId id, bool ok);
     void terminate(SpillJob& job, SpillStageState final_state, std::unique_lock<std::mutex>& lock);
     bool allWorkersDone(const SpillJob& job) const;
     bool anyWorkerFailed(const SpillJob& job) const;
     bool tryDispatchLocalPwrite(SpillJob& job);
-    bool tryBroadcastSpill(SpillJob& job);
+    bool shouldEnterPwriteInflight(const SpillJob& job,
+                                   std::chrono::steady_clock::time_point now) const;
 
     std::shared_ptr<DiskSpillBlockCache>  cache_;
     Config                                config_;

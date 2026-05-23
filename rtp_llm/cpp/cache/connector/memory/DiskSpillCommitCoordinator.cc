@@ -1,9 +1,19 @@
 #include "rtp_llm/cpp/cache/connector/memory/DiskSpillCommitCoordinator.h"
 
+#include <cstring>
+
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
+namespace {
+
+size_t alignUpTo(size_t value, size_t alignment) {
+    RTP_LLM_CHECK_WITH_INFO(alignment != 0, "disk spill alignment must not be zero");
+    return ((value + alignment - 1) / alignment) * alignment;
+}
+
+}  // namespace
 
 DiskSpillCommitCoordinator::DiskSpillCommitCoordinator(std::shared_ptr<DiskSpillBlockCache> cache,
                                                        Config                               config,
@@ -67,6 +77,7 @@ void DiskSpillCommitCoordinator::stop() {
 }
 
 SpillJobId DiskSpillCommitCoordinator::submitSpill(const DiskSpillBlockCache::DiskItem& slot,
+                                                   BlockIdxType                         source_mem_block,
                                                    std::vector<char>                    staging_data,
                                                    OnCompleteFn                         on_complete) {
     if (!running_.load()) {
@@ -85,13 +96,15 @@ SpillJobId DiskSpillCommitCoordinator::submitSpill(const DiskSpillBlockCache::Di
     }
     const auto id = next_job_id_.fetch_add(1);
     SpillJob   job;
-    job.id              = id;
-    job.slot            = slot;
-    job.staging_data    = std::make_shared<std::vector<char>>(std::move(staging_data));
-    job.on_complete     = std::move(on_complete);
-    job.state           = SpillStageState::RESERVED;
-    job.created_at      = std::chrono::steady_clock::now();
-    job.staging_done_at = job.created_at;
+    job.id               = id;
+    job.slot             = slot;
+    job.source_mem_block = source_mem_block;
+    job.staging_data     = std::make_shared<std::vector<char>>(std::move(staging_data));
+    job.on_complete      = std::move(on_complete);
+    job.state            = SpillStageState::RESERVED;
+    job.created_at       = std::chrono::steady_clock::now();
+    job.staging_done_at   = job.created_at;
+    job.pwrite_inflight_at = job.created_at;
     for (int r = 0; r < worker_count_; ++r) {
         job.worker_status[r] = SpillWriteStatus::PENDING;
     }
@@ -172,14 +185,21 @@ void DiskSpillCommitCoordinator::mainLoop() {
             if (!running_.load()) {
                 return;
             }
-            tickLocked();
+            tickLocked(lock);
         }
     }
 }
 
-void DiskSpillCommitCoordinator::tickLocked() {
+void DiskSpillCommitCoordinator::tickLocked(std::unique_lock<std::mutex>& lock) {
+    struct BroadcastTask {
+        SpillJobId                    id{0};
+        DiskSpillBlockCache::DiskItem slot{};
+        BlockIdxType                  source_mem_block{NULL_BLOCK_IDX};
+    };
+
     const auto now = std::chrono::steady_clock::now();
     std::vector<SpillJobId> terminate_ids;
+    std::vector<BroadcastTask> broadcast_tasks;
     for (auto& [id, job] : jobs_) {
         // RESERVED -> STAGING: dispatch local pwrite + broadcast spill
         if (job.state == SpillStageState::RESERVED) {
@@ -188,23 +208,28 @@ void DiskSpillCommitCoordinator::tickLocked() {
                 terminate_ids.push_back(id);
                 continue;
             }
-            if (!tryBroadcastSpill(job)) {
-                job.state = SpillStageState::ABORTING;
-                terminate_ids.push_back(id);
-                continue;
+            job.state           = SpillStageState::STAGING;
+            job.staging_done_at = now;
+            if (spill_fn_) {
+                job.spill_broadcast_sent = true;
+                broadcast_tasks.push_back(BroadcastTask{id, job.slot, job.source_mem_block});
+            } else {
+                // no worker fanout (e.g. TP=1) — treat as instantly acked
+                for (auto& [rank, status] : job.worker_status) {
+                    status = SpillWriteStatus::SUCCESS;
+                }
+                job.spill_broadcast_sent = true;
             }
-            job.state = SpillStageState::STAGING;
         }
 
-        // STAGING: timeout if no progress
+        // STAGING: enter pwrite collection as soon as local pwrite progresses, or
+        // when stage ack times out. The previous implementation waited for the
+        // full stage_ack_timeout even when every ack was already complete, which
+        // delayed commits by minutes in production configs.
         if (job.state == SpillStageState::STAGING) {
-            const auto elapsed_ms =
-                std::chrono::duration_cast<std::chrono::milliseconds>(now - job.staging_done_at).count();
-            if (elapsed_ms > config_.stage_ack_timeout_ms) {
-                if (!job.local_pwrite_done) {
-                    // local pwrite not done -> push to PWRITE_INFLIGHT so we wait commit_timeout next
-                }
-                job.state = SpillStageState::PWRITE_INFLIGHT;
+            if (shouldEnterPwriteInflight(job, now)) {
+                job.state              = SpillStageState::PWRITE_INFLIGHT;
+                job.pwrite_inflight_at = now;
             }
         }
 
@@ -231,7 +256,7 @@ void DiskSpillCommitCoordinator::tickLocked() {
                 terminate_ids.push_back(id);
             } else {
                 const auto elapsed_ms =
-                    std::chrono::duration_cast<std::chrono::milliseconds>(now - job.created_at).count();
+                    std::chrono::duration_cast<std::chrono::milliseconds>(now - job.pwrite_inflight_at).count();
                 if (elapsed_ms > config_.commit_timeout_ms) {
                     job.state = SpillStageState::ABORTING;
                     terminate_ids.push_back(id);
@@ -239,6 +264,35 @@ void DiskSpillCommitCoordinator::tickLocked() {
             }
         }
     }
+
+    if (!broadcast_tasks.empty()) {
+        lock.unlock();
+        std::vector<SpillJobId> failed_broadcasts;
+        failed_broadcasts.reserve(broadcast_tasks.size());
+        for (const auto& task : broadcast_tasks) {
+            bool ok = false;
+            try {
+                ok = spill_fn_(task.id, task.slot, task.source_mem_block);
+            } catch (const std::exception& e) {
+                RTP_LLM_LOG_WARNING("disk spill broadcast callback threw: %s", e.what());
+            } catch (...) {
+                RTP_LLM_LOG_WARNING("disk spill broadcast callback threw unknown");
+            }
+            if (!ok) {
+                failed_broadcasts.push_back(task.id);
+            }
+        }
+        lock.lock();
+        for (auto id : failed_broadcasts) {
+            auto it = jobs_.find(id);
+            if (it == jobs_.end()) {
+                continue;
+            }
+            it->second.state = SpillStageState::ABORTING;
+            terminate_ids.push_back(id);
+        }
+    }
+
     // Run terminations outside the per-job loop to avoid mutating the map during
     // iteration.
     for (auto id : terminate_ids) {
@@ -279,13 +333,60 @@ bool DiskSpillCommitCoordinator::tryDispatchLocalPwrite(SpillJob& job) {
     if (job.slot.disk_id < 0 || static_cast<size_t>(job.slot.disk_id) >= fms.size()) {
         return false;
     }
+    const auto file_manager = fms[job.slot.disk_id];
+    if (!file_manager) {
+        return false;
+    }
     const auto workers = cache_->ioWorkers();
     if (static_cast<size_t>(job.slot.disk_id) >= workers.size() || !workers[job.slot.disk_id]) {
         return false;
     }
-    const auto id      = job.id;
-    auto*      self    = this;
-    auto       staging = job.staging_data;  // shared_ptr capture keeps buffer alive past job erase
+    auto staging = job.staging_data;
+    if (!staging || staging->size() < job.slot.block_size) {
+        return false;
+    }
+    if (file_manager->ioMode() == DiskSpillFileManager::IoMode::DIRECT) {
+        auto aligned_staging = file_manager->acquireStagingBuffer();
+        if (!aligned_staging || !aligned_staging->valid() || aligned_staging->size() < job.slot.block_size) {
+            if (aligned_staging) {
+                file_manager->releaseStagingBuffer(aligned_staging);
+            }
+            return false;
+        }
+        const auto write_bytes = alignUpTo(job.slot.block_size, file_manager->alignBytes());
+        if (write_bytes > aligned_staging->size()) {
+            file_manager->releaseStagingBuffer(aligned_staging);
+            return false;
+        }
+        std::memcpy(aligned_staging->data(), staging->data(), job.slot.block_size);
+        if (write_bytes > job.slot.block_size) {
+            std::memset(static_cast<char*>(aligned_staging->data()) + job.slot.block_size,
+                        0,
+                        write_bytes - job.slot.block_size);
+        }
+
+        const auto id   = job.id;
+        auto*      self = this;
+        {
+            std::lock_guard<std::mutex> lk(pending_callbacks_mutex_);
+            ++pending_callbacks_;
+        }
+        const bool ok = workers[job.slot.disk_id]->submitWrite(
+            job.slot.slot_id,
+            aligned_staging->data(),
+            write_bytes,
+            [self, id, staging, aligned_staging, file_manager](bool ok, const std::string& /*err*/) {
+                file_manager->releaseStagingBuffer(aligned_staging);
+                self->onLocalPwriteComplete(id, ok);
+                std::lock_guard<std::mutex> lk(self->pending_callbacks_mutex_);
+                --self->pending_callbacks_;
+                self->pending_callbacks_cv_.notify_all();
+            });
+        return ok;
+    }
+
+    const auto id   = job.id;
+    auto*      self = this;
     {
         std::lock_guard<std::mutex> lk(pending_callbacks_mutex_);
         ++pending_callbacks_;
@@ -300,11 +401,6 @@ bool DiskSpillCommitCoordinator::tryDispatchLocalPwrite(SpillJob& job) {
             --self->pending_callbacks_;
             self->pending_callbacks_cv_.notify_all();
         });
-    if (!ok) {
-        std::lock_guard<std::mutex> lk(pending_callbacks_mutex_);
-        --pending_callbacks_;
-        pending_callbacks_cv_.notify_all();
-    }
     return ok;
 }
 
@@ -320,17 +416,14 @@ void DiskSpillCommitCoordinator::onLocalPwriteComplete(SpillJobId id, bool ok) {
     cv_.notify_one();
 }
 
-bool DiskSpillCommitCoordinator::tryBroadcastSpill(SpillJob& job) {
-    if (!spill_fn_) {
-        // no worker fanout (e.g. TP=1) — treat as instantly acked
-        for (auto& [rank, status] : job.worker_status) {
-            status = SpillWriteStatus::SUCCESS;
-        }
-        job.spill_broadcast_sent = true;
+bool DiskSpillCommitCoordinator::shouldEnterPwriteInflight(
+    const SpillJob& job, std::chrono::steady_clock::time_point now) const {
+    if (job.local_pwrite_done || allWorkersDone(job) || anyWorkerFailed(job)) {
         return true;
     }
-    job.spill_broadcast_sent = spill_fn_(job.id, job.slot);
-    return job.spill_broadcast_sent;
+    const auto elapsed_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(now - job.staging_done_at).count();
+    return elapsed_ms > config_.stage_ack_timeout_ms;
 }
 
 bool DiskSpillCommitCoordinator::allWorkersDone(const SpillJob& job) const {

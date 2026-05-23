@@ -111,6 +111,7 @@ public:
 
     // for every single rank
     bool executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response);
+    bool postInitConnectorCoordinator();
 
     // handle read request from decode side (StartLoad RPC), delegate to coordinator
     void handleRead(const P2PConnectorStartLoadRequestPB& request,

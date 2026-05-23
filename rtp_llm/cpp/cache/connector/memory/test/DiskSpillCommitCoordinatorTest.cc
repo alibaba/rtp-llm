@@ -32,7 +32,7 @@ protected:
         std::filesystem::remove_all(base_path_, ec);
     }
 
-    std::shared_ptr<DiskSpillBlockCache> makeCache(size_t block_size = 4096) {
+    std::shared_ptr<DiskSpillBlockCache> makeCache(size_t block_size = 4096, int max_staging_buffers = 32) {
         DiskSpillBlockCache::InitConfig cfg;
         cfg.disks.push_back(DiskSpillBlockCache::DiskConfig{base_path_, /*capacity_mb=*/1});
         cfg.block_size              = block_size;
@@ -42,9 +42,10 @@ protected:
         cfg.schema_hash             = "cct";
         cfg.startup_uuid            = "u_" + std::to_string(uuid_++);
         cfg.hostname                = "h";
-        cfg.io_threads_per_disk     = 1;
-        cfg.io_queue_size           = 32;
-        cfg.cleanup_old_startup_dirs = false;
+        cfg.io_threads_per_disk          = 1;
+        cfg.io_queue_size                = 32;
+        cfg.max_staging_buffers_per_disk = max_staging_buffers;
+        cfg.cleanup_old_startup_dirs     = false;
         auto cache = DiskSpillBlockCache::create(cfg);
         EXPECT_TRUE(cache->init());
         return cache;
@@ -73,7 +74,7 @@ TEST_F(DiskSpillCommitCoordinatorTest, SubmitSpillTp1Commits) {
     auto                          fut = done.get_future();
     std::vector<char>             data(4096, 'X');
     const auto id =
-        c.submitSpill(*slot, data, [&](SpillJobId, SpillStageState s) { done.set_value(s); });
+        c.submitSpill(*slot, NULL_BLOCK_IDX, data, [&](SpillJobId, SpillStageState s) { done.set_value(s); });
     EXPECT_NE(id, 0u);
 
     const auto state = fut.wait_for(std::chrono::seconds(2));
@@ -98,7 +99,7 @@ TEST_F(DiskSpillCommitCoordinatorTest, SubmitSpillTp2WaitsForWorkerAck) {
         cache,
         cfg,
         /*worker_count=*/1,
-        [](SpillJobId, const DiskSpillBlockCache::DiskItem&) { return true; },
+        [](SpillJobId, const DiskSpillBlockCache::DiskItem&, BlockIdxType) { return true; },
         nullptr,
         [&](int /*rank*/, SpillJobId) {
             poll_called.fetch_add(1);
@@ -109,7 +110,7 @@ TEST_F(DiskSpillCommitCoordinatorTest, SubmitSpillTp2WaitsForWorkerAck) {
     std::promise<SpillStageState> done;
     auto                          fut = done.get_future();
     std::vector<char>             data(4096, 'Y');
-    c.submitSpill(*slot, data, [&](SpillJobId, SpillStageState s) { done.set_value(s); });
+    c.submitSpill(*slot, NULL_BLOCK_IDX, data, [&](SpillJobId, SpillStageState s) { done.set_value(s); });
 
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     EXPECT_NE(fut.wait_for(std::chrono::milliseconds(50)), std::future_status::ready)
@@ -134,7 +135,7 @@ TEST_F(DiskSpillCommitCoordinatorTest, WorkerFailureTriggersAbortAndDeleteBroadc
         cache,
         {},
         /*worker_count=*/1,
-        [](SpillJobId, const DiskSpillBlockCache::DiskItem&) { return true; },
+        [](SpillJobId, const DiskSpillBlockCache::DiskItem&, BlockIdxType) { return true; },
         [&](const DiskSpillBlockCache::DiskItem&) {
             delete_calls.fetch_add(1);
             return true;
@@ -145,7 +146,7 @@ TEST_F(DiskSpillCommitCoordinatorTest, WorkerFailureTriggersAbortAndDeleteBroadc
     std::promise<SpillStageState> done;
     auto                          fut = done.get_future();
     std::vector<char>             data(4096, 'Z');
-    c.submitSpill(*slot, data, [&](SpillJobId, SpillStageState s) { done.set_value(s); });
+    c.submitSpill(*slot, NULL_BLOCK_IDX, data, [&](SpillJobId, SpillStageState s) { done.set_value(s); });
 
     const auto s = fut.wait_for(std::chrono::seconds(2));
     ASSERT_EQ(s, std::future_status::ready);
@@ -164,7 +165,7 @@ TEST_F(DiskSpillCommitCoordinatorTest, BroadcastFailureAborts) {
         cache,
         {},
         /*worker_count=*/1,
-        [](SpillJobId, const DiskSpillBlockCache::DiskItem&) { return false; },  // broadcast fails
+        [](SpillJobId, const DiskSpillBlockCache::DiskItem&, BlockIdxType) { return false; },  // broadcast fails
         nullptr,
         nullptr);
     ASSERT_TRUE(c.start());
@@ -172,7 +173,7 @@ TEST_F(DiskSpillCommitCoordinatorTest, BroadcastFailureAborts) {
     std::promise<SpillStageState> done;
     auto                          fut = done.get_future();
     std::vector<char>             data(4096, 'W');
-    c.submitSpill(*slot, data, [&](SpillJobId, SpillStageState s) { done.set_value(s); });
+    c.submitSpill(*slot, NULL_BLOCK_IDX, data, [&](SpillJobId, SpillStageState s) { done.set_value(s); });
 
     const auto s = fut.wait_for(std::chrono::seconds(2));
     ASSERT_EQ(s, std::future_status::ready);
@@ -194,7 +195,7 @@ TEST_F(DiskSpillCommitCoordinatorTest, CommitTimeoutAborts) {
         cache,
         cfg,
         /*worker_count=*/1,
-        [](SpillJobId, const DiskSpillBlockCache::DiskItem&) { return true; },
+        [](SpillJobId, const DiskSpillBlockCache::DiskItem&, BlockIdxType) { return true; },
         nullptr,
         [](int, SpillJobId) { return SpillWriteStatus::PENDING; });
     ASSERT_TRUE(c.start());
@@ -202,7 +203,7 @@ TEST_F(DiskSpillCommitCoordinatorTest, CommitTimeoutAborts) {
     std::promise<SpillStageState> done;
     auto                          fut = done.get_future();
     std::vector<char>             data(4096, 'T');
-    c.submitSpill(*slot, data, [&](SpillJobId, SpillStageState s) { done.set_value(s); });
+    c.submitSpill(*slot, NULL_BLOCK_IDX, data, [&](SpillJobId, SpillStageState s) { done.set_value(s); });
 
     const auto s = fut.wait_for(std::chrono::seconds(2));
     ASSERT_EQ(s, std::future_status::ready);
@@ -210,16 +211,85 @@ TEST_F(DiskSpillCommitCoordinatorTest, CommitTimeoutAborts) {
     c.stop();
 }
 
-TEST_F(DiskSpillCommitCoordinatorTest, NotifyWorkerStatusPushPath) {
+TEST_F(DiskSpillCommitCoordinatorTest, CommitTimeoutStartsAfterPwriteInflight) {
     auto cache = makeCache();
     auto slot  = cache->reserve(/*key=*/105, 4096, true);
+    ASSERT_TRUE(slot.has_value());
+
+    DiskSpillCommitCoordinator::Config cfg;
+    cfg.commit_timeout_ms    = 100;
+    cfg.stage_ack_timeout_ms = 10;
+    cfg.poll_interval_ms     = 10;
+
+    std::atomic<int> poll_called{0};
+    DiskSpillCommitCoordinator c(
+        cache,
+        cfg,
+        /*worker_count=*/1,
+        [](SpillJobId, const DiskSpillBlockCache::DiskItem&, BlockIdxType) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(150));
+            return true;
+        },
+        nullptr,
+        [&](int, SpillJobId) {
+            return poll_called.fetch_add(1) >= 2 ? SpillWriteStatus::SUCCESS : SpillWriteStatus::PENDING;
+        });
+    ASSERT_TRUE(c.start());
+
+    std::promise<SpillStageState> done;
+    auto                          fut = done.get_future();
+    std::vector<char>             data(4096, 'C');
+    c.submitSpill(*slot, NULL_BLOCK_IDX, data, [&](SpillJobId, SpillStageState s) { done.set_value(s); });
+
+    const auto s = fut.wait_for(std::chrono::seconds(2));
+    ASSERT_EQ(s, std::future_status::ready);
+    EXPECT_EQ(fut.get(), SpillStageState::COMMITTED);
+    EXPECT_TRUE(cache->contains(105));
+    c.stop();
+}
+
+TEST_F(DiskSpillCommitCoordinatorTest, BufferedPwriteDoesNotConsumeAlignedStagingPool) {
+    auto cache = makeCache(/*block_size=*/4096, /*max_staging_buffers=*/1);
+    auto fms   = cache->fileManagers();
+    ASSERT_EQ(fms.size(), 1u);
+    ASSERT_EQ(fms[0]->ioMode(), DiskSpillFileManager::IoMode::BUFFERED);
+
+    auto held_staging = fms[0]->acquireStagingBuffer();
+    ASSERT_TRUE(held_staging);
+    ASSERT_TRUE(held_staging->valid());
+
+    auto slot = cache->reserve(/*key=*/106, 4096, true);
+    ASSERT_TRUE(slot.has_value());
+
+    DiskSpillCommitCoordinator c(cache, {}, /*worker_count=*/0, nullptr, nullptr, nullptr);
+    ASSERT_TRUE(c.start());
+
+    std::promise<SpillStageState> done;
+    auto                          fut = done.get_future();
+    std::vector<char>             data(4096, 'B');
+    const auto id =
+        c.submitSpill(*slot, NULL_BLOCK_IDX, data, [&](SpillJobId, SpillStageState s) { done.set_value(s); });
+    EXPECT_NE(id, 0u);
+
+    const auto state = fut.wait_for(std::chrono::seconds(2));
+    ASSERT_EQ(state, std::future_status::ready);
+    EXPECT_EQ(fut.get(), SpillStageState::COMMITTED);
+    EXPECT_TRUE(cache->contains(106));
+
+    fms[0]->releaseStagingBuffer(held_staging);
+    c.stop();
+}
+
+TEST_F(DiskSpillCommitCoordinatorTest, NotifyWorkerStatusPushPath) {
+    auto cache = makeCache();
+    auto slot  = cache->reserve(/*key=*/106, 4096, true);
     ASSERT_TRUE(slot.has_value());
 
     DiskSpillCommitCoordinator c(
         cache,
         {},
         /*worker_count=*/1,
-        [](SpillJobId, const DiskSpillBlockCache::DiskItem&) { return true; },
+        [](SpillJobId, const DiskSpillBlockCache::DiskItem&, BlockIdxType) { return true; },
         nullptr,
         [](int, SpillJobId) { return SpillWriteStatus::PENDING; });
     ASSERT_TRUE(c.start());
@@ -227,7 +297,8 @@ TEST_F(DiskSpillCommitCoordinatorTest, NotifyWorkerStatusPushPath) {
     std::promise<SpillStageState> done;
     auto                          fut = done.get_future();
     std::vector<char>             data(4096, 'N');
-    const auto                    id = c.submitSpill(*slot, data, [&](SpillJobId, SpillStageState s) { done.set_value(s); });
+    const auto                    id =
+        c.submitSpill(*slot, NULL_BLOCK_IDX, data, [&](SpillJobId, SpillStageState s) { done.set_value(s); });
 
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     c.notifyWorkerStatus(id, 0, SpillWriteStatus::SUCCESS);
@@ -235,6 +306,47 @@ TEST_F(DiskSpillCommitCoordinatorTest, NotifyWorkerStatusPushPath) {
     const auto s = fut.wait_for(std::chrono::seconds(2));
     ASSERT_EQ(s, std::future_status::ready);
     EXPECT_EQ(fut.get(), SpillStageState::COMMITTED);
+    c.stop();
+}
+
+TEST_F(DiskSpillCommitCoordinatorTest, BroadcastPushAckDoesNotDeadlockAndCommitsBeforeStageTimeout) {
+    auto cache = makeCache();
+    auto slot  = cache->reserve(/*key=*/107, 4096, true);
+    ASSERT_TRUE(slot.has_value());
+
+    DiskSpillCommitCoordinator::Config cfg;
+    cfg.stage_ack_timeout_ms = 300000;
+    cfg.commit_timeout_ms    = 2000;
+    cfg.poll_interval_ms     = 10;
+
+    DiskSpillCommitCoordinator* coordinator = nullptr;
+    std::atomic<int>            broadcast_called{0};
+    DiskSpillCommitCoordinator  c(
+        cache,
+        cfg,
+        /*worker_count=*/1,
+        [&](SpillJobId id, const DiskSpillBlockCache::DiskItem&, BlockIdxType source_mem_block) {
+            EXPECT_EQ(source_mem_block, 123);
+            broadcast_called.fetch_add(1);
+            coordinator->notifyWorkerStatus(id, 0, SpillWriteStatus::SUCCESS);
+            return true;
+        },
+        nullptr,
+        [](int, SpillJobId) { return SpillWriteStatus::PENDING; });
+    coordinator = &c;
+    ASSERT_TRUE(c.start());
+
+    std::promise<SpillStageState> done;
+    auto                          fut = done.get_future();
+    std::vector<char>             data(4096, 'P');
+    const auto                    id =
+        c.submitSpill(*slot, 123, data, [&](SpillJobId, SpillStageState s) { done.set_value(s); });
+    EXPECT_NE(id, 0u);
+
+    const auto s = fut.wait_for(std::chrono::milliseconds(500));
+    ASSERT_EQ(s, std::future_status::ready);
+    EXPECT_EQ(fut.get(), SpillStageState::COMMITTED);
+    EXPECT_EQ(broadcast_called.load(), 1);
     c.stop();
 }
 
@@ -248,7 +360,7 @@ TEST_F(DiskSpillCommitCoordinatorTest, BackpressureWhenMaxInflight) {
         cache,
         cfg,
         /*worker_count=*/1,
-        [](SpillJobId, const DiskSpillBlockCache::DiskItem&) { return true; },
+        [](SpillJobId, const DiskSpillBlockCache::DiskItem&, BlockIdxType) { return true; },
         nullptr,
         [](int, SpillJobId) { return SpillWriteStatus::PENDING; });  // never resolve
     ASSERT_TRUE(c.start());
@@ -259,7 +371,7 @@ TEST_F(DiskSpillCommitCoordinatorTest, BackpressureWhenMaxInflight) {
         auto slot = cache->reserve(static_cast<CacheKeyType>(200 + i), 4096, true);
         ASSERT_TRUE(slot.has_value());
         std::vector<char> data(4096, static_cast<char>('a' + i));
-        const auto id = c.submitSpill(*slot, data, [](SpillJobId, SpillStageState) {});
+        const auto id = c.submitSpill(*slot, NULL_BLOCK_IDX, data, [](SpillJobId, SpillStageState) {});
         if (id == 0) {
             ++rejected;
         } else {
