@@ -32,40 +32,42 @@ OUT_DIR = "/home/zw193905/RTP-LLM/github-opensource/docs/hidden_align/rtp_llm_du
 PORT = 18235
 GPU = "1"
 
-SMOKE_ARGS = [
-    "--warm_up",
-    "0",
-    "--seq_size_per_block",
-    "64",
-    "--act_type",
-    "BF16",
-    "--enable_cuda_graph",
-    "0",
-    "--tp_size",
-    "1",
-    "--ep_size",
-    "1",
-    "--dp_size",
-    "1",
-    "--world_size",
-    "1",
-    "--quantization",
-    "FP8_PER_BLOCK_NO_MOE",
-    "--moe_strategy",
-    "mega_moe",
-    "--reserver_runtime_mem_mb",
-    "8192",
-    "--force_cpu_load_weights",
-    "1",
-    "--fp8_kv_cache",
-    "1",
-    "--use_deepep_moe",
-    "0",
-    "--use_deepep_low_latency",
-    "0",
-    "--use_all_gather",
-    "0",
-]
+
+def build_smoke_args(enable_cuda_graph: int) -> list[str]:
+    return [
+        "--warm_up",
+        "0",
+        "--seq_size_per_block",
+        "64",
+        "--act_type",
+        "BF16",
+        "--enable_cuda_graph",
+        str(enable_cuda_graph),
+        "--tp_size",
+        "1",
+        "--ep_size",
+        "1",
+        "--dp_size",
+        "1",
+        "--world_size",
+        "1",
+        "--quantization",
+        "FP8_PER_BLOCK_NO_MOE",
+        "--moe_strategy",
+        "mega_moe",
+        "--reserver_runtime_mem_mb",
+        "8192",
+        "--force_cpu_load_weights",
+        "1",
+        "--fp8_kv_cache",
+        "1",
+        "--use_deepep_moe",
+        "0",
+        "--use_deepep_low_latency",
+        "0",
+        "--use_all_gather",
+        "0",
+    ]
 
 
 def build_long_prompt(target_tokens=4096):
@@ -153,7 +155,7 @@ def kill_server(proc):
         proc.terminate()
 
 
-def query_server(port, prompt, max_tokens):
+def query_server(port, prompt, max_tokens, timeout):
     url = f"http://0.0.0.0:{port}/"
     payload = {
         "prompt": prompt,
@@ -165,19 +167,19 @@ def query_server(port, prompt, max_tokens):
             "return_output_ids": True,
         },
     }
-    r = requests.post(url, json=payload, timeout=180)
+    r = requests.post(url, json=payload, timeout=timeout)
     r.raise_for_status()
     return r.json()
 
 
-def run_one_prompt(name, prompt, max_tokens):
+def run_one_prompt(name, prompt, max_tokens, args):
     print(f"\n=== Prompt {name!r} ===", flush=True)
-    case_dir = os.path.join(DUMP_BASE, name)
+    case_dir = os.path.join(args.dump_base, name)
     shutil.rmtree(case_dir, ignore_errors=True)
     os.makedirs(case_dir, exist_ok=True)
 
     env = os.environ.copy()
-    env["CUDA_VISIBLE_DEVICES"] = GPU
+    env["CUDA_VISIBLE_DEVICES"] = args.gpu
     # bazel builds generated pbs into bazel-bin; make them importable
     bazel_bin = os.path.join(WORK_DIR, "bazel-bin")
     extra_paths = [bazel_bin]
@@ -185,40 +187,45 @@ def run_one_prompt(name, prompt, max_tokens):
     env["PYTHONPATH"] = ":".join(extra_paths) + (
         ":" + existing_pp if existing_pp else ""
     )
-    env["CHECKPOINT_PATH"] = MODEL_PATH
+    env["CHECKPOINT_PATH"] = args.model
     env["MODEL_TYPE"] = "glm_5"
-    env["TOKENIZER_PATH"] = MODEL_PATH
-    env["START_PORT"] = str(PORT)
+    env["TOKENIZER_PATH"] = args.model
+    env["START_PORT"] = str(args.port)
     env["CUDA_HOME"] = "/usr/local/cuda"
     env["NVCC_PREPEND_FLAGS"] = (
         "-ccbin=/home/zw193905/.conda_gcc/bin/x86_64-conda-linux-gnu-g++"
     )
     env["MOE_STRATEGY"] = "mega_moe"
     env["DETERMINISTIC_GEMM"] = "1"
-    env["MOEDBG"] = "1"
-    env["MOEDBG_DIR"] = DUMP_BASE
-    env["MOEDBG_CASE"] = name
-    env["MOEDBG_FULL_THRESHOLD"] = str(
-        16 * 1024 * 1024
-    )  # 16M elements, enough for 2k×6k
+    if args.skip_hidden_dump:
+        env["MOEDBG"] = "0"
+    else:
+        env["MOEDBG"] = "1"
+        env["MOEDBG_DIR"] = args.dump_base
+        env["MOEDBG_CASE"] = name
+        env["MOEDBG_FULL_THRESHOLD"] = str(
+            16 * 1024 * 1024
+        )  # 16M elements, enough for 2k×6k
     home = os.environ.get("HOME", os.path.expanduser("~"))
     env["DG_JIT_CACHE_DIR"] = os.path.join(home, ".deep_gemm")
 
-    log_file = os.path.join(OUT_DIR, f"{name}.server.log")
+    log_file = os.path.join(args.out_dir, f"{name}.server.log")
     print(f"  Log: {log_file}", flush=True)
-    cmd = ["/opt/conda310/bin/python", "-m", "rtp_llm.start_server"] + SMOKE_ARGS
+    cmd = ["/opt/conda310/bin/python", "-m", "rtp_llm.start_server"] + build_smoke_args(
+        args.enable_cuda_graph
+    )
     log_fh = open(log_file, "w")
     proc = subprocess.Popen(cmd, env=env, stdout=log_fh, stderr=log_fh, cwd=WORK_DIR)
 
     try:
-        if not wait_server_ready(PORT, timeout=420):
+        if not wait_server_ready(args.port, timeout=args.start_timeout):
             print(f"  FATAL: server failed to start; see {log_file}", flush=True)
             return None
 
         # Query
         print(f"  Querying ({len(prompt)} chars, max_tokens={max_tokens})", flush=True)
         t0 = time.time()
-        resp = query_server(PORT, prompt, max_tokens)
+        resp = query_server(args.port, prompt, max_tokens, args.query_timeout)
         print(f"  Response in {time.time() - t0:.1f}s", flush=True)
         output_text = resp.get("response", "")
         output_ids = resp.get("output_ids", [[]])
@@ -230,6 +237,35 @@ def run_one_prompt(name, prompt, max_tokens):
             output_ids = output_ids[0]
         print(f"  output_text[:80]: {output_text[:80]!r}", flush=True)
         print(f"  output_token_ids[:10]: {output_ids[:10]}", flush=True)
+
+        if args.skip_hidden_dump:
+            out_payload = {
+                "name": name,
+                "prompt": prompt,
+                "max_tokens": max_tokens,
+                "output_text": output_text,
+                "output_token_ids": output_ids,
+                "tensors": {},
+                "stats": {},
+                "extra": {"hidden_dump_skipped": True},
+            }
+            out_path = os.path.join(args.out_dir, f"{name}.pt")
+            torch.save(out_payload, out_path)
+            print(f"  Saved {out_path}", flush=True)
+            with open(os.path.join(args.out_dir, f"{name}.stats.json"), "w") as f:
+                json.dump(
+                    {
+                        "name": name,
+                        "output_text": output_text,
+                        "output_token_ids": output_ids,
+                        "stats": {},
+                        "hidden_dump_skipped": True,
+                    },
+                    f,
+                    indent=2,
+                    ensure_ascii=False,
+                )
+            return out_payload
 
         # Locate dump files
         # _rt writes one .pt per forward; the FIRST forward is prefill
@@ -257,10 +293,10 @@ def run_one_prompt(name, prompt, max_tokens):
             "stats": dump.get("stats", {}),
             "extra": dump.get("extra", {}),
         }
-        out_path = os.path.join(OUT_DIR, f"{name}.pt")
+        out_path = os.path.join(args.out_dir, f"{name}.pt")
         torch.save(out_payload, out_path)
         print(f"  Saved {out_path}", flush=True)
-        with open(os.path.join(OUT_DIR, f"{name}.stats.json"), "w") as f:
+        with open(os.path.join(args.out_dir, f"{name}.stats.json"), "w") as f:
             json.dump(
                 {
                     "name": name,
@@ -282,17 +318,31 @@ def run_one_prompt(name, prompt, max_tokens):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--prompts", nargs="*", default=["short", "medium", "long_4k"])
+    parser.add_argument("--model", default=MODEL_PATH)
+    parser.add_argument("--gpu", default=GPU)
+    parser.add_argument("--port", type=int, default=PORT)
+    parser.add_argument("--dump-base", default=DUMP_BASE)
+    parser.add_argument("--out-dir", default=OUT_DIR)
+    parser.add_argument("--enable-cuda-graph", type=int, choices=[0, 1], default=0)
+    parser.add_argument("--start-timeout", type=int, default=420)
+    parser.add_argument("--query-timeout", type=int, default=180)
+    parser.add_argument("--skip-hidden-dump", action="store_true")
     args = parser.parse_args()
 
-    os.makedirs(OUT_DIR, exist_ok=True)
-    os.makedirs(DUMP_BASE, exist_ok=True)
+    os.makedirs(args.out_dir, exist_ok=True)
+    os.makedirs(args.dump_base, exist_ok=True)
 
-    meta_path = os.path.join(OUT_DIR, "meta.json")
-    meta = {"model": MODEL_PATH, "engine": "rtp_llm", "prompts": {}}
+    meta_path = os.path.join(args.out_dir, "meta.json")
+    meta = {
+        "model": args.model,
+        "engine": "rtp_llm",
+        "enable_cuda_graph": args.enable_cuda_graph,
+        "prompts": {},
+    }
 
     for name in args.prompts:
         prompt, max_tokens = PROMPTS[name]
-        result = run_one_prompt(name, prompt, max_tokens)
+        result = run_one_prompt(name, prompt, max_tokens, args)
         if result is None:
             print(f"  {name}: FAILED", flush=True)
             continue

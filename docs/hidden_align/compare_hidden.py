@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare per-layer hidden states between vLLM and RTP-LLM dumps.
+"""Compare per-layer hidden states between reference and test dumps.
 
 Produces a table of per-tensor metrics:
   - cosine similarity (mean across sequence positions)
@@ -7,9 +7,9 @@ Produces a table of per-tensor metrics:
   - max absolute difference
   - correlation coefficient
 """
+import argparse
 import json
 import os
-import sys
 
 import numpy as np
 import torch
@@ -53,9 +53,9 @@ def mean_abs_diff(a: torch.Tensor, b: torch.Tensor) -> float:
     return (a.float() - b.float()).abs().mean().item()
 
 
-def compare_prompt(name: str) -> dict:
-    vllm_path = os.path.join(VLLM_DIR, f"{name}.pt")
-    rtp_path = os.path.join(RTP_DIR, f"{name}.pt")
+def compare_prompt(name: str, ref_dir: str, test_dir: str) -> dict:
+    vllm_path = os.path.join(ref_dir, f"{name}.pt")
+    rtp_path = os.path.join(test_dir, f"{name}.pt")
 
     if not os.path.exists(vllm_path):
         print(f"  SKIP {name}: vLLM dump not found")
@@ -170,20 +170,28 @@ def print_table(name: str, results: dict):
 
 
 def main():
-    prompts = sys.argv[1:] if len(sys.argv) > 1 else PROMPTS
+    parser = argparse.ArgumentParser()
+    parser.add_argument("prompt_names", nargs="*", default=None)
+    parser.add_argument("--ref-dir", default=VLLM_DIR)
+    parser.add_argument("--test-dir", default=RTP_DIR)
+    parser.add_argument(
+        "--out", default=os.path.join(OUT_DIR, "comparison_results.json")
+    )
+    args = parser.parse_args()
+
+    prompts = args.prompt_names if args.prompt_names else PROMPTS
     all_results = {}
 
     for name in prompts:
         print(f"\nComparing {name}...")
-        results = compare_prompt(name)
+        results = compare_prompt(name, args.ref_dir, args.test_dir)
         if results:
             all_results[name] = results
             print_table(name, results)
 
-    out_path = os.path.join(OUT_DIR, "comparison_results.json")
-    with open(out_path, "w") as f:
+    with open(args.out, "w") as f:
         json.dump(all_results, f, indent=2, ensure_ascii=False)
-    print(f"\nResults saved to: {out_path}")
+    print(f"\nResults saved to: {args.out}")
 
 
 if __name__ == "__main__":
