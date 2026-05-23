@@ -9,6 +9,7 @@
 
 namespace rtp_llm {
 
+class GenerateConfig;
 class GenerateInput;
 struct GrammarConfig;
 
@@ -18,6 +19,8 @@ public:
 
     static void
     init(const std::string& ckpt_path, const std::string& tree_decode_config, const GrammarConfig& grammar_config);
+
+    static bool hasGrammarConstraint(const GenerateConfig& config);
 
     static std::vector<BaseLogitsProcessorPtr> createLogitsProcessors(std::shared_ptr<GenerateInput> generate_input,
                                                                       int32_t                        init_batch_size,
