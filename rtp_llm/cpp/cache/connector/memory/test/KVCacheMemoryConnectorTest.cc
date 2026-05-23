@@ -564,10 +564,15 @@ TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_WhenMemoryCacheSyncTimeoutMs
 }
 
 TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_WhenBlockSizeBytesZero) {
-    // NOTE: business code no longer validates `block_size_bytes` for memory cache block size.
-    // `init()` validates `layer_to_block_stride_bytes` instead.
     auto cfg = cache_config_;
     cfg.layer_to_block_stride_bytes.clear();
+    cfg.group_kv_block_stride_bytes.clear();
+    cfg.group_kv_scale_stride_bytes.clear();
+    cfg.kv_block_stride_bytes       = 0;
+    cfg.kv_scale_stride_bytes       = 0;
+    cfg.kv_block_size_bytes         = 0;
+    cfg.kv_scale_size_bytes         = 0;
+    cfg.block_size_bytes            = 0;
 
     auto kv_cfg                         = kv_cache_config_;
     kv_cfg.memory_cache_size_mb         = 64;
@@ -610,10 +615,15 @@ TEST_F(KVCacheMemoryConnectorTest, initBlockPool_Throw_WhenMemoryCacheSizeMbZero
 }
 
 TEST_F(KVCacheMemoryConnectorTest, initBlockPool_Throw_WhenBlockSizeBytesZero) {
-    // NOTE: business code no longer validates `block_size_bytes` for memory cache block size.
-    // `initBlockPool()` validates `layer_to_block_stride_bytes` instead.
     auto cfg = cache_config_;
     cfg.layer_to_block_stride_bytes.clear();
+    cfg.group_kv_block_stride_bytes.clear();
+    cfg.group_kv_scale_stride_bytes.clear();
+    cfg.kv_block_stride_bytes       = 0;
+    cfg.kv_scale_stride_bytes       = 0;
+    cfg.kv_block_size_bytes         = 0;
+    cfg.kv_scale_size_bytes         = 0;
+    cfg.block_size_bytes            = 0;
 
     auto kv_cfg                         = kv_cache_config_;
     kv_cfg.memory_cache_size_mb         = 64;
@@ -657,16 +667,16 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_UsesLayerAndRegionSlots
     cfg.layer_region_to_group_id.assign(1, std::vector<int>(static_cast<size_t>(KVCacheRegionName::REGION_COUNT), -1));
     cfg.layer_region_to_group_id[0][static_cast<size_t>(KVCacheRegionName::CSA_KV)] = 0;
     cfg.layer_region_to_group_id[0][static_cast<size_t>(KVCacheRegionName::SWA_KV)] = 1;
-    cfg.group_types                 = {CacheGroupType::FULL, CacheGroupType::FULL};
-    cfg.group_kv_block_stride_bytes = {16, 32};
-    cfg.group_kv_scale_stride_bytes = {0, 0};
-    cfg.layer_to_block_stride_bytes = {999};
+    cfg.group_types                  = {CacheGroupType::FULL, CacheGroupType::FULL};
+    cfg.group_kv_block_stride_bytes  = {16, 32};
+    cfg.group_kv_scale_stride_bytes  = {0, 0};
+    cfg.layer_to_block_stride_bytes  = {999};
 
     auto kv_cfg                         = kv_cache_config_;
     kv_cfg.memory_cache_size_mb         = 64;
     kv_cfg.memory_cache_sync_timeout_ms = 1000;
     auto conn          = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, allocator_, server_addrs_);
-    conn->block_cache_ = std::make_shared<MemoryBlockCache>();
+    conn->block_cache_ = std::make_shared<MemoryDiskBlockCache>();
     ASSERT_NO_THROW(conn->initBlockPool());
 
     auto slots = conn->layerRegionSlots();
@@ -2252,10 +2262,8 @@ TEST_F(KVCacheMemoryConnectorDualPoolTest, Init_CreatesDualPools) {
     EXPECT_TRUE(conn->isDualPool());
     EXPECT_NE(conn->complete_pool_, nullptr);
     EXPECT_NE(conn->incomplete_pool_, nullptr);
-    EXPECT_NE(conn->complete_cache_, nullptr);
-    EXPECT_NE(conn->incomplete_cache_, nullptr);
     EXPECT_EQ(conn->block_pool_, nullptr);
-    EXPECT_EQ(conn->block_cache_, nullptr);
+    EXPECT_NE(conn->block_cache_, nullptr);
     EXPECT_GT(conn->complete_block_size_, 0u);
     EXPECT_GT(conn->incomplete_block_size_, 0u);
     EXPECT_GT(conn->complete_block_size_, conn->incomplete_block_size_);
@@ -2322,31 +2330,34 @@ TEST_F(KVCacheMemoryConnectorDualPoolTest, AsyncMatch_AdvancesOnlyOnCompleteHit)
         // key0: incomplete (SWA NULL) → incomplete cache
         auto inc_blks = conn->incomplete_pool_->malloc(2);
         ASSERT_EQ(inc_blks.size(), 2u);
-        MemoryBlockCache::CacheItem item0;
-        item0.cache_key   = cache_keys[0];
-        item0.block_index = static_cast<BlockIdxType>(inc_blks[0]);
-        item0.is_complete = false;
-        conn->incomplete_cache_->put(item0);
+        MemoryDiskBlockCache::CacheItem item0;
+        item0.cache_key    = cache_keys[0];
+        item0.backing_type = CacheBackingType::MEMORY;
+        item0.block_index  = static_cast<BlockIdxType>(inc_blks[0]);
+        item0.is_complete  = false;
+        conn->block_cache_->putCommitted(item0);
         conn->incomplete_pool_->blockCacheReference({static_cast<BlockIdxType>(inc_blks[0])});
         conn->incomplete_pool_->requestFree({inc_blks[0]});
 
         // key2: incomplete → incomplete cache
-        MemoryBlockCache::CacheItem item2;
-        item2.cache_key   = cache_keys[2];
-        item2.block_index = static_cast<BlockIdxType>(inc_blks[1]);
-        item2.is_complete = false;
-        conn->incomplete_cache_->put(item2);
+        MemoryDiskBlockCache::CacheItem item2;
+        item2.cache_key    = cache_keys[2];
+        item2.backing_type = CacheBackingType::MEMORY;
+        item2.block_index  = static_cast<BlockIdxType>(inc_blks[1]);
+        item2.is_complete  = false;
+        conn->block_cache_->putCommitted(item2);
         conn->incomplete_pool_->blockCacheReference({static_cast<BlockIdxType>(inc_blks[1])});
         conn->incomplete_pool_->requestFree({inc_blks[1]});
 
         // key1: complete → complete cache
         auto comp_blks = conn->complete_pool_->malloc(1);
         ASSERT_EQ(comp_blks.size(), 1u);
-        MemoryBlockCache::CacheItem item1;
-        item1.cache_key   = cache_keys[1];
-        item1.block_index = static_cast<BlockIdxType>(comp_blks[0]);
-        item1.is_complete = true;
-        conn->complete_cache_->put(item1);
+        MemoryDiskBlockCache::CacheItem item1;
+        item1.cache_key    = cache_keys[1];
+        item1.backing_type = CacheBackingType::MEMORY;
+        item1.block_index  = static_cast<BlockIdxType>(comp_blks[0]);
+        item1.is_complete  = true;
+        conn->block_cache_->putCommitted(item1);
         conn->complete_pool_->blockCacheReference({static_cast<BlockIdxType>(comp_blks[0])});
         conn->complete_pool_->requestFree({comp_blks[0]});
     }
@@ -2376,19 +2387,21 @@ TEST_F(KVCacheMemoryConnectorDualPoolTest, AsyncMatch_StopsOnDoubleMiss) {
     // Put key0 as complete, skip key1 (gap), key2 as complete
     auto blks = conn->complete_pool_->malloc(2);
     ASSERT_EQ(blks.size(), 2u);
-    MemoryBlockCache::CacheItem item0;
-    item0.cache_key   = cache_keys[0];
-    item0.block_index = static_cast<BlockIdxType>(blks[0]);
-    item0.is_complete = true;
-    conn->complete_cache_->put(item0);
+    MemoryDiskBlockCache::CacheItem item0;
+    item0.cache_key    = cache_keys[0];
+    item0.backing_type = CacheBackingType::MEMORY;
+    item0.block_index  = static_cast<BlockIdxType>(blks[0]);
+    item0.is_complete  = true;
+    conn->block_cache_->putCommitted(item0);
     conn->complete_pool_->blockCacheReference({static_cast<BlockIdxType>(blks[0])});
     conn->complete_pool_->requestFree({blks[0]});
 
-    MemoryBlockCache::CacheItem item2;
-    item2.cache_key   = cache_keys[2];
-    item2.block_index = static_cast<BlockIdxType>(blks[1]);
-    item2.is_complete = true;
-    conn->complete_cache_->put(item2);
+    MemoryDiskBlockCache::CacheItem item2;
+    item2.cache_key    = cache_keys[2];
+    item2.backing_type = CacheBackingType::MEMORY;
+    item2.block_index  = static_cast<BlockIdxType>(blks[1]);
+    item2.is_complete  = true;
+    conn->block_cache_->putCommitted(item2);
     conn->complete_pool_->blockCacheReference({static_cast<BlockIdxType>(blks[1])});
     conn->complete_pool_->requestFree({blks[1]});
 
@@ -2450,24 +2463,26 @@ TEST_F(KVCacheMemoryConnectorDualPoolTest, CacheKeys_MergesBothCaches) {
     auto conn = createConnector(cfg);
     ASSERT_TRUE(conn->isDualPool());
 
-    // Put some items into each cache
+    // Put complete/incomplete items into the unified backing cache.
     auto comp_blks = conn->complete_pool_->malloc(1);
     ASSERT_EQ(comp_blks.size(), 1u);
-    MemoryBlockCache::CacheItem item1;
-    item1.cache_key   = 100;
-    item1.block_index = static_cast<BlockIdxType>(comp_blks[0]);
-    item1.is_complete = true;
-    conn->complete_cache_->put(item1);
+    MemoryDiskBlockCache::CacheItem item1;
+    item1.cache_key    = 100;
+    item1.backing_type = CacheBackingType::MEMORY;
+    item1.block_index  = static_cast<BlockIdxType>(comp_blks[0]);
+    item1.is_complete  = true;
+    conn->block_cache_->putCommitted(item1);
     conn->complete_pool_->blockCacheReference({static_cast<BlockIdxType>(comp_blks[0])});
     conn->complete_pool_->requestFree({comp_blks[0]});
 
     auto inc_blks = conn->incomplete_pool_->malloc(1);
     ASSERT_EQ(inc_blks.size(), 1u);
-    MemoryBlockCache::CacheItem item2;
-    item2.cache_key   = 200;
-    item2.block_index = static_cast<BlockIdxType>(inc_blks[0]);
-    item2.is_complete = false;
-    conn->incomplete_cache_->put(item2);
+    MemoryDiskBlockCache::CacheItem item2;
+    item2.cache_key    = 200;
+    item2.backing_type = CacheBackingType::MEMORY;
+    item2.block_index  = static_cast<BlockIdxType>(inc_blks[0]);
+    item2.is_complete  = false;
+    conn->block_cache_->putCommitted(item2);
     conn->incomplete_pool_->blockCacheReference({static_cast<BlockIdxType>(inc_blks[0])});
     conn->incomplete_pool_->requestFree({inc_blks[0]});
 

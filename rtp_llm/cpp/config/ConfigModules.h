@@ -151,11 +151,16 @@ struct KVCacheConfig {
     std::string                             multi_task_prompt     = "";
     std::string                             multi_task_prompt_str = "";
     std::map<std::string, std::vector<int>> multi_task_prompt_tokens;
-    int64_t                                 reserve_block_ratio          = 5;
-    int                                     max_block_size_per_item      = 16;
-    int64_t                                 memory_cache_size_mb         = 0;
-    int64_t                                 memory_cache_sync_timeout_ms = 10000;
-    int                                     linear_step                  = 1;  // for linear attention cache reuse
+    int64_t                                 reserve_block_ratio               = 5;
+    int                                     max_block_size_per_item           = 16;
+    int64_t                                 memory_cache_size_mb              = 0;
+    int64_t                                 memory_cache_sync_timeout_ms      = 10000;
+    bool                                    enable_memory_cache_disk          = false;
+    std::string                             memory_cache_disk_paths           = "";
+    int64_t                                 memory_cache_disk_size_mb         = 0;
+    bool                                    memory_cache_disk_buffered_io     = true;
+    int64_t                                 memory_cache_disk_sync_timeout_ms = 30000;
+    int                                     linear_step                       = 1;  // for linear attention cache reuse
     // Fields merged from PyKvCacheConfig
     int         int8_kv_cache             = 0;
     int         fp8_kv_cache              = 0;
