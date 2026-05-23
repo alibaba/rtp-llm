@@ -22,6 +22,15 @@ int32_t inferThinkEndTokenId(const std::vector<int>& end_think_token_ids) {
     return end_think_token_ids.front();
 }
 
+std::vector<int> effectiveThinkEndTokenIds(const std::vector<int>& end_think_token_ids) {
+    if (end_think_token_ids.size() > 1
+        && (end_think_token_ids.front() == kDeepSeekNewlineTokenId
+            || end_think_token_ids.front() == kQwenGlmNewlineTokenId)) {
+        return std::vector<int>(end_think_token_ids.begin() + 1, end_think_token_ids.end());
+    }
+    return end_think_token_ids;
+}
+
 int32_t inferThinkBeginTokenId(const std::vector<int>& begin_think_token_ids) {
     if (begin_think_token_ids.empty()) {
         return kInvalidTokenId;
@@ -36,6 +45,10 @@ void maskToken(const torch::Tensor& new_tokens_logits, size_t vocab_size, int32_
     new_tokens_logits[token_id] = BaseLogitsProcessor::neg_inf;
 }
 
+bool inThinkProcess(const StreamThinkInfo& info) {
+    return info.in_think_mode && info.process_state == ThinkProcessState::IN_THINK;
+}
+
 }  // namespace
 
 ThinkModeLogitsProcessor::ThinkModeLogitsProcessor(std::vector<StreamThinkInfo> think_infos):
@@ -47,13 +60,22 @@ void ThinkModeLogitsProcessor::process(const SamplerInputs& inputs, size_t start
     for (size_t i = 0; i < size(); ++i) {
         auto& info = think_infos_[i];
 
-        if (info.in_think_mode && info.max_thinking_tokens > 0 && info.dfa_ptr
-            && !info.end_think_token_ids.empty()) {
+        if (inThinkProcess(info) && info.dfa_ptr && info.dfa_ptr->isFinished()) {
+            info.process_state = ThinkProcessState::AFTER_THINK;
+        }
+
+        if (inThinkProcess(info) && info.max_thinking_tokens > 0 && info.dfa_ptr && !info.end_think_token_ids.empty()) {
+            if (info.dfa_ptr->status() > 0 && !info.dfa_ptr->isFinished()) {
+                setVocabMask(
+                    info.dfa_ptr, inputs.logits[i + start_idx], 1, info.end_think_token_ids, inputs.vocab_size, true);
+                continue;
+            }
             int* input_lengths    = inputs.input_lengths.data_ptr<int32_t>();
             int* sequence_lengths = inputs.sequence_lengths.data_ptr<int32_t>();
             int  num_new_tokens   = 1;
-            bool enforce          = (sequence_lengths[i + start_idx] + num_new_tokens
-                            >= info.max_thinking_tokens + input_lengths[i + start_idx]);
+            int  generated_tokens = sequence_lengths[i + start_idx] - input_lengths[i + start_idx];
+            int  tokens_to_close  = static_cast<int>(info.end_think_token_ids.size() - info.dfa_ptr->status());
+            bool enforce          = generated_tokens + tokens_to_close >= info.max_thinking_tokens;
             if (enforce && !info.dfa_ptr->isFinished()) {
                 setVocabMask(info.dfa_ptr,
                              inputs.logits[i + start_idx],
@@ -65,12 +87,10 @@ void ThinkModeLogitsProcessor::process(const SamplerInputs& inputs, size_t start
             }
         }
 
-        maskToken(inputs.logits[i + start_idx],
-                  inputs.vocab_size,
-                  inferThinkBeginTokenId(info.begin_think_token_ids));
-        maskToken(inputs.logits[i + start_idx],
-                  inputs.vocab_size,
-                  inferThinkEndTokenId(info.end_think_token_ids));
+        maskToken(inputs.logits[i + start_idx], inputs.vocab_size, inferThinkBeginTokenId(info.begin_think_token_ids));
+        if (!inThinkProcess(info)) {
+            maskToken(inputs.logits[i + start_idx], inputs.vocab_size, inferThinkEndTokenId(info.end_think_token_ids));
+        }
     }
 }
 
@@ -100,7 +120,7 @@ void ThinkModeLogitsProcessor::updateStatus(const torch::Tensor& new_tokens, int
 
     for (size_t i = 0; i < size(); i++) {
         auto& info = think_infos_[i];
-        if (!info.in_think_mode)
+        if (!inThinkProcess(info))
             continue;
         if (info.max_thinking_tokens <= 0 || !info.dfa_ptr)
             continue;
@@ -117,18 +137,20 @@ void ThinkModeLogitsProcessor::updateStatus(const torch::Tensor& new_tokens, int
         }
 
         info.current_output_length += num_new_tokens;
+        if (info.dfa_ptr->isFinished()) {
+            info.process_state = ThinkProcessState::AFTER_THINK;
+        }
     }
 }
 
 ThinkModeLogitsProcessorPtr ThinkModeLogitsProcessor::fromGenerateInput(std::shared_ptr<GenerateInput> generate_input,
                                                                         int32_t                        num) {
-    auto generate_config = generate_input->generate_config;
-    bool has_static_mask = !generate_config->begin_think_token_ids.empty()
-                           || !generate_config->end_think_token_ids.empty();
+    auto generate_config         = generate_input->generate_config;
+    auto end_think_token_ids     = effectiveThinkEndTokenIds(generate_config->end_think_token_ids);
+    bool has_think_boundary_mask = !generate_config->begin_think_token_ids.empty() || !end_think_token_ids.empty();
     bool has_think_budget =
-        generate_config->in_think_mode && generate_config->max_thinking_tokens > 0
-        && !generate_config->end_think_token_ids.empty();
-    if (!has_static_mask && !has_think_budget) {
+        generate_config->in_think_mode && generate_config->max_thinking_tokens > 0 && !end_think_token_ids.empty();
+    if (!has_think_boundary_mask) {
         return nullptr;
     }
 
@@ -136,17 +158,16 @@ ThinkModeLogitsProcessorPtr ThinkModeLogitsProcessor::fromGenerateInput(std::sha
     for (size_t i = 0; i < num; i++) {
         std::shared_ptr<StringContainDFA<size_t, int>> dfa_ptr;
         if (has_think_budget) {
-            dfa_ptr = std::make_shared<StringContainDFA<size_t, int>>(generate_config->end_think_token_ids);
+            dfa_ptr = std::make_shared<StringContainDFA<size_t, int>>(end_think_token_ids);
         }
-        StreamThinkInfo think_info(
-            generate_config->in_think_mode,
-            generate_config->max_thinking_tokens,
-            generate_config->begin_think_token_ids,
-            generate_config->end_think_token_ids,
-            generate_input->inputLength(),
-            0,
-            generate_config->hasNumBeams() || generate_config->num_return_sequences > 1,
-            dfa_ptr);
+        StreamThinkInfo              think_info(generate_config->in_think_mode,
+                                   generate_config->max_thinking_tokens,
+                                   generate_config->begin_think_token_ids,
+                                   end_think_token_ids,
+                                   generate_input->inputLength(),
+                                   0,
+                                   generate_config->hasNumBeams() || generate_config->num_return_sequences > 1,
+                                   dfa_ptr);
         std::vector<StreamThinkInfo> think_infos = {think_info};
         auto                         ptr         = std::make_shared<ThinkModeLogitsProcessor>(think_infos);
 
