@@ -156,6 +156,16 @@ public class FlexlbConfig {
     private boolean dpBalanceEnabled = true;
 
     /**
+     * Cache-aware scheduling kill switch. When false, FlexLB stops polling per-worker
+     * KV cache state ({@code GrpcCacheStatusCheckRunner} submission is suppressed) and
+     * both the batcher's cache-prefix enrichment and the dispatcher's group selection
+     * fall back to no-cache paths (bucket 0, first-alive group). Set this when the
+     * cache-status pipeline is unavailable or when tests want deterministic
+     * round-robin behaviour without exercising cache-affinity code.
+     */
+    private boolean cacheAwareSchedulingEnabled = true;
+
+    /**
      * Max requests per Prefill.Enqueue batch. 0 = auto-pick worker.dpSize so one batch
      * fills exactly one DP cycle. Only effective when dpBalanceEnabled=true.
      */
