@@ -159,6 +159,46 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="Memory Cache 多TP同步的超时时间, 单位为毫秒",
     )
     kv_cache_group.add_argument(
+        "--enable_memory_cache_disk",
+        env_name="ENABLE_MEMORY_CACHE_DISK",
+        bind_to=(kv_cache_config, "enable_memory_cache_disk"),
+        type=str2bool,
+        default=False,
+        help="Memory connector 内部 disk KV cache 开关。开启时必须同时开启 enable_memory_cache。",
+    )
+    kv_cache_group.add_argument(
+        "--memory_cache_disk_paths",
+        env_name="MEMORY_CACHE_DISK_PATHS",
+        bind_to=(kv_cache_config, "memory_cache_disk_paths"),
+        type=str,
+        default="",
+        help="逗号分隔的本机 disk KV cache 挂载点列表，数量必须等于本机 local_world_size。",
+    )
+    kv_cache_group.add_argument(
+        "--memory_cache_disk_size_mb",
+        env_name="MEMORY_CACHE_DISK_SIZE_MB",
+        bind_to=(kv_cache_config, "memory_cache_disk_size_mb"),
+        type=int,
+        default=0,
+        help="每个 GPU rank 可用的 disk KV cache 文件大小，单位 MB。",
+    )
+    kv_cache_group.add_argument(
+        "--memory_cache_disk_buffered_io",
+        env_name="MEMORY_CACHE_DISK_BUFFERED_IO",
+        bind_to=(kv_cache_config, "memory_cache_disk_buffered_io"),
+        type=str2bool,
+        default=True,
+        help="disk KV cache 是否使用 buffered IO。False 时使用 O_DIRECT。",
+    )
+    kv_cache_group.add_argument(
+        "--memory_cache_disk_sync_timeout_ms",
+        env_name="MEMORY_CACHE_DISK_SYNC_TIMEOUT_MS",
+        bind_to=(kv_cache_config, "memory_cache_disk_sync_timeout_ms"),
+        type=int,
+        default=30000,
+        help="包含 disk backing 的 memory cache copy plan 同步超时时间，单位毫秒。",
+    )
+    kv_cache_group.add_argument(
         "--write_cache_sync",
         env_name="WRITE_CACHE_SYNC",
         bind_to=(kv_cache_config, "write_cache_sync"),

@@ -893,7 +893,7 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_MergesDeviceAndMemoryKeys_Dedup) {
     // put 11 then 13 => MRU order: 13,11 (11 duplicates device key)
     auto mem_connector = std::make_shared<KVCacheMemoryConnector>(
         cache_config, kv_cache_config, kv_cache_manager->allocator_, std::vector<std::string>{});
-    mem_connector->block_cache_ = std::make_shared<MemoryBlockCache>();
+    mem_connector->block_cache_ = std::make_shared<MemoryDiskBlockCache>();
     {
         MemoryBlockCache::CacheItem item;
         item.cache_key   = 11;

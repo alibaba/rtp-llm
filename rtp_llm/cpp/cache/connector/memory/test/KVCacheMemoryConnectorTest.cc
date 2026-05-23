@@ -556,10 +556,15 @@ TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_WhenMemoryCacheSyncTimeoutMs
 }
 
 TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_WhenBlockSizeBytesZero) {
-    // NOTE: business code no longer validates `block_size_bytes` for memory cache block size.
-    // `init()` validates `layer_to_block_stride_bytes` instead.
     auto cfg = cache_config_;
     cfg.layer_to_block_stride_bytes.clear();
+    cfg.group_kv_block_stride_bytes.clear();
+    cfg.group_kv_scale_stride_bytes.clear();
+    cfg.kv_block_stride_bytes       = 0;
+    cfg.kv_scale_stride_bytes       = 0;
+    cfg.kv_block_size_bytes         = 0;
+    cfg.kv_scale_size_bytes         = 0;
+    cfg.block_size_bytes            = 0;
 
     auto kv_cfg                         = kv_cache_config_;
     kv_cfg.memory_cache_size_mb         = 64;
@@ -602,10 +607,15 @@ TEST_F(KVCacheMemoryConnectorTest, initBlockPool_Throw_WhenMemoryCacheSizeMbZero
 }
 
 TEST_F(KVCacheMemoryConnectorTest, initBlockPool_Throw_WhenBlockSizeBytesZero) {
-    // NOTE: business code no longer validates `block_size_bytes` for memory cache block size.
-    // `initBlockPool()` validates `layer_to_block_stride_bytes` instead.
     auto cfg = cache_config_;
     cfg.layer_to_block_stride_bytes.clear();
+    cfg.group_kv_block_stride_bytes.clear();
+    cfg.group_kv_scale_stride_bytes.clear();
+    cfg.kv_block_stride_bytes       = 0;
+    cfg.kv_scale_stride_bytes       = 0;
+    cfg.kv_block_size_bytes         = 0;
+    cfg.kv_scale_size_bytes         = 0;
+    cfg.block_size_bytes            = 0;
 
     auto kv_cfg                         = kv_cache_config_;
     kv_cfg.memory_cache_size_mb         = 64;
@@ -650,16 +660,16 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_UsesLayerAndRegionSlots
                                         std::vector<int>(static_cast<size_t>(KVCacheRegionName::REGION_COUNT), -1));
     cfg.layer_region_to_group_id[0][static_cast<size_t>(KVCacheRegionName::CSA_KV)] = 0;
     cfg.layer_region_to_group_id[0][static_cast<size_t>(KVCacheRegionName::SWA_KV)] = 1;
-    cfg.group_types = {CacheGroupType::FULL, CacheGroupType::FULL};
-    cfg.group_kv_block_stride_bytes    = {16, 32};
-    cfg.group_kv_scale_stride_bytes    = {0, 0};
-    cfg.layer_to_block_stride_bytes    = {999};
+    cfg.group_types                  = {CacheGroupType::FULL, CacheGroupType::FULL};
+    cfg.group_kv_block_stride_bytes  = {16, 32};
+    cfg.group_kv_scale_stride_bytes  = {0, 0};
+    cfg.layer_to_block_stride_bytes  = {999};
 
     auto kv_cfg                         = kv_cache_config_;
     kv_cfg.memory_cache_size_mb         = 64;
     kv_cfg.memory_cache_sync_timeout_ms = 1000;
     auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, allocator_, server_addrs_);
-    conn->block_cache_ = std::make_shared<MemoryBlockCache>();
+    conn->block_cache_ = std::make_shared<MemoryDiskBlockCache>();
     ASSERT_NO_THROW(conn->initBlockPool());
 
     auto slots = conn->layerRegionSlots();
