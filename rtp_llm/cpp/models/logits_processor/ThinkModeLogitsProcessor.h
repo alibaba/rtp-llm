@@ -5,6 +5,12 @@
 
 namespace rtp_llm {
 
+enum class ThinkProcessState {
+    NO_THINK,
+    IN_THINK,
+    AFTER_THINK,
+};
+
 struct StreamThinkInfo {
     bool                                           in_think_mode;
     int                                            max_thinking_tokens;
@@ -14,6 +20,7 @@ struct StreamThinkInfo {
     int32_t                                        current_output_length;
     bool                                           is_beam_search;
     std::shared_ptr<StringContainDFA<size_t, int>> dfa_ptr;
+    ThinkProcessState                              process_state = ThinkProcessState::NO_THINK;
 
     StreamThinkInfo() = default;
 
@@ -32,7 +39,11 @@ struct StreamThinkInfo {
         input_length(input_length),
         current_output_length(output_length),
         is_beam_search(is_beam_search),
-        dfa_ptr(dfa_ptr) {}
+        dfa_ptr(dfa_ptr) {
+        if (think_mode && max_thinking_tokens > 0 && dfa_ptr) {
+            process_state = ThinkProcessState::IN_THINK;
+        }
+    }
 
     StreamThinkInfo copy() {
         StreamThinkInfo think_info;
@@ -43,6 +54,7 @@ struct StreamThinkInfo {
         think_info.input_length          = input_length;
         think_info.current_output_length = current_output_length;
         think_info.is_beam_search        = is_beam_search;
+        think_info.process_state         = process_state;
         if (dfa_ptr) {
             think_info.dfa_ptr = std::make_shared<StringContainDFA<size_t, int>>(*dfa_ptr);
         }
