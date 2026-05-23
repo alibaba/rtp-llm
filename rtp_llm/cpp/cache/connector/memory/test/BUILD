@@ -74,6 +74,21 @@ cc_test(
 )
 
 cc_test(
+    name = "disk_spill_block_cache_test",
+    srcs = [
+        "DiskSpillBlockCacheTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache/connector/memory:disk_spill_block_cache",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    env = {},
+)
+
+cc_test(
     name = "memory_block_cache_test",
     srcs = [
         "MemoryBlockCacheTest.cc",

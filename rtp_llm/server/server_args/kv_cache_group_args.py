@@ -143,6 +143,38 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="内存 Cache 拷贝是否启用 split-KV SM scatter/gather（CUDA 上满足布局条件时）。默认 False；True 时满足条件可走 SM copy。",
     )
     kv_cache_group.add_argument(
+        "--enable_memory_cache_disk_spill",
+        env_name="ENABLE_MEMORY_CACHE_DISK_SPILL",
+        bind_to=(kv_cache_config, "enable_memory_cache_disk_spill"),
+        type=str2bool,
+        default=False,
+        help="Memory Cache LRU 淘汰时是否启用本地 disk spill tier。",
+    )
+    kv_cache_group.add_argument(
+        "--memory_cache_disk_paths",
+        env_name="MEMORY_CACHE_DISK_PATHS",
+        bind_to=(kv_cache_config, "memory_cache_disk_paths"),
+        type=str,
+        default="",
+        help="Disk spill 路径和容量配置，格式: /path0=102400,/path1=102400，容量单位 MB。",
+    )
+    kv_cache_group.add_argument(
+        "--memory_cache_disk_init_timeout_ms",
+        env_name="MEMORY_CACHE_DISK_INIT_TIMEOUT_MS",
+        bind_to=(kv_cache_config, "memory_cache_disk_init_timeout_ms"),
+        type=int,
+        default=10000,
+        help="Disk spill 初始化/能力检查超时时间，单位毫秒。",
+    )
+    kv_cache_group.add_argument(
+        "--memory_cache_disk_stage_ack_timeout_ms",
+        env_name="MEMORY_CACHE_DISK_STAGE_ACK_TIMEOUT_MS",
+        bind_to=(kv_cache_config, "memory_cache_disk_stage_ack_timeout_ms"),
+        type=int,
+        default=1000,
+        help="Disk spill 淘汰阶段等待 worker stage ack 的超时时间，单位毫秒。",
+    )
+    kv_cache_group.add_argument(
         "--memory_cache_size_mb",
         env_name="MEMORY_CACHE_SIZE_MB",
         bind_to=(kv_cache_config, "memory_cache_size_mb"),

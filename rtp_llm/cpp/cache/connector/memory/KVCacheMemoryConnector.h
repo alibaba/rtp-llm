@@ -12,6 +12,7 @@
 #include <torch/torch.h>
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
+#include "rtp_llm/cpp/cache/connector/memory/DiskSpillBlockCache.h"
 #include "rtp_llm/cpp/cache/connector/memory/MemoryBlockCache.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -64,10 +65,16 @@ private:
         size_t            stride_bytes{0};
     };
     struct CopyInfoPerKey {
-        CacheKeyType              cache_key{0};
-        BlockIdxType              mem_block{NULL_BLOCK_IDX};
-        std::vector<BlockIdxType> gpu_blocks;
-        bool                      is_complete{true};
+        enum class SourceType {
+            MEMORY_BLOCK = 0,
+            DISK_SLOT    = 1,
+        };
+        CacheKeyType                  cache_key{0};
+        BlockIdxType                  mem_block{NULL_BLOCK_IDX};
+        std::vector<BlockIdxType>     gpu_blocks;
+        bool                          is_complete{true};
+        SourceType                    source_type{SourceType::MEMORY_BLOCK};
+        DiskSpillBlockCache::DiskSlot disk_slot;
     };
     enum class CopyDirection {
         H2D = 0,
@@ -78,17 +85,17 @@ private:
         CopyDirection               direction;
     };
 
-    std::shared_ptr<CopyPlan> buildCopyPlanForRead(const CacheKeysType& cache_keys,
-                                                   const LayerAttnBlockIds& layer_attn_block_ids,
+    std::shared_ptr<CopyPlan> buildCopyPlanForRead(const CacheKeysType&                cache_keys,
+                                                   const LayerAttnBlockIds&            layer_attn_block_ids,
                                                    const std::vector<LayerRegionSlot>& slots,
-                                                   int start_index,
-                                                   int read_num);
-    std::shared_ptr<CopyPlan> buildCopyPlanForWrite(const CacheKeysType& cache_keys,
-                                                    const LayerAttnBlockIds& layer_attn_block_ids,
+                                                   int                                 start_index,
+                                                   int                                 read_num);
+    std::shared_ptr<CopyPlan> buildCopyPlanForWrite(const CacheKeysType&                cache_keys,
+                                                    const LayerAttnBlockIds&            layer_attn_block_ids,
                                                     const std::vector<LayerRegionSlot>& slots,
-                                                    int start_index,
-                                                    int write_num,
-                                                    bool& no_need_write);
+                                                    int                                 start_index,
+                                                    int                                 write_num,
+                                                    bool&                               no_need_write);
     std::shared_ptr<CopyPlan> createCopyPlan(const std::vector<CopyInfoPerKey>& copy_infos,
                                              const CopyDirection&               direction);
     bool startCopyAsync(const std::shared_ptr<MemoryAsyncContext>& context, const std::shared_ptr<CopyPlan>& copy_plan);
@@ -96,37 +103,41 @@ private:
          sendCopyPlan(const std::shared_ptr<CopyPlan>& copy_plan) const;
     void printCopyPlan(const std::shared_ptr<CopyPlan>& copy_plan) const;
 
-    bool prepareCopyBuffers(BlockIdxType                     mem_block,
-                            const std::vector<BlockIdxType>& gpu_blocks,
-                            CopyDirection                    direction,
-                            std::vector<torch::Tensor>&      dst,
-                            std::vector<torch::Tensor>&      src);
-    bool tryCopyCacheWithBatchedMemoryCopy(const MemoryOperationRequestPB&     request,
-                                           CopyDirection                       direction,
-                                           const std::vector<LayerRegionSlot>& slots);
-    bool tryCopyCacheWithStagedMemoryCopy(const MemoryOperationRequestPB&     request,
-                                          CopyDirection                       direction,
-                                          const std::vector<LayerRegionSlot>& slots);
+    bool                     prepareCopyBuffers(BlockIdxType                     mem_block,
+                                                const std::vector<BlockIdxType>& gpu_blocks,
+                                                CopyDirection                    direction,
+                                                std::vector<torch::Tensor>&      dst,
+                                                std::vector<torch::Tensor>&      src);
+    bool                     tryCopyCacheWithBatchedMemoryCopy(const MemoryOperationRequestPB&     request,
+                                                               CopyDirection                       direction,
+                                                               const std::vector<LayerRegionSlot>& slots);
+    bool                     tryCopyCacheWithStagedMemoryCopy(const MemoryOperationRequestPB&     request,
+                                                              CopyDirection                       direction,
+                                                              const std::vector<LayerRegionSlot>& slots);
+    bool                     copyMixedMemoryDiskToDevice(const MemoryOperationRequestPB&     request,
+                                                         const std::vector<LayerRegionSlot>& slots);
+    bool                     spillMemoryToDisk(const MemoryOperationRequestPB& request);
+    bool                     deleteDiskSlots(const MemoryOperationRequestPB& request);
     StagedMemoryCopyScratch& stagedCopyScratchForDevice(int device_index);
-    bool appendCopyBytesToBuffers(const BlockInfo&            mem_block,
-                                  const BlockInfo&            gpu_block,
-                                  size_t                      byte_off,
-                                  CopyDirection               direction,
-                                  std::vector<torch::Tensor>& dst,
-                                  std::vector<torch::Tensor>& src);
+    bool                     appendCopyBytesToBuffers(const BlockInfo&            mem_block,
+                                                      const BlockInfo&            gpu_block,
+                                                      size_t                      byte_off,
+                                                      CopyDirection               direction,
+                                                      std::vector<torch::Tensor>& dst,
+                                                      std::vector<torch::Tensor>& src);
 
-    void checkLayerBlockStrideBytes() const;
+    void                         checkLayerBlockStrideBytes() const;
     std::vector<LayerRegionSlot> layerRegionSlots() const;
-    bool                      hasTypedLayerRegionSlots(const std::vector<LayerRegionSlot>& slots) const;
-    bool                      isDsv4TypedCacheLayout(const std::vector<LayerRegionSlot>& slots) const;
-    bool checkLayerBlocks(const LayerBlockIds& layer_block_ids, size_t required_len) const;
-    bool checkLayerRegionBlocks(const LayerAttnBlockIds& layer_attn_block_ids,
-                              const std::vector<LayerRegionSlot>& slots,
-                              size_t required_len) const;
-    bool gpuBlocksAllValid(const LayerBlockIds& layer_block_ids, size_t key_index) const;
-    bool gpuBlocksAllValid(const LayerAttnBlockIds& layer_attn_block_ids,
-                           const std::vector<LayerRegionSlot>& slots,
-                           size_t key_index) const;
+    bool                         hasTypedLayerRegionSlots(const std::vector<LayerRegionSlot>& slots) const;
+    bool                         isDsv4TypedCacheLayout(const std::vector<LayerRegionSlot>& slots) const;
+    bool                         checkLayerBlocks(const LayerBlockIds& layer_block_ids, size_t required_len) const;
+    bool                         checkLayerRegionBlocks(const LayerAttnBlockIds&            layer_attn_block_ids,
+                                                        const std::vector<LayerRegionSlot>& slots,
+                                                        size_t                              required_len) const;
+    bool                         gpuBlocksAllValid(const LayerBlockIds& layer_block_ids, size_t key_index) const;
+    bool                         gpuBlocksAllValid(const LayerAttnBlockIds&            layer_attn_block_ids,
+                                                   const std::vector<LayerRegionSlot>& slots,
+                                                   size_t                              key_index) const;
 
     bool mallocBlocks(size_t need_blocks, std::vector<BlockIdxType>& malloced_blocks);
     bool freeBlocks(const std::vector<BlockIdxType>& blocks, bool cache_free = true);
@@ -134,9 +145,13 @@ private:
     bool ensureEnoughFreeBlocks(size_t need_blocks);
 
     void                       initBlockPool();
+    void                       initDiskSpillCache();
     std::shared_ptr<BlockPool> createBlockPool(size_t block_size, size_t pool_size_mb) const;
+    size_t                     memoryBlockSizeBytes() const;
     std::string                blockPoolDebugString() const;
     void                       putToCache(const MemoryBlockCache::CacheItem& item);
+    bool                       spillMemoryItemToDisk(const MemoryBlockCache::CacheItem& item);
+    bool                       sendDeleteDiskSlot(const DiskSpillBlockCache::DiskSlot& slot) const;
 
     void reportMatchMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t matched_block_num);
     void reportReadMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t read_block_num);
@@ -150,13 +165,14 @@ private:
     std::shared_ptr<KVCacheAllocator> allocator_;
     const std::vector<std::string>    tp_addrs_;
 
-    std::shared_ptr<BlockPool> block_pool_;
-    mutable std::mutex                         malloc_mutex_;
-    mutable std::mutex                         staged_copy_scratch_mutex_;
+    std::shared_ptr<BlockPool>                              block_pool_;
+    mutable std::mutex                                      malloc_mutex_;
+    mutable std::mutex                                      staged_copy_scratch_mutex_;
     std::map<int, std::unique_ptr<StagedMemoryCopyScratch>> staged_copy_scratch_by_device_;
-    std::shared_ptr<MemoryBlockCache>          block_cache_;
-    std::shared_ptr<BroadcastManager>          broadcast_manager_;
-    std::shared_ptr<autil::LockFreeThreadPool> wait_done_thread_pool_;
+    std::shared_ptr<MemoryBlockCache>                       block_cache_;
+    std::shared_ptr<DiskSpillBlockCache>                    disk_spill_cache_;
+    std::shared_ptr<BroadcastManager>                       broadcast_manager_;
+    std::shared_ptr<autil::LockFreeThreadPool>              wait_done_thread_pool_;
 
     // metrics reporter
     kmonitor::MetricsReporterPtr metrics_reporter_;

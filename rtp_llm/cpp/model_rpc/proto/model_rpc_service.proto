@@ -443,17 +443,46 @@ message MemoryOperationRequestPB {
     message CopyItem {
         int32 mem_block = 1;
         repeated int32 gpu_blocks = 2;
+        int64 cache_key = 3;
+        SourceType source_type = 4;
+        int32 disk_id = 5;
+        int32 disk_slot_id = 6;
+        uint64 generation = 7;
+        uint64 logical_bytes = 8;
+        bytes valid_slot_bitmap = 9;
+        uint64 key_generation = 10;
+        bool is_complete = 11;
     }
     enum CopyDirection {
         H2D = 0;
         D2H = 1;
     }
+    enum SourceType {
+        MEMORY_BLOCK = 0;
+        DISK_SLOT = 1;
+    }
+    enum OpType {
+        UNSPECIFIED = 0;
+        LEGACY_MEMORY_COPY = 1;
+        H2D_MEMORY = 2;
+        D2H_MEMORY = 3;
+        DISK_SPILL_HELLO = 4;
+        SPILL_MEMORY_TO_DISK = 5;
+        SPILL_WRITE_STATUS = 6;
+        H2D_MIXED_MEMORY_DISK = 7;
+        DELETE_DISK_SLOT = 8;
+    }
     repeated CopyItem copy_items = 1;
     CopyDirection copy_direction = 2;
+    uint32 memory_op_protocol_version = 3;
+    uint64 op_sequence = 4;
+    OpType op_type = 5;
+    uint64 disk_spill_capability_mask = 6;
 }
 
 message MemoryOperationResponsePB {
     bool success = 1;
+    string error_type = 2;
 }
 
 message TPWorkerInfoPB {

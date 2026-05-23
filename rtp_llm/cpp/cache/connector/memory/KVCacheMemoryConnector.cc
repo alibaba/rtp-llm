@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/connector/memory/KVCacheMemoryConnector.h"
 
 #include <algorithm>
+#include <cstring>
 
 #include "rtp_llm/cpp/cache/BlockPool.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
@@ -25,27 +26,23 @@ static void applySplitKvMultiCopyFieldsIfEligible(bool enable_sm_copy, const Cac
     out.split_kv_scale_stride_bytes = cfg.kv_scale_stride_bytes;
 }
 
-static void appendBatchedMemoryCopyTile(void*                         dst,
-                                        const void*                   src,
-                                        size_t                        bytes,
-                                        std::vector<BatchedMemoryCopyTile>& tiles) {
+static void
+appendBatchedMemoryCopyTile(void* dst, const void* src, size_t bytes, std::vector<BatchedMemoryCopyTile>& tiles) {
     if (bytes > 0) {
         tiles.push_back(BatchedMemoryCopyTile{dst, src, bytes});
     }
 }
 
-static void appendStagedMemoryCopyTile(void*                         gpu,
-                                       size_t                        host_offset,
-                                       size_t                        bytes,
-                                       std::vector<StagedMemoryCopyTile>& tiles) {
+static void
+appendStagedMemoryCopyTile(void* gpu, size_t host_offset, size_t bytes, std::vector<StagedMemoryCopyTile>& tiles) {
     if (gpu != nullptr && bytes > 0) {
         tiles.push_back(StagedMemoryCopyTile{gpu, host_offset, bytes});
     }
 }
 
-static void appendStagedMemoryCopyHostSegment(void*                                    host,
-                                              size_t                                   host_offset,
-                                              size_t                                   bytes,
+static void appendStagedMemoryCopyHostSegment(void*                                     host,
+                                              size_t                                    host_offset,
+                                              size_t                                    bytes,
                                               std::vector<StagedMemoryCopyHostSegment>& segments) {
     if (host == nullptr || bytes == 0) {
         return;
@@ -115,6 +112,7 @@ bool KVCacheMemoryConnector::init() {
 
     initBlockPool();
     block_cache_ = std::make_shared<MemoryBlockCache>();
+    initDiskSpillCache();
 
     broadcast_manager_ = std::make_shared<BroadcastManager>(tp_addrs_);
     RTP_LLM_CHECK_WITH_INFO(broadcast_manager_->init(), "init failed, broadcast manager init failed");
@@ -159,6 +157,34 @@ void KVCacheMemoryConnector::initBlockPool() {
 
     block_pool_ = createBlockPool(block_size, memory_cache_size_mb);
     RTP_LLM_CHECK_WITH_INFO(block_pool_ != nullptr, "init block pool failed, create block pool failed");
+}
+
+void KVCacheMemoryConnector::initDiskSpillCache() {
+    if (!kv_cache_config_.enable_memory_cache_disk_spill) {
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(!kv_cache_config_.memory_cache_disk_paths.empty(),
+                            "init disk spill failed, MEMORY_CACHE_DISK_PATHS is empty");
+    RTP_LLM_CHECK_WITH_INFO(kv_cache_config_.memory_cache_disk_init_timeout_ms > 0,
+                            "init disk spill failed, init timeout is invalid: %ld",
+                            kv_cache_config_.memory_cache_disk_init_timeout_ms);
+    RTP_LLM_CHECK_WITH_INFO(kv_cache_config_.memory_cache_disk_stage_ack_timeout_ms > 0,
+                            "init disk spill failed, stage ack timeout is invalid: %ld",
+                            kv_cache_config_.memory_cache_disk_stage_ack_timeout_ms);
+    DiskSpillBlockCache::InitConfig config;
+    config.disks      = DiskSpillBlockCache::parseDiskConfigs(kv_cache_config_.memory_cache_disk_paths);
+    config.block_size = memoryBlockSizeBytes();
+    disk_spill_cache_ = std::make_shared<DiskSpillBlockCache>(std::move(config));
+    RTP_LLM_CHECK_WITH_INFO(disk_spill_cache_->init(), "init disk spill failed, disk cache init failed");
+}
+
+size_t KVCacheMemoryConnector::memoryBlockSizeBytes() const {
+    const auto slots      = layerRegionSlots();
+    size_t     block_size = 0;
+    for (const auto& slot : slots) {
+        block_size += slot.stride_bytes;
+    }
+    return block_size;
 }
 
 std::vector<KVCacheMemoryConnector::LayerRegionSlot> KVCacheMemoryConnector::layerRegionSlots() const {
@@ -228,22 +254,22 @@ bool KVCacheMemoryConnector::isDsv4TypedCacheLayout(const std::vector<LayerRegio
     // cache schema, not by model name. DSV4 Flash/Pro currently use seven typed pools in the fixed
     // order below, 256 tokens/block, sparse opaque KV cache store, and SWA_KV in group 6. If that
     // schema changes, update this matcher together with HybridPoolConfigCreator coverage.
-    constexpr size_t kDsv4PoolNum        = 7;
-    constexpr size_t kDsv4TokensPerBlock = 256;
-    constexpr KVCacheRegionName kExpectedRegions[kDsv4PoolNum] = {KVCacheRegionName::CSA_KV,
-                                                                  KVCacheRegionName::HCA_KV,
-                                                                  KVCacheRegionName::INDEXER_KV,
-                                                                  KVCacheRegionName::INDEXER_STATE,
-                                                                  KVCacheRegionName::CSA_STATE,
-                                                                  KVCacheRegionName::HCA_STATE,
-                                                                  KVCacheRegionName::SWA_KV};
-    constexpr CacheGroupType kExpectedGroupTypes[kDsv4PoolNum] = {CacheGroupType::FULL,
-                                                                  CacheGroupType::FULL,
-                                                                  CacheGroupType::FULL,
-                                                                  CacheGroupType::SWA,
-                                                                  CacheGroupType::SWA,
-                                                                  CacheGroupType::SWA,
-                                                                  CacheGroupType::SWA};
+    constexpr size_t            kDsv4PoolNum                      = 7;
+    constexpr size_t            kDsv4TokensPerBlock               = 256;
+    constexpr KVCacheRegionName kExpectedRegions[kDsv4PoolNum]    = {KVCacheRegionName::CSA_KV,
+                                                                     KVCacheRegionName::HCA_KV,
+                                                                     KVCacheRegionName::INDEXER_KV,
+                                                                     KVCacheRegionName::INDEXER_STATE,
+                                                                     KVCacheRegionName::CSA_STATE,
+                                                                     KVCacheRegionName::HCA_STATE,
+                                                                     KVCacheRegionName::SWA_KV};
+    constexpr CacheGroupType    kExpectedGroupTypes[kDsv4PoolNum] = {CacheGroupType::FULL,
+                                                                     CacheGroupType::FULL,
+                                                                     CacheGroupType::FULL,
+                                                                     CacheGroupType::SWA,
+                                                                     CacheGroupType::SWA,
+                                                                     CacheGroupType::SWA,
+                                                                     CacheGroupType::SWA};
 
     if (slots.empty() || !hasTypedLayerRegionSlots(slots)) {
         return false;
@@ -256,8 +282,7 @@ bool KVCacheMemoryConnector::isDsv4TypedCacheLayout(const std::vector<LayerRegio
         || cache_config_.kernel_seq_size_per_block != kDsv4TokensPerBlock) {
         return false;
     }
-    if (cache_config_.cache_specs.size() != kDsv4PoolNum
-        || cache_config_.group_region_names.size() != kDsv4PoolNum
+    if (cache_config_.cache_specs.size() != kDsv4PoolNum || cache_config_.group_region_names.size() != kDsv4PoolNum
         || cache_config_.group_types.size() != kDsv4PoolNum
         || cache_config_.group_kv_block_stride_bytes.size() < kDsv4PoolNum
         || cache_config_.group_kv_scale_stride_bytes.size() < kDsv4PoolNum
@@ -282,8 +307,7 @@ bool KVCacheMemoryConnector::isDsv4TypedCacheLayout(const std::vector<LayerRegio
         if (row.size() < regionIndex(KVCacheRegionName::REGION_COUNT)) {
             return false;
         }
-        if (row[regionIndex(KVCacheRegionName::DEFAULT)] >= 0
-            || row[regionIndex(KVCacheRegionName::SWA_KV)] != 6) {
+        if (row[regionIndex(KVCacheRegionName::DEFAULT)] >= 0 || row[regionIndex(KVCacheRegionName::SWA_KV)] != 6) {
             return false;
         }
 
@@ -319,9 +343,9 @@ bool KVCacheMemoryConnector::isDsv4TypedCacheLayout(const std::vector<LayerRegio
             || cache_config_.layer_region_to_group_id[layer][attn] != slot.group_id) {
             return false;
         }
-        const auto group_id     = static_cast<size_t>(slot.group_id);
-        const auto group_stride = cache_config_.group_kv_block_stride_bytes[group_id]
-                                  + cache_config_.group_kv_scale_stride_bytes[group_id];
+        const auto group_id = static_cast<size_t>(slot.group_id);
+        const auto group_stride =
+            cache_config_.group_kv_block_stride_bytes[group_id] + cache_config_.group_kv_scale_stride_bytes[group_id];
         if (slot.stride_bytes != group_stride) {
             return false;
         }
@@ -372,29 +396,120 @@ std::shared_ptr<AsyncMatchContext> KVCacheMemoryConnector::asyncMatch(const std:
     // Notes:
     // - If a key is complete, we allow gpu blocks to be partially invalid and keep matching further.
     // - If all gpu blocks are valid, the final matched key must be complete.
-    size_t matched_num = already_reuse_num;
+    size_t       matched_num                    = already_reuse_num;
+    size_t       inspected_num                  = already_reuse_num;
+    CacheKeyType first_unmatched_key            = 0;
+    const char*  first_unmatched_reason         = "none";
+    bool         first_block_recorded           = false;
+    size_t       matched_entries                = 0;
+    size_t       complete_entries               = 0;
+    size_t       gpu_valid_entries              = 0;
+    size_t       complete_gpu_valid_entries     = 0;
+    int          first_complete_index           = -1;
+    int          first_complete_gpu_valid_index = -1;
+    int          first_not_found_index          = -1;
     for (size_t i = already_reuse_num; i < cache_keys_size; ++i) {
-        const auto cache_key    = cache_keys.at(i);
-        const auto match_result = block_cache_->match(static_cast<CacheKeyType>(cache_key));
-        if (isNullBlockIdx(match_result.matched_index)) {
-            break;  // only continuous prefix
+        const auto cache_key           = static_cast<CacheKeyType>(cache_keys.at(i));
+        bool       matched             = false;
+        bool       matched_is_complete = false;
+        bool       matched_in_memory   = false;
+        bool       matched_on_disk     = false;
+        const auto memory_match_result = block_cache_->match(cache_key);
+        if (!isNullBlockIdx(memory_match_result.matched_index)) {
+            matched             = true;
+            matched_is_complete = memory_match_result.is_complete;
+            matched_in_memory   = true;
+        } else if (disk_spill_cache_) {
+            const auto disk_match_result = disk_spill_cache_->match(cache_key);
+            if (disk_match_result.matched) {
+                matched             = true;
+                matched_is_complete = disk_match_result.is_complete;
+                matched_on_disk     = true;
+            }
         }
-        if (match_result.is_complete && gpuBlocksAllValid(layer_attn_block_ids, slots, i)) {
+        if (!matched) {
+            inspected_num          = i;
+            first_unmatched_key    = cache_key;
+            first_unmatched_reason = "not_found";
+            first_not_found_index  = static_cast<int>(i);
+            break;
+        }
+        const bool gpu_blocks_valid = gpuBlocksAllValid(layer_attn_block_ids, slots, i);
+        ++matched_entries;
+        if (matched_is_complete) {
+            ++complete_entries;
+            if (first_complete_index < 0) {
+                first_complete_index = static_cast<int>(i);
+            }
+        }
+        if (gpu_blocks_valid) {
+            ++gpu_valid_entries;
+        }
+        if (matched_is_complete && gpu_blocks_valid) {
+            ++complete_gpu_valid_entries;
+            if (first_complete_gpu_valid_index < 0) {
+                first_complete_gpu_valid_index = static_cast<int>(i);
+            }
+        }
+        if (matched_is_complete && gpu_blocks_valid) {
             matched_num = i + 1;
+        } else if (matched_num <= already_reuse_num && !first_block_recorded) {
+            inspected_num          = i;
+            first_unmatched_key    = cache_key;
+            first_unmatched_reason = matched_is_complete ? "gpu_blocks_invalid" : "incomplete";
+            first_block_recorded   = true;
+            if (disk_spill_cache_) {
+                RTP_LLM_LOG_INFO("memory disk cache match blocked, index=%zu cache_key=%ld source=%s complete=%d "
+                                 "gpu_blocks_valid=%d already_reuse=%zu cache_keys=%zu",
+                                 i,
+                                 cache_key,
+                                 matched_in_memory ? "memory" : (matched_on_disk ? "disk" : "unknown"),
+                                 matched_is_complete,
+                                 gpu_blocks_valid,
+                                 already_reuse_num,
+                                 cache_keys_size);
+            }
         }
     }
 
     if (matched_num <= already_reuse_num) {
-        RTP_LLM_LOG_DEBUG("not matched cache in memory, cache keys size: %zu, already_reuse_num: %zu",
-                          cache_keys_size,
-                          already_reuse_num);
+        if (disk_spill_cache_) {
+            RTP_LLM_LOG_INFO("not matched cache in memory/disk, cache_keys=%zu already_reuse=%zu inspected=%zu "
+                             "cache_key=%ld reason=%s matched_entries=%zu complete=%zu gpu_valid=%zu "
+                             "complete_gpu_valid=%zu first_complete=%d first_complete_gpu_valid=%d first_not_found=%d",
+                             cache_keys_size,
+                             already_reuse_num,
+                             inspected_num,
+                             first_unmatched_key,
+                             first_unmatched_reason,
+                             matched_entries,
+                             complete_entries,
+                             gpu_valid_entries,
+                             complete_gpu_valid_entries,
+                             first_complete_index,
+                             first_complete_gpu_valid_index,
+                             first_not_found_index);
+        } else {
+            RTP_LLM_LOG_DEBUG("not matched cache in memory, cache keys size: %zu, already_reuse_num: %zu",
+                              cache_keys_size,
+                              already_reuse_num);
+        }
         reportMatchMetrics(/*success=*/false, timer.done_us(), cache_keys_size, matched_num);
         return nullptr;
     }
-    RTP_LLM_LOG_INFO("memory cache matched blocks: already_reuse=%zu matched=%zu cache_keys=%zu",
+    RTP_LLM_LOG_INFO("memory cache matched blocks: already_reuse=%zu matched=%zu cache_keys=%zu "
+                     "matched_entries=%zu complete=%zu gpu_valid=%zu complete_gpu_valid=%zu "
+                     "first_complete=%d first_complete_gpu_valid=%d first_not_found=%d",
                      already_reuse_num,
                      matched_num,
-                     cache_keys_size);
+                     cache_keys_size,
+                     matched_entries,
+                     complete_entries,
+                     gpu_valid_entries,
+                     complete_gpu_valid_entries,
+                     first_complete_index,
+                     first_complete_gpu_valid_index,
+                     first_not_found_index);
     reportMatchMetrics(/*success=*/true, timer.done_us(), cache_keys_size, matched_num);
     return std::make_shared<MemoryAsyncMatchContext>(matched_num);
 }
@@ -474,6 +589,12 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::share
         if (success) {
             resource->setMemoryReuseBlockNum(read_block_num);
             for (const auto& copy_info : copy_plan->copy_infos) {
+                if (copy_info.source_type == CopyInfoPerKey::SourceType::DISK_SLOT) {
+                    if (disk_spill_cache_) {
+                        disk_spill_cache_->releaseReadSlot(copy_info.disk_slot);
+                    }
+                    continue;
+                }
                 const auto removed_item = block_cache_->removeIfMatch(copy_info.cache_key, copy_info.mem_block);
                 if (!removed_item.has_value()) {
                     continue;
@@ -484,6 +605,12 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::share
                              read_block_num,
                              copy_plan->copy_infos.size(),
                              total_block_num);
+        } else {
+            for (const auto& copy_info : copy_plan->copy_infos) {
+                if (copy_info.source_type == CopyInfoPerKey::SourceType::DISK_SLOT && disk_spill_cache_) {
+                    disk_spill_cache_->releaseReadSlot(copy_info.disk_slot);
+                }
+            }
         }
         // reset ptr to release memory block refs
         copy_plan.reset();
@@ -509,19 +636,42 @@ KVCacheMemoryConnector::buildCopyPlanForRead(const CacheKeysType&               
     bool                        success = true;
 
     for (int i = start_index; i < start_index + read_num; ++i) {
-        const auto cache_key    = cache_keys.at(i);
-        const auto match_result = block_cache_->match(static_cast<CacheKeyType>(cache_key));
-        if (isNullBlockIdx(match_result.matched_index)) {
+        const auto                    cache_key           = static_cast<CacheKeyType>(cache_keys.at(i));
+        const auto                    memory_match_result = block_cache_->match(cache_key);
+        bool                          source_found        = false;
+        bool                          source_is_complete  = false;
+        BlockIdxType                  source_memory_block = NULL_BLOCK_IDX;
+        DiskSpillBlockCache::DiskSlot source_disk_slot;
+        CopyInfoPerKey::SourceType    source_type = CopyInfoPerKey::SourceType::MEMORY_BLOCK;
+
+        if (!isNullBlockIdx(memory_match_result.matched_index)) {
+            source_found        = true;
+            source_is_complete  = memory_match_result.is_complete;
+            source_memory_block = memory_match_result.matched_index;
+            source_type         = CopyInfoPerKey::SourceType::MEMORY_BLOCK;
+            // 每次都加引用的原因是为了确保match到的block不会被释放(避免在写时malloc如果cache满弹出该block)
+            referenceBlocks({source_memory_block}, /*cache_ref=*/false);
+        } else if (disk_spill_cache_) {
+            auto disk_slot = disk_spill_cache_->takeForRead(cache_key);
+            if (disk_slot.has_value()) {
+                source_found       = true;
+                source_is_complete = disk_slot->is_complete;
+                source_disk_slot   = *disk_slot;
+                source_type        = CopyInfoPerKey::SourceType::DISK_SLOT;
+            }
+        }
+
+        if (!source_found) {
             RTP_LLM_LOG_WARNING("build copy plan for read failed, cache key not found, cache key: %ld", cache_key);
             success = false;
             break;
         }
-        // 每次都加引用的原因是为了确保match到的block不会被释放(避免在写时malloc如果cache满弹出该block)
-        referenceBlocks({match_result.matched_index}, /*cache_ref=*/false);
 
         CopyInfoPerKey copy_info;
-        copy_info.cache_key = cache_key;
-        copy_info.mem_block = match_result.matched_index;
+        copy_info.cache_key   = cache_key;
+        copy_info.mem_block   = source_memory_block;
+        copy_info.source_type = source_type;
+        copy_info.disk_slot   = source_disk_slot;
         copy_info.gpu_blocks.reserve(slots.size());
         for (const auto& slot : slots) {
             // Do NOT skip NULL_BLOCK_IDX here. The merged memory block layout requires reserving
@@ -530,7 +680,7 @@ KVCacheMemoryConnector::buildCopyPlanForRead(const CacheKeysType&               
             const auto attn  = static_cast<size_t>(slot.region_name);
             copy_info.gpu_blocks.push_back(layer_attn_block_ids.at(layer).at(attn)->blocks().at(i));
         }
-        copy_info.is_complete = match_result.is_complete;
+        copy_info.is_complete = source_is_complete;
         copy_infos.emplace_back(std::move(copy_info));
     }
 
@@ -543,7 +693,15 @@ KVCacheMemoryConnector::buildCopyPlanForRead(const CacheKeysType&               
 
     // free blocks in destructor
     auto plan = createCopyPlan(copy_infos, CopyDirection::H2D);
-    return success ? plan : nullptr;
+    if (!success) {
+        for (const auto& copy_info : copy_infos) {
+            if (copy_info.source_type == CopyInfoPerKey::SourceType::DISK_SLOT && disk_spill_cache_) {
+                disk_spill_cache_->releaseReadSlot(copy_info.disk_slot);
+            }
+        }
+        return nullptr;
+    }
+    return plan;
 }
 
 std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shared_ptr<KVCacheResource>& resource,
@@ -595,6 +753,15 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
         reportWriteMetrics(no_need_write, timer.done_us(), static_cast<int64_t>(cache_keys_size), 0);
         return nullptr;
     }
+    if (disk_spill_cache_) {
+        RTP_LLM_LOG_INFO("memory disk cache write plan, mem_matched=%zu cache_keys=%zu write_blocks=%zu "
+                         "first_cache_key=%ld last_cache_key=%ld",
+                         mem_matched_num,
+                         cache_keys_size,
+                         copy_plan->copy_infos.size(),
+                         copy_plan->copy_infos.front().cache_key,
+                         copy_plan->copy_infos.back().cache_key);
+    }
 
     auto write_done =
         [copy_plan, resource_copy = resource, timer, total_block_num = cache_keys_size, this](bool success) mutable {
@@ -641,7 +808,9 @@ KVCacheMemoryConnector::buildCopyPlanForWrite(const CacheKeysType&              
     // We allow writing "partial" keys (incomplete KV) to keep prefix continuity,
     // BUT the final written key MUST be "complete" (complete KV on all layers),
     // otherwise the written tail cannot be reused by asyncMatch.
-    int last_complete_index = -1;  // cache_key index in [start_index, start_index + write_num)
+    int    last_complete_index  = -1;  // cache_key index in [start_index, start_index + write_num)
+    int    first_complete_index = -1;
+    size_t complete_count       = 0;
 
     for (int i = start_index; i < start_index + write_num; ++i) {
         const auto                cache_key = cache_keys.at(i);
@@ -661,7 +830,11 @@ KVCacheMemoryConnector::buildCopyPlanForWrite(const CacheKeysType&              
 
         const bool is_complete = null_block_num == 0;
         if (is_complete) {
+            if (first_complete_index < 0) {
+                first_complete_index = i;
+            }
             last_complete_index = i;
+            ++complete_count;
         }
 
         CopyInfoPerKey copy_info;
@@ -674,12 +847,28 @@ KVCacheMemoryConnector::buildCopyPlanForWrite(const CacheKeysType&              
 
     // ensure the final written key is complete
     no_need_write = last_complete_index < start_index;
+    if (disk_spill_cache_) {
+        RTP_LLM_LOG_INFO("memory disk cache write completeness, start=%d write_num=%d complete=%zu "
+                         "first_complete=%d last_complete=%d",
+                         start_index,
+                         write_num,
+                         complete_count,
+                         first_complete_index,
+                         last_complete_index);
+    }
     if (no_need_write) {
         return nullptr;
     }
 
     // drop keys behind the last complete key
     const size_t keep_cnt = static_cast<size_t>(last_complete_index - start_index + 1);
+    if (disk_spill_cache_) {
+        RTP_LLM_LOG_INFO("memory disk cache write keep, start=%d keep=%zu first_key=%ld last_key=%ld",
+                         start_index,
+                         keep_cnt,
+                         static_cast<CacheKeyType>(cache_keys.at(start_index)),
+                         static_cast<CacheKeyType>(cache_keys.at(last_complete_index)));
+    }
     copy_infos.resize(keep_cnt);
 
     std::vector<BlockIdxType> mem_blocks;
@@ -736,11 +925,31 @@ bool KVCacheMemoryConnector::startCopyAsync(const std::shared_ptr<MemoryAsyncCon
 std::shared_ptr<BroadcastResult<FunctionRequestPB, FunctionResponsePB>>
 KVCacheMemoryConnector::sendCopyPlan(const std::shared_ptr<CopyPlan>& copy_plan) const {
     MemoryOperationRequestPB mem_req;
+    bool                     has_disk_source = false;
+    for (const auto& copy_info : copy_plan->copy_infos) {
+        has_disk_source = has_disk_source || copy_info.source_type == CopyInfoPerKey::SourceType::DISK_SLOT;
+    }
+    if (has_disk_source) {
+        mem_req.set_memory_op_protocol_version(1);
+        mem_req.set_op_type(MemoryOperationRequestPB::H2D_MIXED_MEMORY_DISK);
+    }
     mem_req.set_copy_direction(copy_plan->direction == CopyDirection::H2D ? MemoryOperationRequestPB::H2D :
                                                                             MemoryOperationRequestPB::D2H);
     for (const auto& copy_info : copy_plan->copy_infos) {
         auto* item = mem_req.add_copy_items();
+        item->set_cache_key(copy_info.cache_key);
         item->set_mem_block(copy_info.mem_block);
+        item->set_source_type(copy_info.source_type == CopyInfoPerKey::SourceType::DISK_SLOT ?
+                                  MemoryOperationRequestPB::DISK_SLOT :
+                                  MemoryOperationRequestPB::MEMORY_BLOCK);
+        if (copy_info.source_type == CopyInfoPerKey::SourceType::DISK_SLOT) {
+            item->set_disk_id(copy_info.disk_slot.disk_id);
+            item->set_disk_slot_id(copy_info.disk_slot.slot_id);
+            item->set_generation(copy_info.disk_slot.generation);
+            item->set_key_generation(copy_info.disk_slot.key_generation);
+            item->set_logical_bytes(copy_info.disk_slot.block_size);
+            item->set_is_complete(copy_info.disk_slot.is_complete);
+        }
         for (const auto& block : copy_info.gpu_blocks) {
             item->add_gpu_blocks(block);
         }
@@ -760,8 +969,10 @@ KVCacheMemoryConnector::sendCopyPlan(const std::shared_ptr<CopyPlan>& copy_plan)
                        grpc::CompletionQueue*                      completion_queue) {
         return stub->AsyncExecuteFunction(context.get(), request, completion_queue);
     };
-    return broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
-        requests, kv_cache_config_.memory_cache_sync_timeout_ms, rpc_call);
+    const auto timeout_ms = has_disk_source ? std::max(kv_cache_config_.memory_cache_sync_timeout_ms,
+                                                       kv_cache_config_.memory_cache_disk_stage_ack_timeout_ms) :
+                                              kv_cache_config_.memory_cache_sync_timeout_ms;
+    return broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(requests, timeout_ms, rpc_call);
 }
 
 void KVCacheMemoryConnector::printCopyPlan(const std::shared_ptr<CopyPlan>& copy_plan) const {
@@ -783,9 +994,56 @@ void KVCacheMemoryConnector::printCopyPlan(const std::shared_ptr<CopyPlan>& copy
 bool KVCacheMemoryConnector::copyCache(const MemoryOperationRequestPB& request, MemoryOperationResponsePB& response) {
     RTP_LLM_PROFILE_FUNCTION();
     autil::ScopedTime2 timer;
-    const auto         copy_direction =
+    if (request.memory_op_protocol_version() != 0) {
+        if (request.op_type() == MemoryOperationRequestPB::UNSPECIFIED) {
+            response.set_success(false);
+            response.set_error_type("protocol_violation");
+            reportCopyMetrics(false, timer.done_us(), CopyDirection::H2D);
+            return false;
+        }
+        const auto slots = layerRegionSlots();
+        switch (request.op_type()) {
+            case MemoryOperationRequestPB::H2D_MIXED_MEMORY_DISK: {
+                const bool success = copyMixedMemoryDiskToDevice(request, slots);
+                response.set_success(success);
+                if (!success) {
+                    response.set_error_type("disk_read_failed");
+                }
+                reportCopyMetrics(success, timer.done_us(), CopyDirection::H2D);
+                return success;
+            }
+            case MemoryOperationRequestPB::SPILL_MEMORY_TO_DISK: {
+                const bool success = spillMemoryToDisk(request);
+                response.set_success(success);
+                if (!success) {
+                    response.set_error_type("disk_spill_failed");
+                }
+                reportCopyMetrics(success, timer.done_us(), CopyDirection::D2H);
+                return success;
+            }
+            case MemoryOperationRequestPB::DELETE_DISK_SLOT: {
+                const bool success = deleteDiskSlots(request);
+                response.set_success(success);
+                if (!success) {
+                    response.set_error_type("disk_delete_failed");
+                }
+                reportCopyMetrics(success, timer.done_us(), CopyDirection::H2D);
+                return success;
+            }
+            case MemoryOperationRequestPB::LEGACY_MEMORY_COPY:
+            case MemoryOperationRequestPB::H2D_MEMORY:
+            case MemoryOperationRequestPB::D2H_MEMORY:
+                break;
+            default:
+                response.set_success(false);
+                response.set_error_type("unsupported_op_type");
+                reportCopyMetrics(false, timer.done_us(), CopyDirection::H2D);
+                return false;
+        }
+    }
+    const auto copy_direction =
         (request.copy_direction() == MemoryOperationRequestPB::H2D) ? CopyDirection::H2D : CopyDirection::D2H;
-    const auto slots = layerRegionSlots();
+    const auto slots           = layerRegionSlots();
     const bool has_typed_slots = hasTypedLayerRegionSlots(slots);
 
     if (tryCopyCacheWithStagedMemoryCopy(request, copy_direction, slots)) {
@@ -818,7 +1076,7 @@ bool KVCacheMemoryConnector::copyCache(const MemoryOperationRequestPB& request, 
 
     if (!dst_buffers.empty()) {
         MultiCopyParams mc{dst_buffers, src_buffers};
-        const bool can_use_split_kv_copy = !hasTypedLayerRegionSlots(slots);
+        const bool      can_use_split_kv_copy = !hasTypedLayerRegionSlots(slots);
         applySplitKvMultiCopyFieldsIfEligible(
             kv_cache_config_.enable_memory_cache_sm_copy && can_use_split_kv_copy, cache_config_, mc);
         execNoBlockCopy(mc);
@@ -841,8 +1099,8 @@ bool KVCacheMemoryConnector::tryCopyCacheWithStagedMemoryCopy(const MemoryOperat
     }
 
     StagedMemoryCopyParams params;
-    params.direction = direction == CopyDirection::H2D ? StagedMemoryCopyDirection::H2D :
-                                                         StagedMemoryCopyDirection::D2H;
+    params.direction =
+        direction == CopyDirection::H2D ? StagedMemoryCopyDirection::H2D : StagedMemoryCopyDirection::D2H;
 
     size_t logical_rows  = 0;
     size_t payload_bytes = 0;
@@ -875,7 +1133,7 @@ bool KVCacheMemoryConnector::tryCopyCacheWithStagedMemoryCopy(const MemoryOperat
                 continue;
             }
 
-            const auto gpu_buffers = allocator_->convertIndexToBuffer(slot.layer_id, slot.region_name, gpu_block);
+            const auto gpu_buffers      = allocator_->convertIndexToBuffer(slot.layer_id, slot.region_name, gpu_block);
             size_t     within_layer_off = 0;
             for (const auto& gpu_buffer : gpu_buffers) {
                 if (gpu_buffer.addr == nullptr || gpu_buffer.size_bytes == 0) {
@@ -900,8 +1158,9 @@ bool KVCacheMemoryConnector::tryCopyCacheWithStagedMemoryCopy(const MemoryOperat
                 constexpr size_t kStagedTileAlignment = 16;
                 const size_t     staging_offset       = alignUp(params.host_bytes, kStagedTileAlignment);
                 params.host_bytes                     = staging_offset;
-                auto*        host_addr       = mem_addr + byte_off + within_layer_off;
-                appendStagedMemoryCopyHostSegment(host_addr, staging_offset, gpu_buffer.size_bytes, params.host_segments);
+                auto* host_addr                       = mem_addr + byte_off + within_layer_off;
+                appendStagedMemoryCopyHostSegment(
+                    host_addr, staging_offset, gpu_buffer.size_bytes, params.host_segments);
                 appendStagedMemoryCopyTile(gpu_buffer.addr, staging_offset, gpu_buffer.size_bytes, params.tiles);
                 params.host_bytes += gpu_buffer.size_bytes;
                 ++logical_rows;
@@ -926,6 +1185,170 @@ bool KVCacheMemoryConnector::tryCopyCacheWithStagedMemoryCopy(const MemoryOperat
     RTP_LLM_PROFILE_SCOPE("reuse_cache.memory.copy.exec_staged");
     std::lock_guard<std::mutex> scratch_lock(staged_copy_scratch_mutex_);
     return execStagedMemoryCopy(params, &stagedCopyScratchForDevice(params.device_index));
+}
+
+bool KVCacheMemoryConnector::copyMixedMemoryDiskToDevice(const MemoryOperationRequestPB&     request,
+                                                         const std::vector<LayerRegionSlot>& slots) {
+    if (request.copy_direction() != MemoryOperationRequestPB::H2D) {
+        return false;
+    }
+    if (block_pool_ == nullptr || allocator_ == nullptr) {
+        return false;
+    }
+
+    std::vector<std::vector<char>> disk_buffers;
+    disk_buffers.reserve(request.copy_items_size());
+    std::vector<torch::Tensor> dst_buffers;
+    std::vector<torch::Tensor> src_buffers;
+
+    for (int i = 0; i < request.copy_items_size(); ++i) {
+        const auto&                     item = request.copy_items(i);
+        const std::vector<BlockIdxType> gpu_blocks(item.gpu_blocks().begin(), item.gpu_blocks().end());
+        if (gpu_blocks.size() != slots.size()) {
+            return false;
+        }
+
+        BlockInfo source_block;
+        if (item.source_type() == MemoryOperationRequestPB::DISK_SLOT) {
+            if (!disk_spill_cache_) {
+                return false;
+            }
+            const size_t logical_bytes =
+                item.logical_bytes() == 0 ? memoryBlockSizeBytes() : static_cast<size_t>(item.logical_bytes());
+            disk_buffers.emplace_back(logical_bytes, 0);
+            DiskSpillBlockCache::DiskSlot disk_slot;
+            disk_slot.cache_key      = static_cast<CacheKeyType>(item.cache_key());
+            disk_slot.disk_id        = item.disk_id();
+            disk_slot.slot_id        = item.disk_slot_id();
+            disk_slot.generation     = item.generation();
+            disk_slot.key_generation = item.key_generation();
+            disk_slot.block_size     = logical_bytes;
+            disk_slot.is_complete    = item.is_complete();
+            if (!disk_spill_cache_->readTaken(disk_slot, disk_buffers.back().data(), logical_bytes)) {
+                disk_spill_cache_->releaseReadSlot(disk_slot);
+                return false;
+            }
+            disk_spill_cache_->releaseReadSlot(disk_slot);
+            source_block.addr       = disk_buffers.back().data();
+            source_block.size_bytes = logical_bytes;
+            source_block.is_cuda    = false;
+        } else {
+            const auto mem_block = static_cast<BlockIdxType>(item.mem_block());
+            if (isNullBlockIdx(mem_block)) {
+                return false;
+            }
+            auto mem_buffers = block_pool_->convertIndexToBuffer(/*layer_id=*/0, mem_block);
+            if (mem_buffers.size() != 1u || mem_buffers[0].addr == nullptr || mem_buffers[0].size_bytes == 0) {
+                return false;
+            }
+            source_block = mem_buffers[0];
+        }
+
+        size_t byte_off = 0;
+        for (size_t slot_idx = 0; slot_idx < slots.size(); ++slot_idx) {
+            const auto& slot         = slots[slot_idx];
+            const auto  gpu_block    = gpu_blocks.at(slot_idx);
+            const auto  layer_stride = slot.stride_bytes;
+            if (isNullBlockIdx(gpu_block)) {
+                byte_off += layer_stride;
+                continue;
+            }
+            const auto gpu_buffers      = allocator_->convertIndexToBuffer(slot.layer_id, slot.region_name, gpu_block);
+            size_t     within_layer_off = 0;
+            for (const auto& gpu_buffer : gpu_buffers) {
+                if (within_layer_off + gpu_buffer.size_bytes > layer_stride) {
+                    return false;
+                }
+                if (!appendCopyBytesToBuffers(source_block,
+                                              gpu_buffer,
+                                              byte_off + within_layer_off,
+                                              CopyDirection::H2D,
+                                              dst_buffers,
+                                              src_buffers)) {
+                    return false;
+                }
+                within_layer_off += gpu_buffer.size_bytes;
+            }
+            byte_off += layer_stride;
+        }
+    }
+
+    if (!dst_buffers.empty()) {
+        MultiCopyParams mc{dst_buffers, src_buffers};
+        execNoBlockCopy(mc);
+    }
+    size_t disk_source_count = 0;
+    for (int i = 0; i < request.copy_items_size(); ++i) {
+        if (request.copy_items(i).source_type() == MemoryOperationRequestPB::DISK_SLOT) {
+            ++disk_source_count;
+        }
+    }
+    if (disk_source_count > 0) {
+        RTP_LLM_LOG_INFO("memory disk cache mixed read success, copy_items=%d disk_sources=%zu",
+                         request.copy_items_size(),
+                         disk_source_count);
+    }
+    return true;
+}
+
+bool KVCacheMemoryConnector::spillMemoryToDisk(const MemoryOperationRequestPB& request) {
+    if (!disk_spill_cache_ || !block_pool_) {
+        return false;
+    }
+    for (int i = 0; i < request.copy_items_size(); ++i) {
+        const auto& item      = request.copy_items(i);
+        const auto  mem_block = static_cast<BlockIdxType>(item.mem_block());
+        if (isNullBlockIdx(mem_block)) {
+            return false;
+        }
+        auto mem_buffers = block_pool_->convertIndexToBuffer(/*layer_id=*/0, mem_block);
+        if (mem_buffers.size() != 1u || mem_buffers[0].addr == nullptr || mem_buffers[0].size_bytes == 0) {
+            return false;
+        }
+        DiskSpillBlockCache::DiskSlot disk_slot;
+        disk_slot.cache_key      = static_cast<CacheKeyType>(item.cache_key());
+        disk_slot.disk_id        = item.disk_id();
+        disk_slot.slot_id        = item.disk_slot_id();
+        disk_slot.generation     = item.generation();
+        disk_slot.key_generation = item.key_generation();
+        disk_slot.block_size     = item.logical_bytes() == 0 ? mem_buffers[0].size_bytes : item.logical_bytes();
+        disk_slot.is_complete    = item.is_complete();
+        if (!disk_spill_cache_->putExternalSlot(disk_slot, mem_buffers[0].addr, disk_slot.block_size)) {
+            return false;
+        }
+        const auto removed_item = block_cache_->removeIfMatch(disk_slot.cache_key, mem_block);
+        if (removed_item.has_value()) {
+            freeBlocks({removed_item->block_index}, /*cache_free=*/true);
+        }
+    }
+    return true;
+}
+
+bool KVCacheMemoryConnector::deleteDiskSlots(const MemoryOperationRequestPB& request) {
+    if (!disk_spill_cache_) {
+        return true;
+    }
+    for (int i = 0; i < request.copy_items_size(); ++i) {
+        const auto&                   item = request.copy_items(i);
+        DiskSpillBlockCache::DiskSlot disk_slot;
+        disk_slot.cache_key      = static_cast<CacheKeyType>(item.cache_key());
+        disk_slot.disk_id        = item.disk_id();
+        disk_slot.slot_id        = item.disk_slot_id();
+        disk_slot.generation     = item.generation();
+        disk_slot.key_generation = item.key_generation();
+        disk_slot.block_size     = item.logical_bytes();
+        disk_slot.is_complete    = item.is_complete();
+        if (!disk_spill_cache_->deleteSlot(disk_slot)) {
+            RTP_LLM_LOG_DEBUG("ignore stale disk slot delete, cache_key=%ld disk_id=%d slot_id=%d generation=%lu "
+                              "key_generation=%lu",
+                              disk_slot.cache_key,
+                              disk_slot.disk_id,
+                              disk_slot.slot_id,
+                              disk_slot.generation,
+                              disk_slot.key_generation);
+        }
+    }
+    return true;
 }
 
 StagedMemoryCopyScratch& KVCacheMemoryConnector::stagedCopyScratchForDevice(int device_index) {
@@ -974,7 +1397,7 @@ bool KVCacheMemoryConnector::tryCopyCacheWithBatchedMemoryCopy(const MemoryOpera
                 continue;
             }
 
-            const auto gpu_buffers = allocator_->convertIndexToBuffer(slot.layer_id, slot.region_name, gpu_block);
+            const auto gpu_buffers      = allocator_->convertIndexToBuffer(slot.layer_id, slot.region_name, gpu_block);
             size_t     within_layer_off = 0;
             for (const auto& gpu_buffer : gpu_buffers) {
                 if (gpu_buffer.addr == nullptr || gpu_buffer.size_bytes == 0) {
@@ -1273,6 +1696,12 @@ std::string KVCacheMemoryConnector::blockPoolDebugString() const {
 
 void KVCacheMemoryConnector::putToCache(const MemoryBlockCache::CacheItem& item) {
     RTP_LLM_PROFILE_FUNCTION();
+    if (disk_spill_cache_) {
+        const auto invalidated_slot = disk_spill_cache_->invalidate(item.cache_key);
+        if (invalidated_slot.has_value()) {
+            sendDeleteDiskSlot(*invalidated_slot);
+        }
+    }
     if (auto [success, popped_item_opt] = block_cache_->put(item); success) {
         RTP_LLM_LOG_DEBUG("write cache, cache key: %ld, block index: %d, block size: %zu",
                           item.cache_key,
@@ -1286,6 +1715,125 @@ void KVCacheMemoryConnector::putToCache(const MemoryBlockCache::CacheItem& item)
     }
 }
 
+bool KVCacheMemoryConnector::spillMemoryItemToDisk(const MemoryBlockCache::CacheItem& item) {
+    if (!disk_spill_cache_ || !block_pool_) {
+        return false;
+    }
+    auto mem_buffers = block_pool_->convertIndexToBuffer(/*layer_id=*/0, item.block_index);
+    if (mem_buffers.size() != 1u || mem_buffers[0].addr == nullptr || mem_buffers[0].size_bytes == 0) {
+        RTP_LLM_LOG_WARNING(
+            "disk spill failed, invalid memory block: cache_key=%ld block=%d", item.cache_key, item.block_index);
+        return false;
+    }
+    auto disk_slot = disk_spill_cache_->reserve(item.cache_key, mem_buffers[0].size_bytes, item.is_complete);
+    if (!disk_slot.has_value()) {
+        RTP_LLM_LOG_WARNING("disk spill failed, reserve slot failed, cache_key=%ld", item.cache_key);
+        return false;
+    }
+    if (!disk_spill_cache_->writeReserved(*disk_slot, mem_buffers[0].addr, mem_buffers[0].size_bytes)) {
+        disk_spill_cache_->abort(*disk_slot);
+        RTP_LLM_LOG_WARNING("disk spill failed, local write failed, cache_key=%ld", item.cache_key);
+        return false;
+    }
+
+    MemoryOperationRequestPB mem_req;
+    mem_req.set_memory_op_protocol_version(1);
+    mem_req.set_op_type(MemoryOperationRequestPB::SPILL_MEMORY_TO_DISK);
+    mem_req.set_copy_direction(MemoryOperationRequestPB::D2H);
+    auto* pb_item = mem_req.add_copy_items();
+    pb_item->set_cache_key(item.cache_key);
+    pb_item->set_mem_block(item.block_index);
+    pb_item->set_source_type(MemoryOperationRequestPB::MEMORY_BLOCK);
+    pb_item->set_disk_id(disk_slot->disk_id);
+    pb_item->set_disk_slot_id(disk_slot->slot_id);
+    pb_item->set_generation(disk_slot->generation);
+    pb_item->set_key_generation(disk_slot->key_generation);
+    pb_item->set_logical_bytes(mem_buffers[0].size_bytes);
+    pb_item->set_is_complete(disk_slot->is_complete);
+
+    std::vector<FunctionRequestPB> requests;
+    requests.reserve(broadcast_manager_->workerNum());
+    for (size_t i = 0; i < broadcast_manager_->workerNum(); ++i) {
+        FunctionRequestPB req;
+        req.mutable_mem_request()->CopyFrom(mem_req);
+        requests.emplace_back(std::move(req));
+    }
+    auto rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
+                       const std::shared_ptr<grpc::ClientContext>& context,
+                       const FunctionRequestPB&                    request,
+                       grpc::CompletionQueue*                      completion_queue) {
+        return stub->AsyncExecuteFunction(context.get(), request, completion_queue);
+    };
+    auto result = broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
+        requests, kv_cache_config_.memory_cache_disk_stage_ack_timeout_ms, rpc_call);
+    bool success = result != nullptr && result->waitDone(kv_cache_config_.memory_cache_disk_stage_ack_timeout_ms)
+                   && result->success();
+    if (success) {
+        for (const auto& response : result->responses()) {
+            if (!response.has_mem_response() || !response.mem_response().success()) {
+                success = false;
+                break;
+            }
+        }
+    }
+    if (!success) {
+        disk_spill_cache_->abort(*disk_slot);
+        sendDeleteDiskSlot(*disk_slot);
+        RTP_LLM_LOG_WARNING("disk spill failed, worker stage ack failed, cache_key=%ld", item.cache_key);
+        return false;
+    }
+    if (!disk_spill_cache_->commit(*disk_slot)) {
+        disk_spill_cache_->abort(*disk_slot);
+        sendDeleteDiskSlot(*disk_slot);
+        RTP_LLM_LOG_WARNING("disk spill failed, commit failed, cache_key=%ld", item.cache_key);
+        return false;
+    }
+    RTP_LLM_LOG_INFO("disk spill success, cache_key=%ld disk_id=%d slot_id=%d generation=%lu",
+                     item.cache_key,
+                     disk_slot->disk_id,
+                     disk_slot->slot_id,
+                     disk_slot->generation);
+    return true;
+}
+
+bool KVCacheMemoryConnector::sendDeleteDiskSlot(const DiskSpillBlockCache::DiskSlot& slot) const {
+    if (!broadcast_manager_) {
+        return false;
+    }
+    MemoryOperationRequestPB mem_req;
+    mem_req.set_memory_op_protocol_version(1);
+    mem_req.set_op_type(MemoryOperationRequestPB::DELETE_DISK_SLOT);
+    auto* item = mem_req.add_copy_items();
+    item->set_cache_key(slot.cache_key);
+    item->set_source_type(MemoryOperationRequestPB::DISK_SLOT);
+    item->set_disk_id(slot.disk_id);
+    item->set_disk_slot_id(slot.slot_id);
+    item->set_generation(slot.generation);
+    item->set_key_generation(slot.key_generation);
+    item->set_logical_bytes(slot.block_size);
+    item->set_is_complete(slot.is_complete);
+
+    std::vector<FunctionRequestPB> requests;
+    requests.reserve(broadcast_manager_->workerNum());
+    for (size_t i = 0; i < broadcast_manager_->workerNum(); ++i) {
+        FunctionRequestPB req;
+        req.mutable_mem_request()->CopyFrom(mem_req);
+        requests.emplace_back(std::move(req));
+    }
+    auto rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
+                       const std::shared_ptr<grpc::ClientContext>& context,
+                       const FunctionRequestPB&                    request,
+                       grpc::CompletionQueue*                      completion_queue) {
+        return stub->AsyncExecuteFunction(context.get(), request, completion_queue);
+    };
+    auto result = broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
+        requests, kv_cache_config_.memory_cache_sync_timeout_ms, rpc_call);
+    if (!result) {
+        return false;
+    }
+    return result->waitDone(kv_cache_config_.memory_cache_sync_timeout_ms);
+}
+
 // this function is called under lock
 bool KVCacheMemoryConnector::ensureEnoughFreeBlocks(size_t need_blocks) {
     RTP_LLM_PROFILE_FUNCTION();
@@ -1294,9 +1842,41 @@ bool KVCacheMemoryConnector::ensureEnoughFreeBlocks(size_t need_blocks) {
         return true;
     }
     const auto need_evict_blocks = need_blocks - free_blocks;
-    const auto evict_blocks      = block_cache_->pop(need_evict_blocks);
-    if (!evict_blocks.empty()) {
-        freeBlocks(evict_blocks, /*cache_free=*/true);
+    if (disk_spill_cache_) {
+        const auto evict_items                = block_cache_->popItems(need_evict_blocks);
+        size_t     complete_items             = 0;
+        size_t     spilled_items              = 0;
+        int        first_complete_evict_index = -1;
+        int        last_complete_evict_index  = -1;
+        for (size_t evict_index = 0; evict_index < evict_items.size(); ++evict_index) {
+            const auto& item = evict_items[evict_index];
+            if (item.is_complete) {
+                if (first_complete_evict_index < 0) {
+                    first_complete_evict_index = static_cast<int>(evict_index);
+                }
+                last_complete_evict_index = static_cast<int>(evict_index);
+                ++complete_items;
+            }
+            if (!item.is_resident) {
+                spilled_items += spillMemoryItemToDisk(item) ? 1 : 0;
+            }
+            freeBlocks({item.block_index}, /*cache_free=*/true);
+        }
+        RTP_LLM_LOG_INFO("memory disk cache eviction, need_blocks=%zu free_before=%zu evicted=%zu complete=%zu "
+                         "spilled=%zu free_after=%zu first_complete_evict=%d last_complete_evict=%d",
+                         need_blocks,
+                         free_blocks,
+                         evict_items.size(),
+                         complete_items,
+                         spilled_items,
+                         block_pool_->freeBlocksNum(),
+                         first_complete_evict_index,
+                         last_complete_evict_index);
+    } else {
+        const auto evict_blocks = block_cache_->pop(need_evict_blocks);
+        if (!evict_blocks.empty()) {
+            freeBlocks(evict_blocks, /*cache_free=*/true);
+        }
     }
     return block_pool_->freeBlocksNum() >= need_blocks;
 }

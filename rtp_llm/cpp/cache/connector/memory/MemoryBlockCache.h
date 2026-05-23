@@ -8,7 +8,6 @@
 
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/utils/LRUCache.h"
-#include "rtp_llm/cpp/cache/Types.h"
 
 namespace rtp_llm {
 
@@ -47,6 +46,8 @@ public:
     std::optional<CacheItem> removeIfMatch(CacheKeyType cache_key, BlockIdxType expected_block_index);
 
     std::vector<BlockIdxType> pop(int n);
+
+    std::vector<CacheItem> popItems(int n);
 
     bool empty() const;
 

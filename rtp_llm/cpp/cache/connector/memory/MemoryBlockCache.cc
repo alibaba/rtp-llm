@@ -109,6 +109,30 @@ std::vector<BlockIdxType> MemoryBlockCache::pop(int n) {
     return pop_blocks;
 }
 
+std::vector<MemoryBlockCache::CacheItem> MemoryBlockCache::popItems(int n) {
+    RTP_LLM_PROFILE_FUNCTION();
+    RTP_LLM_CHECK_WITH_INFO(n > 0, "pop n should > 0, n = " + std::to_string(n));
+    std::vector<CacheItem> pop_items;
+
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+
+    auto cond = [&](const CacheKeyType& /*key*/, const CacheItem& item) { return !item.is_resident; };
+
+    while (!lru_cache_.empty()) {
+        auto [success, cache_item] = lru_cache_.popWithCond(cond);
+        if (!success) {
+            break;
+        }
+        pop_items.push_back(cache_item);
+        --n;
+        if (n == 0) {
+            break;
+        }
+    }
+
+    return pop_items;
+}
+
 bool MemoryBlockCache::empty() const {
     std::shared_lock<std::shared_mutex> lock(mutex_);
     return lru_cache_.empty();

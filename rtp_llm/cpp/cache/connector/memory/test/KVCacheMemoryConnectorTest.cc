@@ -3,6 +3,7 @@
 #include <csignal>
 #include <chrono>
 #include <execinfo.h>
+#include <filesystem>
 #include <thread>
 #include <unistd.h>
 
@@ -121,6 +122,8 @@ protected:
     std::shared_ptr<KVCacheMemoryConnector>     connector_;
     std::vector<std::unique_ptr<TestRpcServer>> servers_;
     std::vector<std::string>                    server_addrs_;
+    std::vector<std::shared_ptr<CacheConfig>>   owned_cache_configs_;
+    std::vector<std::shared_ptr<KVCacheConfig>> owned_kv_cache_configs_;
 
 private:
     void createDevice() const {
@@ -421,6 +424,13 @@ private:
         auto res             = std::make_shared<KVCacheResource>();
         res->cache_keys      = cache_keys;
         res->layer_block_ids = makeLayerBlockIds(per_layer_block_indices, cache_keys.size());
+        res->layer_region_block_ids.resize(res->layer_block_ids.size());
+        const size_t region_name_count = static_cast<size_t>(KVCacheRegionName::REGION_COUNT);
+        for (size_t layer = 0; layer < res->layer_block_ids.size(); ++layer) {
+            res->layer_region_block_ids[layer].assign(region_name_count, nullptr);
+            res->layer_region_block_ids[layer][static_cast<size_t>(KVCacheRegionName::DEFAULT)] =
+                res->layer_block_ids[layer];
+        }
         // reuse_len in these tests means "GPU already-reused prefix length".
         // KVCacheResource::reuseBlockNum() is derived from (device + memory + remote),
         // so set device reuse here to make asyncMatch/asyncRead semantics consistent.
@@ -428,6 +438,92 @@ private:
         // These unit tests want to include the whole cache_keys range by default.
         res->setLastBlockAligned(true);
         return res;
+    }
+
+    std::string makeDiskTempDir(const std::string& name) const {
+        const auto stamp =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
+                .count();
+        auto path = std::filesystem::temp_directory_path()
+                    / ("rtp_llm_memory_connector_disk_" + name + "_" + std::to_string(::getpid()) + "_"
+                       + std::to_string(stamp));
+        std::error_code ec;
+        std::filesystem::remove_all(path, ec);
+        std::filesystem::create_directories(path, ec);
+        EXPECT_FALSE(ec) << ec.message();
+        return path.string();
+    }
+
+    DiskSpillBlockCachePtr createDiskSpillCache(size_t block_size, size_t capacity_mb = 8) const {
+        DiskSpillBlockCache::InitConfig config;
+        config.disks.push_back(DiskSpillBlockCache::DiskConfig{makeDiskTempDir("cache"), capacity_mb});
+        config.block_size         = block_size;
+        config.cleanup_on_destroy = false;
+        auto cache                = std::make_shared<DiskSpillBlockCache>(std::move(config));
+        EXPECT_TRUE(cache->init());
+        return cache;
+    }
+
+    std::shared_ptr<KVCacheMemoryConnector>
+    createDiskEnabledConnector(size_t per_layer_stride_bytes, size_t memory_size_mb, size_t disk_capacity_mb) {
+        auto cfg                   = std::make_shared<CacheConfig>(cache_config_);
+        cfg->kv_block_stride_bytes = per_layer_stride_bytes;
+        cfg->kv_scale_stride_bytes = 0;
+        cfg->layer_to_block_stride_bytes.assign(static_cast<size_t>(cfg->layer_all_num),
+                                                static_cast<int>(per_layer_stride_bytes));
+        cfg->kv_block_size_bytes = static_cast<size_t>(cfg->layer_all_num) * per_layer_stride_bytes;
+        cfg->kv_scale_size_bytes = 0;
+        cfg->block_size_bytes    = cfg->kv_block_size_bytes;
+
+        auto kv_cfg                            = std::make_shared<KVCacheConfig>(kv_cache_config_);
+        kv_cfg->memory_cache_size_mb           = memory_size_mb;
+        kv_cfg->enable_memory_cache_disk_spill = true;
+        kv_cfg->memory_cache_disk_paths        = makeDiskTempDir("connector") + "=" + std::to_string(disk_capacity_mb);
+        kv_cfg->memory_cache_disk_init_timeout_ms      = 1000;
+        kv_cfg->memory_cache_disk_stage_ack_timeout_ms = 1000;
+
+        owned_cache_configs_.push_back(cfg);
+        owned_kv_cache_configs_.push_back(kv_cfg);
+
+        auto conn = std::make_shared<KVCacheMemoryConnector>(*cfg, *kv_cfg, allocator_, server_addrs_);
+        EXPECT_TRUE(conn->init());
+        if (conn->disk_spill_cache_) {
+            conn->disk_spill_cache_->config_.cleanup_on_destroy = false;
+        }
+        return conn;
+    }
+
+    BlockIdxType putHostItemToConnector(const std::shared_ptr<KVCacheMemoryConnector>& conn,
+                                        CacheKeyType                                   key,
+                                        char                                           fill,
+                                        bool                                           is_complete,
+                                        bool                                           is_resident = false) const {
+        auto pool = conn->block_pool_;
+        EXPECT_NE(pool, nullptr);
+        auto blocks = pool->malloc(1);
+        EXPECT_EQ(blocks.size(), 1u);
+        if (blocks.size() != 1u) {
+            return NULL_BLOCK_IDX;
+        }
+        const auto block = static_cast<BlockIdxType>(blocks[0]);
+        const auto bufs  = pool->convertIndexToBuffer(0, block);
+        EXPECT_EQ(bufs.size(), 1u);
+        if (bufs.size() == 1u && bufs[0].addr != nullptr && bufs[0].size_bytes > 0) {
+            setBlockBytes(bufs[0], /*byte_offset=*/0, bufs[0].size_bytes, fill);
+        }
+
+        MemoryBlockCache::CacheItem item;
+        item.cache_key    = key;
+        item.block_index  = block;
+        item.block_size   = bufs.empty() ? 0 : bufs[0].size_bytes;
+        item.is_resident  = is_resident;
+        item.is_complete  = is_complete;
+        auto [ok, popped] = conn->block_cache_->put(item);
+        EXPECT_TRUE(ok);
+        EXPECT_FALSE(popped.has_value());
+        pool->blockCacheReference({block});
+        pool->requestFree({block});
+        return block;
     }
 
     // Put items into memory block cache.
@@ -556,10 +652,14 @@ TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_WhenMemoryCacheSyncTimeoutMs
 }
 
 TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_WhenBlockSizeBytesZero) {
-    // NOTE: business code no longer validates `block_size_bytes` for memory cache block size.
-    // `init()` validates `layer_to_block_stride_bytes` instead.
+    // `layerRegionSlots()` falls back from per-layer strides to global kv/scale strides.
+    // Clear both so the derived memory cache block size is invalid.
     auto cfg = cache_config_;
     cfg.layer_to_block_stride_bytes.clear();
+    cfg.group_kv_block_stride_bytes.clear();
+    cfg.group_kv_scale_stride_bytes.clear();
+    cfg.kv_block_stride_bytes = 0;
+    cfg.kv_scale_stride_bytes = 0;
 
     auto kv_cfg                         = kv_cache_config_;
     kv_cfg.memory_cache_size_mb         = 64;
@@ -602,10 +702,14 @@ TEST_F(KVCacheMemoryConnectorTest, initBlockPool_Throw_WhenMemoryCacheSizeMbZero
 }
 
 TEST_F(KVCacheMemoryConnectorTest, initBlockPool_Throw_WhenBlockSizeBytesZero) {
-    // NOTE: business code no longer validates `block_size_bytes` for memory cache block size.
-    // `initBlockPool()` validates `layer_to_block_stride_bytes` instead.
+    // `layerRegionSlots()` falls back from per-layer strides to global kv/scale strides.
+    // Clear both so the derived memory cache block size is invalid.
     auto cfg = cache_config_;
     cfg.layer_to_block_stride_bytes.clear();
+    cfg.group_kv_block_stride_bytes.clear();
+    cfg.group_kv_scale_stride_bytes.clear();
+    cfg.kv_block_stride_bytes = 0;
+    cfg.kv_scale_stride_bytes = 0;
 
     auto kv_cfg                         = kv_cache_config_;
     kv_cfg.memory_cache_size_mb         = 64;
@@ -641,24 +745,23 @@ TEST_F(KVCacheMemoryConnectorTest, initBlockPool_ReturnTrue_AndRegistersPool) {
 }
 
 TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_UsesLayerAndRegionSlots) {
-    auto cfg = cache_config_;
+    auto cfg          = cache_config_;
     cfg.layer_num     = 1;
     cfg.layer_all_num = 1;
     cfg.layer_to_group_id.assign(1, 0);
     cfg.layer_to_group_ids.assign(1, std::vector<int>{0, 1});
-    cfg.layer_region_to_group_id.assign(1,
-                                        std::vector<int>(static_cast<size_t>(KVCacheRegionName::REGION_COUNT), -1));
+    cfg.layer_region_to_group_id.assign(1, std::vector<int>(static_cast<size_t>(KVCacheRegionName::REGION_COUNT), -1));
     cfg.layer_region_to_group_id[0][static_cast<size_t>(KVCacheRegionName::CSA_KV)] = 0;
     cfg.layer_region_to_group_id[0][static_cast<size_t>(KVCacheRegionName::SWA_KV)] = 1;
-    cfg.group_types = {CacheGroupType::FULL, CacheGroupType::FULL};
-    cfg.group_kv_block_stride_bytes    = {16, 32};
-    cfg.group_kv_scale_stride_bytes    = {0, 0};
-    cfg.layer_to_block_stride_bytes    = {999};
+    cfg.group_types                 = {CacheGroupType::FULL, CacheGroupType::FULL};
+    cfg.group_kv_block_stride_bytes = {16, 32};
+    cfg.group_kv_scale_stride_bytes = {0, 0};
+    cfg.layer_to_block_stride_bytes = {999};
 
     auto kv_cfg                         = kv_cache_config_;
     kv_cfg.memory_cache_size_mb         = 64;
     kv_cfg.memory_cache_sync_timeout_ms = 1000;
-    auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, allocator_, server_addrs_);
+    auto conn          = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, allocator_, server_addrs_);
     conn->block_cache_ = std::make_shared<MemoryBlockCache>();
     ASSERT_NO_THROW(conn->initBlockPool());
 
@@ -673,7 +776,7 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_UsesLayerAndRegionSlots
     EXPECT_EQ(slots[1].group_id, 1);
     EXPECT_EQ(slots[1].stride_bytes, 32u);
 
-    auto resource = std::make_shared<KVCacheResource>();
+    auto resource         = std::make_shared<KVCacheResource>();
     resource->cacheKeys() = {101, 102, 103};
     resource->initGroups(/*group_num=*/2,
                          /*layer_num=*/1,
@@ -685,7 +788,7 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_UsesLayerAndRegionSlots
     resource->mutableBlockIds(/*group_id=*/1).assign({21, NULL_BLOCK_IDX, 23});
 
     bool no_need_write = true;
-    auto plan = conn->buildCopyPlanForWrite(
+    auto plan          = conn->buildCopyPlanForWrite(
         resource->cacheKeys(), resource->layerAttnBlocks(), slots, /*start_index=*/0, /*write_num=*/3, no_need_write);
 
     ASSERT_NE(plan, nullptr);
@@ -912,6 +1015,41 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_ReturnNull_WhenPlanEmpty) {
     auto meta      = std::make_shared<TestReadMeta>(/*enable_memory_cache=*/true, /*enable_remote_cache=*/false, "");
     auto ctx       = connector_->asyncRead(res, meta, match_ctx, /*start_read_block_index=*/0, /*read_block_num=*/1);
     EXPECT_EQ(ctx, nullptr);
+}
+
+TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForRead_TakesAndReleasesDiskSlot) {
+    const CacheKeyType key      = 91001;
+    const size_t       mem_size = memoryCacheBlockBytes();
+    ASSERT_GT(mem_size, 0u);
+    connector_->disk_spill_cache_ = createDiskSpillCache(mem_size);
+
+    std::vector<char>           bytes(mem_size, 'd');
+    MemoryBlockCache::CacheItem item;
+    item.cache_key   = key;
+    item.block_index = 1;
+    item.block_size  = mem_size;
+    item.is_complete = true;
+    ASSERT_TRUE(connector_->disk_spill_cache_->store(item, bytes.data(), bytes.size()));
+
+    auto res  = makeCacheResource({key, 91999}, {{1, 1}, {2, 2}, {3, 3}, {4, 4}});
+    auto meta = std::make_shared<TestReadMeta>(/*enable_memory_cache=*/true, /*enable_remote_cache=*/false, "");
+
+    auto match_ctx = connector_->asyncMatch(res, meta);
+    ASSERT_NE(match_ctx, nullptr);
+    EXPECT_EQ(match_ctx->matchedBlockCount(), 1u);
+
+    const auto slots = connector_->layerRegionSlots();
+    auto       plan  = connector_->buildCopyPlanForRead(
+        res->cacheKeys(), res->layerAttnBlocks(), slots, /*start_index=*/0, /*read_num=*/1);
+    ASSERT_NE(plan, nullptr);
+    ASSERT_EQ(plan->copy_infos.size(), 1u);
+    EXPECT_EQ(plan->copy_infos[0].source_type, KVCacheMemoryConnector::CopyInfoPerKey::SourceType::DISK_SLOT);
+    EXPECT_FALSE(connector_->disk_spill_cache_->contains(key));
+    EXPECT_TRUE(connector_->disk_spill_cache_->releaseReadSlot(plan->copy_infos[0].disk_slot));
+    plan.reset();
+    const auto status = connector_->disk_spill_cache_->status();
+    EXPECT_EQ(status.item_num, 0u);
+    EXPECT_EQ(status.free_slot_num, status.total_slot_num);
 }
 
 TEST_F(KVCacheMemoryConnectorTest, asyncRead_Success_IncrementsReuseLen_ByMatchedPrefix) {
@@ -1648,6 +1786,127 @@ TEST_F(KVCacheMemoryConnectorTest, sendCopyPlan_ReturnContext_RpcStatusError) {
     ASSERT_NE(result, nullptr);
     result->waitDone();
     EXPECT_FALSE(result->success());
+}
+
+TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnFalse_WhenDiskProtocolOpUnspecified) {
+    MemoryOperationRequestPB req;
+    req.set_memory_op_protocol_version(1);
+
+    MemoryOperationResponsePB resp;
+    EXPECT_FALSE(connector_->copyCache(req, resp));
+    EXPECT_FALSE(resp.success());
+    EXPECT_EQ(resp.error_type(), "protocol_violation");
+}
+
+TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_MixedDiskSource) {
+    const CacheKeyType key      = 92001;
+    const size_t       mem_size = memoryCacheBlockBytes();
+    ASSERT_GT(mem_size, 0u);
+    connector_->disk_spill_cache_ = createDiskSpillCache(mem_size);
+
+    std::vector<char> bytes(mem_size, 'q');
+    auto              disk_slot = connector_->disk_spill_cache_->reserve(key, mem_size, /*is_complete=*/true);
+    ASSERT_TRUE(disk_slot.has_value());
+    ASSERT_TRUE(connector_->disk_spill_cache_->writeReserved(*disk_slot, bytes.data(), bytes.size()));
+    ASSERT_TRUE(connector_->disk_spill_cache_->commit(*disk_slot));
+
+    constexpr int            kGpuBlock = 2;
+    MemoryOperationRequestPB req;
+    req.set_memory_op_protocol_version(1);
+    req.set_op_type(MemoryOperationRequestPB::H2D_MIXED_MEMORY_DISK);
+    req.set_copy_direction(MemoryOperationRequestPB::H2D);
+    auto* item = req.add_copy_items();
+    item->set_cache_key(key);
+    item->set_source_type(MemoryOperationRequestPB::DISK_SLOT);
+    item->set_disk_id(disk_slot->disk_id);
+    item->set_disk_slot_id(disk_slot->slot_id);
+    item->set_generation(disk_slot->generation);
+    item->set_logical_bytes(mem_size);
+    for (int layer = 0; layer < static_cast<int>(cache_config_.layer_all_num); ++layer) {
+        item->add_gpu_blocks(kGpuBlock);
+    }
+
+    MemoryOperationResponsePB resp;
+    EXPECT_TRUE(connector_->copyCache(req, resp));
+    EXPECT_TRUE(resp.success());
+    EXPECT_FALSE(connector_->disk_spill_cache_->contains(key));
+    for (int layer = 0; layer < static_cast<int>(cache_config_.layer_all_num); ++layer) {
+        verifyBlockInfosContent(allocator_->convertIndexToBuffer(layer, kGpuBlock), 'q');
+    }
+}
+
+TEST_F(KVCacheMemoryConnectorTest, putToCache_InvalidatesExistingDiskSlotForSameKey) {
+    const CacheKeyType key      = 93001;
+    const size_t       mem_size = memoryCacheBlockBytes();
+    ASSERT_GT(mem_size, 0u);
+    connector_->disk_spill_cache_ = createDiskSpillCache(mem_size);
+
+    std::vector<char>           bytes(mem_size, 's');
+    MemoryBlockCache::CacheItem disk_item;
+    disk_item.cache_key   = key;
+    disk_item.block_index = 1;
+    disk_item.block_size  = mem_size;
+    disk_item.is_complete = true;
+    ASSERT_TRUE(connector_->disk_spill_cache_->store(disk_item, bytes.data(), bytes.size()));
+    ASSERT_TRUE(connector_->disk_spill_cache_->contains(key));
+
+    auto pool = connector_->block_pool_;
+    ASSERT_NE(pool, nullptr);
+    auto blocks = pool->malloc(1);
+    ASSERT_EQ(blocks.size(), 1u);
+    const auto block = static_cast<BlockIdxType>(blocks[0]);
+
+    MemoryBlockCache::CacheItem memory_item;
+    memory_item.cache_key   = key;
+    memory_item.block_index = block;
+    memory_item.block_size  = mem_size;
+    memory_item.is_complete = true;
+    connector_->putToCache(memory_item);
+    pool->requestFree({block});
+
+    EXPECT_TRUE(connector_->block_cache_->contains(key));
+    EXPECT_FALSE(connector_->disk_spill_cache_->contains(key));
+    const auto status = connector_->disk_spill_cache_->status();
+    EXPECT_EQ(status.item_num, 0u);
+}
+
+TEST_F(KVCacheMemoryConnectorTest, ensureEnoughFreeBlocks_SpillsCompleteEvictedItemToDisk) {
+    constexpr size_t kPerLayerStride = 256 * 1024;
+    auto             conn = createDiskEnabledConnector(kPerLayerStride, /*memory_size_mb=*/3, /*disk_capacity_mb=*/4);
+    auto             pool = conn->block_pool_;
+    ASSERT_NE(pool, nullptr);
+    ASSERT_EQ(pool->totalBlocksNum(), 2u);
+
+    ASSERT_FALSE(isNullBlockIdx(putHostItemToConnector(conn, 94001, 'a', /*is_complete=*/true)));
+    ASSERT_FALSE(isNullBlockIdx(putHostItemToConnector(conn, 94002, 'b', /*is_complete=*/true)));
+    ASSERT_EQ(pool->freeBlocksNum(), 0u);
+
+    EXPECT_TRUE(conn->ensureEnoughFreeBlocks(1));
+    EXPECT_GE(pool->freeBlocksNum(), 1u);
+    EXPECT_EQ(conn->block_cache_->size(), 1u);
+    const auto status = conn->disk_spill_cache_->status();
+    EXPECT_EQ(status.item_num, 1u);
+    EXPECT_TRUE(conn->disk_spill_cache_->contains(94001) || conn->disk_spill_cache_->contains(94002));
+}
+
+TEST_F(KVCacheMemoryConnectorTest, ensureEnoughFreeBlocks_SpillsPartialEvictedItemToDisk) {
+    constexpr size_t kPerLayerStride = 256 * 1024;
+    auto             conn = createDiskEnabledConnector(kPerLayerStride, /*memory_size_mb=*/2, /*disk_capacity_mb=*/4);
+    auto             pool = conn->block_pool_;
+    ASSERT_NE(pool, nullptr);
+    ASSERT_EQ(pool->totalBlocksNum(), 1u);
+
+    ASSERT_FALSE(isNullBlockIdx(putHostItemToConnector(conn, 95001, 'p', /*is_complete=*/false)));
+    ASSERT_EQ(pool->freeBlocksNum(), 0u);
+
+    EXPECT_TRUE(conn->ensureEnoughFreeBlocks(1));
+    EXPECT_GE(pool->freeBlocksNum(), 1u);
+    EXPECT_TRUE(conn->block_cache_->empty());
+    const auto status = conn->disk_spill_cache_->status();
+    EXPECT_EQ(status.item_num, 1u);
+    const auto match = conn->disk_spill_cache_->match(95001);
+    ASSERT_TRUE(match.matched);
+    EXPECT_FALSE(match.is_complete);
 }
 
 TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnFalse_CountMismatch) {

@@ -2,6 +2,25 @@ load("//:def.bzl", "copts")
 load("//bazel:arch_select.bzl", "no_block_copy_link_deps", "torch_deps")
 
 cc_library(
+    name = "disk_spill_block_cache",
+    srcs = [
+        "DiskSpillBlockCache.cc",
+    ],
+    hdrs = [
+        "DiskSpillBlockCache.h",
+        "MemoryBlockCache.h",
+    ],
+    deps = [
+        "//rtp_llm/cpp/cache:batch_kv_cache_resource",
+        "//rtp_llm/cpp/cache:cache_group_type",
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/utils:lru_cache",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "memory_connector",
     hdrs = glob([
         "*.h",

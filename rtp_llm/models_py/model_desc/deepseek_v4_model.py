@@ -170,9 +170,7 @@ class MtpHiddenBufferStore:
     def _sync_subscribers(self) -> None:
         assert self._buffer is not None
         for module in self._subscribers:
-            module.register_buffer(
-                "_mtp_hidden_buffer", self._buffer, persistent=False
-            )
+            module.register_buffer("_mtp_hidden_buffer", self._buffer, persistent=False)
 
 
 def _args_from_model_config(
@@ -427,9 +425,7 @@ class DeepSeekV4Model(GptModelBase):
         cp_size = max(1, int(self._prefill_cp_size))
         if cp_size > 1:
             return (
-                cp_padded_tokens_per_rank_bound(
-                    int(self._v4_args.max_seq_len), cp_size
-                )
+                cp_padded_tokens_per_rank_bound(int(self._v4_args.max_seq_len), cp_size)
                 * self._max_context_batch_size
             )
         return self._v4_args.max_seq_len * self._max_context_batch_size
@@ -541,15 +537,18 @@ class DeepSeekV4Model(GptModelBase):
         # subsequent calls inside CUDA graph capture hit the cache and skip
         # JIT — which would otherwise abort via __unexpected (noexcept violation).
         if device_str.startswith("cuda"):
-            from rtp_llm.models_py.modules.dsv4 import tilelang_kernels as _tl_kernels
+            if os.environ.get("DSV4_PREWARM_TILELANG_SPARSE_ATTN", "1") != "0":
+                from rtp_llm.models_py.modules.dsv4 import (
+                    tilelang_kernels as _tl_kernels,
+                )
 
-            first_attn = self.v4.layers[0].attn
-            _tl_kernels.prewarm(
-                first_attn.n_heads,
-                first_attn.head_dim,
-                first_attn.softmax_scale,
-                device_str,
-            )
+                first_attn = self.v4.layers[0].attn
+                _tl_kernels.prewarm(
+                    first_attn.n_heads,
+                    first_attn.head_dim,
+                    first_attn.softmax_scale,
+                    device_str,
+                )
 
             # Pre-warm the v4_indexer_score Triton kernel for the SAME
             # constexpr config the live decode (and CSA prefill) call will
@@ -969,9 +968,7 @@ class DeepSeekV4Model(GptModelBase):
     def get_mtp_last_hidden_states(self, num_tokens: int) -> Optional[torch.Tensor]:
         if self.v4 is None:
             raise RuntimeError("DeepSeekV4Model: v4 transformer not initialized")
-        assert (
-            not self._is_decode_role
-        ), "decode MTP last-hidden reads are unsupported"
+        assert not self._is_decode_role, "decode MTP last-hidden reads are unsupported"
         buf = self.v4._mtp_last_hidden_buffer
         if buf is None:
             return None
