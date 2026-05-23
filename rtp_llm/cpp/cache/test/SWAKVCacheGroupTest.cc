@@ -72,12 +72,12 @@ TEST_F(SWAKVCacheGroupTest, GetNeedBlocks_SeqLenZero) {
     EXPECT_EQ(need.extra_blocks, 0);
 }
 
-TEST_F(SWAKVCacheGroupTest, GetNeedBlocks_ReuseDisabledCountsOnlyTail) {
+TEST_F(SWAKVCacheGroupTest, GetNeedBlocks_ReuseDisabledCountsActiveTail) {
     auto group = makeGroupWithStep(4, 2);
-    // seq_len=12 => seq_slots=3, reuse disabled => count_sparse(0,3)=1(tail only)
+    // seq_len=12 => seq_slots=3, reuse disabled => last two active tail blocks.
     auto need = group.getNeedBlocks(0, 12, 0, 0, false);
     EXPECT_EQ(need.common_blocks, 0);
-    EXPECT_EQ(need.extra_blocks, 1);
+    EXPECT_EQ(need.extra_blocks, 2);
 }
 
 TEST_F(SWAKVCacheGroupTest, GetNeedBlocks_ReuseEnabledUsesSparse) {
@@ -91,10 +91,9 @@ TEST_F(SWAKVCacheGroupTest, GetNeedBlocks_ReuseEnabledUsesSparse) {
 
 TEST_F(SWAKVCacheGroupTest, GetNeedBlocks_WithReserveStep) {
     auto group = makeGroupWithStep(4, 2);
-    // seq_len=8 => seq_slots=2, reserve_step=2 => total_slots=3
-    // reuse disabled: count_sparse(0,2)=1, + (3-2)=1 => 2
+    // seq_len=8 => two active tail blocks, plus one reserve block.
     auto need = group.getNeedBlocks(0, 8, 2, 0, false);
-    EXPECT_EQ(need.extra_blocks, 2);
+    EXPECT_EQ(need.extra_blocks, 3);
 }
 
 TEST_F(SWAKVCacheGroupTest, GetNeedBlocks_ReusePartialOverlap) {
@@ -158,18 +157,33 @@ TEST_F(SWAKVCacheGroupTest, Malloc_ShortSeq_OnlyOneBlock) {
     EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_ - 1);
 }
 
-TEST_F(SWAKVCacheGroupTest, Malloc_ManyBlocks_OnlyTailReal) {
+TEST_F(SWAKVCacheGroupTest, Malloc_ManyBlocks_LastTwoActiveBlocksReal) {
     auto     group = makeGroup(4);
     BlockIds block_ids(1);
     ASSERT_TRUE(group.malloc(block_ids, 20));
-    // step=1 (default), reuse_cache=false => only seq_tail allocated
-    // seq_slots=5, seq_tail=index 4 => 1 real block
+    // reuse_cache=false still keeps the last two active blocks.
     ASSERT_EQ(block_ids.blocksNum(), 5u);
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < 3; ++i) {
         EXPECT_TRUE(isNullBlockIdx(block_ids.blocks()[i])) << "position " << i << " should be NULL";
     }
+    EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[3]));
     EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[4]));
-    EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_ - 1);
+    EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_ - 2);
+}
+
+TEST_F(SWAKVCacheGroupTest, Malloc_DSV4PromptTailKeepsPenultimateBlock) {
+    auto     group = makeGroup(256);
+    BlockIds block_ids(1);
+
+    ASSERT_TRUE(group.malloc(block_ids, 5121, /*enable_reuse_cache=*/false, /*reserve_step=*/0));
+
+    ASSERT_EQ(block_ids.blocksNum(), 21u);
+    for (int i = 0; i < 19; ++i) {
+        EXPECT_TRUE(isNullBlockIdx(block_ids.blocks()[i])) << "position " << i << " should be NULL";
+    }
+    EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[19]));
+    EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[20]));
+    EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_ - 2);
 }
 
 TEST_F(SWAKVCacheGroupTest, Malloc_NoOpWhenEnoughBlocks) {
@@ -215,45 +229,42 @@ TEST_F(SWAKVCacheGroupTest, Malloc_FailsWhenPoolExhausted) {
 TEST_F(SWAKVCacheGroupTest, Malloc_WithStep_ReuseEnabled) {
     auto     group = makeGroupWithStep(4, 2);
     BlockIds block_ids(1);
-    // seq_len=16 => 4 slots, reuse_cache=true
-    // step=2: step_hit at i=1 ((1+1)%2==0), i=3 ((3+1)%2==0)
-    // seq_tail at i=3, step_hit at 1,3
-    // should_alloc: i=0: false, i=1: step_hit, i=2: false, i=3: step_hit||seq_tail
+    // seq_len=16 => 4 slots; keep step hits plus the last two active blocks.
     ASSERT_TRUE(group.malloc(block_ids, 16, /*enable_reuse_cache=*/true));
     ASSERT_EQ(block_ids.blocksNum(), 4u);
     EXPECT_TRUE(isNullBlockIdx(block_ids.blocks()[0]));
     EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[1]));
-    EXPECT_TRUE(isNullBlockIdx(block_ids.blocks()[2]));
+    EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[2]));
     EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[3]));
-    EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_ - 2);
+    EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_ - 3);
 }
 
 TEST_F(SWAKVCacheGroupTest, Malloc_WithStep_ReuseDisabled) {
     auto     group = makeGroupWithStep(4, 2);
     BlockIds block_ids(1);
-    // seq_len=16 => 4 slots, reuse_cache=false => only seq_tail (index 3) allocated
+    // seq_len=16 => 4 slots, reuse_cache=false => active tail indices 2 and 3.
     ASSERT_TRUE(group.malloc(block_ids, 16, /*enable_reuse_cache=*/false));
     ASSERT_EQ(block_ids.blocksNum(), 4u);
     EXPECT_TRUE(isNullBlockIdx(block_ids.blocks()[0]));
     EXPECT_TRUE(isNullBlockIdx(block_ids.blocks()[1]));
-    EXPECT_TRUE(isNullBlockIdx(block_ids.blocks()[2]));
+    EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[2]));
     EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[3]));
-    EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_ - 1);
+    EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_ - 2);
 }
 
 TEST_F(SWAKVCacheGroupTest, Malloc_WithStep_ReserveAllocated) {
     auto     group = makeGroupWithStep(4, 2);
     BlockIds block_ids(1);
     // seq_len=16 => seq_slots=4, reserve_step=2 => total_slots=5
-    // reuse disabled: only seq_tail(3) and reserve(4) allocated
+    // reuse disabled: active tail(2,3) and reserve(4) allocated
     ASSERT_TRUE(group.malloc(block_ids, 16, /*enable_reuse_cache=*/false, /*reserve_step=*/2));
     ASSERT_EQ(block_ids.blocksNum(), 5u);
     EXPECT_TRUE(isNullBlockIdx(block_ids.blocks()[0]));
     EXPECT_TRUE(isNullBlockIdx(block_ids.blocks()[1]));
-    EXPECT_TRUE(isNullBlockIdx(block_ids.blocks()[2]));
+    EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[2]));
     EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[3]));
     EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[4]));
-    EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_ - 2);
+    EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_ - 3);
 }
 
 // ==================== removeSkippedBlocks ====================
@@ -288,10 +299,10 @@ TEST_F(SWAKVCacheGroupTest, RemoveSkippedBlocks_FreesNonTailReal) {
     //   i=1: not null, step_hit => continue
     //   i=0: not null, not step_hit => free
     // But wait, with reuse_cache=true for the first malloc (5 tokens), blocks at 0,1 are:
-    // step_hit at 1 => REAL, seq_tail at 1 => REAL. index 0: NULL
+    // active tail at 0,1 and step_hit at 1 => both REAL
     // Then extending to 20 tokens with reuse: new blocks at 2,3,4
-    // step_hit at 3 => REAL, seq_tail at 4 => REAL. index 2: NULL
-    // So blocks are: [NULL, REAL, NULL, REAL, REAL]
+    // step_hit at 3 and active tail at 3,4 => REAL. index 2: NULL
+    // So blocks are: [REAL, REAL, NULL, REAL, REAL]
     // removeSkippedBlocks: loop from i=2 down:
     //   i=2: NULL => break (stops on first null going backward)
     // No blocks freed.
@@ -439,7 +450,11 @@ TEST_F(SWAKVCacheGroupTest, PutIntoCache_SkipsNullBlocks) {
     auto result1 = group.matchSingleKey(101);
     EXPECT_TRUE(result1.block_indices.empty());
 
-    // Only the seq_tail block (last one) is real
+    // The last two active tail blocks are real.
+    auto result4 = group.matchSingleKey(104);
+    ASSERT_EQ(result4.block_indices.size(), 1u);
+    EXPECT_EQ(result4.block_indices[0], block_ids.blocks()[3]);
+
     auto result5 = group.matchSingleKey(105);
     ASSERT_EQ(result5.block_indices.size(), 1u);
     EXPECT_EQ(result5.block_indices[0], block_ids.blocks()[4]);
