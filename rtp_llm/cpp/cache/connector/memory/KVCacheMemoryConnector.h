@@ -59,6 +59,11 @@ public:
 public:
     bool init();
 
+    // Called by KVCacheConnectorCoordinator AFTER it has assigned
+    // memory_connector_ (so the cross-rank capability HELLO can succeed without
+    // dereferencing a null memory_connector_ on the receiving side).
+    bool postInit();
+
     std::shared_ptr<AsyncMatchContext> asyncMatch(const std::shared_ptr<KVCacheResource>& resource,
                                                   const std::shared_ptr<Meta>&            meta) override;
     std::shared_ptr<AsyncContext>      asyncRead(const std::shared_ptr<KVCacheResource>&   resource,

@@ -133,18 +133,23 @@ bool KVCacheMemoryConnector::init() {
     wait_done_thread_pool_ = std::make_shared<autil::LockFreeThreadPool>(8, 1000, nullptr, "WaitDoneThreadPool");
     RTP_LLM_CHECK_WITH_INFO(wait_done_thread_pool_->start(), "init failed, wait done thread pool start failed");
 
-    // Run capability handshake AFTER disk + thread pool are ready so all ranks
-    // have a working incoming op handler when the HELLO arrives.
-    if (kv_cache_config_.enable_memory_cache_disk_spill && isMaster()
-        && broadcast_manager_->workerNum() > 0) {
-        RTP_LLM_CHECK_WITH_INFO(runDiskSpillHandshake(),
-                                "init failed, disk spill handshake rejected by at least one worker");
-    }
-
     if (metrics_reporter_) {
         metrics_reporter_thread_ = std::make_shared<std::thread>([this]() { reportMetricsLoop(); });
     }
+    // NOTE: disk spill capability handshake is deferred to postInit() which the
+    // coordinator MUST call after memory_connector_ assignment completes. We
+    // can't broadcast here because executeFunction's RTP_LLM_CHECK on the
+    // receiving rank dereferences memory_connector_ — which is still null on
+    // every rank until each rank's coordinator finishes initMemoryConnector().
     return true;
+}
+
+bool KVCacheMemoryConnector::postInit() {
+    if (!kv_cache_config_.enable_memory_cache_disk_spill || !isMaster()
+        || !broadcast_manager_ || broadcast_manager_->workerNum() == 0) {
+        return true;
+    }
+    return runDiskSpillHandshake();
 }
 
 void KVCacheMemoryConnector::checkLayerBlockStrideBytes() const {
@@ -2244,66 +2249,108 @@ bool KVCacheMemoryConnector::runDiskSpillHandshake() {
     if (broadcast_manager_->workerNum() == 0) {
         return true;  // TP=1 (no remote workers) — vacuously ok
     }
-    MemoryOperationRequestPB hello;
-    hello.set_memory_op_protocol_version(kDiskSpillProtocolVersion);
-    hello.set_op_type(MemoryOperationRequestPB::DISK_SPILL_HELLO);
-    hello.set_op_sequence(outgoing_op_sequence_.next());
-    hello.set_disk_spill_capability_mask(static_cast<uint64_t>(disk_spill_cache_->blockSize()));
-    hello.set_schema_hash(schema_hash_);
+    // Worker ranks may finish initDiskSpillCache() slightly after master.
+    // Retry the HELLO on transient "capability_mismatch" responses (which
+    // a worker returns when its disk_spill_cache_ isn't ready yet) until
+    // memory_cache_disk_init_timeout_ms elapses. Real schema mismatches will
+    // surface as the same error_type but the cache will be initialised on
+    // every retry, so any persistent mismatch eventually still fails out
+    // after timeout.
+    const auto deadline_ms      = kv_cache_config_.memory_cache_disk_init_timeout_ms;
+    const auto deadline         = std::chrono::steady_clock::now() + std::chrono::milliseconds(deadline_ms);
+    const auto per_call_timeout = std::min<int64_t>(2000, deadline_ms);
+    int        attempts         = 0;
+    while (true) {
+        ++attempts;
+        MemoryOperationRequestPB hello;
+        hello.set_memory_op_protocol_version(kDiskSpillProtocolVersion);
+        hello.set_op_type(MemoryOperationRequestPB::DISK_SPILL_HELLO);
+        hello.set_op_sequence(outgoing_op_sequence_.next());
+        hello.set_disk_spill_capability_mask(static_cast<uint64_t>(disk_spill_cache_->blockSize()));
+        hello.set_schema_hash(schema_hash_);
 
-    std::vector<FunctionRequestPB> requests;
-    requests.reserve(broadcast_manager_->workerNum());
-    for (size_t i = 0; i < broadcast_manager_->workerNum(); ++i) {
-        FunctionRequestPB req;
-        req.mutable_mem_request()->CopyFrom(hello);
-        requests.emplace_back(std::move(req));
-    }
-    auto rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
-                       const std::shared_ptr<grpc::ClientContext>& context,
-                       const FunctionRequestPB&                    request,
-                       grpc::CompletionQueue*                      completion_queue) {
-        return stub->AsyncExecuteFunction(context.get(), request, completion_queue);
-    };
-    const auto timeout = static_cast<int>(kv_cache_config_.memory_cache_disk_init_timeout_ms);
-    auto       result  = broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(requests, timeout, rpc_call);
-    if (!result) {
-        reportDiskError(disk_error::kTpBroadcast, "hello");
-        return false;
-    }
-    if (!result->waitDone(timeout)) {
-        reportDiskError(disk_error::kTpBroadcastTimeout, "hello");
-        return false;
-    }
-    if (!result->success()) {
-        reportDiskError(disk_error::kCapabilityMismatch, "hello");
-        return false;
-    }
-    for (const auto& response : result->responses()) {
-        if (!response.has_mem_response() || !response.mem_response().success()) {
+        std::vector<FunctionRequestPB> requests;
+        requests.reserve(broadcast_manager_->workerNum());
+        for (size_t i = 0; i < broadcast_manager_->workerNum(); ++i) {
+            FunctionRequestPB req;
+            req.mutable_mem_request()->CopyFrom(hello);
+            requests.emplace_back(std::move(req));
+        }
+        auto rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
+                           const std::shared_ptr<grpc::ClientContext>& context,
+                           const FunctionRequestPB&                    request,
+                           grpc::CompletionQueue*                      completion_queue) {
+            return stub->AsyncExecuteFunction(context.get(), request, completion_queue);
+        };
+        auto result = broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
+            requests, static_cast<int>(per_call_timeout), rpc_call);
+
+        bool transient_failure = false;
+        bool permanent_failure = false;
+        if (!result || !result->waitDone(static_cast<int>(per_call_timeout))) {
+            transient_failure = true;
+        } else if (!result->success()) {
+            transient_failure = true;
+        } else {
+            for (const auto& response : result->responses()) {
+                if (!response.has_mem_response()) {
+                    transient_failure = true;
+                    break;
+                }
+                const auto& mr = response.mem_response();
+                if (!mr.success()) {
+                    // capability_mismatch and protocol_violation can be transient if
+                    // worker isn't ready or our op_sequence is ahead of theirs after
+                    // a partial rollout.
+                    if (mr.error_type() == disk_error::kCapabilityMismatch
+                        || mr.error_type() == disk_error::kProtocolViolation) {
+                        transient_failure = true;
+                        if (attempts % 25 == 1) {
+                            RTP_LLM_LOG_WARNING("disk spill handshake transient reject error=%s attempt=%d",
+                                                mr.error_type().c_str(),
+                                                attempts);
+                        }
+                    } else {
+                        permanent_failure = true;
+                        RTP_LLM_LOG_ERROR("disk spill handshake rejected, error=%s", mr.error_type().c_str());
+                    }
+                    break;
+                }
+                if (mr.schema_hash() != schema_hash_) {
+                    permanent_failure = true;
+                    RTP_LLM_LOG_ERROR("disk spill schema_hash mismatch: master=%s worker=%s",
+                                      schema_hash_.c_str(),
+                                      mr.schema_hash().c_str());
+                    break;
+                }
+                if (mr.disk_spill_capability_mask() != static_cast<uint64_t>(disk_spill_cache_->blockSize())) {
+                    permanent_failure = true;
+                    RTP_LLM_LOG_ERROR("disk spill capability_mask mismatch: master=%zu worker=%lu",
+                                      disk_spill_cache_->blockSize(),
+                                      mr.disk_spill_capability_mask());
+                    break;
+                }
+            }
+        }
+        if (!transient_failure && !permanent_failure) {
+            RTP_LLM_LOG_INFO("disk spill capability handshake ok, peers=%zu schema_hash=%s attempts=%d",
+                             broadcast_manager_->workerNum(),
+                             schema_hash_.c_str(),
+                             attempts);
+            return true;
+        }
+        if (permanent_failure) {
             reportDiskError(disk_error::kCapabilityMismatch, "hello");
-            RTP_LLM_LOG_ERROR("disk spill handshake rejected, error=%s",
-                              response.has_mem_response() ? response.mem_response().error_type().c_str() : "rpc");
             return false;
         }
-        if (response.mem_response().schema_hash() != schema_hash_) {
-            reportDiskError(disk_error::kInitSchema, "hello");
-            RTP_LLM_LOG_ERROR("disk spill schema_hash mismatch: master=%s worker=%s",
-                              schema_hash_.c_str(),
-                              response.mem_response().schema_hash().c_str());
+        // transient — back off and retry
+        if (std::chrono::steady_clock::now() >= deadline) {
+            reportDiskError(disk_error::kTpBroadcastTimeout, "hello");
+            RTP_LLM_LOG_ERROR("disk spill handshake exhausted retries after %d attempts", attempts);
             return false;
         }
-        if (response.mem_response().disk_spill_capability_mask() != static_cast<uint64_t>(disk_spill_cache_->blockSize())) {
-            reportDiskError(disk_error::kCapabilityMismatch, "hello");
-            RTP_LLM_LOG_ERROR("disk spill capability_mask mismatch: master=%zu worker=%lu",
-                              disk_spill_cache_->blockSize(),
-                              response.mem_response().disk_spill_capability_mask());
-            return false;
-        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
-    RTP_LLM_LOG_INFO("disk spill capability handshake ok, peers=%zu schema_hash=%s",
-                     broadcast_manager_->workerNum(),
-                     schema_hash_.c_str());
-    return true;
 }
 
 bool KVCacheMemoryConnector::handleDiskSpillHello(const MemoryOperationRequestPB& request,
@@ -2314,16 +2361,23 @@ bool KVCacheMemoryConnector::handleDiskSpillHello(const MemoryOperationRequestPB
     if (!disk_spill_cache_) {
         response.set_success(false);
         response.set_error_type(disk_error::kCapabilityMismatch);
+        RTP_LLM_LOG_WARNING("disk spill hello: local disk_spill_cache_ not initialised yet");
         return false;
     }
     if (request.schema_hash() != schema_hash_) {
         response.set_success(false);
         response.set_error_type(disk_error::kInitSchema);
+        RTP_LLM_LOG_WARNING("disk spill hello: schema_hash mismatch req='%s' local='%s'",
+                            request.schema_hash().c_str(),
+                            schema_hash_.c_str());
         return false;
     }
     if (request.disk_spill_capability_mask() != static_cast<uint64_t>(disk_spill_cache_->blockSize())) {
         response.set_success(false);
         response.set_error_type(disk_error::kCapabilityMismatch);
+        RTP_LLM_LOG_WARNING("disk spill hello: cap_mask mismatch req=%lu local=%zu",
+                            request.disk_spill_capability_mask(),
+                            disk_spill_cache_->blockSize());
         return false;
     }
     response.set_success(true);

@@ -80,6 +80,11 @@ bool KVCacheConnectorCoordinator::init() {
     if (kv_cache_config_.reuse_cache && kv_cache_config_.enable_memory_cache) {
         memory_connector_ = initMemoryConnector();
         connectors_.emplace_back(memory_connector_);
+        // Two-step init: connector::init() sets up local disk + thread pool;
+        // postInit() runs the cross-rank HELLO once memory_connector_ is
+        // visible to the local gRPC handler.
+        RTP_LLM_CHECK_WITH_INFO(memory_connector_->postInit(),
+                                "memory connector disk spill handshake failed");
     }
 #ifdef USE_REMOTE_KV_CACHE
     if (kv_cache_config_.reuse_cache && kv_cache_config_.enable_remote_cache) {
@@ -202,6 +207,9 @@ std::shared_ptr<KVCacheMemoryConnector> KVCacheConnectorCoordinator::initMemoryC
                                                  static_cast<int>(parallelism_config_.tp_rank),
                                                  static_cast<int>(parallelism_config_.tp_size));
     RTP_LLM_CHECK_WITH_INFO(memory_connector->init(), "memory connector init failed");
+    // Run the cross-rank disk-spill capability handshake AFTER assignment so
+    // that incoming HELLO RPCs on this rank find a non-null memory_connector_
+    // when they dispatch through executeFunction.
     return memory_connector;
 }
 
