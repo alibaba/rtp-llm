@@ -13,9 +13,33 @@ from typing import Any, Dict, Optional
 import torch
 import torch.nn as nn
 
-from .mega_moe import GLM5MegaMoE, GLM5MegaMoeCfg
+from .mega_moe import GLM5MegaMoE
 
 logger = logging.getLogger(__name__)
+
+
+def _split_stacked_moe_w1_up_gate(
+    w1: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Split RTP stacked MoE W1 layout into up/value and gate halves."""
+    if w1.dim() != 3:
+        raise ValueError(
+            f"Expected stacked moe_w1 to be 3D, got shape={tuple(w1.shape)}"
+        )
+    if w1.shape[1] % 2 != 0:
+        raise ValueError(
+            f"Expected even stacked moe_w1 N dimension, got shape={tuple(w1.shape)}"
+        )
+    half_n = w1.shape[1] // 2
+    # RTP's generic MoE kernels use [up/value | gate].  DeepGEMM Mega MoE
+    # follows the DSV4 convention [gate | up], so callers must reorder.
+    w1_up = w1[:, :half_n, :].contiguous()
+    w1_gate = w1[:, half_n:, :].contiguous()
+    return w1_up, w1_gate
+
+
+def _restack_gate_up(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+    return torch.cat([gate, up], dim=1).contiguous()
 
 
 class MegaMoeFusedWrapper(nn.Module):
@@ -76,62 +100,30 @@ class MegaMoeFusedWrapper(nn.Module):
         s1 = weights.pop(W.moe_s1, None)
         s2 = weights.pop(W.moe_s2, None)
 
-        if w1 is not None and w1.dtype == torch.int8 and s1 is not None:
-            # Pre-quantized FP4 weights from load-time conversion
-            self.mega_moe.setup_weights_from_fp4(
-                w1_w=w1,
-                w1_s=s1,
-                w2_w=w2,
-                w2_s=s2,
-            )
-            del w1, w2, s1, s2
-            torch.cuda.empty_cache()
-        elif w1 is not None and w1.dtype == torch.float8_e4m3fn and s1 is not None:
-            E = w1.shape[0]
-            half_n = w1.shape[1] // 2
-            if s1.shape[1] < w1.shape[1]:
-                s1 = s1.repeat_interleave(128, dim=1)[:, : w1.shape[1], :]
-            if s2.shape[1] < w2.shape[1]:
-                s2 = s2.repeat_interleave(128, dim=1)[:, : w2.shape[1], :]
-            w1_gate = w1[:, :half_n, :].contiguous()
-            w1_up = w1[:, half_n:, :].contiguous()
-            s1_gate = s1[:, :half_n, :].contiguous()
-            s1_up = s1[:, half_n:, :].contiguous()
-            del w1, s1
-            self.mega_moe.setup_weights_from_fp8(
-                w1_fp8=w1_gate,
-                w1_scale=s1_gate,
-                w2_fp8=w2,
-                w2_scale=s2,
-                w3_fp8=w1_up,
-                w3_scale=s1_up,
-            )
-            del w1_gate, w1_up, s1_gate, s1_up, w2, s2
-            torch.cuda.empty_cache()
-        elif w1 is not None and w1.dtype in (
-            torch.bfloat16,
-            torch.float16,
-            torch.float32,
-        ):
-            E = w1.shape[0]
-            half_n = w1.shape[1] // 2
-            w1_gate = w1[:, :half_n, :].to(torch.bfloat16).contiguous()
-            w1_up = w1[:, half_n:, :].to(torch.bfloat16).contiguous()
-            w2_bf16 = w2.to(torch.bfloat16)
-            del w1, w2, s1, s2
-            torch.cuda.empty_cache()
-            self.mega_moe.setup_weights_from_bf16(
-                w1_bf16=w1_gate,
-                w2_bf16=w2_bf16,
-                w3_bf16=w1_up,
-            )
-            del w1_gate, w1_up, w2_bf16
-            torch.cuda.empty_cache()
-        else:
+        if w1 is None or w2 is None or s1 is None or s2 is None:
             raise ValueError(
-                "MegaMoeFusedWrapper: unsupported weight dtype %s"
-                % (w1.dtype if w1 is not None else "None")
+                "MegaMoeFusedWrapper requires load-time FP4 MoE weights "
+                "(moe_w1, moe_w2, moe_s1, moe_s2). Runtime/module-init "
+                "FP4 quantization is not supported."
             )
+        if w1.dtype != torch.int8 or w2.dtype != torch.int8:
+            raise ValueError(
+                "MegaMoeFusedWrapper only accepts load-time FP4 int8 weights. "
+                "Runtime/module-init FP4 quantization is not supported. "
+                f"Got moe_w1 dtype={w1.dtype}, moe_w2 dtype={w2.dtype}."
+            )
+
+        w1_up, w1_gate = _split_stacked_moe_w1_up_gate(w1)
+        s1_up, s1_gate = _split_stacked_moe_w1_up_gate(s1)
+        del w1, s1
+        self.mega_moe.setup_weights_from_fp4(
+            w1_w=_restack_gate_up(w1_gate, w1_up),
+            w1_s=_restack_gate_up(s1_gate, s1_up),
+            w2_w=w2,
+            w2_s=s2,
+        )
+        del w1_up, w1_gate, s1_up, s1_gate, w2, s2
+        torch.cuda.empty_cache()
 
         self.expert_num = n_routed_experts
 
