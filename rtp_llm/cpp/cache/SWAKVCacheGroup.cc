@@ -6,6 +6,25 @@
 
 namespace rtp_llm {
 
+namespace {
+
+constexpr int kSwaActiveTailBlocks = 2;
+
+bool isActiveTailBlock(int block_idx, int seq_slots) {
+    if (seq_slots <= 0 || block_idx >= seq_slots) {
+        return false;
+    }
+    return block_idx >= std::max(seq_slots - kSwaActiveTailBlocks, 0);
+}
+
+bool shouldAllocateBlock(int block_idx, int seq_slots, int reserve_step, int step, bool enable_reuse_cache) {
+    const bool is_reserve = reserve_step > 0 && block_idx >= seq_slots;
+    const bool step_hit   = ((block_idx + 1) % step) == 0;
+    return is_reserve || isActiveTailBlock(block_idx, seq_slots) || (enable_reuse_cache && step_hit);
+}
+
+}  // namespace
+
 void SWAKVCacheGroup::filterValidBlocks(const BlockIndicesType& in, BlockIndicesType& out) const {
     out.clear();
     out.reserve(in.size());
@@ -25,26 +44,18 @@ NeedBlocksInfo SWAKVCacheGroup::getNeedBlocks(
     (void)common_seq_len;
     const int step = std::max(1, linear_step_);
 
-    auto count_linear_sparse_range = [&](int begin, int end) -> int {
-        if (end <= begin) {
-            return 0;
-        }
-        if (!reuse_enabled) {
-            return 1;
-        }
-        const int eligible = (end + 1) / step - (begin + 1) / step;
-        const int tail     = ((end + 1) % step == 0) ? 0 : 1;
-        return eligible + tail;
-    };
-
     NeedBlocksInfo info;
 
     const int seq_slots   = needBlocksNum(seq_len, 0);
     const int total_slots = needBlocksNum(seq_len, 0, reserve_step);
 
     info.common_blocks = 0;
-    info.extra_blocks  = count_linear_sparse_range(reuse_blocks_len, seq_slots);
-    info.extra_blocks += std::max(total_slots - seq_slots, 0);
+    for (int i = reuse_blocks_len; i < seq_slots; ++i) {
+        if (shouldAllocateBlock(i, seq_slots, /*reserve_step=*/0, step, reuse_enabled)) {
+            ++info.extra_blocks;
+        }
+    }
+    info.extra_blocks += std::max(total_slots - std::max(seq_slots, reuse_blocks_len), 0);
 
     info.extra_blocks = std::max(info.extra_blocks, 0);
     return info;
@@ -81,10 +92,7 @@ bool SWAKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_reuse
     int need_alloc_blocks = 0;
 
     for (int i = current_blocks_len; i < current_blocks_len + new_blocks_len; i++) {
-        const bool is_seq_tail  = (seq_slots > 0) && (i == seq_slots - 1);
-        const bool is_reserve   = (reserve_step > 0) && (i >= seq_slots);
-        const bool step_hit     = (((i + 1) % step) == 0);
-        const bool should_alloc = is_reserve || (enable_reuse_cache ? (step_hit || is_seq_tail) : is_seq_tail);
+        const bool should_alloc = shouldAllocateBlock(i, seq_slots, reserve_step, step, enable_reuse_cache);
         if (should_alloc) {
             need_alloc_blocks++;
         }
@@ -105,10 +113,7 @@ bool SWAKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_reuse
     BlockIndicesType new_ids;
     new_ids.reserve(static_cast<size_t>(new_blocks_len));
     for (int i = current_blocks_len; i < current_blocks_len + new_blocks_len; i++) {
-        const bool is_seq_tail  = (seq_slots > 0) && (i == seq_slots - 1);
-        const bool is_reserve   = (reserve_step > 0) && (i >= seq_slots);
-        const bool step_hit     = (((i + 1) % step) == 0);
-        const bool should_alloc = is_reserve || (enable_reuse_cache ? (step_hit || is_seq_tail) : is_seq_tail);
+        const bool should_alloc   = shouldAllocateBlock(i, seq_slots, reserve_step, step, enable_reuse_cache);
         if (should_alloc) {
             auto result = block_pool_->malloc(1);
             if (result.empty()) {
