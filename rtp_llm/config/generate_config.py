@@ -150,6 +150,23 @@ class GenerateConfig(BaseModel):
 
     unique_key: str = ""
 
+    # Structured output / XGrammar metadata.  The frontend fills these from
+    # OpenAI response_format; the backend consumes the canonical schema fields
+    # once the logits processor is enabled.
+    xgrammar_enabled: bool = False
+    xgrammar_grammar_kind: str = ""
+    xgrammar_canonical_schema: str = ""
+    xgrammar_schema_sha256: str = ""
+    xgrammar_tokenizer_fp: str = ""
+    xgrammar_compile_cache_key: str = ""
+    xgrammar_compile_cache_capacity: int = 1024
+    xgrammar_compile_cache_hit_total: int = 0
+    xgrammar_compile_cache_miss_total: int = 0
+    xgrammar_compile_cache_eviction_total: int = 0
+    xgrammar_compile_cache_entries: int = 0
+    xgrammar_gpu_hot_path_host_sync_total: int = 0
+    xgrammar_gpu_hot_path_d2h_total: int = 0
+
     def gen_hash_value(self):
         cp = copy.copy(self)
         cp.max_new_tokens = 0
@@ -229,11 +246,7 @@ class GenerateConfig(BaseModel):
         self.end_think_token_ids = (
             [end_think_token_id] if end_think_token_id != -1 else []
         )
-        if (
-            bool(generate_env_config.think_mode)
-            and tokenizer
-            and end_think_token_id == -1
-        ):
+        if tokenizer and end_think_token_id == -1:
             think_end_tag: str = generate_env_config.think_end_tag.encode(
                 "utf-8"
             ).decode("unicode_escape")

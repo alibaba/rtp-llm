@@ -140,6 +140,7 @@ class ChatCompletionRequest(BaseModel):
     n: Optional[int] = None
     logprobs: Optional[bool] = None
     top_logprobs: Optional[int] = None
+    response_format: Optional[Dict[str, Any]] = None
 
     # ---- These functions are not implemented yet.
     # presence_penalty: Optional[float] = 0.0

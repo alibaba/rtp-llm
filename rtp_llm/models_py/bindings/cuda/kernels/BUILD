@@ -125,6 +125,17 @@ cc_library(
 )
 
 cc_library(
+    name = "xgrammar_kernels",
+    srcs = ["xgrammar_kernels.cu"],
+    hdrs = ["xgrammar_kernels.h"],
+    deps = cuda_deps + [
+        "//rtp_llm/cpp/utils:core_utils",
+    ] + torch_deps(),
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "persistent_topk",
     srcs = ["persistent_topk.cu"],
     hdrs = [

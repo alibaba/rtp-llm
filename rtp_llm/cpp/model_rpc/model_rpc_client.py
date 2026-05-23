@@ -141,6 +141,25 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.profile_trace_name = input_py.generate_config.profile_trace_name
     generate_config_pb.global_request_id = input_py.generate_config.global_request_id
     generate_config_pb.ignore_eos = input_py.generate_config.ignore_eos
+    generate_config_pb.xgrammar_enabled = input_py.generate_config.xgrammar_enabled
+    generate_config_pb.xgrammar_grammar_kind = (
+        input_py.generate_config.xgrammar_grammar_kind
+    )
+    generate_config_pb.xgrammar_canonical_schema = (
+        input_py.generate_config.xgrammar_canonical_schema
+    )
+    generate_config_pb.xgrammar_schema_sha256 = (
+        input_py.generate_config.xgrammar_schema_sha256
+    )
+    generate_config_pb.xgrammar_tokenizer_fp = (
+        input_py.generate_config.xgrammar_tokenizer_fp
+    )
+    generate_config_pb.xgrammar_compile_cache_key = (
+        input_py.generate_config.xgrammar_compile_cache_key
+    )
+    generate_config_pb.xgrammar_compile_cache_capacity = (
+        input_py.generate_config.xgrammar_compile_cache_capacity
+    )
     generate_config_pb.reuse_cache = input_py.generate_config.reuse_cache
     generate_config_pb.enable_memory_cache = (
         input_py.generate_config.enable_memory_cache

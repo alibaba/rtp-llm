@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/models/logits_processor/ThinkModeLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/TreeLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/MultiSeqLogitsProcessor.h"
+#include "rtp_llm/cpp/models/logits_processor/xgrammar/XGrammarLogitsProcessor.h"
 
 namespace rtp_llm {
 
@@ -20,6 +21,11 @@ LogitsProcessorFactory::createLogitsProcessors(std::shared_ptr<GenerateInput> ge
     auto think_processor = ThinkModeLogitsProcessor::fromGenerateInput(generate_input, max_batch_size);
     if (think_processor != nullptr) {
         result.push_back(std::static_pointer_cast<BaseLogitsProcessor>(think_processor));
+    }
+
+    auto xgrammar_processor = XGrammarLogitsProcessor::fromGenerateInput(generate_input, init_batch_size);
+    if (xgrammar_processor != nullptr) {
+        result.push_back(std::static_pointer_cast<BaseLogitsProcessor>(xgrammar_processor));
     }
 
     auto tree_processor = TreeLogitsProcessor::fromGenerateInput(generate_input, init_batch_size);

@@ -424,7 +424,10 @@ class CustomChatRenderer:
 
         # 处理非流式请求的合并逻辑
         if not generate_config.is_streaming:
-            output_generator = await self._merge_non_streaming_outputs(output_generator)
+            output_generator = await self._merge_non_streaming_outputs(
+                output_generator,
+                generate_config.return_incremental,
+            )
 
         async for response in self.render_response_stream(
             output_generator, request, generate_config
@@ -432,7 +435,9 @@ class CustomChatRenderer:
             yield response
 
     async def _merge_non_streaming_outputs(
-        self, output_generator: AsyncGenerator[GenerateOutputs, None]
+        self,
+        output_generator: AsyncGenerator[GenerateOutputs, None],
+        return_incremental: bool = False,
     ) -> AsyncGenerator[GenerateOutputs, None]:
         """
         合并非流式请求的多个输出为单个输出
@@ -448,8 +453,15 @@ class CustomChatRenderer:
         async for output in output_generator:
             collected_outputs.append(output)
 
-        # 合并输出
-        merged_output = self._merge_generate_outputs(collected_outputs)
+        if return_incremental:
+            merged_output = (
+                collected_outputs[-1]
+                if collected_outputs
+                else GenerateOutputs(generate_outputs=[])
+            )
+        else:
+            # 合并输出
+            merged_output = self._merge_generate_outputs(collected_outputs)
 
         # 创建新的单次输出generator
         async def single_output_generator():
@@ -879,6 +891,7 @@ class CustomChatRenderer:
         buffer_list: List[StreamStatus],
         request: ChatCompletionRequest,
         think_status_list: List[ThinkStatus],
+        generate_config: GenerateConfig,
     ):
         input_token_length = 0
         output_token_length = 0
@@ -906,6 +919,8 @@ class CustomChatRenderer:
                 input_token_length = buffer.output.aux_info.input_len
                 reuse_length = buffer.output.aux_info.reuse_len
                 aux_info = buffer.output.aux_info if request.aux_info else None
+                if aux_info is not None:
+                    self._fill_xgrammar_aux_info(aux_info, generate_config)
             output_token_length += buffer.output.aux_info.output_len
         return StreamResponseObject(
             choices=[
@@ -938,6 +953,34 @@ class CustomChatRenderer:
                 ),
             ),
             aux_info=aux_info,
+        )
+
+    def _fill_xgrammar_aux_info(
+        self, aux_info: AuxInfo, generate_config: Optional[GenerateConfig]
+    ) -> None:
+        if generate_config is None or not generate_config.xgrammar_enabled:
+            return
+        aux_info.xgrammar_enabled = True
+        aux_info.xgrammar_compile_cache_capacity = (
+            generate_config.xgrammar_compile_cache_capacity
+        )
+        aux_info.xgrammar_compile_cache_hit_total = (
+            generate_config.xgrammar_compile_cache_hit_total
+        )
+        aux_info.xgrammar_compile_cache_miss_total = (
+            generate_config.xgrammar_compile_cache_miss_total
+        )
+        aux_info.xgrammar_compile_cache_eviction_total = (
+            generate_config.xgrammar_compile_cache_eviction_total
+        )
+        aux_info.xgrammar_compile_cache_entries = (
+            generate_config.xgrammar_compile_cache_entries
+        )
+        aux_info.xgrammar_gpu_hot_path_host_sync_total = (
+            generate_config.xgrammar_gpu_hot_path_host_sync_total
+        )
+        aux_info.xgrammar_gpu_hot_path_d2h_total = (
+            generate_config.xgrammar_gpu_hot_path_d2h_total
         )
 
     async def _create_status_list(
@@ -1021,7 +1064,7 @@ class CustomChatRenderer:
             if self._should_yield_stream_response(flush_response):
                 yield flush_response
             final_response = await self._generate_final(
-                status_list, request, think_status_list
+                status_list, request, think_status_list, generate_config
             )
             if self._should_yield_stream_response(final_response, is_final=True):
                 yield final_response

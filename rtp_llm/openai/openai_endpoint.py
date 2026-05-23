@@ -41,6 +41,7 @@ from rtp_llm.openai.renderers.custom_renderer import (
 from rtp_llm.ops import SpecialTokens
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.server.request_headers import extract_request_headers
+from rtp_llm.structured_output.xgrammar_frontend import XGrammarFrontendCompiler
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
@@ -103,6 +104,11 @@ class OpenaiEndpoint(object):
             vit_config,
         )
         logging.info(f"Finally openai endpoint uses renderer: {self.chat_renderer} ")
+        self.xgrammar_compiler = XGrammarFrontendCompiler(
+            capacity=self.generate_env_config.xgrammar_compile_cache_size,
+            thread_num=self.generate_env_config.xgrammar_compile_thread_num,
+        )
+        self._precompile_xgrammar_response_formats()
         self.template_renderer: CustomChatRenderer = (
             self.chat_renderer
             if isinstance(self.chat_renderer, BasicRenderer)
@@ -164,6 +170,29 @@ class OpenaiEndpoint(object):
             f"stop_words_id_list [{self.stop_words_id_list}]"
         )
 
+    def _precompile_xgrammar_response_formats(self):
+        precompile_path = self.generate_env_config.xgrammar_precompile_list
+        if not precompile_path:
+            return
+        compiled = 0
+        with open(precompile_path, "r") as f:
+            for line_no, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    response_format = json.loads(line)
+                    self.xgrammar_compiler.compile_response_format(
+                        response_format, self.tokenizer
+                    )
+                    compiled += 1
+                except Exception as e:
+                    raise ValueError(
+                        f"Failed to precompile xgrammar response_format "
+                        f"{precompile_path}:{line_no}: {e}"
+                    ) from e
+        logging.info("precompiled %d xgrammar response formats", compiled)
+
     async def list_models(self):
         model_card = ModelCard(id=self.model_name)
         return ModelList(data=[model_card])
@@ -214,6 +243,32 @@ class OpenaiEndpoint(object):
         if request.logprobs or request.functions:
             config.is_streaming = True
         config.convert_select_tokens(len(self.tokenizer), self.tokenizer)
+        compile_result = self.xgrammar_compiler.compile_response_format(
+            request.response_format, self.tokenizer
+        )
+        if compile_result is not None:
+            stats = self.xgrammar_compiler.stats()
+            config.xgrammar_enabled = True
+            config.xgrammar_grammar_kind = compile_result.grammar_kind
+            config.xgrammar_canonical_schema = compile_result.canonical_schema
+            config.xgrammar_schema_sha256 = compile_result.canonical_schema_sha256
+            config.xgrammar_tokenizer_fp = compile_result.backend_tokenizer_payload
+            config.xgrammar_compile_cache_key = compile_result.cache_key
+            config.xgrammar_compile_cache_capacity = (
+                self.generate_env_config.xgrammar_compile_cache_size
+            )
+            config.xgrammar_compile_cache_hit_total = stats[
+                "xgrammar_compile_cache_hit_total"
+            ]
+            config.xgrammar_compile_cache_miss_total = stats[
+                "xgrammar_compile_cache_miss_total"
+            ]
+            config.xgrammar_compile_cache_eviction_total = stats[
+                "xgrammar_compile_cache_eviction_total"
+            ]
+            config.xgrammar_compile_cache_entries = stats[
+                "xgrammar_compile_cache_entries"
+            ]
 
         # add_thinking_params now accepts generate_env_config parameter
         config.add_thinking_params(self.tokenizer, self.generate_env_config)

@@ -845,6 +845,12 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
                   torch::Tensor(),
                   update_info.update_remote_generate,
                   update_info.force_update_info});
+
+    if (getStatus() != StreamState::FINISHED) {
+        for (auto logit_processor_ptr : getAllLogitsProcessorPtr()) {
+            logit_processor_ptr->updateStatus(new_tokens, num_new_tokens);
+        }
+    }
 }
 
 void GenerateStream::update(const StreamUpdateInfo& update_info) {

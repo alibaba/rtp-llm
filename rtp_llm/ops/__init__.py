@@ -13,6 +13,31 @@ libs_path = os.path.join(parent_dir, "libs")
 SO_NAME = "libth_transformer_config.so"
 
 
+def _preload_shared_lib(lib_name: str, search_roots: List[str]) -> bool:
+    """Preload a runtime dependency that may live outside rpath in Bazel runfiles."""
+    from ctypes import CDLL, RTLD_GLOBAL
+
+    seen = set()
+    for root in search_roots:
+        if not root or root in seen or not os.path.exists(root):
+            continue
+        seen.add(root)
+        for dirpath, _, filenames in os.walk(root):
+            if lib_name not in filenames:
+                continue
+            lib_path = os.path.join(dirpath, lib_name)
+            try:
+                CDLL(lib_path, mode=RTLD_GLOBAL)
+                logging.info(f"preloaded {lib_name} from {lib_path}")
+                return True
+            except BaseException as e:
+                logging.info(
+                    f"failed to preload {lib_name} from {lib_path}: {e}, "
+                    f"traceback: {traceback.format_exc()}"
+                )
+    return False
+
+
 # for py test
 def find_upper_so(current_dir: str):
     logging.info(f"find_upper_so: {current_dir}")
@@ -100,6 +125,31 @@ try:
         logging.info(f"loaded libcaffe2_nvrtc.so from {so_load_path}")
 except BaseException as e:
     logging.info(f"Exception: {e}, traceback: {traceback.format_exc()}")
+
+# XGrammar's Python wheel ships shared libraries under the pip repository in
+# Bazel runfiles.  libth_transformer.so links against them, but its rpath differs
+# between the source tree, runfiles, and wheel layouts.  Preloading by filename
+# keeps the engine import independent of that layout.
+runfiles_root = os.path.dirname(parent_dir)
+runfiles_parent = os.path.dirname(runfiles_root)
+_preload_shared_lib(
+    "libtvm_ffi.so",
+    [
+        os.path.join(runfiles_root, "external/pip_gpu_cuda13_torch_apache_tvm_ffi/site-packages/tvm_ffi/lib"),
+        os.path.join(runfiles_root, "external/pip_cuda13_arm_torch_apache_tvm_ffi/site-packages/tvm_ffi/lib"),
+        os.path.join(runfiles_parent, "pip_gpu_cuda13_torch_apache_tvm_ffi/site-packages/tvm_ffi/lib"),
+        os.path.join(runfiles_parent, "pip_cuda13_arm_torch_apache_tvm_ffi/site-packages/tvm_ffi/lib"),
+    ],
+)
+_preload_shared_lib(
+    "libxgrammar_bindings.so",
+    [
+        os.path.join(runfiles_root, "external/pip_gpu_cuda13_torch_xgrammar/site-packages/xgrammar"),
+        os.path.join(runfiles_root, "external/pip_cuda13_arm_torch_xgrammar/site-packages/xgrammar"),
+        os.path.join(runfiles_parent, "pip_gpu_cuda13_torch_xgrammar/site-packages/xgrammar"),
+        os.path.join(runfiles_parent, "pip_cuda13_arm_torch_xgrammar/site-packages/xgrammar"),
+    ],
+)
 
 # frontend cannot load libpython3.10.so, so we need to load it manually
 import sysconfig

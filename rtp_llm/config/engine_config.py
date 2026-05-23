@@ -235,6 +235,9 @@ class EngineConfig:
         device_resource_config = py_env_configs.device_resource_config
         model_specific_config = py_env_configs.model_specific_config
         misc_config = py_env_configs.misc_config.misc_config
+        misc_config.xgrammar_compile_cache_size = (
+            py_env_configs.generate_env_config.xgrammar_compile_cache_size
+        )
         moe_config = py_env_configs.moe_config
         sp_config = py_env_configs.sp_config
         cache_store_config = py_env_configs.cache_store_config

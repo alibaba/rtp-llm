@@ -21,6 +21,7 @@ public:
     torch::Tensor accept_len_cpu;
 
     std::shared_ptr<torch::Event> transfer_done_event;
+    bool                          xgrammar_mtp_device_path = false;
 
     SpeculativeSamplerOutput(): transfer_done_event(std::make_shared<torch::Event>(cuda_graph::makeGraphEvent())) {}
 };

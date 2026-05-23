@@ -100,6 +100,13 @@ message GenerateConfigPB {
     google.protobuf.Int32Value batch_group_timeout = 56;
     string profile_trace_name = 57;
     repeated int32 begin_think_token_ids = 58;
+    bool xgrammar_enabled = 59;
+    string xgrammar_grammar_kind = 60;
+    string xgrammar_canonical_schema = 61;
+    string xgrammar_schema_sha256 = 62;
+    string xgrammar_tokenizer_fp = 63;
+    string xgrammar_compile_cache_key = 64;
+    int32 xgrammar_compile_cache_capacity = 65;
 }
 
 message MMPreprocessConfigPB {
@@ -255,6 +262,10 @@ message GenerateRequestPB {
     repeated int32 position_ids = 9;
     TensorPB propose_probs = 10;
     TensorPB propose_hidden = 11;
+    repeated int32 xgrammar_accepted_tokens = 12;
+    int64 xgrammar_consumed_seq_len = 13;
+    bytes xgrammar_replay_state_blob = 14;
+    string xgrammar_replay_state_version = 15;
 }
 
 // in tp case, decode master broadcast to decode worker

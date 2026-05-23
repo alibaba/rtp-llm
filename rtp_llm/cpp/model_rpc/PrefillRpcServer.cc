@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/engine_base/Host.h"
+#include "rtp_llm/cpp/models/logits_processor/xgrammar/XGrammarLogitsProcessor.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include <cstring>
 #include <memory>
@@ -17,6 +18,23 @@ using grpc::Status;
 using grpc::ClientContext;
 
 namespace rtp_llm {
+
+namespace {
+
+XGrammarLogitsProcessorPtr findXGrammarProcessor(const std::shared_ptr<GenerateStream>& stream) {
+    if (!stream) {
+        return nullptr;
+    }
+    for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
+        auto xgrammar_processor = std::dynamic_pointer_cast<XGrammarLogitsProcessor>(processor);
+        if (xgrammar_processor) {
+            return xgrammar_processor;
+        }
+    }
+    return nullptr;
+}
+
+}  // namespace
 
 #define CLIENT_GRPC_RET_IF_ERROR(prefill_context, state, error_code_value)                                             \
     if (!(state)) {                                                                                                    \
@@ -305,6 +323,14 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
     generate_request.set_client_id(process_id_);
     generate_request.set_request_id(prefill_context.request_id);
     generate_request.set_first_generate_token_id(first_token);
+    if (auto xgrammar_processor = findXGrammarProcessor(stream)) {
+        auto replay_tokens = xgrammar_processor->exportPdReplayAcceptedTokens(/*batch_idx=*/0,
+                                                                              /*exclude_last_token=*/true);
+        generate_request.mutable_xgrammar_accepted_tokens()->CopyFrom({replay_tokens.begin(), replay_tokens.end()});
+        generate_request.set_xgrammar_consumed_seq_len(
+            xgrammar_processor->exportPdReplayConsumedSeqLen(/*batch_idx=*/0, /*exclude_last_token=*/true));
+        generate_request.set_xgrammar_replay_state_version(XGrammarLogitsProcessor::pdReplayStateVersion());
+    }
     auto context_position_ids = stream->getContextPositionIds();
     if (context_position_ids.defined()) {
         generate_request.mutable_position_ids()->CopyFrom(

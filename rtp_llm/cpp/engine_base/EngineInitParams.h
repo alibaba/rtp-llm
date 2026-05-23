@@ -67,6 +67,7 @@ struct EngineInitParams {
         grpc_config(grpc_config),
         ffn_disaggregate_config(ffn_disaggregate_config),
         vit_config(vit_config),
+        xgrammar_compile_cache_size(misc_config.xgrammar_compile_cache_size),
         gpt_weights(std::move(gpt_weights)),
         py_model(py_model),
         py_eplb(py_eplb),
@@ -109,6 +110,7 @@ struct EngineInitParams {
     GrpcConfig                   grpc_config;
     FfnDisAggregateConfig        ffn_disaggregate_config;
     VitConfig                    vit_config;
+    size_t                       xgrammar_compile_cache_size = 1024;
     rtp_llm::Weights             gpt_weights;
     py::object                   py_model;
     py::object                   py_eplb;

@@ -1,0 +1,2 @@
+"""Structured output helpers."""
+

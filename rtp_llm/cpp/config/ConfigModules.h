@@ -407,8 +407,9 @@ struct PDSepConfig {
 };
 
 struct MiscellaneousConfig {
-    bool        disable_pdl = true;
-    std::string aux_string  = "";
+    bool        disable_pdl                  = true;
+    std::string aux_string                   = "";
+    size_t      xgrammar_compile_cache_size  = 1024;
     std::string to_string() const;
 };
 

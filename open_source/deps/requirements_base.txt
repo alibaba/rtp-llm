@@ -50,6 +50,7 @@ timm==0.9.12
 transformers==4.51.2
 typing-extensions
 uvicorn==0.30.0
+xgrammar==0.2.1
 xfastertransformer_devel==1.8.1.1 ; platform_machine == "x86_64"
 xfastertransformer_devel_icx==1.8.1.1 ; platform_machine == "x86_64"
 pybind11_stubgen

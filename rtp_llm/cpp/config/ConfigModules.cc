@@ -340,7 +340,8 @@ std::string CacheStoreConfig::to_string() const {
 std::string MiscellaneousConfig::to_string() const {
     std::ostringstream oss;
     oss << "disable_pdl: " << disable_pdl << "\n"
-        << "aux_string: " << aux_string << "\n";
+        << "aux_string: " << aux_string << "\n"
+        << "xgrammar_compile_cache_size: " << xgrammar_compile_cache_size << "\n";
     return oss.str();
 }
 

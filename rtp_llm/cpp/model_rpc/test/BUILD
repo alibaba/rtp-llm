@@ -9,6 +9,30 @@ test_copts = [
     "-fno-access-control",
 ] + copts()
 
+cc_import(
+    name = "cuda13_torch_nvshmem",
+    shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
+)
+
+cc_import(
+    name = "cuda13_xgrammar_bindings",
+    shared_library = "@pip_gpu_cuda13_torch_xgrammar//:site-packages/xgrammar/libxgrammar_bindings.so",
+)
+
+cc_import(
+    name = "cuda13_tvm_ffi",
+    shared_library = "@pip_gpu_cuda13_torch_apache_tvm_ffi//:site-packages/tvm_ffi/lib/libtvm_ffi.so",
+)
+
+cuda13_torch_link_deps = select({
+    "@//:using_cuda13_x86": [
+        ":cuda13_torch_nvshmem",
+        ":cuda13_tvm_ffi",
+        ":cuda13_xgrammar_bindings",
+    ],
+    "//conditions:default": [],
+})
+
 py_test (
     name = "model_rpc_client_test",
     srcs = ["model_rpc_client_test.py"],
@@ -33,7 +57,7 @@ test_deps = [
     "@com_google_googletest//:gtest_main",
     "@havenask//aios/autil:base64",
     "@havenask//aios/autil:zlib",
-] + torch_deps() + device_impl_target()
+] + torch_deps() + cuda13_torch_link_deps + device_impl_target()
 
 # cc_test(
 #     name = "model_rpc_server_test",

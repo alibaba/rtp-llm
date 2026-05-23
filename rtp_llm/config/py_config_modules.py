@@ -275,6 +275,10 @@ class GenerateEnvConfig:
         self.think_start_tag: str = "<think>\n"
         self.think_terminate_token_id: int = 1
         self.generation_config_path: Optional[str] = None
+        self.xgrammar_compile_cache_size: int = 1024
+        self.xgrammar_compile_thread_num: int = 4
+        self.xgrammar_precompile_list: Optional[str] = None
+        self.xgrammar_enable_stream_partial_json: bool = True
 
     def to_string(self):
         return (
@@ -286,7 +290,11 @@ class GenerateEnvConfig:
             f"stop_words_str: {self.stop_words_str}\n"
             f"think_start_tag: {self.think_start_tag}\n"
             f"think_terminate_token_id: {self.think_terminate_token_id}\n"
-            f"generation_config_path: {self.generation_config_path}"
+            f"generation_config_path: {self.generation_config_path}\n"
+            f"xgrammar_compile_cache_size: {self.xgrammar_compile_cache_size}\n"
+            f"xgrammar_compile_thread_num: {self.xgrammar_compile_thread_num}\n"
+            f"xgrammar_precompile_list: {self.xgrammar_precompile_list}\n"
+            f"xgrammar_enable_stream_partial_json: {self.xgrammar_enable_stream_partial_json}"
         )
 
 

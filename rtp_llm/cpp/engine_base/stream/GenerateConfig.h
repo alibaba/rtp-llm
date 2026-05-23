@@ -92,6 +92,20 @@ public:
     std::optional<int> batch_group_timeout;
     std::string      unique_key;
 
+    bool        xgrammar_enabled                        = false;
+    std::string xgrammar_grammar_kind                   = "";
+    std::string xgrammar_canonical_schema               = "";
+    std::string xgrammar_schema_sha256                  = "";
+    std::string xgrammar_tokenizer_fp                   = "";
+    std::string xgrammar_compile_cache_key              = "";
+    int         xgrammar_compile_cache_capacity         = 1024;
+    int64_t     xgrammar_compile_cache_hit_total        = 0;
+    int64_t     xgrammar_compile_cache_miss_total       = 0;
+    int64_t     xgrammar_compile_cache_eviction_total   = 0;
+    int64_t     xgrammar_compile_cache_entries          = 0;
+    int64_t     xgrammar_gpu_hot_path_host_sync_total   = 0;
+    int64_t     xgrammar_gpu_hot_path_d2h_total         = 0;
+
     bool top1() {
         return top_k == 1;
     }
@@ -145,7 +159,10 @@ public:
                      << ", gen_timeline: " << gen_timeline << ", profile_step: " << profile_step
                      << ", reuse_cache: " << reuse_cache << ", enable_device_cache: " << enable_device_cache
                      << ", enable_memory_cache: " << enable_memory_cache
-                     << ", enable_remote_cache: " << enable_remote_cache << ", force_batch: " << force_batch << ", unique_key: " << unique_key << "}";
+                     << ", enable_remote_cache: " << enable_remote_cache << ", force_batch: " << force_batch
+                     << ", unique_key: " << unique_key << ", xgrammar_enabled: " << xgrammar_enabled
+                     << ", xgrammar_grammar_kind: " << xgrammar_grammar_kind
+                     << ", xgrammar_compile_cache_capacity: " << xgrammar_compile_cache_capacity << "}";
         return debug_string.str();
     }
 
@@ -230,6 +247,19 @@ public:
         JSONIZE(aux_info);
         JSONIZE_OPTIONAL(batch_group_timeout);
         JSONIZE(unique_key);
+        JSONIZE(xgrammar_enabled);
+        JSONIZE(xgrammar_grammar_kind);
+        JSONIZE(xgrammar_canonical_schema);
+        JSONIZE(xgrammar_schema_sha256);
+        JSONIZE(xgrammar_tokenizer_fp);
+        JSONIZE(xgrammar_compile_cache_key);
+        JSONIZE(xgrammar_compile_cache_capacity);
+        JSONIZE(xgrammar_compile_cache_hit_total);
+        JSONIZE(xgrammar_compile_cache_miss_total);
+        JSONIZE(xgrammar_compile_cache_eviction_total);
+        JSONIZE(xgrammar_compile_cache_entries);
+        JSONIZE(xgrammar_gpu_hot_path_host_sync_total);
+        JSONIZE(xgrammar_gpu_hot_path_d2h_total);
 #undef JSONIZE
 #undef JSONIZE_OPTIONAL
     }

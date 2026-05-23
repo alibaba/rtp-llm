@@ -1,4 +1,15 @@
 py_test(
+    name = "xgrammar_frontend_test",
+    srcs = [
+        "xgrammar_frontend_test.py",
+    ],
+    deps = [
+        "//rtp_llm:openai_api",
+    ],
+    exec_properties = {'gpu':'H20'},
+)
+
+py_test(
     name = "generate_config_test",
     srcs = [
         "generate_config_test.py",

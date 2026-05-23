@@ -39,7 +39,7 @@ the slot indices we produce here are ``r * stride + offset_in_request``.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
@@ -68,6 +68,10 @@ class DSv4DecodeAttnMetadata:
 
     # Per-request scalars (host int32 tensor; B-shaped)
     start_pos: torch.Tensor  # [B] int32 — start index of this step's tokens
+    # Per-token absolute positions, flattened token-major over [B, q_len].
+    # AttentionFP8 uses this even when the KV cache itself is not FP8.
+    position_ids: torch.Tensor  # [T_total] int32
+    position_ids_long: torch.Tensor  # [T_total] int64
 
     # Slot mappings — flat over [T_total] with per-request offset baked in.
     # SWA: applies to all layers.
@@ -93,6 +97,10 @@ class DSv4DecodeAttnMetadata:
     # ``compressed_lens[ratio][r] = (start_pos[r] + 1) // ratio``  (after
     # this step's writes are applied).
     compressed_lens: Dict[int, torch.Tensor]  # ratio -> [B] int32
+    # Per-token compressed lengths for target-verify/speculative decode.
+    # AttentionFP8 may consume this metadata even when the KV metadata
+    # builder is the non-FP8 variant.
+    compressed_lens_per_token: Dict[int, torch.Tensor]  # ratio -> [B, S] int32
 
     # Concatenated topk indices per layer-type. For SWA-only layers,
     # equals ``topk_window_idxs``. For compressed layers (CSA/HCA),
@@ -128,6 +136,12 @@ class DSv4DecodeAttnMetadata:
     # (boundary-only writers like CSA-K / HCA-K / INDEXER-K).
     pool_write_slot_mappings: Dict[int, torch.Tensor] = field(default_factory=dict)
 
+    # Per-attn_type compressor state-pool slot mapping: [max_T_total] int64.
+    # Used by AttentionFP8 compressor decode helpers.
+    compressor_state_slot_mappings: Dict[int, torch.Tensor] = field(
+        default_factory=dict
+    )
+
     # Per-step absolute positions for the SWA window — left-aligned,
     # ``-1`` padded for pre-sequence-start entries. Shape ``[B, q_len, win]``
     # int32. UNLIKE ``topk_window_idxs`` (which is request-local ring
@@ -136,6 +150,16 @@ class DSv4DecodeAttnMetadata:
     # slot ids via ``translate_local_to_global_slots``. Optional —
     # populated only when paged-decode read is enabled.
     swa_abs_idx: torch.Tensor = field(default=None)  # type: ignore[assignment]
+
+    # Shared layer-invariant metadata consumed by AttentionFP8 decode helpers.
+    cache_seqlens_i32: torch.Tensor = field(default=None)  # type: ignore[assignment]
+    req_id_per_token: Optional[torch.Tensor] = None
+    req_id_per_token_long: Optional[torch.Tensor] = None
+    decode_seq_start_per_req: Optional[torch.Tensor] = None
+    decode_cu_seq_per_req: Optional[torch.Tensor] = None
+    swa_global_slots: Optional[torch.Tensor] = None
+    hca_cmp_global_slots: Optional[torch.Tensor] = None
+    sched_meta_cache: Dict[Tuple[int, Optional[int]], Any] = field(default_factory=dict)
 
     # Phase F: ``layer_pool_descs`` deleted — Attention resolves pool
     # views via ``self._kv_cache.get_layer_cache(layer_id, attn_type)``
@@ -213,6 +237,26 @@ def _build_compressed_slot_mapping(
     flat = (req_base + in_req).reshape(-1)
     mask = on_boundary.reshape(-1)
     return torch.where(mask, flat, torch.full_like(flat, -1))
+
+
+def _compute_state_pool_slot_mapping(
+    block_table: torch.Tensor,
+    positions: torch.Tensor,
+    req_idx: torch.Tensor,
+    entries_per_block: int,
+) -> torch.Tensor:
+    """Match CompressorFP8 state-pool cyclic slot mapping."""
+    if positions.numel() == 0:
+        return torch.empty(0, dtype=torch.long, device=positions.device)
+    pos_i64 = positions.to(torch.long)
+    req_i64 = req_idx.to(torch.long)
+    bt_long = block_table.to(torch.long)
+    max_blocks = int(bt_long.shape[1])
+    block_in_seq = (pos_i64 // entries_per_block) % max_blocks
+    in_block = pos_i64 % entries_per_block
+    block_id = bt_long[req_i64, block_in_seq]
+    slot = block_id * entries_per_block + in_block
+    return torch.where(block_id > 0, slot, torch.full_like(slot, -1))
 
 
 def _build_window_topk_idxs(
@@ -296,6 +340,8 @@ def allocate_decode_metadata(
     swa_buffer_stride = window_size
 
     start_pos = torch.zeros(B, dtype=torch.int32, device=device)
+    position_ids = torch.zeros(T_total, dtype=torch.int32, device=device)
+    position_ids_long = torch.zeros(T_total, dtype=torch.long, device=device)
     slot_swa = torch.full((T_total,), -1, dtype=torch.int32, device=device)
     topk_window = torch.full(
         (B, q_len, window_size),
@@ -313,6 +359,7 @@ def allocate_decode_metadata(
     unique_ratios: List[int] = sorted({r for r in compress_ratios if r > 1})
     slot_compressed: Dict[int, torch.Tensor] = {}
     compressed_lens: Dict[int, torch.Tensor] = {}
+    compressed_lens_per_token: Dict[int, torch.Tensor] = {}
     compressed_buffer_stride_per_ratio: Dict[int, int] = {}
     topk_total_by_ratio: Dict[int, torch.Tensor] = {}
     for r in unique_ratios:
@@ -325,6 +372,9 @@ def allocate_decode_metadata(
             device=device,
         )
         compressed_lens[r] = torch.zeros(B, dtype=torch.int32, device=device)
+        compressed_lens_per_token[r] = torch.zeros(
+            B, q_len, dtype=torch.int32, device=device
+        )
         topk_total_by_ratio[r] = torch.full(
             (B, q_len, window_size + index_topk),
             -1,
@@ -339,8 +389,14 @@ def allocate_decode_metadata(
     # corresponding entries are simply unused.
     pool_block_tables: Dict[int, torch.Tensor] = {}
     pool_write_slot_mappings: Dict[int, torch.Tensor] = {}
+    compressor_state_slot_mappings: Dict[int, torch.Tensor] = {}
     if paged_pool_specs:
-        from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
+        from rtp_llm.models_py.modules.dsv4.attn_type import (
+            CSA_STATE,
+            HCA_STATE,
+            INDEXER_STATE,
+            SWA_KV,
+        )
 
         for attn_type, (_, max_blocks) in paged_pool_specs.items():
             pool_block_tables[attn_type] = torch.zeros(
@@ -357,12 +413,33 @@ def allocate_decode_metadata(
             pool_write_slot_mappings[attn_type] = torch.full(
                 (T_total,), sentinel, dtype=torch.int64, device=device
             )
+        for attn_type in (CSA_STATE, HCA_STATE, INDEXER_STATE):
+            if attn_type in paged_pool_specs:
+                compressor_state_slot_mappings[attn_type] = torch.full(
+                    (T_total,),
+                    -1,
+                    dtype=torch.int64,
+                    device=device,
+                )
 
     # Pre-allocate swa_abs_idx[B, q_len, win] int32 (always — Phase 2B-2a
     # paged read may consume it; cost is trivial compared to the rest).
     swa_abs_idx = torch.full(
         (B, q_len, window_size),
         -1,
+        dtype=torch.int32,
+        device=device,
+    )
+    cache_seqlens_i32 = torch.zeros(B, dtype=torch.int32, device=device)
+    req_id_per_token = torch.arange(B, dtype=torch.int32, device=device)
+    if q_len != 1:
+        req_id_per_token = req_id_per_token.repeat_interleave(q_len).contiguous()
+    req_id_per_token_long = req_id_per_token.to(torch.long)
+    decode_seq_start_per_req = torch.zeros(B, dtype=torch.int32, device=device)
+    decode_cu_seq_per_req = torch.arange(
+        0,
+        (B + 1) * q_len,
+        q_len,
         dtype=torch.int32,
         device=device,
     )
@@ -376,17 +453,26 @@ def allocate_decode_metadata(
         swa_buffer_t_dim=window_size,
         compressed_buffer_t_dim_per_ratio=compressed_buffer_stride_per_ratio,
         start_pos=start_pos,
+        position_ids=position_ids,
+        position_ids_long=position_ids_long,
         slot_mapping_swa=slot_swa,
         slot_mapping_compressed=slot_compressed,
         topk_window_idxs=topk_window,
         topk_buffer_compressed=topk_buffer_compressed,
         compressed_lens=compressed_lens,
+        compressed_lens_per_token=compressed_lens_per_token,
         topk_total_by_ratio=topk_total_by_ratio,
         compressed_offset=window_size,
         is_cuda_graph=True,
         pool_block_tables=pool_block_tables,
         pool_write_slot_mappings=pool_write_slot_mappings,
+        compressor_state_slot_mappings=compressor_state_slot_mappings,
         swa_abs_idx=swa_abs_idx,
+        cache_seqlens_i32=cache_seqlens_i32,
+        req_id_per_token=req_id_per_token,
+        req_id_per_token_long=req_id_per_token_long,
+        decode_seq_start_per_req=decode_seq_start_per_req,
+        decode_cu_seq_per_req=decode_cu_seq_per_req,
     )
 
 
@@ -437,6 +523,8 @@ def update_decode_metadata_in_place(
     if forbid_realloc:
         ptr_snap = {
             "start_pos": meta.start_pos.data_ptr(),
+            "position_ids": meta.position_ids.data_ptr(),
+            "position_ids_long": meta.position_ids_long.data_ptr(),
             "slot_swa": meta.slot_mapping_swa.data_ptr(),
             "topk_window": meta.topk_window_idxs.data_ptr(),
             "topk_buffer_compressed": meta.topk_buffer_compressed.data_ptr(),
@@ -445,17 +533,39 @@ def update_decode_metadata_in_place(
             ptr_snap[f"slot_compressed[{r}]"] = t.data_ptr()
         for r, t in meta.compressed_lens.items():
             ptr_snap[f"compressed_lens[{r}]"] = t.data_ptr()
+        for r, t in meta.compressed_lens_per_token.items():
+            ptr_snap[f"compressed_lens_per_token[{r}]"] = t.data_ptr()
         for r, t in meta.topk_total_by_ratio.items():
             ptr_snap[f"topk_total_by_ratio[{r}]"] = t.data_ptr()
+        for at, t in meta.compressor_state_slot_mappings.items():
+            ptr_snap[f"compressor_state_slot_mappings[{at}]"] = t.data_ptr()
+        if meta.cache_seqlens_i32 is not None:
+            ptr_snap["cache_seqlens_i32"] = meta.cache_seqlens_i32.data_ptr()
+        if meta.req_id_per_token is not None:
+            ptr_snap["req_id_per_token"] = meta.req_id_per_token.data_ptr()
+        if meta.req_id_per_token_long is not None:
+            ptr_snap["req_id_per_token_long"] = meta.req_id_per_token_long.data_ptr()
+        if meta.decode_seq_start_per_req is not None:
+            ptr_snap["decode_seq_start_per_req"] = meta.decode_seq_start_per_req.data_ptr()
+        if meta.decode_cu_seq_per_req is not None:
+            ptr_snap["decode_cu_seq_per_req"] = meta.decode_cu_seq_per_req.data_ptr()
 
-    # start_pos
-    meta.start_pos[:bs].copy_(start_pos)
-
-    # SWA slot mapping prefix [:bs * q_len]
-    swa_buffer_stride = window_size
     s_offsets = start_pos.view(bs, 1) + torch.arange(
         q_len, device=device, dtype=torch.int32
     ).view(1, q_len)
+
+    # start_pos and flat position ids.
+    meta.start_pos[:bs].copy_(start_pos)
+    position_ids_flat = s_offsets.reshape(-1).contiguous()
+    meta.position_ids[: bs * q_len].copy_(position_ids_flat)
+    meta.position_ids_long[: bs * q_len].copy_(position_ids_flat.to(torch.long))
+    if meta.cache_seqlens_i32 is not None:
+        meta.cache_seqlens_i32[:bs].copy_(s_offsets[:, -1] + 1)
+    if meta.decode_seq_start_per_req is not None:
+        meta.decode_seq_start_per_req[:bs].copy_(start_pos)
+
+    # SWA slot mapping prefix [:bs * q_len]
+    swa_buffer_stride = window_size
     in_ring = s_offsets % window_size
     req_base = (
         torch.arange(bs, device=device, dtype=torch.int32).view(bs, 1)
@@ -504,6 +614,10 @@ def update_decode_metadata_in_place(
 
         # compressed_lens
         meta.compressed_lens[r][:bs].copy_(((start_pos + q_len) // r).to(torch.int32))
+        if r in meta.compressed_lens_per_token:
+            meta.compressed_lens_per_token[r][:bs].copy_(
+                ((s_offsets + 1) // r).to(torch.int32)
+            )
 
         # topk_total_by_ratio: refill window half, refill HCA dense half
         total = meta.topk_total_by_ratio[r]
@@ -614,6 +728,31 @@ def update_decode_metadata_in_place(
                 )
                 meta.pool_write_slot_mappings[at][: bs * q_len].copy_(mapped)
 
+        if (
+            meta.req_id_per_token_long is not None
+            and meta.compressor_state_slot_mappings
+        ):
+            from rtp_llm.models_py.modules.dsv4.attn_type import (
+                CSA_STATE,
+                HCA_STATE,
+                INDEXER_STATE,
+            )
+
+            positions = meta.position_ids_long[: bs * q_len]
+            req_idx = meta.req_id_per_token_long[: bs * q_len]
+            for at in (CSA_STATE, HCA_STATE, INDEXER_STATE):
+                out = meta.compressor_state_slot_mappings.get(at)
+                if out is None or at not in meta.pool_block_tables:
+                    continue
+                entries_per_block = paged_pool_entries_per_block.get(at, 1)
+                mapped = _compute_state_pool_slot_mapping(
+                    meta.pool_block_tables[at][:bs],
+                    positions,
+                    req_idx,
+                    entries_per_block,
+                )
+                out[: bs * q_len].copy_(mapped)
+
     # Phase 2B-2a: SWA absolute-position window (paged read). Left-aligned,
     # ``-1`` padded for entries before sequence start. Same shape as
     # ``topk_window_idxs`` but holds abs positions, not ring slots.
@@ -640,6 +779,8 @@ def update_decode_metadata_in_place(
         # Verify every storage pointer is unchanged.
         cur = {
             "start_pos": meta.start_pos.data_ptr(),
+            "position_ids": meta.position_ids.data_ptr(),
+            "position_ids_long": meta.position_ids_long.data_ptr(),
             "slot_swa": meta.slot_mapping_swa.data_ptr(),
             "topk_window": meta.topk_window_idxs.data_ptr(),
             "topk_buffer_compressed": meta.topk_buffer_compressed.data_ptr(),
@@ -648,8 +789,22 @@ def update_decode_metadata_in_place(
             cur[f"slot_compressed[{r}]"] = t.data_ptr()
         for r, t in meta.compressed_lens.items():
             cur[f"compressed_lens[{r}]"] = t.data_ptr()
+        for r, t in meta.compressed_lens_per_token.items():
+            cur[f"compressed_lens_per_token[{r}]"] = t.data_ptr()
         for r, t in meta.topk_total_by_ratio.items():
             cur[f"topk_total_by_ratio[{r}]"] = t.data_ptr()
+        for at, t in meta.compressor_state_slot_mappings.items():
+            cur[f"compressor_state_slot_mappings[{at}]"] = t.data_ptr()
+        if meta.cache_seqlens_i32 is not None:
+            cur["cache_seqlens_i32"] = meta.cache_seqlens_i32.data_ptr()
+        if meta.req_id_per_token is not None:
+            cur["req_id_per_token"] = meta.req_id_per_token.data_ptr()
+        if meta.req_id_per_token_long is not None:
+            cur["req_id_per_token_long"] = meta.req_id_per_token_long.data_ptr()
+        if meta.decode_seq_start_per_req is not None:
+            cur["decode_seq_start_per_req"] = meta.decode_seq_start_per_req.data_ptr()
+        if meta.decode_cu_seq_per_req is not None:
+            cur["decode_cu_seq_per_req"] = meta.decode_cu_seq_per_req.data_ptr()
         for k, p_before in ptr_snap.items():
             assert cur[k] == p_before, (
                 f"update_decode_metadata_in_place(forbid_realloc=True) "
@@ -697,6 +852,11 @@ def build_decode_metadata(
 
     B = start_pos.shape[0]
     T_total = B * q_len
+    position_ids_2d = start_pos.view(B, 1) + torch.arange(
+        q_len, device=device, dtype=torch.int32
+    ).view(1, q_len)
+    position_ids_flat = position_ids_2d.reshape(-1).contiguous()
+    position_ids_long = position_ids_flat.to(torch.long)
 
     # SWA slot mapping (always needed).
     swa_buffer_stride = window_size
@@ -709,6 +869,7 @@ def build_decode_metadata(
     unique_ratios: List[int] = sorted({r for r in compress_ratios if r > 1})
     slot_compressed: Dict[int, torch.Tensor] = {}
     compressed_lens: Dict[int, torch.Tensor] = {}
+    compressed_lens_per_token: Dict[int, torch.Tensor] = {}
     compressed_buffer_stride_per_ratio: Dict[int, int] = {}
     for r in unique_ratios:
         stride = max_seq_len // r
@@ -717,6 +878,7 @@ def build_decode_metadata(
         # After-this-step length: floor((start_pos + q_len) / r)
         # (each request now has this many compressed entries).
         compressed_lens[r] = ((start_pos + q_len) // r).to(torch.int32)
+        compressed_lens_per_token[r] = ((position_ids_2d + 1) // r).to(torch.int32)
 
     # Indexer output buffer — pre-allocated; IndexerDecodeV4Op fills it.
     # Indexer is only present in compress_ratio==4 layers, so K=index_topk.
@@ -779,15 +941,36 @@ def build_decode_metadata(
     # path doesn't share buffers across steps, unlike DSv4DecodeFmhaImpl).
     pool_block_tables: Dict[int, torch.Tensor] = {}
     pool_write_slot_mappings: Dict[int, torch.Tensor] = {}
+    compressor_state_slot_mappings: Dict[int, torch.Tensor] = {}
+    req_id_per_token: Optional[torch.Tensor] = None
+    req_id_per_token_long: Optional[torch.Tensor] = None
+    decode_seq_start_per_req: Optional[torch.Tensor] = None
+    decode_cu_seq_per_req: Optional[torch.Tensor] = None
     if paged_block_tables and paged_pool_entries_per_block:
         from rtp_llm.models_py.modules.dsv4.attn_type import (
+            CSA_STATE,
             CSA_KV,
+            HCA_STATE,
             HCA_KV,
+            INDEXER_STATE,
             INDEXER_KV,
             SWA_KV,
         )
         from rtp_llm.models_py.modules.dsv4.decode.pool_slot_mapping import (
             compute_kv_pool_slot_mapping,
+        )
+
+        req_id_per_token = torch.arange(B, dtype=torch.int32, device=device)
+        if q_len != 1:
+            req_id_per_token = req_id_per_token.repeat_interleave(q_len).contiguous()
+        req_id_per_token_long = req_id_per_token.to(torch.long)
+        decode_seq_start_per_req = start_pos.to(torch.int32).contiguous()
+        decode_cu_seq_per_req = torch.arange(
+            0,
+            (B + 1) * q_len,
+            q_len,
+            dtype=torch.int32,
+            device=device,
         )
 
         # Snapshot block tables (clone so downstream writes can't surprise
@@ -835,6 +1018,17 @@ def build_decode_metadata(
                     E,
                 )
 
+        for at in (CSA_STATE, HCA_STATE, INDEXER_STATE):
+            if at not in pool_block_tables:
+                continue
+            entries_per_block = paged_pool_entries_per_block.get(at, 1)
+            compressor_state_slot_mappings[at] = _compute_state_pool_slot_mapping(
+                pool_block_tables[at],
+                position_ids_long,
+                req_id_per_token_long,
+                entries_per_block,
+            )
+
     # Phase 2B-2a: SWA absolute-position window (paged read).
     abs_pos_eager = start_pos.view(B, 1) + torch.arange(
         q_len, device=device, dtype=torch.int32
@@ -851,6 +1045,7 @@ def build_decode_metadata(
         candidate,
         torch.full_like(candidate, -1),
     )
+    cache_seqlens_i32 = (position_ids_2d[:, -1] + 1).to(torch.int32)
 
     return DSv4DecodeAttnMetadata(
         batch_size=B,
@@ -861,15 +1056,24 @@ def build_decode_metadata(
         swa_buffer_t_dim=window_size,
         compressed_buffer_t_dim_per_ratio=compressed_buffer_stride_per_ratio,
         start_pos=start_pos,
+        position_ids=position_ids_flat,
+        position_ids_long=position_ids_long,
         slot_mapping_swa=slot_swa,
         slot_mapping_compressed=slot_compressed,
         topk_window_idxs=topk_window,
         topk_buffer_compressed=topk_buffer_compressed,
         compressed_lens=compressed_lens,
+        compressed_lens_per_token=compressed_lens_per_token,
         topk_total_by_ratio=topk_total_by_ratio,
         compressed_offset=window_size,
         is_cuda_graph=False,
         pool_block_tables=pool_block_tables,
         pool_write_slot_mappings=pool_write_slot_mappings,
+        compressor_state_slot_mappings=compressor_state_slot_mappings,
         swa_abs_idx=swa_abs_idx,
+        cache_seqlens_i32=cache_seqlens_i32,
+        req_id_per_token=req_id_per_token,
+        req_id_per_token_long=req_id_per_token_long,
+        decode_seq_start_per_req=decode_seq_start_per_req,
+        decode_cu_seq_per_req=decode_cu_seq_per_req,
     )

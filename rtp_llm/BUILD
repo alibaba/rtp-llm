@@ -117,6 +117,7 @@ requirement([
     "nest_asyncio",
     "blobfile",
     "partial_json_parser",
+    "xgrammar",
     "librosa",
     "matplotlib", # required by qwen vl tokenizer
     "pyrsmi",
@@ -372,12 +373,15 @@ py_library(
     srcs = glob([
         "openai/*.py",
         "openai/**/*.py",
+        "structured_output/*.py",
+        "structured_output/**/*.py",
     ]),
     deps = [
         ":utils",
         ":ops",
         ":config",
         ":structure",
+        ":xgrammar",
     ],
     data = [
         "openai/renderers/qwen_agent/utils/qwen.tiktoken"
@@ -617,6 +621,7 @@ whl_reqs = [
     "portalocker",
     "concurrent_log_handler",
     "apache-tvm-ffi",
+    "xgrammar==0.2.1",
 ] + whl_deps() + platform_deps() + xft_dep
 
 py_wheel(

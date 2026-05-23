@@ -42,6 +42,13 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->profile_step             = config_proto->profile_step();
     generate_config->profile_trace_name       = config_proto->profile_trace_name();
     generate_config->ignore_eos               = config_proto->ignore_eos();
+    generate_config->xgrammar_enabled         = config_proto->xgrammar_enabled();
+    generate_config->xgrammar_grammar_kind    = config_proto->xgrammar_grammar_kind();
+    generate_config->xgrammar_canonical_schema = config_proto->xgrammar_canonical_schema();
+    generate_config->xgrammar_schema_sha256    = config_proto->xgrammar_schema_sha256();
+    generate_config->xgrammar_tokenizer_fp     = config_proto->xgrammar_tokenizer_fp();
+    generate_config->xgrammar_compile_cache_key = config_proto->xgrammar_compile_cache_key();
+    generate_config->xgrammar_compile_cache_capacity = config_proto->xgrammar_compile_cache_capacity();
     generate_config->select_tokens_id.resize(config_proto->select_tokens_id_size());
     memcpy(generate_config->select_tokens_id.data(),
            config_proto->select_tokens_id().data(),

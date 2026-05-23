@@ -214,7 +214,7 @@ def setup_jit_cache(cache_dir=None, packages=None):
     if cache_dir is None:
         cache_dir = Path.home().as_posix() + "/.cache"
     if packages is None:
-        packages = ["flashinfer", "torch", "deep_gemm", "tvm_ffi"]
+        packages = ["flashinfer", "torch", "deep_gemm", "tvm_ffi", "xgrammar"]
 
     runfiles_dir = os.environ.get("RUNFILES_DIR") or os.environ.get("TEST_SRCDIR")
 

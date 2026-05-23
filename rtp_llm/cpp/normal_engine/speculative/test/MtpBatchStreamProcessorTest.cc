@@ -278,6 +278,58 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
     EXPECT_EQ(stream2->getMtpAsyncDeviceState().next_real_seq_len, stream2->seqLength());
 }
 
+TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeXGrammarDevicePathDoesNotNeedAcceptLenCpu) {
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    SpeculativeExecutionConfig  sp_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+
+    model_config.max_seq_len    = 2048;
+    model_config.vocab_size     = 4;
+    model_config.num_layers     = 1;
+    sp_config.gen_num_per_cycle = 4;
+
+    ResourceContext resource_context;
+    resource_context.cache_manager =
+        std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(/*layer_num=*/1,
+                                                                        /*block_num=*/10,
+                                                                        /*tokens_per_block=*/2,
+                                                                        rtp_llm::TYPE_INT8,
+                                                                        /*local_head_num_kv=*/128,
+                                                                        /*size_per_head=*/256));
+
+    GenerateStreamPtr stream1 = createContextStream(model_config, runtime_config, resource_context, {1}, 1);
+    GenerateStreamPtr stream2 = createContextStream(model_config, runtime_config, resource_context, {2, 1}, 2);
+
+    auto stream_groups = StreamGroups({stream1, stream2});
+
+    speculative::SpeculativeSamplerOutput spec_decode_output;
+    spec_decode_output.xgrammar_mtp_device_path = true;
+    spec_decode_output.accept_tokens =
+        torch::tensor({{2, 3, 1, 3, 2}, {2, 0, 0, 0, 0}}, torch::kInt32).to(torch::kCUDA);
+    spec_decode_output.accept_len = torch::tensor({1, 1}, torch::kInt32).to(torch::kCUDA);
+
+    MergedOutput draft_prefill_output;
+    draft_prefill_output.model_output.all_hidden_states =
+        torch::tensor({0.2f, 0.02f, 0.3f, 0.03f, 0.4f, 0.04f, 0.5f, 0.05f, 0.6f, 0.06f, 1.3f, 0.13f}, torch::kFloat32)
+            .reshape({6, 2});
+    draft_prefill_output.sampler_output.token_ids = torch::tensor({0L, 3L}, torch::kInt64).reshape({2, 1});
+    draft_prefill_output.sampler_output.all_probs =
+        torch::tensor({0.2f, 0.1f, 0.3f, 0.5f, 0.3f, 0.1f, 0.4f, 0.2f}, torch::kFloat32).reshape({2, 4});
+
+    cache_config.group_types = {CacheGroupType::FULL};
+    MtpBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+
+    auto status = processor.dispatchDecode(stream_groups, spec_decode_output, draft_prefill_output);
+    EXPECT_TRUE(status.ok());
+
+    checkOutput(stream1, {1, 2}, {2, 0}, {0.2, 0.1, 0.3, 0.5}, {0.2, 0.02});
+    checkOutput(stream2, {2, 1, 2}, {2, 3}, {0.3, 0.1, 0.4, 0.2}, {1.3, 0.13});
+}
+
 TEST_F(MtpBatchStreamProcessorTest, testGatherDecodeModelInput) {
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;

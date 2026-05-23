@@ -52,7 +52,34 @@ cc_library(
         "logits_processor/ThinkModeLogitsProcessor.h",
         "logits_processor/TreeLogitsProcessor.h",
         "logits_processor/LogitsProcessorFactory.h",
-    ],
+        "logits_processor/xgrammar/XGrammarCompilerCache.h",
+        "logits_processor/xgrammar/XGrammarGpuState.h",
+        "logits_processor/xgrammar/XGrammarLogitsProcessor.h",
+    ] + select({
+        "//:using_cuda13_x86": [
+            "@pip_gpu_cuda13_torch_xgrammar//:site-packages/xgrammar/include/dlpack/dlpack.h",
+            "@pip_gpu_cuda13_torch_xgrammar//:site-packages/xgrammar/include/xgrammar/compiler.h",
+            "@pip_gpu_cuda13_torch_xgrammar//:site-packages/xgrammar/include/xgrammar/config.h",
+            "@pip_gpu_cuda13_torch_xgrammar//:site-packages/xgrammar/include/xgrammar/exception.h",
+            "@pip_gpu_cuda13_torch_xgrammar//:site-packages/xgrammar/include/xgrammar/grammar.h",
+            "@pip_gpu_cuda13_torch_xgrammar//:site-packages/xgrammar/include/xgrammar/matcher.h",
+            "@pip_gpu_cuda13_torch_xgrammar//:site-packages/xgrammar/include/xgrammar/object.h",
+            "@pip_gpu_cuda13_torch_xgrammar//:site-packages/xgrammar/include/xgrammar/tokenizer_info.h",
+            "@pip_gpu_cuda13_torch_xgrammar//:site-packages/xgrammar/include/xgrammar/xgrammar.h",
+        ],
+        "//:using_cuda13_arm": [
+            "@pip_cuda13_arm_torch_xgrammar//:site-packages/xgrammar/include/dlpack/dlpack.h",
+            "@pip_cuda13_arm_torch_xgrammar//:site-packages/xgrammar/include/xgrammar/compiler.h",
+            "@pip_cuda13_arm_torch_xgrammar//:site-packages/xgrammar/include/xgrammar/config.h",
+            "@pip_cuda13_arm_torch_xgrammar//:site-packages/xgrammar/include/xgrammar/exception.h",
+            "@pip_cuda13_arm_torch_xgrammar//:site-packages/xgrammar/include/xgrammar/grammar.h",
+            "@pip_cuda13_arm_torch_xgrammar//:site-packages/xgrammar/include/xgrammar/matcher.h",
+            "@pip_cuda13_arm_torch_xgrammar//:site-packages/xgrammar/include/xgrammar/object.h",
+            "@pip_cuda13_arm_torch_xgrammar//:site-packages/xgrammar/include/xgrammar/tokenizer_info.h",
+            "@pip_cuda13_arm_torch_xgrammar//:site-packages/xgrammar/include/xgrammar/xgrammar.h",
+        ],
+        "//conditions:default": [],
+    }),
     srcs = [
         "logits_processor/BaseLogitsProcessor.cc",
         "logits_processor/MultiSeqLogitsProcessor.cc",
@@ -60,6 +87,8 @@ cc_library(
         "logits_processor/ThinkModeLogitsProcessor.cc",
         "logits_processor/TreeLogitsProcessor.cc",
         "logits_processor/LogitsProcessorFactory.cc",
+        "logits_processor/xgrammar/XGrammarCompilerCache.cc",
+        "logits_processor/xgrammar/XGrammarLogitsProcessor.cc",
     ],
     deps = [
         ":sample_infos",
@@ -70,7 +99,49 @@ cc_library(
         "//rtp_llm/cpp/pybind:py_utils",
         "//rtp_llm/cpp/utils:error_code",
     ] + select({
-        "//:using_cuda": ["//rtp_llm/models_py/bindings/cuda/ops:standalone_ops"],
+        "//:using_cuda": [
+            "//rtp_llm/models_py/bindings/cuda/ops:standalone_ops",
+            "//rtp_llm/models_py/bindings/cuda/kernels:xgrammar_kernels",
+        ],
+        "//conditions:default": [],
+    }),
+    additional_linker_inputs = select({
+        "//:using_cuda13_x86": [
+            "@pip_gpu_cuda13_torch_apache_tvm_ffi//:site-packages/tvm_ffi/lib/libtvm_ffi.so",
+            "@pip_gpu_cuda13_torch_xgrammar//:site-packages/xgrammar/libxgrammar_bindings.so",
+        ],
+        "//:using_cuda13_arm": [
+            "@pip_cuda13_arm_torch_apache_tvm_ffi//:site-packages/tvm_ffi/lib/libtvm_ffi.so",
+            "@pip_cuda13_arm_torch_xgrammar//:site-packages/xgrammar/libxgrammar_bindings.so",
+        ],
+        "//conditions:default": [],
+    }),
+    linkopts = select({
+        "//:using_cuda13_x86": [
+            "external/pip_gpu_cuda13_torch_xgrammar/site-packages/xgrammar/libxgrammar_bindings.so",
+            "external/pip_gpu_cuda13_torch_apache_tvm_ffi/site-packages/tvm_ffi/lib/libtvm_ffi.so",
+            "-Wl,-rpath,$$ORIGIN/../../../../../..//external/pip_gpu_cuda13_torch_xgrammar/site-packages/xgrammar",
+            "-Wl,-rpath,$$ORIGIN/../../../../../..//external/pip_gpu_cuda13_torch_apache_tvm_ffi/site-packages/tvm_ffi/lib",
+        ],
+        "//:using_cuda13_arm": [
+            "external/pip_cuda13_arm_torch_xgrammar/site-packages/xgrammar/libxgrammar_bindings.so",
+            "external/pip_cuda13_arm_torch_apache_tvm_ffi/site-packages/tvm_ffi/lib/libtvm_ffi.so",
+            "-Wl,-rpath,$$ORIGIN/../../../../../..//external/pip_cuda13_arm_torch_xgrammar/site-packages/xgrammar",
+            "-Wl,-rpath,$$ORIGIN/../../../../../..//external/pip_cuda13_arm_torch_apache_tvm_ffi/site-packages/tvm_ffi/lib",
+        ],
+        "//conditions:default": [],
+    }),
+    copts = select({
+        "//:using_cuda13_x86": [
+            "-DRTP_LLM_ENABLE_XGRAMMAR_CPP=1",
+            "-isystem",
+            "external/pip_gpu_cuda13_torch_xgrammar/site-packages/xgrammar/include",
+        ],
+        "//:using_cuda13_arm": [
+            "-DRTP_LLM_ENABLE_XGRAMMAR_CPP=1",
+            "-isystem",
+            "external/pip_cuda13_arm_torch_xgrammar/site-packages/xgrammar/include",
+        ],
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],

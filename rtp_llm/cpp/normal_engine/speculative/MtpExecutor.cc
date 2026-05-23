@@ -15,6 +15,7 @@
 #include "rtp_llm/cpp/utils/StringUtil.h"
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
+#include "rtp_llm/cpp/models/logits_processor/xgrammar/XGrammarLogitsProcessor.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include <sstream>
 #if USING_CUDA
@@ -95,6 +96,53 @@ torch::Tensor toCudaInt32WithHostHold(const torch::Tensor& tensor, TensorHolder&
     }
     holder.hold_host(tensor);
     return tensor.to(cuda_i32, /*non_blocking=*/true);
+}
+
+XGrammarLogitsProcessorPtr findXGrammarProcessor(const GenerateStreamPtr& stream) {
+    for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
+        auto xgrammar_processor = std::dynamic_pointer_cast<XGrammarLogitsProcessor>(processor);
+        if (xgrammar_processor) {
+            return xgrammar_processor;
+        }
+    }
+    return nullptr;
+}
+
+void applyXGrammarMtpAcceptLenCap(const std::list<GenerateStreamPtr>&          streams,
+                                  speculative::SpeculativeSamplerOutput& output) {
+    if (streams.empty() || !output.accept_len.defined()) {
+        return;
+    }
+
+    bool has_xgrammar = false;
+    for (const auto& stream : streams) {
+        if (findXGrammarProcessor(stream)) {
+            has_xgrammar = true;
+            break;
+        }
+    }
+    if (!has_xgrammar) {
+        return;
+    }
+
+    RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(xgrammar_device_accept_len_cap)");
+    RTP_LLM_CHECK_WITH_INFO(output.accept_len.is_cuda(), "xgrammar MTP accept_len cap requires CUDA accept_len");
+
+    // Score-batch target verification masks every speculative position from the same
+    // committed grammar state. Until draft-offset grammar states are fully device-native,
+    // only commit one verified token per MTP cycle for structured output requests.
+    output.accept_len.clamp_max_(1);
+    output.xgrammar_mtp_device_path = true;
+    output.accept_len_cpu           = torch::Tensor();
+}
+
+void materializeLegacySpeculativeSamplerCpuOutput(speculative::SpeculativeSamplerOutput& output) {
+    if (output.xgrammar_mtp_device_path) {
+        return;
+    }
+    output.accept_tokens_cpu = output.accept_tokens.to(torch::kCPU, /*non_blocking=*/true);
+    output.accept_len_cpu    = output.accept_len.to(torch::kCPU, /*non_blocking=*/true);
+    output.transfer_done_event->record(cuda_graph::graphGetCurrentStream());
 }
 
 }  // namespace
@@ -959,6 +1007,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
             // rejection sampling
             speculative_sampler_output = speculative_sampler_->forward(streams, draft_sampler_output, sampler_output);
+            applyXGrammarMtpAcceptLenCap(streams, speculative_sampler_output);
+            materializeLegacySpeculativeSamplerCpuOutput(speculative_sampler_output);
         }
 
         batch_stream_processor_->updateDecodePostDraftModelInput(

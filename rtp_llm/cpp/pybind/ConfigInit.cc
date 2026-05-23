@@ -890,20 +890,26 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     py::class_<MiscellaneousConfig>(m, "MiscellaneousConfig")
         .def(py::init<>())
         .def_readwrite("disable_pdl", &MiscellaneousConfig::disable_pdl)
+        .def_readwrite("xgrammar_compile_cache_size", &MiscellaneousConfig::xgrammar_compile_cache_size)
         .def_property(
             "aux_string",
             [](const MiscellaneousConfig& self) { return self.aux_string; },
             [](MiscellaneousConfig& self, const std::string& value) { self.aux_string = value; })
         .def("to_string", &MiscellaneousConfig::to_string)
         .def(py::pickle(
-            [](const MiscellaneousConfig& self) { return py::make_tuple(self.disable_pdl, self.aux_string); },
+            [](const MiscellaneousConfig& self) {
+                return py::make_tuple(self.disable_pdl, self.aux_string, self.xgrammar_compile_cache_size);
+            },
             [](py::tuple t) {
-                if (t.size() != 2)
+                if (t.size() != 2 && t.size() != 3)
                     throw std::runtime_error("Invalid state!");
                 MiscellaneousConfig c;
                 try {
-                    c.disable_pdl = t[0].cast<bool>();
-                    c.aux_string  = t[1].cast<std::string>();
+                    c.disable_pdl                 = t[0].cast<bool>();
+                    c.aux_string                  = t[1].cast<std::string>();
+                    if (t.size() == 3) {
+                        c.xgrammar_compile_cache_size = t[2].cast<size_t>();
+                    }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("MiscellaneousConfig unpickle error: ") + e.what());
                 }

@@ -87,6 +87,15 @@ class AuxInfo:
     role_addrs: List[RoleAddr] = field(default_factory=list)
     aux_string: str = ""
 
+    xgrammar_enabled: bool = False
+    xgrammar_compile_cache_capacity: int = 0
+    xgrammar_compile_cache_hit_total: int = 0
+    xgrammar_compile_cache_miss_total: int = 0
+    xgrammar_compile_cache_eviction_total: int = 0
+    xgrammar_compile_cache_entries: int = 0
+    xgrammar_gpu_hot_path_host_sync_total: int = 0
+    xgrammar_gpu_hot_path_d2h_total: int = 0
+
 
 @dataclass
 class GenerateOutput:

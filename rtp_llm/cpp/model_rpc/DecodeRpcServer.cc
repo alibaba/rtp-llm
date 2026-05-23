@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
+#include "rtp_llm/cpp/models/logits_processor/xgrammar/XGrammarLogitsProcessor.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "autil/LockFreeThreadPool.h"
@@ -38,6 +39,23 @@ string makeRequestKey(const string& client_id, size_t request_id) {
 }
 
 namespace rtp_llm {
+
+namespace {
+
+XGrammarLogitsProcessorPtr findXGrammarProcessor(const std::shared_ptr<GenerateStream>& stream) {
+    if (!stream) {
+        return nullptr;
+    }
+    for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
+        auto xgrammar_processor = std::dynamic_pointer_cast<XGrammarLogitsProcessor>(processor);
+        if (xgrammar_processor) {
+            return xgrammar_processor;
+        }
+    }
+    return nullptr;
+}
+
+}  // namespace
 
 grpc::Status DecodeRpcServer::init(const EngineInitParams&                                maga_init_params,
                                    py::object                                             mm_process_engine,
@@ -168,6 +186,19 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                       "message first status != RemoteStage::GENERATE");
     decode_context.time_info.updateGenerateBeginTime();
     generate_stream->setIsContextStream(false);
+    if (generate_request.xgrammar_accepted_tokens_size() > 0 || generate_request.xgrammar_consumed_seq_len() > 0
+        || !generate_request.xgrammar_replay_state_version().empty()) {
+        if (auto xgrammar_processor = findXGrammarProcessor(generate_stream)) {
+            std::vector<int> accepted_tokens(generate_request.xgrammar_accepted_tokens().begin(),
+                                             generate_request.xgrammar_accepted_tokens().end());
+            xgrammar_processor->restorePdReplayState(accepted_tokens,
+                                                     generate_request.xgrammar_consumed_seq_len(),
+                                                     generate_request.xgrammar_replay_state_version());
+        } else {
+            RTP_LLM_LOG_WARNING("request [%s] received xgrammar replay state but no xgrammar processor is active",
+                                decode_context.request_key.c_str());
+        }
+    }
     generate_stream->step();
 
     auto new_tokens = torch::zeros({(int64_t)generate_stream->nextBatchSize(), 1}, torch::kInt32);

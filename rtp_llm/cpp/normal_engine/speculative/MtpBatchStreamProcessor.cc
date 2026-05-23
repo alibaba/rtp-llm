@@ -295,6 +295,15 @@ absl::Status MtpBatchStreamProcessor::dispatchDecode(const StreamGroups&        
     updateProposeTokens(stream_groups, draft_prefill_output, spec_update_infos);
 
     stream_groups.updateStreams(spec_update_infos);
+    for (auto& stream : stream_groups.allStreams()) {
+        if (stream->getMtpAsyncDeviceState().epoch != 0) {
+            continue;
+        }
+        GenerateStream::MtpAsyncDeviceState state;
+        state.last_real_seq_len = stream->seqLength();
+        state.next_real_seq_len = stream->seqLength();
+        stream->setMtpAsyncDeviceState(std::move(state));
+    }
 
     RTP_LLM_LOG_DEBUG("dispatch decode done");
     return absl::OkStatus();
@@ -808,6 +817,49 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
     const speculative::SpeculativeSamplerOutput& spec_decode_output,
     const MergedOutput&                          draft_prefill_output,
     std::vector<StreamSpecUpdateInfo>&           spec_update_infos) const {
+    if (spec_decode_output.xgrammar_mtp_device_path) {
+        RTP_LLM_PROFILE_SCOPE("normal_engine.mtp_batch_stream_processor.prepare_decode_spec_update_info.xgrammar");
+        RTP_LLM_CHECK_WITH_INFO(spec_decode_output.accept_tokens.defined(),
+                                "xgrammar MTP device path requires accept_tokens");
+
+        // XGrammar clamps MTP accept_len to one on device before publishing
+        // MtpAsyncDeviceState. Worker-side host bookkeeping only needs the
+        // accepted token text; it must not read accept_len_cpu or use .item()
+        // to drive the next decode step.
+        const auto accept_tokens =
+            spec_decode_output.accept_tokens.is_cuda() ? spec_decode_output.accept_tokens.to(torch::kCPU) :
+                                                        spec_decode_output.accept_tokens;
+
+        const auto& draft_model_output   = draft_prefill_output.model_output;
+        const auto& draft_sampler_output = draft_prefill_output.sampler_output;
+
+        int batch_idx_out = 0;
+        int token_offset  = 0;
+
+        for (auto& stream : stream_groups.allStreams()) {
+            auto next_batch_size = stream->nextBatchSize();
+
+            torch::Tensor propose_all_probs =
+                draft_sampler_output.all_probs.narrow(0, batch_idx_out, next_batch_size).to(torch::kCUDA).clone();
+
+            constexpr int cur_accept_len = 1;
+            torch::Tensor last_hidden_states;
+            if (propose_step_ > 1) {
+                last_hidden_states =
+                    cloneHiddenSlice(draft_model_output.all_hidden_states, token_offset + cur_accept_len - 1, 1);
+            }
+
+            torch::Tensor accept_tokens_tensor =
+                accept_tokens.narrow(0, batch_idx_out, next_batch_size).narrow(1, 0, cur_accept_len).contiguous();
+            spec_update_infos.push_back(
+                {accept_tokens_tensor, cur_accept_len, -1, std::move(last_hidden_states), std::move(propose_all_probs)});
+
+            token_offset += propose_step_ + 1;
+            batch_idx_out += next_batch_size;
+        }
+        return;
+    }
+
     // wait for the transfer to complete
     spec_decode_output.transfer_done_event->synchronize();
     const auto& accept_len    = spec_decode_output.accept_len_cpu;

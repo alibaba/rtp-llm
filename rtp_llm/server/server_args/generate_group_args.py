@@ -78,3 +78,35 @@ def init_generate_group_args(parser, generate_env_config):
         default=None,
         help="生成配置路径",
     )
+    generate_group.add_argument(
+        "--xgrammar_compile_cache_size",
+        env_name="XGRAMMAR_COMPILE_CACHE_SIZE",
+        bind_to=(generate_env_config, "xgrammar_compile_cache_size"),
+        type=int,
+        default=1024,
+        help="XGrammar frontend compile cache LRU capacity per process",
+    )
+    generate_group.add_argument(
+        "--xgrammar_compile_thread_num",
+        env_name="XGRAMMAR_COMPILE_THREAD_NUM",
+        bind_to=(generate_env_config, "xgrammar_compile_thread_num"),
+        type=int,
+        default=4,
+        help="XGrammar frontend compile worker thread count",
+    )
+    generate_group.add_argument(
+        "--xgrammar_precompile_list",
+        env_name="XGRAMMAR_PRECOMPILE_LIST",
+        bind_to=(generate_env_config, "xgrammar_precompile_list"),
+        type=str,
+        default=None,
+        help="Optional JSONL file with response_format objects to precompile",
+    )
+    generate_group.add_argument(
+        "--xgrammar_enable_stream_partial_json",
+        env_name="XGRAMMAR_ENABLE_STREAM_PARTIAL_JSON",
+        bind_to=(generate_env_config, "xgrammar_enable_stream_partial_json"),
+        type=str2bool,
+        default=True,
+        help="Enable prefix-valid partial JSON checks for streaming structured output",
+    )
