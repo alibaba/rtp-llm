@@ -117,10 +117,13 @@ def cp_kv_slot_mapping(
     in_block_compressed = (positions % tokens_per_block) // ratio
     slot = block_id * kv_eb + in_block_compressed
     boundary = ((positions + 1) % ratio) == 0
-    # Align with the non-CP path (compressor.py): NULL_BLOCK_IDX is the only
-    # invalid sentinel (negative); physical block 0 is a real allocatable block
-    # and must not be filtered out here.
-    valid = owned_mask & boundary & (block_id >= 0)
+    # CP path uses ``block_id > 0`` (stricter than the non-CP path which uses
+    # ``>= 0``). This is intentional: under page-RR the rank-local
+    # block_table is padded for short requests, and the CP slot mapper
+    # conservatively treats block_id == 0 as the unallocated sentinel to
+    # avoid writing through padding rows. Pinned by
+    # ``test_unallocated_block_zero_yields_minus_one``.
+    valid = owned_mask & boundary & (block_id > 0)
     return torch.where(valid, slot, torch.full_like(slot, -1))
 
 

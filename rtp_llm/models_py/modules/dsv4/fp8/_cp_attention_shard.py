@@ -65,13 +65,23 @@ def cp_attention_comm_bytes(
 
     alpha_num = cp_size - 1
     total_compressed = (prefix_len + input_len) // compress_ratio
+    # Path A — packed KV gather: total compressed K spans prefix + input,
+    # each rank receives (C-1)/C of the global pool (its non-owned share).
     packed = alpha_num * total_compressed * packed_kv_slot_bytes // cp_size
+    # Path B — raw Q / topk / O / LSE gathers. Q (and CSA topk) are sharded
+    # token-wise across cp ranks (T/C per rank); after AG each rank receives
+    # (C-1)/C × T worth of bytes. O and LSE are NOT sharded: each rank
+    # produces a partial O and partial LSE for the FULL T queries against
+    # its local KV shard (used by the subsequent logsumexp merge), so each
+    # rank sends T × H × D (resp. T × H × 4) and receives (C-1) × that.
+    # The strip-back to own T/C rows happens only AFTER merge — it saves
+    # GPU memory, not network bytes.
     raw_q = alpha_num * input_len * num_heads * head_dim * element_bytes // cp_size
     topk_bytes = (
         alpha_num * input_len * topk * 4 // cp_size if include_topk_gather else 0
     )
-    output = alpha_num * input_len * num_heads * head_dim * element_bytes // cp_size
-    lse = alpha_num * input_len * num_heads * 4 // cp_size
+    output = alpha_num * input_len * num_heads * head_dim * element_bytes
+    lse = alpha_num * input_len * num_heads * 4
     return CPAttentionCommBytes(
         packed_kv_gather=packed,
         raw_q_gather=raw_q,
@@ -109,19 +119,22 @@ def prefer_raw_q_merge_attention_conservative(
     compress_ratio: int,
     include_topk_gather: bool,
 ) -> bool:
-    """Plan-level conservative runtime gate.
+    """Plan-level conservative runtime gate (cp_size=2 default geometry).
 
-    The raw-byte break-even is roughly ``P/T > 912`` for CSA (r=4) and
-    ``P/T > 28786`` for HCA (r=128). Runtime uses round numbers to leave room
-    for extra kernels, topk remap, workspace construction and NCCL latency.
+    With output_gather and lse_gather corrected to NOT divide by cp_size
+    (each rank's partial O/LSE covers the FULL T queries), the raw-byte
+    break-even tightens to ``P/T >= 1363`` for CSA (r=4) and ``P/T >= 43227``
+    for HCA (r=128) at cp_size=2 with DSV4-Flash/Pro dims
+    (H=64, head_dim=512, BF16). Runtime uses round numbers with ~10% safety
+    margin to account for NCCL launch latency and slight workload variance.
     """
     if input_len <= 0:
         return False
     ratio = prefix_len / input_len
     if compress_ratio == 4 and include_topk_gather:
-        return ratio >= 1024
+        return ratio >= 1500
     if compress_ratio == 128 and not include_topk_gather:
-        return ratio >= 32768
+        return ratio >= 48000
     return prefer_raw_q_merge_attention(
         prefix_len=prefix_len,
         input_len=input_len,
@@ -274,25 +287,55 @@ def build_swa_cp_local_indices(
 
     gp = global_positions.to(device=device, dtype=torch.int64).reshape(-1)
     prefix = prefix_lengths.to(device=device, dtype=torch.int64).reshape(-1)
-    indices = torch.full((T, window_size), -1, dtype=torch.int32, device=device)
-    lens = torch.zeros((T,), dtype=torch.int32, device=device)
 
-    # This helper is intentionally pure/planning code. The production hot path
-    # should use a Triton combine kernel with the same owner rule.
-    for row in range(T):
-        req_id = int(req[row].item())
-        prefix_i = int(prefix[req_id].item())
-        gp_i = int(gp[row].item())
-        p = min(prefix_i, window_size - 1)
-        gather_start = prefix_i - p
-        swa_len = min(gp_i + 1, window_size)
-        key_start = gp_i - swa_len + 1
-        out_col = 0
-        for key_pos in range(key_start, gp_i + 1):
-            owner = (key_pos // owner_chunk_size) % cp_size
-            if owner != cp_rank:
-                continue
-            indices[row, out_col] = req_id * M + N + (key_pos - gather_start)
-            out_col += 1
-        lens[row] = out_col
+    # Vectorized SWA owner-partition + compact. Replaces the per-row /
+    # per-key Python double loop (O(T × window_size) at host speed →
+    # catastrophic at long context) with O(T × window_size) GPU ops.
+    #
+    # Memory cost: builds intermediate [T, window_size] int64 grids. At
+    # T=1M and window_size=2048 each grid is ~16 GB. Production typical
+    # is T≤64k and window_size≤2048 → ~1 GB per grid, fits comfortably.
+    # If long-ctx call sites exceed VRAM, switch to a row-chunked driver
+    # around this body (chunk_size = 64k rows works for most configs).
+    window = int(window_size)
+    prefix_per_row = prefix.index_select(0, req)  # [T]
+    p_per_row = torch.clamp(prefix_per_row, max=window - 1)  # [T]
+    gather_start_per_row = prefix_per_row - p_per_row  # [T]
+    swa_len_per_row = torch.clamp(gp + 1, max=window)  # [T]
+    key_start_per_row = gp - swa_len_per_row + 1  # [T]
+
+    col_offset = torch.arange(window, device=device, dtype=torch.int64).unsqueeze(
+        0
+    )  # [1, W]
+    key_pos = key_start_per_row.unsqueeze(1) + col_offset  # [T, W]
+    valid_in_window = col_offset < swa_len_per_row.unsqueeze(1)  # [T, W] bool
+    owned_mask = (
+        ((key_pos // owner_chunk_size) % cp_size) == cp_rank
+    ) & valid_in_window  # [T, W] bool
+
+    # Target workspace column for each (row, key_pos) cell — only meaningful
+    # where owned_mask is True; the rest get filtered out below.
+    target_value = (
+        req.unsqueeze(1) * M + N + (key_pos - gather_start_per_row.unsqueeze(1))
+    )  # [T, W]
+
+    # Per-row rank of each owned cell (0, 1, 2, ... in row-scan order).
+    # cumsum on bool produces the 1-indexed rank at each owned cell.
+    rank_in_row = owned_mask.cumsum(dim=1) - 1  # [T, W] int64
+
+    # Flatten owned cells and scatter into [T, W] output at (row, rank_in_row).
+    row_idx_grid = (
+        torch.arange(T, device=device, dtype=torch.int64)
+        .unsqueeze(1)
+        .expand(-1, window)
+    )  # [T, W]
+    flat_mask = owned_mask.reshape(-1)
+    flat_row = row_idx_grid.reshape(-1).masked_select(flat_mask)
+    flat_col = rank_in_row.reshape(-1).masked_select(flat_mask)
+    flat_val = target_value.reshape(-1).masked_select(flat_mask).to(torch.int32)
+
+    indices = torch.full((T, window), -1, dtype=torch.int32, device=device)
+    if flat_row.numel() > 0:
+        indices.index_put_((flat_row, flat_col), flat_val, accumulate=False)
+    lens = owned_mask.sum(dim=1).to(torch.int32)
     return indices, lens

@@ -56,17 +56,19 @@ SHARD = _stub_and_import()
 
 
 def test_csa_prefers_merge_only_for_long_prefix() -> None:
+    # cp_size=2 break-even (output/lse NOT divided by C in formula):
+    #   P/T >= 1363. Pick test points clearly straddling that line.
     short = SHARD.prefer_raw_q_merge_attention(
-        prefix_len=900 * 128,
+        prefix_len=1000 * 128,
         input_len=128,
-        cp_size=4,
+        cp_size=2,
         compress_ratio=4,
         include_topk_gather=True,
     )
     long = SHARD.prefer_raw_q_merge_attention(
-        prefix_len=1024 * 128,
+        prefix_len=1500 * 128,
         input_len=128,
-        cp_size=4,
+        cp_size=2,
         compress_ratio=4,
         include_topk_gather=True,
     )
@@ -75,17 +77,19 @@ def test_csa_prefers_merge_only_for_long_prefix() -> None:
 
 
 def test_hca_threshold_is_much_higher_than_csa() -> None:
+    # cp_size=2 break-evens: CSA P/T >= 1363, HCA P/T >= ~43k. Pick
+    # P/T = 2500: CSA prefers raw_q, HCA doesn't.
     csa = SHARD.cp_attention_comm_bytes(
-        prefix_len=1024 * 128,
+        prefix_len=2500 * 128,
         input_len=128,
-        cp_size=8,
+        cp_size=2,
         compress_ratio=4,
         include_topk_gather=True,
     )
     hca = SHARD.cp_attention_comm_bytes(
-        prefix_len=1024 * 128,
+        prefix_len=2500 * 128,
         input_len=128,
-        cp_size=8,
+        cp_size=2,
         compress_ratio=128,
         include_topk_gather=False,
     )
@@ -94,30 +98,73 @@ def test_hca_threshold_is_much_higher_than_csa() -> None:
 
 
 def test_conservative_thresholds_match_plan() -> None:
+    # CSA threshold tightened to P/T >= 1500 after the output/lse formula
+    # correction. HCA threshold tightened to P/T >= 48000.
     assert SHARD.prefer_raw_q_merge_attention_conservative(
-        prefix_len=1024 * 7,
+        prefix_len=1500 * 7,
         input_len=7,
         compress_ratio=4,
         include_topk_gather=True,
     )
     assert not SHARD.prefer_raw_q_merge_attention_conservative(
-        prefix_len=1023 * 7,
+        prefix_len=1499 * 7,
         input_len=7,
         compress_ratio=4,
         include_topk_gather=True,
     )
     assert SHARD.prefer_raw_q_merge_attention_conservative(
-        prefix_len=32768 * 3,
+        prefix_len=48000 * 3,
         input_len=3,
         compress_ratio=128,
         include_topk_gather=False,
     )
     assert not SHARD.prefer_raw_q_merge_attention_conservative(
-        prefix_len=32767 * 3,
+        prefix_len=47999 * 3,
         input_len=3,
         compress_ratio=128,
         include_topk_gather=False,
     )
+
+
+def test_comm_bytes_formula_pinned() -> None:
+    """Pin the exact per-rank gather byte values for both paths.
+
+    Regressions in the byte formula (e.g. accidentally dividing
+    ``output_gather`` / ``lse_gather`` by ``cp_size``) flip the
+    ``raw_q_merge_total`` semantics and silently move the auto-selected
+    runtime path. Pin the exact values for one representative config so any
+    formula tweak forces an intentional update here.
+
+    Config: cp_size=2, DSV4-Flash/Pro dims (H=64, head_dim=512, BF16),
+    topk=512, packed_kv_slot_bytes=584. With ``alpha = cp_size-1 = 1``:
+
+      raw_q     = alpha * T * H * D * elem / C    # Q sharded T/C
+      topk      = alpha * T * topk * 4   / C      # topk sharded T/C
+      output    = alpha * T * H * D * elem        # partial O for full T
+      lse       = alpha * T * H * 4               # partial LSE for full T
+      packed_kv = alpha * (P+T)/r * slot / C
+
+    With T=64, P=128, r=4 (CSA):
+      raw_q     = 1 * 64 * 64 * 512 * 2 / 2 = 2_097_152
+      topk      = 1 * 64 * 512 * 4 / 2      = 65_536
+      output    = 1 * 64 * 64 * 512 * 2     = 4_194_304
+      lse       = 1 * 64 * 64 * 4           = 16_384
+      raw_total = 6_373_376
+      packed    = 1 * (128+64)/4 * 584 / 2  = 14_016
+    """
+    est = SHARD.cp_attention_comm_bytes(
+        prefix_len=128,
+        input_len=64,
+        cp_size=2,
+        compress_ratio=4,
+        include_topk_gather=True,
+    )
+    assert est.raw_q_gather == 2_097_152
+    assert est.topk_gather == 65_536
+    assert est.output_gather == 4_194_304
+    assert est.lse_gather == 16_384
+    assert est.raw_q_merge_total == 6_373_376
+    assert est.packed_kv_gather == 14_016
 
 
 def test_remap_topk_b1_cp2_block4() -> None:

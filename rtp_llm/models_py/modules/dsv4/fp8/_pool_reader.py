@@ -200,14 +200,12 @@ class CPShardedPoolReader(CompressedKPoolReader):
         # Use raw rank-major all_gather; cp_all_gather_full_async asserts
         # T_local == cp_ctx.chunk_length (prefill-token space), but
         # local_flat lives in KV-pool-entry space (block-aligned).
-        # The compressor's writes land on the current stream (via
-        # ``cp_wait_gather_full`` followed by the writer ``_launch``), so
-        # in-order issue alone would suffice for NCCL stream-local visibility.
-        # The CPU-blocking ``synchronize()`` is a defensive guard that costs
-        # little — pool writes are short — and protects against future
-        # refactors that might move the writer back to a side stream.
-        if local_flat.is_cuda:
-            torch.cuda.current_stream(local_flat.device).synchronize()
+        # INVARIANT: the compressor writer (cp_wait_gather_full + _launch)
+        # always lands its pool writes on the current stream, so NCCL
+        # stream-ordering alone suffices for visibility. No CPU-blocking
+        # synchronize() here — at ~60 layers × per-fill it would serialize
+        # the prefill pipeline. If the writer ever moves to a side stream,
+        # add ``current_stream.wait_event(writer_event)`` instead.
         gathered = all_gather(local_flat, group=Group.TP)
         # gathered shape is rank-major: [cp_size * total_local_kv, 584].
 
@@ -232,33 +230,57 @@ _compute_local_owned_kv_lens = cp_actual_owned_kv_lens
 def _pack_padded_to_flat(
     padded: torch.Tensor, lens: torch.Tensor, total: int, D: int
 ) -> torch.Tensor:
-    """Drop per-row padding → flat [total, D]."""
+    """Drop per-row padding → flat [total, D].
+
+    Vectorized: build per-token ``(b_idx, s_idx)`` via repeat_interleave +
+    arange − cu_starts, then advanced-index in one shot. Replaces a
+    per-request Python loop with B .item() syncs (~B per layer per
+    reader).
+    """
     if total == 0:
         return torch.empty((0, D), dtype=padded.dtype, device=padded.device)
-    B = int(lens.shape[0])
-    out = torch.empty((total, D), dtype=padded.dtype, device=padded.device)
-    cursor = 0
-    for b in range(B):
-        L = int(lens[b].item())
-        if L == 0:
-            continue
-        out[cursor : cursor + L].copy_(padded[b, :L])
-        cursor += L
-    return out
+    device = padded.device
+    lens_l = lens.to(device=device, dtype=torch.int64)
+    B = int(lens_l.shape[0])
+    b_idx = torch.repeat_interleave(
+        torch.arange(B, device=device, dtype=torch.int64), lens_l
+    )
+    cu_starts = torch.zeros(B, device=device, dtype=torch.int64)
+    if B > 1:
+        cu_starts[1:] = torch.cumsum(lens_l[:-1], dim=0)
+    s_idx = torch.arange(
+        total, device=device, dtype=torch.int64
+    ) - cu_starts.index_select(0, b_idx)
+    return padded[b_idx, s_idx]
 
 
 def _scatter_flat_to_workspace(
     restored: torch.Tensor, out: torch.Tensor, seq_lens: torch.Tensor, offset: int
 ) -> None:
-    """Copy restored[r-th-slice] → out[r, offset:offset+T_r, :]."""
-    B = int(seq_lens.shape[0])
-    cursor = 0
-    for b in range(B):
-        T_r = int(seq_lens[b].item())
-        if T_r == 0:
-            continue
-        out[b, offset : offset + T_r, :].copy_(restored[cursor : cursor + T_r])
-        cursor += T_r
+    """Copy restored[r-th-slice] → out[r, offset:offset+T_r, :].
+
+    Vectorized: build per-token ``(b_idx, col_idx)`` and use
+    ``out.index_put_`` for a single GPU op. Replaces a per-request loop
+    with B .item() syncs.
+    """
+    total = int(restored.shape[0])
+    if total == 0:
+        return
+    device = restored.device
+    seq_lens_l = seq_lens.to(device=device, dtype=torch.int64)
+    B = int(seq_lens_l.shape[0])
+    b_idx = torch.repeat_interleave(
+        torch.arange(B, device=device, dtype=torch.int64), seq_lens_l
+    )
+    cu_starts = torch.zeros(B, device=device, dtype=torch.int64)
+    if B > 1:
+        cu_starts[1:] = torch.cumsum(seq_lens_l[:-1], dim=0)
+    col_idx = (
+        torch.arange(total, device=device, dtype=torch.int64)
+        - cu_starts.index_select(0, b_idx)
+        + offset
+    )
+    out.index_put_((b_idx, col_idx), restored, accumulate=False)
 
 
 def make_compressed_k_pool_reader(
