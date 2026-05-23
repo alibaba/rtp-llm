@@ -370,7 +370,6 @@ absl::StatusOr<GptModelInputs> MtpBatchStreamProcessor::gatherDecodeModelInput(c
 
 absl::StatusOr<SamplerInputs> MtpBatchStreamProcessor::gatherSpecSamplerInput(
     const StreamGroups& stream_groups, const GptModelInputs& model_inputs, const GptModelOutputs& model_output) const {
-    (void)model_inputs;
     RTP_LLM_CHECK(!stream_groups.empty());
     auto all_streams      = stream_groups.allStreams();
     bool return_all_probs = stream_groups.needReturnAllProbs();
