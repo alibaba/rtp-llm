@@ -95,7 +95,17 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     setReturnAllProbs(generate_input_->generate_config->return_all_probs);
 
     logits_processor_list_ = LogitsProcessorFactory::createLogitsProcessors(
-        generate_input_, init_batch_size, maxBatchSize(), special_tokens_.eos_token_id);
+        generate_input_,
+        init_batch_size,
+        maxBatchSize(),
+        special_tokens_.eos_token_id,
+        [this](ErrorCode error_code, const std::string& error_msg, bool stream_lock_held) {
+            if (stream_lock_held) {
+                reportEventWithoutLock(StreamEvents::Error, error_code, error_msg);
+            } else {
+                reportError(error_code, error_msg);
+            }
+        });
 
     if (generateConfig()->random_seed.has_value()) {
 #if defined(USING_CUDA) || defined(USING_ROCM)

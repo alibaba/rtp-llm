@@ -1,0 +1,70 @@
+#include "rtp_llm/cpp/models/logits_processor/GrammarLogitsProcessor.h"
+
+#include <gtest/gtest.h>
+
+#include <memory>
+#include <string>
+#include <vector>
+
+#include <xgrammar/tokenizer_info.h>
+
+#include "rtp_llm/cpp/engine_base/grammar/RtpGrammarMatcher.h"
+#include "rtp_llm/cpp/engine_base/grammar/XGrammarBackendCpp.h"
+#include "rtp_llm/cpp/models/SampleInfos.h"
+
+namespace rtp_llm {
+namespace {
+
+std::string makeTokenizerInfoJson() {
+    std::vector<std::string> vocab;
+    vocab.reserve(128);
+    for (int i = 0; i < 128; ++i) {
+        vocab.emplace_back(1, static_cast<char>(i));
+    }
+    xgrammar::TokenizerInfo info(vocab,
+                                 xgrammar::VocabType::RAW,
+                                 /*vocab_size=*/128,
+                                 /*stop_token_ids=*/std::vector<int32_t>{0});
+    return info.SerializeJSON();
+}
+
+XGrammarBackendCpp makeBackend() {
+    XGrammarBackendOptions options;
+    options.max_compiler_threads = 1;
+    return XGrammarBackendCpp(makeTokenizerInfoJson(), options);
+}
+
+TEST(GrammarLogitsProcessorTest, ProcessMasksDisallowedTokens) {
+    auto backend  = makeBackend();
+    auto compiled = backend.compileNow({"regex", "a"}).compiled;
+    ASSERT_TRUE(compiled);
+
+    auto                   matcher = backend.createMatcher(compiled, false, std::nullopt);
+    GrammarLogitsProcessor processor(matcher, /*eos_token_id=*/0);
+
+    SamplerInputs inputs;
+    inputs.logits        = torch::zeros({1, 128}, torch::kFloat32);
+    inputs.finished_mask = torch::zeros({1}, torch::kBool);
+    processor.process(inputs, 0, 1);
+
+    EXPECT_GT(inputs.logits[0][static_cast<int>('a')].item<float>(), BaseLogitsProcessor::neg_inf);
+    EXPECT_EQ(inputs.logits[0][static_cast<int>('b')].item<float>(), BaseLogitsProcessor::neg_inf);
+}
+
+TEST(GrammarLogitsProcessorTest, UpdateStatusAdvancesMatcherToTerminal) {
+    auto backend  = makeBackend();
+    auto compiled = backend.compileNow({"regex", "a"}).compiled;
+    ASSERT_TRUE(compiled);
+
+    auto                   matcher = backend.createMatcher(compiled, false, std::nullopt);
+    GrammarLogitsProcessor processor(matcher, /*eos_token_id=*/0);
+
+    processor.updateStatus(torch::tensor({{static_cast<int32_t>('a')}}, torch::kInt32), 1);
+    EXPECT_FALSE(matcher->isTerminated());
+
+    processor.updateStatus(torch::tensor({{0}}, torch::kInt32), 1);
+    EXPECT_TRUE(matcher->isTerminated());
+}
+
+}  // namespace
+}  // namespace rtp_llm

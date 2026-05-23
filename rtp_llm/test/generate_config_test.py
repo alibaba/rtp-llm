@@ -1,3 +1,4 @@
+import json
 import os
 from typing import Any, List, Optional
 from unittest import TestCase, main
@@ -91,6 +92,37 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(generate_config.top_k, 2)
         self.assertEqual(generate_config.top_p, 0.5)
         self.assertEqual(generate_config.max_new_tokens, 20)
+
+    def test_response_format_to_grammar_config(self):
+        request = ChatCompletionRequest(
+            messages=[],
+            response_format={
+                "type": "json_schema",
+                "json_schema": {"schema": {"type": "object"}},
+            },
+        )
+        config = GenerateConfig()
+        OpenaiEndpoint._apply_response_format(request.response_format, config)
+        self.assertEqual(json.loads(config.json_schema), {"type": "object"})
+
+        request = ChatCompletionRequest(messages=[], json_format=True)
+        self.assertTrue(request.json_format)
+
+        config = GenerateConfig()
+        OpenaiEndpoint._apply_json_format(config)
+        self.assertEqual(json.loads(config.json_schema), {"type": "object"})
+
+        config = GenerateConfig(json_schema={"type": "object"})
+        config.validate()
+        self.assertEqual(config.json_schema, '{"type":"object"}')
+
+        config = GenerateConfig(json_format=True)
+        config.validate()
+        self.assertEqual(config.json_schema, '{"type":"object"}')
+        self.assertTrue(config.force_disable_sp_run)
+
+        with self.assertRaisesRegex(Exception, "beam search"):
+            GenerateConfig(num_beams=2, regex="[0-9]+").validate()
 
     def test_stop_words_merge(self):
         special_tokens = SpecialTokens()
