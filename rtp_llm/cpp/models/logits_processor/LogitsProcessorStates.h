@@ -14,10 +14,15 @@ public:
 public:
     void batchProcess(const SamplerInputs& inputs);
     void insert(const BaseLogitsProcessorPtr& ptr, size_t start, size_t finish);
+    void insertSpeculative(const BaseLogitsProcessorPtr& ptr,
+                           size_t                        start,
+                           size_t                        finish,
+                           std::vector<int32_t>          draft_prefix);
 
 private:
     std::vector<BaseLogitsProcessorPtr>    logits_processors_;
     std::vector<std::pair<size_t, size_t>> intervals_;
+    std::vector<std::vector<int32_t>>      draft_prefixes_;
 };
 
 typedef std::shared_ptr<LogitsProcessorStates> LogitsProcessorStatesPtr;

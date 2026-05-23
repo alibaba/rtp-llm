@@ -3,6 +3,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
@@ -21,6 +22,10 @@ public:
     ~GrammarLogitsProcessor() override = default;
 
     void process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) override;
+    void processSpeculative(const SamplerInputs&        inputs,
+                            size_t                      start_idx,
+                            size_t                      finish_idx,
+                            const std::vector<int32_t>& draft_prefix) override;
     void updateMultiSeqStatus(const std::vector<int>& src_batch_indices) override;
     void updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) override;
     bool isStateful() const override {

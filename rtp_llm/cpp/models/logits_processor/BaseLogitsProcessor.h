@@ -1,5 +1,7 @@
 #pragma once
 
+#include <vector>
+
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 
@@ -13,8 +15,15 @@ public:
 
 public:
     virtual void process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) = 0;
-    virtual void updateMultiSeqStatus(const std::vector<int>& src_batch_indices)           = 0;
-    virtual void updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens)     = 0;
+    virtual void processSpeculative(const SamplerInputs&        inputs,
+                                    size_t                      start_idx,
+                                    size_t                      finish_idx,
+                                    const std::vector<int32_t>& draft_prefix) {
+        (void)draft_prefix;
+        process(inputs, start_idx, finish_idx);
+    }
+    virtual void updateMultiSeqStatus(const std::vector<int>& src_batch_indices)       = 0;
+    virtual void updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) = 0;
     virtual bool isStateful() const {
         return false;
     }
