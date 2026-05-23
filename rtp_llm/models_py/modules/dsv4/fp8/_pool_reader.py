@@ -200,11 +200,12 @@ class CPShardedPoolReader(CompressedKPoolReader):
         # Use raw rank-major all_gather; cp_all_gather_full_async asserts
         # T_local == cp_ctx.chunk_length (prefill-token space), but
         # local_flat lives in KV-pool-entry space (block-aligned).
-        # NCCL all_gather on default stream sees prior same-stream writes,
-        # but the compressor's CP gather runs on a per-call side stream
-        # (``gather_stream``); subsequent ``_launch`` writes to k_cache flow
-        # through that side path and aren't visible to NCCL's stream-local
-        # ordering. Per-stream sync keeps device-wide other streams free.
+        # The compressor's writes land on the current stream (via
+        # ``cp_wait_gather_full`` followed by the writer ``_launch``), so
+        # in-order issue alone would suffice for NCCL stream-local visibility.
+        # The CPU-blocking ``synchronize()`` is a defensive guard that costs
+        # little — pool writes are short — and protects against future
+        # refactors that might move the writer back to a side stream.
         if local_flat.is_cuda:
             torch.cuda.current_stream(local_flat.device).synchronize()
         gathered = all_gather(local_flat, group=Group.TP)

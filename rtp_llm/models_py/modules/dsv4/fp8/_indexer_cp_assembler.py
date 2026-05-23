@@ -133,10 +133,11 @@ def assemble_indexer_k(
     # space; here local_k_* lives in KV-pool-entry space sized by
     # plan.total_local_T = sum_b n_virtual_blocks * block_size). The
     # restore_indices are built against this rank-major layout.
-    # Per-stream sync: nested-compressor write to indexer pool happens on
-    # the gather_stream side path (CP all-gather of raw KV inside
-    # compressor.forward), so NCCL's stream-local ordering on the default
-    # stream is insufficient. See _pool_reader.fill for the same pattern.
+    # Per-stream sync: nested-compressor writes to indexer pool land on the
+    # current stream (cp_wait_gather_full + writer _launch), so stream-order
+    # alone would suffice for NCCL. The CPU-blocking sync here is defensive
+    # against future refactors that might move the writer to a side stream.
+    # See _pool_reader.fill for the same pattern.
     if local_k_quant.is_cuda:
         torch.cuda.current_stream(local_k_quant.device).synchronize()
     gathered_q = all_gather(local_k_quant, group=Group.TP)
