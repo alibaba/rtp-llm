@@ -117,6 +117,24 @@ class DashScGrpcRequestTest(TestCase):
         self.assertEqual(sp.num_return_sequences, 1)
         self.assertEqual(sp.min_new_tokens, 2)
 
+    def test_parse_sampling_response_format_parameters(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["response_format"].string_param = json.dumps(
+            {"type": "json_object"}
+        )
+        sp = parse_sampling_params(req)
+        self.assertEqual(json.loads(sp.response_format), {"type": "json_object"})
+        self.assertEqual(
+            json.loads(sp.to_generate_config().response_format), {"type": "json_object"}
+        )
+
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["json_format"].bool_param = True
+        config = parse_sampling_params(req).to_generate_config()
+        self.assertTrue(config.json_format)
+        config.validate()
+        self.assertEqual(config.json_schema, '{"type":"object"}')
+
     def test_parse_sampling_max_completion_tokens_parameter_alias_wins(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
         req.parameters["max_tokens"].int64_param = 200

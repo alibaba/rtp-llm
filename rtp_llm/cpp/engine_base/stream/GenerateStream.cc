@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <condition_variable>
 #include <cstddef>
 #include <memory>
@@ -95,7 +96,17 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     setReturnAllProbs(generate_input_->generate_config->return_all_probs);
 
     logits_processor_list_ = LogitsProcessorFactory::createLogitsProcessors(
-        generate_input_, init_batch_size, maxBatchSize(), special_tokens_.eos_token_id);
+        generate_input_,
+        init_batch_size,
+        maxBatchSize(),
+        special_tokens_.eos_token_id,
+        [this](ErrorCode error_code, const std::string& error_msg, bool stream_lock_held) {
+            if (stream_lock_held) {
+                reportEventWithoutLock(StreamEvents::Error, error_code, error_msg);
+            } else {
+                reportError(error_code, error_msg);
+            }
+        });
 
     if (generateConfig()->random_seed.has_value()) {
 #if defined(USING_CUDA) || defined(USING_ROCM)
@@ -767,8 +778,9 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
         const_cast<torch::Tensor&>(new_tokens).zero_();
     }
 
-    auto num_new_tokens = update_info.num_new_tokens;
-    int  cur_cached_len = seqLength() - 1;
+    const int old_seq_length = seqLength();
+    auto      num_new_tokens = update_info.num_new_tokens;
+    int       cur_cached_len = seqLength() - 1;
 
     int error_token_id = 0;
     if (!complete_token_ids_->update(new_tokens,
@@ -845,6 +857,12 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
                   torch::Tensor(),
                   update_info.update_remote_generate,
                   update_info.force_update_info});
+
+    const int committed_num_new_tokens = std::max(0, seqLength() - old_seq_length);
+    if (committed_num_new_tokens > 0) {
+        updateLogitProcessorStatus(new_tokens, committed_num_new_tokens, torch::Tensor(), true);
+    }
+    validateStatefulLogitsProcessorState();
 }
 
 void GenerateStream::update(const StreamUpdateInfo& update_info) {
@@ -864,7 +882,8 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
     const auto& new_tokens     = update_info.new_tokens;
     auto        num_new_tokens = update_info.num_new_tokens;
 
-    int error_token_id = 0;
+    const int old_seq_length = seqLength();
+    int       error_token_id = 0;
     if (!complete_token_ids_->update(new_tokens,
                                      begin_time_us_,
                                      num_new_tokens,
@@ -888,8 +907,16 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
 
     bool is_done = getStatus() == StreamState::FINISHED;
 
-    if (!is_done) {
-        updateLogitProcessorStatus(update_info);
+    const int committed_num_new_tokens = std::max(0, seqLength() - old_seq_length);
+    if (committed_num_new_tokens > 0) {
+        updateLogitProcessorStatus(update_info.new_tokens,
+                                   committed_num_new_tokens,
+                                   update_info.src_batch_indices,
+                                   /*stateful_only=*/is_done);
+        validateStatefulLogitsProcessorState();
+        if (hasError()) {
+            return;
+        }
     }
 
     if (!is_done || reuseCache()) {
@@ -922,6 +949,30 @@ bool GenerateStream::updateKvCacheBlocks(const torch::Tensor& src_batch_indices)
     return stream_cache_resource_->updateKVBlock(block_src_batch, is_seq_len_misaligned);
 }
 
+bool GenerateStream::hasStatefulLogitsProcessor() const {
+    return std::any_of(logits_processor_list_.begin(), logits_processor_list_.end(), [](const auto& processor) {
+        return processor != nullptr && processor->isStateful();
+    });
+}
+
+int64_t GenerateStream::processorAcceptedTokenLen() const {
+    int64_t accepted_token_len = -1;
+    for (const auto& processor : logits_processor_list_) {
+        if (processor == nullptr || !processor->isStateful()) {
+            continue;
+        }
+        const auto processor_token_len = processor->acceptedTokenLen();
+        if (accepted_token_len < 0) {
+            accepted_token_len = processor_token_len;
+            continue;
+        }
+        if (accepted_token_len != processor_token_len) {
+            return -1;
+        }
+    }
+    return accepted_token_len < 0 ? 0 : accepted_token_len;
+}
+
 void GenerateStream::updateLogitProcessorMultiSeqStatus(const torch::Tensor& src_batch_indices) {
     RTP_LLM_PROFILE_FUNCTION();
     if (!src_batch_indices.defined() || !hasNumBeams()) {
@@ -939,15 +990,43 @@ void GenerateStream::updateLogitProcessorMultiSeqStatus(const torch::Tensor& src
 
 void GenerateStream::updateLogitProcessorStatus(const StreamUpdateInfo& update_info) {
     RTP_LLM_PROFILE_FUNCTION();
-    updateLogitProcessorMultiSeqStatus(update_info.src_batch_indices);
+    updateLogitProcessorStatus(update_info.new_tokens,
+                               update_info.num_new_tokens,
+                               update_info.src_batch_indices,
+                               /*stateful_only=*/false);
+}
 
-    const auto& new_tokens = update_info.new_tokens;
+void GenerateStream::updateLogitProcessorStatus(const torch::Tensor& new_tokens,
+                                                int32_t              num_new_tokens,
+                                                const torch::Tensor& src_batch_indices,
+                                                bool                 stateful_only) {
+    RTP_LLM_PROFILE_FUNCTION();
+    updateLogitProcessorMultiSeqStatus(src_batch_indices);
+
     RTP_LLM_CHECK(new_tokens.size(0) == currentBatchSize());
-    auto num_new_tokens = update_info.num_new_tokens;
 
     for (auto logit_processor_ptr : getAllLogitsProcessorPtr()) {
+        if (stateful_only && !logit_processor_ptr->isStateful()) {
+            continue;
+        }
         logit_processor_ptr->updateStatus(new_tokens, num_new_tokens);
     }
+}
+
+void GenerateStream::validateStatefulLogitsProcessorState() {
+    if (!hasStatefulLogitsProcessor() || hasError()) {
+        return;
+    }
+    const auto processor_token_len = processorAcceptedTokenLen();
+    const auto stream_output_len   = static_cast<int64_t>(outputTokenLen());
+    if (processor_token_len == stream_output_len) {
+        return;
+    }
+    reportEventWithoutLock(StreamEvents::Error,
+                           ErrorCode::UNKNOWN_ERROR,
+                           "stateful logits processor accepted token length mismatch: processor="
+                               + std::to_string(processor_token_len)
+                               + ", stream_output=" + std::to_string(stream_output_len));
 }
 
 void GenerateStream::setLoss(const torch::Tensor& loss) {

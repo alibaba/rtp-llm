@@ -1,3 +1,4 @@
+import json
 import os
 from typing import Any, List, Optional
 from unittest import TestCase, main
@@ -91,6 +92,37 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(generate_config.top_k, 2)
         self.assertEqual(generate_config.top_p, 0.5)
         self.assertEqual(generate_config.max_new_tokens, 20)
+
+    def test_response_format_to_grammar_config(self):
+        request = ChatCompletionRequest(
+            messages=[],
+            response_format={
+                "type": "json_schema",
+                "json_schema": {"schema": {"type": "object"}},
+            },
+        )
+        config = GenerateConfig()
+        OpenaiEndpoint._apply_response_format(request.response_format, config)
+        self.assertEqual(json.loads(config.json_schema), {"type": "object"})
+
+        request = ChatCompletionRequest(messages=[], json_format=True)
+        self.assertTrue(request.json_format)
+
+        config = GenerateConfig()
+        OpenaiEndpoint._apply_json_format(config)
+        self.assertEqual(json.loads(config.json_schema), {"type": "object"})
+
+        config = GenerateConfig(json_schema={"type": "object"})
+        config.validate()
+        self.assertEqual(config.json_schema, '{"type":"object"}')
+
+        config = GenerateConfig(json_format=True)
+        config.validate()
+        self.assertEqual(config.json_schema, '{"type":"object"}')
+        self.assertFalse(config.force_disable_sp_run)
+
+        with self.assertRaisesRegex(Exception, "beam search"):
+            GenerateConfig(num_beams=2, regex="[0-9]+").validate()
 
     def test_stop_words_merge(self):
         special_tokens = SpecialTokens()
@@ -410,6 +442,24 @@ class OpenaiGenerateConfigTest(TestCase):
         self.assertEqual(config.max_new_tokens, 100)
         self.assertEqual(config.max_thinking_tokens, 32000)
         self.assertTrue(config.in_think_mode)
+
+    def test_request_level_thinking_adds_think_end_tokens_when_env_mode_off(self):
+        generate_env_config = GenerateEnvConfig()
+        generate_env_config.think_mode = 0
+        generate_env_config.think_end_token_id = -1
+        generate_env_config.think_end_tag = "</think>\n\n"
+        request = ChatCompletionRequest(
+            messages=[], thinking_budget=10, enable_thinking=True
+        )
+
+        config = self._extract_openai_generation_config(request, generate_env_config)
+
+        self.assertTrue(config.in_think_mode)
+        self.assertEqual(config.max_thinking_tokens, 10)
+        self.assertEqual(
+            config.end_think_token_ids,
+            self.tokenizer.encode("</think>\n\n", add_special_tokens=False),
+        )
 
     def test_openai_max_completion_tokens_non_positive_is_unset(self):
         request = ChatCompletionRequest(

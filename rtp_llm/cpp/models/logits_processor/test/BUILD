@@ -59,3 +59,17 @@ cc_test(
     },
     exec_properties = {'gpu':'H20'},
 )
+
+cc_test(
+    name = "grammar_logits_processor_test",
+    srcs = [
+        "GrammarLogitsProcessorTest.cc",
+    ],
+    copts = test_copts,
+    deps = test_deps + [
+        "@xgrammar//:xgrammar",
+    ],
+    env = {
+        "TEST_USING_DEVICE": "CPU",
+    },
+)
