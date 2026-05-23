@@ -1402,6 +1402,35 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(responses), 1)
         self.assertIn("max_new_tokens", responses[0].error_message)
 
+    async def test_openai_compat_max_new_tokens_negative_uses_default(
+        self,
+    ) -> None:
+        out = GenerateOutput(
+            output_ids=torch.tensor([9], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(input_len=1, reuse_len=0),
+        )
+        visitor = _FakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
+        )
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+        req = self._valid_infer_request()
+        req.parameters["ds_header_attributes"].string_param = json.dumps(
+            {"x-envoy-original-path": "/compatible-mode/v1/chat/completions"}
+        )
+        _add_input_tensor(req, "max_new_tokens", "INT32", [1], struct.pack("<i", -1))
+
+        responses = await _drain(
+            servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
+        )
+
+        self.assertEqual(visitor.enqueue_called, 1)
+        self.assertEqual(len(responses), 1)
+        self.assertEqual(
+            visitor.last_generate_input.generate_config.max_new_tokens,
+            32000,
+        )
+
     async def test_max_completion_tokens_non_positive_uses_default_repro(
         self,
     ) -> None:
@@ -1419,6 +1448,47 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
                 servicer = DashScInferenceServicer(backend_visitor=visitor)
                 req = self._valid_infer_request()
                 req.parameters["max_completion_tokens"].int64_param = value
+
+                responses = await _drain(
+                    servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
+                )
+
+                self.assertEqual(visitor.enqueue_called, 1)
+                self.assertEqual(len(responses), 1)
+                self.assertEqual(
+                    visitor.last_generate_input.generate_config.max_new_tokens,
+                    32000,
+                )
+
+    async def test_max_completion_tokens_non_positive_blocks_legacy_aliases(
+        self,
+    ) -> None:
+        for value in (-1, 0):
+            with self.subTest(value=value):
+                out = GenerateOutput(
+                    output_ids=torch.tensor([9], dtype=torch.int32),
+                    finished=True,
+                    aux_info=AuxInfo(input_len=1, reuse_len=0),
+                )
+                visitor = _FakeVisitor(
+                    _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
+                )
+                servicer = DashScInferenceServicer(backend_visitor=visitor)
+                req = self._valid_infer_request()
+                _add_input_tensor(
+                    req,
+                    "max_completion_tokens",
+                    "INT32",
+                    [1],
+                    struct.pack("<i", value),
+                )
+                _add_input_tensor(
+                    req,
+                    "max_new_tokens",
+                    "INT32",
+                    [1],
+                    struct.pack("<i", -1),
+                )
 
                 responses = await _drain(
                     servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())

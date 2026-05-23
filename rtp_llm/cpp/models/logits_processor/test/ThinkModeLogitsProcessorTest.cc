@@ -365,6 +365,32 @@ TEST_F(SamplerTest, testThinkingMasksThinkBoundaryTokensAfterThinkEnd) {
     EXPECT_EQ(0, sampler_inputs.logits[0][271].item<float>());
 }
 
+TEST_F(SamplerTest, testDsv4TrailingNewlineThinkEndClosesOnSemanticToken) {
+    SamplerDataBuilder builder;
+
+    auto generate_input                                    = std::make_shared<GenerateInput>();
+    generate_input->generate_config                        = std::make_shared<GenerateConfig>();
+    generate_input->generate_config->in_think_mode         = true;
+    generate_input->generate_config->max_thinking_tokens   = 32;
+    generate_input->generate_config->begin_think_token_ids = {128821, 201};
+    generate_input->generate_config->end_think_token_ids   = {128822, 271};
+    generate_input->input_ids                              = torch::tensor({1, 2, 3}, torch::kInt32);
+
+    auto processor = ThinkModeLogitsProcessor::fromGenerateInput(generate_input, 1);
+    ASSERT_NE(processor, nullptr);
+    processor->updateStatus(torch::tensor({{128822, 128822}}, torch::kInt32), 2);
+
+    SamplerInputs sampler_inputs    = builder.allocate({1, 128900, 8}, {processor}, {1});
+    sampler_inputs.input_lengths    = torch::tensor({3}, torch::kInt32);
+    sampler_inputs.sequence_lengths = torch::tensor({5}, torch::kInt32);
+    processor->process(sampler_inputs, 0, 1);
+
+    float neg_inf = -std::numeric_limits<float>::max();
+    EXPECT_EQ(neg_inf, sampler_inputs.logits[0][128821].item<float>());
+    EXPECT_EQ(neg_inf, sampler_inputs.logits[0][128822].item<float>());
+    EXPECT_EQ(0, sampler_inputs.logits[0][271].item<float>());
+}
+
 TEST_F(SamplerTest, testThinkingForcesRemainingThinkEndAfterNaturalPrefix) {
     SamplerDataBuilder builder;
 

@@ -150,6 +150,20 @@ class DashScGrpcRequestTest(TestCase):
         sp = parse_sampling_params(req)
         self.assertEqual(sp.max_new_tokens, -1)
 
+    def test_parse_sampling_openai_compat_max_new_tokens_negative_uses_default(
+        self,
+    ) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["ds_header_attributes"].string_param = json.dumps(
+            {"x-envoy-original-path": "/compatible-mode/v1/chat/completions"}
+        )
+        _add_tensor(req, "max_new_tokens", "INT32", [1], struct.pack("<i", -1))
+
+        sp = parse_sampling_params(req)
+
+        self.assertEqual(sp.max_new_tokens, 32000)
+        self.assertFalse(sp.max_new_tokens_from_completion_alias)
+
     def test_parse_sampling_max_completion_tokens_non_positive_uses_default_repro(
         self,
     ) -> None:
@@ -159,6 +173,32 @@ class DashScGrpcRequestTest(TestCase):
                 req = predict_v2_pb2.ModelInferRequest()
                 req.parameters["max_completion_tokens"].int64_param = value
                 sp = parse_sampling_params(req)
+                self.assertEqual(sp.max_new_tokens, 32000)
+                self.assertFalse(sp.max_new_tokens_from_completion_alias)
+
+    def test_parse_sampling_max_completion_tokens_non_positive_blocks_legacy_aliases(
+        self,
+    ) -> None:
+        for value in (-1, 0):
+            with self.subTest(value=value):
+                req = predict_v2_pb2.ModelInferRequest()
+                _add_tensor(
+                    req,
+                    "max_completion_tokens",
+                    "INT32",
+                    [1],
+                    struct.pack("<i", value),
+                )
+                _add_tensor(
+                    req,
+                    "max_new_tokens",
+                    "INT32",
+                    [1],
+                    struct.pack("<i", -1),
+                )
+
+                sp = parse_sampling_params(req)
+
                 self.assertEqual(sp.max_new_tokens, 32000)
                 self.assertFalse(sp.max_new_tokens_from_completion_alias)
 

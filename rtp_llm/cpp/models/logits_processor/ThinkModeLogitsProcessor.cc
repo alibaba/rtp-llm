@@ -6,29 +6,38 @@ namespace rtp_llm {
 
 namespace {
 
-constexpr int32_t kInvalidTokenId         = -1;
-constexpr int32_t kDeepSeekNewlineTokenId = 201;
-constexpr int32_t kQwenGlmNewlineTokenId  = 198;
+constexpr int32_t kInvalidTokenId           = -1;
+constexpr int32_t kDeepSeekNewlineTokenId   = 201;
+constexpr int32_t kDeepSeekBlankLineTokenId = 271;
+constexpr int32_t kQwenGlmNewlineTokenId    = 198;
 
-int32_t inferThinkEndTokenId(const std::vector<int>& end_think_token_ids) {
-    if (end_think_token_ids.empty()) {
-        return kInvalidTokenId;
-    }
-    if (end_think_token_ids.size() > 1
-        && (end_think_token_ids.front() == kDeepSeekNewlineTokenId
-            || end_think_token_ids.front() == kQwenGlmNewlineTokenId)) {
-        return end_think_token_ids[1];
-    }
-    return end_think_token_ids.front();
+bool isThinkBoundaryWhitespaceToken(int32_t token_id) {
+    return token_id == kDeepSeekNewlineTokenId || token_id == kDeepSeekBlankLineTokenId
+           || token_id == kQwenGlmNewlineTokenId;
 }
 
 std::vector<int> effectiveThinkEndTokenIds(const std::vector<int>& end_think_token_ids) {
-    if (end_think_token_ids.size() > 1
-        && (end_think_token_ids.front() == kDeepSeekNewlineTokenId
-            || end_think_token_ids.front() == kQwenGlmNewlineTokenId)) {
-        return std::vector<int>(end_think_token_ids.begin() + 1, end_think_token_ids.end());
+    if (end_think_token_ids.size() <= 1) {
+        return end_think_token_ids;
     }
-    return end_think_token_ids;
+
+    size_t begin = 0;
+    size_t end   = end_think_token_ids.size();
+    while (begin + 1 < end && isThinkBoundaryWhitespaceToken(end_think_token_ids[begin])) {
+        ++begin;
+    }
+    while (begin + 1 < end && isThinkBoundaryWhitespaceToken(end_think_token_ids[end - 1])) {
+        --end;
+    }
+    return std::vector<int>(end_think_token_ids.begin() + begin, end_think_token_ids.begin() + end);
+}
+
+int32_t inferThinkEndTokenId(const std::vector<int>& end_think_token_ids) {
+    auto effective_ids = effectiveThinkEndTokenIds(end_think_token_ids);
+    if (effective_ids.empty()) {
+        return kInvalidTokenId;
+    }
+    return effective_ids.front();
 }
 
 int32_t inferThinkBeginTokenId(const std::vector<int>& begin_think_token_ids) {
@@ -133,12 +142,13 @@ void ThinkModeLogitsProcessor::updateStatus(const torch::Tensor& new_tokens, int
         for (size_t j = 0; j < num_new_tokens; ++j) {
             auto current_token_id = new_tokens.data_ptr<int>()[i * new_tokens.size(1) + j + offset];
             info.dfa_ptr->next(current_token_id);
+            if (info.dfa_ptr->isFinished()) {
+                info.process_state = ThinkProcessState::AFTER_THINK;
+                break;
+            }
         }
 
         info.current_output_length += num_new_tokens;
-        if (info.dfa_ptr->isFinished()) {
-            info.process_state = ThinkProcessState::AFTER_THINK;
-        }
     }
 }
 
