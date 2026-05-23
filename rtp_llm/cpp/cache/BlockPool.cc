@@ -8,9 +8,15 @@
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 
 #include <cstdlib>
+#include <cerrno>
+#include <cstdint>
+#include <cstring>
 #include <exception>
 #include <string>
 #include <utility>
+
+#include <sys/mman.h>
+#include <unistd.h>
 
 namespace rtp_llm {
 
@@ -23,6 +29,43 @@ bool shouldPinHostBlockPool() {
     }
     const std::string flag(value);
     return flag != "0" && flag != "false" && flag != "FALSE" && flag != "off" && flag != "OFF";
+}
+
+void markHostBlockPoolDontDump(void* ptr, size_t size) {
+#ifdef MADV_DONTDUMP
+    if (ptr == nullptr || size == 0) {
+        return;
+    }
+
+    long page_size = sysconf(_SC_PAGESIZE);
+    if (page_size <= 0) {
+        page_size = 4096;
+    }
+
+    const auto begin         = reinterpret_cast<uintptr_t>(ptr);
+    const auto page_mask     = static_cast<uintptr_t>(page_size - 1);
+    const auto aligned_begin = begin & ~page_mask;
+    const auto aligned_end   = (begin + size + page_mask) & ~page_mask;
+    const auto aligned_size  = static_cast<size_t>(aligned_end - aligned_begin);
+
+    if (madvise(reinterpret_cast<void*>(aligned_begin), aligned_size, MADV_DONTDUMP) != 0) {
+        RTP_LLM_LOG_WARNING("madvise MADV_DONTDUMP failed for host block pool, ptr=%p, size=%zu, error=%s",
+                            ptr,
+                            size,
+                            std::strerror(errno));
+    } else {
+        RTP_LLM_LOG_INFO("madvise MADV_DONTDUMP success for host block pool, ptr=%p, size=%zu, aligned_ptr=%p, "
+                         "aligned_size=%zu",
+                         ptr,
+                         size,
+                         reinterpret_cast<void*>(aligned_begin),
+                         aligned_size);
+    }
+#else
+    RTP_LLM_LOG_WARNING("MADV_DONTDUMP is not defined, host block pool may be included in coredump, ptr=%p, size=%zu",
+                        ptr,
+                        size);
+#endif
 }
 
 }  // namespace
@@ -73,6 +116,10 @@ void BlockPool::initializeCacheBuffer() {
                              config_.total_size_bytes);
             cache_aligned_buffer_ = std::move(cpu_buffer);
         }
+        RTP_LLM_LOG_INFO("mark host block pool dont dump, ptr=%p, size=%zu",
+                         cache_aligned_buffer_.data_ptr(),
+                         config_.total_size_bytes);
+        markHostBlockPoolDontDump(cache_aligned_buffer_.data_ptr(), config_.total_size_bytes);
     } else {
         cache_aligned_buffer_ = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
                                              torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
