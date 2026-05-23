@@ -5,6 +5,7 @@ from typing import Dict, Optional
 from typing_extensions import override
 
 from rtp_llm.async_decoder_engine.base_engine import BaseEngine
+from rtp_llm.async_decoder_engine.xgrammar_bootstrap import bootstrap_grammar_config
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.frontend.token_processor import TokenProcessor
 from rtp_llm.models.base_model import BaseModel
@@ -44,6 +45,7 @@ class LanguageCppEngine(BaseEngine):
             self.mm_engine = MMProcessEngine(self.model, self.model.vit_config)
         else:
             self.mm_engine = None
+        bootstrap_grammar_config(engine_config, model)
         self.rtp_llm_op_ = RtpLLMOp(
             engine_config, model, self.mm_engine, propose_model, self.token_processor
         )

@@ -133,6 +133,16 @@ def _parse_optional_parameter_bool(request, param_name: str) -> bool | None:
     return None
 
 
+def _parse_optional_parameter_string(request, param_name: str) -> str | None:
+    if param_name not in request.parameters:
+        return None
+    p = request.parameters[param_name]
+    if not p.HasField("string_param"):
+        return None
+    value = str(p.string_param).strip()
+    return value or None
+
+
 def _parse_optional_int_value(value: Any) -> int | None:
     if value is None or isinstance(value, bool):
         return None
@@ -198,6 +208,14 @@ def _normalize_non_empty_str(value: Any) -> str | None:
     return s if s else None
 
 
+def _jsonable_to_string(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return _normalize_non_empty_str(value)
+
+
 def _parse_stop_words_list_input(request) -> tuple[tuple[int, ...], ...] | None:
     """Input name ``stop_words_list`` -> ``GenerateConfig.stop_words_list`` (groups of token ids)."""
     inp, raw = _find_input_raw(request, "stop_words_list")
@@ -254,6 +272,8 @@ class SamplingParams:
     presence_penalty: float = 0.0
     stop_words_list: tuple[tuple[int, ...], ...] = field(default_factory=tuple)
     max_new_think_tokens: int | None = None
+    response_format: str | None = None
+    json_format: bool = False
 
     @property
     def n(self) -> int:
@@ -311,6 +331,8 @@ class SamplingParams:
             max_thinking_tokens=max_thinking_tokens,
             return_input_ids=return_input_ids,
             is_streaming=True,
+            response_format=self.response_format,
+            json_format=self.json_format,
         )
 
 
@@ -357,6 +379,8 @@ def parse_sampling_params(request) -> SamplingParams:
     presence_penalty = 0.0
     max_new_think_tokens: int | None = None
     stop_words_list: tuple[tuple[int, ...], ...] = tuple()
+    response_format: str | None = None
+    json_format = False
 
     v = _parse_optional_scalar_int(request, "max_tokens")
     if v is None:
@@ -435,6 +459,14 @@ def parse_sampling_params(request) -> SamplingParams:
     if sw is not None:
         stop_words_list = sw
 
+    response_format = _parse_optional_parameter_string(request, "response_format")
+    json_format = bool(_parse_optional_parameter_bool(request, "json_format"))
+    ds_attrs = _parse_ds_header_attributes(request)
+    if response_format is None:
+        response_format = _jsonable_to_string(ds_attrs.get("response_format"))
+    if not json_format:
+        json_format = bool(_parse_optional_bool(ds_attrs.get("json_format")))
+
     return SamplingParams(
         max_new_tokens=max_new_tokens,
         max_new_tokens_from_completion_alias=max_new_tokens_from_completion_alias,
@@ -450,6 +482,8 @@ def parse_sampling_params(request) -> SamplingParams:
         presence_penalty=presence_penalty,
         max_new_think_tokens=max_new_think_tokens,
         stop_words_list=stop_words_list,
+        response_format=response_format,
+        json_format=json_format,
     )
 
 

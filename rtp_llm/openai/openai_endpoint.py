@@ -6,6 +6,7 @@ from typing import Any, AsyncGenerator, List, Optional
 
 from fastapi import Request
 
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.model_args import ModelArgs
 from rtp_llm.config.model_config import ModelConfig
@@ -173,6 +174,48 @@ class OpenaiEndpoint(object):
     ) -> List[List[int]]:
         return [i for i, _ in itertools.groupby(sorted(stop_words_list))]
 
+    @staticmethod
+    def _apply_json_format(config: GenerateConfig) -> None:
+        config.json_format = True
+        config.json_schema = json.dumps(
+            {"type": "object"}, ensure_ascii=False, separators=(",", ":")
+        )
+
+    @staticmethod
+    def _apply_response_format(rf, config: GenerateConfig) -> None:
+        config.json_format = False
+        config.json_schema = None
+        config.regex = None
+        config.ebnf = None
+        config.structural_tag = None
+        if rf.type == "text":
+            return
+        if rf.type == "json_schema":
+            assert rf.json_schema is not None and rf.json_schema.schema is not None
+            config.json_schema = json.dumps(
+                rf.json_schema.schema, ensure_ascii=False, separators=(",", ":")
+            )
+        elif rf.type == "json_object":
+            config.json_schema = json.dumps(
+                {"type": "object"}, ensure_ascii=False, separators=(",", ":")
+            )
+        elif rf.type == "regex":
+            assert rf.pattern
+            config.regex = rf.pattern
+        elif rf.type == "ebnf":
+            assert rf.grammar
+            config.ebnf = rf.grammar
+        elif rf.type == "structural_tag":
+            assert rf.structural_tag
+            config.structural_tag = json.dumps(
+                rf.structural_tag, ensure_ascii=False, separators=(",", ":")
+            )
+        else:
+            raise FtRuntimeException(
+                ExceptionType.INVALID_PARAMS,
+                f"unknown response_format.type: {rf.type!r}",
+            )
+
     def _extract_generation_config(
         self, request: ChatCompletionRequest
     ) -> GenerateConfig:
@@ -213,6 +256,10 @@ class OpenaiEndpoint(object):
             config.return_all_probs = request.logprobs
         if request.logprobs or request.functions:
             config.is_streaming = True
+        if request.response_format is not None:
+            self._apply_response_format(request.response_format, config)
+        elif request.json_format or config.json_format:
+            self._apply_json_format(config)
         config.convert_select_tokens(len(self.tokenizer), self.tokenizer)
 
         # add_thinking_params now accepts generate_env_config parameter
