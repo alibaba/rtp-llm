@@ -985,6 +985,14 @@ bool KVCacheMemoryConnector::startCopyAsync(const std::shared_ptr<MemoryAsyncCon
     if (stop_.load()) {
         return false;
     }
+    bool has_disk_source = false;
+    for (const auto& copy_info : copy_plan->copy_infos) {
+        has_disk_source = has_disk_source || copy_info.source_type == CopyInfoPerKey::SourceType::DISK_SLOT;
+    }
+    const auto timeout_ms = has_disk_source ? std::max(kv_cache_config_.memory_cache_sync_timeout_ms,
+                                                       kv_cache_config_.memory_cache_disk_stage_ack_timeout_ms) :
+                                              kv_cache_config_.memory_cache_sync_timeout_ms;
+    context->setWaitTimeoutMs(timeout_ms);
     auto task_copy_plan = copy_plan;
     auto code           = wait_done_thread_pool_->pushTask([this, context, task_copy_plan]() mutable {
         auto send_result = sendCopyPlan(task_copy_plan);

@@ -218,6 +218,83 @@ TEST_F(MemoryAsyncContextTest, waitDone_IsIdempotent_CallbackOnlyOnce) {
     EXPECT_TRUE(last_ok);
 }
 
+TEST_F(MemoryAsyncContextTest, waitDone_ConcurrentCalls_CallbackOnlyOnce) {
+    std::atomic<int>  callback_cnt{0};
+    std::atomic<bool> last_ok{false};
+    auto              cb = [&](bool ok) {
+        callback_cnt.fetch_add(1);
+        last_ok.store(ok);
+    };
+
+    auto result = std::make_shared<MemoryBroadcastResultT>(std::vector<std::shared_ptr<MemoryWorkerCtxT>>{});
+    auto ctx    = std::make_shared<rtp_llm::MemoryAsyncContext>(cb);
+    ctx->setBroadcastResult(result);
+
+    std::thread t1([&]() { ctx->waitDone(); });
+    std::thread t2([&]() { ctx->waitDone(); });
+    t1.join();
+    t2.join();
+
+    EXPECT_TRUE(ctx->done());
+    EXPECT_TRUE(ctx->success());
+    EXPECT_EQ(callback_cnt.load(), 1);
+    EXPECT_TRUE(last_ok.load());
+}
+
+TEST_F(MemoryAsyncContextTest, waitDone_FailsAndCallsCallback_WhenBroadcastTimesOut) {
+    auto worker0            = std::make_shared<MemoryWorkerCtxT>();
+    worker0->client_context = std::make_shared<grpc::ClientContext>();
+    auto result             = std::make_shared<MemoryBroadcastResultT>(std::vector<std::shared_ptr<MemoryWorkerCtxT>>{
+        worker0});
+
+    int  callback_cnt = 0;
+    bool last_ok      = true;
+    auto cb           = [&](bool ok) {
+        callback_cnt++;
+        last_ok = ok;
+    };
+
+    auto ctx = std::make_shared<rtp_llm::MemoryAsyncContext>(cb);
+    ctx->setBroadcastResult(result);
+    ctx->setWaitTimeoutMs(1);
+
+    ctx->waitDone();
+    EXPECT_TRUE(ctx->done());
+    EXPECT_EQ(callback_cnt, 1);
+    EXPECT_FALSE(last_ok);
+    EXPECT_FALSE(ctx->success());
+}
+
+TEST_F(MemoryAsyncContextTest, waitDone_CatchesBroadcastExceptionAndCallsCallback) {
+    auto worker0            = std::make_shared<MemoryWorkerCtxT>();
+    worker0->client_context = std::make_shared<grpc::ClientContext>();
+    worker0->status         = grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "deadline");
+    worker0->response.mutable_mem_response()->set_success(true);
+    auto result = std::make_shared<MemoryBroadcastResultT>(std::vector<std::shared_ptr<MemoryWorkerCtxT>>{worker0});
+
+    grpc::Alarm alarm;
+    alarm.Set(&worker0->completion_queue,
+              std::chrono::system_clock::now(),
+              reinterpret_cast<void*>(static_cast<intptr_t>(0)));
+
+    int  callback_cnt = 0;
+    bool last_ok      = true;
+    auto cb           = [&](bool ok) {
+        callback_cnt++;
+        last_ok = ok;
+    };
+
+    auto ctx = std::make_shared<rtp_llm::MemoryAsyncContext>(cb);
+    ctx->setBroadcastResult(result);
+    ctx->setWaitTimeoutMs(100);
+
+    EXPECT_NO_THROW(ctx->waitDone());
+    EXPECT_TRUE(ctx->done());
+    EXPECT_EQ(callback_cnt, 1);
+    EXPECT_FALSE(last_ok);
+    EXPECT_FALSE(ctx->success());
+}
+
 }  // namespace rtp_llm::test
 
 int main(int argc, char** argv) {

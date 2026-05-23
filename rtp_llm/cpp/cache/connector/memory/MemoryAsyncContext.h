@@ -3,6 +3,7 @@
 #include <atomic>
 #include <functional>
 #include <memory>
+#include <mutex>
 
 #include "rtp_llm/cpp/cache/connector/AsyncContext.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
@@ -36,11 +37,14 @@ public:
     bool done() const override;
     bool success() const override;
     void setBroadcastResult(const std::shared_ptr<BroadcastResult<FunctionRequestPB, FunctionResponsePB>>& result);
+    void setWaitTimeoutMs(int timeout_ms);
 
 private:
     std::shared_ptr<BroadcastResult<FunctionRequestPB, FunctionResponsePB>> broadcast_result_;
     std::function<void(bool)>                                               done_callback_;
+    int                                                                     wait_timeout_ms_{0};
     std::atomic<bool>                                                       already_done_{false};
+    std::mutex                                                              wait_mutex_;
 };
 
 }  // namespace rtp_llm
