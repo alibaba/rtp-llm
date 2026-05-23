@@ -284,7 +284,7 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
                     masked_m[start_idx:end_idx],
                     expected_m,
                     disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),
-                )
+                )  # fuse kernel: may use transpose_fp32 in m_grouped_fp8_gemm_nt_masked to be column major format
 
                 # Free down_input and down_input_scale
                 dispose_tensor(down_input)

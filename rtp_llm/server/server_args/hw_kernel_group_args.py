@@ -176,6 +176,20 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
         "保证多次运行结果确定性一致。默认 False，使用性能最优算法。",
     )
 
+    hw_kernel_group.add_argument(
+        "--enable_fuse_kernels",
+        env_name="ENABLE_FUSE_KERNELS",
+        bind_to=(hw_kernel_config, "enable_fuse_kernels"),
+        type=str2bool,
+        default=True,
+        help=(
+            "model_py 路径下所有 Triton fuse kernel 的总开关 "
+            "(Qwen3.5/Qwen3-Next decoder 融合、GLM5/DSV3.2 MLA 融合、"
+            "strided_slice_copy_、_apply_output_bmm 等)。"
+            "设置为 `False` 时全量回退到 unfused baseline，用于调试或精度对齐验证。"
+        ),
+    )
+
 
 def _parse_comma_separated_ints(
     config: str, config_name: str, item_name: str, raise_on_empty: bool = True

@@ -210,7 +210,8 @@ std::string HWKernelConfig::to_string() const {
         << "disable_dpc_random: " << disable_dpc_random << "\n"
         << "rocm_disable_custom_ag: " << rocm_disable_custom_ag << "\n"
         << "deterministic_gemm: " << deterministic_gemm << "\n"
-        << "deterministic_attn: " << deterministic_attn;
+        << "deterministic_attn: " << deterministic_attn << "\n"
+        << "enable_fuse_kernels: " << enable_fuse_kernels;
     return oss.str();
 }
 

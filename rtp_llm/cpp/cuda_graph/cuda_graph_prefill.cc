@@ -40,20 +40,21 @@ void CudaGraphRunner::capturePrefill() {
             inputs.attention_inputs.prefix_lengths.fill_(prefix_len);
             auto& input_lengths = inputs.attention_inputs.input_lengths;
             for (int b = 0; b < active_bs; b++) {
-                int tokens           = (b < active_bs - 1) ? num_tokens_per_bs_ : (seq_len - b * num_tokens_per_bs_);
+                int tokens       = (b < active_bs - 1) ? num_tokens_per_bs_ : (seq_len - b * num_tokens_per_bs_);
                 input_lengths[b] = tokens;
             }
 
             // Build cu_seqlens and cu_kv_seqlens as cumulative sums
-            auto cu_seqlens_host = inputs.attention_inputs.cu_seqlens_host;
+            auto cu_seqlens_host    = inputs.attention_inputs.cu_seqlens_host;
             auto cu_kv_seqlens_host = inputs.attention_inputs.cu_kv_seqlens.cpu();
-            auto prefix_lengths = inputs.attention_inputs.prefix_lengths;
+            auto prefix_lengths     = inputs.attention_inputs.prefix_lengths;
 
-            cu_seqlens_host[0]        = 0;
-            cu_kv_seqlens_host[0]     = 0;
+            cu_seqlens_host[0]    = 0;
+            cu_kv_seqlens_host[0] = 0;
             for (int b = 0; b < max_bs_; b++) {
-                cu_seqlens_host[b + 1]    = cu_seqlens_host[b].item<int>() + input_lengths[b].item<int>();
-                cu_kv_seqlens_host[b + 1] = cu_kv_seqlens_host[b].item<int>() + input_lengths[b].item<int>() + prefix_lengths[b].item<int>();
+                cu_seqlens_host[b + 1] = cu_seqlens_host[b].item<int>() + input_lengths[b].item<int>();
+                cu_kv_seqlens_host[b + 1] =
+                    cu_kv_seqlens_host[b].item<int>() + input_lengths[b].item<int>() + prefix_lengths[b].item<int>();
             }
 
             inputs.attention_inputs.cu_seqlens.copy_(cu_seqlens_host);
@@ -69,18 +70,15 @@ void CudaGraphRunner::capturePrefill() {
             inputs.bert_embedding_inputs.combo_tokens_type_ids =
                 inputs.bert_embedding_inputs.combo_tokens_type_ids.slice(0, 0, seq_len);
         }
-        graph_instances_[seq_len].mem_hold_ = createCaptureMemoryHold(inputs, max_bs_ * num_tokens_per_bs_);
+        const bool draft_prefill_graph_mode    = is_prefill_cuda_graph_mode_ && num_tokens_per_bs_ != max_seq_len_;
+        const bool draft_prefill_full_capacity = draft_prefill_graph_mode && hc_mult_ > 1;
+        const int  capture_tokens_count        = draft_prefill_full_capacity ? max_bs_ * num_tokens_per_bs_ : seq_len;
+        graph_instances_[seq_len].mem_hold_    = createCaptureMemoryHold(inputs, capture_tokens_count);
         graph_instances_[seq_len].mem_hold_.attn_pyobj_ =
             py_attn_pyobj_method_(graph_instances_[seq_len].mem_hold_.py_model_inputs_, true);
-        // Draft prefill graph mode (num_tokens_per_bs_ != max_seq_len_) routes
-        // through ``forward_decode`` whose output is ``[B * q_len, dim]`` —
-        // i.e. always the full ``max_bs_ * num_tokens_per_bs_``. Slicing the
-        // output buffer to ``seq_len`` here would produce a copy-size
-        // mismatch in ``captureOneGraphInstance``'s
-        // ``decoder_layer_hidden_states_.copy_(outputs.hidden_states)``.
-        // Embedding prefill (num_tokens_per_bs_ == max_seq_len_) still needs
-        // the per-seq_len slice because its output shape is ``[seq_len, dim]``.
-        if (num_tokens_per_bs_ == max_seq_len_) {
+        // DSv4 MTP full-capacity capture returns [max_bs*num_tokens_per_bs, dim].
+        // GLM5 MTP and embedding prefill return [seq_len, dim].
+        if (!draft_prefill_full_capacity) {
             graph_instances_[seq_len].mem_hold_.decoder_layer_hidden_states_ =
                 graph_instances_[seq_len].mem_hold_.decoder_layer_hidden_states_.slice(0, 0, seq_len);
         }

@@ -1,5 +1,6 @@
 import gc
 import logging
+import os
 import threading
 import time
 from typing import TYPE_CHECKING, Optional
@@ -47,7 +48,10 @@ class BackendManager(object):
             nccl_comm_config=self._distributed_server.get_nccl_comm_config(),
         )
 
-        if engine_config.parallelism_config.world_size > 1:
+        need_dist = engine_config.parallelism_config.world_size > 1
+        if not need_dist and os.environ.get("MOE_STRATEGY") == "mega_moe":
+            need_dist = True
+        if need_dist:
             init_distributed_environment(
                 engine_config.parallelism_config,
                 nccl_comm_config=self._distributed_server.get_nccl_comm_config(),

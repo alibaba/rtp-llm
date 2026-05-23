@@ -221,3 +221,28 @@ cc_library(
     copts = cuda_copts() + common_copts,
     visibility = ["//visibility:public"],
 )
+
+# Slim subset of flashinfer that only ships the symbols RTP-LLM actually
+# calls from C++ (sampling / renorm / norm / activation in CudaSampleOp.cc and
+# RegisterBaseBindings.hpp). Skips all attention csrcs and the 11 AOT
+# cc_shared_library sub-targets, so librtp_compute_ops.so doesn't pick up the
+# libflashinfer_*.so NEEDED entries that have nowhere to live in the wheel.
+cc_library(
+    name = "flashinfer_minimal",
+    srcs = [
+        "csrc/sampling.cu",
+        "csrc/renorm.cu",
+        "csrc/norm.cu",
+        "csrc/activation.cu",
+    ] + glob([
+        "csrc/*.h",
+        "csrc/*.inc",
+    ]),
+    implementation_deps = [
+        ":dispatch",
+        ":flashinfer_hdrs",
+        ":aot_default_additional_params",
+    ],
+    copts = cuda_copts() + common_copts,
+    visibility = ["//visibility:public"],
+)

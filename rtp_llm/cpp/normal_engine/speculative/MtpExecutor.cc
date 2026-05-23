@@ -638,11 +638,15 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                                   draft_cache_layer_layout.layer_to_groups,
                                                   model_inputs_logger_));
             // Create separate model for speculative prefill with CUDA graph if enabled (from params)
-            const bool enable_cuda_graph = params.hw_kernel_config.enable_cuda_graph;
+            const bool  enable_cuda_graph      = params.hw_kernel_config.enable_cuda_graph;
+            const char* disable_sp_prefill_env = std::getenv("DISABLE_SP_PREFILL_CUDA_GRAPH");
+            const bool  disable_sp_prefill_cuda_graph =
+                disable_sp_prefill_env != nullptr && std::string(disable_sp_prefill_env) == "1";
             RTP_LLM_LOG_INFO(
-                "[speculative decoding] enable_cuda_graph=%d (set ENABLE_CUDA_GRAPH=1 when starting server to enable sp_prefill_draft_model_)",
-                static_cast<int>(enable_cuda_graph));
-            if (enable_cuda_graph) {
+                "[speculative decoding] enable_cuda_graph=%d disable_sp_prefill_cuda_graph=%d (set ENABLE_CUDA_GRAPH=1 when starting server to enable sp_prefill_draft_model_; set DISABLE_SP_PREFILL_CUDA_GRAPH=1 to skip the draft prefill CUDA graph capture only)",
+                static_cast<int>(enable_cuda_graph),
+                static_cast<int>(disable_sp_prefill_cuda_graph));
+            if (enable_cuda_graph && !disable_sp_prefill_cuda_graph) {
                 RTP_LLM_LOG_INFO(
                     "[speculative decoding] creating separate prefill draft model with CUDA graph support");
                 sp_prefill_draft_model_.reset(new PyWrappedModel(model_params,

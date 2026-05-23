@@ -14,6 +14,10 @@ _CLASS_TO_MODULE: Dict[str, str] = {
     "CosyVoiceQwen": "rtp_llm.models.cosyvoice_qwen",
     "DeepSeekV2": "rtp_llm.models.deepseek_v2",
     "DeepSeekV3Mtp": "rtp_llm.models.deepseek_v2",
+    # REBASE CONFLICT CONTEXT(e2e00e570): source branch eagerly imported
+    # `Glm5Mtp` from deepseek_v2; new base uses lazy model imports. Keep the
+    # lazy table and add the GLM5 MTP symbol here instead of restoring eager imports.
+    "Glm5Mtp": "rtp_llm.models.deepseek_v2",
     "DeepSeekV4": "rtp_llm.models.deepseek_v4",
     "DeepSeekV4Mtp": "rtp_llm.models.deepseek_v4",
     "DeepSeekVLV2": "rtp_llm.models.deepseek_vl2.deepseek_vl2",
