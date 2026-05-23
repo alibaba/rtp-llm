@@ -117,7 +117,10 @@ def cp_kv_slot_mapping(
     in_block_compressed = (positions % tokens_per_block) // ratio
     slot = block_id * kv_eb + in_block_compressed
     boundary = ((positions + 1) % ratio) == 0
-    valid = owned_mask & boundary & (block_id > 0)
+    # Align with the non-CP path (compressor.py): NULL_BLOCK_IDX is the only
+    # invalid sentinel (negative); physical block 0 is a real allocatable block
+    # and must not be filtered out here.
+    valid = owned_mask & boundary & (block_id >= 0)
     return torch.where(valid, slot, torch.full_like(slot, -1))
 
 
