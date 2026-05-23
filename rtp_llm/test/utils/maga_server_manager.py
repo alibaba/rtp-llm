@@ -288,6 +288,7 @@ class MagaServerManager(object):
         retry_times: int,
         endpoint: str = "/",
         expected_status_code: Any = 200,
+        timeout: Optional[float] = None,
     ):
         logging.info(f"retry times: {retry_times}")
         if isinstance(expected_status_code, list):
@@ -308,7 +309,7 @@ class MagaServerManager(object):
         for _ in range(retry_times):
             try:
                 logging.info(f"curl {url} -d '{json.dumps(query)}'")
-                response = requests.post(url, json=query)
+                response = requests.post(url, json=query, timeout=timeout)
                 if response.status_code in expected_status_codes:
                     logging.debug("%s", response.text)
                 else:
