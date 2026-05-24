@@ -9,6 +9,31 @@
 namespace rtp_llm {
 namespace {
 
+constexpr int32_t kDeepSeekNewlineTokenId   = 201;
+constexpr int32_t kDeepSeekBlankLineTokenId = 271;
+constexpr int32_t kQwenGlmNewlineTokenId    = 198;
+
+bool isBoundaryPaddingToken(int32_t token_id) {
+    return token_id == kDeepSeekNewlineTokenId || token_id == kDeepSeekBlankLineTokenId
+           || token_id == kQwenGlmNewlineTokenId;
+}
+
+std::vector<int> normalizeThinkEndTokenIds(const std::vector<int>& token_ids) {
+    if (token_ids.size() <= 1) {
+        return token_ids;
+    }
+
+    size_t begin = 0;
+    size_t end   = token_ids.size();
+    while (begin + 1 < end && isBoundaryPaddingToken(token_ids[begin])) {
+        ++begin;
+    }
+    while (begin + 1 < end && isBoundaryPaddingToken(token_ids[end - 1])) {
+        --end;
+    }
+    return std::vector<int>(token_ids.begin() + begin, token_ids.begin() + end);
+}
+
 std::vector<size_t> buildKmpFailureTable(const std::vector<int>& pattern) {
     std::vector<size_t> lps(pattern.size(), 0);
     size_t              len = 0;
@@ -32,8 +57,8 @@ RtpGrammarMatcher::RtpGrammarMatcher(std::shared_ptr<xgrammar::CompiledGrammar> 
                                      std::optional<std::vector<int>>            override_stop_tokens,
                                      int                                        max_rollback_tokens):
     compiled_(std::move(compiled)),
-    require_reasoning_(require_reasoning && think_end_token_ids.has_value() && !think_end_token_ids->empty()),
-    think_end_token_ids_(think_end_token_ids.value_or(std::vector<int>{})) {
+    think_end_token_ids_(normalizeThinkEndTokenIds(think_end_token_ids.value_or(std::vector<int>{}))),
+    require_reasoning_(require_reasoning && !think_end_token_ids_.empty()) {
     if (require_reasoning && think_end_token_ids_.empty()) {
         RTP_LLM_LOG_WARNING("grammar reasoning requested but think_end_token_ids is missing; using plain grammar mode");
     }

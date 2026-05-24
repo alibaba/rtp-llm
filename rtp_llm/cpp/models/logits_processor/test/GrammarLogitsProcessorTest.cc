@@ -100,6 +100,28 @@ TEST(GrammarLogitsProcessorTest, ReasoningModeWaitsForFullThinkEndSequence) {
     EXPECT_EQ(inputs.logits[0][static_cast<int>('b')].item<float>(), BaseLogitsProcessor::neg_inf);
 }
 
+TEST(GrammarLogitsProcessorTest, ReasoningModeNormalizesThinkEndPaddingTokens) {
+    constexpr int32_t kQwenGlmNewlineTokenId = 198;
+    auto              backend                = makeBackend();
+    auto              compiled               = backend.compileNow({"regex", "a"}).compiled;
+    ASSERT_TRUE(compiled);
+
+    auto matcher = backend.createMatcher(
+        compiled, true, std::vector<int>{kQwenGlmNewlineTokenId, static_cast<int>('x'), kQwenGlmNewlineTokenId});
+    matcher->initReasoning(true);
+    GrammarLogitsProcessor processor(matcher, /*eos_token_id=*/0);
+
+    processor.updateStatus(torch::tensor({{static_cast<int32_t>('x')}}, torch::kInt32), 1);
+
+    SamplerInputs inputs;
+    inputs.logits        = torch::zeros({1, 128}, torch::kFloat32);
+    inputs.finished_mask = torch::zeros({1}, torch::kBool);
+    processor.process(inputs, 0, 1);
+
+    EXPECT_GT(inputs.logits[0][static_cast<int>('a')].item<float>(), BaseLogitsProcessor::neg_inf);
+    EXPECT_EQ(inputs.logits[0][static_cast<int>('b')].item<float>(), BaseLogitsProcessor::neg_inf);
+}
+
 TEST(GrammarLogitsProcessorTest, SpeculativePrefixMasksRowsAndRollsBack) {
     auto backend  = makeBackend();
     auto compiled = backend.compileNow({"regex", "ab"}).compiled;

@@ -54,8 +54,8 @@ private:
     std::shared_ptr<xgrammar::CompiledGrammar> compiled_;
     std::unique_ptr<xgrammar::GrammarMatcher>  matcher_;
 
-    const bool             require_reasoning_;
     const std::vector<int> think_end_token_ids_;
+    const bool             require_reasoning_;
     std::vector<size_t>    think_end_lps_;
 
     // < 0: inside thinking body, parser frozen. >= 0: grammar is active.
