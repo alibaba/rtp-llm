@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <limits>
 #include <numeric>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -16,8 +17,36 @@ namespace rtp_llm {
 
 namespace {
 
-bool usePinnedCpuBackingForRegion(const CacheConfig& config, size_t gid, AllocationType allocation_type) {
-    if (allocation_type != AllocationType::DEVICE || gid >= config.group_region_names.size()) {
+const char* kvCacheRegionNameString(KVCacheRegionName region_name) {
+    switch (region_name) {
+        case KVCacheRegionName::DEFAULT:
+            return "DEFAULT";
+        case KVCacheRegionName::CSA_KV:
+            return "CSA_KV";
+        case KVCacheRegionName::HCA_KV:
+            return "HCA_KV";
+        case KVCacheRegionName::INDEXER_KV:
+            return "INDEXER_KV";
+        case KVCacheRegionName::INDEXER_STATE:
+            return "INDEXER_STATE";
+        case KVCacheRegionName::CSA_STATE:
+            return "CSA_STATE";
+        case KVCacheRegionName::HCA_STATE:
+            return "HCA_STATE";
+        case KVCacheRegionName::SWA_KV:
+            return "SWA_KV";
+        case KVCacheRegionName::REGION_COUNT:
+            return "REGION_COUNT";
+    }
+    return "UNKNOWN";
+}
+
+bool usePinnedCpuBackingForRegion(const CacheConfig& config,
+                                  size_t             gid,
+                                  AllocationType     allocation_type,
+                                  RoleType           role_type) {
+    if (allocation_type != AllocationType::DEVICE || role_type != RoleType::PREFILL
+        || gid >= config.group_region_names.size()) {
         return false;
     }
 
@@ -31,8 +60,9 @@ bool usePinnedCpuBackingForRegion(const CacheConfig& config, size_t gid, Allocat
 HybridPoolKVCacheAllocator::HybridPoolKVCacheAllocator(const CacheConfig&                 config,
                                                        AllocationType                     allocation_type,
                                                        const kmonitor::MetricsReporterPtr metrics_reporter,
-                                                       int64_t                            reserve_block_ratio):
-    HybridKVCacheAllocator(config, allocation_type, metrics_reporter, reserve_block_ratio) {}
+                                                       int64_t                            reserve_block_ratio,
+                                                       RoleType                           role_type):
+    HybridKVCacheAllocator(config, allocation_type, metrics_reporter, reserve_block_ratio), role_type_(role_type) {}
 
 bool HybridPoolKVCacheAllocator::doInit() {
     RTP_LLM_CHECK_WITH_INFO(!config_.cache_specs.empty(), "no cache_specs found in CacheConfig");
@@ -54,8 +84,18 @@ bool HybridPoolKVCacheAllocator::doInit() {
         const auto group_type = config_.group_types[static_cast<size_t>(gid)];
 
         auto pool_config = BlockPoolConfigHelper::createConfigForGroup(config_, static_cast<size_t>(gid));
-        auto group_pool = std::make_shared<BlockPool>(
-            pool_config, allocation_type_, usePinnedCpuBackingForRegion(config_, static_cast<size_t>(gid), allocation_type_));
+        if (static_cast<size_t>(gid) < config_.group_region_names.size()) {
+            const auto region_name = config_.group_region_names[static_cast<size_t>(gid)];
+            pool_config.pool_name =
+                "group[" + std::to_string(gid) + "]/" + kvCacheRegionNameString(region_name);
+        } else {
+            pool_config.pool_name = "group[" + std::to_string(gid) + "]/UNKNOWN";
+        }
+        auto group_pool =
+            std::make_shared<BlockPool>(pool_config,
+                                        allocation_type_,
+                                        usePinnedCpuBackingForRegion(
+                                            config_, static_cast<size_t>(gid), allocation_type_, role_type_));
         RTP_LLM_CHECK_WITH_INFO(group_pool->init(), "Failed to initialize block pool for group %d", gid);
 
         const auto& ids  = config_.global_layer_ids[static_cast<size_t>(gid)];

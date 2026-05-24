@@ -218,6 +218,44 @@ TEST_F(KVCacheManagerTest, WarmupConfigSmoke) {
     EXPECT_EQ(cache_manager->freeBlocksNum(), 0);
 }
 
+TEST_F(KVCacheManagerTest, DSV4IndependentPoolsUsePrefillPinnedCpuBackingOnly) {
+    auto expect_pool_backing = [](RoleType role_type, bool expect_state_cpu) {
+        auto config = makeCompactDSV4ManagerConfig(/*block_num=*/8);
+
+        PDSepConfig pd_sep_config;
+        pd_sep_config.role_type = role_type;
+        auto cache_manager      = std::make_shared<KVCacheManager>(config,
+                                                               /*warmup=*/false,
+                                                               nullptr,
+                                                               KVCacheConfig{},
+                                                               ParallelismConfig{},
+                                                               RuntimeConfig{},
+                                                               SpeculativeExecutionConfig{},
+                                                               pd_sep_config);
+        ASSERT_TRUE(cache_manager->init());
+
+        auto allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(cache_manager->allocator_);
+        ASSERT_NE(allocator, nullptr);
+        ASSERT_EQ(allocator->groupBlockPools().size(), config.group_region_names.size());
+
+        for (size_t gid = 0; gid < allocator->groupBlockPools().size(); ++gid) {
+            const auto region_name = config.group_region_names[gid];
+            const bool state_region = region_name == KVCacheRegionName::INDEXER_STATE
+                                      || region_name == KVCacheRegionName::CSA_STATE
+                                      || region_name == KVCacheRegionName::HCA_STATE;
+            const auto expected =
+                (expect_state_cpu && state_region) ? MemoryType::MEMORY_CPU_PINNED : MemoryType::MEMORY_GPU;
+            EXPECT_EQ(allocator->groupBlockPools()[gid]->where(), expected)
+                << "role=" << static_cast<int>(role_type) << " gid=" << gid
+                << " region=" << static_cast<int>(region_name);
+        }
+    };
+
+    expect_pool_backing(RoleType::PREFILL, true);
+    expect_pool_backing(RoleType::DECODE, false);
+    expect_pool_backing(RoleType::PDFUSION, false);
+}
+
 TEST_F(KVCacheManagerTest, MetricsThreadSmoke) {
     auto cache_config = makeSimpleMhaCacheConfig(
         /*layer_num=*/1, /*block_num=*/4, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_INT8);

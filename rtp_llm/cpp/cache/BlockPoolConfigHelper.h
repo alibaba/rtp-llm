@@ -3,6 +3,8 @@
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfig.h"
 
+#include <string>
+
 namespace rtp_llm {
 
 class BlockPoolConfigHelper {
@@ -18,6 +20,7 @@ public:
     static BlockPoolConfig createConfig(const CacheConfig& cache_config) {
         RTP_LLM_CHECK_WITH_INFO(!cache_config.cache_specs.empty(), "cache_specs must not be empty");
         BlockPoolConfig config;
+        config.pool_name      = "default";
         config.block_num      = cache_config.block_num;
         const bool  is_hybrid = cache_config.groupNums() > 1;
         auto        layer_num = is_hybrid ? cache_config.group_layer_num : cache_config.layer_num;
@@ -92,6 +95,7 @@ public:
         RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "cache_specs[%zu] is null", group_id);
 
         BlockPoolConfig config;
+        config.pool_name = "group_" + std::to_string(group_id);
         const bool      has_group_blocks =
             group_id < cache_config.group_block_nums.size() && cache_config.group_block_nums[group_id] > 0;
         config.block_num = has_group_blocks ? cache_config.group_block_nums[group_id] : cache_config.block_num;
@@ -139,6 +143,7 @@ public:
     static BlockPoolConfig
     createConfig(uint32_t layer_num, uint32_t block_num, size_t block_stride_bytes, rtp_llm::DataType dtype) {
         BlockPoolConfig config;
+        config.pool_name = "memory_connector";
         config.block_num = block_num;
 
         MemoryLayoutConfig layout_cfg;

@@ -22,6 +22,37 @@ namespace rtp_llm {
 
 namespace {
 
+bool shouldPinHostBlockPool();
+
+const char* allocationTypeName(AllocationType allocation_type) {
+    switch (allocation_type) {
+        case AllocationType::HOST:
+            return "HOST";
+        case AllocationType::DEVICE:
+            return "DEVICE";
+    }
+    return "UNKNOWN";
+}
+
+const char* memoryTypeName(MemoryType memory_type) {
+    switch (memory_type) {
+        case MemoryType::MEMORY_CPU:
+            return "CPU";
+        case MemoryType::MEMORY_CPU_PINNED:
+            return "CPU_PINNED";
+        case MemoryType::MEMORY_GPU:
+            return "GPU";
+    }
+    return "UNKNOWN";
+}
+
+const char* requestedBackingName(AllocationType allocation_type, bool use_pinned_cpu_backing) {
+    if (allocation_type == AllocationType::HOST) {
+        return shouldPinHostBlockPool() ? "CPU_PINNED_OR_CPU_FALLBACK" : "CPU";
+    }
+    return use_pinned_cpu_backing ? "CPU_PINNED" : "GPU";
+}
+
 bool shouldPinHostBlockPool() {
     const char* value = std::getenv("RTP_LLM_PIN_HOST_BLOCK_POOL");
     if (value == nullptr) {
@@ -128,20 +159,34 @@ void BlockPool::initializeCacheBuffer() {
     }
     cache_base_ptr_ = cache_aligned_buffer_.data_ptr();
     RTP_LLM_CHECK_WITH_INFO(cache_base_ptr_ != nullptr, "block pool allocate cache aligned buffer is null");
+    const bool is_cuda   = cache_aligned_buffer_.is_cuda();
+    const bool is_pinned = !is_cuda && cache_aligned_buffer_.is_pinned();
+    RTP_LLM_LOG_INFO("BlockPool backing selected: pool_name=%s allocation_type=%s requested_backing=%s "
+                     "actual_backing=%s is_cuda=%d is_pinned=%d ptr=%p total_size=%zu bytes block_num=%u "
+                     "memory_layouts=%zu",
+                     config_.pool_name.c_str(),
+                     allocationTypeName(allocation_type_),
+                     requestedBackingName(allocation_type_, use_pinned_cpu_backing_),
+                     memoryTypeName(where()),
+                     is_cuda,
+                     is_pinned,
+                     cache_base_ptr_,
+                     config_.total_size_bytes,
+                     config_.block_num,
+                     config_.memory_layouts.size());
 }
 
 void BlockPool::initializePinnedCpuBuffer(const char* log_context) {
-    RTP_LLM_LOG_WARNING("%s, total_size=%zu bytes", log_context, config_.total_size_bytes);
+    RTP_LLM_LOG_WARNING("%s, pool_name=%s, total_size=%zu bytes",
+                        log_context,
+                        config_.pool_name.c_str(),
+                        config_.total_size_bytes);
     auto cpu_buffer = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
                                    torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
     try {
         cache_aligned_buffer_ = cpu_buffer.pin_memory();
     } catch (const std::exception& e) {
-        RTP_LLM_LOG_WARNING("%s pin failed, fallback to pageable CPU memory, total_size=%zu bytes, error=%s",
-                            log_context,
-                            config_.total_size_bytes,
-                            e.what());
-        cache_aligned_buffer_ = std::move(cpu_buffer);
+        RTP_LLM_FAIL("%s pin failed, total_size=%zu bytes, error=%s", log_context, config_.total_size_bytes, e.what());
     }
 }
 
@@ -434,6 +479,7 @@ void BlockPool::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_sto
     if (cache_store_ && !kvcache_reg_mr_) {
         RTP_LLM_LOG_INFO("start to register user mr");
         auto memory_util = cache_store_->getMemoryUtil();
+        const bool gpu = where() == MemoryType::MEMORY_GPU;
 
         for (size_t layout_idx = 0; layout_idx < config_.memory_layouts.size(); ++layout_idx) {
             const auto& layout_cfg = config_.memory_layouts[layout_idx];
@@ -444,6 +490,7 @@ void BlockPool::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_sto
                                     layout_cfg.kv_cache_offset_bytes,
                                     layout_cfg.kv_block_pool_size_bytes,
                                     layout_cfg.kv_block_stride_bytes,
+                                    gpu,
                                     "kv");
 
             // Register scale buffer if present
@@ -453,6 +500,7 @@ void BlockPool::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_sto
                                         layout_cfg.kv_scale_offset_bytes,
                                         layout_cfg.kv_scale_pool_size_bytes,
                                         layout_cfg.kv_scale_stride_bytes,
+                                        gpu,
                                         "scale");
             }
         }
@@ -465,16 +513,17 @@ void BlockPool::deregUserMr() {
     if (kvcache_reg_mr_ && cache_store_) {
         RTP_LLM_LOG_INFO("start to deregister user mr");
         auto memory_util = cache_store_->getMemoryUtil();
+        const bool gpu = where() == MemoryType::MEMORY_GPU;
 
         for (size_t layout_idx = 0; layout_idx < config_.memory_layouts.size(); ++layout_idx) {
             const auto& layout_cfg = config_.memory_layouts[layout_idx];
 
             // Deregister KV buffer
-            deregisterUserMrForBuffer(memory_util, layout_idx, layout_cfg.kv_cache_offset_bytes, "kv");
+            deregisterUserMrForBuffer(memory_util, layout_idx, layout_cfg.kv_cache_offset_bytes, gpu, "kv");
 
             // Deregister scale buffer if present
             if (layout_cfg.hasScale()) {
-                deregisterUserMrForBuffer(memory_util, layout_idx, layout_cfg.kv_scale_offset_bytes, "scale");
+                deregisterUserMrForBuffer(memory_util, layout_idx, layout_cfg.kv_scale_offset_bytes, gpu, "scale");
             }
         }
 
@@ -488,11 +537,12 @@ void BlockPool::registerUserMrForBuffer(std::shared_ptr<rtp_llm::MemoryUtil> mem
                                         size_t                               offset_bytes,
                                         size_t                               bytes,
                                         size_t                               stride_bytes,
+                                        bool                                 gpu,
                                         const std::string&                   buffer_type) {
     void* base_ptr = static_cast<void*>(static_cast<char*>(cache_base_ptr_) + static_cast<ptrdiff_t>(offset_bytes));
     auto  start_us = currentTimeUs();
 
-    if (!memory_util->regUserMr(base_ptr, bytes, true, stride_bytes)) {
+    if (!memory_util->regUserMr(base_ptr, bytes, gpu, stride_bytes)) {
         RTP_LLM_FAIL("register user mr for block pool layout[%zu] %s buffer failed", layout_idx, buffer_type.c_str());
     }
 
@@ -511,10 +561,11 @@ void BlockPool::registerUserMrForBuffer(std::shared_ptr<rtp_llm::MemoryUtil> mem
 void BlockPool::deregisterUserMrForBuffer(std::shared_ptr<rtp_llm::MemoryUtil> memory_util,
                                           size_t                               layout_idx,
                                           size_t                               offset_bytes,
+                                          bool                                 gpu,
                                           const std::string&                   buffer_type) {
     void* base_ptr = static_cast<void*>(static_cast<char*>(cache_base_ptr_) + static_cast<ptrdiff_t>(offset_bytes));
 
-    if (!memory_util->deregUserMr(base_ptr, true)) {
+    if (!memory_util->deregUserMr(base_ptr, gpu)) {
         RTP_LLM_FAIL("deregister user mr for block pool layout[%zu] %s buffer failed", layout_idx, buffer_type.c_str());
     }
 }

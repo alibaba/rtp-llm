@@ -761,7 +761,8 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                         RTP_LLM_CHECK_WITH_INFO(block.addr != nullptr, "null block addr for key=%s", key.c_str());
                         RTP_LLM_CHECK_WITH_INFO(block.size_bytes > 0, "zero block size for key=%s", key.c_str());
                         std::shared_ptr<void> addr(block.addr, [](void*) {});
-                        load_layer_cache->addBlock(key, addr, static_cast<uint32_t>(block.size_bytes), true, true);
+                        load_layer_cache->addBlock(
+                            key, addr, static_cast<uint32_t>(block.size_bytes), block.is_cuda, true);
                     };
 
                     if (use_mla || use_opaque_kv_store) {
@@ -901,7 +902,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                         block.size_bytes > 0, "zero block size for key=%s", key.c_str());
                                     std::shared_ptr<void> addr(block.addr, [](void*) {});
                                     load_layer_cache->addBlock(
-                                        key, addr, static_cast<uint32_t>(block.size_bytes), true, true);
+                                        key, addr, static_cast<uint32_t>(block.size_bytes), block.is_cuda, true);
                                 };
 
                                 if (mtp_use_mla || mtp_use_opaque_kv_store) {
