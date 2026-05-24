@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/connector/memory/KVCacheMemoryConnector.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 
@@ -685,15 +686,8 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
             }
 
             if (success) {
-                for (const auto& copy_info : copy_plan->copy_infos) {
-                    MemoryDiskBlockCache::CacheItem item;
-                    item.cache_key    = copy_info.cache_key;
-                    item.backing_type = copy_info.backing_type;
-                    item.block_index  = copy_info.mem_block;
-                    item.disk_slot    = copy_info.disk_slot;
-                    item.is_resident  = false;
-                    item.is_complete  = copy_info.is_complete;
-                    putToCache(item);
+                for (auto& copy_info : copy_plan->copy_infos) {
+                    putToCache(copy_info);
                 }
             }
             // reset resource to decrease block ref count in destructor
@@ -789,11 +783,13 @@ KVCacheMemoryConnector::createCopyPlan(const std::vector<CopyInfoPerKey>& copy_i
     plan->direction  = direction;
     auto deleter     = [this](CopyPlan* plan) {
         for (const auto& copy_info : plan->copy_infos) {
+            if (!copy_info.request_released) {
+                releaseRequestBacking(copy_info);
+            }
             if (plan->direction == CopyDirection::H2D) {
                 block_cache_->releaseInFlight(
                     copy_info.cache_key, copy_info.backing_type, copy_info.mem_block, copy_info.disk_slot);
             }
-            releaseRequestBacking(copy_info);
         }
         delete plan;
     };
@@ -829,7 +825,9 @@ KVCacheMemoryConnector::sendCopyPlan(const std::shared_ptr<CopyPlan>& copy_plan)
         item->set_mem_block(copy_info.mem_block);
         item->set_backing_type(copy_info.backing_type == CacheBackingType::MEMORY ? MemoryOperationRequestPB::MEMORY :
                                                                                     MemoryOperationRequestPB::DISK);
-        item->set_disk_slot(copy_info.disk_slot);
+        if (copy_info.backing_type == CacheBackingType::DISK) {
+            item->set_disk_slot(copy_info.disk_slot);
+        }
         for (const auto& block : copy_info.gpu_blocks) {
             item->add_gpu_blocks(block);
         }
@@ -989,12 +987,23 @@ bool KVCacheMemoryConnector::copyMemoryItemsGeneric(const MemoryOperationRequest
 bool KVCacheMemoryConnector::copyDiskItems(const MemoryOperationRequestPB&     request,
                                            CopyDirection                       direction,
                                            const std::vector<LayerRegionSlot>& slots) {
+    void*        raw_buffer   = nullptr;
+    const size_t stride_bytes = disk_block_pool_ ? disk_block_pool_->slotStrideBytes() : 0;
+    if (stride_bytes == 0) {
+        return false;
+    }
+    if (::posix_memalign(&raw_buffer, 4096, stride_bytes) != 0 || raw_buffer == nullptr) {
+        RTP_LLM_LOG_WARNING("allocate disk staging buffer failed, bytes=%zu", stride_bytes);
+        return false;
+    }
+    std::unique_ptr<void, decltype(&std::free)> staging(raw_buffer, &std::free);
+
     for (int i = 0; i < request.copy_items_size(); ++i) {
         const auto& item = request.copy_items(i);
         if (item.backing_type() != MemoryOperationRequestPB::DISK) {
             continue;
         }
-        if (!copyDiskItem(item, direction, slots)) {
+        if (!copyDiskItem(item, direction, slots, raw_buffer)) {
             return false;
         }
     }
@@ -1003,19 +1012,19 @@ bool KVCacheMemoryConnector::copyDiskItems(const MemoryOperationRequestPB&     r
 
 bool KVCacheMemoryConnector::copyDiskItem(const MemoryOperationRequestPB::CopyItem& item,
                                           CopyDirection                             direction,
-                                          const std::vector<LayerRegionSlot>&       slots) {
+                                          const std::vector<LayerRegionSlot>&       slots,
+                                          void*                                     raw_buffer) {
     if (!disk_block_pool_ || item.gpu_blocks_size() != static_cast<int>(slots.size())) {
         return false;
     }
 
-    void*        raw_buffer   = nullptr;
     const size_t stride_bytes = disk_block_pool_->slotStrideBytes();
-    if (::posix_memalign(&raw_buffer, 4096, stride_bytes) != 0 || raw_buffer == nullptr) {
-        RTP_LLM_LOG_WARNING("allocate disk staging buffer failed, bytes=%zu", stride_bytes);
+    if (raw_buffer == nullptr || stride_bytes == 0) {
         return false;
     }
-    std::unique_ptr<void, decltype(&std::free)> staging(raw_buffer, &std::free);
-    std::memset(raw_buffer, 0, stride_bytes);
+    if (direction == CopyDirection::D2H) {
+        std::memset(raw_buffer, 0, stride_bytes);
+    }
 
     const auto disk_slot = item.disk_slot();
     if (direction == CopyDirection::H2D && !disk_block_pool_->read(disk_slot, raw_buffer, stride_bytes)) {
@@ -1627,21 +1636,48 @@ void KVCacheMemoryConnector::putToCache(const MemoryBlockCache::CacheItem& item)
     putToCache(new_item);
 }
 
-void KVCacheMemoryConnector::putToCache(const MemoryDiskBlockCache::CacheItem& item) {
-    RTP_LLM_PROFILE_FUNCTION();
-    if (auto [success, popped_item_opt] = block_cache_->putCommitted(item); success) {
-        RTP_LLM_LOG_DEBUG("write cache, cache key: %ld, backing: %d, block index: %d, disk slot: %d, block size: %zu",
-                          item.cache_key,
-                          static_cast<int>(item.backing_type),
-                          item.block_index,
-                          item.disk_slot,
-                          item.block_size);
-        referenceCacheBacking(item);
-        if (popped_item_opt.has_value()) {
-            const auto popped_item = popped_item_opt.value();
-            releaseCacheBacking(popped_item);
-        }
+void KVCacheMemoryConnector::putToCache(CopyInfoPerKey& copy_info) {
+    MemoryDiskBlockCache::CacheItem item;
+    item.cache_key    = copy_info.cache_key;
+    item.backing_type = copy_info.backing_type;
+    item.block_index  = copy_info.mem_block;
+    item.disk_slot    = copy_info.disk_slot;
+    item.is_resident  = false;
+    item.is_complete  = copy_info.is_complete;
+
+    referenceCacheBacking(item);
+    // Transfer the write request ref to the cache ref before the item enters the
+    // LRU, so any immediate eviction can actually reclaim the backing.
+    releaseRequestBacking(copy_info);
+    copy_info.request_released = true;
+
+    if (!putToCache(item, /*already_has_cache_ref=*/true)) {
+        return;
     }
+}
+
+bool KVCacheMemoryConnector::putToCache(const MemoryDiskBlockCache::CacheItem& item, bool already_has_cache_ref) {
+    RTP_LLM_PROFILE_FUNCTION();
+    if (!already_has_cache_ref) {
+        referenceCacheBacking(item);
+    }
+    auto [success, popped_item_opt] = block_cache_->putCommitted(item);
+    if (!success) {
+        releaseCacheBacking(item);
+        return false;
+    }
+
+    RTP_LLM_LOG_DEBUG("write cache, cache key: %ld, backing: %d, block index: %d, disk slot: %d, block size: %zu",
+                      item.cache_key,
+                      static_cast<int>(item.backing_type),
+                      item.block_index,
+                      item.disk_slot,
+                      item.block_size);
+    if (popped_item_opt.has_value()) {
+        const auto popped_item = popped_item_opt.value();
+        releaseCacheBacking(popped_item);
+    }
+    return true;
 }
 
 int64_t KVCacheMemoryConnector::copyPlanTimeoutMs(const std::shared_ptr<CopyPlan>& copy_plan) const {
@@ -1784,8 +1820,9 @@ void KVCacheMemoryConnector::reportDiskCopyMetrics(bool success, int64_t latency
 }
 
 void KVCacheMemoryConnector::reportMetricsLoop() {
-    size_t last_disk_read_bytes  = 0;
-    size_t last_disk_write_bytes = 0;
+    size_t                           last_disk_read_bytes  = 0;
+    size_t                           last_disk_write_bytes = 0;
+    std::chrono::steady_clock::time_point last_disk_metrics_time = std::chrono::steady_clock::now();
     while (!stop_.load()) {
         if (metrics_reporter_) {
             if (!block_pool_) {
@@ -1810,6 +1847,10 @@ void KVCacheMemoryConnector::reportMetricsLoop() {
                 const auto available_disk_slots = disk_block_pool_->availableSlots();
                 const auto read_bytes           = disk_block_pool_->readBytes();
                 const auto write_bytes          = disk_block_pool_->writeBytes();
+                const auto now                  = std::chrono::steady_clock::now();
+                const auto elapsed_us =
+                    std::chrono::duration_cast<std::chrono::microseconds>(now - last_disk_metrics_time).count();
+                const double elapsed_sec = elapsed_us > 0 ? static_cast<double>(elapsed_us) / 1000000.0 : 1.0;
 
                 RtpLLMDiskCacheStatusMetricsCollector disk_collector;
                 disk_collector.total_block_num     = total_disk_slots;
@@ -1818,12 +1859,15 @@ void KVCacheMemoryConnector::reportMetricsLoop() {
                 disk_collector.in_flight_block_num = static_cast<int64_t>(total_disk_slots - available_disk_slots);
                 disk_collector.read_bytes          = read_bytes;
                 disk_collector.write_bytes         = write_bytes;
-                disk_collector.read_bandwidth =
-                    read_bytes >= last_disk_read_bytes ? read_bytes - last_disk_read_bytes : 0;
-                disk_collector.write_bandwidth =
-                    write_bytes >= last_disk_write_bytes ? write_bytes - last_disk_write_bytes : 0;
-                last_disk_read_bytes  = read_bytes;
-                last_disk_write_bytes = write_bytes;
+                const auto read_delta =
+                    read_bytes >= last_disk_read_bytes ? read_bytes - last_disk_read_bytes : static_cast<size_t>(0);
+                const auto write_delta =
+                    write_bytes >= last_disk_write_bytes ? write_bytes - last_disk_write_bytes : static_cast<size_t>(0);
+                disk_collector.read_bandwidth  = static_cast<int64_t>(static_cast<double>(read_delta) / elapsed_sec);
+                disk_collector.write_bandwidth = static_cast<int64_t>(static_cast<double>(write_delta) / elapsed_sec);
+                last_disk_read_bytes           = read_bytes;
+                last_disk_write_bytes          = write_bytes;
+                last_disk_metrics_time         = now;
 
                 metrics_reporter_->report<RtpLLMDiskCacheMetrics, RtpLLMDiskCacheStatusMetricsCollector>(
                     nullptr, &disk_collector);

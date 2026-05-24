@@ -78,6 +78,7 @@ private:
         int32_t                   disk_slot{-1};
         std::vector<BlockIdxType> gpu_blocks;
         bool                      is_complete{true};
+        bool                      request_released{false};
     };
     enum class CopyDirection {
         H2D = 0,
@@ -129,7 +130,8 @@ private:
                                            const std::vector<LayerRegionSlot>& slots);
     bool                     copyDiskItem(const MemoryOperationRequestPB::CopyItem& item,
                                           CopyDirection                             direction,
-                                          const std::vector<LayerRegionSlot>&       slots);
+                                          const std::vector<LayerRegionSlot>&       slots,
+                                          void*                                     staging_buffer);
     bool                     copyMemoryItemsGeneric(const MemoryOperationRequestPB&     request,
                                                     CopyDirection                       direction,
                                                     const std::vector<LayerRegionSlot>& slots);
@@ -168,7 +170,9 @@ private:
     std::string                blockPoolDebugString() const;
     size_t                     memoryCacheBlockSizeBytes() const;
     void                       putToCache(const MemoryBlockCache::CacheItem& item);
-    void                       putToCache(const MemoryDiskBlockCache::CacheItem& item);
+    void                       putToCache(CopyInfoPerKey& copy_info);
+    bool                       putToCache(const MemoryDiskBlockCache::CacheItem& item,
+                                          bool                                   already_has_cache_ref = false);
 
     void reportMatchMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t matched_block_num);
     void reportReadMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t read_block_num);
