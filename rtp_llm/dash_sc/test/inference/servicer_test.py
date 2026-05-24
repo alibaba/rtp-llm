@@ -563,7 +563,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         )
 
         phase2_chunks = [c for c in chunks if c.infer_response.id.endswith("-2")]
-        self.assertEqual(visitor.generate_inputs[0].generate_config.max_new_tokens, 12)
+        self.assertEqual(visitor.generate_inputs[0].generate_config.max_new_tokens, 2)
         self.assertEqual(visitor.generate_inputs[1].generate_config.max_new_tokens, 2)
         self.assertEqual(len(phase2_chunks), 1)
         self.assertEqual(_gen_ids(phase2_chunks[0]), [20, 21])
@@ -618,7 +618,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        self.assertEqual(visitor.generate_inputs[0].generate_config.max_new_tokens, 105)
+        self.assertEqual(visitor.generate_inputs[0].generate_config.max_new_tokens, 100)
         self.assertEqual(visitor.generate_inputs[1].generate_config.max_new_tokens, 95)
         self.assertEqual(
             chunks[1].infer_response.parameters["generate_think_token_num"].int64_param,
@@ -1402,6 +1402,35 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(responses), 1)
         self.assertIn("max_new_tokens", responses[0].error_message)
 
+    async def test_openai_compat_max_new_tokens_negative_uses_default(
+        self,
+    ) -> None:
+        out = GenerateOutput(
+            output_ids=torch.tensor([9], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(input_len=1, reuse_len=0),
+        )
+        visitor = _FakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
+        )
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+        req = self._valid_infer_request()
+        req.parameters["ds_header_attributes"].string_param = json.dumps(
+            {"x-envoy-original-path": "/compatible-mode/v1/chat/completions"}
+        )
+        _add_input_tensor(req, "max_new_tokens", "INT32", [1], struct.pack("<i", -1))
+
+        responses = await _drain(
+            servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
+        )
+
+        self.assertEqual(visitor.enqueue_called, 1)
+        self.assertEqual(len(responses), 1)
+        self.assertEqual(
+            visitor.last_generate_input.generate_config.max_new_tokens,
+            32000,
+        )
+
     async def test_max_completion_tokens_non_positive_uses_default_repro(
         self,
     ) -> None:
@@ -1431,7 +1460,48 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
                     32000,
                 )
 
-    async def test_max_completion_tokens_thinking_budget_extends_backend_limit_repro(
+    async def test_max_completion_tokens_non_positive_blocks_legacy_aliases(
+        self,
+    ) -> None:
+        for value in (-1, 0):
+            with self.subTest(value=value):
+                out = GenerateOutput(
+                    output_ids=torch.tensor([9], dtype=torch.int32),
+                    finished=True,
+                    aux_info=AuxInfo(input_len=1, reuse_len=0),
+                )
+                visitor = _FakeVisitor(
+                    _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
+                )
+                servicer = DashScInferenceServicer(backend_visitor=visitor)
+                req = self._valid_infer_request()
+                _add_input_tensor(
+                    req,
+                    "max_completion_tokens",
+                    "INT32",
+                    [1],
+                    struct.pack("<i", value),
+                )
+                _add_input_tensor(
+                    req,
+                    "max_new_tokens",
+                    "INT32",
+                    [1],
+                    struct.pack("<i", -1),
+                )
+
+                responses = await _drain(
+                    servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
+                )
+
+                self.assertEqual(visitor.enqueue_called, 1)
+                self.assertEqual(len(responses), 1)
+                self.assertEqual(
+                    visitor.last_generate_input.generate_config.max_new_tokens,
+                    32000,
+                )
+
+    async def test_max_completion_tokens_thinking_budget_keeps_backend_limit_repro(
         self,
     ) -> None:
         visitor = _FakeVisitor(_FakeAsyncStream([]))
@@ -1447,7 +1517,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(visitor.enqueue_called, 1)
         self.assertEqual(
             visitor.last_generate_input.generate_config.max_new_tokens,
-            110,
+            100,
         )
 
     async def test_real_mode_request_id_matches_generate_request_id(self) -> None:

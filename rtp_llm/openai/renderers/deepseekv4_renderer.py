@@ -63,7 +63,9 @@ def _split_content_left_in_reasoning(
     reasoning_content: str,
     content: str,
 ) -> Tuple[str, str]:
-    if content or not reasoning_content:
+    if content:
+        return reasoning_content, _strip_leading_repeated_think_end(content)
+    if not reasoning_content:
         return reasoning_content, content
 
     think_end = "</think>"
@@ -72,8 +74,20 @@ def _split_content_left_in_reasoning(
         return reasoning_content, content
 
     reasoning_text = reasoning_content[:idx].replace("<think>", "").rstrip()
-    content_text = reasoning_content[idx + len(think_end) :].lstrip()
+    content_text = _strip_leading_repeated_think_end(
+        reasoning_content[idx + len(think_end) :].lstrip()
+    )
     return reasoning_text, content_text
+
+
+def _strip_leading_repeated_think_end(text: str) -> str:
+    think_end = "</think>"
+    candidate = text.lstrip()
+    if not candidate.startswith(think_end):
+        return text
+    while candidate.startswith(think_end):
+        candidate = candidate[len(think_end) :].lstrip()
+    return candidate
 
 
 def _longest_suffix_prefix(text: str, tokens: list[str]) -> int:

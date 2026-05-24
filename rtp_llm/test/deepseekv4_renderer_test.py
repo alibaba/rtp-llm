@@ -649,6 +649,38 @@ class DeepseekV4ReasoningToolPipelineTest(IsolatedAsyncioTestCase):
         self.assertEqual(delta.output_str.reasoning_content, "Let me compare.")
         self.assertEqual(delta.output_str.content, "9.9更大。")
 
+    async def test_full_completion_parser_drops_repeated_leading_think_end(
+        self,
+    ):
+        class FullCompletionEncoding:
+            def parse_message_from_completion_text(self, text, thinking_mode):
+                return {
+                    "role": "assistant",
+                    "content": "</think></think>春天来了。",
+                    "reasoning_content": "短思考",
+                }
+
+        renderer = _make_renderer(FullCompletionEncoding())
+        renderer._generate_log_probs = AsyncMock(return_value=None)
+        request = ChatCompletionRequest(
+            messages=[{"role": "user", "content": "写春天"}],
+            chat_template_kwargs={"enable_thinking": True},
+        )
+        status = ReasoningToolStreamStatus(
+            request,
+            None,
+            ReasoningParser(model_type="deepseek-v3", force_reasoning=True),
+        )
+        status.delta_output_string = "短思考</think></think>春天来了。"
+
+        delta = await renderer._process_reasoning_and_tool_calls(
+            status, self._output(), is_streaming=False
+        )
+
+        self.assertIsNotNone(delta)
+        self.assertEqual(delta.output_str.reasoning_content, "短思考")
+        self.assertEqual(delta.output_str.content, "春天来了。")
+
     async def test_full_completion_parser_parses_dsml_left_in_reasoning(
         self,
     ):
