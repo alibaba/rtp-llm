@@ -2,6 +2,9 @@
 
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/DFAUtil.h"
+#include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
+#include <atomic>
+#include <memory>
 #include <mutex>
 
 namespace rtp_llm {
@@ -48,7 +51,7 @@ struct StreamThinkInfo {
         }
     }
 
-    StreamThinkInfo copy() {
+    StreamThinkInfo copy() const {
         StreamThinkInfo think_info;
         think_info.in_think_mode                      = in_think_mode;
         think_info.max_thinking_tokens                = max_thinking_tokens;
@@ -66,7 +69,13 @@ struct StreamThinkInfo {
     }
 };
 
-class ThinkModeLogitsProcessor: public BaseLogitsProcessor {
+struct ThinkModeSpecSnapshot {
+    bool            eligible = false;
+    StreamThinkInfo info;
+    uint64_t        version = 0;
+};
+
+class ThinkModeLogitsProcessor: public BaseLogitsProcessor, public SpecLogitsProcessor {
 public:
     ThinkModeLogitsProcessor() = default;
     ThinkModeLogitsProcessor(std::vector<StreamThinkInfo> think_infos);
@@ -80,6 +89,8 @@ public:
     void process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) override;
     void updateMultiSeqStatus(const std::vector<int>& src_batch_indices) override;
     void updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) override;
+    bool isSpecVerifyEligible() const override;
+    int  tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) override;
 
 private:
     bool forceThinkEndToken(const torch::Tensor& new_tokens_logits, StreamThinkInfo& info, size_t vocab_size);
@@ -94,12 +105,18 @@ public:
         if (others != nullptr) {
             std::lock_guard<std::mutex> lock(mutex_);
             think_infos_.insert(think_infos_.end(), others->think_infos_.begin(), others->think_infos_.end());
+            publishSpecSnapshotLocked();
         }
     }
 
 private:
-    std::vector<StreamThinkInfo> think_infos_;
-    mutable std::mutex           mutex_;
+    void publishSpecSnapshotLocked();
+
+private:
+    std::vector<StreamThinkInfo>                 think_infos_;
+    mutable std::mutex                           mutex_;
+    std::shared_ptr<const ThinkModeSpecSnapshot> spec_snapshot_;
+    uint64_t                                     spec_snapshot_version_ = 0;
 };
 typedef std::shared_ptr<ThinkModeLogitsProcessor> ThinkModeLogitsProcessorPtr;
 

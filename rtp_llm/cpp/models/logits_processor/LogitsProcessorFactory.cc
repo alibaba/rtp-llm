@@ -185,8 +185,10 @@ BaseLogitsProcessorPtr createGrammarProcessor(std::shared_ptr<GenerateInput>    
         backend->setCache(key, compiled);
     }
 
-    const bool require_reasoning = config->in_think_mode;
-    auto       matcher           = backend->createMatcher(compiled, require_reasoning, config->end_think_token_ids);
+    const bool require_reasoning            = config->in_think_mode;
+    const bool terminate_without_stop_token = key.key_type == "json";
+    auto       matcher =
+        backend->createMatcher(compiled, require_reasoning, config->end_think_token_ids, terminate_without_stop_token);
     matcher->initReasoning(require_reasoning);
     return std::make_shared<GrammarLogitsProcessor>(std::move(matcher), eos_token_id, std::move(error_reporter));
 }

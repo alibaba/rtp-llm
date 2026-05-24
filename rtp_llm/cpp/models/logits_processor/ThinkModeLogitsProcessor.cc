@@ -98,10 +98,125 @@ void maskThinkBoundaryTokens(const torch::Tensor& new_tokens_logits, size_t voca
     maskToken(new_tokens_logits, vocab_size, firstTokenOrInvalid(info.end_think_token_ids));
 }
 
+void clearTokenFromBitmask(int32_t* row, size_t words, int32_t token_id) {
+    if (token_id < 0 || static_cast<size_t>(token_id / 32) >= words) {
+        return;
+    }
+    row[token_id / 32] &= ~(1u << (token_id % 32));
+}
+
+void forceTokenInBitmask(int32_t* row, size_t words, int32_t token_id) {
+    std::fill_n(row, words, 0);
+    if (token_id < 0 || static_cast<size_t>(token_id / 32) >= words) {
+        return;
+    }
+    row[token_id / 32] |= (1u << (token_id % 32));
+}
+
+bool bitmaskAllowsToken(const int32_t* row, size_t words, int32_t token_id) {
+    if (token_id < 0 || static_cast<size_t>(token_id / 32) >= words) {
+        return false;
+    }
+    const uint32_t word = static_cast<uint32_t>(row[token_id / 32]);
+    return (word & (1u << (token_id % 32))) != 0u;
+}
+
+bool specThinkBudgetExhausted(const StreamThinkInfo& info) {
+    return info.dfa_ptr && !info.end_think_token_ids.empty() && info.max_thinking_tokens > 0
+           && info.current_output_length >= info.max_thinking_tokens;
+}
+
+bool forceThinkEndTokenInBitmask(int32_t* row, size_t words, const StreamThinkInfo& info) {
+    if (!info.dfa_ptr || info.dfa_ptr->isFinished() || info.end_think_token_ids.empty()) {
+        return false;
+    }
+    auto next_token_idx = info.dfa_ptr->status();
+    if (next_token_idx >= info.end_think_token_ids.size()) {
+        return false;
+    }
+    forceTokenInBitmask(row, words, info.end_think_token_ids[next_token_idx]);
+    return true;
+}
+
+void applyThinkSpecRowMask(int32_t* row, size_t words, StreamThinkInfo& info) {
+    std::fill_n(row, words, SpecLogitsProcessor::kBitmaskAllowAll);
+    switch (info.process_state) {
+        case ThinkProcessState::NO_THINK:
+        case ThinkProcessState::AFTER_THINK: {
+            clearTokenFromBitmask(row, words, firstTokenOrInvalid(info.begin_think_token_ids));
+            clearTokenFromBitmask(row, words, firstTokenOrInvalid(info.end_think_token_ids));
+            break;
+        }
+        case ThinkProcessState::IN_THINK: {
+            if (transitionToAfterThinkIfClosed(info)) {
+                clearTokenFromBitmask(row, words, firstTokenOrInvalid(info.begin_think_token_ids));
+                clearTokenFromBitmask(row, words, firstTokenOrInvalid(info.end_think_token_ids));
+                break;
+            }
+            if (thinkEndCloseInProgress(info) || specThinkBudgetExhausted(info)) {
+                info.process_state = ThinkProcessState::CLOSING_THINK;
+                if (!forceThinkEndTokenInBitmask(row, words, info)) {
+                    clearTokenFromBitmask(row, words, firstTokenOrInvalid(info.begin_think_token_ids));
+                    clearTokenFromBitmask(row, words, firstTokenOrInvalid(info.end_think_token_ids));
+                }
+                break;
+            }
+            clearTokenFromBitmask(row, words, firstTokenOrInvalid(info.begin_think_token_ids));
+            break;
+        }
+        case ThinkProcessState::CLOSING_THINK: {
+            if (transitionToAfterThinkIfClosed(info)) {
+                clearTokenFromBitmask(row, words, firstTokenOrInvalid(info.begin_think_token_ids));
+                clearTokenFromBitmask(row, words, firstTokenOrInvalid(info.end_think_token_ids));
+                break;
+            }
+            if (!forceThinkEndTokenInBitmask(row, words, info)) {
+                clearTokenFromBitmask(row, words, firstTokenOrInvalid(info.begin_think_token_ids));
+                clearTokenFromBitmask(row, words, firstTokenOrInvalid(info.end_think_token_ids));
+            }
+            break;
+        }
+    }
+}
+
+void advanceThinkStateForSpec(StreamThinkInfo& info, int32_t token_id) {
+    if (consumePendingForcedThinkEndToken(info, token_id)) {
+        return;
+    }
+
+    info.current_output_length += 1;
+    if (!isActiveThinkState(info) || info.max_thinking_tokens <= 0 || !info.dfa_ptr) {
+        return;
+    }
+
+    info.dfa_ptr->next(token_id);
+    if (info.dfa_ptr->isFinished()) {
+        info.process_state = ThinkProcessState::AFTER_THINK;
+    } else if (thinkEndCloseInProgress(info)) {
+        info.process_state = ThinkProcessState::CLOSING_THINK;
+    } else if (info.process_state == ThinkProcessState::CLOSING_THINK) {
+        info.process_state = ThinkProcessState::IN_THINK;
+    }
+}
+
 }  // namespace
 
 ThinkModeLogitsProcessor::ThinkModeLogitsProcessor(std::vector<StreamThinkInfo> think_infos):
-    think_infos_(think_infos) {};
+    think_infos_(think_infos) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    publishSpecSnapshotLocked();
+};
+
+void ThinkModeLogitsProcessor::publishSpecSnapshotLocked() {
+    auto snapshot      = std::make_shared<ThinkModeSpecSnapshot>();
+    snapshot->version  = ++spec_snapshot_version_;
+    snapshot->eligible = think_infos_.size() == 1 && !think_infos_[0].is_beam_search;
+    if (snapshot->eligible) {
+        snapshot->info = think_infos_[0].copy();
+    }
+    std::atomic_store_explicit(
+        &spec_snapshot_, std::shared_ptr<const ThinkModeSpecSnapshot>(snapshot), std::memory_order_release);
+}
 
 void ThinkModeLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -145,6 +260,7 @@ void ThinkModeLogitsProcessor::process(const SamplerInputs& inputs, size_t start
             }
         }
     }
+    publishSpecSnapshotLocked();
 }
 
 bool ThinkModeLogitsProcessor::forceThinkEndToken(const torch::Tensor& new_tokens_logits,
@@ -188,6 +304,7 @@ void ThinkModeLogitsProcessor::updateMultiSeqStatus(const std::vector<int>& src_
         new_think_infos.push_back(think_infos_[src_batch_idx].copy());
     }
     think_infos_ = new_think_infos;
+    publishSpecSnapshotLocked();
 }
 
 void ThinkModeLogitsProcessor::updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) {
@@ -237,6 +354,39 @@ void ThinkModeLogitsProcessor::updateStatus(const torch::Tensor& new_tokens, int
             }
         }
     }
+    publishSpecSnapshotLocked();
+}
+
+bool ThinkModeLogitsProcessor::isSpecVerifyEligible() const {
+    auto snapshot = std::atomic_load_explicit(&spec_snapshot_, std::memory_order_acquire);
+    return snapshot && snapshot->eligible;
+}
+
+int ThinkModeLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) {
+    auto snapshot = std::atomic_load_explicit(&spec_snapshot_, std::memory_order_acquire);
+    if (!snapshot || !snapshot->eligible || request.propose_step <= 0 || request.bitmask_cpu_out == nullptr) {
+        return request.propose_step;
+    }
+
+    StreamThinkInfo state = snapshot->info.copy();
+    int             cap   = request.propose_step;
+    const size_t    W     = request.bitmask_size_int32;
+
+    for (int offset = 0; offset <= request.propose_step; ++offset) {
+        int32_t* row = request.bitmask_cpu_out + offset * W;
+        applyThinkSpecRowMask(row, W, state);
+        if (offset == request.propose_step) {
+            break;
+        }
+
+        const int32_t draft_token = request.draft_tokens[offset];
+        if (!bitmaskAllowsToken(row, W, draft_token)) {
+            cap = offset;
+            break;
+        }
+        advanceThinkStateForSpec(state, draft_token);
+    }
+    return cap;
 }
 
 ThinkModeLogitsProcessorPtr ThinkModeLogitsProcessor::fromGenerateInput(std::shared_ptr<GenerateInput> generate_input,

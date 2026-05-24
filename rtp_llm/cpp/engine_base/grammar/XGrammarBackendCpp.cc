@@ -206,11 +206,13 @@ CompileResult XGrammarBackendCpp::compileNow(const GrammarKeyCpp& key) {
 std::shared_ptr<RtpGrammarMatcher>
 XGrammarBackendCpp::createMatcher(std::shared_ptr<xgrammar::CompiledGrammar> compiled,
                                   bool                                       require_reasoning,
-                                  std::optional<std::vector<int>>            think_end_token_ids) {
+                                  std::optional<std::vector<int>>            think_end_token_ids,
+                                  bool                                       terminate_without_stop_token) {
     return std::make_shared<RtpGrammarMatcher>(std::move(compiled),
                                                require_reasoning,
                                                std::move(think_end_token_ids),
                                                options_.override_stop_tokens,
+                                               terminate_without_stop_token,
                                                /*max_rollback_tokens=*/200);
 }
 

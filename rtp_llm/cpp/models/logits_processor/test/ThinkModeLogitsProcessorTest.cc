@@ -579,6 +579,36 @@ TEST_F(SamplerTest, testForcedMultiTokenThinkEndAsyncStatusDoesNotDoubleAdvance)
     EXPECT_EQ(1, second_inputs.logits[0][9].item<float>());
 }
 
+TEST_F(SamplerTest, testSpecForceMismatchCapsWithoutMutatingParent) {
+    std::vector<int>             end_think_token_ids = {8, 9};
+    StreamThinkInfo              info(true,
+                         1,
+                                      {7},
+                         end_think_token_ids,
+                         0,
+                         1,
+                         false,
+                         std::make_shared<StringContainDFA<size_t, int>>(end_think_token_ids));
+    std::vector<StreamThinkInfo> infos = {info};
+    ThinkModeLogitsProcessor     processor(infos);
+
+    const int            P     = 3;
+    const size_t         W     = SpecLogitsProcessor::bitmaskWordCount(16);
+    std::vector<int32_t> draft = {5, 8, 9};
+    std::vector<int32_t> bitmask((P + 1) * W, SpecLogitsProcessor::kBitmaskAllowAll);
+
+    SpecLogitsProcessorRequest request;
+    request.draft_tokens       = draft.data();
+    request.propose_step       = P;
+    request.bitmask_cpu_out    = bitmask.data();
+    request.bitmask_size_int32 = W;
+    request.vocab_size         = 16;
+
+    EXPECT_TRUE(processor.isSpecVerifyEligible());
+    EXPECT_EQ(processor.tryAcceptAndFillBitmask(request), 0);
+    EXPECT_EQ(0, processor.thinkEndTokensStatus()[0]);
+}
+
 #undef EXPECT_SIMILAR
 
 }  // namespace rtp_llm

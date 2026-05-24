@@ -10,13 +10,14 @@
 #include <vector>
 
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
+#include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 
 namespace rtp_llm {
 
 class RtpGrammarMatcher;
 
-class GrammarLogitsProcessor: public BaseLogitsProcessor {
+class GrammarLogitsProcessor: public BaseLogitsProcessor, public SpecLogitsProcessor {
 public:
     using ErrorReporter = std::function<void(ErrorCode, const std::string&, bool)>;
 
@@ -32,6 +33,8 @@ public:
                             const std::vector<int32_t>& draft_prefix) override;
     void updateMultiSeqStatus(const std::vector<int>& src_batch_indices) override;
     void updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) override;
+    bool isSpecVerifyEligible() const override;
+    int  tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) override;
     bool isStateful() const override {
         return true;
     }

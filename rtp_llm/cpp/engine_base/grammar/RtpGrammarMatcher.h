@@ -15,8 +15,9 @@ public:
     RtpGrammarMatcher(std::shared_ptr<xgrammar::CompiledGrammar> compiled,
                       bool                                       require_reasoning,
                       std::optional<std::vector<int>>            think_end_token_ids,
-                      std::optional<std::vector<int>>            override_stop_tokens = std::nullopt,
-                      int                                        max_rollback_tokens  = 200);
+                      std::optional<std::vector<int>>            override_stop_tokens         = std::nullopt,
+                      bool                                       terminate_without_stop_token = false,
+                      int                                        max_rollback_tokens          = 200);
 
     RtpGrammarMatcher(const RtpGrammarMatcher&)            = delete;
     RtpGrammarMatcher& operator=(const RtpGrammarMatcher&) = delete;

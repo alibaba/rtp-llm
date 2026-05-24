@@ -2,6 +2,9 @@
 
 #include <utility>
 
+#include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
+#include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
+
 using namespace std;
 
 namespace rtp_llm {
@@ -9,7 +12,18 @@ namespace rtp_llm {
 LogitsProcessorStates::LogitsProcessorStates() {};
 
 void LogitsProcessorStates::batchProcess(const SamplerInputs& inputs) {
+    const bool has_spec_mask = inputs.phase == LogitsProcessorPhase::MTP_VERIFY && inputs.spec_vocab_mask_gpu.defined();
+    if (has_spec_mask) {
+        if (inputs.spec_mask_ready_event) {
+            inputs.spec_mask_ready_event->block(cuda_graph::graphGetCurrentStream());
+        }
+        inputs.logits.masked_fill_(inputs.spec_vocab_mask_gpu, BaseLogitsProcessor::neg_inf);
+    }
+
     for (size_t i = 0; i < logits_processors_.size(); i++) {
+        if (has_spec_mask && std::dynamic_pointer_cast<SpecLogitsProcessor>(logits_processors_[i]) != nullptr) {
+            continue;
+        }
         if (draft_prefixes_[i].empty()) {
             logits_processors_[i]->process(inputs, intervals_[i].first, intervals_[i].second);
         } else {

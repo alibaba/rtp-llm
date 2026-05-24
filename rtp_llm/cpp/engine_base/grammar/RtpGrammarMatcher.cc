@@ -55,6 +55,7 @@ RtpGrammarMatcher::RtpGrammarMatcher(std::shared_ptr<xgrammar::CompiledGrammar> 
                                      bool                                       require_reasoning,
                                      std::optional<std::vector<int>>            think_end_token_ids,
                                      std::optional<std::vector<int>>            override_stop_tokens,
+                                     bool                                       terminate_without_stop_token,
                                      int                                        max_rollback_tokens):
     compiled_(std::move(compiled)),
     think_end_token_ids_(normalizeThinkEndTokenIds(think_end_token_ids.value_or(std::vector<int>{}))),
@@ -67,10 +68,8 @@ RtpGrammarMatcher::RtpGrammarMatcher(std::shared_ptr<xgrammar::CompiledGrammar> 
     }
     think_end_lps_ = buildKmpFailureTable(think_end_token_ids_);
 
-    matcher_ = std::make_unique<xgrammar::GrammarMatcher>(*compiled_,
-                                                          std::move(override_stop_tokens),
-                                                          /*terminate_without_stop_token=*/false,
-                                                          max_rollback_tokens);
+    matcher_ = std::make_unique<xgrammar::GrammarMatcher>(
+        *compiled_, std::move(override_stop_tokens), terminate_without_stop_token, max_rollback_tokens);
 }
 
 void RtpGrammarMatcher::initReasoning(bool in_think_body) {

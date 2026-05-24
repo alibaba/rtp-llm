@@ -12,6 +12,12 @@ typedef std::shared_ptr<LogitsProcessorStates> LogitsProcessorStatesPtr;
 
 struct SamplerInitParams {};
 
+enum class LogitsProcessorPhase {
+    NORMAL_DECODE,
+    MTP_VERIFY,
+    DRAFT_SAMPLE,
+};
+
 struct SamplerInputs {
 public:
     std::string debugString() const {
@@ -55,6 +61,15 @@ public:
     mutable torch::Tensor all_probs;      // shape: [batch_size, vocab_size]
 
     std::vector<at::Generator> generator;
+
+    LogitsProcessorPhase phase = LogitsProcessorPhase::NORMAL_DECODE;
+
+    // MTP_VERIFY only. spec_vocab_mask_gpu is a bool mask with the same row
+    // count as logits; true means the token is disallowed for that verify row.
+    torch::Tensor                 spec_vocab_mask_gpu;
+    torch::Tensor                 spec_cap_gpu;
+    std::shared_ptr<torch::Event> spec_mask_ready_event;
+    int                           spec_propose_step = 0;
 };
 
 struct SamplerOutput {

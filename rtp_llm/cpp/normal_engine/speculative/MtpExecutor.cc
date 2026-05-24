@@ -14,6 +14,7 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/StringUtil.h"
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
+#include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include <sstream>
@@ -95,6 +96,22 @@ torch::Tensor toCudaInt32WithHostHold(const torch::Tensor& tensor, TensorHolder&
     }
     holder.hold_host(tensor);
     return tensor.to(cuda_i32, /*non_blocking=*/true);
+}
+
+void applySpecLogitsAcceptLenCap(const SamplerInputs& sampler_input, speculative::SpeculativeSamplerOutput& output) {
+    if (!sampler_input.spec_cap_gpu.defined()) {
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(output.accept_len.defined() && output.accept_len.is_cuda(),
+                            "spec logits cap requires CUDA accept_len");
+
+    if (sampler_input.spec_mask_ready_event) {
+        sampler_input.spec_mask_ready_event->block(cuda_graph::graphGetCurrentStream());
+    }
+    auto cap              = sampler_input.spec_cap_gpu.to(output.accept_len.options()) + 1;
+    output.accept_len     = torch::minimum(output.accept_len, cap);
+    output.accept_len_cpu = output.accept_len.to(torch::kCPU, /*non_blocking=*/true);
+    output.transfer_done_event->record(cuda_graph::graphGetCurrentStream());
 }
 
 }  // namespace
@@ -360,6 +377,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     collect_metrics_stream_(cuda_graph::graphGetStreamFromPool(true)),
     target_verify_prepare_runner_(cuda_graph::graphGetStreamFromPool(true)),
     draft_prefill_prepare_runner_(cuda_graph::graphGetStreamFromPool(true)),
+    spec_logits_verify_runner_(std::make_unique<SpecLogitsVerifyRunner>()),
     spec_bookkeeping_runner_(cuda_graph::graphGetStreamFromPool(true)) {
     data_type_        = params.model_config_.data_type;
     hidden_size_      = params.model_config_.hidden_size * params.model_config_.hc_mult;
@@ -820,19 +838,21 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     speculative::SpeculativeSamplerOutput speculative_sampler_output;
 
     // Placeholders shared across draftModelDecode and the post-rejection update.
-    torch::Tensor              draft_token_probs_d_t;
-    torch::Tensor              hidden_states_d_t;
-    torch::Tensor              draft_token_ids_t;
-    torch::Tensor              spec_token_ids_t;
-    std::vector<torch::Tensor> draft_probs_list;
-    torch::Event               accept_len_ready_event = cuda_graph::makeGraphEvent();
-    int64_t                    model_forward_us       = 0;
+    torch::Tensor                        draft_token_probs_d_t;
+    torch::Tensor                        hidden_states_d_t;
+    torch::Tensor                        draft_token_ids_t;
+    torch::Tensor                        spec_token_ids_t;
+    std::vector<torch::Tensor>           draft_probs_list;
+    torch::Event                         accept_len_ready_event = cuda_graph::makeGraphEvent();
+    int64_t                              model_forward_us       = 0;
+    SpecLogitsVerifyRunner::LaunchResult spec_logits_result;
 
     // Stream-async events are recorded on the main stream as soon as tensors
     // become valid. rejection_event guards accept_len/tokens D2H; draft_event
     // guards all_probs cloning. They stay null when stream-async is off.
     std::shared_ptr<torch::Event> rejection_event;
     std::shared_ptr<torch::Event> draft_event;
+    bool                          prev_bookkeeping_synced_for_spec_logits = false;
 
     waitPreviousBookkeepingAndKvSwaps(streams);
 
@@ -919,6 +939,24 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         }
     }
 
+    if (isTpRank0() && !model_input.is_fake_stream) {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(spec_logits_verify_inline)");
+        if (useStreamAsync() && useDropBroadSync()) {
+            RTP_LLM_PROFILE_SCOPE_DYNAMIC(
+                "executor.mtp.decode_step(wait_prev_bookkeeping_pre_spec_logits,stream_count=%zu)", streams.size());
+            spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
+            stream_groups                           = StreamGroups(streams);
+            prev_bookkeeping_synced_for_spec_logits = true;
+        }
+        std::shared_ptr<torch::Event> draft_tokens_ready_event;
+        if (draft_sampler_output.token_ids.defined() && draft_sampler_output.token_ids.is_cuda()) {
+            draft_tokens_ready_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+            draft_tokens_ready_event->record(cuda_graph::graphGetCurrentStream());
+        }
+        spec_logits_result =
+            buildSpecLogitsVerifyInline(streams, draft_sampler_output.token_ids, std::move(draft_tokens_ready_event));
+    }
+
     // eplb
     if (expert_balancer_) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(eplb_step_forward)");
@@ -940,7 +978,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             // gatherSpecSamplerInput reads host stream state updated by the previous
             // bookkeeping worker. DROP_BROAD_SYNC therefore needs this narrow sync
             // unless the broad sync at decodeStep start already waited.
-            if (useStreamAsync() && useDropBroadSync()) {
+            if (useStreamAsync() && useDropBroadSync() && !prev_bookkeeping_synced_for_spec_logits) {
                 RTP_LLM_PROFILE_SCOPE_DYNAMIC(
                     "executor.mtp.decode_step(wait_prev_bookkeeping_pre_sampler,stream_count=%zu)", streams.size());
                 spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
@@ -950,9 +988,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             }
 
             // target model sample
-            CHECK_AND_RETURN_REF(
-                sampler_input,
-                batch_stream_processor_->gatherSpecSamplerInput(stream_groups, model_input, model_output));
+            CHECK_AND_RETURN_REF(sampler_input,
+                                 batch_stream_processor_->gatherSpecSamplerInput(
+                                     stream_groups, model_input, model_output, spec_logits_result));
             holdSamplerInputHostBuffers(buffer_holder_, sampler_input);
             sampler_output           = std::move(sampler_->forward(sampler_input));
             sampler_output.all_probs = sampler_output.all_probs.reshape(
@@ -960,6 +998,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
             // rejection sampling
             speculative_sampler_output = speculative_sampler_->forward(streams, draft_sampler_output, sampler_output);
+            applySpecLogitsAcceptLenCap(sampler_input, speculative_sampler_output);
         }
 
         batch_stream_processor_->updateDecodePostDraftModelInput(
@@ -1201,6 +1240,41 @@ GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input,
     RTP_LLM_LOG_DEBUG("[MTP decode] target model verify forward end");
     model_input.is_target_verify = false;
     return model_output;
+}
+
+SpecLogitsVerifyRunner::LaunchResult
+MtpExecutor::buildSpecLogitsVerifyInline(const std::list<GenerateStreamPtr>& streams,
+                                         const torch::Tensor&                draft_tokens,
+                                         std::shared_ptr<torch::Event>       draft_tokens_ready_event) {
+    SpecLogitsVerifyRunner::LaunchTask task;
+    task.total_streams            = streams.size();
+    task.propose_step             = static_cast<int>(propose_step_);
+    task.vocab_size               = vocab_size_;
+    task.draft_tokens             = draft_tokens;
+    task.draft_tokens_ready_event = std::move(draft_tokens_ready_event);
+
+    size_t stream_idx = 0;
+    for (const auto& stream : streams) {
+        size_t processor_idx = 0;
+        for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
+            auto spec_processor = std::dynamic_pointer_cast<SpecLogitsProcessor>(processor);
+            if (spec_processor) {
+                task.active.push_back({spec_processor,
+                                       stream_idx,
+                                       processor_idx,
+                                       static_cast<uint64_t>(stream->streamId()),
+                                       static_cast<int64_t>(stream->seqLength()),
+                                       static_cast<int64_t>(stream->outputTokenLen())});
+            }
+            ++processor_idx;
+        }
+        ++stream_idx;
+    }
+
+    if (task.active.empty()) {
+        return {};
+    }
+    return spec_logits_verify_runner_->buildInline(task);
 }
 
 void MtpExecutor::debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& model_input,
