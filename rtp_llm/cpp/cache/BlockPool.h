@@ -22,7 +22,9 @@ class CacheStore;
 
 class BlockPool {
 public:
-    BlockPool(const BlockPoolConfig& config, AllocationType allocation_type = AllocationType::DEVICE);
+    BlockPool(const BlockPoolConfig& config,
+              AllocationType         allocation_type        = AllocationType::DEVICE,
+              bool                   use_pinned_cpu_backing = false);
     ~BlockPool();
 
     bool init();
@@ -82,6 +84,7 @@ private:
     // Helper functions for init()
     void validateConfig() const;
     void initializeCacheBuffer();
+    void initializePinnedCpuBuffer(const char* log_context);
     void initializeLayerMappings();
     void initializeLayoutStrategies();
 
@@ -123,6 +126,7 @@ private:
     BlockRefCounter        req_cache_ref_counter_;
 
     AllocationType allocation_type_;
+    bool           use_pinned_cpu_backing_;
 
     torch::Tensor               cache_aligned_buffer_;
     void*                       cache_base_ptr_  = nullptr;

@@ -101,6 +101,19 @@ static CacheConfig makeTinyMultiPoolHybridConfig(uint32_t linear_block_num = 6, 
     return config;
 }
 
+static CacheConfig makeTinySwaMultiPoolHybridConfig(uint32_t linear_block_num = 6, uint32_t swa_block_num = 8) {
+    auto config = makeTinyMultiPoolHybridConfig(linear_block_num, swa_block_num);
+
+    config.group_types      = {CacheGroupType::LINEAR, CacheGroupType::SWA};
+    config.linear_group_num = 1;
+    config.full_group_num   = 0;
+    config.swa_group_num    = 1;
+    for (int layer_id : config.layer_ids[1]) {
+        config.layer_group_types[static_cast<size_t>(layer_id)] = CacheGroupType::SWA;
+    }
+    return config;
+}
+
 static ModelConfig makeProModelConfig() {
     ModelConfig mc;
     mc.num_layers                   = 61;
@@ -237,6 +250,16 @@ TEST_F(HybridPoolKVCacheAllocatorTest, InitCreatesIndependentBlockPoolPerGroup) 
     // Per-pool totalBlocksNum = group_block_nums[gid] - 1 (block 0 reserved).
     EXPECT_EQ(allocator->groupBlockPools()[0]->totalBlocksNum(), 6u - 1u);
     EXPECT_EQ(allocator->groupBlockPools()[1]->totalBlocksNum(), 8u - 1u);
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, SwaDefaultRegionGroupPoolUsesGpuBacking) {
+    auto config    = makeTinySwaMultiPoolHybridConfig(/*linear_block_num=*/6, /*swa_block_num=*/8);
+    auto allocator = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+
+    ASSERT_EQ(allocator->groupBlockPools().size(), 2u);
+    EXPECT_EQ(allocator->groupBlockPools()[0]->where(), MemoryType::MEMORY_GPU);
+    EXPECT_EQ(allocator->groupBlockPools()[1]->where(), MemoryType::MEMORY_GPU);
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, GetBlockPoolReturnsFirstGroupPool) {
@@ -754,6 +777,25 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4InitAndAggregatedCounters) {
     EXPECT_EQ(allocator->totalBlocksNum(), expected_total);
     EXPECT_EQ(allocator->freeBlocksNum(), expected_total);
     EXPECT_EQ(allocator->availableBlocksNum(), expected_total);
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, DSV4StateRegionPoolsUsePinnedCpuBackingOnly) {
+    auto config    = makeDSV4HybridPoolConfig(/*block_num=*/200);
+    auto allocator = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+
+    ASSERT_EQ(config.group_region_names.size(), 7u);
+    ASSERT_EQ(allocator->groupBlockPools().size(), 7u);
+
+    for (size_t gid = 0; gid < allocator->groupBlockPools().size(); ++gid) {
+        const auto region_name = config.group_region_names[gid];
+        const bool is_state_region =
+            region_name == KVCacheRegionName::INDEXER_STATE || region_name == KVCacheRegionName::CSA_STATE
+            || region_name == KVCacheRegionName::HCA_STATE;
+        EXPECT_EQ(allocator->groupBlockPools()[gid]->where(),
+                  is_state_region ? MemoryType::MEMORY_CPU_PINNED : MemoryType::MEMORY_GPU)
+            << "gid=" << gid << " region=" << static_cast<int>(region_name);
+    }
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4ConvertIndexToAddrByRegionRoutesToCorrectPool) {

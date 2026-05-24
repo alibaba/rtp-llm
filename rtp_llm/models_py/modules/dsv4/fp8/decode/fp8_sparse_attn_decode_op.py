@@ -107,7 +107,6 @@ class SparseAttnV4DecodeFp8Op:
             "flash_mla wheel is required for FP8 sparse decode "
             "(install rtp_llm with cuda12_9 / cuda13 config)"
         )
-        assert q.is_cuda and kv_cache.is_cuda, "FP8 sparse decode requires CUDA tensors"
         return self._forward_flash_mla(
             q,
             kv_cache,

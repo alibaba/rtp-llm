@@ -14,6 +14,20 @@
 
 namespace rtp_llm {
 
+namespace {
+
+bool usePinnedCpuBackingForRegion(const CacheConfig& config, size_t gid, AllocationType allocation_type) {
+    if (allocation_type != AllocationType::DEVICE || gid >= config.group_region_names.size()) {
+        return false;
+    }
+
+    const auto region_name = config.group_region_names[gid];
+    return region_name == KVCacheRegionName::INDEXER_STATE || region_name == KVCacheRegionName::CSA_STATE
+           || region_name == KVCacheRegionName::HCA_STATE;
+}
+
+}  // namespace
+
 HybridPoolKVCacheAllocator::HybridPoolKVCacheAllocator(const CacheConfig&                 config,
                                                        AllocationType                     allocation_type,
                                                        const kmonitor::MetricsReporterPtr metrics_reporter,
@@ -34,18 +48,20 @@ bool HybridPoolKVCacheAllocator::doInit() {
     SharedBlockCache* shared_cache_raw = shared_block_cache_ ? shared_block_cache_.get() : nullptr;
 
     for (int gid = 0; gid < group_nums; ++gid) {
+        RTP_LLM_CHECK_WITH_INFO(gid < static_cast<int>(config_.group_types.size()),
+                                "missing group type for group %d in HybridPoolKVCacheAllocator",
+                                gid);
+        const auto group_type = config_.group_types[static_cast<size_t>(gid)];
+
         auto pool_config = BlockPoolConfigHelper::createConfigForGroup(config_, static_cast<size_t>(gid));
-        auto group_pool  = std::make_shared<BlockPool>(pool_config, allocation_type_);
+        auto group_pool = std::make_shared<BlockPool>(
+            pool_config, allocation_type_, usePinnedCpuBackingForRegion(config_, static_cast<size_t>(gid), allocation_type_));
         RTP_LLM_CHECK_WITH_INFO(group_pool->init(), "Failed to initialize block pool for group %d", gid);
 
         const auto& ids  = config_.global_layer_ids[static_cast<size_t>(gid)];
         auto        spec = config_.cache_specs[static_cast<size_t>(gid)];
 
         KVCacheGroupPtr group;
-        RTP_LLM_CHECK_WITH_INFO(gid < static_cast<int>(config_.group_types.size()),
-                                "missing group type for group %d in HybridPoolKVCacheAllocator",
-                                gid);
-        const auto group_type = config_.group_types[static_cast<size_t>(gid)];
         if (group_type == CacheGroupType::LINEAR) {
             group =
                 std::make_shared<LinearKVCacheGroup>(ids, spec, group_pool, gid, config_.linear_step, shared_cache_raw);
@@ -237,18 +253,30 @@ void HybridPoolKVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, co
         return;
     }
 
-    auto copy_type = BatchCopyParams::get_copy_type(
-        allocation_type_ == AllocationType::DEVICE ? rtp_llm::MEMORY_GPU : rtp_llm::MEMORY_CPU,
-        allocation_type_ == AllocationType::DEVICE ? rtp_llm::MEMORY_GPU : rtp_llm::MEMORY_CPU);
-
-    size_t copy_num = 0;
-    for (const auto& layers : config_.global_layer_ids) {
-        copy_num += layers.size();
+    size_t copy_nums[BatchCopyParams::TYPE_SIZE] = {};
+    for (int gid = 0; gid < static_cast<int>(kv_cache_groups_.size()); ++gid) {
+        RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(gid) < group_block_pools_.size(),
+                                "missing block pool for group %d",
+                                gid);
+        RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(gid) < config_.cache_specs.size(),
+                                "missing cache spec for group %d",
+                                gid);
+        RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(gid) < config_.global_layer_ids.size(),
+                                "missing layer ids for group %d",
+                                gid);
+        const auto copy_type =
+            BatchCopyParams::get_copy_type(group_block_pools_[static_cast<size_t>(gid)]->where(),
+                                           group_block_pools_[static_cast<size_t>(gid)]->where());
+        const auto& spec                = config_.cache_specs[static_cast<size_t>(gid)];
+        const size_t buffers_per_layer  = spec->scale_block_size_bytes() > 0 ? 2 : 1;
+        copy_nums[copy_type] += config_.global_layer_ids[static_cast<size_t>(gid)].size()
+                                * static_cast<size_t>(end_ptr - begin_ptr) * buffers_per_layer;
     }
-    copy_num *= static_cast<size_t>(end_ptr - begin_ptr);
 
     BatchCopyParams copy_params;
-    copy_params.reserve(copy_type, copy_num);
+    for (size_t i = 0; i < BatchCopyParams::TYPE_SIZE; ++i) {
+        copy_params.reserve(static_cast<BatchCopyParams::CopyType>(i), copy_nums[i]);
+    }
 
     for (auto it = begin_ptr; it != end_ptr; ++it) {
         auto [src_block_index, dest_block_index] = *it;
@@ -261,6 +289,9 @@ void HybridPoolKVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, co
 
             const size_t kv_block_size_bytes = config_.cache_specs[static_cast<size_t>(gid)]->block_size_bytes();
             const size_t scale_block_bytes   = config_.cache_specs[static_cast<size_t>(gid)]->scale_block_size_bytes();
+            const auto   copy_type =
+                BatchCopyParams::get_copy_type(group_block_pools_[static_cast<size_t>(gid)]->where(),
+                                               group_block_pools_[static_cast<size_t>(gid)]->where());
 
             for (int layer_id : config_.global_layer_ids[static_cast<size_t>(gid)]) {
                 auto src_addr_info =

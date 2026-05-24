@@ -70,8 +70,8 @@ void markHostBlockPoolDontDump(void* ptr, size_t size) {
 
 }  // namespace
 
-BlockPool::BlockPool(const BlockPoolConfig& config, AllocationType allocation_type):
-    config_(config), allocation_type_(allocation_type) {}
+BlockPool::BlockPool(const BlockPoolConfig& config, AllocationType allocation_type, bool use_pinned_cpu_backing):
+    config_(config), allocation_type_(allocation_type), use_pinned_cpu_backing_(use_pinned_cpu_backing) {}
 
 BlockPool::~BlockPool() {
     cache_aligned_buffer_ = torch::Tensor();
@@ -120,12 +120,29 @@ void BlockPool::initializeCacheBuffer() {
                          cache_aligned_buffer_.data_ptr(),
                          config_.total_size_bytes);
         markHostBlockPoolDontDump(cache_aligned_buffer_.data_ptr(), config_.total_size_bytes);
+    } else if (use_pinned_cpu_backing_) {
+        initializePinnedCpuBuffer("device block pool pinned CPU backing");
     } else {
         cache_aligned_buffer_ = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
                                              torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
     }
     cache_base_ptr_ = cache_aligned_buffer_.data_ptr();
     RTP_LLM_CHECK_WITH_INFO(cache_base_ptr_ != nullptr, "block pool allocate cache aligned buffer is null");
+}
+
+void BlockPool::initializePinnedCpuBuffer(const char* log_context) {
+    RTP_LLM_LOG_WARNING("%s, total_size=%zu bytes", log_context, config_.total_size_bytes);
+    auto cpu_buffer = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
+                                   torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
+    try {
+        cache_aligned_buffer_ = cpu_buffer.pin_memory();
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_WARNING("%s pin failed, fallback to pageable CPU memory, total_size=%zu bytes, error=%s",
+                            log_context,
+                            config_.total_size_bytes,
+                            e.what());
+        cache_aligned_buffer_ = std::move(cpu_buffer);
+    }
 }
 
 void BlockPool::initializeLayerMappings() {
@@ -574,7 +591,10 @@ BlockPool::convertIndexToBuffer(int layer_id, int block_id, int partition_count,
 }
 
 MemoryType BlockPool::where() const {
-    return cache_aligned_buffer_.is_cuda() ? MemoryType::MEMORY_GPU : MemoryType::MEMORY_CPU;
+    if (cache_aligned_buffer_.is_cuda()) {
+        return MemoryType::MEMORY_GPU;
+    }
+    return cache_aligned_buffer_.is_pinned() ? MemoryType::MEMORY_CPU_PINNED : MemoryType::MEMORY_CPU;
 }
 
 void BlockPool::checkLayoutValidity(int layout_id) const {
