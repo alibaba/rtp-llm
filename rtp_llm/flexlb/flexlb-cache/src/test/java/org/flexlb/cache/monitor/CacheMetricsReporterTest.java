@@ -46,8 +46,8 @@ class CacheMetricsReporterTest {
     void should_register_recent_cache_key_metrics_as_visible_series() {
         reporter.init();
 
-        verify(monitor).register(CACHE_RECENT_KEY_HIT_COUNT, FlexMetricType.GAUGE);
-        verify(monitor).register(CACHE_RECENT_KEY_TOTAL_COUNT, FlexMetricType.GAUGE);
+        verify(monitor).register(CACHE_RECENT_KEY_HIT_COUNT, FlexMetricType.QPS);
+        verify(monitor).register(CACHE_RECENT_KEY_TOTAL_COUNT, FlexMetricType.QPS);
         verify(monitor).register(CACHE_RECENT_KEY_HIT_RATIO, FlexMetricType.GAUGE);
         verify(monitor).register(CACHE_RECENT_KEY_REQUEST_COUNT, FlexMetricType.QPS);
         verify(monitor).register(CACHE_RECENT_KEY_EMPTY_REQUEST_COUNT, FlexMetricType.QPS);

@@ -82,8 +82,8 @@ public class CacheMetricsReporter {
         // Cache hit rate metrics
         monitor.register(CACHE_HIT_COUNT, FlexMetricType.GAUGE);
         monitor.register(CACHE_HIT_RATIO, FlexMetricType.GAUGE);
-        monitor.register(CACHE_RECENT_KEY_HIT_COUNT, FlexMetricType.GAUGE);
-        monitor.register(CACHE_RECENT_KEY_TOTAL_COUNT, FlexMetricType.GAUGE);
+        monitor.register(CACHE_RECENT_KEY_HIT_COUNT, FlexMetricType.QPS);
+        monitor.register(CACHE_RECENT_KEY_TOTAL_COUNT, FlexMetricType.QPS);
         monitor.register(CACHE_RECENT_KEY_HIT_RATIO, FlexMetricType.GAUGE);
         monitor.register(CACHE_RECENT_KEY_REQUEST_COUNT, FlexMetricType.QPS);
         monitor.register(CACHE_RECENT_KEY_EMPTY_REQUEST_COUNT, FlexMetricType.QPS);
@@ -166,8 +166,8 @@ public class CacheMetricsReporter {
      *
      * <p>Dashboards should calculate the small-bucket hit ratio as
      * sum(CACHE_RECENT_KEY_HIT_COUNT) / sum(CACHE_RECENT_KEY_TOTAL_COUNT). The
-     * count metrics are gauges carrying per-request counts so a request with
-     * zero hits still produces a visible data point. The ratio gauge is kept as
+     * count metrics are QPS/accumulator metrics carrying per-request increment
+     * values, matching existing route QPS metrics. The ratio gauge is kept as
      * a per-request instantaneous hint and no-data guard.</p>
      *
      * @param timeWindowMs     Sliding window size in milliseconds
