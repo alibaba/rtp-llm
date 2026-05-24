@@ -189,6 +189,13 @@ struct KVCacheConfig {
     // Each non-FULL pool gets: rule_blocks + non_full_addition_kvcache_blocks.
     uint32_t non_full_addition_kvcache_blocks = 256;
 
+    // Per-rank CPU pinned memory budget (in MiB) for DSV4 STATE pools
+    // (INDEXER_STATE / CSA_STATE / HCA_STATE). 0 = STATE block_num falls
+    // back to the HBM-derived block_num (legacy parity); >0 = STATE pools
+    // are sized independently from HBM by floor(state_pool_memory_mb *
+    // 1024 * 1024 / Σstate_block_size_bytes).
+    int64_t state_pool_memory_mb = 0;
+
     // Remote connector configuration fields
     bool        reco_enable_vipserver                = false;
     std::string reco_vipserver_domain                = "";

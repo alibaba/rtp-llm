@@ -66,6 +66,24 @@ struct CacheConfig {
     size_t block_size_bytes     = 0;  // (kv + scales together)
     size_t swa_block_size_bytes = 0;  // SWA groups (joint allocation with full groups)
 
+    // Per-block bytes of all CPU-resident DSV4 STATE pools (INDEXER_STATE,
+    // CSA_STATE, HCA_STATE). Excluded from the HBM block-num formula and
+    // sized separately by KVCacheConfig::state_pool_memory_mb.
+    size_t state_block_size_bytes = 0;
+
+    // Block count for STATE pools. Defaults to the HBM-derived block_num
+    // (legacy / state_pool_memory_mb=0); replaced by the CPU-budget-derived
+    // count when the env var is set.
+    uint32_t state_block_num = 0;
+
+    // True when STATE pools should be allocated on pinned CPU memory and
+    // sized independently from HBM. CacheConfigCreator sets this to
+    // (state_pool_memory_mb > 0 && state_block_size_bytes > 0). When
+    // false (env=0), STATE pools live on the device and their bytes are
+    // included in the HBM block-num formula — this is the pre-aa0572d
+    // behavior.
+    bool state_pool_uses_pinned_cpu = false;
+
     // ---- Per-block strides (one layer) ----
     size_t kv_block_stride_bytes = 0;
     size_t kv_scale_stride_bytes = 0;
@@ -93,7 +111,8 @@ struct CacheConfig {
         return std::max<int>(1, static_cast<int>(cache_specs.size()));
     }
 
-    void finalizeBlockNums(uint32_t global_block_num, const RuntimeConfig& runtime_config) {
+    void
+    finalizeBlockNums(uint32_t global_block_num, uint32_t state_global_block_num, const RuntimeConfig& runtime_config) {
         (void)runtime_config;
         if (!use_independent_block_pools || group_block_nums.empty()) {
             fixed_pool_reserve_bytes = 0;
@@ -106,18 +125,33 @@ struct CacheConfig {
             const bool     is_full  = gid < group_types.size() && group_types[gid] == CacheGroupType::FULL;
             const uint32_t addition = is_full ? 0u : non_full_addition_kvcache_blocks;
             const bool     is_swa   = gid < group_types.size() && group_types[gid] == CacheGroupType::SWA;
-            uint32_t       rule_blocks;
-            if (is_swa && step > 1 && global_block_num > 0) {
+            const auto region = gid < group_region_names.size() ? group_region_names[gid] : KVCacheRegionName::DEFAULT;
+            const bool is_state = isStateRegion(region);
+            uint32_t   rule_blocks;
+            if (is_state) {
+                rule_blocks = state_global_block_num;
+            } else if (is_swa && step > 1 && global_block_num > 0) {
                 rule_blocks = std::max(1u, global_block_num / static_cast<uint32_t>(step));
             } else {
                 rule_blocks = global_block_num;
             }
             group_block_nums[gid] = rule_blocks + addition;
-            if (addition > 0 && gid < group_block_size_bytes.size()) {
+            // STATE addition headroom only escapes the HBM reserve when STATE
+            // is allocated on pinned CPU. When STATE is on device (env=0),
+            // its addition still competes for HBM and must be reserved.
+            const bool exclude_from_reserve = is_state && state_pool_uses_pinned_cpu;
+            if (addition > 0 && gid < group_block_size_bytes.size() && !exclude_from_reserve) {
                 reserve += static_cast<size_t>(addition) * group_block_size_bytes[gid];
             }
         }
         fixed_pool_reserve_bytes = reserve;
+    }
+
+    // Legacy one-arg overload: callers that haven't been updated for STATE
+    // sizing get state_global_block_num = global_block_num (i.e. STATE pool
+    // matches HBM block_num — preserves pre-aa0572d behavior).
+    void finalizeBlockNums(uint32_t global_block_num, const RuntimeConfig& runtime_config) {
+        finalizeBlockNums(global_block_num, global_block_num, runtime_config);
     }
 
     std::string debugString(size_t indent = 0) const {

@@ -368,6 +368,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("device_cache_min_free_blocks", &KVCacheConfig::device_cache_min_free_blocks)
         .def_readwrite("load_cache_retry_times", &KVCacheConfig::load_cache_retry_times)
         .def_readwrite("non_full_addition_kvcache_blocks", &KVCacheConfig::non_full_addition_kvcache_blocks)
+        .def_readwrite("state_pool_memory_mb", &KVCacheConfig::state_pool_memory_mb)
         // Remote connector configuration fields
         .def_readwrite("reco_enable_vipserver", &KVCacheConfig::reco_enable_vipserver)
         .def_readwrite("reco_vipserver_domain", &KVCacheConfig::reco_vipserver_domain)
@@ -442,10 +443,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.reco_put_broadcast_timeout,
                                       self.reco_client_config,
                                       self.ssm_state_dtype,
-                                      self.non_full_addition_kvcache_blocks);
+                                      self.non_full_addition_kvcache_blocks,
+                                      self.state_pool_memory_mb);
             },
             [](py::tuple t) {
-                if (t.size() != 45 && t.size() < 50)
+                if (t.size() != 45 && t.size() != 46 && t.size() < 50)
                     throw std::runtime_error("Invalid state!");
                 KVCacheConfig c;
                 try {
@@ -504,6 +506,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.reco_client_config                   = t[42 + offset].cast<std::string>();
                     c.ssm_state_dtype                      = t[43 + offset].cast<std::string>();
                     c.non_full_addition_kvcache_blocks     = t[44 + offset].cast<uint32_t>();
+                    const size_t expected_with_state       = (has_disk_fields ? 51u : 46u);
+                    if (t.size() >= expected_with_state) {
+                        c.state_pool_memory_mb = t[45 + offset].cast<int64_t>();
+                    }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("KVCacheConfig unpickle error: ") + e.what());
                 }

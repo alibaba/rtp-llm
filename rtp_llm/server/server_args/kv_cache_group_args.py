@@ -396,3 +396,15 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         "每个非-FULL pool 实际容量 = 规则 block_num + 本参数。"
         "device 侧无论 linear_step 都生效；host incomplete pool 只在 linear_step>1 时生效。设为 0 关闭。",
     )
+    kv_cache_group.add_argument(
+        "--state_pool_memory_mb",
+        env_name="STATE_POOL_MEMORY_MB",
+        bind_to=(kv_cache_config, "state_pool_memory_mb"),
+        type=int,
+        default=0,
+        help="DSV4 STATE pools (INDEXER_STATE/CSA_STATE/HCA_STATE) CPU pinned BlockPool 的"
+        "每-rank 内存预算，单位 MiB（按 1024*1024 折算，与 KV_CACHE_MEM_MB 一致）。"
+        "0 表示不显式指定，STATE pool block_num 沿用 KV pool block_num（向后兼容）。"
+        "设置为 >0 时，STATE pool block_num = floor(state_pool_memory_mb * 1024 * 1024 / "
+        "Σstate_block_size_bytes)，与 HBM 派生的 block_num 解耦。",
+    )

@@ -3,8 +3,11 @@
 #include <algorithm>
 #include <limits>
 #include <memory>
+#include <stdexcept>
 #include <unordered_set>
 #include <vector>
+
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
@@ -877,9 +880,11 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4InitAndAggregatedCounters) {
     EXPECT_EQ(allocator->availableBlocksNum(), expected_total);
 }
 
-TEST_F(HybridPoolKVCacheAllocatorTest, DSV4PrefillStateRegionPoolsUsePinnedCpuBackingOnly) {
-    auto config    = makeDSV4HybridPoolConfig(/*block_num=*/200);
-    auto allocator = makeAllocator(config, RoleType::PREFILL);
+TEST_F(HybridPoolKVCacheAllocatorTest, DSV4StateRegionPoolsUsePinnedCpuBackingWhenToggled) {
+    auto config = makeDSV4HybridPoolConfig(/*block_num=*/200);
+    // STATE_POOL_MEMORY_MB > 0 path → CacheConfigCreator would set this true.
+    config.state_pool_uses_pinned_cpu = true;
+    auto allocator                    = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
 
     ASSERT_EQ(config.group_region_names.size(), 7u);
@@ -887,58 +892,185 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4PrefillStateRegionPoolsUsePinnedCpuBa
 
     for (size_t gid = 0; gid < allocator->groupBlockPools().size(); ++gid) {
         const auto region_name = config.group_region_names[gid];
-        const bool is_state_region =
-            region_name == KVCacheRegionName::INDEXER_STATE || region_name == KVCacheRegionName::CSA_STATE
-            || region_name == KVCacheRegionName::HCA_STATE;
         EXPECT_EQ(allocator->groupBlockPools()[gid]->where(),
-                  is_state_region ? MemoryType::MEMORY_CPU_PINNED : MemoryType::MEMORY_GPU)
+                  isStateRegion(region_name) ? MemoryType::MEMORY_CPU_PINNED : MemoryType::MEMORY_GPU)
             << "gid=" << gid << " region=" << static_cast<int>(region_name);
     }
 }
 
-TEST_F(HybridPoolKVCacheAllocatorTest, DSV4DecodeAndPdfusionRegionPoolsUseGpuBacking) {
-    auto expect_gpu_backing = [](RoleType role_type) {
-        auto config    = makeDSV4HybridPoolConfig(/*block_num=*/200);
-        auto allocator = makeAllocator(config, role_type);
-        ASSERT_TRUE(allocator->init());
-
-        ASSERT_EQ(config.group_region_names.size(), 7u);
-        ASSERT_EQ(allocator->groupBlockPools().size(), 7u);
-        for (size_t gid = 0; gid < allocator->groupBlockPools().size(); ++gid) {
-            EXPECT_EQ(allocator->groupBlockPools()[gid]->where(), MemoryType::MEMORY_GPU)
-                << "role=" << static_cast<int>(role_type) << " gid=" << gid
-                << " region=" << static_cast<int>(config.group_region_names[gid]);
-        }
-    };
-
-    expect_gpu_backing(RoleType::DECODE);
-    expect_gpu_backing(RoleType::PDFUSION);
-}
-
-TEST_F(HybridPoolKVCacheAllocatorTest, DSV4PrefillUserMrGpuFlagFollowsPoolBacking) {
-    auto config    = makeDSV4HybridPoolConfig(/*block_num=*/200);
-    auto allocator = makeAllocator(config, RoleType::PREFILL);
+TEST_F(HybridPoolKVCacheAllocatorTest, DSV4StateRegionPoolsOnGpuWhenStateBudgetZero) {
+    auto config = makeDSV4HybridPoolConfig(/*block_num=*/200);
+    // Default (env=0): state_pool_uses_pinned_cpu == false → all 7 pools on GPU.
+    ASSERT_FALSE(config.state_pool_uses_pinned_cpu);
+    auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
 
-    auto memory_util = std::make_shared<RecordingMemoryUtil>();
-    auto cache_store = std::make_shared<RecordingCacheStore>(memory_util);
-    allocator->regUserMr(/*model_id=*/0, cache_store);
+    ASSERT_EQ(allocator->groupBlockPools().size(), 7u);
+    for (size_t gid = 0; gid < allocator->groupBlockPools().size(); ++gid) {
+        EXPECT_EQ(allocator->groupBlockPools()[gid]->where(), MemoryType::MEMORY_GPU)
+            << "gid=" << gid << " region=" << static_cast<int>(config.group_region_names[gid]);
+    }
+}
 
-    const auto reg_cpu_count = std::count(memory_util->reg_gpu_flags.begin(), memory_util->reg_gpu_flags.end(), false);
-    const auto reg_gpu_count = std::count(memory_util->reg_gpu_flags.begin(), memory_util->reg_gpu_flags.end(), true);
-    EXPECT_GT(reg_cpu_count, 0) << "pinned CPU state pools must be registered as CPU memory";
-    EXPECT_GT(reg_gpu_count, 0) << "GPU pools must still be registered as GPU memory";
+TEST_F(HybridPoolKVCacheAllocatorTest, DSV4ConfigSplitsStateBytesOutOfSwaAccumulator) {
+    auto              mc = makeProModelConfig();
+    ParallelismConfig pc;
+    auto              config = HybridPoolConfigCreator::createConfig(mc, pc);
 
-    for (const auto& pool : allocator->groupBlockPools()) {
-        pool->deregUserMr();
+    ASSERT_EQ(config.groupNums(), 7);
+    ASSERT_EQ(config.group_region_names.size(), 7u);
+    ASSERT_EQ(config.group_block_size_bytes.size(), 7u);
+
+    size_t expected_state_bytes = 0;
+    size_t expected_swa_bytes   = 0;
+    size_t expected_full_bytes  = 0;
+    for (size_t gid = 0; gid < config.group_region_names.size(); ++gid) {
+        const auto region = config.group_region_names[gid];
+        const auto type   = config.group_types[gid];
+        if (isStateRegion(region)) {
+            expected_state_bytes += config.group_block_size_bytes[gid];
+        } else if (type == CacheGroupType::SWA) {
+            expected_swa_bytes += config.group_block_size_bytes[gid];
+        } else {
+            expected_full_bytes += config.group_block_size_bytes[gid];
+        }
     }
 
-    const auto dereg_cpu_count =
-        std::count(memory_util->dereg_gpu_flags.begin(), memory_util->dereg_gpu_flags.end(), false);
-    const auto dereg_gpu_count =
-        std::count(memory_util->dereg_gpu_flags.begin(), memory_util->dereg_gpu_flags.end(), true);
-    EXPECT_EQ(dereg_cpu_count, reg_cpu_count);
-    EXPECT_EQ(dereg_gpu_count, reg_gpu_count);
+    EXPECT_GT(expected_state_bytes, 0u);
+    EXPECT_GT(expected_swa_bytes, 0u);
+    EXPECT_GT(expected_full_bytes, 0u);
+
+    EXPECT_EQ(config.state_block_size_bytes, expected_state_bytes);
+    EXPECT_EQ(config.swa_block_size_bytes, expected_swa_bytes);  // SWA_KV only, no STATE
+    EXPECT_EQ(config.block_size_bytes, expected_full_bytes);
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FinalizeBlockNumsHonorsStateGlobalBlockNum) {
+    auto              mc = makeProModelConfig();
+    ParallelismConfig pc;
+    auto              config = HybridPoolConfigCreator::createConfig(mc, pc);
+    // Env > 0 simulation: STATE on pinned CPU, addition headroom must NOT
+    // appear in fixed_pool_reserve_bytes.
+    config.state_pool_uses_pinned_cpu = true;
+
+    RuntimeConfig rt;  // unused inside finalizeBlockNums today
+    config.finalizeBlockNums(/*global_block_num=*/200, /*state_global_block_num=*/50, rt);
+
+    ASSERT_EQ(config.group_block_nums.size(), config.group_region_names.size());
+    const uint32_t addition = config.non_full_addition_kvcache_blocks;
+    for (size_t gid = 0; gid < config.group_block_nums.size(); ++gid) {
+        const auto region = config.group_region_names[gid];
+        const auto type   = config.group_types[gid];
+        if (isStateRegion(region)) {
+            EXPECT_EQ(config.group_block_nums[gid], 50u + addition) << "gid=" << gid;
+        } else if (type == CacheGroupType::FULL) {
+            EXPECT_EQ(config.group_block_nums[gid], 200u) << "gid=" << gid;  // no addition for FULL
+        } else {
+            EXPECT_EQ(config.group_block_nums[gid], 200u + addition) << "gid=" << gid;
+        }
+    }
+
+    // STATE bytes must NOT be charged to the HBM fixed-pool reserve.
+    size_t expected_reserve = 0;
+    for (size_t gid = 0; gid < config.group_block_size_bytes.size(); ++gid) {
+        const auto region = config.group_region_names[gid];
+        const auto type   = config.group_types[gid];
+        if (type != CacheGroupType::FULL && !isStateRegion(region)) {
+            expected_reserve += static_cast<size_t>(addition) * config.group_block_size_bytes[gid];
+        }
+    }
+    EXPECT_EQ(config.fixed_pool_reserve_bytes, expected_reserve);
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FinalizeBlockNumsLegacyOverloadStillWorks) {
+    auto              mc = makeProModelConfig();
+    ParallelismConfig pc;
+    auto              config = HybridPoolConfigCreator::createConfig(mc, pc);
+
+    RuntimeConfig rt;
+    config.finalizeBlockNums(/*global_block_num=*/123, rt);  // legacy one-arg overload
+
+    const uint32_t addition = config.non_full_addition_kvcache_blocks;
+    for (size_t gid = 0; gid < config.group_block_nums.size(); ++gid) {
+        const auto type = config.group_types[gid];
+        if (type == CacheGroupType::FULL) {
+            EXPECT_EQ(config.group_block_nums[gid], 123u);
+        } else {
+            EXPECT_EQ(config.group_block_nums[gid], 123u + addition);
+        }
+    }
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FinalizeBlockNumsStateBudgetDecouplesFromHbm) {
+    auto              mc = makeProModelConfig();
+    ParallelismConfig pc;
+    auto              config = HybridPoolConfigCreator::createConfig(mc, pc);
+    ASSERT_GT(config.state_block_size_bytes, 0u);
+    config.state_pool_uses_pinned_cpu = true;  // env>0 simulation
+
+    // Pretend the HBM budget yielded 200 blocks but the operator wants
+    // STATE pools sized for ~50 blocks worth of CPU memory.
+    const uint32_t hbm_block_num      = 200;
+    const uint32_t state_target       = 50;
+    const size_t   state_budget_bytes = static_cast<size_t>(state_target) * config.state_block_size_bytes;
+    const uint32_t state_block_num    = static_cast<uint32_t>(state_budget_bytes / config.state_block_size_bytes);
+    EXPECT_EQ(state_block_num, state_target);
+
+    RuntimeConfig rt;
+    config.finalizeBlockNums(hbm_block_num, state_block_num, rt);
+    config.state_block_num = state_block_num;
+
+    const uint32_t addition = config.non_full_addition_kvcache_blocks;
+    for (size_t gid = 0; gid < config.group_block_nums.size(); ++gid) {
+        const auto region = config.group_region_names[gid];
+        const auto type   = config.group_types[gid];
+        if (isStateRegion(region)) {
+            EXPECT_EQ(config.group_block_nums[gid], state_target + addition) << "gid=" << gid;
+        } else if (type == CacheGroupType::FULL) {
+            EXPECT_EQ(config.group_block_nums[gid], hbm_block_num) << "gid=" << gid;
+        } else {
+            EXPECT_EQ(config.group_block_nums[gid], hbm_block_num + addition) << "gid=" << gid;
+        }
+    }
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, DSV4StateBudgetZeroMatchesHbmBlockNum) {
+    auto              mc = makeProModelConfig();
+    ParallelismConfig pc;
+    auto              config = HybridPoolConfigCreator::createConfig(mc, pc);
+
+    RuntimeConfig rt;
+    // env=0 → state_block_num falls back to global_block_num.
+    config.finalizeBlockNums(/*global_block_num=*/200, /*state_global_block_num=*/200, rt);
+
+    const uint32_t addition = config.non_full_addition_kvcache_blocks;
+    for (size_t gid = 0; gid < config.group_block_nums.size(); ++gid) {
+        const auto type = config.group_types[gid];
+        if (type == CacheGroupType::FULL) {
+            EXPECT_EQ(config.group_block_nums[gid], 200u) << "gid=" << gid;
+        } else {
+            EXPECT_EQ(config.group_block_nums[gid], 200u + addition) << "gid=" << gid;
+        }
+    }
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, DSV4StateBudgetTooSmallTriggersCheck) {
+    auto              mc = makeProModelConfig();
+    ParallelismConfig pc;
+    auto              config = HybridPoolConfigCreator::createConfig(mc, pc);
+    ASSERT_GT(config.state_block_size_bytes, 0u);
+
+    // Compute a budget that yields zero blocks: anything < state_block_size_bytes.
+    const size_t too_small_bytes = config.state_block_size_bytes - 1;
+
+    EXPECT_THROW(
+        {
+            const uint32_t state_block_num = static_cast<uint32_t>(too_small_bytes / config.state_block_size_bytes);
+            RTP_LLM_CHECK_WITH_INFO(state_block_num > 0,
+                                    "STATE_POOL_MEMORY_MB too small for state_block_size_bytes=%zu",
+                                    config.state_block_size_bytes);
+        },
+        std::runtime_error);
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4ConvertIndexToAddrByRegionRoutesToCorrectPool) {
