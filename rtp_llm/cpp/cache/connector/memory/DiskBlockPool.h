@@ -30,6 +30,10 @@ public:
 
     bool init();
 
+    // Slot allocation is driven by the copy-plan owner, matching the existing
+    // memory connector metadata model. Follower ranks receive the slot id in
+    // the broadcast copy plan and use it as an externally assigned file offset;
+    // they do not independently allocate or evict disk slots.
     std::optional<int32_t> malloc();
     void                   requestReference(int32_t slot);
     void                   requestFree(int32_t slot);
