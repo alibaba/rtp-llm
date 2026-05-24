@@ -184,32 +184,26 @@ class BackendRPCServerVisitor:
     def _report_recent_cache_key_metrics(self, block_cache_keys: List[int]) -> None:
         try:
             snapshot = self.recent_cache_key_window.record(block_cache_keys)
-            tags = {"timeWindowMs": str(snapshot.time_window_ms)}
             kmonitor.report(
                 AccMetrics.RECENT_CACHE_KEY_REQUEST_COUNT_METRIC,
                 1,
-                tags,
             )
             if snapshot.request_occurrences <= 0:
                 kmonitor.report(
                     AccMetrics.RECENT_CACHE_KEY_EMPTY_REQUEST_COUNT_METRIC,
                     1,
-                    tags,
                 )
             kmonitor.report(
                 AccMetrics.RECENT_CACHE_KEY_HIT_COUNT_METRIC,
                 snapshot.request_hit_occurrences,
-                tags,
             )
             kmonitor.report(
                 AccMetrics.RECENT_CACHE_KEY_TOTAL_COUNT_METRIC,
                 snapshot.request_occurrences,
-                tags,
             )
             kmonitor.report(
                 GaugeMetrics.RECENT_CACHE_KEY_HIT_RATIO_METRIC,
                 snapshot.request_hit_ratio,
-                tags,
             )
         except Exception:
             route_logger.exception("failed to report recent cache key metrics")
