@@ -52,6 +52,9 @@ MemoryDiskBlockCache::putCommitted(const CacheItem& input_item) {
     if (existing != items_.end()) {
         touchLocked(existing->second);
         if (!existing->second.is_complete && item.is_complete) {
+            if (existing->second.in_flight_ref > 0) {
+                return {false, std::nullopt};
+            }
             auto old_item = existing->second;
             eraseEvictKeyLocked(existing->second);
             item.last_access_seq = ++access_seq_;

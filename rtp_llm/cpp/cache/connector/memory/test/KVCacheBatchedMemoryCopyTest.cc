@@ -557,14 +557,15 @@ TEST(KVCacheBatchedMemoryCopyTest, Dsv4TypedLayoutUsesStagedCopyForD2HAndH2D) {
     std::vector<std::string> server_addrs = {"127.0.0.1:1"};
     auto connector = std::make_shared<KVCacheMemoryConnector>(config, kv_config, allocator, server_addrs);
     ASSERT_TRUE(connector->init());
-    ASSERT_NE(connector->block_pool_, nullptr);
+    auto memory_pool = connector->isDualPool() ? connector->complete_pool_ : connector->block_pool_;
+    ASSERT_NE(memory_pool, nullptr);
 
     const auto slots = connector->layerRegionSlots();
     ASSERT_TRUE(connector->hasTypedLayerRegionSlots(slots));
     ASSERT_TRUE(connector->isDsv4TypedCacheLayout(slots));
     ASSERT_GT(slots.size(), config.layer_all_num);
 
-    auto mem_blocks = connector->block_pool_->malloc(2);
+    auto mem_blocks = memory_pool->malloc(2);
     ASSERT_EQ(mem_blocks.size(), 2u);
     const std::vector<BlockIdxType> request_mem_blocks{
         static_cast<BlockIdxType>(mem_blocks[1]), static_cast<BlockIdxType>(mem_blocks[0])};
@@ -583,6 +584,7 @@ TEST(KVCacheBatchedMemoryCopyTest, Dsv4TypedLayoutUsesStagedCopyForD2HAndH2D) {
     for (size_t block_idx = 0; block_idx < request_mem_blocks.size(); ++block_idx) {
         auto* item = req.add_copy_items();
         item->set_mem_block(request_mem_blocks[block_idx]);
+        item->set_is_complete(true);
         ASSERT_EQ(gpu_block_sets[block_idx].size(), slots.size());
         for (const auto block : gpu_block_sets[block_idx]) {
             item->add_gpu_blocks(block);
@@ -590,7 +592,7 @@ TEST(KVCacheBatchedMemoryCopyTest, Dsv4TypedLayoutUsesStagedCopyForD2HAndH2D) {
     }
 
     for (size_t block_idx = 0; block_idx < request_mem_blocks.size(); ++block_idx) {
-        const auto mem_bufs = connector->block_pool_->convertIndexToBuffer(0, request_mem_blocks[block_idx]);
+        const auto mem_bufs = memory_pool->convertIndexToBuffer(0, request_mem_blocks[block_idx]);
         ASSERT_EQ(mem_bufs.size(), 1u);
         const auto& mem_buffer = mem_bufs[0];
         ASSERT_NE(mem_buffer.addr, nullptr);
@@ -613,7 +615,7 @@ TEST(KVCacheBatchedMemoryCopyTest, Dsv4TypedLayoutUsesStagedCopyForD2HAndH2D) {
     ASSERT_TRUE(connector->tryCopyCacheWithStagedMemoryCopy(req, KVCacheMemoryConnector::CopyDirection::D2H, slots));
 
     for (size_t block_idx = 0; block_idx < request_mem_blocks.size(); ++block_idx) {
-        const auto mem_bufs = connector->block_pool_->convertIndexToBuffer(0, request_mem_blocks[block_idx]);
+        const auto mem_bufs = memory_pool->convertIndexToBuffer(0, request_mem_blocks[block_idx]);
         ASSERT_EQ(mem_bufs.size(), 1u);
         const auto& mem_buffer = mem_bufs[0];
 
@@ -637,7 +639,7 @@ TEST(KVCacheBatchedMemoryCopyTest, Dsv4TypedLayoutUsesStagedCopyForD2HAndH2D) {
     }
 
     for (size_t block_idx = 0; block_idx < request_mem_blocks.size(); ++block_idx) {
-        const auto mem_bufs = connector->block_pool_->convertIndexToBuffer(0, request_mem_blocks[block_idx]);
+        const auto mem_bufs = memory_pool->convertIndexToBuffer(0, request_mem_blocks[block_idx]);
         ASSERT_EQ(mem_bufs.size(), 1u);
         const auto& mem_buffer = mem_bufs[0];
 

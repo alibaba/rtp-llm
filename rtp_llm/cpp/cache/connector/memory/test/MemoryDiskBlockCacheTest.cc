@@ -84,6 +84,24 @@ TEST(MemoryDiskBlockCacheTest, PartialToCompleteCanUpgradeAcrossBacking) {
     EXPECT_TRUE(match.is_complete);
 }
 
+TEST(MemoryDiskBlockCacheTest, PartialToCompleteDoesNotReplaceInFlightItem) {
+    MemoryDiskBlockCache cache;
+    ASSERT_TRUE(cache.putCommitted(memoryItem(1, 10, false)).first);
+
+    auto in_flight = cache.matchAndMarkInFlight(1);
+    EXPECT_EQ(in_flight.backing_type, CacheBackingType::MEMORY);
+    EXPECT_EQ(in_flight.matched_index, 10);
+
+    auto [ok, popped] = cache.putCommitted(diskItem(1, 20, true));
+    EXPECT_FALSE(ok);
+    EXPECT_FALSE(popped.has_value());
+
+    auto match = cache.match(1);
+    EXPECT_EQ(match.backing_type, CacheBackingType::MEMORY);
+    EXPECT_EQ(match.matched_index, 10);
+    EXPECT_FALSE(match.is_complete);
+}
+
 TEST(MemoryDiskBlockCacheTest, InFlightEntryIsNotEvictable) {
     MemoryDiskBlockCache cache;
     ASSERT_TRUE(cache.putCommitted(memoryItem(1, 10)).first);
