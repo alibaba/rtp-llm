@@ -116,6 +116,7 @@ static CacheConfig makeCompactDSV4ManagerConfig(uint32_t block_num = 16) {
     ParallelismConfig pc;
     auto              config = HybridPoolConfigCreator::createConfig(makeDSV4ManagerFlashModelConfig(), pc);
     config.block_num         = block_num;
+    config.non_full_addition_kvcache_blocks = 0;
     config.group_block_nums.assign(config.groupNums(), block_num);
     return config;
 }
@@ -126,6 +127,7 @@ static CacheConfig makeDSV4ConfigWithConcurrencyPool(uint32_t full_block_num, ui
     ParallelismConfig pc;
     auto              config = HybridPoolConfigCreator::createConfig(makeDSV4ManagerFlashModelConfig(), pc);
     config.block_num         = full_block_num;
+    config.non_full_addition_kvcache_blocks = 0;
     for (int gid = 0; gid < config.groupNums(); ++gid) {
         config.group_block_nums[gid] = (gid < 3) ? full_block_num : (2u * swa_batch_size);
     }
@@ -138,7 +140,7 @@ makeProductionDSV4Config(uint32_t full_block_num, uint32_t max_concurrency, uint
     RuntimeConfig     runtime_config;
     KVCacheConfig     kv_cache_config;
     kv_cache_config.test_block_num                              = full_block_num;
-    kv_cache_config.dsv4_fixed_pool_blocks                      = fixed_pool_blocks;
+    kv_cache_config.non_full_addition_kvcache_blocks            = fixed_pool_blocks;
     runtime_config.max_generate_batch_size                      = max_concurrency;
     runtime_config.fifo_scheduler_config.max_context_batch_size = max_concurrency;
     return CacheConfigCreator::createConfig(makeDSV4ManagerFlashModelConfig(), pc, runtime_config, kv_cache_config);
@@ -1119,15 +1121,17 @@ TEST_F(KVCacheManagerTest, DSV4EvictionTriggeredWhenPoolExhaustedByCache) {
 TEST_F(KVCacheManagerTest, DSV4MaxConcurrencyOneReuseOneBlockAndAllocTwoTailBlocks) {
     auto manager_config = makeProductionDSV4Config(/*full_block_num=*/8, /*max_concurrency=*/1);
     ASSERT_EQ(manager_config.group_block_nums.size(), static_cast<size_t>(kDsv4PoolNum));
+    // SWA groups: rule_blocks(8) + non_full_addition(4) = 12
     for (int gid = 3; gid < kDsv4PoolNum; ++gid) {
-        ASSERT_EQ(manager_config.group_block_nums[gid], 5u) << "group " << gid;
+        ASSERT_EQ(manager_config.group_block_nums[gid], 12u) << "group " << gid;
     }
 
     auto manager = std::make_shared<KVCacheManager>(manager_config, /*warmup=*/false);
     ASSERT_TRUE(manager->init());
 
     const size_t free_before = manager->freeBlocksNum();
-    EXPECT_EQ(free_before, 3u * 7u + 4u * 4u);
+    // FULL groups: 3 × (8-1)=21, SWA groups: 4 × (12-1)=44, total=65
+    EXPECT_EQ(free_before, 3u * 7u + 4u * 11u);
     const int spb = static_cast<int>(manager_config.seq_size_per_block);
 
     auto makeTokens = [&](int seq_len) {

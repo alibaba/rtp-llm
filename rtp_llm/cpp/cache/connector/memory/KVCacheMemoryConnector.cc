@@ -213,11 +213,22 @@ void KVCacheMemoryConnector::initBlockPool() {
     size_t complete_block_num;
     size_t incomplete_block_num;
     if (step > 1) {
+        const size_t addition       = static_cast<size_t>(kv_cache_config_.non_full_addition_kvcache_blocks);
+        const size_t addition_bytes = addition * incomplete_block_size_;
+        RTP_LLM_CHECK_WITH_INFO(total_bytes > addition_bytes,
+                                "memory_cache_size_mb=%ld too small: non_full_addition reserve=%zu bytes "
+                                "(addition=%zu x incomplete_block=%zu) exceeds total=%zu",
+                                memory_cache_size_mb,
+                                addition_bytes,
+                                addition,
+                                incomplete_block_size_,
+                                total_bytes);
+        const size_t available = total_bytes - addition_bytes;
         const size_t effective_block_bytes =
             complete_block_size_ + incomplete_block_size_ * static_cast<size_t>(step - 1);
         RTP_LLM_CHECK_WITH_INFO(effective_block_bytes > 0, "effective block bytes is zero");
-        complete_block_num   = total_bytes / effective_block_bytes;
-        incomplete_block_num = complete_block_num * static_cast<size_t>(step - 1);
+        complete_block_num   = available / effective_block_bytes;
+        incomplete_block_num = complete_block_num * static_cast<size_t>(step - 1) + addition;
     } else {
         complete_block_num   = total_bytes / complete_block_size_;
         incomplete_block_num = 0;
@@ -228,12 +239,14 @@ void KVCacheMemoryConnector::initBlockPool() {
                             complete_block_size_);
 
     RTP_LLM_LOG_INFO(
-        "dual pool init: complete_size=%zu complete_num=%zu incomplete_size=%zu incomplete_num=%zu step=%d",
+        "dual pool init: complete_size=%zu complete_num=%zu incomplete_size=%zu incomplete_num=%zu step=%d "
+        "non_full_addition=%u",
         complete_block_size_,
         complete_block_num,
         incomplete_block_size_,
         incomplete_block_num,
-        step);
+        step,
+        kv_cache_config_.non_full_addition_kvcache_blocks);
 
     auto make_pool = [](size_t block_size, size_t block_num) -> std::shared_ptr<BlockPool> {
         if (block_num == 0) {
@@ -288,8 +301,7 @@ void KVCacheMemoryConnector::initDiskBlockPools() {
     disk_mount_guard_     = std::make_unique<DiskMountGuard>();
     RTP_LLM_CHECK_WITH_INFO(disk_mount_guard_->init(mount_path), "init disk mount guard failed");
 
-    const size_t total_disk_bytes =
-        static_cast<size_t>(kv_cache_config_.memory_cache_disk_size_mb) * 1024UL * 1024UL;
+    const size_t total_disk_bytes   = static_cast<size_t>(kv_cache_config_.memory_cache_disk_size_mb) * 1024UL * 1024UL;
     const bool   use_disk_dual_pool = isDualPool() && incomplete_pool_ != nullptr;
     const size_t complete_block_size = isDualPool() ? complete_block_size_ : memoryCacheBlockSizeBytes();
     RTP_LLM_CHECK_WITH_INFO(complete_block_size > 0, "init disk block pool failed, complete block size is zero");
@@ -349,10 +361,8 @@ void KVCacheMemoryConnector::initDiskBlockPools() {
                      incomplete_file_bytes,
                      step);
 
-    complete_disk_pool_ =
-        make_disk_pool(CacheBlockKind::COMPLETE, complete_file_bytes, complete_block_size);
-    incomplete_disk_pool_ =
-        make_disk_pool(CacheBlockKind::INCOMPLETE, incomplete_file_bytes, incomplete_blk_size);
+    complete_disk_pool_   = make_disk_pool(CacheBlockKind::COMPLETE, complete_file_bytes, complete_block_size);
+    incomplete_disk_pool_ = make_disk_pool(CacheBlockKind::INCOMPLETE, incomplete_file_bytes, incomplete_blk_size);
 }
 
 std::vector<KVCacheMemoryConnector::LayerRegionSlot> KVCacheMemoryConnector::layerRegionSlots() const {
@@ -675,7 +685,7 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::share
     }
 
     std::shared_ptr<CopyPlan> copy_plan;
-    auto memory_match_context = std::dynamic_pointer_cast<MemoryAsyncMatchContext>(match_context);
+    auto                      memory_match_context = std::dynamic_pointer_cast<MemoryAsyncMatchContext>(match_context);
     if (memory_match_context && memory_match_context->readCopyPlan()) {
         if (memory_match_context->startReadBlockIndex() == start_read_block_index
             && memory_match_context->readBlockNum() == read_block_num) {
@@ -691,7 +701,8 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::share
         }
     }
     if (!copy_plan) {
-        copy_plan = buildCopyPlanForRead(cache_keys, layer_attn_block_ids, slots, start_read_block_index, read_block_num);
+        copy_plan =
+            buildCopyPlanForRead(cache_keys, layer_attn_block_ids, slots, start_read_block_index, read_block_num);
     }
     if (!copy_plan || copy_plan->copy_infos.empty()) {
         reportReadMetrics(false, timer.done_us(), cache_keys_size, 0);
@@ -773,8 +784,8 @@ KVCacheMemoryConnector::buildCopyPlanForRead(const CacheKeysType&               
         } else {
             auto disk_pool = diskPoolFor(blockKindFromComplete(match_result.is_complete));
             if (!disk_pool || !disk_pool->validSlot(match_result.disk_slot)) {
-                RTP_LLM_LOG_WARNING("build copy plan for read failed, missing disk pool or invalid slot, cache key: %ld",
-                                    cache_key);
+                RTP_LLM_LOG_WARNING(
+                    "build copy plan for read failed, missing disk pool or invalid slot, cache key: %ld", cache_key);
                 success = false;
                 break;
             }
@@ -1145,9 +1156,8 @@ bool KVCacheMemoryConnector::validateCopyItemBacking(const MemoryOperationReques
         }
         auto disk_pool = diskPoolFor(blockKindFromComplete(item.is_complete()));
         if (!disk_pool || !disk_pool->validSlot(item.disk_slot())) {
-            RTP_LLM_LOG_WARNING("disk copy item slot is out of range, slot=%d, is_complete=%d",
-                                item.disk_slot(),
-                                item.is_complete());
+            RTP_LLM_LOG_WARNING(
+                "disk copy item slot is out of range, slot=%d, is_complete=%d", item.disk_slot(), item.is_complete());
             return false;
         }
         return true;
@@ -1243,7 +1253,7 @@ bool KVCacheMemoryConnector::copyDiskItem(const MemoryOperationRequestPB::CopyIt
 
     std::vector<torch::Tensor> dst_buffers;
     std::vector<torch::Tensor> src_buffers;
-    size_t                     byte_off = 0;
+    size_t                     byte_off         = 0;
     const bool                 item_is_complete = item.is_complete();
     for (size_t slot_idx = 0; slot_idx < slots.size(); ++slot_idx) {
         const auto& slot      = slots[slot_idx];
@@ -1641,9 +1651,8 @@ bool KVCacheMemoryConnector::checkLayerBlocks(const LayerBlockIds& layer_block_i
     return true;
 }
 
-LayerAttnBlockIds
-KVCacheMemoryConnector::resourceLayerRegionBlocks(const KVCacheResource&                resource,
-                                                  const std::vector<LayerRegionSlot>& slots) const {
+LayerAttnBlockIds KVCacheMemoryConnector::resourceLayerRegionBlocks(const KVCacheResource&              resource,
+                                                                    const std::vector<LayerRegionSlot>& slots) const {
     if (!resource.layerAttnBlocks().empty()) {
         return resource.layerAttnBlocks();
     }
@@ -1797,7 +1806,7 @@ bool KVCacheMemoryConnector::allocateOneBacking(CopyInfoPerKey& copy_info) {
 }
 
 bool KVCacheMemoryConnector::tryMallocMemoryBlock(CacheBlockKind kind, BlockIdxType& block) {
-    block = NULL_BLOCK_IDX;
+    block     = NULL_BLOCK_IDX;
     auto pool = memoryPoolFor(kind);
     if (pool == nullptr || pool->freeBlocksNum() == 0) {
         return false;
@@ -1811,7 +1820,7 @@ bool KVCacheMemoryConnector::tryMallocMemoryBlock(CacheBlockKind kind, BlockIdxT
 }
 
 bool KVCacheMemoryConnector::tryMallocDiskSlot(CacheBlockKind kind, int32_t& slot) {
-    slot = -1;
+    slot      = -1;
     auto pool = diskPoolFor(kind);
     if (!pool) {
         return false;
@@ -1942,7 +1951,7 @@ void KVCacheMemoryConnector::putToCache(const MemoryBlockCache::CacheItem& item)
 }
 
 void KVCacheMemoryConnector::putToCache(CopyInfoPerKey& copy_info) {
-    const auto kind = blockKindFromComplete(copy_info.is_complete);
+    const auto                      kind = blockKindFromComplete(copy_info.is_complete);
     MemoryDiskBlockCache::CacheItem item;
     item.cache_key    = copy_info.cache_key;
     item.backing_type = copy_info.backing_type;
@@ -1957,8 +1966,8 @@ void KVCacheMemoryConnector::putToCache(CopyInfoPerKey& copy_info) {
         RTP_LLM_CHECK_WITH_INFO(disk_pool != nullptr, "disk pool is null when putting disk cache item");
         item.block_size = disk_pool->blockSizeBytes();
     }
-    item.is_resident  = false;
-    item.is_complete  = copy_info.is_complete;
+    item.is_resident = false;
+    item.is_complete = copy_info.is_complete;
 
     referenceCacheBacking(item);
     // Transfer the write request ref to the cache ref before the item enters the
@@ -2135,8 +2144,8 @@ void KVCacheMemoryConnector::reportDiskCopyMetrics(bool success, int64_t latency
 }
 
 void KVCacheMemoryConnector::reportMetricsLoop() {
-    size_t                           last_disk_read_bytes  = 0;
-    size_t                           last_disk_write_bytes = 0;
+    size_t                                last_disk_read_bytes   = 0;
+    size_t                                last_disk_write_bytes  = 0;
     std::chrono::steady_clock::time_point last_disk_metrics_time = std::chrono::steady_clock::now();
     while (!stop_.load()) {
         if (metrics_reporter_) {
@@ -2178,16 +2187,16 @@ void KVCacheMemoryConnector::reportMetricsLoop() {
             if (complete_disk_pool_) {
                 const auto total_disk_slots = complete_disk_pool_->totalSlots()
                                               + (incomplete_disk_pool_ ? incomplete_disk_pool_->totalSlots() : 0);
-                const auto free_disk_slots = complete_disk_pool_->freeSlots()
-                                             + (incomplete_disk_pool_ ? incomplete_disk_pool_->freeSlots() : 0);
+                const auto free_disk_slots =
+                    complete_disk_pool_->freeSlots() + (incomplete_disk_pool_ ? incomplete_disk_pool_->freeSlots() : 0);
                 const auto available_disk_slots =
                     complete_disk_pool_->availableSlots()
                     + (incomplete_disk_pool_ ? incomplete_disk_pool_->availableSlots() : 0);
-                const auto read_bytes = complete_disk_pool_->readBytes()
-                                        + (incomplete_disk_pool_ ? incomplete_disk_pool_->readBytes() : 0);
+                const auto read_bytes =
+                    complete_disk_pool_->readBytes() + (incomplete_disk_pool_ ? incomplete_disk_pool_->readBytes() : 0);
                 const auto write_bytes = complete_disk_pool_->writeBytes()
                                          + (incomplete_disk_pool_ ? incomplete_disk_pool_->writeBytes() : 0);
-                const auto now                  = std::chrono::steady_clock::now();
+                const auto now = std::chrono::steady_clock::now();
                 const auto elapsed_us =
                     std::chrono::duration_cast<std::chrono::microseconds>(now - last_disk_metrics_time).count();
                 const double elapsed_sec = elapsed_us > 0 ? static_cast<double>(elapsed_us) / 1000000.0 : 1.0;

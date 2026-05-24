@@ -139,7 +139,7 @@ std::string KVCacheConfig::to_string() const {
         << "enable_tiered_memory_cache: " << enable_tiered_memory_cache << "\n"
         << "device_cache_min_free_blocks: " << device_cache_min_free_blocks << "\n"
         << "load_cache_retry_times: " << load_cache_retry_times << "\n"
-        << "dsv4_fixed_pool_blocks: " << dsv4_fixed_pool_blocks << "\n";
+        << "non_full_addition_kvcache_blocks: " << non_full_addition_kvcache_blocks << "\n";
     return oss.str();
 }
 

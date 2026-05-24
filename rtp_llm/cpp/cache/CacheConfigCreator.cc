@@ -77,9 +77,11 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
         size_t paged_budget = kv_cache_mem_size;
         if (config.fixed_pool_reserve_bytes > 0) {
             RTP_LLM_CHECK_WITH_INFO(kv_cache_mem_size > config.fixed_pool_reserve_bytes,
-                                    "kv cache budget %zu MiB is smaller than fixed-pool reservation %zu MiB",
+                                    "kv cache budget %zu MiB is smaller than fixed-pool reservation %zu MiB "
+                                    "(includes non_full_addition_kvcache_blocks=%u; reduce it if needed)",
                                     kv_cache_mem_size / 1024 / 1024,
-                                    config.fixed_pool_reserve_bytes / 1024 / 1024);
+                                    config.fixed_pool_reserve_bytes / 1024 / 1024,
+                                    config.non_full_addition_kvcache_blocks);
             paged_budget = kv_cache_mem_size - config.fixed_pool_reserve_bytes;
             RTP_LLM_LOG_INFO("kv cache: total budget %zu MiB, fixed-pool reserve %zu MiB, paged budget %zu MiB",
                              kv_cache_mem_size / 1024 / 1024,
@@ -181,7 +183,8 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
         size_t paged_budget = kv_cache_mem_size;
         if (fixed_reserve > 0) {
             RTP_LLM_CHECK_WITH_INFO(kv_cache_mem_size > fixed_reserve,
-                                    "sp kv cache budget %zu MiB is smaller than fixed-pool reservation %zu MiB",
+                                    "sp kv cache budget %zu MiB is smaller than fixed-pool reservation %zu MiB "
+                                    "(includes non_full_addition_kvcache_blocks; reduce it if needed)",
                                     kv_cache_mem_size / 1024 / 1024,
                                     fixed_reserve / 1024 / 1024);
             paged_budget = kv_cache_mem_size - fixed_reserve;

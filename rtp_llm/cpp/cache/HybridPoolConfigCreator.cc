@@ -140,7 +140,6 @@ void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
     config.use_independent_block_pools = true;
     const auto group_num               = static_cast<size_t>(config.groupNums());
     config.group_block_nums.resize(group_num, 0);
-    config.group_fixed_pool_blocks.resize(group_num, 0);
     config.group_seq_size_per_block.resize(group_num, config.seq_size_per_block);
     config.group_kv_block_stride_bytes.resize(group_num, 0);
     config.group_kv_scale_stride_bytes.resize(group_num, 0);
@@ -171,12 +170,11 @@ void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
         config.group_kv_block_stride_bytes[gid] = kv_stride;
         config.group_kv_scale_stride_bytes[gid] = scale_stride;
         config.group_block_size_bytes[gid]      = static_cast<size_t>(layer_count) * (kv_stride + scale_stride);
-        const bool is_fixed                     = config.group_fixed_pool_blocks[gid] > 0;
         const bool is_swa = gid < config.group_types.size() && config.group_types[gid] == CacheGroupType::SWA;
-        if (!is_fixed && is_swa) {
+        if (is_swa) {
             swa_kv_block_bytes += static_cast<size_t>(layer_count) * kv_stride;
             swa_scale_block_bytes += static_cast<size_t>(layer_count) * scale_stride;
-        } else if (!is_fixed) {
+        } else {
             total_kv_block_bytes += static_cast<size_t>(layer_count) * kv_stride;
             total_scale_block_bytes += static_cast<size_t>(layer_count) * scale_stride;
         }
@@ -282,6 +280,7 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
     setupGroupCounts(config);
     populateDefaultRegionMappings(config);
     setupIndependentPoolSizes(config, is_mtp);
+    config.non_full_addition_kvcache_blocks = kv_cache_config.non_full_addition_kvcache_blocks;
     return config;
 }
 

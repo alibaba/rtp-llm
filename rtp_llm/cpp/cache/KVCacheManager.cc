@@ -629,20 +629,7 @@ void KVCacheManager::allocateAndSync() {
         }
     }
     if (config_.use_independent_block_pools) {
-        const int step = std::max(1, config_.linear_step);
-        for (size_t gid = 0; gid < config_.group_block_nums.size(); ++gid) {
-            const uint32_t fixed_pool_blocks =
-                gid < config_.group_fixed_pool_blocks.size() ? config_.group_fixed_pool_blocks[gid] : 0;
-            if (fixed_pool_blocks == 0) {
-                const bool is_swa = gid < config_.group_types.size() && config_.group_types[gid] == CacheGroupType::SWA;
-                if (is_swa && step > 1) {
-                    config_.group_block_nums[gid] =
-                        std::max(1u, static_cast<uint32_t>(config_.block_num) / static_cast<uint32_t>(step));
-                } else {
-                    config_.group_block_nums[gid] = static_cast<uint32_t>(config_.block_num);
-                }
-            }
-        }
+        config_.finalizeBlockNums(static_cast<uint32_t>(config_.block_num), runtime_config_);
     }
     RTP_LLM_LOG_INFO("block_num is %d after tp sync", config_.block_num);
 }

@@ -367,7 +367,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("enable_tiered_memory_cache", &KVCacheConfig::enable_tiered_memory_cache)
         .def_readwrite("device_cache_min_free_blocks", &KVCacheConfig::device_cache_min_free_blocks)
         .def_readwrite("load_cache_retry_times", &KVCacheConfig::load_cache_retry_times)
-        .def_readwrite("dsv4_fixed_pool_blocks", &KVCacheConfig::dsv4_fixed_pool_blocks)
+        .def_readwrite("non_full_addition_kvcache_blocks", &KVCacheConfig::non_full_addition_kvcache_blocks)
         // Remote connector configuration fields
         .def_readwrite("reco_enable_vipserver", &KVCacheConfig::reco_enable_vipserver)
         .def_readwrite("reco_vipserver_domain", &KVCacheConfig::reco_vipserver_domain)
@@ -442,7 +442,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.reco_put_broadcast_timeout,
                                       self.reco_client_config,
                                       self.ssm_state_dtype,
-                                      self.dsv4_fixed_pool_blocks);
+                                      self.non_full_addition_kvcache_blocks);
             },
             [](py::tuple t) {
                 if (t.size() != 45 && t.size() < 50)
@@ -503,7 +503,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.reco_put_broadcast_timeout           = t[41 + offset].cast<int>();
                     c.reco_client_config                   = t[42 + offset].cast<std::string>();
                     c.ssm_state_dtype                      = t[43 + offset].cast<std::string>();
-                    c.dsv4_fixed_pool_blocks               = t[44 + offset].cast<uint32_t>();
+                    c.non_full_addition_kvcache_blocks     = t[44 + offset].cast<uint32_t>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("KVCacheConfig unpickle error: ") + e.what());
                 }

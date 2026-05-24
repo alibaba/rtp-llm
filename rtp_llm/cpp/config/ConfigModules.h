@@ -177,13 +177,10 @@ struct KVCacheConfig {
     int64_t device_cache_min_free_blocks = 0;
     int     load_cache_retry_times       = 1;  // Maximum retry attempts for load cache transfer failures
 
-    // DSV4 fixed-pool (indexer/CSA/HCA/SWA state) total block count per pool.
-    // Paged pools are unaffected. This is the absolute number of blocks reserved
-    // for each fixed pool; the runtime scheduler shares them across concurrent
-    // requests. Each request may hold up to 2 active tail blocks plus 1 reused
-    // (prefix-cache matched) block per pool, so the pool must be sized for
-    // (active_concurrency × 3) plus headroom.
-    uint32_t dsv4_fixed_pool_blocks = 256;
+    // Extra blocks added to every non-FULL group (SWA / LINEAR) on device side
+    // and to the memory incomplete pool when linear_step > 1.
+    // Each non-FULL pool gets: rule_blocks + non_full_addition_kvcache_blocks.
+    uint32_t non_full_addition_kvcache_blocks = 256;
 
     // Remote connector configuration fields
     bool        reco_enable_vipserver                = false;
