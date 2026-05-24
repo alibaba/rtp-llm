@@ -7,6 +7,17 @@ test_copts = [
     "-fno-access-control",
 ] + copts()
 
+cc_import(
+    name = "cuda13_torch_nvshmem",
+    shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
+)
+
+cuda13_torch_link_deps = select({
+    "@//:using_cuda13_x86": [
+        ":cuda13_torch_nvshmem",
+    ],
+    "//conditions:default": [],
+})
 
 cc_library(
     name = "mock_engine",
@@ -27,7 +38,7 @@ cc_library(
         "@com_google_googletest//:gtest_main",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
-    ] + torch_deps(),
+    ] + torch_deps() + cuda13_torch_link_deps,
     alwayslink = 1,
     visibility = ["//visibility:public"],
 )
@@ -48,7 +59,7 @@ cc_test(
         "@com_google_googletest//:gtest_main",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
-    ],
+    ] + cuda13_torch_link_deps,
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
@@ -64,7 +75,7 @@ cc_test(
     copts = test_copts,
     deps =  [
         ":mock_engine",
-    ],
+    ] + cuda13_torch_link_deps,
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
@@ -85,7 +96,7 @@ cc_test(
         "@com_google_googletest//:gtest_main",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
-    ],
+    ] + cuda13_torch_link_deps,
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
