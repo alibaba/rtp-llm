@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstring>
 
+#include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/cache/BlockPool.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/connector/memory/MemoryAsyncContext.h"
@@ -64,6 +65,11 @@ static size_t alignUp(size_t value, size_t alignment) {
 
 static size_t regionIndex(KVCacheRegionName region_name) {
     return static_cast<size_t>(region_name);
+}
+
+static size_t memoryCacheMinUncachedBlocks() {
+    static const size_t value = autil::EnvUtil::getEnv("MEMORY_CACHE_MIN_UNCACHED_BLOCKS", size_t(0));
+    return value;
 }
 
 KVCacheMemoryConnector::KVCacheMemoryConnector(const CacheConfig&                       cache_config,
@@ -469,6 +475,21 @@ std::shared_ptr<AsyncMatchContext> KVCacheMemoryConnector::asyncMatch(const std:
                                  already_reuse_num,
                                  cache_keys_size);
             }
+        }
+    }
+
+    const size_t min_uncached_blocks = memoryCacheMinUncachedBlocks();
+    if (min_uncached_blocks > 0 && cache_keys_size > min_uncached_blocks) {
+        const size_t max_matched_num = cache_keys_size - min_uncached_blocks;
+        if (matched_num > max_matched_num) {
+            RTP_LLM_LOG_INFO("memory cache match capped: matched=%zu capped=%zu cache_keys=%zu "
+                             "min_uncached_blocks=%zu already_reuse=%zu",
+                             matched_num,
+                             max_matched_num,
+                             cache_keys_size,
+                             min_uncached_blocks,
+                             already_reuse_num);
+            matched_num = max_matched_num;
         }
     }
 
