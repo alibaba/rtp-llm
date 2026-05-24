@@ -439,6 +439,13 @@ class MlaFlashInferDecodeOp(object):
         self._fp8_kv = kv_cache_dtype == KvCacheDataType.FP8
         self._fmha_params = None
         self._sched_meta = None
+        self._fp8_prefill_sched_meta = None
+        self._fp8_prefill_indices = None
+        self._fp8_prefill_topk_length = None
+        self._fp8_prefill_qo_indptr_h = None
+        self._fp8_prefill_q_lens_h = None
+        self._fp8_prefill_max_q_len = 0
+        self._fp8_prefill_total_q = 0
         global g_workspace_buffer
 
         if self._fp8_kv:
@@ -508,7 +515,18 @@ class MlaFlashInferDecodeOp(object):
             cache_seqlens = fmha_params.kvlen_h[:B].to(
                 dtype=torch.int32, device=block_table.device
             )
+            total_q = (
+                int(fmha_params.qo_indptr_h[B].item())
+                if B > 0 and fmha_params.qo_indptr_h.numel() > B
+                else B
+            )
             self._fp8_plan_B = B
+            self._clear_fp8_prefill_absorb_plan()
+            if total_q > B:
+                self._build_fp8_prefill_absorb_plan(
+                    fmha_params, block_table, cache_seqlens, total_q
+                )
+                return
             self._fp8_indices_buf[:B].fill_(-1)
             self._fp8_topk_len_buf[:B].copy_(cache_seqlens)
             for i in range(B):
@@ -557,6 +575,73 @@ class MlaFlashInferDecodeOp(object):
         self._sched_meta.tile_scheduler_metadata = None
         self._sched_meta.num_splits = None
 
+    def _clear_fp8_prefill_absorb_plan(self) -> None:
+        self._fp8_prefill_sched_meta = None
+        self._fp8_prefill_indices = None
+        self._fp8_prefill_topk_length = None
+        self._fp8_prefill_qo_indptr_h = None
+        self._fp8_prefill_q_lens_h = None
+        self._fp8_prefill_max_q_len = 0
+        self._fp8_prefill_total_q = 0
+
+    def _build_fp8_prefill_absorb_plan(
+        self,
+        fmha_params: Any,
+        block_table: torch.Tensor,
+        cache_seqlens: torch.Tensor,
+        total_q: int,
+    ) -> None:
+        B = int(cache_seqlens.size(0))
+        if B == 0 or total_q == 0:
+            return
+
+        qo_indptr_h = fmha_params.qo_indptr_h[: B + 1].to(
+            dtype=torch.int32, device="cpu"
+        )
+        kvlen_h = fmha_params.kvlen_h[:B].to(dtype=torch.int32, device="cpu")
+        q_lens_h = qo_indptr_h[1:] - qo_indptr_h[:B]
+        max_q_len = int(q_lens_h.max().item())
+        max_kv_len = int(kvlen_h.max().item())
+        if max_q_len <= 0 or max_kv_len <= 0:
+            return
+        align = self._FP8_SPARSE_TOPK_ALIGN
+        padded_topk = ((max_kv_len + align - 1) // align) * align
+
+        indices = torch.full(
+            (B, max_q_len, padded_topk),
+            -1,
+            dtype=torch.int32,
+            device=block_table.device,
+        )
+        for i in range(B):
+            q_len = int(q_lens_h[i].item())
+            kv_len = int(kvlen_h[i].item())
+            if q_len <= 0 or kv_len <= 0:
+                continue
+            prefix_len = max(0, kv_len - q_len)
+            positions = torch.arange(
+                kv_len, dtype=torch.long, device=block_table.device
+            )
+            block_ids = positions // self.token_per_block
+            offsets = (positions % self.token_per_block).to(torch.int32)
+            dense_indices = (
+                block_table[i, block_ids].to(torch.int32) * self.token_per_block
+                + offsets
+            )
+            for q_pos in range(q_len):
+                causal_len = min(prefix_len + q_pos + 1, kv_len)
+                indices[i, q_pos, :causal_len] = dense_indices[:causal_len]
+
+        self._fp8_prefill_sched_meta, _ = get_mla_metadata()
+        self._fp8_prefill_indices = indices
+        self._fp8_prefill_topk_length = kvlen_h.to(
+            dtype=torch.int32, device=block_table.device
+        )
+        self._fp8_prefill_qo_indptr_h = qo_indptr_h
+        self._fp8_prefill_q_lens_h = q_lens_h
+        self._fp8_prefill_max_q_len = max_q_len
+        self._fp8_prefill_total_q = total_q
+
     def plan_cuda_graph(self, attn_inputs: PyAttentionInputs) -> bool:
         if not self._fp8_kv:
             return False
@@ -576,6 +661,7 @@ class MlaFlashInferDecodeOp(object):
         block_table: torch.Tensor,
     ) -> None:
         self._reset_fp8_sched_meta()
+        self._clear_fp8_prefill_absorb_plan()
         B = int(sequence_lengths.shape[0])
         self._fp8_plan_B = B
         if B == 0:
@@ -704,6 +790,11 @@ class MlaFlashInferDecodeOp(object):
         v_weight: torch.Tensor,
         layer_id: int,
     ) -> torch.Tensor:
+        if self._fp8_prefill_indices is not None:
+            return self._forward_fp8_prefill_absorb(
+                q_nope, q_pe, kv_cache, v_weight, layer_id
+            )
+
         B = q_nope.size(0)
         q_absorbed = torch.cat([q_nope, q_pe], dim=-1)
         q_4d = q_absorbed.unsqueeze(1)
@@ -743,6 +834,99 @@ class MlaFlashInferDecodeOp(object):
             raise
 
         attn_output = attn_out.view(B, self.num_heads, self.kv_lora_rank)
+        attn_bmm_output = torch.bmm(attn_output.transpose(0, 1), v_weight)
+        attn_bmm_output = attn_bmm_output.transpose(0, 1)
+
+        return attn_bmm_output
+
+    def _pack_fp8_prefill_q(self, q_absorbed: torch.Tensor) -> torch.Tensor:
+        assert self._fp8_prefill_qo_indptr_h is not None
+        assert self._fp8_prefill_q_lens_h is not None
+        B = int(self._fp8_prefill_q_lens_h.size(0))
+        q_padded = q_absorbed.new_zeros(
+            (
+                B,
+                self._fp8_prefill_max_q_len,
+                self.num_heads,
+                self.kv_lora_rank + self.qk_rope_head_dim,
+            )
+        )
+        for i in range(B):
+            q_len = int(self._fp8_prefill_q_lens_h[i].item())
+            if q_len <= 0:
+                continue
+            start = int(self._fp8_prefill_qo_indptr_h[i].item())
+            q_padded[i, :q_len].copy_(q_absorbed[start : start + q_len])
+        return q_padded
+
+    def _unpack_fp8_prefill_out(self, attn_out: torch.Tensor) -> torch.Tensor:
+        assert self._fp8_prefill_qo_indptr_h is not None
+        assert self._fp8_prefill_q_lens_h is not None
+        B = int(self._fp8_prefill_q_lens_h.size(0))
+        attn_output = attn_out.new_empty(
+            (self._fp8_prefill_total_q, self.num_heads, self.kv_lora_rank)
+        )
+        for i in range(B):
+            q_len = int(self._fp8_prefill_q_lens_h[i].item())
+            if q_len <= 0:
+                continue
+            start = int(self._fp8_prefill_qo_indptr_h[i].item())
+            attn_output[start : start + q_len].copy_(attn_out[i, :q_len])
+        return attn_output
+
+    def _forward_fp8_prefill_absorb(
+        self,
+        q_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        kv_cache: Optional[LayerKVCache],
+        v_weight: torch.Tensor,
+        layer_id: int,
+    ) -> torch.Tensor:
+        assert self._fp8_prefill_sched_meta is not None
+        assert self._fp8_prefill_indices is not None
+
+        q_absorbed = torch.cat([q_nope, q_pe], dim=-1)
+        q_4d = self._pack_fp8_prefill_q(q_absorbed)
+
+        kv_cache_u8 = kv_cache.kv_cache_base.view(torch.uint8)
+        fp8_per_token = (
+            self.kv_lora_rank + self.kv_lora_rank // 128 * 4 + self.qk_rope_head_dim * 2
+        )
+        kv_cache_paged = kv_cache_u8.view(-1, self.token_per_block, 1, fp8_per_token)
+
+        if layer_id == 0:
+            self._fp8_prefill_sched_meta.tile_scheduler_metadata = None
+            self._fp8_prefill_sched_meta.num_splits = None
+
+        try:
+            attn_out, _ = flash_mla_with_kvcache(
+                q=q_4d,
+                k_cache=kv_cache_paged,
+                block_table=None,
+                cache_seqlens=None,
+                head_dim_v=self.kv_lora_rank,
+                tile_scheduler_metadata=self._fp8_prefill_sched_meta,
+                num_splits=None,
+                softmax_scale=self.scale * self.softmax_extra_scale,
+                causal=False,
+                is_fp8_kvcache=True,
+                indices=self._fp8_prefill_indices,
+                topk_length=self._fp8_prefill_topk_length,
+            )
+        except Exception as e:
+            logging.error(
+                f"[MLA-FP8-PREFILL-ABSORB] flash_mla_with_kvcache FAILED layer={layer_id}: {e}"
+            )
+            raise
+
+        attn_output = self._unpack_fp8_prefill_out(
+            attn_out.view(
+                q_4d.shape[0],
+                q_4d.shape[1],
+                self.num_heads,
+                self.kv_lora_rank,
+            )
+        )
         attn_bmm_output = torch.bmm(attn_output.transpose(0, 1), v_weight)
         attn_bmm_output = attn_bmm_output.transpose(0, 1)
 

@@ -104,6 +104,17 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
 
     sampler_.reset(new Sampler(SamplerInitParams{}));
 
+    // when warmup, cache manager maybe nullptr
+    //
+    // CUDA graph capture buffers must follow the actual KV cache layout. For
+    // sparse MLA decode the runtime cache may expose token-level kernel block
+    // ids even when the model config's default kernel_tokens_per_block falls
+    // back to the physical page size.
+    const CacheConfig cache_config = cache_manager ?
+                                         (is_propose_ ? cache_manager->getMTPModuleCacheConfig(propose_model_index_) :
+                                                        cache_manager->cacheConfig()) :
+                                         CacheConfig();
+
     GptModelInitParams model_init_params(
         {params.gpt_weights,
          genModelDescription(params.model_config_, params.parallelism_config, params.eplb_config, params.moe_config),
@@ -122,8 +133,8 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
          mla_ops_type,
          params.model_config_.max_seq_len,
          params.model_config_.hidden_size,
-         params.model_config_.attn_config.tokens_per_block,
-         params.model_config_.attn_config.kernel_tokens_per_block,
+         cache_config.seq_size_per_block,
+         cache_config.kernel_seq_size_per_block,
          kv_cache_group_num,
          kv_cache_layer_to_group,
          cache_manager,
@@ -143,12 +154,6 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
         RTP_LLM_LOG_WARNING("py_model is None — model will not be initialized (test mode)");
     }
 
-    // when warmup, cache manager maybe nullptr
-    const auto& cache_config = cache_manager ?
-                                   (is_propose_ ? cache_manager->getMTPModuleCacheConfig(propose_model_index_) :
-                                                  cache_manager->cacheConfig()) :
-                                   CacheConfig();
-
     batch_stream_processor_.reset(new NormalBatchStreamProcessor(
         params.model_config_, params.pd_sep_config, params.profiling_debug_logging_config, cache_config, warm_up_));
     LogitsProcessorFactory::init(params.model_config_.ckpt_path, params.sp_config.tree_decode_config);
@@ -164,9 +169,9 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     RtpLLMTokenPSMetricsCollector  tps_collector;
     auto                           tps_active_guard =
         tps_reporter_.makeActiveGuard(metrics_reporter_ && tp_rank_ == 0 && !warm_up_ && !streams.empty());
-    GptModelInputs                 model_input;
-    GptModelOutputs                model_output;
-    SamplerOutput                  sampler_output;
+    GptModelInputs  model_input;
+    GptModelOutputs model_output;
+    SamplerOutput   sampler_output;
     RTP_LLM_PROFILE_FUNCTION();
     // Cap outstanding stream-async bookkeeping to one step unless DROP_BROAD_SYNC is on.
     // Still sync when gatherModelInput lacks NormalAsyncDeviceState; host
@@ -308,7 +313,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         // Metrics and KV release stay on the main thread; dispatch_output_us
         // now measures launch cost, while worker time is in async_runner.thread.
         executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-        int64_t tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
+        int64_t tps_execute_time_us           = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
         if (tps_execute_time_us <= 0) {
             tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us;
         }
@@ -325,7 +330,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         publishNormalDeviceState(stream_groups, merge_outputs.sampler_output);
         auto result                           = batch_stream_processor_->dispatch(stream_groups, merge_outputs);
         executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-        int64_t tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
+        int64_t tps_execute_time_us           = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
         if (tps_execute_time_us <= 0) {
             tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us;
         }

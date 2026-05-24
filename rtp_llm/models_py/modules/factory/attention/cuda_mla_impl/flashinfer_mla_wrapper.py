@@ -189,8 +189,16 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
         if (
             q_len < self.absorb_opt_len
             and self.has_reuse_cache
-            and attn_configs.kv_cache_dtype == KvCacheDataType.BASE
+            and attn_configs.kv_cache_dtype
+            in (KvCacheDataType.BASE, KvCacheDataType.FP8)
         ):
+            max_context_len = max_seq_len
+            if max_context_len <= 0 and attn_inputs.prefix_lengths is not None:
+                max_context_len = int(
+                    (attn_inputs.prefix_lengths + attn_inputs.input_lengths)
+                    .max()
+                    .item()
+                )
             self.absorb_fmha = MlaFlashInferDecodeOp(
                 attn_configs.head_num,
                 attn_configs.kv_lora_rank,
@@ -201,6 +209,9 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
                 attn_configs.use_mla,
                 attn_configs.is_sparse,
                 weights,
+                max_bs=int(attn_inputs.input_lengths.size(0)),
+                max_context_len=max_context_len,
+                kv_cache_dtype=attn_configs.kv_cache_dtype,
             )
             self.absorb_fmha.plan(self.fmha_params)
 

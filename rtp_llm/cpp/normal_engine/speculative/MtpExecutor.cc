@@ -406,8 +406,10 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
         kv_cache_layer_layout = cache_manager->allLayerCacheBase();
     }
 
-    auto target_cache_layer_layout = cache_manager->getMainModelCacheLayerLayout();
-    auto draft_cache_layer_layout  = cache_manager->getMTPModuleCacheLayerLayout(0);
+    auto              target_cache_layer_layout = cache_manager->getMainModelCacheLayerLayout();
+    auto              draft_cache_layer_layout  = cache_manager->getMTPModuleCacheLayerLayout(0);
+    const CacheConfig cache_config              = cache_manager ? cache_manager->cacheConfig() : CacheConfig();
+    const CacheConfig draft_cache_config = cache_manager ? cache_manager->getMTPModuleCacheConfig(0) : CacheConfig();
 
     GptModelInitParams model_init_params(
         {params.gpt_weights,
@@ -424,8 +426,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
          mla_ops_type,
          params.model_config_.max_seq_len,
          params.model_config_.hidden_size,
-         params.model_config_.attn_config.tokens_per_block,
-         params.model_config_.attn_config.kernel_tokens_per_block,
+         cache_config.seq_size_per_block,
+         cache_config.kernel_seq_size_per_block,
          kv_cache_group_num,
          kv_cache_layer_to_group,
          cache_manager,
@@ -443,7 +445,6 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     }
 
     // when warmup, cache manager maybe nullptr
-    const auto& cache_config   = cache_manager ? cache_manager->cacheConfig() : CacheConfig();
     is_linear_attention_model_ = cache_config.linear_group_num > 0;
     batch_stream_processor_.reset(new MtpBatchStreamProcessor(params.model_config_,
                                                               params.pd_sep_config,
@@ -474,8 +475,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 mla_ops_type,
                                 mtp_params->model_config_.max_seq_len,
                                 mtp_params->model_config_.hidden_size,
-                                mtp_params->model_config_.attn_config.tokens_per_block,
-                                mtp_params->model_config_.attn_config.kernel_tokens_per_block,
+                                draft_cache_config.seq_size_per_block,
+                                draft_cache_config.kernel_seq_size_per_block,
                                 kv_cache_group_num,
                                 kv_cache_layer_to_group,
                                 cache_manager,

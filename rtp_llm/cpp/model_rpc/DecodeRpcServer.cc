@@ -3,6 +3,7 @@
 #include <unistd.h>
 #include <limits.h>
 #include <condition_variable>
+#include <cstdlib>
 
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
@@ -26,6 +27,13 @@ using grpc::ClientAsyncResponseReader;
 const int LOAD_TIMEOUT_MS         = 5 * 1000;
 const int EXTRA_TIMEOUT_MS        = 100;
 const int RDMA_CONNECT_RETRY_TIME = 3;
+
+namespace {
+bool pdDebugEnabled() {
+    const char* env = std::getenv("RTP_LLM_PD_DEBUG");
+    return env != nullptr && std::string(env) == "1";
+}
+}  // namespace
 
 #define GRPC_RET_IF_ERROR(decode_context, stat, code, msg)                                                             \
     if (!(stat)) {                                                                                                     \
@@ -167,6 +175,51 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                       grpc::StatusCode::INTERNAL,
                       "message first status != RemoteStage::GENERATE");
     decode_context.time_info.updateGenerateBeginTime();
+    if (pdDebugEnabled()) {
+        auto& cache_keys     = generate_stream->cacheKeys(0);
+        auto  kv_cache       = generate_stream->kvCachePtr();
+        int   group_num      = -1;
+        int   blocks0        = -1;
+        int   first_block_id = -1;
+        int   last_block_id  = -1;
+        if (kv_cache && kv_cache->batchSize() > 0) {
+            group_num = kv_cache->groupNums();
+            if (group_num > 0) {
+                const auto& blocks = kv_cache->blocks(0, 0);
+                blocks0            = static_cast<int>(blocks.size());
+                if (!blocks.empty()) {
+                    first_block_id = blocks.front();
+                    last_block_id  = blocks.back();
+                }
+            }
+        }
+        const int64_t first_cache_key = cache_keys.empty() ? -1 : static_cast<int64_t>(cache_keys.front());
+        const int64_t last_cache_key  = cache_keys.empty() ? -1 : static_cast<int64_t>(cache_keys.back());
+        const int     pos_size        = generate_request.position_ids_size();
+        const int     first_pos       = pos_size > 0 ? generate_request.position_ids(0) : -1;
+        const int     last_pos        = pos_size > 0 ? generate_request.position_ids(pos_size - 1) : -1;
+        RTP_LLM_LOG_INFO("[PD_DEBUG][LOCAL_GENERATE_BEGIN] request_id=%ld request_key=%s first_token=%d "
+                         "seq_len_before=%d input_len=%d output_token_len=%zu reuse_len=%d "
+                         "cache_keys=%zu first_cache_key=%ld last_cache_key=%ld group_num=%d group0_blocks=%d "
+                         "first_block_id=%d last_block_id=%d position_ids=%d first_pos=%d last_pos=%d",
+                         static_cast<long>(decode_context.request_id),
+                         decode_context.request_key.c_str(),
+                         generate_request.first_generate_token_id(),
+                         generate_stream->seqLength(),
+                         generate_stream->inputLength(),
+                         generate_stream->outputTokenLen(),
+                         generate_stream->reuseLength(),
+                         cache_keys.size(),
+                         static_cast<long>(first_cache_key),
+                         static_cast<long>(last_cache_key),
+                         group_num,
+                         blocks0,
+                         first_block_id,
+                         last_block_id,
+                         pos_size,
+                         first_pos,
+                         last_pos);
+    }
     generate_stream->setIsContextStream(false);
     generate_stream->step();
 
@@ -184,6 +237,16 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                              torch::Tensor(),
                              torch::Tensor(),
                              torch::Tensor()});
+    if (pdDebugEnabled()) {
+        RTP_LLM_LOG_INFO("[PD_DEBUG][LOCAL_GENERATE_AFTER_FIRST_TOKEN] request_id=%ld first_token=%d "
+                         "seq_len_after=%d input_len=%d output_token_len=%zu reuse_len=%d",
+                         static_cast<long>(decode_context.request_id),
+                         generate_request.first_generate_token_id(),
+                         generate_stream->seqLength(),
+                         generate_stream->inputLength(),
+                         generate_stream->outputTokenLen(),
+                         generate_stream->reuseLength());
+    }
     {
         const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
         generate_stream->setNormalAsyncDeviceState(GenerateStream::NormalAsyncDeviceState{
@@ -303,6 +366,42 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
         }
     }
     request.set_timeout_ms(load_context.timeout_ms);
+    if (pdDebugEnabled()) {
+        const int64_t first_cache_key =
+            load_context.cache_keys.empty() ? -1 : static_cast<int64_t>(load_context.cache_keys.front());
+        const int64_t last_cache_key =
+            load_context.cache_keys.empty() ? -1 : static_cast<int64_t>(load_context.cache_keys.back());
+        size_t first_group_blocks = 0;
+        size_t last_group_blocks  = 0;
+        if (!load_context.block_ids_by_group.empty()) {
+            if (load_context.block_ids_by_group.front() != nullptr) {
+                first_group_blocks = load_context.block_ids_by_group.front()->blocks().size();
+            }
+            if (load_context.block_ids_by_group.back() != nullptr) {
+                last_group_blocks = load_context.block_ids_by_group.back()->blocks().size();
+            }
+        }
+        RTP_LLM_LOG_INFO("[PD_DEBUG][CONSTRUCT_REMOTE_LOAD_MLA] request_id=%ld request_key=%s worker_index=%d "
+                         "decode_workers=%zu peer_addrs_size=%zu selected_peer_addrs=%d dp_rank=%d partition_count=%d "
+                         "partition_id=%d cache_keys=%zu first_cache_key=%ld last_cache_key=%ld group_count=%zu "
+                         "first_group_blocks=%zu last_group_blocks=%zu timeout_ms=%ld",
+                         static_cast<long>(load_context.request_id),
+                         load_context.request_key.c_str(),
+                         index,
+                         resource_.workers.size(),
+                         peer_addrs.size(),
+                         request.peer_addrs_size(),
+                         maga_init_params_.parallelism_config.dp_rank,
+                         request.partition_count(),
+                         request.partition_id(),
+                         load_context.cache_keys.size(),
+                         static_cast<long>(first_cache_key),
+                         static_cast<long>(last_cache_key),
+                         load_context.block_ids_by_group.size(),
+                         first_group_blocks,
+                         last_group_blocks,
+                         static_cast<long>(load_context.timeout_ms));
+    }
     return request;
 }
 
@@ -360,6 +459,37 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
     auto*       generate_stream    = decode_context.getStream().get();
     auto&       cache_keys         = generate_stream->cacheKeys(0);
     const auto& block_ids_by_group = generate_stream->kvCachePtr()->groupBlocks(0);
+    if (pdDebugEnabled()) {
+        const int64_t first_cache_key    = cache_keys.empty() ? -1 : static_cast<int64_t>(cache_keys.front());
+        const int64_t last_cache_key     = cache_keys.empty() ? -1 : static_cast<int64_t>(cache_keys.back());
+        size_t        first_group_blocks = 0;
+        size_t        last_group_blocks  = 0;
+        if (!block_ids_by_group.empty()) {
+            if (block_ids_by_group.front() != nullptr) {
+                first_group_blocks = block_ids_by_group.front()->blocks().size();
+            }
+            if (block_ids_by_group.back() != nullptr) {
+                last_group_blocks = block_ids_by_group.back()->blocks().size();
+            }
+        }
+        RTP_LLM_LOG_INFO("[PD_DEBUG][LOAD_CACHE_ALL_RANK_BEGIN] request_id=%ld request_key=%s "
+                         "decode_workers=%zu remote_workers=%zu peer_addrs=%zu cache_keys=%zu "
+                         "first_cache_key=%ld last_cache_key=%ld group_count=%zu first_group_blocks=%zu "
+                         "last_group_blocks=%zu reuse_block_size=%ld request_timeout_ms=%ld",
+                         static_cast<long>(decode_context.request_id),
+                         decode_context.request_key.c_str(),
+                         resource_.workers.size(),
+                         resource_.grpc_workers.size(),
+                         decode_context.peer_addrs.size(),
+                         cache_keys.size(),
+                         static_cast<long>(first_cache_key),
+                         static_cast<long>(last_cache_key),
+                         block_ids_by_group.size(),
+                         first_group_blocks,
+                         last_group_blocks,
+                         static_cast<long>(generate_stream->reuseBlockSize()),
+                         static_cast<long>(decode_context.request_timeout_ms));
+    }
 
     if (resource_.workers.size() % decode_context.peer_addrs.size() != 0
         && decode_context.peer_addrs.size() % resource_.workers.size() != 0) {
@@ -635,6 +765,30 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     const auto&  spec                = cache_config.cache_specs[0];
     const size_t k_total_bytes       = spec->k_block_size_bytes();
     const size_t v_total_bytes       = spec->v_block_size_bytes();
+    if (pdDebugEnabled()) {
+        const int64_t first_cache_key =
+            load_context.cache_keys.empty() ? -1 : static_cast<int64_t>(load_context.cache_keys.front());
+        const int64_t last_cache_key =
+            load_context.cache_keys.empty() ? -1 : static_cast<int64_t>(load_context.cache_keys.back());
+        RTP_LLM_LOG_INFO("[PD_DEBUG][LOAD_CACHE_BEGIN] request_id=%ld request_key=%s peer_cnt=%d partition_count=%d "
+                         "partition_id=%d cache_keys=%zu first_cache_key=%ld last_cache_key=%ld group_count=%zu "
+                         "reuse_block_size=%ld use_mla=%d use_hybrid=%d use_typed_regions=%d opaque=%d layer_num=%zu",
+                         static_cast<long>(load_context.request_id),
+                         load_context.request_key.c_str(),
+                         peer_cnt,
+                         load_context.partition_count,
+                         load_context.partition_id,
+                         load_context.cache_keys.size(),
+                         static_cast<long>(first_cache_key),
+                         static_cast<long>(last_cache_key),
+                         load_context.block_ids_by_group.size(),
+                         static_cast<long>(load_context.reuse_block_size),
+                         static_cast<int>(use_mla),
+                         static_cast<int>(use_hybrid),
+                         static_cast<int>(use_typed_regions),
+                         static_cast<int>(use_opaque_kv_store),
+                         layer_num);
+    }
 
     if (!use_mla && !use_opaque_kv_store && peer_cnt > 1) {
         RTP_LLM_CHECK_WITH_INFO(k_total_bytes % static_cast<size_t>(peer_cnt) == 0,
@@ -701,6 +855,36 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                                                      use_hybrid,
                                                                      group_type,
                                                                      /*hybrid_full_from_begin=*/true);
+                if (pdDebugEnabled()) {
+                    const int     first_index = block_pos_list.empty() ? -1 : static_cast<int>(block_pos_list.front());
+                    const int     last_index  = block_pos_list.empty() ? -1 : static_cast<int>(block_pos_list.back());
+                    const int64_t first_block_id =
+                        first_index >= 0 ? static_cast<int64_t>(block_ids[static_cast<size_t>(first_index)]) : -1;
+                    const int64_t last_block_id =
+                        last_index >= 0 ? static_cast<int64_t>(block_ids[static_cast<size_t>(last_index)]) : -1;
+                    RTP_LLM_LOG_INFO(
+                        "[PD_DEBUG][LOAD_CACHE_LAYER] request_id=%ld peer_index=%d peer_addr=%s layer=%zu gid=%zu "
+                        "model_id=%zu region=%d block_num=%zu selected_blocks=%zu first_index=%d last_index=%d "
+                        "first_block_id=%ld last_block_id=%ld local_part_cnt=%d local_part_id=%d "
+                        "group_type=%d use_mla=%d",
+                        static_cast<long>(load_context.request_id),
+                        i,
+                        peer_addr.c_str(),
+                        layer_id,
+                        gid,
+                        model_id,
+                        static_cast<int>(region_name),
+                        block_num,
+                        block_pos_list.size(),
+                        first_index,
+                        last_index,
+                        static_cast<long>(first_block_id),
+                        static_cast<long>(last_block_id),
+                        peer_cnt,
+                        i,
+                        static_cast<int>(group_type),
+                        static_cast<int>(use_mla));
+                }
 
                 for (size_t block_pos : block_pos_list) {
                     auto block_id = block_ids[block_pos];
@@ -812,9 +996,11 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                         const int global_layer_id = mtp_local_to_global_layer_id[layer_id];
 
                         for (int gid_int : mtp_layer_gids) {
-                            const size_t gid = static_cast<size_t>(gid_int);
-                            auto request_key = std::to_string(load_context.request_id) + "-" + std::to_string(layer_id)
-                                               + "-g" + std::to_string(gid);
+                            const size_t gid         = static_cast<size_t>(gid_int);
+                            const bool   mtp_use_mla = mtp_cache_cfg.use_mla;
+                            auto         request_key = std::to_string(load_context.request_id) + "-mtp"
+                                               + std::to_string(mtp_model_id) + "-" + std::to_string(layer_id) + "-g"
+                                               + std::to_string(gid);
                             auto load_layer_cache = std::make_shared<RequestBlockBuffer>(
                                 std::to_string(load_context.request_id), request_key);
 
@@ -841,24 +1027,61 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                                                                  mtp_use_hybrid,
                                                                                  group_type,
                                                                                  /*hybrid_full_from_begin=*/true);
+                            if (pdDebugEnabled()) {
+                                const int first_index =
+                                    block_pos_list.empty() ? -1 : static_cast<int>(block_pos_list.front());
+                                const int last_index =
+                                    block_pos_list.empty() ? -1 : static_cast<int>(block_pos_list.back());
+                                const int64_t first_block_id =
+                                    first_index >= 0 ?
+                                        static_cast<int64_t>(block_ids[static_cast<size_t>(first_index)]) :
+                                        -1;
+                                const int64_t last_block_id =
+                                    last_index >= 0 ? static_cast<int64_t>(block_ids[static_cast<size_t>(last_index)]) :
+                                                      -1;
+                                RTP_LLM_LOG_INFO(
+                                    "[PD_DEBUG][LOAD_CACHE_MTP_LAYER] request_id=%ld peer_index=%d peer_addr=%s "
+                                    "mtp_model_id=%zu layer=%zu global_layer=%d gid=%zu model_id=%zu region=%d "
+                                    "block_num=%zu selected_blocks=%zu first_index=%d last_index=%d "
+                                    "first_block_id=%ld last_block_id=%ld local_part_cnt=%d local_part_id=%d "
+                                    "group_type=%d use_mla=%d",
+                                    static_cast<long>(load_context.request_id),
+                                    i,
+                                    peer_addr.c_str(),
+                                    mtp_model_id,
+                                    layer_id,
+                                    global_layer_id,
+                                    gid,
+                                    model_id,
+                                    static_cast<int>(region_name),
+                                    block_num,
+                                    block_pos_list.size(),
+                                    first_index,
+                                    last_index,
+                                    static_cast<long>(first_block_id),
+                                    static_cast<long>(last_block_id),
+                                    peer_cnt,
+                                    i,
+                                    static_cast<int>(group_type),
+                                    static_cast<int>(mtp_use_mla));
+                            }
 
                             for (size_t block_pos : block_pos_list) {
                                 auto block_id = block_ids[block_pos];
                                 if (isNullBlockIdx(block_id)) {
                                     continue;
                                 }
-                                auto       cache_key      = makeCacheKey(model_id,
+                                auto      cache_key      = makeCacheKey(model_id,
                                                               std::to_string(load_context.cache_keys[block_pos]),
                                                               layer_id,
                                                               region_name);
-                                const bool mtp_use_mla    = mtp_cache_cfg.use_mla;
-                                const int  local_part_cnt = peer_cnt;
-                                const int  local_part_id  = i;
-                                auto       parts =
+                                const int local_part_cnt = peer_cnt;
+                                const int local_part_id  = i;
+                                auto      parts =
                                     (region_name != KVCacheRegionName::DEFAULT) ?
-                                              cache_manager->convertIndexToBuffer(
+                                             cache_manager->convertIndexToBuffer(
                                             block_id, global_layer_id, region_name, local_part_cnt, local_part_id) :
-                                              cache_manager->convertIndexToBuffer(
+                                             cache_manager->convertIndexToBuffer(
                                             block_id, global_layer_id, local_part_cnt, local_part_id);
 
                                 auto addBufBlock = [&](const std::string& key, const BlockInfo& block) {

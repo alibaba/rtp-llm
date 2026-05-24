@@ -92,7 +92,70 @@ class ModelLoader:
         self._load_dynamic_weights(weights, device)
         # load eplb weight
         self._init_eplb_weight(weights, device)
+        if os.environ.get("RTP_LLM_LOG_WEIGHT_MEMORY_SUMMARY", "0") == "1":
+            self._log_weight_memory_summary(weights)
         return weights
+
+    def _log_weight_memory_summary(self, weights: ModelWeights):
+        seen_storages = set()
+        total_bytes = 0
+        by_device: Dict[str, int] = {}
+        by_scope: Dict[str, int] = {"global": 0, "layers": 0}
+        top_tensors: List[Tuple[int, str, str, Tuple[int, ...], str]] = []
+        tensor_count = 0
+
+        def tensor_bytes(tensor: torch.Tensor) -> int:
+            return tensor.numel() * tensor.element_size()
+
+        def storage_key(tensor: torch.Tensor):
+            try:
+                storage = tensor.untyped_storage()
+                return (str(tensor.device), storage.data_ptr(), storage.nbytes())
+            except Exception:
+                return (str(tensor.device), id(tensor), tensor_bytes(tensor))
+
+        def add_tensor(scope: str, name: str, tensor: torch.Tensor):
+            nonlocal total_bytes, tensor_count
+            if not isinstance(tensor, torch.Tensor):
+                return
+            tensor_count += 1
+            key = storage_key(tensor)
+            if key in seen_storages:
+                return
+            seen_storages.add(key)
+            nbytes = tensor_bytes(tensor)
+            device = str(tensor.device)
+            total_bytes += nbytes
+            by_device[device] = by_device.get(device, 0) + nbytes
+            by_scope[scope] = by_scope.get(scope, 0) + nbytes
+            top_tensors.append(
+                (nbytes, name, device, tuple(tensor.shape), str(tensor.dtype))
+            )
+
+        for name, tensor in weights.global_weights.items():
+            add_tensor("global", f"global.{name}", tensor)
+        for layer_id, layer_weights in enumerate(weights.weights):
+            for name, tensor in layer_weights.items():
+                add_tensor("layers", f"layers.{layer_id}.{name}", tensor)
+
+        def fmt_gib(nbytes: int) -> str:
+            return f"{nbytes / (1024.0 ** 3):.2f}GiB"
+
+        top_tensors.sort(reverse=True, key=lambda x: x[0])
+        top_desc = [
+            f"{name}:{fmt_gib(nbytes)}:{device}:{shape}:{dtype}"
+            for nbytes, name, device, shape, dtype in top_tensors[:20]
+        ]
+        logging.info(
+            "[WEIGHT_MEMORY_SUMMARY] total=%s by_device=%s by_scope=%s "
+            "tensor_count=%d unique_storage_count=%d top_tensors=%s",
+            fmt_gib(total_bytes),
+            {k: fmt_gib(v) for k, v in sorted(by_device.items())},
+            {k: fmt_gib(v) for k, v in sorted(by_scope.items())},
+            tensor_count,
+            len(seen_storages),
+            top_desc,
+        )
 
     def load_lora_weights(self, adapter_name: str, lora_path: str, device: str = "cpu"):
         lora_weights = LoRAWeights(self._load_config.num_layers)
