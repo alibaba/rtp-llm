@@ -2,6 +2,7 @@
 #include <chrono>
 #include <stdexcept>
 #include <thread>
+#include <ATen/record_function.h>
 #include "gtest/gtest.h"
 #include "torch/torch.h"
 
@@ -9,6 +10,18 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 
 namespace rtp_llm {
+namespace {
+
+std::atomic<int>* g_record_function_callback_count = nullptr;
+
+std::unique_ptr<at::ObserverContext> countRecordFunctionCallback(const at::RecordFunction&) {
+    if (g_record_function_callback_count != nullptr) {
+        g_record_function_callback_count->fetch_add(1, std::memory_order_relaxed);
+    }
+    return nullptr;
+}
+
+}  // namespace
 
 class AsyncRunnerTest: public ::testing::Test {
 protected:
@@ -79,6 +92,45 @@ TEST_F(AsyncRunnerTest, CudaTensorWork) {
 
     auto result = dst.cpu();
     EXPECT_TRUE(torch::equal(result, torch::ones({64}, torch::kFloat32)));
+}
+
+TEST_F(AsyncRunnerTest, DoesNotPropagateRecordFunctionCallbacksToWorker) {
+    auto        stream = makeStream();
+    AsyncRunner runner(stream);
+
+    std::atomic<int>  callback_count{0};
+    std::atomic<bool> allow_worker_ops{false};
+    std::atomic<bool> worker_task_started{false};
+    g_record_function_callback_count = &callback_count;
+    auto handle = at::addThreadLocalCallback(at::RecordFunctionCallback(&countRecordFunctionCallback));
+
+    {
+        at::RecordFunction main_record(at::RecordScope::FUNCTION);
+        main_record.before("async_runner.main_thread_positive_control");
+        main_record.end();
+    }
+    EXPECT_GT(callback_count.load(std::memory_order_relaxed), 0);
+    callback_count.store(0, std::memory_order_relaxed);
+
+    runner.launch([&allow_worker_ops, &worker_task_started] {
+        worker_task_started.store(true, std::memory_order_release);
+        while (!allow_worker_ops.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        auto src = torch::ones({64}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+        auto dst = src.narrow(0, 0, 32).clone();
+        (void)dst;
+    });
+
+    while (!worker_task_started.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+    }
+    at::removeCallback(handle);
+    allow_worker_ops.store(true, std::memory_order_release);
+    runner.sync(currentStream());
+
+    g_record_function_callback_count = nullptr;
+    EXPECT_EQ(callback_count.load(std::memory_order_relaxed), 0);
 }
 
 TEST_F(AsyncRunnerTest, DestructorJoinsThread) {
