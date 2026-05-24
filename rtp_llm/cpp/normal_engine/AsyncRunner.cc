@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/normal_engine/AsyncRunner.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include <ATen/record_function.h>
 #include <thread>
 #include <utility>
 
@@ -71,7 +72,10 @@ void AsyncRunner::workerLoop() {
         std::exception_ptr exception;
         {
             at::ThreadLocalStateGuard tls_guard(task.tls_state);
-            RTP_LLM_PROFILE_SCOPE("async_runner.thread");
+            // Do not propagate Torch profiler callbacks into this worker: Kineto
+            // callbacks are thread-affine and can crash when the main engine thread
+            // starts/stops profiling while async bookkeeping still runs ATen ops.
+            at::DisableRecordFunctionGuard record_function_guard;
             cuda_graph::GraphStreamGuard stream_guard(cuda_graph::toGraphStream(stream_));
             try {
                 task.fn();
