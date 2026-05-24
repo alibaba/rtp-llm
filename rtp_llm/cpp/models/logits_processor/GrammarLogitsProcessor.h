@@ -65,6 +65,9 @@ private:
 private:
     DeviceMaskState getDeviceMaskState(const c10::Device& device);
     DeviceMaskState buildDeviceMaskStateLocked(const c10::Device& device);
+    DeviceMaskState buildDeviceMaskStateForMatcherLocked(const std::shared_ptr<RtpGrammarMatcher>& matcher,
+                                                         const c10::Device&                        device,
+                                                         int64_t                                   token_len);
     void            publishMaskToDevice(DeviceMaskState& state, torch::Tensor vocab_mask, const c10::Device& device);
     void            applyDeviceMaskState(const torch::Tensor& logits, const DeviceMaskState& state);
     void            reportErrorOnce(ErrorCode error_code, const std::string& error_msg, bool stream_lock_held);

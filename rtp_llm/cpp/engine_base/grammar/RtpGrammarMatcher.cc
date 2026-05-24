@@ -59,7 +59,10 @@ RtpGrammarMatcher::RtpGrammarMatcher(std::shared_ptr<xgrammar::CompiledGrammar> 
                                      int                                        max_rollback_tokens):
     compiled_(std::move(compiled)),
     think_end_token_ids_(normalizeThinkEndTokenIds(think_end_token_ids.value_or(std::vector<int>{}))),
-    require_reasoning_(require_reasoning && !think_end_token_ids_.empty()) {
+    require_reasoning_(require_reasoning && !think_end_token_ids_.empty()),
+    override_stop_tokens_(std::move(override_stop_tokens)),
+    terminate_without_stop_token_(terminate_without_stop_token),
+    max_rollback_tokens_(max_rollback_tokens) {
     if (require_reasoning && think_end_token_ids_.empty()) {
         RTP_LLM_LOG_WARNING("grammar reasoning requested but think_end_token_ids is missing; using plain grammar mode");
     }
@@ -69,20 +72,45 @@ RtpGrammarMatcher::RtpGrammarMatcher(std::shared_ptr<xgrammar::CompiledGrammar> 
     think_end_lps_ = buildKmpFailureTable(think_end_token_ids_);
 
     matcher_ = std::make_unique<xgrammar::GrammarMatcher>(
-        *compiled_, std::move(override_stop_tokens), terminate_without_stop_token, max_rollback_tokens);
+        *compiled_, override_stop_tokens_, terminate_without_stop_token_, max_rollback_tokens_);
+}
+
+std::shared_ptr<RtpGrammarMatcher> RtpGrammarMatcher::clone() const {
+    auto cloned = std::make_shared<RtpGrammarMatcher>(compiled_,
+                                                      require_reasoning_,
+                                                      think_end_token_ids_,
+                                                      override_stop_tokens_,
+                                                      terminate_without_stop_token_,
+                                                      max_rollback_tokens_);
+    if (reasoning_initialized_) {
+        cloned->initReasoning(initial_in_think_body_);
+    }
+    for (const int32_t token_id : accepted_tokens_history_) {
+        if (!cloned->acceptToken(token_id)) {
+            throw std::runtime_error("RtpGrammarMatcher clone replay failed at token " + std::to_string(token_id));
+        }
+    }
+    cloned->finished_ = finished_;
+    return cloned;
 }
 
 void RtpGrammarMatcher::initReasoning(bool in_think_body) {
+    reasoning_initialized_ = true;
+    initial_in_think_body_ = in_think_body;
     if (require_reasoning_) {
         tokens_after_think_end_ = in_think_body ? -1 : 0;
         think_end_match_pos_    = 0;
         reasoner_state_history_.clear();
+        accepted_tokens_history_.clear();
+        num_accepted_ = 0;
+        finished_     = false;
     }
 }
 
 bool RtpGrammarMatcher::acceptToken(int32_t token_id) {
     if (isPassthroughForMask()) {
         transferReasonerState(token_id);
+        accepted_tokens_history_.push_back(token_id);
         ++num_accepted_;
         return true;
     }
@@ -92,6 +120,7 @@ bool RtpGrammarMatcher::acceptToken(int32_t token_id) {
         return false;
     }
     transferReasonerState(token_id);
+    accepted_tokens_history_.push_back(token_id);
     ++num_accepted_;
     return true;
 }
@@ -131,6 +160,11 @@ void RtpGrammarMatcher::rollback(int n) {
     }
     for (int i = 0; i < n; ++i) {
         rollbackReasonerState();
+    }
+    if (n >= static_cast<int>(accepted_tokens_history_.size())) {
+        accepted_tokens_history_.clear();
+    } else {
+        accepted_tokens_history_.resize(accepted_tokens_history_.size() - n);
     }
     num_accepted_ = std::max<int64_t>(0, num_accepted_ - n);
 }

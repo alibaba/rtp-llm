@@ -98,6 +98,20 @@ TEST(GrammarLogitsProcessorTest, TerminateWithoutStopTokenForcesEosAndAcceptsCom
     EXPECT_EQ(processor.acceptedTokenLen(), 2);
 }
 
+TEST(GrammarLogitsProcessorTest, BatchedTerminalAndEosCommitCountsBothTokens) {
+    auto backend  = makeBackend();
+    auto compiled = backend.compileNow({"regex", "a"}).compiled;
+    ASSERT_TRUE(compiled);
+
+    auto matcher = backend.createMatcher(compiled, false, std::nullopt, /*terminate_without_stop_token=*/true);
+    GrammarLogitsProcessor processor(matcher, /*eos_token_id=*/0);
+
+    processor.updateStatus(torch::tensor({{static_cast<int32_t>('a'), 0}}, torch::kInt32), 2);
+
+    EXPECT_TRUE(matcher->finished());
+    EXPECT_EQ(processor.acceptedTokenLen(), 2);
+}
+
 TEST(GrammarLogitsProcessorTest, ReasoningModeWaitsForFullThinkEndSequence) {
     auto backend  = makeBackend();
     auto compiled = backend.compileNow({"regex", "a"}).compiled;
@@ -205,6 +219,85 @@ TEST(GrammarLogitsProcessorTest, SpecTryAcceptBuildsOffsetMasksAndCap) {
     EXPECT_FALSE(packedBitmaskAllowsToken(bitmask.data() + W, static_cast<int32_t>('a')));
     EXPECT_TRUE(packedBitmaskAllowsToken(bitmask.data() + W, static_cast<int32_t>('b')));
     EXPECT_EQ(processor.acceptedTokenLen(), 0);
+}
+
+TEST(GrammarLogitsProcessorTest, MtpP3UsesCloneStatesForFourVerifyRows) {
+    auto backend  = makeBackend();
+    auto compiled = backend.compileNow({"regex", "abcd"}).compiled;
+    ASSERT_TRUE(compiled);
+
+    auto                   matcher = backend.createMatcher(compiled, false, std::nullopt);
+    GrammarLogitsProcessor processor(matcher, /*eos_token_id=*/0);
+
+    const int            P     = 3;
+    const size_t         W     = SpecLogitsProcessor::bitmaskWordCount(128);
+    std::vector<int32_t> draft = {
+        static_cast<int32_t>('a'),  // MTP prefill token
+        static_cast<int32_t>('b'),  // MTP decode token 1
+        static_cast<int32_t>('c'),  // MTP decode token 2
+    };
+    std::vector<int32_t> bitmask((P + 1) * W, SpecLogitsProcessor::kBitmaskAllowAll);
+
+    SpecLogitsProcessorRequest request;
+    request.draft_tokens       = draft.data();
+    request.propose_step       = P;
+    request.bitmask_cpu_out    = bitmask.data();
+    request.bitmask_size_int32 = W;
+    request.vocab_size         = 128;
+
+    EXPECT_EQ(processor.tryAcceptAndFillBitmask(request), P);
+    EXPECT_TRUE(packedBitmaskAllowsToken(bitmask.data(), static_cast<int32_t>('a')));
+    EXPECT_FALSE(packedBitmaskAllowsToken(bitmask.data(), static_cast<int32_t>('b')));
+    EXPECT_TRUE(packedBitmaskAllowsToken(bitmask.data() + W, static_cast<int32_t>('b')));
+    EXPECT_FALSE(packedBitmaskAllowsToken(bitmask.data() + W, static_cast<int32_t>('c')));
+    EXPECT_TRUE(packedBitmaskAllowsToken(bitmask.data() + 2 * W, static_cast<int32_t>('c')));
+    EXPECT_FALSE(packedBitmaskAllowsToken(bitmask.data() + 2 * W, static_cast<int32_t>('d')));
+    EXPECT_TRUE(packedBitmaskAllowsToken(bitmask.data() + 3 * W, static_cast<int32_t>('d')));
+    EXPECT_FALSE(packedBitmaskAllowsToken(bitmask.data() + 3 * W, static_cast<int32_t>('a')));
+
+    SamplerInputs inputs;
+    inputs.logits        = torch::zeros({1, 128}, torch::kFloat32);
+    inputs.finished_mask = torch::zeros({1}, torch::kBool);
+    processor.process(inputs, 0, 1);
+    EXPECT_GT(inputs.logits[0][static_cast<int>('a')].item<float>(), BaseLogitsProcessor::neg_inf);
+    EXPECT_EQ(inputs.logits[0][static_cast<int>('d')].item<float>(), BaseLogitsProcessor::neg_inf);
+    EXPECT_EQ(processor.acceptedTokenLen(), 0);
+}
+
+TEST(GrammarLogitsProcessorTest, CommitAcceptLenAdvancesRealMatcherAfterCloneVerify) {
+    auto backend  = makeBackend();
+    auto compiled = backend.compileNow({"regex", "abcd"}).compiled;
+    ASSERT_TRUE(compiled);
+
+    auto                   matcher = backend.createMatcher(compiled, false, std::nullopt);
+    GrammarLogitsProcessor processor(matcher, /*eos_token_id=*/0);
+
+    const int            P     = 3;
+    const size_t         W     = SpecLogitsProcessor::bitmaskWordCount(128);
+    std::vector<int32_t> draft = {static_cast<int32_t>('a'), static_cast<int32_t>('b'), static_cast<int32_t>('c')};
+    std::vector<int32_t> bitmask((P + 1) * W, SpecLogitsProcessor::kBitmaskAllowAll);
+
+    SpecLogitsProcessorRequest request;
+    request.draft_tokens       = draft.data();
+    request.propose_step       = P;
+    request.bitmask_cpu_out    = bitmask.data();
+    request.bitmask_size_int32 = W;
+    request.vocab_size         = 128;
+
+    EXPECT_EQ(processor.tryAcceptAndFillBitmask(request), P);
+    EXPECT_EQ(processor.acceptedTokenLen(), 0);
+
+    processor.updateStatus(torch::tensor({{static_cast<int32_t>('a'), static_cast<int32_t>('b')}},
+                                         torch::kInt32),
+                           2);
+    EXPECT_EQ(processor.acceptedTokenLen(), 2);
+
+    SamplerInputs inputs;
+    inputs.logits        = torch::zeros({1, 128}, torch::kFloat32);
+    inputs.finished_mask = torch::zeros({1}, torch::kBool);
+    processor.process(inputs, 0, 1);
+    EXPECT_GT(inputs.logits[0][static_cast<int>('c')].item<float>(), BaseLogitsProcessor::neg_inf);
+    EXPECT_EQ(inputs.logits[0][static_cast<int>('a')].item<float>(), BaseLogitsProcessor::neg_inf);
 }
 
 TEST(GrammarLogitsProcessorTest, ReasoningModeUsesKmpForSelfOverlappingThinkEnd) {

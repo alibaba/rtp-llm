@@ -2,6 +2,7 @@
 #include <limits>
 #include "torch/all.h"
 #include "gtest/gtest.h"
+#include <xgrammar/tokenizer_info.h>
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
@@ -12,6 +13,8 @@
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
+#include "rtp_llm/cpp/engine_base/grammar/XGrammarBackendCpp.h"
+#include "rtp_llm/cpp/models/logits_processor/GrammarLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
@@ -25,6 +28,30 @@ template<typename T>
 std::vector<T> toVec(const torch::Tensor& t) {
     auto c = t.is_cuda() ? t.cpu().contiguous() : t.contiguous();
     return std::vector<T>(c.data_ptr<T>(), c.data_ptr<T>() + c.numel());
+}
+
+static std::string makeTokenizerInfoJson() {
+    std::vector<std::string> vocab;
+    vocab.reserve(128);
+    for (int i = 0; i < 128; ++i) {
+        vocab.emplace_back(1, static_cast<char>(i));
+    }
+    xgrammar::TokenizerInfo info(vocab,
+                                 xgrammar::VocabType::RAW,
+                                 /*vocab_size=*/128,
+                                 /*stop_token_ids=*/std::vector<int32_t>{0});
+    return info.SerializeJSON();
+}
+
+static XGrammarBackendCpp makeGrammarBackend() {
+    XGrammarBackendOptions options;
+    options.max_compiler_threads = 1;
+    return XGrammarBackendCpp(makeTokenizerInfoJson(), options);
+}
+
+static bool vocabMaskDisallowsToken(const torch::Tensor& vocab_mask, int row, int token_id) {
+    auto mask_cpu = vocab_mask.is_cuda() ? vocab_mask.cpu().contiguous() : vocab_mask.contiguous();
+    return mask_cpu.data_ptr<bool>()[row * mask_cpu.size(1) + token_id];
 }
 
 class MtpBatchStreamProcessorTest: public DeviceTestBase {
@@ -123,6 +150,95 @@ TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerInputMasksThinkBoundaryTokens
         EXPECT_EQ(neg_inf, sampler_inputs.logits[i][8].item<float>());
         EXPECT_EQ(0, sampler_inputs.logits[i][9].item<float>());
     }
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputUsesP3GrammarSpecMaskRows) {
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    SpeculativeExecutionConfig  sp_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+
+    model_config.max_seq_len    = 2048;
+    model_config.vocab_size     = 128;
+    model_config.num_layers     = 1;
+    sp_config.gen_num_per_cycle = 3;
+    cache_config.group_types    = {CacheGroupType::FULL};
+
+    ResourceContext resource_context;
+    auto            stream = createContextStream(model_config, runtime_config, resource_context, {'p'}, 1);
+    stream->setScoreLen(sp_config.gen_num_per_cycle + 1);
+
+    auto backend  = makeGrammarBackend();
+    auto compiled = backend.compileNow({"regex", "pabcd"}).compiled;
+    ASSERT_TRUE(compiled);
+    auto matcher = backend.createMatcher(compiled, false, std::nullopt);
+    auto grammar_processor = std::make_shared<GrammarLogitsProcessor>(matcher, /*eos_token_id=*/0);
+    grammar_processor->updateStatus(torch::tensor({{static_cast<int32_t>('p')}}, torch::kInt32), 1);
+    stream->logits_processor_list_.push_back(grammar_processor);
+
+    SpecLogitsVerifyRunner::LaunchTask task;
+    task.total_streams = 1;
+    task.propose_step  = sp_config.gen_num_per_cycle;
+    task.vocab_size    = model_config.vocab_size;
+    task.draft_tokens  = torch::tensor({{static_cast<int32_t>('a'),
+                                         static_cast<int32_t>('b'),
+                                         static_cast<int32_t>('c')}},
+                                       torch::kInt32);
+    task.active.push_back({std::dynamic_pointer_cast<SpecLogitsProcessor>(grammar_processor),
+                           /*stream_idx=*/0,
+                           /*processor_idx=*/0,
+                           static_cast<uint64_t>(stream->streamId()),
+                           static_cast<int64_t>(stream->seqLength()),
+                           static_cast<int64_t>(stream->outputTokenLen())});
+
+    SpecLogitsVerifyRunner spec_runner;
+    auto                   spec_logits_result = spec_runner.buildInline(task);
+    ASSERT_TRUE(spec_logits_result.has_active_processor);
+    ASSERT_TRUE(spec_logits_result.spec_vocab_mask_gpu.defined());
+
+    EXPECT_FALSE(vocabMaskDisallowsToken(spec_logits_result.spec_vocab_mask_gpu, 0, 'a'));
+    EXPECT_TRUE(vocabMaskDisallowsToken(spec_logits_result.spec_vocab_mask_gpu, 0, 'b'));
+    EXPECT_FALSE(vocabMaskDisallowsToken(spec_logits_result.spec_vocab_mask_gpu, 1, 'b'));
+    EXPECT_TRUE(vocabMaskDisallowsToken(spec_logits_result.spec_vocab_mask_gpu, 1, 'c'));
+    EXPECT_FALSE(vocabMaskDisallowsToken(spec_logits_result.spec_vocab_mask_gpu, 2, 'c'));
+    EXPECT_TRUE(vocabMaskDisallowsToken(spec_logits_result.spec_vocab_mask_gpu, 2, 'd'));
+    EXPECT_FALSE(vocabMaskDisallowsToken(spec_logits_result.spec_vocab_mask_gpu, 3, 'd'));
+    EXPECT_TRUE(vocabMaskDisallowsToken(spec_logits_result.spec_vocab_mask_gpu, 3, 'a'));
+    EXPECT_EQ(grammar_processor->acceptedTokenLen(), 1);
+
+    MtpBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    StreamGroups stream_groups({stream});
+
+    GptModelInputs  model_input;
+    GptModelOutputs model_output;
+    model_output.logits =
+        torch::zeros({static_cast<int64_t>(sp_config.gen_num_per_cycle + 1), 128},
+                     torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+
+    auto sampler_inputs_status =
+        processor.gatherSpecSamplerInput(stream_groups, model_input, model_output, spec_logits_result);
+    ASSERT_TRUE(sampler_inputs_status.ok());
+    auto sampler_inputs = sampler_inputs_status.value();
+
+    EXPECT_EQ(sampler_inputs.phase, LogitsProcessorPhase::MTP_VERIFY);
+    ASSERT_TRUE(sampler_inputs.spec_vocab_mask_gpu.defined());
+    ASSERT_NE(sampler_inputs.logits_processor_states_ptr, nullptr);
+    sampler_inputs.logits_processor_states_ptr->batchProcess(sampler_inputs);
+
+    auto  logits_cpu = sampler_inputs.logits.cpu();
+    float neg_inf    = -std::numeric_limits<float>::max();
+    EXPECT_GT(logits_cpu[0][static_cast<int>('a')].item<float>(), neg_inf);
+    EXPECT_EQ(neg_inf, logits_cpu[0][static_cast<int>('b')].item<float>());
+    EXPECT_GT(logits_cpu[1][static_cast<int>('b')].item<float>(), neg_inf);
+    EXPECT_EQ(neg_inf, logits_cpu[1][static_cast<int>('c')].item<float>());
+    EXPECT_GT(logits_cpu[2][static_cast<int>('c')].item<float>(), neg_inf);
+    EXPECT_EQ(neg_inf, logits_cpu[2][static_cast<int>('d')].item<float>());
+    EXPECT_GT(logits_cpu[3][static_cast<int>('d')].item<float>(), neg_inf);
+    EXPECT_EQ(neg_inf, logits_cpu[3][static_cast<int>('a')].item<float>());
+    EXPECT_EQ(grammar_processor->acceptedTokenLen(), 1);
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testPrefillDispatch) {

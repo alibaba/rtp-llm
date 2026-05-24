@@ -93,24 +93,29 @@ GrammarLogitsProcessor::DeviceMaskState GrammarLogitsProcessor::getDeviceMaskSta
 }
 
 GrammarLogitsProcessor::DeviceMaskState GrammarLogitsProcessor::buildDeviceMaskStateLocked(const c10::Device& device) {
+    return buildDeviceMaskStateForMatcherLocked(matcher_, device, accepted_token_len_);
+}
+
+GrammarLogitsProcessor::DeviceMaskState GrammarLogitsProcessor::buildDeviceMaskStateForMatcherLocked(
+    const std::shared_ptr<RtpGrammarMatcher>& matcher, const c10::Device& device, int64_t token_len) {
     DeviceMaskState state;
-    state.token_len = accepted_token_len_;
+    state.token_len = token_len;
     state.device    = device;
 
-    if (!matcher_ || matcher_->finished()) {
+    if (!matcher || matcher->finished()) {
         state.mode = DeviceMaskMode::FINISHED;
         return state;
     }
-    if (matcher_->isTerminated()) {
+    if (matcher->isTerminated()) {
         state.mode = DeviceMaskMode::TERMINATED;
         return state;
     }
-    if (matcher_->isPassthroughForMask()) {
+    if (matcher->isPassthroughForMask()) {
         state.mode = DeviceMaskMode::PASSTHROUGH;
         return state;
     }
 
-    const int32_t grammar_vocab_size = matcher_->vocabSize();
+    const int32_t grammar_vocab_size = matcher->vocabSize();
     if (grammar_vocab_size <= 0) {
         state.mode = DeviceMaskMode::NOOP;
         return state;
@@ -119,7 +124,7 @@ GrammarLogitsProcessor::DeviceMaskState GrammarLogitsProcessor::buildDeviceMaskS
     const int32_t words   = (grammar_vocab_size + 31) / 32;
     auto          bitmask = at::full({1, words}, -1, at::dtype(at::kInt));
     DLTensor      dl      = makeSingleRowBitmaskView(bitmask.data_ptr<int32_t>(), words);
-    if (!matcher_->fillBitmask(&dl, 0)) {
+    if (!matcher->fillBitmask(&dl, 0)) {
         state.mode = DeviceMaskMode::NOOP;
         return state;
     }
@@ -243,26 +248,27 @@ void GrammarLogitsProcessor::processSpeculative(const SamplerInputs&        inpu
 
     auto            logits = inputs.logits.narrow(0, start_idx, 1);
     DeviceMaskState state;
-    int             accepted_prefix = 0;
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
         if (matcher_->finished()) {
             return;
         }
+        auto speculative_matcher = matcher_->clone();
+        int  accepted_prefix     = 0;
         for (const int32_t token_id : draft_prefix) {
-            if (!matcher_->acceptToken(token_id)) {
-                matcher_->rollback(accepted_prefix);
+            if (!speculative_matcher->acceptToken(token_id)) {
                 state.mode = DeviceMaskMode::TERMINATED;
                 applyDeviceMaskState(logits[0], state);
                 return;
             }
             ++accepted_prefix;
-            if (matcher_->isTerminated()) {
+            if (speculative_matcher->isTerminated()) {
                 break;
             }
         }
-        state = buildDeviceMaskStateLocked(logits.device());
-        matcher_->rollback(accepted_prefix);
+        state = buildDeviceMaskStateForMatcherLocked(speculative_matcher,
+                                                     logits.device(),
+                                                     accepted_token_len_ + accepted_prefix);
     }
     applyDeviceMaskState(logits[0], state);
 }
@@ -278,33 +284,34 @@ int GrammarLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsProcessorReq
 
     const int  P               = request.propose_step;
     const auto W               = request.bitmask_size_int32;
-    int        accepted_prefix = 0;
     int        cap             = P;
 
-    auto fill_row = [&](int32_t* row) {
+    auto fill_row = [&](const std::shared_ptr<RtpGrammarMatcher>& matcher, int32_t* row) {
         std::fill_n(row, W, SpecLogitsProcessor::kBitmaskAllowAll);
-        if (matcher_->finished()) {
+        if (matcher->finished()) {
             return;
         }
-        if (matcher_->isTerminated()) {
+        if (matcher->isTerminated()) {
             forceTokenInBitmask(row, W, eos_token_id_);
             return;
         }
-        if (matcher_->isPassthroughForMask()) {
+        if (matcher->isPassthroughForMask()) {
             clearTokenFromBitmask(row, W, eos_token_id_);
             return;
         }
 
         DLTensor dl = makeSingleRowBitmaskView(row, static_cast<int32_t>(W));
-        if (!matcher_->fillBitmask(&dl, 0) && matcher_->isPassthroughForMask()) {
+        if (!matcher->fillBitmask(&dl, 0) && matcher->isPassthroughForMask()) {
             std::fill_n(row, W, SpecLogitsProcessor::kBitmaskAllowAll);
             clearTokenFromBitmask(row, W, eos_token_id_);
         }
     };
 
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    auto                        speculative_matcher = matcher_->clone();
     for (int offset = 0; offset <= P; ++offset) {
         int32_t* row = request.bitmask_cpu_out + offset * W;
-        fill_row(row);
+        fill_row(speculative_matcher, row);
         if (offset == P) {
             break;
         }
@@ -315,14 +322,12 @@ int GrammarLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsProcessorReq
             cap = offset;
             break;
         }
-        if (!matcher_->acceptToken(draft_token)) {
+        if (!speculative_matcher->acceptToken(draft_token)) {
             cap = offset;
             break;
         }
-        ++accepted_prefix;
     }
 
-    matcher_->rollback(accepted_prefix);
     return cap;
 }
 
@@ -375,7 +380,7 @@ void GrammarLogitsProcessor::updateStatus(const torch::Tensor& new_tokens, int32
         }
         ++accepted_token_len_;
         if (matcher_->isTerminated()) {
-            break;
+            continue;
         }
     }
 
