@@ -203,4 +203,49 @@ void invokeMtpSpecDecodeTokensMetadataPrepare(const std::vector<torch::Tensor>& 
         static_cast<int32_t>(batch_size));
 }
 
+// Fused kernel: next_seq_len[i] = prev_seq_len[i] + accept_len[i]
+//               hidden_idx[i]  = (int64_t)(accept_len[i] - 1)
+__global__ void mtpDispatchStatePrepareKernel(const int32_t* __restrict__ accept_len,
+                                              const int32_t* __restrict__ prev_seq_len,
+                                              int32_t* __restrict__ next_seq_len,
+                                              int64_t* __restrict__ hidden_idx,
+                                              int32_t batch_size) {
+    const int32_t idx = static_cast<int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+    if (idx >= batch_size) {
+        return;
+    }
+    const int32_t al   = accept_len[idx];
+    next_seq_len[idx]  = prev_seq_len[idx] + al;
+    hidden_idx[idx]    = static_cast<int64_t>(al - 1);
+}
+
+void invokeMtpDispatchStatePrepare(const torch::Tensor& accept_len,
+                                   const torch::Tensor& prev_seq_len,
+                                   torch::Tensor&       next_seq_len,
+                                   torch::Tensor&       hidden_idx,
+                                   int64_t              batch_size,
+                                   cudaStream_t         stream) {
+    if (batch_size <= 0) {
+        return;
+    }
+    checkCudaI32Vector(accept_len, "accept_len", batch_size);
+    checkCudaI32Vector(prev_seq_len, "prev_seq_len", batch_size);
+    checkCudaI32Vector(next_seq_len, "next_seq_len", batch_size);
+    RTP_LLM_CHECK_WITH_INFO(hidden_idx.defined() && hidden_idx.is_cuda(), "hidden_idx must be CUDA");
+    RTP_LLM_CHECK_WITH_INFO(hidden_idx.scalar_type() == torch::kInt64, "hidden_idx must be int64");
+    RTP_LLM_CHECK_WITH_INFO(hidden_idx.is_contiguous(), "hidden_idx must be contiguous");
+    RTP_LLM_CHECK_WITH_INFO(hidden_idx.numel() >= batch_size,
+                            "hidden_idx numel %ld < batch_size %ld",
+                            hidden_idx.numel(),
+                            batch_size);
+
+    constexpr int block_size = 256;
+    const int     grid_size  = static_cast<int>((batch_size + block_size - 1) / block_size);
+    mtpDispatchStatePrepareKernel<<<grid_size, block_size, 0, stream>>>(accept_len.data_ptr<int32_t>(),
+                                                                        prev_seq_len.data_ptr<int32_t>(),
+                                                                        next_seq_len.data_ptr<int32_t>(),
+                                                                        hidden_idx.data_ptr<int64_t>(),
+                                                                        static_cast<int32_t>(batch_size));
+}
+
 }  // namespace rtp_llm
