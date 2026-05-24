@@ -11,8 +11,7 @@
 - 代码分支：`codex/dsv4-json-format-mtp-clean-20260524`
 - 已验证代码 commit：`ad0b638d3c fix: harden async mtp logits processor state flow`
 - GitHub 已推分支：`origin/codex/dsv4-json-format-mtp-clean-20260524`
-- 父仓库 commit：`e08bf9bec fix: update dsv4 xgrammar code submodule`
-- GitLab 父仓库已推分支：`origin/dev/dsv4-xgrammar-json-smoke-20260524`
+- GitLab 父仓库已推分支：`origin/dev/dsv4-xgrammar-json-smoke-20260524`，父仓库 commit 以该分支 `git log -1 --oneline` 为准。
 - smoke target：`//internal_source/rtp_llm/test/smoke:v4_flash_pd_cp4_tp1ep1dp1_xgrammar_json_sm100`
 - smoke fixture：`internal_source/rtp_llm/test/smoke/data/model/deepseek_v4/q_r_v4_flash_pd_cp4_tp1ep1dp1_xgrammar_json_sm100_arm.json`
 - fixture case 数：`query_result` 共 17 条
@@ -55,7 +54,7 @@ git branch -a --contains ad0b638d3ce24dc5e91ef71f108862adbf0a47b5
 cd $PARENT
 git rev-parse --abbrev-ref HEAD
 git log -1 --oneline
-git branch -a --contains e08bf9bec2b2aacb86670c4cb24fd569e04995ef
+git branch -a --contains HEAD
 
 python3 - <<'PY'
 import json
@@ -72,7 +71,7 @@ PY
 
 - 代码仓库当前分支是 `codex/dsv4-json-format-mtp-clean-20260524`，已验证代码 commit 是 `ad0b638d3c fix: harden async mtp logits processor state flow`；如果后续只有文档提交，实际分支头以 `git log -1 --oneline` 为准。
 - 代码 commit 同时在 `remotes/origin/codex/dsv4-json-format-mtp-clean-20260524` 上。
-- 父仓库最新 commit 是 `e08bf9bec fix: update dsv4 xgrammar code submodule`。本地父仓库分支可能显示为 `dev/dsv4-xgrammar-json-smoke`，远端包含 `remotes/origin/dev/dsv4-xgrammar-json-smoke-20260524`。
+- 父仓库 commit 以 `origin/dev/dsv4-xgrammar-json-smoke-20260524` 的分支头为准。本地父仓库分支可能显示为 `dev/dsv4-xgrammar-json-smoke`，远端包含 `remotes/origin/dev/dsv4-xgrammar-json-smoke-20260524`。
 - fixture 的 `query_result cases` 是 `17`。远端宿主机没有 `jq` 时用上面的 Python 命令即可。
 
 ## 3. 跑普通 smoke 验证
