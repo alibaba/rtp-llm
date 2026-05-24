@@ -42,6 +42,12 @@ public class FlexlbConfig {
      */
     private double weightedCacheDecayFactor = 0.001;
 
+    /**
+     * Time window for recent cache-key hit ratio metrics in milliseconds.
+     * Default is 30 minutes. Environment override: CACHE_HIT_TIME_WINDOW_MS.
+     */
+    private long cacheHitTimeWindowMs = 30L * 60L * 1000L;
+
     // ========== Queue Configuration ==========
 
     /**
