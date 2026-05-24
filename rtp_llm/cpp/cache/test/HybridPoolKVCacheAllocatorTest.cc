@@ -18,6 +18,8 @@
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/MemoryUtil.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
@@ -171,12 +173,107 @@ static BatchKVCacheResourcePtr makeBatchResource(int batch_size, const CacheConf
 }
 
 // Create HybridPoolKVCacheAllocator with SharedBlockCache injected (required before init()).
-static HybridPoolKVCacheAllocatorPtr makeAllocator(const CacheConfig& config) {
-    auto allocator    = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::DEVICE);
+static HybridPoolKVCacheAllocatorPtr makeAllocator(const CacheConfig& config, RoleType role_type = RoleType::PDFUSION) {
+    auto allocator =
+        std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::DEVICE, nullptr, 0, role_type);
     auto shared_cache = std::make_shared<SharedBlockCache>();
     allocator->setSharedBlockCache(shared_cache);
     return allocator;
 }
+
+class RecordingMemoryUtil: public MemoryUtil {
+public:
+    bool regUserMr(void*, uint64_t, bool gpu, uint64_t) override {
+        reg_gpu_flags.push_back(gpu);
+        return true;
+    }
+
+    bool deregUserMr(void*, bool gpu) override {
+        dereg_gpu_flags.push_back(gpu);
+        return true;
+    }
+
+    bool isMemoryMr(void*, uint64_t, bool, bool) override {
+        return false;
+    }
+
+    bool findMemoryMr(void*, void*, uint64_t, bool, bool) override {
+        return false;
+    }
+
+    bool isRdmaMode() override {
+        return true;
+    }
+
+    std::vector<bool> reg_gpu_flags;
+    std::vector<bool> dereg_gpu_flags;
+};
+
+class RecordingCacheStore: public CacheStore {
+public:
+    explicit RecordingCacheStore(std::shared_ptr<MemoryUtil> memory_util): memory_util_(std::move(memory_util)) {}
+
+    void store(const std::shared_ptr<RequestBlockBuffer>&, CacheStoreStoreDoneCallback callback) override {
+        if (callback) {
+            callback(false, CacheStoreErrorCode::InvalidParams);
+        }
+    }
+
+    void load(const std::shared_ptr<RequestBlockBuffer>&,
+              CacheStoreLoadDoneCallback callback,
+              const std::string&,
+              uint32_t,
+              uint32_t,
+              uint32_t,
+              int,
+              int) override {
+        if (callback) {
+            callback(false, CacheStoreErrorCode::InvalidParams);
+        }
+    }
+
+    std::shared_ptr<LoadContext> loadBuffers(const std::vector<std::shared_ptr<RequestBlockBuffer>>&,
+                                             const std::string&,
+                                             uint32_t,
+                                             uint32_t,
+                                             int64_t,
+                                             LoadContext::CheckCancelFunc,
+                                             int,
+                                             int) override {
+        return nullptr;
+    }
+
+    std::shared_ptr<StoreContext>
+    storeBuffers(const std::vector<std::shared_ptr<RequestBlockBuffer>>&, int64_t) override {
+        return nullptr;
+    }
+
+    std::shared_ptr<RemoteStoreTask>
+    submitRemoteStoreTask(const std::shared_ptr<RemoteStoreRequest>&,
+                          const std::shared_ptr<CacheStoreRemoteStoreMetricsCollector>&,
+                          RemoteStoreTask::CheckCancelFunc) override {
+        return nullptr;
+    }
+
+    void releaseRemoteStoreTask(const std::shared_ptr<RemoteStoreTask>&) override {}
+
+    bool regUserBuffers(const std::vector<std::shared_ptr<BlockBuffer>>&) override {
+        return true;
+    }
+
+    std::shared_ptr<BlockBuffer> findUserBuffer(const std::string&) override {
+        return nullptr;
+    }
+
+    const std::shared_ptr<MemoryUtil>& getMemoryUtil() const override {
+        return memory_util_;
+    }
+
+    void debugInfo() override {}
+
+private:
+    std::shared_ptr<MemoryUtil> memory_util_;
+};
 
 // Insert a non-resident cache item into the shared block cache for a specific group.
 // Returns the BlockIdx allocated for the item (kept blockCache-referenced + request-released).
@@ -780,9 +877,9 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4InitAndAggregatedCounters) {
     EXPECT_EQ(allocator->availableBlocksNum(), expected_total);
 }
 
-TEST_F(HybridPoolKVCacheAllocatorTest, DSV4StateRegionPoolsUsePinnedCpuBackingOnly) {
+TEST_F(HybridPoolKVCacheAllocatorTest, DSV4PrefillStateRegionPoolsUsePinnedCpuBackingOnly) {
     auto config    = makeDSV4HybridPoolConfig(/*block_num=*/200);
-    auto allocator = makeAllocator(config);
+    auto allocator = makeAllocator(config, RoleType::PREFILL);
     ASSERT_TRUE(allocator->init());
 
     ASSERT_EQ(config.group_region_names.size(), 7u);
@@ -797,6 +894,51 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4StateRegionPoolsUsePinnedCpuBackingOn
                   is_state_region ? MemoryType::MEMORY_CPU_PINNED : MemoryType::MEMORY_GPU)
             << "gid=" << gid << " region=" << static_cast<int>(region_name);
     }
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, DSV4DecodeAndPdfusionRegionPoolsUseGpuBacking) {
+    auto expect_gpu_backing = [](RoleType role_type) {
+        auto config    = makeDSV4HybridPoolConfig(/*block_num=*/200);
+        auto allocator = makeAllocator(config, role_type);
+        ASSERT_TRUE(allocator->init());
+
+        ASSERT_EQ(config.group_region_names.size(), 7u);
+        ASSERT_EQ(allocator->groupBlockPools().size(), 7u);
+        for (size_t gid = 0; gid < allocator->groupBlockPools().size(); ++gid) {
+            EXPECT_EQ(allocator->groupBlockPools()[gid]->where(), MemoryType::MEMORY_GPU)
+                << "role=" << static_cast<int>(role_type) << " gid=" << gid
+                << " region=" << static_cast<int>(config.group_region_names[gid]);
+        }
+    };
+
+    expect_gpu_backing(RoleType::DECODE);
+    expect_gpu_backing(RoleType::PDFUSION);
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, DSV4PrefillUserMrGpuFlagFollowsPoolBacking) {
+    auto config    = makeDSV4HybridPoolConfig(/*block_num=*/200);
+    auto allocator = makeAllocator(config, RoleType::PREFILL);
+    ASSERT_TRUE(allocator->init());
+
+    auto memory_util = std::make_shared<RecordingMemoryUtil>();
+    auto cache_store = std::make_shared<RecordingCacheStore>(memory_util);
+    allocator->regUserMr(/*model_id=*/0, cache_store);
+
+    const auto reg_cpu_count = std::count(memory_util->reg_gpu_flags.begin(), memory_util->reg_gpu_flags.end(), false);
+    const auto reg_gpu_count = std::count(memory_util->reg_gpu_flags.begin(), memory_util->reg_gpu_flags.end(), true);
+    EXPECT_GT(reg_cpu_count, 0) << "pinned CPU state pools must be registered as CPU memory";
+    EXPECT_GT(reg_gpu_count, 0) << "GPU pools must still be registered as GPU memory";
+
+    for (const auto& pool : allocator->groupBlockPools()) {
+        pool->deregUserMr();
+    }
+
+    const auto dereg_cpu_count =
+        std::count(memory_util->dereg_gpu_flags.begin(), memory_util->dereg_gpu_flags.end(), false);
+    const auto dereg_gpu_count =
+        std::count(memory_util->dereg_gpu_flags.begin(), memory_util->dereg_gpu_flags.end(), true);
+    EXPECT_EQ(dereg_cpu_count, reg_cpu_count);
+    EXPECT_EQ(dereg_gpu_count, reg_gpu_count);
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4ConvertIndexToAddrByRegionRoutesToCorrectPool) {

@@ -107,10 +107,12 @@ private:
                                  size_t                               offset_bytes,
                                  size_t                               bytes,
                                  size_t                               stride_bytes,
+                                 bool                                 gpu,
                                  const std::string&                   buffer_type);
     void deregisterUserMrForBuffer(std::shared_ptr<rtp_llm::MemoryUtil> memory_util,
                                    size_t                               layout_idx,
                                    size_t                               offset_bytes,
+                                   bool                                 gpu,
                                    const std::string&                   buffer_type);
 
 private:

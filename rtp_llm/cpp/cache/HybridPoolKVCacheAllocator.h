@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/HybridKVCacheAllocator.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 
 namespace rtp_llm {
 
@@ -12,7 +13,8 @@ public:
     HybridPoolKVCacheAllocator(const CacheConfig&                 config,
                                AllocationType                     allocation_type     = AllocationType::DEVICE,
                                const kmonitor::MetricsReporterPtr metrics_reporter    = nullptr,
-                               int64_t                            reserve_block_ratio = 0);
+                               int64_t                            reserve_block_ratio = 0,
+                               RoleType                           role_type           = RoleType::PDFUSION);
 
     BlockAddrInfo          convertIndexToAddr(int layer_id, int block_id) const override;
     std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int block_id) const override;
@@ -60,6 +62,7 @@ private:
     int defaultGroupIdForLayer(int layer_id) const;
 
     std::vector<BlockPoolPtr> group_block_pools_;
+    RoleType                  role_type_{RoleType::PDFUSION};
 };
 
 using HybridPoolKVCacheAllocatorPtr = std::shared_ptr<HybridPoolKVCacheAllocator>;

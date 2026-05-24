@@ -98,7 +98,11 @@ bool KVCacheManager::init() {
     const bool is_hybrid = config_.groupNums() > 1;
     if (config_.use_independent_block_pools) {
         allocator_ = std::make_shared<rtp_llm::HybridPoolKVCacheAllocator>(
-            config_, AllocationType::DEVICE, metrics_reporter_, kv_cache_config_.reserve_block_ratio);
+            config_,
+            AllocationType::DEVICE,
+            metrics_reporter_,
+            kv_cache_config_.reserve_block_ratio,
+            pd_sep_config_.role_type);
     } else if (is_hybrid) {
         allocator_ = std::make_shared<rtp_llm::HybridTypeKVCacheAllocator>(
             config_, AllocationType::DEVICE, metrics_reporter_, kv_cache_config_.reserve_block_ratio);

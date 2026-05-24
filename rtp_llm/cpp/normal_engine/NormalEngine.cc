@@ -373,8 +373,14 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                          isMTPEagle(),
                                                          isEagle());
 
-        resource_context_.cache_manager = make_shared<KVCacheManager>(
-            config, false, metrics_reporter_, kv_cache_config, parallelism_config, runtime_config, sp_config);
+        resource_context_.cache_manager = make_shared<KVCacheManager>(config,
+                                                                      false,
+                                                                      metrics_reporter_,
+                                                                      kv_cache_config,
+                                                                      parallelism_config,
+                                                                      runtime_config,
+                                                                      sp_config,
+                                                                      pd_sep_config);
         resource_context_.role_type = pd_sep_config.role_type;
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
@@ -392,7 +398,14 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                          result.block_size_bytes / 1024);
         RTP_LLM_LOG_INFO("create cache manager with linear step %d", result.linear_step);
         resource_context_.cache_manager = make_shared<KVCacheManager>(
-            result, false, metrics_reporter_, kv_cache_config, parallelism_config, runtime_config);
+            result,
+            false,
+            metrics_reporter_,
+            kv_cache_config,
+            parallelism_config,
+            runtime_config,
+            SpeculativeExecutionConfig{},
+            pd_sep_config);
         resource_context_.role_type = pd_sep_config.role_type;
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
