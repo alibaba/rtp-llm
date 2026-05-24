@@ -471,6 +471,91 @@ TEST(CacheConfigTest, FinalizeBlockNumsAppliesToIndependentPools) {
     EXPECT_GT(config.fixed_pool_reserve_bytes, 0u);
 }
 
+TEST(CacheConfigTest, AdditionReserveDeductedFromPagedBudget) {
+    auto              mc = makeProModelConfig();
+    ParallelismConfig pc;
+    RuntimeConfig     runtime_config;
+    runtime_config.max_generate_batch_size                      = 4;
+    runtime_config.fifo_scheduler_config.max_context_batch_size = 2;
+
+    const uint32_t addition = 32;
+
+    // Config with addition > 0
+    KVCacheConfig kv_cache_config_with;
+    kv_cache_config_with.kv_cache_mem_mb                  = 1024;
+    kv_cache_config_with.non_full_addition_kvcache_blocks = addition;
+    auto config_with = CacheConfigCreator::createConfig(mc, pc, runtime_config, kv_cache_config_with);
+
+    // Config with addition = 0
+    KVCacheConfig kv_cache_config_without;
+    kv_cache_config_without.kv_cache_mem_mb                  = 1024;
+    kv_cache_config_without.non_full_addition_kvcache_blocks = 0;
+    auto config_without = CacheConfigCreator::createConfig(mc, pc, runtime_config, kv_cache_config_without);
+
+    // With addition, FULL groups must get fewer blocks because paged_budget is smaller
+    EXPECT_LT(config_with.block_num, config_without.block_num);
+    // FULL group block_nums reflect the reduced block_num
+    EXPECT_EQ(config_with.group_block_nums[0], static_cast<uint32_t>(config_with.block_num));
+    EXPECT_EQ(config_without.group_block_nums[0], static_cast<uint32_t>(config_without.block_num));
+    // SWA groups get rule_blocks + addition
+    for (int gid = 3; gid < kDsv4PoolNum; ++gid) {
+        EXPECT_EQ(config_with.group_block_nums[gid], static_cast<uint32_t>(config_with.block_num) + addition)
+            << "gid=" << gid;
+    }
+    // Reserve bytes = addition × sum(swa group block sizes)
+    size_t expected_reserve = 0;
+    for (int gid = 3; gid < kDsv4PoolNum; ++gid) {
+        expected_reserve += static_cast<size_t>(addition) * config_with.group_block_size_bytes[gid];
+    }
+    EXPECT_EQ(config_with.fixed_pool_reserve_bytes, expected_reserve);
+    EXPECT_EQ(config_without.fixed_pool_reserve_bytes, 0u);
+}
+
+TEST(CacheConfigTest, FinalizeBlockNumsWithLinearStepShrinksSwaRuleBlocks) {
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                      = 4;
+    runtime_config.fifo_scheduler_config.max_context_batch_size = 2;
+
+    ParallelismConfig pc;
+    auto              config = HybridPoolConfigCreator::createConfig(makeProModelConfig(), pc);
+    // Simulate linear_step = 4
+    config.linear_step                      = 4;
+    config.non_full_addition_kvcache_blocks = 10;
+    config.finalizeBlockNums(100, runtime_config);
+
+    // FULL groups: unaffected by step, get global_block_num
+    EXPECT_EQ(config.group_block_nums[0], 100u);
+    EXPECT_EQ(config.group_block_nums[1], 100u);
+    EXPECT_EQ(config.group_block_nums[2], 100u);
+    // SWA groups: rule_blocks = 100/4 = 25, + addition = 10 → 35
+    for (int gid = 3; gid < kDsv4PoolNum; ++gid) {
+        EXPECT_EQ(config.group_block_nums[gid], 25u + 10u) << "gid=" << gid;
+    }
+    // Reserve only counts the addition portion
+    size_t expected_reserve = 0;
+    for (int gid = 3; gid < kDsv4PoolNum; ++gid) {
+        expected_reserve += 10u * config.group_block_size_bytes[gid];
+    }
+    EXPECT_EQ(config.fixed_pool_reserve_bytes, expected_reserve);
+}
+
+TEST(CacheConfigTest, AdditionZeroProducesNoReserve) {
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                      = 4;
+    runtime_config.fifo_scheduler_config.max_context_batch_size = 2;
+
+    ParallelismConfig pc;
+    auto              config                = HybridPoolConfigCreator::createConfig(makeProModelConfig(), pc);
+    config.non_full_addition_kvcache_blocks = 0;
+    config.finalizeBlockNums(50, runtime_config);
+
+    // All groups get exactly rule_blocks with no addition
+    for (int gid = 0; gid < kDsv4PoolNum; ++gid) {
+        EXPECT_EQ(config.group_block_nums[gid], 50u) << "gid=" << gid;
+    }
+    EXPECT_EQ(config.fixed_pool_reserve_bytes, 0u);
+}
+
 TEST(CacheConfigTest, DSV4MtpKeepsProposeLayerInSwaPool) {
     auto score_model_config   = makeFlashModelConfig();
     auto propose_model_config = makeFlashMtpModelConfig();
