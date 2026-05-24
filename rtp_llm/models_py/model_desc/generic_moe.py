@@ -90,7 +90,12 @@ class GenericMoeLayer(nn.Module):
             )
 
             self.fused_moe = MegaMoeFusedWrapper(
-                config, parallelism_config, weights, moe_config, layer_idx=layer_idx
+                config,
+                parallelism_config,
+                weights,
+                moe_config,
+                layer_idx=layer_idx,
+                max_generate_batch_size=max_generate_batch_size,
             )
         else:
             config_adapter = MoEConfigAdapter(

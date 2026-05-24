@@ -13,6 +13,8 @@ from typing import Any, Dict, Optional
 import torch
 import torch.nn as nn
 
+from rtp_llm.models_py.modules.dsv4.moe.moe_layer import resolve_moe_max_tokens_per_rank
+
 from .mega_moe import GLM5MegaMoE
 
 logger = logging.getLogger(__name__)
@@ -58,6 +60,7 @@ class MegaMoeFusedWrapper(nn.Module):
         weights: Dict[str, torch.Tensor],
         moe_config=None,
         layer_idx: int = 0,
+        max_generate_batch_size: int = 0,
     ):
         super().__init__()
         from rtp_llm.utils.model_weight import W
@@ -83,6 +86,54 @@ class MegaMoeFusedWrapper(nn.Module):
             ll = getattr(moe_config, "ll_num_max_token", 0)
             if ll and ll > 0:
                 max_tokens_per_rank = max(max_tokens_per_rank, ll)
+
+        # Detect decode role from parallelism_config.role_type
+        is_decode_role = False
+        try:
+            from rtp_llm.ops import RoleType
+
+            role_type = getattr(parallelism_config, "role_type", None)
+            if role_type is not None:
+                is_decode_role = role_type == RoleType.DECODE
+        except Exception:
+            pass
+
+        # Resolve CP: when prefill_cp_config is enabled, per-rank tokens
+        # are bounded by max_seq_len / cp_size (same logic as DSv4).
+        cp_size = 1
+        if (
+            not is_decode_role
+            and parallelism_config is not None
+            and getattr(parallelism_config, "prefill_cp_config", None) is not None
+        ):
+            try:
+                if parallelism_config.prefill_cp_config.is_enabled():
+                    cp_size = int(getattr(parallelism_config, "tp_size", 1) or 1)
+            except Exception:
+                pass
+
+        # Resolve max_tokens_per_rank based on role
+        max_generate_batch_size = (
+            int(max_generate_batch_size) if max_generate_batch_size > 0 else 0
+        )
+        resolved = resolve_moe_max_tokens_per_rank(
+            max_seq_len=max_seq_len,
+            current_max_tokens_per_rank=max_tokens_per_rank,
+            cp_size=cp_size,
+            max_generate_batch_size=max(max_generate_batch_size, 1),
+            is_decode_role=is_decode_role,
+        )
+        if resolved != max_tokens_per_rank:
+            logger.info(
+                "[GLM5 MegaMoE] max_tokens_per_rank %d -> %d "
+                "(role=%s, cp=%d, max_batch=%d)",
+                max_tokens_per_rank,
+                resolved,
+                "DECODE" if is_decode_role else "PREFILL",
+                cp_size,
+                max_generate_batch_size,
+            )
+            max_tokens_per_rank = resolved
 
         self.mega_moe = GLM5MegaMoE.from_params(
             layer_id=layer_idx,
