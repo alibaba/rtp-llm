@@ -30,7 +30,7 @@ The eager path is unchanged.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
@@ -84,7 +84,7 @@ class DSv4DecodeFmhaImplFP8:
         self,
         config: DSv4DecodeFmhaImplConfigFP8,
         device: torch.device,
-        attn_inputs=None,
+        attn_inputs: Any,
     ) -> None:
         self.config = config
         self.device = device
@@ -99,21 +99,10 @@ class DSv4DecodeFmhaImplFP8:
             device=device,
             paged_pool_specs=config.paged_pool_specs,
         )
-        # Cache entries_per_block lookup — passed unchanged to
-        # update_decode_metadata_in_place_fp8 every prepare call.
         self._paged_entries_per_block: Dict[int, int] = {
             at: spec[0] for at, spec in config.paged_pool_specs.items()
         }
-        # Populate metadata so the initial dtype-check forward (called by
-        # CudaGraphRunner::initCapture BEFORE any prepare_cuda_graph) reads
-        # valid values rather than the zero/-1 sentinels from allocation.
-        # Mirrors flashmla_sparse_impl.py:386 (create_params → prepare in __init__).
-        # ``forbid_realloc=True`` here too — allocate_decode_metadata_fp8 has
-        # already created every destination buffer; update_decode_metadata_in_place_fp8
-        # only ``.copy_`` into them, so any realloc on the first prepare is a
-        # bug (and would silently bake the new ptr into the captured graph).
-        if attn_inputs is not None:
-            self.prepare(attn_inputs, forbid_realloc=True)
+        self.prepare(attn_inputs, forbid_realloc=True)
 
     def support_cuda_graph(self) -> bool:
         # Always True for this impl class — the legacy ``callable(getattr(...))``
@@ -121,30 +110,33 @@ class DSv4DecodeFmhaImplFP8:
         # False here (prepare_cuda_graph is hardcoded on the class).
         return True
 
-    def prepare(self, attn_inputs, forbid_realloc: bool = False) -> None:
-        """Update persistent metadata and paged block-table snapshots."""
-        # Phase 2: pull per-attn_type block_tables from the framework's
-        # by_group list. Empty paged_pool_specs ⇒ skip (legacy path).
-        paged_block_tables: Optional[Dict[int, torch.Tensor]] = None
-        if self._paged_entries_per_block and self.config.group_region_names:
-            by_group = getattr(
-                attn_inputs,
-                "kv_cache_kernel_block_id_device_by_group",
-                None,
-            )
-            if by_group is not None and len(by_group) > 0:
-                paged_block_tables = {}
-                # Position IS the group id; entry IS the attn_type (int).
-                for group_id, attn_type in enumerate(self.config.group_region_names):
-                    if group_id >= len(by_group):
-                        continue
-                    if attn_type not in self.config.paged_pool_specs:
-                        continue
-                    group_block_table = by_group[group_id]
-                    if group_block_table is None or group_block_table.numel() == 0:
-                        continue
-                    paged_block_tables[attn_type] = group_block_table
+    def _extract_paged_block_tables(
+        self, attn_inputs: Any,
+    ) -> Optional[Dict[int, torch.Tensor]]:
+        if not self._paged_entries_per_block or not self.config.group_region_names:
+            return None
+        by_group = getattr(
+            attn_inputs,
+            "kv_cache_kernel_block_id_device_by_group",
+            None,
+        )
+        if by_group is None or len(by_group) == 0:
+            return None
+        paged_block_tables: Dict[int, torch.Tensor] = {}
+        for group_id, attn_type in enumerate(self.config.group_region_names):
+            if group_id >= len(by_group):
+                continue
+            if attn_type not in self.config.paged_pool_specs:
+                continue
+            group_block_table = by_group[group_id]
+            if group_block_table is None or group_block_table.numel() == 0:
+                continue
+            paged_block_tables[attn_type] = group_block_table
+        return paged_block_tables or None
 
+    def prepare(self, attn_inputs: Any, forbid_realloc: bool = False) -> None:
+        """Update persistent metadata and paged block-table snapshots."""
+        paged_block_tables = self._extract_paged_block_tables(attn_inputs)
         update_decode_metadata_in_place_fp8(
             self.metadata,
             attn_inputs,
@@ -153,10 +145,20 @@ class DSv4DecodeFmhaImplFP8:
             paged_pool_entries_per_block=self._paged_entries_per_block,
         )
 
-    def prepare_cuda_graph(self, attn_inputs) -> None:
+    def prepare_cuda_graph(self, attn_inputs: Any) -> None:
         """Called by ``CudaGraphRunner::prepareInputs`` between every
-        replay. Re-runs ``prepare`` with ``forbid_realloc=True`` so any
-        accidental buffer reallocation surfaces as an immediate error
-        rather than a silent correctness bug (a captured graph still
-        holds the old pointer and would compute on stale values)."""
-        self.prepare(attn_inputs, forbid_realloc=True)
+        replay."""
+        paged_block_tables = self._extract_paged_block_tables(attn_inputs)
+        if self._paged_entries_per_block and paged_block_tables is None:
+            raise RuntimeError(
+                "prepare_cuda_graph: paged_pool_specs configured "
+                "but paged_block_tables is empty — "
+                "framework did not provide block tables"
+            )
+        update_decode_metadata_in_place_fp8(
+            self.metadata,
+            attn_inputs,
+            forbid_realloc=True,
+            paged_block_tables=paged_block_tables,
+            paged_pool_entries_per_block=self._paged_entries_per_block,
+        )

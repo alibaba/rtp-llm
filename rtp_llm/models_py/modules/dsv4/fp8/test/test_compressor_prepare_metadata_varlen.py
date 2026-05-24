@@ -58,6 +58,8 @@ class _StubCompressor:
         self._state_eb = state_eb
         self._kv_block_table = kv_block_table
         self._kv_eb = kv_eb
+        self._kv_cache_sharded = False
+        self._cp_ctx = None
         self._kv_pool_3d = None  # disable the pool-row overflow guard
 
     # Bind the unbound methods so ``_StubCompressor`` quacks correctly.
@@ -79,7 +81,7 @@ def _make_stub(
     ``[b*blocks_per_req+1 .. (b+1)*blocks_per_req]``. We start at 1 so
     each request has distinct non-overlapping physical blocks."""
     state_bt = torch.arange(
-        1, n_reqs * blocks_per_req + 1, dtype=torch.int64, device=device
+        1, n_reqs * blocks_per_req + 1, dtype=torch.int32, device=device
     ).view(n_reqs, blocks_per_req)
     # Use distinct block ids for kv vs state so a per-request routing bug
     # surfaces as a wrong slot id rather than coincidentally matching.

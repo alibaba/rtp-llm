@@ -524,7 +524,7 @@ def run_correctness_tests():
     passed_mq = 0
     failed_mq = 0
     total_mq = 0
-    mq_bs_list = [1, 4, 16, 64, 128]
+    mq_bs_list = [1, 2, 4, 16, 32, 64, 128]
     mq_qlen_list = [2, 4, 6]
     mq_seqlen_list = [2**i for i in range(2, 18)]  # 4 to 131072
 
@@ -576,7 +576,7 @@ def run_correctness_tests():
     entries = {SWA_KV: 256, CSA_KV: 64, INDEXER_KV: 64, HCA_KV: 2}
 
     all_qlen_list = [1, 2, 4, 6]
-    p2b_bs_list = [1, 4, 16, 64, 128]
+    p2b_bs_list = [1, 2, 4, 16, 32, 64, 128]
     p2b_seqlen_list = [2**i for i in range(2, 18)]  # 4 to 131072
 
     print("\nTesting fused_phase2b_pool_slot_mapping (q_len=1,2,4,6)...")
