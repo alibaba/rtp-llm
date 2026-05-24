@@ -55,10 +55,39 @@ def _split_reasoning_before_dsml(text: str) -> Optional[Tuple[str, str]]:
     if idx == -1:
         return None
 
-    reasoning_text = (
-        text[:idx].replace("<think>", "").replace("</think>", "").strip()
-    )
+    reasoning_text = text[:idx].replace("<think>", "").replace("</think>", "").strip()
     return reasoning_text, text[idx:]
+
+
+def _split_content_left_in_reasoning(
+    reasoning_content: str,
+    content: str,
+) -> Tuple[str, str]:
+    if content:
+        return reasoning_content, _strip_leading_repeated_think_end(content)
+    if not reasoning_content:
+        return reasoning_content, content
+
+    think_end = "</think>"
+    idx = reasoning_content.find(think_end)
+    if idx == -1:
+        return reasoning_content, content
+
+    reasoning_text = reasoning_content[:idx].replace("<think>", "").rstrip()
+    content_text = _strip_leading_repeated_think_end(
+        reasoning_content[idx + len(think_end) :].lstrip()
+    )
+    return reasoning_text, content_text
+
+
+def _strip_leading_repeated_think_end(text: str) -> str:
+    think_end = "</think>"
+    candidate = text.lstrip()
+    if not candidate.startswith(think_end):
+        return text
+    while candidate.startswith(think_end):
+        candidate = candidate[len(think_end) :].lstrip()
+    return candidate
 
 
 def _longest_suffix_prefix(text: str, tokens: list[str]) -> int:
@@ -168,20 +197,17 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
         Returns:
             True if thinking mode is enabled, False otherwise
         """
+        if request.disable_thinking():
+            return False
+        if request.enable_thinking is True:
+            return True
+
         # Check parent class logic first
         thinking_enabled = super().in_think_mode(request)
 
         # Check if enable_thinking is explicitly set in request kwargs
-        if request.chat_template_kwargs and request.chat_template_kwargs.get(
-            "enable_thinking"
-        ):
-            thinking_enabled = True
-        if (
-            request.extra_configs
-            and request.extra_configs.chat_template_kwargs
-            and isinstance(request.extra_configs.chat_template_kwargs, dict)
-            and request.extra_configs.chat_template_kwargs.get("enable_thinking")
-        ):
+        chat_template_kwargs = request.get_chat_template_kwargs()
+        if chat_template_kwargs and chat_template_kwargs.get("enable_thinking") is True:
             thinking_enabled = True
 
         return thinking_enabled
@@ -189,9 +215,13 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
     def _normalize_reasoning_effort(self, effort: Any) -> Optional[str]:
         if not isinstance(effort, str) or effort == "none":
             return None
-        if effort in ("max", "xhigh"):
-            return "max"
-        return "high"
+        valid_efforts = ("low", "medium", "high", "xhigh", "max")
+        if effort not in valid_efforts:
+            raise ValueError(
+                "'reasoning_effort' must be one of: "
+                "'low', 'medium', 'high', 'xhigh', 'max'"
+            )
+        return "xhigh" if effort == "max" else effort
 
     def _normalize_tool_arguments(self, arguments: Any) -> str:
         if arguments is None:
@@ -292,6 +322,8 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
             and isinstance(request.extra_configs.chat_template_kwargs, dict)
         ):
             encode_config.update(request.extra_configs.chat_template_kwargs)
+        if request.disable_thinking():
+            encode_config["thinking_mode"] = "chat"
 
         encode_config["reasoning_effort"] = self._normalize_reasoning_effort(
             encode_config.get("reasoning_effort")
@@ -434,6 +466,33 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
                 status.request.tools,
                 parsed_msg.get("tool_calls", []),
             )
+            reasoning_content, content = _split_content_left_in_reasoning(
+                reasoning_content or "",
+                content or "",
+            )
+            if (
+                not tool_calls
+                and reasoning_content
+                and "<｜DSML｜" in reasoning_content
+            ):
+                split_result = _split_reasoning_before_dsml(reasoning_content)
+                if split_result is not None:
+                    reasoning_content, tool_text = split_result
+                    tool_calls, remaining_text = await self._extract_tool_calls_content(
+                        status.detector,
+                        status.request.tools,
+                        tool_text,
+                        is_streaming=False,
+                    )
+                    if remaining_text:
+                        content = (content or "") + remaining_text
+            if not tool_calls and content and "<｜DSML｜" in content:
+                tool_calls, content = await self._extract_tool_calls_content(
+                    status.detector,
+                    status.request.tools,
+                    content,
+                    is_streaming=False,
+                )
         except Exception as e:
             if _dsv4_renderer_debug_enabled():
                 logging.warning(

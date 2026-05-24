@@ -131,6 +131,8 @@ class ChatCompletionRequest(BaseModel):
     top_p: Optional[float] = 1.0
     top_k: Optional[int] = None
     max_tokens: Optional[int] = None
+    max_completion_tokens: Optional[int] = None
+    thinking_budget: Optional[int] = None
     stop: Optional[Union[str, List[str]]] = Field(default_factory=list)
     stream: Optional[bool] = False
     user: Optional[str] = None
@@ -158,6 +160,7 @@ class ChatCompletionRequest(BaseModel):
     )
     master_info: Optional[Dict[str, Any]] = None
     chat_template_kwargs: Optional[Dict[str, Any]] = None
+    enable_thinking: Optional[bool] = None
 
     @staticmethod
     def is_openai_request(request: Dict[str, Any]):
@@ -169,17 +172,25 @@ class ChatCompletionRequest(BaseModel):
             and self.extra_configs.chat_template_kwargs is not None
         ):
             return self.extra_configs.chat_template_kwargs
-        else:
-            return self.chat_template_kwargs
+        return self.chat_template_kwargs
 
     def disable_thinking(self):
+        if self.thinking_budget == 0:
+            return True
         if (
-            self.get_chat_template_kwargs() is not None
-            and self.get_chat_template_kwargs().get("enable_thinking", True) is False
+            self.extra_configs is not None
+            and self.extra_configs.max_thinking_tokens == 0
         ):
             return True
-        else:
-            return False
+        if self.enable_thinking is False:
+            return True
+        chat_template_kwargs = self.get_chat_template_kwargs()
+        if (
+            chat_template_kwargs is not None
+            and chat_template_kwargs.get("enable_thinking", True) is False
+        ):
+            return True
+        return False
 
 
 class CompletionTokensDetails(BaseModel):

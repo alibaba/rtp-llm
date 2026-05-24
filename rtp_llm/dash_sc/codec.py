@@ -9,6 +9,7 @@ Defaults for ``SamplingParams`` align with ``rtp_llm.config.generate_config.Gene
 
 from __future__ import annotations
 
+import json
 import logging
 import struct
 from collections.abc import Iterator
@@ -17,6 +18,11 @@ from typing import Any
 
 from rtp_llm.dash_sc.proto import predict_v2_pb2
 from rtp_llm.utils.base_model_datatypes import GenerateOutputs
+
+_INT32_MAX = 2_147_483_647
+_DEFAULT_MAX_NEW_TOKENS = 32000
+
+FINISH_REASON_LENGTH = 1
 
 # ----------------------------------------------------------------------------
 # Low-level tensor decoding helpers (shared by request parsing and access log)
@@ -88,6 +94,122 @@ def _parse_optional_scalar_float(request, tensor_name: str) -> float | None:
     return None
 
 
+def _parse_optional_parameter_int(request, param_name: str) -> int | None:
+    """Read a scalar int from ``request.parameters``.
+
+    DashScope-serving usually sends request controls as tensors, but some proxy
+    paths put scalar knobs into the Triton ``parameters`` map. Accept both native
+    int64 and numeric strings so the hot path does not silently fall back to
+    defaults when the wire shape changes.
+    """
+    if param_name not in request.parameters:
+        return None
+    p = request.parameters[param_name]
+    if p.HasField("int64_param"):
+        return int(p.int64_param)
+    if p.HasField("string_param"):
+        s = str(p.string_param).strip()
+        if not s:
+            return None
+        try:
+            return int(s)
+        except ValueError:
+            return None
+    if p.HasField("bool_param"):
+        return 1 if p.bool_param else 0
+    return None
+
+
+def _parse_optional_parameter_bool(request, param_name: str) -> bool | None:
+    if param_name not in request.parameters:
+        return None
+    p = request.parameters[param_name]
+    if p.HasField("bool_param"):
+        return bool(p.bool_param)
+    if p.HasField("int64_param"):
+        return _parse_optional_bool(p.int64_param)
+    if p.HasField("string_param"):
+        return _parse_optional_bool(p.string_param)
+    return None
+
+
+def _parse_optional_int_value(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return int(value)
+    if isinstance(value, float):
+        return int(value)
+    s = str(value).strip()
+    if not s:
+        return None
+    try:
+        return int(s)
+    except ValueError:
+        try:
+            return int(float(s))
+        except ValueError:
+            return None
+
+
+def _parse_optional_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if value is None:
+        return None
+    s = str(value).strip().lower()
+    if not s:
+        return None
+    if s in {"1", "true", "yes", "y", "on", "enable", "enabled"}:
+        return True
+    if s in {"0", "false", "no", "n", "off", "disable", "disabled"}:
+        return False
+    return None
+
+
+def _parse_ds_header_attributes(request) -> dict[str, Any]:
+    """Parse ``ds_header_attributes`` into a lower-case-key dict.
+
+    The value is a JSON string produced by dashscope-serving. Returning an empty
+    dict on malformed input preserves inference while keeping the parser
+    defensive against partial or legacy requests.
+    """
+    if "ds_header_attributes" not in request.parameters:
+        return {}
+    p = request.parameters["ds_header_attributes"]
+    if not p.HasField("string_param") or not p.string_param:
+        return {}
+    try:
+        attrs = json.loads(p.string_param)
+    except Exception as e:
+        logging.warning("failed to parse ds_header_attributes: %s", e)
+        return {}
+    if not isinstance(attrs, dict):
+        return {}
+    return {str(k).lower(): v for k, v in attrs.items()}
+
+
+def _is_openai_compatible_request(request) -> bool:
+    attrs = _parse_ds_header_attributes(request)
+    path = str(attrs.get("x-envoy-original-path", "")).lower()
+    raw_path = str(attrs.get("x-dashscope-inner-rawhttppath", "")).lower()
+    baggage = str(attrs.get("baggage", "")).lower()
+    return any(
+        marker in text
+        for text in (path, raw_path, baggage)
+        for marker in ("/compatible-mode/", "/api-openai/")
+    )
+
+
+def _normalize_non_empty_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    s = str(value).strip()
+    return s if s else None
+
+
 def _parse_stop_words_list_input(request) -> tuple[tuple[int, ...], ...] | None:
     """Input name ``stop_words_list`` -> ``GenerateConfig.stop_words_list`` (groups of token ids)."""
     inp, raw = _find_input_raw(request, "stop_words_list")
@@ -119,13 +241,20 @@ class OtherParams:
     """Non-sampling knobs carried alongside ``input_ids`` (filled by ``parse_other_params``)."""
 
     return_input_ids: bool = False
+    enable_thinking: bool | None = None
+    max_new_think_tokens: int | None = None
+    timeout_ms: int | None = None
+    traffic_reject_priority: int | None = None
+    request_headers: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
 class SamplingParams:
     """Sampling / generation options from ``request.inputs`` (+ legacy ``top_k`` in ``request.parameters``)."""
 
-    max_new_tokens: int = 32000
+    max_new_tokens: int = _DEFAULT_MAX_NEW_TOKENS
+    max_new_tokens_from_completion_alias: bool = False
+    max_total_tokens: int | None = None
     num_return_sequences: int = 0
     top_p: float = 1.0
     top_k: int = 0
@@ -136,6 +265,7 @@ class SamplingParams:
     frequency_penalty: float = 0.0
     presence_penalty: float = 0.0
     stop_words_list: tuple[tuple[int, ...], ...] = field(default_factory=tuple)
+    max_new_think_tokens: int | None = None
 
     @property
     def n(self) -> int:
@@ -151,8 +281,27 @@ class SamplingParams:
         from rtp_llm.config.generate_config import GenerateConfig
 
         return_input_ids = other.return_input_ids if other is not None else False
+        request_max_think = self.max_new_think_tokens
+        if request_max_think is None and other is not None:
+            request_max_think = other.max_new_think_tokens
+        if request_max_think is None:
+            max_thinking_tokens = 32000
+        elif request_max_think < 0:
+            max_thinking_tokens = _INT32_MAX
+        else:
+            max_thinking_tokens = request_max_think
+        backend_max_new_tokens = self.max_new_tokens
+        if (
+            other is not None
+            and self.max_new_tokens_from_completion_alias
+            and backend_max_new_tokens > 0
+        ):
+            if self.max_total_tokens is not None and self.max_total_tokens > 0:
+                backend_max_new_tokens = min(
+                    backend_max_new_tokens, int(self.max_total_tokens)
+                )
         return GenerateConfig(
-            max_new_tokens=self.max_new_tokens,
+            max_new_tokens=backend_max_new_tokens,
             num_return_sequences=self.num_return_sequences,
             top_k=self.top_k,
             top_p=self.top_p,
@@ -163,6 +312,7 @@ class SamplingParams:
             frequency_penalty=self.frequency_penalty,
             presence_penalty=self.presence_penalty,
             stop_words_list=self.stop_words_list_py(),
+            max_thinking_tokens=max_thinking_tokens,
             return_input_ids=return_input_ids,
             is_streaming=True,
         )
@@ -187,14 +337,19 @@ def parse_input_ids_from_request(request) -> list[int] | None:
 def parse_sampling_params(request) -> SamplingParams:
     """Read sampling fields from ``request.inputs``.
 
-    Tensor names: ``max_new_tokens``, ``num_return_sequences``, ``top_p``, ``top_k``,
-    ``stop_words_list``, ``temperature``, ``min_new_tokens``, ``seed``,
-    ``repetition_penalty``, ``frequency_penalty``, ``presence_penalty``.
+    Tensor names: ``max_completion_tokens`` (or legacy ``max_new_tokens`` /
+    ``max_tokens``), ``num_return_sequences`` (or DashScope alias ``n``),
+    ``top_p``, ``top_k``, ``stop_words_list``, ``temperature``,
+    ``min_new_tokens`` (or DashScope alias ``min_length``), ``seed``,
+    ``repetition_penalty``, ``frequency_penalty``, ``presence_penalty``,
+    ``max_new_think_tokens`` / ``max_think_length``.
 
     Legacy: if there is no ``top_k`` input, ``request.parameters["top_k"].int64_param``
     is used instead.
     """
-    max_new_tokens = 32000
+    max_new_tokens = _DEFAULT_MAX_NEW_TOKENS
+    max_new_tokens_from_completion_alias = False
+    max_total_tokens: int | None = None
     num_return_sequences = 0
     top_p = 1.0
     top_k = 0
@@ -204,13 +359,50 @@ def parse_sampling_params(request) -> SamplingParams:
     repetition_penalty = 1.0
     frequency_penalty = 0.0
     presence_penalty = 0.0
+    max_new_think_tokens: int | None = None
     stop_words_list: tuple[tuple[int, ...], ...] = tuple()
+    openai_compatible_request = _is_openai_compatible_request(request)
 
-    v = _parse_optional_scalar_int(request, "max_new_tokens")
+    v = _parse_optional_scalar_int(request, "max_tokens")
+    if v is None:
+        v = _parse_optional_parameter_int(request, "max_tokens")
+    if v is not None and v > 0:
+        max_total_tokens = v
+
+    v = _parse_optional_scalar_int(request, "max_completion_tokens")
+    if v is None:
+        v = _parse_optional_parameter_int(request, "max_completion_tokens")
     if v is not None:
-        max_new_tokens = max(0, v)
+        if v > 0:
+            max_new_tokens = v
+            max_new_tokens_from_completion_alias = True
+        # Compatible-mode max_completion_tokens values <= 0 mean "unset".
+        # Keep the server default and do not fall through to legacy aliases.
+    else:
+        legacy_max_new_tokens = _parse_optional_scalar_int(request, "max_new_tokens")
+        if legacy_max_new_tokens is None:
+            v = _parse_optional_scalar_int(request, "max_tokens")
+        else:
+            v = legacy_max_new_tokens
+        if v is None:
+            legacy_max_new_tokens = _parse_optional_parameter_int(
+                request, "max_new_tokens"
+            )
+            v = legacy_max_new_tokens
+        if v is None:
+            v = _parse_optional_parameter_int(request, "max_tokens")
+        if (
+            legacy_max_new_tokens is not None
+            and legacy_max_new_tokens <= 0
+            and openai_compatible_request
+        ):
+            pass
+        elif v is not None:
+            max_new_tokens = v
 
     v = _parse_optional_scalar_int(request, "num_return_sequences")
+    if v is None:
+        v = _parse_optional_scalar_int(request, "n")
     if v is not None:
         num_return_sequences = max(0, v)
 
@@ -231,6 +423,8 @@ def parse_sampling_params(request) -> SamplingParams:
         temperature = vf
 
     v = _parse_optional_scalar_int(request, "min_new_tokens")
+    if v is None:
+        v = _parse_optional_scalar_int(request, "min_length")
     if v is not None:
         min_new_tokens = max(0, v)
 
@@ -250,12 +444,20 @@ def parse_sampling_params(request) -> SamplingParams:
     if vf is not None:
         presence_penalty = vf
 
+    for tensor_name in ("max_think_length", "max_new_think_tokens"):
+        v = _parse_optional_scalar_int(request, tensor_name)
+        if v is not None:
+            max_new_think_tokens = v
+            break
+
     sw = _parse_stop_words_list_input(request)
     if sw is not None:
         stop_words_list = sw
 
     return SamplingParams(
         max_new_tokens=max_new_tokens,
+        max_new_tokens_from_completion_alias=max_new_tokens_from_completion_alias,
+        max_total_tokens=max_total_tokens,
         num_return_sequences=num_return_sequences,
         top_p=top_p,
         top_k=top_k,
@@ -265,12 +467,18 @@ def parse_sampling_params(request) -> SamplingParams:
         repetition_penalty=repetition_penalty,
         frequency_penalty=frequency_penalty,
         presence_penalty=presence_penalty,
+        max_new_think_tokens=max_new_think_tokens,
         stop_words_list=stop_words_list,
     )
 
 
 def parse_other_params(request) -> OtherParams:
-    """Non-sampling tensors. Currently: ``return_input_ids`` (BOOL byte or numeric scalar)."""
+    """Parse non-sampling request controls.
+
+    ``ds_header_attributes`` carries DashScope request-scoped controls that need
+    backend effects (thinking switch, timeout, priority, scheduler headers) even
+    though they are not ordinary sampler behavior.
+    """
     return_input_ids = False
     inp, raw = _find_input_raw(request, "return_input_ids")
     if inp is not None and raw:
@@ -284,7 +492,53 @@ def parse_other_params(request) -> OtherParams:
                 vf = _parse_optional_scalar_float(request, "return_input_ids")
                 if vf is not None:
                     return_input_ids = vf != 0.0
-    return OtherParams(return_input_ids=return_input_ids)
+
+    ds_attrs = _parse_ds_header_attributes(request)
+    enable_thinking = _parse_optional_bool(ds_attrs.get("x-ds-llm-thinking"))
+    if enable_thinking is None:
+        enable_thinking = _parse_optional_bool(ds_attrs.get("enable_thinking"))
+    if enable_thinking is None:
+        enable_thinking = _parse_optional_parameter_bool(request, "enable_thinking")
+
+    max_new_think_tokens = _parse_optional_scalar_int(request, "max_new_think_tokens")
+    if max_new_think_tokens is None:
+        max_new_think_tokens = _parse_optional_parameter_int(
+            request, "max_new_think_tokens"
+        )
+    if max_new_think_tokens is None:
+        max_new_think_tokens = _parse_optional_int_value(
+            ds_attrs.get("thinking_budget")
+        )
+    if max_new_think_tokens is None:
+        max_new_think_tokens = _parse_optional_parameter_int(request, "thinking_budget")
+    if max_new_think_tokens is not None:
+        max_new_think_tokens = int(max_new_think_tokens)
+
+    timeout_s = _parse_optional_int_value(ds_attrs.get("x-dashscope-inner-timeout"))
+    timeout_ms = timeout_s * 1000 if timeout_s is not None and timeout_s > 0 else None
+
+    traffic_reject_priority = _parse_optional_int_value(
+        ds_attrs.get("x-ds-request-priority")
+    )
+    if traffic_reject_priority is None:
+        traffic_reject_priority = _parse_optional_int_value(
+            ds_attrs.get("x-dashscope-inner-request-priority")
+        )
+
+    request_headers: dict[str, str] = {}
+    for header_name in ("user_id", "x-dashscope-apikeyid"):
+        value = _normalize_non_empty_str(ds_attrs.get(header_name))
+        if value is not None:
+            request_headers[header_name] = value
+
+    return OtherParams(
+        return_input_ids=return_input_ids,
+        enable_thinking=enable_thinking,
+        max_new_think_tokens=max_new_think_tokens,
+        timeout_ms=timeout_ms,
+        traffic_reject_priority=traffic_reject_priority,
+        request_headers=request_headers,
+    )
 
 
 def parse_dash_sc_grpc_request(
@@ -395,13 +649,18 @@ def prepend_to_generated_ids_tensor(
 def _append_finish_reason_output(
     infer: predict_v2_pb2.ModelInferResponse,
     finished: bool,
+    finish_reason_override: int | None = None,
 ) -> None:
     """``finish_reason``: INT64 scalar (``[1]``). finished=0, not finished=2."""
     out = infer.outputs.add()
     out.name = "finish_reason"
     out.datatype = "INT64"
     out.shape.append(1)
-    infer.raw_output_contents.append(struct.pack("<q", 0 if finished else 2))
+    if finish_reason_override is not None:
+        value = finish_reason_override
+    else:
+        value = 0 if finished else 2
+    infer.raw_output_contents.append(struct.pack("<q", value))
 
 
 def _append_finished_output(
@@ -480,6 +739,7 @@ def build_stream_response_from_generate_outputs(
     eos_token_id: int | None = None,
     max_token_id: int | None = None,
     generate_think_token_num: int | None = None,
+    finish_reason_override: int | None = None,
     _request_shape: list[int] | None = None,
 ) -> predict_v2_pb2.ModelStreamInferResponse:
     """Build ``ModelStreamInferResponse`` from one ``GenerateOutputs`` chunk.
@@ -507,7 +767,7 @@ def build_stream_response_from_generate_outputs(
         _append_prompt_token_ids_output(infer, request_input_ids)
 
     _append_generated_ids_output(infer, generated_ids)
-    _append_finish_reason_output(infer, finished)
+    _append_finish_reason_output(infer, finished, finish_reason_override)
     _append_finished_output(infer, finished)
     _append_aux_info_metrics_outputs(infer, out_py)
     infer.parameters["incremental_output"].int64_param = 1 if is_streaming else 0
