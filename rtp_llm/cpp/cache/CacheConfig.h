@@ -33,14 +33,11 @@ struct CacheConfig {
     std::vector<size_t>            group_kv_scale_stride_bytes;
     std::vector<size_t>            group_block_size_bytes;
     std::vector<uint32_t>          group_block_nums;
-    // Total block count reserved for each group's fixed pool (0 means the group
-    // follows the shared paged `block_num`). This is an absolute count — it is
-    // not multiplied by runtime batch size.
-    std::vector<uint32_t> group_fixed_pool_blocks;
-    bool                  use_independent_block_pools              = false;
-    bool                  use_typed_cache_regions                  = false;
-    bool                  use_opaque_kv_cache_store                = false;
-    bool                  disable_decode_first_malloc_device_reuse = false;
+    uint32_t                       non_full_addition_kvcache_blocks         = 0;
+    bool                           use_independent_block_pools              = false;
+    bool                           use_typed_cache_regions                  = false;
+    bool                           use_opaque_kv_cache_store                = false;
+    bool                           disable_decode_first_malloc_device_reuse = false;
 
     // Model configuration
     rtp_llm::DataType dtype;
@@ -103,27 +100,24 @@ struct CacheConfig {
             return;
         }
 
-        const int step               = std::max(1, linear_step);
-        size_t    fixed_pool_reserve = 0;
+        const int step    = std::max(1, linear_step);
+        size_t    reserve = 0;
         for (size_t gid = 0; gid < group_block_nums.size(); ++gid) {
-            const uint32_t fixed_pool_blocks = gid < group_fixed_pool_blocks.size() ? group_fixed_pool_blocks[gid] : 0;
-            if (fixed_pool_blocks > 0) {
-                // BlockPool reserves block 0, so fixed pools need one extra
-                // physical block beyond the request-visible capacity.
-                group_block_nums[gid] = fixed_pool_blocks + 1;
-                if (gid < group_block_size_bytes.size()) {
-                    fixed_pool_reserve += static_cast<size_t>(group_block_nums[gid]) * group_block_size_bytes[gid];
-                }
+            const bool     is_full  = gid < group_types.size() && group_types[gid] == CacheGroupType::FULL;
+            const uint32_t addition = is_full ? 0u : non_full_addition_kvcache_blocks;
+            const bool     is_swa   = gid < group_types.size() && group_types[gid] == CacheGroupType::SWA;
+            uint32_t       rule_blocks;
+            if (is_swa && step > 1 && global_block_num > 0) {
+                rule_blocks = std::max(1u, global_block_num / static_cast<uint32_t>(step));
             } else {
-                const bool is_swa = gid < group_types.size() && group_types[gid] == CacheGroupType::SWA;
-                if (is_swa && step > 1 && global_block_num > 0) {
-                    group_block_nums[gid] = std::max(1u, global_block_num / static_cast<uint32_t>(step));
-                } else if (group_block_nums[gid] == 0) {
-                    group_block_nums[gid] = global_block_num;
-                }
+                rule_blocks = global_block_num;
+            }
+            group_block_nums[gid] = rule_blocks + addition;
+            if (addition > 0 && gid < group_block_size_bytes.size()) {
+                reserve += static_cast<size_t>(addition) * group_block_size_bytes[gid];
             }
         }
-        fixed_pool_reserve_bytes = fixed_pool_reserve;
+        fixed_pool_reserve_bytes = reserve;
     }
 
     std::string debugString(size_t indent = 0) const {
@@ -173,12 +167,12 @@ struct CacheConfig {
         OUTPUT_FIELD(linear_group_num);
         OUTPUT_FIELD(swa_group_num);
         OUTPUT_FIELD(full_group_num);
+        OUTPUT_FIELD(non_full_addition_kvcache_blocks);
         OUTPUT_FIELD(use_independent_block_pools);
         OUTPUT_FIELD(use_typed_cache_regions);
         OUTPUT_FIELD(use_opaque_kv_cache_store);
         OUTPUT_FIELD(disable_decode_first_malloc_device_reuse);
         os << indent1 << "group_block_nums=" << rtp_llm::vectorToString(group_block_nums) << "\n";
-        os << indent1 << "group_fixed_pool_blocks=" << rtp_llm::vectorToString(group_fixed_pool_blocks) << "\n";
         os << "\n";
 
         // Cache specification section
