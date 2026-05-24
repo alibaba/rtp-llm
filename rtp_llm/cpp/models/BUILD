@@ -5,6 +5,7 @@ cc_library(
     name = "sample_infos",
     hdrs = [
         "SampleInfos.h",
+        "SpecLogitsProcessorTypes.h",
     ],
     deps = [
         "//:rtp_compute_ops",

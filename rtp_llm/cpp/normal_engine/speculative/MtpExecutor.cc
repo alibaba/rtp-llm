@@ -16,9 +16,12 @@
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
+#include "rtp_llm/cpp/models/logits_processor/TreeLogitsProcessor.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include <sstream>
 #if USING_CUDA
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDACachingAllocator.h>
 #include "rtp_llm/models_py/bindings/cuda/kernels/mtp_target_verify_prepare.h"
 #endif
 #include "autil/TimeUtility.h"
@@ -29,7 +32,6 @@
 #include <random>
 #include <string>
 #include <vector>
-#include <ATen/cuda/CUDAContext.h>
 
 namespace rtp_llm {
 
@@ -83,6 +85,31 @@ bool hasSpecLogitsProcessor(const std::list<GenerateStreamPtr>& streams) {
     return false;
 }
 
+bool hasUnsupportedMtpStatefulLogitsProcessor(const std::list<GenerateStreamPtr>& streams) {
+    for (const auto& stream : streams) {
+        for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
+            if (processor == nullptr || std::dynamic_pointer_cast<SpecLogitsProcessor>(processor) != nullptr) {
+                continue;
+            }
+            if (processor->isStateful() || std::dynamic_pointer_cast<TreeLogitsProcessor>(processor) != nullptr) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+void recordSpecTensorUseOnCurrentStream(const torch::Tensor& tensor) {
+#if USING_CUDA
+    if (tensor.defined() && tensor.is_cuda()) {
+        c10::cuda::CUDACachingAllocator::recordStream(tensor.storage().data_ptr(),
+                                                      at::cuda::getCurrentCUDAStream(tensor.device().index()));
+    }
+#else
+    (void)tensor;
+#endif
+}
+
 torch::Tensor toCudaWithHostHold(const torch::Tensor& tensor, TensorHolder& holder) {
     if (!tensor.defined() || tensor.is_cuda()) {
         return tensor;
@@ -123,6 +150,7 @@ void applySpecLogitsAcceptLenCap(const SamplerInputs&                     sample
     if (sampler_input.spec_mask_ready_event) {
         sampler_input.spec_mask_ready_event->block(cuda_graph::graphGetCurrentStream());
     }
+    recordSpecTensorUseOnCurrentStream(sampler_input.spec_cap_gpu);
     auto cap_gpu      = sampler_input.spec_cap_gpu.to(output.accept_len.options());
     auto cap_plus_one = cap_gpu + 1;
     output.accept_len = torch::minimum(output.accept_len, cap_plus_one);
@@ -155,6 +183,12 @@ void applySpecLogitsAcceptLenCap(const SamplerInputs&                     sample
     output.accept_tokens_cpu = output.accept_tokens.to(torch::kCPU, /*non_blocking=*/true);
     output.accept_len_cpu    = output.accept_len.to(torch::kCPU, /*non_blocking=*/true);
     output.transfer_done_event->record(cuda_graph::graphGetCurrentStream());
+    // The spec artifact is read by logits masking before sampling and by cap
+    // application here. Recording after cap keeps future artifact pools from
+    // reusing mask/cap storage before the sampler stream has consumed both.
+    if (sampler_input.spec_mask_consumed_event) {
+        sampler_input.spec_mask_consumed_event->record(cuda_graph::graphGetCurrentStream());
+    }
 }
 
 }  // namespace
@@ -898,6 +932,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     std::shared_ptr<torch::Event> draft_event;
     bool                          prev_bookkeeping_synced_for_spec_logits = false;
     bool                          spec_logits_async_launched              = false;
+    bool                          spec_logits_processor_present           = false;
 
     waitPreviousBookkeepingAndKvSwaps(streams);
 
@@ -942,6 +977,13 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         ensureModelInputsOnCuda(model_input, "decode.after_tp_sync");
     }
     size_t batch_size = model_input.input_lengths.size(0);
+    spec_logits_processor_present =
+        isTpRank0() && !model_input.is_fake_stream && hasSpecLogitsProcessor(streams);
+    if (isTpRank0() && !model_input.is_fake_stream && hasUnsupportedMtpStatefulLogitsProcessor(streams)) {
+        return absl::InternalError(
+            "MTP spec decode found a stateful logits processor without SpecLogitsProcessor support; "
+            "disable MTP or implement spec verify for this processor");
+    }
 
     // release hold buffers before draft model forward
     releaseAllModelBuffers();
@@ -955,8 +997,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode end");
     }
 
-    if (isTpRank0() && !model_input.is_fake_stream && propose_step_ > 1 && draft_token_ids_t.defined()
-        && hasSpecLogitsProcessor(streams)) {
+    if (spec_logits_processor_present && propose_step_ > 1 && draft_token_ids_t.defined()) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(launch_spec_logits_verify_async)");
         if (useStreamAsync() && useDropBroadSync()) {
             RTP_LLM_PROFILE_SCOPE_DYNAMIC(
@@ -1019,7 +1060,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         }
     }
 
-    if (isTpRank0() && !model_input.is_fake_stream && !spec_logits_async_launched) {
+    if (spec_logits_processor_present && !spec_logits_async_launched) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(spec_logits_verify_inline)");
         if (useStreamAsync() && useDropBroadSync()) {
             RTP_LLM_PROFILE_SCOPE_DYNAMIC(
@@ -1040,6 +1081,11 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     if (spec_logits_async_launched) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(wait_spec_logits_verify_async)");
         spec_logits_verify_async_runner_.sync(cuda_graph::graphGetCurrentStream());
+    }
+    if (spec_logits_processor_present && !spec_logits_result.has_active_processor) {
+        return absl::InternalError(
+            "MTP async spec logits processor is present but no verify artifact was produced; "
+            "disable MTP/async or implement spec verify for this processor");
     }
 
     // eplb

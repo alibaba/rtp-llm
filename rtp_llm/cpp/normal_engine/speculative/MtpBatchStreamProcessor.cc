@@ -341,10 +341,12 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
     setLogitsProcessorInputs(sampler_inputs, all_streams, true);
     sampler_inputs.phase = LogitsProcessorPhase::MTP_VERIFY;
     if (spec_logits_result.has_active_processor) {
-        sampler_inputs.spec_vocab_mask_gpu   = spec_logits_result.spec_vocab_mask_gpu;
-        sampler_inputs.spec_cap_gpu          = spec_logits_result.spec_cap_gpu;
-        sampler_inputs.spec_mask_ready_event = spec_logits_result.ready_event;
-        sampler_inputs.spec_propose_step     = propose_step_;
+        sampler_inputs.spec_vocab_mask_gpu      = spec_logits_result.spec_vocab_mask_gpu;
+        sampler_inputs.spec_cap_gpu             = spec_logits_result.spec_cap_gpu;
+        sampler_inputs.spec_mask_ready_event    = spec_logits_result.ready_event;
+        sampler_inputs.spec_mask_consumed_event = spec_logits_result.consumed_event;
+        sampler_inputs.spec_applied_processors  = spec_logits_result.applied_processors;
+        sampler_inputs.spec_propose_step        = propose_step_;
     }
 
     int batch_idx = 0;

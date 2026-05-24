@@ -3,6 +3,7 @@
 #include <torch/all.h>
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/models_py/bindings/core/OpData.h"
+#include "rtp_llm/cpp/models/SpecLogitsProcessorTypes.h"
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
 
 namespace rtp_llm {
@@ -66,10 +67,12 @@ public:
 
     // MTP_VERIFY only. spec_vocab_mask_gpu is a bool mask with the same row
     // count as logits; true means the token is disallowed for that verify row.
-    torch::Tensor                 spec_vocab_mask_gpu;
-    torch::Tensor                 spec_cap_gpu;
-    std::shared_ptr<torch::Event> spec_mask_ready_event;
-    int                           spec_propose_step = 0;
+    torch::Tensor                      spec_vocab_mask_gpu;
+    torch::Tensor                      spec_cap_gpu;
+    std::shared_ptr<torch::Event>      spec_mask_ready_event;
+    std::shared_ptr<torch::Event>      spec_mask_consumed_event;
+    std::vector<SpecLogitsProcessorId> spec_applied_processors;
+    int                                spec_propose_step = 0;
 };
 
 struct SamplerOutput {

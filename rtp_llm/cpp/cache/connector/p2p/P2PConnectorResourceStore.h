@@ -29,7 +29,7 @@ struct P2PConnectorResourceEntry {
 
     // Side-channel data (filled by prefill when first token / SP data is produced)
     struct SideChannelData {
-        int64_t              first_token_id   = 0;
+        int64_t              first_token_id   = -1;
         int32_t              total_reuse_len  = 0;
         int32_t              local_reuse_len  = 0;
         int32_t              remote_reuse_len = 0;

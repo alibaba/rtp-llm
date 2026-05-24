@@ -148,6 +148,7 @@ SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::buildInline(const L
         bitwiseAndInplace(merged_row, proc_mask.data_ptr<int32_t>(), static_cast<size_t>(P + 1) * W);
         auto* cap_ptr            = spec_cap_cpu_.data_ptr<int32_t>();
         cap_ptr[item.stream_idx] = std::min<int32_t>(cap_ptr[item.stream_idx], cap);
+        result.applied_processors.push_back({item.stream_id, item.processor_idx});
     }
 
     if (!applied_processor) {
@@ -172,10 +173,12 @@ SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::buildInline(const L
     cap_gpu.copy_(cap_cpu, /*non_blocking=*/true);
     auto ready = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
     ready->record(copy_stream_);
+    auto consumed = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
 
     result.spec_vocab_mask_gpu  = mask_gpu;
     result.spec_cap_gpu         = cap_gpu;
     result.ready_event          = ready;
+    result.consumed_event       = consumed;
     result.has_active_processor = true;
     result.spec_vocab_mask_cpu_owner = mask_cpu;
     result.spec_cap_cpu_owner        = cap_cpu;

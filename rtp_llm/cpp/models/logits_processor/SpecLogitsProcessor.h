@@ -4,6 +4,8 @@
 #include <cstdint>
 #include <memory>
 
+#include "rtp_llm/cpp/models/SpecLogitsProcessorTypes.h"
+
 namespace rtp_llm {
 
 struct SpecLogitsProcessorRequest {

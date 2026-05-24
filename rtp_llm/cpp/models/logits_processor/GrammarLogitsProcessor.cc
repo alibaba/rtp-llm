@@ -268,13 +268,17 @@ int GrammarLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsProcessorReq
             return;
         }
 
-        DLTensor dl = makeSingleRowBitmaskView(row, static_cast<int32_t>(W));
+        const int32_t grammar_vocab_size = matcher_->vocabSize();
+        const size_t  grammar_words      = SpecLogitsProcessor::bitmaskWordCount(grammar_vocab_size);
+        RTP_LLM_CHECK_WITH_INFO(
+            grammar_words <= W, "grammar vocab bitmask exceeds model vocab bitmask in MTP verify");
+
+        DLTensor dl = makeSingleRowBitmaskView(row, static_cast<int32_t>(grammar_words));
         if (!matcher_->fillBitmask(&dl, 0) && matcher_->isPassthroughForMask()) {
             std::fill_n(row, W, SpecLogitsProcessor::kBitmaskAllowAll);
             clearTokenFromBitmask(row, W, eos_token_id_);
             return;
         }
-        const int32_t grammar_vocab_size = matcher_->vocabSize();
         clearBitmaskTokenRange(row, W, grammar_vocab_size, static_cast<int64_t>(request.vocab_size));
     };
 

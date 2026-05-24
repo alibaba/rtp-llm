@@ -35,10 +35,12 @@ public:
         // Bool vocab mask, shape [B * (P + 1), vocab_size], CUDA when active.
         // true means masked. This keeps the generic sampler path independent
         // from grammar-specific packed bitmask kernels.
-        torch::Tensor                 spec_vocab_mask_gpu;
-        torch::Tensor                 spec_cap_gpu;  // [B] int32 CUDA
-        std::shared_ptr<torch::Event> ready_event;
-        bool                          has_active_processor = false;
+        torch::Tensor                      spec_vocab_mask_gpu;
+        torch::Tensor                      spec_cap_gpu;  // [B] int32 CUDA
+        std::shared_ptr<torch::Event>      ready_event;
+        std::shared_ptr<torch::Event>      consumed_event;
+        bool                               has_active_processor = false;
+        std::vector<SpecLogitsProcessorId> applied_processors;
 
         // Keep H2D sources alive until ready_event has completed. The runner
         // reuses scratch buffers across decode rounds, while these tensors own
