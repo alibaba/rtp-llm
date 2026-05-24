@@ -22,6 +22,12 @@ class AccMetrics(Enum):
     DOMAIN_ROUTE_QPS_METRIC = "py_rtp_domain_route_qps"
     MASTER_ROUTE_ERROR_QPS_METRIC = "py_rtp_master_route_error_qps"
     MASTER_QUEUE_REJECT_QPS_METRIC = "py_rtp_master_queue_reject_qps"
+    RECENT_CACHE_KEY_HIT_COUNT_METRIC = "py_rtp_recent_cache_key_hit_count"
+    RECENT_CACHE_KEY_TOTAL_COUNT_METRIC = "py_rtp_recent_cache_key_total_count"
+    RECENT_CACHE_KEY_REQUEST_COUNT_METRIC = "py_rtp_recent_cache_key_request_count"
+    RECENT_CACHE_KEY_EMPTY_REQUEST_COUNT_METRIC = (
+        "py_rtp_recent_cache_key_empty_request_count"
+    )
 
     # igraph
     IGRAPH_QPS_METRIC = "py_rtp_igraph_qps"
@@ -60,6 +66,7 @@ class GaugeMetrics(Enum):
     DOMAIN_ROUTE_RT_METRIC = "py_rtp_domain_route_rt"
     MASTER_QUEUE_LENGTH_METRIC = "py_rtp_master_queue_length"
     MASTER_HOST_METRIC = "py_rtp_master_host"
+    RECENT_CACHE_KEY_HIT_RATIO_METRIC = "py_rtp_recent_cache_key_hit_ratio"
 
     # igraph
     IGRAPH_RT_METRIC = "py_rtp_igraph_rt"
