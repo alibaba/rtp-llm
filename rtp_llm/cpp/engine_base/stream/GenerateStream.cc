@@ -119,15 +119,15 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
 }
 
 void GenerateStream::resetBeginTime(int64_t begin_time_us) {
-    begin_time_us_ = begin_time_us;
-    wait_time_us_ = 0;
-    scheduler_enqueue_time_us_ = 0;
-    can_run_time_us_ = 0;
+    begin_time_us_               = begin_time_us;
+    wait_time_us_                = 0;
+    scheduler_enqueue_time_us_   = 0;
+    can_run_time_us_             = 0;
     loading_cache_start_time_us_ = 0;
-    loading_cache_done_time_us_ = 0;
-    first_running_time_us_ = 0;
-    loading_cache_latency_us_ = 0;
-    load_done_to_running_us_ = 0;
+    loading_cache_done_time_us_  = 0;
+    first_running_time_us_       = 0;
+    loading_cache_latency_us_    = 0;
+    load_done_to_running_us_     = 0;
 }
 
 bool GenerateStream::hasCacheKeys() const {
@@ -906,6 +906,7 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     // PDFUSION path provides this; PD-disaggregate path leaves it undefined and
     // readers fall back to the CPU `tokens` tensor.
     sp_output_buffer_->propose_tokens_gpu = update_info.draft_token_gpu;
+    sp_output_buffer_->target_token_gpu   = update_info.target_token_gpu;
 
     // for spec-decode linear attention, we need to adjust cache blocks
     int nxt_cached_len   = seqLength() - 1;
@@ -1186,9 +1187,10 @@ void GenerateStream::reportStreamMetrics() {
         collector.is_streaming_qps  = generate_input_->generate_config->is_streaming;
         collector.not_streaming_qps = !generate_input_->generate_config->is_streaming;
         if (getStatus() == StreamState::FINISHED || cancelled || timeout) {
-            collector.reuse_length           = initial_reuse_length_;
-            collector.input_token_length     = inputLength();
-            collector.effective_context_length = std::max<int64_t>(0, collector.input_token_length - initial_reuse_length_);
+            collector.reuse_length       = initial_reuse_length_;
+            collector.input_token_length = inputLength();
+            collector.effective_context_length =
+                std::max<int64_t>(0, collector.input_token_length - initial_reuse_length_);
             collector.output_token_length    = outputTokenLen();
             collector.iterate_count          = iter_count_;
             collector.query_batch_size       = maxBatchSize();
@@ -1196,7 +1198,7 @@ void GenerateStream::reportStreamMetrics() {
             collector.first_token_latency_us = complete_token_ids_->firstTokenLatencyUs();
             RTP_LLM_LOG_DEBUG(
                 "stream [%s] report first latency us = %ld", streamLogTag().c_str(), collector.first_token_latency_us);
-            collector.wait_latency_us          = wait_time_us_;
+            collector.wait_latency_us = wait_time_us_;
             if (scheduler_enqueue_time_us_ > 0 && can_run_time_us_ > scheduler_enqueue_time_us_) {
                 collector.enqueue_to_canrun_us = can_run_time_us_ - scheduler_enqueue_time_us_;
             }

@@ -130,6 +130,9 @@ torch::Tensor pickOneStepTargetLastToken(const GenerateStreamPtr& stream) {
     if (!sp_output_buffer) {
         return torch::Tensor();
     }
+    if (sp_output_buffer->target_token_gpu.defined() && sp_output_buffer->target_token_gpu.is_cuda()) {
+        return lastColumnAsFlat(sp_output_buffer->target_token_gpu);
+    }
     return columnAsFlat(sp_output_buffer->tokens, 0);
 }
 
@@ -227,8 +230,14 @@ bool collectMtpStateProposeSlices(const std::list<GenerateStreamPtr>& streams,
     for (const auto& stream : streams) {
         torch::Tensor gpu_t = stream->getProposeTokensGpu();
         if (!gpu_t.defined() || !gpu_t.is_cuda()) {
-            logMtpStateFallback(stream, "propose_tokens_gpu_missing");
-            return false;
+            auto sp_output_buffer = stream->getSPOutputBuffer();
+            if (sp_output_buffer && sp_output_buffer->propose_tokens_gpu.defined()
+                && sp_output_buffer->propose_tokens_gpu.is_cuda()) {
+                gpu_t = sp_output_buffer->propose_tokens_gpu;
+            } else {
+                logMtpStateFallback(stream, "propose_tokens_gpu_missing");
+                return false;
+            }
         }
         propose_slices.push_back(lastColumnAsFlat(gpu_t));
         if (next_seq_lengths) {
@@ -866,8 +875,20 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
 
         torch::Tensor accept_tokens_tensor =
             accept_tokens.narrow(0, batch_idx_out, next_batch_size).narrow(1, 0, cur_accept_len).contiguous();
-        spec_update_infos.push_back(
-            {accept_tokens_tensor, cur_accept_len, -1, std::move(last_hidden_states), std::move(propose_all_probs)});
+        torch::Tensor target_token_gpu;
+        if (spec_decode_output.accept_tokens.defined() && spec_decode_output.accept_tokens.is_cuda()) {
+            target_token_gpu = spec_decode_output.accept_tokens.narrow(0, batch_idx_out, next_batch_size)
+                                   .narrow(1, cur_accept_len - 1, 1)
+                                   .reshape({static_cast<int64_t>(next_batch_size)})
+                                   .to(torch::kInt32);
+        }
+        spec_update_infos.push_back({accept_tokens_tensor,
+                                     cur_accept_len,
+                                     -1,
+                                     std::move(last_hidden_states),
+                                     std::move(propose_all_probs),
+                                     torch::Tensor(),
+                                     std::move(target_token_gpu)});
 
         token_offset += propose_step_ + 1;
         batch_idx_in += cur_batch_size;

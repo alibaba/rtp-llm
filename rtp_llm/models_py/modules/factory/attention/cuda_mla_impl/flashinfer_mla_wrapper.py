@@ -223,6 +223,8 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
         self.prepare(attn_inputs, forbid_realloc=True)
+        if self.absorb_fmha is not None:
+            self.absorb_fmha.plan_prefill_cuda_graph(self.fmha_params)
 
     def _handle_long_sequence(
         self,

@@ -105,7 +105,7 @@ protected:
     GptModelOutputs runTargetVerifyForward(GptModelInputs& model_input, const StreamGroups& stream_groups);
     void            debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& model_input,
                                                          const StreamGroups&   stream_groups) const;
-    void            broadcastPostRejectionInputs(GptModelInputs& model_input);
+    void            broadcastPostRejectionInputs(GptModelInputs& model_input, const StreamGroups& stream_groups);
     GptModelOutputs runDraftPrefillForward(GptModelInputs& model_input);
     SpecLogitsVerifyRunner::LaunchResult
                  buildSpecLogitsVerifyInline(const std::list<GenerateStreamPtr>& streams,

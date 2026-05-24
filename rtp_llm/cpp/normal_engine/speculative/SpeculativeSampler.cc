@@ -3,9 +3,59 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include <atomic>
+#include <cstdlib>
+#include <sstream>
+#include <string>
 
 namespace rtp_llm {
 namespace speculative {
+
+namespace {
+
+bool debugMtpAcceptEnabled() {
+    static const bool enabled = []() {
+        const char* env = std::getenv("RTP_LLM_DEBUG_MTP_ACCEPT");
+        const bool  on  = env != nullptr && std::string(env) != "0";
+        if (on) {
+            RTP_LLM_LOG_WARNING("[debug-mtp-accept] enabled; this copies small sampler tensors to host");
+        }
+        return on;
+    }();
+    return enabled;
+}
+
+std::string debugTensorSummary(const torch::Tensor& tensor, int64_t limit = 24) {
+    if (!tensor.defined()) {
+        return "None";
+    }
+    std::ostringstream oss;
+    oss << "shape=[";
+    for (int64_t i = 0; i < tensor.dim(); ++i) {
+        if (i > 0) {
+            oss << ",";
+        }
+        oss << tensor.size(i);
+    }
+    oss << "] device=" << tensor.device() << " dtype=" << tensor.dtype();
+    if (tensor.numel() == 0) {
+        return oss.str();
+    }
+    try {
+        auto flat  = tensor.reshape({-1});
+        auto count = std::min<int64_t>(limit, flat.numel());
+        auto head  = flat.slice(0, 0, count);
+        if (head.device().is_cuda()) {
+            head = head.cpu();
+        }
+        oss << " head=" << head;
+    } catch (const std::exception& e) {
+        oss << " summary_error=" << e.what();
+    }
+    return oss.str();
+}
+
+}  // namespace
 
 FastTopKSamplerOutput FastTopKSampler::forward(const torch::Tensor& logits, int top_k) {
     FastTopKSamplerOutput output;
@@ -179,6 +229,22 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     output_token_ids_d.index_put_({output_token_ids_d == -1}, 0);
     sample_output.accept_tokens = output_token_ids_d;
     sample_output.accept_len    = output_accepted_token_num_d;
+
+    if (debugMtpAcceptEnabled()) {
+        static std::atomic<int> log_budget{32};
+        if (log_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
+            RTP_LLM_LOG_INFO("[debug-mtp-accept] batch=%d propose_step=%zu draft_token_ids=%s target_token_ids=%s "
+                             "accept_len=%s accept_tokens=%s draft_probs=%s target_probs=%s",
+                             batch_size,
+                             propose_step_,
+                             debugTensorSummary(draft_token_ids, 32).c_str(),
+                             debugTensorSummary(target_token_ids, 32).c_str(),
+                             debugTensorSummary(sample_output.accept_len, 32).c_str(),
+                             debugTensorSummary(sample_output.accept_tokens, 32).c_str(),
+                             debugTensorSummary(draft_token_probs, 0).c_str(),
+                             debugTensorSummary(target_token_probs, 0).c_str());
+        }
+    }
 
     sample_output.accept_tokens_cpu = sample_output.accept_tokens.to(torch::kCPU, true);
     sample_output.accept_len_cpu    = sample_output.accept_len.to(torch::kCPU, true);
