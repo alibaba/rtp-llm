@@ -3,6 +3,7 @@ package org.flexlb.cache.core;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.config.ConfigService;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayDeque;
@@ -33,6 +34,7 @@ public class RecentCacheKeyWindow {
 
     private long totalOccurrences;
 
+    @Autowired
     public RecentCacheKeyWindow(ConfigService configService) {
         this(resolveTimeWindowMs(configService), System::currentTimeMillis);
     }
