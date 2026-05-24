@@ -10,6 +10,7 @@
 
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
+#include "rtp_llm/cpp/cache/connector/memory/CacheBlockKind.h"
 #include "rtp_llm/cpp/cache/connector/memory/MemoryBlockCache.h"
 
 namespace rtp_llm {
@@ -55,6 +56,7 @@ public:
     std::optional<MemoryBlockCache::CacheItem>                  remove(CacheKeyType cache_key);
     std::optional<MemoryBlockCache::CacheItem> removeIfMatch(CacheKeyType cache_key, BlockIdxType expected_block_index);
     std::optional<CacheItem>                   popOldestEvictable();
+    std::optional<CacheItem>                   popOldestEvictable(CacheBlockKind kind);
 
     bool
     markInFlight(CacheKeyType cache_key, CacheBackingType backing_type, BlockIdxType block_index, int32_t disk_slot);
@@ -84,12 +86,16 @@ private:
     void                               eraseEvictKeyLocked(const CacheItem& item);
     void                               touchLocked(CacheItem& item);
     std::optional<CacheItem>           oldestFromSetLocked(std::set<EvictKey>& eviction_set);
+    std::optional<CacheItem>           popOldestEvictableLocked(CacheBlockKind kind);
+    std::set<EvictKey>&                lruSetLocked(CacheBackingType backing_type, CacheBlockKind kind);
 
 private:
     mutable std::shared_mutex                   mutex_;
     std::unordered_map<CacheKeyType, CacheItem> items_;
-    std::set<EvictKey>                          memory_lru_;
-    std::set<EvictKey>                          disk_lru_;
+    std::set<EvictKey>                          memory_complete_lru_;
+    std::set<EvictKey>                          memory_incomplete_lru_;
+    std::set<EvictKey>                          disk_complete_lru_;
+    std::set<EvictKey>                          disk_incomplete_lru_;
     uint64_t                                    access_seq_{0};
 };
 

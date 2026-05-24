@@ -57,6 +57,35 @@ TEST(MemoryDiskBlockCacheTest, SharedAccessSeqEvictsOldestAcrossBackings) {
     EXPECT_EQ(evicted->backing_type, CacheBackingType::DISK);
 }
 
+TEST(MemoryDiskBlockCacheTest, KindAwareEvictionOnlyPopsRequestedKind) {
+    MemoryDiskBlockCache cache;
+    ASSERT_TRUE(cache.putCommitted(memoryItem(1, 10, false)).first);
+    ASSERT_TRUE(cache.putCommitted(diskItem(2, 20, false)).first);
+    ASSERT_TRUE(cache.putCommitted(memoryItem(3, 30, true)).first);
+
+    auto evicted = cache.popOldestEvictable(CacheBlockKind::COMPLETE);
+    ASSERT_TRUE(evicted.has_value());
+    EXPECT_EQ(evicted->cache_key, 3);
+    EXPECT_TRUE(evicted->is_complete);
+
+    evicted = cache.popOldestEvictable(CacheBlockKind::INCOMPLETE);
+    ASSERT_TRUE(evicted.has_value());
+    EXPECT_EQ(evicted->cache_key, 1);
+    EXPECT_FALSE(evicted->is_complete);
+}
+
+TEST(MemoryDiskBlockCacheTest, KindAwareEvictionChoosesOldestAcrossMemoryAndDiskForSameKind) {
+    MemoryDiskBlockCache cache;
+    ASSERT_TRUE(cache.putCommitted(memoryItem(1, 10, true)).first);
+    ASSERT_TRUE(cache.putCommitted(diskItem(2, 20, true)).first);
+    ASSERT_FALSE(isNullBlockIdx(cache.match(1).matched_index));
+
+    auto evicted = cache.popOldestEvictable(CacheBlockKind::COMPLETE);
+    ASSERT_TRUE(evicted.has_value());
+    EXPECT_EQ(evicted->cache_key, 2);
+    EXPECT_EQ(evicted->backing_type, CacheBackingType::DISK);
+}
+
 TEST(MemoryDiskBlockCacheTest, ContainsDoesNotUpdateRecency) {
     MemoryDiskBlockCache cache;
     ASSERT_TRUE(cache.putCommitted(memoryItem(1, 10)).first);
