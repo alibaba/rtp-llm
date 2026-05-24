@@ -37,7 +37,6 @@ import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.isNull;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -183,7 +182,7 @@ class DefaultRouterTest {
     }
 
     @Test
-    void should_not_report_recent_cache_key_metrics_when_request_has_no_block_cache_keys() {
+    void should_report_recent_cache_key_metrics_when_request_has_no_block_cache_keys() {
         org.flexlb.dao.master.WorkerStatus dummyDecodeWorker = new org.flexlb.dao.master.WorkerStatus();
         dummyDecodeWorker.setIp("192.168.1.2");
         dummyDecodeWorker.setPort(8081);
@@ -205,7 +204,8 @@ class DefaultRouterTest {
         Response response = defaultRouter.route(balanceContext);
 
         assertTrue(response.isSuccess(), "Response should be successful");
-        verifyNoInteractions(cacheMetricsReporter);
+        verify(cacheMetricsReporter).reportRecentCacheKeyHitMetrics(
+                RecentCacheKeyWindow.DEFAULT_TIME_WINDOW_MS, 0L, 0L, 0.0);
     }
 
     @Test

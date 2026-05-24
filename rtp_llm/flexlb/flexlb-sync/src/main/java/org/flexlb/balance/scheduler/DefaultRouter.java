@@ -105,9 +105,6 @@ public class DefaultRouter implements Router {
         }
 
         RecentCacheKeyWindow.Snapshot snapshot = recentCacheKeyWindow.record(request.getBlockCacheKeys());
-        if (snapshot.getRequestOccurrences() <= 0) {
-            return;
-        }
 
         cacheMetricsReporter.reportRecentCacheKeyHitMetrics(snapshot.getTimeWindowMs(),
                 snapshot.getRequestHitOccurrences(),

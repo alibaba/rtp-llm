@@ -145,6 +145,16 @@ public class MetricConstant {
     public static final String CACHE_RECENT_KEY_HIT_RATIO = "app.cache.recent.key.hit.ratio";
 
     /**
+     * Requests observed by recent cache-key hit metrics.
+     */
+    public static final String CACHE_RECENT_KEY_REQUEST_COUNT = "app.cache.recent.key.request.count";
+
+    /**
+     * Requests observed by recent cache-key hit metrics without cache keys.
+     */
+    public static final String CACHE_RECENT_KEY_EMPTY_REQUEST_COUNT = "app.cache.recent.key.empty_request.count";
+
+    /**
      * Cache request total count
      */
     public static final String CACHE_REQUEST_TOTAL = "app.cache.request.total";

@@ -23,6 +23,8 @@ import static org.flexlb.constant.MetricConstant.CACHE_HIT_RATIO;
 import static org.flexlb.constant.MetricConstant.CACHE_RECENT_KEY_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_RECENT_KEY_HIT_RATIO;
 import static org.flexlb.constant.MetricConstant.CACHE_RECENT_KEY_TOTAL_COUNT;
+import static org.flexlb.constant.MetricConstant.CACHE_RECENT_KEY_REQUEST_COUNT;
+import static org.flexlb.constant.MetricConstant.CACHE_RECENT_KEY_EMPTY_REQUEST_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_REQUEST_TOTAL;
 import static org.flexlb.constant.MetricConstant.CACHE_UPDATE_ENGINE_BLOCK_CACHE_RT;
 
@@ -80,9 +82,11 @@ public class CacheMetricsReporter {
         // Cache hit rate metrics
         monitor.register(CACHE_HIT_COUNT, FlexMetricType.GAUGE);
         monitor.register(CACHE_HIT_RATIO, FlexMetricType.GAUGE);
-        monitor.register(CACHE_RECENT_KEY_HIT_COUNT, FlexMetricType.QPS);
-        monitor.register(CACHE_RECENT_KEY_TOTAL_COUNT, FlexMetricType.QPS);
+        monitor.register(CACHE_RECENT_KEY_HIT_COUNT, FlexMetricType.GAUGE);
+        monitor.register(CACHE_RECENT_KEY_TOTAL_COUNT, FlexMetricType.GAUGE);
         monitor.register(CACHE_RECENT_KEY_HIT_RATIO, FlexMetricType.GAUGE);
+        monitor.register(CACHE_RECENT_KEY_REQUEST_COUNT, FlexMetricType.QPS);
+        monitor.register(CACHE_RECENT_KEY_EMPTY_REQUEST_COUNT, FlexMetricType.QPS);
         monitor.register(CACHE_REQUEST_TOTAL, FlexMetricType.QPS);
 
         // Cache service response time metrics
@@ -161,8 +165,10 @@ public class CacheMetricsReporter {
      * Report cache-key hits for the current request against the configured sliding window.
      *
      * <p>Dashboards should calculate the small-bucket hit ratio as
-     * sum(CACHE_RECENT_KEY_HIT_COUNT) / sum(CACHE_RECENT_KEY_TOTAL_COUNT).
-     * The ratio gauge is kept as a per-request instantaneous hint.</p>
+     * sum(CACHE_RECENT_KEY_HIT_COUNT) / sum(CACHE_RECENT_KEY_TOTAL_COUNT). The
+     * count metrics are gauges carrying per-request counts so a request with
+     * zero hits still produces a visible data point. The ratio gauge is kept as
+     * a per-request instantaneous hint and no-data guard.</p>
      *
      * @param timeWindowMs     Sliding window size in milliseconds
      * @param hitOccurrences   Cache-key hits in the current request
@@ -177,6 +183,10 @@ public class CacheMetricsReporter {
                 "timeWindowMs", String.valueOf(timeWindowMs)
         );
 
+        monitor.report(CACHE_RECENT_KEY_REQUEST_COUNT, tags, 1.0);
+        if (totalOccurrences <= 0) {
+            monitor.report(CACHE_RECENT_KEY_EMPTY_REQUEST_COUNT, tags, 1.0);
+        }
         monitor.report(CACHE_RECENT_KEY_HIT_COUNT, tags, hitOccurrences);
         monitor.report(CACHE_RECENT_KEY_TOTAL_COUNT, tags, totalOccurrences);
         monitor.report(CACHE_RECENT_KEY_HIT_RATIO, tags, hitRatio);
