@@ -1840,7 +1840,9 @@ void KVCacheMemoryConnector::putToCache(CopyInfoPerKey& copy_info) {
     releaseRequestBacking(copy_info);
     copy_info.request_released = true;
 
-    putToCache(item, /*already_has_cache_ref=*/true);
+    if (!putToCache(item, /*already_has_cache_ref=*/true)) {
+        return;
+    }
 }
 
 bool KVCacheMemoryConnector::putToCache(const MemoryDiskBlockCache::CacheItem& item, bool already_has_cache_ref) {
@@ -2007,8 +2009,8 @@ void KVCacheMemoryConnector::reportDiskCopyMetrics(bool success, int64_t latency
 }
 
 void KVCacheMemoryConnector::reportMetricsLoop() {
-    size_t                           last_disk_read_bytes   = 0;
-    size_t                           last_disk_write_bytes  = 0;
+    size_t                           last_disk_read_bytes  = 0;
+    size_t                           last_disk_write_bytes = 0;
     std::chrono::steady_clock::time_point last_disk_metrics_time = std::chrono::steady_clock::now();
     while (!stop_.load()) {
         if (metrics_reporter_) {

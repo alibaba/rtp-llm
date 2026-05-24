@@ -445,11 +445,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.dsv4_fixed_pool_blocks);
             },
             [](py::tuple t) {
-                if (t.size() != 45 && t.size() != 50)
+                if (t.size() != 45 && t.size() < 50)
                     throw std::runtime_error("Invalid state!");
                 KVCacheConfig c;
                 try {
-                    const bool has_disk_fields     = t.size() == 50;
+                    const bool has_disk_fields     = t.size() >= 50;
                     c.reuse_cache                  = t[0].cast<bool>();
                     c.multi_task_prompt            = t[1].cast<std::string>();
                     c.multi_task_prompt_str        = t[2].cast<std::string>();

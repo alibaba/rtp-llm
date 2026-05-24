@@ -2,7 +2,10 @@
 
 #include <csignal>
 #include <chrono>
+#include <cstdio>
+#include <dirent.h>
 #include <execinfo.h>
+#include <string>
 #include <thread>
 #include <unistd.h>
 
@@ -58,6 +61,54 @@ struct CrashHandlerInstaller {
 };
 
 static CrashHandlerInstaller g_crash_handler_installer;
+
+class DiskTempDir {
+public:
+    DiskTempDir() {
+        char tmpl[] = "/tmp/rtp_memory_connector_disk_test_XXXXXX";
+        auto path   = ::mkdtemp(tmpl);
+        EXPECT_NE(path, nullptr);
+        if (path != nullptr) {
+            path_ = path;
+        }
+    }
+    ~DiskTempDir() {
+        if (path_.empty()) {
+            return;
+        }
+        const auto work_dir = path_ + "/rtp_llm_disk_kv";
+        if (auto* dir = ::opendir(work_dir.c_str())) {
+            while (auto* entry = ::readdir(dir)) {
+                const std::string name(entry->d_name);
+                if (name == "." || name == "..") {
+                    continue;
+                }
+                ::unlink((work_dir + "/" + name).c_str());
+            }
+            ::closedir(dir);
+        }
+        ::rmdir(work_dir.c_str());
+        ::rmdir(path_.c_str());
+    }
+
+    const std::string& path() const {
+        return path_;
+    }
+
+private:
+    std::string path_;
+};
+
+std::string joinPaths(const std::vector<std::string>& paths) {
+    std::string joined;
+    for (const auto& path : paths) {
+        if (!joined.empty()) {
+            joined += ",";
+        }
+        joined += path;
+    }
+    return joined;
+}
 
 }  // namespace
 
@@ -527,6 +578,27 @@ private:
         }
         return ctx->done();
     }
+    KVCacheConfig makeDiskKvConfig(const std::vector<std::string>& paths, int64_t disk_size_mb = 1) const {
+        auto kv_cfg                                  = kv_cache_config_;
+        kv_cfg.enable_memory_cache                   = true;
+        kv_cfg.enable_memory_cache_disk              = true;
+        kv_cfg.memory_cache_disk_paths               = joinPaths(paths);
+        kv_cfg.memory_cache_disk_size_mb             = disk_size_mb;
+        kv_cfg.memory_cache_disk_buffered_io         = true;
+        kv_cfg.memory_cache_disk_sync_timeout_ms     = 1000;
+        kv_cfg.enable_tiered_memory_cache            = false;
+        return kv_cfg;
+    }
+    ParallelismConfig makeParallelismConfig(int64_t local_rank = 0,
+                                            int64_t local_world_size = 1,
+                                            int64_t world_rank = 0) const {
+        ParallelismConfig parallelism_config;
+        parallelism_config.world_size       = local_world_size;
+        parallelism_config.world_rank       = world_rank;
+        parallelism_config.local_world_size = local_world_size;
+        parallelism_config.local_rank       = local_rank;
+        return parallelism_config;
+    }
 };
 
 TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_NoWorkerAddrs) {
@@ -603,6 +675,202 @@ TEST_F(KVCacheMemoryConnectorTest, init_ReturnTrue_WithWorkerAddrs) {
     ASSERT_NE(conn->block_cache_, nullptr);
     ASSERT_NE(conn->broadcast_manager_, nullptr);
     EXPECT_EQ(conn->broadcast_manager_->workerNum(), server_addrs_.size());
+}
+
+TEST_F(KVCacheMemoryConnectorTest, initDiskBlockPool_UsesLocalRankPathAndPreallocatesFile) {
+    DiskTempDir disk0;
+    DiskTempDir disk1;
+    ASSERT_FALSE(disk0.path().empty());
+    ASSERT_FALSE(disk1.path().empty());
+
+    auto kv_cfg = makeDiskKvConfig({disk0.path(), disk1.path()});
+    auto conn   = std::make_shared<KVCacheMemoryConnector>(cache_config_,
+                                                         kv_cfg,
+                                                         makeParallelismConfig(/*local_rank=*/1,
+                                                                               /*local_world_size=*/2,
+                                                                               /*world_rank=*/5),
+                                                         allocator_,
+                                                         server_addrs_,
+                                                         nullptr);
+    ASSERT_TRUE(conn->init());
+    ASSERT_NE(conn->disk_block_pool_, nullptr);
+    EXPECT_NE(conn->disk_block_pool_->filePath().find(disk1.path()), std::string::npos);
+    EXPECT_NE(conn->disk_block_pool_->filePath().find("rank_1_world_5.kv"), std::string::npos);
+    EXPECT_GT(conn->disk_block_pool_->totalSlots(), 0u);
+    EXPECT_EQ(conn->disk_block_pool_->freeSlots(), conn->disk_block_pool_->totalSlots());
+}
+
+TEST_F(KVCacheMemoryConnectorTest, initDiskBlockPool_RejectsInvalidDiskConfig) {
+    DiskTempDir disk0;
+    ASSERT_FALSE(disk0.path().empty());
+
+    {
+        auto kv_cfg                      = makeDiskKvConfig({disk0.path()});
+        kv_cfg.enable_memory_cache       = false;
+        auto conn = std::make_shared<KVCacheMemoryConnector>(
+            cache_config_, kv_cfg, makeParallelismConfig(), allocator_, server_addrs_, nullptr);
+        EXPECT_THROW(conn->init(), std::runtime_error);
+    }
+    {
+        auto kv_cfg                            = makeDiskKvConfig({disk0.path()});
+        kv_cfg.enable_tiered_memory_cache      = true;
+        auto conn = std::make_shared<KVCacheMemoryConnector>(
+            cache_config_, kv_cfg, makeParallelismConfig(), allocator_, server_addrs_, nullptr);
+        EXPECT_THROW(conn->init(), std::runtime_error);
+    }
+    {
+        auto kv_cfg                      = makeDiskKvConfig({disk0.path()}, /*disk_size_mb=*/0);
+        auto conn = std::make_shared<KVCacheMemoryConnector>(
+            cache_config_, kv_cfg, makeParallelismConfig(), allocator_, server_addrs_, nullptr);
+        EXPECT_THROW(conn->init(), std::runtime_error);
+    }
+    {
+        auto kv_cfg = makeDiskKvConfig({disk0.path()});
+        auto conn   = std::make_shared<KVCacheMemoryConnector>(cache_config_,
+                                                             kv_cfg,
+                                                             makeParallelismConfig(/*local_rank=*/0,
+                                                                                   /*local_world_size=*/2,
+                                                                                   /*world_rank=*/0),
+                                                             allocator_,
+                                                             server_addrs_,
+                                                             nullptr);
+        EXPECT_THROW(conn->init(), std::runtime_error);
+    }
+    {
+        auto kv_cfg = makeDiskKvConfig({disk0.path()});
+        auto conn   = std::make_shared<KVCacheMemoryConnector>(cache_config_,
+                                                             kv_cfg,
+                                                             makeParallelismConfig(/*local_rank=*/1,
+                                                                                   /*local_world_size=*/1,
+                                                                                   /*world_rank=*/1),
+                                                             allocator_,
+                                                             server_addrs_,
+                                                             nullptr);
+        EXPECT_THROW(conn->init(), std::runtime_error);
+    }
+}
+
+TEST_F(KVCacheMemoryConnectorTest, allocateOneBacking_FallsBackToDiskWhenMemoryPoolFull) {
+    DiskTempDir disk0;
+    ASSERT_FALSE(disk0.path().empty());
+
+    auto kv_cfg = makeDiskKvConfig({disk0.path()});
+    auto conn   = std::make_shared<KVCacheMemoryConnector>(
+        cache_config_, kv_cfg, makeParallelismConfig(), allocator_, server_addrs_, nullptr);
+    ASSERT_TRUE(conn->init());
+    ASSERT_NE(conn->block_pool_, nullptr);
+    ASSERT_NE(conn->disk_block_pool_, nullptr);
+
+    const auto free_memory_blocks = conn->block_pool_->freeBlocksNum();
+    ASSERT_GT(free_memory_blocks, 0u);
+    auto held_memory_blocks = conn->block_pool_->malloc(static_cast<int>(free_memory_blocks));
+    ASSERT_EQ(held_memory_blocks.size(), free_memory_blocks);
+    EXPECT_EQ(conn->block_pool_->freeBlocksNum(), 0u);
+
+    KVCacheMemoryConnector::CopyInfoPerKey copy_info;
+    ASSERT_TRUE(conn->allocateOneBacking(copy_info));
+    EXPECT_EQ(copy_info.backing_type, CacheBackingType::DISK);
+    EXPECT_TRUE(isNullBlockIdx(copy_info.mem_block));
+    EXPECT_GE(copy_info.disk_slot, 0);
+    EXPECT_EQ(conn->disk_block_pool_->freeSlots(), conn->disk_block_pool_->totalSlots() - 1);
+
+    conn->releaseRequestBacking(copy_info);
+    conn->block_pool_->requestFree(held_memory_blocks);
+    EXPECT_EQ(conn->disk_block_pool_->freeSlots(), conn->disk_block_pool_->totalSlots());
+}
+
+TEST_F(KVCacheMemoryConnectorTest, putToCache_DiskBackingTransfersRequestRefToCacheRef) {
+    DiskTempDir disk0;
+    ASSERT_FALSE(disk0.path().empty());
+
+    auto kv_cfg = makeDiskKvConfig({disk0.path()});
+    auto conn   = std::make_shared<KVCacheMemoryConnector>(
+        cache_config_, kv_cfg, makeParallelismConfig(), allocator_, server_addrs_, nullptr);
+    ASSERT_TRUE(conn->init());
+
+    const auto free_memory_blocks = conn->block_pool_->freeBlocksNum();
+    auto       held_memory_blocks = conn->block_pool_->malloc(static_cast<int>(free_memory_blocks));
+    ASSERT_EQ(held_memory_blocks.size(), free_memory_blocks);
+
+    KVCacheMemoryConnector::CopyInfoPerKey copy_info;
+    ASSERT_TRUE(conn->allocateOneBacking(copy_info));
+    ASSERT_EQ(copy_info.backing_type, CacheBackingType::DISK);
+    copy_info.cache_key   = 1001;
+    copy_info.is_complete = true;
+    conn->putToCache(copy_info);
+    EXPECT_TRUE(copy_info.request_released);
+
+    EXPECT_EQ(conn->disk_block_pool_->freeSlots(), conn->disk_block_pool_->totalSlots() - 1);
+    EXPECT_EQ(conn->disk_block_pool_->availableSlots(), conn->disk_block_pool_->totalSlots());
+
+    auto evicted = conn->block_cache_->popOldestEvictable();
+    ASSERT_TRUE(evicted.has_value());
+    EXPECT_EQ(evicted->disk_slot, copy_info.disk_slot);
+    conn->releaseCacheBacking(*evicted);
+    EXPECT_EQ(conn->disk_block_pool_->freeSlots(), conn->disk_block_pool_->totalSlots());
+
+    conn->block_pool_->requestFree(held_memory_blocks);
+}
+
+TEST_F(KVCacheMemoryConnectorTest, putToCache_DuplicateDiskItemRollsBackCacheRef) {
+    DiskTempDir disk0;
+    ASSERT_FALSE(disk0.path().empty());
+
+    auto kv_cfg = makeDiskKvConfig({disk0.path()});
+    auto conn   = std::make_shared<KVCacheMemoryConnector>(
+        cache_config_, kv_cfg, makeParallelismConfig(), allocator_, server_addrs_, nullptr);
+    ASSERT_TRUE(conn->init());
+    ASSERT_GT(conn->disk_block_pool_->totalSlots(), 1u);
+
+    const auto free_memory_blocks = conn->block_pool_->freeBlocksNum();
+    auto       held_memory_blocks = conn->block_pool_->malloc(static_cast<int>(free_memory_blocks));
+    ASSERT_EQ(held_memory_blocks.size(), free_memory_blocks);
+
+    KVCacheMemoryConnector::CopyInfoPerKey first;
+    ASSERT_TRUE(conn->allocateOneBacking(first));
+    ASSERT_EQ(first.backing_type, CacheBackingType::DISK);
+    first.cache_key   = 1002;
+    first.is_complete = true;
+    conn->putToCache(first);
+    EXPECT_TRUE(first.request_released);
+    EXPECT_EQ(conn->disk_block_pool_->freeSlots(), conn->disk_block_pool_->totalSlots() - 1);
+
+    KVCacheMemoryConnector::CopyInfoPerKey duplicate;
+    ASSERT_TRUE(conn->allocateOneBacking(duplicate));
+    ASSERT_EQ(duplicate.backing_type, CacheBackingType::DISK);
+    duplicate.cache_key   = first.cache_key;
+    duplicate.is_complete = true;
+    conn->putToCache(duplicate);
+    EXPECT_TRUE(duplicate.request_released);
+    EXPECT_EQ(conn->disk_block_pool_->freeSlots(), conn->disk_block_pool_->totalSlots() - 1);
+
+    auto evicted = conn->block_cache_->popOldestEvictable();
+    ASSERT_TRUE(evicted.has_value());
+    EXPECT_EQ(evicted->disk_slot, first.disk_slot);
+    conn->releaseCacheBacking(*evicted);
+    EXPECT_EQ(conn->disk_block_pool_->freeSlots(), conn->disk_block_pool_->totalSlots());
+
+    conn->block_pool_->requestFree(held_memory_blocks);
+}
+
+TEST_F(KVCacheMemoryConnectorTest, validateCopyItemBacking_AcceptsUnsetDiskSlotForMemoryOnly) {
+    MemoryOperationRequestPB::CopyItem item;
+    item.set_backing_type(MemoryOperationRequestPB::MEMORY);
+    item.set_mem_block(1);
+    EXPECT_TRUE(connector_->validateCopyItemBacking(item));
+
+    item.set_disk_slot(-1);
+    EXPECT_TRUE(connector_->validateCopyItemBacking(item));
+
+    item.set_disk_slot(0);
+    EXPECT_FALSE(connector_->validateCopyItemBacking(item));
+
+    MemoryOperationRequestPB::CopyItem disk_item;
+    disk_item.set_backing_type(MemoryOperationRequestPB::DISK);
+    disk_item.set_mem_block(NULL_BLOCK_IDX);
+    EXPECT_FALSE(connector_->validateCopyItemBacking(disk_item));
+    disk_item.set_disk_slot(0);
+    EXPECT_TRUE(connector_->validateCopyItemBacking(disk_item));
 }
 
 TEST_F(KVCacheMemoryConnectorTest, initBlockPool_Throw_WhenMemoryCacheSizeMbZero) {
