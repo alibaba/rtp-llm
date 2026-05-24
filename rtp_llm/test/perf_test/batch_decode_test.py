@@ -106,6 +106,12 @@ def parse_args():
         default=os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", "./perf_results"),
     )
     perf.add_argument("--decode_test_length", type=int, default=10)
+    perf.add_argument(
+        "--num_measures",
+        type=int,
+        default=1,
+        help="Number of measurement rounds requested by BUILD configs. Currently recorded only.",
+    )
 
     engine = parser.add_argument_group(
         "engine args consumed by perf test (also forwarded to server)"
@@ -183,6 +189,7 @@ def _write_test_info(args: argparse.Namespace, remaining_args: List[str]) -> Non
         "max_seq_len": args.max_seq_len,
         "concurrency_limit": args.concurrency_limit,
         "decode_test_length": args.decode_test_length,
+        "num_measures": args.num_measures,
         "dataset_name": args.dataset_name or None,
         "dataset_path": args.dataset_path or args.dataset or None,
     }

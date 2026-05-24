@@ -70,6 +70,19 @@ bool mtpPrefillDebugEnabled() {
     return enabled;
 }
 
+bool mtpDecodeDebugEnabled() {
+    static const bool enabled = []() {
+        const char* env = std::getenv("RTP_LLM_DEBUG_MTP_DECODE_DATA");
+        const bool  on  = env != nullptr && std::string(env) != "0";
+        if (on) {
+            RTP_LLM_LOG_WARNING(
+                "[debug-mtp-decode-data] enabled; tensor summaries may perform D2H copies and serialize debugging runs");
+        }
+        return on;
+    }();
+    return enabled;
+}
+
 std::string tensorSummary(const torch::Tensor& tensor, int64_t limit = 4) {
     if (!tensor.defined()) {
         return "None";
@@ -561,7 +574,28 @@ void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs
     RTP_LLM_CHECK_WITH_INFO(inputs.kv_cache_kernel_block_id.dim() == 3, "kv_cache_kernel_block_id shape should be 3");
     // New CUDA layout: [group, batch, kernel_blocks].
     // Per-group device views are zero-copy slices; host_by_group was removed.
-    const size_t group = inputs.kv_cache_kernel_block_id.size(0);
+    const size_t group            = inputs.kv_cache_kernel_block_id.size(0);
+    const bool   debug_mtp_decode = mtpDecodeDebugEnabled();
+
+    if (debug_mtp_decode) {
+        static std::atomic<int> debug_log_budget{256};
+        if (debug_log_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
+            RTP_LLM_LOG_INFO("[debug-mtp-decode-data][setup_kv_begin] is_prefill=%d is_target_verify=%d "
+                             "use_mla=%d group=%zu combo=%s input_lengths=%s sequence_lengths=%s "
+                             "prefix_lengths=%s lm_output_indexes=%s kv_kernel=%s kv_block=%s",
+                             static_cast<int>(py_attn_inputs.is_prefill),
+                             static_cast<int>(py_attn_inputs.is_target_verify),
+                             static_cast<int>(description_.attention_conf.use_mla),
+                             group,
+                             tensorSummary(inputs.combo_tokens).c_str(),
+                             tensorSummary(inputs.input_lengths).c_str(),
+                             tensorSummary(inputs.sequence_lengths).c_str(),
+                             tensorSummary(inputs.prefix_lengths).c_str(),
+                             tensorSummary(inputs.lm_output_indexes).c_str(),
+                             tensorSummary(inputs.kv_cache_kernel_block_id).c_str(),
+                             tensorSummary(inputs.kv_cache_block_id).c_str());
+        }
+    }
 
     py_attn_inputs.kv_cache_kernel_block_id_device_by_group.clear();
     py_attn_inputs.kv_cache_kernel_block_id_device_by_group.reserve(group);
@@ -587,6 +621,13 @@ void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs
         group0 = group0.contiguous().pin_memory();
         buffer_holder_.hold_host(group0);
         py_attn_inputs.kv_cache_kernel_block_id_host = group0;
+        if (debug_mtp_decode) {
+            static std::atomic<int> debug_log_budget{256};
+            if (debug_log_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
+                RTP_LLM_LOG_INFO("[debug-mtp-decode-data][setup_kv_kernel_host] group0=%s",
+                                 tensorSummary(group0, 8).c_str());
+            }
+        }
     }
 
     if (inputs.kv_cache_block_id.defined()) {
@@ -612,6 +653,13 @@ void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs
                 auto physical_host = physical_group0.cpu().contiguous().pin_memory();
                 buffer_holder_.hold_host(physical_host);
                 py_attn_inputs.kv_cache_block_id_host = physical_host;
+                if (debug_mtp_decode) {
+                    static std::atomic<int> debug_log_budget{256};
+                    if (debug_log_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
+                        RTP_LLM_LOG_INFO("[debug-mtp-decode-data][setup_kv_physical_host] physical_group0=%s",
+                                         tensorSummary(physical_host, 8).c_str());
+                    }
+                }
             }
         } else {
             if (!physical_group0.is_pinned()) {
@@ -620,6 +668,17 @@ void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs
             buffer_holder_.hold_host(physical_group0);
             py_attn_inputs.kv_cache_block_id_host   = physical_group0;
             py_attn_inputs.kv_cache_block_id_device = tensorHoldHostAndToCuda(physical_group0);
+        }
+    }
+    if (debug_mtp_decode) {
+        static std::atomic<int> debug_log_budget{256};
+        if (debug_log_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
+            RTP_LLM_LOG_INFO("[debug-mtp-decode-data][setup_kv_end] kv_kernel_device=%s kv_kernel_host=%s "
+                             "kv_block_device=%s kv_block_host=%s",
+                             tensorSummary(py_attn_inputs.kv_cache_kernel_block_id_device).c_str(),
+                             tensorSummary(py_attn_inputs.kv_cache_kernel_block_id_host).c_str(),
+                             tensorSummary(py_attn_inputs.kv_cache_block_id_device).c_str(),
+                             tensorSummary(py_attn_inputs.kv_cache_block_id_host).c_str());
         }
     }
 }
