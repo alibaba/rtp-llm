@@ -43,73 +43,47 @@ bool directoryExists(const std::string& path) {
 
 }  // namespace
 
-DiskBlockPool::DiskBlockPool(DiskBlockPoolConfig config, std::unique_ptr<IDiskBlockIO> io):
-    config_(std::move(config)), io_(std::move(io)) {
-    if (!io_) {
-        io_ = std::make_unique<PosixDiskBlockIO>();
-    }
-}
-
-DiskBlockPool::~DiskBlockPool() {
-    if (io_) {
-        io_->close();
-    }
+DiskMountGuard::~DiskMountGuard() {
     unlockAndClose();
 }
 
-size_t DiskBlockPool::alignUp(size_t value, size_t alignment) {
-    return ((value + alignment - 1) / alignment) * alignment;
-}
-
-bool DiskBlockPool::init() {
-    if (config_.mount_path.empty() || config_.disk_size_bytes == 0 || config_.block_size_bytes == 0) {
-        RTP_LLM_LOG_ERROR("init disk block pool failed, invalid config: %s", debugString().c_str());
+bool DiskMountGuard::init(const std::string& mount_path) {
+    mount_path_ = mount_path;
+    work_dir_   = joinPath(mount_path_, "rtp_llm_disk_kv");
+    lock_path_  = joinPath(work_dir_, ".lock");
+    if (!initDirectoryAndLock() || !cleanupStaleFiles()) {
+        unlockAndClose();
         return false;
     }
-    slot_stride_bytes_ = alignUp(config_.block_size_bytes, kDiskIOAlignment);
-    slot_count_        = config_.disk_size_bytes / slot_stride_bytes_;
-    if (slot_count_ == 0) {
-        RTP_LLM_LOG_ERROR("init disk block pool failed, disk size too small, disk=%zu, block=%zu, stride=%zu",
-                          config_.disk_size_bytes,
-                          config_.block_size_bytes,
-                          slot_stride_bytes_);
-        return false;
-    }
-
-    if (!initDirectoryAndLock() || !cleanupStaleFiles() || !initFile()) {
-        if (!file_path_.empty()) {
-            ::unlink(file_path_.c_str());
-        }
-        return false;
-    }
-
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        slots_.assign(slot_count_, SlotState{});
-        free_slots_.clear();
-        for (size_t i = 0; i < slot_count_; ++i) {
-            free_slots_.insert(static_cast<int32_t>(i));
-        }
-    }
-
-    RTP_LLM_LOG_INFO("disk kv block pool init success: %s", debugString().c_str());
+    RTP_LLM_LOG_INFO("disk kv mount guard init success: %s", debugString().c_str());
     return true;
 }
 
-bool DiskBlockPool::initDirectoryAndLock() {
-    work_dir_  = joinPath(config_.mount_path, "rtp_llm_disk_kv");
-    lock_path_ = joinPath(work_dir_, ".lock");
+const std::string& DiskMountGuard::workDir() const {
+    return work_dir_;
+}
 
-    if (!directoryExists(config_.mount_path)) {
+const std::string& DiskMountGuard::mountPath() const {
+    return mount_path_;
+}
+
+std::string DiskMountGuard::debugString() const {
+    std::ostringstream oss;
+    oss << "DiskMountGuard{mount=" << mount_path_ << ", work_dir=" << work_dir_ << ", lock=" << lock_path_ << "}";
+    return oss.str();
+}
+
+bool DiskMountGuard::initDirectoryAndLock() {
+    if (!directoryExists(mount_path_)) {
         RTP_LLM_LOG_ERROR("disk kv mount path does not exist or is not a directory, mount=%s, error=%s",
-                          config_.mount_path.c_str(),
+                          mount_path_.c_str(),
                           std::strerror(errno));
         return false;
     }
 
     if (!mkdirIfMissing(work_dir_)) {
         RTP_LLM_LOG_ERROR("create disk kv directory failed, mount=%s, work_dir=%s, error=%s",
-                          config_.mount_path.c_str(),
+                          mount_path_.c_str(),
                           work_dir_.c_str(),
                           std::strerror(errno));
         return false;
@@ -128,7 +102,7 @@ bool DiskBlockPool::initDirectoryAndLock() {
     return true;
 }
 
-bool DiskBlockPool::cleanupStaleFiles() {
+bool DiskMountGuard::cleanupStaleFiles() {
     DIR* dir = ::opendir(work_dir_.c_str());
     if (dir == nullptr) {
         RTP_LLM_LOG_ERROR("open disk kv work dir failed, dir=%s, error=%s", work_dir_.c_str(), std::strerror(errno));
@@ -157,8 +131,72 @@ bool DiskBlockPool::cleanupStaleFiles() {
     return true;
 }
 
+void DiskMountGuard::unlockAndClose() {
+    if (lock_fd_ >= 0) {
+        ::flock(lock_fd_, LOCK_UN);
+        ::close(lock_fd_);
+        lock_fd_ = -1;
+    }
+}
+
+DiskBlockPool::DiskBlockPool(DiskBlockPoolConfig config, std::unique_ptr<IDiskBlockIO> io):
+    config_(std::move(config)), io_(std::move(io)) {
+    if (!io_) {
+        io_ = std::make_unique<PosixDiskBlockIO>();
+    }
+}
+
+DiskBlockPool::~DiskBlockPool() {
+    if (io_) {
+        io_->close();
+    }
+}
+
+size_t DiskBlockPool::alignUp(size_t value, size_t alignment) {
+    return ((value + alignment - 1) / alignment) * alignment;
+}
+
+bool DiskBlockPool::init() {
+    if (config_.work_dir.empty() || config_.disk_size_bytes == 0 || config_.block_size_bytes == 0) {
+        RTP_LLM_LOG_ERROR("init disk block pool failed, invalid config: %s", debugString().c_str());
+        return false;
+    }
+    slot_stride_bytes_ = alignUp(config_.block_size_bytes, kDiskIOAlignment);
+    slot_count_        = config_.disk_size_bytes / slot_stride_bytes_;
+    if (slot_count_ == 0) {
+        RTP_LLM_LOG_ERROR("init disk block pool failed, disk size too small, disk=%zu, block=%zu, stride=%zu",
+                          config_.disk_size_bytes,
+                          config_.block_size_bytes,
+                          slot_stride_bytes_);
+        return false;
+    }
+
+    if (!initFile()) {
+        if (!file_path_.empty()) {
+            ::unlink(file_path_.c_str());
+        }
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        slots_.assign(slot_count_, SlotState{});
+        free_slots_.clear();
+        for (size_t i = 0; i < slot_count_; ++i) {
+            free_slots_.insert(static_cast<int32_t>(i));
+        }
+    }
+
+    RTP_LLM_LOG_INFO("disk kv block pool init success: %s", debugString().c_str());
+    return true;
+}
+
 bool DiskBlockPool::initFile() {
-    file_path_ = joinPath(work_dir_, fmtstr("rank_%ld_world_%ld.kv", config_.local_rank, config_.world_rank));
+    file_path_ = joinPath(config_.work_dir,
+                          fmtstr("rank_%ld_world_%ld_%s.kv",
+                                 config_.local_rank,
+                                 config_.world_rank,
+                                 cacheBlockKindName(config_.pool_kind)));
     return io_->openAndPreallocate(file_path_, slot_count_ * slot_stride_bytes_, config_.buffered_io);
 }
 
@@ -294,20 +332,13 @@ const std::string& DiskBlockPool::filePath() const {
 
 std::string DiskBlockPool::debugString() const {
     std::ostringstream oss;
-    oss << "DiskBlockPool{mount=" << config_.mount_path << ", file=" << file_path_
+    oss << "DiskBlockPool{work_dir=" << config_.work_dir << ", file=" << file_path_
         << ", local_rank=" << config_.local_rank << ", world_rank=" << config_.world_rank
-        << ", disk_size=" << config_.disk_size_bytes << ", block_size=" << config_.block_size_bytes
+        << ", kind=" << cacheBlockKindName(config_.pool_kind) << ", disk_size=" << config_.disk_size_bytes
+        << ", block_size=" << config_.block_size_bytes
         << ", stride=" << slot_stride_bytes_ << ", slots=" << slot_count_
         << ", io=" << (config_.buffered_io ? "buffered" : "direct") << "}";
     return oss.str();
-}
-
-void DiskBlockPool::unlockAndClose() {
-    if (lock_fd_ >= 0) {
-        ::flock(lock_fd_, LOCK_UN);
-        ::close(lock_fd_);
-        lock_fd_ = -1;
-    }
 }
 
 }  // namespace rtp_llm

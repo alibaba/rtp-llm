@@ -1,5 +1,6 @@
 #include "gtest/gtest.h"
 
+#include <dirent.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -29,9 +30,16 @@ public:
             return;
         }
         const auto work_dir = path_ + "/rtp_llm_disk_kv";
-        ::unlink((work_dir + "/rank_0_world_0.kv").c_str());
-        ::unlink((work_dir + "/rank_stale.kv").c_str());
-        ::unlink((work_dir + "/.lock").c_str());
+        if (auto* dir = ::opendir(work_dir.c_str())) {
+            while (auto* entry = ::readdir(dir)) {
+                const std::string name(entry->d_name);
+                if (name == "." || name == "..") {
+                    continue;
+                }
+                ::unlink((work_dir + "/" + name).c_str());
+            }
+            ::closedir(dir);
+        }
         ::rmdir(work_dir.c_str());
         ::rmdir(path_.c_str());
     }
@@ -45,12 +53,13 @@ private:
 
 DiskBlockPoolConfig makeConfig(const std::string& path, size_t disk_size_bytes = 3 * 4096) {
     DiskBlockPoolConfig config;
-    config.mount_path       = path;
+    config.work_dir         = path;
     config.local_rank       = 0;
     config.world_rank       = 0;
     config.disk_size_bytes  = disk_size_bytes;
     config.block_size_bytes = 1024;
     config.buffered_io      = true;
+    config.pool_kind        = CacheBlockKind::COMPLETE;
     return config;
 }
 
@@ -68,10 +77,14 @@ TEST(DiskBlockPoolTest, InitPreallocatesFileAndCleansStaleFiles) {
     ::close(fd);
     ASSERT_EQ(::access(stale.c_str(), F_OK), 0);
 
-    DiskBlockPool pool(makeConfig(temp_dir.path()));
+    DiskMountGuard guard;
+    ASSERT_TRUE(guard.init(temp_dir.path()));
+
+    DiskBlockPool pool(makeConfig(guard.workDir()));
     ASSERT_TRUE(pool.init());
     EXPECT_EQ(::access(stale.c_str(), F_OK), -1);
     EXPECT_EQ(::access(pool.filePath().c_str(), F_OK), 0);
+    EXPECT_NE(pool.filePath().find("rank_0_world_0_complete.kv"), std::string::npos);
     EXPECT_EQ(pool.totalSlots(), 3u);
     EXPECT_EQ(pool.freeSlots(), 3u);
 }
@@ -80,13 +93,38 @@ TEST(DiskBlockPoolTest, InitFailsWhenMountPathDoesNotExist) {
     TempDir temp_dir;
     ASSERT_FALSE(temp_dir.path().empty());
 
-    DiskBlockPool pool(makeConfig(temp_dir.path() + "/missing_mount"));
-    EXPECT_FALSE(pool.init());
+    DiskMountGuard guard;
+    EXPECT_FALSE(guard.init(temp_dir.path() + "/missing_mount"));
+}
+
+TEST(DiskBlockPoolTest, MountGuardAllowsTwoPoolsOnSameMountWithoutDeletingFirst) {
+    TempDir temp_dir;
+    ASSERT_FALSE(temp_dir.path().empty());
+
+    DiskMountGuard guard;
+    ASSERT_TRUE(guard.init(temp_dir.path()));
+
+    DiskBlockPool complete_pool(makeConfig(guard.workDir()));
+    ASSERT_TRUE(complete_pool.init());
+    ASSERT_EQ(::access(complete_pool.filePath().c_str(), F_OK), 0);
+
+    auto incomplete_cfg       = makeConfig(guard.workDir(), 6 * 4096);
+    incomplete_cfg.pool_kind  = CacheBlockKind::INCOMPLETE;
+    incomplete_cfg.local_rank = 0;
+    incomplete_cfg.world_rank = 0;
+    DiskBlockPool incomplete_pool(incomplete_cfg);
+    ASSERT_TRUE(incomplete_pool.init());
+
+    EXPECT_EQ(::access(complete_pool.filePath().c_str(), F_OK), 0);
+    EXPECT_EQ(::access(incomplete_pool.filePath().c_str(), F_OK), 0);
+    EXPECT_NE(complete_pool.filePath(), incomplete_pool.filePath());
 }
 
 TEST(DiskBlockPoolTest, ReserveCommitAbortAndFreeSlots) {
     TempDir       temp_dir;
-    DiskBlockPool pool(makeConfig(temp_dir.path()));
+    DiskMountGuard guard;
+    ASSERT_TRUE(guard.init(temp_dir.path()));
+    DiskBlockPool pool(makeConfig(guard.workDir()));
     ASSERT_TRUE(pool.init());
 
     auto slot = pool.malloc();
@@ -104,7 +142,9 @@ TEST(DiskBlockPoolTest, ReserveCommitAbortAndFreeSlots) {
 
 TEST(DiskBlockPoolTest, RequestRefPreventsReuseUntilReleased) {
     TempDir       temp_dir;
-    DiskBlockPool pool(makeConfig(temp_dir.path()));
+    DiskMountGuard guard;
+    ASSERT_TRUE(guard.init(temp_dir.path()));
+    DiskBlockPool pool(makeConfig(guard.workDir()));
     ASSERT_TRUE(pool.init());
 
     auto slot = pool.malloc();
@@ -122,7 +162,9 @@ TEST(DiskBlockPoolTest, RequestRefPreventsReuseUntilReleased) {
 
 TEST(DiskBlockPoolTest, ReadWriteFullSlot) {
     TempDir       temp_dir;
-    DiskBlockPool pool(makeConfig(temp_dir.path()));
+    DiskMountGuard guard;
+    ASSERT_TRUE(guard.init(temp_dir.path()));
+    DiskBlockPool pool(makeConfig(guard.workDir()));
     ASSERT_TRUE(pool.init());
 
     auto slot = pool.malloc();
@@ -139,7 +181,9 @@ TEST(DiskBlockPoolTest, ReadWriteFullSlot) {
 
 TEST(DiskBlockPoolTest, FullPoolReturnsNullopt) {
     TempDir       temp_dir;
-    DiskBlockPool pool(makeConfig(temp_dir.path(), 2 * 4096));
+    DiskMountGuard guard;
+    ASSERT_TRUE(guard.init(temp_dir.path()));
+    DiskBlockPool pool(makeConfig(guard.workDir(), 2 * 4096));
     ASSERT_TRUE(pool.init());
     ASSERT_TRUE(pool.malloc().has_value());
     ASSERT_TRUE(pool.malloc().has_value());
