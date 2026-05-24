@@ -39,6 +39,9 @@ public class KvCacheManager {
     @Autowired
     private WorkerStatusProvider workerStatusProvider;
     
+    @Autowired
+    private RecentCacheKeyWindow recentCacheKeyWindow;
+
     /**
      * Cache metrics reporter
      */
@@ -75,6 +78,12 @@ public class KvCacheManager {
         if (blockCacheKeys == null || blockCacheKeys.isEmpty()) {
             return Collections.emptyMap();
         }
+
+        RecentCacheKeyWindow.Snapshot snapshot = recentCacheKeyWindow.record(blockCacheKeys);
+        cacheMetricsReporter.reportRecentCacheKeyHitMetrics(snapshot.getTimeWindowMs(),
+                snapshot.getRequestHitOccurrences(),
+                snapshot.getRequestOccurrences(),
+                snapshot.getRequestHitRatio());
 
         // Use candidate engine list
         List<String> enginesIpPorts = workerStatusProvider.getWorkerIpPorts(roleType, group);
@@ -135,6 +144,8 @@ public class KvCacheManager {
 
         globalCacheIndex.clear();
         engineLocalView.clear();
+        RecentCacheKeyWindow.Snapshot snapshot = recentCacheKeyWindow.clear();
+        cacheMetricsReporter.reportRecentCacheKeyHitMetrics(snapshot.getTimeWindowMs(), 0L, 0L, 0.0);
 
         totalUpdates.reset();
         // Report

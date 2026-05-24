@@ -130,6 +130,21 @@ public class MetricConstant {
     public static final String CACHE_HIT_RATIO = "app.cache.hit.ratio";
 
     /**
+     * Recent cache-key hit count for requests in the current metric bucket.
+     */
+    public static final String CACHE_RECENT_KEY_HIT_COUNT = "app.cache.recent.key.hit.count";
+
+    /**
+     * Recent cache-key total count for requests in the current metric bucket.
+     */
+    public static final String CACHE_RECENT_KEY_TOTAL_COUNT = "app.cache.recent.key.total.count";
+
+    /**
+     * Recent cache-key hit ratio for the current request against the sliding time window.
+     */
+    public static final String CACHE_RECENT_KEY_HIT_RATIO = "app.cache.recent.key.hit.ratio";
+
+    /**
      * Cache request total count
      */
     public static final String CACHE_REQUEST_TOTAL = "app.cache.request.total";

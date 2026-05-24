@@ -76,6 +76,14 @@ class ConfigServiceTest {
         assertEquals(32, configService.loadBalanceConfig().getDecodeConcurrencyLimit());
     }
 
+    @Test
+    void should_override_cache_hit_time_window_ms_with_environment() {
+        ConfigService configService = new ConfigService(Map.of(
+                "CACHE_HIT_TIME_WINDOW_MS", "600000"));
+
+        assertEquals(600000L, configService.loadBalanceConfig().getCacheHitTimeWindowMs());
+    }
+
     private Request request() {
         Request request = new Request();
         request.setRequestId(12345L);
