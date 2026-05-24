@@ -150,6 +150,20 @@ class DashScGrpcRequestTest(TestCase):
         sp = parse_sampling_params(req)
         self.assertEqual(sp.max_new_tokens, -1)
 
+    def test_parse_sampling_openai_compat_max_new_tokens_negative_uses_default(
+        self,
+    ) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["ds_header_attributes"].string_param = json.dumps(
+            {"x-envoy-original-path": "/compatible-mode/v1/chat/completions"}
+        )
+        _add_tensor(req, "max_new_tokens", "INT32", [1], struct.pack("<i", -1))
+
+        sp = parse_sampling_params(req)
+
+        self.assertEqual(sp.max_new_tokens, 32000)
+        self.assertFalse(sp.max_new_tokens_from_completion_alias)
+
     def test_parse_sampling_max_completion_tokens_non_positive_uses_default_repro(
         self,
     ) -> None:
@@ -162,7 +176,33 @@ class DashScGrpcRequestTest(TestCase):
                 self.assertEqual(sp.max_new_tokens, 32000)
                 self.assertFalse(sp.max_new_tokens_from_completion_alias)
 
-    def test_completion_alias_thinking_budget_extends_backend_limit_repro(
+    def test_parse_sampling_max_completion_tokens_non_positive_blocks_legacy_aliases(
+        self,
+    ) -> None:
+        for value in (-1, 0):
+            with self.subTest(value=value):
+                req = predict_v2_pb2.ModelInferRequest()
+                _add_tensor(
+                    req,
+                    "max_completion_tokens",
+                    "INT32",
+                    [1],
+                    struct.pack("<i", value),
+                )
+                _add_tensor(
+                    req,
+                    "max_new_tokens",
+                    "INT32",
+                    [1],
+                    struct.pack("<i", -1),
+                )
+
+                sp = parse_sampling_params(req)
+
+                self.assertEqual(sp.max_new_tokens, 32000)
+                self.assertFalse(sp.max_new_tokens_from_completion_alias)
+
+    def test_completion_alias_thinking_budget_keeps_backend_limit(
         self,
     ) -> None:
         sampling = SamplingParams(
@@ -173,7 +213,7 @@ class DashScGrpcRequestTest(TestCase):
 
         generate_config = sampling.to_generate_config(other=other)
 
-        self.assertEqual(generate_config.max_new_tokens, 110)
+        self.assertEqual(generate_config.max_new_tokens, 100)
         self.assertEqual(generate_config.max_thinking_tokens, 10)
 
     def test_completion_alias_thinking_budget_respects_max_tokens_cap(
@@ -188,7 +228,7 @@ class DashScGrpcRequestTest(TestCase):
 
         generate_config = sampling.to_generate_config(other=other)
 
-        self.assertEqual(generate_config.max_new_tokens, 105)
+        self.assertEqual(generate_config.max_new_tokens, 100)
         self.assertEqual(generate_config.max_thinking_tokens, 10)
 
     def test_explicit_max_new_tokens_thinking_budget_keeps_backend_limit(

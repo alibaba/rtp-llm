@@ -191,6 +191,18 @@ def _parse_ds_header_attributes(request) -> dict[str, Any]:
     return {str(k).lower(): v for k, v in attrs.items()}
 
 
+def _is_openai_compatible_request(request) -> bool:
+    attrs = _parse_ds_header_attributes(request)
+    path = str(attrs.get("x-envoy-original-path", "")).lower()
+    raw_path = str(attrs.get("x-dashscope-inner-rawhttppath", "")).lower()
+    baggage = str(attrs.get("baggage", "")).lower()
+    return any(
+        marker in text
+        for text in (path, raw_path, baggage)
+        for marker in ("/compatible-mode/", "/api-openai/")
+    )
+
+
 def _normalize_non_empty_str(value: Any) -> str | None:
     if value is None:
         return None
@@ -284,14 +296,6 @@ class SamplingParams:
             and self.max_new_tokens_from_completion_alias
             and backend_max_new_tokens > 0
         ):
-            if (
-                other.enable_thinking is not False
-                and request_max_think is not None
-                and request_max_think > 0
-            ):
-                backend_max_new_tokens = min(
-                    _INT32_MAX, backend_max_new_tokens + int(request_max_think)
-                )
             if self.max_total_tokens is not None and self.max_total_tokens > 0:
                 backend_max_new_tokens = min(
                     backend_max_new_tokens, int(self.max_total_tokens)
@@ -357,6 +361,7 @@ def parse_sampling_params(request) -> SamplingParams:
     presence_penalty = 0.0
     max_new_think_tokens: int | None = None
     stop_words_list: tuple[tuple[int, ...], ...] = tuple()
+    openai_compatible_request = _is_openai_compatible_request(request)
 
     v = _parse_optional_scalar_int(request, "max_tokens")
     if v is None:
@@ -367,18 +372,32 @@ def parse_sampling_params(request) -> SamplingParams:
     v = _parse_optional_scalar_int(request, "max_completion_tokens")
     if v is None:
         v = _parse_optional_parameter_int(request, "max_completion_tokens")
-    if v is not None and v > 0:
-        max_new_tokens = v
-        max_new_tokens_from_completion_alias = True
+    if v is not None:
+        if v > 0:
+            max_new_tokens = v
+            max_new_tokens_from_completion_alias = True
+        # Compatible-mode max_completion_tokens values <= 0 mean "unset".
+        # Keep the server default and do not fall through to legacy aliases.
     else:
-        v = _parse_optional_scalar_int(request, "max_new_tokens")
-        if v is None:
+        legacy_max_new_tokens = _parse_optional_scalar_int(request, "max_new_tokens")
+        if legacy_max_new_tokens is None:
             v = _parse_optional_scalar_int(request, "max_tokens")
+        else:
+            v = legacy_max_new_tokens
         if v is None:
-            v = _parse_optional_parameter_int(request, "max_new_tokens")
+            legacy_max_new_tokens = _parse_optional_parameter_int(
+                request, "max_new_tokens"
+            )
+            v = legacy_max_new_tokens
         if v is None:
             v = _parse_optional_parameter_int(request, "max_tokens")
-        if v is not None:
+        if (
+            legacy_max_new_tokens is not None
+            and legacy_max_new_tokens <= 0
+            and openai_compatible_request
+        ):
+            pass
+        elif v is not None:
             max_new_tokens = v
 
     v = _parse_optional_scalar_int(request, "num_return_sequences")
