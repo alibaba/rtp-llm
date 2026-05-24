@@ -129,7 +129,7 @@ cc_test(
         "@com_google_googletest//:gtest_main",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
-    ],
+    ] + torch_deps() + cuda13_torch_link_deps,
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
