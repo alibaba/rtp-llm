@@ -687,7 +687,8 @@ void KVCacheManager::initConnectorCoordinator() {
 }
 
 void KVCacheManager::allocateAndSync() {
-    size_t world_size = parallelism_config_.tp_size * parallelism_config_.dp_size;
+    size_t   world_size           = parallelism_config_.tp_size * parallelism_config_.dp_size;
+    const int original_block_num  = config_.block_num;
     if (world_size > 1) {
         size_t local_rank    = parallelism_config_.tp_size * parallelism_config_.dp_rank + parallelism_config_.tp_rank;
         auto   block_num_t   = torch::empty({(int64_t)world_size}, torch::kInt32).pin_memory();
@@ -703,7 +704,12 @@ void KVCacheManager::allocateAndSync() {
             config_.block_num = *std::min_element(block_num_ptr, block_num_ptr + world_size);
         }
     }
-    if (config_.use_independent_block_pools) {
+    // Only re-derive per-group sizing when the cross-rank sync actually shrunk
+    // block_num — otherwise we would clobber test/production configs that have
+    // pre-populated differentiated group_block_nums (e.g. DSV4 stress tests
+    // that hand-tune SWA pool sizes vs FULL paged pools, or
+    // CacheConfigCreator-built configs that already finalized once).
+    if (config_.use_independent_block_pools && config_.block_num != original_block_num) {
         config_.finalizeBlockNums(static_cast<uint32_t>(config_.block_num), runtime_config_);
     }
     RTP_LLM_LOG_INFO("block_num is %d after tp sync", config_.block_num);

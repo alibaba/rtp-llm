@@ -480,15 +480,20 @@ TEST(CacheConfigTest, AdditionReserveDeductedFromPagedBudget) {
 
     const uint32_t addition = 32;
 
+    // Budget sized to fit the SWA/STATE reserve (4 non-FULL pools × 32 blocks ×
+    // ~30 MiB/block ≈ 3.9 GiB) plus headroom for paged-FULL allocation. With a
+    // 1024 MiB budget the createConfig path RTP_LLM_CHECK-throws on
+    // "budget < fixed-pool reservation" before block_num is computed.
+    constexpr int64_t kBudgetMb = 8192;
     // Config with addition > 0
     KVCacheConfig kv_cache_config_with;
-    kv_cache_config_with.kv_cache_mem_mb                  = 1024;
+    kv_cache_config_with.kv_cache_mem_mb                  = kBudgetMb;
     kv_cache_config_with.non_full_addition_kvcache_blocks = addition;
     auto config_with = CacheConfigCreator::createConfig(mc, pc, runtime_config, kv_cache_config_with);
 
     // Config with addition = 0
     KVCacheConfig kv_cache_config_without;
-    kv_cache_config_without.kv_cache_mem_mb                  = 1024;
+    kv_cache_config_without.kv_cache_mem_mb                  = kBudgetMb;
     kv_cache_config_without.non_full_addition_kvcache_blocks = 0;
     auto config_without = CacheConfigCreator::createConfig(mc, pc, runtime_config, kv_cache_config_without);
 
@@ -527,11 +532,16 @@ TEST(CacheConfigTest, FinalizeBlockNumsWithLinearStepShrinksSwaRuleBlocks) {
     EXPECT_EQ(config.group_block_nums[0], 100u);
     EXPECT_EQ(config.group_block_nums[1], 100u);
     EXPECT_EQ(config.group_block_nums[2], 100u);
-    // SWA groups: rule_blocks = 100/4 = 25, + addition = 10 → 35
-    for (int gid = 3; gid < kDsv4PoolNum; ++gid) {
-        EXPECT_EQ(config.group_block_nums[gid], 25u + 10u) << "gid=" << gid;
+    // DSV4 pool layout: gids 3..5 are STATE regions (INDEXER/CSA/HCA_STATE),
+    // gid 6 is the genuine SWA_KV pool. After commit 04e36fe9, finalizeBlockNums
+    // routes STATE rule_blocks via state_global_block_num (= global_block_num
+    // for the one-arg overload), so STATE pools get global_block_num + addition.
+    // Only the true SWA pool divides by linear_step.
+    for (int gid = 3; gid <= 5; ++gid) {
+        EXPECT_EQ(config.group_block_nums[gid], 100u + 10u) << "STATE gid=" << gid;
     }
-    // Reserve only counts the addition portion
+    EXPECT_EQ(config.group_block_nums[6], 25u + 10u) << "SWA_KV gid=6";
+    // Reserve only counts the addition portion of every non-FULL pool.
     size_t expected_reserve = 0;
     for (int gid = 3; gid < kDsv4PoolNum; ++gid) {
         expected_reserve += 10u * config.group_block_size_bytes[gid];

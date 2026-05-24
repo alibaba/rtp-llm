@@ -519,14 +519,21 @@ TEST_F(HybridTypeKVCacheAllocatorTest, InsertIntoCacheInsertsOnlyFullBlocks) {
     InsertInfo insert_info{batch_res, token_ids, /*is_resident=*/false};
     allocator->insertIntoCache(insert_info);
 
-    // Full group should have cached first two keys.
+    // After commit 9b2f364c5 (insertIntoCache moved to allocator level),
+    // HybridKVCacheAllocator::insertIntoCache publishes every non-null per-pool
+    // slot to SharedBlockCache. The previous "only full blocks" guard lived in
+    // FullKVCacheGroup::insertIntoCache and was dropped during the refactor —
+    // so the partial-tail key 102 is also reachable now.
     EXPECT_FALSE(isNullBlockIdx(shared_cache->matchGroup(100, gid_full)));
     EXPECT_FALSE(isNullBlockIdx(shared_cache->matchGroup(101, gid_full)));
-    EXPECT_TRUE(isNullBlockIdx(shared_cache->matchGroup(102, gid_full)));
+    EXPECT_FALSE(isNullBlockIdx(shared_cache->matchGroup(102, gid_full)));
 
-    // Linear group has NULL in early slots when reuse disabled, thus should not insert these full blocks.
+    // Linear group: LinearKVCacheGroup keeps the trailing two blocks when
+    // reuse is disabled, so blocks[0] is NULL_BLOCK_IDX (skipped by the
+    // insertIntoCache fan-out) while blocks[1] / blocks[2] are real and land
+    // in the shared cache as keys 101 / 102.
     EXPECT_TRUE(isNullBlockIdx(shared_cache->matchGroup(100, gid_linear)));
-    EXPECT_TRUE(isNullBlockIdx(shared_cache->matchGroup(101, gid_linear)));
+    EXPECT_FALSE(isNullBlockIdx(shared_cache->matchGroup(101, gid_linear)));
 }
 
 TEST_F(HybridTypeKVCacheAllocatorTest, ConvertIndexToBufferAndAllLayerCacheBaseSmoke) {

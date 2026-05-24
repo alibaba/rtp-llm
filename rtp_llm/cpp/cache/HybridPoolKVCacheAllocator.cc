@@ -95,12 +95,17 @@ bool HybridPoolKVCacheAllocator::doInit() {
         const auto group_type = config_.group_types[static_cast<size_t>(gid)];
 
         auto pool_config = BlockPoolConfigHelper::createConfigForGroup(config_, static_cast<size_t>(gid));
-        auto group_pool =
-            std::make_shared<BlockPool>(pool_config,
-                                        allocation_type_,
-                                        allocation_type_ == AllocationType::DEVICE && config_.state_pool_uses_pinned_cpu
-                                            && static_cast<size_t>(gid) < config_.group_region_names.size()
-                                            && isStateRegion(config_.group_region_names[static_cast<size_t>(gid)]));
+        // State pools live on pinned CPU when the explicit env-driven toggle is
+        // set (state_pool_uses_pinned_cpu) OR when this allocator runs in the
+        // PREFILL role (DSV4 PD-sep: prefill rank stages state to pinned host
+        // memory before handing the request to decode). DECODE / PDFUSION fall
+        // back to device backing unless the env toggle is on.
+        const bool state_on_pinned_cpu =
+            allocation_type_ == AllocationType::DEVICE
+            && (config_.state_pool_uses_pinned_cpu || role_type_ == RoleType::PREFILL)
+            && static_cast<size_t>(gid) < config_.group_region_names.size()
+            && isStateRegion(config_.group_region_names[static_cast<size_t>(gid)]);
+        auto group_pool = std::make_shared<BlockPool>(pool_config, allocation_type_, state_on_pinned_cpu);
         RTP_LLM_CHECK_WITH_INFO(group_pool->init(), "Failed to initialize block pool for group %d", gid);
 
         const auto& ids  = config_.global_layer_ids[static_cast<size_t>(gid)];

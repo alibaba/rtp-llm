@@ -1179,6 +1179,10 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4SharedBlockCacheIsUnifiedAcrossGroups
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CPShardedInsertThenReuseSamePrefix) {
     auto config    = makeDSV4HybridPoolConfig(/*block_num=*/64);
     auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::DEVICE);
+    // M03 unification: SharedBlockCache is now owned by the manager and must
+    // be injected before init() — bare-allocator tests previously got an
+    // implicit per-pool BlockCache.
+    allocator->setSharedBlockCache(std::make_shared<SharedBlockCache>());
     ASSERT_TRUE(allocator->init());
 
     const int spb     = static_cast<int>(config.seq_size_per_block);
