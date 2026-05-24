@@ -133,8 +133,38 @@ std::optional<MemoryBlockCache::CacheItem> MemoryDiskBlockCache::removeIfMatch(C
 
 std::optional<MemoryDiskBlockCache::CacheItem> MemoryDiskBlockCache::popOldestEvictable() {
     std::unique_lock<std::shared_mutex> lock(mutex_);
-    auto                                memory_item = oldestFromSetLocked(memory_lru_);
-    auto                                disk_item   = oldestFromSetLocked(disk_lru_);
+    std::optional<CacheItem>            selected;
+    auto consider = [&selected](const std::optional<CacheItem>& candidate) {
+        if (!candidate.has_value()) {
+            return;
+        }
+        if (!selected.has_value() || candidate->last_access_seq < selected->last_access_seq) {
+            selected = candidate;
+        }
+    };
+    consider(oldestFromSetLocked(memory_complete_lru_));
+    consider(oldestFromSetLocked(memory_incomplete_lru_));
+    consider(oldestFromSetLocked(disk_complete_lru_));
+    consider(oldestFromSetLocked(disk_incomplete_lru_));
+    if (!selected.has_value()) {
+        return std::nullopt;
+    }
+    auto it = items_.find(selected->cache_key);
+    if (it != items_.end()) {
+        eraseEvictKeyLocked(it->second);
+        items_.erase(it);
+    }
+    return selected;
+}
+
+std::optional<MemoryDiskBlockCache::CacheItem> MemoryDiskBlockCache::popOldestEvictable(CacheBlockKind kind) {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    return popOldestEvictableLocked(kind);
+}
+
+std::optional<MemoryDiskBlockCache::CacheItem> MemoryDiskBlockCache::popOldestEvictableLocked(CacheBlockKind kind) {
+    auto memory_item = oldestFromSetLocked(lruSetLocked(CacheBackingType::MEMORY, kind));
+    auto disk_item   = oldestFromSetLocked(lruSetLocked(CacheBackingType::DISK, kind));
     if (!memory_item.has_value()) {
         if (!disk_item.has_value()) {
             return std::nullopt;
@@ -250,12 +280,12 @@ MemoryBlockCache::CacheItem MemoryDiskBlockCache::toMemoryCacheItem(const CacheI
 }
 
 void MemoryDiskBlockCache::insertEvictKeyLocked(const CacheItem& item) {
-    auto& eviction_set = item.backing_type == CacheBackingType::MEMORY ? memory_lru_ : disk_lru_;
+    auto& eviction_set = lruSetLocked(item.backing_type, blockKindFromComplete(item.is_complete));
     eviction_set.insert(EvictKey{item.last_access_seq, item.cache_key});
 }
 
 void MemoryDiskBlockCache::eraseEvictKeyLocked(const CacheItem& item) {
-    auto& eviction_set = item.backing_type == CacheBackingType::MEMORY ? memory_lru_ : disk_lru_;
+    auto& eviction_set = lruSetLocked(item.backing_type, blockKindFromComplete(item.is_complete));
     eviction_set.erase(EvictKey{item.last_access_seq, item.cache_key});
 }
 
@@ -281,6 +311,14 @@ MemoryDiskBlockCache::oldestFromSetLocked(std::set<EvictKey>& eviction_set) {
         return it->second;
     }
     return std::nullopt;
+}
+
+std::set<MemoryDiskBlockCache::EvictKey>&
+MemoryDiskBlockCache::lruSetLocked(CacheBackingType backing_type, CacheBlockKind kind) {
+    if (backing_type == CacheBackingType::MEMORY) {
+        return kind == CacheBlockKind::COMPLETE ? memory_complete_lru_ : memory_incomplete_lru_;
+    }
+    return kind == CacheBlockKind::COMPLETE ? disk_complete_lru_ : disk_incomplete_lru_;
 }
 
 }  // namespace rtp_llm
