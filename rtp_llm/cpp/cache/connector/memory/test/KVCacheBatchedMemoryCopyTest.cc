@@ -36,17 +36,12 @@ BlockAddrInfo KVCacheAllocator::convertIndexToAddr(int layer_id, KVCacheRegionNa
     return convertIndexToAddr(layer_id, block_id);
 }
 
-std::vector<BlockInfo>
-KVCacheAllocator::convertIndexToBuffer(int layer_id, KVCacheRegionName, int block_id) const {
+std::vector<BlockInfo> KVCacheAllocator::convertIndexToBuffer(int layer_id, KVCacheRegionName, int block_id) const {
     return convertIndexToBuffer(layer_id, block_id);
 }
 
-std::vector<BlockInfo>
-KVCacheAllocator::convertIndexToBuffer(int layer_id,
-                                       KVCacheRegionName,
-                                       int block_id,
-                                       int partition_count,
-                                       int partition_id) const {
+std::vector<BlockInfo> KVCacheAllocator::convertIndexToBuffer(
+    int layer_id, KVCacheRegionName, int block_id, int partition_count, int partition_id) const {
     return convertIndexToBuffer(layer_id, block_id, partition_count, partition_id);
 }
 
@@ -203,8 +198,8 @@ CacheConfig makeTinyTypedHybridPoolConfig() {
 
     config.layer_to_group_id.assign(config.layer_all_num, 0);
     config.layer_to_group_ids.assign(config.layer_all_num, std::vector<int>{0, 1});
-    config.layer_region_to_group_id.assign(
-        config.layer_all_num, std::vector<int>(static_cast<size_t>(KVCacheRegionName::REGION_COUNT), -1));
+    config.layer_region_to_group_id.assign(config.layer_all_num,
+                                           std::vector<int>(static_cast<size_t>(KVCacheRegionName::REGION_COUNT), -1));
     config.layer_group_types.assign(config.layer_all_num, CacheGroupType::FULL);
     for (size_t layer = 0; layer < config.layer_all_num; ++layer) {
         config.layer_region_to_group_id[layer][static_cast<size_t>(KVCacheRegionName::CSA_KV)] = 0;
@@ -238,34 +233,34 @@ CacheConfig makeCompactDsv4TypedMemoryCopyConfig(bool use_flash) {
     config.use_opaque_kv_cache_store   = true;
     config.is_sparse                   = true;
 
-    constexpr size_t kDsv4PoolNum = 7;
-    config.group_region_names     = {KVCacheRegionName::CSA_KV,
-                                     KVCacheRegionName::HCA_KV,
-                                     KVCacheRegionName::INDEXER_KV,
-                                     KVCacheRegionName::INDEXER_STATE,
-                                     KVCacheRegionName::CSA_STATE,
-                                     KVCacheRegionName::HCA_STATE,
-                                     KVCacheRegionName::SWA_KV};
-    config.group_types            = {CacheGroupType::FULL,
-                                     CacheGroupType::FULL,
-                                     CacheGroupType::FULL,
-                                     CacheGroupType::SWA,
-                                     CacheGroupType::SWA,
-                                     CacheGroupType::SWA,
-                                     CacheGroupType::SWA};
-    config.group_kv_block_stride_bytes    = {64, 16, 32, 48, 80, 40, 96};
-    config.group_kv_scale_stride_bytes    = std::vector<size_t>(kDsv4PoolNum, 0);
-    config.group_seq_size_per_block       = std::vector<size_t>(kDsv4PoolNum, config.seq_size_per_block);
-    config.group_block_nums               = std::vector<uint32_t>(kDsv4PoolNum, config.block_num);
-    config.group_fixed_pool_blocks        = {0, 0, 0, 8, 8, 8, 8};
-    config.layer_ids                      = std::vector<std::vector<int>>(kDsv4PoolNum);
-    config.global_layer_ids               = std::vector<std::vector<int>>(kDsv4PoolNum);
-    config.layer_to_group_id              = std::vector<int>(config.layer_all_num, 6);
-    config.layer_to_group_ids             = std::vector<std::vector<int>>(config.layer_all_num);
-    config.layer_group_types              = std::vector<CacheGroupType>(config.layer_all_num, CacheGroupType::SWA);
-    config.layer_region_to_group_id       = std::vector<std::vector<int>>(
+    constexpr size_t kDsv4PoolNum           = 7;
+    config.group_region_names               = {KVCacheRegionName::CSA_KV,
+                                               KVCacheRegionName::HCA_KV,
+                                               KVCacheRegionName::INDEXER_KV,
+                                               KVCacheRegionName::INDEXER_STATE,
+                                               KVCacheRegionName::CSA_STATE,
+                                               KVCacheRegionName::HCA_STATE,
+                                               KVCacheRegionName::SWA_KV};
+    config.group_types                      = {CacheGroupType::FULL,
+                                               CacheGroupType::FULL,
+                                               CacheGroupType::FULL,
+                                               CacheGroupType::SWA,
+                                               CacheGroupType::SWA,
+                                               CacheGroupType::SWA,
+                                               CacheGroupType::SWA};
+    config.group_kv_block_stride_bytes      = {64, 16, 32, 48, 80, 40, 96};
+    config.group_kv_scale_stride_bytes      = std::vector<size_t>(kDsv4PoolNum, 0);
+    config.group_seq_size_per_block         = std::vector<size_t>(kDsv4PoolNum, config.seq_size_per_block);
+    config.group_block_nums                 = std::vector<uint32_t>(kDsv4PoolNum, config.block_num);
+    config.non_full_addition_kvcache_blocks = 0;
+    config.layer_ids                        = std::vector<std::vector<int>>(kDsv4PoolNum);
+    config.global_layer_ids                 = std::vector<std::vector<int>>(kDsv4PoolNum);
+    config.layer_to_group_id                = std::vector<int>(config.layer_all_num, 6);
+    config.layer_to_group_ids               = std::vector<std::vector<int>>(config.layer_all_num);
+    config.layer_group_types                = std::vector<CacheGroupType>(config.layer_all_num, CacheGroupType::SWA);
+    config.layer_region_to_group_id         = std::vector<std::vector<int>>(
         config.layer_all_num, std::vector<int>(static_cast<size_t>(KVCacheRegionName::REGION_COUNT), -1));
-    config.layer_to_block_stride_bytes    = std::vector<int>(config.layer_all_num, 0);
+    config.layer_to_block_stride_bytes = std::vector<int>(config.layer_all_num, 0);
     config.cache_specs.reserve(kDsv4PoolNum);
 
     auto make_spec = [&](uint32_t layer_num) {
@@ -429,9 +424,9 @@ public:
             || static_cast<uint32_t>(block_id) >= config_.block_num) {
             return {};
         }
-        const auto& tensor = tensor_it->second;
-        const auto  stride = stride_it->second;
-        auto*       addr   = static_cast<char*>(tensor.data_ptr()) + static_cast<size_t>(block_id) * stride;
+        const auto& tensor       = tensor_it->second;
+        const auto  stride       = stride_it->second;
+        auto*       addr         = static_cast<char*>(tensor.data_ptr()) + static_cast<size_t>(block_id) * stride;
         const auto  payload_size = payload_gap_bytes_ < stride ? stride - payload_gap_bytes_ : stride;
         return {BlockInfo{
             /*is_cuda=*/true,
@@ -455,8 +450,8 @@ public:
         return {};
     }
 
-    bool updateKVBlock(const BatchKVCacheResourcePtr&, const std::vector<int>&, bool, std::vector<BlockIdPair>&)
-        override {
+    bool
+    updateKVBlock(const BatchKVCacheResourcePtr&, const std::vector<int>&, bool, std::vector<BlockIdPair>&) override {
         return false;
     }
 
@@ -499,7 +494,7 @@ private:
 }  // namespace
 
 TEST(KVCacheBatchedMemoryCopyTest, StagedCopyEligibilityRequiresDsv4TypedLayout) {
-    KVCacheConfig kv_config;
+    KVCacheConfig            kv_config;
     std::vector<std::string> server_addrs = {"127.0.0.1:1"};
 
     auto non_dsv4_config    = makeTinyTypedHybridPoolConfig();
@@ -509,23 +504,23 @@ TEST(KVCacheBatchedMemoryCopyTest, StagedCopyEligibilityRequiresDsv4TypedLayout)
     ASSERT_TRUE(non_dsv4_connector->hasTypedLayerRegionSlots(non_dsv4_slots));
     EXPECT_FALSE(non_dsv4_connector->isDsv4TypedCacheLayout(non_dsv4_slots));
 
-    auto non_sparse_config       = makeCompactDsv4TypedMemoryCopyConfig(/*use_flash=*/true);
-    non_sparse_config.is_sparse  = false;
-    auto non_sparse_connector    = std::make_shared<KVCacheMemoryConnector>(
+    auto non_sparse_config      = makeCompactDsv4TypedMemoryCopyConfig(/*use_flash=*/true);
+    non_sparse_config.is_sparse = false;
+    auto non_sparse_connector   = std::make_shared<KVCacheMemoryConnector>(
         non_sparse_config, kv_config, std::shared_ptr<KVCacheAllocator>(), server_addrs);
     EXPECT_FALSE(non_sparse_connector->isDsv4TypedCacheLayout(non_sparse_connector->layerRegionSlots()));
 
-    auto wrong_tokens_config                        = makeCompactDsv4TypedMemoryCopyConfig(/*use_flash=*/true);
-    wrong_tokens_config.seq_size_per_block          = 128;
-    wrong_tokens_config.kernel_seq_size_per_block   = 128;
-    auto wrong_tokens_connector = std::make_shared<KVCacheMemoryConnector>(
+    auto wrong_tokens_config                      = makeCompactDsv4TypedMemoryCopyConfig(/*use_flash=*/true);
+    wrong_tokens_config.seq_size_per_block        = 128;
+    wrong_tokens_config.kernel_seq_size_per_block = 128;
+    auto wrong_tokens_connector                   = std::make_shared<KVCacheMemoryConnector>(
         wrong_tokens_config, kv_config, std::shared_ptr<KVCacheAllocator>(), server_addrs);
     EXPECT_FALSE(wrong_tokens_connector->isDsv4TypedCacheLayout(wrong_tokens_connector->layerRegionSlots()));
 
     auto wrong_schema_config = makeCompactDsv4TypedMemoryCopyConfig(/*use_flash=*/true);
     ASSERT_GT(wrong_schema_config.group_region_names.size(), 6u);
     wrong_schema_config.group_region_names[6] = KVCacheRegionName::CSA_KV;
-    auto wrong_schema_connector = std::make_shared<KVCacheMemoryConnector>(
+    auto wrong_schema_connector               = std::make_shared<KVCacheMemoryConnector>(
         wrong_schema_config, kv_config, std::shared_ptr<KVCacheAllocator>(), server_addrs);
     EXPECT_FALSE(wrong_schema_connector->isDsv4TypedCacheLayout(wrong_schema_connector->layerRegionSlots()));
 
@@ -567,13 +562,13 @@ TEST(KVCacheBatchedMemoryCopyTest, Dsv4TypedLayoutUsesStagedCopyForD2HAndH2D) {
 
     auto mem_blocks = memory_pool->malloc(2);
     ASSERT_EQ(mem_blocks.size(), 2u);
-    const std::vector<BlockIdxType> request_mem_blocks{
-        static_cast<BlockIdxType>(mem_blocks[1]), static_cast<BlockIdxType>(mem_blocks[0])};
+    const std::vector<BlockIdxType> request_mem_blocks{static_cast<BlockIdxType>(mem_blocks[1]),
+                                                       static_cast<BlockIdxType>(mem_blocks[0])};
 
-    MemoryOperationRequestPB req;
+    MemoryOperationRequestPB               req;
     std::vector<std::vector<BlockIdxType>> gpu_block_sets(request_mem_blocks.size(),
                                                           std::vector<BlockIdxType>(slots.size(), NULL_BLOCK_IDX));
-    BlockIdxType next_gpu_block = 1;
+    BlockIdxType                           next_gpu_block = 1;
     for (auto& gpu_blocks : gpu_block_sets) {
         for (auto& gpu_block : gpu_blocks) {
             gpu_block = next_gpu_block++;
@@ -624,10 +619,8 @@ TEST(KVCacheBatchedMemoryCopyTest, Dsv4TypedLayoutUsesStagedCopyForD2HAndH2D) {
             const auto& slot = slots[i];
             const auto  gpu_bufs =
                 allocator->convertIndexToBuffer(slot.layer_id, slot.region_name, gpu_block_sets[block_idx][i]);
-            verifyBlockBytesEq(mem_buffer,
-                               byte_off,
-                               sumBlockInfosBytes(gpu_bufs),
-                               copyTag(block_idx * slots.size() + i));
+            verifyBlockBytesEq(
+                mem_buffer, byte_off, sumBlockInfosBytes(gpu_bufs), copyTag(block_idx * slots.size() + i));
             if (slot.stride_bytes > sumBlockInfosBytes(gpu_bufs)) {
                 verifyBlockBytesEq(mem_buffer,
                                    byte_off + sumBlockInfosBytes(gpu_bufs),
