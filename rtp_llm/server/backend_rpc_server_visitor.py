@@ -14,6 +14,7 @@ from rtp_llm.ops import SpeculativeExecutionConfig, VitSeparation, get_block_cac
 from rtp_llm.server.host_service import HostService, HostServiceArgs
 from rtp_llm.server.master_client import FlexlbResponse, MasterClient
 from rtp_llm.server.misc import format_exception
+from rtp_llm.server.recent_cache_key_window import RecentCacheKeyWindow
 from rtp_llm.utils.base_model_datatypes import GenerateInput, GenerateOutputs
 from rtp_llm.utils.time_util import Timer
 
@@ -83,6 +84,7 @@ class BackendRPCServerVisitor:
             server_config=server_config,
             master_config=master_config,
         )
+        self.recent_cache_key_window = RecentCacheKeyWindow()
 
     async def close(self):
         await self.model_rpc_client.close()
@@ -143,6 +145,7 @@ class BackendRPCServerVisitor:
             else input.token_ids.tolist()
         )
         block_cache_keys = get_block_cache_keys(token_ids, self.seq_size_per_block)
+        self._report_recent_cache_key_metrics(block_cache_keys)
 
         try:
             route_result = await self.master_client.get_backend_role_addrs(
@@ -177,6 +180,39 @@ class BackendRPCServerVisitor:
             route_result.error_message or "",
         )
         return route_result
+
+    def _report_recent_cache_key_metrics(self, block_cache_keys: List[int]) -> None:
+        try:
+            snapshot = self.recent_cache_key_window.record(block_cache_keys)
+            tags = {"timeWindowMs": str(snapshot.time_window_ms)}
+            kmonitor.report(
+                AccMetrics.RECENT_CACHE_KEY_REQUEST_COUNT_METRIC,
+                1,
+                tags,
+            )
+            if snapshot.request_occurrences <= 0:
+                kmonitor.report(
+                    AccMetrics.RECENT_CACHE_KEY_EMPTY_REQUEST_COUNT_METRIC,
+                    1,
+                    tags,
+                )
+            kmonitor.report(
+                AccMetrics.RECENT_CACHE_KEY_HIT_COUNT_METRIC,
+                snapshot.request_hit_occurrences,
+                tags,
+            )
+            kmonitor.report(
+                AccMetrics.RECENT_CACHE_KEY_TOTAL_COUNT_METRIC,
+                snapshot.request_occurrences,
+                tags,
+            )
+            kmonitor.report(
+                GaugeMetrics.RECENT_CACHE_KEY_HIT_RATIO_METRIC,
+                snapshot.request_hit_ratio,
+                tags,
+            )
+        except Exception:
+            route_logger.exception("failed to report recent cache key metrics")
 
     async def get_domain_route_addrs(self, input: GenerateInput):
         specified_roles = {addr.role for addr in input.generate_config.role_addrs}
