@@ -78,6 +78,19 @@ bool debugMtpPrefillDataEnabled() {
     return enabled;
 }
 
+bool debugMtpDecodeDataEnabled() {
+    static const bool enabled = []() {
+        const char* env = std::getenv("RTP_LLM_DEBUG_MTP_DECODE_DATA");
+        const bool  on  = env != nullptr && std::string(env) != "0";
+        if (on) {
+            RTP_LLM_LOG_WARNING(
+                "[debug-mtp-decode-data] enabled; tensor summaries may perform D2H copies and serialize debugging runs");
+        }
+        return on;
+    }();
+    return enabled;
+}
+
 std::string debugTensorSummary(const torch::Tensor& tensor, int64_t limit = 8) {
     if (!tensor.defined()) {
         return "None";
@@ -106,6 +119,46 @@ std::string debugTensorSummary(const torch::Tensor& tensor, int64_t limit = 8) {
         oss << " summary_error=" << e.what();
     }
     return oss.str();
+}
+
+void logMtpDecodeModelInput(const char* tag, const GptModelInputs& input) {
+    if (!debugMtpDecodeDataEnabled()) {
+        return;
+    }
+    static std::atomic<int> debug_log_budget{512};
+    if (debug_log_budget.fetch_sub(1, std::memory_order_relaxed) <= 0) {
+        return;
+    }
+    RTP_LLM_LOG_INFO("[debug-mtp-decode-data][%s] combo=%s input_lengths=%s sequence_lengths=%s "
+                     "prefix_lengths=%s sequence_lengths_plus_1=%s lm_output_indexes=%s "
+                     "last_hidden=%s kv_kernel=%s kv_block=%s is_target_verify=%d is_fake_stream=%d",
+                     tag,
+                     debugTensorSummary(input.combo_tokens).c_str(),
+                     debugTensorSummary(input.input_lengths).c_str(),
+                     debugTensorSummary(input.sequence_lengths).c_str(),
+                     debugTensorSummary(input.prefix_lengths).c_str(),
+                     debugTensorSummary(input.sequence_lengths_plus_1).c_str(),
+                     debugTensorSummary(input.lm_output_indexes).c_str(),
+                     debugTensorSummary(input.last_hidden_states, 0).c_str(),
+                     debugTensorSummary(input.kv_cache_kernel_block_id, 0).c_str(),
+                     debugTensorSummary(input.kv_cache_block_id, 0).c_str(),
+                     static_cast<int>(input.is_target_verify),
+                     static_cast<int>(input.is_fake_stream));
+}
+
+void logMtpDecodeModelOutput(const char* tag, const GptModelOutputs& output) {
+    if (!debugMtpDecodeDataEnabled()) {
+        return;
+    }
+    static std::atomic<int> debug_log_budget{512};
+    if (debug_log_budget.fetch_sub(1, std::memory_order_relaxed) <= 0) {
+        return;
+    }
+    RTP_LLM_LOG_INFO("[debug-mtp-decode-data][%s] logits=%s hidden=%s all_hidden=%s",
+                     tag,
+                     debugTensorSummary(output.logits, 0).c_str(),
+                     debugTensorSummary(output.hidden_states, 0).c_str(),
+                     debugTensorSummary(output.all_hidden_states, 0).c_str());
 }
 
 std::string debugTensorDiffSummary(const torch::Tensor& lhs, const torch::Tensor& rhs) {
@@ -549,9 +602,13 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     warm_up_(warm_up),
     role_type_(params.pd_sep_config.role_type),
     collect_metrics_stream_(cuda_graph::graphGetStreamFromPool(true)),
-    target_verify_prepare_runner_(cuda_graph::graphGetStreamFromPool(true)),
-    draft_prefill_prepare_runner_(cuda_graph::graphGetStreamFromPool(true)),
-    spec_bookkeeping_runner_(cuda_graph::graphGetStreamFromPool(true)) {
+    // These runners intentionally do not inherit PyTorch profiler TLS from the
+    // engine loop. Kineto callbacks are thread-affine; propagating an active
+    // profiling state to async MTP worker threads can crash while perf timelines
+    // are being recorded.
+    target_verify_prepare_runner_(cuda_graph::graphGetStreamFromPool(true), false),
+    draft_prefill_prepare_runner_(cuda_graph::graphGetStreamFromPool(true), false),
+    spec_bookkeeping_runner_(cuda_graph::graphGetStreamFromPool(true), false) {
     data_type_        = params.model_config_.data_type;
     hidden_size_      = params.model_config_.hidden_size * params.model_config_.hc_mult;
     propose_step_     = propose_params->gen_num_per_circle;
@@ -1409,7 +1466,9 @@ GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input,
     }
 
     ensureModelInputsOnCuda(model_input, "decode.target_verify_forward");
+    logMtpDecodeModelInput("target_verify_forward_input", model_input);
     GptModelOutputs model_output = model_->forward(model_input);
+    logMtpDecodeModelOutput("target_verify_forward_output", model_output);
     RTP_LLM_LOG_DEBUG("[MTP decode] target model verify forward end");
     model_input.is_target_verify = false;
     return model_output;
@@ -1555,6 +1614,7 @@ GptModelOutputs MtpExecutor::runDraftPrefillForward(GptModelInputs& model_input)
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(draft_model_forward)");
     maybePrintModelInput(model_input, "decode post draft model");
     ensureModelInputsOnCuda(model_input, "decode.draft_prefill_forward");
+    logMtpDecodeModelInput("draft_prefill_forward_input", model_input);
     // Use sp_prefill_draft_model_ if CUDA graph is enabled, otherwise use draft_model_.
     GptModelOutputs draft_prefill_model_output;
     if (sp_prefill_draft_model_) {
@@ -1612,6 +1672,7 @@ GptModelOutputs MtpExecutor::runDraftPrefillForward(GptModelInputs& model_input)
         draft_prefill_model_output = draft_model_->forward(model_input);
         maybeOverrideLastHiddenWithMtpBuffer(draft_prefill_model_output, *draft_model_);
     }
+    logMtpDecodeModelOutput("draft_prefill_forward_output", draft_prefill_model_output);
     return draft_prefill_model_output;
 }
 
@@ -1797,7 +1858,8 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
     torch::Tensor              spec_prefix_lengths;
 
     // update TP > 0 batch_size
-    size_t     batch_size       = model_input.combo_tokens.size(0);
+    size_t batch_size = model_input.combo_tokens.size(0);
+    logMtpDecodeModelInput("draft_decode_begin", model_input);
     const auto cuda_i32         = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
     auto       to_cuda_i32_flat = [this, batch_size](const torch::Tensor& tensor) -> torch::Tensor {
         auto tensor_d = toCudaInt32WithHostHold(tensor, buffer_holder_);
@@ -1891,9 +1953,11 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         RTP_LLM_LOG_DEBUG("[MTP draftDecode] loop step %d/%d start, batch_size %zu", i, propose_step_ - 1, batch_size);
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         ensureModelInputsOnCuda(model_input, "draft_decode.loop_forward");
+        logMtpDecodeModelInput("draft_decode_loop_forward_input", model_input);
         draft_decode_model_output = std::move(draft_model_->forward(model_input));
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
         maybeOverrideLastHiddenWithMtpBuffer(draft_decode_model_output, *draft_model_);
+        logMtpDecodeModelOutput("draft_decode_loop_forward_output", draft_decode_model_output);
         RTP_LLM_LOG_DEBUG("[MTP draftDecode] loop step %d forward done", i);
 
         // sample
@@ -1967,6 +2031,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         model_input.sequence_lengths   = torch::empty({0}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
         model_input.last_hidden_states = torch::Tensor();
         ensureModelInputsOnCuda(model_input, "draft_decode.build_spec_decode_input");
+        logMtpDecodeModelInput("draft_decode_spec_input", model_input);
 
         // Since other tp ranks don't have streams, its combo_tokens' first token is not correct.
         // Thus, we need to broadcast the combo_tokens to other tp ranks.

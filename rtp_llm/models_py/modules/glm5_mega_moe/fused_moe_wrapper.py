@@ -116,22 +116,26 @@ class MegaMoeFusedWrapper(nn.Module):
         max_generate_batch_size = (
             int(max_generate_batch_size) if max_generate_batch_size > 0 else 0
         )
+        gen_num_per_cycle = int(getattr(config, "gen_num_per_cycle", 0) or 0)
         resolved = resolve_moe_max_tokens_per_rank(
             max_seq_len=max_seq_len,
             current_max_tokens_per_rank=max_tokens_per_rank,
             cp_size=cp_size,
             max_generate_batch_size=max(max_generate_batch_size, 1),
             is_decode_role=is_decode_role,
+            is_speculative=gen_num_per_cycle > 0,
+            gen_num_per_cycle=gen_num_per_cycle,
         )
         if resolved != max_tokens_per_rank:
             logger.info(
                 "[GLM5 MegaMoE] max_tokens_per_rank %d -> %d "
-                "(role=%s, cp=%d, max_batch=%d)",
+                "(role=%s, cp=%d, max_batch=%d, gen_num_per_cycle=%d)",
                 max_tokens_per_rank,
                 resolved,
                 "DECODE" if is_decode_role else "PREFILL",
                 cp_size,
                 max_generate_batch_size,
+                gen_num_per_cycle,
             )
             max_tokens_per_rank = resolved
 

@@ -319,6 +319,12 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         }
         reportMetrics(stream_groups, executor_collector, tps_collector, tps_execute_time_us);
 
+        // Close the engine-step profiler before handing tensors to the async
+        // bookkeeping worker. Kineto callbacks are thread-affine, and the
+        // worker runs outside the engine step on a separate thread/stream.
+        if (profile_step_finish_) {
+            profile_step_finish_();
+        }
         return dispatchOutputAsync(
             stream_groups, std::move(model_output), std::move(sampler_output), std::move(sampler_event));
     }
