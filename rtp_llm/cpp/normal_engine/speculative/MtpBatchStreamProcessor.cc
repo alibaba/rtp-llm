@@ -1,14 +1,17 @@
 #include "rtp_llm/cpp/normal_engine/speculative/MtpBatchStreamProcessor.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
 #include "rtp_llm/cpp/utils/StringUtil.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include <algorithm>
 #include <atomic>
 #include <cstdlib>
 #include <numeric>
 #include <string>
+#include <vector>
 #include <cstring>
 
 namespace rtp_llm {
@@ -94,6 +97,56 @@ torch::Tensor toCudaInt32(const torch::Tensor& tensor, TensorHolder& host_holder
     }
     host_holder.hold_host(tensor);
     return tensor.to(cudaInt32Options(), /*non_blocking=*/true);
+}
+
+void appendSpeculativeStatefulLogitsProcessors(SamplerInputs&                      sampler_inputs,
+                                               const std::list<GenerateStreamPtr>& all_streams,
+                                               const GptModelInputs&               model_inputs,
+                                               size_t                              score_len) {
+    const bool has_stateful_processor = std::any_of(all_streams.begin(), all_streams.end(), [](const auto& stream) {
+        return stream->hasStatefulLogitsProcessor();
+    });
+    if (!has_stateful_processor) {
+        return;
+    }
+
+    RTP_LLM_CHECK_WITH_INFO(score_len > 0, "MTP score_len must be positive for stateful logits processors");
+    RTP_LLM_CHECK_WITH_INFO(model_inputs.combo_tokens.defined(),
+                            "MTP target verify combo_tokens missing for stateful logits processor");
+    if (!sampler_inputs.logits_processor_states_ptr) {
+        sampler_inputs.logits_processor_states_ptr = std::make_shared<LogitsProcessorStates>();
+    }
+
+    auto combo_tokens_cpu =
+        model_inputs.combo_tokens.is_cuda() ? model_inputs.combo_tokens.cpu() : model_inputs.combo_tokens;
+    combo_tokens_cpu             = combo_tokens_cpu.to(torch::kInt32).contiguous();
+    const size_t expected_tokens = all_streams.size() * score_len;
+    RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(combo_tokens_cpu.numel()) >= expected_tokens,
+                            "MTP target verify combo_tokens too short: got=%ld, expected=%zu",
+                            combo_tokens_cpu.numel(),
+                            expected_tokens);
+
+    const auto* token_ptr  = combo_tokens_cpu.data_ptr<int32_t>();
+    size_t      stream_idx = 0;
+    for (const auto& stream : all_streams) {
+        const size_t stream_offset = stream_idx * score_len;
+        for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
+            if (processor == nullptr || !processor->isStateful()) {
+                continue;
+            }
+            for (size_t row = 0; row < score_len; ++row) {
+                std::vector<int32_t> draft_prefix;
+                draft_prefix.reserve(row);
+                for (size_t prefix_idx = 1; prefix_idx <= row; ++prefix_idx) {
+                    draft_prefix.push_back(token_ptr[stream_offset + prefix_idx]);
+                }
+                const size_t row_idx = stream_offset + row;
+                sampler_inputs.logits_processor_states_ptr->insertSpeculative(
+                    processor, row_idx, row_idx + 1, std::move(draft_prefix));
+            }
+        }
+        ++stream_idx;
+    }
 }
 
 torch::Tensor lastColumnAsFlat(const torch::Tensor& tensor) {
@@ -317,7 +370,6 @@ absl::StatusOr<GptModelInputs> MtpBatchStreamProcessor::gatherDecodeModelInput(c
 
 absl::StatusOr<SamplerInputs> MtpBatchStreamProcessor::gatherSpecSamplerInput(
     const StreamGroups& stream_groups, const GptModelInputs& model_inputs, const GptModelOutputs& model_output) const {
-    (void)model_inputs;
     RTP_LLM_CHECK(!stream_groups.empty());
     auto all_streams      = stream_groups.allStreams();
     bool return_all_probs = stream_groups.needReturnAllProbs();
@@ -333,6 +385,7 @@ absl::StatusOr<SamplerInputs> MtpBatchStreamProcessor::gatherSpecSamplerInput(
         allocateSamplerInputs(stream_groups, total_batch_size, total_batch_size, propose_step_);
     fillSamplerCommonInputs(sampler_inputs, all_streams, true, propose_step_);
     setLogitsProcessorInputs(sampler_inputs, all_streams, true);
+    appendSpeculativeStatefulLogitsProcessors(sampler_inputs, all_streams, model_inputs, score_len);
 
     int batch_idx = 0;
     for (auto& stream : all_streams) {

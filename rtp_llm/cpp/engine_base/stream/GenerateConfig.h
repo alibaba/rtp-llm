@@ -42,6 +42,11 @@ public:
     std::optional<float>       top_p_min;
     std::optional<int>         top_p_reset_ids;
     std::optional<std::string> task_id;
+    std::optional<std::string> json_schema;
+    std::optional<std::string> regex;
+    std::optional<std::string> ebnf;
+    std::optional<std::string> structural_tag;
+    std::optional<std::string> response_format;
     std::string                adapter_name = "";
     std::vector<std::string>   adapter_names;
 
@@ -138,6 +143,12 @@ public:
                      << ", top_p:" << top_p << ", force_disable_sp_run: " << force_disable_sp_run
                      << ", force_sp_accept: " << force_sp_accept << ", return_all_probs: " << return_all_probs
                      << ", stop_words_list:" << vectorsToString(stop_words_list)
+                     << ", json_schema: " << (json_schema.has_value() ? std::to_string(json_schema->size()) : "none")
+                     << ", regex: " << (regex.has_value() ? std::to_string(regex->size()) : "none")
+                     << ", ebnf: " << (ebnf.has_value() ? std::to_string(ebnf->size()) : "none") << ", structural_tag: "
+                     << (structural_tag.has_value() ? std::to_string(structural_tag->size()) : "none")
+                     << ", response_format: "
+                     << (response_format.has_value() ? std::to_string(response_format->size()) : "none")
                      << ", can_use_pd_separation: " << can_use_pd_separation << ", pd_separation: " << pd_separation
                      << ", in_think_mode: " << in_think_mode << ", max_thinking_tokens: " << max_thinking_tokens
                      << ", begin_think_token_ids: " << vectorToString(begin_think_token_ids)
@@ -181,6 +192,11 @@ public:
         JSONIZE_OPTIONAL(top_p_min);
         JSONIZE_OPTIONAL(top_p_reset_ids);
         JSONIZE_OPTIONAL(task_id);
+        JSONIZE_OPTIONAL(json_schema);
+        JSONIZE_OPTIONAL(regex);
+        JSONIZE_OPTIONAL(ebnf);
+        JSONIZE_OPTIONAL(structural_tag);
+        JSONIZE_OPTIONAL(response_format);
         try {
             std::string adapter_name_;
             json.Jsonize("adapter_name", adapter_name_);
