@@ -77,7 +77,10 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
 
     is_context_stream_  = std::make_shared<bool>();
     *is_context_stream_ = true;
-    generate_status_    = std::make_shared<GenerateStateMachine>(stream_cache_resource_);
+    // Pass `this` so the state machine can drive onErrorReported() wakeup via
+    // GenerateStream::reportErrorWithoutLock() on its internal Error paths
+    // (handleWaiting/handleRunning MALLOC_FAILED).
+    generate_status_    = std::make_shared<GenerateStateMachine>(stream_cache_resource_, this);
     sub_generate_status_.clear();
     resizeSubGenerateStatus(init_batch_size);
 
@@ -508,10 +511,14 @@ void GenerateStream::reportEventWithoutLock(StreamEvents::EventType event,
 
 void GenerateStream::reportError(ErrorCode error_code, const std::string& error_msg) {
     std::lock_guard<std::mutex> lock(*mutex_);
+    reportErrorWithoutLock(error_code, error_msg);
+}
+
+// 无锁版本:调用者必须已持有 *mutex_。与 reportError() 共享同一个 onErrorReported() wakeup
+// 链路,这样无论从哪条路径报 Error,nextOutput() 等等待原语都不会被卡到 cv 超时(最长 1s)。
+// 锁序: *mutex_ -> queue._cond (与 reportError() 保持一致)。
+void GenerateStream::reportErrorWithoutLock(ErrorCode error_code, const std::string& error_msg) {
     generate_status_->reportEvent(StreamEvents::Error, error_code, error_msg);
-    // Wake any consumer parked on a derived-class wait primitive (e.g. NormalGenerateStream's
-    // generate_outputs_queue_.waitNotEmpty()), so the error is observed immediately rather
-    // than after the cv timeout. Lock order: *mutex_ -> queue._cond is preserved here.
     onErrorReported();
 }
 

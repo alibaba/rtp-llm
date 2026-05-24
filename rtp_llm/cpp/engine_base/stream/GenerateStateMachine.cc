@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateStateMachine.h"
+#include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
 
@@ -8,6 +9,22 @@ namespace rtp_llm {
 // ============================================================================
 // GenerateStateMachine method implementations
 // ============================================================================
+
+void GenerateStateMachine::reportErrorAndWakeup(ErrorCode error_code, const std::string& error_msg) {
+    // 调用 stream->reportErrorWithoutLock() 走统一 Error 链路:
+    //   - 内部会回调 generate_status_->reportEvent(Error,...) 登记 error_info/events_
+    //   - 接着触发 stream 的 onErrorReported() hook 唤醒 nextOutput() 等待原语
+    // 调用者必须已持有 stream->mutex_(moveToNext/handleRunning 调用链满足此前置)。
+    if (stream_) {
+        stream_->reportErrorWithoutLock(error_code, error_msg);
+    } else {
+        // Fallback:无 owner stream(理论上不应发生)时退化为只登记 error_info/events_。
+        if (error_info.ok()) {
+            error_info = ErrorInfo(error_code, error_msg);
+        }
+        events_.append(StreamEvents::Error);
+    }
+}
 
 StreamState GenerateStateMachine::moveToNext() {
     // Error 最高优先级，任何状态下直接终止
@@ -49,7 +66,7 @@ void GenerateStateMachine::handleWaiting() {
     if (!events_.has(StreamEvents::LoadInitiated)) {
         auto result = stream_cache_resource_->initKVBlock(reserve_step_);
         if (!result.ok()) {
-            error_info = ErrorInfo(ErrorCode::MALLOC_FAILED, "LACK MEM");
+            reportErrorAndWakeup(ErrorCode::MALLOC_FAILED, "initKVBlock failed: LACK MEM");
             status.store(StreamState::FINISHED, std::memory_order_release);
             releaseResource();
             return;
@@ -79,7 +96,7 @@ void GenerateStateMachine::handleWaiting() {
     // 绕过incrKVBlock at prefill
     auto result = stream_cache_resource_->incrKVBlock(reserve_step_);
     if (!result.ok()) {
-        error_info = ErrorInfo(ErrorCode::MALLOC_FAILED, "LACK MEM");
+        reportErrorAndWakeup(ErrorCode::MALLOC_FAILED, "incrKVBlock failed: LACK MEM");
         status.store(StreamState::FINISHED, std::memory_order_release);
         releaseResource();
         return;
@@ -106,8 +123,9 @@ void GenerateStateMachine::handleRunning() {
     }
     auto result = stream_cache_resource_->incrKVBlock(reserve_step_);
     if (!result.ok()) {
-        // Report Error event so moveToNext() won't be called again on this stream
-        reportEvent(StreamEvents::Error, ErrorCode::MALLOC_FAILED, "incrKVBlock failed: LACK MEM");
+        // Report Error event so moveToNext() won't be called again on this stream;
+        // 走 reportErrorAndWakeup() 同时唤醒 stream 的 nextOutput() 等待者(否则会等到 cv 超时 ~1s)。
+        reportErrorAndWakeup(ErrorCode::MALLOC_FAILED, "incrKVBlock failed: LACK MEM");
         status.store(StreamState::FINISHED, std::memory_order_release);
         releaseResource();
     }

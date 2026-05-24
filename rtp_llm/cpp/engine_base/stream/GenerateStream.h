@@ -231,7 +231,10 @@ public:
                                 ErrorCode               error_code = ErrorCode::NONE_ERROR,
                                 const std::string&      error_msg  = "");
 
-    void         reportError(ErrorCode error_code = ErrorCode::NONE_ERROR, const std::string& error_msg = "");
+    void reportError(ErrorCode error_code = ErrorCode::NONE_ERROR, const std::string& error_msg = "");
+    // 无锁版本,供已持有 mutex_ 的内部调用路径(update/specUpdate/moveToNext/GenerateStateMachine
+    // 等)使用。和 reportError() 一样会触发 onErrorReported() hook,避免被等待原语卡到 cv 超时。
+    void reportErrorWithoutLock(ErrorCode error_code = ErrorCode::NONE_ERROR, const std::string& error_msg = "");
     bool         hasEvent(StreamEvents::EventType event) const;
     virtual bool hasError() const;
     ErrorInfo    statusInfo();
@@ -595,8 +598,11 @@ protected:
     // This is intentional: GenerateStateMachine needs direct access to StreamCacheResource
     // for state transitions (e.g., loading cache, releasing blocks). Both owners share the
     // same instance via shared_ptr, so reference counting ensures correct lifetime management.
-    // No circular reference exists because neither StreamCacheResource nor GenerateStateMachine
-    // holds a back-reference to GenerateStream.
+    //
+    // 反向引用说明:为了在 GenerateStateMachine 内部 Error 路径(MALLOC_FAILED 等)触发
+    // GenerateStream::onErrorReported() wakeup hook,StreamCacheResource 和 GenerateStateMachine
+    // 均持有 GenerateStream* 裸指针。无生命周期循环 —— GenerateStream 全程拥有这两个对象,
+    // shared_ptr 引用计数不形成回环。
 
     torch::Tensor                            cum_log_probs_;
     torch::Tensor                            all_probs_;
