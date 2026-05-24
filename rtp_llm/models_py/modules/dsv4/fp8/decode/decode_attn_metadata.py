@@ -298,11 +298,24 @@ def _update_compressor_state_slot_mappings(
     meta: "DSv4DecodeAttnMetadataFP8",
     bs: int,
     paged_pool_entries_per_block: Dict[int, int],
+    paged_block_tables: Optional[Dict[int, torch.Tensor]] = None,
 ) -> None:
     if not meta.compressor_state_slot_mappings:
         return
     if meta.position_ids_long is None or meta.req_id_per_token_long is None:
-        return
+        raise RuntimeError(
+            "compressor_state_slot_mappings exist but "
+            "position_ids_long or req_id_per_token_long is None"
+        )
+
+    if paged_block_tables is not None:
+        for at in meta.compressor_state_slot_mappings:
+            if at in meta.pool_block_tables and at not in paged_block_tables:
+                raise RuntimeError(
+                    f"state pool {at} has block table in meta "
+                    f"but was not refreshed by paged_block_tables "
+                    f"— slot mappings would be stale"
+                )
 
     T = bs * meta.q_len_per_req
     positions = meta.position_ids_long[:T]
@@ -752,6 +765,211 @@ def allocate_decode_metadata_fp8(
     )
 
 
+def _metadata_ptr_snapshot(meta: "DSv4DecodeAttnMetadataFP8") -> Dict[str, int]:
+    ptrs = {
+        "start_pos": meta.start_pos.data_ptr(),
+        "position_ids": meta.position_ids.data_ptr(),
+        "slot_swa": meta.slot_mapping_swa.data_ptr(),
+        "topk_window": meta.topk_window_idxs.data_ptr(),
+        "topk_buffer_compressed": meta.topk_buffer_compressed.data_ptr(),
+    }
+    if meta.cache_seqlens_i32 is not None:
+        ptrs["cache_seqlens_i32"] = meta.cache_seqlens_i32.data_ptr()
+    if meta.position_ids_long is not None:
+        ptrs["position_ids_long"] = meta.position_ids_long.data_ptr()
+    if meta.req_id_per_token is not None:
+        ptrs["req_id_per_token"] = meta.req_id_per_token.data_ptr()
+    if meta.req_id_per_token_long is not None:
+        ptrs["req_id_per_token_long"] = meta.req_id_per_token_long.data_ptr()
+    if meta.decode_seq_start_per_req is not None:
+        ptrs["decode_seq_start_per_req"] = meta.decode_seq_start_per_req.data_ptr()
+    if meta.decode_cu_seq_per_req is not None:
+        ptrs["decode_cu_seq_per_req"] = meta.decode_cu_seq_per_req.data_ptr()
+    for r, t in meta.slot_mapping_compressed.items():
+        ptrs[f"slot_compressed[{r}]"] = t.data_ptr()
+    for r, t in meta.compressed_lens.items():
+        ptrs[f"compressed_lens[{r}]"] = t.data_ptr()
+    for r, t in meta.compressed_lens_per_token.items():
+        ptrs[f"compressed_lens_per_token[{r}]"] = t.data_ptr()
+    for r, t in meta.topk_total_by_ratio.items():
+        ptrs[f"topk_total_by_ratio[{r}]"] = t.data_ptr()
+    for at, t in meta.pool_block_tables.items():
+        ptrs[f"pool_block_tables[{at}]"] = t.data_ptr()
+    for at, t in meta.pool_write_slot_mappings.items():
+        ptrs[f"pool_write_slot_mappings[{at}]"] = t.data_ptr()
+    for at, t in meta.compressor_state_slot_mappings.items():
+        ptrs[f"compressor_state_slot_mappings[{at}]"] = t.data_ptr()
+    if meta.swa_abs_idx is not None:
+        ptrs["swa_abs_idx"] = meta.swa_abs_idx.data_ptr()
+    if meta.swa_global_slots is not None:
+        ptrs["swa_global_slots"] = meta.swa_global_slots.data_ptr()
+    if meta.hca_cmp_global_slots is not None:
+        ptrs["hca_cmp_global_slots"] = meta.hca_cmp_global_slots.data_ptr()
+    return ptrs
+
+
+def _assert_metadata_ptrs_unchanged(
+    meta: "DSv4DecodeAttnMetadataFP8",
+    ptr_snap: Dict[str, int],
+) -> None:
+    cur = _metadata_ptr_snapshot(meta)
+    for k, p_before in ptr_snap.items():
+        if k not in cur:
+            raise RuntimeError(
+                "update_decode_metadata_in_place_fp8(forbid_realloc=True) "
+                f"dropped buffer '{k}' from metadata snapshot"
+            )
+        if cur[k] != p_before:
+            raise RuntimeError(
+                "update_decode_metadata_in_place_fp8(forbid_realloc=True) "
+                f"reallocated buffer '{k}': before={hex(p_before)} "
+                f"after={hex(cur[k])}"
+            )
+
+
+def _validate_decode_metadata_update_capacity(
+    meta: "DSv4DecodeAttnMetadataFP8",
+    start_pos: torch.Tensor,
+    q_len: int,
+) -> int:
+    if start_pos.dim() != 1:
+        raise RuntimeError(
+            "update_decode_metadata_in_place_fp8 expects 1D start_pos, "
+            f"got shape={tuple(start_pos.shape)}"
+        )
+    if q_len <= 0:
+        raise RuntimeError(
+            f"update_decode_metadata_in_place_fp8 expects q_len > 0, got {q_len}"
+        )
+    bs = int(start_pos.shape[0])
+    max_batch_size = int(meta.start_pos.shape[0])
+    if bs <= 0 or bs > max_batch_size:
+        raise RuntimeError(
+            "update_decode_metadata_in_place_fp8 batch size out of preallocated "
+            f"capacity: bs={bs}, max_batch_size={max_batch_size}"
+        )
+    total_tokens = bs * q_len
+    if total_tokens > int(meta.position_ids.numel()):
+        raise RuntimeError(
+            "update_decode_metadata_in_place_fp8 token count out of preallocated "
+            f"capacity: total_tokens={total_tokens}, "
+            f"capacity={int(meta.position_ids.numel())}"
+        )
+    return bs
+
+
+def _finish_fused_prepare_common(
+    meta: "DSv4DecodeAttnMetadataFP8",
+    start_pos: torch.Tensor,
+    bs: int,
+    q_len: int,
+    device: torch.device,
+) -> torch.Tensor:
+    position_ids_2d = _build_position_ids_2d(start_pos, q_len, device)
+    position_ids_flat = position_ids_2d.reshape(-1).contiguous()
+
+    T = bs * q_len
+    meta.position_ids[:T].copy_(position_ids_flat)
+    if meta.position_ids_long is not None:
+        meta.position_ids_long[:T].copy_(position_ids_flat.to(torch.long))
+    if meta.decode_seq_start_per_req is not None:
+        meta.decode_seq_start_per_req[:bs].copy_(start_pos)
+    meta.topk_buffer_compressed[:bs].fill_(-1)
+
+    for r in meta.compressed_lens_per_token:
+        cmp_lpt = ((position_ids_2d + 1) // r).to(torch.int32)
+        meta.compressed_lens_per_token[r][:bs].copy_(cmp_lpt)
+
+    return position_ids_2d
+
+
+def _copy_paged_block_tables(
+    meta: "DSv4DecodeAttnMetadataFP8",
+    bs: int,
+    paged_block_tables: Dict[int, torch.Tensor],
+) -> None:
+    for at, src_bt in paged_block_tables.items():
+        dst_bt = meta.pool_block_tables.get(at)
+        if dst_bt is None:
+            continue
+        n_rows = min(src_bt.shape[0], dst_bt.shape[0])
+        n_cols = min(src_bt.shape[1], dst_bt.shape[1])
+        dst_bt[bs:].zero_()
+        dst_bt[:n_rows, :n_cols].copy_(src_bt[:n_rows, :n_cols])
+        if n_cols < dst_bt.shape[1]:
+            dst_bt[:n_rows, n_cols:].zero_()
+
+
+def _translate_paged_swa_global(
+    meta: "DSv4DecodeAttnMetadataFP8",
+    bs: int,
+    q_len: int,
+    window_size: int,
+    paged_pool_entries_per_block: Dict[int, int],
+) -> None:
+    from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
+    from rtp_llm.models_py.modules.dsv4.fp8.decode.paged_topk_translator import (
+        translate_local_to_global_slots,
+    )
+
+    T = bs * q_len
+    req_id_bs = meta.req_id_per_token[:T] if meta.req_id_per_token is not None else None
+    if (
+        req_id_bs is None
+        or meta.swa_global_slots is None
+        or SWA_KV not in meta.pool_block_tables
+        or meta.swa_abs_idx is None
+    ):
+        return
+
+    swa_eb = paged_pool_entries_per_block.get(SWA_KV, window_size)
+    swa_local = meta.swa_abs_idx[:bs].reshape(T, window_size)
+    meta.swa_global_slots[:T].copy_(
+        translate_local_to_global_slots(
+            req_id_bs,
+            meta.pool_block_tables[SWA_KV][:bs],
+            swa_local,
+            swa_eb,
+        )
+    )
+
+
+def _translate_paged_hca_global(
+    meta: "DSv4DecodeAttnMetadataFP8",
+    bs: int,
+    q_len: int,
+    window_size: int,
+    paged_pool_entries_per_block: Dict[int, int],
+) -> None:
+    from rtp_llm.models_py.modules.dsv4.attn_type import HCA_KV
+    from rtp_llm.models_py.modules.dsv4.fp8.decode.paged_topk_translator import (
+        translate_local_to_global_slots,
+    )
+
+    T = bs * q_len
+    req_id_bs = meta.req_id_per_token[:T] if meta.req_id_per_token is not None else None
+    if (
+        req_id_bs is None
+        or meta.hca_cmp_global_slots is None
+        or HCA_KV not in meta.pool_block_tables
+        or 128 not in meta.topk_total_by_ratio
+    ):
+        return
+
+    hca_eb = paged_pool_entries_per_block.get(HCA_KV, 1)
+    hca_tt = meta.topk_total_by_ratio[128]
+    K_h = hca_tt.shape[-1] - window_size
+    hca_cmp_local = hca_tt[:bs, :, window_size:].reshape(T, K_h).contiguous()
+    meta.hca_cmp_global_slots[:T].copy_(
+        translate_local_to_global_slots(
+            req_id_bs,
+            meta.pool_block_tables[HCA_KV][:bs],
+            hca_cmp_local,
+            hca_eb,
+        )
+    )
+
+
 def update_decode_metadata_in_place_fp8(
     meta: "DSv4DecodeAttnMetadataFP8",
     attention_inputs: Any,
@@ -794,299 +1012,87 @@ def update_decode_metadata_in_place_fp8(
         meta.max_seq_len,
         q_len,
     )
-    bs = int(start_pos.shape[0])
-    position_ids_2d = _build_position_ids_2d(start_pos, q_len, device)
-    position_ids_flat = position_ids_2d.reshape(-1).contiguous()
+    bs = _validate_decode_metadata_update_capacity(meta, start_pos, q_len)
 
-    # snapshot pointers for the realloc-forbidden mode
-    if forbid_realloc:
-        ptr_snap = {
-            "start_pos": meta.start_pos.data_ptr(),
-            "position_ids": meta.position_ids.data_ptr(),
-            "slot_swa": meta.slot_mapping_swa.data_ptr(),
-            "topk_window": meta.topk_window_idxs.data_ptr(),
-            "topk_buffer_compressed": meta.topk_buffer_compressed.data_ptr(),
-        }
-        if meta.position_ids_long is not None:
-            ptr_snap["position_ids_long"] = meta.position_ids_long.data_ptr()
-        if meta.decode_seq_start_per_req is not None:
-            ptr_snap["decode_seq_start_per_req"] = (
-                meta.decode_seq_start_per_req.data_ptr()
-            )
-        for r, t in meta.slot_mapping_compressed.items():
-            ptr_snap[f"slot_compressed[{r}]"] = t.data_ptr()
-        for r, t in meta.compressed_lens.items():
-            ptr_snap[f"compressed_lens[{r}]"] = t.data_ptr()
-        for r, t in meta.compressed_lens_per_token.items():
-            ptr_snap[f"compressed_lens_per_token[{r}]"] = t.data_ptr()
-        for r, t in meta.topk_total_by_ratio.items():
-            ptr_snap[f"topk_total_by_ratio[{r}]"] = t.data_ptr()
-        for at, t in meta.compressor_state_slot_mappings.items():
-            ptr_snap[f"compressor_state_slot_mappings[{at}]"] = t.data_ptr()
-        if meta.swa_global_slots is not None:
-            ptr_snap["swa_global_slots"] = meta.swa_global_slots.data_ptr()
-        if meta.hca_cmp_global_slots is not None:
-            ptr_snap["hca_cmp_global_slots"] = meta.hca_cmp_global_slots.data_ptr()
+    ptr_snap = _metadata_ptr_snapshot(meta) if forbid_realloc else None
 
-    meta.position_ids[: bs * q_len].copy_(position_ids_flat)
-    if meta.position_ids_long is not None:
-        meta.position_ids_long[: bs * q_len].copy_(position_ids_flat.to(torch.long))
-    if meta.decode_seq_start_per_req is not None:
-        meta.decode_seq_start_per_req[:bs].copy_(start_pos)
-    meta.topk_buffer_compressed[:bs].fill_(-1)
-
-    # start_pos
-    meta.start_pos[:bs].copy_(start_pos)
-    # Iter3.2: refresh cache_seqlens = last decoded position + 1 (shared
-    # across all decode-layer calls this step).
-    if meta.cache_seqlens_i32 is not None:
-        meta.cache_seqlens_i32[:bs].copy_(position_ids_2d[:, -1] + 1)
-
-    # SWA slot mapping prefix [:bs * q_len]
-    swa_buffer_stride = window_size
-    abs_pos = position_ids_2d
-    swa_slots = _build_swa_slot_mapping_from_positions(
-        position_ids_2d, window_size, swa_buffer_stride
+    from rtp_llm.models_py.modules.dsv4.fp8.decode._fused_prepare_meta_triton import (
+        FUSED_PREPARE_FULL_V4,
+        FUSED_PREPARE_SWA_ONLY,
+        fused_phase2b_full_v4_pool_slot_mapping,
+        fused_phase2b_swa_pool_slot_mapping,
+        fused_prepare_kind,
+        fused_update_decode_meta_full_v4,
+        fused_update_decode_meta_swa_only,
+        is_full_v4_phase2b_fused_supported,
+        is_swa_phase2b_fused_supported,
     )
-    meta.slot_mapping_swa[: bs * q_len].copy_(swa_slots)
 
-    # Window topk indices [:bs, :, :] — left-aligned.
-    window_idxs = _build_window_topk_idxs_from_positions(position_ids_2d, window_size)
-    meta.topk_window_idxs[:bs].copy_(window_idxs)
+    kind = fused_prepare_kind(meta)
+    has_paged = (
+        paged_block_tables is not None and paged_pool_entries_per_block is not None
+    )
 
-    # Per-ratio compressed slot mappings + lens + topk_total
-    for r, slot_t in meta.slot_mapping_compressed.items():
-        stride = meta.compressed_buffer_t_dim_per_ratio[r]
-        abs_pos_plus_1 = position_ids_2d + 1
-        on_boundary = (abs_pos_plus_1 % r) == 0
-        in_req = abs_pos_plus_1 // r - 1
-        compressed_lens_per_token = (abs_pos_plus_1 // r).to(torch.int32)
-        cmp_req_base = (
-            torch.arange(bs, device=device, dtype=torch.int32).view(bs, 1) * stride
-        )
-        flat = (cmp_req_base + in_req).reshape(-1)
-        mask = on_boundary.reshape(-1)
-        cmp_slots = torch.where(mask, flat, torch.full_like(flat, -1))
-        slot_t[: bs * q_len].copy_(cmp_slots)
+    if kind == FUSED_PREPARE_FULL_V4:
+        fused_update_decode_meta_full_v4(meta, start_pos, meta.max_seq_len)
+        _finish_fused_prepare_common(meta, start_pos, bs, q_len, device)
 
-        # compressed_lens
-        meta.compressed_lens_per_token[r][:bs].copy_(compressed_lens_per_token)
-        meta.compressed_lens[r][:bs].copy_(compressed_lens_per_token[:, -1])
-
-        # topk_total_by_ratio: refill window half, refill HCA dense half
-        total = meta.topk_total_by_ratio[r]
-        total[:bs, :, :window_size].copy_(window_idxs)
-        if r != 4:
-            K_dense = total.shape[-1] - window_size
-            dense_idxs = (
-                torch.arange(
-                    K_dense,
-                    device=device,
-                    dtype=torch.int32,
+        if has_paged:
+            if not is_full_v4_phase2b_fused_supported(
+                meta, paged_block_tables, paged_pool_entries_per_block
+            ):
+                raise RuntimeError(
+                    "full V4 fused prepare entered but phase2b unsupported: "
+                    "paged metadata would be stale. "
+                    f"pool_block_tables keys={set(paged_block_tables.keys())}, "
+                    f"pool_write_slot_mappings keys="
+                    f"{set(meta.pool_write_slot_mappings.keys())}"
                 )
-                .view(1, 1, K_dense)
-                .expand(bs, q_len, K_dense)
+            _copy_paged_block_tables(meta, bs, paged_block_tables)
+            fused_phase2b_full_v4_pool_slot_mapping(
+                meta, start_pos, bs, paged_pool_entries_per_block
             )
-            cmp_lens_per_token = compressed_lens_per_token.view(bs, q_len, 1)
-            valid_h = dense_idxs < cmp_lens_per_token
-            total[:bs, :, window_size:].copy_(
-                torch.where(valid_h, dense_idxs, torch.full_like(dense_idxs, -1))
+            _translate_paged_swa_global(
+                meta, bs, q_len, window_size, paged_pool_entries_per_block
             )
-        else:
-            # CSA: indexer fills the compressed half per-call. Reset to -1.
-            total[:bs, :, window_size:].fill_(-1)
-
-    # Phase 2B-2a: SWA absolute-position window (paged read). Left-aligned,
-    # ``-1`` padded for entries before sequence start.
-    if meta.swa_abs_idx is not None:
-        win_range = torch.arange(window_size, device=device, dtype=torch.int32).view(
-            1,
-            1,
-            window_size,
-        )
-        win_start = (abs_pos.unsqueeze(-1) - window_size + 1).clamp(
-            min=0
-        )  # [bs,q_len,1]
-        candidate = win_start + win_range  # [bs, q_len, win]
-        valid_pos = candidate <= abs_pos.unsqueeze(-1)
-        meta.swa_abs_idx[:bs].copy_(
-            torch.where(valid_pos, candidate, torch.full_like(candidate, -1))
-        )
-
-    # ------------------------------------------------------------------
-    # Phase 2: paged write slot mappings (per attn_type).
-    # SWA-K writes EVERY decode token; CSA-K / HCA-K / INDEXER-K write
-    # ONLY on their respective compression boundaries (sentinel ``-1``
-    # otherwise — the write op honors that via ``mask_negative=True``).
-    # ------------------------------------------------------------------
-    if paged_block_tables is not None and paged_pool_entries_per_block is not None:
-        from rtp_llm.models_py.modules.dsv4.attn_type import (
-            CSA_KV,
-            HCA_KV,
-            INDEXER_KV,
-            SWA_KV,
-        )
-        from rtp_llm.models_py.modules.dsv4.fp8.decode.pool_slot_mapping import (
-            compute_kv_pool_slot_mapping,
-        )
-
-        # Snapshot block_table content into the metadata's stable buffer
-        # (forbid_realloc-friendly: just `.copy_` the prefix). Skip pools
-        # without a metadata buffer (e.g. SWA-only layers don't carry CSA).
-        for at, src_bt in paged_block_tables.items():
-            dst_bt = meta.pool_block_tables.get(at)
-            if dst_bt is None:
-                continue
-            n_rows = min(src_bt.shape[0], dst_bt.shape[0])
-            n_cols = min(src_bt.shape[1], dst_bt.shape[1])
-            # Zero stale rows beyond current bs to avoid carrying old block
-            # ids (defensive — graph reads only [:bs] anyway).
-            dst_bt[bs:].zero_()
-            dst_bt[:n_rows, :n_cols].copy_(src_bt[:n_rows, :n_cols])
-            if n_cols < dst_bt.shape[1]:
-                dst_bt[:n_rows, n_cols:].zero_()
-
-        # SWA: every token writes; abs_pos = start_pos + s.
-        if SWA_KV in meta.pool_block_tables:
-            slot = meta.pool_write_slot_mappings[SWA_KV]
-            E = paged_pool_entries_per_block.get(SWA_KV, window_size)
-            abs_pos_swa = position_ids_flat
-            mapped = compute_kv_pool_slot_mapping(
-                meta.pool_block_tables[SWA_KV][:bs],
-                abs_pos_swa,
-                E,
+            _translate_paged_hca_global(
+                meta, bs, q_len, window_size, paged_pool_entries_per_block
             )
-            slot[: bs * q_len].copy_(mapped)
+            _update_compressor_state_slot_mappings(
+                meta, bs, paged_pool_entries_per_block, paged_block_tables
+            )
 
-        # Compressed pools (CSA / HCA / INDEXER): write only on boundary;
-        # abs_pos here is the COMPRESSED entry index for this token, with
-        # ``-1`` sentinel for non-boundary tokens. Indexer shares the
-        # ratio=4 boundary with CSA.
-        for ratio_key, attn_type_writers in (
-            (4, [CSA_KV, INDEXER_KV]),
-            (128, [HCA_KV]),
-        ):
-            if ratio_key not in meta.slot_mapping_compressed:
-                continue
-            # Per-request compressed entry index for THIS step's tokens,
-            # with ``-1`` sentinel for non-boundary tokens. The legacy
-            # ``meta.slot_mapping_compressed[ratio]`` is in register_buffer
-            # coordinates (req_idx*stride+offset); for paged we need the
-            # plain per-request entry index.
-            abs_pos_plus_1 = position_ids_2d + 1
-            on_boundary = (abs_pos_plus_1 % ratio_key) == 0
-            cmp_idx = abs_pos_plus_1 // ratio_key - 1
-            cmp_idx_with_skip = torch.where(
-                on_boundary,
-                cmp_idx,
-                torch.full_like(cmp_idx, -1),
-            ).reshape(-1)
-            for at in attn_type_writers:
-                if at not in meta.pool_block_tables:
-                    continue
-                E = paged_pool_entries_per_block.get(at, 1)
-                mapped = compute_kv_pool_slot_mapping(
-                    meta.pool_block_tables[at][:bs],
-                    cmp_idx_with_skip,
-                    E,
+    elif kind == FUSED_PREPARE_SWA_ONLY:
+        fused_update_decode_meta_swa_only(meta, start_pos)
+        _finish_fused_prepare_common(meta, start_pos, bs, q_len, device)
+
+        if has_paged:
+            if not is_swa_phase2b_fused_supported(
+                meta, paged_block_tables, paged_pool_entries_per_block
+            ):
+                raise RuntimeError(
+                    "SWA-only fused prepare entered but phase2b unsupported: "
+                    "paged metadata would be stale. "
+                    f"pool_block_tables keys={set(paged_block_tables.keys())}, "
+                    f"pool_write_slot_mappings keys="
+                    f"{set(meta.pool_write_slot_mappings.keys())}"
                 )
-                meta.pool_write_slot_mappings[at][: bs * q_len].copy_(mapped)
-
-        _update_compressor_state_slot_mappings(
-            meta,
-            bs,
-            paged_pool_entries_per_block,
-        )
-
-    # Iter3.3: precompute translate_swa / translate_hca once per step.
-    # Shared across all 43 attention layers. Graph-safe: ``.copy_()`` into
-    # pre-allocated buffers on meta (allocated at max_bs); never reassigns
-    # the attribute, so graph replays read from fixed addresses.
-    # ``req_id_per_token`` is deterministic (``arange(B)``) so it was filled
-    # at allocate time and stays stable.
-    if paged_block_tables is not None and paged_pool_entries_per_block is not None:
-        from rtp_llm.models_py.modules.dsv4.attn_type import HCA_KV, SWA_KV
-        from rtp_llm.models_py.modules.dsv4.fp8.decode.paged_topk_translator import (
-            translate_local_to_global_slots,
-        )
-
-        T = bs * q_len
-        req_id_bs = (
-            meta.req_id_per_token[:T] if meta.req_id_per_token is not None else None
-        )
-
-        if (
-            req_id_bs is not None
-            and meta.swa_global_slots is not None
-            and SWA_KV in meta.pool_block_tables
-            and meta.swa_abs_idx is not None
-        ):
-            swa_eb = paged_pool_entries_per_block.get(SWA_KV, window_size)
-            swa_local = meta.swa_abs_idx[:bs].reshape(T, window_size)
-            swa_global_new = translate_local_to_global_slots(
-                req_id_bs,
-                meta.pool_block_tables[SWA_KV][:bs],
-                swa_local,
-                swa_eb,
+            _copy_paged_block_tables(meta, bs, paged_block_tables)
+            fused_phase2b_swa_pool_slot_mapping(
+                meta, start_pos, bs, paged_pool_entries_per_block
             )
-            meta.swa_global_slots[:T].copy_(swa_global_new)
-
-        # HCA layers all share the dense-idx-masked cmp_local_raw (already
-        # materialised as topk_total[r=128][:, :, win:]); translate it once.
-        if (
-            req_id_bs is not None
-            and meta.hca_cmp_global_slots is not None
-            and HCA_KV in meta.pool_block_tables
-            and 128 in meta.topk_total_by_ratio
-        ):
-            hca_eb = paged_pool_entries_per_block.get(HCA_KV, 1)
-            hca_tt = meta.topk_total_by_ratio[128]
-            K_h = hca_tt.shape[-1] - window_size
-            hca_cmp_local = hca_tt[:bs, :, window_size:].reshape(T, K_h).contiguous()
-            hca_global_new = translate_local_to_global_slots(
-                req_id_bs,
-                meta.pool_block_tables[HCA_KV][:bs],
-                hca_cmp_local,
-                hca_eb,
+            _translate_paged_swa_global(
+                meta, bs, q_len, window_size, paged_pool_entries_per_block
             )
-            meta.hca_cmp_global_slots[:T].copy_(hca_global_new)
 
-    # Update Python-scalar geometry (cheap — these are not captured into the graph)
+    else:
+        raise RuntimeError(f"unexpected fused_prepare_kind: {kind}")
+
     meta.batch_size = bs
     meta.total_tokens = bs * q_len
 
-    if forbid_realloc:
-        # Verify every storage pointer is unchanged.
-        cur = {
-            "start_pos": meta.start_pos.data_ptr(),
-            "position_ids": meta.position_ids.data_ptr(),
-            "slot_swa": meta.slot_mapping_swa.data_ptr(),
-            "topk_window": meta.topk_window_idxs.data_ptr(),
-            "topk_buffer_compressed": meta.topk_buffer_compressed.data_ptr(),
-        }
-        if meta.position_ids_long is not None:
-            cur["position_ids_long"] = meta.position_ids_long.data_ptr()
-        if meta.decode_seq_start_per_req is not None:
-            cur["decode_seq_start_per_req"] = meta.decode_seq_start_per_req.data_ptr()
-        for r, t in meta.slot_mapping_compressed.items():
-            cur[f"slot_compressed[{r}]"] = t.data_ptr()
-        for r, t in meta.compressed_lens.items():
-            cur[f"compressed_lens[{r}]"] = t.data_ptr()
-        for r, t in meta.compressed_lens_per_token.items():
-            cur[f"compressed_lens_per_token[{r}]"] = t.data_ptr()
-        for r, t in meta.topk_total_by_ratio.items():
-            cur[f"topk_total_by_ratio[{r}]"] = t.data_ptr()
-        for at, t in meta.compressor_state_slot_mappings.items():
-            cur[f"compressor_state_slot_mappings[{at}]"] = t.data_ptr()
-        if meta.swa_global_slots is not None:
-            cur["swa_global_slots"] = meta.swa_global_slots.data_ptr()
-        if meta.hca_cmp_global_slots is not None:
-            cur["hca_cmp_global_slots"] = meta.hca_cmp_global_slots.data_ptr()
-        for k, p_before in ptr_snap.items():
-            assert cur[k] == p_before, (
-                f"update_decode_metadata_in_place_fp8(forbid_realloc=True) "
-                f"reallocated buffer '{k}': before={hex(p_before)} after={hex(cur[k])}"
-            )
+    if ptr_snap is not None:
+        _assert_metadata_ptrs_unchanged(meta, ptr_snap)
 
 
 def build_decode_metadata_fp8(
@@ -1126,6 +1132,8 @@ def build_decode_metadata_fp8(
         start_pos = start_pos.to(device)
     if start_pos.dtype != torch.int32:
         start_pos = start_pos.to(torch.int32)
+    max_start = max(0, int(max_seq_len) - int(q_len))
+    start_pos = torch.clamp(start_pos, min=0, max=max_start)
 
     B = start_pos.shape[0]
     T_total = B * q_len

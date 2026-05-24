@@ -32,88 +32,78 @@ from typing import Optional
 
 import torch
 
-try:
-    import triton
-    import triton.language as tl
-
-    _TRITON_AVAILABLE = True
-except Exception:  # pragma: no cover
-    triton = None
-    tl = None
-    _TRITON_AVAILABLE = False
+import triton
+import triton.language as tl
 
 
-if _TRITON_AVAILABLE:
+@triton.jit
+def _compressor_slot_mapping_kernel(
+    # inputs
+    positions_ptr,  # [N] i64
+    b_idx_ptr,  # [N] i64
+    state_bt_ptr,  # [B, STATE_MAX_BLOCKS] i32
+    kv_bt_ptr,  # [B, KV_MAX_BLOCKS] i32 (ignored when HAS_KV=False)
+    # outputs
+    state_slots_ptr,  # [N] i64
+    kv_slots_ptr,  # [N] i64 (written with -1 when HAS_KV=False)
+    token_to_req_ptr,  # [N] i32
+    # runtime
+    N,
+    POOL_ROWS,  # <= 0 means skip overflow check
+    # constexpr
+    STATE_EB: tl.constexpr,
+    STATE_MAX_BLOCKS: tl.constexpr,
+    HAS_KV: tl.constexpr,
+    KV_EB: tl.constexpr,
+    KV_MAX_BLOCKS: tl.constexpr,
+    RATIO: tl.constexpr,
+    TOKENS_PER_BLOCK: tl.constexpr,  # = KV_EB * RATIO (noop when HAS_KV=False)
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offs < N
 
-    @triton.jit
-    def _compressor_slot_mapping_kernel(
-        # inputs
-        positions_ptr,  # [N] i64
-        b_idx_ptr,  # [N] i64
-        state_bt_ptr,  # [B, STATE_MAX_BLOCKS] i32
-        kv_bt_ptr,  # [B, KV_MAX_BLOCKS] i32 (ignored when HAS_KV=False)
-        # outputs
-        state_slots_ptr,  # [N] i64
-        kv_slots_ptr,  # [N] i64 (written with -1 when HAS_KV=False)
-        token_to_req_ptr,  # [N] i32
-        # runtime
-        N,
-        POOL_ROWS,  # <= 0 means skip overflow check
-        # constexpr
-        STATE_EB: tl.constexpr,
-        STATE_MAX_BLOCKS: tl.constexpr,
-        HAS_KV: tl.constexpr,
-        KV_EB: tl.constexpr,
-        KV_MAX_BLOCKS: tl.constexpr,
-        RATIO: tl.constexpr,
-        TOKENS_PER_BLOCK: tl.constexpr,  # = KV_EB * RATIO (noop when HAS_KV=False)
-        BLOCK_SIZE: tl.constexpr,
-    ):
-        pid = tl.program_id(0)
-        offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-        mask = offs < N
+    pos = tl.load(positions_ptr + offs, mask=mask, other=0).to(tl.int64)
+    b = tl.load(b_idx_ptr + offs, mask=mask, other=0).to(tl.int64)
 
-        pos = tl.load(positions_ptr + offs, mask=mask, other=0).to(tl.int64)
-        b = tl.load(b_idx_ptr + offs, mask=mask, other=0).to(tl.int64)
+    # ---------- State slot ----------
+    state_bis_raw = pos // STATE_EB
+    state_in_capacity = state_bis_raw < STATE_MAX_BLOCKS
+    state_bis = tl.maximum(tl.minimum(state_bis_raw, STATE_MAX_BLOCKS - 1), 0)
+    in_blk_s = pos % STATE_EB
+    state_bid = tl.load(
+        state_bt_ptr + b * STATE_MAX_BLOCKS + state_bis, mask=mask, other=0
+    ).to(tl.int64)
+    state_valid = state_in_capacity & (state_bid > 0)
+    state_slot = tl.where(state_valid, state_bid * STATE_EB + in_blk_s, -1)
+    tl.store(state_slots_ptr + offs, state_slot, mask=mask)
 
-        # ---------- State slot ----------
-        state_bis_raw = pos // STATE_EB
-        state_in_capacity = state_bis_raw < STATE_MAX_BLOCKS
-        state_bis = tl.maximum(tl.minimum(state_bis_raw, STATE_MAX_BLOCKS - 1), 0)
-        in_blk_s = pos % STATE_EB
-        state_bid = tl.load(
-            state_bt_ptr + b * STATE_MAX_BLOCKS + state_bis, mask=mask, other=0
+    # ---------- KV slot ----------
+    if HAS_KV:
+        boundary = ((pos + 1) % RATIO) == 0
+        kv_bis_raw = pos // TOKENS_PER_BLOCK
+        in_blk_k = (pos % TOKENS_PER_BLOCK) // RATIO
+        in_capacity = kv_bis_raw < KV_MAX_BLOCKS
+        safe_kv_bis = tl.maximum(tl.minimum(kv_bis_raw, KV_MAX_BLOCKS - 1), 0)
+        kv_bid = tl.load(
+            kv_bt_ptr + b * KV_MAX_BLOCKS + safe_kv_bis, mask=mask, other=0
         ).to(tl.int64)
-        state_valid = state_in_capacity & (state_bid > 0)
-        state_slot = tl.where(state_valid, state_bid * STATE_EB + in_blk_s, -1)
-        tl.store(state_slots_ptr + offs, state_slot, mask=mask)
+        kv_slot = kv_bid * KV_EB + in_blk_k
+        kv_valid = boundary & in_capacity & (kv_bid > 0)
+        if POOL_ROWS > 0:
+            kv_valid = kv_valid & (kv_slot < POOL_ROWS)
+        kv_slot = tl.where(kv_valid, kv_slot, -1)
+        tl.store(kv_slots_ptr + offs, kv_slot, mask=mask)
+    else:
+        tl.store(
+            kv_slots_ptr + offs,
+            tl.full((BLOCK_SIZE,), -1, tl.int64),
+            mask=mask,
+        )
 
-        # ---------- KV slot ----------
-        if HAS_KV:
-            boundary = ((pos + 1) % RATIO) == 0
-            kv_bis_raw = pos // TOKENS_PER_BLOCK
-            in_blk_k = (pos % TOKENS_PER_BLOCK) // RATIO
-            in_capacity = kv_bis_raw < KV_MAX_BLOCKS
-            # Clamp for safe gather; correctness relies on the `valid` mask.
-            safe_kv_bis = tl.maximum(tl.minimum(kv_bis_raw, KV_MAX_BLOCKS - 1), 0)
-            kv_bid = tl.load(
-                kv_bt_ptr + b * KV_MAX_BLOCKS + safe_kv_bis, mask=mask, other=0
-            ).to(tl.int64)
-            kv_slot = kv_bid * KV_EB + in_blk_k
-            kv_valid = boundary & in_capacity & (kv_bid > 0)
-            if POOL_ROWS > 0:
-                kv_valid = kv_valid & (kv_slot < POOL_ROWS)
-            kv_slot = tl.where(kv_valid, kv_slot, -1)
-            tl.store(kv_slots_ptr + offs, kv_slot, mask=mask)
-        else:
-            tl.store(
-                kv_slots_ptr + offs,
-                tl.full((BLOCK_SIZE,), -1, tl.int64),
-                mask=mask,
-            )
-
-        # ---------- token_to_req ----------
-        tl.store(token_to_req_ptr + offs, b.to(tl.int32), mask=mask)
+    # ---------- token_to_req ----------
+    tl.store(token_to_req_ptr + offs, b.to(tl.int32), mask=mask)
 
 
 def fused_compressor_slot_mapping(
@@ -136,13 +126,48 @@ def fused_compressor_slot_mapping(
     Handles the ``kv_bt is None`` / ``kv_eb <= 0`` sentinel case (SWA-only
     layers) by writing ``kv_slots`` as all ``-1``.
     """
-    if not _TRITON_AVAILABLE:
-        raise RuntimeError("triton unavailable")
-
-    assert positions.dim() == 1 and b_idx.dim() == 1
-    assert positions.shape == b_idx.shape
-    assert positions.dtype == torch.int64
-    assert b_idx.dtype == torch.int64
+    if positions.dim() != 1 or b_idx.dim() != 1:
+        raise RuntimeError(
+            "fused_compressor_slot_mapping expects 1D positions and b_idx, "
+            f"got {tuple(positions.shape)} and {tuple(b_idx.shape)}"
+        )
+    if positions.shape != b_idx.shape:
+        raise RuntimeError(
+            "fused_compressor_slot_mapping expects positions and b_idx to have "
+            f"the same shape, got {tuple(positions.shape)} and {tuple(b_idx.shape)}"
+        )
+    if positions.dtype != torch.int64 or b_idx.dtype != torch.int64:
+        raise RuntimeError(
+            "fused_compressor_slot_mapping expects int64 positions and b_idx, "
+            f"got {positions.dtype} and {b_idx.dtype}"
+        )
+    if not positions.is_cuda or not b_idx.is_cuda:
+        raise RuntimeError("fused_compressor_slot_mapping requires CUDA tensors")
+    if positions.device != b_idx.device:
+        raise RuntimeError(
+            "fused_compressor_slot_mapping expects positions and b_idx on the "
+            f"same device, got {positions.device} and {b_idx.device}"
+        )
+    if not positions.is_contiguous() or not b_idx.is_contiguous():
+        raise RuntimeError(
+            "fused_compressor_slot_mapping requires contiguous positions and b_idx"
+        )
+    if state_bt.dim() != 2 or state_bt.dtype != torch.int32:
+        raise RuntimeError(
+            "fused_compressor_slot_mapping expects state_bt as 2D int32 tensor, "
+            f"got shape={tuple(state_bt.shape)}, dtype={state_bt.dtype}"
+        )
+    if state_bt.device != positions.device or not state_bt.is_cuda:
+        raise RuntimeError(
+            "fused_compressor_slot_mapping expects state_bt on the same CUDA "
+            f"device as positions, got {state_bt.device} and {positions.device}"
+        )
+    if not state_bt.is_contiguous():
+        raise RuntimeError("fused_compressor_slot_mapping requires contiguous state_bt")
+    if state_eb <= 0:
+        raise RuntimeError(
+            f"fused_compressor_slot_mapping expects state_eb > 0, got {state_eb}"
+        )
 
     N = positions.shape[0]
     device = positions.device
@@ -155,10 +180,36 @@ def fused_compressor_slot_mapping(
         return state_slots, kv_slots, token_to_req
 
     state_max_blocks = int(state_bt.shape[1])
+    if state_max_blocks <= 0:
+        raise RuntimeError(
+            "fused_compressor_slot_mapping expects state_bt to contain at least "
+            f"one block column, got shape={tuple(state_bt.shape)}"
+        )
 
     has_kv = kv_bt is not None and kv_eb > 0
     if has_kv:
+        if ratio <= 0:
+            raise RuntimeError(
+                f"fused_compressor_slot_mapping expects ratio > 0, got {ratio}"
+            )
+        if kv_bt.dim() != 2 or kv_bt.dtype != torch.int32:
+            raise RuntimeError(
+                "fused_compressor_slot_mapping expects kv_bt as 2D int32 tensor, "
+                f"got shape={tuple(kv_bt.shape)}, dtype={kv_bt.dtype}"
+            )
+        if kv_bt.device != positions.device or not kv_bt.is_cuda:
+            raise RuntimeError(
+                "fused_compressor_slot_mapping expects kv_bt on the same CUDA "
+                f"device as positions, got {kv_bt.device} and {positions.device}"
+            )
+        if not kv_bt.is_contiguous():
+            raise RuntimeError("fused_compressor_slot_mapping requires contiguous kv_bt")
         kv_max_blocks = int(kv_bt.shape[1])
+        if kv_max_blocks <= 0:
+            raise RuntimeError(
+                "fused_compressor_slot_mapping expects kv_bt to contain at least "
+                f"one block column, got shape={tuple(kv_bt.shape)}"
+            )
         tokens_per_block = kv_eb * ratio
         kv_bt_arg = kv_bt
     else:

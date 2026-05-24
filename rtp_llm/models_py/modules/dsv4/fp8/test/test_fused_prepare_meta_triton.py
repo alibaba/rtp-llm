@@ -1,11 +1,9 @@
-"""UT: numerical equivalence of fused Triton prepare vs Python path.
+"""UT: numerical equivalence of fused Triton prepare vs local reference.
 
 Compares every persistent buffer written by
-``fused_update_decode_meta_pure`` against the Python reference inside
-``update_decode_metadata_in_place_fp8``. Both paths use the same
-pre-allocated metadata dataclass; we run them on two independently
-allocated copies to avoid cross-contamination, then assert elementwise
-``torch.equal`` over the ``[:bs]`` / ``[:bs*q_len]`` prefixes.
+``update_decode_metadata_in_place_fp8`` against a local Python reference.
+Production update intentionally has no eager fallback; reference math lives
+in this UT.
 
 Dev-box note: ``rtp_llm/models_py/modules/__init__.py`` pulls in the
 whole framework (compiled ops + base layers). This UT only needs the
@@ -20,7 +18,6 @@ Run (bypassing package init):
 from __future__ import annotations
 
 import importlib.util
-import os
 import sys
 import types
 import unittest
@@ -75,34 +72,246 @@ update_decode_metadata_in_place_fp8 = _meta_mod.update_decode_metadata_in_place_
 
 # V4-Flash config: ratios {4, 128}, window=128, index_topk=512.
 _V4_COMPRESS_RATIOS = [0, 0] + [4, 128] * 20 + [4, 0]
+_SWA_ONLY_COMPRESS_RATIOS = [0]
 _WINDOW = 128
 _HEAD_DIM = 512
 _INDEX_TOPK = 512
 
+SWA_KV = _attn_type_mod.SWA_KV
+CSA_KV = _attn_type_mod.CSA_KV
+HCA_KV = _attn_type_mod.HCA_KV
+INDEXER_KV = _attn_type_mod.INDEXER_KV
 
-def _alloc(max_bs: int, q_len: int, max_seq_len: int, device: torch.device):
+
+def _alloc(
+    max_bs: int,
+    q_len: int,
+    max_seq_len: int,
+    device: torch.device,
+    compress_ratios=None,
+):
     return allocate_decode_metadata_fp8(
         max_batch_size=max_bs,
         q_len=q_len,
         window_size=_WINDOW,
         head_dim=_HEAD_DIM,
         max_seq_len=max_seq_len,
-        compress_ratios=_V4_COMPRESS_RATIOS,
+        compress_ratios=compress_ratios or _V4_COMPRESS_RATIOS,
         index_topk=_INDEX_TOPK,
         device=device,
     )
 
 
-def _run_update(meta, start_pos, fused: bool):
-    prev = os.environ.get("DSV4_FUSED_PREPARE")
-    os.environ["DSV4_FUSED_PREPARE"] = "1" if fused else "0"
-    try:
-        update_decode_metadata_in_place_fp8(meta, start_pos)
-    finally:
-        if prev is None:
-            os.environ.pop("DSV4_FUSED_PREPARE", None)
+def _ref_position_ids_2d(start_pos, q_len):
+    B = int(start_pos.shape[0])
+    return start_pos.view(B, 1) + torch.arange(
+        q_len, device=start_pos.device, dtype=torch.int32
+    ).view(1, q_len)
+
+
+def _ref_swa_slot_mapping(position_ids_2d, window_size):
+    B = int(position_ids_2d.shape[0])
+    req_base = (
+        torch.arange(B, device=position_ids_2d.device, dtype=torch.int32).view(B, 1)
+        * window_size
+    )
+    return (req_base + (position_ids_2d % window_size)).reshape(-1)
+
+
+def _ref_window_topk_idxs(position_ids_2d, window_size):
+    k_range = torch.arange(
+        window_size, device=position_ids_2d.device, dtype=torch.int32
+    ).view(1, 1, window_size)
+    abs_pos_b = position_ids_2d.unsqueeze(-1)
+    sp = (position_ids_2d % window_size).unsqueeze(-1)
+    ring_full_idx = (sp + 1 + k_range) % window_size
+    partial_idx = torch.where(
+        k_range <= abs_pos_b, k_range, torch.full_like(k_range, -1)
+    )
+    return torch.where(abs_pos_b >= (window_size - 1), ring_full_idx, partial_idx)
+
+
+def _ref_state_pool_slot_mapping(block_table, positions, req_idx, entries_per_block):
+    pos_i64 = positions.to(torch.long)
+    req_i64 = req_idx.to(torch.long)
+    bt_long = block_table.to(torch.long)
+    max_blocks = int(bt_long.shape[1])
+    block_in_seq = (pos_i64 // entries_per_block) % max_blocks
+    in_block = pos_i64 % entries_per_block
+    block_id = bt_long[req_i64, block_in_seq]
+    slot = block_id * entries_per_block + in_block
+    return torch.where(block_id > 0, slot, torch.full_like(slot, -1))
+
+
+def _reference_update_decode_metadata_in_place(
+    meta,
+    start_pos,
+    paged_block_tables=None,
+    paged_pool_entries_per_block=None,
+):
+    q_len = meta.q_len_per_req
+    window_size = meta.window_size
+    bs = int(start_pos.shape[0])
+    T = bs * q_len
+
+    if start_pos.device != meta.start_pos.device:
+        start_pos = start_pos.to(meta.start_pos.device)
+    if start_pos.dtype != torch.int32:
+        start_pos = start_pos.to(torch.int32)
+    start_pos = torch.clamp(
+        start_pos, min=0, max=max(0, int(meta.max_seq_len) - int(q_len))
+    )
+
+    position_ids_2d = _ref_position_ids_2d(start_pos, q_len)
+    position_ids_flat = position_ids_2d.reshape(-1).contiguous()
+
+    meta.start_pos[:bs].copy_(start_pos)
+    meta.position_ids[:T].copy_(position_ids_flat)
+    if meta.position_ids_long is not None:
+        meta.position_ids_long[:T].copy_(position_ids_flat.to(torch.long))
+    if meta.decode_seq_start_per_req is not None:
+        meta.decode_seq_start_per_req[:bs].copy_(start_pos)
+    if meta.cache_seqlens_i32 is not None:
+        meta.cache_seqlens_i32[:bs].copy_(position_ids_2d[:, -1] + 1)
+    meta.topk_buffer_compressed[:bs].fill_(-1)
+
+    meta.slot_mapping_swa[:T].copy_(
+        _ref_swa_slot_mapping(position_ids_2d, window_size)
+    )
+    window_idxs = _ref_window_topk_idxs(position_ids_2d, window_size)
+    meta.topk_window_idxs[:bs].copy_(window_idxs)
+
+    for r, slot_t in meta.slot_mapping_compressed.items():
+        stride = meta.compressed_buffer_t_dim_per_ratio[r]
+        abs_pos_plus_1 = position_ids_2d + 1
+        on_boundary = (abs_pos_plus_1 % r) == 0
+        in_req = abs_pos_plus_1 // r - 1
+        cmp_lens_per_token = (abs_pos_plus_1 // r).to(torch.int32)
+        cmp_req_base = (
+            torch.arange(bs, device=start_pos.device, dtype=torch.int32).view(bs, 1)
+            * stride
+        )
+        flat = (cmp_req_base + in_req).reshape(-1)
+        slot_t[:T].copy_(
+            torch.where(on_boundary.reshape(-1), flat, torch.full_like(flat, -1))
+        )
+        meta.compressed_lens_per_token[r][:bs].copy_(cmp_lens_per_token)
+        meta.compressed_lens[r][:bs].copy_(cmp_lens_per_token[:, -1])
+
+        total = meta.topk_total_by_ratio[r]
+        total[:bs, :, :window_size].copy_(window_idxs)
+        if r == 4:
+            total[:bs, :, window_size:].fill_(-1)
         else:
-            os.environ["DSV4_FUSED_PREPARE"] = prev
+            K_dense = total.shape[-1] - window_size
+            dense_idxs = (
+                torch.arange(K_dense, device=start_pos.device, dtype=torch.int32)
+                .view(1, 1, K_dense)
+                .expand(bs, q_len, K_dense)
+            )
+            valid = dense_idxs < cmp_lens_per_token.view(bs, q_len, 1)
+            total[:bs, :, window_size:].copy_(
+                torch.where(valid, dense_idxs, torch.full_like(dense_idxs, -1))
+            )
+
+    if meta.swa_abs_idx is not None:
+        win_range = torch.arange(
+            window_size, device=start_pos.device, dtype=torch.int32
+        ).view(1, 1, window_size)
+        win_start = (position_ids_2d.unsqueeze(-1) - window_size + 1).clamp(min=0)
+        candidate = win_start + win_range
+        valid_pos = candidate <= position_ids_2d.unsqueeze(-1)
+        meta.swa_abs_idx[:bs].copy_(
+            torch.where(valid_pos, candidate, torch.full_like(candidate, -1))
+        )
+
+    if paged_block_tables is not None and paged_pool_entries_per_block is not None:
+        for at, src_bt in paged_block_tables.items():
+            dst_bt = meta.pool_block_tables.get(at)
+            if dst_bt is None:
+                continue
+            n_rows = min(src_bt.shape[0], dst_bt.shape[0])
+            n_cols = min(src_bt.shape[1], dst_bt.shape[1])
+            dst_bt[bs:].zero_()
+            dst_bt[:n_rows, :n_cols].copy_(src_bt[:n_rows, :n_cols])
+            if n_cols < dst_bt.shape[1]:
+                dst_bt[:n_rows, n_cols:].zero_()
+
+        if SWA_KV in meta.pool_block_tables:
+            E = paged_pool_entries_per_block.get(SWA_KV, window_size)
+            mapped = _pool_mod.compute_kv_pool_slot_mapping(
+                meta.pool_block_tables[SWA_KV][:bs],
+                position_ids_flat,
+                E,
+            )
+            meta.pool_write_slot_mappings[SWA_KV][:T].copy_(mapped)
+
+        for ratio_key, attn_type_writers in (
+            (4, [CSA_KV, INDEXER_KV]),
+            (128, [HCA_KV]),
+        ):
+            if ratio_key not in meta.slot_mapping_compressed:
+                continue
+            abs_pos_plus_1 = position_ids_2d + 1
+            on_boundary = (abs_pos_plus_1 % ratio_key) == 0
+            cmp_idx = abs_pos_plus_1 // ratio_key - 1
+            cmp_idx_with_skip = torch.where(
+                on_boundary, cmp_idx, torch.full_like(cmp_idx, -1)
+            ).reshape(-1)
+            for at in attn_type_writers:
+                if at not in meta.pool_block_tables:
+                    continue
+                E = paged_pool_entries_per_block.get(at, 1)
+                mapped = _pool_mod.compute_kv_pool_slot_mapping(
+                    meta.pool_block_tables[at][:bs],
+                    cmp_idx_with_skip,
+                    E,
+                )
+                meta.pool_write_slot_mappings[at][:T].copy_(mapped)
+
+        if meta.req_id_per_token is not None and meta.swa_global_slots is not None:
+            req_id_bs = meta.req_id_per_token[:T]
+            if SWA_KV in meta.pool_block_tables and meta.swa_abs_idx is not None:
+                swa_eb = paged_pool_entries_per_block.get(SWA_KV, window_size)
+                swa_local = meta.swa_abs_idx[:bs].reshape(T, window_size)
+                meta.swa_global_slots[:T].copy_(
+                    _translator_mod.translate_local_to_global_slots(
+                        req_id_bs, meta.pool_block_tables[SWA_KV][:bs], swa_local, swa_eb
+                    )
+                )
+            if HCA_KV in meta.pool_block_tables and 128 in meta.topk_total_by_ratio:
+                hca_eb = paged_pool_entries_per_block.get(HCA_KV, 1)
+                hca_tt = meta.topk_total_by_ratio[128]
+                K_h = hca_tt.shape[-1] - window_size
+                hca_local = hca_tt[:bs, :, window_size:].reshape(T, K_h).contiguous()
+                meta.hca_cmp_global_slots[:T].copy_(
+                    _translator_mod.translate_local_to_global_slots(
+                        req_id_bs, meta.pool_block_tables[HCA_KV][:bs], hca_local, hca_eb
+                    )
+                )
+
+        if meta.compressor_state_slot_mappings:
+            positions = meta.position_ids_long[:T]
+            req_idx = meta.req_id_per_token_long[:T]
+            for at, out in meta.compressor_state_slot_mappings.items():
+                if at not in meta.pool_block_tables:
+                    continue
+                E = paged_pool_entries_per_block.get(at, 1)
+                out[:T].copy_(
+                    _ref_state_pool_slot_mapping(
+                        meta.pool_block_tables[at][:bs], positions, req_idx, E
+                    )
+                )
+
+    meta.batch_size = bs
+    meta.total_tokens = T
+
+
+def _run_update(meta, start_pos, fused: bool):
+    if fused:
+        update_decode_metadata_in_place_fp8(meta, start_pos)
+    else:
+        _reference_update_decode_metadata_in_place(meta, start_pos)
 
 
 def _assert_equal(tc, name, a, b):
@@ -134,11 +343,29 @@ def _compare(tc, meta_py, meta_fu, bs: int, q_len: int):
     )
     _assert_equal(
         tc,
+        "position_ids",
+        meta_py.position_ids[:T],
+        meta_fu.position_ids[:T],
+    )
+    _assert_equal(
+        tc,
+        "position_ids_long",
+        meta_py.position_ids_long[:T],
+        meta_fu.position_ids_long[:T],
+    )
+    _assert_equal(
+        tc,
+        "decode_seq_start_per_req",
+        meta_py.decode_seq_start_per_req[:bs],
+        meta_fu.decode_seq_start_per_req[:bs],
+    )
+    _assert_equal(
+        tc,
         "slot_mapping_swa",
         meta_py.slot_mapping_swa[:T],
         meta_fu.slot_mapping_swa[:T],
     )
-    for r in (4, 128):
+    for r in sorted(meta_py.slot_mapping_compressed):
         _assert_equal(
             tc,
             f"slot_mapping_compressed[{r}]",
@@ -150,6 +377,12 @@ def _compare(tc, meta_py, meta_fu, bs: int, q_len: int):
             f"compressed_lens[{r}]",
             meta_py.compressed_lens[r][:bs],
             meta_fu.compressed_lens[r][:bs],
+        )
+        _assert_equal(
+            tc,
+            f"compressed_lens_per_token[{r}]",
+            meta_py.compressed_lens_per_token[r][:bs],
+            meta_fu.compressed_lens_per_token[r][:bs],
         )
         _assert_equal(
             tc,
@@ -182,9 +415,16 @@ class FusedPrepareMetaEquivalenceTest(unittest.TestCase):
     def setUp(self):
         self.device = torch.device("cuda:0")
 
-    def _run_case(self, bs: int, q_len: int, max_seq_len: int, start_pos_values):
-        meta_py = _alloc(bs, q_len, max_seq_len, self.device)
-        meta_fu = _alloc(bs, q_len, max_seq_len, self.device)
+    def _run_case(
+        self,
+        bs: int,
+        q_len: int,
+        max_seq_len: int,
+        start_pos_values,
+        compress_ratios=None,
+    ):
+        meta_py = _alloc(bs, q_len, max_seq_len, self.device, compress_ratios)
+        meta_fu = _alloc(bs, q_len, max_seq_len, self.device, compress_ratios)
 
         start_pos = torch.tensor(
             start_pos_values, dtype=torch.int32, device=self.device
@@ -195,6 +435,27 @@ class FusedPrepareMetaEquivalenceTest(unittest.TestCase):
         _run_update(meta_fu, start_pos, fused=True)
 
         _compare(self, meta_py, meta_fu, bs, q_len)
+
+    def test_prepare_kind_full_v4(self):
+        meta = _alloc(1, 1, 4096, self.device)
+        self.assertEqual(
+            _fused_mod.fused_prepare_kind(meta),
+            _fused_mod.FUSED_PREPARE_FULL_V4,
+        )
+
+    def test_prepare_kind_swa_only(self):
+        meta = _alloc(1, 1, 4096, self.device, _SWA_ONLY_COMPRESS_RATIOS)
+        self.assertEqual(
+            _fused_mod.fused_prepare_kind(meta),
+            _fused_mod.FUSED_PREPARE_SWA_ONLY,
+        )
+
+    def test_prepare_kind_rejects_third_shape(self):
+        meta = _alloc(1, 1, 4096, self.device, [4])
+        with self.assertRaisesRegex(RuntimeError, "SWA-only or ratios \\{4, 128\\}"):
+            update_decode_metadata_in_place_fp8(
+                meta, torch.tensor([0], dtype=torch.int32, device=self.device)
+            )
 
     def test_early_decode_all_zero(self):
         self._run_case(bs=4, q_len=1, max_seq_len=4096, start_pos_values=[0, 0, 0, 0])
@@ -223,9 +484,48 @@ class FusedPrepareMetaEquivalenceTest(unittest.TestCase):
         vals[5] = max_seq_len - 2
         self._run_case(bs=bs, q_len=1, max_seq_len=max_seq_len, start_pos_values=vals)
 
-    def test_qlen_gt_1(self):
+    def test_intermediate_batch_sizes(self):
+        max_seq_len = 8192
+        for bs in (2, 16, 32, 64):
+            vals = ((torch.arange(bs, dtype=torch.int32) * 37) % (max_seq_len - 1)).tolist()
+            vals[0] = 0
+            vals[min(1, bs - 1)] = 127
+            vals[min(2, bs - 1)] = 255
+            vals[-1] = max_seq_len - 2
+            with self.subTest(bs=bs):
+                self._run_case(
+                    bs=bs,
+                    q_len=1,
+                    max_seq_len=max_seq_len,
+                    start_pos_values=vals,
+                )
+
+    def test_qlen_2(self):
         self._run_case(
             bs=4, q_len=2, max_seq_len=4096, start_pos_values=[0, 127, 511, 2048]
+        )
+
+    def test_qlen_4(self):
+        self._run_case(
+            bs=4, q_len=4, max_seq_len=4096, start_pos_values=[0, 126, 511, 2048]
+        )
+
+    def test_swa_only_qlen_1(self):
+        self._run_case(
+            bs=4,
+            q_len=1,
+            max_seq_len=4096,
+            start_pos_values=[0, 1, 127, 2048],
+            compress_ratios=_SWA_ONLY_COMPRESS_RATIOS,
+        )
+
+    def test_swa_only_qlen_4_cross_window(self):
+        self._run_case(
+            bs=4,
+            q_len=4,
+            max_seq_len=4096,
+            start_pos_values=[0, 126, 511, 2048],
+            compress_ratios=_SWA_ONLY_COMPRESS_RATIOS,
         )
 
 
@@ -252,36 +552,38 @@ _HCA_E = 2
 
 
 def _alloc_with_paged_pools(
-    max_bs: int, q_len: int, max_seq_len: int, device: torch.device
+    max_bs: int,
+    q_len: int,
+    max_seq_len: int,
+    device: torch.device,
+    compress_ratios=None,
 ):
-    from rtp_llm.models_py.modules.dsv4.attn_type import (
-        CSA_KV,
-        HCA_KV,
-        INDEXER_KV,
-        SWA_KV,
-    )
-
     # max_blocks_per_req per pool — pick with headroom so clamp isn't
     # excercised on valid positions in the tests below.
-    paged_pool_specs = {
-        SWA_KV: (_SWA_E, max(1, (_WINDOW + _SWA_E - 1) // _SWA_E)),
-        CSA_KV: (_CSA_E, max(1, (max_seq_len // 4 + _CSA_E - 1) // _CSA_E)),
-        INDEXER_KV: (
-            _IDX_E,
-            max(1, (max_seq_len // 4 + _IDX_E - 1) // _IDX_E),
-        ),
-        HCA_KV: (
-            _HCA_E,
-            max(1, (max_seq_len // 128 + _HCA_E - 1) // _HCA_E),
-        ),
-    }
+    ratios = compress_ratios or _V4_COMPRESS_RATIOS
+    positive_ratios = {r for r in ratios if r > 1}
+    paged_pool_specs = {SWA_KV: (_SWA_E, max(1, (_WINDOW + _SWA_E - 1) // _SWA_E))}
+    if positive_ratios == {4, 128}:
+        paged_pool_specs.update(
+            {
+                CSA_KV: (_CSA_E, max(1, (max_seq_len // 4 + _CSA_E - 1) // _CSA_E)),
+                INDEXER_KV: (
+                    _IDX_E,
+                    max(1, (max_seq_len // 4 + _IDX_E - 1) // _IDX_E),
+                ),
+                HCA_KV: (
+                    _HCA_E,
+                    max(1, (max_seq_len // 128 + _HCA_E - 1) // _HCA_E),
+                ),
+            }
+        )
     return allocate_decode_metadata_fp8(
         max_batch_size=max_bs,
         q_len=q_len,
         window_size=_WINDOW,
         head_dim=_HEAD_DIM,
         max_seq_len=max_seq_len,
-        compress_ratios=_V4_COMPRESS_RATIOS,
+        compress_ratios=ratios,
         index_topk=_INDEX_TOPK,
         device=device,
         paged_pool_specs=paged_pool_specs,
@@ -292,29 +594,31 @@ def _seed_block_tables(meta, seed: int = 0):
     """Fill meta.pool_block_tables with deterministic non-zero block ids.
     Returns (paged_block_tables_arg, paged_pool_entries_per_block_arg).
     """
-    from rtp_llm.models_py.modules.dsv4.attn_type import (
-        CSA_KV,
-        HCA_KV,
-        INDEXER_KV,
-        SWA_KV,
-    )
-
     gen = torch.Generator(device=meta.pool_block_tables[SWA_KV].device).manual_seed(
         seed
     )
+    base_by_attn_type = {
+        SWA_KV: 1000,
+        CSA_KV: 2000,
+        INDEXER_KV: 3000,
+        HCA_KV: 4000,
+    }
+    entries_by_attn_type = {
+        SWA_KV: _SWA_E,
+        CSA_KV: _CSA_E,
+        INDEXER_KV: _IDX_E,
+        HCA_KV: _HCA_E,
+    }
     for at, bt in meta.pool_block_tables.items():
         # Distinct ranges per pool so cross-pool aliasing bugs surface.
-        base = {SWA_KV: 1000, CSA_KV: 2000, INDEXER_KV: 3000, HCA_KV: 4000}[at]
+        base = base_by_attn_type[at]
         rand = torch.randint(
             0, 10000, bt.shape, generator=gen, dtype=torch.int32, device=bt.device
         )
         bt.copy_(rand + base)
 
     paged_pool_entries_per_block = {
-        SWA_KV: _SWA_E,
-        CSA_KV: _CSA_E,
-        INDEXER_KV: _IDX_E,
-        HCA_KV: _HCA_E,
+        at: entries_by_attn_type[at] for at in meta.pool_block_tables
     }
     # paged_block_tables arg is the same tensor reference — caller
     # would pass the framework's live block table; for the test the
@@ -324,20 +628,20 @@ def _seed_block_tables(meta, seed: int = 0):
 
 
 def _run_update_paged(meta, start_pos, paged_bt, paged_e, fused: bool):
-    prev = os.environ.get("DSV4_FUSED_PREPARE")
-    os.environ["DSV4_FUSED_PREPARE"] = "1" if fused else "0"
-    try:
+    if fused:
         update_decode_metadata_in_place_fp8(
             meta,
             start_pos,
             paged_block_tables=paged_bt,
             paged_pool_entries_per_block=paged_e,
         )
-    finally:
-        if prev is None:
-            os.environ.pop("DSV4_FUSED_PREPARE", None)
-        else:
-            os.environ["DSV4_FUSED_PREPARE"] = prev
+    else:
+        _reference_update_decode_metadata_in_place(
+            meta,
+            start_pos,
+            paged_block_tables=paged_bt,
+            paged_pool_entries_per_block=paged_e,
+        )
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
@@ -345,9 +649,20 @@ class FusedPhase2bEquivalenceTest(unittest.TestCase):
     def setUp(self):
         self.device = torch.device("cuda:0")
 
-    def _run_case(self, bs: int, q_len: int, max_seq_len: int, start_pos_values):
-        meta_py = _alloc_with_paged_pools(bs, q_len, max_seq_len, self.device)
-        meta_fu = _alloc_with_paged_pools(bs, q_len, max_seq_len, self.device)
+    def _run_case(
+        self,
+        bs: int,
+        q_len: int,
+        max_seq_len: int,
+        start_pos_values,
+        compress_ratios=None,
+    ):
+        meta_py = _alloc_with_paged_pools(
+            bs, q_len, max_seq_len, self.device, compress_ratios
+        )
+        meta_fu = _alloc_with_paged_pools(
+            bs, q_len, max_seq_len, self.device, compress_ratios
+        )
 
         paged_bt_py, paged_e = _seed_block_tables(meta_py, seed=42)
         paged_bt_fu, _ = _seed_block_tables(meta_fu, seed=42)
@@ -360,25 +675,41 @@ class FusedPhase2bEquivalenceTest(unittest.TestCase):
         _run_update_paged(meta_py, start_pos, paged_bt_py, paged_e, fused=False)
         _run_update_paged(meta_fu, start_pos, paged_bt_fu, paged_e, fused=True)
 
-        from rtp_llm.models_py.modules.dsv4.attn_type import (
-            CSA_KV,
-            HCA_KV,
-            INDEXER_KV,
-            SWA_KV,
-        )
-
         T = bs * q_len
-        for at, label in (
-            (SWA_KV, "SWA"),
-            (CSA_KV, "CSA"),
-            (INDEXER_KV, "INDEXER"),
-            (HCA_KV, "HCA"),
-        ):
+        labels = {
+            SWA_KV: "SWA",
+            CSA_KV: "CSA",
+            INDEXER_KV: "INDEXER",
+            HCA_KV: "HCA",
+        }
+        for at, slot_py in meta_py.pool_write_slot_mappings.items():
             _assert_equal(
                 self,
-                f"pool_write_slot_mappings[{label}]",
-                meta_py.pool_write_slot_mappings[at][:T],
+                f"pool_write_slot_mappings[{labels[at]}]",
+                slot_py[:T],
                 meta_fu.pool_write_slot_mappings[at][:T],
+            )
+
+        if meta_py.swa_global_slots is not None:
+            _assert_equal(
+                self,
+                "swa_global_slots",
+                meta_py.swa_global_slots[:T],
+                meta_fu.swa_global_slots[:T],
+            )
+        if meta_py.hca_cmp_global_slots is not None:
+            _assert_equal(
+                self,
+                "hca_cmp_global_slots",
+                meta_py.hca_cmp_global_slots[:T],
+                meta_fu.hca_cmp_global_slots[:T],
+            )
+        for at in meta_py.compressor_state_slot_mappings:
+            _assert_equal(
+                self,
+                f"compressor_state_slot_mappings[{at}]",
+                meta_py.compressor_state_slot_mappings[at][:T],
+                meta_fu.compressor_state_slot_mappings[at][:T],
             )
 
     def test_phase2b_small_batch(self):
@@ -406,6 +737,57 @@ class FusedPhase2bEquivalenceTest(unittest.TestCase):
         vals[2] = 127  # just before ratio=128 boundary
         vals[3] = 255
         self._run_case(bs=bs, q_len=1, max_seq_len=max_seq_len, start_pos_values=vals)
+
+    def test_phase2b_intermediate_batch_sizes(self):
+        max_seq_len = 8192
+        for bs in (2, 16, 32, 64):
+            vals = ((torch.arange(bs, dtype=torch.int32) * 41) % (max_seq_len - 1)).tolist()
+            vals[0] = 0
+            vals[min(1, bs - 1)] = 3
+            vals[min(2, bs - 1)] = 127
+            vals[min(3, bs - 1)] = 255
+            vals[-1] = max_seq_len - 2
+            with self.subTest(bs=bs):
+                self._run_case(
+                    bs=bs,
+                    q_len=1,
+                    max_seq_len=max_seq_len,
+                    start_pos_values=vals,
+                )
+
+    def test_phase2b_qlen_2(self):
+        self._run_case(
+            bs=4,
+            q_len=2,
+            max_seq_len=4096,
+            start_pos_values=[0, 127, 511, 2048],
+        )
+
+    def test_phase2b_qlen_4(self):
+        self._run_case(
+            bs=4,
+            q_len=4,
+            max_seq_len=4096,
+            start_pos_values=[0, 126, 511, 2048],
+        )
+
+    def test_phase2b_swa_only_qlen_1(self):
+        self._run_case(
+            bs=4,
+            q_len=1,
+            max_seq_len=4096,
+            start_pos_values=[0, 1, 127, 2048],
+            compress_ratios=_SWA_ONLY_COMPRESS_RATIOS,
+        )
+
+    def test_phase2b_swa_only_qlen_4(self):
+        self._run_case(
+            bs=4,
+            q_len=4,
+            max_seq_len=4096,
+            start_pos_values=[0, 126, 511, 2048],
+            compress_ratios=_SWA_ONLY_COMPRESS_RATIOS,
+        )
 
 
 if __name__ == "__main__":

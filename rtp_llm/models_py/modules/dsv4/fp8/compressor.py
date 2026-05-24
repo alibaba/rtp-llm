@@ -33,7 +33,6 @@ sites do not change:
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
@@ -45,16 +44,6 @@ from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 _CUBLAS_GEMM_BF16_BF16_FP32 = getattr(rtp_llm_ops, "cublas_gemm_bf16_bf16_fp32", None)
 
-
-def _compressor_meta_fused_enabled() -> bool:
-    """Env-gated fused compressor prepare_metadata.
-
-    Default-on: decode now feeds metadata from buildmeta, and the remaining
-    prepare_metadata callers should use the fused integer slot builder unless
-    explicitly disabled for debugging with ``DSV4_FUSED_PREPARE=0``.
-    """
-
-    return os.environ.get("DSV4_FUSED_PREPARE", "1").strip() == "1"
 
 
 def _linear_bf16_bf16_fp32(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
@@ -360,46 +349,29 @@ class CompressorFP8(nn.Module):
                 cu_seq_per_req=cu_seq_per_req,
             )
 
-        if _compressor_meta_fused_enabled():
-            from rtp_llm.models_py.modules.dsv4.fp8 import _fused_compressor_meta_triton
+        from rtp_llm.models_py.modules.dsv4.fp8._fused_compressor_meta_triton import (
+            fused_compressor_slot_mapping,
+        )
 
-            if _fused_compressor_meta_triton._TRITON_AVAILABLE:
-                pool_rows = 0
-                if self._kv_pool_3d is not None:
-                    pool_rows = int(
-                        self._kv_pool_3d.numel() // self._kv_pool_3d.shape[-1]
-                    )
-                (
-                    state_slots,
-                    kv_slots,
-                    token_to_req,
-                ) = _fused_compressor_meta_triton.fused_compressor_slot_mapping(
-                    positions,
-                    b_idx,
-                    self._state_block_table,
-                    self._state_eb,
-                    self._kv_block_table,
-                    self._kv_eb,
-                    self.compress_ratio,
-                    pool_rows=pool_rows,
-                )
-                return CompressorMeta(
-                    positions=positions,
-                    b_idx=b_idx,
-                    state_slots=state_slots,
-                    kv_slots=kv_slots,
-                    token_to_req=token_to_req,
-                    is_batched=is_batched,
-                    seq_start_per_req=seq_start_per_req,
-                    cu_seq_per_req=cu_seq_per_req,
-                )
-
-        with record_function_range("dsv4.fp8.compressor.meta.state_slots"):
-            state_slots = self._compute_state_slot_mapping(positions, b_idx)
-        with record_function_range("dsv4.fp8.compressor.meta.kv_slots"):
-            kv_slots = self._compute_kv_slot_mapping(positions, b_idx)
-        with record_function_range("dsv4.fp8.compressor.meta.token_to_req"):
-            token_to_req = b_idx.to(torch.int32)
+        pool_rows = 0
+        if self._kv_pool_3d is not None:
+            pool_rows = int(
+                self._kv_pool_3d.numel() // self._kv_pool_3d.shape[-1]
+            )
+        (
+            state_slots,
+            kv_slots,
+            token_to_req,
+        ) = fused_compressor_slot_mapping(
+            positions,
+            b_idx,
+            self._state_block_table,
+            self._state_eb,
+            self._kv_block_table,
+            self._kv_eb,
+            self.compress_ratio,
+            pool_rows=pool_rows,
+        )
         return CompressorMeta(
             positions=positions,
             b_idx=b_idx,

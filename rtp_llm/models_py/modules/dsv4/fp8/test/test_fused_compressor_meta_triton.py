@@ -8,37 +8,16 @@ Triton path against the Python reference path for both CSA/indexer
 
 from __future__ import annotations
 
-import os
-from contextlib import contextmanager
-from typing import Optional
-
 import torch
 
-from rtp_llm.models_py.modules.dsv4.fp8 import _fused_compressor_meta_triton
-from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
-    CompressorFP8,
-    _compressor_meta_fused_enabled,
+from rtp_llm.models_py.modules.dsv4.fp8._fused_compressor_meta_triton import (
+    fused_compressor_slot_mapping,
 )
+from rtp_llm.models_py.modules.dsv4.fp8.compressor import CompressorFP8
 
 
 DEVICE = "cuda"
 STATE_EB = 256
-
-
-@contextmanager
-def _env(value: Optional[str]):
-    prev = os.environ.get("DSV4_FUSED_PREPARE")
-    if value is None:
-        os.environ.pop("DSV4_FUSED_PREPARE", None)
-    else:
-        os.environ["DSV4_FUSED_PREPARE"] = value
-    try:
-        yield
-    finally:
-        if prev is None:
-            os.environ.pop("DSV4_FUSED_PREPARE", None)
-        else:
-            os.environ["DSV4_FUSED_PREPARE"] = prev
 
 
 def _make_positions(start_pos: torch.Tensor, q_len: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -74,14 +53,6 @@ def _shell(
     return cmp
 
 
-def _assert_meta_equal(py, fused):
-    assert torch.equal(py.positions, fused.positions)
-    assert torch.equal(py.b_idx, fused.b_idx)
-    assert torch.equal(py.state_slots, fused.state_slots)
-    assert torch.equal(py.kv_slots, fused.kv_slots)
-    assert torch.equal(py.token_to_req, fused.token_to_req)
-    assert py.is_batched == fused.is_batched
-
 
 def _compare_default_fused_to_python(
     *,
@@ -104,50 +75,36 @@ def _compare_default_fused_to_python(
         pool_rows=pool_rows,
     )
 
-    with _env("0"):
-        py = cmp.prepare_metadata(
-            positions,
-            b_idx,
-            is_batched=q_len > 1,
-            seq_start_per_req=positions.view(len(start_pos_values), q_len)[:, 0].to(torch.int32),
-            cu_seq_per_req=torch.arange(
-                0,
-                (len(start_pos_values) + 1) * q_len,
-                q_len,
-                dtype=torch.int32,
-                device=DEVICE,
-            ),
-        )
+    py_state = cmp._compute_state_slot_mapping(positions, b_idx)
+    py_kv = cmp._compute_kv_slot_mapping(positions, b_idx)
+    py_t2r = b_idx.to(torch.int32)
 
-    with _env(None):
-        assert _compressor_meta_fused_enabled()
-        fused = cmp.prepare_metadata(
-            positions,
-            b_idx,
-            is_batched=q_len > 1,
-            seq_start_per_req=positions.view(len(start_pos_values), q_len)[:, 0].to(torch.int32),
-            cu_seq_per_req=torch.arange(
-                0,
-                (len(start_pos_values) + 1) * q_len,
-                q_len,
-                dtype=torch.int32,
-                device=DEVICE,
-            ),
-        )
+    fu_state, fu_kv, fu_t2r = fused_compressor_slot_mapping(
+        positions,
+        b_idx,
+        state_bt,
+        cmp._state_eb,
+        kv_bt,
+        kv_eb,
+        cmp.compress_ratio,
+        pool_rows=pool_rows,
+    )
 
-    _assert_meta_equal(py, fused)
+    assert torch.equal(py_state, fu_state), (
+        f"state_slots mismatch:\npy={py_state}\nfu={fu_state}"
+    )
+    assert torch.equal(py_kv, fu_kv), (
+        f"kv_slots mismatch:\npy={py_kv}\nfu={fu_kv}"
+    )
+    assert torch.equal(py_t2r, fu_t2r), (
+        f"token_to_req mismatch:\npy={py_t2r}\nfu={fu_t2r}"
+    )
 
-
-def test_default_enabled():
-    with _env(None):
-        assert _compressor_meta_fused_enabled()
-    with _env("0"):
-        assert not _compressor_meta_fused_enabled()
 
 
 def test_ratio4_batched_speculative_q_len_gt_1():
-    if not torch.cuda.is_available() or not _fused_compressor_meta_triton._TRITON_AVAILABLE:
-        print("  [SKIP] CUDA/Triton unavailable")
+    if not torch.cuda.is_available():
+        print("  [SKIP] CUDA unavailable")
         return
     state_bt = torch.tensor(
         [
@@ -182,8 +139,8 @@ def test_ratio4_batched_speculative_q_len_gt_1():
 
 
 def test_ratio128_batched_speculative_q_len_gt_1():
-    if not torch.cuda.is_available() or not _fused_compressor_meta_triton._TRITON_AVAILABLE:
-        print("  [SKIP] CUDA/Triton unavailable")
+    if not torch.cuda.is_available():
+        print("  [SKIP] CUDA unavailable")
         return
     state_bt = torch.tensor(
         [
@@ -217,8 +174,8 @@ def test_ratio128_batched_speculative_q_len_gt_1():
 
 
 def test_no_kv_context_writes_negative_kv_slots():
-    if not torch.cuda.is_available() or not _fused_compressor_meta_triton._TRITON_AVAILABLE:
-        print("  [SKIP] CUDA/Triton unavailable")
+    if not torch.cuda.is_available():
+        print("  [SKIP] CUDA unavailable")
         return
     state_bt = torch.tensor(
         [[1, 2], [3, 0]],
@@ -235,8 +192,156 @@ def test_no_kv_context_writes_negative_kv_slots():
     )
 
 
+def _ratio4_bt():
+    return (
+        torch.tensor(
+            [[1, 2, 0, 4], [0, 6, 7, 8], [9, 10, 11, 12], [13, 14, 15, 16]],
+            dtype=torch.int32,
+            device=DEVICE,
+        ),
+        torch.tensor(
+            [[1, 2, 3, 4], [0, 6, 7, 8], [9, 10, 11, 12], [999, 14, 15, 16]],
+            dtype=torch.int32,
+            device=DEVICE,
+        ),
+    )
+
+
+def _ratio128_bt():
+    return (
+        torch.tensor(
+            [[1, 2, 3, 4], [5, 0, 7, 8], [9, 10, 11, 12], [13, 14, 15, 16]],
+            dtype=torch.int32,
+            device=DEVICE,
+        ),
+        torch.tensor(
+            [[1, 2, 3, 4], [5, 6, 7, 8], [0, 10, 11, 12], [999, 14, 15, 16]],
+            dtype=torch.int32,
+            device=DEVICE,
+        ),
+    )
+
+
+def test_ratio4_q_len_1():
+    if not torch.cuda.is_available():
+        print("  [SKIP] CUDA unavailable")
+        return
+    state_bt, kv_bt = _ratio4_bt()
+    _compare_default_fused_to_python(
+        ratio=4,
+        q_len=1,
+        start_pos_values=[1, 126, 255, 1021],
+        state_bt=state_bt,
+        kv_bt=kv_bt,
+        kv_eb=64,
+        pool_rows=64 * 64,
+    )
+
+
+def test_ratio4_q_len_2():
+    if not torch.cuda.is_available():
+        print("  [SKIP] CUDA unavailable")
+        return
+    state_bt, kv_bt = _ratio4_bt()
+    _compare_default_fused_to_python(
+        ratio=4,
+        q_len=2,
+        start_pos_values=[1, 126, 255, 1021],
+        state_bt=state_bt,
+        kv_bt=kv_bt,
+        kv_eb=64,
+        pool_rows=64 * 64,
+    )
+
+
+def test_ratio4_q_len_4():
+    if not torch.cuda.is_available():
+        print("  [SKIP] CUDA unavailable")
+        return
+    state_bt, kv_bt = _ratio4_bt()
+    _compare_default_fused_to_python(
+        ratio=4,
+        q_len=4,
+        start_pos_values=[1, 126, 255, 1021],
+        state_bt=state_bt,
+        kv_bt=kv_bt,
+        kv_eb=64,
+        pool_rows=64 * 64,
+    )
+
+
+def test_ratio128_q_len_1():
+    if not torch.cuda.is_available():
+        print("  [SKIP] CUDA unavailable")
+        return
+    state_bt, kv_bt = _ratio128_bt()
+    _compare_default_fused_to_python(
+        ratio=128,
+        q_len=1,
+        start_pos_values=[125, 253, 255, 1021],
+        state_bt=state_bt,
+        kv_bt=kv_bt,
+        kv_eb=2,
+        pool_rows=2 * 64,
+    )
+
+
+def test_ratio128_q_len_2():
+    if not torch.cuda.is_available():
+        print("  [SKIP] CUDA unavailable")
+        return
+    state_bt, kv_bt = _ratio128_bt()
+    _compare_default_fused_to_python(
+        ratio=128,
+        q_len=2,
+        start_pos_values=[125, 253, 255, 1021],
+        state_bt=state_bt,
+        kv_bt=kv_bt,
+        kv_eb=2,
+        pool_rows=2 * 64,
+    )
+
+
+def test_ratio128_q_len_4():
+    if not torch.cuda.is_available():
+        print("  [SKIP] CUDA unavailable")
+        return
+    state_bt, kv_bt = _ratio128_bt()
+    _compare_default_fused_to_python(
+        ratio=128,
+        q_len=4,
+        start_pos_values=[125, 253, 255, 1021],
+        state_bt=state_bt,
+        kv_bt=kv_bt,
+        kv_eb=2,
+        pool_rows=2 * 64,
+    )
+
+
+def test_ratio128_q_len_gt_ratio():
+    if not torch.cuda.is_available():
+        print("  [SKIP] CUDA unavailable")
+        return
+    state_bt, kv_bt = _ratio128_bt()
+    _compare_default_fused_to_python(
+        ratio=128,
+        q_len=129,
+        start_pos_values=[0, 127],
+        state_bt=state_bt[:2],
+        kv_bt=kv_bt[:2],
+        kv_eb=2,
+        pool_rows=2 * 64,
+    )
+
+
 if __name__ == "__main__":
-    test_default_enabled()
+    test_ratio4_q_len_1()
+    test_ratio4_q_len_2()
     test_ratio4_batched_speculative_q_len_gt_1()
+    test_ratio4_q_len_4()
+    test_ratio128_q_len_1()
+    test_ratio128_q_len_2()
     test_ratio128_batched_speculative_q_len_gt_1()
+    test_ratio128_q_len_4()
+    test_ratio128_q_len_gt_ratio()
     test_no_kv_context_writes_negative_kv_slots()

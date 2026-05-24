@@ -370,7 +370,6 @@ py_test(
         "PERF_PROFILE_FLUSH_SLEEP": "120",
         "DSV4_USE_MEGA_MOE": "1",
         "ENABLE_FP32_LM_HEAD": "0",
-        "DSV4_FUSED_PREPARE": "1",
         "RTP_LLM_STREAM_ASYNC": "1",
         "RTP_LLM_DROP_BROAD_SYNC": "1",
         "RTP_LLM_DEVICE_INPUT": "1",
@@ -558,7 +557,7 @@ py_test(
         "--model_type", "deepseek_v4",
         "--checkpoint_path", "/mnt/nas1/hf/DeepSeek-V4-Flash",
         "--tokenizer_path", "/mnt/nas1/hf/DeepSeek-V4-Flash",
-        "--batch_size", "1,8,16,32",
+        "--batch_size", "1,8,64,128",
         "--input_len", "65536",
         "--partial", "1",
         "--decode_test_length", "30",
@@ -579,6 +578,7 @@ py_test(
         "--sp_checkpoint_path", "/mnt/nas1/hf/DeepSeek-V4-Flash",
         "--sp_act_type", "bf16",
         "--warm_up", "0",
+        "--dsv4_fixed_pool_blocks", "1024"
     ],
     env = {
         "WORLD_SIZE": "4",
@@ -589,6 +589,9 @@ py_test(
         "PERF_PROFILE_ARM_SLEEP": "2",
         "PERF_PROFILE_FLUSH_SLEEP": "120",
         "DSV4_USE_MEGA_MOE": "1",
+        "RTP_LLM_STREAM_ASYNC": "1",
+        "RTP_LLM_DROP_BROAD_SYNC": "1",
+        "RTP_LLM_DEVICE_INPUT": "1"
     },
     tags = ["manual"],
 )
@@ -740,7 +743,6 @@ py_test(
         "PERF_PROFILE_FLUSH_SLEEP": "120",
         "DSV4_USE_MEGA_MOE": "1",
         "ENABLE_FP32_LM_HEAD": "0",
-        "DSV4_FUSED_PREPARE": "1",
     },
     tags = ["manual"],
 )

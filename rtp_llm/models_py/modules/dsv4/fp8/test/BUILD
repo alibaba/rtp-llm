@@ -48,6 +48,16 @@ py_test(
     name = "test_decode_attn_metadata_start_pos",
     srcs = ["test_decode_attn_metadata_start_pos.py"],
     deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["H20"],
+    exec_properties = {"gpu": "H20"},
+)
+
+py_test(
+    name = "test_fused_prepare_meta_triton",
+    srcs = ["test_fused_prepare_meta_triton.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["H20"],
+    exec_properties = {"gpu": "H20"},
 )
 
 py_test(
