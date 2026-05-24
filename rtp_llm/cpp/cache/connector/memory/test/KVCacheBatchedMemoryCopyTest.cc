@@ -3,6 +3,8 @@
 #include <cstring>
 #include <map>
 #include <memory>
+#include <set>
+#include <utility>
 #include <vector>
 
 #include <cuda_runtime.h>
@@ -368,9 +370,14 @@ void verifyBlockInfosContent(const std::vector<BlockInfo>& infos, char c) {
 
 class FakeTypedKVCacheAllocator: public KVCacheAllocator {
 public:
-    explicit FakeTypedKVCacheAllocator(const CacheConfig& config, size_t payload_gap_bytes = 0):
-        KVCacheAllocator(config, AllocationType::DEVICE), payload_gap_bytes_(payload_gap_bytes) {
-        const auto options = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
+    explicit FakeTypedKVCacheAllocator(const CacheConfig&               config,
+                                       size_t                           payload_gap_bytes = 0,
+                                       std::set<KVCacheRegionName>      host_regions = {}):
+        KVCacheAllocator(config, AllocationType::DEVICE),
+        host_regions_(std::move(host_regions)),
+        payload_gap_bytes_(payload_gap_bytes) {
+        const auto cuda_options = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
+        const auto host_options = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU);
         for (int layer = 0; layer < static_cast<int>(config.layer_all_num); ++layer) {
             if (static_cast<size_t>(layer) >= config.layer_region_to_group_id.size()) {
                 continue;
@@ -388,8 +395,15 @@ public:
                 if (stride == 0) {
                     continue;
                 }
-                tensors_[key(layer, static_cast<KVCacheRegionName>(region))] =
-                    torch::empty({static_cast<int64_t>(config.block_num), static_cast<int64_t>(stride)}, options);
+                const auto region_name = static_cast<KVCacheRegionName>(region);
+                const bool host_region = host_regions_.count(region_name) > 0;
+                auto       tensor      = torch::empty({static_cast<int64_t>(config.block_num),
+                                                       static_cast<int64_t>(stride)},
+                                                      host_region ? host_options : cuda_options);
+                if (host_region) {
+                    tensor = tensor.pin_memory();
+                }
+                tensors_[key(layer, static_cast<KVCacheRegionName>(region))] = std::move(tensor);
                 strides_[key(layer, static_cast<KVCacheRegionName>(region))] = stride;
             }
         }
@@ -429,8 +443,8 @@ public:
         auto*       addr         = static_cast<char*>(tensor.data_ptr()) + static_cast<size_t>(block_id) * stride;
         const auto  payload_size = payload_gap_bytes_ < stride ? stride - payload_gap_bytes_ : stride;
         return {BlockInfo{
-            /*is_cuda=*/true,
-            /*device_index=*/static_cast<int32_t>(tensor.get_device()),
+            /*is_cuda=*/tensor.is_cuda(),
+            /*device_index=*/tensor.is_cuda() ? static_cast<int32_t>(tensor.get_device()) : -1,
             /*scalar_type=*/static_cast<int32_t>(tensor.scalar_type()),
             /*addr=*/addr,
             /*size_bytes=*/payload_size,
@@ -488,6 +502,7 @@ private:
 
     std::map<std::pair<int, KVCacheRegionName>, torch::Tensor> tensors_;
     std::map<std::pair<int, KVCacheRegionName>, size_t>        strides_;
+    std::set<KVCacheRegionName>                                host_regions_;
     size_t                                                     payload_gap_bytes_ = 0;
 };
 
@@ -537,7 +552,7 @@ TEST(KVCacheBatchedMemoryCopyTest, StagedCopyEligibilityRequiresDsv4TypedLayout)
     EXPECT_TRUE(pro_connector->isDsv4TypedCacheLayout(pro_connector->layerRegionSlots()));
 }
 
-TEST(KVCacheBatchedMemoryCopyTest, Dsv4TypedLayoutUsesStagedCopyForD2HAndH2D) {
+void runDsv4TypedStagedCopyRoundTrip(const std::set<KVCacheRegionName>& host_regions) {
     const auto set_device_rc = cudaSetDevice(0);
     ASSERT_EQ(set_device_rc, cudaSuccess) << cudaGetErrorString(set_device_rc);
 
@@ -547,7 +562,7 @@ TEST(KVCacheBatchedMemoryCopyTest, Dsv4TypedLayoutUsesStagedCopyForD2HAndH2D) {
     kv_config.memory_cache_size_mb         = 64;
     kv_config.memory_cache_sync_timeout_ms = 1000;
 
-    auto allocator = std::make_shared<FakeTypedKVCacheAllocator>(config, /*payload_gap_bytes=*/8);
+    auto allocator = std::make_shared<FakeTypedKVCacheAllocator>(config, /*payload_gap_bytes=*/8, host_regions);
 
     std::vector<std::string> server_addrs = {"127.0.0.1:1"};
     auto connector = std::make_shared<KVCacheMemoryConnector>(config, kv_config, allocator, server_addrs);
@@ -658,6 +673,15 @@ TEST(KVCacheBatchedMemoryCopyTest, Dsv4TypedLayoutUsesStagedCopyForD2HAndH2D) {
             verifyBlockInfosContent(gpu_bufs, copyTag(1000 + block_idx * slots.size() + i));
         }
     }
+}
+
+TEST(KVCacheBatchedMemoryCopyTest, Dsv4TypedLayoutUsesStagedCopyForD2HAndH2D) {
+    runDsv4TypedStagedCopyRoundTrip({});
+}
+
+TEST(KVCacheBatchedMemoryCopyTest, Dsv4TypedStagedCopySupportsHostBackedStateRegions) {
+    runDsv4TypedStagedCopyRoundTrip(
+        {KVCacheRegionName::INDEXER_STATE, KVCacheRegionName::CSA_STATE, KVCacheRegionName::HCA_STATE});
 }
 
 }  // namespace rtp_llm::test
