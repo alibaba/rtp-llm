@@ -1,4 +1,5 @@
 import functools
+import json
 import logging
 from typing import AsyncGenerator
 
@@ -44,6 +45,17 @@ def trans_role_type(role_type: RoleType) -> RoleAddrPB.RoleType:
         return RoleAddrPB.RoleType.VIT
     elif role_type == RoleType.FRONTEND:
         return RoleAddrPB.RoleType.FRONTEND
+
+
+def _trans_jsonable_option(config_pb, config, field_name):
+    if not hasattr(config_pb, field_name):
+        return
+    value = getattr(config, field_name, None)
+    if value is None:
+        return
+    if not isinstance(value, str):
+        value = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    getattr(config_pb, field_name).value = value
 
 
 def trans_input(input_py: GenerateInput):
@@ -97,6 +109,15 @@ def trans_input(input_py: GenerateInput):
     trans_option(generate_config_pb, input_py.generate_config, "top_p_decay")
     trans_option(generate_config_pb, input_py.generate_config, "top_p_min")
     trans_option(generate_config_pb, input_py.generate_config, "top_p_reset_ids")
+    _trans_jsonable_option(generate_config_pb, input_py.generate_config, "json_schema")
+    _trans_jsonable_option(generate_config_pb, input_py.generate_config, "regex")
+    _trans_jsonable_option(generate_config_pb, input_py.generate_config, "ebnf")
+    _trans_jsonable_option(
+        generate_config_pb, input_py.generate_config, "structural_tag"
+    )
+    _trans_jsonable_option(
+        generate_config_pb, input_py.generate_config, "response_format"
+    )
     trans_option(generate_config_pb, input_py.generate_config, "adapter_name")
     trans_option_cast(
         generate_config_pb, input_py.generate_config, "task_id", functools.partial(str)

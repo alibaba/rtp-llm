@@ -248,8 +248,8 @@ public:
     ErrorInfo    statusInfo();
     std::string  stopReason();
 
-    void        setReserveStep(size_t reserve_step);
-    size_t      reserveStep() const {
+    void   setReserveStep(size_t reserve_step);
+    size_t reserveStep() const {
         return reserve_step_;
     }
     StreamState moveToNext();
@@ -455,6 +455,9 @@ public:
     std::vector<BaseLogitsProcessorPtr> getAllLogitsProcessorPtr() const {
         return logits_processor_list_;
     }
+
+    bool    hasStatefulLogitsProcessor() const;
+    int64_t processorAcceptedTokenLen() const;
 
     at::Generator getGenerator() {
         return generator_;
@@ -673,6 +676,11 @@ public:
 protected:
     void updateLogitProcessorMultiSeqStatus(const torch::Tensor& src_batch_indices);
     void updateLogitProcessorStatus(const StreamUpdateInfo& update_info);
+    void updateLogitProcessorStatus(const torch::Tensor& new_tokens,
+                                    int32_t              num_new_tokens,
+                                    const torch::Tensor& src_batch_indices,
+                                    bool                 stateful_only = false);
+    void validateStatefulLogitsProcessorState();
     void fillSubGenerateStatus(StreamState state);
     void resizeSubGenerateStatus(size_t new_size);
 

@@ -151,7 +151,8 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
 
     batch_stream_processor_.reset(new NormalBatchStreamProcessor(
         params.model_config_, params.pd_sep_config, params.profiling_debug_logging_config, cache_config, warm_up_));
-    LogitsProcessorFactory::init(params.model_config_.ckpt_path, params.sp_config.tree_decode_config);
+    LogitsProcessorFactory::init(
+        params.model_config_.ckpt_path, params.sp_config.tree_decode_config, params.grammar_config);
     cudaProfilerBegin();
 }
 
@@ -164,9 +165,9 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     RtpLLMTokenPSMetricsCollector  tps_collector;
     auto                           tps_active_guard =
         tps_reporter_.makeActiveGuard(metrics_reporter_ && tp_rank_ == 0 && !warm_up_ && !streams.empty());
-    GptModelInputs                 model_input;
-    GptModelOutputs                model_output;
-    SamplerOutput                  sampler_output;
+    GptModelInputs  model_input;
+    GptModelOutputs model_output;
+    SamplerOutput   sampler_output;
     RTP_LLM_PROFILE_FUNCTION();
     // Cap outstanding stream-async bookkeeping to one step unless DROP_BROAD_SYNC is on.
     // Still sync when gatherModelInput lacks NormalAsyncDeviceState; host
@@ -308,14 +309,17 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         // Metrics and KV release stay on the main thread; dispatch_output_us
         // now measures launch cost, while worker time is in async_runner.thread.
         executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-        int64_t tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
+        int64_t tps_execute_time_us           = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
         if (tps_execute_time_us <= 0) {
             tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us;
         }
         reportMetrics(stream_groups, executor_collector, tps_collector, tps_execute_time_us);
 
-        return dispatchOutputAsync(
-            stream_groups, std::move(model_output), std::move(sampler_output), std::move(sampler_event));
+        return dispatchOutputAsync(stream_groups,
+                                   std::move(model_output),
+                                   std::move(sampler_output),
+                                   std::move(sampler_event),
+                                   profile_step_finish_);
     }
 
     {
@@ -325,7 +329,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         publishNormalDeviceState(stream_groups, merge_outputs.sampler_output);
         auto result                           = batch_stream_processor_->dispatch(stream_groups, merge_outputs);
         executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-        int64_t tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
+        int64_t tps_execute_time_us           = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
         if (tps_execute_time_us <= 0) {
             tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us;
         }
@@ -475,6 +479,19 @@ bool NormalExecutor::gatherCanUseDeviceState(const StreamGroups& stream_groups) 
         if (stream->hasNumBeams() || stream->numReturnSequences() > 1) {
             return false;
         }
+        bool has_blocking_stateful_processor = false;
+        for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
+            if (processor != nullptr && processor->isStateful() && !processor->supportsNormalAsyncDeviceState()) {
+                has_blocking_stateful_processor = true;
+                break;
+            }
+        }
+        // NormalAsyncDeviceState mirrors token ids and sequence length. Stateful
+        // processors that cannot publish their own device-side next-step state
+        // still need the old wait before the next sampler consumes logits.
+        if (has_blocking_stateful_processor && stream->hasPendingAsyncBookkeeping()) {
+            return false;
+        }
         const auto& state = stream->getNormalAsyncDeviceState();
         if (!state.last_sample_token_gpu.defined() || !state.last_sample_token_gpu.is_cuda()
             || !state.next_seq_len_gpu.defined() || !state.next_seq_len_gpu.is_cuda()) {
@@ -553,6 +570,12 @@ void NormalExecutor::publishNormalDeviceState(const StreamGroups& stream_groups,
             cur_seq_len_gpu = torch::full({1}, static_cast<int64_t>(cur_real_seq_len), cuda_i32);
         }
 
+        for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
+            if (processor != nullptr && processor->supportsNormalAsyncDeviceState()) {
+                processor->prepareNormalAsyncUpdate(last_sample_token_gpu, 1);
+            }
+        }
+
         GenerateStream::NormalAsyncDeviceState state;
         state.last_sample_token_gpu = std::move(last_sample_token_gpu);
         state.next_seq_len_gpu      = (cur_seq_len_gpu + 1).to(torch::kInt32);
@@ -566,7 +589,8 @@ void NormalExecutor::publishNormalDeviceState(const StreamGroups& stream_groups,
 absl::Status NormalExecutor::dispatchOutputAsync(const StreamGroups&           stream_groups,
                                                  GptModelOutputs               model_output,
                                                  SamplerOutput                 sampler_output,
-                                                 std::shared_ptr<torch::Event> sampler_event) {
+                                                 std::shared_ptr<torch::Event> sampler_event,
+                                                 std::function<void()>         profile_step_finish) {
     RTP_LLM_PROFILE_SCOPE("executor.dispatch_output_async");
 
     publishNormalDeviceState(stream_groups, sampler_output);
@@ -587,7 +611,8 @@ absl::Status NormalExecutor::dispatchOutputAsync(const StreamGroups&           s
                              stream_groups_copy  = std::move(stream_groups_copy),
                              model_output_copy   = std::move(model_output_copy),
                              sampler_output_copy = std::move(sampler_output_copy),
-                             sampler_event]() mutable {
+                             sampler_event,
+                             profile_step_finish = std::move(profile_step_finish)]() mutable {
         RTP_LLM_PROFILE_SCOPE("executor.dispatch_output_worker");
 
         auto worker_streams = stream_groups_copy.allStreams();
@@ -610,6 +635,9 @@ absl::Status NormalExecutor::dispatchOutputAsync(const StreamGroups&           s
             processor->dispatch(stream_groups_copy, {std::move(model_output_copy), std::move(sampler_output_copy)});
         if (!status.ok()) {
             RTP_LLM_LOG_ERROR("[normal-stream-async] dispatch (worker) failed: %s", status.ToString().c_str());
+        }
+        if (profile_step_finish) {
+            profile_step_finish();
         }
         // dec_guard destructs here, dec'ing each stream's pending count.
     });
