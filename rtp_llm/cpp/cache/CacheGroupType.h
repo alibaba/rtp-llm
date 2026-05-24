@@ -29,4 +29,9 @@ enum class KVCacheRegionName : int8_t {
     REGION_COUNT  = 8,
 };
 
+inline bool isStateRegion(KVCacheRegionName region_name) {
+    return region_name == KVCacheRegionName::INDEXER_STATE || region_name == KVCacheRegionName::CSA_STATE
+           || region_name == KVCacheRegionName::HCA_STATE;
+}
+
 }  // namespace rtp_llm

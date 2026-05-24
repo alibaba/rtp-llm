@@ -62,6 +62,11 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
         config.kernel_seq_size_per_block = config.seq_size_per_block;
     }
 
+    // STATE residency toggle must be set before the pre-pass finalizeBlockNums
+    // so fixed_pool_reserve_bytes correctly excludes STATE-pool addition bytes
+    // when STATE lives on pinned CPU.
+    config.state_pool_uses_pinned_cpu = kv_cache_config.state_pool_memory_mb > 0 && config.state_block_size_bytes > 0;
+
     if (kv_cache_config.test_block_num > 0) {
         RTP_LLM_LOG_INFO("KVCacheConfig explicitly specified kv cache block num %d", kv_cache_config.test_block_num);
         block_num = kv_cache_config.test_block_num;
@@ -88,21 +93,44 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
                              config.fixed_pool_reserve_bytes / 1024 / 1024,
                              paged_budget / 1024 / 1024);
         }
-        const int    joint_step = std::max(1, config.linear_step);
-        const size_t effective_bytes =
-            (config.swa_block_size_bytes > 0 && joint_step > 1) ?
-                config.block_size_bytes + config.swa_block_size_bytes / static_cast<size_t>(joint_step) :
-                config.block_size_bytes + config.swa_block_size_bytes;
-        block_num = paged_budget / effective_bytes;
+        const int    joint_step    = std::max(1, config.linear_step);
+        const size_t swa_effective = (config.swa_block_size_bytes > 0 && joint_step > 1) ?
+                                         config.swa_block_size_bytes / static_cast<size_t>(joint_step) :
+                                         config.swa_block_size_bytes;
+        // env=0 → STATE pools live on device and compete for HBM, so include
+        // their bytes in the HBM block-num divisor. env>0 → STATE pools live
+        // on pinned CPU and are sized separately; exclude them here.
+        const size_t state_in_hbm_bytes = config.state_pool_uses_pinned_cpu ? 0u : config.state_block_size_bytes;
+        const size_t effective_bytes    = config.block_size_bytes + swa_effective + state_in_hbm_bytes;
+        block_num                       = paged_budget / effective_bytes;
     }
     RTP_LLM_CHECK_WITH_INFO(block_num > 0,
                             "kv cache needs at least 1 block but %ld, each block needs %ld MiB memory",
                             block_num,
                             static_cast<long>(config.block_size_bytes / 1024 / 1024));
 
+    // STATE pool block_num: env-driven CPU budget when set, else fall back
+    // to the HBM-derived block_num (legacy parity, STATE on device).
+    uint32_t state_block_num = block_num;
+    if (config.state_pool_uses_pinned_cpu) {
+        const size_t state_budget_bytes = static_cast<size_t>(kv_cache_config.state_pool_memory_mb) * 1024 * 1024;
+        state_block_num                 = static_cast<uint32_t>(state_budget_bytes / config.state_block_size_bytes);
+        RTP_LLM_CHECK_WITH_INFO(state_block_num > 0,
+                                "STATE_POOL_MEMORY_MB=%lld too small for state_block_size_bytes=%zu",
+                                static_cast<long long>(kv_cache_config.state_pool_memory_mb),
+                                config.state_block_size_bytes);
+        RTP_LLM_LOG_INFO("DSV4 state pools: budget=%zu MiB, per-block=%zu B, block_num=%u "
+                         "(decoupled from HBM block_num=%u)",
+                         state_budget_bytes / 1024 / 1024,
+                         config.state_block_size_bytes,
+                         state_block_num,
+                         block_num);
+    }
+    config.state_block_num = state_block_num;
+
     const auto kv_cache_seq_len = static_cast<size_t>(block_num) * config.seq_size_per_block;
     config.block_num            = static_cast<int>(block_num);
-    config.finalizeBlockNums(block_num, runtime_config);
+    config.finalizeBlockNums(block_num, state_block_num, runtime_config);
     RTP_LLM_LOG_INFO("kv cache block nums is %u, allows storing %ld tokens", block_num, kv_cache_seq_len);
     if (kv_cache_seq_len < model_config.max_seq_len) {
         RTP_LLM_LOG_WARNING("kv cache block nums %u can only store %ld tokens, less than max_seq_len %ld, "
@@ -154,11 +182,18 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
         }
     }
 
+    // STATE residency toggle (mirror createConfig) — must precede pre-pass
+    // so fixed_pool_reserve_bytes correctly accounts for STATE addition.
+    score_config.state_pool_uses_pinned_cpu =
+        kv_cache_config.state_pool_memory_mb > 0 && score_config.state_block_size_bytes > 0;
+    propose_config.state_pool_uses_pinned_cpu =
+        kv_cache_config.state_pool_memory_mb > 0 && propose_config.state_block_size_bytes > 0;
+
     // Fixed-pool block counts depend on runtime scheduler limits. Finalize the
     // score and propose configs before sizing the shared paged budget so DSV4
     // state/SWA pools are accounted outside the paged KV-cache block budget.
-    score_config.finalizeBlockNums(0, runtime_config);
-    propose_config.finalizeBlockNums(0, runtime_config);
+    score_config.finalizeBlockNums(0, 0, runtime_config);
+    propose_config.finalizeBlockNums(0, 0, runtime_config);
 
     uint32_t total_layer_num = score_config.layer_num;
     for (int i = 0; i < num_mtp_modules; ++i) {
@@ -200,10 +235,11 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
 
         const int joint_step     = std::max(1, kv_cache_config.linear_step);
         auto      effective_size = [&](const CacheConfig& cfg) -> size_t {
-            if (cfg.swa_block_size_bytes > 0 && joint_step > 1) {
-                return cfg.block_size_bytes + cfg.swa_block_size_bytes / static_cast<size_t>(joint_step);
-            }
-            return cfg.block_size_bytes + cfg.swa_block_size_bytes;
+            const size_t swa_eff      = (cfg.swa_block_size_bytes > 0 && joint_step > 1) ?
+                                                 cfg.swa_block_size_bytes / static_cast<size_t>(joint_step) :
+                                                 cfg.swa_block_size_bytes;
+            const size_t state_in_hbm = cfg.state_pool_uses_pinned_cpu ? 0u : cfg.state_block_size_bytes;
+            return cfg.block_size_bytes + swa_eff + state_in_hbm;
         };
         block_num =
             paged_budget
@@ -211,6 +247,32 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     }
 
     RTP_LLM_CHECK_WITH_INFO(block_num > 0, "kv cache needs at least 1 block but %zu", block_num);
+
+    // Mirror createConfig: STATE pools are sized from STATE_POOL_MEMORY_MB
+    // (CPU pinned), independent of the HBM-derived block_num. Each
+    // sub-config uses its own state_block_size_bytes; propose typically
+    // has 0 (SWA-only layers) and falls back to block_num — harmless.
+    auto compute_state_block_num = [&](const CacheConfig& cfg) -> uint32_t {
+        if (kv_cache_config.state_pool_memory_mb > 0 && cfg.state_block_size_bytes > 0) {
+            const size_t   state_budget_bytes = static_cast<size_t>(kv_cache_config.state_pool_memory_mb) * 1024 * 1024;
+            const uint32_t n                  = static_cast<uint32_t>(state_budget_bytes / cfg.state_block_size_bytes);
+            RTP_LLM_CHECK_WITH_INFO(n > 0,
+                                    "sp STATE_POOL_MEMORY_MB=%lld too small for state_block_size_bytes=%zu",
+                                    static_cast<long long>(kv_cache_config.state_pool_memory_mb),
+                                    cfg.state_block_size_bytes);
+            return n;
+        }
+        return static_cast<uint32_t>(block_num);
+    };
+    const uint32_t score_state_block_num   = compute_state_block_num(score_config);
+    const uint32_t propose_state_block_num = compute_state_block_num(propose_config);
+    RTP_LLM_LOG_INFO("sp DSV4 state pools: score_state_block_num=%u propose_state_block_num=%u "
+                     "(env=%lld MiB, score_state_bytes=%zu, propose_state_bytes=%zu)",
+                     score_state_block_num,
+                     propose_state_block_num,
+                     static_cast<long long>(kv_cache_config.state_pool_memory_mb),
+                     score_config.state_block_size_bytes,
+                     propose_config.state_block_size_bytes);
 
     CacheConfig config      = score_config;
     config.linear_step      = std::max(1, kv_cache_config.linear_step);
@@ -333,11 +395,13 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                 }
             }
         }
-        sub_cfg->finalizeBlockNums(static_cast<uint32_t>(block_num), runtime_config);
+        sub_cfg->finalizeBlockNums(static_cast<uint32_t>(block_num), propose_state_block_num, runtime_config);
+        sub_cfg->state_block_num = propose_state_block_num;
         config.mtp_sub_configs.push_back(sub_cfg);
     }
 
-    config.finalizeBlockNums(static_cast<uint32_t>(block_num), runtime_config);
+    config.finalizeBlockNums(static_cast<uint32_t>(block_num), score_state_block_num, runtime_config);
+    config.state_block_num          = score_state_block_num;
     config.fixed_pool_reserve_bytes = fixed_reserve;
 
     const auto kv_cache_seq_len = static_cast<size_t>(block_num) * config.seq_size_per_block;
