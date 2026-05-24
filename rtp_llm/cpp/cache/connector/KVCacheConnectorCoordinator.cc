@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/KVCacheTransferPlanner.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
@@ -95,6 +96,130 @@ KVCacheResource makeCpShardedConnectorResource(const KVCacheResource& source,
     return selected;
 }
 
+// M04-PR2: per-pool resource builder driven by the unified block-major planner.
+//
+// Gated by ``cache_config.super_block_layout.enabled`` at the call site.
+// Default behaviour (gate off) is completely unchanged — the legacy
+// ``makeCpShardedConnectorResource`` above is still reachable and bit-identical
+// to today.
+//
+// Semantics:
+//   * Pool descriptors are derived from ``cache_config.group_{types,region_names}``.
+//   * The unified planner is invoked with ``shard_owner_rank = cp_size - 1``
+//     (canonical last-rank namespace, matching the legacy
+//     ``localCacheKeys(cp_size-1, cp_size)`` projection).
+//   * Per-pool block lists are populated from each plan item's
+//     ``offset_index`` — FULL pools get the rank-local compact offset
+//     (``B / cp_size``); non-FULL pools are replicated to rank 0 only per the
+//     planner's ownership rule (semantic improvement vs legacy, which shipped
+//     non-FULL groups from every rank).
+//   * Cache-keys are populated via the M01-sanctioned controlled mutators
+//     ``clearCacheKeys`` / ``appendCacheKey`` / ``setLastBlockAlignedAll``
+//     (Panel-A item 5 / C3 closure; Fix 19 / Fix 76 revised) — NO direct
+//     ``selected.cacheKeys() =`` vector assignment, NO direct
+//     ``setLastBlockAligned`` (legacy spelling) at this site.
+//   * The dummy-tail trick is retained for byte-equivalence with legacy
+//     under the unified path; PR-4 will atomically delete it and wire
+//     per-pool ``PoolDescriptor.last_partial`` instead (Risk 9.2).
+//   * ``last_partial`` on every pool descriptor is left at ``false`` —
+//     M01 surface (per-pool alignment fan-out) lands in PR-4.
+//
+// Caller contract: invoked only when ``cp_size > 1`` (mirrors legacy).
+KVCacheResource makeUnifiedConnectorResource(const KVCacheResource& source,
+                                             const CacheConfig&     cache_config,
+                                             const CacheKeysType&   selected_keys,
+                                             int                    cp_size) {
+    const int group_num = source.groupNums();
+
+    std::vector<PoolDescriptor> pools;
+    std::vector<size_t>         pool_block_counts;
+    std::vector<CacheGroupType> group_types;
+    pools.reserve(static_cast<size_t>(group_num));
+    pool_block_counts.reserve(static_cast<size_t>(group_num));
+    group_types.reserve(static_cast<size_t>(group_num));
+
+    // M04-PR4 atomic cutover (REQ-D3):
+    //   * FULL pools: last_partial = !source.lastBlockAligned() — the
+    //     planner Step 2 drops B+1 == total_cache_keys for these pools,
+    //     replacing the legacy dummy-tail append (deleted below).
+    //   * SWA / LINEAR pools: last_partial = false unconditionally — SWA
+    //     pools still emit the last 2 blocks regardless (M04 §3.3 Step 2
+    //     comment), LINEAR emits exactly one tail block.  Setting
+    //     last_partial=true on SWA would silently truncate the kvcache
+    //     window by 1 vs legacy peers and break cross-version pairing.
+    const bool source_last_partial = !source.lastBlockAligned();
+    for (int gid = 0; gid < group_num; ++gid) {
+        PoolDescriptor pd{};
+        pd.pool_id      = gid;
+        pd.layer_id     = -1;
+        pd.region_name  = (static_cast<size_t>(gid) < cache_config.group_region_names.size())
+                              ? cache_config.group_region_names[static_cast<size_t>(gid)]
+                              : KVCacheRegionName::DEFAULT;
+        pd.group_type   = groupTypeForConnector(cache_config, gid);
+        pd.stride_bytes = 0;
+        pd.last_partial = source_last_partial && pd.group_type == CacheGroupType::FULL;
+        pools.push_back(pd);
+        pool_block_counts.push_back(static_cast<size_t>(source.blocks(gid).size()));
+        group_types.push_back(pd.group_type);
+    }
+
+    const size_t total_logical_blocks = source.cacheKeys().size();
+    const auto   plan                  = buildUnifiedTransferPlan(/*model_id=*/0,
+                                                                  total_logical_blocks,
+                                                                  /*total_cache_keys=*/total_logical_blocks,
+                                                                  /*reuse_block_size=*/0u,
+                                                                  pools,
+                                                                  pool_block_counts,
+                                                                  /*shard_owner_rank=*/cp_size - 1,
+                                                                  cp_size,
+                                                                  /*use_hybrid=*/true,
+                                                                  /*hybrid_full_from_begin=*/true,
+                                                                  PlannerRole::kPrefillWrite);
+
+    KVCacheResource selected = source;
+    selected.initGroups(group_num,
+                        static_cast<int>(cache_config.layer_all_num),
+                        cache_config.layer_to_group_id,
+                        cache_config.kernelBlocksPerKvBlock(),
+                        group_types,
+                        cache_config.layer_region_to_group_id);
+
+    // -- Cache keys via controlled mutators (M01 §3.6 Fix 19 / M03 §4 Fix 76) --
+    selected.clearCacheKeys();
+    for (const auto& k : selected_keys) {
+        selected.appendCacheKey(k);
+    }
+    // M04-PR4 atomic cutover (Risk 9.2): legacy ``makeCpShardedConnectorResource``
+    // appended a dummy-tail cache_key here so the memory connector's
+    // unconditional drop-last contract discarded the dummy rather than the
+    // usable selected-last key.  Under the unified path the planner Step 2
+    // performs the drop *per-pool* — FULL pools whose source.lastBlockAligned()
+    // == false skip B+1 == total_cache_keys, SWA pools keep both tail blocks
+    // (REQ-D3) — so the wire-level dummy-tail trick is no longer required.
+    // ``lastBlockAlignedAll`` carries the source signal verbatim for receivers
+    // that still walk the request-level bit (mixed-mode pairs during rollout).
+    const bool selected_aligned = selectedLastRankKeysAreAligned(source, cp_size);
+    selected.setLastBlockAlignedAll(selected_aligned);
+
+    // -- Per-pool block lists from plan items (vLLM SupportsHMA per-pool view). --
+    std::vector<BlockIndicesType> per_pool_dst(static_cast<size_t>(group_num));
+    for (size_t p = 0; p < per_pool_dst.size(); ++p) {
+        per_pool_dst[p].reserve(selected_keys.size());
+    }
+    for (const auto& it : plan) {
+        const auto&        src_blocks = source.blocks(it.pool_id);
+        const BlockIdxType v          = (it.offset_index >= 0 && static_cast<size_t>(it.offset_index) < src_blocks.size())
+                                            ? src_blocks[static_cast<size_t>(it.offset_index)]
+                                            : NULL_BLOCK_IDX;
+        per_pool_dst[static_cast<size_t>(it.pool_id)].push_back(v);
+    }
+    for (int gid = 0; gid < group_num; ++gid) {
+        selected.mutableBlockIds(gid).assign(std::move(per_pool_dst[static_cast<size_t>(gid)]));
+    }
+
+    return selected;
+}
+
 }  // namespace
 
 KVCacheConnectorCoordinator::KVCacheConnectorCoordinator(const CacheConfig&                       cache_config,
@@ -159,6 +284,22 @@ bool KVCacheConnectorCoordinator::init() {
                      cache_config_.debugString().c_str(),
                      kv_cache_config_.to_string().c_str(),
                      runtime_config_.to_string().c_str());
+
+    // M04 PR-3: pre-compute the local handshake info from the cache config.
+    // Legacy path keeps all fields at 0; unified path
+    // (super_block_layout.enabled == true) populates the pinned-input
+    // pool_descriptor_hash and the M03 salt schema (placeholder zero until
+    // M03-PR1 lands the salt schema_version surface). The validator
+    // ``validatePeerHandshake`` is invoked by per-connector peer-pairing
+    // code once the peer's HandshakeInfo arrives over the wire.  Until that
+    // wiring lands, the cached info is consulted by unit tests only —
+    // legacy ↔ legacy default behaviour is byte-identical (no RPC, no
+    // additional fields populated).
+    local_handshake_info_ = computeLocalHandshakeInfo(cache_config_,
+                                                      /*hash_salt_version=*/0u,
+                                                      /*hash_salt_nonzero_bitmap=*/0u);
+    RTP_LLM_LOG_INFO("PD pair local handshake info: %s", local_handshake_info_.toString().c_str());
+
     if (kv_cache_config_.reuse_cache && kv_cache_config_.enable_memory_cache) {
         memory_connector_ = initMemoryConnector();
         connectors_.emplace_back(memory_connector_);
@@ -209,7 +350,12 @@ KVCacheConnectorCoordinator::asyncRead(const std::shared_ptr<KVCacheConnectorRea
         if (ref_keys.empty()) {
             return nullptr;
         }
-        ref_resource = makeCpShardedConnectorResource(kvcache_resource, cache_config_, ref_keys, cp_size);
+        // M04-PR2 gate: under the unified super-block layout, build the
+        // per-pool resource via the block-major planner. Default (env=0,
+        // super_block_layout.enabled=false) preserves legacy path verbatim.
+        ref_resource = cache_config_.super_block_layout.enabled
+                           ? makeUnifiedConnectorResource(kvcache_resource, cache_config_, ref_keys, cp_size)
+                           : makeCpShardedConnectorResource(kvcache_resource, cache_config_, ref_keys, cp_size);
         ref_keys     = ref_resource.cacheKeys();
     }
     auto resource = allocator_->incrKVCacheRef(ref_resource, ref_keys, true);
@@ -258,7 +404,10 @@ KVCacheConnectorCoordinator::asyncWrite(const std::shared_ptr<KVCacheConnectorRe
         if (ref_keys.empty()) {
             return nullptr;  // request shorter than one virtual block — nothing to write
         }
-        ref_resource = makeCpShardedConnectorResource(kvcache_resource, cache_config_, ref_keys, cp_size);
+        // M04-PR2 gate: see asyncRead for rationale. Default path unchanged.
+        ref_resource = cache_config_.super_block_layout.enabled
+                           ? makeUnifiedConnectorResource(kvcache_resource, cache_config_, ref_keys, cp_size)
+                           : makeCpShardedConnectorResource(kvcache_resource, cache_config_, ref_keys, cp_size);
         ref_keys     = ref_resource.cacheKeys();
     }
     auto resource = allocator_->incrKVCacheRef(ref_resource, ref_keys, true);
@@ -480,6 +629,19 @@ bool KVCacheConnectorCoordinator::initP2PConnectorInternal() {
     RTP_LLM_LOG_INFO("P2PConnector initialized successfully, total connectors: %zu", connectors_.size());
 #endif
     return true;
+}
+
+void KVCacheConnectorCoordinator::validatePeerHandshake(const HandshakeInfo& peer_info) const {
+    // REQ-D1 / REQ-D2: any disagreement with a peer's HandshakeInfo is a
+    // hard abort.  Mixed-mode pairs (legacy ↔ unified) are refused outright
+    // — the per-request magic-byte fall-back (§4.3) does NOT protect
+    // against silent reuse-miss at the cache_key layer (RDMA routes by
+    // opaque key strings only).  The fail-fast diagnostic includes both
+    // sides of the handshake so on-call can immediately spot the drift.
+    std::string err;
+    if (!validateHandshake(local_handshake_info_, peer_info, &err)) {
+        RTP_LLM_FAIL("%s", err.c_str());
+    }
 }
 
 std::vector<CacheKeyType> KVCacheConnectorCoordinator::memoryCacheKeys() const {

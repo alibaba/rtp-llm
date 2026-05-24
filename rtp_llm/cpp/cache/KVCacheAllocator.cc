@@ -81,11 +81,33 @@ MallocResult KVCacheAllocator::malloc(const MallocInfo& malloc_info) {
         return {false, 0};
     }
 
+    // M01-PR2: unified-path gate. Default (env=0) leaves enabled=false and the
+    // legacy malloc dispatch below is bit-equal to today's behaviour.
+    if (config_.super_block_layout.isUnified()) {
+        return unifiedMalloc(malloc_info);
+    }
+
     if (malloc_info.batch_kv_cache_resource->curBlocksNum() == 0) {
         return initMalloc(malloc_info);
     } else {
         return incrMalloc(malloc_info);
     }
+}
+
+// M01-PR2: default unified entry points — only HybridPoolKVCacheAllocator
+// overrides them. A non-Hybrid allocator with super_block_layout.enabled=true
+// is a config-time invariant violation; fail loudly so smoke catches the
+// mismatch instead of silently falling through.
+MallocResult KVCacheAllocator::unifiedMalloc(const MallocInfo& /*malloc_info*/) {
+    RTP_LLM_FAIL("unifiedMalloc invoked on an allocator that does not implement the unified path "
+                 "(super_block_layout.enabled is true but the runtime allocator is not "
+                 "HybridPoolKVCacheAllocator)");
+}
+
+void KVCacheAllocator::unifiedFree(const FreeInfo& /*free_info*/) {
+    RTP_LLM_FAIL("unifiedFree invoked on an allocator that does not implement the unified path "
+                 "(super_block_layout.enabled is true but the runtime allocator is not "
+                 "HybridPoolKVCacheAllocator)");
 }
 
 uint32_t KVCacheAllocator::convertToGlobalLayerId(size_t model_id, int local_layer_id) const {

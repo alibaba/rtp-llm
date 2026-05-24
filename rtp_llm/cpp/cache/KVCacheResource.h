@@ -11,6 +11,10 @@
 
 namespace rtp_llm {
 
+// ``SuperBlockLayout`` is defined in CacheGroupType.h (already included above).
+// Kept as a separately-defined lightweight struct so this header does NOT
+// transitively pull in CacheConfig.h / c10 headers.
+
 using CacheKeyType = int64_t;
 using BlockIdxType = int32_t;
 
@@ -101,6 +105,20 @@ public:
     CacheKeysType&       cacheKeys();
     const CacheKeysType& cacheKeys() const;
 
+    // ---------- M01-PR3 / M04 pattern: controlled cache-keys mutators ----------
+    // Additive convenience wrappers that match the sanctioned construction-time
+    // pattern documented in M01 §3.6 (Panel-A item 5 / C3). Phase-6 cleanup
+    // will privatise ``cache_keys`` and force all call-sites through these
+    // methods + ``BatchKVCacheResource``'s fan-out (``clearCacheKeys`` /
+    // ``pushBackCacheKey``). Today they remain optional — the existing public
+    // ``cacheKeys()`` accessor is retained for backward compatibility.
+    void clearCacheKeys() {
+        cache_keys.clear();
+    }
+    void appendCacheKey(CacheKeyType k) {
+        cache_keys.push_back(k);
+    }
+
     // Return rank-local cache keys: every cp_size-th key starting from cp_rank.
     // localCacheKeys(r, s)[i] == cacheKeys()[i * s + r]
     // Note: when cacheKeys().size() % cp_size != 0 (e.g. 1 real block, cp_size=2),
@@ -129,6 +147,14 @@ public:
 
     bool lastBlockAligned() const;
     void setLastBlockAligned(bool last_block_aligned);
+    // M01-PR3 / M04 sanctioned naming alias (Panel-A item 5 / C3 closure).
+    // Same semantic as ``setLastBlockAligned`` — present so call-sites
+    // converging on the unified pattern can use the canonical name without
+    // touching the legacy spelling. Phase-6 cleanup will retire the legacy
+    // name in favour of this one.
+    void setLastBlockAlignedAll(bool v) {
+        setLastBlockAligned(v);
+    }
 
     size_t remoteReuseBlocksNum() const;
     void   setRemoteReuseBlocksNum(size_t remote_reuse_blocks_num);
@@ -136,6 +162,36 @@ public:
     void swapBlocks(size_t group_id, size_t rhs, size_t lhs);
 
     std::string debugString() const;
+
+    // ---------- M01-PR3: unified super-block view (additive, dual-storage) ----------
+    //
+    // ``super_block_ids_`` is the canonical per-stream allocation list under the
+    // unified path (``CacheConfig::super_block_layout.enabled == true``). It is
+    // populated by ``HybridPoolKVCacheAllocator::unifiedMalloc`` alongside the
+    // existing per-pool ``group_block_ids`` (which remains the per-pool view —
+    // byte-identical under bps[p]==1 for DSV4 today) and drained by
+    // ``unifiedFree``. Under the legacy per-pool path (default) this vector is
+    // empty and ``isUnified()`` returns false; consumers continue using
+    // ``group_block_ids`` with no behaviour change. The per-pool collapse to a
+    // single source of truth happens in Phase-6 cleanup (M01-PR6).
+    bool isUnified() const {
+        return !super_block_ids_.empty();
+    }
+
+    const BlockIndicesType& superBlockIds() const {
+        return super_block_ids_;
+    }
+    BlockIndicesType& superBlockIds() {
+        return super_block_ids_;
+    }
+
+    // Materialise the per-pool view of ``super_block_ids_`` for pool ``p``
+    // according to ``layout.bps``. Emits ``bps[p]`` entries per super-block:
+    //   poolBlockIdsView(p)[i*bps[p] + k] = layout.poolBlockId(p, S_i, k)
+    // Under bps[p]==1 (DSV4 today) the result is byte-equal to
+    // ``superBlockIds()``; future bps>1 layouts expand it. Returns a freshly
+    // constructed vector — callers that need a long-lived buffer should cache.
+    BlockIndicesType poolBlockIdsView(int p, const SuperBlockLayout& layout) const;
 
 private:
     // layer_id -> block_indices
@@ -145,6 +201,11 @@ private:
     // group_id -> block_indices
     GroupBlockIds group_block_ids;
     CacheKeysType cache_keys;
+
+    // M01-PR3: canonical unified-path super-block id list. Empty under legacy
+    // per-pool mode. Dual-storage with ``group_block_ids`` until Phase-6
+    // cleanup removes ``group_block_ids`` entirely.
+    BlockIndicesType super_block_ids_;
 
     size_t device_reuse_block_num_{0};
     size_t memory_reuse_block_num_{0};

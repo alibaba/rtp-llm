@@ -7,18 +7,40 @@
 #include <unordered_set>
 #include <vector>
 
+#include <functional>
+
 #include "rtp_llm/cpp/utils/LRUCache.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/BlockPool.h"
+#include "rtp_llm/cpp/cache/BlockRefCounter.h"  // UnifiedRefCounter (M03-PR3)
 
 namespace rtp_llm {
 
+class SharedBlockCache;  // fwd for ReleaseGuard
+
 class SharedBlockCache {
 public:
+    // M03-PR2: dual-storage UnifiedCacheItem.
+    //   * Legacy path: ``slots`` is the per-group vector indexed by group_id —
+    //     unchanged so all current callers keep their semantics.
+    //   * Unified path (when ``CacheConfig::super_block_layout.enabled``):
+    //     ``slots`` is a length-1 vector with ``slots[0] = super_block_id``;
+    //     read via ``superBlockId()``. ``pin_for_swa_tail`` is set by the SWA
+    //     reference path (M03-PR4) and skipped during eviction. ``use_ref`` is
+    //     bumped under ``mu_`` by ``matchUnified`` for every matched key and
+    //     drained by ``ReleaseGuard::abandon()`` / explicit ``decUseRef`` at
+    //     match-completion (lifecycle in M03-PR3 will move to UnifiedRefCounter).
     struct UnifiedCacheItem {
         CacheKeyType              cache_key;
-        bool                      is_resident = false;
+        bool                      is_resident      = false;
+        bool                      pin_for_swa_tail = false;  // A09 45-6 — SWA tail-veto
+        int                       use_ref          = 0;      // matchUnified pin count
         std::vector<BlockIdxType> slots;
+
+        // Unified-path accessor. Returns NULL_BLOCK_IDX if slots is empty.
+        int superBlockId() const {
+            return slots.empty() ? static_cast<int>(NULL_BLOCK_IDX) : static_cast<int>(slots[0]);
+        }
     };
 
     struct EvictResult {
@@ -29,6 +51,83 @@ public:
     struct MatchResult {
         bool                      found = false;
         std::vector<BlockIdxType> group_blocks;
+    };
+
+    // ---- M03-PR2: unified TOCTOU-safe match types ----
+    //
+    // ReleaseGuard holds ONE entry per ``incUseRef`` bump performed during a
+    // ``matchUnified`` walk (Panel-A item 1 / Fix 78 follow-up: a single-key
+    // design leaked N-1 use_ref entries on multi-key matches because abandon
+    // touched only the last key — the vector form drains every bump).
+    //
+    // Lifecycle:
+    //   * ``commit()``  — the request has materialised; ownership of every
+    //     bumped use_ref transfers to the request. Guard becomes dormant.
+    //   * ``abandon()`` — caller failed downstream; iterate ``keys_`` in
+    //     reverse and call ``decUseRef`` once per entry.
+    //   * dtor — if neither commit nor abandon was called, abandon is invoked
+    //     as a RAII safety net (early return / exception path).
+    //
+    // Copy is deleted (would double-decrement on dtor). Move is allowed so
+    // the guard can be returned by value inside MatchResultUnified.
+    class ReleaseGuard {
+    public:
+        ReleaseGuard() = default;
+        explicit ReleaseGuard(SharedBlockCache* cache): cache_(cache) {}
+        ~ReleaseGuard() {
+            abandon();
+        }
+
+        ReleaseGuard(const ReleaseGuard&)            = delete;
+        ReleaseGuard& operator=(const ReleaseGuard&) = delete;
+
+        ReleaseGuard(ReleaseGuard&& other) noexcept:
+            cache_(other.cache_), keys_(std::move(other.keys_)) {
+            other.cache_ = nullptr;
+            other.keys_.clear();
+        }
+        ReleaseGuard& operator=(ReleaseGuard&& other) noexcept {
+            if (this != &other) {
+                abandon();
+                cache_       = other.cache_;
+                keys_        = std::move(other.keys_);
+                other.cache_ = nullptr;
+                other.keys_.clear();
+            }
+            return *this;
+        }
+
+        // Record one use_ref bump under ``cache_->mu_`` (called by
+        // matchUnified). Caller is responsible for the actual increment of
+        // the item's use_ref counter — addKey only records the witness.
+        void addKey(CacheKeyType k) {
+            keys_.push_back(k);
+        }
+
+        // Caller promises to manage refs from here on; guard goes dormant.
+        void commit() noexcept {
+            keys_.clear();
+            cache_ = nullptr;
+        }
+
+        // Drain every recorded bump. Iterates in reverse for symmetry with
+        // bump order. Idempotent — repeat calls see an empty vector.
+        void abandon() noexcept;
+
+        size_t pendingBumpCount() const {
+            return keys_.size();
+        }
+
+    private:
+        SharedBlockCache*         cache_ = nullptr;
+        std::vector<CacheKeyType> keys_;  // one entry per use_ref bump (Fix 78 follow-up)
+    };
+
+    struct MatchResultUnified {
+        bool             found        = false;
+        size_t           reuse_length = 0;  // matched_count * Tlog, or 0 on SWA tail-veto
+        std::vector<int> super_block_ids;   // one S per matched key (in walk order)
+        ReleaseGuard     release_guard;     // RAII over every use_ref bump
     };
 
     using LRUCacheType = LRUCache<CacheKeyType, UnifiedCacheItem>;
@@ -48,6 +147,68 @@ public:
 
     size_t evictAndFree(size_t min_blocks);
 
+    // ---- M03-PR2: unified-path entry points (default-OFF) ----
+    //
+    // Caller contract:
+    //   * These methods are only invoked when
+    //     ``CacheConfig::super_block_layout.enabled == true``. The legacy
+    //     ``put`` / ``match`` / ``matchGroup`` / ``selectAndEvict`` / ``evictAndFree``
+    //     paths above remain the steady-state code for non-unified configs.
+    //   * Locking (see §3.0 of M03 plan):
+    //       L1 = ``SharedBlockCache::mu_`` (held only inside these methods'
+    //            select / snapshot phase, and re-acquired briefly as a leaf
+    //            during cascade for the re-residency probe).
+    //       L1 is ALWAYS RELEASED before crossing into the per-pool
+    //       ``BlockPool::blockCacheFree`` (which takes its own L3 lock pair).
+    //   * Snapshot-then-cascade pattern (Fix 79 / Fix 80) prevents the
+    //     lock-drop / put-overflow race.
+    //
+    // ``putUnified``:
+    //   Inserts ``{cache_key, super_block_id}`` (length-1 slots vector).
+    //   When the LRU overflows ``kCacheMaxCapacity``, surfaces the displaced
+    //   item via the LRUCache overflow callback, releases ``mu_``, and
+    //   cascade-frees the displaced super_block_id's per-pool blocks under
+    //   the same re-residency re-check used by ``evictAndFreeUnified``.
+    void putUnified(CacheKeyType cache_key, int super_block_id, bool is_resident);
+
+    // ``matchUnified``:
+    //   Walks ``keys`` in order under ONE acquisition of ``mu_``. For every
+    //   key that hits a resident entry, bumps the per-item ``use_ref`` and
+    //   records the key in the returned ``ReleaseGuard``. Stops at the first
+    //   miss / non-resident entry (truncation distinguishable via
+    //   ``super_block_ids.size() < keys.size()``). If ``check_swa_tail`` is
+    //   true and the matched tail is not SWA-valid, returns
+    //   ``reuse_length=0`` per M03 §5 FULL_HIT vs KV_ONLY_HIT semantics.
+    MatchResultUnified matchUnified(const std::vector<CacheKeyType>& keys,
+                                    int                              tokens_per_block = 1,
+                                    bool                             check_swa_tail   = false);
+
+    // ``selectAndEvictUnified``:
+    //   Builds a snapshot of evictable items under ``mu_``, erases them from
+    //   the LRU, drops ``mu_``, then returns the snapshot. Items pinned by
+    //   ``pin_for_swa_tail`` or with ``use_ref > 0`` are skipped (R10 / Fix 78).
+    std::vector<UnifiedCacheItem> selectAndEvictUnified(size_t min_super_blocks);
+
+    // ``evictAndFreeUnified``:
+    //   Calls ``selectAndEvictUnified`` (mu_ dropped), then cascade-frees
+    //   each item's per-pool blocks. Re-acquires ``mu_`` briefly per item to
+    //   re-check LRU residency before declaring the dec safe (R8 / Fix 80).
+    //   Returns the number of items actually cascaded.
+    size_t evictAndFreeUnified(size_t min_super_blocks);
+
+    // Decrement the per-item ``use_ref``. Called by ``ReleaseGuard::abandon``
+    // and by explicit request-side ``decUseRef`` at match-completion. Bumps
+    // are emitted by ``matchUnified`` under ``mu_``. Idempotent on missing
+    // keys (treated as no-op rather than fail — the LRU may have been
+    // evicted-then-re-evicted between bump and abandon under heavy churn).
+    void decUseRef(CacheKeyType cache_key);
+
+    // Inspect ``use_ref`` for a key. Returns 0 if absent. Test / diag only.
+    int useRefCount(CacheKeyType cache_key) const;
+
+    // Set / clear the SWA tail-pin flag on a resident item. No-op if absent.
+    void setSwaTailPin(CacheKeyType cache_key, bool pinned);
+
     std::optional<UnifiedCacheItem> remove(CacheKeyType cache_key);
 
     bool contains(CacheKeyType cache_key) const;
@@ -60,6 +221,39 @@ public:
 
     int64_t version() const;
 
+    // ---- M03-PR3: UnifiedRefCounter wiring (default-OFF) ----
+    //
+    // Both setters are no-ops on the legacy path — callers MUST only invoke
+    // them when ``CacheConfig::super_block_layout.enabled == true``. When
+    // ``unified_ref_counter_`` is non-null, the unified entry points
+    // (``putUnified`` / ``matchUnified`` / ``evictAndFreeUnified`` /
+    // ``decUseRef``) issue the dual-write contract documented on
+    // ``UnifiedRefCounter`` (BlockRefCounter.h): every primary bump/dec is
+    // paired with the matching legacy per-pool ``BlockPool::*Reference / *Free``
+    // call at the same critical section. When ``unified_ref_counter_`` is
+    // null the unified entry points fall back to the legacy use_ref-on-item
+    // path introduced by PR-2 (preserved as a fallback for tests that
+    // construct ``SharedBlockCache`` without an allocator).
+    //
+    // ``super_block_reclaim_callback_`` is invoked once per fully-reclaimed
+    // super-block (``UnifiedRefCounter::isZero(S) == true`` after a CACHE
+    // dec) so the owning ``SuperBlockFreeList`` can push S back. The
+    // callback runs OUTSIDE the cache ``mu_`` (lock-order §3.0 — L1 must be
+    // released before the allocator's L2). When unset, the super-block is
+    // not pushed back (legacy fallback; M01 ``unifiedFree`` handles request-
+    // side reclaim).
+    void setUnifiedRefCounter(UnifiedRefCounter* counter) {
+        unified_ref_counter_ = counter;
+    }
+    void setSuperBlockReclaimCallback(std::function<void(int)> cb) {
+        super_block_reclaim_callback_ = std::move(cb);
+    }
+
+    // Diagnostic accessor used by tests / metrics (read-only).
+    UnifiedRefCounter* unifiedRefCounter() const {
+        return unified_ref_counter_;
+    }
+
 private:
     static const size_t kCacheMaxCapacity = 10000000;
 
@@ -69,6 +263,12 @@ private:
 
     int                       group_num_ = 0;
     std::vector<BlockPoolPtr> group_pools_;
+
+    // M03-PR3: wired by HybridPoolKVCacheAllocator::doInit() when
+    // ``config_.super_block_layout.enabled``. Owned by the allocator; the
+    // pointer stays valid for the lifetime of the cache.
+    UnifiedRefCounter*       unified_ref_counter_ = nullptr;
+    std::function<void(int)> super_block_reclaim_callback_;
 };
 
 using SharedBlockCachePtr = std::shared_ptr<SharedBlockCache>;

@@ -335,6 +335,13 @@ MallocResult HybridKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
 }
 
 void HybridKVCacheAllocator::free(const FreeInfo& free_info) {
+    // M01-PR2: unified-path gate. Default (env=0) leaves enabled=false and the
+    // body below is bit-equal to today's behaviour.
+    if (config_.super_block_layout.isUnified()) {
+        unifiedFree(free_info);
+        return;
+    }
+
     auto& kv_cache_resource = free_info.batch_kv_cache_resource;
     if (kv_cache_resource->curBlocksNum() == 0) {
         return;

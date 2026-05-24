@@ -128,6 +128,26 @@ def assemble_indexer_k(
         )
     if chunk_T == 0:
         return
+    # REQ-D9 (M04 §10.1): release-build check (not debug-only `assert`) that
+    # the CP group used for indexer all_gather actually matches the bound
+    # CPContext.  Debug-only asserts hide build-flag-flip miswiring (e.g.
+    # M04-PR2 `RTP_LLM_UNIFIED_PD_PLANNER` toggled with a stale CP group)
+    # with no externally visible signal until CP>1 smoke triggers, which is
+    # the exact scenario this op targets.  Use a plain `if`+`raise` so the
+    # check stays live under -O / Python -O optimization (where `assert` is
+    # stripped).
+    if plan.cp_ctx.cp_size > 1:
+        try:
+            tp_world_size = collective_torch._get_group(Group.TP).size()
+        except Exception:
+            tp_world_size = None
+        if tp_world_size is not None and tp_world_size != plan.cp_ctx.cp_size:
+            raise RuntimeError(
+                f"indexer CP all_gather group mismatch (REQ-D9): "
+                f"Group.TP world_size={tp_world_size} != cp_ctx.cp_size="
+                f"{plan.cp_ctx.cp_size}.  Indexer kernels must receive the CP "
+                f"group (cp_group != tp_group), not the TP process group."
+            )
     # Use raw rank-major all_gather (NOT cp_all_gather_full_async, which
     # asserts T_local == cp_ctx.chunk_length — that's the prefill-token
     # space; here local_k_* lives in KV-pool-entry space sized by

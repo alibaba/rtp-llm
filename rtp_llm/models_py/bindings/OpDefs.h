@@ -221,6 +221,56 @@ struct PyModelInitResources {
     int64_t                max_context_batch_size = 1;
 };
 
+// Per-region descriptor surfaced to Python on the pybind boundary.
+//
+// One instance per group (per pool) lifted out of KVCache-init-time data
+// once and copied into PyAttentionInputs::region_descs on every forward
+// (cheap — at most kRegionCount POD entries, no tensor allocation).
+//
+// See M05 §3.1 for the full producer/consumer contract; every field below
+// MUST also appear as a `def_readonly` accessor in OpDefs.cc.
+struct PyKVCacheRegionDesc {
+    // ---- region identity ---------------------------------------------------
+    int region_name = 0;   // KVCacheRegionName enum int (0..7)
+    int group_id    = -1;  // canonical CacheConfig group id
+
+    // ---- per-block / per-entry shape --------------------------------------
+    int entries_per_block          = 0;  // tokens (KV) or 1 (state)
+    int kernel_blocks_per_kv_block = 1;  // bps factor; ≡1 under F02 bps≡1
+    int num_blocks                 = 0;  // per-region kernel-block count
+    int region_max_cols            = 0;  // per-region effective_max_blocks
+
+    // ---- per-block / per-scale byte strides --------------------------------
+    int64_t kv_block_stride_bytes  = 0;  // raw per-block byte stride incl. TMA pad
+    int64_t kv_scale_stride_bytes  = 0;
+
+    // ---- raw base pointers -------------------------------------------------
+    int64_t kv_pool_base_ptr   = 0;  // raw uint8 base of region pool
+    int64_t kv_scale_base_ptr  = 0;  // 0 if no scale tensor
+
+    // ---- per-slot byte size + null sentinel --------------------------------
+    int bytes_per_entry  = 0;
+    int null_block_value = 0;  // 0 for KV pools, -1 for state pools
+
+    // ---- attribute predicates ----------------------------------------------
+    bool has_tma_padding            = false;
+    bool is_state_pool              = false;
+    bool is_contiguous_paged_blocks = false;  // INDEXER pool MUST be contiguous
+
+    // ---- INDEXER-only invariants -------------------------------------------
+    int head_dim    = 0;
+    int entry_bytes = 0;  // alias for bytes_per_entry surfaced to indexer
+
+    // ---- CP layout flag (STATIC; topology lives in CPShardConfig) ----------
+    bool cp_sharded = false;
+
+    // ---- STATE-pool offset constexpr ---------------------------------------
+    int stride_elems = 0;  // 2 * coff * head_dim
+
+    // ---- STATE-pool ring depth ---------------------------------------------
+    int max_state_blocks = 0;  // CacheConfig.state_block_num for STATE pools; 0 otherwise
+};
+
 struct PyCacheStoreInputs {
     size_t                   context_batch_size = 0;
     size_t                   decoder_batch_size = 0;
@@ -290,6 +340,34 @@ struct PyAttentionInputs {
     // which aliases group 0.
     std::vector<torch::Tensor> kv_cache_kernel_block_id_device_by_group;
     torch::Tensor              kv_cache_layer_to_group;
+
+    // === Unified block-id contract (phase 1 additive; phase 3 replaces by_group). ===
+    //
+    // Unified kernel-block id tensor on CUDA. Shape [B, max_kernel_blocks] int32.
+    // Under bps≡1 every group's by_group[g] is a zero-copy alias of this tensor.
+    // (Producer wiring lands in M05 PR-2; PR-1 only declares the field.)
+    torch::Tensor kv_cache_unified_block_id_device;
+
+    // Pinned host mirror of the unified kernel-block id tensor.
+    // Materialised when use_mla is true.
+    torch::Tensor kv_cache_unified_block_id_host;
+
+    // Pinned host physical (logical) block ids for cache-store / PD transfer.
+    // Shape [B, max_blocks] int32 for the bps≡1 case.
+    torch::Tensor kv_cache_unified_phys_block_id_host;
+
+    // Per-region descriptor table. Index = group_id. Cheaply copied each forward.
+    // Defaults to empty so legacy behaviour is preserved until M05 PR-2 producer
+    // wiring lands.
+    std::vector<PyKVCacheRegionDesc> region_descs;
+
+    // Typed [layer_num, kRegionCount] int32 host tensor. Replaces the legacy
+    // untyped `kv_cache_layer_to_group_dpsk_v4` Python attribute set by
+    // NormalModelInputGatherer (B07 04-8 / 18-2). `-1` marks unowned cells.
+    // Canonical region ordering: KVCacheRegionName ascending (B07 46-4).
+    // Default-empty tensor preserves legacy behaviour in PR-1.
+    torch::Tensor kv_cache_layer_region_descs;
+
     caffe2::TypeMeta           dtype;
     // Cumulative sequence lengths for attention kernels (e.g. FusedRopeKVCacheDecodeOp).
     // cu_seqlens lives on CUDA device; cu_seqlens_host is its pinned-memory CPU mirror

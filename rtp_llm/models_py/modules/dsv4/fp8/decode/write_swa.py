@@ -26,6 +26,10 @@ def decode_write_swa_fp8(
     bsz: int,
     q_len: int,
     head_dim: int,
+    *,
+    super_block_id_namespace: bool = False,
+    bps_swa: int = 1,
+    region_block_offset: int = 0,
 ) -> None:
     """Write newly-computed SWA KV into the FP8 584B/slot pool.
 
@@ -35,6 +39,10 @@ def decode_write_swa_fp8(
     ``slot_mapping[i] == -1`` entries are skipped in-kernel, so CUDA-graph
     padding slots at the tail of max-bs buffers don't need a Python-side
     slice.
+
+    M07 PR-1: passes ``super_block_id_namespace`` / ``bps_swa`` /
+    ``region_block_offset`` through to
+    :func:`quantize_and_insert_k_cache` — bit-equal under bps≡1.
     """
     if slot_mapping is None or slot_mapping.numel() == 0 or swa_pool_3d is None:
         return
@@ -48,4 +56,11 @@ def decode_write_swa_fp8(
         f"[T, {head_dim}] KV view, got shape={tuple(kv_flat.shape)} "
         f"stride={tuple(kv_flat.stride())}"
     )
-    quantize_and_insert_k_cache(kv_flat, swa_pool_3d, slot_mapping)
+    quantize_and_insert_k_cache(
+        kv_flat,
+        swa_pool_3d,
+        slot_mapping,
+        super_block_id_namespace=super_block_id_namespace,
+        bps_swa=bps_swa,
+        region_block_offset=region_block_offset,
+    )

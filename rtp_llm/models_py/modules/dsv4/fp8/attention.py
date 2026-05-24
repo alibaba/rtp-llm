@@ -1000,6 +1000,68 @@ class AttentionFP8(nn.Module):
         work then all-gathers across ranks and strips padding."""
         self._cp_ctx = cp_ctx
 
+    def _pool_handle(self, attn_type: int) -> Optional["PoolHandle"]:
+        """M06 §2.1 + §3.1.3: resolve a unified PoolHandle for this layer
+        and ``attn_type``.
+
+        Tries the descriptor-driven Path A first (consumes
+        ``attn_inputs.region_descs`` published by M05); falls back to the
+        legacy vec_dim-hinted Path B (mirrors today's
+        :meth:`_pool_view_3d_fp8` derivation). Returns ``None`` when the
+        layer doesn't own this region.
+
+        Additive — the existing :meth:`_pool_view` / :meth:`_pool_view_3d_fp8`
+        / :meth:`_pool_entries_per_block` triplet stays in place for
+        kernels that haven't yet migrated; new consumers should prefer
+        ``_pool_handle`` to consolidate stride / TMA-pad / cyclic-modulus
+        introspection in one object.
+        """
+        from rtp_llm.models_py.modules.dsv4.fp8._pool_handle import (
+            make_pool_handle,
+            make_pool_handle_from_raw,
+        )
+
+        if self._kv_cache is None:
+            return None
+        attn_type_enum = _ATTN_TYPE_ENUM_BY_INT.get(attn_type)
+        if attn_type_enum is None:
+            return None
+
+        # Path A: consume PyKVCacheRegionDesc list from M05 if attached.
+        region_descs = getattr(self, "_region_descs", None)
+        if region_descs is None:
+            attn_inputs = getattr(self, "_attn_inputs", None)
+            region_descs = (
+                getattr(attn_inputs, "region_descs", None)
+                if attn_inputs is not None
+                else None
+            )
+        if region_descs is not None and len(region_descs) > 0:
+            handle = make_pool_handle(
+                self._kv_cache,
+                self.layer_id,
+                int(attn_type),
+                region_descs=region_descs,
+            )
+            if handle is not None and handle.eb > 0:
+                return handle
+
+        # Path B: vec_dim-hinted legacy fallback (today's behaviour).
+        spec = self._pool_spec.get(attn_type)
+        if spec is None:
+            return None
+        try:
+            layer_kv = self._kv_cache.get_layer_cache(self.layer_id, attn_type_enum)
+        except RuntimeError:
+            return None
+        base = layer_kv.kv_cache_base
+        if base is None or base.numel() == 0 or base.dim() != 2:
+            return None
+        vec_dtype, vec_dim = spec
+        return make_pool_handle_from_raw(
+            base, int(attn_type), vec_dtype, int(vec_dim)
+        )
+
     def _pool_view(self, attn_type: int) -> Optional[torch.Tensor]:
         """Return a flat ``[total_slots, vec_dim]`` typed view of the
         framework BlockPool for this layer + attn_type, or ``None`` if
@@ -1517,7 +1579,17 @@ class AttentionFP8(nn.Module):
         hand them to Compressor / Indexer via ``set_pool_context``.  Called
         once at the top of every forward/forward_decode; paired with
         :meth:`_clear_compressor_pool_context` in a try/finally so stale
-        pool views don't leak across forwards."""
+        pool views don't leak across forwards.
+
+        M08 §4.1 / PR-5 — when ``self._attn_inputs.kv_cache_unified_block_id_device``
+        is populated (M05 producer wiring under the F02 super_block_layout
+        unified config), it is forwarded to both Compressor and Indexer
+        as the unified block table. Under bps=1 the inner wrappers select
+        between unified and per-pool views without changing kernel
+        signatures (see ``CompressorFP8._select_state_bt`` /
+        ``CompressorFP8._select_kv_bt``). When unified_bt is absent the
+        legacy two-table contract is preserved bit-equal.
+        """
         from rtp_llm.models_py.modules.dsv4.attn_type import (
             CSA_KV,
             CSA_STATE,
@@ -1528,6 +1600,15 @@ class AttentionFP8(nn.Module):
         )
 
         bt_by_type = self._block_tables_by_type
+
+        # M08 PR-5 — source unified_bt from PyAttentionInputs (M05 binding).
+        # Empty / unwired tensor → fall back to legacy two-table contract.
+        unified_bt: Optional[torch.Tensor] = None
+        attn_inputs = getattr(self, "_attn_inputs", None)
+        if attn_inputs is not None:
+            cand = getattr(attn_inputs, "kv_cache_unified_block_id_device", None)
+            if cand is not None and cand.numel() > 0 and cand.dim() == 2:
+                unified_bt = cand
 
         if self.compressor is not None:
             if self.compress_ratio == 4:
@@ -1560,7 +1641,8 @@ class AttentionFP8(nn.Module):
                 self._pool_entries_per_block(state_at) if state_at is not None else 0
             )
             self.compressor.set_pool_context(
-                kv_view, kv_bt, kv_eb, state_view, state_bt, state_eb
+                kv_view, kv_bt, kv_eb, state_view, state_bt, state_eb,
+                unified_bt=unified_bt,
             )
 
         if self.indexer is not None:
@@ -1572,7 +1654,8 @@ class AttentionFP8(nn.Module):
             state_bt = bt_by_type.get(INDEXER_STATE) if bt_by_type is not None else None
             state_eb = self._pool_entries_per_block(INDEXER_STATE)
             self.indexer.set_pool_context(
-                kv_view, kv_bt, kv_eb, state_view, state_bt, state_eb
+                kv_view, kv_bt, kv_eb, state_view, state_bt, state_eb,
+                unified_bt=unified_bt,
             )
 
     def _clear_compressor_pool_context(self) -> None:

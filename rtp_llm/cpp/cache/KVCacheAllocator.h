@@ -54,6 +54,14 @@ public:
                                                    int                            reserve_step) const                 = 0;
 
     MallocResult malloc(const MallocInfo& malloc_info);
+
+    // M01-PR2: unified-path entry points. Default impls return failure / no-op
+    // so non-Hybrid allocators trip a hard error if env=1 is enabled against
+    // them. The legacy path is completely unchanged when
+    // ``config_.super_block_layout.enabled == false`` (default).
+    virtual MallocResult unifiedMalloc(const MallocInfo& malloc_info);
+    virtual void         unifiedFree(const FreeInfo& free_info);
+
     virtual void blockCopy(int src_block_index, int dest_block_index);
     virtual void blockBatchCopy(const std::vector<BlockIdPair>& copy_mapping);
     virtual void blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end);

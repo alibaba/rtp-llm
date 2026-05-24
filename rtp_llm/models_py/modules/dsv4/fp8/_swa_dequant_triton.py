@@ -171,6 +171,10 @@ def dequantize_and_gather_k_cache(
     block_table: torch.Tensor,
     block_size: int,
     offset: int,
+    *,
+    super_block_id_namespace: bool = False,
+    bps_swa: int = 1,
+    region_block_offset: int = 0,
 ) -> None:
     """Dequantize + gather FP8 K cache into a BF16 workspace.
 
@@ -185,10 +189,21 @@ def dequantize_and_gather_k_cache(
       gather_lens:  optional ``[num_reqs]`` int — tokens to gather (suffix);
                     ``None`` ⇒ gather all ``seq_lens[r]`` tokens for request r.
       block_table:  ``[num_reqs, max_blocks_per_seq]`` int — physical block id
-                    per logical block per request.
+                    per logical block per request (super_block_id namespace
+                    when ``super_block_id_namespace=True``; pool-local otherwise).
       block_size:   tokens per cache block (matches the 3D shape of k_cache).
       offset:       column offset in ``out`` to start writing.
+
+    M07 PR-1 namespace kwargs (wrapper-only; kernel bit-equal under bps≡1).
+    See ``_swa_kv_insert_triton.quantize_and_insert_k_cache`` for the
+    full contract.
     """
+    if super_block_id_namespace and bps_swa != 1:
+        raise NotImplementedError(
+            "dequantize_and_gather_k_cache: bps_swa>1 requires the M07 PR-2 "
+            "region_block_offset kernel diff (Choice B)."
+        )
+    del region_block_offset  # PR-1 ignores; only consumed by PR-2 kernel diff.
     assert out.dim() == 3 and out.shape[-1] == HEAD_DIM and out.dtype == torch.bfloat16
     assert (
         k_cache.dim() == 3
@@ -337,12 +352,23 @@ def gather_k_cache_packed(
     block_table: torch.Tensor,
     block_size: int,
     offset: int,
+    *,
+    super_block_id_namespace: bool = False,
+    bps_swa: int = 1,
+    region_block_offset: int = 0,
 ) -> None:
     """Gather FP8 K cache into compact per-token packed slots.
 
     Args mirror :func:`dequantize_and_gather_k_cache`, but ``out`` is
-    ``[B, max_tokens, 584] uint8`` rather than BF16.
+    ``[B, max_tokens, 584] uint8`` rather than BF16. See
+    :func:`dequantize_and_gather_k_cache` for the M07 PR-1 namespace kwargs.
     """
+    if super_block_id_namespace and bps_swa != 1:
+        raise NotImplementedError(
+            "gather_k_cache_packed: bps_swa>1 requires the M07 PR-2 "
+            "region_block_offset kernel diff (Choice B)."
+        )
+    del region_block_offset  # PR-1 ignores; only consumed by PR-2 kernel diff.
     assert out.dim() == 3 and out.shape[-1] == ENTRY_BYTES and out.dtype == torch.uint8
     assert out.stride(2) == 1, f"out must have packed byte stride; got {out.stride()}"
     assert (
@@ -597,13 +623,24 @@ def _dequantize_slots_kernel(
 def dequantize_slots_to_bf16(
     pool_3d: torch.Tensor,  # [num_blocks, block_size, 584] uint8
     slot_indices: torch.Tensor,  # [N] int (flat slot ids; <0 = sentinel)
+    *,
+    super_block_id_namespace: bool = False,
+    bps_swa: int = 1,
+    region_block_offset: int = 0,
 ) -> torch.Tensor:
     """Per-slot fancy-index dequant of canonical 584B FP8 KV → [N, 512] bf16.
 
     Replacement for the deleted ``_kv_fp8_dequant_canonical.unpack_kv_fp8_canonical``.
     Striped-layout aware: addresses data and scale regions independently.
-    Sentinel rows (slot < 0) are zero-filled.
+    Sentinel rows (slot < 0) are zero-filled. See
+    :func:`dequantize_and_gather_k_cache` for the M07 PR-1 namespace kwargs.
     """
+    if super_block_id_namespace and bps_swa != 1:
+        raise NotImplementedError(
+            "dequantize_slots_to_bf16: bps_swa>1 requires the M07 PR-2 "
+            "region_block_offset kernel diff (Choice B)."
+        )
+    del region_block_offset  # PR-1 ignores; only consumed by PR-2 kernel diff.
     assert (
         pool_3d.dim() == 3
         and pool_3d.shape[-1] == ENTRY_BYTES

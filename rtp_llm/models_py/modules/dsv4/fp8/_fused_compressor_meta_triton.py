@@ -144,6 +144,17 @@ def fused_compressor_slot_mapping(
     assert positions.dtype == torch.int64
     assert b_idx.dtype == torch.int64
 
+    if __debug__:
+        # M08 §10.4 pool-row guard tightening: pool_rows MUST be derived
+        # from the KV pool view alone (kv_pool.numel() // last_dim) and
+        # MUST stay KV-pool-local even when ``unified_bt`` has more
+        # columns than the per-pool table. Caller passes 0 to disable the
+        # guard; positive value must be sensible (>= state_bt.shape[1]).
+        assert pool_rows >= 0, (
+            f"fused_compressor_slot_mapping: pool_rows must be >= 0, "
+            f"got {pool_rows} (KV-pool-local row count or 0 to skip)"
+        )
+
     N = positions.shape[0]
     device = positions.device
 

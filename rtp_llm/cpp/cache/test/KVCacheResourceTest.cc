@@ -69,8 +69,12 @@ TEST(KVCacheResourceTest, InitGroups_RespectsGroupTypesAndBlocksPerKvBlock) {
     auto& g0 = resource.mutableBlockIds(0);
     auto& g1 = resource.mutableBlockIds(1);
 
+    // Post-`feat(dsv4): unify bpk between paged and SWA pools` (8248d16b6): all groups share the
+    // same kernel/physical block ratio so kernel-block id arrays stay consistent per token range
+    // across regions. `group_types` is currently ignored by `initGroups`; LINEAR groups expand to
+    // `kernel_blocks_per_kv_block` kernel blocks just like FULL groups.
     ASSERT_EQ(g0.kernelBlocksPerKvBlock(), 4u);
-    ASSERT_EQ(g1.kernelBlocksPerKvBlock(), 1u);
+    ASSERT_EQ(g1.kernelBlocksPerKvBlock(), 4u);
 
     g0.add(BlockIndicesType{1});
     g1.add(BlockIndicesType{1});
@@ -79,7 +83,7 @@ TEST(KVCacheResourceTest, InitGroups_RespectsGroupTypesAndBlocksPerKvBlock) {
     ASSERT_EQ(resource.kernelBlocks(0), (BlockIndicesType{4, 5, 6, 7}));
 
     ASSERT_EQ(resource.blocks(1), (BlockIndicesType{1}));
-    ASSERT_EQ(resource.kernelBlocks(1), (BlockIndicesType{1}));
+    ASSERT_EQ(resource.kernelBlocks(1), (BlockIndicesType{4, 5, 6, 7}));
 }
 
 TEST(CacheConfigTest, KernelBlocksPerKvBlockSafeByDefault) {
@@ -111,7 +115,8 @@ TEST(BatchKVCacheResourceTest, BasicBatchOperations_WorkAsExpected) {
 
     batch.setBatchBlocks(/*batch_id=*/0, /*group_id=*/1, BlockIndicesType{9, 10});
     ASSERT_EQ(batch.blocks(0, 1), (BlockIndicesType{9, 10}));
-    ASSERT_EQ(batch.kernelBlocks(0, 1), (BlockIndicesType{9, 10}));
+    // Post-bpk unification: LINEAR group also expands by `kernel_blocks_per_kv_block` (=4).
+    ASSERT_EQ(batch.kernelBlocks(0, 1), (BlockIndicesType{36, 37, 38, 39, 40, 41, 42, 43}));
 
     auto all_g0 = batch.getAllBatchBlocks(/*group_id=*/0);
     ASSERT_EQ(all_g0.size(), 2u);

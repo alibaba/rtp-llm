@@ -2,6 +2,10 @@
 
 #include <algorithm>
 
+// SuperBlockLayout lives in CacheGroupType.h (already included by
+// KVCacheResource.h) — kept here as a lightweight type so this widely-built
+// translation unit does NOT pull in CacheConfig/c10.
+
 namespace rtp_llm {
 
 size_t BlockIds::blocksNum() const {
@@ -334,6 +338,37 @@ std::string KVCacheResource::debugString() const {
 
 void KVCacheResource::swapBlocks(size_t group_id, size_t rhs, size_t lhs) {
     group_block_ids[group_id]->swap(rhs, lhs);
+}
+
+// M01-PR3: materialise per-pool view of super_block_ids_ for pool `p`.
+// Identity under bps[p]==1 (DSV4 today). The arithmetic mirrors
+// CacheConfig::poolBlockId so the host & device views agree (§3.4 / Fix 27).
+BlockIndicesType KVCacheResource::poolBlockIdsView(int p, const SuperBlockLayout& layout) const {
+    RTP_LLM_CHECK_WITH_INFO(p >= 0 && static_cast<size_t>(p) < layout.bps.size(),
+                            "poolBlockIdsView: pool index %d out of range [0, %zu)",
+                            p,
+                            layout.bps.size());
+    const uint32_t bps = layout.bps[static_cast<size_t>(p)];
+    RTP_LLM_CHECK_WITH_INFO(bps >= 1, "poolBlockIdsView: bps[%d]=%u (must be >= 1)", p, bps);
+
+    BlockIndicesType view;
+    view.reserve(super_block_ids_.size() * static_cast<size_t>(bps));
+    for (auto S : super_block_ids_) {
+        // ``S`` is signed BlockIdxType so NULL_BLOCK_IDX (-1) propagates as-is
+        // through every per-pool slot. Legitimate super-block ids are > 0
+        // (§1.1 invariant 1 — id 0 is reserved).
+        if (isNullBlockIdx(S)) {
+            for (uint32_t k = 0; k < bps; ++k) {
+                view.push_back(NULL_BLOCK_IDX);
+            }
+            continue;
+        }
+        const int base = static_cast<int>(S) * static_cast<int>(bps);
+        for (uint32_t k = 0; k < bps; ++k) {
+            view.push_back(static_cast<BlockIdxType>(base + static_cast<int>(k)));
+        }
+    }
+    return view;
 }
 
 }  // namespace rtp_llm

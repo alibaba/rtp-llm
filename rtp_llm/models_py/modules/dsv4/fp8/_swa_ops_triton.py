@@ -204,6 +204,10 @@ def compute_swa_slot_mapping(
     seq_lens: torch.Tensor,  # [num_reqs] int32 — total seq len = sp + query_len
     block_size: int,  # eb
     num_tokens: int,  # total tokens across all reqs (= query_start_loc[-1])
+    *,
+    super_block_id_namespace: bool = False,
+    bps_swa: int = 1,
+    region_block_offset: int = 0,
 ) -> torch.Tensor:
     """Build ``[num_tokens]`` int64 slot_mapping for SWA paged FP8 write.
 
@@ -213,7 +217,22 @@ def compute_swa_slot_mapping(
     has ``block_id < 0`` emit ``-1`` so the FP8 insert kernel skips them.
     This intentionally honors every non-negative block id in the table; it is
     not limited to the final SWA tail blocks.
+
+    M07 PR-1 namespace kwargs (wrapper-only; kernel bit-equal under bps≡1):
+    M2 is namespace-agnostic by construction — under bps≡1 the input
+    ``block_table`` values are identical whether they came from a
+    super_block_id or pool_block_id namespace, so the slot formula needs no
+    remap. For bps>1 Choice A the caller is expected to remap (via
+    :func:`_swa_kv_insert_triton.remap_super_block_id_to_swa_pool_id`)
+    before calling this helper; bps>1 Choice B is PR-2 territory.
     """
+    if super_block_id_namespace and bps_swa != 1:
+        raise NotImplementedError(
+            "compute_swa_slot_mapping: bps_swa>1 requires the M07 PR-2 "
+            "region_block_offset kernel diff (Choice B). Use Choice A "
+            "(remap super→pool before this call) under PR-1."
+        )
+    del region_block_offset  # PR-1 ignores; only consumed by PR-2 kernel diff.
     assert (
         block_table.dtype == torch.int32
     ), f"block_table must be int32, got {block_table.dtype}"

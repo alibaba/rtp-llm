@@ -14,6 +14,11 @@
 
 namespace rtp_llm {
 
+// SuperBlockLayout now lives in CacheGroupType.h so widely-included consumers
+// (e.g. KVCacheResource) can take it without pulling the heavy CacheConfig
+// transitive surface (c10 headers via AttentionConfig). The definition is
+// reachable here through the CacheGroupType.h include above.
+
 struct CacheConfig {
     // Cache specification and layer mapping
     std::vector<KVCacheSpecPtr>    cache_specs;
@@ -33,6 +38,7 @@ struct CacheConfig {
     std::vector<size_t>            group_kv_scale_stride_bytes;
     std::vector<size_t>            group_block_size_bytes;
     std::vector<uint32_t>          group_block_nums;
+    SuperBlockLayout               super_block_layout;  // M01-PR1: default disabled, no behaviour change
     uint32_t                       non_full_addition_kvcache_blocks         = 0;
     bool                           use_independent_block_pools              = false;
     bool                           use_typed_cache_regions                  = false;
@@ -57,6 +63,14 @@ struct CacheConfig {
             return 1;
         }
         return std::max<size_t>(1, seq_size_per_block / kernel_seq_size_per_block);
+    }
+
+    // M01-PR1: stable arithmetic mapping super_block_id -> per-pool physical block id.
+    // Identity under bps[p] == 1 (DSV4 today). Identical on host & device.
+    // Only valid after M02 populates super_block_layout.bps; PR-1 does not call this
+    // from any execution path — declaration only, for downstream PRs to use.
+    inline int poolBlockId(int p, int S, uint32_t k = 0) const {
+        return S * static_cast<int>(super_block_layout.bps[p]) + static_cast<int>(k);
     }
 
     // Block sizing information

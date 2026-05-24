@@ -13,6 +13,17 @@ from typing import Any, Optional
 import torch
 import torch.nn as nn
 
+from rtp_llm.models_py.modules.dsv4.fp8._pool_handle import (
+    PoolHandle,
+    _adhoc_kv_handle,
+    _adhoc_state_handle,
+    make_pool_handle,
+)
+from rtp_llm.models_py.modules.dsv4.fp8._slot_resolver import (
+    SentinelStrict,
+    build_slot_mapping,
+)
+
 # DSV4 per-layer gid slot count. Must match the alloc size used in
 # ``NormalModelInputGatherer`` for ``kv_cache_layer_to_group_dpsk_v4``.
 # A CSA layer touches 5 groups (SWA_KV, CSA_KV, INDEXER_KV, INDEXER_STATE,
@@ -47,15 +58,19 @@ def is_fp8_indexer_pool(pool_view: Optional[torch.Tensor]) -> bool:
     )
 
 
-def gid_for(kv_cache: Any, attn_inputs: Any, layer_id: int, attn_type: int) -> int:
-    """Resolve ``(layer_id, attn_type) → group_id`` via the DSV4 dense gid list.
+# Canonical REGION_COUNT (mirror C++ ``CacheGroupType.h:29``); pinned by
+# M06 §2.4. Replaces the brittle ``_DSV4_MAX_GROUPS_PER_LAYER`` constant
+# in the descriptor-driven branch.
+_REGION_COUNT = 8
 
-    Reads ``attn_inputs.kv_cache_layer_to_group_dpsk_v4`` — a flat int32 tensor
-    of length ``num_layers * 5`` populated by ``NormalModelInputGatherer`` from
-    ``CacheConfig::layer_to_group_ids``. Each row holds up to 5 gids the layer
-    participates in (order from C++), padded with -1. Walks the row and returns
-    the gid whose ``group_region_names[gid]`` matches ``attn_type``; -1 otherwise
-    (tensor undefined on warmup / non-DSV4 / this attn_type inactive at layer).
+
+def _gid_for_legacy(
+    kv_cache: Any, attn_inputs: Any, layer_id: int, attn_type: int
+) -> int:
+    """Legacy 5-slot walk preserved for warmup / pre-M05 paths.
+
+    Scheduled for removal in M06 Step 7 once descriptor surface is
+    universal (per M06 §6).
     """
     tensor = getattr(attn_inputs, "kv_cache_layer_to_group_dpsk_v4", None)
     if tensor is None or tensor.numel() == 0:
@@ -71,6 +86,28 @@ def gid_for(kv_cache: Any, attn_inputs: Any, layer_id: int, attn_type: int) -> i
         if gid < len(group_region_names) and int(group_region_names[gid]) == attn_type:
             return gid
     return -1
+
+
+def gid_for(kv_cache: Any, attn_inputs: Any, layer_id: int, attn_type: int) -> int:
+    """Resolve ``(layer_id, attn_type) → group_id``.
+
+    Fast path (M05 / F02 unified, per M06 §2.4): O(1) lookup into the
+    ``[num_layers * REGION_COUNT]`` int32 descriptor table published as
+    ``PyAttentionInputs.kv_cache_layer_region_descs``. ``-1`` cells mark
+    "layer doesn't own this region".
+
+    Slow path (legacy): falls through to ``_gid_for_legacy`` which walks
+    the 5-slot dense list ``kv_cache_layer_to_group_dpsk_v4`` populated
+    by ``NormalModelInputGatherer``. This branch survives only until M05
+    PR-2 producer wiring lands.
+    """
+    descs = getattr(attn_inputs, "kv_cache_layer_region_descs", None)
+    if descs is not None and descs.numel() > 0:
+        idx = layer_id * _REGION_COUNT + int(attn_type)
+        if 0 <= idx < descs.numel():
+            return int(descs[idx].item())
+        return -1
+    return _gid_for_legacy(kv_cache, attn_inputs, layer_id, attn_type)
 
 
 class PoolBackedModule(nn.Module):
@@ -89,6 +126,15 @@ class PoolBackedModule(nn.Module):
         self._state_pool_view: Optional[torch.Tensor] = None
         self._state_block_table: Optional[torch.Tensor] = None
         self._state_eb: int = 0
+        # M06: optional PoolHandles surfaced via :meth:`set_pool_handle`.
+        # None on the legacy / pre-M05 path; new consumers may use them
+        # for TMA-pad / cyclic-modulus / scale-stride introspection.
+        self._kv_pool_handle: Optional[PoolHandle] = None
+        self._state_pool_handle: Optional[PoolHandle] = None
+        # M08 §4.2: unified [B, max_super_blocks] int32 block table.
+        # None preserves the legacy two-table contract (bit-equal); when
+        # set, KV-side consumers MAY pre-slice from this single source.
+        self._unified_bt: Optional[torch.Tensor] = None
 
         self.kv_state: Optional[torch.Tensor] = None
         self.score_state: Optional[torch.Tensor] = None
@@ -107,13 +153,27 @@ class PoolBackedModule(nn.Module):
         state_pool_view: Optional[torch.Tensor],
         state_block_table: Optional[torch.Tensor],
         state_eb: int,
+        *,
+        unified_bt: Optional[torch.Tensor] = None,
     ) -> None:
+        """Bind framework pool views + block tables.
+
+        M08 §4.2: optional ``unified_bt`` kwarg threads the unified
+        [B, max_super_blocks] int32 block table into the module. Under bps=1
+        + non-CP it is alias-equal to ``kv_block_table`` (and to
+        ``state_block_table`` when both pools exist); under CP page-RR
+        ``unified_bt`` aliases the KV side only (M08 §4.2 CP-conditional
+        rule). Default ``None`` preserves the bit-equal legacy two-table
+        contract — every consumer falls back to ``kv_block_table`` /
+        ``state_block_table``.
+        """
         self._kv_pool_view = kv_pool_view
         self._kv_block_table = kv_block_table
         self._kv_eb = kv_eb
         self._state_pool_view = state_pool_view
         self._state_block_table = state_block_table
         self._state_eb = state_eb
+        self._unified_bt = unified_bt
 
     def clear_pool_context(self) -> None:
         self._kv_pool_view = None
@@ -122,6 +182,56 @@ class PoolBackedModule(nn.Module):
         self._state_pool_view = None
         self._state_block_table = None
         self._state_eb = 0
+        self._kv_pool_handle = None
+        self._state_pool_handle = None
+        self._unified_bt = None
+
+    def set_pool_handle(
+        self,
+        kv_handle: Optional[PoolHandle],
+        kv_block_table: Optional[torch.Tensor],
+        state_handle: Optional[PoolHandle],
+        state_block_table: Optional[torch.Tensor],
+    ) -> None:
+        """M06 §3.1.3 additive migration: bind one PoolHandle per region.
+
+        Wraps :meth:`set_pool_context` so downstream consumers (compressor,
+        indexer) continue receiving the legacy tuple form (kv_view,
+        kv_bt, kv_eb, state_view, state_bt, state_eb). New consumers may
+        read ``self._kv_pool_handle`` / ``self._state_pool_handle``
+        directly (None on Path B / legacy fallback).
+
+        Bit-equal to ``set_pool_context`` when handles are derived from
+        the same underlying tensors (eb is read from ``handle.eb``).
+        """
+        kv_view = (
+            (kv_handle.base_3d if kv_handle.base_3d is not None else kv_handle.base_2d)
+            if kv_handle is not None
+            else None
+        )
+        kv_eb = int(kv_handle.eb) if kv_handle is not None else 0
+        state_view = (
+            (
+                state_handle.base_3d
+                if state_handle.base_3d is not None
+                else state_handle.base_2d
+            )
+            if state_handle is not None
+            else None
+        )
+        state_eb = int(state_handle.eb) if state_handle is not None else 0
+        self.set_pool_context(
+            kv_view,
+            kv_block_table,
+            kv_eb,
+            state_view,
+            state_block_table,
+            state_eb,
+        )
+        # Attach handles for new consumers that need full descriptor info
+        # (TMA pad, cyclic ring depth, scale stride, ...).
+        self._kv_pool_handle = kv_handle
+        self._state_pool_handle = state_handle
 
     def _compute_pool_slots(
         self,
@@ -130,25 +240,28 @@ class PoolBackedModule(nn.Module):
         block_table: torch.Tensor,
         eb: int,
         device: torch.device,
+        handle: Optional[PoolHandle] = None,
     ) -> tuple:
-        max_blocks = block_table.shape[1]
-        pool_capacity = max_blocks * eb
-        pos = torch.arange(T, device=device, dtype=torch.long)
-        in_capacity_row = pos < pool_capacity
-        safe_pos = torch.where(in_capacity_row, pos, torch.zeros_like(pos))
-        block_in_seq = safe_pos // eb
-        in_block = safe_pos % eb
-        bt_long = block_table.to(torch.long)
-        b_idx = torch.arange(bsz, device=device, dtype=torch.long).unsqueeze(1)
-        block_id = bt_long[:bsz][b_idx, block_in_seq.unsqueeze(0)]
-        in_capacity = in_capacity_row.unsqueeze(0).expand(bsz, -1)
-        # Block 0 is a valid physical block and may appear during warmup;
-        # only negative block ids are skip sentinels.
-        valid = (block_id >= 0) & in_capacity
-        safe_slot = torch.where(
-            valid, block_id * eb + in_block.unsqueeze(0), torch.zeros_like(block_id)
+        """Forward to :func:`build_slot_mapping`.
+
+        Preserves the historical ``(valid, safe_slot)`` tuple contract
+        (4 call sites destructure: lines 174, 197, 244, 266) and the
+        ``GE_ZERO`` sentinel (block 0 valid for warmup). Pre-existing
+        callers that only know ``eb`` pass ``handle=None``; a degenerate
+        STATE / KV ad-hoc handle is synthesised so resolver arithmetic
+        is bit-equal to the historical inline body.
+        """
+        if handle is None:
+            handle = _adhoc_state_handle(eb=eb)
+        sm = build_slot_mapping(
+            handle,
+            block_table,
+            bsz,
+            T,
+            device,
+            sentinel_strict=SentinelStrict.GE_ZERO,
         )
-        return valid, safe_slot
+        return sm.valid, sm.safe_slot
 
     def _bind_state_from_pool(
         self, bsz: int, is_fresh_prefill: bool, device: torch.device

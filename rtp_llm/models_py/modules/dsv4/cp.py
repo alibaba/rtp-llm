@@ -1120,13 +1120,23 @@ def cp_padded_local_kv_lens(
     ``ceil(T_r / (block_size * cp_size)) * block_size`` rows so NCCL
     ``all_gather`` sees identical shapes. Rows past the actual owned count are
     padding and must be initialized by the caller before gather.
+
+    REQ-D6 (M04 §10.1): under ``cp_size == 1`` the pad-up-to-``kv_eb`` rule
+    reduces to a no-op iff ``kv_lens % kv_eb == 0``; for arbitrary tail-token
+    requests with CP=1 the pad would otherwise round up and the indexer op
+    would emit virtual-block zero-K rows that legacy CP=1 did not emit,
+    perturbing indexer logits. The unified path therefore short-circuits
+    here so callers can compare against ``kv_lens`` byte-for-byte.
     """
     if cp_size <= 0:
         raise ValueError(f"cp_size must be positive, got {cp_size}")
     if block_size <= 0:
         raise ValueError(f"block_size must be positive, got {block_size}")
-    virtual_block_size = block_size * cp_size
     lens = per_req_total_kv_lens.to(torch.int64)
+    if cp_size == 1:
+        # REQ-D6: no pad applied under CP=1.
+        return lens
+    virtual_block_size = block_size * cp_size
     n_virtual_blocks = (lens + virtual_block_size - 1) // virtual_block_size
     return n_virtual_blocks * block_size
 

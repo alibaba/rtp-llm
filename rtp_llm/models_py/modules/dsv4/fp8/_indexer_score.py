@@ -86,6 +86,8 @@ def fp8_paged_indexer_score(
     context_lens: torch.Tensor,  # [B, next_n] int32 — live K length per row
     block_size: int,  # tokens per cache block
     max_ctx_len: int,  # output T dim
+    *,
+    region_offset: int = 0,
 ) -> torch.Tensor:
     """One-shot FP8 paged indexer logits via DeepGEMM.
 
@@ -94,6 +96,13 @@ def fp8_paged_indexer_score(
     whatever DeepGEMM writes (use ``clean_logits=True`` if the
     downstream topk needs ``-inf`` there; default False to save the
     extra mask).
+
+    ``region_offset`` (M08 §4.4): constexpr block-base for the
+    asymmetric ``bps > 1`` future variant. Under DSV4 today (bps=1)
+    this MUST be 0 — caller is expected to pre-slice the pool view to
+    the INDEXER_KV region. Ignored on the kernel pointer math path
+    today; reserved so PR-2 plumbing does not churn the signature when
+    F02 ratios change.
     """
     assert _HAS_DEEP_GEMM, "deep_gemm.fp8_paged_mqa_logits not available"
     assert q_fp8.dtype == torch.float8_e4m3fn, f"q_fp8 dtype={q_fp8.dtype}"
@@ -103,6 +112,18 @@ def fp8_paged_indexer_score(
     assert kv_pool_uint8.shape[-1] == INDEXER_ENTRY_BYTES
     assert block_table.dtype == torch.int32 and block_table.dim() == 2
     assert context_lens.dtype == torch.int32 and context_lens.dim() == 2
+    if __debug__:
+        # M08 §4.4 + §10.9 — DeepGEMM I5 zero-copy reshape contract.
+        # block_table must be contiguous int32; pool slot axis must
+        # factor cleanly; region_offset==0 today (bps=1).
+        assert block_table.is_contiguous(), (
+            "fp8_paged_indexer_score: block_table must be contiguous "
+            "(DeepGEMM zero-copy reshape contract — M08 §10.9)"
+        )
+        assert region_offset == 0, (
+            "fp8_paged_indexer_score: region_offset > 0 reserved for "
+            "future bps>1 asymmetric variant (M08 §4.4); today must be 0"
+        )
     # DeepGEMM kv_cache shape: [num_blocks, block_size, 1, D+4] uint8.
     # Our pool is a flat [total_slots, 132] view; reshape into the 4D
     # layout (no copy — just a metadata change).

@@ -15,12 +15,65 @@
 
 namespace rtp_llm {
 
+// ---------- M01-PR2: SuperBlockFreeList ----------
+SuperBlockFreeList::SuperBlockFreeList(uint32_t num_super_blocks): num_super_blocks_(num_super_blocks) {
+    // §1.1 invariant 1: super_block_id 0 is RESERVED. Free list starts at 1.
+    RTP_LLM_CHECK_WITH_INFO(num_super_blocks_ > 0,
+                            "SuperBlockFreeList requires num_super_blocks > 0 (got %u)",
+                            num_super_blocks_);
+    for (uint32_t s = 1; s < num_super_blocks_; ++s) {
+        free_list_.push_back(static_cast<int>(s));
+    }
+}
+
+int SuperBlockFreeList::allocSuperBlock() {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (free_list_.empty()) {
+        return -1;
+    }
+    const int s = free_list_.front();
+    free_list_.pop_front();
+    // §1.1 invariant 1 (defence in depth): never hand out 0.
+    RTP_LLM_CHECK_WITH_INFO(s > 0, "SuperBlockFreeList produced reserved id 0");
+    return s;
+}
+
+void SuperBlockFreeList::freeSuperBlock(int S) {
+    RTP_LLM_CHECK_WITH_INFO(S > 0 && static_cast<uint32_t>(S) < num_super_blocks_,
+                            "SuperBlockFreeList::freeSuperBlock invalid id %d (budget=%u)",
+                            S,
+                            num_super_blocks_);
+    std::lock_guard<std::mutex> lk(mu_);
+    free_list_.push_back(S);
+}
+
+size_t SuperBlockFreeList::totalCount() const {
+    return static_cast<size_t>(num_super_blocks_);
+}
+
+size_t SuperBlockFreeList::freeCount() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return free_list_.size();
+}
+
+
 HybridPoolKVCacheAllocator::HybridPoolKVCacheAllocator(const CacheConfig&                 config,
                                                        AllocationType                     allocation_type,
                                                        const kmonitor::MetricsReporterPtr metrics_reporter,
                                                        int64_t                            reserve_block_ratio,
                                                        RoleType                           role_type):
     HybridKVCacheAllocator(config, allocation_type, metrics_reporter, reserve_block_ratio), role_type_(role_type) {}
+
+HybridPoolKVCacheAllocator::~HybridPoolKVCacheAllocator() {
+    // M03-PR3: detach the shared cache's wiring BEFORE our owned counter and
+    // super-block free list are destroyed. The base ~KVCacheAllocator runs
+    // AFTER this dtor and tears down shared_block_cache_; any callback
+    // captured by that cache would otherwise see a dangling raw pointer.
+    if (shared_block_cache_) {
+        shared_block_cache_->setUnifiedRefCounter(nullptr);
+        shared_block_cache_->setSuperBlockReclaimCallback({});
+    }
+}
 
 bool HybridPoolKVCacheAllocator::doInit() {
     RTP_LLM_CHECK_WITH_INFO(!config_.cache_specs.empty(), "no cache_specs found in CacheConfig");
@@ -79,8 +132,76 @@ bool HybridPoolKVCacheAllocator::doInit() {
         shared_block_cache_->init(group_nums, group_block_pools_);
     }
 
-    RTP_LLM_LOG_INFO("HybridPoolKVCacheAllocator init success, group pools=%zu", group_block_pools_.size());
+    // M01-PR2: instantiate the super-block free list only when the unified
+    // layout is enabled. When disabled (default), super_block_allocator_ stays
+    // nullptr and the legacy per-pool path is bit-equal to today's behaviour.
+    if (config_.super_block_layout.isUnified()) {
+        const uint32_t budget = config_.super_block_layout.num_super_blocks;
+        RTP_LLM_CHECK_WITH_INFO(budget > 0,
+                                "super_block_layout.enabled=true but num_super_blocks=0 — config bug");
+        RTP_LLM_CHECK_WITH_INFO(config_.super_block_layout.bps.size() == config_.cache_specs.size(),
+                                "super_block_layout.bps size %zu != cache_specs size %zu",
+                                config_.super_block_layout.bps.size(),
+                                config_.cache_specs.size());
+        for (size_t p = 0; p < config_.super_block_layout.bps.size(); ++p) {
+            RTP_LLM_CHECK_WITH_INFO(config_.super_block_layout.bps[p] >= 1,
+                                    "super_block_layout.bps[%zu]=%u (must be >= 1)",
+                                    p,
+                                    config_.super_block_layout.bps[p]);
+        }
+        super_block_allocator_ = std::make_unique<SuperBlockFreeList>(budget);
+        // M03-PR3: construct the unified ref counter (5-counter family per
+        // super-block) and wire it into the shared cache so put / match /
+        // evict paths honour the dual-write contract. Lifetime is tied to
+        // *this; the raw pointer handed to SharedBlockCache stays valid as
+        // long as the allocator outlives the cache (verified at teardown by
+        // KVCacheAllocator destruction order — cache resets first).
+        unified_ref_counter_ = std::make_unique<UnifiedRefCounter>();
+        unified_ref_counter_->init(static_cast<int>(budget));
+        if (shared_block_cache_) {
+            shared_block_cache_->setUnifiedRefCounter(unified_ref_counter_.get());
+            // Reclaim callback: SharedBlockCache invokes this OUTSIDE its mu_
+            // when a cache eviction drops the last UnifiedRefCounter primary
+            // for S. Bypass the public freeSuperBlock to avoid a RTP_LLM_CHECK
+            // re-validation hop — we already know the super_block_allocator_
+            // is non-null inside this branch.
+            SuperBlockFreeList* sbfl = super_block_allocator_.get();
+            shared_block_cache_->setSuperBlockReclaimCallback([sbfl](int S) {
+                if (sbfl) {
+                    sbfl->freeSuperBlock(S);
+                }
+            });
+        }
+        RTP_LLM_LOG_INFO("HybridPoolKVCacheAllocator unified path ENABLED: num_super_blocks=%u, "
+                         "free=%zu (id 0 reserved), UnifiedRefCounter wired",
+                         budget,
+                         super_block_allocator_->freeCount());
+    }
+
+    RTP_LLM_LOG_INFO("HybridPoolKVCacheAllocator init success, group pools=%zu, unified=%s",
+                     group_block_pools_.size(),
+                     config_.super_block_layout.isUnified() ? "true" : "false");
     return true;
+}
+
+// ---------- M01-PR2: unified-path public primitives ----------
+
+int HybridPoolKVCacheAllocator::allocSuperBlock() {
+    RTP_LLM_CHECK_WITH_INFO(super_block_allocator_ != nullptr,
+                            "allocSuperBlock called but super_block_allocator_ is null "
+                            "(unified path disabled)");
+    return super_block_allocator_->allocSuperBlock();
+}
+
+void HybridPoolKVCacheAllocator::freeSuperBlock(int S) {
+    RTP_LLM_CHECK_WITH_INFO(super_block_allocator_ != nullptr,
+                            "freeSuperBlock called but super_block_allocator_ is null "
+                            "(unified path disabled)");
+    super_block_allocator_->freeSuperBlock(S);
+}
+
+size_t HybridPoolKVCacheAllocator::freeSuperBlocksNum() const {
+    return super_block_allocator_ ? super_block_allocator_->freeCount() : 0;
 }
 
 int HybridPoolKVCacheAllocator::defaultGroupIdForLayer(int layer_id) const {
@@ -203,11 +324,23 @@ CacheLayerLayout HybridPoolKVCacheAllocator::allLayerCacheBase() const {
 }
 
 BlockAddrInfo HybridPoolKVCacheAllocator::convertIndexToAddr(int layer_id, int block_id) const {
+    // M01-PR2 / §6.1 Fix 11: under multi-spec layouts (DSV4 = 7 regions), the
+    // legacy 2-arg accessor cannot disambiguate the region and would silently
+    // mis-map. Force callers to use the region-aware overload when unified is
+    // enabled. Legacy (env=0) path keeps its existing semantics.
+    RTP_LLM_CHECK_WITH_INFO(!config_.super_block_layout.isUnified(),
+                            "Legacy 2-arg convertIndexToAddr(layer_id, block_id) is forbidden when "
+                            "super_block_layout.enabled=true. Call convertIndexToAddr(layer_id, "
+                            "region_name, block_id) instead.");
     const int gid = defaultGroupIdForLayer(layer_id);
     return kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToAddr(layer_id, block_id);
 }
 
 std::vector<BlockInfo> HybridPoolKVCacheAllocator::convertIndexToBuffer(int layer_id, int block_id) const {
+    RTP_LLM_CHECK_WITH_INFO(!config_.super_block_layout.isUnified(),
+                            "Legacy 2-arg convertIndexToBuffer(layer_id, block_id) is forbidden when "
+                            "super_block_layout.enabled=true. Call convertIndexToBuffer(layer_id, "
+                            "region_name, block_id) instead.");
     const int gid = defaultGroupIdForLayer(layer_id);
     return kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToBuffer(layer_id, block_id);
 }
@@ -216,6 +349,10 @@ std::vector<BlockInfo> HybridPoolKVCacheAllocator::convertIndexToBuffer(int laye
                                                                         int block_id,
                                                                         int partition_count,
                                                                         int partition_id) const {
+    RTP_LLM_CHECK_WITH_INFO(!config_.super_block_layout.isUnified(),
+                            "Legacy 2-arg convertIndexToBuffer(layer_id, block_id, partition_count, "
+                            "partition_id) is forbidden when super_block_layout.enabled=true. Call "
+                            "convertIndexToBuffer(layer_id, region_name, block_id, ...) instead.");
     const int gid = defaultGroupIdForLayer(layer_id);
     return kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToBuffer(
         layer_id, block_id, partition_count, partition_id);
@@ -524,6 +661,241 @@ bool HybridPoolKVCacheAllocator::hasAvailableBlocksForReserve(const MallocInfo& 
         }
     }
     return true;
+}
+
+// ---------- M01-PR2: unified malloc/free ----------
+//
+// PR-2 scope:
+//   * super_block_id N maps to per-pool block ids via poolBlockId(p, N, k) =
+//     N * bps[p] + k. For DSV4 (bps[p]==1 for all p) this is identity.
+//   * Per-pool BlockPool::free_block_ids_ and ref-counter remain dormant under
+//     unified mode (M03-PR3 migrates them away). PR-2 still bumps the per-pool
+//     request_ref_counter via requestReference so today's accounting queries
+//     (freeBlocksNum / blockCacheRefBlocksNum / etc.) stay coherent.
+//   * KVCacheResource::group_block_ids continues to carry the per-pool block
+//     ids (M01-PR3 collapses this to a single super_block_ids vector).
+//
+// Lock order (M01 §3.7 canonical 3-tier):
+//   [L1] SharedBlockCache::mu_     — NOT taken in PR-2 (no prefix reuse path)
+//   [L2] super_block_allocator_->mu_ — held only inside allocSuperBlock /
+//                                     freeSuperBlock primitives (their internal
+//                                     std::mutex). PR-2 acquires and releases
+//                                     it pointwise per super-block call.
+//   [L3] BlockPool::{ref_mu_, free_mu_} — taken inside requestReference via
+//                                         the std::scoped_lock pair.
+// PR-2 never holds L2 across L3 boundaries because allocSuperBlock /
+// freeSuperBlock return before any BlockPool call.
+
+MallocResult HybridPoolKVCacheAllocator::unifiedMalloc(const MallocInfo& malloc_info) {
+    RTP_LLM_CHECK_WITH_INFO(super_block_allocator_ != nullptr,
+                            "unifiedMalloc called without super_block_allocator_ (config bug)");
+    RTP_LLM_CHECK_WITH_INFO(malloc_info.batch_kv_cache_resource && malloc_info.complete_token_ids,
+                            "unifiedMalloc: null batch_kv_cache_resource or complete_token_ids");
+
+    auto&     kv_resource = malloc_info.batch_kv_cache_resource;
+    const int batch_size  = kv_resource->batchSize();
+    RTP_LLM_CHECK_WITH_INFO(
+        batch_size == 1, "unifiedMalloc currently requires batch_size==1 (got %d)", batch_size);
+
+    const int group_nums = kv_resource->groupNums();
+    RTP_LLM_CHECK_WITH_INFO(group_nums > 0, "unifiedMalloc: groupNums()==0");
+    RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(group_nums) == config_.super_block_layout.bps.size(),
+                            "unifiedMalloc: groupNums=%d != bps.size=%zu",
+                            group_nums,
+                            config_.super_block_layout.bps.size());
+
+    // Determine how many super-blocks this call needs. The unified path treats
+    // bps[p]==1 as the structural invariant (M01 §6 risk 1); under that
+    // invariant every pool needs the same per-super-block count, so the
+    // canonical group 0's getNeedBlocks gives the super-block count directly.
+    const int need_blocks = getNeedBlocks(malloc_info);
+    if (need_blocks <= 0) {
+        // Nothing to do — preserves today's "no-op malloc" semantics for paths
+        // that arrive with all blocks already cached.
+        return {true, 0};
+    }
+
+    // §1.1 invariant 5: bps[p]>=1 per pool. PR-2 only supports bps[p]==1 to
+    // keep poolBlockId(p, S, 0) identical across pools (fail loudly if a future
+    // helper tries to flip bps>1 without an updated allocator).
+    for (size_t p = 0; p < config_.super_block_layout.bps.size(); ++p) {
+        RTP_LLM_CHECK_WITH_INFO(config_.super_block_layout.bps[p] == 1,
+                                "unifiedMalloc (PR-2): bps[%zu]=%u, only bps==1 is supported in PR-2",
+                                p,
+                                config_.super_block_layout.bps[p]);
+    }
+
+    // Allocate super-block ids one-by-one; rollback on first failure.
+    std::vector<int> allocated;
+    allocated.reserve(static_cast<size_t>(need_blocks));
+    for (int i = 0; i < need_blocks; ++i) {
+        const int s = super_block_allocator_->allocSuperBlock();
+        if (s < 0) {
+            for (int prev : allocated) {
+                super_block_allocator_->freeSuperBlock(prev);
+            }
+            if (malloc_info.verbose) {
+                RTP_LLM_LOG_INFO("unifiedMalloc rejected: super-block free list exhausted "
+                                 "(request_id=%ld, need=%d, granted=%zu, free=%zu, total=%zu)",
+                                 malloc_info.request_id,
+                                 need_blocks,
+                                 allocated.size(),
+                                 super_block_allocator_->freeCount(),
+                                 super_block_allocator_->totalCount());
+            }
+            return {false, 0};
+        }
+        // §1.1 invariant 1: never assign super_block_id==0 to a write path.
+        RTP_LLM_CHECK_WITH_INFO(s > 0, "unifiedMalloc received reserved super_block_id 0");
+        allocated.push_back(s);
+    }
+
+    // Materialise per-pool block ids and append to resource. Under bps[p]==1
+    // poolBlockId(p, S, 0) == S, so each pool's view is identical.
+    for (int p = 0; p < group_nums; ++p) {
+        auto&            block_ids = kv_resource->mutableBlockIds(0, p);
+        BlockIndicesType new_ids;
+        new_ids.reserve(allocated.size());
+        for (int s : allocated) {
+            const int k_count = static_cast<int>(config_.super_block_layout.bps[static_cast<size_t>(p)]);
+            for (int k = 0; k < k_count; ++k) {
+                new_ids.push_back(config_.poolBlockId(p, s, static_cast<uint32_t>(k)));
+            }
+        }
+        block_ids.add(new_ids);
+        // Bump per-pool request_ref_counter to keep today's accounting queries
+        // coherent. requestReference itself takes BlockPool::ref_mu_ via the
+        // std::scoped_lock pair (L3) — we are no longer inside L2 here.
+        if (!new_ids.empty()) {
+            referenceBlocksInGroup(p, new_ids, /*is_connector=*/false);
+        }
+    }
+
+    // M03-PR3 dual-write: bump REQUEST on UnifiedRefCounter for each freshly
+    // allocated super-block. Pairs with the per-pool ``requestReference``
+    // fan-out above; together they keep the unified primary view and the
+    // legacy per-pool view aligned for PD / connector observers.
+    if (unified_ref_counter_) {
+        unified_ref_counter_->bumpRange(allocated, UnifiedRefCounter::Kind::REQUEST);
+    }
+
+    // M01-PR3 dual-storage: append the freshly allocated super_block_ids to the
+    // canonical KVCacheResource::super_block_ids_ vector. The per-pool
+    // ``group_block_ids`` is retained above (byte-equal under bps[p]==1) so
+    // existing readers see no behaviour change; Phase-6 cleanup will drop the
+    // per-pool population once all consumers migrate to ``superBlockIds()``.
+    {
+        BlockIndicesType to_append;
+        to_append.reserve(allocated.size());
+        for (int s : allocated) {
+            to_append.push_back(static_cast<BlockIdxType>(s));
+        }
+        auto& super_ids = kv_resource->superBlockIds(0);
+        super_ids.insert(super_ids.end(), to_append.begin(), to_append.end());
+    }
+
+    return {true, 0};
+}
+
+void HybridPoolKVCacheAllocator::unifiedFree(const FreeInfo& free_info) {
+    RTP_LLM_CHECK_WITH_INFO(super_block_allocator_ != nullptr,
+                            "unifiedFree called without super_block_allocator_ (config bug)");
+    auto& kv_resource = free_info.batch_kv_cache_resource;
+    if (!kv_resource || kv_resource->curBlocksNum() == 0) {
+        return;
+    }
+
+    const int group_nums = kv_resource->groupNums();
+    const int batch_size = kv_resource->batchSize();
+
+    // First drop per-pool request_ref_counter on every distinct block id so the
+    // legacy stats (freeBlocksNum / requestRefBlocksNum) stay coherent. We do
+    // NOT pop from BlockPool::free_block_ids_ here — that's by design (M01 §1):
+    // the per-pool free list is dormant under unified mode and the super-block
+    // free list is the single source of truth.
+    for (int batch_id = 0; batch_id < batch_size; ++batch_id) {
+        for (int gid = 0; gid < group_nums; ++gid) {
+            BlockIndicesType                 valid;
+            std::unordered_set<BlockIdxType> seen;
+            for (auto b : kv_resource->blocks(batch_id, gid)) {
+                if (isNullBlockIdx(b) || b <= 0) {
+                    continue;
+                }
+                if (seen.insert(b).second) {
+                    valid.push_back(b);
+                }
+            }
+            if (!valid.empty()) {
+                freeBlocksInGroup(gid, valid, /*is_connector=*/false);
+            }
+        }
+    }
+
+    // M01-PR3: collect unique super-block ids from the canonical
+    // ``super_block_ids_`` vector. Under bps[p]==1 this is byte-identical to
+    // the previous ``blocks(batch_id, gid=0)`` source, but reading the
+    // unified field directly makes the migration explicit and unblocks the
+    // Phase-6 ``group_block_ids`` removal. Fall back to the per-pool gid=0
+    // view if the resource was constructed by a legacy path that bypassed
+    // ``unifiedMalloc`` (e.g. older tests) — this preserves PR-2 behaviour.
+    std::vector<int>        unique_S;
+    std::unordered_set<int> seen_S;
+    for (int batch_id = 0; batch_id < batch_size; ++batch_id) {
+        const bool unified_view = kv_resource->isUnified(batch_id);
+        if (unified_view) {
+            for (auto b : kv_resource->superBlockIds(batch_id)) {
+                if (isNullBlockIdx(b) || b <= 0) {
+                    continue;
+                }
+                if (seen_S.insert(b).second) {
+                    unique_S.push_back(b);
+                }
+            }
+        } else {
+            for (auto b : kv_resource->blocks(batch_id, /*gid=*/0)) {
+                if (isNullBlockIdx(b) || b <= 0) {
+                    continue;
+                }
+                if (seen_S.insert(b).second) {
+                    unique_S.push_back(b);
+                }
+            }
+        }
+    }
+
+    // M03-PR3 dual-write: dec REQUEST on UnifiedRefCounter (pairs with
+    // ``bumpRange(REQUEST)`` issued in ``unifiedMalloc`` / connector path).
+    // Then ONLY push S back to the super-block free list when isZero(S)
+    // (request==0 && connector==0 && cache==0 && !useRefPinned). This is the
+    // semantic shift vs PR-2: cached blocks survive the request finish; only
+    // the cache eviction path (SharedBlockCache::evictAndFreeUnified) and the
+    // counterpart connector-finish path will drop CACHE / CONNECTOR and
+    // ultimately trigger the reclaim through the SharedBlockCache callback
+    // OR through this branch on the request-only path.
+    if (unified_ref_counter_) {
+        unified_ref_counter_->decRange(unique_S, UnifiedRefCounter::Kind::REQUEST);
+        for (int S : unique_S) {
+            if (unified_ref_counter_->isZero(S)) {
+                super_block_allocator_->freeSuperBlock(S);
+            }
+        }
+    } else {
+        // Fallback (counter not wired — e.g. tests bypassing doInit). Behave
+        // as PR-2 did: unconditionally release every distinct S.
+        for (int S : unique_S) {
+            super_block_allocator_->freeSuperBlock(S);
+        }
+    }
+
+    // M01-PR3 dual-storage drain: reset super_block_ids_ on every batch slot.
+    // ``BatchKVCacheResource::clearBlocks`` only resizes the per-pool
+    // ``group_block_ids`` to zero — the canonical super-block list is owned by
+    // the underlying ``KVCacheResource`` and must be cleared explicitly so the
+    // next ``unifiedMalloc`` starts from an empty list.
+    for (int batch_id = 0; batch_id < batch_size; ++batch_id) {
+        kv_resource->superBlockIds(batch_id).clear();
+    }
+    kv_resource->clearBlocks();
 }
 
 }  // namespace rtp_llm

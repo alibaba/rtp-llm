@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/cache/connector/AsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/IKVCacheConnectorCoordinator.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
+#include "rtp_llm/cpp/cache/connector/KVCacheHandshake.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
@@ -63,6 +64,27 @@ public:
                             P2PConnectorStartLoadResponsePB&      response,
                             std::function<bool()>                 is_cancelled = nullptr);
 
+    // ----- M04 PR-3: PD pair startup handshake (REQ-D1 / REQ-D2) ------
+    //
+    // ``localHandshakeInfo()`` is computed once at init() time from the
+    // local CacheConfig and cached.  Under legacy path
+    // (super_block_layout.enabled == false) the result is all-zero — legacy
+    // peers hand-shake trivially.
+    //
+    // ``validatePeerHandshake(peer)`` MUST be called by the per-connector
+    // peer-pairing path once the peer's HandshakeInfo arrives over the
+    // wire.  On any mismatch it raises RTP_LLM_FAIL with a diagnostic
+    // describing the offending field (mixed-mode, hash drift, salt drift).
+    // PR-3 wires the validator helper; the actual cross-the-wire exchange
+    // lives in the per-connector init path and is added alongside the
+    // peer-list-acquisition site (one site per connector type — memory,
+    // remote, p2p).  Until the per-connector wiring lands the validator
+    // is invoked by unit tests only; default-off behaviour is preserved.
+    const HandshakeInfo& localHandshakeInfo() const {
+        return local_handshake_info_;
+    }
+    void validatePeerHandshake(const HandshakeInfo& peer_info) const;
+
 private:
     std::shared_ptr<KVCacheMemoryConnector> initMemoryConnector();
     std::shared_ptr<RemoteConnector>        initRemoteConnector();
@@ -98,6 +120,10 @@ private:
     autil::LoopThreadPtr                              update_thread_;
     const int                                         update_interval_ms_{1};
     std::atomic<bool>                                 stop_{false};
+
+    // M04 PR-3: cached at init() from cache_config_; consulted on every
+    // peer pairing.
+    HandshakeInfo                                     local_handshake_info_{};
 };
 
 }  // namespace rtp_llm

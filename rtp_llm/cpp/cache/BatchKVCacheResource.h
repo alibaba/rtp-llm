@@ -265,6 +265,27 @@ public:
         batch_resource[batch_id].swapBlocks(group_id, rhs, lhs);
     }
 
+    // ---------- M01-PR3: unified super-block view (additive, dual-storage) ----------
+    // Thin forwarders so unified-path consumers can address super_block_ids_
+    // through the batch resource without poking into ``cacheResource(batch_id)``.
+    // ``isUnified()`` reports true iff the underlying KVCacheResource has a
+    // non-empty super_block_ids_ (i.e. unified malloc populated it). Under the
+    // legacy per-pool path these views stay empty / false — no behaviour change.
+    bool isUnified(int batch_id = 0) const {
+        RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
+        return batch_resource[batch_id].isUnified();
+    }
+
+    const BlockIndicesType& superBlockIds(int batch_id = 0) const {
+        RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
+        return batch_resource[batch_id].superBlockIds();
+    }
+
+    BlockIndicesType& superBlockIds(int batch_id = 0) {
+        RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
+        return batch_resource[batch_id].superBlockIds();
+    }
+
 private:
     std::vector<KVCacheResource> batch_resource;  // [batch_size]
 };

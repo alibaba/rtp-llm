@@ -227,6 +227,13 @@ class CompressorFP8(nn.Module):
         self._kv_pool_3d: Optional[torch.Tensor] = None
         self._kv_block_table: Optional[torch.Tensor] = None
         self._kv_eb: int = 0
+        # M08 §4.2: optional unified [B, max_super_blocks] int32 block
+        # table. Under bps=1 each per-pool view is the pool-local block
+        # table itself; the wrapper resolves the view via
+        # ``_build_pool_block_table_view`` (M08 §3.2). When None the
+        # wrapper falls back to ``_state_block_table`` / ``_kv_block_table``
+        # — bit-equal to today.
+        self._unified_bt: Optional[torch.Tensor] = None
 
         # Legacy attribute kept for attention.py's cmp_T fallback (line 1583).
         self._kv_cache_t: int = 0
@@ -291,6 +298,8 @@ class CompressorFP8(nn.Module):
         state_pool_view: Optional[torch.Tensor],
         state_block_table: Optional[torch.Tensor],
         state_eb: int,
+        *,
+        unified_bt: Optional[torch.Tensor] = None,
     ) -> None:
         """Install framework pool views.
 
@@ -299,6 +308,16 @@ class CompressorFP8(nn.Module):
         ``state_pool_view`` : 2D flat ``[total_slots, 2*coff*head_dim]`` fp32
                               from ``_pool_view``. Reshaped here to
                               ``[num_blocks, state_eb, 2*coff*head_dim]``.
+
+        ``unified_bt`` (M08 §4.2): optional unified [B, max_super_blocks]
+        int32 block table. Under bps=1 and non-CP it is alias-equal to
+        ``kv_block_table`` and (when both pools exist) to
+        ``state_block_table``; under CP page-RR it aliases the KV side
+        only — STATE side is full-replicated and necessarily a distinct
+        allocation (M08 §4.2 CP-conditional rule + M09 §2.1 "KV+STATE
+        separate copies"). Default ``None`` falls back to the legacy
+        two-table contract — every consumer reads ``_state_block_table``
+        / ``_kv_block_table`` as before (bit-equal to today).
         """
         self._kv_pool_3d = kv_pool_view
         self._kv_block_table = kv_block_table
@@ -319,6 +338,33 @@ class CompressorFP8(nn.Module):
             self._state_pool_3d = None
         self._state_block_table = state_block_table
         self._state_eb = state_eb
+        self._unified_bt = unified_bt
+
+        if __debug__ and unified_bt is not None:
+            # M08 §4.2 (Panel C CD-3) — discriminator-driven debug alias
+            # check. KV-side aliasing always holds under bps=1; STATE-side
+            # aliasing is non-CP-only.
+            if kv_block_table is not None:
+                assert unified_bt.data_ptr() == kv_block_table.data_ptr(), (
+                    "M08 bps=1 violated: kv_block_table is not unified_bt slice"
+                )
+            cp_size = (
+                int(self._cp_ctx.cp_size)
+                if self._cp_ctx is not None
+                else 1
+            )
+            if (
+                state_block_table is not None
+                and kv_block_table is not None
+                and cp_size == 1
+            ):
+                assert (
+                    state_block_table.data_ptr() == kv_block_table.data_ptr()
+                ), (
+                    "M08 bps=1 + non-CP violated: state_block_table is "
+                    "not unified_bt slice (under CP page-RR this assertion "
+                    "is skipped; discriminator is cp_size)"
+                )
 
     def clear_pool_context(self) -> None:
         self._state_pool_3d = None
@@ -327,6 +373,43 @@ class CompressorFP8(nn.Module):
         self._kv_pool_3d = None
         self._kv_block_table = None
         self._kv_eb = 0
+        self._unified_bt = None
+
+    # ----------------------------------------------------------------------
+    # M08 §3.2 wrapper helpers — pre-slice per-pool views from unified_bt.
+    # Under bps=1 these are zero-copy identity views (alias of the legacy
+    # per-pool block_table). When ``unified_bt`` is None we fall back to
+    # the legacy block_table — bit-equal to today.
+    # ----------------------------------------------------------------------
+    def _select_state_bt(self) -> Optional[torch.Tensor]:
+        """Return the STATE-pool block-table view consumed by K1 / K2 / K3.
+
+        Under bps=1 + non-CP this returns ``_unified_bt`` (alias-equal to
+        ``_state_block_table``). Under CP page-RR the STATE pool is
+        full-replicated and lives in a distinct allocation, so we keep
+        returning ``_state_block_table`` (M08 §4.2 + M09 §2.1 "KV+STATE
+        separate copies"). When ``unified_bt`` is None falls back to the
+        legacy ``_state_block_table`` — bit-equal.
+        """
+        if self._unified_bt is None:
+            return self._state_block_table
+        cp_size = (
+            int(self._cp_ctx.cp_size) if self._cp_ctx is not None else 1
+        )
+        if cp_size > 1:
+            return self._state_block_table
+        return self._unified_bt
+
+    def _select_kv_bt(self) -> Optional[torch.Tensor]:
+        """Return the KV-pool block-table view consumed by K2 / K3 / K4.
+
+        Under bps=1 KV-side aliasing always holds (both non-CP and CP).
+        When ``unified_bt`` is None falls back to ``_kv_block_table`` —
+        bit-equal.
+        """
+        if self._unified_bt is None:
+            return self._kv_block_table
+        return self._unified_bt
 
     # ----------------------------------------------------------------------
     # Metadata preparation (call once per forward, OFF the hot path)
@@ -376,9 +459,14 @@ class CompressorFP8(nn.Module):
             if _fused_compressor_meta_triton._TRITON_AVAILABLE:
                 pool_rows = 0
                 if self._kv_pool_3d is not None:
+                    # M08 §10.4 — pool_rows MUST be KV-pool-local even
+                    # when unified_bt has more columns; we read it off the
+                    # KV pool view only.
                     pool_rows = int(
                         self._kv_pool_3d.numel() // self._kv_pool_3d.shape[-1]
                     )
+                state_bt_view = self._select_state_bt()
+                kv_bt_view = self._select_kv_bt()
                 (
                     state_slots,
                     kv_slots,
@@ -386,9 +474,9 @@ class CompressorFP8(nn.Module):
                 ) = _fused_compressor_meta_triton.fused_compressor_slot_mapping(
                     positions,
                     b_idx,
-                    self._state_block_table,
+                    state_bt_view,
                     self._state_eb,
-                    self._kv_block_table,
+                    kv_bt_view,
                     self._kv_eb,
                     self.compress_ratio,
                     pool_rows=pool_rows,
@@ -605,13 +693,17 @@ class CompressorFP8(nn.Module):
             and meta.cu_seq_per_req is not None
         )
         raw_disabled = (seq_start is None) and not use_varlen_raw
+        # M08 §4.1 — state_bt_view sources the cache branch read in K2/K3.
+        # Under bps=1 this is alias-equal to ``self._state_block_table``
+        # whether or not ``unified_bt`` was bound (see ``_select_state_bt``).
+        state_bt_view = self._select_state_bt()
         with record_function_range("dsv4.fp8.compressor.launch.compress_kv_write"):
             run_fused_compress_kv_write(
                 self._state_pool_3d,
                 meta.token_to_req,
                 meta.positions,
                 meta.state_slots,
-                self._state_block_table,
+                state_bt_view,
                 self.norm.weight,
                 self.norm_eps,
                 cos_sin_cache,

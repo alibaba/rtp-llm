@@ -236,6 +236,14 @@ void DSV4CacheConfigHelper::applyConfig(CacheConfig&         config,
         config.group_types.push_back(pool.is_paged ? CacheGroupType::FULL : CacheGroupType::SWA);
         config.group_region_names.push_back(pool.region_name);
     }
+
+    // ---- F02 super-block layout (M02-PR1: default OFF, no behaviour change) ----
+    // bps[p] == 1 for every DSV4 pool today. `enabled` only flips when the
+    // user explicitly opts in via DSV4_UNIFIED_BLOCKS=1 (tri-state -1=auto
+    // resolves to OFF until M01-PR5 flips kDsv4UnifiedDefault). num_super_blocks
+    // stays 0 in PR-1; HybridPoolConfigCreator populates it in M02-PR2.
+    config.super_block_layout.bps.assign(pools.size(), 1u);
+    config.super_block_layout.enabled = (kv_cache_config.dsv4_unified_block_count == 1);
 }
 
 }  // namespace rtp_llm

@@ -196,12 +196,25 @@ class EmptyClass:
 try:
     import librtp_compute_ops
     from .compute_ops import rtp_llm_ops
-    # Export LayerKVCache and other types from librtp_compute_ops
-    from librtp_compute_ops import LayerKVCache, KVCache, PyAttentionInputs, PyModelInputs, PyModelOutputs, PyModelInitResources, PyCacheStoreInputs
+    # Export LayerKVCache and other types from librtp_compute_ops.
+    # M08 PR-4: `PyKVCacheRegionDesc` is the per-region descriptor exposed
+    # by M05 bindings; M06 / M08 / M09 wrappers consume it via
+    # `PyAttentionInputs.region_descs`. Re-export so external callers can
+    # construct / inspect descriptors without reaching into the .so module.
+    from librtp_compute_ops import (
+        LayerKVCache,
+        KVCache,
+        PyAttentionInputs,
+        PyModelInputs,
+        PyModelOutputs,
+        PyModelInitResources,
+        PyCacheStoreInputs,
+        PyKVCacheRegionDesc,
+    )
 except BaseException as e:
     logging.info(f"Exception: {e}, traceback: {traceback.format_exc()}")
     rtp_llm_ops = EmptyClass
-    LayerKVCache = KVCache = PyAttentionInputs = PyModelInputs = PyModelOutputs = PyModelInitResources = PyCacheStoreInputs = EmptyClass
+    LayerKVCache = KVCache = PyAttentionInputs = PyModelInputs = PyModelOutputs = PyModelInitResources = PyCacheStoreInputs = PyKVCacheRegionDesc = EmptyClass
 
 try:
 

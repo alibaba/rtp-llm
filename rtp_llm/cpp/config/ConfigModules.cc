@@ -141,7 +141,8 @@ std::string KVCacheConfig::to_string() const {
         << "device_cache_min_free_blocks: " << device_cache_min_free_blocks << "\n"
         << "load_cache_retry_times: " << load_cache_retry_times << "\n"
         << "non_full_addition_kvcache_blocks: " << non_full_addition_kvcache_blocks << "\n"
-        << "state_pool_memory_mb: " << state_pool_memory_mb << "\n";
+        << "state_pool_memory_mb: " << state_pool_memory_mb << "\n"
+        << "dsv4_unified_block_count: " << dsv4_unified_block_count << "\n";
     return oss.str();
 }
 

@@ -33,6 +33,27 @@ message BlockBufferInfo {
     optional RdmaBlockBufferAddrInfo rdma_info = 3; // use only rdma mode
     optional bytes content = 4[ctype = RAW_STRING]; // use only tcp mode
     optional int64 addr = 5; // 使用TCP做Read, 需要指定addr
+
+    // -------- M04 PR-3 (additive, optional; legacy peers ignore) --------
+    // Advisory unified-block-id; receiver MAY skip duplicate cache_key lookups.
+    optional uint64 unified_block_id = 10;
+    // Index into request-level pools[] descriptor list.
+    optional uint32 pool_id          = 11;
+    // Per-pool drop-last-partial gate. FULL pools only (REQ-D3); SWA always false.
+    optional bool   last_partial     = 12;
+}
+
+// M04 PR-3 (additive): request-level per-pool descriptor. layer_id and
+// last_partial are deliberately NOT on the wire — see M04 §4.1 REQ-D5: layer_id
+// is reconstructed receiver-side from cache_config.layer_region_to_group_id
+// after pool_descriptor_hash agrees, and last_partial flows per-block on
+// BlockBufferInfo.last_partial.
+message PoolDescriptorProto {
+    optional uint32 pool_id      = 1;
+    optional uint32 group_type   = 2;  // CacheGroupType enum value
+    optional uint32 region_name  = 3;  // KVCacheRegionName enum value
+    optional uint32 stride_bytes = 4;
+    optional bool   has_scale    = 5;
 }
 
 message CacheLoadRequest {
@@ -44,6 +65,16 @@ message CacheLoadRequest {
     optional string requestid = 6;
     optional int32 partition_count = 7;
     optional int32 partition_id = 8;
+
+    // -------- M04 PR-3 (additive, magic-byte negotiation; M04 §4.3) ------
+    // 0 = legacy sender, 1 = unified-aware (bps=1 wire schema).  Any
+    // unrecognised positive value triggers receiver fallback-to-legacy
+    // (never abort) per §4.3.
+    optional uint32              protocol_magic = 100 [default = 0];
+    // Length-N unified super-block id list (N == total_logical_blocks).
+    repeated uint64              super_block_ids = 101;
+    // Length-P per-pool descriptor list.
+    repeated PoolDescriptorProto pools           = 102;
 }
 
 message CacheLoadResponse {
@@ -51,6 +82,11 @@ message CacheLoadResponse {
     optional int64 response_send_start_time_us = 2;
     optional bool direct_write_response = 3[default=false]; // true is rdma, false is tcp
     repeated BlockBufferInfo blocks = 4;
+
+    // -------- M04 PR-3 (additive; REQ-D4) ---------------------------------
+    // Response-side magic so a unified→legacy response can signal that the
+    // decode side is unified-aware (used by PD ring-open triple capture).
+    optional uint32 protocol_magic = 100 [default = 0];
 };
 
 message CacheTransferInfo {
@@ -70,6 +106,11 @@ message CacheTransferRequest {
     optional uint32 rdma_client_port = 6;
     optional uint32 timeout_ms = 7;
     optional int64 request_send_start_time_us = 8;
+
+    // -------- M04 PR-3 (additive, magic-byte negotiation) -----------------
+    optional uint32              protocol_magic = 100 [default = 0];
+    repeated uint64              super_block_ids = 101;
+    repeated PoolDescriptorProto pools           = 102;
 }
 
 message CacheTransferResponse {

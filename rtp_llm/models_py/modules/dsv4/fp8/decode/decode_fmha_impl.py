@@ -30,7 +30,7 @@ The eager path is unchanged.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
@@ -71,6 +71,25 @@ class DSv4DecodeFmhaImplConfigFP8:
     # snapshot-at-construct is safe.
     group_region_names: List[int] = field(default_factory=list)
 
+    # M09 §2.1 / §9 R3 — optional region descriptor list (PyKVCacheRegionDesc
+    # vector from M05 §3.1). When provided, ``allocate_decode_metadata_fp8``
+    # builds ``unified_block_table`` + per-pool views; otherwise falls back
+    # verbatim to the legacy 7-pool snapshot. Snapshot-at-construct because
+    # descriptors are model-config-static.
+    region_descs: Optional[Any] = None
+
+    # M09 §9 R3 — per-STATE-pool cyclic ring depth sourced from
+    # ``M06.cyclic_state_pool_mapper(kv_cache, layer_id=0, at_state, region_descs)``
+    # which reads ``PyKVCacheRegionDesc.max_state_blocks``. Distinct from
+    # ``unified_block_table.shape[1]`` (the cyclic modulus is per-STATE-pool
+    # and may differ from the KV-pool block table width under any future
+    # asymmetric / M08 prefill clamp).
+    max_state_blocks_by_at: Dict[int, int] = field(default_factory=dict)
+
+    # M09 §4.2 — model identifier consumed only as part of the sched_meta
+    # cache key (distinguishes main / MTP-target / MTP-draft instances).
+    model_id: Optional[Any] = None
+
 
 class DSv4DecodeFmhaImplFP8:
     """CUDA-graph-friendly DSv4 decode "FMHA impl".
@@ -98,6 +117,9 @@ class DSv4DecodeFmhaImplFP8:
             index_topk=config.index_topk,
             device=device,
             paged_pool_specs=config.paged_pool_specs,
+            region_descs=config.region_descs,
+            max_state_blocks_by_at=config.max_state_blocks_by_at or None,
+            model_id=config.model_id,
         )
         # Cache entries_per_block lookup — passed unchanged to
         # update_decode_metadata_in_place_fp8 every prepare call.
@@ -158,5 +180,16 @@ class DSv4DecodeFmhaImplFP8:
         replay. Re-runs ``prepare`` with ``forbid_realloc=True`` so any
         accidental buffer reallocation surfaces as an immediate error
         rather than a silent correctness bug (a captured graph still
-        holds the old pointer and would compute on stale values)."""
+        holds the old pointer and would compute on stale values).
+
+        M09 §4.2: resets ``sched_meta_cache`` at the capture boundary so
+        stale (B, q_len, region) entries from an earlier graph cannot
+        cross into the new captured graph's lifetime. Per-replay entries
+        re-populate lazily on the first ``flash_mla_with_kvcache`` call.
+        Also clears ``pool_view_3d_cache`` (CUDA-graph 3D view cache,
+        M09 §9 R2.5) for the same reason — views must be re-resolved
+        against the post-graph-boundary KVCache addresses.
+        """
+        self.metadata.sched_meta_cache.clear()
+        self.metadata.pool_view_3d_cache.clear()
         self.prepare(attn_inputs, forbid_realloc=True)

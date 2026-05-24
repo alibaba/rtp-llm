@@ -408,3 +408,15 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         "设置为 >0 时，STATE pool block_num = floor(state_pool_memory_mb * 1024 * 1024 / "
         "Σstate_block_size_bytes)，与 HBM 派生的 block_num 解耦。",
     )
+    kv_cache_group.add_argument(
+        "--dsv4_unified_block_count",
+        env_name="DSV4_UNIFIED_BLOCKS",
+        bind_to=(kv_cache_config, "dsv4_unified_block_count"),
+        type=int,
+        default=-1,
+        help="F02 DSV4 unified super-block layout opt-in (tri-state): "
+        "-1=auto (follow compiled default; today OFF), 0=force OFF (legacy per-group path), "
+        "1=force ON (CacheConfig.super_block_layout.enabled=true, bps≡1). "
+        "M02-PR1 plumbs the flag only; sizing/allocator wiring lands in later PRs. "
+        "Default -1 ⇒ today's behaviour is unchanged.",
+    )

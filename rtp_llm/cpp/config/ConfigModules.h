@@ -193,6 +193,15 @@ struct KVCacheConfig {
     // 1024 * 1024 / Σstate_block_size_bytes).
     int64_t state_pool_memory_mb = 0;
 
+    // F02 DSV4 unified super-block layout opt-in (tri-state):
+    //   -1 = auto (follow compiled default; today default OFF)
+    //    0 = force OFF (legacy per-group path)
+    //    1 = force ON  (write SuperBlockLayout with bps≡1, enabled=true)
+    // Env var: DSV4_UNIFIED_BLOCKS. Precedence: env > config > auto > default.
+    // M02-PR1 plumbs the flag only; downstream sizing / allocator wiring lands
+    // in M02-PR2 / M01-PR4. Default stays -1 → today's behaviour is unchanged.
+    int dsv4_unified_block_count = -1;
+
     // Remote connector configuration fields
     bool        reco_enable_vipserver                = false;
     std::string reco_vipserver_domain                = "";

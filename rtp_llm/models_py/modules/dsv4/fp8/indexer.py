@@ -349,6 +349,9 @@ class IndexerFP8(PoolBackedModule):
     # Pool propagation to nested compressor
     # --------------------------------------------------------------
     def _propagate_pool_to_nested(self) -> None:
+        # M08 §4.3 — forward the unified_bt kwarg to the nested compressor
+        # so its KV-side / STATE-side block-table views resolve from a
+        # single source under bps=1. None preserves legacy two-table.
         self.compressor.set_pool_context(
             self._kv_pool_view,
             self._kv_block_table,
@@ -356,6 +359,7 @@ class IndexerFP8(PoolBackedModule):
             self._state_pool_view,
             self._state_block_table,
             self._state_eb,
+            unified_bt=self._unified_bt,
         )
 
     def _clear_nested_pool(self) -> None:

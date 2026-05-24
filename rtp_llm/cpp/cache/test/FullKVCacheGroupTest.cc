@@ -16,6 +16,26 @@ protected:
     void SetUp() override {}
 
     void TearDown() override {}
+
+    // Mirror SingleTypeKVCacheAllocator::insertIntoCache (non-CP path):
+    // M03 refactor moved insertIntoCache from KVCacheGroup up to the allocator;
+    // the per-group write path is now a reverse-iterated SharedBlockCache::put.
+    static void insertIntoSharedCache(SharedBlockCache*       shared_cache,
+                                      const CacheKeysType&    cache_keys,
+                                      const BlockIndicesType& blocks,
+                                      bool                    is_resident) {
+        if (!shared_cache) {
+            return;
+        }
+        const size_t block_num = std::min(cache_keys.size(), blocks.size());
+        for (size_t i = block_num; i > 0; --i) {
+            const size_t idx = i - 1;
+            if (isNullBlockIdx(blocks[idx])) {
+                continue;
+            }
+            shared_cache->put(cache_keys[idx], {blocks[idx]}, is_resident);
+        }
+    }
 };
 
 // ==================== Basic functionality tests ====================
@@ -173,7 +193,7 @@ TEST_F(FullKVCacheGroupTest, InsertIntoCacheTest) {
     BlockIndicesType expected_result = {1, 2, 3, 4};
     ASSERT_EQ(block_ids.blocks(), expected_result);
 
-    group1.insertIntoCache(cache_keys, block_ids.blocks(), false);
+    insertIntoSharedCache(shared_cache.get(), cache_keys, block_ids.blocks(), false);
 
     CacheKeysType cache_keys1   = {107, 108};
     auto          match_result1 = group1.match(cache_keys1);
@@ -219,7 +239,7 @@ TEST_F(FullKVCacheGroupTest, EnsureFreeBlocksTest) {
     ASSERT_EQ(block_pool->freeBlocksNum(), total_blocks - 4);
     ASSERT_EQ(block_pool->availableBlocksNum(), total_blocks - 4);
 
-    group1.insertIntoCache(cache_keys, block_ids.blocks(), false);
+    insertIntoSharedCache(shared_cache.get(), cache_keys, block_ids.blocks(), false);
     ASSERT_EQ(shared_cache->size(), 4);
     ASSERT_EQ(block_pool->freeBlocksNum(), total_blocks - 4);
     ASSERT_EQ(block_pool->availableBlocksNum(), total_blocks - 4);

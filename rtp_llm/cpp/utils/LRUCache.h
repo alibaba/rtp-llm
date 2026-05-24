@@ -42,6 +42,16 @@ public:
 
     void put(const KeyType& key, const ValueType& value);
 
+    // M03-PR2 (Fix 79): put variant that surfaces a displaced value when an
+    // overflow eviction happens. The callback is invoked AT MOST ONCE per call,
+    // with the value that was popped from the LRU tail. If the inserted key was
+    // already present (in-place update) or no overflow occurred, the callback
+    // is NOT invoked. Caller must perform any cascade-free OUTSIDE any lock
+    // held during this call (snapshot-then-cascade pattern — see
+    // SharedBlockCache::putUnified).
+    template<typename EvictCallback>
+    void putWithEvictCallback(const KeyType& key, const ValueType& value, EvictCallback&& on_overflow);
+
     std::tuple<bool, ValueType> get(const KeyType& key);
 
     std::tuple<bool, ValueType> pop();
@@ -110,6 +120,33 @@ void LRUCache<KeyType, ValueType, Hash, Equal>::put(const KeyType& key, const Va
         cache_items_map_[key] = items_list_.begin();
         version++;
     }
+}
+
+template<typename KeyType, typename ValueType, typename Hash, typename Equal>
+template<typename EvictCallback>
+void LRUCache<KeyType, ValueType, Hash, Equal>::putWithEvictCallback(const KeyType&    key,
+                                                                     const ValueType&  value,
+                                                                     EvictCallback&&   on_overflow) {
+    auto it = cache_items_map_.find(key);
+    if (it != cache_items_map_.end()) {
+        // In-place update; no overflow.
+        it->second->second = value;
+        items_list_.splice(items_list_.begin(), items_list_, it->second);
+        return;
+    }
+    if (items_list_.size() == capacity_) {
+        // Surface the LRU tail BEFORE removing the map entry so the callback
+        // observes the same {key,value} pair that just lost residency.
+        auto&     tail     = items_list_.back();
+        KeyType   gone_key = tail.first;
+        ValueType gone_val = std::move(tail.second);
+        items_list_.pop_back();
+        cache_items_map_.erase(gone_key);
+        on_overflow(std::move(gone_val));
+    }
+    items_list_.emplace_front(key, value);
+    cache_items_map_[key] = items_list_.begin();
+    version++;
 }
 
 template<typename KeyType, typename ValueType, typename Hash, typename Equal>

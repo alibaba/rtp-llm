@@ -196,4 +196,362 @@ int64_t SharedBlockCache::version() const {
     return version_;
 }
 
+// ============================================================================
+// M03-PR2: unified-path methods (default-OFF, opt-in via super_block_layout)
+// ============================================================================
+
+void SharedBlockCache::ReleaseGuard::abandon() noexcept {
+    if (!cache_ || keys_.empty()) {
+        keys_.clear();
+        cache_ = nullptr;
+        return;
+    }
+    // Drain in reverse for symmetry with bump order. decUseRef takes mu_
+    // itself, so the guard MUST NOT be invoked while the caller already
+    // holds SharedBlockCache::mu_ (Panel-A item 1 contract).
+    for (auto it = keys_.rbegin(); it != keys_.rend(); ++it) {
+        cache_->decUseRef(*it);
+    }
+    keys_.clear();
+    cache_ = nullptr;
+}
+
+void SharedBlockCache::decUseRef(CacheKeyType cache_key) {
+    // M03-PR3 dual-write: when UnifiedRefCounter is wired, delegate the
+    // primary state to it. The per-item ``use_ref`` mirror is still
+    // maintained (legacy fallback for tests / non-unified paths).
+    // UnifiedRefCounter::decUseRef takes its own mu_; call it OUTSIDE our mu_
+    // to keep L1 (this->mu_) a leaf and avoid nested-lock surprises.
+    if (unified_ref_counter_) {
+        unified_ref_counter_->decUseRef(cache_key);
+    }
+    std::lock_guard<std::mutex> lock(mu_);
+    auto [success, item] = lru_cache_.get(cache_key);
+    if (!success) {
+        // The item was evicted (e.g. via remove() or a cascade) after the
+        // bump landed. Treat as no-op rather than fail — heavy churn can
+        // legitimately race the abandon path. The bump is already gone with
+        // the item; no leak.
+        return;
+    }
+    if (item.use_ref <= 0) {
+        // Defensive: should not happen if bump/dec are paired correctly. Log
+        // and clamp rather than fail because this is dual-storage code and
+        // the legacy path may interact via remove().
+        RTP_LLM_LOG_WARNING("SharedBlockCache::decUseRef: use_ref already 0 for key %ld", cache_key);
+        return;
+    }
+    --item.use_ref;
+    lru_cache_.put(cache_key, item);
+}
+
+int SharedBlockCache::useRefCount(CacheKeyType cache_key) const {
+    std::lock_guard<std::mutex> lock(mu_);
+    // Use a const-correct lookup: LRUCache::get touches the entry as MRU,
+    // which is fine here (test/diag-only API; callers don't rely on
+    // non-promotion semantics). The legacy contains() is true-const.
+    if (!lru_cache_.contains(cache_key)) {
+        return 0;
+    }
+    auto& mutable_self = const_cast<SharedBlockCache&>(*this);
+    auto [success, item] = mutable_self.lru_cache_.get(cache_key);
+    return success ? item.use_ref : 0;
+}
+
+void SharedBlockCache::setSwaTailPin(CacheKeyType cache_key, bool pinned) {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto [success, item] = lru_cache_.get(cache_key);
+    if (!success) {
+        return;
+    }
+    item.pin_for_swa_tail = pinned;
+    lru_cache_.put(cache_key, item);
+}
+
+void SharedBlockCache::putUnified(CacheKeyType cache_key, int super_block_id, bool is_resident) {
+    RTP_LLM_PROFILE_FUNCTION();
+
+    // Snapshot any displaced item under mu_; cascade OUTSIDE mu_ to honour
+    // the §3.0 lock-order (L1 released before L3 BlockPool calls).
+    std::vector<UnifiedCacheItem> displaced;
+    bool                          bumped_cache_for_new = false;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+
+        // In-place update path: bump version, refresh slot, do NOT cascade.
+        if (lru_cache_.contains(cache_key)) {
+            auto [success, existing_item] = lru_cache_.get(cache_key);
+            if (success) {
+                if (existing_item.slots.empty()) {
+                    existing_item.slots.resize(1, NULL_BLOCK_IDX);
+                }
+                if (isNullBlockIdx(existing_item.slots[0])
+                    && !isNullBlockIdx(static_cast<BlockIdxType>(super_block_id))) {
+                    existing_item.slots[0] = static_cast<BlockIdxType>(super_block_id);
+                    existing_item.is_resident = is_resident;
+                    // M03-PR3 dual-write: bump CACHE on UnifiedRefCounter AND
+                    // fan out blockCacheReference to EVERY per-pool counter
+                    // (bps[p]==1 ⇒ poolBlockId(p, S, 0) == S). PR-2's pool-0-only
+                    // bump was the minimal stub; the full migration touches
+                    // each pool so per-pool tryFreeBlocks gates stay coherent.
+                    if (!isNullBlockIdx(static_cast<BlockIdxType>(super_block_id))) {
+                        for (auto& pool : group_pools_) {
+                            if (pool) {
+                                pool->blockCacheReference(static_cast<BlockIdxType>(super_block_id));
+                            }
+                        }
+                        if (unified_ref_counter_) {
+                            unified_ref_counter_->bump(super_block_id, UnifiedRefCounter::Kind::CACHE);
+                        }
+                    }
+                    lru_cache_.put(cache_key, existing_item);
+                    ++version_;
+                }
+            }
+            return;
+        }
+
+        UnifiedCacheItem item;
+        item.cache_key   = cache_key;
+        item.is_resident = is_resident;
+        item.slots       = {static_cast<BlockIdxType>(super_block_id)};
+
+        lru_cache_.putWithEvictCallback(
+            cache_key, item, [&](UnifiedCacheItem&& gone) { displaced.push_back(std::move(gone)); });
+        ++version_;
+
+        if (!isNullBlockIdx(static_cast<BlockIdxType>(super_block_id))) {
+            for (auto& pool : group_pools_) {
+                if (pool) {
+                    pool->blockCacheReference(static_cast<BlockIdxType>(super_block_id));
+                }
+            }
+            bumped_cache_for_new = true;
+        }
+    }
+
+    // M03-PR3: bump CACHE on UnifiedRefCounter OUTSIDE mu_ (the counter has
+    // its own mu_; keep L1 as a leaf). Ordering vs the per-pool fan-out above
+    // is benign because both are independent monotonic mirrors of the same
+    // logical event.
+    if (bumped_cache_for_new && unified_ref_counter_) {
+        unified_ref_counter_->bump(super_block_id, UnifiedRefCounter::Kind::CACHE);
+    }
+
+    // Cascade-free OUTSIDE mu_. Re-acquire mu_ briefly per displaced item to
+    // re-check LRU residency: if a racing putUnified restored the displaced
+    // key (Fix 79 / R9), the new owner already holds the CACHE refcount and
+    // the dec belongs to a different residency — skip to preserve the
+    // "old blockCacheFree precedes new blockCacheReference for same key"
+    // invariant (R8 / Fix 80).
+    for (const auto& item : displaced) {
+        const int S = item.superBlockId();
+        if (S < 0) {
+            continue;
+        }
+        bool still_evicted = true;
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            if (lru_cache_.contains(item.cache_key)) {
+                auto [success, current] = lru_cache_.get(item.cache_key);
+                if (success && current.superBlockId() == S) {
+                    still_evicted = false;
+                }
+            }
+        }
+        if (!still_evicted) {
+            continue;
+        }
+        // M03-PR3 dual-write: per-pool blockCacheFree (legacy mirror) +
+        // UnifiedRefCounter dec(S, CACHE). Per-pool tryFreeBlocks fires
+        // internally on per-pool ref==0; UnifiedRefCounter isZero(S) gates
+        // the super-block free-list push.
+        for (auto& pool : group_pools_) {
+            if (pool) {
+                pool->blockCacheFree(static_cast<BlockIdxType>(S));
+            }
+        }
+        if (unified_ref_counter_) {
+            unified_ref_counter_->dec(S, UnifiedRefCounter::Kind::CACHE);
+            if (unified_ref_counter_->isZero(S) && super_block_reclaim_callback_) {
+                super_block_reclaim_callback_(S);
+            }
+        }
+    }
+}
+
+SharedBlockCache::MatchResultUnified SharedBlockCache::matchUnified(const std::vector<CacheKeyType>& keys,
+                                                                    int                              tokens_per_block,
+                                                                    bool                             check_swa_tail) {
+    RTP_LLM_PROFILE_FUNCTION();
+    MatchResultUnified out;
+    out.release_guard = ReleaseGuard(this);
+
+    if (keys.empty()) {
+        return out;
+    }
+
+    out.super_block_ids.reserve(keys.size());
+
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        for (size_t i = 0; i < keys.size(); ++i) {
+            if (!lru_cache_.contains(keys[i])) {
+                break;
+            }
+            auto [success, item] = lru_cache_.get(keys[i]);
+            if (!success || !item.is_resident) {
+                break;
+            }
+            const int S = item.superBlockId();
+            if (S < 0) {
+                break;
+            }
+            // M03-PR3: route the use_ref bump through UnifiedRefCounter when
+            // wired. Witness comparison is item.slots vs item.slots (taken
+            // under the same mu_); equal by construction, so the bump always
+            // lands for the in-walk case. Out-of-walk callers (M03-PR4 SWA
+            // tail-read path) supply a stale ``expected_slots`` so the witness
+            // gate has bite.
+            if (unified_ref_counter_) {
+                if (!unified_ref_counter_->incUseRef(keys[i], S, item.slots, item.slots)) {
+                    break;
+                }
+            }
+            // Legacy mirror — preserves the per-item gate read by
+            // ``selectAndEvictUnified`` on the non-unified-counter fallback
+            // path. Under unified mode the gate also consults
+            // ``unified_ref_counter_->useRefPinned(S)``.
+            ++item.use_ref;
+            lru_cache_.put(keys[i], item);  // re-insert (touches MRU + persists use_ref)
+            out.super_block_ids.push_back(S);
+            out.release_guard.addKey(keys[i]);
+        }
+    }
+
+    out.found = !out.super_block_ids.empty();
+
+    // SWA tail-veto: when the caller is the SWA group, the matched tail must
+    // include at least kSwaActiveTailBlocks worth of state. If not, return
+    // reuse_length=0 per M03 §5 (KV_ONLY_HIT downgrades). The decision is
+    // simplistic in PR-2: if the caller requested check_swa_tail and the
+    // matched count is < 2, demote to reuse_length=0 (M03-PR4 will plumb the
+    // actual per-stream SWA-window context). Pinned use_refs remain held by
+    // the guard so cascade can't drop the underlying blocks.
+    if (check_swa_tail && out.super_block_ids.size() < 2) {
+        out.reuse_length = 0;
+    } else {
+        out.reuse_length = out.super_block_ids.size() * static_cast<size_t>(tokens_per_block);
+    }
+
+    return out;
+}
+
+std::vector<SharedBlockCache::UnifiedCacheItem>
+SharedBlockCache::selectAndEvictUnified(size_t min_super_blocks) {
+    RTP_LLM_PROFILE_FUNCTION();
+    std::vector<UnifiedCacheItem> snapshot;
+    if (min_super_blocks == 0) {
+        return snapshot;
+    }
+
+    std::lock_guard<std::mutex> lock(mu_);
+    if (lru_cache_.empty()) {
+        return snapshot;
+    }
+
+    // Scan LRU tail; skip items that are pin_for_swa_tail OR use_ref>0 (Fix 78
+    // / R5). Up to K=2*min_super_blocks tail scan window mirrors §3.3 in the
+    // design doc — PR-2 implements the unbiased version (hint_gid lands in a
+    // follow-up; under bps[p]==1 the bias is a no-op anyway).
+    const size_t              scan_cap = 2 * min_super_blocks;
+    std::vector<CacheKeyType> to_evict;
+    to_evict.reserve(min_super_blocks);
+    size_t scanned = 0;
+    for (auto it = lru_cache_.items().rbegin(); it != lru_cache_.items().rend(); ++it) {
+        if (scanned >= scan_cap || to_evict.size() >= min_super_blocks) {
+            break;
+        }
+        ++scanned;
+        const auto& item = it->second;
+        // M03-PR3: composite eviction gate.
+        //   * pin_for_swa_tail — SWA reader claim (M03-PR4 plumbing).
+        //   * item.use_ref > 0 — legacy mirror; still authoritative on the
+        //     non-unified-counter fallback path.
+        //   * unified_ref_counter_->inUse(S) — REQUEST/CONNECTOR active OR a
+        //     use_ref bump is pinning S via the s_to_keys_ reverse index
+        //     (Panel-A item 2 closure). CACHE>0 alone does NOT block — that
+        //     is the entire point of LRU eviction.
+        if (item.pin_for_swa_tail || item.use_ref > 0) {
+            continue;  // R10 / R5: pinned by reader or by in-flight match
+        }
+        if (item.superBlockId() < 0) {
+            continue;  // no payload to cascade
+        }
+        if (unified_ref_counter_ && unified_ref_counter_->inUse(item.superBlockId())) {
+            continue;  // REQUEST/CONNECTOR active or use_ref pinned via counter
+        }
+        to_evict.push_back(item.cache_key);
+    }
+
+    for (auto k : to_evict) {
+        UnifiedCacheItem removed;
+        if (lru_cache_.remove(k, &removed)) {
+            snapshot.push_back(std::move(removed));
+        }
+    }
+    if (!snapshot.empty()) {
+        ++version_;
+    }
+    return snapshot;
+}
+
+size_t SharedBlockCache::evictAndFreeUnified(size_t min_super_blocks) {
+    RTP_LLM_PROFILE_FUNCTION();
+    // Phase A: select + erase under mu_.
+    auto snapshot = selectAndEvictUnified(min_super_blocks);
+    if (snapshot.empty()) {
+        return 0;
+    }
+
+    // Phase B: cascade per-pool with re-residency re-check (R8 / Fix 80).
+    size_t cascaded = 0;
+    for (const auto& item : snapshot) {
+        const int S = item.superBlockId();
+        if (S < 0) {
+            continue;
+        }
+        bool still_evicted = true;
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            if (lru_cache_.contains(item.cache_key)) {
+                auto [success, current] = lru_cache_.get(item.cache_key);
+                if (success && current.superBlockId() == S) {
+                    still_evicted = false;
+                }
+            }
+        }
+        if (!still_evicted) {
+            continue;
+        }
+        // M03-PR3 dual-write: always drop legacy per-pool block_cache_ref
+        // AND unified CACHE counter. The two mirrors track 1:1 because put
+        // bumps both; eviction drops both. Per-pool tryFreeBlocks fires on
+        // per-pool ref==0; super-block reclaim fires on unified isZero(S).
+        for (auto& pool : group_pools_) {
+            if (pool) {
+                pool->blockCacheFree(static_cast<BlockIdxType>(S));
+            }
+        }
+        if (unified_ref_counter_) {
+            unified_ref_counter_->dec(S, UnifiedRefCounter::Kind::CACHE);
+            if (unified_ref_counter_->isZero(S) && super_block_reclaim_callback_) {
+                super_block_reclaim_callback_(S);
+            }
+        }
+        ++cascaded;
+    }
+    return cascaded;
+}
+
 }  // namespace rtp_llm

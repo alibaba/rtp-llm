@@ -422,13 +422,22 @@ def fused_phase2b_pool_slot_mapping(
     if not (has_swa or has_csa or has_idx or has_hca):
         return
 
-    # For absent pools, pass the SWA buffer as a dummy (kernel won't touch it)
-    bt_swa = meta.pool_block_tables.get(
-        SWA_KV, meta.pool_block_tables.get(next(iter(meta.pool_block_tables)))
-    )
-    bt_csa = meta.pool_block_tables.get(CSA_KV, bt_swa)
-    bt_idx = meta.pool_block_tables.get(INDEXER_KV, bt_swa)
-    bt_hca = meta.pool_block_tables.get(HCA_KV, bt_swa)
+    # M09 §3.2 — under unified mode the four bt_* pointers collapse to one:
+    # ``bt_swa == bt_csa == bt_idx == bt_hca == &unified_block_table[0, 0]``.
+    # The kernel body is UNCHANGED for F02-1:1; we just feed the same tensor
+    # four times so BT_STRIDE/E_at consteval per-pool. For the legacy path
+    # (no unified table), the per-pool dict-of-tensors form is preserved.
+    unified = getattr(meta, "unified_block_table", None)
+    if unified is not None:
+        bt_swa = bt_csa = bt_idx = bt_hca = unified
+    else:
+        # For absent pools, pass the SWA buffer as a dummy (kernel won't touch it)
+        bt_swa = meta.pool_block_tables.get(
+            SWA_KV, meta.pool_block_tables.get(next(iter(meta.pool_block_tables)))
+        )
+        bt_csa = meta.pool_block_tables.get(CSA_KV, bt_swa)
+        bt_idx = meta.pool_block_tables.get(INDEXER_KV, bt_swa)
+        bt_hca = meta.pool_block_tables.get(HCA_KV, bt_swa)
 
     slot_swa = meta.pool_write_slot_mappings.get(
         SWA_KV,

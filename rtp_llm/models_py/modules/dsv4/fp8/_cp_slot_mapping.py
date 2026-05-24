@@ -27,9 +27,19 @@ excluded: every CP rank keeps the full STATE block table.
 
 from __future__ import annotations
 
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torch
+
+from rtp_llm.models_py.modules.dsv4.fp8._pool_handle import (
+    PoolHandle,
+    _adhoc_kv_handle,
+)
+from rtp_llm.models_py.modules.dsv4.fp8._slot_resolver import (
+    CPContext,
+    SentinelStrict,
+    resolve_pool_slot,
+)
 
 
 def cp_global_block_to_local(
@@ -97,6 +107,8 @@ def cp_kv_slot_mapping(
     ratio: int,
     cp_size: int,
     cp_rank: int,
+    *,
+    handle: Optional[PoolHandle] = None,
 ) -> torch.Tensor:
     """CP-aware KV-pool slot mapping for compressor write path.
 
@@ -108,23 +120,30 @@ def cp_kv_slot_mapping(
 
     With CP sharding additionally:
       * Non-owned logical blocks → slot = -1.
+
+    Per M06 §3.4: ``tokens_per_block`` is sourced from
+    ``PyKVCacheRegionDesc.entries_per_block * kernel_blocks_per_kv_block``
+    (M05 §3.1; with DSv4 ``bps≡1`` the second factor is 1). The optional
+    ``handle`` argument lets the unified path pass the canonical
+    descriptor; bit-equal to the legacy inline body when omitted.
     """
     if ratio <= 0 or kv_eb <= 0:
         return torch.full_like(positions, -1, dtype=torch.int64)
-    block_id, owned_mask = cp_global_block_to_local(
-        positions, block_table_local, b_idx, tokens_per_block, cp_size, cp_rank
+    if handle is None:
+        handle = _adhoc_kv_handle(eb=int(kv_eb), ratio=int(ratio), is_state=False)
+    assert tokens_per_block == handle.eb * handle.ratio, (
+        f"tokens_per_block {tokens_per_block} != eb*ratio "
+        f"{handle.eb * handle.ratio} — likely SWA-vs-compressed mix-up"
     )
-    in_block_compressed = (positions % tokens_per_block) // ratio
-    slot = block_id * kv_eb + in_block_compressed
-    boundary = ((positions + 1) % ratio) == 0
-    # CP path uses ``block_id > 0`` (stricter than the non-CP path which uses
-    # ``>= 0``). This is intentional: under page-RR the rank-local
-    # block_table is padded for short requests, and the CP slot mapper
-    # conservatively treats block_id == 0 as the unallocated sentinel to
-    # avoid writing through padding rows. Pinned by
-    # ``test_unallocated_block_zero_yields_minus_one``.
-    valid = owned_mask & boundary & (block_id > 0)
-    return torch.where(valid, slot, torch.full_like(slot, -1))
+    slot, _ = resolve_pool_slot(
+        handle,
+        positions,
+        block_table_local,
+        req_idx=b_idx,
+        cp=CPContext(size=int(cp_size), rank=int(cp_rank)),
+        sentinel_strict=SentinelStrict.GT_ZERO,
+    )
+    return slot
 
 
 def cp_state_slot_mapping(

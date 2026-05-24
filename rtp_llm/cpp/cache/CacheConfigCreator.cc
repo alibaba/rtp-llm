@@ -93,16 +93,44 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
                              config.fixed_pool_reserve_bytes / 1024 / 1024,
                              paged_budget / 1024 / 1024);
         }
-        const int    joint_step    = std::max(1, config.linear_step);
-        const size_t swa_effective = (config.swa_block_size_bytes > 0 && joint_step > 1) ?
-                                         config.swa_block_size_bytes / static_cast<size_t>(joint_step) :
-                                         config.swa_block_size_bytes;
-        // env=0 → STATE pools live on device and compete for HBM, so include
-        // their bytes in the HBM block-num divisor. env>0 → STATE pools live
-        // on pinned CPU and are sized separately; exclude them here.
-        const size_t state_in_hbm_bytes = config.state_pool_uses_pinned_cpu ? 0u : config.state_block_size_bytes;
-        const size_t effective_bytes    = config.block_size_bytes + swa_effective + state_in_hbm_bytes;
-        block_num                       = paged_budget / effective_bytes;
+        if (config.super_block_layout.enabled) {
+            // F02 unified path (DSV4): sum of per-pool strides.
+            //   super_block_bytes_hbm = Σ_{p ∈ HBM} bps[p] * group_block_size_bytes[p]
+            //   num_super_blocks      = paged_budget / super_block_bytes_hbm
+            // STATE pools are excluded from the HBM divisor when they live on
+            // pinned CPU (production default). paged_budget is already net of
+            // fixed_pool_reserve_bytes (see the if-block above).
+            const size_t group_count = config.group_block_size_bytes.size();
+            RTP_LLM_CHECK_WITH_INFO(config.super_block_layout.bps.size() == group_count,
+                                    "DSV4 unified path: super_block_layout.bps size %zu != group_count %zu",
+                                    config.super_block_layout.bps.size(),
+                                    group_count);
+            size_t super_block_bytes_hbm = 0;
+            for (size_t p = 0; p < group_count; ++p) {
+                const auto region = p < config.group_region_names.size() ? config.group_region_names[p] :
+                                                                           KVCacheRegionName::DEFAULT;
+                if (config.state_pool_uses_pinned_cpu && isStateRegion(region)) {
+                    continue;
+                }
+                super_block_bytes_hbm += static_cast<size_t>(config.super_block_layout.bps[p])
+                                         * config.group_block_size_bytes[p];
+            }
+            RTP_LLM_CHECK_WITH_INFO(super_block_bytes_hbm > 0,
+                                    "DSV4 unified path: no HBM pools to size against (paged_budget=%zu)",
+                                    paged_budget);
+            block_num = static_cast<uint32_t>(paged_budget / super_block_bytes_hbm);
+        } else {
+            const int    joint_step    = std::max(1, config.linear_step);
+            const size_t swa_effective = (config.swa_block_size_bytes > 0 && joint_step > 1) ?
+                                             config.swa_block_size_bytes / static_cast<size_t>(joint_step) :
+                                             config.swa_block_size_bytes;
+            // env=0 → STATE pools live on device and compete for HBM, so include
+            // their bytes in the HBM block-num divisor. env>0 → STATE pools live
+            // on pinned CPU and are sized separately; exclude them here.
+            const size_t state_in_hbm_bytes = config.state_pool_uses_pinned_cpu ? 0u : config.state_block_size_bytes;
+            const size_t effective_bytes    = config.block_size_bytes + swa_effective + state_in_hbm_bytes;
+            block_num                       = paged_budget / effective_bytes;
+        }
     }
     RTP_LLM_CHECK_WITH_INFO(block_num > 0,
                             "kv cache needs at least 1 block but %ld, each block needs %ld MiB memory",
@@ -130,7 +158,26 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
 
     const auto kv_cache_seq_len = static_cast<size_t>(block_num) * config.seq_size_per_block;
     config.block_num            = static_cast<int>(block_num);
-    config.finalizeBlockNums(block_num, state_block_num, runtime_config);
+    if (config.super_block_layout.enabled) {
+        // F02 unified path: write group_block_nums directly from num_super_blocks * bps[p].
+        // Non-FULL groups keep the legacy `+non_full_addition_kvcache_blocks` headroom
+        // (preserves SWA/STATE reserve invariant — A10 17-10 / 45-5).
+        config.super_block_layout.num_super_blocks = block_num;
+        const size_t group_count                   = config.group_block_size_bytes.size();
+        config.group_block_nums.assign(group_count, 0);
+        for (size_t p = 0; p < group_count; ++p) {
+            uint32_t   blocks  = block_num * config.super_block_layout.bps[p];
+            const bool is_full = p < config.group_types.size() && config.group_types[p] == CacheGroupType::FULL;
+            if (!is_full) {
+                blocks += config.non_full_addition_kvcache_blocks;
+            }
+            config.group_block_nums[p] = blocks;
+        }
+        // fixed_pool_reserve_bytes already populated by setupIndependentPoolSizes /
+        // an earlier finalizeBlockNums pass; leave it intact for budget accounting.
+    } else {
+        config.finalizeBlockNums(block_num, state_block_num, runtime_config);
+    }
     RTP_LLM_LOG_INFO("kv cache block nums is %u, allows storing %ld tokens", block_num, kv_cache_seq_len);
     if (kv_cache_seq_len < model_config.max_seq_len) {
         RTP_LLM_LOG_WARNING("kv cache block nums %u can only store %ld tokens, less than max_seq_len %ld, "

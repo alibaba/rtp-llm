@@ -109,6 +109,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":cache_group_type",
+        "//rtp_llm/cpp/utils:core_utils",
     ],
 )
 

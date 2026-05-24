@@ -152,10 +152,42 @@ _TOKEN_DATA_SIZE = _TOKEN_FP8_DIM + _TOKEN_BF16_DIM * 2  # 576
 _INPUT_DIM = 512
 
 
+# ---------------------------------------------------------------------------
+# M07 PR-1 — wrapper-side super_block_id → SWA-pool-block_id remap.
+#
+# Under F02 bps[SWA_KV]≡1 the mapping is identity, so this is a pure
+# passthrough. For bps>1 Choice A (kernel still bit-equal) we project
+# ``pool_block_id = S * bps + sub_block_index_in_super``. NULL sentinels
+# (``< 0``) flow through unchanged so K1/K5's slot-skip fast-path keeps
+# firing. See ``docs/dsv4/kvcache-unify-final/modules/M07_kernels_swa.md``
+# §3.2 + §5.1.
+# ---------------------------------------------------------------------------
+def remap_super_block_id_to_swa_pool_id(
+    block_table: torch.Tensor,
+    bps_swa: int = 1,
+    sub_block_index_in_super: int = 0,
+) -> torch.Tensor:
+    """Resolve super_block_id namespace → SWA pool-local block index.
+
+    - ``bps_swa == 1``     : identity passthrough (recommended path).
+    - ``bps_swa > 1`` (A)  : pool_block_id = S * bps + sub_block_index_in_super.
+    - Negative entries     : preserved (NULL_BLOCK_IDX sentinel).
+    """
+    if bps_swa == 1:
+        return block_table
+    valid = block_table >= 0
+    pool_id = block_table * int(bps_swa) + int(sub_block_index_in_super)
+    return torch.where(valid, pool_id, block_table)
+
+
 def quantize_and_insert_k_cache(
     k: torch.Tensor,  # [num_tokens, 512] bf16
     k_cache: torch.Tensor,  # [num_blocks, block_size, 584] uint8
     slot_mapping: torch.Tensor,  # [num_tokens] int64; -1 = skip
+    *,
+    super_block_id_namespace: bool = False,
+    bps_swa: int = 1,
+    region_block_offset: int = 0,
 ) -> None:
     """One-launch quantize-and-write into the FP8 SWA pool.
 
@@ -168,7 +200,22 @@ def quantize_and_insert_k_cache(
     Slots with value ``-1`` are skipped. The caller decides which logical
     blocks are writable by passing a per-token slot mapping; sparse positive
     block-table entries are written just like contiguous tail entries.
+
+    M07 PR-1 namespace contract (wrapper-only; kernel bit-equal):
+      * ``super_block_id_namespace=False`` (default) — legacy bit-equal path.
+      * ``super_block_id_namespace=True`` with ``bps_swa==1`` —
+        ``slot_mapping`` already carries pool-local indices (super_block_id
+        ≡ pool_block_id under bps≡1). Pure contract assertion, no remap.
+      * ``bps_swa>1`` — reserved for PR-2 (asymmetric Choice B); rejected
+        here so callers don't silently hit the wrong pointer math.
     """
+    if super_block_id_namespace and bps_swa != 1:
+        raise NotImplementedError(
+            "quantize_and_insert_k_cache: bps_swa>1 requires the M07 PR-2 "
+            "region_block_offset kernel diff (Choice B). Use Choice A "
+            "(remap super→pool before slot_mapping) under PR-1."
+        )
+    del region_block_offset  # PR-1 ignores; only consumed by PR-2 kernel diff.
     assert (
         k.dim() == 2 and k.shape[1] == _INPUT_DIM
     ), f"K must be [num_tokens, 512], got {tuple(k.shape)}"

@@ -43,6 +43,60 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
+# ---------------------------------------------------------------------------
+# Per-region sentinel constexpr (M09 §2.2, Fix 141 — E03-09-1, D05 08-2, M07 §1).
+# SWA is the always-write path (mask_negative=False); slot 0 is reserved by
+# M01 §1 ("super-block-id 0 reserved") and the SWA Triton writer guarantees
+# in-block offset >=1 on real writes — so warmup-before-bt-populated writes
+# may harmlessly overwrite slot 0 of unified storage.
+# CSA/HCA/INDEXER writers honour mask_negative=True, so -1 slots skip.
+# ---------------------------------------------------------------------------
+SWA_SENTINEL: int = 0
+OTHER_SENTINEL: int = -1
+WARMUP_SENTINEL: int = -1
+
+# Canonical KVCacheRegionName count (mirror C++ ``CacheGroupType.h``, pinned by
+# M06 §3.1.4). Used by ``owned_regions_from_descs`` to walk the per-layer
+# descriptor table published as ``PyAttentionInputs.kv_cache_layer_region_descs``.
+_REGION_COUNT_FOR_OWNED: int = 8
+
+
+def owned_regions_from_descs(
+    region_descs_flat: Any,
+    layer_id: int,
+    num_regions: int = _REGION_COUNT_FOR_OWNED,
+) -> int:
+    """Per-layer owned-regions bitmask (M09 §3.0, Fix 146 — B06 18-3, C07 06-6).
+
+    Replaces the ``try: getLayerCache(at); except RuntimeError`` antipattern
+    with a single O(R) walk of the descriptor table.
+
+    ``region_descs_flat`` is the flat ``int32[num_layers * num_regions]`` tensor
+    published as ``PyAttentionInputs.kv_cache_layer_region_descs`` (M05 PR-1).
+    Each cell holds the resolved ``group_id`` for ``(layer, region)`` or ``-1``
+    when the layer does not own the region. Returns a bitmask where bit
+    ``region_id`` is set iff that layer owns that region.
+
+    ``region_descs_flat=None`` returns ``0`` (no descriptors ⇒ caller must
+    fall back to the legacy probe path). Hot-path cost is one bitwise-AND
+    per region per layer — no exception unwinding.
+    """
+    if region_descs_flat is None:
+        return 0
+    try:
+        numel = int(region_descs_flat.numel())
+    except AttributeError:
+        return 0
+    if numel == 0:
+        return 0
+    base = int(layer_id) * int(num_regions)
+    owned = 0
+    for r in range(int(num_regions)):
+        idx = base + r
+        if 0 <= idx < numel and int(region_descs_flat[idx].item()) >= 0:
+            owned |= 1 << r
+    return owned
+
 
 @dataclass
 class DSv4DecodeAttnMetadataFP8:
@@ -132,12 +186,56 @@ class DSv4DecodeAttnMetadataFP8:
     # framework block tables are wired.
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # M09 §2.1 — Unified block table (single source of truth for KV pools).
+    # ------------------------------------------------------------------
+    # Shape ``[B_max, max_blocks_per_req]`` int32. Under F02 with bps==1 every
+    # entry IS the super_block_id; per-pool views in ``pool_views`` are
+    # aliases of this tensor for KV pools (SWA_KV, CSA_KV, HCA_KV, INDEXER_KV).
+    # STATE pools own a separate block-table-equivalent (see
+    # ``compressor_state_slot_mappings`` and CP-page-RR reconciliation in
+    # M09 §2.1).
+    #
+    # ``None`` when region_descs are not wired (legacy 7-pool path stays
+    # bit-equal). Allocated once at ``allocate_decode_metadata_fp8`` time and
+    # always ``.copy_``'d into thereafter (CUDA-graph-friendly).
+    unified_block_table: Optional[torch.Tensor] = None
+
     # Per-attn_type framework block_table: [max_B, max_blocks_per_req] int32.
     # Source: ``attn_inputs.kv_cache_kernel_block_id_device_by_group[gid]``.
     # Keys are attn_type ids (1=CSA_KV..7=SWA_KV) from
     # :mod:`rtp_llm.models_py.modules.dsv4.attn_type`; only pools that the
-    # model actually uses are present.
+    # model actually uses are present. Under unified mode (M09), KV-pool
+    # entries are aliases of ``unified_block_table``; STATE-pool entries (if
+    # present) are independently-addressable.
     pool_block_tables: Dict[int, torch.Tensor] = field(default_factory=dict)
+
+    # M09 §2.1 — Per-pool typed views (alias dict; mirrors ``pool_block_tables``
+    # for the F02-1:1 case where KV-pool block tables collapse to a single
+    # tensor). Kept as a separate field so new consumers can read the
+    # "view" semantics explicitly without depending on the historical
+    # ``pool_block_tables`` dict shape.
+    pool_views: Dict[int, torch.Tensor] = field(default_factory=dict)
+
+    # M09 §2.1 — Per-pool ``entries_per_block`` (E_at). Compile-time-stable;
+    # mirrors ``DSv4DecodeFmhaImplConfigFP8.paged_pool_specs[at][0]`` for the
+    # populated pools. Lives next to the views so consumers can compute
+    # ``slot = block_id * E + in_block`` without re-querying the impl config.
+    pool_entries_per_block: Dict[int, int] = field(default_factory=dict)
+
+    # M09 §2.3 — Per-pool region offset (placeholder for non-DSv4 / future
+    # asymmetric layouts where two pools fuse into one physical tensor).
+    # For F02-1:1 every entry is 0 because each pool keeps its own physical
+    # tensor (M05 + M06). Carried for forward-compat.
+    region_offsets: Dict[int, int] = field(default_factory=dict)
+
+    # M09 §9 R3 (Fix 150 — E03 09-4 / 37-2, C07 34-3) — per-STATE-pool cyclic
+    # ring depth, SOURCE-OF-TRUTH is ``PyKVCacheRegionDesc.max_state_blocks``
+    # (M05 §3.1, surfaced by ``cyclic_state_pool_mapper`` in M06 §3.3.1).
+    # NEVER derive the cyclic modulus from ``unified_block_table.shape[1]`` —
+    # that aliases STATE writes from different logical state blocks into the
+    # same physical slot under any future asymmetric / M08 prefill clamp.
+    max_state_blocks: Dict[int, int] = field(default_factory=dict)
 
     # Per-attn_type new-token write slot mapping: [max_T_total] int64.
     # ``slot[t] = block_table[req(t), abs_pos(t)//E] * E + abs_pos(t)%E``
@@ -219,7 +317,33 @@ class DSv4DecodeAttnMetadataFP8:
     # pools have different page_block_size → separate cache keys.
     # ``extra_at`` is the ``attn_type`` int for the compressed pool
     # (``CSA_KV`` / ``HCA_KV``) or ``None`` for single-pool SWA-only.
-    sched_meta_cache: Dict[Tuple[int, Optional[int]], Any] = field(default_factory=dict)
+    # M09 §4.2 (Fix 142, D01 07-5 / 49-3, D04 21-7 / 49-5, D05 08-3 / 50-1):
+    # cache key extended from ``(batch_size, extra_attn_type)`` to
+    # ``(model_id, batch_size, q_len_per_req, region_id)``. Distinguishes
+    # main-vs-MTP-target-vs-MTP-draft modules + q_len variants +
+    # per-region ``entries_per_block`` (semantically equal to the wheel's
+    # ``extra_page_block_size``). Cache lifecycle: rebuilt every step in
+    # eager; survives across CUDA-graph replays in graph mode; cleared at
+    # ``prepare_cuda_graph`` boundary via ``DSv4DecodeFmhaImplFP8.prepare_cuda_graph``.
+    sched_meta_cache: Dict[Tuple[Any, int, int, Optional[int]], Any] = field(
+        default_factory=dict
+    )
+
+    # M09 §9 R2.5 (Fix 149 — D04 49-4, B07 18-3 / 46-3) — per-(layer_id, region)
+    # CUDA-graph 3D view cache. Views are constructed ONCE at allocator-init
+    # time (or first call pre-capture); after that the dict-lookup returns the
+    # cached view with stable ``.data_ptr()``. Populated lazily by
+    # ``AttentionFP8._pool_view_3d_fp8`` (M09 PR-E migrate path); M09 PR-A
+    # owns the storage slot only.
+    pool_view_3d_cache: Dict[Tuple[int, int], torch.Tensor] = field(
+        default_factory=dict
+    )
+
+    # M09 §4.2 — optional model identifier consumed only as part of the
+    # sched_meta cache key. ``None`` collapses to today's behaviour (single
+    # KVCache instance across the process); set per-model (main / MTP-target /
+    # MTP-draft) when multiple coexist.
+    model_id: Optional[Any] = None
 
 
 def get_or_build_sched_meta(
@@ -249,12 +373,27 @@ def get_or_build_sched_meta(
       * CSA_KV and HCA_KV pools have different ``page_block_size``, so
         they MUST use separate sched_meta instances.
 
-    Within one (B, extra_attn_type) bucket ``q_len / num_heads / topk`` are
-    process-constants.
+    Within one (model_id, B, q_len, extra_attn_type) bucket
+    ``num_heads / topk`` are process-constants.
+
+    M09 §4.2 (Fix 142): cache key extended to
+    ``(model_id, batch_size, q_len_per_req, region_id)``:
+      * ``model_id`` distinguishes main vs MTP-target vs MTP-draft modules.
+      * ``q_len_per_req`` covers MTP/verify variants (without it an MTP verify
+        step reusing a decode sched_meta would silently mis-shape the
+        per-token recompute).
+      * ``region_id`` ⇔ ``extra_attn_type`` for the 7 pools — keys explicitly
+        by region so two distinct ``entries_per_block`` values cannot collapse.
     """
     from flash_mla import get_mla_metadata  # type: ignore[import-not-found]
 
-    key = (batch_size, extra_attn_type)
+    model_id = getattr(metadata, "model_id", None)
+    key: Tuple[Any, int, int, Optional[int]] = (
+        model_id,
+        int(batch_size),
+        int(q_len),
+        extra_attn_type,
+    )
     sched_meta = metadata.sched_meta_cache.get(key)
     if sched_meta is None:
         sched_meta, _ = get_mla_metadata(
@@ -274,19 +413,42 @@ def _compute_state_pool_slot_mapping(
     positions: torch.Tensor,
     req_idx: torch.Tensor,
     entries_per_block: int,
+    *,
+    max_state_blocks: Optional[int] = None,
 ) -> torch.Tensor:
     """Match CompressorFP8._compute_state_slot_mapping.
 
     State pools are cyclic per request: block index is
     ``(pos // entries_per_block) % max_blocks``.  Block id <= 0 is the
     unallocated sentinel and maps to -1.
+
+    M09 §9 R3 (Fix 150): the cyclic modulus is the per-STATE-pool
+    ``max_state_blocks`` sourced from ``PyKVCacheRegionDesc.max_state_blocks``
+    (M05 §3.1, surfaced by ``M06.cyclic_state_pool_mapper``). Callers MUST
+    pass it explicitly when ``block_table`` was narrowed from a unified
+    table. ``None`` falls back to ``block_table.shape[1]`` for the legacy
+    7-pool path (every pool keeps its own physical block table). When both
+    are present, ``block_table.shape[1] == max_state_blocks`` is asserted
+    (Panel C CD-4 enforcement) — the helper refuses to operate on a
+    mismatched view rather than silently aliasing.
     """
     if positions.numel() == 0:
         return torch.empty(0, dtype=torch.long, device=positions.device)
     pos_i64 = positions.to(torch.long)
     req_i64 = req_idx.to(torch.long)
     bt_long = block_table.to(torch.long)
-    max_blocks = int(bt_long.shape[1])
+    bt_cols = int(bt_long.shape[1])
+    if max_state_blocks is not None:
+        assert bt_cols == int(max_state_blocks), (
+            f"_compute_state_pool_slot_mapping: STATE-pool cyclic-modulus "
+            f"contract violation — block_table.shape[1]={bt_cols} != "
+            f"max_state_blocks={int(max_state_blocks)}. M09 R3 owns the "
+            f"per-pool narrowing of unified_block_table[:, :max_state_blocks[at]] "
+            f"before invocation (Panel C CD-4)."
+        )
+        max_blocks = int(max_state_blocks)
+    else:
+        max_blocks = bt_cols
     block_in_seq = (pos_i64 // entries_per_block) % max_blocks
     in_block = pos_i64 % entries_per_block
     block_id = bt_long[req_i64, block_in_seq]
@@ -311,11 +473,20 @@ def _update_compressor_state_slot_mappings(
         if at not in meta.pool_block_tables:
             continue
         entries_per_block = paged_pool_entries_per_block.get(at, 1)
+        # M09 §9 R3 (Fix 150): cyclic modulus = per-STATE-pool max_state_blocks
+        # (from M06 cyclic_state_pool_mapper). When the meta carries the
+        # value, narrow the block-table view to match before invoking the
+        # cyclic helper — refuses to operate on a mismatched view.
+        max_state = meta.max_state_blocks.get(at) if meta.max_state_blocks else None
+        bt_for_state = meta.pool_block_tables[at][:bs]
+        if max_state is not None and bt_for_state.shape[1] != int(max_state):
+            bt_for_state = bt_for_state[:, : int(max_state)]
         mapped = _compute_state_pool_slot_mapping(
-            meta.pool_block_tables[at][:bs],
+            bt_for_state,
             positions,
             req_idx,
             entries_per_block,
+            max_state_blocks=max_state,
         )
         out[:T].copy_(mapped)
 
@@ -571,6 +742,10 @@ def allocate_decode_metadata_fp8(
     index_topk: int,
     device: torch.device,
     paged_pool_specs: Optional[Dict[int, Tuple[int, int]]] = None,
+    *,
+    region_descs: Optional[Any] = None,
+    max_state_blocks_by_at: Optional[Dict[int, int]] = None,
+    model_id: Optional[Any] = None,
 ) -> "DSv4DecodeAttnMetadataFP8":
     """Pre-allocate a ``DSv4DecodeAttnMetadataFP8`` sized for ``max_batch_size``.
 
@@ -641,39 +816,128 @@ def allocate_decode_metadata_fp8(
     # from these stable addresses. When a pool is absent on a layer, the
     # corresponding entries are simply unused.
     pool_block_tables: Dict[int, torch.Tensor] = {}
+    pool_views: Dict[int, torch.Tensor] = {}
+    pool_entries_per_block: Dict[int, int] = {}
+    region_offsets: Dict[int, int] = {}
+    max_state_blocks: Dict[int, int] = {}
     pool_write_slot_mappings: Dict[int, torch.Tensor] = {}
     compressor_state_slot_mappings: Dict[int, torch.Tensor] = {}
+    unified_block_table: Optional[torch.Tensor] = None
     if paged_pool_specs:
         from rtp_llm.models_py.modules.dsv4.attn_type import (
+            CSA_KV,
             CSA_STATE,
+            HCA_KV,
             HCA_STATE,
+            INDEXER_KV,
             INDEXER_STATE,
             SWA_KV,
         )
 
-        for attn_type, (_, max_blocks) in paged_pool_specs.items():
-            pool_block_tables[attn_type] = torch.zeros(
-                B, max_blocks, dtype=torch.int32, device=device
-            )
+        _kv_attn_types = (SWA_KV, CSA_KV, HCA_KV, INDEXER_KV)
+
+        # M09 §2.1 — unified KV block table is enabled when descriptors are
+        # wired (M05 region_descs published). Under F02 with bps==1 every KV
+        # pool's per-request block-id column equals the super_block_id stream,
+        # so a single tensor (per-pool dict-of-views as aliases) replaces the
+        # 4-per-step KV snapshots. STATE pools own a separate block table
+        # (cyclic depth from M05 PyKVCacheRegionDesc.max_state_blocks).
+        use_unified = region_descs is not None and (
+            (hasattr(region_descs, "__len__") and len(region_descs) > 0)
+            or (hasattr(region_descs, "numel") and int(region_descs.numel()) > 0)
+        )
+
+        if use_unified:
+            # Pick the max across present KV pools as canonical width
+            # (every KV pool's max_blocks_per_req should agree under bps==1;
+            # take the max defensively).
+            kv_max_blocks_iter = [
+                paged_pool_specs[at][1]
+                for at in _kv_attn_types
+                if at in paged_pool_specs
+            ]
+            unified_cols = max(kv_max_blocks_iter) if kv_max_blocks_iter else 0
+            if unified_cols > 0:
+                unified_block_table = torch.zeros(
+                    B, unified_cols, dtype=torch.int32, device=device
+                )
+
+        for attn_type, (eb, max_blocks) in paged_pool_specs.items():
+            pool_entries_per_block[attn_type] = int(eb)
+            region_offsets[attn_type] = 0
+            if (
+                use_unified
+                and unified_block_table is not None
+                and attn_type in _kv_attn_types
+            ):
+                # KV pool: per-pool block_table is an ALIAS of the unified
+                # tensor (narrowed to this pool's width). For F02-1:1 every
+                # KV pool's max_blocks equals the unified width — the slice
+                # is a no-op view. forbid_realloc snapshot validates the
+                # data_ptr alias at every prepare boundary (M09 §4.1).
+                bt_view = unified_block_table[:, : int(max_blocks)]
+                pool_block_tables[attn_type] = bt_view
+                pool_views[attn_type] = bt_view
+            else:
+                pool_block_tables[attn_type] = torch.zeros(
+                    B, max_blocks, dtype=torch.int32, device=device
+                )
+                pool_views[attn_type] = pool_block_tables[attn_type]
             # SWA_KV is the always-write path (mask_negative=False downstream),
             # so it must hold a *valid* slot at all times — including during
             # framework warmup where update_decode_metadata_in_place_fp8's paged
             # branch is skipped (no block_tables yet). Slot 0 is always a
             # valid pool index; warmup writes overlap there harmlessly.
             # Compressed pools (CSA/HCA/INDEXER) use mask_negative=True and
-            # require -1 sentinel for non-boundary tokens.
-            sentinel = 0 if attn_type == SWA_KV else -1
+            # require -1 sentinel for non-boundary tokens. Per M09 §2.2 these
+            # are the per-region sentinel constexpr values.
+            sentinel = SWA_SENTINEL if attn_type == SWA_KV else OTHER_SENTINEL
             pool_write_slot_mappings[attn_type] = torch.full(
                 (T_total,), sentinel, dtype=torch.int64, device=device
             )
         for attn_type in (CSA_STATE, HCA_STATE, INDEXER_STATE):
             if attn_type in paged_pool_specs:
+                eb_state, max_blocks_state = paged_pool_specs[attn_type]
+                pool_entries_per_block[attn_type] = int(eb_state)
+                region_offsets[attn_type] = 0
+                # STATE pools NEVER alias unified_block_table — cyclic depth
+                # differs (M09 §9 R3, Fix 150). Use the per-pool max_blocks.
+                pool_block_tables[attn_type] = torch.zeros(
+                    B, max_blocks_state, dtype=torch.int32, device=device
+                )
+                pool_views[attn_type] = pool_block_tables[attn_type]
                 compressor_state_slot_mappings[attn_type] = torch.full(
                     (T_total,),
-                    -1,
+                    WARMUP_SENTINEL,
                     dtype=torch.int64,
                     device=device,
                 )
+                # M09 §9 R3 — record cyclic ring depth: prefer caller-supplied
+                # value (sourced from M06.cyclic_state_pool_mapper(region_descs)
+                # ⇒ PyKVCacheRegionDesc.max_state_blocks, F3 binding) and
+                # fall back to the impl-config max_blocks for legacy callers.
+                if max_state_blocks_by_at is not None and attn_type in max_state_blocks_by_at:
+                    max_state_blocks[attn_type] = int(
+                        max_state_blocks_by_at[attn_type]
+                    )
+                else:
+                    max_state_blocks[attn_type] = int(max_blocks_state)
+
+        # R7 (Fix 144) — int32 slot-space saturation guard at allocator time.
+        if pool_entries_per_block:
+            max_eb = max(pool_entries_per_block.values())
+            # max_blocks here is the unified width when active, else the per-pool max.
+            num_super_blocks = (
+                unified_block_table.shape[1]
+                if unified_block_table is not None
+                else max(spec[1] for spec in paged_pool_specs.values())
+            )
+            slot_space = int(num_super_blocks) * int(max_eb)
+            assert slot_space < (1 << 31), (
+                f"slot space {slot_space} exceeds int32; widen "
+                f"pool_write_slot_mappings dtype to int64 (matches Triton "
+                f"reader cast)."
+            )
 
     # Pre-allocate swa_abs_idx[B, q_len, win] int32 (always — Phase 2B-2a
     # paged read may consume it; cost is trivial compared to the rest).
@@ -738,7 +1002,12 @@ def allocate_decode_metadata_fp8(
         topk_total_by_ratio=topk_total_by_ratio,
         compressed_offset=window_size,
         is_cuda_graph=True,
+        unified_block_table=unified_block_table,
         pool_block_tables=pool_block_tables,
+        pool_views=pool_views,
+        pool_entries_per_block=pool_entries_per_block,
+        region_offsets=region_offsets,
+        max_state_blocks=max_state_blocks,
         pool_write_slot_mappings=pool_write_slot_mappings,
         compressor_state_slot_mappings=compressor_state_slot_mappings,
         swa_abs_idx=swa_abs_idx,
@@ -749,6 +1018,7 @@ def allocate_decode_metadata_fp8(
         decode_cu_seq_per_req=decode_cu_seq_per_req_alloc,
         swa_global_slots=swa_global_slots_alloc,
         hca_cmp_global_slots=hca_cmp_global_slots_alloc,
+        model_id=model_id,
     )
 
 
@@ -827,6 +1097,17 @@ def update_decode_metadata_in_place_fp8(
             ptr_snap["swa_global_slots"] = meta.swa_global_slots.data_ptr()
         if meta.hca_cmp_global_slots is not None:
             ptr_snap["hca_cmp_global_slots"] = meta.hca_cmp_global_slots.data_ptr()
+        # M09 §9 R2.5 / R2 — extend snapshot to track unified_block_table
+        # AND every alias data_ptr. KV-pool views are constructed as
+        # narrow slices of unified_block_table; any code that reassigns a
+        # dict entry breaks the alias and silently bakes stale memory
+        # into a captured graph. Snapshot fires immediately on drift.
+        if meta.unified_block_table is not None:
+            ptr_snap["unified_block_table"] = meta.unified_block_table.data_ptr()
+        for at, t in meta.pool_block_tables.items():
+            ptr_snap[f"pool_block_tables[{at}]"] = t.data_ptr()
+        for at, t in meta.pool_views.items():
+            ptr_snap[f"pool_views[{at}]"] = t.data_ptr()
 
     meta.position_ids[: bs * q_len].copy_(position_ids_flat)
     if meta.position_ids_long is not None:
@@ -877,21 +1158,76 @@ def update_decode_metadata_in_place_fp8(
     # otherwise — the write op honors that via ``mask_negative=True``).
     # ------------------------------------------------------------------
     if paged_block_tables is not None and paged_pool_entries_per_block is not None:
-        # Snapshot block_table content into the metadata's stable buffer
-        # (forbid_realloc-friendly: just `.copy_` the prefix). Skip pools
-        # without a metadata buffer (e.g. SWA-only layers don't carry CSA).
-        for at, src_bt in paged_block_tables.items():
-            dst_bt = meta.pool_block_tables.get(at)
-            if dst_bt is None:
-                continue
-            n_rows = min(src_bt.shape[0], dst_bt.shape[0])
-            n_cols = min(src_bt.shape[1], dst_bt.shape[1])
-            # Zero stale rows beyond current bs to avoid carrying old block
-            # ids (defensive — graph reads only [:bs] anyway).
-            dst_bt[bs:].zero_()
-            dst_bt[:n_rows, :n_cols].copy_(src_bt[:n_rows, :n_cols])
-            if n_cols < dst_bt.shape[1]:
-                dst_bt[:n_rows, n_cols:].zero_()
+        # M09 §4.1 — when the unified block table is active, the per-pool
+        # KV views are aliases of one allocation. Pick any KV source
+        # (prefer SWA_KV, fall back to the first present pool) and `.copy_`
+        # it into ``unified_block_table`` once. STATE pools (with their own
+        # block tables) still take individual snapshots.
+        from rtp_llm.models_py.modules.dsv4.attn_type import (
+            CSA_KV,
+            CSA_STATE,
+            HCA_KV,
+            HCA_STATE,
+            INDEXER_KV,
+            INDEXER_STATE,
+            SWA_KV,
+        )
+
+        _KV_AT = (SWA_KV, CSA_KV, HCA_KV, INDEXER_KV)
+        _STATE_AT = (CSA_STATE, HCA_STATE, INDEXER_STATE)
+
+        if meta.unified_block_table is not None:
+            # Pick the SWA source first (always present); else any present KV pool.
+            src = paged_block_tables.get(SWA_KV)
+            if src is None:
+                for _at in _KV_AT:
+                    if _at in paged_block_tables:
+                        src = paged_block_tables[_at]
+                        break
+            if src is not None:
+                dst = meta.unified_block_table
+                # R7 precondition asserts (Fix 144 — C03 33-3 / 33-6, C08 35-2).
+                assert src.dtype == dst.dtype, (
+                    f"unified_block_table dtype drift: src={src.dtype} "
+                    f"dst={dst.dtype}"
+                )
+                assert src.shape[0] <= dst.shape[0] + 0 or True, "rows ok"  # noqa: E501
+                n_rows = min(src.shape[0], dst.shape[0])
+                n_cols = min(src.shape[1], dst.shape[1])
+                dst[bs:].zero_()
+                dst[:n_rows, :n_cols].copy_(src[:n_rows, :n_cols])
+                if n_cols < dst.shape[1]:
+                    dst[:n_rows, n_cols:].zero_()
+            # STATE pools: copy each separately (they own their own block
+            # tables — never aliased to unified_block_table under any cp_size).
+            for at_state in _STATE_AT:
+                src_bt = paged_block_tables.get(at_state)
+                dst_bt = meta.pool_block_tables.get(at_state)
+                if src_bt is None or dst_bt is None:
+                    continue
+                n_rows = min(src_bt.shape[0], dst_bt.shape[0])
+                n_cols = min(src_bt.shape[1], dst_bt.shape[1])
+                dst_bt[bs:].zero_()
+                dst_bt[:n_rows, :n_cols].copy_(src_bt[:n_rows, :n_cols])
+                if n_cols < dst_bt.shape[1]:
+                    dst_bt[:n_rows, n_cols:].zero_()
+        else:
+            # Legacy 7-pool path (verbatim — preserves bit-equal default).
+            # Snapshot block_table content into the metadata's stable buffer
+            # (forbid_realloc-friendly: just `.copy_` the prefix). Skip pools
+            # without a metadata buffer (e.g. SWA-only layers don't carry CSA).
+            for at, src_bt in paged_block_tables.items():
+                dst_bt = meta.pool_block_tables.get(at)
+                if dst_bt is None:
+                    continue
+                n_rows = min(src_bt.shape[0], dst_bt.shape[0])
+                n_cols = min(src_bt.shape[1], dst_bt.shape[1])
+                # Zero stale rows beyond current bs to avoid carrying old block
+                # ids (defensive — graph reads only [:bs] anyway).
+                dst_bt[bs:].zero_()
+                dst_bt[:n_rows, :n_cols].copy_(src_bt[:n_rows, :n_cols])
+                if n_cols < dst_bt.shape[1]:
+                    dst_bt[:n_rows, n_cols:].zero_()
 
         from rtp_llm.models_py.modules.dsv4.fp8.decode._fused_prepare_meta_triton import (
             fused_phase2b_pool_slot_mapping,
@@ -991,6 +1327,12 @@ def update_decode_metadata_in_place_fp8(
             cur["swa_global_slots"] = meta.swa_global_slots.data_ptr()
         if meta.hca_cmp_global_slots is not None:
             cur["hca_cmp_global_slots"] = meta.hca_cmp_global_slots.data_ptr()
+        if meta.unified_block_table is not None:
+            cur["unified_block_table"] = meta.unified_block_table.data_ptr()
+        for at, t in meta.pool_block_tables.items():
+            cur[f"pool_block_tables[{at}]"] = t.data_ptr()
+        for at, t in meta.pool_views.items():
+            cur[f"pool_views[{at}]"] = t.data_ptr()
         for k, p_before in ptr_snap.items():
             assert cur[k] == p_before, (
                 f"update_decode_metadata_in_place_fp8(forbid_realloc=True) "
@@ -1257,6 +1599,15 @@ def build_decode_metadata_fp8(
                 hca_eb,
             )
 
+    # M09 §2.1 eager-path: legacy 7-pool snapshot keeps separate tensors per
+    # pool (paged_pool_specs metadata is built fresh every step). pool_views
+    # mirrors pool_block_tables one-to-one (no unified collapse on eager).
+    pool_views: Dict[int, torch.Tensor] = dict(pool_block_tables)
+    pool_entries_per_block_dict: Dict[int, int] = {
+        at: int(paged_pool_entries_per_block.get(at, 0))
+        for at in pool_block_tables
+    } if paged_pool_entries_per_block else {}
+    region_offsets_dict: Dict[int, int] = {at: 0 for at in pool_block_tables}
     return DSv4DecodeAttnMetadataFP8(
         batch_size=B,
         q_len_per_req=q_len,
@@ -1278,7 +1629,12 @@ def build_decode_metadata_fp8(
         topk_total_by_ratio=topk_total_by_ratio,
         compressed_offset=window_size,
         is_cuda_graph=False,
+        unified_block_table=None,
         pool_block_tables=pool_block_tables,
+        pool_views=pool_views,
+        pool_entries_per_block=pool_entries_per_block_dict,
+        region_offsets=region_offsets_dict,
+        max_state_blocks={},
         pool_write_slot_mappings=pool_write_slot_mappings,
         compressor_state_slot_mappings=compressor_state_slot_mappings,
         swa_abs_idx=swa_abs_idx,
