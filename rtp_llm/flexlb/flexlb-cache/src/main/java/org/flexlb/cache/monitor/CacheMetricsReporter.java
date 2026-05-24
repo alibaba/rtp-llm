@@ -190,6 +190,17 @@ public class CacheMetricsReporter {
         monitor.report(CACHE_RECENT_KEY_HIT_COUNT, tags, hitOccurrences);
         monitor.report(CACHE_RECENT_KEY_TOTAL_COUNT, tags, totalOccurrences);
         monitor.report(CACHE_RECENT_KEY_HIT_RATIO, tags, hitRatio);
+        log.info("recent-cache-key flexlb monitor report done: time_window_ms={}, hit_occurrences={}, "
+                        + "total_occurrences={}, hit_ratio={}, request_metric={}, hit_metric={}, "
+                        + "total_metric={}, ratio_metric={}",
+                timeWindowMs,
+                hitOccurrences,
+                totalOccurrences,
+                hitRatio,
+                CACHE_RECENT_KEY_REQUEST_COUNT,
+                CACHE_RECENT_KEY_HIT_COUNT,
+                CACHE_RECENT_KEY_TOTAL_COUNT,
+                CACHE_RECENT_KEY_HIT_RATIO);
     }
 
     /**

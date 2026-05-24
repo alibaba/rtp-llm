@@ -85,6 +85,15 @@ class BackendRPCServerVisitor:
             master_config=master_config,
         )
         self.recent_cache_key_window = RecentCacheKeyWindow()
+        route_logger.info(
+            "recent-cache-key metrics initialized: time_window_ms=%s, "
+            "request_metric=%s, hit_metric=%s, total_metric=%s, ratio_metric=%s",
+            self.recent_cache_key_window.time_window_ms,
+            AccMetrics.RECENT_CACHE_KEY_REQUEST_COUNT_METRIC.value,
+            AccMetrics.RECENT_CACHE_KEY_HIT_COUNT_METRIC.value,
+            AccMetrics.RECENT_CACHE_KEY_TOTAL_COUNT_METRIC.value,
+            GaugeMetrics.RECENT_CACHE_KEY_HIT_RATIO_METRIC.value,
+        )
 
     async def close(self):
         await self.model_rpc_client.close()
@@ -145,7 +154,16 @@ class BackendRPCServerVisitor:
             else input.token_ids.tolist()
         )
         block_cache_keys = get_block_cache_keys(token_ids, self.seq_size_per_block)
-        self._report_recent_cache_key_metrics(block_cache_keys)
+        route_logger.info(
+            "recent-cache-key route enter: request_id=%s, token_count=%s, "
+            "seq_size_per_block=%s, block_cache_keys_len=%s, block_cache_keys_preview=%s",
+            input.request_id,
+            len(token_ids),
+            self.seq_size_per_block,
+            len(block_cache_keys),
+            self._preview_cache_keys(block_cache_keys),
+        )
+        self._report_recent_cache_key_metrics(block_cache_keys, input.request_id)
 
         try:
             route_result = await self.master_client.get_backend_role_addrs(
@@ -181,7 +199,9 @@ class BackendRPCServerVisitor:
         )
         return route_result
 
-    def _report_recent_cache_key_metrics(self, block_cache_keys: List[int]) -> None:
+    def _report_recent_cache_key_metrics(
+        self, block_cache_keys: List[int], request_id: str
+    ) -> None:
         try:
             snapshot = self.recent_cache_key_window.record(block_cache_keys)
             kmonitor.report(
@@ -205,8 +225,31 @@ class BackendRPCServerVisitor:
                 GaugeMetrics.RECENT_CACHE_KEY_HIT_RATIO_METRIC,
                 snapshot.request_hit_ratio,
             )
+            route_logger.info(
+                "recent-cache-key metrics reported: request_id=%s, "
+                "request_occurrences=%s, request_hit_occurrences=%s, "
+                "request_hit_ratio=%.6f, retained_occurrences=%s, "
+                "retained_unique_cache_keys=%s",
+                request_id,
+                snapshot.request_occurrences,
+                snapshot.request_hit_occurrences,
+                snapshot.request_hit_ratio,
+                snapshot.retained_occurrences,
+                snapshot.retained_unique_cache_keys,
+            )
         except Exception:
-            route_logger.exception("failed to report recent cache key metrics")
+            route_logger.exception(
+                "failed to report recent cache key metrics: request_id=%s",
+                request_id,
+            )
+
+    @staticmethod
+    def _preview_cache_keys(block_cache_keys: List[int]) -> str:
+        if not block_cache_keys:
+            return "[]"
+        if len(block_cache_keys) <= 6:
+            return str(block_cache_keys)
+        return f"{block_cache_keys[:3]}...{block_cache_keys[-3:]}"
 
     async def get_domain_route_addrs(self, input: GenerateInput):
         specified_roles = {addr.role for addr in input.generate_config.role_addrs}
@@ -253,11 +296,22 @@ class BackendRPCServerVisitor:
         with Timer() as route_timer:
             role_addrs_specified = bool(input.generate_config.role_addrs)
             master_addr = self.host_service.get_master_addr()
-            route_logger.debug("routing to master: %s", master_addr)
 
             input_token_batched = False
             if len(input.token_ids.shape) == 2 and input.token_ids.size(0) != 1:
                 input_token_batched = True
+
+            route_logger.info(
+                "route decision before master route: request_id=%s, "
+                "role_addrs_specified=%s, master_addr=%s, input_token_batched=%s, "
+                "token_shape=%s, master_config_present=%s",
+                input.request_id,
+                role_addrs_specified,
+                master_addr,
+                input_token_batched,
+                tuple(input.token_ids.shape),
+                self.master_config is not None,
+            )
 
             master_route_result: Optional[FlexlbResponse] = None
             if not role_addrs_specified and master_addr and not input_token_batched:

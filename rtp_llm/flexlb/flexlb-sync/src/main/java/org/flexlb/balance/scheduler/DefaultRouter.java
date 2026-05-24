@@ -100,9 +100,26 @@ public class DefaultRouter implements Router {
     }
 
     private void reportRecentCacheKeyHitMetrics(Request request) {
-        if (request == null || recentCacheKeyWindow == null || cacheMetricsReporter == null) {
+        if (request == null) {
+            Logger.info("recent-cache-key flexlb metric skipped: request is null");
             return;
         }
+        if (recentCacheKeyWindow == null || cacheMetricsReporter == null) {
+            Logger.info("recent-cache-key flexlb metric skipped: request_id={}, recent_window_present={}, "
+                            + "cache_metrics_reporter_present={}",
+                    request.getRequestId(),
+                    recentCacheKeyWindow != null,
+                    cacheMetricsReporter != null);
+            return;
+        }
+
+        List<Long> blockCacheKeys = request.getBlockCacheKeys();
+        Logger.info("recent-cache-key flexlb route enter: request_id={}, seq_len={}, "
+                        + "block_cache_keys_size={}, block_cache_keys_preview={}",
+                request.getRequestId(),
+                request.getSeqLen(),
+                blockCacheKeys == null ? 0 : blockCacheKeys.size(),
+                previewCacheKeys(blockCacheKeys));
 
         RecentCacheKeyWindow.Snapshot snapshot = recentCacheKeyWindow.record(request.getBlockCacheKeys());
 
@@ -110,6 +127,27 @@ public class DefaultRouter implements Router {
                 snapshot.getRequestHitOccurrences(),
                 snapshot.getRequestOccurrences(),
                 snapshot.getRequestHitRatio());
+        Logger.info("recent-cache-key flexlb metric reported: request_id={}, time_window_ms={}, "
+                        + "request_occurrences={}, request_hit_occurrences={}, request_hit_ratio={}, "
+                        + "retained_occurrences={}, retained_unique_cache_keys={}",
+                request.getRequestId(),
+                snapshot.getTimeWindowMs(),
+                snapshot.getRequestOccurrences(),
+                snapshot.getRequestHitOccurrences(),
+                snapshot.getRequestHitRatio(),
+                snapshot.getRetainedOccurrences(),
+                snapshot.getRetainedUniqueCacheKeys());
+    }
+
+    private static String previewCacheKeys(List<Long> blockCacheKeys) {
+        if (blockCacheKeys == null || blockCacheKeys.isEmpty()) {
+            return "[]";
+        }
+        if (blockCacheKeys.size() <= 6) {
+            return blockCacheKeys.toString();
+        }
+        return blockCacheKeys.subList(0, 3) + "..." + blockCacheKeys.subList(blockCacheKeys.size() - 3,
+                blockCacheKeys.size());
     }
 
     /**
