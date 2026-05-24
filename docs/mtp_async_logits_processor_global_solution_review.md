@@ -7,7 +7,7 @@ Related:
 - `docs/mtp_async_logits_processor_cross_review.md`
 - `docs/dsv4_mtp_async_logits_processor_design.md`
 - Current implementation branch: `codex/dsv4-json-format-mtp-clean-20260524`
-- Current verified commit: `1d9f3d25c2 fix: harden async MTP logits verify`
+- Current verified code commit: `ad0b638d3c fix: harden async mtp logits processor state flow`
 
 ## 0. 结论
 
@@ -107,7 +107,7 @@ flowchart TD
 
 ## 3. 当前补丁已经修复的局部问题
 
-当前 commit `1d9f3d25c2` 已经把下面几类 bug 修掉：
+当前验证代码 commit `ad0b638d3c` 已经把下面几类 bug 修掉：
 
 | 问题 | 当前修复 | 仍然不足 |
 |---|---|---|

@@ -9,7 +9,7 @@
 - 父仓库目录：`/home/luoli.hn/work/rtp_llm_3`
 - 代码目录：`/home/luoli.hn/work/rtp_llm_3/github-opensource-dsv4-json-format-mtp-clean`
 - 代码分支：`codex/dsv4-json-format-mtp-clean-20260524`
-- 代码 commit：`9ce7869991 fix: implement async MTP xgrammar logits processor`
+- 已验证代码 commit：`ad0b638d3c fix: harden async mtp logits processor state flow`
 - GitHub 已推分支：`origin/codex/dsv4-json-format-mtp-clean-20260524`
 - 父仓库 commit：`e08bf9bec fix: update dsv4 xgrammar code submodule`
 - GitLab 父仓库已推分支：`origin/dev/dsv4-xgrammar-json-smoke-20260524`
@@ -50,7 +50,7 @@ export FIXTURE=$PARENT/internal_source/rtp_llm/test/smoke/data/model/deepseek_v4
 cd $CODE
 git rev-parse --abbrev-ref HEAD
 git log -1 --oneline
-git branch -a --contains 9ce7869991acbca17a5dbf9426910ba947f40628
+git branch -a --contains ad0b638d3ce24dc5e91ef71f108862adbf0a47b5
 
 cd $PARENT
 git rev-parse --abbrev-ref HEAD
@@ -70,7 +70,7 @@ PY
 
 预期重点：
 
-- 代码仓库当前分支是 `codex/dsv4-json-format-mtp-clean-20260524`，最新 commit 是 `9ce7869991 fix: implement async MTP xgrammar logits processor`。
+- 代码仓库当前分支是 `codex/dsv4-json-format-mtp-clean-20260524`，已验证代码 commit 是 `ad0b638d3c fix: harden async mtp logits processor state flow`；如果后续只有文档提交，实际分支头以 `git log -1 --oneline` 为准。
 - 代码 commit 同时在 `remotes/origin/codex/dsv4-json-format-mtp-clean-20260524` 上。
 - 父仓库最新 commit 是 `e08bf9bec fix: update dsv4 xgrammar code submodule`。本地父仓库分支可能显示为 `dev/dsv4-xgrammar-json-smoke`，远端包含 `remotes/origin/dev/dsv4-xgrammar-json-smoke-20260524`。
 - fixture 的 `query_result cases` 是 `17`。远端宿主机没有 `jq` 时用上面的 Python 命令即可。
