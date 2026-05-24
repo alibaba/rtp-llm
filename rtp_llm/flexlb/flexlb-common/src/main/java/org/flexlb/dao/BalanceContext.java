@@ -49,6 +49,8 @@ public class BalanceContext {
 
     private String errorMessage;
 
+    private long cacheMatchedTokens;
+
     //===================== Method ===================//
 
     public long getRequestId() {

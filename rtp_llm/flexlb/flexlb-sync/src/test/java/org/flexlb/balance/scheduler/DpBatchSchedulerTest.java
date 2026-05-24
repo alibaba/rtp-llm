@@ -17,6 +17,7 @@ import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.DpRankStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
@@ -555,6 +556,79 @@ class DpBatchSchedulerTest {
 
         assertEquals(2, sentBatches.size(), "two models ⇒ two batches");
         assertEquals(2, scheduler.batcherCount());
+    }
+
+    @Test
+    void debugInfo_hit_cache_len_reflects_enriched_cache_matched_tokens() throws Exception {
+        // GlobalPrefillBatcher.enrichRequest computes
+        //   cacheMatchedTokens = CacheAwareService.findMatchingPrefixLength * worker.cacheStatus.blockSize
+        // and stashes it on BalanceContext; DpBatchScheduler.buildSuccessResponse
+        // copies it into response.serverStatus[prefill].debugInfo.hitCacheLen so
+        // the Python smoke check role_hit_cache_len can read it. This test
+        // pins the end-to-end wiring.
+        long blockSize = 64L;
+        int matchedBlocks = 5;
+        long expectedHitTokens = matchedBlocks * blockSize;
+
+        CacheAwareService cacheAware = mock(CacheAwareService.class);
+        when(cacheAware.findMatchingPrefixLength(anyString(), any())).thenReturn(matchedBlocks);
+
+        WorkerStatus prefillWs = new WorkerStatus();
+        prefillWs.setIp("10.0.0.1");
+        prefillWs.setPort(8080);
+        prefillWs.setDpSize(2);
+        prefillWs.setAlive(true);
+        prefillWs.setCacheStatus(CacheStatus.builder().blockSize(blockSize).build());
+        when(engineWorkerStatus.selectModelWorkerStatus(eq(RoleType.PREFILL), any()))
+                .thenReturn(Map.of("10.0.0.1:8080", prefillWs));
+
+        DpBatchScheduler s = new DpBatchScheduler(configService, engineWorkerStatus, planner,
+                List.of(new RoundRobinAssign()), grpcClient, registry, cacheAware);
+        try {
+            List<CompletableFuture<Response>> futures = IntStream.range(0, 4)
+                    .mapToObj(i -> s.submit(makeCtx(i + 1, "m1")))
+                    .toList();
+
+            for (CompletableFuture<Response> f : futures) {
+                Response r = f.get(2, TimeUnit.SECONDS);
+                assertTrue(r.isSuccess());
+                ServerStatus prefill = r.getServerStatus().get(0);
+                assertNotNull(prefill.getDebugInfo(),
+                        "prefill ServerStatus must carry DebugInfo so Python smoke "
+                                + "check can read role_hit_cache_len");
+                assertEquals(expectedHitTokens, prefill.getDebugInfo().getHitCacheLen(),
+                        "hitCacheLen must reflect matchedBlocks * blockSize from CacheAwareService");
+            }
+        } finally {
+            s.shutdown();
+        }
+    }
+
+    @Test
+    void debugInfo_hit_cache_len_is_zero_when_cache_aware_disabled() throws Exception {
+        // Kill-switch path: cacheAwareSchedulingEnabled=false ⇒ enrichRequest must
+        // skip CacheAwareService entirely and leave cacheMatchedTokens=0. The
+        // dispatched response still carries a well-formed DebugInfo with 0 — not
+        // stale data, not a null reference.
+        cfg.setCacheAwareSchedulingEnabled(false);
+
+        CacheAwareService cacheAware = mock(CacheAwareService.class);
+        DpBatchScheduler s = new DpBatchScheduler(configService, engineWorkerStatus, planner,
+                List.of(new RoundRobinAssign()), grpcClient, registry, cacheAware);
+        try {
+            CompletableFuture<Response> f0 = s.submit(makeCtx(1, "m1"));
+            s.submit(makeCtx(2, "m1"));
+            s.submit(makeCtx(3, "m1"));
+            s.submit(makeCtx(4, "m1"));
+
+            Response r = f0.get(2, TimeUnit.SECONDS);
+            assertTrue(r.isSuccess());
+            assertNotNull(r.getServerStatus().get(0).getDebugInfo());
+            assertEquals(0L, r.getServerStatus().get(0).getDebugInfo().getHitCacheLen());
+            verify(cacheAware, never()).findMatchingPrefixLength(anyString(), any());
+        } finally {
+            s.shutdown();
+        }
     }
 
     // ============== helpers ==============

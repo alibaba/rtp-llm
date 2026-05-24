@@ -204,6 +204,7 @@ public class GlobalPrefillBatcher {
                 cfg.getDpTtftSloMs(), cfg.getDpSafeMarginMs(),
                 cfg.getDpMinBatchIntervalMs(), cfg.getDpMaxBatchIntervalMs());
 
+        raw.ctx().setCacheMatchedTokens(cacheMatchedTokens);
         return QueuedRequest.of(raw.ctx(), raw.future(), computeTokenLength, sloDeadlineMicros, bucketIndex);
     }
 

@@ -12,6 +12,7 @@ import org.flexlb.balance.dp.RoundRobinAssign;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -264,6 +265,7 @@ public class DpBatchScheduler {
         ServerStatus prefill = copyOf(req.prefill());
         prefill.setDpRank(dpRank);
         prefill.setRequestId(req.requestId());
+        prefill.setDebugInfo(buildDebugInfo(req));
         // Frontend's FetchResponse uses prefill.serverIp + prefill.grpcPort. The
         // request's response_registry entry lives on the DP that received the
         // real (non-fake) Enqueue slot — for any dpRank > 0 that is a peer DP,
@@ -433,6 +435,14 @@ public class DpBatchScheduler {
         }
         Logger.warn("applyDpRankAddress: dpRank {} not found in dpStatuses for {} (size={})",
                 dpRank, ipPort, ws.getDpStatuses().size());
+    }
+
+    private static DebugInfo buildDebugInfo(PendingRequest req) {
+        DebugInfo info = new DebugInfo();
+        if (req.ctx() != null) {
+            info.setHitCacheLen(req.ctx().getCacheMatchedTokens());
+        }
+        return info;
     }
 
     private static ServerStatus copyOf(ServerStatus src) {
