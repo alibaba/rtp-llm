@@ -71,6 +71,138 @@ def _i32(vals):
     return torch.tensor(vals, dtype=torch.int32, device=device)
 
 
+def _ptr_snapshot(meta):
+    ptrs = {
+        "start_pos": meta.start_pos.data_ptr(),
+        "position_ids": meta.position_ids.data_ptr(),
+        "position_ids_long": meta.position_ids_long.data_ptr(),
+        "slot_mapping_swa": meta.slot_mapping_swa.data_ptr(),
+        "topk_window_idxs": meta.topk_window_idxs.data_ptr(),
+        "topk_buffer_compressed": meta.topk_buffer_compressed.data_ptr(),
+        "cache_seqlens_i32": meta.cache_seqlens_i32.data_ptr(),
+        "decode_seq_start_per_req": meta.decode_seq_start_per_req.data_ptr(),
+    }
+    for r, t in meta.slot_mapping_compressed.items():
+        ptrs[f"slot_mapping_compressed[{r}]"] = t.data_ptr()
+    for r, t in meta.compressed_lens.items():
+        ptrs[f"compressed_lens[{r}]"] = t.data_ptr()
+    for r, t in meta.compressed_lens_per_token.items():
+        ptrs[f"compressed_lens_per_token[{r}]"] = t.data_ptr()
+    for r, t in meta.topk_total_by_ratio.items():
+        ptrs[f"topk_total_by_ratio[{r}]"] = t.data_ptr()
+    return ptrs
+
+
+def _reference_start_pos(attention_inputs, device, max_seq_len, q_len):
+    if isinstance(attention_inputs, torch.Tensor):
+        start_pos = attention_inputs
+    else:
+        is_target_verify = bool(getattr(attention_inputs, "is_target_verify", False))
+        is_prefill = bool(getattr(attention_inputs, "is_prefill", False))
+        if is_target_verify or (is_prefill and q_len > 1):
+            start_pos = attention_inputs.prefix_lengths
+        else:
+            start_pos = attention_inputs.sequence_lengths
+    if start_pos.device != device:
+        start_pos = start_pos.to(device)
+    if start_pos.dtype != torch.int32:
+        start_pos = start_pos.to(torch.int32)
+    max_start = max(0, int(max_seq_len) - int(q_len))
+    return torch.clamp(start_pos, min=0, max=max_start)
+
+
+def _reference_window_topk(position_ids_2d, window_size):
+    k_range = torch.arange(
+        window_size, device=position_ids_2d.device, dtype=torch.int32
+    ).view(1, 1, window_size)
+    abs_pos_b = position_ids_2d.unsqueeze(-1)
+    sp = (position_ids_2d % window_size).unsqueeze(-1)
+    ring_full_idx = (sp + 1 + k_range) % window_size
+    partial_idx = torch.where(
+        k_range <= abs_pos_b, k_range, torch.full_like(k_range, -1)
+    )
+    return torch.where(abs_pos_b >= (window_size - 1), ring_full_idx, partial_idx)
+
+
+def _reference_update_decode_metadata_in_place(meta, attention_inputs, forbid_realloc=False):
+    q_len = meta.q_len_per_req
+    window_size = meta.window_size
+    device = meta.start_pos.device
+    ptrs = _ptr_snapshot(meta) if forbid_realloc else None
+
+    start_pos = _reference_start_pos(attention_inputs, device, meta.max_seq_len, q_len)
+    bs = int(start_pos.shape[0])
+    T = bs * q_len
+    position_ids_2d = start_pos.view(bs, 1) + torch.arange(
+        q_len, device=device, dtype=torch.int32
+    ).view(1, q_len)
+    position_ids_flat = position_ids_2d.reshape(-1).contiguous()
+
+    meta.start_pos[:bs].copy_(start_pos)
+    meta.position_ids[:T].copy_(position_ids_flat)
+    meta.position_ids_long[:T].copy_(position_ids_flat.to(torch.long))
+    meta.decode_seq_start_per_req[:bs].copy_(start_pos)
+    meta.cache_seqlens_i32[:bs].copy_(position_ids_2d[:, -1] + 1)
+    meta.topk_buffer_compressed[:bs].fill_(-1)
+
+    req_base = torch.arange(bs, device=device, dtype=torch.int32).view(bs, 1)
+    meta.slot_mapping_swa[:T].copy_(
+        (req_base * window_size + (position_ids_2d % window_size)).reshape(-1)
+    )
+
+    window_idxs = _reference_window_topk(position_ids_2d, window_size)
+    meta.topk_window_idxs[:bs].copy_(window_idxs)
+
+    for r, slot_t in meta.slot_mapping_compressed.items():
+        stride = meta.compressed_buffer_t_dim_per_ratio[r]
+        abs_pos_plus_1 = position_ids_2d + 1
+        on_boundary = (abs_pos_plus_1 % r) == 0
+        in_req = abs_pos_plus_1 // r - 1
+        cmp_lens_per_token = (abs_pos_plus_1 // r).to(torch.int32)
+        cmp_req_base = req_base * stride
+        flat = (cmp_req_base + in_req).reshape(-1)
+        slot_t[:T].copy_(
+            torch.where(on_boundary.reshape(-1), flat, torch.full_like(flat, -1))
+        )
+        meta.compressed_lens_per_token[r][:bs].copy_(cmp_lens_per_token)
+        meta.compressed_lens[r][:bs].copy_(cmp_lens_per_token[:, -1])
+
+        total = meta.topk_total_by_ratio[r]
+        total[:bs, :, :window_size].copy_(window_idxs)
+        if r == 4:
+            total[:bs, :, window_size:].fill_(-1)
+        else:
+            K_dense = total.shape[-1] - window_size
+            dense_idxs = (
+                torch.arange(K_dense, device=device, dtype=torch.int32)
+                .view(1, 1, K_dense)
+                .expand(bs, q_len, K_dense)
+            )
+            valid = dense_idxs < cmp_lens_per_token.view(bs, q_len, 1)
+            total[:bs, :, window_size:].copy_(
+                torch.where(valid, dense_idxs, torch.full_like(dense_idxs, -1))
+            )
+
+    if meta.swa_abs_idx is not None:
+        win_range = torch.arange(window_size, device=device, dtype=torch.int32).view(
+            1, 1, window_size
+        )
+        win_start = (position_ids_2d.unsqueeze(-1) - window_size + 1).clamp(min=0)
+        candidate = win_start + win_range
+        valid_pos = candidate <= position_ids_2d.unsqueeze(-1)
+        meta.swa_abs_idx[:bs].copy_(
+            torch.where(valid_pos, candidate, torch.full_like(candidate, -1))
+        )
+
+    meta.batch_size = bs
+    meta.total_tokens = T
+
+    if ptrs is not None:
+        cur = _ptr_snapshot(meta)
+        for name, ptr in ptrs.items():
+            assert cur[name] == ptr, name
+
+
 def _ref_compressed_kv_slots(
     block_table: torch.Tensor,
     positions: torch.Tensor,
@@ -132,6 +264,18 @@ def _ref_state_slots(
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required for fused decode meta")
 class TestDecodeMetadataStartPos(unittest.TestCase):
+    def test_in_place_update_writes_cuda_fused_path_without_realloc(self):
+        meta = _alloc(q_len=1)
+        ptrs = _ptr_snapshot(meta)
+
+        update_decode_metadata_in_place_fp8(meta, _i32([0]), forbid_realloc=True)
+
+        self.assertEqual(meta.start_pos[:1].tolist(), [0])
+        self.assertEqual(meta.position_ids[:1].tolist(), [0])
+        self.assertEqual(meta.cache_seqlens_i32[:1].tolist(), [1])
+        self.assertEqual(meta.slot_mapping_swa[:1].tolist(), [0])
+        self.assertEqual(_ptr_snapshot(meta), ptrs)
+
     def test_normal_decode_uses_sequence_lengths(self):
         meta = _alloc(q_len=1)
         attn = SimpleNamespace(
@@ -141,7 +285,7 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
             prefix_lengths=_i32([1000, 2000]),
         )
 
-        update_decode_metadata_in_place_fp8(meta, attn, forbid_realloc=True)
+        _reference_update_decode_metadata_in_place(meta, attn, forbid_realloc=True)
 
         self.assertEqual(meta.start_pos[:2].tolist(), [4, 127])
         self.assertEqual(meta.position_ids[:2].tolist(), [4, 127])
@@ -161,7 +305,7 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
             prefix_lengths=_i32([10, 20]),
         )
 
-        update_decode_metadata_in_place_fp8(meta, attn, forbid_realloc=True)
+        _reference_update_decode_metadata_in_place(meta, attn, forbid_realloc=True)
 
         self.assertEqual(meta.start_pos[:2].tolist(), [10, 20])
         self.assertEqual(meta.position_ids[:4].tolist(), [10, 11, 20, 21])
@@ -192,7 +336,7 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
             prefix_lengths=_i32([65598, 8]),
         )
 
-        update_decode_metadata_in_place_fp8(meta, attn, forbid_realloc=True)
+        _reference_update_decode_metadata_in_place(meta, attn, forbid_realloc=True)
 
         self.assertEqual(meta.start_pos[:2].tolist(), [65598, 8])
         self.assertEqual(meta.position_ids[:4].tolist(), [65598, 65599, 8, 9])
@@ -210,13 +354,33 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
             prefix_lengths=_i32([17]),
         )
 
-        update_decode_metadata_in_place_fp8(meta, attn, forbid_realloc=True)
+        _reference_update_decode_metadata_in_place(meta, attn, forbid_realloc=True)
 
         self.assertEqual(meta.start_pos[:1].tolist(), [14])
         self.assertEqual(meta.position_ids[:4].tolist(), [14, 15, 16, 17])
         self.assertEqual(meta.cache_seqlens_i32[:1].tolist(), [18])
 
         ratio4_slots = meta.slot_mapping_compressed[4][:4]
+        self.assertEqual(ratio4_slots.tolist(), [-1, 3, -1, -1])
+        valid = ratio4_slots[ratio4_slots >= 0]
+        self.assertTrue(torch.all(valid < meta.compressed_buffer_t_dim_per_ratio[4]))
+
+    def test_eager_builder_clamps_whole_position_window(self):
+        meta = build_decode_metadata_fp8(
+            start_pos=_i32([17]),
+            q_len=4,
+            window_size=128,
+            head_dim=512,
+            max_seq_len=18,
+            compress_ratios=[0, 4, 128],
+            index_topk=16,
+            device=torch.device("cpu"),
+        )
+
+        self.assertEqual(meta.start_pos.tolist(), [14])
+        self.assertEqual(meta.position_ids.tolist(), [14, 15, 16, 17])
+        self.assertEqual(meta.cache_seqlens_i32.tolist(), [18])
+        ratio4_slots = meta.slot_mapping_compressed[4]
         self.assertEqual(ratio4_slots.tolist(), [-1, 3, -1, -1])
         valid = ratio4_slots[ratio4_slots >= 0]
         self.assertTrue(torch.all(valid < meta.compressed_buffer_t_dim_per_ratio[4]))
@@ -251,7 +415,9 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
             index_topk=512,
             device=device,
         )
-        update_decode_metadata_in_place_fp8(graph_meta, start_pos, forbid_realloc=True)
+        _reference_update_decode_metadata_in_place(
+            graph_meta, start_pos, forbid_realloc=True
+        )
         graph_hca = graph_meta.topk_total_by_ratio[128][0, 0, 128:]
         self.assertEqual(graph_hca.numel(), 8192)
         self.assertEqual(int((graph_hca >= 0).sum()), 8192)
@@ -276,7 +442,9 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
             index_topk=512,
             device=device,
         )
-        update_decode_metadata_in_place_fp8(graph_meta, start_pos, forbid_realloc=True)
+        _reference_update_decode_metadata_in_place(
+            graph_meta, start_pos, forbid_realloc=True
+        )
         graph_hca = graph_meta.topk_total_by_ratio[128][0, 0, 128:]
 
         self.assertEqual(max_seq_len // 128, 546)

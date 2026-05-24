@@ -306,7 +306,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         sampler_event->record(cuda_graph::graphGetCurrentStream());
 
         // Metrics and KV release stay on the main thread; dispatch_output_us
-        // now measures launch cost, while worker time is in async_runner.thread.
+        // measures only async launch/enqueue overhead.
         executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
         int64_t tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
         if (tps_execute_time_us <= 0) {

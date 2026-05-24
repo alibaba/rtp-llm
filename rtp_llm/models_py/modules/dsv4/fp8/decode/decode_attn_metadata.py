@@ -1035,6 +1035,8 @@ def build_decode_metadata_fp8(
         start_pos = start_pos.to(device)
     if start_pos.dtype != torch.int32:
         start_pos = start_pos.to(torch.int32)
+    max_start = max(0, int(max_seq_len) - int(q_len))
+    start_pos = torch.clamp(start_pos, min=0, max=max_start)
 
     B = start_pos.shape[0]
     T_total = B * q_len
