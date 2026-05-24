@@ -271,8 +271,7 @@ bool GenerateStream::updatePrefix(const std::shared_ptr<SystemPrompt>& system_pr
         if (!prefix_param.prompt_tokens.empty()) {
             auto total_input_len = inputLength() + prefix_param.prompt_tokens.size();
             if (total_input_len >= max_seq_len_) {
-                reportEvent(StreamEvents::Error,
-                            ErrorCode::LONG_PROMPT_ERROR,
+                reportError(ErrorCode::LONG_PROMPT_ERROR,
                             "after update prefix, total input len " + std::to_string(total_input_len)
                                 + " is greater than max seq len " + std::to_string(max_seq_len_));
                 return false;
@@ -480,8 +479,7 @@ void GenerateStream::checkTimeout() {
     auto running_time_ms = (autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_) / 1000;
     auto timeout_ms      = getTimeoutMs();
     if (timeout_ms > 0 && timeout_ms < running_time_ms) {
-        reportEvent(StreamEvents::Error,
-                    ErrorCode::GENERATE_TIMEOUT,
+        reportError(ErrorCode::GENERATE_TIMEOUT,
                     "query has been running " + std::to_string(running_time_ms) + " ms, "
                         + "timeout_ms = " + std::to_string(timeout_ms) + ", it's timeout");
     }
@@ -489,21 +487,32 @@ void GenerateStream::checkTimeout() {
 
 // 统一的事件上报接口，替代原先所有 reportXX 方法。
 // 外部线程调用时自动加锁保护 error_info 和 events_ 的一致性。
+// 注意：禁止从这里报 Error，必须走 reportError*()，否则 onErrorReported() hook
+// 不会被触发，nextOutput() 等等待原语可能被卡到 cv 超时（最长 1s）。
 void GenerateStream::reportEvent(StreamEvents::EventType event, ErrorCode error_code, const std::string& error_msg) {
+    RTP_LLM_CHECK_WITH_INFO(event != StreamEvents::Error,
+                            "Error must be reported via reportError(), not reportEvent()");
     std::lock_guard<std::mutex> lock(*mutex_);
     generate_status_->reportEvent(event, error_code, error_msg);
 }
 
 // 无锁版本，供已持有 mutex_ 的内部调用路径使用（如 update/specUpdate/moveToNext 链路）。
+// 同上：禁止报 Error，必须走 reportErrorWithoutLock()。
 void GenerateStream::reportEventWithoutLock(StreamEvents::EventType event,
                                             ErrorCode               error_code,
                                             const std::string&      error_msg) {
+    RTP_LLM_CHECK_WITH_INFO(event != StreamEvents::Error,
+                            "Error must be reported via reportErrorWithoutLock(), not reportEventWithoutLock()");
     generate_status_->reportEvent(event, error_code, error_msg);
 }
 
 void GenerateStream::reportError(ErrorCode error_code, const std::string& error_msg) {
     std::lock_guard<std::mutex> lock(*mutex_);
     generate_status_->reportEvent(StreamEvents::Error, error_code, error_msg);
+    // Wake any consumer parked on a derived-class wait primitive (e.g. NormalGenerateStream's
+    // generate_outputs_queue_.waitNotEmpty()), so the error is observed immediately rather
+    // than after the cv timeout. Lock order: *mutex_ -> queue._cond is preserved here.
+    onErrorReported();
 }
 
 bool GenerateStream::hasEvent(StreamEvents::EventType event) const {
@@ -715,8 +724,7 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
                                      hasNumBeams(),
                                      streamId(),
                                      error_token_id)) {
-        reportEventWithoutLock(StreamEvents::Error,
-                               ErrorCode::OUT_OF_VOCAB_RANGE,
+        reportErrorWithoutLock(ErrorCode::OUT_OF_VOCAB_RANGE,
                                "output token id:" + std::to_string(error_token_id)
                                    + " out of vocab size: " + std::to_string(vocab_size_));
         return;
@@ -798,8 +806,7 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
                                      hasNumBeams(),
                                      streamId(),
                                      error_token_id)) {
-        reportEventWithoutLock(StreamEvents::Error,
-                               ErrorCode::OUT_OF_VOCAB_RANGE,
+        reportErrorWithoutLock(ErrorCode::OUT_OF_VOCAB_RANGE,
                                "output token id:" + std::to_string(error_token_id)
                                    + " out of vocab size: " + std::to_string(vocab_size_));
         return;
@@ -820,7 +827,7 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
         // kv cache blocks must be updated if REUSE_CACHE is on, even the stream is done
         auto update_res = updateKvCacheBlocks(update_info.src_batch_indices);
         if (!update_res) {
-            reportEventWithoutLock(StreamEvents::Error, ErrorCode::MALLOC_FAILED, "update kv cache blocks failed");
+            reportErrorWithoutLock(ErrorCode::MALLOC_FAILED, "update kv cache blocks failed");
             return;
         }
     }

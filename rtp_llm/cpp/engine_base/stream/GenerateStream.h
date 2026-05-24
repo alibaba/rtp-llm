@@ -534,6 +534,12 @@ protected:
     void reportStreamMetrics();
     void reportCacheReuseMetrics() const;
 
+    // Hook fired right after the stream is flipped into Error via reportError*.
+    // Default no-op; derived streams override to wake whatever wait primitive
+    // their consumer (e.g. nextOutput) is parked on, so the consumer doesn't
+    // sleep until the cv timeout to observe the error.
+    virtual void onErrorReported() {}
+
 protected:
     uint64_t                              stream_magic_ = STREAM_MAGIC;
     std::shared_ptr<GenerateInput>        generate_input_;
