@@ -76,6 +76,52 @@ XGrammarLogitsProcessor::XGrammarLogitsProcessor(std::vector<StreamXGrammarInfo>
 XGrammarLogitsProcessor::~XGrammarLogitsProcessor() = default;
 
 void XGrammarLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) {
+    if (inputs.phase == LogitsProcessorPhase::MTP_VERIFY) {
+        // Spec-verify path: SpecGrammarVerifyHelper already filled the bitmask
+        // for every (stream, draft_offset) row asynchronously on its private
+        // CUDA stream. The main stream just needs a GPU-side wait on the
+        // helper's ready_event before applying the mask kernel — no CPU
+        // FillNextTokenBitmask, no D2H here.
+        //
+        // If the helper produced no output for this step (e.g. propose_step==1
+        // on the staged path, or grammar-active streams absent), treat this as
+        // a no-op: the legacy clamp_max_(1) cap path in MtpExecutor handles the
+        // grammar correctness for that step. We must NOT fall through to the
+        // NORMAL_DECODE branch here — that branch asserts size()==span and
+        // would abort under D19's single-interval registration where span ==
+        // score_len (P+1) > size() == 1 for single-seq.
+        if (!inputs.bitmask_gpu.defined() || !inputs.bitmask_ready_event || !inputs.logits.is_cuda()) {
+            RTP_LLM_LOG_WARNING(
+                "xgrammar MTP_VERIFY phase reached process() without helper output "
+                "(bitmask_gpu defined=%d, ready_event=%p, logits.is_cuda=%d); skipping "
+                "mask application — relying on legacy accept_len cap fallback.",
+                static_cast<int>(inputs.bitmask_gpu.defined()),
+                static_cast<void*>(inputs.bitmask_ready_event.get()),
+                static_cast<int>(inputs.logits.is_cuda()));
+            return;
+        }
+#if USING_CUDA
+        const size_t span = finish_idx - start_idx;
+        if (span == 0) {
+            return;
+        }
+        auto cur_stream = at::cuda::getCurrentCUDAStream();
+        inputs.bitmask_ready_event->block(cur_stream);
+        auto batch_logits  = inputs.logits.narrow(0, start_idx, span);
+        auto batch_bitmask = inputs.bitmask_gpu.narrow(0, start_idx, span);
+        invokeApplyXGrammarBitmaskInplace(batch_logits,
+                                           batch_bitmask,
+                                           static_cast<int64_t>(inputs.vocab_size),
+                                           cur_stream.stream());
+        return;
+#else
+        RTP_LLM_CHECK_WITH_INFO(false, "xgrammar MTP_VERIFY path requires CUDA build");
+#endif
+    }
+
+    // NORMAL_DECODE path. Score-batch (MTP verify) must NOT reach here under
+    // D19's single-interval registration; the MTP_VERIFY phase branch above
+    // handles that span exclusively.
     RTP_LLM_CHECK(size() == finish_idx - start_idx);
 #if RTP_LLM_ENABLE_XGRAMMAR_CPP
     RTP_LLM_CHECK_WITH_INFO(runtime_state_ != nullptr, "xgrammar runtime state is not initialized");
@@ -211,6 +257,116 @@ void XGrammarLogitsProcessor::updateStatus(const torch::Tensor& new_tokens, int3
     }
 }
 
+// ─── SpecLogitsProcessor implementation (single-sequence) ────────────────────
+
+bool XGrammarLogitsProcessor::isSpecVerifyEligible() const {
+    if (xgrammar_infos_.empty()) {
+        return false;
+    }
+    const auto& info = xgrammar_infos_[0];
+    return info.active && !info.terminated && !info.dead;
+}
+
+int XGrammarLogitsProcessor::tryAcceptAndFillBitmask(const int32_t* draft_tokens,
+                                                     int            propose_step,
+                                                     int32_t*       bitmask_cpu_out,
+                                                     size_t         bitmask_size_int32) {
+    (void)draft_tokens;
+    (void)bitmask_cpu_out;
+    (void)bitmask_size_int32;
+    if (propose_step <= 0) {
+        return 0;
+    }
+#if RTP_LLM_ENABLE_XGRAMMAR_CPP
+    if (!runtime_state_ || runtime_state_->matchers.empty() || xgrammar_infos_.empty()) {
+        return propose_step;  // no matcher → leave caps unconstrained, rows allow-all
+    }
+    auto& matcher = runtime_state_->matchers[0];
+    int   cap     = propose_step;
+
+    // RAII guard: ensures Rollback runs even if FillNextTokenBitmask or
+    // AcceptToken throws partway through the walk. The idempotency contract
+    // documented on SpecLogitsProcessor::tryAcceptAndFillBitmask requires the
+    // matcher state to be unchanged on return.
+    struct RollbackGuard {
+        xgrammar::GrammarMatcher* matcher;
+        int                       advances = 0;
+        ~RollbackGuard() {
+            if (advances <= 0) {
+                return;
+            }
+            try {
+                matcher->Rollback(advances);
+            } catch (const std::exception& e) {
+                RTP_LLM_LOG_WARNING("xgrammar Rollback(%d) threw during unwind: %s",
+                                    advances,
+                                    e.what());
+            } catch (...) {
+                RTP_LLM_LOG_WARNING("xgrammar Rollback(%d) threw unknown exception during unwind",
+                                    advances);
+            }
+        }
+    };
+
+    int64_t  row_shape[2] = {1, static_cast<int64_t>(bitmask_size_int32)};
+    DLTensor dl;
+    dl.device      = DLDevice{kDLCPU, 0};
+    dl.ndim        = 2;
+    dl.dtype       = DLDataType{kDLInt, 32, 1};
+    dl.shape       = row_shape;
+    dl.strides     = nullptr;
+    dl.byte_offset = 0;
+
+    RollbackGuard guard{&matcher, 0};
+    for (int j = 0; j <= propose_step; ++j) {
+        dl.data = bitmask_cpu_out + static_cast<size_t>(j) * bitmask_size_int32;
+        matcher.FillNextTokenBitmask(&dl, /*index=*/0);
+        if (j == propose_step) {
+            break;  // bonus row, no further advance
+        }
+        if (!matcher.AcceptToken(draft_tokens[j])) {
+            cap = j;
+            break;
+        }
+        ++guard.advances;
+    }
+    return cap;
+#else
+    return propose_step;
+#endif
+}
+
+// ─── PdTransferableLogitsProcessor implementation ────────────────────────────
+
+std::string XGrammarLogitsProcessor::pdProcessorKind() const {
+    return "xgrammar";
+}
+
+std::string XGrammarLogitsProcessor::pdSnapshotVersion() const {
+    return pdReplayStateVersion();
+}
+
+PdTransferableLogitsProcessor::PdSnapshot
+XGrammarLogitsProcessor::exportPdSnapshot(bool exclude_last_token) const {
+    PdTransferableLogitsProcessor::PdSnapshot snap;
+    snap.kind    = pdProcessorKind();
+    snap.version = pdSnapshotVersion();
+    if (xgrammar_infos_.empty()) {
+        return snap;
+    }
+    snap.accepted_tokens  = exportPdReplayAcceptedTokens(/*batch_idx=*/0, exclude_last_token);
+    snap.consumed_seq_len = exportPdReplayConsumedSeqLen(/*batch_idx=*/0, exclude_last_token);
+    return snap;
+}
+
+void XGrammarLogitsProcessor::restorePdSnapshot(
+    const PdTransferableLogitsProcessor::PdSnapshot& snapshot) {
+    restorePdReplayState(snapshot.accepted_tokens,
+                         snapshot.consumed_seq_len,
+                         snapshot.version,
+                         /*batch_idx=*/0);
+}
+
 const std::string& XGrammarLogitsProcessor::pdReplayStateVersion() {
     return kPdReplayStateVersion;
 }
@@ -322,8 +478,18 @@ XGrammarLogitsProcessorPtr XGrammarLogitsProcessor::fromGenerateInput(std::share
     RTP_LLM_CHECK_WITH_INFO(table.compiled_grammar != nullptr, "xgrammar compiled grammar missing from cache table");
     processor->runtime_state_ = std::make_unique<XGrammarRuntimeState>();
     processor->runtime_state_->matchers.reserve(num);
+    // 0/negative => xgrammar GrammarMatcher default (-1). Spec-verify path
+    // requires a positive cap so Rollback() works; openai_endpoint sets this
+    // from sp_config.gen_num_per_cycle + 1 when speculative decoding is on.
+    const int max_rollback =
+        generate_config->xgrammar_max_rollback_tokens > 0
+            ? generate_config->xgrammar_max_rollback_tokens
+            : -1;
     for (int32_t i = 0; i < num; ++i) {
-        processor->runtime_state_->matchers.emplace_back(*table.compiled_grammar);
+        processor->runtime_state_->matchers.emplace_back(*table.compiled_grammar,
+                                                         /*override_stop_tokens=*/std::nullopt,
+                                                         /*terminate_without_stop_token=*/false,
+                                                         /*max_rollback_tokens=*/max_rollback);
     }
 #else
     (void)table;

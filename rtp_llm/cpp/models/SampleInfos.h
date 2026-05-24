@@ -10,6 +10,19 @@ namespace rtp_llm {
 class LogitsProcessorStates;
 typedef std::shared_ptr<LogitsProcessorStates> LogitsProcessorStatesPtr;
 
+// Stage 2 of the XGrammar verify-only MTP async plan: phase metadata that
+// travels with the sampler input batch so logits processors (XGrammar in
+// particular) can dispatch on which speculative-decoding phase produced the
+// batch. Default is NORMAL_DECODE; MTP target-verify batches are tagged
+// MTP_VERIFY by MtpBatchStreamProcessor::gatherSpecSamplerInput, draft
+// sampling stays as DRAFT_SAMPLE on the few paths that route through a
+// processor at all (the FastTopKSampler path bypasses processors today).
+enum class LogitsProcessorPhase : uint8_t {
+    NORMAL_DECODE = 0,
+    MTP_VERIFY    = 1,
+    DRAFT_SAMPLE  = 2,
+};
+
 struct SamplerInitParams {};
 
 struct SamplerInputs {
@@ -55,6 +68,22 @@ public:
     mutable torch::Tensor all_probs;      // shape: [batch_size, vocab_size]
 
     std::vector<at::Generator> generator;
+
+    LogitsProcessorPhase phase = LogitsProcessorPhase::NORMAL_DECODE;
+
+    // ─── MTP_VERIFY-only fields, populated by SpecGrammarVerifyHelper ───
+    // Bitmask block produced by the helper for the score-batch:
+    //   shape [total_streams * (propose_step + 1), bitmask_word_count] CUDA int32,
+    //   bit=1 means allow. Rows for streams that opted out (or for offsets past
+    //   each stream's grammar cap) are filled with allow-all (0xFFFFFFFF).
+    torch::Tensor                 bitmask_gpu;
+    // Per-stream grammar cap in [0, propose_step], shape [total_streams] CUDA int32.
+    // The executor truncates verifier accept_len with min(accept_len, cap + 1).
+    torch::Tensor                 grammar_cap_gpu;
+    // Main stream must wait this event before consuming bitmask_gpu / grammar_cap_gpu.
+    std::shared_ptr<torch::Event> bitmask_ready_event;
+    // Number of speculative draft tokens per stream (P).
+    int                           propose_step = 0;
 };
 
 struct SamplerOutput {

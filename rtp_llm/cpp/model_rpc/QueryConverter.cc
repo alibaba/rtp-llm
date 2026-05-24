@@ -49,6 +49,7 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->xgrammar_tokenizer_fp     = config_proto->xgrammar_tokenizer_fp();
     generate_config->xgrammar_compile_cache_key = config_proto->xgrammar_compile_cache_key();
     generate_config->xgrammar_compile_cache_capacity = config_proto->xgrammar_compile_cache_capacity();
+    generate_config->xgrammar_max_rollback_tokens    = config_proto->xgrammar_max_rollback_tokens();
     generate_config->select_tokens_id.resize(config_proto->select_tokens_id_size());
     memcpy(generate_config->select_tokens_id.data(),
            config_proto->select_tokens_id().data(),

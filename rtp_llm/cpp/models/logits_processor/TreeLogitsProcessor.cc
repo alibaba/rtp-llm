@@ -7,6 +7,11 @@ namespace rtp_llm {
 TreeLogitsProcessor::TreeLogitsProcessor(std::vector<StreamTreeInfo> tree_infos): tree_infos_(tree_infos) {}
 
 void TreeLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) {
+    // Tree has no spec-verify implementation. See ThinkModeLogitsProcessor for
+    // the rationale; the same single-interval registration constraint applies.
+    if (inputs.phase == LogitsProcessorPhase::MTP_VERIFY) {
+        return;
+    }
     auto batch_size = size();
     RTP_LLM_CHECK(batch_size == finish_idx - start_idx);
     bool                             need_process = false;

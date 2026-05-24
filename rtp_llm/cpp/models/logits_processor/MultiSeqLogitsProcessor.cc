@@ -16,6 +16,14 @@ MultiSeqLogitsProcessor::fromGenerateInput(std::shared_ptr<GenerateInput> genera
 }
 
 void MultiSeqLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) {
+    // MultiSeq has no spec-verify implementation. Today this branch is
+    // structurally unreachable (MtpBatchStreamProcessor asserts
+    // maxBatchSize==1 which excludes num_return_sequences>1 / beam search
+    // from the MTP path), but the early-return matches ThinkMode/Tree style
+    // and hardens against future relaxation of that invariant.
+    if (inputs.phase == LogitsProcessorPhase::MTP_VERIFY) {
+        return;
+    }
     size_t batch_size = finish_idx - start_idx;
     size_t vocab_size = inputs.logits.size(1);
 

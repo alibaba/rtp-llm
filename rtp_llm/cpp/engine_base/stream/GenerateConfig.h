@@ -105,6 +105,12 @@ public:
     int64_t     xgrammar_compile_cache_entries          = 0;
     int64_t     xgrammar_gpu_hot_path_host_sync_total   = 0;
     int64_t     xgrammar_gpu_hot_path_d2h_total         = 0;
+    int64_t     xgrammar_forbidden_cpu_fallback_total   = 0;
+    int64_t     xgrammar_device_state_missing_total     = 0;
+    // Max draft offsets the grammar matcher must be able to roll back. Required
+    // for the spec-verify "AcceptToken + Rollback" walk; openai_endpoint sets
+    // this from sp_config.gen_num_per_circle + 1. 0/negative => default 8.
+    int         xgrammar_max_rollback_tokens            = 0;
 
     bool top1() {
         return top_k == 1;
@@ -260,6 +266,9 @@ public:
         JSONIZE(xgrammar_compile_cache_entries);
         JSONIZE(xgrammar_gpu_hot_path_host_sync_total);
         JSONIZE(xgrammar_gpu_hot_path_d2h_total);
+        JSONIZE(xgrammar_forbidden_cpu_fallback_total);
+        JSONIZE(xgrammar_device_state_missing_total);
+        JSONIZE(xgrammar_max_rollback_tokens);
 #undef JSONIZE
 #undef JSONIZE_OPTIONAL
     }

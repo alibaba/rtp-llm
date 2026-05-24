@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
+#include "rtp_llm/cpp/models/logits_processor/PdTransferableLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/xgrammar/XGrammarLogitsProcessor.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -42,17 +43,109 @@ namespace rtp_llm {
 
 namespace {
 
-XGrammarLogitsProcessorPtr findXGrammarProcessor(const std::shared_ptr<GenerateStream>& stream) {
-    if (!stream) {
-        return nullptr;
+// Walks the stream's processor list and applies one PdSnapshot to the
+// matching backend (keyed by pdProcessorKind()). Validates that the
+// snapshot's version string matches the matching backend's
+// pdSnapshotVersion(). Returns true on full success; on failure, fills
+// `error_detail` with a kind/version-qualified diagnostic suitable for the
+// gRPC error message. Two failure modes:
+//   1. Unmatched kind  : no processor on this decode node has pdProcessorKind()
+//                        == snap.kind. Caller should return FAILED_PRECONDITION.
+//   2. Version mismatch: matching processor found but pdSnapshotVersion() !=
+//                        snap.version. Caller should return FAILED_PRECONDITION.
+// In both modes the offending snapshot is skipped (state is NOT restored) so
+// the matcher remains in its (clean) post-construction state — safer than
+// applying a partially-mismatched snapshot.
+bool applyLogitsProcessorPdSnapshots(
+    const std::shared_ptr<GenerateStream>&                          stream,
+    const std::vector<PdTransferableLogitsProcessor::PdSnapshot>&   snapshots,
+    const std::string&                                              request_key,
+    std::string&                                                    error_detail) {
+    if (!stream || snapshots.empty()) {
+        return true;
     }
-    for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
-        auto xgrammar_processor = std::dynamic_pointer_cast<XGrammarLogitsProcessor>(processor);
-        if (xgrammar_processor) {
-            return xgrammar_processor;
+    bool all_ok = true;
+    for (const auto& snap : snapshots) {
+        bool dispatched      = false;
+        bool version_ok      = true;
+        std::string mismatch_local;
+        for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
+            auto pd = std::dynamic_pointer_cast<PdTransferableLogitsProcessor>(processor);
+            if (!pd) {
+                continue;
+            }
+            if (pd->pdProcessorKind() != snap.kind) {
+                continue;
+            }
+            const std::string backend_version = pd->pdSnapshotVersion();
+            if (!snap.version.empty() && backend_version != snap.version) {
+                version_ok = false;
+                mismatch_local =
+                    "kind=" + snap.kind + " snapshot.version=" + snap.version
+                    + " backend.version=" + backend_version;
+                break;
+            }
+            pd->restorePdSnapshot(snap);
+            dispatched = true;
+            break;
+        }
+        if (!version_ok) {
+            all_ok = false;
+            RTP_LLM_LOG_WARNING(
+                "request [%s] PD snapshot version mismatch: %s",
+                request_key.c_str(), mismatch_local.c_str());
+            if (error_detail.empty()) {
+                error_detail = "PD snapshot version mismatch (" + mismatch_local + ")";
+            }
+            continue;
+        }
+        if (!dispatched) {
+            all_ok = false;
+            RTP_LLM_LOG_WARNING(
+                "request [%s] received PD snapshot kind=[%s] but no matching processor is active",
+                request_key.c_str(),
+                snap.kind.c_str());
+            if (error_detail.empty()) {
+                error_detail = "PD snapshot kind=[" + snap.kind
+                             + "] has no matching processor on this decode node "
+                               "(likely backend mismatch or unconfigured grammar)";
+            }
         }
     }
-    return nullptr;
+    return all_ok;
+}
+
+// Build the snapshot list from the request, preferring the new envelope and
+// falling back to the deprecated xgrammar_* fields when the envelope is empty
+// (older prefill nodes).
+std::vector<PdTransferableLogitsProcessor::PdSnapshot>
+collectPdSnapshotsFromRequest(const GenerateRequestPB& generate_request) {
+    std::vector<PdTransferableLogitsProcessor::PdSnapshot> snapshots;
+    if (generate_request.logits_processor_pd_snapshots_size() > 0) {
+        snapshots.reserve(generate_request.logits_processor_pd_snapshots_size());
+        for (const auto& msg : generate_request.logits_processor_pd_snapshots()) {
+            PdTransferableLogitsProcessor::PdSnapshot snap;
+            snap.kind             = msg.kind();
+            snap.version          = msg.version();
+            snap.accepted_tokens.assign(msg.accepted_tokens().begin(), msg.accepted_tokens().end());
+            snap.consumed_seq_len = msg.consumed_seq_len();
+            snap.opaque_blob      = msg.opaque_blob();
+            snapshots.push_back(std::move(snap));
+        }
+        return snapshots;
+    }
+    if (generate_request.xgrammar_accepted_tokens_size() > 0
+        || generate_request.xgrammar_consumed_seq_len() > 0
+        || !generate_request.xgrammar_replay_state_version().empty()) {
+        PdTransferableLogitsProcessor::PdSnapshot snap;
+        snap.kind             = "xgrammar";
+        snap.version          = generate_request.xgrammar_replay_state_version();
+        snap.accepted_tokens.assign(generate_request.xgrammar_accepted_tokens().begin(),
+                                     generate_request.xgrammar_accepted_tokens().end());
+        snap.consumed_seq_len = generate_request.xgrammar_consumed_seq_len();
+        snapshots.push_back(std::move(snap));
+    }
+    return snapshots;
 }
 
 }  // namespace
@@ -186,19 +279,17 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                       "message first status != RemoteStage::GENERATE");
     decode_context.time_info.updateGenerateBeginTime();
     generate_stream->setIsContextStream(false);
-    if (generate_request.xgrammar_accepted_tokens_size() > 0 || generate_request.xgrammar_consumed_seq_len() > 0
-        || !generate_request.xgrammar_replay_state_version().empty()) {
-        if (auto xgrammar_processor = findXGrammarProcessor(generate_stream)) {
-            std::vector<int> accepted_tokens(generate_request.xgrammar_accepted_tokens().begin(),
-                                             generate_request.xgrammar_accepted_tokens().end());
-            xgrammar_processor->restorePdReplayState(accepted_tokens,
-                                                     generate_request.xgrammar_consumed_seq_len(),
-                                                     generate_request.xgrammar_replay_state_version());
-        } else {
-            RTP_LLM_LOG_WARNING("request [%s] received xgrammar replay state but no xgrammar processor is active",
-                                decode_context.request_key.c_str());
-        }
-    }
+    auto pd_snapshots = collectPdSnapshotsFromRequest(generate_request);
+    std::string pd_dispatch_detail;
+    GRPC_RET_IF_ERROR(decode_context,
+                      applyLogitsProcessorPdSnapshots(generate_stream, pd_snapshots,
+                                                      decode_context.request_key,
+                                                      pd_dispatch_detail),
+                      grpc::StatusCode::FAILED_PRECONDITION,
+                      pd_dispatch_detail.empty()
+                          ? std::string(
+                              "PD snapshot dispatch failed without further detail")
+                          : pd_dispatch_detail);
     generate_stream->step();
 
     auto new_tokens = torch::zeros({(int64_t)generate_stream->nextBatchSize(), 1}, torch::kInt32);

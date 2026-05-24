@@ -47,6 +47,9 @@ cc_library(
     name = "logits_processor",
     hdrs = [
         "logits_processor/BaseLogitsProcessor.h",
+        "logits_processor/SpecLogitsProcessor.h",
+        "logits_processor/PdTransferableLogitsProcessor.h",
+        "logits_processor/SpecGrammarVerifyHelper.h",
         "logits_processor/MultiSeqLogitsProcessor.h",
         "logits_processor/LogitsProcessorStates.h",
         "logits_processor/ThinkModeLogitsProcessor.h",
@@ -82,6 +85,7 @@ cc_library(
     }),
     srcs = [
         "logits_processor/BaseLogitsProcessor.cc",
+        "logits_processor/SpecGrammarVerifyHelper.cc",
         "logits_processor/MultiSeqLogitsProcessor.cc",
         "logits_processor/LogitsProcessorStates.cc",
         "logits_processor/ThinkModeLogitsProcessor.cc",
@@ -93,6 +97,7 @@ cc_library(
     deps = [
         ":sample_infos",
         ":dfa_utils",
+        "//rtp_llm/cpp/cuda_graph:cuda_graph_hdrs_lib",
         "//rtp_llm/cpp/engine_base/stream:generate_types",
         "//rtp_llm/cpp/engine_base/stream:generate_config",
         "//rtp_llm/cpp/multimodal_processor:multimodal_types",
@@ -144,6 +149,24 @@ cc_library(
         ],
         "//conditions:default": [],
     }),
+    visibility = ["//visibility:public"],
+)
+
+# XGrammar hot-path source files exported as data for the static-check test
+# in //rtp_llm/cpp/models/logits_processor/xgrammar/test:xgrammar_hot_path_static_check.
+# The actual compilation of these files lives in the ":logits_processor"
+# target above.
+filegroup(
+    name = "xgrammar_hot_path_sources",
+    srcs = [
+        "logits_processor/SpecGrammarVerifyHelper.cc",
+        "logits_processor/SpecGrammarVerifyHelper.h",
+        "logits_processor/xgrammar/XGrammarCompilerCache.cc",
+        "logits_processor/xgrammar/XGrammarCompilerCache.h",
+        "logits_processor/xgrammar/XGrammarGpuState.h",
+        "logits_processor/xgrammar/XGrammarLogitsProcessor.cc",
+        "logits_processor/xgrammar/XGrammarLogitsProcessor.h",
+    ],
     visibility = ["//visibility:public"],
 )
 

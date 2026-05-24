@@ -15,6 +15,8 @@
 #include "rtp_llm/cpp/utils/StringUtil.h"
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
+#include "rtp_llm/cpp/models/logits_processor/SpecGrammarVerifyHelper.h"
+#include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/xgrammar/XGrammarLogitsProcessor.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include <sstream>
@@ -108,30 +110,82 @@ XGrammarLogitsProcessorPtr findXGrammarProcessor(const GenerateStreamPtr& stream
     return nullptr;
 }
 
-void applyXGrammarMtpAcceptLenCap(const std::list<GenerateStreamPtr>&          streams,
-                                  speculative::SpeculativeSamplerOutput& output) {
+bool streamsHaveSpecGrammarProcessor(const std::list<GenerateStreamPtr>& streams) {
+    for (const auto& stream : streams) {
+        for (const auto& proc : stream->getAllLogitsProcessorPtr()) {
+            if (std::dynamic_pointer_cast<SpecLogitsProcessor>(proc)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+void applySpecGrammarAcceptLenCap(const std::list<GenerateStreamPtr>&    streams,
+                                   const SamplerInputs&                   sampler_input,
+                                   speculative::SpeculativeSamplerOutput& output) {
     if (streams.empty() || !output.accept_len.defined()) {
         return;
     }
 
-    bool has_xgrammar = false;
-    for (const auto& stream : streams) {
-        if (findXGrammarProcessor(stream)) {
-            has_xgrammar = true;
-            break;
-        }
-    }
-    if (!has_xgrammar) {
+    if (sampler_input.grammar_cap_gpu.defined()) {
+        // Helper ran this step — apply the per-stream grammar cap on GPU.
+        // accept_len is "number of accepted tokens" (>= 1, includes bonus).
+        // cap_gpu is the max draft offset accepted by the matcher in
+        // [0, propose_step]; cap+1 is the equivalent accept_len ceiling.
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(spec_grammar_accept_len_cap)");
+        RTP_LLM_CHECK_WITH_INFO(output.accept_len.is_cuda(),
+                                "spec grammar accept_len cap requires CUDA accept_len");
+        auto cap_plus_one =
+            sampler_input.grammar_cap_gpu.to(output.accept_len.dtype()) + 1;
+        output.accept_len               = torch::minimum(output.accept_len, cap_plus_one);
+        output.xgrammar_mtp_device_path = true;
+        output.accept_len_cpu           = torch::Tensor();
         return;
     }
 
-    RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(xgrammar_device_accept_len_cap)");
-    RTP_LLM_CHECK_WITH_INFO(output.accept_len.is_cuda(), "xgrammar MTP accept_len cap requires CUDA accept_len");
-
-    // Score-batch target verification masks every speculative position from the same
-    // committed grammar state. Until draft-offset grammar states are fully device-native,
-    // only commit one verified token per MTP cycle for structured output requests.
-    output.accept_len.clamp_max_(1);
+    // Helper did not run this step (e.g. propose_step==1 fastpath path not
+    // wired yet, or F26 multi-seq guard fired). Fall back to the legacy
+    // conservative clamp — accept at most 1 token per cycle for grammar-active
+    // streams, matching pre-helper behavior. Once the propose_step==1
+    // host-mirror fastpath lands this branch goes away.
+    //
+    // Per-stream selectivity: only grammar-active streams get clamped to 1.
+    // Non-grammar streams in the same batch keep their full accept_len so
+    // they don't lose spec acceleration just because a grammar peer caused
+    // the helper to bail. (Pre-this-fix the whole batch was clamped — same
+    // behavior as the original pre-async code, but suboptimal under
+    // heterogeneous batching.)
+    const size_t nstreams = streams.size();
+    bool         any_grammar = false;
+    auto         grammar_mask_cpu = torch::empty(
+        {static_cast<int64_t>(nstreams)},
+        torch::TensorOptions().dtype(torch::kBool).pinned_memory(true));
+    auto* mask_ptr = grammar_mask_cpu.data_ptr<bool>();
+    {
+        size_t i = 0;
+        for (const auto& stream : streams) {
+            bool has_grammar = false;
+            for (const auto& proc : stream->getAllLogitsProcessorPtr()) {
+                if (std::dynamic_pointer_cast<SpecLogitsProcessor>(proc)) {
+                    has_grammar = true;
+                    break;
+                }
+            }
+            mask_ptr[i++] = has_grammar;
+            any_grammar |= has_grammar;
+        }
+    }
+    if (!any_grammar) {
+        return;
+    }
+    RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(spec_grammar_clamp_fallback)");
+    RTP_LLM_CHECK_WITH_INFO(output.accept_len.is_cuda(),
+                            "spec grammar accept_len clamp fallback requires CUDA accept_len");
+    auto grammar_mask_gpu =
+        grammar_mask_cpu.to(output.accept_len.device(), /*non_blocking=*/true);
+    auto capped = torch::clamp_max(output.accept_len, 1);
+    output.accept_len               = torch::where(grammar_mask_gpu, capped, output.accept_len);
     output.xgrammar_mtp_device_path = true;
     output.accept_len_cpu           = torch::Tensor();
 }
@@ -408,7 +462,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     collect_metrics_stream_(cuda_graph::graphGetStreamFromPool(true)),
     target_verify_prepare_runner_(cuda_graph::graphGetStreamFromPool(true)),
     draft_prefill_prepare_runner_(cuda_graph::graphGetStreamFromPool(true)),
-    spec_bookkeeping_runner_(cuda_graph::graphGetStreamFromPool(true)) {
+    spec_bookkeeping_runner_(cuda_graph::graphGetStreamFromPool(true)),
+    spec_grammar_helper_(std::make_unique<SpecGrammarVerifyHelper>()) {
     data_type_        = params.model_config_.data_type;
     hidden_size_      = params.model_config_.hidden_size * params.model_config_.hc_mult;
     propose_step_     = propose_params->gen_num_per_circle;
@@ -930,11 +985,23 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     launchTargetVerifyPrepareAsync(model_input, batch_size);
 
+    // Producer-side event for draft_token_ids_t. Recorded on the main stream
+    // immediately after draftModelDecode finishes so the SpecGrammarVerifyHelper's
+    // private [xg] stream can issue a cudaStreamWaitEvent on it before D2H'ing
+    // the draft tokens. Without this, the [xg] D2H races the [main] producer
+    // kernels (invokeMtpSpecDecodeTokensMetadataPrepare / torch::stack) and the
+    // CPU matcher walk would consume stale/garbage tokens.
+    torch::Event draft_tokens_ready_event = cuda_graph::makeGraphEvent();
+    bool         draft_tokens_event_valid = false;
     if (propose_step_ > 1) {
         model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
         RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode start");
         draftModelDecode(model_input, stream_groups, draft_probs_list, draft_token_ids_t, model_forward_us);
         RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode end");
+        if (draft_token_ids_t.defined()) {
+            draft_tokens_ready_event.record(cuda_graph::graphGetCurrentStream());
+            draft_tokens_event_valid = true;
+        }
     }
 
     // Launch draft-prefill prepare BEFORE target verify forward so it overlaps
@@ -996,19 +1063,74 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                 stream_groups = StreamGroups(streams);
             }
 
+            // ── Spec grammar verify async helper ─────────────────────────────────
+            // runTargetVerifyForward above launched a non-blocking GPU forward;
+            // the helper's CPU matcher walk runs on this main thread in parallel
+            // with that GPU work, while D2H draft tokens / H2D bitmask + cap
+            // ride a private CUDA stream. The main stream blocks on
+            // grammar_result.ready_event before applying the mask kernel
+            // (inside XGrammarLogitsProcessor::process MTP_VERIFY branch) and
+            // before reading grammar_cap_gpu in applySpecGrammarAcceptLenCap.
+            torch::Event* draft_tokens_event_ptr =
+                draft_tokens_event_valid ? &draft_tokens_ready_event : nullptr;
+            SpecGrammarVerifyHelper::LaunchResult grammar_result =
+                launchSpecGrammarVerify(streams, draft_token_ids_t, draft_tokens_event_ptr);
+
+            // RAII record of consumer_done_event: the helper buffer-reuse
+            // barrier MUST fire even if sampler_->forward / speculative_sampler
+            // / applySpecGrammarAcceptLenCap throws. Otherwise the helper holds
+            // an unrecorded event and next-step xg_stream wait becomes a no-op
+            // → race between next H2D and main-stream mask kernel.
+            struct ConsumerDoneScopeGuard {
+                std::shared_ptr<torch::Event> ev;
+                bool                          fired = false;
+                ~ConsumerDoneScopeGuard() {
+                    if (ev && !fired) {
+                        try {
+                            ev->record(cuda_graph::graphGetCurrentStream());
+                        } catch (const std::exception& e) {
+                            RTP_LLM_LOG_WARNING(
+                                "consumer_done_event RAII record threw during unwind: %s", e.what());
+                        } catch (...) {
+                            RTP_LLM_LOG_WARNING(
+                                "consumer_done_event RAII record threw unknown during unwind");
+                        }
+                    }
+                }
+            };
+            ConsumerDoneScopeGuard consumer_done_guard{grammar_result.consumer_done_event, false};
+
             // target model sample
             CHECK_AND_RETURN_REF(
                 sampler_input,
                 batch_stream_processor_->gatherSpecSamplerInput(stream_groups, model_input, model_output));
             holdSamplerInputHostBuffers(buffer_holder_, sampler_input);
+
+            // Hand the helper output to the sampler so XGrammar's MTP_VERIFY
+            // branch in process() can wait the ready_event and apply the mask.
+            if (grammar_result.bitmask_gpu.defined()) {
+                sampler_input.bitmask_gpu         = grammar_result.bitmask_gpu;
+                sampler_input.grammar_cap_gpu     = grammar_result.cap_gpu;
+                sampler_input.bitmask_ready_event = grammar_result.ready_event;
+                sampler_input.propose_step        = propose_step_;
+            }
+
             sampler_output           = std::move(sampler_->forward(sampler_input));
             sampler_output.all_probs = sampler_output.all_probs.reshape(
                 {(int64_t)batch_size, (int64_t)(propose_step_ + 1), (int64_t)vocab_size_});
 
             // rejection sampling
             speculative_sampler_output = speculative_sampler_->forward(streams, draft_sampler_output, sampler_output);
-            applyXGrammarMtpAcceptLenCap(streams, speculative_sampler_output);
+            applySpecGrammarAcceptLenCap(streams, sampler_input, speculative_sampler_output);
             materializeLegacySpeculativeSamplerCpuOutput(speculative_sampler_output);
+
+            // Helper buffer-reuse barrier: happy-path record. The guard above
+            // covers exception unwinding; this site marks the event fired so
+            // the dtor does not double-record.
+            if (consumer_done_guard.ev) {
+                consumer_done_guard.ev->record(cuda_graph::graphGetCurrentStream());
+                consumer_done_guard.fired = true;
+            }
         }
 
         batch_stream_processor_->updateDecodePostDraftModelInput(
@@ -1205,6 +1327,78 @@ void MtpExecutor::launchDraftPrefillPrepareAsync(const GptModelInputs& model_inp
             checkModelInputsOnCuda(model_input_copy, "decode.draft_prefill_prepare.forwarded");
             prefill_model->prepareAttentionInputs(model_input_copy);
         });
+}
+
+SpecGrammarVerifyHelper::LaunchResult
+MtpExecutor::launchSpecGrammarVerify(const std::list<GenerateStreamPtr>& streams,
+                                     const torch::Tensor&                draft_token_ids_t,
+                                     torch::Event*                       draft_tokens_ready_event) {
+    SpecGrammarVerifyHelper::LaunchResult empty;
+
+    if (!spec_grammar_helper_ || streams.empty() || propose_step_ <= 0 || vocab_size_ == 0) {
+        return empty;
+    }
+
+    // Multi-seq + grammar guard. tryAcceptAndFillBitmask is single-sequence
+    // (operates on matchers[0]); cap_gpu/bitmask_gpu are sized by stream count
+    // not sub-stream count. If any grammar-active stream has
+    // num_return_sequences > 1 OR beam search, the cap broadcasts wrongly to
+    // sibling sub-streams and the matcher walk only covers sub-stream 0. Bail
+    // to the legacy clamp_max_(1) fallback (applySpecGrammarAcceptLenCap with
+    // an undefined grammar_cap_gpu hits that path), which is conservative but
+    // correct.
+    for (const auto& stream : streams) {
+        if (stream->numReturnSequences() <= 1 && !stream->hasNumBeams()) {
+            continue;
+        }
+        for (const auto& proc : stream->getAllLogitsProcessorPtr()) {
+            if (std::dynamic_pointer_cast<SpecLogitsProcessor>(proc)) {
+                RTP_LLM_LOG_WARNING(
+                    "spec grammar verify: stream has num_return_sequences=%d hasNumBeams=%d "
+                    "with grammar processor — single-seq spec helper not safe; falling back "
+                    "to legacy accept_len cap.",
+                    stream->numReturnSequences(),
+                    static_cast<int>(stream->hasNumBeams()));
+                return empty;
+            }
+        }
+    }
+
+    SpecGrammarVerifyHelper::LaunchTask task;
+    task.total_streams = streams.size();
+    task.propose_step  = propose_step_;
+    task.vocab_size    = vocab_size_;
+
+    // Collect spec-aware processors and the row slot they occupy in the
+    // score-batch. One stream → one slot; non-grammar streams skipped.
+    size_t row_slot = 0;
+    for (const auto& stream : streams) {
+        for (const auto& proc : stream->getAllLogitsProcessorPtr()) {
+            if (auto sp = std::dynamic_pointer_cast<SpecLogitsProcessor>(proc)) {
+                task.active.push_back(sp);
+                task.active_row_slots.push_back(row_slot);
+                break;  // single-sequence: at most one spec processor per stream
+            }
+        }
+        ++row_slot;
+    }
+    if (task.active.empty()) {
+        return empty;
+    }
+
+    // Stage B/C wiring only handles propose_step > 1 today (draft_token_ids_t
+    // is a CUDA tensor produced by draftModelDecode). The propose_step==1
+    // host-mirror fastpath is plan stage D; in that case we leave
+    // grammar_cap_gpu undefined and applySpecGrammarAcceptLenCap falls back
+    // to the legacy clamp_max_(1).
+    if (propose_step_ == 1 || !draft_token_ids_t.defined()) {
+        return empty;
+    }
+
+    task.draft_tokens_gpu         = draft_token_ids_t;
+    task.draft_tokens_ready_event = draft_tokens_ready_event;
+
+    return spec_grammar_helper_->launch(task);
 }
 
 GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input, const StreamGroups& stream_groups) {

@@ -160,6 +160,9 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.xgrammar_compile_cache_capacity = (
         input_py.generate_config.xgrammar_compile_cache_capacity
     )
+    generate_config_pb.xgrammar_max_rollback_tokens = (
+        input_py.generate_config.xgrammar_max_rollback_tokens
+    )
     generate_config_pb.reuse_cache = input_py.generate_config.reuse_cache
     generate_config_pb.enable_memory_cache = (
         input_py.generate_config.enable_memory_cache

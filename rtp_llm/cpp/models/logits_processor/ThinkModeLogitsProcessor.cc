@@ -55,6 +55,14 @@ ThinkModeLogitsProcessor::ThinkModeLogitsProcessor(std::vector<StreamThinkInfo> 
     think_infos_(think_infos) {};
 
 void ThinkModeLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) {
+    // ThinkMode has no spec-verify implementation. Under D19's single-interval
+    // registration, this is invoked once per (stream, processor) with
+    // span == score_len (P+1) on MTP_VERIFY, which would violate the
+    // size()==span invariant. DFA advance over accepted tokens still happens
+    // in updateStatus during bookkeeping.
+    if (inputs.phase == LogitsProcessorPhase::MTP_VERIFY) {
+        return;
+    }
     RTP_LLM_CHECK(size() == finish_idx - start_idx);
 
     for (size_t i = 0; i < size(); ++i) {

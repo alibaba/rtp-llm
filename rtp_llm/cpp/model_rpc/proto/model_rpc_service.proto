@@ -107,6 +107,7 @@ message GenerateConfigPB {
     string xgrammar_tokenizer_fp = 63;
     string xgrammar_compile_cache_key = 64;
     int32 xgrammar_compile_cache_capacity = 65;
+    int32 xgrammar_max_rollback_tokens = 66;
 }
 
 message MMPreprocessConfigPB {
@@ -250,6 +251,18 @@ enum RemoteStage {
     GENERATE = 2;
 }
 
+// Generic logits-processor PD snapshot envelope. Each entry is one backend's
+// state carried from prefill node to decode node. accepted_tokens drives the
+// token-replay path (xgrammar today); opaque_blob is reserved for backends
+// that need a binary state dump.
+message LogitsProcessorPdSnapshotPB {
+    string kind = 1;                       // backend tag, e.g. "xgrammar"
+    string version = 2;                    // backend snapshot version
+    repeated int32 accepted_tokens = 3;
+    int64 consumed_seq_len = 4;
+    bytes opaque_blob = 5;
+}
+
 message GenerateRequestPB {
     RemoteStage stage = 1;
     int64 request_id = 2;
@@ -262,10 +275,14 @@ message GenerateRequestPB {
     repeated int32 position_ids = 9;
     TensorPB propose_probs = 10;
     TensorPB propose_hidden = 11;
-    repeated int32 xgrammar_accepted_tokens = 12;
-    int64 xgrammar_consumed_seq_len = 13;
-    bytes xgrammar_replay_state_blob = 14;
-    string xgrammar_replay_state_version = 15;
+    // Deprecated: use logits_processor_pd_snapshots (field 16). Kept for
+    // cross-version prefill/decode interop; decode side falls back to these
+    // when the new envelope is empty.
+    repeated int32 xgrammar_accepted_tokens = 12 [deprecated = true];
+    int64 xgrammar_consumed_seq_len = 13 [deprecated = true];
+    bytes xgrammar_replay_state_blob = 14 [deprecated = true];
+    string xgrammar_replay_state_version = 15 [deprecated = true];
+    repeated LogitsProcessorPdSnapshotPB logits_processor_pd_snapshots = 16;
 }
 
 // in tp case, decode master broadcast to decode worker

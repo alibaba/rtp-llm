@@ -12,6 +12,7 @@
 #include "rtp_llm/cpp/normal_engine/speculative/MtpBatchStreamProcessor.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
+#include "rtp_llm/cpp/models/logits_processor/SpecGrammarVerifyHelper.h"
 #include "rtp_llm/cpp/normal_engine/AsyncRunner.h"
 #include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
 
@@ -97,6 +98,10 @@ protected:
     void            waitPreviousBookkeepingAndKvSwaps(const std::list<GenerateStreamPtr>& streams);
     void            launchTargetVerifyPrepareAsync(const GptModelInputs& model_input, size_t batch_size);
     void            launchDraftPrefillPrepareAsync(const GptModelInputs& model_input);
+    SpecGrammarVerifyHelper::LaunchResult
+                    launchSpecGrammarVerify(const std::list<GenerateStreamPtr>& streams,
+                                             const torch::Tensor&                draft_token_ids_t,
+                                             torch::Event*                       draft_tokens_ready_event);
     GptModelOutputs runTargetVerifyForward(GptModelInputs& model_input, const StreamGroups& stream_groups);
     void            debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& model_input,
                                                          const StreamGroups&   stream_groups) const;
@@ -227,5 +232,15 @@ private:
     // Bookkeeping worker for stream-async decode dispatch. It owns a CUDA
     // stream + thread and runs D2H/specUpdate/KV release off the main thread.
     AsyncRunner spec_bookkeeping_runner_;
+
+    // Async grammar-verify helper. Holds a private CUDA stream + reusable host
+    // and device buffers. Each MTP cycle the executor calls launch() right
+    // after target verify forward; the helper performs an async D2H of draft
+    // tokens, runs the per-stream CPU matcher walk on the executor's main
+    // thread (overlapping with the still-running target verify forward), and
+    // pushes the resulting bitmask + grammar accept-len cap back to GPU on
+    // the private stream. The main stream waits the helper's ready_event
+    // before applying the mask kernel and computing min(accept_len, cap+1).
+    std::unique_ptr<SpecGrammarVerifyHelper> spec_grammar_helper_;
 };
 };  // namespace rtp_llm

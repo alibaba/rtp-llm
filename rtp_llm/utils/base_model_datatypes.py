@@ -95,6 +95,8 @@ class AuxInfo:
     xgrammar_compile_cache_entries: int = 0
     xgrammar_gpu_hot_path_host_sync_total: int = 0
     xgrammar_gpu_hot_path_d2h_total: int = 0
+    xgrammar_forbidden_cpu_fallback_total: int = 0
+    xgrammar_device_state_missing_total: int = 0
 
 
 @dataclass

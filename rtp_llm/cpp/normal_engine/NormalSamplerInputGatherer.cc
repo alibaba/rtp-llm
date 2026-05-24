@@ -201,22 +201,21 @@ void NormalSamplerInputGatherer::fillSamplerCommonInputs(SamplerInputs&         
 void NormalSamplerInputGatherer::setLogitsProcessorInputs(SamplerInputs&                sampler_inputs,
                                                           std::list<GenerateStreamPtr>& all_streams,
                                                           bool                          score_batch) const {
+    // Single-interval registration per (stream, processor): one process() call
+    // per processor per step, with span = score_len (MTP_VERIFY) or
+    // currentBatchSize (NORMAL_DECODE). XGrammar's MTP_VERIFY branch consumes
+    // the (P+1)-row block in one batched mask kernel; ThinkMode / Tree
+    // early-return on MTP_VERIFY (see their process() overrides). The previous
+    // P+1-times-per-stream per-row insert defeated the helper's batching and
+    // also broke ThinkMode/Tree's size()==span assert under multi-seq.
     LogitsProcessorStatesPtr state_ptr = std::make_shared<LogitsProcessorStates>();
     std::for_each(all_streams.begin(), all_streams.end(), [&state_ptr, score_batch, idx = 0](auto& stream) mutable {
-        if (score_batch) {
-            const int score_len = static_cast<int>(stream->scoreLen());
-            for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
-                for (int i = 0; i < score_len; ++i) {
-                    state_ptr->insert(processor, idx + i, idx + i + 1);
-                }
-            }
-            idx += score_len;
-        } else {
-            for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
-                state_ptr->insert(processor, idx, idx + stream->currentBatchSize());
-            }
-            idx += stream->currentBatchSize();
+        const int span =
+            score_batch ? static_cast<int>(stream->scoreLen()) : static_cast<int>(stream->currentBatchSize());
+        for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
+            state_ptr->insert(processor, idx, idx + span);
         }
+        idx += span;
     });
     sampler_inputs.logits_processor_states_ptr = state_ptr;
 }

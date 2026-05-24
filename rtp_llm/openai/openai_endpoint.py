@@ -269,6 +269,12 @@ class OpenaiEndpoint(object):
             config.xgrammar_compile_cache_entries = stats[
                 "xgrammar_compile_cache_entries"
             ]
+            # Spec-verify CPU walk needs to roll back at most propose_step + 1
+            # offsets after a virtual advance. 0 here means "use default 8" on
+            # the C++ side.
+            sp_config = getattr(self.generate_env_config, "sp_config", None)
+            if sp_config is not None and getattr(sp_config, "gen_num_per_cycle", 0) > 0:
+                config.xgrammar_max_rollback_tokens = sp_config.gen_num_per_cycle + 1
 
         # add_thinking_params now accepts generate_env_config parameter
         config.add_thinking_params(self.tokenizer, self.generate_env_config)

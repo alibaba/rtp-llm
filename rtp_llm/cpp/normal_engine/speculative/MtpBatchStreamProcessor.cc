@@ -342,6 +342,10 @@ absl::StatusOr<SamplerInputs> MtpBatchStreamProcessor::gatherSpecSamplerInput(
         allocateSamplerInputs(stream_groups, total_batch_size, total_batch_size, propose_step_);
     fillSamplerCommonInputs(sampler_inputs, all_streams, true, propose_step_);
     setLogitsProcessorInputs(sampler_inputs, all_streams, true);
+    // Stage 2 of xgrammar verify-only MTP async plan: tag this batch so
+    // logits processors can dispatch on phase. The score-batch path is the
+    // target-verify input for speculative decoding.
+    sampler_inputs.phase = LogitsProcessorPhase::MTP_VERIFY;
 
     int batch_idx = 0;
     for (auto& stream : all_streams) {

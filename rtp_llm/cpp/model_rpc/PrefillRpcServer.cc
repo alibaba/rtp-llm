@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/engine_base/Host.h"
+#include "rtp_llm/cpp/models/logits_processor/PdTransferableLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/xgrammar/XGrammarLogitsProcessor.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include <cstring>
@@ -21,17 +22,43 @@ namespace rtp_llm {
 
 namespace {
 
-XGrammarLogitsProcessorPtr findXGrammarProcessor(const std::shared_ptr<GenerateStream>& stream) {
+// Walks the stream's processor list and emits one LogitsProcessorPdSnapshotPB
+// per backend that implements PdTransferableLogitsProcessor. Backends that
+// don't carry PD state (ThinkMode / Tree / MultiSeq) just skip silently.
+void writeLogitsProcessorPdSnapshots(const std::shared_ptr<GenerateStream>& stream,
+                                      GenerateRequestPB&                     generate_request) {
     if (!stream) {
-        return nullptr;
+        return;
     }
     for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
-        auto xgrammar_processor = std::dynamic_pointer_cast<XGrammarLogitsProcessor>(processor);
-        if (xgrammar_processor) {
-            return xgrammar_processor;
+        auto pd = std::dynamic_pointer_cast<PdTransferableLogitsProcessor>(processor);
+        if (!pd) {
+            continue;
+        }
+        auto snap = pd->exportPdSnapshot(/*exclude_last_token=*/true);
+        if (snap.accepted_tokens.empty() && snap.opaque_blob.empty()) {
+            continue;
+        }
+        auto* msg = generate_request.add_logits_processor_pd_snapshots();
+        msg->set_kind(snap.kind);
+        msg->set_version(snap.version);
+        msg->mutable_accepted_tokens()->CopyFrom(
+            {snap.accepted_tokens.begin(), snap.accepted_tokens.end()});
+        msg->set_consumed_seq_len(snap.consumed_seq_len);
+        if (!snap.opaque_blob.empty()) {
+            msg->set_opaque_blob(snap.opaque_blob);
+        }
+
+        // Cross-version compat: also populate the deprecated xgrammar_* fields
+        // so an older decode node that doesn't yet read the envelope still
+        // gets the matcher state. Drop once all decode nodes are upgraded.
+        if (snap.kind == "xgrammar") {
+            generate_request.mutable_xgrammar_accepted_tokens()->CopyFrom(
+                {snap.accepted_tokens.begin(), snap.accepted_tokens.end()});
+            generate_request.set_xgrammar_consumed_seq_len(snap.consumed_seq_len);
+            generate_request.set_xgrammar_replay_state_version(snap.version);
         }
     }
-    return nullptr;
 }
 
 }  // namespace
@@ -323,14 +350,7 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
     generate_request.set_client_id(process_id_);
     generate_request.set_request_id(prefill_context.request_id);
     generate_request.set_first_generate_token_id(first_token);
-    if (auto xgrammar_processor = findXGrammarProcessor(stream)) {
-        auto replay_tokens = xgrammar_processor->exportPdReplayAcceptedTokens(/*batch_idx=*/0,
-                                                                              /*exclude_last_token=*/true);
-        generate_request.mutable_xgrammar_accepted_tokens()->CopyFrom({replay_tokens.begin(), replay_tokens.end()});
-        generate_request.set_xgrammar_consumed_seq_len(
-            xgrammar_processor->exportPdReplayConsumedSeqLen(/*batch_idx=*/0, /*exclude_last_token=*/true));
-        generate_request.set_xgrammar_replay_state_version(XGrammarLogitsProcessor::pdReplayStateVersion());
-    }
+    writeLogitsProcessorPdSnapshots(stream, generate_request);
     auto context_position_ids = stream->getContextPositionIds();
     if (context_position_ids.defined()) {
         generate_request.mutable_position_ids()->CopyFrom(

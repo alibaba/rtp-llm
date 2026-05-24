@@ -982,6 +982,12 @@ class CustomChatRenderer:
         aux_info.xgrammar_gpu_hot_path_d2h_total = (
             generate_config.xgrammar_gpu_hot_path_d2h_total
         )
+        aux_info.xgrammar_forbidden_cpu_fallback_total = (
+            generate_config.xgrammar_forbidden_cpu_fallback_total
+        )
+        aux_info.xgrammar_device_state_missing_total = (
+            generate_config.xgrammar_device_state_missing_total
+        )
 
     async def _create_status_list(
         self, n: int, request: ChatCompletionRequest
