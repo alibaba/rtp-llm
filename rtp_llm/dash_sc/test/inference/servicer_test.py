@@ -563,7 +563,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         )
 
         phase2_chunks = [c for c in chunks if c.infer_response.id.endswith("-2")]
-        self.assertEqual(visitor.generate_inputs[0].generate_config.max_new_tokens, 12)
+        self.assertEqual(visitor.generate_inputs[0].generate_config.max_new_tokens, 2)
         self.assertEqual(visitor.generate_inputs[1].generate_config.max_new_tokens, 2)
         self.assertEqual(len(phase2_chunks), 1)
         self.assertEqual(_gen_ids(phase2_chunks[0]), [20, 21])
@@ -618,7 +618,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        self.assertEqual(visitor.generate_inputs[0].generate_config.max_new_tokens, 105)
+        self.assertEqual(visitor.generate_inputs[0].generate_config.max_new_tokens, 100)
         self.assertEqual(visitor.generate_inputs[1].generate_config.max_new_tokens, 95)
         self.assertEqual(
             chunks[1].infer_response.parameters["generate_think_token_num"].int64_param,
@@ -1501,7 +1501,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
                     32000,
                 )
 
-    async def test_max_completion_tokens_thinking_budget_extends_backend_limit_repro(
+    async def test_max_completion_tokens_thinking_budget_keeps_backend_limit_repro(
         self,
     ) -> None:
         visitor = _FakeVisitor(_FakeAsyncStream([]))
@@ -1517,7 +1517,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(visitor.enqueue_called, 1)
         self.assertEqual(
             visitor.last_generate_input.generate_config.max_new_tokens,
-            110,
+            100,
         )
 
     async def test_real_mode_request_id_matches_generate_request_id(self) -> None:

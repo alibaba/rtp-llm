@@ -475,12 +475,6 @@ bool NormalExecutor::gatherCanUseDeviceState(const StreamGroups& stream_groups) 
         if (stream->hasNumBeams() || stream->numReturnSequences() > 1) {
             return false;
         }
-        // NormalAsyncDeviceState mirrors token ids and sequence length, not host
-        // logits-processor DFA state. If the previous async worker is still
-        // pending, wait for it to commit updateStatus() before the next sampler.
-        if (!stream->getAllLogitsProcessorPtr().empty() && stream->hasPendingAsyncBookkeeping()) {
-            return false;
-        }
         const auto& state = stream->getNormalAsyncDeviceState();
         if (!state.last_sample_token_gpu.defined() || !state.last_sample_token_gpu.is_cuda()
             || !state.next_seq_len_gpu.defined() || !state.next_seq_len_gpu.is_cuda()) {

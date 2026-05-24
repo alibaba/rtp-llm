@@ -138,7 +138,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     }
 }
 
-TEST_F(NormalBatchStreamProcessorTest, testDeviceStateFastPathWaitsForLogitsProcessorState) {
+TEST_F(NormalBatchStreamProcessorTest, testDeviceStateFastPathAllowsLogitsProcessorOverlap) {
     ResourceContext resource_context;
     ModelConfig     model_config;
     model_config.max_seq_len = 128;
@@ -176,7 +176,9 @@ TEST_F(NormalBatchStreamProcessorTest, testDeviceStateFastPathWaitsForLogitsProc
 
     EXPECT_TRUE(executor.gatherCanUseDeviceState(stream_groups));
     stream->incPendingAsyncBookkeeping();
-    EXPECT_FALSE(executor.gatherCanUseDeviceState(stream_groups));
+    // Logits processors run after model forward. Pending output bookkeeping
+    // should not disable the model-input device-state fast path.
+    EXPECT_TRUE(executor.gatherCanUseDeviceState(stream_groups));
     stream->decPendingAsyncBookkeepingAndMaybeRelease();
 }
 

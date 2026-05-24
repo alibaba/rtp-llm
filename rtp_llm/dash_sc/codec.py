@@ -296,14 +296,6 @@ class SamplingParams:
             and self.max_new_tokens_from_completion_alias
             and backend_max_new_tokens > 0
         ):
-            if (
-                other.enable_thinking is not False
-                and request_max_think is not None
-                and request_max_think > 0
-            ):
-                backend_max_new_tokens = min(
-                    _INT32_MAX, backend_max_new_tokens + int(request_max_think)
-                )
             if self.max_total_tokens is not None and self.max_total_tokens > 0:
                 backend_max_new_tokens = min(
                     backend_max_new_tokens, int(self.max_total_tokens)

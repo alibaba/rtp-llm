@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/models/logits_processor/ThinkModeLogitsProcessor.h"
+#include <algorithm>
 
 using namespace std;
 
@@ -47,8 +48,8 @@ void maskToken(const torch::Tensor& new_tokens_logits, size_t vocab_size, int32_
     new_tokens_logits[token_id] = BaseLogitsProcessor::neg_inf;
 }
 
-bool isInThinkState(const StreamThinkInfo& info) {
-    return info.process_state == ThinkProcessState::IN_THINK;
+bool isActiveThinkState(const StreamThinkInfo& info) {
+    return info.process_state == ThinkProcessState::IN_THINK || info.process_state == ThinkProcessState::CLOSING_THINK;
 }
 
 bool transitionToAfterThinkIfClosed(StreamThinkInfo& info) {
@@ -65,14 +66,31 @@ int generatedTokens(const SamplerInputs& inputs, size_t batch_idx) {
     return sequence_lengths[batch_idx] - input_lengths[batch_idx];
 }
 
-bool shouldForceThinkEnd(const SamplerInputs& inputs, size_t batch_idx, const StreamThinkInfo& info) {
+bool thinkBudgetExhausted(const SamplerInputs& inputs, size_t batch_idx, const StreamThinkInfo& info) {
     if (!info.dfa_ptr || info.end_think_token_ids.empty() || info.max_thinking_tokens <= 0) {
         return false;
     }
 
-    bool close_in_progress = info.dfa_ptr->status() > 0;
-    bool budget_exhausted  = generatedTokens(inputs, batch_idx) >= info.max_thinking_tokens;
-    return close_in_progress || budget_exhausted;
+    const int observed_output_tokens = std::max(generatedTokens(inputs, batch_idx), info.current_output_length);
+    return observed_output_tokens >= info.max_thinking_tokens;
+}
+
+bool thinkEndCloseInProgress(const StreamThinkInfo& info) {
+    return info.dfa_ptr && info.dfa_ptr->status() > 0;
+}
+
+bool consumePendingForcedThinkEndToken(StreamThinkInfo& info, int32_t current_token_id) {
+    if (info.pending_forced_think_end_token_ids.empty()) {
+        return false;
+    }
+    const int32_t expected_token_id = info.pending_forced_think_end_token_ids.front();
+    info.pending_forced_think_end_token_ids.erase(info.pending_forced_think_end_token_ids.begin());
+    if (current_token_id != expected_token_id) {
+        RTP_LLM_LOG_WARNING("forced think end token mismatch, expected=%d actual=%d, trust precommitted state",
+                            expected_token_id,
+                            current_token_id);
+    }
+    return true;
 }
 
 void maskThinkBoundaryTokens(const torch::Tensor& new_tokens_logits, size_t vocab_size, const StreamThinkInfo& info) {
@@ -86,9 +104,10 @@ ThinkModeLogitsProcessor::ThinkModeLogitsProcessor(std::vector<StreamThinkInfo> 
     think_infos_(think_infos) {};
 
 void ThinkModeLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) {
-    RTP_LLM_CHECK(size() == finish_idx - start_idx);
+    std::lock_guard<std::mutex> lock(mutex_);
+    RTP_LLM_CHECK(think_infos_.size() == finish_idx - start_idx);
 
-    for (size_t i = 0; i < size(); ++i) {
+    for (size_t i = 0; i < think_infos_.size(); ++i) {
         auto&  info      = think_infos_[i];
         size_t batch_idx = i + start_idx;
 
@@ -104,7 +123,8 @@ void ThinkModeLogitsProcessor::process(const SamplerInputs& inputs, size_t start
                     break;
                 }
 
-                if (shouldForceThinkEnd(inputs, batch_idx, info)) {
+                if (thinkEndCloseInProgress(info) || thinkBudgetExhausted(inputs, batch_idx, info)) {
+                    info.process_state = ThinkProcessState::CLOSING_THINK;
                     forceThinkEndToken(inputs.logits[batch_idx], info, inputs.vocab_size);
                     break;
                 }
@@ -112,13 +132,24 @@ void ThinkModeLogitsProcessor::process(const SamplerInputs& inputs, size_t start
                 maskToken(inputs.logits[batch_idx], inputs.vocab_size, firstTokenOrInvalid(info.begin_think_token_ids));
                 break;
             }
+            case ThinkProcessState::CLOSING_THINK: {
+                if (transitionToAfterThinkIfClosed(info)) {
+                    maskThinkBoundaryTokens(inputs.logits[batch_idx], inputs.vocab_size, info);
+                    break;
+                }
+
+                if (!forceThinkEndToken(inputs.logits[batch_idx], info, inputs.vocab_size)) {
+                    maskThinkBoundaryTokens(inputs.logits[batch_idx], inputs.vocab_size, info);
+                }
+                break;
+            }
         }
     }
 }
 
-bool ThinkModeLogitsProcessor::forceThinkEndToken(const torch::Tensor&   new_tokens_logits,
-                                                  const StreamThinkInfo& info,
-                                                  size_t                 vocab_size) {
+bool ThinkModeLogitsProcessor::forceThinkEndToken(const torch::Tensor& new_tokens_logits,
+                                                  StreamThinkInfo&     info,
+                                                  size_t               vocab_size) {
     if (!info.dfa_ptr || info.dfa_ptr->isFinished() || info.end_think_token_ids.empty()) {
         return false;
     }
@@ -128,11 +159,30 @@ bool ThinkModeLogitsProcessor::forceThinkEndToken(const torch::Tensor&   new_tok
     }
 
     RTP_LLM_LOG_INFO("sampler enforce think end token");
-    memFill(new_tokens_logits, vocab_size, (size_t)info.end_think_token_ids[next_token_idx]);
+    auto token_id = info.end_think_token_ids[next_token_idx];
+    memFill(new_tokens_logits, vocab_size, (size_t)token_id);
+
+    // Beam/multi-sequence updates need src-batch remapping from updateStatus(),
+    // and they do not use the normal async device-state fast path. Keep their
+    // historical behavior: force logits now, advance DFA when the sampled token
+    // is committed by updateStatus().
+    if (info.is_beam_search) {
+        return true;
+    }
+
+    info.dfa_ptr->next(token_id);
+    info.pending_forced_think_end_token_ids.push_back(token_id);
+    info.current_output_length += 1;
+    if (info.dfa_ptr->isFinished()) {
+        info.process_state = ThinkProcessState::AFTER_THINK;
+    } else {
+        info.process_state = ThinkProcessState::CLOSING_THINK;
+    }
     return true;
 }
 
 void ThinkModeLogitsProcessor::updateMultiSeqStatus(const std::vector<int>& src_batch_indices) {
+    std::lock_guard<std::mutex>  lock(mutex_);
     std::vector<StreamThinkInfo> new_think_infos;
     for (auto src_batch_idx : src_batch_indices) {
         new_think_infos.push_back(think_infos_[src_batch_idx].copy());
@@ -142,15 +192,21 @@ void ThinkModeLogitsProcessor::updateMultiSeqStatus(const std::vector<int>& src_
 
 void ThinkModeLogitsProcessor::updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) {
     RTP_LLM_CHECK(2 == new_tokens.dim());
-    RTP_LLM_CHECK(size() == (size_t)new_tokens.size(0));
+    std::lock_guard<std::mutex> lock(mutex_);
+    RTP_LLM_CHECK(think_infos_.size() == (size_t)new_tokens.size(0));
 
-    for (size_t i = 0; i < size(); i++) {
+    for (size_t i = 0; i < think_infos_.size(); i++) {
         auto& info = think_infos_[i];
-        if (!isInThinkState(info))
+        if (!isActiveThinkState(info) && info.pending_forced_think_end_token_ids.empty()) {
+            info.current_output_length += num_new_tokens;
             continue;
-        if (info.max_thinking_tokens <= 0 || !info.dfa_ptr)
+        }
+        if (info.max_thinking_tokens <= 0 || !info.dfa_ptr) {
+            info.current_output_length += num_new_tokens;
             continue;
-        if (transitionToAfterThinkIfClosed(info)) {
+        }
+        if (info.pending_forced_think_end_token_ids.empty() && transitionToAfterThinkIfClosed(info)) {
+            info.current_output_length += num_new_tokens;
             continue;
         }
 
@@ -162,14 +218,24 @@ void ThinkModeLogitsProcessor::updateStatus(const torch::Tensor& new_tokens, int
 
         for (size_t j = 0; j < num_new_tokens; ++j) {
             auto current_token_id = new_tokens.data_ptr<int>()[i * new_tokens.size(1) + j + offset];
+            if (consumePendingForcedThinkEndToken(info, current_token_id)) {
+                continue;
+            }
+
+            info.current_output_length += 1;
+            if (!isActiveThinkState(info)) {
+                continue;
+            }
+
             info.dfa_ptr->next(current_token_id);
             if (info.dfa_ptr->isFinished()) {
                 info.process_state = ThinkProcessState::AFTER_THINK;
-                break;
+            } else if (thinkEndCloseInProgress(info)) {
+                info.process_state = ThinkProcessState::CLOSING_THINK;
+            } else if (info.process_state == ThinkProcessState::CLOSING_THINK) {
+                info.process_state = ThinkProcessState::IN_THINK;
             }
         }
-
-        info.current_output_length += num_new_tokens;
     }
 }
 
@@ -207,7 +273,8 @@ ThinkModeLogitsProcessorPtr ThinkModeLogitsProcessor::fromGenerateInput(std::sha
 }
 
 std::vector<size_t> ThinkModeLogitsProcessor::thinkEndTokensStatus() {
-    std::vector<size_t> status;
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<size_t>         status;
     for (auto think_info : think_infos_) {
         auto dfa = think_info.dfa_ptr;
         status.push_back(dfa ? dfa->status() : 0);

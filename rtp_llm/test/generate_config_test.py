@@ -360,7 +360,7 @@ class OpenaiGenerateConfigTest(TestCase):
         self.assertEqual(config.max_thinking_tokens, 0)
         self.assertEqual(config.end_think_token_ids, [102])
 
-    def test_openai_max_completion_tokens_thinking_budget_extends_backend_limit(self):
+    def test_openai_max_completion_tokens_thinking_budget_keeps_backend_limit(self):
         generate_env_config = GenerateEnvConfig()
         generate_env_config.think_mode = 1
         generate_env_config.think_end_token_id = 102
@@ -374,7 +374,7 @@ class OpenaiGenerateConfigTest(TestCase):
 
         config = self._extract_openai_generation_config(request, generate_env_config)
 
-        self.assertEqual(config.max_new_tokens, 110)
+        self.assertEqual(config.max_new_tokens, 100)
         self.assertEqual(config.max_thinking_tokens, 10)
         self.assertTrue(config.in_think_mode)
 
@@ -392,7 +392,7 @@ class OpenaiGenerateConfigTest(TestCase):
 
         config = self._extract_openai_generation_config(request, generate_env_config)
 
-        self.assertEqual(config.max_new_tokens, 105)
+        self.assertEqual(config.max_new_tokens, 100)
         self.assertEqual(config.max_thinking_tokens, 10)
 
     def test_openai_max_completion_tokens_does_not_add_default_thinking_budget(self):

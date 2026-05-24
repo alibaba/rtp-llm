@@ -488,6 +488,97 @@ TEST_F(SamplerTest, testThinkingBudgetEnforceStartsAfterReasoningBudget) {
     EXPECT_EQ(neg_inf, enforce_inputs.logits[0][9].item<float>());
 }
 
+TEST_F(SamplerTest, testForcedSingleTokenThinkEndDoesNotRepeatBeforeAsyncStatusUpdate) {
+    SamplerDataBuilder builder;
+
+    auto generate_input                                  = std::make_shared<GenerateInput>();
+    generate_input->generate_config                      = std::make_shared<GenerateConfig>();
+    generate_input->generate_config->in_think_mode       = true;
+    generate_input->generate_config->max_thinking_tokens = 3;
+    generate_input->generate_config->end_think_token_ids = {8};
+    generate_input->input_ids                            = torch::tensor({1, 2}, torch::kInt32);
+
+    auto processor = ThinkModeLogitsProcessor::fromGenerateInput(generate_input, 1);
+    ASSERT_NE(processor, nullptr);
+
+    SamplerInputs enforce_inputs    = builder.allocate({1, 16, 8}, {processor}, {1});
+    enforce_inputs.input_lengths    = torch::tensor({2}, torch::kInt32);
+    enforce_inputs.sequence_lengths = torch::tensor({5}, torch::kInt32);
+    processor->process(enforce_inputs, 0, 1);
+
+    float neg_inf = -std::numeric_limits<float>::max();
+    EXPECT_EQ(1, enforce_inputs.logits[0][8].item<float>());
+
+    SamplerInputs next_inputs    = builder.allocate({1, 16, 8}, {processor}, {1});
+    next_inputs.input_lengths    = torch::tensor({2}, torch::kInt32);
+    next_inputs.sequence_lengths = torch::tensor({6}, torch::kInt32);
+    processor->process(next_inputs, 0, 1);
+
+    EXPECT_EQ(neg_inf, next_inputs.logits[0][8].item<float>());
+}
+
+TEST_F(SamplerTest, testForcedMultiTokenThinkEndAdvancesBeforeAsyncStatusUpdate) {
+    SamplerDataBuilder builder;
+
+    auto generate_input                                  = std::make_shared<GenerateInput>();
+    generate_input->generate_config                      = std::make_shared<GenerateConfig>();
+    generate_input->generate_config->in_think_mode       = true;
+    generate_input->generate_config->max_thinking_tokens = 3;
+    generate_input->generate_config->end_think_token_ids = {8, 9};
+    generate_input->input_ids                            = torch::tensor({1, 2}, torch::kInt32);
+
+    auto processor = ThinkModeLogitsProcessor::fromGenerateInput(generate_input, 1);
+    ASSERT_NE(processor, nullptr);
+
+    SamplerInputs first_inputs    = builder.allocate({1, 16, 8}, {processor}, {1});
+    first_inputs.input_lengths    = torch::tensor({2}, torch::kInt32);
+    first_inputs.sequence_lengths = torch::tensor({5}, torch::kInt32);
+    processor->process(first_inputs, 0, 1);
+
+    float neg_inf = -std::numeric_limits<float>::max();
+    EXPECT_EQ(1, first_inputs.logits[0][8].item<float>());
+    EXPECT_EQ(neg_inf, first_inputs.logits[0][9].item<float>());
+
+    SamplerInputs second_inputs    = builder.allocate({1, 16, 8}, {processor}, {1});
+    second_inputs.input_lengths    = torch::tensor({2}, torch::kInt32);
+    second_inputs.sequence_lengths = torch::tensor({6}, torch::kInt32);
+    processor->process(second_inputs, 0, 1);
+
+    EXPECT_EQ(neg_inf, second_inputs.logits[0][8].item<float>());
+    EXPECT_EQ(1, second_inputs.logits[0][9].item<float>());
+}
+
+TEST_F(SamplerTest, testForcedMultiTokenThinkEndAsyncStatusDoesNotDoubleAdvance) {
+    SamplerDataBuilder builder;
+
+    auto generate_input                                  = std::make_shared<GenerateInput>();
+    generate_input->generate_config                      = std::make_shared<GenerateConfig>();
+    generate_input->generate_config->in_think_mode       = true;
+    generate_input->generate_config->max_thinking_tokens = 3;
+    generate_input->generate_config->end_think_token_ids = {8, 9};
+    generate_input->input_ids                            = torch::tensor({1, 2}, torch::kInt32);
+
+    auto processor = ThinkModeLogitsProcessor::fromGenerateInput(generate_input, 1);
+    ASSERT_NE(processor, nullptr);
+
+    SamplerInputs first_inputs    = builder.allocate({1, 16, 8}, {processor}, {1});
+    first_inputs.input_lengths    = torch::tensor({2}, torch::kInt32);
+    first_inputs.sequence_lengths = torch::tensor({5}, torch::kInt32);
+    processor->process(first_inputs, 0, 1);
+    EXPECT_EQ(1, first_inputs.logits[0][8].item<float>());
+
+    processor->updateStatus(torch::tensor({{8}}, torch::kInt32), 1);
+
+    SamplerInputs second_inputs    = builder.allocate({1, 16, 8}, {processor}, {1});
+    second_inputs.input_lengths    = torch::tensor({2}, torch::kInt32);
+    second_inputs.sequence_lengths = torch::tensor({6}, torch::kInt32);
+    processor->process(second_inputs, 0, 1);
+
+    float neg_inf = -std::numeric_limits<float>::max();
+    EXPECT_EQ(neg_inf, second_inputs.logits[0][8].item<float>());
+    EXPECT_EQ(1, second_inputs.logits[0][9].item<float>());
+}
+
 #undef EXPECT_SIMILAR
 
 }  // namespace rtp_llm

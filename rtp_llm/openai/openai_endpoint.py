@@ -234,15 +234,6 @@ class OpenaiEndpoint(object):
         max_tokens_cap = _positive_int_or_none(request.max_tokens)
         if max_completion_tokens is not None:
             backend_max_new_tokens = max_completion_tokens
-            think_budget = (
-                _positive_int_or_none(request.thinking_budget)
-                if config.in_think_mode
-                else None
-            )
-            if think_budget is not None:
-                backend_max_new_tokens = min(
-                    _INT32_MAX, backend_max_new_tokens + think_budget
-                )
             if max_tokens_cap is not None:
                 backend_max_new_tokens = min(backend_max_new_tokens, max_tokens_cap)
             config.max_new_tokens = backend_max_new_tokens
