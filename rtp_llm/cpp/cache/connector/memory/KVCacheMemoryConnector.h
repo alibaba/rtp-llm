@@ -157,11 +157,14 @@ private:
     void referenceBlocks(const std::vector<BlockIdxType>& blocks, bool cache_ref = true);
     bool allocateBackingsForWrite(std::vector<CopyInfoPerKey>& copy_infos);
     bool allocateOneBacking(CopyInfoPerKey& copy_info);
-    bool tryMallocMemoryBlock(bool is_complete, BlockIdxType& block);
-    bool tryMallocDiskSlot(int32_t& slot);
+    bool tryMallocMemoryBlock(CacheBlockKind kind, BlockIdxType& block);
+    bool tryMallocDiskSlot(CacheBlockKind kind, int32_t& slot);
     void releaseRequestBacking(const CopyInfoPerKey& copy_info);
     void releaseCacheBacking(const MemoryDiskBlockCache::CacheItem& item);
     void referenceCacheBacking(const MemoryDiskBlockCache::CacheItem& item);
+    std::shared_ptr<BlockPool> memoryPoolFor(CacheBlockKind kind) const;
+    DiskBlockPoolPtr           diskPoolFor(CacheBlockKind kind) const;
+    size_t                     maxDiskSlotStrideBytes() const;
 
     bool isDualPool() const;
     bool isFullOnlySlot(const LayerRegionSlot& slot) const;
@@ -183,7 +186,7 @@ private:
                           const MemoryBlockCache::CacheItem&       item);
 
     void                       initBlockPool();
-    void                       initDiskBlockPool(size_t block_size_bytes);
+    void                       initDiskBlockPools();
     bool                       diskCacheEnabled() const;
     int64_t                    copyPlanTimeoutMs(const std::shared_ptr<CopyPlan>& copy_plan) const;
     std::shared_ptr<BlockPool> createBlockPool(size_t block_size, size_t pool_size_mb) const;
@@ -216,7 +219,9 @@ private:
     mutable std::mutex                                      staged_copy_scratch_mutex_;
     std::map<int, std::unique_ptr<StagedMemoryCopyScratch>> staged_copy_scratch_by_device_;
     std::shared_ptr<MemoryDiskBlockCache>                   block_cache_;
-    std::shared_ptr<DiskBlockPool>                          disk_block_pool_;
+    std::unique_ptr<DiskMountGuard>                         disk_mount_guard_;
+    std::shared_ptr<DiskBlockPool>                          complete_disk_pool_;
+    std::shared_ptr<DiskBlockPool>                          incomplete_disk_pool_;
     std::shared_ptr<BroadcastManager>                       broadcast_manager_;
     std::shared_ptr<autil::LockFreeThreadPool>              wait_done_thread_pool_;
 

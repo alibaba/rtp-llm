@@ -447,6 +447,8 @@ private:
             item->add_gpu_blocks(blocks[layer]);
         }
         item->set_mem_block(static_cast<int>(mem_block_index));
+        item->set_is_complete(true);
+        item->set_backing_type(MemoryOperationRequestPB::MEMORY);
     }
     LayerBlockIds makeLayerBlockIds(const std::vector<std::vector<BlockIdxType>>& per_layer_block_indices,
                                     size_t                                        cache_keys_num) const {
@@ -693,11 +695,12 @@ TEST_F(KVCacheMemoryConnectorTest, initDiskBlockPool_UsesLocalRankPathAndPreallo
                                                          server_addrs_,
                                                          nullptr);
     ASSERT_TRUE(conn->init());
-    ASSERT_NE(conn->disk_block_pool_, nullptr);
-    EXPECT_NE(conn->disk_block_pool_->filePath().find(disk1.path()), std::string::npos);
-    EXPECT_NE(conn->disk_block_pool_->filePath().find("rank_1_world_5.kv"), std::string::npos);
-    EXPECT_GT(conn->disk_block_pool_->totalSlots(), 0u);
-    EXPECT_EQ(conn->disk_block_pool_->freeSlots(), conn->disk_block_pool_->totalSlots());
+    ASSERT_NE(conn->complete_disk_pool_, nullptr);
+    ASSERT_EQ(conn->incomplete_disk_pool_, nullptr);
+    EXPECT_NE(conn->complete_disk_pool_->filePath().find(disk1.path()), std::string::npos);
+    EXPECT_NE(conn->complete_disk_pool_->filePath().find("rank_1_world_5_complete.kv"), std::string::npos);
+    EXPECT_GT(conn->complete_disk_pool_->totalSlots(), 0u);
+    EXPECT_EQ(conn->complete_disk_pool_->freeSlots(), conn->complete_disk_pool_->totalSlots());
 }
 
 TEST_F(KVCacheMemoryConnectorTest, initDiskBlockPool_RejectsInvalidDiskConfig) {
@@ -759,7 +762,7 @@ TEST_F(KVCacheMemoryConnectorTest, allocateOneBacking_FallsBackToDiskWhenMemoryP
         cache_config_, kv_cfg, makeParallelismConfig(), allocator_, server_addrs_, nullptr);
     ASSERT_TRUE(conn->init());
     ASSERT_NE(conn->block_pool_, nullptr);
-    ASSERT_NE(conn->disk_block_pool_, nullptr);
+    ASSERT_NE(conn->complete_disk_pool_, nullptr);
 
     const auto free_memory_blocks = conn->block_pool_->freeBlocksNum();
     ASSERT_GT(free_memory_blocks, 0u);
@@ -772,11 +775,11 @@ TEST_F(KVCacheMemoryConnectorTest, allocateOneBacking_FallsBackToDiskWhenMemoryP
     EXPECT_EQ(copy_info.backing_type, CacheBackingType::DISK);
     EXPECT_TRUE(isNullBlockIdx(copy_info.mem_block));
     EXPECT_GE(copy_info.disk_slot, 0);
-    EXPECT_EQ(conn->disk_block_pool_->freeSlots(), conn->disk_block_pool_->totalSlots() - 1);
+    EXPECT_EQ(conn->complete_disk_pool_->freeSlots(), conn->complete_disk_pool_->totalSlots() - 1);
 
     conn->releaseRequestBacking(copy_info);
     conn->block_pool_->requestFree(held_memory_blocks);
-    EXPECT_EQ(conn->disk_block_pool_->freeSlots(), conn->disk_block_pool_->totalSlots());
+    EXPECT_EQ(conn->complete_disk_pool_->freeSlots(), conn->complete_disk_pool_->totalSlots());
 }
 
 TEST_F(KVCacheMemoryConnectorTest, putToCache_DiskBackingTransfersRequestRefToCacheRef) {
@@ -800,14 +803,14 @@ TEST_F(KVCacheMemoryConnectorTest, putToCache_DiskBackingTransfersRequestRefToCa
     conn->putToCache(copy_info);
     EXPECT_TRUE(copy_info.request_released);
 
-    EXPECT_EQ(conn->disk_block_pool_->freeSlots(), conn->disk_block_pool_->totalSlots() - 1);
-    EXPECT_EQ(conn->disk_block_pool_->availableSlots(), conn->disk_block_pool_->totalSlots());
+    EXPECT_EQ(conn->complete_disk_pool_->freeSlots(), conn->complete_disk_pool_->totalSlots() - 1);
+    EXPECT_EQ(conn->complete_disk_pool_->availableSlots(), conn->complete_disk_pool_->totalSlots());
 
     auto evicted = conn->block_cache_->popOldestEvictable();
     ASSERT_TRUE(evicted.has_value());
     EXPECT_EQ(evicted->disk_slot, copy_info.disk_slot);
     conn->releaseCacheBacking(*evicted);
-    EXPECT_EQ(conn->disk_block_pool_->freeSlots(), conn->disk_block_pool_->totalSlots());
+    EXPECT_EQ(conn->complete_disk_pool_->freeSlots(), conn->complete_disk_pool_->totalSlots());
 
     conn->block_pool_->requestFree(held_memory_blocks);
 }
@@ -820,7 +823,7 @@ TEST_F(KVCacheMemoryConnectorTest, putToCache_DuplicateDiskItemRollsBackCacheRef
     auto conn   = std::make_shared<KVCacheMemoryConnector>(
         cache_config_, kv_cfg, makeParallelismConfig(), allocator_, server_addrs_, nullptr);
     ASSERT_TRUE(conn->init());
-    ASSERT_GT(conn->disk_block_pool_->totalSlots(), 1u);
+    ASSERT_GT(conn->complete_disk_pool_->totalSlots(), 1u);
 
     const auto free_memory_blocks = conn->block_pool_->freeBlocksNum();
     auto       held_memory_blocks = conn->block_pool_->malloc(static_cast<int>(free_memory_blocks));
@@ -833,7 +836,7 @@ TEST_F(KVCacheMemoryConnectorTest, putToCache_DuplicateDiskItemRollsBackCacheRef
     first.is_complete = true;
     conn->putToCache(first);
     EXPECT_TRUE(first.request_released);
-    EXPECT_EQ(conn->disk_block_pool_->freeSlots(), conn->disk_block_pool_->totalSlots() - 1);
+    EXPECT_EQ(conn->complete_disk_pool_->freeSlots(), conn->complete_disk_pool_->totalSlots() - 1);
 
     KVCacheMemoryConnector::CopyInfoPerKey duplicate;
     ASSERT_TRUE(conn->allocateOneBacking(duplicate));
@@ -842,13 +845,13 @@ TEST_F(KVCacheMemoryConnectorTest, putToCache_DuplicateDiskItemRollsBackCacheRef
     duplicate.is_complete = true;
     conn->putToCache(duplicate);
     EXPECT_TRUE(duplicate.request_released);
-    EXPECT_EQ(conn->disk_block_pool_->freeSlots(), conn->disk_block_pool_->totalSlots() - 1);
+    EXPECT_EQ(conn->complete_disk_pool_->freeSlots(), conn->complete_disk_pool_->totalSlots() - 1);
 
     auto evicted = conn->block_cache_->popOldestEvictable();
     ASSERT_TRUE(evicted.has_value());
     EXPECT_EQ(evicted->disk_slot, first.disk_slot);
     conn->releaseCacheBacking(*evicted);
-    EXPECT_EQ(conn->disk_block_pool_->freeSlots(), conn->disk_block_pool_->totalSlots());
+    EXPECT_EQ(conn->complete_disk_pool_->freeSlots(), conn->complete_disk_pool_->totalSlots());
 
     conn->block_pool_->requestFree(held_memory_blocks);
 }
@@ -870,7 +873,14 @@ TEST_F(KVCacheMemoryConnectorTest, validateCopyItemBacking_AcceptsUnsetDiskSlotF
     disk_item.set_mem_block(NULL_BLOCK_IDX);
     EXPECT_FALSE(connector_->validateCopyItemBacking(disk_item));
     disk_item.set_disk_slot(0);
-    EXPECT_TRUE(connector_->validateCopyItemBacking(disk_item));
+    EXPECT_FALSE(connector_->validateCopyItemBacking(disk_item));
+
+    DiskTempDir disk0;
+    auto kv_cfg    = makeDiskKvConfig({disk0.path()});
+    auto disk_conn = std::make_shared<KVCacheMemoryConnector>(
+        cache_config_, kv_cfg, makeParallelismConfig(), allocator_, server_addrs_, nullptr);
+    ASSERT_TRUE(disk_conn->init());
+    EXPECT_TRUE(disk_conn->validateCopyItemBacking(disk_item));
 }
 
 TEST_F(KVCacheMemoryConnectorTest, initBlockPool_Throw_WhenMemoryCacheSizeMbZero) {
@@ -2238,6 +2248,8 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_D2H_SingleLayer) {
         item->add_gpu_blocks(l == layer_id ? gpu_block_idx : NULL_BLOCK_IDX);
     }
     item->set_mem_block(mem_block_index);
+    item->set_is_complete(true);
+    item->set_backing_type(MemoryOperationRequestPB::MEMORY);
     req.set_copy_direction(MemoryOperationRequestPB::D2H);
 
     MemoryOperationResponsePB resp;
@@ -2439,6 +2451,25 @@ protected:
 
     std::shared_ptr<KVCacheMemoryConnector> createConnector(const CacheConfig& cfg) {
         auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cache_config_, allocator_, server_addrs_);
+        EXPECT_TRUE(conn->init());
+        return conn;
+    }
+
+    KVCacheConfig makeDiskKvConfig(const std::vector<std::string>& paths, int64_t disk_size_mb = 1) const {
+        auto kv_cfg                                  = kv_cache_config_;
+        kv_cfg.enable_memory_cache                   = true;
+        kv_cfg.enable_memory_cache_disk              = true;
+        kv_cfg.memory_cache_disk_paths               = joinPaths(paths);
+        kv_cfg.memory_cache_disk_size_mb             = disk_size_mb;
+        kv_cfg.memory_cache_disk_buffered_io         = true;
+        kv_cfg.memory_cache_disk_sync_timeout_ms     = 1000;
+        kv_cfg.enable_tiered_memory_cache            = false;
+        return kv_cfg;
+    }
+
+    std::shared_ptr<KVCacheMemoryConnector>
+    createConnectorWithKvConfig(const CacheConfig& cfg, const KVCacheConfig& kv_cfg) {
+        auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, allocator_, server_addrs_);
         EXPECT_TRUE(conn->init());
         return conn;
     }
@@ -2695,6 +2726,71 @@ TEST_F(KVCacheMemoryConnectorDualPoolTest, PoolSizing_JointCalculation) {
     EXPECT_GT(complete_total, 0u);
     EXPECT_GT(incomplete_total, 0u);
     EXPECT_NEAR(static_cast<double>(incomplete_total), static_cast<double>(complete_total) * 3.0, 3.0);
+}
+
+TEST_F(KVCacheMemoryConnectorDualPoolTest, InitDiskDualPools_MirrorsMemoryPoolRatioOnSameMount) {
+    DiskTempDir disk0;
+    auto cfg   = createHybridCacheConfig(/*layer_num=*/2, /*block_num=*/10, /*seq_size_per_block=*/8, /*linear_step=*/4);
+    allocator_ = std::make_shared<HybridTypeKVCacheAllocator>(cfg, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator_->init());
+
+    auto kv_cfg = makeDiskKvConfig({disk0.path()}, /*disk_size_mb=*/1);
+    auto conn   = createConnectorWithKvConfig(cfg, kv_cfg);
+    ASSERT_TRUE(conn->isDualPool());
+    ASSERT_NE(conn->complete_disk_pool_, nullptr);
+    ASSERT_NE(conn->incomplete_disk_pool_, nullptr);
+
+    EXPECT_NE(conn->complete_disk_pool_->filePath().find(disk0.path()), std::string::npos);
+    EXPECT_NE(conn->incomplete_disk_pool_->filePath().find(disk0.path()), std::string::npos);
+    EXPECT_NE(conn->complete_disk_pool_->filePath(), conn->incomplete_disk_pool_->filePath());
+    EXPECT_NE(conn->complete_disk_pool_->filePath().find("complete.kv"), std::string::npos);
+    EXPECT_NE(conn->incomplete_disk_pool_->filePath().find("incomplete.kv"), std::string::npos);
+
+    const auto complete_slots   = conn->complete_disk_pool_->totalSlots();
+    const auto incomplete_slots = conn->incomplete_disk_pool_->totalSlots();
+    EXPECT_GT(complete_slots, 0u);
+    EXPECT_EQ(incomplete_slots, complete_slots * 3);
+}
+
+TEST_F(KVCacheMemoryConnectorDualPoolTest, AllocateOneBackingUsesMatchingDiskPoolWhenMemoryKindIsFull) {
+    DiskTempDir disk0;
+    auto cfg   = createHybridCacheConfig(/*layer_num=*/2, /*block_num=*/10, /*seq_size_per_block=*/8, /*linear_step=*/4);
+    allocator_ = std::make_shared<HybridTypeKVCacheAllocator>(cfg, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator_->init());
+
+    auto kv_cfg = makeDiskKvConfig({disk0.path()}, /*disk_size_mb=*/1);
+    auto conn   = createConnectorWithKvConfig(cfg, kv_cfg);
+    ASSERT_TRUE(conn->isDualPool());
+    ASSERT_NE(conn->complete_pool_, nullptr);
+    ASSERT_NE(conn->incomplete_pool_, nullptr);
+    ASSERT_NE(conn->complete_disk_pool_, nullptr);
+    ASSERT_NE(conn->incomplete_disk_pool_, nullptr);
+
+    const auto held_complete =
+        conn->complete_pool_->malloc(static_cast<int>(conn->complete_pool_->freeBlocksNum()));
+    ASSERT_GT(held_complete.size(), 0u);
+    KVCacheMemoryConnector::CopyInfoPerKey complete_info;
+    complete_info.is_complete = true;
+    ASSERT_TRUE(conn->allocateOneBacking(complete_info));
+    EXPECT_EQ(complete_info.backing_type, CacheBackingType::DISK);
+    EXPECT_GE(complete_info.disk_slot, 0);
+    EXPECT_EQ(conn->complete_disk_pool_->freeSlots(), conn->complete_disk_pool_->totalSlots() - 1);
+    EXPECT_EQ(conn->incomplete_disk_pool_->freeSlots(), conn->incomplete_disk_pool_->totalSlots());
+    conn->releaseRequestBacking(complete_info);
+    conn->complete_pool_->requestFree(held_complete);
+
+    const auto held_incomplete =
+        conn->incomplete_pool_->malloc(static_cast<int>(conn->incomplete_pool_->freeBlocksNum()));
+    ASSERT_GT(held_incomplete.size(), 0u);
+    KVCacheMemoryConnector::CopyInfoPerKey incomplete_info;
+    incomplete_info.is_complete = false;
+    ASSERT_TRUE(conn->allocateOneBacking(incomplete_info));
+    EXPECT_EQ(incomplete_info.backing_type, CacheBackingType::DISK);
+    EXPECT_GE(incomplete_info.disk_slot, 0);
+    EXPECT_EQ(conn->complete_disk_pool_->freeSlots(), conn->complete_disk_pool_->totalSlots());
+    EXPECT_EQ(conn->incomplete_disk_pool_->freeSlots(), conn->incomplete_disk_pool_->totalSlots() - 1);
+    conn->releaseRequestBacking(incomplete_info);
+    conn->incomplete_pool_->requestFree(held_incomplete);
 }
 
 TEST_F(KVCacheMemoryConnectorDualPoolTest, BuildCopyPlanForWrite_SkipsIncompleteWhenIncompletePoolDisabled) {

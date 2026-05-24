@@ -10,17 +10,41 @@
 #include <string>
 #include <vector>
 
+#include "rtp_llm/cpp/cache/connector/memory/CacheBlockKind.h"
 #include "rtp_llm/cpp/cache/connector/memory/DiskBlockIO.h"
 
 namespace rtp_llm {
 
+class DiskMountGuard {
+public:
+    DiskMountGuard() = default;
+    ~DiskMountGuard();
+
+    bool               init(const std::string& mount_path);
+    const std::string& workDir() const;
+    const std::string& mountPath() const;
+    std::string        debugString() const;
+
+private:
+    bool initDirectoryAndLock();
+    bool cleanupStaleFiles();
+    void unlockAndClose();
+
+private:
+    std::string mount_path_;
+    std::string work_dir_;
+    std::string lock_path_;
+    int         lock_fd_{-1};
+};
+
 struct DiskBlockPoolConfig {
-    std::string mount_path;
+    std::string work_dir;
     int64_t     local_rank{0};
     int64_t     world_rank{0};
     size_t      disk_size_bytes{0};
     size_t      block_size_bytes{0};
     bool        buffered_io{true};
+    CacheBlockKind pool_kind{CacheBlockKind::COMPLETE};
 };
 
 class DiskBlockPool {
@@ -43,6 +67,7 @@ public:
     bool read(int32_t slot, void* dst, size_t bytes);
     bool write(int32_t slot, const void* src, size_t bytes);
 
+    bool               validSlot(int32_t slot) const;
     size_t             totalSlots() const;
     size_t             freeSlots() const;
     size_t             availableSlots() const;
@@ -61,20 +86,13 @@ private:
         uint32_t cache_ref{0};
     };
 
-    bool initDirectoryAndLock();
-    bool cleanupStaleFiles();
     bool initFile();
-    bool validSlot(int32_t slot) const;
     void tryFreeSlotLocked(int32_t slot);
-    void unlockAndClose();
 
 private:
     DiskBlockPoolConfig           config_;
     std::unique_ptr<IDiskBlockIO> io_;
-    std::string                   work_dir_;
-    std::string                   lock_path_;
     std::string                   file_path_;
-    int                           lock_fd_{-1};
     size_t                        slot_stride_bytes_{0};
     size_t                        slot_count_{0};
     mutable std::mutex            mutex_;
