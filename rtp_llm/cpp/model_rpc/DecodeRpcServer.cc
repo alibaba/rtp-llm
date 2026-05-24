@@ -296,11 +296,15 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
         sp_output_buffer->all_probs     = propose_probs_t.to(torch::kCUDA);
         sp_output_buffer->hidden_states = propose_hidden_t.to(torch::kCUDA);
 
-        auto propose_tokens_gpu = torch::empty({1}, cuda_i32);
-        auto accept_len         = torch::ones({1}, cuda_i32);
-        auto accept_tokens      = torch::zeros({1, static_cast<int64_t>(propose_step + 1)}, cuda_i32);
-        accept_tokens[0][0]     = sp_output_buffer->tokens[0][0];
-        propose_tokens_gpu[0]   = sp_output_buffer->tokens[0][1];
+        auto propose_tokens_gpu              = torch::empty({1}, cuda_i32);
+        auto target_token_gpu                = torch::empty({1}, cuda_i32);
+        auto accept_len                      = torch::ones({1}, cuda_i32);
+        auto accept_tokens                   = torch::zeros({1, static_cast<int64_t>(propose_step + 1)}, cuda_i32);
+        accept_tokens[0][0]                  = sp_output_buffer->tokens[0][0];
+        target_token_gpu[0]                  = sp_output_buffer->tokens[0][0];
+        propose_tokens_gpu[0]                = sp_output_buffer->tokens[0][1];
+        sp_output_buffer->target_token_gpu   = target_token_gpu;
+        sp_output_buffer->propose_tokens_gpu = propose_tokens_gpu;
 
         auto next_seq_len = torch::ones({1}, cuda_i32);
         next_seq_len[0]   = generate_stream->seqLength();

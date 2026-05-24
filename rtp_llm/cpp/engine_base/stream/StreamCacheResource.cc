@@ -186,6 +186,12 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
         memcpy(sp_output_buffer->tokens.data_ptr<int>(),
                payload->propose_tokens.data(),
                payload->propose_tokens.size() * sizeof(int));
+        const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+        auto       flat     = sp_output_buffer->tokens.reshape({-1});
+        if (flat.numel() >= 2) {
+            sp_output_buffer->target_token_gpu   = flat.narrow(0, 0, 1).to(cuda_i32);
+            sp_output_buffer->propose_tokens_gpu = flat.narrow(0, 1, 1).to(cuda_i32);
+        }
 
         stream->setSPOutputBuffer(sp_output_buffer);
         RTP_LLM_LOG_DEBUG("applyP2PSideChannel: propose_tokens count=%zu", payload->propose_tokens.size());

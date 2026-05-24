@@ -28,6 +28,7 @@
 #include <random>
 #include <string>
 #include <vector>
+#include <atomic>
 #include <ATen/cuda/CUDAContext.h>
 
 namespace rtp_llm {
@@ -51,6 +52,182 @@ bool debugTargetVerifyInputEnabled() {
         return on;
     }();
     return enabled;
+}
+
+bool debugCompareSpPrefillEnabled() {
+    static const bool enabled = []() {
+        const char* env = std::getenv("RTP_LLM_COMPARE_SP_PREFILL");
+        const bool  on  = env != nullptr && std::string(env) != "0";
+        if (on) {
+            RTP_LLM_LOG_WARNING("[debug-sp-prefill] enabled; this runs an extra eager draft-prefill forward");
+        }
+        return on;
+    }();
+    return enabled;
+}
+
+bool debugMtpPrefillDataEnabled() {
+    static const bool enabled = []() {
+        const char* env = std::getenv("RTP_LLM_DEBUG_MTP_PREFILL_DATA");
+        const bool  on  = env != nullptr && std::string(env) != "0";
+        if (on) {
+            RTP_LLM_LOG_WARNING("[debug-mtp-prefill-data] enabled; this records stage tensors for graph/eager diff");
+        }
+        return on;
+    }();
+    return enabled;
+}
+
+std::string debugTensorSummary(const torch::Tensor& tensor, int64_t limit = 8) {
+    if (!tensor.defined()) {
+        return "None";
+    }
+    std::ostringstream oss;
+    oss << "shape=[";
+    for (int64_t i = 0; i < tensor.dim(); ++i) {
+        if (i > 0) {
+            oss << ",";
+        }
+        oss << tensor.size(i);
+    }
+    oss << "] device=" << tensor.device() << " dtype=" << tensor.dtype() << " numel=" << tensor.numel();
+    if (tensor.numel() == 0) {
+        return oss.str();
+    }
+    try {
+        auto flat  = tensor.reshape({-1});
+        auto count = std::min<int64_t>(limit, flat.numel());
+        auto head  = flat.slice(0, 0, count);
+        if (head.device().is_cuda()) {
+            head = head.cpu();
+        }
+        oss << " head=" << head;
+    } catch (const std::exception& e) {
+        oss << " summary_error=" << e.what();
+    }
+    return oss.str();
+}
+
+std::string debugTensorDiffSummary(const torch::Tensor& lhs, const torch::Tensor& rhs) {
+    if (!lhs.defined() || !rhs.defined()) {
+        return std::string("lhs=") + (lhs.defined() ? "defined" : "None")
+               + " rhs=" + (rhs.defined() ? "defined" : "None");
+    }
+    if (lhs.sizes() != rhs.sizes()) {
+        std::ostringstream oss;
+        oss << "shape_mismatch lhs=" << debugTensorSummary(lhs, 0) << " rhs=" << debugTensorSummary(rhs, 0);
+        return oss.str();
+    }
+    if (lhs.numel() == 0) {
+        return "empty";
+    }
+    try {
+        auto  lhs_f          = lhs.to(torch::kFloat32);
+        auto  rhs_f          = rhs.to(torch::kFloat32);
+        auto  lhs_nan        = torch::isnan(lhs_f);
+        auto  rhs_nan        = torch::isnan(rhs_f);
+        auto  both_nan       = torch::logical_and(lhs_nan, rhs_nan);
+        auto  mismatch       = torch::logical_and(torch::ne(lhs_f, rhs_f), torch::logical_not(both_nan));
+        auto  finite         = torch::logical_and(torch::isfinite(lhs_f), torch::isfinite(rhs_f));
+        auto  finite_count   = finite.to(torch::kInt64).sum().item<int64_t>();
+        auto  mismatch_count = mismatch.to(torch::kInt64).sum().item<int64_t>();
+        auto  lhs_nan_count  = lhs_nan.to(torch::kInt64).sum().item<int64_t>();
+        auto  rhs_nan_count  = rhs_nan.to(torch::kInt64).sum().item<int64_t>();
+        float max_diff       = 0.0f;
+        float mean           = 0.0f;
+        if (finite_count > 0) {
+            auto diff = (lhs_f - rhs_f).abs().masked_select(finite);
+            max_diff  = diff.max().item<float>();
+            mean      = diff.mean().item<float>();
+        }
+        std::ostringstream oss;
+        oss << "max_abs=" << max_diff << " mean_abs=" << mean << " finite_count=" << finite_count
+            << " mismatch_count=" << mismatch_count << " lhs_nan=" << lhs_nan_count << " rhs_nan=" << rhs_nan_count;
+        return oss.str();
+    } catch (const std::exception& e) {
+        return std::string("diff_error=") + e.what();
+    }
+}
+
+torch::Tensor tryGetMtpDebugTensor(ModelBase* model, const std::string& name, int64_t num_rows) {
+    auto* py_model = dynamic_cast<PyWrappedModel*>(model);
+    if (py_model == nullptr) {
+        return torch::Tensor();
+    }
+    try {
+        return py_model->getPythonDebugTensor(name, num_rows);
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_WARNING("[debug-mtp-prefill-data] get %s failed: %s", name.c_str(), e.what());
+        return torch::Tensor();
+    }
+}
+
+torch::Tensor tryGetMtpDebugKvCache(ModelBase* model, int64_t layer_idx, int64_t max_blocks) {
+    auto* py_model = dynamic_cast<PyWrappedModel*>(model);
+    if (py_model == nullptr) {
+        return torch::Tensor();
+    }
+    try {
+        return py_model->getPythonDebugKvCache(layer_idx, max_blocks);
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_WARNING("[debug-mtp-prefill-data] get kv cache failed: %s", e.what());
+        return torch::Tensor();
+    }
+}
+
+void logMtpPrefillStageDiffs(ModelBase* graph_model, ModelBase* eager_model, int64_t num_rows) {
+    if (!debugMtpPrefillDataEnabled()) {
+        return;
+    }
+    static std::atomic<int> log_budget{8};
+    if (log_budget.fetch_sub(1, std::memory_order_relaxed) <= 0) {
+        return;
+    }
+    const char* names[] = {"input_ids",
+                           "input_hiddens",
+                           "input_lengths",
+                           "prefix_lengths",
+                           "cu_seqlens",
+                           "cu_kv_seqlens",
+                           "kv_cache_kernel_block_id_device",
+                           "kv_cache_kernel_block_id_group0",
+                           "kv_cache_block_id_device",
+                           "fc_hidden",
+                           "layer0_hidden",
+                           "layer0_residual",
+                           "pre_norm_hidden"};
+    for (const char* name : names) {
+        auto graph_tensor = tryGetMtpDebugTensor(graph_model, name, num_rows);
+        auto eager_tensor = tryGetMtpDebugTensor(eager_model, name, num_rows);
+        RTP_LLM_LOG_INFO("[debug-mtp-prefill-data] %s graph=%s eager=%s diff=%s",
+                         name,
+                         debugTensorSummary(graph_tensor, 4).c_str(),
+                         debugTensorSummary(eager_tensor, 4).c_str(),
+                         debugTensorDiffSummary(graph_tensor, eager_tensor).c_str());
+    }
+}
+
+std::string debugLogitsTopKSummary(const torch::Tensor& logits, int64_t k = 8) {
+    if (!logits.defined() || logits.numel() == 0 || logits.dim() != 2 || logits.size(0) == 0) {
+        return "None";
+    }
+    try {
+        auto row     = logits[0].to(torch::kFloat32);
+        auto topk    = row.topk(std::min<int64_t>(k, row.size(0)));
+        auto values  = std::get<0>(topk);
+        auto indices = std::get<1>(topk);
+        if (values.device().is_cuda()) {
+            values = values.cpu();
+        }
+        if (indices.device().is_cuda()) {
+            indices = indices.cpu();
+        }
+        std::ostringstream oss;
+        oss << "ids=" << indices << " values=" << values;
+        return oss.str();
+    } catch (const std::exception& e) {
+        return std::string("topk_error=") + e.what();
+    }
 }
 
 void holdSamplerInputHostBuffers(TensorHolder& holder, const SamplerInputs& inputs) {
@@ -301,6 +478,20 @@ makeFakeSPOutputBuffer(DataType data_type, size_t hidden_size, size_t vocab_size
     return sp_buffer;
 }
 
+static void ensureSpOutputTokenGpuMirrors(const SpeculativeExecutorStreamOutputPtr& sp_buffer) {
+    if (!sp_buffer || !sp_buffer->tokens.defined() || sp_buffer->tokens.numel() < 2) {
+        return;
+    }
+    const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    auto       flat     = sp_buffer->tokens.reshape({-1});
+    if (!sp_buffer->target_token_gpu.defined() || !sp_buffer->target_token_gpu.is_cuda()) {
+        sp_buffer->target_token_gpu = flat.narrow(0, 0, 1).to(cuda_i32);
+    }
+    if (!sp_buffer->propose_tokens_gpu.defined() || !sp_buffer->propose_tokens_gpu.is_cuda()) {
+        sp_buffer->propose_tokens_gpu = flat.narrow(0, 1, 1).to(cuda_i32);
+    }
+}
+
 GenerateStreamPtr MtpExecutor::createMinFakePrefillStream(int                    max_new_tokens,
                                                           const ModelConfig&     model_config,
                                                           const RuntimeConfig&   runtime_config,
@@ -497,8 +688,25 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
             if (enable_cuda_graph && !disable_sp_prefill_cuda_graph) {
                 RTP_LLM_LOG_INFO(
                     "[speculative decoding] creating separate prefill draft model with CUDA graph support");
+                py::object sp_prefill_py_model = params.py_sp_model;
+                {
+                    py::gil_scoped_acquire gil;
+                    if (py::hasattr(params.py_sp_model, "clone_for_cuda_graph")) {
+                        try {
+                            sp_prefill_py_model = params.py_sp_model.attr("clone_for_cuda_graph")();
+                            RTP_LLM_LOG_INFO(
+                                "[speculative decoding] cloned py_sp_model for sp_prefill CUDA graph runtime state");
+                        } catch (const py::error_already_set& e) {
+                            RTP_LLM_LOG_ERROR("[speculative decoding] clone_for_cuda_graph failed:\n%s", e.what());
+                            throw;
+                        }
+                    } else {
+                        RTP_LLM_LOG_WARNING(
+                            "[speculative decoding] py_sp_model has no clone_for_cuda_graph(); sp_prefill CUDA graph will share Python runtime state with eager draft model");
+                    }
+                }
                 sp_prefill_draft_model_.reset(new PyWrappedModel(
-                    model_params, params.py_sp_model, true, false, draft_cache_layer_layout.layer_to_groups));
+                    model_params, sp_prefill_py_model, true, false, draft_cache_layer_layout.layer_to_groups));
             }
         }
         break;  // NOTE: only support one mtp model now
@@ -985,7 +1193,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     }
 
     maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_);
-    broadcastPostRejectionInputs(model_input);
+    broadcastPostRejectionInputs(model_input, stream_groups);
 
     draft_prefill_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
 
@@ -1311,7 +1519,7 @@ void MtpExecutor::debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& mod
                             "linear cache NULL at kernel read position — see [debug-target-verify] log lines above");
 }
 
-void MtpExecutor::broadcastPostRejectionInputs(GptModelInputs& model_input) {
+void MtpExecutor::broadcastPostRejectionInputs(GptModelInputs& model_input, const StreamGroups& stream_groups) {
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(tp_sync_post_rejection)");
     const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
     // Broadcast only fields updated after rejection sampling. They are all
@@ -1321,6 +1529,22 @@ void MtpExecutor::broadcastPostRejectionInputs(GptModelInputs& model_input) {
         execBroadcast({{model_input.combo_tokens}, 0});
         execBroadcast({{model_input.last_hidden_states}, 0});
         execBroadcast({{model_input.lm_output_indexes}, 0});
+    }
+    if (model_input.combo_tokens.defined() && model_input.lm_output_indexes.defined()) {
+        const auto all_streams = stream_groups.allStreams();
+        if (!all_streams.empty()) {
+            auto target_token_gpu =
+                model_input.combo_tokens.index_select(/*dim=*/0, model_input.lm_output_indexes.to(torch::kLong))
+                    .to(torch::kInt32);
+            int64_t batch_idx = 0;
+            for (const auto& stream : all_streams) {
+                auto sp_output_buffer = stream->getSPOutputBuffer();
+                if (sp_output_buffer) {
+                    sp_output_buffer->target_token_gpu = target_token_gpu.narrow(0, batch_idx, 1);
+                }
+                ++batch_idx;
+            }
+        }
     }
     model_input.kv_block_stride_bytes   = mtp_cache_cfg.kv_block_stride_bytes;
     model_input.kv_scale_stride_bytes   = mtp_cache_cfg.kv_scale_stride_bytes;
@@ -1336,6 +1560,54 @@ GptModelOutputs MtpExecutor::runDraftPrefillForward(GptModelInputs& model_input)
     if (sp_prefill_draft_model_) {
         draft_prefill_model_output = sp_prefill_draft_model_->forward(model_input);
         maybeOverrideLastHiddenWithMtpBuffer(draft_prefill_model_output, *sp_prefill_draft_model_);
+        if (debugCompareSpPrefillEnabled()) {
+            auto clone_if_defined = [](const torch::Tensor& t) { return t.defined() ? t.clone() : torch::Tensor(); };
+            auto graph_logits_snapshot     = clone_if_defined(draft_prefill_model_output.logits);
+            auto graph_hidden_snapshot     = clone_if_defined(draft_prefill_model_output.hidden_states);
+            auto graph_all_hidden_snapshot = clone_if_defined(draft_prefill_model_output.all_hidden_states);
+            auto graph_kv_snapshot         = debugMtpPrefillDataEnabled() ?
+                                                 tryGetMtpDebugKvCache(sp_prefill_draft_model_.get(), 0, 8) :
+                                                 torch::Tensor();
+            RTP_LLM_LOG_INFO(
+                "[debug-sp-prefill] input combo=%s input_lengths=%s prefix_lengths=%s lm_output_indexes=%s "
+                "last_hidden=%s kv_kernel=%s kv_block=%s",
+                debugTensorSummary(model_input.combo_tokens).c_str(),
+                debugTensorSummary(model_input.input_lengths).c_str(),
+                debugTensorSummary(model_input.prefix_lengths).c_str(),
+                debugTensorSummary(model_input.lm_output_indexes).c_str(),
+                debugTensorSummary(model_input.last_hidden_states).c_str(),
+                debugTensorSummary(model_input.kv_cache_kernel_block_id).c_str(),
+                debugTensorSummary(model_input.kv_cache_block_id).c_str());
+            auto eager_output = draft_model_->forward(model_input);
+            maybeOverrideLastHiddenWithMtpBuffer(eager_output, *draft_model_);
+            auto eager_kv_snapshot =
+                debugMtpPrefillDataEnabled() ? tryGetMtpDebugKvCache(draft_model_.get(), 0, 8) : torch::Tensor();
+            logMtpPrefillStageDiffs(sp_prefill_draft_model_.get(),
+                                    draft_model_.get(),
+                                    model_input.combo_tokens.defined() ? model_input.combo_tokens.size(0) : -1);
+            if (debugMtpPrefillDataEnabled()) {
+                RTP_LLM_LOG_INFO("[debug-mtp-prefill-data] layer0_kv_cache graph=%s eager=%s diff=%s",
+                                 debugTensorSummary(graph_kv_snapshot, 0).c_str(),
+                                 debugTensorSummary(eager_kv_snapshot, 0).c_str(),
+                                 debugTensorDiffSummary(graph_kv_snapshot, eager_kv_snapshot).c_str());
+            }
+            RTP_LLM_LOG_INFO("[debug-sp-prefill] graph logits=%s topk=%s",
+                             debugTensorSummary(draft_prefill_model_output.logits).c_str(),
+                             debugLogitsTopKSummary(draft_prefill_model_output.logits).c_str());
+            RTP_LLM_LOG_INFO("[debug-sp-prefill] eager logits=%s topk=%s",
+                             debugTensorSummary(eager_output.logits).c_str(),
+                             debugLogitsTopKSummary(eager_output.logits).c_str());
+            RTP_LLM_LOG_INFO("[debug-sp-prefill] logits_diff=%s hidden_diff=%s all_hidden_diff=%s",
+                             debugTensorDiffSummary(graph_logits_snapshot, eager_output.logits).c_str(),
+                             debugTensorDiffSummary(graph_hidden_snapshot, eager_output.hidden_states).c_str(),
+                             debugTensorDiffSummary(graph_all_hidden_snapshot, eager_output.all_hidden_states).c_str());
+            RTP_LLM_LOG_INFO(
+                "[debug-sp-prefill] graph_output_mutation logits=%s hidden=%s all_hidden=%s",
+                debugTensorDiffSummary(draft_prefill_model_output.logits, graph_logits_snapshot).c_str(),
+                debugTensorDiffSummary(draft_prefill_model_output.hidden_states, graph_hidden_snapshot).c_str(),
+                debugTensorDiffSummary(draft_prefill_model_output.all_hidden_states, graph_all_hidden_snapshot)
+                    .c_str());
+        }
     } else {
         draft_prefill_model_output = draft_model_->forward(model_input);
         maybeOverrideLastHiddenWithMtpBuffer(draft_prefill_model_output, *draft_model_);
@@ -1442,6 +1714,7 @@ void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
         // set propose_step
         auto sp_output_buffer          = stream->getSPOutputBuffer();
         sp_output_buffer->propose_step = propose_step_;
+        ensureSpOutputTokenGpuMirrors(sp_output_buffer);
     }
 }
 
@@ -1572,6 +1845,25 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
             // only needs to be device-resident and shape-correct.
             pre_target_token_t =
                 torch::empty({(int64_t)batch_size}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+        }
+    }
+
+    if (!pre_target_token_t.defined()) {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.draft_model_decode(pre_target_sp_buffer_gather)");
+        std::vector<torch::Tensor> pre_target_slices_gpu;
+        pre_target_slices_gpu.reserve(batch_size);
+        bool all_sp_buffer_gpu = !all_streams.empty();
+        for (const auto& stream : all_streams) {
+            auto sp_output_buffer = stream->getSPOutputBuffer();
+            if (!sp_output_buffer || !sp_output_buffer->target_token_gpu.defined()
+                || !sp_output_buffer->target_token_gpu.is_cuda()) {
+                all_sp_buffer_gpu = false;
+                break;
+            }
+            pre_target_slices_gpu.push_back(sp_output_buffer->target_token_gpu.reshape({-1}));
+        }
+        if (all_sp_buffer_gpu && pre_target_slices_gpu.size() == batch_size && !pre_target_slices_gpu.empty()) {
+            pre_target_token_t = torch::cat(pre_target_slices_gpu, 0).to(torch::kInt32);
         }
     }
 
@@ -1759,6 +2051,17 @@ void MtpExecutor::publishSyncMtpDeviceState(const StreamGroups&                 
         torch::Tensor accept_tokens_slice = accept_tokens_all.narrow(0, idx, 1);
         torch::Tensor propose_tokens_slice =
             propose_tokens_all.defined() ? propose_tokens_all.narrow(0, idx, 1) : torch::Tensor();
+        torch::Tensor target_token_slice;
+        if (accept_tokens_slice.defined() && accept_len_slice.defined()) {
+            auto target_idx    = (accept_len_slice - 1).to(torch::kLong);
+            target_token_slice = accept_tokens_slice.squeeze(0).index_select(/*dim=*/0, target_idx).to(torch::kInt32);
+        }
+
+        auto sp_output_buffer = stream->getSPOutputBuffer();
+        if (sp_output_buffer) {
+            sp_output_buffer->target_token_gpu   = target_token_slice;
+            sp_output_buffer->propose_tokens_gpu = propose_tokens_slice;
+        }
 
         // Synchronous dispatch has already run GenerateStream::specUpdate, so
         // host seqLength is the authoritative committed length for this stream.
@@ -1832,6 +2135,19 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
             accept_tokens_gpu_all.defined() ? accept_tokens_gpu_all.narrow(0, idx, 1) : torch::Tensor();
         torch::Tensor propose_tokens_slice =
             propose_tokens_gpu_all.defined() ? propose_tokens_gpu_all.narrow(0, idx, 1) : torch::Tensor();
+        torch::Tensor target_token_slice;
+        if (accept_tokens_slice.defined() && accept_len_slice.defined()) {
+            auto target_idx    = (accept_len_slice - 1).to(torch::kLong);
+            target_token_slice = accept_tokens_slice.squeeze(0).index_select(/*dim=*/0, target_idx).to(torch::kInt32);
+        }
+
+        auto sp_output_buffer = stream->getSPOutputBuffer();
+        if (sp_output_buffer) {
+            // Publish GPU mirrors before the bookkeeping worker launches. The
+            // next decode step can then stay on device even with DROP_BROAD_SYNC.
+            sp_output_buffer->target_token_gpu   = target_token_slice;
+            sp_output_buffer->propose_tokens_gpu = propose_tokens_slice;
+        }
 
         torch::Tensor next_seq_len_gpu;
         if (accept_len_slice.defined()) {

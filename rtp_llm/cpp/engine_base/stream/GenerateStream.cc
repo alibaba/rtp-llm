@@ -800,6 +800,7 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     // PDFUSION path provides this; PD-disaggregate path leaves it undefined and
     // readers fall back to the CPU `tokens` tensor.
     sp_output_buffer_->propose_tokens_gpu = update_info.draft_token_gpu;
+    sp_output_buffer_->target_token_gpu   = update_info.target_token_gpu;
 
     // for spec-decode linear attention, we need to adjust cache blocks
     int nxt_cached_len   = seqLength() - 1;

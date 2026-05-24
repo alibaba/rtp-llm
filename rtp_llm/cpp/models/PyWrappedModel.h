@@ -59,6 +59,8 @@ public:
     void            releaseBuffers() override;
     torch::Tensor   getMtpTargetHiddenStates(int64_t num_tokens) override;
     torch::Tensor   getMtpLastHiddenStates(int64_t num_tokens) override;
+    torch::Tensor   getPythonDebugTensor(const std::string& name, int64_t num_rows);
+    torch::Tensor   getPythonDebugKvCache(int64_t layer_idx, int64_t max_blocks);
     void            prepareAttentionInputs(const GptModelInputs& inputs) override;
     void            prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
     void            updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
@@ -212,8 +214,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
 
         init_resources.kv_cache = kv_cache;
     }
-    init_resources.is_speculative = (params.sp_config.type != SP_TYPE_NONE);
-    init_resources.is_decode_role = (params.parallelism_config.role_type == RoleType::DECODE);
+    init_resources.is_speculative         = (params.sp_config.type != SP_TYPE_NONE);
+    init_resources.is_decode_role         = (params.parallelism_config.role_type == RoleType::DECODE);
     init_resources.max_context_batch_size = params.runtime_config.fifo_scheduler_config.max_context_batch_size;
 
     py::object py_init_result;
@@ -290,11 +292,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         // decodeWarmUp path defaults use_spec_decoding=false but still sees
         // sp_config enabled, so infer the flag from config instead of
         // relying solely on the constructor arg.
-        const bool is_target_verify_decode =
-            params.sp_config.type != SP_TYPE_NONE
-            && params.sp_config.gen_num_per_cycle > 0
-            && !params.model_id
-            && !is_prefill_cuda_graph_mode;
+        const bool is_target_verify_decode = params.sp_config.type != SP_TYPE_NONE
+                                             && params.sp_config.gen_num_per_cycle > 0 && !params.model_id
+                                             && !is_prefill_cuda_graph_mode;
         graph_params.is_target_verify = use_spec_decoding || is_target_verify_decode;
         if (params.sp_config.type != SP_TYPE_NONE) {
             graph_params.sp_steps = params.sp_config.gen_num_per_cycle;

@@ -18,7 +18,8 @@ torch::Tensor cloneHiddenSlice(const torch::Tensor& hidden_states, int64_t start
     if (!hidden_states.defined() || length <= 0) {
         return torch::Tensor();
     }
-    RTP_LLM_CHECK_WITH_INFO(hidden_states.dim() == 2, "MTP hidden states must be 2-D, got dim=%ld", hidden_states.dim());
+    RTP_LLM_CHECK_WITH_INFO(
+        hidden_states.dim() == 2, "MTP hidden states must be 2-D, got dim=%ld", hidden_states.dim());
     RTP_LLM_CHECK_WITH_INFO(start >= 0 && start + length <= hidden_states.size(0),
                             "MTP hidden slice out of range: start=%ld, length=%ld, rows=%ld",
                             start,
@@ -126,6 +127,9 @@ torch::Tensor pickOneStepTargetLastToken(const GenerateStreamPtr& stream) {
     if (!sp_output_buffer) {
         return torch::Tensor();
     }
+    if (sp_output_buffer->target_token_gpu.defined() && sp_output_buffer->target_token_gpu.is_cuda()) {
+        return lastColumnAsFlat(sp_output_buffer->target_token_gpu);
+    }
     return columnAsFlat(sp_output_buffer->tokens, 0);
 }
 
@@ -210,8 +214,14 @@ bool collectMtpStateProposeSlices(const std::list<GenerateStreamPtr>& streams,
     for (const auto& stream : streams) {
         torch::Tensor gpu_t = stream->getProposeTokensGpu();
         if (!gpu_t.defined() || !gpu_t.is_cuda()) {
-            logMtpStateFallback(stream, "propose_tokens_gpu_missing");
-            return false;
+            auto sp_output_buffer = stream->getSPOutputBuffer();
+            if (sp_output_buffer && sp_output_buffer->propose_tokens_gpu.defined()
+                && sp_output_buffer->propose_tokens_gpu.is_cuda()) {
+                gpu_t = sp_output_buffer->propose_tokens_gpu;
+            } else {
+                logMtpStateFallback(stream, "propose_tokens_gpu_missing");
+                return false;
+            }
         }
         propose_slices.push_back(lastColumnAsFlat(gpu_t));
         if (next_seq_lengths) {
@@ -255,10 +265,7 @@ bool legacyGpuProposePathEnabled(size_t batch_size) {
 absl::Status MtpBatchStreamProcessor::dispatchPrefill(const StreamGroups& stream_groups,
                                                       const MergedOutput& prefill_output,
                                                       const MergedOutput& propose_output) const {
-    return dispatchPrefill(stream_groups,
-                           prefill_output,
-                           propose_output,
-                           torch::Tensor());
+    return dispatchPrefill(stream_groups, prefill_output, propose_output, torch::Tensor());
 }
 
 absl::Status MtpBatchStreamProcessor::dispatchPrefill(const StreamGroups&  stream_groups,
@@ -271,12 +278,8 @@ absl::Status MtpBatchStreamProcessor::dispatchPrefill(const StreamGroups&  strea
     auto                              new_tokens_all = torch::empty({(int64_t)total_batch_size_out, 1}, torch::kInt32);
     std::vector<StreamSpecUpdateInfo> spec_update_infos;
 
-    preparePrefillSpecUpdateInfo(stream_groups,
-                                 prefill_output,
-                                 propose_output,
-                                 draft_last_hidden_states,
-                                 new_tokens_all,
-                                 spec_update_infos);
+    preparePrefillSpecUpdateInfo(
+        stream_groups, prefill_output, propose_output, draft_last_hidden_states, new_tokens_all, spec_update_infos);
 
     // we set propose token in extra loop to avoid cuda sync
     updateProposeTokens(stream_groups, propose_output, spec_update_infos);
@@ -845,8 +848,20 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
 
         torch::Tensor accept_tokens_tensor =
             accept_tokens.narrow(0, batch_idx_out, next_batch_size).narrow(1, 0, cur_accept_len).contiguous();
-        spec_update_infos.push_back(
-            {accept_tokens_tensor, cur_accept_len, -1, std::move(last_hidden_states), std::move(propose_all_probs)});
+        torch::Tensor target_token_gpu;
+        if (spec_decode_output.accept_tokens.defined() && spec_decode_output.accept_tokens.is_cuda()) {
+            target_token_gpu = spec_decode_output.accept_tokens.narrow(0, batch_idx_out, next_batch_size)
+                                   .narrow(1, cur_accept_len - 1, 1)
+                                   .reshape({static_cast<int64_t>(next_batch_size)})
+                                   .to(torch::kInt32);
+        }
+        spec_update_infos.push_back({accept_tokens_tensor,
+                                     cur_accept_len,
+                                     -1,
+                                     std::move(last_hidden_states),
+                                     std::move(propose_all_probs),
+                                     torch::Tensor(),
+                                     std::move(target_token_gpu)});
 
         token_offset += propose_step_ + 1;
         batch_idx_in += cur_batch_size;

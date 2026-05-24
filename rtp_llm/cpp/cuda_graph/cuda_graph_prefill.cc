@@ -13,10 +13,16 @@ void CudaGraphRunner::capturePrefill() {
         int seq_len = capture_range_[i];
         RTP_LLM_LOG_INFO("capture range for seq len: %d", seq_len);
         PyModelInputs inputs;
+        const bool    draft_prefill_graph_mode    = is_prefill_cuda_graph_mode_ && num_tokens_per_bs_ != max_seq_len_;
+        const bool    draft_prefill_full_capacity = draft_prefill_graph_mode && hc_mult_ > 1;
+        const int     active_bs = draft_prefill_graph_mode ? (seq_len + num_tokens_per_bs_ - 1) / num_tokens_per_bs_ :
+                                                             static_cast<int>(max_bs_);
+        const int     capture_batch_size =
+            (draft_prefill_graph_mode && !draft_prefill_full_capacity) ? active_bs : static_cast<int>(max_bs_);
         // for attention, it always run the max_bs, so when we run `forward`, the real batch size is not sure
         // we will transfer a `batch size tensor(int)` for `copy kernel`.
         // Prepare common inputs using shared function
-        prepareCaptureInputs(inputs, max_bs_, seq_len);
+        prepareCaptureInputs(inputs, capture_batch_size, seq_len);
         // Prefill-specific settings, one the first seq is valid, the post ones are all empty
         if (is_prefill_cuda_graph_mode_ && num_tokens_per_bs_ == max_seq_len_) {
             // embedding model, without kv cache
@@ -29,7 +35,8 @@ void CudaGraphRunner::capturePrefill() {
             inputs.attention_inputs.input_lengths[0] = seq_len;
         } else {
             // Draft model prefill: distribute seq_len tokens across batches (max num_tokens_per_bs_ each).
-            // All max_bs_ batches get the largest legal prefix to ensure buffer allocation covers worst-case replay.
+            // GLM5/flat MTP captures only active batches for each seq_len graph so FlashInfer MLA prefill
+            // sees the same effective batch shape as eager. DSv4 full-capacity capture still uses max_bs_.
             int active_bs  = (seq_len + num_tokens_per_bs_ - 1) / num_tokens_per_bs_;
             int prefix_len = max_seq_len_ > num_tokens_per_bs_ ? max_seq_len_ - num_tokens_per_bs_ : 0;
 
@@ -51,7 +58,7 @@ void CudaGraphRunner::capturePrefill() {
 
             cu_seqlens_host[0]    = 0;
             cu_kv_seqlens_host[0] = 0;
-            for (int b = 0; b < max_bs_; b++) {
+            for (int b = 0; b < capture_batch_size; b++) {
                 cu_seqlens_host[b + 1] = cu_seqlens_host[b].item<int>() + input_lengths[b].item<int>();
                 cu_kv_seqlens_host[b + 1] =
                     cu_kv_seqlens_host[b].item<int>() + input_lengths[b].item<int>() + prefix_lengths[b].item<int>();
@@ -70,10 +77,8 @@ void CudaGraphRunner::capturePrefill() {
             inputs.bert_embedding_inputs.combo_tokens_type_ids =
                 inputs.bert_embedding_inputs.combo_tokens_type_ids.slice(0, 0, seq_len);
         }
-        const bool draft_prefill_graph_mode    = is_prefill_cuda_graph_mode_ && num_tokens_per_bs_ != max_seq_len_;
-        const bool draft_prefill_full_capacity = draft_prefill_graph_mode && hc_mult_ > 1;
-        const int  capture_tokens_count        = draft_prefill_full_capacity ? max_bs_ * num_tokens_per_bs_ : seq_len;
-        graph_instances_[seq_len].mem_hold_    = createCaptureMemoryHold(inputs, capture_tokens_count);
+        const int capture_tokens_count      = draft_prefill_full_capacity ? max_bs_ * num_tokens_per_bs_ : seq_len;
+        graph_instances_[seq_len].mem_hold_ = createCaptureMemoryHold(inputs, capture_tokens_count);
         graph_instances_[seq_len].mem_hold_.attn_pyobj_ =
             py_attn_pyobj_method_(graph_instances_[seq_len].mem_hold_.py_model_inputs_, true);
         // DSv4 MTP full-capacity capture returns [max_bs*num_tokens_per_bs, dim].

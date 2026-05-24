@@ -383,7 +383,7 @@ class MlaFlashInferPrefillOp(object):
             w = self.weights[layer_id].get(W.mla_kv_b_w)
             s = self.weights[layer_id].get(W.mla_kv_b_s)
             logging.error(
-                f"[MLA-PREFILL-DEBUG] kv_b_proj output mismatch: "
+                f"[MLA-PREFILL] kv_b_proj output mismatch: "
                 f"kv={list(kv.shape)} expected_out={expected_out} "
                 f"num_heads={self.num_heads} nope={self.qk_nope_head_dim} "
                 f"v_dim={self.v_head_dim} w_shape={list(w.shape) if w is not None else None} "
@@ -641,6 +641,70 @@ class MlaFlashInferDecodeOp(object):
         self._fp8_prefill_q_lens_h = q_lens_h
         self._fp8_prefill_max_q_len = max_q_len
         self._fp8_prefill_total_q = total_q
+
+    def plan_prefill_cuda_graph(self, fmha_params: Any) -> bool:
+        if not self._fp8_kv or self._fp8_prefill_indices is None:
+            self.plan(fmha_params)
+            return True
+
+        block_table = self._build_block_table(fmha_params)
+        B = int(fmha_params.kvlen_h.size(0))
+        if B == 0:
+            return True
+
+        qo_indptr_h = fmha_params.qo_indptr_h[: B + 1].to(
+            dtype=torch.int32, device="cpu"
+        )
+        kvlen_h = fmha_params.kvlen_h[:B].to(dtype=torch.int32, device="cpu")
+        q_lens_h = qo_indptr_h[1:] - qo_indptr_h[:B]
+        max_q_len = int(q_lens_h.max().item())
+        max_kv_len = int(kvlen_h.max().item())
+        if max_q_len <= 0 or max_kv_len <= 0:
+            return True
+
+        if (
+            B > self._fp8_prefill_indices.shape[0]
+            or max_q_len > self._fp8_prefill_indices.shape[1]
+            or max_kv_len > self._fp8_prefill_indices.shape[2]
+        ):
+            raise ValueError(
+                "FP8 MLA prefill CUDA graph replay exceeds captured absorb plan: "
+                f"B={B}/{self._fp8_prefill_indices.shape[0]}, "
+                f"max_q_len={max_q_len}/{self._fp8_prefill_indices.shape[1]}, "
+                f"max_kv_len={max_kv_len}/{self._fp8_prefill_indices.shape[2]}"
+            )
+
+        if self._fp8_prefill_sched_meta is None:
+            self._fp8_prefill_sched_meta, _ = get_mla_metadata()
+        self._fp8_prefill_sched_meta.tile_scheduler_metadata = None
+        self._fp8_prefill_sched_meta.num_splits = None
+
+        indices = self._fp8_prefill_indices[:B, :max_q_len]
+        indices.fill_(-1)
+        self._fp8_prefill_topk_length[:B].copy_(
+            kvlen_h.to(dtype=torch.int32, device=block_table.device)
+        )
+
+        for i in range(B):
+            q_len = int(q_lens_h[i].item())
+            kv_len = int(kvlen_h[i].item())
+            if q_len <= 0 or kv_len <= 0:
+                continue
+            prefix_len = max(0, kv_len - q_len)
+            positions = torch.arange(
+                kv_len, dtype=torch.long, device=block_table.device
+            )
+            block_ids = positions // self.token_per_block
+            offsets = (positions % self.token_per_block).to(torch.int32)
+            dense_indices = (
+                block_table[i, block_ids].to(torch.int32) * self.token_per_block
+                + offsets
+            )
+            for q_pos in range(q_len):
+                causal_len = min(prefix_len + q_pos + 1, kv_len)
+                indices[i, q_pos, :causal_len].copy_(dense_indices[:causal_len])
+
+        return True
 
     def plan_cuda_graph(self, attn_inputs: PyAttentionInputs) -> bool:
         if not self._fp8_kv:
