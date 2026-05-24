@@ -50,6 +50,15 @@ void forceTokenInBitmask(int32_t* bitmask, size_t words, int64_t token_id) {
     bitmask[token_id / 32] |= (1u << (token_id % 32));
 }
 
+void clearBitmaskTokenRange(int32_t* bitmask, size_t words, int64_t begin_token, int64_t end_token) {
+    if (begin_token < 0 || end_token <= begin_token) {
+        return;
+    }
+    for (int64_t token_id = begin_token; token_id < end_token; ++token_id) {
+        clearTokenFromBitmask(bitmask, words, token_id);
+    }
+}
+
 }  // namespace
 
 GrammarLogitsProcessor::GrammarLogitsProcessor(std::shared_ptr<RtpGrammarMatcher> matcher,
@@ -226,45 +235,9 @@ void GrammarLogitsProcessor::processSpeculative(const SamplerInputs&        inpu
         process(inputs, start_idx, finish_idx);
         return;
     }
-    if (!matcher_) {
-        return;
-    }
-    if (finish_idx - start_idx != 1) {
-        reportErrorOnce(
-            ErrorCode::INVALID_PARAMS, "grammar speculative logits processor only supports single row masking", false);
-        return;
-    }
-    if (inputs.finished_mask.defined()) {
-        const auto* finished = reinterpret_cast<const bool*>(inputs.finished_mask.data_ptr());
-        if (finished[start_idx]) {
-            return;
-        }
-    }
-
-    auto            logits = inputs.logits.narrow(0, start_idx, 1);
-    DeviceMaskState state;
-    int             accepted_prefix = 0;
-    {
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        if (matcher_->finished()) {
-            return;
-        }
-        for (const int32_t token_id : draft_prefix) {
-            if (!matcher_->acceptToken(token_id)) {
-                matcher_->rollback(accepted_prefix);
-                state.mode = DeviceMaskMode::TERMINATED;
-                applyDeviceMaskState(logits[0], state);
-                return;
-            }
-            ++accepted_prefix;
-            if (matcher_->isTerminated()) {
-                break;
-            }
-        }
-        state = buildDeviceMaskStateLocked(logits.device());
-        matcher_->rollback(accepted_prefix);
-    }
-    applyDeviceMaskState(logits[0], state);
+    reportErrorOnce(ErrorCode::INVALID_PARAMS,
+                    "grammar speculative path requires precomputed MTP verify bitmask",
+                    false);
 }
 
 bool GrammarLogitsProcessor::isSpecVerifyEligible() const {
@@ -299,7 +272,10 @@ int GrammarLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsProcessorReq
         if (!matcher_->fillBitmask(&dl, 0) && matcher_->isPassthroughForMask()) {
             std::fill_n(row, W, SpecLogitsProcessor::kBitmaskAllowAll);
             clearTokenFromBitmask(row, W, eos_token_id_);
+            return;
         }
+        const int32_t grammar_vocab_size = matcher_->vocabSize();
+        clearBitmaskTokenRange(row, W, grammar_vocab_size, static_cast<int64_t>(request.vocab_size));
     };
 
     for (int offset = 0; offset <= P; ++offset) {
@@ -375,7 +351,7 @@ void GrammarLogitsProcessor::updateStatus(const torch::Tensor& new_tokens, int32
         }
         ++accepted_token_len_;
         if (matcher_->isTerminated()) {
-            break;
+            continue;
         }
     }
 

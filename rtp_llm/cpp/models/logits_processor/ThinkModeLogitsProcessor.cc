@@ -362,6 +362,18 @@ bool ThinkModeLogitsProcessor::isSpecVerifyEligible() const {
     return snapshot && snapshot->eligible;
 }
 
+bool ThinkModeLogitsProcessor::isStateful() const {
+    return isSpecVerifyEligible();
+}
+
+int64_t ThinkModeLogitsProcessor::acceptedTokenLen() const {
+    auto snapshot = std::atomic_load_explicit(&spec_snapshot_, std::memory_order_acquire);
+    if (!snapshot || !snapshot->eligible) {
+        return 0;
+    }
+    return snapshot->info.current_output_length;
+}
+
 int ThinkModeLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) {
     auto snapshot = std::atomic_load_explicit(&spec_snapshot_, std::memory_order_acquire);
     if (!snapshot || !snapshot->eligible || request.propose_step <= 0 || request.bitmask_cpu_out == nullptr) {

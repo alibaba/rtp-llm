@@ -39,6 +39,12 @@ public:
         torch::Tensor                 spec_cap_gpu;  // [B] int32 CUDA
         std::shared_ptr<torch::Event> ready_event;
         bool                          has_active_processor = false;
+
+        // Keep H2D sources alive until ready_event has completed. The runner
+        // reuses scratch buffers across decode rounds, while these tensors own
+        // the actual async transfer source for this result.
+        torch::Tensor spec_vocab_mask_cpu_owner;
+        torch::Tensor spec_cap_cpu_owner;
     };
 
     SpecLogitsVerifyRunner();
@@ -48,17 +54,17 @@ public:
 private:
     void ensureBuffersFit(size_t total_streams, int propose_step, size_t vocab_size, size_t bitmask_words);
     void materializeDraftTokensToCpu(const LaunchTask& task);
-    void unpackMergedBitmaskToVocabMask(size_t rows, size_t vocab_size, size_t bitmask_words);
+    void unpackMergedBitmaskToVocabMask(const torch::Tensor& mask_cpu,
+                                        size_t               rows,
+                                        size_t               vocab_size,
+                                        size_t               bitmask_words);
 
 private:
     torch::Stream copy_stream_;
     torch::Tensor draft_tokens_cpu_;
     torch::Tensor processor_bitmask_cpu_;
     torch::Tensor merged_bitmask_cpu_;
-    torch::Tensor spec_vocab_mask_cpu_;
-    torch::Tensor spec_vocab_mask_gpu_;
     torch::Tensor spec_cap_cpu_;
-    torch::Tensor spec_cap_gpu_;
 };
 
 }  // namespace rtp_llm

@@ -91,6 +91,8 @@ public:
     void updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) override;
     bool isSpecVerifyEligible() const override;
     int  tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) override;
+    bool isStateful() const override;
+    int64_t acceptedTokenLen() const override;
 
 private:
     bool forceThinkEndToken(const torch::Tensor& new_tokens_logits, StreamThinkInfo& info, size_t vocab_size);
