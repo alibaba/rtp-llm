@@ -611,8 +611,7 @@ absl::Status NormalExecutor::dispatchOutputAsync(const StreamGroups&           s
                              stream_groups_copy  = std::move(stream_groups_copy),
                              model_output_copy   = std::move(model_output_copy),
                              sampler_output_copy = std::move(sampler_output_copy),
-                             sampler_event,
-                             profile_step_finish = std::move(profile_step_finish)]() mutable {
+                             sampler_event]() mutable {
         RTP_LLM_PROFILE_SCOPE("executor.dispatch_output_worker");
 
         auto worker_streams = stream_groups_copy.allStreams();
@@ -636,11 +635,14 @@ absl::Status NormalExecutor::dispatchOutputAsync(const StreamGroups&           s
         if (!status.ok()) {
             RTP_LLM_LOG_ERROR("[normal-stream-async] dispatch (worker) failed: %s", status.ToString().c_str());
         }
-        if (profile_step_finish) {
-            profile_step_finish();
-        }
         // dec_guard destructs here, dec'ing each stream's pending count.
     });
+
+    // Kineto requires profiler enable/disable on the same thread. Keep finish
+    // on the engine loop thread even when output dispatch runs asynchronously.
+    if (profile_step_finish) {
+        profile_step_finish();
+    }
 
     return absl::OkStatus();
 }
