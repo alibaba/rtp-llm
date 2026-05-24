@@ -281,8 +281,16 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
 
     const size_t graph_idx =
         is_prefill_cuda_graph_mode_ ? state.current_real_graph_seq_len : state.current_real_graph_bs;
-    auto& py_model_inputs_ = graph_instances_[graph_idx].mem_hold_.py_model_inputs_;
-    auto  attn_pyobj       = graph_instances_[graph_idx].mem_hold_.attn_pyobj_;
+    auto&     py_model_inputs_        = graph_instances_[graph_idx].mem_hold_.py_model_inputs_;
+    auto      attn_pyobj              = graph_instances_[graph_idx].mem_hold_.attn_pyobj_;
+    const int captured_batch_capacity = py_model_inputs_.attention_inputs.input_lengths.defined() ?
+                                            static_cast<int>(py_model_inputs_.attention_inputs.input_lengths.size(0)) :
+                                            static_cast<int>(max_bs_);
+    RTP_LLM_CHECK_WITH_INFO(state.current_batch_size <= captured_batch_capacity,
+                            "cuda graph replay batch size %d exceeds captured capacity %d for graph %zu",
+                            state.current_batch_size,
+                            captured_batch_capacity,
+                            graph_idx);
 
     // Per-launch capacity contract: see fuse_copy_util.h sizing rationale.
     // Worst case here is ~8 contiguous + (1 + group_count) strided copies,
@@ -321,25 +329,28 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
             }
         }
         if (is_prefill_cuda_graph_mode_) {
-            if (state.current_batch_size < max_bs_) {
+            if (state.current_batch_size < captured_batch_capacity) {
                 addCudaGraphPrepareFillRegion(fill_params,
                                               py_model_inputs_.attention_inputs.prefix_lengths,
                                               state.current_batch_size,
-                                              max_bs_,
+                                              captured_batch_capacity,
                                               0);
-                addCudaGraphPrepareFillRegion(
-                    fill_params, py_model_inputs_.attention_inputs.input_lengths, state.current_batch_size, max_bs_, 0);
+                addCudaGraphPrepareFillRegion(fill_params,
+                                              py_model_inputs_.attention_inputs.input_lengths,
+                                              state.current_batch_size,
+                                              captured_batch_capacity,
+                                              0);
             }
             const int last_valid = state.current_seq_len;
             addCudaGraphPrepareFillRegion(fill_params,
                                           py_model_inputs_.attention_inputs.cu_seqlens,
                                           state.current_batch_size + 1,
-                                          max_bs_ + 1,
+                                          captured_batch_capacity + 1,
                                           last_valid);
             addCudaGraphPrepareFillRegion(fill_params,
                                           py_model_inputs_.attention_inputs.cu_kv_seqlens,
                                           state.current_batch_size + 1,
-                                          max_bs_ + 1,
+                                          captured_batch_capacity + 1,
                                           last_valid);
         }
         invokeCudaGraphPrepareFill(fill_params, cuda_graph::graphGetCurrentStream().stream());
@@ -467,7 +478,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
             int last_valid = state.current_seq_len;
             fillHostInt32(py_model_inputs_.attention_inputs.cu_seqlens_host,
                           state.current_batch_size + 1,
-                          max_bs_ + 1,
+                          captured_batch_capacity + 1,
                           last_valid);
         }
     }
@@ -937,6 +948,7 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
     RTP_LLM_LOG_INFO("WarmUp for %s %d start.", key_type, key);
     auto attn_pyobj = graph_instances_[key].mem_hold_.attn_pyobj_;
     try {
+        ScopedEnvFlag cuda_graph_capture_forward("RTP_LLM_CUDA_GRAPH_CAPTURE_FORWARD", "1");
         py_forward_method_(inputs, attn_pyobj);
         py_forward_method_(inputs, attn_pyobj);
     } catch (const py::error_already_set& e) {
@@ -966,8 +978,9 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
             cuda_graph::graphCaptureBegin(graph, shared_graph_pool_);
             CudaGraphCaptureGuard capture_guard;
             try {
-                auto py_outputs_obj = py_forward_method_(inputs, attn_pyobj);
-                outputs             = py_outputs_obj.cast<PyModelOutputs>();
+                ScopedEnvFlag cuda_graph_capture_forward("RTP_LLM_CUDA_GRAPH_CAPTURE_FORWARD", "1");
+                auto          py_outputs_obj = py_forward_method_(inputs, attn_pyobj);
+                outputs                      = py_outputs_obj.cast<PyModelOutputs>();
             } catch (const py::error_already_set& e) {
                 RTP_LLM_LOG_ERROR("Capture forward failed for %s %d: %s", key_type, key, e.what());
                 try {

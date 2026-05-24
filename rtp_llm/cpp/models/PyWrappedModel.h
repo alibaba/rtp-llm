@@ -59,6 +59,8 @@ public:
     void            releaseBuffers() override;
     torch::Tensor   getMtpTargetHiddenStates(int64_t num_tokens) override;
     torch::Tensor   getMtpLastHiddenStates(int64_t num_tokens) override;
+    torch::Tensor   getPythonDebugTensor(const std::string& name, int64_t num_rows);
+    torch::Tensor   getPythonDebugKvCache(int64_t layer_idx, int64_t max_blocks);
     void            prepareAttentionInputs(const GptModelInputs& inputs) override;
     void            prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
     void            updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
@@ -209,8 +211,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             kv_cache.kv_scale_base_by_layer.push_back(t);
         }
 
-        kv_cache.layer_group_types             = layout.layer_group_types;
-        kv_cache.group_region_names            = layout.group_region_names;
+        kv_cache.layer_group_types  = layout.layer_group_types;
+        kv_cache.group_region_names = layout.group_region_names;
         kv_cache.group_seq_size_per_block.clear();
         kv_cache.group_seq_size_per_block.reserve(layout.group_seq_size_per_block.size());
         for (auto value : layout.group_seq_size_per_block) {

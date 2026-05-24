@@ -229,7 +229,7 @@ int64_t GenerateStream::streamId() const {
 
 std::string GenerateStream::streamLogTag() const {
     const auto& request_info = generate_input_->request_info;
-    std::string tag = std::string("request_id=") + std::to_string(streamId()) + " trace_id=" + traceId();
+    std::string tag          = std::string("request_id=") + std::to_string(streamId()) + " trace_id=" + traceId();
     if (!request_info.request_id.empty()) {
         tag += " source_request_id=" + request_info.request_id;
     }
@@ -836,6 +836,7 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     // PDFUSION path provides this; PD-disaggregate path leaves it undefined and
     // readers fall back to the CPU `tokens` tensor.
     sp_output_buffer_->propose_tokens_gpu = update_info.draft_token_gpu;
+    sp_output_buffer_->target_token_gpu   = update_info.target_token_gpu;
 
     // for spec-decode linear attention, we need to adjust cache blocks
     int nxt_cached_len   = seqLength() - 1;
@@ -1134,9 +1135,9 @@ void GenerateStream::reportStreamMetrics() {
 
 void GenerateStream::reportCacheReuseMetrics() const {
     if (metrics_reporter_ && stream_cache_resource_->reuseCache()) {
-        const int64_t input_length        = inputLength();
+        const int64_t input_length       = inputLength();
         const int64_t total_reuse_length = initialReuseLength();
-        auto hit_ratio = [input_length](int64_t reuse_length) {
+        auto          hit_ratio          = [input_length](int64_t reuse_length) {
             return input_length > 0 ? static_cast<float>(reuse_length * 100.0 / input_length) : 0.0f;
         };
         RtpLLMCacheReuseMetricsCollector collector;
@@ -1215,7 +1216,7 @@ void GenerateStream::CopyOnWrite(const GenerateStream& other_stream, bool copy_l
     complete_token_ids_ = make_shared<CompleteTokenIds>(*other_stream.complete_token_ids_, share);
     grpc_normal_device_state_pending_ =
         std::make_shared<std::atomic<bool>>(other_stream.hasGrpcNormalDeviceStatePending());
-    cum_log_probs_      = other_stream.cum_log_probs_.clone();
+    cum_log_probs_ = other_stream.cum_log_probs_.clone();
     if (other_stream.calculateLoss() && copy_loss) {
         loss_ = other_stream.loss_.clone();
     } else {

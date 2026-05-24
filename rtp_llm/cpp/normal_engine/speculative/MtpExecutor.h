@@ -103,7 +103,7 @@ protected:
     GptModelOutputs runTargetVerifyForward(GptModelInputs& model_input, const StreamGroups& stream_groups);
     void            debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& model_input,
                                                          const StreamGroups&   stream_groups) const;
-    void            broadcastPostRejectionInputs(GptModelInputs& model_input);
+    void            broadcastPostRejectionInputs(GptModelInputs& model_input, const StreamGroups& stream_groups);
     GptModelOutputs runDraftPrefillForward(GptModelInputs& model_input);
     SpecLogitsVerifyRunner::LaunchResult
                  buildSpecLogitsVerifyInline(const std::list<GenerateStreamPtr>& streams,
@@ -187,10 +187,12 @@ private:
     ParallelismConfig                                                        parallelism_config_;
     kmonitor::MetricsReporterPtr                                             metrics_reporter_ = nullptr;
     MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector> tps_reporter_;
-    WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector>
-        wall_tps_reporter_;
-    std::shared_ptr<ExpertBalancer>                                          expert_balancer_;
-    size_t                                                                   vocab_size_;
+    // REBASE CONFLICT CONTEXT(b08feda05): source branch did not have the new
+    // wall-clock TPS reporter. Keep it because constructor initialization and
+    // process metrics in the new base depend on it.
+    WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector> wall_tps_reporter_;
+    std::shared_ptr<ExpertBalancer>                                                            expert_balancer_;
+    size_t                                                                                     vocab_size_;
 
     // for mtp
     DataType                                         data_type_;
