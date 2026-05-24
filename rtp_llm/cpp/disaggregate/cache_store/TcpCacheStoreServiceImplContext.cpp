@@ -1,12 +1,40 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/TcpCacheStoreServiceImplContext.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
+#include <cstdlib>
+
 namespace rtp_llm {
+
+namespace {
+
+bool pdDebugEnabled() {
+    const char* env = std::getenv("RTP_LLM_PD_DEBUG");
+    return env != nullptr && std::string(env) == "1";
+}
+
+}  // namespace
 
 void TcpCacheStoreServiceImplContext::loadBlockOnTcp(bool ok, const std::vector<std::shared_ptr<BlockBuffer>>& blocks) {
     if (done_run_) {
         // already done run, most likely timeout, no need load
         return;
+    }
+
+    if (pdDebugEnabled()) {
+        const std::string first_key = blocks.empty() || blocks[0] == nullptr ? "" : blocks[0]->key;
+        const uint32_t    first_len = blocks.empty() || blocks[0] == nullptr ? 0 : blocks[0]->len;
+        RTP_LLM_LOG_INFO("[PD_DEBUG][TCP_CACHE_LOAD_BLOCK] request_id=%s ok=%d incoming_blocks=%zu "
+                         "first_key=%s first_len=%u total_blocks=%u write_cnt=%d partition_count=%d "
+                         "partition_id=%d",
+                         request_id_.c_str(),
+                         static_cast<int>(ok),
+                         blocks.size(),
+                         first_key.c_str(),
+                         first_len,
+                         total_block_count_,
+                         write_cnt_.load(),
+                         partition_count_,
+                         partition_id_);
     }
 
     if (!ok) {
@@ -19,6 +47,14 @@ void TcpCacheStoreServiceImplContext::loadBlockOnTcp(bool ok, const std::vector<
         auto unloaded_block_info = getAndEraseUnLoadedBlock(block->key);
         if (unloaded_block_info == nullptr) {
             // block already loaded
+            if (pdDebugEnabled()) {
+                RTP_LLM_LOG_INFO("[PD_DEBUG][TCP_CACHE_DUP_OR_LATE_BLOCK] request_id=%s key=%s total_blocks=%u "
+                                 "write_cnt=%d",
+                                 request_id_.c_str(),
+                                 block == nullptr ? "" : block->key.c_str(),
+                                 total_block_count_,
+                                 write_cnt_.load());
+            }
             continue;
         }
 
@@ -41,6 +77,12 @@ void TcpCacheStoreServiceImplContext::loadBlockOnTcp(bool ok, const std::vector<
     }
 
     if (write_cnt_ == total_block_count_) {
+        if (pdDebugEnabled()) {
+            RTP_LLM_LOG_INFO("[PD_DEBUG][TCP_CACHE_LOAD_COMPLETE] request_id=%s total_blocks=%u write_cnt=%d",
+                             request_id_.c_str(),
+                             total_block_count_,
+                             write_cnt_.load());
+        }
         runSuccess(false);
     }
 }

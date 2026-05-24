@@ -40,6 +40,52 @@ from .flashmla_sparse_impl import (
     _topk_2d,
 )
 
+_PD_DEBUG_PLAN_LOGGED: set[str] = set()
+
+
+def _pd_debug_enabled() -> bool:
+    return os.environ.get("RTP_LLM_PD_DEBUG", "0") == "1"
+
+
+def _rank_tag() -> str:
+    return (
+        f"rank={os.environ.get('RANK', os.environ.get('WORLD_RANK', '?'))} "
+        f"local_rank={os.environ.get('LOCAL_RANK', '?')}"
+    )
+
+
+def _cuda_graph_capturing() -> bool:
+    try:
+        return bool(
+            torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()
+        )
+    except Exception:
+        return False
+
+
+def _tensor_summary(t: Optional[torch.Tensor]) -> str:
+    if t is None:
+        return "None"
+    try:
+        if t.is_cuda and _cuda_graph_capturing():
+            return (
+                f"shape={tuple(t.shape)} device={t.device} dtype={t.dtype} " "capture=1"
+            )
+        if t.numel() == 0:
+            return f"shape={tuple(t.shape)} numel=0"
+        tc = t.detach()
+        if tc.is_cuda:
+            tc = tc.cpu()
+        if tc.numel() <= 16:
+            return f"shape={tuple(t.shape)} values={tc.tolist()}"
+        return (
+            f"shape={tuple(t.shape)} numel={tc.numel()} "
+            f"min={tc.min().item()} max={tc.max().item()} "
+            f"head={tc[:4].tolist()} tail={tc[-4:].tolist()}"
+        )
+    except Exception as exc:
+        return f"shape={tuple(t.shape)} summary_error={exc}"
+
 
 class SparseMlaFp8CPOp(SparseMlaFp8Op):
     """Context-parallel sparse MLA prefill: all-gather KV, restore to global order,
@@ -165,6 +211,30 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             and getattr(attn_inputs, "is_prefill", False)
         )
         self._gather = self._build_gather_workspace() if gather_enabled else None
+
+        if _pd_debug_enabled():
+            log_key = f"{os.getpid()}:{self.prefill_cp_rank}"
+            if log_key not in _PD_DEBUG_PLAN_LOGGED:
+                _PD_DEBUG_PLAN_LOGGED.add(log_key)
+                logging.info(
+                    "[PD_DEBUG][CP_MLA_PLAN] %s cp_rank=%s cp_size=%s "
+                    "chunk_lengths=%s actual_lengths=%s prefix_lengths=%s "
+                    "local_tokens=%s kv_restore=%s total_global=%s total_local=%s "
+                    "cu_kv=%s total_kv_len=%s gather_enabled=%s",
+                    _rank_tag(),
+                    self.prefill_cp_rank,
+                    self.prefill_cp_size,
+                    chunk_lengths_list,
+                    _tensor_summary(self.cp_info.prefill_actual_input_lengths_cpu),
+                    _tensor_summary(self.attn_inputs.prefix_lengths),
+                    local_tokens,
+                    _tensor_summary(self.kv_restore_unpad_indices),
+                    _tensor_summary(self.total_global_ids),
+                    _tensor_summary(self.total_local_ids),
+                    _tensor_summary(self.cu_kv_seqlens_global),
+                    self.total_kv_len,
+                    self._gather is not None,
+                )
 
     def _build_gather_workspace(self) -> Optional[_GatherWorkspace]:
         """Allocate the BF16 workspace from prefill_ragged_kv_len_indptr_d.

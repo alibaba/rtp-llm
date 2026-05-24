@@ -1,10 +1,21 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStoreServiceImplContext.h"
 #include <atomic>
+#include <cstdlib>
+#include <sstream>
 
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 
 namespace rtp_llm {
+
+namespace {
+
+bool pdDebugEnabled() {
+    const char* env = std::getenv("RTP_LLM_PD_DEBUG");
+    return env != nullptr && std::string(env) == "1";
+}
+
+}  // namespace
 
 CacheStoreServiceImplContext::CacheStoreServiceImplContext(
     const CacheLoadRequest*                                      request,
@@ -29,6 +40,29 @@ CacheStoreServiceImplContext::CacheStoreServiceImplContext(
     for (int i = 0; i < request_->blocks_size(); i++) {
         unloaded_blocks_[request_->blocks(i).key()] = std::make_shared<BlockBufferInfo>(request_->blocks(i));
     }
+    if (pdDebugEnabled()) {
+        std::ostringstream sample;
+        int                sample_count = 0;
+        for (const auto& [key, block] : unloaded_blocks_) {
+            if (sample_count++ >= 5) {
+                sample << ",...";
+                break;
+            }
+            if (sample_count > 1) {
+                sample << ",";
+            }
+            sample << key << ":" << (block == nullptr ? 0 : block->len());
+        }
+        RTP_LLM_LOG_INFO("[PD_DEBUG][CACHE_SERVICE_CONTEXT_INIT] request_id=%s peer=%s total_blocks=%u "
+                         "partition_count=%d partition_id=%d send_start_us=%ld sample_unloaded=[%s]",
+                         request_id_.c_str(),
+                         peer_ip_.c_str(),
+                         total_block_count_,
+                         partition_count_,
+                         partition_id_,
+                         request_send_start_time_us_,
+                         sample.str().c_str());
+    }
 }
 
 std::shared_ptr<BlockBufferInfo> CacheStoreServiceImplContext::getAndEraseUnLoadedBlock(const std::string& block_key) {
@@ -40,6 +74,12 @@ std::shared_ptr<BlockBufferInfo> CacheStoreServiceImplContext::getAndEraseUnLoad
     }
     if (unloaded_blocks_.size() == total_block_count_) {
         collector_->markFirstBlockReady();
+        if (pdDebugEnabled()) {
+            RTP_LLM_LOG_INFO("[PD_DEBUG][CACHE_SERVICE_FIRST_BLOCK_READY] request_id=%s key=%s total_blocks=%u",
+                             request_id_.c_str(),
+                             block_key.c_str(),
+                             total_block_count_);
+        }
     }
 
     auto block_info = it->second;
@@ -47,6 +87,11 @@ std::shared_ptr<BlockBufferInfo> CacheStoreServiceImplContext::getAndEraseUnLoad
 
     if (unloaded_blocks_.empty()) {
         collector_->markAllBlocksReady();
+        if (pdDebugEnabled()) {
+            RTP_LLM_LOG_INFO("[PD_DEBUG][CACHE_SERVICE_ALL_BLOCKS_READY] request_id=%s total_blocks=%u",
+                             request_id_.c_str(),
+                             total_block_count_);
+        }
     }
     return block_info;
 }
@@ -73,6 +118,15 @@ void CacheStoreServiceImplContext::runSuccess(bool direct_write) {
     }
 
     collector_->markEnd(true);
+    if (pdDebugEnabled()) {
+        RTP_LLM_LOG_INFO("[PD_DEBUG][CACHE_SERVICE_RUN_SUCCESS] request_id=%s peer=%s total_blocks=%u "
+                         "write_cnt=%d direct_write=%d",
+                         request_id_.c_str(),
+                         peer_ip_.c_str(),
+                         total_block_count_,
+                         write_cnt_.load(),
+                         static_cast<int>(direct_write));
+    }
     // call callback
     if (done_) {
         done_->Run();
@@ -88,6 +142,31 @@ void CacheStoreServiceImplContext::runFailed(KvCacheStoreServiceErrorCode error_
     }
 
     stopTimer();
+
+    if (pdDebugEnabled()) {
+        std::shared_lock<std::shared_mutex> unloaded_lock(unloaded_blocks_mutex_);
+        std::ostringstream                  sample;
+        int                                 sample_count = 0;
+        for (const auto& [key, block] : unloaded_blocks_) {
+            if (sample_count++ >= 10) {
+                sample << ",...";
+                break;
+            }
+            if (sample_count > 1) {
+                sample << ",";
+            }
+            sample << key << ":" << (block == nullptr ? 0 : block->len());
+        }
+        RTP_LLM_LOG_WARNING("[PD_DEBUG][CACHE_SERVICE_RUN_FAILED] request_id=%s peer=%s error_code=%d "
+                            "total_blocks=%u write_cnt=%d unloaded=%zu sample_unloaded=[%s]",
+                            request_id_.c_str(),
+                            peer_ip_.c_str(),
+                            error_code,
+                            total_block_count_,
+                            write_cnt_.load(),
+                            unloaded_blocks_.size(),
+                            sample.str().c_str());
+    }
 
     auto request_block_buffer_store = request_block_buffer_store_.lock();
     if (request_block_buffer_store) {

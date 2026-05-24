@@ -27,6 +27,19 @@ bool readEnvFlagOnce(const char* env_name, const char* log_tag, const char* labe
     return on;
 }
 
+int readEnvIntOnce(const char* env_name, int default_value, const char* log_tag) {
+    const char* env   = std::getenv(env_name);
+    int         value = default_value;
+    if (env != nullptr) {
+        value = std::atoi(env);
+        if (value <= 0) {
+            value = default_value;
+        }
+    }
+    RTP_LLM_LOG_INFO("[%s] %s=%s -> %d", log_tag, env_name, env ? env : "(unset)", value);
+    return value;
+}
+
 void holdSamplerInputHostBuffers(TensorHolder& holder, const SamplerInputs& inputs) {
     holder.hold_host(inputs.token_ids);
     holder.hold_host(inputs.input_lengths);
@@ -129,6 +142,9 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                                     (is_propose_ ? cache_manager->getMTPModuleCacheConfig(propose_model_index_) :
                                                                    cache_manager->cacheConfig()) :
                                                     warmup_sentinel;
+    // REBASE CONFLICT CONTEXT(6511f0467): source branch also wanted CUDA graph
+    // buffers to use the runtime cache layout. New base already does that and
+    // adds a zero-valued warmup sentinel; keep the stricter base behavior.
 
     GptModelInitParams model_init_params(
         {params.gpt_weights,

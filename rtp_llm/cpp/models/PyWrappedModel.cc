@@ -55,6 +55,63 @@ static torch::Tensor layerRegionToGroupTensor(const std::optional<CacheLayerLayo
     return tensor;
 }
 
+namespace {
+
+bool pdDebugEnabled() {
+    const char* env = std::getenv("RTP_LLM_PD_DEBUG");
+    return env != nullptr && std::string(env) == "1";
+}
+
+std::string tensorSummary(const torch::Tensor& tensor, int64_t limit = 4) {
+    if (!tensor.defined()) {
+        return "None";
+    }
+    std::ostringstream oss;
+    oss << "shape=[";
+    for (int64_t i = 0; i < tensor.dim(); ++i) {
+        if (i > 0) {
+            oss << ",";
+        }
+        oss << tensor.size(i);
+    }
+    oss << "] device=" << tensor.device() << " dtype=" << tensor.dtype() << " numel=" << tensor.numel();
+    if (tensor.numel() == 0) {
+        return oss.str();
+    }
+    auto flat       = tensor.reshape({-1});
+    auto head_count = std::min<int64_t>(limit, flat.numel());
+    auto tail_count = std::min<int64_t>(limit, flat.numel());
+    auto head       = flat.slice(0, 0, head_count);
+    auto tail       = flat.slice(0, flat.numel() - tail_count, flat.numel());
+    if (head.device().is_cuda()) {
+        head = head.cpu();
+        tail = tail.cpu();
+    }
+    oss << " head=" << head << " tail=" << tail;
+    return oss.str();
+}
+
+std::string logitsTopKSummary(const torch::Tensor& logits, int64_t k = 8) {
+    if (!logits.defined() || logits.numel() == 0 || logits.dim() != 2 || logits.size(0) == 0) {
+        return "None";
+    }
+    try {
+        auto               row      = logits[0];
+        auto               topk     = row.topk(std::min<int64_t>(k, row.size(0)));
+        auto               values   = std::get<0>(topk);
+        auto               indices  = std::get<1>(topk);
+        auto               values_h = values.device().is_cuda() ? values.cpu() : values;
+        auto               ids_h    = indices.device().is_cuda() ? indices.cpu() : indices;
+        std::ostringstream oss;
+        oss << "ids=" << ids_h << " values=" << values_h;
+        return oss.str();
+    } catch (const std::exception& e) {
+        return std::string("topk_error=") + e.what();
+    }
+}
+
+}  // namespace
+
 torch::Tensor PyWrappedModel::tensorHoldHostAndToCuda(const torch::Tensor& tensor) {
     if (tensor.device().is_cuda()) {
         return tensor;
@@ -286,6 +343,36 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         }
     }
 
+    if (pdDebugEnabled()) {
+        static std::atomic<int> debug_log_budget{512};
+        if (debug_log_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
+            RTP_LLM_LOG_INFO("[PD_DEBUG][PY_ATTENTION_INPUTS] is_prefill=%d is_target_verify=%d "
+                             "context_bs=%zu decode_bs=%zu batch_size=%d total_tokens=%d "
+                             "combo_tokens=%s input_lengths_src=%s sequence_lengths_src=%s prefix_lengths_src=%s "
+                             "attn_input_lengths=%s attn_sequence_lengths=%s attn_prefix_lengths=%s "
+                             "seq_plus_1=%s decode_cu=%s cu_seqlens=%s cu_kv=%s kv_kernel_blocks=%s kv_blocks=%s",
+                             static_cast<int>(py_attn_inputs.is_prefill),
+                             static_cast<int>(py_attn_inputs.is_target_verify),
+                             context_batch_size,
+                             decode_batch_size,
+                             batch_size,
+                             py_attn_inputs.total_tokens,
+                             tensorSummary(inputs.combo_tokens).c_str(),
+                             tensorSummary(input_lengths_src).c_str(),
+                             tensorSummary(sequence_lengths_src).c_str(),
+                             tensorSummary(prefix_lengths_src).c_str(),
+                             tensorSummary(py_attn_inputs.input_lengths).c_str(),
+                             tensorSummary(py_attn_inputs.sequence_lengths).c_str(),
+                             tensorSummary(py_attn_inputs.prefix_lengths).c_str(),
+                             tensorSummary(py_attn_inputs.sequence_lengths_plus_1_d).c_str(),
+                             tensorSummary(py_attn_inputs.decode_cu_seqlens_d).c_str(),
+                             tensorSummary(py_attn_inputs.cu_seqlens).c_str(),
+                             tensorSummary(py_attn_inputs.cu_kv_seqlens).c_str(),
+                             tensorSummary(inputs.kv_cache_kernel_block_id).c_str(),
+                             tensorSummary(inputs.kv_cache_block_id).c_str());
+        }
+    }
+
     return py_attn_inputs;
 }
 
@@ -354,6 +441,40 @@ void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs
         group0 = group0.contiguous().pin_memory();
         buffer_holder_.hold_host(group0);
         py_attn_inputs.kv_cache_kernel_block_id_host = group0;
+    }
+
+    if (inputs.kv_cache_block_id.defined()) {
+        torch::Tensor physical_group0;
+        if (inputs.kv_cache_block_id.dim() == 3) {
+            physical_group0 = inputs.kv_cache_block_id[0];
+        } else if (inputs.kv_cache_block_id.dim() == 2) {
+            physical_group0 = inputs.kv_cache_block_id;
+        } else {
+            RTP_LLM_CHECK_WITH_INFO(false, "kv_cache_block_id shape should be 2 or 3");
+        }
+
+        if (physical_group0.dtype() != torch::kInt32) {
+            physical_group0 = physical_group0.to(torch::kInt32);
+        }
+        if (!physical_group0.is_contiguous()) {
+            physical_group0 = physical_group0.contiguous();
+        }
+
+        if (physical_group0.device().is_cuda()) {
+            py_attn_inputs.kv_cache_block_id_device = physical_group0;
+            if (description_.attention_conf.use_mla) {
+                auto physical_host = physical_group0.cpu().contiguous().pin_memory();
+                buffer_holder_.hold_host(physical_host);
+                py_attn_inputs.kv_cache_block_id_host = physical_host;
+            }
+        } else {
+            if (!physical_group0.is_pinned()) {
+                physical_group0 = physical_group0.pin_memory();
+            }
+            buffer_holder_.hold_host(physical_group0);
+            py_attn_inputs.kv_cache_block_id_host   = physical_group0;
+            py_attn_inputs.kv_cache_block_id_device = tensorHoldHostAndToCuda(physical_group0);
+        }
     }
 }
 
@@ -662,6 +783,39 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
     }
     attention_inputs_.kv_cache_kernel_block_id_device = attention_inputs_.kv_cache_kernel_block_id_device_by_group[0];
 
+    if (inputs.kv_cache_block_id.defined()) {
+        torch::Tensor physical_group0;
+        if (inputs.kv_cache_block_id.dim() == 3) {
+            physical_group0 = inputs.kv_cache_block_id[0];
+        } else if (inputs.kv_cache_block_id.dim() == 2) {
+            physical_group0 = inputs.kv_cache_block_id;
+        } else {
+            RTP_LLM_CHECK_WITH_INFO(false, "kv_cache_block_id shape should be 2 or 3");
+        }
+        if (physical_group0.dtype() != torch::kInt32) {
+            physical_group0 = physical_group0.to(torch::kInt32);
+        }
+        if (!physical_group0.is_contiguous()) {
+            physical_group0 = physical_group0.contiguous();
+        }
+        if (physical_group0.device().is_cuda()) {
+            attention_inputs_.kv_cache_block_id_device = physical_group0;
+            if (description_.attention_conf.use_mla) {
+                auto physical_host = physical_group0.cpu().contiguous().pin_memory();
+                buffer_holder_.hold_host(physical_host);
+                attention_inputs_.kv_cache_block_id_host = physical_host;
+            }
+        } else {
+            if (!physical_group0.is_pinned()) {
+                physical_group0 = physical_group0.pin_memory();
+            }
+            buffer_holder_.hold_host(physical_group0);
+            attention_inputs_.kv_cache_block_id_host   = physical_group0;
+            auto cuda_i32                              = torch::TensorOptions(torch::kInt32).device(torch::kCUDA);
+            attention_inputs_.kv_cache_block_id_device = physical_group0.to(cuda_i32, /*non_blocking=*/false);
+        }
+    }
+
     // CUDA-graph case: refresh the captured held buffers + FlashInfer plan
     // via the focused graph_runner hook (no replay of unrelated D2D copies).
     if (enable_cuda_graph_) {
@@ -787,6 +941,22 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 return forwardPostLayersLastHidden(hidden_states, inputs);
             }
             size_t num_valid_tokens = context_parallel_processor_->handleOutputs(hidden_states, inputs, cp_params);
+            if (pdDebugEnabled()) {
+                static std::atomic<int> cp_output_log_budget{16};
+                if (cp_output_log_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
+                    RTP_LLM_LOG_INFO("[PD_DEBUG][CP_HANDLE_OUTPUTS] hidden=%s num_valid_tokens=%zu "
+                                     "lm_output_indexes=%s input_lengths=%s sequence_lengths=%s "
+                                     "cp_padding=%s cp_restore=%s cp_mask=%s",
+                                     tensorSummary(hidden_states).c_str(),
+                                     num_valid_tokens,
+                                     tensorSummary(inputs.lm_output_indexes).c_str(),
+                                     tensorSummary(inputs.input_lengths).c_str(),
+                                     tensorSummary(inputs.sequence_lengths).c_str(),
+                                     tensorSummary(cp_params.prefill_cp_padding_lengths).c_str(),
+                                     tensorSummary(cp_params.prefill_qkv_restore_indice).c_str(),
+                                     tensorSummary(cp_params.prefill_qkv_padding_mask).c_str());
+                }
+            }
             return callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens);
         }
         return callForwardPostLayers(hidden_states, inputs, true);
@@ -936,6 +1106,19 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
             last_hidden = hidden;
         }
 
+        if (pdDebugEnabled() && has_context_request) {
+            static std::atomic<int> post_layers_pre_logits_budget{16};
+            if (post_layers_pre_logits_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
+                RTP_LLM_LOG_INFO("[PD_DEBUG][POST_LAYERS_PRE_LOGITS] hidden=%s lm_output_indexes=%s "
+                                 "last_hidden=%s token_num=%zu need_all_logits=%d",
+                                 tensorSummary(hidden).c_str(),
+                                 tensorSummary(lm_output_indexes).c_str(),
+                                 tensorSummary(last_hidden).c_str(),
+                                 token_num,
+                                 static_cast<int>(need_all_logits));
+            }
+        }
+
         printTorchTensorData(last_hidden, "last_hidden");
 
         torch::Tensor logits;
@@ -956,6 +1139,14 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
         if (device_props_.tp_size > 1) {
             RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(tp_sync_logits)");
             logits = tpSyncEmbeddingOrLogits(logits);
+        }
+        if (pdDebugEnabled() && has_context_request) {
+            static std::atomic<int> post_layers_logits_budget{16};
+            if (post_layers_logits_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
+                RTP_LLM_LOG_INFO("[PD_DEBUG][POST_LAYERS_LOGITS] logits=%s topk=%s",
+                                 tensorSummary(logits).c_str(),
+                                 logitsTopKSummary(logits).c_str());
+            }
         }
         if (check_nan_) {
             RTP_LLM_CHECK_WITH_INFO(!torch::isnan(last_hidden).any().item<bool>(), "NAN detected in last_hidden");

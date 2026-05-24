@@ -1,6 +1,8 @@
 """CUDA-specific indexer operations for DeepSeek-V3.2 DSA mechanism."""
 
-from typing import Any, Optional, Tuple
+import logging
+import os
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 from torch import nn
@@ -21,6 +23,83 @@ try:
 except Exception as e:
     print(f"Warning: Failed to import flashinfer.rope (likely running on CPU): {e}")
     rope = None
+
+
+_PD_DEBUG_INDEXER_LOG_COUNTS: Dict[str, int] = {}
+
+
+def _pd_debug_enabled() -> bool:
+    return os.environ.get("RTP_LLM_PD_DEBUG", "0") == "1"
+
+
+def _pd_debug_take(tag: str, limit: int = 16) -> bool:
+    key = f"{tag}:{os.getpid()}"
+    count = _PD_DEBUG_INDEXER_LOG_COUNTS.get(key, 0)
+    if count >= limit:
+        return False
+    _PD_DEBUG_INDEXER_LOG_COUNTS[key] = count + 1
+    return True
+
+
+def _cuda_graph_capturing() -> bool:
+    try:
+        return bool(
+            torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()
+        )
+    except Exception:
+        return False
+
+
+def _rank_tag() -> str:
+    return (
+        f"rank={os.environ.get('RANK', os.environ.get('WORLD_RANK', '?'))} "
+        f"local_rank={os.environ.get('LOCAL_RANK', '?')}"
+    )
+
+
+def _tensor_summary(t: Optional[torch.Tensor]) -> str:
+    if t is None:
+        return "None"
+    try:
+        if t.is_cuda and _cuda_graph_capturing():
+            return (
+                f"shape={tuple(t.shape)} device={t.device} dtype={t.dtype} " "capture=1"
+            )
+        if t.numel() == 0:
+            return f"shape={tuple(t.shape)} numel=0"
+        flat = t.detach().reshape(-1)
+        if flat.numel() <= 16:
+            tc = flat.cpu() if flat.is_cuda else flat
+            return f"shape={tuple(t.shape)} values={tc.tolist()}"
+        head = flat[:4]
+        tail = flat[-4:]
+        if head.is_cuda:
+            head = head.cpu()
+            tail = tail.cpu()
+        return (
+            f"shape={tuple(t.shape)} numel={flat.numel()} "
+            f"head={head.tolist()} tail={tail.tolist()}"
+        )
+    except Exception as exc:
+        return f"shape={tuple(t.shape)} summary_error={exc}"
+
+
+def _physical_block_table(attention_inputs: Any) -> torch.Tensor:
+    """Return the physical paged-cache block table.
+
+    Indexer cache reads use ``kv_cache`` as physical pages
+    ``[num_blocks, block_size, ...]``.  The kernel-granularity table can be
+    token-level when ``kernel_seq_size_per_block == 1``; using it here reads
+    unrelated cache pages and corrupts sparse MLA top-k.
+    """
+    physical = getattr(attention_inputs, "kv_cache_block_id_device", None)
+    if isinstance(physical, torch.Tensor) and physical.numel() > 0:
+        return physical
+    return attention_inputs.kv_cache_kernel_block_id_device
+
+
+def _prefill_physical_block_table(attention_inputs: Any) -> torch.Tensor:
+    return _physical_block_table(attention_inputs)
 
 
 def _unpack_ue8m0_scale(sf_packed: torch.Tensor) -> torch.Tensor:
@@ -467,7 +546,7 @@ class IndexerOp(nn.Module):
             kv_cache_fp8.shape[0], self.blocksize, num_heads_kv, head_dim_with_sf
         ).view(dtype=torch.uint8)
 
-        block_table = attention_inputs.kv_cache_kernel_block_id_device
+        block_table = _physical_block_table(attention_inputs)
         cu_seqlens_q = attention_inputs.decode_cu_seqlens_d
         lengths = fmha_params.expanded_seq_lens
 
@@ -537,6 +616,30 @@ class IndexerOp(nn.Module):
             topk=self.index_topk,
             row_starts=None,
         )
+        if _pd_debug_enabled():
+            if _pd_debug_take(f"paged:{self.index_topk}", 32):
+                logging.info(
+                    "[PD_DEBUG][INDEXER_TOPK_PAGED] %s is_target_verify=%s "
+                    "q_fp8=%s weights=%s kv_cache_fp8=%s block_table=%s "
+                    "kernel_block_table=%s kvlen_2d=%s lengths=%s "
+                    "cu_seqlens_q=%s logits=%s topk=%s",
+                    _rank_tag(),
+                    is_target_verify,
+                    _tensor_summary(q_fp8),
+                    _tensor_summary(weights),
+                    _tensor_summary(kv_cache_fp8),
+                    _tensor_summary(block_table),
+                    _tensor_summary(
+                        getattr(
+                            attention_inputs, "kv_cache_kernel_block_id_device", None
+                        )
+                    ),
+                    _tensor_summary(kvlen_2d),
+                    _tensor_summary(lengths),
+                    _tensor_summary(cu_seqlens_q),
+                    _tensor_summary(logits),
+                    _tensor_summary(topk_result),
+                )
 
         return topk_result
 
@@ -588,11 +691,28 @@ class IndexerOp(nn.Module):
             device=q_fp8.device,
         )
 
+        block_table = _prefill_physical_block_table(attention_inputs)
+        if _pd_debug_enabled():
+            if _pd_debug_take(f"ragged_block_table:{self.index_topk}", 16):
+                logging.info(
+                    "[PD_DEBUG][INDEXER_RAGGED_BLOCK_TABLE] %s "
+                    "physical=%s kernel=%s kv_cache_blocks=%s cu_kv=%s",
+                    _rank_tag(),
+                    _tensor_summary(block_table),
+                    _tensor_summary(
+                        getattr(
+                            attention_inputs, "kv_cache_kernel_block_id_device", None
+                        )
+                    ),
+                    kv_cache.kv_scale_base.shape[0],
+                    _tensor_summary(attention_inputs.cu_kv_seqlens),
+                )
+
         rtp_llm_ops.cp_gather_indexer_k_quant_cache(
             kv_cache.kv_scale_base,  # [num_blocks, block_size, cache_stride]
             k_fp8,  # output [num_tokens, index_head_dim]
             k_scale,  # output [num_tokens, scale_size]
-            attention_inputs.kv_cache_kernel_block_id_device,  # [batch_size, num_blocks]
+            block_table,  # [batch_size, physical_blocks]
             attention_inputs.cu_kv_seqlens,
         )
 
@@ -698,11 +818,38 @@ class IndexerOp(nn.Module):
             dtype=torch.uint8,
             device=device,
         )
+        block_table = _prefill_physical_block_table(attention_inputs)
+        if _pd_debug_enabled():
+            if _pd_debug_take(f"ragged_cp_block_table:{self.index_topk}", 16):
+                logging.info(
+                    "[PD_DEBUG][INDEXER_RAGGED_CP_BLOCK_TABLE] %s "
+                    "physical=%s kernel=%s kv_cache_blocks=%s cu_kv_global=%s "
+                    "total_local_ids=%s precomputed_ks=%s precomputed_ke=%s "
+                    "precomputed_lengths=%s precomputed_topk_off=%s q0=%s "
+                    "weights_sq0=%s",
+                    _rank_tag(),
+                    _tensor_summary(block_table),
+                    _tensor_summary(
+                        getattr(
+                            attention_inputs, "kv_cache_kernel_block_id_device", None
+                        )
+                    ),
+                    kv_cache.kv_scale_base.shape[0],
+                    _tensor_summary(cu_kv_seqlens_global),
+                    _tensor_summary(total_local_ids),
+                    _tensor_summary(precomputed_ks),
+                    _tensor_summary(precomputed_ke),
+                    _tensor_summary(precomputed_lengths),
+                    _tensor_summary(precomputed_topk_off),
+                    _tensor_summary(q0),
+                    _tensor_summary(weights_sq0),
+                )
+
         rtp_llm_ops.cp_gather_indexer_k_quant_cache(
             kv_cache.kv_scale_base,
             k_fp8,
             k_scale,
-            attention_inputs.kv_cache_kernel_block_id_device,
+            block_table,
             cu_kv_seqlens_global,
         )
         kv_fp8_full = (k_fp8, k_scale.view(torch.float32).squeeze(-1))
