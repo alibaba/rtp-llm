@@ -362,6 +362,11 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         }
         reportMetrics(stream_groups, executor_collector, tps_collector, tps_execute_time_us);
 
+        // REBASE CONFLICT CONTEXT(704f3c147): source branch closed the profiler
+        // before async dispatch to avoid thread-affine Kineto callbacks. New
+        // base passes `profile_step_finish_` into dispatchOutputAsync so it can
+        // finish on the engine thread after launch; AsyncRunner also disables
+        // record-function callbacks in the worker.
         return dispatchOutputAsync(stream_groups,
                                    std::move(model_output),
                                    std::move(sampler_output),
