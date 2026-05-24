@@ -476,10 +476,17 @@ bool NormalExecutor::gatherCanUseDeviceState(const StreamGroups& stream_groups) 
         if (stream->hasNumBeams() || stream->numReturnSequences() > 1) {
             return false;
         }
-        // NormalAsyncDeviceState mirrors token ids and sequence length, not host
-        // logits-processor DFA state. If the previous async worker is still
-        // pending, wait for it to commit updateStatus() before the next sampler.
-        if (!stream->getAllLogitsProcessorPtr().empty() && stream->hasPendingAsyncBookkeeping()) {
+        bool has_blocking_stateful_processor = false;
+        for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
+            if (processor != nullptr && processor->isStateful() && !processor->supportsNormalAsyncDeviceState()) {
+                has_blocking_stateful_processor = true;
+                break;
+            }
+        }
+        // NormalAsyncDeviceState mirrors token ids and sequence length. Stateful
+        // processors that cannot publish their own device-side next-step state
+        // still need the old wait before the next sampler consumes logits.
+        if (has_blocking_stateful_processor && stream->hasPendingAsyncBookkeeping()) {
             return false;
         }
         const auto& state = stream->getNormalAsyncDeviceState();
@@ -558,6 +565,12 @@ void NormalExecutor::publishNormalDeviceState(const StreamGroups& stream_groups,
             cur_seq_len_gpu = prev_next_seq_len;
         } else {
             cur_seq_len_gpu = torch::full({1}, static_cast<int64_t>(cur_real_seq_len), cuda_i32);
+        }
+
+        for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
+            if (processor != nullptr && processor->supportsNormalAsyncDeviceState()) {
+                processor->prepareNormalAsyncUpdate(last_sample_token_gpu, 1);
+            }
         }
 
         GenerateStream::NormalAsyncDeviceState state;

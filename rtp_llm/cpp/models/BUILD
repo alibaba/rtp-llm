@@ -66,6 +66,7 @@ cc_library(
     deps = [
         ":sample_infos",
         ":dfa_utils",
+        "//rtp_llm/cpp/cuda_graph:cuda_graph_hdrs_lib",
         "//rtp_llm/cpp/engine_base/stream:generate_types",
         "//rtp_llm/cpp/engine_base/stream:generate_config",
         "//rtp_llm/cpp/engine_base/grammar:grammar_cpp_lib",

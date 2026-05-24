@@ -27,6 +27,13 @@ public:
     virtual bool isStateful() const {
         return false;
     }
+    virtual bool supportsNormalAsyncDeviceState() const {
+        return false;
+    }
+    virtual void prepareNormalAsyncUpdate(const torch::Tensor& new_tokens, int32_t num_new_tokens) {
+        (void)new_tokens;
+        (void)num_new_tokens;
+    }
     virtual int64_t acceptedTokenLen() const {
         return 0;
     }

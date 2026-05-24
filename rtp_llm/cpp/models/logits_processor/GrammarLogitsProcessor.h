@@ -1,7 +1,11 @@
 #pragma once
 
+#include <atomic>
+#include <condition_variable>
 #include <functional>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -31,21 +35,50 @@ public:
     bool isStateful() const override {
         return true;
     }
-    int64_t acceptedTokenLen() const override {
-        return accepted_token_len_;
+    bool supportsNormalAsyncDeviceState() const override {
+        return true;
     }
+    void    prepareNormalAsyncUpdate(const torch::Tensor& new_tokens, int32_t num_new_tokens) override;
+    int64_t acceptedTokenLen() const override;
 
 private:
-    void reportErrorOnce(ErrorCode error_code, const std::string& error_msg, bool stream_lock_held);
-    void forceToken(const torch::Tensor& logits, int64_t token_id);
-    void maskToken(const torch::Tensor& logits, int64_t token_id);
+    enum class DeviceMaskMode {
+        UNSET,
+        NOOP,
+        MASK,
+        PASSTHROUGH,
+        TERMINATED,
+        FINISHED,
+    };
+
+    struct DeviceMaskState {
+        DeviceMaskMode                mode      = DeviceMaskMode::UNSET;
+        int64_t                       token_len = -1;
+        c10::Device                   device    = c10::Device(c10::DeviceType::CPU);
+        torch::Tensor                 vocab_mask;
+        std::shared_ptr<torch::Event> ready_event;
+    };
 
 private:
+    DeviceMaskState getDeviceMaskState(const c10::Device& device);
+    DeviceMaskState buildDeviceMaskStateLocked(const c10::Device& device);
+    void            publishMaskToDevice(DeviceMaskState& state, torch::Tensor vocab_mask, const c10::Device& device);
+    void            applyDeviceMaskState(const torch::Tensor& logits, const DeviceMaskState& state);
+    void            reportErrorOnce(ErrorCode error_code, const std::string& error_msg, bool stream_lock_held);
+    void            forceToken(const torch::Tensor& logits, int64_t token_id);
+    void            maskToken(const torch::Tensor& logits, int64_t token_id);
+
+private:
+    mutable std::mutex                 state_mutex_;
+    std::condition_variable            state_cv_;
     std::shared_ptr<RtpGrammarMatcher> matcher_;
     int64_t                            eos_token_id_;
     ErrorReporter                      error_reporter_;
-    bool                               reported_error_     = false;
-    int64_t                            accepted_token_len_ = 0;
+    std::atomic_bool                   reported_error_          = false;
+    int64_t                            accepted_token_len_      = 0;
+    int64_t                            pending_async_token_len_ = 0;
+    std::optional<c10::Device>         last_mask_device_;
+    DeviceMaskState                    device_mask_state_;
 };
 
 using GrammarLogitsProcessorPtr = std::shared_ptr<GrammarLogitsProcessor>;
