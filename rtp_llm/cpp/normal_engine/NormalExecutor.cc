@@ -28,7 +28,7 @@ bool readEnvFlagOnce(const char* env_name, const char* log_tag, const char* labe
 }
 
 int readEnvIntOnce(const char* env_name, int default_value, const char* log_tag) {
-    const char* env = std::getenv(env_name);
+    const char* env   = std::getenv(env_name);
     int         value = default_value;
     if (env != nullptr) {
         value = std::atoi(env);
@@ -100,8 +100,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
         readEnvFlagOnce("RTP_LLM_CROSS_NODE_CPU_TP_BROADCAST", "NormalExecutor", "cross_node_cpu_tp_broadcast");
     if (enable_cross_node_cpu_tp_broadcast && params.parallelism_config.tp_size > 1
         && params.parallelism_config.tp_size > params.parallelism_config.local_world_size) {
-        const int timeout_ms =
-            readEnvIntOnce("RTP_LLM_CPU_TP_BROADCAST_TIMEOUT_MS", 30000, "NormalExecutor");
+        const int timeout_ms = readEnvIntOnce("RTP_LLM_CPU_TP_BROADCAST_TIMEOUT_MS", 30000, "NormalExecutor");
         RpcCpuTpBroadcaster::instance().initialize(static_cast<int>(params.parallelism_config.tp_rank),
                                                    static_cast<int>(params.parallelism_config.tp_size),
                                                    static_cast<int>(params.parallelism_config.dp_rank),
@@ -150,6 +149,9 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                                     (is_propose_ ? cache_manager->getMTPModuleCacheConfig(propose_model_index_) :
                                                                    cache_manager->cacheConfig()) :
                                                     warmup_sentinel;
+    // REBASE CONFLICT CONTEXT(6511f0467): source branch also wanted CUDA graph
+    // buffers to use the runtime cache layout. New base already does that and
+    // adds a zero-valued warmup sentinel; keep the stricter base behavior.
 
     GptModelInitParams model_init_params(
         {params.gpt_weights,

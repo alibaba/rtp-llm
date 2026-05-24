@@ -145,38 +145,75 @@ void addStridedD2DCopy(FusedStridedCopyParams& strided_copies,
                        FusedD2DCopyParams&     d2d_copies,
                        const torch::Tensor&    src,
                        torch::Tensor&          dst) {
-    if (!src.defined() || src.numel() <= 0) {
+    if (!src.defined() || src.numel() <= 0 || !dst.defined() || dst.numel() <= 0) {
+        return;
+    }
+    if (src.element_size() != dst.element_size()) {
+        RTP_LLM_LOG_WARNING(
+            "skip strided D2D copy: element size mismatch src=%zu dst=%zu", src.element_size(), dst.element_size());
         return;
     }
     if (src.dim() < 2) {
-        d2d_copies.add(src.data_ptr(), dst.data_ptr(), src.numel() * src.element_size());
+        const size_t bytes = std::min(src.numel(), dst.numel()) * src.element_size();
+        if (bytes > 0) {
+            d2d_copies.add(src.data_ptr(), dst.data_ptr(), bytes);
+        }
+        return;
+    }
+    if (dst.dim() < 2) {
+        RTP_LLM_LOG_WARNING("skip strided D2D copy: dst dim %ld is smaller than src dim %ld", dst.dim(), src.dim());
+        return;
+    }
+    const size_t rows      = std::min(src.size(0), dst.size(0));
+    const size_t cols      = std::min(src.size(1), dst.size(1));
+    const size_t row_bytes = cols * src.element_size();
+    if (rows == 0 || row_bytes == 0) {
         return;
     }
     strided_copies.add(src.data_ptr(),
                        dst.data_ptr(),
-                       src.size(0),
-                       src.size(1) * src.element_size(),
+                       rows,
+                       row_bytes,
                        src.stride(0) * src.element_size(),
                        dst.stride(0) * dst.element_size());
 }
 
 void copyStridedHost(const torch::Tensor& src, torch::Tensor& dst) {
-    if (!src.defined() || src.numel() <= 0) {
+    if (!src.defined() || src.numel() <= 0 || !dst.defined() || dst.numel() <= 0) {
         return;
     }
     RTP_LLM_PROFILE_SCOPE("stridedCopyHost");
-    if (src.dim() < 2) {
-        memcpy(dst.data_ptr(), src.data_ptr(), src.numel() * src.element_size());
+    if (src.is_cuda() || dst.is_cuda()) {
+        RTP_LLM_LOG_WARNING("skip host strided copy: src_cuda=%d dst_cuda=%d", src.is_cuda(), dst.is_cuda());
         return;
     }
-    const size_t nrows      = src.size(0);
-    const size_t row_bytes  = src.size(1) * src.element_size();
+    if (src.element_size() != dst.element_size()) {
+        RTP_LLM_LOG_WARNING(
+            "skip host strided copy: element size mismatch src=%zu dst=%zu", src.element_size(), dst.element_size());
+        return;
+    }
+    if (src.dim() < 2) {
+        const size_t bytes = std::min(src.numel(), dst.numel()) * src.element_size();
+        if (bytes > 0) {
+            std::memcpy(dst.data_ptr(), src.data_ptr(), bytes);
+        }
+        return;
+    }
+    if (dst.dim() < 2) {
+        RTP_LLM_LOG_WARNING("skip host strided copy: dst dim %ld is smaller than src dim %ld", dst.dim(), src.dim());
+        return;
+    }
+    const size_t nrows      = std::min(src.size(0), dst.size(0));
+    const size_t row_bytes  = std::min(src.size(1), dst.size(1)) * src.element_size();
     const size_t src_stride = src.stride(0) * src.element_size();
     const size_t dst_stride = dst.stride(0) * dst.element_size();
-    const char*  src_ptr    = reinterpret_cast<const char*>(src.data_ptr());
-    char*        dst_ptr    = reinterpret_cast<char*>(dst.data_ptr());
+    if (nrows == 0 || row_bytes == 0) {
+        return;
+    }
+    const char* src_ptr = reinterpret_cast<const char*>(src.data_ptr());
+    char*       dst_ptr = reinterpret_cast<char*>(dst.data_ptr());
     for (size_t r = 0; r < nrows; ++r) {
-        memcpy(dst_ptr + r * dst_stride, src_ptr + r * src_stride, row_bytes);
+        std::memcpy(dst_ptr + r * dst_stride, src_ptr + r * src_stride, row_bytes);
     }
 }
 
@@ -268,6 +305,11 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                                       0,
                                       py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device.numel(),
                                       0);
+        addCudaGraphPrepareFillRegion(fill_params,
+                                      py_model_inputs_.attention_inputs.kv_cache_block_id_device,
+                                      0,
+                                      py_model_inputs_.attention_inputs.kv_cache_block_id_device.numel(),
+                                      0);
         if (has_hybrid_cache) {
             for (size_t g = 0; g < hybrid_cache_group; ++g) {
                 addCudaGraphPrepareFillRegion(
@@ -306,10 +348,8 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device.fill_(0);
 #endif
 
-    // NOTE: kv_cache_block_id_{host,device} are physical block IDs dedicated for cache store
-    // (see OpDefs.h). They are NOT consumed by any GPU attention kernel during CUDA graph replay;
-    // attention kernels only use kv_cache_kernel_block_id_{host,device}. Cache store operations
-    // run outside the CUDA graph and read from the original (non-graph) inputs directly.
+    // Sparse MLA consumes physical page IDs, while dense MHA kernels consume
+    // kernel-granularity block IDs. Mirror both tables into the capture buffers.
 
     // input_ids / input_hiddens are handled by prepareInputData. They MUST NOT be touched here
     // because the async-prepare path (PyWrappedModel::prepareAttentionInputs) calls this with
@@ -336,6 +376,10 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                       d2d_copies,
                       inputs.attention_inputs.kv_cache_kernel_block_id_device,
                       py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device);
+    addStridedD2DCopy(strided_d2d_copies,
+                      d2d_copies,
+                      inputs.attention_inputs.kv_cache_block_id_device,
+                      py_model_inputs_.attention_inputs.kv_cache_block_id_device);
 
     if (!is_prefill_cuda_graph_mode_) {
         // D2D copies — collected for single batched kernel launch
@@ -390,6 +434,8 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         // Common H2H strided copies for kv_cache block tables (both decode & prefill)
         copyStridedHost(inputs.attention_inputs.kv_cache_kernel_block_id_host,
                         py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_host);
+        copyStridedHost(inputs.attention_inputs.kv_cache_block_id_host,
+                        py_model_inputs_.attention_inputs.kv_cache_block_id_host);
 
         optimizedCopyAsync(inputs.attention_inputs.kv_cache_layer_to_group,
                            py_model_inputs_.attention_inputs.kv_cache_layer_to_group,
@@ -445,8 +491,10 @@ void CudaGraphRunner::updateKVCacheKernelBlockId(const PyModelInputs& inputs, Cu
     auto& py_model_inputs_ = graph_instances_[graph_idx].mem_hold_.py_model_inputs_;
     auto  attn_pyobj       = graph_instances_[graph_idx].mem_hold_.attn_pyobj_;
 
-    // Re-mirror only kv_cache_kernel_block_id device buffers; sibling fields
-    // were already copied by prepareAttentionInputs and are unchanged here.
+    // Re-mirror KV block-id device buffers. Dense kernels consume the
+    // kernel-granularity table; sparse MLA/indexer consume the physical page
+    // table, so both must stay fresh when a caller updates cache metadata after
+    // prepareAttentionInputs.
     FusedD2DCopyParams     d2d_copies;
     FusedStridedCopyParams strided_d2d_copies;
 
@@ -454,6 +502,10 @@ void CudaGraphRunner::updateKVCacheKernelBlockId(const PyModelInputs& inputs, Cu
                       d2d_copies,
                       inputs.attention_inputs.kv_cache_kernel_block_id_device,
                       py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device);
+    addStridedD2DCopy(strided_d2d_copies,
+                      d2d_copies,
+                      inputs.attention_inputs.kv_cache_block_id_device,
+                      py_model_inputs_.attention_inputs.kv_cache_block_id_device);
 
     const size_t hybrid_cache_group = hybridCacheGroup(inputs, py_model_inputs_, /*require_equal=*/false);
     if (hybrid_cache_group > 0) {
@@ -664,6 +716,10 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
 
     inputs.attention_inputs.kv_cache_kernel_block_id_host =
         torch::zeros({int(max_bs_), max_blocks}, options_cpu_int32_).pin_memory();
+
+    inputs.attention_inputs.kv_cache_block_id_device = torch::zeros({int(max_bs_), max_kv_blocks}, options_cuda_int32_);
+    inputs.attention_inputs.kv_cache_block_id_host =
+        torch::zeros({int(max_bs_), max_kv_blocks}, options_cpu_int32_).pin_memory();
 
     auto layer_num = kv_cache_layer_to_group_.size();
     if (layer_num > 0) {

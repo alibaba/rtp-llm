@@ -1,4 +1,5 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/models_py/bindings/core/CacheStoreAsyncWriter.h"
 #include "rtp_llm/models_py/bindings/core/CommonDefines.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
 #include "rtp_llm/cpp/distribute/CpuTpBroadcaster.h"
@@ -22,6 +23,8 @@
 #include <atomic>
 #include <algorithm>
 #include <memory>
+#include <condition_variable>
+#include <stdexcept>
 #if USING_CUDA
 #include <c10/cuda/CUDAGuard.h>
 #elif USING_ROCM
@@ -73,6 +76,11 @@ static std::once_flag    g_init_flag;
 static bool g_enable_comm_overlap = true;
 
 static int64_t g_device_id = 0;
+
+static bool pdDebugEnabled() {
+    const char* env = std::getenv("RTP_LLM_PD_DEBUG");
+    return env != nullptr && std::string(env) == "1";
+}
 }  // anonymous namespace
 
 // ============================================================
@@ -216,9 +224,9 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
     auto       kv_cache_data      = (uint64_t*)kv_cache.kv_cache_buffer.data_ptr();
     auto       kv_cache_owner     = std::make_shared<torch::Tensor>(kv_cache.kv_cache_buffer);
     const bool kv_gpu_mem         = kv_cache.kv_cache_buffer.is_cuda();
-    const bool has_kv_scale = kv_cache.kv_scale_buffer.defined() && kv_cache.kv_scale_buffer.numel() > 0
-                              && param.kv_scale_stride_bytes > 0;
-    uint64_t*  kv_scale_data      = nullptr;
+    const bool has_kv_scale =
+        kv_cache.kv_scale_buffer.defined() && kv_cache.kv_scale_buffer.numel() > 0 && param.kv_scale_stride_bytes > 0;
+    uint64_t*                      kv_scale_data = nullptr;
     std::shared_ptr<torch::Tensor> kv_scale_owner;
     if (has_kv_scale) {
         kv_scale_data  = (uint64_t*)kv_cache.kv_scale_buffer.data_ptr();
@@ -247,23 +255,22 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
                                 "failed to get prefix_length_host and input_length_host for cache store");
         RTP_LLM_CHECK_WITH_INFO(param.prefix_lengths_host.data_ptr<int>()[batch_id] % seq_size_per_block == 0,
                                 "prefix_length %% seq_size_per_block != 0");
+        // REBASE CONFLICT CONTEXT(6511f0467): source branch introduced
+        // `prefix_len`/`input_len` variables for PD debug output; new base
+        // added canonical CP-compact block accounting. Keep both.
+        const int  prefix_len = param.prefix_lengths_host.data_ptr<int>()[batch_id];
+        const int  input_len  = param.input_lengths_host.data_ptr<int>()[param.decoder_batch_size + batch_id];
         const bool is_cp_compact_fixed_region =
             param.cp_size > 1 && isDsv4FixedRegion(param.region_name) && seq_size_per_block % param.cp_size == 0;
         const size_t canonical_seq_size_per_block =
             is_cp_compact_fixed_region ? seq_size_per_block / static_cast<size_t>(param.cp_size) : seq_size_per_block;
-        int reuse_block_num = param.prefix_lengths_host.data_ptr<int>()[batch_id] / seq_size_per_block;
-        int block_num =
-            (param.input_lengths_host.data_ptr<int>()[param.decoder_batch_size + batch_id] + seq_size_per_block - 1)
-            / seq_size_per_block;
-        int canonical_reuse_block_num =
-            param.prefix_lengths_host.data_ptr<int>()[batch_id] / canonical_seq_size_per_block;
-        int canonical_block_num =
-            (param.input_lengths_host.data_ptr<int>()[param.decoder_batch_size + batch_id]
-             + canonical_seq_size_per_block - 1)
-            / canonical_seq_size_per_block;
-        auto request_id     = *(param.request_id.data_ptr<int64_t>() + batch_id);
-        auto event          = param.pre_created_event ? param.pre_created_event : runtimeCreateEvent();
-        auto request_blocks = std::make_shared<RequestBlockBuffer>(std::to_string(request_id), event);
+        int  reuse_block_num           = prefix_len / seq_size_per_block;
+        int  block_num                 = (input_len + seq_size_per_block - 1) / seq_size_per_block;
+        int  canonical_reuse_block_num = prefix_len / canonical_seq_size_per_block;
+        int  canonical_block_num       = (input_len + canonical_seq_size_per_block - 1) / canonical_seq_size_per_block;
+        auto request_id                = *(param.request_id.data_ptr<int64_t>() + batch_id);
+        auto event                     = param.pre_created_event ? param.pre_created_event : runtimeCreateEvent();
+        auto request_blocks            = std::make_shared<RequestBlockBuffer>(std::to_string(request_id), event);
         RTP_LLM_LOG_DEBUG(
             "write cache store, request id is %ld, blocks num is %ld", request_id, block_num + reuse_block_num);
 
@@ -308,20 +315,20 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
 
             constexpr size_t kDsv4SwaFp8EntryBytes  = 584;
             constexpr size_t kDsv4SwaTokenDataBytes = 576;
-            const bool       is_swa_cp_slice        = param.region_name == KVCacheRegionName::SWA_KV && param.cp_size > 1
-                                               && param.kv_block_stride_bytes % kDsv4SwaFp8EntryBytes == 0;
+            const bool       is_swa_cp_slice = param.region_name == KVCacheRegionName::SWA_KV && param.cp_size > 1
+                                         && param.kv_block_stride_bytes % kDsv4SwaFp8EntryBytes == 0;
 
             // Some layouts treat the block as a single opaque KV chunk. Only
             // the legacy MHA path splits k/v. SWA_KV is opaque logically, but
             // its FP8 physical block is striped as DATA then SCALES, so CP
             // slices must store those two regions independently.
             if (is_swa_cp_slice) {
-                constexpr size_t kSwaTokenDataBytes  = kDsv4SwaTokenDataBytes;
-                constexpr size_t kSwaTokenScaleBytes = kDsv4SwaFp8EntryBytes - kSwaTokenDataBytes;
-                const size_t     local_entries       = param.kv_block_stride_bytes / kDsv4SwaFp8EntryBytes;
-                const size_t     data_bytes          = local_entries * kSwaTokenDataBytes;
-                const size_t     scale_bytes         = local_entries * kSwaTokenScaleBytes;
-                void*            scale_addr          = static_cast<void*>(static_cast<int8_t*>(kv_addr) + data_bytes);
+                constexpr size_t      kSwaTokenDataBytes  = kDsv4SwaTokenDataBytes;
+                constexpr size_t      kSwaTokenScaleBytes = kDsv4SwaFp8EntryBytes - kSwaTokenDataBytes;
+                const size_t          local_entries       = param.kv_block_stride_bytes / kDsv4SwaFp8EntryBytes;
+                const size_t          data_bytes          = local_entries * kSwaTokenDataBytes;
+                const size_t          scale_bytes         = local_entries * kSwaTokenScaleBytes;
+                void*                 scale_addr = static_cast<void*>(static_cast<int8_t*>(kv_addr) + data_bytes);
                 std::shared_ptr<void> scale_block_addr(kv_cache_owner, scale_addr);
                 request_blocks->addBlock("kv_" + cache_key, kv_block_addr, data_bytes, kv_gpu_mem, true);
                 request_blocks->addBlock("kv_scale_" + cache_key, scale_block_addr, scale_bytes, kv_gpu_mem, true);
@@ -375,22 +382,130 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
             group_type,
             param.cp_rank,
             param.cp_size);
+        // REBASE CONFLICT CONTEXT(6511f0467): source branch logged
+        // `block_positions` from `blockPositionsForCacheTransfer`; new base
+        // uses `buildCacheStoreBlockPlan` to map cache-key indices to compact
+        // CP offset indices. Log both indices from the plan, then add blocks by
+        // `(key_index, offset_index)`.
+        if (pdDebugEnabled()) {
+            auto blockIdAt = [&](int index) -> int64_t {
+                if (index < 0 || index >= static_cast<int>(max_blocks_per_batch)) {
+                    return -1;
+                }
+                return static_cast<int64_t>(
+                    *(offset_addr + (param.decoder_batch_size + batch_id) * max_blocks_per_batch + index));
+            };
+            const int first_key_index    = block_plan.empty() ? -1 : static_cast<int>(block_plan.front().key_index);
+            const int first_offset_index = block_plan.empty() ? -1 : static_cast<int>(block_plan.front().offset_index);
+            const int last_key_index     = block_plan.empty() ? -1 : static_cast<int>(block_plan.back().key_index);
+            const int last_offset_index  = block_plan.empty() ? -1 : static_cast<int>(block_plan.back().offset_index);
+            const std::string first_cache_key =
+                first_key_index >= 0 ? param.cache_keys[batch_id * cache_keys_per_batch + first_key_index] : "";
+            const std::string last_cache_key =
+                last_key_index >= 0 ? param.cache_keys[batch_id * cache_keys_per_batch + last_key_index] : "";
+            RTP_LLM_LOG_INFO(
+                "[PD_DEBUG][WRITE_CACHE_STORE] request_id=%ld model_id=%zu layer=%d gid=%d region=%d batch_id=%zu "
+                "decoder_batch_size=%zu input_len=%d prefix_len=%d seq_size_per_block=%d block_num=%d "
+                "reuse_block_num=%d total_blocks=%d max_blocks_per_batch=%zu selected_blocks=%zu group_num=%zu "
+                "group_type=%d first_key_index=%d first_offset_index=%d last_key_index=%d last_offset_index=%d "
+                "first_cache_key=%s last_cache_key=%s first_block_id=%ld last_block_id=%ld opaque_or_mla=%d",
+                static_cast<long>(request_id),
+                param.model_id,
+                param.layer_id,
+                gid,
+                static_cast<int>(param.region_name),
+                batch_id,
+                param.decoder_batch_size,
+                input_len,
+                prefix_len,
+                static_cast<int>(seq_size_per_block),
+                block_num,
+                reuse_block_num,
+                total_blocks,
+                max_blocks_per_batch,
+                block_plan.size(),
+                group_num,
+                static_cast<int>(group_type),
+                first_key_index,
+                first_offset_index,
+                last_key_index,
+                last_offset_index,
+                first_cache_key.c_str(),
+                last_cache_key.c_str(),
+                static_cast<long>(blockIdAt(first_offset_index)),
+                static_cast<long>(blockIdAt(last_offset_index)),
+                static_cast<int>(param.use_opaque_kv_cache_store || mla_kvcache));
+        }
         for (const auto& pair : block_plan) {
             addBlock(pair.key_index, pair.offset_index);
         }
 
-        auto storeCallback = [layer_id = param.layer_id, request_id](bool success, CacheStoreErrorCode ec) {
-            if (!success) {
-                RTP_LLM_LOG_WARNING(
-                    "query [%ld], layer id [%d], call store kv cache failed, ec is %d, error msg is [%s]",
-                    request_id,
-                    layer_id,
-                    ec,
-                    ErrorCodeToString(transCacheStoreErrorCode(ec)).c_str());
-            }
+        struct StoreWaiter {
+            std::mutex              mutex;
+            std::condition_variable cv;
+            int                     pending{0};
+            bool                    failed{false};
+            CacheStoreErrorCode     first_ec{CacheStoreErrorCode::None};
         };
+        auto store_waiter = std::make_shared<StoreWaiter>();
+        auto async_writer = param.cache_store_async_writer;
+
+        auto storeCallback =
+            [layer_id = param.layer_id, request_id, store_waiter, async_writer](bool success, CacheStoreErrorCode ec) {
+                if (!success) {
+                    RTP_LLM_LOG_WARNING(
+                        "query [%ld], layer id [%d], call store kv cache failed, ec is %d, error msg is [%s]",
+                        request_id,
+                        layer_id,
+                        ec,
+                        ErrorCodeToString(transCacheStoreErrorCode(ec)).c_str());
+                }
+                if (async_writer != nullptr) {
+                    std::exception_ptr exception = nullptr;
+                    if (!success) {
+                        try {
+                            throw std::runtime_error("store kv cache callback failed");
+                        } catch (...) {
+                            exception = std::current_exception();
+                        }
+                    }
+                    async_writer->finishExternalTask(exception);
+                    return;
+                }
+                {
+                    std::lock_guard<std::mutex> lock(store_waiter->mutex);
+                    if (!success && !store_waiter->failed) {
+                        store_waiter->failed   = true;
+                        store_waiter->first_ec = ec;
+                    }
+                    store_waiter->pending--;
+                }
+                store_waiter->cv.notify_all();
+            };
         if (request_blocks->getBlocksCount() > 0) {
-            cache_store->store(request_blocks, storeCallback);
+            if (async_writer != nullptr) {
+                async_writer->trackExternalTask();
+            } else {
+                std::lock_guard<std::mutex> lock(store_waiter->mutex);
+                store_waiter->pending++;
+            }
+            try {
+                cache_store->store(request_blocks, storeCallback);
+            } catch (...) {
+                if (async_writer != nullptr) {
+                    async_writer->finishExternalTask(std::current_exception());
+                }
+                throw;
+            }
+            if (async_writer == nullptr) {
+                std::unique_lock<std::mutex> lock(store_waiter->mutex);
+                store_waiter->cv.wait(lock, [&store_waiter]() { return store_waiter->pending == 0; });
+                RTP_LLM_CHECK_WITH_INFO(!store_waiter->failed,
+                                        "query [%ld], layer id [%d], store kv cache callback failed, ec is %d",
+                                        request_id,
+                                        param.layer_id,
+                                        static_cast<int>(store_waiter->first_ec));
+            }
         } else {
             RTP_LLM_LOG_DEBUG("skip cache store because all selected blocks are null, request id [%ld], layer id [%d]",
                               request_id,

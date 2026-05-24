@@ -6,6 +6,7 @@
 #include <functional>
 #include <vector>
 #include <atomic>
+#include <unordered_set>
 
 #include "rtp_llm/cpp/disaggregate/cache_store/RequestBlockBuffer.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CommonDefine.h"
@@ -34,6 +35,8 @@ public:
     void
     updateResult(bool success, CacheStoreErrorCode ec, const std::shared_ptr<RequestBlockBuffer>& request_block_buffer);
 
+    void setMaxInflightRequestCount(size_t max_inflight_request_count);
+
 protected:
     virtual bool doCall(const std::shared_ptr<RequestBlockBuffer>& request_block_buffer, int64_t timeout_ms) = 0;
 
@@ -46,12 +49,16 @@ protected:
 
     int64_t         start_time_ms_     = 0;
     int64_t         deadline_ms_       = 0;
+    int64_t         timeout_ms_        = 0;
     CheckCancelFunc check_cancel_func_ = nullptr;
 
-    mutable std::mutex      mutex_;
-    std::condition_variable cond_;
-    int                     expect_layer_cnt_ = 0;
-    std::atomic_int         done_layer_cnt_   = 0;
+    mutable std::mutex              mutex_;
+    std::condition_variable         cond_;
+    int                             expect_layer_cnt_ = 0;
+    std::atomic_int                 done_layer_cnt_   = 0;
+    std::unordered_set<std::string> done_request_keys_;
+    size_t                          max_inflight_request_count_ = 0;
+    size_t                          next_request_idx_           = 0;
 };
 
 class LoadContext: public SyncContext {

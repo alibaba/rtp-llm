@@ -39,7 +39,7 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
             if (!tensor.defined() || tensor.dim() != 2) {
                 return stride_bytes;
             }
-            const size_t row_stride_bytes = static_cast<size_t>(tensor.stride(0)) * tensor.element_size();
+            const size_t row_stride_bytes       = static_cast<size_t>(tensor.stride(0)) * tensor.element_size();
             const int    layer_tokens_per_block = captured_kv_cache.seq_size_per_block;
             RTP_LLM_CHECK_WITH_INFO(layer_tokens_per_block > 0,
                                     "LayerKVCache.seq_size_per_block must be positive for cache-store %s write",
@@ -49,12 +49,13 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
             RTP_LLM_CHECK_WITH_INFO(store_tokens > 0, "cache-store tokens_per_block must be positive");
 
             if (store_tokens >= layer_tokens) {
-                RTP_LLM_CHECK_WITH_INFO(store_tokens % layer_tokens == 0,
-                                        "cache-store tokens_per_block=%zu must be divisible by layer tokens_per_block=%zu "
-                                        "for cache-store %s write",
-                                        store_tokens,
-                                        layer_tokens,
-                                        name);
+                RTP_LLM_CHECK_WITH_INFO(
+                    store_tokens % layer_tokens == 0,
+                    "cache-store tokens_per_block=%zu must be divisible by layer tokens_per_block=%zu "
+                    "for cache-store %s write",
+                    store_tokens,
+                    layer_tokens,
+                    name);
                 return row_stride_bytes * (store_tokens / layer_tokens);
             }
 
@@ -72,8 +73,7 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
 
         size_t kv_block_stride_bytes = captured_cache_store.kv_block_stride_bytes;
         if (captured_kv_cache.kv_cache_base.defined() && captured_kv_cache.kv_cache_base.dim() == 2) {
-            kv_block_stride_bytes =
-                resolve_store_stride(captured_kv_cache.kv_cache_base, kv_block_stride_bytes, "kv");
+            kv_block_stride_bytes = resolve_store_stride(captured_kv_cache.kv_cache_base, kv_block_stride_bytes, "kv");
         }
         size_t kv_scale_stride_bytes = captured_cache_store.kv_scale_stride_bytes;
         if (captured_kv_cache.kv_scale_base.defined() && captured_kv_cache.kv_scale_base.dim() == 2) {
@@ -106,9 +106,14 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
                                 captured_cache_store.use_opaque_kv_cache_store,
                                 captured_kv_cache.layer_id,
                                 captured_kv_cache.region_name,
+                                // REBASE CONFLICT CONTEXT(6511f0467): new base
+                                // passes CP sharding context here; source branch
+                                // added async writer ownership after the event.
+                                // Keep both constructor fields in OpData order.
                                 captured_cache_store.cp_rank,
                                 captured_cache_store.cp_size,
-                                std::move(event)};
+                                std::move(event),
+                                captured_cache_store.cache_store_async_writer};
 
         KvCacheInfo kv_cache_info;
         kv_cache_info.kv_cache_buffer = captured_kv_cache.kv_cache_base;

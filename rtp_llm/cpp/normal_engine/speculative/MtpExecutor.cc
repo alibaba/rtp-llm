@@ -547,6 +547,10 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     warmup_sentinel.kernel_seq_size_per_block = 0;
     const auto& target_cache_config           = cache_manager ? cache_manager->cacheConfig() : warmup_sentinel;
     const auto& draft_cache_config = cache_manager ? cache_manager->getMTPModuleCacheConfig(0) : warmup_sentinel;
+    // REBASE CONFLICT CONTEXT(6511f0467): source branch introduced runtime
+    // cache-layout propagation for sparse MLA cudagraph; new base already
+    // carries that through target/draft cache configs and additionally guards
+    // warmup null cache_manager. Keep the guarded base variant.
 
     GptModelInitParams model_init_params(
         {params.gpt_weights,

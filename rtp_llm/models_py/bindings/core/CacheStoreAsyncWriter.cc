@@ -30,6 +30,7 @@ void CacheStoreAsyncWriter::init() {
                             "CacheStoreAsyncWriter::init() called while already RUNNING. "
                             "Must call waitAllDone() before re-initializing.");
     pending_count_.store(0, std::memory_order_relaxed);
+    pending_external_count_.store(0, std::memory_order_relaxed);
     stored_exception_ = nullptr;
     state_            = State::RUNNING;
 }
@@ -48,17 +49,11 @@ void CacheStoreAsyncWriter::submit(std::function<void()> task) {
         try {
             task();
         } catch (...) {
-            {
-                std::lock_guard<std::mutex> ex_lock(exception_mutex_);
-                if (!stored_exception_) {
-                    stored_exception_ = std::current_exception();
-                }
-            }
+            recordException(std::current_exception());
             RTP_LLM_LOG_ERROR("CacheStoreAsyncWriter: background task threw an exception");
         }
         if (pending_count_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-            std::lock_guard<std::mutex> lock(wait_mutex_);
-            wait_cv_.notify_all();
+            notifyIfDone();
         }
     };
 
@@ -69,6 +64,23 @@ void CacheStoreAsyncWriter::submit(std::function<void()> task) {
                                 "CacheStoreAsyncWriter: pushTask failed (rc=%d). "
                                 "Queue full or thread pool in bad state.",
                                 static_cast<int>(rc));
+    }
+}
+
+void CacheStoreAsyncWriter::trackExternalTask() {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    RTP_LLM_CHECK_WITH_INFO(state_ == State::RUNNING,
+                            "CacheStoreAsyncWriter::trackExternalTask() called when not RUNNING. "
+                            "Call init() first.");
+    pending_external_count_.fetch_add(1, std::memory_order_acq_rel);
+}
+
+void CacheStoreAsyncWriter::finishExternalTask(std::exception_ptr exception) {
+    if (exception != nullptr) {
+        recordException(exception);
+    }
+    if (pending_external_count_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+        notifyIfDone();
     }
 }
 
@@ -84,7 +96,10 @@ void CacheStoreAsyncWriter::waitAllDone() {
 
     {
         std::unique_lock<std::mutex> lock(wait_mutex_);
-        wait_cv_.wait(lock, [this]() { return pending_count_.load(std::memory_order_acquire) == 0; });
+        wait_cv_.wait(lock, [this]() {
+            return pending_count_.load(std::memory_order_acquire) == 0
+                   && pending_external_count_.load(std::memory_order_acquire) == 0;
+        });
     }
 
     {
@@ -96,6 +111,24 @@ void CacheStoreAsyncWriter::waitAllDone() {
         auto ex           = stored_exception_;
         stored_exception_ = nullptr;
         std::rethrow_exception(ex);
+    }
+}
+
+void CacheStoreAsyncWriter::recordException(std::exception_ptr exception) {
+    if (exception == nullptr) {
+        return;
+    }
+    std::lock_guard<std::mutex> ex_lock(exception_mutex_);
+    if (!stored_exception_) {
+        stored_exception_ = exception;
+    }
+}
+
+void CacheStoreAsyncWriter::notifyIfDone() {
+    if (pending_count_.load(std::memory_order_acquire) == 0
+        && pending_external_count_.load(std::memory_order_acquire) == 0) {
+        std::lock_guard<std::mutex> lock(wait_mutex_);
+        wait_cv_.notify_all();
     }
 }
 

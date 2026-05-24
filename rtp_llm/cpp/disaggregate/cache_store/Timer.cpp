@@ -19,13 +19,18 @@ void Timer::stop() {
 }
 
 void Timer::callback() {
+    Callback callback;
     {
         autil::ScopedLock lock(_mutex);
-        if (!_stoped && _callback) {
-            _stoped = true;
-            _callback();
-            _callback = nullptr;
+        if (_stoped || !_callback) {
+            return;
         }
+        _stoped   = true;
+        callback  = std::move(_callback);
+        _callback = nullptr;
+    }
+    if (callback) {
+        callback();
     }
 }
 }  // namespace rtp_llm

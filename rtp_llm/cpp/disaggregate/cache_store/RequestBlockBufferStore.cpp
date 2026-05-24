@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include <torch/torch.h>
+#include <utility>
 
 namespace rtp_llm {
 
@@ -52,13 +53,20 @@ bool RequestBlockBufferStore::setRequestBlockBuffer(const std::shared_ptr<Reques
 
 bool RequestBlockBufferStore::setRequestBlockBufferWatchFunc(const std::string&              requestid,
                                                              RequestBlockBuffer::WatchFunc&& watch_func) {
+    return setRequestBlockBufferWatchFunc(requestid, std::move(watch_func), nullptr);
+}
+
+bool RequestBlockBufferStore::setRequestBlockBufferWatchFunc(
+    const std::string&                                     requestid,
+    RequestBlockBuffer::WatchFunc&&                        watch_func,
+    std::shared_ptr<const std::unordered_set<std::string>> filter_keys) {
     auto request_block_buffer = getOrInsertRequestBlockBuffer(requestid);
     if (request_block_buffer == nullptr) {
         RTP_LLM_LOG_WARNING("set request block buffer to request block buffer store failed, request id %s",
                             requestid.c_str());
         return false;
     }
-    return request_block_buffer->setWatchFunc(std::move(watch_func));
+    return request_block_buffer->setWatchFunc(std::move(watch_func), std::move(filter_keys));
 }
 
 void RequestBlockBufferStore::debugInfo() {

@@ -72,6 +72,65 @@ def _as_uint8(kv: torch.Tensor) -> torch.Tensor:
     return kv.view(torch.uint8) if kv.dtype != torch.uint8 else kv
 
 
+_PD_DEBUG_DECODE_LOG_COUNTS: Dict[str, int] = {}
+
+
+def _pd_debug_enabled() -> bool:
+    return os.environ.get("RTP_LLM_PD_DEBUG", "0") == "1"
+
+
+def _pd_debug_take(tag: str, limit: int = 16) -> bool:
+    key = f"{tag}:{os.getpid()}"
+    count = _PD_DEBUG_DECODE_LOG_COUNTS.get(key, 0)
+    if count >= limit:
+        return False
+    _PD_DEBUG_DECODE_LOG_COUNTS[key] = count + 1
+    return True
+
+
+def _cuda_graph_capturing() -> bool:
+    try:
+        return bool(
+            torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()
+        )
+    except Exception:
+        return False
+
+
+def _rank_tag() -> str:
+    return (
+        f"rank={os.environ.get('RANK', os.environ.get('WORLD_RANK', '?'))} "
+        f"local_rank={os.environ.get('LOCAL_RANK', '?')}"
+    )
+
+
+def _tensor_summary(t: Optional[torch.Tensor]) -> str:
+    if t is None:
+        return "None"
+    try:
+        if t.is_cuda and _cuda_graph_capturing():
+            return (
+                f"shape={tuple(t.shape)} device={t.device} dtype={t.dtype} " "capture=1"
+            )
+        if t.numel() == 0:
+            return f"shape={tuple(t.shape)} numel=0"
+        flat = t.detach().reshape(-1)
+        if flat.numel() <= 16:
+            tc = flat.cpu() if flat.is_cuda else flat
+            return f"shape={tuple(t.shape)} values={tc.tolist()}"
+        head = flat[:4]
+        tail = flat[-4:]
+        if head.is_cuda:
+            head = head.cpu()
+            tail = tail.cpu()
+        return (
+            f"shape={tuple(t.shape)} numel={flat.numel()} "
+            f"head={head.tolist()} tail={tail.tolist()}"
+        )
+    except Exception as exc:
+        return f"shape={tuple(t.shape)} summary_error={exc}"
+
+
 # ---------------------------------------------------------------------------
 # BF16 sparse MLA operator
 # ---------------------------------------------------------------------------
@@ -104,6 +163,7 @@ class SparseMlaOp(object):
         # Filled by plan() each forward
         self.block_table: Optional[torch.Tensor] = None
         self.mla_params: Optional[rtp_llm_ops.FlashInferMlaAttnParams] = None
+        self._pd_debug_is_prefill: bool = False
 
     # Sub-classes that consume KV in paged layout override this to True.
     expects_paged_kv: bool = False
@@ -116,6 +176,9 @@ class SparseMlaOp(object):
     ) -> None:
         self.block_table = block_table
         self.mla_params = mla_params
+        self._pd_debug_is_prefill = bool(
+            attn_inputs is not None and getattr(attn_inputs, "is_prefill", False)
+        )
 
     def _convert_topk_indices_to_global(
         self, topk_indices: torch.Tensor
@@ -260,6 +323,28 @@ class SparseMlaFp8Op(SparseMlaOp):
         )
         self._gather = self._build_gather_workspace() if gather_enabled else None
 
+        if _pd_debug_enabled() and not self._pd_debug_is_prefill:
+            if _pd_debug_take("plan", 32):
+                logging.info(
+                    "[PD_DEBUG][SPARSE_MLA_DECODE_PLAN] %s block_table=%s "
+                    "batch_indice=%s kvlen=%s positions=%s expanded_seq=%s "
+                    "decode_cu=%s gather_enabled=%s",
+                    _rank_tag(),
+                    _tensor_summary(block_table),
+                    _tensor_summary(getattr(mla_params, "batch_indice_d", None)),
+                    _tensor_summary(getattr(mla_params, "kvlen_d", None)),
+                    _tensor_summary(getattr(mla_params, "positions_d", None)),
+                    _tensor_summary(getattr(mla_params, "expanded_seq_lens", None)),
+                    (
+                        _tensor_summary(
+                            getattr(attn_inputs, "decode_cu_seqlens_d", None)
+                        )
+                        if attn_inputs is not None
+                        else "None"
+                    ),
+                    self._gather is not None,
+                )
+
     def _build_gather_workspace(self) -> Optional[_GatherWorkspace]:
         """Slice the prefill indptr and allocate the BF16 workspace.
 
@@ -361,6 +446,20 @@ class SparseMlaFp8Op(SparseMlaOp):
         global_indices = (
             self._convert_topk_indices_to_global(topk_indices).squeeze(1).unsqueeze(0)
         )
+        if _pd_debug_enabled() and not self._pd_debug_is_prefill and layer_id == 0:
+            if _pd_debug_take("forward", 32):
+                logging.info(
+                    "[PD_DEBUG][SPARSE_MLA_DECODE_FORWARD] %s q=%s kv_cache=%s "
+                    "topk=%s global_indices=%s block_table=%s kvlen=%s positions=%s",
+                    _rank_tag(),
+                    _tensor_summary(q),
+                    _tensor_summary(kv_cache),
+                    _tensor_summary(topk_indices),
+                    _tensor_summary(global_indices),
+                    _tensor_summary(self.block_table),
+                    _tensor_summary(getattr(self.mla_params, "kvlen_d", None)),
+                    _tensor_summary(getattr(self.mla_params, "positions_d", None)),
+                )
 
         attn_out, _ = flash_mla_with_kvcache(
             q=q.unsqueeze(0),
@@ -374,6 +473,13 @@ class SparseMlaFp8Op(SparseMlaOp):
             indices=global_indices,
             softmax_scale=self.scale,
         )
+        if _pd_debug_enabled() and not self._pd_debug_is_prefill and layer_id == 0:
+            if _pd_debug_take("forward_out", 32):
+                logging.info(
+                    "[PD_DEBUG][SPARSE_MLA_DECODE_OUTPUT] %s attn_out=%s",
+                    _rank_tag(),
+                    _tensor_summary(attn_out),
+                )
         return attn_out.squeeze(0)
 
 
@@ -562,9 +668,12 @@ class SparseMlaImpl(MlaImplBase):
             attn_inputs, self.seq_size_per_block, forbid_realloc
         )
         self._refresh_paged_mqa_schedule_metadata(attn_inputs, forbid_realloc)
+        block_table = getattr(attn_inputs, "kv_cache_block_id_device", None)
+        if not isinstance(block_table, torch.Tensor) or block_table.numel() == 0:
+            block_table = attn_inputs.kv_cache_kernel_block_id_device
         self.fmha_impl.plan(
             self.fmha_params,
-            attn_inputs.kv_cache_kernel_block_id_device,
+            block_table,
             attn_inputs=attn_inputs,
         )
 
