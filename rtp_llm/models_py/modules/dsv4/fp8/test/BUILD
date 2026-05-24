@@ -20,6 +20,7 @@ _DSV4_FP8_TESTS = [
     "test_compressor_gemm_merge",
     "test_compressor_prepare_metadata_varlen",
     "test_compressor_raw_dispatch",
+    "test_compressor_state_pool_cpu",
     "test_compressor_varlen_raw_path",
     "test_decode_swa_write",
     "test_dsv4_kv_cache",
