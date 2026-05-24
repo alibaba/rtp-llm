@@ -202,11 +202,21 @@ void NormalSamplerInputGatherer::setLogitsProcessorInputs(SamplerInputs&        
                                                           std::list<GenerateStreamPtr>& all_streams,
                                                           bool                          score_batch) const {
     LogitsProcessorStatesPtr state_ptr = std::make_shared<LogitsProcessorStates>();
-    std::for_each(all_streams.begin(), all_streams.end(), [&state_ptr, idx = 0](auto& stream) mutable {
-        for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
-            state_ptr->insert(processor, idx, idx + stream->currentBatchSize());
+    std::for_each(all_streams.begin(), all_streams.end(), [&state_ptr, score_batch, idx = 0](auto& stream) mutable {
+        if (score_batch) {
+            const int score_len = static_cast<int>(stream->scoreLen());
+            for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
+                for (int i = 0; i < score_len; ++i) {
+                    state_ptr->insert(processor, idx + i, idx + i + 1);
+                }
+            }
+            idx += score_len;
+        } else {
+            for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
+                state_ptr->insert(processor, idx, idx + stream->currentBatchSize());
+            }
+            idx += stream->currentBatchSize();
         }
-        idx += stream->currentBatchSize();
     });
     sampler_inputs.logits_processor_states_ptr = state_ptr;
 }

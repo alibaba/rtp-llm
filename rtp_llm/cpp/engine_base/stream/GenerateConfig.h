@@ -77,6 +77,7 @@ public:
 
     bool               in_think_mode       = false;
     int                max_thinking_tokens = 0;
+    std::vector<int>   begin_think_token_ids;
     std::vector<int>   end_think_token_ids;
     bool               gen_timeline = false;
     int                profile_step = 3;
@@ -89,7 +90,7 @@ public:
     std::string        trace_id;
     bool               force_batch = false;  // If true, streams with same batch_group_id must be scheduled together
     std::optional<int> batch_group_timeout;
-    std::string      unique_key;
+    std::string        unique_key;
 
     bool top1() {
         return top_k == 1;
@@ -139,11 +140,13 @@ public:
                      << ", stop_words_list:" << vectorsToString(stop_words_list)
                      << ", can_use_pd_separation: " << can_use_pd_separation << ", pd_separation: " << pd_separation
                      << ", in_think_mode: " << in_think_mode << ", max_thinking_tokens: " << max_thinking_tokens
+                     << ", begin_think_token_ids: " << vectorToString(begin_think_token_ids)
                      << ", end_think_token_ids: " << vectorToString(end_think_token_ids)
                      << ", gen_timeline: " << gen_timeline << ", profile_step: " << profile_step
                      << ", reuse_cache: " << reuse_cache << ", enable_device_cache: " << enable_device_cache
                      << ", enable_memory_cache: " << enable_memory_cache
-                     << ", enable_remote_cache: " << enable_remote_cache << ", force_batch: " << force_batch << ", unique_key: " << unique_key << "}";
+                     << ", enable_remote_cache: " << enable_remote_cache << ", force_batch: " << force_batch
+                     << ", unique_key: " << unique_key << "}";
         return debug_string.str();
     }
 
@@ -215,6 +218,7 @@ public:
         JSONIZE(sp_advice_prompt_token_ids);
         JSONIZE(in_think_mode);
         JSONIZE(max_thinking_tokens);
+        JSONIZE(begin_think_token_ids);
         JSONIZE(end_think_token_ids);
         JSONIZE(gen_timeline);
         JSONIZE(profile_step);

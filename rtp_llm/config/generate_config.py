@@ -52,6 +52,7 @@ class GenerateConfig(BaseModel):
         False  # same as `enable_thinking` in chat_template_kwargs, discard one in the future
     )
     chat_template_kwargs: Optional[Dict[str, Any]] = None
+    begin_think_token_ids: List[int] = []
     end_think_token_ids: List[int] = []
     num_beams: int = 1
     variable_num_beams: List[int] = []
@@ -348,6 +349,10 @@ class GenerateConfig(BaseModel):
             check_with_info(
                 is_union_positive_integer(self.sp_advice_prompt_token_ids),
                 f"sp_advice_prompt_token_ids {self.sp_advice_prompt_token_ids} is wrong data type",
+            )
+            check_with_info(
+                is_list_positive_integer(self.begin_think_token_ids),
+                f"begin_think_token_ids {self.begin_think_token_ids} is wrong data type",
             )
             if self.in_think_mode:
                 check_with_info(

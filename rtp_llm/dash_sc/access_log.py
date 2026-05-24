@@ -51,6 +51,7 @@ from google.protobuf.json_format import MessageToDict
 from rtp_llm.access_logger.log_utils import get_handler
 from rtp_llm.dash_sc.codec import (
     parse_input_ids_from_request,
+    parse_other_params,
     parse_sampling_params,
     unpack_int_tensor_flat,
 )
@@ -593,6 +594,15 @@ class _RpcAggregate:
             try:
                 sampling = parse_sampling_params(request)
                 self.generate_config = _sampling_to_dict(sampling)
+                other = parse_other_params(request)
+                self.generate_config["enable_thinking"] = other.enable_thinking
+                self.generate_config["max_new_think_tokens"] = (
+                    other.max_new_think_tokens
+                )
+                self.generate_config["timeout_ms"] = other.timeout_ms
+                self.generate_config["traffic_reject_priority"] = (
+                    other.traffic_reject_priority
+                )
             except Exception:
                 self.generate_config = None
 

@@ -289,6 +289,36 @@ class UnaryUnaryTest(InterceptorTestBase):
         self.assertLessEqual(rec["latency_ttfb_ms"], rec["latency_total_ms"])
         self.assertLess(rec["latency_total_ms"] - rec["latency_ttfb_ms"], 50.0)
 
+    def test_unary_logs_dashscope_thinking_controls(self) -> None:
+        def inner(request, context):
+            return _make_stream_response(generated_ids=[1], finish_reason=0)
+
+        handler = _make_handler(
+            request_streaming=False, response_streaming=False, inner=inner
+        )
+        behavior = _wrapped_behavior(self.interceptor, handler)
+        ctx = FakeContext()
+        request = _make_infer_request(
+            input_ids=[10, 20],
+            sampling={"max_new_think_tokens": 0, "n": 1, "min_length": 0},
+        )
+        request.parameters["ds_header_attributes"].string_param = json.dumps(
+            {
+                "x-ds-llm-thinking": "false",
+                "x-dashscope-inner-timeout": 1800,
+                "x-ds-request-priority": "10",
+            }
+        )
+
+        behavior(request, ctx)
+        cfg = self.records[0]["generate_config"]
+        self.assertEqual(cfg["max_new_think_tokens"], 0)
+        self.assertIs(cfg["enable_thinking"], False)
+        self.assertEqual(cfg["timeout_ms"], 1_800_000)
+        self.assertEqual(cfg["traffic_reject_priority"], 10)
+        self.assertEqual(cfg["num_return_sequences"], 1)
+        self.assertEqual(cfg["min_new_tokens"], 0)
+
     def test_unary_without_input_ids_tensor(self) -> None:
         """Health-check style RPC with no input_ids tensor: content fields null but trafic fine."""
 

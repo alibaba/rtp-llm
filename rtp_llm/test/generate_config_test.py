@@ -4,20 +4,21 @@ from unittest import TestCase, main
 
 from transformers import AutoTokenizer
 
-from rtp_llm.ops import SpecialTokens
-from rtp_llm.frontend.tokenizer_factory.tokenizers.tokenization_qwen import (
-    QWenTokenizer,
-)
-from rtp_llm.openai.api_datatype import ChatCompletionRequest, GenerateConfig
-from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
-from rtp_llm.pipeline.pipeline import Pipeline
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import (
     GenerateEnvConfig,
     PyMiscellaneousConfig,
     RenderConfig,
     VitConfig,
 )
-from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.frontend.tokenizer_factory.tokenizers.tokenization_qwen import (
+    QWenTokenizer,
+)
+from rtp_llm.openai.api_datatype import ChatCompletionRequest, GenerateConfig
+from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
+from rtp_llm.ops import SpecialTokens
+from rtp_llm.pipeline.pipeline import Pipeline
+
 
 class GenerateConfigTest(TestCase):
     def __init__(self, *args: Any, **kwargs: Any):
@@ -249,6 +250,28 @@ class OpenaiGenerateConfigTest(TestCase):
             **kwargs,
         )
 
+    def _extract_openai_generation_config(
+        self,
+        request: ChatCompletionRequest,
+        generate_env_config: Optional[GenerateEnvConfig] = None,
+    ):
+        model_config = ModelConfig()
+        model_config.generate_env_config = generate_env_config or GenerateEnvConfig()
+        model_config.render_config = RenderConfig()
+        model_config.special_tokens = SpecialTokens()
+        model_config.max_seq_len = 1024
+        model_config.template_type = None
+        model_config.model_name = ""
+        model_config.ckpt_path = ""
+
+        openai_endpoint = OpenaiEndpoint(
+            model_config=model_config,
+            misc_config=PyMiscellaneousConfig(),
+            vit_config=VitConfig(),
+            tokenizer=self.tokenizer,
+            backend_rpc_server_visitor=None,
+        )
+        return openai_endpoint._extract_generation_config(request)
 
     def _generate_config_with_stop_word(
         self,
@@ -268,13 +291,9 @@ class OpenaiGenerateConfigTest(TestCase):
 
         generate_env_config = GenerateEnvConfig()
         if env_stop_word_str is not None:
-            generate_env_config.stop_words_str = (
-                env_stop_word_str
-            )
+            generate_env_config.stop_words_str = env_stop_word_str
         if env_stop_word_list is not None:
-            generate_env_config.stop_words_list = (
-                env_stop_word_list
-            )
+            generate_env_config.stop_words_list = env_stop_word_list
 
         # Create ModelConfig object
         model_config = ModelConfig()
@@ -307,6 +326,103 @@ class OpenaiGenerateConfigTest(TestCase):
             request.extra_configs.stop_words_list = req_config_stop_word_list
 
         return openai_endpoint._extract_generation_config(request)
+
+    def test_extra_configs_max_thinking_tokens_zero_disables_thinking(self):
+        generate_env_config = GenerateEnvConfig()
+        generate_env_config.think_mode = 1
+        generate_env_config.think_end_token_id = 102
+        request = ChatCompletionRequest(
+            messages=[],
+            extra_configs=GenerateConfig(max_thinking_tokens=0),
+            enable_thinking=True,
+        )
+
+        self.assertTrue(request.disable_thinking())
+        config = self._extract_openai_generation_config(request, generate_env_config)
+
+        self.assertFalse(config.in_think_mode)
+        self.assertEqual(config.max_thinking_tokens, 0)
+        self.assertEqual(config.end_think_token_ids, [102])
+
+    def test_disable_thinking_zeroes_backend_thinking_budget(self):
+        generate_env_config = GenerateEnvConfig()
+        generate_env_config.think_mode = 1
+        generate_env_config.think_end_token_id = 102
+        request = ChatCompletionRequest(
+            messages=[],
+            extra_configs=GenerateConfig(max_thinking_tokens=16),
+            enable_thinking=False,
+        )
+
+        config = self._extract_openai_generation_config(request, generate_env_config)
+
+        self.assertFalse(config.in_think_mode)
+        self.assertEqual(config.max_thinking_tokens, 0)
+        self.assertEqual(config.end_think_token_ids, [102])
+
+    def test_openai_max_completion_tokens_thinking_budget_keeps_backend_limit(self):
+        generate_env_config = GenerateEnvConfig()
+        generate_env_config.think_mode = 1
+        generate_env_config.think_end_token_id = 102
+        request = ChatCompletionRequest(
+            messages=[],
+            max_tokens=200,
+            max_completion_tokens=100,
+            thinking_budget=10,
+            enable_thinking=True,
+        )
+
+        config = self._extract_openai_generation_config(request, generate_env_config)
+
+        self.assertEqual(config.max_new_tokens, 100)
+        self.assertEqual(config.max_thinking_tokens, 10)
+        self.assertTrue(config.in_think_mode)
+
+    def test_openai_max_completion_tokens_respects_max_tokens_total_cap(self):
+        generate_env_config = GenerateEnvConfig()
+        generate_env_config.think_mode = 1
+        generate_env_config.think_end_token_id = 102
+        request = ChatCompletionRequest(
+            messages=[],
+            max_tokens=105,
+            max_completion_tokens=100,
+            thinking_budget=10,
+            enable_thinking=True,
+        )
+
+        config = self._extract_openai_generation_config(request, generate_env_config)
+
+        self.assertEqual(config.max_new_tokens, 100)
+        self.assertEqual(config.max_thinking_tokens, 10)
+
+    def test_openai_max_completion_tokens_does_not_add_default_thinking_budget(self):
+        generate_env_config = GenerateEnvConfig()
+        generate_env_config.think_mode = 1
+        generate_env_config.think_end_token_id = 102
+        request = ChatCompletionRequest(
+            messages=[],
+            max_completion_tokens=100,
+            enable_thinking=True,
+        )
+
+        config = self._extract_openai_generation_config(request, generate_env_config)
+
+        self.assertEqual(config.max_new_tokens, 100)
+        self.assertEqual(config.max_thinking_tokens, 32000)
+        self.assertTrue(config.in_think_mode)
+
+    def test_openai_max_completion_tokens_non_positive_is_unset(self):
+        request = ChatCompletionRequest(
+            messages=[],
+            max_tokens=64,
+            max_completion_tokens=0,
+        )
+        config = self._extract_openai_generation_config(request)
+        self.assertEqual(config.max_new_tokens, 64)
+
+        request = ChatCompletionRequest(messages=[], max_completion_tokens=-1)
+        config = self._extract_openai_generation_config(request)
+        self.assertEqual(config.max_new_tokens, 32000)
 
     def assert_config_stop_word(
         self,
