@@ -2,6 +2,7 @@ package org.flexlb.dispatcher;
 
 import lombok.RequiredArgsConstructor;
 import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.http.HttpHeaders;
 import org.springframework.web.reactive.function.BodyInserters;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.reactive.function.server.ServerRequest;
@@ -11,9 +12,31 @@ import reactor.core.publisher.Mono;
 
 import java.net.URI;
 import java.time.Duration;
+import java.util.Locale;
+import java.util.Set;
 
 @RequiredArgsConstructor
 public class WebClientPassthroughClient implements PassthroughClient {
+
+    /**
+     * Hop-by-hop headers from RFC 7230 §6.1 plus framing headers WebClient must compute itself
+     * for the outbound connection. Forwarding any of these from the inbound request — or back on
+     * the response — corrupts the new connection: an inbound {@code Transfer-Encoding: chunked}
+     * double-frames the body WebClient is already about to chunk-encode; an inbound {@code Host}
+     * routes to whatever the original client put there; {@code Proxy-Authorization} would be
+     * relayed downstream against the original intent. Comparison is case-insensitive.
+     */
+    private static final Set<String> HOP_BY_HOP_LOWERCASE = Set.of(
+            "connection",
+            "keep-alive",
+            "proxy-authenticate",
+            "proxy-authorization",
+            "te",
+            "trailer",
+            "transfer-encoding",
+            "upgrade",
+            "host",
+            "content-length");
 
     private final WebClient webClient;
     private final FePool fePool;
@@ -48,16 +71,24 @@ public class WebClientPassthroughClient implements PassthroughClient {
             Flux<DataBuffer> bodyStream = request.bodyToFlux(DataBuffer.class);
             return webClient.method(request.method())
                     .uri(target)
-                    .headers(h -> h.addAll(request.headers().asHttpHeaders()))
+                    .headers(h -> copyEndToEndHeaders(request.headers().asHttpHeaders(), h))
                     .body(BodyInserters.fromDataBuffers(bodyStream))
                     .exchange()
                     .flatMap(clientResponse ->
                             ServerResponse.status(clientResponse.statusCode())
-                                    .headers(h -> h.addAll(clientResponse.headers().asHttpHeaders()))
+                                    .headers(h -> copyEndToEndHeaders(clientResponse.headers().asHttpHeaders(), h))
                                     .body(BodyInserters.fromDataBuffers(
                                             clientResponse.bodyToFlux(DataBuffer.class)
                                                     .timeout(Duration.ofMillis(maxStreamDurationMs))))
                                     .doOnCancel(() -> clientResponse.releaseBody().subscribe()));
+        });
+    }
+
+    private static void copyEndToEndHeaders(HttpHeaders source, HttpHeaders sink) {
+        source.forEach((name, values) -> {
+            if (!HOP_BY_HOP_LOWERCASE.contains(name.toLowerCase(Locale.ROOT))) {
+                sink.addAll(name, values);
+            }
         });
     }
 }

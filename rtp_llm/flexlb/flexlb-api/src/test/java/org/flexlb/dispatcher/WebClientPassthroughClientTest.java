@@ -118,6 +118,96 @@ class WebClientPassthroughClientTest {
     }
 
     @Test
+    void stripsHopByHopAndFramingHeadersFromOutboundRequest() throws Exception {
+        server.enqueue(new MockResponse().setBody("ok").setResponseCode(200));
+        String base = "http://" + server.getHostName() + ":" + server.getPort();
+        FePool pool = new FePool(() -> List.of(base));
+        WebClientPassthroughClient client =
+                new WebClientPassthroughClient(WebClient.builder().build(), pool, 60000);
+
+        MockServerRequest request = MockServerRequest.builder()
+                .method(HttpMethod.GET)
+                .uri(URI.create("/worker_status"))
+                .header("Host", "phony.example:9999")
+                .header("Connection", "close")
+                .header("Upgrade", "websocket")
+                .header("Transfer-Encoding", "chunked")
+                .header("Proxy-Authorization", "Basic deadbeef")
+                .header("TE", "trailers")
+                .header("X-Trace-Id", "trace-keep-me")
+                .body(Flux.empty());
+
+        StepVerifier.create(client.forward(request))
+                .assertNext(r -> Assertions.assertEquals(200, r.statusCode().value()))
+                .verifyComplete();
+
+        RecordedRequest rec = server.takeRequest();
+        Assertions.assertNotEquals("phony.example:9999", rec.getHeader("Host"),
+                "inbound Host must not leak — WebClient owns the outbound Host");
+        Assertions.assertNull(rec.getHeader("Connection"));
+        Assertions.assertNull(rec.getHeader("Upgrade"));
+        Assertions.assertNull(rec.getHeader("Proxy-Authorization"));
+        Assertions.assertNull(rec.getHeader("TE"));
+        Assertions.assertEquals("trace-keep-me", rec.getHeader("X-Trace-Id"),
+                "non-hop-by-hop headers must still pass through");
+    }
+
+    @Test
+    void hopByHopFilterIsCaseInsensitive() throws Exception {
+        server.enqueue(new MockResponse().setBody("ok").setResponseCode(200));
+        String base = "http://" + server.getHostName() + ":" + server.getPort();
+        FePool pool = new FePool(() -> List.of(base));
+        WebClientPassthroughClient client =
+                new WebClientPassthroughClient(WebClient.builder().build(), pool, 60000);
+
+        MockServerRequest request = MockServerRequest.builder()
+                .method(HttpMethod.GET)
+                .uri(URI.create("/worker_status"))
+                .header("PROXY-AUTHORIZATION", "Basic deadbeef")
+                .header("connection", "close")
+                .body(Flux.empty());
+
+        StepVerifier.create(client.forward(request))
+                .assertNext(r -> Assertions.assertEquals(200, r.statusCode().value()))
+                .verifyComplete();
+
+        RecordedRequest rec = server.takeRequest();
+        Assertions.assertNull(rec.getHeader("Proxy-Authorization"));
+        Assertions.assertNull(rec.getHeader("Connection"));
+    }
+
+    @Test
+    void stripsHopByHopHeadersFromForwardedResponse() throws Exception {
+        server.enqueue(new MockResponse()
+                .setBody("{\"ok\":true}")
+                .setHeader("Content-Type", "application/json")
+                .setHeader("Connection", "close")
+                .setHeader("Keep-Alive", "timeout=5")
+                .setHeader("Proxy-Authenticate", "Basic realm=fe")
+                .setHeader("X-Backend-Id", "fe-7"));
+        String base = "http://" + server.getHostName() + ":" + server.getPort();
+        FePool pool = new FePool(() -> List.of(base));
+        WebClientPassthroughClient client =
+                new WebClientPassthroughClient(WebClient.builder().build(), pool, 60000);
+
+        MockServerRequest request = MockServerRequest.builder()
+                .method(HttpMethod.GET)
+                .uri(URI.create("/worker_status"))
+                .body(Flux.empty());
+
+        StepVerifier.create(client.forward(request))
+                .assertNext(r -> {
+                    Assertions.assertEquals(200, r.statusCode().value());
+                    Assertions.assertFalse(r.headers().containsKey("Connection"));
+                    Assertions.assertFalse(r.headers().containsKey("Keep-Alive"));
+                    Assertions.assertFalse(r.headers().containsKey("Proxy-Authenticate"));
+                    Assertions.assertEquals("fe-7", r.headers().getFirst("X-Backend-Id"),
+                            "end-to-end response headers must still pass through");
+                })
+                .verifyComplete();
+    }
+
+    @Test
     void cancellingForwardDoesNotThrowAndReleasesUpstream() throws Exception {
         server.enqueue(new MockResponse().setBody("first"));
         server.enqueue(new MockResponse().setBody("second"));
