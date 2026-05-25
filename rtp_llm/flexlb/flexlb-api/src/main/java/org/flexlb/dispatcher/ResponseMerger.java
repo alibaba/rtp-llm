@@ -7,6 +7,8 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.util.List;
 
+/** @deprecated superseded by {@link PartialFailureMerger}; removed in V7 once callers are rewired. */
+@Deprecated
 public final class ResponseMerger {
 
     private ResponseMerger() {
