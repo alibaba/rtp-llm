@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 
+#include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/utils/HashUtil.h"
 
 namespace rtp_llm {
@@ -40,17 +41,26 @@ uint32_t nonzeroFieldBitmap(const CacheKeySalt& salt) {
     if (salt.Tlog     != 0) bitmap |= 1u << 4;
     return bitmap;
 }
-// TODO(F01-PR2): the K_state salt bit3 (and its nonzero bitmap bit) are
-// wired through ``applySalt`` and ``nonzeroFieldBitmap`` above, but no
-// producer constructs a non-zero CacheKeySalt anywhere today —
-// computeLocalHandshakeInfo() still receives hash_salt_version=0 and
-// hash_salt_nonzero_bitmap=0 (see KVCacheConnectorCoordinator::init).
-// F01-PR2 must wire the producer to read
-// ``CacheConfig::state_entries_per_block_constant`` (added by F01-PR1) and
-// emit it as ``salt.K_state`` before the unified-aware handshake is
-// activated. Without that producer, two PD peers running with different
-// K_state values would silently share cache keys (Risk 9.6) once
-// super_block_layout.enabled flips on.
+
+CacheKeySalt makeCacheKeySalt(const CacheConfig& cache_config) {
+    // F01-PR2 part A: only the K_state bit (bit3) is populated by this
+    // producer.  K_state == 0 → all-zero salt → byte-identical legacy
+    // cache_keys + handshake (version 0, bitmap 0).  K_state > 0 (set when
+    // ``--dsv4_state_entries_per_block`` flips on under
+    // DSV4CacheConfigHelper::applyConfig) → salt.K_state mirrors the
+    // override so PD peers with different K_state values produce
+    // distinct cache_keys (reuse-miss instead of silent corruption,
+    // Risk 9.6) AND advertise a non-zero (version, bitmap) over the
+    // handshake so validatePeerHandshake can refuse mixed-mode pairs
+    // (REQ-D1).  Other CacheKeySalt fields (model_id, dtype_id, lora_id,
+    // Tlog) are reserved for follow-up PRs and stay zero here.
+    CacheKeySalt salt{};
+    const int k_state = cache_config.state_entries_per_block_constant;
+    if (k_state > 0) {
+        salt.K_state = static_cast<uint32_t>(k_state);
+    }
+    return salt;
+}
 
 void initCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
                    CompleteTokenIdsPtr     complete_token_ids,

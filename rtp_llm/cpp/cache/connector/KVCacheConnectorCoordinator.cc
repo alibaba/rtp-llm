@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
 #include "rtp_llm/cpp/cache/KVCacheTransferPlanner.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -288,17 +289,44 @@ bool KVCacheConnectorCoordinator::init() {
     // M04 PR-3: pre-compute the local handshake info from the cache config.
     // Legacy path keeps all fields at 0; unified path
     // (super_block_layout.enabled == true) populates the pinned-input
-    // pool_descriptor_hash and the M03 salt schema (placeholder zero until
-    // M03-PR1 lands the salt schema_version surface). The validator
-    // ``validatePeerHandshake`` is invoked by per-connector peer-pairing
-    // code once the peer's HandshakeInfo arrives over the wire.  Until that
-    // wiring lands, the cached info is consulted by unit tests only —
-    // legacy ↔ legacy default behaviour is byte-identical (no RPC, no
-    // additional fields populated).
-    local_handshake_info_ = computeLocalHandshakeInfo(cache_config_,
-                                                      /*hash_salt_version=*/0u,
-                                                      /*hash_salt_nonzero_bitmap=*/0u);
-    RTP_LLM_LOG_INFO("PD pair local handshake info: %s", local_handshake_info_.toString().c_str());
+    // pool_descriptor_hash and the M03 salt schema.
+    //
+    // F01-PR2 part A: the salt is now built from
+    // ``CacheConfig::state_entries_per_block_constant`` via
+    // ``makeCacheKeySalt`` (single source of truth shared with the
+    // cache_key producer in KVCacheManager).  When K_state == 0 the salt
+    // is all-zero → bitmap=0 → hash_salt_version stays 0 → handshake is
+    // byte-identical to today.  When K_state > 0 the bitmap acquires
+    // bit3 and the schema version flips to ``kCacheKeySaltSchemaVersion``
+    // so peers with different K_state values trip
+    // ``validateHandshake``'s REQ-D1 check.
+    //
+    // The validator ``validatePeerHandshake`` is invoked by per-connector
+    // peer-pairing code once the peer's HandshakeInfo arrives over the
+    // wire.  That call site is still TODO (see F01-PR2-followup note
+    // below) — but the actual cache_key XOR is wired through to
+    // KVCacheManager in this PR so mixed-mode peers always produce
+    // divergent cache_keys (Risk 9.6: silent-reuse-miss instead of
+    // silent corruption) even if the handshake validation hook hasn't
+    // landed yet.
+    const CacheKeySalt local_salt    = makeCacheKeySalt(cache_config_);
+    const uint32_t     salt_bitmap   = nonzeroFieldBitmap(local_salt);
+    const uint32_t     salt_version  = (salt_bitmap != 0) ? kCacheKeySaltSchemaVersion : 0u;
+    local_handshake_info_ = computeLocalHandshakeInfo(cache_config_, salt_version, salt_bitmap);
+    RTP_LLM_LOG_INFO("PD pair local handshake info: %s (K_state=%d, salt.K_state=%u)",
+                     local_handshake_info_.toString().c_str(),
+                     cache_config_.state_entries_per_block_constant,
+                     local_salt.K_state);
+
+    // F01-PR2-followup: ``validatePeerHandshake`` is defined in this class
+    // (see below) but no PD accept path invokes it today.  Wiring it
+    // requires touching every connector's peer-pairing handler
+    // (memory / remote / p2p) to deserialize HandshakeInfo from the
+    // wire, route it here, and abort on failure.  That refactor is
+    // deferred to F01-PR2-followup; mixed-mode safety is currently
+    // guarded only at the cache_key layer (divergent salts ⇒
+    // reuse-miss).  Track in the F01-PR2 followup list together with
+    // the M08 kernel-side K_state consumer (decode_attn_metadata).
 
     if (kv_cache_config_.reuse_cache && kv_cache_config_.enable_memory_cache) {
         memory_connector_ = initMemoryConnector();

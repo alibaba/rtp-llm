@@ -150,11 +150,22 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
 
     // Cache-key computation is identical for CP and non-CP — we always have
     // the full sequence's token ids; rolling hash is at block_size granularity.
-    const int seq_size_per_block = config_.seq_size_per_block;
+    //
+    // F01-PR2 part A: the salt is constructed from CacheConfig via the
+    // shared ``makeCacheKeySalt`` producer (also used by the PD-handshake
+    // wiring in KVCacheConnectorCoordinator::init).  Default config
+    // (``state_entries_per_block_constant == 0``) → all-zero salt → XOR
+    // with zero in ``applySalt`` → byte-identical legacy cache_keys.
+    // When K_state > 0, salt.K_state mirrors the override so two PD peers
+    // running different ``--dsv4_state_entries_per_block`` values produce
+    // distinct cache_keys (Risk 9.6: silent reuse-miss rather than silent
+    // corruption from cross-K_state cache_key collision).
+    const int          seq_size_per_block = config_.seq_size_per_block;
+    const CacheKeySalt salt               = makeCacheKeySalt(config_);
     if (!effective->batch_kv_cache_resource->curBlocksNum()) {
-        initCacheKeys(effective->batch_kv_cache_resource, effective->complete_token_ids, seq_size_per_block);
+        initCacheKeys(effective->batch_kv_cache_resource, effective->complete_token_ids, seq_size_per_block, salt);
     } else {
-        updateCacheKeys(effective->batch_kv_cache_resource, effective->complete_token_ids, seq_size_per_block);
+        updateCacheKeys(effective->batch_kv_cache_resource, effective->complete_token_ids, seq_size_per_block, salt);
     }
 
     auto result = allocator_->malloc(*effective);

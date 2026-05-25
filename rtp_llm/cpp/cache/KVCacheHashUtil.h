@@ -7,6 +7,9 @@
 
 namespace rtp_llm {
 
+struct CacheConfig;  // forward decl to avoid pulling CacheConfig.h into the hash-util header
+
+
 // ---------------------------------------------------------------------------
 // Hash salt (M03 §3.1 / §4 — Hash Salt Strategy)
 //
@@ -44,6 +47,24 @@ constexpr uint32_t kCacheKeySaltSchemaVersion = 1u;
 // bit2=lora_id, bit3=K_state, bit4=Tlog. PD handshake carries
 // (schema_version, bitmap) so peers detect mismatched salt schemas.
 uint32_t nonzeroFieldBitmap(const CacheKeySalt& salt);
+
+// F01-PR2 producer: build the per-engine CacheKeySalt from a CacheConfig.
+// Single source of truth for both (a) the PD-handshake (version, bitmap)
+// emitted by KVCacheConnectorCoordinator::init and (b) the cache_key XOR
+// applied by KVCacheManager via initCacheKeys/updateCacheKeys.
+//
+// Currently populates only bit3 (K_state) from
+// ``CacheConfig::state_entries_per_block_constant`` (set by F01-PR1's
+// DSV4CacheConfigHelper::applyConfig hook). Default config →
+// state_entries_per_block_constant == 0 → all-zero salt → byte-identical
+// to today's unsalted cache_key bytes (XOR with zero = identity).
+//
+// Future PRs MUST extend this helper as additional CacheKeySalt fields
+// come online (model_id, dtype_id, lora_id, Tlog) — keeping the producer
+// in one place avoids the silent-divergence hazard the PR2 round-2
+// reviews flagged when the handshake metadata and the cache_key XOR
+// drift out of sync.
+CacheKeySalt makeCacheKeySalt(const CacheConfig& cache_config);
 
 // Initial fill: build cache_keys for all blocks (including the final partial block).
 // Also updates BatchKVCacheResource::last_block_aligned based on seq_len % seq_size_per_block.

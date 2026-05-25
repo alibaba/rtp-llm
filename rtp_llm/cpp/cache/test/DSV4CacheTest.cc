@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
@@ -1858,6 +1859,183 @@ TEST_F(DSV4AllocatorTest, FlashIncrMallocDecode) {
 
     FreeInfo free_info{batch_res};
     allocator->free(free_info);
+}
+
+// ============================================================
+// F01-PR2 part A: CacheKeySalt producer + handshake metadata
+//
+// makeCacheKeySalt(CacheConfig) is the single source of truth for both
+// (a) the PD handshake (version, bitmap) emitted by
+//     KVCacheConnectorCoordinator::init
+// (b) the cache_key XOR applied by KVCacheManager via
+//     initCacheKeys/updateCacheKeys.
+//
+// Default (K_state == 0) MUST be byte-identical to today (all-zero
+// salt, bitmap 0, version 0).  When K_state > 0 the salt mirrors the
+// override, the bitmap acquires bit3, and the version flips to
+// kCacheKeySaltSchemaVersion so a mixed-mode PD peer producing
+// different cache_keys is the conservative outcome.
+// ============================================================
+
+namespace {
+
+// Run initCacheKeys against a small synthetic batch and return the
+// produced cache_key vector for batch 0.  Helper for cross-K_state
+// inequality below.
+CacheKeysType runInitCacheKeysWithSalt(const CacheKeySalt& salt, int seq_size_per_block, int seq_len) {
+    // Deterministic non-trivial token pattern so the unsalted Jenkins
+    // roll yields a non-zero baseline that the salt XOR can perturb in a
+    // detectable way.
+    const int reserve = std::max(seq_len, seq_size_per_block) + 32;
+    auto cti = std::make_shared<CompleteTokenIds>(/*batch_size=*/1,
+                                                   /*beam_size=*/1,
+                                                   /*max_seq_len=*/reserve,
+                                                   seq_size_per_block);
+    auto generate_input             = std::make_shared<GenerateInput>();
+    generate_input->input_ids       = torch::empty({seq_len}, torch::kInt32);
+    int32_t* src                    = generate_input->input_ids.data_ptr<int32_t>();
+    for (int i = 0; i < seq_len; ++i) {
+        src[i] = (i * 31 + 7) & 0xffff;
+    }
+    generate_input->generate_config = std::make_shared<GenerateConfig>();
+    cti->init(generate_input);
+
+    auto batch_res = std::make_shared<BatchKVCacheResource>();
+    batch_res->resetBatchSize(1);
+    batch_res->initGroups(/*group_nums=*/1, /*layer_num=*/1);
+
+    initCacheKeys(batch_res, cti, seq_size_per_block, salt);
+    return batch_res->cacheKeys(0);
+}
+
+}  // namespace
+
+TEST(DSV4CacheKeySaltProducerTest, DefaultOffSaltEmptyBitmapZeroVersionZero) {
+    // K_state == 0 (default) -> all-zero salt fields, bitmap 0, and the
+    // schema-version selector at the coordinator call site stays 0
+    // (legacy/legacy peers handshake trivially).
+    CacheConfig cfg;
+    EXPECT_EQ(cfg.state_entries_per_block_constant, 0);
+
+    const CacheKeySalt salt = makeCacheKeySalt(cfg);
+    EXPECT_EQ(salt.model_id, 0u);
+    EXPECT_EQ(salt.dtype_id, 0u);
+    EXPECT_EQ(salt.lora_id, 0u);
+    EXPECT_EQ(salt.K_state, 0u);
+    EXPECT_EQ(salt.Tlog, 0u);
+
+    const uint32_t bitmap = nonzeroFieldBitmap(salt);
+    EXPECT_EQ(bitmap, 0u);
+
+    // Mirrors the selector in KVCacheConnectorCoordinator::init: version
+    // is 0 when bitmap is 0 so legacy peers stay byte-identical.
+    const uint32_t version = (bitmap != 0) ? kCacheKeySaltSchemaVersion : 0u;
+    EXPECT_EQ(version, 0u);
+}
+
+TEST(DSV4CacheKeySaltProducerTest, KStateFourPopulatesBit3AndFlipsVersion) {
+    CacheConfig cfg;
+    cfg.state_entries_per_block_constant = 4;
+
+    const CacheKeySalt salt = makeCacheKeySalt(cfg);
+    EXPECT_EQ(salt.model_id, 0u);
+    EXPECT_EQ(salt.dtype_id, 0u);
+    EXPECT_EQ(salt.lora_id, 0u);
+    EXPECT_EQ(salt.K_state, 4u);
+    EXPECT_EQ(salt.Tlog, 0u);
+
+    const uint32_t bitmap = nonzeroFieldBitmap(salt);
+    EXPECT_EQ(bitmap, 1u << 3) << "K_state must light up bit3 only";
+
+    // When the bitmap is non-zero the coordinator promotes the version
+    // to ``kCacheKeySaltSchemaVersion`` so cross-K_state peers trip
+    // REQ-D1 in validateHandshake.
+    const uint32_t version = (bitmap != 0) ? kCacheKeySaltSchemaVersion : 0u;
+    EXPECT_EQ(version, kCacheKeySaltSchemaVersion);
+    EXPECT_EQ(kCacheKeySaltSchemaVersion, 1u);
+}
+
+TEST(DSV4CacheKeySaltProducerTest, KStateOneIsLowerBoundStillSaltsBit3) {
+    // K_state == 1 is the tightest collapse the F01-PR1 hook permits;
+    // bitmap/version behaviour must match K_state == 4.
+    CacheConfig cfg;
+    cfg.state_entries_per_block_constant = 1;
+
+    const CacheKeySalt salt = makeCacheKeySalt(cfg);
+    EXPECT_EQ(salt.K_state, 1u);
+    EXPECT_EQ(nonzeroFieldBitmap(salt), 1u << 3);
+}
+
+TEST(DSV4CacheKeySaltProducerTest, CrossKStateCacheKeysDiverge) {
+    // The load-bearing safety guarantee: cache_keys produced under
+    // different K_state values MUST differ block-for-block so a
+    // mixed-mode PD pair gets a clean reuse-miss instead of silently
+    // colliding on opaque cache_key strings.
+    constexpr int kSeqSizePerBlock = 16;
+    constexpr int kSeqLen          = 16 * 3;  // 3 full blocks, no partial tail
+
+    CacheConfig cfg_off;
+    CacheConfig cfg_on;
+    cfg_on.state_entries_per_block_constant = 4;
+
+    const CacheKeySalt salt_off = makeCacheKeySalt(cfg_off);
+    const CacheKeySalt salt_on  = makeCacheKeySalt(cfg_on);
+
+    const CacheKeysType keys_off = runInitCacheKeysWithSalt(salt_off, kSeqSizePerBlock, kSeqLen);
+    const CacheKeysType keys_on  = runInitCacheKeysWithSalt(salt_on, kSeqSizePerBlock, kSeqLen);
+
+    ASSERT_EQ(keys_off.size(), 3u);
+    ASSERT_EQ(keys_on.size(), 3u);
+
+    // Every block_id must differ — the K_state XOR perturbs the rolling
+    // hash at every step, not just the first block.
+    for (size_t i = 0; i < keys_off.size(); ++i) {
+        EXPECT_NE(keys_off[i], keys_on[i])
+            << "block " << i << " collided across K_state values (silent corruption hazard)";
+    }
+}
+
+TEST(DSV4CacheKeySaltProducerTest, DefaultOffCacheKeysAreLegacyIdentical) {
+    // Default config (K_state == 0) -> all-zero salt -> XOR identity
+    // -> cache_keys MUST match the legacy unsalted overload byte-for-
+    // byte.  Anyone landing F01-PR2 must NOT shift production cache_key
+    // bytes when the K_state hook is off.
+    constexpr int kSeqSizePerBlock = 16;
+    constexpr int kSeqLen          = 16 * 4;  // 4 full blocks
+
+    CacheConfig cfg_off;
+    const CacheKeySalt salt_off = makeCacheKeySalt(cfg_off);
+    EXPECT_EQ(nonzeroFieldBitmap(salt_off), 0u);
+
+    const CacheKeysType keys_salted = runInitCacheKeysWithSalt(salt_off, kSeqSizePerBlock, kSeqLen);
+
+    // Build an unsalted baseline via the legacy overload (zero-salt
+    // wrapper) and compare element-wise.
+    auto cti = std::make_shared<CompleteTokenIds>(/*batch_size=*/1,
+                                                   /*beam_size=*/1,
+                                                   /*max_seq_len=*/kSeqLen + 32,
+                                                   kSeqSizePerBlock);
+    auto generate_input             = std::make_shared<GenerateInput>();
+    generate_input->input_ids       = torch::empty({kSeqLen}, torch::kInt32);
+    int32_t* src                    = generate_input->input_ids.data_ptr<int32_t>();
+    for (int i = 0; i < kSeqLen; ++i) {
+        src[i] = (i * 31 + 7) & 0xffff;
+    }
+    generate_input->generate_config = std::make_shared<GenerateConfig>();
+    cti->init(generate_input);
+
+    auto batch_res = std::make_shared<BatchKVCacheResource>();
+    batch_res->resetBatchSize(1);
+    batch_res->initGroups(/*group_nums=*/1, /*layer_num=*/1);
+    initCacheKeys(batch_res, cti, kSeqSizePerBlock);  // legacy unsalted overload
+    const CacheKeysType keys_legacy = batch_res->cacheKeys(0);
+
+    ASSERT_EQ(keys_salted.size(), keys_legacy.size());
+    for (size_t i = 0; i < keys_salted.size(); ++i) {
+        EXPECT_EQ(keys_salted[i], keys_legacy[i])
+            << "default-off salt produced a different key at block " << i
+            << " (must be byte-identical to legacy)";
+    }
 }
 
 }  // namespace test
