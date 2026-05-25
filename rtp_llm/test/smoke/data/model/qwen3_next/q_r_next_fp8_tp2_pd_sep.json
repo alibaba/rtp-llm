@@ -26,7 +26,7 @@
             "index": 0,
             "message": {
               "role": "assistant",
-              "content": "当然可以！以下是围绕“英语听力方法”主题提出的几个有深度和实用性的问题，适合用于学习反思、教学讨论或研究：\n\n1. What are the most effective strategies for improving English listening skills at different proficiency levels (beginner, intermediate, advanced)?  \n2. How can active listening techniques, such as note-taking or shadowing, be integrated into daily English practice for better comprehension?  \n3. Why do many learners struggle with native-speed English speech, and what specific methods can",
+              "content": "当然可以！以下是围绕“英语听力方法”主题提出的几个有深度和实用性的问题，适合用于学习反思、教学研讨或自我提升：\n\n1. What are the most effective active listening strategies for improving English comprehension, and how can learners apply them in daily practice?\n\n2. How does shadowing (repeating audio immediately after hearing it) enhance listening skills, and what types of materials are best suited for this technique?\n\n3. Why is listening to native speakers with different accents important, and",
               "reasoning_content": null,
               "function_call": null,
               "tool_calls": null,
@@ -84,7 +84,6 @@
       }
     },
     {
-      "endpoint": "/",
       "query": {
         "prompt_batch": [
           "$prompt:s1",

@@ -61,15 +61,6 @@ def auto_configure_deepep(
     dp_size = parallelism_config.dp_size
     moe_config.ll_num_max_token = ll_num_max_token
 
-    # Explicit MoriEP is incompatible with use_all_gather (PURE_TP router).
-    # Disable use_all_gather when user explicitly requests MoriEP.
-    if deep_ep_config.use_mori_ep:
-        moe_config.use_all_gather = False
-        logging.info(
-            "use_mori_ep is explicitly enabled; disabling use_all_gather "
-            "to allow MoriEP router selection"
-        )
-
     # allgather default applies only to single GPU and pure TP (no CP).
     # PureCP / PureDP routers exist but must be opted in via --moe_strategy
     # (auto-selection falls back to DeepEP). CP-enabled topologies share the
@@ -125,7 +116,6 @@ def auto_configure_deepep(
         deep_ep_config.use_deepep_moe is None
         and deep_ep_config.use_deepep_internode is None
         and deep_ep_config.use_deepep_low_latency is None
-        and deep_ep_config.use_mori_ep is None
     ):
         # All are None, use auto configuration
         _apply_auto_deepep_config(
@@ -142,27 +132,11 @@ def auto_configure_deepep(
             moe_config.use_deepep_internode = deep_ep_config.use_deepep_internode
         if deep_ep_config.use_deepep_low_latency is not None:
             moe_config.use_deepep_low_latency = deep_ep_config.use_deepep_low_latency
-        if deep_ep_config.use_mori_ep is not None:
-            moe_config.use_mori_ep = deep_ep_config.use_mori_ep
-
-        # MoriEP does not support low-latency mode. When use_mori_ep is
-        # explicitly enabled and use_deepep_low_latency was not explicitly set
-        # by the user, disable the default True value so that MoriEP strategy
-        # can pass its check_conditions.
-        if moe_config.use_mori_ep and deep_ep_config.use_deepep_low_latency is None:
-            moe_config.use_deepep_low_latency = False
-            logging.info(
-                "use_mori_ep is enabled and use_deepep_low_latency was not "
-                "explicitly set; disabling the default low-latency mode so "
-                "that MoriEP strategy is selectable"
-            )
-
         logging.info(
-            f"Using user-specified DeepEP/MoriEP configuration:\n"
+            f"Using user-specified DeepEP configuration:\n"
             f"  USE_DEEPEP_MOE: {moe_config.use_deepep_moe}\n"
             f"  USE_DEEPEP_INTERNODE: {moe_config.use_deepep_internode}\n"
-            f"  USE_DEEPEP_LOW_LATENCY: {moe_config.use_deepep_low_latency}\n"
-            f"  USE_MORI_EP: {moe_config.use_mori_ep}\n"
+            f"  USE_DEEPEP_LOW_LATENCY: {moe_config.use_deepep_low_latency}"
             f"  ll_num_max_token: {moe_config.ll_num_max_token}"
         )
 
@@ -401,18 +375,12 @@ def setup_default_args(py_env_configs):
             "[MI308X] enable FT_DISABLE_CUSTOM_AR by default, as amd has own implementation."
         )
 
-    if (
-        os.path.exists("/dev/kfd")
-        and py_env_configs.kv_cache_config.seq_size_per_block == 0
-    ):
+    if os.path.exists("/dev/kfd") and py_env_configs.kv_cache_config.seq_size_per_block == 0:
         py_env_configs.kv_cache_config.seq_size_per_block = 16
         logging.info(
             "[MI308X] set SEQ_SIZE_PER_BLOCK 16 by default, as it just support 16 now."
         )
-    if (
-        os.path.exists("/dev/alixpu")
-        and py_env_configs.kv_cache_config.seq_size_per_block == 0
-    ):
+    if os.path.exists("/dev/alixpu") and py_env_configs.kv_cache_config.seq_size_per_block == 0:
         py_env_configs.kv_cache_config.seq_size_per_block = 256
         logging.info("set SEQ_SIZE_PER_BLOCK 256 by default")
     if py_env_configs.kv_cache_config.seq_size_per_block == 0:

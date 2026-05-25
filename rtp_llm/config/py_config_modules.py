@@ -388,7 +388,7 @@ class JITConfig:
 
 class DeepEPConfig:
     """
-    Configuration for DeepEP / MoriEP settings.
+    Configuration for DeepEP settings.
     Used to track whether user has explicitly set these values.
     If all are None, auto_configure_deepep will be called.
     Otherwise, these values will be copied to moe_config.
@@ -398,14 +398,12 @@ class DeepEPConfig:
         self.use_deepep_moe: Optional[bool] = None
         self.use_deepep_internode: Optional[bool] = None
         self.use_deepep_low_latency: Optional[bool] = None
-        self.use_mori_ep: Optional[bool] = None
 
     def to_string(self):
         return (
             f"use_deepep_moe: {self.use_deepep_moe}\n"
             f"use_deepep_internode: {self.use_deepep_internode}\n"
-            f"use_deepep_low_latency: {self.use_deepep_low_latency}\n"
-            f"use_mori_ep: {self.use_mori_ep}"
+            f"use_deepep_low_latency: {self.use_deepep_low_latency}"
         )
 
 

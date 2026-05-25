@@ -246,9 +246,7 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         return combined_x
 
     def _finalize_post_tp_gather(
-        self,
-        combined_x: torch.Tensor,
-        extra_finalize_args: Optional[Dict[str, Any]],
+        self, combined_x: torch.Tensor, extra_finalize_args: Optional[Dict[str, Any]]
     ) -> torch.Tensor:
         """Finalize post tp gather for DeepEP Low-Latency.
         Args:
