@@ -22,7 +22,8 @@ public:
                                     const RuntimeConfig&                             runtime_config,
                                     const KVCacheConfig&                             kv_cache_config,
                                     const std::optional<WarmUpResult>&               warm_up_result = std::nullopt,
-                                    const std::optional<SpeculativeExecutionConfig>& sp_config      = std::nullopt);
+                                    const std::optional<SpeculativeExecutionConfig>& sp_config      = std::nullopt,
+                                    RoleType                                         role_type      = RoleType::PDFUSION);
     static CacheConfig createSpConfig(const ModelConfig&                 score_model_config,
                                       const ModelConfig&                 propose_model_config,
                                       const ParallelismConfig&           parallelism_config,
@@ -31,7 +32,8 @@ public:
                                       const SpeculativeExecutionConfig&  sp_config,
                                       const std::optional<WarmUpResult>& warm_up_result,
                                       bool                               is_mtp,
-                                      bool                               is_eagle);
+                                      bool                               is_eagle,
+                                      RoleType                           role_type = RoleType::PDFUSION);
 
 private:
     // Removed functions moved to MemoryEvaluationHelper:

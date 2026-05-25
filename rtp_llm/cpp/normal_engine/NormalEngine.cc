@@ -371,7 +371,8 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                          sp_config,
                                                          warm_up_result,
                                                          isMTPEagle(),
-                                                         isEagle());
+                                                         isEagle(),
+                                                         pd_sep_config.role_type);
 
         resource_context_.cache_manager = make_shared<KVCacheManager>(config,
                                                                       false,
@@ -390,8 +391,13 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
         kv_cache_group_num_      = cache_cfg.groupNums();
         kv_cache_layer_to_group_ = cache_cfg.layer_to_group_id;
     } else {
-        auto result = CacheConfigCreator::createConfig(
-            model_config_, parallelism_config, runtime_config, kv_cache_config, warm_up_result);
+        auto result = CacheConfigCreator::createConfig(model_config_,
+                                                       parallelism_config,
+                                                       runtime_config,
+                                                       kv_cache_config,
+                                                       warm_up_result,
+                                                       std::nullopt,
+                                                       pd_sep_config.role_type);
         RTP_LLM_LOG_INFO("create cache manager with config %s", result.debugString().c_str());
         RTP_LLM_LOG_INFO("create cache manager with block nums %d, block size %ld KB",
                          result.block_num,

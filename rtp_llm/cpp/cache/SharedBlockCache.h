@@ -156,19 +156,25 @@ public:
     //     paths above remain the steady-state code for non-unified configs.
     //   * Locking (see §3.0 of M03 plan):
     //       L1 = ``SharedBlockCache::mu_`` (held only inside these methods'
-    //            select / snapshot phase, and re-acquired briefly as a leaf
-    //            during cascade for the re-residency probe).
+    //            select / snapshot phase).
     //       L1 is ALWAYS RELEASED before crossing into the per-pool
     //       ``BlockPool::blockCacheFree`` (which takes its own L3 lock pair).
-    //   * Snapshot-then-cascade pattern (Fix 79 / Fix 80) prevents the
-    //     lock-drop / put-overflow race.
+    //   * Snapshot-then-cascade pattern (Fix 79) prevents the lock-drop /
+    //     put-overflow race. The cascade tail issues one dec per snapshot
+    //     entry unconditionally — CACHE refcounts are event-paired (each
+    //     ``putUnified`` insertion bumps once; each cascade entry decs
+    //     once). XR-C1: an earlier re-residency probe attempted to skip
+    //     the dec when a racing put restored the displaced key at the same
+    //     S; that skip un-paired the original bump and leaked CACHE / per-
+    //     pool refs permanently. The probe has been removed.
     //
     // ``putUnified``:
     //   Inserts ``{cache_key, super_block_id}`` (length-1 slots vector).
     //   When the LRU overflows ``kCacheMaxCapacity``, surfaces the displaced
     //   item via the LRUCache overflow callback, releases ``mu_``, and
-    //   cascade-frees the displaced super_block_id's per-pool blocks under
-    //   the same re-residency re-check used by ``evictAndFreeUnified``.
+    //   unconditionally cascade-frees the displaced super_block_id's
+    //   per-pool blocks + decs UnifiedRefCounter CACHE (event-paired with
+    //   the original put's bump; see XR-C1 fix notes in .cc).
     void putUnified(CacheKeyType cache_key, int super_block_id, bool is_resident);
 
     // ``matchUnified``:
@@ -190,10 +196,12 @@ public:
     std::vector<UnifiedCacheItem> selectAndEvictUnified(size_t min_super_blocks);
 
     // ``evictAndFreeUnified``:
-    //   Calls ``selectAndEvictUnified`` (mu_ dropped), then cascade-frees
-    //   each item's per-pool blocks. Re-acquires ``mu_`` briefly per item to
-    //   re-check LRU residency before declaring the dec safe (R8 / Fix 80).
-    //   Returns the number of items actually cascaded.
+    //   Calls ``selectAndEvictUnified`` (mu_ dropped), then unconditionally
+    //   cascade-frees each item's per-pool blocks + decs UnifiedRefCounter
+    //   CACHE. CACHE is event-paired with putUnified, not residency-paired
+    //   with LRU membership, so the snapshot dec is correct even if a
+    //   racing putUnified has re-inserted the same key at the same S
+    //   (XR-C1 fix). Returns the number of items actually cascaded.
     size_t evictAndFreeUnified(size_t min_super_blocks);
 
     // Decrement the per-item ``use_ref``. Called by ``ReleaseGuard::abandon``
@@ -255,6 +263,14 @@ public:
     }
 
 private:
+    // XR-C1: shared cascade body for ``putUnified``'s overflow tail and
+    // ``evictAndFreeUnified``'s phase B. Drops one CACHE/per-pool ref per
+    // snapshot entry unconditionally — event-paired with the put that
+    // produced the entry. Must be called WITHOUT ``mu_`` held (per-pool
+    // ``blockCacheFree`` and ``UnifiedRefCounter::dec`` each take their
+    // own locks; L1 stays a leaf).
+    void cascadeUnifiedSnapshot(const std::vector<UnifiedCacheItem>& snapshot, size_t* cascaded_out);
+
     static const size_t kCacheMaxCapacity = 10000000;
 
     LRUCacheType       lru_cache_;

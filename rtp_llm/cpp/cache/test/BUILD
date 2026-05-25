@@ -357,3 +357,19 @@ cc_test(
     env = {},
     exec_properties = {'gpu':'H20'},
 )
+
+cc_test(
+    name = "shared_block_cache_unified_test",
+    srcs = [
+        "SharedBlockCacheUnifiedTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache:block_pool",
+        "//rtp_llm/cpp/cache:cache_types",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps() + cuda12_torch_link_deps,
+    env = {},
+)

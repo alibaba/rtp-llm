@@ -44,7 +44,8 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
                                              const RuntimeConfig&                             runtime_config,
                                              const KVCacheConfig&                             kv_cache_config,
                                              const std::optional<WarmUpResult>&               warm_up_result,
-                                             const std::optional<SpeculativeExecutionConfig>& sp_config) {
+                                             const std::optional<SpeculativeExecutionConfig>& sp_config,
+                                             RoleType                                         role_type) {
     CacheConfig config    = CacheConfigCreator::createBasicConfig(model_config, parallelism_config, kv_cache_config);
     uint32_t    block_num = 0;
 
@@ -65,7 +66,20 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
     // STATE residency toggle must be set before the pre-pass finalizeBlockNums
     // so fixed_pool_reserve_bytes correctly excludes STATE-pool addition bytes
     // when STATE lives on pinned CPU.
-    config.state_pool_uses_pinned_cpu = kv_cache_config.state_pool_memory_mb > 0 && config.state_block_size_bytes > 0;
+    //
+    // Single source of truth for state-pool residency:
+    //   - Explicit env-driven: state_pool_memory_mb > 0 ⇒ pinned CPU with a
+    //     budget that decouples STATE from HBM block_num.
+    //   - PREFILL role: DSV4 PD-sep prefill ranks always stage STATE to pinned
+    //     host memory (handed to decode via cache store), so STATE never
+    //     competes for HBM here. When state_pool_memory_mb=0 we fall back to
+    //     the HBM-derived block_num × state_block_size_bytes as the pinned-CPU
+    //     budget (legacy parity for the count, but the bytes live on host).
+    //   - state_block_size_bytes > 0 guards non-DSV4 paths where there is no
+    //     STATE region — those keep the flag false regardless of role.
+    config.state_pool_uses_pinned_cpu =
+        (kv_cache_config.state_pool_memory_mb > 0 || role_type == RoleType::PREFILL)
+        && config.state_block_size_bytes > 0;
 
     if (kv_cache_config.test_block_num > 0) {
         RTP_LLM_LOG_INFO("KVCacheConfig explicitly specified kv cache block num %d", kv_cache_config.test_block_num);
@@ -138,21 +152,57 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
                             static_cast<long>(config.block_size_bytes / 1024 / 1024));
 
     // STATE pool block_num: env-driven CPU budget when set, else fall back
-    // to the HBM-derived block_num (legacy parity, STATE on device).
+    // to the HBM-derived block_num. For pinned-CPU STATE without an explicit
+    // budget (PREFILL role with state_pool_memory_mb=0), mirror the HBM count
+    // — the bytes live on host but the per-request block count matches the
+    // paged budget exactly, so PD-sep semantics stay 1:1 with prior behavior.
     uint32_t state_block_num = block_num;
     if (config.state_pool_uses_pinned_cpu) {
-        const size_t state_budget_bytes = static_cast<size_t>(kv_cache_config.state_pool_memory_mb) * 1024 * 1024;
-        state_block_num                 = static_cast<uint32_t>(state_budget_bytes / config.state_block_size_bytes);
-        RTP_LLM_CHECK_WITH_INFO(state_block_num > 0,
-                                "STATE_POOL_MEMORY_MB=%lld too small for state_block_size_bytes=%zu",
-                                static_cast<long long>(kv_cache_config.state_pool_memory_mb),
-                                config.state_block_size_bytes);
-        RTP_LLM_LOG_INFO("DSV4 state pools: budget=%zu MiB, per-block=%zu B, block_num=%u "
-                         "(decoupled from HBM block_num=%u)",
-                         state_budget_bytes / 1024 / 1024,
-                         config.state_block_size_bytes,
-                         state_block_num,
-                         block_num);
+        if (kv_cache_config.state_pool_memory_mb > 0) {
+            const size_t state_budget_bytes = static_cast<size_t>(kv_cache_config.state_pool_memory_mb) * 1024 * 1024;
+            state_block_num                 = static_cast<uint32_t>(state_budget_bytes / config.state_block_size_bytes);
+            RTP_LLM_CHECK_WITH_INFO(state_block_num > 0,
+                                    "STATE_POOL_MEMORY_MB=%lld too small for state_block_size_bytes=%zu",
+                                    static_cast<long long>(kv_cache_config.state_pool_memory_mb),
+                                    config.state_block_size_bytes);
+            RTP_LLM_LOG_INFO("DSV4 state pools: budget=%zu MiB, per-block=%zu B, block_num=%u "
+                             "(decoupled from HBM block_num=%u)",
+                             state_budget_bytes / 1024 / 1024,
+                             config.state_block_size_bytes,
+                             state_block_num,
+                             block_num);
+        } else {
+            // PREFILL fallback: no explicit STATE budget — mirror HBM count
+            // but place the bytes on pinned host memory. Effective host bytes
+            // ≈ block_num × state_block_size_bytes (per state pool).
+            const size_t host_bytes = static_cast<size_t>(block_num) * config.state_block_size_bytes;
+            // Round-2 XR-B1/B2/B3: WARNING-tag the log when the unbounded
+            // fallback exceeds 8 GiB/pool so operators see it in startup
+            // grep. Production deployments SHOULD set --state_pool_memory_mb
+            // explicitly; otherwise pinned-CPU bytes scale linearly with
+            // HBM budget and can exhaust host RLIMIT_MEMLOCK on dense
+            // multi-rank-per-host fleets. Hard cap deferred to follow-up
+            // (track via canary/PHASE5_CANARY_PROCEDURE.md §1.0 item 10).
+            constexpr size_t kPrefillPinnedFallbackWarnBytes = 8ULL * 1024 * 1024 * 1024;  // 8 GiB
+            if (host_bytes > kPrefillPinnedFallbackWarnBytes) {
+                RTP_LLM_LOG_WARNING(
+                    "DSV4 state pools (PREFILL default): UNBOUNDED pinned-CPU "
+                    "fallback est=%zu MiB > %zu MiB warn threshold; multi-pool "
+                    "fan-out can exhaust host pinned memory. Set "
+                    "--state_pool_memory_mb explicitly for production PREFILL "
+                    "deployments. block_num=%u per-block=%zu B",
+                    host_bytes / 1024 / 1024,
+                    kPrefillPinnedFallbackWarnBytes / 1024 / 1024,
+                    block_num,
+                    config.state_block_size_bytes);
+            } else {
+                RTP_LLM_LOG_INFO("DSV4 state pools (PREFILL default): mirroring HBM block_num=%u on pinned CPU, "
+                                 "per-block=%zu B, est. host bytes/pool=%zu MiB",
+                                 block_num,
+                                 config.state_block_size_bytes,
+                                 host_bytes / 1024 / 1024);
+            }
+        }
     }
     config.state_block_num = state_block_num;
 
@@ -197,7 +247,8 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                                                const SpeculativeExecutionConfig&  sp_config,
                                                const std::optional<WarmUpResult>& warm_up_result,
                                                bool                               is_mtp,
-                                               bool                               is_eagle) {
+                                               bool                               is_eagle,
+                                               RoleType                           role_type) {
     CacheConfig score_config =
         CacheConfigCreator::createBasicConfig(score_model_config, parallelism_config, kv_cache_config, false);
     CacheConfig propose_config =
@@ -231,10 +282,14 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
 
     // STATE residency toggle (mirror createConfig) — must precede pre-pass
     // so fixed_pool_reserve_bytes correctly accounts for STATE addition.
+    // PREFILL role forces STATE to pinned CPU even without an explicit env
+    // budget (single source of truth — the allocator just reads this flag).
+    const bool prefill_or_env_state =
+        kv_cache_config.state_pool_memory_mb > 0 || role_type == RoleType::PREFILL;
     score_config.state_pool_uses_pinned_cpu =
-        kv_cache_config.state_pool_memory_mb > 0 && score_config.state_block_size_bytes > 0;
+        prefill_or_env_state && score_config.state_block_size_bytes > 0;
     propose_config.state_pool_uses_pinned_cpu =
-        kv_cache_config.state_pool_memory_mb > 0 && propose_config.state_block_size_bytes > 0;
+        prefill_or_env_state && propose_config.state_block_size_bytes > 0;
 
     // Fixed-pool block counts depend on runtime scheduler limits. Finalize the
     // score and propose configs before sizing the shared paged budget so DSV4
@@ -299,6 +354,9 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     // (CPU pinned), independent of the HBM-derived block_num. Each
     // sub-config uses its own state_block_size_bytes; propose typically
     // has 0 (SWA-only layers) and falls back to block_num — harmless.
+    // PREFILL role without an explicit env budget falls back to the HBM count
+    // but the bytes still live on pinned host memory (state_pool_uses_pinned_cpu
+    // is already set above).
     auto compute_state_block_num = [&](const CacheConfig& cfg) -> uint32_t {
         if (kv_cache_config.state_pool_memory_mb > 0 && cfg.state_block_size_bytes > 0) {
             const size_t   state_budget_bytes = static_cast<size_t>(kv_cache_config.state_pool_memory_mb) * 1024 * 1024;

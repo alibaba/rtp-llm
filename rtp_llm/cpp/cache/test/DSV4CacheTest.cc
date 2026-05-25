@@ -516,6 +516,136 @@ TEST(CacheConfigTest, AdditionReserveDeductedFromPagedBudget) {
     EXPECT_EQ(config_without.fixed_pool_reserve_bytes, 0u);
 }
 
+// ============================================================
+// state_pool_uses_pinned_cpu single source of truth (B1 Option A)
+//
+// Pre-fix bug: HybridPoolKVCacheAllocator added a unilateral
+//   `state_pool_uses_pinned_cpu || role_type_ == PREFILL`
+// at init time. CacheConfigCreator however set the flag from
+// `state_pool_memory_mb > 0` only. Under PREFILL with state_pool_memory_mb=0
+// the HBM divisor still included STATE bytes (over-reserve) while the
+// allocator silently moved STATE to pinned host memory anyway.
+//
+// Fix: CacheConfigCreator is the single source of truth. The allocator just
+// reads `config.state_pool_uses_pinned_cpu`. Below we lock down the matrix
+// for all (role × state_pool_memory_mb) combinations on DSV4 hybrid configs.
+// ============================================================
+namespace {
+
+constexpr int64_t kStatePinnedTestBudgetMb = 8192;
+
+// Helper: build a DSV4 createConfig() under the given (role, state budget).
+// non_full_addition_kvcache_blocks is forced to 0 because the default (256) on
+// the full pro model yields ~31 GiB of fixed reserve, which would blow the
+// 8 GiB paged budget when STATE pools are device-resident (PDFUSION/DECODE).
+// The reserve invariant under pinning is exercised separately below.
+CacheConfig makeStatePinnedTestConfig(int64_t state_pool_memory_mb, RoleType role) {
+    auto              mc = makeProModelConfig();
+    ParallelismConfig pc;
+    RuntimeConfig     runtime_config;
+    runtime_config.max_generate_batch_size                      = 4;
+    runtime_config.fifo_scheduler_config.max_context_batch_size = 2;
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.kv_cache_mem_mb                  = kStatePinnedTestBudgetMb;
+    kv_cache_config.state_pool_memory_mb             = state_pool_memory_mb;
+    kv_cache_config.non_full_addition_kvcache_blocks = 0;
+    return CacheConfigCreator::createConfig(
+        mc, pc, runtime_config, kv_cache_config, std::nullopt, std::nullopt, role);
+}
+
+}  // namespace
+
+TEST(CacheConfigStatePinnedTest, PrefillWithZeroBudgetMovesStateToPinnedCpu) {
+    auto cfg = makeStatePinnedTestConfig(/*state_pool_memory_mb=*/0, RoleType::PREFILL);
+    EXPECT_TRUE(cfg.state_pool_uses_pinned_cpu)
+        << "PREFILL + state_pool_memory_mb=0 must mark STATE as pinned-CPU at the config layer";
+    EXPECT_GT(cfg.state_block_size_bytes, 0u) << "DSV4 hybrid config must populate state_block_size_bytes";
+}
+
+TEST(CacheConfigStatePinnedTest, PrefillWithExplicitBudgetMovesStateToPinnedCpu) {
+    auto cfg = makeStatePinnedTestConfig(/*state_pool_memory_mb=*/256, RoleType::PREFILL);
+    EXPECT_TRUE(cfg.state_pool_uses_pinned_cpu);
+    EXPECT_GT(cfg.state_block_size_bytes, 0u);
+    // state_block_num is decoupled from HBM count when an explicit budget is set.
+    const size_t expected_state_block_num =
+        (static_cast<size_t>(256) * 1024 * 1024) / cfg.state_block_size_bytes;
+    EXPECT_EQ(cfg.state_block_num, static_cast<uint32_t>(expected_state_block_num));
+}
+
+TEST(CacheConfigStatePinnedTest, PdfusionWithZeroBudgetKeepsStateOnDevice) {
+    auto cfg = makeStatePinnedTestConfig(/*state_pool_memory_mb=*/0, RoleType::PDFUSION);
+    EXPECT_FALSE(cfg.state_pool_uses_pinned_cpu)
+        << "Default-OFF invariant: non-PREFILL + state_pool_memory_mb=0 must keep STATE on device "
+        << "(byte-identical to pre-unification behavior).";
+}
+
+TEST(CacheConfigStatePinnedTest, DecodeWithZeroBudgetKeepsStateOnDevice) {
+    auto cfg = makeStatePinnedTestConfig(/*state_pool_memory_mb=*/0, RoleType::DECODE);
+    EXPECT_FALSE(cfg.state_pool_uses_pinned_cpu)
+        << "DECODE role without explicit STATE budget must keep STATE on device — only PREFILL "
+        << "forces pinned-CPU residency.";
+}
+
+TEST(CacheConfigStatePinnedTest, PrefillHbmDivisorExcludesStateBytesVsPdfusion) {
+    // Two configs differ only by role_type. PREFILL excludes STATE bytes from
+    // the HBM divisor (b/c STATE lives on host), so it gets MORE block_num
+    // than PDFUSION at the same paged_budget.
+    auto cfg_prefill  = makeStatePinnedTestConfig(/*state_pool_memory_mb=*/0, RoleType::PREFILL);
+    auto cfg_pdfusion = makeStatePinnedTestConfig(/*state_pool_memory_mb=*/0, RoleType::PDFUSION);
+
+    ASSERT_TRUE(cfg_prefill.state_pool_uses_pinned_cpu);
+    ASSERT_FALSE(cfg_pdfusion.state_pool_uses_pinned_cpu);
+    ASSERT_GT(cfg_prefill.state_block_size_bytes, 0u);
+
+    EXPECT_GT(cfg_prefill.block_num, cfg_pdfusion.block_num)
+        << "PREFILL HBM divisor must exclude state_block_size_bytes — should yield more blocks "
+        << "than PDFUSION at identical budget";
+}
+
+TEST(CacheConfigStatePinnedTest, PrefillReserveExcludesStateAdditionBytes) {
+    // With non_full_addition_kvcache_blocks > 0 and STATE pinned-CPU, the
+    // fixed_pool_reserve must only count the SWA_KV pool's addition (gid 6),
+    // NOT the three STATE pools (gids 3..5). This is the load-bearing assert
+    // for the over-reserve half of the bug.
+    auto              mc = makeProModelConfig();
+    ParallelismConfig pc;
+    RuntimeConfig     runtime_config;
+    runtime_config.max_generate_batch_size                      = 4;
+    runtime_config.fifo_scheduler_config.max_context_batch_size = 2;
+
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.kv_cache_mem_mb                  = kStatePinnedTestBudgetMb;
+    kv_cache_config.state_pool_memory_mb             = 0;  // pinned via PREFILL role
+    kv_cache_config.non_full_addition_kvcache_blocks = 4;
+
+    auto cfg = CacheConfigCreator::createConfig(
+        mc, pc, runtime_config, kv_cache_config, std::nullopt, std::nullopt, RoleType::PREFILL);
+
+    ASSERT_TRUE(cfg.state_pool_uses_pinned_cpu);
+    const size_t expected_reserve = static_cast<size_t>(4) * cfg.group_block_size_bytes[6];
+    EXPECT_EQ(cfg.fixed_pool_reserve_bytes, expected_reserve)
+        << "STATE pool addition bytes must NOT be counted in HBM reserve when STATE is pinned-CPU "
+        << "(silent HBM waste described in B1/B2/B3 reviews).";
+}
+
+TEST(CacheConfigStatePinnedTest, NonDsv4ConfigUnaffectedByRoleType) {
+    // Guards default-OFF for non-DSV4: a single-pool config has
+    // state_block_size_bytes=0, so role_type=PREFILL must NOT flip the flag.
+    ParallelismConfig pc;
+    RuntimeConfig     runtime_config;
+    runtime_config.max_generate_batch_size                      = 4;
+    runtime_config.fifo_scheduler_config.max_context_batch_size = 2;
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.test_block_num = 32;
+
+    auto cfg = CacheConfigCreator::createConfig(
+        ModelConfig(), pc, runtime_config, kv_cache_config, std::nullopt, std::nullopt, RoleType::PREFILL);
+    EXPECT_FALSE(cfg.state_pool_uses_pinned_cpu)
+        << "Default-OFF: non-DSV4 paths (state_block_size_bytes=0) must keep the flag false "
+        << "regardless of role";
+    EXPECT_EQ(cfg.state_block_size_bytes, 0u);
+}
+
 TEST(CacheConfigTest, FinalizeBlockNumsWithLinearStepShrinksSwaRuleBlocks) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                      = 4;

@@ -406,7 +406,13 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         "每-rank 内存预算，单位 MiB（按 1024*1024 折算，与 KV_CACHE_MEM_MB 一致）。"
         "0 表示不显式指定，STATE pool block_num 沿用 KV pool block_num（向后兼容）。"
         "设置为 >0 时，STATE pool block_num = floor(state_pool_memory_mb * 1024 * 1024 / "
-        "Σstate_block_size_bytes)，与 HBM 派生的 block_num 解耦。",
+        "Σstate_block_size_bytes)，与 HBM 派生的 block_num 解耦。"
+        "**Production PREFILL deployments MUST set this value explicitly** —"
+        "B-fix (XR2_B1/B2/B3) routes PREFILL STATE to pinned-CPU; the "
+        "fallback path mirrors HBM block_num to pinned-CPU bytes, which can "
+        "exceed host RLIMIT_MEMLOCK on dense multi-rank-per-host fleets. "
+        "Startup emits WARNING when fallback est. > 8 GiB/pool. Hard cap "
+        "is pending (canary §1.0 item 10).",
     )
     kv_cache_group.add_argument(
         "--dsv4_unified_block_count",
@@ -415,8 +421,15 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         type=int,
         default=-1,
         help="F02 DSV4 unified super-block layout opt-in (tri-state): "
-        "-1=auto (follow compiled default; today OFF), 0=force OFF (legacy per-group path), "
+        "-1=auto (follow compiled default; legacy OFF semantics), 0=force OFF (legacy per-group path), "
         "1=force ON (CacheConfig.super_block_layout.enabled=true, bps≡1). "
-        "M02-PR1 plumbs the flag only; sizing/allocator wiring lands in later PRs. "
-        "Default -1 ⇒ today's behaviour is unchanged.",
+        "Phase 5 default flip is GATED PENDING prerequisites: createSpConfig MTP "
+        "unified branch (R02 H-1), validatePeerHandshake wiring + hash_salt_version "
+        "computation (R17 F1/F2), ConfigModules.h C++ default mirror (R10 C2), "
+        "pinned-CPU oversubscribe guard (R02 H-2), canary metric registration "
+        "(R10 C6), and smoke baseline env pin (R10 C1). Until those land, default "
+        "stays -1 (auto = legacy OFF) and operators opt in per-process via "
+        "DSV4_UNIFIED_BLOCKS=1. "
+        "See docs/dsv4/kvcache-unify-final/canary/PHASE5_CANARY_PROCEDURE.md "
+        "for the re-flip pre-flight checklist.",
     )

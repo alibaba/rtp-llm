@@ -272,9 +272,9 @@ void SharedBlockCache::putUnified(CacheKeyType cache_key, int super_block_id, bo
     RTP_LLM_PROFILE_FUNCTION();
 
     // Snapshot any displaced item under mu_; cascade OUTSIDE mu_ to honour
-    // the §3.0 lock-order (L1 released before L3 BlockPool calls).
+    // the §3.0 lock-order (L1 released before L2 reclaim callback into the
+    // SuperBlockFreeList).
     std::vector<UnifiedCacheItem> displaced;
-    bool                          bumped_cache_for_new = false;
     {
         std::lock_guard<std::mutex> lock(mu_);
 
@@ -326,58 +326,37 @@ void SharedBlockCache::putUnified(CacheKeyType cache_key, int super_block_id, bo
                     pool->blockCacheReference(static_cast<BlockIdxType>(super_block_id));
                 }
             }
-            bumped_cache_for_new = true;
+            // XR2-A1/A2/A3 cross-review (REAL_RACE_FIX_REQUIRED): the unified
+            // CACHE bump MUST happen under L1, paired with the per-pool fan-out
+            // above and the LRU insert at putWithEvictCallback. Pre-fix, the
+            // bump was deferred to OUTSIDE L1 — that opened a window where a
+            // concurrent evictAndFreeUnified could snapshot the newly-inserted
+            // K (gates skip CACHE per `inUse(S)` definition), run cascade, and
+            // call `dec(S, CACHE)` on a counter still at zero → underflow
+            // RTP_LLM_FAIL crash (or symmetric reclaim-before-bump race
+            // returning S to the free list while LRU still points at it). The
+            // in-place branch above already calls `bump` under L1 at line 304
+            // → L1 → Lcr is an existing edge, no new lock-order risk.
+            if (unified_ref_counter_) {
+                unified_ref_counter_->bump(super_block_id, UnifiedRefCounter::Kind::CACHE);
+            }
         }
     }
 
-    // M03-PR3: bump CACHE on UnifiedRefCounter OUTSIDE mu_ (the counter has
-    // its own mu_; keep L1 as a leaf). Ordering vs the per-pool fan-out above
-    // is benign because both are independent monotonic mirrors of the same
-    // logical event.
-    if (bumped_cache_for_new && unified_ref_counter_) {
-        unified_ref_counter_->bump(super_block_id, UnifiedRefCounter::Kind::CACHE);
-    }
-
-    // Cascade-free OUTSIDE mu_. Re-acquire mu_ briefly per displaced item to
-    // re-check LRU residency: if a racing putUnified restored the displaced
-    // key (Fix 79 / R9), the new owner already holds the CACHE refcount and
-    // the dec belongs to a different residency — skip to preserve the
-    // "old blockCacheFree precedes new blockCacheReference for same key"
-    // invariant (R8 / Fix 80).
-    for (const auto& item : displaced) {
-        const int S = item.superBlockId();
-        if (S < 0) {
-            continue;
-        }
-        bool still_evicted = true;
-        {
-            std::lock_guard<std::mutex> lock(mu_);
-            if (lru_cache_.contains(item.cache_key)) {
-                auto [success, current] = lru_cache_.get(item.cache_key);
-                if (success && current.superBlockId() == S) {
-                    still_evicted = false;
-                }
-            }
-        }
-        if (!still_evicted) {
-            continue;
-        }
-        // M03-PR3 dual-write: per-pool blockCacheFree (legacy mirror) +
-        // UnifiedRefCounter dec(S, CACHE). Per-pool tryFreeBlocks fires
-        // internally on per-pool ref==0; UnifiedRefCounter isZero(S) gates
-        // the super-block free-list push.
-        for (auto& pool : group_pools_) {
-            if (pool) {
-                pool->blockCacheFree(static_cast<BlockIdxType>(S));
-            }
-        }
-        if (unified_ref_counter_) {
-            unified_ref_counter_->dec(S, UnifiedRefCounter::Kind::CACHE);
-            if (unified_ref_counter_->isZero(S) && super_block_reclaim_callback_) {
-                super_block_reclaim_callback_(S);
-            }
-        }
-    }
+    // Cascade-free OUTSIDE mu_.
+    //
+    // XR-C1 fix (cache-ref leak race): the earlier implementation re-acquired
+    // mu_ and skipped the dec if the displaced key was already resident again
+    // at the same S. That was a residency-paired view of CACHE — but the
+    // counter is EVENT-PAIRED. The bump that owns this dec was issued by
+    // the LRU insertion that produced ``item``. A racing ``putUnified`` for
+    // the same K landing at the same S has ALREADY issued its OWN paired
+    // bump (line 323-329 + 337-339); skipping our dec would leave that
+    // original bump dangling forever (CACHE(S)>=1 with one fewer logical
+    // residency than counter ticks, isZero(S) never fires, S never returns
+    // to SuperBlockFreeList). Always dec the snapshot — every put has
+    // exactly one matching cascade dec, regardless of subsequent re-puts.
+    cascadeUnifiedSnapshot(displaced, /*cascaded_out=*/nullptr);
 }
 
 SharedBlockCache::MatchResultUnified SharedBlockCache::matchUnified(const std::vector<CacheKeyType>& keys,
@@ -514,24 +493,35 @@ size_t SharedBlockCache::evictAndFreeUnified(size_t min_super_blocks) {
         return 0;
     }
 
-    // Phase B: cascade per-pool with re-residency re-check (R8 / Fix 80).
+    // Phase B: cascade per-pool unconditionally on the snapshot.
+    //
+    // XR-C1 fix (cache-ref leak race): the prior implementation re-acquired
+    // mu_ per item and skipped both the legacy per-pool blockCacheFree AND
+    // the unified CACHE dec when the just-evicted K had been re-inserted at
+    // the same S by a racing putUnified. That skip un-paired the ORIGINAL
+    // bump (the one issued by the put that produced this snapshot item),
+    // permanently leaking exactly one CACHE refcount per occurrence — the
+    // per-pool mirror leaked identically. Under same-S concurrent put the
+    // racing putUnified has already issued its OWN paired bump for the new
+    // residency; that bump pairs with a future cascade of T2's entry, not
+    // with this snapshot. CACHE is event-paired, not residency-paired:
+    // every put has exactly one matching cascade dec. Always drop the
+    // snapshot.
     size_t cascaded = 0;
+    cascadeUnifiedSnapshot(snapshot, &cascaded);
+    return cascaded;
+}
+
+void SharedBlockCache::cascadeUnifiedSnapshot(const std::vector<UnifiedCacheItem>& snapshot,
+                                              size_t*                              cascaded_out) {
+    // Pre-condition: mu_ is NOT held. ``blockCacheFree`` takes per-pool L3,
+    // ``UnifiedRefCounter::dec``/``isZero`` take the counter's internal mu_,
+    // and the reclaim callback (e.g. ``SuperBlockFreeList::push``) takes
+    // its own L2. Calling them with L1 held would invert the §3.0
+    // lock-order (L1 → L2 / L3 documented; reverse forbidden).
     for (const auto& item : snapshot) {
         const int S = item.superBlockId();
         if (S < 0) {
-            continue;
-        }
-        bool still_evicted = true;
-        {
-            std::lock_guard<std::mutex> lock(mu_);
-            if (lru_cache_.contains(item.cache_key)) {
-                auto [success, current] = lru_cache_.get(item.cache_key);
-                if (success && current.superBlockId() == S) {
-                    still_evicted = false;
-                }
-            }
-        }
-        if (!still_evicted) {
             continue;
         }
         // M03-PR3 dual-write: always drop legacy per-pool block_cache_ref
@@ -549,9 +539,10 @@ size_t SharedBlockCache::evictAndFreeUnified(size_t min_super_blocks) {
                 super_block_reclaim_callback_(S);
             }
         }
-        ++cascaded;
+        if (cascaded_out) {
+            ++(*cascaded_out);
+        }
     }
-    return cascaded;
 }
 
 }  // namespace rtp_llm
