@@ -7,6 +7,7 @@ import signal as signal_mod
 import socket
 import subprocess
 import sys
+import threading
 import time
 from typing import Any, Dict, List, Optional
 
@@ -47,6 +48,8 @@ class MagaServerManager(object):
         self._port = port
         self._smoke_args_str = smoke_args_str
         self._exit_code: Optional[int] = None
+        self._state_lock = threading.Lock()
+        self._stop_requested = False
         if self._port is None:
             self._port = MagaServerManager.get_free_port()
 
@@ -214,17 +217,32 @@ class MagaServerManager(object):
             stderr=self._file_stream,
             cwd=cwd_path,
         )
-        self._server_process = p
+        with self._state_lock:
+            self._server_process = p
+            stop_requested = self._stop_requested
+
+        if stop_requested:
+            logging.warning(
+                "Server pid=%d was started after a stop request; stopping it now",
+                p.pid,
+            )
+            self.stop_server()
+            return False
+
         return self.wait_sever_done(timeout)
 
     def stop_server(self):
-        if self._server_process is not None and self._server_process.pid is not None:
+        with self._state_lock:
+            self._stop_requested = True
+            server_process = self._server_process
+
+        if server_process is not None and server_process.pid is not None:
             try:
                 # 如果只kill start_server，会残留 backend/frontend 占用显存。
                 # 部署时容器整体会回收，但测试时需要自己递归 kill
                 # 不适用 setsid/killpg 是因为 setsid 可能会在 test 父进程意外退出的情况遗留 start_server 占用测试资源
-                logging.info("stop server and children: %d", self._server_process.pid)
-                parent = psutil.Process(self._server_process.pid)
+                logging.info("stop server and children: %d", server_process.pid)
+                parent = psutil.Process(server_process.pid)
                 children = list(
                     parent.children(recursive=True)
                 )  # 获取所有子进程（递归）
@@ -243,10 +261,14 @@ class MagaServerManager(object):
                     )
                     parent.kill()
                     parent.wait(timeout=5)
-                self._server_process = None
+                with self._state_lock:
+                    if self._server_process is server_process:
+                        self._server_process = None
             except Exception as e:
                 logging.warning("failed to get process with: " + str(e))
-                self._server_process = None
+                with self._state_lock:
+                    if self._server_process is server_process:
+                        self._server_process = None
         if self._file_stream is not None:
             self._file_stream.close()
             self._file_stream = None

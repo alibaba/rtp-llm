@@ -495,8 +495,13 @@ def start_server(py_env_configs: PyEnvConfigs):
         logging.info(f"start server took {consume_s:.2f}s")
     except Exception as e:
         logging.error(f"start failed, trace: {traceback.format_exc()}")
-        # Trigger graceful shutdown on any exception
-        process_manager.graceful_shutdown()
+        # If a SIGTERM/SIGINT already triggered shutdown before this exception,
+        # the exception is a side-effect of the signal (health check tripped on
+        # shutdown_requested), not a real failure — preserve graceful exit
+        # semantics. Otherwise mark failure so the process manager uses bounded
+        # timeouts and the parent exits non-zero.
+        if not process_manager.shutdown_requested:
+            process_manager.request_failure_shutdown()
     finally:
         process_manager.monitor_and_release_processes()
 
