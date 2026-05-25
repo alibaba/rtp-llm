@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 from typing import TYPE_CHECKING, AsyncGenerator, List, Optional
 
@@ -101,6 +102,14 @@ class BackendRPCServerVisitor:
             master_config=master_config,
         )
         self.recent_cache_key_window = RecentCacheKeyWindow()
+        # V1 FlexLB DP controller: backend role addrs are resolved per-request
+        # via master.get_backend_role_addrs(), so the static role list is empty
+        # by design. Mirror the gate used by ModelRpcClient (DP_CONTROLLER_MANAGED)
+        # so readiness is driven by the same explicit signal rather than inferred
+        # from "empty role list + master_vip configured".
+        self._dp_controller_managed = os.environ.get(
+            "DP_CONTROLLER_MANAGED", ""
+        ).lower() in ("true", "1", "yes")
 
     async def close(self):
         await self.model_rpc_client.close()
@@ -418,10 +427,10 @@ class BackendRPCServerVisitor:
         return stream_with_aux_info()
 
     def is_backend_service_ready(self, refresh: bool = False) -> bool:
-        # Master-only routing (V1 FlexLB DP controller): backend role addrs are
-        # resolved per-request via master.get_backend_role_addrs(), so no static
-        # role list is configured. Ready iff master endpoint resolves.
-        if not self.backend_role_list and self.host_service.master_vip.domain:
+        # V1 FlexLB DP controller mode: readiness is the master endpoint, since
+        # backend role addrs are resolved per-request from the master rather than
+        # from a static list.
+        if self._dp_controller_managed:
             return self.host_service.get_master_addr() is not None
         roles: List[RoleAddr] = self.host_service.get_backend_role_addrs(
             self.backend_role_list, refresh
