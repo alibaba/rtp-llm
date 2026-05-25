@@ -181,7 +181,7 @@ TEST_F(FIFOSchedulerTest, testInitKVCacheRejectedByReserveBlocks) {
     ASSERT_TRUE(streams_status.ok());
     ASSERT_EQ(streams_status.value().size(), 0);
     ASSERT_TRUE(stream->hasError());
-    ASSERT_EQ(stream->stopReason(), "LACK MEM");
+    ASSERT_EQ(stream->stopReason(), "initKVBlock failed: LACK MEM");
     ASSERT_EQ(cache_manager->freeBlocksNum(), 10);
     ASSERT_EQ(cache_manager->availableBlocksNum(), 10);
 }
