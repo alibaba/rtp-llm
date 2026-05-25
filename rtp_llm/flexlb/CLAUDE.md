@@ -335,6 +335,52 @@ New configuration fields:
 ### FLEXLB_SYNC_CONSISTENCY_CONFIG (optional, for master election)
 ZooKeeper connection configuration for distributed coordination.
 
+### DISPATCH_CONFIG (optional, opt-in)
+
+When set with `enabled=true`, FlexLB serves `/dispatcher/<original_fe_path>` on its 7001 listener. Requests are matched against a hard-coded **batch endpoint registry** (see `BatchEndpointRegistry`); batch-shaped requests (whose registered array field is a list larger than `subBatchSize`) are split across the FE pool and merged; everything else (including small-batch requests) is passthrough-forwarded to one FE.
+
+```json
+{
+  "enabled": true,
+  "fePoolServiceId": "rtp_llm.frontend.service",
+  "subBatchSize": 5,
+  "feRequestTimeoutMs": 3000,
+  "feConnectTimeoutMs": 2000,
+  "feResponseTimeoutMs": 5000,
+  "feMaxStreamDurationMs": 600000,
+  "feMaxConnections": 200,
+  "feMaxPendingAcquire": 1000,
+  "feMaxResponseBytes": 16777216
+}
+```
+
+`feRequestTimeoutMs` is legacy and only feeds `ConnectionProvider.pendingAcquireTimeout`; per-call deadlines are governed by `feConnectTimeoutMs` / `feResponseTimeoutMs` / `feMaxStreamDurationMs`. Production configs typically still set it.
+
+**Batch endpoint registry (built-in):**
+
+| Path under `/dispatcher/` | Request array field | Response array field | Failure shape | Cross-chunk aggregation |
+|---|---|---|---|---|
+| `/batch_infer` | `prompt_batch` | `response_batch` | `null` | — |
+| `/v1/batch/chat/completions` | `requests` | `responses` | `{index, error: {code, message}}` | — |
+| `/v1/embeddings` | `input` (when list) | `data` | `{index, embedding: null, error: <reason>}` | `data[i].index` renumbered to absolute offset; `usage.{prompt_tokens, total_tokens}` summed across successful sub-bodies |
+
+**Partial-failure contract:**
+- HTTP 200 on full success or any partial success.
+- HTTP 500 only when **every** sub-batch failed.
+- On partial success, the response body contains an extra top-level object: `_partial_failure: { failed_count: N, total_count: M, failed_indices: [...] }`.
+- Failed positions in the response array are filled in-place by the per-endpoint failure factory (see table). **Indices are preserved** so callers can correlate failures back to input positions.
+
+**Migration:**
+- Pre-dispatcher clients calling `<fe>/batch_infer` keep working — they hit FE directly. To opt in, change the URL to `<master>:7001/dispatcher/batch_infer` (everything else stays the same; the registered field names match FE's existing wire format).
+- Streaming endpoints (e.g. `/v1/chat/completions` with `stream=true`) work through the passthrough as long as `feMaxStreamDurationMs` exceeds the longest expected response time.
+- Direct-to-FE remains the bypass for any client that can't change URLs.
+
+**Known limits (deferred):**
+- Bare `POST /` is intentionally not in the registry: it triggers batch mode only when the body carries `prompt_batch` (same wire shape as `/batch_infer`), and the `prompt: [...]` variant has a known FE-side footgun. Such requests fall through to passthrough-forward to a single FE. Add `/` once it's decided whether to alias it to `/batch_infer` or leave it as passthrough.
+- `request_id` set by `frontend_server.py` overwrites any upstream id — dispatcher to FE trace linkage is broken. Tracked in `project_frontend_request_id_overwrite.md`.
+- Failed pre-assigned FE targets do not auto-failover (BE pre-assignment is not enabled in Stage 2).
+- Embedding variants (`/v1/embeddings/{dense,sparse,colbert,similarity}`, `/v1/reranker`, `/v1/classifier`) — not in the registry yet; add one row each after verifying wire shape.
+
 ## Important Implementation Details
 
 ### LoadBalancer Registration
