@@ -12,6 +12,7 @@
 #include "rtp_llm/cpp/cache/BlockRefCounter.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/BufferTypes.h"
+#include "rtp_llm/cpp/cache/BlockCache.h"
 #include "rtp_llm/cpp/cache/MemoryLayoutStrategy.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfig.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/MemoryUtil.h"
@@ -29,6 +30,11 @@ public:
     ~BlockPool();
 
     bool init();
+
+    // REBASE CONFLICT CONTEXT(2413e8e03): source branch exposed the per-pool BlockCache
+    // while the new base routes prefix reuse through SharedBlockCache at allocator scope.
+    // Keep this accessor for compatibility with the source branch's RDMA/cache-pool plumbing.
+    BlockCachePtr blockCache();
 
     MemoryType                 where() const;
     std::vector<torch::Tensor> allLayerCacheBase() const;
@@ -132,6 +138,8 @@ private:
     AllocationType allocation_type_;
     bool           use_pinned_cpu_backing_;
     bool           use_cuda_malloc_backing_;
+
+    BlockCachePtr block_cache_;
 
     torch::Tensor               cache_aligned_buffer_;
     void*                       cache_base_ptr_  = nullptr;

@@ -155,6 +155,8 @@ private:
     const CacheStoreConfig             cache_store_config_;
     const bool                         use_cuda_malloc_block_pool_;
 
+    // REBASE CONFLICT CONTEXT(2413e8e03): preserve new base CP cache-key sharding
+    // state while the source branch adds cudaMalloc block-pool backing.
     std::shared_ptr<CPSlotMapper> cp_slot_mapper_;
 
     std::atomic<bool> stop_{false};

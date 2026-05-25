@@ -39,19 +39,18 @@ GlobalCacheMetricsSnapshot collectGlobalCacheMetrics(const KVCacheAllocatorPtr& 
     snapshot.request_ref_blocks   = allocator->requestRefBlocksNum();
     snapshot.connector_ref_blocks = allocator->connectorRefBlocksNum();
 
-    auto& collector = snapshot.collector;
+    auto& collector                         = snapshot.collector;
     collector.kv_cache_item_num             = shared_cache ? static_cast<int64_t>(shared_cache->size()) : 0;
     collector.kv_cache_left_seq             = static_cast<int64_t>(allocator->availableTokensNum());
     collector.kv_cache_available_blocks     = static_cast<int64_t>(snapshot.available_blocks);
     collector.kv_cache_request_ref_blocks   = static_cast<int64_t>(snapshot.request_ref_blocks);
     collector.kv_cache_connector_ref_blocks = static_cast<int64_t>(snapshot.connector_ref_blocks);
     collector.kv_cache_free_blocks          = static_cast<int64_t>(allocator->freeBlocksNum());
-    collector.kv_cache_used_ratio =
-        (snapshot.total_blocks == 0) ?
-            0.0f :
-            static_cast<float>(100.0 * (snapshot.total_blocks - snapshot.available_blocks)
-                               / static_cast<double>(snapshot.total_blocks));
-    collector.mr_cost_time_ms = allocator->getMrCostTimeMs();
+    collector.kv_cache_used_ratio           = (snapshot.total_blocks == 0) ?
+                                                  0.0f :
+                                                  static_cast<float>(100.0 * (snapshot.total_blocks - snapshot.available_blocks)
+                                                           / static_cast<double>(snapshot.total_blocks));
+    collector.mr_cost_time_ms               = allocator->getMrCostTimeMs();
 
     return snapshot;
 }
@@ -114,6 +113,9 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
     pd_sep_config_(pd_sep_config),
     cache_store_config_(cache_store_config),
     use_cuda_malloc_block_pool_(use_cuda_malloc_block_pool) {
+    // REBASE CONFLICT CONTEXT(2413e8e03): keep new base DSV4 fixed-pool backing
+    // configuration; source branch only adds cudaMalloc backing when RDMA cache
+    // store requests it.
     if (config_.state_block_size_bytes > 0 || config_.swa_block_size_bytes > 0) {
         config_.fixed_pool_uses_pinned_cpu = kv_cache_config_.dsv4_fixed_pool_use_memory;
     }
@@ -184,6 +186,9 @@ bool KVCacheManager::init() {
 
     const bool is_hybrid = config_.groupNums() > 1;
     if (config_.use_independent_block_pools) {
+        // REBASE CONFLICT CONTEXT(2413e8e03): preserve the new base role-aware
+        // HybridPool allocator constructor while later setting the source branch's
+        // cudaMalloc block-pool flag through KVCacheAllocator.
         allocator_ = std::make_shared<rtp_llm::HybridPoolKVCacheAllocator>(config_,
                                                                            AllocationType::DEVICE,
                                                                            metrics_reporter_,
@@ -202,9 +207,10 @@ bool KVCacheManager::init() {
         allocator_->setUseCudaMallocBlockPool(true);
     }
 
+    // REBASE CONFLICT CONTEXT(2413e8e03): keep new base SharedBlockCache and CP
+    // slot mapper wiring, then initialize with source branch cudaMalloc setting if enabled.
     allocator_->setCPSlotMapper(cp_slot_mapper_);
     allocator_->setSharedBlockCache(shared_cache);
-    allocator_->setCPSlotMapper(cp_slot_mapper_);
     RTP_LLM_CHECK_WITH_INFO(allocator_->init(), "KVCacheAllocator init failed");
 
     if (metrics_reporter_) {
@@ -225,9 +231,8 @@ const CacheConfig& KVCacheManager::getMTPModuleCacheConfig(int mtp_module_id) co
                             "Invalid mtp_module_id: %d, must be in range [0, %zu)",
                             mtp_module_id,
                             config_.mtp_sub_configs.size());
-    RTP_LLM_CHECK_WITH_INFO(config_.mtp_sub_configs[mtp_module_id] != nullptr,
-                            "mtp_sub_configs[%d] is null",
-                            mtp_module_id);
+    RTP_LLM_CHECK_WITH_INFO(
+        config_.mtp_sub_configs[mtp_module_id] != nullptr, "mtp_sub_configs[%d] is null", mtp_module_id);
     return *config_.mtp_sub_configs[mtp_module_id];
 }
 
@@ -684,6 +689,8 @@ void KVCacheManager::allocateAndSync() {
 void KVCacheManager::reportMetricsLoop() {
     RTP_LLM_PROFILE_FUNCTION();
     kmonitor::MetricsTags tags;
+    // REBASE CONFLICT CONTEXT(2413e8e03): source branch logged HybridPool metrics
+    // via a local dynamic_cast; new base centralizes that in poolMetricsSnapshots().
     constexpr auto kLogInterval  = std::chrono::minutes(1);
     auto           last_log_time = std::chrono::steady_clock::now() - kLogInterval;
     while (!stop_.load(std::memory_order_relaxed)) {
@@ -719,9 +726,9 @@ void KVCacheManager::handleRead(const P2PConnectorStartLoadRequestPB& request,
 
 // Write one KV block (optionally per-layer) from host/device tensors for test
 bool KVCacheManager::writeKVBlockForTest(int                  block_index,
-                                          int                  layer_id,
-                                          const torch::Tensor& k_buffer,
-                                          const torch::Tensor& v_buffer) {
+                                         int                  layer_id,
+                                         const torch::Tensor& k_buffer,
+                                         const torch::Tensor& v_buffer) {
     // Basic size/type validation to prevent out-of-bounds copy
     auto&  spec             = config_.cache_specs[0];
     size_t expected_k_bytes = spec->k_block_size_bytes();
@@ -751,11 +758,12 @@ bool KVCacheManager::writeKVBlockForTest(int                  block_index,
                         size_t               copy_bytes) -> bool {
         const size_t dst_bytes = dst_block.size_bytes;
         if (dst_bytes < dst_byte_offset + copy_bytes) {
-            RTP_LLM_LOG_ERROR("dst block bytes[%zu] < dst_offset[%zu] + copy bytes[%zu] in writeKVBlockForTest(layer=%d)",
-                              dst_bytes,
-                              dst_byte_offset,
-                              copy_bytes,
-                              layer_id);
+            RTP_LLM_LOG_ERROR(
+                "dst block bytes[%zu] < dst_offset[%zu] + copy bytes[%zu] in writeKVBlockForTest(layer=%d)",
+                dst_bytes,
+                dst_byte_offset,
+                copy_bytes,
+                layer_id);
             return false;
         }
 
@@ -783,7 +791,9 @@ bool KVCacheManager::writeKVBlockForTest(int                  block_index,
     return true;
 }
 
-bool KVCacheManager::writeKVBlockForTest(int block_index, const torch::Tensor& k_buffer, const torch::Tensor& v_buffer) {
+bool KVCacheManager::writeKVBlockForTest(int                  block_index,
+                                         const torch::Tensor& k_buffer,
+                                         const torch::Tensor& v_buffer) {
     if (block_index < 0 || block_index >= config_.block_num) {
         RTP_LLM_LOG_WARNING("Invalid block_index: %d, valid range: [0, %d)", block_index, config_.block_num);
         return false;

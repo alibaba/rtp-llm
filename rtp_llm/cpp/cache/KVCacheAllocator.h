@@ -67,7 +67,7 @@ public:
     virtual int              seqSizePerBlock() const                                       = 0;
     virtual int              singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                                                    int                            seq_len,
-                                                   int                            reserve_step) const              = 0;
+                                                   int                            reserve_step) const                 = 0;
 
     MallocResult malloc(const MallocInfo& malloc_info);
     virtual void blockCopy(int src_block_index, int dest_block_index);
@@ -91,6 +91,8 @@ public:
         use_cuda_malloc_block_pool_ = use_cuda_malloc_block_pool;
     }
 
+    // REBASE CONFLICT CONTEXT(2413e8e03): keep new base CP slot mapping and
+    // SharedBlockCache hooks while adding the source branch cudaMalloc pool flag.
     void setCPSlotMapper(std::shared_ptr<CPSlotMapper> cp_slot_mapper) {
         cp_slot_mapper_ = std::move(cp_slot_mapper);
     }
@@ -130,9 +132,9 @@ public:
 protected:
     virtual bool         doInit() = 0;
     MallocResult         initMalloc(const MallocInfo& malloc_info);
-    virtual MallocResult incrMalloc(const MallocInfo& malloc_info)                                          = 0;
-    virtual MallocResult initMallocForCommonLen(const MallocInfo& malloc_info)                              = 0;
-    virtual int          getNeedBlocks(const MallocInfo& malloc_info) const                                 = 0;
+    virtual MallocResult incrMalloc(const MallocInfo& malloc_info)             = 0;
+    virtual MallocResult initMallocForCommonLen(const MallocInfo& malloc_info) = 0;
+    virtual int          getNeedBlocks(const MallocInfo& malloc_info) const    = 0;
     virtual void         checkCPShardedMallocResult(const MallocInfo&) const {}
     virtual void         decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector = false) = 0;
     bool                 cpShardThisGroupForCapacity(size_t gid) const;

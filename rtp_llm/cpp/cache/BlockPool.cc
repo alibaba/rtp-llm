@@ -176,6 +176,8 @@ void BlockPool::initializeCacheBuffer() {
     RTP_LLM_CHECK_WITH_INFO(cache_base_ptr_ != nullptr, "block pool allocate cache aligned buffer is null");
     const bool is_cuda   = cache_aligned_buffer_.is_cuda();
     const bool is_pinned = !is_cuda && cache_aligned_buffer_.is_pinned();
+    // REBASE CONFLICT CONTEXT(2413e8e03): keep the new base's pool-name/MB diagnostics
+    // and include the source branch's cudaMalloc backing in requestedBackingName().
     static constexpr double kBytesPerMB = 1024.0 * 1024.0;
     RTP_LLM_LOG_INFO("BlockPool backing selected: pool_name=%s allocation_type=%s requested_backing=%s "
                      "actual_backing=%s is_cuda=%d is_pinned=%d ptr=%p total_size=%zu bytes total_size_mb=%.2f "
@@ -194,6 +196,8 @@ void BlockPool::initializeCacheBuffer() {
 }
 
 void BlockPool::initializePinnedCpuBuffer(const char* log_context) {
+    // REBASE CONFLICT CONTEXT(2413e8e03): preserve new base pool-name logging for
+    // DSV4 fixed pools while retaining the source branch's selectable backing path.
     RTP_LLM_LOG_WARNING(
         "%s, pool_name=%s, total_size=%zu bytes", log_context, config_.pool_name.c_str(), config_.total_size_bytes);
     auto cpu_buffer = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
@@ -243,6 +247,8 @@ void BlockPool::initializeCudaMallocBuffer() {
                          {static_cast<int64_t>(config_.total_size_bytes)},
                          std::move(deleter),
                          torch::TensorOptions().dtype(torch::kUInt8).device(torch::Device(torch::kCUDA, device_id)));
+    // REBASE CONFLICT CONTEXT(2413e8e03): source branch added cudaMalloc backing for
+    // RDMA KV cache; keep new base pool-name diagnostics for multi-pool debugging.
     RTP_LLM_LOG_INFO("cudaMalloc block pool backing allocated, pool_name=%s, ptr=%p, total_size=%zu bytes, device=%d",
                      config_.pool_name.c_str(),
                      ptr,
@@ -391,6 +397,10 @@ bool BlockPool::init() {
     return true;
 }
 
+BlockCachePtr BlockPool::blockCache() {
+    return block_cache_;
+}
+
 void BlockPool::initFreeBlocks() {
     // block 0 is reserved
     for (BlockIdxType i = 1; i < static_cast<BlockIdxType>(config_.block_num); ++i) {
@@ -401,6 +411,7 @@ void BlockPool::initFreeBlocks() {
     req_con_ref_counter_.init(config_.block_num);
     block_cache_ref_counter_.init(config_.block_num);
     req_cache_ref_counter_.init(config_.block_num);
+    block_cache_ = std::make_shared<BlockCache>();
 }
 
 std::vector<torch::Tensor> BlockPool::allLayerCacheBase() const {

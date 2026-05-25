@@ -64,6 +64,9 @@ bool HybridPoolKVCacheAllocator::doInit() {
     group_pool_configs.reserve(static_cast<size_t>(group_nums));
     for (int gid = 0; gid < group_nums; ++gid) {
         auto pool_config = BlockPoolConfigHelper::createConfigForGroup(config_, static_cast<size_t>(gid));
+        // REBASE CONFLICT CONTEXT(2413e8e03): keep new base DSV4 per-group pool
+        // accounting before constructing pools; source branch only added cudaMalloc
+        // backing selection to the BlockPool constructor call below.
         if (gid >= 0 && gid <= 2) {
             const size_t paged_idx                  = static_cast<size_t>(gid);
             has_dsv4_paged_pool                     = true;
@@ -132,6 +135,9 @@ bool HybridPoolKVCacheAllocator::doInit() {
                                             && config_.fixed_pool_uses_pinned_cpu
                                             && static_cast<size_t>(gid) < config_.group_region_names.size()
                                             && isDsv4FixedRegion(config_.group_region_names[static_cast<size_t>(gid)]);
+        // REBASE CONFLICT CONTEXT(2413e8e03): DSV4 fixed pools may use pinned CPU
+        // backing in the new base; RDMA cudaMalloc backing is still applied to the
+        // remaining device-backed pools from the source branch.
         auto group_pool = std::make_shared<BlockPool>(pool_config,
                                                       allocation_type_,
                                                       use_pinned_cpu_backing,
