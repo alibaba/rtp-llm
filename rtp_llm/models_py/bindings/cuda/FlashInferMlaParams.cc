@@ -443,6 +443,7 @@ void FlashInferMlaAttnParams::fillParams(torch::Tensor t_prefix_lengths,
     auto t_prefix_lengths_host   = toHostContiguousI32(t_prefix_lengths);
     auto t_sequence_lengths_host = toHostContiguousI32(t_sequence_lengths);
     auto t_input_lengths_host    = toHostContiguousI32(t_input_lengths);
+    t_kv_cache_block_id_host     = toHostContiguousI32(t_kv_cache_block_id_host);
 
     const int batch_size = t_input_lengths_host.size(0);
 

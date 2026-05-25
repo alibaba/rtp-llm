@@ -71,10 +71,17 @@ flashinfer_attention_tests = [
             "base_attention_test.py",
         ],
     },
+    {
+        "name": "test_py_flashinfer_hybrid_mha_prefill",
+        "main": "test_flashinfer_prefill/test_py_flashinfer_hybrid_mha_prefill.py",
+        "extra_srcs": [
+            "base_attention_test.py",
+        ],
+    },
 ]
 
 # Generates one py_test per (test, platform): <test name>_<sm>,
-# e.g. test_py_flashinfer_paged_mha_prefill_sm90.
+# e.g. test_py_flashinfer_hybrid_mha_prefill_sm90.
 [
     py_test(
         name = test["name"] + "_" + platform["sm"],

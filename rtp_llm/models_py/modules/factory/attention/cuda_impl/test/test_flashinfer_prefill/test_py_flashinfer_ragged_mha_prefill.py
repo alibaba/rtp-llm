@@ -11,24 +11,18 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.attention_ref im
     compute_flashinfer_prefill_reference,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.base_attention_test import (
+    FP8_CACHE_DTYPES,
     BaseAttentionTest,
-    compare_tensors,
+    make_fp8_unit_scale,
 )
 from rtp_llm.ops import KvCacheDataType
 from rtp_llm.ops.compute_ops import LayerKVCache, rtp_llm_ops
-from rtp_llm.test.utils.numeric_util import assert_close_with_mismatch_tolerance
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 
 class TestPyFlashinferPrefillAttnOp(BaseAttentionTest):
     """Test suite for PyFlashinferPrefillAttnOp with correctness verification"""
-
-    kv_cache_dtype = KvCacheDataType.BASE
-    cache_dtype = torch.float16
-    rtol = 1e-2
-    atol = 1e-2
-    max_mismatch_rate = 0.0
 
     def setUp(self):
         """Set up test fixtures"""
@@ -37,11 +31,6 @@ class TestPyFlashinferPrefillAttnOp(BaseAttentionTest):
 
         # Call parent setUp for common initialization
         super().setUp()
-
-    def _create_config(self, *args, **kwargs):
-        config = super()._create_config(*args, **kwargs)
-        config.attn_configs.kv_cache_dtype = self.kv_cache_dtype
-        return config
 
     def _create_kv_cache(
         self,
@@ -67,6 +56,10 @@ class TestPyFlashinferPrefillAttnOp(BaseAttentionTest):
         )
 
         kv_cache.kv_cache_base = kv_cache_combined
+        if dtype in FP8_CACHE_DTYPES:
+            kv_cache.kv_scale_base = make_fp8_unit_scale(
+                total_blocks, num_kv_heads, seq_size_per_block, self.device
+            )
 
         # Extract separate K and V for reference computation
         k_cache = kv_cache_combined[:, 0, :, :, :]
@@ -153,7 +146,7 @@ class TestPyFlashinferPrefillAttnOp(BaseAttentionTest):
                 config.seq_size_per_block,
                 config.head_num_kv,
                 config.size_per_head,
-                dtype=self.cache_dtype,
+                dtype=self.cache_dtype(config.attn_configs),
             )
 
         # Forward pass through PyFlashinferPrefillAttnOp
@@ -169,24 +162,11 @@ class TestPyFlashinferPrefillAttnOp(BaseAttentionTest):
         )
 
         # Compare outputs
-        if self.max_mismatch_rate > 0:
-            assert_close_with_mismatch_tolerance(
-                output,
-                ref_output,
-                rtol=self.rtol,
-                atol=self.atol,
-                max_mismatched_elements=math.ceil(
-                    self.max_mismatch_rate * ref_output.numel()
-                ),
-            )
-        else:
-            compare_tensors(
-                output,
-                ref_output,
-                rtol=self.rtol,
-                atol=self.atol,
-                name=f"Prefill output (batch={batch_size}, seq_lens={sequence_lengths})",
-            )
+        self._assert_output_close(
+            output,
+            ref_output,
+            name=f"Prefill output (batch={batch_size}, seq_lens={sequence_lengths})",
+        )
 
         logging.info(
             f"✓ Test passed: batch_size={batch_size}, sequence_lengths={sequence_lengths}"
@@ -340,7 +320,6 @@ class TestPyFlashinferPrefillAttnOp(BaseAttentionTest):
 
 class TestPyFlashinferPrefillAttnOpFP8(TestPyFlashinferPrefillAttnOp):
     kv_cache_dtype = KvCacheDataType.FP8
-    cache_dtype = torch.float8_e4m3fn
     rtol = 4e-2
     atol = 4e-2
     max_mismatch_rate = 5e-5

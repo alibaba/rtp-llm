@@ -92,6 +92,7 @@ std::string FMHAConfig::to_string() const {
         << "enable_open_source_fmha: " << enable_open_source_fmha << "\n"
         << "enable_paged_open_source_fmha: " << enable_paged_open_source_fmha << "\n"
         << "disable_flashinfer_native: " << disable_flashinfer_native << "\n"
+        << "disable_flashinfer_hybrid_prefill: " << disable_flashinfer_hybrid_prefill << "\n"
         << "enable_xqa: " << enable_xqa << "\n"
         << "use_aiter_pa: " << use_aiter_pa << "\n"
         << "use_asm_pa: " << use_asm_pa << "\n"

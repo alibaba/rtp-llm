@@ -1,14 +1,99 @@
 import logging
 import math
 import unittest
-from typing import List, NamedTuple
+from typing import List, NamedTuple, Optional, Sequence
 
 import torch
 
-from rtp_llm.ops import AttentionConfigs, ParallelismConfig
+from rtp_llm.ops import AttentionConfigs, KvCacheDataType, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs, get_typemeta
+from rtp_llm.test.utils.numeric_util import assert_close_with_mismatch_tolerance
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
+
+FP8_CACHE_DTYPES = (torch.float8_e4m3fn,)
+
+
+def make_fp8_unit_scale(
+    total_pages: int,
+    num_kv_heads: int,
+    page_size: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """All-ones cache scale, matching the kv_scale == 1.0 FP8 contract."""
+    return torch.ones(
+        total_pages,
+        2 * num_kv_heads * page_size,
+        dtype=torch.float32,
+        device=device,
+    )
+
+
+def fill_paged_kv_cache(
+    k: Sequence[torch.Tensor],
+    v: Sequence[torch.Tensor],
+    fill_lengths: Sequence[int],
+    block_table: torch.Tensor,
+    page_size: int,
+    num_kv_heads: int,
+    head_dim: int,
+    cache_dtype: torch.dtype,
+    device: torch.device,
+    total_pages: Optional[int] = None,
+) -> LayerKVCache:
+    """Scatter per-batch K/V into a paged HND KV cache following ``block_table``.
+
+    Args:
+        k: Per-batch tensors [length, num_kv_heads, head_dim]; only the first
+            ``fill_lengths[i]`` tokens of each are written.
+        v: Value counterpart of ``k``.
+        fill_lengths: Tokens to write per batch. Use the prefix length when the
+            op under test appends the new tokens itself, or the full sequence
+            length to populate the whole cache.
+        block_table: [batch, max_pages] page ids, as carried by
+            ``kv_cache_kernel_block_id``.
+        cache_dtype: Cache element dtype; FP8 dtypes also get a unit scale.
+        total_pages: Cache capacity in pages. Defaults to the pages required by
+            ``fill_lengths``; pass explicitly when the block table indexes into
+            a larger or sparsely used page pool.
+
+    Returns:
+        LayerKVCache whose kv_cache_base is
+        [total_pages, 2, num_kv_heads, page_size, head_dim], index 0 of dim 1
+        being K and index 1 being V.
+    """
+    if total_pages is None:
+        total_pages = sum(math.ceil(length / page_size) for length in fill_lengths)
+
+    paged_kv_cache = torch.zeros(
+        total_pages,
+        2,
+        num_kv_heads,
+        page_size,
+        head_dim,
+        dtype=cache_dtype,
+        device=device,
+    )
+    for batch_idx, fill_len in enumerate(fill_lengths):
+        for page_offset in range(math.ceil(fill_len / page_size)):
+            page_id = int(block_table[batch_idx, page_offset].item())
+            start = page_offset * page_size
+            end = min(start + page_size, fill_len)
+            # [num_tokens, H, D] -> [H, num_tokens, D]
+            paged_kv_cache[page_id, 0, :, : end - start, :] = k[batch_idx][
+                start:end
+            ].transpose(0, 1)
+            paged_kv_cache[page_id, 1, :, : end - start, :] = v[batch_idx][
+                start:end
+            ].transpose(0, 1)
+
+    kv_cache = LayerKVCache()
+    kv_cache.kv_cache_base = paged_kv_cache
+    if cache_dtype in FP8_CACHE_DTYPES:
+        kv_cache.kv_scale_base = make_fp8_unit_scale(
+            total_pages, num_kv_heads, page_size, device
+        )
+    return kv_cache
 
 
 def set_seed(seed: int):
@@ -56,6 +141,19 @@ class TestConfig(NamedTuple):
 class BaseAttentionTest(unittest.TestCase):
     """Base test class for attention decode operations with common helper functions"""
 
+    kv_cache_dtype = KvCacheDataType.BASE
+    rtol = 1e-2
+    atol = 1e-2
+    max_mismatch_rate = 0.0
+
+    @staticmethod
+    def cache_dtype(attn_configs: AttentionConfigs) -> torch.dtype:
+        return (
+            torch.float8_e4m3fn
+            if attn_configs.kv_cache_dtype == KvCacheDataType.FP8
+            else attn_configs.dtype
+        )
+
     def setUp(self):
         """Set up test fixtures"""
         if not torch.cuda.is_available():
@@ -89,6 +187,7 @@ class BaseAttentionTest(unittest.TestCase):
             "bf16": torch.bfloat16,
         }
         attn_configs.dtype = dtype_map.get(data_type, torch.float16)
+        attn_configs.kv_cache_dtype = self.kv_cache_dtype
 
         parallelism_config = ParallelismConfig()
         parallelism_config.tp_size = tp_size
@@ -102,6 +201,36 @@ class BaseAttentionTest(unittest.TestCase):
             seq_size_per_block=seq_size_per_block,
             tp_size=tp_size,
         )
+
+    def _assert_output_close(
+        self,
+        actual: torch.Tensor,
+        expected: torch.Tensor,
+        name: str,
+        *,
+        rtol: Optional[float] = None,
+        atol: Optional[float] = None,
+    ) -> None:
+        compare_rtol = self.rtol if rtol is None else rtol
+        compare_atol = self.atol if atol is None else atol
+        if self.max_mismatch_rate > 0:
+            assert_close_with_mismatch_tolerance(
+                actual,
+                expected,
+                rtol=compare_rtol,
+                atol=compare_atol,
+                max_mismatched_elements=math.ceil(
+                    self.max_mismatch_rate * expected.numel()
+                ),
+            )
+        else:
+            compare_tensors(
+                actual,
+                expected,
+                rtol=compare_rtol,
+                atol=compare_atol,
+                name=name,
+            )
 
     def _create_kv_cache_block_ids(
         self,
@@ -249,6 +378,50 @@ class BaseAttentionTest(unittest.TestCase):
 
         return attn_inputs
 
+    def _create_chunked_prefill_attention_inputs(
+        self,
+        batch_size: int,
+        prefix_lengths: List[int],
+        input_lengths: List[int],
+        seq_size_per_block: int,
+        dtype: torch.dtype = torch.float16,
+    ) -> PyAttentionInputs:
+        """Create PyAttentionInputs for chunked prefill: new Q tokens on top of
+        an existing KV prefix; cu_seqlens accumulates input lengths only."""
+        attn_inputs = PyAttentionInputs()
+        attn_inputs.is_prefill = True
+        attn_inputs.is_cuda_graph = False
+        attn_inputs.input_lengths = torch.tensor(
+            input_lengths, dtype=torch.int32, device="cpu"
+        ).pin_memory()
+        attn_inputs.prefix_lengths = torch.tensor(
+            prefix_lengths, dtype=torch.int32, device="cpu"
+        ).pin_memory()
+        sequence_lengths = [p + i for p, i in zip(prefix_lengths, input_lengths)]
+        attn_inputs.sequence_lengths = torch.tensor(
+            sequence_lengths, dtype=torch.int32, device="cpu"
+        ).pin_memory()
+
+        kv_cache_block_id = self._create_kv_cache_block_ids(
+            batch_size, sequence_lengths, seq_size_per_block
+        )
+        attn_inputs.kv_cache_block_id = kv_cache_block_id
+        attn_inputs.kv_cache_block_id_device = kv_cache_block_id.to(self.device)
+        attn_inputs.kv_cache_kernel_block_id = kv_cache_block_id
+        attn_inputs.kv_cache_kernel_block_id_device = kv_cache_block_id.to(self.device)
+
+        cu_seqlens = [0]
+        for input_len in input_lengths:
+            cu_seqlens.append(cu_seqlens[-1] + input_len)
+        attn_inputs.cu_seqlens = torch.tensor(
+            cu_seqlens, dtype=torch.int32, device="cpu"
+        ).pin_memory()
+        attn_inputs.cu_seqlens_device = attn_inputs.cu_seqlens.to(
+            self.device, non_blocking=True
+        )
+        attn_inputs.dtype = get_typemeta(torch.zeros([1], dtype=dtype))
+        return attn_inputs
+
     def _create_kv_cache(
         self,
         total_blocks: int,
@@ -268,7 +441,7 @@ class BaseAttentionTest(unittest.TestCase):
 
         # Create combined KV cache with shape [total_blocks, 2, num_kv_heads, seq_size_per_block, head_dim]
         # where dim=1, index=0 is K and index=1 is V
-        is_fp8 = dtype == torch.float8_e4m3fn
+        is_fp8 = dtype in FP8_CACHE_DTYPES
         kv_cache_combined = torch.randn(
             total_blocks,
             2,  # K and V
@@ -283,11 +456,8 @@ class BaseAttentionTest(unittest.TestCase):
 
         kv_cache.kv_cache_base = kv_cache_combined
         if is_fp8:
-            kv_cache.kv_scale_base = torch.ones(
-                total_blocks,
-                2 * num_kv_heads * seq_size_per_block,
-                dtype=torch.float32,
-                device=self.device,
+            kv_cache.kv_scale_base = make_fp8_unit_scale(
+                total_blocks, num_kv_heads, seq_size_per_block, self.device
             )
 
         # Extract separate K and V for reference computation

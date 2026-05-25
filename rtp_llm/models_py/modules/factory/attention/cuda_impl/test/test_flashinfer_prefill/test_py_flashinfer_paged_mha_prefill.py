@@ -12,11 +12,10 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.attention_ref im
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.base_attention_test import (
     BaseAttentionTest,
-    compare_tensors,
+    fill_paged_kv_cache,
 )
 from rtp_llm.ops import KvCacheDataType
 from rtp_llm.ops.compute_ops import LayerKVCache
-from rtp_llm.test.utils.numeric_util import assert_close_with_mismatch_tolerance
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -24,11 +23,7 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 class TestPyFlashinferPrefillPagedAttnOp(BaseAttentionTest):
     """Test suite for PyFlashinferPrefillPagedAttnOp with paged KV cache"""
 
-    kv_cache_dtype = KvCacheDataType.BASE
-    cache_dtype = torch.float16
-    rtol = 1e-2
     atol = 5e-3
-    max_mismatch_rate = 0.0
 
     def setUp(self):
         """Set up test fixtures"""
@@ -38,70 +33,6 @@ class TestPyFlashinferPrefillPagedAttnOp(BaseAttentionTest):
         # Call parent setUp for common initialization
         super().setUp()
 
-    def _create_config(self, *args, **kwargs):
-        config = super()._create_config(*args, **kwargs)
-        config.attn_configs.kv_cache_dtype = self.kv_cache_dtype
-        return config
-
-    def _create_chunked_prefill_attention_inputs(
-        self,
-        batch_size: int,
-        prefix_lengths: List[int],
-        input_lengths: List[int],
-        seq_size_per_block: int,
-    ) -> PyAttentionInputs:
-        """Helper to create PyAttentionInputs for chunked prefill mode
-
-        Args:
-            batch_size: Number of sequences in the batch
-            prefix_lengths: List of prefix lengths (existing KV cache) for each batch
-            input_lengths: List of input lengths (new Q tokens) for each batch
-            seq_size_per_block: Number of tokens per block (page size)
-
-        Returns:
-            PyAttentionInputs configured for chunked prefill mode
-        """
-        attn_inputs = PyAttentionInputs()
-
-        # Prefill mode
-        attn_inputs.is_prefill = True
-
-        # input_lengths is the length of new Q tokens
-        attn_inputs.input_lengths = torch.tensor(
-            input_lengths, dtype=torch.int32, device="cpu"
-        ).pin_memory()
-
-        # prefix_lengths is the length of existing KV cache
-        attn_inputs.prefix_lengths = torch.tensor(
-            prefix_lengths, dtype=torch.int32, device="cpu"
-        ).pin_memory()
-
-        # sequence_lengths is prefix + input (total KV length)
-        sequence_lengths = [p + i for p, i in zip(prefix_lengths, input_lengths)]
-        attn_inputs.sequence_lengths = torch.tensor(
-            sequence_lengths, dtype=torch.int32, device="cpu"
-        ).pin_memory()
-
-        # Create KV cache block IDs for total sequence
-        kv_cache_block_id = self._create_kv_cache_block_ids(
-            batch_size, sequence_lengths, seq_size_per_block
-        )
-        attn_inputs.kv_cache_block_id = kv_cache_block_id
-        attn_inputs.kv_cache_block_id_device = kv_cache_block_id.to(self.device)
-        attn_inputs.kv_cache_kernel_block_id = kv_cache_block_id
-        attn_inputs.kv_cache_kernel_block_id_device = kv_cache_block_id.to(self.device)
-
-        # Create cu_seqlens (cumulative input lengths, NOT sequence lengths!)
-        cu_seqlens = [0]
-        for input_len in input_lengths:
-            cu_seqlens.append(cu_seqlens[-1] + input_len)
-        attn_inputs.cu_seqlens_device = torch.tensor(
-            cu_seqlens, dtype=torch.int32, device=self.device
-        )
-        attn_inputs.dtype = get_typemeta(torch.zeros([1], dtype=torch.float16))
-
-        return attn_inputs
-
     def _create_paged_kv_cache(
         self,
         k_ragged: torch.Tensor,
@@ -110,6 +41,8 @@ class TestPyFlashinferPrefillPagedAttnOp(BaseAttentionTest):
         page_size: int,
         num_kv_heads: int,
         head_dim: int,
+        block_table: torch.Tensor,
+        cache_dtype: torch.dtype,
     ) -> LayerKVCache:
         """
         Convert ragged K, V to paged KV cache format (HND layout)
@@ -121,59 +54,32 @@ class TestPyFlashinferPrefillPagedAttnOp(BaseAttentionTest):
             page_size: Page size
             num_kv_heads: Number of KV heads
             head_dim: Head dimension
+            block_table: [batch, max_pages] page ids the op will read
 
         Returns:
-            paged_kv_cache: [num_layers, num_pages, 2, num_kv_heads, page_size, head_dim] (HND layout)
+            paged_kv_cache: [num_pages, 2, num_kv_heads, page_size, head_dim] (HND layout)
         """
-        total_pages = sum(
-            (seq_len + page_size - 1) // page_size for seq_len in sequence_lengths
-        )
-
-        # single layer for testing
-        # Allocate paged KV cache in HND format: [num_layers, num_pages, 2, num_kv_heads, page_size, head_dim]
-        paged_kv_cache = torch.zeros(
-            total_pages,
-            2,
-            num_kv_heads,
-            page_size,
-            head_dim,
-            dtype=k_ragged.dtype,
-            device=self.device,
-        )
-
-        page_idx = 0
-        token_offset = 0
-
+        offsets = [0]
         for seq_len in sequence_lengths:
-            num_pages = (seq_len + page_size - 1) // page_size
-
-            # Fill pages with K, V data
-            for i in range(num_pages):
-                start_token = i * page_size
-                end_token = min(start_token + page_size, seq_len)
-                num_tokens_in_page = end_token - start_token
-
-                # Copy K, V to page (layer 0) in HND layout
-                # k_ragged/v_ragged shape: [total_tokens, num_kv_heads, head_dim]
-                # paged_kv_cache shape: [num_layers, num_pages, 2, num_kv_heads, page_size, head_dim]
-                paged_kv_cache[page_idx, 0, :, :num_tokens_in_page, :] = k_ragged[
-                    token_offset + start_token : token_offset + end_token
-                ].transpose(
-                    0, 1
-                )  # [num_tokens, H, D] -> [H, num_tokens, D]
-
-                paged_kv_cache[page_idx, 1, :, :num_tokens_in_page, :] = v_ragged[
-                    token_offset + start_token : token_offset + end_token
-                ].transpose(
-                    0, 1
-                )  # [num_tokens, H, D] -> [H, num_tokens, D]
-
-                page_idx += 1
-
-            token_offset += seq_len
-        kv_cache = LayerKVCache()
-        kv_cache.kv_cache_base = paged_kv_cache
-        return kv_cache
+            offsets.append(offsets[-1] + seq_len)
+        per_batch = [
+            (
+                k_ragged[offsets[i] : offsets[i + 1]],
+                v_ragged[offsets[i] : offsets[i + 1]],
+            )
+            for i in range(len(sequence_lengths))
+        ]
+        return fill_paged_kv_cache(
+            [entry[0] for entry in per_batch],
+            [entry[1] for entry in per_batch],
+            sequence_lengths,
+            block_table,
+            page_size,
+            num_kv_heads,
+            head_dim,
+            cache_dtype,
+            self.device,
+        )
 
     def _test_prefill_correctness(
         self,
@@ -246,12 +152,20 @@ class TestPyFlashinferPrefillPagedAttnOp(BaseAttentionTest):
         k = k_flat.reshape(total_tokens, config.head_num_kv, config.size_per_head)
         v = v_flat.reshape(total_tokens, config.head_num_kv, config.size_per_head)
 
-        k = k.to(self.cache_dtype)
-        v = v.to(self.cache_dtype)
+        cache_dtype = self.cache_dtype(config.attn_configs)
+        k = k.to(cache_dtype)
+        v = v.to(cache_dtype)
 
         # Create paged KV cache
         paged_kv_cache = self._create_paged_kv_cache(
-            k, v, sequence_lengths, page_size, config.head_num_kv, config.size_per_head
+            k,
+            v,
+            sequence_lengths,
+            page_size,
+            config.head_num_kv,
+            config.size_per_head,
+            attn_inputs.kv_cache_kernel_block_id,
+            cache_dtype,
         )
 
         # Forward pass through PyFlashinferPrefillPagedAttnOp
@@ -275,24 +189,7 @@ class TestPyFlashinferPrefillPagedAttnOp(BaseAttentionTest):
 
         # Assert closeness (with relaxed tolerance for FP16)
         try:
-            if self.max_mismatch_rate > 0:
-                assert_close_with_mismatch_tolerance(
-                    output,
-                    ref_output,
-                    rtol=self.rtol,
-                    atol=self.atol,
-                    max_mismatched_elements=math.ceil(
-                        self.max_mismatch_rate * ref_output.numel()
-                    ),
-                )
-            else:
-                compare_tensors(
-                    output,
-                    ref_output,
-                    rtol=self.rtol,
-                    atol=self.atol,
-                    name="Prefill output",
-                )
+            self._assert_output_close(output, ref_output, name="Prefill output")
             print("✓ Test passed")
         except AssertionError as e:
             logging.error(f"✗ Test failed: {e}")
@@ -448,8 +345,9 @@ class TestPyFlashinferPrefillPagedAttnOp(BaseAttentionTest):
             device=self.device,
         )
 
-        k = k.to(self.cache_dtype)
-        v = v.to(self.cache_dtype)
+        cache_dtype = self.cache_dtype(config.attn_configs)
+        k = k.to(cache_dtype)
+        v = v.to(cache_dtype)
 
         # Create paged KV cache
         sequence_lengths = [p + i for p, i in zip(prefix_lengths, input_lengths)]
@@ -460,6 +358,8 @@ class TestPyFlashinferPrefillPagedAttnOp(BaseAttentionTest):
             page_size,
             config.head_num_kv,
             config.size_per_head,
+            attn_inputs.kv_cache_kernel_block_id,
+            cache_dtype,
         )
 
         # Forward pass through PyFlashinferPrefillPagedAttnOp
@@ -533,26 +433,13 @@ class TestPyFlashinferPrefillPagedAttnOp(BaseAttentionTest):
         # Compare outputs
         print(f"\n[Correctness Check]")
         try:
-            atol = max(self.atol, 1e-2)
-            rtol = max(self.rtol, 1e-2)
-            if self.max_mismatch_rate > 0:
-                assert_close_with_mismatch_tolerance(
-                    output,
-                    ref_output,
-                    rtol=rtol,
-                    atol=atol,
-                    max_mismatched_elements=math.ceil(
-                        self.max_mismatch_rate * ref_output.numel()
-                    ),
-                )
-            else:
-                compare_tensors(
-                    output,
-                    ref_output,
-                    atol=atol,
-                    rtol=rtol,
-                    name="Chunked prefill output",
-                )
+            self._assert_output_close(
+                output,
+                ref_output,
+                rtol=max(self.rtol, 1e-2),
+                atol=max(self.atol, 1e-2),
+                name="Chunked prefill output",
+            )
             print("✅ Correctness check PASSED!")
         except AssertionError as e:
             print(f"❌ Correctness check FAILED: {e}")
@@ -635,7 +522,6 @@ class TestPyFlashinferPrefillPagedAttnOp(BaseAttentionTest):
 
 class TestPyFlashinferPrefillPagedAttnOpFP8(TestPyFlashinferPrefillPagedAttnOp):
     kv_cache_dtype = KvCacheDataType.FP8
-    cache_dtype = torch.float8_e4m3fn
     rtol = 4e-2
     atol = 4e-2
     max_mismatch_rate = 1e-5
