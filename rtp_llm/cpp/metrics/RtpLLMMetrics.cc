@@ -9,6 +9,7 @@ namespace rtp_llm {
 AUTIL_LOG_SETUP(rtp_llm, RpcMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RpcWorkerStatusMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RpcCacheStatusMetrics);
+AUTIL_LOG_SETUP(rtp_llm, PrefillRecentCacheKeyMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMStreamMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpEmbeddingGlobalMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpEmbeddingStreamMetrics);
@@ -100,6 +101,40 @@ bool RpcWorkerStatusMetrics::init(kmonitor::MetricsGroupManager* manager) {
 void RpcWorkerStatusMetrics::report(const kmonitor::MetricsTags* tags, RpcWorkerStatusMetricsCollector* collector) {
     REPORT_QPS(qps);
     REPORT_GAUGE(total_rt_us);
+}
+
+bool PrefillRecentCacheKeyMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_QPS_MUTABLE_METRIC(request_count_metric, "rtp_llm_prefill_worker_recent_cache_key_request_count");
+    REGISTER_QPS_MUTABLE_METRIC(empty_request_count_metric,
+                                "rtp_llm_prefill_worker_recent_cache_key_empty_request_count");
+    REGISTER_GAUGE_MUTABLE_METRIC(hit_count_metric, "rtp_llm_prefill_worker_recent_cache_key_hit_count");
+    REGISTER_GAUGE_MUTABLE_METRIC(total_count_metric, "rtp_llm_prefill_worker_recent_cache_key_total_count");
+    REGISTER_GAUGE_MUTABLE_METRIC(hit_ratio_metric, "rtp_llm_prefill_worker_recent_cache_key_hit_ratio");
+    REGISTER_GAUGE_MUTABLE_METRIC(retained_occurrences_metric,
+                                  "rtp_llm_prefill_worker_recent_cache_key_retained_occurrences");
+    REGISTER_GAUGE_MUTABLE_METRIC(retained_unique_cache_keys_metric,
+                                  "rtp_llm_prefill_worker_recent_cache_key_retained_unique_cache_keys");
+    REGISTER_GAUGE_MUTABLE_METRIC(time_window_ms_metric, "rtp_llm_prefill_worker_recent_cache_key_time_window_ms");
+    return true;
+}
+
+void PrefillRecentCacheKeyMetrics::report(const kmonitor::MetricsTags*              tags,
+                                          PrefillRecentCacheKeyMetricsCollector* collector) {
+    if (collector->request_count) {
+        REPORT_MUTABLE_QPS(request_count_metric);
+    }
+    if (collector->empty_request_count) {
+        REPORT_MUTABLE_QPS(empty_request_count_metric);
+    }
+    if (!collector->has_value) {
+        return;
+    }
+    REPORT_MUTABLE_METRIC(hit_count_metric, collector->hit_count);
+    REPORT_MUTABLE_METRIC(total_count_metric, collector->total_count);
+    REPORT_MUTABLE_METRIC(hit_ratio_metric, collector->hit_ratio);
+    REPORT_MUTABLE_METRIC(retained_occurrences_metric, collector->retained_occurrences);
+    REPORT_MUTABLE_METRIC(retained_unique_cache_keys_metric, collector->retained_unique_cache_keys);
+    REPORT_MUTABLE_METRIC(time_window_ms_metric, collector->time_window_ms);
 }
 
 void RpcMetrics::report(const kmonitor::MetricsTags* tags, RpcMetricsCollector* collector) {
