@@ -5,8 +5,12 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/engine_base/Host.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/cpp/utils/HashUtil.h"
 #include <cstring>
+#include <strings.h>
+#include <cstdlib>
 #include <memory>
+#include <sstream>
 #include <unistd.h>
 #include <limits.h>
 
@@ -17,6 +21,87 @@ using grpc::Status;
 using grpc::ClientContext;
 
 namespace rtp_llm {
+
+namespace {
+
+bool prefillCacheDebugLogEnabled() {
+    static const bool enabled = []() {
+        const char* value = std::getenv("PREFILL_CACHE_DEBUG_LOG");
+        if (value == nullptr) {
+            value = std::getenv("KV_CACHE_DEBUG_LOG");
+        }
+        if (value == nullptr) {
+            return false;
+        }
+        return strcmp(value, "1") == 0 || strcasecmp(value, "true") == 0 || strcasecmp(value, "on") == 0;
+    }();
+    return enabled;
+}
+
+std::string cacheKeyPreview(const std::vector<CacheKeyType>& keys, size_t limit = 6) {
+    std::ostringstream oss;
+    oss << "[";
+    for (size_t i = 0; i < keys.size() && i < limit; ++i) {
+        if (i != 0) {
+            oss << ",";
+        }
+        oss << keys[i];
+    }
+    if (keys.size() > limit) {
+        oss << ",...";
+    }
+    oss << "]";
+    return oss.str();
+}
+
+std::vector<CacheKeyType> buildFullBlockCacheKeys(torch::Tensor input_ids, int seq_size_per_block) {
+    std::vector<CacheKeyType> cache_keys;
+    if (seq_size_per_block <= 0 || !input_ids.defined() || input_ids.numel() <= 0) {
+        return cache_keys;
+    }
+
+    if (!input_ids.device().is_cpu()) {
+        input_ids = input_ids.cpu();
+    }
+    if (!input_ids.is_contiguous()) {
+        input_ids = input_ids.contiguous();
+    }
+    if (input_ids.scalar_type() != torch::kInt32) {
+        input_ids = input_ids.to(torch::kInt32);
+    }
+
+    const int64_t token_num   = input_ids.numel();
+    const int64_t block_count = token_num / seq_size_per_block;
+    if (block_count <= 0) {
+        return cache_keys;
+    }
+    cache_keys.reserve(static_cast<size_t>(block_count));
+
+    auto*   token_ids    = input_ids.data_ptr<int32_t>();
+    int64_t rolling_hash = 0;
+    for (int64_t block_idx = 0; block_idx < block_count; ++block_idx) {
+        const int64_t pos = block_idx * seq_size_per_block;
+        rolling_hash      = rtp_llm::hashInt64Array(
+            rolling_hash, token_ids + pos, token_ids + pos + static_cast<int64_t>(seq_size_per_block));
+        cache_keys.push_back(static_cast<CacheKeyType>(rolling_hash));
+    }
+    return cache_keys;
+}
+
+void fillPrefillRecentCacheKeyMetricsCollector(PrefillRecentCacheKeyMetricsCollector& collector,
+                                               const RecentCacheKeyWindow::Snapshot&  snapshot) {
+    collector.has_value                  = true;
+    collector.request_count              = true;
+    collector.empty_request_count        = snapshot.request_occurrences == 0;
+    collector.hit_count                  = snapshot.request_hit_occurrences;
+    collector.total_count                = snapshot.request_occurrences;
+    collector.hit_ratio                  = snapshot.request_hit_ratio;
+    collector.retained_occurrences       = snapshot.retained_occurrences;
+    collector.retained_unique_cache_keys = static_cast<int64_t>(snapshot.retained_unique_cache_keys);
+    collector.time_window_ms             = snapshot.time_window_ms;
+}
+
+}  // namespace
 
 #define CLIENT_GRPC_RET_IF_ERROR(prefill_context, state, error_code_value)                                             \
     if (!(state)) {                                                                                                    \
@@ -84,6 +169,7 @@ grpc::Status PrefillRpcServer::init(const EngineInitParams&                     
     if (!ret.ok()) {
         return ret;
     }
+    prefill_recent_cache_key_window_ = std::make_unique<RecentCacheKeyWindow>();
     return grpc::Status::OK;
 }
 
@@ -419,6 +505,44 @@ grpc::Status PrefillRpcServer::prepareAllocateResource(PrefillGenerateContext& p
     return grpc::Status::OK;
 }
 
+void PrefillRpcServer::reportPrefillRecentCacheKeyMetrics(PrefillGenerateContext& prefill_context) {
+    RTP_LLM_PROFILE_FUNCTION();
+    if (!prefill_recent_cache_key_window_) {
+        return;
+    }
+    if (!prefill_context.generate_input) {
+        return;
+    }
+
+    const int seq_size_per_block = maga_init_params_.kv_cache_config.seq_size_per_block;
+    auto      cache_keys = buildFullBlockCacheKeys(prefill_context.generate_input->input_ids, seq_size_per_block);
+    auto      snapshot   = prefill_recent_cache_key_window_->record(cache_keys);
+
+    if (metrics_reporter_) {
+        PrefillRecentCacheKeyMetricsCollector collector;
+        fillPrefillRecentCacheKeyMetricsCollector(collector, snapshot);
+        metrics_reporter_->report<PrefillRecentCacheKeyMetrics, PrefillRecentCacheKeyMetricsCollector>(nullptr,
+                                                                                                       &collector);
+    }
+
+    if (prefillCacheDebugLogEnabled()) {
+        RTP_LLM_LOG_INFO("prefill recent-cache-key metrics reported: request_id=%ld token_num=%ld "
+                         "seq_size_per_block=%d key_count=%zu hit_count=%ld total_count=%ld hit_ratio=%.6f "
+                         "retained_occurrences=%ld retained_unique_cache_keys=%zu window_ms=%ld keys=%s",
+                         prefill_context.request_id,
+                         prefill_context.generate_input->input_ids.numel(),
+                         seq_size_per_block,
+                         cache_keys.size(),
+                         snapshot.request_hit_occurrences,
+                         snapshot.request_occurrences,
+                         snapshot.request_hit_ratio,
+                         snapshot.retained_occurrences,
+                         snapshot.retained_unique_cache_keys,
+                         snapshot.time_window_ms,
+                         cacheKeyPreview(cache_keys).c_str());
+    }
+}
+
 grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*                   server_context,
                                                   const GenerateInputPB*                 request,
                                                   grpc::ServerWriter<GenerateOutputsPB>* writer) {
@@ -461,6 +585,7 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
                 max_retry_timeout_ms);
             return prefill_context.error_status;
         }
+        reportPrefillRecentCacheKeyMetrics(prefill_context);
         EXECUTE_STAGE_FUNC(enqueueRequest, prefill_context);
         EXECUTE_STAGE_FUNC(remoteLoadCacheStart, prefill_context);
         EXECUTE_STAGE_FUNC(pollLocalOutput, prefill_context);

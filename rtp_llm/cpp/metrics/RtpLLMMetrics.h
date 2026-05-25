@@ -141,6 +141,38 @@ private:
     AUTIL_LOG_DECLARE();
 };
 
+class PrefillRecentCacheKeyMetricsCollector final {
+public:
+    bool    has_value                  = false;
+    bool    request_count              = false;
+    bool    empty_request_count        = false;
+    int64_t hit_count                  = 0;
+    int64_t total_count                = 0;
+    double  hit_ratio                  = 0.0;
+    int64_t retained_occurrences       = 0;
+    int64_t retained_unique_cache_keys = 0;
+    int64_t time_window_ms             = 0;
+};
+
+class PrefillRecentCacheKeyMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, PrefillRecentCacheKeyMetricsCollector* collector);
+
+public:
+    kmonitor::MutableMetric* request_count_metric              = nullptr;
+    kmonitor::MutableMetric* empty_request_count_metric        = nullptr;
+    kmonitor::MutableMetric* hit_count_metric                  = nullptr;
+    kmonitor::MutableMetric* total_count_metric                = nullptr;
+    kmonitor::MutableMetric* hit_ratio_metric                  = nullptr;
+    kmonitor::MutableMetric* retained_occurrences_metric       = nullptr;
+    kmonitor::MutableMetric* retained_unique_cache_keys_metric = nullptr;
+    kmonitor::MutableMetric* time_window_ms_metric             = nullptr;
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
 class RtpLLMStreamMetricsCollector final {
 public:
     bool qps               = false;
