@@ -285,8 +285,9 @@ class TestCPLinearAttnForward(unittest.TestCase):
             for r in range(cp_size):
                 r_pos = torch.tensor(all_rank_pos[r], device=self.device)
                 r_hidden = full_hidden[r_pos]
-                r_qkvz = module.in_proj_qkvz(r_hidden)
-                r_ba = module.in_proj_ba(r_hidden)
+                # Use the projection helper so the test runs under both the
+                # fused (single-GEMM) and 2-GEMM dispatch paths.
+                r_qkvz, r_ba = module._input_project(r_hidden)
                 r_mixed_qkv, r_z, r_b, r_a = module.fix_query_key_value_ordering(
                     r_qkvz, r_ba
                 )

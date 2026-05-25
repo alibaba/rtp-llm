@@ -37,10 +37,14 @@ except ImportError:
 try:
     from rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter import (
         AiterPrefillAttnOp,
+        AiterPrefillAttnOpPaged,
+        AiterPrefillImplAsm,
+        AiterPrefillImplNonAsm,
         AiterPrefillImplPaged,
         FMHAParams,
     )
-    from rtp_llm.ops import AttentionConfigs, PyAttentionInputs
+    from rtp_llm.ops import AttentionConfigs, PyAttentionInputs, RopeConfig, RopeStyle
+    from rtp_llm.ops.compute_ops import get_typemeta
 
     _OPS_IMPORTABLE = True
 except ImportError:
@@ -76,6 +80,92 @@ def _make_prefill_inputs(input_lengths: List[int], device: torch.device):
     )
     attn_inputs.prefix_lengths = torch.empty(0, dtype=torch.int32, device=device)
     return attn_inputs
+
+
+def _make_rope_attn_configs(
+    head_num: int,
+    head_num_kv: int,
+    head_dim: int,
+    dtype: torch.dtype,
+    tokens_per_block: int = 16,
+):
+    """AttentionConfigs configured for need_rope_kv_cache=True with base RoPE.
+
+    Mirrors the embedding-model setup so AiterPrefillImplAsm/NonAsm wire up the
+    real FusedRopeKVCachePrefillOp during __init__.
+    """
+    cfg = _make_attn_configs(head_num, head_num_kv, head_dim, tokens_per_block)
+    cfg.dtype = dtype
+    cfg.need_rope_kv_cache = True
+    rope = RopeConfig()
+    rope.dim = head_dim
+    rope.base = 10000
+    rope.scale = 1.0
+    rope.style = RopeStyle.Base
+    cfg.rope_config = rope
+    return cfg
+
+
+def _make_rope_prefill_inputs(
+    input_lengths: List[int], device: torch.device, dtype: torch.dtype
+):
+    """PyAttentionInputs populated with the cu_seqlens / padding_offset /
+    dtype fields the C++ RoPE op reads during prepare()."""
+    attn_inputs = _make_prefill_inputs(input_lengths, device)
+    attn_inputs.dtype = get_typemeta(torch.empty(1, dtype=dtype))
+    # The C++ op reads input_lengths from CPU pinned memory in production.
+    attn_inputs.input_lengths = torch.tensor(
+        input_lengths, dtype=torch.int32, device="cpu"
+    ).pin_memory()
+    attn_inputs.sequence_lengths = torch.tensor(
+        input_lengths, dtype=torch.int32, device="cpu"
+    ).pin_memory()
+    attn_inputs.prefix_lengths = torch.zeros(
+        len(input_lengths), dtype=torch.int32, device="cpu"
+    )
+
+    cu = [0]
+    for seq_len in input_lengths:
+        cu.append(cu[-1] + seq_len)
+    cu_seqlens = torch.tensor(cu, dtype=torch.int32, device=device)
+    attn_inputs.cu_seqlens = cu_seqlens
+    attn_inputs.cu_kv_seqlens = cu_seqlens
+
+    max_seq_len = max(input_lengths)
+    padding_offset = []
+    for batch_idx, seq_len in enumerate(input_lengths):
+        offset = batch_idx * max_seq_len - cu[batch_idx]
+        padding_offset.extend([offset] * seq_len)
+    attn_inputs.padding_offset = torch.tensor(
+        padding_offset, dtype=torch.int32, device=device
+    )
+    return attn_inputs
+
+
+def _apply_base_rope(q: torch.Tensor, k: torch.Tensor, input_lengths: List[int]):
+    """Torch reference for base RoPE (style=Base, base=10000) — matches the
+    RopeConfig produced by _make_rope_attn_configs. Used to validate the C++
+    FusedRopeKVCachePrefillOp output without depending on any HF model code."""
+    head_dim = q.shape[-1]
+    half = head_dim // 2
+    positions = []
+    for seq_len in input_lengths:
+        positions.extend(range(seq_len))
+    pos = torch.tensor(positions, dtype=torch.float32, device=q.device)
+    inv_freq = 10000 ** (
+        -2.0 * torch.arange(half, dtype=torch.float32, device=q.device) / head_dim
+    )
+    angle = pos.unsqueeze(1) * inv_freq.unsqueeze(0)
+    cos = torch.cos(angle)
+    sin = torch.sin(angle)
+
+    def rot(x):
+        lo, hi = x[..., :half], x[..., half:]
+        cos_b = cos.unsqueeze(1)
+        sin_b = sin.unsqueeze(1)
+        return torch.cat([lo * cos_b - hi * sin_b, hi * cos_b + lo * sin_b], dim=-1)
+
+    return rot(q).to(q.dtype), rot(k).to(k.dtype)
 
 
 def _sdpa_reference(
@@ -304,6 +394,7 @@ class TestAiterPrefillImplPagedSupport(unittest.TestCase):
 
     def _make_attn_inputs(self, prefix_lengths):
         from types import SimpleNamespace
+
         return SimpleNamespace(
             prefix_lengths=prefix_lengths,
             is_cuda_graph=False,
@@ -324,12 +415,16 @@ class TestAiterPrefillImplPagedSupport(unittest.TestCase):
     def test_support_false_for_zero_prefix(self):
         """All-zero prefix_lengths => support() returns False (ASM/NonAsm preferred)."""
         pl = torch.zeros(4, dtype=torch.int32)
-        self.assertFalse(AiterPrefillImplPaged.support(None, self._make_attn_inputs(pl)))
+        self.assertFalse(
+            AiterPrefillImplPaged.support(None, self._make_attn_inputs(pl))
+        )
 
     def test_support_false_for_empty_prefix_lengths(self):
         """Empty prefix_lengths tensor => support() returns False."""
         pl = torch.empty(0, dtype=torch.int32)
-        self.assertFalse(AiterPrefillImplPaged.support(None, self._make_attn_inputs(pl)))
+        self.assertFalse(
+            AiterPrefillImplPaged.support(None, self._make_attn_inputs(pl))
+        )
 
 
 @unittest.skipUnless(_OPS_IMPORTABLE, "Requires AiterPrefillImplPaged module")
@@ -343,6 +438,7 @@ class TestUpdatePrefillParamsForCudaGraph(unittest.TestCase):
     def _make_stub(self, batch_size):
         """Build a minimal object with fmha_params matching capture-time batch_size."""
         from types import SimpleNamespace
+
         fmha_params = SimpleNamespace(
             cu_seqlens_q=torch.zeros(batch_size + 1, dtype=torch.int32),
             cu_seqlens_k=torch.zeros(batch_size + 1, dtype=torch.int32),
@@ -357,10 +453,16 @@ class TestUpdatePrefillParamsForCudaGraph(unittest.TestCase):
         stub = SimpleNamespace(fmha_params=fmha_params)
         return stub
 
-    def _make_attn_inputs(self, input_lengths, prefix_lengths=None,
-                          cu_seqlens=None, cu_kv_seqlens=None,
-                          kv_block_id=None):
+    def _make_attn_inputs(
+        self,
+        input_lengths,
+        prefix_lengths=None,
+        cu_seqlens=None,
+        cu_kv_seqlens=None,
+        kv_block_id=None,
+    ):
         from types import SimpleNamespace
+
         batch_size = len(input_lengths)
         if kv_block_id is None:
             kv_block_id = torch.zeros(batch_size, 4, dtype=torch.int32)
@@ -460,6 +562,7 @@ class TestUpdatePrefillParamsForCudaGraph(unittest.TestCase):
     def test_missing_kv_block_id_raises(self):
         """Missing kv_cache block ids raises ValueError."""
         from types import SimpleNamespace
+
         stub = self._make_stub(batch_size=2)
         inputs = SimpleNamespace(
             input_lengths=torch.tensor([5, 5], dtype=torch.int32),
@@ -475,14 +578,17 @@ class TestUpdatePrefillParamsForCudaGraph(unittest.TestCase):
 
 @unittest.skipUnless(_OPS_IMPORTABLE, "Requires AiterPrefillAttnOp module")
 class TestCompactGatherReshape(unittest.TestCase):
-    """Regression tests for _gather_and_reshape_kv_compact.
+    """Regression tests for _gather_and_reshape_kv_compact and block_table sanitize/pad.
 
     Validates that the compact gather path produces the same K/V layout as
     _reshape_kv_cache_vectorized for the referenced blocks, and that the
-    identity block_table is correctly constructed.
+    block_table sanitize/pad logic correctly fills padding columns.
 
     These tests run on CPU (no aiter kernel needed) — they only exercise the
-    tensor reshape / gather logic.
+    tensor reshape / gather / sanitize logic. End-to-end kernel coverage
+    (including the actual mha_batch_prefill_func call with real kv_cache_base
+    and block_table) is provided by ROCm smoke tests that exercise the full
+    prefill-with-prefix path on GPU.
     """
 
     def _make_op(self, head_num_kv=4, head_dim=128, tokens_per_block=16):
@@ -503,21 +609,21 @@ class TestCompactGatherReshape(unittest.TestCase):
         return torch.randn(num_blocks, 2 * hk * ps * hd, dtype=dtype)
 
     def _assert_compact_equiv(self, op, kv_cache, block_table):
-        """Assert compact gather output equals full reshape indexed by block_table."""
+        """Assert compact gather plus remap equals full reshape indexed by block_table."""
         k_full, v_full = op._reshape_kv_cache_vectorized(kv_cache)
         k_compact, v_compact, compact_bt = op._gather_and_reshape_kv_compact(
             kv_cache, block_table
         )
 
-        # compact_bt should be identity: [0, 1, 2, ...] reshaped
-        flat_bt = compact_bt.reshape(-1)
-        expected_ids = torch.arange(flat_bt.numel(), dtype=torch.int32)
-        self.assertTrue(torch.equal(flat_bt, expected_ids))
-
-        # Index full K/V by original block_table and compare
+        # Remapped compact K/V should produce the same per-table K/V as the
+        # original full K/V indexed by the original block_table.
+        flat_bt = compact_bt.reshape(-1).to(torch.int64)
         orig_indices = block_table.reshape(-1).to(torch.int64)
-        torch.testing.assert_close(k_compact, k_full[orig_indices])
-        torch.testing.assert_close(v_compact, v_full[orig_indices])
+        torch.testing.assert_close(k_compact[flat_bt], k_full[orig_indices])
+        torch.testing.assert_close(v_compact[flat_bt], v_full[orig_indices])
+        # Compact buffer has unique blocks + 1 trailing dummy zero-block for
+        # CK speculative prefetch safety.
+        self.assertEqual(k_compact.shape[0], torch.unique(orig_indices).numel() + 1)
 
     # ---- 5D cache path ----------------------------------------------------
 
@@ -542,7 +648,11 @@ class TestCompactGatherReshape(unittest.TestCase):
         # Rows that map to the same original block should have identical data
         k_full, _ = op._reshape_kv_cache_vectorized(kv)
         orig_indices = bt.reshape(-1).to(torch.int64)
-        torch.testing.assert_close(k_compact, k_full[orig_indices])
+        torch.testing.assert_close(
+            k_compact[compact_bt.reshape(-1).to(torch.int64)], k_full[orig_indices]
+        )
+        # 3 unique blocks + 1 trailing dummy zero-block
+        self.assertEqual(k_compact.shape[0], 4)
 
     def test_5d_non_contiguous_blocks(self):
         """Block indices are sparse across a large pool."""
@@ -572,7 +682,11 @@ class TestCompactGatherReshape(unittest.TestCase):
         k_compact, v_compact, compact_bt = op._gather_and_reshape_kv_compact(kv, bt)
         k_full, _ = op._reshape_kv_cache_vectorized(kv)
         orig_indices = bt.reshape(-1).to(torch.int64)
-        torch.testing.assert_close(k_compact, k_full[orig_indices])
+        torch.testing.assert_close(
+            k_compact[compact_bt.reshape(-1).to(torch.int64)], k_full[orig_indices]
+        )
+        # 3 unique blocks + 1 trailing dummy zero-block
+        self.assertEqual(k_compact.shape[0], 4)
 
     # ---- FP8 fallback: compact should NOT be used -------------------------
 
@@ -587,21 +701,29 @@ class TestCompactGatherReshape(unittest.TestCase):
         use_compact = op.v1_kv_layout and not is_fp8
         self.assertFalse(use_compact)
 
-    # ---- arange cache reuse -----------------------------------------------
+    # ---- block table sanitization ------------------------------------------
 
-    def test_arange_cache_grows(self):
-        """The cached _compact_arange grows to accommodate larger block_tables."""
-        op = self._make_op()
-        kv = self._make_kv_cache_5d(2048, 4, 16, 128)
-        # First call with small block_table
-        bt_small = torch.tensor([[0, 1]], dtype=torch.int32)
-        op._gather_and_reshape_kv_compact(kv, bt_small)
-        first_size = op._compact_arange.numel()
-        # Second call with larger block_table
-        bt_large = torch.arange(2048, dtype=torch.int32).unsqueeze(0)
-        op._gather_and_reshape_kv_compact(kv, bt_large)
-        self.assertGreaterEqual(op._compact_arange.numel(), 2048)
-        self.assertGreaterEqual(op._compact_arange.numel(), first_size)
+    def test_sanitize_block_table_fills_padding_with_last_valid(self):
+        """Padding columns are filled with last-valid-block-id per row.
+
+        Valid-mask entries are left untouched (fail-fast for truly invalid ids).
+        The helper also pads columns for CK speculative prefetch.
+        """
+        op = self._make_op()  # tokens_per_block=16
+        bt = torch.tensor([[3, -1, 99, 5], [7, 8, 9, 10]], dtype=torch.int32)
+        seqlen_k = torch.tensor([16, 33], dtype=torch.int32)
+        # Row 0: valid_blocks=ceil(16/16)=1 → only col0 is valid, rest filled with bt[0,0]=3
+        # Row 1: valid_blocks=ceil(33/16)=3 → cols 0-2 valid, col3 filled with bt[1,2]=9
+        sanitized = op._sanitize_block_table(bt, block_num=8, seqlen_k=seqlen_k, max_seqlen_k=33)
+        # Check the first 4 columns (original width) for sanitize correctness.
+        first_4 = sanitized[:, :4].tolist()
+        self.assertEqual(first_4, [[3, 3, 3, 3], [7, 8, 9, 9]])
+        # Additional pad columns should all be filled with last-valid-block-id.
+        if sanitized.shape[1] > 4:
+            for row_idx, expected_fill in enumerate([3, 9]):
+                pad_vals = sanitized[row_idx, 4:].tolist()
+                self.assertTrue(all(v == expected_fill for v in pad_vals),
+                                f"Row {row_idx} pad columns should all be {expected_fill}, got {pad_vals}")
 
     # ---- different head_dim / tokens_per_block configs --------------------
 
@@ -616,6 +738,402 @@ class TestCompactGatherReshape(unittest.TestCase):
         kv = self._make_kv_cache_2d(32, 2, 8, 64)
         bt = torch.tensor([[0, 3, 7], [1, 4, 8]], dtype=torch.int32)
         self._assert_compact_equiv(op, kv, bt)
+
+
+@unittest.skipUnless(_is_rocm(), "Requires ROCm GPU")
+@unittest.skipUnless(_AITER_AVAILABLE, "Requires aiter")
+@unittest.skipUnless(_OPS_IMPORTABLE, "Requires AiterPrefillAttnOp module")
+class TestPagedPrefillKernelE2E(unittest.TestCase):
+    """End-to-end regression for AiterPrefillAttnOpPaged.forward.
+
+    Constructs real kv_cache_base (5D paged layout) and block_table with
+    padding columns, then calls mha_batch_prefill_func through the operator's
+    forward() method. Verifies the output against a torch SDPA reference
+    computed from the same K/V data unpacked from the paged cache.
+
+    This covers the sanitize+pad block_table logic together with the actual
+    CK batch prefill kernel execution on GPU.
+    """
+
+    def setUp(self):
+        torch.manual_seed(42)
+        self.device = torch.device("cuda")
+        self.dtype = torch.float16
+
+    @staticmethod
+    def _prefix_causal_sdpa_reference(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        input_lengths: List[int],
+        prefix_lengths: List[int],
+        head_num: int,
+        head_num_kv: int,
+        head_dim: int,
+    ) -> torch.Tensor:
+        """Per-sequence SDPA reference with prefix-cache causal mask.
+
+        For prefix-cache prefill, Q token i (0-indexed within the input chunk)
+        sits at KV position (prefix_len + i). It can attend to all KV positions
+        j where j <= prefix_len + i. This is equivalent to a causal mask with
+        Q offset = prefix_len.
+        """
+        repeat = head_num // head_num_kv
+        scale = 1.0 / math.sqrt(head_dim)
+        out_chunks = []
+        q_offset = 0
+        k_offset = 0
+        for seq_idx, (q_len, p_len) in enumerate(zip(input_lengths, prefix_lengths)):
+            kv_len = q_len + p_len
+            q_seq = q[q_offset : q_offset + q_len]  # [q_len, H_q, D]
+            k_seq = k[k_offset : k_offset + kv_len]  # [kv_len, H_kv, D]
+            v_seq = v[k_offset : k_offset + kv_len]  # [kv_len, H_kv, D]
+
+            # Transpose to [H, seq_len, D]
+            q_h = q_seq.transpose(0, 1)  # [H_q, q_len, D]
+            k_h = k_seq.transpose(0, 1)  # [H_kv, kv_len, D]
+            v_h = v_seq.transpose(0, 1)  # [H_kv, kv_len, D]
+
+            if repeat > 1:
+                k_h = k_h.repeat_interleave(repeat, dim=0)
+                v_h = v_h.repeat_interleave(repeat, dim=0)
+
+            # Build prefix-causal attention mask: Q[i] attends to K[j] where j <= p_len + i
+            # i.e. for each Q position i, the valid KV range is [0, p_len + i].
+            q_positions = torch.arange(q_len, device=q.device).unsqueeze(1) + p_len  # [q_len, 1]
+            k_positions = torch.arange(kv_len, device=q.device).unsqueeze(0)  # [1, kv_len]
+            # mask[i, j] = True means BLOCKED (will be set to -inf)
+            causal_mask = k_positions > q_positions  # [q_len, kv_len]
+
+            # Compute attention: [H_q, q_len, D] x [H_q, D, kv_len] -> [H_q, q_len, kv_len]
+            attn_weights = torch.matmul(q_h, k_h.transpose(-1, -2)) * scale
+            attn_weights.masked_fill_(causal_mask.unsqueeze(0), float("-inf"))
+            attn_weights = torch.softmax(attn_weights, dim=-1)
+            # [H_q, q_len, kv_len] x [H_q, kv_len, D] -> [H_q, q_len, D]
+            attn_out = torch.matmul(attn_weights, v_h)
+            # Transpose back to [q_len, H_q, D] -> [q_len, H_q*D]
+            attn_out = attn_out.transpose(0, 1).reshape(q_len, head_num * head_dim)
+            out_chunks.append(attn_out)
+
+            q_offset += q_len
+            k_offset += kv_len
+
+        return torch.cat(out_chunks, dim=0)
+
+    def _run_paged_prefill_e2e(
+        self,
+        batch_size: int,
+        input_lengths: List[int],
+        prefix_lengths: List[int],
+        head_num: int,
+        head_num_kv: int,
+        head_dim: int,
+        tokens_per_block: int,
+    ):
+        """Build real paged KV cache, run AiterPrefillAttnOpPaged.forward, compare to SDPA ref.
+
+        Strategy: randomly initialize kv_cache_base, then extract logical K/V
+        from it using the same vectorized view the kernel uses. This guarantees
+        the reference computes attention on exactly the same data the kernel sees.
+        """
+        device = self.device
+        dtype = self.dtype
+
+        # Compute derived lengths
+        kv_lengths = [il + pl for il, pl in zip(input_lengths, prefix_lengths)]
+        total_q_tokens = sum(input_lengths)
+        max_kv_len = max(kv_lengths)
+        blocks_per_seq = (max_kv_len + tokens_per_block - 1) // tokens_per_block
+
+        # Vectorization factor
+        x = 16 // torch.tensor(0, dtype=dtype).element_size()  # fp16: x=8
+
+        # Allocate paged KV cache pool with random data
+        num_pool_blocks = batch_size * blocks_per_seq + 8
+        kv_cache_base = torch.randn(
+            num_pool_blocks, 2, head_num_kv, tokens_per_block, head_dim,
+            dtype=dtype, device=device,
+        )
+
+        # Build block_table with extra padding columns (-1) to exercise sanitize.
+        bt_cols = blocks_per_seq + 2
+        block_table = torch.full(
+            (batch_size, bt_cols), -1, dtype=torch.int32, device=device
+        )
+        block_offset = 0
+        for b in range(batch_size):
+            num_valid_blocks = (kv_lengths[b] + tokens_per_block - 1) // tokens_per_block
+            for col in range(num_valid_blocks):
+                block_table[b, col] = block_offset + col
+            block_offset += num_valid_blocks
+
+        # Extract logical K/V from paged cache using the kernel's vectorized view.
+        #
+        # forward() does:
+        #   k_raw = kv_cache_base.select(1, 0)  → [N, hk, ps, hd] contiguous
+        #   k_vec = k_raw.view(N, hk, hd//x, ps, x)
+        # The kernel interprets k_vec[h, a, b, c] as K[head=h, token=b, dim=a*x+c].
+        #
+        #   v_raw = kv_cache_base.select(1, 1)  → [N, hk, ps, hd] contiguous
+        #   v_vec = v_raw.view(N, hk, ps//x, hd, x)
+        # The kernel interprets v_vec[h, a, b, c] as V[head=h, token=a*x+c, dim=b].
+        all_k_flat = []
+        all_v_flat = []
+        for b in range(batch_size):
+            kv_len = kv_lengths[b]
+            num_valid_blocks = (kv_len + tokens_per_block - 1) // tokens_per_block
+            k_tokens = []
+            v_tokens = []
+            for blk_idx in range(num_valid_blocks):
+                block_id = block_table[b, blk_idx].item()
+                tok_start = blk_idx * tokens_per_block
+                tok_end = min(tok_start + tokens_per_block, kv_len)
+                num_toks = tok_end - tok_start
+
+                # K: k_vec[h, a, b, c] = K[h, token=b, dim=a*x+c]
+                # Read logical K[h, t, d] = k_vec[h, d//x, t, d%x]
+                k_raw = kv_cache_base[block_id, 0]  # [hk, ps, hd] contiguous
+                k_vec = k_raw.view(head_num_kv, head_dim // x, tokens_per_block, x)
+                # k_vec shape: [hk, hd//x, ps, x] → permute to [hk, ps, hd//x, x] → reshape [hk, ps, hd]
+                k_logical = k_vec.permute(0, 2, 1, 3).reshape(
+                    head_num_kv, tokens_per_block, head_dim
+                )
+                k_tokens.append(k_logical[:, :num_toks, :].permute(1, 0, 2))  # [num_toks, hk, hd]
+
+                # V: v_vec[h, a, b, c] = V[h, token=a*x+c, dim=b]
+                # Read logical V[h, t, d] = v_vec[h, t//x, d, t%x]
+                v_raw = kv_cache_base[block_id, 1]  # [hk, ps, hd] contiguous
+                v_vec = v_raw.view(head_num_kv, tokens_per_block // x, head_dim, x)
+                # v_vec shape: [hk, ps//x, hd, x] → permute to [hk, ps//x, x, hd] → reshape [hk, ps, hd]
+                v_logical = v_vec.permute(0, 1, 3, 2).reshape(
+                    head_num_kv, tokens_per_block, head_dim
+                )
+                v_tokens.append(v_logical[:, :num_toks, :].permute(1, 0, 2))  # [num_toks, hk, hd]
+
+            all_k_flat.append(torch.cat(k_tokens, dim=0))
+            all_v_flat.append(torch.cat(v_tokens, dim=0))
+
+        # Generate Q tokens (only input_lengths, not prefix)
+        q_flat = torch.randn(total_q_tokens, head_num, head_dim, dtype=dtype, device=device)
+
+        # Build operator
+        cfg = _make_attn_configs(head_num, head_num_kv, head_dim, tokens_per_block)
+        op = AiterPrefillAttnOpPaged(cfg)
+
+        # Construct cu_seqlens
+        cu_seqlens_q = torch.zeros(batch_size + 1, dtype=torch.int32, device=device)
+        cu_seqlens_k = torch.zeros(batch_size + 1, dtype=torch.int32, device=device)
+        for b in range(batch_size):
+            cu_seqlens_q[b + 1] = cu_seqlens_q[b] + input_lengths[b]
+            cu_seqlens_k[b + 1] = cu_seqlens_k[b] + kv_lengths[b]
+
+        # Build a minimal FMHAParams-like object
+        class _FakeParams:
+            pass
+
+        params = _FakeParams()
+        params.cu_seqlens_q = cu_seqlens_q
+        params.cu_seqlens_k = cu_seqlens_k
+        params.max_seqlen_q = max(input_lengths)
+        params.max_seqlen_k = max_kv_len
+        params.token_q_num = total_q_tokens
+        params.kv_cache_block_id_device = block_table
+
+        # Build a minimal kv_cache object
+        class _FakeKVCache:
+            pass
+
+        kv_cache = _FakeKVCache()
+        kv_cache.kv_cache_base = kv_cache_base
+
+        # Run AiterPrefillAttnOpPaged.forward
+        qkv = (q_flat,)
+        actual = op.forward(qkv, kv_cache, params)
+
+        # Compute prefix-causal SDPA reference from the original flat K/V.
+        k_all = torch.cat(all_k_flat, dim=0)
+        v_all = torch.cat(all_v_flat, dim=0)
+        ref = self._prefix_causal_sdpa_reference(
+            q_flat, k_all, v_all,
+            input_lengths, prefix_lengths,
+            head_num, head_num_kv, head_dim,
+        )
+
+        # Numerical regression: kernel output must match reference within fp16 tolerance.
+        self.assertFalse(torch.isnan(actual).any(), "Output contains NaN")
+        self.assertFalse(torch.isinf(actual).any(), "Output contains Inf")
+        self.assertEqual(actual.shape, (total_q_tokens, head_num * head_dim))
+        torch.testing.assert_close(actual, ref, atol=1e-2, rtol=1e-2)
+
+    def test_single_batch_with_prefix(self):
+        """Single sequence with prefix cache — simplest paged prefill case."""
+        self._run_paged_prefill_e2e(
+            batch_size=1,
+            input_lengths=[16],
+            prefix_lengths=[32],
+            head_num=8,
+            head_num_kv=4,
+            head_dim=64,
+            tokens_per_block=16,
+        )
+
+    def test_multi_batch_varied_lengths(self):
+        """Multiple sequences with different prefix/input lengths."""
+        self._run_paged_prefill_e2e(
+            batch_size=3,
+            input_lengths=[8, 24, 12],
+            prefix_lengths=[16, 48, 0],
+            head_num=8,
+            head_num_kv=4,
+            head_dim=128,
+            tokens_per_block=16,
+        )
+
+    def test_unaligned_seq_triggers_padding(self):
+        """Sequence length not aligned to tokens_per_block — exercises block_table padding."""
+        self._run_paged_prefill_e2e(
+            batch_size=2,
+            input_lengths=[7, 13],
+            prefix_lengths=[19, 5],
+            head_num=8,
+            head_num_kv=8,
+            head_dim=64,
+            tokens_per_block=16,
+        )
+
+    def test_large_prefix_many_blocks(self):
+        """Long prefix spanning many blocks — stresses sanitize+pad column expansion."""
+        self._run_paged_prefill_e2e(
+            batch_size=1,
+            input_lengths=[4],
+            prefix_lengths=[128],
+            head_num=8,
+            head_num_kv=4,
+            head_dim=64,
+            tokens_per_block=16,
+        )
+
+
+# ============================================================================
+# no-cache RoPE wrapper regression — kv_cache=None + need_rope_kv_cache=True
+# ============================================================================
+
+
+class _FakeRopeKvCachePrefillOp:
+    def __init__(self, output):
+        self.calls = []
+        self.output = output
+
+    def forward(self, qkv, kv_cache, rope_params):
+        self.calls.append((qkv, kv_cache, rope_params))
+        return self.output
+
+
+class _FakeFmhaOp:
+    def __init__(self):
+        self.calls = []
+        self.output = object()
+
+    def forward(self, fmha_input, kv_cache, fmha_params):
+        self.calls.append((fmha_input, kv_cache, fmha_params))
+        return self.output
+
+
+@unittest.skipUnless(_OPS_IMPORTABLE, "Requires ROCm attention wrapper module")
+class TestAiterPrefillImplNoKvRopeWrapper(unittest.TestCase):
+    """Without a KV cache, embedding-style prefill still needs RoPE applied to
+    Q/K. Both ASM and NonASM wrappers must call rope_kvcache_impl before fmha_impl
+    and pass the RoPE output straight through — bypassing the prior shortcut
+    that fed raw QKV into FMHA.
+
+    Real RoPE/FMHA kernels are covered by TestAiterPrefillImplNoKvRopeRealOp
+    below; this class isolates the wrapper logic with fakes so it runs anywhere.
+    """
+
+    def _check_no_kv_rope_path(self, impl_cls):
+        impl = object.__new__(impl_cls)
+        impl.need_rope_kv_cache = True
+        qkv = torch.randn(4, 16)
+        rope_output = (
+            torch.randn(4, 2, 4),
+            torch.randn(1, 1, 4, 4),
+            torch.randn(1, 1, 4, 4),
+        )
+        impl.rope_kvcache_impl = _FakeRopeKvCachePrefillOp(rope_output)
+        impl.fmha_impl = _FakeFmhaOp()
+        impl.rope_params = object()
+        impl.fmha_params = object()
+
+        actual = impl.forward(qkv, kv_cache=None, layer_idx=0)
+
+        self.assertIs(actual, impl.fmha_impl.output)
+        self.assertEqual(len(impl.rope_kvcache_impl.calls), 1)
+        self.assertEqual(len(impl.fmha_impl.calls), 1)
+        self.assertEqual(impl.rope_kvcache_impl.calls[0], (qkv, None, impl.rope_params))
+        self.assertEqual(
+            impl.fmha_impl.calls[0],
+            (impl.rope_kvcache_impl.output, None, impl.fmha_params),
+        )
+
+    def test_asm_no_kv_cache_still_applies_rope(self):
+        self._check_no_kv_rope_path(AiterPrefillImplAsm)
+
+    def test_nonasm_no_kv_cache_still_applies_rope(self):
+        self._check_no_kv_rope_path(AiterPrefillImplNonAsm)
+
+
+@unittest.skipUnless(_is_rocm(), "Requires ROCm GPU")
+@unittest.skipUnless(_AITER_AVAILABLE, "Requires aiter")
+@unittest.skipUnless(_OPS_IMPORTABLE, "Requires ROCm attention wrapper module")
+class TestAiterPrefillImplNoKvRopeRealOp(unittest.TestCase):
+    """End-to-end numerical regression for the wrapper path with the real C++
+    FusedRopeKVCachePrefillOp + AiterPrefillAttnOp on ROCm. Exercises both ASM
+    and NonASM wrappers with varied-length GQA batches and asserts the output
+    matches RoPE(Q,K) → flash attention reference."""
+
+    def setUp(self):
+        torch.manual_seed(1)
+        self.device = torch.device("cuda")
+        self.dtype = torch.bfloat16
+
+    def _check_real_no_kv_rope_path(self, impl_cls):
+        input_lengths = [5, 3]
+        head_num = 4
+        head_num_kv = 2
+        head_dim = 64
+        cfg = _make_rope_attn_configs(head_num, head_num_kv, head_dim, dtype=self.dtype)
+        attn_inputs = _make_rope_prefill_inputs(input_lengths, self.device, self.dtype)
+        impl = impl_cls(cfg, attn_inputs)
+
+        total_tokens = sum(input_lengths)
+        q = torch.randn(
+            total_tokens, head_num, head_dim, dtype=self.dtype, device=self.device
+        )
+        k = torch.randn(
+            total_tokens, head_num_kv, head_dim, dtype=self.dtype, device=self.device
+        )
+        v = torch.randn(
+            total_tokens, head_num_kv, head_dim, dtype=self.dtype, device=self.device
+        )
+        qkv = _pack_qkv(q, k, v)
+
+        actual = impl.forward(qkv, kv_cache=None, layer_idx=0)
+        q_rope, k_rope = _apply_base_rope(q, k, input_lengths)
+        ref = _sdpa_reference(
+            q_rope,
+            k_rope,
+            v,
+            attn_inputs.cu_seqlens,
+            attn_inputs.cu_kv_seqlens,
+            causal=True,
+        )
+        torch.testing.assert_close(actual, ref, atol=1e-2, rtol=1e-2)
+
+    def test_asm_no_kv_rope_real_op_matches_reference(self):
+        self._check_real_no_kv_rope_path(AiterPrefillImplAsm)
+
+    def test_nonasm_no_kv_rope_real_op_matches_reference(self):
+        self._check_real_no_kv_rope_path(AiterPrefillImplNonAsm)
 
 
 if __name__ == "__main__":
