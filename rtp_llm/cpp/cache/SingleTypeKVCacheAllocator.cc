@@ -197,8 +197,22 @@ void SingleTypeKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) 
     for (int batch_id = 0; batch_id < batch_size; ++batch_id) {
         const auto& cache_keys = kv_resource->cacheKeys(batch_id);
         const auto& blocks     = kv_resource->blocks(batch_id);
+        if (cache_keys.empty() || blocks.empty()) {
+            continue;
+        }
 
-        size_t block_num = std::min(size_t(cache_keys.size()), size_t(blocks.size()));
+        size_t full_blocks_num = insert_info.cacheable_blocks;
+        if (full_blocks_num == SIZE_MAX) {
+            const int seq_len = insert_info.complete_token_ids->seqLength();
+            if (seq_len <= 0) {
+                continue;
+            }
+            const bool keep_decode_tail = insert_info.is_resident || insert_info.epoch > 0;
+            const auto token_len =
+                keep_decode_tail ? static_cast<size_t>(seq_len) : static_cast<size_t>(std::max(seq_len - 1, 0));
+            full_blocks_num = token_len / static_cast<size_t>(seqSizePerBlock());
+        }
+        size_t block_num = std::min({size_t(cache_keys.size()), size_t(blocks.size()), full_blocks_num});
         if (block_num == 0) {
             continue;
         }

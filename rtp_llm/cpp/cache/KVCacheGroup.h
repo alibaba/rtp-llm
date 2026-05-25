@@ -37,12 +37,13 @@ public:
     // Allocate blocks for `seq_len` tokens; appends new IDs to `block_ids` via BlockIds::add().
     virtual bool malloc(BlockIds& block_ids, int seq_len, bool enable_reuse_cache = false, int reserve_step = 0) = 0;
     // TODO, match的时候热度不增加，最终匹配成功的时候再去增加热度。
-    virtual MatchResult match(const CacheKeysType& cache_keys, int64_t current_batch_epoch = BlockCache::NO_EPOCH_FILTER) = 0;
-    virtual void        free(const BlockIndicesType& block_indices)                            = 0;
+    virtual MatchResult match(const CacheKeysType& cache_keys,
+                              int64_t              current_batch_epoch = BlockCache::GLOBAL_EPOCH)                            = 0;
+    virtual void        free(const BlockIndicesType& block_indices)                                              = 0;
     virtual void        insertIntoCache(const CacheKeysType&    cache_keys,
                                         const BlockIndicesType& block_indices,
                                         bool                    is_resident,
-                                        int64_t                 epoch = 0)                                     = 0;
+                                        int64_t                 epoch = 0)                                                       = 0;
     virtual void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) = 0;
     virtual int  needBlocksNum(int seq_len, int current_blocks, int reserve_step = 0) const                      = 0;
     virtual NeedBlocksInfo getNeedBlocks(

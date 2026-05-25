@@ -48,7 +48,10 @@ private:
     void         decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector = false) override;
 
     // Joint match across groups. Returns reuse_blocks decided by full groups + linear groups.
-    int  reuseCache(const CacheKeysType& cache_keys, BatchKVCacheResource& kv_resource);
+    // current_batch_epoch is forwarded to BlockCache::match for batch-level isolation.
+    int  reuseCache(const CacheKeysType&  cache_keys,
+                    BatchKVCacheResource& kv_resource,
+                    int64_t               current_batch_epoch = BlockCache::GLOBAL_EPOCH);
     void referenceValidBlocks(const BlockIndicesType& blocks) const;
 
 private:

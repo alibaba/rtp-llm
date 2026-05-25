@@ -59,9 +59,9 @@ NeedBlocksInfo LinearKVCacheGroup::getNeedBlocks(
     return info;
 }
 
-MatchResult LinearKVCacheGroup::matchSingleKey(CacheKeyType cache_key) const {
+MatchResult LinearKVCacheGroup::matchSingleKey(CacheKeyType cache_key, int64_t current_batch_epoch) const {
     MatchResult result;
-    auto        matched = block_cache_->match(cache_key, group_id_);
+    auto        matched = block_cache_->match(cache_key, group_id_, current_batch_epoch);
     if (!isNullBlockIdx(matched.matched_index)) {
         result.block_indices = {matched.matched_index};
     }

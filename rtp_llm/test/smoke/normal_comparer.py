@@ -1,14 +1,13 @@
 import json
 import logging
 import os
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 import torch
 from pydantic import BaseModel, ValidationError
 from smoke.base_comparer import BaseComparer
 from smoke.common_def import ABS_PATH, REL_PATH, QueryStatus, SmokeException
 from smoke.utils import create_temporary_copy, save_hidden_states, save_logits
-from typing import Any, Callable, Optional
 
 from rtp_llm.config.generate_config import GenerateConfig
 
@@ -43,6 +42,7 @@ class QueryInfo(BaseModel):
     @property
     def is_batch(self):
         return self.prompt_batch is not None
+
 
 class AuxInfo(BaseModel):
     input_len: Optional[int] = None
@@ -135,7 +135,7 @@ class NormalComparer(BaseComparer):
         query_info = QueryInfo(**query_json)
         self._rewrite_query(query_info)
         return query_info
-    
+
     def get_concurrency_batch(self, query_info: QueryInfo) -> int:
         if query_info.prompt_batch is not None:
             return len(query_info.prompt_batch)
@@ -266,12 +266,14 @@ class NormalComparer(BaseComparer):
             "",
         ]
         if exp_len != act_len:
-            lines.extend([
-                "  length:",
-                f"    expect: {exp_len}",
-                f"    actual:  {act_len}",
-                "",
-            ])
+            lines.extend(
+                [
+                    "  length:",
+                    f"    expect: {exp_len}",
+                    f"    actual:  {act_len}",
+                    "",
+                ]
+            )
         lines.append("  expect (full list):")
         for i, s in enumerate(expect_beams or []):
             lines.append(f"    [{i}] {repr(s)}")
@@ -284,8 +286,16 @@ class NormalComparer(BaseComparer):
         max_len = max(exp_len, act_len)
         any_diff = False
         for i in range(max_len):
-            exp = expect_beams[i] if expect_beams and i < len(expect_beams) else "<missing>"
-            act = actual_beams[i] if actual_beams and i < len(actual_beams) else "<missing>"
+            exp = (
+                expect_beams[i]
+                if expect_beams and i < len(expect_beams)
+                else "<missing>"
+            )
+            act = (
+                actual_beams[i]
+                if actual_beams and i < len(actual_beams)
+                else "<missing>"
+            )
             if exp != act:
                 any_diff = True
                 lines.append(f"    [{i}] expect: {repr(exp)}")
@@ -321,27 +331,43 @@ class NormalComparer(BaseComparer):
 
         # 普通字段直接比较
         for field in [
-            "input_len", "prefix_len", "reuse_len", "output_len", "iter_count",
-            "local_reuse_len", "remote_reuse_len", "memory_reuse_len",
-            "prefill_total_reuse_len", "prefill_local_reuse_len",
-            "prefill_remote_reuse_len", "prefill_memory_reuse_len",
-            "decode_total_reuse_len", "decode_local_reuse_len",
-            "decode_remote_reuse_len", "decode_memory_reuse_len",
+            "input_len",
+            "prefix_len",
+            "reuse_len",
+            "output_len",
+            "iter_count",
+            "local_reuse_len",
+            "remote_reuse_len",
+            "memory_reuse_len",
+            "prefill_total_reuse_len",
+            "prefill_local_reuse_len",
+            "prefill_remote_reuse_len",
+            "prefill_memory_reuse_len",
+            "decode_total_reuse_len",
+            "decode_local_reuse_len",
+            "decode_remote_reuse_len",
+            "decode_memory_reuse_len",
         ]:
             expect_val = getattr(expect_aux, field)
             actual_val = getattr(actual_aux, field)
             check_equal(field, expect_val, actual_val)
 
-        check_equal("beam_responses", expect_aux.beam_responses, actual_aux.beam_responses)
+        check_equal(
+            "beam_responses", expect_aux.beam_responses, actual_aux.beam_responses
+        )
 
         def is_close_list(a: Any, b: Any) -> bool:
             if a is None or b is None:
                 return a == b
             if len(a) != len(b):
                 return False
-            return bool(torch.all(torch.isclose(
-                torch.tensor(a), torch.tensor(b), rtol=1e-2, atol=1e-2
-            )))
+            return bool(
+                torch.all(
+                    torch.isclose(
+                        torch.tensor(a), torch.tensor(b), rtol=1e-2, atol=1e-2
+                    )
+                )
+            )
 
         check_equal(
             "softmax_probs",
@@ -356,6 +382,25 @@ class NormalComparer(BaseComparer):
             is_close_list,
         )
 
+    def _normalize_aux_info(
+        self,
+        aux_info: Union[AuxInfo, List[AuxInfo]],
+        label: str,
+        diffs: List[str],
+        prefix: str = "",
+    ) -> Optional[AuxInfo]:
+        if isinstance(aux_info, list):
+            if not aux_info:
+                diffs.append(f"{prefix}{label}.aux_info: empty list")
+                return None
+            if len(aux_info) != 1:
+                diffs.append(
+                    f"{prefix}{label}.aux_info: expected single item, got {len(aux_info)}"
+                )
+                return None
+            return aux_info[0]
+        return aux_info
+
     def _compare(
         self,
         expect: SmokeResponse,
@@ -368,7 +413,10 @@ class NormalComparer(BaseComparer):
 
         # response
         if expect.response != actual.response:
-            if expect.response_alternatives and actual.response in expect.response_alternatives:
+            if (
+                expect.response_alternatives
+                and actual.response in expect.response_alternatives
+            ):
                 logging.info(
                     f"[STABILITY_DIAG] Response matched alternative: "
                     f"primary=[{expect.response}] actual=[{actual.response}] "
@@ -381,10 +429,19 @@ class NormalComparer(BaseComparer):
                     f"  actual:  {repr(actual.response)}"
                 )
                 if expect.aux_info is not None and actual.aux_info is not None:
-                    exp_beams = getattr(expect.aux_info, "beam_responses", None)
-                    act_beams = getattr(actual.aux_info, "beam_responses", None)
-                    if exp_beams is not None or act_beams is not None:
-                        msg += "\n\n" + self._format_beam_responses_diff(exp_beams, act_beams)
+                    _exp_a = self._normalize_aux_info(
+                        expect.aux_info, "expect", diffs, prefix=prefix
+                    )
+                    _act_a = self._normalize_aux_info(
+                        actual.aux_info, "actual", diffs, prefix=prefix
+                    )
+                    if _exp_a is not None and _act_a is not None:
+                        exp_beams = getattr(_exp_a, "beam_responses", None)
+                        act_beams = getattr(_act_a, "beam_responses", None)
+                        if exp_beams is not None or act_beams is not None:
+                            msg += "\n\n" + self._format_beam_responses_diff(
+                                exp_beams, act_beams
+                            )
                 diffs.append(msg)
 
         # loss
@@ -443,9 +500,18 @@ class NormalComparer(BaseComparer):
 
         # aux_info: skip comparison when expected auxinfo is null
         if expect.aux_info is not None and actual.aux_info is not None:
-            self._compare_aux_info(
-                expect.aux_info, actual.aux_info, diffs, prefix=prefix
+            # SmokeResponse.aux_info is typed as Union[AuxInfo, List[AuxInfo]];
+            # golden JSON stores it as a single-element list while the live HTTP
+            # path returns a bare AuxInfo. Normalize so _compare_aux_info always
+            # sees the same shape.
+            expect_aux = self._normalize_aux_info(
+                expect.aux_info, "expect", diffs, prefix=prefix
             )
+            actual_aux = self._normalize_aux_info(
+                actual.aux_info, "actual", diffs, prefix=prefix
+            )
+            if expect_aux is not None and actual_aux is not None:
+                self._compare_aux_info(expect_aux, actual_aux, diffs, prefix=prefix)
 
     def _rewrite_images(self, images: Union[List[str], str]) -> Union[List[str], str]:
         # iter rewrite

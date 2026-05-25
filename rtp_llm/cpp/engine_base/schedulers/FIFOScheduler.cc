@@ -12,9 +12,6 @@
 using namespace std;
 namespace rtp_llm {
 
-// Initialize static atomic counter for generating unique batch Epoch IDs (starts from 1)
-std::atomic<int64_t> FIFOScheduler::batch_epoch_counter_{0};
-
 FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_config,
                              const ModelConfig&                     model_config,
                              const PDSepConfig&                     pd_sep_config,
@@ -22,8 +19,7 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
                              const ModelSpecificConfig&             model_specific_config,
                              const std::shared_ptr<KVCacheManager>& cache_manager,
                              const kmonitor::MetricsReporterPtr     metrics_reporter,
-                             const int                              max_score_len,
-                             bool                                   enable_batch_cache_reuse):
+                             const int                              max_score_len):
     pd_sep_config_(pd_sep_config),
     model_specific_config_(model_specific_config),
     cache_manager_(cache_manager),
@@ -31,8 +27,7 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
     max_batch_tokens_size_(runtime_config.fifo_scheduler_config.max_batch_tokens_size),
     max_generate_batch_size_(runtime_config.max_generate_batch_size),
     need_fill_fake_stream_(parallelism_config.dp_size > 1 && parallelism_config.tp_rank == 0),
-    metrics_reporter_(metrics_reporter),
-    enable_batch_cache_reuse_(enable_batch_cache_reuse) {
+    metrics_reporter_(metrics_reporter) {
     RTP_LLM_LOG_INFO("max_generate_batch_size is [%d], max_batch_tokens_size is [%d]",
                      max_generate_batch_size_,
                      max_batch_tokens_size_);
@@ -178,17 +173,12 @@ void FIFOScheduler::evaluateAndUpdateStreams(list<GenerateStreamPtr>& streams) {
     }
 }
 
-void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_streams) {
+void FIFOScheduler::evaluateWaitingStreams() {
     RTP_LLM_PROFILE_FUNCTION();
     list<GenerateStreamPtr> new_streams;
-
-    // Batch group scheduling support:
-    // 1. Group completeness: force_batch streams with same batch_group_id are scheduled together
-    //    only when group size reaches batch_group_size
-    // 2. Timeout fallback: if batch_group_timeout expires, incomplete group is scheduled as normal
-    // 3. Batch isolation: each scheduling round handles only one type:
-    //    - normal streams, OR
-    //    - streams from a single force_batch group
+    int64_t                 batch_epoch          = ++schedule_round_;
+    int64_t                 force_batch_group_id = -1;
+    int64_t                 now                  = autil::TimeUtility::currentTimeInMilliSeconds();
 
     struct GroupInfo {
         int64_t first_arrival_time = 0;
@@ -196,10 +186,8 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_stre
     };
     std::unordered_map<int64_t, GroupInfo> request_group_info;
 
-    int64_t now = autil::TimeUtility::currentTimeInMilliSeconds();
-
     // Build group info statistics for force_batch streams
-    for (const auto& stream : waiting_streams) {
+    for (const auto& stream : waiting_streams_) {
         if (stream->forceBatch() && stream->batchGroupId() != -1) {
             auto& info = request_group_info[stream->batchGroupId()];
             if (info.count == 0) {
@@ -208,9 +196,6 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_stre
             info.count++;
         }
     }
-
-    int64_t force_batch_group_id = -1;
-    int64_t batch_epoch = enable_batch_cache_reuse_ ? ++batch_epoch_counter_ : 0;
 
     for (auto it = waiting_streams_.begin(); it != waiting_streams_.end();) {
         auto& stream      = *it;
@@ -247,10 +232,16 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_stre
             }
         }
 
-        (*it)->setBatchEpoch(batch_epoch);
-        // Check for errors and memory constraints
+        // Check for errors and memory constraints. Only assign batch_epoch to streams
+        // that actually clear the memory check, so streams left in waiting_streams_
+        // across rounds do not carry stale epoch values.
+        // NOTE: batch-level insertIntoCache happens later in GenerateStateMachine,
+        // right before transitioning to RUNNING — that point is reached only after
+        // the async LOADING_CACHE state completes, so connector-loaded prefix data
+        // is already present in the blocks we expose for sibling reuse.
         if (!stream->hasError() && !stream->hasEvent(StreamEvents::CanRun)
             && evaluateRunningMemory(new_streams, stream)) {
+            stream->setBatchEpoch(batch_epoch);
             stream->reportEvent(StreamEvents::CanRun);
             new_streams.push_back(stream);
 
@@ -309,7 +300,7 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     //       their new state (RUNNING or LOADING_CACHE) based on the events set in Phase 1.
     // This separation ensures safe iteration while deferring structural modifications.
     size_t prev_waiting_size = waiting_streams_.size();
-    evaluateWaitingStreams(waiting_streams_);
+    evaluateWaitingStreams();
     evaluateAndUpdateStreams(waiting_streams_);
     running_streams_.insert(running_streams_.end(), new_streams_.begin(), new_streams_.end());
     new_streams_.clear();

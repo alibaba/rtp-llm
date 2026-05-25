@@ -234,6 +234,109 @@ TEST_F(BlockCacheTest, SelectAndEvictZeroBlocks) {
     EXPECT_EQ(cache_->size(), 0);
 }
 
+// ==================== Epoch sentinel separation ====================
+//
+// Three-way semantics:
+//   current_batch_epoch == NO_EPOCH_FILTER (-1): bypass filter, see everything
+//   current_batch_epoch == 0 (GLOBAL_EPOCH):     no batch identity, only global
+//   current_batch_epoch >= 1:                    same batch + global
+
+TEST_F(BlockCacheTest, MatchEpochZeroDoesNotSeeBatchLocal) {
+    // global entry
+    CacheItem global_item = {201, 0, /*block_index=*/1, /*is_resident=*/false, /*epoch=*/0};
+    EXPECT_EQ(cache_->put(global_item).action, BlockCache::PutResult::Action::INSERTED);
+
+    // batch-local entry, epoch=5
+    CacheItem batch_item = {202, 0, /*block_index=*/2, /*is_resident=*/false, /*epoch=*/5};
+    EXPECT_EQ(cache_->put(batch_item).action, BlockCache::PutResult::Action::INSERTED);
+
+    // current_batch_epoch == 0: "no batch identity" — must NOT see batch-local
+    EXPECT_EQ(cache_->match(201, /*group_id=*/0, /*current_batch_epoch=*/0).matched_index, 1);
+    EXPECT_TRUE(isNullBlockIdx(cache_->match(202, /*group_id=*/0, /*current_batch_epoch=*/0).matched_index));
+    EXPECT_TRUE(isNullBlockIdx(cache_->match(202).matched_index));
+
+    // current_batch_epoch == NO_EPOCH_FILTER: see everything
+    EXPECT_EQ(cache_->match(201, 0, BlockCache::NO_EPOCH_FILTER).matched_index, 1);
+    EXPECT_EQ(cache_->match(202, 0, BlockCache::NO_EPOCH_FILTER).matched_index, 2);
+
+    // same batch (5): see global + same-batch
+    EXPECT_EQ(cache_->match(201, 0, /*current_batch_epoch=*/5).matched_index, 1);
+    EXPECT_EQ(cache_->match(202, 0, /*current_batch_epoch=*/5).matched_index, 2);
+
+    // different batch (7): only global
+    EXPECT_EQ(cache_->match(201, 0, /*current_batch_epoch=*/7).matched_index, 1);
+    EXPECT_TRUE(isNullBlockIdx(cache_->match(202, 0, /*current_batch_epoch=*/7).matched_index));
+}
+
+TEST_F(BlockCacheTest, PositiveEpochsWithSameKeyDoNotOverwriteEachOther) {
+    CacheItem epoch_42 = {301, 0, /*block_index=*/2, /*is_resident=*/false, /*epoch=*/42};
+    CacheItem epoch_43 = {301, 0, /*block_index=*/3, /*is_resident=*/false, /*epoch=*/43};
+
+    EXPECT_EQ(cache_->put(epoch_42).action, BlockCache::PutResult::Action::INSERTED);
+    EXPECT_EQ(cache_->put(epoch_43).action, BlockCache::PutResult::Action::INSERTED);
+
+    EXPECT_EQ(cache_->match(301, 0, /*current_batch_epoch=*/42).matched_index, 2);
+    EXPECT_EQ(cache_->match(301, 0, /*current_batch_epoch=*/43).matched_index, 3);
+    EXPECT_TRUE(isNullBlockIdx(cache_->match(301, 0, BlockCache::GLOBAL_EPOCH).matched_index));
+    EXPECT_EQ(cache_->size(), 2u);
+}
+
+TEST_F(BlockCacheTest, SameEpochSameKeyStillReplaces) {
+    CacheItem first  = {302, 0, /*block_index=*/4, /*is_resident=*/false, /*epoch=*/42};
+    CacheItem second = {302, 0, /*block_index=*/5, /*is_resident=*/false, /*epoch=*/42};
+
+    EXPECT_EQ(cache_->put(first).action, BlockCache::PutResult::Action::INSERTED);
+    auto result = cache_->put(second);
+
+    EXPECT_EQ(result.action, BlockCache::PutResult::Action::REPLACED);
+    EXPECT_EQ(result.old_block_index, 4);
+    EXPECT_EQ(cache_->match(302, 0, /*current_batch_epoch=*/42).matched_index, 5);
+    EXPECT_EQ(cache_->size(), 1u);
+}
+
+// ==================== Resident protection on put() ====================
+
+TEST_F(BlockCacheTest, PutDoesNotDowngradeResidentEntry) {
+    // Insert a resident entry first.
+    CacheItem resident_item = {101, 0, /*block_index=*/1, /*is_resident=*/true};
+    auto      r1            = cache_->put(resident_item);
+    EXPECT_EQ(r1.action, BlockCache::PutResult::Action::INSERTED);
+
+    // A subsequent put with is_resident=false (different physical block) must NOT
+    // overwrite the resident entry. Old behavior on `main` was a complete no-op
+    // (return false). After the PutResult refactor, REPLACE must be guarded so a
+    // non-resident put cannot drop the resident bit and swap blocks.
+    CacheItem non_resident_item = {101, 0, /*block_index=*/2, /*is_resident=*/false};
+    auto      r2                = cache_->put(non_resident_item);
+    EXPECT_EQ(r2.action, BlockCache::PutResult::Action::SKIPPED);
+
+    // The resident entry survives, still pointing to its original block.
+    auto match = cache_->match(101);
+    EXPECT_EQ(match.matched_index, 1);
+
+    // pop() must not evict the resident entry.
+    auto popped = cache_->pop(5);
+    EXPECT_EQ(popped.size(), 0);
+    EXPECT_EQ(cache_->size(), 1);
+}
+
+TEST_F(BlockCacheTest, PutAllowsResidentToReplaceNonResident) {
+    // Reverse direction: an existing non-resident entry SHOULD be replaceable by
+    // a resident put — that's how multi-task prompts get promoted.
+    CacheItem non_resident_item = {101, 0, /*block_index=*/1, /*is_resident=*/false};
+    EXPECT_EQ(cache_->put(non_resident_item).action, BlockCache::PutResult::Action::INSERTED);
+
+    CacheItem resident_item = {101, 0, /*block_index=*/2, /*is_resident=*/true};
+    auto      r2            = cache_->put(resident_item);
+    EXPECT_EQ(r2.action, BlockCache::PutResult::Action::REPLACED);
+    EXPECT_EQ(r2.old_block_index, 1);
+
+    // After promotion the entry is resident and points to the new block.
+    EXPECT_EQ(cache_->match(101).matched_index, 2);
+    auto popped = cache_->pop(5);
+    EXPECT_EQ(popped.size(), 0);
+}
+
 TEST_F(BlockCacheTest, SelectAndEvictLRUOrder) {
     // Insert items, then access some to change LRU order
     CacheItem item1 = {101, 0, 1, false};
@@ -251,6 +354,29 @@ TEST_F(BlockCacheTest, SelectAndEvictLRUOrder) {
     EXPECT_EQ(result.evicted_keys.size(), 1);
     EXPECT_EQ(result.evicted_keys[0], 102);
     EXPECT_EQ(cache_->size(), 2);
+}
+
+// Tiered eviction (memory cache export) must never select epoch>0 entries:
+// memory cache has no epoch concept, so exporting batch-local data would leak
+// it into the global memory cache and break batch isolation. epoch>0 entries
+// are reclaimed only via BlockCache::pop's Phase 1 (local free, no export).
+TEST_F(BlockCacheTest, SelectAndEvictSkipsBatchLocalEntries) {
+    CacheItem global1     = {101, 0, 1, false, /*epoch=*/0};
+    CacheItem batch_local = {102, 0, 2, false, /*epoch=*/42};
+    CacheItem global2     = {103, 0, 3, false, /*epoch=*/0};
+    cache_->put(global1);
+    cache_->put(batch_local);
+    cache_->put(global2);
+
+    auto result = cache_->selectAndEvict(/*min_blocks=*/3);
+    // Only the two epoch=0 entries are eligible for tiered eviction.
+    EXPECT_EQ(result.evicted_keys.size(), 2u);
+    std::set<CacheKeyType> evicted(result.evicted_keys.begin(), result.evicted_keys.end());
+    EXPECT_TRUE(evicted.count(101));
+    EXPECT_TRUE(evicted.count(103));
+    EXPECT_EQ(evicted.count(102), 0u);  // batch-local entry preserved
+    // batch-local entry stays in cache for Phase-1 pop to reclaim locally.
+    EXPECT_EQ(cache_->size(), 1u);
 }
 
 }  // namespace test

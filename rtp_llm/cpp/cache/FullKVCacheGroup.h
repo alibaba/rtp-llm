@@ -15,7 +15,7 @@ public:
         KVCacheGroup(layer_ids, kvcache_spec, block_pool, group_id) {}
 
     bool malloc(BlockIds& block_ids, int seq_len, bool enable_reuse_cache = false, int reserve_step = 0) override;
-    MatchResult match(const CacheKeysType& cache_keys, int64_t current_batch_epoch = BlockCache::NO_EPOCH_FILTER) override;
+    MatchResult match(const CacheKeysType& cache_keys, int64_t current_batch_epoch = BlockCache::GLOBAL_EPOCH) override;
     void        free(const BlockIndicesType& block_indices) override;
     void        insertIntoCache(const CacheKeysType&    cache_keys,
                                 const BlockIndicesType& block_indices,

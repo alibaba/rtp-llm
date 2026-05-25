@@ -113,6 +113,18 @@ public:
 
     void swapBlocks(size_t group_id, size_t rhs, size_t lhs);
 
+    // Deep copy: creates independent BlockIds objects (not shared_ptr aliases).
+    // Required because default copy only shallow-copies shared_ptrs.
+    KVCacheResource deepCopy() const;
+
+    // Prefix-only copy for insertIntoCache hot path: copy the first `n_blocks`
+    // entries of cache_keys and each group's block_indices, plus metadata
+    // flags. layer_block_ids is intentionally left empty — downstream
+    // insertIntoCache only reads cacheKeys()/blocks(group_id) and never
+    // walks layer mapping, so skipping the layer→group pointer rebuild
+    // avoids ~O(layer_num) work per insert.
+    KVCacheResource prefixCopy(size_t n_blocks) const;
+
     std::string debugString() const;
 
 private:
