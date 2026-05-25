@@ -1,7 +1,5 @@
 package org.flexlb.dispatcher;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -18,42 +16,44 @@ public class FanoutService {
 
     private final FeClient feClient;
     private final FePool fePool;
-    private final ObjectMapper mapper;
-    private final int subBatchSize;
 
     /**
-     * Split prompts into K-sized chunks, POST each to one FE concurrently, and merge in order.
-     * A chunk whose FE call errors — or whose FE pick from the pool fails — becomes a
+     * POST each pre-built chunk body to one FE concurrently and return the per-chunk outcomes in
+     * the original order. Each entry of {@code chunkBodies} is already the full FE request — the
+     * caller (handler) is responsible for splitting the input array, deep-copying the envelope,
+     * and replacing {@code spec.requestArrayField} with the chunk slice before calling here.
+     *
+     * <p>A chunk whose FE call errors — or whose FE pick from the pool fails — becomes a
      * {@link SubBatchResult#failed} and never aborts its siblings (ft_proxy semantics). The
-     * returned {@link MergedResponse} reports how many chunks succeeded so the caller can 200
-     * on partial success and 500 only when all chunks failed.
+     * handler is responsible for calling {@link PartialFailureMerger} on the returned list.
      */
-    public Mono<MergedResponse> dispatch(List<String> prompts, JsonNode generateConfig) {
-        List<List<String>> chunks = BatchSplitter.split(prompts, subBatchSize);
-        List<Mono<SubBatchResult>> calls = new ArrayList<>(chunks.size());
-        for (List<String> chunk : chunks) {
-            ObjectNode body = mapper.createObjectNode();
-            body.set(DispatchProtocol.FIELD_PROMPT_BATCH, mapper.valueToTree(chunk));
-            if (generateConfig != null) {
-                body.set(DispatchProtocol.FIELD_GENERATE_CONFIG, generateConfig);
-            }
-            int chunkSize = chunk.size();
+    public Mono<List<SubBatchResult>> dispatchChunks(String fePath, List<ObjectNode> chunkBodies,
+                                                     BatchEndpointSpec spec) {
+        List<Mono<SubBatchResult>> calls = new ArrayList<>(chunkBodies.size());
+        int start = 0;
+        for (ObjectNode body : chunkBodies) {
+            int chunkSize = body.get(spec.getRequestArrayField()).size();
+            int startIndex = start;
             calls.add(Mono.fromCallable(fePool::next)
-                    .flatMap(feUrl -> feClient.postBatch(feUrl, body)
-                            .map(resp -> SubBatchResult.ok(resp, chunkSize))
+                    .flatMap(feUrl -> feClient.post(feUrl, fePath, body)
+                            .map(resp -> SubBatchResult.ok(resp, chunkSize, startIndex))
                             .onErrorResume(e -> {
-                                log.warn("FE sub-batch failed: url={}, size={}", feUrl, chunkSize, e);
-                                return Mono.just(SubBatchResult.failed(chunkSize));
+                                log.warn("FE chunk failed: url={}, path={}, size={}", feUrl, fePath, chunkSize, e);
+                                return Mono.just(SubBatchResult.failed(chunkSize, startIndex, briefReason(e)));
                             }))
                     .onErrorResume(e -> {
                         log.warn("FE pick failed for chunk size={}", chunkSize, e);
-                        return Mono.just(SubBatchResult.failed(chunkSize));
+                        return Mono.just(SubBatchResult.failed(chunkSize, startIndex, briefReason(e)));
                     }));
+            start += chunkSize;
         }
-        // mergeSequential dispatches concurrently but collects results in chunk order.
         return Flux.mergeSequential(Flux.fromIterable(calls))
                 .collectList()
-                .publishOn(Schedulers.parallel())
-                .map(subs -> ResponseMerger.merge(subs, mapper));
+                .publishOn(Schedulers.parallel());
+    }
+
+    private static String briefReason(Throwable e) {
+        String m = e.getClass().getSimpleName();
+        return e.getMessage() == null ? m : m + ": " + e.getMessage();
     }
 }

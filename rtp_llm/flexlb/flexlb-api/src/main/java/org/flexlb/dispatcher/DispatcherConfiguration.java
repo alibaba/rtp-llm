@@ -74,10 +74,8 @@ public class DispatcherConfiguration {
         });
         FePool pool = new FePool(fePoolUrls::get);
 
-        FeClient feClient = new WebClientFeClient(feBuilder, cfg.getFeRequestTimeoutMs(), cfg.getFeMaxResponseBytes());
-        FanoutService fanout = new FanoutService(feClient, pool, mapper, cfg.getSubBatchSize());
         PassthroughClient passthrough = new WebClientPassthroughClient(feBuilder.build(), pool, cfg.getFeRequestTimeoutMs());
-        DispatchHandler handler = new DispatchHandler(fanout, passthrough, mapper);
+        DispatchHandler handler = new DispatchHandler(passthrough);
         log.info("dispatcher enabled: fePoolServiceId={}, seedHosts={}, subBatchSize={}",
                 serviceId, fePoolUrls.get().size(), cfg.getSubBatchSize());
         return new DispatchRouter(handler).routes();

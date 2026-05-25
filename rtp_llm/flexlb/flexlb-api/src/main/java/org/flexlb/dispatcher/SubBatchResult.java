@@ -22,25 +22,7 @@ public record SubBatchResult(boolean success,
         return new SubBatchResult(false, chunkSize, startIndex, null, reason);
     }
 
-    /** @deprecated use {@link #ok(JsonNode, int, int)} with an absolute startIndex; removed in V7. */
-    @Deprecated
-    public static SubBatchResult ok(JsonNode body, int chunkSize) {
-        return new SubBatchResult(true, chunkSize, -1, body, null);
-    }
-
-    /** @deprecated use {@link #failed(int, int, String)} with absolute startIndex and reason; removed in V7. */
-    @Deprecated
-    public static SubBatchResult failed(int chunkSize) {
-        return new SubBatchResult(false, chunkSize, -1, null, "unknown");
-    }
-
     public boolean isSuccess() {
         return success;
-    }
-
-    /** @deprecated legacy alias for {@link #body()}; removed in V7 once {@link ResponseMerger} is deleted. */
-    @Deprecated
-    public JsonNode response() {
-        return body;
     }
 }

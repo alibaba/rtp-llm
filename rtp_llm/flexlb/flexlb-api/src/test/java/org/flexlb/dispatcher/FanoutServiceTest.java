@@ -2,6 +2,7 @@ package org.flexlb.dispatcher;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Mono;
 import reactor.test.StepVerifier;
@@ -10,6 +11,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -20,6 +22,9 @@ import static org.mockito.Mockito.when;
 class FanoutServiceTest {
 
     private final ObjectMapper mapper = new ObjectMapper();
+
+    private final BatchEndpointSpec spec = new BatchEndpointSpec(
+            "/batch_infer", "prompt_batch", "response_batch", FailedItemFactory.NULL, null);
 
     private JsonNode batchOf(String... responses) throws Exception {
         StringBuilder sb = new StringBuilder("{\"response_batch\":[");
@@ -33,45 +38,59 @@ class FanoutServiceTest {
         return mapper.readTree(sb.toString());
     }
 
+    private ObjectNode chunk(String... prompts) {
+        ObjectNode body = mapper.createObjectNode();
+        var arr = body.putArray("prompt_batch");
+        for (String p : prompts) {
+            arr.add(p);
+        }
+        return body;
+    }
+
     @Test
-    void splitsFansOutAndMergesInOrder() throws Exception {
+    void fansOutChunksAndPreservesOrder() throws Exception {
         FeClient feClient = mock(FeClient.class);
         FePool pool = new FePool(() -> List.of("http://a", "http://b"));
-        // chunk0 -> a -> ["r0","r1"], chunk1 -> b -> ["r2"]
-        when(feClient.postBatch(eq("http://a"), any())).thenReturn(Mono.just(batchOf("r0", "r1")));
-        when(feClient.postBatch(eq("http://b"), any())).thenReturn(Mono.just(batchOf("r2")));
+        when(feClient.post(eq("http://a"), eq("/batch_infer"), any())).thenReturn(Mono.just(batchOf("r0", "r1")));
+        when(feClient.post(eq("http://b"), eq("/batch_infer"), any())).thenReturn(Mono.just(batchOf("r2")));
 
-        FanoutService svc = new FanoutService(feClient, pool, mapper, 2 /*K*/);
+        FanoutService svc = new FanoutService(feClient, pool);
 
-        StepVerifier.create(svc.dispatch(List.of("p0", "p1", "p2"), null))
-                .assertNext(m -> {
-                    JsonNode arr = m.body().get("response_batch");
-                    assertEquals(3, arr.size());
-                    assertEquals("r0", arr.get(0).get("response").asText());
-                    assertEquals("r2", arr.get(2).get("response").asText());
-                    assertEquals(2, m.succeededChunks());
-                    assertFalse(m.allFailed());
+        StepVerifier.create(svc.dispatchChunks("/batch_infer", List.of(chunk("p0", "p1"), chunk("p2")), spec))
+                .assertNext(subs -> {
+                    assertEquals(2, subs.size());
+                    SubBatchResult s0 = subs.get(0);
+                    assertTrue(s0.isSuccess());
+                    assertEquals(0, s0.startIndex());
+                    assertEquals(2, s0.chunkSize());
+                    assertEquals("r0", s0.body().get("response_batch").get(0).get("response").asText());
+                    SubBatchResult s1 = subs.get(1);
+                    assertTrue(s1.isSuccess());
+                    assertEquals(2, s1.startIndex());
+                    assertEquals(1, s1.chunkSize());
+                    assertEquals("r2", s1.body().get("response_batch").get(0).get("response").asText());
                 })
                 .verifyComplete();
     }
 
     @Test
-    void failedChunkBecomesPlaceholdersNotAnError() throws Exception {
+    void failedChunkBecomesFailedSubResultNotAnError() throws Exception {
         FeClient feClient = mock(FeClient.class);
         FePool pool = new FePool(() -> List.of("http://a", "http://b"));
-        when(feClient.postBatch(eq("http://a"), any())).thenReturn(Mono.just(batchOf("r0", "r1")));
-        when(feClient.postBatch(eq("http://b"), any())).thenReturn(Mono.error(new RuntimeException("FE down")));
+        when(feClient.post(eq("http://a"), eq("/batch_infer"), any())).thenReturn(Mono.just(batchOf("r0", "r1")));
+        when(feClient.post(eq("http://b"), eq("/batch_infer"), any())).thenReturn(Mono.error(new RuntimeException("FE down")));
 
-        FanoutService svc = new FanoutService(feClient, pool, mapper, 2 /*K*/);
+        FanoutService svc = new FanoutService(feClient, pool);
 
-        StepVerifier.create(svc.dispatch(List.of("p0", "p1", "p2"), null))
-                .assertNext(m -> {
-                    JsonNode arr = m.body().get("response_batch");
-                    assertEquals(3, arr.size()); // still N, order preserved
-                    assertEquals("r0", arr.get(0).get("response").asText());
-                    assertTrue(arr.get(2).get("response").asText().isEmpty()); // failed chunk -> placeholder
-                    assertEquals(1, m.succeededChunks());
-                    assertFalse(m.allFailed());
+        StepVerifier.create(svc.dispatchChunks("/batch_infer", List.of(chunk("p0", "p1"), chunk("p2")), spec))
+                .assertNext(subs -> {
+                    assertEquals(2, subs.size());
+                    assertTrue(subs.get(0).isSuccess());
+                    assertFalse(subs.get(1).isSuccess());
+                    assertEquals(2, subs.get(1).startIndex());
+                    assertEquals(1, subs.get(1).chunkSize());
+                    assertNotNull(subs.get(1).reason());
+                    assertTrue(subs.get(1).reason().contains("RuntimeException"));
                 })
                 .verifyComplete();
     }
@@ -80,33 +99,36 @@ class FanoutServiceTest {
     void allChunksFailedReportedNotThrown() {
         FeClient feClient = mock(FeClient.class);
         FePool pool = new FePool(() -> List.of("http://a"));
-        when(feClient.postBatch(anyString(), any())).thenReturn(Mono.error(new RuntimeException("FE down")));
+        when(feClient.post(anyString(), eq("/batch_infer"), any())).thenReturn(Mono.error(new RuntimeException("FE down")));
 
-        FanoutService svc = new FanoutService(feClient, pool, mapper, 5 /*K*/);
+        FanoutService svc = new FanoutService(feClient, pool);
 
-        StepVerifier.create(svc.dispatch(List.of("p0", "p1"), null))
-                .assertNext(m -> {
-                    assertTrue(m.allFailed());
-                    assertEquals(2, m.body().get("response_batch").size()); // placeholders, no exception
+        StepVerifier.create(svc.dispatchChunks("/batch_infer", List.of(chunk("p0", "p1")), spec))
+                .assertNext(subs -> {
+                    assertEquals(1, subs.size());
+                    assertFalse(subs.get(0).isSuccess());
+                    assertEquals(0, subs.get(0).startIndex());
+                    assertEquals(2, subs.get(0).chunkSize());
+                    assertTrue(subs.get(0).reason().contains("RuntimeException"));
                 })
                 .verifyComplete();
     }
 
     @Test
-    void emptyFePoolFailsChunksSoftlyWithPlaceholders() {
+    void emptyFePoolFailsChunksSoftly() {
         FeClient feClient = mock(FeClient.class);
         FePool pool = new FePool(List::of);
 
-        FanoutService svc = new FanoutService(feClient, pool, mapper, 2 /*K*/);
+        FanoutService svc = new FanoutService(feClient, pool);
 
-        StepVerifier.create(svc.dispatch(List.of("p0", "p1", "p2"), null))
-                .assertNext(m -> {
-                    assertTrue(m.allFailed());
-                    JsonNode arr = m.body().get("response_batch");
-                    assertEquals(3, arr.size());
-                    assertTrue(arr.get(0).get("response").asText().isEmpty());
-                    assertTrue(arr.get(1).get("response").asText().isEmpty());
-                    assertTrue(arr.get(2).get("response").asText().isEmpty());
+        StepVerifier.create(svc.dispatchChunks("/batch_infer", List.of(chunk("p0", "p1"), chunk("p2")), spec))
+                .assertNext(subs -> {
+                    assertEquals(2, subs.size());
+                    assertFalse(subs.get(0).isSuccess());
+                    assertFalse(subs.get(1).isSuccess());
+                    assertTrue(subs.get(0).reason().contains("IllegalStateException"));
+                    assertEquals(0, subs.get(0).startIndex());
+                    assertEquals(2, subs.get(1).startIndex());
                 })
                 .verifyComplete();
     }

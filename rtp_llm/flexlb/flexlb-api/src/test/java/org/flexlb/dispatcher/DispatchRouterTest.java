@@ -26,19 +26,6 @@ class DispatchRouterTest {
     }
 
     @Test
-    void dispatcherBatchInferGoesToHandleBatch() {
-        DispatchHandler handler = mock(DispatchHandler.class);
-        when(handler.handleBatch(any()))
-                .thenReturn(ServerResponse.ok().bodyValue("batch-handled"));
-        WebTestClient client = WebTestClient.bindToRouterFunction(new DispatchRouter(handler).routes()).build();
-
-        client.post().uri("/dispatcher/batch_infer").bodyValue("{}").exchange()
-                .expectStatus().isOk()
-                .expectBody(String.class).isEqualTo("batch-handled");
-        verify(handler).handleBatch(any());
-    }
-
-    @Test
     void dispatcherAnyOtherPathGoesToPassthrough() {
         DispatchHandler handler = mock(DispatchHandler.class);
         when(handler.handlePassthrough(any()))

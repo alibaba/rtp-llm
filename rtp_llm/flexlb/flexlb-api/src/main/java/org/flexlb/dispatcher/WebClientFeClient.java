@@ -23,9 +23,9 @@ public class WebClientFeClient implements FeClient {
     }
 
     @Override
-    public Mono<JsonNode> postBatch(String feBaseUrl, ObjectNode body) {
+    public Mono<JsonNode> post(String feBaseUrl, String fePath, ObjectNode body) {
         return webClient.post()
-                .uri(feBaseUrl + DispatchProtocol.PATH_BATCH_INFER)
+                .uri(feBaseUrl + fePath)
                 .contentType(MediaType.APPLICATION_JSON)
                 .bodyValue(body)
                 .retrieve()

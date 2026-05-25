@@ -14,7 +14,6 @@ public class DispatchRouter {
 
     public RouterFunction<ServerResponse> routes() {
         return route()
-                .POST("/dispatcher/batch_infer", handler::handleBatch)
                 .route(RequestPredicates.path("/dispatcher/**"), handler::handlePassthrough)
                 .build();
     }

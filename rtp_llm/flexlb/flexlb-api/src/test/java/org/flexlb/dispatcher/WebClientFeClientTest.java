@@ -40,7 +40,7 @@ class WebClientFeClientTest {
         body.putArray("prompt_batch").add("hi");
 
         String base = "http://" + server.getHostName() + ":" + server.getPort();
-        StepVerifier.create(client.postBatch(base, body))
+        StepVerifier.create(client.post(base, "/batch_infer", body))
                 .assertNext(n -> Assertions.assertEquals("ok",
                         n.get("response_batch").get(0).get("response").asText()))
                 .verifyComplete();
@@ -66,7 +66,7 @@ class WebClientFeClientTest {
         body.putArray("prompt_batch").add("hi");
         String base = "http://" + server.getHostName() + ":" + server.getPort();
 
-        StepVerifier.create(client.postBatch(base, body))
+        StepVerifier.create(client.post(base, "/batch_infer", body))
                 .expectErrorMatches(e -> e instanceof DataBufferLimitException
                         || (e.getCause() != null && e.getCause() instanceof DataBufferLimitException))
                 .verify();

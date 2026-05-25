@@ -6,5 +6,5 @@ import reactor.core.publisher.Mono;
 
 public interface FeClient {
 
-    Mono<JsonNode> postBatch(String feBaseUrl, ObjectNode body);
+    Mono<JsonNode> post(String feBaseUrl, String fePath, ObjectNode body);
 }
