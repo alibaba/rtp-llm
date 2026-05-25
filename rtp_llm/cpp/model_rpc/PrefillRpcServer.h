@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/model_rpc/RpcServerRuntimeMeta.h"
 #include "rtp_llm/cpp/model_rpc/RemoteRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/PrefillGenerateContext.h"
+#include "rtp_llm/cpp/model_rpc/RecentCacheKeyWindow.h"
 
 namespace rtp_llm {
 
@@ -33,9 +34,11 @@ private:
     void         remoteLoadCacheEnd(PrefillGenerateContext& prefill_context);
     void         remoteGenerate(PrefillGenerateContext& prefill_context);
     void         pollRemoteOutput(PrefillGenerateContext& prefill_context);
+    void         reportPrefillRecentCacheKeyMetrics(PrefillGenerateContext& prefill_context);
 
 private:
-    std::string decode_cluster_name_;
+    std::string                           decode_cluster_name_;
+    std::unique_ptr<RecentCacheKeyWindow> prefill_recent_cache_key_window_;
 };
 
 }  // namespace rtp_llm
