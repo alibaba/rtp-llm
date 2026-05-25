@@ -28,6 +28,12 @@ public class WebClientPassthroughClient implements PassthroughClient {
      * synchronous — leaving nothing left to read by the time the downstream subscribes.
      * {@code exchange()} defers connection release until the body is consumed, which matches the
      * passthrough's intended lifetime.
+     *
+     * <p>With {@code .exchange()} the caller owns body consumption, so the
+     * {@code doOnCancel} on the assembled response Mono explicitly drains the FE channel back to
+     * the {@code dispatcher-fe} pool when downstream cancels before {@code writeTo} subscribes —
+     * without it the channel would sit checked out until reactor-netty's idle reaper closed it,
+     * silently draining the pool under churn.
      */
     @Override
     @SuppressWarnings("deprecation")
@@ -50,7 +56,8 @@ public class WebClientPassthroughClient implements PassthroughClient {
                                     .headers(h -> h.addAll(clientResponse.headers().asHttpHeaders()))
                                     .body(BodyInserters.fromDataBuffers(
                                             clientResponse.bodyToFlux(DataBuffer.class)
-                                                    .timeout(Duration.ofMillis(maxStreamDurationMs)))));
+                                                    .timeout(Duration.ofMillis(maxStreamDurationMs))))
+                                    .doOnCancel(() -> clientResponse.releaseBody().subscribe()));
         });
     }
 }

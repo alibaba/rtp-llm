@@ -116,4 +116,26 @@ class WebClientPassthroughClientTest {
         RecordedRequest recorded = server.takeRequest();
         Assertions.assertEquals("/worker_status?role=PREFILL", recorded.getPath());
     }
+
+    @Test
+    void cancellingForwardDoesNotThrowAndReleasesUpstream() throws Exception {
+        server.enqueue(new MockResponse().setBody("first"));
+        server.enqueue(new MockResponse().setBody("second"));
+        String base = "http://" + server.getHostName() + ":" + server.getPort();
+        FePool pool = new FePool(() -> List.of(base));
+        WebClientPassthroughClient client =
+                new WebClientPassthroughClient(WebClient.builder().build(), pool, 60000);
+
+        MockServerRequest first = MockServerRequest.builder()
+                .method(HttpMethod.GET).uri(URI.create("/a")).body(Flux.empty());
+        // Subscribe and immediately cancel — doOnCancel must release the FE channel without throwing.
+        StepVerifier.create(client.forward(first)).thenCancel().verify();
+
+        // A follow-up request must still complete successfully through the same pool.
+        MockServerRequest second = MockServerRequest.builder()
+                .method(HttpMethod.GET).uri(URI.create("/b")).body(Flux.empty());
+        StepVerifier.create(client.forward(second))
+                .assertNext(r -> Assertions.assertEquals(200, r.statusCode().value()))
+                .verifyComplete();
+    }
 }
