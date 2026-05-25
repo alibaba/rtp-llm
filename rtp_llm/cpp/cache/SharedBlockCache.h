@@ -265,9 +265,9 @@ public:
     // DEFEND1 HIGH-9 (R6 DEV-γ): LRU mirror desync invariant — public
     // diagnostic. Acquires ``mu_`` internally so external callers (tests /
     // post-condition probes) can invoke directly. See
-    // ``assertMirrorInvariantUnlocked_DCHECK`` for the actual check and the
+    // ``assertMirrorInvariantUnlocked_CHECK`` for the actual check and the
     // full invariant rationale.
-    void assertMirrorInvariant_DCHECK() const;
+    void assertMirrorInvariant_CHECK() const;
 
 private:
     // XR-C1: shared cascade body for ``putUnified``'s overflow tail and
@@ -285,9 +285,13 @@ private:
     // §3.0 lock-order).
     void cascadeUnifiedSnapshot(const std::vector<UnifiedCacheItem>& snapshot, size_t* cascaded_out);
 
-    // DEFEND1 HIGH-9 (R6 DEV-γ) — mirror invariant body, called with ``mu_``
-    // already held by the internal put/match/dec/evict paths. Compiled out
-    // in release (NDEBUG). The invariant:
+    // DEFEND1 HIGH-9 (R6 DEV-γ → R8 always-on per user directive
+    // "不要藏 bug 在 release 后面") — mirror invariant body, called with
+    // ``mu_`` already held by the internal put/match/dec/evict paths.
+    // R8 upgrade: removed the prior ``#ifndef NDEBUG`` gate. The CHECK now
+    // throws std::runtime_error in BOTH debug and release builds when the
+    // dual-write contract is bypassed, so the operator sees a hard failure
+    // instead of silent cache corruption. The invariant:
     //
     //   ``count(LRU items with use_ref > 0) <= UnifiedRefCounter::useRefMapSize()``
     //
@@ -297,7 +301,7 @@ private:
     // later tolerates as a no-op. Counter > LRU is benign; the failure mode
     // we catch is LRU > counter, which means someone bumped item.use_ref
     // without paying the counter bump — a silent dual-write bypass.
-    void assertMirrorInvariantUnlocked_DCHECK() const;
+    void assertMirrorInvariantUnlocked_CHECK() const;
 
     static const size_t kCacheMaxCapacity = 10000000;
 

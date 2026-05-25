@@ -277,21 +277,21 @@ TEST_F(SharedBlockCacheUnifiedTest, R6SharedCacheDecUseRefMissingKeyWarns) {
 // HIGH-9: LRU mirror invariant holds across the natural put / match /
 // abandon lifecycle. Every mutating unified path calls
 // ``assertMirrorInvariantUnlocked_DCHECK`` at the L1 tail; we also probe
-// the public diagnostic ``assertMirrorInvariant_DCHECK`` directly.
+// the public diagnostic ``assertMirrorInvariant_CHECK`` directly.
 TEST_F(SharedBlockCacheUnifiedTest, R6SharedCacheLruMirrorInvariantHolds) {
     constexpr CacheKeyType K1 = 0xA1;
     constexpr CacheKeyType K2 = 0xA2;
 
     cache_->putUnified(K1, /*S=*/31, /*is_resident=*/true);
     cache_->putUnified(K2, /*S=*/33, /*is_resident=*/true);
-    EXPECT_NO_THROW(cache_->assertMirrorInvariant_DCHECK());
+    EXPECT_NO_THROW(cache_->assertMirrorInvariant_CHECK());
 
     auto match = cache_->matchUnified({K1, K2}, /*tokens_per_block=*/1);
     EXPECT_EQ(match.super_block_ids.size(), 2u);
-    EXPECT_NO_THROW(cache_->assertMirrorInvariant_DCHECK());
+    EXPECT_NO_THROW(cache_->assertMirrorInvariant_CHECK());
 
     match.release_guard.abandon();
-    EXPECT_NO_THROW(cache_->assertMirrorInvariant_DCHECK());
+    EXPECT_NO_THROW(cache_->assertMirrorInvariant_CHECK());
     EXPECT_EQ(counter_->useRefMapSize(), 0u);
 }
 
@@ -570,7 +570,7 @@ TEST_F(SharedBlockCacheRaceStressTest, R7RaceCascadePutUnderContention) {
     // with any in-LRU item, so drainAll cannot dec them — we therefore
     // tolerate residual CACHE>0 for THIS test only and assert via the
     // counter-vs-LRU mirror invariant instead.
-    EXPECT_NO_THROW(cache_->assertMirrorInvariant_DCHECK());
+    EXPECT_NO_THROW(cache_->assertMirrorInvariant_CHECK());
     // Reclaim count must not exceed total bumps issued (no double-reclaim).
     EXPECT_LE(reclaim_count_.load(), static_cast<size_t>(kPutGetIters * kPutGetThreads));
 }
@@ -672,6 +672,70 @@ TEST_F(SharedBlockCacheRaceStressTest, R7RaceDecRefDoubleFreeProbe) {
     // putUnified threw — which exception_count would have caught.)
     EXPECT_EQ(reclaim_count_.load(), put_count.load())
         << "reclaim_count != put_count — possible missed or duplicate reclaim";
+}
+
+// R9: confirm the LRU mirror-invariant CHECK fires in ALL build flavors,
+// not only #ifndef NDEBUG. Prior to the R8 upgrade
+// (SharedBlockCache.cc:588-624) the body was wrapped in `#ifndef NDEBUG`,
+// so on `-c opt` builds (which set -DNDEBUG by default in Bazel) any
+// dual-write bypass would silently pass — exactly what allowed
+// R6/R7-class bugs to escape regression for so long. After R9 the body
+// is unconditional RTP_LLM_CHECK_WITH_INFO. We prove that by
+// deliberately desynchronizing the LRU's per-item use_ref mirror from
+// the UnifiedRefCounter's primary use_ref_ map and asserting that
+// assertMirrorInvariant_CHECK now throws std::runtime_error.
+//
+// Tamper strategy (-fno-access-control from cache/test/BUILD:7 lets us
+// reach private members directly):
+//   1. putUnified(K, S, is_resident=true) → LRU item.use_ref starts at 0,
+//      counter use_ref map is empty (putUnified does not bump use_ref;
+//      only matchUnified does).
+//   2. Directly increment lru_cache_.items_list_.front().second.use_ref
+//      WITHOUT touching counter_->use_ref_. The LRU now reports one
+//      pinned item while the counter reports zero use_ref keys → the
+//      "LRU > counter" silent-dual-write-bypass signal the invariant
+//      was designed to catch.
+//   3. EXPECT_THROW the public assertMirrorInvariant_CHECK probe.
+//
+// Cleanup: after the probe, restore use_ref=0 so TearDown / drainAll
+// (no drain here — we never wired BlockPools) can exit cleanly without
+// triggering the same CHECK on a future operation.
+TEST_F(SharedBlockCacheUnifiedTest, R9LruMirrorDesyncCheckFiresInAllBuilds) {
+    constexpr CacheKeyType K = 0xBADD5C;
+    constexpr int          S = 7;
+
+    // Seed one LRU entry with zero use_ref and zero counter use_ref keys.
+    cache_->putUnified(K, S, /*is_resident=*/true);
+    ASSERT_EQ(counter_->useRefMapSize(), 0u);
+    EXPECT_NO_THROW(cache_->assertMirrorInvariant_CHECK())
+        << "baseline invariant must hold before tampering";
+
+    // Tamper: bump the mirror without paying the counter — the precise
+    // failure mode the invariant exists to catch.
+    {
+        std::lock_guard<std::mutex> lock(cache_->mu_);
+        ASSERT_FALSE(cache_->lru_cache_.items_list_.empty());
+        cache_->lru_cache_.items_list_.front().second.use_ref = 1;
+    }
+
+    // R9 acceptance: CHECK must fire in BOTH debug and release builds.
+    // RTP_LLM_CHECK_WITH_INFO throws RTP_EXCEPTION which derives from
+    // std::runtime_error (rtp_llm/cpp/utils/AssertUtils.cc).
+    EXPECT_THROW(cache_->assertMirrorInvariant_CHECK(), std::runtime_error)
+        << "R9 mirror-invariant CHECK failed to fire — either the "
+           "#ifndef NDEBUG gate was reintroduced, or the build is "
+           "stripping the CHECK body. This regression would re-hide "
+           "dual-write bypasses in production.";
+
+    // Restore so TearDown is clean. Resetting under the lock keeps the
+    // tamper symmetric with the mutate above.
+    {
+        std::lock_guard<std::mutex> lock(cache_->mu_);
+        cache_->lru_cache_.items_list_.front().second.use_ref = 0;
+    }
+    EXPECT_NO_THROW(cache_->assertMirrorInvariant_CHECK())
+        << "post-restore invariant must hold so the cache destructor "
+           "does not trip on a tampered residual";
 }
 
 }  // namespace test

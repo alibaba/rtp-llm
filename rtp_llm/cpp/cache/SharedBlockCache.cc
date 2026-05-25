@@ -220,16 +220,24 @@ void SharedBlockCache::decUseRef(CacheKeyType cache_key) {
     // M03-PR3 dual-write: when UnifiedRefCounter is wired, delegate the
     // primary state to it. The per-item ``use_ref`` mirror is still
     // maintained (legacy fallback for tests / non-unified paths).
-    // UnifiedRefCounter::decUseRef takes its own mu_ (Lcr); call it OUTSIDE
-    // our mu_ here because this code path nests L1 AFTER Lcr (sequential
-    // re-acquisition, not nested), which keeps decUseRef from forming a
-    // Lcr→L1 cycle vs the L1→Lcr nesting used by putUnified/matchUnified.
-    // L1 itself is NOT a leaf — it parents Lcr and L3 on the put/match
-    // sites; see SharedBlockCache.h cascadeUnifiedSnapshot doc for the
-    // full lock-order discussion.
-    if (unified_ref_counter_) {
-        unified_ref_counter_->decUseRef(cache_key);
-    }
+    //
+    // R9 race fix (user directive "不要藏 bug 在 release 后面"): both writes
+    // MUST happen atomically under L1, in the order (LRU dec → counter dec).
+    // The original code did counter dec OUTSIDE L1 first, then LRU dec inside
+    // L1, which opened a transient `lru_pinned > counter_pinned` window any
+    // concurrent put/match/dec/evict observer could see. Under R7Race
+    // contention this triggers the always-on mirror CHECK
+    // (assertMirrorInvariantUnlocked_CHECK).
+    //
+    // Lock order: L1 → Lcr is the established nesting on the put/match
+    // sites (see header doc for cascadeUnifiedSnapshot), so taking the
+    // counter's mu_ while holding our mu_ here is consistent with that
+    // direction. No L1 → Lcr cycle is created.
+    //
+    // Dec order: LRU FIRST, then counter, so the invariant
+    // `lru_pinned ≤ counter_pinned` only ever observes states where the
+    // ratio drops monotonically (transiently lru < counter ≡ benign orphan,
+    // never lru > counter ≡ bypass).
     std::lock_guard<std::mutex> lock(mu_);
     auto [success, item] = lru_cache_.get(cache_key);
     if (!success) {
@@ -237,6 +245,13 @@ void SharedBlockCache::decUseRef(CacheKeyType cache_key) {
         // bump landed. Treat as no-op rather than fail — heavy churn can
         // legitimately race the abandon path. The bump is already gone with
         // the item; no leak.
+        //
+        // Counter still needs the dec in case remove() didn't drop the
+        // counter key (decUseRef on UnifiedRefCounter tolerates missing
+        // keys per R6 DEV-γ HIGH-4: missing → WARN, not CHECK fail).
+        if (unified_ref_counter_) {
+            unified_ref_counter_->decUseRef(cache_key);
+        }
         return;
     }
     if (item.use_ref <= 0) {
@@ -248,8 +263,11 @@ void SharedBlockCache::decUseRef(CacheKeyType cache_key) {
     }
     --item.use_ref;
     lru_cache_.put(cache_key, item);
+    if (unified_ref_counter_) {
+        unified_ref_counter_->decUseRef(cache_key);
+    }
     // DEFEND1 HIGH-9 (R6 DEV-γ): post-condition mirror invariant.
-    assertMirrorInvariantUnlocked_DCHECK();
+    assertMirrorInvariantUnlocked_CHECK();
 }
 
 int SharedBlockCache::useRefCount(CacheKeyType cache_key) const {
@@ -407,7 +425,7 @@ void SharedBlockCache::putUnified(CacheKeyType cache_key, int super_block_id, bo
         // DEFEND1 HIGH-9 (R6 DEV-γ): post-condition mirror invariant —
         // run BEFORE we drop mu_ so any divergence is attributed to this
         // putUnified rather than a downstream operation.
-        assertMirrorInvariantUnlocked_DCHECK();
+        assertMirrorInvariantUnlocked_CHECK();
     }
 
     // Cascade-free OUTSIDE mu_.
@@ -474,7 +492,7 @@ SharedBlockCache::MatchResultUnified SharedBlockCache::matchUnified(const std::v
             out.release_guard.addKey(keys[i]);
         }
         // DEFEND1 HIGH-9 (R6 DEV-γ): post-condition mirror invariant.
-        assertMirrorInvariantUnlocked_DCHECK();
+        assertMirrorInvariantUnlocked_CHECK();
     }
 
     out.found = !out.super_block_ids.empty();
@@ -554,7 +572,7 @@ SharedBlockCache::selectAndEvictUnified(size_t min_super_blocks) {
     // DEFEND1 HIGH-9 (R6 DEV-γ): post-condition mirror invariant. Eviction
     // only drops items with item.use_ref == 0 (gated above), so LRU pinned
     // count is unchanged; counter use_ref unchanged. Invariant holds.
-    assertMirrorInvariantUnlocked_DCHECK();
+    assertMirrorInvariantUnlocked_CHECK();
     return snapshot;
 }
 
@@ -585,19 +603,24 @@ size_t SharedBlockCache::evictAndFreeUnified(size_t min_super_blocks) {
     return cascaded;
 }
 
-void SharedBlockCache::assertMirrorInvariant_DCHECK() const {
-#ifndef NDEBUG
+void SharedBlockCache::assertMirrorInvariant_CHECK() const {
     std::lock_guard<std::mutex> lock(mu_);
-    assertMirrorInvariantUnlocked_DCHECK();
-#endif
+    assertMirrorInvariantUnlocked_CHECK();
 }
 
-void SharedBlockCache::assertMirrorInvariantUnlocked_DCHECK() const {
-#ifndef NDEBUG
-    // DEFEND1 HIGH-9 (R6 DEV-γ): compare the LRU's per-item ``use_ref`` mirror
-    // against the UnifiedRefCounter's primary ``use_ref_`` map. Both are
-    // bumped/deced together under L1 (the dual-write contract); a divergence
-    // where LRU > counter means a silent dual-write bypass.
+void SharedBlockCache::assertMirrorInvariantUnlocked_CHECK() const {
+    // DEFEND1 HIGH-9 (R6 DEV-γ → R8 always-on per user directive
+    // "不要藏 bug 在 release 后面"): compare the LRU's per-item ``use_ref``
+    // mirror against the UnifiedRefCounter's primary ``use_ref_`` map. Both
+    // are bumped/deced together under L1 (the dual-write contract); a
+    // divergence where LRU > counter means a silent dual-write bypass.
+    //
+    // This was originally `#ifndef NDEBUG`-gated (release build no-op) so a
+    // dual-write bypass would not crash production but would also not be
+    // detected.  Upgraded R8 to RTP_LLM_CHECK_WITH_INFO unconditional so the
+    // process throws std::runtime_error and the operator notices, instead of
+    // silently corrupting the cache. Hot path cost: O(LRU.size()) per call,
+    // amortized by being on the put/match/dec/evict slow path (not the get).
     if (!unified_ref_counter_) {
         return;
     }
@@ -617,7 +640,6 @@ void SharedBlockCache::assertMirrorInvariantUnlocked_DCHECK() const {
                             "item.use_ref without paying the counter bump (dual-write bypass)",
                             lru_pinned,
                             counter_pinned);
-#endif
 }
 
 void SharedBlockCache::cascadeUnifiedSnapshot(const std::vector<UnifiedCacheItem>& snapshot,
