@@ -25,6 +25,9 @@ except (ImportError, AttributeError, ValueError) as _e:
 
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.modules.factory.attention import common
+from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.triton_kv_scatter import (
+    triton_kv_scatter,
+)
 from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_utils import (
     generate_q_indices,
 )
@@ -322,14 +325,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         else:
             out0 = self._attend_with_kvcache(q0, kv_cache, topk, layer_id)
 
-        out = torch.zeros(
-            q.size(0),
-            out0.size(1),
-            out0.size(2),
-            dtype=out0.dtype,
-            device=out0.device,
-        )
-        out[self.total_local_ids] = out0
+        out = triton_kv_scatter(out0, self.total_local_ids, q.size(0))
         return out
 
     def _attend_with_kvcache(
