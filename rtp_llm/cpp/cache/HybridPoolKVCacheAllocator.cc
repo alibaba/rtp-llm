@@ -33,7 +33,8 @@ bool HybridPoolKVCacheAllocator::doInit() {
 
     for (int gid = 0; gid < group_nums; ++gid) {
         auto pool_config = BlockPoolConfigHelper::createConfigForGroup(config_, static_cast<size_t>(gid));
-        auto group_pool  = std::make_shared<BlockPool>(pool_config, allocation_type_);
+        auto group_pool  = std::make_shared<BlockPool>(
+            pool_config, allocation_type_, /*use_pinned_cpu_backing=*/false, use_cuda_malloc_block_pool_);
         RTP_LLM_CHECK_WITH_INFO(group_pool->init(), "Failed to initialize block pool for group %d", gid);
 
         const auto& ids  = config_.global_layer_ids[static_cast<size_t>(gid)];

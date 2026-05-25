@@ -23,7 +23,10 @@ class CacheStore;
 
 class BlockPool {
 public:
-    BlockPool(const BlockPoolConfig& config, AllocationType allocation_type = AllocationType::DEVICE);
+    BlockPool(const BlockPoolConfig& config,
+              AllocationType         allocation_type         = AllocationType::DEVICE,
+              bool                   use_pinned_cpu_backing  = false,
+              bool                   use_cuda_malloc_backing = false);
     ~BlockPool();
 
     bool init();
@@ -85,6 +88,8 @@ private:
     // Helper functions for init()
     void validateConfig() const;
     void initializeCacheBuffer();
+    void initializePinnedCpuBuffer(const char* log_context);
+    void initializeCudaMallocBuffer();
     void initializeLayerMappings();
     void initializeLayoutStrategies();
 
@@ -126,6 +131,8 @@ private:
     BlockRefCounter        req_cache_ref_counter_;
 
     AllocationType allocation_type_;
+    bool           use_pinned_cpu_backing_;
+    bool           use_cuda_malloc_backing_;
 
     BlockCachePtr block_cache_;
 

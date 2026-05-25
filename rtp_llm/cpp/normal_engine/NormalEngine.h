@@ -75,6 +75,7 @@ private:
     PDSepConfig                                   pd_sep_config;
     ProfilingDebugLoggingConfig                   profiling_debug_logging_config;
     KVCacheConfig                                 kv_cache_config;
+    CacheStoreConfig                              cache_store_config;
     FfnDisAggregateConfig                         ffn_disaggregate_config;
     ModelSpecificConfig                           model_specific_config;
     SpeculativeExecutionConfig                    sp_config;

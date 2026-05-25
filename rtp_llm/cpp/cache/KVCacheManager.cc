@@ -27,7 +27,8 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
                                const RuntimeConfig&               runtime_config,
                                const SpeculativeExecutionConfig&  sp_config,
                                const PDSepConfig&                 pd_sep_config,
-                               const CacheStoreConfig&            cache_store_config):
+                               const CacheStoreConfig&            cache_store_config,
+                               bool                               use_cuda_malloc_block_pool):
     config_(config),
     metrics_reporter_(metrics_reporter),
     kv_cache_config_(kv_cache_config),
@@ -35,7 +36,8 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
     runtime_config_(runtime_config),
     sp_config_(sp_config),
     pd_sep_config_(pd_sep_config),
-    cache_store_config_(cache_store_config) {
+    cache_store_config_(cache_store_config),
+    use_cuda_malloc_block_pool_(use_cuda_malloc_block_pool) {
     if (warmup) {
         config_.block_num = 1;
     } else {
@@ -67,16 +69,20 @@ bool KVCacheManager::init() {
     if (config_.use_independent_block_pools) {
         allocator_ = std::make_shared<rtp_llm::HybridPoolKVCacheAllocator>(
             config_, AllocationType::DEVICE, metrics_reporter_, kv_cache_config_.reserve_block_ratio);
-        RTP_LLM_CHECK_WITH_INFO(allocator_->init(), "HybridPoolKVCacheAllocator init failed");
     } else if (is_hybrid) {
         allocator_ = std::make_shared<rtp_llm::HybridTypeKVCacheAllocator>(
             config_, AllocationType::DEVICE, metrics_reporter_, kv_cache_config_.reserve_block_ratio);
-        RTP_LLM_CHECK_WITH_INFO(allocator_->init(), "HybridTypeKVCacheAllocator init failed");
     } else {
         allocator_ = std::make_shared<rtp_llm::SingleTypeKVCacheAllocator>(
             config_, AllocationType::DEVICE, metrics_reporter_, kv_cache_config_.reserve_block_ratio);
-        RTP_LLM_CHECK_WITH_INFO(allocator_->init(), "SingleTypeKVCacheAllocator init failed");
     }
+
+    if (use_cuda_malloc_block_pool_) {
+        RTP_LLM_LOG_INFO("RDMA cache store enabled for PD role, use cudaMalloc KV cache block-pool backing");
+        allocator_->setUseCudaMallocBlockPool(true);
+    }
+
+    RTP_LLM_CHECK_WITH_INFO(allocator_->init(), "KVCacheAllocator init failed");
 
     if (metrics_reporter_) {
         stop_.store(false, std::memory_order_relaxed);
@@ -315,8 +321,7 @@ CacheLayerLayout KVCacheManager::getMainModelCacheLayerLayout() const {
             layout.layer_to_group_ids[layer_id] = config_.layer_to_group_ids[static_cast<size_t>(layer_id)];
         }
         if (static_cast<size_t>(layer_id) < config_.layer_region_to_group_id.size()) {
-            layout.layer_region_to_group_id[layer_id] =
-                config_.layer_region_to_group_id[static_cast<size_t>(layer_id)];
+            layout.layer_region_to_group_id[layer_id] = config_.layer_region_to_group_id[static_cast<size_t>(layer_id)];
         }
         if (static_cast<size_t>(layer_id) < all_layout.layers_to_kv_buffer_ptrs_by_attn.size()) {
             layout.layers_to_kv_buffer_ptrs_by_attn[layer_id] =
@@ -355,9 +360,8 @@ CacheLayerLayout KVCacheManager::getMTPModuleCacheLayerLayout(int mtp_module_id)
             mtp_global_layer_ids.push_back(lid);
         }
     }
-    RTP_LLM_CHECK_WITH_INFO(!mtp_global_layer_ids.empty(),
-                            "mtp_sub_configs[%d] has no layers across any group",
-                            mtp_module_id);
+    RTP_LLM_CHECK_WITH_INFO(
+        !mtp_global_layer_ids.empty(), "mtp_sub_configs[%d] has no layers across any group", mtp_module_id);
     const uint32_t mtp_layer_num = mtp_sub_config->layer_num;
 
     auto  all_layout        = allocator_->allLayerCacheBase();
@@ -386,10 +390,8 @@ CacheLayerLayout KVCacheManager::getMTPModuleCacheLayerLayout(int mtp_module_id)
     // buffers, which causes the draft to write into the main model's KV
     // pool and corrupts target verify (0% acceptance regression).
     const size_t region_name_count = static_cast<size_t>(KVCacheRegionName::REGION_COUNT);
-    layout.layers_to_kv_buffer_ptrs_by_attn.assign(
-        mtp_layer_num, std::vector<torch::Tensor>(region_name_count));
-    layout.layers_to_scale_buffer_ptrs_by_attn.assign(
-        mtp_layer_num, std::vector<torch::Tensor>(region_name_count));
+    layout.layers_to_kv_buffer_ptrs_by_attn.assign(mtp_layer_num, std::vector<torch::Tensor>(region_name_count));
+    layout.layers_to_scale_buffer_ptrs_by_attn.assign(mtp_layer_num, std::vector<torch::Tensor>(region_name_count));
     layout.layer_region_to_group_id.assign(mtp_layer_num, std::vector<int>(region_name_count, -1));
 
     for (uint32_t local_layer_id = 0; local_layer_id < mtp_layer_num; ++local_layer_id) {
@@ -649,7 +651,7 @@ void KVCacheManager::reportMetricsLoop() {
     // diagnostic log is intended for sporadic spot-checks, not per-tick spam.
     // Initialise to "3 min ago" so the first iteration emits one line right
     // away (gives operators an immediate baseline after restart).
-    constexpr auto kLogInterval = std::chrono::minutes(3);
+    constexpr auto kLogInterval  = std::chrono::minutes(3);
     auto           last_log_time = std::chrono::steady_clock::now() - kLogInterval;
     while (!stop_.load(std::memory_order_relaxed)) {
         if (!metrics_reporter_ || !allocator_) {
@@ -711,15 +713,15 @@ void KVCacheManager::reportMetricsLoop() {
                 if (!pool) {
                     continue;
                 }
-                const size_t pool_total      = pool->totalBlocksNum();
-                const size_t pool_available  = pool->availableBlocksNum();
-                const size_t pool_free       = pool->freeBlocksNum();
-                const size_t pool_req_ref    = pool->requestRefBlocksNum();
-                const size_t pool_con_ref    = pool->connectorRefBlocksNum();
-                const float  pool_used_ratio = (pool_total == 0) ?
-                                                   0.0f :
-                                                   static_cast<float>(100.0 * (pool_total - pool_available)
-                                                                      / static_cast<double>(pool_total));
+                const size_t pool_total     = pool->totalBlocksNum();
+                const size_t pool_available = pool->availableBlocksNum();
+                const size_t pool_free      = pool->freeBlocksNum();
+                const size_t pool_req_ref   = pool->requestRefBlocksNum();
+                const size_t pool_con_ref   = pool->connectorRefBlocksNum();
+                const float  pool_used_ratio =
+                    (pool_total == 0) ?
+                         0.0f :
+                         static_cast<float>(100.0 * (pool_total - pool_available) / static_cast<double>(pool_total));
 
                 if (should_log) {
                     RTP_LLM_LOG_INFO(

@@ -25,14 +25,15 @@ class KVCacheConnectorReadWriteContext;
 class KVCacheManager {
 public:
     KVCacheManager(const CacheConfig&                 config,
-                   bool                               warmup             = false,
-                   const kmonitor::MetricsReporterPtr metrics_reporter   = nullptr,
-                   const KVCacheConfig&               kv_cache_config    = KVCacheConfig{},
-                   const ParallelismConfig&           parallelism_config = ParallelismConfig{},
-                   const RuntimeConfig&               runtime_config     = RuntimeConfig{},
-                   const SpeculativeExecutionConfig&  sp_config          = SpeculativeExecutionConfig{},
-                   const PDSepConfig&                 pd_sep_config      = PDSepConfig{},
-                   const CacheStoreConfig&            cache_store_config = CacheStoreConfig{});
+                   bool                               warmup                     = false,
+                   const kmonitor::MetricsReporterPtr metrics_reporter           = nullptr,
+                   const KVCacheConfig&               kv_cache_config            = KVCacheConfig{},
+                   const ParallelismConfig&           parallelism_config         = ParallelismConfig{},
+                   const RuntimeConfig&               runtime_config             = RuntimeConfig{},
+                   const SpeculativeExecutionConfig&  sp_config                  = SpeculativeExecutionConfig{},
+                   const PDSepConfig&                 pd_sep_config              = PDSepConfig{},
+                   const CacheStoreConfig&            cache_store_config         = CacheStoreConfig{},
+                   bool                               use_cuda_malloc_block_pool = false);
     ~KVCacheManager();
 
     // 初始化和配置相关
@@ -69,11 +70,11 @@ public:
     BlockAddrInfo          convertIndexToAddr(int block_index, int layer_id) const;
     std::vector<BlockInfo> convertIndexToBuffer(int block_index, int layer_id) const;
     std::vector<BlockInfo>
-    convertIndexToBuffer(int block_index, int layer_id, int partition_count, int partition_id) const;
-    BlockAddrInfo          convertIndexToAddr(int block_index, int layer_id, KVCacheRegionName region_name) const;
+                  convertIndexToBuffer(int block_index, int layer_id, int partition_count, int partition_id) const;
+    BlockAddrInfo convertIndexToAddr(int block_index, int layer_id, KVCacheRegionName region_name) const;
     std::vector<BlockInfo> convertIndexToBuffer(int block_index, int layer_id, KVCacheRegionName region_name) const;
-    std::vector<BlockInfo>
-    convertIndexToBuffer(int block_index, int layer_id, KVCacheRegionName region_name, int partition_count, int partition_id) const;
+    std::vector<BlockInfo> convertIndexToBuffer(
+        int block_index, int layer_id, KVCacheRegionName region_name, int partition_count, int partition_id) const;
 
     CacheLayerLayout allLayerCacheBase() const;
 
@@ -144,6 +145,7 @@ private:
     const SpeculativeExecutionConfig   sp_config_;
     const PDSepConfig                  pd_sep_config_;
     const CacheStoreConfig             cache_store_config_;
+    const bool                         use_cuda_malloc_block_pool_;
 
     std::atomic<bool> stop_{false};
     std::thread       metrics_reporter_thread_;
