@@ -93,7 +93,7 @@ TEST_F(ComputedLayerCacheBufferTest, ComputedLayerCacheBuffer_WaitChange) {
 
     producer.join();
 
-    std::set<int> layer_ids     = {0, 1};
+    std::set<int> layer_ids     = {0, 8};  // virtualLayerId: layer0=0*8+0=0, layer1=1*8+0=8
     auto [layer_count, buffers] = computed_buffer->getBuffers(layer_ids);
     EXPECT_EQ(layer_count, 2);
     EXPECT_EQ(buffers.size(), 2);
