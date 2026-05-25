@@ -1,3 +1,5 @@
+#include <chrono>
+#include <cstring>
 #include <memory>
 #include "torch/all.h"
 #include "gtest/gtest.h"
@@ -23,6 +25,47 @@ template<typename T>
 std::vector<T> toVec(const torch::Tensor& t) {
     auto c = t.is_cuda() ? t.cpu().contiguous() : t.contiguous();
     return std::vector<T>(c.data_ptr<T>(), c.data_ptr<T>() + c.numel());
+}
+
+void fillScoreTokenIdsWithMemcpy(torch::Tensor&                     token_ids,
+                                 const std::vector<torch::Tensor>&  complete_token_ids,
+                                 const std::vector<int64_t>&        seq_lens,
+                                 int64_t                            score_len) {
+    int64_t batch_idx = 0;
+    auto*   dst       = token_ids.data_ptr<int32_t>();
+    const auto dst_stride = token_ids.size(1);
+    for (size_t stream_idx = 0; stream_idx < complete_token_ids.size(); ++stream_idx) {
+        auto* src     = complete_token_ids[stream_idx].data_ptr<int32_t>();
+        auto  seq_len = seq_lens[stream_idx];
+        for (int64_t i = 0; i < score_len; ++i) {
+            std::memcpy(dst + batch_idx * dst_stride, src, seq_len * sizeof(int32_t));
+            ++batch_idx;
+        }
+    }
+}
+
+void fillScoreTokenIdsWithTorchCopy(torch::Tensor&                     token_ids,
+                                    const std::vector<torch::Tensor>&  complete_token_ids,
+                                    const std::vector<int64_t>&        seq_lens,
+                                    int64_t                            score_len) {
+    int64_t batch_idx = 0;
+    for (size_t stream_idx = 0; stream_idx < complete_token_ids.size(); ++stream_idx) {
+        auto seq_len = seq_lens[stream_idx];
+        token_ids.narrow(0, batch_idx, score_len)
+            .narrow(1, 0, seq_len)
+            .copy_(complete_token_ids[stream_idx].narrow(1, 0, seq_len).expand({score_len, seq_len}));
+        batch_idx += score_len;
+    }
+}
+
+template<typename Func>
+double benchmarkUs(Func&& func, int iterations) {
+    auto start = std::chrono::steady_clock::now();
+    for (int i = 0; i < iterations; ++i) {
+        func();
+    }
+    auto end = std::chrono::steady_clock::now();
+    return std::chrono::duration<double, std::micro>(end - start).count() / iterations;
 }
 
 class MtpBatchStreamProcessorTest: public DeviceTestBase {
@@ -77,6 +120,93 @@ public:
         EXPECT_EQ(expect_last_hidden_states, toVec<float>(last_hidden_states_h));
     }
 };
+
+TEST_F(MtpBatchStreamProcessorTest, DISABLED_benchmarkScoreTokenIdsTorchCopyVsMemcpy) {
+    constexpr int64_t stream_count = 64;
+    constexpr int64_t score_len    = 4;
+    constexpr int64_t max_seq_len  = 65536;
+    constexpr int     iterations   = 20;
+
+    auto src_storage = torch::empty({stream_count, max_seq_len}, torch::kInt32);
+    src_storage.random_(0, 32000);
+
+    std::vector<torch::Tensor> complete_token_ids;
+    std::vector<int64_t>       seq_lens;
+    complete_token_ids.reserve(stream_count);
+    seq_lens.reserve(stream_count);
+    for (int64_t i = 0; i < stream_count; ++i) {
+        complete_token_ids.push_back(src_storage.narrow(0, i, 1));
+        seq_lens.push_back(max_seq_len - (i % 8) * 128);
+    }
+
+    auto pinned_i32 = torch::TensorOptions(torch::kInt32).pinned_memory(true);
+    auto dst_memcpy = torch::empty({stream_count * score_len, max_seq_len + score_len}, pinned_i32);
+    auto dst_torch  = torch::empty({stream_count * score_len, max_seq_len + score_len}, pinned_i32);
+
+    dst_memcpy.fill_(-1);
+    dst_torch.fill_(-1);
+    fillScoreTokenIdsWithMemcpy(dst_memcpy, complete_token_ids, seq_lens, score_len);
+    fillScoreTokenIdsWithTorchCopy(dst_torch, complete_token_ids, seq_lens, score_len);
+    ASSERT_TRUE(torch::equal(dst_memcpy, dst_torch));
+
+    auto memcpy_us =
+        benchmarkUs([&]() { fillScoreTokenIdsWithMemcpy(dst_memcpy, complete_token_ids, seq_lens, score_len); },
+                    iterations);
+    auto torch_us =
+        benchmarkUs([&]() { fillScoreTokenIdsWithTorchCopy(dst_torch, complete_token_ids, seq_lens, score_len); },
+                    iterations);
+
+    std::cout << "[mtp-score-token-ids-copy] streams=" << stream_count << " score_len=" << score_len
+              << " max_seq_len=" << max_seq_len << " iterations=" << iterations << " memcpy_us=" << memcpy_us
+              << " torch_copy_us=" << torch_us << " speedup=" << (memcpy_us / torch_us) << std::endl;
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputReplicatesScoreTokenIds) {
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    SpeculativeExecutionConfig  sp_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    cache_config.group_types = {CacheGroupType::FULL};
+
+    model_config.max_seq_len    = 2048;
+    model_config.vocab_size     = 4;
+    model_config.num_layers     = 1;
+    sp_config.gen_num_per_cycle = 3;
+
+    ResourceContext resource_context;
+
+    GenerateStreamPtr stream1 = createContextStream(model_config, runtime_config, resource_context, {5}, 1);
+    GenerateStreamPtr stream2 = createContextStream(model_config, runtime_config, resource_context, {6, 7}, 2);
+    stream1->setScoreLen(sp_config.gen_num_per_cycle + 1);
+    stream2->setScoreLen(sp_config.gen_num_per_cycle + 1);
+
+    auto stream_groups = StreamGroups({stream1, stream2});
+    auto processor     = MtpBatchStreamProcessor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+
+    GptModelInputs  model_inputs;
+    GptModelOutputs model_output;
+    model_output.logits =
+        torch::empty({static_cast<int64_t>(stream_groups.size() * (sp_config.gen_num_per_cycle + 1)), 4},
+                     torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+
+    auto sampler_inputs_status = processor.gatherSpecSamplerInput(stream_groups, model_inputs, model_output);
+    ASSERT_TRUE(sampler_inputs_status.ok());
+
+    auto token_ids = sampler_inputs_status.value().token_ids;
+    auto stride    = token_ids.size(1);
+    auto* data     = token_ids.data_ptr<int32_t>();
+
+    for (int64_t row = 0; row < 4; ++row) {
+        EXPECT_EQ(5, data[row * stride]);
+    }
+    for (int64_t row = 4; row < 8; ++row) {
+        EXPECT_EQ(6, data[row * stride]);
+        EXPECT_EQ(7, data[row * stride + 1]);
+    }
+}
 
 TEST_F(MtpBatchStreamProcessorTest, testPrefillDispatch) {
     ModelConfig                 model_config;
