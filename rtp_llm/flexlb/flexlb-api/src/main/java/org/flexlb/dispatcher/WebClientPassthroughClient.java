@@ -19,7 +19,18 @@ public class WebClientPassthroughClient implements PassthroughClient {
     private final FePool fePool;
     private final int maxStreamDurationMs;
 
+    /**
+     * Uses the deprecated {@link WebClient.RequestHeadersSpec#exchange() exchange()} rather than
+     * {@code exchangeToMono} because the upstream body {@link Flux} is handed to a
+     * {@link ServerResponse} that subscribes lazily (at {@code writeTo} time);
+     * {@code exchangeToMono} would release the upstream connection the instant its lambda
+     * {@code Mono} completes — which is immediate, since {@code .body(BodyInserter)} is
+     * synchronous — leaving nothing left to read by the time the downstream subscribes.
+     * {@code exchange()} defers connection release until the body is consumed, which matches the
+     * passthrough's intended lifetime.
+     */
     @Override
+    @SuppressWarnings("deprecation")
     public Mono<ServerResponse> forward(ServerRequest request) {
         return Mono.fromCallable(fePool::next).flatMap(feBaseUrl -> {
             URI src = request.uri();
@@ -33,12 +44,13 @@ public class WebClientPassthroughClient implements PassthroughClient {
                     .uri(target)
                     .headers(h -> h.addAll(request.headers().asHttpHeaders()))
                     .body(BodyInserters.fromDataBuffers(bodyStream))
-                    .exchangeToMono(clientResponse ->
+                    .exchange()
+                    .flatMap(clientResponse ->
                             ServerResponse.status(clientResponse.statusCode())
                                     .headers(h -> h.addAll(clientResponse.headers().asHttpHeaders()))
-                                    .body(clientResponse.bodyToFlux(DataBuffer.class)
-                                                    .timeout(Duration.ofMillis(maxStreamDurationMs)),
-                                            DataBuffer.class));
+                                    .body(BodyInserters.fromDataBuffers(
+                                            clientResponse.bodyToFlux(DataBuffer.class)
+                                                    .timeout(Duration.ofMillis(maxStreamDurationMs)))));
         });
     }
 }
