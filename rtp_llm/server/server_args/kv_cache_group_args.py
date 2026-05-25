@@ -452,22 +452,13 @@ def init_kv_cache_group_args(parser, kv_cache_config):
     )
     kv_cache_group.add_argument(
         "--dsv4_unified_block_count",
-        env_name="DSV4_UNIFIED_BLOCKS",
         bind_to=(kv_cache_config, "dsv4_unified_block_count"),
         type=int,
-        default=-1,
-        help="F02 DSV4 unified super-block layout opt-in (tri-state): "
-        "-1=auto (follow compiled default; legacy OFF semantics), 0=force OFF (legacy per-group path), "
-        "1=force ON (CacheConfig.super_block_layout.enabled=true, bps≡1). "
-        "Phase 5 default flip is GATED PENDING prerequisites: createSpConfig MTP "
-        "unified branch (R02 H-1), validatePeerHandshake wiring + hash_salt_version "
-        "computation (R17 F1/F2), ConfigModules.h C++ default mirror (R10 C2), "
-        "pinned-CPU oversubscribe guard (R02 H-2), canary metric registration "
-        "(R10 C6), and smoke baseline env pin (R10 C1). Until those land, default "
-        "stays -1 (auto = legacy OFF) and operators opt in per-process via "
-        "DSV4_UNIFIED_BLOCKS=1. "
-        "See docs/dsv4/kvcache-unify-final/canary/PHASE5_CANARY_PROCEDURE.md "
-        "for the re-flip pre-flight checklist.",
+        default=1,
+        help="DSV4 unified super-block layout (post Phase 6+1, env override removed). "
+        "1=ON (default, compiled-in); 0=legacy per-group path (removed in Phase 6 — "
+        "value retained for config-file back-compat only; setting 0 will fail at "
+        "KVCacheManager::init with a clear error pointing to docs/dsv4/kvcache-unify-final/).",
     )
     kv_cache_group.add_argument(
         "--dsv4_state_entries_per_block",

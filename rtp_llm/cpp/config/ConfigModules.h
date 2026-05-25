@@ -193,14 +193,12 @@ struct KVCacheConfig {
     // 1024 * 1024 / Σstate_block_size_bytes).
     int64_t state_pool_memory_mb = 0;
 
-    // F02 DSV4 unified super-block layout opt-in (tri-state):
-    //   -1 = auto (follow compiled default; today default OFF)
-    //    0 = force OFF (legacy per-group path)
-    //    1 = force ON  (write SuperBlockLayout with bps≡1, enabled=true)
-    // Env var: DSV4_UNIFIED_BLOCKS. Precedence: env > config > auto > default.
-    // M02-PR1 plumbs the flag only; downstream sizing / allocator wiring lands
-    // in M02-PR2 / M01-PR4. Default stays -1 → today's behaviour is unchanged.
-    int dsv4_unified_block_count = -1;
+    // DSV4 unified super-block layout (Phase 6+1: env override removed).
+    // Default = 1 (compiled-in ON). Field retained for config-file callers;
+    // legacy per-group path was deleted in Phase 6. Setting this to 0 via
+    // a config file will fail at KVCacheManager::init with a clear error
+    // pointing to docs/dsv4/kvcache-unify-final/.
+    int dsv4_unified_block_count = 1;
 
     // F01 PR-1 phase-2 hook: K_state — number of state entries kept per
     // physical block for the 3 DSV4 STATE pools (INDEXER_STATE, CSA_STATE,

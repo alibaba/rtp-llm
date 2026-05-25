@@ -364,12 +364,11 @@ void DSV4CacheConfigHelper::applyConfig(CacheConfig&         config,
         config.group_region_names.push_back(pool.region_name);
     }
 
-    // ---- F02 super-block layout (M02-PR1: default OFF, no behaviour change) ----
-    // bps[p] == 1 for every DSV4 pool today. `enabled` only flips when the
-    // user explicitly opts in via DSV4_UNIFIED_BLOCKS=1 (tri-state default -1
-    // resolves to legacy OFF until canary §1.0 11-item checklist clears and
-    // the default is re-flipped to 1). num_super_blocks stays 0 in PR-1;
-    // HybridPoolConfigCreator populates it in M02-PR2.
+    // ---- F02 super-block layout (Phase 6+1: env override removed; default ON) ----
+    // bps[p] == 1 for every DSV4 pool. `enabled` is true unless a config-file
+    // caller explicitly sets dsv4_unified_block_count = 0 (which will then fail
+    // at KVCacheManager::init because the legacy per-group path was removed in
+    // Phase 6). num_super_blocks populated by HybridPoolConfigCreator.
     config.super_block_layout.bps.assign(pools.size(), 1u);
     config.super_block_layout.enabled = (kv_cache_config.dsv4_unified_block_count == 1);
 }
