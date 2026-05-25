@@ -9,7 +9,7 @@ ComputedLayerCacheBuffer::ComputedLayerCacheBuffer(int64_t                      
                                                    int64_t                                  deadline_ms):
     request_id_(request_id), deadline_ms_(deadline_ms) {
     if (layer_cache_buffer) {
-        layer_cache_buffers_[layer_cache_buffer->getLayerId()] = layer_cache_buffer;
+        layer_cache_buffers_[layer_cache_buffer->virtualLayerId()] = layer_cache_buffer;
     }
 }
 
@@ -17,7 +17,7 @@ void ComputedLayerCacheBuffer::addBuffer(const std::shared_ptr<LayerCacheBuffer>
                                          int64_t                                  deadline_ms) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (layer_cache_buffer) {
-        layer_cache_buffers_[layer_cache_buffer->getLayerId()] = layer_cache_buffer;
+        layer_cache_buffers_[layer_cache_buffer->virtualLayerId()] = layer_cache_buffer;
     }
     int64_t cur = deadline_ms_.load(std::memory_order_relaxed);
     if (deadline_ms > cur) {

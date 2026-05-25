@@ -1,5 +1,6 @@
 #pragma once
 
+#include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferBackendConfig.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include <cstdint>
@@ -14,6 +15,9 @@ struct P2PConnectorSchedulerConfig {
     int64_t                  p2p_transfer_not_done_resource_hold_ms       = 10 * 1000;
     int                      p2p_resource_store_timeout_check_interval_ms = 100;
     int64_t                  p2p_cancel_broadcast_timeout_ms              = 1000;
+
+    std::vector<std::vector<int>> layer_region_to_group_id;
+    std::vector<CacheGroupType>   group_types;
 
     static P2PConnectorSchedulerConfig create(const RuntimeConfig&    runtime_config,
                                               const CacheStoreConfig& cache_store_config,
@@ -45,6 +49,9 @@ struct P2PConnectorWorkerConfig {
     int  cp_rank          = 0;
     int  cp_size          = 1;
     bool kv_cache_sharded = false;
+
+    std::vector<std::vector<int>> layer_region_to_group_id;
+    std::vector<CacheGroupType>   group_types;
 
     static P2PConnectorWorkerConfig create(const CacheStoreConfig&  cache_store_config,
                                            const PDSepConfig&       pd_sep_config,

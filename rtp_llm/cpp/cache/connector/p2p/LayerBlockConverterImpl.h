@@ -25,6 +25,20 @@ public:
         return result;
     }
 
+    std::vector<BlockInfo> convertIndexToBuffer(
+        int layer_id, KVCacheRegionName region_name, int block_id, int partition_count, int partition_id) const override {
+        auto block_infos =
+            allocator_->convertIndexToBuffer(layer_id, region_name, block_id, partition_count, partition_id);
+        std::vector<BlockInfo> result;
+        result.reserve(block_infos.size());
+        for (const auto& info : block_infos) {
+            if (info.addr != nullptr && info.size_bytes > 0) {
+                result.push_back(info);
+            }
+        }
+        return result;
+    }
+
     std::vector<std::pair<BlockInfo, size_t>> getAllBuffers() const override {
         const auto                                layout = allocator_->allLayerCacheBase();
         std::vector<std::pair<BlockInfo, size_t>> result;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "autil/Thread.h"
+#include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include <mutex>
 #include <thread>
 #include <map>
@@ -12,24 +13,29 @@ namespace rtp_llm {
 
 class LayerCacheBuffer {
 public:
-    LayerCacheBuffer(int layer_id);
+    LayerCacheBuffer(int layer_id, KVCacheRegionName region_name = KVCacheRegionName::DEFAULT);
     ~LayerCacheBuffer() = default;
 
 public:
-    /// @brief 记录 cache_key 对应的 block_id
     void addBlockId(int64_t cache_key, int block_id);
-    /// @brief 查询 cache_key 对应的 block_id，未找到返回 -1
-    int getBlockId(int64_t cache_key) const;
-    int getLayerId() const {
+    int  getBlockId(int64_t cache_key) const;
+    int  getLayerId() const {
         return layer_id_;
+    }
+    KVCacheRegionName getRegionName() const {
+        return region_name_;
+    }
+    int virtualLayerId() const {
+        return layer_id_ * static_cast<int>(KVCacheRegionName::REGION_COUNT) + static_cast<int>(region_name_);
     }
     const std::map<int64_t, int>& blockIdMap() const {
         return block_id_map_;
     }
 
 private:
-    int                    layer_id_;
-    std::map<int64_t, int> block_id_map_;  // [cache_key, block_id]
+    int               layer_id_;
+    KVCacheRegionName region_name_;
+    std::map<int64_t, int> block_id_map_;
 };
 
 class LayerCacheBufferStore {

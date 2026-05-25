@@ -6,7 +6,8 @@ namespace rtp_llm {
 
 // ==================== LayerCacheBuffer ====================
 
-LayerCacheBuffer::LayerCacheBuffer(int layer_id): layer_id_(layer_id) {}
+LayerCacheBuffer::LayerCacheBuffer(int layer_id, KVCacheRegionName region_name):
+    layer_id_(layer_id), region_name_(region_name) {}
 
 void LayerCacheBuffer::addBlockId(int64_t key, int block_id) {
     block_id_map_[key] = block_id;
@@ -27,7 +28,7 @@ LayerCacheBufferStore::LayerCacheBufferStore(uint64_t timeout_ms): timeout_ms_(t
 void LayerCacheBufferStore::addLayerCacheBuffer(const std::string&                       unique_key,
                                                 const std::shared_ptr<LayerCacheBuffer>& layer_cache_buffer) {
     std::lock_guard<std::mutex> lock(mutex_);
-    layer_cache_buffer_map_[unique_key][layer_cache_buffer->getLayerId()] = layer_cache_buffer;
+    layer_cache_buffer_map_[unique_key][layer_cache_buffer->virtualLayerId()] = layer_cache_buffer;
     expired_time_map_[unique_key]                                         = currentTimeMs() + timeout_ms_;
 }
 

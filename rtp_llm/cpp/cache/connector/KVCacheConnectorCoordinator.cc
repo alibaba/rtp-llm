@@ -465,6 +465,10 @@ bool KVCacheConnectorCoordinator::initP2PConnectorInternal() {
 
     auto p2p_config = P2PConnectorConfig::create(
         runtime_config_, cache_store_config_, parallelism_config_, pd_sep_config_, layer_all_num);
+    p2p_config.worker_config.layer_region_to_group_id    = cache_config_.layer_region_to_group_id;
+    p2p_config.worker_config.group_types                 = cache_config_.group_types;
+    p2p_config.scheduler_config.layer_region_to_group_id = cache_config_.layer_region_to_group_id;
+    p2p_config.scheduler_config.group_types              = cache_config_.group_types;
     auto p2p = std::make_shared<P2PConnector>(std::move(p2p_config), layer_block_converter, metrics_reporter_);
     if (!p2p->init()) {
         RTP_LLM_LOG_ERROR("P2PConnector init failed");
