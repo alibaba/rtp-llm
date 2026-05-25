@@ -609,6 +609,26 @@ TEST_F(SamplerTest, testSpecForceMismatchCapsWithoutMutatingParent) {
     EXPECT_EQ(0, processor.thinkEndTokensStatus()[0]);
 }
 
+TEST_F(SamplerTest, testUpdateStatusAllowsPartialCommitWindow) {
+    std::vector<int> end_think_token_ids = {8, 9};
+    StreamThinkInfo  info(true,
+                         4,
+                         {7},
+                         end_think_token_ids,
+                         0,
+                         0,
+                         false,
+                         std::make_shared<StringContainDFA<size_t, int>>(end_think_token_ids));
+    std::vector<StreamThinkInfo> infos = {info};
+    ThinkModeLogitsProcessor     processor(infos);
+
+    auto commit_window = torch::tensor({{8, 9, 7}}, torch::kInt32);
+    processor.updateStatus(commit_window, /*num_new_tokens=*/1);
+
+    EXPECT_EQ(processor.acceptedTokenLen(), 1);
+    EXPECT_EQ(processor.thinkEndTokensStatus()[0], 1);
+}
+
 #undef EXPECT_SIMILAR
 
 }  // namespace rtp_llm

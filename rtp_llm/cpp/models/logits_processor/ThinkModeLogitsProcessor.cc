@@ -330,7 +330,11 @@ void ThinkModeLogitsProcessor::updateStatus(const torch::Tensor& new_tokens, int
         auto offset = info.is_beam_search ? (info.current_output_length + info.input_length) : 0;
 
         if (!info.is_beam_search) {
-            RTP_LLM_CHECK(num_new_tokens == new_tokens.size(1));
+            RTP_LLM_CHECK_WITH_INFO(num_new_tokens <= new_tokens.size(1),
+                                    "think mode commit token count exceeds tensor width, num_new_tokens=%d, "
+                                    "new_tokens.size(1)=%ld",
+                                    num_new_tokens,
+                                    new_tokens.size(1));
         }
 
         for (size_t j = 0; j < num_new_tokens; ++j) {
