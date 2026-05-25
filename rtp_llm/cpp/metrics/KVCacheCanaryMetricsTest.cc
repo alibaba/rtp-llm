@@ -29,6 +29,7 @@ TEST_F(KVCacheCanaryMetricsTest, BaselineCountersAreZero) {
     EXPECT_EQ(canaryErrorEventCount(), 0u);
     EXPECT_EQ(canaryOomEventCount(), 0u);
     EXPECT_EQ(canaryPeerRefusedCount(), 0u);
+    EXPECT_EQ(canaryDsv4EnvOverrideObservedCount(), 0u);
 }
 
 TEST_F(KVCacheCanaryMetricsTest, EachHelperBumpsItsOwnCounterOnly) {
@@ -97,6 +98,38 @@ TEST_F(KVCacheCanaryMetricsTest, CollectorSentinelsSkipUnsetFields) {
     EXPECT_FALSE(empty.engine_error_event);
     EXPECT_FALSE(empty.engine_oom_event);
     EXPECT_FALSE(empty.pd_peer_refused);
+    EXPECT_FALSE(empty.dsv4_env_override_observed);
+}
+
+// G5-Env-a Phase 6+1 env-removal hard prereq — see
+// docs/dsv4/kvcache-unify-final/canary/PHASE6_1_ENV_REMOVAL_RUNBOOK.md §3.
+TEST_F(KVCacheCanaryMetricsTest, DsvUnifiedBlocksEnvOverrideCounterIsZeroByDefault) {
+    // Fresh process (SetUp() reset all counters and the single-emit guard).
+    // No record call has fired — counter must be exactly 0 so a fleet-wide
+    // dashboard reads 0 unless an operator still has the env exported.
+    EXPECT_EQ(canaryDsv4EnvOverrideObservedCount(), 0u);
+}
+
+TEST_F(KVCacheCanaryMetricsTest, DsvUnifiedBlocksEnvOverrideCounterIncrementsOnObserve) {
+    kmonitor::MetricsReporterPtr null_reporter;
+    recordDsv4EnvOverrideObserved(null_reporter);
+    EXPECT_EQ(canaryDsv4EnvOverrideObservedCount(), 1u);
+
+    // Single-emit invariant: subsequent calls in the same process must
+    // NOT re-bump the counter, regardless of how many KVCacheManager
+    // instances / threads observe the env.  Per-process boolean is the
+    // contract the 7d=0 fleet threshold relies on.
+    recordDsv4EnvOverrideObserved(null_reporter);
+    recordDsv4EnvOverrideObserved(null_reporter);
+    recordDsv4EnvOverrideObserved(null_reporter);
+    EXPECT_EQ(canaryDsv4EnvOverrideObservedCount(), 1u);
+
+    // resetCanaryCountersForTest() must also clear the single-emit guard
+    // so successive test cases can re-arm the counter.
+    resetCanaryCountersForTest();
+    EXPECT_EQ(canaryDsv4EnvOverrideObservedCount(), 0u);
+    recordDsv4EnvOverrideObserved(null_reporter);
+    EXPECT_EQ(canaryDsv4EnvOverrideObservedCount(), 1u);
 }
 
 }  // namespace test

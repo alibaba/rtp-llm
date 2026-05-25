@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <limits>
 #include <unordered_set>
 
@@ -64,6 +65,23 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
                                 && kv_cache_config_.dsv4_unified_block_count <= 1,
                             "KVCacheConfig.dsv4_unified_block_count=%d must be in {-1,0,1}",
                             kv_cache_config_.dsv4_unified_block_count);
+    // G5-Env-a Phase 6+1 env-removal hard prereq: if the legacy
+    // ``DSV4_UNIFIED_BLOCKS`` env var is observed (any value, including
+    // ``=0`` / ``=1``), bump the canary counter exactly once per process
+    // and emit a WARNING.  Production fleet must read 0 over 7d before
+    // the env binder can be deleted — see
+    // docs/dsv4/kvcache-unify-final/canary/PHASE6_1_ENV_REMOVAL_RUNBOOK.md §3.
+    // recordDsv4EnvOverrideObserved() is internally CAS-guarded so multi-
+    // rank / multi-init call sites still emit exactly once per process.
+    if (std::getenv("DSV4_UNIFIED_BLOCKS") != nullptr) {
+        recordDsv4EnvOverrideObserved(metrics_reporter_);
+        RTP_LLM_LOG_WARNING(
+            "DSV4_UNIFIED_BLOCKS env override observed (dsv4_unified_block_count=%d). "
+            "This env knob is scheduled for removal in Phase 6+1; please migrate "
+            "to the --dsv4_unified_block_count flag or the compiled default. See "
+            "docs/dsv4/kvcache-unify-final/canary/PHASE6_1_ENV_REMOVAL_RUNBOOK.md",
+            kv_cache_config_.dsv4_unified_block_count);
+    }
     RTP_LLM_CHECK_WITH_INFO(kv_cache_config_.dsv4_state_entries_per_block >= 0
                                 && kv_cache_config_.dsv4_state_entries_per_block <= 256,
                             "KVCacheConfig.dsv4_state_entries_per_block=%d must be in [0,256]",

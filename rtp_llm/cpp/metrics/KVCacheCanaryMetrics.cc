@@ -15,6 +15,13 @@ std::atomic<uint64_t> g_canary_tpot_ticks{0};
 std::atomic<uint64_t> g_canary_error_events{0};
 std::atomic<uint64_t> g_canary_oom_events{0};
 std::atomic<uint64_t> g_canary_peer_refused{0};
+std::atomic<uint64_t> g_canary_dsv4_env_override_observed{0};
+
+// Single-emit guard for the G5-Env-a counter.  Initialized ``false``; the
+// first recordDsv4EnvOverrideObserved() call CAS-flips it to ``true`` and
+// only that caller performs the counter bump + gauge emit.  Cleared by
+// resetCanaryCountersForTest() so unit tests can re-arm the guard.
+std::atomic<bool> g_canary_dsv4_env_override_emitted{false};
 
 }  // namespace
 
@@ -29,6 +36,11 @@ bool KVCacheCanaryMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_QPS_MUTABLE_METRIC(error_count_metric_, "engine.error_count");
     REGISTER_QPS_MUTABLE_METRIC(oom_count_metric_, "engine.oom_count");
     REGISTER_QPS_MUTABLE_METRIC(peer_refused_metric_, "pd.peer.refused_total");
+    // G5-Env-a — Phase 6+1 env-removal hard prereq.  Single-emit per process
+    // at startup iff DSV4_UNIFIED_BLOCKS is set.  Must read 0 over 7d on
+    // prod fleet before env binder can land.  See
+    // docs/dsv4/kvcache-unify-final/canary/PHASE6_1_ENV_REMOVAL_RUNBOOK.md §3.
+    REGISTER_QPS_MUTABLE_METRIC(dsv4_env_override_metric_, "kv_cache.dsv4_env_override_observed_total");
     return true;
 }
 
@@ -61,6 +73,9 @@ void KVCacheCanaryMetrics::report(const kmonitor::MetricsTags* tags, KVCacheCana
     if (collector->pd_peer_refused) {
         REPORT_MUTABLE_QPS(peer_refused_metric_);
     }
+    if (collector->dsv4_env_override_observed) {
+        REPORT_MUTABLE_QPS(dsv4_env_override_metric_);
+    }
 }
 
 // ---- Test accessors -------------------------------------------------------
@@ -86,6 +101,9 @@ uint64_t canaryOomEventCount() {
 uint64_t canaryPeerRefusedCount() {
     return g_canary_peer_refused.load(std::memory_order_relaxed);
 }
+uint64_t canaryDsv4EnvOverrideObservedCount() {
+    return g_canary_dsv4_env_override_observed.load(std::memory_order_relaxed);
+}
 
 void resetCanaryCountersForTest() {
     g_canary_hit_rate_ticks.store(0, std::memory_order_relaxed);
@@ -95,6 +113,11 @@ void resetCanaryCountersForTest() {
     g_canary_error_events.store(0, std::memory_order_relaxed);
     g_canary_oom_events.store(0, std::memory_order_relaxed);
     g_canary_peer_refused.store(0, std::memory_order_relaxed);
+    g_canary_dsv4_env_override_observed.store(0, std::memory_order_relaxed);
+    // Re-arm the single-emit guard so subsequent
+    // recordDsv4EnvOverrideObserved() calls can bump the counter in the
+    // next test case.  Production never touches this hook.
+    g_canary_dsv4_env_override_emitted.store(false, std::memory_order_relaxed);
 }
 
 // ---- Helpers --------------------------------------------------------------
@@ -158,6 +181,26 @@ void recordCanaryPeerRefused(const kmonitor::MetricsReporterPtr& reporter) {
     if (reporter) {
         KVCacheCanaryMetricsCollector c;
         c.pd_peer_refused = true;
+        reporter->report<KVCacheCanaryMetrics, KVCacheCanaryMetricsCollector>(nullptr, &c);
+    }
+}
+
+void recordDsv4EnvOverrideObserved(const kmonitor::MetricsReporterPtr& reporter) {
+    // Single-emit guard: CAS the ``emitted`` flag from ``false`` to ``true``.
+    // Only the first caller (across all threads in the process) bumps the
+    // counter and fires the gauge.  This makes the metric a per-process
+    // boolean: any non-zero rank in the fleet means an operator still has
+    // DSV4_UNIFIED_BLOCKS exported, which halts Phase 6+1 per
+    // PHASE6_1_ENV_REMOVAL_RUNBOOK §3 G5-Env-a.
+    bool expected = false;
+    if (!g_canary_dsv4_env_override_emitted.compare_exchange_strong(
+            expected, true, std::memory_order_acq_rel, std::memory_order_relaxed)) {
+        return;
+    }
+    g_canary_dsv4_env_override_observed.fetch_add(1, std::memory_order_relaxed);
+    if (reporter) {
+        KVCacheCanaryMetricsCollector c;
+        c.dsv4_env_override_observed = true;
         reporter->report<KVCacheCanaryMetrics, KVCacheCanaryMetricsCollector>(nullptr, &c);
     }
 }
