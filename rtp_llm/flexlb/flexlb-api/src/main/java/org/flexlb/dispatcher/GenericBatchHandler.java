@@ -55,6 +55,7 @@ public class GenericBatchHandler {
             for (ArrayNode chunk : chunks) {
                 ObjectNode copy = obj.deepCopy();
                 copy.set(spec.getRequestArrayField(), chunk);
+                injectForceBatch(copy);
                 chunkBodies.add(copy);
             }
             return fanoutService.dispatchChunks(spec.getPath(), chunkBodies, spec)
@@ -69,6 +70,33 @@ public class GenericBatchHandler {
             err.put("message", String.valueOf(e.getMessage()));
             return ServerResponse.status(500).contentType(MediaType.APPLICATION_JSON).bodyValue(err);
         });
+    }
+
+    /**
+     * Stamps {@code generate_config.force_batch=true} into each sub-batch body. The legacy
+     * ft_proxy convention is that the dispatch layer — not the user — tags batch traffic with
+     * {@code force_batch} so the per-chunk FE's {@code FIFOScheduler} groups the chunk's prompts
+     * into a single scheduling slot instead of interleaving them with whatever else is queued.
+     * Without this stamp, splitting a batch into chunks would be observationally equivalent to
+     * the user issuing N independent requests, defeating the whole point of going through a
+     * batch endpoint.
+     *
+     * <p>A user-supplied {@code force_batch} is honored verbatim: an explicit {@code false} is a
+     * legitimate opt-out (e.g. for measuring scheduler interleaving) and must not be overwritten.
+     * Any other fields under {@code generate_config} (temperature, max_new_tokens, …) are
+     * preserved by the surrounding deep-copy.
+     */
+    private static void injectForceBatch(ObjectNode chunkBody) {
+        JsonNode gcNode = chunkBody.get("generate_config");
+        ObjectNode gc;
+        if (gcNode instanceof ObjectNode existing) {
+            gc = existing;
+        } else {
+            gc = chunkBody.putObject("generate_config");
+        }
+        if (!gc.has("force_batch")) {
+            gc.put("force_batch", true);
+        }
     }
 
     private Mono<ServerResponse> badRequest(String message) {
