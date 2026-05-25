@@ -667,6 +667,8 @@ void beamSearchKernelLauncher(
 
     if constexpr (IS_V2)
     {
+        const static T mask_val = T(-std::numeric_limits<float>::infinity());
+
         // see `BeamSearchLayer<T>::configureBeamSearchLayer()` for the workspace structure
         // TODO: align the workspace structure with tensorrt_llm::configureBeamSearch, padding or not?
         size_t offset = 0;
@@ -682,7 +684,8 @@ void beamSearchKernelLauncher(
         void* pTopK = reinterpret_cast<void*>(reinterpret_cast<char*>(workspace) + offset);
 
         // Stage 1
-        invokeTopkLastDim<T>(nBS * nBMIn, nV, nBMOut * 2, true, logProbs, pStage1LogProbs, pStage1Ids, pTopK, stream);
+        invokeTopkLastDim<T>(nBS * nBMIn, nV, nBMOut * 2, true, mask_val, logProbs, pStage1LogProbs, pStage1Ids, 
+            pTopK, stream);
         check_cuda_error();
 
         int nThread = std::min(std::max(roundUp(nBMIn * nBMOut * 2, 32), MIN_BLOCK_SIZE), MAX_BLOCK_SIZE);
@@ -691,8 +694,8 @@ void beamSearchKernelLauncher(
         check_cuda_error();
 
         // Stage 2
-        invokeTopkLastDim<T>(
-            nBS, nBMIn * nBMOut * 2, nBMOut * 2, true, pStage1LogProbs, pStage2LogProbs, pStage2Ids, pTopK, stream);
+        invokeTopkLastDim<T>(nBS, nBMIn * nBMOut * 2, nBMOut * 2, true, mask_val, pStage1LogProbs, pStage2LogProbs, 
+            pStage2Ids, pTopK, stream);
         check_cuda_error();
 
         nThread = std::min(std::max(roundUp(nBMOut * 2, 32), MIN_BLOCK_SIZE), MAX_BLOCK_SIZE);

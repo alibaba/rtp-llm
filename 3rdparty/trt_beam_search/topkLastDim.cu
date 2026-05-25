@@ -117,7 +117,7 @@ __host__ __device__ int round(int num, int round_value)
  * NB: Use pass=-1 for calc_mask().
  */
 template <typename T, int BitsPerPass>
-__device__ constexpr int calc_start_bit(int pass)
+__host__ __device__ constexpr int calc_start_bit(int pass)
 {
     int start_bit = static_cast<int>(sizeof(T) * 8) - (pass + 1) * BitsPerPass;
     if (start_bit < 0)
@@ -579,13 +579,14 @@ __device__ void choose_bucket(Counter<T, IdxT>* counter, IdxT const* histogram, 
 // So `pass` could not be constexpr
 template <typename T, typename IdxT, int BitsPerPass, bool prioritize_smaller_indice = false>
 __device__ void last_filter(T const* in_buf, IdxT const* in_idx_buf, T* out, IdxT* out_idx, IdxT current_len, IdxT k,
-    Counter<T, IdxT>* counter, bool const select_min, int const pass)
+    Counter<T, IdxT>* counter, bool const select_min, int const pass, bool has_mask, T mask_val)
 {
     auto const kth_value_bits = counter->kth_value_bits;
     int const start_bit = calc_start_bit<T, BitsPerPass>(pass);
 
     // changed in choose_bucket(); need to reload
     const IdxT num_of_kth_needed = counter->k;
+    auto const mask_full_bits = twiddle_in(mask_val, select_min);
     IdxT* p_out_cnt = &counter->out_cnt;
     IdxT* p_out_back_cnt = &counter->out_back_cnt;
     IdxT* p_equal = out_idx + k - num_of_kth_needed;
@@ -597,9 +598,10 @@ __device__ void last_filter(T const* in_buf, IdxT const* in_idx_buf, T* out, Idx
         constexpr bool ENABLE_VEC = false;
 #endif
     auto f = [in_idx_buf, out, out_idx, select_min, start_bit, kth_value_bits, num_of_kth_needed, k, p_out_cnt, 
-        p_out_back_cnt, p_equal, ref_last](T value, IdxT i)
+        p_out_back_cnt, p_equal, ref_last, has_mask, mask_full_bits](T value, IdxT i)
     {
-        auto const bits = (twiddle_in(value, select_min) >> start_bit) << start_bit;
+        auto const full_bits = twiddle_in(value, select_min);
+        auto const bits = (full_bits >> start_bit) << start_bit;
         if (bits < kth_value_bits)
         {
             IdxT pos = atomicAdd(p_out_cnt, static_cast<IdxT>(1));
@@ -613,6 +615,7 @@ __device__ void last_filter(T const* in_buf, IdxT const* in_idx_buf, T* out, Idx
         {
             IdxT new_idx = in_idx_buf ? in_idx_buf[i] : i;
             IdxT back_pos = atomicAdd(p_out_back_cnt, static_cast<IdxT>(1));
+            bool skip_reorder = has_mask && full_bits == mask_full_bits;
             if (back_pos < num_of_kth_needed)
             {
                 IdxT pos = k - 1 - back_pos;
@@ -621,10 +624,17 @@ __device__ void last_filter(T const* in_buf, IdxT const* in_idx_buf, T* out, Idx
                 {
                     out_idx[pos] = new_idx;
                 }
+                else
+                {
+                    if (skip_reorder)
+                    {
+                        out_idx[pos] = new_idx;
+                    }
+                }
             }
             if constexpr (prioritize_smaller_indice)
             {
-                if (new_idx < ref_last.load(cuda::memory_order_relaxed))
+                if (!skip_reorder && new_idx < ref_last.load(cuda::memory_order_relaxed))
                 {
                     for (int j = 0; j < num_of_kth_needed; j++)
                     {
@@ -643,7 +653,7 @@ __device__ void last_filter(T const* in_buf, IdxT const* in_idx_buf, T* out, Idx
 
 template <typename T, typename IdxT, int BitsPerPass, bool prioritize_smaller_indice = false>
 __global__ void last_filter_kernel(T const* in, IdxT const* in_idx, T const* in_buf, IdxT const* in_idx_buf, T* out,
-    IdxT* out_idx, IdxT len, IdxT k, Counter<T, IdxT>* counters, bool const select_min)
+    IdxT* out_idx, IdxT len, IdxT k, Counter<T, IdxT>* counters, bool const select_min, bool has_mask, T mask_val)
 {
     const size_t batch_id = blockIdx.y; // size_t to avoid multiplication overflow
 
@@ -672,15 +682,17 @@ __global__ void last_filter_kernel(T const* in, IdxT const* in_idx, T const* in_
     constexpr int start_bit = calc_start_bit<T, BitsPerPass>(pass);
 
     auto const kth_value_bits = counter->kth_value_bits;
+    auto const mask_full_bits = twiddle_in(mask_val, select_min);
     const IdxT num_of_kth_needed = counter->k;
     IdxT* p_out_cnt = &counter->out_cnt;
     IdxT* p_out_back_cnt = &counter->out_back_cnt;
     IdxT* p_equal = out_idx + k - num_of_kth_needed;
     cuda::atomic_ref<IdxT> ref_last(p_equal[num_of_kth_needed - 1]);
     auto f = [k, select_min, kth_value_bits, num_of_kth_needed, p_out_cnt, p_out_back_cnt, in_idx_buf, out, out_idx,
-                 p_equal, ref_last](T value, IdxT i)
+                 p_equal, ref_last, has_mask, mask_full_bits](T value, IdxT i)
     {
-        const auto bits = (twiddle_in(value, select_min) >> start_bit) << start_bit;
+        const auto full_bits = twiddle_in(value, select_min);
+        const auto bits = (full_bits >> start_bit) << start_bit;
         if (bits < kth_value_bits)
         {
             IdxT pos = atomicAdd(p_out_cnt, static_cast<IdxT>(1));
@@ -689,6 +701,7 @@ __global__ void last_filter_kernel(T const* in, IdxT const* in_idx, T const* in_
         }
         else if (bits == kth_value_bits)
         {
+            bool skip_reorder = has_mask && full_bits == mask_full_bits;
             IdxT new_idx = in_idx_buf ? in_idx_buf[i] : i;
             IdxT back_pos = atomicAdd(p_out_back_cnt, static_cast<IdxT>(1));
             if (back_pos < num_of_kth_needed)
@@ -699,10 +712,17 @@ __global__ void last_filter_kernel(T const* in, IdxT const* in_idx, T const* in_
                 {
                     out_idx[pos] = new_idx;
                 }
+                else
+                {
+                    if (skip_reorder)
+                    {
+                        out_idx[pos] = new_idx;
+                    }
+                }
             }
             if constexpr (prioritize_smaller_indice)
             {
-                if (new_idx < ref_last.load(cuda::memory_order_relaxed))
+                if (!skip_reorder && new_idx < ref_last.load(cuda::memory_order_relaxed))
                 {
                     for (int j = 0; j < num_of_kth_needed; j++)
                     {
@@ -762,7 +782,7 @@ template <typename T, typename IdxT, int BitsPerPass, int BlockSize, bool fused_
     bool prioritize_smaller_indice = false>
 __global__ void radix_kernel(T const* in, IdxT const* in_idx, T const* in_buf, IdxT const* in_idx_buf, T* out_buf,
     IdxT* out_idx_buf, T* out, IdxT* out_idx, Counter<T, IdxT>* counters, IdxT* histograms, const IdxT len,
-    const IdxT k, bool const select_min, int const pass)
+    const IdxT k, bool const select_min, int const pass, bool has_mask, T mask_val)
 {
     const size_t batch_id = blockIdx.y;
     auto counter = counters + batch_id;
@@ -896,7 +916,7 @@ __global__ void radix_kernel(T const* in, IdxT const* in_idx, T const* in_buf, I
             {
                 last_filter<T, IdxT, BitsPerPass, prioritize_smaller_indice>(out_buf ? out_buf : in_buf,
                     out_idx_buf ? out_idx_buf : in_idx_buf, out, out_idx, out_buf ? current_len : len, k, counter,
-                    select_min, pass);
+                    select_min, pass, has_mask, mask_val);
             }
         }
     }
@@ -1109,7 +1129,7 @@ __device__ void filter_and_histogram_for_one_block(T const* in_buf, IdxT const* 
 
 template <typename T, typename IdxT, int BitsPerPass, int BlockSize, bool prioritize_smaller_indice = false>
 __global__ void radix_topk_one_block_kernel(T const* in, IdxT const* in_idx, const IdxT len, const IdxT k, T* out,
-    IdxT* out_idx, bool const select_min, char* bufs)
+    IdxT* out_idx, bool const select_min, char* bufs, bool has_mask, T mask_val)
 {
     constexpr int num_buckets = calc_num_buckets<BitsPerPass>();
     __shared__ Counter<T, IdxT> counter;
@@ -1178,7 +1198,7 @@ __global__ void radix_topk_one_block_kernel(T const* in, IdxT const* in_idx, con
         }
         __syncthreads();
 
-        if ((pass == num_passes - 1))
+        if (pass == num_passes - 1)
         {
             if constexpr (prioritize_smaller_indice)
             {
@@ -1191,13 +1211,13 @@ __global__ void radix_topk_one_block_kernel(T const* in, IdxT const* in_idx, con
             }
             last_filter<T, IdxT, BitsPerPass, prioritize_smaller_indice>(out_buf ? out_buf : in,
                 out_buf ? out_idx_buf : in_idx, out, out_idx, out_buf ? current_len : len, k, &counter, select_min,
-                pass);
+                pass, has_mask, mask_val);
             break;
         }
         else if (counter.len == counter.k)
         {
             last_filter<T, IdxT, BitsPerPass, false>(out_buf ? out_buf : in, out_buf ? out_idx_buf : in_idx, out,
-                out_idx, out_buf ? current_len : len, k, &counter, select_min, pass);
+                out_idx, out_buf ? current_len : len, k, &counter, select_min, pass, has_mask, mask_val);
             break;
         }
     }
@@ -1240,11 +1260,14 @@ inline std::vector<void*> calc_aligned_pointers(void const* p, std::vector<size_
 
 template <typename T, typename IdxT, int BitsPerPass, int BlockSize>
 void standalone_stable_radix_topk_(void* buf, size_t& buf_size, T const* in, IdxT const* in_idx, int batch_size,
-    IdxT len, IdxT k, T* out, IdxT* out_idx, bool select_min, bool fused_last_filter, unsigned grid_dim,
-    cudaStream_t stream, bool sorted = false)
+    IdxT len, IdxT k, T* out, IdxT* out_idx, bool select_min, bool fused_last_filter, unsigned grid_dim, 
+    std::optional<T> mask_val, cudaStream_t stream, bool sorted = false)
 {
     static_assert(air_topk_stable::calc_num_passes<T, BitsPerPass>() > 1);
     constexpr int num_buckets = air_topk_stable::calc_num_buckets<BitsPerPass>();
+
+    const bool has_mask = mask_val.has_value();
+    const T mask_val_ = mask_val.value_or(T(0));
 
     air_topk_stable::Counter<T, IdxT>* counters = nullptr;
     IdxT* histograms = nullptr;
@@ -1344,14 +1367,14 @@ void standalone_stable_radix_topk_(void* buf, size_t& buf_size, T const* in, Idx
         }
 
         kernel<<<blocks, BlockSize, 0, stream>>>(in, in_idx, in_buf, in_idx_buf, out_buf, out_idx_buf, topk_out,
-            topk_out_idx, counters, histograms, len, k, select_min, pass);
+            topk_out_idx, counters, histograms, len, k, select_min, pass, has_mask, mask_val_);
         check_cuda_error();
     }
 
     if (!fused_last_filter)
     {
         air_topk_stable::last_filter_kernel<T, IdxT, BitsPerPass, true><<<blocks, BlockSize, 0, stream>>>(
-            in, in_idx, out_buf, out_idx_buf, topk_out, topk_out_idx, len, k, counters, select_min);
+            in, in_idx, out_buf, out_idx_buf, topk_out, topk_out_idx, len, k, counters, select_min, has_mask, mask_val_);
         check_cuda_error();
     }
 
@@ -1380,9 +1403,13 @@ void standalone_stable_radix_topk_(void* buf, size_t& buf_size, T const* in, Idx
 
 template <typename T, typename IdxT, int BitsPerPass, int BlockSize>
 void standalone_stable_radix_topk_one_block_(void* buf, size_t& buf_size, T const* in, IdxT const* in_idx,
-    int batch_size, IdxT len, IdxT k, T* out, IdxT* out_idx, bool select_min, cudaStream_t stream, bool sorted = false)
+    int batch_size, IdxT len, IdxT k, T* out, IdxT* out_idx, bool select_min, std::optional<T> mask_val, 
+    cudaStream_t stream, bool sorted = false)
 {
     static_assert(air_topk_stable::calc_num_passes<T, BitsPerPass>() > 1);
+
+    const bool has_mask = mask_val.has_value();
+    const T mask_val_ = mask_val.value_or(T(0));
 
     char* bufs = nullptr;
     void* sort_temp_storage = nullptr;
@@ -1450,7 +1477,8 @@ void standalone_stable_radix_topk_one_block_(void* buf, size_t& buf_size, T cons
     check_cuda_error();
 
     air_topk_stable::radix_topk_one_block_kernel<T, IdxT, BitsPerPass, BlockSize, true>
-        <<<batch_size, BlockSize, 0, stream>>>(in, in_idx, len, k, topk_out, topk_out_idx, select_min, bufs);
+        <<<batch_size, BlockSize, 0, stream>>>(in, in_idx, len, k, 
+            topk_out, topk_out_idx, select_min, bufs, has_mask, mask_val_);
     check_cuda_error();
 
     T* idx_sort_out = sorted ? sort_in : out;
@@ -1477,7 +1505,7 @@ void standalone_stable_radix_topk_one_block_(void* buf, size_t& buf_size, T cons
 
 template <typename T, typename idxT, bool sorted = false>
 void standalone_stable_radix_11bits(void* buf, size_t& buf_size, T const* in, int batch_size, idxT len, idxT k, T* out,
-    idxT* out_idx, bool greater, cudaStream_t stream = 0)
+    idxT* out_idx, bool greater, std::optional<T> mask_val, cudaStream_t stream = 0)
 {
     constexpr int items_per_thread = 32;
     constexpr int block_dim = 512;
@@ -1485,8 +1513,8 @@ void standalone_stable_radix_11bits(void* buf, size_t& buf_size, T const* in, in
     constexpr int topk_bits = 11;
     if (len <= block_dim * items_per_thread)
     {
-        standalone_stable_radix_topk_one_block_<T, idxT, topk_bits, block_dim>(
-            buf, buf_size, in, static_cast<idxT*>(nullptr), batch_size, len, k, out, out_idx, !greater, stream, sorted);
+        standalone_stable_radix_topk_one_block_<T, idxT, topk_bits, block_dim>(buf, buf_size, in, 
+            static_cast<idxT*>(nullptr), batch_size, len, k, out, out_idx, !greater, mask_val, stream, sorted);
     }
     else
     {
@@ -1509,12 +1537,12 @@ void standalone_stable_radix_11bits(void* buf, size_t& buf_size, T const* in, in
         if (grid_dim == 1)
         {
             standalone_stable_radix_topk_one_block_<T, idxT, topk_bits, block_dim>(buf, buf_size, in,
-                static_cast<idxT*>(nullptr), batch_size, len, k, out, out_idx, !greater, stream, sorted);
+                static_cast<idxT*>(nullptr), batch_size, len, k, out, out_idx, !greater, mask_val, stream, sorted);
         }
         else
         {
             standalone_stable_radix_topk_<T, idxT, topk_bits, block_dim>(buf, buf_size, in, static_cast<idxT*>(nullptr),
-                batch_size, len, k, out, out_idx, !greater, fused_last_filter, grid_dim, stream, sorted);
+                batch_size, len, k, out, out_idx, !greater, fused_last_filter, grid_dim, mask_val, stream, sorted);
         }
     }
 }
@@ -1592,8 +1620,8 @@ INSTANTIATE_COMPUTE_TOPK_LastDim_WORKSPACE_SIZE_DATA_TYPE(__nv_bfloat16);
 
 template <typename T>
 void invokeTopkLastDim(SizeType32 batchSize, SizeType32 inputLength, SizeType32 k, bool is_largest,
-    void const* __restrict__ input, void* __restrict__ out_val, void* __restrict__ out_idx, void* workspace,
-    cudaStream_t stream)
+    std::optional<T> mask_val, void const* __restrict__ input, void* __restrict__ out_val, void* __restrict__ out_idx, 
+    void* workspace, cudaStream_t stream)
 {
     T const* in = reinterpret_cast<T const*>(input);
     T* out_val_ = reinterpret_cast<T*>(out_val);
@@ -1606,13 +1634,13 @@ void invokeTopkLastDim(SizeType32 batchSize, SizeType32 inputLength, SizeType32 
 #endif
     size_t buf_size = 0;
     standalone_stable_radix_11bits<T, SizeType32, true>(
-        workspace, buf_size, in, batchSize, inputLength, k, out_val_, out_idx_, is_largest, stream);
+        workspace, buf_size, in, batchSize, inputLength, k, out_val_, out_idx_, is_largest, mask_val, stream);
 }
 
 #define INSTANTIATE_TOPK_LastDim_DATA_TYPE(T)                                                                          \
     template void invokeTopkLastDim<T>(SizeType32 batchSize, SizeType32 inputLength, SizeType32 k, bool is_largest,    \
-        void const* __restrict__ input, void* __restrict__ out_val, void* __restrict__ out_idx, void* workspace,       \
-        cudaStream_t stream)
+        std::optional<T> mask_val, void const* __restrict__ input, void* __restrict__ out_val, void* __restrict__ out_idx, \
+        void* workspace, cudaStream_t stream)
 
 INSTANTIATE_TOPK_LastDim_DATA_TYPE(int);
 INSTANTIATE_TOPK_LastDim_DATA_TYPE(float);
