@@ -29,6 +29,9 @@ struct P2PConnectorSchedulerConfig {
     int64_t                     p2p_cancelled_keys_ttl_ms    = 3600 * 1000;
     std::vector<CacheGroupType> layer_attn_types;
 
+    std::vector<std::vector<int>> layer_region_to_group_id;
+    std::vector<CacheGroupType>   group_types;
+
     static P2PConnectorSchedulerConfig create(const RuntimeConfig&    runtime_config,
                                               const CacheStoreConfig& cache_store_config,
                                               const PDSepConfig&      pd_sep_config) {
@@ -59,6 +62,9 @@ struct P2PConnectorWorkerConfig {
     int64_t  tp_rank       = 0;
     uint32_t layer_all_num = 0;
     bool     is_mla        = false;
+
+    std::vector<std::vector<int>> layer_region_to_group_id;
+    std::vector<CacheGroupType>   group_types;
 
     static P2PConnectorWorkerConfig create(const CacheStoreConfig&  cache_store_config,
                                            const PDSepConfig&       pd_sep_config,
