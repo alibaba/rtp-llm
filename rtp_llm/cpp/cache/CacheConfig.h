@@ -90,6 +90,18 @@ struct CacheConfig {
     // count when the env var is set.
     uint32_t state_block_num = 0;
 
+    // F01 PR-1 phase-2 hook: K_state — number of state entries kept per
+    // physical block for the 3 DSV4 STATE pools (INDEXER_STATE, CSA_STATE,
+    // HCA_STATE). Mirror of KVCacheConfig::dsv4_state_entries_per_block.
+    // 0 = OFF (state pools keep 256 entries/block — byte-identical to
+    // today's legacy layout). >0 = each state pool's entries_per_block is
+    // overridden to this value in DSV4CacheConfigHelper::applyConfig before
+    // makeDSV4Spec, collapsing per-block bytes by 256/K_state. M02 §1.
+    // Consumed by hash-salt (CacheKeySalt::K_state bit3, producer pending
+    // in F01-PR2) and kernel-side compressor / decode_attn_metadata
+    // (F01-PR2 / M08).
+    int state_entries_per_block_constant = 0;
+
     // True when STATE pools should be allocated on pinned CPU memory and
     // sized independently from HBM. CacheConfigCreator sets this to
     // (state_pool_memory_mb > 0 && state_block_size_bytes > 0). When

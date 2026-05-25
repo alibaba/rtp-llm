@@ -202,6 +202,19 @@ struct KVCacheConfig {
     // in M02-PR2 / M01-PR4. Default stays -1 → today's behaviour is unchanged.
     int dsv4_unified_block_count = -1;
 
+    // F01 PR-1 phase-2 hook: K_state — number of state entries kept per
+    // physical block for the 3 DSV4 STATE pools (INDEXER_STATE, CSA_STATE,
+    // HCA_STATE). Default 0 = OFF (state pools keep the legacy kernel-block
+    // size of 256 entries/block; byte-identical to today). When >0,
+    // DSV4CacheConfigHelper overrides each state pool's entries_per_block
+    // to this value before makeDSV4Spec, collapsing the per-block bytes by
+    // (256 / K_state). Typical opus F01 §2 setting K_state=4 → 9.9x state-
+    // pool density (256/4 reduction with the 6.4x layer multiplier baked in
+    // separately). Kernel-side compressor / decode_attn_metadata changes
+    // land in F01-PR2; HBM mem accounting smoke in F01-PR3. Env var:
+    // DSV4_STATE_ENTRIES_PER_BLOCK.
+    int dsv4_state_entries_per_block = 0;
+
     // Remote connector configuration fields
     bool        reco_enable_vipserver                = false;
     std::string reco_vipserver_domain                = "";

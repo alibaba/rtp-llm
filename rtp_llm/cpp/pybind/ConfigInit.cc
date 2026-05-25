@@ -370,6 +370,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("non_full_addition_kvcache_blocks", &KVCacheConfig::non_full_addition_kvcache_blocks)
         .def_readwrite("state_pool_memory_mb", &KVCacheConfig::state_pool_memory_mb)
         .def_readwrite("dsv4_unified_block_count", &KVCacheConfig::dsv4_unified_block_count)
+        .def_readwrite("dsv4_state_entries_per_block", &KVCacheConfig::dsv4_state_entries_per_block)
         // Remote connector configuration fields
         .def_readwrite("reco_enable_vipserver", &KVCacheConfig::reco_enable_vipserver)
         .def_readwrite("reco_vipserver_domain", &KVCacheConfig::reco_vipserver_domain)
@@ -446,7 +447,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.ssm_state_dtype,
                                       self.non_full_addition_kvcache_blocks,
                                       self.state_pool_memory_mb,
-                                      self.dsv4_unified_block_count);
+                                      self.dsv4_unified_block_count,
+                                      self.dsv4_state_entries_per_block);
             },
             [](py::tuple t) {
                 if (t.size() != 45 && t.size() != 46 && t.size() < 50)
@@ -515,6 +517,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     const size_t expected_with_dsv4_unified = (has_disk_fields ? 52u : 47u);
                     if (t.size() >= expected_with_dsv4_unified) {
                         c.dsv4_unified_block_count = t[46 + offset].cast<int>();
+                    }
+                    // F01 PR-1: additive; older pickle tuples that lack the
+                    // K_state phase-2 hook silently keep the default (0 = OFF).
+                    const size_t expected_with_dsv4_state_kpb = (has_disk_fields ? 53u : 48u);
+                    if (t.size() >= expected_with_dsv4_state_kpb) {
+                        c.dsv4_state_entries_per_block = t[47 + offset].cast<int>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("KVCacheConfig unpickle error: ") + e.what());

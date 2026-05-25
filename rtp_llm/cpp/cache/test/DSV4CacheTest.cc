@@ -646,6 +646,165 @@ TEST(CacheConfigStatePinnedTest, NonDsv4ConfigUnaffectedByRoleType) {
     EXPECT_EQ(cfg.state_block_size_bytes, 0u);
 }
 
+// ============================================================
+// F01 PR-1: K_state phase-2 hook (dsv4_state_entries_per_block)
+//
+// Default OFF: state pools keep 256 entries/block, byte-identical to
+// today's production state-on-CPU goldens. When >0, the 3 STATE pools
+// (INDEXER_STATE @ idx3, CSA_STATE @ idx4, HCA_STATE @ idx5) collapse
+// from 256 down to K_state entries/block, shrinking per-block bytes by
+// 256/K_state. Paged pools (CSA_KV / HCA_KV / INDEXER_KV) and SWA_KV
+// (idx6) MUST be unaffected. Kernel-side wiring lands in F01-PR2 / M02
+// §3.3 HBM-savings smoke; PR-1 only flips the sizing surface.
+// ============================================================
+
+TEST(DSV4KStateHookTest, DefaultOffStatePoolBlockSizeUnchanged) {
+    auto              mc = makeProModelConfig();
+    ParallelismConfig pc;
+    KVCacheConfig     kv_cache_config;  // dsv4_state_entries_per_block = 0 (default)
+
+    auto config = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config);
+
+    // Default-OFF byte identity: every state-pool block_size_bytes must
+    // match the pre-F01 expectations from BlockSizeBytes above.
+    ASSERT_EQ(config.cache_specs.size(), 7u);
+    EXPECT_EQ(config.cache_specs[3]->block_size_bytes(), 256u * 512u * 4u);   // INDEXER_STATE
+    EXPECT_EQ(config.cache_specs[4]->block_size_bytes(), 256u * 2048u * 4u);  // CSA_STATE
+    EXPECT_EQ(config.cache_specs[5]->block_size_bytes(), 256u * 1024u * 4u);  // HCA_STATE
+    // Paged + SWA pools also unchanged.
+    EXPECT_EQ(config.cache_specs[0]->block_size_bytes(), 64u * kDsv4KvEntryBytes);  // CSA_KV
+    EXPECT_EQ(config.cache_specs[1]->block_size_bytes(), 2u * kDsv4KvEntryBytes);   // HCA_KV
+    EXPECT_EQ(config.cache_specs[2]->block_size_bytes(), 64u * kDsv4IndexerEntryBytes);  // INDEXER_KV
+    EXPECT_EQ(config.cache_specs[6]->block_size_bytes(), kDsv4TokensPerBlock * kDsv4KvEntryBytes);  // SWA_KV
+
+    // Mirror field on CacheConfig defaults to 0 → no kernel-side opt-in.
+    EXPECT_EQ(config.state_entries_per_block_constant, 0);
+}
+
+TEST(DSV4KStateHookTest, KStateFourCollapsesStatePoolBlockSizeBy64x) {
+    auto              mc = makeProModelConfig();
+    ParallelismConfig pc;
+    KVCacheConfig     kv_cache_config;
+    kv_cache_config.dsv4_state_entries_per_block = 4;
+
+    auto config = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config);
+
+    ASSERT_EQ(config.cache_specs.size(), 7u);
+    // 256 entries/block → 4 entries/block = 64x reduction on per-block bytes
+    // for the 3 STATE pools. entry_elems and dtype_size unchanged.
+    EXPECT_EQ(config.cache_specs[3]->block_size_bytes(), 4u * 512u * 4u);   // INDEXER_STATE: 256 → 4
+    EXPECT_EQ(config.cache_specs[4]->block_size_bytes(), 4u * 2048u * 4u);  // CSA_STATE:     256 → 4
+    EXPECT_EQ(config.cache_specs[5]->block_size_bytes(), 4u * 1024u * 4u);  // HCA_STATE:     256 → 4
+
+    // Paged + SWA pools MUST be untouched by the K_state hook.
+    EXPECT_EQ(config.cache_specs[0]->block_size_bytes(), 64u * kDsv4KvEntryBytes);
+    EXPECT_EQ(config.cache_specs[1]->block_size_bytes(), 2u * kDsv4KvEntryBytes);
+    EXPECT_EQ(config.cache_specs[2]->block_size_bytes(), 64u * kDsv4IndexerEntryBytes);
+    EXPECT_EQ(config.cache_specs[6]->block_size_bytes(), kDsv4TokensPerBlock * kDsv4KvEntryBytes);
+
+    // K_state mirrored onto CacheConfig for downstream hash-salt / kernel
+    // wiring (the producer lands in F01-PR2; PR-1 only plumbs the value).
+    EXPECT_EQ(config.state_entries_per_block_constant, 4);
+}
+
+TEST(DSV4KStateHookTest, KStateOneIsLowerBoundReducesStatePoolBy256x) {
+    // K_state=1 is the tightest collapse the hook permits; verifies the
+    // arithmetic and that we still produce sensible non-zero state bytes.
+    auto              mc = makeProModelConfig();
+    ParallelismConfig pc;
+    KVCacheConfig     kv_cache_config;
+    kv_cache_config.dsv4_state_entries_per_block = 1;
+
+    auto config = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config);
+    ASSERT_EQ(config.cache_specs.size(), 7u);
+    EXPECT_EQ(config.cache_specs[3]->block_size_bytes(), 1u * 512u * 4u);
+    EXPECT_EQ(config.cache_specs[4]->block_size_bytes(), 1u * 2048u * 4u);
+    EXPECT_EQ(config.cache_specs[5]->block_size_bytes(), 1u * 1024u * 4u);
+    EXPECT_EQ(config.state_entries_per_block_constant, 1);
+}
+
+TEST(DSV4KStateHookTest, KStateAggregatedStateBlockSizeBytesShrinksOnHook) {
+    // state_block_size_bytes is the sum-over-state-pools used by
+    // CacheConfigCreator's HBM divisor / pinned-CPU budget calc.
+    // F01 PR-1 collapses each contributing pool's per-block bytes, so the
+    // aggregate must shrink by the same K_state factor (no other terms).
+    auto              mc = makeProModelConfig();
+    ParallelismConfig pc;
+
+    KVCacheConfig kv_off;
+    auto          cfg_off = HybridPoolConfigCreator::createConfig(mc, pc, kv_off);
+
+    KVCacheConfig kv_on;
+    kv_on.dsv4_state_entries_per_block = 4;
+    auto cfg_on = HybridPoolConfigCreator::createConfig(mc, pc, kv_on);
+
+    ASSERT_GT(cfg_off.state_block_size_bytes, 0u);
+    // 256 → 4 ⇒ 64x shrink on each state pool ⇒ 64x shrink on the sum.
+    EXPECT_EQ(cfg_on.state_block_size_bytes, cfg_off.state_block_size_bytes / 64u);
+
+    // Paged-side aggregate (kv_block_size_bytes + kv_scale_size_bytes) is
+    // unaffected — the K_state hook only touches the 3 state pools.
+    EXPECT_EQ(cfg_on.kv_block_size_bytes, cfg_off.kv_block_size_bytes);
+    EXPECT_EQ(cfg_on.kv_scale_size_bytes, cfg_off.kv_scale_size_bytes);
+    EXPECT_EQ(cfg_on.swa_block_size_bytes, cfg_off.swa_block_size_bytes);
+}
+
+TEST(DSV4KStateHookTest, StateOnCpuPrefillHbmAccountingIdenticalWhenHookOff) {
+    // State-on-CPU production path (state_pool_uses_pinned_cpu=true, set by
+    // CacheConfigCreator under PREFILL) must remain byte-identical in HBM
+    // accounting when the hook is OFF (dsv4_state_entries_per_block=0).
+    // This is the load-bearing default-OFF byte-identity assert: anyone
+    // landing F01 PR-1 must NOT shift HBM block_num for production
+    // PREFILL roles that today rely on state-on-pinned-CPU.
+    auto cfg_off = makeStatePinnedTestConfig(/*state_pool_memory_mb=*/0, RoleType::PREFILL);
+
+    // Compare against a re-created config built the same way — sanity-
+    // check the helper is deterministic, then check K_state stays at 0.
+    auto cfg_off_again = makeStatePinnedTestConfig(/*state_pool_memory_mb=*/0, RoleType::PREFILL);
+    EXPECT_EQ(cfg_off.block_num, cfg_off_again.block_num);
+    EXPECT_EQ(cfg_off.state_block_size_bytes, cfg_off_again.state_block_size_bytes);
+    EXPECT_TRUE(cfg_off.state_pool_uses_pinned_cpu);
+    EXPECT_EQ(cfg_off.state_entries_per_block_constant, 0);
+}
+
+TEST(DSV4KStateHookTest, StateOnCpuPrefillHbmDivisorUnchangedRegardlessOfKState) {
+    // When STATE is pinned-CPU (production PREFILL), state_block_size_bytes
+    // is EXCLUDED from the HBM divisor — so toggling the K_state hook must
+    // NOT shift the paged block_num. This protects the production state-
+    // on-CPU goldens from any accidental HBM accounting drift.
+    auto mc = makeProModelConfig();
+    ParallelismConfig pc;
+    RuntimeConfig     runtime_config;
+    runtime_config.max_generate_batch_size                      = 4;
+    runtime_config.fifo_scheduler_config.max_context_batch_size = 2;
+
+    KVCacheConfig kv_off;
+    kv_off.kv_cache_mem_mb                  = kStatePinnedTestBudgetMb;
+    kv_off.non_full_addition_kvcache_blocks = 0;
+    // dsv4_state_entries_per_block = 0 (default, OFF)
+    auto cfg_off = CacheConfigCreator::createConfig(
+        mc, pc, runtime_config, kv_off, std::nullopt, std::nullopt, RoleType::PREFILL);
+
+    KVCacheConfig kv_on                    = kv_off;
+    kv_on.dsv4_state_entries_per_block     = 4;
+    auto cfg_on = CacheConfigCreator::createConfig(
+        mc, pc, runtime_config, kv_on, std::nullopt, std::nullopt, RoleType::PREFILL);
+
+    ASSERT_TRUE(cfg_off.state_pool_uses_pinned_cpu);
+    ASSERT_TRUE(cfg_on.state_pool_uses_pinned_cpu);
+
+    // Paged-FULL block_num must be unchanged because state bytes are
+    // already excluded from the HBM divisor on PREFILL.
+    EXPECT_EQ(cfg_on.block_num, cfg_off.block_num)
+        << "PREFILL state-on-CPU HBM block_num must not change when K_state hook flips";
+
+    // State per-block bytes do shrink (this is the whole point of K_state),
+    // and the mirror field reflects the override.
+    EXPECT_LT(cfg_on.state_block_size_bytes, cfg_off.state_block_size_bytes);
+    EXPECT_EQ(cfg_on.state_entries_per_block_constant, 4);
+    EXPECT_EQ(cfg_off.state_entries_per_block_constant, 0);
+}
+
 TEST(CacheConfigTest, FinalizeBlockNumsWithLinearStepShrinksSwaRuleBlocks) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                      = 4;

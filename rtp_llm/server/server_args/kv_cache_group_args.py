@@ -433,3 +433,22 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         "See docs/dsv4/kvcache-unify-final/canary/PHASE5_CANARY_PROCEDURE.md "
         "for the re-flip pre-flight checklist.",
     )
+    kv_cache_group.add_argument(
+        "--dsv4_state_entries_per_block",
+        env_name="DSV4_STATE_ENTRIES_PER_BLOCK",
+        bind_to=(kv_cache_config, "dsv4_state_entries_per_block"),
+        type=int,
+        default=0,
+        help="F01 phase-2 K_state hook for the 3 DSV4 STATE pools "
+        "(INDEXER_STATE / CSA_STATE / HCA_STATE): collapses each state "
+        "pool's entries_per_block from the kernel-block size (256) down to "
+        "this value, reducing per-block bytes by 256/K_state. "
+        "0 = OFF (default; state pools keep 256 entries/block — production "
+        "state-on-CPU goldens are byte-identical to today). "
+        ">0 = K_state (typical opus F01 §2 setting K_state=4 → 9.9x state "
+        "pool density / 64x reduction per state pool per block, with kernel-"
+        "side compressor/decode_attn_metadata changes landing in F01-PR2 and "
+        "HBM mem accounting smoke in F01-PR3). Only the per-block byte "
+        "sizing flips in PR-1 — peer hash_salt K_state bit (bit3) and the "
+        "kernel-side metadata both stay wired through their F01-PR2 producer.",
+    )

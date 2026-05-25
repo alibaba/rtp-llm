@@ -40,6 +40,17 @@ uint32_t nonzeroFieldBitmap(const CacheKeySalt& salt) {
     if (salt.Tlog     != 0) bitmap |= 1u << 4;
     return bitmap;
 }
+// TODO(F01-PR2): the K_state salt bit3 (and its nonzero bitmap bit) are
+// wired through ``applySalt`` and ``nonzeroFieldBitmap`` above, but no
+// producer constructs a non-zero CacheKeySalt anywhere today —
+// computeLocalHandshakeInfo() still receives hash_salt_version=0 and
+// hash_salt_nonzero_bitmap=0 (see KVCacheConnectorCoordinator::init).
+// F01-PR2 must wire the producer to read
+// ``CacheConfig::state_entries_per_block_constant`` (added by F01-PR1) and
+// emit it as ``salt.K_state`` before the unified-aware handshake is
+// activated. Without that producer, two PD peers running with different
+// K_state values would silently share cache keys (Risk 9.6) once
+// super_block_layout.enabled flips on.
 
 void initCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
                    CompleteTokenIdsPtr     complete_token_ids,

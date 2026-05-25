@@ -198,9 +198,42 @@ void DSV4CacheConfigHelper::applyConfig(CacheConfig&         config,
                      kDsv4KernelTokensPerBlock,
                      physical_tokens_per_block / kDsv4KernelTokensPerBlock);
 
-    const auto sets  = classifyDSV4Layers(model_config.attn_config.layer_compress_ratios);
-    const auto pools = buildDSV4PoolDescs(sets, model_config, physical_tokens_per_block);
+    const auto sets = classifyDSV4Layers(model_config.attn_config.layer_compress_ratios);
+    auto       pools = buildDSV4PoolDescs(sets, model_config, physical_tokens_per_block);
     RTP_LLM_CHECK_WITH_INFO(pools.size() == kDsv4PoolNum, "DSV4 must produce %zu pools", kDsv4PoolNum);
+
+    // ---- F01 PR-1: K_state phase-2 hook (default OFF; byte-identical) ----
+    // When `dsv4_state_entries_per_block > 0`, collapse the 3 STATE pools
+    // (INDEXER_STATE @ idx 3, CSA_STATE @ idx 4, HCA_STATE @ idx 5 — see
+    // ``buildDSV4PoolDescs`` ordering) from kernel-block size
+    // (kDsv4KernelTokensPerBlock = 256) entries_per_block down to K_state,
+    // shrinking each per-block bytes by 256/K_state. PR-1 only flips the
+    // sizing surface; kernel-side compressor / decode_attn_metadata land
+    // in F01-PR2 (M08) and the HBM-savings smoke in F01-PR3 (M02 §3.3).
+    // makeDSV4Spec runs *after* this override so the resulting spec's
+    // block_size_bytes reflects the reduced K_state.
+    const int k_state = kv_cache_config.dsv4_state_entries_per_block;
+    if (k_state > 0) {
+        RTP_LLM_CHECK_WITH_INFO(static_cast<uint32_t>(k_state) <= kDsv4KernelTokensPerBlock,
+                                "dsv4_state_entries_per_block (%d) must be <= kernel block size (%u)",
+                                k_state,
+                                kDsv4KernelTokensPerBlock);
+        constexpr size_t kStatePoolIndices[]   = {3, 4, 5};  // INDEXER_STATE, CSA_STATE, HCA_STATE
+        for (size_t state_idx : kStatePoolIndices) {
+            auto& pool = pools[state_idx];
+            RTP_LLM_CHECK_WITH_INFO(!pool.is_paged, "DSV4 state pool idx %zu unexpectedly paged", state_idx);
+            pool.entries_per_block = static_cast<uint32_t>(k_state);
+        }
+        config.state_entries_per_block_constant = k_state;
+        RTP_LLM_LOG_INFO("F01 PR-1: K_state=%d active; 3 DSV4 STATE pools collapsed from "
+                         "%u to %d entries/block (per-block bytes shrunk by %ux)",
+                         k_state,
+                         kDsv4KernelTokensPerBlock,
+                         k_state,
+                         kDsv4KernelTokensPerBlock / static_cast<uint32_t>(k_state));
+    } else {
+        config.state_entries_per_block_constant = 0;
+    }
 
     config.layer_num                                = static_cast<uint32_t>(sets.all_layers.size());
     config.layer_all_num                            = config.layer_num;
