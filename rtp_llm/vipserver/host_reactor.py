@@ -60,9 +60,9 @@ class HostReactor:
                 )
                 if self.domain_failed_cnt[k] >= DOMAIN_FAILED_CNT_THRESHOLD:
                     logging.warning(
-                        f"{k} has failed {self.domain_failed_cnt[k]} times, set server list to empty."
+                        f"{k} has failed {self.domain_failed_cnt[k]} times, drop cache entry to force re-fetch on next access."
                     )
-                    self.domain_map[k] = []
+                    self.domain_map.pop(k, None)
                     self.domain_failed_cnt[k] = 0
 
         self.domain_update_lock.release()
@@ -121,6 +121,6 @@ class HostReactor:
         :return: host list
         """
         hosts = self.domain_map.get(domain)
-        if hosts is None:
+        if not hosts:
             return self.get_host_list_by_domain_now(domain)
         return hosts

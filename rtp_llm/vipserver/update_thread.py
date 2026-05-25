@@ -1,5 +1,7 @@
+import logging
 import threading
 import time
+import traceback
 
 
 class UpdateThread(threading.Thread):
@@ -14,4 +16,11 @@ class UpdateThread(threading.Thread):
     def run(self):
         while not self.stop_flag:
             time.sleep(self.interval)
-            self.func()
+            try:
+                self.func()
+            except Exception as e:
+                stack_summary = traceback.format_exception(type(e), e, e.__traceback__)
+                logging.error(
+                    f"vipserver update thread {self.name} caught exception, continuing loop: {e}\n"
+                    + "\n".join(stack_summary)
+                )
