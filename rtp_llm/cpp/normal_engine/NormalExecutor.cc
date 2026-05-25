@@ -64,6 +64,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                std::function<void()>                  profile_step_finish):
     Executor(),
     cache_manager_(cache_manager),
+    role_type_(params.pd_sep_config.role_type),
     warm_up_(warm_up),
     use_all_gather_(params.moe_config.use_all_gather && !params.moe_config.use_deepep_low_latency),
     metrics_reporter_(params.metrics_reporter),
@@ -179,6 +180,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     }
 
     StreamGroups stream_groups(streams);
+    prepareGrpcNormalDeviceState(stream_groups);
 
     if (useStreamAsync() && useDropBroadSync() && !gatherCanUseDeviceState(stream_groups)) {
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.wait_prev_dispatch(stream_count=%zu)", streams.size());
@@ -187,6 +189,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         // Rebuild StreamGroups after waiting: cached maxSeqLen/batch sizes can
         // be stale while the previous worker mutates GenerateStream host state.
         stream_groups = StreamGroups(streams);
+        prepareGrpcNormalDeviceState(stream_groups);
     }
 
     {
@@ -482,6 +485,52 @@ bool NormalExecutor::gatherCanUseDeviceState(const StreamGroups& stream_groups) 
         }
     }
     return true;
+}
+
+void NormalExecutor::prepareGrpcNormalDeviceState(const StreamGroups& stream_groups) {
+    if (role_type_ != RoleType::DECODE || stream_groups.totalContextBatchSize() != 0
+        || stream_groups.totalDecodeBatchSize() == 0) {
+        return;
+    }
+
+    const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    for (const auto& stream : stream_groups.decodeStreams()) {
+        if (!stream->consumeGrpcNormalDeviceStatePending()) {
+            continue;
+        }
+        const auto& state = stream->getNormalAsyncDeviceState();
+        if (state.last_sample_token_gpu.defined() && state.last_sample_token_gpu.is_cuda()
+            && state.next_seq_len_gpu.defined() && state.next_seq_len_gpu.is_cuda()) {
+            continue;
+        }
+        if (stream->outputTokenLen() != 1) {
+            continue;
+        }
+        const auto current_batch_size = stream->currentBatchSize();
+        if (current_batch_size != 1) {
+            RTP_LLM_LOG_WARNING("[normal-device-state] skip grpc publish: stream=%ld cur_bs=%d",
+                                stream->streamId(),
+                                current_batch_size);
+            continue;
+        }
+
+        auto current_tokens = stream->currentExecuteTokens(0);
+        if (current_tokens.size() != 1) {
+            RTP_LLM_LOG_WARNING("[normal-device-state] skip grpc publish: stream=%ld token_count=%zu",
+                                stream->streamId(),
+                                current_tokens.size());
+            continue;
+        }
+
+        const auto seq_length = stream->seqLength();
+        stream->setNormalAsyncDeviceState(GenerateStream::NormalAsyncDeviceState{
+            .epoch                 = 0,
+            .last_sample_token_gpu = torch::full({1}, static_cast<int64_t>(current_tokens[0]), cuda_i32),
+            .next_seq_len_gpu      = torch::full({1}, static_cast<int64_t>(seq_length), cuda_i32),
+            .last_real_seq_len     = seq_length,
+            .next_real_seq_len     = seq_length,
+        });
+    }
 }
 
 void NormalExecutor::publishNormalDeviceState(const StreamGroups& stream_groups, const SamplerOutput& sampler_output) {

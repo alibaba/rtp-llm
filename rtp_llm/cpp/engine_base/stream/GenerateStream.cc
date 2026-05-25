@@ -1120,6 +1120,8 @@ StreamCacheResource& GenerateStream::streamCacheResource() {
 void GenerateStream::CopyOnWrite(const GenerateStream& other_stream, bool copy_loss, bool share) {
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("GenerateStream::CopyOnWrite(copy_loss=%d, share=%d)", copy_loss, share);
     complete_token_ids_ = make_shared<CompleteTokenIds>(*other_stream.complete_token_ids_, share);
+    grpc_normal_device_state_pending_ =
+        std::make_shared<std::atomic<bool>>(other_stream.hasGrpcNormalDeviceStatePending());
     cum_log_probs_      = other_stream.cum_log_probs_.clone();
     if (other_stream.calculateLoss() && copy_loss) {
         loss_ = other_stream.loss_.clone();
