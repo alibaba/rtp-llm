@@ -2239,11 +2239,13 @@ TEST(CacheConfigStatePinnedTest, SpConfigPrefillPinnedFallbackEmitsWarnWhenState
     runtime_config.fifo_scheduler_config.max_context_batch_size = 1;
 
     KVCacheConfig kv_cache_config;
-    // Force a huge block_num so block_num * state_block_size_bytes
-    // crosses the 8 GiB WARN threshold without touching the real budget
-    // accounting paths. The lambda's "else" branch (no explicit budget)
-    // is identical regardless of how block_num got there.
-    kv_cache_config.test_block_num                   = 200000;
+    // Force a block_num that crosses the 8 GiB WARN threshold but stays
+    // under the 64 GiB HARD CAP added by R6 DEV-α (canary §1.0 item 10).
+    // For flash sp config state_block_size_bytes ≈ 76 MB / pool, so
+    //   - 8 GiB / 76 MB ≈ 113 blocks (WARN floor)
+    //   - 64 GiB / 76 MB ≈ 862 blocks (HARD CAP ceiling)
+    // 512 sits comfortably in between → WARN fires, CAP does not.
+    kv_cache_config.test_block_num                   = 512;
     kv_cache_config.state_pool_memory_mb             = 0;  // pinned via PREFILL role
     kv_cache_config.non_full_addition_kvcache_blocks = 0;
 
@@ -2264,7 +2266,7 @@ TEST(CacheConfigStatePinnedTest, SpConfigPrefillPinnedFallbackEmitsWarnWhenState
 
     // (a) Result is valid — fallback still produced a usable config.
     EXPECT_GT(config.block_num, 0);
-    EXPECT_EQ(static_cast<uint32_t>(config.block_num), 200000u);
+    EXPECT_EQ(static_cast<uint32_t>(config.block_num), 512u);
 
     // (b) Verify the WARN guard predicate is satisfied — i.e. the code
     // path that emits the WARN was taken. alog output is not trivially
@@ -2282,7 +2284,7 @@ TEST(CacheConfigStatePinnedTest, SpConfigPrefillPinnedFallbackEmitsWarnWhenState
     constexpr size_t kWarnThresholdBytes = 8ULL * 1024 * 1024 * 1024;  // 8 GiB
     EXPECT_GT(projected_host_bytes, kWarnThresholdBytes)
         << "Test scenario must cross the 8 GiB WARN threshold so the sp WARN "
-        << "branch actually fires (test_block_num=200000 * state_block_size_bytes="
+        << "branch actually fires (test_block_num=512 * state_block_size_bytes="
         << config.state_block_size_bytes << " B = "
         << (projected_host_bytes / 1024 / 1024) << " MiB)";
 
@@ -2327,6 +2329,418 @@ TEST(CacheConfigStatePinnedTest, SpConfigPdfusionDoesNotEnterPinnedFallback) {
 
     EXPECT_FALSE(config.state_pool_uses_pinned_cpu)
         << "PDFUSION must not enter pinned-CPU fallback — WARN branch must be skipped";
+}
+
+// ====================================================================
+// R6 DEV-ε — KVCacheHashUtil + DSV4CacheConfigHelper defensive CHECKs
+// (DEFEND-4 HIGH-2 / HIGH-4 + DEFEND-3 HIGH-3)
+// ====================================================================
+//
+// Tests below cover the three HIGH-severity bounds CHECKs added in
+// FIX-B follow-up:
+//
+//   R6Hash*  — KVCacheHashUtil.cc invariants:
+//              * bitmap-vs-salt-byte consistency under fold8 collision
+//                (DEFEND-4 HIGH-2);
+//              * per-field >255 silent-truncation reject (DEFEND-4 HIGH-4).
+//
+//   R6Helper* — DSV4CacheConfigHelper.cc structural invariants:
+//              * pools[0..2].is_paged + pools[3..5].!is_paged (STATE) +
+//                pools[6].region==SWA_KV hoisted OUT of the K_state>0
+//                branch so legacy OFF deployments also exercise them
+//                (DEFEND-3 HIGH-3).
+//
+// Coordinated with DEV-α (CreateSpMtpUnified* / PinnedCpuHardCap* /
+// F02Mirror* prefixes appended to this same file): non-overlapping
+// prefixes prevent merge collisions.
+
+namespace {
+
+// DEFEND-4 HIGH-2: a uint64 whose 8 bytes XOR to 0 produces fold8(v)==0
+// yet is itself non-zero.  0xFFFF has byte0=0xFF, byte1=0xFF, rest=0 →
+// XOR = 0; the smallest natural model_id collision.  See
+// KVCacheHashUtil.cc::fold8 for the folding formula.
+constexpr uint64_t kFold8CollisionModelId = 0xFFFFull;
+
+}  // namespace
+
+TEST(R6HashFold8CollisionTest, BitmapReportsSetEvenWhenFold8Collapses) {
+    // Bitmap MUST reflect "user configured this field" (raw source field
+    // != 0), NOT "packed salt byte != 0".  Otherwise a fold8-collision
+    // model_id would silently report bit0=0 over the handshake — peers
+    // with model_id=0 and model_id=0xFFFF would advertise the same
+    // (version, bitmap) and pass REQ-D1, yet their cache_keys differ
+    // (one path skips XOR, the other XORs salt-byte0=0 which is identity
+    // — so they'd actually collide here, but for non-fold-colliding
+    // dtype/lora paths the silent-skip hazard is real).  This test pins
+    // the bitmap-side contract.
+    CacheKeySalt salt{};
+    salt.model_id = kFold8CollisionModelId;
+    EXPECT_NE(salt.model_id, 0ull)
+        << "test precondition: model_id must be non-zero to exercise bit0";
+    const uint32_t bitmap = nonzeroFieldBitmap(salt);
+    EXPECT_NE(bitmap & (1u << 0), 0u)
+        << "bitmap must report bit0=1 for any non-zero model_id, even when fold8 collapses to 0";
+}
+
+TEST(R6HashFold8CollisionTest, PackSaltRejectsFold8CollisionForNonZeroModelId) {
+    // The salt boundary CHECK MUST fire on fold8(model_id)==0 with
+    // model_id != 0.  This is the silent-corruption path: bitmap bit0=1
+    // (peer thinks model_id is set), salt byte0=0 (XOR is identity for
+    // model_id); a peer with model_id=0 would compute identical
+    // cache_keys yet REFUSE on bitmap mismatch — and worse, two peers
+    // each with distinct fold-colliding model_ids would PASS handshake
+    // (same bitmap) and silently collide on cache_keys.
+    CacheKeySalt salt{};
+    salt.model_id = kFold8CollisionModelId;
+    EXPECT_ANY_THROW({
+        (void)runInitCacheKeysWithSalt(salt, /*seq_size_per_block=*/16, /*seq_len=*/16);
+    }) << "fold8-collision model_id must trigger RTP_LLM_CHECK_WITH_INFO at salt boundary";
+}
+
+TEST(R6HashFold8CollisionTest, ZeroModelIdAllowedAsLegacyIdentity) {
+    // Negative control: model_id == 0 (legacy unsalted entry, bit0=0 by
+    // design) MUST be allowed through the CHECK.  Otherwise the legacy
+    // zero-salt wrapper would crash on every call.
+    CacheKeySalt salt{};
+    salt.model_id = 0;
+    EXPECT_NO_THROW({
+        (void)runInitCacheKeysWithSalt(salt, /*seq_size_per_block=*/16, /*seq_len=*/16);
+    });
+}
+
+TEST(R6HashOversizedFieldTest, DtypeIdAbove255Rejected) {
+    // DEFEND-4 HIGH-4: ``s.dtype_id & 0xff`` silently truncates >255 to
+    // 0, producing bitmap=set yet byte1=0 (silent reuse-miss across PD
+    // peers).  packSaltBytes CHECK must reject.
+    CacheKeySalt salt{};
+    salt.dtype_id = 0x100;  // first value where & 0xff == 0
+    EXPECT_ANY_THROW({
+        (void)runInitCacheKeysWithSalt(salt, /*seq_size_per_block=*/16, /*seq_len=*/16);
+    }) << "dtype_id=0x100 must trigger RTP_LLM_CHECK_WITH_INFO at salt boundary";
+}
+
+TEST(R6HashOversizedFieldTest, LoraIdAbove255Rejected) {
+    // Multi-tenant LoRA buckets can plausibly hit >255 IDs; producer is
+    // expected to fold (id % 256) before assignment.  Catch unfolded IDs
+    // at the salt boundary so the bug surfaces at startup.
+    CacheKeySalt salt{};
+    salt.lora_id = 1024;
+    EXPECT_ANY_THROW({
+        (void)runInitCacheKeysWithSalt(salt, /*seq_size_per_block=*/16, /*seq_len=*/16);
+    }) << "lora_id=1024 must trigger RTP_LLM_CHECK_WITH_INFO at salt boundary";
+}
+
+TEST(R6HashOversizedFieldTest, KStateAbove255Rejected) {
+    // DSV4CacheConfigHelper normalises K_state=256 to OFF and rejects
+    // anything larger up-front, but the salt boundary is the last
+    // defence against handshake-receive paths re-injecting an oversized
+    // K_state into a CacheKeySalt manually.
+    CacheKeySalt salt{};
+    salt.K_state = 256;
+    EXPECT_ANY_THROW({
+        (void)runInitCacheKeysWithSalt(salt, /*seq_size_per_block=*/16, /*seq_len=*/16);
+    }) << "K_state=256 must trigger RTP_LLM_CHECK_WITH_INFO at salt boundary";
+}
+
+TEST(R6HashOversizedFieldTest, TlogAbove255Rejected) {
+    CacheKeySalt salt{};
+    salt.Tlog = 300;
+    EXPECT_ANY_THROW({
+        (void)runInitCacheKeysWithSalt(salt, /*seq_size_per_block=*/16, /*seq_len=*/16);
+    }) << "Tlog=300 must trigger RTP_LLM_CHECK_WITH_INFO at salt boundary";
+}
+
+TEST(R6HashOversizedFieldTest, MaxByteValueAllowed) {
+    // Negative control: each field at the boundary (0xFF) MUST pass.
+    CacheKeySalt salt{};
+    salt.dtype_id = 0xFF;
+    salt.lora_id  = 0xFF;
+    salt.K_state  = 0xFF;
+    salt.Tlog     = 0xFF;
+    EXPECT_NO_THROW({
+        (void)runInitCacheKeysWithSalt(salt, /*seq_size_per_block=*/16, /*seq_len=*/16);
+    }) << "all fields at 0xFF must pass — boundary inclusivity";
+}
+
+TEST(R6HelperPoolStructuralInvariants, DefaultOffPathExercisesStructuralChecks) {
+    // DEFEND-3 HIGH-3: pools[0..2].is_paged + pools[3..5].!is_paged
+    // (STATE) + pools[6].region==SWA_KV invariants must fire on the
+    // legacy OFF path, not only when K_state>0.  Positive proof: build a
+    // default DSV4 config (K_state=0, super_block layout off) and verify
+    // every produced pool matches the ordering contract — this is the
+    // exact assertion the new structural CHECKs guard against.  Any
+    // future refactor of buildDSV4PoolDescs that re-orders pools would
+    // crash applyConfig at startup and ALSO fail this test, giving
+    // operators two independent signals of the regression.
+    auto              mc = makeProModelConfig();
+    ParallelismConfig pc;
+    KVCacheConfig     kv_cache_config;
+    // Default K_state=0 (legacy OFF) — this is the path that previously
+    // had zero structural guards on the STATE pools.
+    kv_cache_config.dsv4_state_entries_per_block = 0;
+
+    auto config = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config);
+    ASSERT_EQ(config.group_types.size(), 7u);
+    ASSERT_EQ(config.group_region_names.size(), 7u);
+
+    // pools[0..2] are paged FULL (CSA_KV, HCA_KV, INDEXER_KV).
+    for (size_t i : {0u, 1u, 2u}) {
+        EXPECT_EQ(config.group_types[i], CacheGroupType::FULL)
+            << "pool " << i << " must be FULL group type";
+        EXPECT_FALSE(isStateRegion(config.group_region_names[i]))
+            << "pool " << i << " must NOT be a STATE region";
+    }
+    EXPECT_EQ(config.group_region_names[0], KVCacheRegionName::CSA_KV);
+    EXPECT_EQ(config.group_region_names[1], KVCacheRegionName::HCA_KV);
+    EXPECT_EQ(config.group_region_names[2], KVCacheRegionName::INDEXER_KV);
+
+    // pools[3..5] are non-paged STATE (INDEXER_STATE, CSA_STATE, HCA_STATE).
+    for (size_t i : {3u, 4u, 5u}) {
+        EXPECT_EQ(config.group_types[i], CacheGroupType::SWA)
+            << "pool " << i << " must be SWA group type (non-paged)";
+        EXPECT_TRUE(isStateRegion(config.group_region_names[i]))
+            << "pool " << i << " must be a STATE region (idx 3..5 invariant)";
+    }
+    EXPECT_EQ(config.group_region_names[3], KVCacheRegionName::INDEXER_STATE);
+    EXPECT_EQ(config.group_region_names[4], KVCacheRegionName::CSA_STATE);
+    EXPECT_EQ(config.group_region_names[5], KVCacheRegionName::HCA_STATE);
+
+    // pools[6] is the non-paged SWA_KV.
+    EXPECT_EQ(config.group_types[6], CacheGroupType::SWA);
+    EXPECT_EQ(config.group_region_names[6], KVCacheRegionName::SWA_KV);
+}
+
+TEST(R6HelperPoolStructuralInvariants, KStateOnPathStillExercisesStructuralChecks) {
+    // Cross-check: the K_state>0 path must continue to honour the same
+    // structural invariants (the hoisted CHECKs run regardless of
+    // K_state). Pick a power-of-2 divisor of 256 so the inner divisibility
+    // CHECKs all pass.
+    auto              mc = makeProModelConfig();
+    ParallelismConfig pc;
+    KVCacheConfig     kv_cache_config;
+    kv_cache_config.dsv4_state_entries_per_block = 64;
+
+    auto config = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config);
+    ASSERT_EQ(config.group_region_names.size(), 7u);
+    EXPECT_EQ(config.group_region_names[3], KVCacheRegionName::INDEXER_STATE);
+    EXPECT_EQ(config.group_region_names[4], KVCacheRegionName::CSA_STATE);
+    EXPECT_EQ(config.group_region_names[5], KVCacheRegionName::HCA_STATE);
+    EXPECT_EQ(config.group_region_names[6], KVCacheRegionName::SWA_KV);
+    EXPECT_EQ(config.state_entries_per_block_constant, 64);
+}
+
+TEST(R6HelperPoolStructuralInvariants, FlashModelAlsoSatisfiesStructure) {
+    // Negative control across a second model topology so the structural
+    // contract is verified independent of layer_compress_ratios.
+    auto              mc = makeFlashModelConfig();
+    ParallelismConfig pc;
+    KVCacheConfig     kv_cache_config;
+    auto config = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config);
+    ASSERT_EQ(config.group_region_names.size(), 7u);
+    EXPECT_EQ(config.group_region_names[0], KVCacheRegionName::CSA_KV);
+    EXPECT_EQ(config.group_region_names[6], KVCacheRegionName::SWA_KV);
+    for (size_t i : {3u, 4u, 5u}) {
+        EXPECT_TRUE(isStateRegion(config.group_region_names[i]))
+            << "flash-model pool " << i << " must be STATE";
+    }
+}
+
+// ====================================================================
+// R6 DEV-α — CacheConfigCreator: canary §1.0 Phase-5 re-flip blockers
+// (Task 1: createSpConfig MTP unified-branch crash fix,
+//  Task 2: PREFILL pinned-CPU HARD CAP,
+//  Task 3: DEFEND-3 HIGH-1 createSp↔createConfig F02 mirror parity).
+// All test names are prefixed CreateSpMtpUnified* / PinnedCpuHardCap* /
+// F02MirrorTest* per cross-agent file lock convention.
+// ====================================================================
+
+namespace {
+
+CacheConfig makeStateHardCapTestConfig(uint32_t test_block_num, RoleType role) {
+    auto              mc = makeProModelConfig();
+    ParallelismConfig pc;
+    RuntimeConfig     runtime_config;
+    runtime_config.max_generate_batch_size                      = 4;
+    runtime_config.fifo_scheduler_config.max_context_batch_size = 2;
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.test_block_num                   = test_block_num;
+    kv_cache_config.state_pool_memory_mb             = 0;  // PREFILL pinned-CPU fallback
+    kv_cache_config.non_full_addition_kvcache_blocks = 0;
+    return CacheConfigCreator::createConfig(
+        mc, pc, runtime_config, kv_cache_config, std::nullopt, std::nullopt, role);
+}
+
+}  // namespace
+
+// --- Task 1: createSpConfig MTP unified branch (canary item 1 / R02 H-1) ---
+//
+// Pre-fix: with dsv4_unified_block_count=1, score_config and propose_config
+// returned from createBasicConfig() have super_block_layout.enabled=true but
+// num_super_blocks=0. createSpConfig() then never populates num_super_blocks
+// on the merged config, so HybridPoolKVCacheAllocator::init crashes at
+// CHECK(num_super_blocks > 0). This test asserts the F02 mirror branch wires
+// num_super_blocks + group_block_nums on both the merged config and every
+// mtp_sub_config without throwing.
+TEST(CacheConfigStatePinnedTest, CreateSpMtpUnifiedDoesNotCrash) {
+    auto score_model_config   = makeFlashModelConfig();
+    auto propose_model_config = makeFlashMtpModelConfig();
+
+    ParallelismConfig parallelism_config;
+    RuntimeConfig     runtime_config;
+    runtime_config.max_generate_batch_size                      = 2;
+    runtime_config.fifo_scheduler_config.max_context_batch_size = 1;
+
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.test_block_num            = 128;
+    kv_cache_config.state_pool_memory_mb      = 0;
+    kv_cache_config.dsv4_unified_block_count  = 1;  // M02-PR1 F02 unified path ON
+    kv_cache_config.non_full_addition_kvcache_blocks = 0;
+
+    SpeculativeExecutionConfig sp_config;
+    sp_config.type              = SP_TYPE_MTP;
+    sp_config.gen_num_per_cycle = 2;
+
+    CacheConfig config;
+    ASSERT_NO_THROW(config = CacheConfigCreator::createSpConfig(score_model_config,
+                                                                propose_model_config,
+                                                                parallelism_config,
+                                                                runtime_config,
+                                                                kv_cache_config,
+                                                                sp_config,
+                                                                std::nullopt,
+                                                                /*is_mtp=*/true,
+                                                                /*is_eagle=*/false,
+                                                                RoleType::PDFUSION))
+        << "DSV4 + MTP + dsv4_unified_block_count=1 must not crash createSpConfig "
+        << "(R02 H-1 / canary §1.0 item 1)";
+
+    // Merged config must satisfy HybridPoolKVCacheAllocator::init invariants:
+    //   - super_block_layout.enabled == true (carried from score_config)
+    //   - num_super_blocks > 0  (was 0 pre-fix — the crash root cause)
+    //   - bps.size() == cache_specs.size() (group-count parity)
+    //   - group_block_nums populated via block_num * bps[p] + non-FULL addition
+    EXPECT_TRUE(config.super_block_layout.enabled)
+        << "F02 unified flag must propagate to merged config";
+    EXPECT_GT(config.super_block_layout.num_super_blocks, 0u)
+        << "createSpConfig F02 mirror must set num_super_blocks (was 0 pre-fix → crash)";
+    EXPECT_EQ(config.super_block_layout.bps.size(), config.cache_specs.size())
+        << "bps size must equal cache_specs size for allocator init CHECK";
+    EXPECT_EQ(config.group_block_nums.size(), config.group_block_size_bytes.size())
+        << "group_block_nums must be populated (F02 path write-back)";
+
+    // Sub-configs (per MTP module) must also have F02 populated so any
+    // per-sub allocator path passes the same CHECK.
+    ASSERT_EQ(config.mtp_sub_configs.size(), 2u) << "gen_num_per_cycle=2 expects 2 sub_cfgs";
+    for (const auto& sub : config.mtp_sub_configs) {
+        ASSERT_NE(sub, nullptr);
+        EXPECT_TRUE(sub->super_block_layout.enabled);
+        EXPECT_GT(sub->super_block_layout.num_super_blocks, 0u)
+            << "sub_cfg must also have F02 num_super_blocks populated";
+        EXPECT_EQ(sub->super_block_layout.bps.size(), sub->cache_specs.size());
+    }
+}
+
+// --- Task 2: PREFILL pinned-CPU HARD CAP (canary items 2 + 10) ---
+//
+// createConfig() at the WARN block must HARD-CHECK fail when
+// block_num * state_block_size_bytes >= 64 GiB (per pool). Operator MUST set
+// --state_pool_memory_mb explicitly to escape; silent unbounded fallback is
+// banned. The CHECK is in addition to (not replacing) the 8 GiB WARN.
+//
+// Empirical: DSV4 pro model state_block_size_bytes ≈ 111 MB (per pool with
+// default 256-entry blocks). 64 GiB / 111 MB ≈ 590 blocks. So any
+// test_block_num >= ~590 will trip the CAP under the pro model. We pick
+// 4096 to give comfortable margin while still being a sane bazel UT value.
+TEST(CacheConfigStatePinnedTest, PinnedCpuHardCapTriggersOnOversize) {
+    // (a) Below CAP: a tiny block_num must not throw — a 32-block PREFILL
+    // config produces ~3.5 GiB host bytes, well under the 8 GiB WARN and the
+    // 64 GiB CAP. WARN does not fire, CAP does not fire.
+    EXPECT_NO_THROW(makeStateHardCapTestConfig(/*test_block_num=*/32, RoleType::PREFILL))
+        << "32 blocks (well under WARN+CAP) must remain valid PREFILL pinned-CPU config";
+
+    // (b) Above CAP: RTP_LLM_CHECK_WITH_INFO throws rtp_llm::RTPException
+    // (std::exception) rather than abort(), so use EXPECT_THROW not
+    // EXPECT_DEATH. 4096 blocks * ~111 MB ≈ 444 GiB host bytes — comfortably
+    // past the 64 GiB cap. The CHECK message includes "exceeds hard cap" so
+    // we additionally substring-match below for robustness.
+    try {
+        (void)makeStateHardCapTestConfig(/*test_block_num=*/4096u, RoleType::PREFILL);
+        FAIL() << "4096 blocks must trip canary §1.0 item 10 HARD CAP CHECK (no throw observed)";
+    } catch (const std::exception& e) {
+        const std::string what = e.what();
+        EXPECT_NE(what.find("exceeds hard cap"), std::string::npos)
+            << "HARD CAP CHECK message must mention 'exceeds hard cap'; got: " << what;
+        EXPECT_NE(what.find("state_pool_memory_mb"), std::string::npos)
+            << "HARD CAP CHECK message must direct operator to --state_pool_memory_mb; got: " << what;
+    }
+}
+
+// --- Task 3: DEFEND-3 HIGH-1 createSp F02 super-block branch mirror ---
+//
+// CacheConfigCreatorMirrorTest core case: same ModelConfig + KVCacheConfig
+// driven through both createConfig() and createSpConfig() (with a degenerate
+// sp_config that triggers the sp path) must produce structurally-identical
+// super_block_layout state. Catches future drift where one entry-point
+// gets a new F02 field and the other does not.
+TEST(CacheConfigStatePinnedTest, F02MirrorTestSpVsNonSpConfigParity) {
+    auto mc = makeFlashModelConfig();
+
+    ParallelismConfig parallelism_config;
+    RuntimeConfig     runtime_config;
+    runtime_config.max_generate_batch_size                      = 2;
+    runtime_config.fifo_scheduler_config.max_context_batch_size = 1;
+
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.test_block_num                   = 128;
+    kv_cache_config.state_pool_memory_mb             = 0;
+    kv_cache_config.dsv4_unified_block_count         = 1;
+    kv_cache_config.non_full_addition_kvcache_blocks = 0;
+
+    auto non_sp_config = CacheConfigCreator::createConfig(
+        mc, parallelism_config, runtime_config, kv_cache_config, std::nullopt, std::nullopt, RoleType::PDFUSION);
+
+    // SP path with a degenerate single-module propose config so the test
+    // exercises the merge logic without doubling group counts.
+    SpeculativeExecutionConfig sp_config;
+    sp_config.type              = SP_TYPE_MTP;
+    sp_config.gen_num_per_cycle = 1;
+
+    auto sp_propose_config = makeFlashMtpModelConfig();
+    auto sp_config_out     = CacheConfigCreator::createSpConfig(mc,
+                                                            sp_propose_config,
+                                                            parallelism_config,
+                                                            runtime_config,
+                                                            kv_cache_config,
+                                                            sp_config,
+                                                            std::nullopt,
+                                                            /*is_mtp=*/true,
+                                                            /*is_eagle=*/false,
+                                                            RoleType::PDFUSION);
+
+    // Parity invariants (anti-drift):
+    EXPECT_EQ(non_sp_config.super_block_layout.enabled, sp_config_out.super_block_layout.enabled)
+        << "F02 enabled flag must mirror between createConfig and createSpConfig";
+    EXPECT_TRUE(sp_config_out.super_block_layout.enabled)
+        << "test precondition: dsv4_unified_block_count=1 must enable F02 path";
+
+    EXPECT_GT(non_sp_config.super_block_layout.num_super_blocks, 0u)
+        << "createConfig must populate num_super_blocks";
+    EXPECT_GT(sp_config_out.super_block_layout.num_super_blocks, 0u)
+        << "createSpConfig must populate num_super_blocks (DEFEND-3 HIGH-1)";
+
+    // bps content parity — DSV4 today is bps[p] ≡ 1 across all pools. If a
+    // future kernel change flips one path off-by-one this test surfaces it.
+    EXPECT_EQ(non_sp_config.super_block_layout.bps, sp_config_out.super_block_layout.bps)
+        << "F02 bps vector must match between sp / non-sp entry-points";
+
+    // group_block_nums population parity (length match — values may differ
+    // for non-FULL additions across MTP modules, but both paths must have
+    // populated the vector).
+    EXPECT_EQ(non_sp_config.group_block_nums.size(), sp_config_out.group_block_nums.size())
+        << "F02 group_block_nums must be populated on both entry-points";
+    EXPECT_FALSE(sp_config_out.group_block_nums.empty())
+        << "createSpConfig must populate group_block_nums in F02 path";
 }
 
 }  // namespace test

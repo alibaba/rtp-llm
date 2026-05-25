@@ -181,9 +181,29 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
             // grep. Production deployments SHOULD set --state_pool_memory_mb
             // explicitly; otherwise pinned-CPU bytes scale linearly with
             // HBM budget and can exhaust host RLIMIT_MEMLOCK on dense
-            // multi-rank-per-host fleets. Hard cap deferred to follow-up
-            // (track via canary/PHASE5_CANARY_PROCEDURE.md §1.0 item 10).
-            constexpr size_t kPrefillPinnedFallbackWarnBytes = 8ULL * 1024 * 1024 * 1024;  // 8 GiB
+            // multi-rank-per-host fleets.
+            //
+            // Canary §1.0 item 10 (R6 DEV-α): HARD CAP at 64 GiB/pool. The
+            // WARN threshold remains 8 GiB so operators get an early signal,
+            // but the CHECK fail-fasts before silent host OOM lands a
+            // production rank in unrecoverable mlock pressure. The cap is
+            // intentionally well above the WARN to give canary deployments
+            // (which can legitimately want >8 GiB on H20/B300/GB200) room
+            // while still protecting dense multi-rank-per-host fleets where
+            // default RLIMIT_MEMLOCK is in the 64-128 GiB range.
+            constexpr size_t kPrefillPinnedFallbackWarnBytes    = 8ULL * 1024 * 1024 * 1024;   // 8 GiB
+            constexpr size_t kPrefillPinnedFallbackHardCapBytes = 64ULL * 1024 * 1024 * 1024;  // 64 GiB
+            RTP_LLM_CHECK_WITH_INFO(
+                host_bytes < kPrefillPinnedFallbackHardCapBytes,
+                "DSV4 state pools (PREFILL default): pinned-CPU fallback %zu B "
+                "exceeds hard cap %zu B (per pool). Operator MUST set "
+                "--state_pool_memory_mb explicitly for this deployment. "
+                "block_num=%u per-block=%zu B. "
+                "See canary/PHASE5_CANARY_PROCEDURE.md §1.0 item 10.",
+                host_bytes,
+                kPrefillPinnedFallbackHardCapBytes,
+                block_num,
+                config.state_block_size_bytes);
             if (host_bytes > kPrefillPinnedFallbackWarnBytes) {
                 RTP_LLM_LOG_WARNING(
                     "DSV4 state pools (PREFILL default): UNBOUNDED pinned-CPU "
@@ -343,9 +363,52 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
             const size_t state_in_hbm = cfg.state_pool_uses_pinned_cpu ? 0u : cfg.state_block_size_bytes;
             return cfg.block_size_bytes + swa_eff + state_in_hbm;
         };
-        block_num =
-            paged_budget
-            / (effective_size(score_config) + effective_size(propose_config) * static_cast<size_t>(num_mtp_modules));
+        // Canary §1.0 item 1 / R02 H-1 / DEFEND-3 HIGH-1 (R6 DEV-α): when the
+        // F02 unified path is enabled, size via Σ_p bps[p] * group_block_size_bytes[p]
+        // so the merged config produces num_super_blocks > 0 downstream and
+        // HybridPoolKVCacheAllocator::init does not crash on the CHECK(budget>0).
+        // STATE pools are excluded from the HBM divisor when they live on
+        // pinned CPU (mirror createConfig L122-135).
+        auto super_block_bytes_hbm = [&](const CacheConfig& cfg) -> size_t {
+            const size_t group_count = cfg.group_block_size_bytes.size();
+            RTP_LLM_CHECK_WITH_INFO(cfg.super_block_layout.bps.size() == group_count,
+                                    "sp DSV4 unified path: super_block_layout.bps size %zu != group_count %zu",
+                                    cfg.super_block_layout.bps.size(),
+                                    group_count);
+            size_t bytes = 0;
+            for (size_t p = 0; p < group_count; ++p) {
+                const auto region = p < cfg.group_region_names.size() ? cfg.group_region_names[p] :
+                                                                        KVCacheRegionName::DEFAULT;
+                if (cfg.state_pool_uses_pinned_cpu && isStateRegion(region)) {
+                    continue;
+                }
+                bytes += static_cast<size_t>(cfg.super_block_layout.bps[p]) * cfg.group_block_size_bytes[p];
+            }
+            return bytes;
+        };
+        const bool score_unified   = score_config.super_block_layout.enabled;
+        const bool propose_unified = propose_config.super_block_layout.enabled;
+        // score and propose come from the same KVCacheConfig in createBasicConfig,
+        // so dsv4_unified_block_count flips both pole flags together. Mixed state
+        // here would be a config bug.
+        RTP_LLM_CHECK_WITH_INFO(score_unified == propose_unified,
+                                "sp DSV4 unified flag mismatch: score=%d propose=%d (must match)",
+                                score_unified,
+                                propose_unified);
+        size_t divisor = 0;
+        if (score_unified) {
+            const size_t score_super   = super_block_bytes_hbm(score_config);
+            const size_t propose_super = super_block_bytes_hbm(propose_config);
+            divisor = score_super + propose_super * static_cast<size_t>(num_mtp_modules);
+            RTP_LLM_CHECK_WITH_INFO(divisor > 0,
+                                    "sp DSV4 unified path: divisor=0 (score_super=%zu, propose_super=%zu, num_mtp=%d)",
+                                    score_super,
+                                    propose_super,
+                                    num_mtp_modules);
+        } else {
+            divisor = effective_size(score_config) + effective_size(propose_config) * static_cast<size_t>(num_mtp_modules);
+        }
+        block_num = paged_budget / divisor;
     }
 
     RTP_LLM_CHECK_WITH_INFO(block_num > 0, "kv cache needs at least 1 block but %zu", block_num);
@@ -377,7 +440,21 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
         // (typically 0 — SWA-only) cannot trip it.
         if (role_type == RoleType::PREFILL && cfg.state_block_size_bytes > 0) {
             const size_t host_bytes = static_cast<size_t>(block_num) * cfg.state_block_size_bytes;
-            constexpr size_t kPrefillPinnedFallbackWarnBytes = 8ULL * 1024 * 1024 * 1024;  // 8 GiB
+            // Canary §1.0 item 10 (R6 DEV-α): mirror createConfig HARD CAP on
+            // the sp entry-point. Hard cap 64 GiB/pool, WARN 8 GiB/pool.
+            constexpr size_t kPrefillPinnedFallbackWarnBytes    = 8ULL * 1024 * 1024 * 1024;   // 8 GiB
+            constexpr size_t kPrefillPinnedFallbackHardCapBytes = 64ULL * 1024 * 1024 * 1024;  // 64 GiB
+            RTP_LLM_CHECK_WITH_INFO(
+                host_bytes < kPrefillPinnedFallbackHardCapBytes,
+                "[Sp] DSV4 state pools (PREFILL default): pinned-CPU fallback %zu B "
+                "exceeds hard cap %zu B (per pool). Operator MUST set "
+                "--state_pool_memory_mb explicitly for this deployment. "
+                "block_num=%u per-block=%zu B. "
+                "See canary/PHASE5_CANARY_PROCEDURE.md §1.0 item 10.",
+                host_bytes,
+                kPrefillPinnedFallbackHardCapBytes,
+                static_cast<uint32_t>(block_num),
+                cfg.state_block_size_bytes);
             if (host_bytes > kPrefillPinnedFallbackWarnBytes) {
                 RTP_LLM_LOG_WARNING(
                     "[Sp] DSV4 state pools (PREFILL default): UNBOUNDED pinned-CPU "
@@ -526,12 +603,56 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
         }
         sub_cfg->finalizeBlockNums(static_cast<uint32_t>(block_num), propose_state_block_num, runtime_config);
         sub_cfg->state_block_num = propose_state_block_num;
+        // Canary §1.0 item 1 (R6 DEV-α): mirror createConfig F02 write-back on
+        // sub_cfg so any per-sub allocator init also passes
+        // HybridPoolKVCacheAllocator::init CHECK(num_super_blocks>0).
+        if (sub_cfg->super_block_layout.enabled) {
+            sub_cfg->super_block_layout.num_super_blocks = static_cast<uint32_t>(block_num);
+            const size_t sub_group_count                 = sub_cfg->group_block_size_bytes.size();
+            RTP_LLM_CHECK_WITH_INFO(sub_cfg->super_block_layout.bps.size() == sub_group_count,
+                                    "sp DSV4 unified path (sub_cfg): bps size %zu != group_count %zu",
+                                    sub_cfg->super_block_layout.bps.size(),
+                                    sub_group_count);
+            sub_cfg->group_block_nums.assign(sub_group_count, 0);
+            for (size_t p = 0; p < sub_group_count; ++p) {
+                uint32_t   blocks  = static_cast<uint32_t>(block_num) * sub_cfg->super_block_layout.bps[p];
+                const bool is_full = p < sub_cfg->group_types.size() && sub_cfg->group_types[p] == CacheGroupType::FULL;
+                if (!is_full) {
+                    blocks += sub_cfg->non_full_addition_kvcache_blocks;
+                }
+                sub_cfg->group_block_nums[p] = blocks;
+            }
+        }
         config.mtp_sub_configs.push_back(sub_cfg);
     }
 
     config.finalizeBlockNums(static_cast<uint32_t>(block_num), score_state_block_num, runtime_config);
     config.state_block_num          = score_state_block_num;
     config.fixed_pool_reserve_bytes = fixed_reserve;
+
+    // Canary §1.0 item 1 / R02 H-1 / DEFEND-3 HIGH-1 (R6 DEV-α): F02 unified
+    // path requires num_super_blocks > 0 and group_block_nums populated via
+    // block_num * bps[p] (+non_full_addition for non-FULL). Mirrors
+    // createConfig L211-227 on the sp entry-point so DSV4+MTP ranks no longer
+    // crash at HybridPoolKVCacheAllocator::init when dsv4_unified_block_count=1.
+    if (config.super_block_layout.enabled) {
+        config.super_block_layout.num_super_blocks = static_cast<uint32_t>(block_num);
+        const size_t group_count                   = config.group_block_size_bytes.size();
+        RTP_LLM_CHECK_WITH_INFO(config.super_block_layout.bps.size() == group_count,
+                                "sp DSV4 unified path (merged): super_block_layout.bps size %zu "
+                                "!= group_count %zu (score-derived bps must match merged groups)",
+                                config.super_block_layout.bps.size(),
+                                group_count);
+        config.group_block_nums.assign(group_count, 0);
+        for (size_t p = 0; p < group_count; ++p) {
+            uint32_t   blocks  = static_cast<uint32_t>(block_num) * config.super_block_layout.bps[p];
+            const bool is_full = p < config.group_types.size() && config.group_types[p] == CacheGroupType::FULL;
+            if (!is_full) {
+                blocks += config.non_full_addition_kvcache_blocks;
+            }
+            config.group_block_nums[p] = blocks;
+        }
+    }
 
     const auto kv_cache_seq_len = static_cast<size_t>(block_num) * config.seq_size_per_block;
     RTP_LLM_LOG_INFO("CacheConfig created: is_mtp=%d, total_layers=%u, num_mtp_modules=%d, block_num=%zu, "

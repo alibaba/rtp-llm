@@ -268,12 +268,31 @@ public:
     void decUseRef(CacheKeyType K) {
         std::lock_guard<std::mutex> lock(mu_);
         auto it = use_ref_.find(K);
-        if (it == use_ref_.end() || it->second <= 0) {
-            // Heavy-churn race: bump was already drained (e.g. by evict path
-            // wiping the K entirely). No-op rather than fail — mirrors
-            // SharedBlockCache::decUseRef tolerance for legacy mirror.
+        if (it == use_ref_.end()) {
+            // DEFEND1 HIGH-4 (R6 DEV-γ): K missing entirely is a tolerable
+            // race — the bump may have been drained by an evict path that
+            // wiped K (e.g. SharedBlockCache::remove called between bump and
+            // abandon). Warn so a high rate surfaces as a real bug rather
+            // than being silently no-op'd as it was before.
+            RTP_LLM_LOG_WARNING(
+                "UnifiedRefCounter::decUseRef no-op for K=%ld (use_ref already drained) — "
+                "tolerable under heavy LRU churn but a high rate indicates a guard-accounting "
+                "bug (double-abandon / incUseRef returned false but addKey called anyway)",
+                static_cast<long>(K));
             return;
         }
+        // DEFEND1 HIGH-4 (R6 DEV-γ): K present with non-positive counter is a
+        // structural invariant violation — we ERASE entries at zero (see below),
+        // so reaching here with it->second <= 0 means dual-storage corruption
+        // or a missed erase. Fail loud rather than silently no-op (the prior
+        // silent path hid the guard-accounting bug; the eventual symptom was
+        // ``inUse(S)`` returning false too early -> premature eviction ->
+        // use-after-free on the tensor pointer).
+        RTP_LLM_CHECK_WITH_INFO(it->second > 0,
+                                "UnifiedRefCounter::decUseRef underflow for K=%ld "
+                                "(counter present but value=%d <= 0; entries should be erased at 0)",
+                                static_cast<long>(K),
+                                it->second);
         --it->second;
         if (it->second == 0) {
             const int S = use_ref_S_.at(K);
@@ -294,6 +313,17 @@ public:
         std::lock_guard<std::mutex> lock(mu_);
         auto it = use_ref_.find(K);
         return it == use_ref_.end() ? 0 : it->second;
+    }
+
+    // DEFEND1 HIGH-9 (R6 DEV-γ) — invariant helper. Returns the number of
+    // distinct keys currently holding at least one use_ref bump. Used by
+    // SharedBlockCache::assertMirrorInvariant_DCHECK to verify that the LRU
+    // mirror's per-item ``use_ref`` count matches the counter's view. Cheap
+    // (O(1) on unordered_map::size); takes the counter's mu_ so the read is
+    // consistent with the most recent bump/dec.
+    size_t useRefMapSize() const {
+        std::lock_guard<std::mutex> lock(mu_);
+        return use_ref_.size();
     }
 
 private:

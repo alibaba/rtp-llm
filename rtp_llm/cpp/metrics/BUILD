@@ -33,3 +33,16 @@ cc_test(
         "@com_google_googletest//:gtest_main",
     ],
 )
+
+# R6 DEV-zeta — canary G5 gauge counter coverage.
+cc_test(
+    name = "kv_cache_canary_metrics_test",
+    srcs = [
+        "KVCacheCanaryMetricsTest.cc",
+    ],
+    deps = [
+        ":metrics",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)

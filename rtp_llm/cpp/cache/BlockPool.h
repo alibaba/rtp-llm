@@ -80,6 +80,8 @@ private:
     // global_layer_id -> {layout_index, local_layer_id}
     std::pair<int, int> mapGlobalLayerIdToLocal(int global_layer_id) const;
     void                checkLayoutValidity(int layout_id) const;
+    // R6 DEFEND-2 HIGH-2: block_id bounds CHK shared by all convertIndex* paths.
+    void                checkBlockIdBounds(int block_id) const;
 
     // Helper functions for init()
     void validateConfig() const;

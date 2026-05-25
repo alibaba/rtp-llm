@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
 #include "rtp_llm/cpp/cache/KVCacheTransferPlanner.h"
+#include "rtp_llm/cpp/metrics/KVCacheCanaryMetrics.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
@@ -678,6 +679,12 @@ bool KVCacheConnectorCoordinator::validatePeerHandshake(const HandshakeInfo& pee
     }
     RTP_LLM_LOG_WARNING("PD handshake mismatch — pairing falls back to legacy-only: %s", err.c_str());
     recordPdSaltMismatchSkipped(metrics_reporter_);
+    // G5d canary alias (PHASE5_CANARY_PROCEDURE.md §3 gate G5d / §1 item 7
+    // pd.peer.refused_total). The salt-mismatch path is today's only peer
+    // refusal source — wiring the canary counter here keeps it bit-aligned
+    // with rtp_llm's existing pd.cache.salt_mismatch_skipped, and gives a
+    // forward-compat hook for any future refusal reasons (R6 DEV-zeta).
+    recordCanaryPeerRefused(metrics_reporter_);
     return false;
 }
 

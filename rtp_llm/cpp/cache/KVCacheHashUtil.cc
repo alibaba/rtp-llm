@@ -24,6 +24,47 @@ inline uint64_t fold8(uint64_t v) {
 // Assemble the v2 salt layout: each field occupies its own byte window
 // of the resulting uint64. See KVCacheHashUtil.h for the on-wire diagram.
 inline uint64_t packSaltBytes(const CacheKeySalt& s) {
+    // R6 DEV-ε / DEFEND-4 HIGH-4: per-field byte-range CHECK.  Each single-
+    // byte field (dtype_id, lora_id, K_state, Tlog) must fit in 0..255 — the
+    // ``& 0xffull`` masks below silently truncate >255 values to 0, which
+    // (combined with ``nonzeroFieldBitmap`` reading the wide source field)
+    // produces bitmap=set yet salt-byte=0 → distinct configs share salt
+    // bytes while handshake bitmap reports as "same config" → silent
+    // reuse-miss across PD peers (REQ-D1 false-negative).  Reject up-front
+    // so the misconfig fires at the salt boundary, not silently downstream.
+    // Use RTP_LLM_CHECK_WITH_INFO (release-active) — same pattern as the
+    // reserved-bytes CHECK below.  Producer ``makeCacheKeySalt`` clamps
+    // K_state to [0,128] already (FIX-B HIGH-1); these CHECKs cover the
+    // handshake-receive path and any future producer wiring dtype/lora/Tlog.
+    RTP_LLM_CHECK_WITH_INFO(s.dtype_id <= 0xFFu,
+                            "CacheKeySalt.dtype_id=%u exceeds 0xFF; silent truncation to byte1=0 hazard",
+                            s.dtype_id);
+    RTP_LLM_CHECK_WITH_INFO(s.lora_id <= 0xFFu,
+                            "CacheKeySalt.lora_id=%u exceeds 0xFF; producer must fold (e.g. id %% 256) "
+                            "before assignment to avoid silent byte2 truncation",
+                            s.lora_id);
+    RTP_LLM_CHECK_WITH_INFO(s.K_state <= 0xFFu,
+                            "CacheKeySalt.K_state=%u exceeds 0xFF; DSV4CacheConfigHelper normalises 256 "
+                            "to 0 (kernel identity) — values above 128 are an upstream bug",
+                            s.K_state);
+    RTP_LLM_CHECK_WITH_INFO(s.Tlog <= 0xFFu,
+                            "CacheKeySalt.Tlog=%u exceeds 0xFF; super-block layout step must fit in one byte",
+                            s.Tlog);
+    // R6 DEV-ε / DEFEND-4 HIGH-2: fold8(model_id) can collapse a non-zero
+    // model_id to byte0=0 (e.g. model_id=0x0101_0101_0101_0101 → fold8==0).
+    // ``nonzeroFieldBitmap`` reports bit0=1 (uses raw source field) while
+    // the packed salt byte0=0 — two peers with distinct fold-colliding
+    // model_ids share salt bytes AND bitmap → PD handshake passes yet
+    // cache_keys collide → silent reuse-miss masked as a hit.  Reject the
+    // collision so the operator perturbs model_id (1 byte of fold space,
+    // ~1/256 odds — rare in practice but worth catching loud).  Skipped
+    // when model_id==0 (legacy unsalted entry, bit0=0 by design).
+    RTP_LLM_CHECK_WITH_INFO(s.model_id == 0 || fold8(s.model_id) != 0,
+                            "CacheKeySalt.model_id=0x%lx folds to byte0=0 (fold8 collision); "
+                            "bitmap bit0 would report set yet salt byte0=0 → silent cache_key collision "
+                            "across distinct configs.  Perturb model_id by 1 to avoid the alias.",
+                            static_cast<unsigned long>(s.model_id));
+
     uint64_t bytes = 0;
     bytes |= fold8(s.model_id)                                                << (0 * 8);
     bytes |= (static_cast<uint64_t>(s.dtype_id) & 0xffull)                    << (1 * 8);

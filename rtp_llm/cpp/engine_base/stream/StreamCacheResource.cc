@@ -220,6 +220,13 @@ void StreamCacheResource::init(int batch_size) {
         group_types              = cache_config.group_types;
         layer_region_to_group    = cache_config.layer_region_to_group_id;
         if (cache_config.kernel_seq_size_per_block > 0 && cache_config.seq_size_per_block > 0) {
+            // DEFEND-5 HIGH-3: bpk divisibility.  Integer division silently truncates; DSV4
+            // mixed-precision (FP8 CSA / BF16 HCA) uses 128/64.  A future typo (e.g. 192/128)
+            // yields bpk=1 instead of error → KV pointer arithmetic reads wrong slot.
+            RTP_LLM_CHECK_WITH_INFO(cache_config.seq_size_per_block % cache_config.kernel_seq_size_per_block == 0,
+                                    "seq_size_per_block (%zu) must be divisible by kernel_seq_size_per_block (%zu)",
+                                    cache_config.seq_size_per_block,
+                                    cache_config.kernel_seq_size_per_block);
             kernel_blocks_per_kv_block = cache_config.seq_size_per_block / cache_config.kernel_seq_size_per_block;
         }
     }
@@ -346,6 +353,17 @@ absl::Status StreamCacheResource::initKVBlock(size_t reserve_step) {
     const bool is_decode_role  = (resource_context_.role_type == RoleType::DECODE);
     const bool is_first_malloc = (batch_kv_cache_resource_->curBlocksNum() == 0);
 
+    // DEFEND-5 HIGH-6: PD decode first-malloc + pd_kvcache_ref_ ownership mutex.
+    // holdKVCacheForPDSep() can attach a pd_kvcache_ref_ from a pre-enqueue CanRun path
+    // WITHOUT growing curBlocksNum() (the ref tracks connector pin, not local block table).
+    // If we then enter the "first malloc" path while pd_kvcache_ref_ is already held, the
+    // decode-side reuse of device cache races against the PD-pinned block → ref-count
+    // double-free on release.  Fail-fast here surfaces the wiring bug at malloc time.
+    RTP_LLM_CHECK_WITH_INFO(!is_decode_role || !is_first_malloc || pd_kvcache_ref_ == nullptr,
+                            "PD decode first-malloc collides with active pd_kvcache_ref_ (stream=%ld): "
+                            "double-ownership of KV blocks",
+                            stream_->streamId());
+
     if (disable_first_malloc_reuse && is_decode_role && is_first_malloc) {
         malloc_info.reuse_cache         = false;
         malloc_info.enable_device_cache = false;
@@ -377,6 +395,19 @@ absl::Status StreamCacheResource::incrKVBlock(size_t reserve_step, int seq_len_o
     // TODO(xinfei.sxf) add reserver_blocks
     if (fake_inited_) {
         return absl::InternalError("fake inited not allow to incr block");
+    }
+
+    // DEFEND-5 HIGH-2: seq_len_override upper-bound.  This is a recently-added back-door
+    // forwarded straight into MallocInfo::incr_seq_len_override.  No callee validates the
+    // upper bound; an out-of-range override (BatchDecodeScheduler / future MTP path) lets
+    // decode walk past max_seq_len, write block_table entries beyond pool, corrupt others.
+    if (seq_len_override != -1) {
+        const size_t max_seq_len = stream_->maxSeqLen();
+        RTP_LLM_CHECK_WITH_INFO(seq_len_override > 0 && static_cast<size_t>(seq_len_override) <= max_seq_len,
+                                "incrKVBlock seq_len_override=%d out of range (max_seq_len=%zu, stream=%ld)",
+                                seq_len_override,
+                                max_seq_len,
+                                stream_->streamId());
     }
 
     MallocInfo malloc_info;

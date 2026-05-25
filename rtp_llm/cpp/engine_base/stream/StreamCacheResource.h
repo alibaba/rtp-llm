@@ -6,6 +6,7 @@
 #include "absl/status/statusor.h"
 #include "rtp_llm/cpp/engine_base/stream/ResourceContext.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
 
@@ -82,7 +83,18 @@ public:
     int reuseBlockTokens() const {
         const auto& mapper = resource_context_.cache_manager->cpSlotMapper();
         if (mapper && mapper->isSharded()) {
-            return mapper->virtualBlockSize();
+            // DEFEND-5 HIGH-4: virtualBlockSize() sanity. If an uninitialised mapper returns
+            // 0, all reuse lengths silently become 0 and CSC re-issues full prefill ignoring
+            // cached prefix — a perf cliff that masquerades as correctness regression.
+            // Also enforce virtualBlockSize is a clean multiple of physical blockSize so the
+            // token-count math in updateReuseLengthsFromContext() stays integral.
+            const int vbs = mapper->virtualBlockSize();
+            const int bs  = mapper->blockSize();
+            RTP_LLM_CHECK_WITH_INFO(vbs > 0 && bs > 0 && (vbs % bs == 0),
+                                    "CPSlotMapper virtualBlockSize/blockSize invalid: vbs=%d bs=%d",
+                                    vbs,
+                                    bs);
+            return vbs;
         }
         return resource_context_.cache_manager->cacheConfig().seq_size_per_block;
     }

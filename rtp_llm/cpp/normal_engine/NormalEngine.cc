@@ -66,6 +66,12 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
                        + params.parallelism_config.tp_rank) {
     RTP_LLM_LOG_INFO(__PRETTY_FUNCTION__);
     if (propose_params_) {
+        // DEFEND-5 MEDIUM #7: gen_num_per_circle == 0 yields reserve_step_=1 but downstream
+        // metrics_accept_len_propose_token_num_ normalisation divides by gen_num_per_circle.
+        // Fail-fast on malformed propose config rather than NaN-ing metrics mid-run.
+        RTP_LLM_CHECK_WITH_INFO(propose_params_->gen_num_per_circle > 0,
+                                "propose_params.gen_num_per_circle must be > 0, got %d",
+                                propose_params_->gen_num_per_circle);
         reserve_step_ = propose_params_->gen_num_per_circle + 1;
     } else {
         reserve_step_ = 0;
@@ -387,10 +393,29 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
             RTP_LLM_FAIL("init kv cache manager failed");
         }
 
+        // DEFEND-5 HIGH-1: role_type tri-consistency post-init (SP branch).
+        // resource_context_.role_type / pd_sep_config.role_type / value passed to
+        // KVCacheManager ctor must agree. Catches future refactors that flip one
+        // copy (e.g. SP path normalising role under MTP) and leave the others stale.
+        // Third leg (cache_manager_->roleType()) requires accessor not yet exposed —
+        // tracked separately; this CHECK still defends the resource_context_ leg.
+        RTP_LLM_CHECK_WITH_INFO(resource_context_.role_type == pd_sep_config.role_type,
+                                "role_type inconsistency post-init (SP branch): resource=%d pd_sep=%d",
+                                static_cast<int>(resource_context_.role_type),
+                                static_cast<int>(pd_sep_config.role_type));
+
         const auto& cache_cfg    = resource_context_.cache_manager->cacheConfig();
         kv_cache_group_num_      = cache_cfg.groupNums();
         kv_cache_layer_to_group_ = cache_cfg.layer_to_group_id;
     } else {
+        // DEFEND-5 HIGH-5: sp_config asymmetric branch.  The non-SP branch below passes an
+        // empty SpeculativeExecutionConfig{} to KVCacheManager.  If user set sp_config but
+        // forgot propose_params_ (or draftModel returns null), scheduler reserves no SP
+        // budget while runtime config still thinks SP is on — KV OOM mid-stream.
+        RTP_LLM_CHECK_WITH_INFO(!(sp_config.gen_num_per_cycle > 0) || (propose_params_ && propose_params_->draftModel()),
+                                "sp_config.gen_num_per_cycle=%d > 0 but propose_params_/draftModel missing — "
+                                "SP cache budget would be under-counted",
+                                sp_config.gen_num_per_cycle);
         auto result = CacheConfigCreator::createConfig(model_config_,
                                                        parallelism_config,
                                                        runtime_config,
@@ -416,6 +441,14 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
         }
+
+        // DEFEND-5 HIGH-1: role_type tri-consistency post-init (non-SP branch). See SP branch
+        // above for rationale; mirrored here so both construction paths fail-fast on drift.
+        RTP_LLM_CHECK_WITH_INFO(resource_context_.role_type == pd_sep_config.role_type,
+                                "role_type inconsistency post-init (non-SP branch): resource=%d pd_sep=%d",
+                                static_cast<int>(resource_context_.role_type),
+                                static_cast<int>(pd_sep_config.role_type));
+
         const auto& cache_cfg    = resource_context_.cache_manager->cacheConfig();
         kv_cache_group_num_      = cache_cfg.groupNums();
         kv_cache_layer_to_group_ = cache_cfg.layer_to_group_id;

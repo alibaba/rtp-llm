@@ -137,32 +137,26 @@ public:
 
 private:
     void initConnectorCoordinator();
-    void allocateAndSync();
     void reportMetricsLoop();
 
+    // R6 DEFEND-2 / DEV-2: XR4-9 const-correctness refactor landed.
+    //   ``config_`` is now ``const CacheConfig`` — every read sees the
+    //   exact post-allocateAndSync, post-finalizeBlockNums snapshot and
+    //   no in-flight mutation can drift it.  The two original mutation
+    //   sites (warmup branch and ``allocateAndSync``) were lifted into a
+    //   static helper ``buildFinalConfig(...)`` invoked from the
+    //   constructor initializer list, so the field is initialised once
+    //   and never assigned again.  This also closes the FIX-B
+    //   ``initialized_`` guard's "config rewritten on second init"
+    //   hazard at the compiler level (any future mutation site would
+    //   fail to compile).
+    static CacheConfig buildFinalConfig(CacheConfig              config,
+                                        bool                     warmup,
+                                        const ParallelismConfig& parallelism_config,
+                                        const RuntimeConfig&     runtime_config);
+
     // 成员变量
-    //
-    // F01-PR2-followup task 5 audit (XR4-9 const-correctness drift hazard):
-    //   ``config_`` cannot be flipped to ``const CacheConfig`` today
-    //   because the constructor body mutates it in two places before
-    //   the engine becomes observable:
-    //     - warmup branch:        ``config_.block_num = 1;`` (line ~52)
-    //     - allocateAndSync(): cross-rank min of block_num + a follow-up
-    //                          ``config_.finalizeBlockNums(...)`` re-derives
-    //                          ``group_block_nums`` / ``fixed_pool_reserve_bytes``.
-    //   Both happen during construction; nothing outside the ctor /
-    //   allocateAndSync mutates ``config_`` (verified by grep). To make
-    //   this field genuinely ``const`` we would need to lift those
-    //   mutations into a static ``buildFinalConfig(...)`` helper invoked
-    //   from the initializer list, which is a bigger refactor than this
-    //   PR scope. Tracked as XR4-9 follow-up: see
-    //   ``docs/dsv4/kvcache-unify-final/reviews/DEV2_salt_kstate.md``.
-    //
-    // Invariant maintained today: every read of ``config_`` outside the
-    // ctor body sees the post-allocateAndSync, post-finalizeBlockNums
-    // snapshot. Do NOT add new mutations of ``config_`` outside the
-    // constructor body.
-    CacheConfig         config_;
+    const CacheConfig   config_;
     KVCacheAllocatorPtr allocator_;
 
     const kmonitor::MetricsReporterPtr metrics_reporter_;

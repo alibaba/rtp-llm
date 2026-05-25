@@ -35,6 +35,15 @@ int SuperBlockFreeList::allocSuperBlock() {
     free_list_.pop_front();
     // §1.1 invariant 1 (defence in depth): never hand out 0.
     RTP_LLM_CHECK_WITH_INFO(s > 0, "SuperBlockFreeList produced reserved id 0");
+    // DEFEND1 HIGH-6 (alloc-side bound, defence in depth): every value on the
+    // free list MUST be in the valid id range. A corrupted entry (e.g. via a
+    // stale ptr smashing free_list_'s underlying chunk) would silently route
+    // an out-of-range S into ``poolBlockId`` and crash deep in BlockPool — fail
+    // here so the blame is on the allocator surface.
+    RTP_LLM_CHECK_WITH_INFO(static_cast<uint32_t>(s) < num_super_blocks_,
+                            "SuperBlockFreeList::allocSuperBlock produced out-of-range id %d (budget=%u)",
+                            s,
+                            num_super_blocks_);
     return s;
 }
 
@@ -44,7 +53,34 @@ void SuperBlockFreeList::freeSuperBlock(int S) {
                             S,
                             num_super_blocks_);
     std::lock_guard<std::mutex> lk(mu_);
+    // DEFEND1 HIGH-1 (R6 DEV-γ): double-free is silent corruption — two
+    // ``allocSuperBlock()`` calls would hand out the same S, aliasing two
+    // requests onto the same KV super-block. The free list is small
+    // (num_super_blocks_ is typically <= a few thousand; one super-block per
+    // request), so the O(N) linear scan is acceptable on the free path and
+    // strictly cheaper than the eventual silent precision corruption. Always-on
+    // (not DCHECK) because corruption is unrecoverable.
+    RTP_LLM_CHECK_WITH_INFO(std::find(free_list_.begin(), free_list_.end(), S) == free_list_.end(),
+                            "SuperBlockFreeList double-free: S=%d already on free list "
+                            "(size=%zu, budget=%u) — caller deced CACHE/REQUEST twice for same S, "
+                            "or a reclaim callback re-fired after an earlier unifiedFree pushed S",
+                            S,
+                            free_list_.size(),
+                            num_super_blocks_);
     free_list_.push_back(S);
+    // DEFEND1 HIGH-6 (R6 DEV-γ): post-push overflow guard. Free list holds IDs
+    // in [1, num_super_blocks_), so its size MUST stay <= num_super_blocks_ - 1.
+    // Crossing the budget means ``freeSuperBlock`` fired more times than total
+    // budget — symptom of a reclaim-callback closure firing twice on the same
+    // S (caught by HIGH-1 above) or an external caller releasing a never-
+    // allocated id (HIGH-1 cannot catch this when the duplicate slid past
+    // between scans). This is a final post-condition safety net.
+    RTP_LLM_CHECK_WITH_INFO(free_list_.size() < num_super_blocks_,
+                            "SuperBlockFreeList overflow: free_list_.size=%zu >= budget=%u — "
+                            "every S released without any alloc held (likely reclaim callback "
+                            "double-fired or external free of unallocated id)",
+                            free_list_.size(),
+                            num_super_blocks_);
 }
 
 size_t SuperBlockFreeList::totalCount() const {
@@ -81,6 +117,33 @@ bool HybridPoolKVCacheAllocator::doInit() {
                             "cache_specs size %zu != global_layer_ids size %zu",
                             config_.cache_specs.size(),
                             config_.global_layer_ids.size());
+
+    // R6 DEFEND-2 HIGH-6: STATE-on-pinned-CPU invariant CHK.  The flag
+    // ``state_pool_uses_pinned_cpu`` is the single source of truth that
+    // moves STATE pools off device HBM and onto pinned CPU.  It MUST only
+    // be set when (a) state_block_size_bytes > 0 (i.e. the model actually
+    // has STATE regions to size — non-DSV4 paths leave it zero) AND (b)
+    // there is at least one STATE region in the layout.  A regressing
+    // CacheConfigCreator that flips the flag without those preconditions
+    // would silently allocate zero-byte pinned CPU pools and double-count
+    // STATE in the HBM accounting — manifests as OOM at peak QPS, hard to
+    // root-cause.  Catching here aborts at construction with a clear
+    // message instead of later under load.
+    if (allocation_type_ == AllocationType::DEVICE && config_.state_pool_uses_pinned_cpu) {
+        bool has_state_region = false;
+        for (const auto& r : config_.group_region_names) {
+            if (isStateRegion(r)) {
+                has_state_region = true;
+                break;
+            }
+        }
+        RTP_LLM_CHECK_WITH_INFO(
+            config_.state_block_size_bytes > 0 && has_state_region,
+            "state_pool_uses_pinned_cpu=true but state_block_size_bytes=%zu, has_state_region=%d "
+            "(both must hold). Likely a CacheConfigCreator regression on non-DSV4 PD-prefill path.",
+            config_.state_block_size_bytes,
+            static_cast<int>(has_state_region));
+    }
 
     const int group_nums = static_cast<int>(config_.cache_specs.size());
     group_block_pools_.reserve(static_cast<size_t>(group_nums));
@@ -185,6 +248,26 @@ bool HybridPoolKVCacheAllocator::doInit() {
                          super_block_allocator_->freeCount());
     }
 
+    // R6 DEFEND-2 HIGH-9: bps consistency vs the materialised pool count.
+    // DSV4CacheConfigHelper unconditionally populates ``bps`` with one entry
+    // per cache-spec group (defaults to ``1u``), regardless of
+    // ``super_block_layout.enabled`` — so the right invariant is "non-empty
+    // bps MUST agree with group_block_pools_ size" rather than "bps empty
+    // when disabled".  A regression that populated bps with the wrong
+    // length would let ``poolBlockId(p, S, k)`` index an OOB slot at
+    // unifiedMalloc and silently diverge from the legacy per-pool path
+    // (manifests as PD cache_keys mismatch).  The existing CHK INSIDE the
+    // isUnified() branch (L149-152) only fires when unified is ON; this
+    // one is the always-on companion.
+    if (!config_.super_block_layout.bps.empty()) {
+        RTP_LLM_CHECK_WITH_INFO(config_.super_block_layout.bps.size() == group_block_pools_.size(),
+                                "super_block_layout.bps size %zu != group_block_pools_ size %zu "
+                                "(post-init divergence; enabled=%d)",
+                                config_.super_block_layout.bps.size(),
+                                group_block_pools_.size(),
+                                static_cast<int>(config_.super_block_layout.isUnified()));
+    }
+
     RTP_LLM_LOG_INFO("HybridPoolKVCacheAllocator init success, group pools=%zu, unified=%s",
                      group_block_pools_.size(),
                      config_.super_block_layout.isUnified() ? "true" : "false");
@@ -246,6 +329,21 @@ int HybridPoolKVCacheAllocator::groupIdForLayerRegion(int layer_id, KVCacheRegio
 void HybridPoolKVCacheAllocator::referenceBlocksInGroup(int                     gid,
                                                         const BlockIndicesType& blocks,
                                                         bool                    is_connector) const {
+    // R6 DEFEND-2 HIGH-1: gid bounds + pool nullness on every fan-out into
+    // a per-group BlockPool.  Without this CHK a caller (PD connector or
+    // unifiedFree fallback) handing in a stale / -1 / oversized gid would
+    // index group_block_pools_ via ``static_cast<size_t>(-1)`` = huge index
+    // and SEGV inside ``connectorReference``.  A doInit that left a slot
+    // null (state pool init failed but threw past the per-group CHK) would
+    // similarly null-deref here.  Catching at the fan-out boundary points
+    // the blame at the wrong gid, not at a deep BlockPool stack frame.
+    RTP_LLM_CHECK_WITH_INFO(gid >= 0 && static_cast<size_t>(gid) < group_block_pools_.size(),
+                            "referenceBlocksInGroup: gid=%d out of range [0,%zu) is_connector=%d",
+                            gid,
+                            group_block_pools_.size(),
+                            static_cast<int>(is_connector));
+    RTP_LLM_CHECK_WITH_INFO(group_block_pools_[static_cast<size_t>(gid)] != nullptr,
+                            "referenceBlocksInGroup: group_block_pools_[%d] is null", gid);
     if (is_connector) {
         group_block_pools_[static_cast<size_t>(gid)]->connectorReference(blocks);
     } else {
@@ -254,6 +352,19 @@ void HybridPoolKVCacheAllocator::referenceBlocksInGroup(int                     
 }
 
 void HybridPoolKVCacheAllocator::freeBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector) {
+    // R6 DEFEND-2 HIGH-1: mirror of referenceBlocksInGroup CHK on the free
+    // fan-out.  Symmetric: ``unifiedFree`` and the connector-finish path
+    // both reach this hop; a corrupted gid here drops ref counts on the
+    // wrong pool (silently overshrinks a different group's busy counter)
+    // before SEGVing — both outcomes are worse than aborting at the
+    // boundary.
+    RTP_LLM_CHECK_WITH_INFO(gid >= 0 && static_cast<size_t>(gid) < group_block_pools_.size(),
+                            "freeBlocksInGroup: gid=%d out of range [0,%zu) is_connector=%d",
+                            gid,
+                            group_block_pools_.size(),
+                            static_cast<int>(is_connector));
+    RTP_LLM_CHECK_WITH_INFO(group_block_pools_[static_cast<size_t>(gid)] != nullptr,
+                            "freeBlocksInGroup: group_block_pools_[%d] is null", gid);
     if (is_connector) {
         group_block_pools_[static_cast<size_t>(gid)]->connectorFree(blocks);
     } else {

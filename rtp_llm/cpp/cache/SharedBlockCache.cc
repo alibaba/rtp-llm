@@ -248,6 +248,8 @@ void SharedBlockCache::decUseRef(CacheKeyType cache_key) {
     }
     --item.use_ref;
     lru_cache_.put(cache_key, item);
+    // DEFEND1 HIGH-9 (R6 DEV-γ): post-condition mirror invariant.
+    assertMirrorInvariantUnlocked_DCHECK();
 }
 
 int SharedBlockCache::useRefCount(CacheKeyType cache_key) const {
@@ -298,39 +300,78 @@ void SharedBlockCache::putUnified(CacheKeyType cache_key, int super_block_id, bo
         std::lock_guard<std::mutex> lock(mu_);
 
         // In-place update path: bump version, refresh slot, do NOT cascade.
-        if (lru_cache_.contains(cache_key)) {
+        //
+        // XR4-1 NIT (R6 DEV-γ): collapse the prior ``contains() + get()`` two-
+        // step into a single ``get()`` — LRUCache::get returns {false, default}
+        // and does NOT promote on miss (verified at LRUCache.h:153-160), so the
+        // semantics are identical and we drop one hash lookup off the hot put
+        // path.
+        {
             auto [success, existing_item] = lru_cache_.get(cache_key);
             if (success) {
                 if (existing_item.slots.empty()) {
                     existing_item.slots.resize(1, NULL_BLOCK_IDX);
                 }
-                if (isNullBlockIdx(existing_item.slots[0])
-                    && !isNullBlockIdx(static_cast<BlockIdxType>(super_block_id))) {
-                    existing_item.slots[0] = static_cast<BlockIdxType>(super_block_id);
+                const BlockIdxType incoming = static_cast<BlockIdxType>(super_block_id);
+                const BlockIdxType existing = existing_item.slots[0];
+                const bool         existing_null = isNullBlockIdx(existing);
+                const bool         incoming_null = isNullBlockIdx(incoming);
+
+                if (existing_null && !incoming_null) {
+                    existing_item.slots[0]    = incoming;
                     existing_item.is_resident = is_resident;
                     // M03-PR3 dual-write: bump CACHE on UnifiedRefCounter AND
                     // fan out blockCacheReference to EVERY per-pool counter
                     // (bps[p]==1 ⇒ poolBlockId(p, S, 0) == S). PR-2's pool-0-only
                     // bump was the minimal stub; the full migration touches
                     // each pool so per-pool tryFreeBlocks gates stay coherent.
-                    if (!isNullBlockIdx(static_cast<BlockIdxType>(super_block_id))) {
-                        for (auto& pool : group_pools_) {
-                            if (pool) {
-                                pool->blockCacheReference(static_cast<BlockIdxType>(super_block_id));
-                            }
+                    for (auto& pool : group_pools_) {
+                        if (pool) {
+                            pool->blockCacheReference(incoming);
                         }
-                        // XR2-A2: CACHE bump under L1 — see the new-entry branch
-                        // below for the full lock-order design note (race-vs-evict
-                        // window that motivated the hoist).
-                        if (unified_ref_counter_) {
-                            unified_ref_counter_->bump(super_block_id, UnifiedRefCounter::Kind::CACHE);
-                        }
+                    }
+                    // XR2-A2: CACHE bump under L1 — see the new-entry branch
+                    // below for the full lock-order design note (race-vs-evict
+                    // window that motivated the hoist).
+                    if (unified_ref_counter_) {
+                        unified_ref_counter_->bump(super_block_id, UnifiedRefCounter::Kind::CACHE);
                     }
                     lru_cache_.put(cache_key, existing_item);
                     ++version_;
+                } else if (!existing_null && !incoming_null) {
+                    // DEFEND1 HIGH-3 / XR4-1 (R6 DEV-γ): both slots populated.
+                    //   * Equal incoming S    -> idempotent put; caller's
+                    //     allocSuperBlock bump is intentionally NOT re-bumped
+                    //     (we already hold one CACHE refcount for this K). Warn
+                    //     so a high duplicate-put rate surfaces as an upstream
+                    //     bug rather than silently inflating allocation cost.
+                    //   * Different incoming  -> structurally a bug: the
+                    //     incoming caller allocated S' under the assumption it
+                    //     would be inserted, but we already point K at S. If we
+                    //     dropped silently, the caller's allocSuperBlock bump
+                    //     leaks until process exit (no second cascade pairs
+                    //     with it). Fail loud so the offending producer (likely
+                    //     an evict-then-realloc race that didn't wait for the
+                    //     prior put to drain) is named.
+                    RTP_LLM_CHECK_WITH_INFO(
+                        existing == incoming,
+                        "SharedBlockCache::putUnified conflict K=%ld existing S=%d incoming S=%d "
+                        "— would leak incoming bump (caller allocated via SuperBlockFreeList but "
+                        "current LRU entry already points at a different S)",
+                        static_cast<long>(cache_key),
+                        static_cast<int>(existing),
+                        super_block_id);
+                    RTP_LLM_LOG_WARNING(
+                        "SharedBlockCache::putUnified duplicate put for K=%ld S=%d — refcount NOT "
+                        "bumped (idempotent put); caller-side allocSuperBlock bump must be released "
+                        "or callers will leak one super-block per duplicate put",
+                        static_cast<long>(cache_key),
+                        super_block_id);
                 }
+                // existing_null && incoming_null  -> nothing to do
+                // !existing_null && incoming_null -> incoming carries no payload, leave existing
+                return;
             }
-            return;
         }
 
         UnifiedCacheItem item;
@@ -363,6 +404,10 @@ void SharedBlockCache::putUnified(CacheKeyType cache_key, int super_block_id, bo
                 unified_ref_counter_->bump(super_block_id, UnifiedRefCounter::Kind::CACHE);
             }
         }
+        // DEFEND1 HIGH-9 (R6 DEV-γ): post-condition mirror invariant —
+        // run BEFORE we drop mu_ so any divergence is attributed to this
+        // putUnified rather than a downstream operation.
+        assertMirrorInvariantUnlocked_DCHECK();
     }
 
     // Cascade-free OUTSIDE mu_.
@@ -428,6 +473,8 @@ SharedBlockCache::MatchResultUnified SharedBlockCache::matchUnified(const std::v
             out.super_block_ids.push_back(S);
             out.release_guard.addKey(keys[i]);
         }
+        // DEFEND1 HIGH-9 (R6 DEV-γ): post-condition mirror invariant.
+        assertMirrorInvariantUnlocked_DCHECK();
     }
 
     out.found = !out.super_block_ids.empty();
@@ -504,6 +551,10 @@ SharedBlockCache::selectAndEvictUnified(size_t min_super_blocks) {
     if (!snapshot.empty()) {
         ++version_;
     }
+    // DEFEND1 HIGH-9 (R6 DEV-γ): post-condition mirror invariant. Eviction
+    // only drops items with item.use_ref == 0 (gated above), so LRU pinned
+    // count is unchanged; counter use_ref unchanged. Invariant holds.
+    assertMirrorInvariantUnlocked_DCHECK();
     return snapshot;
 }
 
@@ -532,6 +583,41 @@ size_t SharedBlockCache::evictAndFreeUnified(size_t min_super_blocks) {
     size_t cascaded = 0;
     cascadeUnifiedSnapshot(snapshot, &cascaded);
     return cascaded;
+}
+
+void SharedBlockCache::assertMirrorInvariant_DCHECK() const {
+#ifndef NDEBUG
+    std::lock_guard<std::mutex> lock(mu_);
+    assertMirrorInvariantUnlocked_DCHECK();
+#endif
+}
+
+void SharedBlockCache::assertMirrorInvariantUnlocked_DCHECK() const {
+#ifndef NDEBUG
+    // DEFEND1 HIGH-9 (R6 DEV-γ): compare the LRU's per-item ``use_ref`` mirror
+    // against the UnifiedRefCounter's primary ``use_ref_`` map. Both are
+    // bumped/deced together under L1 (the dual-write contract); a divergence
+    // where LRU > counter means a silent dual-write bypass.
+    if (!unified_ref_counter_) {
+        return;
+    }
+    size_t lru_pinned = 0;
+    for (const auto& [k, item] : lru_cache_.items()) {
+        (void)k;
+        if (item.use_ref > 0) {
+            ++lru_pinned;
+        }
+    }
+    const size_t counter_pinned = unified_ref_counter_->useRefMapSize();
+    // counter_pinned >= lru_pinned: counter may hold orphans from remove()
+    // (legitimate, decUseRef tolerates). The reverse is a silent bypass.
+    RTP_LLM_CHECK_WITH_INFO(lru_pinned <= counter_pinned,
+                            "SharedBlockCache LRU mirror desync: LRU has %zu pinned items but "
+                            "UnifiedRefCounter only tracks %zu use_ref keys — someone bumped "
+                            "item.use_ref without paying the counter bump (dual-write bypass)",
+                            lru_pinned,
+                            counter_pinned);
+#endif
 }
 
 void SharedBlockCache::cascadeUnifiedSnapshot(const std::vector<UnifiedCacheItem>& snapshot,

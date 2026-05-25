@@ -12,6 +12,7 @@
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
+#include "rtp_llm/cpp/metrics/KVCacheCanaryMetrics.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -40,7 +41,7 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
                                const SpeculativeExecutionConfig&  sp_config,
                                const PDSepConfig&                 pd_sep_config,
                                const CacheStoreConfig&            cache_store_config):
-    config_(config),
+    config_(buildFinalConfig(config, warmup, parallelism_config, runtime_config)),
     metrics_reporter_(metrics_reporter),
     kv_cache_config_(kv_cache_config),
     parallelism_config_(parallelism_config),
@@ -48,10 +49,96 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
     sp_config_(sp_config),
     pd_sep_config_(pd_sep_config),
     cache_store_config_(cache_store_config) {
-    if (warmup) {
-        config_.block_num = 1;
-    } else {
-        allocateAndSync();
+    // R6 DEFEND-2 HIGH-8: KVCacheConfig field-range validation at the
+    // earliest possible point in construction.  Catches argparse / unit-
+    // conversion bugs that today silently cap or wrap (e.g.
+    // ``--reserve_block_ratio 500`` would reserve 5x available_blocks then
+    // underflow into a stealth perf cliff).  All ranges below are documented
+    // in ConfigModules.h; rejecting at boundary surfaces misconfig before
+    // any pool allocation.
+    RTP_LLM_CHECK_WITH_INFO(kv_cache_config_.reserve_block_ratio >= 0
+                                && kv_cache_config_.reserve_block_ratio <= 100,
+                            "KVCacheConfig.reserve_block_ratio=%ld must be in [0,100] (percent)",
+                            static_cast<long>(kv_cache_config_.reserve_block_ratio));
+    RTP_LLM_CHECK_WITH_INFO(kv_cache_config_.dsv4_unified_block_count >= -1
+                                && kv_cache_config_.dsv4_unified_block_count <= 1,
+                            "KVCacheConfig.dsv4_unified_block_count=%d must be in {-1,0,1}",
+                            kv_cache_config_.dsv4_unified_block_count);
+    RTP_LLM_CHECK_WITH_INFO(kv_cache_config_.dsv4_state_entries_per_block >= 0
+                                && kv_cache_config_.dsv4_state_entries_per_block <= 256,
+                            "KVCacheConfig.dsv4_state_entries_per_block=%d must be in [0,256]",
+                            kv_cache_config_.dsv4_state_entries_per_block);
+    RTP_LLM_CHECK_WITH_INFO(kv_cache_config_.kv_cache_mem_mb != 0,
+                            "KVCacheConfig.kv_cache_mem_mb=0 is meaningless (use -1 for auto, "
+                            "or a positive explicit budget)");
+    if (config_.state_pool_uses_pinned_cpu && kv_cache_config_.state_pool_memory_mb == 0) {
+        // ``state_pool_uses_pinned_cpu`` is set by CacheConfigCreator either
+        // because an explicit env budget (state_pool_memory_mb > 0) is
+        // present OR because role_type==PREFILL forces STATE off-HBM.  The
+        // second branch yields the (flag-true, budget-zero) combination
+        // documented as "auto-size from HBM-derived block_num" — warn once
+        // so operators know the budget knob did NOT participate.
+        RTP_LLM_LOG_WARNING("state_pool_uses_pinned_cpu=true but state_pool_memory_mb=0 — STATE "
+                            "pool will be auto-sized to HBM-derived block_num via DSV4 PD-prefill "
+                            "override");
+    }
+
+    // R6 DEFEND-2 HIGH-7: CacheConfig divisor guards.  ``seq_size_per_block``
+    // is the primary divisor for every per-block / per-token conversion
+    // (availableTokensNum, scheduler capacity probes, CP slot mapper) — a
+    // hand-tuned task_info with this set to 0 today silently makes
+    // ``available_blocks * 0 == 0`` so the scheduler infers no capacity.
+    // Likewise ``kernel_seq_size_per_block``, when nonzero, MUST divide
+    // ``seq_size_per_block`` exactly — otherwise the kernel <-> KV block
+    // ratio is fractional and ``kernelBlocksPerKvBlock`` rounds, dropping
+    // blocks.  Both surfaces fire once at construction with a clear
+    // message instead of as silent zero-throughput later.
+    RTP_LLM_CHECK_WITH_INFO(config_.seq_size_per_block > 0,
+                            "CacheConfig.seq_size_per_block must be > 0 (got %zu)",
+                            config_.seq_size_per_block);
+    RTP_LLM_CHECK_WITH_INFO(
+        config_.kernel_seq_size_per_block == 0
+            || config_.seq_size_per_block % config_.kernel_seq_size_per_block == 0,
+        "CacheConfig.kernel_seq_size_per_block=%zu must divide seq_size_per_block=%zu (or be 0)",
+        config_.kernel_seq_size_per_block,
+        config_.seq_size_per_block);
+    for (size_t gid = 0; gid < config_.group_seq_size_per_block.size(); ++gid) {
+        // Zero is a sentinel meaning "fall back to seq_size_per_block";
+        // negative is impossible (size_t).  Reject only the explicit zero
+        // when the surrounding caller treats it as an out-of-band divisor
+        // — the fallback path at availableTokensNum (lines 569-571) already
+        // guards against 0 by replacing it; here we surface configs where
+        // a non-fallback CHK was intended.
+        if (config_.group_seq_size_per_block[gid] == 0) {
+            RTP_LLM_LOG_WARNING("CacheConfig.group_seq_size_per_block[%zu]=0 — caller fallback "
+                                "to seq_size_per_block=%zu will apply",
+                                gid,
+                                config_.seq_size_per_block);
+        }
+    }
+
+    // R6 DEFEND-2 HIGH-4: post-buildFinalConfig invariant CHK.  Catches a
+    // cross-rank ``min_element`` that returned 0 (a peer rank evaluated zero
+    // blocks → silent under-provision) AND a ``finalizeBlockNums`` skip
+    // (block_num unchanged so the per-group sizing was never re-derived
+    // against the new global).  Without this CHK the post-warmup engine
+    // would have an empty pool and every malloc would return success=false
+    // forever, hanging the scheduler.  Locks down the XR4-9 contract that
+    // every ``config_`` read outside the ctor sees a fully finalised
+    // snapshot.  Skipped on warmup path (block_num is intentionally 1
+    // there and group_block_nums is not yet populated).
+    if (!warmup) {
+        RTP_LLM_CHECK_WITH_INFO(config_.block_num > 0,
+                                "post-buildFinalConfig invariant: block_num=%d must be > 0 "
+                                "(cross-rank min collapsed to 0 — peer under-provision?)",
+                                config_.block_num);
+        RTP_LLM_CHECK_WITH_INFO(!config_.use_independent_block_pools
+                                    || config_.group_block_nums.size() == config_.cache_specs.size(),
+                                "post-buildFinalConfig invariant: use_independent_block_pools=true "
+                                "but group_block_nums.size=%zu != cache_specs.size=%zu "
+                                "(finalizeBlockNums was skipped — block_num didn't change after sync?)",
+                                config_.group_block_nums.size(),
+                                config_.cache_specs.size());
     }
 
     // F01-PR2-followup task 4: WARN when the user opted into the K_state
@@ -724,22 +811,39 @@ void KVCacheManager::initConnectorCoordinator() {
     RTP_LLM_CHECK_WITH_INFO(coordinator_->init(), "connector coordinator init failed");
 }
 
-void KVCacheManager::allocateAndSync() {
-    size_t   world_size           = parallelism_config_.tp_size * parallelism_config_.dp_size;
-    const int original_block_num  = config_.block_num;
+CacheConfig KVCacheManager::buildFinalConfig(CacheConfig              config,
+                                             bool                     warmup,
+                                             const ParallelismConfig& parallelism_config,
+                                             const RuntimeConfig&     runtime_config) {
+    // R6 DEFEND-2 / DEV-2: this is the lifted ``allocateAndSync`` body.
+    // Operating on a LOCAL ``config`` value (passed by value) and returning
+    // the finalised snapshot lets the caller (KVCacheManager ctor init list)
+    // bind ``config_`` as a ``const`` member — no mid-flight mutation can
+    // ever drift the field after this returns.  Behaviour is byte-equal
+    // to the previous in-place mutation: warmup yields block_num=1; non-
+    // warmup runs the cross-rank gather + min + conditional
+    // ``finalizeBlockNums`` exactly as before.
+    if (warmup) {
+        config.block_num = 1;
+        return config;
+    }
+
+    const int original_block_num = config.block_num;
+    size_t    world_size         = parallelism_config.tp_size * parallelism_config.dp_size;
     if (world_size > 1) {
-        size_t local_rank    = parallelism_config_.tp_size * parallelism_config_.dp_rank + parallelism_config_.tp_rank;
-        auto   block_num_t   = torch::empty({(int64_t)world_size}, torch::kInt32).pin_memory();
-        auto   block_num_ptr = block_num_t.data_ptr<int>();
-        block_num_ptr[local_rank] = config_.block_num;
+        size_t local_rank =
+            parallelism_config.tp_size * parallelism_config.dp_rank + parallelism_config.tp_rank;
+        auto block_num_t          = torch::empty({(int64_t)world_size}, torch::kInt32).pin_memory();
+        auto block_num_ptr        = block_num_t.data_ptr<int>();
+        block_num_ptr[local_rank] = config.block_num;
         execAllGather({{block_num_t}, ParallelMode::DP_AND_TP});
         execSyncCommunication(false);
         cudaSyncAndCheck();
 
-        if (parallelism_config_.ffn_disaggregate_config.is_ffn_service()) {
-            config_.block_num = 1;
+        if (parallelism_config.ffn_disaggregate_config.is_ffn_service()) {
+            config.block_num = 1;
         } else {
-            config_.block_num = *std::min_element(block_num_ptr, block_num_ptr + world_size);
+            config.block_num = *std::min_element(block_num_ptr, block_num_ptr + world_size);
         }
     }
     // Only re-derive per-group sizing when the cross-rank sync actually shrunk
@@ -747,10 +851,11 @@ void KVCacheManager::allocateAndSync() {
     // pre-populated differentiated group_block_nums (e.g. DSV4 stress tests
     // that hand-tune SWA pool sizes vs FULL paged pools, or
     // CacheConfigCreator-built configs that already finalized once).
-    if (config_.use_independent_block_pools && config_.block_num != original_block_num) {
-        config_.finalizeBlockNums(static_cast<uint32_t>(config_.block_num), runtime_config_);
+    if (config.use_independent_block_pools && config.block_num != original_block_num) {
+        config.finalizeBlockNums(static_cast<uint32_t>(config.block_num), runtime_config);
     }
-    RTP_LLM_LOG_INFO("block_num is %d after tp sync", config_.block_num);
+    RTP_LLM_LOG_INFO("block_num is %d after tp sync", config.block_num);
+    return config;
 }
 
 void KVCacheManager::reportMetricsLoop() {
@@ -791,6 +896,15 @@ void KVCacheManager::reportMetricsLoop() {
         collector.mr_cost_time_ms = allocator_->getMrCostTimeMs();
 
         metrics_reporter_->report<RtpLLMCacheMetrics, RtpLLMCacheMetricsCollector>(&tags, &collector);
+
+        // G5 canary alias (PHASE5_CANARY_PROCEDURE.md §1 item kv_cache.hbm_used_blocks).
+        // Used = total - free; semantics match the "hbm_used_blocks" axis the
+        // canary dashboard graphs (G5b threshold: ≤ 2 blocks vs baseline).
+        // Fires every tick alongside the legacy rtp_llm_kv_cache_free_blocks /
+        // _available_blocks gauges so the canary path stays bit-aligned with
+        // the existing pool numbers.
+        const int64_t hbm_used_blocks = static_cast<int64_t>(total_blocks) - collector.kv_cache_free_blocks;
+        recordCanaryHbmUsedBlocks(metrics_reporter_, hbm_used_blocks);
 
         // Decide once per tick whether the throttled diagnostic log should fire.
         // Math is self-consistent within this tick by construction; the log is

@@ -262,6 +262,13 @@ public:
         return unified_ref_counter_;
     }
 
+    // DEFEND1 HIGH-9 (R6 DEV-γ): LRU mirror desync invariant — public
+    // diagnostic. Acquires ``mu_`` internally so external callers (tests /
+    // post-condition probes) can invoke directly. See
+    // ``assertMirrorInvariantUnlocked_DCHECK`` for the actual check and the
+    // full invariant rationale.
+    void assertMirrorInvariant_DCHECK() const;
+
 private:
     // XR-C1: shared cascade body for ``putUnified``'s overflow tail and
     // ``evictAndFreeUnified``'s phase B. Drops one CACHE/per-pool ref per
@@ -277,6 +284,20 @@ private:
     // L1 → L2 edge from forming via the reclaim callback (forbidden by
     // §3.0 lock-order).
     void cascadeUnifiedSnapshot(const std::vector<UnifiedCacheItem>& snapshot, size_t* cascaded_out);
+
+    // DEFEND1 HIGH-9 (R6 DEV-γ) — mirror invariant body, called with ``mu_``
+    // already held by the internal put/match/dec/evict paths. Compiled out
+    // in release (NDEBUG). The invariant:
+    //
+    //   ``count(LRU items with use_ref > 0) <= UnifiedRefCounter::useRefMapSize()``
+    //
+    // Strict equality only holds when no ``remove()`` orphans exist —
+    // ``remove()`` evicts items unconditionally and may drop an item whose
+    // use_ref > 0, leaving an orphan entry in the counter that decUseRef
+    // later tolerates as a no-op. Counter > LRU is benign; the failure mode
+    // we catch is LRU > counter, which means someone bumped item.use_ref
+    // without paying the counter bump — a silent dual-write bypass.
+    void assertMirrorInvariantUnlocked_DCHECK() const;
 
     static const size_t kCacheMaxCapacity = 10000000;
 

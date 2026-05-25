@@ -576,8 +576,20 @@ size_t BlockPool::freeBlocksNum() const {
 }
 
 size_t BlockPool::totalBlocksNum() const {
-    // reserve block 0 for internal use
-    return config_.block_num - 1;
+    // reserve block 0 for internal use.
+    // R6 DEFEND-2 HIGH-5: underflow-safe subtraction.  ``block_num`` is a
+    // ``uint32_t`` and the warmup path legitimately sets ``block_num=1``
+    // (KVCacheManager.cc:52 ``config_.block_num = 1`` for warmup) — in that
+    // mode initFreeBlocks runs but yields zero usable slots.  Before this
+    // guard a stray ``block_num=0`` (e.g. a regressed creator path that
+    // forgot to call finalizeBlockNums, or an early call during partial
+    // construction) would underflow to ``2^32-1`` and cascade into
+    // ``reserve_blocks = ratio * 2^32 / 100`` reserving billions, after
+    // which every malloc would be denied — a stealth wedge.  Saturating to
+    // 0 keeps the warmup contract (totalBlocksNum() == 0) intact and turns
+    // the regression into a deterministic "no capacity" state instead of a
+    // silent reservation explosion.
+    return config_.block_num >= 1 ? static_cast<size_t>(config_.block_num) - 1u : 0u;
 }
 
 // Available blocks need to satisfy two conditions:
@@ -623,12 +635,14 @@ std::pair<int, int> BlockPool::mapGlobalLayerIdToLocal(int global_layer_id) cons
 BlockAddrInfo BlockPool::convertIndexToAddr(int layer_id, int block_id) const {
     auto [layout_index, local_layer_id] = mapGlobalLayerIdToLocal(layer_id);
     checkLayoutValidity(layout_index);
+    checkBlockIdBounds(block_id);
     return layout_strategies_[static_cast<size_t>(layout_index)]->convertIndexToAddr(local_layer_id, block_id);
 }
 
 std::vector<BlockInfo> BlockPool::convertIndexToBuffer(int layer_id, int block_id) const {
     auto [layout_index, local_layer_id] = mapGlobalLayerIdToLocal(layer_id);
     checkLayoutValidity(layout_index);
+    checkBlockIdBounds(block_id);
     return layout_strategies_[static_cast<size_t>(layout_index)]->convertIndexToBuffer(local_layer_id, block_id);
 }
 
@@ -636,6 +650,7 @@ std::vector<BlockInfo>
 BlockPool::convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const {
     auto [layout_index, local_layer_id] = mapGlobalLayerIdToLocal(layer_id);
     checkLayoutValidity(layout_index);
+    checkBlockIdBounds(block_id);
 
     return layout_strategies_[static_cast<size_t>(layout_index)]->convertIndexToBuffer(
         local_layer_id, block_id, partition_count, partition_id);
@@ -653,6 +668,24 @@ void BlockPool::checkLayoutValidity(int layout_id) const {
                             "Memory layout ID %d out of range (max: %zu)",
                             layout_id,
                             layout_strategies_.size());
+}
+
+// R6 DEFEND-2 HIGH-2: block_id bounds on convertIndex* (BlockPool 623,629,635).
+// Without this CHK a corrupted ``KVCacheResource::group_block_ids`` (e.g. a
+// stray NULL_BLOCK_IDX=-1 that escaped filtering, or a unifiedMalloc race
+// that wrote a poolBlockId beyond block_num under bps>1) lets
+// MemoryLayoutStrategy compute an address beyond the allocated cache blob
+// and silently read / write into adjacent allocator pages — the worst
+// class of bug because it never throws.  Default-OFF path: every legit
+// caller already passes block_id in [1, block_num); the CHK is a no-op
+// for them and turns the latent OOB into a deterministic abort.
+void BlockPool::checkBlockIdBounds(int block_id) const {
+    RTP_LLM_CHECK_WITH_INFO(
+        block_id >= 0 && static_cast<uint32_t>(block_id) < config_.block_num,
+        "BlockPool::convertIndex* block_id=%d out of range [0,%u) pool=%s",
+        block_id,
+        config_.block_num,
+        config_.pool_name.c_str());
 }
 
 }  // namespace rtp_llm

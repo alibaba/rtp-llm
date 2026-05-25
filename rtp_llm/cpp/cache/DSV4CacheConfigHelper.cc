@@ -211,6 +211,44 @@ void DSV4CacheConfigHelper::applyConfig(CacheConfig&         config,
     auto       pools = buildDSV4PoolDescs(sets, model_config, physical_tokens_per_block);
     RTP_LLM_CHECK_WITH_INFO(pools.size() == kDsv4PoolNum, "DSV4 must produce %zu pools", kDsv4PoolNum);
 
+    // R6 DEV-ε / DEFEND-3 HIGH-3: structural invariant CHECKs hoisted OUT
+    // of the K_state>0 branch so legacy (OFF) deployments also exercise
+    // them.  Pool ordering [CSA_KV, HCA_KV, INDEXER_KV, INDEXER_STATE,
+    // CSA_STATE, HCA_STATE, SWA_KV] is baked into CacheConfigCreator
+    // (pool-id 3..5 ↔ STATE pinned-CPU branch), the K_state hook below
+    // (``kStatePoolIndices = {3,4,5}``), the hash-salt producer, and the
+    // connector init.  Previously only the K_state hook re-asserted
+    // ``!is_paged`` for idx 3..5; OFF-path deployments ran with ZERO
+    // structural guard, so a refactor that re-ordered ``buildDSV4PoolDescs``
+    // would silently miscategorise HBM-vs-CPU residency and only manifest
+    // as a PD hash mismatch on the first peer query.  Fail-loud here.
+    constexpr size_t kPagedFullIndices[] = {0, 1, 2};
+    constexpr size_t kStatePoolIndices_inv[] = {3, 4, 5};
+    constexpr size_t kSwaPoolIndex            = 6;
+    for (size_t i : kPagedFullIndices) {
+        RTP_LLM_CHECK_WITH_INFO(pools[i].is_paged,
+                                "DSV4 pool idx %zu must be paged FULL (got is_paged=false); "
+                                "buildDSV4PoolDescs ordering was refactored without updating "
+                                "the downstream {kStatePoolIndices, CacheConfigCreator pinned-CPU} consumers",
+                                i);
+    }
+    for (size_t i : kStatePoolIndices_inv) {
+        RTP_LLM_CHECK_WITH_INFO(!pools[i].is_paged,
+                                "DSV4 pool idx %zu must be a non-paged STATE pool (got is_paged=true)",
+                                i);
+        RTP_LLM_CHECK_WITH_INFO(isStateRegion(pools[i].region_name),
+                                "DSV4 pool idx %zu must be a STATE region (got region=%d)",
+                                i,
+                                static_cast<int>(pools[i].region_name));
+    }
+    RTP_LLM_CHECK_WITH_INFO(!pools[kSwaPoolIndex].is_paged,
+                            "DSV4 pool idx %zu must be the non-paged SWA pool (got is_paged=true)",
+                            kSwaPoolIndex);
+    RTP_LLM_CHECK_WITH_INFO(pools[kSwaPoolIndex].region_name == KVCacheRegionName::SWA_KV,
+                            "DSV4 pool idx %zu must have region=SWA_KV (got region=%d)",
+                            kSwaPoolIndex,
+                            static_cast<int>(pools[kSwaPoolIndex].region_name));
+
     // ---- F01 PR-1: K_state phase-2 hook (default OFF; byte-identical) ----
     // When `dsv4_state_entries_per_block > 0`, collapse the 3 STATE pools
     // (INDEXER_STATE @ idx 3, CSA_STATE @ idx 4, HCA_STATE @ idx 5 — see

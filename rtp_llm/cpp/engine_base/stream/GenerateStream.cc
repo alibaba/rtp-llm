@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/cpp/metrics/KVCacheCanaryMetrics.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
@@ -1036,6 +1037,31 @@ void GenerateStream::reportStreamMetrics() {
         static kmonitor::MetricsTags timeout_tag("timeout", "true");
         metrics_reporter_->report<RtpLLMStreamMetrics, RtpLLMStreamMetricsCollector>(timeout ? &timeout_tag : nullptr,
                                                                                      &collector);
+
+        // G5 canary aliases (PHASE5_CANARY_PROCEDURE.md §1 item 7).  Fired
+        // alongside the existing rtp_llm_first_token_latency_us / _error_qps /
+        // _malloc_failed_times gauges so the canary panel stays bit-aligned
+        // with the legacy gauges (R6 DEV-zeta).  Only finished/cancelled/
+        // timeout streams have meaningful latency — the same gate the legacy
+        // path uses above.
+        if (collector.error_qps) {
+            recordCanaryErrorEvent(metrics_reporter_);                              // G5c
+        }
+        if (collector.malloc_failed_times > 0) {
+            recordCanaryOomEvent(metrics_reporter_);                                // G5c
+        }
+        if (getStatus() == StreamState::FINISHED || cancelled || timeout) {
+            if (collector.first_token_latency_us > 0) {
+                recordCanaryTtftMs(metrics_reporter_, collector.first_token_latency_us / 1000);  // G5e
+            }
+            if (collector.iterate_count > 1 && collector.total_latency_us > 0) {
+                // TPOT = (total - ttft) / (iterations - 1), in ms.
+                const int64_t decode_us =
+                    collector.total_latency_us - collector.first_token_latency_us;
+                const int64_t tpot_ms = decode_us / 1000 / (collector.iterate_count - 1);
+                recordCanaryTpotMs(metrics_reporter_, tpot_ms);                     // G5f
+            }
+        }
     }
 }
 
@@ -1054,6 +1080,11 @@ void GenerateStream::reportCacheReuseMetrics() const {
         collector.stream_cache_remote_reuse_length = remoteReuseLength();
         kmonitor::MetricsTags tags;
         metrics_reporter_->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(&tags, &collector);
+
+        // G5a canary alias (PHASE5_CANARY_PROCEDURE.md §1 item kv_cache.hit_rate).
+        // Same numerator/denominator as the legacy gauge above — within ±1pp
+        // is the G5a threshold (TEST_PLAN AC-4).
+        recordCanaryHitRate(metrics_reporter_, collector.kv_cache_hit_rate);
     }
 }
 

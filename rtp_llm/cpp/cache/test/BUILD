@@ -385,6 +385,7 @@ cc_test(
     deps = [
         "//rtp_llm/cpp/cache:block_pool",
         "//rtp_llm/cpp/cache:cache_types",
+        "//rtp_llm/cpp/cache:kv_cache_allocator",  # R6 DEV-γ: SuperBlockFreeList
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ] + torch_deps() + cuda12_torch_link_deps,

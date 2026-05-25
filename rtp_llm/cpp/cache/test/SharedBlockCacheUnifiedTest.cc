@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/BlockRefCounter.h"
+#include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"  // SuperBlockFreeList (R6 DEV-γ)
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/cache/Types.h"
 
@@ -169,6 +170,125 @@ TEST_F(SharedBlockCacheUnifiedTest, MultipleSnapshotEntriesCascadeAll) {
     EXPECT_EQ(cacheRef(4), 0);
     EXPECT_EQ(cacheRef(5), 0);
     EXPECT_EQ(reclaimed_.size(), 3u);
+}
+
+// ============================================================================
+// R6 DEV-γ — DEFEND1 HIGH bounds checks
+// ============================================================================
+//
+// Each test exercises one of the HIGH bounds CHECKs added in this round:
+//   * R6SharedCacheDoubleFreeFailsLoud           — HIGH-1
+//   * R6SharedCachePutSilentDropConflictFails    — HIGH-3 (conflict variant)
+//   * R6SharedCachePutDuplicateIsIdempotent      — HIGH-3 (idempotent variant)
+//   * R6SharedCacheDecUseRefMissingKeyWarns      — HIGH-4 (post-fix WARN, no throw)
+//   * R6SharedCacheAllocOverflowFails            — HIGH-6 (free overflow guard)
+//   * R6SharedCacheLruMirrorInvariantHolds       — HIGH-9
+//
+// myAssert() throws via throwRuntimeError (see AssertUtils.cc), so the kill
+// path is EXPECT_THROW(std::exception) rather than EXPECT_DEATH.
+
+// HIGH-1: releasing the same super_block_id twice must fail loud rather than
+// silently push a duplicate onto the free list (which would let two
+// allocSuperBlock() calls return the same S and alias two requests onto the
+// same KV super-block — silent precision corruption).
+TEST(R6SharedCacheDefendStandalone, R6SharedCacheDoubleFreeFailsLoud) {
+    SuperBlockFreeList free_list(/*num_super_blocks=*/8);
+    const int          s = free_list.allocSuperBlock();
+    ASSERT_GT(s, 0);
+    free_list.freeSuperBlock(s);
+    EXPECT_THROW(free_list.freeSuperBlock(s), std::exception);
+}
+
+// HIGH-6: the free-list size invariant fires when an unallocated id is
+// pushed back via the double-free guard (the genuine overflow scenario —
+// pushing past num_super_blocks_ - 1 — structurally requires releasing an
+// unallocated id, which the double-free guard catches first for any id
+// currently on the list). We use a small budget so the test is fast.
+TEST(R6SharedCacheDefendStandalone, R6SharedCacheAllocOverflowFails) {
+    constexpr uint32_t kBudget = 4;  // valid IDs are 1..3 (id 0 reserved)
+    SuperBlockFreeList free_list(kBudget);
+
+    // Drain the free list so we know exactly which ids are held.
+    std::vector<int> held;
+    while (true) {
+        const int s = free_list.allocSuperBlock();
+        if (s < 0) {
+            break;
+        }
+        held.push_back(s);
+    }
+    ASSERT_EQ(held.size(), static_cast<size_t>(kBudget - 1));  // ids 1..3
+
+    // Release them all — free_list is now full at kBudget-1.
+    for (int s : held) {
+        free_list.freeSuperBlock(s);
+    }
+    EXPECT_EQ(free_list.freeCount(), static_cast<size_t>(kBudget - 1));
+
+    // Releasing any further id (all valid ids are now on the free list)
+    // trips the double-free guard, which is the upstream signal of the same
+    // overflow condition: free_list_ would exceed budget if pushed.
+    EXPECT_THROW(free_list.freeSuperBlock(/*S=*/1), std::exception);
+}
+
+// HIGH-3 (conflict): put a non-null incoming S while the existing slot
+// already holds a DIFFERENT S — silent drop here would leak the incoming
+// allocSuperBlock bump forever.
+TEST_F(SharedBlockCacheUnifiedTest, R6SharedCachePutSilentDropConflictFails) {
+    constexpr CacheKeyType K  = 0xC011;
+    constexpr int          S1 = 17;
+    constexpr int          S2 = 19;
+
+    cache_->putUnified(K, S1, /*is_resident=*/true);
+    ASSERT_EQ(cacheRef(S1), 1);
+
+    EXPECT_THROW(cache_->putUnified(K, S2, /*is_resident=*/true), std::exception);
+}
+
+// HIGH-3 (idempotent): re-putting the same (K, S) must NOT bump CACHE again
+// and must NOT throw — it emits a WARN but the entry stays consistent.
+TEST_F(SharedBlockCacheUnifiedTest, R6SharedCachePutDuplicateIsIdempotent) {
+    constexpr CacheKeyType K = 0xD0E5;
+    constexpr int          S = 21;
+
+    cache_->putUnified(K, S, /*is_resident=*/true);
+    ASSERT_EQ(cacheRef(S), 1);
+
+    cache_->putUnified(K, S, /*is_resident=*/true);
+    EXPECT_EQ(cacheRef(S), 1) << "duplicate put must be idempotent on CACHE refcount";
+    EXPECT_TRUE(cache_->contains(K));
+}
+
+// HIGH-4 (missing-K WARN branch): decUseRef on a never-bumped key must NOT
+// throw (tolerable LRU-churn race) but is no longer silently no-op — it
+// emits a WARN so high rates surface. The structural underflow case
+// (entry present with value <= 0) is unreachable without harness
+// tampering, so we validate the missing-K branch behaves cleanly and the
+// counter's use_ref map remains empty.
+TEST_F(SharedBlockCacheUnifiedTest, R6SharedCacheDecUseRefMissingKeyWarns) {
+    EXPECT_NO_THROW(counter_->decUseRef(/*K=*/0xDEAD));
+    EXPECT_EQ(counter_->useRefMapSize(), 0u);
+}
+
+// HIGH-9: LRU mirror invariant holds across the natural put / match /
+// abandon lifecycle. Every mutating unified path calls
+// ``assertMirrorInvariantUnlocked_DCHECK`` at the L1 tail; we also probe
+// the public diagnostic ``assertMirrorInvariant_DCHECK`` directly.
+TEST_F(SharedBlockCacheUnifiedTest, R6SharedCacheLruMirrorInvariantHolds) {
+    constexpr CacheKeyType K1 = 0xA1;
+    constexpr CacheKeyType K2 = 0xA2;
+
+    cache_->putUnified(K1, /*S=*/31, /*is_resident=*/true);
+    cache_->putUnified(K2, /*S=*/33, /*is_resident=*/true);
+    EXPECT_NO_THROW(cache_->assertMirrorInvariant_DCHECK());
+
+    auto match = cache_->matchUnified({K1, K2}, /*tokens_per_block=*/1);
+    EXPECT_EQ(match.super_block_ids.size(), 2u);
+    EXPECT_NO_THROW(cache_->assertMirrorInvariant_DCHECK());
+
+    match.release_guard.abandon();
+    EXPECT_NO_THROW(cache_->assertMirrorInvariant_DCHECK());
+    EXPECT_EQ(counter_->useRefMapSize(), 0u);
 }
 
 }  // namespace test
