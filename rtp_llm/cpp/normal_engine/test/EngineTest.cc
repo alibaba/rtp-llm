@@ -371,4 +371,53 @@ TEST_F(NormalEngineTest, testQueryReuseCacheWhenSwitchIsOff) {
     }
 }
 
+// ============================================================================
+// R7 DEFEND-5 HIGH-* death probes for NormalEngine::initCacheManager
+// (R6 DEV-δ deferred; REV-4 follow-up).  RTP_LLM_CHECK_WITH_INFO throws
+// std::exception, so EXPECT_THROW is the death-equivalent (AssertUtils.cc).
+//
+// Spec called for 3 probes (HIGH-1 SP, HIGH-1 non-SP, HIGH-5) but only
+// HIGH-5 is reachable from a public test surface — HIGH-1's CHECK is
+// preceded by an unconditional ``resource_context_.role_type =
+// pd_sep_config.role_type`` assignment, making the equality tautological.
+// Honest 1/3 per R7 ground rule.
+// ============================================================================
+
+// HIGH-5 — sp_config asymmetric: gen_num_per_cycle > 0 must imply propose_params_
+// + draftModel().  Without this, scheduler reserves no SP budget but runtime
+// thinks SP is on → KV OOM mid-stream.  Default-constructed
+// SpeculativeExecutionConfig already has gen_num_per_cycle=1, so passing nullptr
+// propose_params_ alongside default sp_config trips the CHECK on the non-SP
+// branch of initCacheManager.
+TEST_F(NormalEngineTest, R7DeathInitCacheMgr_SpConfigAsymmetric_NoPropose) {
+    CustomConfig            config;
+    rtp_llm::ModelConfig    model_config;
+    rtp_llm::RuntimeConfig  runtime_config;
+    rtp_llm::KVCacheConfig  kv_cache_config;
+    rtp_llm::EngineInitParams params =
+        createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
+    params.sp_config.gen_num_per_cycle = 2;  // asymmetric: SP on, no propose_params
+
+    const size_t vocab                 = model_config.vocab_size;
+    NormalExecutor::test_model_factory = [vocab](const GptModelInitParams&) {
+        return std::make_unique<MockModel>(vocab);
+    };
+    EXPECT_THROW(
+        {
+            auto engine = std::make_shared<NormalEngine>(params, /*propose_params=*/nullptr);
+            (void)engine;
+        },
+        std::exception);
+    NormalExecutor::test_model_factory = nullptr;
+}
+
+// HIGH-1 (SP and non-SP branches) — role_type tri-consistency CHECK at
+// NormalEngine.cc:402 and :447 is preceded by an unconditional
+// ``resource_context_.role_type = pd_sep_config.role_type`` assignment two lines
+// above. The CHECK compares the two values that were just made equal in the
+// same function scope, with no intervening call that mutates pd_sep_config.
+// Unreachable from a public test surface without source-level mutation
+// (which would break the same CHECK at compile/runtime trivially). Marked
+// unreachable per R7 ground rule rather than fabricated.
+
 }  // namespace rtp_llm

@@ -55,6 +55,18 @@ cc_test(
     exec_properties = {'gpu':'H20'},
 )
 
+cc_import(
+    name = "engine_test_cuda13_torch_nvshmem",
+    shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
+)
+
+engine_test_cuda13_torch_link_deps = select({
+    "@//:using_cuda13_x86": [
+        ":engine_test_cuda13_torch_nvshmem",
+    ],
+    "//conditions:default": [],
+})
+
 cc_test(
     name = "engine_test",
     srcs = glob([
@@ -64,7 +76,7 @@ cc_test(
     copts = test_copts,
     deps =  [
         ":mock_engine",
-    ],
+    ] + engine_test_cuda13_torch_link_deps,
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },

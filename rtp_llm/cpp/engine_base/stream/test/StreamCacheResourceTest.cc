@@ -782,4 +782,161 @@ TEST_F(StreamCacheResourceTest, testWaitLoadCacheDone_ZeroReuseLen_DoesNotOverwr
     EXPECT_EQ(stream_->getMtpTokenIndex(), 100);
 }
 
+// ============================================================================
+// R7 DEFEND-5 bounds CHECKs (deferred from R6 DEV-δ).  RTP_LLM_CHECK_WITH_INFO
+// throws std::exception (not abort), so we use EXPECT_THROW as the
+// EXPECT_DEATH equivalent per project convention (see SharedBlockCacheUnifiedTest.cc:192).
+// ============================================================================
+
+// CHECK A: initKVBlock entry null preconditions (DEFEND-5 top-10 #10).
+TEST_F(StreamCacheResourceTest, testR7Bounds_InitKVBlock_PositivePreconditions) {
+    prepareResource();
+    auto& resource = stream_->streamCacheResource();
+    // All four pointers are non-null on a properly prepared resource — must NOT throw.
+    ASSERT_NO_THROW(resource.initKVBlock(/*reserve_step=*/0).IgnoreError());
+}
+
+TEST_F(StreamCacheResourceTest, testR7Bounds_InitKVBlock_DeathOnNullCacheManager) {
+    prepareResource();
+    auto& resource = stream_->streamCacheResource();
+    // Force precondition violation: detach cache_manager.  initKVBlock dereferences it
+    // unconditionally (cacheConfig()); the new CHECK turns the segfault into a fail-fast.
+    resource.resource_context_.cache_manager.reset();
+    EXPECT_THROW(resource.initKVBlock(/*reserve_step=*/0).IgnoreError(), std::exception);
+}
+
+// CHECK B: tryReleaseKVBlock upgraded CHECK with stream context (DEFEND-5 runner-up #14).
+TEST_F(StreamCacheResourceTest, testR7Bounds_TryReleaseKVBlock_PositiveExactMatch) {
+    prepareResource();
+    auto& resource = stream_->streamCacheResource();
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    const int blocks = resource.curBlocksNum();
+    ASSERT_GT(blocks, 0);
+    // nums == total_blocks must NOT throw.
+    ASSERT_NO_THROW({ resource.tryReleaseKVBlock(blocks); });
+}
+
+TEST_F(StreamCacheResourceTest, testR7Bounds_TryReleaseKVBlock_DeathOnPartialRelease) {
+    prepareResource();
+    auto& resource = stream_->streamCacheResource();
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    const int blocks = resource.curBlocksNum();
+    ASSERT_GT(blocks, 1);
+    // Partial release (nums != total_blocks) is unsupported; upgraded CHECK fires with context.
+    EXPECT_THROW(resource.tryReleaseKVBlock(blocks - 1), std::exception);
+}
+
+// CHECK C: fakeInitKVBlock reserved_blocks ≤ totalBlocksNum (DEFEND-5 runner-up #12).
+TEST_F(StreamCacheResourceTest, testR7Bounds_FakeInitKVBlock_PositiveWithinPool) {
+    prepareResource();
+    auto& resource = stream_->streamCacheResource();
+    const size_t pool_blocks = cache_manager_->totalBlocksNum();
+    ASSERT_GT(pool_blocks, 1u);
+    // Within-pool reservation must NOT throw.
+    ASSERT_NO_THROW(resource.fakeInitKVBlock(/*reserved_blocks=*/1));
+}
+
+TEST_F(StreamCacheResourceTest, testR7Bounds_FakeInitKVBlock_DeathOnExceedPool) {
+    prepareResource();
+    auto& resource = stream_->streamCacheResource();
+    const size_t pool_blocks = cache_manager_->totalBlocksNum();
+    // reserved_blocks = pool + 1 exceeds the pool — fail-fast.
+    EXPECT_THROW(resource.fakeInitKVBlock(/*reserved_blocks=*/pool_blocks + 1), std::exception);
+}
+
+// CHECK D: asyncLoadCache rejects calls on a released resource (DEFEND-5 runner-up #15).
+TEST_F(StreamCacheResourceTest, testR7Bounds_AsyncLoadCache_PositiveLive) {
+    prepareResource(/*reuse_cache=*/false);
+    auto& resource = stream_->streamCacheResource();
+    // Resource is live — asyncLoadCache returns false (no connector) but must NOT throw.
+    ASSERT_NO_THROW({ (void)resource.asyncLoadCache(); });
+}
+
+TEST_F(StreamCacheResourceTest, testR7Bounds_AsyncLoadCache_DeathOnReleasedResource) {
+    prepareResource();
+    auto& resource = stream_->streamCacheResource();
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    stream_->releaseResource();
+    ASSERT_TRUE(resource.isResourceReleased());
+    // Calling asyncLoadCache after release without re-initialising trips the new CHECK.
+    EXPECT_THROW({ (void)resource.asyncLoadCache(); }, std::exception);
+}
+
+// CHECK E: swapLinearBlocks batch_id bounds (sibling to other BatchKVCacheResource accessors
+// which DO bounds-check; swapBlocks does not).
+TEST_F(StreamCacheResourceTest, testR7Bounds_SwapLinearBlocks_PositiveInBounds) {
+    prepareResource();
+    auto& resource = stream_->streamCacheResource();
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    const int batch_size = resource.kvCache().batchSize();
+    ASSERT_GE(batch_size, 1);
+    // batch_id within range — must NOT throw.  rhs == lhs short-circuits before any swap; pass
+    // distinct slots that exist (curBlocksNum is the same across the batch under hybrid groups,
+    // but LINEAR group is absent in init_config, so the loop runs 0 iterations and is safe).
+    ASSERT_NO_THROW(resource.swapLinearBlocks(/*batch_id=*/0, /*rhs=*/0, /*lhs=*/1));
+}
+
+TEST_F(StreamCacheResourceTest, testR7Bounds_SwapLinearBlocks_DeathOnBatchIdOOB) {
+    prepareResource();
+    auto& resource = stream_->streamCacheResource();
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    const int batch_size = resource.kvCache().batchSize();
+    EXPECT_THROW(resource.swapLinearBlocks(/*batch_id=*/batch_size + 5, /*rhs=*/0, /*lhs=*/1), std::exception);
+    EXPECT_THROW(resource.swapLinearBlocks(/*batch_id=*/-1, /*rhs=*/0, /*lhs=*/1), std::exception);
+}
+
+// ============================================================================
+// R7 DEFEND-5 HIGH-* CHECKs (R6 DEV-δ HIGH-2 / HIGH-6 / HIGH-3).  These probe the
+// new RTP_LLM_CHECK_WITH_INFO sites added to StreamCacheResource.cc by R6 DEV-δ;
+// REV-4 deferred wiring them until DEV-ζ canary macro-expansion was resolved.
+// RTP_LLM_CHECK_WITH_INFO throws std::exception by default (see AssertUtils.cc),
+// so EXPECT_THROW is the death-equivalent per project convention.
+// ============================================================================
+
+// HIGH-2 — seq_len_override upper bound (StreamCacheResource.cc:429).
+// The MTP / BatchDecodeScheduler back-door must reject seq_len_override<=0 (other
+// than the -1 sentinel) and seq_len_override>max_seq_len to prevent block_table
+// writes past the pool.
+TEST_F(StreamCacheResourceTest, R7Defend5_IncrKVBlock_SeqLenOverride_DeathOnZero) {
+    prepareResource();
+    auto& resource = stream_->streamCacheResource();
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    // seq_len_override=0 escapes the -1 sentinel guard but fails the > 0 lower bound.
+    EXPECT_THROW(resource.incrKVBlock(/*reserve_step=*/0, /*seq_len_override=*/0).IgnoreError(),
+                 std::exception);
+}
+
+TEST_F(StreamCacheResourceTest, R7Defend5_IncrKVBlock_SeqLenOverride_DeathOnAboveMaxSeqLen) {
+    prepareResource();
+    auto& resource = stream_->streamCacheResource();
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    // prepareResourceWithCacheConfig sets max_seq_len=2048; anything above must abort.
+    const int oversize = static_cast<int>(stream_->maxSeqLen()) + 1;
+    EXPECT_THROW(resource.incrKVBlock(/*reserve_step=*/0, /*seq_len_override=*/oversize).IgnoreError(),
+                 std::exception);
+}
+
+// HIGH-6 — PD decode first-malloc + pd_kvcache_ref_ ownership mutex
+// (StreamCacheResource.cc:385).  Role=DECODE + curBlocksNum()==0 + non-null
+// pd_kvcache_ref_ must fail-fast: a stale connector pin colliding with a fresh
+// first-malloc would otherwise double-own KV blocks and double-free on release.
+TEST_F(StreamCacheResourceTest, R7Defend5_InitKVBlock_PDDecode_DeathOnPdKvCacheRefDoubleOwn) {
+    prepareResource(/*reuse_cache=*/false, /*role_type=*/RoleType::DECODE);
+    auto& resource = stream_->streamCacheResource();
+    ASSERT_EQ(resource.curBlocksNum(), 0);  // confirm first-malloc precondition
+    // Inject a non-null pd_kvcache_ref_ (simulating a pre-enqueue connector pin
+    // that didn't grow curBlocksNum).  HIGH-6 CHECK fires on entering initKVBlock.
+    resource.pd_kvcache_ref_ = std::make_shared<KVCacheResource>();
+    EXPECT_THROW(resource.initKVBlock(/*reserve_step=*/0).IgnoreError(), std::exception);
+}
+
+// HIGH-3 — bpk divisibility CHECK at StreamCacheResource.cc:226 is documented as
+// defense-in-depth; the same invariant is enforced earlier in the
+// KVCacheManager constructor (KVCacheManager.cc:99-104, exercised by
+// KVCacheManagerTest::R6BoundsCacheConfigDivisorGuards).  KVCacheManager
+// rejects bad kernel_seq_size_per_block before any StreamCacheResource can
+// be constructed against it, so the inner CHECK is unreachable from the
+// public test surface.  Intentionally not probed here — honest skip per
+// the R7 ground rule ("4/6 honest > 6/6 fabricated").
+
 }  // namespace rtp_llm

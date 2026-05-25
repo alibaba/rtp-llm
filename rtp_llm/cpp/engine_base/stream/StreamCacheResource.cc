@@ -293,7 +293,16 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
     // NOTE: Currently only support releasing all blocks
     // Partial release (shrink) is not supported yet
     int total_blocks = curBlocksNum();
-    RTP_LLM_CHECK(nums == total_blocks);
+    // DEFEND-5 R7 bounds: upgrade bare CHECK with stream/fake_inited context so a partial-release
+    // bug surfaces with diagnosable info instead of a context-free abort (runner-up #14 in
+    // DEFEND5_engine_scheduler.md, deferred from R6 DEV-δ).
+    RTP_LLM_CHECK_WITH_INFO(static_cast<int>(nums) == total_blocks,
+                            "tryReleaseKVBlock partial release not supported: nums=%zu total_blocks=%d "
+                            "stream=%ld fake_inited=%d",
+                            nums,
+                            total_blocks,
+                            stream_->streamId(),
+                            static_cast<int>(fake_inited_));
 
     if (total_blocks > 0) {
         if (reuseCache() && !stream_->hasError() && stream_->getStatus() == StreamState::FINISHED) {
@@ -336,6 +345,20 @@ int StreamCacheResource::singleBatchNeedBlocks(int seq_len, int reserve_step) co
 // TODO(xinfei.sxf) 保证这个函数的原子性
 absl::Status StreamCacheResource::initKVBlock(size_t reserve_step) {
     RTP_LLM_PROFILE_FUNCTION();
+    // DEFEND-5 R7 bounds: initKVBlock entry preconditions (top-10 #10 in DEFEND5_engine_scheduler.md,
+    // deferred from R6 DEV-δ).  All three pointers are dereferenced unconditionally below
+    // (cache_manager->cacheConfig(), completeTokenIdsPtr()->setReserveStep, batch_kv_cache_resource_
+    // → curBlocksNum); a null from a partially-constructed stream becomes a hard segfault with no
+    // useful stack.  Fail-fast turns it into an abort with stream context.
+    RTP_LLM_CHECK_WITH_INFO(stream_ != nullptr && batch_kv_cache_resource_ != nullptr
+                                && resource_context_.cache_manager != nullptr
+                                && stream_->completeTokenIdsPtr() != nullptr,
+                            "initKVBlock null precondition: stream=%p batch_resource=%p cache_manager=%p "
+                            "complete_token_ids=%p",
+                            static_cast<void*>(stream_),
+                            static_cast<void*>(batch_kv_cache_resource_.get()),
+                            static_cast<void*>(resource_context_.cache_manager.get()),
+                            static_cast<void*>(stream_ ? stream_->completeTokenIdsPtr().get() : nullptr));
     // Decode side: first malloc should NOT use device cache, regardless of runtime config.
     // Follow-up allocations (incrKVBlock) will respect reuseCache() && enableDeviceCache().
     if (fake_inited_) {
@@ -439,6 +462,13 @@ absl::Status StreamCacheResource::incrKVBlock(size_t reserve_step, int seq_len_o
 
 bool StreamCacheResource::asyncLoadCache() {
     RTP_LLM_PROFILE_FUNCTION();
+    // DEFEND-5 R7 bounds: catch release-then-reload-without-reset (runner-up #15 in
+    // DEFEND5_engine_scheduler.md, deferred from R6 DEV-δ).  releaseResource() clears
+    // load_cache_once_; a caller that calls asyncLoadCache after release without calling
+    // init() to reset resource_released_ is operating on a torn-down resource.
+    RTP_LLM_CHECK_WITH_INFO(!resource_released_,
+                            "asyncLoadCache on released resource (stream=%ld): missing init() reset",
+                            stream_ ? stream_->streamId() : -1);
     if (!resource_context_.cache_manager || !resource_context_.cache_manager->hasActiveConnectors()) {
         return false;
     }
@@ -592,6 +622,18 @@ void StreamCacheResource::fakeInitKVBlock(size_t reserved_blocks) {
         group_nums, layer_all_num, layer_to_group, kernel_blocks_per_kv_block, group_types, layer_region_to_group);
 
     reserved_blocks = std::max(1ul, reserved_blocks);
+    // DEFEND-5 R7 bounds: reserved_blocks ≤ totalBlocksNum() (runner-up #12 in
+    // DEFEND5_engine_scheduler.md, deferred from R6 DEV-δ).  Already lower-bounded by std::max,
+    // but no upper-bound check today — a caller passing e.g. SIZE_MAX/2 silently resizes the
+    // batch block table beyond the underlying pool.
+    if (resource_context_.cache_manager) {
+        const size_t pool_blocks = resource_context_.cache_manager->totalBlocksNum();
+        RTP_LLM_CHECK_WITH_INFO(reserved_blocks <= pool_blocks,
+                                "fakeInitKVBlock reserved_blocks=%zu exceeds pool totalBlocksNum=%zu (stream=%ld)",
+                                reserved_blocks,
+                                pool_blocks,
+                                stream_->streamId());
+    }
     batch_kv_cache_resource_->resizeBlocks(reserved_blocks, 0);
 }
 
@@ -759,6 +801,16 @@ void StreamCacheResource::swapLinearBlocks(int32_t batch_id, size_t rhs, size_t 
     if (rhs == lhs) {
         return;
     }
+    // DEFEND-5 R7 bounds: BatchKVCacheResource::swapBlocks (sibling to mutableBlockIds /
+    // cacheKeys / cacheResource which DO bounds-check batch_id) does NOT check batch_id —
+    // an out-of-range index from beam-search recompute path silently corrupts the wrong
+    // sub-batch.  Gate at the stream-cache entry point with a fail-fast.
+    const int batch_size = batch_kv_cache_resource_ ? batch_kv_cache_resource_->batchSize() : 0;
+    RTP_LLM_CHECK_WITH_INFO(batch_id >= 0 && batch_id < batch_size,
+                            "swapLinearBlocks batch_id=%d out of range [0,%d) stream=%ld",
+                            batch_id,
+                            batch_size,
+                            stream_ ? stream_->streamId() : -1);
 
     auto type_list = resource_context_.cache_manager->cacheConfig().group_types;
 

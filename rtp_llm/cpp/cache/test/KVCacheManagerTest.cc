@@ -1819,6 +1819,43 @@ TEST_F(KVCacheManagerTest, R6BoundsCacheConfigDivisorGuards) {
     }
 }
 
+// R7 HIGH-1 follow-up (REV-2 gap) — symmetric negative probes for the
+// HybridPoolKVCacheAllocator gid-bounds CHECKs at
+// HybridPoolKVCacheAllocator.cc:340 (referenceBlocksInGroup) and :361
+// (freeBlocksInGroup).  The positive symmetry test (R6Bounds...
+// SymmetricToCacheSpecs) only verified construction-time pool count; these
+// tests exercise the runtime fan-out CHECK by feeding a deliberately
+// out-of-range gid via the public allocator API.
+TEST_F(KVCacheManagerTest, R7BoundsReferenceBlocksInGroupBadGid) {
+    auto manager_config = makeCompactDSV4ManagerConfig(/*block_num=*/8);
+    auto manager        = std::make_shared<KVCacheManager>(manager_config, /*warmup=*/false);
+    ASSERT_TRUE(manager->init());
+
+    auto hybrid = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(manager->allocator_);
+    ASSERT_NE(hybrid, nullptr);
+    const int bad_gid = static_cast<int>(hybrid->groupBlockPools().size()) + 1;
+    BlockIndicesType blocks{};  // empty is fine — gid bound is checked before blocks deref
+    EXPECT_THROW(hybrid->referenceBlocksInGroup(bad_gid, blocks, /*is_connector=*/false),
+                 std::exception);
+    EXPECT_THROW(hybrid->referenceBlocksInGroup(/*gid=*/-1, blocks, /*is_connector=*/true),
+                 std::exception);
+}
+
+TEST_F(KVCacheManagerTest, R7BoundsFreeBlocksInGroupBadGid) {
+    auto manager_config = makeCompactDSV4ManagerConfig(/*block_num=*/8);
+    auto manager        = std::make_shared<KVCacheManager>(manager_config, /*warmup=*/false);
+    ASSERT_TRUE(manager->init());
+
+    auto hybrid = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(manager->allocator_);
+    ASSERT_NE(hybrid, nullptr);
+    const int bad_gid = static_cast<int>(hybrid->groupBlockPools().size()) + 1;
+    BlockIndicesType blocks{};
+    EXPECT_THROW(hybrid->freeBlocksInGroup(bad_gid, blocks, /*is_connector=*/false),
+                 std::exception);
+    EXPECT_THROW(hybrid->freeBlocksInGroup(/*gid=*/-1, blocks, /*is_connector=*/true),
+                 std::exception);
+}
+
 // DEV-2 / DEFEND-2 — config_ is a const member after the buildFinalConfig
 // refactor.  Asserted via type traits so a future regression that drops
 // the const qualifier fails to compile this static_assert AND fails this

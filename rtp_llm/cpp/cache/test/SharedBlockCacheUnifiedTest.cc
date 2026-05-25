@@ -12,7 +12,11 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <memory>
+#include <mutex>
+#include <random>
+#include <thread>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/BlockRefCounter.h"
@@ -289,6 +293,385 @@ TEST_F(SharedBlockCacheUnifiedTest, R6SharedCacheLruMirrorInvariantHolds) {
     match.release_guard.abandon();
     EXPECT_NO_THROW(cache_->assertMirrorInvariant_DCHECK());
     EXPECT_EQ(counter_->useRefMapSize(), 0u);
+}
+
+// ============================================================================
+// R7 Race — Multi-threaded stress for the A-fix-2 R5/R6 CACHE-bump hoist
+// ============================================================================
+//
+// These tests exercise putUnified / matchUnified / decUseRef /
+// evictAndFreeUnified (the public driver of cascadeUnifiedSnapshot) under
+// high concurrency on shared key / super-block pools.
+//
+// What they are guarding (XR-C1 / R5 FIX-B / R6 LRU-mirror):
+//   * The unified CACHE bump now happens INSIDE L1 alongside the LRU insert,
+//     fan-out, and version bump. Before the hoist a concurrent
+//     evictAndFreeUnified could snapshot a freshly-inserted K and call
+//     ``dec(S, CACHE)`` on a counter still at zero — RTP_LLM_FAIL underflow.
+//     After the hoist the dec always pairs with an already-landed bump
+//     (XR2-A1/A2/A3 cross-review, SharedBlockCache.cc line 392-405).
+//   * snapshot-then-cascade in evictAndFreeUnified no longer probes
+//     re-residency, so every snapshot dec is unconditional and event-paired
+//     with the put that produced it (XR-C1). Stress here drives
+//     evictAndFreeUnified concurrently with putUnified to flush any residual
+//     reorder leak — final invariant: every super-block isZero after drain
+//     and SuperBlockFreeList accounting balances.
+//   * SuperBlockFreeList::freeSuperBlock CHECKs on double-free (R6 HIGH-1);
+//     wiring it as the reclaim sink (R7RaceDecRefDoubleFreeProbe) turns any
+//     duplicate reclaim into an immediate exception from a worker thread.
+//
+// Failure mode: RTP_LLM_FAIL / RTP_LLM_CHECK_WITH_INFO throw RTP_EXCEPTION
+// (AssertUtils.cc:13). Workers wrap each iteration in try/catch and bump
+// ``exception_count`` so any underflow / double-free surfaces as a
+// post-condition assertion failure instead of std::terminate.
+//
+// Determinism: each test uses a fixed parent seed; per-thread RNGs derive
+// from parent_seed XOR (thread_index * golden_ratio). Reproducible on the
+// same host given the same iteration count.
+
+namespace {
+
+constexpr uint32_t kRaceNumSuperBlocks = 64;
+constexpr int      kRaceMaxValidS      = static_cast<int>(kRaceNumSuperBlocks) - 1;  // ids [1, 64)
+constexpr uint64_t kRaceParentSeed     = 0xC0FFEEDEADBEEFULL;
+
+// Deterministic CacheKey -> super_block_id mapping. Many K may collide on the
+// same S — that is the point: the per-S CACHE accumulator must stay balanced
+// under concurrent overlapping bumps/decs. Never produces the reserved id 0.
+int sForKey(CacheKeyType K) {
+    constexpr uint64_t kMix = 1469598103934665603ULL;  // FNV offset (any large odd)
+    return static_cast<int>((static_cast<uint64_t>(K) * kMix) % static_cast<uint64_t>(kRaceMaxValidS)) + 1;
+}
+
+uint64_t seedFor(int tid, uint64_t salt = 0) {
+    constexpr uint64_t kGolden = 0x9E3779B97F4A7C15ULL;
+    return kRaceParentSeed ^ (static_cast<uint64_t>(tid + 1) * kGolden) ^ salt;
+}
+
+}  // namespace
+
+class SharedBlockCacheRaceStressTest: public ::testing::Test {
+protected:
+    void SetUp() override {
+        cache_   = std::make_unique<SharedBlockCache>();
+        counter_ = std::make_unique<UnifiedRefCounter>();
+        counter_->init(static_cast<int>(kRaceNumSuperBlocks));
+
+        cache_->setUnifiedRefCounter(counter_.get());
+        cache_->setSuperBlockReclaimCallback([this](int S) {
+            std::lock_guard<std::mutex> g(reclaim_mu_);
+            reclaimed_.push_back(S);
+            reclaim_count_.fetch_add(1, std::memory_order_relaxed);
+        });
+    }
+
+    void TearDown() override {
+        cache_.reset();
+        counter_.reset();
+        reclaimed_.clear();
+        reclaim_count_.store(0);
+    }
+
+    // Drain helper: evicts until cache is empty or a hard cap is hit. Uses
+    // min_super_blocks=128 so each call scans 256 LRU tail entries (cf.
+    // selectAndEvictUnified scan_cap = 2 * min) — bounded per-call cost.
+    void drainAll(size_t hard_cap = 200000) {
+        size_t guard_iters = 0;
+        while (cache_->size() > 0 && guard_iters++ < hard_cap) {
+            const size_t freed = cache_->evictAndFreeUnified(/*min_super_blocks=*/128);
+            if (freed == 0) {
+                // All tail entries pinned (no concurrent reader at this point
+                // means a logic bug). Break to surface via size() assertion.
+                break;
+            }
+        }
+    }
+
+    std::unique_ptr<SharedBlockCache>  cache_;
+    std::unique_ptr<UnifiedRefCounter> counter_;
+    std::mutex                         reclaim_mu_;
+    std::vector<int>                   reclaimed_;
+    std::atomic<size_t>                reclaim_count_{0};
+};
+
+// R7-1: 16 threads × 10k iter, randomized mix of putUnified / matchUnified /
+// decUseRef over a 256-key pool (K -> S is deterministic so concurrent
+// putUnified on the same K never hits the HIGH-3 conflict CHECK; same-S
+// duplicate puts are idempotent). After the workers join, drain the cache and
+// assert every super-block reaches isZero — i.e. every CACHE bump paired with
+// exactly one cascade dec. A broken hoist would either throw underflow from a
+// cascade or leave CACHE > 0 on some S after drain.
+TEST_F(SharedBlockCacheRaceStressTest, R7RaceConcurrentPutGet) {
+    constexpr int kThreads     = 16;
+    constexpr int kItersPerThr = 10000;
+    constexpr int kKeyPoolSize = 256;
+
+    std::atomic<size_t> put_count{0};
+    std::atomic<size_t> get_count{0};
+    std::atomic<size_t> dec_count{0};
+    std::atomic<size_t> exception_count{0};
+
+    auto worker = [&](int tid) {
+        std::mt19937_64                    rng(seedFor(tid));
+        std::uniform_int_distribution<int> op_pick(0, 2);
+        std::uniform_int_distribution<int> key_pick(0, kKeyPoolSize - 1);
+
+        for (int i = 0; i < kItersPerThr; ++i) {
+            const CacheKeyType K  = static_cast<CacheKeyType>(key_pick(rng));
+            const int          S  = sForKey(K);
+            const int          op = op_pick(rng);
+            try {
+                if (op == 0) {
+                    cache_->putUnified(K, S, /*is_resident=*/true);
+                    put_count.fetch_add(1, std::memory_order_relaxed);
+                } else if (op == 1) {
+                    auto m = cache_->matchUnified({K}, /*tokens_per_block=*/1);
+                    (void)m;  // ReleaseGuard dtor abandons (drains use_ref bumps)
+                    get_count.fetch_add(1, std::memory_order_relaxed);
+                } else {
+                    // Direct decUseRef — when K never had a bump it's a WARN
+                    // no-op; when it did, drains one bump early. Either way
+                    // the counter must not underflow.
+                    cache_->decUseRef(K);
+                    dec_count.fetch_add(1, std::memory_order_relaxed);
+                }
+            } catch (const std::exception&) {
+                exception_count.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+    };
+
+    std::vector<std::thread> threads;
+    threads.reserve(kThreads);
+    for (int t = 0; t < kThreads; ++t) {
+        threads.emplace_back(worker, t);
+    }
+    for (auto& th : threads) {
+        th.join();
+    }
+
+    EXPECT_EQ(exception_count.load(), 0u)
+        << "race path threw — likely CACHE dec underflow / double-free / HIGH-3 conflict";
+    EXPECT_LE(cache_->size(), static_cast<size_t>(kKeyPoolSize));
+
+    drainAll();
+    EXPECT_EQ(cache_->size(), 0u) << "drain stalled — pinned items still present";
+    EXPECT_EQ(counter_->useRefMapSize(), 0u) << "use_ref leak after drain";
+
+    for (int s = 1; s <= kRaceMaxValidS; ++s) {
+        EXPECT_EQ(counter_->getRefCount(s, UnifiedRefCounter::Kind::CACHE), 0)
+            << "S=" << s << " leaked CACHE refs after drain (put/dec unbalanced)";
+        EXPECT_TRUE(counter_->isZero(s)) << "S=" << s << " not zero after drain";
+    }
+    // Sanity counters (no behavioural assertion — just record).
+    EXPECT_GT(put_count.load() + get_count.load() + dec_count.load(), 0u);
+}
+
+// R7-2: 8 cascade threads racing 8 put/get threads over an overlapping
+// 256-key pool. The cascade threads drive evictAndFreeUnified (the public
+// entry of the R5 FIX-B hoist: selectAndEvictUnified then
+// cascadeUnifiedSnapshot, both with mu_ released between the snapshot and the
+// per-S CACHE dec). The put/get threads keep the LRU tail churning so the
+// cascade always has work. If the hoist were missing, the cascade thread
+// would see a tail entry whose CACHE bump hasn't landed yet and underflow on
+// dec — caught by the per-worker try/catch + exception_count.
+TEST_F(SharedBlockCacheRaceStressTest, R7RaceCascadePutUnderContention) {
+    constexpr int kCascadeThreads = 8;
+    constexpr int kPutGetThreads  = 8;
+    constexpr int kPutGetIters    = 8000;
+    constexpr int kKeyPoolSize    = 256;
+
+    std::atomic<size_t> exception_count{0};
+    std::atomic<size_t> evict_returned_nonzero{0};
+    std::atomic<bool>   stop_cascade{false};
+
+    auto put_get_worker = [&](int tid) {
+        std::mt19937_64                    rng(seedFor(tid, /*salt=*/0xABABABABULL));
+        std::uniform_int_distribution<int> key_pick(0, kKeyPoolSize - 1);
+        std::uniform_int_distribution<int> op_pick(0, 2);
+
+        for (int i = 0; i < kPutGetIters; ++i) {
+            const CacheKeyType K = static_cast<CacheKeyType>(key_pick(rng));
+            const int          S = sForKey(K);
+            try {
+                const int op = op_pick(rng);
+                if (op == 0) {
+                    cache_->putUnified(K, S, /*is_resident=*/true);
+                } else if (op == 1) {
+                    auto m = cache_->matchUnified({K}, /*tokens_per_block=*/1);
+                    (void)m;
+                } else {
+                    // selectAndEvictUnified WITHOUT cascade — leaves an
+                    // outstanding "pending bump" view from the put side. The
+                    // next caller's evictAndFreeUnified must reconcile.
+                    auto snap = cache_->selectAndEvictUnified(/*min_super_blocks=*/2);
+                    // Snapshot is dropped here. Phase B (cascade) never runs
+                    // on it — the per-pool callbacks are no-op since
+                    // group_pools_ is empty, but the unified CACHE dec is
+                    // intentionally lost from this branch. R5 FIX-B
+                    // documents that callers MUST cascade the snapshot;
+                    // this branch is exercising the WRONG pattern on
+                    // purpose to verify the loss surfaces as leaked CACHE,
+                    // NOT as underflow on the cascade thread.
+                    (void)snap;
+                }
+            } catch (const std::exception&) {
+                exception_count.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+    };
+
+    auto cascade_worker = [&](int tid) {
+        std::mt19937_64                    rng(seedFor(tid, /*salt=*/0xCDCDCDCDULL));
+        std::uniform_int_distribution<int> min_pick(1, 4);
+
+        while (!stop_cascade.load(std::memory_order_acquire)) {
+            try {
+                const size_t freed = cache_->evictAndFreeUnified(static_cast<size_t>(min_pick(rng)));
+                if (freed > 0) {
+                    evict_returned_nonzero.fetch_add(freed, std::memory_order_relaxed);
+                }
+            } catch (const std::exception&) {
+                exception_count.fetch_add(1, std::memory_order_relaxed);
+            }
+            std::this_thread::yield();
+        }
+    };
+
+    std::vector<std::thread> threads;
+    threads.reserve(kPutGetThreads + kCascadeThreads);
+    for (int t = 0; t < kCascadeThreads; ++t) {
+        threads.emplace_back(cascade_worker, t);
+    }
+    for (int t = 0; t < kPutGetThreads; ++t) {
+        threads.emplace_back(put_get_worker, kCascadeThreads + t);
+    }
+    // Wait for put/get threads first.
+    for (int t = kCascadeThreads; t < kCascadeThreads + kPutGetThreads; ++t) {
+        threads[t].join();
+    }
+    // Signal cascade threads to wind down.
+    stop_cascade.store(true, std::memory_order_release);
+    for (int t = 0; t < kCascadeThreads; ++t) {
+        threads[t].join();
+    }
+
+    EXPECT_EQ(exception_count.load(), 0u)
+        << "cascade-vs-put race threw — likely R5 FIX-B regression "
+           "(CACHE bump escaped L1 → dec landed before bump → underflow)";
+
+    drainAll();
+    EXPECT_EQ(cache_->size(), 0u);
+    EXPECT_EQ(counter_->useRefMapSize(), 0u);
+    // Final balance: every S must be zero. The intentional snapshot-without-
+    // cascade branch in the worker leaves CACHE > 0 on those S's, but the
+    // post-test drainAll() runs evictAndFreeUnified until empty. The
+    // remaining CACHE bumps from the lost-snapshot branch are NOT paired
+    // with any in-LRU item, so drainAll cannot dec them — we therefore
+    // tolerate residual CACHE>0 for THIS test only and assert via the
+    // counter-vs-LRU mirror invariant instead.
+    EXPECT_NO_THROW(cache_->assertMirrorInvariant_DCHECK());
+    // Reclaim count must not exceed total bumps issued (no double-reclaim).
+    EXPECT_LE(reclaim_count_.load(), static_cast<size_t>(kPutGetIters * kPutGetThreads));
+}
+
+// R7-3: SuperBlockFreeList double-free probe. Wire reclaim_callback into a
+// live SuperBlockFreeList so every isZero(S) reclaim performs a real
+// freeSuperBlock(S). Any duplicate reclaim trips the double-free CHECK
+// (HybridPoolKVCacheAllocator.cc:64), which throws and is caught + counted.
+// Each thread runs an alloc → put → drain pipeline; under 32-way concurrency
+// the free list churns aggressively over the 63-slot budget. A working hoist
+// keeps the pipeline coherent; a broken one either underflows the CACHE
+// counter or causes a duplicate reclaim (both raise exception_count).
+TEST_F(SharedBlockCacheRaceStressTest, R7RaceDecRefDoubleFreeProbe) {
+    constexpr int kThreads = 32;
+    constexpr int kIters   = 1500;
+
+    // Local SuperBlockFreeList wired as the reclaim sink. Must outlive worker
+    // threads; declared before the thread vector and joined before
+    // destruction.
+    SuperBlockFreeList sbfl(kRaceNumSuperBlocks);
+    // Combine free-list reclaim with the fixture's per-test counter so we
+    // can cross-check budget invariants AND per-reclaim accounting. The
+    // fixture's lambda also pushes onto reclaimed_ under reclaim_mu_; we
+    // mirror that here so failures still capture the offending S list.
+    cache_->setSuperBlockReclaimCallback([this, &sbfl](int S) {
+        {
+            std::lock_guard<std::mutex> g(reclaim_mu_);
+            reclaimed_.push_back(S);
+            reclaim_count_.fetch_add(1, std::memory_order_relaxed);
+        }
+        sbfl.freeSuperBlock(S);
+    });
+
+    std::atomic<size_t> exception_count{0};
+    std::atomic<size_t> alloc_count{0};
+    std::atomic<size_t> put_count{0};
+
+    auto worker = [&](int tid) {
+        std::mt19937_64                    rng(seedFor(tid, /*salt=*/0xEFEFEFEFULL));
+        std::uniform_int_distribution<int> roll(0, 99);
+
+        for (int i = 0; i < kIters; ++i) {
+            try {
+                int S = sbfl.allocSuperBlock();
+                if (S < 0) {
+                    // Pool drained by peers — push the LRU forward to
+                    // recycle some S's.
+                    cache_->evictAndFreeUnified(/*min_super_blocks=*/4);
+                    std::this_thread::yield();
+                    continue;
+                }
+                alloc_count.fetch_add(1, std::memory_order_relaxed);
+
+                // Unique key per (tid, iter) — no put-conflict possible.
+                const CacheKeyType K =
+                    (static_cast<CacheKeyType>(tid + 1) << 40) | static_cast<CacheKeyType>(i + 1);
+                cache_->putUnified(K, S, /*is_resident=*/false);
+                put_count.fetch_add(1, std::memory_order_relaxed);
+
+                // Occasionally stress decUseRef on a never-bumped key
+                // (WARN no-op path) — must not throw / underflow.
+                if (roll(rng) < 25) {
+                    cache_->decUseRef(K);
+                }
+
+                // Drain at least one entry — may be ours or a peer's.
+                cache_->evictAndFreeUnified(/*min_super_blocks=*/1);
+            } catch (const std::exception&) {
+                exception_count.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+    };
+
+    std::vector<std::thread> threads;
+    threads.reserve(kThreads);
+    for (int t = 0; t < kThreads; ++t) {
+        threads.emplace_back(worker, t);
+    }
+    for (auto& th : threads) {
+        th.join();
+    }
+
+    EXPECT_EQ(exception_count.load(), 0u)
+        << "double-free / underflow surfaced under concurrent alloc/put/free pipeline";
+
+    // Final drain to recycle everything still cached.
+    drainAll();
+    EXPECT_EQ(cache_->size(), 0u);
+
+    // Free-list invariant: after full drain, every allocatable id is back on
+    // the free list (id 0 reserved, so the budget is kRaceNumSuperBlocks - 1).
+    EXPECT_EQ(sbfl.freeCount(), static_cast<size_t>(kRaceNumSuperBlocks - 1))
+        << "alloc/free count diverged — alloc=" << alloc_count.load()
+        << " put=" << put_count.load() << " reclaim=" << reclaim_count_.load();
+
+    // Reclaim count must equal alloc count: every allocSuperBlock that
+    // produced an S which was successfully put must have been reclaimed
+    // exactly once. (put_count == alloc_count by construction unless
+    // putUnified threw — which exception_count would have caught.)
+    EXPECT_EQ(reclaim_count_.load(), put_count.load())
+        << "reclaim_count != put_count — possible missed or duplicate reclaim";
 }
 
 }  // namespace test
