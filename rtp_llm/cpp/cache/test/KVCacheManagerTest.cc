@@ -218,7 +218,7 @@ TEST_F(KVCacheManagerTest, WarmupConfigSmoke) {
     EXPECT_EQ(cache_manager->freeBlocksNum(), 0);
 }
 
-TEST_F(KVCacheManagerTest, DSV4IndependentPoolsUsePrefillPinnedCpuBackingOnly) {
+TEST_F(KVCacheManagerTest, DSV4StatePoolBackingFollowsPinnedCpuFlag) {
     // Contract after B1 Option A fix: the allocator reads
     // `config.state_pool_uses_pinned_cpu` directly — it does NOT inspect
     // role_type independently. CacheConfigCreator sets the flag from
@@ -1182,7 +1182,7 @@ TEST_F(KVCacheManagerTest, DSV4EvictionTriggeredWhenPoolExhaustedByCache) {
 // instead of spb. The post-reuse block layout is unchanged: the reused
 // prefix slot is NULL-stamped by reuseCache() and only the new tail block
 // is allocated fresh at position 2.
-TEST_F(KVCacheManagerTest, DSV4MaxConcurrencyOneReuseOneBlockAndAllocTwoTailBlocks) {
+TEST_F(KVCacheManagerTest, DSV4ReuseAllSeededTailBlocksAndAllocOneFreshTail) {
     auto manager_config = makeProductionDSV4Config(/*full_block_num=*/8, /*max_concurrency=*/1);
     ASSERT_EQ(manager_config.group_block_nums.size(), static_cast<size_t>(kDsv4PoolNum));
     // SWA groups: rule_blocks(8) + non_full_addition(4) = 12

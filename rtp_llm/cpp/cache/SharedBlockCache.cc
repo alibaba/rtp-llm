@@ -305,6 +305,9 @@ void SharedBlockCache::putUnified(CacheKeyType cache_key, int super_block_id, bo
                                 pool->blockCacheReference(static_cast<BlockIdxType>(super_block_id));
                             }
                         }
+                        // XR2-A2: CACHE bump under L1 — see the new-entry branch
+                        // below for the full lock-order design note (race-vs-evict
+                        // window that motivated the hoist).
                         if (unified_ref_counter_) {
                             unified_ref_counter_->bump(super_block_id, UnifiedRefCounter::Kind::CACHE);
                         }
