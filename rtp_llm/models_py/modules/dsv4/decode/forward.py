@@ -132,53 +132,35 @@ def build_metadata_eager(
     metadata owned by ``DSv4DecodeFmhaImpl.metadata`` — the caller
     checks the fmha_impl type and picks.
 
-    Returns ``None`` when the incoming batch is empty (B == 0) so the
+    Returns ``None`` when the incoming batch is empty (bs == 0) so the
     caller can short-circuit to an empty ``PyModelOutputs``.
 
-    ``start_pos[r]`` is the absolute position of the new token's
-    predecessor (per ``NormalModelInputGatherer.cc:255``). Clamped to
-    ``max_seq_len - 1`` for warmup safety (probe at max_seq_len then
-    decode).
-
-    ``fp8_kv_cache=True`` switches the underlying builder to
-    :func:`build_decode_metadata_fp8`, which yields the FP8-flavored
-    ``DSv4DecodeAttnMetadataFP8`` (carries ``sched_meta_cache``, FP8 pool
-    specs, etc.) consumed by ``AttentionFP8`` decode helpers.
+    Per-request first-token position is read from ``attn.sequence_lengths``
+    (normal decode) or ``attn.prefix_lengths`` (target verify). The FP8
+    branch passes ``attn`` straight through and lets
+    :func:`build_decode_metadata_fp8` derive + clamp ``start_pos``
+    internally via :func:`_build_start_pos_from_attention_inputs`; the
+    BF16 branch builds + clamps ``start_pos`` here before calling the
+    legacy :func:`build_decode_metadata`. Both clamp to
+    ``[0, max_seq_len - q_len]`` so the whole ``[start_pos, start_pos + q_len)``
+    window stays within KV/compressed pool capacity.
     """
-    if fp8_kv_cache:
-        from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_attn_metadata import (
-            build_decode_metadata_fp8 as build_decode_metadata,
-        )
-    else:
-        from rtp_llm.models_py.modules.dsv4.decode.decode_attn_metadata import (
-            build_decode_metadata,
-        )
-
     # Target verify is a multi-token decode. C++ MtpExecutor (see
     # MtpExecutor.cc:879-958) clears ``sequence_lengths`` and stashes the
     # prior decode positions into ``prefix_lengths``; ``input_lengths``
-    # carries the uniform verify width = ``gen_num_per_cycle + 1``. Read
-    # from those fields when ``is_target_verify`` is set.
+    # carries the uniform verify width = ``gen_num_per_cycle + 1``.
     is_target_verify = bool(getattr(attn, "is_target_verify", False))
     if is_target_verify:
-        prefix_d = attn.prefix_lengths
-        if prefix_d.device.type == "cpu":
-            prefix_d = prefix_d.to(device)
-        start_pos = prefix_d.to(torch.int32)
         input_lengths_d = attn.input_lengths
         q_len = int(input_lengths_d[0]) if input_lengths_d.numel() > 0 else 1
+        bs = int(attn.prefix_lengths.shape[0])
     else:
-        seq_lens_d = attn.sequence_lengths
-        if seq_lens_d.device.type == "cpu":
-            seq_lens_d = seq_lens_d.to(device)
-        start_pos = seq_lens_d.to(torch.int32)
         q_len = 1
-    B = int(start_pos.shape[0])
-    if B == 0:
+        bs = int(attn.sequence_lengths.shape[0])
+    if bs == 0:
         return None
 
     max_s = int(v4_args.max_seq_len)
-    start_pos = torch.clamp(start_pos, min=0, max=max(0, max_s - 1))
 
     # Pull per-attn_type block_tables + entries_per_block for the paged
     # read/write path. Eager allocates fresh per step (no graph capture,
@@ -209,6 +191,39 @@ def build_metadata_eager(
                     continue
                 paged_block_tables[attn_type] = group_block_table
                 paged_entries_per_block[attn_type] = entries_per_block
+
+    if fp8_kv_cache:
+        from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_attn_metadata import (
+            build_decode_metadata_fp8,
+        )
+
+        return build_decode_metadata_fp8(
+            attention_inputs=attn,
+            q_len=q_len,
+            window_size=int(v4_args.window_size),
+            head_dim=int(v4_args.head_dim),
+            max_seq_len=max_s,
+            compress_ratios=list(v4_args.compress_ratios)[: v4_args.n_layers],
+            index_topk=int(v4_args.index_topk),
+            device=device,
+            paged_block_tables=paged_block_tables or None,
+            paged_pool_entries_per_block=paged_entries_per_block or None,
+        )
+
+    # BF16 path: legacy ``build_decode_metadata`` takes a raw ``start_pos``
+    # tensor. Derive + clamp here so it shares semantics with the FP8 branch
+    # (whole [start_pos, start_pos+q_len) window inside KV capacity).
+    from rtp_llm.models_py.modules.dsv4.decode.decode_attn_metadata import (
+        build_decode_metadata,
+    )
+
+    if is_target_verify:
+        start_pos = attn.prefix_lengths
+    else:
+        start_pos = attn.sequence_lengths
+    start_pos = start_pos.to(device=device, dtype=torch.int32)
+    max_start = max(0, max_s - q_len)
+    start_pos = torch.clamp(start_pos, min=0, max=max_start)
 
     return build_decode_metadata(
         start_pos=start_pos,

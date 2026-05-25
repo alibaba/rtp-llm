@@ -102,8 +102,10 @@ class V4Args:
     # SWA/CSA/HCA pools, FlashMLA dual-pool decode); False keeps the BF16
     # ``Attention`` path. Resolved from
     # ``attn_config.kv_cache_dtype == KvCacheDataType.FP8`` in
-    # ``DeepSeekV4Model._args_from_model_config``.
-    fp8_kv_cache: bool = False
+    # ``DeepSeekV4Model._args_from_model_config`` — production is FP8, so
+    # the default reflects that; the BF16 path remains supported for
+    # debugging by callers that pass ``fp8_kv_cache=False`` explicitly.
+    fp8_kv_cache: bool = True
 
 
 def _block_kwargs(

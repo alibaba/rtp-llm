@@ -79,7 +79,6 @@ def _ptr_snapshot(meta):
         "slot_mapping_swa": meta.slot_mapping_swa.data_ptr(),
         "topk_window_idxs": meta.topk_window_idxs.data_ptr(),
         "topk_buffer_compressed": meta.topk_buffer_compressed.data_ptr(),
-        "cache_seqlens_i32": meta.cache_seqlens_i32.data_ptr(),
         "decode_seq_start_per_req": meta.decode_seq_start_per_req.data_ptr(),
     }
     for r, t in meta.slot_mapping_compressed.items():
@@ -142,7 +141,6 @@ def _reference_update_decode_metadata_in_place(meta, attention_inputs, forbid_re
     meta.position_ids[:T].copy_(position_ids_flat)
     meta.position_ids_long[:T].copy_(position_ids_flat.to(torch.long))
     meta.decode_seq_start_per_req[:bs].copy_(start_pos)
-    meta.cache_seqlens_i32[:bs].copy_(position_ids_2d[:, -1] + 1)
     meta.topk_buffer_compressed[:bs].fill_(-1)
 
     req_base = torch.arange(bs, device=device, dtype=torch.int32).view(bs, 1)
@@ -272,7 +270,6 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
 
         self.assertEqual(meta.start_pos[:1].tolist(), [0])
         self.assertEqual(meta.position_ids[:1].tolist(), [0])
-        self.assertEqual(meta.cache_seqlens_i32[:1].tolist(), [1])
         self.assertEqual(meta.slot_mapping_swa[:1].tolist(), [0])
         self.assertEqual(_ptr_snapshot(meta), ptrs)
 
@@ -294,7 +291,6 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
         self.assertEqual(meta.req_id_per_token_long[:2].tolist(), [0, 1])
         self.assertEqual(meta.decode_seq_start_per_req[:2].tolist(), [4, 127])
         self.assertEqual(meta.decode_cu_seq_per_req[:3].tolist(), [0, 1, 2])
-        self.assertEqual(meta.cache_seqlens_i32[:2].tolist(), [5, 128])
 
     def test_target_verify_uses_prefix_lengths(self):
         meta = _alloc(q_len=2)
@@ -314,7 +310,6 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
         self.assertEqual(meta.req_id_per_token_long[:4].tolist(), [0, 0, 1, 1])
         self.assertEqual(meta.decode_seq_start_per_req[:2].tolist(), [10, 20])
         self.assertEqual(meta.decode_cu_seq_per_req[:3].tolist(), [0, 2, 4])
-        self.assertEqual(meta.cache_seqlens_i32[:2].tolist(), [12, 22])
         self.assertEqual(meta.compressed_lens[4][:2].tolist(), [3, 5])
         self.assertEqual(
             meta.compressed_lens_per_token[4][:2].tolist(),
@@ -340,7 +335,6 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
 
         self.assertEqual(meta.start_pos[:2].tolist(), [65598, 8])
         self.assertEqual(meta.position_ids[:4].tolist(), [65598, 65599, 8, 9])
-        self.assertEqual(meta.cache_seqlens_i32[:2].tolist(), [65600, 10])
         self.assertNotEqual(
             meta.position_ids[:4].tolist(), [65597, 65598, 65597, 65598]
         )
@@ -358,7 +352,6 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
 
         self.assertEqual(meta.start_pos[:1].tolist(), [14])
         self.assertEqual(meta.position_ids[:4].tolist(), [14, 15, 16, 17])
-        self.assertEqual(meta.cache_seqlens_i32[:1].tolist(), [18])
 
         ratio4_slots = meta.slot_mapping_compressed[4][:4]
         self.assertEqual(ratio4_slots.tolist(), [-1, 3, -1, -1])
@@ -367,7 +360,7 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
 
     def test_eager_builder_clamps_whole_position_window(self):
         meta = build_decode_metadata_fp8(
-            start_pos=_i32([17]),
+            attention_inputs=_i32([17]),
             q_len=4,
             window_size=128,
             head_dim=512,
@@ -379,11 +372,70 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
 
         self.assertEqual(meta.start_pos.tolist(), [14])
         self.assertEqual(meta.position_ids.tolist(), [14, 15, 16, 17])
-        self.assertEqual(meta.cache_seqlens_i32.tolist(), [18])
         ratio4_slots = meta.slot_mapping_compressed[4]
         self.assertEqual(ratio4_slots.tolist(), [-1, 3, -1, -1])
         valid = ratio4_slots[ratio4_slots >= 0]
         self.assertTrue(torch.all(valid < meta.compressed_buffer_t_dim_per_ratio[4]))
+
+    def test_eager_builder_attention_inputs_object_normal_decode(self):
+        """Direct ``build_decode_metadata_fp8`` with a SimpleNamespace
+        attn_inputs (no torch.Tensor shortcut): normal-decode branch must
+        pull from ``sequence_lengths`` and ignore stale ``prefix_lengths``.
+        """
+        device = (
+            torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        )
+        attn = SimpleNamespace(
+            is_prefill=False,
+            is_target_verify=False,
+            sequence_lengths=torch.tensor([4, 127], dtype=torch.int32, device=device),
+            prefix_lengths=torch.tensor(
+                [1000, 2000], dtype=torch.int32, device=device
+            ),
+        )
+        meta = build_decode_metadata_fp8(
+            attention_inputs=attn,
+            q_len=1,
+            window_size=128,
+            head_dim=512,
+            max_seq_len=65600,
+            compress_ratios=[0, 4, 128],
+            index_topk=16,
+            device=device,
+        )
+
+        self.assertEqual(meta.start_pos.tolist(), [4, 127])
+        self.assertEqual(meta.position_ids.tolist(), [4, 127])
+
+    def test_eager_builder_attention_inputs_object_target_verify(self):
+        """Direct ``build_decode_metadata_fp8`` with target-verify
+        SimpleNamespace: must read ``prefix_lengths`` and produce a
+        q_len=2 position window per request.
+        """
+        device = (
+            torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        )
+        attn = SimpleNamespace(
+            is_prefill=True,
+            is_target_verify=True,
+            sequence_lengths=torch.tensor([], dtype=torch.int32, device=device),
+            prefix_lengths=torch.tensor([10, 20], dtype=torch.int32, device=device),
+        )
+        meta = build_decode_metadata_fp8(
+            attention_inputs=attn,
+            q_len=2,
+            window_size=128,
+            head_dim=512,
+            max_seq_len=65600,
+            compress_ratios=[0, 4, 128],
+            index_topk=16,
+            device=device,
+        )
+
+        self.assertEqual(meta.start_pos.tolist(), [10, 20])
+        self.assertEqual(meta.position_ids.tolist(), [10, 11, 20, 21])
+        # ratio=4 compressed lens: floor((sp + q_len) / 4) per request
+        self.assertEqual(meta.compressed_lens[4].tolist(), [3, 5])
 
     def test_hca_dense_indices_cover_1m_context(self):
         max_seq_len = 1048576
@@ -391,7 +443,7 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
         start_pos = torch.tensor([max_seq_len - 1], dtype=torch.int32, device=device)
 
         eager = build_decode_metadata_fp8(
-            start_pos=start_pos,
+            attention_inputs=start_pos,
             q_len=1,
             window_size=128,
             head_dim=512,
