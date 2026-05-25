@@ -704,7 +704,10 @@ void KVCacheManager::allocateAndSync() {
         }
     }
     if (config_.use_independent_block_pools) {
-        config_.finalizeBlockNums(static_cast<uint32_t>(config_.block_num), runtime_config_);
+        const auto global_block_num = static_cast<uint32_t>(config_.block_num);
+        const auto state_block_num  = config_.state_pool_uses_pinned_cpu ? config_.state_block_num : global_block_num;
+        config_.state_block_num     = state_block_num;
+        config_.finalizeBlockNums(global_block_num, state_block_num, runtime_config_);
     }
     RTP_LLM_LOG_INFO("block_num is %d after tp sync", config_.block_num);
 }
