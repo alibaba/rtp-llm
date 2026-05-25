@@ -41,6 +41,10 @@ public class DispatcherConfiguration {
      * subscribes via {@code listen()} and mirrors every host-change callback into an
      * {@link AtomicReference} that {@link FePool} reads on every {@code next()}.
      *
+     * <p>Batch-aware routes are registered per {@link BatchEndpointSpec} supplied by
+     * {@link BatchEndpointRegistry}; everything else under {@code /dispatcher/**} falls through to
+     * {@link WebClientPassthroughClient}.
+     *
      * <p>The dispatcher shares its JVM, listener, and heap with the master. Three things keep the
      * two from starving each other: the shared Jackson {@link ObjectMapper} bean (no drifting
      * config), a dedicated named {@link ConnectionProvider} ("dispatcher-fe") so fanout cannot
@@ -52,7 +56,8 @@ public class DispatcherConfiguration {
     public RouterFunction<ServerResponse> dispatcherRoutes(DispatchConfig cfg,
                                                            ObjectMapper mapper,
                                                            WebClient.Builder webClientBuilder,
-                                                           ServiceDiscovery serviceDiscovery) {
+                                                           ServiceDiscovery serviceDiscovery,
+                                                           List<BatchEndpointSpec> specs) {
         if (!cfg.isEnabled()) {
             return null;
         }
@@ -74,11 +79,16 @@ public class DispatcherConfiguration {
         });
         FePool pool = new FePool(fePoolUrls::get);
 
+        FeClient feClient = new WebClientFeClient(
+                feBuilder.clone(), cfg.getFeRequestTimeoutMs(), cfg.getFeMaxResponseBytes());
+        FanoutService fanout = new FanoutService(feClient, pool);
+        GenericBatchHandler batchHandler = new GenericBatchHandler(fanout, mapper, cfg.getSubBatchSize());
+
         PassthroughClient passthrough = new WebClientPassthroughClient(feBuilder.build(), pool, cfg.getFeRequestTimeoutMs());
         DispatchHandler handler = new DispatchHandler(passthrough);
-        log.info("dispatcher enabled: fePoolServiceId={}, seedHosts={}, subBatchSize={}",
-                serviceId, fePoolUrls.get().size(), cfg.getSubBatchSize());
-        return new DispatchRouter(handler).routes();
+        log.info("dispatcher enabled: fePoolServiceId={}, seedHosts={}, subBatchSize={}, batchSpecs={}",
+                serviceId, fePoolUrls.get().size(), cfg.getSubBatchSize(), specs.size());
+        return new DispatchRouter(batchHandler, handler, specs).routes();
     }
 
     private static List<String> toUrls(List<WorkerHost> hosts) {

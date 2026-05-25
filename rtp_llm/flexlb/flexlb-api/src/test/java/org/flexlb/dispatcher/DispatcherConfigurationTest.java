@@ -23,6 +23,8 @@ import static org.junit.jupiter.api.Assertions.fail;
 
 class DispatcherConfigurationTest {
 
+    private static final List<BatchEndpointSpec> SPECS = new BatchEndpointRegistry().batchSpecs();
+
     @Test
     void buildsRouterWhenEnabled() {
         DispatchConfig cfg = DispatchConfig.fromJson(
@@ -30,7 +32,7 @@ class DispatcherConfigurationTest {
                         + "\"feRequestTimeoutMs\":3000,\"fePoolServiceId\":\"com.rtp_llm.fe\"}");
         DispatcherConfiguration conf = new DispatcherConfiguration();
         RouterFunction<ServerResponse> routes = conf.dispatcherRoutes(
-                cfg, new ObjectMapper(), WebClient.builder(), new StubServiceDiscovery("com.rtp_llm.fe"));
+                cfg, new ObjectMapper(), WebClient.builder(), new StubServiceDiscovery("com.rtp_llm.fe"), SPECS);
         assertNotNull(routes);
     }
 
@@ -39,7 +41,7 @@ class DispatcherConfigurationTest {
         DispatchConfig cfg = DispatchConfig.fromJson(null);
         DispatcherConfiguration conf = new DispatcherConfiguration();
         assertNull(conf.dispatcherRoutes(
-                cfg, new ObjectMapper(), WebClient.builder(), new FailingServiceDiscovery()));
+                cfg, new ObjectMapper(), WebClient.builder(), new FailingServiceDiscovery(), SPECS));
     }
 
     @Test
@@ -49,7 +51,7 @@ class DispatcherConfigurationTest {
         StubServiceDiscovery discovery = new StubServiceDiscovery("com.rtp_llm.fe",
                 WorkerHost.of("10.0.0.1", 8088));
         DispatcherConfiguration conf = new DispatcherConfiguration();
-        conf.dispatcherRoutes(cfg, new ObjectMapper(), WebClient.builder(), discovery);
+        conf.dispatcherRoutes(cfg, new ObjectMapper(), WebClient.builder(), discovery, SPECS);
 
         assertEquals(1, discovery.getHostsCalls);
         assertNotNull(discovery.registeredListener, "dispatcher must subscribe to host changes");
@@ -72,7 +74,7 @@ class DispatcherConfigurationTest {
                     WorkerHost.of(staleFe.getHostName(), staleFe.getPort()));
             DispatcherConfiguration conf = new DispatcherConfiguration();
             RouterFunction<ServerResponse> routes = conf.dispatcherRoutes(
-                    cfg, new ObjectMapper(), WebClient.builder(), discovery);
+                    cfg, new ObjectMapper(), WebClient.builder(), discovery, SPECS);
 
             // Simulate a service-discovery push: the pool must immediately observe the new host
             // on subsequent next() calls; the request below must land on freshFe, not staleFe.
