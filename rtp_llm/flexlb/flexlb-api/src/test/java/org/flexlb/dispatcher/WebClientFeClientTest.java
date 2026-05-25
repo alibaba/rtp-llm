@@ -34,7 +34,7 @@ class WebClientFeClientTest {
         server.enqueue(new MockResponse()
                 .setHeader("Content-Type", "application/json")
                 .setBody("{\"response_batch\":[{\"response\":\"ok\"}]}"));
-        WebClientFeClient client = new WebClientFeClient(WebClient.builder(), 3000, 16 * 1024 * 1024);
+        WebClientFeClient client = new WebClientFeClient(WebClient.builder(), 16 * 1024 * 1024);
 
         ObjectNode body = mapper.createObjectNode();
         body.putArray("prompt_batch").add("hi");
@@ -60,7 +60,7 @@ class WebClientFeClientTest {
         big.append("\"}]}");
         server.enqueue(new MockResponse().setHeader("Content-Type", "application/json").setBody(big.toString()));
 
-        WebClientFeClient client = new WebClientFeClient(WebClient.builder(), 3000, /*maxResponseBytes*/ 4 * 1024);
+        WebClientFeClient client = new WebClientFeClient(WebClient.builder(), /*maxResponseBytes*/ 4 * 1024);
 
         ObjectNode body = mapper.createObjectNode();
         body.putArray("prompt_batch").add("hi");

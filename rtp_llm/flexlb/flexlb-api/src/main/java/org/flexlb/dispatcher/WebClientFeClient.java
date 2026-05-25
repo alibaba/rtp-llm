@@ -7,19 +7,15 @@ import org.springframework.web.reactive.function.client.ExchangeStrategies;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Mono;
 
-import java.time.Duration;
-
 public class WebClientFeClient implements FeClient {
 
     private final WebClient webClient;
-    private final int timeoutMs;
 
-    public WebClientFeClient(WebClient.Builder builder, int timeoutMs, int maxResponseBytes) {
+    public WebClientFeClient(WebClient.Builder builder, int maxResponseBytes) {
         ExchangeStrategies strategies = ExchangeStrategies.builder()
                 .codecs(c -> c.defaultCodecs().maxInMemorySize(maxResponseBytes))
                 .build();
         this.webClient = builder.exchangeStrategies(strategies).build();
-        this.timeoutMs = timeoutMs;
     }
 
     @Override
@@ -29,7 +25,6 @@ public class WebClientFeClient implements FeClient {
                 .contentType(MediaType.APPLICATION_JSON)
                 .bodyValue(body)
                 .retrieve()
-                .bodyToMono(JsonNode.class)
-                .timeout(Duration.ofMillis(timeoutMs));
+                .bodyToMono(JsonNode.class);
     }
 }

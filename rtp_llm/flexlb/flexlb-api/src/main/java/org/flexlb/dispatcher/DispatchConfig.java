@@ -14,6 +14,12 @@ public class DispatchConfig {
 
     private int feRequestTimeoutMs = 3000;
 
+    private int feConnectTimeoutMs = 2000;
+
+    private int feResponseTimeoutMs = 5000;
+
+    private int feMaxStreamDurationMs = 600_000;
+
     private String fePoolServiceId = "";
 
     private int feMaxConnections = 200;

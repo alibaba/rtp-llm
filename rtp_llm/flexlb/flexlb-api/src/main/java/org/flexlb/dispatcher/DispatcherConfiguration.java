@@ -1,6 +1,7 @@
 package org.flexlb.dispatcher;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.netty.channel.ChannelOption;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.discovery.ServiceDiscovery;
@@ -50,6 +51,17 @@ public class DispatcherConfiguration {
      * config), a dedicated named {@link ConnectionProvider} ("dispatcher-fe") so fanout cannot
      * starve {@code GeneralHttpNettyService}'s master connections, and the per-response byte cap
      * in {@link WebClientFeClient} so a misbehaving FE cannot swamp the shared heap.
+     *
+     * <p>Two {@link HttpClient} instances share that one connection provider so the pool stays
+     * unified but the timeout semantics split by role:
+     * <ul>
+     *   <li>FE batch traffic gets {@code responseTimeout=feResponseTimeoutMs} — chunks are
+     *       JSON-tiny and complete in milliseconds, so a stalled read is a real fault.</li>
+     *   <li>Passthrough streaming gets no {@code responseTimeout} — mid-stream silence is normal
+     *       for SSE. Its only cap is {@link WebClientPassthroughClient}'s body-Flux
+     *       {@code .timeout(feMaxStreamDurationMs)}.</li>
+     * </ul>
+     * Both share {@link ChannelOption#CONNECT_TIMEOUT_MILLIS} so dead FEs fast-fail on connect.
      */
     @Bean
     @Order(Ordered.LOWEST_PRECEDENCE)
@@ -66,8 +78,16 @@ public class DispatcherConfiguration {
                 .pendingAcquireTimeout(Duration.ofMillis(cfg.getFeRequestTimeoutMs()))
                 .pendingAcquireMaxCount(cfg.getFeMaxPendingAcquire())
                 .build();
-        WebClient.Builder feBuilder = webClientBuilder.clone()
-                .clientConnector(new ReactorClientHttpConnector(HttpClient.create(feConnections)));
+        HttpClient feBatchHttp = HttpClient.create(feConnections)
+                .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, cfg.getFeConnectTimeoutMs())
+                .responseTimeout(Duration.ofMillis(cfg.getFeResponseTimeoutMs()));
+        HttpClient passthroughHttp = HttpClient.create(feConnections)
+                .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, cfg.getFeConnectTimeoutMs());
+        WebClient.Builder feBatchBuilder = webClientBuilder.clone()
+                .clientConnector(new ReactorClientHttpConnector(feBatchHttp));
+        WebClient passthroughWebClient = webClientBuilder.clone()
+                .clientConnector(new ReactorClientHttpConnector(passthroughHttp))
+                .build();
 
         String serviceId = cfg.getFePoolServiceId();
         AtomicReference<List<String>> fePoolUrls = new AtomicReference<>(
@@ -79,15 +99,19 @@ public class DispatcherConfiguration {
         });
         FePool pool = new FePool(fePoolUrls::get);
 
-        FeClient feClient = new WebClientFeClient(
-                feBuilder.clone(), cfg.getFeRequestTimeoutMs(), cfg.getFeMaxResponseBytes());
+        FeClient feClient = new WebClientFeClient(feBatchBuilder, cfg.getFeMaxResponseBytes());
         FanoutService fanout = new FanoutService(feClient, pool);
         GenericBatchHandler batchHandler = new GenericBatchHandler(fanout, mapper, cfg.getSubBatchSize());
 
-        PassthroughClient passthrough = new WebClientPassthroughClient(feBuilder.build(), pool, cfg.getFeRequestTimeoutMs());
+        PassthroughClient passthrough =
+                new WebClientPassthroughClient(passthroughWebClient, pool, cfg.getFeMaxStreamDurationMs());
         DispatchHandler handler = new DispatchHandler(passthrough);
-        log.info("dispatcher enabled: fePoolServiceId={}, seedHosts={}, subBatchSize={}, batchSpecs={}",
-                serviceId, fePoolUrls.get().size(), cfg.getSubBatchSize(), specs.size());
+        log.info("dispatcher enabled: fePoolServiceId={}, seedHosts={}, subBatchSize={}, batchSpecs={}, "
+                        + "feConnectTimeoutMs={}, feResponseTimeoutMs={}, feMaxStreamDurationMs={}, "
+                        + "feRequestTimeoutMs={}",
+                serviceId, fePoolUrls.get().size(), cfg.getSubBatchSize(), specs.size(),
+                cfg.getFeConnectTimeoutMs(), cfg.getFeResponseTimeoutMs(), cfg.getFeMaxStreamDurationMs(),
+                cfg.getFeRequestTimeoutMs());
         return new DispatchRouter(batchHandler, handler, specs).routes();
     }
 

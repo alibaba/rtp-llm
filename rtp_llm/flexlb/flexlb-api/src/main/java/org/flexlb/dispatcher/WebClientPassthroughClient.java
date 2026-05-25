@@ -17,7 +17,7 @@ public class WebClientPassthroughClient implements PassthroughClient {
 
     private final WebClient webClient;
     private final FePool fePool;
-    private final int timeoutMs;
+    private final int maxStreamDurationMs;
 
     @Override
     public Mono<ServerResponse> forward(ServerRequest request) {
@@ -36,8 +36,9 @@ public class WebClientPassthroughClient implements PassthroughClient {
                     .exchangeToMono(clientResponse ->
                             ServerResponse.status(clientResponse.statusCode())
                                     .headers(h -> h.addAll(clientResponse.headers().asHttpHeaders()))
-                                    .body(clientResponse.bodyToFlux(DataBuffer.class), DataBuffer.class))
-                    .timeout(Duration.ofMillis(timeoutMs));
+                                    .body(clientResponse.bodyToFlux(DataBuffer.class)
+                                                    .timeout(Duration.ofMillis(maxStreamDurationMs)),
+                                            DataBuffer.class));
         });
     }
 }

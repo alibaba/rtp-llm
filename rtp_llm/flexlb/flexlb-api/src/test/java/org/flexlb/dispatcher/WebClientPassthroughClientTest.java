@@ -41,7 +41,7 @@ class WebClientPassthroughClientTest {
         String base = "http://" + server.getHostName() + ":" + server.getPort();
         FePool pool = new FePool(() -> List.of(base));
         WebClientPassthroughClient client =
-                new WebClientPassthroughClient(WebClient.builder().build(), pool, 3000);
+                new WebClientPassthroughClient(WebClient.builder().build(), pool, 60000);
 
         MockServerRequest request = MockServerRequest.builder()
                 .method(HttpMethod.GET)
@@ -61,7 +61,7 @@ class WebClientPassthroughClientTest {
     void emptyFePoolBecomesErrorMono() {
         FePool pool = new FePool(List::of);
         WebClientPassthroughClient client =
-                new WebClientPassthroughClient(WebClient.builder().build(), pool, 3000);
+                new WebClientPassthroughClient(WebClient.builder().build(), pool, 60000);
 
         MockServerRequest request = MockServerRequest.builder()
                 .method(HttpMethod.GET)
@@ -81,7 +81,7 @@ class WebClientPassthroughClientTest {
         String base = "http://" + server.getHostName() + ":" + server.getPort();
         FePool pool = new FePool(() -> List.of(base));
         WebClientPassthroughClient client =
-                new WebClientPassthroughClient(WebClient.builder().build(), pool, 3000);
+                new WebClientPassthroughClient(WebClient.builder().build(), pool, 60000);
 
         MockServerRequest request = MockServerRequest.builder()
                 .method(HttpMethod.GET)
@@ -102,7 +102,7 @@ class WebClientPassthroughClientTest {
         server.enqueue(new MockResponse().setBody("ok").setResponseCode(200));
         FePool pool = new FePool(() -> List.of("http://" + server.getHostName() + ":" + server.getPort()));
         WebClientPassthroughClient passthrough =
-                new WebClientPassthroughClient(WebClient.builder().build(), pool, 5000);
+                new WebClientPassthroughClient(WebClient.builder().build(), pool, 60000);
 
         MockServerRequest request = MockServerRequest.builder()
                 .method(HttpMethod.GET)
