@@ -16,9 +16,9 @@ public:
                            const ParallelismConfig&               parallelism_config,
                            const ModelSpecificConfig&             model_specific_config,
                            const std::shared_ptr<KVCacheManager>& cache_manager,
-                           const kmonitor::MetricsReporterPtr     metrics_reporter          = nullptr,
-                           const int                              max_score_len             = 1,
-                           bool                                   enable_batch_cache_reuse  = false);
+                           const kmonitor::MetricsReporterPtr     metrics_reporter = nullptr,
+                           const int                              max_score_len    = 1,
+                           bool                                   enable_batch_cache_reuse = false);
 
     ~FIFOScheduler() override;
 

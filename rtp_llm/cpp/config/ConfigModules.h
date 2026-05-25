@@ -162,11 +162,15 @@ struct KVCacheConfig {
     bool        enable_device_cache       = true;
     bool        enable_memory_cache       = false;
     // When true, memory-cache H2D/D2H may use split-KV SM scatter/gather (CUDA) when layout is eligible.
-    bool    enable_memory_cache_sm_copy  = false;
-    bool    enable_remote_cache          = false;
-    bool    write_cache_sync             = false;
-    bool    enable_tiered_memory_cache   = false;
-    bool        enable_batch_cache_reuse   = true;
+    bool enable_memory_cache_sm_copy = false;
+    bool enable_remote_cache         = false;
+    bool write_cache_sync            = false;
+    bool enable_tiered_memory_cache  = false;
+    // Disabled by default. This feature exposes batch-local full-attention KV
+    // blocks before the owner stream enters RUNNING so same-batch siblings can
+    // reuse them in the same forward pass. Hybrid/linear-attention state cache
+    // is not supported by this feature.
+    bool    enable_reuse_cache_in_batch  = false;
     int64_t device_cache_min_free_blocks = 0;
     int     load_cache_retry_times       = 1;  // Maximum retry attempts for load cache transfer failures
 

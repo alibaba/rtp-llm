@@ -3,8 +3,11 @@
 
 #define private public
 #define protected public
-#include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/BlockCache.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/FullKVCacheGroup.h"
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
@@ -28,14 +31,16 @@ protected:
             /*layer_num=*/3, /*block_num=*/9, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_INT8);
     }
 
-    GenerateStreamPtr createStream(const std::vector<int>& input_tokens = {1, 2, 3, 4, 5, 6},
-                                   bool                    reuse_cache  = false) {
+    GenerateStreamPtr createStream(const std::vector<int>& input_tokens          = {1, 2, 3, 4, 5, 6},
+                                   bool                    reuse_cache           = false,
+                                   bool                    enable_reuse_in_batch = false) {
         cache_manager_ =
             std::make_shared<KVCacheManager>(init_config(), /*warmup=*/false, /*metrics_reporter=*/nullptr);
         EXPECT_TRUE(cache_manager_->init());
         ResourceContext resource_context;
-        resource_context.cache_manager = cache_manager_;
-        resource_context.reuse_cache   = reuse_cache;
+        resource_context.cache_manager               = cache_manager_;
+        resource_context.reuse_cache                 = reuse_cache;
+        resource_context.enable_reuse_cache_in_batch = enable_reuse_in_batch;
 
         std::shared_ptr<GenerateInput>  generate_input(new GenerateInput());
         std::shared_ptr<GenerateConfig> generate_config(new GenerateConfig());
@@ -48,6 +53,47 @@ protected:
         model_config.max_seq_len = 2048;
         return std::make_shared<NormalGenerateStream>(
             generate_input, model_config, runtime_config, resource_context, nullptr);
+    }
+
+    // Build a sibling stream that shares the already-created cache_manager_,
+    // so two streams can interact through the same BlockCache (required for
+    // sibling-reuse tests).
+    GenerateStreamPtr createSiblingStream(const std::vector<int>& input_tokens,
+                                          bool                    reuse_cache           = true,
+                                          bool                    enable_reuse_in_batch = true) {
+        EXPECT_TRUE(cache_manager_ != nullptr);
+        ResourceContext resource_context;
+        resource_context.cache_manager               = cache_manager_;
+        resource_context.reuse_cache                 = reuse_cache;
+        resource_context.enable_reuse_cache_in_batch = enable_reuse_in_batch;
+
+        std::shared_ptr<GenerateInput>  generate_input(new GenerateInput());
+        std::shared_ptr<GenerateConfig> generate_config(new GenerateConfig());
+        generate_config->num_return_sequences = 1;
+        generate_input->input_ids =
+            torch::tensor(std::vector<int32_t>(input_tokens.begin(), input_tokens.end()), torch::kInt32);
+        generate_input->generate_config = generate_config;
+        ModelConfig   model_config;
+        RuntimeConfig runtime_config;
+        model_config.max_seq_len = 2048;
+        return std::make_shared<NormalGenerateStream>(
+            generate_input, model_config, runtime_config, resource_context, nullptr);
+    }
+
+    // Count BlockCache items with epoch > 0 (i.e., batch-local entries
+    // inserted via the enable_reuse_cache_in_batch path).
+    size_t countBatchLocalEntries() const {
+        auto single_allocator = std::dynamic_pointer_cast<SingleTypeKVCacheAllocator>(cache_manager_->allocator_);
+        EXPECT_TRUE(single_allocator != nullptr);
+        auto&  block_cache = single_allocator->full_kv_cache_group_->block_cache_;
+        auto   snapshot    = block_cache->cacheSnapshot(/*latest_version=*/0);
+        size_t count       = 0;
+        for (const auto& item : snapshot.values) {
+            if (item.epoch > 0) {
+                ++count;
+            }
+        }
+        return count;
     }
 
 protected:
@@ -337,6 +383,150 @@ TEST_F(GenerateStreamStateTest, testNormalPathTriggersAsyncLoadCache) {
     // Should transition to LOADING_CACHE if asyncLoadCache was initiated
     // or stay in WAITING if no connectors are available
     ASSERT_TRUE(new_state == StreamState::LOADING_CACHE || new_state == StreamState::WAITING);
+}
+
+// ============================================================================
+// 10. Batch-local cache reuse insertion timing
+//
+// Regression coverage for the LOADING_CACHE visibility window:
+// insertIntoCache must run only when a stream is about to enter RUNNING,
+// not eagerly after initKVBlock. Otherwise same-batch siblings could match
+// an epoch entry whose backing blocks are still waiting for connector load.
+// ============================================================================
+
+TEST_F(GenerateStreamStateTest, testBatchReuseInsertedOnFirstPassRunningTransition) {
+    // No connectors active in this test fixture, so asyncLoadCache returns
+    // false and the first-pass handleWaiting transitions directly to RUNNING.
+    auto stream = createStream({1, 2, 3, 4, 5, 6}, /*reuse_cache=*/true, /*enable_reuse_in_batch=*/true);
+    stream->setBatchEpoch(42);
+
+    ASSERT_EQ(stream->getStatus(), StreamState::WAITING);
+    ASSERT_EQ(countBatchLocalEntries(), 0u);
+
+    stream->reportEvent(StreamEvents::CanRun);
+    auto new_state = stream->moveToNext();
+
+    ASSERT_EQ(new_state, StreamState::RUNNING);
+    EXPECT_GT(countBatchLocalEntries(), 0u);  // inserted on RUNNING transition
+}
+
+TEST_F(GenerateStreamStateTest, testBatchReuseInsertedOnSecondPassAfterLoadInitiated) {
+    // Simulate the post-LOADING_CACHE flow: blocks were allocated in a prior
+    // round (initKVBlock), the LoadInitiated event is set, and now handleWaiting
+    // runs its second-pass path (incrKVBlock → insertIntoCache → RUNNING).
+    auto stream = createStream({1, 2, 3, 4, 5, 6}, /*reuse_cache=*/true, /*enable_reuse_in_batch=*/true);
+    stream->setBatchEpoch(7);
+    auto& resource = stream->streamCacheResource();
+    ASSERT_TRUE(resource.initKVBlock().ok());
+
+    // No insertion should have happened from initKVBlock alone.
+    ASSERT_EQ(countBatchLocalEntries(), 0u);
+
+    stream->reportEvent(StreamEvents::LoadInitiated);
+    stream->reportEvent(StreamEvents::CanRun);
+    auto new_state = stream->moveToNext();
+
+    ASSERT_EQ(new_state, StreamState::RUNNING);
+    EXPECT_GT(countBatchLocalEntries(), 0u);  // inserted on RUNNING transition
+}
+
+TEST_F(GenerateStreamStateTest, testBatchReuseNotInsertedWhileLoadingCache) {
+    // Stream parked in LOADING_CACHE must not have any epoch entry exposed.
+    // handleLoading only checks loadCacheDone() and never calls insertIntoCache,
+    // so being stuck in LOADING_CACHE is a no-op for the batch-local cache.
+    auto stream = createStream({1, 2, 3, 4, 5, 6}, /*reuse_cache=*/true, /*enable_reuse_in_batch=*/true);
+    stream->setBatchEpoch(13);
+    auto& resource = stream->streamCacheResource();
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    stream->reportEvent(StreamEvents::LoadInitiated);
+    stream->generate_status_->status = StreamState::LOADING_CACHE;
+
+    ASSERT_EQ(countBatchLocalEntries(), 0u);
+
+    // moveToNext from LOADING_CACHE runs handleLoading. With no real
+    // load_cache_context_ attached, loadCacheDone() returns true immediately
+    // and the stream transitions back to WAITING — but no insertion.
+    stream->moveToNext();
+    EXPECT_EQ(countBatchLocalEntries(), 0u);
+}
+
+TEST_F(GenerateStreamStateTest, testBatchReuseNoInsertWhenFeatureDisabled) {
+    // Sanity check: with enable_reuse_cache_in_batch=false, the insert path
+    // is a no-op regardless of batch_epoch.
+    auto stream = createStream({1, 2, 3, 4, 5, 6}, /*reuse_cache=*/true, /*enable_reuse_in_batch=*/false);
+    stream->setBatchEpoch(99);
+
+    stream->reportEvent(StreamEvents::CanRun);
+    auto new_state = stream->moveToNext();
+    ASSERT_EQ(new_state, StreamState::RUNNING);
+    EXPECT_EQ(countBatchLocalEntries(), 0u);
+}
+
+TEST_F(GenerateStreamStateTest, testBatchReuseNoInsertWhenBatchEpochUnset) {
+    // Sanity check: insertIntoCache refuses to expose entries when
+    // batch_epoch == 0 (scheduler hasn't assigned a batch identity).
+    auto stream = createStream({1, 2, 3, 4, 5, 6}, /*reuse_cache=*/true, /*enable_reuse_in_batch=*/true);
+    // Note: setBatchEpoch intentionally NOT called.
+    ASSERT_EQ(stream->batchEpoch(), 0);
+
+    stream->reportEvent(StreamEvents::CanRun);
+    auto new_state = stream->moveToNext();
+    ASSERT_EQ(new_state, StreamState::RUNNING);
+    EXPECT_EQ(countBatchLocalEntries(), 0u);
+}
+
+// End-to-end demonstration: with the deferred insertIntoCache still happening
+// inside A's moveToNext() before B's moveToNext() runs, sibling B in the same
+// batch_epoch CAN match A's freshly-inserted entry and reuse its blocks. This
+// verifies the fix did NOT break the batch-local sharing semantics.
+TEST_F(GenerateStreamStateTest, testBatchReuseSiblingMatchesPriorStreamEntry) {
+    constexpr int64_t      kSharedEpoch = 42;
+    const std::vector<int> prefix_tokens{1, 2, 3, 4, 5, 6};
+
+    // Stream A: first in the scheduling round, no device cache hit (cold).
+    auto stream_a = createStream(prefix_tokens, /*reuse_cache=*/true, /*enable_reuse_in_batch=*/true);
+    stream_a->setBatchEpoch(kSharedEpoch);
+    ASSERT_EQ(countBatchLocalEntries(), 0u);
+
+    stream_a->reportEvent(StreamEvents::CanRun);
+    ASSERT_EQ(stream_a->moveToNext(), StreamState::RUNNING);
+    const size_t entries_after_a = countBatchLocalEntries();
+    ASSERT_GT(entries_after_a, 0u);  // A inserted its epoch entries
+
+    // Stream B: same batch_epoch, same prefix, shares the cache_manager.
+    // FIFOScheduler iterates streams serially, so this mirrors how A's
+    // moveToNext returns before B's moveToNext starts.
+    auto stream_b = createSiblingStream(prefix_tokens);
+    stream_b->setBatchEpoch(kSharedEpoch);
+    ASSERT_EQ(stream_b->reuseLength(), 0);
+
+    stream_b->reportEvent(StreamEvents::CanRun);
+    ASSERT_EQ(stream_b->moveToNext(), StreamState::RUNNING);
+
+    // The key assertion: B's initKVBlock saw A's epoch=42 entries and
+    // bumped reuse_length, so prefill skips the shared prefix.
+    EXPECT_GT(stream_b->reuseLength(), 0);
+}
+
+// Negative companion: with a different batch_epoch, B must NOT match A's
+// batch-local entry — epoch isolation must hold.
+TEST_F(GenerateStreamStateTest, testBatchReuseSiblingMissesDifferentEpoch) {
+    const std::vector<int> prefix_tokens{1, 2, 3, 4, 5, 6};
+
+    auto stream_a = createStream(prefix_tokens, /*reuse_cache=*/true, /*enable_reuse_in_batch=*/true);
+    stream_a->setBatchEpoch(11);
+    stream_a->reportEvent(StreamEvents::CanRun);
+    ASSERT_EQ(stream_a->moveToNext(), StreamState::RUNNING);
+    ASSERT_GT(countBatchLocalEntries(), 0u);
+
+    // Sibling in a different batch.
+    auto stream_b = createSiblingStream(prefix_tokens);
+    stream_b->setBatchEpoch(99);  // different epoch
+    stream_b->reportEvent(StreamEvents::CanRun);
+    ASSERT_EQ(stream_b->moveToNext(), StreamState::RUNNING);
+
+    // Epoch isolation: B's match filter rejects A's epoch=11 entries.
+    EXPECT_EQ(stream_b->reuseLength(), 0);
 }
 
 }  // namespace rtp_llm

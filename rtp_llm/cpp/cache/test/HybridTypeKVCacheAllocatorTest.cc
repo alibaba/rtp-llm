@@ -526,6 +526,104 @@ TEST_F(HybridTypeKVCacheAllocatorTest, InsertIntoCacheInsertsOnlyFullBlocks) {
     EXPECT_FALSE(block_cache->contains(101, gid_linear));
 }
 
+// ==================== Epoch isolation in hybrid path ====================
+
+// Helper: same as allocateAndCache but with a configurable epoch.
+static std::vector<BlockIdxType> allocateAndCacheWithEpoch(
+    BlockPoolPtr block_pool, BlockCachePtr block_cache, int group_id, const CacheKeysType& keys, int64_t epoch) {
+    auto blocks = block_pool->malloc(static_cast<int>(keys.size()));
+    EXPECT_EQ(blocks.size(), keys.size());
+
+    for (size_t i = 0; i < keys.size(); ++i) {
+        BlockCache::CacheItem item;
+        item.cache_key   = keys[i];
+        item.group_id    = group_id;
+        item.block_index = blocks[i];
+        item.is_resident = false;
+        item.epoch       = epoch;
+        EXPECT_EQ(block_cache->put(item).action, BlockCache::PutResult::Action::INSERTED);
+        block_pool->blockCacheReference(blocks[i]);
+    }
+    block_pool->requestFree(blocks);
+    return blocks;
+}
+
+TEST_F(HybridTypeKVCacheAllocatorTest, JointReuseRespectsBatchEpoch) {
+    auto config    = makeTinyHybridConfig();
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+
+    auto block_pool  = allocator->getBlockPool();
+    auto block_cache = block_pool->blockCache();
+    ASSERT_NE(block_pool, nullptr);
+    ASSERT_NE(block_cache, nullptr);
+
+    const int gid_linear = 0;
+    const int gid_full   = 1;
+
+    // Seed full + linear groups with epoch=42 (batch-specific).
+    CacheKeysType full_keys = {100, 101, 102};
+    allocateAndCacheWithEpoch(block_pool, block_cache, gid_full, full_keys, /*epoch=*/42);
+    CacheKeysType linear_keys = {101};
+    allocateAndCacheWithEpoch(block_pool, block_cache, gid_linear, linear_keys, /*epoch=*/42);
+
+    // Different-epoch malloc must NOT see those entries.
+    {
+        auto       batch_res = makeBatchResource(/*batch_size=*/1,
+                                           /*group_nums=*/2,
+                                           /*layer_num=*/static_cast<int>(config.layer_all_num),
+                                           /*layer_to_group_id=*/config.layer_to_group_id,
+                                           CacheKeysType{100, 101, 102, 103});
+        auto       token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/12, /*seq_size_per_block=*/4);
+        MallocInfo info{batch_res, token_ids};
+        info.enable_device_cache = true;
+        info.epoch               = 99;  // different batch
+        auto result              = allocator->malloc(info);
+        ASSERT_TRUE(result.success);
+        EXPECT_EQ(result.reuse_len, 0);
+        FreeInfo free_info{batch_res, token_ids};
+        allocator->free(free_info);
+    }
+
+    // Same-epoch malloc must reuse the seeded entries.
+    {
+        auto       batch_res = makeBatchResource(/*batch_size=*/1,
+                                           /*group_nums=*/2,
+                                           /*layer_num=*/static_cast<int>(config.layer_all_num),
+                                           /*layer_to_group_id=*/config.layer_to_group_id,
+                                           CacheKeysType{100, 101, 102, 103});
+        auto       token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/12, /*seq_size_per_block=*/4);
+        MallocInfo info{batch_res, token_ids};
+        info.enable_device_cache = true;
+        info.epoch               = 42;  // same batch as seeded entries
+        auto result              = allocator->malloc(info);
+        ASSERT_TRUE(result.success);
+        // Joint reuse picks up the linear key at pos=1 → reuse_blocks_len=2.
+        EXPECT_EQ(result.reuse_len, 2 * 4);
+        FreeInfo free_info{batch_res, token_ids};
+        allocator->free(free_info);
+    }
+
+    // epoch=0 (GLOBAL_EPOCH = "no batch identity"): MUST NOT see batch-local entries.
+    // The seeded entries are all epoch=42, so a no-batch caller sees nothing.
+    {
+        auto       batch_res = makeBatchResource(/*batch_size=*/1,
+                                           /*group_nums=*/2,
+                                           /*layer_num=*/static_cast<int>(config.layer_all_num),
+                                           /*layer_to_group_id=*/config.layer_to_group_id,
+                                           CacheKeysType{100, 101, 102, 103});
+        auto       token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/12, /*seq_size_per_block=*/4);
+        MallocInfo info{batch_res, token_ids};
+        info.enable_device_cache = true;
+        info.epoch               = 0;  // GLOBAL_EPOCH
+        auto result              = allocator->malloc(info);
+        ASSERT_TRUE(result.success);
+        EXPECT_EQ(result.reuse_len, 0);
+        FreeInfo free_info{batch_res, token_ids};
+        allocator->free(free_info);
+    }
+}
+
 TEST_F(HybridTypeKVCacheAllocatorTest, ConvertIndexToBufferAndAllLayerCacheBaseSmoke) {
     auto config    = makeTinyHybridConfig();
     auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
@@ -632,10 +730,10 @@ TEST_F(HybridTypeKVCacheAllocatorTest, PrefillInitSkipsSparseCleanupAndPreserves
     auto token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/20, /*seq_size_per_block=*/4);
 
     MallocInfo info{batch_res, token_ids};
-    info.enable_device_cache   = true;
-    info.reuse_cache           = true;
+    info.enable_device_cache          = true;
+    info.reuse_cache                  = true;
     info.enable_remove_skipped_blocks = false;  // prefill init path
-    auto result                = allocator->malloc(info);
+    auto result                       = allocator->malloc(info);
     ASSERT_TRUE(result.success);
 
     const auto& linear_out = batch_res->blocks(0, gid_linear);
@@ -681,10 +779,10 @@ TEST_F(HybridTypeKVCacheAllocatorTest, DecodeIncrMallocAppliesSparseCleanupOnLin
     auto token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/24, /*seq_size_per_block=*/4);
 
     MallocInfo info{batch_res, token_ids};
-    info.enable_device_cache   = false;
-    info.reuse_cache           = true;
+    info.enable_device_cache          = false;
+    info.reuse_cache                  = true;
     info.enable_remove_skipped_blocks = true;  // decode path
-    auto result                = allocator->malloc(info);
+    auto result                       = allocator->malloc(info);
     ASSERT_TRUE(result.success);
 
     // For step=2 and size=6: keep pos 1, 3 (step hits) and last two (4, 5); null pos 0, 2.

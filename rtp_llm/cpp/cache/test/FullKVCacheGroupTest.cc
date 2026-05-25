@@ -234,40 +234,13 @@ TEST_F(FullKVCacheGroupTest, EnsureFreeBlocksTest) {
 }
 
 // ==================== Epoch-based cache isolation tests ====================
-
-TEST_F(FullKVCacheGroupTest, EpochMatchVisibilityTest) {
-    auto block_pool = createBlockPool();
-    block_pool->init();
-    auto block_cache = block_pool->blockCache();
-
-    // Insert item with epoch=0 (globally visible)
-    BlockCache::CacheItem global_item = {201, 0, 1, false, /*epoch=*/0};
-    EXPECT_EQ(block_cache->put(global_item).action, BlockCache::PutResult::Action::INSERTED);
-
-    // Insert item with epoch=42 (batch-specific)
-    BlockCache::CacheItem batch_item = {202, 0, 2, false, /*epoch=*/42};
-    EXPECT_EQ(block_cache->put(batch_item).action, BlockCache::PutResult::Action::INSERTED);
-
-    auto spec                = std::make_shared<MHAKVCacheSpec>();
-    spec->seq_size_per_block = 4;
-    FullKVCacheGroup group({}, spec, block_pool, 0);
-
-    // epoch=0 items visible to any batch
-    auto result1 = group.match({201}, /*current_batch_epoch=*/42);
-    EXPECT_EQ(result1.reuse_blocks, 1);
-
-    // epoch=42 items visible to same batch
-    auto result2 = group.match({202}, /*current_batch_epoch=*/42);
-    EXPECT_EQ(result2.reuse_blocks, 1);
-
-    // epoch=42 items invisible to different batch
-    auto result3 = group.match({202}, /*current_batch_epoch=*/99);
-    EXPECT_EQ(result3.reuse_blocks, 0);
-
-    // NO_EPOCH_FILTER (-1) matches all items (backward compat)
-    auto result4 = group.match({202}, BlockCache::NO_EPOCH_FILTER);
-    EXPECT_EQ(result4.reuse_blocks, 1);
-}
+//
+// NOTE: The epoch filter logic itself is exercised by
+// BlockCacheTest::MatchEpochZeroDoesNotSeeBatchLocal (covers all four query
+// modes: epoch=0, NO_EPOCH_FILTER, same-batch, different-batch).
+// FullKVCacheGroup::match is a thin pass-through to BlockCache::match with no
+// extra business logic, so a duplicate visibility matrix at this layer would
+// add no coverage. Group-specific behavior (put/promote/pop) is covered below.
 
 TEST_F(FullKVCacheGroupTest, EpochPutSkipsOverwritingGlobalWithBatch) {
     auto block_pool = createBlockPool();
@@ -280,7 +253,7 @@ TEST_F(FullKVCacheGroupTest, EpochPutSkipsOverwritingGlobalWithBatch) {
 
     // Try to overwrite with batch-specific item (epoch=42) — should be SKIPPED
     BlockCache::CacheItem batch_item = {301, 0, 2, false, /*epoch=*/42};
-    auto result = block_cache->put(batch_item);
+    auto                  result     = block_cache->put(batch_item);
     EXPECT_EQ(result.action, BlockCache::PutResult::Action::SKIPPED);
 
     // Original global item still there

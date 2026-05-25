@@ -54,14 +54,27 @@ void GenerateStateMachine::handleWaiting() {
             releaseResource();
             return;
         }
+
         bool ret = stream_cache_resource_->asyncLoadCache();
         // 设置 LoadInitiated 标志，表示已尝试asyncLoadCache. 当前实现即便asyncLoadCache失败也不再重试
         reportEvent(StreamEvents::LoadInitiated);
         if (ret) {
+            // Connector load in flight: blocks may not hold valid KV until
+            // loadCacheDone() succeeds. Do NOT expose to siblings here —
+            // a sibling matching this epoch entry would skip prefill and
+            // read empty blocks. insertIntoCache is deferred to the
+            // second-pass handleWaiting after LOADING_CACHE → WAITING.
             status.store(StreamState::LOADING_CACHE, std::memory_order_release);
         } else if (stream_cache_resource_->resourceContext().role_type != RoleType::DECODE) {
             // Loading cache 失败或不需要loading，直接触发重计算
             // 当前decodeRpcServer会调用moveToNext，判断role type避免decodeRpcServer在enqueue前提早走到running状态
+            //
+            // No connector load this round. Blocks are either device-cache
+            // filled ([0..reuse_len)) or will be written by THIS stream's
+            // forward this round ([reuse_len..N)). Safe to expose to
+            // same-batch siblings: they join the same forward pass, and
+            // per-layer K/V write precedes attention read.
+            stream_cache_resource_->insertIntoCache();
             status.store(StreamState::RUNNING, std::memory_order_release);
         }
         return;
@@ -72,6 +85,12 @@ void GenerateStateMachine::handleWaiting() {
     // 会导致 cache manager 对不完整的最后一个 block 执行 pop_back，
     // 破坏已分配的 block 结构。
     if (stream_cache_resource_->resourceContext().role_type == RoleType::PREFILL) {
+        // Second-pass entry after LOADING_CACHE completed (success or
+        // match-fail). Success: blocks now hold connector-loaded KV.
+        // Match-fail: reuse_len was not bumped, this stream's forward
+        // will write the full uncached range — siblings reusing blocks
+        // get write-before-read in the same forward.
+        stream_cache_resource_->insertIntoCache();
         status.store(StreamState::RUNNING, std::memory_order_release);
         return;
     }
@@ -84,6 +103,10 @@ void GenerateStateMachine::handleWaiting() {
         releaseResource();
         return;
     }
+    // Same rationale as the PREFILL branch above: connector load (if any)
+    // has completed by the time LoadInitiated is set, so block contents
+    // are safe to expose to same-batch siblings before entering RUNNING.
+    stream_cache_resource_->insertIntoCache();
     status.store(StreamState::RUNNING, std::memory_order_release);
     return;
 }
