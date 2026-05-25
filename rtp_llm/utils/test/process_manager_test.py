@@ -4,9 +4,29 @@ import os
 import signal
 import time
 import unittest
+from contextlib import contextmanager
 from unittest.mock import Mock, patch
 
 from rtp_llm.utils.process_manager import ProcessManager
+
+
+@contextmanager
+def _watchdog(seconds: float, msg: str = "test exceeded watchdog"):
+    """Fail-fast guard for tests that would hang on regression.
+
+    Uses SIGALRM (main-thread only); raises AssertionError on timeout so the
+    test fails immediately instead of blocking the whole suite.
+    """
+    def handler(_signum: int, _frame: object) -> None:
+        raise AssertionError(f"{msg}: exceeded {seconds}s")
+
+    prev = signal.signal(signal.SIGALRM, handler)
+    signal.alarm(int(seconds))
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, prev)
 
 
 def dummy_worker(duration=1, should_crash=False):
@@ -71,8 +91,7 @@ class TestProcessManager(unittest.TestCase):
         """Test ProcessManager initialization"""
         self.assertEqual(self.manager.processes, [])
         self.assertFalse(self.manager.shutdown_requested)
-        self.assertFalse(self.manager.terminated)
-        self.assertEqual(self.manager.first_dead_time, 0)
+        self.assertFalse(self.manager.failure_detected)
 
     def test_add_single_process(self):
         """Test adding a single process"""
@@ -183,9 +202,7 @@ class TestProcessManager(unittest.TestCase):
         self.assertTrue(proc.is_alive())
 
         # Terminate
-        self.manager._terminate_processes()
-        self.assertTrue(self.manager.terminated)
-        self.assertGreater(self.manager.first_dead_time, 0)
+        self.manager._terminate_processes(drain_timeout=0)
 
         # Wait for process to handle SIGTERM and die
         timeout = time.time() + 3
@@ -197,11 +214,6 @@ class TestProcessManager(unittest.TestCase):
             proc.join(timeout=1)
 
         self.assertFalse(proc.is_alive())
-
-        # Test idempotency
-        old_time = self.manager.first_dead_time
-        self.manager._terminate_processes()
-        self.assertEqual(self.manager.first_dead_time, old_time)
 
     def test_terminate_processes_stages_frontend_before_backend(self):
         """Test frontend process group is drained before backend is signaled"""
@@ -225,13 +237,14 @@ class TestProcessManager(unittest.TestCase):
         self.manager.add_process(frontend_proc, shutdown_group="frontend")
         self.manager.add_process(backend_proc, shutdown_group="backend")
 
-        self.manager._terminate_processes()
+        self.manager._terminate_processes(drain_timeout=0)
 
         self.assertEqual(events, ["frontend", "backend"])
-        self.assertTrue(self.manager.terminated)
 
-    def test_timeout_force_kills_frontend_before_backend(self):
-        """Test an undrained frontend is force-killed before backend shutdown."""
+    def test_undrained_frontend_force_killed_after_backend_sigterm(self):
+        """Undrained frontend is SIGTERM'd, backend SIGTERM'd next, then monitor
+        force-kills frontend after POST_KILL_REAP_WINDOW. SIGKILL no longer
+        happens inside _terminate_processes — it is the monitor loop's job."""
         events = []
 
         class FakeProcess:
@@ -252,8 +265,10 @@ class TestProcessManager(unittest.TestCase):
         backend_proc = FakeProcess("backend", 1002)
         self.manager.shutdown_timeout = 0
         self.manager.monitor_interval = 0.01
+        self.manager.POST_KILL_REAP_WINDOW = 0.05
         self.manager.add_process(frontend_proc, shutdown_group="frontend")
         self.manager.add_process(backend_proc, shutdown_group="backend")
+        self.manager.shutdown_requested = True  # drive monitor end-to-end
 
         def fake_kill(pid, sig):
             events.append(f"kill:{pid}:{sig}")
@@ -261,16 +276,14 @@ class TestProcessManager(unittest.TestCase):
                 frontend_proc._alive = False
 
         with patch("os.kill", side_effect=fake_kill):
-            self.manager._terminate_processes()
+            self.manager._monitor_processes_health()
 
-        self.assertEqual(
-            events,
-            [
-                "term:frontend",
-                f"kill:{frontend_proc.pid}:{signal.SIGKILL}",
-                "term:backend",
-            ],
-        )
+        # SIGTERM ordering preserved (frontend before backend), and the SIGKILL
+        # for the survivor comes AFTER both SIGTERMs — the monitor loop's
+        # POST_KILL_REAP_WINDOW expiry is the single source of force-kill.
+        self.assertEqual(events[0], "term:frontend")
+        self.assertEqual(events[1], "term:backend")
+        self.assertIn(f"kill:{frontend_proc.pid}:{signal.SIGKILL}", events[2:])
 
     def test_force_kill_processes(self):
         """Test force killing processes"""
@@ -335,7 +348,6 @@ class TestProcessManager(unittest.TestCase):
         # All processes should be terminated
         for proc in procs:
             self.assertFalse(proc.is_alive())
-        self.assertTrue(self.manager.terminated)
         self.assertTrue(self.manager.failure_detected)
 
     def test_monitor_with_shutdown_signal(self):
@@ -352,9 +364,11 @@ class TestProcessManager(unittest.TestCase):
         )
         monitor_thread.start()
 
-        # Send shutdown signal after a short delay
+        # Send shutdown signal after a short delay (mirrors what the SIGTERM
+        # handler does in production — sets shutdown_requested directly,
+        # leaves failure_detected=False).
         time.sleep(0.5)
-        self.manager.graceful_shutdown()
+        self.manager.shutdown_requested = True
 
         # Wait for monitoring to complete
         monitor_thread.join(timeout=5)
@@ -365,10 +379,9 @@ class TestProcessManager(unittest.TestCase):
         # Process should be terminated
         self.assertFalse(proc.is_alive())
         self.assertTrue(self.manager.shutdown_requested)
-        self.assertTrue(self.manager.terminated)
 
     def test_monitor_with_force_kill_timeout(self):
-        """Test force kill after timeout"""
+        """Monitor force-kills survivors after the post-SIGTERM reap window."""
         # Mock a process that won't die
         mock_proc = Mock()
         mock_proc.is_alive.return_value = True
@@ -376,20 +389,24 @@ class TestProcessManager(unittest.TestCase):
         # Mark it as a mock to skip in teardown
         mock_proc._mock_name = "mock_proc"
 
-        self.manager.add_process(mock_proc)
-        self.manager.terminated = True
-        self.manager.first_dead_time = time.time() - self.manager.shutdown_timeout - 1
+        self.manager.add_process(mock_proc, shutdown_group="frontend")
+        self.manager.shutdown_timeout = 0  # immediate drain timeout
+        self.manager.POST_KILL_REAP_WINDOW = 0.05
+        self.manager.shutdown_requested = True
 
-        # Should force kill
+        # Should force kill after reap window expires
         with patch("os.kill") as mock_kill:
             self.manager._monitor_processes_health()
             mock_kill.assert_called_with(12345, signal.SIGKILL)
 
-    def test_graceful_shutdown(self):
-        """Test graceful shutdown method"""
+    def test_request_failure_shutdown(self):
+        """request_failure_shutdown marks both shutdown and failure flags."""
         self.assertFalse(self.manager.shutdown_requested)
-        self.manager.graceful_shutdown()
+        self.assertFalse(self.manager.failure_detected)
+
+        self.manager.request_failure_shutdown()
         self.assertTrue(self.manager.shutdown_requested)
+        self.assertTrue(self.manager.failure_detected)
 
     def test_join_all_processes(self):
         """Test joining all processes"""
@@ -455,8 +472,8 @@ class TestProcessManager(unittest.TestCase):
         # Give it a moment
         time.sleep(0.1)
 
-        # Request shutdown
-        self.manager.graceful_shutdown()
+        # Request shutdown (mirrors SIGTERM handler — flag-only, not failure)
+        self.manager.shutdown_requested = True
 
         # Wait for monitoring to complete
         monitor_thread.join()
@@ -464,7 +481,6 @@ class TestProcessManager(unittest.TestCase):
         # Process should be terminated
         self.assertFalse(proc1.is_alive())
         self.assertFalse(proc2.is_alive())
-        self.assertTrue(self.manager.terminated)
 
 
 class TestProcessManagerHealthCheck(unittest.TestCase):
@@ -854,6 +870,389 @@ class TestProcessManagerHealthCheck(unittest.TestCase):
         self.assertTrue(result)
         self.assertEqual(check_state["counter"], 3)
         self.assertTrue(self.manager.health_check_status["custom_service"]["ready"])
+
+
+class _FakeProc:
+    """Minimal fake process for staged-shutdown tests.
+
+    Compatible with the methods ProcessManager invokes (.is_alive, .terminate,
+    .join, .pid, .name) without touching the OS.
+    """
+
+    _next_pid = 9000
+
+    def __init__(
+        self,
+        name,
+        alive=True,
+        dies_on_terminate=False,
+        dies_after=None,
+        exitcode=0,
+    ):
+        type(self)._next_pid += 1
+        self.pid = type(self)._next_pid
+        self.name = name
+        self._alive = alive
+        self._dies_on_terminate = dies_on_terminate
+        self._dies_after = dies_after  # absolute time after which is_alive flips False
+        self._exitcode = exitcode  # value reported once dead
+        self.terminated = False
+
+    def is_alive(self):
+        if self._dies_after is not None and time.time() >= self._dies_after:
+            self._alive = False
+        return self._alive
+
+    @property
+    def exitcode(self):
+        # Match multiprocessing.Process: None while alive, set after exit.
+        return None if self.is_alive() else self._exitcode
+
+    def terminate(self):
+        self.terminated = True
+        if self._dies_on_terminate:
+            self._alive = False
+
+    def join(self, timeout=None):
+        # Pretend to wait; flip alive false if the death window already elapsed.
+        if self._dies_after is not None and time.time() >= self._dies_after:
+            self._alive = False
+
+
+class TestFailureShutdownPaths(unittest.TestCase):
+    """Coverage for the failure-driven shutdown / drain-abort fixes."""
+
+    def setUp(self):
+        # Use a short graceful drain so monitor-driven tests finish fast.
+        self.manager = ProcessManager(shutdown_timeout=1, monitor_interval=0.01)
+        self.manager.POST_KILL_REAP_WINDOW = 0.1
+
+    # --- request_failure_shutdown invariants -------------------------------
+
+    def test_signal_handler_does_not_mark_failure(self):
+        """SIGTERM/SIGINT must leave failure_detected=False."""
+        self.manager._signal_handler(signal.SIGTERM, None)
+        self.assertTrue(self.manager.shutdown_requested)
+        self.assertFalse(self.manager.failure_detected)
+
+    # --- drain-cap activation -----------------------------------------------
+
+    def test_failure_with_dead_backend_force_kills_frontend(self):
+        """failure_detected=True + backend already dead → drain_timeout=0, so
+        SIGTERM fires immediately and the monitor loop force-kills the
+        non-draining frontend after POST_KILL_REAP_WINDOW."""
+        frontend = _FakeProc("frontend")
+        backend = _FakeProc("backend", alive=False)
+        self.manager.add_process(frontend, shutdown_group="frontend")
+        self.manager.add_process(backend, shutdown_group="backend")
+        self.manager.request_failure_shutdown()
+
+        kills = []
+
+        def fake_kill(pid, sig):
+            kills.append((pid, sig))
+            if pid == frontend.pid:
+                frontend._alive = False
+
+        with patch("os.kill", side_effect=fake_kill), _watchdog(
+            5, "failure path with dead backend regressed"
+        ):
+            self.manager._monitor_processes_health()
+
+        self.assertTrue(frontend.terminated)
+        self.assertIn((frontend.pid, signal.SIGKILL), kills)
+
+    def test_failure_with_alive_backend_force_kills_frontend(self):
+        """failure_detected=True with backend alive → SIGTERM frontend+backend,
+        then monitor force-kills non-draining frontend within REAP window."""
+        frontend = _FakeProc("frontend")  # ignores SIGTERM, never dies
+        backend = _FakeProc("backend", dies_on_terminate=True)
+        self.manager.add_process(frontend, shutdown_group="frontend")
+        self.manager.add_process(backend, shutdown_group="backend")
+        self.manager.request_failure_shutdown()
+
+        kills = []
+
+        def fake_kill(pid, sig):
+            kills.append((pid, sig))
+            if pid == frontend.pid:
+                frontend._alive = False
+
+        t0 = time.time()
+        with patch("os.kill", side_effect=fake_kill), _watchdog(
+            5, "failure path with alive backend regressed"
+        ):
+            self.manager._monitor_processes_health()
+        elapsed = time.time() - t0
+
+        self.assertIn((frontend.pid, signal.SIGKILL), kills)
+        self.assertLess(elapsed, 3.0, f"failure shutdown took too long: {elapsed:.2f}s")
+
+    # --- abort-upgrade (Patch A, Scenario 7) --------------------------------
+
+    def test_normal_shutdown_backend_crashes_mid_drain_upgrades_to_failure(self):
+        """SIGTERM-driven shutdown, backend alive at start, CRASHES (exitcode!=0)
+        during drain wait. Drain-abort branch in _wait_process_list_exit upgrades
+        failure_detected so the parent eventually exits non-zero. Monitor loop
+        then force-kills the non-draining frontend after POST_KILL_REAP_WINDOW."""
+        frontend = _FakeProc("frontend")  # ignores SIGTERM
+        # Backend dies 0.1s into drain wait with non-zero exitcode (crash).
+        backend = _FakeProc(
+            "backend", dies_after=time.time() + 0.1, exitcode=1
+        )
+        self.manager.add_process(frontend, shutdown_group="frontend")
+        self.manager.add_process(backend, shutdown_group="backend")
+        self.manager.shutdown_requested = True  # mirror SIGTERM handler
+
+        kills = []
+
+        def fake_kill(pid, sig):
+            kills.append((pid, sig))
+            if pid == frontend.pid:
+                frontend._alive = False
+
+        with patch("os.kill", side_effect=fake_kill), _watchdog(
+            15, "crash-mid-drain regressed: force-kill never fired"
+        ):
+            self.manager._monitor_processes_health()
+
+        # Crash → failure_detected escalated.
+        self.assertTrue(
+            self.manager.failure_detected,
+            "abort branch with crashed backend must upgrade failure_detected",
+        )
+        self.assertIn((frontend.pid, signal.SIGKILL), kills)
+
+    def test_normal_shutdown_backend_clean_exit_mid_drain_no_failure(self):
+        """Cgroup-wide SIGTERM scenario: parent + backend + frontends all get
+        SIGTERM. Backend handles it cleanly (exitcode=0) before frontends finish
+        draining. Drain abort must NOT flag failure — exit code stays 0 — but
+        the monitor still force-kills frontends after POST_KILL_REAP_WINDOW
+        because they ignore SIGTERM."""
+        frontend = _FakeProc("frontend")  # ignores SIGTERM
+        # Backend exits cleanly 0.1s into drain wait.
+        backend = _FakeProc(
+            "backend", dies_after=time.time() + 0.1, exitcode=0
+        )
+        self.manager.add_process(frontend, shutdown_group="frontend")
+        self.manager.add_process(backend, shutdown_group="backend")
+        self.manager.shutdown_requested = True  # mirror SIGTERM handler
+
+        kills = []
+
+        def fake_kill(pid, sig):
+            kills.append((pid, sig))
+            if pid == frontend.pid:
+                frontend._alive = False
+
+        with patch("os.kill", side_effect=fake_kill), _watchdog(
+            15, "clean-exit-mid-drain regressed: drain never aborted"
+        ):
+            self.manager._monitor_processes_health()
+
+        # Clean exit must NOT escalate to failure (k8s sees exit 0).
+        self.assertFalse(
+            self.manager.failure_detected,
+            "clean backend exit must NOT flag failure",
+        )
+        # Frontend still force-killed by monitor's REAP-window timer.
+        self.assertIn((frontend.pid, signal.SIGKILL), kills)
+
+    # --- frontend-only scenarios (no backend group registered) -------------
+
+    def test_frontend_only_sigterm_drains_naturally(self):
+        """No backend group registered. SIGTERM lets frontend drain (here:
+        dies after 0.2s, well under shutdown_timeout). No SIGKILL, no failure."""
+        # Frontend exits cleanly on SIGTERM after a short fake drain.
+        frontend = _FakeProc(
+            "frontend", dies_after=time.time() + 0.2
+        )
+        self.manager.add_process(frontend, shutdown_group="frontend")
+        # No backend at all.
+        self.manager.shutdown_requested = True
+
+        kills = []
+        with patch(
+            "os.kill", side_effect=lambda pid, sig: kills.append((pid, sig))
+        ), _watchdog(5, "frontend-only graceful drain regressed"):
+            self.manager._monitor_processes_health()
+
+        self.assertFalse(self.manager.failure_detected)
+        self.assertNotIn(
+            signal.SIGKILL,
+            [sig for _, sig in kills],
+            "frontend-only graceful path must not SIGKILL",
+        )
+        self.assertFalse(frontend.is_alive())
+
+    def test_frontend_only_undrained_force_killed_by_monitor(self):
+        """No backend group. Frontend ignores SIGTERM → monitor force-kills
+        after POST_KILL_REAP_WINDOW. Force kill is NOT a failure."""
+        frontend = _FakeProc("frontend")  # never drains
+        self.manager.add_process(frontend, shutdown_group="frontend")
+        self.manager.shutdown_requested = True
+
+        kills = []
+
+        def fake_kill(pid, sig):
+            kills.append((pid, sig))
+            if pid == frontend.pid:
+                frontend._alive = False
+
+        with patch("os.kill", side_effect=fake_kill), _watchdog(
+            5, "frontend-only force kill regressed"
+        ):
+            self.manager._monitor_processes_health()
+
+        self.assertIn((frontend.pid, signal.SIGKILL), kills)
+        # Timeout-driven force kill is NOT a failure.
+        self.assertFalse(self.manager.failure_detected)
+
+    # --- timing: graceful waits, failure does not -------------------------
+
+    def test_graceful_drain_actually_waits_for_frontend(self):
+        """Graceful path must wait for frontend to drain before SIGTERM'ing
+        backend — that's the whole point of staged shutdown. Verifies the wait
+        actually happens by checking backend SIGTERM timestamp vs t0."""
+        DRAIN_DELAY = 0.3  # frontend drains after this long
+        frontend = _FakeProc("frontend", dies_after=time.time() + DRAIN_DELAY)
+        backend = _FakeProc("backend", dies_on_terminate=True)
+        backend_terminated_at: list = []
+        original_terminate = backend.terminate
+
+        def tracked():
+            backend_terminated_at.append(time.time())
+            original_terminate()
+
+        backend.terminate = tracked  # type: ignore[method-assign]
+
+        self.manager.shutdown_timeout = 5  # plenty of headroom for the drain
+        self.manager.add_process(frontend, shutdown_group="frontend")
+        self.manager.add_process(backend, shutdown_group="backend")
+        self.manager.shutdown_requested = True  # mirror SIGTERM handler
+
+        t0 = time.time()
+        with patch("os.kill", side_effect=lambda pid, sig: None), _watchdog(
+            5, "graceful drain timing regressed"
+        ):
+            self.manager._monitor_processes_health()
+
+        self.assertEqual(len(backend_terminated_at), 1, "backend SIGTERM'd once")
+        backend_delay = backend_terminated_at[0] - t0
+        self.assertGreaterEqual(
+            backend_delay,
+            DRAIN_DELAY * 0.8,
+            f"backend SIGTERM'd too early ({backend_delay:.3f}s < {DRAIN_DELAY}s); "
+            "drain wait did not actually wait for frontend",
+        )
+        self.assertFalse(self.manager.failure_detected)
+
+    def test_failure_path_skips_drain_even_with_long_timeout(self):
+        """Failure path must use drain_timeout=0 regardless of shutdown_timeout.
+        Set shutdown_timeout=60 (would hang for a minute on graceful path);
+        verify the failure shutdown completes in well under a second."""
+        self.manager.shutdown_timeout = 60
+        frontend = _FakeProc("frontend")  # ignores SIGTERM, never drains
+        backend = _FakeProc("backend", dies_on_terminate=True)
+        self.manager.add_process(frontend, shutdown_group="frontend")
+        self.manager.add_process(backend, shutdown_group="backend")
+        self.manager.request_failure_shutdown()
+
+        def fake_kill(pid, sig):
+            if pid == frontend.pid:
+                frontend._alive = False
+
+        t0 = time.time()
+        with patch("os.kill", side_effect=fake_kill), _watchdog(
+            3, "failure path waited on shutdown_timeout instead of skipping drain"
+        ):
+            self.manager._monitor_processes_health()
+        elapsed = time.time() - t0
+
+        # Should be ~POST_KILL_REAP_WINDOW (0.1s) + a bit, NOT 60s.
+        self.assertLess(
+            elapsed,
+            1.0,
+            f"failure shutdown took {elapsed:.2f}s — drain wait was not skipped",
+        )
+
+    # --- _join_all_processes always uses POST_KILL_REAP_WINDOW --------------
+
+    def test_join_uses_post_kill_reap_window_regardless_of_state(self):
+        """After refactor, _join_all_processes is just bounded wait4(); the
+        graceful drain happens upstream in _wait_process_list_exit. The reap
+        window is identical whether shutdown_timeout is small/large or
+        failure_detected — join's job is only to reap, not to honor drain
+        budgets."""
+        for shutdown_timeout, failure in [(1, False), (1, True), (60, True)]:
+            with self.subTest(shutdown_timeout=shutdown_timeout, failure=failure):
+                manager = ProcessManager(
+                    shutdown_timeout=shutdown_timeout, monitor_interval=0.01
+                )
+                proc = _FakeProc("any", alive=True)
+                proc._mock_name = "fake"
+                manager.add_process(proc)
+                if failure:
+                    manager.failure_detected = True
+
+                captured = []
+
+                def capture_join(self_proc, timeout=None):
+                    captured.append(timeout)
+                    proc._alive = False
+
+                with patch.object(_FakeProc, "join", capture_join):
+                    manager._join_all_processes()
+
+                self.assertEqual(len(captured), 1)
+                self.assertIsNotNone(captured[0])
+                self.assertGreater(captured[0], 0)
+                self.assertLessEqual(captured[0], manager.POST_KILL_REAP_WINDOW)
+
+    # --- monitor_and_release_processes empty-list --------------------------
+
+    def test_empty_processes_with_failure_flag_still_exits_nonzero(self):
+        """Empty processes + failure_detected must still os._exit(1).
+
+        Production path: backend Process construction (pickle/spawn) or
+        config validation raises before add_process() runs. The except branch
+        calls request_failure_shutdown() + monitor_and_release_processes()
+        in finally; processes is still []. Without this, the parent silently
+        exits 0 and k8s/systemd never restarts.
+        """
+        self.manager.request_failure_shutdown()
+        with patch("os._exit") as mock_exit:
+            self.manager.monitor_and_release_processes()
+            mock_exit.assert_called_once_with(1)
+
+    def test_empty_processes_without_failure_returns_cleanly(self):
+        """No processes + no failure → quiet return, no os._exit."""
+        with patch("os._exit") as mock_exit:
+            self.manager.monitor_and_release_processes()
+            mock_exit.assert_not_called()
+
+    # --- normal SIGTERM with alive backend keeps -1 semantics ---------------
+
+    def test_signal_shutdown_alive_backend_no_force_kill(self):
+        """SIGTERM with backend healthy and frontend that dies on SIGTERM →
+        graceful drain succeeds, no SIGKILL, no failure flag."""
+        frontend = _FakeProc("frontend", dies_on_terminate=True)
+        backend = _FakeProc("backend", dies_on_terminate=True)
+        self.manager.add_process(frontend, shutdown_group="frontend")
+        self.manager.add_process(backend, shutdown_group="backend")
+        self.manager.shutdown_requested = True  # like SIGTERM handler
+
+        kills = []
+        with patch(
+            "os.kill", side_effect=lambda pid, sig: kills.append((pid, sig))
+        ), _watchdog(5, "graceful path regressed"):
+            self.manager._monitor_processes_health()
+
+        self.assertNotIn(signal.SIGKILL, [sig for _, sig in kills])
+        self.assertFalse(
+            self.manager.failure_detected,
+            "graceful path should not flip failure_detected",
+        )
 
 
 if __name__ == "__main__":
