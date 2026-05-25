@@ -4,6 +4,7 @@
 #include <memory>
 #include <optional>
 #include "kmonitor/client/MetricsReporter.h"
+#include "rtp_llm/cpp/config/RoleTypes.h"
 #include "rtp_llm/cpp/engine_base/Executor.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
@@ -73,6 +74,7 @@ protected:
                                      std::shared_ptr<torch::Event> sampler_event);
 
     void publishNormalDeviceState(const StreamGroups& stream_groups, const SamplerOutput& sampler_output);
+    void prepareGrpcNormalDeviceState(const StreamGroups& stream_groups);
 
     // Mirror the use_normal_device_state condition in processDecodeStreams.
     // When false, gather falls back to host accessors still mutated by the
@@ -93,6 +95,7 @@ private:
     std::unique_ptr<NormalBatchStreamProcessor>                              batch_stream_processor_;
     std::shared_ptr<KVCacheManager>                                          cache_manager_;
     std::shared_ptr<ExpertBalancer>                                          expert_balancer_;
+    RoleType                                                                 role_type_ = RoleType::PDFUSION;
     bool                                                                     warm_up_;
     bool                                                                     use_all_gather_;
     kmonitor::MetricsReporterPtr                                             metrics_reporter_ = nullptr;

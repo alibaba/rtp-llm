@@ -1,6 +1,8 @@
 #pragma once
 
+#include <list>
 #include <memory>
+#include <vector>
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/engine_base/Executor.h"
@@ -94,6 +96,7 @@ protected:
     // decodeStep helpers — extracted to keep decodeStep readable. Each helper
     // owns a single phase (sync, prepare, forward, broadcast, dispatch) and
     // preserves the original PROFILE_SCOPE labels.
+    void            prepareGrpcMtpDeviceState(const std::list<GenerateStreamPtr>& streams, TensorHolder& host_holder);
     void            waitPreviousBookkeepingAndKvSwaps(const std::list<GenerateStreamPtr>& streams);
     void            launchTargetVerifyPrepareAsync(const GptModelInputs& model_input, size_t batch_size);
     void            launchDraftPrefillPrepareAsync(const GptModelInputs& model_input);
