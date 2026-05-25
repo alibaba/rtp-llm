@@ -23,9 +23,10 @@ public class WebClientPassthroughClient implements PassthroughClient {
     public Mono<ServerResponse> forward(ServerRequest request) {
         return Mono.fromCallable(fePool::next).flatMap(feBaseUrl -> {
             URI src = request.uri();
-            String pathAndQuery = src.getRawQuery() == null
-                    ? src.getRawPath()
-                    : src.getRawPath() + "?" + src.getRawQuery();
+            String fePath = src.getRawPath().startsWith("/dispatcher/")
+                    ? src.getRawPath().substring("/dispatcher".length())
+                    : src.getRawPath();
+            String pathAndQuery = src.getRawQuery() == null ? fePath : fePath + "?" + src.getRawQuery();
             URI target = URI.create(feBaseUrl + pathAndQuery);
             Flux<DataBuffer> bodyStream = request.bodyToFlux(DataBuffer.class);
             return webClient.method(request.method())

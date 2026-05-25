@@ -96,4 +96,24 @@ class WebClientPassthroughClientTest {
         RecordedRequest rec = server.takeRequest();
         Assertions.assertEquals("/worker_status?role=PREFILL&verbose=1", rec.getPath());
     }
+
+    @Test
+    void forwardsToFeStrippingDispatcherPrefix() throws Exception {
+        server.enqueue(new MockResponse().setBody("ok").setResponseCode(200));
+        FePool pool = new FePool(() -> List.of("http://" + server.getHostName() + ":" + server.getPort()));
+        WebClientPassthroughClient passthrough =
+                new WebClientPassthroughClient(WebClient.builder().build(), pool, 5000);
+
+        MockServerRequest request = MockServerRequest.builder()
+                .method(HttpMethod.GET)
+                .uri(URI.create("/dispatcher/worker_status?role=PREFILL"))
+                .body(Flux.empty());
+
+        StepVerifier.create(passthrough.forward(request))
+                .assertNext(r -> Assertions.assertEquals(200, r.statusCode().value()))
+                .verifyComplete();
+
+        RecordedRequest recorded = server.takeRequest();
+        Assertions.assertEquals("/worker_status?role=PREFILL", recorded.getPath());
+    }
 }

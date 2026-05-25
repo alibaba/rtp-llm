@@ -80,7 +80,7 @@ class DispatcherConfigurationTest {
                     List.of(WorkerHost.of(freshFe.getHostName(), freshFe.getPort())));
 
             WebTestClient client = WebTestClient.bindToRouterFunction(routes).build();
-            client.post().uri("/batch_infer")
+            client.post().uri("/dispatcher/batch_infer")
                     .contentType(MediaType.APPLICATION_JSON)
                     .bodyValue("{\"prompt_batch\":[\"x\"]}")
                     .exchange()
