@@ -16,4 +16,6 @@ final class DispatchProtocol {
     static final String FIELD_RESPONSE_BATCH = "response_batch";
 
     static final String FIELD_GENERATE_CONFIG = "generate_config";
+
+    static final String ERROR_CODE_SUB_BATCH_FAILED = "dispatcher_sub_batch_failed";
 }
