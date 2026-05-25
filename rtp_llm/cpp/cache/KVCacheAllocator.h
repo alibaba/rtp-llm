@@ -71,6 +71,10 @@ public:
         shared_block_cache_ = std::move(shared_block_cache);
     }
 
+    void setUseCudaMallocBlockPool(bool use_cuda_malloc_block_pool) {
+        use_cuda_malloc_block_pool_ = use_cuda_malloc_block_pool;
+    }
+
     // Reserve some blocks for already-running streams' future allocations.
     // Only applied to "init malloc" requests where batch_kv_cache_resource has no blocks yet.
     void setReserveBlockNum(size_t reserve_block_num) {
@@ -108,7 +112,8 @@ protected:
     AllocationType                     allocation_type_;
     BlockPoolPtr                       block_pool_;
     SharedBlockCachePtr                shared_block_cache_;
-    const kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;
+    const kmonitor::MetricsReporterPtr metrics_reporter_           = nullptr;
+    bool                               use_cuda_malloc_block_pool_ = false;
 
     size_t  reserve_block_num_{0};
     int64_t reserve_block_ratio_{0};

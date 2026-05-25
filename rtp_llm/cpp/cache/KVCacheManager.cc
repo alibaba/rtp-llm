@@ -39,7 +39,8 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
                                const RuntimeConfig&               runtime_config,
                                const SpeculativeExecutionConfig&  sp_config,
                                const PDSepConfig&                 pd_sep_config,
-                               const CacheStoreConfig&            cache_store_config):
+                               const CacheStoreConfig&            cache_store_config,
+                               bool                               use_cuda_malloc_block_pool):
     config_(config),
     metrics_reporter_(metrics_reporter),
     kv_cache_config_(kv_cache_config),
@@ -47,7 +48,8 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
     runtime_config_(runtime_config),
     sp_config_(sp_config),
     pd_sep_config_(pd_sep_config),
-    cache_store_config_(cache_store_config) {
+    cache_store_config_(cache_store_config),
+    use_cuda_malloc_block_pool_(use_cuda_malloc_block_pool) {
     if (warmup) {
         config_.block_num = 1;
     } else {
@@ -108,6 +110,11 @@ bool KVCacheManager::init() {
     } else {
         allocator_ = std::make_shared<rtp_llm::SingleTypeKVCacheAllocator>(
             config_, AllocationType::DEVICE, metrics_reporter_, kv_cache_config_.reserve_block_ratio);
+    }
+
+    if (use_cuda_malloc_block_pool_) {
+        RTP_LLM_LOG_INFO("RDMA cache store enabled for PD role, use cudaMalloc KV cache block-pool backing");
+        allocator_->setUseCudaMallocBlockPool(true);
     }
 
     allocator_->setSharedBlockCache(shared_cache);

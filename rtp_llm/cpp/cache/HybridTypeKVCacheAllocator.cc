@@ -17,7 +17,8 @@ bool HybridTypeKVCacheAllocator::doInit() {
     RTP_LLM_CHECK_WITH_INFO(!config_.cache_specs.empty(), "no cache_specs found in CacheConfig");
 
     auto pool_config = BlockPoolConfigHelper::createConfig(config_);
-    block_pool_      = std::make_shared<BlockPool>(pool_config, allocation_type_);
+    block_pool_      = std::make_shared<BlockPool>(
+        pool_config, allocation_type_, /*use_pinned_cpu_backing=*/false, use_cuda_malloc_block_pool_);
     RTP_LLM_CHECK_WITH_INFO(block_pool_->init(), "Failed to initialize block pool for HybridTypeKVCacheAllocator");
 
     const auto& layer_groups = config_.global_layer_ids;
