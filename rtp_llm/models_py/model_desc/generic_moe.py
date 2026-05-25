@@ -278,16 +278,22 @@ class GenericMoeDecoderLayer(nn.Module):
         fmha_impl: FMHAImplBase,
         kv_cache: Optional[LayerKVCache] = None,
     ) -> DecodeLayerOutput:
-        hidden_states, residual = self.input_layernorm(hidden_states, residual)
+        # equivalent to:
+        # residual = residual + hidden_states
+        # hidden_states = self.input_layernorm(hidden_states)
+        hidden_states = self.input_layernorm(hidden_states, residual)
 
         hidden_states = self.self_attn(
             hidden_states=hidden_states, fmha_impl=fmha_impl, kv_cache=kv_cache
         )
 
-        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        # Fused: residual = residual + hidden_states, hidden_states = RMSNorm(residual)
+        hidden_states = self.post_attention_layernorm(hidden_states, residual)
 
+        # MLP (Dense or MoE，shared expert 逻辑已经在 GenericMoeLayer 内部处理)
         hidden_states = self.mlp(hidden_states)
 
+        # 返回 mlp_output 和 residual，让下一层的 input_layernorm 来 fuse 最后的 add
         return DecodeLayerOutput(hidden_states, residual)
 
 
@@ -363,7 +369,7 @@ class GenericMoeModel(GptModelBase):
             hidden_states = output.hidden_states
             residual = output.residual
 
-        hidden_states, _ = self.norm(hidden_states, residual)
+        hidden_states = self.norm(hidden_states, residual)
 
         return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
 
