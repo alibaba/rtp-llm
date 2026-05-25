@@ -20,6 +20,7 @@
 #include <mutex>
 #include <atomic>
 #include <algorithm>
+#include <memory>
 #if USING_CUDA
 #include <c10/cuda/CUDAGuard.h>
 #elif USING_ROCM
@@ -212,7 +213,17 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
 
     const auto seq_size_per_block = param.tokens_per_block;
     auto       kv_cache_data      = (uint64_t*)kv_cache.kv_cache_buffer.data_ptr();
-    auto kv_scale_data = kv_cache.kv_scale_buffer.defined() ? (uint64_t*)kv_cache.kv_scale_buffer.data_ptr() : nullptr;
+    auto       kv_cache_owner     = std::make_shared<torch::Tensor>(kv_cache.kv_cache_buffer);
+    const bool kv_gpu_mem         = kv_cache.kv_cache_buffer.is_cuda();
+    const bool has_kv_scale = kv_cache.kv_scale_buffer.defined() && kv_cache.kv_scale_buffer.numel() > 0
+                              && param.kv_scale_stride_bytes > 0;
+    uint64_t*  kv_scale_data      = nullptr;
+    std::shared_ptr<torch::Tensor> kv_scale_owner;
+    if (has_kv_scale) {
+        kv_scale_data  = (uint64_t*)kv_cache.kv_scale_buffer.data_ptr();
+        kv_scale_owner = std::make_shared<torch::Tensor>(kv_cache.kv_scale_buffer);
+    }
+    const bool kv_scale_gpu_mem = has_kv_scale && kv_cache.kv_scale_buffer.is_cuda();
 
     RTP_LLM_CHECK_WITH_INFO(param.context_batch_size == static_cast<size_t>(param.request_pd_separation.numel()),
                             "size not same");
@@ -281,36 +292,42 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
                                                  param.region_name);
 
             void*                 kv_addr = (void*)((int8_t*)kv_cache_data + block_id * param.kv_block_stride_bytes);
-            std::shared_ptr<void> kv_block_addr(kv_addr, [](void* p) {});
+            std::shared_ptr<void> kv_block_addr(kv_cache_owner, kv_addr);
 
             // Some layouts treat the block as a single opaque KV chunk. Only
             // the legacy MHA path splits k/v.
             if (param.use_opaque_kv_cache_store || mla_kvcache) {
-                request_blocks->addBlock("kv_" + cache_key, kv_block_addr, param.kv_block_stride_bytes, true, true);
+                request_blocks->addBlock(
+                    "kv_" + cache_key, kv_block_addr, param.kv_block_stride_bytes, kv_gpu_mem, true);
             } else {
                 const uint32_t        kv_half = static_cast<uint32_t>(param.kv_block_stride_bytes / 2);
                 void*                 k_addr  = kv_addr;
                 void*                 v_addr  = (void*)((int8_t*)kv_addr + kv_half);
-                std::shared_ptr<void> k_block_addr(k_addr, [](void* p) {});
-                std::shared_ptr<void> v_block_addr(v_addr, [](void* p) {});
-                request_blocks->addBlock("k_" + cache_key, k_block_addr, kv_half, true, true);
-                request_blocks->addBlock("v_" + cache_key, v_block_addr, kv_half, true, true);
+                std::shared_ptr<void> k_block_addr(kv_cache_owner, k_addr);
+                std::shared_ptr<void> v_block_addr(kv_cache_owner, v_addr);
+                request_blocks->addBlock("k_" + cache_key, k_block_addr, kv_half, kv_gpu_mem, true);
+                request_blocks->addBlock("v_" + cache_key, v_block_addr, kv_half, kv_gpu_mem, true);
             }
 
             if (kv_scale_data) {
                 void* kv_scale_addr = (void*)((int8_t*)kv_scale_data + block_id * param.kv_scale_stride_bytes);
-                std::shared_ptr<void> kv_scale_block_addr(kv_scale_addr, [](void* p) {});
+                std::shared_ptr<void> kv_scale_block_addr(kv_scale_owner, kv_scale_addr);
                 if (param.use_opaque_kv_cache_store || mla_kvcache) {
-                    request_blocks->addBlock(
-                        "kv_scale_" + cache_key, kv_scale_block_addr, param.kv_scale_stride_bytes, true, true);
+                    request_blocks->addBlock("kv_scale_" + cache_key,
+                                             kv_scale_block_addr,
+                                             param.kv_scale_stride_bytes,
+                                             kv_scale_gpu_mem,
+                                             true);
                 } else {
                     const uint32_t        sc_half = static_cast<uint32_t>(param.kv_scale_stride_bytes / 2);
                     void*                 k_sc    = kv_scale_addr;
                     void*                 v_sc    = (void*)((int8_t*)kv_scale_addr + sc_half);
-                    std::shared_ptr<void> k_scale_block_addr(k_sc, [](void* p) {});
-                    std::shared_ptr<void> v_scale_block_addr(v_sc, [](void* p) {});
-                    request_blocks->addBlock("k_scale_" + cache_key, k_scale_block_addr, sc_half, true, true);
-                    request_blocks->addBlock("v_scale_" + cache_key, v_scale_block_addr, sc_half, true, true);
+                    std::shared_ptr<void> k_scale_block_addr(kv_scale_owner, k_sc);
+                    std::shared_ptr<void> v_scale_block_addr(kv_scale_owner, v_sc);
+                    request_blocks->addBlock(
+                        "k_scale_" + cache_key, k_scale_block_addr, sc_half, kv_scale_gpu_mem, true);
+                    request_blocks->addBlock(
+                        "v_scale_" + cache_key, v_scale_block_addr, sc_half, kv_scale_gpu_mem, true);
                 }
             }
         };

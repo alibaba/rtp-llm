@@ -65,14 +65,16 @@ public:
                CacheStoreStoreDoneCallback                callback) override {
         runtimeSyncAndCheck();
         for (const auto& [key, block] : request_block_buffer->getBlocks()) {
-            auto device = torch::from_blob(
-                block->addr.get(), {(int64_t)block->len}, torch::TensorOptions(torch::kUInt8).device(torch::kCUDA));
-            auto                 host = device.cpu().contiguous();
+            auto src_options =
+                torch::TensorOptions(torch::kUInt8).device(block->gpu_mem ? torch::kCUDA : torch::kCPU);
+            auto src         = torch::from_blob(block->addr.get(), {(int64_t)block->len}, src_options);
+            auto host        = block->gpu_mem ? src.cpu().contiguous() : src.contiguous();
             std::vector<uint8_t> bytes(static_cast<size_t>(block->len));
             std::memcpy(bytes.data(), host.data_ptr<uint8_t>(), bytes.size());
             stored_blocks_[key] = std::move(bytes);
         }
         store_request_keys_.push_back(request_block_buffer->getRequestKey());
+        store_buffer_requests_.push_back(request_block_buffer);
         callback(true, CacheStoreErrorCode::None);
     }
 
@@ -95,9 +97,10 @@ public:
                                          {(int64_t)it->second.size()},
                                          torch::TensorOptions(torch::kUInt8).device(torch::kCPU))
                             .clone();
-            auto device = torch::from_blob(
-                block->addr.get(), {(int64_t)block->len}, torch::TensorOptions(torch::kUInt8).device(torch::kCUDA));
-            device.copy_(host);
+            auto dst_options =
+                torch::TensorOptions(torch::kUInt8).device(block->gpu_mem ? torch::kCUDA : torch::kCPU);
+            auto dst         = torch::from_blob(block->addr.get(), {(int64_t)block->len}, dst_options);
+            dst.copy_(host);
         }
         runtimeSyncAndCheck();
         load_request_keys_.push_back(request_block_buffer->getRequestKey());
@@ -124,6 +127,7 @@ public:
     std::unordered_map<std::string, std::vector<uint8_t>> stored_blocks_;
     std::vector<std::string>                              store_request_keys_;
     std::vector<std::string>                              load_request_keys_;
+    std::vector<std::shared_ptr<RequestBlockBuffer>>      store_buffer_requests_;
     std::vector<std::shared_ptr<RequestBlockBuffer>>      load_buffer_requests_;
 };
 
@@ -187,6 +191,35 @@ torch::Tensor blockIdsTensor(const BatchKVCacheResourcePtr& resource, int gid) {
     const auto& blocks = resource->blocks(0, gid);
     return torch::from_blob(const_cast<int*>(blocks.data()), {1, static_cast<int64_t>(blocks.size())}, torch::kInt32)
         .clone();
+}
+
+CacheStoreInputs makeSingleBlockWriteInputs(const std::string& cache_key_string,
+                                            int                request_id_val,
+                                            int                tokens_per_block,
+                                            int                kv_stride,
+                                            int                kv_scale_stride,
+                                            bool               use_opaque_kv_cache_store,
+                                            KVCacheRegionName  region_name) {
+    CacheStoreInputs inputs;
+    inputs.input_lengths_host        = torch::tensor({tokens_per_block}, torch::kInt32);
+    inputs.prefix_lengths_host       = torch::tensor({0}, torch::kInt32);
+    inputs.host_kv_cache_offset      = torch::tensor({{1}}, torch::kInt32);
+    inputs.context_batch_size        = 1;
+    inputs.decoder_batch_size        = 0;
+    inputs.request_id                = torch::tensor({(int64_t)request_id_val}, torch::kInt64);
+    inputs.request_pd_separation     = torch::tensor({true}, torch::kBool);
+    inputs.cache_keys                = {cache_key_string};
+    inputs.tokens_per_block          = tokens_per_block;
+    inputs.kv_block_stride_bytes     = kv_stride;
+    inputs.kv_scale_stride_bytes     = kv_scale_stride;
+    inputs.pd_separation             = true;
+    inputs.model_id                  = 0;
+    inputs.decode_entrance           = false;
+    inputs.warmup                    = false;
+    inputs.use_opaque_kv_cache_store = use_opaque_kv_cache_store;
+    inputs.layer_id                  = 0;
+    inputs.region_name               = region_name;
+    return inputs;
 }
 
 }  // namespace
@@ -1118,6 +1151,116 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreWithPinnedHostMetadataAndEven
             EXPECT_EQ(it->second[0], expected) << "layer=" << layer_id << " block=" << b << " first byte mismatch";
         }
     }
+}
+
+TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreUsesTensorDeviceForCpuKvBuffer) {
+    const int spb            = 8;
+    const int kv_stride      = 64;
+    const int request_id_val = 4242;
+    const std::string cache_key_string = "10000";
+
+    auto kv_options = torch::TensorOptions(torch::kUInt8).device(torch::kCPU).pinned_memory(true);
+    auto kv_buffer  = torch::empty({2, kv_stride}, kv_options);
+    kv_buffer[1].fill_(static_cast<uint8_t>(123));
+
+    auto inputs = makeSingleBlockWriteInputs(
+        cache_key_string, request_id_val, spb, kv_stride, 0, true, KVCacheRegionName::CSA_STATE);
+
+    KvCacheInfo kv_cache_info;
+    kv_cache_info.kv_cache_buffer = kv_buffer;
+
+    auto cache_store = std::make_shared<MemoryBackedCacheStore>();
+    runtimeWriteCacheStore(inputs, kv_cache_info, /*mla_kvcache=*/false, cache_store);
+
+    const auto key = "kv_" + makeCacheKey(0, cache_key_string, 0, KVCacheRegionName::CSA_STATE);
+    auto       it  = cache_store->stored_blocks_.find(key);
+    ASSERT_NE(it, cache_store->stored_blocks_.end());
+    ASSERT_EQ(it->second.size(), static_cast<size_t>(kv_stride));
+    EXPECT_EQ(it->second[0], static_cast<uint8_t>(123));
+
+    ASSERT_EQ(cache_store->store_buffer_requests_.size(), 1u);
+    auto blocks   = cache_store->store_buffer_requests_.front()->getBlocks();
+    auto block_it = blocks.find(key);
+    ASSERT_NE(block_it, blocks.end());
+    EXPECT_FALSE(block_it->second->gpu_mem);
+}
+
+TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreUsesTensorDeviceForCpuSplitKvBuffer) {
+    const int spb            = 8;
+    const int kv_stride      = 64;
+    const int kv_half        = kv_stride / 2;
+    const int request_id_val = 4243;
+    const std::string cache_key_string = "10001";
+
+    auto kv_options = torch::TensorOptions(torch::kUInt8).device(torch::kCPU).pinned_memory(true);
+    auto kv_buffer  = torch::empty({2, kv_stride}, kv_options);
+    auto block      = kv_buffer[1];
+    block.slice(0, 0, kv_half).fill_(static_cast<uint8_t>(17));
+    block.slice(0, kv_half, kv_stride).fill_(static_cast<uint8_t>(29));
+
+    auto inputs = makeSingleBlockWriteInputs(
+        cache_key_string, request_id_val, spb, kv_stride, 0, false, KVCacheRegionName::DEFAULT);
+
+    KvCacheInfo kv_cache_info;
+    kv_cache_info.kv_cache_buffer = kv_buffer;
+
+    auto cache_store = std::make_shared<MemoryBackedCacheStore>();
+    runtimeWriteCacheStore(inputs, kv_cache_info, /*mla_kvcache=*/false, cache_store);
+
+    const auto cache_key = makeCacheKey(0, cache_key_string, 0, KVCacheRegionName::DEFAULT);
+    const auto k_key     = "k_" + cache_key;
+    const auto v_key     = "v_" + cache_key;
+    auto       k_it      = cache_store->stored_blocks_.find(k_key);
+    auto       v_it      = cache_store->stored_blocks_.find(v_key);
+    ASSERT_NE(k_it, cache_store->stored_blocks_.end());
+    ASSERT_NE(v_it, cache_store->stored_blocks_.end());
+    ASSERT_EQ(k_it->second.size(), static_cast<size_t>(kv_half));
+    ASSERT_EQ(v_it->second.size(), static_cast<size_t>(kv_half));
+    EXPECT_EQ(k_it->second[0], static_cast<uint8_t>(17));
+    EXPECT_EQ(v_it->second[0], static_cast<uint8_t>(29));
+
+    ASSERT_EQ(cache_store->store_buffer_requests_.size(), 1u);
+    auto k_block = cache_store->store_buffer_requests_.front()->getBlock(k_key);
+    auto v_block = cache_store->store_buffer_requests_.front()->getBlock(v_key);
+    ASSERT_NE(k_block, nullptr);
+    ASSERT_NE(v_block, nullptr);
+    EXPECT_FALSE(k_block->gpu_mem);
+    EXPECT_FALSE(v_block->gpu_mem);
+}
+
+TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreUsesTensorDeviceForCpuKvScaleBuffer) {
+    const int spb            = 8;
+    const int kv_stride      = 64;
+    const int scale_stride   = 16;
+    const int request_id_val = 4244;
+    const std::string cache_key_string = "10002";
+
+    auto cpu_options     = torch::TensorOptions(torch::kUInt8).device(torch::kCPU).pinned_memory(true);
+    auto kv_buffer       = torch::empty({2, kv_stride}, cpu_options);
+    auto kv_scale_buffer = torch::empty({2, scale_stride}, cpu_options);
+    kv_buffer[1].fill_(static_cast<uint8_t>(41));
+    kv_scale_buffer[1].fill_(static_cast<uint8_t>(73));
+
+    auto inputs = makeSingleBlockWriteInputs(
+        cache_key_string, request_id_val, spb, kv_stride, scale_stride, true, KVCacheRegionName::CSA_STATE);
+
+    KvCacheInfo kv_cache_info;
+    kv_cache_info.kv_cache_buffer = kv_buffer;
+    kv_cache_info.kv_scale_buffer = kv_scale_buffer;
+
+    auto cache_store = std::make_shared<MemoryBackedCacheStore>();
+    runtimeWriteCacheStore(inputs, kv_cache_info, /*mla_kvcache=*/false, cache_store);
+
+    const auto scale_key = "kv_scale_" + makeCacheKey(0, cache_key_string, 0, KVCacheRegionName::CSA_STATE);
+    auto       scale_it  = cache_store->stored_blocks_.find(scale_key);
+    ASSERT_NE(scale_it, cache_store->stored_blocks_.end());
+    ASSERT_EQ(scale_it->second.size(), static_cast<size_t>(scale_stride));
+    EXPECT_EQ(scale_it->second[0], static_cast<uint8_t>(73));
+
+    ASSERT_EQ(cache_store->store_buffer_requests_.size(), 1u);
+    auto scale_block = cache_store->store_buffer_requests_.front()->getBlock(scale_key);
+    ASSERT_NE(scale_block, nullptr);
+    EXPECT_FALSE(scale_block->gpu_mem);
 }
 
 }  // namespace rtp_llm
