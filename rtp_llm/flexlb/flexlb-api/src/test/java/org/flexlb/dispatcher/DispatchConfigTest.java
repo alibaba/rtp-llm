@@ -60,6 +60,25 @@ class DispatchConfigTest {
     }
 
     @Test
+    void parsesNewTimeoutFields() {
+        DispatchConfig c = DispatchConfig.fromJson(
+                "{\"enabled\":true,\"fePoolServiceId\":\"com.rtp_llm.fe\","
+                        + "\"feConnectTimeoutMs\":1500,\"feResponseTimeoutMs\":7500,"
+                        + "\"feMaxStreamDurationMs\":300000}");
+        assertEquals(1500, c.getFeConnectTimeoutMs());
+        assertEquals(7500, c.getFeResponseTimeoutMs());
+        assertEquals(300_000, c.getFeMaxStreamDurationMs());
+    }
+
+    @Test
+    void newTimeoutFieldsHaveSensibleDefaults() {
+        DispatchConfig c = DispatchConfig.fromJson(null);
+        assertEquals(2000, c.getFeConnectTimeoutMs());
+        assertEquals(5000, c.getFeResponseTimeoutMs());
+        assertEquals(600_000, c.getFeMaxStreamDurationMs());
+    }
+
+    @Test
     void sameJvmIsolationKnobsOverridableViaJson() {
         DispatchConfig c = DispatchConfig.fromJson(
                 "{\"enabled\":true,\"fePoolServiceId\":\"com.rtp_llm.fe\","
