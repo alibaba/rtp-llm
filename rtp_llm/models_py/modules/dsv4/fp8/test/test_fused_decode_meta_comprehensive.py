@@ -2,14 +2,15 @@
 
 Covers:
   - fused_update_decode_meta_pure q_len=1: bs=1-256, seqlen=1-1M (189 cases)
-  - fused_update_decode_meta_pure q_len=2,4,6 with production fixups:
-    bs=1-128, seqlen=4-131072 (240 cases) — validates MTP/target-verify path
+  - fused_update_decode_meta_pure q_len=2,4,6:
+    bs=1-128, seqlen=4-131072 plus ratio=4/128 boundary starts (693 cases)
+    — validates MTP/target-verify path
+  - fused_update_decode_meta_pure heterogeneous start_pos per request
+    (q_len=1,2,4,6; bs=4,16,64) — exercises per-q HCA causality (12 cases)
   - fused_phase2b_pool_slot_mapping q_len=1,2,4,6:
-    bs=1-128, seqlen=4-131072 (320 cases)
+    bs=1-128, seqlen=4-131072 (448 cases)
 
 Reference: standalone PyTorch reimplementation of the old code.
-The q_len>1 tests apply the same post-kernel fixups as production
-(cache_seqlens correction + HCA dense topk rewrite).
 
 Run:
   CUDA_VISIBLE_DEVICES=0 python3 rtp_llm/models_py/modules/dsv4/fp8/test/test_fused_decode_meta_comprehensive.py
@@ -73,7 +74,6 @@ class MockMeta:
     compressed_buffer_t_dim_per_ratio: Dict[int, int]
 
     start_pos: torch.Tensor
-    cache_seqlens_i32: torch.Tensor
     slot_mapping_swa: torch.Tensor
     slot_mapping_compressed: Dict[int, torch.Tensor]
     compressed_lens: Dict[int, torch.Tensor]
@@ -100,7 +100,6 @@ def _alloc_mock(max_bs: int, q_len: int, max_seq_len: int, device) -> MockMeta:
         max_seq_len=max_seq_len,
         compressed_buffer_t_dim_per_ratio={4: stride_4, 128: stride_128},
         start_pos=torch.full((max_bs,), -1, dtype=torch.int32, device=device),
-        cache_seqlens_i32=torch.zeros(max_bs, dtype=torch.int32, device=device),
         slot_mapping_swa=torch.full((T,), -1, dtype=torch.int32, device=device),
         slot_mapping_compressed={
             4: torch.full((T,), -1, dtype=torch.int32, device=device),
@@ -138,6 +137,93 @@ def _alloc_mock(max_bs: int, q_len: int, max_seq_len: int, device) -> MockMeta:
             (max_bs, q_len, _WINDOW), -1, dtype=torch.int32, device=device
         ),
     )
+
+
+def _alloc_mock_subset(
+    max_bs: int,
+    q_len: int,
+    max_seq_len: int,
+    device,
+    ratios: Tuple[int, ...] = (),
+) -> MockMeta:
+    """Mock with an arbitrary subset of compress ratios from {4, 128}.
+
+    ``ratios=()``  → SWA-only (HAS_CMP_4=False, HAS_CMP_128=False),
+                     models MTP draft layers (``compress_ratios=[0]``).
+    ``ratios=(4,)`` → CSA/INDEXER only (HAS_CMP_4=True, HAS_CMP_128=False).
+    ``ratios=(128,)`` → HCA only (HAS_CMP_4=False, HAS_CMP_128=True).
+
+    Exercises the kernel's per-ratio constexpr gate + None-pointer path.
+    """
+    T = max_bs * q_len
+    stride_4 = max_seq_len // 4
+    stride_128 = max_seq_len // 128
+    hca_dense = ((stride_128 + 63) // 64) * 64
+
+    compressed_buffer_t_dim_per_ratio: Dict[int, int] = {}
+    slot_mapping_compressed: Dict[int, torch.Tensor] = {}
+    compressed_lens: Dict[int, torch.Tensor] = {}
+    compressed_lens_per_token: Dict[int, torch.Tensor] = {}
+    topk_total_by_ratio: Dict[int, torch.Tensor] = {}
+
+    if 4 in ratios:
+        compressed_buffer_t_dim_per_ratio[4] = stride_4
+        slot_mapping_compressed[4] = torch.full(
+            (T,), -1, dtype=torch.int32, device=device
+        )
+        compressed_lens[4] = torch.zeros(max_bs, dtype=torch.int32, device=device)
+        compressed_lens_per_token[4] = torch.zeros(
+            max_bs, q_len, dtype=torch.int32, device=device
+        )
+        topk_total_by_ratio[4] = torch.full(
+            (max_bs, q_len, _WINDOW + _INDEX_TOPK),
+            -1,
+            dtype=torch.int32,
+            device=device,
+        )
+
+    if 128 in ratios:
+        compressed_buffer_t_dim_per_ratio[128] = stride_128
+        slot_mapping_compressed[128] = torch.full(
+            (T,), -1, dtype=torch.int32, device=device
+        )
+        compressed_lens[128] = torch.zeros(max_bs, dtype=torch.int32, device=device)
+        compressed_lens_per_token[128] = torch.zeros(
+            max_bs, q_len, dtype=torch.int32, device=device
+        )
+        topk_total_by_ratio[128] = torch.full(
+            (max_bs, q_len, _WINDOW + hca_dense),
+            -1,
+            dtype=torch.int32,
+            device=device,
+        )
+
+    return MockMeta(
+        q_len_per_req=q_len,
+        window_size=_WINDOW,
+        max_seq_len=max_seq_len,
+        compressed_buffer_t_dim_per_ratio=compressed_buffer_t_dim_per_ratio,
+        start_pos=torch.full((max_bs,), -1, dtype=torch.int32, device=device),
+        slot_mapping_swa=torch.full((T,), -1, dtype=torch.int32, device=device),
+        slot_mapping_compressed=slot_mapping_compressed,
+        compressed_lens=compressed_lens,
+        compressed_lens_per_token=compressed_lens_per_token,
+        topk_window_idxs=torch.full(
+            (max_bs, q_len, _WINDOW), -1, dtype=torch.int32, device=device
+        ),
+        topk_buffer_compressed=torch.full(
+            (max_bs, q_len, _INDEX_TOPK), -1, dtype=torch.int32, device=device
+        ),
+        topk_total_by_ratio=topk_total_by_ratio,
+        swa_abs_idx=torch.full(
+            (max_bs, q_len, _WINDOW), -1, dtype=torch.int32, device=device
+        ),
+    )
+
+
+def _alloc_mock_swa_only(max_bs: int, q_len: int, max_seq_len: int, device) -> MockMeta:
+    """Back-compat shim: equivalent to ``_alloc_mock_subset(ratios=())``."""
+    return _alloc_mock_subset(max_bs, q_len, max_seq_len, device, ratios=())
 
 
 def _alloc_phase2b(meta: MockMeta, bs: int, device, seqlen: int = 0) -> None:
@@ -187,8 +273,6 @@ def ref_update_pure(meta: MockMeta, start_pos: torch.Tensor) -> None:
 
     # start_pos
     meta.start_pos[:bs].copy_(start_pos)
-    # cache_seqlens
-    meta.cache_seqlens_i32[:bs].copy_(position_ids_2d[:, -1] + 1)
 
     # SWA slot mapping
     in_ring = position_ids_2d % window_size
@@ -360,11 +444,6 @@ def _compare_pure(
     checks = [
         ("start_pos", ref_meta.start_pos[:bs], fused_meta.start_pos[:bs]),
         (
-            "cache_seqlens_i32",
-            ref_meta.cache_seqlens_i32[:bs],
-            fused_meta.cache_seqlens_i32[:bs],
-        ),
-        (
             "slot_mapping_swa",
             ref_meta.slot_mapping_swa[:T],
             fused_meta.slot_mapping_swa[:T],
@@ -376,7 +455,12 @@ def _compare_pure(
         ),
         ("swa_abs_idx", ref_meta.swa_abs_idx[:bs], fused_meta.swa_abs_idx[:bs]),
     ]
-    for r in (4, 128):
+    # Only compare ratios present in BOTH metas — SWA-only path has empty dicts.
+    common_ratios = sorted(
+        set(ref_meta.slot_mapping_compressed.keys())
+        & set(fused_meta.slot_mapping_compressed.keys())
+    )
+    for r in common_ratios:
         checks.append(
             (
                 f"slot_cmp[{r}]",
@@ -437,41 +521,6 @@ def _compare_phase2b(
 # ---------------------------------------------------------------------------
 
 
-def _apply_production_fixups(meta: MockMeta, start_pos: torch.Tensor, bs: int) -> None:
-    """Apply the same post-kernel fixups that production code does for q_len>1.
-
-    This mirrors decode_attn_metadata.py lines 846-862:
-      - cache_seqlens_i32: kernel writes sp+1, production rewrites to sp+q_len
-      - HCA dense topk: kernel uses (sp+Q_LEN)//128 for all q positions,
-        production rewrites per-token (sp+q+1)//128
-    """
-    q_len = meta.q_len_per_req
-    window_size = meta.window_size
-    device = start_pos.device
-
-    if q_len <= 1:
-        return
-
-    offs = torch.arange(q_len, device=device, dtype=torch.int32)
-    pos_2d = start_pos[:bs].unsqueeze(1) + offs.unsqueeze(0)
-
-    meta.cache_seqlens_i32[:bs].copy_(pos_2d[:bs, -1] + 1)
-
-    if 128 in meta.topk_total_by_ratio:
-        total_128 = meta.topk_total_by_ratio[128]
-        K_dense = total_128.shape[-1] - window_size
-        dense_idxs = (
-            torch.arange(K_dense, device=device, dtype=torch.int32)
-            .view(1, 1, K_dense)
-            .expand(bs, q_len, K_dense)
-        )
-        cmp_lens_pt = ((pos_2d[:bs] + 1) // 128).to(torch.int32).view(bs, q_len, 1)
-        valid_h = dense_idxs < cmp_lens_pt
-        total_128[:bs, :, window_size:].copy_(
-            torch.where(valid_h, dense_idxs, torch.full_like(dense_idxs, -1))
-        )
-
-
 def run_correctness_tests():
     device = "cuda"
     bs_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
@@ -496,12 +545,6 @@ def run_correctness_tests():
 
                 ref_update_pure(ref_m, start_pos)
                 fused_update_decode_meta_pure(fused_m, start_pos, max_seq_len)
-                offs = torch.arange(q_len, device=device, dtype=torch.int32)
-                pos_2d = start_pos[:bs].unsqueeze(1) + offs.unsqueeze(0)
-                for r in fused_m.compressed_lens_per_token:
-                    fused_m.compressed_lens_per_token[r][:bs].copy_(
-                        ((pos_2d + 1) // r).to(torch.int32)
-                    )
 
                 err = _compare_pure(ref_m, fused_m, bs, q_len)
                 total += 1
@@ -520,13 +563,21 @@ def run_correctness_tests():
     print(f"  Result: {passed}/{total} passed, {failed} failed")
 
     # q_len > 1 tests (MTP target-verify / speculative decode path)
-    print("\nTesting fused_update_decode_meta_pure (q_len=2,4,6 with production fixups)...")
+    print("\nTesting fused_update_decode_meta_pure (q_len=2,4,6)...")
     passed_mq = 0
     failed_mq = 0
     total_mq = 0
     mq_bs_list = [1, 2, 4, 16, 32, 64, 128]
     mq_qlen_list = [2, 4, 6]
-    mq_seqlen_list = [2**i for i in range(2, 18)]  # 4 to 131072
+    mq_seqlen_list = sorted(
+        set(
+            [2**i for i in range(2, 18)]
+            # ratio=128 boundary starts
+            + [126, 127, 128, 129, 254, 255, 256]
+            # ratio=4 boundary starts (small values + a few mid-range)
+            + [3, 5, 7, 9, 11, 13, 15, 17, 125, 130, 252, 257]
+        )
+    )
 
     for bs in mq_bs_list:
         for q_len in mq_qlen_list:
@@ -543,14 +594,6 @@ def run_correctness_tests():
 
                 ref_update_pure(ref_m, start_pos)
                 fused_update_decode_meta_pure(fused_m, start_pos, max_seq_len)
-                # Apply production fixups (same as decode_attn_metadata.py)
-                _apply_production_fixups(fused_m, start_pos, bs)
-                offs = torch.arange(q_len, device=device, dtype=torch.int32)
-                pos_2d = start_pos[:bs].unsqueeze(1) + offs.unsqueeze(0)
-                for r in fused_m.compressed_lens_per_token:
-                    fused_m.compressed_lens_per_token[r][:bs].copy_(
-                        ((pos_2d + 1) // r).to(torch.int32)
-                    )
 
                 err = _compare_pure(ref_m, fused_m, bs, q_len)
                 total_mq += 1
@@ -567,6 +610,152 @@ def run_correctness_tests():
             break
 
     print(f"  Result: {passed_mq}/{total_mq} passed, {failed_mq} failed")
+
+    # Heterogeneous start_pos per request — every prior loop uses a
+    # uniform sp_val across the batch, so per-q HCA causality and the
+    # per-token compressed_lens write are only exercised at one phase
+    # offset per case. Sprinkle requests across boundaries (just before,
+    # on, just after multiples of 4 and 128) so different (r,q) threads
+    # hit different ratio-boundary states in the same kernel launch.
+    print("\nTesting fused_update_decode_meta_pure (heterogeneous start_pos)...")
+    passed_h = 0
+    failed_h = 0
+    total_h = 0
+    het_offsets = torch.tensor(
+        [3, 4, 5, 7, 8, 9, 125, 127, 128, 129, 253, 256, 257, 511, 1024, 8191],
+        dtype=torch.int32,
+        device=device,
+    )
+    for bs in (4, 16, 64):
+        for q_len in (1, 2, 4, 6):
+            # Tile/truncate the offset bank to the batch size.
+            reps = (bs + het_offsets.numel() - 1) // het_offsets.numel()
+            start_pos = het_offsets.repeat(reps)[:bs].clone()
+            max_seq_len = int(start_pos.max().item()) + q_len + 16
+            max_seq_len = ((max_seq_len + 127) // 128) * 128
+            max_seq_len = max(max_seq_len, 256)
+
+            ref_m = _alloc_mock(bs, q_len, max_seq_len, device)
+            fused_m = _alloc_mock(bs, q_len, max_seq_len, device)
+
+            ref_update_pure(ref_m, start_pos)
+            fused_update_decode_meta_pure(fused_m, start_pos, max_seq_len)
+
+            err = _compare_pure(ref_m, fused_m, bs, q_len)
+            total_h += 1
+            if err:
+                print(f"  FAIL bs={bs} q={q_len} (het): {err}")
+                failed_h += 1
+            else:
+                passed_h += 1
+
+    print(f"  Result: {passed_h}/{total_h} passed, {failed_h} failed")
+
+    # Ratio-subset coverage: SWA-only (MTP draft), CSA/INDEXER-only ({4}),
+    # HCA-only ({128}). Each subset exercises a different HAS_CMP_* gate
+    # combination in the kernel and the corresponding None-pointer path.
+    # The {128}-only subset at small max_seq_len also hits the HCA dense
+    # width == 0 boundary (max_seq_len < 128 → topk_total_by_ratio[128]
+    # has shape [..., WINDOW]; the kernel must skip the dense write).
+    print(
+        "\nTesting fused_update_decode_meta_pure (ratio subsets: "
+        "(), (4,), (128,))..."
+    )
+    passed_s = 0
+    failed_s = 0
+    total_s = 0
+    subset_bs_list = [1, 2, 4, 16, 32, 128]
+    subset_qlen_list = [1, 2, 4]
+    # Cover small seqlens (1-128) to trip HCA dense width == 0 for {128}
+    # plus mid + large for general correctness.
+    subset_seqlen_list = [
+        1, 2, 4, 8, 16, 64, 100, 127, 128, 129, 1024, 4096, 65535, 131072,
+    ]
+    for ratios in ((), (4,), (128,)):
+        label = f"ratios={ratios or '()'}"
+        for bs in subset_bs_list:
+            for q_len in subset_qlen_list:
+                for seqlen in subset_seqlen_list:
+                    max_seq_len = max(seqlen + q_len + 1, 64)
+                    # 128-align only for the {128} subset (kernel writes
+                    # compressed_buffer with stride max_seq_len // 128).
+                    if 128 in ratios:
+                        max_seq_len = ((max_seq_len + 63) // 64) * 64
+                    sp_val = min(seqlen, max_seq_len - q_len - 1)
+                    start_pos = torch.full(
+                        (bs,), sp_val, dtype=torch.int32, device=device
+                    )
+
+                    ref_m = _alloc_mock_subset(
+                        bs, q_len, max_seq_len, device, ratios=ratios
+                    )
+                    fused_m = _alloc_mock_subset(
+                        bs, q_len, max_seq_len, device, ratios=ratios
+                    )
+
+                    ref_update_pure(ref_m, start_pos)
+                    fused_update_decode_meta_pure(fused_m, start_pos, max_seq_len)
+
+                    err = _compare_pure(ref_m, fused_m, bs, q_len)
+                    total_s += 1
+                    if err:
+                        print(
+                            f"  FAIL {label} bs={bs} q={q_len} seq={seqlen}: {err}"
+                        )
+                        failed_s += 1
+                        if failed_s >= 10:
+                            break
+                    else:
+                        passed_s += 1
+                if failed_s >= 10:
+                    break
+            if failed_s >= 10:
+                break
+        if failed_s >= 10:
+            break
+
+    print(f"  Result: {passed_s}/{total_s} passed, {failed_s} failed")
+
+    # Targeted: HCA dense width == 0 boundary (max_seq_len < 128 with
+    # ratios=(128,)). Without the kernel's ``if HCA_DENSE_WIDTH > 0`` guard
+    # the dense-half store overruns ``topk_total_by_ratio[128]`` (shape
+    # [..., WINDOW + 0]). Asserts: (a) no crash/OOB, (b) the window half
+    # equals the SWA-window indices, (c) all the compressed-length
+    # writes report 0 because abs_pos+1 < 128.
+    print("\nTesting fused_update_decode_meta_pure (HCA dense width==0 boundary)...")
+    passed_bnd = 0
+    failed_bnd = 0
+    for bs, q_len, max_seq_len_bnd, sp_val in [
+        (1, 1, 64, 5),
+        (4, 2, 64, 60),    # abs_pos hits {60..61}, still < 128
+        (8, 4, 96, 90),    # abs_pos {90..93}, still < 128
+        (32, 1, 64, 0),    # smallest viable max_seq_len
+    ]:
+        start_pos = torch.full((bs,), sp_val, dtype=torch.int32, device=device)
+        m = _alloc_mock_subset(bs, q_len, max_seq_len_bnd, device, ratios=(128,))
+        assert m.topk_total_by_ratio[128].shape[-1] == _WINDOW, (
+            "Test setup invariant: HCA dense half must be empty for this case"
+        )
+        fused_update_decode_meta_pure(m, start_pos, max_seq_len_bnd)
+        torch.cuda.synchronize()
+
+        # All compressed-len writes are 0 (no full 128-block formed yet).
+        ok = (
+            int(m.compressed_lens[128].max()) == 0
+            and int(m.compressed_lens_per_token[128].max()) == 0
+            and int(m.slot_mapping_compressed[128].max()) == -1
+        )
+        if ok:
+            passed_bnd += 1
+        else:
+            print(
+                f"  FAIL bs={bs} q={q_len} max_s={max_seq_len_bnd} sp={sp_val}: "
+                f"cmp_lens={m.compressed_lens[128][:bs].tolist()}, "
+                f"slot={m.slot_mapping_compressed[128][:bs * q_len].tolist()}"
+            )
+            failed_bnd += 1
+
+    print(f"  Result: {passed_bnd}/{passed_bnd + failed_bnd} passed, {failed_bnd} failed")
 
     # Phase 2b tests (q_len=1 and q_len>1)
     passed2 = 0
@@ -619,7 +808,7 @@ def run_correctness_tests():
             break
 
     print(f"  Result: {passed2}/{total2} passed, {failed2} failed")
-    return failed + failed_mq + failed2
+    return failed + failed_mq + failed_h + failed_s + failed_bnd + failed2
 
 
 def _benchmark(fn, warmup=10, iters=100):

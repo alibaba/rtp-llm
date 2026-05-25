@@ -167,15 +167,6 @@ class DSv4DecodeAttnMetadataFP8:
     # views via ``self._kv_cache.get_layer_cache(layer_id, attn_type)``
     # at call time, no per-layer descriptor cache needed.
 
-    # FlashMLA's ``cache_seqlens`` argument = start_pos + 1 (number of
-    # valid kv tokens for this step). The decode FP8 attention op is
-    # called 43× per step (once per layer) with the same value, so we
-    # compute the int32 tensor once here and reuse across layers instead
-    # of re-running ``(start_pos[:bsz] + 1).to(torch.int32)`` per layer.
-    # Pre-allocated at max_batch by ``allocate_decode_metadata_fp8`` and
-    # refilled per step by ``update_decode_metadata_in_place_fp8``.
-    cache_seqlens_i32: torch.Tensor = field(default=None)  # type: ignore[assignment]
-
     # Iter3.3: shared-across-layers request-id mapping ``[T]`` int32 = the
     # ``arange(bsz)`` (for q_len=1) passed to every ``translate_local_to_global_slots``
     # call. 43 layers × same arange = one cached tensor.
@@ -457,11 +448,12 @@ def _build_position_ids_2d(
     position_ids field is intentionally not consumed here; DSv4 decode builds
     its own contiguous per-request position stream from the first token
     position and q_len.
+
+    Caller is expected to have already moved ``start_pos`` to ``device`` /
+    ``int32`` (see :func:`_build_start_pos_from_attention_inputs`); the
+    ``.to`` here is a no-op in that case.
     """
-    if start_pos.device != device:
-        start_pos = start_pos.to(device)
-    if start_pos.dtype != torch.int32:
-        start_pos = start_pos.to(torch.int32)
+    start_pos = start_pos.to(device=device, dtype=torch.int32)
     B = int(start_pos.shape[0])
     return start_pos.view(B, 1) + torch.arange(
         q_len, device=device, dtype=torch.int32
@@ -490,10 +482,7 @@ def _build_start_pos_from_attention_inputs(
         else:
             start_pos = attention_inputs.sequence_lengths
 
-    if start_pos.device != device:
-        start_pos = start_pos.to(device)
-    if start_pos.dtype != torch.int32:
-        start_pos = start_pos.to(torch.int32)
+    start_pos = start_pos.to(device=device, dtype=torch.int32)
     # Cuda-graph capture/warmup can hand us sentinel prefix lengths near
     # max_seq_len. For multi-token speculative batches, clamping only the first
     # token to max_seq_len - 1 still lets later tokens exceed the sized KV and
@@ -684,10 +673,6 @@ def allocate_decode_metadata_fp8(
         device=device,
     )
 
-    # Iter3.2: precomputed cache_seqlens = start_pos + 1 int32, reused
-    # across all 43 decode layers. See field doc on DSv4DecodeAttnMetadataFP8.
-    cache_seqlens_i32_alloc = torch.zeros(B, dtype=torch.int32, device=device)
-
     # Iter3.3: pre-allocated buffers for the shared-across-layers translate
     # outputs. Under CUDA graph capture the graph bakes in the buffer
     # address, so refill MUST .copy_() into the existing storage instead of
@@ -742,7 +727,6 @@ def allocate_decode_metadata_fp8(
         pool_write_slot_mappings=pool_write_slot_mappings,
         compressor_state_slot_mappings=compressor_state_slot_mappings,
         swa_abs_idx=swa_abs_idx,
-        cache_seqlens_i32=cache_seqlens_i32_alloc,
         req_id_per_token=req_id_per_token_alloc,
         req_id_per_token_long=req_id_per_token_long_alloc,
         decode_seq_start_per_req=decode_seq_start_per_req_alloc,
@@ -840,35 +824,6 @@ def update_decode_metadata_in_place_fp8(
     )
 
     fused_update_decode_meta_pure(meta, start_pos, meta.max_seq_len)
-
-    # The fused kernel writes cache_seqlens = sp + 1 (correct only for
-    # q_len=1). For q_len > 1, fix up to sp + q_len = position_ids_2d[:,-1]+1.
-    if q_len > 1:
-        meta.cache_seqlens_i32[:bs].copy_(position_ids_2d[:bs, -1] + 1)
-        # HCA dense topk: fused kernel uses (sp + Q_LEN)//128 for all q,
-        # but per-token validity should be (sp + q + 1)//128. Rewrite.
-        if 128 in meta.topk_total_by_ratio:
-            total_128 = meta.topk_total_by_ratio[128]
-            K_dense = total_128.shape[-1] - window_size
-            dense_idxs = (
-                torch.arange(K_dense, device=device, dtype=torch.int32)
-                .view(1, 1, K_dense)
-                .expand(bs, q_len, K_dense)
-            )
-            cmp_lens_pt = (
-                ((position_ids_2d[:bs] + 1) // 128).to(torch.int32).view(bs, q_len, 1)
-            )
-            valid_h = dense_idxs < cmp_lens_pt
-            total_128[:bs, :, window_size:].copy_(
-                torch.where(valid_h, dense_idxs, torch.full_like(dense_idxs, -1))
-            )
-
-    # compressed_lens_per_token not covered by the fused kernel (added for
-    # target-verify/speculative q_len>1). Populate from position_ids.
-    for r in meta.compressed_lens_per_token:
-        meta.compressed_lens_per_token[r][:bs].copy_(
-            ((position_ids_2d[:bs] + 1) // r).to(torch.int32)
-        )
 
     # ------------------------------------------------------------------
     # Phase 2: paged write slot mappings (per attn_type).
@@ -999,7 +954,7 @@ def update_decode_metadata_in_place_fp8(
 
 
 def build_decode_metadata_fp8(
-    start_pos: torch.Tensor,
+    attention_inputs: Any,
     q_len: int,
     window_size: int,
     head_dim: int,
@@ -1014,8 +969,11 @@ def build_decode_metadata_fp8(
     """Top-level builder. Call ONCE per decode forward step.
 
     Args:
-        start_pos: [B] int32 — current absolute position per request
-            (i.e. number of tokens already in cache before this step).
+        attention_inputs: framework attention inputs (PyAttentionInputs) — the
+            first-token position is derived from ``sequence_lengths`` for normal
+            decode and from ``prefix_lengths`` for target-verify / MTP draft
+            prefill. A bare ``[B] int32`` tensor is also accepted for focused
+            metadata tests.
         q_len: tokens per request this step (1 for pure decode).
         window_size: SWA size (V4: 128).
         head_dim: 512 for V4 attn KV; passed through for downstream
@@ -1031,12 +989,12 @@ def build_decode_metadata_fp8(
     Returns:
         Fully-populated DSv4DecodeAttnMetadataFP8.
     """
-    if start_pos.device != device:
-        start_pos = start_pos.to(device)
-    if start_pos.dtype != torch.int32:
-        start_pos = start_pos.to(torch.int32)
-    max_start = max(0, int(max_seq_len) - int(q_len))
-    start_pos = torch.clamp(start_pos, min=0, max=max_start)
+    start_pos = _build_start_pos_from_attention_inputs(
+        attention_inputs,
+        device,
+        max_seq_len,
+        q_len,
+    )
 
     B = start_pos.shape[0]
     T_total = B * q_len
@@ -1202,8 +1160,6 @@ def build_decode_metadata_fp8(
         torch.full_like(candidate, -1),
     )
 
-    cache_seqlens_i32 = (position_ids_2d[:, -1] + 1).to(torch.int32)
-
     if paged_block_tables and paged_pool_entries_per_block:
         from rtp_llm.models_py.modules.dsv4.attn_type import HCA_KV, SWA_KV
         from rtp_llm.models_py.modules.dsv4.fp8.decode.paged_topk_translator import (
@@ -1284,7 +1240,6 @@ def build_decode_metadata_fp8(
         pool_write_slot_mappings=pool_write_slot_mappings,
         compressor_state_slot_mappings=compressor_state_slot_mappings,
         swa_abs_idx=swa_abs_idx,
-        cache_seqlens_i32=cache_seqlens_i32,
         req_id_per_token=req_id_per_token,
         req_id_per_token_long=req_id_per_token_long,
         decode_seq_start_per_req=decode_seq_start_per_req,

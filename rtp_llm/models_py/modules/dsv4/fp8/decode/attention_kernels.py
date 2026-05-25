@@ -31,7 +31,6 @@ def attn_fp8_swa_paged(
     swa_pool_3d: torch.Tensor,  # [num_blocks, entries_per_block, 584] uint8
     attn_sink: torch.Tensor,  # [H] bf16 / fp32
     swa_topk_3d: torch.Tensor,  # [B, 1, win] int32 global slots into SWA pool
-    cache_seqlens: torch.Tensor,  # [B] int32
     swa_block_table: torch.Tensor,  # [B, max_blocks_per_req] int32
     sched_meta: Any,  # FlashMLA sched_meta from DSv4DecodeAttnMetadataFP8
     fp8_op: SparseAttnV4DecodeFp8Op,
@@ -45,9 +44,6 @@ def attn_fp8_swa_paged(
         so the caller MUST translate abs positions via
         :func:`~paged_topk_translator.translate_local_to_global_slots`
         before invoking this op.
-      * ``cache_seqlens`` is precomputed once per step into
-        ``attn_metadata.cache_seqlens_i32`` and sliced ``[:bsz]`` by the
-        caller.
       * ``sched_meta`` is owned by :class:`DSv4DecodeAttnMetadataFP8` (see
         :func:`~decode_attn_metadata.get_or_build_sched_meta`); lifetime
         is tied to the decode step (eager) or the capture impl (CUDA graph).
@@ -58,7 +54,6 @@ def attn_fp8_swa_paged(
         attn_sink,
         swa_topk_3d,
         sched_meta,
-        cache_seqlens=cache_seqlens,
         block_table=swa_block_table,
     )
 
@@ -71,7 +66,6 @@ def attn_fp8_dual_paged(
     attn_sink: torch.Tensor,
     swa_topk_3d: torch.Tensor,  # [B, 1, win] int32 global slots into SWA pool
     cmp_topk_3d: torch.Tensor,  # [B, 1, K_cmp] int32 global slots into cmp pool
-    cache_seqlens: torch.Tensor,  # [B] int32
     swa_block_table: torch.Tensor,  # [B, max_blocks_per_req] int32
     sched_meta: Any,  # FlashMLA sched_meta from DSv4DecodeAttnMetadataFP8
     fp8_op: SparseAttnV4DecodeFp8Op,
@@ -95,7 +89,6 @@ def attn_fp8_dual_paged(
         attn_sink,
         swa_topk_3d,
         sched_meta,
-        cache_seqlens=cache_seqlens,
         block_table=swa_block_table,
         extra_k_cache=cmp_pool_3d,
         extra_topk_idxs=cmp_topk_3d,
