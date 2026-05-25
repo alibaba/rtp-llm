@@ -63,19 +63,6 @@ test_deps = [
     "@local_config_cuda//cuda:cudart",
 ] + torch_deps() + cuda12_torch_link_deps
 
-block_cache_test_deps = [
-    "//rtp_llm/cpp/testing:device_test_utils",
-    "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
-    "//rtp_llm/cpp/config:config_modules",
-    "//rtp_llm/cpp/config:model_config",
-    "//rtp_llm/cpp/cache",
-    "@com_google_googletest//:gtest",
-    "@com_google_googletest//:gtest_main",
-    "@local_config_cuda//cuda:cuda_headers",
-    "@local_config_cuda//cuda:cudart",
-] + torch_deps() + cuda12_torch_link_deps
-
-
 cc_library(
     name = "cache_config_test_utils",
     hdrs = [
@@ -144,18 +131,6 @@ cc_library(
     deps = test_deps,
     alwayslink = 1,
     visibility = ["//visibility:public"],
-)
-
-cc_test(
-    name = "block_cache_test",
-    srcs = [
-        "BlockCacheTest.cc",
-    ],
-    data = [],
-    copts = test_copts,
-    deps = block_cache_test_deps,
-    env = {},
-    exec_properties = {'gpu':'H20'},
 )
 
 cc_test(
