@@ -462,10 +462,10 @@ bool KVCacheMemoryConnector::hasTypedLayerRegionSlots(const std::vector<LayerReg
 bool KVCacheMemoryConnector::isDsv4TypedCacheLayout(const std::vector<LayerRegionSlot>& slots) const {
     // Keep this gate deliberately strict: this staged SM path is enabled by the current DSV4 typed
     // cache schema, not by model name. DSV4 Flash/Pro currently use seven typed pools in the fixed
-    // order below, 256 tokens/block, sparse opaque KV cache store, and SWA_KV in group 6. If that
-    // schema changes, update this matcher together with HybridPoolConfigCreator coverage.
+    // order below, configured 128-aligned kernel tokens/block, sparse opaque KV cache store, and SWA_KV in group 6.
+    // If that schema changes, update this matcher together with HybridPoolConfigCreator coverage.
     constexpr size_t            kDsv4PoolNum                      = 7;
-    constexpr size_t            kDsv4TokensPerBlock               = 256;
+    constexpr size_t            kDsv4MinTokensPerBlock            = 128;
     constexpr KVCacheRegionName kExpectedRegions[kDsv4PoolNum]    = {KVCacheRegionName::CSA_KV,
                                                                      KVCacheRegionName::HCA_KV,
                                                                      KVCacheRegionName::INDEXER_KV,
@@ -488,8 +488,10 @@ bool KVCacheMemoryConnector::isDsv4TypedCacheLayout(const std::vector<LayerRegio
         || !cache_config_.use_independent_block_pools || !cache_config_.is_sparse) {
         return false;
     }
-    if (cache_config_.seq_size_per_block != kDsv4TokensPerBlock
-        || cache_config_.kernel_seq_size_per_block != kDsv4TokensPerBlock) {
+    const auto seq_size    = cache_config_.seq_size_per_block;
+    const auto kernel_size = cache_config_.kernel_seq_size_per_block;
+    if (kernel_size < kDsv4MinTokensPerBlock || kernel_size % kDsv4MinTokensPerBlock != 0
+        || seq_size != kernel_size) {
         return false;
     }
     if (cache_config_.cache_specs.size() != kDsv4PoolNum || cache_config_.group_region_names.size() != kDsv4PoolNum
