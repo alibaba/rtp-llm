@@ -24,6 +24,23 @@ namespace rtp_llm {
 
 namespace {
 
+bool envValueIsFalse(const char* value) {
+    return value != nullptr
+           && (strcmp(value, "0") == 0 || strcasecmp(value, "false") == 0 || strcasecmp(value, "off") == 0
+               || strcasecmp(value, "no") == 0);
+}
+
+bool prefillCacheHitMetricEnabled() {
+    static const bool enabled = []() {
+        const char* value = std::getenv("PREFILL_CACHE_HIT_METRIC_ENABLE");
+        if (value == nullptr || value[0] == 0) {
+            return true;
+        }
+        return !envValueIsFalse(value);
+    }();
+    return enabled;
+}
+
 bool prefillCacheDebugLogEnabled() {
     static const bool enabled = []() {
         const char* value = std::getenv("PREFILL_CACHE_DEBUG_LOG");
@@ -169,7 +186,11 @@ grpc::Status PrefillRpcServer::init(const EngineInitParams&                     
     if (!ret.ok()) {
         return ret;
     }
-    prefill_recent_cache_key_window_ = std::make_unique<RecentCacheKeyWindow>();
+    if (prefillCacheHitMetricEnabled()) {
+        prefill_recent_cache_key_window_ = std::make_unique<RecentCacheKeyWindow>();
+    } else {
+        RTP_LLM_LOG_INFO("prefill recent-cache-key metrics disabled by PREFILL_CACHE_HIT_METRIC_ENABLE");
+    }
     return grpc::Status::OK;
 }
 
@@ -507,6 +528,9 @@ grpc::Status PrefillRpcServer::prepareAllocateResource(PrefillGenerateContext& p
 
 void PrefillRpcServer::reportPrefillRecentCacheKeyMetrics(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
+    if (!prefillCacheHitMetricEnabled()) {
+        return;
+    }
     if (!prefill_recent_cache_key_window_) {
         return;
     }
