@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 
 using namespace std;
 
@@ -15,15 +16,11 @@ void GenerateStateMachine::reportErrorAndWakeup(ErrorCode error_code, const std:
     //   - 内部会回调 generate_status_->reportEvent(Error,...) 登记 error_info/events_
     //   - 接着触发 stream 的 onErrorReported() hook 唤醒 nextOutput() 等待原语
     // 调用者必须已持有 stream->mutex_(moveToNext/handleRunning 调用链满足此前置)。
-    if (stream_) {
-        stream_->reportErrorWithoutLock(error_code, error_msg);
-    } else {
-        // Fallback:无 owner stream(理论上不应发生)时退化为只登记 error_info/events_。
-        if (error_info.ok()) {
-            error_info = ErrorInfo(error_code, error_msg);
-        }
-        events_.append(StreamEvents::Error);
-    }
+    // stream_ 由唯一构造点(GenerateStream::ctor)注入,理论上永远非空;断言保护契约,
+    // 同时让任何未来误把它构造成 nullptr 的尝试在第一时间暴露,而不是悄悄退化。
+    RTP_LLM_CHECK_WITH_INFO(stream_ != nullptr,
+                            "GenerateStateMachine::reportErrorAndWakeup called without owner stream");
+    stream_->reportErrorWithoutLock(error_code, error_msg);
 }
 
 StreamState GenerateStateMachine::moveToNext() {
