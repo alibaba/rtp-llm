@@ -1,6 +1,9 @@
 #include "rtp_llm/cpp/cache/connector/memory/MemoryDiskBlockCache.h"
 
 #include <algorithm>
+#include <cstdlib>
+#include <cstring>
+#include <strings.h>
 #include <mutex>
 
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -9,15 +12,42 @@
 
 namespace rtp_llm {
 
+namespace {
+
+bool kvCacheDebugLogEnabled() {
+    static const bool enabled = []() {
+        const char* value = std::getenv("KV_CACHE_DEBUG_LOG");
+        if (value == nullptr) {
+            return false;
+        }
+        return strcmp(value, "1") == 0 || strcasecmp(value, "true") == 0 || strcasecmp(value, "on") == 0;
+    }();
+    return enabled;
+}
+
+}  // namespace
+
 MemoryDiskBlockCache::MatchResult MemoryDiskBlockCache::match(CacheKeyType cache_key) {
     RTP_LLM_PROFILE_FUNCTION();
     std::unique_lock<std::shared_mutex> lock(mutex_);
     auto                                it = items_.find(cache_key);
     if (it == items_.end()) {
+        if (kvCacheDebugLogEnabled()) {
+            RTP_LLM_LOG_INFO("memory cache match miss: key=%ld size=%zu", cache_key, items_.size());
+        }
         return {};
     }
     touchLocked(it->second);
     const auto& item = it->second;
+    if (kvCacheDebugLogEnabled()) {
+        RTP_LLM_LOG_INFO("memory cache match hit: key=%ld backing=%d block=%d disk_slot=%d complete=%d size=%zu",
+                         cache_key,
+                         static_cast<int>(item.backing_type),
+                         item.block_index,
+                         item.disk_slot,
+                         item.is_complete,
+                         items_.size());
+    }
     return {item.backing_type, item.block_index, item.disk_slot, item.block_size, item.is_complete};
 }
 
@@ -26,11 +56,25 @@ MemoryDiskBlockCache::MatchResult MemoryDiskBlockCache::matchAndMarkInFlight(Cac
     std::unique_lock<std::shared_mutex> lock(mutex_);
     auto                                it = items_.find(cache_key);
     if (it == items_.end()) {
+        if (kvCacheDebugLogEnabled()) {
+            RTP_LLM_LOG_INFO("memory cache match-inflight miss: key=%ld size=%zu", cache_key, items_.size());
+        }
         return {};
     }
     touchLocked(it->second);
     it->second.in_flight_ref++;
     const auto& item = it->second;
+    if (kvCacheDebugLogEnabled()) {
+        RTP_LLM_LOG_INFO("memory cache match-inflight hit: key=%ld backing=%d block=%d disk_slot=%d complete=%d "
+                         "inflight_ref=%u size=%zu",
+                         cache_key,
+                         static_cast<int>(item.backing_type),
+                         item.block_index,
+                         item.disk_slot,
+                         item.is_complete,
+                         item.in_flight_ref,
+                         items_.size());
+    }
     return {item.backing_type, item.block_index, item.disk_slot, item.block_size, item.is_complete};
 }
 
@@ -53,6 +97,12 @@ MemoryDiskBlockCache::putCommitted(const CacheItem& input_item) {
         touchLocked(existing->second);
         if (!existing->second.is_complete && item.is_complete) {
             if (existing->second.in_flight_ref > 0) {
+                if (kvCacheDebugLogEnabled()) {
+                    RTP_LLM_LOG_INFO("memory cache put skip upgrade in-flight: key=%ld inflight_ref=%u size=%zu",
+                                     item.cache_key,
+                                     existing->second.in_flight_ref,
+                                     items_.size());
+                }
                 return {false, std::nullopt};
             }
             auto old_item = existing->second;
@@ -60,7 +110,18 @@ MemoryDiskBlockCache::putCommitted(const CacheItem& input_item) {
             item.last_access_seq = ++access_seq_;
             existing->second     = item;
             insertEvictKeyLocked(existing->second);
+            if (kvCacheDebugLogEnabled()) {
+                RTP_LLM_LOG_INFO("memory cache put upgrade: key=%ld backing=%d block=%d disk_slot=%d size=%zu",
+                                 item.cache_key,
+                                 static_cast<int>(item.backing_type),
+                                 item.block_index,
+                                 item.disk_slot,
+                                 items_.size());
+            }
             return {true, old_item};
+        }
+        if (kvCacheDebugLogEnabled()) {
+            RTP_LLM_LOG_INFO("memory cache put duplicate: key=%ld size=%zu", item.cache_key, items_.size());
         }
         return {false, std::nullopt};
     }
@@ -69,6 +130,15 @@ MemoryDiskBlockCache::putCommitted(const CacheItem& input_item) {
     auto [it, inserted]  = items_.emplace(item.cache_key, item);
     (void)inserted;
     insertEvictKeyLocked(it->second);
+    if (kvCacheDebugLogEnabled()) {
+        RTP_LLM_LOG_INFO("memory cache put new: key=%ld backing=%d block=%d disk_slot=%d complete=%d size=%zu",
+                         item.cache_key,
+                         static_cast<int>(item.backing_type),
+                         item.block_index,
+                         item.disk_slot,
+                         item.is_complete,
+                         items_.size());
+    }
     return {true, std::nullopt};
 }
 
@@ -154,6 +224,15 @@ std::optional<MemoryDiskBlockCache::CacheItem> MemoryDiskBlockCache::popOldestEv
         eraseEvictKeyLocked(it->second);
         items_.erase(it);
     }
+    if (kvCacheDebugLogEnabled()) {
+        RTP_LLM_LOG_INFO("memory cache evict oldest: key=%ld backing=%d block=%d disk_slot=%d complete=%d size=%zu",
+                         selected->cache_key,
+                         static_cast<int>(selected->backing_type),
+                         selected->block_index,
+                         selected->disk_slot,
+                         selected->is_complete,
+                         items_.size());
+    }
     return selected;
 }
 
@@ -174,6 +253,15 @@ std::optional<MemoryDiskBlockCache::CacheItem> MemoryDiskBlockCache::popOldestEv
             eraseEvictKeyLocked(it->second);
             items_.erase(it);
         }
+        if (kvCacheDebugLogEnabled()) {
+            RTP_LLM_LOG_INFO("memory cache evict kind: key=%ld backing=%d block=%d disk_slot=%d complete=%d size=%zu",
+                             disk_item->cache_key,
+                             static_cast<int>(disk_item->backing_type),
+                             disk_item->block_index,
+                             disk_item->disk_slot,
+                             disk_item->is_complete,
+                             items_.size());
+        }
         return disk_item;
     }
     if (!disk_item.has_value() || memory_item->last_access_seq <= disk_item->last_access_seq) {
@@ -182,12 +270,30 @@ std::optional<MemoryDiskBlockCache::CacheItem> MemoryDiskBlockCache::popOldestEv
             eraseEvictKeyLocked(it->second);
             items_.erase(it);
         }
+        if (kvCacheDebugLogEnabled()) {
+            RTP_LLM_LOG_INFO("memory cache evict kind: key=%ld backing=%d block=%d disk_slot=%d complete=%d size=%zu",
+                             memory_item->cache_key,
+                             static_cast<int>(memory_item->backing_type),
+                             memory_item->block_index,
+                             memory_item->disk_slot,
+                             memory_item->is_complete,
+                             items_.size());
+        }
         return memory_item;
     }
     auto it = items_.find(disk_item->cache_key);
     if (it != items_.end()) {
         eraseEvictKeyLocked(it->second);
         items_.erase(it);
+    }
+    if (kvCacheDebugLogEnabled()) {
+        RTP_LLM_LOG_INFO("memory cache evict kind: key=%ld backing=%d block=%d disk_slot=%d complete=%d size=%zu",
+                         disk_item->cache_key,
+                         static_cast<int>(disk_item->backing_type),
+                         disk_item->block_index,
+                         disk_item->disk_slot,
+                         disk_item->is_complete,
+                         items_.size());
     }
     return disk_item;
 }
