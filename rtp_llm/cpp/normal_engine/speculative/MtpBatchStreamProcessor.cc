@@ -166,6 +166,19 @@ torch::Tensor interleaveTokenPairs(const torch::Tensor& first, const torch::Tens
     return torch::stack({first, second}, /*dim=*/1).reshape({-1});
 }
 
+void copyScoreSamplerTokenIds(torch::Tensor&       token_ids,
+                              const torch::Tensor& complete_token_ids,
+                              int64_t              batch_idx,
+                              int64_t              score_len,
+                              int64_t              seq_len) {
+    if (score_len <= 0 || seq_len <= 0) {
+        return;
+    }
+    auto dst = token_ids.narrow(0, batch_idx, score_len).narrow(1, 0, seq_len);
+    auto src = complete_token_ids.narrow(0, 0, 1).narrow(1, 0, seq_len).expand({score_len, seq_len});
+    dst.copy_(src);
+}
+
 const char* missingMtpStateReason(const GenerateStreamPtr& stream) {
     if (!stream->getAcceptTokensGpu().defined()) {
         return "accept_tokens_gpu_missing";
@@ -323,7 +336,7 @@ absl::StatusOr<GptModelInputs> MtpBatchStreamProcessor::gatherDecodeModelInput(c
 
 absl::StatusOr<SamplerInputs> MtpBatchStreamProcessor::gatherSpecSamplerInput(
     const StreamGroups& stream_groups, const GptModelInputs& model_inputs, const GptModelOutputs& model_output) const {
-    (void)model_inputs;
+    RTP_LLM_PROFILE_SCOPE("mtp_batch_stream_processor.gather_spec_sampler_input");
     RTP_LLM_CHECK(!stream_groups.empty());
     auto all_streams      = stream_groups.allStreams();
     bool return_all_probs = stream_groups.needReturnAllProbs();
@@ -339,18 +352,14 @@ absl::StatusOr<SamplerInputs> MtpBatchStreamProcessor::gatherSpecSamplerInput(
         allocateSamplerInputs(stream_groups, total_batch_size, total_batch_size, propose_step_);
     fillSamplerCommonInputs(sampler_inputs, all_streams, true, propose_step_);
 
-    int batch_idx = 0;
+    int64_t batch_idx = 0;
     for (auto& stream : all_streams) {
         auto complete_token_ids = stream->completeTokenIds();
-        auto seq_len            = stream->seqLength();
-        auto current_batch_size = score_len;
+        auto seq_len            = static_cast<int64_t>(stream->seqLength());
 
-        for (int i = 0; i < current_batch_size; ++i) {
-            memcpy(sampler_inputs.token_ids.data_ptr<int32_t>() + ((batch_idx) * (sampler_inputs.step + 1)),
-                   complete_token_ids.data_ptr<int32_t>(),
-                   seq_len * sizeof(int));
-            batch_idx += 1;
-        }
+        copyScoreSamplerTokenIds(
+            sampler_inputs.token_ids, complete_token_ids, batch_idx, static_cast<int64_t>(score_len), seq_len);
+        batch_idx += static_cast<int64_t>(score_len);
         RTP_LLM_LOG_DEBUG("stream [%s], sampler inputs token ids = [%s]",
                           stream->streamLogTag().c_str(),
                           tensorDebugStringWithData<int32_t>(sampler_inputs.token_ids).c_str());
