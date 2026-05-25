@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.mock.web.reactive.function.server.MockServerRequest;
+import org.springframework.web.reactive.function.server.EntityResponse;
 import org.springframework.web.reactive.function.server.ServerResponse;
 import reactor.core.publisher.Mono;
 import reactor.test.StepVerifier;
@@ -17,6 +18,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.argThat;
@@ -112,6 +114,30 @@ class GenericBatchHandlerTest {
         StepVerifier.create(handler.handle(req, spec))
                 .assertNext(resp -> assertEquals(HttpStatus.INTERNAL_SERVER_ERROR, resp.statusCode()))
                 .verifyComplete();
+    }
+
+    @Test
+    void emptyBatchReturnsShapedEmptyEnvelopeNotEmptyObject() {
+        FanoutService fanout = mock(FanoutService.class);
+        GenericBatchHandler handler = new GenericBatchHandler(fanout, mapper, /*K=*/5);
+        ObjectNode body = mapper.createObjectNode();
+        body.putArray("prompt_batch");
+
+        MockServerRequest req = MockServerRequest.builder()
+                .method(HttpMethod.POST)
+                .uri(URI.create("http://x/dispatcher/batch_infer"))
+                .body(Mono.just(body));
+
+        StepVerifier.create(handler.handle(req, spec))
+                .assertNext(resp -> {
+                    assertEquals(HttpStatus.OK, resp.statusCode());
+                    EntityResponse<?> entity = (EntityResponse<?>) resp;
+                    ObjectNode out = (ObjectNode) entity.entity();
+                    assertEquals(0, out.get("response_batch").size());
+                    assertTrue(out.get("response_batch").isArray());
+                })
+                .verifyComplete();
+        verifyNoInteractions(fanout);
     }
 
     @Test

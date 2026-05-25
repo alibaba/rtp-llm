@@ -45,6 +45,11 @@ public class GenericBatchHandler {
             if (arr == null || !arr.isArray()) {
                 return badRequest("missing or non-array field: " + spec.getRequestArrayField());
             }
+            if (arr.isEmpty()) {
+                ObjectNode emptyEnvelope = mapper.createObjectNode();
+                emptyEnvelope.set(spec.getResponseArrayField(), mapper.createArrayNode());
+                return ServerResponse.ok().contentType(MediaType.APPLICATION_JSON).bodyValue(emptyEnvelope);
+            }
             List<ArrayNode> chunks = BatchSplitter.splitArray((ArrayNode) arr, subBatchSize, mapper);
             List<ObjectNode> chunkBodies = new ArrayList<>(chunks.size());
             for (ArrayNode chunk : chunks) {
