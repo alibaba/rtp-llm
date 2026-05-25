@@ -367,6 +367,30 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                                     cfg.state_block_size_bytes);
             return n;
         }
+        // F01-PR2 followup: mirror createConfig() L186-197 WARN on the sp
+        // entry-point. PREFILL role with no explicit STATE budget falls back
+        // to the HBM-derived block_num placed on pinned CPU; when projected
+        // host bytes/pool exceed 8 GiB this is a foot-gun for multi-rank-per
+        // -host fleets. Latent today (MTP is PDFUSION-only in production),
+        // kept symmetric so future PREFILL-MTP rollouts don't lose the
+        // warning. Guarded on state_block_size_bytes > 0 so propose_config
+        // (typically 0 — SWA-only) cannot trip it.
+        if (role_type == RoleType::PREFILL && cfg.state_block_size_bytes > 0) {
+            const size_t host_bytes = static_cast<size_t>(block_num) * cfg.state_block_size_bytes;
+            constexpr size_t kPrefillPinnedFallbackWarnBytes = 8ULL * 1024 * 1024 * 1024;  // 8 GiB
+            if (host_bytes > kPrefillPinnedFallbackWarnBytes) {
+                RTP_LLM_LOG_WARNING(
+                    "[Sp] DSV4 state pools (PREFILL default): UNBOUNDED pinned-CPU "
+                    "fallback est=%zu MiB > %zu MiB warn threshold; multi-pool "
+                    "fan-out can exhaust host pinned memory. Set "
+                    "--state_pool_memory_mb explicitly for production PREFILL "
+                    "deployments. block_num=%u per-block=%zu B",
+                    host_bytes / 1024 / 1024,
+                    kPrefillPinnedFallbackWarnBytes / 1024 / 1024,
+                    static_cast<uint32_t>(block_num),
+                    cfg.state_block_size_bytes);
+            }
+        }
         return static_cast<uint32_t>(block_num);
     };
     const uint32_t score_state_block_num   = compute_state_block_num(score_config);

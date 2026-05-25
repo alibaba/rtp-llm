@@ -1,13 +1,24 @@
 #include "rtp_llm/cpp/cache/connector/KVCacheHandshake.h"
 
 #include <algorithm>
+#include <atomic>
 #include <sstream>
 
+#include "kmonitor/client/MetricsReporter.h"
+
 #include "rtp_llm/cpp/cache/DSV4KVCacheSpec.h"
+#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 
 namespace rtp_llm {
 
 namespace {
+
+// Process-wide counter for the PD salt-mismatch silent-skip path.  Updated
+// from KVCacheConnectorCoordinator::acceptPeerHandshakeFields when the
+// peer's announced (version, bitmap) disagrees with the local one and the
+// pairing falls back to legacy-only.  Used by gtest fixtures and exposed via
+// ``pd.cache.salt_mismatch_skipped`` to kmonitor.
+std::atomic<uint64_t> g_pd_salt_mismatch_skipped_count{0};
 
 // FNV-1a 64-bit constants.
 constexpr uint64_t kFnvOffsetBasis = 0xcbf29ce484222325ULL;
@@ -140,6 +151,36 @@ bool validateHandshake(const HandshakeInfo& local, const HandshakeInfo& peer, st
     // future PR-5 may add magic=2 etc., handshake downgrades to common
     // subset.  Today both must be 1; downgrade is a no-op.
     return true;
+}
+
+// ---------- F01-PR2-followup: counter + kmonitor wiring -------------------
+
+uint64_t pdSaltMismatchSkippedCount() {
+    return g_pd_salt_mismatch_skipped_count.load(std::memory_order_relaxed);
+}
+
+void resetPdSaltMismatchSkippedCountForTest() {
+    g_pd_salt_mismatch_skipped_count.store(0, std::memory_order_relaxed);
+}
+
+bool PDHandshakeMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_QPS_MUTABLE_METRIC(salt_mismatch_skipped_qps_metric_, "pd.cache.salt_mismatch_skipped");
+    return true;
+}
+
+void PDHandshakeMetrics::report(const kmonitor::MetricsTags* tags, PDHandshakeMetricsCollector* collector) {
+    if (collector != nullptr && collector->salt_mismatch_skipped) {
+        REPORT_MUTABLE_QPS(salt_mismatch_skipped_qps_metric_);
+    }
+}
+
+void recordPdSaltMismatchSkipped(const kmonitor::MetricsReporterPtr& reporter) {
+    g_pd_salt_mismatch_skipped_count.fetch_add(1, std::memory_order_relaxed);
+    if (reporter) {
+        PDHandshakeMetricsCollector collector;
+        collector.salt_mismatch_skipped = true;
+        reporter->report<PDHandshakeMetrics, PDHandshakeMetricsCollector>(nullptr, &collector);
+    }
 }
 
 }  // namespace rtp_llm

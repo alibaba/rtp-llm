@@ -1952,7 +1952,7 @@ TEST(DSV4CacheKeySaltProducerTest, KStateFourPopulatesBit3AndFlipsVersion) {
     // REQ-D1 in validateHandshake.
     const uint32_t version = (bitmap != 0) ? kCacheKeySaltSchemaVersion : 0u;
     EXPECT_EQ(version, kCacheKeySaltSchemaVersion);
-    EXPECT_EQ(kCacheKeySaltSchemaVersion, 1u);
+    EXPECT_EQ(kCacheKeySaltSchemaVersion, 2u);
 }
 
 TEST(DSV4CacheKeySaltProducerTest, KStateOneIsLowerBoundStillSaltsBit3) {
@@ -1992,6 +1992,186 @@ TEST(DSV4CacheKeySaltProducerTest, CrossKStateCacheKeysDiverge) {
     for (size_t i = 0; i < keys_off.size(); ++i) {
         EXPECT_NE(keys_off[i], keys_on[i])
             << "block " << i << " collided across K_state values (silent corruption hazard)";
+    }
+}
+
+// ============================================================
+// F01-PR2-followup task 7: salt v2 byte-window layout
+// ============================================================
+
+namespace {
+
+// Replicates the .cc-private byte packing so the test can predict the
+// exact bytes XOR'd into the rolling hash and assert pairwise disjoint
+// byte windows.
+uint64_t expectedSaltBytes(const CacheKeySalt& s) {
+    auto fold8 = [](uint64_t v) {
+        v ^= v >> 32;
+        v ^= v >> 16;
+        v ^= v >> 8;
+        return v & 0xffull;
+    };
+    uint64_t bytes = 0;
+    bytes |= fold8(s.model_id) << (0 * 8);
+    bytes |= (static_cast<uint64_t>(s.dtype_id) & 0xffull) << (1 * 8);
+    bytes |= (static_cast<uint64_t>(s.lora_id) & 0xffull) << (2 * 8);
+    bytes |= (static_cast<uint64_t>(s.K_state) & 0xffull) << (3 * 8);
+    bytes |= (static_cast<uint64_t>(s.Tlog) & 0xffull) << (4 * 8);
+    return bytes;
+}
+
+}  // namespace
+
+TEST(DSV4CacheKeySaltProducerTest, SaltXorBytesNonOverlapping) {
+    // For each single-field non-zero salt, assert (a) the field only
+    // writes to its own byte window, and (b) any two distinct fields'
+    // byte windows are disjoint. Pairwise non-overlap is the load-bearing
+    // v2 invariant that kills the R4-4 F7 collision class.
+    struct FieldCase {
+        const char*  name;
+        CacheKeySalt salt;
+        uint64_t     expected_byte_mask;
+    };
+    std::vector<FieldCase> cases = {
+        {"model_id", [] { CacheKeySalt s{}; s.model_id = 0xdeadbeefcafebabeULL; return s; }(), 0x00000000000000ffULL},
+        {"dtype_id", [] { CacheKeySalt s{}; s.dtype_id = 0xab; return s; }(),                  0x000000000000ff00ULL},
+        {"lora_id",  [] { CacheKeySalt s{}; s.lora_id  = 0xcd; return s; }(),                  0x0000000000ff0000ULL},
+        {"K_state",  [] { CacheKeySalt s{}; s.K_state  = 4;    return s; }(),                  0x00000000ff000000ULL},
+        {"Tlog",     [] { CacheKeySalt s{}; s.Tlog     = 7;    return s; }(),                  0x000000ff00000000ULL},
+    };
+
+    for (const auto& c : cases) {
+        const uint64_t bytes = expectedSaltBytes(c.salt);
+        EXPECT_NE(bytes, 0ull) << c.name << " produced no salt bytes (fold8 / mask broken)";
+        EXPECT_EQ(bytes & ~c.expected_byte_mask, 0ull)
+            << c.name << " leaked outside its allowed byte window";
+        // Reserved bytes 5..7 must stay zero.
+        EXPECT_EQ(bytes & 0xffffff0000000000ULL, 0ull)
+            << c.name << " wrote into reserved bytes 5..7";
+    }
+
+    // Pairwise disjoint AND-mask.
+    for (size_t i = 0; i < cases.size(); ++i) {
+        for (size_t j = i + 1; j < cases.size(); ++j) {
+            const uint64_t bi = expectedSaltBytes(cases[i].salt);
+            const uint64_t bj = expectedSaltBytes(cases[j].salt);
+            EXPECT_EQ(bi & bj, 0ull)
+                << "byte windows for " << cases[i].name << " and " << cases[j].name << " overlap";
+        }
+    }
+}
+
+TEST(DSV4CacheKeySaltProducerTest, SaltCollisionRegressionTlogVsModelId) {
+    // R4-4 F7 regression guard: under the v1 XOR layout, {Tlog=1} and
+    // {model_id=1<<32} XOR'd into bits 32..63 — producing identical
+    // cache_keys. The v2 byte-window layout routes Tlog->byte4 and
+    // fold8(model_id)->byte0, so the two configurations now diverge.
+    CacheKeySalt salt_tlog{};
+    salt_tlog.Tlog = 1;
+
+    CacheKeySalt salt_model{};
+    salt_model.model_id = (1ULL << 32);
+
+    EXPECT_NE(expectedSaltBytes(salt_tlog), expectedSaltBytes(salt_model))
+        << "v1 collision class still present: {Tlog=1} and {model_id=1<<32} produce identical salt bytes";
+
+    constexpr int kSpb = 16;
+    constexpr int kLen = 16 * 2;
+    auto keys_tlog  = runInitCacheKeysWithSalt(salt_tlog, kSpb, kLen);
+    auto keys_model = runInitCacheKeysWithSalt(salt_model, kSpb, kLen);
+    ASSERT_EQ(keys_tlog.size(), 2u);
+    ASSERT_EQ(keys_model.size(), 2u);
+    for (size_t i = 0; i < keys_tlog.size(); ++i) {
+        EXPECT_NE(keys_tlog[i], keys_model[i])
+            << "block " << i << " regressed R4-4 F7: {Tlog=1} ≡ {model_id=1<<32}";
+    }
+}
+
+TEST(DSV4CacheKeySaltProducerTest, ModelIdHighWordContributesViaFold8) {
+    // fold8 must surface model_id high bits (1<<32) into byte 0;
+    // otherwise a salt with only model_id set high would equal zero salt.
+    CacheKeySalt salt_hi{};
+    salt_hi.model_id = (1ULL << 32);
+    EXPECT_NE(expectedSaltBytes(salt_hi), 0ull)
+        << "fold8(model_id=1<<32) collapsed to 0 — model_id high bits not contributing";
+}
+
+TEST(DSV4CacheKeySaltProducerTest, SaltSchemaVersionIsV2) {
+    // F01-PR2-followup bumped schema to v2 (non-overlapping byte windows).
+    EXPECT_EQ(kCacheKeySaltSchemaVersion, 2u);
+}
+
+// ============================================================
+// F01-PR2-followup task 7: K_state lifecycle hardening
+// ============================================================
+
+TEST(DSV4KStateHookTest, KStateEquals256NormalizesToOff) {
+    // K_state == 256 is the kernel-block identity (no shrink). Helper
+    // must normalize it to OFF (mirror=0, salt bit3 dark, byte-identical
+    // hash bytes) so a config operationally equivalent to OFF does NOT
+    // light up salt bit3 / handshake bitmap.
+    auto              mc = makeProModelConfig();
+    ParallelismConfig pc;
+    KVCacheConfig     kv_cache_config;
+    kv_cache_config.dsv4_state_entries_per_block = 256;
+
+    auto config = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config);
+
+    EXPECT_EQ(config.state_entries_per_block_constant, 0)
+        << "K_state=256 must normalize to mirror=0 (identity, no kernel shrink)";
+
+    const CacheKeySalt salt = makeCacheKeySalt(config);
+    EXPECT_EQ(salt.K_state, 0u);
+    EXPECT_EQ(nonzeroFieldBitmap(salt), 0u) << "K_state=256 must keep bitmap empty";
+
+    // State pool block sizes byte-identical to default-OFF.
+    ASSERT_EQ(config.cache_specs.size(), 7u);
+    EXPECT_EQ(config.cache_specs[3]->block_size_bytes(), 256u * 512u * 4u);
+    EXPECT_EQ(config.cache_specs[4]->block_size_bytes(), 256u * 2048u * 4u);
+    EXPECT_EQ(config.cache_specs[5]->block_size_bytes(), 256u * 1024u * 4u);
+}
+
+TEST(DSV4KStateHookTest, KStateNegativeRejected) {
+    // Validate-on-load: negative K_state must fail-loud.
+    auto              mc = makeProModelConfig();
+    ParallelismConfig pc;
+    KVCacheConfig     kv_cache_config;
+    kv_cache_config.dsv4_state_entries_per_block = -1;
+
+    EXPECT_ANY_THROW({
+        (void)HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config);
+    }) << "K_state<0 must trigger RTP_LLM_CHECK_WITH_INFO";
+}
+
+TEST(DSV4KStateHookTest, KStateOversizedRejected) {
+    // Validate-on-load: K_state > kernel block size (256) must fail-loud.
+    auto              mc = makeProModelConfig();
+    ParallelismConfig pc;
+    KVCacheConfig     kv_cache_config;
+    kv_cache_config.dsv4_state_entries_per_block = 512;
+
+    EXPECT_ANY_THROW({
+        (void)HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config);
+    }) << "K_state>256 must trigger RTP_LLM_CHECK_WITH_INFO";
+}
+
+// FIX-B HIGH-3 (DEFEND-3 #2): K_state must divide kDsv4KernelTokensPerBlock=256
+// evenly; non-divisors silently corrupt per-block byte math downstream.  This
+// is a stricter contract than the previous "warn on non-power-of-2" test
+// (which accepted K_state=3); the WARN path is now subsumed by the hard
+// CHECK because all divisors of 256 are exactly the powers of 2 in [1,256].
+TEST(DSV4KStateHookTest, KStateNonDivisorOfKernelBlockRejected) {
+    // Each of {3,5,7,9} is non-divisor of 256 (and non-power-of-2); each
+    // must trigger RTP_LLM_CHECK_WITH_INFO at the divisibility guard.
+    for (int bad_k : {3, 5, 7, 9}) {
+        auto              mc = makeProModelConfig();
+        ParallelismConfig pc;
+        KVCacheConfig     kv_cache_config;
+        kv_cache_config.dsv4_state_entries_per_block = bad_k;
+
+        EXPECT_ANY_THROW({
+            (void)HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config);
+        }) << "K_state=" << bad_k << " (non-divisor of 256) must trigger RTP_LLM_CHECK_WITH_INFO";
     }
 }
 
@@ -2036,6 +2216,117 @@ TEST(DSV4CacheKeySaltProducerTest, DefaultOffCacheKeysAreLegacyIdentical) {
             << "default-off salt produced a different key at block " << i
             << " (must be byte-identical to legacy)";
     }
+}
+
+// ============================================================
+// F01-PR2 followup (DEV-3): createSpConfig() WARN mirror.
+//
+// createConfig() at CacheConfigCreator.cc L186-197 emits a B-fix-2
+// WARNING when PREFILL + state_pool_memory_mb=0 falls back to the
+// HBM-derived block_num placed on pinned host memory and the projected
+// host bytes/pool exceed 8 GiB. The sp entry-point had the identical
+// fallback formula but no WARN — silent foot-gun for future PREFILL+MTP
+// rollouts. This test exercises the predicate that gates the WARN to
+// guard against regressions of the mirror branch.
+// ============================================================
+TEST(CacheConfigStatePinnedTest, SpConfigPrefillPinnedFallbackEmitsWarnWhenStateBytesLarge) {
+    auto score_model_config   = makeFlashModelConfig();
+    auto propose_model_config = makeFlashMtpModelConfig();
+
+    ParallelismConfig parallelism_config;
+    RuntimeConfig     runtime_config;
+    runtime_config.max_generate_batch_size                      = 2;
+    runtime_config.fifo_scheduler_config.max_context_batch_size = 1;
+
+    KVCacheConfig kv_cache_config;
+    // Force a huge block_num so block_num * state_block_size_bytes
+    // crosses the 8 GiB WARN threshold without touching the real budget
+    // accounting paths. The lambda's "else" branch (no explicit budget)
+    // is identical regardless of how block_num got there.
+    kv_cache_config.test_block_num                   = 200000;
+    kv_cache_config.state_pool_memory_mb             = 0;  // pinned via PREFILL role
+    kv_cache_config.non_full_addition_kvcache_blocks = 0;
+
+    SpeculativeExecutionConfig sp_config;
+    sp_config.type              = SP_TYPE_MTP;
+    sp_config.gen_num_per_cycle = 2;
+
+    auto config = CacheConfigCreator::createSpConfig(score_model_config,
+                                                     propose_model_config,
+                                                     parallelism_config,
+                                                     runtime_config,
+                                                     kv_cache_config,
+                                                     sp_config,
+                                                     std::nullopt,
+                                                     /*is_mtp=*/true,
+                                                     /*is_eagle=*/false,
+                                                     RoleType::PREFILL);
+
+    // (a) Result is valid — fallback still produced a usable config.
+    EXPECT_GT(config.block_num, 0);
+    EXPECT_EQ(static_cast<uint32_t>(config.block_num), 200000u);
+
+    // (b) Verify the WARN guard predicate is satisfied — i.e. the code
+    // path that emits the WARN was taken. alog output is not trivially
+    // capturable from gtest, so we assert via the same side-channels the
+    // WARN guards on:
+    //   1. state_pool_uses_pinned_cpu (PREFILL fallback was applied)
+    //   2. state_block_size_bytes > 0 (DSV4 path, not non-DSV4)
+    //   3. block_num * state_block_size_bytes > 8 GiB (threshold crossed)
+    ASSERT_TRUE(config.state_pool_uses_pinned_cpu)
+        << "PREFILL + state_pool_memory_mb=0 must mark sp-config STATE as pinned-CPU";
+    ASSERT_GT(config.state_block_size_bytes, 0u)
+        << "DSV4 sp score_config must populate state_block_size_bytes";
+    const size_t projected_host_bytes =
+        static_cast<size_t>(config.block_num) * config.state_block_size_bytes;
+    constexpr size_t kWarnThresholdBytes = 8ULL * 1024 * 1024 * 1024;  // 8 GiB
+    EXPECT_GT(projected_host_bytes, kWarnThresholdBytes)
+        << "Test scenario must cross the 8 GiB WARN threshold so the sp WARN "
+        << "branch actually fires (test_block_num=200000 * state_block_size_bytes="
+        << config.state_block_size_bytes << " B = "
+        << (projected_host_bytes / 1024 / 1024) << " MiB)";
+
+    // state_block_num must mirror HBM block_num for the fallback path
+    // (per the unchanged `return static_cast<uint32_t>(block_num)` return).
+    EXPECT_EQ(config.state_block_num, static_cast<uint32_t>(config.block_num))
+        << "PREFILL fallback (no explicit budget) must mirror HBM block_num";
+}
+
+// Negative guard: non-PREFILL role with the same large state-byte
+// scenario must NOT take the WARN branch. We can't observe the absence
+// of a log line, but state_pool_uses_pinned_cpu must be false, which is
+// the same predicate that gates the WARN.
+TEST(CacheConfigStatePinnedTest, SpConfigPdfusionDoesNotEnterPinnedFallback) {
+    auto score_model_config   = makeFlashModelConfig();
+    auto propose_model_config = makeFlashMtpModelConfig();
+
+    ParallelismConfig parallelism_config;
+    RuntimeConfig     runtime_config;
+    runtime_config.max_generate_batch_size                      = 2;
+    runtime_config.fifo_scheduler_config.max_context_batch_size = 1;
+
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.test_block_num                   = 200000;
+    kv_cache_config.state_pool_memory_mb             = 0;
+    kv_cache_config.non_full_addition_kvcache_blocks = 0;
+
+    SpeculativeExecutionConfig sp_config;
+    sp_config.type              = SP_TYPE_MTP;
+    sp_config.gen_num_per_cycle = 2;
+
+    auto config = CacheConfigCreator::createSpConfig(score_model_config,
+                                                     propose_model_config,
+                                                     parallelism_config,
+                                                     runtime_config,
+                                                     kv_cache_config,
+                                                     sp_config,
+                                                     std::nullopt,
+                                                     /*is_mtp=*/true,
+                                                     /*is_eagle=*/false,
+                                                     RoleType::PDFUSION);
+
+    EXPECT_FALSE(config.state_pool_uses_pinned_cpu)
+        << "PDFUSION must not enter pinned-CPU fallback — WARN branch must be skipped";
 }
 
 }  // namespace test

@@ -141,6 +141,27 @@ private:
     void reportMetricsLoop();
 
     // 成员变量
+    //
+    // F01-PR2-followup task 5 audit (XR4-9 const-correctness drift hazard):
+    //   ``config_`` cannot be flipped to ``const CacheConfig`` today
+    //   because the constructor body mutates it in two places before
+    //   the engine becomes observable:
+    //     - warmup branch:        ``config_.block_num = 1;`` (line ~52)
+    //     - allocateAndSync(): cross-rank min of block_num + a follow-up
+    //                          ``config_.finalizeBlockNums(...)`` re-derives
+    //                          ``group_block_nums`` / ``fixed_pool_reserve_bytes``.
+    //   Both happen during construction; nothing outside the ctor /
+    //   allocateAndSync mutates ``config_`` (verified by grep). To make
+    //   this field genuinely ``const`` we would need to lift those
+    //   mutations into a static ``buildFinalConfig(...)`` helper invoked
+    //   from the initializer list, which is a bigger refactor than this
+    //   PR scope. Tracked as XR4-9 follow-up: see
+    //   ``docs/dsv4/kvcache-unify-final/reviews/DEV2_salt_kstate.md``.
+    //
+    // Invariant maintained today: every read of ``config_`` outside the
+    // ctor body sees the post-allocateAndSync, post-finalizeBlockNums
+    // snapshot. Do NOT add new mutations of ``config_`` outside the
+    // constructor body.
     CacheConfig         config_;
     KVCacheAllocatorPtr allocator_;
 
@@ -156,6 +177,15 @@ private:
 
     std::atomic<bool> stop_{false};
     std::thread       metrics_reporter_thread_;
+
+    // FIX-B HIGH-6 (DEFEND-2 HIGH-3): single-init guard.  Catches any test
+    // fixture / factory wrapper that calls ``init()`` twice — without it a
+    // second metrics_reporter_thread_ would be spawned (orphaning the first),
+    // ``allocator_`` would be overwritten mid-flight, and
+    // ``coordinator_->init()`` would re-bind the connector socket.  Lighter-
+    // weight than the XR4-9 "const config_" refactor but covers the same
+    // class of bug.
+    bool initialized_ = false;
 
     std::shared_ptr<KVCacheConnectorCoordinator> coordinator_;
 

@@ -60,8 +60,17 @@ DSV4LayerSets classifyDSV4Layers(const std::vector<int>& compress_ratios) {
         } else if (ratio == 0) {
             sets.swa_only_layers.push_back(layer_id);
         } else {
-            RTP_LLM_LOG_WARNING("Unknown DSV4 compress_ratio %d at layer %zu, treating as HCA", ratio, i);
-            sets.hca_layers.push_back(layer_id);
+            // FIX-B HIGH-7 (DEFEND-3 #4): strict reject unknown compress_ratio.
+            // DSV4 spec only allows {0, 4, 128}; silently treating a stray
+            // value as HCA produces wrong pool layout + wrong block bytes
+            // and the only user-visible signal is a hash-mismatch on the
+            // first PD-pair query (very far from the bad config).  Fail-loud
+            // at startup instead.
+            RTP_LLM_CHECK_WITH_INFO(false,
+                                    "DSV4 unsupported compress_ratio=%d at layer %zu "
+                                    "(allowed: {0, 4, 128})",
+                                    ratio,
+                                    i);
         }
     }
 
@@ -213,11 +222,52 @@ void DSV4CacheConfigHelper::applyConfig(CacheConfig&         config,
     // makeDSV4Spec runs *after* this override so the resulting spec's
     // block_size_bytes reflects the reduced K_state.
     const int k_state = kv_cache_config.dsv4_state_entries_per_block;
-    if (k_state > 0) {
-        RTP_LLM_CHECK_WITH_INFO(static_cast<uint32_t>(k_state) <= kDsv4KernelTokensPerBlock,
-                                "dsv4_state_entries_per_block (%d) must be <= kernel block size (%u)",
-                                k_state,
-                                kDsv4KernelTokensPerBlock);
+    // F01-PR2-followup validate-on-load: reject negative and oversized
+    // values up-front so a misconfigured deployment crashes at startup
+    // rather than silently producing a degenerate cache layout.
+    RTP_LLM_CHECK_WITH_INFO(k_state >= 0 && k_state <= static_cast<int>(kDsv4KernelTokensPerBlock),
+                            "dsv4_state_entries_per_block (%d) out of range [0, %u]",
+                            k_state,
+                            kDsv4KernelTokensPerBlock);
+    // FIX-B HIGH-3 (DEFEND-3 #2): strict divisibility CHECK — non-divisors of
+    // kDsv4KernelTokensPerBlock=256 produce non-integer per-block byte math
+    // downstream (e.g. K_state=3 ⇒ 256/3=85 truncated, layout silently
+    // corrupts).  This is a HARD kernel invariant; the power-of-2 WARN
+    // below catches OFF-fast-path values, but the WARN-only path lets
+    // K_state=3/5/7/9 silently produce a degenerate cache layout.  Reject
+    // up-front so a misconfigured deployment crashes at startup rather
+    // than silently shipping bad cache_keys to the kernel.
+    RTP_LLM_CHECK_WITH_INFO(k_state == 0 || (kDsv4KernelTokensPerBlock % static_cast<uint32_t>(k_state) == 0),
+                            "dsv4_state_entries_per_block (%d) must divide kernel block size %u evenly "
+                            "(non-divisors produce non-integer per-block byte math)",
+                            k_state,
+                            kDsv4KernelTokensPerBlock);
+    // F01-PR2-followup: warn on non-power-of-2 K_state. The compressor /
+    // decode_attn_metadata kernels in F01-PR2 expect K_state ∈ {1,2,4,8,
+    // 16,32,64,128,256}; other values land but trigger a slow scalar tail.
+    if (k_state > 0 && (k_state & (k_state - 1)) != 0) {
+        // Find the closest power-of-2 divisor of 256 for operator guidance.
+        int suggested = 1;
+        while (suggested < k_state && suggested < static_cast<int>(kDsv4KernelTokensPerBlock)) {
+            suggested <<= 1;
+        }
+        if (suggested - k_state > k_state - (suggested >> 1)) {
+            suggested >>= 1;
+        }
+        RTP_LLM_LOG_WARNING("dsv4_state_entries_per_block=%d is not a power-of-2 divisor of %u; "
+                            "kernel fast paths only cover {1,2,4,8,16,32,64,128,256} — closest "
+                            "supported value is %d",
+                            k_state,
+                            kDsv4KernelTokensPerBlock,
+                            suggested);
+    }
+    // F01-PR2-followup task 2: K_state == 256 is the kernel-block identity
+    // (no shrink). Normalize it to OFF so salt bit3 stays dark and legacy
+    // hash bytes are preserved byte-for-byte. The override loop below would
+    // be a no-op at 256 anyway, but writing the mirror to 256 would flip
+    // the salt bit3 / handshake bitmap for a config that is operationally
+    // identical to OFF — a needless mixed-mode PD-pair fail-loud.
+    if (k_state > 0 && k_state < static_cast<int>(kDsv4KernelTokensPerBlock)) {
         constexpr size_t kStatePoolIndices[]   = {3, 4, 5};  // INDEXER_STATE, CSA_STATE, HCA_STATE
         for (size_t state_idx : kStatePoolIndices) {
             auto& pool = pools[state_idx];
@@ -232,6 +282,12 @@ void DSV4CacheConfigHelper::applyConfig(CacheConfig&         config,
                          k_state,
                          kDsv4KernelTokensPerBlock / static_cast<uint32_t>(k_state));
     } else {
+        if (k_state == static_cast<int>(kDsv4KernelTokensPerBlock)) {
+            RTP_LLM_LOG_INFO("F01 PR-1: K_state=%d == kernel block size %u (identity), normalizing "
+                             "to OFF; salt/hash bytes remain byte-identical to legacy.",
+                             k_state,
+                             kDsv4KernelTokensPerBlock);
+        }
         config.state_entries_per_block_constant = 0;
     }
 

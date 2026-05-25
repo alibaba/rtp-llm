@@ -54,6 +54,25 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
         allocateAndSync();
     }
 
+    // F01-PR2-followup task 4: WARN when the user opted into the K_state
+    // hook via --dsv4_state_entries_per_block but the DSV4 helper never
+    // ran (the model is not DSV4) — otherwise the override is silently
+    // ignored and the operator gets no signal that their flag was a
+    // no-op. ``state_entries_per_block_constant`` is the mirror written
+    // only by DSV4CacheConfigHelper::applyConfig (DSV4-typed hybrid
+    // configs); a non-DSV4 model leaves it at 0. K_state==256 is the
+    // identity case that the helper normalizes to mirror=0 (task 2);
+    // do not WARN there because the helper did fire.
+    const int requested_k_state = kv_cache_config_.dsv4_state_entries_per_block;
+    if (requested_k_state > 0 && requested_k_state != 256
+        && config_.state_entries_per_block_constant == 0) {
+        RTP_LLM_LOG_WARNING("--dsv4_state_entries_per_block=%d was set but the active model is "
+                            "not a DSV4 hybrid config (layer_compress_ratios empty); the "
+                            "K_state hook is silently ignored. Either deploy on DSV4 or unset "
+                            "the flag (default 0).",
+                            requested_k_state);
+    }
+
     // Page-level RR sharding context: one CPSlotMapper for the lifetime of the
     // manager, broadcast into every malloc/insert via auto-injection in
     // malloc()/insertIntoCache().  When kv_cache_sharded=false (or tp_size==1),
@@ -91,6 +110,13 @@ KVCacheManager::~KVCacheManager() {
 // 初始化和配置相关
 
 bool KVCacheManager::init() {
+    // FIX-B HIGH-6 (DEFEND-2 HIGH-3): reject double-init.  Without this guard
+    // a second call would spawn an extra metrics_reporter_thread_ (orphaning
+    // the first), overwrite allocator_ mid-flight, and re-bind the connector
+    // socket inside coordinator_->init().  Cheap caller-bug catcher that
+    // closes the XR4-9 config_-drift hazard without requiring the full
+    // const-config refactor.
+    RTP_LLM_CHECK_WITH_INFO(!initialized_, "KVCacheManager::init called twice");
     RTP_LLM_CHECK_WITH_INFO(!config_.cache_specs.empty(), "cache specs must not be empty");
 
     auto shared_cache = std::make_shared<SharedBlockCache>();
@@ -120,6 +146,7 @@ bool KVCacheManager::init() {
     }
 
     initConnectorCoordinator();
+    initialized_ = true;
     return true;
 }
 

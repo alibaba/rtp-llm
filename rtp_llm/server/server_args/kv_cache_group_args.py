@@ -1,4 +1,40 @@
+import argparse
+import logging
+
 from rtp_llm.server.server_args.util import str2bool
+
+
+# F01-PR2-followup task 6: validator for --dsv4_state_entries_per_block.
+# Accepted range [0, 256]; warns (does not reject) when the value is in
+# range but not a power-of-2 divisor of 256 because the F01-PR2 kernel
+# fast paths only cover {1, 2, 4, 8, 16, 32, 64, 128, 256}.
+# Canonical doc: docs/dsv4/kvcache-unify-final/modules/M02_config_layer.md
+_DSV4_K_STATE_POWERS_OF_TWO = {0, 1, 2, 4, 8, 16, 32, 64, 128, 256}
+
+
+def _dsv4_state_entries_per_block(value):
+    try:
+        ivalue = int(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(
+            f"--dsv4_state_entries_per_block must be an int, got {value!r}"
+        )
+    if ivalue < 0:
+        raise argparse.ArgumentTypeError(
+            f"--dsv4_state_entries_per_block must be >= 0 (negative values reserved); got {ivalue}"
+        )
+    if ivalue > 256:
+        raise argparse.ArgumentTypeError(
+            f"--dsv4_state_entries_per_block must be <= 256 (DSV4 kernel block size); got {ivalue}"
+        )
+    if ivalue not in _DSV4_K_STATE_POWERS_OF_TWO:
+        logging.warning(
+            "--dsv4_state_entries_per_block=%d is not a power-of-2 divisor of 256; "
+            "F01-PR2 kernel fast paths only cover {1,2,4,8,16,32,64,128,256}. "
+            "See docs/dsv4/kvcache-unify-final/modules/M02_config_layer.md.",
+            ivalue,
+        )
+    return ivalue
 
 
 def init_kv_cache_group_args(parser, kv_cache_config):
@@ -437,12 +473,15 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         "--dsv4_state_entries_per_block",
         env_name="DSV4_STATE_ENTRIES_PER_BLOCK",
         bind_to=(kv_cache_config, "dsv4_state_entries_per_block"),
-        type=int,
+        type=_dsv4_state_entries_per_block,
         default=0,
         help="F01 phase-2 K_state hook for the 3 DSV4 STATE pools "
         "(INDEXER_STATE / CSA_STATE / HCA_STATE): collapses each state "
         "pool's entries_per_block from the kernel-block size (256) down to "
         "this value, reducing per-block bytes by 256/K_state. "
+        "Valid range: [0, 256]; power-of-2 values {1,2,4,8,16,32,64,128,256} "
+        "use the kernel fast path. K_state=256 is normalized to OFF "
+        "(identity, byte-identical hash). "
         "0 = OFF (default; state pools keep 256 entries/block — production "
         "state-on-CPU goldens are byte-identical to today). "
         ">0 = K_state (typical opus F01 §2 setting K_state=4 → 9.9x state "
@@ -450,5 +489,7 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         "side compressor/decode_attn_metadata changes landing in F01-PR2 and "
         "HBM mem accounting smoke in F01-PR3). Only the per-block byte "
         "sizing flips in PR-1 — peer hash_salt K_state bit (bit3) and the "
-        "kernel-side metadata both stay wired through their F01-PR2 producer.",
+        "kernel-side metadata both stay wired through their F01-PR2 producer. "
+        "Canonical reference: "
+        "docs/dsv4/kvcache-unify-final/modules/M02_config_layer.md.",
     )

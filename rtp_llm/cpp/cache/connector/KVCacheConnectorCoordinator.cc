@@ -318,15 +318,18 @@ bool KVCacheConnectorCoordinator::init() {
                      cache_config_.state_entries_per_block_constant,
                      local_salt.K_state);
 
-    // F01-PR2-followup: ``validatePeerHandshake`` is defined in this class
-    // (see below) but no PD accept path invokes it today.  Wiring it
-    // requires touching every connector's peer-pairing handler
-    // (memory / remote / p2p) to deserialize HandshakeInfo from the
-    // wire, route it here, and abort on failure.  That refactor is
-    // deferred to F01-PR2-followup; mixed-mode safety is currently
-    // guarded only at the cache_key layer (divergent salts ⇒
-    // reuse-miss).  Track in the F01-PR2 followup list together with
-    // the M08 kernel-side K_state consumer (decode_attn_metadata).
+    // F01-PR2-followup wired (R4-24): the validator API is no longer a
+    // dead-letter.  Connectors with a salt-aware wire (cache_store_service.
+    // proto fields 103/104/105) should invoke
+    // ``acceptPeerHandshakeFields(magic, version, bitmap)`` from their
+    // per-request accept path — see CacheStoreServiceImpl::load for the
+    // first call site.  Connectors whose wire does NOT yet carry the
+    // salt triple fall back to the cache_key XOR safety net (divergent
+    // salts ⇒ reuse-miss instead of silent corruption, Risk 9.6) and
+    // never observe a mismatch.  The validator logs WARN + increments
+    // ``pd.cache.salt_mismatch_skipped`` on mismatch — it does NOT
+    // RTP_LLM_FAIL, so a mixed-mode misconfiguration is observable in
+    // kmonitor but does not crash the engine.
 
     if (kv_cache_config_.reuse_cache && kv_cache_config_.enable_memory_cache) {
         memory_connector_ = initMemoryConnector();
@@ -659,17 +662,73 @@ bool KVCacheConnectorCoordinator::initP2PConnectorInternal() {
     return true;
 }
 
-void KVCacheConnectorCoordinator::validatePeerHandshake(const HandshakeInfo& peer_info) const {
-    // REQ-D1 / REQ-D2: any disagreement with a peer's HandshakeInfo is a
-    // hard abort.  Mixed-mode pairs (legacy ↔ unified) are refused outright
-    // — the per-request magic-byte fall-back (§4.3) does NOT protect
-    // against silent reuse-miss at the cache_key layer (RDMA routes by
-    // opaque key strings only).  The fail-fast diagnostic includes both
-    // sides of the handshake so on-call can immediately spot the drift.
+bool KVCacheConnectorCoordinator::validatePeerHandshake(const HandshakeInfo& peer_info) const {
+    // F01-PR2-followup: returns bool (was void+FAIL).  A mixed-mode peer
+    // is a misconfiguration, not a crash-worthy invariant violation —
+    // RTP_LLM_FAIL would have brought down the engine on a single
+    // misbehaving wire-peer.  Instead we WARN, bump
+    // ``pd.cache.salt_mismatch_skipped``, and return false so the caller
+    // can downgrade the pairing to legacy-only OR drop the peer
+    // depending on connector semantics.  The cache_key salt XOR
+    // (KVCacheHashUtil) already prevents silent corruption at the
+    // request layer (Risk 9.6); this counter surfaces the misconfig.
     std::string err;
-    if (!validateHandshake(local_handshake_info_, peer_info, &err)) {
-        RTP_LLM_FAIL("%s", err.c_str());
+    if (validateHandshake(local_handshake_info_, peer_info, &err)) {
+        return true;
     }
+    RTP_LLM_LOG_WARNING("PD handshake mismatch — pairing falls back to legacy-only: %s", err.c_str());
+    recordPdSaltMismatchSkipped(metrics_reporter_);
+    return false;
+}
+
+bool KVCacheConnectorCoordinator::acceptPeerHandshakeFields(uint32_t peer_salt_magic,
+                                                            uint32_t peer_hash_salt_version,
+                                                            uint32_t peer_hash_salt_nonzero_bitmap) const {
+    // FIX-B HIGH-5 (DEFEND-4 #5, production-fatal): the wire's ``salt_magic``
+    // proto field (tag 103) is a fixed sentinel ({0,100}) used only for
+    // forward-compat envelope detection.  It is NOT the same semantic as
+    // ``HandshakeInfo::protocol_magic`` ({0,1} = legacy / unified-aware).
+    // Pre-fix, the proto field defaulted to 100 and a naive route into
+    // HandshakeInfo::protocol_magic produced ``HandshakeInfo{magic=100,...}``
+    // which falls through ``validateHandshake``'s unified↔unified branch and
+    // REFUSES every legacy peer (zero hash/version mismatch) → fleet-wide
+    // REFUSE storm at every PD pairing.  The proto rename + default=0 below
+    // means a legacy peer is now wire-identifiable as ``salt_magic == 0``;
+    // the real "is the peer's cache_key payload salted" gate uses
+    // ``hash_salt_version > 0``, NOT salt_magic.
+    //
+    // CHECK invariant (caller-bug catcher): if any non-salt-aware caller
+    // wires a stray byte into salt_magic, it must still be in the
+    // forward-compat sentinel set {0, 100}.  We don't FAIL (mixed-mode is
+    // a misconfiguration, not a fatal crash — same policy as
+    // validatePeerHandshake), but we log + downgrade to legacy semantics
+    // so we never accidentally inject the sentinel into the legacy
+    // protocol_magic field.  Note: bare ``DCHECK`` (release-stripped) is
+    // not enough — use a warn-once so prod sees it.
+    if (peer_salt_magic != 0 && peer_salt_magic != 100) {
+        RTP_LLM_LOG_WARNING(
+            "PD handshake: peer advertised unexpected salt_magic=%u (expected {0,100}); "
+            "downgrading peer to legacy semantics for envelope detection",
+            peer_salt_magic);
+    }
+
+    // Map the proto sentinel onto the {0,1} HandshakeInfo::protocol_magic
+    // domain.  REQ: salt_magic == 0 (proto default = field NOT sent by
+    // legacy peer) MUST be treated as legacy-OK, NOT mixed-mode REFUSE.
+    HandshakeInfo peer{};
+    peer.pool_descriptor_hash     = 0;  // not yet on the wire (deferred to PR adding field 106)
+    peer.hash_salt_version        = peer_hash_salt_version;
+    peer.hash_salt_nonzero_bitmap = peer_hash_salt_nonzero_bitmap;
+
+    // FIX-B HIGH-5: the actual "peer is salt-aware (unified-mode hash domain)"
+    // gate is ``hash_salt_version > 0`` — only then advertise unified-aware
+    // protocol_magic=1.  A legacy peer (no field 103, defaults to 0) AND a
+    // salt-aware peer that happens to send {salt_magic=100, version=0}
+    // (e.g. a unified-aware sender on a fresh boot with K_state=0) both
+    // route to the legacy↔legacy branch, which is byte-identical to
+    // today's behaviour.
+    peer.protocol_magic = (peer_hash_salt_version > 0) ? 1u : 0u;
+    return validatePeerHandshake(peer);
 }
 
 std::vector<CacheKeyType> KVCacheConnectorCoordinator::memoryCacheKeys() const {

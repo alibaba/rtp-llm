@@ -75,6 +75,26 @@ message CacheLoadRequest {
     repeated uint64              super_block_ids = 101;
     // Length-P per-pool descriptor list.
     repeated PoolDescriptorProto pools           = 102;
+
+    // -------- F01-PR2-followup (R4-24 §5): PD handshake salt fields ------
+    // Tag numbers 103/104/105 are reserved for the salt-aware handshake.
+    // Field 103 ``salt_magic`` is a fixed sentinel (100 == salt-aware
+    // sender, 0 == legacy / field-not-sent) used ONLY for forward-compat
+    // envelope detection.  It is intentionally NAMED differently from the
+    // legacy ``HandshakeInfo::protocol_magic`` (which lives in {0,1} and
+    // means "is the unified-layout cache schema engaged") to avoid the
+    // FIX-B HIGH-5 hazard where a naive route of proto-103 into
+    // ``HandshakeInfo::protocol_magic`` would inject the sentinel 100 and
+    // cause validateHandshake's unified↔unified branch to REFUSE every
+    // legacy peer.  See ``KVCacheConnectorCoordinator::acceptPeerHandshakeFields``
+    // — the wire-side helper maps salt_magic=0 → legacy peer (magic=0) and
+    // salt_magic!=0 → unified peer iff hash_salt_version>0.  The actual
+    // "is the cache_key payload salted" gate uses hash_salt_version > 0,
+    // NOT salt_magic.  Default = 0 so a legacy sender (no field on the
+    // wire) is unambiguously identified as legacy by the receiver.
+    optional uint32 salt_magic              = 103 [default = 0];
+    optional uint32 hash_salt_version       = 104 [default = 0];
+    optional uint32 hash_salt_nonzero_bitmap = 105 [default = 0];
 }
 
 message CacheLoadResponse {
@@ -87,6 +107,16 @@ message CacheLoadResponse {
     // Response-side magic so a unified→legacy response can signal that the
     // decode side is unified-aware (used by PD ring-open triple capture).
     optional uint32 protocol_magic = 100 [default = 0];
+
+    // -------- F01-PR2-followup (R4-24 §5): PD handshake salt response ----
+    // Echoed back so the request-side coordinator can confirm the receiver
+    // ran ``validatePeerHandshake`` and that the salt schemas matched.
+    // Tag numbers MUST stay stable across PRs — 103/104/105 are reserved.
+    // See CacheLoadRequest::salt_magic for the FIX-B HIGH-5 rationale on
+    // the rename + default=0 (legacy peer must NOT advertise sentinel 100).
+    optional uint32 salt_magic              = 103 [default = 0];
+    optional uint32 hash_salt_version       = 104 [default = 0];
+    optional uint32 hash_salt_nonzero_bitmap = 105 [default = 0];
 };
 
 message CacheTransferInfo {
@@ -111,6 +141,13 @@ message CacheTransferRequest {
     optional uint32              protocol_magic = 100 [default = 0];
     repeated uint64              super_block_ids = 101;
     repeated PoolDescriptorProto pools           = 102;
+
+    // -------- F01-PR2-followup (R4-24 §5): PD handshake salt fields ------
+    // See ``CacheLoadRequest`` for the field-number + naming rationale
+    // (FIX-B HIGH-5: salt_magic is NOT the legacy HandshakeInfo magic).
+    optional uint32 salt_magic              = 103 [default = 0];
+    optional uint32 hash_salt_version       = 104 [default = 0];
+    optional uint32 hash_salt_nonzero_bitmap = 105 [default = 0];
 }
 
 message CacheTransferResponse {

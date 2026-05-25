@@ -1,8 +1,11 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <vector>
+
+#include "kmonitor/client/MetricsReporter.h"
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
@@ -27,12 +30,22 @@ namespace rtp_llm {
 //   * pool_descriptor_hash      — uint64 over the PINNED input set (REQ-D2);
 //                                  see ``poolDescriptorHashInputsFor`` below.
 //                                  Mismatch ⇒ abort.
-//   * hash_salt_version         — packed (schema_version : uint16,
-//                                  nonzero_bitmap : uint16) for the M03 hash
-//                                  salt; REQ-D1.  Mismatch ⇒ abort.
-//   * hash_salt_nonzero_bitmap  — sender's per-field salt-domain bitmap so the
-//                                  receiver can detect "both zero" vs
-//                                  "schema-zero on one side only".
+//   * hash_salt_version         — uint32 schema version of the M03 hash salt;
+//                                  REQ-D1.  Stored as a stand-alone uint32 (NOT
+//                                  packed with the bitmap — XR4-24 N1 doc
+//                                  correction).  Currently == 0 for legacy/
+//                                  unsalted, == ``kCacheKeySaltSchemaVersion``
+//                                  for any non-zero salt.  Wire encoding uses
+//                                  proto field 104 (uint32 varint); host byte
+//                                  order on the C++ side — varint serialization
+//                                  is endian-neutral so no htonl is required.
+//   * hash_salt_nonzero_bitmap  — uint32 sender's per-field salt-domain bitmap
+//                                  (1 bit per CacheKeySalt field); receiver
+//                                  compares for byte-equality so it can detect
+//                                  "both zero" vs "schema-zero on one side
+//                                  only".  Wire encoding uses proto field 105
+//                                  (uint32 varint); same endian-neutrality as
+//                                  the version field.
 //
 // Default-constructed instance corresponds to the legacy peer (protocol_magic
 // = 0, hash = 0, salt zeros).  Default-on legacy ↔ legacy pairs therefore
@@ -110,5 +123,42 @@ HandshakeInfo computeLocalHandshakeInfo(const CacheConfig& cache_config,
 //                                       hash_salt_nonzero_bitmap MUST match
 //                                       (REQ-D1).  Any mismatch ⇒ REFUSE.
 bool validateHandshake(const HandshakeInfo& local, const HandshakeInfo& peer, std::string* error_message);
+
+// ---------------------------------------------------------------------------
+// F01-PR2-followup: PD handshake observability + accept-path counter.
+//
+// Process-wide atomic counter incremented every time a peer's announced
+// HandshakeInfo (decoded from proto fields 103/104/105 — see
+// ``cache_store_service.proto``) fails ``validateHandshake`` and the
+// accept path falls back to legacy-only / refuses the pairing.  Tests read
+// the counter via ``pdSaltMismatchSkippedCount()``; production reports go
+// through ``PDHandshakeMetrics::report`` with the metric path
+// ``pd.cache.salt_mismatch_skipped``.
+// ---------------------------------------------------------------------------
+
+uint64_t pdSaltMismatchSkippedCount();
+void     resetPdSaltMismatchSkippedCountForTest();
+
+class PDHandshakeMetricsCollector final {
+public:
+    bool salt_mismatch_skipped = false;
+};
+
+class PDHandshakeMetrics: public kmonitor::MetricsGroup {
+public:
+    ~PDHandshakeMetrics() = default;
+
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, PDHandshakeMetricsCollector* collector);
+
+private:
+    kmonitor::MutableMetric* salt_mismatch_skipped_qps_metric_ = nullptr;
+};
+
+// Increment the process-wide counter AND (when ``reporter`` is non-null)
+// fire a ``pd.cache.salt_mismatch_skipped`` QPS point.  Safe to call from
+// the connector accept path with no locks held — uses an atomic counter
+// only; metrics reporter is internally thread-safe.
+void recordPdSaltMismatchSkipped(const kmonitor::MetricsReporterPtr& reporter);
 
 }  // namespace rtp_llm

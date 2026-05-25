@@ -276,6 +276,20 @@ void SharedBlockCache::setSwaTailPin(CacheKeyType cache_key, bool pinned) {
 void SharedBlockCache::putUnified(CacheKeyType cache_key, int super_block_id, bool is_resident) {
     RTP_LLM_PROFILE_FUNCTION();
 
+    // FIX-B HIGH-2 (DEFEND-1 #2): hoist the S != 0 invariant to the entry of
+    // putUnified so the OFFENDING CALLER is named at the bad put, not far
+    // downstream when the K is later displaced and cascadeUnifiedSnapshot
+    // fires the deep CHECK (line 539 below).  S == 0 is reserved by
+    // SuperBlockFreeList (allocSuperBlock / unifiedMalloc invariant); any
+    // caller hard-coding S = 0 (test stub / connector path that forgets to
+    // skip slot 0 / unifiedMalloc regression) is structurally a bug.  The
+    // cascade-time CHECK at :539 stays as defense in depth.
+    RTP_LLM_CHECK_WITH_INFO(super_block_id != 0,
+                            "SharedBlockCache::putUnified received reserved super_block_id 0 "
+                            "(cache_key=%ld); SuperBlockFreeList reserves slot 0 — caller must "
+                            "allocate via SuperBlockFreeList::alloc",
+                            static_cast<long>(cache_key));
+
     // Snapshot any displaced item under mu_; cascade OUTSIDE mu_ to honour
     // the §3.0 lock-order (L1 released before L2 reclaim callback into the
     // SuperBlockFreeList).

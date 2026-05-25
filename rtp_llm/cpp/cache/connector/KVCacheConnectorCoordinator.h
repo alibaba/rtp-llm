@@ -83,7 +83,35 @@ public:
     const HandshakeInfo& localHandshakeInfo() const {
         return local_handshake_info_;
     }
-    void validatePeerHandshake(const HandshakeInfo& peer_info) const;
+
+    // F01-PR2-followup: returns true if the pair may proceed (legacy↔legacy
+    // OR same-version unified pair).  On mismatch, logs WARN, increments
+    // the process-wide ``pd.cache.salt_mismatch_skipped`` counter and
+    // returns false — callers MUST treat false as "do NOT publish this
+    // peer's cache_keys into our reuse lookup" (legacy-only fallback at
+    // worst, refusal at best).  The function deliberately does NOT raise
+    // RTP_LLM_FAIL: a mixed-mode peer is a misconfiguration, not a fatal
+    // crash; the counter + WARN + cache_key salt divergence are the
+    // user-visible signal (Risk 9.6 silent reuse-miss path).
+    bool validatePeerHandshake(const HandshakeInfo& peer_info) const;
+
+    // Wire-side overload: construct the peer HandshakeInfo from proto fields
+    // 103/104/105 (``cache_store_service.proto`` CacheLoadRequest /
+    // CacheTransferRequest) and run ``validatePeerHandshake``.  Peer's
+    // ``pool_descriptor_hash`` is NOT yet on the wire (deferred to the next
+    // PR adding field 106), so this overload passes 0 — legacy↔legacy and
+    // matching-bitmap cases still pass, hash-only drift falls back to the
+    // cache_key XOR safety net (Risk 9.6).
+    //
+    // FIX-B HIGH-5: ``peer_salt_magic`` is the proto-103 ``salt_magic``
+    // sentinel ({0,100}), NOT the {0,1} HandshakeInfo::protocol_magic.
+    // The mapping into HandshakeInfo::protocol_magic uses
+    // ``hash_salt_version > 0`` as the load-bearing gate so a legacy peer
+    // (no field 103, version=0) is unambiguously accepted instead of
+    // mis-routed into the unified↔unified REFUSE branch.
+    bool acceptPeerHandshakeFields(uint32_t peer_salt_magic,
+                                   uint32_t peer_hash_salt_version,
+                                   uint32_t peer_hash_salt_nonzero_bitmap) const;
 
 private:
     std::shared_ptr<KVCacheMemoryConnector> initMemoryConnector();

@@ -28,20 +28,42 @@ struct CacheConfig;  // forward decl to avoid pulling CacheConfig.h into the has
 // Production opt-in (per-field) is gated by F07 step 4; PD peers exchange
 // (schema_version, nonzero_field_bitmap) over the M04 §4.3 handshake to
 // fail-fast on mismatched salt schemas (Panel D §1.3, REQ-D1).
+//
+// F01-PR2-followup (v2 layout): salt fields are packed into NON-OVERLAPPING
+// byte windows of a uint64 before the XOR-fold, removing the v1 hazard
+// where ``model_id`` (uint64) covered every other field's 32-bit XOR slot
+// (R4-4 F7 trivial collision: ``{Tlog=1} ≡ {model_id=1<<32}``).
+//
+// On-wire layout of the assembled uint64 salt (little-endian byte index):
+//     byte 0 : fold8(model_id)        — XOR-fold of all 8 bytes of model_id
+//     byte 1 : dtype_id & 0xff        — kv_cache_dtype id (FP8/BF16/INT8...)
+//     byte 2 : lora_id  & 0xff        — lora bucket (mod 256)
+//     byte 3 : K_state  & 0xff        — F01 phase-2 K_state (<=256)
+//     byte 4 : Tlog     & 0xff        — F02 super-block layout step
+//     bytes 5..7 : reserved (must be 0)
+//
+// Pairwise non-overlap proof: each non-zero field writes to its own byte
+// window; two distinct field combinations cannot land on identical salt
+// bytes unless both are zero. fold8(model_id) ensures any non-zero bit
+// of the 64-bit model_id surfaces in byte 0 (the v1 layout silently
+// aliased model_id high words because uint64 << 0 dropped the high
+// bytes off the dtype/lora/K_state/Tlog XOR slots).
 // ---------------------------------------------------------------------------
 
 struct CacheKeySalt {
-    uint64_t model_id = 0;  // bit0 — ModelConfig::model_id
-    uint32_t dtype_id = 0;  // bit1 — kv_cache_dtype (FP8/BF16/...)
-    uint32_t lora_id  = 0;  // bit2 — lora_config.id (0 = no LoRA)
-    uint32_t K_state  = 0;  // bit3 — F01 phase-2 K_state semantic
-    uint32_t Tlog     = 0;  // bit4 — super_block_layout step
+    uint64_t model_id = 0;  // bit0 — ModelConfig::model_id (fold8 -> byte0)
+    uint32_t dtype_id = 0;  // bit1 — kv_cache_dtype (FP8/BF16/...) -> byte1
+    uint32_t lora_id  = 0;  // bit2 — lora_config.id (0 = no LoRA)  -> byte2
+    uint32_t K_state  = 0;  // bit3 — F01 phase-2 K_state semantic  -> byte3
+    uint32_t Tlog     = 0;  // bit4 — super_block_layout step       -> byte4
 };
 
 // Salt schema version (M03 §4 REQ-D1). Bumped whenever the set or
-// interpretation of CacheKeySalt fields changes. PR-M03-1 ships v1 with
-// every field defaulting to zero -> legacy-identical hashes.
-constexpr uint32_t kCacheKeySaltSchemaVersion = 1u;
+// interpretation of CacheKeySalt fields changes. v1 used overlapping
+// XOR slots; v2 (F01-PR2-followup) uses the non-overlapping byte-window
+// layout described above. PD peers exchange (version, bitmap) so a v1
+// and v2 peer trip REQ-D1 fail-loud at handshake time.
+constexpr uint32_t kCacheKeySaltSchemaVersion = 2u;
 
 // Per-field non-zero bitmap (M03 §4 REQ-D1). bit0=model_id, bit1=dtype_id,
 // bit2=lora_id, bit3=K_state, bit4=Tlog. PD handshake carries

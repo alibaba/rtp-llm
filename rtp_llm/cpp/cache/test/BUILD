@@ -359,6 +359,23 @@ cc_test(
 )
 
 cc_test(
+    name = "kv_cache_handshake_test",
+    srcs = [
+        "KVCacheHandshakeTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache:cache_core",
+        "//rtp_llm/cpp/cache:cache_types",
+        "//rtp_llm/cpp/cache/connector:connector",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps() + cuda12_torch_link_deps,
+    env = {},
+)
+
+cc_test(
     name = "shared_block_cache_unified_test",
     srcs = [
         "SharedBlockCacheUnifiedTest.cc",
