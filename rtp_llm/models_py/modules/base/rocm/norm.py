@@ -2,9 +2,7 @@ from typing import Tuple, Union
 
 import torch
 import torch.nn.functional as F
-from aiter import layernorm2d_fwd as layernorm2d_fwd
 from aiter import rms_norm
-from aiter import rmsnorm2d_fwd_with_add as fused_add_rmsnorm
 from torch import nn
 
 from rtp_llm.models_py.modules.base.common.norm import (
@@ -14,6 +12,16 @@ from rtp_llm.models_py.modules.base.common.norm import (
     BaseResNorm,
 )
 from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+try:
+    from aiter import layernorm2d_fwd
+except ImportError:
+    layernorm2d_fwd = None
+
+try:
+    from aiter import rmsnorm2d_fwd_with_add as fused_add_rmsnorm
+except ImportError:
+    fused_add_rmsnorm = None
 
 
 class LayerNorm(BaseLayerNorm):
@@ -43,6 +51,14 @@ class RMSResNorm(BaseResNorm):
     def forward(
         self, hidden_states: torch.Tensor, residual: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if fused_add_rmsnorm is None:
+            residual_out = hidden_states + residual
+            input_dtype = residual_out.dtype
+            normed = residual_out.to(torch.float32)
+            variance = normed.pow(2).mean(-1, keepdim=True)
+            normed = normed * torch.rsqrt(variance + self.variance_epsilon)
+            return self.weight * normed.to(input_dtype), residual_out
+
         output = torch.empty_like(hidden_states)
         residual_out = torch.empty_like(hidden_states)
         fused_add_rmsnorm(
@@ -74,7 +90,11 @@ class AddBiasResLayerNorm(BaseAddBiasResLayerNorm):
                 dtype=hidden_states.dtype,
             )
 
-        if hidden_states.shape[0] > 32 and hidden_states.shape[1] <= 768:
+        if (
+            layernorm2d_fwd is not None
+            and hidden_states.shape[0] > 32
+            and hidden_states.shape[1] <= 768
+        ):
             hidden_states = hidden_states + residual
             x_bias = bias if bias.numel() > 0 else None
             return layernorm2d_fwd(
