@@ -220,8 +220,13 @@ void SharedBlockCache::decUseRef(CacheKeyType cache_key) {
     // M03-PR3 dual-write: when UnifiedRefCounter is wired, delegate the
     // primary state to it. The per-item ``use_ref`` mirror is still
     // maintained (legacy fallback for tests / non-unified paths).
-    // UnifiedRefCounter::decUseRef takes its own mu_; call it OUTSIDE our mu_
-    // to keep L1 (this->mu_) a leaf and avoid nested-lock surprises.
+    // UnifiedRefCounter::decUseRef takes its own mu_ (Lcr); call it OUTSIDE
+    // our mu_ here because this code path nests L1 AFTER Lcr (sequential
+    // re-acquisition, not nested), which keeps decUseRef from forming a
+    // Lcr→L1 cycle vs the L1→Lcr nesting used by putUnified/matchUnified.
+    // L1 itself is NOT a leaf — it parents Lcr and L3 on the put/match
+    // sites; see SharedBlockCache.h cascadeUnifiedSnapshot doc for the
+    // full lock-order discussion.
     if (unified_ref_counter_) {
         unified_ref_counter_->decUseRef(cache_key);
     }
@@ -524,6 +529,14 @@ void SharedBlockCache::cascadeUnifiedSnapshot(const std::vector<UnifiedCacheItem
         if (S < 0) {
             continue;
         }
+        // R2-20 / R3-17 defense-in-depth: S==0 is reserved by
+        // SuperBlockFreeList (allocSuperBlock/unifiedMalloc invariant).
+        // Reaching here with S==0 means a caller leaked the reserved id
+        // into the LRU — fail loud rather than silently free pool 0.
+        RTP_LLM_CHECK_WITH_INFO(S != 0,
+                                "cascadeUnifiedSnapshot received reserved super-block id 0 "
+                                "(cache_key=%ld); SuperBlockFreeList invariant violated upstream",
+                                static_cast<long>(item.cache_key));
         // M03-PR3 dual-write: always drop legacy per-pool block_cache_ref
         // AND unified CACHE counter. The two mirrors track 1:1 because put
         // bumps both; eviction drops both. Per-pool tryFreeBlocks fires on

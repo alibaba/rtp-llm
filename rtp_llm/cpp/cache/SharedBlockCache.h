@@ -266,9 +266,16 @@ private:
     // XR-C1: shared cascade body for ``putUnified``'s overflow tail and
     // ``evictAndFreeUnified``'s phase B. Drops one CACHE/per-pool ref per
     // snapshot entry unconditionally — event-paired with the put that
-    // produced the entry. Must be called WITHOUT ``mu_`` held (per-pool
-    // ``blockCacheFree`` and ``UnifiedRefCounter::dec`` each take their
-    // own locks; L1 stays a leaf).
+    // produced the entry.
+    //
+    // Pre-condition: ``mu_`` (L1) MUST NOT be held. The body invokes
+    // ``UnifiedRefCounter::dec``/``isZero`` (Lcr), ``BlockPool::blockCacheFree``
+    // (L3), and ``super_block_reclaim_callback_`` (which targets L2 on
+    // ``SuperBlockFreeList``). L1 itself is NOT a leaf — it nests Lcr
+    // and L3 in ``putUnified``/``matchUnified`` for atomic bump+insert
+    // — but the cascade path runs outside L1 specifically to keep the
+    // L1 → L2 edge from forming via the reclaim callback (forbidden by
+    // §3.0 lock-order).
     void cascadeUnifiedSnapshot(const std::vector<UnifiedCacheItem>& snapshot, size_t* cascaded_out);
 
     static const size_t kCacheMaxCapacity = 10000000;

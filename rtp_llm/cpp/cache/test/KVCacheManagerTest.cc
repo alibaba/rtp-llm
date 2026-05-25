@@ -1210,7 +1210,9 @@ TEST_F(KVCacheManagerTest, DSV4MaxConcurrencyOneReuseOneBlockAndAllocTwoTailBloc
     };
 
     // Seed one reusable SWA/state block per fixed pool.  For a 2-block request,
-    // insertIntoCache keeps only the first full block; the active tail is not cached.
+    // HybridKVCacheAllocator::insertIntoCache caches EVERY non-NULL slot
+    // (no N-1 / active-tail filter), so both blocks land in SharedBlockCache.
+    // The matching expected counters below derive from that documented behavior.
     auto       seed_res    = makeDSV4BatchResource(manager_config);
     auto       seed_tokens = makeTokens(2 * spb);
     MallocInfo seed_malloc{seed_res, seed_tokens};
@@ -1275,7 +1277,10 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
     //
     // We use reuse_cache=false for malloc so the SWA group keeps its native
     // tail-only allocation pattern ([NULL, real, real] for a 3*spb request).
-    // Tests 1 and 4 cover the reuse_cache=true / all-positions variant.
+    // Test 1 (DSV4EvictionTriggeredWhenPoolExhaustedByCache) covers the
+    // reuse_cache=true / all-positions variant; Test 4 uses reuse_cache=false
+    // throughout. A dedicated reuse_cache=true + decode-step-pressure
+    // composition is queued as a follow-up (R3-7 MED).
     auto manager_config = makeDSV4ConfigWithConcurrencyPool(/*full_block_num=*/8, /*swa_batch_size=*/2);
     auto manager        = std::make_shared<KVCacheManager>(manager_config, /*warmup=*/false);
     ASSERT_TRUE(manager->init());
