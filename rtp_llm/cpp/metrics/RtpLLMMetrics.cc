@@ -905,6 +905,58 @@ bool RtpLLMDiskCacheMetrics::init(kmonitor::MetricsGroupManager* manager) {
                                 "rtp_llm_kv_cache_disk_cache_copy_failed_qps");
     REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_disk_cache_copy_latency_metric,
                                   "rtp_llm_kv_cache_disk_cache_copy_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_disk_cache_copy_item_count_metric,
+                                  "rtp_llm_kv_cache_disk_cache_copy_item_count");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_disk_cache_copy_complete_item_count_metric,
+                                  "rtp_llm_kv_cache_disk_cache_copy_complete_item_count");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_disk_cache_copy_incomplete_item_count_metric,
+                                  "rtp_llm_kv_cache_disk_cache_copy_incomplete_item_count");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_disk_cache_copy_payload_bytes_metric,
+                                  "rtp_llm_kv_cache_disk_cache_copy_payload_bytes");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_disk_cache_copy_slot_bytes_metric,
+                                  "rtp_llm_kv_cache_disk_cache_copy_slot_bytes");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_disk_cache_copy_pwrite_bytes_metric,
+                                  "rtp_llm_kv_cache_disk_cache_copy_pwrite_bytes");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_disk_cache_copy_pread_bytes_metric,
+                                  "rtp_llm_kv_cache_disk_cache_copy_pread_bytes");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_disk_cache_copy_pwrite_attempt_bytes_metric,
+                                  "rtp_llm_kv_cache_disk_cache_copy_pwrite_attempt_bytes");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_disk_cache_copy_pread_attempt_bytes_metric,
+                                  "rtp_llm_kv_cache_disk_cache_copy_pread_attempt_bytes");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_disk_cache_copy_range_count_metric,
+                                  "rtp_llm_kv_cache_disk_cache_copy_range_count");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_disk_cache_copy_null_slot_count_metric,
+                                  "rtp_llm_kv_cache_disk_cache_copy_null_slot_count");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_disk_cache_copy_skipped_slot_count_metric,
+                                  "rtp_llm_kv_cache_disk_cache_copy_skipped_slot_count");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_disk_cache_copy_staging_alloc_latency_metric,
+                                  "rtp_llm_kv_cache_disk_cache_copy_staging_alloc_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_disk_cache_copy_memset_latency_metric,
+                                  "rtp_llm_kv_cache_disk_cache_copy_memset_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_disk_cache_copy_gpu_copy_latency_metric,
+                                  "rtp_llm_kv_cache_disk_cache_copy_gpu_copy_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_disk_cache_copy_pwrite_latency_metric,
+                                  "rtp_llm_kv_cache_disk_cache_copy_pwrite_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_disk_cache_copy_pread_latency_metric,
+                                  "rtp_llm_kv_cache_disk_cache_copy_pread_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_disk_cache_copy_complete_payload_bytes_metric,
+                                  "rtp_llm_kv_cache_disk_cache_copy_complete_payload_bytes");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_disk_cache_copy_incomplete_payload_bytes_metric,
+                                  "rtp_llm_kv_cache_disk_cache_copy_incomplete_payload_bytes");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_disk_cache_copy_complete_pwrite_bytes_metric,
+                                  "rtp_llm_kv_cache_disk_cache_copy_complete_pwrite_bytes");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_disk_cache_copy_incomplete_pwrite_bytes_metric,
+                                  "rtp_llm_kv_cache_disk_cache_copy_incomplete_pwrite_bytes");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_disk_cache_copy_payload_bytes_total_metric,
+                                  "rtp_llm_kv_cache_disk_cache_copy_payload_bytes_total");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_disk_cache_copy_pwrite_bytes_total_metric,
+                                  "rtp_llm_kv_cache_disk_cache_copy_pwrite_bytes_total");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_disk_cache_copy_pread_bytes_total_metric,
+                                  "rtp_llm_kv_cache_disk_cache_copy_pread_bytes_total");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_disk_cache_copy_pwrite_attempt_bytes_total_metric,
+                                  "rtp_llm_kv_cache_disk_cache_copy_pwrite_attempt_bytes_total");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_disk_cache_copy_pread_attempt_bytes_total_metric,
+                                  "rtp_llm_kv_cache_disk_cache_copy_pread_attempt_bytes_total");
 
     REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_disk_cache_status_total_block_num_metric,
                                   "rtp_llm_kv_cache_disk_cache_status_total_block_num");
@@ -971,24 +1023,70 @@ void RtpLLMDiskCacheMetrics::report(const kmonitor::MetricsTags*          tags,
 }
 
 void RtpLLMDiskCacheMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMDiskCacheCopyMetricsCollector* collector) {
-    kmonitor::MetricsTags copy_tag("copy_direction", collector->from_gpu ? "FROM_GPU" : "TO_GPU");
-    kv_cache_disk_cache_copy_qps_metric->Report(&copy_tag, 1);
-    kv_cache_disk_cache_copy_latency_metric->Report(&copy_tag, collector->latency_us);
+    auto make_copy_tag = [&](const char* pool_kind) {
+        kmonitor::MetricsTags copy_tag;
+        copy_tag.AddTag("copy_direction", collector->from_gpu ? "FROM_GPU" : "TO_GPU");
+        copy_tag.AddTag("io_mode", collector->buffered_io ? "buffered" : "direct");
+        copy_tag.AddTag("pool_kind", pool_kind);
+        return copy_tag;
+    };
+    auto report_pool = [&](const char* pool_kind, const RtpLLMDiskCacheCopyPoolMetrics& stats, bool detailed) {
+        auto copy_tag = make_copy_tag(pool_kind);
+        kv_cache_disk_cache_copy_item_count_metric->Report(&copy_tag, stats.item_count);
+        kv_cache_disk_cache_copy_payload_bytes_metric->Report(&copy_tag, stats.payload_bytes);
+        kv_cache_disk_cache_copy_slot_bytes_metric->Report(&copy_tag, stats.slot_bytes);
+        kv_cache_disk_cache_copy_pwrite_bytes_metric->Report(&copy_tag, stats.pwrite_bytes);
+        kv_cache_disk_cache_copy_pread_bytes_metric->Report(&copy_tag, stats.pread_bytes);
+        kv_cache_disk_cache_copy_pwrite_attempt_bytes_metric->Report(&copy_tag, stats.pwrite_attempt_bytes);
+        kv_cache_disk_cache_copy_pread_attempt_bytes_metric->Report(&copy_tag, stats.pread_attempt_bytes);
+        if (!detailed) {
+            return;
+        }
+        kv_cache_disk_cache_copy_range_count_metric->Report(&copy_tag, stats.range_count);
+        kv_cache_disk_cache_copy_null_slot_count_metric->Report(&copy_tag, stats.null_slot_count);
+        kv_cache_disk_cache_copy_skipped_slot_count_metric->Report(&copy_tag, stats.skipped_slot_count);
+        kv_cache_disk_cache_copy_memset_latency_metric->Report(&copy_tag, stats.memset_us);
+        kv_cache_disk_cache_copy_gpu_copy_latency_metric->Report(&copy_tag, stats.gpu_copy_us);
+        kv_cache_disk_cache_copy_pwrite_latency_metric->Report(&copy_tag, stats.pwrite_us);
+        kv_cache_disk_cache_copy_pread_latency_metric->Report(&copy_tag, stats.pread_us);
+    };
+
+    auto all_tag = make_copy_tag("all");
+    kv_cache_disk_cache_copy_qps_metric->Report(&all_tag, 1);
+    kv_cache_disk_cache_copy_latency_metric->Report(&all_tag, collector->latency_us);
+    report_pool("all", collector->all, collector->profile_metrics);
+    report_pool("complete", collector->complete, collector->profile_metrics);
+    report_pool("incomplete", collector->incomplete, collector->profile_metrics);
+    kv_cache_disk_cache_copy_complete_item_count_metric->Report(&all_tag, collector->complete.item_count);
+    kv_cache_disk_cache_copy_incomplete_item_count_metric->Report(&all_tag, collector->incomplete.item_count);
+    kv_cache_disk_cache_copy_complete_payload_bytes_metric->Report(&all_tag, collector->complete.payload_bytes);
+    kv_cache_disk_cache_copy_incomplete_payload_bytes_metric->Report(&all_tag, collector->incomplete.payload_bytes);
+    kv_cache_disk_cache_copy_complete_pwrite_bytes_metric->Report(&all_tag, collector->complete.pwrite_bytes);
+    kv_cache_disk_cache_copy_incomplete_pwrite_bytes_metric->Report(&all_tag, collector->incomplete.pwrite_bytes);
+    kv_cache_disk_cache_copy_payload_bytes_total_metric->Report(&all_tag, collector->payload_bytes_total);
+    kv_cache_disk_cache_copy_pwrite_bytes_total_metric->Report(&all_tag, collector->pwrite_bytes_total);
+    kv_cache_disk_cache_copy_pread_bytes_total_metric->Report(&all_tag, collector->pread_bytes_total);
+    kv_cache_disk_cache_copy_pwrite_attempt_bytes_total_metric->Report(&all_tag,
+                                                                       collector->pwrite_attempt_bytes_total);
+    kv_cache_disk_cache_copy_pread_attempt_bytes_total_metric->Report(&all_tag, collector->pread_attempt_bytes_total);
+    if (collector->profile_metrics) {
+        kv_cache_disk_cache_copy_staging_alloc_latency_metric->Report(&all_tag, collector->staging_alloc_us);
+    }
     if (collector->failed) {
-        kv_cache_disk_cache_copy_failed_qps_metric->Report(&copy_tag, 1);
+        kv_cache_disk_cache_copy_failed_qps_metric->Report(&all_tag, 1);
     }
 }
 
 void RtpLLMDiskCacheMetrics::report(const kmonitor::MetricsTags*           tags,
                                     RtpLLMDiskCacheStatusMetricsCollector* collector) {
-    REPORT_MUTABLE_METRIC(kv_cache_disk_cache_status_total_block_num_metric, collector->total_block_num);
-    REPORT_MUTABLE_METRIC(kv_cache_disk_cache_status_allocated_block_num_metric, collector->allocated_block_num);
-    REPORT_MUTABLE_METRIC(kv_cache_disk_cache_status_available_block_num_metric, collector->available_block_num);
-    REPORT_MUTABLE_METRIC(kv_cache_disk_cache_status_in_flight_block_num_metric, collector->in_flight_block_num);
-    REPORT_MUTABLE_METRIC(kv_cache_disk_cache_read_bytes_metric, collector->read_bytes);
-    REPORT_MUTABLE_METRIC(kv_cache_disk_cache_write_bytes_metric, collector->write_bytes);
-    REPORT_MUTABLE_METRIC(kv_cache_disk_cache_read_bandwidth_metric, collector->read_bandwidth);
-    REPORT_MUTABLE_METRIC(kv_cache_disk_cache_write_bandwidth_metric, collector->write_bandwidth);
+    kv_cache_disk_cache_status_total_block_num_metric->Report(tags, collector->total_block_num);
+    kv_cache_disk_cache_status_allocated_block_num_metric->Report(tags, collector->allocated_block_num);
+    kv_cache_disk_cache_status_available_block_num_metric->Report(tags, collector->available_block_num);
+    kv_cache_disk_cache_status_in_flight_block_num_metric->Report(tags, collector->in_flight_block_num);
+    kv_cache_disk_cache_read_bytes_metric->Report(tags, collector->read_bytes);
+    kv_cache_disk_cache_write_bytes_metric->Report(tags, collector->write_bytes);
+    kv_cache_disk_cache_read_bandwidth_metric->Report(tags, collector->read_bandwidth);
+    kv_cache_disk_cache_write_bandwidth_metric->Report(tags, collector->write_bandwidth);
 }
 
 #undef REPORT_NON_ZERO_MUTABLE_METRIC

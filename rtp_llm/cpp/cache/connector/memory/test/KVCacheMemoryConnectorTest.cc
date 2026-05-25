@@ -2,6 +2,7 @@
 
 #include <csignal>
 #include <chrono>
+#include <cstdlib>
 #include <cstdio>
 #include <dirent.h>
 #include <execinfo.h>
@@ -450,6 +451,30 @@ private:
         item->set_is_complete(true);
         item->set_backing_type(MemoryOperationRequestPB::MEMORY);
     }
+    MemoryOperationRequestPB::CopyItem makeDiskCopyItem(const std::vector<KVCacheMemoryConnector::LayerRegionSlot>& slots,
+                                                        int32_t                                                     disk_slot,
+                                                        BlockIdxType valid_gpu_block,
+                                                        bool         is_complete,
+                                                        size_t       valid_slot_index = 0) const {
+        MemoryOperationRequestPB::CopyItem item;
+        item.set_backing_type(MemoryOperationRequestPB::DISK);
+        item.set_mem_block(NULL_BLOCK_IDX);
+        item.set_disk_slot(disk_slot);
+        item.set_is_complete(is_complete);
+        for (size_t i = 0; i < slots.size(); ++i) {
+            item.add_gpu_blocks(i == valid_slot_index ? valid_gpu_block : NULL_BLOCK_IDX);
+        }
+        return item;
+    }
+    size_t countNonEmptyBuffers(const std::vector<BlockInfo>& infos) const {
+        size_t count = 0;
+        for (const auto& info : infos) {
+            if (info.addr != nullptr && info.size_bytes > 0) {
+                ++count;
+            }
+        }
+        return count;
+    }
     LayerBlockIds makeLayerBlockIds(const std::vector<std::vector<BlockIdxType>>& per_layer_block_indices,
                                     size_t                                        cache_keys_num) const {
         LayerBlockIds lbs;
@@ -880,6 +905,106 @@ TEST_F(KVCacheMemoryConnectorTest, validateCopyItemBacking_AcceptsUnsetDiskSlotF
         cache_config_, kv_cfg, makeParallelismConfig(), allocator_, server_addrs_, nullptr);
     ASSERT_TRUE(disk_conn->init());
     EXPECT_TRUE(disk_conn->validateCopyItemBacking(disk_item));
+}
+
+TEST_F(KVCacheMemoryConnectorTest, copyDiskItemStats_D2HCompleteAndH2DRead) {
+    DiskTempDir disk0;
+    auto        kv_cfg = makeDiskKvConfig({disk0.path()});
+    auto        conn   = std::make_shared<KVCacheMemoryConnector>(
+        cache_config_, kv_cfg, makeParallelismConfig(), allocator_, server_addrs_, nullptr);
+    ASSERT_TRUE(conn->init());
+    ASSERT_NE(conn->complete_disk_pool_, nullptr);
+
+    const auto slots = conn->layerRegionSlots();
+    ASSERT_FALSE(slots.empty());
+    auto slot = conn->complete_disk_pool_->malloc();
+    ASSERT_TRUE(slot.has_value());
+
+    constexpr BlockIdxType kGpuBlock = 2;
+    const auto&            valid_slot = slots[0];
+    const auto             gpu_bufs =
+        allocator_->convertIndexToBuffer(valid_slot.layer_id, valid_slot.region_name, kGpuBlock);
+    const auto expected_payload = sumBlockInfosBytes(gpu_bufs);
+    const auto expected_ranges  = countNonEmptyBuffers(gpu_bufs);
+    ASSERT_GT(expected_payload, 0u);
+    setBlockInfosContent(gpu_bufs, 'd');
+
+    const auto stride = conn->complete_disk_pool_->slotStrideBytes();
+    void*      raw    = nullptr;
+    ASSERT_EQ(::posix_memalign(&raw, 4096, stride), 0);
+    std::unique_ptr<void, decltype(&std::free)> staging(raw, &std::free);
+
+    auto item = makeDiskCopyItem(slots, *slot, kGpuBlock, /*is_complete=*/true);
+    KVCacheMemoryConnector::DiskCopyStats d2h_stats;
+    ASSERT_TRUE(conn->copyDiskItem(item, KVCacheMemoryConnector::CopyDirection::D2H, slots, raw, &d2h_stats));
+
+    const auto d2h_total = d2h_stats.total();
+    EXPECT_EQ(d2h_stats.complete.item_count, 1);
+    EXPECT_EQ(d2h_stats.incomplete.item_count, 0);
+    EXPECT_EQ(d2h_total.item_count, 1);
+    EXPECT_EQ(d2h_total.payload_bytes, static_cast<int64_t>(expected_payload));
+    EXPECT_EQ(d2h_total.range_count, static_cast<int64_t>(expected_ranges));
+    EXPECT_EQ(d2h_total.null_slot_count, static_cast<int64_t>(slots.size() - 1));
+    EXPECT_EQ(d2h_total.skipped_slot_count, 0);
+    EXPECT_EQ(d2h_total.slot_bytes, static_cast<int64_t>(stride));
+    EXPECT_EQ(d2h_total.pwrite_attempt_bytes, static_cast<int64_t>(stride));
+    EXPECT_EQ(d2h_total.pwrite_bytes, static_cast<int64_t>(stride));
+    EXPECT_EQ(d2h_total.pread_attempt_bytes, 0);
+    EXPECT_EQ(d2h_total.pread_bytes, 0);
+
+    setBlockInfosContent(gpu_bufs, 0);
+    KVCacheMemoryConnector::DiskCopyStats h2d_stats;
+    ASSERT_TRUE(conn->copyDiskItem(item, KVCacheMemoryConnector::CopyDirection::H2D, slots, raw, &h2d_stats));
+    verifyBlockInfosContent(gpu_bufs, 'd');
+
+    const auto h2d_total = h2d_stats.total();
+    EXPECT_EQ(h2d_stats.complete.item_count, 1);
+    EXPECT_EQ(h2d_stats.incomplete.item_count, 0);
+    EXPECT_EQ(h2d_total.payload_bytes, static_cast<int64_t>(expected_payload));
+    EXPECT_EQ(h2d_total.range_count, static_cast<int64_t>(expected_ranges));
+    EXPECT_EQ(h2d_total.null_slot_count, static_cast<int64_t>(slots.size() - 1));
+    EXPECT_EQ(h2d_total.pread_attempt_bytes, static_cast<int64_t>(stride));
+    EXPECT_EQ(h2d_total.pread_bytes, static_cast<int64_t>(stride));
+    EXPECT_EQ(h2d_total.pwrite_attempt_bytes, 0);
+    EXPECT_EQ(h2d_total.pwrite_bytes, 0);
+
+    conn->complete_disk_pool_->requestFree(*slot);
+}
+
+TEST_F(KVCacheMemoryConnectorTest, copyDiskItemStats_WriteFailureCountsAttemptOnly) {
+    DiskTempDir disk0;
+    auto        kv_cfg = makeDiskKvConfig({disk0.path()});
+    auto        conn   = std::make_shared<KVCacheMemoryConnector>(
+        cache_config_, kv_cfg, makeParallelismConfig(), allocator_, server_addrs_, nullptr);
+    ASSERT_TRUE(conn->init());
+    ASSERT_NE(conn->complete_disk_pool_, nullptr);
+
+    const auto slots = conn->layerRegionSlots();
+    ASSERT_FALSE(slots.empty());
+
+    constexpr BlockIdxType kGpuBlock = 3;
+    const auto&            valid_slot = slots[0];
+    const auto             gpu_bufs =
+        allocator_->convertIndexToBuffer(valid_slot.layer_id, valid_slot.region_name, kGpuBlock);
+    const auto expected_payload = sumBlockInfosBytes(gpu_bufs);
+    ASSERT_GT(expected_payload, 0u);
+    setBlockInfosContent(gpu_bufs, 'f');
+
+    const auto stride = conn->complete_disk_pool_->slotStrideBytes();
+    void*      raw    = nullptr;
+    ASSERT_EQ(::posix_memalign(&raw, 4096, stride), 0);
+    std::unique_ptr<void, decltype(&std::free)> staging(raw, &std::free);
+
+    const int32_t invalid_slot = static_cast<int32_t>(conn->complete_disk_pool_->totalSlots() + 1);
+    auto          item         = makeDiskCopyItem(slots, invalid_slot, kGpuBlock, /*is_complete=*/true);
+    KVCacheMemoryConnector::DiskCopyStats stats;
+    EXPECT_FALSE(conn->copyDiskItem(item, KVCacheMemoryConnector::CopyDirection::D2H, slots, raw, &stats));
+
+    const auto total = stats.total();
+    EXPECT_EQ(total.item_count, 1);
+    EXPECT_EQ(total.payload_bytes, static_cast<int64_t>(expected_payload));
+    EXPECT_EQ(total.pwrite_attempt_bytes, static_cast<int64_t>(stride));
+    EXPECT_EQ(total.pwrite_bytes, 0);
 }
 
 TEST_F(KVCacheMemoryConnectorTest, initBlockPool_Throw_WhenMemoryCacheSizeMbZero) {
@@ -2527,6 +2652,24 @@ protected:
         }
         return ctx->done();
     }
+    size_t sumBlockInfosBytes(const std::vector<BlockInfo>& infos) const {
+        size_t total = 0;
+        for (const auto& info : infos) {
+            if (info.addr != nullptr && info.size_bytes > 0) {
+                total += info.size_bytes;
+            }
+        }
+        return total;
+    }
+    size_t countNonEmptyBuffers(const std::vector<BlockInfo>& infos) const {
+        size_t count = 0;
+        for (const auto& info : infos) {
+            if (info.addr != nullptr && info.size_bytes > 0) {
+                ++count;
+            }
+        }
+        return count;
+    }
 
     KVCacheConfig                               kv_cache_config_;
     std::shared_ptr<KVCacheAllocator>           allocator_;
@@ -2717,14 +2860,14 @@ TEST_F(KVCacheMemoryConnectorDualPoolTest, PoolSizing_JointCalculation) {
     auto conn = createConnector(cfg);
     ASSERT_TRUE(conn->isDualPool());
 
-    // With linear_step=4: computed incomplete = 3 * computed complete.
-    // totalBlocksNum() = block_num - 1 (reserves block 0), so the exact ratio
-    // is (3*N - 1) / (N - 1) ≈ 3. Check within tolerance of the reserve offset.
+    // With linear_step=4: raw incomplete = raw complete * 3 + non_full_addition.
+    // totalBlocksNum() = raw block_num - 1 (reserves block 0).
     const auto complete_total   = conn->complete_pool_->totalBlocksNum();
     const auto incomplete_total = conn->incomplete_pool_->totalBlocksNum();
+    const auto addition         = static_cast<size_t>(kv_cache_config_.non_full_addition_kvcache_blocks);
     EXPECT_GT(complete_total, 0u);
     EXPECT_GT(incomplete_total, 0u);
-    EXPECT_NEAR(static_cast<double>(incomplete_total), static_cast<double>(complete_total) * 3.0, 3.0);
+    EXPECT_EQ(incomplete_total + 1, (complete_total + 1) * 3 + addition);
 }
 
 TEST_F(KVCacheMemoryConnectorDualPoolTest, InitDiskDualPools_MirrorsMemoryPoolRatioOnSameMount) {
@@ -2749,6 +2892,69 @@ TEST_F(KVCacheMemoryConnectorDualPoolTest, InitDiskDualPools_MirrorsMemoryPoolRa
     const auto incomplete_slots = conn->incomplete_disk_pool_->totalSlots();
     EXPECT_GT(complete_slots, 0u);
     EXPECT_EQ(incomplete_slots, complete_slots * 3);
+}
+
+TEST_F(KVCacheMemoryConnectorDualPoolTest, CopyDiskItemStats_IncompleteSkipsNonFullSlots) {
+    DiskTempDir disk0;
+    auto cfg = createHybridCacheConfig(/*layer_num=*/2, /*block_num=*/10, /*seq_size_per_block=*/8, /*linear_step=*/4);
+    allocator_ = std::make_shared<HybridTypeKVCacheAllocator>(cfg, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator_->init());
+
+    auto kv_cfg = makeDiskKvConfig({disk0.path()}, /*disk_size_mb=*/1);
+    auto conn   = createConnectorWithKvConfig(cfg, kv_cfg);
+    ASSERT_TRUE(conn->isDualPool());
+    ASSERT_NE(conn->incomplete_disk_pool_, nullptr);
+
+    const auto slots = conn->layerRegionSlots();
+    ASSERT_FALSE(slots.empty());
+    auto slot = conn->incomplete_disk_pool_->malloc();
+    ASSERT_TRUE(slot.has_value());
+
+    constexpr BlockIdxType kGpuBlock = 1;
+    MemoryOperationRequestPB::CopyItem item;
+    item.set_backing_type(MemoryOperationRequestPB::DISK);
+    item.set_mem_block(NULL_BLOCK_IDX);
+    item.set_disk_slot(*slot);
+    item.set_is_complete(false);
+    size_t expected_payload = 0;
+    size_t expected_ranges  = 0;
+    size_t skipped_slots    = 0;
+    for (const auto& layer_slot : slots) {
+        item.add_gpu_blocks(kGpuBlock);
+        if (!conn->isFullOnlySlot(layer_slot)) {
+            ++skipped_slots;
+            continue;
+        }
+        const auto gpu_bufs =
+            allocator_->convertIndexToBuffer(layer_slot.layer_id, layer_slot.region_name, kGpuBlock);
+        expected_payload += sumBlockInfosBytes(gpu_bufs);
+        expected_ranges += countNonEmptyBuffers(gpu_bufs);
+    }
+    ASSERT_GT(expected_payload, 0u);
+    ASSERT_GT(skipped_slots, 0u);
+
+    const auto stride = conn->incomplete_disk_pool_->slotStrideBytes();
+    void*      raw    = nullptr;
+    ASSERT_EQ(::posix_memalign(&raw, 4096, stride), 0);
+    std::unique_ptr<void, decltype(&std::free)> staging(raw, &std::free);
+
+    KVCacheMemoryConnector::DiskCopyStats stats;
+    ASSERT_TRUE(conn->copyDiskItem(item, KVCacheMemoryConnector::CopyDirection::D2H, slots, raw, &stats));
+
+    const auto total = stats.total();
+    EXPECT_EQ(stats.complete.item_count, 0);
+    EXPECT_EQ(stats.incomplete.item_count, 1);
+    EXPECT_EQ(total.item_count, 1);
+    EXPECT_EQ(total.payload_bytes, static_cast<int64_t>(expected_payload));
+    EXPECT_EQ(total.range_count, static_cast<int64_t>(expected_ranges));
+    EXPECT_EQ(total.skipped_slot_count, static_cast<int64_t>(skipped_slots));
+    EXPECT_EQ(total.null_slot_count, 0);
+    EXPECT_EQ(total.pwrite_attempt_bytes, static_cast<int64_t>(stride));
+    EXPECT_EQ(total.pwrite_bytes, static_cast<int64_t>(stride));
+    EXPECT_EQ(stats.incomplete.payload_bytes, static_cast<int64_t>(expected_payload));
+    EXPECT_EQ(stats.incomplete.pwrite_bytes, static_cast<int64_t>(stride));
+
+    conn->incomplete_disk_pool_->requestFree(*slot);
 }
 
 TEST_F(KVCacheMemoryConnectorDualPoolTest, AllocateOneBackingUsesMatchingDiskPoolWhenMemoryKindIsFull) {
@@ -2893,14 +3099,11 @@ TEST_F(KVCacheMemoryConnectorDualPoolTest, Init_AdditionIncreasesIncompletePoolS
         complete_with   = conn->complete_pool_->totalBlocksNum();
     }
 
-    // With addition, complete pool shrinks (budget reserved for addition)
+    // With addition, complete pool shrinks (budget reserved for addition).
     EXPECT_LT(complete_with, complete_without);
-    // Incomplete pool = complete_num * (step-1) + addition, so it gains addition
-    // but loses some from reduced complete_num. Net: incomplete increases.
-    EXPECT_GT(incomplete_with, incomplete_without);
-    // Verify the formula: incomplete = complete * (step-1) + addition
-    EXPECT_EQ(incomplete_with, complete_with * static_cast<size_t>(linear_step - 1) + addition);
-    EXPECT_EQ(incomplete_without, complete_without * static_cast<size_t>(linear_step - 1));
+    // Verify the raw formula. The visible totalBlocksNum() excludes reserved block 0.
+    EXPECT_EQ(incomplete_with + 1, (complete_with + 1) * static_cast<size_t>(linear_step - 1) + addition);
+    EXPECT_EQ(incomplete_without + 1, (complete_without + 1) * static_cast<size_t>(linear_step - 1));
 }
 
 }  // namespace rtp_llm::test

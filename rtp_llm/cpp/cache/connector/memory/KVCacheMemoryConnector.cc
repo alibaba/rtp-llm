@@ -31,11 +31,65 @@ bool kvCacheDebugLogEnabled() {
     return enabled;
 }
 
+int64_t diskCopyProfileSlowUs() {
+    static const int64_t slow_us = []() {
+        const char* value = std::getenv("MEMORY_CACHE_DISK_PROFILE_SLOW_US");
+        if (value == nullptr) {
+            return static_cast<int64_t>(-1);
+        }
+        return static_cast<int64_t>(std::strtoll(value, nullptr, 10));
+    }();
+    return slow_us;
+}
+
+bool diskCopyProfileMetricsEnabled() {
+    static const bool enabled = []() {
+        const char* value = std::getenv("MEMORY_CACHE_DISK_PROFILE_METRICS");
+        if (value == nullptr) {
+            return false;
+        }
+        return strcmp(value, "1") == 0 || strcasecmp(value, "true") == 0 || strcasecmp(value, "on") == 0
+               || strcasecmp(value, "yes") == 0;
+    }();
+    return enabled;
+}
+
 const char* backingTypeName(CacheBackingType backing_type) {
     return backing_type == CacheBackingType::MEMORY ? "MEMORY" : "DISK";
 }
 
 }  // namespace
+
+void KVCacheMemoryConnector::DiskCopyPoolStats::add(const DiskCopyPoolStats& other) {
+    item_count += other.item_count;
+    payload_bytes += other.payload_bytes;
+    slot_bytes += other.slot_bytes;
+    pwrite_bytes += other.pwrite_bytes;
+    pread_bytes += other.pread_bytes;
+    pwrite_attempt_bytes += other.pwrite_attempt_bytes;
+    pread_attempt_bytes += other.pread_attempt_bytes;
+    range_count += other.range_count;
+    null_slot_count += other.null_slot_count;
+    skipped_slot_count += other.skipped_slot_count;
+    memset_us += other.memset_us;
+    gpu_copy_us += other.gpu_copy_us;
+    pwrite_us += other.pwrite_us;
+    pread_us += other.pread_us;
+}
+
+KVCacheMemoryConnector::DiskCopyPoolStats KVCacheMemoryConnector::DiskCopyStats::total() const {
+    DiskCopyPoolStats stats = complete;
+    stats.add(incomplete);
+    return stats;
+}
+
+void KVCacheMemoryConnector::DiskCopyStats::add(CacheBlockKind kind, const DiskCopyPoolStats& other) {
+    if (kind == CacheBlockKind::COMPLETE) {
+        complete.add(other);
+    } else {
+        incomplete.add(other);
+    }
+}
 
 // When set on MultiCopyParams, execNoBlockCopy may try CUDA split scatter/gather (SplitKvCacheCopy; not on PPU).
 // This legacy SM-copy path is only used for non typed layer-region layouts.
@@ -1176,16 +1230,32 @@ bool KVCacheMemoryConnector::copyCache(const MemoryOperationRequestPB& request, 
     }
 
     if (has_disk_items) {
-        bool success = true;
+        bool          success = true;
+        DiskCopyStats disk_copy_stats;
+        int64_t       disk_copy_latency_us = 0;
+        bool          disk_copy_attempted  = false;
         if (has_memory_items) {
             success = copyMemoryItemsGeneric(request, copy_direction, slots);
         }
         if (success) {
-            success = copyDiskItems(request, copy_direction, slots);
+            disk_copy_attempted = true;
+            autil::ScopedTime2 disk_timer;
+            try {
+                success = copyDiskItems(request, copy_direction, slots, &disk_copy_stats);
+            } catch (...) {
+                disk_copy_latency_us = disk_timer.done_us();
+                response.set_success(false);
+                reportCopyMetrics(false, timer.done_us(), copy_direction);
+                reportDiskCopyMetrics(false, disk_copy_latency_us, copy_direction, &disk_copy_stats);
+                throw;
+            }
+            disk_copy_latency_us = disk_timer.done_us();
         }
         response.set_success(success);
         reportCopyMetrics(success, timer.done_us(), copy_direction);
-        reportDiskCopyMetrics(success, timer.done_us(), copy_direction);
+        if (disk_copy_attempted) {
+            reportDiskCopyMetrics(success, disk_copy_latency_us, copy_direction, &disk_copy_stats);
+        }
         return success;
     }
 
@@ -1274,9 +1344,11 @@ bool KVCacheMemoryConnector::copyMemoryItemsGeneric(const MemoryOperationRequest
 
 bool KVCacheMemoryConnector::copyDiskItems(const MemoryOperationRequestPB&     request,
                                            CopyDirection                       direction,
-                                           const std::vector<LayerRegionSlot>& slots) {
-    void*        raw_buffer   = nullptr;
-    const size_t stride_bytes = maxDiskSlotStrideBytes();
+                                           const std::vector<LayerRegionSlot>& slots,
+                                           DiskCopyStats*                      stats) {
+    void*             raw_buffer   = nullptr;
+    const size_t      stride_bytes = maxDiskSlotStrideBytes();
+    autil::ScopedTime2 alloc_timer;
     if (stride_bytes == 0) {
         return false;
     }
@@ -1284,16 +1356,94 @@ bool KVCacheMemoryConnector::copyDiskItems(const MemoryOperationRequestPB&     r
         RTP_LLM_LOG_WARNING("allocate disk staging buffer failed, bytes=%zu", stride_bytes);
         return false;
     }
+    if (stats) {
+        stats->staging_alloc_us += alloc_timer.done_us();
+    }
     std::unique_ptr<void, decltype(&std::free)> staging(raw_buffer, &std::free);
+    auto should_log_stats = [&]() {
+        if (!stats) {
+            return false;
+        }
+        if (kvCacheDebugLogEnabled()) {
+            return true;
+        }
+        const int64_t slow_us = diskCopyProfileSlowUs();
+        if (slow_us <= 0) {
+            return false;
+        }
+        const auto total = stats->total();
+        return stats->staging_alloc_us + total.memset_us + total.gpu_copy_us + total.pwrite_us + total.pread_us
+               >= slow_us;
+    };
+    auto log_stats = [&](const char* status) {
+        if (!stats) {
+            return;
+        }
+        const auto total = stats->total();
+        RTP_LLM_LOG_INFO("disk cache copy stats %s, direction=%s io_mode=%s items=%ld complete=%ld incomplete=%ld "
+                         "payload=%ld slot=%ld pwrite=%ld pread=%ld pwrite_attempt=%ld pread_attempt=%ld "
+                         "ranges=%ld null_slots=%ld skipped=%ld "
+                         "complete_payload=%ld incomplete_payload=%ld complete_pwrite=%ld incomplete_pwrite=%ld "
+                         "complete_pread=%ld incomplete_pread=%ld "
+                         "alloc_us=%ld memset_us=%ld gpu_copy_us=%ld pwrite_us=%ld pread_us=%ld "
+                         "complete_memset_us=%ld incomplete_memset_us=%ld complete_gpu_copy_us=%ld "
+                         "incomplete_gpu_copy_us=%ld complete_pwrite_us=%ld incomplete_pwrite_us=%ld "
+                         "complete_pread_us=%ld incomplete_pread_us=%ld linear_step=%d seq_size_per_block=%d "
+                         "world_rank=%ld local_rank=%ld",
+                         status,
+                         direction == CopyDirection::D2H ? "D2H" : "H2D",
+                         kv_cache_config_.memory_cache_disk_buffered_io ? "buffered" : "direct",
+                         total.item_count,
+                         stats->complete.item_count,
+                         stats->incomplete.item_count,
+                         total.payload_bytes,
+                         total.slot_bytes,
+                         total.pwrite_bytes,
+                         total.pread_bytes,
+                         total.pwrite_attempt_bytes,
+                         total.pread_attempt_bytes,
+                         total.range_count,
+                         total.null_slot_count,
+                         total.skipped_slot_count,
+                         stats->complete.payload_bytes,
+                         stats->incomplete.payload_bytes,
+                         stats->complete.pwrite_bytes,
+                         stats->incomplete.pwrite_bytes,
+                         stats->complete.pread_bytes,
+                         stats->incomplete.pread_bytes,
+                         stats->staging_alloc_us,
+                         total.memset_us,
+                         total.gpu_copy_us,
+                         total.pwrite_us,
+                         total.pread_us,
+                         stats->complete.memset_us,
+                         stats->incomplete.memset_us,
+                         stats->complete.gpu_copy_us,
+                         stats->incomplete.gpu_copy_us,
+                         stats->complete.pwrite_us,
+                         stats->incomplete.pwrite_us,
+                         stats->complete.pread_us,
+                         stats->incomplete.pread_us,
+                         static_cast<int>(cache_config_.linear_step),
+                         static_cast<int>(cache_config_.seq_size_per_block),
+                         parallelism_config_.world_rank,
+                         parallelism_config_.local_rank);
+    };
 
     for (int i = 0; i < request.copy_items_size(); ++i) {
         const auto& item = request.copy_items(i);
         if (item.backing_type() != MemoryOperationRequestPB::DISK) {
             continue;
         }
-        if (!copyDiskItem(item, direction, slots, raw_buffer)) {
+        if (!copyDiskItem(item, direction, slots, raw_buffer, stats)) {
+            if (should_log_stats()) {
+                log_stats("failed");
+            }
             return false;
         }
+    }
+    if (should_log_stats()) {
+        log_stats("success");
     }
     return true;
 }
@@ -1301,7 +1451,8 @@ bool KVCacheMemoryConnector::copyDiskItems(const MemoryOperationRequestPB&     r
 bool KVCacheMemoryConnector::copyDiskItem(const MemoryOperationRequestPB::CopyItem& item,
                                           CopyDirection                             direction,
                                           const std::vector<LayerRegionSlot>&       slots,
-                                          void*                                     raw_buffer) {
+                                          void*                                     raw_buffer,
+                                          DiskCopyStats*                            stats) {
     auto disk_pool = diskPoolFor(blockKindFromComplete(item.is_complete()));
     if (!disk_pool || item.gpu_blocks_size() != static_cast<int>(slots.size())) {
         return false;
@@ -1311,14 +1462,33 @@ bool KVCacheMemoryConnector::copyDiskItem(const MemoryOperationRequestPB::CopyIt
     if (raw_buffer == nullptr || stride_bytes == 0) {
         return false;
     }
+    DiskCopyPoolStats item_stats;
+    item_stats.item_count = 1;
+    item_stats.slot_bytes = static_cast<int64_t>(stride_bytes);
+    const auto item_kind = blockKindFromComplete(item.is_complete());
+    auto finish = [&]() {
+        if (stats) {
+            stats->add(item_kind, item_stats);
+        }
+    };
     if (direction == CopyDirection::D2H) {
+        autil::ScopedTime2 memset_timer;
         std::memset(raw_buffer, 0, stride_bytes);
+        item_stats.memset_us += memset_timer.done_us();
     }
 
     const auto disk_slot = item.disk_slot();
-    if (direction == CopyDirection::H2D && !disk_pool->read(disk_slot, raw_buffer, stride_bytes)) {
-        RTP_LLM_LOG_WARNING("disk cache read failed, slot=%d, bytes=%zu", disk_slot, stride_bytes);
-        return false;
+    if (direction == CopyDirection::H2D) {
+        autil::ScopedTime2 pread_timer;
+        item_stats.pread_attempt_bytes += static_cast<int64_t>(stride_bytes);
+        const bool         read_ok = disk_pool->read(disk_slot, raw_buffer, stride_bytes);
+        item_stats.pread_us += pread_timer.done_us();
+        if (!read_ok) {
+            finish();
+            RTP_LLM_LOG_WARNING("disk cache read failed, slot=%d, bytes=%zu", disk_slot, stride_bytes);
+            return false;
+        }
+        item_stats.pread_bytes += static_cast<int64_t>(stride_bytes);
     }
 
     BlockInfo disk_block;
@@ -1335,10 +1505,12 @@ bool KVCacheMemoryConnector::copyDiskItem(const MemoryOperationRequestPB::CopyIt
         const auto  gpu_block = static_cast<BlockIdxType>(item.gpu_blocks(static_cast<int>(slot_idx)));
 
         if (!item_is_complete && !isFullOnlySlot(slot)) {
+            item_stats.skipped_slot_count++;
             continue;
         }
 
         if (isNullBlockIdx(gpu_block)) {
+            item_stats.null_slot_count++;
             byte_off += slot.stride_bytes;
             continue;
         }
@@ -1347,7 +1519,12 @@ bool KVCacheMemoryConnector::copyDiskItem(const MemoryOperationRequestPB::CopyIt
         for (const auto& gpu_buffer : gpu_buffers) {
             const auto off = byte_off + within_layer_off;
             if (!appendCopyBytesToBuffers(disk_block, gpu_buffer, off, direction, dst_buffers, src_buffers)) {
+                finish();
                 return false;
+            }
+            if (gpu_buffer.addr != nullptr && gpu_buffer.size_bytes > 0) {
+                item_stats.payload_bytes += static_cast<int64_t>(gpu_buffer.size_bytes);
+                item_stats.range_count++;
             }
             within_layer_off += gpu_buffer.size_bytes;
         }
@@ -1355,14 +1532,31 @@ bool KVCacheMemoryConnector::copyDiskItem(const MemoryOperationRequestPB::CopyIt
     }
 
     if (!dst_buffers.empty()) {
+        autil::ScopedTime2 copy_timer;
         MultiCopyParams mc{dst_buffers, src_buffers};
-        execNoBlockCopy(mc);
+        try {
+            execNoBlockCopy(mc);
+        } catch (...) {
+            item_stats.gpu_copy_us += copy_timer.done_us();
+            finish();
+            throw;
+        }
+        item_stats.gpu_copy_us += copy_timer.done_us();
     }
 
-    if (direction == CopyDirection::D2H && !disk_pool->write(disk_slot, raw_buffer, stride_bytes)) {
-        RTP_LLM_LOG_WARNING("disk cache write failed, slot=%d, bytes=%zu", disk_slot, stride_bytes);
-        return false;
+    if (direction == CopyDirection::D2H) {
+        autil::ScopedTime2 pwrite_timer;
+        item_stats.pwrite_attempt_bytes += static_cast<int64_t>(stride_bytes);
+        const bool         write_ok = disk_pool->write(disk_slot, raw_buffer, stride_bytes);
+        item_stats.pwrite_us += pwrite_timer.done_us();
+        if (!write_ok) {
+            finish();
+            RTP_LLM_LOG_WARNING("disk cache write failed, slot=%d, bytes=%zu", disk_slot, stride_bytes);
+            return false;
+        }
+        item_stats.pwrite_bytes += static_cast<int64_t>(stride_bytes);
     }
+    finish();
     return true;
 }
 
@@ -2259,7 +2453,10 @@ void KVCacheMemoryConnector::reportDiskWriteMetrics(bool    success,
     metrics_reporter_->report<RtpLLMDiskCacheMetrics, RtpLLMDiskCacheWriteMetricsCollector>(nullptr, &collector);
 }
 
-void KVCacheMemoryConnector::reportDiskCopyMetrics(bool success, int64_t latency_us, CopyDirection direction) {
+void KVCacheMemoryConnector::reportDiskCopyMetrics(bool                 success,
+                                                   int64_t              latency_us,
+                                                   CopyDirection        direction,
+                                                   const DiskCopyStats* stats) {
     if (!metrics_reporter_ || !diskCacheEnabled()) {
         return;
     }
@@ -2267,12 +2464,59 @@ void KVCacheMemoryConnector::reportDiskCopyMetrics(bool success, int64_t latency
     collector.failed     = !success;
     collector.latency_us = latency_us;
     collector.from_gpu   = direction == CopyDirection::D2H;
+    collector.buffered_io = kv_cache_config_.memory_cache_disk_buffered_io;
+    collector.profile_metrics = diskCopyProfileMetricsEnabled();
+    if (stats != nullptr) {
+        auto assign_pool_stats = [](RtpLLMDiskCacheCopyPoolMetrics& dst, const DiskCopyPoolStats& src) {
+            dst.item_count           = src.item_count;
+            dst.payload_bytes        = src.payload_bytes;
+            dst.slot_bytes           = src.slot_bytes;
+            dst.pwrite_bytes         = src.pwrite_bytes;
+            dst.pread_bytes          = src.pread_bytes;
+            dst.pwrite_attempt_bytes = src.pwrite_attempt_bytes;
+            dst.pread_attempt_bytes  = src.pread_attempt_bytes;
+            dst.range_count          = src.range_count;
+            dst.null_slot_count      = src.null_slot_count;
+            dst.skipped_slot_count   = src.skipped_slot_count;
+            dst.memset_us            = src.memset_us;
+            dst.gpu_copy_us          = src.gpu_copy_us;
+            dst.pwrite_us            = src.pwrite_us;
+            dst.pread_us             = src.pread_us;
+        };
+        const auto total_stats = stats->total();
+        assign_pool_stats(collector.all, total_stats);
+        assign_pool_stats(collector.complete, stats->complete);
+        assign_pool_stats(collector.incomplete, stats->incomplete);
+        collector.staging_alloc_us = stats->staging_alloc_us;
+
+        collector.payload_bytes_total =
+            disk_copy_payload_bytes_total_.fetch_add(collector.all.payload_bytes, std::memory_order_relaxed)
+            + collector.all.payload_bytes;
+        collector.pwrite_bytes_total =
+            disk_copy_pwrite_bytes_total_.fetch_add(collector.all.pwrite_bytes, std::memory_order_relaxed)
+            + collector.all.pwrite_bytes;
+        collector.pread_bytes_total =
+            disk_copy_pread_bytes_total_.fetch_add(collector.all.pread_bytes, std::memory_order_relaxed)
+            + collector.all.pread_bytes;
+        collector.pwrite_attempt_bytes_total =
+            disk_copy_pwrite_attempt_bytes_total_.fetch_add(collector.all.pwrite_attempt_bytes,
+                                                            std::memory_order_relaxed)
+            + collector.all.pwrite_attempt_bytes;
+        collector.pread_attempt_bytes_total =
+            disk_copy_pread_attempt_bytes_total_.fetch_add(collector.all.pread_attempt_bytes,
+                                                           std::memory_order_relaxed)
+            + collector.all.pread_attempt_bytes;
+    }
     metrics_reporter_->report<RtpLLMDiskCacheMetrics, RtpLLMDiskCacheCopyMetricsCollector>(nullptr, &collector);
 }
 
 void KVCacheMemoryConnector::reportMetricsLoop() {
     size_t                                last_disk_read_bytes   = 0;
     size_t                                last_disk_write_bytes  = 0;
+    size_t                                last_complete_disk_read_bytes = 0;
+    size_t                                last_complete_disk_write_bytes = 0;
+    size_t                                last_incomplete_disk_read_bytes = 0;
+    size_t                                last_incomplete_disk_write_bytes = 0;
     std::chrono::steady_clock::time_point last_disk_metrics_time = std::chrono::steady_clock::now();
     while (!stop_.load()) {
         if (metrics_reporter_) {
@@ -2312,41 +2556,90 @@ void KVCacheMemoryConnector::reportMetricsLoop() {
             }
 
             if (complete_disk_pool_) {
-                const auto total_disk_slots = complete_disk_pool_->totalSlots()
-                                              + (incomplete_disk_pool_ ? incomplete_disk_pool_->totalSlots() : 0);
-                const auto free_disk_slots =
-                    complete_disk_pool_->freeSlots() + (incomplete_disk_pool_ ? incomplete_disk_pool_->freeSlots() : 0);
-                const auto available_disk_slots =
-                    complete_disk_pool_->availableSlots()
-                    + (incomplete_disk_pool_ ? incomplete_disk_pool_->availableSlots() : 0);
-                const auto read_bytes =
-                    complete_disk_pool_->readBytes() + (incomplete_disk_pool_ ? incomplete_disk_pool_->readBytes() : 0);
-                const auto write_bytes = complete_disk_pool_->writeBytes()
-                                         + (incomplete_disk_pool_ ? incomplete_disk_pool_->writeBytes() : 0);
+                const auto complete_total_slots = complete_disk_pool_->totalSlots();
+                const auto complete_free_slots  = complete_disk_pool_->freeSlots();
+                const auto complete_available_slots = complete_disk_pool_->availableSlots();
+                const auto complete_read_bytes      = complete_disk_pool_->readBytes();
+                const auto complete_write_bytes     = complete_disk_pool_->writeBytes();
+                const auto incomplete_total_slots =
+                    incomplete_disk_pool_ ? incomplete_disk_pool_->totalSlots() : static_cast<size_t>(0);
+                const auto incomplete_free_slots =
+                    incomplete_disk_pool_ ? incomplete_disk_pool_->freeSlots() : static_cast<size_t>(0);
+                const auto incomplete_available_slots =
+                    incomplete_disk_pool_ ? incomplete_disk_pool_->availableSlots() : static_cast<size_t>(0);
+                const auto incomplete_read_bytes =
+                    incomplete_disk_pool_ ? incomplete_disk_pool_->readBytes() : static_cast<size_t>(0);
+                const auto incomplete_write_bytes =
+                    incomplete_disk_pool_ ? incomplete_disk_pool_->writeBytes() : static_cast<size_t>(0);
+                const auto total_disk_slots     = complete_total_slots + incomplete_total_slots;
+                const auto free_disk_slots      = complete_free_slots + incomplete_free_slots;
+                const auto available_disk_slots = complete_available_slots + incomplete_available_slots;
+                const auto read_bytes           = complete_read_bytes + incomplete_read_bytes;
+                const auto write_bytes          = complete_write_bytes + incomplete_write_bytes;
                 const auto now = std::chrono::steady_clock::now();
                 const auto elapsed_us =
                     std::chrono::duration_cast<std::chrono::microseconds>(now - last_disk_metrics_time).count();
                 const double elapsed_sec = elapsed_us > 0 ? static_cast<double>(elapsed_us) / 1000000.0 : 1.0;
+                auto report_disk_status = [&](const char* pool_kind,
+                                              size_t      total_slots,
+                                              size_t      free_slots,
+                                              size_t      available_slots,
+                                              size_t      pool_read_bytes,
+                                              size_t      pool_write_bytes,
+                                              size_t&     last_read_bytes,
+                                              size_t&     last_write_bytes) {
+                    RtpLLMDiskCacheStatusMetricsCollector disk_collector;
+                    disk_collector.total_block_num     = total_slots;
+                    disk_collector.allocated_block_num = total_slots - free_slots;
+                    disk_collector.available_block_num = available_slots;
+                    disk_collector.in_flight_block_num = static_cast<int64_t>(total_slots - available_slots);
+                    disk_collector.read_bytes          = pool_read_bytes;
+                    disk_collector.write_bytes         = pool_write_bytes;
+                    const auto read_delta = pool_read_bytes >= last_read_bytes ?
+                                                pool_read_bytes - last_read_bytes :
+                                                static_cast<size_t>(0);
+                    const auto write_delta = pool_write_bytes >= last_write_bytes ?
+                                                 pool_write_bytes - last_write_bytes :
+                                                 static_cast<size_t>(0);
+                    disk_collector.read_bandwidth =
+                        static_cast<int64_t>(static_cast<double>(read_delta) / elapsed_sec);
+                    disk_collector.write_bandwidth =
+                        static_cast<int64_t>(static_cast<double>(write_delta) / elapsed_sec);
+                    last_read_bytes  = pool_read_bytes;
+                    last_write_bytes = pool_write_bytes;
 
-                RtpLLMDiskCacheStatusMetricsCollector disk_collector;
-                disk_collector.total_block_num     = total_disk_slots;
-                disk_collector.allocated_block_num = total_disk_slots - free_disk_slots;
-                disk_collector.available_block_num = available_disk_slots;
-                disk_collector.in_flight_block_num = static_cast<int64_t>(total_disk_slots - available_disk_slots);
-                disk_collector.read_bytes          = read_bytes;
-                disk_collector.write_bytes         = write_bytes;
-                const auto read_delta =
-                    read_bytes >= last_disk_read_bytes ? read_bytes - last_disk_read_bytes : static_cast<size_t>(0);
-                const auto write_delta =
-                    write_bytes >= last_disk_write_bytes ? write_bytes - last_disk_write_bytes : static_cast<size_t>(0);
-                disk_collector.read_bandwidth  = static_cast<int64_t>(static_cast<double>(read_delta) / elapsed_sec);
-                disk_collector.write_bandwidth = static_cast<int64_t>(static_cast<double>(write_delta) / elapsed_sec);
-                last_disk_read_bytes           = read_bytes;
-                last_disk_write_bytes          = write_bytes;
+                    kmonitor::MetricsTags pool_tags("pool_kind", pool_kind);
+                    metrics_reporter_->report<RtpLLMDiskCacheMetrics, RtpLLMDiskCacheStatusMetricsCollector>(
+                        &pool_tags, &disk_collector);
+                };
+
+                report_disk_status("all",
+                                   total_disk_slots,
+                                   free_disk_slots,
+                                   available_disk_slots,
+                                   read_bytes,
+                                   write_bytes,
+                                   last_disk_read_bytes,
+                                   last_disk_write_bytes);
+                report_disk_status("complete",
+                                   complete_total_slots,
+                                   complete_free_slots,
+                                   complete_available_slots,
+                                   complete_read_bytes,
+                                   complete_write_bytes,
+                                   last_complete_disk_read_bytes,
+                                   last_complete_disk_write_bytes);
+                if (incomplete_disk_pool_) {
+                    report_disk_status("incomplete",
+                                       incomplete_total_slots,
+                                       incomplete_free_slots,
+                                       incomplete_available_slots,
+                                       incomplete_read_bytes,
+                                       incomplete_write_bytes,
+                                       last_incomplete_disk_read_bytes,
+                                       last_incomplete_disk_write_bytes);
+                }
                 last_disk_metrics_time         = now;
-
-                metrics_reporter_->report<RtpLLMDiskCacheMetrics, RtpLLMDiskCacheStatusMetricsCollector>(
-                    nullptr, &disk_collector);
             }
         }
         std::this_thread::sleep_for(std::chrono::seconds(1));

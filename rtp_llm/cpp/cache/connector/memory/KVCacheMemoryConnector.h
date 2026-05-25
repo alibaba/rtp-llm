@@ -88,6 +88,32 @@ private:
         std::vector<CopyInfoPerKey> copy_infos;
         CopyDirection               direction;
     };
+    struct DiskCopyPoolStats {
+        int64_t item_count           = 0;
+        int64_t payload_bytes        = 0;
+        int64_t slot_bytes           = 0;
+        int64_t pwrite_bytes         = 0;
+        int64_t pread_bytes          = 0;
+        int64_t pwrite_attempt_bytes = 0;
+        int64_t pread_attempt_bytes  = 0;
+        int64_t range_count          = 0;
+        int64_t null_slot_count      = 0;
+        int64_t skipped_slot_count   = 0;
+        int64_t memset_us            = 0;
+        int64_t gpu_copy_us          = 0;
+        int64_t pwrite_us            = 0;
+        int64_t pread_us             = 0;
+
+        void add(const DiskCopyPoolStats& other);
+    };
+    struct DiskCopyStats {
+        DiskCopyPoolStats complete;
+        DiskCopyPoolStats incomplete;
+        int64_t           staging_alloc_us = 0;
+
+        DiskCopyPoolStats total() const;
+        void              add(CacheBlockKind kind, const DiskCopyPoolStats& other);
+    };
 
     std::shared_ptr<CopyPlan> buildCopyPlanForRead(const CacheKeysType&                cache_keys,
                                                    const LayerAttnBlockIds&            layer_attn_block_ids,
@@ -128,11 +154,13 @@ private:
                                                       std::vector<torch::Tensor>& src);
     bool                     copyDiskItems(const MemoryOperationRequestPB&     request,
                                            CopyDirection                       direction,
-                                           const std::vector<LayerRegionSlot>& slots);
+                                           const std::vector<LayerRegionSlot>& slots,
+                                           DiskCopyStats*                      stats);
     bool                     copyDiskItem(const MemoryOperationRequestPB::CopyItem& item,
                                           CopyDirection                             direction,
                                           const std::vector<LayerRegionSlot>&       slots,
-                                          void*                                     staging_buffer);
+                                          void*                                     staging_buffer,
+                                          DiskCopyStats*                            stats);
     bool                     copyMemoryItemsGeneric(const MemoryOperationRequestPB&     request,
                                                     CopyDirection                       direction,
                                                     const std::vector<LayerRegionSlot>& slots);
@@ -204,7 +232,7 @@ private:
     void reportDiskMatchMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t matched_block_num);
     void reportDiskReadMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t read_block_num);
     void reportDiskWriteMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t write_block_num);
-    void reportDiskCopyMetrics(bool success, int64_t latency_us, CopyDirection direction);
+    void reportDiskCopyMetrics(bool success, int64_t latency_us, CopyDirection direction, const DiskCopyStats* stats);
     void reportMetricsLoop();
 
 private:
@@ -233,6 +261,11 @@ private:
     // metrics reporter
     kmonitor::MetricsReporterPtr metrics_reporter_;
     std::shared_ptr<std::thread> metrics_reporter_thread_{nullptr};
+    std::atomic<int64_t>         disk_copy_payload_bytes_total_{0};
+    std::atomic<int64_t>         disk_copy_pwrite_bytes_total_{0};
+    std::atomic<int64_t>         disk_copy_pread_bytes_total_{0};
+    std::atomic<int64_t>         disk_copy_pwrite_attempt_bytes_total_{0};
+    std::atomic<int64_t>         disk_copy_pread_attempt_bytes_total_{0};
     std::atomic<bool>            stop_{false};
 };
 

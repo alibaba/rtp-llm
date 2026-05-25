@@ -1110,11 +1110,41 @@ public:
     int64_t write_token = 0;
 };
 
+struct RtpLLMDiskCacheCopyPoolMetrics {
+    int64_t item_count           = 0;
+    int64_t payload_bytes        = 0;
+    int64_t slot_bytes           = 0;
+    int64_t pwrite_bytes         = 0;
+    int64_t pread_bytes          = 0;
+    int64_t pwrite_attempt_bytes = 0;
+    int64_t pread_attempt_bytes  = 0;
+    int64_t range_count          = 0;
+    int64_t null_slot_count      = 0;
+    int64_t skipped_slot_count   = 0;
+    int64_t memset_us            = 0;
+    int64_t gpu_copy_us          = 0;
+    int64_t pwrite_us            = 0;
+    int64_t pread_us             = 0;
+};
+
 class RtpLLMDiskCacheCopyMetricsCollector final {
 public:
     bool    failed     = false;
     int64_t latency_us = 0;
     bool    from_gpu   = false;
+    bool    buffered_io = true;
+    bool    profile_metrics = false;
+
+    RtpLLMDiskCacheCopyPoolMetrics all;
+    RtpLLMDiskCacheCopyPoolMetrics complete;
+    RtpLLMDiskCacheCopyPoolMetrics incomplete;
+    int64_t                        staging_alloc_us = 0;
+
+    int64_t payload_bytes_total         = 0;
+    int64_t pwrite_bytes_total          = 0;
+    int64_t pread_bytes_total           = 0;
+    int64_t pwrite_attempt_bytes_total  = 0;
+    int64_t pread_attempt_bytes_total   = 0;
 };
 
 class RtpLLMDiskCacheStatusMetricsCollector final {
@@ -1163,6 +1193,32 @@ public:
     kmonitor::MutableMetric* kv_cache_disk_cache_copy_qps_metric        = nullptr;
     kmonitor::MutableMetric* kv_cache_disk_cache_copy_failed_qps_metric = nullptr;
     kmonitor::MutableMetric* kv_cache_disk_cache_copy_latency_metric    = nullptr;
+    kmonitor::MutableMetric* kv_cache_disk_cache_copy_item_count_metric = nullptr;
+    kmonitor::MutableMetric* kv_cache_disk_cache_copy_complete_item_count_metric = nullptr;
+    kmonitor::MutableMetric* kv_cache_disk_cache_copy_incomplete_item_count_metric = nullptr;
+    kmonitor::MutableMetric* kv_cache_disk_cache_copy_payload_bytes_metric = nullptr;
+    kmonitor::MutableMetric* kv_cache_disk_cache_copy_slot_bytes_metric = nullptr;
+    kmonitor::MutableMetric* kv_cache_disk_cache_copy_pwrite_bytes_metric = nullptr;
+    kmonitor::MutableMetric* kv_cache_disk_cache_copy_pread_bytes_metric = nullptr;
+    kmonitor::MutableMetric* kv_cache_disk_cache_copy_pwrite_attempt_bytes_metric = nullptr;
+    kmonitor::MutableMetric* kv_cache_disk_cache_copy_pread_attempt_bytes_metric = nullptr;
+    kmonitor::MutableMetric* kv_cache_disk_cache_copy_range_count_metric = nullptr;
+    kmonitor::MutableMetric* kv_cache_disk_cache_copy_null_slot_count_metric = nullptr;
+    kmonitor::MutableMetric* kv_cache_disk_cache_copy_skipped_slot_count_metric = nullptr;
+    kmonitor::MutableMetric* kv_cache_disk_cache_copy_staging_alloc_latency_metric = nullptr;
+    kmonitor::MutableMetric* kv_cache_disk_cache_copy_memset_latency_metric = nullptr;
+    kmonitor::MutableMetric* kv_cache_disk_cache_copy_gpu_copy_latency_metric = nullptr;
+    kmonitor::MutableMetric* kv_cache_disk_cache_copy_pwrite_latency_metric = nullptr;
+    kmonitor::MutableMetric* kv_cache_disk_cache_copy_pread_latency_metric = nullptr;
+    kmonitor::MutableMetric* kv_cache_disk_cache_copy_complete_payload_bytes_metric = nullptr;
+    kmonitor::MutableMetric* kv_cache_disk_cache_copy_incomplete_payload_bytes_metric = nullptr;
+    kmonitor::MutableMetric* kv_cache_disk_cache_copy_complete_pwrite_bytes_metric = nullptr;
+    kmonitor::MutableMetric* kv_cache_disk_cache_copy_incomplete_pwrite_bytes_metric = nullptr;
+    kmonitor::MutableMetric* kv_cache_disk_cache_copy_payload_bytes_total_metric = nullptr;
+    kmonitor::MutableMetric* kv_cache_disk_cache_copy_pwrite_bytes_total_metric = nullptr;
+    kmonitor::MutableMetric* kv_cache_disk_cache_copy_pread_bytes_total_metric = nullptr;
+    kmonitor::MutableMetric* kv_cache_disk_cache_copy_pwrite_attempt_bytes_total_metric = nullptr;
+    kmonitor::MutableMetric* kv_cache_disk_cache_copy_pread_attempt_bytes_total_metric = nullptr;
 
     kmonitor::MutableMetric* kv_cache_disk_cache_status_total_block_num_metric     = nullptr;
     kmonitor::MutableMetric* kv_cache_disk_cache_status_allocated_block_num_metric = nullptr;

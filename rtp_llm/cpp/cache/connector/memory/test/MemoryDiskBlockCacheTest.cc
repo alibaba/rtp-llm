@@ -147,6 +147,33 @@ TEST(MemoryDiskBlockCacheTest, InFlightEntryIsNotEvictable) {
     EXPECT_EQ(evicted->cache_key, 1);
 }
 
+TEST(MemoryDiskBlockCacheTest, ResidentEntryIsNotEvictable) {
+    MemoryDiskBlockCache cache;
+    auto resident = memoryItem(1, 10);
+    resident.is_resident = true;
+    ASSERT_TRUE(cache.putCommitted(resident).first);
+    ASSERT_TRUE(cache.putCommitted(diskItem(2, 20)).first);
+
+    auto evicted = cache.popOldestEvictable();
+    ASSERT_TRUE(evicted.has_value());
+    EXPECT_EQ(evicted->cache_key, 2);
+
+    EXPECT_FALSE(cache.popOldestEvictable().has_value());
+    EXPECT_TRUE(cache.contains(1));
+}
+
+TEST(MemoryDiskBlockCacheTest, KindAwarePopReturnsNullWhenOnlyOtherKindExists) {
+    MemoryDiskBlockCache cache;
+    ASSERT_TRUE(cache.putCommitted(memoryItem(1, 10, false)).first);
+    ASSERT_TRUE(cache.putCommitted(diskItem(2, 20, false)).first);
+
+    EXPECT_FALSE(cache.popOldestEvictable(CacheBlockKind::COMPLETE).has_value());
+    auto evicted = cache.popOldestEvictable(CacheBlockKind::INCOMPLETE);
+    ASSERT_TRUE(evicted.has_value());
+    EXPECT_FALSE(evicted->is_complete);
+    EXPECT_EQ(evicted->cache_key, 1);
+}
+
 TEST(MemoryDiskBlockCacheTest, MatchAndMarkInFlightPreventsEviction) {
     MemoryDiskBlockCache cache;
     ASSERT_TRUE(cache.putCommitted(memoryItem(1, 10)).first);
