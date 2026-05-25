@@ -76,13 +76,15 @@ void HybridTypeKVCacheAllocator::referenceValidBlocks(const BlockIndicesType& bl
     }
 }
 
-int HybridTypeKVCacheAllocator::reuseCache(const CacheKeysType& cache_keys, BatchKVCacheResource& kv_resource) {
+int HybridTypeKVCacheAllocator::reuseCache(const CacheKeysType&  cache_keys,
+                                           BatchKVCacheResource& kv_resource,
+                                           int64_t               current_batch_epoch) {
     // 1) Prefix match on all full-attn groups, take the shortest prefix.
     int                           min_full_reuse_blocks = static_cast<int>(cache_keys.size());
     std::vector<BlockIndicesType> full_matched_blocks(kv_cache_groups_.size());
 
     for (int gid : full_group_ids_) {
-        auto match_result     = kv_cache_groups_[static_cast<size_t>(gid)]->match(cache_keys);
+        auto match_result     = kv_cache_groups_[static_cast<size_t>(gid)]->match(cache_keys, current_batch_epoch);
         min_full_reuse_blocks = std::min(min_full_reuse_blocks, static_cast<int>(match_result.reuse_blocks));
         full_matched_blocks[static_cast<size_t>(gid)] = std::move(match_result.block_indices);
     }
@@ -97,7 +99,7 @@ int HybridTypeKVCacheAllocator::reuseCache(const CacheKeysType& cache_keys, Batc
         for (size_t i = 0; i < linear_group_ids_.size(); ++i) {
             const int gid      = linear_group_ids_[i];
             auto* linear_group = dynamic_cast<LinearKVCacheGroup*>(kv_cache_groups_[static_cast<size_t>(gid)].get());
-            auto  result       = linear_group->matchSingleKey(cache_keys[static_cast<size_t>(pos)]);
+            auto  result = linear_group->matchSingleKey(cache_keys[static_cast<size_t>(pos)], current_batch_epoch);
             if (result.block_indices.empty()) {
                 all_linear_matched = false;
                 break;
@@ -234,7 +236,7 @@ MallocResult HybridTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
         // Drop last key of partial block (same rationale as SingleType).
         CacheKeysType match_keys(cache_keys.begin(), cache_keys.empty() ? cache_keys.end() : cache_keys.end() - 1);
         auto          begin_us = currentTimeUs();
-        reuse_blocks           = reuseCache(match_keys, *kv_resource);
+        reuse_blocks           = reuseCache(match_keys, *kv_resource, malloc_info.epoch);
         match_cost_time_us     = currentTimeUs() - begin_us;
 
         // Reference reused blocks in batch 0 (filter NULL_BLOCK_IDX).

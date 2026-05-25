@@ -11,9 +11,7 @@ BlockCache::MatchResult BlockCache::match(CacheKeyType cache_key, int group_id, 
     CacheKeyGroupPair           key{cache_key, group_id};
     auto [success, item] = lru_cache_.get(key);
     if (success) {
-        if (current_batch_epoch == NO_EPOCH_FILTER
-            || item.epoch == 0
-            || (current_batch_epoch > 0 && item.epoch == current_batch_epoch)) {
+        if (current_batch_epoch == NO_EPOCH_FILTER || item.epoch == 0 || item.epoch == current_batch_epoch) {
             return {item.block_index};
         }
     }
@@ -30,10 +28,20 @@ BlockCache::PutResult BlockCache::put(CacheItem& item) {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(mu_);
     RTP_LLM_CHECK_WITH_INFO(!isNullBlockIdx(item.block_index), "put block id should not be null block");
+    RTP_LLM_CHECK_WITH_INFO(item.epoch >= 0,
+                            "CacheItem.epoch must be >= 0 (got %ld); negative values are reserved as query-side "
+                            "sentinels",
+                            item.epoch);
 
     CacheKeyGroupPair key{item.cache_key, item.group_id};
     auto [found, old_item] = lru_cache_.get(key);
     if (found) {
+        // Preserve privileged states: a resident entry must not be downgraded
+        // by a non-resident put, and a globally-visible (epoch=0) entry must
+        // not be narrowed to batch-specific (epoch>0) visibility.
+        if (old_item.is_resident && !item.is_resident) {
+            return {PutResult::Action::SKIPPED, NULL_BLOCK_IDX};
+        }
         if (old_item.epoch == 0 && item.epoch != 0) {
             return {PutResult::Action::SKIPPED, NULL_BLOCK_IDX};
         }
@@ -119,12 +127,20 @@ BlockCache::EvictResult BlockCache::selectAndEvict(size_t min_blocks) {
         }
     }
 
-    // Second pass: group non-resident items by cache_key in LRU order (back = least-recently-used)
+    // Second pass: group non-resident items by cache_key in LRU order (back = least-recently-used).
+    // Tiered eviction promotes selected entries to memory/remote cache via
+    // storeCacheAsync, where there is no epoch concept — exposing a batch-local
+    // (epoch>0) entry to that path would leak it into the global memory cache and
+    // break batch isolation. Skip epoch>0 entries here; they are only reclaimed
+    // through BlockCache::pop (Phase 1) which frees blocks locally without export.
     std::unordered_map<CacheKeyType, std::vector<CacheItem>> grouped_items;
     std::vector<CacheKeyType>                                lru_keys;
     for (auto it = lru_cache_.items().rbegin(); it != lru_cache_.items().rend(); ++it) {
         const auto& item = it->second;
         if (item.is_resident) {
+            continue;
+        }
+        if (item.epoch != GLOBAL_EPOCH) {
             continue;
         }
         auto [iter, inserted] = grouped_items.try_emplace(item.cache_key);

@@ -23,12 +23,12 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="控制是否启用显存Cache的重用机制, 默认开启。设置为 True 启用 , False 关闭",
     )
     kv_cache_group.add_argument(
-        "--enable_batch_cache_reuse",
-        env_name="ENABLE_BATCH_CACHE_REUSE",
-        bind_to=(kv_cache_config, "enable_batch_cache_reuse"),
+        "--enable_reuse_cache_in_batch",
+        env_name="ENABLE_REUSE_CACHE_IN_BATCH",
+        bind_to=(kv_cache_config, "enable_reuse_cache_in_batch"),
         type=str2bool,
         default=None,
-        help="控制是否启用 batch 内 query 间的 KV Cache 复用（epoch-based 隔离）。默认跟随 reuse_cache。显式设为 False 可在开启 reuse_cache 时关闭此功能。",
+        help="控制是否启用 batch 内 query 间的 KV Cache 复用（epoch-based 隔离）。默认关闭，只有显式设为 True 时生效。",
     )
     kv_cache_group.add_argument(
         "--reserve_block_ratio",

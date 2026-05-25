@@ -20,12 +20,23 @@ using CacheKeyGroupPair = std::pair<CacheKeyType, GroupIdType>;  // <cache_key, 
 
 class BlockCache {
 public:
+    // Epoch sentinels:
+    //   GLOBAL_EPOCH (0)    : applied to CacheItem.epoch — entry is globally visible.
+    //                         Also valid as a query epoch meaning "no batch identity,
+    //                         only see global entries".
+    //   NO_EPOCH_FILTER (-1): query-side ONLY — bypass filter, see everything (diagnostics
+    //                         and legacy callers without batch context).
+    // Batch-local epochs are positive integers (>= 1) assigned by the scheduler.
+    // CacheItem.epoch must always be >= 0.
+    static constexpr int64_t GLOBAL_EPOCH    = 0;
+    static constexpr int64_t NO_EPOCH_FILTER = -1;
+
     struct CacheItem {
         CacheKeyType cache_key;
         GroupIdType  group_id;
         BlockIdxType block_index;
         bool         is_resident = false;
-        int64_t      epoch       = 0;  // Epoch ID: 0 = global visible, >0 = batch-specific
+        int64_t      epoch       = GLOBAL_EPOCH;  // 0 = globally visible, >=1 = visible only within the same batch
         std::string  debugString() const {
             std::stringstream debug_string;
             debug_string << "CacheItem cache_key: " << cache_key << ", group_id: " << group_id
@@ -70,8 +81,11 @@ public:
 
     bool contains(CacheKeyType cache_key, int group_id = 0) const;
 
-    static constexpr int64_t NO_EPOCH_FILTER = -1;
-
+    // current_batch_epoch semantics:
+    //   NO_EPOCH_FILTER (-1): bypass filter, match every item regardless of epoch
+    //   GLOBAL_EPOCH    ( 0): no batch identity, match ONLY items with epoch == 0
+    //                         (this is what feature-OFF callers and non-batch-bound paths use)
+    //   >= 1                : same-batch caller — match global items OR items with the same epoch
     MatchResult match(CacheKeyType cache_key, int group_id = 0, int64_t current_batch_epoch = NO_EPOCH_FILTER);
 
     BlockIndicesType pop(int n);
@@ -95,7 +109,7 @@ private:
     size_t       seq_size_per_block_;
     LRUCacheType lru_cache_;
     // All public methods acquire mu_ before accessing lru_cache_.
-    // This mutex is required because BlockCache is shared across scheduler and stream threads.
+    // This mutex is required because BlockCache is shared across scheduler and rpc threads.
     mutable std::mutex mu_;
 };
 
