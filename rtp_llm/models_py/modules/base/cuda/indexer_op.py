@@ -606,7 +606,7 @@ class IndexerOp(nn.Module):
             fmha_params.expanded_seq_lens.device == logits.device
         ), "expanded_seq_lens must be on the same device as logits"
         assert (
-            attention_inputs.decode_cu_seqlens_d.device == logits.device
+            cu_seqlens_q is not None and cu_seqlens_q.device == logits.device
         ), "cu_seqlens must be on the same device as logits"
 
         topk_result = fast_topk_transform_fused(
