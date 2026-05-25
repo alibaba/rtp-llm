@@ -1,4 +1,3 @@
-import logging
 from typing import Callable
 
 import torch
@@ -12,16 +11,9 @@ from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs
 
-from rtp_llm.utils.flash_attn_utils import can_use_flash_attn
+from rtp_llm.utils.flash_attn_utils import get_default_vision_attention_impl
 
-default_attn_impl = "sdpa"
-try:
-    if can_use_flash_attn():
-        default_attn_impl = "flash_attention_2"
-except Exception as e:
-    logging.info(
-        f"initialize flash_attn failed, exception {e}, using sdpa attention in qwen3_5_moe vit"
-    )
+default_attn_impl = get_default_vision_attention_impl()
 
 
 class Qwen3_5MoeVisionConfig(PretrainedConfig):

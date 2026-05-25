@@ -1,5 +1,4 @@
 import json
-import logging
 import os
 from typing import Any, Dict, List, Optional
 
@@ -25,16 +24,9 @@ from rtp_llm.multimodal.multimodal_mixins.qwen3_vl_mixin import (
 from rtp_llm.multimodal.multimodal_util import get_bytes_io_from_url
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
 from rtp_llm.utils.base_model_datatypes import MMUrlType
-from rtp_llm.utils.flash_attn_utils import can_use_flash_attn
+from rtp_llm.utils.flash_attn_utils import get_default_vision_attention_impl
 
-default_attn_impl = "sdpa"
-try:
-    if can_use_flash_attn():
-        default_attn_impl = "flash_attention_2"
-except Exception as e:
-    logging.info(
-        f"initialize flash_attn failed, exception {e}, using sdpa attention in qwen3_5 vl vit"
-    )
+default_attn_impl = get_default_vision_attention_impl()
 
 
 class Qwen3_5MoeImageEmbedding(Qwen3_VLImageEmbedding):
@@ -156,6 +148,10 @@ class Qwen3_5MoeMixin(Qwen3_VLMixin):
         self.mm_related_params.vit_weights = Qwen3_5MoeVitWeight(
             {"vit": self.mm_part.visual}
         )
+
+    @classmethod
+    def _get_mm_module(cls, mm_related_params: VitParameters, vit_config: VitConfig):
+        return Qwen3_5MoeImageEmbedding(mm_related_params).visual
 
 
 register_multimodal_mixin(["qwen35_moe"], Qwen3_5MoeMixin)

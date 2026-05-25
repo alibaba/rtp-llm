@@ -1,5 +1,4 @@
 import json
-import logging
 import os
 from typing import Any, Dict, List, Optional
 
@@ -27,16 +26,9 @@ from rtp_llm.multimodal.multimodal_mixins.qwen2_5_vl.qwen2_5_vl_mixin import (
 from rtp_llm.multimodal.multimodal_util import get_bytes_io_from_url
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
 from rtp_llm.utils.base_model_datatypes import MMUrlType
-from rtp_llm.utils.flash_attn_utils import can_use_flash_attn
+from rtp_llm.utils.flash_attn_utils import get_default_vision_attention_impl
 
-default_attn_impl = "sdpa"
-try:
-    if can_use_flash_attn():
-        default_attn_impl = "flash_attention_2"
-except Exception as e:
-    logging.info(
-        f"initialize flash_attn failed, exception {e}, using sdpa attention in qwen2.5 vl vit"
-    )
+default_attn_impl = get_default_vision_attention_impl()
 
 if not hasattr(tl, "wrap_triton"):
 
