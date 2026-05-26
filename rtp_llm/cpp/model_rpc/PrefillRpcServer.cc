@@ -630,12 +630,16 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
 grpc::Status PrefillRpcServer::prepareAllocateResource(PrefillGenerateContext& prefill_context) {
     EXECUTE_STAGE_FUNC(getRpcConnection, prefill_context);
     EXECUTE_STAGE_FUNC(multimodalProcess, prefill_context);
+    reportPrefillRecentCacheKeyMetricsOnce(prefill_context);
     EXECUTE_STAGE_FUNC(remoteAllocateResource, prefill_context);
     return grpc::Status::OK;
 }
 
-void PrefillRpcServer::reportPrefillRecentCacheKeyMetrics(PrefillGenerateContext& prefill_context) {
+void PrefillRpcServer::reportPrefillRecentCacheKeyMetricsOnce(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
+    if (prefill_context.recent_cache_key_metric_reported) {
+        return;
+    }
     if (!prefillCacheHitMetricEnabled()) {
         return;
     }
@@ -645,6 +649,7 @@ void PrefillRpcServer::reportPrefillRecentCacheKeyMetrics(PrefillGenerateContext
     if (!prefill_context.generate_input) {
         return;
     }
+    prefill_context.recent_cache_key_metric_reported = true;
 
     const int seq_size_per_block = maga_init_params_.kv_cache_config.seq_size_per_block;
     auto      cache_keys = buildFullBlockCacheKeys(prefill_context.generate_input->input_ids, seq_size_per_block);
@@ -742,7 +747,6 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
                 max_retry_timeout_ms);
             return prefill_context.error_status;
         }
-        reportPrefillRecentCacheKeyMetrics(prefill_context);
         EXECUTE_STAGE_FUNC(enqueueRequest, prefill_context);
         EXECUTE_STAGE_FUNC(remoteLoadCacheStart, prefill_context);
         EXECUTE_STAGE_FUNC(pollLocalOutput, prefill_context);
