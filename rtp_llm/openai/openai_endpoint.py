@@ -441,7 +441,13 @@ class OpenaiEndpoint(object):
                     and response.choices
                     and any(c.finish_reason for c in response.choices)
                 )
-                if include_usage is True and has_finish_usage:
+                if include_usage is True:
+                    # Spec layout: only emit `usage` once, in a trailing
+                    # choices=[] chunk after the chunk that carried
+                    # finish_reason. Suppress `usage` on every other chunk
+                    # (the backend tags every chunk with running totals, but
+                    # spec-compliant clients only inspect the choices-empty
+                    # chunk).
                     yield ChatCompletionStreamResponse(
                         choices=response.choices,
                         usage=None,
@@ -450,13 +456,14 @@ class OpenaiEndpoint(object):
                         extra_outputs=response.extra_outputs,
                     )
                     debug_info_responded = True
-                    yield ChatCompletionStreamResponse(
-                        choices=[],
-                        usage=response.usage,
-                        aux_info=None,
-                        debug_info=None,
-                        extra_outputs=None,
-                    )
+                    if has_finish_usage:
+                        yield ChatCompletionStreamResponse(
+                            choices=[],
+                            usage=response.usage,
+                            aux_info=None,
+                            debug_info=None,
+                            extra_outputs=None,
+                        )
                 elif include_usage is False:
                     yield ChatCompletionStreamResponse(
                         choices=response.choices,

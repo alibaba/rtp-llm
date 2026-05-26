@@ -103,6 +103,39 @@ class TestIncludeUsageTrue(unittest.TestCase):
         self.assertEqual(len(out), 2)
         self.assertTrue(all(r.usage is None for r in out))
 
+    def test_mid_stream_usage_suppressed(self):
+        # The backend tags every chunk with running usage totals. When
+        # include_usage=True, only the trailing choices=[] chunk should
+        # carry `usage`; intermediate chunks must drop the field.
+        usage_running = UsageInfo(prompt_tokens=4, completion_tokens=1, total_tokens=5)
+        usage_final = UsageInfo(prompt_tokens=4, completion_tokens=8, total_tokens=12)
+        items = [
+            StreamResponseObject(
+                choices=[_make_choice(content="a")], usage=usage_running
+            ),
+            StreamResponseObject(
+                choices=[_make_choice(content="b", finish_reason=FinisheReason.stop)],
+                usage=usage_final,
+            ),
+        ]
+        gen = OpenaiEndpoint._complete_stream_response(
+            _gen_from(items),
+            debug_info=None,
+            tokenizer=None,
+            include_usage=True,
+        )
+        out = asyncio.run(_drain(gen))
+        self.assertEqual(len(out), 3)
+        # Mid-stream chunk has choices but no usage.
+        self.assertEqual(len(out[0].choices), 1)
+        self.assertIsNone(out[0].usage)
+        # Finish chunk has choices but no usage.
+        self.assertEqual(len(out[1].choices), 1)
+        self.assertIsNone(out[1].usage)
+        # Tail chunk has usage only.
+        self.assertEqual(out[2].choices, [])
+        self.assertEqual(out[2].usage.completion_tokens, 8)
+
 
 class TestIncludeUsageFalse(unittest.TestCase):
     """include_usage=False -> usage suppressed from the stream entirely."""
