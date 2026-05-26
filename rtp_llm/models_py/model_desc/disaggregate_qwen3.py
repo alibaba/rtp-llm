@@ -104,7 +104,9 @@ class DisaggregateModelBase(GptModelBase):
             i for i in range(ffn_disaggregate_config.attention_dp_size)
         ]
         self.attn_world_size = ffn_disaggregate_config.attention_dp_size
-        self.device = "cuda:" + str(parallelism_config.local_rank)
+        from rtp_llm.device.device_type import get_device_type, DeviceType
+        _dn = "npu" if get_device_type() == DeviceType.Ascend else ("hip" if get_device_type() == DeviceType.ROCm else "cuda")
+        self.device = _dn + ":" + str(parallelism_config.local_rank)
 
 
 class Qwen3GemmLayer(nn.Module):

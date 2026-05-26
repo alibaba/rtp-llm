@@ -21,6 +21,7 @@ cc_library(
         ],
         "@//:using_ascend": [
             "@local_config_ascend//ascend:ascend_headers",
+            "//rtp_llm/models_py/bindings/ascend:ascend_types_hdr",
         ],
         "//conditions:default": [],
     }),

@@ -35,7 +35,10 @@ def create_engine(
     Returns:
         BaseEngine instance
     """
-    torch.ops.rtp_llm.init_engine(alog_conf_path)
+    try:
+        torch.ops.rtp_llm.init_engine(alog_conf_path)
+    except (AttributeError, RuntimeError):
+        logging.warning("torch.ops.rtp_llm.init_engine not available (Ascend stub), skipping")
 
     if model.model_config.task_type == TaskType.LANGUAGE_MODEL:
         return LanguageCppEngine(

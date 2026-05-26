@@ -118,7 +118,8 @@ def local_rank_start(
 def _get_local_world_size(py_env_configs: PyEnvConfigs) -> int:
     """Calculate local world size based on environment and hardware"""
     world_size = py_env_configs.parallelism_config.world_size
-    local_world_size = min(torch.cuda.device_count(), world_size)
+    _dev_count = torch.npu.device_count() if (not torch.cuda.is_available()) else torch.cuda.device_count()
+    local_world_size = min(_dev_count, world_size)
     if "LOCAL_WORLD_SIZE" in os.environ:
         logging.info(
             f"multi rank starts with local world size specified in env: {os.environ['LOCAL_WORLD_SIZE']}"
@@ -127,7 +128,7 @@ def _get_local_world_size(py_env_configs: PyEnvConfigs) -> int:
     else:
         logging.info(
             f"multi rank starts with default local world size: {local_world_size}, "
-            f"device count = {torch.cuda.device_count()}, world size = {world_size}"
+            f"device count = {_dev_count}, world size = {world_size}"
         )
     os.environ["LOCAL_WORLD_SIZE"] = str(local_world_size)
     return local_world_size
@@ -139,7 +140,7 @@ def _get_cuda_device_list() -> List[str]:
     return (
         cuda_devices.split(",")
         if cuda_devices is not None
-        else [str(i) for i in range(torch.cuda.device_count())]
+        else [str(i) for i in range(_dev_count if "_dev_count" in dir() else (torch.npu.device_count() if not torch.cuda.is_available() else torch.cuda.device_count()))]
     )
 
 
@@ -435,16 +436,17 @@ def start_backend_server(
         return local_rank_start(global_controller, py_env_configs)
 
     pc = py_env_configs.parallelism_config
+    _dev_count = torch.npu.device_count() if (not torch.cuda.is_available()) else torch.cuda.device_count()
     if (
-        pc.world_size % torch.cuda.device_count() != 0
-        and pc.world_size > torch.cuda.device_count()
+        pc.world_size % _dev_count != 0
+        and pc.world_size > _dev_count
     ):
         raise Exception(
-            f"result: {pc.world_size % torch.cuda.device_count()} \
-            not support WORLD_SIZE {pc.world_size} for {torch.cuda.device_count()} local gpu"
+            f"result: {pc.world_size % _dev_count} \
+            not support WORLD_SIZE {pc.world_size} for {_dev_count} local device"
         )
 
-    if torch.cuda.device_count() > 1 and pc.world_size > 1:
+    if _dev_count > 1 and pc.world_size > 1:
         return multi_rank_start(global_controller, py_env_configs, pipe_writer)
     else:
         return local_rank_start(global_controller, py_env_configs, 0, pipe_writer)

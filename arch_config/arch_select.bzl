@@ -186,7 +186,7 @@ def select_py_bindings():
             "@rtp_llm//rtp_llm/models_py/bindings/rocm:rocm_bindings_register"
         ],
         "@rtp_llm//:using_ascend": [
-            "@rtp_llm//rtp_llm/models_py/bindings:dummy_register",
+            "@rtp_llm//rtp_llm/models_py/bindings/ascend:ascend_bindings_register",
         ],
         "//conditions:default": [
             "@rtp_llm//rtp_llm/models_py/bindings:dummy_register",

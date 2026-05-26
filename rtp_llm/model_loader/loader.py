@@ -439,6 +439,14 @@ class ModelLoader:
         if torch.cuda.is_available():
             torch.cuda.synchronize()
             torch.cuda.empty_cache()
+        else:
+            try:
+                import torch_npu
+                if torch.npu.is_available():
+                    torch.npu.synchronize()
+                    torch.npu.empty_cache()
+            except ImportError:
+                pass
 
     @staticmethod
     def force_clean_host_memory():

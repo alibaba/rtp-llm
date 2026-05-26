@@ -68,6 +68,7 @@ cc_library(
             "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
             "@havenask//aios/autil:stack_tracer",
             "//rtp_llm/models_py/bindings/ascend:ascend_host_utils",
+            "//rtp_llm/models_py/bindings/core:exec_ctx_ops",
         ],
         "//conditions:default": [],
     }) + select({

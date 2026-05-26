@@ -1,2 +1,5 @@
-// Phase 0: Empty Ascend registration file
-// Phase 5: Replace with actual operator registration
+#include "rtp_llm/models_py/bindings/RegisterOps.h"
+
+namespace rtp_llm {
+void registerPyModuleOps(pybind11::module& m) {}
+}

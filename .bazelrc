@@ -2,10 +2,10 @@ common --experimental_downloader_config=bazel/bazel_downloader.cfg
 fetch:downloader --experimental_remote_downloader=grpc://com.taobao.search.bazel.server:9092 --remote_cache=grpc://com.taobao.search.bazel.server:9092
 
 
-build --python_top=//:python310 --incompatible_use_python_toolchains=false # force use /opt/conda310/bin/python3
+build --python_top=//:python310 --incompatible_use_python_toolchains=false # force use /opt/conda310/envs/py310/bin/python3
 
 build --spawn_strategy=local # avoid nvcc conflicts
-build --action_env PYTHON_BIN_PATH="/opt/conda310/bin/python3"
+build --action_env PYTHON_BIN_PATH="/opt/conda310/envs/py310/bin/python3"
 build --cxxopt="-std=c++17" --copt="-DGTEST_USE_OWN_TR1_TUPLE=0" --copt="-DEIGEN_MAX_CPP_VER=11"
 build -c opt
 build --copt -O2
@@ -201,7 +201,7 @@ build:ascend --copt="-Wno-error=array-bounds"
 build:ascend --copt=-Wno-tautological-compare
 build:ascend --copt=-Wno-array-parameter
 build:ascend --copt=-Wno-unused-variable
-build:ascend --copt="-march=armv8-a+crc" # for crc instruction compile error
+build:ascend --copt="-march=armv8.2-a+fp16+dotprod+crc" # for crc instruction compile error
 build:ascend --action_env LD_LIBRARY_PATH="/usr/local/Ascend/ascend-toolkit/latest/lib64:/usr/local/Ascend/driver/lib64:/usr/local/Ascend/add-ons/"
 build:ascend --host_action_env LD_LIBRARY_PATH="/usr/local/Ascend/ascend-toolkit/latest/lib64:/usr/local/Ascend/driver/lib64:/usr/local/Ascend/add-ons/"
 

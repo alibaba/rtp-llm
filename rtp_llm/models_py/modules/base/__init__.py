@@ -24,6 +24,7 @@ if device_type == DeviceType.Ascend:
     from rtp_llm.models_py.modules.base.ascend.norm import (
         AddBiasResLayerNorm,
         FusedQKRMSNorm,
+        LayerNorm,
         QKRMSNorm,
         RMSNorm,
         RMSResNorm,
@@ -40,6 +41,7 @@ elif device_type == DeviceType.ROCm:
     from rtp_llm.models_py.modules.base.rocm.norm import (
         AddBiasResLayerNorm,
         FusedQKRMSNorm,
+        LayerNorm,
         QKRMSNorm,
         RMSNorm,
         RMSResNorm,
@@ -64,6 +66,7 @@ else:
         RMSNorm,
         RMSResNorm,
     )
+    from rtp_llm.models_py.modules.base.common.norm import LayerNorm
     from rtp_llm.models_py.modules.base.cuda.select_topk import (
         FakeBalanceExpert,
         GroupTopK,

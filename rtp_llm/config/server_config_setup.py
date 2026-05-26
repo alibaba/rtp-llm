@@ -203,7 +203,14 @@ def set_parallelism_config(
         if torch.cuda.is_available():
             n = min(torch.cuda.device_count(), world_size)
         else:
-            n = world_size
+            try:
+                import torch_npu
+                if torch.npu.is_available():
+                    n = min(torch.npu.device_count(), world_size)
+                else:
+                    n = world_size
+            except ImportError:
+                n = world_size
         parallelism_config.local_world_size = max(n, 1)
 
     # Resolve and validate parallelism configuration.
@@ -347,6 +354,14 @@ def setup_default_args(py_env_configs):
     if py_env_configs.kv_cache_config.seq_size_per_block == 0:
         py_env_configs.kv_cache_config.seq_size_per_block = 64
 
+    try:
+        import torch_npu
+        if torch.npu.is_available() and not py_env_configs.kv_cache_config.separate_kv_cache:
+            py_env_configs.kv_cache_config.separate_kv_cache = True
+            logging.info("set separate_kv_cache=True by default on Ascend NPU")
+    except ImportError:
+        pass
+
     # Set NCCL_P2P_DISABLE for RTX GPUs or when CUDA is not available
     # Frontend doesn't need this setting
     if py_env_configs.role_config.role_type != RoleType.FRONTEND:
@@ -443,6 +458,13 @@ def setup_cuda_device_and_accl_env(local_rank: int) -> None:
     """Apply CUDA device and ACCL env side effects (same as ParallelInfo.from_params)."""
     if torch.cuda.is_available():
         torch.cuda.set_device(local_rank)
+    else:
+        try:
+            import torch_npu
+            if torch.npu.is_available():
+                torch.npu.set_device(local_rank)
+        except ImportError:
+            pass
 
     if os.environ.get("ACCL_SELECT_PATH") == "1":
         select_port = str(local_rank % 2)

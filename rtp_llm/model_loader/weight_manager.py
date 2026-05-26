@@ -112,9 +112,9 @@ class WeightManager:
         self._weights: ModelWeights = weight
         self._weights_loader: ModelLoader = model_weights_loader
         self._weight_module = self._weights_loader._model_weights_info
-        self._working_stream: torch.cuda.Stream = torch.cuda.Stream(
-            device=self._device,
-        )
+        from rtp_llm.device.device_type import get_device_type, DeviceType
+        _StreamCls = torch.npu.Stream if get_device_type() == DeviceType.Ascend else torch.cuda.Stream
+        self._working_stream = _StreamCls(device=self._device)
         # TODO: Consider the actual need for this lock. If updates are always
         # serialized via the server's request handling, a per-update lock might
         # be redundant or require finer-grained locking within _weights.update_...
@@ -211,7 +211,9 @@ class WeightManager:
         logging.info(
             f"update weight request: {name}, shape: {tensor.shape}, device: {tensor.device}, dtype: {tensor.dtype}"
         )
-        with torch.cuda.stream(self._working_stream):
+        from rtp_llm.device.device_type import get_device_type, DeviceType
+        _stream_ctx = torch.npu.stream if get_device_type() == DeviceType.Ascend else torch.cuda.stream
+        with _stream_ctx(self._working_stream):
             config = self._weights_loader.get_load_config()
             if "layers" in name:
                 # This is a layer-specific weight

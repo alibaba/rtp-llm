@@ -126,7 +126,14 @@ class BaseModel(object):
 
     def _get_device_str(self) -> str:
         """Get device string from parallelism_config."""
-        return f"cuda:{self.parallelism_config.local_rank}"
+        from rtp_llm.device.device_type import get_device_type, DeviceType
+        dt = get_device_type()
+        if dt == DeviceType.Ascend:
+            return f"npu:{self.parallelism_config.local_rank}"
+        elif dt == DeviceType.ROCm:
+            return f"hip:{self.parallelism_config.local_rank}"
+        else:
+            return f"cuda:{self.parallelism_config.local_rank}"
 
     @timer_wrapper(description="load model")
     def load(self, skip_python_model: bool = False):

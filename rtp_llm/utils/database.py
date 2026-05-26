@@ -282,7 +282,9 @@ class CkptDatabase(BaseDatabase):
                 [file.file_name for file in self.pretrain_file_list]
             )
             if device == "cuda":
-                device = f"cuda:{pg.rank()}"
+                from rtp_llm.device.device_type import get_device_type, DeviceType
+                _dn = "npu" if get_device_type() == DeviceType.Ascend else ("hip" if get_device_type() == DeviceType.ROCm else "cuda")
+                device = f"{_dn}:{pg.rank()}"
                 logging.debug(f"origin device is cuda, set to {device}")
 
             loader_kwargs: Dict[str, Any] = dict(
