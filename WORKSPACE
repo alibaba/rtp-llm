@@ -24,7 +24,7 @@ load("@bazel_tools//tools/build_defs/repo:utils.bzl", "maybe")
 maybe(
     new_git_repository,
     name = "xgrammar",
-    remote = "https://github.com/mlc-ai/xgrammar.git",
+    remote = "git@gitlab.alibaba-inc.com:foundation_models/xgrammar_github.git",
     commit = "62e13551b9b63251114894c5ee638564b160dd48",  # v0.1.32
     init_submodules = False,
     patch_cmds = [
