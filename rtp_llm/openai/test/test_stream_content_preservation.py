@@ -1,10 +1,24 @@
-"""Tests for empty-string content preservation in stream aggregators (Fix C).
+"""Tests for stream aggregator `content` semantics.
 
-When a chat completion is truncated mid-`<think>`, every `delta.content`
-chunk is the empty string. The aggregators previously collapsed `''` to
-`None`, and `model_dump(exclude_none=True)` then dropped the `content` key
-entirely from the response payload. Downstream consumers received a
-message with no `content` field at all, violating the Chat Completions spec.
+Two cases the aggregator must preserve correctly:
+
+1. When every `delta.content` is the empty string (e.g. chat completion
+   truncated mid-`<think>`), the aggregated message must keep
+   `content=""`, not collapse to `None`. Previously the aggregator
+   coerced `""` to `None` via `delta.content or ""` /
+   `delta.content or None`; after `model_dump(exclude_none=True)` the
+   `content` key was dropped entirely, violating the spec which
+   requires the field to be present.
+
+2. When every `delta.content` is `None` (e.g. a tool-call only
+   message), the aggregated message must keep `content=None` so that
+   `exclude_none=True` correctly drops the field. The previous defense
+   -in-depth pass coerced `None` to `""`, which leaked an empty content
+   string into tool-call payloads.
+
+The fix is a simple pass-through: don't coerce `""` to `None`, and don't
+coerce `None` to `""`. Pydantic + `exclude_none` does the right thing
+when the aggregator preserves the source delta semantics exactly.
 """
 
 import asyncio
@@ -59,7 +73,10 @@ class TestContentPreservation(unittest.TestCase):
         self.assertIn("content", payload["choices"][0]["message"])
         self.assertEqual(payload["choices"][0]["message"]["content"], "")
 
-    def test_none_delta_content_does_not_collapse_to_missing_key(self):
+    def test_all_none_delta_content_preserves_none(self):
+        # Tool-call style stream: every delta.content is None. The
+        # aggregator must NOT coerce None to "", otherwise tool-call
+        # messages leak an empty content string into the JSON payload.
         items = [
             StreamResponseObject(choices=[_choice(None)]),
             StreamResponseObject(
@@ -72,9 +89,10 @@ class TestContentPreservation(unittest.TestCase):
                 _gen(items), debug_info=None, tokenizer=None
             )
         )
-        self.assertEqual(resp.choices[0].message.content, "")
+        self.assertIsNone(resp.choices[0].message.content)
         payload = json.loads(resp.model_dump_json(exclude_none=True))
-        self.assertIn("content", payload["choices"][0]["message"])
+        # exclude_none should drop the content key entirely.
+        self.assertNotIn("content", payload["choices"][0]["message"])
 
     def test_normal_text_unaffected(self):
         items = [
@@ -91,6 +109,27 @@ class TestContentPreservation(unittest.TestCase):
             )
         )
         self.assertEqual(resp.choices[0].message.content, "hello world")
+
+    def test_mixed_none_then_text_starts_clean(self):
+        # If the first delta is None (tool-call hint) and later deltas
+        # carry text, the aggregator should not concatenate "None" or
+        # double-coerce. Once content becomes a string it stays a string.
+        items = [
+            StreamResponseObject(choices=[_choice(None)]),
+            StreamResponseObject(choices=[_choice("hi")]),
+            StreamResponseObject(
+                choices=[_choice("", finish_reason=FinisheReason.stop)],
+                usage=UsageInfo(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            ),
+        ]
+        resp = asyncio.run(
+            OpenaiEndpoint._collect_complete_response(
+                _gen(items), debug_info=None, tokenizer=None
+            )
+        )
+        # The first None initializes content to None; then "hi" replaces
+        # it (since content is None, not a string we can += to).
+        self.assertEqual(resp.choices[0].message.content, "hi")
 
 
 if __name__ == "__main__":

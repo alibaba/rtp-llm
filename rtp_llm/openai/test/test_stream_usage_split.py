@@ -1,12 +1,20 @@
-"""Tests for OpenAI streaming SSE chunk split (Fix A/B).
+"""Tests for OpenAI streaming `stream_options.include_usage` gating.
 
-Covers:
-- `OpenaiEndpoint._complete_stream_response` emits the trailing usage payload
-  in its own `choices=[]` chunk after the chunk that carried `finish_reason`,
-  matching the OpenAI Chat Completions streaming protocol with
-  `stream_options.include_usage=true`.
-- `OpenaiEndpoint._collect_complete_response` correctly aggregates the
-  resulting two-chunk tail (usage from the choices-empty chunk is captured).
+`OpenaiEndpoint._complete_stream_response` follows the OpenAI Chat
+Completions streaming protocol:
+
+  * `include_usage=True`  -> emit the trailing `usage` payload in its own
+    `choices=[]` chunk after the chunk that carried `finish_reason`.
+    Spec-compliant clients (vllm bench, OpenAI Python SDK) only inspect
+    `usage` on choices-empty chunks, so bundling drops the payload.
+  * `include_usage=False` -> suppress `usage` from the stream entirely.
+  * `include_usage=None`  -> rtp-llm legacy behavior: bundle `usage` on
+    the chunk that carried `finish_reason`. Preserved for backward
+    compatibility with internal consumers that predate the spec layout.
+
+`OpenaiEndpoint._collect_complete_response` must also tolerate the
+split layout so the non-streaming aggregator can still recover `usage`
+from a `choices=[]` chunk.
 """
 
 import asyncio
@@ -48,8 +56,8 @@ async def _gen_from(items):
         yield it
 
 
-class TestStreamUsageSplit(unittest.TestCase):
-    """Fix A: split final SSE chunk into choices-only + usage-only chunks."""
+class TestIncludeUsageTrue(unittest.TestCase):
+    """include_usage=True -> split the finish chunk and usage chunk."""
 
     def test_finish_with_usage_emits_two_chunks(self):
         usage = UsageInfo(prompt_tokens=4, completion_tokens=8, total_tokens=12)
@@ -61,7 +69,10 @@ class TestStreamUsageSplit(unittest.TestCase):
             ),
         ]
         gen = OpenaiEndpoint._complete_stream_response(
-            _gen_from(items), debug_info=None, tokenizer=None
+            _gen_from(items),
+            debug_info=None,
+            tokenizer=None,
+            include_usage=True,
         )
         out = asyncio.run(_drain(gen))
 
@@ -83,17 +94,48 @@ class TestStreamUsageSplit(unittest.TestCase):
             StreamResponseObject(choices=[_make_choice(content="b")]),
         ]
         gen = OpenaiEndpoint._complete_stream_response(
-            _gen_from(items), debug_info=None, tokenizer=None
+            _gen_from(items),
+            debug_info=None,
+            tokenizer=None,
+            include_usage=True,
         )
         out = asyncio.run(_drain(gen))
         self.assertEqual(len(out), 2)
         self.assertTrue(all(r.usage is None for r in out))
 
-    def test_usage_without_finish_does_not_split(self):
-        usage = UsageInfo(prompt_tokens=1, completion_tokens=1, total_tokens=2)
+
+class TestIncludeUsageFalse(unittest.TestCase):
+    """include_usage=False -> usage suppressed from the stream entirely."""
+
+    def test_finish_chunk_has_no_usage(self):
+        usage = UsageInfo(prompt_tokens=4, completion_tokens=8, total_tokens=12)
         items = [
+            StreamResponseObject(choices=[_make_choice(content="hi")]),
             StreamResponseObject(
-                choices=[_make_choice(content="x")],
+                choices=[_make_choice(content="", finish_reason=FinisheReason.stop)],
+                usage=usage,
+            ),
+        ]
+        gen = OpenaiEndpoint._complete_stream_response(
+            _gen_from(items),
+            debug_info=None,
+            tokenizer=None,
+            include_usage=False,
+        )
+        out = asyncio.run(_drain(gen))
+        self.assertEqual(len(out), 2)
+        self.assertTrue(all(r.usage is None for r in out))
+
+
+class TestIncludeUsageDefault(unittest.TestCase):
+    """include_usage=None (default) -> legacy bundled behavior."""
+
+    def test_usage_bundled_on_finish_chunk(self):
+        usage = UsageInfo(prompt_tokens=4, completion_tokens=8, total_tokens=12)
+        items = [
+            StreamResponseObject(choices=[_make_choice(content="hi")]),
+            StreamResponseObject(
+                choices=[_make_choice(content="", finish_reason=FinisheReason.stop)],
                 usage=usage,
             ),
         ]
@@ -101,13 +143,18 @@ class TestStreamUsageSplit(unittest.TestCase):
             _gen_from(items), debug_info=None, tokenizer=None
         )
         out = asyncio.run(_drain(gen))
-        self.assertEqual(len(out), 1)
-        self.assertIsNotNone(out[0].usage)
+        # Two chunks (no split), usage rides on the finish chunk.
+        self.assertEqual(len(out), 2)
+        self.assertIsNone(out[0].usage)
+        self.assertIsNotNone(out[1].usage)
+        self.assertEqual(out[1].choices[0].finish_reason, FinisheReason.stop)
+        self.assertEqual(out[1].usage.completion_tokens, 8)
 
 
 class TestCollectCompleteResponseHandlesEmptyChoices(unittest.TestCase):
-    """Fix B: non-streaming aggregator must handle usage-only chunks
-    (choices=[]). Usage from such a chunk must still be captured."""
+    """`_collect_complete_response` must capture `usage` from a
+    choices-empty chunk so that downstream callers see the split-layout
+    output produced when `include_usage=True`."""
 
     def test_aggregates_split_tail(self):
         usage = UsageInfo(prompt_tokens=3, completion_tokens=5, total_tokens=8)

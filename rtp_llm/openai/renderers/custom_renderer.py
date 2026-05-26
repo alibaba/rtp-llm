@@ -961,7 +961,27 @@ class CustomChatRenderer:
         # Bind min_new_tokens for this request's asyncio Task scope. The value
         # is read by _check_finish_reason; using a ContextVar avoids touching
         # the _update_single_status signature (which subclasses override).
-        _MIN_NEW_TOKENS_CV.set(int(generate_config.min_new_tokens or 0))
+        # GenerateConfig.min_new_tokens is Union[List[int], int]; collapse a
+        # list to its max so the floor still applies for variable-N requests.
+        mnt = generate_config.min_new_tokens
+        if isinstance(mnt, list):
+            mnt = max(mnt) if mnt else 0
+        _min_new_tokens_token = _MIN_NEW_TOKENS_CV.set(int(mnt or 0))
+        try:
+            yield_gen = self._render_response_stream_body(
+                output_generator, request, generate_config
+            )
+            async for resp in yield_gen:
+                yield resp
+        finally:
+            _MIN_NEW_TOKENS_CV.reset(_min_new_tokens_token)
+
+    async def _render_response_stream_body(
+        self,
+        output_generator: AsyncGenerator[GenerateOutputs, None],
+        request: ChatCompletionRequest,
+        generate_config: GenerateConfig,
+    ) -> AsyncGenerator[StreamResponseObject, None]:
         stop_word_slice_list = get_stop_word_slices(generate_config.stop_words_str)
         nums_output = request.n if request.n is not None else 1
         # FIXME(zhangjianning.zjn): for variable width beam search,
@@ -1474,7 +1494,7 @@ class CustomChatRenderer:
                                 index=i,
                                 message=ChatMessage(
                                     role=choice.delta.role or RoleEnum.assistant,
-                                    content=content if content is not None else "",
+                                    content=content,
                                     reasoning_content=reasoning_content or None,
                                     function_call=choice.delta.function_call or None,
                                 ),
@@ -1489,14 +1509,11 @@ class CustomChatRenderer:
                     )
             else:
                 for i in range(len(all_choices)):
+                    delta_content = response.choices[i].delta.content
                     if all_choices[i].message.content is None:
-                        all_choices[i].message.content = (
-                            response.choices[i].delta.content or ""
-                        )
-                    else:
-                        all_choices[i].message.content += (
-                            response.choices[i].delta.content or ""
-                        )
+                        all_choices[i].message.content = delta_content
+                    elif delta_content is not None:
+                        all_choices[i].message.content += delta_content
                     content, reasoning_content = split_think_tag(
                         all_choices[i].message.content
                     )
@@ -1526,9 +1543,6 @@ class CustomChatRenderer:
         if usage == None:
             logging.warning(f"No usage returned from stream response. use empty value.")
             usage = UsageInfo(prompt_tokens=0, total_tokens=0, completion_tokens=0)
-        for choice in all_choices:
-            if choice.message.content is None:
-                choice.message.content = ""
         chat_response = ChatCompletionResponse(
             choices=all_choices,
             usage=usage,

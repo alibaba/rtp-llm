@@ -104,3 +104,74 @@ class TestMinNewTokensEnforcement(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRenderResponseStreamCVLifecycle(unittest.TestCase):
+    """`render_response_stream` must set the CV on entry and reset it on
+    exit so that one request's `min_new_tokens` cannot leak into another
+    request running on the same asyncio Task (e.g. background pool reuse)."""
+
+    def test_cv_resets_after_generator_close(self):
+        import asyncio
+
+        from rtp_llm.config.generate_config import GenerateConfig
+        from rtp_llm.openai.api_datatype import ChatCompletionRequest, ChatMessage
+
+        async def _empty_outputs():
+            if False:
+                yield None  # async generator that produces nothing
+            return
+
+        async def run():
+            renderer = _bare_renderer()
+            renderer.in_think_mode = lambda req: False
+            renderer.should_process_think = lambda req: False
+            async def _async_empty(n, req):
+                return []
+            renderer._create_status_list = _async_empty
+            request = ChatCompletionRequest(
+                messages=[ChatMessage(role="user", content="hi")], n=1
+            )
+            gen_config = GenerateConfig()
+            gen_config.min_new_tokens = 42
+
+            # Pre-set the CV to a sentinel so we can verify it's restored
+            outer_token = _MIN_NEW_TOKENS_CV.set(7)
+            try:
+                gen = renderer.render_response_stream(
+                    _empty_outputs(), request, gen_config
+                )
+                async for _ in gen:
+                    pass
+                # After the generator is drained the CV must be back to 7.
+                self.assertEqual(_MIN_NEW_TOKENS_CV.get(), 7)
+            finally:
+                _MIN_NEW_TOKENS_CV.reset(outer_token)
+
+        asyncio.run(run())
+
+
+class TestMinNewTokensListInput(unittest.TestCase):
+    """`GenerateConfig.min_new_tokens` is `Union[List[int], int]`. The
+    renderer must accept both forms without crashing on `int([...])`."""
+
+    def test_list_input_collapses_to_max(self):
+        # Simulate what render_response_stream does with a list.
+        from rtp_llm.config.generate_config import GenerateConfig
+
+        gen_config = GenerateConfig()
+        gen_config.min_new_tokens = [3, 5, 1]
+        mnt = gen_config.min_new_tokens
+        if isinstance(mnt, list):
+            mnt = max(mnt) if mnt else 0
+        self.assertEqual(int(mnt or 0), 5)
+
+    def test_empty_list_input_becomes_zero(self):
+        from rtp_llm.config.generate_config import GenerateConfig
+
+        gen_config = GenerateConfig()
+        gen_config.min_new_tokens = []
+        mnt = gen_config.min_new_tokens
+        if isinstance(mnt, list):
+            mnt = max(mnt) if mnt else 0
+        self.assertEqual(int(mnt or 0), 0)

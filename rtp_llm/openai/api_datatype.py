@@ -121,6 +121,16 @@ class GPTToolDefinition(BaseModel):
     function: GPTFunctionDefinition
 
 
+class StreamOptions(BaseModel):
+    # OpenAI streaming option. When set to True, a trailing chunk with
+    # `choices=[]` carrying `usage` is appended to the SSE stream. When
+    # False, `usage` is suppressed from the stream entirely. When omitted
+    # (None), rtp-llm preserves the legacy behavior of bundling `usage`
+    # on the finish chunk for backward compatibility with internal
+    # consumers that predate the OpenAI spec layout.
+    include_usage: Optional[bool] = None
+
+
 class ChatCompletionRequest(BaseModel):
     model: Optional[str] = None
     messages: List[ChatMessage]
@@ -131,6 +141,7 @@ class ChatCompletionRequest(BaseModel):
     max_tokens: Optional[int] = None
     stop: Optional[Union[str, List[str]]] = Field(default_factory=list)
     stream: Optional[bool] = False
+    stream_options: Optional[StreamOptions] = None
     user: Optional[str] = None
     seed: Optional[int] = None
     n: Optional[int] = None
