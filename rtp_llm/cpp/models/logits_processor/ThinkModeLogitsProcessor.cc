@@ -7,32 +7,7 @@ namespace rtp_llm {
 
 namespace {
 
-constexpr int32_t kInvalidTokenId           = -1;
-constexpr int32_t kDeepSeekNewlineTokenId   = 201;
-constexpr int32_t kDeepSeekBlankLineTokenId = 271;
-constexpr int32_t kQwenGlmNewlineTokenId    = 198;
-
-bool isBoundaryPaddingToken(int32_t token_id) {
-    return token_id == kDeepSeekNewlineTokenId || token_id == kDeepSeekBlankLineTokenId
-           || token_id == kQwenGlmNewlineTokenId;
-}
-
-std::vector<int> normalizeThinkEndTokenIds(const std::vector<int>& end_think_token_ids) {
-    if (end_think_token_ids.size() <= 1) {
-        return end_think_token_ids;
-    }
-
-    // Some templates include surrounding newlines around the semantic </think> token.
-    size_t begin = 0;
-    size_t end   = end_think_token_ids.size();
-    while (begin + 1 < end && isBoundaryPaddingToken(end_think_token_ids[begin])) {
-        ++begin;
-    }
-    while (begin + 1 < end && isBoundaryPaddingToken(end_think_token_ids[end - 1])) {
-        --end;
-    }
-    return std::vector<int>(end_think_token_ids.begin() + begin, end_think_token_ids.begin() + end);
-}
+constexpr int32_t kInvalidTokenId = -1;
 
 int32_t firstTokenOrInvalid(const std::vector<int>& token_ids) {
     if (token_ids.empty()) {
@@ -408,7 +383,7 @@ int ThinkModeLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsProcessorR
 ThinkModeLogitsProcessorPtr ThinkModeLogitsProcessor::fromGenerateInput(std::shared_ptr<GenerateInput> generate_input,
                                                                         int32_t                        num) {
     auto generate_config         = generate_input->generate_config;
-    auto end_think_token_ids     = normalizeThinkEndTokenIds(generate_config->end_think_token_ids);
+    auto end_think_token_ids     = generate_config->end_think_token_ids;
     bool has_think_boundary_mask = !generate_config->begin_think_token_ids.empty() || !end_think_token_ids.empty();
     bool has_think_budget =
         generate_config->in_think_mode && generate_config->max_thinking_tokens > 0 && !end_think_token_ids.empty();
