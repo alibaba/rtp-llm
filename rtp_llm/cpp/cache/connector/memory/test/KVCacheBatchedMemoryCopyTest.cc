@@ -162,6 +162,7 @@ CacheConfig makeRealDsv4TypedMemoryCopyConfig(bool use_flash) {
     auto              mc = use_flash ? makeDsv4FlashModelConfig() : makeDsv4ProModelConfig();
     ParallelismConfig pc;
     KVCacheConfig     kv_config;
+    kv_config.dsv4_fixed_pool_blocks = 512;
     auto              config = HybridPoolConfigCreator::createConfig(mc, pc, kv_config);
     config.block_num         = 512;
     return config;
@@ -254,7 +255,7 @@ CacheConfig makeCompactDsv4TypedMemoryCopyConfig(bool use_flash) {
     config.group_kv_scale_stride_bytes      = std::vector<size_t>(kDsv4PoolNum, 0);
     config.group_seq_size_per_block         = std::vector<size_t>(kDsv4PoolNum, config.seq_size_per_block);
     config.group_block_nums                 = std::vector<uint32_t>(kDsv4PoolNum, config.block_num);
-    config.non_full_addition_kvcache_blocks = 0;
+    config.dsv4_fixed_pool_blocks           = config.block_num;
     config.layer_ids                        = std::vector<std::vector<int>>(kDsv4PoolNum);
     config.global_layer_ids                 = std::vector<std::vector<int>>(kDsv4PoolNum);
     config.layer_to_group_id                = std::vector<int>(config.layer_all_num, 6);
