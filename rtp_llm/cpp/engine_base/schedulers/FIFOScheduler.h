@@ -88,9 +88,9 @@ protected:
     // to one stream per round. This remains the conservative default while
     // newer dsv4 CP paths can opt in to batched prefill through runtime config.
     const bool                      cp_force_single_prefill_ = false;
-    // V1 DP-controller: FlexLB 已做好跨 DP 批对齐,引擎只按 FlexLB 发来的单位执行,
-    // 不做本地机会式打包。force_batch group 仍按 isolation 规则处理;非 force_batch
-    // 的 normal 请求每轮只允许 1 条进入 running。
+    // V1 DP-controller: FlexLB 已做好跨 DP 批对齐,引擎跳过本地 force_batch group
+    // 凑齐等待(每个 DP 队列同 group 只会有 1 个 slot),其他逻辑保持与 legacy 一致 —
+    // normal 请求按 evaluateRunningBatch 的 batch / token 上限自然成批。
     const bool                      dp_controller_managed_   = false;
     std::atomic<bool>               stop_                    = false;
     bool                            schedule_trigger_        = false;

@@ -66,7 +66,6 @@ class RandomStrategyTest {
         // Given: No workers registered for the model
         Request req = new Request();
 
-
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
 
@@ -85,7 +84,6 @@ class RandomStrategyTest {
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().clear();
 
         Request req = new Request();
-
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -109,7 +107,6 @@ class RandomStrategyTest {
         prefillStatusMap.put("127.0.0.1:8080", workerStatus);
 
         Request req = new Request();
-
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -136,7 +133,6 @@ class RandomStrategyTest {
         prefillStatusMap.put("127.0.0.3:8080", worker3);
 
         Request req = new Request();
-
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -165,7 +161,6 @@ class RandomStrategyTest {
 
         Request req = new Request();
 
-
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
 
@@ -189,7 +184,6 @@ class RandomStrategyTest {
 
         Request req = new Request();
 
-
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
 
@@ -210,7 +204,6 @@ class RandomStrategyTest {
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put("127.0.0.1:8080", worker);
 
         Request req = new Request();
-
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -249,7 +242,6 @@ class RandomStrategyTest {
         prefillStatusMap.put("127.0.0.3:8080", worker3);
 
         Request req = new Request();
-
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -298,7 +290,6 @@ class RandomStrategyTest {
         prefillStatusMap.put("127.0.0.2:8080", aliveWorker);
 
         Request req = new Request();
-
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -388,7 +379,6 @@ class RandomStrategyTest {
         prefillStatusMap.put("127.0.0.1:8080", worker);
 
         Request req = new Request();
-
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);

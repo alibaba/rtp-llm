@@ -2,12 +2,12 @@ package org.flexlb.balance.scheduler;
 
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
-import org.flexlb.cache.core.RecentCacheKeyWindow;
-import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.balance.policy.GroupRoutingDecision;
 import org.flexlb.balance.policy.GroupRoutingPolicy;
 import org.flexlb.balance.strategy.LoadBalanceStrategyFactory;
 import org.flexlb.balance.strategy.LoadBalancer;
+import org.flexlb.cache.core.RecentCacheKeyWindow;
+import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;

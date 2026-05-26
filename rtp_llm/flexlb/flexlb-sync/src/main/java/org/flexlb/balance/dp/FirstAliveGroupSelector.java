@@ -8,7 +8,7 @@ import java.util.List;
 /**
  * No-cache group selector. Returns the first candidate — relies on the upstream
  * filter ({@code DefaultDispatchPlanner.dpEnabledPrefillCandidates}) to enforce
- * {@code isAlive} + {@code dpSize > 1}. Used as the kill-switch fallback when
+ * {@code isAlive} + matching {@code dpSize}. Used as the kill-switch fallback when
  * {@code flexlb.cacheAwareSchedulingEnabled = false}, and exposable via
  * {@code dpGroupSelector = FIRST_ALIVE}.
  */

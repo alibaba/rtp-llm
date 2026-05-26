@@ -1008,9 +1008,9 @@ TEST_F(FIFOSchedulerTest, testTwoForceBatchGroupsIsolation) {
     ASSERT_EQ(scheduler.runningStreamsSize(), 2);
 }
 
-// V1 DP-controller: FlexLB 已预对齐跨 DP 批,引擎不得自行凑批。normal (非
-// force_batch) 请求每轮最多放 1 条。
-TEST_F(FIFOSchedulerTest, DpControllerManaged_NoOpportunisticMerge) {
+// V1 DP-controller: FlexLB 推多条 normal 请求时,引擎按 evaluateRunningBatch 的容量
+// 上限自然成批,不再做"每轮 1 条"的限制。
+TEST_F(FIFOSchedulerTest, DpControllerManaged_NormalRequestsBatchTogether) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 11, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
     std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
     ASSERT_TRUE(cache_manager->init());
@@ -1043,8 +1043,8 @@ TEST_F(FIFOSchedulerTest, DpControllerManaged_NoOpportunisticMerge) {
 
     auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());
-    ASSERT_EQ(result.value().size(), 1u);
-    ASSERT_EQ(scheduler.waitingStreamsSize(), 2);
+    ASSERT_EQ(result.value().size(), 3u);
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
 }
 
 // V1 DP-controller: FlexLB 已做跨 DP 切分,本地 group 永远不足 batchGroupSize,

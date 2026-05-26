@@ -2,6 +2,8 @@ package org.flexlb.balance.dp;
 
 import org.flexlb.balance.resource.ResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
+import org.flexlb.balance.strategy.LoadBalanceStrategyFactory;
+import org.flexlb.balance.strategy.LoadBalancer;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -10,8 +12,6 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.util.Logger;
-import org.flexlb.balance.strategy.LoadBalanceStrategyFactory;
-import org.flexlb.balance.strategy.LoadBalancer;
 import org.springframework.context.annotation.DependsOn;
 import org.springframework.stereotype.Component;
 
@@ -45,7 +45,7 @@ public class DefaultDispatchPlanner implements DispatchPlanner {
         }
 
         FlexlbConfig cfg = context.config();
-        List<WorkerStatus> candidates = dpEnabledPrefillCandidates(cfg);
+        List<WorkerStatus> candidates = dpEnabledPrefillCandidates(cfg, context.dpSize());
         if (candidates.isEmpty()) {
             return DispatchPlan.allFailed(drained, StrategyErrorType.NO_PREFILL_WORKER,
                     "no DP-enabled prefill worker available");
@@ -95,18 +95,38 @@ public class DefaultDispatchPlanner implements DispatchPlanner {
         return new DispatchPlan(List.of(batch), failures);
     }
 
-    private List<WorkerStatus> dpEnabledPrefillCandidates(FlexlbConfig cfg) {
+    private List<WorkerStatus> dpEnabledPrefillCandidates(FlexlbConfig cfg, int targetDpSize) {
         Map<String, WorkerStatus> all = engineWorkerStatus.selectModelWorkerStatus(RoleType.PREFILL, null);
         if (all == null || all.isEmpty()) {
+            Logger.warn("dpEnabledPrefillCandidates: workers={}", all == null ? "null" : "empty");
             return List.of();
         }
         ResourceMeasureIndicatorEnum indicator = cfg.getResourceMeasureIndicator(RoleType.PREFILL);
         ResourceMeasure measure = resourceMeasureFactory.getMeasure(indicator);
-        return all.values().stream()
+        List<WorkerStatus> result = all.values().stream()
                 .filter(WorkerStatus::isAlive)
-                .filter(w -> w.getDpSize() > 1)
+                .filter(w -> targetDpSize <= 0 || w.getDpSize() == targetDpSize)
                 .filter(w -> measure == null || measure.isResourceAvailable(w))
                 .toList();
+        if (result.isEmpty()) {
+            StringBuilder sb = new StringBuilder();
+            for (Map.Entry<String, WorkerStatus> e : all.entrySet()) {
+                WorkerStatus w = e.getValue();
+                boolean alive = w != null && w.isAlive();
+                long dpSize = w == null ? -1L : w.getDpSize();
+                boolean dpOk = targetDpSize <= 0 || dpSize == targetDpSize;
+                boolean resOk = measure == null || (w != null && measure.isResourceAvailable(w));
+                sb.append("[").append(e.getKey())
+                  .append(":alive=").append(alive)
+                  .append(",dpSize=").append(dpSize)
+                  .append(",dpOk=").append(dpOk)
+                  .append(",resOk=").append(resOk)
+                  .append("]");
+            }
+            Logger.warn("dpEnabledPrefillCandidates: 0 candidates, targetDpSize={}, indicator={}, measure={}, workers={}",
+                    targetDpSize, indicator, measure == null ? "null" : measure.getClass().getSimpleName(), sb);
+        }
+        return result;
     }
 
     private static ServerStatus toPrefillServerStatus(WorkerStatus w) {

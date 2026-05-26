@@ -292,12 +292,6 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_stre
             if (admitted_streams.size() == 1 && force_batch && stream->batchGroupId() != -1) {
                 force_batch_group_id = stream->batchGroupId();
             }
-
-            // V1: normal(非 force_batch) 请求在 dp_controller_managed 下不得与其他请求
-            // 合进同一步 — FlexLB 不期望引擎自行凑批。
-            if (dp_controller_managed_ && !force_batch) {
-                break;
-            }
         }
         it++;
     }

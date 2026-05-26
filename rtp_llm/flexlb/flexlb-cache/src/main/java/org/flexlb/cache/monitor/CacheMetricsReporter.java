@@ -20,11 +20,11 @@ import static org.flexlb.constant.MetricConstant.CACHE_GLOBAL_BYTES;
 import static org.flexlb.constant.MetricConstant.CACHE_GLOBAL_TOTAL_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_RATIO;
+import static org.flexlb.constant.MetricConstant.CACHE_RECENT_KEY_EMPTY_REQUEST_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_RECENT_KEY_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_RECENT_KEY_HIT_RATIO;
-import static org.flexlb.constant.MetricConstant.CACHE_RECENT_KEY_TOTAL_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_RECENT_KEY_REQUEST_COUNT;
-import static org.flexlb.constant.MetricConstant.CACHE_RECENT_KEY_EMPTY_REQUEST_COUNT;
+import static org.flexlb.constant.MetricConstant.CACHE_RECENT_KEY_TOTAL_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_REQUEST_TOTAL;
 import static org.flexlb.constant.MetricConstant.CACHE_UPDATE_ENGINE_BLOCK_CACHE_RT;
 

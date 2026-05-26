@@ -3,11 +3,14 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.dp.DispatchContext;
 import org.flexlb.balance.dp.DispatchPlan;
 import org.flexlb.balance.dp.DispatchPlanner;
+import org.flexlb.balance.dp.DpAssignStrategy;
 import org.flexlb.balance.dp.FailedRequest;
 import org.flexlb.balance.dp.InflightBatchRegistry;
+import org.flexlb.balance.dp.LinearPrefillTimePredictor;
 import org.flexlb.balance.dp.PendingRequest;
 import org.flexlb.balance.dp.PrefillBatch;
 import org.flexlb.balance.dp.QueuedRequest;
+import org.flexlb.balance.dp.RankAssignment;
 import org.flexlb.balance.dp.RoundRobinAssign;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
@@ -28,6 +31,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -129,7 +133,7 @@ class DpBatchSchedulerTest {
 
         scheduler = new DpBatchScheduler(configService, engineWorkerStatus, planner,
                 List.of(new RoundRobinAssign()), grpcClient, registry,
-                mock(CacheAwareService.class));
+                mock(CacheAwareService.class), new LinearPrefillTimePredictor());
     }
 
     @AfterEach
@@ -583,7 +587,8 @@ class DpBatchSchedulerTest {
                 .thenReturn(Map.of("10.0.0.1:8080", prefillWs));
 
         DpBatchScheduler s = new DpBatchScheduler(configService, engineWorkerStatus, planner,
-                List.of(new RoundRobinAssign()), grpcClient, registry, cacheAware);
+                List.of(new RoundRobinAssign()), grpcClient, registry, cacheAware,
+                new LinearPrefillTimePredictor());
         try {
             List<CompletableFuture<Response>> futures = IntStream.range(0, 4)
                     .mapToObj(i -> s.submit(makeCtx(i + 1, "m1")))
@@ -614,7 +619,8 @@ class DpBatchSchedulerTest {
 
         CacheAwareService cacheAware = mock(CacheAwareService.class);
         DpBatchScheduler s = new DpBatchScheduler(configService, engineWorkerStatus, planner,
-                List.of(new RoundRobinAssign()), grpcClient, registry, cacheAware);
+                List.of(new RoundRobinAssign()), grpcClient, registry, cacheAware,
+                new LinearPrefillTimePredictor());
         try {
             CompletableFuture<Response> f0 = s.submit(makeCtx(1, "m1"));
             s.submit(makeCtx(2, "m1"));
@@ -628,6 +634,136 @@ class DpBatchSchedulerTest {
             verify(cacheAware, never()).findMatchingPrefixLength(anyString(), any());
         } finally {
             s.shutdown();
+        }
+    }
+
+    @Test
+    void all_inputs_carry_batch_group_id_equal_to_batchId_and_force_batch_set() throws Exception {
+        IntStream.range(0, 4).forEach(i -> scheduler.submit(makeCtx(i + 1, "m1")));
+        // Wait for flush
+        Thread.sleep(150);
+
+        assertEquals(1, sentBatches.size());
+        EngineRpcService.BatchEnqueueRequestPB sent = sentBatches.get(0);
+        long batchId = sent.getBatchId();
+        for (EngineRpcService.GenerateInputPB in : sent.getInputsList()) {
+            assertTrue(in.hasBatchGroupId(),
+                    "every input (real or fake) must carry batch_group_id so engine "
+                            + "groups them in one forward step");
+            assertEquals(batchId, in.getBatchGroupId().getValue(),
+                    "batch_group_id must equal the FlexLB-assigned batchId");
+            assertTrue(in.getGenerateConfig().hasForceBatch()
+                            && in.getGenerateConfig().getForceBatch().getValue() == 1,
+                    "force_batch must be 1 so FIFOScheduler refuses to mix this batch with anything else");
+        }
+    }
+
+    @Test
+    void multiple_real_requests_on_same_rank_emit_n_inputs_no_fake_for_filled_rank() throws Exception {
+        // Use a fake assign strategy that pins everything to rank=0. dpSize=2 so
+        // rank=1 still needs a fake-pad. Verifies (a) rank=0 carries N real inputs,
+        // (b) NO fake input is emitted for rank=0, (c) rank=1 gets exactly one fake pad.
+        DpAssignStrategy pinToRank0 = new DpAssignStrategy() {
+            @Override
+            public List<RankAssignment> assign(PrefillBatch batch) {
+                List<RankAssignment> out = new ArrayList<>(batch.size());
+                for (PendingRequest pr : batch.requests()) {
+                    out.add(new RankAssignment(pr, 0));
+                }
+                return out;
+            }
+
+            @Override
+            public String name() {
+                return "PIN0";
+            }
+        };
+
+        cfg.setDpBatchSizeMax(2);   // dpSize=2 → 2 requests fill the bucket then flush
+        cfg.setDpAssignStrategy("PIN0");
+
+        DpBatchScheduler s = new DpBatchScheduler(configService, engineWorkerStatus, planner,
+                List.of(pinToRank0), grpcClient, registry,
+                mock(CacheAwareService.class), new LinearPrefillTimePredictor());
+        try {
+            sentBatches.clear();
+            // dpSize=2 + 2 submissions → GlobalPrefillBatcher drains bucket of size 2;
+            // pinToRank0 puts both on rank=0.
+            CompletableFuture<Response> f1 = s.submit(makeCtx(1, "m1"));
+            CompletableFuture<Response> f2 = s.submit(makeCtx(2, "m1"));
+            f1.get(2, TimeUnit.SECONDS);
+            f2.get(2, TimeUnit.SECONDS);
+
+            assertEquals(1, sentBatches.size());
+            EngineRpcService.BatchEnqueueRequestPB sent = sentBatches.get(0);
+
+            long realOnRank0 = sent.getInputsList().stream()
+                    .filter(in -> !in.getIsFakeQuery())
+                    .filter(in -> in.getDpRank().getValue() == 0)
+                    .count();
+            long fakeOnRank0 = sent.getInputsList().stream()
+                    .filter(EngineRpcService.GenerateInputPB::getIsFakeQuery)
+                    .filter(in -> in.getDpRank().getValue() == 0)
+                    .count();
+            long fakeOnRank1 = sent.getInputsList().stream()
+                    .filter(EngineRpcService.GenerateInputPB::getIsFakeQuery)
+                    .filter(in -> in.getDpRank().getValue() == 1)
+                    .count();
+
+            assertEquals(2, realOnRank0, "rank=0 must carry both real inputs");
+            assertEquals(0, fakeOnRank0, "rank=0 already filled by real requests — no fake pad expected");
+            assertEquals(1, fakeOnRank1, "rank=1 has zero real requests — pad with exactly one fake slot");
+            assertEquals(3, sent.getInputsCount(), "2 real on rank=0 + 1 fake on rank=1");
+        } finally {
+            s.shutdown();
+        }
+    }
+
+    @Test
+    void all_ranks_filled_by_real_requests_emits_zero_fake_pad() throws Exception {
+        // dpSize=4 + 4 real requests via RoundRobinAssign covers ranks 0..3 once each.
+        // No fake-pad should appear.
+        IntStream.range(0, 4).forEach(i -> scheduler.submit(makeCtx(i + 1, "m1")));
+        Thread.sleep(150);
+
+        assertEquals(1, sentBatches.size());
+        EngineRpcService.BatchEnqueueRequestPB sent = sentBatches.get(0);
+        long fakeCount = sent.getInputsList().stream()
+                .filter(EngineRpcService.GenerateInputPB::getIsFakeQuery)
+                .count();
+        assertEquals(0, fakeCount, "all ranks covered by real requests ⇒ no fake-pad slots");
+        assertEquals(4, sent.getInputsCount());
+    }
+
+    @Test
+    void dispatch_emits_BatchDispatch_log_line_for_smoke_scanner() throws Exception {
+        // The dpsize=1 smoke (FLEXLB_SMOKE_CHECK_DPSIZE1_PACK) greps the flexlb
+        // log for "BatchDispatch batchId=N dpSize=N realRequests=N totalInputs=N"
+        // to detect serialization regressions. If anyone refactors this log line,
+        // this test fails LOUDLY at unit-test time instead of silently in CI smoke.
+        ch.qos.logback.classic.Logger lb =
+                (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger("flexlbLogger");
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> appender =
+                new ch.qos.logback.core.read.ListAppender<>();
+        appender.start();
+        lb.addAppender(appender);
+        try {
+            IntStream.range(0, 4).forEach(i -> scheduler.submit(makeCtx(i + 1, "m1")));
+            Thread.sleep(150);
+
+            java.util.regex.Pattern p = java.util.regex.Pattern.compile(
+                    "BatchDispatch batchId=\\d+ dpSize=\\d+ realRequests=\\d+ totalInputs=\\d+");
+            long hits = appender.list.stream()
+                    .map(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage)
+                    .filter(msg -> p.matcher(msg).find())
+                    .count();
+            assertTrue(hits >= 1,
+                    "expected at least one BatchDispatch log line for the dpsize=1 smoke scanner; got: "
+                            + appender.list.stream()
+                                    .map(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage)
+                                    .collect(Collectors.joining("\n")));
+        } finally {
+            lb.detachAppender(appender);
         }
     }
 

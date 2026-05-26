@@ -19,10 +19,16 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.Mockito.*;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 /**
  * V1-α: verify {@link RouteService} dispatches to the right downstream:
@@ -180,12 +186,27 @@ class RouteServiceTest {
     }
 
     @Test
-    void dpBalance_on_but_no_dp_enabled_worker_falls_through_to_legacy() {
+    void dpBalance_on_single_rank_worker_routes_to_dp_batch_scheduler() {
         cfg.setDpBalanceEnabled(true);
         cfg.setEnableQueueing(false);
-        // All workers report dp_size=1 → DP lane has no group to RR over.
         when(engineWorkerStatus.selectModelWorkerStatus(any(RoleType.class), any()))
                 .thenReturn(workersWithDpSize(1));
+        when(dpBatchScheduler.submit(any())).thenReturn(CompletableFuture.completedFuture(okResponse()));
+
+        BalanceContext ctx = ctxWith(maxNewTokens(128));
+        Response r = routeService.route(ctx).block();
+
+        assertTrue(r.isSuccess());
+        verify(dpBatchScheduler).submit(any());
+        verify(defaultRouter, never()).route(any());
+    }
+
+    @Test
+    void dpBalance_on_but_no_prefill_worker_falls_through_to_legacy() {
+        cfg.setDpBalanceEnabled(true);
+        cfg.setEnableQueueing(false);
+        when(engineWorkerStatus.selectModelWorkerStatus(any(RoleType.class), any()))
+                .thenReturn(new HashMap<>());
         when(defaultRouter.route(any())).thenReturn(okResponse());
 
         BalanceContext ctx = ctxWith(maxNewTokens(128));

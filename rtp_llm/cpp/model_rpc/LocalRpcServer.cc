@@ -242,7 +242,7 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
     // this, role_addrs returned to frontend always points at DP0 and
     // cross-DP requests get NOT_FOUND in DP0's response_registry.
     const auto& parallel_cfg = maga_init_params_.parallelism_config;
-    if (parallel_cfg.dp_size > 1 && parallel_cfg.dp_rank == 0
+    if (parallel_cfg.dp_size >= 1 && parallel_cfg.dp_rank == 0
         && !parallel_cfg.dp_peer_addrs.empty()) {
         for (const auto& addr : parallel_cfg.dp_peer_addrs) {
             auto colon = addr.find(':');

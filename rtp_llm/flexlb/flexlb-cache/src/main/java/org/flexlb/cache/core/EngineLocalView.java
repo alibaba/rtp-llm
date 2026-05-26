@@ -32,10 +32,10 @@ public class EngineLocalView {
 
     /**
      * Secondary per-rank view, keyed by group ip:port (DP0 endpoint), value
-     * indexed by dp_rank. Lazily populated only when the engine reports
-     * {@code dp_size > 1}; stays empty for non-DP pods. Routing does NOT
-     * consume this yet — it is exposed via {@link #getPerRankBlocks} for
-     * monitoring and future rank-aware strategies.
+     * indexed by dp_rank. Lazily populated when the engine reports a
+     * non-empty {@code dp_caches[]} (including dp_size==1, single rank).
+     * Routing does NOT consume this yet — it is exposed via
+     * {@link #getPerRankBlocks} for monitoring and future rank-aware strategies.
      */
     private final ConcurrentHashMap<String, List<Set<Long>>> perRankViews = new ConcurrentHashMap<>();
 

@@ -18,7 +18,7 @@ import java.util.List;
  *
  * <p>Contract:
  * <ul>
- *   <li>{@code candidates} is pre-filtered: alive, {@code dp_size > 1}, resource available.</li>
+ *   <li>{@code candidates} is pre-filtered: alive, {@code dp_size >= 1}, resource available.</li>
  *   <li>{@code ctx.requests()} is the chunk being planned — selectors that look at
  *       request content (cache keys, length) read it from there.</li>
  *   <li>Implementations MUST be thread-safe (one batcher thread + size-trigger callers).</li>

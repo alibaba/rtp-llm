@@ -239,6 +239,32 @@ public class FlexlbConfig {
      */
     private String dpGroupSelector = "CACHE_AWARE";
 
+    // ========== SloBudgetBatcher (dpSize=1 single-DP path) ==========
+
+    /**
+     * Per-batch total compute-token cap used by {@code SloBudgetBatcher} when
+     * dpSize == 1. The batcher greedily packs requests up to this many tokens
+     * (subject to the SLO budget constraint) so a single prefill step keeps GPU
+     * occupancy high without overflowing the kernel's max-batch token budget.
+     */
+    private int batchMaxTokens = 8192;
+
+    /**
+     * Safety margin (ms) shaved off the head request's TTFT deadline before
+     * computing the batch budget. Guards against estimator inaccuracy + network
+     * dispatch latency so batches still meet SLO under noisy predictions.
+     */
+    private long sloSafetyMargin = 50;
+
+    /**
+     * Bounded look-ahead distance for {@code SloBudgetBatcher}'s backward scan.
+     * After the FIFO head is locked in, the batcher scans at most this many
+     * additional requests to find smaller ones that fit the remaining budget,
+     * bypassing head-of-line blocking from oversized requests without an
+     * unbounded O(N) walk.
+     */
+    private int dpMaxScanAhead = 64;
+
     /**
      * Get load balancing strategy for a role type
      * This method handles the logic of selecting the appropriate strategy based on role type and configuration

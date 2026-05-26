@@ -1,7 +1,6 @@
 package org.flexlb.engine.grpc;
 
 import io.grpc.ManagedChannel;
-import io.grpc.stub.AbstractBlockingStub;
 import lombok.Getter;
 import org.apache.commons.collections4.CollectionUtils;
 import org.flexlb.cache.core.DpGroupTopology;

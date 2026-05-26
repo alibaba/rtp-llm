@@ -1,9 +1,5 @@
 package org.flexlb.service;
 
-import java.util.Map;
-import java.util.concurrent.CancellationException;
-import java.util.concurrent.CompletableFuture;
-
 import org.flexlb.balance.scheduler.DefaultRouter;
 import org.flexlb.balance.scheduler.DpBatchScheduler;
 import org.flexlb.balance.scheduler.QueueManager;
@@ -21,6 +17,10 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Mono;
+
+import java.util.Map;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * High-level routing entry. Selects between three downstream paths based on config:
@@ -132,9 +132,9 @@ public class RouteService {
      *   <li>request will produce more than one token AND not use beam search AND
      *       hasn't disabled SP — the same precondition under which pd_separation
      *       activates in the engine; SP/beam paths still take the legacy router,</li>
-     *   <li>at least one Prefill worker reports {@code dp_size > 1}. When all
-     *       workers are single-rank, the DP batching path has no group to RR over
-     *       and the legacy ShortestTTFT/WeightedCache lane handles the request.</li>
+     *   <li>at least one alive Prefill worker exists. Multi-rank workers route
+     *       to {@code GlobalPrefillBatcher}; single-rank ({@code dp_size == 1})
+     *       workers route to {@code SloBudgetBatcher} (FIFO + SLO-budget batching).</li>
      * </ul>
      */
     boolean shouldUseDpBatch(BalanceContext ctx, FlexlbConfig cfg) {
@@ -145,39 +145,38 @@ public class RouteService {
         int maxNewTokens = reqOk ? req.getMaxNewTokens() : -1;
         int numBeams = reqOk ? req.getNumBeams() : -1;
         boolean forceDisableSp = reqOk && req.isForceDisableSpRun();
-        boolean dpWorkerOk = hasDpEnabledPrefillWorker();
+        boolean prefillWorkerOk = hasAlivePrefillWorker();
         boolean decision = schedulerOk && cfgOk && reqOk
-                && maxNewTokens > 1 && numBeams <= 1 && !forceDisableSp && dpWorkerOk;
-        logger.debug("dp-batch gate decision={} scheduler={} cfgDpBalance={} req={} maxNewTokens={} numBeams={} forceDisableSp={} dpWorker={}",
-                decision, schedulerOk, cfgOk, reqOk, maxNewTokens, numBeams, forceDisableSp, dpWorkerOk);
+                && maxNewTokens > 1 && numBeams <= 1 && !forceDisableSp && prefillWorkerOk;
+        logger.warn("dp-batch gate decision={} scheduler={} cfgDpBalance={} req={} maxNewTokens={} numBeams={} forceDisableSp={} prefillWorker={}",
+                decision, schedulerOk, cfgOk, reqOk, maxNewTokens, numBeams, forceDisableSp, prefillWorkerOk);
         return decision;
     }
 
-    private boolean hasDpEnabledPrefillWorker() {
+    private boolean hasAlivePrefillWorker() {
         Map<String, WorkerStatus> prefillWorkers =
                 engineWorkerStatus.selectModelWorkerStatus(RoleType.PREFILL, null);
         if (prefillWorkers == null || prefillWorkers.isEmpty()) {
-            logger.debug("dp-batch gate prefillWorkers={}",
+            logger.warn("dp-batch gate prefillWorkers={}",
                     prefillWorkers == null ? "null" : "empty");
             return false;
         }
         boolean found = false;
         for (WorkerStatus w : prefillWorkers.values()) {
-            if (w != null && w.getDpSize() > 1) {
+            if (w != null && w.isAlive()) {
                 found = true;
                 break;
             }
         }
-        if (logger.isDebugEnabled()) {
-            StringBuilder sb = new StringBuilder();
-            for (Map.Entry<String, WorkerStatus> e : prefillWorkers.entrySet()) {
-                WorkerStatus w = e.getValue();
-                sb.append("[").append(e.getKey()).append(":dpSize=")
-                  .append(w == null ? "null" : w.getDpSize()).append("]");
-            }
-            logger.debug("dp-batch gate prefillWorkers count={} found={} workers={}",
-                    prefillWorkers.size(), found, sb);
+        StringBuilder sb = new StringBuilder();
+        for (Map.Entry<String, WorkerStatus> e : prefillWorkers.entrySet()) {
+            WorkerStatus w = e.getValue();
+            sb.append("[").append(e.getKey()).append(":dpSize=")
+              .append(w == null ? "null" : w.getDpSize()).append(",alive=")
+              .append(w == null ? "null" : w.isAlive()).append("]");
         }
+        logger.warn("dp-batch gate prefillWorkers count={} found={} workers={}",
+                prefillWorkers.size(), found, sb);
         return found;
     }
 }

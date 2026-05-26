@@ -358,10 +358,10 @@ def update_dp_peer_addrs(
 ) -> None:
     """Populate dp_peer_addrs for V1 DP-controller fan-out.
 
-    Only fills when dp_controller_managed is true and dp_size > 1.
+    Fills whenever dp_controller_managed is true (including dp_size == 1).
     Index == dp_rank, value == "ip:grpc_port" of each DP group's TP-leader.
     """
-    if not parallelism_config.dp_controller_managed or parallelism_config.dp_size <= 1:
+    if not parallelism_config.dp_controller_managed or parallelism_config.dp_size < 1:
         return
     if world_info is None:
         return

@@ -6,9 +6,11 @@ import org.flexlb.balance.dp.GlobalPrefillBatcher;
 import org.flexlb.balance.dp.InflightBatchRegistry;
 import org.flexlb.balance.dp.PendingRequest;
 import org.flexlb.balance.dp.PrefillBatch;
+import org.flexlb.balance.dp.PrefillTimePredictor;
 import org.flexlb.balance.dp.QueuedRequest;
 import org.flexlb.balance.dp.RankAssignment;
 import org.flexlb.balance.dp.RoundRobinAssign;
+import org.flexlb.balance.dp.SloBudgetBatcher;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.BalanceContext;
@@ -16,7 +18,6 @@ import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
-import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.DpRankStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
@@ -53,9 +54,11 @@ public class DpBatchScheduler {
     private final DpGrpcClient grpcClient;
     private final InflightBatchRegistry inflightRegistry;
     private final CacheAwareService cacheAwareService;
+    private final PrefillTimePredictor prefillTimePredictor;
     private DpBatchReporter dpBatchReporter;
 
     private final Map<String, GlobalPrefillBatcher> batchers = new ConcurrentHashMap<>();
+    private final Map<String, SloBudgetBatcher> sloBatchers = new ConcurrentHashMap<>();
 
     private final ScheduledExecutorService timerExecutor = Executors.newScheduledThreadPool(2, r -> {
         Thread t = new Thread(r, "dp-batch-timer");
@@ -71,7 +74,8 @@ public class DpBatchScheduler {
                             List<DpAssignStrategy> allAssignStrategies,
                             DpGrpcClient grpcClient,
                             InflightBatchRegistry inflightRegistry,
-                            CacheAwareService cacheAwareService) {
+                            CacheAwareService cacheAwareService,
+                            PrefillTimePredictor prefillTimePredictor) {
         this.configService = configService;
         this.engineWorkerStatus = engineWorkerStatus;
         this.planner = planner;
@@ -80,6 +84,7 @@ public class DpBatchScheduler {
         this.grpcClient = grpcClient;
         this.inflightRegistry = inflightRegistry;
         this.cacheAwareService = cacheAwareService;
+        this.prefillTimePredictor = prefillTimePredictor;
     }
 
     @Autowired(required = false)
@@ -93,8 +98,13 @@ public class DpBatchScheduler {
         CompletableFuture<Response> future = new CompletableFuture<>();
         try {
             String key = modelKey(ctx);
-            GlobalPrefillBatcher batcher = batchers.computeIfAbsent(key, this::newBatcher);
-            batcher.offer(QueuedRequest.of(ctx, future));
+            int dpSize = peekModelDpSize();
+            QueuedRequest qr = QueuedRequest.of(ctx, future);
+            if (dpSize == 1) {
+                sloBatchers.computeIfAbsent(key, this::newSloBatcher).offer(qr);
+            } else {
+                batchers.computeIfAbsent(key, this::newBatcher).offer(qr);
+            }
         } catch (Throwable t) {
             Logger.error("DpBatchScheduler.submit threw before request was queued; "
                     + "failing future to avoid leaking a hung Mono", t);
@@ -103,9 +113,28 @@ public class DpBatchScheduler {
         return future;
     }
 
+    private int peekModelDpSize() {
+        Map<String, WorkerStatus> workers =
+                engineWorkerStatus.selectModelWorkerStatus(RoleType.PREFILL, null);
+        if (workers == null || workers.isEmpty()) {
+            return 0;
+        }
+        for (WorkerStatus w : workers.values()) {
+            if (w != null && w.isAlive()) {
+                return (int) w.getDpSize();
+            }
+        }
+        return 0;
+    }
+
     private GlobalPrefillBatcher newBatcher(String model) {
         return new GlobalPrefillBatcher(model, configService, engineWorkerStatus,
                 planner, this::dispatchBatch, timerExecutor, cacheAwareService, dpBatchReporter);
+    }
+
+    private SloBudgetBatcher newSloBatcher(String model) {
+        return new SloBudgetBatcher(model, configService, planner,
+                this::dispatchBatch, prefillTimePredictor, dpBatchReporter);
     }
 
     // ============== Dispatch (called by GlobalPrefillBatcher) ==============
@@ -133,6 +162,9 @@ public class DpBatchScheduler {
         reportBatchComposition(assignments, batch.dpSize());
         inflightRegistry.register(batchId, batch);
 
+        Logger.info("BatchDispatch batchId={} dpSize={} realRequests={} totalInputs={}",
+                batchId, batch.dpSize(), assignments.size(), pb.getInputsCount());
+
         grpcClient.enqueue(batch.prefillIp(), batch.prefillGrpcPort(), pb)
                 .whenComplete((ack, err) -> handleAck(batch, batchId, assignments, ack, err));
     }
@@ -141,15 +173,15 @@ public class DpBatchScheduler {
         if (dpBatchReporter == null || dpSize <= 0) {
             return;
         }
-        boolean[] rankFilled = new boolean[dpSize];
+        int[] requestsPerRank = new int[dpSize];
         for (RankAssignment ra : assignments) {
             if (ra.dpRank() >= 0 && ra.dpRank() < dpSize) {
-                rankFilled[ra.dpRank()] = true;
+                requestsPerRank[ra.dpRank()]++;
             }
         }
         int filledRanks = 0;
         for (int rank = 0; rank < dpSize; rank++) {
-            if (rankFilled[rank]) {
+            if (requestsPerRank[rank] > 0) {
                 dpBatchReporter.reportDpRankHit(rank);
                 filledRanks++;
             }
@@ -291,6 +323,11 @@ public class DpBatchScheduler {
                 return;
             }
         }
+        for (SloBudgetBatcher b : sloBatchers.values()) {
+            if (b.cancelInQueue(requestId)) {
+                return;
+            }
+        }
         InflightBatchRegistry.RequestEntry entry = inflightRegistry.lookupByRequest(requestId);
         if (entry == null) {
             Logger.debug("cancel({}) — no in-flight entry, ignoring", requestId);
@@ -337,7 +374,7 @@ public class DpBatchScheduler {
         EngineRpcService.BatchEnqueueRequestPB.Builder b = EngineRpcService.BatchEnqueueRequestPB.newBuilder()
                 .setBatchId(batchId);
 
-        boolean[] rankFilled = dpSize > 0 ? new boolean[dpSize] : null;
+        int[] requestsPerRank = dpSize > 0 ? new int[dpSize] : null;
 
         for (RankAssignment ra : assignments) {
             PendingRequest req = ra.request();
@@ -360,11 +397,13 @@ public class DpBatchScheduler {
             }
 
             ib.setDpRank(com.google.protobuf.Int32Value.of(ra.dpRank()));
+            ib.setBatchGroupId(com.google.protobuf.Int64Value.of(batchId));
             if (reqDto != null && reqDto.getBlockCacheKeys() != null) {
                 ib.clearCacheHashKey().addAllCacheHashKey(reqDto.getBlockCacheKeys());
             }
 
             EngineRpcService.GenerateConfigPB.Builder gcb = ib.getGenerateConfigBuilder();
+            gcb.setForceBatch(com.google.protobuf.Int32Value.of(1));
             gcb.clearRoleAddrs();
             ServerStatus prefillSs = req.prefill();
             if (prefillSs != null) {
@@ -386,14 +425,14 @@ public class DpBatchScheduler {
             }
             b.addInputs(ib.build());
 
-            if (rankFilled != null && ra.dpRank() >= 0 && ra.dpRank() < dpSize) {
-                rankFilled[ra.dpRank()] = true;
+            if (requestsPerRank != null && ra.dpRank() >= 0 && ra.dpRank() < dpSize) {
+                requestsPerRank[ra.dpRank()]++;
             }
         }
 
-        if (rankFilled != null) {
+        if (requestsPerRank != null) {
             for (int rank = 0; rank < dpSize; rank++) {
-                if (rankFilled[rank]) {
+                if (requestsPerRank[rank] > 0) {
                     continue;
                 }
                 b.addInputs(buildFakeInputPb(batchId, rank));
@@ -405,11 +444,13 @@ public class DpBatchScheduler {
 
     private EngineRpcService.GenerateInputPB buildFakeInputPb(long batchId, int dpRank) {
         long fakeRequestId = -(batchId * 1024L + dpRank);
-        return EngineRpcService.GenerateInputPB.newBuilder()
+        EngineRpcService.GenerateInputPB.Builder ib = EngineRpcService.GenerateInputPB.newBuilder()
                 .setRequestId(fakeRequestId)
                 .setIsFakeQuery(true)
                 .setDpRank(com.google.protobuf.Int32Value.of(dpRank))
-                .build();
+                .setBatchGroupId(com.google.protobuf.Int64Value.of(batchId));
+        ib.getGenerateConfigBuilder().setForceBatch(com.google.protobuf.Int32Value.of(1));
+        return ib.build();
     }
 
     private void applyDpRankAddress(ServerStatus prefill, int dpRank) {
@@ -462,16 +503,22 @@ public class DpBatchScheduler {
 
     @PreDestroy
     public void shutdown() {
+        for (SloBudgetBatcher b : sloBatchers.values()) {
+            b.shutdown();
+        }
         timerExecutor.shutdownNow();
     }
 
     public int batcherCount() {
-        return batchers.size();
+        return batchers.size() + sloBatchers.size();
     }
 
     public int totalQueueDepth() {
         int sum = 0;
         for (GlobalPrefillBatcher b : batchers.values()) {
+            sum += b.queueSize();
+        }
+        for (SloBudgetBatcher b : sloBatchers.values()) {
             sum += b.queueSize();
         }
         return sum;

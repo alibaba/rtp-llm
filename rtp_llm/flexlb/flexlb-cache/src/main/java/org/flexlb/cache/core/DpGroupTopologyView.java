@@ -41,9 +41,8 @@ public interface DpGroupTopologyView {
 
     /**
      * Group identifier (= DP0's ip:port) that owns the given per-rank ip:port,
-     * or {@code null} if the rank is unknown — either the worker has not
-     * been synced yet, or the pod is single-rank (dp_size==1) and therefore
-     * not tracked here.
+     * or {@code null} if the rank is unknown — the worker has not been synced
+     * yet, or the engine has not reported {@code dp_caches[]} for this group.
      */
     String groupOf(String rankIpPort);
 
