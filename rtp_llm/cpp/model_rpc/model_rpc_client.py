@@ -27,8 +27,6 @@ from rtp_llm.utils.base_model_datatypes import (
 from rtp_llm.utils.grpc_host_channel_pool import GrpcHostChannelPool
 from rtp_llm.utils.grpc_util import trans_option, trans_option_cast, trans_tensor
 
-MAX_GRPC_TIMEOUT_SECONDS = 3600
-
 
 class StreamState:
     def __init__(self):
@@ -394,7 +392,9 @@ class ModelRpcClient(object):
 
         Args:
             addresses: List of RPC addresses for data parallel communication
-            max_rpc_timeout_ms: Maximum RPC timeout in milliseconds
+            max_rpc_timeout_ms: Maximum RPC timeout in milliseconds. <= 0 disables
+                the gRPC deadline. Callers normally pass pd_sep_config.max_rpc_timeout_ms
+                (args: --max_rpc_timeout_ms / env: MAX_RPC_TIMEOUT_MS).
             decode_entrance: Whether this is a decode entrance
         """
         self._addresses = addresses
@@ -414,15 +414,12 @@ class ModelRpcClient(object):
     async def close(self):
         await self._channel_pool.close()
 
-    def _compute_grpc_timeout(self, timeout_ms) -> float:
-        rpc_timeout_ms = (
-            self._max_rpc_timeout_ms
-            if self._max_rpc_timeout_ms > 0
-            else MAX_GRPC_TIMEOUT_SECONDS * 1000
-        )
-        if timeout_ms is None or timeout_ms <= 0:
-            return rpc_timeout_ms / 1000
-        return timeout_ms / 1000
+    def _compute_effective_timeout_ms(self, timeout_ms) -> int:
+        # Prefer per-request timeout; otherwise fall back to the server-side default
+        # (pd_sep_config.max_rpc_timeout_ms). Returns <= 0 to disable the gRPC deadline.
+        if timeout_ms is not None and timeout_ms > 0:
+            return timeout_ms
+        return self._max_rpc_timeout_ms
 
     def _handle_grpc_error(self, e: grpc.RpcError, request_desc: str) -> None:
         error_details = ErrorDetailsPB()
@@ -453,10 +450,9 @@ class ModelRpcClient(object):
     async def enqueue(
         self, input_py: GenerateInput
     ) -> AsyncGenerator[GenerateOutputs, None]:
-        grpc_timeout_seconds = self._compute_grpc_timeout(
+        effective_ms = self._compute_effective_timeout_ms(
             input_py.generate_config.timeout_ms
         )
-        input_py.generate_config.timeout_ms = int(grpc_timeout_seconds * 1000)
         input_pb = trans_input(input_py)
         response_iterator = None
         stream_state = StreamState()
@@ -486,9 +482,8 @@ class ModelRpcClient(object):
             channel = await self._channel_pool.get(target_address)
             stub = RpcServiceStub(channel)
 
-            response_iterator = stub.GenerateStreamCall(
-                input_pb, timeout=grpc_timeout_seconds
-            )
+            grpc_kwargs = {"timeout": effective_ms / 1000.0} if effective_ms > 0 else {}
+            response_iterator = stub.GenerateStreamCall(input_pb, **grpc_kwargs)
             # 调用服务器方法并接收流式响应
             async for response in response_iterator.__aiter__():
                 yield trans_output(input_py, response, stream_state)
@@ -508,11 +503,10 @@ class ModelRpcClient(object):
             return []
 
         max_timeout_ms = max((inp.generate_config.timeout_ms or 0) for inp in inputs)
-        grpc_timeout_seconds = self._compute_grpc_timeout(max_timeout_ms)
+        effective_ms = self._compute_effective_timeout_ms(max_timeout_ms)
 
         batch_input_pb = BatchGenerateInputPB()
         for inp in inputs:
-            inp.generate_config.timeout_ms = int(grpc_timeout_seconds * 1000)
             input_pb = trans_input(inp)
             batch_input_pb.inputs.append(input_pb)
 
@@ -524,9 +518,8 @@ class ModelRpcClient(object):
         try:
             channel = await self._channel_pool.get(target_address)
             stub = RpcServiceStub(channel)
-            response = await stub.BatchGenerateCall(
-                batch_input_pb, timeout=grpc_timeout_seconds
-            )
+            grpc_kwargs = {"timeout": effective_ms / 1000.0} if effective_ms > 0 else {}
+            response = await stub.BatchGenerateCall(batch_input_pb, **grpc_kwargs)
 
             results = []
             for i, result_pb in enumerate(response.results):
