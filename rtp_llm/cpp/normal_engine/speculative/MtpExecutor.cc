@@ -2069,7 +2069,29 @@ bool MtpExecutor::useDropBroadSync() const {
 
 bool MtpExecutor::useAsyncPrepare() const {
     static const bool enabled = []() {
-        return readEnvFlagOnce("RTP_LLM_MTP_ASYNC_PREPARE", "async-prepare", "enabled");
+        const bool prepare = readEnvFlagOnce("RTP_LLM_MTP_ASYNC_PREPARE", "async-prepare", "enabled");
+        if (!prepare) {
+            return false;
+        }
+        // Hard exclusion vs RTP_LLM_STREAM_ASYNC. Not going through
+        // readEnvFlagOnce to avoid binding the STREAM_ASYNC env to the
+        // async-prepare log label.
+        // Why: with STREAM_ASYNC=1 the bookkeeping worker already overlaps host
+        // work with main launch; the fused prepare metadata kernel
+        // (invokeMtpTargetVerifyPrepare) is already issued on the main stream,
+        // so async-prepare only ships the trailing prepareAttentionInputs() to
+        // a worker. That adds AsyncRunner mutex/cv + a worker->main
+        // event.block barrier without a real overlap window, which is a net
+        // regression on GLM5 MTP cudagraph decode.
+        const char* stream_async_env = std::getenv("RTP_LLM_STREAM_ASYNC");
+        const bool  stream_async     = (stream_async_env != nullptr && std::string(stream_async_env) == "1");
+        if (stream_async) {
+            RTP_LLM_LOG_WARNING("[async-prepare] forced OFF because RTP_LLM_STREAM_ASYNC=1 is active; "
+                                "stream-async already overlaps bookkeeping with main launch and async-prepare "
+                                "adds AsyncRunner mutex/cv + worker->main event.block without a real overlap window");
+            return false;
+        }
+        return true;
     }();
     return enabled;
 }
