@@ -34,7 +34,7 @@ private:
     void         remoteLoadCacheEnd(PrefillGenerateContext& prefill_context);
     void         remoteGenerate(PrefillGenerateContext& prefill_context);
     void         pollRemoteOutput(PrefillGenerateContext& prefill_context);
-    void         reportPrefillRecentCacheKeyMetrics(PrefillGenerateContext& prefill_context);
+    void         reportPrefillRecentCacheKeyMetricsOnce(PrefillGenerateContext& prefill_context);
 
 private:
     std::string                           decode_cluster_name_;
