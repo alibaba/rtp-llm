@@ -115,6 +115,7 @@ static ModelConfig makeDSV4ManagerFlashModelConfig() {
 static CacheConfig makeCompactDSV4ManagerConfig(uint32_t block_num = 16) {
     ParallelismConfig pc;
     KVCacheConfig     kv_cache_config;
+    kv_cache_config.seq_size_per_block     = 128;
     kv_cache_config.dsv4_fixed_pool_blocks = block_num;
     auto              config = HybridPoolConfigCreator::createConfig(makeDSV4ManagerFlashModelConfig(), pc, kv_cache_config);
     config.block_num         = block_num;
@@ -127,6 +128,7 @@ static CacheConfig makeCompactDSV4ManagerConfig(uint32_t block_num = 16) {
 static CacheConfig makeDSV4ConfigWithConcurrencyPool(uint32_t full_block_num, uint32_t swa_batch_size) {
     ParallelismConfig pc;
     KVCacheConfig     kv_cache_config;
+    kv_cache_config.seq_size_per_block     = 128;
     kv_cache_config.dsv4_fixed_pool_blocks = 2u * swa_batch_size;
     auto              config = HybridPoolConfigCreator::createConfig(makeDSV4ManagerFlashModelConfig(), pc, kv_cache_config);
     config.block_num         = full_block_num;
@@ -141,6 +143,7 @@ makeProductionDSV4Config(uint32_t full_block_num, uint32_t max_concurrency, uint
     ParallelismConfig pc;
     RuntimeConfig     runtime_config;
     KVCacheConfig     kv_cache_config;
+    kv_cache_config.seq_size_per_block                         = 128;
     kv_cache_config.test_block_num                              = full_block_num;
     kv_cache_config.dsv4_fixed_pool_blocks                      = fixed_pool_blocks;
     runtime_config.max_generate_batch_size                      = max_concurrency;
@@ -220,15 +223,16 @@ TEST_F(KVCacheManagerTest, WarmupConfigSmoke) {
     EXPECT_EQ(cache_manager->freeBlocksNum(), 0);
 }
 
-TEST_F(KVCacheManagerTest, DSV4IndependentPoolsStateBackingFollowsMemorySwitch) {
-    auto expect_pool_backing = [](RoleType role_type, bool state_pool_use_memory) {
+TEST_F(KVCacheManagerTest, DSV4IndependentPoolsFixedBackingFollowsMemorySwitch) {
+    auto expect_pool_backing = [](RoleType role_type, bool fixed_pool_use_memory) {
         auto config = makeCompactDSV4ManagerConfig(/*block_num=*/8);
 
         PDSepConfig pd_sep_config;
         pd_sep_config.role_type = role_type;
         KVCacheConfig kv_cache_config;
-        kv_cache_config.dsv4_state_pool_use_memory = state_pool_use_memory;
-        config.state_pool_uses_pinned_cpu          = state_pool_use_memory && config.state_block_size_bytes > 0;
+        kv_cache_config.dsv4_fixed_pool_use_memory = fixed_pool_use_memory;
+        config.fixed_pool_uses_pinned_cpu =
+            fixed_pool_use_memory && (config.state_block_size_bytes > 0 || config.swa_block_size_bytes > 0);
         auto cache_manager      = std::make_shared<KVCacheManager>(config,
                                                                /*warmup=*/false,
                                                                nullptr,
@@ -245,11 +249,9 @@ TEST_F(KVCacheManagerTest, DSV4IndependentPoolsStateBackingFollowsMemorySwitch) 
 
         for (size_t gid = 0; gid < allocator->groupBlockPools().size(); ++gid) {
             const auto region_name = config.group_region_names[gid];
-            const bool state_region = region_name == KVCacheRegionName::INDEXER_STATE
-                                      || region_name == KVCacheRegionName::CSA_STATE
-                                      || region_name == KVCacheRegionName::HCA_STATE;
             const auto expected =
-                (state_pool_use_memory && state_region) ? MemoryType::MEMORY_CPU_PINNED : MemoryType::MEMORY_GPU;
+                (fixed_pool_use_memory && isDsv4FixedRegion(region_name)) ? MemoryType::MEMORY_CPU_PINNED :
+                                                                             MemoryType::MEMORY_GPU;
             EXPECT_EQ(allocator->groupBlockPools()[gid]->where(), expected)
                 << "role=" << static_cast<int>(role_type) << " gid=" << gid
                 << " region=" << static_cast<int>(region_name);

@@ -209,9 +209,8 @@ def dequantize_and_gather_k_cache(
     assert (
         block_table.dtype == torch.int32
         and block_table.is_contiguous()
-        and block_table.device == k_cache.device
     ), (
-        "block_table must be int32, contiguous, and on the same device as k_cache; "
+        "block_table must be int32 and contiguous; "
         f"got dtype={block_table.dtype} contig={block_table.is_contiguous()} "
         f"dev={block_table.device} (k_cache dev={k_cache.device})"
     )

@@ -34,4 +34,8 @@ inline bool isStateRegion(KVCacheRegionName region_name) {
            || region_name == KVCacheRegionName::HCA_STATE;
 }
 
+inline bool isDsv4FixedRegion(KVCacheRegionName region_name) {
+    return isStateRegion(region_name) || region_name == KVCacheRegionName::SWA_KV;
+}
+
 }  // namespace rtp_llm

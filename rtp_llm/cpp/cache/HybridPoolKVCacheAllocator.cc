@@ -43,9 +43,9 @@ bool HybridPoolKVCacheAllocator::doInit() {
 
         auto       pool_config = BlockPoolConfigHelper::createConfigForGroup(config_, static_cast<size_t>(gid));
         const bool use_pinned_cpu_backing = allocation_type_ == AllocationType::DEVICE
-                                            && config_.state_pool_uses_pinned_cpu
+                                            && config_.fixed_pool_uses_pinned_cpu
                                             && static_cast<size_t>(gid) < config_.group_region_names.size()
-                                            && isStateRegion(config_.group_region_names[static_cast<size_t>(gid)]);
+                                            && isDsv4FixedRegion(config_.group_region_names[static_cast<size_t>(gid)]);
         auto group_pool = std::make_shared<BlockPool>(pool_config,
                                                       allocation_type_,
                                                       use_pinned_cpu_backing,
