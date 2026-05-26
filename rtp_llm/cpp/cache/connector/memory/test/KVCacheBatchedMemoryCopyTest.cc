@@ -163,7 +163,7 @@ CacheConfig makeRealDsv4TypedMemoryCopyConfig(bool use_flash) {
     ParallelismConfig pc;
     KVCacheConfig     kv_config;
     kv_config.dsv4_fixed_pool_blocks = 512;
-    auto              config = HybridPoolConfigCreator::createConfig(mc, pc, kv_config);
+    auto              config = HybridPoolConfigCreator::createConfig(mc, pc, kv_config, false, 0);
     config.block_num         = 512;
     return config;
 }
@@ -371,9 +371,9 @@ void verifyBlockInfosContent(const std::vector<BlockInfo>& infos, char c) {
 
 class FakeTypedKVCacheAllocator: public KVCacheAllocator {
 public:
-    explicit FakeTypedKVCacheAllocator(const CacheConfig&               config,
-                                       size_t                           payload_gap_bytes = 0,
-                                       std::set<KVCacheRegionName>      host_regions = {}):
+    explicit FakeTypedKVCacheAllocator(const CacheConfig&          config,
+                                       size_t                      payload_gap_bytes = 0,
+                                       std::set<KVCacheRegionName> host_regions      = {}):
         KVCacheAllocator(config, AllocationType::DEVICE),
         host_regions_(std::move(host_regions)),
         payload_gap_bytes_(payload_gap_bytes) {
@@ -398,9 +398,8 @@ public:
                 }
                 const auto region_name = static_cast<KVCacheRegionName>(region);
                 const bool host_region = host_regions_.count(region_name) > 0;
-                auto       tensor      = torch::empty({static_cast<int64_t>(config.block_num),
-                                                       static_cast<int64_t>(stride)},
-                                                      host_region ? host_options : cuda_options);
+                auto       tensor = torch::empty({static_cast<int64_t>(config.block_num), static_cast<int64_t>(stride)},
+                                           host_region ? host_options : cuda_options);
                 if (host_region) {
                     tensor = tensor.pin_memory();
                 }
