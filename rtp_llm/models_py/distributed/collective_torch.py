@@ -350,16 +350,21 @@ def _register_process_groups_to_cpp():
 
         Args:
             tensors: Tensors to broadcast, each is broadcast in-place from root.
-            root: Source rank that holds the data.
+            root: Group-local source rank (0 = first member of the selected group).
             mode: ParallelMode int (0=TP, 1=DP, 2=DP_AND_TP) selecting process group.
         """
         pg = mode_to_group.get(mode)
         if pg is None or pg.size() < 2:
             return
+        # torch.distributed.broadcast's `src` is a GLOBAL rank, but every C++
+        # caller passes a group-local rank (always 0 today). Without translation,
+        # any TP group whose member set excludes global rank 0 (e.g. dp_rank>0
+        # under TP>1) raises ValueError("Global rank 0 is not part of group ...").
+        global_root = torch.distributed.get_global_rank(pg, root)
         device_id = torch.cuda.current_device()
         for t in tensors:
             gpu_t, was_cpu = _ensure_cuda(t, device_id)
-            torch.distributed.broadcast(gpu_t, root, group=pg)
+            torch.distributed.broadcast(gpu_t, global_root, group=pg)
             if was_cpu:
                 t.copy_(gpu_t)
 
