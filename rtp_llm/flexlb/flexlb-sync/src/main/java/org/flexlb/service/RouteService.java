@@ -19,13 +19,16 @@ public class RouteService {
     private final ConfigService configService;
     private final Router router;
     private final QueueManager queueManager;
+    private final RecentCacheKeyTraceReporter recentCacheKeyTraceReporter;
 
     public RouteService(ConfigService configService,
                         DefaultRouter defaultScheduler,
-                        QueueManager queueManager) {
+                        QueueManager queueManager,
+                        RecentCacheKeyTraceReporter recentCacheKeyTraceReporter) {
         this.configService = configService;
         this.router = defaultScheduler;
         this.queueManager = queueManager;
+        this.recentCacheKeyTraceReporter = recentCacheKeyTraceReporter;
     }
 
     /**
@@ -46,6 +49,9 @@ public class RouteService {
 
         return resultMono.doOnSuccess(result -> {
             balanceContext.setResponse(result);
+            if (result != null && result.isSuccess()) {
+                recentCacheKeyTraceReporter.report(balanceContext);
+            }
         });
     }
 

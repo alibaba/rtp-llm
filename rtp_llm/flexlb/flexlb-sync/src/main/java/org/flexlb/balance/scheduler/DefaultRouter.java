@@ -2,8 +2,6 @@ package org.flexlb.balance.scheduler;
 
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
-import org.flexlb.cache.core.RecentCacheKeyWindow;
-import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.balance.policy.GroupRoutingDecision;
 import org.flexlb.balance.policy.GroupRoutingPolicy;
 import org.flexlb.balance.strategy.LoadBalanceStrategyFactory;
@@ -11,7 +9,6 @@ import org.flexlb.balance.strategy.LoadBalancer;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.RoutingResult;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -21,7 +18,6 @@ import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.sync.status.ModelWorkerStatus;
 import org.flexlb.util.Logger;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.DependsOn;
 import org.springframework.stereotype.Component;
 
@@ -38,12 +34,6 @@ public class DefaultRouter implements Router {
 
     private final Map<RoleType, LoadBalancer> loadBalancerMap;
     private final GroupRoutingPolicy groupRoutingPolicy;
-
-    @Autowired(required = false)
-    private RecentCacheKeyWindow recentCacheKeyWindow;
-
-    @Autowired(required = false)
-    private CacheMetricsReporter cacheMetricsReporter;
 
     public DefaultRouter(ConfigService configService, GroupRoutingPolicy groupRoutingPolicy) {
         this.groupRoutingPolicy = groupRoutingPolicy;
@@ -74,8 +64,6 @@ public class DefaultRouter implements Router {
             return validationResponse;
         }
 
-        reportRecentCacheKeyHitMetrics(balanceContext.getRequest());
-
         // 2. Get routing configuration
         long requestId = balanceContext.getRequestId();
         ModelWorkerStatus workerStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS;
@@ -97,18 +85,6 @@ public class DefaultRouter implements Router {
         }
 
         return response;
-    }
-
-    private void reportRecentCacheKeyHitMetrics(Request request) {
-        if (request == null || recentCacheKeyWindow == null || cacheMetricsReporter == null) {
-            return;
-        }
-
-        RecentCacheKeyWindow.Snapshot snapshot = recentCacheKeyWindow.record(request.getBlockCacheKeys());
-
-        cacheMetricsReporter.reportRecentCacheKeyHitMetrics(snapshot.getTimeWindowMs(),
-                snapshot.getRequestHitOccurrences(),
-                snapshot.getRequestOccurrences());
     }
 
     /**
