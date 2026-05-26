@@ -13,3 +13,11 @@ py_test(
         "//rtp_llm:testlib",
     ],
 )
+
+py_test(
+    name = "test_min_new_tokens",
+    srcs = ["test_min_new_tokens.py"],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+)
