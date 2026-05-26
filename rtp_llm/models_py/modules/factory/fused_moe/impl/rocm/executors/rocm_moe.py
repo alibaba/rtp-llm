@@ -1,9 +1,11 @@
 import copy
+import os
 from typing import Any, Dict, Optional
 
 import aiter
 import torch
-from aiter.fused_moe import fused_moe
+from aiter import ActivationType, QuantType
+from aiter.fused_moe import fused_moe, get_block_size_M, get_inter_dim, moe_sorting
 
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
@@ -24,6 +26,67 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
     MoeConfigResolver,
 )
 from rtp_llm.utils.model_weight import W
+
+_USE_DETERMINISTIC_MOE = os.environ.get("DETERMINISTIC_MOE", "0") == "1"
+_USE_TORCH_MOE = _USE_DETERMINISTIC_MOE
+_VALIDATE_MOE = os.environ.get("VALIDATE_MOE", "0") == "1"
+_TORCH_MOE_MAX_M = int(os.environ.get("TORCH_MOE_MAX_M", "0")) or (None if _USE_TORCH_MOE else 32)
+
+
+def _deterministic_moe_ck(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    activation: "aiter.ActivationType",
+    expert_mask: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Deterministic MoE using CK kernels with flattened single-call stage2.
+
+    Avoids the non-deterministic atomic scatter by flattening M*topk into M_flat
+    independent tokens each with topk=1. A single moe_sorting + ck_moe_stage2_fwd
+    call handles all slots, then we reshape and sum deterministically.
+    """
+    M, topk = topk_ids.shape
+    E_local = w1.shape[0]
+    _, model_dim, inter_dim = get_inter_dim(w1.shape, w2.shape)
+    dtype = hidden_states.dtype
+    device = hidden_states.device
+    global_E = expert_mask.numel() if expert_mask is not None else E_local
+
+    # Stage 1: shared CK GEMM for all topk slots
+    block_m_full = get_block_size_M(M, topk, global_E, inter_dim)
+    sorted_ids, sorted_weights_out, sorted_expert_ids, num_valid_ids, _ = moe_sorting(
+        topk_ids, topk_weights, global_E, model_dim, dtype, block_m_full, expert_mask
+    )
+    a2 = torch.empty((M, topk, inter_dim), dtype=dtype, device=device)
+    aiter.ck_moe_stage1_fwd(
+        hidden_states, w1, w2, sorted_ids, sorted_expert_ids, num_valid_ids,
+        a2, topk, "", None, None, block_m_full, None, QuantType.No, activation,
+    )
+
+    # Stage 2: flatten all topk slots into M*topk "tokens" with topk=1 each
+    M_flat = M * topk
+    a2_flat = a2.reshape(M_flat, 1, inter_dim)
+    topk_ids_flat = topk_ids.reshape(M_flat, 1).contiguous()
+    topk_weights_flat = topk_weights.reshape(M_flat, 1).contiguous()
+
+    block_m_flat = get_block_size_M(M_flat, 1, global_E, inter_dim)
+    s_ids, s_wts, s_exp, n_valid, _ = moe_sorting(
+        topk_ids_flat, topk_weights_flat, global_E, model_dim, dtype,
+        block_m_flat, expert_mask,
+    )
+
+    out_flat = torch.zeros(M_flat, model_dim, dtype=dtype, device=device)
+    aiter.ck_moe_stage2_fwd(
+        a2_flat, w1, w2, s_ids, s_exp, n_valid,
+        out_flat, 1, "", None, None, block_m_flat, s_wts,
+        QuantType.No, activation,
+    )
+
+    # Deterministic reduction: reshape and sum over topk dimension
+    return out_flat.view(M, topk, model_dim).sum(dim=1)
 
 
 def _moe_activation_type(activation: str) -> aiter.ActivationType:
@@ -138,15 +201,60 @@ class RocmExpertsBf16(FusedMoeExpertExecutor):
             hidden_states = hidden_states * topk_weights.to(hidden_states.dtype)
             topk_weights = torch.ones_like(topk_weights, dtype=torch.float32)
 
-        output = fused_moe(
-            hidden_states,
-            self.w1,
-            self.w2,
-            topk_weights,
-            topk_ids,
-            activation=_moe_activation_type(activation),
-            expert_mask=effective_expert_mask,
-        )
+        M = hidden_states.shape[0]
+        use_torch = _USE_TORCH_MOE and (_TORCH_MOE_MAX_M is None or M <= _TORCH_MOE_MAX_M)
+        is_capturing = torch.cuda.is_current_stream_capturing()
+
+        if _USE_DETERMINISTIC_MOE or use_torch:
+            output = _deterministic_moe_ck(
+                hidden_states,
+                self.w1,
+                self.w2,
+                topk_weights,
+                topk_ids,
+                activation=_moe_activation_type(activation),
+                expert_mask=effective_expert_mask,
+            )
+        elif _VALIDATE_MOE and (_TORCH_MOE_MAX_M is None or M <= _TORCH_MOE_MAX_M):
+            output_ck = fused_moe(
+                hidden_states,
+                self.w1,
+                self.w2,
+                topk_weights,
+                topk_ids,
+                activation=_moe_activation_type(activation),
+                expert_mask=effective_expert_mask,
+            )
+            output_torch = _deterministic_moe_ck(
+                hidden_states,
+                self.w1,
+                self.w2,
+                topk_weights,
+                topk_ids,
+                activation=_moe_activation_type(activation),
+                expert_mask=effective_expert_mask,
+            )
+            max_diff = (output_ck - output_torch).abs().max().item()
+            ck_norm = output_ck.float().norm().item()
+            torch_norm = output_torch.float().norm().item()
+            rel_diff = max_diff / (max(ck_norm, torch_norm) + 1e-8)
+            if rel_diff > 0.1:
+                import logging
+                logging.warning(
+                    f"[VALIDATE_MOE] M={M} rel_diff={rel_diff:.4f} "
+                    f"ck_norm={ck_norm:.4f} torch_norm={torch_norm:.4f}"
+                )
+            output = output_ck
+        else:
+            output = fused_moe(
+                hidden_states,
+                self.w1,
+                self.w2,
+                topk_weights,
+                topk_ids,
+                activation=_moe_activation_type(activation),
+                expert_mask=effective_expert_mask,
+            )
 
         return CombineForwardPayload(fused_expert_output=output)
 
