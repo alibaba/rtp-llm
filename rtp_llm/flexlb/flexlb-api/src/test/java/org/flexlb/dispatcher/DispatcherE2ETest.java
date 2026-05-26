@@ -287,14 +287,15 @@ class DispatcherE2ETest {
 
     private WebTestClient buildClient(int subBatchSize) {
         List<String> urls = List.of(baseUrl(fe1), baseUrl(fe2), baseUrl(fe3));
-        FePool pool = new FePool(() -> urls);
+        FePool pool = new FePool(() -> urls, url -> true);
 
-        WebClientFeClient feClient = new WebClientFeClient(WebClient.builder(), 16 * 1024 * 1024);
+        WebClientFeClient feClient = new WebClientFeClient(WebClient.builder());
         FanoutService fanout = new FanoutService(feClient, pool);
-        GenericBatchHandler batchHandler = new GenericBatchHandler(fanout, mapper, subBatchSize);
+        GenericBatchHandler batchHandler = new GenericBatchHandler(
+                fanout, mapper, new SubBatchSpec(SubBatchSpec.Mode.SIZE, subBatchSize));
 
         WebClientPassthroughClient passthrough =
-                new WebClientPassthroughClient(WebClient.create(), pool, 600_000);
+                new WebClientPassthroughClient(WebClient.create(), pool);
         DispatchHandler passthroughHandler = new DispatchHandler(passthrough);
 
         List<BatchEndpointSpec> specs = new BatchEndpointRegistry().batchSpecs();

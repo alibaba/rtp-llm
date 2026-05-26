@@ -9,7 +9,6 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.springframework.core.io.buffer.DataBufferLimitException;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.test.StepVerifier;
 
@@ -34,7 +33,7 @@ class WebClientFeClientTest {
         server.enqueue(new MockResponse()
                 .setHeader("Content-Type", "application/json")
                 .setBody("{\"response_batch\":[{\"response\":\"ok\"}]}"));
-        WebClientFeClient client = new WebClientFeClient(WebClient.builder(), 16 * 1024 * 1024);
+        WebClientFeClient client = new WebClientFeClient(WebClient.builder());
 
         ObjectNode body = mapper.createObjectNode();
         body.putArray("prompt_batch").add("hi");
@@ -50,25 +49,4 @@ class WebClientFeClientTest {
         Assertions.assertEquals("POST", rec.getMethod());
     }
 
-    @Test
-    void rejectsResponseLargerThanMaxBytesCap() throws Exception {
-        // Build a response_batch whose serialized body comfortably exceeds the 4 KiB cap.
-        StringBuilder big = new StringBuilder("{\"response_batch\":[{\"response\":\"");
-        for (int i = 0; i < 8 * 1024; i++) {
-            big.append('x');
-        }
-        big.append("\"}]}");
-        server.enqueue(new MockResponse().setHeader("Content-Type", "application/json").setBody(big.toString()));
-
-        WebClientFeClient client = new WebClientFeClient(WebClient.builder(), /*maxResponseBytes*/ 4 * 1024);
-
-        ObjectNode body = mapper.createObjectNode();
-        body.putArray("prompt_batch").add("hi");
-        String base = "http://" + server.getHostName() + ":" + server.getPort();
-
-        StepVerifier.create(client.post(base, "/batch_infer", body))
-                .expectErrorMatches(e -> e instanceof DataBufferLimitException
-                        || (e.getCause() != null && e.getCause() instanceof DataBufferLimitException))
-                .verify();
-    }
 }

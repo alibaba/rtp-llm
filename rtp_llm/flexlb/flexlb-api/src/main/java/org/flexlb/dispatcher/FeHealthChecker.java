@@ -1,0 +1,113 @@
+package org.flexlb.dispatcher;
+
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.web.reactive.function.client.WebClient;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+
+import java.time.Duration;
+import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Supplier;
+
+/**
+ * Tracks FE-host liveness via periodic HTTP probes of {@code /frontend_health} — a FE-only
+ * endpoint that bypasses backend health (so the dispatcher's view of FE doesn't get poisoned when
+ * BE is down). Design parameters mirror {@code host_service.py}'s production-tuned
+ * {@code MasterService} so cross-language ops behavior stays consistent.
+ *
+ * <p>Why bother when VipServer already drops unhealthy nodes from the registry: VipServer's
+ * probe only proves TCP reachability. An OOM'd / event-loop-stuck FE keeps its port open but
+ * stops responding — only an application-level probe like {@code /frontend_health} catches that.
+ * VipServer is layer 1 (registration), this is layer 2 (application liveness).
+ */
+@Slf4j
+public class FeHealthChecker {
+
+    private static final int FAIL_THRESHOLD = 2;
+    private static final int PROBE_TIMEOUT_MS = 500;
+    private static final long PROBE_INTERVAL_MS = 1000;
+    private static final String PROBE_PATH = "/frontend_health";
+
+    private final Supplier<List<String>> urlSupplier;
+    private final WebClient webClient;
+    private final ConcurrentMap<String, AtomicInteger> consecFails = new ConcurrentHashMap<>();
+    private ScheduledExecutorService scheduler;
+
+    public FeHealthChecker(Supplier<List<String>> urlSupplier, WebClient webClient) {
+        this.urlSupplier = urlSupplier;
+        this.webClient = webClient;
+    }
+
+    /**
+     * Optimistic default: an unprobed URL is assumed alive. Removing a host from the pool the
+     * instant it appears (before its first probe completes) would block legitimate traffic on a
+     * data race; the opposite — letting one in-flight request hit a freshly-dead host before the
+     * next probe — is recoverable at the caller.
+     */
+    public boolean isAlive(String url) {
+        AtomicInteger n = consecFails.get(url);
+        return n == null || n.get() < FAIL_THRESHOLD;
+    }
+
+    /**
+     * Run one probe round against the current snapshot of {@link #urlSupplier}. Each URL gets a
+     * single {@code GET /frontend_health} with {@value #PROBE_TIMEOUT_MS}ms timeout; 2xx resets
+     * the failure counter, everything else (non-2xx, connect refused, read timeout) increments it.
+     * Probes run in parallel via reactor; the returned {@code Mono} completes when all are done.
+     */
+    public Mono<Void> probeOnce() {
+        List<String> urls = urlSupplier.get();
+        if (urls == null || urls.isEmpty()) {
+            return Mono.empty();
+        }
+        return Flux.fromIterable(urls)
+                .flatMap(url -> webClient.get()
+                        .uri(url + PROBE_PATH)
+                        .retrieve()
+                        .toBodilessEntity()
+                        .timeout(Duration.ofMillis(PROBE_TIMEOUT_MS))
+                        .doOnSuccess(r -> consecFails
+                                .computeIfAbsent(url, k -> new AtomicInteger())
+                                .set(0))
+                        .onErrorResume(e -> {
+                            int n = consecFails
+                                    .computeIfAbsent(url, k -> new AtomicInteger())
+                                    .incrementAndGet();
+                            log.debug("FE probe failed: url={}, consec={}, err={}",
+                                    url, n, e.getClass().getSimpleName());
+                            return Mono.empty();
+                        })
+                        .then())
+                .then();
+    }
+
+    /**
+     * Start the background probe loop. Idempotent — subsequent calls are no-ops once started.
+     */
+    public synchronized void start() {
+        if (scheduler != null) {
+            return;
+        }
+        scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "fe-health-checker");
+            t.setDaemon(true);
+            return t;
+        });
+        scheduler.scheduleAtFixedRate(
+                () -> probeOnce().subscribe(),
+                0, PROBE_INTERVAL_MS, TimeUnit.MILLISECONDS);
+    }
+
+    public synchronized void stop() {
+        if (scheduler != null) {
+            scheduler.shutdownNow();
+            scheduler = null;
+        }
+    }
+}

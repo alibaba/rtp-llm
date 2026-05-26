@@ -9,11 +9,19 @@ import reactor.core.publisher.Mono;
 
 public class WebClientFeClient implements FeClient {
 
+    /**
+     * Max in-memory size for a single FE sub-batch response. Per-chunk, not aggregate — the
+     * dispatcher's final response to the client is N chunks × this value (bounded by heap, not
+     * a config). 16MB covers extreme "long generation × large batch" workloads with margin while
+     * staying well below typical 8-16GB heap allocations even under peak concurrency.
+     */
+    private static final int MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
+
     private final WebClient webClient;
 
-    public WebClientFeClient(WebClient.Builder builder, int maxResponseBytes) {
+    public WebClientFeClient(WebClient.Builder builder) {
         ExchangeStrategies strategies = ExchangeStrategies.builder()
-                .codecs(c -> c.defaultCodecs().maxInMemorySize(maxResponseBytes))
+                .codecs(c -> c.defaultCodecs().maxInMemorySize(MAX_RESPONSE_BYTES))
                 .build();
         this.webClient = builder.exchangeStrategies(strategies).build();
     }

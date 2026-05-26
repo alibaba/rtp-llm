@@ -94,8 +94,8 @@ class StreamingPassthroughTest {
     }
 
     private WebClientPassthroughClient passthroughClient(WebClient webClient) {
-        FePool pool = new FePool(() -> List.of("http://" + fe.getHostName() + ":" + fe.getPort()));
-        return new WebClientPassthroughClient(webClient, pool, MAX_STREAM_DURATION_MS);
+        FePool pool = new FePool(() -> List.of("http://" + fe.getHostName() + ":" + fe.getPort()), url -> true);
+        return new WebClientPassthroughClient(webClient, pool);
     }
 
     private static MockResponse buildSseResponseWith6sBodyDelay() {

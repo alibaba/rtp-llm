@@ -39,9 +39,9 @@ class WebClientPassthroughClientTest {
                 .setBody("{\"status\":\"ok\"}")
                 .setHeader("Content-Type", "application/json"));
         String base = "http://" + server.getHostName() + ":" + server.getPort();
-        FePool pool = new FePool(() -> List.of(base));
+        FePool pool = new FePool(() -> List.of(base), url -> true);
         WebClientPassthroughClient client =
-                new WebClientPassthroughClient(WebClient.builder().build(), pool, 60000);
+                new WebClientPassthroughClient(WebClient.builder().build(), pool);
 
         MockServerRequest request = MockServerRequest.builder()
                 .method(HttpMethod.GET)
@@ -59,9 +59,9 @@ class WebClientPassthroughClientTest {
 
     @Test
     void emptyFePoolBecomesErrorMono() {
-        FePool pool = new FePool(List::of);
+        FePool pool = new FePool(List::of, url -> true);
         WebClientPassthroughClient client =
-                new WebClientPassthroughClient(WebClient.builder().build(), pool, 60000);
+                new WebClientPassthroughClient(WebClient.builder().build(), pool);
 
         MockServerRequest request = MockServerRequest.builder()
                 .method(HttpMethod.GET)
@@ -79,9 +79,9 @@ class WebClientPassthroughClientTest {
                 .setBody("{\"status\":\"ok\"}")
                 .setHeader("Content-Type", "application/json"));
         String base = "http://" + server.getHostName() + ":" + server.getPort();
-        FePool pool = new FePool(() -> List.of(base));
+        FePool pool = new FePool(() -> List.of(base), url -> true);
         WebClientPassthroughClient client =
-                new WebClientPassthroughClient(WebClient.builder().build(), pool, 60000);
+                new WebClientPassthroughClient(WebClient.builder().build(), pool);
 
         MockServerRequest request = MockServerRequest.builder()
                 .method(HttpMethod.GET)
@@ -100,9 +100,9 @@ class WebClientPassthroughClientTest {
     @Test
     void forwardsToFeStrippingDispatcherPrefix() throws Exception {
         server.enqueue(new MockResponse().setBody("ok").setResponseCode(200));
-        FePool pool = new FePool(() -> List.of("http://" + server.getHostName() + ":" + server.getPort()));
+        FePool pool = new FePool(() -> List.of("http://" + server.getHostName() + ":" + server.getPort()), url -> true);
         WebClientPassthroughClient passthrough =
-                new WebClientPassthroughClient(WebClient.builder().build(), pool, 60000);
+                new WebClientPassthroughClient(WebClient.builder().build(), pool);
 
         MockServerRequest request = MockServerRequest.builder()
                 .method(HttpMethod.GET)
@@ -121,9 +121,9 @@ class WebClientPassthroughClientTest {
     void stripsHopByHopAndFramingHeadersFromOutboundRequest() throws Exception {
         server.enqueue(new MockResponse().setBody("ok").setResponseCode(200));
         String base = "http://" + server.getHostName() + ":" + server.getPort();
-        FePool pool = new FePool(() -> List.of(base));
+        FePool pool = new FePool(() -> List.of(base), url -> true);
         WebClientPassthroughClient client =
-                new WebClientPassthroughClient(WebClient.builder().build(), pool, 60000);
+                new WebClientPassthroughClient(WebClient.builder().build(), pool);
 
         MockServerRequest request = MockServerRequest.builder()
                 .method(HttpMethod.GET)
@@ -156,9 +156,9 @@ class WebClientPassthroughClientTest {
     void hopByHopFilterIsCaseInsensitive() throws Exception {
         server.enqueue(new MockResponse().setBody("ok").setResponseCode(200));
         String base = "http://" + server.getHostName() + ":" + server.getPort();
-        FePool pool = new FePool(() -> List.of(base));
+        FePool pool = new FePool(() -> List.of(base), url -> true);
         WebClientPassthroughClient client =
-                new WebClientPassthroughClient(WebClient.builder().build(), pool, 60000);
+                new WebClientPassthroughClient(WebClient.builder().build(), pool);
 
         MockServerRequest request = MockServerRequest.builder()
                 .method(HttpMethod.GET)
@@ -186,9 +186,9 @@ class WebClientPassthroughClientTest {
                 .setHeader("Proxy-Authenticate", "Basic realm=fe")
                 .setHeader("X-Backend-Id", "fe-7"));
         String base = "http://" + server.getHostName() + ":" + server.getPort();
-        FePool pool = new FePool(() -> List.of(base));
+        FePool pool = new FePool(() -> List.of(base), url -> true);
         WebClientPassthroughClient client =
-                new WebClientPassthroughClient(WebClient.builder().build(), pool, 60000);
+                new WebClientPassthroughClient(WebClient.builder().build(), pool);
 
         MockServerRequest request = MockServerRequest.builder()
                 .method(HttpMethod.GET)
@@ -212,9 +212,9 @@ class WebClientPassthroughClientTest {
         server.enqueue(new MockResponse().setBody("first"));
         server.enqueue(new MockResponse().setBody("second"));
         String base = "http://" + server.getHostName() + ":" + server.getPort();
-        FePool pool = new FePool(() -> List.of(base));
+        FePool pool = new FePool(() -> List.of(base), url -> true);
         WebClientPassthroughClient client =
-                new WebClientPassthroughClient(WebClient.builder().build(), pool, 60000);
+                new WebClientPassthroughClient(WebClient.builder().build(), pool);
 
         MockServerRequest first = MockServerRequest.builder()
                 .method(HttpMethod.GET).uri(URI.create("/a")).body(Flux.empty());

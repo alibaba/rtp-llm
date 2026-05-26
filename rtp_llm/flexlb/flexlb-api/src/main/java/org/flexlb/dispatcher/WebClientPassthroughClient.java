@@ -38,9 +38,18 @@ public class WebClientPassthroughClient implements PassthroughClient {
             "host",
             "content-length");
 
+    /**
+     * SSE body-stream total duration cap. Streaming responses (e.g. {@code /v1/chat/completions}
+     * with {@code stream=true}) tend to go straight to FE in production — the value-add of routing
+     * them through the dispatcher (split + fanout) doesn't apply to a 1:1 stream. We still
+     * passthrough SSE so it's not broken when it happens, just bound the body Flux to 10min as a
+     * safety net against hung streams holding the connection pool indefinitely. Not exposed as
+     * config: extreme long-stream workloads should bypass the dispatcher rather than tune this.
+     */
+    private static final int STREAM_TIMEOUT_MS = 600_000;
+
     private final WebClient webClient;
     private final FePool fePool;
-    private final int maxStreamDurationMs;
 
     /**
      * Uses the deprecated {@link WebClient.RequestHeadersSpec#exchange() exchange()} rather than
@@ -79,7 +88,7 @@ public class WebClientPassthroughClient implements PassthroughClient {
                                     .headers(h -> copyEndToEndHeaders(clientResponse.headers().asHttpHeaders(), h))
                                     .body(BodyInserters.fromDataBuffers(
                                             clientResponse.bodyToFlux(DataBuffer.class)
-                                                    .timeout(Duration.ofMillis(maxStreamDurationMs))))
+                                                    .timeout(Duration.ofMillis(STREAM_TIMEOUT_MS))))
                                     .doOnCancel(() -> clientResponse.releaseBody().subscribe()));
         });
     }

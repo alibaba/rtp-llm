@@ -3,6 +3,7 @@ package org.flexlb.dispatcher;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
+import okhttp3.mockwebserver.RecordedRequest;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.discovery.ServiceDiscovery;
 import org.flexlb.discovery.ServiceHostListener;
@@ -14,6 +15,7 @@ import org.springframework.web.reactive.function.server.RouterFunction;
 import org.springframework.web.reactive.function.server.ServerResponse;
 
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -88,12 +90,30 @@ class DispatcherConfigurationTest {
                     .exchange()
                     .expectStatus().isOk();
 
-            assertEquals(0, staleFe.getRequestCount(), "stale host must not be hit after pool swap");
-            assertEquals(1, freshFe.getRequestCount(), "fresh host must receive the post-swap request");
+            assertEquals(0, countBatchInferRequests(staleFe),
+                    "stale host must not receive batch traffic after pool swap (health probes ok)");
+            assertEquals(1, countBatchInferRequests(freshFe),
+                    "fresh host must receive the post-swap batch_infer request");
         } finally {
             staleFe.shutdown();
             freshFe.shutdown();
         }
+    }
+
+    /**
+     * Drains a MockWebServer's request queue and counts only {@code /batch_infer} requests, so
+     * background {@code /frontend_health} probes from {@link FeHealthChecker} are not mistaken for
+     * batch traffic in tests asserting which FE got hit.
+     */
+    private static int countBatchInferRequests(MockWebServer server) throws InterruptedException {
+        int count = 0;
+        RecordedRequest req;
+        while ((req = server.takeRequest(50, TimeUnit.MILLISECONDS)) != null) {
+            if (req.getPath() != null && req.getPath().startsWith("/batch_infer")) {
+                count++;
+            }
+        }
+        return count;
     }
 
     /** Stub that returns a controllable host list for one expected service id. */

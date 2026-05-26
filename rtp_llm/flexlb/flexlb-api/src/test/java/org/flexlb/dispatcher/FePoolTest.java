@@ -14,7 +14,7 @@ class FePoolTest {
 
     @Test
     void roundRobinsAcrossAddresses() {
-        FePool pool = new FePool(() -> List.of("http://a:8088", "http://b:8088"));
+        FePool pool = new FePool(() -> List.of("http://a:8088", "http://b:8088"), url -> true);
         assertEquals("http://a:8088", pool.next());
         assertEquals("http://b:8088", pool.next());
         assertEquals("http://a:8088", pool.next());
@@ -22,13 +22,40 @@ class FePoolTest {
 
     @Test
     void rejectsNullSupplier() {
-        assertThrows(IllegalArgumentException.class, () -> new FePool(null));
+        assertThrows(IllegalArgumentException.class, () -> new FePool(null, url -> true));
+    }
+
+    @Test
+    void rejectsNullPredicate() {
+        assertThrows(IllegalArgumentException.class, () -> new FePool(List::of, null));
+    }
+
+    @Test
+    void skipsDeadHostsPerPredicate() {
+        FePool pool = new FePool(
+                () -> List.of("http://a:8088", "http://b:8088", "http://c:8088"),
+                url -> !url.contains("b:"));
+        for (int i = 0; i < 6; i++) {
+            String picked = pool.next();
+            assertNotEquals("http://b:8088", picked,
+                    "host marked dead by predicate must never be returned");
+        }
+    }
+
+    @Test
+    void fallsBackToRoundRobinWhenAllDead() {
+        FePool pool = new FePool(
+                () -> List.of("http://a:8088", "http://b:8088"),
+                url -> false);
+        String picked = pool.next();
+        assertTrue(picked.startsWith("http://"),
+                "all-dead fallback must still return a host, not refuse service");
     }
 
     @Test
     void readsDynamicSupplierOnEveryNext() {
         AtomicReference<List<String>> source = new AtomicReference<>(List.of("http://a:8088"));
-        FePool pool = new FePool(source::get);
+        FePool pool = new FePool(source::get, url -> true);
         assertEquals("http://a:8088", pool.next());
 
         source.set(List.of("http://b:8088", "http://c:8088"));
@@ -46,7 +73,7 @@ class FePoolTest {
 
     @Test
     void emptySupplierSnapshotThrowsOnNext() {
-        FePool pool = new FePool(List::of);
+        FePool pool = new FePool(List::of, url -> true);
         assertThrows(IllegalStateException.class, pool::next);
     }
 }

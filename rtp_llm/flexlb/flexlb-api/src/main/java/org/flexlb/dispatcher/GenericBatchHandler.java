@@ -34,7 +34,7 @@ public class GenericBatchHandler {
 
     private final FanoutService fanoutService;
     private final ObjectMapper mapper;
-    private final int subBatchSize;
+    private final SubBatchSpec subBatch;
 
     public Mono<ServerResponse> handle(ServerRequest request, BatchEndpointSpec spec) {
         return request.bodyToMono(JsonNode.class).flatMap(body -> {
@@ -50,7 +50,7 @@ public class GenericBatchHandler {
                 emptyEnvelope.set(spec.getResponseArrayField(), mapper.createArrayNode());
                 return ServerResponse.ok().contentType(MediaType.APPLICATION_JSON).bodyValue(emptyEnvelope);
             }
-            List<ArrayNode> chunks = BatchSplitter.splitArray((ArrayNode) arr, subBatchSize, mapper);
+            List<ArrayNode> chunks = splitChunks((ArrayNode) arr);
             List<ObjectNode> chunkBodies = new ArrayList<>(chunks.size());
             for (ArrayNode chunk : chunks) {
                 ObjectNode copy = obj.deepCopy();
@@ -97,6 +97,13 @@ public class GenericBatchHandler {
         if (!gc.has("force_batch")) {
             gc.put("force_batch", true);
         }
+    }
+
+    private List<ArrayNode> splitChunks(ArrayNode arr) {
+        return switch (subBatch.mode()) {
+            case SIZE -> BatchSplitter.splitArray(arr, subBatch.value(), mapper);
+            case COUNT -> BatchSplitter.splitByCount(arr, subBatch.value(), mapper);
+        };
     }
 
     private Mono<ServerResponse> badRequest(String message) {
