@@ -9,15 +9,15 @@ import org.flexlb.util.JsonUtils;
 import java.util.Map;
 
 /**
- * Operator-facing tuning surface for the dispatcher. Six fields and nothing else — every
+ * Operator-facing tuning surface for the dispatcher. Seven fields and nothing else — every
  * timeout/safety knob that "no one actually tunes" lives as a constant inside
  * {@code DispatcherConfiguration} / {@code WebClientPassthroughClient} / {@code WebClientFeClient}
  * (see those classes for FE_CONNECT_TIMEOUT_MS / FE_PENDING_ACQUIRE_TIMEOUT_MS /
  * STREAM_TIMEOUT_MS / MAX_RESPONSE_BYTES).
  *
  * <p>Loading order: defaults → JSON from {@code DISPATCH_CONFIG} env → per-field env overrides
- * (e.g. {@code DISPATCH_BATCH_TIMEOUT_MS}). The per-field env wins, matching the {@code FLEXLB_CONFIG}
- * contract operators already know.
+ * (e.g. {@code DISPATCH_BATCH_TIMEOUT_MS}, {@code DISPATCH_PROBE_PATH}). The per-field env wins,
+ * matching the {@code FLEXLB_CONFIG} contract operators already know.
  *
  * <p>Unknown JSON properties are ignored so a stale {@code DISPATCH_CONFIG} carrying old field
  * names (subBatchSize, feRequestTimeoutMs, …) still boots — they just have no effect.
@@ -62,6 +62,15 @@ public class DispatchConfig {
      */
     private int feMaxPendingAcquirePerHost = 1000;
 
+    /**
+     * Path the {@link FeHealthChecker} probes via {@code GET <feUrl><probePath>} every 1s. Default
+     * matches rtp_llm FE's {@code /frontend_health} endpoint; switch to {@code /health} for vLLM
+     * deployments or any other backend that exposes a different liveness path. The 2-fail-then-dead,
+     * 1-success-resets, optimistic-default semantics in {@link FeHealthChecker} are unchanged
+     * regardless of path — only the URL suffix moves.
+     */
+    private String probePath = "/frontend_health";
+
     /** Internal cache of the parsed sub-batch spec — populated in {@link #validate()}. */
     private transient SubBatchSpec subBatchSpec;
 
@@ -99,6 +108,11 @@ public class DispatchConfig {
         if (feMaxPendingAcquirePerHost <= 0) {
             throw new IllegalArgumentException(
                     "feMaxPendingAcquirePerHost must be > 0, got " + feMaxPendingAcquirePerHost);
+        }
+        if (probePath == null || probePath.isBlank()) {
+            throw new IllegalArgumentException(
+                    "probePath must not be blank — set DISPATCH_PROBE_PATH=/frontend_health (rtp_llm) "
+                            + "or /health (vLLM) etc.; got '" + probePath + "'");
         }
         // SubBatchSpec.parse throws IllegalArgumentException with a precise message on bad DSL.
         this.subBatchSpec = SubBatchSpec.parse(subBatch);

@@ -16,15 +16,17 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 
 /**
- * Tracks FE-host liveness via periodic HTTP probes of {@code /frontend_health} — a FE-only
- * endpoint that bypasses backend health (so the dispatcher's view of FE doesn't get poisoned when
- * BE is down). Design parameters mirror {@code host_service.py}'s production-tuned
- * {@code MasterService} so cross-language ops behavior stays consistent.
+ * Tracks FE-host liveness via periodic HTTP probes of an application-level path (default
+ * {@code /frontend_health} for rtp_llm; switch via {@code DISPATCH_PROBE_PATH} for vLLM
+ * ({@code /health}) or other backends). The probe targets a FE-only endpoint that bypasses
+ * backend health, so the dispatcher's view of FE doesn't get poisoned when BE is down. Design
+ * parameters mirror {@code host_service.py}'s production-tuned {@code MasterService} so
+ * cross-language ops behavior stays consistent.
  *
  * <p>Why bother when VipServer already drops unhealthy nodes from the registry: VipServer's
  * probe only proves TCP reachability. An OOM'd / event-loop-stuck FE keeps its port open but
- * stops responding — only an application-level probe like {@code /frontend_health} catches that.
- * VipServer is layer 1 (registration), this is layer 2 (application liveness).
+ * stops responding — only an application-level probe catches that. VipServer is layer 1
+ * (registration), this is layer 2 (application liveness).
  */
 @Slf4j
 public class FeHealthChecker {
@@ -32,16 +34,21 @@ public class FeHealthChecker {
     private static final int FAIL_THRESHOLD = 2;
     private static final int PROBE_TIMEOUT_MS = 500;
     private static final long PROBE_INTERVAL_MS = 1000;
-    private static final String PROBE_PATH = "/frontend_health";
 
     private final Supplier<List<String>> urlSupplier;
     private final WebClient webClient;
+    private final String probePath;
     private final ConcurrentMap<String, AtomicInteger> consecFails = new ConcurrentHashMap<>();
     private ScheduledExecutorService scheduler;
 
-    public FeHealthChecker(Supplier<List<String>> urlSupplier, WebClient webClient) {
+    public FeHealthChecker(Supplier<List<String>> urlSupplier, WebClient webClient, String probePath) {
+        if (probePath == null || probePath.isBlank()) {
+            throw new IllegalArgumentException(
+                    "probePath must not be blank — pass /frontend_health, /health, etc.");
+        }
         this.urlSupplier = urlSupplier;
         this.webClient = webClient;
+        this.probePath = probePath;
     }
 
     /**
@@ -57,7 +64,7 @@ public class FeHealthChecker {
 
     /**
      * Run one probe round against the current snapshot of {@link #urlSupplier}. Each URL gets a
-     * single {@code GET /frontend_health} with {@value #PROBE_TIMEOUT_MS}ms timeout; 2xx resets
+     * single {@code GET <url><probePath>} with {@value #PROBE_TIMEOUT_MS}ms timeout; 2xx resets
      * the failure counter, everything else (non-2xx, connect refused, read timeout) increments it.
      * Probes run in parallel via reactor; the returned {@code Mono} completes when all are done.
      */
@@ -68,7 +75,7 @@ public class FeHealthChecker {
         }
         return Flux.fromIterable(urls)
                 .flatMap(url -> webClient.get()
-                        .uri(url + PROBE_PATH)
+                        .uri(url + probePath)
                         .retrieve()
                         .toBodilessEntity()
                         .timeout(Duration.ofMillis(PROBE_TIMEOUT_MS))

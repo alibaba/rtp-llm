@@ -114,7 +114,8 @@ public class DispatcherConfiguration {
             fePoolUrls.set(urls);
             log.info("dispatcher FE pool updated: serviceId={}, hosts={}", serviceId, urls.size());
         });
-        FeHealthChecker healthChecker = new FeHealthChecker(fePoolUrls::get, passthroughWebClient);
+        FeHealthChecker healthChecker = new FeHealthChecker(
+                fePoolUrls::get, passthroughWebClient, cfg.getProbePath());
         healthChecker.start();
         FePool pool = new FePool(fePoolUrls::get, healthChecker::isAlive);
 
@@ -125,10 +126,11 @@ public class DispatcherConfiguration {
         PassthroughClient passthrough = new WebClientPassthroughClient(passthroughWebClient, pool);
         DispatchHandler handler = new DispatchHandler(passthrough);
         log.info("dispatcher enabled: fePoolServiceId={}, seedHosts={}, subBatch={}, batchSpecs={}, "
-                        + "batchTimeoutMs={}, feMaxConnectionsPerHost={}, feMaxPendingAcquirePerHost={}",
+                        + "batchTimeoutMs={}, feMaxConnectionsPerHost={}, feMaxPendingAcquirePerHost={}, "
+                        + "probePath={}",
                 serviceId, fePoolUrls.get().size(), cfg.getSubBatch(), specs.size(),
                 cfg.getBatchTimeoutMs(), cfg.getFeMaxConnectionsPerHost(),
-                cfg.getFeMaxPendingAcquirePerHost());
+                cfg.getFeMaxPendingAcquirePerHost(), cfg.getProbePath());
         return new DispatchRouter(batchHandler, handler, specs).routes();
     }
 

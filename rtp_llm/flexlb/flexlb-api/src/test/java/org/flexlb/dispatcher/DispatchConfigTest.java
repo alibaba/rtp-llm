@@ -121,4 +121,43 @@ class DispatchConfigTest {
         assertEquals(SubBatchSpec.Mode.COUNT, spec.mode());
         assertEquals(7, spec.value());
     }
+
+    @Test
+    void probePathDefaultsToFrontendHealth() {
+        DispatchConfig c = DispatchConfig.fromJson(null);
+        assertEquals("/frontend_health", c.getProbePath(),
+                "default targets rtp_llm FE; vLLM users override via DISPATCH_PROBE_PATH");
+    }
+
+    @Test
+    void probePathFromJson() {
+        DispatchConfig c = DispatchConfig.fromJson(
+                "{\"enabled\":true,\"fePoolServiceId\":\"x\",\"probePath\":\"/health\"}");
+        assertEquals("/health", c.getProbePath());
+    }
+
+    @Test
+    void envOverridesProbePath() {
+        Map<String, String> env = Map.of("DISPATCH_PROBE_PATH", "/health");
+        DispatchConfig c = DispatchConfig.fromJsonWithEnv(
+                "{\"enabled\":true,\"fePoolServiceId\":\"x\",\"probePath\":\"/frontend_health\"}", env);
+        assertEquals("/health", c.getProbePath(), "DISPATCH_PROBE_PATH must beat the JSON value");
+    }
+
+    @Test
+    void blankProbePathFailsValidation() {
+        Map<String, String> env = Map.of("DISPATCH_PROBE_PATH", "");
+        // Blank env is treated as "not set" by EnvConfigOverrides, so default sticks here.
+        DispatchConfig c = DispatchConfig.fromJsonWithEnv(null, env);
+        assertEquals("/frontend_health", c.getProbePath(),
+                "blank env value is ignored; default kept (matches existing FLEXLB_CONFIG semantics)");
+
+        // But an explicit blank in JSON is a config error — must throw to surface the typo.
+        try {
+            DispatchConfig.fromJson("{\"probePath\":\"  \"}");
+            org.junit.jupiter.api.Assertions.fail("blank probePath in JSON must throw");
+        } catch (IllegalArgumentException expected) {
+            // expected
+        }
+    }
 }
