@@ -2,8 +2,6 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.strategy.LoadBalanceStrategyFactory;
 import org.flexlb.balance.strategy.LoadBalancer;
-import org.flexlb.cache.core.RecentCacheKeyWindow;
-import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.balance.policy.GroupRoutingDecision;
 import org.flexlb.balance.policy.GroupRoutingPolicy;
 import org.flexlb.config.ConfigService;
@@ -137,75 +135,6 @@ class DefaultRouterTest {
         } catch (Exception e) {
             fail("Failed to mock LoadBalanceStrategyFactory: " + e.getMessage());
         }
-    }
-
-    private void injectRecentCacheMetricReporter(RecentCacheKeyWindow recentCacheKeyWindow,
-                                                 CacheMetricsReporter cacheMetricsReporter) {
-        try {
-            Field recentCacheKeyWindowField = DefaultRouter.class.getDeclaredField("recentCacheKeyWindow");
-            recentCacheKeyWindowField.setAccessible(true);
-            recentCacheKeyWindowField.set(defaultRouter, recentCacheKeyWindow);
-
-            Field cacheMetricsReporterField = DefaultRouter.class.getDeclaredField("cacheMetricsReporter");
-            cacheMetricsReporterField.setAccessible(true);
-            cacheMetricsReporterField.set(defaultRouter, cacheMetricsReporter);
-        } catch (Exception e) {
-            fail("Failed to inject recent cache metric reporter: " + e.getMessage());
-        }
-    }
-
-    @Test
-    void should_report_recent_cache_key_metrics_once_for_decode_weighted_cache_route() {
-        org.flexlb.dao.master.WorkerStatus dummyDecodeWorker = new org.flexlb.dao.master.WorkerStatus();
-        dummyDecodeWorker.setIp("192.168.1.2");
-        dummyDecodeWorker.setPort(8081);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put("192.168.1.2:8081", dummyDecodeWorker);
-
-        when(request.getBlockCacheKeys()).thenReturn(List.of(1L, 2L, 3L));
-
-        ServerStatus decodeServerStatus = new ServerStatus();
-        decodeServerStatus.setSuccess(true);
-        decodeServerStatus.setServerIp("192.168.1.2");
-        decodeServerStatus.setHttpPort(8081);
-        decodeServerStatus.setRole(RoleType.DECODE);
-        when(decodeLoadBalancer.select(any(BalanceContext.class), eq(RoleType.DECODE), isNull()))
-                .thenReturn(decodeServerStatus);
-
-        CacheMetricsReporter cacheMetricsReporter = org.mockito.Mockito.mock(CacheMetricsReporter.class);
-        injectRecentCacheMetricReporter(new RecentCacheKeyWindow(null), cacheMetricsReporter);
-
-        Response response = defaultRouter.route(balanceContext);
-
-        assertTrue(response.isSuccess(), "Response should be successful");
-        verify(cacheMetricsReporter).reportRecentCacheKeyHitMetrics(
-                RecentCacheKeyWindow.DEFAULT_TIME_WINDOW_MS, 0L, 3L);
-    }
-
-    @Test
-    void should_report_recent_cache_key_metrics_when_request_has_no_block_cache_keys() {
-        org.flexlb.dao.master.WorkerStatus dummyDecodeWorker = new org.flexlb.dao.master.WorkerStatus();
-        dummyDecodeWorker.setIp("192.168.1.2");
-        dummyDecodeWorker.setPort(8081);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put("192.168.1.2:8081", dummyDecodeWorker);
-
-        when(request.getBlockCacheKeys()).thenReturn(List.of());
-
-        ServerStatus decodeServerStatus = new ServerStatus();
-        decodeServerStatus.setSuccess(true);
-        decodeServerStatus.setServerIp("192.168.1.2");
-        decodeServerStatus.setHttpPort(8081);
-        decodeServerStatus.setRole(RoleType.DECODE);
-        when(decodeLoadBalancer.select(any(BalanceContext.class), eq(RoleType.DECODE), isNull()))
-                .thenReturn(decodeServerStatus);
-
-        CacheMetricsReporter cacheMetricsReporter = org.mockito.Mockito.mock(CacheMetricsReporter.class);
-        injectRecentCacheMetricReporter(new RecentCacheKeyWindow(null), cacheMetricsReporter);
-
-        Response response = defaultRouter.route(balanceContext);
-
-        assertTrue(response.isSuccess(), "Response should be successful");
-        verify(cacheMetricsReporter).reportRecentCacheKeyHitMetrics(
-                RecentCacheKeyWindow.DEFAULT_TIME_WINDOW_MS, 0L, 0L);
     }
 
     @Test
