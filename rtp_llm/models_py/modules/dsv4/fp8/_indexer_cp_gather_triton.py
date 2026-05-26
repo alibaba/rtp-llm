@@ -3,9 +3,8 @@ per-block grouped FP8 cache.
 
 Mirrors vLLM's ``cp_gather_indexer_k_quant_cache_kernel`` (csrc/cache_kernels.cu),
 but driven by an explicit ``slot_mapping`` (one absolute slot per output token,
-``-1`` to skip / write zeros) instead of ``cu_seq_lens + block_table`` —
-RTP-LLM's pool helper (`_compute_pool_slots`) already resolves the
-``(b, t) → absolute_slot`` indirection.
+``-1`` to skip / write zeros) instead of ``cu_seq_lens + block_table``. The
+caller resolves the ``(b, t) → absolute_slot`` indirection before launching.
 
 Cache layout (per block of ``block_size`` tokens):
 

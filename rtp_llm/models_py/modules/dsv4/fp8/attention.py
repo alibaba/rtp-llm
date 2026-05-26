@@ -862,8 +862,8 @@ class AttentionFP8(nn.Module):
             self.compressor.configure_kv_cache_shape(max_seq_len // compress_ratio)
             # #50 standalone / warmup fallback: nested indexer compressor
             # shares the INDEXER_KV pool with Indexer; when pool context is
-            # absent (warmup, unit tests), ``_bind_kv_cache_from_pool``
-            # needs the T hint to allocate the ephemeral zero tensor.
+            # absent (warmup, unit tests), keep the T hint available for
+            # legacy shape fallbacks.
             if compress_ratio == 4:
                 from rtp_llm.models_py.modules.dsv4.fp8.indexer import IndexerFP8
 
@@ -1539,7 +1539,7 @@ class AttentionFP8(nn.Module):
             # FP8 KV pool has TMA per-block padding which the flat 2D
             # ``_pool_view`` cannot represent; use the 3D as_strided form
             # instead. CompressorFP8 stores whatever shape it receives
-            # in ``_kv_pool_view`` and dispatches via ``_pool_view_3d``.
+            # in ``_kv_pool_3d``.
             if kv_at is not None:
                 kv_view = self._pool_view_3d_fp8(kv_at)
             else:

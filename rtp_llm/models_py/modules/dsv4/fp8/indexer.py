@@ -94,12 +94,17 @@ def _fp8_prefill_topk_force_radix_sort() -> bool:
 
 
 def _fp8_prefill_topk_use_torch() -> bool:
-    return os.environ.get("DSV4_INDEXER_TOPK_BACKEND", "auto").strip().lower() == "torch"
+    return (
+        os.environ.get("DSV4_INDEXER_TOPK_BACKEND", "auto").strip().lower() == "torch"
+    )
 
 
 def _fp8_prefill_topk_canonicalize() -> bool:
     return os.environ.get("DSV4_INDEXER_TOPK_CANONICALIZE", "").strip().lower() in (
-        "1", "true", "yes", "on",
+        "1",
+        "true",
+        "yes",
+        "on",
     )
 
 
@@ -124,9 +129,13 @@ def _run_prefill_topk_torch(
     indices = torch.where(indices < lengths, indices, torch.full_like(indices, -1))
     if _fp8_prefill_topk_canonicalize():
         sentinel = torch.iinfo(torch.int32).max
-        sortable = torch.where(indices >= 0, indices, torch.full_like(indices, sentinel))
+        sortable = torch.where(
+            indices >= 0, indices, torch.full_like(indices, sentinel)
+        )
         sorted_idx = torch.sort(sortable, dim=-1).values
-        indices = torch.where(sorted_idx == sentinel, torch.full_like(sorted_idx, -1), sorted_idx)
+        indices = torch.where(
+            sorted_idx == sentinel, torch.full_like(sorted_idx, -1), sorted_idx
+        )
     out[:, :k_eff].copy_(indices)
 
 
@@ -198,9 +207,8 @@ class _IndexerFP8PrefillMeta(NamedTuple):
 
     Built once by :meth:`IndexerFP8.prepare` from the caller's
     per-step state (``bsz``, ``seqlen``, ``sp_int``, ``device``) and the
-    bound INDEXER_KV pool. Replaces the in-forward ``torch.arange`` /
-    ``_compute_pool_slots`` / ``where`` / ``zeros`` chain so
-    :meth:`IndexerFP8.forward` is kernel-only.
+    bound INDEXER_KV pool. Replaces the old in-forward slot construction and
+    masking chain so :meth:`IndexerFP8.forward` is kernel-only.
 
     All ``torch.Tensor`` fields are device-side, contiguous, and
     immediately consumable by the gather / score / topk kernels.
@@ -504,11 +512,7 @@ class IndexerFP8(PoolBackedModule):
             score_2d = score.view(bsz * q_len, T_max)
             lengths_i32 = compressed_len.view(bsz * q_len)
             out_topk_2d = out_topk_buffer.view(bsz * q_len, K)
-            if (
-                K_eff > 0
-                and K in (512, 1024, 2048)
-                and _persistent_topk_enabled()
-            ):
+            if K_eff > 0 and K in (512, 1024, 2048) and _persistent_topk_enabled():
                 rtp_llm_ops.dsv4_persistent_topk(
                     score_2d,
                     lengths_i32,
@@ -528,9 +532,7 @@ class IndexerFP8(PoolBackedModule):
                     )
                     topk_idxs = score_masked.topk(K_eff, dim=-1)[1].to(torch.int32)
                     out_topk_2d[:, :K_eff].copy_(topk_idxs)
-                    k_arange = torch.arange(K, device=out_topk_buffer.device).view(
-                        1, K
-                    )
+                    k_arange = torch.arange(K, device=out_topk_buffer.device).view(1, K)
                     out_topk_2d.masked_fill_(k_arange >= lengths_i32.view(-1, 1), -1)
             return out_topk_buffer
         finally:
