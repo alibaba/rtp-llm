@@ -54,6 +54,18 @@ public class FlexlbConfig {
      */
     private long cacheHitMaxCacheKeys = 10_000_000L;
 
+    /**
+     * Whether Master writes successful requests into the recent cache-key window.
+     * Environment override: CACHE_HIT_WINDOW_WRITE_ENABLED.
+     */
+    private boolean cacheHitWindowWriteEnabled = true;
+
+    /**
+     * Whether Master reports recent cache-key hit/total metrics.
+     * Environment override: CACHE_HIT_METRIC_REPORT_ENABLED.
+     */
+    private boolean cacheHitMetricReportEnabled = true;
+
     // ========== Queue Configuration ==========
 
     /**
