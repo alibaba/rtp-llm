@@ -95,6 +95,44 @@ __global__ void mtpSpecDecodeTokensMetadataPrepareKernel(const int32_t* __restri
     }
 }
 
+__global__ void mtpPrefillShiftAppendKernel(const int32_t* __restrict__ combo_tokens_in,
+                                            const int32_t* __restrict__ input_lengths,
+                                            const int32_t* __restrict__ batch_offsets,
+                                            const int32_t* __restrict__ new_all_token_ids,
+                                            int32_t* __restrict__ combo_tokens_out,
+                                            int32_t token_stride,
+                                            int32_t batch_size,
+                                            int32_t total_tokens) {
+    const int32_t global_idx = static_cast<int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+    if (global_idx >= total_tokens) {
+        return;
+    }
+    // Binary search for the batch this token belongs to. batch_offsets[b] holds
+    // the exclusive end offset for batch b (i.e. cumulative input_lengths up to b+1).
+    int32_t lo = 0;
+    int32_t hi = batch_size - 1;
+    while (lo < hi) {
+        const int32_t mid = lo + ((hi - lo) >> 1);
+        if (batch_offsets[mid] <= global_idx) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    const int32_t batch_idx         = lo;
+    const int32_t batch_start       = (batch_idx == 0) ? 0 : batch_offsets[batch_idx - 1];
+    const int32_t position_in_batch = global_idx - batch_start;
+    const int32_t input_length      = input_lengths[batch_idx];
+
+    if (position_in_batch == input_length - 1) {
+        // Last position: write the new accepted token (last column of new_all_token_ids).
+        combo_tokens_out[global_idx] = new_all_token_ids[batch_idx * token_stride + token_stride - 1];
+    } else if (position_in_batch < input_length - 1) {
+        // Shift left by 1: out[i] = in[i+1] within the batch.
+        combo_tokens_out[global_idx] = combo_tokens_in[global_idx + 1];
+    }
+}
+
 void checkCudaI32Vector(const torch::Tensor& tensor, const char* name, int64_t batch_size) {
     RTP_LLM_CHECK_WITH_INFO(tensor.defined(), "%s must be defined", name);
     RTP_LLM_CHECK_WITH_INFO(tensor.is_cuda(), "%s must be CUDA", name);
@@ -201,6 +239,49 @@ void invokeMtpSpecDecodeTokensMetadataPrepare(const std::vector<torch::Tensor>& 
         lm_output_indexes.data_ptr<int32_t>(),
         tokens_per_batch,
         static_cast<int32_t>(batch_size));
+}
+
+void invokeMtpPrefillShiftAppend(const torch::Tensor& combo_tokens_in,
+                                 const torch::Tensor& input_lengths,
+                                 const torch::Tensor& batch_offsets,
+                                 const torch::Tensor& new_all_token_ids,
+                                 torch::Tensor&       combo_tokens_out,
+                                 int32_t              token_stride,
+                                 cudaStream_t         stream) {
+    const int64_t batch_size = input_lengths.numel();
+    if (batch_size <= 0) {
+        return;
+    }
+    const int64_t total_tokens = combo_tokens_in.numel();
+    if (total_tokens <= 0) {
+        return;
+    }
+    checkCudaI32Vector(combo_tokens_in, "combo_tokens_in", total_tokens);
+    checkCudaI32Vector(combo_tokens_out, "combo_tokens_out", total_tokens);
+    checkCudaI32Vector(input_lengths, "input_lengths", batch_size);
+    checkCudaI32Vector(batch_offsets, "batch_offsets", batch_size);
+    RTP_LLM_CHECK_WITH_INFO(new_all_token_ids.defined() && new_all_token_ids.is_cuda(),
+                            "new_all_token_ids must be CUDA");
+    RTP_LLM_CHECK_WITH_INFO(new_all_token_ids.scalar_type() == torch::kInt32,
+                            "new_all_token_ids must be int32 (got %s)",
+                            c10::toString(new_all_token_ids.scalar_type()));
+    RTP_LLM_CHECK_WITH_INFO(new_all_token_ids.is_contiguous(), "new_all_token_ids must be contiguous");
+    RTP_LLM_CHECK_WITH_INFO(new_all_token_ids.numel() >= batch_size * token_stride,
+                            "new_all_token_ids numel %ld < batch_size %ld * token_stride %d",
+                            new_all_token_ids.numel(),
+                            batch_size,
+                            token_stride);
+
+    constexpr int block_size = 256;
+    const int     grid_size  = static_cast<int>((total_tokens + block_size - 1) / block_size);
+    mtpPrefillShiftAppendKernel<<<grid_size, block_size, 0, stream>>>(combo_tokens_in.data_ptr<int32_t>(),
+                                                                      input_lengths.data_ptr<int32_t>(),
+                                                                      batch_offsets.data_ptr<int32_t>(),
+                                                                      new_all_token_ids.data_ptr<int32_t>(),
+                                                                      combo_tokens_out.data_ptr<int32_t>(),
+                                                                      token_stride,
+                                                                      static_cast<int32_t>(batch_size),
+                                                                      static_cast<int32_t>(total_tokens));
 }
 
 }  // namespace rtp_llm

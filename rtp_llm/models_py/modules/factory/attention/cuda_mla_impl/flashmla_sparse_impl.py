@@ -681,6 +681,45 @@ class SparseMlaImpl(MlaImplBase):
         )
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs) -> None:
+        if (
+            getattr(attn_inputs, "is_target_verify", False)
+            and isinstance(self.fmha_impl, SparseMlaFp8Op)
+            and attn_inputs.kv_cache_kernel_block_id_device is not None
+            and self.fmha_params.target_verify_total_tokens > 0
+        ):
+            block_table = getattr(attn_inputs, "kv_cache_block_id_device", None)
+            if not isinstance(block_table, torch.Tensor) or block_table.numel() == 0:
+                block_table = attn_inputs.kv_cache_kernel_block_id_device
+            self.fmha_params.fill_target_verify_cuda_graph_params(
+                attn_inputs.input_lengths,
+                attn_inputs.prefix_lengths,
+                block_table,
+                self.seq_size_per_block,
+            )
+            self._refresh_paged_mqa_schedule_metadata(attn_inputs, forbid_realloc=True)
+            self.fmha_impl.plan(self.fmha_params, block_table, attn_inputs=attn_inputs)
+            return
+        # Decode fast path (draft model): SparseMlaImpl handles decode for sparse
+        # configs because MlaFlashInferDecodeImpl rejects when is_sparse=True.
+        # fillParams' 3 toHostContiguousI32 D2H syncs go away by delegating to
+        # the device-only fillDecodeCudaGraphParams kernel.
+        if (
+            not getattr(attn_inputs, "is_prefill", True)
+            and isinstance(self.fmha_impl, SparseMlaOp)
+            and attn_inputs.sequence_lengths_plus_1_d is not None
+            and attn_inputs.kv_cache_kernel_block_id_device is not None
+        ):
+            block_table = getattr(attn_inputs, "kv_cache_block_id_device", None)
+            if not isinstance(block_table, torch.Tensor) or block_table.numel() == 0:
+                block_table = attn_inputs.kv_cache_kernel_block_id_device
+            self.fmha_params.fill_sparse_mla_decode_cuda_graph_params(
+                attn_inputs.sequence_lengths_plus_1_d,
+                block_table,
+                self.seq_size_per_block,
+            )
+            self._refresh_paged_mqa_schedule_metadata(attn_inputs, forbid_realloc=True)
+            self.fmha_impl.plan(self.fmha_params, block_table, attn_inputs=attn_inputs)
+            return
         self.prepare(attn_inputs, forbid_realloc=True)
 
     # -- BMMs ----------------------------------------------------------------

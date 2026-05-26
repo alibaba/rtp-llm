@@ -633,6 +633,95 @@ void FlashInferMlaAttnParams::fillDecodeCudaGraphParams(torch::Tensor sequence_l
     slot_mapping                 = torch::Tensor();
 }
 
+void FlashInferMlaAttnParams::fillPrefillCudaGraphParams(torch::Tensor input_lengths_d,
+                                                         torch::Tensor prefix_lengths_d,
+                                                         torch::Tensor kv_cache_block_id_device,
+                                                         int           seq_size_per_block,
+                                                         int           total_tokens) {
+    RTP_LLM_CHECK_WITH_INFO(input_lengths_d.defined() && input_lengths_d.is_cuda(),
+                            "fillPrefillCudaGraphParams expects CUDA input_lengths");
+    RTP_LLM_CHECK_WITH_INFO(prefix_lengths_d.defined() && prefix_lengths_d.is_cuda(),
+                            "fillPrefillCudaGraphParams expects CUDA prefix_lengths");
+    RTP_LLM_CHECK_WITH_INFO(kv_cache_block_id_device.defined() && kv_cache_block_id_device.is_cuda(),
+                            "fillPrefillCudaGraphParams expects CUDA kv_cache block table");
+    RTP_LLM_CHECK_WITH_INFO(total_tokens > 0, "total_tokens must be > 0");
+
+    if (input_lengths_d.scalar_type() != torch::kInt32)
+        input_lengths_d = input_lengths_d.to(torch::kInt32);
+    if (prefix_lengths_d.scalar_type() != torch::kInt32)
+        prefix_lengths_d = prefix_lengths_d.to(torch::kInt32);
+    if (kv_cache_block_id_device.scalar_type() != torch::kInt32)
+        kv_cache_block_id_device = kv_cache_block_id_device.to(torch::kInt32);
+
+    const int batch_size           = static_cast<int>(input_lengths_d.size(0));
+    const int max_blocks_per_batch = static_cast<int>(kv_cache_block_id_device.size(1));
+    const int page_capacity        = batch_size * max_blocks_per_batch;
+
+    // Buffers must already be sized (capture ran fillParams once).
+    ensureTensorSize(batch_size,
+                     total_tokens,
+                     page_capacity,
+                     /*reuse_page_num=*/0,
+                     /*batch_reuse_info_size=*/batch_size * 4,
+                     /*forbid_realloc=*/true);
+
+    cudaStream_t stream = GET_CURRENT_STREAM();
+
+    invokePrepareFlashInferPrefillParams(input_lengths_d.data_ptr<int32_t>(),
+                                         prefix_lengths_d.data_ptr<int32_t>(),
+                                         kv_cache_block_id_device.data_ptr<int32_t>(),
+                                         batch_indice_d.data_ptr<int32_t>(),
+                                         page_indice_d.data_ptr<int32_t>(),
+                                         decode_page_indptr_d.data_ptr<int32_t>(),
+                                         paged_kv_last_page_len_d.data_ptr<int32_t>(),
+                                         qo_indptr_d.data_ptr<int32_t>(),
+                                         prefill_ragged_kv_len_indptr_d.data_ptr<int32_t>(),
+                                         kvlen_d.data_ptr<int32_t>(),
+                                         positions_d.data_ptr<int32_t>(),
+                                         slot_mapping_d_.data_ptr<int64_t>(),
+                                         batch_size,
+                                         max_blocks_per_batch,
+                                         seq_size_per_block,
+                                         stream);
+
+    // Update tensor shapes (host metadata, no GPU op).
+    auto set_shape = [](torch::Tensor& t, std::vector<int64_t> s) {
+        if (t.defined())
+            t.unsafeGetTensorImpl()->set_sizes_contiguous(s);
+    };
+    set_shape(batch_indice_d, {total_tokens});
+    set_shape(batch_indice_h, {total_tokens});
+    set_shape(positions_d, {total_tokens});
+    set_shape(positions_h, {total_tokens});
+    set_shape(kvlen_d, {batch_size});
+    set_shape(kvlen_h, {batch_size});
+    set_shape(qo_indptr_d, {batch_size + 1});
+    set_shape(qo_indptr_h, {batch_size + 1});
+    set_shape(decode_page_indptr_d, {batch_size + 1});
+    set_shape(decode_page_indptr_h, {batch_size + 1});
+    set_shape(paged_kv_last_page_len_d, {batch_size});
+    set_shape(paged_kv_last_page_len_h, {batch_size});
+    set_shape(prefill_ragged_kv_len_indptr_d, {batch_size + 1});
+    set_shape(prefill_ragged_kv_len_indptr_h, {batch_size + 1});
+    set_shape(page_indice_d, {page_capacity});
+    set_shape(page_indice_h, {page_capacity});
+    set_shape(slot_mapping_d_, {total_tokens});
+    set_shape(slot_mapping_h_, {total_tokens});
+
+    // Set output tensor references.
+    batch_indice                 = batch_indice_d;
+    page_indice                  = page_indice_d;
+    reuse_cache_page_indice      = torch::Tensor();
+    decode_page_indptr           = decode_page_indptr_d;
+    prefill_ragged_kv_len_indptr = prefill_ragged_kv_len_indptr_d;
+    paged_kv_last_page_len       = paged_kv_last_page_len_d;
+    qo_indptr                    = qo_indptr_d;
+    kvlen                        = kvlen_d;
+    positions                    = positions_d;
+    batch_reuse_info_vec         = torch::Tensor();
+    slot_mapping                 = slot_mapping_d_;
+}
+
 void FlashInferMlaAttnParams::fillParamsMhaDevice(torch::Tensor t_prefix_lengths,
                                                   torch::Tensor t_sequence_lengths,
                                                   torch::Tensor t_input_lengths,
@@ -737,6 +826,15 @@ void registerPyFlashInferMlaParams(pybind11::module& m) {
              pybind11::arg("kv_cache_block_id_device"),
              pybind11::arg("seq_size_per_block"),
              "Update FlashInfer decode metadata on device during CUDA graph replay")
+        .def("fill_prefill_cuda_graph_params",
+             &rtp_llm::FlashInferMlaAttnParams::fillPrefillCudaGraphParams,
+             pybind11::arg("input_lengths_d"),
+             pybind11::arg("prefix_lengths_d"),
+             pybind11::arg("kv_cache_block_id_device"),
+             pybind11::arg("seq_size_per_block"),
+             pybind11::arg("total_tokens"),
+             "Device-only prefill metadata fill for CUDA graph replay (MTP draft prefill). "
+             "Issues a single cudaStreamSynchronize so host indptr mirrors are valid for FlashInfer plan().")
         .def(
             "fill_params_mha_device",
             [](rtp_llm::FlashInferMlaAttnParams& self,
