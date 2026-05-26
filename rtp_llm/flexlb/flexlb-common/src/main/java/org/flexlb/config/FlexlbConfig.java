@@ -66,6 +66,12 @@ public class FlexlbConfig {
      */
     private boolean cacheHitMetricReportEnabled = true;
 
+    /**
+     * Whether Master logs per-request recent cache-key hit trace.
+     * Environment override: CACHE_HIT_TRACE_LOG_ENABLED.
+     */
+    private boolean cacheHitTraceLogEnabled = false;
+
     // ========== Queue Configuration ==========
 
     /**

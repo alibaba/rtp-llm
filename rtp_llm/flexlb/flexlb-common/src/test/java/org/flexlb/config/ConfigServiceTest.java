@@ -11,6 +11,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ConfigServiceTest {
 
@@ -97,10 +98,12 @@ class ConfigServiceTest {
     void should_override_cache_hit_switches_with_environment() {
         ConfigService configService = new ConfigService(Map.of(
                 "CACHE_HIT_WINDOW_WRITE_ENABLED", "false",
-                "CACHE_HIT_METRIC_REPORT_ENABLED", "false"));
+                "CACHE_HIT_METRIC_REPORT_ENABLED", "false",
+                "CACHE_HIT_TRACE_LOG_ENABLED", "true"));
 
         assertFalse(configService.loadBalanceConfig().isCacheHitWindowWriteEnabled());
         assertFalse(configService.loadBalanceConfig().isCacheHitMetricReportEnabled());
+        assertTrue(configService.loadBalanceConfig().isCacheHitTraceLogEnabled());
     }
 
     private Request request() {
