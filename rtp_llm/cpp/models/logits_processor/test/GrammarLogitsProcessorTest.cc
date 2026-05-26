@@ -203,14 +203,13 @@ TEST(GrammarLogitsProcessorTest, SpeculativePrefixPathReportsInsteadOfRollingMat
     ASSERT_TRUE(compiled);
 
     auto matcher   = backend.createMatcher(compiled, false, std::nullopt);
-    bool reported = false;
-    auto processor =
-        std::make_shared<GrammarLogitsProcessor>(matcher,
-                                                 /*eos_token_id=*/0,
-                                                 [&reported](ErrorCode, const std::string& message, bool) {
-                                                     reported = message.find("precomputed MTP verify bitmask")
-                                                                != std::string::npos;
-                                                 });
+    bool reported  = false;
+    auto processor = std::make_shared<GrammarLogitsProcessor>(
+        matcher,
+        /*eos_token_id=*/0,
+        [&reported](ErrorCode, const std::string& message, bool) {
+            reported = message.find("precomputed MTP verify bitmask") != std::string::npos;
+        });
 
     SamplerInputs inputs;
     inputs.logits        = torch::zeros({2, 128}, torch::kFloat32);
@@ -290,10 +289,10 @@ TEST(GrammarLogitsProcessorTest, SpecTryAcceptMasksModelVocabTailBeyondGrammarVo
     auto                   matcher = backend.createMatcher(compiled, false, std::nullopt);
     GrammarLogitsProcessor processor(matcher, /*eos_token_id=*/0);
 
-    const int            P          = 1;
+    const int            P           = 1;
     const size_t         model_vocab = 160;
-    const size_t         W          = SpecLogitsProcessor::bitmaskWordCount(model_vocab);
-    std::vector<int32_t> draft      = {static_cast<int32_t>('a')};
+    const size_t         W           = SpecLogitsProcessor::bitmaskWordCount(model_vocab);
+    std::vector<int32_t> draft       = {static_cast<int32_t>('a')};
     std::vector<int32_t> bitmask((P + 1) * W, SpecLogitsProcessor::kBitmaskAllowAll);
 
     SpecLogitsProcessorRequest request;
@@ -433,11 +432,10 @@ TEST(ReasoningGrammarLogitsProcessorTest, JsonObjectConstrainsOnlyAfterThinkEnd)
     EXPECT_EQ(inputs.logits[0][0].item<float>(), BaseLogitsProcessor::neg_inf);
     EXPECT_EQ(inputs.logits[0][static_cast<int>('<')].item<float>(), BaseLogitsProcessor::neg_inf);
 
-    processor.updateStatus(torch::tensor({{static_cast<int32_t>('b'),
-                                           static_cast<int32_t>('x'),
-                                           static_cast<int32_t>('y')}},
-                                         torch::kInt32),
-                           3);
+    processor.updateStatus(
+        torch::tensor({{static_cast<int32_t>('b'), static_cast<int32_t>('x'), static_cast<int32_t>('y')}},
+                      torch::kInt32),
+        3);
 
     inputs.logits           = torch::zeros({1, 128}, torch::kFloat32);
     inputs.sequence_lengths = torch::tensor({3}, torch::kInt32);
@@ -446,6 +444,48 @@ TEST(ReasoningGrammarLogitsProcessorTest, JsonObjectConstrainsOnlyAfterThinkEnd)
     EXPECT_GT(inputs.logits[0][static_cast<int>('{')].item<float>(), BaseLogitsProcessor::neg_inf);
     EXPECT_EQ(inputs.logits[0][static_cast<int>('a')].item<float>(), BaseLogitsProcessor::neg_inf);
     EXPECT_EQ(processor.acceptedTokenLen(), 3);
+}
+
+TEST(ReasoningGrammarLogitsProcessorTest, NaturalCloseForcesTrailingPadBeforeGrammar) {
+    // end_think = [</think>='y', 271 (pad)]; pad stays in DFA, so a natural
+    // </think> only matches the prefix and CLOSING_THINK force-emits 271 via
+    // the existing forceThinkEndTokenLocked path before grammar takes over.
+    constexpr int kPadToken  = 271;
+    constexpr int kVocabSize = 512;
+    auto          backend    = makeBackend();
+    auto          compiled   = backend.compileNow({"json", R"({"type":"object"})"}).compiled;
+    ASSERT_TRUE(compiled);
+
+    auto matcher = backend.createMatcher(
+        compiled, /*require_reasoning=*/false, std::nullopt, /*terminate_without_stop_token=*/true);
+    ReasoningGrammarLogitsProcessor processor(matcher,
+                                              /*eos_token_id=*/0,
+                                              /*max_thinking_tokens=*/32,
+                                              {static_cast<int>('<')},
+                                              {static_cast<int>('y'), kPadToken},
+                                              /*input_length=*/0);
+
+    processor.updateStatus(torch::tensor({{static_cast<int32_t>('y')}}, torch::kInt32), 1);
+
+    SamplerInputs inputs;
+    inputs.logits           = torch::zeros({1, kVocabSize}, torch::kFloat32);
+    inputs.finished_mask    = torch::zeros({1}, torch::kBool);
+    inputs.input_lengths    = torch::tensor({0}, torch::kInt32);
+    inputs.sequence_lengths = torch::tensor({1}, torch::kInt32);
+    inputs.vocab_size       = kVocabSize;
+    processor.process(inputs, 0, 1);
+
+    EXPECT_GT(inputs.logits[0][kPadToken].item<float>(), BaseLogitsProcessor::neg_inf);
+    EXPECT_EQ(inputs.logits[0][static_cast<int>('{')].item<float>(), BaseLogitsProcessor::neg_inf);
+
+    processor.updateStatus(torch::tensor({{kPadToken}}, torch::kInt32), 1);
+
+    inputs.logits           = torch::zeros({1, kVocabSize}, torch::kFloat32);
+    inputs.sequence_lengths = torch::tensor({2}, torch::kInt32);
+    processor.process(inputs, 0, 1);
+
+    EXPECT_GT(inputs.logits[0][static_cast<int>('{')].item<float>(), BaseLogitsProcessor::neg_inf);
+    EXPECT_EQ(inputs.logits[0][static_cast<int>('a')].item<float>(), BaseLogitsProcessor::neg_inf);
 }
 
 TEST(ReasoningGrammarLogitsProcessorTest, SpecTryAcceptPassthroughThenGrammar) {
@@ -574,7 +614,7 @@ TEST(LogitsProcessorFactoryTest, GrammarThinkingWithoutEndIdsReportsInvalidParam
     bool        reported = false;
     ErrorCode   code     = ErrorCode::UNKNOWN_ERROR;
     std::string message;
-    auto processors = LogitsProcessorFactory::createLogitsProcessors(
+    auto        processors = LogitsProcessorFactory::createLogitsProcessors(
         generate_input,
         /*init_batch_size=*/1,
         /*max_batch_size=*/1,
@@ -608,7 +648,7 @@ TEST(LogitsProcessorFactoryTest, GrammarThinkingBackendMissingSuppressesThinkMod
     bool        reported = false;
     ErrorCode   code     = ErrorCode::UNKNOWN_ERROR;
     std::string message;
-    auto processors = LogitsProcessorFactory::createLogitsProcessors(
+    auto        processors = LogitsProcessorFactory::createLogitsProcessors(
         generate_input,
         /*init_batch_size=*/1,
         /*max_batch_size=*/1,
@@ -638,7 +678,7 @@ TEST(LogitsProcessorFactoryTest, GrammarThinkingInvalidResponseFormatSuppressesT
     bool        reported = false;
     ErrorCode   code     = ErrorCode::UNKNOWN_ERROR;
     std::string message;
-    auto processors = LogitsProcessorFactory::createLogitsProcessors(
+    auto        processors = LogitsProcessorFactory::createLogitsProcessors(
         generate_input,
         /*init_batch_size=*/1,
         /*max_batch_size=*/1,
