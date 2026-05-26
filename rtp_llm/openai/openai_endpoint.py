@@ -404,8 +404,15 @@ class OpenaiEndpoint(object):
     ) -> CompleteResponseAsyncGenerator:
         async def response_generator():
             debug_info_responded = False
+            # Track last-seen usage so we can emit a trailing chunk even
+            # when usage and finish_reason arrive on different chunks.
+            last_usage = None
+            usage_emitted = False
 
             async for response in choice_generator:
+                if response.usage is not None:
+                    last_usage = response.usage
+
                 output = None
                 if (
                     debug_info is not None
@@ -433,18 +440,14 @@ class OpenaiEndpoint(object):
                 #             same chunk as `finish_reason`. Kept as the
                 #             default for backward compatibility with internal
                 #             consumers that predate the spec layout.
-                has_finish_usage = (
-                    response.usage is not None
-                    and response.choices
+                has_finish = (
+                    response.choices
                     and any(c.finish_reason for c in response.choices)
                 )
                 if include_usage is True:
-                    # Spec layout: only emit `usage` once, in a trailing
-                    # choices=[] chunk after the chunk that carried
-                    # finish_reason. Suppress `usage` on every other chunk
-                    # (the backend tags every chunk with running totals, but
-                    # spec-compliant clients only inspect the choices-empty
-                    # chunk).
+                    # Spec layout: suppress `usage` on every content chunk;
+                    # emit it once in a trailing choices=[] chunk after the
+                    # chunk that carried finish_reason.
                     yield ChatCompletionStreamResponse(
                         choices=response.choices,
                         usage=None,
@@ -453,14 +456,15 @@ class OpenaiEndpoint(object):
                         extra_outputs=response.extra_outputs,
                     )
                     debug_info_responded = True
-                    if has_finish_usage:
+                    if has_finish and last_usage is not None:
                         yield ChatCompletionStreamResponse(
                             choices=[],
-                            usage=response.usage,
+                            usage=last_usage,
                             aux_info=None,
                             debug_info=None,
                             extra_outputs=None,
                         )
+                        usage_emitted = True
                 elif include_usage is False:
                     yield ChatCompletionStreamResponse(
                         choices=response.choices,
@@ -480,6 +484,23 @@ class OpenaiEndpoint(object):
                         extra_outputs=response.extra_outputs,
                     )
                     debug_info_responded = True
+
+            # Fallback: if include_usage=True and we accumulated usage but
+            # never emitted it (usage arrived on a different chunk than
+            # finish_reason, or as a standalone usage-only chunk), emit the
+            # trailing usage chunk now so it is never silently lost.
+            if include_usage is True and last_usage is not None and not usage_emitted:
+                logging.warning(
+                    "Usage was not co-located with finish_reason; "
+                    "emitting deferred trailing usage chunk."
+                )
+                yield ChatCompletionStreamResponse(
+                    choices=[],
+                    usage=last_usage,
+                    aux_info=None,
+                    debug_info=None,
+                    extra_outputs=None,
+                )
 
         complete_response_collect_func = partial(
             OpenaiEndpoint._collect_complete_response,

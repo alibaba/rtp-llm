@@ -228,5 +228,99 @@ class TestCollectCompleteResponseHandlesEmptyChoices(unittest.TestCase):
         self.assertEqual(resp.choices[0].message.content, "hi")
 
 
+class TestIncludeUsageTrueUsageOnSeparateChunk(unittest.TestCase):
+    """include_usage=True with usage arriving on a different chunk than
+    finish_reason. The trailing usage chunk must still be emitted."""
+
+    def test_usage_after_finish_on_separate_chunk(self):
+        """Backend sends finish_reason first, then a standalone usage-only
+        chunk. The trailing choices=[] usage chunk must still appear."""
+        usage = UsageInfo(prompt_tokens=4, completion_tokens=8, total_tokens=12)
+        items = [
+            StreamResponseObject(choices=[_make_choice(content="hello")]),
+            StreamResponseObject(
+                choices=[_make_choice(content="", finish_reason=FinisheReason.stop)],
+            ),
+            # Usage arrives on a standalone chunk with no choices.
+            StreamResponseObject(choices=[], usage=usage),
+        ]
+        gen = OpenaiEndpoint._complete_stream_response(
+            _gen_from(items),
+            debug_info=None,
+            tokenizer=None,
+            include_usage=True,
+        )
+        out = asyncio.run(_drain(gen))
+
+        # 3 original chunks forwarded + 1 trailing usage chunk
+        self.assertEqual(len(out), 4)
+        # Content chunk
+        self.assertIsNone(out[0].usage)
+        self.assertEqual(len(out[0].choices), 1)
+        # Finish chunk (usage suppressed)
+        self.assertIsNone(out[1].usage)
+        self.assertEqual(out[1].choices[0].finish_reason, FinisheReason.stop)
+        # Standalone usage-only chunk forwarded with usage=None
+        self.assertIsNone(out[2].usage)
+        self.assertEqual(out[2].choices, [])
+        # Trailing usage chunk emitted by fallback
+        self.assertEqual(out[3].choices, [])
+        self.assertIsNotNone(out[3].usage)
+        self.assertEqual(out[3].usage.completion_tokens, 8)
+
+    def test_usage_before_finish_on_separate_chunk(self):
+        """Usage arrives on an early chunk, finish_reason on a later one.
+        The trailing usage chunk should carry the last-seen usage."""
+        early_usage = UsageInfo(prompt_tokens=4, completion_tokens=3, total_tokens=7)
+        final_usage = UsageInfo(prompt_tokens=4, completion_tokens=8, total_tokens=12)
+        items = [
+            StreamResponseObject(
+                choices=[_make_choice(content="hello")], usage=early_usage
+            ),
+            # Final usage on a mid-stream chunk, finish comes later without usage.
+            StreamResponseObject(
+                choices=[_make_choice(content=" world")], usage=final_usage
+            ),
+            StreamResponseObject(
+                choices=[_make_choice(content="", finish_reason=FinisheReason.stop)],
+            ),
+        ]
+        gen = OpenaiEndpoint._complete_stream_response(
+            _gen_from(items),
+            debug_info=None,
+            tokenizer=None,
+            include_usage=True,
+        )
+        out = asyncio.run(_drain(gen))
+
+        # 3 content/finish chunks + 1 trailing usage chunk
+        self.assertEqual(len(out), 4)
+        # All content chunks have usage=None
+        for i in range(3):
+            self.assertIsNone(out[i].usage)
+        # Trailing chunk carries the last-seen usage
+        self.assertEqual(out[3].choices, [])
+        self.assertIsNotNone(out[3].usage)
+        self.assertEqual(out[3].usage.completion_tokens, 8)
+
+    def test_no_usage_at_all_no_trailing_chunk(self):
+        """If no usage is ever seen, no trailing chunk is emitted."""
+        items = [
+            StreamResponseObject(choices=[_make_choice(content="hi")]),
+            StreamResponseObject(
+                choices=[_make_choice(content="", finish_reason=FinisheReason.stop)],
+            ),
+        ]
+        gen = OpenaiEndpoint._complete_stream_response(
+            _gen_from(items),
+            debug_info=None,
+            tokenizer=None,
+            include_usage=True,
+        )
+        out = asyncio.run(_drain(gen))
+        self.assertEqual(len(out), 2)
+        self.assertTrue(all(r.usage is None for r in out))
+
+
 if __name__ == "__main__":
     unittest.main()
