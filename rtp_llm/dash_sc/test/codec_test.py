@@ -219,6 +219,17 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
         self.assertEqual(_unpack_int64_le(by_name["finish_reason"]), [0])
         self.assertEqual(_unpack_int32_le(by_name["prompt_token_num"]), [10])
         self.assertEqual(_unpack_int32_le(by_name["prompt_cached_token_num"]), [4])
+        self.assertIn("prompt_token_num", infer.parameters)
+        self.assertIn("prompt_cached_token_num", infer.parameters)
+        self.assertTrue(infer.parameters["prompt_token_num"].HasField("int64_param"))
+        self.assertTrue(
+            infer.parameters["prompt_cached_token_num"].HasField("int64_param")
+        )
+        self.assertEqual(
+            infer.parameters["prompt_cached_token_num"].int64_param,
+            4,
+        )
+        self.assertEqual(infer.parameters["prompt_token_num"].int64_param, 10)
 
     def test_not_finished_finish_reason_two(self) -> None:
         out = GenerateOutput(
@@ -241,6 +252,32 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
         self.assertEqual(_unpack_int64_le(by_name["finish_reason"]), [2])
         self.assertEqual(_unpack_int32_le(by_name["prompt_token_num"]), [0])
         self.assertEqual(_unpack_int32_le(by_name["prompt_cached_token_num"]), [0])
+        self.assertEqual(infer.parameters["prompt_token_num"].int64_param, 0)
+        self.assertEqual(infer.parameters["prompt_cached_token_num"].int64_param, 0)
+
+    def test_missing_aux_info_uses_request_prompt_len_for_usage(self) -> None:
+        out = GenerateOutput(
+            output_ids=torch.tensor([1], dtype=torch.int32),
+            finished=False,
+            aux_info=None,
+        )
+        go = GenerateOutputs(generate_outputs=[out])
+        resp = build_stream_response_from_generate_outputs(
+            dash_sc_request_id="r",
+            model_name="m",
+            go=go,
+            request_log_tag=stream_log_tag(request_id_numeric=0, trace_id="r"),
+            request_input_ids=[10, 11, 12],
+        )
+        infer = resp.infer_response
+        by_name = {
+            infer.outputs[i].name: infer.raw_output_contents[i]
+            for i in range(len(infer.outputs))
+        }
+        self.assertEqual(_unpack_int32_le(by_name["prompt_token_num"]), [3])
+        self.assertEqual(_unpack_int32_le(by_name["prompt_cached_token_num"]), [0])
+        self.assertEqual(infer.parameters["prompt_token_num"].int64_param, 3)
+        self.assertEqual(infer.parameters["prompt_cached_token_num"].int64_param, 0)
 
     def test_output_ids_2d_uses_first_row(self) -> None:
         out = GenerateOutput(

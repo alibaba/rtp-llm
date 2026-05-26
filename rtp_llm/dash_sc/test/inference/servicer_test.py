@@ -170,6 +170,8 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
             for i in range(len(infer.outputs))
         }
         self.assertEqual(_unpack_int32_le(by_name["generated_ids"]), [3, 4])
+        self.assertEqual(infer.parameters["prompt_token_num"].int64_param, 2)
+        self.assertEqual(infer.parameters["prompt_cached_token_num"].int64_param, 0)
 
     async def test_empty_list_yields_error_response(self) -> None:
         req = self._minimal_request()
