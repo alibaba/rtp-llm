@@ -29,6 +29,46 @@ bool GroupPolicy::addSpecInfo(const std::string& spec_name, int32_t group_id, in
     return true;
 }
 
+void GroupPolicy::filterNullBlockUnitsFromView(LocationsView&                          locations_view,
+                                               const std::shared_ptr<KVCacheResource>& resource) const {
+    if (!resource) {
+        return;
+    }
+    const auto& group_blocks = resource->groupBlocks();
+    for (size_t key_idx = 0; key_idx < locations_view.size(); ++key_idx) {
+        auto& view = locations_view[key_idx];
+        if (view.empty()) {
+            continue;
+        }
+        view.erase(std::remove_if(view.begin(),
+                                  view.end(),
+                                  [&](const LocationSpecUnitView& unit) {
+                                      const auto it = spec_name_to_info_.find(unit.spec_name);
+                                      if (it == spec_name_to_info_.end()) {
+                                          return false;
+                                      }
+                                      const int32_t gid = it->second.group_id;
+                                      if (gid < 0 || static_cast<size_t>(gid) >= group_blocks.size()) {
+                                          return false;
+                                      }
+                                      const auto& blocks = group_blocks.at(gid)->blocks();
+                                      if (key_idx >= blocks.size()) {
+                                          return false;
+                                      }
+                                      if (rtp_llm::isNullBlockIdx(blocks[key_idx])) {
+                                          RTP_LLM_LOG_DEBUG(
+                                              "filterNullBlockUnitsFromView drop spec_name [%s] group_id [%d] key_idx [%zu]",
+                                              std::string(unit.spec_name).c_str(),
+                                              gid,
+                                              key_idx);
+                                          return true;
+                                      }
+                                      return false;
+                                  }),
+                   view.end());
+    }
+}
+
 std::string GroupPolicy::debugString() const {
     size_t            gs = groups_.size();
     std::stringstream debug_ss;

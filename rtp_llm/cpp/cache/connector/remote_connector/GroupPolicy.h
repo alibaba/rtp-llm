@@ -71,6 +71,14 @@ public:
     }
     virtual std::string debugString() const;
 
+    // Drop spec units whose owning group has NULL_BLOCK_IDX at the corresponding cache_key
+    // index. Required for DSV4 + linear_step where SWA / state ring-buffer groups carry
+    // NULL_BLOCK_IDX padding at non-step positions; without this filter -1 leaks into
+    // genReadRequest -> genBlockBuffers -> convertIndexToBuffer and trips the
+    // MemoryLayoutStrategy block-id range check on the receiving worker.
+    void filterNullBlockUnitsFromView(LocationsView&                          locations_view,
+                                      const std::shared_ptr<KVCacheResource>& resource) const;
+
 protected:
     std::shared_ptr<KVCacheAllocator> allocator_;
     std::set<int32_t>                 full_group_ids_;

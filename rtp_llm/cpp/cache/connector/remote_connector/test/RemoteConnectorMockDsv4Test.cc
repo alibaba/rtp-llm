@@ -538,6 +538,66 @@ TEST_F(RemoteConnectorMockDsv4Test, dsv4_read_partial_linear_at_last_block_fails
     ASSERT_EQ(RemoteConnectorState::State::RCS_ERROR, rctx->state());
 }
 
+// Regression for the linear_step refactor (commit 8a1652ab9) which dropped the
+// NULL_BLOCK_IDX guard from genReadRequest. With sparse SWA layout (linear_step > 1
+// or enable_reuse_cache=false), the local SWA group carries NULL_BLOCK_IDX at
+// non-step / non-active-tail positions; the remote SDK does not know this and may
+// hand back full_other Locations at those positions. FullLinearLayerGroupPolicy's
+// backward-iter only strips L* from non-latest full_other positions, so the LATEST
+// full_other (which becomes view[i] with all 7 specs) can still land on a NULL
+// local SWA block. Without the connector-side null filter, block_indices[L][i] = -1
+// is sent across the broadcast RPC and trips the MemoryLayoutStrategy block-id
+// range check on the receiving worker. The filter installed in genReadRequest must
+// drop those L* spec units before the request leaves rank 0.
+TEST_F(RemoteConnectorMockDsv4Test, dsv4_read_drops_l_specs_when_local_swa_is_null) {
+    auto kv_res = std::make_shared<KVCacheResource>();
+    // SWA valid only at positions {2, 3} → tail invariant satisfied; positions 0 and 1
+    // carry NULL_BLOCK_IDX in every SWA group (gid 3..6).
+    fillDsv4GroupBlocks(kv_res, {101, 102, 103, 104}, std::optional<std::vector<size_t>>({2, 3}));
+
+    const size_t tp_rank = 0;
+    // SDK pretends it has L data at key 102 (pos 1) — i.e. full_other at pos 1, full_only
+    // at pos 0 and pos 2. After backward iter, view[1] gets all 7 specs (the latest
+    // full_other from the end going backward); without the null filter L3..L6 at view[1]
+    // would carry block_id=-1 and crash the worker.
+    Locations expected_locations = genDsv4FullSwaLocations({101, 102, 103}, {1});
+    auto      meta               = std::make_shared<Dsv4Meta>("ut_dsv4_read_swa_null");
+
+    EXPECT_CALL(*meta_clients_[tp_rank],
+                MatchLocation(Eq("match_ut_dsv4_read_swa_null"),
+                              _,
+                              std::vector<int64_t>({101, 102, 103}),
+                              _,
+                              Eq(BlockMask(static_cast<size_t>(0))),
+                              _,
+                              _))
+        .WillOnce(Return(MatchLocationReturnType({ClientErrorCode::ER_OK, expected_locations})));
+
+    auto match_ctx = remote_connectors_[tp_rank]->asyncMatch(kv_res, meta);
+    waitDsv4AsyncContextDone(std::static_pointer_cast<AsyncContext>(match_ctx));
+    ASSERT_TRUE(match_ctx->success());
+    ASSERT_EQ(match_ctx->matchedBlockCount(), 3u);
+
+    // Expect F-only transfer at pos 0 and pos 1 (L specs at pos 1 dropped by the null
+    // filter); pos 2 is full_only and not added to view by the FullLinear backward iter.
+    UriStrVec                expected_uris = genDsv4Uris({101, 102}, {});
+    std::vector<std::string> expect_block_ids({"1", "11", "21", "2", "12", "22"});
+    EXPECT_CALL(*transfer_client_, LoadKvCaches(Eq(expected_uris), _, TransferTraceInfoMatcher(expect_block_ids)))
+        .WillOnce(Return(ClientErrorCode::ER_OK));
+
+    const int gpu_reuse_num          = static_cast<int>(kv_res->reuseBlockNum());
+    const int matched_num            = static_cast<int>(match_ctx->matchedBlockCount());
+    int       start_read_block_index = gpu_reuse_num;
+    int       read_block_num         = matched_num - gpu_reuse_num;
+    auto      read_context =
+        remote_connectors_[tp_rank]->asyncRead(kv_res, meta, match_ctx, start_read_block_index, read_block_num);
+    waitDsv4AsyncContextDone(std::static_pointer_cast<AsyncContext>(read_context));
+    ASSERT_TRUE(read_context->success());
+    // 2 view entries (view[0], view[1]) were non-empty after filter — view[2] was full_only
+    // and not added (exist_linear_location was still false at i=2 going backwards).
+    ASSERT_EQ(kv_res->remoteReuseBlockNum(), 2);
+}
+
 // ==================== Write tests ====================
 
 TEST_F(RemoteConnectorMockDsv4Test, dsv4_write_success) {

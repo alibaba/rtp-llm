@@ -815,6 +815,12 @@ bool RemoteConnector::genReadRequest(size_t                                   tp
         RTP_LLM_LOG_WARNING("trace_id [%s], filterNeedLoadLocations failed");
         return false;
     }
+    // DSV4 + linear_step: SWA / state ring-buffer groups carry NULL_BLOCK_IDX padding at
+    // non-step positions. The remote SDK does not know about that local layout, so the
+    // matched Locations may include L* spec units at key positions where our local block
+    // is NULL. Drop those units before they reach genBlockBuffers — otherwise -1 leaks
+    // into convertIndexToBuffer on the receiving worker and trips MemoryLayoutStrategy.
+    group_policy_->filterNullBlockUnitsFromView(locations_view, resource);
     new_reuse_block_num           = locations_view.size() - block_mask;  // only contains remote
     const auto& spec_name_to_info = group_policy_->spec_info_map();
     for (const auto& location_view : locations_view) {
