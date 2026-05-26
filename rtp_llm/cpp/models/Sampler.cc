@@ -128,7 +128,8 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                  presence_penalty,
                  frequency_penalty,
                  do_sample,
-                 generator});
+                 generator,
+                 &buffer_holder_});
             if (greedy_output.success.defined()) {
                 success.copy_(greedy_output.success);
                 // TODO(zhangjianning.zjn): would be better to eliminate the copy
@@ -197,6 +198,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
         from_batch_idx_out = to_batch_idx_out;
     }
 
+    buffer_holder_.release();
     return SamplerOutput({std::move(all_token_ids_out),
                           std::move(all_cum_log_probs_out),
                           std::move(inputs.all_probs),

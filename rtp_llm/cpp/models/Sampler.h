@@ -2,6 +2,7 @@
 
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
+#include "rtp_llm/models_py/bindings/core/TensorHolder.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 
 namespace rtp_llm {
@@ -16,6 +17,8 @@ public:
 
 private:
     void preprocessLogits(const SamplerInputs& inputs);
+
+    TensorHolder buffer_holder_;
 };
 
 }  // namespace rtp_llm
