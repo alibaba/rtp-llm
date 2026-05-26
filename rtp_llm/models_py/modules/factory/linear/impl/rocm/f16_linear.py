@@ -10,6 +10,14 @@ from aiter import hipb_mm, hipb_create_extension
 from functools import lru_cache
 from rtp_llm.ops import HWKernelConfig
 
+_DETERMINISTIC_GEMM = os.environ.get("DETERMINISTIC_MOE", "0") == "1"
+
+
+def _next_power_of_2(n: int) -> int:
+    if n <= 1:
+        return 1
+    return 1 << (n - 1).bit_length()
+
 class RocmF16LinearBase(LinearBase):
     """ROCm F16 (non-quantized) Linear"""
 
@@ -64,6 +72,20 @@ class RocmF16LinearWithSwizzle(RocmF16LinearBase):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         self.init_hipblas()
+        if _DETERMINISTIC_GEMM:
+            M = input.shape[0]
+            target_M = _next_power_of_2(M)
+            if target_M != M:
+                padded = torch.zeros(
+                    target_M, input.shape[1], dtype=input.dtype, device=input.device
+                )
+                padded[:M] = input
+                out = hipb_mm(
+                    padded, self.weight, solution_index=-1, bias=self.bias,
+                    out_dtype=input.dtype, scaleA=None, scaleB=None,
+                    scaleOut=None, bpreshuffle=True,
+                )
+                return out[:M]
         return hipb_mm(
             input,
             self.weight,
@@ -75,7 +97,8 @@ class RocmF16LinearWithSwizzle(RocmF16LinearBase):
             scaleOut=None,
             bpreshuffle=True,
         )
-        
+
+
 class RocmF16LinearNoSwizzle(RocmF16LinearBase):
 
     @classmethod
@@ -99,6 +122,20 @@ class RocmF16LinearNoSwizzle(RocmF16LinearBase):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         self.init_hipblas()
+        if _DETERMINISTIC_GEMM:
+            M = input.shape[0]
+            target_M = _next_power_of_2(M)
+            if target_M != M:
+                padded = torch.zeros(
+                    target_M, input.shape[1], dtype=input.dtype, device=input.device
+                )
+                padded[:M] = input
+                out = hipb_mm(
+                    padded, self.weight, solution_index=-1, bias=self.bias,
+                    out_dtype=input.dtype, scaleA=None, scaleB=None,
+                    scaleOut=None, bpreshuffle=False,
+                )
+                return out[:M]
         return hipb_mm(
             input,
             self.weight,
