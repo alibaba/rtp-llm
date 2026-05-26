@@ -68,12 +68,12 @@ struct CacheConfig {
 
     // Per-block bytes of all DSV4 STATE pools (INDEXER_STATE, CSA_STATE,
     // HCA_STATE). Excluded from the HBM fixed-pool reservation only when
-    // state_pool_uses_pinned_cpu is true.
+    // fixed_pool_uses_pinned_cpu is true.
     size_t state_block_size_bytes = 0;
 
-    // True when STATE pools should be allocated on pinned CPU memory and
-    // excluded from HBM fixed-pool reservation.
-    bool state_pool_uses_pinned_cpu = false;
+    // True when DSV4 fixed pools (STATE pools and SWA_KV) should be allocated
+    // on pinned CPU memory and excluded from HBM fixed-pool reservation.
+    bool fixed_pool_uses_pinned_cpu = false;
 
     // ---- Per-block strides (one layer) ----
     size_t kv_block_stride_bytes = 0;
@@ -114,8 +114,7 @@ struct CacheConfig {
         for (size_t gid = 0; gid < group_block_nums.size(); ++gid) {
             const bool is_swa = gid < group_types.size() && group_types[gid] == CacheGroupType::SWA;
             const auto region = gid < group_region_names.size() ? group_region_names[gid] : KVCacheRegionName::DEFAULT;
-            const bool is_state                       = isStateRegion(region);
-            const bool is_dsv4_fixed_region           = is_state || region == KVCacheRegionName::SWA_KV;
+            const bool is_dsv4_fixed_region           = isDsv4FixedRegion(region);
             const bool use_explicit_dsv4_fixed_blocks = is_dsv4_fixed_region && dsv4_fixed_pool_blocks > 0;
             uint32_t   rule_blocks;
             if (use_explicit_dsv4_fixed_blocks) {
@@ -130,7 +129,7 @@ struct CacheConfig {
             // Explicit DSV4 fixed pools are allocated outside the paged FULL
             // pool budget. The linear-step fallback is accounted by the
             // effective block-size formula instead, so no reserve is needed.
-            const bool exclude_from_reserve = is_state && state_pool_uses_pinned_cpu;
+            const bool exclude_from_reserve = is_dsv4_fixed_region && fixed_pool_uses_pinned_cpu;
             if (use_explicit_dsv4_fixed_blocks && gid < group_block_size_bytes.size() && !exclude_from_reserve) {
                 reserve += static_cast<size_t>(rule_blocks) * group_block_size_bytes[gid];
             }

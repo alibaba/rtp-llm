@@ -29,7 +29,10 @@ size_t steppedBytes(size_t bytes, int step) {
 }
 
 size_t fallbackFixedPoolHbmBytes(const CacheConfig& config) {
-    return config.swa_block_size_bytes + (config.state_pool_uses_pinned_cpu ? 0u : config.state_block_size_bytes);
+    if (config.fixed_pool_uses_pinned_cpu) {
+        return 0u;
+    }
+    return config.swa_block_size_bytes + config.state_block_size_bytes;
 }
 
 size_t effectivePagedBlockBytes(const CacheConfig& config, int step) {
@@ -37,6 +40,10 @@ size_t effectivePagedBlockBytes(const CacheConfig& config, int step) {
         return config.block_size_bytes;
     }
     return config.block_size_bytes + steppedBytes(fallbackFixedPoolHbmBytes(config), step);
+}
+
+bool hasDsv4FixedPoolBytes(const CacheConfig& config) {
+    return config.state_block_size_bytes > 0 || config.swa_block_size_bytes > 0;
 }
 
 }  // namespace
@@ -77,11 +84,10 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
         config.kernel_seq_size_per_block = config.seq_size_per_block;
     }
 
-    // STATE residency toggle must be set before the pre-pass finalizeBlockNums
-    // so fixed_pool_reserve_bytes excludes STATE bytes only when those pools
-    // live on pinned CPU.
-    config.state_pool_uses_pinned_cpu =
-        kv_cache_config.dsv4_state_pool_use_memory && config.state_block_size_bytes > 0;
+    // DSV4 fixed-pool residency toggle must be set before the pre-pass
+    // finalizeBlockNums so CPU-backed STATE/SWA_KV bytes are excluded from HBM.
+    config.fixed_pool_uses_pinned_cpu =
+        kv_cache_config.dsv4_fixed_pool_use_memory && hasDsv4FixedPoolBytes(config);
 
     if (kv_cache_config.test_block_num > 0) {
         RTP_LLM_LOG_INFO("KVCacheConfig explicitly specified kv cache block num %d", kv_cache_config.test_block_num);
@@ -176,12 +182,12 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
         }
     }
 
-    // STATE residency toggle (mirror createConfig) — must precede pre-pass
-    // so fixed_pool_reserve_bytes correctly accounts for CPU-backed STATE.
-    score_config.state_pool_uses_pinned_cpu =
-        kv_cache_config.dsv4_state_pool_use_memory && score_config.state_block_size_bytes > 0;
-    propose_config.state_pool_uses_pinned_cpu =
-        kv_cache_config.dsv4_state_pool_use_memory && propose_config.state_block_size_bytes > 0;
+    // DSV4 fixed-pool residency toggle (mirror createConfig) must precede
+    // pre-pass so fixed_pool_reserve_bytes accounts for CPU-backed regions.
+    score_config.fixed_pool_uses_pinned_cpu =
+        kv_cache_config.dsv4_fixed_pool_use_memory && hasDsv4FixedPoolBytes(score_config);
+    propose_config.fixed_pool_uses_pinned_cpu =
+        kv_cache_config.dsv4_fixed_pool_use_memory && hasDsv4FixedPoolBytes(propose_config);
 
     // Fixed-pool block counts depend on runtime scheduler limits. Finalize the
     // score and propose configs before sizing the shared paged budget so DSV4

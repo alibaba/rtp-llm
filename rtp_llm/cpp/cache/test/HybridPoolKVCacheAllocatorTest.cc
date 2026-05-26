@@ -168,6 +168,7 @@ static CacheConfig makeDSV4HybridPoolConfig(uint32_t block_num = 200) {
     auto              mc = makeProModelConfig();
     ParallelismConfig pc;
     KVCacheConfig     kv_cache_config;
+    kv_cache_config.seq_size_per_block     = 128;
     kv_cache_config.dsv4_fixed_pool_blocks = block_num;
     auto              config = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config);
     config.block_num         = block_num;
@@ -900,10 +901,10 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4InitAndAggregatedCounters) {
     EXPECT_EQ(allocator->availableBlocksNum(), expected_total);
 }
 
-TEST_F(HybridPoolKVCacheAllocatorTest, DSV4StateRegionPoolsUsePinnedCpuBackingWhenToggled) {
+TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FixedRegionPoolsUsePinnedCpuBackingWhenToggled) {
     auto config = makeDSV4HybridPoolConfig(/*block_num=*/200);
-    // DSV4_STATE_POOL_USE_MEMORY path → CacheConfigCreator would set this true.
-    config.state_pool_uses_pinned_cpu = true;
+    // DSV4_FIXED_POOL_USE_MEMORY path → CacheConfigCreator would set this true.
+    config.fixed_pool_uses_pinned_cpu = true;
     auto allocator                    = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
 
@@ -913,15 +914,15 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4StateRegionPoolsUsePinnedCpuBackingWh
     for (size_t gid = 0; gid < allocator->groupBlockPools().size(); ++gid) {
         const auto region_name = config.group_region_names[gid];
         EXPECT_EQ(allocator->groupBlockPools()[gid]->where(),
-                  isStateRegion(region_name) ? MemoryType::MEMORY_CPU_PINNED : MemoryType::MEMORY_GPU)
+                  isDsv4FixedRegion(region_name) ? MemoryType::MEMORY_CPU_PINNED : MemoryType::MEMORY_GPU)
             << "gid=" << gid << " region=" << static_cast<int>(region_name);
     }
 }
 
-TEST_F(HybridPoolKVCacheAllocatorTest, DSV4StateRegionPoolsOnGpuWhenStateBudgetZero) {
+TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FixedRegionPoolsOnGpuWhenFixedPoolMemoryDisabled) {
     auto config = makeDSV4HybridPoolConfig(/*block_num=*/200);
-    // Default (env=0): state_pool_uses_pinned_cpu == false → all 7 pools on GPU.
-    ASSERT_FALSE(config.state_pool_uses_pinned_cpu);
+    // Default (env=0): fixed_pool_uses_pinned_cpu == false → all 7 pools on GPU.
+    ASSERT_FALSE(config.fixed_pool_uses_pinned_cpu);
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
 
@@ -936,6 +937,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4ConfigSplitsStateBytesOutOfSwaAccumul
     auto              mc = makeTinyDSV4ModelConfig();
     ParallelismConfig pc;
     KVCacheConfig     kv_cache_config;
+    kv_cache_config.seq_size_per_block     = 128;
     kv_cache_config.dsv4_fixed_pool_blocks = 200;
     auto              config = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config);
 
@@ -969,7 +971,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4ConfigSplitsStateBytesOutOfSwaAccumul
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FinalizeBlockNumsUsesFixedPoolBlocks) {
     auto config = makeDSV4HybridPoolConfig(/*block_num=*/50);
-    config.state_pool_uses_pinned_cpu = true;
+    config.fixed_pool_uses_pinned_cpu = true;
 
     RuntimeConfig rt;  // unused inside finalizeBlockNums today
     config.finalizeBlockNums(/*global_block_num=*/200, rt);
@@ -984,12 +986,12 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FinalizeBlockNumsUsesFixedPoolBlocks)
         }
     }
 
-    // STATE bytes must NOT be charged to the HBM fixed-pool reserve when pinned.
+    // CPU-pinned fixed regions must NOT be charged to the HBM fixed-pool reserve.
     size_t expected_reserve = 0;
     for (size_t gid = 0; gid < config.group_block_size_bytes.size(); ++gid) {
         const auto region = config.group_region_names[gid];
         const auto type   = config.group_types[gid];
-        if (type != CacheGroupType::FULL && !isStateRegion(region)) {
+        if (type != CacheGroupType::FULL && !isDsv4FixedRegion(region)) {
             expected_reserve += static_cast<size_t>(config.dsv4_fixed_pool_blocks) * config.group_block_size_bytes[gid];
         }
     }
@@ -1012,9 +1014,9 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FinalizeBlockNumsUsesConfiguredFixedB
     }
 }
 
-TEST_F(HybridPoolKVCacheAllocatorTest, DSV4PinnedStateExcludesStateReserve) {
+TEST_F(HybridPoolKVCacheAllocatorTest, DSV4PinnedFixedPoolExcludesFixedReserve) {
     auto config = makeDSV4HybridPoolConfig(/*block_num=*/50);
-    config.state_pool_uses_pinned_cpu = true;  // env>0 simulation
+    config.fixed_pool_uses_pinned_cpu = true;  // env>0 simulation
 
     RuntimeConfig rt;
     config.finalizeBlockNums(/*global_block_num=*/200, rt);
@@ -1023,14 +1025,14 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4PinnedStateExcludesStateReserve) {
     for (size_t gid = 0; gid < config.group_block_nums.size(); ++gid) {
         const auto region = config.group_region_names[gid];
         const auto type   = config.group_types[gid];
-        if (type != CacheGroupType::FULL && !isStateRegion(region)) {
+        if (type != CacheGroupType::FULL && !isDsv4FixedRegion(region)) {
             expected_reserve += static_cast<size_t>(config.dsv4_fixed_pool_blocks) * config.group_block_size_bytes[gid];
         }
     }
     EXPECT_EQ(config.fixed_pool_reserve_bytes, expected_reserve);
 }
 
-TEST_F(HybridPoolKVCacheAllocatorTest, DSV4GpuStateIncludesStateReserve) {
+TEST_F(HybridPoolKVCacheAllocatorTest, DSV4GpuFixedPoolIncludesFixedReserve) {
     auto config = makeDSV4HybridPoolConfig(/*block_num=*/50);
 
     RuntimeConfig rt;
@@ -1049,7 +1051,9 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4GpuStateIncludesStateReserve) {
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FixedPoolBlocksFallbackFollowsLinearStep) {
     auto              mc = makeProModelConfig();
     ParallelismConfig pc;
-    auto              config = HybridPoolConfigCreator::createConfig(mc, pc, KVCacheConfig{});
+    KVCacheConfig     kv_cache_config;
+    kv_cache_config.seq_size_per_block = 128;
+    auto              config = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config);
     config.linear_step       = 4;
 
     RuntimeConfig rt;

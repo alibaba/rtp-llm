@@ -22,7 +22,7 @@ namespace test {
 namespace {
 
 constexpr int      kDsv4PoolNum           = 7;
-constexpr uint32_t kDsv4TokensPerBlock    = 256;
+constexpr uint32_t kDsv4TokensPerBlock    = 128;
 constexpr uint32_t kDsv4KvEntryBytes      = 1024;
 constexpr uint32_t kDsv4IndexerEntryBytes = 256;
 constexpr uint32_t kDsv4Fp8KvEntryBytes   = 584;
@@ -32,6 +32,7 @@ constexpr uint32_t kDsv4FixedPoolBlocks   = 256;
 
 static KVCacheConfig makeDsv4KvCacheConfig(uint32_t fixed_pool_blocks = kDsv4FixedPoolBlocks) {
     KVCacheConfig config;
+    config.seq_size_per_block     = 128;
     config.dsv4_fixed_pool_blocks = fixed_pool_blocks;
     return config;
 }
@@ -155,23 +156,23 @@ TEST(HybridPoolConfigCreatorTest, ProPoolSpecs) {
     auto              config = HybridPoolConfigCreator::createConfig(makeProModelConfig(), pc, makeDsv4KvCacheConfig());
 
     EXPECT_EQ(config.cache_specs[0]->layer_num, 30u);
-    EXPECT_EQ(config.cache_specs[0]->block_size_bytes(), 64u * kDsv4KvEntryBytes);
+    EXPECT_EQ(config.cache_specs[0]->block_size_bytes(), 32u * kDsv4KvEntryBytes);
     EXPECT_EQ(config.group_types[0], CacheGroupType::FULL);
 
     EXPECT_EQ(config.cache_specs[1]->layer_num, 31u);
-    EXPECT_EQ(config.cache_specs[1]->block_size_bytes(), 2u * kDsv4KvEntryBytes);
+    EXPECT_EQ(config.cache_specs[1]->block_size_bytes(), 1u * kDsv4KvEntryBytes);
 
     EXPECT_EQ(config.cache_specs[2]->layer_num, 30u);
-    EXPECT_EQ(config.cache_specs[2]->block_size_bytes(), 64u * kDsv4IndexerEntryBytes);
+    EXPECT_EQ(config.cache_specs[2]->block_size_bytes(), 32u * kDsv4IndexerEntryBytes);
 
     EXPECT_EQ(config.cache_specs[3]->layer_num, 30u);
-    EXPECT_EQ(config.cache_specs[3]->block_size_bytes(), 256u * 512u * 4u);
+    EXPECT_EQ(config.cache_specs[3]->block_size_bytes(), kDsv4TokensPerBlock * 512u * 4u);
 
     EXPECT_EQ(config.cache_specs[4]->layer_num, 30u);
-    EXPECT_EQ(config.cache_specs[4]->block_size_bytes(), 256u * 2048u * 4u);
+    EXPECT_EQ(config.cache_specs[4]->block_size_bytes(), kDsv4TokensPerBlock * 2048u * 4u);
 
     EXPECT_EQ(config.cache_specs[5]->layer_num, 31u);
-    EXPECT_EQ(config.cache_specs[5]->block_size_bytes(), 256u * 1024u * 4u);
+    EXPECT_EQ(config.cache_specs[5]->block_size_bytes(), kDsv4TokensPerBlock * 1024u * 4u);
 
     EXPECT_EQ(config.cache_specs[6]->layer_num, 61u);
     EXPECT_EQ(config.cache_specs[6]->block_size_bytes(), kDsv4TokensPerBlock * kDsv4KvEntryBytes);
@@ -192,12 +193,12 @@ TEST(HybridPoolConfigCreatorTest, FlashPoolSpecs) {
 TEST(HybridPoolConfigCreatorTest, BlockSizeBytes) {
     ParallelismConfig pc;
     auto              config = HybridPoolConfigCreator::createConfig(makeProModelConfig(), pc, makeDsv4KvCacheConfig());
-    EXPECT_EQ(config.cache_specs[0]->block_size_bytes(), 64u * kDsv4KvEntryBytes);
-    EXPECT_EQ(config.cache_specs[1]->block_size_bytes(), 2u * kDsv4KvEntryBytes);
-    EXPECT_EQ(config.cache_specs[2]->block_size_bytes(), 64u * kDsv4IndexerEntryBytes);
-    EXPECT_EQ(config.cache_specs[3]->block_size_bytes(), 256u * 512u * 4u);
-    EXPECT_EQ(config.cache_specs[4]->block_size_bytes(), 256u * 2048u * 4u);
-    EXPECT_EQ(config.cache_specs[5]->block_size_bytes(), 256u * 1024u * 4u);
+    EXPECT_EQ(config.cache_specs[0]->block_size_bytes(), 32u * kDsv4KvEntryBytes);
+    EXPECT_EQ(config.cache_specs[1]->block_size_bytes(), 1u * kDsv4KvEntryBytes);
+    EXPECT_EQ(config.cache_specs[2]->block_size_bytes(), 32u * kDsv4IndexerEntryBytes);
+    EXPECT_EQ(config.cache_specs[3]->block_size_bytes(), kDsv4TokensPerBlock * 512u * 4u);
+    EXPECT_EQ(config.cache_specs[4]->block_size_bytes(), kDsv4TokensPerBlock * 2048u * 4u);
+    EXPECT_EQ(config.cache_specs[5]->block_size_bytes(), kDsv4TokensPerBlock * 1024u * 4u);
     EXPECT_EQ(config.cache_specs[6]->block_size_bytes(), kDsv4TokensPerBlock * kDsv4KvEntryBytes);
 }
 
@@ -210,10 +211,10 @@ TEST(HybridPoolConfigCreatorTest, Fp8BlockSizeBytesUsePaddedPhysicalStride) {
     ASSERT_EQ(config.cache_specs.size(), 7u);
     ASSERT_EQ(config.group_kv_block_stride_bytes.size(), 7u);
 
-    EXPECT_EQ(config.cache_specs[0]->block_size_bytes(), 37440u);  // 64 * 584 padded to 576B alignment
-    EXPECT_EQ(config.cache_specs[1]->block_size_bytes(), 1728u);   // 2 * 584 padded to 576B alignment
-    EXPECT_EQ(config.cache_specs[2]->block_size_bytes(), 64u * 132u);
-    EXPECT_EQ(config.cache_specs[6]->block_size_bytes(), 149760u);  // 256 * 584 padded to 576B alignment
+    EXPECT_EQ(config.cache_specs[0]->block_size_bytes(), 19008u);  // 32 * 584 padded to 576B alignment
+    EXPECT_EQ(config.cache_specs[1]->block_size_bytes(), 1152u);   // 1 * 584 padded to 576B alignment
+    EXPECT_EQ(config.cache_specs[2]->block_size_bytes(), 32u * 132u);
+    EXPECT_EQ(config.cache_specs[6]->block_size_bytes(), 74880u);  // 128 * 584 padded to 576B alignment
 
     EXPECT_EQ(config.group_kv_block_stride_bytes[0], config.cache_specs[0]->block_size_bytes());
     EXPECT_EQ(config.group_kv_block_stride_bytes[1], config.cache_specs[1]->block_size_bytes());
@@ -299,11 +300,11 @@ TEST(DSV4KVCacheSpecTest, KVSpecFromPoolSpec) {
 
 TEST(DSV4KVCacheSpecTest, SWAFp8StateSpecUsesPaddedPhysicalBlockSize) {
     DSV4StateSpec spec(
-        KVCacheRegionName::SWA_KV, 61, kDsv4Fp8KvEntryBytes, 256, DataType::TYPE_UINT8, kDsv4TokensPerBlock);
+        KVCacheRegionName::SWA_KV, 61, kDsv4Fp8KvEntryBytes, kDsv4TokensPerBlock, DataType::TYPE_UINT8, kDsv4TokensPerBlock);
 
     EXPECT_EQ(spec.block_size(), kDsv4TokensPerBlock * kDsv4Fp8KvEntryBytes);
     EXPECT_EQ(spec.natural_block_size_bytes(), kDsv4TokensPerBlock * kDsv4Fp8KvEntryBytes);
-    EXPECT_EQ(spec.block_size_bytes(), 149760u);
+    EXPECT_EQ(spec.block_size_bytes(), 74880u);
     EXPECT_EQ(spec.cache_type, KVCacheRegionName::SWA_KV);
 }
 
@@ -374,6 +375,7 @@ TEST(HybridPoolConfigCreatorTest, DSV4FixedPoolBlocksAppliedToFixedGroups) {
     ParallelismConfig pc;
     RuntimeConfig     runtime_config;
     KVCacheConfig     kv_cache_config;
+    kv_cache_config.seq_size_per_block                         = 128;
     kv_cache_config.test_block_num                              = 100;
     kv_cache_config.dsv4_fixed_pool_blocks                      = kDsv4FixedPoolBlocks;
     runtime_config.max_generate_batch_size                      = 5;
@@ -404,6 +406,7 @@ TEST(HybridPoolConfigCreatorTest, DSV4FixedPoolBlocksIndependentOfMaxConcurrency
         ParallelismConfig pc;
         RuntimeConfig     runtime_config;
         KVCacheConfig     kv_cache_config;
+        kv_cache_config.seq_size_per_block                         = 128;
         kv_cache_config.test_block_num                              = 100;
         kv_cache_config.dsv4_fixed_pool_blocks                      = kDsv4FixedPoolBlocks;
         runtime_config.max_generate_batch_size                      = max_concurrency;
@@ -424,6 +427,7 @@ TEST(HybridPoolConfigCreatorTest, DSV4FixedPoolBlocksCanBeOverriddenByConfig) {
     ParallelismConfig pc;
     RuntimeConfig     runtime_config;
     KVCacheConfig     kv_cache_config;
+    kv_cache_config.seq_size_per_block                         = 128;
     kv_cache_config.test_block_num                              = 100;
     kv_cache_config.dsv4_fixed_pool_blocks                      = 6;
     runtime_config.max_generate_batch_size                      = 2;
@@ -490,12 +494,14 @@ TEST(CacheConfigTest, FixedPoolReserveDeductedFromPagedBudget) {
 
     // Config with fewer fixed-pool blocks.
     KVCacheConfig kv_cache_config_with;
+    kv_cache_config_with.seq_size_per_block              = 128;
     kv_cache_config_with.kv_cache_mem_mb                  = 65536;
     kv_cache_config_with.dsv4_fixed_pool_blocks           = small_fixed_pool;
     auto config_with = CacheConfigCreator::createConfig(mc, pc, runtime_config, kv_cache_config_with);
 
     // Config with more fixed-pool blocks.
     KVCacheConfig kv_cache_config_without;
+    kv_cache_config_without.seq_size_per_block              = 128;
     kv_cache_config_without.kv_cache_mem_mb                  = 65536;
     kv_cache_config_without.dsv4_fixed_pool_blocks           = kDsv4FixedPoolBlocks;
     auto config_without = CacheConfigCreator::createConfig(mc, pc, runtime_config, kv_cache_config_without);
@@ -550,6 +556,7 @@ TEST(CacheConfigTest, DSV4FixedPoolBlocksFallbackFollowsLinearStep) {
 
     ParallelismConfig pc;
     KVCacheConfig     kv_cache_config;
+    kv_cache_config.seq_size_per_block = 128;
     kv_cache_config.test_block_num = 100;
     kv_cache_config.linear_step    = 4;
 
@@ -565,60 +572,62 @@ TEST(CacheConfigTest, DSV4FixedPoolBlocksFallbackFollowsLinearStep) {
     EXPECT_EQ(config.fixed_pool_reserve_bytes, 0u);
 }
 
-TEST(CacheConfigTest, DSV4PinnedStateFallbackIsExcludedFromGpuBudget) {
+TEST(CacheConfigTest, DSV4PinnedFixedPoolFallbackIsExcludedFromGpuBudget) {
     auto              mc = makeProModelConfig();
     ParallelismConfig pc;
     RuntimeConfig     runtime_config;
     runtime_config.max_generate_batch_size                      = 4;
     runtime_config.fifo_scheduler_config.max_context_batch_size = 2;
 
-    KVCacheConfig gpu_state_config;
-    gpu_state_config.kv_cache_mem_mb = 65536;
-    gpu_state_config.linear_step     = 4;
+    KVCacheConfig gpu_fixed_config;
+    gpu_fixed_config.seq_size_per_block = 128;
+    gpu_fixed_config.kv_cache_mem_mb = 65536;
+    gpu_fixed_config.linear_step     = 4;
 
-    KVCacheConfig pinned_state_config = gpu_state_config;
-    pinned_state_config.dsv4_state_pool_use_memory = true;
+    KVCacheConfig pinned_fixed_config = gpu_fixed_config;
+    pinned_fixed_config.dsv4_fixed_pool_use_memory = true;
 
-    auto gpu_state    = CacheConfigCreator::createConfig(mc, pc, runtime_config, gpu_state_config);
-    auto pinned_state = CacheConfigCreator::createConfig(mc, pc, runtime_config, pinned_state_config);
+    auto gpu_fixed    = CacheConfigCreator::createConfig(mc, pc, runtime_config, gpu_fixed_config);
+    auto pinned_fixed = CacheConfigCreator::createConfig(mc, pc, runtime_config, pinned_fixed_config);
 
-    EXPECT_GT(pinned_state.block_num, gpu_state.block_num);
+    EXPECT_GT(pinned_fixed.block_num, gpu_fixed.block_num);
     for (int gid = 3; gid < kDsv4PoolNum; ++gid) {
-        EXPECT_EQ(gpu_state.group_block_nums[gid],
-                  static_cast<uint32_t>(gpu_state.block_num / gpu_state.linear_step))
+        EXPECT_EQ(gpu_fixed.group_block_nums[gid],
+                  static_cast<uint32_t>(gpu_fixed.block_num / gpu_fixed.linear_step))
             << "gid=" << gid;
-        EXPECT_EQ(pinned_state.group_block_nums[gid],
-                  static_cast<uint32_t>(pinned_state.block_num / pinned_state.linear_step))
+        EXPECT_EQ(pinned_fixed.group_block_nums[gid],
+                  static_cast<uint32_t>(pinned_fixed.block_num / pinned_fixed.linear_step))
             << "gid=" << gid;
-        EXPECT_GT(pinned_state.group_block_nums[gid], gpu_state.group_block_nums[gid]) << "gid=" << gid;
+        EXPECT_GT(pinned_fixed.group_block_nums[gid], gpu_fixed.group_block_nums[gid]) << "gid=" << gid;
     }
-    EXPECT_EQ(pinned_state.fixed_pool_reserve_bytes, 0u);
+    EXPECT_EQ(pinned_fixed.fixed_pool_reserve_bytes, 0u);
 }
 
-TEST(CacheConfigTest, DSV4PinnedStateFallbackFollowsExpandedFullPoolWhenStepOne) {
+TEST(CacheConfigTest, DSV4PinnedFixedPoolFallbackFollowsExpandedFullPoolWhenStepOne) {
     auto              mc = makeProModelConfig();
     ParallelismConfig pc;
     RuntimeConfig     runtime_config;
     runtime_config.max_generate_batch_size                      = 4;
     runtime_config.fifo_scheduler_config.max_context_batch_size = 2;
 
-    KVCacheConfig gpu_state_config;
-    gpu_state_config.kv_cache_mem_mb = 65536;
+    KVCacheConfig gpu_fixed_config;
+    gpu_fixed_config.seq_size_per_block = 128;
+    gpu_fixed_config.kv_cache_mem_mb = 65536;
 
-    KVCacheConfig pinned_state_config = gpu_state_config;
-    pinned_state_config.dsv4_state_pool_use_memory = true;
+    KVCacheConfig pinned_fixed_config = gpu_fixed_config;
+    pinned_fixed_config.dsv4_fixed_pool_use_memory = true;
 
-    auto gpu_state    = CacheConfigCreator::createConfig(mc, pc, runtime_config, gpu_state_config);
-    auto pinned_state = CacheConfigCreator::createConfig(mc, pc, runtime_config, pinned_state_config);
+    auto gpu_fixed    = CacheConfigCreator::createConfig(mc, pc, runtime_config, gpu_fixed_config);
+    auto pinned_fixed = CacheConfigCreator::createConfig(mc, pc, runtime_config, pinned_fixed_config);
 
-    EXPECT_GT(pinned_state.block_num, gpu_state.block_num);
-    ASSERT_EQ(pinned_state.group_block_nums.size(), static_cast<size_t>(kDsv4PoolNum));
+    EXPECT_GT(pinned_fixed.block_num, gpu_fixed.block_num);
+    ASSERT_EQ(pinned_fixed.group_block_nums.size(), static_cast<size_t>(kDsv4PoolNum));
     for (int gid = 3; gid < kDsv4PoolNum; ++gid) {
-        EXPECT_EQ(gpu_state.group_block_nums[gid], static_cast<uint32_t>(gpu_state.block_num)) << "gid=" << gid;
-        EXPECT_EQ(pinned_state.group_block_nums[gid], static_cast<uint32_t>(pinned_state.block_num)) << "gid=" << gid;
-        EXPECT_GT(pinned_state.group_block_nums[gid], gpu_state.group_block_nums[gid]) << "gid=" << gid;
+        EXPECT_EQ(gpu_fixed.group_block_nums[gid], static_cast<uint32_t>(gpu_fixed.block_num)) << "gid=" << gid;
+        EXPECT_EQ(pinned_fixed.group_block_nums[gid], static_cast<uint32_t>(pinned_fixed.block_num)) << "gid=" << gid;
+        EXPECT_GT(pinned_fixed.group_block_nums[gid], gpu_fixed.group_block_nums[gid]) << "gid=" << gid;
     }
-    EXPECT_EQ(pinned_state.fixed_pool_reserve_bytes, 0u);
+    EXPECT_EQ(pinned_fixed.fixed_pool_reserve_bytes, 0u);
 }
 
 TEST(CacheConfigTest, DSV4MtpKeepsProposeLayerInSwaPool) {
@@ -631,6 +640,7 @@ TEST(CacheConfigTest, DSV4MtpKeepsProposeLayerInSwaPool) {
     runtime_config.fifo_scheduler_config.max_context_batch_size = 1;
 
     KVCacheConfig kv_cache_config;
+    kv_cache_config.seq_size_per_block = 128;
     kv_cache_config.test_block_num = 100;
     kv_cache_config.dsv4_fixed_pool_blocks = kDsv4FixedPoolBlocks;
 
@@ -844,12 +854,12 @@ TEST_F(DSV4AllocatorTest, SpecBlockSizesMatchPoolSpecs) {
     auto config = makeDSV4AllocatorConfig();
 
     ASSERT_EQ(config.cache_specs.size(), 7u);
-    EXPECT_EQ(config.cache_specs[0]->block_size_bytes(), 64u * kDsv4KvEntryBytes);
-    EXPECT_EQ(config.cache_specs[1]->block_size_bytes(), 2u * kDsv4KvEntryBytes);
-    EXPECT_EQ(config.cache_specs[2]->block_size_bytes(), 64u * kDsv4IndexerEntryBytes);
-    EXPECT_EQ(config.cache_specs[3]->block_size_bytes(), 256u * 512u * 4u);
-    EXPECT_EQ(config.cache_specs[4]->block_size_bytes(), 256u * 2048u * 4u);
-    EXPECT_EQ(config.cache_specs[5]->block_size_bytes(), 256u * 1024u * 4u);
+    EXPECT_EQ(config.cache_specs[0]->block_size_bytes(), 32u * kDsv4KvEntryBytes);
+    EXPECT_EQ(config.cache_specs[1]->block_size_bytes(), 1u * kDsv4KvEntryBytes);
+    EXPECT_EQ(config.cache_specs[2]->block_size_bytes(), 32u * kDsv4IndexerEntryBytes);
+    EXPECT_EQ(config.cache_specs[3]->block_size_bytes(), kDsv4TokensPerBlock * 512u * 4u);
+    EXPECT_EQ(config.cache_specs[4]->block_size_bytes(), kDsv4TokensPerBlock * 2048u * 4u);
+    EXPECT_EQ(config.cache_specs[5]->block_size_bytes(), kDsv4TokensPerBlock * 1024u * 4u);
     EXPECT_EQ(config.cache_specs[6]->block_size_bytes(), kDsv4TokensPerBlock * kDsv4KvEntryBytes);
 }
 
@@ -958,9 +968,9 @@ TEST_F(DSV4AllocatorTest, FlashSpecBlockSizes) {
     auto config = makeDSV4AllocatorConfig(/*use_flash=*/true);
 
     ASSERT_EQ(config.cache_specs.size(), 7u);
-    EXPECT_EQ(config.cache_specs[0]->block_size_bytes(), 64u * kDsv4KvEntryBytes);
-    EXPECT_EQ(config.cache_specs[1]->block_size_bytes(), 2u * kDsv4KvEntryBytes);
-    EXPECT_EQ(config.cache_specs[2]->block_size_bytes(), 64u * kDsv4IndexerEntryBytes);
+    EXPECT_EQ(config.cache_specs[0]->block_size_bytes(), 32u * kDsv4KvEntryBytes);
+    EXPECT_EQ(config.cache_specs[1]->block_size_bytes(), 1u * kDsv4KvEntryBytes);
+    EXPECT_EQ(config.cache_specs[2]->block_size_bytes(), 32u * kDsv4IndexerEntryBytes);
     EXPECT_EQ(config.cache_specs[6]->block_size_bytes(), kDsv4TokensPerBlock * kDsv4KvEntryBytes);
 }
 

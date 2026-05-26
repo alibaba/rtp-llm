@@ -368,7 +368,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("device_cache_min_free_blocks", &KVCacheConfig::device_cache_min_free_blocks)
         .def_readwrite("load_cache_retry_times", &KVCacheConfig::load_cache_retry_times)
         .def_readwrite("dsv4_fixed_pool_blocks", &KVCacheConfig::dsv4_fixed_pool_blocks)
-        .def_readwrite("dsv4_state_pool_use_memory", &KVCacheConfig::dsv4_state_pool_use_memory)
+        .def_readwrite("dsv4_fixed_pool_use_memory", &KVCacheConfig::dsv4_fixed_pool_use_memory)
         // Remote connector configuration fields
         .def_readwrite("reco_enable_vipserver", &KVCacheConfig::reco_enable_vipserver)
         .def_readwrite("reco_vipserver_domain", &KVCacheConfig::reco_vipserver_domain)
@@ -444,7 +444,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.reco_client_config,
                                       self.ssm_state_dtype,
                                       self.dsv4_fixed_pool_blocks,
-                                      self.dsv4_state_pool_use_memory);
+                                      self.dsv4_fixed_pool_use_memory);
             },
             [](py::tuple t) {
                 if (t.size() != 45 && t.size() != 46 && t.size() < 50)
@@ -506,9 +506,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.reco_client_config                   = t[42 + offset].cast<std::string>();
                     c.ssm_state_dtype                      = t[43 + offset].cast<std::string>();
                     c.dsv4_fixed_pool_blocks               = t[44 + offset].cast<uint32_t>();
-                    const size_t expected_with_state_memory = (has_disk_fields ? 51u : 46u);
-                    if (t.size() >= expected_with_state_memory) {
-                        c.dsv4_state_pool_use_memory = t[45 + offset].cast<bool>();
+                    const size_t expected_with_fixed_pool_memory = (has_disk_fields ? 51u : 46u);
+                    if (t.size() >= expected_with_fixed_pool_memory) {
+                        c.dsv4_fixed_pool_use_memory = t[45 + offset].cast<bool>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("KVCacheConfig unpickle error: ") + e.what());
