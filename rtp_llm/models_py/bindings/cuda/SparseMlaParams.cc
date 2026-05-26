@@ -1,5 +1,6 @@
 #include "rtp_llm/models_py/bindings/cuda/SparseMlaParams.h"
 #include "rtp_llm/models_py/bindings/cuda/FlashInferMlaParams.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/cuda_graph_prepare.h"
 
 #include <cuda_runtime.h>
 
@@ -452,6 +453,9 @@ void SparseMlaParams::fillParams(torch_ext::PyAttentionInputs attn_inputs,
         if (forbid_realloc && batch_indice_h.defined()) {
             graph_token_capacity = std::max<int64_t>(graph_token_capacity, batch_indice_h.size(0));
         }
+        if (attn_inputs.is_target_verify && total_tokens > 0) {
+            target_verify_total_tokens_ = static_cast<int>(total_tokens);
+        }
 
         if (graph_token_capacity > 0) {
             ensureTensorSize(batch_size, static_cast<int>(graph_token_capacity), forbid_realloc);
@@ -517,6 +521,122 @@ void SparseMlaParams::fillParams(torch_ext::PyAttentionInputs attn_inputs,
     }
 }
 
+void SparseMlaParams::fillTargetVerifyCudaGraphParams(torch::Tensor input_lengths_d,
+                                                      torch::Tensor prefix_lengths_d,
+                                                      torch::Tensor kv_cache_block_id_device,
+                                                      int           seq_size_per_block) {
+    RTP_LLM_CHECK_WITH_INFO(input_lengths_d.defined() && input_lengths_d.is_cuda(), "expects CUDA input_lengths");
+    RTP_LLM_CHECK_WITH_INFO(prefix_lengths_d.defined() && prefix_lengths_d.is_cuda(), "expects CUDA prefix_lengths");
+    RTP_LLM_CHECK_WITH_INFO(kv_cache_block_id_device.defined() && kv_cache_block_id_device.is_cuda(),
+                            "expects CUDA kv_cache block table");
+
+    if (input_lengths_d.scalar_type() != torch::kInt32)
+        input_lengths_d = input_lengths_d.to(torch::kInt32);
+    if (prefix_lengths_d.scalar_type() != torch::kInt32)
+        prefix_lengths_d = prefix_lengths_d.to(torch::kInt32);
+    if (kv_cache_block_id_device.scalar_type() != torch::kInt32)
+        kv_cache_block_id_device = kv_cache_block_id_device.to(torch::kInt32);
+
+    const int batch_size           = static_cast<int>(input_lengths_d.size(0));
+    const int max_blocks_per_batch = static_cast<int>(kv_cache_block_id_device.size(1));
+
+    cudaStream_t stream = GET_CURRENT_STREAM();
+
+    invokePrepareSparseMlaTargetVerifyParams(input_lengths_d.data_ptr<int32_t>(),
+                                             prefix_lengths_d.data_ptr<int32_t>(),
+                                             kv_cache_block_id_device.data_ptr<int32_t>(),
+                                             batch_indice_d.data_ptr<int32_t>(),
+                                             page_indice_d.data_ptr<int32_t>(),
+                                             decode_page_indptr_d.data_ptr<int32_t>(),
+                                             paged_kv_last_page_len_d.data_ptr<int32_t>(),
+                                             qo_indptr_d.data_ptr<int32_t>(),
+                                             prefill_ragged_kv_len_indptr_d.data_ptr<int32_t>(),
+                                             kvlen_d.data_ptr<int32_t>(),
+                                             positions_d.data_ptr<int32_t>(),
+                                             slot_mapping_d_.data_ptr<int64_t>(),
+                                             expanded_seq_lens_d_.data_ptr<int32_t>(),
+                                             topk_indices_offset_d_.data_ptr<int32_t>(),
+                                             ks_d_.data_ptr<int32_t>(),
+                                             ke_d_.data_ptr<int32_t>(),
+                                             batch_size,
+                                             max_blocks_per_batch,
+                                             seq_size_per_block,
+                                             stream);
+
+    RTP_LLM_CHECK_WITH_INFO(
+        target_verify_total_tokens_ > 0,
+        "target_verify_total_tokens_ must be set (call fillParams once with is_target_verify=true first)");
+    const int total_tokens  = target_verify_total_tokens_;
+    const int page_capacity = batch_size * max_blocks_per_batch;
+
+    auto set_shape = [](torch::Tensor& t, std::vector<int64_t> s) {
+        if (t.defined())
+            t.unsafeGetTensorImpl()->set_sizes_contiguous(s);
+    };
+
+    set_shape(batch_indice_d, {total_tokens});
+    set_shape(batch_indice_h, {total_tokens});
+    set_shape(positions_d, {total_tokens});
+    set_shape(positions_h, {total_tokens});
+    set_shape(kvlen_d, {batch_size});
+    set_shape(kvlen_h, {batch_size});
+    set_shape(qo_indptr_d, {batch_size + 1});
+    set_shape(qo_indptr_h, {batch_size + 1});
+    set_shape(decode_page_indptr_d, {batch_size + 1});
+    set_shape(decode_page_indptr_h, {batch_size + 1});
+    set_shape(paged_kv_last_page_len_d, {batch_size});
+    set_shape(paged_kv_last_page_len_h, {batch_size});
+    set_shape(prefill_ragged_kv_len_indptr_d, {batch_size + 1});
+    set_shape(prefill_ragged_kv_len_indptr_h, {batch_size + 1});
+    set_shape(page_indice_d, {page_capacity});
+    set_shape(page_indice_h, {page_capacity});
+    set_shape(slot_mapping_d_, {total_tokens});
+    set_shape(slot_mapping_h_, {total_tokens});
+
+    set_shape(expanded_seq_lens_d_, {total_tokens});
+    set_shape(expanded_seq_lens_h_, {total_tokens});
+    set_shape(topk_indices_offset_d_, {total_tokens});
+    set_shape(topk_indices_offset_h_, {total_tokens});
+    set_shape(ks_d_, {total_tokens});
+    set_shape(ks_h_, {total_tokens});
+    set_shape(ke_d_, {total_tokens});
+    set_shape(ke_h_, {total_tokens});
+
+    batch_indice                 = batch_indice_d;
+    page_indice                  = page_indice_d;
+    reuse_cache_page_indice      = torch::Tensor();
+    decode_page_indptr           = decode_page_indptr_d;
+    prefill_ragged_kv_len_indptr = prefill_ragged_kv_len_indptr_d;
+    paged_kv_last_page_len       = paged_kv_last_page_len_d;
+    qo_indptr                    = qo_indptr_d;
+    kvlen                        = kvlen_d;
+    positions                    = positions_d;
+    batch_reuse_info_vec         = torch::Tensor();
+    slot_mapping                 = slot_mapping_d_;
+
+    expanded_seq_lens   = expanded_seq_lens_d_;
+    topk_indices_offset = topk_indices_offset_d_;
+    ks                  = ks_d_;
+    ke                  = ke_d_;
+}
+
+void SparseMlaParams::fillSparseMlaDecodeCudaGraphParams(torch::Tensor sequence_lengths_plus_1_d,
+                                                         torch::Tensor kv_cache_block_id_device,
+                                                         int           seq_size_per_block) {
+    // Delegate base-class metadata fill (batch_indice, page_indice, kvlen, etc.)
+    FlashInferMlaAttnParams::fillDecodeCudaGraphParams(
+        sequence_lengths_plus_1_d, kv_cache_block_id_device, seq_size_per_block);
+
+    // Mirror fillParams' decode branch: SparseMla-specific tensors are
+    // empty (no expanded view needed for decode), and expanded_seq_lens
+    // reuses kvlen_d directly.
+    auto options_cuda   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    topk_indices_offset = torch::empty({0}, options_cuda);
+    ks                  = torch::empty({0}, options_cuda);
+    ke                  = torch::empty({0}, options_cuda);
+    expanded_seq_lens   = kvlen_d;
+}
+
 void registerPySparseMlaParams(pybind11::module& m) {
     // Third template parameter must be FlashInferMlaAttnParams (not ParamsBase)
     // This allows Python to access all def_readonly attributes of the base class
@@ -531,10 +651,37 @@ void registerPySparseMlaParams(pybind11::module& m) {
             pybind11::arg("attention_inputs"),
             pybind11::arg("seq_size_per_block"),
             pybind11::arg("forbid_realloc") = false)
+        .def(
+            "fill_target_verify_cuda_graph_params",
+            [](rtp_llm::SparseMlaParams& self,
+               torch::Tensor             input_lengths_d,
+               torch::Tensor             prefix_lengths_d,
+               torch::Tensor             kv_cache_block_id_device,
+               int                       seq_size_per_block) {
+                self.fillTargetVerifyCudaGraphParams(
+                    input_lengths_d, prefix_lengths_d, kv_cache_block_id_device, seq_size_per_block);
+            },
+            pybind11::arg("input_lengths"),
+            pybind11::arg("prefix_lengths"),
+            pybind11::arg("kv_cache_block_id_device"),
+            pybind11::arg("seq_size_per_block"))
+        .def(
+            "fill_sparse_mla_decode_cuda_graph_params",
+            [](rtp_llm::SparseMlaParams& self,
+               torch::Tensor             sequence_lengths_plus_1_d,
+               torch::Tensor             kv_cache_block_id_device,
+               int                       seq_size_per_block) {
+                self.fillSparseMlaDecodeCudaGraphParams(
+                    sequence_lengths_plus_1_d, kv_cache_block_id_device, seq_size_per_block);
+            },
+            pybind11::arg("sequence_lengths_plus_1_d"),
+            pybind11::arg("kv_cache_block_id_device"),
+            pybind11::arg("seq_size_per_block"))
         .def_readonly("expanded_seq_lens", &SparseMlaParams::expanded_seq_lens)
         .def_readonly("topk_indices_offset", &SparseMlaParams::topk_indices_offset)
         .def_readonly("ks", &SparseMlaParams::ks)
         .def_readonly("ke", &SparseMlaParams::ke)
+        .def_readonly("target_verify_total_tokens", &SparseMlaParams::target_verify_total_tokens_)
         .def_readonly("prefill_total_kv_tokens", &SparseMlaParams::prefill_total_kv_tokens)
         .def_readwrite("schedule_metadata", &SparseMlaParams::schedule_metadata)
         .def(

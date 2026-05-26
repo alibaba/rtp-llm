@@ -64,6 +64,94 @@ __global__ void prepareFlashInferDecodeParamsKernel(const int32_t* sequence_leng
     }
 }
 
+// Generic prefill cuda graph metadata kernel. Used by both:
+//   - target verify (SparseMla, with sparse-specific outputs)
+//   - draft prefill (FlashInfer, sparse-specific outputs as nullptr)
+// Pass nullptr for ks/ke/expanded_seq_lens/topk_indices_offset to skip those.
+__global__ void prepareSparseMlaTargetVerifyParamsKernel(const int32_t* input_lengths,
+                                                         const int32_t* prefix_lengths,
+                                                         const int32_t* block_ids,
+                                                         int32_t*       batch_indice,
+                                                         int32_t*       page_indice,
+                                                         int32_t*       decode_page_indptr,
+                                                         int32_t*       paged_kv_last_page_len,
+                                                         int32_t*       qo_indptr,
+                                                         int32_t*       prefill_ragged_kv_len_indptr,
+                                                         int32_t*       kvlen,
+                                                         int32_t*       positions,
+                                                         int64_t*       slot_mapping,
+                                                         int32_t*       expanded_seq_lens,
+                                                         int32_t*       topk_indices_offset,
+                                                         int32_t*       ks,
+                                                         int32_t*       ke,
+                                                         int32_t        batch_size,
+                                                         int32_t        max_blocks_per_batch,
+                                                         int32_t        seq_size_per_block) {
+    if (threadIdx.x != 0 || blockIdx.x != 0) {
+        return;
+    }
+
+    const int32_t safe_page_sz = seq_size_per_block > 0 ? seq_size_per_block : 1;
+    int32_t       token_offset = 0;
+    int32_t       page_offset  = 0;
+    int32_t       accu_kv_len  = 0;
+    int32_t       k_offset     = 0;
+
+    decode_page_indptr[0]           = 0;
+    qo_indptr[0]                    = 0;
+    prefill_ragged_kv_len_indptr[0] = 0;
+
+    for (int32_t i = 0; i < batch_size; ++i) {
+        const int32_t input_len  = input_lengths[i];
+        const int32_t prefix_len = prefix_lengths[i];
+        const int32_t kv_len     = input_len + prefix_len;
+
+        for (int32_t j = 0; j < input_len; ++j) {
+            const int32_t position      = j + prefix_len;
+            batch_indice[token_offset]  = i;
+            positions[token_offset]     = position;
+            const int32_t seq_len_value = kv_len - input_len + 1 + j;
+            if (expanded_seq_lens != nullptr) {
+                expanded_seq_lens[token_offset] = seq_len_value;
+            }
+            if (topk_indices_offset != nullptr) {
+                topk_indices_offset[token_offset] = 0;
+            }
+            if (ks != nullptr) {
+                ks[token_offset] = k_offset;
+            }
+            if (ke != nullptr) {
+                ke[token_offset] = k_offset + seq_len_value;
+            }
+
+            // slot_mapping: physical KV cache slot for this token
+            const int32_t block_index  = position / safe_page_sz;
+            const int32_t block_offset = position % safe_page_sz;
+            const int32_t block_number =
+                block_index < max_blocks_per_batch ? block_ids[i * max_blocks_per_batch + block_index] : 0;
+            slot_mapping[token_offset] =
+                static_cast<int64_t>(block_number) * safe_page_sz + static_cast<int64_t>(block_offset);
+
+            token_offset++;
+        }
+        k_offset += kv_len;
+        accu_kv_len += kv_len;
+
+        kvlen[i]                    = kv_len;
+        paged_kv_last_page_len[i]   = (kv_len - 1) % safe_page_sz + 1;
+        const int32_t pages         = (kv_len + safe_page_sz - 1) / safe_page_sz;
+        const int32_t pages_to_copy = pages < max_blocks_per_batch ? pages : max_blocks_per_batch;
+        for (int32_t p = 0; p < pages_to_copy; ++p) {
+            page_indice[page_offset + p] = block_ids[i * max_blocks_per_batch + p];
+        }
+        page_offset += pages_to_copy;
+
+        decode_page_indptr[i + 1]           = page_offset;
+        qo_indptr[i + 1]                    = token_offset;
+        prefill_ragged_kv_len_indptr[i + 1] = accu_kv_len;
+    }
+}
+
 }  // namespace
 
 void invokeCudaGraphPrepareFill(CudaGraphPrepareFillParams params, cudaStream_t stream) {
@@ -123,6 +211,106 @@ void invokePrepareFlashInferDecodeParams(const int32_t* sequence_lengths_plus_1,
     const auto result = cudaGetLastError();
     TORCH_CHECK(
         result == cudaSuccess, "FlashInfer decode CUDA graph prepare kernel failed: ", cudaGetErrorString(result));
+}
+
+// Non-sparse prefill cuda graph kernel — sparse-specific outputs nullptr.
+void invokePrepareFlashInferPrefillParams(const int32_t* input_lengths,
+                                          const int32_t* prefix_lengths,
+                                          const int32_t* block_ids,
+                                          int32_t*       batch_indice,
+                                          int32_t*       page_indice,
+                                          int32_t*       decode_page_indptr,
+                                          int32_t*       paged_kv_last_page_len,
+                                          int32_t*       qo_indptr,
+                                          int32_t*       prefill_ragged_kv_len_indptr,
+                                          int32_t*       kvlen,
+                                          int32_t*       positions,
+                                          int64_t*       slot_mapping,
+                                          int32_t        batch_size,
+                                          int32_t        max_blocks_per_batch,
+                                          int32_t        seq_size_per_block,
+                                          cudaStream_t   stream) {
+    TORCH_CHECK(input_lengths != nullptr, "input_lengths is null");
+    TORCH_CHECK(prefix_lengths != nullptr, "prefix_lengths is null");
+    TORCH_CHECK(block_ids != nullptr, "block_ids is null");
+    TORCH_CHECK(slot_mapping != nullptr, "slot_mapping is null");
+    if (batch_size <= 0 || max_blocks_per_batch <= 0) {
+        return;
+    }
+    prepareSparseMlaTargetVerifyParamsKernel<<<1, 1, 0, stream>>>(input_lengths,
+                                                                  prefix_lengths,
+                                                                  block_ids,
+                                                                  batch_indice,
+                                                                  page_indice,
+                                                                  decode_page_indptr,
+                                                                  paged_kv_last_page_len,
+                                                                  qo_indptr,
+                                                                  prefill_ragged_kv_len_indptr,
+                                                                  kvlen,
+                                                                  positions,
+                                                                  slot_mapping,
+                                                                  /*expanded_seq_lens=*/nullptr,
+                                                                  /*topk_indices_offset=*/nullptr,
+                                                                  /*ks=*/nullptr,
+                                                                  /*ke=*/nullptr,
+                                                                  batch_size,
+                                                                  max_blocks_per_batch,
+                                                                  seq_size_per_block);
+    const auto result = cudaGetLastError();
+    TORCH_CHECK(
+        result == cudaSuccess, "FlashInfer prefill CUDA graph prepare kernel failed: ", cudaGetErrorString(result));
+}
+
+void invokePrepareSparseMlaTargetVerifyParams(const int32_t* input_lengths,
+                                              const int32_t* prefix_lengths,
+                                              const int32_t* block_ids,
+                                              int32_t*       batch_indice,
+                                              int32_t*       page_indice,
+                                              int32_t*       decode_page_indptr,
+                                              int32_t*       paged_kv_last_page_len,
+                                              int32_t*       qo_indptr,
+                                              int32_t*       prefill_ragged_kv_len_indptr,
+                                              int32_t*       kvlen,
+                                              int32_t*       positions,
+                                              int64_t*       slot_mapping,
+                                              int32_t*       expanded_seq_lens,
+                                              int32_t*       topk_indices_offset,
+                                              int32_t*       ks,
+                                              int32_t*       ke,
+                                              int32_t        batch_size,
+                                              int32_t        max_blocks_per_batch,
+                                              int32_t        seq_size_per_block,
+                                              cudaStream_t   stream) {
+    TORCH_CHECK(input_lengths != nullptr, "input_lengths is null");
+    TORCH_CHECK(prefix_lengths != nullptr, "prefix_lengths is null");
+    TORCH_CHECK(block_ids != nullptr, "block_ids is null");
+    TORCH_CHECK(slot_mapping != nullptr, "slot_mapping is null");
+    if (batch_size <= 0 || max_blocks_per_batch <= 0) {
+        return;
+    }
+    prepareSparseMlaTargetVerifyParamsKernel<<<1, 1, 0, stream>>>(input_lengths,
+                                                                  prefix_lengths,
+                                                                  block_ids,
+                                                                  batch_indice,
+                                                                  page_indice,
+                                                                  decode_page_indptr,
+                                                                  paged_kv_last_page_len,
+                                                                  qo_indptr,
+                                                                  prefill_ragged_kv_len_indptr,
+                                                                  kvlen,
+                                                                  positions,
+                                                                  slot_mapping,
+                                                                  expanded_seq_lens,
+                                                                  topk_indices_offset,
+                                                                  ks,
+                                                                  ke,
+                                                                  batch_size,
+                                                                  max_blocks_per_batch,
+                                                                  seq_size_per_block);
+    const auto result = cudaGetLastError();
+    TORCH_CHECK(result == cudaSuccess,
+                "SparseMLA target verify CUDA graph prepare kernel failed: ",
+                cudaGetErrorString(result));
 }
 
 }  // namespace rtp_llm
