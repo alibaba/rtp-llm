@@ -599,6 +599,7 @@ class _RpcAggregate:
                 self.generate_config["max_new_think_tokens"] = (
                     other.max_new_think_tokens
                 )
+                self.generate_config["reasoning_effort"] = other.reasoning_effort
                 self.generate_config["timeout_ms"] = other.timeout_ms
                 self.generate_config["traffic_reject_priority"] = (
                     other.traffic_reject_priority

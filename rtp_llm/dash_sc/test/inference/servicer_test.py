@@ -197,6 +197,34 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(infer.parameters["prompt_token_num"].int64_param, 2)
         self.assertEqual(infer.parameters["prompt_cached_token_num"].int64_param, 0)
 
+    async def test_reasoning_effort_override_reaches_generate_config(self) -> None:
+        req = self._minimal_request()
+        out = GenerateOutput(
+            output_ids=torch.tensor([3], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(input_len=2, reuse_len=0),
+        )
+        visitor = _FakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
+        )
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [1, 2],
+                SamplingParams(),
+                OtherParams(reasoning_effort="xhigh"),
+                visitor,
+                rtp_llm_request_id=1,
+            )
+        )
+
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(
+            visitor.last_generate_input.generate_config.chat_template_kwargs,
+            {"reasoning_effort": "xhigh"},
+        )
+
     async def test_finished_at_max_new_tokens_reports_length_repro_p1(self) -> None:
         req = self._minimal_request()
         out = GenerateOutput(

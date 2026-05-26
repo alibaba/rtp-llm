@@ -417,6 +417,27 @@ class DashScGrpcRequestTest(TestCase):
             op.request_headers, {"user_id": "u1", "x-dashscope-apikeyid": "ak1"}
         )
 
+    def test_parse_other_params_reasoning_effort_max_alias(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["reasoning_effort"].string_param = "max"
+        op = parse_other_params(req)
+        self.assertEqual(op.reasoning_effort, "xhigh")
+
+    def test_parse_other_params_reasoning_effort_from_dashscope_attrs(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["ds_header_attributes"].string_param = json.dumps(
+            {"parameters": {"reasoning_effort": {"effort": "max"}}}
+        )
+        op = parse_other_params(req)
+        self.assertEqual(op.reasoning_effort, "xhigh")
+
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["ds_header_attributes"].string_param = json.dumps(
+            {"body": {"reasoning_effort": "max"}}
+        )
+        op = parse_other_params(req)
+        self.assertEqual(op.reasoning_effort, "xhigh")
+
     def test_parse_other_params_dashscope_body_thinking_aliases(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
         req.parameters["enable_thinking"].bool_param = False

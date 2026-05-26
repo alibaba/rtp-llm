@@ -227,8 +227,11 @@ def _lookup_ds_request_control(attrs: dict[str, Any], name: str) -> Any:
         return direct
     for prefix in (
         ("parameters",),
+        ("body",),
         ("body", "parameters"),
+        ("payload",),
         ("payload", "parameters"),
+        ("request",),
         ("request", "parameters"),
     ):
         value = _nested_get_case_insensitive(attrs, prefix + (name,))
@@ -262,6 +265,54 @@ def _jsonable_to_string(value: Any) -> str | None:
     if isinstance(value, (dict, list)):
         return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
     return _normalize_non_empty_str(value)
+
+
+_REASONING_EFFORT_ALIASES: dict[str, str | None] = {
+    "none": None,
+    "minimum": "minimum",
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "xhigh": "xhigh",
+    "max": "xhigh",
+}
+
+
+def _extract_reasoning_effort_value(value: Any) -> str | None:
+    """Read Dash/OpenAI reasoning_effort shapes and normalize max -> xhigh."""
+    if value is None:
+        return None
+    parsed = value
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return None
+        try:
+            parsed = json.loads(s)
+        except Exception:
+            parsed = s
+    if isinstance(parsed, dict):
+        nested = _dict_get_case_insensitive(parsed, "effort")
+        if nested is None:
+            nested = _dict_get_case_insensitive(parsed, "reasoning_effort")
+        return _extract_reasoning_effort_value(nested)
+    if isinstance(parsed, list):
+        for item in parsed:
+            normalized = _extract_reasoning_effort_value(item)
+            if normalized is not None:
+                return normalized
+        return None
+    effort = str(parsed).strip().lower()
+    return _REASONING_EFFORT_ALIASES.get(effort)
+
+
+def _parse_optional_parameter_reasoning_effort(request, param_name: str) -> str | None:
+    if param_name not in request.parameters:
+        return None
+    p = request.parameters[param_name]
+    if p.HasField("string_param"):
+        return _extract_reasoning_effort_value(p.string_param)
+    return None
 
 
 def _normalize_response_format_value(value: Any) -> str | None:
@@ -322,6 +373,7 @@ class OtherParams:
     max_new_think_tokens: int | None = None
     timeout_ms: int | None = None
     traffic_reject_priority: int | None = None
+    reasoning_effort: str | None = None
     request_headers: dict[str, str] = field(default_factory=dict)
 
 
@@ -617,6 +669,14 @@ def parse_other_params(request) -> OtherParams:
     if max_new_think_tokens is not None:
         max_new_think_tokens = int(max_new_think_tokens)
 
+    reasoning_effort = _parse_optional_parameter_reasoning_effort(
+        request, "reasoning_effort"
+    )
+    if reasoning_effort is None:
+        reasoning_effort = _extract_reasoning_effort_value(
+            _lookup_ds_request_control(ds_attrs, "reasoning_effort")
+        )
+
     timeout_s = _parse_optional_int_value(ds_attrs.get("x-dashscope-inner-timeout"))
     timeout_ms = timeout_s * 1000 if timeout_s is not None and timeout_s > 0 else None
 
@@ -640,6 +700,7 @@ def parse_other_params(request) -> OtherParams:
         max_new_think_tokens=max_new_think_tokens,
         timeout_ms=timeout_ms,
         traffic_reject_priority=traffic_reject_priority,
+        reasoning_effort=reasoning_effort,
         request_headers=request_headers,
     )
 
