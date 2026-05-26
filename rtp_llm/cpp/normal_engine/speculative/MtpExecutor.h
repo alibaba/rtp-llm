@@ -99,6 +99,9 @@ protected:
     // decodeStep helpers — extracted to keep decodeStep readable. Each helper
     // owns a single phase (sync, prepare, forward, broadcast, dispatch) and
     // preserves the original PROFILE_SCOPE labels.
+    // REBASE CONFLICT CONTEXT(518707c73): keep new base async target/draft
+    // prepare runners and add source branch previous-bookkeeping stream ordering.
+    void            waitPreviousBookkeepingAndKvSwaps(const std::list<GenerateStreamPtr>& streams);
     void            prepareGrpcMtpDeviceState(const std::list<GenerateStreamPtr>& streams, TensorHolder& host_holder);
     void            launchTargetVerifyPrepareAsync(const GptModelInputs& model_input, size_t batch_size);
     void            launchDraftPrefillPrepareAsync(const GptModelInputs& model_input);
@@ -157,8 +160,6 @@ protected:
     // REBASE CONFLICT CONTEXT(cdc1b18b6): source branch added async device-state
     // gating for GLM5 MTP; keep it with the new base stop_requested_ path.
     bool useAsyncDeviceState() const;
-
-    bool useAsyncPrepare() const;
 
     // Opt-in gate to skip the broad sync at decodeStep start.
     // Device state, epoch-guarded clears, and single-slotted workers preserve

@@ -28,3 +28,33 @@ py_test(
     tags = ["manual"],
     exec_properties = {'gpu': 'H20'},
 )
+
+py_test(
+    name = "test_target_verify_kernel",
+    srcs = ["test_target_verify_kernel.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    tags = ["manual"],
+    exec_properties = {'gpu': 'H20'},
+)
+
+py_test(
+    name = "test_plan_fp8_no_sync",
+    srcs = ["test_plan_fp8_no_sync.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    tags = ["manual"],
+    exec_properties = {'gpu': 'H20'},
+)
+
+py_test(
+    name = "test_prefill_cuda_graph_kernel",
+    srcs = ["test_prefill_cuda_graph_kernel.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    tags = ["manual"],
+    exec_properties = {'gpu': 'H20'},
+)

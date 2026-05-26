@@ -690,25 +690,35 @@ makeFakeSPOutputBuffer(DataType data_type, size_t hidden_size, size_t vocab_size
         {1, (int64_t)hidden_size}, torch::TensorOptions().dtype(dataTypeToTorchType(data_type)).device(torch::kCUDA));
     auto fake_probs =
         torch::zeros({1, (int64_t)vocab_size}, torch::TensorOptions().dtype(torch::kFloat).device(torch::kCUDA));
+    const auto cuda_i32      = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
     sp_buffer->propose_step  = propose_step;
     sp_buffer->all_probs     = fake_probs;
     sp_buffer->tokens        = torch::zeros({1, 2}, torch::kInt32);
     sp_buffer->hidden_states = fake_hidden_states;
+    // Pre-allocate device mirrors so the hot path never triggers a pageable
+    // H2D + sync via ensureSpOutputTokenGpuMirrors().
+    sp_buffer->target_token_gpu   = torch::zeros({1}, cuda_i32);
+    sp_buffer->propose_tokens_gpu = torch::zeros({1}, cuda_i32);
 
     return sp_buffer;
 }
 
 static void ensureSpOutputTokenGpuMirrors(const SpeculativeExecutorStreamOutputPtr& sp_buffer) {
+    // Mirrors should already be device-resident from the buffer's construction
+    // site (MtpExecutor::prepareStreams + makeFakeSPOutputBuffer). Only the
+    // legacy P2P-injection path (StreamCacheResource::applyP2PSideChannel) and
+    // dispatchDecodeAsync intentionally replace them with values from a payload.
+    // This function exists as a defensive fallback for older paths; it should be
+    // a no-op in steady-state and never trigger an H2D sync.
     if (!sp_buffer || !sp_buffer->tokens.defined() || sp_buffer->tokens.numel() < 2) {
         return;
     }
     const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
-    auto       flat     = sp_buffer->tokens.reshape({-1});
     if (!sp_buffer->target_token_gpu.defined() || !sp_buffer->target_token_gpu.is_cuda()) {
-        sp_buffer->target_token_gpu = flat.narrow(0, 0, 1).to(cuda_i32);
+        sp_buffer->target_token_gpu = torch::zeros({1}, cuda_i32);
     }
     if (!sp_buffer->propose_tokens_gpu.defined() || !sp_buffer->propose_tokens_gpu.is_cuda()) {
-        sp_buffer->propose_tokens_gpu = flat.narrow(0, 1, 1).to(cuda_i32);
+        sp_buffer->propose_tokens_gpu = torch::zeros({1}, cuda_i32);
     }
 }
 
@@ -804,6 +814,13 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     // for the async workers.
     spec_logits_verify_async_runner_(cuda_graph::graphGetStreamFromPool(true), false),
     spec_logits_verify_runner_(std::make_unique<SpecLogitsVerifyRunner>()),
+    // REBASE CONFLICT CONTEXT(518707c73): source branch added a bookkeeping
+    // worker to avoid cudaStreamSynchronize in decode prepare. Keep it alongside
+    // the new base target/draft prepare and spec-logits async runners.
+    // Bookkeeping worker intentionally does not inherit PyTorch profiler TLS from
+    // the engine loop. Kineto callbacks are thread-affine; propagating an active
+    // profiling state to the worker thread can crash while perf timelines are
+    // being recorded.
     spec_bookkeeping_runner_(cuda_graph::graphGetStreamFromPool(true), false) {
     data_type_        = params.model_config_.data_type;
     hidden_size_      = params.model_config_.hidden_size * params.model_config_.hc_mult;
@@ -1435,6 +1452,10 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     bool                          spec_logits_async_launched              = false;
     bool                          spec_logits_processor_present           = false;
 
+    // REBASE CONFLICT CONTEXT(518707c73): wait/order prior async bookkeeping
+    // before gathering host-derived state, then keep the new base grpc MTP
+    // device-state preparation path.
+    waitPreviousBookkeepingAndKvSwaps(streams);
     prepareGrpcMtpDeviceState(streams, buffer_holder_);
 
     {
@@ -1508,6 +1529,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     auto draft_tokens_ready_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
     draft_tokens_ready_event->record(cuda_graph::graphGetCurrentStream());
 
+    // REBASE CONFLICT CONTEXT(518707c73): new base overlaps draft-prefill
+    // prepare with target verify; source branch's sync removal is retained by
+    // the waitPreviousBookkeepingAndKvSwaps helper above.
     // Launch draft-prefill prepare BEFORE target verify forward so it overlaps
     // with target verify GPU work instead of running serially after it. Sync
     // on this prepare happens just before draft_model_forward below.
@@ -1666,8 +1690,6 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_);
     broadcastPostRejectionInputs(model_input, stream_groups);
 
-    draft_prefill_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
-
     {
         if (shouldSkipFakeStreamForStop(model_input, "draft prefill forward")) {
             releaseAllModelBuffers();
@@ -1819,6 +1841,41 @@ void MtpExecutor::launchDraftPrefillPrepareAsync(const GptModelInputs& model_inp
         });
 }
 
+// REBASE CONFLICT CONTEXT(518707c73): source branch introduced this helper to
+// replace broad cudaStreamSynchronize with targeted bookkeeping stream/event
+// ordering. Keep it after the new base async prepare helpers.
+void MtpExecutor::waitPreviousBookkeepingAndKvSwaps(const std::list<GenerateStreamPtr>& streams) {
+    // Cap outstanding stream-async bookkeeping to one step unless DROP_BROAD_SYNC
+    // is on. Device state handles host staleness; swap events handle linear KV.
+    if (useStreamAsync() && !useDropBroadSync()) {
+        RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.decode_step(wait_prev_bookkeeping,stream_count=%zu)",
+                                      streams.size());
+        spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
+    } else if (useStreamAsync()) {
+        // DROP_BROAD_SYNC: skip CPU wait but still ensure GPU stream ordering.
+        // The bookkeeping runner may have launched GPU kernels (D2H staging,
+        // block table updates) on its own stream; the compute stream must wait
+        // for those before reading the same buffers in forward().
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(stream_wait_prev_bookkeeping)");
+        spec_bookkeeping_runner_.streamWait(cuda_graph::graphGetCurrentStream());
+    }
+
+    // Linear attention may rewrite KV mappings via swapLinearBlocks; wait on
+    // producer events before target verify reads KV, even when broad sync is off.
+    {
+        RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.decode_step(wait_pending_linear_attn_swaps,stream_count=%zu)",
+                                      streams.size());
+        for (auto& stream : streams) {
+            auto event_handle = stream->getPendingSwapDoneEvent();
+            if (event_handle) {
+                auto event = std::static_pointer_cast<torch::Event>(event_handle);
+                event->block(cuda_graph::graphGetCurrentStream());
+                stream->clearPendingSwapDoneEvent();
+            }
+        }
+    }
+}
+
 GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input, const StreamGroups& stream_groups) {
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(target_model_verify)");
     maybePrintModelInput(model_input, "decode target model");
@@ -1829,7 +1886,6 @@ GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input,
         model_input.input_lengths.size(0),
         model_input.prefix_lengths.size(0),
         model_input.sequence_lengths.size(0));
-    target_verify_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
 
     // Linear-attention only: page table advances every token. Standard paged
     // attention (MHA/MLA) page table rarely changes within a propose+verify
@@ -2240,8 +2296,13 @@ void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
         // init sp output buffer if not exist
         stream->setReturnAllProbs(true);
         if (stream->getSPOutputBuffer() == nullptr) {
-            auto sp_output_buffer    = std::make_shared<SpeculativeExecutorStreamOutput>();
-            sp_output_buffer->tokens = torch::zeros({1, 2}, torch::kInt32);
+            const auto cuda_i32         = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+            auto       sp_output_buffer = std::make_shared<SpeculativeExecutorStreamOutput>();
+            sp_output_buffer->tokens    = torch::zeros({1, 2}, torch::kInt32);
+            // Pre-allocate device mirrors so ensureSpOutputTokenGpuMirrors() is a
+            // no-op in steady-state (no pageable H2D + sync per stream per step).
+            sp_output_buffer->target_token_gpu   = torch::zeros({1}, cuda_i32);
+            sp_output_buffer->propose_tokens_gpu = torch::zeros({1}, cuda_i32);
 
             stream->setSPOutputBuffer(sp_output_buffer);
         }
@@ -2564,15 +2625,6 @@ bool MtpExecutor::useDropBroadSync() const {
     }();
     (void)logged;
     return kDropBroadSyncFlag.on;
-}
-
-bool MtpExecutor::useAsyncPrepare() const {
-    static const bool logged = []() {
-        logCachedEnvFlag(kAsyncPrepareFlag);
-        return true;
-    }();
-    (void)logged;
-    return kAsyncPrepareFlag.on;
 }
 
 void MtpExecutor::publishSyncMtpDeviceState(const StreamGroups&                          stream_groups,

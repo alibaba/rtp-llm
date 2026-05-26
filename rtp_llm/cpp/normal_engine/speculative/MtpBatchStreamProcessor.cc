@@ -2,6 +2,9 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
+// REBASE CONFLICT CONTEXT(518707c73): keep new base logits-processor state
+// support and add the source branch fused prefill shift/append CUDA helper.
+#include "rtp_llm/models_py/bindings/cuda/kernels/mtp_target_verify_prepare.h"
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
 #include "rtp_llm/cpp/utils/StringUtil.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -528,6 +531,10 @@ void MtpBatchStreamProcessor::prepareDecodeDraftModelInput(const StreamGroups& s
         }
     }
 
+    // Legacy GPU fallback (older sp_output_buffer mirrors). With pre-allocated
+    // propose_tokens_gpu (see MtpExecutor::prepareStreams), the primary fast
+    // path above should always succeed. Keep this as a safety net for streams
+    // missing the new device state APIs but having sp_output_buffer mirrors.
     std::vector<torch::Tensor> propose_slices_gpu;
     if (legacyGpuProposePathEnabled(batch_size)
         && collectLegacyProposeSlices(stream_groups.allStreams(), propose_slices_gpu)) {
@@ -541,20 +548,14 @@ void MtpBatchStreamProcessor::prepareDecodeDraftModelInput(const StreamGroups& s
         return;
     }
 
-    int  batch_idx    = 0;
-    auto combo_tokens = torch::empty({(int64_t)batch_size}, torch::kInt32).pin_memory();
-
-    for (const auto& stream : stream_groups.allStreams()) {
-        int propose_token                       = stream->getSPOutputBuffer()->tokens.data_ptr<int>()[1];
-        combo_tokens.data_ptr<int>()[batch_idx] = propose_token;
-        batch_idx++;
-    }
-
-    model_input.combo_tokens     = toCudaInt32(combo_tokens, host_holder);
-    model_input.input_lengths    = toCudaInt32(model_input.input_lengths, host_holder);
-    model_input.sequence_lengths = normalDecodePositionToDraftDecodePosition(model_input.sequence_lengths, host_holder);
-    model_input.prefix_lengths   = toCudaInt32(model_input.prefix_lengths, host_holder);
-    model_input.lm_output_indexes = makeCudaInt32Range(static_cast<int64_t>(batch_size));
+    // Host fallback removed: pre-allocating propose_tokens_gpu in
+    // MtpExecutor::prepareStreams (and makeFakeSPOutputBuffer) guarantees the
+    // device fast paths above succeed. Reaching here means a stream lacks both
+    // MTP device-state APIs and sp_output_buffer mirrors — a programming error.
+    RTP_LLM_CHECK_WITH_INFO(false,
+                            "prepareDecodeDraftModelInput: no device-side propose tokens available "
+                            "(batch_size=%zu). All sp_output_buffer mirrors must be pre-allocated on CUDA.",
+                            batch_size);
 }
 
 bool MtpBatchStreamProcessor::gatherMtpDecodeModelInputFromDeviceState(const StreamGroups& stream_groups,
@@ -650,19 +651,17 @@ void MtpBatchStreamProcessor::updateDecodeDraftModelInput(GptModelInputs&       
     // here combo_tokens is a device buffer
     model_input.combo_tokens = draft_token_ids.reshape({batch_size});
 
-    if (useMtpDeviceInput() || model_input.sequence_lengths.is_cuda()) {
-        auto seq_lengths_d           = model_input.sequence_lengths.is_cuda() ? model_input.sequence_lengths :
-                                                                                model_input.sequence_lengths.to(torch::kCUDA);
-        model_input.sequence_lengths = (seq_lengths_d + 1).to(torch::kInt32);
-    } else {
-        // Legacy CPU fallback when device input is disabled and the caller has
-        // not already published sequence_lengths on CUDA.
-        auto sequence_lengths_cpu = model_input.sequence_lengths.cpu().clone().pin_memory();
-        for (int i = 0; i < batch_size; i++) {
-            sequence_lengths_cpu.data_ptr<int>()[i]++;
-        }
-        model_input.sequence_lengths = toCudaInt32(sequence_lengths_cpu, host_holder);
-    }
+    // Device-input is the only supported path: sequence_lengths must already be a
+    // CUDA int32 tensor (published by gatherDecodeModelInput / prepareStreams).
+    // Legacy CPU fallback removed — its .cpu()+clone+pin_memory triggered a sync.
+    RTP_LLM_CHECK_WITH_INFO(
+        model_input.sequence_lengths.defined() && model_input.sequence_lengths.is_cuda(),
+        "updateDecodeDraftModelInput requires CUDA sequence_lengths "
+        "(useMtpDeviceInput=%d, defined=%d, is_cuda=%d)",
+        static_cast<int>(useMtpDeviceInput()),
+        static_cast<int>(model_input.sequence_lengths.defined()),
+        static_cast<int>(model_input.sequence_lengths.defined() && model_input.sequence_lengths.is_cuda()));
+    model_input.sequence_lengths = (model_input.sequence_lengths + 1).to(torch::kInt32);
 }
 
 void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(GptModelInputs&        model_input,
@@ -673,35 +672,43 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(GptModelInputs&  
     const auto& new_all_token_ids  = sampler_output.token_ids;
 
     // set model_input.combo_tokens
-    const size_t batch_size   = new_all_token_ids.size(0);
-    const size_t token_stride = new_all_token_ids.size(1);
-    // TODO(async): data_ptr iteration below is CPU-only; keep all .cpu()
-    // conversions explicit, then republish model-bound tensors to CUDA.
-    const torch::Tensor new_all_token_ids_cpu =
-        new_all_token_ids.is_cuda() ? new_all_token_ids.cpu() : new_all_token_ids;
-    torch::Tensor input_lengths_cpu =
-        model_input.input_lengths.is_cuda() ? model_input.input_lengths.cpu().pin_memory() : model_input.input_lengths;
-    torch::Tensor combo_tokens_cpu =
-        model_input.combo_tokens.is_cuda() ? model_input.combo_tokens.cpu().pin_memory() : model_input.combo_tokens;
+    const int64_t batch_size   = new_all_token_ids.size(0);
+    const int64_t token_stride = new_all_token_ids.size(1);
 
-    int* input_lengths = input_lengths_cpu.data_ptr<int>();
-    int* combo_tokens  = combo_tokens_cpu.data_ptr<int>();
-
-    int offset = 0;
-    for (int i = 0; i < batch_size; i++) {
-        // should shift one token for combo_tokens
-        int input_length = input_lengths[i];
-        memcpy(combo_tokens + offset, combo_tokens + offset + 1, (input_length - 1) * sizeof(int));
-
-        // set new token id
-        int new_token_id = new_all_token_ids_cpu.data_ptr<int>()[i * token_stride + token_stride - 1];
-        combo_tokens[offset + input_length - 1] = new_token_id;
-
-        offset += input_length;
+    // Device path: do the shift+append entirely on GPU via invokeMtpPrefillShiftAppend.
+    // The legacy CPU path (3x .cpu() + pin_memory + for-loop) is gone — it forced
+    // pageable D2H syncs every prefill+draft cycle.
+    const auto    cuda_i32        = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    torch::Tensor input_lengths_d = toCudaInt32(model_input.input_lengths, host_holder);
+    torch::Tensor combo_tokens_d  = toCudaInt32(model_input.combo_tokens, host_holder);
+    torch::Tensor new_all_tokens_d =
+        new_all_token_ids.is_cuda() ? new_all_token_ids : toCudaInt32(new_all_token_ids, host_holder);
+    if (new_all_tokens_d.scalar_type() != torch::kInt32) {
+        new_all_tokens_d = new_all_tokens_d.to(torch::kInt32);
+    }
+    if (!new_all_tokens_d.is_contiguous()) {
+        new_all_tokens_d = new_all_tokens_d.contiguous();
     }
 
-    model_input.input_lengths = toCudaInt32(input_lengths_cpu, host_holder);
-    model_input.combo_tokens  = toCudaInt32(combo_tokens_cpu, host_holder);
+    // batch_offsets[b] = cumulative input_lengths through batch b (inclusive end offset).
+    auto batch_offsets_d  = input_lengths_d.cumsum(0).to(torch::kInt32);
+    auto combo_tokens_out = torch::empty({combo_tokens_d.numel()}, cuda_i32);
+
+#if USING_CUDA
+    invokeMtpPrefillShiftAppend(combo_tokens_d,
+                                input_lengths_d,
+                                batch_offsets_d,
+                                new_all_tokens_d,
+                                combo_tokens_out,
+                                static_cast<int32_t>(token_stride),
+                                cuda_graph::graphGetCurrentStream().stream());
+#else
+    RTP_LLM_CHECK_WITH_INFO(false, "updatePrefillPostDraftModelInput requires CUDA");
+#endif
+
+    model_input.input_lengths = input_lengths_d;
+    model_input.combo_tokens  = combo_tokens_out;
+    (void)batch_size;  // batch_size verified inside kernel via input_lengths.numel()
 }
 
 void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(

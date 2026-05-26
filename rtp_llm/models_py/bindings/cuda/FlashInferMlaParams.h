@@ -27,10 +27,12 @@ private:
     int    max_batch_reuse_info_ = 0;
     size_t max_i64_elements_     = 0;
 
-    // Private slot_mapping tensors
+protected:
+    // slot_mapping tensors (accessible to subclasses for device-only fast paths)
     torch::Tensor slot_mapping_h_;
     torch::Tensor slot_mapping_d_;
 
+private:
     // Helper method to refresh buffer shapes and copy to device (single memcpy)
     void
     refreshBuffer(int batch_size, int input_token_num, int page_num, int reuse_page_num, int batch_reuse_info_size);
@@ -71,6 +73,21 @@ public:
     void fillDecodeCudaGraphParams(torch::Tensor sequence_lengths_plus_1_d,
                                    torch::Tensor kv_cache_block_id_device,
                                    int           seq_size_per_block);
+
+    // Device-only prefill cuda graph fast path (used by MTP draft prefill).
+    // Computes all metadata on device via a single kernel, then issues
+    // cudaMemcpyAsync to update host pinned indptr mirrors (qo_indptr_h,
+    // decode_page_indptr_h, prefill_ragged_kv_len_indptr_h, kvlen_h,
+    // paged_kv_last_page_len_h) so FlashInfer's plan() — which expects host
+    // indptr — does not internally trigger D2H syncs. A single
+    // cudaStreamSynchronize is issued at the end so the host mirrors are
+    // valid before the caller reads them. Replaces the 3 toHostContiguousI32
+    // .cpu() syncs in fillParams.
+    void fillPrefillCudaGraphParams(torch::Tensor input_lengths_d,
+                                    torch::Tensor prefix_lengths_d,
+                                    torch::Tensor kv_cache_block_id_device,
+                                    int           seq_size_per_block,
+                                    int           total_tokens);
 
     // Device-only fast path for MHA paged attention. Fills paged-KV metadata
     // plus batch_indice_d/positions_d, reusing fillParams buffers so existing
