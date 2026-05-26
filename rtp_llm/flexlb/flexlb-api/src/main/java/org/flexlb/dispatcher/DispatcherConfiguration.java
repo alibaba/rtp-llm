@@ -2,9 +2,9 @@ package org.flexlb.dispatcher;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.netty.channel.ChannelOption;
-import lombok.extern.slf4j.Slf4j;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.discovery.ServiceDiscovery;
+import org.flexlb.util.Logger;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.Ordered;
@@ -21,7 +21,6 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
-@Slf4j
 @Configuration
 public class DispatcherConfiguration {
 
@@ -112,7 +111,9 @@ public class DispatcherConfiguration {
         serviceDiscovery.listen(serviceId, hosts -> {
             List<String> urls = toUrls(hosts);
             fePoolUrls.set(urls);
-            log.info("dispatcher FE pool updated: serviceId={}, hosts={}", serviceId, urls.size());
+            // WARN level (always-on) — FE pool topology changes are operationally important
+            // and infrequent, matching the codebase convention used by ZK election / engine sync.
+            Logger.warn("dispatcher FE pool updated: serviceId={}, hosts={}", serviceId, urls.size());
         });
         FeHealthChecker healthChecker = new FeHealthChecker(
                 fePoolUrls::get, passthroughWebClient, cfg.getProbePath());
@@ -125,7 +126,10 @@ public class DispatcherConfiguration {
 
         PassthroughClient passthrough = new WebClientPassthroughClient(passthroughWebClient, pool);
         DispatchHandler handler = new DispatchHandler(passthrough);
-        log.info("dispatcher enabled: fePoolServiceId={}, seedHosts={}, subBatch={}, batchSpecs={}, "
+        // WARN so the boot footprint survives default LOG_LEVEL=null gating — operators
+        // need this exact line to verify which FE pool, batchSpecs count, and timeouts the
+        // dispatcher came up with.
+        Logger.warn("dispatcher enabled: fePoolServiceId={}, seedHosts={}, subBatch={}, batchSpecs={}, "
                         + "batchTimeoutMs={}, feMaxConnectionsPerHost={}, feMaxPendingAcquirePerHost={}, "
                         + "probePath={}",
                 serviceId, fePoolUrls.get().size(), cfg.getSubBatch(), specs.size(),

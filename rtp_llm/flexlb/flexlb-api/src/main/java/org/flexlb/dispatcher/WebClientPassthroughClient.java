@@ -1,6 +1,10 @@
 package org.flexlb.dispatcher;
 
 import lombok.RequiredArgsConstructor;
+import org.flexlb.dao.pv.DispatchPvLogData;
+import org.flexlb.util.JsonUtils;
+import org.flexlb.util.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.core.io.buffer.DataBuffer;
 import org.springframework.http.HttpHeaders;
 import org.springframework.web.reactive.function.BodyInserters;
@@ -17,6 +21,9 @@ import java.util.Set;
 
 @RequiredArgsConstructor
 public class WebClientPassthroughClient implements PassthroughClient {
+
+    /** Per-request access log, shared with {@code /schedule} / {@code /batch_schedule} → pv.log. */
+    private static final org.slf4j.Logger pvLogger = LoggerFactory.getLogger("pvLogger");
 
     /**
      * Hop-by-hop headers from RFC 7230 §6.1 plus framing headers WebClient must compute itself
@@ -66,31 +73,62 @@ public class WebClientPassthroughClient implements PassthroughClient {
      * the {@code dispatcher-fe} pool when downstream cancels before {@code writeTo} subscribes —
      * without it the channel would sit checked out until reactor-netty's idle reaper closed it,
      * silently draining the pool under churn.
+     *
+     * <p>PV emission fires the instant FE response headers are seen (success path) or the instant
+     * any upstream step throws (pool pick, connect, response-timeout); body-stream errors during
+     * SSE consumption are intentionally not captured — there's no meaningful "request time" for a
+     * 10-minute stream and the response was already handed off downstream.
      */
     @Override
     @SuppressWarnings("deprecation")
     public Mono<ServerResponse> forward(ServerRequest request) {
-        return Mono.fromCallable(fePool::next).flatMap(feBaseUrl -> {
-            URI src = request.uri();
-            String fePath = src.getRawPath().startsWith("/dispatcher/")
-                    ? src.getRawPath().substring("/dispatcher".length())
-                    : src.getRawPath();
-            String pathAndQuery = src.getRawQuery() == null ? fePath : fePath + "?" + src.getRawQuery();
-            URI target = URI.create(feBaseUrl + pathAndQuery);
-            Flux<DataBuffer> bodyStream = request.bodyToFlux(DataBuffer.class);
-            return webClient.method(request.method())
-                    .uri(target)
-                    .headers(h -> copyEndToEndHeaders(request.headers().asHttpHeaders(), h))
-                    .body(BodyInserters.fromDataBuffers(bodyStream))
-                    .exchange()
-                    .flatMap(clientResponse ->
-                            ServerResponse.status(clientResponse.statusCode())
-                                    .headers(h -> copyEndToEndHeaders(clientResponse.headers().asHttpHeaders(), h))
-                                    .body(BodyInserters.fromDataBuffers(
-                                            clientResponse.bodyToFlux(DataBuffer.class)
-                                                    .timeout(Duration.ofMillis(STREAM_TIMEOUT_MS))))
-                                    .doOnCancel(() -> clientResponse.releaseBody().subscribe()));
-        });
+        URI src = request.uri();
+        String fePath = src.getRawPath().startsWith("/dispatcher/")
+                ? src.getRawPath().substring("/dispatcher".length())
+                : src.getRawPath();
+        DispatchPvLogData pv = DispatchPvLogData.passthrough(fePath, System.currentTimeMillis());
+        return Mono.fromCallable(fePool::next)
+                .doOnNext(pv::setFeHost)
+                .flatMap(feBaseUrl -> {
+                    String pathAndQuery = src.getRawQuery() == null ? fePath : fePath + "?" + src.getRawQuery();
+                    URI target = URI.create(feBaseUrl + pathAndQuery);
+                    Flux<DataBuffer> bodyStream = request.bodyToFlux(DataBuffer.class);
+                    return webClient.method(request.method())
+                            .uri(target)
+                            .headers(h -> copyEndToEndHeaders(request.headers().asHttpHeaders(), h))
+                            .body(BodyInserters.fromDataBuffers(bodyStream))
+                            .exchange()
+                            .flatMap(clientResponse -> {
+                                pv.finish(clientResponse.statusCode().value(), null);
+                                emitPv(pv);
+                                return ServerResponse.status(clientResponse.statusCode())
+                                        .headers(h -> copyEndToEndHeaders(clientResponse.headers().asHttpHeaders(), h))
+                                        .body(BodyInserters.fromDataBuffers(
+                                                clientResponse.bodyToFlux(DataBuffer.class)
+                                                        .timeout(Duration.ofMillis(STREAM_TIMEOUT_MS))))
+                                        .doOnCancel(() -> clientResponse.releaseBody().subscribe());
+                            });
+                })
+                .doOnError(e -> {
+                    Logger.warn("passthrough forward failed: path={}, feHost={}, err={}",
+                            fePath, pv.getFeHost(),
+                            e.getClass().getSimpleName() + ": " + e.getMessage());
+                    pv.finish(500, e.getClass().getSimpleName() + ": " + e.getMessage());
+                    emitPv(pv);
+                });
+    }
+
+    private static void emitPv(DispatchPvLogData pv) {
+        try {
+            String jsonLog = JsonUtils.toStringOrEmpty(pv);
+            if (pv.isSuccess()) {
+                pvLogger.info(jsonLog);
+            } else {
+                pvLogger.error(jsonLog);
+            }
+        } catch (Exception ex) {
+            Logger.error("Failed to serialize dispatcher passthrough PV log data", ex);
+        }
     }
 
     private static void copyEndToEndHeaders(HttpHeaders source, HttpHeaders sink) {

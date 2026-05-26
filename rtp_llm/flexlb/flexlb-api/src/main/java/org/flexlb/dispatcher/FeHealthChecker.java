@@ -1,6 +1,6 @@
 package org.flexlb.dispatcher;
 
-import lombok.extern.slf4j.Slf4j;
+import org.flexlb.util.Logger;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -28,7 +28,6 @@ import java.util.function.Supplier;
  * stops responding — only an application-level probe catches that. VipServer is layer 1
  * (registration), this is layer 2 (application liveness).
  */
-@Slf4j
 public class FeHealthChecker {
 
     private static final int FAIL_THRESHOLD = 2;
@@ -79,15 +78,32 @@ public class FeHealthChecker {
                         .retrieve()
                         .toBodilessEntity()
                         .timeout(Duration.ofMillis(PROBE_TIMEOUT_MS))
-                        .doOnSuccess(r -> consecFails
-                                .computeIfAbsent(url, k -> new AtomicInteger())
-                                .set(0))
+                        .doOnSuccess(r -> {
+                            AtomicInteger counter = consecFails
+                                    .computeIfAbsent(url, k -> new AtomicInteger());
+                            int prev = counter.getAndSet(0);
+                            // Only log on dead→alive transition. Every-probe success would
+                            // make pv.log unreadable and adds nothing once the host is known
+                            // healthy.
+                            if (prev >= FAIL_THRESHOLD) {
+                                Logger.warn("FE recovered: url={}, after {} consec failures",
+                                        url, prev);
+                            }
+                        })
                         .onErrorResume(e -> {
                             int n = consecFails
                                     .computeIfAbsent(url, k -> new AtomicInteger())
                                     .incrementAndGet();
-                            log.debug("FE probe failed: url={}, consec={}, err={}",
-                                    url, n, e.getClass().getSimpleName());
+                            // Log the exact tick the host crosses the threshold, once. Every
+                            // failure spam would flood the log under a real outage; once-on-
+                            // transition tells ops the minute it happened and the cause.
+                            if (n == FAIL_THRESHOLD) {
+                                Logger.warn("FE marked dead: url={}, consec={}, err={}",
+                                        url, n, e.getClass().getSimpleName());
+                            } else {
+                                Logger.debug("FE probe failed: url={}, consec={}, err={}",
+                                        url, n, e.getClass().getSimpleName());
+                            }
                             return Mono.empty();
                         })
                         .then())

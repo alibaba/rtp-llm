@@ -2,7 +2,7 @@ package org.flexlb.dispatcher;
 
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
+import org.flexlb.util.Logger;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
@@ -10,7 +10,6 @@ import reactor.core.scheduler.Schedulers;
 import java.util.ArrayList;
 import java.util.List;
 
-@Slf4j
 @RequiredArgsConstructor
 public class FanoutService {
 
@@ -38,11 +37,13 @@ public class FanoutService {
                     .flatMap(feUrl -> feClient.post(feUrl, fePath, body)
                             .map(resp -> SubBatchResult.ok(resp, chunkSize, startIndex))
                             .onErrorResume(e -> {
-                                log.warn("FE chunk failed: url={}, path={}, size={}", feUrl, fePath, chunkSize, e);
+                                Logger.warn("FE chunk failed: url={}, path={}, size={}, err={}",
+                                        feUrl, fePath, chunkSize, briefReason(e));
                                 return Mono.just(SubBatchResult.failed(chunkSize, startIndex, briefReason(e)));
                             }))
                     .onErrorResume(e -> {
-                        log.warn("FE pick failed for chunk size={}", chunkSize, e);
+                        Logger.warn("FE pick failed for chunk size={}, err={}",
+                                chunkSize, briefReason(e));
                         return Mono.just(SubBatchResult.failed(chunkSize, startIndex, briefReason(e)));
                     }));
             start += chunkSize;

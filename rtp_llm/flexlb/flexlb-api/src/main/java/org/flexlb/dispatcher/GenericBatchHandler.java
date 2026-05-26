@@ -5,7 +5,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
+import org.flexlb.dao.pv.DispatchPvLogData;
+import org.flexlb.util.JsonUtils;
+import org.flexlb.util.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.MediaType;
 import org.springframework.web.reactive.function.server.ServerRequest;
 import org.springframework.web.reactive.function.server.ServerResponse;
@@ -28,15 +31,18 @@ import java.util.List;
  * consumed by {@link ServerRequest#bodyToMono}, so re-forwarding through {@code WebClient}
  * would lose the body.
  */
-@Slf4j
 @RequiredArgsConstructor
 public class GenericBatchHandler {
+
+    /** Per-request access log, shared with {@code /schedule} / {@code /batch_schedule} → pv.log. */
+    private static final org.slf4j.Logger pvLogger = LoggerFactory.getLogger("pvLogger");
 
     private final FanoutService fanoutService;
     private final ObjectMapper mapper;
     private final SubBatchSpec subBatch;
 
     public Mono<ServerResponse> handle(ServerRequest request, BatchEndpointSpec spec) {
+        DispatchPvLogData pv = DispatchPvLogData.batch(spec.getPath(), System.currentTimeMillis());
         return request.bodyToMono(JsonNode.class).flatMap(body -> {
             if (!(body instanceof ObjectNode obj)) {
                 return badRequest("expected a JSON object body");
@@ -50,7 +56,9 @@ public class GenericBatchHandler {
                 emptyEnvelope.set(spec.getResponseArrayField(), mapper.createArrayNode());
                 return ServerResponse.ok().contentType(MediaType.APPLICATION_JSON).bodyValue(emptyEnvelope);
             }
+            pv.setTotalItems(arr.size());
             List<ArrayNode> chunks = splitChunks((ArrayNode) arr);
+            pv.setChunkCount(chunks.size());
             List<ObjectNode> chunkBodies = new ArrayList<>(chunks.size());
             for (ArrayNode chunk : chunks) {
                 ObjectNode copy = obj.deepCopy();
@@ -60,16 +68,39 @@ public class GenericBatchHandler {
             }
             return fanoutService.dispatchChunks(spec.getPath(), chunkBodies, spec)
                     .map(subs -> PartialFailureMerger.merge(subs, spec, mapper))
-                    .flatMap(merged -> merged.allFailed()
-                            ? errorResponse(merged)
-                            : ServerResponse.ok().contentType(MediaType.APPLICATION_JSON).bodyValue(merged.body()));
+                    .flatMap(merged -> {
+                        pv.setFailedChunks(merged.failedIndices().size());
+                        return merged.allFailed()
+                                ? errorResponse(merged)
+                                : ServerResponse.ok().contentType(MediaType.APPLICATION_JSON).bodyValue(merged.body());
+                    });
         }).onErrorResume(e -> {
-            log.warn("dispatcher request failed: spec={}", spec.getPath(), e);
+            Logger.warn("dispatcher request failed: spec={}, err={}",
+                    spec.getPath(), e.getClass().getSimpleName() + ": " + e.getMessage());
             ObjectNode err = mapper.createObjectNode();
             err.put("error", "dispatch_failed");
             err.put("message", String.valueOf(e.getMessage()));
             return ServerResponse.status(500).contentType(MediaType.APPLICATION_JSON).bodyValue(err);
+        }).doOnSuccess(resp -> {
+            // doOnSuccess sees the ServerResponse whether it was built by the happy path,
+            // badRequest(), errorResponse(), or onErrorResume — single emission point covers
+            // every outcome. doOnError is unreachable because onErrorResume always recovers.
+            pv.finish(resp.statusCode().value(), null);
+            emitPv(pv);
         });
+    }
+
+    private static void emitPv(DispatchPvLogData pv) {
+        try {
+            String jsonLog = JsonUtils.toStringOrEmpty(pv);
+            if (pv.isSuccess()) {
+                pvLogger.info(jsonLog);
+            } else {
+                pvLogger.error(jsonLog);
+            }
+        } catch (Exception ex) {
+            Logger.error("Failed to serialize dispatcher batch PV log data", ex);
+        }
     }
 
     /**

@@ -1,6 +1,9 @@
 package org.flexlb.dispatcher;
 
+import org.flexlb.util.Logger;
+
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
@@ -26,6 +29,12 @@ public class FePool {
     private final Supplier<List<String>> source;
     private final Predicate<String> isAlive;
     private final AtomicInteger cursor = new AtomicInteger(0);
+    /**
+     * Latch so the "all FE dead, falling back to RR" diagnostic fires once per outage event,
+     * not on every {@link #next()} call during a sustained outage (which would be N×QPS).
+     * Resets the instant any subsequent pick finds an alive host.
+     */
+    private final AtomicBoolean allDeadReported = new AtomicBoolean(false);
 
     public FePool(Supplier<List<String>> source, Predicate<String> isAlive) {
         if (source == null) {
@@ -56,10 +65,17 @@ public class FePool {
         for (int i = 0; i < size; i++) {
             String candidate = snapshot.get(Math.floorMod(start + i, size));
             if (isAlive.test(candidate)) {
+                allDeadReported.set(false);
                 return candidate;
             }
         }
-        // All dead — fall through to plain round-robin at the original cursor position.
+        // All dead — fall through to plain round-robin at the original cursor position. Log
+        // once per outage so the operator knows the dispatcher is gambling rather than refusing,
+        // without flooding the log at request rate.
+        if (allDeadReported.compareAndSet(false, true)) {
+            Logger.warn("FE pool all-dead fallback: pool size={}, returning RR pick anyway "
+                    + "(stale probe data is preferred over refusing service)", size);
+        }
         return snapshot.get(Math.floorMod(start, size));
     }
 }
