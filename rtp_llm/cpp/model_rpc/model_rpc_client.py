@@ -384,6 +384,7 @@ class ModelRpcClient(object):
         client_config,
         max_rpc_timeout_ms: int = 0,
         decode_entrance: bool = False,
+        force_legacy_generate_stream: bool = False,
     ):
         """Initialize ModelRpcClient with addresses.
 
@@ -391,6 +392,10 @@ class ModelRpcClient(object):
             addresses: List of RPC addresses for data parallel communication
             max_rpc_timeout_ms: Maximum RPC timeout in milliseconds
             decode_entrance: Whether this is a decode entrance
+            force_legacy_generate_stream: Force the V0 GenerateStreamCall path
+                even when DP_CONTROLLER_MANAGED=1. Used by self-issued backend
+                requests (e.g. DSV4 startup warmup) that bypass FlexLB and thus
+                have no BatchEnqueue-created response_registry entry to fetch.
         """
         self._addresses = addresses
         self._max_rpc_timeout_ms = max_rpc_timeout_ms
@@ -398,13 +403,19 @@ class ModelRpcClient(object):
         # V1 DP-controller gate: when enabled, enqueue() uses the two-step
         # Enqueue+FetchResponse flow to hit the ResponseBuffer async queue
         # instead of legacy GenerateStreamCall.
-        self._dp_controller_managed = os.environ.get(
-            "DP_CONTROLLER_MANAGED", ""
-        ).lower() in ("true", "1", "yes")
-        if self._dp_controller_managed:
+        if force_legacy_generate_stream:
+            self._dp_controller_managed = False
             logging.info(
-                "ModelRpcClient: DP_CONTROLLER_MANAGED=1, using V1 Enqueue+FetchResponse flow"
+                "ModelRpcClient: force_legacy_generate_stream=True, using V0 GenerateStreamCall path"
             )
+        else:
+            self._dp_controller_managed = os.environ.get(
+                "DP_CONTROLLER_MANAGED", ""
+            ).lower() in ("true", "1", "yes")
+            if self._dp_controller_managed:
+                logging.info(
+                    "ModelRpcClient: DP_CONTROLLER_MANAGED=1, using V1 Enqueue+FetchResponse flow"
+                )
         self._options = []
         for key, value in client_config.items():
             self._options.append((key, value))

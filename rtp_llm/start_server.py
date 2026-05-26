@@ -666,6 +666,7 @@ async def _run_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs):
             addresses=[addr],
             client_config=client_config,
             max_rpc_timeout_ms=timeout_ms,
+            force_legacy_generate_stream=True,
         )
         try:
             for len_idx, token_len in enumerate(token_lens):
