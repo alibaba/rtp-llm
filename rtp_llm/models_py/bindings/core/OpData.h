@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include "rtp_llm/cpp/models/eplb/stats/ExpertStats.h"
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
+#include "rtp_llm/models_py/bindings/core/TensorHolder.h"
 #include <cstddef>
 #include <optional>
 #include <memory>
@@ -312,6 +313,7 @@ struct GreedyParams {
     std::optional<torch::Tensor> do_sample;
 
     std::vector<at::Generator> generator;
+    TensorHolder*              buffer_holder = nullptr;
 };
 
 struct GreedyOutput {

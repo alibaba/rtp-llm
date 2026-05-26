@@ -1,5 +1,6 @@
 #include "rtp_llm/models_py/bindings/core/OpData.h"
 #include "rtp_llm/models_py/bindings/core/CommonDefines.h"
+#include "rtp_llm/models_py/bindings/core/TensorHolder.h"
 
 #if USING_CUDA
 #include <ATen/cuda/CUDAContext.h>
@@ -52,6 +53,34 @@ void pyTopPRenormProbs(const torch::Tensor& probs, torch::Tensor& renorm_probs, 
     pybind11::gil_scoped_acquire gil;
     auto                         result = pyTopPRenormFn()(probs, top_p).cast<torch::Tensor>();
     renorm_probs.copy_(result, /*non_blocking=*/true);
+}
+
+std::pair<torch::Tensor, torch::Tensor> makeSamplingSeedOffsetTensors(const std::vector<at::Generator>& generators,
+                                                                      int64_t                           batch_size,
+                                                                      int                               increment,
+                                                                      TensorHolder*                     buffer_holder) {
+    auto options  = torch::TensorOptions().dtype(torch::kInt64).pinned_memory(true);
+    auto seed_h   = torch::empty({batch_size}, options);
+    auto offset_h = torch::empty({batch_size}, options);
+    auto seed_ptr = seed_h.data_ptr<int64_t>();
+    auto off_ptr  = offset_h.data_ptr<int64_t>();
+
+    for (int64_t i = 0; i < batch_size; ++i) {
+        auto generator = (i < static_cast<int64_t>(generators.size()) && generators[i].defined()) ?
+                             std::make_optional(generators[i]) :
+                             std::nullopt;
+        auto [seed, offset] = get_seed_and_offset(increment, generator);
+        seed_ptr[i]         = static_cast<int64_t>(seed);
+        off_ptr[i]          = static_cast<int64_t>(offset);
+    }
+
+    auto seed_d   = seed_h.to(torch::kCUDA, /*non_blocking=*/true).contiguous();
+    auto offset_d = offset_h.to(torch::kCUDA, /*non_blocking=*/true).contiguous();
+    if (buffer_holder != nullptr) {
+        buffer_holder->hold_host(seed_h);
+        buffer_holder->hold_host(offset_h);
+    }
+    return {seed_d, offset_d};
 }
 
 void processLogits(const GreedyParams&  params,
@@ -130,6 +159,9 @@ void processLogits(const GreedyParams&  params,
             for (int64_t i = 0; i < (int64_t)decoder_batch_size; i++) {
                 output_ids_ptrs.data_ptr<int64_t>()[i] = (int64_t)(device_tokens.data_ptr<int32_t>() + i * (step + 1));
             }
+            if (params.buffer_holder) {
+                params.buffer_holder->hold_host(output_ids_ptrs);
+            }
             auto output_ids_ptrs_gpu  = output_ids_ptrs.to(torch::kCUDA, true);
             auto sequence_lengths_gpu = params.sequence_lengths.to(torch::kCUDA, true);
 
@@ -166,16 +198,11 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
     // [1, batch_size] — last row of transposed_tokens
     auto samples_t = transposed_tokens.slice(0, transposed_tokens.size(0) - 1, transposed_tokens.size(0));
 
-    torch::TensorOptions options          = torch::TensorOptions(probs_t.scalar_type()).device(torch::kCUDA);
     constexpr bool       deterministic    = true;
-    constexpr int        max_top_k_rounds = 32;
-    auto                 uniform_samples  = torch::rand({max_top_k_rounds, (int)batch_size}, options);
-    for (int64_t i = 0; i < (int64_t)batch_size; i++) {
-        if (params.generator[i].defined()) {
-            uniform_samples.index({torch::indexing::Slice(), i}) =
-                torch::rand({max_top_k_rounds}, params.generator[i], nullopt, options);
-        }
-    }
+    constexpr int        max_sampling_rounds = 32;
+    auto [seed_t, offset_t] =
+        makeSamplingSeedOffsetTensors(
+            params.generator, batch_size, static_cast<int>(max_sampling_rounds), params.buffer_holder);
 
     torch::Tensor success_t = success;
     torch::Tensor top_k_t   = params.top_k;
@@ -189,49 +216,79 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
     }
 
     // top_k/top_p are CPU tensors with int32/float32 dtype
-    auto top_k_ptr = reinterpret_cast<uint32_t*>(params.top_k.data_ptr<int32_t>());
+    auto top_k_ptr = params.top_k.data_ptr<int32_t>();
     auto top_p_ptr = params.top_p.data_ptr<float>();
 
     std::transform(top_p_ptr, top_p_ptr + batch_size, top_p_ptr, [&](auto t) { return std::abs(t) < 1e-7 ? 1.0 : t; });
-    // top_k<=0 means "no limit" in our config; flashinfer's top_p_sampling_from_probs
-    // path returns success=false for that input here (verified for any top_p incl. 1.0),
-    // so normalize up front and route through top_k_sampling / top_k_top_p_sampling.
-    std::transform(top_k_ptr, top_k_ptr + batch_size, top_k_ptr, [&](auto t) { return t <= 0 ? 1 << 30 : t; });
+    const bool all_top_k_one      = std::all_of(top_k_ptr, top_k_ptr + batch_size, [](auto t) { return t == 1; });
+    const bool all_top_k_no_limit = std::all_of(top_k_ptr, top_k_ptr + batch_size, [](auto t) { return t <= 0; });
+    const bool all_top_p_one =
+        std::all_of(top_p_ptr, top_p_ptr + batch_size, [](auto t) { return std::abs(t - 1.0f) < 1e-7; });
 
-    if (std::all_of(top_k_ptr, top_k_ptr + batch_size, [&](auto t) { return t == 1; })) {
+    if (all_top_k_one) {
         torch::Tensor selected_tokens = torch::argmax(probs_t, -1, /*keepdim=*/false);
         samples_t.copy_(selected_tokens, true);
         success = torch::Tensor();  // mark as undefined — all succeeded
         if (output_all_probs_t.defined()) {
             top_k_renorm_probs(probs_t, output_all_probs_t, top_k_t, 0, (int64_t)cur_stream);
         }
-    } else if (std::all_of(top_k_ptr, top_k_ptr + batch_size, [&](auto t) { return t <= 0; })) {
-        top_p_sampling_from_probs(
-            probs_t, uniform_samples, samples_t, success_t, top_p_t, 1.0, deterministic, (int64_t)cur_stream);
+    } else if (all_top_k_no_limit) {
+        top_p_sampling_from_probs(probs_t,
+                                  samples_t.squeeze(0),
+                                  success_t,
+                                  std::nullopt,
+                                  top_p_t,
+                                  1.0,
+                                  deterministic,
+                                  seed_t,
+                                  0,
+                                  offset_t,
+                                  0,
+                                  (int64_t)cur_stream);
         if (output_all_probs_t.defined()) {
             top_p_renorm_probs(probs_t, output_all_probs_t, top_p_t, 1.0, (int64_t)cur_stream);
         }
-    } else if (std::all_of(top_p_ptr, top_p_ptr + batch_size, [&](auto t) { return std::abs(t - 1.0f) < 1e-7; })) {
-        top_k_sampling_from_probs(
-            probs_t, uniform_samples, samples_t, success_t, top_k_t, 0, deterministic, (int64_t)cur_stream);
-        if (output_all_probs_t.defined()) {
-            top_k_renorm_probs(probs_t, output_all_probs_t, top_k_t, 0, (int64_t)cur_stream);
-        }
     } else {
-        top_k_top_p_sampling_from_probs(probs_t,
-                                        uniform_samples,
-                                        samples_t,
-                                        success_t,
-                                        top_k_t,
-                                        1.0,
-                                        top_p_t,
-                                        1.0,
-                                        deterministic,
-                                        (int64_t)cur_stream);
-        if (output_all_probs_t.defined()) {
-            torch::Tensor temp_t = torch::zeros_like(output_all_probs_t);
-            top_k_renorm_probs(probs_t, temp_t, top_k_t, 1.0, (int64_t)cur_stream);
-            top_p_renorm_probs(temp_t, output_all_probs_t, top_p_t, 1.0, (int64_t)cur_stream);
+        // top_k<=0 means "no limit" in RTP config. The combined FlashInfer
+        // kernel takes a top_k array, so normalize mixed batches after the
+        // pure top-p route has been selected.
+        std::transform(top_k_ptr, top_k_ptr + batch_size, top_k_ptr, [](auto t) { return t <= 0 ? 1 << 30 : t; });
+        if (all_top_p_one) {
+            top_k_sampling_from_probs(probs_t,
+                                      samples_t.squeeze(0),
+                                      success_t,
+                                      std::nullopt,
+                                      top_k_t,
+                                      0,
+                                      deterministic,
+                                      seed_t,
+                                      0,
+                                      offset_t,
+                                      0,
+                                      (int64_t)cur_stream);
+            if (output_all_probs_t.defined()) {
+                top_k_renorm_probs(probs_t, output_all_probs_t, top_k_t, 0, (int64_t)cur_stream);
+            }
+        } else {
+            top_k_top_p_sampling_from_probs(probs_t,
+                                            samples_t.squeeze(0),
+                                            success_t,
+                                            std::nullopt,
+                                            top_k_t,
+                                            0,
+                                            top_p_t,
+                                            1.0,
+                                            deterministic,
+                                            seed_t,
+                                            0,
+                                            offset_t,
+                                            0,
+                                            (int64_t)cur_stream);
+            if (output_all_probs_t.defined()) {
+                torch::Tensor temp_t = torch::zeros_like(output_all_probs_t);
+                top_k_renorm_probs(probs_t, temp_t, top_k_t, 1.0, (int64_t)cur_stream);
+                top_p_renorm_probs(temp_t, output_all_probs_t, top_p_t, 1.0, (int64_t)cur_stream);
+            }
         }
     }
 

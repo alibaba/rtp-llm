@@ -59,4 +59,26 @@ TEST_F(ModelDataTest, testConstruct) {
     EXPECT_EQ(std::vector<int>(sl.data_ptr<int>(), sl.data_ptr<int>() + sl.numel()), std::vector<int>({1, 2, 3, 4}));
 }
 
+TEST_F(ModelDataTest, testTensorHolderReleasesOnThirdRound) {
+    TensorHolder holder;
+    auto         t0 = torch::empty({1}, torch::kFloat32);
+    auto         t1 = torch::empty({1}, torch::kFloat32);
+    auto         t2 = torch::empty({1}, torch::kFloat32);
+
+    holder.hold(t0);
+    holder.release();
+    ASSERT_EQ(holder.clear_tensors.size(), 1);
+    EXPECT_EQ(holder.clear_tensors.front().front().data_ptr(), t0.data_ptr());
+
+    holder.hold(t1);
+    holder.release();
+    ASSERT_EQ(holder.clear_tensors.size(), 2);
+    EXPECT_EQ(holder.clear_tensors.front().front().data_ptr(), t0.data_ptr());
+
+    holder.hold(t2);
+    holder.release();
+    ASSERT_EQ(holder.clear_tensors.size(), 2);
+    EXPECT_EQ(holder.clear_tensors.front().front().data_ptr(), t1.data_ptr());
+}
+
 }  // namespace rtp_llm

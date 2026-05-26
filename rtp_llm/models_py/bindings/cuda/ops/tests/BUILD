@@ -3,6 +3,18 @@ load("@arch_config//:arch_select.bzl", "torch_deps")
 
 cc_test = cc_test_wrapper
 
+cc_import(
+    name = "cuda13_torch_nvshmem",
+    shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
+)
+
+cuda13_torch_link_deps = select({
+    "@//:using_cuda13_x86": [
+        ":cuda13_torch_nvshmem",
+    ],
+    "//conditions:default": [],
+})
+
 cc_library(
     name = "cuda_test_util",
     hdrs = [
@@ -45,7 +57,10 @@ cc_test(
     ],
     data = [],
     copts = copts(),
-    deps = test_deps,
+    deps = test_deps + [
+        "//3rdparty/flashinfer:flashinfer",
+        "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
+    ] + cuda13_torch_link_deps,
     exec_properties = {'gpu':'H20'},
 )
 
