@@ -48,8 +48,9 @@ MatchResult FullKVCacheGroup::match(const CacheKeysType& cache_keys) {
         return final_result;
     }
 
-    for (const auto& cache_key : cache_keys) {
-        auto block_idx = shared_cache_->matchGroup(cache_key, group_id_);
+    for (size_t i = 0; i < cache_keys.size(); ++i) {
+        const auto cache_key = cache_keys[i];
+        auto       block_idx = shared_cache_->matchGroup(cache_key, group_id_);
         if (isNullBlockIdx(block_idx)) {
             break;
         }

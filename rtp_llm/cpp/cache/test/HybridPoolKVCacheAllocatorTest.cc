@@ -120,34 +120,27 @@ static CacheConfig makeTinySwaMultiPoolHybridConfig(uint32_t linear_block_num = 
     return config;
 }
 
-static ModelConfig makeProModelConfig() {
+static ModelConfig makeTinyDSV4ModelConfig() {
     ModelConfig mc;
-    mc.num_layers                   = 61;
-    mc.hidden_size                  = 7168;
-    mc.attn_config.head_num         = 128;
-    mc.attn_config.kv_head_num      = 1;
-    mc.attn_config.size_per_head    = 512;
-    mc.attn_config.rope_head_dim    = 64;
-    mc.attn_config.sliding_window   = 128;
-    mc.attn_config.indexer_head_dim = 128;
-    mc.attn_config.indexer_head_num = 64;
-    mc.attn_config.indexer_topk     = 1024;
-    mc.attn_config.o_groups         = 16;
-    mc.attn_config.o_lora_rank      = 1024;
-    std::vector<int> ratios;
-    ratios.push_back(128);
-    ratios.push_back(128);
-    for (int i = 2; i < 61; i++) {
-        ratios.push_back((i % 2 == 0) ? 4 : 128);
-    }
-    ratios.push_back(0);
-    mc.attn_config.layer_compress_ratios = ratios;
+    mc.num_layers                        = 5;
+    mc.hidden_size                       = 32;
+    mc.attn_config.head_num              = 4;
+    mc.attn_config.kv_head_num           = 1;
+    mc.attn_config.size_per_head         = 8;
+    mc.attn_config.rope_head_dim         = 4;
+    mc.attn_config.sliding_window        = 128;
+    mc.attn_config.indexer_head_dim      = 8;
+    mc.attn_config.indexer_head_num      = 2;
+    mc.attn_config.indexer_topk          = 16;
+    mc.attn_config.o_groups              = 2;
+    mc.attn_config.o_lora_rank           = 16;
+    mc.attn_config.layer_compress_ratios = {4, 128, 4, 128, 0};
     return mc;
 }
 
 // Build a DSV4 7-pool CacheConfig (uses use_independent_block_pools=true).
 static CacheConfig makeDSV4HybridPoolConfig(uint32_t block_num = 200) {
-    auto              mc = makeProModelConfig();
+    auto              mc = makeTinyDSV4ModelConfig();
     ParallelismConfig pc;
     auto              config = HybridPoolConfigCreator::createConfig(mc, pc);
     config.block_num         = block_num;
@@ -246,8 +239,8 @@ public:
         return nullptr;
     }
 
-    std::shared_ptr<StoreContext>
-    storeBuffers(const std::vector<std::shared_ptr<RequestBlockBuffer>>&, int64_t) override {
+    std::shared_ptr<StoreContext> storeBuffers(const std::vector<std::shared_ptr<RequestBlockBuffer>>&,
+                                               int64_t) override {
         return nullptr;
     }
 
@@ -913,7 +906,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4StateRegionPoolsOnGpuWhenStateBudgetZ
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4ConfigSplitsStateBytesOutOfSwaAccumulator) {
-    auto              mc = makeProModelConfig();
+    auto              mc = makeTinyDSV4ModelConfig();
     ParallelismConfig pc;
     auto              config = HybridPoolConfigCreator::createConfig(mc, pc);
 
@@ -946,7 +939,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4ConfigSplitsStateBytesOutOfSwaAccumul
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FinalizeBlockNumsHonorsStateGlobalBlockNum) {
-    auto              mc = makeProModelConfig();
+    auto              mc = makeTinyDSV4ModelConfig();
     ParallelismConfig pc;
     auto              config = HybridPoolConfigCreator::createConfig(mc, pc);
     // Env > 0 simulation: STATE on pinned CPU, addition headroom must NOT
@@ -983,7 +976,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FinalizeBlockNumsHonorsStateGlobalBlo
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FinalizeBlockNumsLegacyOverloadStillWorks) {
-    auto              mc = makeProModelConfig();
+    auto              mc = makeTinyDSV4ModelConfig();
     ParallelismConfig pc;
     auto              config = HybridPoolConfigCreator::createConfig(mc, pc);
 
@@ -1002,7 +995,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FinalizeBlockNumsLegacyOverloadStillW
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FinalizeBlockNumsStateBudgetDecouplesFromHbm) {
-    auto              mc = makeProModelConfig();
+    auto              mc = makeTinyDSV4ModelConfig();
     ParallelismConfig pc;
     auto              config = HybridPoolConfigCreator::createConfig(mc, pc);
     ASSERT_GT(config.state_block_size_bytes, 0u);
@@ -1035,7 +1028,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FinalizeBlockNumsStateBudgetDecouples
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4StateBudgetZeroMatchesHbmBlockNum) {
-    auto              mc = makeProModelConfig();
+    auto              mc = makeTinyDSV4ModelConfig();
     ParallelismConfig pc;
     auto              config = HybridPoolConfigCreator::createConfig(mc, pc);
 
@@ -1055,7 +1048,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4StateBudgetZeroMatchesHbmBlockNum) {
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4StateBudgetTooSmallTriggersCheck) {
-    auto              mc = makeProModelConfig();
+    auto              mc = makeTinyDSV4ModelConfig();
     ParallelismConfig pc;
     auto              config = HybridPoolConfigCreator::createConfig(mc, pc);
     ASSERT_GT(config.state_block_size_bytes, 0u);
@@ -1178,7 +1171,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4SharedBlockCacheIsUnifiedAcrossGroups
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CPShardedInsertThenReuseSamePrefix) {
     auto config    = makeDSV4HybridPoolConfig(/*block_num=*/64);
-    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
 
     const int spb     = static_cast<int>(config.seq_size_per_block);

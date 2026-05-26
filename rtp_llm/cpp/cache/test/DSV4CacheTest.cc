@@ -482,13 +482,13 @@ TEST(CacheConfigTest, AdditionReserveDeductedFromPagedBudget) {
 
     // Config with addition > 0
     KVCacheConfig kv_cache_config_with;
-    kv_cache_config_with.kv_cache_mem_mb                  = 1024;
+    kv_cache_config_with.kv_cache_mem_mb                  = 8192;
     kv_cache_config_with.non_full_addition_kvcache_blocks = addition;
     auto config_with = CacheConfigCreator::createConfig(mc, pc, runtime_config, kv_cache_config_with);
 
     // Config with addition = 0
     KVCacheConfig kv_cache_config_without;
-    kv_cache_config_without.kv_cache_mem_mb                  = 1024;
+    kv_cache_config_without.kv_cache_mem_mb                  = 8192;
     kv_cache_config_without.non_full_addition_kvcache_blocks = 0;
     auto config_without = CacheConfigCreator::createConfig(mc, pc, runtime_config, kv_cache_config_without);
 
@@ -511,7 +511,7 @@ TEST(CacheConfigTest, AdditionReserveDeductedFromPagedBudget) {
     EXPECT_EQ(config_without.fixed_pool_reserve_bytes, 0u);
 }
 
-TEST(CacheConfigTest, FinalizeBlockNumsWithLinearStepShrinksSwaRuleBlocks) {
+TEST(CacheConfigTest, FinalizeBlockNumsWithLinearStepShrinksOnlyNonStateSwaRuleBlocks) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                      = 4;
     runtime_config.fifo_scheduler_config.max_context_batch_size = 2;
@@ -527,10 +527,12 @@ TEST(CacheConfigTest, FinalizeBlockNumsWithLinearStepShrinksSwaRuleBlocks) {
     EXPECT_EQ(config.group_block_nums[0], 100u);
     EXPECT_EQ(config.group_block_nums[1], 100u);
     EXPECT_EQ(config.group_block_nums[2], 100u);
-    // SWA groups: rule_blocks = 100/4 = 25, + addition = 10 → 35
-    for (int gid = 3; gid < kDsv4PoolNum; ++gid) {
-        EXPECT_EQ(config.group_block_nums[gid], 25u + 10u) << "gid=" << gid;
+    // STATE groups use state_global_block_num and are not shrunk by linear_step.
+    for (int gid = 3; gid <= 5; ++gid) {
+        EXPECT_EQ(config.group_block_nums[gid], 100u + 10u) << "gid=" << gid;
     }
+    // SWA_KV group: rule_blocks = 100/4 = 25, + addition = 10 -> 35.
+    EXPECT_EQ(config.group_block_nums[6], 25u + 10u);
     // Reserve only counts the addition portion
     size_t expected_reserve = 0;
     for (int gid = 3; gid < kDsv4PoolNum; ++gid) {

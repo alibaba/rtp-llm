@@ -11,7 +11,6 @@
 #include <strings.h>
 #include <cstdlib>
 #include <memory>
-#include <sstream>
 #include <unistd.h>
 #include <limits.h>
 
@@ -40,36 +39,6 @@ bool prefillCacheHitMetricEnabled() {
         return !envValueIsFalse(value);
     }();
     return enabled;
-}
-
-bool prefillCacheDebugLogEnabled() {
-    static const bool enabled = []() {
-        const char* value = std::getenv("PREFILL_CACHE_DEBUG_LOG");
-        if (value == nullptr) {
-            value = std::getenv("KV_CACHE_DEBUG_LOG");
-        }
-        if (value == nullptr) {
-            return false;
-        }
-        return strcmp(value, "1") == 0 || strcasecmp(value, "true") == 0 || strcasecmp(value, "on") == 0;
-    }();
-    return enabled;
-}
-
-std::string cacheKeyPreview(const std::vector<CacheKeyType>& keys, size_t limit = 6) {
-    std::ostringstream oss;
-    oss << "[";
-    for (size_t i = 0; i < keys.size() && i < limit; ++i) {
-        if (i != 0) {
-            oss << ",";
-        }
-        oss << keys[i];
-    }
-    if (keys.size() > limit) {
-        oss << ",...";
-    }
-    oss << "]";
-    return oss.str();
 }
 
 std::vector<CacheKeyType> buildFullBlockCacheKeys(torch::Tensor input_ids, int seq_size_per_block) {
@@ -548,23 +517,6 @@ void PrefillRpcServer::reportPrefillRecentCacheKeyMetrics(PrefillGenerateContext
         fillPrefillRecentCacheKeyMetricsCollector(collector, snapshot);
         metrics_reporter_->report<PrefillRecentCacheKeyMetrics, PrefillRecentCacheKeyMetricsCollector>(nullptr,
                                                                                                        &collector);
-    }
-
-    if (prefillCacheDebugLogEnabled()) {
-        RTP_LLM_LOG_INFO("prefill recent-cache-key metrics reported: request_id=%ld token_num=%ld "
-                         "seq_size_per_block=%d key_count=%zu hit_count=%ld total_count=%ld hit_ratio=%.6f "
-                         "retained_occurrences=%ld retained_unique_cache_keys=%zu window_ms=%ld keys=%s",
-                         prefill_context.request_id,
-                         prefill_context.generate_input->input_ids.numel(),
-                         seq_size_per_block,
-                         cache_keys.size(),
-                         snapshot.request_hit_occurrences,
-                         snapshot.request_occurrences,
-                         snapshot.request_hit_ratio,
-                         snapshot.retained_occurrences,
-                         snapshot.retained_unique_cache_keys,
-                         snapshot.time_window_ms,
-                         cacheKeyPreview(cache_keys).c_str());
     }
 }
 

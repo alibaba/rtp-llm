@@ -2,17 +2,13 @@
 
 #include <algorithm>
 #include <chrono>
-#include <cstdlib>
-#include <cstring>
-#include <strings.h>
 #include <limits>
-#include <sstream>
 #include <unordered_set>
 
-#include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
-#include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
-#include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
@@ -25,41 +21,6 @@
 namespace rtp_llm {
 
 namespace {
-
-bool kvCacheDebugLogEnabled() {
-    static const bool enabled = []() {
-        const char* value = std::getenv("KV_CACHE_DEBUG_LOG");
-        if (value == nullptr) {
-            return false;
-        }
-        return strcmp(value, "1") == 0 || strcasecmp(value, "true") == 0 || strcasecmp(value, "on") == 0;
-    }();
-    return enabled;
-}
-
-template<typename T>
-std::string previewVector(const std::vector<T>& values, size_t limit = 6) {
-    std::ostringstream oss;
-    oss << "[";
-    for (size_t i = 0; i < values.size() && i < limit; ++i) {
-        if (i != 0) {
-            oss << ",";
-        }
-        oss << values[i];
-    }
-    if (values.size() > limit) {
-        oss << ",...";
-    }
-    oss << "]";
-    return oss.str();
-}
-
-std::string previewCacheKeys(const BatchKVCacheResourcePtr& resource) {
-    if (!resource || resource->batchSize() <= 0) {
-        return "[]";
-    }
-    return previewVector(resource->cacheKeys(0));
-}
 
 size_t expectedCPShardedLocalBlocks(const CPSlotMapper& mapper, int seq_len, int reserve_step) {
     const int effective_seq_len = mapper.effectiveSeqLenForAlloc(std::max(seq_len, 0));
@@ -136,12 +97,11 @@ bool KVCacheManager::init() {
 
     const bool is_hybrid = config_.groupNums() > 1;
     if (config_.use_independent_block_pools) {
-        allocator_ = std::make_shared<rtp_llm::HybridPoolKVCacheAllocator>(
-            config_,
-            AllocationType::DEVICE,
-            metrics_reporter_,
-            kv_cache_config_.reserve_block_ratio,
-            pd_sep_config_.role_type);
+        allocator_ = std::make_shared<rtp_llm::HybridPoolKVCacheAllocator>(config_,
+                                                                           AllocationType::DEVICE,
+                                                                           metrics_reporter_,
+                                                                           kv_cache_config_.reserve_block_ratio,
+                                                                           pd_sep_config_.role_type);
     } else if (is_hybrid) {
         allocator_ = std::make_shared<rtp_llm::HybridTypeKVCacheAllocator>(
             config_, AllocationType::DEVICE, metrics_reporter_, kv_cache_config_.reserve_block_ratio);
@@ -196,26 +156,6 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
         updateCacheKeys(effective->batch_kv_cache_resource, effective->complete_token_ids, seq_size_per_block);
     }
 
-    const size_t available_before = allocator_ ? allocator_->availableBlocksNum() : 0;
-    const size_t free_before      = allocator_ ? allocator_->freeBlocksNum() : 0;
-    if (kvCacheDebugLogEnabled()) {
-        RTP_LLM_LOG_INFO("kv-cache malloc begin: request_id=%ld seq_len=%d reserve_step=%d common_seq_len=%d "
-                         "cur_blocks=%d cache_keys=%zu key_preview=%s reuse_cache=%d enable_device_cache=%d "
-                         "enable_memory_cache=%d available_before=%zu free_before=%zu",
-                         effective->request_id,
-                         effective->complete_token_ids->seqLength(),
-                         effective->complete_token_ids->getReserveStep(),
-                         effective->complete_token_ids->commonSeqLength(),
-                         effective->batch_kv_cache_resource->curBlocksNum(),
-                         effective->batch_kv_cache_resource->cacheKeys(0).size(),
-                         previewCacheKeys(effective->batch_kv_cache_resource).c_str(),
-                         effective->reuse_cache,
-                         effective->enable_device_cache,
-                         kv_cache_config_.enable_memory_cache,
-                         available_before,
-                         free_before);
-    }
-
     auto result = allocator_->malloc(*effective);
 
     // CP invariant: blocks holds this rank's local share of logical KV pages.
@@ -239,18 +179,6 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
                                 res.cacheKeys().size());
     }
 
-    if (kvCacheDebugLogEnabled()) {
-        const size_t available_after = allocator_ ? allocator_->availableBlocksNum() : 0;
-        const size_t free_after      = allocator_ ? allocator_->freeBlocksNum() : 0;
-        RTP_LLM_LOG_INFO("kv-cache malloc end: request_id=%ld success=%d reuse_len=%d match_cost_us=%ld "
-                         "available_after=%zu free_after=%zu",
-                         effective->request_id,
-                         result.success,
-                         result.reuse_len,
-                         result.match_cost_time_us,
-                         available_after,
-                         free_after);
-    }
     return result;
 }
 
@@ -264,28 +192,10 @@ void KVCacheManager::insertIntoCache(const InsertInfo& insert_info) {
     RTP_LLM_PROFILE_FUNCTION();
     dropLastPartialBlock(insert_info.batch_kv_cache_resource);
     if (cp_slot_mapper_ && !insert_info.cp_slot_mapper) {
-        if (kvCacheDebugLogEnabled()) {
-            RTP_LLM_LOG_INFO("kv-cache insert begin: cp_auto_injected=1 batch_size=%d group_nums=%d cache_keys=%zu "
-                             "key_preview=%s resident=%d",
-                             insert_info.batch_kv_cache_resource->batchSize(),
-                             insert_info.batch_kv_cache_resource->groupNums(),
-                             insert_info.batch_kv_cache_resource->cacheKeys(0).size(),
-                             previewCacheKeys(insert_info.batch_kv_cache_resource).c_str(),
-                             insert_info.is_resident);
-        }
         InsertInfo patched     = insert_info;
         patched.cp_slot_mapper = cp_slot_mapper_;
         allocator_->insertIntoCache(patched);
         return;
-    }
-    if (kvCacheDebugLogEnabled()) {
-        RTP_LLM_LOG_INFO("kv-cache insert begin: cp_auto_injected=0 batch_size=%d group_nums=%d cache_keys=%zu "
-                         "key_preview=%s resident=%d",
-                         insert_info.batch_kv_cache_resource->batchSize(),
-                         insert_info.batch_kv_cache_resource->groupNums(),
-                         insert_info.batch_kv_cache_resource->cacheKeys(0).size(),
-                         previewCacheKeys(insert_info.batch_kv_cache_resource).c_str(),
-                         insert_info.is_resident);
     }
     allocator_->insertIntoCache(insert_info);
 }
@@ -660,10 +570,11 @@ KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cac
     if (need_cache_keys) {
         std::unordered_set<CacheKeyType> all_keys;
         // device cache keys
-        auto shared_cache = allocator_->sharedBlockCache();
+        std::vector<CacheKeyType> device_cache_keys;
+        auto                      shared_cache = allocator_->sharedBlockCache();
         if (shared_cache) {
-            auto cache_keys = shared_cache->allCacheKeys();
-            all_keys.insert(cache_keys.begin(), cache_keys.end());
+            device_cache_keys = shared_cache->allCacheKeys();
+            all_keys.insert(device_cache_keys.begin(), device_cache_keys.end());
             info.version = shared_cache->version();
         }
         // memory cache keys
@@ -673,7 +584,9 @@ KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cac
         info.cached_keys.assign(all_keys.begin(), all_keys.end());
     }
 
-    const size_t block_size_tokens = config_.seq_size_per_block;
+    const size_t block_size_tokens = cp_slot_mapper_ && cp_slot_mapper_->isSharded() ?
+                                         cp_slot_mapper_->virtualBlockSize() :
+                                         config_.seq_size_per_block;
 
     info.block_size = block_size_tokens;
     if (auto hybrid = std::dynamic_pointer_cast<rtp_llm::HybridPoolKVCacheAllocator>(allocator_)) {

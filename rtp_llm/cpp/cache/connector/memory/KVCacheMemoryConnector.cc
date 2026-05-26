@@ -2,9 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
-#include <cstdlib>
 #include <cstring>
-#include <strings.h>
 
 #include "rtp_llm/cpp/cache/BlockPool.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
@@ -18,25 +16,6 @@
 #include "rtp_llm/cpp/utils/StringUtil.h"
 
 namespace rtp_llm {
-namespace {
-
-bool kvCacheDebugLogEnabled() {
-    static const bool enabled = []() {
-        const char* value = std::getenv("KV_CACHE_DEBUG_LOG");
-        if (value == nullptr) {
-            return false;
-        }
-        return strcmp(value, "1") == 0 || strcasecmp(value, "true") == 0 || strcasecmp(value, "on") == 0;
-    }();
-    return enabled;
-}
-
-const char* backingTypeName(CacheBackingType backing_type) {
-    return backing_type == CacheBackingType::MEMORY ? "MEMORY" : "DISK";
-}
-
-}  // namespace
-
 // When set on MultiCopyParams, execNoBlockCopy may try CUDA split scatter/gather (SplitKvCacheCopy; not on PPU).
 // This legacy SM-copy path is only used for non typed layer-region layouts.
 static void applySplitKvMultiCopyFieldsIfEligible(bool enable_sm_copy, const CacheConfig& cfg, MultiCopyParams& out) {
@@ -601,13 +580,6 @@ std::shared_ptr<AsyncMatchContext> KVCacheMemoryConnector::asyncMatch(const std:
 
     autil::ScopedTime2 timer;
 
-    if (kvCacheDebugLogEnabled()) {
-        RTP_LLM_LOG_INFO("memory cache asyncMatch begin: cache_keys=%zu already_reuse=%zu cache_size=%zu",
-                         cache_keys_size,
-                         already_reuse_num,
-                         block_cache_ ? block_cache_->size() : 0);
-    }
-
     // matched_num must end at a key that satisfies BOTH:
     // - memory cache key is complete
     // - all gpu blocks for this key are valid (non-null)
@@ -626,8 +598,9 @@ std::shared_ptr<AsyncMatchContext> KVCacheMemoryConnector::asyncMatch(const std:
         if (match_result.backing_type == CacheBackingType::DISK && match_result.disk_slot < 0) {
             break;
         }
-        matched_disk = matched_disk || match_result.backing_type == CacheBackingType::DISK;
-        if (match_result.is_complete && gpuBlocksAllValid(layer_attn_block_ids, slots, i)) {
+        matched_disk                    = matched_disk || match_result.backing_type == CacheBackingType::DISK;
+        const bool gpu_blocks_all_valid = gpuBlocksAllValid(layer_attn_block_ids, slots, i);
+        if (match_result.is_complete && gpu_blocks_all_valid) {
             matched_num = i + 1;
         }
     }
@@ -636,14 +609,6 @@ std::shared_ptr<AsyncMatchContext> KVCacheMemoryConnector::asyncMatch(const std:
         RTP_LLM_LOG_DEBUG("not matched cache in memory, cache keys size: %zu, already_reuse_num: %zu",
                           cache_keys_size,
                           already_reuse_num);
-        if (kvCacheDebugLogEnabled()) {
-            RTP_LLM_LOG_INFO("memory cache asyncMatch none: cache_keys=%zu already_reuse=%zu matched=%zu "
-                             "cache_size=%zu",
-                             cache_keys_size,
-                             already_reuse_num,
-                             matched_num,
-                             block_cache_ ? block_cache_->size() : 0);
-        }
         reportMatchMetrics(/*success=*/true, timer.done_us(), cache_keys_size, matched_num);
         reportDiskMatchMetrics(/*success=*/false, timer.done_us(), cache_keys_size, 0);
         return nullptr;
@@ -666,17 +631,6 @@ std::shared_ptr<AsyncMatchContext> KVCacheMemoryConnector::asyncMatch(const std:
                       already_reuse_num,
                       matched_num,
                       cache_keys_size);
-    if (kvCacheDebugLogEnabled()) {
-        RTP_LLM_LOG_INFO("memory cache asyncMatch hit: cache_keys=%zu already_reuse=%zu matched=%zu read_start=%d "
-                         "read_blocks=%d matched_disk=%d cache_size=%zu",
-                         cache_keys_size,
-                         already_reuse_num,
-                         matched_num,
-                         start_read_block_index,
-                         read_block_num,
-                         matched_disk,
-                         block_cache_ ? block_cache_->size() : 0);
-    }
     reportMatchMetrics(/*success=*/true, timer.done_us(), cache_keys_size, matched_num);
     reportDiskMatchMetrics(/*success=*/true, timer.done_us(), cache_keys_size, matched_disk ? matched_num : 0);
     return std::make_shared<MemoryAsyncMatchContext>(matched_num, start_read_block_index, read_block_num, copy_plan);
@@ -1883,15 +1837,6 @@ bool KVCacheMemoryConnector::allocateOneBacking(CopyInfoPerKey& copy_info) {
         if (!evicted.has_value()) {
             return false;
         }
-        if (kvCacheDebugLogEnabled()) {
-            RTP_LLM_LOG_INFO("memory cache allocate backing evict: cache_key=%ld backing=%s block=%d disk_slot=%d "
-                             "complete=%d",
-                             evicted->cache_key,
-                             backingTypeName(evicted->backing_type),
-                             evicted->block_index,
-                             evicted->disk_slot,
-                             evicted->is_complete);
-        }
         const auto target_backing = evicted->backing_type;
         releaseCacheBacking(*evicted);
         if (target_backing == CacheBackingType::MEMORY) {
@@ -2100,16 +2045,6 @@ bool KVCacheMemoryConnector::putToCache(const MemoryDiskBlockCache::CacheItem& i
         return false;
     }
 
-    if (kvCacheDebugLogEnabled()) {
-        RTP_LLM_LOG_INFO("memory cache put committed: key=%ld backing=%s block=%d disk_slot=%d complete=%d "
-                         "cache_size=%zu",
-                         item.cache_key,
-                         backingTypeName(item.backing_type),
-                         item.block_index,
-                         item.disk_slot,
-                         item.is_complete,
-                         block_cache_ ? block_cache_->size() : 0);
-    }
     RTP_LLM_LOG_DEBUG("write cache, cache key: %ld, backing: %d, block index: %d, disk slot: %d, block size: %zu",
                       item.cache_key,
                       static_cast<int>(item.backing_type),
@@ -2119,14 +2054,6 @@ bool KVCacheMemoryConnector::putToCache(const MemoryDiskBlockCache::CacheItem& i
     if (popped_item_opt.has_value()) {
         const auto popped_item = popped_item_opt.value();
         releaseCacheBacking(popped_item);
-        if (kvCacheDebugLogEnabled()) {
-            RTP_LLM_LOG_INFO("memory cache put popped old: key=%ld backing=%s block=%d disk_slot=%d complete=%d",
-                             popped_item.cache_key,
-                             backingTypeName(popped_item.backing_type),
-                             popped_item.block_index,
-                             popped_item.disk_slot,
-                             popped_item.is_complete);
-        }
     }
     return true;
 }
@@ -2414,13 +2341,6 @@ bool KVCacheMemoryConnector::ensureEnoughFreeBlocksInPool(const std::shared_ptr<
                                                           size_t                                   need_blocks) {
     RTP_LLM_PROFILE_FUNCTION();
     auto free_blocks = pool->freeBlocksNum();
-    if (kvCacheDebugLogEnabled()) {
-        RTP_LLM_LOG_INFO("memory pool ensure free begin: need=%zu free_before=%zu available=%zu cache_size=%zu",
-                         need_blocks,
-                         free_blocks,
-                         pool->availableBlocksNum(),
-                         cache ? cache->size() : 0);
-    }
     if (free_blocks >= need_blocks) {
         return true;
     }
@@ -2428,13 +2348,6 @@ bool KVCacheMemoryConnector::ensureEnoughFreeBlocksInPool(const std::shared_ptr<
     const auto evicted    = cache->pop(need_evict);
     if (!evicted.empty()) {
         freeBlocksFromPool(pool, evicted, true);
-    }
-    if (kvCacheDebugLogEnabled()) {
-        RTP_LLM_LOG_INFO("memory pool ensure free end: need=%zu need_evict=%zu evicted=%zu free_after=%zu",
-                         need_blocks,
-                         need_evict,
-                         evicted.size(),
-                         pool->freeBlocksNum());
     }
     return pool->freeBlocksNum() >= need_blocks;
 }
