@@ -24,6 +24,7 @@ from rtp_llm.openai.renderer_factory_register import register_renderer
 from rtp_llm.openai.renderers.basic_renderer import BasicRenderer
 from rtp_llm.openai.renderers.custom_renderer import (
     _MIN_NEW_TOKENS_CV,
+    _bind_min_new_tokens,
     CustomChatRenderer,
     RenderedInputs,
     RendererParams,
@@ -183,14 +184,7 @@ class QwenAgentRenderer(CustomChatRenderer):
         request: ChatCompletionRequest,
         generate_config: GenerateConfig,
     ) -> AsyncGenerator[StreamResponseObject, None]:
-        # Bind min_new_tokens floor for this request. CustomChatRenderer's
-        # _check_finish_reason reads this ContextVar; subclasses that
-        # override render_response_stream (like this one) must keep it in
-        # sync or the floor is silently ignored.
-        mnt = generate_config.min_new_tokens
-        if isinstance(mnt, list):
-            mnt = max(mnt) if mnt else 0
-        _min_new_tokens_token = _MIN_NEW_TOKENS_CV.set(int(mnt or 0))
+        _min_new_tokens_token = _bind_min_new_tokens(generate_config)
         try:
             async for resp in self._render_response_stream_impl(
                 output_generator, request, generate_config

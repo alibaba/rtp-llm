@@ -102,10 +102,6 @@ class TestMinNewTokensEnforcement(unittest.TestCase):
         self.assertIsNone(result)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestRenderResponseStreamCVLifecycle(unittest.TestCase):
     """`render_response_stream` must set the CV on entry and reset it on
     exit so that one request's `min_new_tokens` cannot leak into another
@@ -175,3 +171,7 @@ class TestMinNewTokensListInput(unittest.TestCase):
         if isinstance(mnt, list):
             mnt = max(mnt) if mnt else 0
         self.assertEqual(int(mnt or 0), 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

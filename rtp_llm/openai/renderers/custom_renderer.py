@@ -3,7 +3,7 @@ import functools
 import json
 import logging
 import os
-from contextvars import ContextVar
+from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, AsyncGenerator, List, Optional, Tuple, Union
@@ -53,6 +53,22 @@ from rtp_llm.utils.word_util import (
 # by CustomChatRenderer._check_finish_reason; set per request at the top of
 # render_response_stream. Default 0 preserves prior behavior.
 _MIN_NEW_TOKENS_CV: ContextVar[int] = ContextVar("_min_new_tokens", default=0)
+
+
+def _bind_min_new_tokens(generate_config) -> Token:
+    """Normalize and bind `min_new_tokens` into the task-scoped ContextVar.
+
+    Returns the ``contextvars.Token`` produced by ``ContextVar.set``,
+    which must be passed to ``_MIN_NEW_TOKENS_CV.reset(token)`` in a
+    ``finally`` block to undo the binding when the request completes.
+
+    GenerateConfig.min_new_tokens is ``Union[List[int], int]``; a list is
+    collapsed to its ``max`` (empty list → 0).
+    """
+    mnt = generate_config.min_new_tokens
+    if isinstance(mnt, list):
+        mnt = max(mnt) if mnt else 0
+    return _MIN_NEW_TOKENS_CV.set(int(mnt or 0))
 
 
 def _get_think_config(generate_env_config):
@@ -958,15 +974,7 @@ class CustomChatRenderer:
         request: ChatCompletionRequest,
         generate_config: GenerateConfig,
     ) -> AsyncGenerator[StreamResponseObject, None]:
-        # Bind min_new_tokens for this request's asyncio Task scope. The value
-        # is read by _check_finish_reason; using a ContextVar avoids touching
-        # the _update_single_status signature (which subclasses override).
-        # GenerateConfig.min_new_tokens is Union[List[int], int]; collapse a
-        # list to its max so the floor still applies for variable-N requests.
-        mnt = generate_config.min_new_tokens
-        if isinstance(mnt, list):
-            mnt = max(mnt) if mnt else 0
-        _min_new_tokens_token = _MIN_NEW_TOKENS_CV.set(int(mnt or 0))
+        _min_new_tokens_token = _bind_min_new_tokens(generate_config)
         try:
             yield_gen = self._render_response_stream_body(
                 output_generator, request, generate_config
@@ -1495,7 +1503,7 @@ class CustomChatRenderer:
                                 message=ChatMessage(
                                     role=choice.delta.role or RoleEnum.assistant,
                                     content=content,
-                                    reasoning_content=reasoning_content or None,
+                                    reasoning_content=reasoning_content,
                                     function_call=choice.delta.function_call or None,
                                 ),
                                 finish_reason=choice.finish_reason,

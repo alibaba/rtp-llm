@@ -132,5 +132,54 @@ class TestContentPreservation(unittest.TestCase):
         self.assertEqual(resp.choices[0].message.content, "hi")
 
 
+class TestReasoningContentPreservation(unittest.TestCase):
+    """reasoning_content must get the same pass-through treatment as content:
+    empty string stays empty string, None stays None."""
+
+    def _choice_rc(self, content=None, reasoning_content=None, finish_reason=None):
+        return ChatCompletionResponseStreamChoice(
+            index=0,
+            delta=DeltaMessage(
+                role=RoleEnum.assistant,
+                content=content,
+                reasoning_content=reasoning_content,
+            ),
+            finish_reason=finish_reason,
+        )
+
+    def test_empty_string_reasoning_content_preserved(self):
+        usage = UsageInfo(prompt_tokens=2, completion_tokens=4, total_tokens=6)
+        items = [
+            StreamResponseObject(choices=[self._choice_rc(content="hi", reasoning_content="")]),
+            StreamResponseObject(
+                choices=[self._choice_rc(content="", reasoning_content="", finish_reason=FinisheReason.length)],
+                usage=usage,
+            ),
+        ]
+        resp = asyncio.run(
+            OpenaiEndpoint._collect_complete_response(
+                _gen(items), debug_info=None, tokenizer=None
+            )
+        )
+        # reasoning_content="" must NOT collapse to None
+        self.assertEqual(resp.choices[0].message.reasoning_content, "")
+
+    def test_none_reasoning_content_stays_none(self):
+        usage = UsageInfo(prompt_tokens=2, completion_tokens=1, total_tokens=3)
+        items = [
+            StreamResponseObject(choices=[self._choice_rc(content="ok", reasoning_content=None)]),
+            StreamResponseObject(
+                choices=[self._choice_rc(content="", reasoning_content=None, finish_reason=FinisheReason.stop)],
+                usage=usage,
+            ),
+        ]
+        resp = asyncio.run(
+            OpenaiEndpoint._collect_complete_response(
+                _gen(items), debug_info=None, tokenizer=None
+            )
+        )
+        self.assertIsNone(resp.choices[0].message.reasoning_content)
+
+
 if __name__ == "__main__":
     unittest.main()

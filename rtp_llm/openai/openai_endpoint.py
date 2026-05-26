@@ -340,14 +340,11 @@ class OpenaiEndpoint(object):
                         all_choices[i].message.content = delta_content
                     elif delta_content is not None:
                         all_choices[i].message.content += delta_content
-                    if all_choices[i].message.reasoning_content == None:
-                        all_choices[i].message.reasoning_content = (
-                            response.choices[i].delta.reasoning_content or None
-                        )
-                    else:
-                        all_choices[i].message.reasoning_content += (
-                            response.choices[i].delta.reasoning_content or ""
-                        )
+                    delta_reasoning = response.choices[i].delta.reasoning_content
+                    if all_choices[i].message.reasoning_content is None:
+                        all_choices[i].message.reasoning_content = delta_reasoning
+                    elif delta_reasoning is not None:
+                        all_choices[i].message.reasoning_content += delta_reasoning
                     all_choices[i].message.role = (
                         response.choices[i].delta.role or all_choices[i].message.role
                     )
