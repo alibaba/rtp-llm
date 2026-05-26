@@ -285,14 +285,84 @@ class DispatcherE2ETest {
         assertEquals(0, fe3.getRequestCount());
     }
 
+    @Test
+    void preAssignBeStampsTargetsIntoGenerateConfigRoleAddrs() throws Exception {
+        fe1.enqueue(jsonResponse(200,
+                "{\"response_batch\":[{\"response\":\"r0\"},{\"response\":\"r1\"},{\"response\":\"r2\"}]}"));
+        fe2.enqueue(jsonResponse(200,
+                "{\"response_batch\":[{\"response\":\"r3\"},{\"response\":\"r4\"},{\"response\":\"r5\"}]}"));
+        fe3.enqueue(jsonResponse(200,
+                "{\"response_batch\":[{\"response\":\"r6\"},{\"response\":\"r7\"},{\"response\":\"r8\"}]}"));
+
+        // Mock master /batch_schedule returning 3 BE targets, all PDFUSION (single-role cluster).
+        // Dispatcher stamps them into each chunk's generate_config.role_addrs so FE's existing
+        // role_addrs-aware path (rtp_llm.server.backend_rpc_server_visitor.route_ips) skips the
+        // /schedule round-trip — no FE-side change required.
+        List<org.flexlb.dao.loadbalance.BatchScheduleTarget> targets = List.of(
+                new org.flexlb.dao.loadbalance.BatchScheduleTarget("10.0.0.1", 23840, 23841,
+                        org.flexlb.dao.route.RoleType.PDFUSION),
+                new org.flexlb.dao.loadbalance.BatchScheduleTarget("10.0.0.2", 23840, 23841,
+                        org.flexlb.dao.route.RoleType.PDFUSION),
+                new org.flexlb.dao.loadbalance.BatchScheduleTarget("10.0.0.3", 23840, 23841,
+                        org.flexlb.dao.route.RoleType.PDFUSION));
+        WebTestClient client = buildClient(/*subBatchSize=*/3, /*preAssignBe=*/true, targets);
+
+        ObjectNode body = mapper.createObjectNode();
+        body.put("model", "qwen");
+        var pb = body.putArray("prompt_batch");
+        for (int i = 0; i < 9; i++) {
+            pb.add("p" + i);
+        }
+
+        client.post().uri("/dispatcher/batch_infer")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(body)
+                .exchange()
+                .expectStatus().isOk();
+
+        // Each FE saw one chunk; each chunk's generate_config.role_addrs carries the i-th target.
+        verifyChunkHasRoleAddr(fe1.takeRequest(), "10.0.0.1");
+        verifyChunkHasRoleAddr(fe2.takeRequest(), "10.0.0.2");
+        verifyChunkHasRoleAddr(fe3.takeRequest(), "10.0.0.3");
+    }
+
+    private void verifyChunkHasRoleAddr(RecordedRequest rec, String expectedIp) throws Exception {
+        assertNotNull(rec);
+        JsonNode bodyJson = mapper.readTree(rec.getBody().readUtf8());
+        // Dispatcher must NOT use a new top-level field (pydantic extra=ignore would drop it);
+        // it must write into generate_config.role_addrs which FE already honors.
+        assertNull(bodyJson.get("pre_assigned_be"),
+                "stamping must use generate_config.role_addrs, not a top-level pre_assigned_be field");
+        JsonNode roleAddrs = bodyJson.get("generate_config").get("role_addrs");
+        assertNotNull(roleAddrs, "generate_config.role_addrs must be present when preAssignBe stamps");
+        assertTrue(roleAddrs.isArray() && roleAddrs.size() == 1,
+                "exactly one role_addr per chunk for single-role batch_schedule");
+        JsonNode addr = roleAddrs.get(0);
+        // Match Python rtp_llm.config.generate_config.RoleAddr field names exactly.
+        assertEquals("PDFUSION", addr.get("role").asText(),
+                "role enum must serialize to its name() so Python's RoleType enum parses it");
+        assertEquals(expectedIp, addr.get("ip").asText());
+        assertEquals(23840, addr.get("http_port").asInt());
+        assertEquals(23841, addr.get("grpc_port").asInt());
+    }
+
     private WebTestClient buildClient(int subBatchSize) {
+        return buildClient(subBatchSize, /*preAssignBe=*/false, /*targets=*/List.of());
+    }
+
+    private WebTestClient buildClient(int subBatchSize,
+                                      boolean preAssignBe,
+                                      List<org.flexlb.dao.loadbalance.BatchScheduleTarget> targets) {
         List<String> urls = List.of(baseUrl(fe1), baseUrl(fe2), baseUrl(fe3));
         FePool pool = new FePool(() -> urls, url -> true);
 
         WebClientFeClient feClient = new WebClientFeClient(WebClient.builder());
         FanoutService fanout = new FanoutService(feClient, pool);
+        BatchScheduleClient batchScheduleClient = count ->
+                reactor.core.publisher.Mono.just(targets);
         GenericBatchHandler batchHandler = new GenericBatchHandler(
-                fanout, mapper, new SubBatchSpec(SubBatchSpec.Mode.SIZE, subBatchSize));
+                fanout, mapper, new SubBatchSpec(SubBatchSpec.Mode.SIZE, subBatchSize),
+                batchScheduleClient, preAssignBe);
 
         WebClientPassthroughClient passthrough =
                 new WebClientPassthroughClient(WebClient.create(), pool);

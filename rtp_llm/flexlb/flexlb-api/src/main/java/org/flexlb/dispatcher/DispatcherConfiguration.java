@@ -3,6 +3,7 @@ package org.flexlb.dispatcher;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.netty.channel.ChannelOption;
 import org.flexlb.discovery.ServiceDiscovery;
+import org.flexlb.service.BatchScheduleCoordinator;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.context.annotation.Bean;
@@ -102,6 +103,7 @@ public class DispatcherConfiguration {
                                                            ObjectMapper mapper,
                                                            WebClient.Builder webClientBuilder,
                                                            ObjectProvider<DispatcherFePoolRefresher> fePoolRefresherProvider,
+                                                           BatchScheduleCoordinator batchScheduleCoordinator,
                                                            List<BatchEndpointSpec> specs) {
         if (!cfg.isEnabled()) {
             return null;
@@ -133,7 +135,9 @@ public class DispatcherConfiguration {
 
         FeClient feClient = new WebClientFeClient(feBatchBuilder);
         FanoutService fanout = new FanoutService(feClient, pool);
-        GenericBatchHandler batchHandler = new GenericBatchHandler(fanout, mapper, cfg.subBatchSpec());
+        BatchScheduleClient batchScheduleClient = new LocalBatchScheduleClient(batchScheduleCoordinator);
+        GenericBatchHandler batchHandler = new GenericBatchHandler(
+                fanout, mapper, cfg.subBatchSpec(), batchScheduleClient, cfg.isPreAssignBe());
 
         PassthroughClient passthrough = new WebClientPassthroughClient(passthroughWebClient, pool);
         DispatchHandler handler = new DispatchHandler(passthrough);
@@ -142,10 +146,10 @@ public class DispatcherConfiguration {
         // dispatcher came up with.
         Logger.warn("dispatcher enabled: fePoolServiceId={}, seedHosts={}, subBatch={}, batchSpecs={}, "
                         + "batchTimeoutMs={}, feMaxConnectionsPerHost={}, feMaxPendingAcquirePerHost={}, "
-                        + "probePath={}",
+                        + "probePath={}, preAssignBe={}",
                 cfg.getFePoolServiceId(), fePoolRefresher.currentSize(), cfg.getSubBatch(),
                 specs.size(), cfg.getBatchTimeoutMs(), cfg.getFeMaxConnectionsPerHost(),
-                cfg.getFeMaxPendingAcquirePerHost(), cfg.getProbePath());
+                cfg.getFeMaxPendingAcquirePerHost(), cfg.getProbePath(), cfg.isPreAssignBe());
         return new DispatchRouter(batchHandler, handler, specs).routes();
     }
 }

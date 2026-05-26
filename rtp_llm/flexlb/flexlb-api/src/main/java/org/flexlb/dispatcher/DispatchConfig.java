@@ -71,6 +71,30 @@ public class DispatchConfig {
      */
     private String probePath = "/frontend_health";
 
+    /**
+     * BE pre-assignment toggle. When {@code true}, the dispatcher resolves N BE targets via
+     * master's {@code /rtp_llm/batch_schedule} before fanout and appends each target into
+     * the chunk's {@code generate_config.role_addrs} (matching Python
+     * {@code rtp_llm.config.generate_config.RoleAddr}: {@code {role, ip, http_port, grpc_port}})
+     * so the receiving FE skips its own master round-trip.
+     *
+     * <p>Defaults to {@code true} because the stamping target —
+     * {@code generate_config.role_addrs} — is a field FE has supported in production for a
+     * long time (see {@code rtp_llm.server.backend_rpc_server_visitor.route_ips}: when
+     * {@code role_addrs} is non-empty the FE skips master entirely; the same mechanism powers
+     * PD-disagg's prefill→decode handoff). No FE-side change is required for this toggle to
+     * take effect end-to-end.
+     *
+     * <p>Operators can flip {@code DISPATCH_PRE_ASSIGN_BE=false} (or set
+     * {@code preAssignBe: false} in {@code DISPATCH_CONFIG}) to opt out for diagnostics or
+     * staged rollback.
+     *
+     * <p>If the dispatcher's call to {@code /batch_schedule} fails, the WARN is emitted once
+     * and the request degrades silently to the no-stamp path — never block traffic on a
+     * routing optimization.
+     */
+    private boolean preAssignBe = true;
+
     /** Internal cache of the parsed sub-batch spec — populated in {@link #validate()}. */
     private transient SubBatchSpec subBatchSpec;
 

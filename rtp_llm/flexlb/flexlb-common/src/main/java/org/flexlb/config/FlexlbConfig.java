@@ -7,6 +7,7 @@ import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
 
 import static org.flexlb.enums.LoadBalanceStrategyEnum.RANDOM;
+import static org.flexlb.enums.LoadBalanceStrategyEnum.ROUND_ROBIN;
 import static org.flexlb.enums.LoadBalanceStrategyEnum.SHORTEST_TTFT;
 import static org.flexlb.enums.LoadBalanceStrategyEnum.WEIGHTED_CACHE;
 import static org.flexlb.enums.ResourceMeasureIndicatorEnum.REMAINING_KV_CACHE;
@@ -35,6 +36,20 @@ public class FlexlbConfig {
      * Load balancing strategy for VIT role
      */
     private LoadBalanceStrategyEnum vitLoadBalanceStrategy = LoadBalanceStrategyEnum.RANDOM;
+
+    /**
+     * Load balancing strategy used by the {@code /batch_schedule} endpoint, decoupled from
+     * {@link #loadBalanceStrategy} which governs {@code /schedule}. Default {@code ROUND_ROBIN}
+     * because batch dispatch's value lies in atomic per-cursor distribution — the only
+     * {@link org.flexlb.balance.strategy.BatchLoadBalancer} implementation today. Operators
+     * who keep e.g. {@code SHORTEST_TTFT} for {@code /schedule} no longer have to give it up
+     * to enable {@code /batch_schedule}; the two endpoints honor their own strategies.
+     *
+     * <p>Per-role overrides are not exposed yet because all four roles share the same default
+     * (RR is the only batch-capable strategy). Add per-role fields if a future batch-aware
+     * strategy ever justifies them.
+     */
+    private LoadBalanceStrategyEnum batchLoadBalanceStrategy = LoadBalanceStrategyEnum.ROUND_ROBIN;
     /**
      * Weight decay factor, controls weight difference degree
      * Smaller value means smaller weight difference, larger value means more obvious weight difference
@@ -127,6 +142,21 @@ public class FlexlbConfig {
      * Actual worker threads = availableProcessors * nettyWorkerThreadMultiplier
      */
     private int nettyWorkerThreadMultiplier = 2;
+
+    /**
+     * Get the {@code /batch_schedule} load balancing strategy for a role. Defaults to
+     * {@link LoadBalanceStrategyEnum#ROUND_ROBIN} so the batch path works out of the box
+     * regardless of how {@link #getStrategyForRoleType} is configured.
+     *
+     * @param roleType Role type
+     * @return Load balancing strategy to use for this role on the batch path
+     */
+    public LoadBalanceStrategyEnum getBatchStrategyForRoleType(RoleType roleType) {
+        // Per-role override hook — currently a single global field; extend with per-role fields
+        // (e.g. decodeBatchLoadBalanceStrategy) if/when a future batch-capable strategy makes
+        // role-specific tuning meaningful.
+        return batchLoadBalanceStrategy != null ? batchLoadBalanceStrategy : ROUND_ROBIN;
+    }
 
     /**
      * Get load balancing strategy for a role type

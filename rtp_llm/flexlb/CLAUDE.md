@@ -378,7 +378,7 @@ When set with `enabled=true`, FlexLB serves `/dispatcher/<original_fe_path>` on 
 **Known limits (deferred):**
 - Bare `POST /` is intentionally not in the registry: it triggers batch mode only when the body carries `prompt_batch` (same wire shape as `/batch_infer`), and the `prompt: [...]` variant has a known FE-side footgun. Such requests fall through to passthrough-forward to a single FE. Add `/` once it's decided whether to alias it to `/batch_infer` or leave it as passthrough.
 - `request_id` set by `frontend_server.py` overwrites any upstream id — dispatcher to FE trace linkage is broken. Tracked in `project_frontend_request_id_overwrite.md`.
-- Failed pre-assigned FE targets do not auto-failover (BE pre-assignment is not enabled in Stage 2).
+- BE pre-assignment is enabled by default (`DISPATCH_PRE_ASSIGN_BE=true`): the dispatcher resolves N BE targets via master `/rtp_llm/batch_schedule` and stamps each chunk's `generate_config.role_addrs` with `{role, ip, http_port, grpc_port}` so FE skips its own master round-trip (existing FE path: `backend_rpc_server_visitor.route_ips` honors non-empty `role_addrs`). `/batch_schedule`'s strategy is decoupled from `/schedule`'s via `FlexlbConfig.batchLoadBalanceStrategy` (default `ROUND_ROBIN`). Failed pre-assigned BE targets still do not auto-failover at the dispatcher; FE handles dead-target fallback by re-invoking `/schedule`.
 - Embedding variants (`/v1/embeddings/{dense,sparse,colbert,similarity}`, `/v1/reranker`, `/v1/classifier`) — not in the registry yet; add one row each after verifying wire shape.
 
 ## Important Implementation Details

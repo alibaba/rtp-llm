@@ -64,7 +64,8 @@ class DispatcherConfigurationTest {
                 new StubServiceDiscovery("com.rtp_llm.fe"), "com.rtp_llm.fe");
 
         RouterFunction<ServerResponse> routes = conf.dispatcherRoutes(
-                cfg, new ObjectMapper(), WebClient.builder(), provider(refresher), SPECS);
+                cfg, new ObjectMapper(), WebClient.builder(), provider(refresher),
+                stubBatchScheduleCoordinator(), SPECS);
 
         assertNotNull(routes);
     }
@@ -75,7 +76,8 @@ class DispatcherConfigurationTest {
         DispatcherConfiguration conf = new DispatcherConfiguration();
 
         assertNull(conf.dispatcherRoutes(
-                cfg, new ObjectMapper(), WebClient.builder(), absentProvider(), SPECS));
+                cfg, new ObjectMapper(), WebClient.builder(), absentProvider(),
+                stubBatchScheduleCoordinator(), SPECS));
     }
 
     @Test
@@ -138,7 +140,8 @@ class DispatcherConfigurationTest {
 
             DispatcherConfiguration conf = new DispatcherConfiguration();
             RouterFunction<ServerResponse> routes = conf.dispatcherRoutes(
-                    cfg, new ObjectMapper(), WebClient.builder(), provider(refresher), SPECS);
+                    cfg, new ObjectMapper(), WebClient.builder(), provider(refresher),
+                stubBatchScheduleCoordinator(), SPECS);
 
             trigger.run(discovery, refresher,
                     WorkerHost.of(freshFe.getHostName(), freshFe.getPort()));
@@ -187,6 +190,22 @@ class DispatcherConfigurationTest {
 
     private static <T> ObjectProvider<T> absentProvider() {
         return new SingletonObjectProvider<>(null);
+    }
+
+    /**
+     * Stub coordinator returning success with no targets — sufficient for routes wiring tests
+     * that never exercise the pre-assignment path. Tests that need a real preAssignBe scenario
+     * mock the coordinator at the {@link BatchScheduleClient} layer instead.
+     */
+    private static org.flexlb.service.BatchScheduleCoordinator stubBatchScheduleCoordinator() {
+        org.flexlb.service.BatchScheduleCoordinator coordinator =
+                org.mockito.Mockito.mock(org.flexlb.service.BatchScheduleCoordinator.class);
+        org.mockito.Mockito.when(coordinator.schedule(org.mockito.ArgumentMatchers.any()))
+                .thenReturn(reactor.core.publisher.Mono.just(
+                        new org.flexlb.service.BatchScheduleCoordinator.Outcome(
+                                org.flexlb.dao.loadbalance.BatchScheduleResponse.success(java.util.List.of()),
+                                org.flexlb.service.BatchScheduleCoordinator.Source.LOCAL)));
+        return coordinator;
     }
 
     /** Minimal ObjectProvider stand-in for tests — Spring's own ObjectProvider has no public ctor. */

@@ -88,11 +88,20 @@ class DefaultRouterTest {
             }
             return LoadBalanceStrategyEnum.SHORTEST_TTFT;
         });
+        // batchStrategy is decoupled from regular strategy: defaults to ROUND_ROBIN per role.
+        // mockStaticLoadBalanceStrategyFactory below pre-populates the batch map with the same
+        // mocks as the regular map so tests can override per-role with replaceBatchLoadBalancer
+        // when they need a batch-capable scripted impl.
+        lenient().when(loadBalanceConfig.getBatchStrategyForRoleType(any(RoleType.class)))
+                .thenReturn(LoadBalanceStrategyEnum.ROUND_ROBIN);
 
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.SHORTEST_TTFT, prefillLoadBalancer);
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.WEIGHTED_CACHE, decodeLoadBalancer);
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.SHORTEST_TTFT, vitLoadBalancer);
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.RANDOM, fusionLoadBalancer);
+        // batchStrategy default is ROUND_ROBIN; the constructor resolves it via factory before
+        // mockStaticLoadBalanceStrategyFactory swaps the map, so a placeholder must be registered.
+        LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.ROUND_ROBIN, fusionLoadBalancer);
 
         // Create scheduler instance
         defaultRouter = new DefaultRouter(configService);
@@ -129,6 +138,17 @@ class DefaultRouterTest {
             loadBalancerMap.put(RoleType.DECODE, decodeLoadBalancer);
             loadBalancerMap.put(RoleType.VIT, vitLoadBalancer);
             loadBalancerMap.put(RoleType.PDFUSION, fusionLoadBalancer);
+
+            // Mirror into the batch map so tests start from a known state. Tests that exercise
+            // the batch path with a scripted batch-capable LB call replaceBatchLoadBalancer.
+            Field batchLoadBalancerMapField = DefaultRouter.class.getDeclaredField("batchLoadBalancerMap");
+            batchLoadBalancerMapField.setAccessible(true);
+            @SuppressWarnings("unchecked")
+            Map<RoleType, LoadBalancer> batchMap = (Map<RoleType, LoadBalancer>) batchLoadBalancerMapField.get(defaultRouter);
+            batchMap.put(RoleType.PREFILL, prefillLoadBalancer);
+            batchMap.put(RoleType.DECODE, decodeLoadBalancer);
+            batchMap.put(RoleType.VIT, vitLoadBalancer);
+            batchMap.put(RoleType.PDFUSION, fusionLoadBalancer);
         } catch (Exception e) {
             fail("Failed to mock LoadBalanceStrategyFactory: " + e.getMessage());
         }
@@ -257,7 +277,7 @@ class DefaultRouterTest {
                 target("192.168.1.10", 8080),
                 target("192.168.1.11", 8080)
         ));
-        replaceRoleLoadBalancer(RoleType.PDFUSION, scripted);
+        replaceBatchLoadBalancer(RoleType.PDFUSION, scripted);
 
         BatchScheduleRequest batchRequest = new BatchScheduleRequest();
         batchRequest.setBatchCount(2);
@@ -268,11 +288,21 @@ class DefaultRouterTest {
         assertEquals(2, response.getServerStatus().size());
         assertEquals(1, scripted.selectBatchCalls);
         assertEquals(2, scripted.lastRequestedCount);
+        for (BatchScheduleTarget target : response.getServerStatus()) {
+            assertEquals(RoleType.PDFUSION, target.getRole(),
+                    "every target in a single-role batch_schedule response must carry the role "
+                            + "so the dispatcher can stamp generate_config.role_addrs 1:1 without "
+                            + "a second master round-trip; works for any single-role cluster "
+                            + "(PDFUSION, PREFILL-only, DECODE-only, VIT) — not just PDFUSION");
+        }
     }
 
     @Test
-    void should_reject_batch_schedule_when_strategy_does_not_support_batch() {
-        // Setup - single role registered, but fusionLoadBalancer (plain mock) does not impl BatchLoadBalancer
+    void should_reject_batch_schedule_when_batch_strategy_does_not_support_batch() {
+        // Setup - single role registered. fusionLoadBalancer (plain mock) sits in the batch map
+        // by default and does not impl BatchLoadBalancer. This is the "operator explicitly set
+        // batchStrategy to a non-batch-capable strategy (e.g., SHORTEST_TTFT)" case — reject
+        // loudly, never silently fall back, so the operator notices the misconfiguration.
         org.flexlb.dao.master.WorkerStatus dummy = new org.flexlb.dao.master.WorkerStatus();
         dummy.setIp("192.168.1.10");
         dummy.setPort(8080);
@@ -287,7 +317,41 @@ class DefaultRouterTest {
         assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), response.getCode());
         assertNotNull(response.getErrorMessage());
         assertTrue(response.getErrorMessage().contains("does not support batch_schedule"),
-                "error message should mention strategy support: " + response.getErrorMessage());
+                "error message should mention batch_schedule support: " + response.getErrorMessage());
+    }
+
+    @Test
+    void should_batch_schedule_succeed_when_role_strategy_is_non_batch_but_batch_strategy_is_RR() {
+        // Setup - simulates the typical production case: operator configured PDFUSION's regular
+        // strategy as SHORTEST_TTFT (non-batch-capable), but batchStrategy defaults to RR.
+        // /schedule still uses ST for single requests; /batch_schedule uses RR independently.
+        // Decoupling means flipping DISPATCH_PRE_ASSIGN_BE on does not require sacrificing
+        // /schedule's smart routing for the role.
+        org.flexlb.dao.master.WorkerStatus dummy = new org.flexlb.dao.master.WorkerStatus();
+        dummy.setIp("192.168.1.10");
+        dummy.setPort(8080);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().put("192.168.1.10:8080", dummy);
+
+        // Regular map keeps the non-batch-capable mock (fusionLoadBalancer) — /schedule's job.
+        // Batch map gets a scripted batch-capable LB — what /batch_schedule consults.
+        ScriptedBatchLoadBalancer scripted = new ScriptedBatchLoadBalancer(List.of(
+                target("192.168.1.10", 8080),
+                target("192.168.1.11", 8080)
+        ));
+        replaceBatchLoadBalancer(RoleType.PDFUSION, scripted);
+
+        BatchScheduleRequest batchRequest = new BatchScheduleRequest();
+        batchRequest.setBatchCount(2);
+
+        BatchScheduleResponse response = defaultRouter.batchSchedule(batchRequest);
+
+        assertTrue(response.isSuccess(),
+                "batch_schedule must succeed when batchStrategy is batch-capable, regardless "
+                        + "of what /schedule's strategy for the same role is");
+        assertEquals(2, response.getServerStatus().size());
+        // Confirm the scripted batch LB was actually consulted, not the regular map's mock.
+        assertEquals(1, scripted.selectBatchCalls,
+                "batch_schedule must query batchLoadBalancerMap, not loadBalancerMap");
     }
 
     @Test
@@ -354,7 +418,7 @@ class DefaultRouterTest {
                 target("192.168.1.10", 8080),
                 target("192.168.1.11", 8080)
         ));
-        replaceRoleLoadBalancer(RoleType.PDFUSION, scripted);
+        replaceBatchLoadBalancer(RoleType.PDFUSION, scripted);
 
         BatchScheduleRequest batchRequest = new BatchScheduleRequest();
         batchRequest.setBatchCount(2);
@@ -382,7 +446,7 @@ class DefaultRouterTest {
                 target("192.168.1.10", 8080),
                 target("192.168.1.11", 8080)
         ));
-        replaceRoleLoadBalancer(RoleType.PDFUSION, scripted);
+        replaceBatchLoadBalancer(RoleType.PDFUSION, scripted);
 
         BatchScheduleRequest batchRequest = new BatchScheduleRequest();
         batchRequest.setBatchCount(2);
@@ -443,7 +507,7 @@ class DefaultRouterTest {
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().put("192.168.1.10:8080", dummy);
 
         ScriptedBatchLoadBalancer scripted = new ScriptedBatchLoadBalancer(List.of());
-        replaceRoleLoadBalancer(RoleType.PDFUSION, scripted);
+        replaceBatchLoadBalancer(RoleType.PDFUSION, scripted);
 
         BatchScheduleRequest batchRequest = new BatchScheduleRequest();
         batchRequest.setBatchCount(2);
@@ -764,6 +828,23 @@ class DefaultRouterTest {
         }
     }
 
+    /**
+     * Replace the batch-path LoadBalancer for a role. Mirrors {@link #replaceRoleLoadBalancer}
+     * but operates on the {@code batchLoadBalancerMap} that {@code /batch_schedule} consults
+     * — independent of the regular {@code loadBalancerMap} that {@code /schedule} uses.
+     */
+    private void replaceBatchLoadBalancer(RoleType roleType, LoadBalancer loadBalancer) {
+        try {
+            Field batchMapField = DefaultRouter.class.getDeclaredField("batchLoadBalancerMap");
+            batchMapField.setAccessible(true);
+            @SuppressWarnings("unchecked")
+            Map<RoleType, LoadBalancer> batchMap = (Map<RoleType, LoadBalancer>) batchMapField.get(defaultRouter);
+            batchMap.put(roleType, loadBalancer);
+        } catch (Exception e) {
+            fail("Failed to replace batch load balancer: " + e.getMessage());
+        }
+    }
+
     private static class ScriptedBatchLoadBalancer implements org.flexlb.balance.strategy.BatchLoadBalancer {
         private final List<BatchScheduleTarget> scriptedResponses;
         int selectBatchCalls;
@@ -782,7 +863,13 @@ class DefaultRouterTest {
         public List<BatchScheduleTarget> selectBatch(int count, RoleType roleType, String group) {
             selectBatchCalls++;
             lastRequestedCount = count;
-            return new java.util.ArrayList<>(scriptedResponses);
+            List<BatchScheduleTarget> stamped = new java.util.ArrayList<>(scriptedResponses.size());
+            for (BatchScheduleTarget t : scriptedResponses) {
+                BatchScheduleTarget copy = new BatchScheduleTarget(
+                        t.getServerIp(), t.getHttpPort(), t.getGrpcPort(), roleType);
+                stamped.add(copy);
+            }
+            return stamped;
         }
 
         @Override

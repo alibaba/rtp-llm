@@ -145,6 +145,32 @@ class DispatchConfigTest {
     }
 
     @Test
+    void preAssignBeDefaultsTrue() {
+        DispatchConfig c = DispatchConfig.fromJson(null);
+        assertTrue(c.isPreAssignBe(),
+                "preAssignBe defaults to true: stamping uses generate_config.role_addrs which "
+                        + "FE already supports natively (backend_rpc_server_visitor.route_ips), "
+                        + "so there's no FE-side prerequisite to gate this on");
+    }
+
+    @Test
+    void preAssignBeJsonExplicitFalseDisables() {
+        DispatchConfig c = DispatchConfig.fromJson(
+                "{\"enabled\":true,\"fePoolServiceId\":\"x\",\"preAssignBe\":false}");
+        assertFalse(c.isPreAssignBe(),
+                "operator opt-out via JSON must be honored — explicit false beats default true");
+    }
+
+    @Test
+    void envOverridesPreAssignBeOff() {
+        Map<String, String> env = Map.of("DISPATCH_PRE_ASSIGN_BE", "false");
+        DispatchConfig c = DispatchConfig.fromJsonWithEnv(
+                "{\"enabled\":true,\"fePoolServiceId\":\"x\"}", env);
+        assertFalse(c.isPreAssignBe(),
+                "DISPATCH_PRE_ASSIGN_BE=false must turn the optimization off without code change");
+    }
+
+    @Test
     void blankProbePathFailsValidation() {
         Map<String, String> env = Map.of("DISPATCH_PROBE_PATH", "");
         // Blank env is treated as "not set" by EnvConfigOverrides, so default sticks here.

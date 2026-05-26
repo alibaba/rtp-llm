@@ -4,7 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import lombok.RequiredArgsConstructor;
+import org.flexlb.dao.loadbalance.BatchScheduleTarget;
 import org.flexlb.dao.pv.DispatchPvLogData;
 import org.flexlb.util.JsonUtils;
 import org.flexlb.util.Logger;
@@ -31,7 +31,6 @@ import java.util.List;
  * consumed by {@link ServerRequest#bodyToMono}, so re-forwarding through {@code WebClient}
  * would lose the body.
  */
-@RequiredArgsConstructor
 public class GenericBatchHandler {
 
     /** Per-request access log, shared with {@code /schedule} / {@code /batch_schedule} → pv.log. */
@@ -40,6 +39,26 @@ public class GenericBatchHandler {
     private final FanoutService fanoutService;
     private final ObjectMapper mapper;
     private final SubBatchSpec subBatch;
+    private final BatchScheduleClient batchScheduleClient;
+    private final boolean preAssignBe;
+
+    public GenericBatchHandler(FanoutService fanoutService,
+                               ObjectMapper mapper,
+                               SubBatchSpec subBatch) {
+        this(fanoutService, mapper, subBatch, count -> Mono.just(java.util.List.of()), false);
+    }
+
+    public GenericBatchHandler(FanoutService fanoutService,
+                               ObjectMapper mapper,
+                               SubBatchSpec subBatch,
+                               BatchScheduleClient batchScheduleClient,
+                               boolean preAssignBe) {
+        this.fanoutService = fanoutService;
+        this.mapper = mapper;
+        this.subBatch = subBatch;
+        this.batchScheduleClient = batchScheduleClient;
+        this.preAssignBe = preAssignBe;
+    }
 
     public Mono<ServerResponse> handle(ServerRequest request, BatchEndpointSpec spec) {
         DispatchPvLogData pv = DispatchPvLogData.batch(spec.getPath(), System.currentTimeMillis());
@@ -66,13 +85,17 @@ public class GenericBatchHandler {
                 injectForceBatch(copy);
                 chunkBodies.add(copy);
             }
-            return fanoutService.dispatchChunks(spec.getPath(), chunkBodies, spec)
-                    .map(subs -> PartialFailureMerger.merge(subs, spec, mapper))
-                    .flatMap(merged -> {
-                        pv.setFailedChunks(merged.failedIndices().size());
-                        return merged.allFailed()
-                                ? errorResponse(merged)
-                                : ServerResponse.ok().contentType(MediaType.APPLICATION_JSON).bodyValue(merged.body());
+            return resolvePreAssignedTargets(chunks.size())
+                    .flatMap(targets -> {
+                        stampPreAssignedBe(chunkBodies, targets);
+                        return fanoutService.dispatchChunks(spec.getPath(), chunkBodies, spec)
+                                .map(subs -> PartialFailureMerger.merge(subs, spec, mapper))
+                                .flatMap(merged -> {
+                                    pv.setFailedChunks(merged.failedIndices().size());
+                                    return merged.allFailed()
+                                            ? errorResponse(merged)
+                                            : ServerResponse.ok().contentType(MediaType.APPLICATION_JSON).bodyValue(merged.body());
+                                });
                     });
         }).onErrorResume(e -> {
             Logger.warn("dispatcher request failed: spec={}, err={}",
@@ -150,5 +173,56 @@ public class GenericBatchHandler {
         body.put("failed_count", merged.failedIndices().size());
         body.put("total_chunks", merged.totalChunks());
         return ServerResponse.status(500).contentType(MediaType.APPLICATION_JSON).bodyValue(body);
+    }
+
+    /**
+     * Resolves N pre-assigned BE targets via {@link BatchScheduleClient} when
+     * {@link #preAssignBe} is on, returning {@link List#of()} otherwise. The client itself
+     * collapses every failure path to an empty list, so the caller never has to handle
+     * errors here — an empty list simply means "no stamping happens this round".
+     */
+    private Mono<List<BatchScheduleTarget>> resolvePreAssignedTargets(int chunkCount) {
+        if (!preAssignBe) {
+            return Mono.just(List.of());
+        }
+        return batchScheduleClient.requestTargets(chunkCount);
+    }
+
+    /**
+     * Appends each chunk's pre-resolved BE target into {@code generate_config.role_addrs} —
+     * the same field FE's existing
+     * {@code rtp_llm.server.backend_rpc_server_visitor.route_ips} skips master on when set
+     * (PD-disagg's prefill→decode handoff uses the same mechanism). No FE-side change
+     * required for this stamping to take effect.
+     *
+     * <p>Wire shape per addr matches Python {@code rtp_llm.config.generate_config.RoleAddr}
+     * exactly: {@code {role, ip, http_port, grpc_port}}. Note {@code ip} (not
+     * {@code server_ip} as in {@link BatchScheduleTarget}'s wire shape) — the rename is
+     * deliberate to align with the FE-side schema.
+     *
+     * <p>Tolerates a short target list (callers degrade to no-stamp if
+     * {@link BatchScheduleClient} returns empty). User-supplied {@code role_addrs} entries
+     * are preserved and the dispatcher's resolved target is appended after them.
+     */
+    private void stampPreAssignedBe(List<ObjectNode> chunkBodies, List<BatchScheduleTarget> targets) {
+        if (targets.isEmpty()) {
+            return;
+        }
+        int max = Math.min(chunkBodies.size(), targets.size());
+        for (int i = 0; i < max; i++) {
+            BatchScheduleTarget target = targets.get(i);
+            ObjectNode chunkBody = chunkBodies.get(i);
+            ObjectNode gc = chunkBody.get("generate_config") instanceof ObjectNode existing
+                    ? existing
+                    : chunkBody.putObject("generate_config");
+            ArrayNode roleAddrs = gc.get("role_addrs") instanceof ArrayNode existingAddrs
+                    ? existingAddrs
+                    : gc.putArray("role_addrs");
+            ObjectNode addr = roleAddrs.addObject();
+            addr.put("role", target.getRole().name());
+            addr.put("ip", target.getServerIp());
+            addr.put("http_port", target.getHttpPort());
+            addr.put("grpc_port", target.getGrpcPort());
+        }
     }
 }
