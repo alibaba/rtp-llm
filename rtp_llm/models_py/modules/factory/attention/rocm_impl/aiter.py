@@ -268,7 +268,31 @@ class AiterPrefillAttnOp:
         )
         return result
 
-    def _gather_and_reshape_kv_compact(self, kv_cache_base, block_table):
+    def _compute_compact_indices(self, block_table, fmha_params):
+        """Compute unique/inverse indices for block_table, cached on fmha_params.
+
+        torch.unique() on ROCm triggers rocprim radix-sort with a large Memset
+        on stream-0. Since block_table is identical across all decoder layers
+        within a single forward pass, we compute unique/inverse once (first
+        layer) and cache the result on fmha_params for reuse by subsequent
+        layers.
+
+        Returns (unique_indices [int64], inverse_indices [int64], compact_block_table [int32]).
+        """
+        cached = getattr(fmha_params, "_compact_cache", None)
+        if cached is not None:
+            return cached
+
+        block_indices = block_table.reshape(-1).to(torch.int64)
+        unique_indices, inverse_indices = torch.unique(
+            block_indices, sorted=True, return_inverse=True
+        )
+        compact_block_table = inverse_indices.to(torch.int32).view_as(block_table)
+        result = (unique_indices, inverse_indices, compact_block_table)
+        fmha_params._compact_cache = result
+        return result
+
+    def _gather_and_reshape_kv_compact(self, kv_cache_base, block_table, fmha_params):
         """Gather referenced blocks once, then reshape to VECTORIZED_LAYOUT.
 
         For v1_kv_layout=True (non-ASM, non-FP8) path, the V cache needs a
@@ -284,6 +308,7 @@ class AiterPrefillAttnOp:
         Args:
             kv_cache_base: Full pool — [block_num, 2, hk, ps, hd] (5D) or 2D flat.
             block_table:   [batch_size, max_blocks_per_seq] int32 on GPU.
+            fmha_params:   FMHAParams — used for cross-layer unique() caching.
 
         Returns:
             (k_compact, v_compact, compact_block_table)
@@ -293,12 +318,10 @@ class AiterPrefillAttnOp:
         hd = self.head_dim
         vs = 16 // kv_cache_base.element_size()
 
-        # Flatten block_table to get referenced block indices. Keep only unique
-        # blocks; reuse-cache pressure can otherwise duplicate long shared
-        # prefixes and padding into a very large temporary K/V buffer.
-        block_indices = block_table.reshape(-1).to(torch.int64)
-        unique_indices, inverse_indices = torch.unique(
-            block_indices, sorted=True, return_inverse=True
+        # Reuse cached unique/inverse indices across layers (avoids per-layer
+        # rocprim radix-sort Memset on stream-0 which costs ~16-105ms on ROCm).
+        unique_indices, _, compact_block_table = self._compute_compact_indices(
+            block_table, fmha_params
         )
         num_gathered = unique_indices.numel()
 
@@ -327,8 +350,6 @@ class AiterPrefillAttnOp:
                 .permute(0, 1, 3, 2, 4)
                 .contiguous()
             )
-
-        compact_block_table = inverse_indices.to(torch.int32).view_as(block_table)
 
         # Append one dummy zero-block to k/v compact buffers. CK kernel may
         # speculatively read beyond the last valid block_table entry; having a
@@ -446,7 +467,7 @@ class AiterPrefillAttnOp:
 
         if use_compact:
             k_cache, v_cache, block_table = self._gather_and_reshape_kv_compact(
-                kv_cache.kv_cache_base, block_table
+                kv_cache.kv_cache_base, block_table, fmha_params
             )
         else:
             k_cache, v_cache = self._reshape_kv_cache_vectorized(kv_cache.kv_cache_base)
