@@ -165,6 +165,11 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     TRANS_OPTIONAL(ebnf);
     TRANS_OPTIONAL(structural_tag);
     TRANS_OPTIONAL(task_id);
+    TRANS_OPTIONAL(json_schema);
+    TRANS_OPTIONAL(regex);
+    TRANS_OPTIONAL(ebnf);
+    TRANS_OPTIONAL(structural_tag);
+    TRANS_OPTIONAL(response_format);
     TRANS_OPTIONAL(adapter_name);
     const bool legacy_in_think_mode = config_proto->in_think_mode();
     const int  thinking_mode        = static_cast<int>(config_proto->thinking_mode());
