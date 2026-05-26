@@ -13,6 +13,8 @@
 #include <memory>
 #include <unistd.h>
 #include <limits.h>
+#include <cstdint>
+#include <sstream>
 
 using namespace std;
 using namespace autil::legacy;
@@ -39,6 +41,108 @@ bool prefillCacheHitMetricEnabled() {
         return !envValueIsFalse(value);
     }();
     return enabled;
+}
+
+bool prefillCacheDebugLogEnabled() {
+    static const bool enabled = []() {
+        const char* value = std::getenv("PREFILL_CACHE_DEBUG_LOG");
+        if (value == nullptr) {
+            value = std::getenv("KV_CACHE_DEBUG_LOG");
+        }
+        if (value == nullptr) {
+            return false;
+        }
+        return strcmp(value, "1") == 0 || strcasecmp(value, "true") == 0 || strcasecmp(value, "on") == 0;
+    }();
+    return enabled;
+}
+
+std::string cacheKeyPreview(const std::vector<CacheKeyType>& keys, size_t limit = 6) {
+    std::ostringstream oss;
+    oss << "[";
+    for (size_t i = 0; i < keys.size() && i < limit; ++i) {
+        if (i != 0) {
+            oss << ",";
+        }
+        oss << keys[i];
+    }
+    if (keys.size() > limit) {
+        oss << ",...";
+    }
+    oss << "]";
+    return oss.str();
+}
+
+std::string cacheKeysToString(const std::vector<CacheKeyType>& keys) {
+    std::ostringstream oss;
+    oss << "[";
+    for (size_t i = 0; i < keys.size(); ++i) {
+        if (i != 0) {
+            oss << ",";
+        }
+        oss << keys[i];
+    }
+    oss << "]";
+    return oss.str();
+}
+
+std::string cacheKeyDigest(const std::vector<CacheKeyType>& keys) {
+    uint64_t digest = 14695981039346656037ULL;
+    for (const auto cache_key : keys) {
+        uint64_t value = static_cast<uint64_t>(cache_key);
+        digest ^= value;
+        digest *= 1099511628211ULL;
+        digest ^= value >> 32;
+        digest *= 1099511628211ULL;
+    }
+    return std::to_string(digest);
+}
+
+const char* prefillStageName(PrefillStatInfo::ExecuteStage stage) {
+    switch (stage) {
+        case PrefillStatInfo::start:
+            return "start";
+        case PrefillStatInfo::getRpcConnection:
+            return "getRpcConnection";
+        case PrefillStatInfo::multimodalProcess:
+            return "multimodalProcess";
+        case PrefillStatInfo::remoteAllocateResource:
+            return "remoteAllocateResource";
+        case PrefillStatInfo::enqueueRequest:
+            return "enqueueRequest";
+        case PrefillStatInfo::remoteLoadCacheStart:
+            return "remoteLoadCacheStart";
+        case PrefillStatInfo::pollLocalOutput:
+            return "pollLocalOutput";
+        case PrefillStatInfo::remoteLoadCacheEnd:
+            return "remoteLoadCacheEnd";
+        case PrefillStatInfo::RemoteGenerate:
+            return "RemoteGenerate";
+        case PrefillStatInfo::pollRemoteOutput:
+            return "pollRemoteOutput";
+        case PrefillStatInfo::finish:
+            return "finish";
+        default:
+            return "unknown";
+    }
+}
+
+void logPrefillFailureTrace(const char* event, PrefillGenerateContext& prefill_context) {
+    RTP_LLM_LOG_WARNING("Prefill request trace: event=%s request_id=%ld request_key=%s stage=%s retry_times=%ld "
+                        "retry_cost_time_ms=%ld execute_time_ms=%ld decode_addr=%s grpc_code=%d grpc_message=%s "
+                        "error_code=%d error_message=%s",
+                        event,
+                        prefill_context.request_id,
+                        prefill_context.request_key.c_str(),
+                        prefillStageName(prefill_context.stat_info.stage),
+                        prefill_context.retry_times,
+                        prefill_context.retry_cost_time_ms,
+                        prefill_context.executeTimeMs(),
+                        prefill_context.decode_addr.c_str(),
+                        static_cast<int>(prefill_context.error_status.error_code()),
+                        prefill_context.error_status.error_message().c_str(),
+                        static_cast<int>(prefill_context.error_info.code()),
+                        prefill_context.error_info.ToString().c_str());
 }
 
 std::vector<CacheKeyType> buildFullBlockCacheKeys(torch::Tensor input_ids, int seq_size_per_block) {
@@ -144,6 +248,7 @@ void fillPrefillRecentCacheKeyMetricsCollector(PrefillRecentCacheKeyMetricsColle
         }                                                                                                              \
         prefill_context.error_info   = ErrorInfo(new_error_code, new_error_msg);                                       \
         prefill_context.error_status = serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);     \
+        logPrefillFailureTrace("client_grpc_error", prefill_context);                                                  \
         return;                                                                                                        \
     }
 
@@ -232,6 +337,7 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
         prefill_context.error_info =
             ErrorInfo(ErrorCode::GET_HOST_FAILED, "get host for decode cluster " + decode_cluster_name_ + " failed");
         prefill_context.error_status = serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);
+        logPrefillFailureTrace("get_rpc_connection_no_decode_host", prefill_context);
         return;
     }
     auto decode_addr    = host->ip + ":" + std::to_string(host->rpc_port);
@@ -240,6 +346,8 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
         prefill_context.error_info   = ErrorInfo(ErrorCode::GET_CONNECTION_FAILED,
                                                "get grpc connection for decode addr " + decode_addr + " failed");
         prefill_context.error_status = serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);
+        prefill_context.decode_addr  = decode_addr;
+        logPrefillFailureTrace("get_rpc_connection_failed", prefill_context);
         return;
     }
     prefill_context.decode_addr     = decode_addr;
@@ -262,6 +370,9 @@ void PrefillRpcServer::multimodalProcess(PrefillGenerateContext& prefill_context
         for (size_t i = 0; i < input->input_ids.numel(); i++) {
             mutable_request->add_token_ids(ids_ptr[i]);
         }
+    }
+    if (prefill_context.hasError()) {
+        logPrefillFailureTrace("multimodal_process_failed", prefill_context);
     }
 }
 
@@ -302,6 +413,14 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     GenerateOutputsPB allocate_response;
     CLIENT_GRPC_RET_IF_ERROR(
         prefill_context, client_stream->Read(&allocate_response), ErrorCode::REMOTE_ALLOCATE_RESOURCE_READ_FAILED);
+    if (allocate_response.has_error_info() && allocate_response.error_info().error_code() != 0) {
+        RTP_LLM_LOG_WARNING("Prefill request trace: event=remote_allocate_response_error request_id=%ld "
+                            "decode_addr=%s remote_error_code=%d remote_error_message=%s",
+                            prefill_context.request_id,
+                            prefill_context.decode_addr.c_str(),
+                            allocate_response.error_info().error_code(),
+                            allocate_response.error_info().error_message().c_str());
+    }
     RTP_LLM_LOG_DEBUG("request [%ld] remote allocate resource done", prefill_context.request_id);
 }
 
@@ -320,6 +439,7 @@ void PrefillRpcServer::remoteLoadCacheStart(PrefillGenerateContext& prefill_cont
     prefill_context.error_info = waitStreamBeforeRun(prefill_context.getStream());
     if (prefill_context.error_info.hasError()) {
         prefill_context.error_status = serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);
+        logPrefillFailureTrace("wait_stream_before_run_failed", prefill_context);
         return;
     }
     AtomicGuard       request_guard(loading_cache_requests_);
@@ -340,6 +460,7 @@ void PrefillRpcServer::pollLocalOutput(PrefillGenerateContext& prefill_context) 
                                          prefill_context.getStream());
     if (!first_status.ok()) {
         prefill_context.error_status = first_status;
+        logPrefillFailureTrace("poll_local_output_failed", prefill_context);
         return;
     }
     RTP_LLM_LOG_DEBUG("request [%ld] poll local output end", prefill_context.request_id);
@@ -348,6 +469,7 @@ void PrefillRpcServer::pollLocalOutput(PrefillGenerateContext& prefill_context) 
     if (stream->hasError()) {
         prefill_context.finished     = true;
         prefill_context.error_status = grpc::Status(grpc::StatusCode::INTERNAL, stream->statusInfo().ToString());
+        logPrefillFailureTrace("local_stream_failed", prefill_context);
     }
 }
 
@@ -512,12 +634,37 @@ void PrefillRpcServer::reportPrefillRecentCacheKeyMetrics(PrefillGenerateContext
     const int seq_size_per_block = maga_init_params_.kv_cache_config.seq_size_per_block;
     auto      cache_keys = buildFullBlockCacheKeys(prefill_context.generate_input->input_ids, seq_size_per_block);
     auto      snapshot   = prefill_recent_cache_key_window_->record(cache_keys);
+    auto      key_digest = cacheKeyDigest(cache_keys);
+    auto      key_text   = cacheKeysToString(cache_keys);
 
     if (metrics_reporter_) {
         PrefillRecentCacheKeyMetricsCollector collector;
         fillPrefillRecentCacheKeyMetricsCollector(collector, snapshot);
         metrics_reporter_->report<PrefillRecentCacheKeyMetrics, PrefillRecentCacheKeyMetricsCollector>(nullptr,
                                                                                                        &collector);
+    }
+
+    RTP_LLM_LOG_INFO("Prefill cache-key trace: request_id=%ld request_key=%s token_num=%ld seq_size_per_block=%d "
+                     "key_count=%zu hit_count=%ld total_count=%ld hit_ratio=%.6f cache_key_digest=%s "
+                     "retained_occurrences=%ld retained_unique_cache_keys=%zu window_ms=%ld cache_keys=%s",
+                     prefill_context.request_id,
+                     prefill_context.request_key.c_str(),
+                     prefill_context.generate_input->input_ids.numel(),
+                     seq_size_per_block,
+                     cache_keys.size(),
+                     snapshot.request_hit_occurrences,
+                     snapshot.request_occurrences,
+                     snapshot.request_hit_ratio,
+                     key_digest.c_str(),
+                     snapshot.retained_occurrences,
+                     snapshot.retained_unique_cache_keys,
+                     snapshot.time_window_ms,
+                     key_text.c_str());
+    if (prefillCacheDebugLogEnabled()) {
+        RTP_LLM_LOG_INFO("Prefill cache-key preview trace: request_id=%ld cache_key_digest=%s keys_preview=%s",
+                         prefill_context.request_id,
+                         key_digest.c_str(),
+                         cacheKeyPreview(cache_keys).c_str());
     }
 }
 
@@ -530,7 +677,19 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
                          && request->generate_config().variable_num_beams().size() == 0
                          && request->generate_config().num_return_sequences() <= 1
                          && request->generate_config().can_use_pd_separation();
+    RTP_LLM_LOG_INFO("Prefill request trace: event=recv request_id=%ld pd_separation=%d token_ids=%d "
+                     "max_new_tokens=%d num_beams=%d num_return_sequences=%d can_use_pd_separation=%d timeout_ms=%ld",
+                     request->request_id(),
+                     pd_separation,
+                     request->token_ids_size(),
+                     request->generate_config().max_new_tokens(),
+                     request->generate_config().num_beams(),
+                     request->generate_config().num_return_sequences(),
+                     request->generate_config().can_use_pd_separation(),
+                     request->generate_config().timeout_ms());
     if (!pd_separation) {
+        RTP_LLM_LOG_INFO("Prefill request trace: event=bypass_local request_id=%ld token_ids=%d",
+                         request->request_id(), request->token_ids_size());
         return LocalRpcServer::GenerateStreamCall(server_context, request, writer);
     }
 
@@ -553,6 +712,7 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
         EXECUTE_WITH_RETRY(
             prepareAllocateResource, prefill_context, max_retry_times, max_retry_timeout_ms, retry_interval_ms);
         if (prefill_context.hasError()) {
+            logPrefillFailureTrace("prepare_allocate_failed", prefill_context);
             RTP_LLM_LOG_WARNING(
                 "request [%ld] prepare allocate resource failed after retry [%d] times, cost time ms [%ld], "
                 "max retry time [%ld], max retry timeout ms [%ld]",
@@ -574,10 +734,12 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
     } catch (const std::exception& e) {
         auto error_msg = "request [" + prefill_context.request_key + "] catch exception [" + e.what() + "]";
         prefill_context.error_status = grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
+        logPrefillFailureTrace("catch_exception", prefill_context);
         return prefill_context.error_status;
     } catch (...) {
         auto error_msg               = "request [" + prefill_context.request_key + "] catch unknown exception";
         prefill_context.error_status = grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
+        logPrefillFailureTrace("catch_unknown_exception", prefill_context);
         return prefill_context.error_status;
     }
 
