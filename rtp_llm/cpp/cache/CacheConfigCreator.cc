@@ -24,6 +24,21 @@ bool shouldUseHybridPoolLayout(const ModelConfig& model_config) {
                && model_config.hybrid_attention_config.enable_independent_kv_cache_pools);
 }
 
+size_t steppedBytes(size_t bytes, int step) {
+    return (bytes > 0 && step > 1) ? bytes / static_cast<size_t>(step) : bytes;
+}
+
+size_t fallbackFixedPoolHbmBytes(const CacheConfig& config) {
+    return config.swa_block_size_bytes + (config.state_pool_uses_pinned_cpu ? 0u : config.state_block_size_bytes);
+}
+
+size_t effectivePagedBlockBytes(const CacheConfig& config, int step) {
+    if (config.use_typed_cache_regions && config.dsv4_fixed_pool_blocks > 0) {
+        return config.block_size_bytes;
+    }
+    return config.block_size_bytes + steppedBytes(fallbackFixedPoolHbmBytes(config), step);
+}
+
 }  // namespace
 
 CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model_config,
@@ -94,17 +109,12 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
                              config.fixed_pool_reserve_bytes / 1024 / 1024,
                              paged_budget / 1024 / 1024);
         }
-        const bool dsv4_fixed_pools = config.use_typed_cache_regions && config.dsv4_fixed_pool_blocks > 0;
+        const int  joint_step        = std::max(1, config.linear_step);
+        const bool dsv4_fixed_pools  = config.use_typed_cache_regions && config.dsv4_fixed_pool_blocks > 0;
         if (dsv4_fixed_pools) {
             block_num = paged_budget / config.block_size_bytes;
         } else {
-            const int    joint_step    = std::max(1, config.linear_step);
-            const size_t swa_effective = (config.swa_block_size_bytes > 0 && joint_step > 1) ?
-                                             config.swa_block_size_bytes / static_cast<size_t>(joint_step) :
-                                             config.swa_block_size_bytes;
-            const size_t state_in_hbm_bytes = config.state_pool_uses_pinned_cpu ? 0u : config.state_block_size_bytes;
-            const size_t effective_bytes    = config.block_size_bytes + swa_effective + state_in_hbm_bytes;
-            block_num                       = paged_budget / effective_bytes;
+            block_num = paged_budget / effectivePagedBlockBytes(config, joint_step);
         }
     }
     RTP_LLM_CHECK_WITH_INFO(block_num > 0,
@@ -217,17 +227,9 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                 paged_budget / 1024 / 1024);
         }
 
-        const int joint_step     = std::max(1, kv_cache_config.linear_step);
-        auto      effective_size = [&](const CacheConfig& cfg) -> size_t {
-            const bool dsv4_fixed_pools = cfg.use_typed_cache_regions && cfg.dsv4_fixed_pool_blocks > 0;
-            if (dsv4_fixed_pools) {
-                return cfg.block_size_bytes;
-            }
-            const size_t swa_eff = (cfg.swa_block_size_bytes > 0 && joint_step > 1) ?
-                                       cfg.swa_block_size_bytes / static_cast<size_t>(joint_step) :
-                                       cfg.swa_block_size_bytes;
-            const size_t state_in_hbm = cfg.state_pool_uses_pinned_cpu ? 0u : cfg.state_block_size_bytes;
-            return cfg.block_size_bytes + swa_eff + state_in_hbm;
+        const int joint_step = std::max(1, kv_cache_config.linear_step);
+        auto effective_size = [&](const CacheConfig& cfg) -> size_t {
+            return effectivePagedBlockBytes(cfg, joint_step);
         };
         block_num =
             paged_budget
