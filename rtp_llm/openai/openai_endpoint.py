@@ -302,6 +302,16 @@ class OpenaiEndpoint(object):
         aux_info = None
         extra_outputs = None
         async for response in choice_generator:
+            # Per the Chat Completions streaming protocol, a chunk that
+            # carries `usage` arrives with `choices=[]` after the chunk that
+            # contained `finish_reason`. Capture usage/aux_info/extra_outputs
+            # first so usage-only chunks are accounted for, then skip the
+            # per-choice merge below.
+            usage = response.usage or usage
+            aux_info = response.aux_info or aux_info
+            extra_outputs = response.extra_outputs or extra_outputs
+            if not response.choices:
+                continue
             if len(response.choices) != len(all_choices):
                 if all_choices == []:
                     all_choices = [
@@ -309,7 +319,7 @@ class OpenaiEndpoint(object):
                             index=i,
                             message=ChatMessage(
                                 role=choice.delta.role or RoleEnum.assistant,
-                                content=choice.delta.content or None,
+                                content=choice.delta.content if choice.delta.content is not None else "",
                                 function_call=choice.delta.function_call or None,
                                 tool_calls=choice.delta.tool_calls or None,
                             ),
@@ -325,9 +335,9 @@ class OpenaiEndpoint(object):
                     )
             else:
                 for i in range(len(all_choices)):
-                    if all_choices[i].message.content == None:
+                    if all_choices[i].message.content is None:
                         all_choices[i].message.content = (
-                            response.choices[i].delta.content or None
+                            response.choices[i].delta.content or ""
                         )
                     else:
                         all_choices[i].message.content += (
@@ -365,9 +375,6 @@ class OpenaiEndpoint(object):
                             ].logprobs.content
                     else:
                         all_choices[i].logprobs = response.choices[i].logprobs
-            usage = response.usage or usage
-            aux_info = response.aux_info or aux_info
-            extra_outputs = response.extra_outputs or extra_outputs
 
         if usage == None:
             logging.warning(f"No usage returned from stream response. use empty value.")
@@ -385,6 +392,9 @@ class OpenaiEndpoint(object):
                     for output_ids in extra_outputs.output_ids
                 ]
 
+        for choice in all_choices:
+            if choice.message.content is None:
+                choice.message.content = ""
         return ChatCompletionResponse(
             choices=all_choices,
             usage=usage,
@@ -417,14 +427,42 @@ class OpenaiEndpoint(object):
                         for output_ids in response.extra_outputs.output_ids
                     ]
 
-                yield ChatCompletionStreamResponse(
-                    choices=response.choices,
-                    usage=response.usage,
-                    aux_info=response.aux_info,
-                    debug_info=debug_info if not debug_info_responded else output,
-                    extra_outputs=response.extra_outputs,
-                )
-                debug_info_responded = True
+                # OpenAI Chat Completions streaming protocol: when a chunk
+                # carries `usage`, that chunk must have `choices=[]`.
+                # Spec-compliant clients expect the trailing usage payload
+                # in a standalone chunk after the chunk that contained
+                # `finish_reason`, and may ignore usage when it is bundled
+                # with choices in the same chunk. Emit the final usage in
+                # its own choices-empty chunk.
+                if (
+                    response.usage is not None
+                    and response.choices
+                    and any(c.finish_reason for c in response.choices)
+                ):
+                    yield ChatCompletionStreamResponse(
+                        choices=response.choices,
+                        usage=None,
+                        aux_info=response.aux_info,
+                        debug_info=debug_info if not debug_info_responded else output,
+                        extra_outputs=response.extra_outputs,
+                    )
+                    debug_info_responded = True
+                    yield ChatCompletionStreamResponse(
+                        choices=[],
+                        usage=response.usage,
+                        aux_info=None,
+                        debug_info=None,
+                        extra_outputs=None,
+                    )
+                else:
+                    yield ChatCompletionStreamResponse(
+                        choices=response.choices,
+                        usage=response.usage,
+                        aux_info=response.aux_info,
+                        debug_info=debug_info if not debug_info_responded else output,
+                        extra_outputs=response.extra_outputs,
+                    )
+                    debug_info_responded = True
 
         complete_response_collect_func = partial(
             OpenaiEndpoint._collect_complete_response,
