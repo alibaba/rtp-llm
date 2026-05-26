@@ -8,7 +8,10 @@ namespace rtp_llm {
 
 class DSV4CacheConfigHelper {
 public:
-    static void applyConfig(CacheConfig& config, const ModelConfig& model_config, const KVCacheConfig& kv_cache_config);
+    static void applyConfig(CacheConfig&         config,
+                            const ModelConfig&   model_config,
+                            const KVCacheConfig& kv_cache_config,
+                            int                  gen_num_per_cycle);
 };
 
 }  // namespace rtp_llm
