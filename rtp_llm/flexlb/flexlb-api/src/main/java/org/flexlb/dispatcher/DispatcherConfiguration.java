@@ -2,9 +2,9 @@ package org.flexlb.dispatcher;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.netty.channel.ChannelOption;
-import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.discovery.ServiceDiscovery;
 import org.flexlb.util.Logger;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.Ordered;
@@ -18,8 +18,6 @@ import reactor.netty.resources.ConnectionProvider;
 
 import java.time.Duration;
 import java.util.List;
-import java.util.concurrent.atomic.AtomicReference;
-import java.util.stream.Collectors;
 
 @Configuration
 public class DispatcherConfiguration {
@@ -47,16 +45,35 @@ public class DispatcherConfiguration {
     }
 
     /**
+     * Singleton FE-pool refresher, created only when the dispatcher is enabled. Returning
+     * {@code null} when disabled keeps Spring from registering the bean — and from
+     * subscribing a listener or parking a {@code @Scheduled} method on the
+     * {@code task-scheduler} pool — in deployments that do not use the dispatcher at all.
+     *
+     * <p>The refresher mirrors sync's {@code EngineAddressNameResolver}: a listener for the
+     * push fast path plus a {@code @Scheduled} poll on the shared {@code task-scheduler}
+     * pool as the always-on safety net. Operators see one staleness model and one threading
+     * model across the whole flexlb process.
+     */
+    @Bean
+    public DispatcherFePoolRefresher dispatcherFePoolRefresher(DispatchConfig cfg,
+                                                               ServiceDiscovery serviceDiscovery) {
+        if (!cfg.isEnabled()) {
+            return null;
+        }
+        return new DispatcherFePoolRefresher(serviceDiscovery, cfg.getFePoolServiceId());
+    }
+
+    /**
      * Dispatcher routes on the SHARED 7001 listener, ordered last so the catch-all never shadows
      * the Master's /rtp_llm/* (which are @Order(0) — see {@code HttpLoadBalanceServer}). Returns
      * null when disabled — Spring will not register a null bean, so disabled deployments add
      * nothing to the route table.
      *
-     * <p>FE pool membership is sourced from {@link ServiceDiscovery}: the bean injected here is
-     * the auto-configured one — NoOp in open-source / dev (reads {@code DOMAIN_ADDRESS:<id>} env
-     * var) and VipServer-backed in the internal profile (push subscription). The dispatcher
-     * subscribes via {@code listen()} and mirrors every host-change callback into an
-     * {@link AtomicReference} that {@link FePool} reads on every {@code next()}.
+     * <p>FE pool membership is sourced from {@link DispatcherFePoolRefresher}, which polls
+     * {@link ServiceDiscovery} on the shared {@code task-scheduler} pool. {@link FePool}
+     * reads the latest snapshot through {@link DispatcherFePoolRefresher#source()} on every
+     * {@code next()}.
      *
      * <p>Batch-aware routes are registered per {@link BatchEndpointSpec} supplied by
      * {@link BatchEndpointRegistry}; everything else under {@code /dispatcher/**} falls through to
@@ -84,11 +101,15 @@ public class DispatcherConfiguration {
     public RouterFunction<ServerResponse> dispatcherRoutes(DispatchConfig cfg,
                                                            ObjectMapper mapper,
                                                            WebClient.Builder webClientBuilder,
-                                                           ServiceDiscovery serviceDiscovery,
+                                                           ObjectProvider<DispatcherFePoolRefresher> fePoolRefresherProvider,
                                                            List<BatchEndpointSpec> specs) {
         if (!cfg.isEnabled()) {
             return null;
         }
+        // Disabled deployments do not register the refresher bean; the ObjectProvider here
+        // tolerates that without forcing dispatcherRoutes to share the same instantiation
+        // policy. When enabled, the bean must exist — getObject() throws loudly if not.
+        DispatcherFePoolRefresher fePoolRefresher = fePoolRefresherProvider.getObject();
         ConnectionProvider feConnections = ConnectionProvider.builder("dispatcher-fe")
                 .maxConnections(cfg.getFeMaxConnectionsPerHost())
                 .pendingAcquireTimeout(Duration.ofMillis(FE_PENDING_ACQUIRE_TIMEOUT_MS))
@@ -105,20 +126,10 @@ public class DispatcherConfiguration {
                 .clientConnector(new ReactorClientHttpConnector(passthroughHttp))
                 .build();
 
-        String serviceId = cfg.getFePoolServiceId();
-        AtomicReference<List<String>> fePoolUrls = new AtomicReference<>(
-                toUrls(serviceDiscovery.getHosts(serviceId)));
-        serviceDiscovery.listen(serviceId, hosts -> {
-            List<String> urls = toUrls(hosts);
-            fePoolUrls.set(urls);
-            // WARN level (always-on) — FE pool topology changes are operationally important
-            // and infrequent, matching the codebase convention used by ZK election / engine sync.
-            Logger.warn("dispatcher FE pool updated: serviceId={}, hosts={}", serviceId, urls.size());
-        });
         FeHealthChecker healthChecker = new FeHealthChecker(
-                fePoolUrls::get, passthroughWebClient, cfg.getProbePath());
+                fePoolRefresher.source(), passthroughWebClient, cfg.getProbePath());
         healthChecker.start();
-        FePool pool = new FePool(fePoolUrls::get, healthChecker::isAlive);
+        FePool pool = new FePool(fePoolRefresher.source(), healthChecker::isAlive);
 
         FeClient feClient = new WebClientFeClient(feBatchBuilder);
         FanoutService fanout = new FanoutService(feClient, pool);
@@ -132,13 +143,9 @@ public class DispatcherConfiguration {
         Logger.warn("dispatcher enabled: fePoolServiceId={}, seedHosts={}, subBatch={}, batchSpecs={}, "
                         + "batchTimeoutMs={}, feMaxConnectionsPerHost={}, feMaxPendingAcquirePerHost={}, "
                         + "probePath={}",
-                serviceId, fePoolUrls.get().size(), cfg.getSubBatch(), specs.size(),
-                cfg.getBatchTimeoutMs(), cfg.getFeMaxConnectionsPerHost(),
+                cfg.getFePoolServiceId(), fePoolRefresher.currentSize(), cfg.getSubBatch(),
+                specs.size(), cfg.getBatchTimeoutMs(), cfg.getFeMaxConnectionsPerHost(),
                 cfg.getFeMaxPendingAcquirePerHost(), cfg.getProbePath());
         return new DispatchRouter(batchHandler, handler, specs).routes();
-    }
-
-    private static List<String> toUrls(List<WorkerHost> hosts) {
-        return hosts.stream().map(h -> "http://" + h.getIpPort()).collect(Collectors.toList());
     }
 }
