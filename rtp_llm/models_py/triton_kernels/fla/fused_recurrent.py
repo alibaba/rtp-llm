@@ -397,6 +397,19 @@ def fused_recurrent_gated_delta_rule(
                 f"If your state is [N, H, K, V] (K-first), transpose with "
                 f"initial_state.transpose(-1, -2)."
             )
+        # When V == K, shape alone cannot distinguish V-first from K-first.
+        # Use strides to detect transpose-view tensors that are actually K-first:
+        # a proper V-first contiguous tensor has stride(-2) == K and stride(-1) == 1.
+        if V == K and initial_state.stride(-2) == 1 and initial_state.stride(-1) == V:
+            import warnings
+            warnings.warn(
+                f"initial_state appears to be a transposed K-first view "
+                f"(stride(-2)=1, stride(-1)={V}) rather than a true V-first layout. "
+                f"Calling .contiguous() to fix. Please update your code to pass "
+                f"V-first [N, H, V, K] tensors directly.",
+                stacklevel=2,
+            )
+            initial_state = initial_state.transpose(-1, -2).contiguous()
     if cu_seqlens is not None and q.shape[0] != 1:
         raise ValueError(
             f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
