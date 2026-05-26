@@ -922,9 +922,8 @@ class RocmImpl(GpuImpl):
                 x_ = e8m0_shuffle(x_.contiguous().view(s0 * s1, -1)).view(s0, s1, -1)
             else:
                 x_ = e8m0_shuffle(x_)
-
-        if original_ndim == 2:
-            x_ = x_.squeeze(-1)
+            if original_ndim == 2:
+                x_ = x_.squeeze(-1)
         return x_
 
     def maybe_rewrite_weight_by_key(
