@@ -138,9 +138,34 @@ static ModelConfig makeTinyDSV4ModelConfig() {
     return mc;
 }
 
+static ModelConfig makeProModelConfig() {
+    ModelConfig mc;
+    mc.num_layers                   = 61;
+    mc.hidden_size                  = 7168;
+    mc.attn_config.head_num         = 128;
+    mc.attn_config.kv_head_num      = 1;
+    mc.attn_config.size_per_head    = 512;
+    mc.attn_config.rope_head_dim    = 64;
+    mc.attn_config.sliding_window   = 128;
+    mc.attn_config.indexer_head_dim = 128;
+    mc.attn_config.indexer_head_num = 64;
+    mc.attn_config.indexer_topk     = 1024;
+    mc.attn_config.o_groups         = 16;
+    mc.attn_config.o_lora_rank      = 1024;
+    std::vector<int> ratios;
+    ratios.push_back(128);
+    ratios.push_back(128);
+    for (int i = 2; i < 61; i++) {
+        ratios.push_back((i % 2 == 0) ? 4 : 128);
+    }
+    ratios.push_back(0);
+    mc.attn_config.layer_compress_ratios = ratios;
+    return mc;
+}
+
 // Build a DSV4 7-pool CacheConfig (uses use_independent_block_pools=true).
 static CacheConfig makeDSV4HybridPoolConfig(uint32_t block_num = 200) {
-    auto              mc = makeTinyDSV4ModelConfig();
+    auto              mc = makeProModelConfig();
     ParallelismConfig pc;
     KVCacheConfig     kv_cache_config;
     kv_cache_config.dsv4_fixed_pool_blocks = block_num;
@@ -1144,7 +1169,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4SharedBlockCacheIsUnifiedAcrossGroups
     pool0->requestFree(blocks);
 }
 
-TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CPShardedInsertThenMallocSamePrefix) {
+TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CPShardedInsertThenReuseSamePrefix) {
     auto config    = makeDSV4HybridPoolConfig(/*block_num=*/64);
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
@@ -1189,9 +1214,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CPShardedInsertThenMallocSamePrefix) 
     auto result                    = allocator->malloc(hit_malloc);
 
     ASSERT_TRUE(result.success);
-    // DSV4 typed CP-sharded requests keep the allocation path valid even when
-    // this local-rank fixture does not produce a cache hit.
-    EXPECT_EQ(result.reuse_len, 0);
+    EXPECT_EQ(result.reuse_len, 5 * spb * 2);
 
     FreeInfo hit_free{hit_res, hit_tokens};
     allocator->free(hit_free);

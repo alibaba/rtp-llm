@@ -120,7 +120,7 @@ struct CacheConfig {
             uint32_t   rule_blocks;
             if (use_explicit_dsv4_fixed_blocks) {
                 rule_blocks = dsv4_fixed_pool_blocks;
-            } else if (is_swa && step > 1 && global_block_num > 0) {
+            } else if ((is_swa || is_dsv4_fixed_region) && step > 1 && global_block_num > 0) {
                 rule_blocks = std::max(1u, global_block_num / static_cast<uint32_t>(step));
             } else {
                 rule_blocks = global_block_num;
