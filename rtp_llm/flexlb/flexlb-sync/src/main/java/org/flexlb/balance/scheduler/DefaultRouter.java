@@ -108,8 +108,7 @@ public class DefaultRouter implements Router {
 
         cacheMetricsReporter.reportRecentCacheKeyHitMetrics(snapshot.getTimeWindowMs(),
                 snapshot.getRequestHitOccurrences(),
-                snapshot.getRequestOccurrences(),
-                snapshot.getRequestHitRatio());
+                snapshot.getRequestOccurrences());
     }
 
     /**

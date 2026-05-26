@@ -84,6 +84,14 @@ class ConfigServiceTest {
         assertEquals(600000L, configService.loadBalanceConfig().getCacheHitTimeWindowMs());
     }
 
+    @Test
+    void should_override_cache_hit_max_cache_keys_with_environment() {
+        ConfigService configService = new ConfigService(Map.of(
+                "CACHE_HIT_MAX_CACHE_KEYS", "123456"));
+
+        assertEquals(123456L, configService.loadBalanceConfig().getCacheHitMaxCacheKeys());
+    }
+
     private Request request() {
         Request request = new Request();
         request.setRequestId(12345L);
