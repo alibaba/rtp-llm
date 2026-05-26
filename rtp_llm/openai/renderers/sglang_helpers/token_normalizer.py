@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 # Qwen-style tokenizers sometimes merge a preceding space into the same token as the
 # first byte (e.g. " 薯" → 3 tokens), giving 5 tokens for space + 4-byte char.
 # 6 provides a small safety margin.
-_MAX_UTF8_WINDOW = 6
+MAX_UTF8_WINDOW = 6
 
 
 class TokenNormalizer:
@@ -170,7 +170,7 @@ class TokenNormalizer:
         Returns:
             str: Valid UTF-8 text if resolved, empty string otherwise
         """
-        max_window_size = _MAX_UTF8_WINDOW
+        max_window_size = MAX_UTF8_WINDOW
 
         # Combine prev and new tokens for sliding window context
         combined_tokens = prev_token_ids + new_token_ids

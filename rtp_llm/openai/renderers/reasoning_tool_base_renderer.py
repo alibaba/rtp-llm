@@ -32,7 +32,10 @@ from rtp_llm.openai.renderers.sglang_helpers.function_call.base_format_detector 
     BaseFormatDetector,
 )
 from rtp_llm.openai.renderers.sglang_helpers.reasoning_parser import ReasoningParser
-from rtp_llm.openai.renderers.sglang_helpers.token_normalizer import TokenNormalizer
+from rtp_llm.openai.renderers.sglang_helpers.token_normalizer import (
+    MAX_UTF8_WINDOW,
+    TokenNormalizer,
+)
 from rtp_llm.utils.base_model_datatypes import GenerateOutput
 
 
@@ -401,6 +404,21 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         if normalizer_yielded and new_token_ids:
             status.last_token_length = len(new_token_ids)
             status.last_output_ids = status.output_ids
+
+            # Widen the prev-token window until it decodes cleanly. The
+            # normalizer's _calculate_yielded_length() only peels from the
+            # right, so a leftmost orphan UTF-8 tail byte makes it return 0
+            # and the next iteration re-emits already-yielded text. Only
+            # the renderer holds the full output_ids needed to extend left.
+            max_expand = min(
+                len(status.last_output_ids),
+                status.last_token_length + MAX_UTF8_WINDOW,
+            )
+            while status.last_token_length < max_expand:
+                window = status.last_output_ids[-status.last_token_length :]
+                if "\uFFFD" not in self.tokenizer.decode(window):
+                    break
+                status.last_token_length += 1
 
         if collected_deltas:
             merged_delta = self._merge_deltas(collected_deltas)

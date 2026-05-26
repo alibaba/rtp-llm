@@ -259,105 +259,114 @@ class BaseFormatDetector(ABC):
             if not current_tool_call:
                 return StreamingParseResult()
 
-            # Case 1: Handle tool name streaming
-            # This happens when we encounter a tool but haven't sent its name yet
+            collected_calls: List[ToolCallItem] = []
+
+            # Case 1: emit the tool name if we haven't yet
             if not self.current_tool_name_sent:
                 function_name = current_tool_call.get("name")
 
                 if function_name and (
                     function_name in self._tool_indices or _forward_unknown_tools()
                 ):
-                    # If this is a new tool (current_tool_id was -1), initialize it
                     if self.current_tool_id == -1:
                         self.current_tool_id = 0
                         self.streamed_args_for_tool.append("")
-                    # If this is a subsequent tool, ensure streamed_args_for_tool is large enough
                     elif self.current_tool_id >= len(self.streamed_args_for_tool):
                         while len(self.streamed_args_for_tool) <= self.current_tool_id:
                             self.streamed_args_for_tool.append("")
 
-                    # Send the tool name with empty parameters
-                    res = StreamingParseResult(
-                        calls=[
-                            ToolCallItem(
-                                tool_index=self.current_tool_id,
-                                name=function_name,
-                                parameters="",
-                            )
-                        ],
+                    collected_calls.append(
+                        ToolCallItem(
+                            tool_index=self.current_tool_id,
+                            name=function_name,
+                            parameters="",
+                        )
                     )
                     self.current_tool_name_sent = True
+
+                    # Seed prev_tool_call_arr so subsequent diff has a baseline.
+                    while len(self.prev_tool_call_arr) <= self.current_tool_id:
+                        self.prev_tool_call_arr.append({})
+                    self.prev_tool_call_arr[self.current_tool_id] = current_tool_call
+
+                    # Fall through to Case 2 only when the entire tool-call
+                    # JSON arrived in this chunk; otherwise return now.
+                    if not is_current_complete:
+                        return StreamingParseResult(calls=collected_calls)
                 else:
-                    res = StreamingParseResult()
+                    return StreamingParseResult()
 
-            # Case 2: Handle streaming arguments
-            # This happens when we've already sent the tool name and now need to stream arguments incrementally
-            else:
-                cur_arguments = current_tool_call.get("arguments")
-                res = StreamingParseResult()
+            # Case 2: stream arguments.
+            cur_arguments = current_tool_call.get("arguments")
 
-                if cur_arguments is not None:
-                    # Calculate how much of the arguments we've already streamed
-                    sent = len(self.streamed_args_for_tool[self.current_tool_id])
-                    cur_args_json = json.dumps(cur_arguments, ensure_ascii=False)
-                    prev_arguments = None
-                    if self.current_tool_id < len(self.prev_tool_call_arr):
-                        prev_arguments = self.prev_tool_call_arr[
-                            self.current_tool_id
-                        ].get("arguments")
+            if cur_arguments is not None:
+                # Calculate how much of the arguments we've already streamed
+                sent = len(self.streamed_args_for_tool[self.current_tool_id])
+                cur_args_json = json.dumps(cur_arguments, ensure_ascii=False)
+                prev_arguments = None
+                if self.current_tool_id < len(self.prev_tool_call_arr):
+                    prev_arguments = self.prev_tool_call_arr[self.current_tool_id].get(
+                        "arguments"
+                    )
 
+                argument_diff = None
+                # Snapshot before the is_current_complete branch below may
+                # increment self.current_tool_id.
+                tool_index_to_use = self.current_tool_id
+
+                # If the current tool's JSON is complete, send all remaining arguments
+                if is_current_complete:
+                    argument_diff = cur_args_json[sent:]
+                    # Only remove the processed portion, keep unprocessed content
+                    self._buffer = current_text[start_idx + end_idx :]
+
+                # If the tool is still being parsed, send incremental changes
+                elif prev_arguments is not None:
+                    prev_args_json = json.dumps(prev_arguments, ensure_ascii=False)
+                    if cur_args_json != prev_args_json:
+                        prefix = _find_common_prefix(prev_args_json, cur_args_json)
+                        argument_diff = prefix[sent:]
+
+                # Invariant: cur_args_json must start with what we've already
+                # streamed. If it doesn't, we can't un-emit, and emitting any
+                # suffix would produce malformed JSON on the client. Drop and
+                # log; truncation is the lesser evil.
+                streamed_so_far = self.streamed_args_for_tool[self.current_tool_id]
+                if argument_diff is not None and not cur_args_json.startswith(
+                    streamed_so_far
+                ):
+                    logger.error(
+                        "tool_call stream diverges from current parse; "
+                        "client will see truncated args. "
+                        "streamed=%r cur=%r is_complete=%s",
+                        streamed_so_far,
+                        cur_args_json,
+                        is_current_complete,
+                    )
                     argument_diff = None
 
-                    # If the current tool's JSON is complete, send all remaining arguments
-                    if is_current_complete:
-                        argument_diff = cur_args_json[sent:]
-                        completing_tool_id = (
-                            self.current_tool_id
-                        )  # Save the ID of the tool that's completing
+                # Update prev_tool_call_arr with current state
+                if self.current_tool_id >= 0:
+                    # Ensure prev_tool_call_arr is large enough
+                    while len(self.prev_tool_call_arr) <= self.current_tool_id:
+                        self.prev_tool_call_arr.append({})
+                    self.prev_tool_call_arr[self.current_tool_id] = current_tool_call
 
-                        # Only remove the processed portion, keep unprocessed content
-                        self._buffer = current_text[start_idx + end_idx :]
+                # Advance to next tool if complete
+                if is_current_complete:
+                    self.current_tool_name_sent = False
+                    self.current_tool_id += 1
 
-                    # If the tool is still being parsed, send incremental changes
-                    elif prev_arguments is not None:
-                        prev_args_json = json.dumps(prev_arguments, ensure_ascii=False)
-                        if cur_args_json != prev_args_json:
-                            prefix = _find_common_prefix(prev_args_json, cur_args_json)
-                            argument_diff = prefix[sent:]
-
-                    # Update prev_tool_call_arr with current state
-                    if self.current_tool_id >= 0:
-                        # Ensure prev_tool_call_arr is large enough
-                        while len(self.prev_tool_call_arr) <= self.current_tool_id:
-                            self.prev_tool_call_arr.append({})
-                        self.prev_tool_call_arr[self.current_tool_id] = (
-                            current_tool_call
+                if argument_diff is not None:
+                    collected_calls.append(
+                        ToolCallItem(
+                            tool_index=tool_index_to_use,
+                            parameters=argument_diff,
                         )
+                    )
+                    self.streamed_args_for_tool[tool_index_to_use] += argument_diff
 
-                    # Advance to next tool if complete
-                    if is_current_complete:
-                        self.current_tool_name_sent = False
-                        self.current_tool_id += 1
-
-                    # Send the argument diff if there's something new
-                    if argument_diff is not None:
-                        # Use the correct tool_index: completing_tool_id for completed tools, current_tool_id for ongoing
-                        tool_index_to_use = (
-                            completing_tool_id
-                            if is_current_complete
-                            else self.current_tool_id
-                        )
-                        res = StreamingParseResult(
-                            calls=[
-                                ToolCallItem(
-                                    tool_index=tool_index_to_use,
-                                    parameters=argument_diff,
-                                )
-                            ],
-                        )
-                        self.streamed_args_for_tool[tool_index_to_use] += argument_diff
-
-            return res
+            return StreamingParseResult(calls=collected_calls)
 
         except Exception as e:
             logger.error(f"Error in parse_streaming_increment: {e}")

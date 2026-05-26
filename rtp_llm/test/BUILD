@@ -246,7 +246,9 @@ py_test(
     srcs=[
         "incremental_streaming_test.py",
     ],
-    data=[],
+    data=[
+        "//rtp_llm/test/model_test/fake_test/testdata:testdata",
+    ],
     deps=["//rtp_llm:testlib"],
     imports=[],
     exec_properties={"gpu": "A10"},
