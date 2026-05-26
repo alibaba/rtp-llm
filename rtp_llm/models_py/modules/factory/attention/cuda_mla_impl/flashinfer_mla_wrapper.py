@@ -269,12 +269,32 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
         return attn_configs.use_mla and attn_inputs.is_prefill
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
-        self.prepare(attn_inputs, forbid_realloc=True)
+        # prepare_cuda_graph is ONLY called during replay (capture uses normal
+        # forward → prepare → fillParams → plan path). Device-only: GPU kernel
+        # updates params, skip fillParams/plan (scheduling baked into graph).
+        bi_h = getattr(self.fmha_params, "batch_indice_h", None)
+        cached_total_tokens = (
+            int(bi_h.shape[0])
+            if isinstance(bi_h, torch.Tensor) and bi_h.dim() == 1 and bi_h.shape[0] > 0
+            else 0
+        )
         if (
-            self.absorb_fmha is not None
-            and self._current_total_q() <= self.cuda_graph_absorb_token_limit
+            cached_total_tokens > 0
+            and attn_inputs.input_lengths is not None
+            and attn_inputs.input_lengths.is_cuda
+            and attn_inputs.prefix_lengths is not None
+            and attn_inputs.prefix_lengths.is_cuda
+            and attn_inputs.kv_cache_kernel_block_id_device is not None
         ):
-            self.absorb_fmha.plan_prefill_cuda_graph(self.fmha_params)
+            self.fmha_params.fill_prefill_cuda_graph_params(
+                attn_inputs.input_lengths,
+                attn_inputs.prefix_lengths,
+                attn_inputs.kv_cache_kernel_block_id_device,
+                self.seq_size_per_block,
+                cached_total_tokens,
+            )
+        if self.absorb_fmha is not None:
+            self.absorb_fmha.plan_prefill_cuda_graph_replay(self.fmha_params)
 
     def _current_total_q(self) -> int:
         if self.fmha_params is not None and self.fmha_params.qo_indptr_h.numel() > 0:
@@ -421,4 +441,18 @@ class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
         )
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
+        # FP8 decode: bypass fill_params (which does D2H syncs via
+        # toHostContiguousI32) and use the device-only CUDA kernel path.
+        if (
+            getattr(self.fmha_impl, "_fp8_kv", False)
+            and attn_inputs.sequence_lengths_plus_1_d is not None
+            and attn_inputs.kv_cache_kernel_block_id_device is not None
+        ):
+            self.fmha_params.fill_decode_cuda_graph_params(
+                attn_inputs.sequence_lengths_plus_1_d,
+                attn_inputs.kv_cache_kernel_block_id_device,
+                self.seq_size_per_block,
+            )
+            self.fmha_impl.plan_cuda_graph(attn_inputs)
+            return
         self.prepare(attn_inputs, forbid_realloc=True)
