@@ -26,7 +26,7 @@ vLLM's ``DeepseekCompressor`` flow:
 Public API kept stable so ``attention.py`` / ``indexer_fp8.py`` call
 sites do not change:
   * ``set_pool_context(kv_view, kv_bt, kv_eb, state_view, state_bt,
-    state_eb)`` — same 6-arg shape as the old ``PoolBackedModule``.
+    state_eb)`` — shared with ``PoolBackedModule``.
   * ``forward(x, start_pos, sequence_lengths=None)`` for prefill.
   * ``forward_decode_vectorized(x, start_pos)`` for batched decode.
 """
@@ -89,6 +89,7 @@ from rtp_llm.models_py.modules.dsv4.fp8._compressor_vllm_triton import (
     run_fused_compress_kv_write,
     run_save_partial_states,
 )
+from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import PoolBackedModule
 
 # Process-local cache for the device-side cos_sin tensor derived from a
 # given freqs_cis source. DSV4 has ~91 CompressorFP8 instances (main +
@@ -149,7 +150,7 @@ class _CompressorNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(dim, dtype=torch.bfloat16))
 
 
-class CompressorFP8(nn.Module):
+class CompressorFP8(PoolBackedModule):
     """FP8 KV cache compressor — vLLM-aligned per-token state pool path.
 
     Compress ratio: CSA uses ratio=4 (overlap=True), HCA uses ratio=128
@@ -220,14 +221,6 @@ class CompressorFP8(nn.Module):
         self._wkv_wgate_fused: Optional[torch.Tensor] = None
         self._fuse_wkv_wgate(coff)
 
-        # Pool context — populated by attention's _set_compressor_pool_context.
-        self._state_pool_3d: Optional[torch.Tensor] = None
-        self._state_block_table: Optional[torch.Tensor] = None
-        self._state_eb: int = 0
-        self._kv_pool_3d: Optional[torch.Tensor] = None
-        self._kv_block_table: Optional[torch.Tensor] = None
-        self._kv_eb: int = 0
-
         # Legacy attribute kept for attention.py's cmp_T fallback (line 1583).
         self._kv_cache_t: int = 0
 
@@ -279,54 +272,6 @@ class CompressorFP8(nn.Module):
             and getattr(cp_ctx, "kv_cache_sharded", False)
             and cp_ctx.cp_size > 1
         )
-
-    # ----------------------------------------------------------------------
-    # Pool context lifecycle (6-arg signature matches PoolBackedModule)
-    # ----------------------------------------------------------------------
-    def set_pool_context(
-        self,
-        kv_pool_view: Optional[torch.Tensor],
-        kv_block_table: Optional[torch.Tensor],
-        kv_eb: int,
-        state_pool_view: Optional[torch.Tensor],
-        state_block_table: Optional[torch.Tensor],
-        state_eb: int,
-    ) -> None:
-        """Install framework pool views.
-
-        ``kv_pool_view``    : 3D ``[num_blocks, kv_eb, ENTRY_BYTES]`` uint8
-                              (FP8 KV pool, already TMA-padded if 584B).
-        ``state_pool_view`` : 2D flat ``[total_slots, 2*coff*head_dim]`` fp32
-                              from ``_pool_view``. Reshaped here to
-                              ``[num_blocks, state_eb, 2*coff*head_dim]``.
-        """
-        self._kv_pool_3d = kv_pool_view
-        self._kv_block_table = kv_block_table
-        self._kv_eb = kv_eb
-
-        if state_pool_view is not None and state_eb > 0:
-            assert (
-                state_pool_view.dim() == 2
-            ), f"expected flat 2D state pool view, got {state_pool_view.shape}"
-            total_slots, hidden = state_pool_view.shape
-            assert total_slots % state_eb == 0, (
-                f"state pool total_slots={total_slots} not divisible by "
-                f"state_eb={state_eb}"
-            )
-            num_blocks = total_slots // state_eb
-            self._state_pool_3d = state_pool_view.view(num_blocks, state_eb, hidden)
-        else:
-            self._state_pool_3d = None
-        self._state_block_table = state_block_table
-        self._state_eb = state_eb
-
-    def clear_pool_context(self) -> None:
-        self._state_pool_3d = None
-        self._state_block_table = None
-        self._state_eb = 0
-        self._kv_pool_3d = None
-        self._kv_block_table = None
-        self._kv_eb = 0
 
     # ----------------------------------------------------------------------
     # Metadata preparation (call once per forward, OFF the hot path)
@@ -493,11 +438,9 @@ class CompressorFP8(nn.Module):
           in_block     = (pos % TOKENS_PER_BLOCK) // ratio    # compressed offset
           slot         = block_id * kv_eb + in_block
 
-        Also masks out any slot that would land past the pool's row count
-        (same overflow guard upstream 2184f972 added to the legacy
-        ``_compute_pool_slots`` — a malformed block_table can otherwise
-        produce a slot above ``pool_view.shape[0]`` and silently corrupt
-        an unrelated pool entry).
+        Also masks out any slot that would land past the pool's row count; a
+        malformed block_table can otherwise produce a slot above
+        ``pool_view.shape[0]`` and silently corrupt an unrelated pool entry.
         """
         bt = self._kv_block_table
         kv_eb = self._kv_eb
