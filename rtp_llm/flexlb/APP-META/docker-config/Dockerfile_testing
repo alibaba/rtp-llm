@@ -9,6 +9,8 @@ ENV SKIP_CHECK_STATUS_TAOBAO="true"
 ENV SERVICE_OPTS="${SERVICE_OPTS} -Dspring.profiles.active=test -Dwhale.api.role=whale-gateway"
 
 
+COPY environment/common/bin/ /home/admin/${APP_NAME}/bin/
+RUN chmod +x /home/admin/${APP_NAME}/bin/*.sh
 #以下内容为集团安全部应用安全能力中心自动修复添加，用于静态部署RASP
 COPY environment/common/bin/RASP.sh /home/admin
 ENTRYPOINT ["source /home/admin/RASP.sh start &&  /home/admin/start.sh"]
