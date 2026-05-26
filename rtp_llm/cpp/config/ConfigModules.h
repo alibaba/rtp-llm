@@ -369,6 +369,15 @@ struct FIFOSchedulerConfig {
     std::string to_string() const;
 };
 
+struct GrammarConfig {
+    std::string          grammar_backend                         = "xgrammar";
+    bool                 constrained_json_disable_any_whitespace = false;
+    int                  num_workers                             = 8;
+    std::string          tokenizer_info_json;
+    std::vector<int32_t> override_stop_tokens;
+    std::string          to_string() const;
+};
+
 struct RuntimeConfig {
     int64_t max_generate_batch_size = 1;
 

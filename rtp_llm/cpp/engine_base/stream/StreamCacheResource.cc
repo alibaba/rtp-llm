@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorAsyncContext.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
+#include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
 #include <thread>
 #include <torch/extension.h>
 
@@ -101,6 +102,11 @@ private:
 
 // Extract P2P side-channel payload from FusedAsyncReadContext and apply to GenerateStream.
 // Returns true if P2P payload was found and applied, false otherwise.
+static bool tensorPbHasPayload(const TensorPB& tensor_pb) {
+    return !tensor_pb.fp32_data().empty() || !tensor_pb.fp16_data().empty() || !tensor_pb.bf16_data().empty()
+           || !tensor_pb.int32_data().empty();
+}
+
 static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadContext>& read_context,
                                         GenerateStream*                               stream) {
     if (!read_context || !stream) {
@@ -129,7 +135,7 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
 
     // Apply side-channel data to GenerateStream
     // 1. First token: append to stream
-    if (payload->first_token_id > 0) {
+    if (payload->first_token_id >= 0) {
         stream->setIsContextStream(false);
         stream->step();
         auto new_tokens                   = torch::zeros({(int64_t)stream->nextBatchSize(), 1}, torch::kInt32);
@@ -145,7 +151,7 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
                         .loss              = {},
                         .src_batch_indices = {},
                         .all_hidden_states = {}});
-        {
+        if (stream->nextBatchSize() == 1) {
             const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
             stream->setNormalAsyncDeviceState(GenerateStream::NormalAsyncDeviceState{
                 .epoch                 = 0,
@@ -181,13 +187,44 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
         stream->setContainProposeToken(true);
         stream->setProposeToken(payload->propose_tokens);
 
-        auto sp_output_buffer    = std::make_shared<SpeculativeExecutorStreamOutput>();
+        auto sp_output_buffer          = std::make_shared<SpeculativeExecutorStreamOutput>();
+        sp_output_buffer->propose_step = payload->propose_tokens.size() > 0 ? payload->propose_tokens.size() - 1 : 0;
         sp_output_buffer->tokens = torch::zeros({1, (int64_t)payload->propose_tokens.size()}, torch::kInt32);
         memcpy(sp_output_buffer->tokens.data_ptr<int>(),
                payload->propose_tokens.data(),
                payload->propose_tokens.size() * sizeof(int));
 
+        const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+        sp_output_buffer->propose_tokens_gpu = sp_output_buffer->tokens.to(cuda_i32, /*non_blocking=*/true);
+        if (tensorPbHasPayload(payload->propose_probs)) {
+            sp_output_buffer->all_probs = TensorPbConvert::pbToTorch(payload->propose_probs).to(torch::kCUDA);
+        }
+        if (tensorPbHasPayload(payload->propose_hidden)) {
+            sp_output_buffer->hidden_states = TensorPbConvert::pbToTorch(payload->propose_hidden).to(torch::kCUDA);
+        }
+
         stream->setSPOutputBuffer(sp_output_buffer);
+
+        if (payload->propose_tokens.size() >= 2) {
+            auto propose_tokens_gpu = sp_output_buffer->tokens.narrow(1, 1, 1).to(cuda_i32, /*non_blocking=*/true);
+            auto accept_len         = torch::ones({1}, cuda_i32);
+            auto accept_tokens =
+                torch::zeros({1, static_cast<int64_t>(payload->propose_tokens.size())}, cuda_i32);
+            accept_tokens[0][0] = sp_output_buffer->tokens[0][0];
+            auto next_seq_len   = torch::full({1}, static_cast<int64_t>(stream->seqLength()), cuda_i32);
+
+            stream->setMtpAsyncDeviceState(GenerateStream::MtpAsyncDeviceState{
+                .epoch                  = 0,
+                .accept_len_gpu         = std::move(accept_len),
+                .accept_tokens_gpu      = std::move(accept_tokens),
+                .next_seq_len_gpu       = std::move(next_seq_len),
+                .propose_tokens_gpu     = std::move(propose_tokens_gpu),
+                .last_hidden_states_gpu = sp_output_buffer->hidden_states,
+                .draft_all_probs_gpu    = sp_output_buffer->all_probs,
+                .last_real_seq_len      = stream->seqLength(),
+                .next_real_seq_len      = stream->seqLength(),
+            });
+        }
         RTP_LLM_LOG_DEBUG("applyP2PSideChannel: propose_tokens count=%zu", payload->propose_tokens.size());
     }
 

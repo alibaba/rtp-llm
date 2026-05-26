@@ -9,6 +9,7 @@ Covers:
 
 from __future__ import annotations
 
+import json
 import struct
 import unittest
 from unittest.mock import MagicMock, patch
@@ -50,6 +51,7 @@ class _FakeAsyncStream:
         self._chunks = list(chunks)
         self._raise_after = raise_after
         self._emitted = 0
+        self.aclose_called = False
 
     def __aiter__(self):
         return self
@@ -62,6 +64,9 @@ class _FakeAsyncStream:
         item = self._chunks[self._emitted]
         self._emitted += 1
         return item
+
+    async def aclose(self):
+        self.aclose_called = True
 
 
 class _FakeVisitor:
@@ -116,6 +121,17 @@ class _GenerateEnvCfg:
     think_end_tag = "</think>\n\n"
 
 
+def _dsv4_tokenizer() -> _FakeTokenizer:
+    return _FakeTokenizer(
+        {
+            "<think>\n": [128821, 198],
+            "</think>\n\n": [128822, 271],
+            "<think>\n\n</think>\n\n": [128821, 271, 128822, 271],
+            "</think>": [128822],
+        }
+    )
+
+
 async def _drain(aiter):
     return [x async for x in aiter]
 
@@ -130,6 +146,14 @@ def _gen_ids(chunk) -> list[int]:
                 return []
             return _unpack_int32_le(infer.raw_output_contents[i])
     return []
+
+
+def _finish_reason(chunk) -> int | None:
+    infer = chunk.infer_response
+    for i, out in enumerate(infer.outputs):
+        if out.name == "finish_reason":
+            return int(struct.unpack("<q", infer.raw_output_contents[i])[0])
+    return None
 
 
 class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
@@ -170,6 +194,32 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
             for i in range(len(infer.outputs))
         }
         self.assertEqual(_unpack_int32_le(by_name["generated_ids"]), [3, 4])
+
+    async def test_finished_at_max_new_tokens_reports_length_repro_p1(self) -> None:
+        req = self._minimal_request()
+        out = GenerateOutput(
+            output_ids=torch.tensor([7, 8, 9], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(input_len=2, reuse_len=0),
+        )
+        visitor = _FakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
+        )
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [1, 2],
+                SamplingParams(max_new_tokens=3),
+                OtherParams(),
+                visitor,
+                rtp_llm_request_id=1,
+            )
+        )
+
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(_gen_ids(chunks[0]), [7, 8, 9])
+        self.assertEqual(_finish_reason(chunks[0]), 1)
 
     async def test_empty_list_yields_error_response(self) -> None:
         req = self._minimal_request()
@@ -224,6 +274,122 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(chunks), 1)
         self.assertIn("backend down", chunks[0].error_message)
+
+    async def test_no_thinking_budget_zero_sets_sampler_mask_config_without_filtering(
+        self,
+    ) -> None:
+        req = self._minimal_request()
+        _add_input_tensor(
+            req,
+            "max_new_think_tokens",
+            "INT32",
+            [1],
+            struct.pack("<i", 0),
+        )
+        out = GenerateOutput(
+            output_ids=torch.tensor([10, 128822, 271], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(input_len=2, reuse_len=0),
+        )
+        visitor = _FakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
+        )
+        tok = _FakeTokenizer(
+            {
+                "<think>\n": [128821, 198],
+                "</think>\n\n": [128822, 271],
+                "<think>\n\n</think>\n\n": [128821, 271, 128822, 271],
+                "</think>": [128822],
+            }
+        )
+        env_cfg = _GenerateEnvCfg()
+        servicer = DashScInferenceServicer(
+            backend_visitor=visitor,
+            tokenizer=tok,
+            generate_env_config=env_cfg,
+            think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+        )
+
+        chunks = await _drain(servicer.ModelStreamInfer(_areq_iter([req]), MagicMock()))
+
+        self.assertEqual(visitor.enqueue_called, 1)
+        gc = visitor.last_generate_input.generate_config
+        self.assertFalse(gc.in_think_mode)
+        self.assertEqual(gc.max_thinking_tokens, 0)
+        self.assertEqual(gc.begin_think_token_ids, [128821, 198])
+        self.assertEqual(gc.end_think_token_ids, [128822, 271])
+        self.assertEqual(_gen_ids(chunks[0]), [10, 128822, 271])
+
+    async def test_max_think_length_wins_final_config_over_max_new_think_tokens(
+        self,
+    ) -> None:
+        req = self._minimal_request()
+        _add_input_tensor(
+            req,
+            "max_new_think_tokens",
+            "INT32",
+            [1],
+            struct.pack("<i", 0),
+        )
+        _add_input_tensor(
+            req,
+            "max_think_length",
+            "INT32",
+            [1],
+            struct.pack("<i", -1),
+        )
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+        servicer = DashScInferenceServicer(
+            backend_visitor=visitor,
+            tokenizer=tok,
+            generate_env_config=env_cfg,
+            think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+        )
+        context = MagicMock()
+        context.invocation_metadata.return_value = ()
+
+        await _drain(servicer.ModelStreamInfer(_areq_iter([req]), context))
+
+        self.assertEqual(visitor.enqueue_called, 1)
+        gc = visitor.last_generate_input.generate_config
+        self.assertTrue(gc.in_think_mode)
+        self.assertEqual(gc.max_thinking_tokens, 2_147_483_647)
+        self.assertEqual(gc.end_think_token_ids, [128822, 271])
+
+    async def test_budget_zero_disables_thinking_even_if_add_thinking_params_fails(
+        self,
+    ) -> None:
+        """Request-level zero budget must still produce a full think mask config."""
+        req = self._minimal_request()
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+
+        with patch(
+            "rtp_llm.config.generate_config.GenerateConfig.add_thinking_params",
+            side_effect=RuntimeError("boom"),
+        ):
+            await _drain(
+                iter_real_model_stream_infer(
+                    req,
+                    [1, 2],
+                    SamplingParams(max_new_think_tokens=0),
+                    OtherParams(),
+                    visitor,
+                    rtp_llm_request_id=1,
+                    tokenizer=tok,
+                    generate_env_config=env_cfg,
+                    think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+                )
+            )
+
+        gc = visitor.last_generate_input.generate_config
+        self.assertFalse(gc.in_think_mode)
+        self.assertEqual(gc.max_thinking_tokens, 0)
+        self.assertEqual(gc.begin_think_token_ids, [128821, 198])
+        self.assertEqual(gc.end_think_token_ids, [128822, 271])
 
     async def test_deepseek_v4_multi_think_uses_first_close_only(self) -> None:
         req = self._minimal_request()
@@ -312,8 +478,10 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
             iter_real_model_stream_infer(
                 req,
                 [7, 8, 128821],
-                SamplingParams(),
-                OtherParams(),
+                SamplingParams(
+                    response_format=json.dumps({"type": "json_object"}),
+                ),
+                OtherParams(enable_thinking=True),
                 visitor,
                 rtp_llm_request_id=100,
                 echo_prefix_ids=[128821, 198],
@@ -327,6 +495,15 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(visitor.enqueue_called, 2)
         self.assertEqual(visitor.generate_inputs[0].request_id, 100)
         self.assertEqual(visitor.generate_inputs[1].request_id, 200)
+        self.assertTrue(visitor.generate_inputs[0].generate_config.in_think_mode)
+        self.assertEqual(
+            visitor.generate_inputs[0].generate_config.begin_think_token_ids,
+            [128821, 198],
+        )
+        self.assertEqual(
+            visitor.generate_inputs[0].generate_config.end_think_token_ids,
+            [128822, 271],
+        )
         self.assertEqual(_gen_ids(chunks[0]), [128821, 10, 11])
         self.assertEqual(_gen_ids(chunks[1]), [128822, 271])
         self.assertEqual(_gen_ids(chunks[2]), [20, 21, 22])
@@ -338,12 +515,266 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         )
         phase2_input_ids = visitor.generate_inputs[1].token_ids.cpu().int().tolist()
         self.assertEqual(phase2_input_ids, [7, 8, 128821, 271, 128822, 271])
+        self.assertEqual(
+            json.loads(visitor.generate_inputs[0].generate_config.response_format),
+            {"type": "json_object"},
+        )
+        self.assertEqual(
+            json.loads(visitor.generate_inputs[1].generate_config.response_format),
+            {"type": "json_object"},
+        )
         self.assertFalse(visitor.generate_inputs[1].generate_config.in_think_mode)
         self.assertNotIn(10, phase2_input_ids)
         self.assertNotIn(11, phase2_input_ids)
         self.assertEqual(
             chunks[1].infer_response.parameters["generate_think_token_num"].int64_param,
             3,
+        )
+
+    async def test_phase2_finished_at_max_new_tokens_reports_length(self) -> None:
+        req = self._minimal_request()
+        phase1 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([10, 1], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        phase2 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([20, 21], dtype=torch.int32),
+                    finished=True,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        visitor = _MultiStreamVisitor(
+            [_FakeAsyncStream([phase1]), _FakeAsyncStream([phase2])]
+        )
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [7, 8, 128821],
+                SamplingParams(
+                    max_new_tokens=2,
+                    max_new_tokens_from_completion_alias=True,
+                ),
+                OtherParams(max_new_think_tokens=10),
+                visitor,
+                rtp_llm_request_id=100,
+                echo_prefix_ids=[128821, 198],
+                tokenizer=tok,
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+                phase2_request_id_factory=lambda: 200,
+            )
+        )
+
+        phase2_chunks = [c for c in chunks if c.infer_response.id.endswith("-2")]
+        self.assertEqual(visitor.generate_inputs[0].generate_config.max_new_tokens, 2)
+        self.assertEqual(visitor.generate_inputs[1].generate_config.max_new_tokens, 2)
+        self.assertEqual(len(phase2_chunks), 1)
+        self.assertEqual(_gen_ids(phase2_chunks[0]), [20, 21])
+        self.assertEqual(_finish_reason(phase2_chunks[0]), 1)
+
+    async def test_phase2_completion_alias_respects_max_tokens_total_cap(
+        self,
+    ) -> None:
+        req = self._minimal_request()
+        phase1 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor(
+                        list(range(10, 20)) + [1], dtype=torch.int32
+                    ),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=2, reuse_len=0),
+                )
+            ]
+        )
+        phase2 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([20], dtype=torch.int32),
+                    finished=True,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        visitor = _MultiStreamVisitor(
+            [_FakeAsyncStream([phase1]), _FakeAsyncStream([phase2])]
+        )
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [1, 2],
+                SamplingParams(
+                    max_new_tokens=100,
+                    max_new_tokens_from_completion_alias=True,
+                    max_total_tokens=105,
+                ),
+                OtherParams(max_new_think_tokens=10),
+                visitor,
+                rtp_llm_request_id=100,
+                tokenizer=tok,
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+                phase2_request_id_factory=lambda: 200,
+            )
+        )
+
+        self.assertEqual(visitor.generate_inputs[0].generate_config.max_new_tokens, 100)
+        self.assertEqual(visitor.generate_inputs[1].generate_config.max_new_tokens, 95)
+        self.assertEqual(
+            chunks[1].infer_response.parameters["generate_think_token_num"].int64_param,
+            10,
+        )
+
+    async def test_phase2_completion_alias_budget_zero_does_not_enqueue_phase2(
+        self,
+    ) -> None:
+        req = self._minimal_request()
+        phase1 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([10, 11, 12, 1], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=2, reuse_len=0),
+                )
+            ]
+        )
+        visitor = _MultiStreamVisitor([_FakeAsyncStream([phase1])])
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [1, 2],
+                SamplingParams(
+                    max_new_tokens=3,
+                    max_new_tokens_from_completion_alias=True,
+                    max_total_tokens=3,
+                ),
+                OtherParams(max_new_think_tokens=10),
+                visitor,
+                rtp_llm_request_id=100,
+                tokenizer=tok,
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+                phase2_request_id_factory=lambda: 200,
+            )
+        )
+
+        self.assertEqual(visitor.enqueue_called, 1)
+        self.assertFalse(any(c.error_message for c in chunks))
+        self.assertEqual(_gen_ids(chunks[-1]), [128822, 271])
+        self.assertEqual(_finish_reason(chunks[-1]), 1)
+
+    async def test_token1_phase2_closes_phase1_stream_before_phase2_enqueue(
+        self,
+    ) -> None:
+        req = self._minimal_request()
+        phase1 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([10, 1], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        phase2 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([20], dtype=torch.int32),
+                    finished=True,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        phase1_stream = _FakeAsyncStream([phase1])
+        visitor = _MultiStreamVisitor([phase1_stream, _FakeAsyncStream([phase2])])
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+
+        await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [7, 8, 128821],
+                SamplingParams(),
+                OtherParams(enable_thinking=True),
+                visitor,
+                rtp_llm_request_id=100,
+                echo_prefix_ids=[128821, 198],
+                tokenizer=tok,
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+                phase2_request_id_factory=lambda: 200,
+            )
+        )
+
+        self.assertEqual(visitor.enqueue_called, 2)
+        self.assertTrue(phase1_stream.aclose_called)
+
+    async def test_request_disable_thinking_prevents_token1_phase2(self) -> None:
+        req = self._minimal_request()
+        phase1 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([10, 11, 1, 99], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        visitor = _FakeVisitor(_FakeAsyncStream([phase1]))
+        tok = _FakeTokenizer(
+            {
+                "<think>\n": [128821, 198],
+                "</think>\n\n": [128822, 271],
+                "<think>\n\n</think>\n\n": [128821, 271, 128822, 271],
+                "</think>": [128822],
+            }
+        )
+
+        env_cfg = _GenerateEnvCfg()
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [7, 8, 128821],
+                SamplingParams(),
+                OtherParams(enable_thinking=False, max_new_think_tokens=0),
+                visitor,
+                rtp_llm_request_id=100,
+                tokenizer=tok,
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+                phase2_request_id_factory=lambda: 200,
+            )
+        )
+
+        self.assertEqual(visitor.enqueue_called, 1)
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(_gen_ids(chunks[0]), [10, 11, 1, 99])
+        self.assertNotEqual(chunks[0].infer_response.id, "trace-real-2")
+        cfg = visitor.generate_inputs[0].generate_config
+        self.assertFalse(cfg.in_think_mode)
+        self.assertEqual(cfg.max_thinking_tokens, 0)
+        self.assertEqual(cfg.begin_think_token_ids, [128821, 198])
+        self.assertEqual(cfg.end_think_token_ids, [128822, 271])
+        self.assertNotIn("max_new_think_tokens", chunks[0].infer_response.parameters)
+        self.assertNotIn(
+            "generate_think_token_num", chunks[0].infer_response.parameters
         )
 
     async def test_deepseek_v4_token1_before_close_wins_within_chunk(self) -> None:
@@ -384,7 +815,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 req,
                 [7, 8, 128821],
                 SamplingParams(),
-                OtherParams(),
+                OtherParams(enable_thinking=True),
                 visitor,
                 rtp_llm_request_id=100,
                 echo_prefix_ids=[128821, 198],
@@ -487,7 +918,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 req,
                 [7, 8, 128821],
                 SamplingParams(),
-                OtherParams(),
+                OtherParams(enable_thinking=True),
                 visitor,
                 rtp_llm_request_id=100,
                 echo_prefix_ids=[128821, 198],
@@ -539,7 +970,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 req,
                 [7, 8, 128821],
                 SamplingParams(),
-                OtherParams(),
+                OtherParams(enable_thinking=True),
                 visitor,
                 rtp_llm_request_id=100,
                 echo_prefix_ids=[128821, 198],
@@ -592,7 +1023,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 req,
                 [7, 8, 128821],
                 SamplingParams(),
-                OtherParams(),
+                OtherParams(enable_thinking=True),
                 visitor,
                 rtp_llm_request_id=100,
                 echo_prefix_ids=[128821, 198],
@@ -651,7 +1082,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                     req,
                     [7, 8, 128821],
                     SamplingParams(),
-                    OtherParams(),
+                    OtherParams(enable_thinking=True),
                     visitor,
                     rtp_llm_request_id=100,
                     echo_prefix_ids=[128821, 198],
@@ -728,7 +1159,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 req,
                 [7, 8, 128821],
                 SamplingParams(),
-                OtherParams(),
+                OtherParams(enable_thinking=True),
                 visitor,
                 rtp_llm_request_id=100,
                 echo_prefix_ids=[128821, 198],
@@ -755,7 +1186,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         phase1 = GenerateOutputs(
             generate_outputs=[
                 GenerateOutput(
-                    output_ids=torch.tensor([10, 128822, 271], dtype=torch.int32),
+                    output_ids=torch.tensor([10, 1], dtype=torch.int32),
                     finished=False,
                     aux_info=AuxInfo(input_len=4, reuse_len=0),
                 )
@@ -790,7 +1221,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 req,
                 [7, 8, 128821],
                 SamplingParams(),
-                OtherParams(),
+                OtherParams(enable_thinking=True),
                 visitor,
                 rtp_llm_request_id=100,
                 echo_prefix_ids=[128821, 198],
@@ -964,6 +1395,18 @@ async def _areq_iter(requests):
         yield r
 
 
+class _FakeGrpcContext:
+    def __init__(self, metadata=()):
+        self._metadata = tuple(metadata)
+        self.initial_metadata = []
+
+    def invocation_metadata(self):
+        return self._metadata
+
+    async def send_initial_metadata(self, metadata):
+        self.initial_metadata.append(tuple(metadata))
+
+
 class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
     def _valid_infer_request(self) -> predict_v2_pb2.ModelInferRequest:
         req = predict_v2_pb2.ModelInferRequest()
@@ -1022,6 +1465,284 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         }
         self.assertEqual(_unpack_int32_le(by_name["generated_ids"]), [9])
 
+    async def test_timeout_request_sets_dashscope_partial_response_metadata(
+        self,
+    ) -> None:
+        servicer = DashScInferenceServicer(backend_visitor=None)
+        req = self._valid_infer_request()
+        req.parameters["ds_header_attributes"].string_param = json.dumps(
+            {"x-dashscope-inner-timeout": 1}
+        )
+        context = _FakeGrpcContext()
+
+        responses = await _drain(servicer.ModelStreamInfer(_areq_iter([req]), context))
+
+        self.assertEqual(len(responses), 1)
+        self.assertIn(
+            (("x-dashscope-partialresponse", "true"),),
+            context.initial_metadata,
+        )
+
+    async def test_max_new_tokens_negative_rejected_before_enqueue_repro_p3(
+        self,
+    ) -> None:
+        """P3 repro: dash-sc forwards a request with ``max_new_tokens=-1`` to
+        the backend, which raises ``FtRuntimeException('max_new_tokens is 0')``
+        and surfaces as HTTP 500. Expected: servicer rejects at the front
+        door with a structured ``error_message`` and never reaches enqueue."""
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+        req = self._valid_infer_request()
+        _add_input_tensor(req, "max_new_tokens", "INT32", [1], struct.pack("<i", -1))
+
+        responses = await _drain(
+            servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
+        )
+
+        self.assertEqual(visitor.enqueue_called, 0)
+        self.assertEqual(len(responses), 1)
+        self.assertIn("max_new_tokens", responses[0].error_message)
+
+    async def test_openai_compat_max_new_tokens_negative_uses_default(
+        self,
+    ) -> None:
+        out = GenerateOutput(
+            output_ids=torch.tensor([9], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(input_len=1, reuse_len=0),
+        )
+        visitor = _FakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
+        )
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+        req = self._valid_infer_request()
+        req.parameters["ds_header_attributes"].string_param = json.dumps(
+            {"x-envoy-original-path": "/compatible-mode/v1/chat/completions"}
+        )
+        _add_input_tensor(req, "max_new_tokens", "INT32", [1], struct.pack("<i", -1))
+
+        responses = await _drain(
+            servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
+        )
+
+        self.assertEqual(visitor.enqueue_called, 1)
+        self.assertEqual(len(responses), 1)
+        self.assertEqual(
+            visitor.last_generate_input.generate_config.max_new_tokens,
+            32000,
+        )
+
+    async def test_max_completion_tokens_non_positive_uses_default_repro(
+        self,
+    ) -> None:
+        """Compat alias values <= 0 should not reach backend as max_new_tokens."""
+        for value in (-1, 0):
+            with self.subTest(value=value):
+                out = GenerateOutput(
+                    output_ids=torch.tensor([9], dtype=torch.int32),
+                    finished=True,
+                    aux_info=AuxInfo(input_len=1, reuse_len=0),
+                )
+                visitor = _FakeVisitor(
+                    _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
+                )
+                servicer = DashScInferenceServicer(backend_visitor=visitor)
+                req = self._valid_infer_request()
+                req.parameters["max_completion_tokens"].int64_param = value
+
+                responses = await _drain(
+                    servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
+                )
+
+                self.assertEqual(visitor.enqueue_called, 1)
+                self.assertEqual(len(responses), 1)
+                self.assertEqual(
+                    visitor.last_generate_input.generate_config.max_new_tokens,
+                    32000,
+                )
+
+    async def test_max_completion_tokens_non_positive_blocks_legacy_aliases(
+        self,
+    ) -> None:
+        for value in (-1, 0):
+            with self.subTest(value=value):
+                out = GenerateOutput(
+                    output_ids=torch.tensor([9], dtype=torch.int32),
+                    finished=True,
+                    aux_info=AuxInfo(input_len=1, reuse_len=0),
+                )
+                visitor = _FakeVisitor(
+                    _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
+                )
+                servicer = DashScInferenceServicer(backend_visitor=visitor)
+                req = self._valid_infer_request()
+                _add_input_tensor(
+                    req,
+                    "max_completion_tokens",
+                    "INT32",
+                    [1],
+                    struct.pack("<i", value),
+                )
+                _add_input_tensor(
+                    req,
+                    "max_new_tokens",
+                    "INT32",
+                    [1],
+                    struct.pack("<i", -1),
+                )
+
+                responses = await _drain(
+                    servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
+                )
+
+                self.assertEqual(visitor.enqueue_called, 1)
+                self.assertEqual(len(responses), 1)
+                self.assertEqual(
+                    visitor.last_generate_input.generate_config.max_new_tokens,
+                    32000,
+                )
+
+    async def test_dash_generation_without_enable_thinking_disables_env_thinking(
+        self,
+    ) -> None:
+        out = GenerateOutput(
+            output_ids=torch.tensor([9], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(input_len=1, reuse_len=0),
+        )
+        visitor = _FakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
+        )
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+        servicer = DashScInferenceServicer(
+            backend_visitor=visitor,
+            tokenizer=tok,
+            generate_env_config=env_cfg,
+            think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+        )
+        req = self._valid_infer_request()
+        req.parameters["max_new_tokens"].int64_param = 3
+        req.parameters["result_format"].string_param = "message"
+        req.parameters["ds_header_attributes"].string_param = json.dumps(
+            {
+                "x-dashscope-inner-timeout": 1800,
+                "user_id": "u1",
+            }
+        )
+
+        responses = await _drain(
+            servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
+        )
+
+        self.assertEqual(visitor.enqueue_called, 1)
+        self.assertEqual(len(responses), 1)
+        self.assertEqual(_gen_ids(responses[0]), [9])
+        generate_config = visitor.last_generate_input.generate_config
+        self.assertEqual(generate_config.max_new_tokens, 3)
+        self.assertFalse(generate_config.in_think_mode)
+        self.assertEqual(generate_config.max_thinking_tokens, 0)
+
+    async def test_dash_generation_enable_thinking_true_without_budget_keeps_thinking(
+        self,
+    ) -> None:
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+        servicer = DashScInferenceServicer(
+            backend_visitor=visitor,
+            tokenizer=tok,
+            generate_env_config=env_cfg,
+            think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+        )
+        req = self._valid_infer_request()
+        req.parameters["enable_thinking"].bool_param = True
+
+        await _drain(servicer.ModelStreamInfer(_areq_iter([req]), MagicMock()))
+
+        self.assertEqual(visitor.enqueue_called, 1)
+        generate_config = visitor.last_generate_input.generate_config
+        self.assertTrue(generate_config.in_think_mode)
+        self.assertEqual(generate_config.max_thinking_tokens, 32000)
+
+    async def test_dash_generation_json_object_with_enable_thinking_keeps_both_constraints(
+        self,
+    ) -> None:
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+        servicer = DashScInferenceServicer(
+            backend_visitor=visitor,
+            tokenizer=tok,
+            generate_env_config=env_cfg,
+            think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+        )
+        req = self._valid_infer_request()
+        req.parameters["enable_thinking"].bool_param = True
+        req.parameters["response_format"].string_param = json.dumps(
+            {"type": "json_object"}
+        )
+
+        await _drain(servicer.ModelStreamInfer(_areq_iter([req]), MagicMock()))
+
+        self.assertEqual(visitor.enqueue_called, 1)
+        generate_config = visitor.last_generate_input.generate_config
+        self.assertTrue(generate_config.in_think_mode)
+        self.assertEqual(generate_config.end_think_token_ids, [128822, 271])
+        self.assertEqual(
+            json.loads(generate_config.response_format), {"type": "json_object"}
+        )
+
+    async def test_dash_generation_budget_aliases_without_enable_thinking_keep_thinking(
+        self,
+    ) -> None:
+        for param_name in ("thinking_budget", "max_new_think_tokens"):
+            with self.subTest(param_name=param_name):
+                visitor = _FakeVisitor(_FakeAsyncStream([]))
+                tok = _dsv4_tokenizer()
+                env_cfg = _GenerateEnvCfg()
+                servicer = DashScInferenceServicer(
+                    backend_visitor=visitor,
+                    tokenizer=tok,
+                    generate_env_config=env_cfg,
+                    think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+                )
+                req = self._valid_infer_request()
+                req.parameters[param_name].int64_param = 10
+
+                await _drain(servicer.ModelStreamInfer(_areq_iter([req]), MagicMock()))
+
+                self.assertEqual(visitor.enqueue_called, 1)
+                generate_config = visitor.last_generate_input.generate_config
+                self.assertTrue(generate_config.in_think_mode)
+                self.assertEqual(generate_config.max_thinking_tokens, 10)
+
+    async def test_max_completion_tokens_thinking_budget_keeps_backend_limit_repro(
+        self,
+    ) -> None:
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+        servicer = DashScInferenceServicer(
+            backend_visitor=visitor,
+            tokenizer=tok,
+            generate_env_config=env_cfg,
+            think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+        )
+        req = self._valid_infer_request()
+        req.parameters["max_new_tokens"].int64_param = 200
+        req.parameters["max_completion_tokens"].int64_param = 100
+        req.parameters["enable_thinking"].bool_param = True
+        req.parameters["thinking_budget"].int64_param = 10
+
+        await _drain(servicer.ModelStreamInfer(_areq_iter([req]), MagicMock()))
+
+        self.assertEqual(visitor.enqueue_called, 1)
+        generate_config = visitor.last_generate_input.generate_config
+        self.assertEqual(generate_config.max_new_tokens, 100)
+        self.assertTrue(generate_config.in_think_mode)
+        self.assertEqual(generate_config.max_thinking_tokens, 10)
+
     async def test_real_mode_request_id_matches_generate_request_id(self) -> None:
         """Backend ``GenerateInput.request_id`` follows the same snowflake scheme as HTTP path."""
         from rtp_llm.frontend import request_id_generator as rig
@@ -1070,6 +1791,40 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             visitor.last_generate_input.headers,
             {"user_id": "u2", "x-dashscope-apikeyid": "ak2"},
+        )
+
+    async def test_real_mode_uses_ds_header_attributes_for_backend_controls(
+        self,
+    ) -> None:
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+        context = MagicMock()
+        context.invocation_metadata.return_value = ()
+        request = self._valid_infer_request()
+        request.parameters["ds_header_attributes"].string_param = json.dumps(
+            {
+                "x-dashscope-inner-timeout": 1800,
+                "x-ds-request-priority": "10",
+                "user_id": "u1",
+                "x-dashscope-apikeyid": "ak1",
+            }
+        )
+        request.parameters["enable_thinking"].bool_param = False
+        request.parameters["thinking_budget"].int64_param = 100
+
+        await _drain(servicer.ModelStreamInfer(_areq_iter([request]), context))
+
+        self.assertIsNotNone(visitor.last_generate_input)
+        generate_config = visitor.last_generate_input.generate_config
+        self.assertFalse(generate_config.in_think_mode)
+        self.assertEqual(generate_config.max_thinking_tokens, 0)
+        self.assertEqual(generate_config.end_think_token_ids, [])
+        self.assertEqual(generate_config.timeout_ms, 1_800_000)
+        self.assertEqual(generate_config.ttft_timeout_ms, 1_800_000)
+        self.assertEqual(generate_config.traffic_reject_priority, 10)
+        self.assertEqual(
+            visitor.last_generate_input.headers,
+            {"user_id": "u1", "x-dashscope-apikeyid": "ak1"},
         )
 
 

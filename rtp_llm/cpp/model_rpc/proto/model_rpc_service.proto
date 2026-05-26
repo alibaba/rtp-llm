@@ -99,6 +99,12 @@ message GenerateConfigPB {
     google.protobuf.Int32Value force_batch = 55;
     google.protobuf.Int32Value batch_group_timeout = 56;
     string profile_trace_name = 57;
+    repeated int32 begin_think_token_ids = 58;
+    google.protobuf.StringValue json_schema = 59;
+    google.protobuf.StringValue regex = 60;
+    google.protobuf.StringValue ebnf = 61;
+    google.protobuf.StringValue structural_tag = 62;
+    google.protobuf.StringValue response_format = 63;
 }
 
 message MMPreprocessConfigPB {

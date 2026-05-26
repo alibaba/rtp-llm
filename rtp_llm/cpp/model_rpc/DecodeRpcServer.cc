@@ -133,7 +133,12 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
         this_thread::sleep_for(chrono::milliseconds(1));
     }
     if (generate_stream->hasError()) {
-        string error_msg = "request: [" + decode_context.request_key + "] malloc kv cache block failed at decode node";
+        auto   stream_error = generate_stream->statusInfo();
+        string error_msg    = stream_error.ToString();
+        if (error_msg.empty()) {
+            error_msg = "malloc kv cache block failed at decode node";
+        }
+        error_msg = "request: [" + decode_context.request_key + "] " + error_msg;
         RTP_LLM_LOG_ERROR(error_msg);
         decode_context.error_status = grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED, error_msg);
         return;
