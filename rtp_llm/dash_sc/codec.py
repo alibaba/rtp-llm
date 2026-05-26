@@ -819,15 +819,32 @@ def _append_int32_scalar_output(
     infer.raw_output_contents.append(struct.pack("<i", int(value)))
 
 
+def _append_prompt_cache_usage_parameters(
+    infer: predict_v2_pb2.ModelInferResponse,
+    prompt_tokens: int,
+    cached_tokens: int,
+) -> None:
+    prompt_tokens = int(prompt_tokens)
+    cached_tokens = int(cached_tokens)
+    # dashllm converts response parameters to extra_params, then emits
+    # output_body["prompt_cached_token_num"]. DashScope uses that field to build
+    # usage.prompt_tokens_details.cached_tokens.
+    infer.parameters["prompt_token_num"].int64_param = prompt_tokens
+    infer.parameters["prompt_cached_token_num"].int64_param = cached_tokens
+
+
 def _append_aux_info_metrics_outputs(
-    infer: predict_v2_pb2.ModelInferResponse, out_py: Any
+    infer: predict_v2_pb2.ModelInferResponse,
+    out_py: Any,
+    prompt_token_fallback: int = 0,
 ) -> None:
     """``prompt_token_num`` = AuxInfo.input_len; ``prompt_cached_token_num`` = AuxInfo.reuse_len."""
     ax = getattr(out_py, "aux_info", None)
-    input_len = int(ax.input_len) if ax is not None else 0
+    input_len = int(ax.input_len) if ax is not None else int(prompt_token_fallback)
     reuse_len = int(ax.reuse_len) if ax is not None else 0
     _append_int32_scalar_output(infer, "prompt_token_num", input_len)
     _append_int32_scalar_output(infer, "prompt_cached_token_num", reuse_len)
+    _append_prompt_cache_usage_parameters(infer, input_len, reuse_len)
 
 
 def build_stream_response_from_generate_outputs(
@@ -850,7 +867,9 @@ def build_stream_response_from_generate_outputs(
     When ``return_input_ids`` is True, prepends ``prompt_token_ids`` (request ``input_ids``)
     before ``generated_ids`` and ``finish_reason``. After ``finish_reason`` appends
     ``prompt_token_num`` (``AuxInfo.input_len``) and ``prompt_cached_token_num``
-    (``AuxInfo.reuse_len``). Output order is stable across chunks.
+    (``AuxInfo.reuse_len``). The same usage counters are also attached as response
+    parameters for dashllm / dashscope-serving clients. Output order is stable
+    across chunks.
     """
     del _request_shape  # reserved for future shape alignment
     if not go.generate_outputs:
@@ -872,7 +891,11 @@ def build_stream_response_from_generate_outputs(
     _append_generated_ids_output(infer, generated_ids)
     _append_finish_reason_output(infer, finished, finish_reason_override)
     _append_finished_output(infer, finished)
-    _append_aux_info_metrics_outputs(infer, out_py)
+    _append_aux_info_metrics_outputs(
+        infer,
+        out_py,
+        prompt_token_fallback=len(request_input_ids or []),
+    )
     infer.parameters["incremental_output"].int64_param = 1 if is_streaming else 0
     _append_dashllm_limit_parameters(
         infer,
