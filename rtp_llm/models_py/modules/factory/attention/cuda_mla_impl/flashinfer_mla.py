@@ -216,9 +216,26 @@ class MlaFlashInferPrefillOp(object):
         )
 
     def plan(self, mla_params: Any):
+        # Pass host indptr tensors to FlashInfer's plan() — its implementation
+        # calls .cpu() on device inputs which triggers cudaStreamSynchronize.
+        # The host mirrors are already populated by fillParams.
+        qo_indptr_for_plan = (
+            mla_params.qo_indptr_h
+            if hasattr(mla_params, "qo_indptr_h")
+            and mla_params.qo_indptr_h is not None
+            and mla_params.qo_indptr_h.numel() > 0
+            else mla_params.qo_indptr_d
+        )
+        kv_len_indptr_for_plan = (
+            mla_params.prefill_ragged_kv_len_indptr_h
+            if hasattr(mla_params, "prefill_ragged_kv_len_indptr_h")
+            and mla_params.prefill_ragged_kv_len_indptr_h is not None
+            and mla_params.prefill_ragged_kv_len_indptr_h.numel() > 0
+            else mla_params.prefill_ragged_kv_len_indptr_d
+        )
         self.prefill_wrapper.plan(
-            mla_params.qo_indptr_d,
-            mla_params.prefill_ragged_kv_len_indptr_d,
+            qo_indptr_for_plan,
+            kv_len_indptr_for_plan,
             self.num_heads,
             self.num_heads,
             self.qk_rope_head_dim + self.qk_nope_head_dim,
@@ -232,7 +249,19 @@ class MlaFlashInferPrefillOp(object):
         self.reuse_cache_page_indice = mla_params.reuse_cache_page_indice_d
         self.qo_indptr = mla_params.qo_indptr_d
         self.batch_reuse_info_vec = mla_params.batch_reuse_info_vec_d
-        self.total_kv_lens = mla_params.prefill_ragged_kv_len_indptr_d[-1].item()
+        # Read total_kv_lens from host indptr to avoid a D2H sync. The host
+        # mirror is updated by fillParams refreshBuffer (CPU pinned).
+        ragged_h = (
+            mla_params.prefill_ragged_kv_len_indptr_h
+            if hasattr(mla_params, "prefill_ragged_kv_len_indptr_h")
+            and mla_params.prefill_ragged_kv_len_indptr_h is not None
+            and mla_params.prefill_ragged_kv_len_indptr_h.numel() > 0
+            else None
+        )
+        if ragged_h is not None:
+            self.total_kv_lens = int(ragged_h[-1].item())
+        else:
+            self.total_kv_lens = mla_params.prefill_ragged_kv_len_indptr_d[-1].item()
         self.block_table = mla_params.page_indice_d.unsqueeze(0)
         self.workspace_starts = torch.zeros(
             1, dtype=torch.int32, device=self.block_table.device
@@ -512,9 +541,8 @@ class MlaFlashInferDecodeOp(object):
             self._reset_fp8_sched_meta()
             block_table = self._build_block_table(fmha_params)
             B = int(fmha_params.kvlen_h.size(0))
-            cache_seqlens = fmha_params.kvlen_h[:B].to(
-                dtype=torch.int32, device=block_table.device
-            )
+            kvlen_h = fmha_params.kvlen_h[:B].to(dtype=torch.int32)
+            cache_seqlens = kvlen_h.to(device=block_table.device)
             total_q = (
                 int(fmha_params.qo_indptr_h[B].item())
                 if B > 0 and fmha_params.qo_indptr_h.numel() > B
@@ -530,7 +558,7 @@ class MlaFlashInferDecodeOp(object):
             self._fp8_indices_buf[:B].fill_(-1)
             self._fp8_topk_len_buf[:B].copy_(cache_seqlens)
             for i in range(B):
-                seqlen = int(cache_seqlens[i].item())
+                seqlen = int(kvlen_h[i].item())
                 if seqlen == 0:
                     continue
                 positions = torch.arange(
@@ -681,9 +709,15 @@ class MlaFlashInferDecodeOp(object):
 
         indices = self._fp8_prefill_indices[:B, :max_q_len]
         indices.fill_(-1)
-        self._fp8_prefill_topk_length[:B].copy_(
-            kvlen_h.to(dtype=torch.int32, device=block_table.device)
-        )
+        # Prefer device-side copy from kvlen_d (D2D, no sync) over H2D from
+        # the host kvlen_h tensor.
+        kvlen_d = getattr(fmha_params, "kvlen_d", None)
+        if isinstance(kvlen_d, torch.Tensor) and kvlen_d.device == block_table.device:
+            self._fp8_prefill_topk_length[:B].copy_(kvlen_d[:B])
+        else:
+            self._fp8_prefill_topk_length[:B].copy_(
+                kvlen_h.to(dtype=torch.int32, device=block_table.device)
+            )
 
         for i in range(B):
             q_len = int(q_lens_h[i].item())
@@ -704,6 +738,84 @@ class MlaFlashInferDecodeOp(object):
                 causal_len = min(prefix_len + q_pos + 1, kv_len)
                 indices[i, q_pos, :causal_len].copy_(dense_indices[:causal_len])
 
+        # Cache q_lens for device-only replay (fixed in CUDA graph mode).
+        self._cached_prefill_B = B
+        self._cached_max_q_len = max_q_len
+        self._cached_q_lens_d = q_lens_h.to(
+            device=self._fp8_prefill_indices.device, dtype=torch.int32
+        )
+        return True
+
+    def plan_prefill_cuda_graph_replay(self, fmha_params: Any) -> bool:
+        """Device-only FP8 prefill index update for CUDA graph replay (0 syncs)."""
+        if not self._fp8_kv or self._fp8_prefill_indices is None:
+            return True
+
+        if not hasattr(self, "_cached_prefill_B") or self._cached_q_lens_d is None:
+            # First call after capture: derive caches from device data (0 syncs).
+            qo_indptr_d = fmha_params.qo_indptr_d
+            kvlen_d_full = fmha_params.kvlen_d
+            B = int(kvlen_d_full.shape[0])
+            if B <= 0:
+                return True
+            q_lens_d = (qo_indptr_d[1 : B + 1] - qo_indptr_d[:B]).to(torch.int32)
+            bi_h = getattr(fmha_params, "batch_indice_h", None)
+            total_tokens = (
+                int(bi_h.shape[0])
+                if isinstance(bi_h, torch.Tensor) and bi_h.dim() == 1
+                else 0
+            )
+            max_q_len = total_tokens // B if B > 0 else 0
+            if max_q_len <= 0:
+                return True
+            self._cached_prefill_B = B
+            self._cached_max_q_len = max_q_len
+            self._cached_q_lens_d = q_lens_d
+
+        device = self._fp8_prefill_indices.device
+        B = self._cached_prefill_B
+        max_q_len = self._cached_max_q_len
+        q_lens_d = self._cached_q_lens_d
+
+        kvlen_d = fmha_params.kvlen_d[:B].to(dtype=torch.int32)
+        self._fp8_prefill_topk_length[:B].copy_(kvlen_d)
+
+        page_indice_d = fmha_params.page_indice_d
+        max_blocks = page_indice_d.shape[0] // B if B > 0 else 0
+        if max_blocks <= 0:
+            return True
+        block_table = page_indice_d[: B * max_blocks].reshape(B, max_blocks)
+
+        topk_cap = min(
+            self._fp8_prefill_indices.shape[2],
+            max_blocks * self.token_per_block,
+        )
+
+        pos = torch.arange(topk_cap, device=device, dtype=torch.long)
+        block_ids = (pos // self.token_per_block).clamp(max=max_blocks - 1)
+        offsets = (pos % self.token_per_block).to(torch.int32)
+
+        block_ids_2d = block_ids.unsqueeze(0).expand(B, -1)
+        phys_blocks = torch.gather(block_table.to(torch.long), 1, block_ids_2d)
+        dense = (phys_blocks * self.token_per_block + offsets.unsqueeze(0)).to(
+            torch.int32
+        )
+
+        kvlen_3d = kvlen_d.view(B, 1, 1).long()
+        q_lens_3d = q_lens_d.view(B, 1, 1).long()
+        j_range = torch.arange(max_q_len, device=device).view(1, max_q_len, 1)
+        pos_3d = pos.view(1, 1, topk_cap)
+
+        causal_limit = torch.minimum(kvlen_3d - q_lens_3d + j_range + 1, kvlen_3d)
+        valid = pos_3d < causal_limit
+
+        indices = self._fp8_prefill_indices[:B, :max_q_len, :topk_cap]
+        indices.copy_(torch.where(valid, dense.unsqueeze(1).expand_as(indices), -1))
+
+        if self._fp8_prefill_sched_meta is None:
+            self._fp8_prefill_sched_meta, _ = get_mla_metadata()
+        self._fp8_prefill_sched_meta.tile_scheduler_metadata = None
+        self._fp8_prefill_sched_meta.num_splits = None
         return True
 
     def plan_cuda_graph(self, attn_inputs: PyAttentionInputs) -> bool:
@@ -740,8 +852,23 @@ class MlaFlashInferDecodeOp(object):
             raise ValueError("FP8 MLA CUDA graph requires a 2-D block table")
 
         device = self._fp8_indices_buf.device
-        block_table = block_table[:B].to(device=device, dtype=torch.int32)
-        cache_seqlens = sequence_lengths[:B].to(device=device, dtype=torch.int32)
+        # Skip .to() when already on the target device with int32 dtype —
+        # otherwise PyTorch issues an aten::copy_ that synchronizes the stream
+        # (each .to() costs one cudaStreamSynchronize per layer per draft step).
+        block_slice = block_table[:B]
+        if block_slice.device == device and block_slice.dtype == torch.int32:
+            block_table = block_slice
+        else:
+            block_table = block_slice.to(
+                device=device, dtype=torch.int32, non_blocking=True
+            )
+        seq_slice = sequence_lengths[:B]
+        if seq_slice.device == device and seq_slice.dtype == torch.int32:
+            cache_seqlens = seq_slice
+        else:
+            cache_seqlens = seq_slice.to(
+                device=device, dtype=torch.int32, non_blocking=True
+            )
         topk_cap = min(
             self._fp8_indices_buf.shape[-1],
             int(block_table.shape[1]) * self.token_per_block,
@@ -764,19 +891,26 @@ class MlaFlashInferDecodeOp(object):
         )
 
     def _build_block_table(self, fmha_params: Any) -> torch.Tensor:
+        # Build 2D block_table[batch, max_blocks] from flat page_indice via
+        # decode_page_indptr_h (host int32). Stay on device end-to-end:
+        # indptr is host so .item()/slicing gives host ints (no sync), and
+        # per-batch copies are D2D from page_indice_d. Original code
+        # round-tripped through host (page_indices_d.cpu() + .to(device))
+        # which cost 2 cudaStreamSynchronize per call.
         indptr_h = fmha_params.decode_page_indptr_h
         batch_size = int(indptr_h.size(0)) - 1
         lengths = indptr_h[1 : batch_size + 1] - indptr_h[:batch_size]
         max_blocks = int(lengths.max().item()) if batch_size > 0 else 0
         page_indices_d = fmha_params.page_indice_d
-        page_indices_h = page_indices_d.cpu()
-        block_table = torch.zeros((batch_size, max_blocks), dtype=torch.int32)
+        block_table = torch.zeros(
+            (batch_size, max_blocks), dtype=torch.int32, device=page_indices_d.device
+        )
         for i in range(batch_size):
             start = int(indptr_h[i].item())
             n = int(lengths[i].item())
             if n > 0:
-                block_table[i, :n] = page_indices_h[start : start + n]
-        return block_table.to(device=page_indices_d.device)
+                block_table[i, :n].copy_(page_indices_d[start : start + n])
+        return block_table
 
     def forward(
         self,
