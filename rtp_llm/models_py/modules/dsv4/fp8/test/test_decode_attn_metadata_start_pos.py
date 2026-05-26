@@ -123,7 +123,9 @@ def _reference_window_topk(position_ids_2d, window_size):
     return torch.where(abs_pos_b >= (window_size - 1), ring_full_idx, partial_idx)
 
 
-def _reference_update_decode_metadata_in_place(meta, attention_inputs, forbid_realloc=False):
+def _reference_update_decode_metadata_in_place(
+    meta, attention_inputs, forbid_realloc=False
+):
     q_len = meta.q_len_per_req
     window_size = meta.window_size
     device = meta.start_pos.device
@@ -266,7 +268,9 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
         meta = _alloc(q_len=1)
         ptrs = _ptr_snapshot(meta)
 
-        update_decode_metadata_in_place_fp8(meta, _i32([0]), forbid_realloc=True)
+        update_decode_metadata_in_place_fp8(
+            meta, _i32([0]), forbid_realloc=True, state_tokens_per_block=256
+        )
 
         self.assertEqual(meta.start_pos[:1].tolist(), [0])
         self.assertEqual(meta.position_ids[:1].tolist(), [0])
@@ -368,6 +372,7 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
             compress_ratios=[0, 4, 128],
             index_topk=16,
             device=torch.device("cpu"),
+            state_tokens_per_block=256,
         )
 
         self.assertEqual(meta.start_pos.tolist(), [14])
@@ -389,9 +394,7 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
             is_prefill=False,
             is_target_verify=False,
             sequence_lengths=torch.tensor([4, 127], dtype=torch.int32, device=device),
-            prefix_lengths=torch.tensor(
-                [1000, 2000], dtype=torch.int32, device=device
-            ),
+            prefix_lengths=torch.tensor([1000, 2000], dtype=torch.int32, device=device),
         )
         meta = build_decode_metadata_fp8(
             attention_inputs=attn,
@@ -402,6 +405,7 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
             compress_ratios=[0, 4, 128],
             index_topk=16,
             device=device,
+            state_tokens_per_block=256,
         )
 
         self.assertEqual(meta.start_pos.tolist(), [4, 127])
@@ -430,6 +434,7 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
             compress_ratios=[0, 4, 128],
             index_topk=16,
             device=device,
+            state_tokens_per_block=256,
         )
 
         self.assertEqual(meta.start_pos.tolist(), [10, 20])
@@ -451,6 +456,7 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
             compress_ratios=[0, 4, 128],
             index_topk=512,
             device=device,
+            state_tokens_per_block=256,
         )
         eager_hca = eager.topk_total_by_ratio[128][0, 0, 128:]
         self.assertEqual(eager_hca.numel(), 8192)
@@ -561,6 +567,7 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
             forbid_realloc=True,
             paged_block_tables=paged_block_tables,
             paged_pool_entries_per_block=entries_per_block,
+            state_tokens_per_block=256,
         )
 
         T = 2 * q_len

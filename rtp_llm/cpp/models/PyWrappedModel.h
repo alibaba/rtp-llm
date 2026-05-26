@@ -172,8 +172,22 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
 
     if (params.kv_cache_layer_layout.has_value()) {
         torch_ext::KVCache kv_cache;
-        kv_cache.seq_size_per_block        = params.description.attention_conf.tokens_per_block;
-        kv_cache.kernel_seq_size_per_block = params.description.attention_conf.kernel_tokens_per_block;
+        // Source these from the top-level GptModelInitParams (filled from
+        // cache_manager->cacheConfig() in NormalExecutor/MtpExecutor) rather
+        // than the model-static attention_conf — for DSV4 the cache manager
+        // promotes seq_size_per_block to a 256-token physical block while
+        // attention_conf still reflects the 64-token --seq_size_per_block
+        // CLI flag, causing the fused compressor to index state block_table
+        // with the wrong stride and trap on unallocated ring slots.
+        RTP_LLM_CHECK_WITH_INFO(params.tokens_per_block > 0 && params.kernel_tokens_per_block > 0
+                                    && params.tokens_per_block % params.kernel_tokens_per_block == 0,
+                                "GptModelInitParams must carry valid tokens_per_block / kernel_tokens_per_block "
+                                "from CacheConfig before constructing PyWrappedModel KVCache; got tokens_per_block=%zu "
+                                "kernel_tokens_per_block=%zu",
+                                params.tokens_per_block,
+                                params.kernel_tokens_per_block);
+        kv_cache.seq_size_per_block        = params.tokens_per_block;
+        kv_cache.kernel_seq_size_per_block = params.kernel_tokens_per_block;
         const auto& layout                 = params.kv_cache_layer_layout.value();
         kv_cache.kv_cache_base_by_layer.reserve(layout.layers_to_kv_buffer_ptrs.size());
         kv_cache.num_kv_heads  = params.description.attention_conf.kv_head_num;
@@ -212,8 +226,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
 
         init_resources.kv_cache = kv_cache;
     }
-    init_resources.is_speculative = (params.sp_config.type != SP_TYPE_NONE);
-    init_resources.is_decode_role = (params.parallelism_config.role_type == RoleType::DECODE);
+    init_resources.is_speculative         = (params.sp_config.type != SP_TYPE_NONE);
+    init_resources.is_decode_role         = (params.parallelism_config.role_type == RoleType::DECODE);
     init_resources.max_context_batch_size = params.runtime_config.fifo_scheduler_config.max_context_batch_size;
 
     py::object py_init_result;
@@ -235,6 +249,16 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     }
     if (enable_cuda_graph_) {
 #if USING_CUDA || USING_ROCM
+        // CUDA graph capture stamps tokens_per_block / kernel_tokens_per_block
+        // into GraphParams below; a 0 here propagates into every captured
+        // graph and is impossible to recover from. Mirror the check
+        // performed in the kv_cache branch so any warmup path that reaches
+        // this branch with invalid values fails fast.
+        RTP_LLM_CHECK_WITH_INFO(params.tokens_per_block > 0 && params.kernel_tokens_per_block > 0,
+                                "GraphParams requires valid tokens_per_block / kernel_tokens_per_block "
+                                "from CacheConfig; got tokens_per_block=%zu kernel_tokens_per_block=%zu",
+                                params.tokens_per_block,
+                                params.kernel_tokens_per_block);
         c10::ScalarType dtype = dataTypeToTorchType(description_.data_type);
 
         // Create GraphParams from individual config fields
@@ -288,11 +312,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         // decodeWarmUp path defaults use_spec_decoding=false but still sees
         // sp_config enabled, so infer the flag from config instead of
         // relying solely on the constructor arg.
-        const bool is_target_verify_decode =
-            params.sp_config.type != SP_TYPE_NONE
-            && params.sp_config.gen_num_per_cycle > 0
-            && !params.model_id
-            && !is_prefill_cuda_graph_mode;
+        const bool is_target_verify_decode = params.sp_config.type != SP_TYPE_NONE
+                                             && params.sp_config.gen_num_per_cycle > 0 && !params.model_id
+                                             && !is_prefill_cuda_graph_mode;
         graph_params.is_target_verify = use_spec_decoding || is_target_verify_decode;
         if (params.sp_config.type != SP_TYPE_NONE) {
             graph_params.sp_steps = params.sp_config.gen_num_per_cycle;

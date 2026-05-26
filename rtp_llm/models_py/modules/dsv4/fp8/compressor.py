@@ -230,6 +230,7 @@ class CompressorFP8(PoolBackedModule):
         self.freqs_cis: Optional[torch.Tensor] = None
         self._cos_sin_cache: Optional[torch.Tensor] = None
         self._cos_sin_cache_device: Optional[torch.device] = None
+        self._state_tokens_per_block: int = 0
         self._cp_ctx: Optional[CPContext] = None
         self._cp_gather_stream: Optional[Any] = None
         self._kv_cache_sharded: bool = False
@@ -315,6 +316,13 @@ class CompressorFP8(PoolBackedModule):
                 cu_seq_per_req=cu_seq_per_req,
             )
 
+        assert seq_start_per_req is not None and cu_seq_per_req is not None, (
+            "seq_start_per_req and cu_seq_per_req are required for ring write mask; "
+            "caller must supply per-request metadata"
+        )
+        input_lens = (cu_seq_per_req[1:] - cu_seq_per_req[:-1]).to(torch.long)
+        seq_end_per_req = seq_start_per_req.to(torch.long) + input_lens
+
         if _compressor_meta_fused_enabled() and not self._kv_cache_sharded:
             from rtp_llm.models_py.modules.dsv4.fp8 import _fused_compressor_meta_triton
 
@@ -336,6 +344,8 @@ class CompressorFP8(PoolBackedModule):
                     self._kv_block_table,
                     self._kv_eb,
                     self.compress_ratio,
+                    seq_end_per_req,
+                    self._state_tokens_per_block,
                     pool_rows=pool_rows,
                 )
                 return CompressorMeta(
@@ -350,7 +360,9 @@ class CompressorFP8(PoolBackedModule):
                 )
 
         with record_function_range("dsv4.fp8.compressor.meta.state_slots"):
-            state_slots = self._compute_state_slot_mapping(positions, b_idx)
+            state_slots = self._compute_state_slot_mapping(
+                positions, b_idx, seq_end_per_req
+            )
         with record_function_range("dsv4.fp8.compressor.meta.kv_slots"):
             kv_slots = self._compute_kv_slot_mapping(positions, b_idx)
         with record_function_range("dsv4.fp8.compressor.meta.token_to_req"):
@@ -395,27 +407,35 @@ class CompressorFP8(PoolBackedModule):
         self,
         positions: torch.Tensor,  # [N] int64
         b_idx: torch.Tensor,  # [N] int64
+        seq_end_per_req: torch.Tensor,  # [B] int64
     ) -> torch.Tensor:
-        """state_slot[t] = state_block_table[b, pos//eb] * eb + pos%eb.
-        Returns -1 where the logical block is absent or unallocated."""
+        """state_slot[t] = state_block_table[b, (pos//tpb)%max_blocks] * eb + pos%eb.
+
+        State pools are SWA-type (cyclic block table). Block-table indexing
+        uses ``_state_tokens_per_block`` (= kernel block size, 256) with modulo
+        wrapping; in-block ring offset uses ``_state_eb`` (= ring size R).
+        Returns -1 where the resolved block_id is negative (unallocated).
+
+        Ring write mask: only the last R positions before each block boundary
+        (or sequence end) actually write. Earlier positions whose ring entries
+        would be overwritten by later tokens in the same block are masked to -1.
+        """
         bt = self._state_block_table
         eb = self._state_eb
+        tpb = self._state_tokens_per_block
         assert bt is not None and eb > 0, "state pool context unbound"
-        # STATE pools (CSA_STATE / HCA_STATE) are NOT cp-sharded — each rank
-        # holds the full block_table. Applying cp ownership mask here would
-        # leave half the entries as -1 sentinels, the writer would skip them,
-        # and decode would read garbage at non-owned positions. Always use
-        # the full slot mapping.
         bt_long = bt.to(torch.long)
         max_blocks = int(bt_long.shape[1])
         if max_blocks <= 0:
             return torch.full_like(positions, -1)
-        block_in_seq = positions // eb
+        block_in_seq = (positions // tpb) % max_blocks
         in_block = positions % eb
-        in_capacity = block_in_seq < max_blocks
-        safe_block_in_seq = block_in_seq.clamp(min=0, max=max_blocks - 1)
-        block_id = bt_long[b_idx, safe_block_in_seq]
-        valid = in_capacity & (block_id >= 0)
+        block_id = bt_long[b_idx, block_in_seq]
+        valid = block_id > 0
+        block_end = (positions // tpb + 1) * tpb
+        seq_end = seq_end_per_req[b_idx]
+        effective_end = torch.minimum(block_end, seq_end)
+        valid = valid & ((positions + eb) >= effective_end)
         slot = block_id * eb + in_block
         return torch.where(valid, slot, torch.full_like(slot, -1))
 
@@ -571,6 +591,7 @@ class CompressorFP8(PoolBackedModule):
                 overlap=self.overlap,
                 seq_start_per_req=meta.seq_start_per_req if use_varlen_raw else None,
                 cu_seq_per_req=meta.cu_seq_per_req if use_varlen_raw else None,
+                state_tokens_per_block=self._state_tokens_per_block,
             )
 
     # ----------------------------------------------------------------------
@@ -668,7 +689,16 @@ class CompressorFP8(PoolBackedModule):
         if meta is None:
             with record_function_range("dsv4.fp8.compressor.prefill.build_meta"):
                 positions, b_idx = _build_prefill_positions(sp, bsz, seqlen, device)
-                meta = self.prepare_metadata(positions, b_idx)
+                meta = self.prepare_metadata(
+                    positions,
+                    b_idx,
+                    seq_start_per_req=torch.tensor(
+                        [sp], dtype=torch.int32, device=device
+                    ),
+                    cu_seq_per_req=torch.tensor(
+                        [0, seqlen], dtype=torch.int32, device=device
+                    ),
+                )
         # Varlen prefill carries per-request raw arrays, so ``_launch`` routes
         # through the kernel's BATCHED branch even when CP has only one
         # request. Legacy scalar metadata keeps the old ``seq_start`` path.
@@ -709,7 +739,15 @@ class CompressorFP8(PoolBackedModule):
             if position_ids is None:
                 positions = start_pos.to(device=device, dtype=torch.long).reshape(bsz)
                 b_idx = torch.arange(bsz, device=device, dtype=torch.long)
-                meta = self.prepare_metadata(positions, b_idx)
+                cu_seq_per_req = torch.arange(
+                    0, bsz + 1, device=device, dtype=torch.int64
+                )
+                meta = self.prepare_metadata(
+                    positions,
+                    b_idx,
+                    seq_start_per_req=positions,
+                    cu_seq_per_req=cu_seq_per_req,
+                )
             else:
                 positions = (
                     position_ids.to(device=device, dtype=torch.long)
@@ -770,7 +808,12 @@ def build_prefill_metadata(
 ) -> CompressorMeta:
     """Convenience: build positions/b_idx + ``CompressorMeta`` in one call."""
     positions, b_idx = _build_prefill_positions(sp, bsz, seqlen, device)
-    return compressor.prepare_metadata(positions, b_idx)
+    return compressor.prepare_metadata(
+        positions,
+        b_idx,
+        seq_start_per_req=torch.tensor([sp], dtype=torch.int32, device=device),
+        cu_seq_per_req=torch.tensor([0, seqlen], dtype=torch.int32, device=device),
+    )
 
 
 def build_prepare_metadata_args(
@@ -840,4 +883,7 @@ def build_decode_metadata(
     device = start_pos.device
     positions = start_pos.to(device=device, dtype=torch.long).reshape(bsz)
     b_idx = torch.arange(bsz, device=device, dtype=torch.long)
-    return compressor.prepare_metadata(positions, b_idx)
+    cu_seq_per_req = torch.arange(0, bsz + 1, device=device, dtype=torch.int64)
+    return compressor.prepare_metadata(
+        positions, b_idx, seq_start_per_req=positions, cu_seq_per_req=cu_seq_per_req
+    )

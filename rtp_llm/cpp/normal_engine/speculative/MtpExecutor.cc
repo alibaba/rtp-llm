@@ -523,8 +523,28 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
         kv_cache_layer_layout = cache_manager->allLayerCacheBase();
     }
 
-    auto target_cache_layer_layout = cache_manager->getMainModelCacheLayerLayout();
-    auto draft_cache_layer_layout  = cache_manager->getMTPModuleCacheLayerLayout(0);
+    // Warmup runs MtpExecutor before CacheManager is wired up — guard every
+    // cache_manager-> call here so the executor can construct with a null
+    // handle. PyWrappedModel's own kernel_tokens_per_block check trips
+    // loudly downstream when tokens_per_block stays 0, so we do not need a
+    // soft fallback to attn_config here.
+    CacheLayerLayout target_cache_layer_layout{};
+    CacheLayerLayout draft_cache_layer_layout{};
+    if (cache_manager) {
+        target_cache_layer_layout = cache_manager->getMainModelCacheLayerLayout();
+        draft_cache_layer_layout  = cache_manager->getMTPModuleCacheLayerLayout(0);
+    }
+
+    // CacheConfig is the single source of truth for tokens_per_block /
+    // kernel_tokens_per_block (DSV4 promotes physical to 256 while
+    // attn_config still reflects the 64-token CLI flag). Zero-init the
+    // warmup sentinel so PyWrappedModel's >0 check catches mis-propagation
+    // (CacheConfig default is 1, not 0).
+    CacheConfig warmup_sentinel;
+    warmup_sentinel.seq_size_per_block        = 0;
+    warmup_sentinel.kernel_seq_size_per_block = 0;
+    const auto& target_cache_config           = cache_manager ? cache_manager->cacheConfig() : warmup_sentinel;
+    const auto& draft_cache_config = cache_manager ? cache_manager->getMTPModuleCacheConfig(0) : warmup_sentinel;
 
     GptModelInitParams model_init_params(
         {params.gpt_weights,
@@ -541,8 +561,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
          mla_ops_type,
          params.model_config_.max_seq_len,
          params.model_config_.hidden_size,
-         params.model_config_.attn_config.tokens_per_block,
-         params.model_config_.attn_config.kernel_tokens_per_block,
+         static_cast<int64_t>(target_cache_config.seq_size_per_block),
+         static_cast<int64_t>(target_cache_config.kernel_seq_size_per_block),
          kv_cache_group_num,
          kv_cache_layer_to_group,
          cache_manager,
@@ -559,13 +579,11 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
             model_init_params, params.py_model, false, true, target_cache_layer_layout.layer_to_groups));
     }
 
-    // when warmup, cache manager maybe nullptr
-    const auto& cache_config   = cache_manager ? cache_manager->cacheConfig() : CacheConfig();
-    is_linear_attention_model_ = cache_config.linear_group_num > 0;
+    is_linear_attention_model_ = target_cache_config.linear_group_num > 0;
     batch_stream_processor_.reset(new MtpBatchStreamProcessor(params.model_config_,
                                                               params.pd_sep_config,
                                                               params.profiling_debug_logging_config,
-                                                              cache_config,
+                                                              target_cache_config,
                                                               params.sp_config,
                                                               warm_up_));
 
@@ -592,8 +610,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 mla_ops_type,
                                 mtp_params->model_config_.max_seq_len,
                                 mtp_params->model_config_.hidden_size,
-                                mtp_params->model_config_.attn_config.tokens_per_block,
-                                mtp_params->model_config_.attn_config.kernel_tokens_per_block,
+                                static_cast<int64_t>(draft_cache_config.seq_size_per_block),
+                                static_cast<int64_t>(draft_cache_config.kernel_seq_size_per_block),
                                 kv_cache_group_num,
                                 kv_cache_layer_to_group,
                                 cache_manager,
@@ -635,7 +653,6 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     fast_topk_sampler_.reset(new speculative::FastTopKSampler(d2t_map_));
 
     RTP_LLM_LOG_INFO("[speculative decoding] d2t_map size: %ld", d2t_map_.defined() ? d2t_map_.numel() : 0);
-
 }
 
 /*
@@ -925,8 +942,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
 
 void MtpExecutor::prepareGrpcMtpDeviceState(const std::list<GenerateStreamPtr>& streams, TensorHolder& host_holder) {
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare grpc input)");
-    const auto pinned_i32 = torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true);
-    auto to_cuda_async = [&host_holder](const torch::Tensor& tensor) {
+    const auto pinned_i32    = torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true);
+    auto       to_cuda_async = [&host_holder](const torch::Tensor& tensor) {
         if (!tensor.defined()) {
             return tensor;
         }
@@ -948,7 +965,7 @@ void MtpExecutor::prepareGrpcMtpDeviceState(const std::list<GenerateStreamPtr>& 
         if (sp_output_buffer == nullptr) {
             continue;
         }
-        auto& tensors_holder  = sp_output_buffer->tensors_holder;
+        auto& tensors_holder = sp_output_buffer->tensors_holder;
         if (tensors_holder.empty()) {
             continue;
         }
@@ -987,12 +1004,12 @@ void MtpExecutor::prepareGrpcMtpDeviceState(const std::list<GenerateStreamPtr>& 
         sp_output_buffer->all_probs     = to_cuda_async(propose_probs_t);
         sp_output_buffer->hidden_states = to_cuda_async(propose_hidden_t);
 
-        auto accept_len_cpu         = torch::ones({1}, pinned_i32);
-        auto accept_tokens_cpu      = torch::zeros({1, static_cast<int64_t>(propose_step_ + 1)}, pinned_i32);
-        auto propose_tokens_cpu     = torch::empty({1}, pinned_i32);
-        auto next_seq_len_cpu       = torch::empty({1}, pinned_i32);
-        auto* token_ptr             = sp_output_buffer->tokens.data_ptr<int32_t>();
-        const auto seq_length       = stream->seqLength();
+        auto       accept_len_cpu     = torch::ones({1}, pinned_i32);
+        auto       accept_tokens_cpu  = torch::zeros({1, static_cast<int64_t>(propose_step_ + 1)}, pinned_i32);
+        auto       propose_tokens_cpu = torch::empty({1}, pinned_i32);
+        auto       next_seq_len_cpu   = torch::empty({1}, pinned_i32);
+        auto*      token_ptr          = sp_output_buffer->tokens.data_ptr<int32_t>();
+        const auto seq_length         = stream->seqLength();
         accept_tokens_cpu.data_ptr<int32_t>()[0]  = token_ptr[0];
         propose_tokens_cpu.data_ptr<int32_t>()[0] = token_ptr[1];
         next_seq_len_cpu.data_ptr<int32_t>()[0]   = seq_length;
@@ -1865,11 +1882,9 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
                 // Batch gather: [batch, propose_step+1] -> pick column [accept_len-1] per row
                 auto accept_tokens_2d = torch::cat(accept_tokens_slices, 0);  // [batch, cols]
                 auto accept_len_batch = torch::cat(accept_len_slices, 0);     // [batch]
-                auto idx_long = (accept_len_batch.to(torch::kInt64) - 1)
-                                    .reshape({(int64_t)batch_size, 1});
-                pre_target_token_t = accept_tokens_2d.gather(1, idx_long)
-                                         .reshape({(int64_t)batch_size})
-                                         .to(torch::kInt32);
+                auto idx_long         = (accept_len_batch.to(torch::kInt64) - 1).reshape({(int64_t)batch_size, 1});
+                pre_target_token_t =
+                    accept_tokens_2d.gather(1, idx_long).reshape({(int64_t)batch_size}).to(torch::kInt32);
             }
         }
         if (!all_device_state && all_streams.empty()) {
@@ -2048,8 +2063,8 @@ void MtpExecutor::publishSyncMtpDeviceState(const StreamGroups&                 
     }
 
     // Batch compute next_seq_len from host seqLength (sync path: host is authoritative)
-    const auto pin_i32      = torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true);
-    const auto cuda_i32     = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    const auto pin_i32          = torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true);
+    const auto cuda_i32         = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
     auto       next_seq_len_cpu = torch::empty({batch_size}, pin_i32);
     {
         int64_t i = 0;
@@ -2066,13 +2081,12 @@ void MtpExecutor::publishSyncMtpDeviceState(const StreamGroups&                 
     torch::Tensor last_hidden_all;
     const auto    stream_hidden_len = static_cast<int64_t>(propose_step_ + 1);
     if (propose_step_ > 1 && draft_all_hidden_full.defined()) {
-        const auto hidden_size  = draft_all_hidden_full.size(1);
-        auto       hidden_3d    = draft_all_hidden_full.reshape({batch_size, stream_hidden_len, hidden_size});
-        auto       accept_i32   = accept_len_all.to(torch::kInt32);
-        auto       idx_long     = (accept_i32.to(torch::kInt64) - 1)
-                                     .reshape({batch_size, 1, 1})
-                                     .expand({batch_size, 1, hidden_size});
-        last_hidden_all         = hidden_3d.gather(1, idx_long).squeeze(1);
+        const auto hidden_size = draft_all_hidden_full.size(1);
+        auto       hidden_3d   = draft_all_hidden_full.reshape({batch_size, stream_hidden_len, hidden_size});
+        auto       accept_i32  = accept_len_all.to(torch::kInt32);
+        auto       idx_long =
+            (accept_i32.to(torch::kInt64) - 1).reshape({batch_size, 1, 1}).expand({batch_size, 1, hidden_size});
+        last_hidden_all = hidden_3d.gather(1, idx_long).squeeze(1);
     }
 
     // One clone for all probs
@@ -2086,13 +2100,12 @@ void MtpExecutor::publishSyncMtpDeviceState(const StreamGroups&                 
     int64_t idx             = 0;
     for (auto& stream : all_streams) {
         GenerateStream::MtpAsyncDeviceState state;
-        state.accept_len_gpu     = accept_len_all.narrow(0, idx, 1);
-        state.accept_tokens_gpu  = accept_tokens_all.narrow(0, idx, 1);
+        state.accept_len_gpu    = accept_len_all.narrow(0, idx, 1);
+        state.accept_tokens_gpu = accept_tokens_all.narrow(0, idx, 1);
         state.propose_tokens_gpu =
             propose_tokens_all.defined() ? propose_tokens_all.narrow(0, idx, 1) : torch::Tensor();
-        state.next_seq_len_gpu   = next_seq_len_owned.narrow(0, idx, 1);
-        state.last_hidden_states_gpu =
-            last_hidden_all.defined() ? last_hidden_all.narrow(0, idx, 1) : torch::Tensor();
+        state.next_seq_len_gpu       = next_seq_len_owned.narrow(0, idx, 1);
+        state.last_hidden_states_gpu = last_hidden_all.defined() ? last_hidden_all.narrow(0, idx, 1) : torch::Tensor();
 
         const auto next_batch_size = stream->nextBatchSize();
         if (draft_probs_all.defined() && next_batch_size > 0) {
@@ -2115,11 +2128,11 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
                                               std::shared_ptr<torch::Event>                draft_event) {
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(dispatch_output_async)");
 
-    const auto& accept_len_gpu_all    = spec_decode_output.accept_len;
-    const auto& accept_tokens_gpu_all = spec_decode_output.accept_tokens;
+    const auto& accept_len_gpu_all     = spec_decode_output.accept_len;
+    const auto& accept_tokens_gpu_all  = spec_decode_output.accept_tokens;
     const auto& propose_tokens_gpu_all = draft_prefill_output.sampler_output.token_ids;
-    const auto& draft_all_hidden_full = draft_prefill_output.model_output.all_hidden_states;
-    const auto& draft_all_probs_full  = draft_prefill_output.sampler_output.all_probs;
+    const auto& draft_all_hidden_full  = draft_prefill_output.model_output.all_hidden_states;
+    const auto& draft_all_probs_full   = draft_prefill_output.sampler_output.all_probs;
 
     auto       all_streams = stream_groups.allStreams();
     const auto batch_size  = static_cast<int64_t>(all_streams.size());
@@ -2142,23 +2155,22 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
             if (gpu_val.defined() && gpu_val.is_cuda()) {
                 prev_slices.push_back(gpu_val.reshape({1}));
             } else {
-                prev_slices.push_back(
-                    torch::tensor({static_cast<int32_t>(stream->seqLength())}, cuda_i32));
+                prev_slices.push_back(torch::tensor({static_cast<int32_t>(stream->seqLength())}, cuda_i32));
             }
         }
         prev_seq_len_all = torch::cat(prev_slices, 0);
 
         next_seq_len_all = torch::empty({batch_size}, cuda_i32);
-        hidden_idx_all = torch::empty({batch_size}, cuda_i64);
+        hidden_idx_all   = torch::empty({batch_size}, cuda_i64);
 
         auto accept_len_i32 = accept_len_gpu_all.to(torch::kInt32);
 #if USING_CUDA
         invokeMtpDispatchStatePrepare(accept_len_i32,
-                                       prev_seq_len_all,
-                                       next_seq_len_all,
-                                       hidden_idx_all,
-                                       batch_size,
-                                       at::cuda::getCurrentCUDAStream().stream());
+                                      prev_seq_len_all,
+                                      next_seq_len_all,
+                                      hidden_idx_all,
+                                      batch_size,
+                                      at::cuda::getCurrentCUDAStream().stream());
 #else
         next_seq_len_all = prev_seq_len_all + accept_len_i32;
         hidden_idx_all   = (accept_len_i32.to(torch::kInt64) - 1);
@@ -2167,7 +2179,7 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
 
     // 2. Batch gather hidden states (1 gather op instead of N index_selects)
     torch::Tensor last_hidden_all;
-    const auto stream_hidden_len = static_cast<int64_t>(propose_step_ + 1);
+    const auto    stream_hidden_len = static_cast<int64_t>(propose_step_ + 1);
     if (propose_step_ > 1 && draft_all_hidden_full.defined()) {
         const auto hidden_size  = draft_all_hidden_full.size(1);
         auto       hidden_3d    = draft_all_hidden_full.reshape({batch_size, stream_hidden_len, hidden_size});
@@ -2190,8 +2202,7 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
         state.accept_tokens_gpu      = accept_tokens_gpu_all.narrow(0, idx, 1);
         state.propose_tokens_gpu     = propose_tokens_gpu_all.narrow(0, idx, 1);
         state.next_seq_len_gpu       = next_seq_len_all.narrow(0, idx, 1);
-        state.last_hidden_states_gpu =
-            last_hidden_all.defined() ? last_hidden_all.narrow(0, idx, 1) : torch::Tensor();
+        state.last_hidden_states_gpu = last_hidden_all.defined() ? last_hidden_all.narrow(0, idx, 1) : torch::Tensor();
 
         const auto next_batch_size = stream->nextBatchSize();
         if (draft_probs_all.defined() && next_batch_size > 0) {

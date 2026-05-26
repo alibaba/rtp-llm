@@ -267,8 +267,11 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
     // Without this, CudaGraphRunner inside the warmup executor sees
     // kv_cache_group_num_=0 and skips per-group block_table setup.
     {
-        auto cfg            = CacheConfigCreator::createBasicConfig(model_config_, parallelism_config, kv_cache_config);
-        kv_cache_group_num_ = cfg.groupNums();
+        const int cache_gen_num_per_cycle =
+            sp_config.type != SP_TYPE_NONE ? static_cast<int>(sp_config.gen_num_per_cycle) : 0;
+        auto cfg = CacheConfigCreator::createBasicConfig(
+            model_config_, parallelism_config, kv_cache_config, false, cache_gen_num_per_cycle);
+        kv_cache_group_num_      = cfg.groupNums();
         kv_cache_layer_to_group_ = cfg.layer_to_group_id;
     }
     executor_.reset(new NormalExecutor(
@@ -294,9 +297,17 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
     rtp_llm::setTraceMemory(true);
 
-    auto cache_config = CacheConfigCreator::createBasicConfig(model_config_, parallelism_config, kv_cache_config);
-    cache_config.seq_size_per_block = model_config_.attn_config.tokens_per_block;
-    cache_config.block_num          = 5;
+    const int cache_gen_num_per_cycle =
+        sp_config.type != SP_TYPE_NONE ? static_cast<int>(sp_config.gen_num_per_cycle) : 0;
+    auto cache_config = CacheConfigCreator::createBasicConfig(
+        model_config_, parallelism_config, kv_cache_config, false, cache_gen_num_per_cycle);
+    // Do NOT override seq_size_per_block here. createBasicConfig already
+    // returns the correct value: model_config.attn_config.tokens_per_block
+    // for non-DSV4 (via SingleConfigCreator / HybridConfigCreator), and the
+    // 256-token physical block for DSV4 (via DSV4CacheConfigHelper). Forcing
+    // it back to attn_config.tokens_per_block would clobber DSV4's promoted
+    // value when the user passed --seq_size_per_block < 256.
+    cache_config.block_num = 5;
     // Snapshot hybrid-cache group info from the warmup cache_config so that the
     // NormalExecutor → PyWrappedModel → CudaGraphRunner created below sees the
     // real kv_cache_group_num_ / kv_cache_layer_to_group_.  Without this the
@@ -397,7 +408,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
         kv_cache_layer_to_group_ = cache_cfg.layer_to_group_id;
     } else {
         auto result = CacheConfigCreator::createConfig(
-            model_config_, parallelism_config, runtime_config, kv_cache_config, warm_up_result);
+            model_config_, parallelism_config, runtime_config, kv_cache_config, warm_up_result, sp_config);
         RTP_LLM_LOG_INFO("create cache manager with config %s", result.debugString().c_str());
         RTP_LLM_LOG_INFO("create cache manager with block nums %d, block size %ld KB",
                          result.block_num,

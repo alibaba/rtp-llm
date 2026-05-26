@@ -117,7 +117,7 @@ static CacheConfig makeCompactDSV4ManagerConfig(uint32_t block_num = 16) {
     KVCacheConfig     kv_cache_config;
     kv_cache_config.seq_size_per_block     = 128;
     kv_cache_config.dsv4_fixed_pool_blocks = block_num;
-    auto              config = HybridPoolConfigCreator::createConfig(makeDSV4ManagerFlashModelConfig(), pc, kv_cache_config);
+    auto              config = HybridPoolConfigCreator::createConfig(makeDSV4ManagerFlashModelConfig(), pc, kv_cache_config, false, 0);
     config.block_num         = block_num;
     config.group_block_nums.assign(config.groupNums(), block_num);
     return config;
@@ -130,7 +130,7 @@ static CacheConfig makeDSV4ConfigWithConcurrencyPool(uint32_t full_block_num, ui
     KVCacheConfig     kv_cache_config;
     kv_cache_config.seq_size_per_block     = 128;
     kv_cache_config.dsv4_fixed_pool_blocks = 2u * swa_batch_size;
-    auto              config = HybridPoolConfigCreator::createConfig(makeDSV4ManagerFlashModelConfig(), pc, kv_cache_config);
+    auto              config = HybridPoolConfigCreator::createConfig(makeDSV4ManagerFlashModelConfig(), pc, kv_cache_config, false, 0);
     config.block_num         = full_block_num;
     for (int gid = 0; gid < config.groupNums(); ++gid) {
         config.group_block_nums[gid] = (gid < 3) ? full_block_num : (2u * swa_batch_size);

@@ -10,8 +10,9 @@ class HybridPoolConfigCreator {
 public:
     static CacheConfig createConfig(const ModelConfig&       model_config,
                                     const ParallelismConfig& parallelism_config,
-                                    const KVCacheConfig&     kv_cache_config = KVCacheConfig{},
-                                    bool                     is_mtp          = false);
+                                    const KVCacheConfig&     kv_cache_config,
+                                    bool                     is_mtp,
+                                    int                      gen_num_per_cycle);
 };
 
 }  // namespace rtp_llm

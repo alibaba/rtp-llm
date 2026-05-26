@@ -51,9 +51,11 @@ bool hasDsv4FixedPoolBytes(const CacheConfig& config) {
 CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model_config,
                                                   const ParallelismConfig& parallelism_config,
                                                   const KVCacheConfig&     kv_cache_config,
-                                                  bool                     is_mtp) {
+                                                  bool                     is_mtp,
+                                                  int                      gen_num_per_cycle) {
     if (shouldUseHybridPoolLayout(model_config)) {
-        return HybridPoolConfigCreator::createConfig(model_config, parallelism_config, kv_cache_config, is_mtp);
+        return HybridPoolConfigCreator::createConfig(
+            model_config, parallelism_config, kv_cache_config, is_mtp, gen_num_per_cycle);
     } else if (model_config.hybrid_attention_config.enable_hybrid_attention) {
         return HybridConfigCreator::createHybridConfig(model_config, parallelism_config, is_mtp);
     } else {
@@ -67,8 +69,9 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
                                              const KVCacheConfig&                             kv_cache_config,
                                              const std::optional<WarmUpResult>&               warm_up_result,
                                              const std::optional<SpeculativeExecutionConfig>& sp_config) {
-    CacheConfig config    = CacheConfigCreator::createBasicConfig(model_config, parallelism_config, kv_cache_config);
-    uint32_t    block_num = 0;
+    CacheConfig config =
+        CacheConfigCreator::createBasicConfig(model_config, parallelism_config, kv_cache_config, false, 0);
+    uint32_t block_num = 0;
 
     config.linear_step = kv_cache_config.linear_step;
     if (kv_cache_config.kernel_seq_size_per_block > 0) {
@@ -76,6 +79,14 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
                                 "seq_size_per_block(%d) must be divisible by kernel_seq_size_per_block(%d)",
                                 kv_cache_config.seq_size_per_block,
                                 kv_cache_config.kernel_seq_size_per_block);
+        if (hasTypedHybridPoolLayout(model_config)) {
+            RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(kv_cache_config.kernel_seq_size_per_block)
+                                        == config.kernel_seq_size_per_block,
+                                    "DSV4 typed cache requires kernel_seq_size_per_block=%zu, "
+                                    "but kv_cache_config overrides to %d",
+                                    config.kernel_seq_size_per_block,
+                                    kv_cache_config.kernel_seq_size_per_block);
+        }
         config.kernel_seq_size_per_block = static_cast<size_t>(kv_cache_config.kernel_seq_size_per_block);
     } else if (config.kernel_seq_size_per_block == 0 || config.kernel_seq_size_per_block == config.seq_size_per_block) {
         // Default: kernel block size == physical block size (no split). Keep
@@ -151,10 +162,10 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                                                const std::optional<WarmUpResult>& warm_up_result,
                                                bool                               is_mtp,
                                                bool                               is_eagle) {
-    CacheConfig score_config =
-        CacheConfigCreator::createBasicConfig(score_model_config, parallelism_config, kv_cache_config, false);
-    CacheConfig propose_config =
-        CacheConfigCreator::createBasicConfig(propose_model_config, parallelism_config, kv_cache_config, is_mtp);
+    CacheConfig score_config = CacheConfigCreator::createBasicConfig(
+        score_model_config, parallelism_config, kv_cache_config, false, sp_config.gen_num_per_cycle);
+    CacheConfig propose_config = CacheConfigCreator::createBasicConfig(
+        propose_model_config, parallelism_config, kv_cache_config, is_mtp, sp_config.gen_num_per_cycle);
 
     if (kv_cache_config.kernel_seq_size_per_block > 0) {
         const size_t kernel_seq_size_per_block = static_cast<size_t>(kv_cache_config.kernel_seq_size_per_block);
@@ -166,12 +177,29 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                                 "propose seq_size_per_block(%zu) must be divisible by kernel_seq_size_per_block(%zu)",
                                 propose_config.seq_size_per_block,
                                 kernel_seq_size_per_block);
+        if (hasTypedHybridPoolLayout(score_model_config)) {
+            RTP_LLM_CHECK_WITH_INFO(kernel_seq_size_per_block == score_config.kernel_seq_size_per_block,
+                                    "DSV4 typed cache requires kernel_seq_size_per_block=%zu, "
+                                    "but kv_cache_config overrides to %zu",
+                                    score_config.kernel_seq_size_per_block,
+                                    kernel_seq_size_per_block);
+        }
         score_config.kernel_seq_size_per_block   = kernel_seq_size_per_block;
         propose_config.kernel_seq_size_per_block = kernel_seq_size_per_block;
     } else {
-        // Default: kernel block size == physical block size (no split).
-        score_config.kernel_seq_size_per_block   = score_config.seq_size_per_block;
-        propose_config.kernel_seq_size_per_block = propose_config.seq_size_per_block;
+        // Default: kernel block size == physical block size (no split). Keep
+        // any explicit value already set by createBasicConfig (e.g. DSV4
+        // forces kernel_seq_size_per_block = 256 even when physical
+        // seq_size_per_block > 256); only fill in when unset or already
+        // matches the physical block.
+        if (score_config.kernel_seq_size_per_block == 0
+            || score_config.kernel_seq_size_per_block == score_config.seq_size_per_block) {
+            score_config.kernel_seq_size_per_block = score_config.seq_size_per_block;
+        }
+        if (propose_config.kernel_seq_size_per_block == 0
+            || propose_config.kernel_seq_size_per_block == propose_config.seq_size_per_block) {
+            propose_config.kernel_seq_size_per_block = propose_config.seq_size_per_block;
+        }
     }
 
     int num_mtp_modules = 1;

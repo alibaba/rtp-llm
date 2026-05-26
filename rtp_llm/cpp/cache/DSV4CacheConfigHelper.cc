@@ -42,6 +42,39 @@ struct DSV4PoolDesc {
     bool                    is_paged;
 };
 
+// DSV4 state pool ring sizing.
+//
+// Boundary writers (CSA / HCA / INDEXER) read the
+// ``window = (1 + overlap) * compress_ratio`` history positions just below
+// the current compression boundary. The state pool only needs that window
+// in flight, plus one MTP cycle's worth of in-progress draft tokens:
+// ``window + gen_num_per_cycle``. With rejection sampling the minimum
+// accept_len is 1 (sampling.cu), so +G is sufficient; the ceil-to-even
+// step in ``computeStateRing`` keeps ``R`` aligned and makes corner
+// conditions easier to reason about.
+//
+// gen_num_per_cycle = 0 (non-MTP path) still uses the same formula —
+// ring = ceil_even(window) — e.g. 8 entries for CSA/INDEXER (cr=4,ov=1)
+// and 128 for HCA (cr=128,ov=0). Each state pool is sized to exactly its
+// boundary-writer window; there is no longer a "one slot per kernel-block
+// token" (256-entry) layout for state pools.
+constexpr int kCsaCompressRatio     = 4;
+constexpr int kHcaCompressRatio     = 128;
+constexpr int kIndexerCompressRatio = 4;
+constexpr int kCsaOverlap           = 1;
+constexpr int kHcaOverlap           = 0;
+constexpr int kIndexerOverlap       = 1;
+
+inline uint32_t computeStateRing(int compress_ratio, int overlap, int gen_num_per_cycle) {
+    // gen_num_per_cycle is 0 for non-MTP and >=1 with rejection sampling under MTP;
+    // a negative value would silently shrink the ring window and corrupt state writes.
+    RTP_LLM_CHECK_WITH_INFO(
+        gen_num_per_cycle >= 0, "DSV4 state ring: gen_num_per_cycle must be >= 0, got %d", gen_num_per_cycle);
+    const int window = (1 + overlap) * compress_ratio;
+    const int raw    = window + gen_num_per_cycle;
+    return static_cast<uint32_t>((raw + 1) & ~1);  // ceil to even
+}
+
 DSV4LayerSets classifyDSV4Layers(const std::vector<int>& compress_ratios) {
     DSV4LayerSets sets;
     // ``compress_ratios`` must describe exactly the layers covered by this
@@ -76,7 +109,8 @@ DSV4LayerSets classifyDSV4Layers(const std::vector<int>& compress_ratios) {
 
 std::vector<DSV4PoolDesc> buildDSV4PoolDescs(const DSV4LayerSets& sets,
                                              const ModelConfig&   model_config,
-                                             uint32_t             kernel_tokens_per_block) {
+                                             uint32_t             kernel_tokens_per_block,
+                                             int                  gen_num_per_cycle) {
     const auto& attn         = model_config.attn_config;
     const auto  head_dim     = static_cast<uint32_t>(attn.size_per_head);
     const auto  idx_head_dim = static_cast<uint32_t>(attn.indexer_head_dim);
@@ -93,11 +127,22 @@ std::vector<DSV4PoolDesc> buildDSV4PoolDescs(const DSV4LayerSets& sets,
     const uint32_t kv_entry_bytes      = fp8_kv ? kDsv4KvEntryBytesFp8 : kDsv4KvEntryBytesBf16;
     const uint32_t indexer_entry_bytes = fp8_kv ? kDsv4IndexerEntryBytesFp8 : kDsv4IndexerEntryBytesBf16;
 
-    // entries_per_block stays at the kernel-block size (kernel/compress_ratio
-    // for paged compressed entries; kernel for state/SWA per-token slots) for every
-    // pool. The framework's bpk machinery uniformly expands each physical
-    // block into contiguous kernel sub-blocks, so kernels see the configured kernel block and block_table
-    // lengths are consistent across regions for the same token range.
+    // Paged KV/INDEXER pools and SWA stay sized to the configured kernel block
+    // (kernel/compress_ratio for compressed paged entries; kernel for SWA
+    // per-token slots). State pools (INDEXER_STATE / CSA_STATE / HCA_STATE) are
+    // ring-buffered: ``entries_per_block`` is sized to the boundary-writer
+    // history window plus one MTP cycle's worth of in-progress draft tokens
+    // (``computeStateRing``: ``ceil_even(window + gen_num_per_cycle)``).
+    // gen_num_per_cycle == 0 (non-MTP) still uses the same formula, giving
+    // ceil_even(window) = 8 entries for CSA/INDEXER and 128 for HCA — there
+    // is no "one slot per kernel-block token" layout.
+    //
+    // The framework's bpk machinery uniformly expands each physical block into
+    // contiguous kernel sub-blocks, so block_table indexing remains in kernel
+    // tokens even when entries_per_block on a state group is much smaller.
+    const uint32_t csa_state_eb     = computeStateRing(kCsaCompressRatio, kCsaOverlap, gen_num_per_cycle);
+    const uint32_t hca_state_eb     = computeStateRing(kHcaCompressRatio, kHcaOverlap, gen_num_per_cycle);
+    const uint32_t indexer_state_eb = computeStateRing(kIndexerCompressRatio, kIndexerOverlap, gen_num_per_cycle);
     return {
         {KVCacheRegionName::CSA_KV,
          &sets.csa_layers,
@@ -120,21 +165,11 @@ std::vector<DSV4PoolDesc> buildDSV4PoolDescs(const DSV4LayerSets& sets,
         {KVCacheRegionName::INDEXER_STATE,
          &sets.csa_layers,
          idx_state_dim * 2,
-         kernel_tokens_per_block,
+         indexer_state_eb,
          DataType::TYPE_FP32,
          false},
-        {KVCacheRegionName::CSA_STATE,
-         &sets.csa_layers,
-         csa_state_dim * 2,
-         kernel_tokens_per_block,
-         DataType::TYPE_FP32,
-         false},
-        {KVCacheRegionName::HCA_STATE,
-         &sets.hca_layers,
-         hca_state_dim * 2,
-         kernel_tokens_per_block,
-         DataType::TYPE_FP32,
-         false},
+        {KVCacheRegionName::CSA_STATE, &sets.csa_layers, csa_state_dim * 2, csa_state_eb, DataType::TYPE_FP32, false},
+        {KVCacheRegionName::HCA_STATE, &sets.hca_layers, hca_state_dim * 2, hca_state_eb, DataType::TYPE_FP32, false},
         {KVCacheRegionName::SWA_KV,
          &sets.all_layers,
          kv_entry_bytes,
@@ -171,9 +206,12 @@ KVCacheSpecPtr makeDSV4Spec(const DSV4PoolDesc& pool, uint32_t physical_tokens_p
 
 void DSV4CacheConfigHelper::applyConfig(CacheConfig&         config,
                                         const ModelConfig&   model_config,
-                                        const KVCacheConfig& kv_cache_config) {
-    RTP_LLM_LOG_INFO("Creating DSV4 typed hybrid-pool cache config with %zu compress_ratios",
-                     model_config.attn_config.layer_compress_ratios.size());
+                                        const KVCacheConfig& kv_cache_config,
+                                        int                  gen_num_per_cycle) {
+    RTP_LLM_LOG_INFO("Creating DSV4 typed hybrid-pool cache config with %zu compress_ratios, "
+                     "state ring slack=%d (gen_num_per_cycle)",
+                     model_config.attn_config.layer_compress_ratios.size(),
+                     gen_num_per_cycle);
 
     // DSV4 uses seq_size_per_block directly as its typed-pool block size.
     const auto user_seq_size = kv_cache_config.seq_size_per_block;
@@ -192,7 +230,7 @@ void DSV4CacheConfigHelper::applyConfig(CacheConfig&         config,
                      physical_tokens_per_block / kernel_tokens_per_block);
 
     const auto sets  = classifyDSV4Layers(model_config.attn_config.layer_compress_ratios);
-    const auto pools = buildDSV4PoolDescs(sets, model_config, kernel_tokens_per_block);
+    const auto pools = buildDSV4PoolDescs(sets, model_config, kernel_tokens_per_block, gen_num_per_cycle);
     RTP_LLM_CHECK_WITH_INFO(pools.size() == kDsv4PoolNum, "DSV4 must produce %zu pools", kDsv4PoolNum);
 
     config.layer_num                                = static_cast<uint32_t>(sets.all_layers.size());

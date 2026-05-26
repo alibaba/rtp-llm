@@ -364,6 +364,7 @@ class IndexerFP8(PoolBackedModule):
             self._state_pool_view,
             self._state_block_table,
             self._state_eb,
+            self._state_tokens_per_block,
         )
 
     def _clear_nested_pool(self) -> None:

@@ -115,6 +115,7 @@ def _bind_pools(
         state_pool_view=state_view_2d,
         state_block_table=state_block_table,
         state_eb=state_eb,
+        state_tokens_per_block=state_eb,
     )
     return state_view_2d, kv_pool_3d
 

@@ -36,6 +36,28 @@ from rtp_llm.models_py.modules.dsv4.attn_type import (
 )
 
 
+def _dsv4_kernel_tokens_per_block(kv_cache: Any) -> int:
+    """No-fallback accessor for KVCache.kernel_seq_size_per_block.
+
+    Mirrors the helper in dsv4/fp8/attention.py — surfaces the C++
+    propagation bug instead of silently writing ring buffer with the
+    wrong stride.
+    """
+    if kv_cache is None:
+        raise RuntimeError(
+            "DSV4 decode: kv_cache is None when sizing paged pool specs."
+        )
+    ksb = int(getattr(kv_cache, "kernel_seq_size_per_block", 0))
+    if ksb <= 0:
+        spb = int(getattr(kv_cache, "seq_size_per_block", 0))
+        grp = getattr(kv_cache, "group_region_names", None)
+        raise RuntimeError(
+            "DSV4 KVCache.kernel_seq_size_per_block is %d (expected >0). "
+            "seq_size_per_block=%d, group_region_names=%r." % (ksb, spb, grp)
+        )
+    return ksb
+
+
 def build_paged_pool_specs(
     kv_cache: Optional[Any],
     v4: Any,
@@ -71,9 +93,7 @@ def build_paged_pool_specs(
     # Framework's block_table width per pool. Add +1 slack for the same
     # reason the C++ allocator does (last-token-of-prefill + first-decode
     # may bridge a block boundary mid-step).
-    ksb = int(getattr(kv_cache, "kernel_seq_size_per_block", 0)) or int(
-        getattr(kv_cache, "seq_size_per_block", 64)
-    )
+    ksb = _dsv4_kernel_tokens_per_block(kv_cache)
     max_blocks_per_req = (max_seq_len + ksb - 1) // ksb + 1
     # ``_pool_entries_per_block`` reads ``self._kv_cache`` which is only
     # bound during ``Attention.forward_decode``'s try/finally. Caller
@@ -197,6 +217,7 @@ def build_metadata_eager(
             build_decode_metadata_fp8,
         )
 
+        ksb = _dsv4_kernel_tokens_per_block(kv_cache)
         return build_decode_metadata_fp8(
             attention_inputs=attn,
             q_len=q_len,
@@ -208,6 +229,7 @@ def build_metadata_eager(
             device=device,
             paged_block_tables=paged_block_tables or None,
             paged_pool_entries_per_block=paged_entries_per_block or None,
+            state_tokens_per_block=ksb,
         )
 
     # BF16 path: legacy ``build_decode_metadata`` takes a raw ``start_pos``

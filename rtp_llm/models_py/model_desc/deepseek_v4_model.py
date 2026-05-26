@@ -170,9 +170,7 @@ class MtpHiddenBufferStore:
     def _sync_subscribers(self) -> None:
         assert self._buffer is not None
         for module in self._subscribers:
-            module.register_buffer(
-                "_mtp_hidden_buffer", self._buffer, persistent=False
-            )
+            module.register_buffer("_mtp_hidden_buffer", self._buffer, persistent=False)
 
 
 def _args_from_model_config(
@@ -427,9 +425,7 @@ class DeepSeekV4Model(GptModelBase):
         cp_size = max(1, int(self._prefill_cp_size))
         if cp_size > 1:
             return (
-                cp_padded_tokens_per_rank_bound(
-                    int(self._v4_args.max_seq_len), cp_size
-                )
+                cp_padded_tokens_per_rank_bound(int(self._v4_args.max_seq_len), cp_size)
                 * self._max_context_batch_size
             )
         return self._v4_args.max_seq_len * self._max_context_batch_size
@@ -702,6 +698,7 @@ class DeepSeekV4Model(GptModelBase):
                     v4=self.v4,
                     v4_args=self._v4_args,
                     device=_jit_device,
+                    gen_num_per_cycle=self._gen_num_per_cycle,
                 )
                 _dense_shapes = _collect_dsv4_dense_gemm_shapes(self.v4)
                 _dense_gemm_prefill_chunk_size = 0
@@ -917,7 +914,18 @@ class DeepSeekV4Model(GptModelBase):
             else []
         )
 
-        cfg = _DecodeFmhaImplConfig(
+        if self.kv_cache is None:
+            raise RuntimeError(
+                "DSV4 prepare_decode_metadata: self.kv_cache is None; "
+                "C++ KVCacheManager must propagate KVCache before forward."
+            )
+        from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
+            require_kernel_tokens_per_block,
+        )
+
+        state_tpb = require_kernel_tokens_per_block(self.kv_cache)
+
+        cfg_kwargs = dict(
             max_batch_size=batch_size,
             q_len=q_len,
             window_size=int(self._v4_args.window_size),
@@ -930,6 +938,9 @@ class DeepSeekV4Model(GptModelBase):
             paged_pool_specs=paged_pool_specs,
             group_region_names=group_region_names_snapshot,
         )
+        if self.fp8_kv_cache:
+            cfg_kwargs["state_tokens_per_block"] = state_tpb
+        cfg = _DecodeFmhaImplConfig(**cfg_kwargs)
         impl = _DecodeFmhaImpl(
             cfg,
             device=device,
@@ -969,9 +980,7 @@ class DeepSeekV4Model(GptModelBase):
     def get_mtp_last_hidden_states(self, num_tokens: int) -> Optional[torch.Tensor]:
         if self.v4 is None:
             raise RuntimeError("DeepSeekV4Model: v4 transformer not initialized")
-        assert (
-            not self._is_decode_role
-        ), "decode MTP last-hidden reads are unsupported"
+        assert not self._is_decode_role, "decode MTP last-hidden reads are unsupported"
         buf = self.v4._mtp_last_hidden_buffer
         if buf is None:
             return None

@@ -130,6 +130,7 @@ def _bind_pools(
         state_pool_view=state_view_2d,
         state_block_table=state_block_table,
         state_eb=state_eb,
+        state_tokens_per_block=state_eb,
     )
     state_pool_3d = state_view_2d.view(state_total_blocks, state_eb, hidden)
     return state_pool_3d, kv_pool_3d, state_block_table
@@ -371,9 +372,9 @@ def _run_decode_long_position_cyclic_state_blocks(head_dim: int, label: str) -> 
     cp = pos // ratio
     block_id = 1 + (cp // kv_eb)
     in_block = cp % kv_eb
-    assert kv_pool_3d[block_id, in_block].any().item(), (
-        f"long-position {label} decode did not write the expected cyclic KV slot"
-    )
+    assert (
+        kv_pool_3d[block_id, in_block].any().item()
+    ), f"long-position {label} decode did not write the expected cyclic KV slot"
     print(f"  [{label} decode] long-position cyclic state block lookup OK")
 
 

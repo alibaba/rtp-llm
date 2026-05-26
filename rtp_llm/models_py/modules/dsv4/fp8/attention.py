@@ -161,6 +161,11 @@ def _force_all_cp_raw_q_merge() -> bool:
     )
 
 
+from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
+    require_kernel_tokens_per_block as _dsv4_kernel_tokens_per_block,
+)
+
+
 def _flat_1d(t: torch.Tensor) -> torch.Tensor:
     return t.reshape(-1).contiguous()
 
@@ -1559,8 +1564,15 @@ class AttentionFP8(nn.Module):
             state_eb = (
                 self._pool_entries_per_block(state_at) if state_at is not None else 0
             )
+            state_tpb = _dsv4_kernel_tokens_per_block(self._kv_cache)
             self.compressor.set_pool_context(
-                kv_view, kv_bt, kv_eb, state_view, state_bt, state_eb
+                kv_view,
+                kv_bt,
+                kv_eb,
+                state_view,
+                state_bt,
+                state_eb,
+                state_tokens_per_block=state_tpb,
             )
 
         if self.indexer is not None:
@@ -1571,8 +1583,15 @@ class AttentionFP8(nn.Module):
             state_view = self._pool_view(INDEXER_STATE)
             state_bt = bt_by_type.get(INDEXER_STATE) if bt_by_type is not None else None
             state_eb = self._pool_entries_per_block(INDEXER_STATE)
+            state_tpb = _dsv4_kernel_tokens_per_block(self._kv_cache)
             self.indexer.set_pool_context(
-                kv_view, kv_bt, kv_eb, state_view, state_bt, state_eb
+                kv_view,
+                kv_bt,
+                kv_eb,
+                state_view,
+                state_bt,
+                state_eb,
+                state_tokens_per_block=state_tpb,
             )
 
     def _clear_compressor_pool_context(self) -> None:

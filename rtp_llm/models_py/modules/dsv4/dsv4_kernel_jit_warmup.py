@@ -8,10 +8,10 @@ cold compiles are otherwise likely to happen after the health gate opens.
 
 from __future__ import annotations
 
-from functools import lru_cache, partial
 import logging
 import os
 import time
+from functools import lru_cache, partial
 from typing import Any, Dict, Iterable, Optional, Tuple
 
 import torch
@@ -176,9 +176,7 @@ def _deepgemm_warmup_lock_path() -> str:
         return os.path.join("/tmp", f"rtp_llm_dsv4_deepgemm_warmup_{os.getuid()}.lock")
 
 
-def _run_deepgemm_warmup_launches_serialized(
-    label: str, launch_fn: Any
-) -> None:
+def _run_deepgemm_warmup_launches_serialized(label: str, launch_fn: Any) -> None:
     """Serialize DeepGEMM dummy launches across rank processes sharing a cache."""
 
     import fcntl
@@ -326,6 +324,7 @@ def warmup_compressor_combine_branch_kernels(
     window_size: Optional[int] = None,
     topk: Optional[int] = None,
     overlap: Optional[bool] = None,
+    gen_num_per_cycle: int,
 ) -> None:
     """Compile batched/varlen Triton branches that B=1 gRPC warmup misses."""
 
@@ -352,7 +351,12 @@ def warmup_compressor_combine_branch_kernels(
             ),
         }
 
-    warmup_key = (configs["combine"], configs["compressor"], str(device))
+    warmup_key = (
+        configs["combine"],
+        configs["compressor"],
+        int(gen_num_per_cycle),
+        str(device),
+    )
     if warmup_key in _BRANCH_KERNEL_JIT_WARMED_KEYS:
         return
 
@@ -381,6 +385,7 @@ def warmup_compressor_combine_branch_kernels(
             compress_ratio=ratio,
             overlap=cfg_overlap,
             device=device,
+            gen_num_per_cycle=gen_num_per_cycle,
         )
     _sync_cuda(device)
     _dist_barrier()
@@ -445,8 +450,10 @@ def _warmup_fused_kv_compress_norm_rope_insert(
     compress_ratio: int,
     overlap: bool,
     device: torch.device,
+    gen_num_per_cycle: int,
 ) -> None:
     from rtp_llm.models_py.modules.dsv4.fp8._compressor_consts import (
+        DSV4_KERNEL_TOKENS_PER_BLOCK,
         INDEXER_ENTRY_BYTES,
         KV_ENTRY_BYTES,
     )
@@ -469,11 +476,17 @@ def _warmup_fused_kv_compress_norm_rope_insert(
     token_to_req = torch.zeros((num_tokens,), dtype=torch.int32, device=device)
     slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=device)
     kv_slot_mapping = torch.zeros((num_tokens,), dtype=torch.int64, device=device)
-    state_block_size = 256
+    # state_block_size is the kernel block size for state-pool block_table
+    state_block_size = DSV4_KERNEL_TOKENS_PER_BLOCK
+    assert (
+        gen_num_per_cycle >= 0
+    ), f"gen_num_per_cycle must be >= 0, got {gen_num_per_cycle}"
+    window = coff * compress_ratio
+    state_ring_entries = (window + gen_num_per_cycle + 1) & ~1
     state_blocks = max(max_position // state_block_size + 1, 1)
     block_table = torch.zeros((1, state_blocks), dtype=torch.int32, device=device)
     state_cache = torch.zeros(
-        (state_blocks, state_block_size, 2 * raw_width),
+        (state_blocks, state_ring_entries, 2 * raw_width),
         dtype=torch.float32,
         device=device,
     )
@@ -520,6 +533,7 @@ def _warmup_fused_kv_compress_norm_rope_insert(
             rope_head_dim=rope_head_dim,
             compress_ratio=compress_ratio,
             overlap=bool(overlap),
+            state_tokens_per_block=state_block_size,
             **kwargs,
         )
 
@@ -1221,6 +1235,7 @@ def warmup_dense_gemm_jit(
             "[DSV4 DenseGEMM] representative M grids: %s",
             {key: m_grids.get(key, ()) for key in shape_keys},
         )
+
     def _run_warmup_launches() -> None:
         for key in shape_keys:
             info = shapes[key]
@@ -1241,9 +1256,7 @@ def warmup_dense_gemm_jit(
             _release_cuda_cache(device)
 
     t0 = time.time()
-    _run_deepgemm_warmup_launches_serialized(
-        "DSV4 DenseGEMM", _run_warmup_launches
-    )
+    _run_deepgemm_warmup_launches_serialized("DSV4 DenseGEMM", _run_warmup_launches)
     if rank == 0:
         logging.info("[DSV4 DenseGEMM] JIT warmup done in %.2fs", time.time() - t0)
     _DENSE_GEMM_JIT_WARMED_KEYS.add(warmup_key)
@@ -1303,6 +1316,7 @@ def warmup_batched_fp8_einsum_jit(
             "[DSV4 BatchedFP8Einsum] representative M grids: %s",
             {key: m_grids.get(key, ()) for key in shape_keys},
         )
+
     def _run_warmup_launches() -> None:
         for key in shape_keys:
             info = shapes[key]
@@ -1387,6 +1401,7 @@ def warmup_mhc_prenorm_gemm_jit(
             "[DSV4 mHC DeepGEMM] representative split specs: %s",
             {key: specs_by_shape.get(key, ()) for key in shape_keys},
         )
+
     def _run_warmup_launches() -> None:
         for key in shape_keys:
             info = shapes[key]
@@ -1408,13 +1423,9 @@ def warmup_mhc_prenorm_gemm_jit(
             _release_cuda_cache(device)
 
     t0 = time.time()
-    _run_deepgemm_warmup_launches_serialized(
-        "DSV4 mHC DeepGEMM", _run_warmup_launches
-    )
+    _run_deepgemm_warmup_launches_serialized("DSV4 mHC DeepGEMM", _run_warmup_launches)
     if rank == 0:
-        logging.info(
-            "[DSV4 mHC DeepGEMM] JIT warmup done in %.2fs", time.time() - t0
-        )
+        logging.info("[DSV4 mHC DeepGEMM] JIT warmup done in %.2fs", time.time() - t0)
     _MHC_PRENORM_GEMM_JIT_WARMED_KEYS.add(warmup_key)
 
 
@@ -1462,13 +1473,9 @@ def warmup_fp8_mqa_logits_jit(
             _release_cuda_cache(device)
 
     t0 = time.time()
-    _run_deepgemm_warmup_launches_serialized(
-        "DSV4 FP8MQALogits", _run_warmup_launches
-    )
+    _run_deepgemm_warmup_launches_serialized("DSV4 FP8MQALogits", _run_warmup_launches)
     if rank == 0:
-        logging.info(
-            "[DSV4 FP8MQALogits] JIT warmup done in %.2fs", time.time() - t0
-        )
+        logging.info("[DSV4 FP8MQALogits] JIT warmup done in %.2fs", time.time() - t0)
     _FP8_MQA_LOGITS_JIT_WARMED_KEYS.add(warmup_key)
 
 
