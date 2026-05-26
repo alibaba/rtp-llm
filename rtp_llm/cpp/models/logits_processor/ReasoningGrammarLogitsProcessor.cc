@@ -12,31 +12,7 @@
 namespace rtp_llm {
 namespace {
 
-constexpr int32_t kInvalidTokenId           = -1;
-constexpr int32_t kDeepSeekNewlineTokenId   = 201;
-constexpr int32_t kDeepSeekBlankLineTokenId = 271;
-constexpr int32_t kQwenGlmNewlineTokenId    = 198;
-
-bool isBoundaryPaddingToken(int32_t token_id) {
-    return token_id == kDeepSeekNewlineTokenId || token_id == kDeepSeekBlankLineTokenId
-           || token_id == kQwenGlmNewlineTokenId;
-}
-
-std::vector<int> normalizeThinkEndTokenIds(const std::vector<int>& end_think_token_ids) {
-    if (end_think_token_ids.size() <= 1) {
-        return end_think_token_ids;
-    }
-
-    size_t begin = 0;
-    size_t end   = end_think_token_ids.size();
-    while (begin + 1 < end && isBoundaryPaddingToken(end_think_token_ids[begin])) {
-        ++begin;
-    }
-    while (begin + 1 < end && isBoundaryPaddingToken(end_think_token_ids[end - 1])) {
-        --end;
-    }
-    return std::vector<int>(end_think_token_ids.begin() + begin, end_think_token_ids.begin() + end);
-}
+constexpr int32_t kInvalidTokenId = -1;
 
 int32_t firstTokenOrInvalid(const std::vector<int>& token_ids) {
     return token_ids.empty() ? kInvalidTokenId : token_ids.front();
@@ -213,22 +189,21 @@ void advanceThinkStateForSpec(StreamThinkInfo& info, int32_t token_id) {
 
 ReasoningGrammarLogitsProcessor::ReasoningGrammarLogitsProcessor(std::shared_ptr<RtpGrammarMatcher> matcher,
                                                                  int64_t                            eos_token_id,
-                                                                 int max_thinking_tokens,
+                                                                 int                                max_thinking_tokens,
                                                                  std::vector<int> begin_think_token_ids,
                                                                  std::vector<int> end_think_token_ids,
                                                                  int32_t          input_length,
-                                                                 ErrorReporter error_reporter):
+                                                                 ErrorReporter    error_reporter):
     matcher_(std::move(matcher)), eos_token_id_(eos_token_id), error_reporter_(std::move(error_reporter)) {
-    auto normalized_end_think_token_ids = normalizeThinkEndTokenIds(end_think_token_ids);
-    think_info_.in_think_mode           = true;
-    think_info_.max_thinking_tokens     = max_thinking_tokens;
-    think_info_.begin_think_token_ids   = std::move(begin_think_token_ids);
-    think_info_.end_think_token_ids     = normalized_end_think_token_ids;
-    think_info_.input_length            = input_length;
-    think_info_.current_output_length   = 0;
-    think_info_.is_beam_search          = false;
-    if (!normalized_end_think_token_ids.empty()) {
-        think_info_.dfa_ptr = std::make_shared<StringContainDFA<size_t, int>>(normalized_end_think_token_ids);
+    think_info_.in_think_mode         = true;
+    think_info_.max_thinking_tokens   = max_thinking_tokens;
+    think_info_.begin_think_token_ids = std::move(begin_think_token_ids);
+    think_info_.end_think_token_ids   = end_think_token_ids;
+    think_info_.input_length          = input_length;
+    think_info_.current_output_length = 0;
+    think_info_.is_beam_search        = false;
+    if (!end_think_token_ids.empty()) {
+        think_info_.dfa_ptr = std::make_shared<StringContainDFA<size_t, int>>(end_think_token_ids);
     }
     think_info_.process_state = think_info_.dfa_ptr ? ThinkProcessState::IN_THINK : ThinkProcessState::NO_THINK;
 }
@@ -266,9 +241,8 @@ void ReasoningGrammarLogitsProcessor::processSpeculative(const SamplerInputs&   
         process(inputs, start_idx, finish_idx);
         return;
     }
-    reportErrorOnce(ErrorCode::INVALID_PARAMS,
-                    "reasoning grammar speculative path requires precomputed MTP verify bitmask",
-                    false);
+    reportErrorOnce(
+        ErrorCode::INVALID_PARAMS, "reasoning grammar speculative path requires precomputed MTP verify bitmask", false);
 }
 
 void ReasoningGrammarLogitsProcessor::updateMultiSeqStatus(const std::vector<int>& src_batch_indices) {
@@ -351,8 +325,7 @@ int ReasoningGrammarLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsPro
 
         const int32_t grammar_vocab_size = matcher_->vocabSize();
         const size_t  grammar_words      = SpecLogitsProcessor::bitmaskWordCount(grammar_vocab_size);
-        RTP_LLM_CHECK_WITH_INFO(
-            grammar_words <= W, "grammar vocab bitmask exceeds model vocab bitmask in MTP verify");
+        RTP_LLM_CHECK_WITH_INFO(grammar_words <= W, "grammar vocab bitmask exceeds model vocab bitmask in MTP verify");
 
         DLTensor dl = makeSingleRowBitmaskView(row, static_cast<int32_t>(grammar_words));
         if (!matcher_->fillBitmask(&dl, 0)) {
@@ -524,8 +497,7 @@ void ReasoningGrammarLogitsProcessor::acceptCommittedGrammarTokenLocked(int32_t 
     if (matcher_->isTerminated()) {
         if (token_id != eos_token_id_) {
             reportErrorOnce(ErrorCode::INVALID_PARAMS,
-                            "reasoning grammar received non-EOS token after terminal state "
-                                + std::to_string(token_id),
+                            "reasoning grammar received non-EOS token after terminal state " + std::to_string(token_id),
                             true);
             return;
         }
@@ -541,8 +513,8 @@ void ReasoningGrammarLogitsProcessor::acceptCommittedGrammarTokenLocked(int32_t 
 }
 
 void ReasoningGrammarLogitsProcessor::reportErrorOnce(ErrorCode          error_code,
-                                                     const std::string& error_msg,
-                                                     bool               stream_lock_held) {
+                                                      const std::string& error_msg,
+                                                      bool               stream_lock_held) {
     if (reported_error_.exchange(true)) {
         return;
     }
@@ -555,7 +527,8 @@ void ReasoningGrammarLogitsProcessor::reportErrorOnce(ErrorCode          error_c
 
 void ReasoningGrammarLogitsProcessor::forceToken(const torch::Tensor& logits, int64_t token_id) {
     if (token_id < 0 || token_id >= logits.size(0)) {
-        reportErrorOnce(ErrorCode::INVALID_PARAMS, "reasoning grammar forced token is out of logits vocab range", false);
+        reportErrorOnce(
+            ErrorCode::INVALID_PARAMS, "reasoning grammar forced token is out of logits vocab range", false);
         return;
     }
     logits.fill_(BaseLogitsProcessor::neg_inf);
