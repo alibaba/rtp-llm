@@ -406,6 +406,10 @@ def _apply_request_overrides(
         generate_config.ttft_timeout_ms = int(other.timeout_ms)
     if other.traffic_reject_priority is not None:
         generate_config.traffic_reject_priority = int(other.traffic_reject_priority)
+    if other.reasoning_effort is not None:
+        kwargs = dict(getattr(generate_config, "chat_template_kwargs", None) or {})
+        kwargs["reasoning_effort"] = other.reasoning_effort
+        generate_config.chat_template_kwargs = kwargs
 
 
 def _debug_score_token_ids_from_request(request: Any) -> list[int]:
