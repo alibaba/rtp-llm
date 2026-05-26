@@ -50,6 +50,9 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
     pd_sep_config_(pd_sep_config),
     cache_store_config_(cache_store_config),
     use_cuda_malloc_block_pool_(use_cuda_malloc_block_pool) {
+    if (config_.state_block_size_bytes > 0) {
+        config_.state_pool_uses_pinned_cpu = kv_cache_config_.dsv4_state_pool_use_memory;
+    }
     if (warmup) {
         config_.block_num = 1;
     } else {
@@ -713,10 +716,7 @@ void KVCacheManager::allocateAndSync() {
         }
     }
     if (config_.use_independent_block_pools) {
-        const auto global_block_num = static_cast<uint32_t>(config_.block_num);
-        const auto state_block_num  = config_.state_pool_uses_pinned_cpu ? config_.state_block_num : global_block_num;
-        config_.state_block_num     = state_block_num;
-        config_.finalizeBlockNums(global_block_num, state_block_num, runtime_config_);
+        config_.finalizeBlockNums(static_cast<uint32_t>(config_.block_num), runtime_config_);
     }
     RTP_LLM_LOG_INFO("block_num is %d after tp sync", config_.block_num);
 }

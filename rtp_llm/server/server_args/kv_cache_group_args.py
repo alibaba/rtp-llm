@@ -385,26 +385,19 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         "不填或填 0 时自动计算为 min(max_context_batch_size * max_seq_len, max_batch_tokens_size) / seq_size_per_block。",
     )
     kv_cache_group.add_argument(
-        "--non_full_addition_kvcache_blocks",
-        env_name="NON_FULL_ADDITION_KVCACHE_BLOCKS",
-        bind_to=(kv_cache_config, "non_full_addition_kvcache_blocks"),
-        type=int,
-        default=256,
-        help="对每个非-FULL group（SWA / LINEAR）与 step>1 时的 memory incomplete pool，"
-        "在规则分配的 block_num 之外额外追加的固定 block 数，"
-        "作为并发请求 tail block 与 prefix cache 命中场景的 headroom。"
-        "每个非-FULL pool 实际容量 = 规则 block_num + 本参数。"
-        "device 侧无论 linear_step 都生效；host incomplete pool 只在 linear_step>1 时生效。设为 0 关闭。",
-    )
-    kv_cache_group.add_argument(
-        "--state_pool_memory_mb",
-        env_name="STATE_POOL_MEMORY_MB",
-        bind_to=(kv_cache_config, "state_pool_memory_mb"),
+        "--dsv4_fixed_pool_blocks",
+        env_name="DSV4_FIXED_POOL_BLOCKS",
+        bind_to=(kv_cache_config, "dsv4_fixed_pool_blocks"),
         type=int,
         default=0,
-        help="DSV4 STATE pools (INDEXER_STATE/CSA_STATE/HCA_STATE) CPU pinned BlockPool 的"
-        "每-rank 内存预算，单位 MiB（按 1024*1024 折算，与 KV_CACHE_MEM_MB 一致）。"
-        "0 表示不显式指定，STATE pool block_num 沿用 KV pool block_num（向后兼容）。"
-        "设置为 >0 时，STATE pool block_num = floor(state_pool_memory_mb * 1024 * 1024 / "
-        "Σstate_block_size_bytes)，与 HBM 派生的 block_num 解耦。",
+        help="DSV4 固定池 block 数。>0 时用于 INDEXER_STATE/CSA_STATE/HCA_STATE/SWA_KV 四个 pool；"
+        "不配置或配置为 0 时，这四个 pool 按 linear_step 派生 block 数，并保持一致。",
+    )
+    kv_cache_group.add_argument(
+        "--dsv4_state_pool_use_memory",
+        env_name="DSV4_STATE_POOL_USE_MEMORY",
+        bind_to=(kv_cache_config, "dsv4_state_pool_use_memory"),
+        type=str2bool,
+        default=False,
+        help="DSV4 三个 STATE pool 是否使用 pinned CPU memory。False 表示继续使用 GPU memory。",
     )

@@ -184,17 +184,14 @@ struct KVCacheConfig {
     int64_t device_cache_min_free_blocks = 0;
     int     load_cache_retry_times       = 1;  // Maximum retry attempts for load cache transfer failures
 
-    // Extra blocks added to every non-FULL group (SWA / LINEAR) on device side
-    // and to the memory incomplete pool when linear_step > 1.
-    // Each non-FULL pool gets: rule_blocks + non_full_addition_kvcache_blocks.
-    uint32_t non_full_addition_kvcache_blocks = 256;
+    // DSV4 fixed-allocation pool block count. 0 means the fixed regions
+    // (INDEXER_STATE / CSA_STATE / HCA_STATE / SWA_KV) use the normal
+    // linear-step-derived block count.
+    uint32_t dsv4_fixed_pool_blocks = 0;
 
-    // Per-rank CPU pinned memory budget (in MiB) for DSV4 STATE pools
-    // (INDEXER_STATE / CSA_STATE / HCA_STATE). 0 = STATE block_num falls
-    // back to the HBM-derived block_num (legacy parity); >0 = STATE pools
-    // are sized independently from HBM by floor(state_pool_memory_mb *
-    // 1024 * 1024 / Σstate_block_size_bytes).
-    int64_t state_pool_memory_mb = 0;
+    // DSV4 STATE pool residency switch. false = GPU BlockPool; true = pinned
+    // CPU BlockPool for INDEXER_STATE / CSA_STATE / HCA_STATE.
+    bool dsv4_state_pool_use_memory = false;
 
     // Remote connector configuration fields
     bool        reco_enable_vipserver                = false;
