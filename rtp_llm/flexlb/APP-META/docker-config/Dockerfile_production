@@ -10,6 +10,8 @@ RUN echo whale_wave_prod > /etc/ilogtail/user_defined_id && \
 echo whale_wave_prod > /etc/uniagent/user_defined_id
 
 
+COPY environment/common/bin/ /home/admin/${APP_NAME}/bin/
+RUN chmod +x /home/admin/${APP_NAME}/bin/*.sh
 #以下内容为集团安全部应用安全能力中心自动修复添加，用于静态部署RASP
 COPY environment/common/bin/RASP.sh /home/admin
 

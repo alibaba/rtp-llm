@@ -178,7 +178,7 @@ class DefaultRouterTest {
 
         assertTrue(response.isSuccess(), "Response should be successful");
         verify(cacheMetricsReporter).reportRecentCacheKeyHitMetrics(
-                RecentCacheKeyWindow.DEFAULT_TIME_WINDOW_MS, 0L, 3L, 0.0);
+                RecentCacheKeyWindow.DEFAULT_TIME_WINDOW_MS, 0L, 3L);
     }
 
     @Test
@@ -205,7 +205,7 @@ class DefaultRouterTest {
 
         assertTrue(response.isSuccess(), "Response should be successful");
         verify(cacheMetricsReporter).reportRecentCacheKeyHitMetrics(
-                RecentCacheKeyWindow.DEFAULT_TIME_WINDOW_MS, 0L, 0L, 0.0);
+                RecentCacheKeyWindow.DEFAULT_TIME_WINDOW_MS, 0L, 0L);
     }
 
     @Test

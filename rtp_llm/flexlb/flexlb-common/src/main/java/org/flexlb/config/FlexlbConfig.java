@@ -48,6 +48,12 @@ public class FlexlbConfig {
      */
     private long cacheHitTimeWindowMs = 30L * 60L * 1000L;
 
+    /**
+     * Maximum cache-key occurrences retained by the recent cache-key pool.
+     * Environment override: CACHE_HIT_MAX_CACHE_KEYS.
+     */
+    private long cacheHitMaxCacheKeys = 10_000_000L;
+
     // ========== Queue Configuration ==========
 
     /**

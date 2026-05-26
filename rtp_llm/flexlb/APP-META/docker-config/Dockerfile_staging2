@@ -7,7 +7,7 @@ ENV SERVICE_OPTS="${SERVICE_OPTS} -Dspring.profiles.active=pre -Dwhale.api.role=
 ENV SKIP_CHECK_STATUS_TAOBAO="true"
 
 COPY environment/common/bin/appctl.sh /home/admin/appctl.sh
-COPY environment/common/bin/appctl.sh /home/admin/$APP_NAME/bin/appctl.sh
+COPY environment/common/bin/ /home/admin/${APP_NAME}/bin/
 
 RUN echo whale_wave_pre > /etc/ilogtail/user_defined_id && \
 echo whale_wave_pre > /etc/uniagent/user_defined_id && \
