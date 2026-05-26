@@ -97,8 +97,25 @@ class MagaServerManager(object):
             return None
 
     def wait_sever_done(self, timeout: int = 1600):
-        # currently we can not check vit server health, assume it is ready, xieshui will fix it
         if int(self._env_args.get("VIT_SEPARATION", "0")) == 1:
+            # VIT role does not expose the normal HTTP health check. Let slow VIT
+            # startup finish when a smoke case explicitly asks for a grace period.
+            wait_seconds = int(self._env_args.get("VIT_STARTUP_WAIT_SECONDS", "0"))
+            if wait_seconds > 0:
+                logging.info("waiting %ss for VIT server startup", wait_seconds)
+                deadline = time.time() + wait_seconds
+                while time.time() < deadline:
+                    rc = self._server_process.poll() if self._server_process else None
+                    if rc is not None:
+                        self._exit_code = rc
+                        logging.warning(
+                            "VIT server process pid=%s exited with code %s during startup wait",
+                            self.server_pid,
+                            rc,
+                        )
+                        self.print_process_log(max_lines=200)
+                        return False
+                    time.sleep(1)
             return True
 
         from rtp_llm.utils.util import wait_sever_done
@@ -111,7 +128,11 @@ class MagaServerManager(object):
             if rc is not None:
                 if rc < 0:
                     sig = -rc
-                    sig_name = signal_mod.Signals(sig).name if sig in signal_mod.Signals._value2member_map_ else f"signal {sig}"
+                    sig_name = (
+                        signal_mod.Signals(sig).name
+                        if sig in signal_mod.Signals._value2member_map_
+                        else f"signal {sig}"
+                    )
                     logging.warning(
                         f"Server process pid={self._server_process.pid} killed by {sig_name} (exit code {rc})"
                     )
@@ -307,7 +328,10 @@ class MagaServerManager(object):
                         all_lines = f.readlines()
                         content = "".join(all_lines[-max_lines:])
                         if len(all_lines) > max_lines:
-                            content = f"... ({len(all_lines) - max_lines} lines truncated)\n" + content
+                            content = (
+                                f"... ({len(all_lines) - max_lines} lines truncated)\n"
+                                + content
+                            )
                     else:
                         content = f.read()
                 if content:

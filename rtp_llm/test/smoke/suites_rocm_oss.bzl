@@ -63,6 +63,27 @@ def rocm_oss_suites():
     )
 
 
+    # ROCm VL / Multimodal (Qwen3-VL dense)
+    native.test_suite(
+        name = "smoke_rocm_vl",
+        tests = [
+            smoke_test(
+                name="rocm_vl_qwen3_vl_4b",
+                task_info="data/model/qwen_vl/q_r_3_rocm.json",
+                smoke_args = {
+                    "llm": "--act_type BF16 --use_local 1 --tp_size 1 --world_size 1 --seq_size_per_block 16 --warm_up 0 --disable_flash_infer 1 --use_aiter_pa 1 --use_asm_pa 0 --enable_cuda_graph 1 --enable_cuda_graph_debug_mode 1 --decode_capture_config '1,2'",
+                    "vit": "--act_type BF16 --use_local 1 --warm_up 0",
+                },
+                envs = {
+                    "llm": ["RTP_LLM_VISION_ATTN_IMPL=sdpa"],
+                    "vit": ["RTP_LLM_VISION_ATTN_IMPL=sdpa", "VIT_STARTUP_WAIT_SECONDS=90"],
+                },
+                gpu_type=["MI308X-ROCM7"],
+            ),
+        ],
+    )
+
+
     # ROCm MoE (Qwen3-30B MoE)
     native.test_suite(
         name = "smoke_rocm_moe",
@@ -182,4 +203,3 @@ def rocm_oss_suites():
             ),
         ],
     )
-

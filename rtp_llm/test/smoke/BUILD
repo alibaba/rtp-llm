@@ -53,6 +53,7 @@ test_suite(
         ":smoke_cuda_remote_cache",
         ":smoke_rocm_basic",
         ":smoke_rocm_dense",
+        ":smoke_rocm_vl",
         ":smoke_rocm_moe",
         ":smoke_rocm_eagle",
         ":smoke_rocm_pd",
