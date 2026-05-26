@@ -107,6 +107,8 @@ class FrontendWorker:
             vit_separation=vit_separation,
             server_config=py_env_configs.server_config,
             master_config=py_env_configs.master_config,
+            parallelism_config=engine_config.parallelism_config,
+            prefill_cp_config=py_env_configs.prefill_cp_config,
         )
         self.backend_rpc_server_visitor = self.pipeline.backend_rpc_server_visitor
         self.generate_env_config = py_env_configs.generate_env_config

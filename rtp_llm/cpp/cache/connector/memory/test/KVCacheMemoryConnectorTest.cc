@@ -2717,14 +2717,13 @@ TEST_F(KVCacheMemoryConnectorDualPoolTest, PoolSizing_JointCalculation) {
     auto conn = createConnector(cfg);
     ASSERT_TRUE(conn->isDualPool());
 
-    // With linear_step=4: computed incomplete = 3 * computed complete.
-    // totalBlocksNum() = block_num - 1 (reserves block 0), so the exact ratio
-    // is (3*N - 1) / (N - 1) ≈ 3. Check within tolerance of the reserve offset.
+    // With linear_step=4: incomplete_num = complete_num * 3 + addition.
+    // totalBlocksNum() reports allocatable blocks and excludes reserved block 0.
     const auto complete_total   = conn->complete_pool_->totalBlocksNum();
     const auto incomplete_total = conn->incomplete_pool_->totalBlocksNum();
     EXPECT_GT(complete_total, 0u);
     EXPECT_GT(incomplete_total, 0u);
-    EXPECT_NEAR(static_cast<double>(incomplete_total), static_cast<double>(complete_total) * 3.0, 3.0);
+    EXPECT_EQ(incomplete_total, (complete_total + 1) * 3 + kv_cache_config_.non_full_addition_kvcache_blocks - 1);
 }
 
 TEST_F(KVCacheMemoryConnectorDualPoolTest, InitDiskDualPools_MirrorsMemoryPoolRatioOnSameMount) {
@@ -2898,9 +2897,9 @@ TEST_F(KVCacheMemoryConnectorDualPoolTest, Init_AdditionIncreasesIncompletePoolS
     // Incomplete pool = complete_num * (step-1) + addition, so it gains addition
     // but loses some from reduced complete_num. Net: incomplete increases.
     EXPECT_GT(incomplete_with, incomplete_without);
-    // Verify the formula: incomplete = complete * (step-1) + addition
-    EXPECT_EQ(incomplete_with, complete_with * static_cast<size_t>(linear_step - 1) + addition);
-    EXPECT_EQ(incomplete_without, complete_without * static_cast<size_t>(linear_step - 1));
+    // Verify the formula in allocatable block counts: BlockPool reserves block 0.
+    EXPECT_EQ(incomplete_with, (complete_with + 1) * static_cast<size_t>(linear_step - 1) + addition - 1);
+    EXPECT_EQ(incomplete_without, (complete_without + 1) * static_cast<size_t>(linear_step - 1) - 1);
 }
 
 }  // namespace rtp_llm::test

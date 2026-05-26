@@ -11,6 +11,7 @@ from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.ops import SpeculativeExecutionConfig, VitSeparation, get_block_cache_keys
+from rtp_llm.server.cache_key_routing import route_cache_keys_for_page_rr
 from rtp_llm.server.host_service import HostService, HostServiceArgs
 from rtp_llm.server.master_client import FlexlbResponse, MasterClient
 from rtp_llm.server.misc import format_exception
@@ -36,6 +37,8 @@ class BackendRPCServerVisitor:
         vit_separation: Optional[VitSeparation] = None,  # Optional VitSeparation
         server_config=None,
         master_config=None,
+        parallelism_config=None,
+        prefill_cp_config=None,
     ) -> None:
         """Initialize BackendRPCServerVisitor.
 
@@ -49,6 +52,8 @@ class BackendRPCServerVisitor:
             vit_separation: Optional VitSeparation for multimodal models
             server_config: Optional ServerConfig for master configuration
             master_config: Optional MasterConfig for master client configuration
+            parallelism_config: Optional ParallelismConfig for page-RR route cache keys
+            prefill_cp_config: Optional PrefillCPConfig for page-RR route cache keys
         """
         self.max_seq_len = max_seq_len
         self.seq_size_per_block = seq_size_per_block
@@ -79,6 +84,17 @@ class BackendRPCServerVisitor:
         )
         self.host_service = HostService(host_args)
         self.master_config = master_config
+        self._page_rr_route_cache_keys = False
+        self._page_rr_cp_size = 1
+        if parallelism_config is not None:
+            cp_config = prefill_cp_config or getattr(
+                parallelism_config, "prefill_cp_config", None
+            )
+            tp_size = int(getattr(parallelism_config, "tp_size", 1) or 1)
+            kv_cache_sharded = bool(getattr(cp_config, "kv_cache_sharded", False))
+            if kv_cache_sharded and tp_size > 1:
+                self._page_rr_route_cache_keys = True
+                self._page_rr_cp_size = tp_size
         self.master_client = MasterClient(
             host_service=self.host_service,
             server_config=server_config,
@@ -144,7 +160,11 @@ class BackendRPCServerVisitor:
             if len(input.token_ids.shape) == 2
             else input.token_ids.tolist()
         )
-        block_cache_keys = get_block_cache_keys(token_ids, self.seq_size_per_block)
+        # Keep hash generation at the physical KV block granularity. Page-RR
+        # routing samples canonical keys from this full logical-block key list;
+        # it must not recompute request hashes with the virtual block size.
+        full_block_cache_keys = get_block_cache_keys(token_ids, self.seq_size_per_block)
+        block_cache_keys = self._route_cache_keys(full_block_cache_keys)
         self._report_recent_cache_key_metrics(block_cache_keys)
 
         try:
@@ -207,6 +227,11 @@ class BackendRPCServerVisitor:
             )
         except Exception:
             route_logger.exception("failed to report recent cache key metrics")
+
+    def _route_cache_keys(self, block_cache_keys: List[int]) -> List[int]:
+        return route_cache_keys_for_page_rr(
+            block_cache_keys, self._page_rr_route_cache_keys, self._page_rr_cp_size
+        )
 
     async def get_domain_route_addrs(self, input: GenerateInput):
         specified_roles = {addr.role for addr in input.generate_config.role_addrs}
@@ -456,4 +481,6 @@ def create_backend_rpc_server_visitor(
         vit_separation=vit_separation,
         server_config=py_env_configs.server_config,
         master_config=py_env_configs.master_config,
+        parallelism_config=engine_config.parallelism_config,
+        prefill_cp_config=py_env_configs.prefill_cp_config,
     )

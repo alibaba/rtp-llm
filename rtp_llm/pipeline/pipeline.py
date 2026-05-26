@@ -58,6 +58,8 @@ class Pipeline(object):
         vit_separation: Optional[VitSeparation] = None,  # Optional VitSeparation
         server_config=None,
         master_config=None,
+        parallelism_config=None,
+        prefill_cp_config=None,
     ):
         self.pd_sep_config = pd_sep_config
         self.tokenizer = tokenizer
@@ -78,6 +80,8 @@ class Pipeline(object):
             vit_separation=vit_separation,
             server_config=server_config,
             master_config=master_config,
+            parallelism_config=parallelism_config,
+            prefill_cp_config=prefill_cp_config,
         )
 
     async def close(self):

@@ -111,6 +111,22 @@ TEST_F(KVCacheManagerCPSlotMapperTest, CPShardingEnabled_ReturnsValidMapper) {
     EXPECT_EQ(mapper->virtualBlockSize(), seq_size_per_block * 2);
 }
 
+TEST_F(KVCacheManagerCPSlotMapperTest, CPShardingEnabled_CacheInfoReportsVirtualBlockSize) {
+    const int seq_size_per_block = 4;
+    auto      config             = makeTestConfig(/*block_num=*/20, seq_size_per_block);
+
+    ParallelismConfig par;
+    par.tp_rank                            = 0;
+    par.tp_size                            = 4;
+    par.prefill_cp_config.kv_cache_sharded = true;
+
+    auto mgr = std::make_shared<KVCacheManager>(config, /*warmup=*/true, nullptr, KVCacheConfig{}, par);
+    ASSERT_TRUE(mgr->init());
+
+    auto info = mgr->getKVCacheInfo(/*latest_version=*/-1, /*need_cache_keys=*/false);
+    EXPECT_EQ(info.block_size, static_cast<size_t>(seq_size_per_block * par.tp_size));
+}
+
 // Partial tails may be allocated as live KV blocks before they become cacheable
 // full blocks. CP invariants must therefore be based on logical sequence length,
 // not cacheKeys().size().
