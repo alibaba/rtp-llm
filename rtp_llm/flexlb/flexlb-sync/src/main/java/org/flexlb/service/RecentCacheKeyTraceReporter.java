@@ -2,6 +2,7 @@ package org.flexlb.service;
 
 import org.flexlb.cache.core.RecentCacheKeyWindow;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -20,13 +21,18 @@ public class RecentCacheKeyTraceReporter {
         if (balanceContext == null) {
             return;
         }
+        FlexlbConfig config = balanceContext.getConfig();
+        if (config != null && !config.isCacheHitWindowWriteEnabled()) {
+            return;
+        }
+
         Request request = balanceContext.getRequest();
         if (request == null || recentCacheKeyWindow == null) {
             return;
         }
 
         RecentCacheKeyWindow.Snapshot snapshot = recentCacheKeyWindow.record(request.getBlockCacheKeys());
-        if (cacheMetricsReporter == null) {
+        if (cacheMetricsReporter == null || (config != null && !config.isCacheHitMetricReportEnabled())) {
             return;
         }
 
