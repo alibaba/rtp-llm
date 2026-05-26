@@ -1,4 +1,5 @@
 import copy
+import os
 from typing import Any, Dict, Optional
 
 import aiter
@@ -24,6 +25,32 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
     MoeConfigResolver,
 )
 from rtp_llm.utils.model_weight import W
+
+_USE_DETERMINISTIC_MOE = os.environ.get("DETERMINISTIC_MOE", "0") == "1"
+
+
+def _deterministic_moe_flatten(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    activation: "aiter.ActivationType",
+    expert_mask: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    M, topk = topk_ids.shape
+    model_dim = hidden_states.shape[1]
+
+    hidden_expanded = hidden_states.unsqueeze(1).expand(M, topk, model_dim).reshape(M * topk, model_dim).contiguous()
+    topk_ids_flat = topk_ids.reshape(M * topk, 1).contiguous()
+    topk_weights_flat = topk_weights.reshape(M * topk, 1).contiguous()
+
+    out_flat = fused_moe(
+        hidden_expanded, w1, w2, topk_weights_flat, topk_ids_flat,
+        activation=activation, expert_mask=expert_mask,
+    )
+
+    return out_flat.view(M, topk, model_dim).sum(dim=1)
 
 
 def _moe_activation_type(activation: str) -> aiter.ActivationType:
@@ -138,15 +165,26 @@ class RocmExpertsBf16(FusedMoeExpertExecutor):
             hidden_states = hidden_states * topk_weights.to(hidden_states.dtype)
             topk_weights = torch.ones_like(topk_weights, dtype=torch.float32)
 
-        output = fused_moe(
-            hidden_states,
-            self.w1,
-            self.w2,
-            topk_weights,
-            topk_ids,
-            activation=_moe_activation_type(activation),
-            expert_mask=effective_expert_mask,
-        )
+        if _USE_DETERMINISTIC_MOE:
+            output = _deterministic_moe_flatten(
+                hidden_states,
+                self.w1,
+                self.w2,
+                topk_weights,
+                topk_ids,
+                activation=_moe_activation_type(activation),
+                expert_mask=effective_expert_mask,
+            )
+        else:
+            output = fused_moe(
+                hidden_states,
+                self.w1,
+                self.w2,
+                topk_weights,
+                topk_ids,
+                activation=_moe_activation_type(activation),
+                expert_mask=effective_expert_mask,
+            )
 
         return CombineForwardPayload(fused_expert_output=output)
 
