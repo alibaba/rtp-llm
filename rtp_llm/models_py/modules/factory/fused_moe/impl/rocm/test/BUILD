@@ -49,21 +49,23 @@ py_test (
     exec_properties = {'gpu':'MI308X-ROCM7'},
 )
 
-# Quark MXFP4 fused_moe requires gfx950 (MI355). Disabled until CI/customer has
-# MI355 pools. Use tag rocm_gfx950 (not rocm) so bulk MI308 ROCm CI does not
-# pick this up; run explicitly with --test_tag_filters=rocm_gfx950 on MI355.
-# py_test (
-#     name = "rocm_mxfp4_fused_moe_test",
-#     srcs = ["rocm_mxfp4_fused_moe_test.py"],
-#     deps = [
-#         "//rtp_llm/models_py:models",
-#         "//rtp_llm:config",
-#         "//rtp_llm:testlib",
-#     ],
-#     timeout = "eternal",
-#     tags = ["rocm_gfx950"],
-#     exec_properties = {'gpu':'MI355X-ROCM7'},
-# )
+# Quark MXFP4 fused_moe numerical test (MI355 / gfx950 only).
+# Not part of bulk MI308 ROCm CI: tag "rocm" is omitted; "manual" skips default
+# bazel test //...; "rocm_gfx950" only matches jobs that opt into that filter.
+# On MI308 this target hung when tagged "rocm" only — see PR #1005.
+# Run on MI355: bazelisk test ...:rocm_mxfp4_fused_moe_test --test_tag_filters=rocm_gfx950
+py_test (
+    name = "rocm_mxfp4_fused_moe_test",
+    srcs = ["rocm_mxfp4_fused_moe_test.py"],
+    deps = [
+        "//rtp_llm/models_py:models",
+        "//rtp_llm:config",
+        "//rtp_llm:testlib",
+    ],
+    timeout = "eternal",
+    tags = ["rocm_gfx950", "manual"],
+    exec_properties = {'gpu':'MI355X-ROCM7'},
+)
 
 # CPU-only regression test for torch_moe_ref (PR #882 review #4):
 # the apply_router_weight_on_input=True path used to raise UnboundLocalError.
