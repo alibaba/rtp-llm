@@ -4,6 +4,9 @@ import unittest
 import numpy as np
 import torch
 
+from rtp_llm.device import get_current_device
+from rtp_llm.device.device_impl import GpuImpl
+
 
 def random_tensor(shape, dtype, device, mean=0, std=1):
     return torch.empty(shape, dtype=dtype, device=device).normal_(mean, std)
@@ -17,18 +20,20 @@ class TestGemmDequantize(unittest.TestCase):
         torch.classes.load_library(
             os.environ["TEST_SRCDIR"] + "/rtp_llm/tests/libtest_ops.so"
         )
+        self.fused_gemm_dq = torch.ops.gemm_dq_unit_ops.fused_gemm_dq
+        self.bench = torch.ops.gemm_dq_unit_ops.benchmark_against_cublas_fp
         self.unpack_packed_int4s = (
             torch.ops.gemm_dq_unit_ops.unpack_int4_packed_tensor_to_int8
         )
-        self.pack_int4s = torch.ops.gemm_dq_unit_ops.pack_int8_tensor_to_packed_int4
-        self.fused_gemm_dq = torch.ops.gemm_dq_unit_ops.fused_gemm_dq
-        self.bench = torch.ops.gemm_dq_unit_ops.benchmark_against_cublas_fp
-        self.preprocess_weights_for_mixed_gemm = (
-            torch.ops.gemm_dq_unit_ops.preprocess_weights_for_mixed_gemm
-        )
 
+        self.device = get_current_device()
+        assert isinstance(self.device, GpuImpl)
+        self.pack_int4s = self.device.pack_int8_tensor_to_packed_int4
+        self.preprocess_weights_for_mixed_gemm = (
+            self.device.preprocess_weights_for_mixed_gemm
+        )
         self.symmetric_quantizer = (
-            torch.ops.gemm_dq_unit_ops._symmetric_quantize_last_axis_of_batched_matrix
+            self.device.symmetric_quantize_last_axis_of_batched_matrix
         )
 
         torch.manual_seed(734876213)
@@ -43,6 +48,7 @@ class TestGemmDequantize(unittest.TestCase):
         rtol,
         atol,
         use_tensor_core,
+        quant_tol=(1e-2, 0.1, 0.2, 0.05),
         benchmark=False,
     ):
         assert (
@@ -51,18 +57,18 @@ class TestGemmDequantize(unittest.TestCase):
 
         for gemm_k in gemm_ks:
             for gemm_n in gemm_ns:
-                torch_weights_cpu = random_tensor(
+                torch_weights = random_tensor(
                     (gemm_k, gemm_n),
                     dtype=compute_type,
-                    device="cpu",
+                    device="cuda",
                     mean=0,
                     std=0.002,
                 )
                 ref_torch_weights, processed_torch_weights, torch_weight_scales = (
-                    self.symmetric_quantizer(torch_weights_cpu, weight_dtype)
+                    self.symmetric_quantizer(torch_weights, weight_dtype, True)
                 )
                 ref_torch_weights = (
-                    self.unpack_packed_int4s(ref_torch_weights)
+                    self.unpack_packed_int4s(ref_torch_weights.cpu())
                     if weight_dtype == torch.quint4x2
                     else ref_torch_weights
                 )
@@ -71,16 +77,39 @@ class TestGemmDequantize(unittest.TestCase):
                 torch_weight_scales = torch_weight_scales.to("cuda")
                 zeros = torch.Tensor().half()
 
+                # dequantized and compare diff
+                scales_unsqueezed = torch_weight_scales.unsqueeze(0)
+                dequantized_weights = torch.multiply(
+                    ref_torch_weights, scales_unsqueezed
+                )
+
+                mse_tol, max_err_tol, rel_err_tol, bad_tol = quant_tol
+                diff = dequantized_weights - torch_weights
+                mse = diff.pow(2).mean().sqrt()
+                assert mse < mse_tol, f"RMSE to large: {mse}"
+
+                max_err = diff.abs().max()
+                assert (
+                    max_err < max_err_tol
+                ), f"Max absolute error exceeds threshold: {max_err}"
+
+                relative_err = diff.abs() / (torch_weights.abs() + 1e-6)
+                bad_ratio = (
+                    (relative_err > rel_err_tol).float().mean()
+                )  # proportion of elements with >20% relative error
+                assert (
+                    bad_ratio < bad_tol
+                ), f"Too many elements with high relative error: {bad_ratio:.2%}"
+
                 for num_rows in gemm_ms:
                     torch_activations = torch.randn(
                         size=(num_rows, gemm_k), dtype=compute_type, device="cuda"
                     )
 
-                    scales_unsqueezed = torch_weight_scales.unsqueeze(0)
-                    casted_weights = ref_torch_weights.to(torch_activations.dtype)
-                    dequantized_weights = torch.multiply(
-                        casted_weights, scales_unsqueezed
+                    dequantized_weights = dequantized_weights.to(
+                        torch_activations.dtype
                     )
+
                     if benchmark:
                         torch.cuda.profiler.start()
                         times, results = self.bench(
@@ -141,6 +170,7 @@ class TestGemmDequantize(unittest.TestCase):
             gemm_ks=[512, 768, 1024, 4096, 11008],
             rtol=0.001,
             atol=0.002,
+            quant_tol=(1e-2, 0.1, 0.2, 0.05),
             use_tensor_core=False,
         )
 
@@ -153,6 +183,7 @@ class TestGemmDequantize(unittest.TestCase):
             gemm_ks=[4096, 8192, 16384],
             rtol=0.001,
             atol=0.002,
+            quant_tol=(1e-2, 0.1, 0.2, 0.05),
             use_tensor_core=True,
         )
 
@@ -216,7 +247,6 @@ class TestGemmDequantize(unittest.TestCase):
                     qweight_int4x2_interleaved = self.preprocess_weights_for_mixed_gemm(
                         self.pack_int4s(qweight_int8 - uint4_input * 8),
                         torch.quint4x2,
-                        "",
                     )
 
                     ref_th_weight = qweight_int8.half() * scale.repeat_interleave(

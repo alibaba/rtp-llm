@@ -485,28 +485,11 @@ Tensor unpack_int4_packed_tensor_to_int8(Tensor weight) {
     return unpacked_weight;
 }
 
-// Same as symmetric_quantize_last_axis_of_batched_matrix but returns a tuple of:
-// (unprocessed_quantized_weights, preprocessed_quantized_weights, scales)
-// Exposed mainly for testing, so that the unprocessed weights can be passed to torch functions.
-std::vector<Tensor> _symmetric_quantize_last_axis_of_batched_matrix(Tensor weight, torch::ScalarType quant_type) {
-    int arch = rtp_llm::get_sm();
-    return rtp_llm::symmetric_quantize_helper(weight, quant_type, true, arch);
-}
-
 TORCH_LIBRARY(gemm_dq_unit_ops, m) {
     m.def("fused_gemm_dq", fused_gemm_dq);
     m.def("gemm_config_select", gemm_config_select);
     m.def("benchmark_against_cublas_fp", benchmark_against_cublas_fp);
     m.def("unpack_int4_packed_tensor_to_int8", unpack_int4_packed_tensor_to_int8);
-#if USING_CUDA
-    m.def("pack_int8_tensor_to_packed_int4", rtp_llm::CudaDevice::packInt8TensorToPackedInt4);
-    m.def("preprocess_weights_for_mixed_gemm", rtp_llm::CudaDevice::preprocessWeightsForMixedGemm);
-#endif
-#if USING_ROCM
-    m.def("pack_int8_tensor_to_packed_int4", rtp_llm::ROCmDevice::packInt8TensorToPackedInt4);
-    m.def("preprocess_weights_for_mixed_gemm", rtp_llm::ROCmDevice::preprocessWeightsForMixedGemm);
-#endif
-    m.def("_symmetric_quantize_last_axis_of_batched_matrix", _symmetric_quantize_last_axis_of_batched_matrix);
 }
 
 }  // namespace torch_ext
