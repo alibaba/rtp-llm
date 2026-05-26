@@ -183,10 +183,7 @@ bool DefaultLayerGroupPolicy::getNeedWriteGroups(const std::shared_ptr<KVCacheRe
     for (size_t key_idx = 0; key_idx < valid_keys_size; key_idx++) {
         uint64_t groups_name_bithash = 0;
         for (const auto& [group_idx, group] : groups_) {
-            const auto&  block_ids = group_block_ids.at(group_idx)->blocks();
-            BlockIdxType gpu_block_idx =
-                GetBlockIndexByKeyName(group_idx, block_ids, key_idx, valid_keys_size, isRingBufferGroup(group_idx));
-
+            const auto gpu_block_idx = group_block_ids.at(group_idx)->blocks().at(key_idx);
             if (!isNullBlockIdx(gpu_block_idx)) {
                 groups_name_bithash |= group.group_name_bithash;
             }
@@ -251,57 +248,6 @@ std::string DefaultLayerGroupPolicy::debugString() const {
         debug_ss << '\n';
     }
     return debug_ss.str();
-}
-
-bool DefaultLayerGroupPolicy::isRingBufferGroup(int32_t group_id) const {
-    // A group uses ring-buffer indexing iff its KV region is a fixed-size state/SWA pool
-    // (INDEXER_STATE / CSA_STATE / HCA_STATE / SWA_KV). Paged regions (CSA_KV / HCA_KV /
-    // INDEXER_KV) and DEFAULT (non-typed models) do not use ring buffers.
-    auto it = group_to_region_name_.find(group_id);
-    if (it == group_to_region_name_.end()) {
-        return false;
-    }
-    switch (it->second) {
-        case KVCacheRegionName::INDEXER_STATE:
-        case KVCacheRegionName::CSA_STATE:
-        case KVCacheRegionName::HCA_STATE:
-        case KVCacheRegionName::SWA_KV:
-            return true;
-        default:
-            return false;
-    }
-}
-
-// Static helper: Get block index from a group's blocks, handling ring buffer indexing
-BlockIdxType GroupPolicy::GetBlockIndexByKeyName(int32_t                          group_id,
-                                                 const std::vector<BlockIdxType>& blocks,
-                                                 size_t                           key_idx,
-                                                 size_t                           valid_keys_size,
-                                                 bool                             is_ring_buffer_group) {
-    if (is_ring_buffer_group) {
-        // Ring buffer mode: blocks are right-aligned to the latest keys
-        const size_t num_blocks = blocks.size();
-        if (num_blocks == 0) {
-            return NULL_BLOCK_IDX;
-        }
-        // Handle edge case: if valid_keys_size < num_blocks, clamp start_key_idx to 0
-        const size_t start_key_idx = (valid_keys_size >= num_blocks) ? (valid_keys_size - num_blocks) : 0;
-        const size_t actual_offset = valid_keys_size - start_key_idx;  // effective num_blocks used
-        if (key_idx >= start_key_idx) {
-            const size_t block_pos = key_idx - start_key_idx;
-            if (block_pos < actual_offset && block_pos < num_blocks) {
-                return blocks[block_pos];
-            }
-        }
-        // If key_idx < start_key_idx, the block has been evicted
-        return NULL_BLOCK_IDX;
-    } else {
-        // FULL groups: direct 1:1 mapping, key_idx -> block_idx
-        if (key_idx < blocks.size()) {
-            return blocks[key_idx];
-        }
-        return NULL_BLOCK_IDX;
-    }
 }
 
 bool FullLayerGroupPolicy::init() {
@@ -380,10 +326,7 @@ bool FullOtherGroupPolicy::getNeedWriteGroups(const std::shared_ptr<KVCacheResou
     for (size_t key_idx = valid_keys_size; key_idx-- > 0;) {
         uint64_t groups_name_bithash = 0;
         for (const auto& [group_idx, group] : groups_) {
-            const auto&  block_ids = group_block_ids.at(group_idx)->blocks();
-            BlockIdxType gpu_block_idx =
-                GetBlockIndexByKeyName(group_idx, block_ids, key_idx, valid_keys_size, isRingBufferGroup(group_idx));
-
+            const auto gpu_block_idx = group_block_ids.at(group_idx)->blocks().at(key_idx);
             if (!rtp_llm::isNullBlockIdx(gpu_block_idx)) {
                 groups_name_bithash |= group.group_name_bithash;
             }

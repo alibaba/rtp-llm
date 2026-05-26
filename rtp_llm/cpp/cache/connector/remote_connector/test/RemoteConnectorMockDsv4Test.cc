@@ -1,4 +1,6 @@
+#include <algorithm>
 #include <chrono>
+#include <optional>
 #include <thread>
 
 #include "rtp_llm/cpp/cache/connector/AsyncContext.h"
@@ -105,14 +107,30 @@ protected:
         }
     }
 
-    void fillDsv4GroupBlocks(const std::shared_ptr<KVCacheResource>& kv_res,
-                             const CacheKeysType&                    keys = {101, 102, 103, 104}) {
+    // swa_valid_positions semantics:
+    //   - std::nullopt (default): SWA groups (gid 3..6) valid at every position — back-compat
+    //                             for tests that pre-date linear_step support.
+    //   - empty vector {}: SWA all NULL — exercises the "no SWA data anywhere" path.
+    //   - {i, j, ...}: SWA valid only at those cache_key positions — exercises the sparse
+    //                  layout produced by SWAKVCacheGroup when linear_step > 1 or
+    //                  enable_reuse_cache=false (only step-hit + active-tail allocated).
+    void fillDsv4GroupBlocks(const std::shared_ptr<KVCacheResource>&   kv_res,
+                             const CacheKeysType&                      keys                = {101, 102, 103, 104},
+                             const std::optional<std::vector<size_t>>& swa_valid_positions = std::nullopt) {
         kv_res->group_block_ids.clear();
         int n = static_cast<int>(keys.size());
         for (int g = 0; g < kDsv4PoolNum; g++) {
+            const bool       is_swa_group = (g >= kDsv4FullPoolNum);
             BlockIndicesType indices;
             for (int i = 0; i < n; i++) {
-                indices.push_back(static_cast<BlockIdxType>((i + 1) + g * 10));
+                bool valid = true;
+                if (is_swa_group && swa_valid_positions.has_value()) {
+                    valid = std::find(swa_valid_positions->begin(),
+                                      swa_valid_positions->end(),
+                                      static_cast<size_t>(i))
+                            != swa_valid_positions->end();
+                }
+                indices.push_back(valid ? static_cast<BlockIdxType>((i + 1) + g * 10) : NULL_BLOCK_IDX);
             }
             kv_res->group_block_ids.push_back(makeGroupBlockIds(indices));
         }
@@ -663,6 +681,165 @@ TEST_F(RemoteConnectorMockDsv4Test, dsv4_write_start_write_fail) {
     auto rctx = std::dynamic_pointer_cast<RemoteConnectorAsyncContext>(ctx);
     ASSERT_NE(nullptr, rctx);
     ASSERT_EQ(RemoteConnectorState::State::RCS_ERROR, rctx->state());
+}
+
+// =====================================================================================
+// linear_step > 1 sparse SWA write coverage.
+//
+// SWAKVCacheGroup (post 60004e2fa) keeps block_indices.size() == valid_keys_size with
+// NULL_BLOCK_IDX at non-step-hit positions. Each cache_key that has SWA blocks valid is
+// written as full_other (all 7 specs); each cache_key whose SWA slots are NULL is
+// written as full_only (just F0/F1/F2). The mocks below pin the exact spec-group-name
+// vector handed to StartWrite, the URI + block_id transfer order for SaveKvCaches, and
+// the FinishWrite block_mask. These exercise the path the prior tests missed because
+// fillDsv4GroupBlocks used to mark every position SWA-valid (which collapsed to the
+// is_all_full_other → clear() shortcut and matched Eq(vector<string>())).
+// =====================================================================================
+
+TEST_F(RemoteConnectorMockDsv4Test, dsv4_write_sparse_swa_full_only_at_swa_null_positions) {
+    auto kv_res = std::make_shared<KVCacheResource>();
+    // SWA valid only at positions 1 and 3; positions 0 and 2 have NULL SWA → full_only.
+    fillDsv4GroupBlocks(kv_res, {101, 102, 103, 104}, std::optional<std::vector<size_t>>({1, 3}));
+    kv_res->setLastBlockAligned(true);
+
+    const size_t  tp_rank = 0;
+    auto          meta    = std::make_shared<Dsv4Meta>("ut_dsv4_write_sparse");
+    std::string   write_session_id("dsv4_write_session_sparse");
+    Locations     expected_write_locations = genDsv4FullSwaLocations({101, 102, 103, 104}, {1, 3});
+    WriteLocation write_location({write_session_id, static_cast<size_t>(0), expected_write_locations});
+
+    // FullOtherGroupPolicy::getNeedWriteGroups emits per-key names; not cleared because
+    // is_all_full_other == false (positions 0 and 2 are full_only).
+    std::vector<std::string> expected_spec_group_names = {
+        "F0F1F2", "F0F1F2L3L4L5L6", "F0F1F2", "F0F1F2L3L4L5L6"};
+
+    EXPECT_CALL(*meta_clients_[tp_rank],
+                StartWrite(Eq("start_write_ut_dsv4_write_sparse"),
+                           std::vector<int64_t>({101, 102, 103, 104}),
+                           _,
+                           Eq(expected_spec_group_names),
+                           _))
+        .WillOnce(Return(StartWriteReturnType({ClientErrorCode::ER_OK, write_location})));
+
+    UriStrVec                expected_uris = genDsv4Uris({101, 102, 103, 104}, {1, 3});
+    UriStrVec                actual_uris   = genDsv4Uris({101, 102, 103, 104}, {1, 3}, "actual_");
+    // Transfer order is forward by position; per position iterate the spec list.
+    // pos 0: F0/F1/F2 → 1,11,21    (3 ids)
+    // pos 1: F0/F1/F2/L3/L4/L5/L6 → 2,12,22,32,42,52,62  (7 ids)
+    // pos 2: F0/F1/F2 → 3,13,23    (3 ids)
+    // pos 3: F0/F1/F2/L3/L4/L5/L6 → 4,14,24,34,44,54,64  (7 ids)
+    std::vector<std::string> expect_block_ids({"1",  "11", "21", "2",  "12", "22", "32", "42", "52", "62",
+                                                "3",  "13", "23", "4",  "14", "24", "34", "44", "54", "64"});
+    EXPECT_CALL(*transfer_client_, SaveKvCaches(Eq(expected_uris), _, TransferTraceInfoMatcher(expect_block_ids)))
+        .WillOnce(Return(SaveKvCachesReturnType({ClientErrorCode::ER_OK, actual_uris})));
+
+    Locations expected_actual_locations = genDsv4FullSwaLocations({101, 102, 103, 104}, {1, 3}, "actual_");
+    EXPECT_CALL(*meta_clients_[tp_rank],
+                FinishWrite(Eq("finish_write_ut_dsv4_write_sparse"),
+                            write_session_id,
+                            Eq(BlockMask(static_cast<size_t>(4))),
+                            Eq(expected_actual_locations)))
+        .WillOnce(Return(ClientErrorCode::ER_OK));
+
+    auto ctx = remote_connectors_[tp_rank]->asyncWrite(kv_res, meta);
+    waitDsv4AsyncContextDone(std::static_pointer_cast<AsyncContext>(ctx));
+    ASSERT_TRUE(ctx->success());
+}
+
+TEST_F(RemoteConnectorMockDsv4Test, dsv4_write_all_swa_null_writes_full_only_everywhere) {
+    auto kv_res = std::make_shared<KVCacheResource>();
+    // All SWA slots NULL → every key is full_only.
+    // Use std::in_place to disambiguate "optional containing an empty vector" from
+    // "default-constructed optional (== nullopt)", which would otherwise wrongly mark
+    // every SWA position valid via the fixture's nullopt back-compat path.
+    fillDsv4GroupBlocks(kv_res, {101, 102, 103}, std::optional<std::vector<size_t>>(std::in_place));
+    kv_res->setLastBlockAligned(true);
+
+    const size_t  tp_rank = 0;
+    auto          meta    = std::make_shared<Dsv4Meta>("ut_dsv4_write_all_null");
+    std::string   write_session_id("dsv4_write_session_all_null");
+    // Empty other_pos_vec → no L specs at any position.
+    Locations     expected_write_locations = genDsv4FullSwaLocations({101, 102, 103}, {});
+    WriteLocation write_location({write_session_id, static_cast<size_t>(0), expected_write_locations});
+
+    std::vector<std::string> expected_spec_group_names = {"F0F1F2", "F0F1F2", "F0F1F2"};
+
+    EXPECT_CALL(*meta_clients_[tp_rank],
+                StartWrite(Eq("start_write_ut_dsv4_write_all_null"),
+                           std::vector<int64_t>({101, 102, 103}),
+                           _,
+                           Eq(expected_spec_group_names),
+                           _))
+        .WillOnce(Return(StartWriteReturnType({ClientErrorCode::ER_OK, write_location})));
+
+    UriStrVec                expected_uris = genDsv4Uris({101, 102, 103}, {});
+    UriStrVec                actual_uris   = genDsv4Uris({101, 102, 103}, {}, "actual_");
+    // Per position only F0/F1/F2 → 3 ids per position.
+    std::vector<std::string> expect_block_ids({"1", "11", "21", "2", "12", "22", "3", "13", "23"});
+    EXPECT_CALL(*transfer_client_, SaveKvCaches(Eq(expected_uris), _, TransferTraceInfoMatcher(expect_block_ids)))
+        .WillOnce(Return(SaveKvCachesReturnType({ClientErrorCode::ER_OK, actual_uris})));
+
+    Locations expected_actual_locations = genDsv4FullSwaLocations({101, 102, 103}, {}, "actual_");
+    EXPECT_CALL(*meta_clients_[tp_rank],
+                FinishWrite(Eq("finish_write_ut_dsv4_write_all_null"),
+                            write_session_id,
+                            Eq(BlockMask(static_cast<size_t>(3))),
+                            Eq(expected_actual_locations)))
+        .WillOnce(Return(ClientErrorCode::ER_OK));
+
+    auto ctx = remote_connectors_[tp_rank]->asyncWrite(kv_res, meta);
+    waitDsv4AsyncContextDone(std::static_pointer_cast<AsyncContext>(ctx));
+    ASSERT_TRUE(ctx->success());
+}
+
+TEST_F(RemoteConnectorMockDsv4Test, dsv4_write_sparse_swa_at_active_tail_only) {
+    auto kv_res = std::make_shared<KVCacheResource>();
+    // Mimics SWAKVCacheGroup with reuse_cache=false: only the last kSwaActiveTailBlocks=2
+    // positions hold SWA blocks; earlier positions are NULL_BLOCK_IDX.
+    fillDsv4GroupBlocks(kv_res, {101, 102, 103, 104}, std::optional<std::vector<size_t>>({2, 3}));
+    kv_res->setLastBlockAligned(true);
+
+    const size_t  tp_rank = 0;
+    auto          meta    = std::make_shared<Dsv4Meta>("ut_dsv4_write_tail_only");
+    std::string   write_session_id("dsv4_write_session_tail_only");
+    Locations     expected_write_locations = genDsv4FullSwaLocations({101, 102, 103, 104}, {2, 3});
+    WriteLocation write_location({write_session_id, static_cast<size_t>(0), expected_write_locations});
+
+    // Backward iter with write_interval=1, count starts at 1:
+    //   i=3: count=2 ≥1, SWA valid → full_other, reset.
+    //   i=2: count=1 ≥1, SWA valid → full_other, reset.
+    //   i=1: count=1 ≥1, SWA NULL → full_only.
+    //   i=0: count=1 ≥1, SWA NULL → full_only.
+    // is_all_full_other = false → vector kept.
+    std::vector<std::string> expected_spec_group_names = {
+        "F0F1F2", "F0F1F2", "F0F1F2L3L4L5L6", "F0F1F2L3L4L5L6"};
+
+    EXPECT_CALL(*meta_clients_[tp_rank],
+                StartWrite(Eq("start_write_ut_dsv4_write_tail_only"),
+                           std::vector<int64_t>({101, 102, 103, 104}),
+                           _,
+                           Eq(expected_spec_group_names),
+                           _))
+        .WillOnce(Return(StartWriteReturnType({ClientErrorCode::ER_OK, write_location})));
+
+    UriStrVec                expected_uris = genDsv4Uris({101, 102, 103, 104}, {2, 3});
+    UriStrVec                actual_uris   = genDsv4Uris({101, 102, 103, 104}, {2, 3}, "actual_");
+    std::vector<std::string> expect_block_ids({"1",  "11", "21", "2",  "12", "22", "3",  "13", "23", "33",
+                                                "43", "53", "63", "4",  "14", "24", "34", "44", "54", "64"});
+    EXPECT_CALL(*transfer_client_, SaveKvCaches(Eq(expected_uris), _, TransferTraceInfoMatcher(expect_block_ids)))
+        .WillOnce(Return(SaveKvCachesReturnType({ClientErrorCode::ER_OK, actual_uris})));
+
+    Locations expected_actual_locations = genDsv4FullSwaLocations({101, 102, 103, 104}, {2, 3}, "actual_");
+    EXPECT_CALL(*meta_clients_[tp_rank],
+                FinishWrite(Eq("finish_write_ut_dsv4_write_tail_only"),
+                            write_session_id,
+                            Eq(BlockMask(static_cast<size_t>(4))),
+                            Eq(expected_actual_locations)))
+        .WillOnce(Return(ClientErrorCode::ER_OK));
+
+    auto ctx = remote_connectors_[tp_rank]->asyncWrite(kv_res, meta);
+    waitDsv4AsyncContextDone(std::static_pointer_cast<AsyncContext>(ctx));
+    ASSERT_TRUE(ctx->success());
 }
 
 TEST_F(RemoteConnectorMockDsv4Test, dsv4_write_save_fail) {

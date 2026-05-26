@@ -71,23 +71,6 @@ public:
     }
     virtual std::string debugString() const;
 
-    // Check if a group uses ring buffer mode (fixed-size state / SWA pools).
-    // Default policy returns false; DefaultLayerGroupPolicy decides by inspecting the
-    // group's KVCacheRegionName (state/SWA regions → true; paged/DEFAULT → false).
-    virtual bool isRingBufferGroup(int32_t group_id) const {
-        return false;  // Default: no ring buffer mode
-    }
-
-    // Get block index from a group's blocks, handling ring buffer indexing for LINEAR groups.
-    // For ring buffer groups: computes offset based on valid_keys_size and num_blocks
-    // For FULL groups: returns direct index access
-    // Returns NULL_BLOCK_IDX if the block has been evicted or index is out of bounds
-    static BlockIdxType GetBlockIndexByKeyName(int32_t                          group_id,
-                                               const std::vector<BlockIdxType>& blocks,
-                                               size_t                           key_idx,
-                                               size_t                           valid_keys_size,
-                                               bool                             is_ring_buffer_group);
-
 protected:
     std::shared_ptr<KVCacheAllocator> allocator_;
     std::set<int32_t>                 full_group_ids_;
@@ -122,8 +105,6 @@ public:
                          kv_cache_manager::BlockBuffers& block_buffers) const override;
 
     std::string debugString() const override;
-
-    bool isRingBufferGroup(int32_t group_id) const override;
 
 protected:
     virtual std::string GetOtherGroupPrefixName() const {

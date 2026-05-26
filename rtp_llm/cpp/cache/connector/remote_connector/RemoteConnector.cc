@@ -664,7 +664,6 @@ void RemoteConnector::asyncReadTask(const std::shared_ptr<KVCacheResource>&     
 
     std::vector<FunctionRequestPB> requests;
     size_t                         new_reuse_block_num = 0;
-    RTP_LLM_LOG_ERROR("yemu_debug RemoteConnector::asyncReadTask genReadRequest begin");
     CHECK_AND_LOG(genReadRequest(broadcaster_->workerNum(),
                                  *locations_ptr,
                                  start_block_index,
@@ -675,7 +674,6 @@ void RemoteConnector::asyncReadTask(const std::shared_ptr<KVCacheResource>&     
                                  new_reuse_block_num),
                   RCS_ERROR,
                   "remote_connector_get genRequest failed");
-    RTP_LLM_LOG_ERROR("yemu_debug RemoteConnector::asyncReadTask genReadRequest end, %zu", new_reuse_block_num);
     RETURN_IF(new_reuse_block_num == 0, read);
     async_context->setState(RemoteConnectorState::State::RCS_READ_BROADCAST);
     auto rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
@@ -835,31 +833,15 @@ bool RemoteConnector::genReadRequest(size_t                                   tp
             auto        remote_request = requests[spec_info.tp_rank].mutable_remote_request();
             remote_request->add_group_ids(spec_info.group_id);
             const auto& block_indices = resource->groupBlocks().at(spec_info.group_id)->blocks();
-
-            // Use helper function to handle ring buffer indexing
-            const size_t valid_keys_size = resource->cacheKeys().size();
-            BlockIdxType block_id        = remote_connector::GroupPolicy::GetBlockIndexByKeyName(
-                spec_info.group_id,
-                block_indices,
-                block_idx,
-                valid_keys_size,
-                group_policy_->isRingBufferGroup(spec_info.group_id));
-
-            if (rtp_llm::isNullBlockIdx(block_id)) {
-                if (!group_policy_->isRingBufferGroup(spec_info.group_id)) {
-                    RTP_LLM_LOG_ERROR("trace_id [%s], group_id [%d] bad block_indices size[%lu], block_idx [%zu]",
-                                      trace_id.c_str(),
-                                      spec_info.group_id,
-                                      block_indices.size(),
-                                      block_idx);
-                } else {
-                    RTP_LLM_LOG_WARNING("trace_id [%s], group_id [%d] block_id is NULL (evicted), block_idx [%zu]",
-                                        trace_id.c_str(),
-                                        spec_info.group_id,
-                                        block_idx);
-                }
+            if (block_indices.size() <= block_idx) {
+                RTP_LLM_LOG_ERROR("trace_id [%s], group_id [%d] bad block_indices size[%lu], block_idx [%zu]",
+                                  trace_id.c_str(),
+                                  spec_info.group_id,
+                                  block_indices.size(),
+                                  block_idx);
                 return false;
             }
+            auto block_id = block_indices[block_idx];
             remote_request->add_block_ids(block_id);
             remote_request->add_uris(location_spec.uri.data());
         }
@@ -920,31 +902,14 @@ bool RemoteConnector::genWriteRequest(size_t                                  tp
             auto        remote_request = requests[spec_info.tp_rank].mutable_remote_request();
             remote_request->add_group_ids(spec_info.group_id);
             const auto& block_indices = resource->groupBlocks().at(spec_info.group_id)->blocks();
-
-            // Use helper function to handle ring buffer indexing
-            const size_t valid_keys_size = resource->cacheKeys().size();
-            BlockIdxType block_id        = remote_connector::GroupPolicy::GetBlockIndexByKeyName(
-                spec_info.group_id,
-                block_indices,
-                static_cast<size_t>(cache_key_idx),
-                valid_keys_size,
-                group_policy_->isRingBufferGroup(spec_info.group_id));
-
-            if (rtp_llm::isNullBlockIdx(block_id)) {
-                if (!group_policy_->isRingBufferGroup(spec_info.group_id)) {
-                    RTP_LLM_LOG_ERROR("trace_id [%s], group_id [%d] bad block_indices size[%lu], cache_key_idx [%ld]",
-                                      trace_id.c_str(),
-                                      spec_info.group_id,
-                                      block_indices.size(),
-                                      cache_key_idx);
-                } else {
-                    RTP_LLM_LOG_WARNING("trace_id [%s], group_id [%d] block_id is NULL (evicted), cache_key_idx [%ld]",
-                                        trace_id.c_str(),
-                                        spec_info.group_id,
-                                        cache_key_idx);
-                }
+            if (block_indices.size() <= cache_key_idx) {
+                RTP_LLM_LOG_ERROR("trace_id [%s], group_id [%d] bad block_indices size[%lu]",
+                                  trace_id.c_str(),
+                                  spec_info.group_id,
+                                  block_indices.size());
                 return false;
             }
+            auto block_id = block_indices[cache_key_idx];
             remote_request->add_block_ids(block_id);
             remote_request->add_uris(location_spec.uri);
             actual_uri_gather[spec_info.tp_rank].push_back(
