@@ -20,7 +20,7 @@ class GenerateStream;
 
 // Side-channel payload for P2P bypass (carries first token, reuse, SP info, position_ids)
 struct P2PSideChannelPayload {
-    int64_t              first_token_id   = 0;
+    int64_t              first_token_id   = -1;
     int32_t              total_reuse_len  = 0;
     int32_t              local_reuse_len  = 0;
     int32_t              remote_reuse_len = 0;

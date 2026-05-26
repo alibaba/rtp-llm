@@ -159,6 +159,7 @@ EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config,
         auto misc_config            = engine_config.attr("misc_config").cast<MiscellaneousConfig>();
         auto arpc_config            = engine_config.attr("arpc_config").cast<ArpcConfig>();
         auto grpc_config            = engine_config.attr("grpc_config").cast<GrpcConfig>();
+        auto grammar_config         = engine_config.attr("grammar_config").cast<GrammarConfig>();
 
         // Extract vit_config
         VitConfig vit_config_cpp;
@@ -206,6 +207,7 @@ EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config,
                                 py_model,
                                 weight_manager,
                                 py_eplb);
+        params.grammar_config   = grammar_config;
         params.nccl_comm_config = engine_config.attr("nccl_comm_config").cast<NcclCommConfig>();
         params.server_config    = engine_config.attr("server_config");
         model_id_++;

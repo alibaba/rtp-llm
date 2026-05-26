@@ -8,8 +8,8 @@ from unittest.mock import AsyncMock, Mock
 
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.openai.api_datatype import (
-    ChatCompletionResponseStreamChoice,
     ChatCompletionRequest,
+    ChatCompletionResponseStreamChoice,
     DeltaMessage,
     FinisheReason,
     FunctionCall,
@@ -18,8 +18,8 @@ from rtp_llm.openai.api_datatype import (
     RoleEnum,
     ToolCall,
 )
-from rtp_llm.openai.renderers.deepseekv4_renderer import DeepseekV4Renderer
 from rtp_llm.openai.renderers.custom_renderer import StreamResponseObject
+from rtp_llm.openai.renderers.deepseekv4_renderer import DeepseekV4Renderer
 from rtp_llm.openai.renderers.reasoning_tool_base_renderer import (
     ReasoningToolStreamStatus,
 )
@@ -32,7 +32,6 @@ from rtp_llm.openai.renderers.sglang_helpers.function_call.deepseekv4_detector i
 )
 from rtp_llm.openai.renderers.sglang_helpers.reasoning_parser import ReasoningParser
 from rtp_llm.utils.base_model_datatypes import AuxInfo, GenerateOutput
-
 
 DSV4_ENCODING_PATH = Path(
     os.environ.get(
@@ -128,9 +127,9 @@ def _rtp_messages_with_tools(messages, tools):
 def _normalize_effort(effort):
     if not isinstance(effort, str) or effort == "none":
         return None
-    if effort in ("max", "xhigh"):
-        return "max"
-    return "high"
+    if effort == "max":
+        return "xhigh"
+    return effort
 
 
 def _rtp_expected_prompt(
@@ -204,6 +203,20 @@ class DeepseekV4RendererTest(TestCase):
 
         self.assertEqual(rendered.rendered_prompt, expected)
 
+    def test_zero_max_thinking_tokens_disables_thinking_render(self):
+        messages = [{"role": "user", "content": "Hello"}]
+        request = ChatCompletionRequest(
+            messages=messages,
+            extra_configs=GenerateConfig(max_thinking_tokens=0),
+            enable_thinking=True,
+            chat_template_kwargs={"thinking_mode": "thinking"},
+        )
+
+        rendered = self.renderer.render_chat(request)
+        expected = _rtp_expected_prompt(self.encoding, messages, thinking_mode="chat")
+
+        self.assertEqual(rendered.rendered_prompt, expected)
+
     def test_thinking_mode_kwarg_still_overrides_encoding_config(self):
         messages = [{"role": "user", "content": "Hello"}]
         request = ChatCompletionRequest(
@@ -223,10 +236,11 @@ class DeepseekV4RendererTest(TestCase):
     def test_reasoning_effort_is_applied_without_changing_thinking_mode(self):
         messages = [{"role": "user", "content": "Hello"}]
         for effort, mapped in (
-            ("max", "max"),
-            ("xhigh", "max"),
+            ("max", "xhigh"),
+            ("xhigh", "xhigh"),
             ("high", "high"),
-            ("minimal", "high"),
+            ("medium", "medium"),
+            ("low", "low"),
             ("none", None),
             (None, None),
         ):
@@ -260,10 +274,24 @@ class DeepseekV4RendererTest(TestCase):
             self.encoding,
             messages,
             thinking_mode="thinking",
-            reasoning_effort="max",
+            reasoning_effort="xhigh",
         )
 
         self.assertEqual(rendered.rendered_prompt, expected)
+
+    def test_invalid_reasoning_effort_uses_dashscope_enum_message(self):
+        request = ChatCompletionRequest(
+            messages=[{"role": "user", "content": "Hello"}],
+            reasoning_effort="minimum",
+            chat_template_kwargs={"thinking_mode": "thinking"},
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "'reasoning_effort' must be one of: "
+            "'low', 'medium', 'high', 'xhigh', 'max'",
+        ):
+            self.renderer.render_chat(request)
 
     def test_extra_config_still_overrides_request_chat_template_kwargs(self):
         messages = [{"role": "user", "content": "Hello"}]
@@ -581,6 +609,117 @@ class DeepseekV4ReasoningToolPipelineTest(IsolatedAsyncioTestCase):
         self.assertEqual(
             delta.output_str.reasoning_content, "Let me inspect the request."
         )
+        self.assertEqual(len(delta.output_str.tool_calls), 1)
+        self.assertEqual(delta.output_str.tool_calls[0].function.name, "get_weather")
+        self.assertEqual(
+            json.loads(delta.output_str.tool_calls[0].function.arguments),
+            {"city": "杭州"},
+        )
+        self.assertEqual(status.delta_output_string, "")
+
+    async def test_full_completion_parser_splits_content_left_in_reasoning(
+        self,
+    ):
+        class FullCompletionEncoding:
+            def parse_message_from_completion_text(self, text, thinking_mode):
+                return {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning_content": "Let me compare.</think>9.9更大。",
+                }
+
+        renderer = _make_renderer(FullCompletionEncoding())
+        renderer._generate_log_probs = AsyncMock(return_value=None)
+        request = ChatCompletionRequest(
+            messages=[{"role": "user", "content": "9.9和9.11哪个大"}],
+            chat_template_kwargs={"enable_thinking": True},
+        )
+        status = ReasoningToolStreamStatus(
+            request,
+            None,
+            ReasoningParser(model_type="deepseek-v3", force_reasoning=True),
+        )
+        status.delta_output_string = "Let me compare.</think>9.9更大。"
+
+        delta = await renderer._process_reasoning_and_tool_calls(
+            status, self._output(), is_streaming=False
+        )
+
+        self.assertIsNotNone(delta)
+        self.assertEqual(delta.output_str.reasoning_content, "Let me compare.")
+        self.assertEqual(delta.output_str.content, "9.9更大。")
+
+    async def test_full_completion_parser_drops_repeated_leading_think_end(
+        self,
+    ):
+        class FullCompletionEncoding:
+            def parse_message_from_completion_text(self, text, thinking_mode):
+                return {
+                    "role": "assistant",
+                    "content": "</think></think>春天来了。",
+                    "reasoning_content": "短思考",
+                }
+
+        renderer = _make_renderer(FullCompletionEncoding())
+        renderer._generate_log_probs = AsyncMock(return_value=None)
+        request = ChatCompletionRequest(
+            messages=[{"role": "user", "content": "写春天"}],
+            chat_template_kwargs={"enable_thinking": True},
+        )
+        status = ReasoningToolStreamStatus(
+            request,
+            None,
+            ReasoningParser(model_type="deepseek-v3", force_reasoning=True),
+        )
+        status.delta_output_string = "短思考</think></think>春天来了。"
+
+        delta = await renderer._process_reasoning_and_tool_calls(
+            status, self._output(), is_streaming=False
+        )
+
+        self.assertIsNotNone(delta)
+        self.assertEqual(delta.output_str.reasoning_content, "短思考")
+        self.assertEqual(delta.output_str.content, "春天来了。")
+
+    async def test_full_completion_parser_parses_dsml_left_in_reasoning(
+        self,
+    ):
+        class FullCompletionEncoding:
+            def parse_message_from_completion_text(self, text, thinking_mode):
+                return {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning_content": text,
+                }
+
+        renderer = _make_renderer(FullCompletionEncoding())
+        renderer._generate_log_probs = AsyncMock(return_value=None)
+        request = ChatCompletionRequest(
+            messages=[{"role": "user", "content": "Weather?"}],
+            tools=_rtp_tools(),
+            chat_template_kwargs={"enable_thinking": True},
+        )
+        status = ReasoningToolStreamStatus(
+            request,
+            DeepSeekV4Detector(),
+            ReasoningParser(model_type="deepseek-v3", force_reasoning=True),
+        )
+        status.delta_output_string = (
+            "Need weather.\n"
+            "<｜DSML｜tool_calls>\n"
+            '<｜DSML｜invoke name="get_weather">\n'
+            '<｜DSML｜parameter name="city" string="true">杭州</｜DSML｜parameter>\n'
+            "</｜DSML｜invoke>\n"
+            "</｜DSML｜tool_calls>"
+        )
+
+        delta = await renderer._process_reasoning_and_tool_calls(
+            status, self._output(), is_streaming=False
+        )
+
+        self.assertIsNotNone(delta)
+        self.assertEqual(delta.output_str.reasoning_content, "Need weather.")
+        self.assertIsNone(delta.output_str.content)
         self.assertEqual(len(delta.output_str.tool_calls), 1)
         self.assertEqual(delta.output_str.tool_calls[0].function.name, "get_weather")
         self.assertEqual(

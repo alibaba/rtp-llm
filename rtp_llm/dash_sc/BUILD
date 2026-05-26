@@ -20,6 +20,7 @@ py_library(
         "app.py",
         "client.py",
         "codec.py",
+        "json_format_e2e_smoke.py",
         "inference/__init__.py",
         "inference/__main__.py",
         "inference/servicer.py",
@@ -38,6 +39,13 @@ py_library(
         "//rtp_llm/dash_sc/proto:predict_v2_py_proto",
         "//rtp_llm/metrics:metrics",
     ],
+)
+
+py_binary(
+    name = "json_format_e2e_smoke",
+    srcs = ["json_format_e2e_smoke.py"],
+    main = "json_format_e2e_smoke.py",
+    visibility = ["//visibility:public"],
 )
 
 py_test(

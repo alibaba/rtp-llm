@@ -71,7 +71,8 @@ protected:
     absl::Status dispatchOutputAsync(const StreamGroups&           stream_groups,
                                      GptModelOutputs               model_output,
                                      SamplerOutput                 sampler_output,
-                                     std::shared_ptr<torch::Event> sampler_event);
+                                     std::shared_ptr<torch::Event> sampler_event,
+                                     std::function<void()>         profile_step_finish);
 
     void publishNormalDeviceState(const StreamGroups& stream_groups, const SamplerOutput& sampler_output);
     void prepareGrpcNormalDeviceState(const StreamGroups& stream_groups);

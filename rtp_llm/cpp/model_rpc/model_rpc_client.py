@@ -1,4 +1,5 @@
 import functools
+import json
 import logging
 from typing import AsyncGenerator
 
@@ -47,6 +48,17 @@ def trans_role_type(role_type: RoleType) -> RoleAddrPB.RoleType:
         return RoleAddrPB.RoleType.FRONTEND
 
 
+def _trans_jsonable_option(config_pb, config, field_name):
+    if not hasattr(config_pb, field_name):
+        return
+    value = getattr(config, field_name, None)
+    if value is None:
+        return
+    if not isinstance(value, str):
+        value = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    getattr(config_pb, field_name).value = value
+
+
 def trans_input(input_py: GenerateInput):
     input_pb = GenerateInputPB()
     input_pb.request_id = input_py.request_id
@@ -64,9 +76,14 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.max_thinking_tokens = (
         input_py.generate_config.max_thinking_tokens
     )
-    generate_config_pb.end_think_token_ids.extend(
-        input_py.generate_config.end_think_token_ids
-    )
+    if hasattr(generate_config_pb, "begin_think_token_ids"):
+        generate_config_pb.begin_think_token_ids.extend(
+            input_py.generate_config.begin_think_token_ids
+        )
+    if hasattr(generate_config_pb, "end_think_token_ids"):
+        generate_config_pb.end_think_token_ids.extend(
+            input_py.generate_config.end_think_token_ids
+        )
     generate_config_pb.in_think_mode = input_py.generate_config.in_think_mode
     generate_config_pb.num_beams = input_py.generate_config.num_beams
     generate_config_pb.variable_num_beams.extend(
@@ -93,6 +110,15 @@ def trans_input(input_py: GenerateInput):
     trans_option(generate_config_pb, input_py.generate_config, "top_p_decay")
     trans_option(generate_config_pb, input_py.generate_config, "top_p_min")
     trans_option(generate_config_pb, input_py.generate_config, "top_p_reset_ids")
+    _trans_jsonable_option(generate_config_pb, input_py.generate_config, "json_schema")
+    _trans_jsonable_option(generate_config_pb, input_py.generate_config, "regex")
+    _trans_jsonable_option(generate_config_pb, input_py.generate_config, "ebnf")
+    _trans_jsonable_option(
+        generate_config_pb, input_py.generate_config, "structural_tag"
+    )
+    _trans_jsonable_option(
+        generate_config_pb, input_py.generate_config, "response_format"
+    )
     trans_option(generate_config_pb, input_py.generate_config, "adapter_name")
     trans_option_cast(
         generate_config_pb, input_py.generate_config, "task_id", functools.partial(str)

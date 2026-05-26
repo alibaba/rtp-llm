@@ -5,6 +5,7 @@ cc_library(
     name = "sample_infos",
     hdrs = [
         "SampleInfos.h",
+        "SpecLogitsProcessorTypes.h",
     ],
     deps = [
         "//:rtp_compute_ops",
@@ -48,7 +49,11 @@ cc_library(
     hdrs = [
         "logits_processor/BaseLogitsProcessor.h",
         "logits_processor/MultiSeqLogitsProcessor.h",
+        "logits_processor/GrammarLogitsProcessor.h",
         "logits_processor/LogitsProcessorStates.h",
+        "logits_processor/ReasoningGrammarLogitsProcessor.h",
+        "logits_processor/SpecLogitsProcessor.h",
+        "logits_processor/SpecLogitsVerifyRunner.h",
         "logits_processor/ThinkModeLogitsProcessor.h",
         "logits_processor/TreeLogitsProcessor.h",
         "logits_processor/RecommendationLogitsProcessor.h",
@@ -57,7 +62,10 @@ cc_library(
     srcs = [
         "logits_processor/BaseLogitsProcessor.cc",
         "logits_processor/MultiSeqLogitsProcessor.cc",
+        "logits_processor/GrammarLogitsProcessor.cc",
         "logits_processor/LogitsProcessorStates.cc",
+        "logits_processor/ReasoningGrammarLogitsProcessor.cc",
+        "logits_processor/SpecLogitsVerifyRunner.cc",
         "logits_processor/ThinkModeLogitsProcessor.cc",
         "logits_processor/TreeLogitsProcessor.cc",
         "logits_processor/RecommendationLogitsProcessor.cc",
@@ -66,11 +74,14 @@ cc_library(
     deps = [
         ":sample_infos",
         ":dfa_utils",
+        "//rtp_llm/cpp/cuda_graph:cuda_graph_hdrs_lib",
         "//rtp_llm/cpp/engine_base/stream:generate_types",
         "//rtp_llm/cpp/engine_base/stream:generate_config",
+        "//rtp_llm/cpp/engine_base/grammar:grammar_cpp_lib",
         "//rtp_llm/cpp/multimodal_processor:multimodal_types",
         "//rtp_llm/cpp/pybind:py_utils",
         "//rtp_llm/cpp/utils:error_code",
+        "@havenask//aios/autil:json",
     ] + select({
         "//:using_cuda": ["//rtp_llm/models_py/bindings/cuda/ops:standalone_ops"],
         "//conditions:default": [],

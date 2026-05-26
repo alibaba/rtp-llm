@@ -14,6 +14,8 @@ coroutine automatically.
 
 from __future__ import annotations
 
+import inspect
+import json
 import logging
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Callable, Iterator, Optional
@@ -21,6 +23,7 @@ from typing import Any, AsyncIterator, Callable, Iterator, Optional
 import torch
 
 from rtp_llm.dash_sc.codec import (
+    FINISH_REASON_LENGTH,
     OtherParams,
     SamplingParams,
     _token_ids_list_from_generate_output,
@@ -47,6 +50,14 @@ _EMPTY_THINK_BODY = "\n"
 # default in ``GenerateEnvConfig.think_terminate_token_id`` (single source of truth
 # for production; this constant exists so unit tests don't have to repeat it).
 _DEFAULT_TERMINATE_TOKEN_ID = 1
+_INT32_MAX = 2_147_483_647
+_DEBUG_SCORE_TOKEN_IDS_PARAM = "dash_sc_debug_score_token_ids"
+_DEBUG_SCORE_LABEL_PARAM = "dash_sc_debug_score_label"
+_DEBUG_SCORE_TOKEN_LABELS = {
+    128821: "<think>",
+    128822: "</think>",
+}
+_PARTIAL_RESPONSE_METADATA = (("x-dashscope-partialresponse", "true"),)
 
 
 def stream_log_tag(
@@ -70,6 +81,15 @@ def _headers_from_invocation_metadata(
         if key is not None and value is not None
     }
     return extract_request_headers(metadata_headers)
+
+
+async def _send_partial_response_metadata(context: Any) -> None:
+    sender = getattr(context, "send_initial_metadata", None)
+    if sender is None:
+        return
+    result = sender(_PARTIAL_RESPONSE_METADATA)
+    if inspect.isawaitable(result):
+        await result
 
 
 def _optional_int_attr(obj: Any, attr: str) -> Optional[int]:
@@ -295,14 +315,46 @@ def _make_generate_input(
     input_ids_list: list[int],
     generate_config: Any,
     invocation_metadata: Optional[Any],
+    request_headers: Optional[dict[str, str]] = None,
 ) -> GenerateInput:
+    headers = dict(request_headers or {})
+    headers.update(_headers_from_invocation_metadata(invocation_metadata))
     return GenerateInput(
         request_id=request_id,
         token_ids=torch.tensor(input_ids_list, dtype=torch.int),
         mm_inputs=[],
         generate_config=generate_config,
-        headers=_headers_from_invocation_metadata(invocation_metadata),
+        headers=headers,
     )
+
+
+async def _close_async_stream_if_possible(stream: Any, tag: str) -> None:
+    close = getattr(stream, "aclose", None)
+    if not callable(close):
+        return
+    try:
+        result = close()
+        if inspect.isawaitable(result):
+            await result
+    except Exception as e:
+        logging.warning("[DashScGrpc] [%s] phase-1 stream close failed: %s", tag, e)
+
+
+def _phase2_max_new_tokens_for_completion_alias(
+    sampling: SamplingParams,
+    generate_think_token_num: Optional[int],
+) -> int:
+    max_new_tokens = int(sampling.max_new_tokens)
+    if (
+        sampling.max_total_tokens is not None
+        and sampling.max_total_tokens > 0
+        and generate_think_token_num is not None
+    ):
+        max_new_tokens = min(
+            max_new_tokens,
+            max(0, int(sampling.max_total_tokens) - int(generate_think_token_num)),
+        )
+    return max_new_tokens
 
 
 def _clone_generate_config(generate_config: Any) -> Any:
@@ -310,6 +362,153 @@ def _clone_generate_config(generate_config: Any) -> Any:
         return generate_config.model_copy(deep=True)
     except AttributeError:
         return generate_config.copy(deep=True)
+
+
+def _apply_request_overrides(
+    generate_config: Any,
+    sampling: SamplingParams,
+    other: OtherParams,
+    runtime: _ThinkRuntime,
+) -> None:
+    """Apply dash-sc request-level controls after env defaults.
+
+    ``GenerateConfig.add_thinking_params`` seeds the config from process-level
+    environment. DashScope-serving still sends per-request thinking, timeout,
+    and priority controls; those explicit controls must win before enqueue.
+    """
+    request_max_think = sampling.max_new_think_tokens
+    if request_max_think is None:
+        request_max_think = other.max_new_think_tokens
+    if request_max_think is not None:
+        max_think = int(request_max_think)
+        generate_config.max_thinking_tokens = _INT32_MAX if max_think < 0 else max_think
+    # Only the selected budget disables thinking; ``max_think_length`` may
+    # intentionally override a zero ``max_new_think_tokens`` alias.
+    disable_by_budget = request_max_think == 0
+    # DashLLM/sglang-compatible Dash requests stay in chat mode unless the
+    # caller explicitly asks for thinking or a request-scoped think budget.
+    disable_by_default = other.enable_thinking is None and request_max_think is None
+    if other.enable_thinking is False or disable_by_budget or disable_by_default:
+        generate_config.in_think_mode = False
+        generate_config.max_thinking_tokens = 0
+        if hasattr(generate_config, "thinking"):
+            generate_config.thinking = False
+    elif (other.enable_thinking is True or request_max_think is not None) and (
+        getattr(generate_config, "end_think_token_ids", None) or runtime.eos_tokens
+    ):
+        generate_config.in_think_mode = True
+        if not getattr(generate_config, "end_think_token_ids", None):
+            generate_config.end_think_token_ids = list(runtime.eos_tokens)
+        if hasattr(generate_config, "thinking"):
+            generate_config.thinking = True
+    if other.timeout_ms is not None:
+        generate_config.timeout_ms = int(other.timeout_ms)
+        generate_config.ttft_timeout_ms = int(other.timeout_ms)
+    if other.traffic_reject_priority is not None:
+        generate_config.traffic_reject_priority = int(other.traffic_reject_priority)
+
+
+def _debug_score_token_ids_from_request(request: Any) -> list[int]:
+    if _DEBUG_SCORE_TOKEN_IDS_PARAM not in request.parameters:
+        return []
+    param = request.parameters[_DEBUG_SCORE_TOKEN_IDS_PARAM]
+    values: Any = []
+    if param.HasField("int64_param"):
+        values = [param.int64_param]
+    elif param.HasField("string_param") and param.string_param:
+        try:
+            values = json.loads(param.string_param)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            values = [param.string_param]
+    elif param.HasField("bool_param"):
+        return []
+    if not isinstance(values, list):
+        values = [values]
+    result: list[int] = []
+    for value in values:
+        try:
+            token_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if token_id >= 0 and token_id not in result:
+            result.append(token_id)
+    return result
+
+
+def _debug_score_label_from_request(request: Any) -> str:
+    if _DEBUG_SCORE_LABEL_PARAM not in request.parameters:
+        return ""
+    param = request.parameters[_DEBUG_SCORE_LABEL_PARAM]
+    if param.HasField("string_param"):
+        return str(param.string_param)
+    if param.HasField("int64_param"):
+        return str(param.int64_param)
+    if param.HasField("bool_param"):
+        return str(param.bool_param)
+    return ""
+
+
+def _log_debug_token_scores(
+    *,
+    tag: str,
+    case_label: str,
+    chunk_idx: int,
+    generated_ids: list[int],
+    logits: Any,
+    token_ids: list[int],
+) -> None:
+    if not token_ids or logits is None or not generated_ids:
+        return
+    if not isinstance(logits, torch.Tensor) or logits.numel() == 0:
+        return
+    rows = logits.detach()
+    if rows.dim() == 1:
+        rows = rows.unsqueeze(0)
+    elif rows.dim() == 3 and rows.size(0) == 1:
+        rows = rows.squeeze(0)
+    elif rows.dim() != 2:
+        logging.info(
+            "[DashScDebugTokenScore] [%s] case=%s chunk=%s skip logits_dim=%s",
+            tag,
+            case_label,
+            chunk_idx,
+            rows.dim(),
+        )
+        return
+    rows = rows.float().cpu()
+    vocab_size = rows.size(-1)
+    for step, sampled_token in enumerate(generated_ids):
+        row = rows[min(step, rows.size(0) - 1)]
+        probs = torch.softmax(row, dim=-1)
+        for token_id in token_ids:
+            label = _DEBUG_SCORE_TOKEN_LABELS.get(token_id, str(token_id))
+            if token_id >= vocab_size:
+                logging.info(
+                    "[DashScDebugTokenScore] [%s] case=%s chunk=%s step=%s "
+                    "sampled_token=%s token=%s token_id=%s out_of_vocab=%s",
+                    tag,
+                    case_label,
+                    chunk_idx,
+                    step,
+                    sampled_token,
+                    label,
+                    token_id,
+                    vocab_size,
+                )
+                continue
+            logging.info(
+                "[DashScDebugTokenScore] [%s] case=%s chunk=%s step=%s "
+                "sampled_token=%s token=%s token_id=%s logit=%.8g prob=%.8g",
+                tag,
+                case_label,
+                chunk_idx,
+                step,
+                sampled_token,
+                label,
+                token_id,
+                float(row[token_id].item()),
+                float(probs[token_id].item()),
+            )
 
 
 # ----------------------------------------------------------------------------
@@ -394,6 +593,18 @@ async def iter_real_model_stream_infer(
                 logging.warning(
                     "[DashScGrpc] [%s] add_thinking_params failed: %s", tag, e
                 )
+        begin_think_tokens = list(runtime.bos_tokens or tuple(echo_prefix_ids or ()))
+        if begin_think_tokens and hasattr(generate_config, "begin_think_token_ids"):
+            generate_config.begin_think_token_ids = begin_think_tokens
+        if runtime.eos_tokens and not getattr(
+            generate_config, "end_think_token_ids", None
+        ):
+            generate_config.end_think_token_ids = list(runtime.eos_tokens)
+        _apply_request_overrides(generate_config, sampling, other, runtime)
+        debug_score_token_ids = _debug_score_token_ids_from_request(request)
+        debug_score_label = _debug_score_label_from_request(request)
+        if debug_score_token_ids:
+            generate_config.return_logits = True
         if extra_stop_word_ids:
             existing = generate_config.stop_words_list
             if existing:
@@ -415,6 +626,7 @@ async def iter_real_model_stream_infer(
         max_id = runtime.max_token_id
         term_id = runtime.terminate_token_id
         think_close_token_id = runtime.close_token_id
+        max_new_tokens = int(getattr(generate_config, "max_new_tokens", 0) or 0)
         matched_think_bos_ids = matched_echo_ids or _matched_echo_prefix_ids(
             input_ids_list, list(runtime.bos_tokens)
         )
@@ -431,6 +643,7 @@ async def iter_real_model_stream_infer(
             input_ids_list=input_ids_list,
             generate_config=generate_config,
             invocation_metadata=invocation_metadata,
+            request_headers=other.request_headers,
         )
         is_streaming = bool(getattr(generate_config, "is_streaming", True))
         logging.debug("[DashScGrpc] [%s] generate_input: %s", tag, generate_input)
@@ -453,10 +666,29 @@ async def iter_real_model_stream_infer(
                 raise ValueError("empty generate_outputs in backend chunk")
             out_py = go.generate_outputs[0]
             generated_ids = _token_ids_list_from_generate_output(out_py)
+            _log_debug_token_scores(
+                tag=tag,
+                case_label=debug_score_label,
+                chunk_idx=chunk_idx,
+                generated_ids=generated_ids,
+                logits=getattr(out_py, "logits", None),
+                token_ids=debug_score_token_ids,
+            )
             if not generated_ids and not out_py.finished:
-                logging.debug(
-                    "[DashScGrpc] [%s] skip empty streaming chunk %s", tag, chunk_idx
+                response = build_stream_response_from_generate_outputs(
+                    dash_sc_request_id=request.id,
+                    model_name=request.model_name,
+                    go=go,
+                    request_log_tag=tag,
+                    request_input_ids=input_ids_list,
+                    return_input_ids=other.return_input_ids,
+                    is_streaming=is_streaming,
+                    generate_config=generate_config,
+                    eos_token_id=eos_id,
+                    max_token_id=max_id,
+                    _request_shape=request_shape,
                 )
+                yield response
                 continue
             ids_for_accounting = generated_ids
             if should_echo and not echoed and generated_ids:
@@ -503,11 +735,17 @@ async def iter_real_model_stream_infer(
                 ids_for_accounting = generated_ids
                 if should_echo and not echoed and generated_ids:
                     ids_for_accounting = matched_echo_ids + generated_ids
-                generate_think_token_num = (
-                    len(cumulative_sent_ids)
-                    + len(ids_for_accounting)
-                    + (1 if runtime.eos_tokens else 0)
+                generate_think_token_num = len(cumulative_sent_ids) + len(
+                    ids_for_accounting
                 )
+                phase2_budget_exhausted = False
+                if sampling.max_new_tokens_from_completion_alias:
+                    phase2_budget_exhausted = (
+                        _phase2_max_new_tokens_for_completion_alias(
+                            sampling, generate_think_token_num
+                        )
+                        <= 0
+                    )
                 cumulative_sent_ids.extend(ids_for_accounting)
                 eos_go = go
                 response = build_stream_response_from_generate_outputs(
@@ -548,12 +786,22 @@ async def iter_real_model_stream_infer(
                         eos_token_id=eos_id,
                         max_token_id=max_id,
                         generate_think_token_num=generate_think_token_num,
+                        finish_reason_override=(
+                            FINISH_REASON_LENGTH if phase2_budget_exhausted else None
+                        ),
                         _request_shape=request_shape,
                     )
                     yield eos_response
-                phase2_needed = True
+                phase2_needed = not phase2_budget_exhausted
                 break
             cumulative_sent_ids.extend(ids_for_accounting)
+            finish_reason_override = None
+            if (
+                out_py.finished
+                and max_new_tokens > 0
+                and len(cumulative_sent_ids) >= max_new_tokens
+            ):
+                finish_reason_override = FINISH_REASON_LENGTH
             response = build_stream_response_from_generate_outputs(
                 dash_sc_request_id=request.id,
                 model_name=request.model_name,
@@ -566,6 +814,7 @@ async def iter_real_model_stream_infer(
                 eos_token_id=eos_id,
                 max_token_id=max_id,
                 generate_think_token_num=generate_think_token_num,
+                finish_reason_override=finish_reason_override,
                 _request_shape=request_shape,
             )
             if should_echo and not echoed and generated_ids:
@@ -593,6 +842,8 @@ async def iter_real_model_stream_infer(
         # (DSV4 token 1) in the think phase. If phase-1 reaches stream end
         # without ever emitting close or term token, treat the whole stream
         # as reasoning content — do NOT silently restart with empty-think.
+        if phase2_needed:
+            await _close_async_stream_if_possible(stream, tag)
         if phase2_needed and not phase2_triggered:
             # One-shot pin BEFORE any await so a future / unexpected re-entry
             # cannot double-fire phase-2. Set before metric report so even an
@@ -621,6 +872,12 @@ async def iter_real_model_stream_infer(
             phase2_config.in_think_mode = False
             if hasattr(phase2_config, "thinking"):
                 phase2_config.thinking = False
+            if sampling.max_new_tokens_from_completion_alias:
+                phase2_config.max_new_tokens = (
+                    _phase2_max_new_tokens_for_completion_alias(
+                        sampling, generate_think_token_num
+                    )
+                )
             # trace_id stays equal across phases so the dashscope log search
             # aggregates both halves under a single trace; phase distinction is
             # carried by request_log_tag (phase=2) and by the ``-2`` suffix on
@@ -642,6 +899,7 @@ async def iter_real_model_stream_infer(
                 input_ids_list=phase2_input_ids,
                 generate_config=phase2_config,
                 invocation_metadata=invocation_metadata,
+                request_headers=other.request_headers,
             )
             logging.debug(
                 "[DashScGrpc] [%s] phase-2 generate_input: %s",
@@ -649,10 +907,24 @@ async def iter_real_model_stream_infer(
                 phase2_generate_input,
             )
             phase2_stream = await backend_visitor.enqueue(phase2_generate_input)
+            phase2_cumulative_sent_ids: list[int] = []
 
             def _build_phase2_response(
                 resp_go: Any,
             ) -> predict_v2_pb2.ModelStreamInferResponse:
+                resp_out = resp_go.generate_outputs[0]
+                resp_ids = _token_ids_list_from_generate_output(resp_out)
+                phase2_cumulative_sent_ids.extend(resp_ids)
+                phase2_max_new_tokens = int(
+                    getattr(phase2_config, "max_new_tokens", 0) or 0
+                )
+                finish_reason_override = None
+                if (
+                    resp_out.finished
+                    and phase2_max_new_tokens > 0
+                    and len(phase2_cumulative_sent_ids) >= phase2_max_new_tokens
+                ):
+                    finish_reason_override = FINISH_REASON_LENGTH
                 return build_stream_response_from_generate_outputs(
                     dash_sc_request_id=f"{request.id}{_PHASE2_SUFFIX}",
                     model_name=request.model_name,
@@ -665,6 +937,7 @@ async def iter_real_model_stream_infer(
                     eos_token_id=eos_id,
                     max_token_id=max_id,
                     generate_think_token_num=generate_think_token_num,
+                    finish_reason_override=finish_reason_override,
                     _request_shape=request_shape,
                 )
 
@@ -709,11 +982,21 @@ async def iter_real_model_stream_infer(
                             )
                     yield _build_phase2_response(buf_go)
 
+            phase2_chunk_idx = 0
             async for go in phase2_stream:
+                phase2_chunk_idx += 1
                 if not go.generate_outputs:
                     raise ValueError("empty generate_outputs in phase-2 backend chunk")
                 out_py = go.generate_outputs[0]
                 generated_ids = _token_ids_list_from_generate_output(out_py)
+                _log_debug_token_scores(
+                    tag=phase2_tag,
+                    case_label=debug_score_label,
+                    chunk_idx=phase2_chunk_idx,
+                    generated_ids=generated_ids,
+                    logits=getattr(out_py, "logits", None),
+                    token_ids=debug_score_token_ids,
+                )
                 if not generated_ids and not out_py.finished:
                     continue
 
@@ -841,6 +1124,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             invocation_metadata = context.invocation_metadata()
         except Exception:
             invocation_metadata = ()
+        partial_metadata_sent = False
         async for request in request_iterator:
             logging.debug(
                 "[DashScGrpc] ModelInferRequest: id=%s model_name=%s",
@@ -851,6 +1135,19 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             if input_ids_list is None:
                 yield predict_v2_pb2.ModelStreamInferResponse(
                     error_message="input_ids not found or raw_input_contents mismatch"
+                )
+                return
+            if (
+                not partial_metadata_sent
+                and other is not None
+                and other.timeout_ms is not None
+            ):
+                await _send_partial_response_metadata(context)
+                partial_metadata_sent = True
+
+            if sampling is not None and sampling.max_new_tokens < 0:
+                yield predict_v2_pb2.ModelStreamInferResponse(
+                    error_message=f"invalid max_new_tokens: {sampling.max_new_tokens}"
                 )
                 return
 

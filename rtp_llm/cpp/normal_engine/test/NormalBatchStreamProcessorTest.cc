@@ -3,8 +3,10 @@
 #include "gtest/gtest.h"
 
 #define private public
+#define protected public
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
+#include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
@@ -26,6 +28,42 @@ static torch::Tensor hostIntBuffer(std::vector<int32_t> data) {
 }
 
 class NormalBatchStreamProcessorTest: public DeviceTestBase {};
+
+class TestStatefulLogitsProcessor: public BaseLogitsProcessor {
+public:
+    explicit TestStatefulLogitsProcessor(bool async_device_state): async_device_state_(async_device_state) {}
+
+    void process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) override {
+        (void)inputs;
+        (void)start_idx;
+        (void)finish_idx;
+    }
+
+    void updateMultiSeqStatus(const std::vector<int>& src_batch_indices) override {
+        (void)src_batch_indices;
+    }
+
+    void updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) override {
+        (void)new_tokens;
+        accepted_token_len_ += num_new_tokens;
+    }
+
+    bool isStateful() const override {
+        return true;
+    }
+
+    bool supportsNormalAsyncDeviceState() const override {
+        return async_device_state_;
+    }
+
+    int64_t acceptedTokenLen() const override {
+        return accepted_token_len_;
+    }
+
+private:
+    bool    async_device_state_;
+    int64_t accepted_token_len_ = 0;
+};
 
 TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     ResourceContext resource_context;
@@ -134,6 +172,87 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         auto& model_input = merge_input_status.value();
         EXPECT_FALSE(model_input.attention_mask.defined());
     }
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testDeviceStateFastPathWaitsForBlockingLogitsProcessorState) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 128;
+    model_config.vocab_size  = 128900;
+    RuntimeConfig runtime_config;
+
+    std::shared_ptr<GenerateInput> query          = make_shared<GenerateInput>();
+    query->input_ids                              = hostIntBuffer({1, 2, 3});
+    query->generate_config                        = make_shared<GenerateConfig>();
+    query->generate_config->in_think_mode         = true;
+    query->generate_config->max_thinking_tokens   = 10;
+    query->generate_config->begin_think_token_ids = {128821};
+    query->generate_config->end_think_token_ids   = {128822};
+
+    GenerateStreamPtr stream =
+        make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    stream->setIsContextStream(false);
+    stream->generate_status_->status = StreamState::RUNNING;
+
+    const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    stream->setNormalAsyncDeviceState(GenerateStream::NormalAsyncDeviceState{
+        .last_sample_token_gpu = torch::full({1}, 42, cuda_i32),
+        .next_seq_len_gpu      = torch::full({1}, 4, cuda_i32),
+        .last_real_seq_len     = 3,
+        .next_real_seq_len     = 4,
+    });
+
+    std::list<GenerateStreamPtr> streams{stream};
+    StreamGroups                 stream_groups(streams);
+
+    EngineInitParams params;
+    params.model_config_ = model_config;
+    params.py_model      = py::none();
+    NormalExecutor executor(params, nullptr, true);
+
+    EXPECT_TRUE(executor.gatherCanUseDeviceState(stream_groups));
+    stream->logits_processor_list_.push_back(std::make_shared<TestStatefulLogitsProcessor>(false));
+    stream->incPendingAsyncBookkeeping();
+    EXPECT_FALSE(executor.gatherCanUseDeviceState(stream_groups));
+    stream->decPendingAsyncBookkeepingAndMaybeRelease();
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testDeviceStateFastPathAllowsAsyncLogitsProcessorState) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 128;
+    model_config.vocab_size  = 128900;
+    RuntimeConfig runtime_config;
+
+    std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
+    query->input_ids                     = hostIntBuffer({1, 2, 3});
+    query->generate_config               = make_shared<GenerateConfig>();
+
+    GenerateStreamPtr stream =
+        make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    stream->setIsContextStream(false);
+    stream->generate_status_->status = StreamState::RUNNING;
+
+    const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    stream->setNormalAsyncDeviceState(GenerateStream::NormalAsyncDeviceState{
+        .last_sample_token_gpu = torch::full({1}, 42, cuda_i32),
+        .next_seq_len_gpu      = torch::full({1}, 4, cuda_i32),
+        .last_real_seq_len     = 3,
+        .next_real_seq_len     = 4,
+    });
+    stream->logits_processor_list_.push_back(std::make_shared<TestStatefulLogitsProcessor>(true));
+
+    std::list<GenerateStreamPtr> streams{stream};
+    StreamGroups                 stream_groups(streams);
+
+    EngineInitParams params;
+    params.model_config_ = model_config;
+    params.py_model      = py::none();
+    NormalExecutor executor(params, nullptr, true);
+
+    stream->incPendingAsyncBookkeeping();
+    EXPECT_TRUE(executor.gatherCanUseDeviceState(stream_groups));
+    stream->decPendingAsyncBookkeepingAndMaybeRelease();
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testSoftmaxProbs) {

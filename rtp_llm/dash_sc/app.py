@@ -36,6 +36,22 @@ from rtp_llm.server.backend_rpc_server_visitor import create_backend_rpc_server_
 # inside the gRPC server or servicer. Empty / unset -> inference mode.
 _FORWARD_ENV_KEY = "DASH_SC_GRPC_FORWARD_ADDR"
 
+# Max time to construct proxy servicer on the gRPC owner loop before start()
+# reports failure to its parent. This mirrors gRPC server startup fail-fast
+# behavior instead of deferring outbound-channel errors to the first request.
+_PROXY_SERVICER_STARTUP_TIMEOUT_S = 30.0
+_SERVICER_CLOSE_TIMEOUT_S = 10.0
+
+
+async def _create_proxy_servicer_on_loop() -> DashScProxyServicer:
+    """Construct proxy servicer inside the running asyncio owner loop.
+
+    ``grpc.aio.Channel`` objects are event-loop affine. The proxy servicer
+    builds outbound channels in its constructor, so construction must happen
+    on the same loop that will later run ``ModelStreamInfer`` and ``close``.
+    """
+    return DashScProxyServicer()
+
 
 def _derive_echo_prefix_ids(generate_env_config: Any, base_tok: Any) -> List[int]:
     """Encode ``generate_env_config.think_start_tag`` once to produce the prefill token ids.
@@ -158,14 +174,17 @@ class DashScApp:
          inference otherwise). Inference mode additionally builds
          ``ModelConfig`` + ``BackendRPCServerVisitor``; proxy mode skips both
          since it only needs outbound channels to the configured backends.
-      2. Construct the chosen servicer (``DashScProxyServicer`` or
-         ``DashScInferenceServicer``).
+      2. In inference mode, build ``ModelConfig`` / tokenizer / servicer before
+         loop startup. In proxy mode, defer servicer construction until the
+         gRPC owner loop exists because outbound ``grpc.aio`` channels are
+         loop-affine.
       3. Spin up a dedicated asyncio loop in a background thread — same loop
          hosts the aio gRPC server AND backend ``enqueue`` coroutines, so the
          request path never leaves this loop.
-      4. Call ``self._grpc_server.start_on_loop`` (schedules start on the
+      4. Construct the proxy servicer on that loop when in proxy mode.
+      5. Call ``self._grpc_server.start_on_loop`` (schedules start on the
          loop and blocks the main thread until bind succeeds or raises).
-      5. Notify the parent via the pipe, then block the main thread waiting on
+      6. Notify the parent via the pipe, then block the main thread waiting on
          SIGTERM/SIGINT.
     """
 
@@ -230,20 +249,34 @@ class DashScApp:
                 "[DashScApp] signal handlers not installed (not on main thread)"
             )
 
+    def _close_servicer_on_loop(self, servicer: Any) -> None:
+        loop = self._enqueue_loop
+        close = getattr(servicer, "close", None)
+        if loop is None or close is None:
+            return
+
+        async def _do_close() -> None:
+            maybe = close()
+            if asyncio.iscoroutine(maybe):
+                await maybe
+
+        try:
+            asyncio.run_coroutine_threadsafe(_do_close(), loop).result(
+                timeout=_SERVICER_CLOSE_TIMEOUT_S
+            )
+        except Exception as e:
+            logging.warning("[DashScApp] servicer cleanup failed: %s", e, exc_info=True)
+
     def start(self, ready_pipe_writer=None) -> None:
+        servicer: Any = None
         try:
             port = self.server_config.dash_sc_grpc_server_port
             is_proxy = bool(os.environ.get(_FORWARD_ENV_KEY, "").strip())
 
-            if is_proxy:
-                # Proxy mode: no model / weight loading / visitor needed — the
-                # servicer is a transparent reverse proxy fed by outbound
-                # channels to ``DASH_SC_GRPC_FORWARD_ADDR``. Skipping the
-                # backend-visitor and model-config construction here avoids the
-                # heavy engine init path (which would fail in proxy-only
-                # deployments where no model is mounted).
-                servicer: Any = DashScProxyServicer()
-            else:
+            # Proxy mode skips model / weight loading / visitor construction;
+            # the servicer is created below on the owner loop so its outbound
+            # grpc.aio channels bind to the same loop that will use them.
+            if not is_proxy:
                 model_config = ModelFactory.create_model_config(
                     model_args=self.py_env_configs.model_args,
                     lora_config=self.py_env_configs.lora_config,
@@ -298,6 +331,15 @@ class DashScApp:
                 )
 
             loop = self._start_enqueue_loop()
+            if is_proxy:
+                fut = asyncio.run_coroutine_threadsafe(
+                    _create_proxy_servicer_on_loop(), loop
+                )
+                try:
+                    servicer = fut.result(timeout=_PROXY_SERVICER_STARTUP_TIMEOUT_S)
+                except BaseException:
+                    fut.cancel()
+                    raise
 
             # Register py_rtp_* metrics so the access-log interceptor's kmonitor.report
             # calls find their metric objects. Idempotent — matches FrontendServer.__init__
@@ -340,6 +382,8 @@ class DashScApp:
                         "[DashScApp] failed to send failure via pipe: %s",
                         pipe_error,
                     )
+            if servicer is not None:
+                self._close_servicer_on_loop(servicer)
             self._stop_enqueue_loop()
             raise
 

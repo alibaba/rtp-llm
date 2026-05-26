@@ -42,6 +42,11 @@ public:
     std::optional<float>       top_p_min;
     std::optional<int>         top_p_reset_ids;
     std::optional<std::string> task_id;
+    std::optional<std::string> json_schema;
+    std::optional<std::string> regex;
+    std::optional<std::string> ebnf;
+    std::optional<std::string> structural_tag;
+    std::optional<std::string> response_format;
     std::string                adapter_name = "";
     std::vector<std::string>   adapter_names;
 
@@ -77,6 +82,7 @@ public:
 
     bool               in_think_mode       = false;
     int                max_thinking_tokens = 0;
+    std::vector<int>   begin_think_token_ids;
     std::vector<int>   end_think_token_ids;
     bool               gen_timeline = false;
     int                profile_step = 3;
@@ -89,7 +95,7 @@ public:
     std::string        trace_id;
     bool               force_batch = false;  // If true, streams with same batch_group_id must be scheduled together
     std::optional<int> batch_group_timeout;
-    std::string      unique_key;
+    std::string        unique_key;
 
     // 生成式推荐：组合 token 粒度去重与曝光过滤
     // combo_token_size 表示一个商品由多少个连续 token 组成（0 表示关闭该功能）
@@ -143,13 +149,21 @@ public:
                      << ", top_p:" << top_p << ", force_disable_sp_run: " << force_disable_sp_run
                      << ", force_sp_accept: " << force_sp_accept << ", return_all_probs: " << return_all_probs
                      << ", stop_words_list:" << vectorsToString(stop_words_list)
+                     << ", json_schema: " << (json_schema.has_value() ? std::to_string(json_schema->size()) : "none")
+                     << ", regex: " << (regex.has_value() ? std::to_string(regex->size()) : "none")
+                     << ", ebnf: " << (ebnf.has_value() ? std::to_string(ebnf->size()) : "none") << ", structural_tag: "
+                     << (structural_tag.has_value() ? std::to_string(structural_tag->size()) : "none")
+                     << ", response_format: "
+                     << (response_format.has_value() ? std::to_string(response_format->size()) : "none")
                      << ", can_use_pd_separation: " << can_use_pd_separation << ", pd_separation: " << pd_separation
                      << ", in_think_mode: " << in_think_mode << ", max_thinking_tokens: " << max_thinking_tokens
+                     << ", begin_think_token_ids: " << vectorToString(begin_think_token_ids)
                      << ", end_think_token_ids: " << vectorToString(end_think_token_ids)
                      << ", gen_timeline: " << gen_timeline << ", profile_step: " << profile_step
                      << ", reuse_cache: " << reuse_cache << ", enable_device_cache: " << enable_device_cache
                      << ", enable_memory_cache: " << enable_memory_cache
-                     << ", enable_remote_cache: " << enable_remote_cache << ", force_batch: " << force_batch << ", unique_key: " << unique_key
+                     << ", enable_remote_cache: " << enable_remote_cache << ", force_batch: " << force_batch
+                     << ", unique_key: " << unique_key
                      << ", combo_token_size: " << combo_token_size
                      << ", banned_combo_token_ids_size: " << banned_combo_token_ids.size() << "}";
         return debug_string.str();
@@ -186,6 +200,11 @@ public:
         JSONIZE_OPTIONAL(top_p_min);
         JSONIZE_OPTIONAL(top_p_reset_ids);
         JSONIZE_OPTIONAL(task_id);
+        JSONIZE_OPTIONAL(json_schema);
+        JSONIZE_OPTIONAL(regex);
+        JSONIZE_OPTIONAL(ebnf);
+        JSONIZE_OPTIONAL(structural_tag);
+        JSONIZE_OPTIONAL(response_format);
         try {
             std::string adapter_name_;
             json.Jsonize("adapter_name", adapter_name_);
@@ -223,6 +242,7 @@ public:
         JSONIZE(sp_advice_prompt_token_ids);
         JSONIZE(in_think_mode);
         JSONIZE(max_thinking_tokens);
+        JSONIZE(begin_think_token_ids);
         JSONIZE(end_think_token_ids);
         JSONIZE(gen_timeline);
         JSONIZE(profile_step);

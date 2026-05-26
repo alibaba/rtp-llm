@@ -2,23 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest import TestCase, main
 from unittest.mock import patch
 
 from rtp_llm.dash_sc import app as bg_app
-from rtp_llm.dash_sc.app import _derive_echo_prefix_ids
+from rtp_llm.dash_sc.app import _create_proxy_servicer_on_loop, _derive_echo_prefix_ids
 
 
 class _EnvCfg:
     def __init__(self, think_mode: int = 1, think_start_tag: str = "<think>\n"):
         self.think_mode = think_mode
         self.think_start_tag = think_start_tag
-
-
-class _ModelCfg:
-    ckpt_path = "/tmp/ckpt"
-    tokenizer_path = "/tmp/tok"
-    model_type = "fake"
 
 
 class _FakeTokenizer:
@@ -42,32 +37,66 @@ class _BaseTok:
 class DeriveEchoPrefixIdsTest(TestCase):
     def test_encodes_think_start_tag(self) -> None:
         tok = _FakeTokenizer(ids=[154841])
-        with patch.object(
-            bg_app.TokenizerFactory, "create", return_value=_BaseTok(tok)
-        ):
-            ids = _derive_echo_prefix_ids(_ModelCfg(), _EnvCfg())
+        ids = _derive_echo_prefix_ids(_EnvCfg(), _BaseTok(tok))
         self.assertEqual(ids, [154841])
         # Must encode without special tokens so only the tag bytes become ids.
         self.assertEqual(tok.encode_calls, [("<think>\n", False)])
 
     def test_disabled_when_think_mode_off(self) -> None:
-        with patch.object(bg_app.TokenizerFactory, "create") as create:
-            ids = _derive_echo_prefix_ids(_ModelCfg(), _EnvCfg(think_mode=0))
+        tok = _FakeTokenizer(ids=[154841])
+        ids = _derive_echo_prefix_ids(_EnvCfg(think_mode=0), _BaseTok(tok))
         self.assertEqual(ids, [])
-        create.assert_not_called()
+        self.assertEqual(tok.encode_calls, [])
 
     def test_disabled_when_tag_empty(self) -> None:
-        with patch.object(bg_app.TokenizerFactory, "create") as create:
-            ids = _derive_echo_prefix_ids(_ModelCfg(), _EnvCfg(think_start_tag=""))
+        tok = _FakeTokenizer(ids=[154841])
+        ids = _derive_echo_prefix_ids(_EnvCfg(think_start_tag=""), _BaseTok(tok))
         self.assertEqual(ids, [])
-        create.assert_not_called()
+        self.assertEqual(tok.encode_calls, [])
 
     def test_fail_open_on_tokenizer_error(self) -> None:
-        with patch.object(
-            bg_app.TokenizerFactory, "create", side_effect=RuntimeError("no tokenizer")
-        ):
-            ids = _derive_echo_prefix_ids(_ModelCfg(), _EnvCfg())
+        ids = _derive_echo_prefix_ids(
+            _EnvCfg(), _BaseTok(_FakeTokenizer(raise_exc=True))
+        )
         self.assertEqual(ids, [])
+
+
+class CreateProxyServicerOnLoopTest(TestCase):
+    def test_constructs_inside_running_loop(self) -> None:
+        created_loops = []
+        sentinel = object()
+
+        def fake_servicer():
+            created_loops.append(asyncio.get_running_loop())
+            return sentinel
+
+        async def run():
+            with patch.object(bg_app, "DashScProxyServicer", side_effect=fake_servicer):
+                loop = asyncio.get_running_loop()
+                servicer = await _create_proxy_servicer_on_loop()
+            return loop, servicer
+
+        loop, servicer = asyncio.run(run())
+        self.assertIs(servicer, sentinel)
+        self.assertEqual(created_loops, [loop])
+
+
+class CloseServicerOnLoopTest(TestCase):
+    def test_closes_servicer_on_enqueue_loop(self) -> None:
+        app = bg_app.DashScApp.__new__(bg_app.DashScApp)
+        loop = app._start_enqueue_loop()
+        closed_loops = []
+
+        class _Closable:
+            async def close(self):
+                closed_loops.append(asyncio.get_running_loop())
+
+        try:
+            app._close_servicer_on_loop(_Closable())
+        finally:
+            app._stop_enqueue_loop()
+
+        self.assertEqual(closed_loops, [loop])
 
 
 if __name__ == "__main__":
