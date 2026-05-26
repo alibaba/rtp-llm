@@ -93,6 +93,7 @@ public:
     grpc::Status                         last_grpc_stream_closed_status = grpc::Status::OK;
     PrefillStatInfo                      stat_info;
     int64_t                              loading_cache_requests = 0;
+    bool                                 recent_cache_key_metric_reported = false;
 };
 
 }  // namespace rtp_llm
