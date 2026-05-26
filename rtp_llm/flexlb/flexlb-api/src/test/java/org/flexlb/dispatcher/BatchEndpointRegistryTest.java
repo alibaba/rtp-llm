@@ -6,6 +6,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -13,14 +14,20 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 class BatchEndpointRegistryTest {
 
     @Test
-    void registryContainsAllThreeSpecsKeyedByPath() {
+    void registryContainsAllSpecsKeyedByPath() {
         BatchEndpointRegistry registry = new BatchEndpointRegistry();
         List<BatchEndpointSpec> specs = registry.batchSpecs();
         Map<String, BatchEndpointSpec> byPath = registry.batchSpecsByPath(specs);
 
-        assertEquals(3, specs.size());
-        assertEquals(3, byPath.size());
-        assertNull(byPath.get("/"));
+        assertEquals(4, specs.size());
+        assertEquals(4, byPath.size());
+
+        BatchEndpointSpec root = byPath.get("/");
+        assertNotNull(root);
+        assertEquals("prompt_batch", root.getRequestArrayField());
+        assertEquals("response_batch", root.getResponseArrayField());
+        assertSame(FailedItemFactory.NULL, root.getFailedItemFactory());
+        assertNull(root.getPostMerger());
 
         BatchEndpointSpec batchInfer = byPath.get("/batch_infer");
         assertEquals("prompt_batch", batchInfer.getRequestArrayField());

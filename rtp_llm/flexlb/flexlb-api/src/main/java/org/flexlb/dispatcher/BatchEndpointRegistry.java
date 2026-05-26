@@ -11,17 +11,26 @@ import java.util.stream.Collectors;
 /**
  * Hard-coded spec table for the dispatcher's batch endpoints.
  *
- * <p><b>Why {@code /} is not listed:</b> {@code POST /} triggers batch mode only when the request
- * body carries {@code prompt_batch} (see {@code request_extractor.py:162-163}), in which case its
- * wire shape is identical to {@code /batch_infer}. Sending {@code prompt: [...]} to {@code /} is a
- * footgun &mdash; {@code frontend_worker.py:425-430} unwraps to {@code batch[0]} on the
- * non-{@code batch_infer} branch, so the engine processes all prompts but returns only the first
- * result. We don't want the dispatcher to normalize that pattern; add {@code /} once V12 settles
- * whether to alias it to {@code /batch_infer} or treat it as passthrough.
+ * <p><b>Bare {@code POST /} is aliased to {@code /batch_infer} semantics</b> &mdash; rtp_llm FE
+ * historically exposes batch generation on the root path and accepts the same
+ * {@code prompt_batch} / {@code response_batch} wire shape. The dispatcher registers it under
+ * {@code /dispatcher/} so deployments whose FE never wired a separate {@code /batch_infer} route
+ * still get fanout. The known footgun applies to <em>callers</em>, not the dispatcher: sending
+ * {@code prompt: [...]} (not {@code prompt_batch}) to {@code POST /} unwraps to
+ * {@code batch[0]} on FE (see {@code frontend_worker.py:425-430}) and silently drops all but the
+ * first result &mdash; clients hitting {@code /dispatcher/} must use {@code prompt_batch}.
  *
  * <p>Embedding variants ({@code /v1/embeddings/dense|sparse|colbert|similarity},
  * {@code /v1/reranker}, {@code /v1/classifier}) share the embedding response shape but use
  * different request fields. Add them after V10, one row each.
+ *
+ * <p><b>Dispatcher is array-only, by design.</b> {@link GenericBatchHandler} hard-rejects (400)
+ * any request whose {@code requestArrayField} is missing or not a JSON array — this is what
+ * neutralizes the {@code POST /} footgun above and matches ft_proxy's gating behavior. The one
+ * place this is stricter than upstream is {@code /v1/embeddings}: the OpenAI spec accepts
+ * {@code input} as either a string OR an array, but the dispatcher rejects the bare-string form.
+ * Single-text embedding callers should hit FE directly; the dispatcher exists to fan batches out,
+ * not to passthrough single items.
  */
 @Configuration
 public class BatchEndpointRegistry {
@@ -29,6 +38,9 @@ public class BatchEndpointRegistry {
     @Bean
     public List<BatchEndpointSpec> batchSpecs() {
         return List.of(
+                new BatchEndpointSpec("/",
+                        "prompt_batch", "response_batch",
+                        FailedItemFactory.NULL, null),
                 new BatchEndpointSpec("/batch_infer",
                         "prompt_batch", "response_batch",
                         FailedItemFactory.NULL, null),
