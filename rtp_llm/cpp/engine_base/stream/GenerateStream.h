@@ -479,21 +479,6 @@ public:
         return sp_output_buffer_;
     }
 
-    // Opaque CUDA event used by async MTP to wait for linear-attention KV swaps
-    // without including cuda_runtime.h in this header.
-    void setPendingSwapDoneEvent(std::shared_ptr<void> event) {
-        std::lock_guard<std::mutex> lk(*pending_swap_done_event_mutex_);
-        pending_swap_done_event_ = std::move(event);
-    }
-    std::shared_ptr<void> getPendingSwapDoneEvent() const {
-        std::lock_guard<std::mutex> lk(*pending_swap_done_event_mutex_);
-        return pending_swap_done_event_;
-    }
-    void clearPendingSwapDoneEvent() {
-        std::lock_guard<std::mutex> lk(*pending_swap_done_event_mutex_);
-        pending_swap_done_event_.reset();
-    }
-
     // Count worker claims on this stream's KV resource.
     // releaseResource waits for zero so worker-side update/specUpdate cannot
     // write into blocks already returned to the pool.

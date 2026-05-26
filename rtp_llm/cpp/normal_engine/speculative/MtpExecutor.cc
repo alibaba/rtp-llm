@@ -1034,8 +1034,6 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     prepareGrpcMtpDeviceState(streams, buffer_holder_);
 
-    waitPreviousBookkeepingAndKvSwaps(streams);
-
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(gather_model_input)");
         int64_t start_time_us      = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -1292,31 +1290,6 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                                 std::move(draft_prefill_sampler_output),
                                 std::move(rejection_event),
                                 std::move(draft_event));
-}
-
-void MtpExecutor::waitPreviousBookkeepingAndKvSwaps(const std::list<GenerateStreamPtr>& streams) {
-    // Cap outstanding stream-async bookkeeping to one step unless DROP_BROAD_SYNC
-    // is on. Device state handles host staleness; swap events handle linear KV.
-    if (useStreamAsync() && !useDropBroadSync()) {
-        RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.decode_step(wait_prev_bookkeeping,stream_count=%zu)",
-                                      streams.size());
-        spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
-    }
-
-    // Linear attention may rewrite KV mappings via swapLinearBlocks; wait on
-    // producer events before target verify reads KV, even when broad sync is off.
-    {
-        RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.decode_step(wait_pending_linear_attn_swaps,stream_count=%zu)",
-                                      streams.size());
-        for (auto& stream : streams) {
-            auto event_handle = stream->getPendingSwapDoneEvent();
-            if (event_handle) {
-                auto event = std::static_pointer_cast<torch::Event>(event_handle);
-                event->block(cuda_graph::graphGetCurrentStream());
-                stream->clearPendingSwapDoneEvent();
-            }
-        }
-    }
 }
 
 void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_input, size_t batch_size) {
@@ -2256,12 +2229,6 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
         auto status = processor->dispatchDecode(stream_groups_copy, spec_decode_copy, draft_prefill_copy);
         if (!status.ok()) {
             RTP_LLM_LOG_ERROR("[stream-async] dispatchDecode (worker) failed: %s", status.ToString().c_str());
-        }
-
-        for (auto& stream : worker_streams) {
-            auto event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
-            event->record(cuda_graph::graphGetCurrentStream());
-            stream->setPendingSwapDoneEvent(std::static_pointer_cast<void>(event));
         }
     });
 
