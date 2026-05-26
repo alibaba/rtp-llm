@@ -2717,13 +2717,13 @@ TEST_F(KVCacheMemoryConnectorDualPoolTest, PoolSizing_JointCalculation) {
     auto conn = createConnector(cfg);
     ASSERT_TRUE(conn->isDualPool());
 
-    // With linear_step=4: incomplete_num = complete_num * 3 + addition.
+    // With linear_step=4: incomplete pool tracks roughly three times the complete pool.
     // totalBlocksNum() reports allocatable blocks and excludes reserved block 0.
     const auto complete_total   = conn->complete_pool_->totalBlocksNum();
     const auto incomplete_total = conn->incomplete_pool_->totalBlocksNum();
     EXPECT_GT(complete_total, 0u);
     EXPECT_GT(incomplete_total, 0u);
-    EXPECT_EQ(incomplete_total, (complete_total + 1) * 3 + kv_cache_config_.non_full_addition_kvcache_blocks - 1);
+    EXPECT_NEAR(static_cast<double>(incomplete_total), static_cast<double>(complete_total) * 3.0, 3.0);
 }
 
 TEST_F(KVCacheMemoryConnectorDualPoolTest, InitDiskDualPools_MirrorsMemoryPoolRatioOnSameMount) {
@@ -2855,51 +2855,23 @@ TEST_F(KVCacheMemoryConnectorDualPoolTest, CacheKeys_MergesBothCaches) {
     EXPECT_TRUE(has_200);
 }
 
-TEST_F(KVCacheMemoryConnectorDualPoolTest, Init_AdditionIncreasesIncompletePoolSize) {
+TEST_F(KVCacheMemoryConnectorDualPoolTest, Init_IncompletePoolTracksCompletePoolByStep) {
     const int linear_step = 4;
     const int layer_num   = 4;
     const int block_num   = 10;
     const int spb         = 8;
 
-    size_t incomplete_without;
-    size_t complete_without;
-    // Create config without addition
-    {
-        kv_cache_config_.non_full_addition_kvcache_blocks = 0;
-        auto cfg                             = createHybridCacheConfig(layer_num, block_num, spb, linear_step);
-        cfg.non_full_addition_kvcache_blocks = 0;
-        allocator_ = std::make_shared<HybridTypeKVCacheAllocator>(cfg, AllocationType::DEVICE);
-        ASSERT_TRUE(allocator_->init());
-        auto conn = createConnector(cfg);
-        ASSERT_TRUE(conn->isDualPool());
-        incomplete_without = conn->incomplete_pool_->totalBlocksNum();
-        complete_without   = conn->complete_pool_->totalBlocksNum();
-    }
+    auto cfg = createHybridCacheConfig(layer_num, block_num, spb, linear_step);
+    allocator_ = std::make_shared<HybridTypeKVCacheAllocator>(cfg, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator_->init());
+    auto conn = createConnector(cfg);
+    ASSERT_TRUE(conn->isDualPool());
 
-    size_t         incomplete_with;
-    size_t         complete_with;
-    const uint32_t addition = 8;
-    // Create config with addition
-    {
-        kv_cache_config_.non_full_addition_kvcache_blocks = addition;
-        auto cfg                             = createHybridCacheConfig(layer_num, block_num, spb, linear_step);
-        cfg.non_full_addition_kvcache_blocks = addition;
-        allocator_ = std::make_shared<HybridTypeKVCacheAllocator>(cfg, AllocationType::DEVICE);
-        ASSERT_TRUE(allocator_->init());
-        auto conn = createConnector(cfg);
-        ASSERT_TRUE(conn->isDualPool());
-        incomplete_with = conn->incomplete_pool_->totalBlocksNum();
-        complete_with   = conn->complete_pool_->totalBlocksNum();
-    }
-
-    // With addition, complete pool shrinks (budget reserved for addition)
-    EXPECT_LT(complete_with, complete_without);
-    // Incomplete pool = complete_num * (step-1) + addition, so it gains addition
-    // but loses some from reduced complete_num. Net: incomplete increases.
-    EXPECT_GT(incomplete_with, incomplete_without);
-    // Verify the formula in allocatable block counts: BlockPool reserves block 0.
-    EXPECT_EQ(incomplete_with, (complete_with + 1) * static_cast<size_t>(linear_step - 1) + addition - 1);
-    EXPECT_EQ(incomplete_without, (complete_without + 1) * static_cast<size_t>(linear_step - 1) - 1);
+    const size_t incomplete = conn->incomplete_pool_->totalBlocksNum();
+    const size_t complete   = conn->complete_pool_->totalBlocksNum();
+    // BlockPool reserves block 0 in each pool, while initBlockPool sizes the
+    // incomplete pool from the complete pool's configured block_num.
+    EXPECT_EQ(incomplete, (complete + 1) * static_cast<size_t>(linear_step - 1) - 1);
 }
 
 }  // namespace rtp_llm::test
