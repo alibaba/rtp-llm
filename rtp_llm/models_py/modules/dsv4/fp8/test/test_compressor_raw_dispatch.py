@@ -206,6 +206,7 @@ def _launch(
         rope_head_dim=rope_dim,
         compress_ratio=COMPRESS_RATIO,
         overlap=OVERLAP,
+        state_tokens_per_block=PAGE,
     )
 
 

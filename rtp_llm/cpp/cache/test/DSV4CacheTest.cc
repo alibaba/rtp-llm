@@ -116,7 +116,7 @@ static ModelConfig makeHybridAttentionModelConfig(bool independent_pool) {
 
 TEST(HybridPoolConfigCreatorTest, ProLayerClassification) {
     ParallelismConfig pc;
-    auto              config = HybridPoolConfigCreator::createConfig(makeProModelConfig(), pc, makeDsv4KvCacheConfig());
+    auto              config = HybridPoolConfigCreator::createConfig(makeProModelConfig(), pc, makeDsv4KvCacheConfig(), false, 0);
     EXPECT_EQ(config.layer_num, 61u);
     EXPECT_EQ(config.global_layer_ids[0].size(), 30u);
     EXPECT_EQ(config.global_layer_ids[1].size(), 31u);
@@ -125,7 +125,7 @@ TEST(HybridPoolConfigCreatorTest, ProLayerClassification) {
 
 TEST(HybridPoolConfigCreatorTest, FlashLayerClassification) {
     ParallelismConfig pc;
-    auto              config = HybridPoolConfigCreator::createConfig(makeFlashModelConfig(), pc, makeDsv4KvCacheConfig());
+    auto              config = HybridPoolConfigCreator::createConfig(makeFlashModelConfig(), pc, makeDsv4KvCacheConfig(), false, 0);
     EXPECT_EQ(config.layer_num, 43u);
     EXPECT_EQ(config.global_layer_ids[0].size(), 21u);
     EXPECT_EQ(config.global_layer_ids[1].size(), 20u);
@@ -134,7 +134,7 @@ TEST(HybridPoolConfigCreatorTest, FlashLayerClassification) {
 
 TEST(HybridPoolConfigCreatorTest, MtpSwaOnlyLayerIsNotStripped) {
     ParallelismConfig pc;
-    auto config = HybridPoolConfigCreator::createConfig(makeFlashMtpModelConfig(), pc, makeDsv4KvCacheConfig(), true);
+    auto config = HybridPoolConfigCreator::createConfig(makeFlashMtpModelConfig(), pc, makeDsv4KvCacheConfig(), true, 0);
 
     EXPECT_EQ(config.layer_num, 1u);
     EXPECT_EQ(config.block_size_bytes, 1u);
@@ -153,7 +153,7 @@ TEST(HybridPoolConfigCreatorTest, MtpSwaOnlyLayerIsNotStripped) {
 
 TEST(HybridPoolConfigCreatorTest, ProPoolSpecs) {
     ParallelismConfig pc;
-    auto              config = HybridPoolConfigCreator::createConfig(makeProModelConfig(), pc, makeDsv4KvCacheConfig());
+    auto              config = HybridPoolConfigCreator::createConfig(makeProModelConfig(), pc, makeDsv4KvCacheConfig(), false, 0);
 
     EXPECT_EQ(config.cache_specs[0]->layer_num, 30u);
     EXPECT_EQ(config.cache_specs[0]->block_size_bytes(), 32u * kDsv4KvEntryBytes);
@@ -166,13 +166,13 @@ TEST(HybridPoolConfigCreatorTest, ProPoolSpecs) {
     EXPECT_EQ(config.cache_specs[2]->block_size_bytes(), 32u * kDsv4IndexerEntryBytes);
 
     EXPECT_EQ(config.cache_specs[3]->layer_num, 30u);
-    EXPECT_EQ(config.cache_specs[3]->block_size_bytes(), kDsv4TokensPerBlock * 512u * 4u);
+    EXPECT_EQ(config.cache_specs[3]->block_size_bytes(), 8u * 512u * 4u);
 
     EXPECT_EQ(config.cache_specs[4]->layer_num, 30u);
-    EXPECT_EQ(config.cache_specs[4]->block_size_bytes(), kDsv4TokensPerBlock * 2048u * 4u);
+    EXPECT_EQ(config.cache_specs[4]->block_size_bytes(), 8u * 2048u * 4u);
 
     EXPECT_EQ(config.cache_specs[5]->layer_num, 31u);
-    EXPECT_EQ(config.cache_specs[5]->block_size_bytes(), kDsv4TokensPerBlock * 1024u * 4u);
+    EXPECT_EQ(config.cache_specs[5]->block_size_bytes(), 128u * 1024u * 4u);
 
     EXPECT_EQ(config.cache_specs[6]->layer_num, 61u);
     EXPECT_EQ(config.cache_specs[6]->block_size_bytes(), kDsv4TokensPerBlock * kDsv4KvEntryBytes);
@@ -180,7 +180,7 @@ TEST(HybridPoolConfigCreatorTest, ProPoolSpecs) {
 
 TEST(HybridPoolConfigCreatorTest, FlashPoolSpecs) {
     ParallelismConfig pc;
-    auto              config = HybridPoolConfigCreator::createConfig(makeFlashModelConfig(), pc, makeDsv4KvCacheConfig());
+    auto              config = HybridPoolConfigCreator::createConfig(makeFlashModelConfig(), pc, makeDsv4KvCacheConfig(), false, 0);
     EXPECT_EQ(config.cache_specs[0]->layer_num, 21u);
     EXPECT_EQ(config.cache_specs[1]->layer_num, 20u);
     EXPECT_EQ(config.cache_specs[6]->layer_num, 43u);
@@ -192,13 +192,13 @@ TEST(HybridPoolConfigCreatorTest, FlashPoolSpecs) {
 
 TEST(HybridPoolConfigCreatorTest, BlockSizeBytes) {
     ParallelismConfig pc;
-    auto              config = HybridPoolConfigCreator::createConfig(makeProModelConfig(), pc, makeDsv4KvCacheConfig());
+    auto              config = HybridPoolConfigCreator::createConfig(makeProModelConfig(), pc, makeDsv4KvCacheConfig(), false, 0);
     EXPECT_EQ(config.cache_specs[0]->block_size_bytes(), 32u * kDsv4KvEntryBytes);
     EXPECT_EQ(config.cache_specs[1]->block_size_bytes(), 1u * kDsv4KvEntryBytes);
     EXPECT_EQ(config.cache_specs[2]->block_size_bytes(), 32u * kDsv4IndexerEntryBytes);
-    EXPECT_EQ(config.cache_specs[3]->block_size_bytes(), kDsv4TokensPerBlock * 512u * 4u);
-    EXPECT_EQ(config.cache_specs[4]->block_size_bytes(), kDsv4TokensPerBlock * 2048u * 4u);
-    EXPECT_EQ(config.cache_specs[5]->block_size_bytes(), kDsv4TokensPerBlock * 1024u * 4u);
+    EXPECT_EQ(config.cache_specs[3]->block_size_bytes(), 8u * 512u * 4u);
+    EXPECT_EQ(config.cache_specs[4]->block_size_bytes(), 8u * 2048u * 4u);
+    EXPECT_EQ(config.cache_specs[5]->block_size_bytes(), 128u * 1024u * 4u);
     EXPECT_EQ(config.cache_specs[6]->block_size_bytes(), kDsv4TokensPerBlock * kDsv4KvEntryBytes);
 }
 
@@ -206,7 +206,7 @@ TEST(HybridPoolConfigCreatorTest, Fp8BlockSizeBytesUsePaddedPhysicalStride) {
     ParallelismConfig pc;
     auto              mc          = makeProModelConfig();
     mc.attn_config.kv_cache_dtype = KvCacheDataType::FP8;
-    auto config                   = HybridPoolConfigCreator::createConfig(mc, pc, makeDsv4KvCacheConfig());
+    auto config                   = HybridPoolConfigCreator::createConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0);
 
     ASSERT_EQ(config.cache_specs.size(), 7u);
     ASSERT_EQ(config.group_kv_block_stride_bytes.size(), 7u);
@@ -228,7 +228,7 @@ TEST(HybridPoolConfigCreatorTest, Fp8BlockSizeBytesUsePaddedPhysicalStride) {
 TEST(HybridPoolConfigCreatorTest, CreateCacheConfig) {
     auto              mc = makeProModelConfig();
     ParallelismConfig pc;
-    auto              config = HybridPoolConfigCreator::createConfig(mc, pc, makeDsv4KvCacheConfig());
+    auto              config = HybridPoolConfigCreator::createConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0);
 
     // 7 groups -> groupNums() > 1 -> HybridTypeKVCacheAllocator path
     EXPECT_EQ(config.groupNums(), 7);
@@ -243,7 +243,7 @@ TEST(HybridPoolConfigCreatorTest, CreateCacheConfig) {
 TEST(HybridPoolConfigCreatorTest, FlashCacheConfig) {
     auto              mc = makeFlashModelConfig();
     ParallelismConfig pc;
-    auto              config = HybridPoolConfigCreator::createConfig(mc, pc, makeDsv4KvCacheConfig());
+    auto              config = HybridPoolConfigCreator::createConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0);
 
     EXPECT_EQ(config.groupNums(), 7);
     EXPECT_EQ(config.layer_num, 43u);
@@ -255,7 +255,8 @@ TEST(HybridPoolConfigCreatorTest, FlashCacheConfig) {
 
 TEST(HybridPoolConfigCreatorTest, HybridAttentionIndependentPoolUsesHybridPoolConfig) {
     ParallelismConfig pc;
-    auto              config = CacheConfigCreator::createBasicConfig(makeHybridAttentionModelConfig(true), pc);
+    auto              config =
+        CacheConfigCreator::createBasicConfig(makeHybridAttentionModelConfig(true), pc, KVCacheConfig{}, false, 0);
 
     EXPECT_TRUE(config.use_independent_block_pools);
     ASSERT_EQ(config.groupNums(), 2);
@@ -270,7 +271,8 @@ TEST(HybridPoolConfigCreatorTest, HybridAttentionIndependentPoolUsesHybridPoolCo
 
 TEST(HybridPoolConfigCreatorTest, HybridAttentionWithoutIndependentPoolKeepsSharedHybridConfig) {
     ParallelismConfig pc;
-    auto              config = CacheConfigCreator::createBasicConfig(makeHybridAttentionModelConfig(false), pc);
+    auto              config =
+        CacheConfigCreator::createBasicConfig(makeHybridAttentionModelConfig(false), pc, KVCacheConfig{}, false, 0);
 
     EXPECT_FALSE(config.use_independent_block_pools);
     ASSERT_EQ(config.groupNums(), 2);
@@ -340,7 +342,7 @@ TEST(HybridPoolConfigCreatorTest, PagedPoolsShareTokensPerBlock) {
     // Pro config
     {
         ParallelismConfig pc;
-        auto              config = HybridPoolConfigCreator::createConfig(makeProModelConfig(), pc, makeDsv4KvCacheConfig());
+        auto              config = HybridPoolConfigCreator::createConfig(makeProModelConfig(), pc, makeDsv4KvCacheConfig(), false, 0);
         EXPECT_EQ(config.group_seq_size_per_block[0], kDsv4TokensPerBlock);
         EXPECT_EQ(config.group_seq_size_per_block[1], kDsv4TokensPerBlock);
         EXPECT_EQ(config.group_seq_size_per_block[2], kDsv4TokensPerBlock);
@@ -349,7 +351,7 @@ TEST(HybridPoolConfigCreatorTest, PagedPoolsShareTokensPerBlock) {
     // Flash config
     {
         ParallelismConfig pc;
-        auto              config = HybridPoolConfigCreator::createConfig(makeFlashModelConfig(), pc, makeDsv4KvCacheConfig());
+        auto              config = HybridPoolConfigCreator::createConfig(makeFlashModelConfig(), pc, makeDsv4KvCacheConfig(), false, 0);
         EXPECT_EQ(config.group_seq_size_per_block[0], kDsv4TokensPerBlock);
         EXPECT_EQ(config.group_seq_size_per_block[1], kDsv4TokensPerBlock);
         EXPECT_EQ(config.group_seq_size_per_block[2], kDsv4TokensPerBlock);
@@ -359,7 +361,7 @@ TEST(HybridPoolConfigCreatorTest, PagedPoolsShareTokensPerBlock) {
 TEST(HybridPoolConfigCreatorTest, AllPagedPoolsShareBlockNum) {
     auto              mc = makeProModelConfig();
     ParallelismConfig pc;
-    auto              config = HybridPoolConfigCreator::createConfig(mc, pc, makeDsv4KvCacheConfig());
+    auto              config = HybridPoolConfigCreator::createConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0);
     config.block_num         = 100;
 
     // Paged groups derive their block count from the global block_num; fixed/SWA
@@ -452,12 +454,13 @@ TEST(CacheConfigTest, FinalizeBlockNumsIsNoopForSingleAndSharedHybridConfig) {
     runtime_config.fifo_scheduler_config.max_context_batch_size = 4;
 
     ParallelismConfig pc;
-    auto              single_config = CacheConfigCreator::createBasicConfig(ModelConfig(), pc);
+    auto single_config = CacheConfigCreator::createBasicConfig(ModelConfig(), pc, KVCacheConfig{}, false, 0);
     single_config.finalizeBlockNums(123, runtime_config);
     EXPECT_TRUE(single_config.group_block_nums.empty());
     EXPECT_EQ(single_config.fixed_pool_reserve_bytes, 0u);
 
-    auto hybrid_config = CacheConfigCreator::createBasicConfig(makeHybridAttentionModelConfig(false), pc);
+    auto hybrid_config =
+        CacheConfigCreator::createBasicConfig(makeHybridAttentionModelConfig(false), pc, KVCacheConfig{}, false, 0);
     hybrid_config.finalizeBlockNums(123, runtime_config);
     EXPECT_FALSE(hybrid_config.use_independent_block_pools);
     EXPECT_TRUE(hybrid_config.group_block_nums.empty());
@@ -470,7 +473,7 @@ TEST(CacheConfigTest, FinalizeBlockNumsAppliesToIndependentPools) {
     runtime_config.fifo_scheduler_config.max_context_batch_size = 3;
 
     ParallelismConfig pc;
-    auto              config = HybridPoolConfigCreator::createConfig(makeProModelConfig(), pc, makeDsv4KvCacheConfig());
+    auto              config = HybridPoolConfigCreator::createConfig(makeProModelConfig(), pc, makeDsv4KvCacheConfig(), false, 0);
     config.finalizeBlockNums(100, runtime_config);
 
     ASSERT_EQ(config.group_block_nums.size(), static_cast<size_t>(kDsv4PoolNum));
@@ -530,7 +533,7 @@ TEST(CacheConfigTest, DSV4ExplicitFixedPoolBlocksIgnoreLinearStep) {
     runtime_config.fifo_scheduler_config.max_context_batch_size = 2;
 
     ParallelismConfig pc;
-    auto              config = HybridPoolConfigCreator::createConfig(makeProModelConfig(), pc, makeDsv4KvCacheConfig());
+    auto              config = HybridPoolConfigCreator::createConfig(makeProModelConfig(), pc, makeDsv4KvCacheConfig(), false, 0);
     config.linear_step = 4;
     config.finalizeBlockNums(100, runtime_config);
 
@@ -682,13 +685,59 @@ TEST(CacheConfigTest, DSV4MtpKeepsProposeLayerInSwaPool) {
     EXPECT_EQ(config.fixed_pool_reserve_bytes, expected_fixed_reserve);
 }
 
+TEST(HybridPoolConfigCreatorTest, MtpGenNum2RingEntriesMatch) {
+    // gen_num_per_cycle=2 → CSA/INDEXER R=10, HCA R=130, SWA=256.
+    // Formula: R = ceil_even((1 + overlap) * ratio + gen_num_per_cycle)
+    auto              mc = makeFlashModelConfig();
+    ParallelismConfig pc;
+    auto config = HybridPoolConfigCreator::createConfig(mc, pc, KVCacheConfig{}, false, /*gen_num_per_cycle=*/2);
+
+    ASSERT_EQ(config.cache_specs.size(), 7u);
+    // Pool 3: INDEXER_STATE (ratio=4, overlap=1) → R=10
+    auto* indexer_state = dynamic_cast<DSV4StateSpec*>(config.cache_specs[3].get());
+    ASSERT_NE(indexer_state, nullptr);
+    EXPECT_EQ(indexer_state->entries_per_block, 10u);
+    // Pool 4: CSA_STATE (ratio=4, overlap=1) → R=10
+    auto* csa_state = dynamic_cast<DSV4StateSpec*>(config.cache_specs[4].get());
+    ASSERT_NE(csa_state, nullptr);
+    EXPECT_EQ(csa_state->entries_per_block, 10u);
+    // Pool 5: HCA_STATE (ratio=128, overlap=0) → R=130
+    auto* hca_state = dynamic_cast<DSV4StateSpec*>(config.cache_specs[5].get());
+    ASSERT_NE(hca_state, nullptr);
+    EXPECT_EQ(hca_state->entries_per_block, 130u);
+    // Pool 6: SWA_KV → entries_per_block = 256
+    auto* swa_kv = dynamic_cast<DSV4StateSpec*>(config.cache_specs[6].get());
+    ASSERT_NE(swa_kv, nullptr);
+    EXPECT_EQ(swa_kv->cache_type, KVCacheRegionName::SWA_KV);
+    EXPECT_EQ(swa_kv->entries_per_block, 256u);
+}
+
+TEST(CacheConfigTest, DSV4NonMtpSpConfigDoesNotInflateRing) {
+    // SP_TYPE_NONE with default gen_num_per_cycle=1 must NOT inflate state ring.
+    // Non-MTP DSV4 ring: R = ceil_even((1+overlap)*ratio + 0) = 8 for CSA.
+    auto              mc = makeFlashModelConfig();
+    ParallelismConfig pc;
+    RuntimeConfig     rc;
+    rc.max_generate_batch_size                      = 2;
+    rc.fifo_scheduler_config.max_context_batch_size = 1;
+    KVCacheConfig kvc;
+    kvc.test_block_num = 50;
+    SpeculativeExecutionConfig sp_none;  // type=SP_TYPE_NONE, gen_num_per_cycle=1
+    auto config = CacheConfigCreator::createConfig(mc, pc, rc, kvc, std::nullopt, std::make_optional(sp_none));
+    ASSERT_EQ(config.cache_specs.size(), 7u);
+    // CSA_STATE (pool 4): ratio=4, overlap=1, gen_num=0 → R=8
+    auto* csa = dynamic_cast<DSV4StateSpec*>(config.cache_specs[4].get());
+    ASSERT_NE(csa, nullptr);
+    EXPECT_EQ(csa->entries_per_block, 8u) << "SP_TYPE_NONE should not inflate ring";
+}
+
 TEST(HybridPoolConfigCreatorTest, BlockIdConsistencyAcrossGroups) {
     // DSV4 has multiple cache regions per logical layer. The config must expose
     // every region's group id for the layer so model/runtime code can request the
     // correct region by KVCacheRegionName.
     auto              mc = makeProModelConfig();
     ParallelismConfig pc;
-    auto              config = HybridPoolConfigCreator::createConfig(mc, pc, makeDsv4KvCacheConfig());
+    auto              config = HybridPoolConfigCreator::createConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0);
 
     // Verify layer_to_group_id mapping: each layer maps to group 6 (SWA) by default
     EXPECT_EQ(config.layer_to_group_id.size(), 61u);
@@ -714,7 +763,7 @@ TEST(HybridPoolConfigCreatorTest, BlockIdConsistencyAcrossGroups) {
 static CacheConfig makeDSV4AllocatorConfig(bool use_flash = false) {
     auto              mc = use_flash ? makeFlashModelConfig() : makeProModelConfig();
     ParallelismConfig pc;
-    auto              config = HybridPoolConfigCreator::createConfig(mc, pc, makeDsv4KvCacheConfig());
+    auto              config = HybridPoolConfigCreator::createConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0);
     // Set enough blocks for tests (7 groups × N blocks each)
     config.block_num = 200;
     return config;
@@ -857,9 +906,9 @@ TEST_F(DSV4AllocatorTest, SpecBlockSizesMatchPoolSpecs) {
     EXPECT_EQ(config.cache_specs[0]->block_size_bytes(), 32u * kDsv4KvEntryBytes);
     EXPECT_EQ(config.cache_specs[1]->block_size_bytes(), 1u * kDsv4KvEntryBytes);
     EXPECT_EQ(config.cache_specs[2]->block_size_bytes(), 32u * kDsv4IndexerEntryBytes);
-    EXPECT_EQ(config.cache_specs[3]->block_size_bytes(), kDsv4TokensPerBlock * 512u * 4u);
-    EXPECT_EQ(config.cache_specs[4]->block_size_bytes(), kDsv4TokensPerBlock * 2048u * 4u);
-    EXPECT_EQ(config.cache_specs[5]->block_size_bytes(), kDsv4TokensPerBlock * 1024u * 4u);
+    EXPECT_EQ(config.cache_specs[3]->block_size_bytes(), 8u * 512u * 4u);
+    EXPECT_EQ(config.cache_specs[4]->block_size_bytes(), 8u * 2048u * 4u);
+    EXPECT_EQ(config.cache_specs[5]->block_size_bytes(), 128u * 1024u * 4u);
     EXPECT_EQ(config.cache_specs[6]->block_size_bytes(), kDsv4TokensPerBlock * kDsv4KvEntryBytes);
 }
 
@@ -872,7 +921,8 @@ TEST_F(DSV4AllocatorTest, KVBlockStrideIsMaxAcrossGroups) {
         expected_max = std::max(expected_max, config.cache_specs[i]->block_size_bytes());
     }
     EXPECT_EQ(config.kv_block_stride_bytes, expected_max);
-    EXPECT_EQ(expected_max, config.cache_specs[4]->block_size_bytes());
+    // HCA_STATE has the largest per-block bytes (128 entries * 1024 * 4)
+    EXPECT_EQ(expected_max, config.cache_specs[5]->block_size_bytes());
 }
 
 TEST_F(DSV4AllocatorTest, AllGroupsParticipateInPrefixCache) {

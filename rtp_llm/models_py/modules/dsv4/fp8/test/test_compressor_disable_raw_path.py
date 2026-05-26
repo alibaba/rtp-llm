@@ -102,6 +102,7 @@ def _bind_pools(
         state_pool_view=state_view_2d,
         state_block_table=state_block_table,
         state_eb=state_eb,
+        state_tokens_per_block=state_eb,
     )
     return state_view_2d, kv_pool_3d
 
@@ -148,7 +149,14 @@ class CompressorDisableRawPathTest(unittest.TestCase):
         score_flat = score.reshape(seqlen, -1).contiguous()
 
         positions, b_idx = _build_prefill_positions(sp, 1, seqlen, DEVICE)
-        meta = cmp.prepare_metadata(positions, b_idx)
+        seq_start_per_req = torch.tensor([sp], dtype=torch.int64, device=DEVICE)
+        cu_seq_per_req = torch.tensor([0, seqlen], dtype=torch.int64, device=DEVICE)
+        meta = cmp.prepare_metadata(
+            positions,
+            b_idx,
+            seq_start_per_req=seq_start_per_req,
+            cu_seq_per_req=cu_seq_per_req,
+        )
         cmp._launch(kv_flat, score_flat, meta, seq_start=(sp if raw_path else None))
         torch.cuda.synchronize()
         return state_view.clone(), kv_pool.clone()

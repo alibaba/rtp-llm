@@ -30,14 +30,14 @@ from typing import Optional
 
 import torch
 
+from rtp_llm.models_py.modules.dsv4.fp8._compressor_vllm_triton import (
+    run_save_partial_states,
+)
 from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
     CompressorFP8,
     CompressorMeta,
     _build_prefill_positions,
     build_prepare_metadata_args,
-)
-from rtp_llm.models_py.modules.dsv4.fp8._compressor_vllm_triton import (
-    run_save_partial_states,
 )
 
 
@@ -56,6 +56,7 @@ class _StubCompressor:
         self.compress_ratio = compress_ratio
         self._state_block_table = state_block_table
         self._state_eb = state_eb
+        self._state_tokens_per_block = state_eb
         self._kv_block_table = kv_block_table
         self._kv_eb = kv_eb
         self._kv_cache_sharded = False
@@ -89,6 +90,28 @@ def _make_stub(
     return _StubCompressor(ratio, state_bt, state_eb, kv_bt, kv_eb)
 
 
+def _seq_meta_for_single_req(
+    sp: int, S: int, device: torch.device
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Build (seq_start_per_req, cu_seq_per_req) for a single request."""
+    seq_start = torch.tensor([sp], dtype=torch.int64, device=device)
+    cu_seq = torch.tensor([0, S], dtype=torch.int64, device=device)
+    return seq_start, cu_seq
+
+
+def _seq_meta_for_batched(
+    prefix_lengths: list[int],
+    input_lengths: list[int],
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Build (seq_start_per_req, cu_seq_per_req) for batched requests."""
+    seq_start = torch.tensor(prefix_lengths, dtype=torch.int64, device=device)
+    cu_seq = torch.zeros(len(input_lengths) + 1, dtype=torch.int64, device=device)
+    for i, L in enumerate(input_lengths):
+        cu_seq[i + 1] = cu_seq[i] + L
+    return seq_start, cu_seq
+
+
 class CompressorPrepareMetadataVarlenTest(unittest.TestCase):
 
     def setUp(self) -> None:
@@ -96,6 +119,26 @@ class CompressorPrepareMetadataVarlenTest(unittest.TestCase):
             self.skipTest("CUDA required")
         self.device = torch.device("cuda")
         self.ratio = 4
+
+    def _prepare(
+        self,
+        stub: _StubCompressor,
+        positions: torch.Tensor,
+        b_idx: torch.Tensor,
+        prefix_lengths: Optional[list[int]] = None,
+        input_lengths: Optional[list[int]] = None,
+    ):
+        """Call prepare_metadata with auto-derived seq metadata."""
+        if prefix_lengths is None:
+            n_reqs = int(b_idx.max().item()) + 1
+            prefix_lengths = [0] * n_reqs
+            input_lengths = [int((b_idx == b).sum().item()) for b in range(n_reqs)]
+        seq_start, cu_seq = _seq_meta_for_batched(
+            prefix_lengths, input_lengths, self.device  # type: ignore[arg-type]
+        )
+        return stub.prepare_metadata(
+            positions, b_idx, seq_start_per_req=seq_start, cu_seq_per_req=cu_seq
+        )
 
     # ------------------------------------------------------------------
     # B == 1: new (position_ids, req_id_per_token) must equal legacy path.
@@ -110,8 +153,8 @@ class CompressorPrepareMetadataVarlenTest(unittest.TestCase):
             sp, sp + S, dtype=torch.int64, device=self.device
         ).contiguous()
         new_b = torch.zeros(S, dtype=torch.int64, device=self.device).contiguous()
-        legacy_meta = stub.prepare_metadata(legacy_pos, legacy_b)
-        new_meta = stub.prepare_metadata(new_pos, new_b)
+        legacy_meta = self._prepare(stub, legacy_pos, legacy_b, [sp], [S])
+        new_meta = self._prepare(stub, new_pos, new_b, [sp], [S])
         self.assertTrue(torch.equal(legacy_meta.positions, new_meta.positions))
         self.assertTrue(torch.equal(legacy_meta.b_idx, new_meta.b_idx))
         self.assertTrue(torch.equal(legacy_meta.state_slots, new_meta.state_slots))
@@ -198,7 +241,7 @@ class CompressorPrepareMetadataVarlenTest(unittest.TestCase):
         # Req1: sp=300,S=10 → positions [300..309] → block_in_seq=1
         #   (since eb=256, 300//256=1; within the table's two blocks)
         positions, req_id = self._build_batched_positions([0, 300], [8, 10])
-        meta = stub.prepare_metadata(positions, req_id)
+        meta = self._prepare(stub, positions, req_id, [0, 300], [8, 10])
         # Req0 first token: bt[0, 0]=1, in_block=0 → slot=1*256+0=256
         self.assertEqual(int(meta.state_slots[0].item()), 256)
         # Req0 last token (pos=7): slot=1*256+7=263
@@ -216,7 +259,7 @@ class CompressorPrepareMetadataVarlenTest(unittest.TestCase):
         # Req0: sp=0,S=8 → boundaries at pos=3,7
         # Req1: sp=4,S=8 → boundaries at pos=7,11
         positions, req_id = self._build_batched_positions([0, 4], [8, 8])
-        meta = stub.prepare_metadata(positions, req_id)
+        meta = self._prepare(stub, positions, req_id, [0, 4], [8, 8])
         kv = meta.kv_slots
         # tokens_per_block = kv_eb * ratio = 64 * 4 = 256
         # For req0 boundary at pos=3:
@@ -240,7 +283,7 @@ class CompressorPrepareMetadataVarlenTest(unittest.TestCase):
         run_fused_compress_kv_write to route per-token writes."""
         stub = _make_stub(self.device, n_reqs=2)
         positions, req_id = self._build_batched_positions([0, 16], [4, 6])
-        meta = stub.prepare_metadata(positions, req_id)
+        meta = self._prepare(stub, positions, req_id, [0, 16], [4, 6])
         self.assertTrue(torch.equal(meta.token_to_req, req_id.to(torch.int32)))
 
     def test_b2_unallocated_block_yields_minus_one_state_slot(self) -> None:
@@ -253,7 +296,7 @@ class CompressorPrepareMetadataVarlenTest(unittest.TestCase):
         # Req0: sp=0,S=4 → all 4 tokens land in req0's first block (id=1)
         # Req1: sp=0,S=4 → all 4 tokens want req1's first block (now id=-1 → -1)
         positions, req_id = self._build_batched_positions([0, 0], [4, 4])
-        meta = stub.prepare_metadata(positions, req_id)
+        meta = self._prepare(stub, positions, req_id, [0, 0], [4, 4])
         # Req0 tokens (t=0..3): valid slots
         for t in range(4):
             self.assertGreater(int(meta.state_slots[t].item()), 0)
@@ -261,14 +304,15 @@ class CompressorPrepareMetadataVarlenTest(unittest.TestCase):
         for t in range(4, 8):
             self.assertEqual(int(meta.state_slots[t].item()), -1)
 
-    def test_zero_block_id_is_valid_state_slot(self) -> None:
+    def test_zero_block_id_is_invalid_sentinel(self) -> None:
+        """block_id == 0 is the unallocated sentinel (unified with reader)."""
         stub = _make_stub(self.device, n_reqs=1, blocks_per_req=2)
         stub._state_block_table = stub._state_block_table.clone()
         stub._state_block_table[0, 1] = 0
         positions = torch.tensor([256, 257], dtype=torch.long, device=self.device)
         req_id = torch.zeros_like(positions)
-        meta = stub.prepare_metadata(positions, req_id)
-        self.assertEqual(meta.state_slots.tolist(), [0, 1])
+        meta = self._prepare(stub, positions, req_id, [256], [2])
+        self.assertEqual(meta.state_slots.tolist(), [-1, -1])
 
     def test_state_sparse_valid_blocks_are_all_written(self) -> None:
         """HCA_STATE / CSA_STATE / INDEXER_STATE share this state mapping.
@@ -276,6 +320,14 @@ class CompressorPrepareMetadataVarlenTest(unittest.TestCase):
         The refactored cache may expose periodic valid logical blocks rather
         than a tail-only table. Every positive state block id must produce a
         writable state slot; gaps must stay ``-1``.
+
+        Note: ``positions`` deliberately stops at 1279 (= 5*256 - 1). A
+        position 1280 would map to ``(1280//256) % 5 == 0`` and collide
+        with the pos=0 slot in block 11 — that wrap-aliasing is the ring
+        contract of the writer, not a bug, and is masked by the
+        ``seq_end_per_req`` write guard at the caller (see
+        ``_fused_compressor_meta_triton`` HAS_SEQ_END path). This UT
+        targets writer slot arithmetic only, so wrap cases are out of scope.
         """
         stub = _make_stub(self.device, n_reqs=1, blocks_per_req=5)
         stub._state_block_table = torch.tensor(
@@ -293,13 +345,12 @@ class CompressorPrepareMetadataVarlenTest(unittest.TestCase):
                 1023,
                 1024,
                 1279,
-                1280,
             ],
             dtype=torch.int64,
             device=self.device,
         )
         req_id = torch.zeros_like(positions)
-        meta = stub.prepare_metadata(positions, req_id)
+        meta = self._prepare(stub, positions, req_id, [0], [int(positions.numel())])
 
         expected = torch.tensor(
             [
@@ -313,7 +364,6 @@ class CompressorPrepareMetadataVarlenTest(unittest.TestCase):
                 -1,
                 15 * 256 + 0,
                 15 * 256 + 255,
-                -1,
             ],
             dtype=torch.int64,
             device=self.device,
@@ -327,7 +377,9 @@ class CompressorPrepareMetadataVarlenTest(unittest.TestCase):
             device=self.device,
         ).view(positions.numel(), head_size)
         score = torch.zeros_like(kv)
-        ape = torch.zeros((self.ratio, head_size), dtype=torch.float32, device=self.device)
+        ape = torch.zeros(
+            (self.ratio, head_size), dtype=torch.float32, device=self.device
+        )
         sentinel = -123.0
         state_cache = torch.full(
             (16, 256, 2 * head_size),
@@ -346,12 +398,16 @@ class CompressorPrepareMetadataVarlenTest(unittest.TestCase):
         )
         torch.cuda.synchronize()
 
+        # pos=0→kv[0], pos=255→kv[1] in block 11
         self.assertTrue(torch.equal(state_cache[11, 0, :head_size], kv[0]))
         self.assertTrue(torch.equal(state_cache[11, 255, :head_size], kv[1]))
+        # pos=512→kv[4], pos=767→kv[5] in block 13
         self.assertTrue(torch.equal(state_cache[13, 0, :head_size], kv[4]))
         self.assertTrue(torch.equal(state_cache[13, 255, :head_size], kv[5]))
+        # pos=1024→kv[8], pos=1279→kv[9] in block 15
         self.assertTrue(torch.equal(state_cache[15, 0, :head_size], kv[8]))
         self.assertTrue(torch.equal(state_cache[15, 255, :head_size], kv[9]))
+        # Blocks 12, 14 had negative block_ids → untouched
         self.assertTrue(torch.all(state_cache[12] == sentinel))
         self.assertTrue(torch.all(state_cache[14] == sentinel))
 

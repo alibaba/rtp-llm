@@ -71,6 +71,19 @@ class DSv4DecodeFmhaImplConfigFP8:
     # snapshot-at-construct is safe.
     group_region_names: List[int] = field(default_factory=list)
 
+    # Kernel token block size for state pool block_table indexing (DSV4 =
+    # 256). Decoupled from state_eb (ring entries) when ring sizing is active.
+    # Required — must be sourced from CacheConfig.kernel_seq_size_per_block.
+    state_tokens_per_block: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        if self.state_tokens_per_block is None or self.state_tokens_per_block <= 0:
+            raise ValueError(
+                "DSv4DecodeFmhaImplConfigFP8.state_tokens_per_block must be a "
+                "positive int sourced from CacheConfig.kernel_seq_size_per_block; "
+                f"got {self.state_tokens_per_block!r}"
+            )
+
 
 class DSv4DecodeFmhaImplFP8:
     """CUDA-graph-friendly DSv4 decode "FMHA impl".
@@ -111,7 +124,8 @@ class DSv4DecodeFmhaImplFP8:
         return True
 
     def _extract_paged_block_tables(
-        self, attn_inputs: Any,
+        self,
+        attn_inputs: Any,
     ) -> Optional[Dict[int, torch.Tensor]]:
         if not self._paged_entries_per_block or not self.config.group_region_names:
             return None
@@ -143,6 +157,7 @@ class DSv4DecodeFmhaImplFP8:
             forbid_realloc=forbid_realloc,
             paged_block_tables=paged_block_tables,
             paged_pool_entries_per_block=self._paged_entries_per_block,
+            state_tokens_per_block=self.config.state_tokens_per_block,
         )
 
     def prepare_cuda_graph(self, attn_inputs: Any) -> None:
@@ -161,4 +176,5 @@ class DSv4DecodeFmhaImplFP8:
             forbid_realloc=True,
             paged_block_tables=paged_block_tables,
             paged_pool_entries_per_block=self._paged_entries_per_block,
+            state_tokens_per_block=self.config.state_tokens_per_block,
         )

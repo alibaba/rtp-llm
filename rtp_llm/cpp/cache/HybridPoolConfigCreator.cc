@@ -264,7 +264,8 @@ void setupGroupCounts(CacheConfig& config) {
 CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_config,
                                             const ParallelismConfig& parallelism_config,
                                             const KVCacheConfig&     kv_cache_config,
-                                            bool                     is_mtp) {
+                                            bool                     is_mtp,
+                                            int                      gen_num_per_cycle) {
     const auto dtype = MemoryEvaluationHelper::getDataTypeForCache(model_config);
 
     CacheConfig config;
@@ -278,7 +279,7 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
     config.is_sparse          = model_config.attn_config.is_sparse;
 
     if (!model_config.attn_config.layer_compress_ratios.empty()) {
-        DSV4CacheConfigHelper::applyConfig(config, model_config, kv_cache_config);
+        DSV4CacheConfigHelper::applyConfig(config, model_config, kv_cache_config, gen_num_per_cycle);
     } else {
         RTP_LLM_CHECK_WITH_INFO(model_config.hybrid_attention_config.enable_hybrid_attention,
                                 "HybridPoolConfigCreator requires DSV4 layer_compress_ratios or hybrid attention");
@@ -300,8 +301,10 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
 CacheConfig HybridPoolConfigCreator::createConfig(const ModelConfig&       model_config,
                                                   const ParallelismConfig& parallelism_config,
                                                   const KVCacheConfig&     kv_cache_config,
-                                                  bool                     is_mtp) {
-    return createHybridAttentionPoolConfig(model_config, parallelism_config, kv_cache_config, is_mtp);
+                                                  bool                     is_mtp,
+                                                  int                      gen_num_per_cycle) {
+    return createHybridAttentionPoolConfig(
+        model_config, parallelism_config, kv_cache_config, is_mtp, gen_num_per_cycle);
 }
 
 }  // namespace rtp_llm

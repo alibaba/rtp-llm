@@ -201,6 +201,7 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     NUM_KV_BLOCKS: tl.constexpr,
     BATCHED: tl.constexpr,
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
+    STATE_RING_ENTRIES: tl.constexpr,
 ):
     token_idx = tl.program_id(0).to(tl.int64)
 
@@ -275,24 +276,20 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     # block index beyond the table width means the framework failed to grow the
     # table before this launch.
     use_cache = mask_pos & ~use_raw
-    block_indices = pos // block_size
-    out_of_table = use_cache & (block_indices >= block_table_stride)
-    if tl.max(out_of_table.to(tl.int32), axis=0) != 0:
-        _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
+    block_indices = (pos // block_size) % block_table_stride
     block_indices_safe = tl.where(use_cache, block_indices, 0)
     block_numbers = tl.load(
         block_table_ptr + req_idx * block_table_stride + block_indices_safe,
         mask=use_cache,
         other=0,
     )
-    invalid_state_block = use_cache & (
-        (block_numbers < 0) | (block_numbers >= NUM_STATE_BLOCKS)
-    )
+    invalid_state_block = use_cache & (block_numbers >= NUM_STATE_BLOCKS)
     if tl.max(invalid_state_block.to(tl.int32), axis=0) != 0:
         _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
-    valid_block = use_cache
+    valid_block = use_cache & (block_numbers > 0)
     block_numbers_i64 = tl.where(valid_block, block_numbers, 0).to(tl.int64)
-    block_offsets_raw = pos % block_size
+    ring_mod = STATE_RING_ENTRIES
+    block_offsets_raw = pos % ring_mod
     block_offsets = tl.where(mask_pos, block_offsets_raw, 0)
 
     row_base = (
@@ -301,7 +298,7 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
         + block_offsets * state_cache_stride1
         + head_offset
     )
-    cache_mask = (use_cache & valid_block)[:, None] & mask[None, :]
+    cache_mask = valid_block[:, None] & mask[None, :]
     kv_from_cache = tl.load(
         row_base[:, None] + block[None, :], mask=cache_mask, other=0.0
     )
@@ -473,6 +470,7 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
     NUM_KV_BLOCKS: tl.constexpr,
     BATCHED: tl.constexpr,
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
+    STATE_RING_ENTRIES: tl.constexpr,
 ):
     token_idx = tl.program_id(0).to(tl.int64)
 
@@ -545,24 +543,20 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
     # block index beyond the table width means the framework failed to grow the
     # table before this launch.
     use_cache = mask_pos & ~use_raw
-    block_indices = pos // block_size
-    out_of_table = use_cache & (block_indices >= block_table_stride)
-    if tl.max(out_of_table.to(tl.int32), axis=0) != 0:
-        _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
+    block_indices = (pos // block_size) % block_table_stride
     block_indices_safe = tl.where(use_cache, block_indices, 0)
     block_numbers = tl.load(
         block_table_ptr + req_idx * block_table_stride + block_indices_safe,
         mask=use_cache,
         other=0,
     )
-    invalid_state_block = use_cache & (
-        (block_numbers < 0) | (block_numbers >= NUM_STATE_BLOCKS)
-    )
+    invalid_state_block = use_cache & (block_numbers >= NUM_STATE_BLOCKS)
     if tl.max(invalid_state_block.to(tl.int32), axis=0) != 0:
         _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
-    valid_block = use_cache
+    valid_block = use_cache & (block_numbers > 0)
     block_numbers_i64 = tl.where(valid_block, block_numbers, 0).to(tl.int64)
-    block_offsets_raw = pos % block_size
+    ring_mod = STATE_RING_ENTRIES
+    block_offsets_raw = pos % ring_mod
     block_offsets = tl.where(mask_pos, block_offsets_raw, 0)
 
     row_base = (
@@ -571,7 +565,7 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
         + block_offsets * state_cache_stride1
         + head_offset
     )
-    cache_mask = (use_cache & valid_block)[:, None] & mask[None, :]
+    cache_mask = valid_block[:, None] & mask[None, :]
     kv_from_cache = tl.load(
         row_base[:, None] + block[None, :], mask=cache_mask, other=0.0
     )
@@ -738,13 +732,16 @@ def _validate_fused_state_block_table(
         req_cu_hi = cu_seq_per_req.to(torch.int64)[safe_req + 1]
         flat_idx_in_req = gathered_pos - req_seq_start[:, None]
         req_n_raw = req_cu_hi - req_cu_lo
-        use_raw = mask_pos & (flat_idx_in_req >= 0) & (flat_idx_in_req < req_n_raw[:, None])
+        use_raw = (
+            mask_pos & (flat_idx_in_req >= 0) & (flat_idx_in_req < req_n_raw[:, None])
+        )
     else:
         flat_idx = gathered_pos - int(seq_start)
         use_raw = mask_pos & (flat_idx >= 0) & (flat_idx < int(n_raw))
 
     use_cache = mask_pos & ~use_raw
-    block_indices = gathered_pos // int(state_block_size)
+    block_table_stride = int(block_table.shape[1])
+    block_indices = (gathered_pos // int(state_block_size)) % block_table_stride
     validate_block_table_lookup(
         site,
         block_table,
@@ -834,6 +831,7 @@ def run_fused_compress_kv_write(
     # ignored in that mode.
     seq_start_per_req: Optional[torch.Tensor] = None,  # [B] int32/int64
     cu_seq_per_req: Optional[torch.Tensor] = None,  # [B+1] int32/int64
+    state_tokens_per_block: int,
 ) -> None:
     """Boundary-token compress→norm→rope→fp8 quant→KV-pool store.
 
@@ -856,7 +854,8 @@ def run_fused_compress_kv_write(
         raise ValueError(f"Unsupported head_dim {head_dim} for fused compressor write")
 
     state_width = int(state_cache.shape[-1] // 2)
-    state_block_size = int(state_cache.shape[1])
+    state_ring_entries = int(state_cache.shape[1])
+    state_block_size = state_tokens_per_block
     kv_block_size = int(kv_cache.shape[1])
     kv_block_stride = int(kv_cache.stride(0))
     n_raw = 0 if disable_raw_path else int(kv_raw.shape[0])
@@ -951,6 +950,7 @@ def run_fused_compress_kv_write(
         NUM_KV_BLOCKS=int(kv_cache.shape[0]),
         BATCHED=batched,
         TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
+        STATE_RING_ENTRIES=state_ring_entries,
         num_warps=_fused_num_warps(head_dim, compress_ratio, cfg),
     )
 

@@ -46,6 +46,7 @@ def _build_cpu_compressor(
         state_pool_view=state_view,
         state_block_table=state_block_table,
         state_eb=state_eb,
+        state_tokens_per_block=state_eb,
     )
     return cmp
 

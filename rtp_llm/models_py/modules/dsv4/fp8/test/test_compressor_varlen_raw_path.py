@@ -120,6 +120,7 @@ def _bind_pools_for_batch(
         state_pool_view=state_view_2d,
         state_block_table=state_block_table,
         state_eb=state_eb,
+        state_tokens_per_block=state_eb,
     )
     return state_view_2d, kv_pool_3d
 
@@ -228,7 +229,16 @@ class CompressorVarlenRawPathTest(unittest.TestCase):
                 sps[b], sps[b] + S_per_req[b], device=DEVICE, dtype=torch.long
             )
             bidx_b = torch.full((S_per_req[b],), b, device=DEVICE, dtype=torch.long)
-            meta_b = cmp_b.prepare_metadata(pos_b, bidx_b)
+            meta_b = cmp_b.prepare_metadata(
+                pos_b,
+                bidx_b,
+                seq_start_per_req=torch.tensor(
+                    [sps[b]], dtype=torch.int64, device=DEVICE
+                ),
+                cu_seq_per_req=torch.tensor(
+                    [0, S_per_req[b]], dtype=torch.int64, device=DEVICE
+                ),
+            )
             cmp_b._launch(kv_b_flat, score_b_flat, meta_b, seq_start=sps[b])
         torch.cuda.synchronize()
 

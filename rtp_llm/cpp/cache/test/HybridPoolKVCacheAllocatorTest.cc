@@ -170,7 +170,7 @@ static CacheConfig makeDSV4HybridPoolConfig(uint32_t block_num = 200) {
     KVCacheConfig     kv_cache_config;
     kv_cache_config.seq_size_per_block     = 128;
     kv_cache_config.dsv4_fixed_pool_blocks = block_num;
-    auto              config = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config);
+    auto              config = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config, false, 0);
     config.block_num         = block_num;
     return config;
 }
@@ -939,7 +939,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4ConfigSplitsStateBytesOutOfSwaAccumul
     KVCacheConfig     kv_cache_config;
     kv_cache_config.seq_size_per_block     = 128;
     kv_cache_config.dsv4_fixed_pool_blocks = 200;
-    auto              config = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config);
+    auto              config = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config, false, 0);
 
     ASSERT_EQ(config.groupNums(), 7);
     ASSERT_EQ(config.group_region_names.size(), 7u);
@@ -1053,7 +1053,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FixedPoolBlocksFallbackFollowsLinearS
     ParallelismConfig pc;
     KVCacheConfig     kv_cache_config;
     kv_cache_config.seq_size_per_block = 128;
-    auto              config = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config);
+    auto              config = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config, false, 0);
     config.linear_step       = 4;
 
     RuntimeConfig rt;

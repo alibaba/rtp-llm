@@ -105,6 +105,22 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
 
     sampler_.reset(new Sampler(SamplerInitParams{}));
 
+    // CacheConfig is the single source of truth for tokens_per_block /
+    // kernel_tokens_per_block. DSV4 promotes seq_size_per_block to a 256-token
+    // physical block while attn_config still reflects the 64-token CLI flag, so
+    // sourcing from attn_config makes the fused compressor index the state
+    // block_table with the wrong stride. During warmup the cache_manager is
+    // null — use zero-initialized block geometry so PyWrappedModel's >0
+    // check catches mis-propagation (CacheConfig default is 1, not 0).
+    // when warmup, cache manager maybe nullptr
+    CacheConfig warmup_sentinel;
+    warmup_sentinel.seq_size_per_block        = 0;
+    warmup_sentinel.kernel_seq_size_per_block = 0;
+    const auto& cache_config                  = cache_manager ?
+                                                    (is_propose_ ? cache_manager->getMTPModuleCacheConfig(propose_model_index_) :
+                                                                   cache_manager->cacheConfig()) :
+                                                    warmup_sentinel;
+
     GptModelInitParams model_init_params(
         {params.gpt_weights,
          genModelDescription(params.model_config_, params.parallelism_config, params.eplb_config, params.moe_config),
@@ -123,8 +139,8 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
          mla_ops_type,
          params.model_config_.max_seq_len,
          params.model_config_.hidden_size,
-         params.model_config_.attn_config.tokens_per_block,
-         params.model_config_.attn_config.kernel_tokens_per_block,
+         static_cast<int64_t>(cache_config.seq_size_per_block),
+         static_cast<int64_t>(cache_config.kernel_seq_size_per_block),
          kv_cache_group_num,
          kv_cache_layer_to_group,
          cache_manager,
@@ -143,12 +159,6 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     } else {
         RTP_LLM_LOG_WARNING("py_model is None — model will not be initialized (test mode)");
     }
-
-    // when warmup, cache manager maybe nullptr
-    const auto& cache_config = cache_manager ?
-                                   (is_propose_ ? cache_manager->getMTPModuleCacheConfig(propose_model_index_) :
-                                                  cache_manager->cacheConfig()) :
-                                   CacheConfig();
 
     batch_stream_processor_.reset(new NormalBatchStreamProcessor(
         params.model_config_, params.pd_sep_config, params.profiling_debug_logging_config, cache_config, warm_up_));

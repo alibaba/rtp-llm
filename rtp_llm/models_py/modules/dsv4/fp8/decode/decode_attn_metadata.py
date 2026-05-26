@@ -265,20 +265,26 @@ def _compute_state_pool_slot_mapping(
     positions: torch.Tensor,
     req_idx: torch.Tensor,
     entries_per_block: int,
+    tokens_per_block: int,
 ) -> torch.Tensor:
     """Match CompressorFP8._compute_state_slot_mapping.
 
     State pools are cyclic per request: block index is
-    ``(pos // entries_per_block) % max_blocks``.  Block id <= 0 is the
+    ``(pos // tokens_per_block) % max_blocks``.  Block id <= 0 is the
     unallocated sentinel and maps to -1.
+
+    ``tokens_per_block``: kernel block size in tokens for block_table
+    indexing (DSV4 = 256). The ring in-block offset always uses
+    ``entries_per_block`` (= R).
     """
     if positions.numel() == 0:
         return torch.empty(0, dtype=torch.long, device=positions.device)
+    tpb = tokens_per_block
     pos_i64 = positions.to(torch.long)
     req_i64 = req_idx.to(torch.long)
     bt_long = block_table.to(torch.long)
     max_blocks = int(bt_long.shape[1])
-    block_in_seq = (pos_i64 // entries_per_block) % max_blocks
+    block_in_seq = (pos_i64 // tpb) % max_blocks
     in_block = pos_i64 % entries_per_block
     block_id = bt_long[req_i64, block_in_seq]
     slot = block_id * entries_per_block + in_block
@@ -289,6 +295,7 @@ def _update_compressor_state_slot_mappings(
     meta: "DSv4DecodeAttnMetadataFP8",
     bs: int,
     paged_pool_entries_per_block: Dict[int, int],
+    state_tokens_per_block: int,
 ) -> None:
     if not meta.compressor_state_slot_mappings:
         return
@@ -307,6 +314,7 @@ def _update_compressor_state_slot_mappings(
             positions,
             req_idx,
             entries_per_block,
+            tokens_per_block=state_tokens_per_block,
         )
         out[:T].copy_(mapped)
 
@@ -739,6 +747,8 @@ def allocate_decode_metadata_fp8(
 def update_decode_metadata_in_place_fp8(
     meta: "DSv4DecodeAttnMetadataFP8",
     attention_inputs: Any,
+    *,
+    state_tokens_per_block: int,
     forbid_realloc: bool = False,
     paged_block_tables: Optional[Dict[int, torch.Tensor]] = None,
     paged_pool_entries_per_block: Optional[Dict[int, int]] = None,
@@ -860,6 +870,7 @@ def update_decode_metadata_in_place_fp8(
             meta,
             bs,
             paged_pool_entries_per_block,
+            state_tokens_per_block=state_tokens_per_block,
         )
 
     # Iter3.3: precompute translate_swa / translate_hca once per step.
@@ -962,6 +973,8 @@ def build_decode_metadata_fp8(
     compress_ratios: List[int],
     index_topk: int,
     device: torch.device,
+    *,
+    state_tokens_per_block: int,
     dtype: torch.dtype = torch.bfloat16,  # noqa: ARG001 — reserved for future
     paged_block_tables: Optional[Dict[int, torch.Tensor]] = None,
     paged_pool_entries_per_block: Optional[Dict[int, int]] = None,
@@ -1193,6 +1206,7 @@ def build_decode_metadata_fp8(
                 position_ids_long,
                 req_id_per_token_long,
                 entries_per_block,
+                state_tokens_per_block,
             )
 
         if SWA_KV in pool_block_tables:

@@ -28,6 +28,7 @@ _DSV4_FP8_TESTS = [
     "test_dsv4_persistent_topk",
     "test_dsv4_top_k_per_row_prefill",
     "test_fused_compressor_meta_triton",
+    "test_ring_write_mask",
     "test_fp8_mqa_prefill_indexer_score",
     "test_fp8_paged_indexer_score",
     "test_indexer_compute_q_flat_input",

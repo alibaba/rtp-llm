@@ -21,7 +21,6 @@ from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
     _compressor_meta_fused_enabled,
 )
 
-
 DEVICE = "cuda"
 STATE_EB = 256
 requires_cuda = unittest.skipUnless(
@@ -70,6 +69,7 @@ def _shell(
     object.__setattr__(cmp, "compress_ratio", ratio)
     object.__setattr__(cmp, "_state_block_table", state_bt)
     object.__setattr__(cmp, "_state_eb", STATE_EB)
+    object.__setattr__(cmp, "_state_tokens_per_block", STATE_EB)
     object.__setattr__(cmp, "_kv_block_table", kv_bt)
     object.__setattr__(cmp, "_kv_eb", kv_eb)
     object.__setattr__(cmp, "_kv_cache_sharded", False)

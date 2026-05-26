@@ -65,8 +65,7 @@ public:
                CacheStoreStoreDoneCallback                callback) override {
         runtimeSyncAndCheck();
         for (const auto& [key, block] : request_block_buffer->getBlocks()) {
-            auto src_options =
-                torch::TensorOptions(torch::kUInt8).device(block->gpu_mem ? torch::kCUDA : torch::kCPU);
+            auto src_options = torch::TensorOptions(torch::kUInt8).device(block->gpu_mem ? torch::kCUDA : torch::kCPU);
             auto src         = torch::from_blob(block->addr.get(), {(int64_t)block->len}, src_options);
             auto host        = block->gpu_mem ? src.cpu().contiguous() : src.contiguous();
             std::vector<uint8_t> bytes(static_cast<size_t>(block->len));
@@ -97,8 +96,7 @@ public:
                                          {(int64_t)it->second.size()},
                                          torch::TensorOptions(torch::kUInt8).device(torch::kCPU))
                             .clone();
-            auto dst_options =
-                torch::TensorOptions(torch::kUInt8).device(block->gpu_mem ? torch::kCUDA : torch::kCPU);
+            auto dst_options = torch::TensorOptions(torch::kUInt8).device(block->gpu_mem ? torch::kCUDA : torch::kCPU);
             auto dst         = torch::from_blob(block->addr.get(), {(int64_t)block->len}, dst_options);
             dst.copy_(host);
         }
@@ -268,7 +266,7 @@ protected:
         mc.attn_config.layer_compress_ratios = ratios;
 
         ParallelismConfig pc;
-        auto              config = HybridPoolConfigCreator::createConfig(mc, pc);
+        auto              config = HybridPoolConfigCreator::createConfig(mc, pc, KVCacheConfig{}, false, 0);
         config.block_num         = block_num;
         config.group_block_nums.assign(config.groupNums(), block_num);
         return config;
@@ -1154,9 +1152,9 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreWithPinnedHostMetadataAndEven
 }
 
 TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreUsesTensorDeviceForCpuKvBuffer) {
-    const int spb            = 8;
-    const int kv_stride      = 64;
-    const int request_id_val = 4242;
+    const int         spb              = 8;
+    const int         kv_stride        = 64;
+    const int         request_id_val   = 4242;
     const std::string cache_key_string = "10000";
 
     auto kv_options = torch::TensorOptions(torch::kUInt8).device(torch::kCPU).pinned_memory(true);
@@ -1186,10 +1184,10 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreUsesTensorDeviceForCpuKvBuffe
 }
 
 TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreUsesTensorDeviceForCpuSplitKvBuffer) {
-    const int spb            = 8;
-    const int kv_stride      = 64;
-    const int kv_half        = kv_stride / 2;
-    const int request_id_val = 4243;
+    const int         spb              = 8;
+    const int         kv_stride        = 64;
+    const int         kv_half          = kv_stride / 2;
+    const int         request_id_val   = 4243;
     const std::string cache_key_string = "10001";
 
     auto kv_options = torch::TensorOptions(torch::kUInt8).device(torch::kCPU).pinned_memory(true);
@@ -1229,10 +1227,10 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreUsesTensorDeviceForCpuSplitKv
 }
 
 TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreUsesTensorDeviceForCpuKvScaleBuffer) {
-    const int spb            = 8;
-    const int kv_stride      = 64;
-    const int scale_stride   = 16;
-    const int request_id_val = 4244;
+    const int         spb              = 8;
+    const int         kv_stride        = 64;
+    const int         scale_stride     = 16;
+    const int         request_id_val   = 4244;
     const std::string cache_key_string = "10002";
 
     auto cpu_options     = torch::TensorOptions(torch::kUInt8).device(torch::kCPU).pinned_memory(true);
