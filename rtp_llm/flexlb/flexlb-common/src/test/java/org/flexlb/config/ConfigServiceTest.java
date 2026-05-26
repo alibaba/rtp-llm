@@ -10,6 +10,7 @@ import java.nio.file.Path;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 
 class ConfigServiceTest {
 
@@ -90,6 +91,16 @@ class ConfigServiceTest {
                 "CACHE_HIT_MAX_CACHE_KEYS", "123456"));
 
         assertEquals(123456L, configService.loadBalanceConfig().getCacheHitMaxCacheKeys());
+    }
+
+    @Test
+    void should_override_cache_hit_switches_with_environment() {
+        ConfigService configService = new ConfigService(Map.of(
+                "CACHE_HIT_WINDOW_WRITE_ENABLED", "false",
+                "CACHE_HIT_METRIC_REPORT_ENABLED", "false"));
+
+        assertFalse(configService.loadBalanceConfig().isCacheHitWindowWriteEnabled());
+        assertFalse(configService.loadBalanceConfig().isCacheHitMetricReportEnabled());
     }
 
     private Request request() {
