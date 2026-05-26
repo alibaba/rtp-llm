@@ -289,7 +289,9 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
     setupGroupCounts(config);
     populateDefaultRegionMappings(config);
     setupIndependentPoolSizes(config, is_mtp);
-    config.non_full_addition_kvcache_blocks = kv_cache_config.non_full_addition_kvcache_blocks;
+    if (!model_config.attn_config.layer_compress_ratios.empty()) {
+        config.dsv4_fixed_pool_blocks = kv_cache_config.dsv4_fixed_pool_blocks;
+    }
     return config;
 }
 

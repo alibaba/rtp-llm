@@ -224,22 +224,11 @@ void KVCacheMemoryConnector::initBlockPool() {
     size_t complete_block_num;
     size_t incomplete_block_num;
     if (step > 1) {
-        const size_t addition       = static_cast<size_t>(kv_cache_config_.non_full_addition_kvcache_blocks);
-        const size_t addition_bytes = addition * incomplete_block_size_;
-        RTP_LLM_CHECK_WITH_INFO(total_bytes > addition_bytes,
-                                "memory_cache_size_mb=%ld too small: non_full_addition reserve=%zu bytes "
-                                "(addition=%zu x incomplete_block=%zu) exceeds total=%zu",
-                                memory_cache_size_mb,
-                                addition_bytes,
-                                addition,
-                                incomplete_block_size_,
-                                total_bytes);
-        const size_t available = total_bytes - addition_bytes;
         const size_t effective_block_bytes =
             complete_block_size_ + incomplete_block_size_ * static_cast<size_t>(step - 1);
         RTP_LLM_CHECK_WITH_INFO(effective_block_bytes > 0, "effective block bytes is zero");
-        complete_block_num   = available / effective_block_bytes;
-        incomplete_block_num = complete_block_num * static_cast<size_t>(step - 1) + addition;
+        complete_block_num   = total_bytes / effective_block_bytes;
+        incomplete_block_num = complete_block_num * static_cast<size_t>(step - 1);
     } else {
         complete_block_num   = total_bytes / complete_block_size_;
         incomplete_block_num = 0;
@@ -250,14 +239,12 @@ void KVCacheMemoryConnector::initBlockPool() {
                             complete_block_size_);
 
     RTP_LLM_LOG_INFO(
-        "dual pool init: complete_size=%zu complete_num=%zu incomplete_size=%zu incomplete_num=%zu step=%d "
-        "non_full_addition=%u",
+        "dual pool init: complete_size=%zu complete_num=%zu incomplete_size=%zu incomplete_num=%zu step=%d",
         complete_block_size_,
         complete_block_num,
         incomplete_block_size_,
         incomplete_block_num,
-        step,
-        kv_cache_config_.non_full_addition_kvcache_blocks);
+        step);
 
     auto make_pool = [](size_t block_size, size_t block_num) -> std::shared_ptr<BlockPool> {
         if (block_num == 0) {
