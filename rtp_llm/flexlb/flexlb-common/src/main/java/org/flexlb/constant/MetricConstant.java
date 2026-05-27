@@ -449,4 +449,8 @@ public class MetricConstant {
      * 标签: model + reason。值大表示 SLO 宽松 / park 频繁。
      */
     public static final String V1_DP_SLO_LOOPS_PER_DISPATCH = "app.v1.dp.slo.loops.per.dispatch";
+
+    public static final String V1_DP_PREFILL_ACTUAL_TIME_US = "app.v1.dp.prefill.actual.time.us";
+
+    public static final String V1_DP_PREFILL_PREDICTION_ERROR_MS = "app.v1.dp.prefill.prediction.error.ms";
 }

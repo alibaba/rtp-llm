@@ -567,6 +567,14 @@ absl::Status NormalEngine::step() {
     if (propose_params_) {
         step_profiler_.tick();
     }
+
+    std::vector<GenerateStream*> context_streams;
+    for (auto& s : streams) {
+        if (s && s->isContextStream()) {
+            context_streams.push_back(s.get());
+        }
+    }
+
     {
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.execute(stream_size=%zu)", streams.size());
         status = executor_->process(streams, tps_schedule_time_us);
@@ -577,6 +585,10 @@ absl::Status NormalEngine::step() {
         RTP_LLM_PROFILE_SCOPE("engine.normal.report_metrics_work");
         auto step_latency = autil::TimeUtility::currentTimeInMicroSeconds() - step_begin_time_us;
         reportMetrics({step_latency});
+
+        for (auto* s : context_streams) {
+            s->setPrefillStepTimeUs(step_latency);
+        }
     }
 
     return status;

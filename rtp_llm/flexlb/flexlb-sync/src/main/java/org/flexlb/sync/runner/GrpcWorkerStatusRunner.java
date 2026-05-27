@@ -204,15 +204,20 @@ public class GrpcWorkerStatusRunner implements Runnable {
         if (finishedTaskInfo == null || finishedTaskInfo.isEmpty() || inflightRegistry == null) {
             return;
         }
-        for (String key : finishedTaskInfo.keySet()) {
+        for (Map.Entry<String, TaskInfo> entry : finishedTaskInfo.entrySet()) {
             long requestId;
             try {
-                requestId = Long.parseLong(key);
+                requestId = Long.parseLong(entry.getKey());
             } catch (NumberFormatException e) {
                 continue;
             }
             if (inflightRegistry.getState(requestId) == InflightBatchRegistry.RequestState.ACTIVE) {
                 inflightRegistry.removeRequest(requestId);
+            }
+            TaskInfo task = entry.getValue();
+            if (task.getPrefillTime() > 0) {
+                long predictedMs = TaskInfo.estimatePrefillTimeMs(task.getInputLength(), task.getPrefixLength());
+                engineHealthReporter.reportPrefillPredictionError(modelName, predictedMs, task.getPrefillTime());
             }
         }
     }

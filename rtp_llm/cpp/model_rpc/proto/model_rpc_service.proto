@@ -445,6 +445,7 @@ message TaskInfoPB {
     int64 end_time_ms = 7;
     int64 dp_rank = 8;
     bool is_waiting = 9;
+    int64 prefill_time_us = 10;
 }
 
 message UpdateWeightsRequestPB {

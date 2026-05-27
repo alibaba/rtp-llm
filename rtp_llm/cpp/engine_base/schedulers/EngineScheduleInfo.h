@@ -11,9 +11,10 @@ struct EngineScheduleInfo {
         int64_t prefix_length;
         int64_t input_length;
         int64_t waiting_time_ms;
-        int64_t iterate_count = 0;
-        int64_t end_time_ms   = -1;
-        bool    is_waiting    = true;
+        int64_t iterate_count   = 0;
+        int64_t end_time_ms     = -1;
+        bool    is_waiting      = true;
+        int64_t prefill_time_us = 0;
     };
     std::vector<TaskInfo> running_task_info_list;
     std::vector<TaskInfo> finished_task_info_list;

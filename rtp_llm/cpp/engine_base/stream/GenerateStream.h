@@ -358,6 +358,9 @@ public:
     void incBatchWithPrefillTimes(int32_t times);
     void incBatchWithPrefillLen(int32_t len);
 
+    void    setPrefillStepTimeUs(int64_t us) { prefill_step_time_us_ = us; }
+    int64_t prefillStepTimeUs() const { return prefill_step_time_us_; }
+
     std::shared_ptr<CompleteTokenIds> getCompleteTokenIds() const {
         return complete_token_ids_;
     }
@@ -723,6 +726,8 @@ protected:
     // The number of times this stream has been interfered by prefills
     int32_t batch_with_prefill_times_ = 0;
     int32_t batch_with_prefill_len_   = 0;
+
+    int64_t prefill_step_time_us_ = 0;
 
     kmonitor::MetricsReporterPtr metrics_reporter_;
     rtp_llm::SpecialTokens       special_tokens_;

@@ -131,6 +131,7 @@ public class EngineStatusConverter {
             taskInfo.setIterateCount(taskInfoPB.getIterateCount());
             taskInfo.setEndTimeMs(taskInfoPB.getEndTimeMs());
             taskInfo.setDpRank(taskInfoPB.getDpRank());
+            taskInfo.setPrefillTime(taskInfoPB.getPrefillTimeUs());
 
             taskInfoMap.put(String.valueOf(taskInfoPB.getRequestId()), taskInfo);
         }

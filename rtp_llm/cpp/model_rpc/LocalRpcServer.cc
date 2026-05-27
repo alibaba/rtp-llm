@@ -222,6 +222,7 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
         task_info->set_end_time_ms(task.end_time_ms);
         task_info->set_dp_rank(status_info.dp_rank);
         task_info->set_is_waiting(task.is_waiting);
+        task_info->set_prefill_time_us(task.prefill_time_us);
     }
 
     for (const auto& task : engine_schedule_info.finished_task_info_list) {
@@ -234,6 +235,7 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
         task_info->set_end_time_ms(task.end_time_ms);
         task_info->set_dp_rank(status_info.dp_rank);
         task_info->set_is_waiting(task.is_waiting);
+        task_info->set_prefill_time_us(task.prefill_time_us);
     }
     response->set_dp_size(status_info.dp_size);
     response->set_tp_size(status_info.tp_size);

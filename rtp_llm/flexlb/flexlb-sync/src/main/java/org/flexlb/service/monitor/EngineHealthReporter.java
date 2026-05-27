@@ -66,6 +66,8 @@ import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_INFO_STEP_LATENCY
 import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_NUMBER;
 import static org.flexlb.constant.MetricConstant.FORWARD_TO_MASTER_RESULT;
 import static org.flexlb.constant.MetricConstant.REQUEST_ARRIVAL_DELAY_MS;
+import static org.flexlb.constant.MetricConstant.V1_DP_PREFILL_ACTUAL_TIME_US;
+import static org.flexlb.constant.MetricConstant.V1_DP_PREFILL_PREDICTION_ERROR_MS;
 import static org.flexlb.constant.MetricConstant.ZK_MASTER_EVENT;
 import static org.flexlb.constant.MetricConstant.ZK_MASTER_NODE;
 
@@ -143,6 +145,8 @@ public class EngineHealthReporter {
         this.monitor.register(CACHE_USED_KV_CACHE_RATIO, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(REQUEST_ARRIVAL_DELAY_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(FORWARD_TO_MASTER_RESULT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        this.monitor.register(V1_DP_PREFILL_ACTUAL_TIME_US, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        this.monitor.register(V1_DP_PREFILL_PREDICTION_ERROR_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
     }
 
     public void reportLatencyMetric(String modelName, String role, double result, double result2) {
@@ -383,5 +387,11 @@ public class EngineHealthReporter {
 
     public void reportForwardToMasterResult(String type, String code) {
         monitor.report(FORWARD_TO_MASTER_RESULT, FlexMetricTags.of("type", type, "code", code), 1.0);
+    }
+
+    public void reportPrefillPredictionError(String model, long predictedMs, long actualUs) {
+        FlexMetricTags tags = FlexMetricTags.of("model", model == null ? "default" : model);
+        monitor.report(V1_DP_PREFILL_ACTUAL_TIME_US, tags, actualUs);
+        monitor.report(V1_DP_PREFILL_PREDICTION_ERROR_MS, tags, predictedMs - actualUs / 1000);
     }
 }
