@@ -72,6 +72,12 @@ public class FlexlbConfig {
      */
     private boolean cacheHitTraceLogEnabled = false;
 
+    /**
+     * Whether Master writes aggregated theory hit counters to master_theory_hit.log.
+     * Environment override: CACHE_HIT_THEORY_LOG_ENABLED.
+     */
+    private boolean cacheHitTheoryLogEnabled = true;
+
     // ========== Queue Configuration ==========
 
     /**

@@ -140,6 +140,21 @@ public class MetricConstant {
     public static final String CACHE_RECENT_KEY_TOTAL_COUNT = "app.cache.recent.key.total.count";
 
     /**
+     * Aggregated theory cache-key hit count. Tagged by window=all/1m/5m/10m/15m.
+     */
+    public static final String CACHE_THEORY_HIT_COUNT = "app.cache.theory.hit.count";
+
+    /**
+     * Aggregated theory cache-key total count. Tagged by window=all/1m/5m/10m/15m.
+     */
+    public static final String CACHE_THEORY_TOTAL_COUNT = "app.cache.theory.total.count";
+
+    /**
+     * Aggregated theory cache-key hit ratio. Tagged by window=all/1m/5m/10m/15m.
+     */
+    public static final String CACHE_THEORY_HIT_RATIO = "app.cache.theory.hit.ratio";
+
+    /**
      * Cache request total count
      */
     public static final String CACHE_REQUEST_TOTAL = "app.cache.request.total";

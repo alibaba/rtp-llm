@@ -1,6 +1,7 @@
 package org.flexlb.service;
 
 import org.flexlb.cache.core.RecentCacheKeyWindow;
+import org.flexlb.cache.monitor.CacheHitTheoryStats;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -19,6 +20,7 @@ import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -95,6 +97,23 @@ class RecentCacheKeyTraceReporterTest {
                 60_000L, 1L, 2L);
     }
 
+    @Test
+    void should_skip_empty_cache_key_request_without_reporting_zero_point() throws Exception {
+        RecentCacheKeyTraceReporter reporter = new RecentCacheKeyTraceReporter();
+        inject(reporter, "recentCacheKeyWindow", smallWindow());
+        inject(reporter, "cacheMetricsReporter", cacheMetricsReporter);
+
+        FlexlbConfig config = new FlexlbConfig();
+        reporter.report(context(config, List.of()));
+        reporter.report(context(config, List.of(1L)));
+
+        verify(cacheMetricsReporter).reportRecentCacheKeyHitMetrics(
+                60_000L, 0L, 1L);
+        verify(cacheMetricsReporter).reportTheoryCacheHitMetrics(
+                org.mockito.Mockito.any(CacheHitTheoryStats.Snapshot.class));
+        verifyNoMoreInteractions(cacheMetricsReporter);
+    }
+
     private static void inject(Object target, String fieldName, Object value) throws Exception {
         Field field = RecentCacheKeyTraceReporter.class.getDeclaredField(fieldName);
         field.setAccessible(true);
@@ -111,12 +130,14 @@ class RecentCacheKeyTraceReporterTest {
     }
 
     private static BalanceContext contextWithConfig(FlexlbConfig config) {
+        config.setCacheHitTheoryLogEnabled(false);
         BalanceContext balanceContext = mock(BalanceContext.class);
         when(balanceContext.getConfig()).thenReturn(config);
         return balanceContext;
     }
 
     private static BalanceContext context(FlexlbConfig config, List<Long> cacheKeys) {
+        config.setCacheHitTheoryLogEnabled(false);
         BalanceContext balanceContext = mock(BalanceContext.class);
         Request request = mock(Request.class);
         when(balanceContext.getConfig()).thenReturn(config);
