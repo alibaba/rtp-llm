@@ -434,6 +434,27 @@ GenerateStreamPtr MtpExecutor::createMinFakeDecodeStream(int                    
 
     fake_stream->update(update_info);
     fake_stream->setSPOutputBuffer(sp_buffer);
+    auto seq_len = fake_stream->seqLength();
+
+    // set device state
+    auto int32_gpu = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    auto accept_len_gpu = torch::ones({1}, int32_gpu);
+    auto accept_tokens_gpu = torch::zeros({1, max_new_tokens + 1}, int32_gpu);
+    auto next_seq_len_gpu = torch::ones({1}, int32_gpu) + 1;
+    auto propose_tokens_gpu = torch::zeros({1, 1}, int32_gpu);
+
+    fake_stream->setMtpAsyncDeviceState(GenerateStream::MtpAsyncDeviceState{
+        .epoch                  = 0,
+        .accept_len_gpu         = std::move(accept_len_gpu),
+        .accept_tokens_gpu      = std::move(accept_tokens_gpu),
+        .next_seq_len_gpu       = std::move(next_seq_len_gpu),
+        .propose_tokens_gpu     = std::move(propose_tokens_gpu),
+        .last_hidden_states_gpu = sp_buffer->hidden_states,
+        .draft_all_probs_gpu    = sp_buffer->all_probs,
+        .last_real_seq_len      = seq_len,
+        .next_real_seq_len      = seq_len,
+    });
+
     return fake_stream;
 }
 
