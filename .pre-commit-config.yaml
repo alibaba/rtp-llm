@@ -1,1 +1,35 @@
-stub_source/.pre-commit-config.yaml
+repos:
+  # Standard hooks
+  - repo: git@gitlab.alibaba-inc.com:foundation_models/pre-commit-hooks.git
+    rev: v5.0.0
+    hooks:
+      - id: check-merge-conflict
+      - id: check-symlinks
+      - id: mixed-line-ending
+        exclude: ^3rdparty/
+      - id: trailing-whitespace
+        exclude: ^3rdparty/
+
+  # Python Formatters
+  - repo: git@gitlab.alibaba-inc.com:foundation_models/black-pre-commit-mirror.git
+    rev: 24.8.0
+    hooks:
+      - id: black
+        types_or: [python]
+        exclude: ^3rdparty/
+
+  # Python header Formatters
+  - repo: git@gitlab.alibaba-inc.com:foundation_models/isort.git
+    rev: 5.13.2
+    hooks:
+      - id: isort
+        args: ["--profile=black"]
+        exclude: ^3rdparty/
+
+  # C++ Formatters
+  - repo: git@gitlab.alibaba-inc.com:foundation_models/mirrors-clang-format.git
+    rev: v19.1.1
+    hooks:
+      - id: clang-format
+        types_or: [c++, c, cuda]
+        exclude: ^3rdparty/|^rtp_llm/cpp/cutlass/

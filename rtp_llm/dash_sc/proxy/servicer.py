@@ -16,7 +16,19 @@ from typing import List, Optional
 
 import grpc
 
-from rtp_llm.dash_sc.proto import predict_v2_pb2_grpc
+from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
+
+
+def _is_stream_done(resp: predict_v2_pb2.ModelStreamInferResponse) -> bool:
+    """True when the proxy should stop forwarding after this frame."""
+    if resp.error_message:
+        return True
+    infer = resp.infer_response
+    for i, out in enumerate(infer.outputs):
+        if out.name == "finished" and i < len(infer.raw_output_contents):
+            return infer.raw_output_contents[i] == b"\x01"
+    return False
+
 
 _FORWARD_ENV_KEY = "DASH_SC_GRPC_FORWARD_ADDR"
 
@@ -313,8 +325,12 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             buffered = None
             yield second
             _set_stage("flushed_both")
+            if _is_stream_done(second):
+                return
             async for remaining in it:
                 yield remaining
+                if _is_stream_done(remaining):
+                    return
         except GeneratorExit:
             # Consumer called ``aclose()`` on the outer RPC generator —
             # yielding is forbidden after GeneratorExit. The buffered frame
