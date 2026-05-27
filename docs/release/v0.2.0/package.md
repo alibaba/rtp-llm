@@ -23,4 +23,4 @@
 | **Frontend**           | https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/package/daily/2025_11_26/rtp_llm-0.2.0-0.2.0-2025_11_26_10_16_dd9cb964d-frontend-cp310-cp310-manylinux1_x86_64.whl |
 | **AMD**           | https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/package/daily/2025_11_26/rtp_llm-0.2.0-0.2.0-2025_11_26_10_16_dd9cb964d-rocm-cp310-cp310-manylinux1_x86_64.whl |
 
-Images of Master is coming soon
+Images of Master are coming soon
