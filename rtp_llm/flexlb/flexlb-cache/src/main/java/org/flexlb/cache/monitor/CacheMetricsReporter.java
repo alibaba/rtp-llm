@@ -23,6 +23,9 @@ import static org.flexlb.constant.MetricConstant.CACHE_HIT_RATIO;
 import static org.flexlb.constant.MetricConstant.CACHE_RECENT_KEY_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_RECENT_KEY_TOTAL_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_REQUEST_TOTAL;
+import static org.flexlb.constant.MetricConstant.CACHE_THEORY_HIT_COUNT;
+import static org.flexlb.constant.MetricConstant.CACHE_THEORY_HIT_RATIO;
+import static org.flexlb.constant.MetricConstant.CACHE_THEORY_TOTAL_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_UPDATE_ENGINE_BLOCK_CACHE_RT;
 
 /**
@@ -81,6 +84,9 @@ public class CacheMetricsReporter {
         monitor.register(CACHE_HIT_RATIO, FlexMetricType.GAUGE);
         monitor.register(CACHE_RECENT_KEY_HIT_COUNT, FlexMetricType.QPS);
         monitor.register(CACHE_RECENT_KEY_TOTAL_COUNT, FlexMetricType.QPS);
+        monitor.register(CACHE_THEORY_HIT_COUNT, FlexMetricType.GAUGE);
+        monitor.register(CACHE_THEORY_TOTAL_COUNT, FlexMetricType.GAUGE);
+        monitor.register(CACHE_THEORY_HIT_RATIO, FlexMetricType.GAUGE);
         monitor.register(CACHE_REQUEST_TOTAL, FlexMetricType.QPS);
 
         // Cache service response time metrics
@@ -161,12 +167,57 @@ public class CacheMetricsReporter {
     public void reportRecentCacheKeyHitMetrics(long timeWindowMs,
                                                long hitOccurrences,
                                                long totalOccurrences) {
+        if (totalOccurrences <= 0L) {
+            return;
+        }
+
         FlexMetricTags tags = FlexMetricTags.of(
                 "timeWindowMs", String.valueOf(timeWindowMs)
         );
 
         monitor.report(CACHE_RECENT_KEY_HIT_COUNT, tags, hitOccurrences);
         monitor.report(CACHE_RECENT_KEY_TOTAL_COUNT, tags, totalOccurrences);
+    }
+
+    /**
+     * Report cumulative and rolling-window theory cache-hit counters.
+     */
+    public void reportTheoryCacheHitMetrics(CacheHitTheoryStats.Snapshot snapshot) {
+        if (snapshot == null) {
+            return;
+        }
+        reportTheoryWindow("all", 0L,
+                snapshot.getAllHitCount(),
+                snapshot.getAllTotalCount(),
+                snapshot.getAllHitRatio());
+        reportTheoryWindow(snapshot.getWindow1m());
+        reportTheoryWindow(snapshot.getWindow5m());
+        reportTheoryWindow(snapshot.getWindow10m());
+        reportTheoryWindow(snapshot.getWindow15m());
+    }
+
+    private void reportTheoryWindow(CacheHitTheoryStats.WindowSnapshot window) {
+        if (window == null) {
+            return;
+        }
+        reportTheoryWindow(window.getLabel(),
+                window.getWindowMs(),
+                window.getHitCount(),
+                window.getTotalCount(),
+                window.getHitRatio());
+    }
+
+    private void reportTheoryWindow(String window, long windowMs, long hitCount, long totalCount, double hitRatio) {
+        if (totalCount <= 0L) {
+            return;
+        }
+        FlexMetricTags tags = FlexMetricTags.of(
+                "window", window,
+                "windowMs", String.valueOf(windowMs)
+        );
+        monitor.report(CACHE_THEORY_HIT_COUNT, tags, hitCount);
+        monitor.report(CACHE_THEORY_TOTAL_COUNT, tags, totalCount);
+        monitor.report(CACHE_THEORY_HIT_RATIO, tags, hitRatio);
     }
 
     /**

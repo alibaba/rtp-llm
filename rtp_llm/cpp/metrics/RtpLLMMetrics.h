@@ -144,6 +144,7 @@ private:
 class PrefillRecentCacheKeyMetricsCollector final {
 public:
     bool    has_value                  = false;
+    bool    theory_has_value           = false;
     bool    request_count              = false;
     bool    empty_request_count        = false;
     int64_t hit_count                  = 0;
@@ -152,6 +153,22 @@ public:
     int64_t retained_occurrences       = 0;
     int64_t retained_unique_cache_keys = 0;
     int64_t time_window_ms             = 0;
+
+    int64_t theory_all_hit_count       = 0;
+    int64_t theory_all_total_count     = 0;
+    double  theory_all_hit_ratio       = 0.0;
+    int64_t theory_1m_hit_count        = 0;
+    int64_t theory_1m_total_count      = 0;
+    double  theory_1m_hit_ratio        = 0.0;
+    int64_t theory_5m_hit_count        = 0;
+    int64_t theory_5m_total_count      = 0;
+    double  theory_5m_hit_ratio        = 0.0;
+    int64_t theory_10m_hit_count       = 0;
+    int64_t theory_10m_total_count     = 0;
+    double  theory_10m_hit_ratio       = 0.0;
+    int64_t theory_15m_hit_count       = 0;
+    int64_t theory_15m_total_count     = 0;
+    double  theory_15m_hit_ratio       = 0.0;
 };
 
 class PrefillRecentCacheKeyMetrics: public kmonitor::MetricsGroup {
@@ -168,6 +185,22 @@ public:
     kmonitor::MutableMetric* retained_occurrences_metric       = nullptr;
     kmonitor::MutableMetric* retained_unique_cache_keys_metric = nullptr;
     kmonitor::MutableMetric* time_window_ms_metric             = nullptr;
+
+    kmonitor::MutableMetric* theory_all_hit_count_metric    = nullptr;
+    kmonitor::MutableMetric* theory_all_total_count_metric  = nullptr;
+    kmonitor::MutableMetric* theory_all_hit_ratio_metric    = nullptr;
+    kmonitor::MutableMetric* theory_1m_hit_count_metric     = nullptr;
+    kmonitor::MutableMetric* theory_1m_total_count_metric   = nullptr;
+    kmonitor::MutableMetric* theory_1m_hit_ratio_metric     = nullptr;
+    kmonitor::MutableMetric* theory_5m_hit_count_metric     = nullptr;
+    kmonitor::MutableMetric* theory_5m_total_count_metric   = nullptr;
+    kmonitor::MutableMetric* theory_5m_hit_ratio_metric     = nullptr;
+    kmonitor::MutableMetric* theory_10m_hit_count_metric    = nullptr;
+    kmonitor::MutableMetric* theory_10m_total_count_metric  = nullptr;
+    kmonitor::MutableMetric* theory_10m_hit_ratio_metric    = nullptr;
+    kmonitor::MutableMetric* theory_15m_hit_count_metric    = nullptr;
+    kmonitor::MutableMetric* theory_15m_total_count_metric  = nullptr;
+    kmonitor::MutableMetric* theory_15m_hit_ratio_metric    = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();

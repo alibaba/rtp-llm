@@ -13,7 +13,11 @@ import java.lang.reflect.Field;
 
 import static org.flexlb.constant.MetricConstant.CACHE_RECENT_KEY_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_RECENT_KEY_TOTAL_COUNT;
+import static org.flexlb.constant.MetricConstant.CACHE_THEORY_HIT_COUNT;
+import static org.flexlb.constant.MetricConstant.CACHE_THEORY_HIT_RATIO;
+import static org.flexlb.constant.MetricConstant.CACHE_THEORY_TOTAL_COUNT;
 import static org.junit.jupiter.api.Assertions.fail;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 
 @ExtendWith(MockitoExtension.class)
@@ -42,6 +46,9 @@ class CacheMetricsReporterTest {
 
         verify(monitor).register(CACHE_RECENT_KEY_HIT_COUNT, FlexMetricType.QPS);
         verify(monitor).register(CACHE_RECENT_KEY_TOTAL_COUNT, FlexMetricType.QPS);
+        verify(monitor).register(CACHE_THEORY_HIT_COUNT, FlexMetricType.GAUGE);
+        verify(monitor).register(CACHE_THEORY_TOTAL_COUNT, FlexMetricType.GAUGE);
+        verify(monitor).register(CACHE_THEORY_HIT_RATIO, FlexMetricType.GAUGE);
     }
 
     @Test
@@ -54,11 +61,28 @@ class CacheMetricsReporterTest {
     }
 
     @Test
-    void should_report_empty_cache_key_request_for_diagnosis() {
+    void should_skip_empty_cache_key_request() {
         reporter.reportRecentCacheKeyHitMetrics(1800000L, 0L, 0L);
 
         FlexMetricTags tags = FlexMetricTags.of("timeWindowMs", "1800000");
-        verify(monitor).report(CACHE_RECENT_KEY_HIT_COUNT, tags, 0L);
-        verify(monitor).report(CACHE_RECENT_KEY_TOTAL_COUNT, tags, 0L);
+        verify(monitor, never()).report(CACHE_RECENT_KEY_HIT_COUNT, tags, 0L);
+        verify(monitor, never()).report(CACHE_RECENT_KEY_TOTAL_COUNT, tags, 0L);
+    }
+
+    @Test
+    void should_report_theory_cache_hit_metrics() {
+        CacheHitTheoryStats stats = new CacheHitTheoryStats(() -> 0L);
+        CacheHitTheoryStats.Snapshot snapshot = stats.record(2L, 4L, 0L);
+
+        reporter.reportTheoryCacheHitMetrics(snapshot);
+
+        FlexMetricTags allTags = FlexMetricTags.of("window", "all", "windowMs", "0");
+        FlexMetricTags oneMinuteTags = FlexMetricTags.of("window", "1m", "windowMs", "60000");
+        verify(monitor).report(CACHE_THEORY_HIT_COUNT, allTags, 2L);
+        verify(monitor).report(CACHE_THEORY_TOTAL_COUNT, allTags, 4L);
+        verify(monitor).report(CACHE_THEORY_HIT_RATIO, allTags, 0.5D);
+        verify(monitor).report(CACHE_THEORY_HIT_COUNT, oneMinuteTags, 2L);
+        verify(monitor).report(CACHE_THEORY_TOTAL_COUNT, oneMinuteTags, 4L);
+        verify(monitor).report(CACHE_THEORY_HIT_RATIO, oneMinuteTags, 0.5D);
     }
 }
