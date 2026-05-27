@@ -636,6 +636,12 @@ class RocmExpertsMXFp4(FusedMoeExpertExecutor):
             w2 = w2.view(torch.float4_e2m1fn_x2)
             w2.is_shuffled = True
 
+        effective_expert_mask = (
+            None
+            if payload.expert_ids_are_local
+            else (expert_map if expert_map is not None else self.expert_mask)
+        )
+
         output = fused_moe(
             hidden_states,
             w1,
@@ -646,7 +652,7 @@ class RocmExpertsMXFp4(FusedMoeExpertExecutor):
             w1_scale=self.w1_scale,
             w2_scale=self.w2_scale,
             activation=_moe_activation_type(activation),
-            expert_mask=expert_map if expert_map is not None else self.expert_mask,
+            expert_mask=effective_expert_mask,
             doweight_stage1=apply_router_weight_on_input,
         )
 
