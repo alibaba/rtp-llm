@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/Types.h"
+#include <algorithm>
 #include <chrono>
 #include <memory>
 #include <mutex>
@@ -27,14 +28,18 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
     max_seq_len_(model_config.max_seq_len),
     max_batch_tokens_size_(runtime_config.fifo_scheduler_config.max_batch_tokens_size),
     max_generate_batch_size_(runtime_config.max_generate_batch_size),
+    max_inited_kv_cache_streams_(
+        std::max<int64_t>(runtime_config.fifo_scheduler_config.max_inited_kv_cache_streams, 0)),
     need_fill_fake_stream_(parallelism_config.dp_size > 1 && parallelism_config.tp_rank == 0),
     cp_force_single_prefill_(parallelism_config.prefill_cp_config.is_enabled()
                              && runtime_config.fifo_scheduler_config.cp_force_single_prefill),
     metrics_reporter_(metrics_reporter) {
-    RTP_LLM_LOG_INFO("max_generate_batch_size is [%d], max_batch_tokens_size is [%d], cp_force_single_prefill is [%d]",
+    RTP_LLM_LOG_INFO("max_generate_batch_size is [%zu], max_batch_tokens_size is [%zu], "
+                     "cp_force_single_prefill is [%d], max_inited_kv_cache_streams is [%zu]",
                      max_generate_batch_size_,
                      max_batch_tokens_size_,
-                     cp_force_single_prefill_);
+                     cp_force_single_prefill_,
+                     max_inited_kv_cache_streams_);
 }
 
 FIFOScheduler::~FIFOScheduler() {
@@ -172,6 +177,19 @@ bool FIFOScheduler::evaluateRunningBatch(const list<GenerateStreamPtr>& streams,
     return max_token_size * (streams.size() + 1) + running_streams_.size() < int(max_batch_tokens_size_);
 }
 
+size_t FIFOScheduler::countInitedKVCacheStreams() const {
+    auto count_inited = [](const list<GenerateStreamPtr>& streams) {
+        size_t count = 0;
+        for (const auto& stream : streams) {
+            if (stream && stream->curBlocksNum() > 0) {
+                ++count;
+            }
+        }
+        return count;
+    };
+    return count_inited(waiting_streams_) + count_inited(loading_cache_streams_) + count_inited(running_streams_);
+}
+
 void FIFOScheduler::accountBatchMetrics(const GenerateStreamPtr& new_stream) {
     for (auto& stream : running_streams_) {
         stream->incBatchWithPrefillTimes(1);
@@ -204,6 +222,9 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_stre
     RTP_LLM_PROFILE_FUNCTION();
     list<GenerateStreamPtr>             admitted_streams;
     std::unordered_set<GenerateStream*> admitted_stream_ptrs;
+    const size_t inited_kv_streams =
+        max_inited_kv_cache_streams_ > 0 ? countInitedKVCacheStreams() : 0;
+    size_t                              admitted_new_init_streams = 0;
 
     // Batch group scheduling support:
     // 1. Group completeness: force_batch streams with same batch_group_id are scheduled together
@@ -275,12 +296,22 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_stre
         // CanRun to drive the pre-enqueue KV allocation path. CanRun is a permanent event, so it
         // cannot be used as proof that FIFO has admitted this stream in the current scheduling
         // round. Always run FIFO capacity checks and only advance streams admitted here.
+        const bool already_inited_kv = stream->curBlocksNum() > 0;
+        if (max_inited_kv_cache_streams_ > 0 && !already_inited_kv
+            && inited_kv_streams + admitted_new_init_streams >= max_inited_kv_cache_streams_) {
+            it++;
+            continue;
+        }
+
         if (!stream->hasError() && evaluateRunningBatch(admitted_streams, stream)) {
             if (!stream->hasEvent(StreamEvents::CanRun)) {
                 stream->reportEvent(StreamEvents::CanRun);
             }
             admitted_streams.push_back(stream);
             admitted_stream_ptrs.insert(stream.get());
+            if (max_inited_kv_cache_streams_ > 0 && !already_inited_kv) {
+                ++admitted_new_init_streams;
+            }
 
             // Lock batch type based on first scheduled stream
             if (admitted_streams.size() == 1 && force_batch && stream->batchGroupId() != -1) {

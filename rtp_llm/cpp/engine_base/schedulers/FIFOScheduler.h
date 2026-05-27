@@ -53,6 +53,7 @@ public:
 private:
     int64_t lastScheduleTime() override;
     bool evaluateRunningBatch(const std::list<GenerateStreamPtr>& streams, const GenerateStreamPtr& new_stream) const;
+    size_t countInitedKVCacheStreams() const;
     void accountBatchMetrics(const GenerateStreamPtr& new_stream);
     bool waitPredicate();
     void addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state);
@@ -72,10 +73,11 @@ protected:
     std::list<GenerateStreamPtr>    new_streams_;
     std::shared_ptr<KVCacheManager> cache_manager_;
     std::atomic<int64_t>            last_schedule_time_      = autil::TimeUtility::currentTimeInMilliSeconds();
-    size_t                          max_seq_len_             = 0;
-    size_t                          max_batch_tokens_size_   = 0;
-    size_t                          max_generate_batch_size_ = 1;
-    const bool                      need_fill_fake_stream_   = false;
+    size_t                          max_seq_len_                  = 0;
+    size_t                          max_batch_tokens_size_        = 0;
+    size_t                          max_generate_batch_size_      = 1;
+    size_t                          max_inited_kv_cache_streams_  = 0;
+    const bool                      need_fill_fake_stream_        = false;
     // Optional guard for Context-Parallel prefill: when enabled, force prefill
     // to one stream per round. This remains the conservative default while
     // newer dsv4 CP paths can opt in to batched prefill through runtime config.

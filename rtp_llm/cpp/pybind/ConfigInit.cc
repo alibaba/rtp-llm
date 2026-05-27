@@ -1153,20 +1153,24 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("max_context_batch_size", &FIFOSchedulerConfig::max_context_batch_size)
         .def_readwrite("max_batch_tokens_size", &FIFOSchedulerConfig::max_batch_tokens_size)
         .def_readwrite("cp_force_single_prefill", &FIFOSchedulerConfig::cp_force_single_prefill)
+        .def_readwrite("max_inited_kv_cache_streams", &FIFOSchedulerConfig::max_inited_kv_cache_streams)
         .def("to_string", &FIFOSchedulerConfig::to_string)
         .def(py::pickle(
             [](const FIFOSchedulerConfig& self) {
-                return py::make_tuple(
-                    self.max_context_batch_size, self.max_batch_tokens_size, self.cp_force_single_prefill);
+                return py::make_tuple(self.max_context_batch_size,
+                                      self.max_batch_tokens_size,
+                                      self.cp_force_single_prefill,
+                                      self.max_inited_kv_cache_streams);
             },
             [](py::tuple t) {
-                if (t.size() != 2 && t.size() != 3)
+                if (t.size() != 2 && t.size() != 3 && t.size() != 4)
                     throw std::runtime_error("Invalid state!");
                 FIFOSchedulerConfig c;
                 try {
-                    c.max_context_batch_size  = t[0].cast<int64_t>();
-                    c.max_batch_tokens_size   = t[1].cast<int64_t>();
-                    c.cp_force_single_prefill = t.size() == 3 ? t[2].cast<bool>() : true;
+                    c.max_context_batch_size       = t[0].cast<int64_t>();
+                    c.max_batch_tokens_size        = t[1].cast<int64_t>();
+                    c.cp_force_single_prefill      = t.size() >= 3 ? t[2].cast<bool>() : true;
+                    c.max_inited_kv_cache_streams = t.size() >= 4 ? t[3].cast<int64_t>() : 0;
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("FIFOSchedulerConfig unpickle error: ") + e.what());
                 }

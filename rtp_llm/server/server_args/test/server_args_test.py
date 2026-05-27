@@ -102,6 +102,8 @@ class ServerArgsSetTest(TestCase):
             "64",
             "--cp_force_single_prefill",
             "false",
+            "--max_inited_kv_cache_streams",
+            "16",
             "--warm_up",
             "0",
             "--cache_store_rdma_io_thread_count",
@@ -141,6 +143,10 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(
             py_env_configs.runtime_config.fifo_scheduler_config.cp_force_single_prefill,
             False,
+        )
+        self.assertEqual(
+            py_env_configs.runtime_config.fifo_scheduler_config.max_inited_kv_cache_streams,
+            16,
         )
 
         # Verify runtime_config (warm_up is now in RuntimeConfig)
