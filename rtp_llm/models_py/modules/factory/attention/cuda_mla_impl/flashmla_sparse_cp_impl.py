@@ -90,6 +90,47 @@ def _tensor_summary(t: Optional[torch.Tensor]) -> str:
         return f"shape={tuple(t.shape)} summary_error={exc}"
 
 
+def _total_local_ids_are_identity(
+    padding_mask_cpu: torch.Tensor,
+    kv_restore_cpu: torch.Tensor,
+    q0_idx: List[int],
+    q1_idx: List[int],
+    cp_rank: int,
+    local_tokens: int,
+) -> bool:
+    ordered_ids = [int(idx) for idx in q0_idx] + [int(idx) for idx in q1_idx]
+    if len(ordered_ids) != local_tokens:
+        return False
+    if any(idx != pos for pos, idx in enumerate(ordered_ids)):
+        return False
+    if local_tokens == 0:
+        return True
+
+    padding_mask_cpu = padding_mask_cpu.reshape(-1).to(dtype=torch.int32)
+    kv_restore_cpu = kv_restore_cpu.reshape(-1).to(dtype=torch.long)
+    padded_total = int(padding_mask_cpu.numel())
+    if padded_total == 0:
+        return False
+
+    cpu_device = padding_mask_cpu.device
+    source_flat = torch.tensor(ordered_ids, dtype=torch.long, device=cpu_device)
+    source_flat += int(cp_rank) * int(local_tokens)
+    if bool(torch.any((source_flat < 0) | (source_flat >= padded_total)).item()):
+        return False
+
+    valid_restore = (kv_restore_cpu >= 0) & (kv_restore_cpu < padded_total)
+    inv_restore = torch.full((padded_total,), -1, dtype=torch.long, device=cpu_device)
+    restore_positions = torch.arange(
+        padded_total, dtype=torch.long, device=cpu_device
+    )
+    inv_restore[kv_restore_cpu[valid_restore]] = restore_positions[valid_restore]
+
+    global_padded = inv_restore[source_flat]
+    if bool(torch.any((global_padded < 0) | (global_padded >= padded_total)).item()):
+        return False
+    return bool(torch.all(padding_mask_cpu[global_padded] == 1).item())
+
+
 class SparseMlaFp8CPOp(SparseMlaFp8Op):
     """Context-parallel sparse MLA prefill: all-gather KV, restore to global order,
     write to paged cache, then run attention only on q tokens this rank owns."""
@@ -124,6 +165,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         self.kv_restore_unpad_indices: Optional[torch.Tensor] = None
         self.total_global_ids: Optional[torch.Tensor] = None
         self.total_local_ids: Optional[torch.Tensor] = None
+        self.total_local_ids_is_identity: bool = False
         self.cu_kv_seqlens_global: Optional[torch.Tensor] = None
         self.total_kv_len: int = 0
         self.precomputed_req_ids: Optional[torch.Tensor] = None
@@ -174,6 +216,14 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         self.kv_restore_unpad_indices = mla_params.cp_kv_restore_unpad_indices
         self.total_global_ids = mla_params.cp_total_global_ids
         self.total_local_ids = mla_params.cp_total_local_ids
+        self.total_local_ids_is_identity = _total_local_ids_are_identity(
+            padding_mask_cpu,
+            kv_restore_cpu,
+            q0_idx,
+            q1_idx,
+            self.prefill_cp_rank,
+            local_tokens,
+        )
         self.cu_kv_seqlens_global = mla_params.cp_cu_kv_seqlens_global
         self.total_kv_len = mla_params.cp_total_kv_len
 
@@ -223,7 +273,8 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
                     "[PD_DEBUG][CP_MLA_PLAN] %s cp_rank=%s cp_size=%s "
                     "chunk_lengths=%s actual_lengths=%s prefix_lengths=%s "
                     "local_tokens=%s kv_restore=%s total_global=%s total_local=%s "
-                    "cu_kv=%s total_kv_len=%s gather_enabled=%s",
+                    "cu_kv=%s total_kv_len=%s local_ids_identity=%s "
+                    "gather_enabled=%s",
                     _rank_tag(),
                     self.prefill_cp_rank,
                     self.prefill_cp_size,
@@ -236,6 +287,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
                     _tensor_summary(self.total_local_ids),
                     _tensor_summary(self.cu_kv_seqlens_global),
                     self.total_kv_len,
+                    self.total_local_ids_is_identity,
                     self._gather is not None,
                 )
 
@@ -325,12 +377,22 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             return None
         assert q is not None and q.size(0) > 0
 
-        q0 = q[self.total_local_ids].contiguous()
+        use_identity_q = (
+            self.total_local_ids_is_identity
+            and self.total_local_ids is not None
+            and q.size(0) == self.total_local_ids.size(0)
+        )
+        if use_identity_q:
+            q0 = q if q.is_contiguous() else q.contiguous()
+        else:
+            q0 = q[self.total_local_ids].contiguous()
         if self._gather is not None:
             out0 = self._attend_gather(q0, kv_cache, topk)
         else:
             out0 = self._attend_with_kvcache(q0, kv_cache, topk, layer_id)
 
+        if use_identity_q:
+            return out0
         out = triton_kv_scatter(out0, self.total_local_ids, q.size(0))
         return out
 
