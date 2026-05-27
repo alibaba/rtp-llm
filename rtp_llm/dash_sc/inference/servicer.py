@@ -365,9 +365,15 @@ def _phase2_max_new_tokens_for_completion_alias(
 
 def _clone_generate_config(generate_config: Any) -> Any:
     try:
-        return generate_config.model_copy(deep=True)
+        cloned_config = generate_config.model_copy(deep=True)
     except AttributeError:
-        return generate_config.copy(deep=True)
+        cloned_config = generate_config.copy(deep=True)
+    if hasattr(cloned_config, "role_addrs"):
+        # Phase-2 must re-enter routing; copied role_addrs would bypass FlexLB master.
+        cloned_config.role_addrs = []
+    if hasattr(cloned_config, "original_role_addrs"):
+        cloned_config.original_role_addrs = []
+    return cloned_config
 
 
 def _apply_request_overrides(
