@@ -279,6 +279,54 @@ class SparseMlaFp8CPOpTest(TestCase):
     def tearDown(self):
         torch.cuda.empty_cache()
 
+    def test_total_local_ids_identity_detection(self):
+        from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_utils import (
+            generate_q_indices,
+        )
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl import (
+            _total_local_ids_are_identity,
+        )
+
+        padding_mask = torch.ones(8, dtype=torch.int32, device=torch.device("cpu"))
+        restore_indices = torch.arange(8, dtype=torch.long, device=torch.device("cpu"))
+
+        q0_idx, q1_idx = generate_q_indices([4, 4])
+        self.assertFalse(
+            _total_local_ids_are_identity(
+                padding_mask,
+                restore_indices,
+                q0_idx,
+                q1_idx,
+                cp_rank=0,
+                local_tokens=8,
+            )
+        )
+
+        q0_idx, q1_idx = generate_q_indices([8])
+        self.assertTrue(
+            _total_local_ids_are_identity(
+                padding_mask,
+                restore_indices,
+                q0_idx,
+                q1_idx,
+                cp_rank=0,
+                local_tokens=8,
+            )
+        )
+
+        padding_mask_with_gap = padding_mask.clone()
+        padding_mask_with_gap[3] = 0
+        self.assertFalse(
+            _total_local_ids_are_identity(
+                padding_mask_with_gap,
+                restore_indices,
+                q0_idx,
+                q1_idx,
+                cp_rank=0,
+                local_tokens=8,
+            )
+        )
+
     def test_cp_op_forward_shape_and_match_non_cp(self):
         """
         With tp_size=1, CP path all_gather is identity.
@@ -407,6 +455,7 @@ class SparseMlaFp8CPOpTest(TestCase):
         cp_op.write_cache_store_impl = None
 
         cp_op.plan(mla_params, block_table_device, attn_inputs=attn_inputs)
+        self.assertFalse(cp_op.total_local_ids_is_identity)
 
         # With tp_size=1, all_gather is identity; mock it to avoid requiring distributed init
         def _identity_all_gather(tensor, group=None):
@@ -481,8 +530,9 @@ class SparseMlaFp8CPOpTest(TestCase):
         page_size = 64
         top_k = 128
         qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
-        # generate_kv_indices requires each chunk length to be even
-        chunk_lengths = [4, 2]
+        # A single chunk keeps q0_idx + q1_idx in natural order and exercises
+        # the identity-q fast path.
+        chunk_lengths = [6]
         n_restore = total_q_len
 
         cp_params = PyContextParallelParams()
@@ -570,6 +620,7 @@ class SparseMlaFp8CPOpTest(TestCase):
         cp_op.kv_cache_write_op = MlaKVCacheWriteOp(kv_cache_dtype=KvCacheDataType.FP8)
         cp_op.write_cache_store_impl = None
         cp_op.plan(mla_params, block_table_device, attn_inputs=attn_inputs)
+        self.assertTrue(cp_op.total_local_ids_is_identity)
 
         def _identity_all_gather(tensor, group=None):
             return tensor
@@ -583,7 +634,9 @@ class SparseMlaFp8CPOpTest(TestCase):
         with patch(
             "rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl.all_gather",
             side_effect=_identity_all_gather,
-        ):
+        ), patch(
+            "rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl.triton_kv_scatter"
+        ) as scatter_mock:
             out = cp_op.forward(
                 q,
                 compressed_kv,
@@ -594,6 +647,7 @@ class SparseMlaFp8CPOpTest(TestCase):
                 layer_id=0,
             )
         torch.cuda.synchronize()
+        scatter_mock.assert_not_called()
         self.assertEqual(out.shape, (total_q_len, num_heads, kv_lora_rank))
 
     @skipIf(torch.cuda.device_count() < 2, "need 2 CUDA devices")
