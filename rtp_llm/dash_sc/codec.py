@@ -23,6 +23,9 @@ _INT32_MAX = 2_147_483_647
 _DEFAULT_MAX_NEW_TOKENS = 32000
 
 FINISH_REASON_LENGTH = 1
+FINISH_REASON_STOP_ENGINE_PARAM = 8
+FINISH_REASON_ABORT = 10
+FINISH_REASON_STOP_TIMEOUT = 13
 
 # ----------------------------------------------------------------------------
 # Low-level tensor decoding helpers (shared by request parsing and access log)
@@ -995,6 +998,29 @@ def iter_fake_model_stream_infer(
     _append_finished_output(infer, finished=True)
     infer.parameters["incremental_output"].int64_param = 1
     yield stream_resp
+
+
+def build_finish_reason_done_response(
+    dash_sc_request_id: str,
+    model_name: str,
+    finish_reason: int,
+) -> predict_v2_pb2.ModelStreamInferResponse:
+    """Build a terminal response with empty content and explicit finish_reason.
+
+    Used when the engine stops for a non-error reason (timeout, abort) that
+    should NOT be reported as a 5xx to the upstream. The finish_reason integer
+    aligns with DashLLM's LLMFinishReason enum so dashscope-serving can map it
+    correctly (e.g. 13=STOP_TIMEOUT → 200 + X-DashScope-PartialResponse).
+    """
+    stream_resp = predict_v2_pb2.ModelStreamInferResponse()
+    infer = stream_resp.infer_response
+    infer.id = dash_sc_request_id
+    infer.model_name = model_name
+    _append_generated_ids_output(infer, [])
+    _append_finish_reason_output(infer, finished=True, finish_reason_override=finish_reason)
+    _append_finished_output(infer, finished=True)
+    infer.parameters["incremental_output"].int64_param = 1
+    return stream_resp
 
 
 def build_parameter_error_response(
