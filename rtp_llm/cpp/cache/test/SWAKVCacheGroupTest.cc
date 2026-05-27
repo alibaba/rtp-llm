@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <vector>
 #include <memory>
 #include "rtp_llm/cpp/cache/SWAKVCacheGroup.h"
@@ -458,6 +459,94 @@ TEST_F(SWAKVCacheGroupTest, PutIntoCache_SkipsNullBlocks) {
     auto result5 = group.matchSingleKey(105);
     ASSERT_EQ(result5.block_indices.size(), 1u);
     EXPECT_EQ(result5.block_indices[0], block_ids.blocks()[4]);
+}
+
+// ==================== batch allocation atomicity (regression: mid-loop leak) ====================
+
+// Reproduces the historical bug where SWAKVCacheGroup::malloc called block_pool_->malloc(1)
+// repeatedly inside a loop. If a later iteration failed (e.g. concurrent allocators raced for
+// the last free blocks), the previously allocated blocks were leaked because they had only
+// been recorded in a stack-local vector and were never written back to block_ids; the upper
+// rollback in HybridKVCacheAllocator::initMallocForCommonLen could not see them.
+//
+// After the fix, SWAKVCacheGroup::malloc performs a single atomic batch malloc on the pool,
+// so a failed allocation must leave the pool's free counter unchanged.
+TEST_F(SWAKVCacheGroupTest, Malloc_FailsAtomicallyWithoutLeak) {
+    auto group = makeGroupWithStep(4, 2);
+
+    // Hold 7 blocks so that only 2 free blocks remain. shared_cache_ is empty here, so
+    // ensureFreeBlocks() cannot evict and refill the pool.
+    auto pre_alloc = block_pool_->malloc(7);
+    ASSERT_EQ(pre_alloc.size(), 7u);
+    const size_t free_before = block_pool_->freeBlocksNum();
+    ASSERT_EQ(free_before, total_blocks_ - 7);
+
+    // seq_len=16, step=2, reuse=true => seq_slots=4. The group needs 3 real blocks at
+    // positions {1, 2, 3}, which exceeds the 2 free blocks currently in the pool.
+    BlockIds block_ids(1);
+    EXPECT_FALSE(group.malloc(block_ids, 16, /*enable_reuse_cache=*/true));
+
+    // Free count must stay identical to the pre-call value (no stranded blocks).
+    EXPECT_EQ(block_pool_->freeBlocksNum(), free_before);
+    // No partial state should have leaked into block_ids either.
+    EXPECT_EQ(block_ids.blocksNum(), 0u);
+
+    // The pre-allocated blocks must still be releasable, proving that BlockPool ref
+    // counters were not corrupted by the failed malloc path.
+    block_pool_->requestFree(pre_alloc);
+    EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_);
+}
+
+// Verifies the new behavior: SWAKVCacheGroup::malloc reserves all required physical blocks
+// via a single batch BlockPool::malloc(N) call instead of N individual malloc(1) calls.
+TEST_F(SWAKVCacheGroupTest, Malloc_AllocatesAtomicallyAsBatch) {
+    auto         group       = makeGroupWithStep(4, 2);
+    const size_t free_before = block_pool_->freeBlocksNum();
+
+    // seq_len=16, step=2, reuse=true => 4 slots. Real blocks expected at positions {1, 2, 3}.
+    BlockIds block_ids(1);
+    ASSERT_TRUE(group.malloc(block_ids, 16, /*enable_reuse_cache=*/true));
+    ASSERT_EQ(block_ids.blocksNum(), 4u);
+    EXPECT_TRUE(isNullBlockIdx(block_ids.blocks()[0]));
+    EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[1]));
+    EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[2]));
+    EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[3]));
+
+    // The pool's free count must drop by exactly the number of physical blocks (3).
+    EXPECT_EQ(block_pool_->freeBlocksNum(), free_before - 3);
+
+    group.free(block_ids.blocks());
+    EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_);
+}
+
+// Larger sparse layout: with linear_step=2 and seq_len=24 (=> 6 slots) and reuse enabled,
+// the active-tail-2 plus step-hits set {1, 3, 4, 5} forms 4 physical blocks. Validates
+// that the batch path correctly distributes the 4 allocated indices across NULL/REAL slots.
+TEST_F(SWAKVCacheGroupTest, Malloc_BatchPlacementMatchesShouldAllocate) {
+    auto         group       = makeGroupWithStep(4, 2);
+    const size_t free_before = block_pool_->freeBlocksNum();
+
+    BlockIds block_ids(1);
+    ASSERT_TRUE(group.malloc(block_ids, 24, /*enable_reuse_cache=*/true));
+    ASSERT_EQ(block_ids.blocksNum(), 6u);
+    // Expected: idx0=NULL, idx1=REAL(step), idx2=NULL, idx3=REAL(step+tail), idx4=REAL(tail), idx5=REAL(tail).
+    EXPECT_TRUE(isNullBlockIdx(block_ids.blocks()[0]));
+    EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[1]));
+    EXPECT_TRUE(isNullBlockIdx(block_ids.blocks()[2]));
+    EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[3]));
+    EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[4]));
+    EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[5]));
+
+    // All 4 real blocks must be distinct (the batch BlockPool::malloc returns unique ids).
+    std::vector<BlockIdxType> reals = {
+        block_ids.blocks()[1], block_ids.blocks()[3], block_ids.blocks()[4], block_ids.blocks()[5]};
+    std::sort(reals.begin(), reals.end());
+    EXPECT_EQ(std::adjacent_find(reals.begin(), reals.end()), reals.end());
+
+    EXPECT_EQ(block_pool_->freeBlocksNum(), free_before - 4);
+
+    group.free(block_ids.blocks());
+    EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_);
 }
 
 }  // namespace test
