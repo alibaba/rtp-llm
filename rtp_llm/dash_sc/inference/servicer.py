@@ -22,6 +22,7 @@ from typing import Any, AsyncIterator, Callable, Iterator, Optional
 
 import torch
 
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.dash_sc.codec import (
     FINISH_REASON_ABORT,
     FINISH_REASON_LENGTH,
@@ -37,7 +38,6 @@ from rtp_llm.dash_sc.codec import (
     parse_dash_sc_grpc_request,
     prepend_to_generated_ids_tensor,
 )
-from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.frontend.request_id_generator import generate_request_id
 from rtp_llm.metrics import AccMetrics, kmonitor
@@ -1074,7 +1074,9 @@ async def iter_real_model_stream_infer(
         if e.exception_type == ExceptionType.GENERATE_TIMEOUT:
             logging.warning("[DashScGrpc] [%s] generate timeout: %s", tag, e)
             yield build_finish_reason_done_response(
-                str(request.id), request.model_name, FINISH_REASON_STOP_TIMEOUT,
+                str(request.id),
+                request.model_name,
+                FINISH_REASON_STOP_TIMEOUT,
             )
         elif e.exception_type in (
             ExceptionType.ERROR_INPUT_FORMAT_ERROR,
@@ -1084,12 +1086,16 @@ async def iter_real_model_stream_infer(
         ):
             logging.warning("[DashScGrpc] [%s] parameter error: %s", tag, e)
             yield build_finish_reason_done_response(
-                str(request.id), request.model_name, FINISH_REASON_STOP_ENGINE_PARAM,
+                str(request.id),
+                request.model_name,
+                FINISH_REASON_STOP_ENGINE_PARAM,
             )
         elif e.exception_type == ExceptionType.CANCELLED_ERROR:
             logging.info("[DashScGrpc] [%s] engine cancelled: %s", tag, e)
             yield build_finish_reason_done_response(
-                str(request.id), request.model_name, FINISH_REASON_ABORT,
+                str(request.id),
+                request.model_name,
+                FINISH_REASON_ABORT,
             )
         else:
             logging.exception("[DashScGrpc] [%s] engine error: %s", tag, e)
@@ -1198,13 +1204,11 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                 return
 
             if self._backend_visitor is None:
-                # ``iter_fake_model_stream_infer`` is a sync generator; iterating it
-                # inside an ``async def`` is valid — it yields synchronously without
-                # awaiting. Fake mode is test-only, no concurrency concern.
                 for resp in iter_fake_model_stream_infer(
                     request, input_ids_list, sampling.top_k
                 ):
                     yield resp
+                return
             else:
                 async for resp in iter_real_model_stream_infer(
                     request,
@@ -1222,3 +1226,4 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                     phase2_request_id_factory=self._next_rtp_llm_request_id,
                 ):
                     yield resp
+                return
