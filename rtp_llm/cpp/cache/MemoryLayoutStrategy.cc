@@ -229,13 +229,29 @@ std::vector<BlockInfo> MemoryLayoutStrategy::createBasicBlockInfo(int layer_id, 
 
     checkLayerIdValidity(layer_id);
     auto& layer_tensor = layer_kv_tensors_[layer_id];
-    void* kv_addr      = getBlockPtr(layer_tensor, block_id);
-    auto  kv_info      = makeBlockInfo(layer_tensor, kv_addr, static_cast<size_t>(config_.kv_block_stride_bytes));
+    void* kv_addr      = nullptr;
+    if (config_.kernel_blocks_per_kv_block > 1) {
+        RTP_LLM_CHECK_WITH_INFO(block_id >= 0 && static_cast<size_t>(block_id) < config_.block_num,
+                                "Physical block ID %d out of range (max: %zu)",
+                                block_id,
+                                config_.block_num);
+        kv_addr =
+            static_cast<char*>(layer_tensor.data_ptr()) + static_cast<size_t>(block_id) * config_.kv_block_stride_bytes;
+    } else {
+        kv_addr = getBlockPtr(layer_tensor, block_id);
+    }
+    auto kv_info = makeBlockInfo(layer_tensor, kv_addr, static_cast<size_t>(config_.kv_block_stride_bytes));
 
     if (config_.hasScale()) {
         auto& layer_scale_tensor = layer_kv_scale_tensors_[layer_id];
-        void* kv_scale_addr      = getBlockPtr(layer_scale_tensor, block_id);
-        auto  scale_info =
+        void* kv_scale_addr      = nullptr;
+        if (config_.kernel_blocks_per_kv_block > 1) {
+            kv_scale_addr = static_cast<char*>(layer_scale_tensor.data_ptr())
+                            + static_cast<size_t>(block_id) * config_.kv_scale_stride_bytes;
+        } else {
+            kv_scale_addr = getBlockPtr(layer_scale_tensor, block_id);
+        }
+        auto scale_info =
             makeBlockInfo(layer_scale_tensor, kv_scale_addr, static_cast<size_t>(config_.kv_scale_stride_bytes));
         return {kv_info, scale_info};
     }

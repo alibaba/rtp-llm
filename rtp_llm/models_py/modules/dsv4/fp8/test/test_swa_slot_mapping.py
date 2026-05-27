@@ -244,6 +244,28 @@ class SwaSlotMappingTest(unittest.TestCase):
                         ring_entries=ring_entries,
                     )
 
+    def test_large_physical_block_multi_request_mixed_tails(self):
+        """B>1 with different physical-row/tail shapes.
+
+        Req0 crosses a physical boundary: the first few tokens in the query
+        are still before the writable ring tail and must be skipped. Req1 is
+        a short mid-block request tail and all tokens are writable.
+        """
+        tpb = 16384
+        for ring_entries in (128, 130, 132, 134):
+            with self.subTest(ring_entries=ring_entries):
+                self._check(
+                    block_table=[
+                        [31, 32],
+                        [41, 42],
+                    ],
+                    query_lens=[ring_entries + 20, 33],
+                    sp_values=[tpb - ring_entries - 10, 4096],
+                    pool_entries_per_block=ring_entries,
+                    tokens_per_block_for_block_table=tpb,
+                    ring_entries=ring_entries,
+                )
+
     def test_continuation_at_segment_boundary(self):
         """sp lands exactly on a block boundary — first new token goes
         to in_block=0 of a fresh segment."""

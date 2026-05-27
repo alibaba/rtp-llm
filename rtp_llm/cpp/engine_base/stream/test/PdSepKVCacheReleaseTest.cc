@@ -18,6 +18,7 @@
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
+#include "rtp_llm/models_py/bindings/common/WriteCacheStoreOp.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 
 #include <atomic>
@@ -244,7 +245,9 @@ protected:
                                               rtp_llm::DataType::TYPE_INT8);
     }
 
-    CacheConfig makeDsv4Config(uint32_t block_num = 16) {
+    CacheConfig makeDsv4Config(uint32_t block_num               = 16,
+                               uint32_t seq_size_per_block      = kDsv4TokensPerBlock,
+                               uint32_t kernel_seq_size_per_blk = kDsv4TokensPerBlock) {
         ModelConfig mc;
         mc.num_layers                   = 43;
         mc.hidden_size                  = 4096;
@@ -266,8 +269,11 @@ protected:
         mc.attn_config.layer_compress_ratios = ratios;
 
         ParallelismConfig pc;
-        auto              config = HybridPoolConfigCreator::createConfig(mc, pc, KVCacheConfig{}, false, 0);
-        config.block_num         = block_num;
+        KVCacheConfig     kv_config;
+        kv_config.seq_size_per_block        = seq_size_per_block;
+        kv_config.kernel_seq_size_per_block = kernel_seq_size_per_blk;
+        auto config                         = HybridPoolConfigCreator::createConfig(mc, pc, kv_config, false, 0);
+        config.block_num                    = block_num;
         config.group_block_nums.assign(config.groupNums(), block_num);
         return config;
     }
@@ -571,7 +577,9 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4PDSepPrefillReleaseInsertsSevenGroupDevi
     std::vector<int> tokens(3 * spb + 17);
     std::iota(tokens.begin(), tokens.end(), 1);
 
-    prepareDsv4Stream(tokens, RoleType::PREFILL);
+    auto config        = makeDsv4Config();
+    config.linear_step = 4;
+    prepareStreamWithConfig(tokens, config, spb, RoleType::PREFILL);
     allocateAndFinish();
 
     auto& resource = stream_->streamCacheResource();
@@ -835,6 +843,189 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
 
     EXPECT_EQ(cache_store->load_buffer_requests_.size(), 10u);
     EXPECT_EQ(cache_store->load_request_keys_.size(), 10u);
+    for (int layer_id = 0; layer_id < 4; ++layer_id) {
+        for (int gid : config.layer_to_group_ids[layer_id]) {
+            auto region_name = config.group_region_names[gid];
+            auto positions   = blockPositionsForCacheTransfer(
+                block_num, /*reuse_block_size=*/0, true, config.group_types[gid], /*hybrid_full_from_begin=*/true);
+            for (auto block_pos : positions) {
+                auto decode_block_id = decode_resource->blocks(0, gid)[block_pos];
+                ASSERT_FALSE(isNullBlockIdx(decode_block_id));
+                expectDsv4RegionBytes(
+                    decode_manager, decode_block_id, layer_id, region_name, dsv4PdPattern(layer_id, gid, block_pos));
+            }
+        }
+    }
+}
+
+TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBlocks) {
+    const int     spb        = 8192;
+    const int     kernel_spb = 128;
+    const int     block_num  = 2;
+    const int64_t request_id = 9020;
+    const size_t  model_id   = 80;
+
+    auto config = makeDsv4Config(/*block_num=*/8, spb, kernel_spb);
+
+    auto makeResource = [&config]() {
+        auto resource = std::make_shared<BatchKVCacheResource>();
+        resource->resetBatchSize(1);
+        resource->initGroups(config.groupNums(),
+                             static_cast<int>(config.layer_all_num),
+                             config.layer_to_group_id,
+                             config.kernelBlocksPerKvBlock(),
+                             config.group_types,
+                             config.layer_region_to_group_id);
+        return resource;
+    };
+    auto makeCompleteTokens = [spb, block_num](int max_seq_len) {
+        auto input              = std::make_shared<GenerateInput>();
+        input->input_ids        = torch::arange(max_seq_len, torch::kInt32);
+        input->generate_config  = std::make_shared<GenerateConfig>();
+        auto complete_token_ids = std::make_shared<CompleteTokenIds>(1, 1, max_seq_len + spb, spb);
+        complete_token_ids->init(input);
+        complete_token_ids->setSeqLength(block_num * spb);
+        return complete_token_ids;
+    };
+
+    auto prefill_manager = std::make_shared<KVCacheManager>(config, /*warmup=*/false, nullptr);
+    auto decode_manager  = std::make_shared<KVCacheManager>(config, /*warmup=*/false, nullptr);
+    ASSERT_TRUE(prefill_manager->init());
+    ASSERT_TRUE(decode_manager->init());
+
+    auto prefill_resource = makeResource();
+    auto decode_resource  = makeResource();
+    ASSERT_TRUE(
+        prefill_manager->malloc({prefill_resource, makeCompleteTokens(block_num * spb), request_id, true, false, false})
+            .success);
+    ASSERT_TRUE(
+        decode_manager->malloc({decode_resource, makeCompleteTokens(block_num * spb), request_id, true, false, false})
+            .success);
+
+    std::vector<CacheKeyType> cache_keys;
+    std::vector<std::string>  cache_key_strings;
+    for (int i = 0; i < block_num; ++i) {
+        cache_keys.push_back(20000 + i);
+        cache_key_strings.push_back(std::to_string(cache_keys.back()));
+    }
+
+    for (int layer_id = 0; layer_id < 4; ++layer_id) {
+        for (int gid : config.layer_to_group_ids[layer_id]) {
+            auto region_name = config.group_region_names[gid];
+            auto positions   = blockPositionsForCacheTransfer(
+                block_num, /*reuse_block_size=*/0, true, config.group_types[gid], /*hybrid_full_from_begin=*/true);
+            for (auto block_pos : positions) {
+                auto prefill_block_id = prefill_resource->blocks(0, gid)[block_pos];
+                auto decode_block_id  = decode_resource->blocks(0, gid)[block_pos];
+                ASSERT_FALSE(isNullBlockIdx(prefill_block_id)) << "prefill gid=" << gid << " pos=" << block_pos;
+                ASSERT_FALSE(isNullBlockIdx(decode_block_id)) << "decode gid=" << gid << " pos=" << block_pos;
+                fillDsv4RegionBytes(
+                    prefill_manager, prefill_block_id, layer_id, region_name, dsv4PdPattern(layer_id, gid, block_pos));
+                fillDsv4RegionBytes(decode_manager, decode_block_id, layer_id, region_name, 0xEE);
+            }
+        }
+    }
+    runtimeSyncAndCheck();
+
+    auto layer_to_group_tensor = torch::from_blob(config.layer_to_group_id.data(),
+                                                  {(int64_t)config.layer_to_group_id.size()},
+                                                  torch::TensorOptions(torch::kInt32))
+                                     .clone();
+    std::vector<int32_t> layer_region_to_group_flat;
+    for (const auto& row : config.layer_region_to_group_id) {
+        layer_region_to_group_flat.insert(layer_region_to_group_flat.end(), row.begin(), row.end());
+    }
+    auto layer_region_to_group_tensor = torch::from_blob(layer_region_to_group_flat.data(),
+                                                         {(int64_t)config.layer_region_to_group_id.size(),
+                                                          (int64_t)config.layer_region_to_group_id[0].size()},
+                                                         torch::TensorOptions(torch::kInt32))
+                                            .clone();
+    std::vector<int32_t> group_types;
+    for (auto group_type : config.group_types) {
+        group_types.push_back(static_cast<int32_t>(group_type));
+    }
+    auto group_types_tensor =
+        torch::from_blob(group_types.data(), {(int64_t)group_types.size()}, torch::TensorOptions(torch::kInt32))
+            .clone();
+
+    auto cache_store = std::make_shared<MemoryBackedCacheStore>();
+    auto layout      = prefill_manager->getMainModelCacheLayerLayout();
+    for (int layer_id = 0; layer_id < 4; ++layer_id) {
+        for (int gid : config.layer_to_group_ids[layer_id]) {
+            auto region_name = config.group_region_names[gid];
+            auto region_idx  = static_cast<size_t>(region_name);
+            ASSERT_TRUE(layout.layers_to_kv_buffer_ptrs_by_attn[layer_id][region_idx].defined())
+                << "layer=" << layer_id << " region=" << region_idx;
+
+            torch_ext::PyCacheStoreInputs inputs;
+            inputs.context_batch_size             = 1;
+            inputs.decoder_batch_size             = 0;
+            inputs.request_id                     = torch::tensor({request_id}, torch::kInt64);
+            inputs.request_pd_separation          = torch::tensor({true}, torch::kBool);
+            inputs.kv_cache_layer_to_group        = layer_to_group_tensor;
+            inputs.kv_cache_layer_region_to_group = layer_region_to_group_tensor;
+            inputs.kv_cache_group_types           = group_types_tensor;
+            inputs.cache_keys                     = cache_key_strings;
+            inputs.input_lengths_host             = torch::tensor({block_num * spb}, torch::kInt32);
+            inputs.prefix_lengths_host            = torch::tensor({0}, torch::kInt32);
+            inputs.tokens_per_block               = spb;
+            inputs.kv_block_stride_bytes          = config.kv_block_stride_bytes;
+            inputs.kv_scale_stride_bytes          = 0;
+            inputs.pd_separation                  = true;
+            inputs.model_id                       = model_id;
+            inputs.decode_entrance                = false;
+            inputs.warmup                         = false;
+            inputs.use_opaque_kv_cache_store      = config.use_opaque_kv_cache_store;
+            inputs.mla_kvcache                    = false;
+            inputs.cache_store                    = cache_store;
+
+            torch_ext::LayerKVCache layer_cache;
+            layer_cache.kv_cache_base      = layout.layers_to_kv_buffer_ptrs_by_attn[layer_id][region_idx];
+            layer_cache.seq_size_per_block = config.group_types[gid] == CacheGroupType::FULL ? kernel_spb : spb;
+            layer_cache.layer_id           = layer_id;
+            layer_cache.group_id           = gid;
+            layer_cache.region_name        = region_name;
+
+            WriteCacheStoreOp(inputs.input_lengths_host,
+                              inputs.prefix_lengths_host,
+                              blockIdsTensor(prefill_resource, gid),
+                              inputs,
+                              layer_cache);
+        }
+    }
+
+    const auto first_csa_key =
+        "kv_" + makeCacheKey(model_id, cache_key_strings[0], /*layer_id=*/2, KVCacheRegionName::CSA_KV);
+    ASSERT_NE(cache_store->stored_blocks_.find(first_csa_key), cache_store->stored_blocks_.end());
+    EXPECT_EQ(cache_store->stored_blocks_[first_csa_key].size(),
+              config.group_kv_block_stride_bytes[static_cast<size_t>(0)]);
+
+    EngineInitParams params;
+    params.model_id                 = model_id;
+    params.model_config_.num_layers = 4;
+    params.parallelism_config       = ParallelismConfig();
+
+    DecodeRpcServer server;
+    server.engine_                   = std::make_shared<MinimalEngine>(params, decode_manager);
+    server.maga_init_params_         = params;
+    server.propose_maga_init_params_ = nullptr;
+    server.resource_.cache_store     = cache_store;
+
+    std::vector<std::string>            peer_addrs = {"127.0.0.1:12345:12346"};
+    grpc::ServerContext                 server_context;
+    DecodeRpcServer::LoadKVCacheContext load_context(request_id,
+                                                     "dsv4-decoupled-cache-store-pd",
+                                                     peer_addrs,
+                                                     cache_keys,
+                                                     decode_resource->groupBlocks(),
+                                                     /*reuse_block_size=*/0,
+                                                     /*timeout_ms=*/5000,
+                                                     /*partition_count=*/1,
+                                                     /*partition_id=*/0,
+                                                     &server_context);
+    auto                                status = server.loadCache(load_context);
+    ASSERT_TRUE(status.ok()) << status.ToString();
+
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
         for (int gid : config.layer_to_group_ids[layer_id]) {
             auto region_name = config.group_region_names[gid];
