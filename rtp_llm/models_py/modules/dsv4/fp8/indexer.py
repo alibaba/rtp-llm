@@ -22,7 +22,7 @@ What this class does NOT do — by design:
 from __future__ import annotations
 
 import os
-from typing import Dict, NamedTuple, Optional
+from typing import Any, Callable, Dict, NamedTuple, Optional
 
 import torch
 import torch.nn as nn
@@ -45,7 +45,17 @@ from rtp_llm.models_py.modules.dsv4.fp8._indexer_score import (
     has_fp8_paged_mqa_logits,
 )
 from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import PoolBackedModule
-from rtp_llm.models_py.modules.dsv4.fp8.compressor import CompressorFP8, CompressorMeta
+from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
+    CompressorFP8,
+    CompressorMeta,
+    _CompressorPending,
+)
+
+
+def _use_varlen_prefill() -> bool:
+    return os.environ.get("DSV4_VARLEN_PREFILL", "1") != "0"
+
+
 from rtp_llm.models_py.modules.dsv4.qlinear import QuantizedLinear
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
@@ -362,7 +372,13 @@ class IndexerFP8(PoolBackedModule):
         )
 
     def _clear_nested_pool(self) -> None:
-        self.compressor.clear_pool_context()
+        compressor = getattr(self, "compressor", None)
+        if compressor is not None:
+            compressor.clear_pool_context()
+
+    def clear_pool_context(self) -> None:
+        super().clear_pool_context()
+        self._clear_nested_pool()
 
     def set_cp_ctx(self, cp_ctx: Optional[CPContext]) -> None:
         """Bind the per-forward CPContext (Phase F / Phase-2).
@@ -381,6 +397,73 @@ class IndexerFP8(PoolBackedModule):
                 and cp_ctx.input_lengths_global.numel() >= 1
             ), "IndexerFP8 CP requires cp_ctx.input_lengths_global"
         self._cp_ctx = cp_ctx
+
+    def _gather_prefill_k_cache(
+        self,
+        attention_inputs: _IndexerFP8PrefillMeta,
+        k_quant_flat: torch.Tensor,
+        k_scale_buf: torch.Tensor,
+    ) -> None:
+        """Fill prefill indexer-K buffers from the FP8 pool.
+
+        Shared by ``forward`` and ``forward_with_pending_nested`` so the overlap
+        path keeps the same CP-sharded assembler behavior as the baseline path.
+        """
+        cp_ctx = getattr(self, "_cp_ctx", None)
+        kv_cache_sharded = bool(
+            cp_ctx is not None
+            and getattr(cp_ctx, "kv_cache_sharded", False)
+            and cp_ctx.cp_size > 1
+        )
+        if not kv_cache_sharded:
+            rtp_llm_ops.cp_gather_indexer_k_quant_cache(
+                self._kv_pool_view,
+                k_quant_flat,
+                k_scale_buf,
+                attention_inputs.block_table_i32,
+                attention_inputs.cu_kv_seqlens,
+            )
+            return
+
+        from rtp_llm.models_py.modules.dsv4.fp8._indexer_cp_assembler import (
+            assemble_indexer_k,
+            build_indexer_cp_chunk_plan,
+            build_local_cu_kv_seqlens,
+        )
+
+        cu = attention_inputs.cu_kv_seqlens.to(torch.int64)
+        per_req_T = (cu[1:] - cu[:-1]).contiguous()
+        plan = build_indexer_cp_chunk_plan(
+            cp_ctx=cp_ctx,
+            per_req_total_kv_lens=per_req_T,
+            block_size=self._kv_eb,
+            device=k_quant_flat.device,
+        )
+        local_cu = build_local_cu_kv_seqlens(plan)
+        local_q = torch.empty(
+            (plan.total_local_T, k_quant_flat.shape[-1]),
+            dtype=k_quant_flat.dtype,
+            device=k_quant_flat.device,
+        )
+        local_s = torch.empty(
+            (plan.total_local_T, k_scale_buf.shape[-1]),
+            dtype=k_scale_buf.dtype,
+            device=k_scale_buf.device,
+        )
+        rtp_llm_ops.cp_gather_indexer_k_quant_cache(
+            self._kv_pool_view,
+            local_q,
+            local_s,
+            attention_inputs.block_table_i32,
+            local_cu,
+        )
+        assemble_indexer_k(
+            plan=plan,
+            local_k_quant=local_q,
+            local_k_scale=local_s,
+            out_k_quant=k_quant_flat,
+            out_k_scale=k_scale_buf,
+        )
 
     # --------------------------------------------------------------
     # Q-projection + RoPE helper (shared between prefill & decode)
@@ -903,60 +986,11 @@ class IndexerFP8(PoolBackedModule):
                 )
                 # quant_block_size = head_dim*4/dst_scale.size(1) = 128*4/4 = 128.
                 k_scale_buf = torch.empty((T, 4), dtype=torch.uint8, device=x.device)
-                cp_ctx = getattr(self, "_cp_ctx", None)
-                kv_cache_sharded = bool(
-                    cp_ctx is not None
-                    and getattr(cp_ctx, "kv_cache_sharded", False)
-                    and cp_ctx.cp_size > 1
+                self._gather_prefill_k_cache(
+                    attention_inputs,
+                    k_quant_flat,
+                    k_scale_buf,
                 )
-                if not kv_cache_sharded:
-                    rtp_llm_ops.cp_gather_indexer_k_quant_cache(
-                        self._kv_pool_view,
-                        k_quant_flat,
-                        k_scale_buf,
-                        attention_inputs.block_table_i32,
-                        attention_inputs.cu_kv_seqlens,
-                    )
-                else:
-                    from rtp_llm.models_py.modules.dsv4.fp8._indexer_cp_assembler import (
-                        assemble_indexer_k,
-                        build_indexer_cp_chunk_plan,
-                        build_local_cu_kv_seqlens,
-                    )
-
-                    cu = attention_inputs.cu_kv_seqlens.to(torch.int64)
-                    per_req_T = (cu[1:] - cu[:-1]).contiguous()
-                    plan = build_indexer_cp_chunk_plan(
-                        cp_ctx=cp_ctx,
-                        per_req_total_kv_lens=per_req_T,
-                        block_size=self._kv_eb,
-                        device=k_quant_flat.device,
-                    )
-                    local_cu = build_local_cu_kv_seqlens(plan)
-                    local_q = torch.empty(
-                        (plan.total_local_T, k_quant_flat.shape[-1]),
-                        dtype=k_quant_flat.dtype,
-                        device=k_quant_flat.device,
-                    )
-                    local_s = torch.empty(
-                        (plan.total_local_T, k_scale_buf.shape[-1]),
-                        dtype=k_scale_buf.dtype,
-                        device=k_scale_buf.device,
-                    )
-                    rtp_llm_ops.cp_gather_indexer_k_quant_cache(
-                        self._kv_pool_view,
-                        local_q,
-                        local_s,
-                        attention_inputs.block_table_i32,
-                        local_cu,
-                    )
-                    assemble_indexer_k(
-                        plan=plan,
-                        local_k_quant=local_q,
-                        local_k_scale=local_s,
-                        out_k_quant=k_quant_flat,
-                        out_k_scale=k_scale_buf,
-                    )
                 # ``deep_gemm.fp8_mqa_logits`` expects k_scale as 1D fp32
                 # contig — view uint8 [T, 4] → fp32 [T, 1] → squeeze [T].
                 k_scale_flat = k_scale_buf.view(torch.float32).squeeze(-1)
@@ -997,6 +1031,192 @@ class IndexerFP8(PoolBackedModule):
                         attention_inputs.ke[row_start:row_end],
                         clean_logits=False,
                     )  # [chunk_rows, T] fp32
+
+                with record_function_range("dsv4.fp8.indexer.prefill.topk"):
+                    _run_prefill_topk(
+                        logits,
+                        attention_inputs.ks[row_start:row_end],
+                        attention_inputs.ke[row_start:row_end],
+                        out_buf[row_start:row_end],
+                        K,
+                        self.compress_ratio,
+                    )
+                del logits
+
+            return out_buf.view(out_shape)
+        finally:
+            self._clear_nested_pool()
+
+    # --------------------------------------------------------------
+    # Overlap orchestration entry points
+    #
+    # Companion pair to :meth:`forward` for the attention overlap path:
+    # ``start_prefill_nested_compressor`` queues the nested compressor's
+    # CP all-gather on ``cp_gather_stream`` without waiting, and the
+    # returned ``_CompressorPending`` is drained inside
+    # :meth:`forward_with_pending_nested` in place of the synchronous
+    # ``self.compressor(x, sp, meta=...)`` call that ``forward`` issues.
+    #
+    # Non-overlap callers must keep using :meth:`forward` unchanged.
+    # --------------------------------------------------------------
+    def start_prefill_nested_compressor(
+        self,
+        x: torch.Tensor,
+        sp_int: int,
+        *,
+        meta: Optional[CompressorMeta],
+        cp_gather_stream: Optional[Any] = None,
+        profile_label: Optional[str] = None,
+    ) -> Optional[_CompressorPending]:
+        """Begin the nested compressor's CP all-gather without waiting.
+
+        Mirrors the first half of :meth:`forward` up to the synchronous
+        compressor call: warmup gate (returns ``None`` when no pool is
+        bound), ``freqs_cis`` propagation, and pool propagation to the
+        nested compressor. The fused KV/gate projection + NCCL gather
+        are then enqueued on the caller's ``cp_gather_stream`` via
+        :meth:`CompressorFP8.start_prefill`.
+
+        ``None`` return means warmup — callers must either fall back to
+        :meth:`forward` (which also returns the empty-topk shape) or
+        pass ``None`` straight to :meth:`forward_with_pending_nested`
+        (which detects warmup via the same pool check and returns the
+        empty-topk shape, after a no-op ``finish_prefill(None)``).
+        """
+        if (
+            self._kv_block_table is None
+            or self._kv_pool_view is None
+            or self._kv_eb <= 0
+        ):
+            return None
+        if self.compressor.freqs_cis is None:
+            self.compressor.freqs_cis = self.freqs_cis
+        self._propagate_pool_to_nested()
+        kwargs = {
+            "meta": meta,
+            "cp_gather_stream": cp_gather_stream,
+        }
+        if profile_label is not None:
+            kwargs["profile_label"] = profile_label
+        return self.compressor.start_prefill(x, sp_int, **kwargs)
+
+    def forward_with_pending_nested(
+        self,
+        x: torch.Tensor,
+        qr: torch.Tensor,
+        attention_inputs: _IndexerFP8PrefillMeta,
+        nested_pending: Optional[_CompressorPending],
+        before_gather_k: Optional[Callable[[], None]] = None,
+    ) -> torch.Tensor:
+        """Overlap-variant of :meth:`forward`.
+
+        Identical to :meth:`forward` byte-for-byte except the nested
+        compressor is drained via ``self.compressor.finish_prefill``
+        on the supplied ``nested_pending`` (produced by
+        :meth:`start_prefill_nested_compressor`) instead of a fresh
+        synchronous call. Same warmup early-return, same try/finally
+        pool clear, same gather_k → quant_q → score → topk path.
+
+        ``before_gather_k`` is an optional orchestrator fence. CSA overlap uses
+        it to wait the main compressor's CP gather after nested write +
+        compute_q/weights projection, but before this method reads the nested
+        INDEXER_KV pool and runs the numerically sensitive score/topk chain.
+
+        ``nested_pending`` is ``None`` on the warmup path; the call to
+        ``finish_prefill(None)`` is a no-op so the pairing is safe to
+        chain unconditionally.
+        """
+        M = attention_inputs.M
+        T = attention_inputs.T
+        K = self.index_topk
+
+        out_shape = (*x.shape[:-1], K)
+        empty_shape = (*x.shape[:-1], 0)
+
+        if (
+            self._kv_block_table is None
+            or self._kv_pool_view is None
+            or self._kv_eb <= 0
+        ):
+            # Warmup mirror of ``forward``: emit empty topk. The pending
+            # here is always ``None`` (start_prefill_nested_compressor
+            # also short-circuits on warmup); the explicit no-op drain
+            # keeps the orchestrator's symmetric pairing contract clear.
+            self.compressor.finish_prefill(nested_pending)
+            return torch.full(empty_shape, -1, dtype=torch.int32, device=x.device)
+
+        if self.compressor.freqs_cis is None:
+            self.compressor.freqs_cis = self.freqs_cis
+        # ``set_pool_context`` is idempotent — re-propagating is safe and
+        # mirrors ``forward``'s unconditional propagate so callers that
+        # entered through this path without start_prefill_nested_compressor
+        # (e.g. tests) still work.
+        self._propagate_pool_to_nested()
+        try:
+            with record_function_range("dsv4.fp8.indexer.prefill.compute_q"):
+                q = self._compute_indexer_q(qr, attention_inputs.freqs_cis_slice)
+            with record_function_range("dsv4.fp8.indexer.prefill.nested_compressor"):
+                self.compressor.finish_prefill(nested_pending)
+            with record_function_range("dsv4.fp8.indexer.prefill.weights_proj"):
+                weights = F.linear(x, self.weights_proj)
+
+            assert (
+                has_fp8_mqa_logits()
+            ), "deep_gemm.fp8_mqa_logits required for IndexerFP8 prefill"
+            assert self._kv_pool_view.dim() == 3, (
+                "IndexerFP8 expects 3D ``_kv_pool_view`` "
+                "[num_blocks, eb, 132]; got dim="
+                f"{self._kv_pool_view.dim()}"
+            )
+
+            if T == 0:
+                return torch.full(empty_shape, -1, dtype=torch.int32, device=x.device)
+
+            if before_gather_k is not None:
+                with record_function_range("dsv4.fp8.indexer.prefill.before_gather_k"):
+                    before_gather_k()
+
+            with record_function_range("dsv4.fp8.indexer.prefill.gather_k_cache"):
+                k_quant_flat = torch.empty(
+                    (T, INDEXER_HEAD_DIM),
+                    dtype=torch.float8_e4m3fn,
+                    device=x.device,
+                )
+                k_scale_buf = torch.empty((T, 4), dtype=torch.uint8, device=x.device)
+                self._gather_prefill_k_cache(
+                    attention_inputs,
+                    k_quant_flat,
+                    k_scale_buf,
+                )
+                k_scale_flat = k_scale_buf.view(torch.float32).squeeze(-1)
+
+            q_for_quant = q if q.dim() == 4 else q.unsqueeze(0)
+            w_for_quant = weights if weights.dim() == 3 else weights.unsqueeze(0)
+            with record_function_range("dsv4.fp8.indexer.prefill.quant_q"):
+                q_fp8, w_fold = indexer_q_fp8_quant_fold(
+                    _as_bf16_contig(q_for_quant), _as_bf16_contig(w_for_quant)
+                )
+
+            q_score = q_fp8.view(M, self.n_heads, INDEXER_HEAD_DIM)
+            w_score = w_fold.view(M, self.n_heads)
+            score_chunk_rows = _fp8_prefill_score_chunk_rows()
+            chunked_score = score_chunk_rows > 0 and M > score_chunk_rows
+            if not chunked_score:
+                score_chunk_rows = M
+            out_buf = torch.empty((M, K), dtype=torch.int32, device=x.device)
+
+            for row_start in range(0, M, score_chunk_rows):
+                row_end = min(M, row_start + score_chunk_rows)
+                with record_function_range("dsv4.fp8.indexer.prefill.score"):
+                    logits = fp8_mqa_indexer_score(
+                        q_score[row_start:row_end],
+                        w_score[row_start:row_end],
+                        k_quant_flat,
+                        k_scale_flat,
+                        attention_inputs.ks[row_start:row_end],
+                        attention_inputs.ke[row_start:row_end],
+                        clean_logits=False,
+                    )
 
                 with record_function_range("dsv4.fp8.indexer.prefill.topk"):
                     _run_prefill_topk(

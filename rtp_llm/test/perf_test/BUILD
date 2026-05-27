@@ -89,11 +89,11 @@ py_test(
     tags = ["manual"],
 )
 
-# V4-Flash CP=4 + EP=4 prefill profile on 64k input.  Manual-only —
-# drives a single batch_size=1, input_len=65536 prefill through the
-# perf test framework so the timeline JSONs land in TEST_UNDECLARED_
-# OUTPUTS_DIR.  Uses a local checkpoint path so the perf hub resolver
-# does not try ModelScope.
+# V4-Flash CP=4 + EP=4 prefill profile sweep from 64k to 1M input.
+# Manual-only — drives batch_size=1 prefill requests through the perf
+# test framework so per-input_len timeline JSONs land in TEST_UNDECLARED_
+# OUTPUTS_DIR. Uses a local checkpoint path so the perf hub resolver does
+# not try ModelScope.
 py_test(
     name = "v4_flash_cp4_ep4_prefill_64k_perf",
     main = "batch_decode_test.py",
@@ -110,15 +110,15 @@ py_test(
         "--checkpoint_path", "/mnt/nas1/hf/DeepSeek-V4-Flash",
         "--tokenizer_path", "/mnt/nas1/hf/DeepSeek-V4-Flash",
         "--batch_size", "1",
-        "--input_len", "65536",
+        "--input_len", "65536,173921,349287,612734,887451,1048575",
         "--partial", "2",
         "--decode_test_length", "2",
-        "--seq_size_per_block", "64",
+        "--seq_size_per_block", "256",
         "--tp_size", "4",
         "--dp_size", "1",
         "--ep_size", "4",
         "--world_size", "4",
-        "--max_seq_len", "65600",
+        "--max_seq_len", "1048576",
         "--cp_rotate_method", "ALL_GATHER",
         "--use_deepep_moe", "1",
         "--use_deepep_low_latency", "0",
@@ -127,7 +127,7 @@ py_test(
         "--load_method", "fastsafetensors",
         "--concurrency_limit", "1",
         "--enable_cuda_graph", "0",
-        "--reserver_runtime_mem_mb", "32768",
+        "--reserver_runtime_mem_mb", "122880",
         "--max_context_batch_size", "1",
     ],
     env = {
@@ -613,15 +613,15 @@ py_test(
         "--checkpoint_path", "/data1/serina.wzq/DeepSeek-V4-Pro",
         "--tokenizer_path", "/data1/serina.wzq/DeepSeek-V4-Pro",
         "--batch_size", "1",
-        "--input_len", "65536",
+        "--input_len", "65536,173921,349287,612734,887451,1048575",
         "--partial", "2",
         "--decode_test_length", "2",
-        "--seq_size_per_block", "64",
+        "--seq_size_per_block", "256",
         "--tp_size", "8",
         "--dp_size", "1",
         "--ep_size", "8",
         "--world_size", "8",
-        "--max_seq_len", "65600",
+        "--max_seq_len", "1048576",
         "--cp_rotate_method", "ALL_GATHER",
         "--use_deepep_moe", "1",
         "--use_deepep_low_latency", "0",
@@ -630,7 +630,7 @@ py_test(
         "--load_method", "fastsafetensors",
         "--concurrency_limit", "1",
         "--enable_cuda_graph", "0",
-        "--reserver_runtime_mem_mb", "32768",
+        "--reserver_runtime_mem_mb", "81920",
         "--max_context_batch_size", "1",
     ],
     env = {
@@ -642,6 +642,7 @@ py_test(
         "PERF_PROFILE_ARM_SLEEP": "2",
         "PERF_PROFILE_FLUSH_SLEEP": "120",
         "DSV4_USE_MEGA_MOE": "1",
+        "DSV4_CHUNK_TOKENS": "8192",
     },
     tags = ["manual"],
 )

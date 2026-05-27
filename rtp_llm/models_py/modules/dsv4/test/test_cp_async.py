@@ -11,7 +11,6 @@ from rtp_llm.models_py.modules.dsv4.cp import (
     _cp_gather_2d,
     _cp_restore_gathered_full_2d,
     build_cp_context,
-    build_cp_gather_impl,
     cp_all_gather_full,
     cp_wait_gather_full,
 )
@@ -107,11 +106,6 @@ def test_cuda_async_cp_gather_impl_fails_fast_on_cpu():
     )
 
 
-def test_cp_gather_default_impl_is_cuda_async():
-    with patch.dict("os.environ", {}, clear=True):
-        assert isinstance(build_cp_gather_impl(), CudaAsyncCPGatherImpl)
-
-
 def test_cp_wait_gather_full_rejects_unknown_handle():
     _assert_raises(
         lambda: cp_wait_gather_full(object()),
@@ -144,7 +138,8 @@ def test_build_cp_context_single_stream_direct_slice_unpad_restore():
     assert ctx.seq_len_full == 6
     assert ctx.prefix_length == 10
     assert torch.equal(ctx.relative_positions, torch.tensor([0, 1, 6, 7]))
-    assert torch.equal(ctx.global_positions, torch.tensor([10, 11, 16, 17]))
+    assert torch.equal(ctx.global_positions, torch.tensor([10, 11, 15, 15]))
+    assert torch.equal(ctx.local_is_real, torch.tensor([True, True, False, False]))
     assert torch.equal(ctx.unpad_restore, cp_info.prefill_qkv_restore_indice[:6].long())
     assert not ctx.unpad_restore_is_prefix
 
@@ -201,7 +196,7 @@ def test_cp_gather_2d_keeps_contiguous_input_object():
     assert out is local
 
 
-def test_build_cp_context_rejects_multi_prefill_stream():
+def test_build_cp_context_supports_multi_prefill_stream():
     cp_info = SimpleNamespace(
         prefill_qkv_padding_mask=torch.ones(16, dtype=torch.int32),
         prefill_qkv_restore_indice=torch.arange(16, dtype=torch.int32),
@@ -209,17 +204,27 @@ def test_build_cp_context_rejects_multi_prefill_stream():
         prefill_actual_input_lengths_cpu=torch.tensor([8, 8], dtype=torch.int32),
     )
 
-    _assert_raises(
-        lambda: build_cp_context(
-            cp_info,
-            cp_size=2,
-            cp_rank=0,
-            chunk_length=8,
-            device=torch.device("cpu"),
-        ),
-        ValueError,
-        "single prefill stream",
+    ctx = build_cp_context(
+        cp_info,
+        cp_size=2,
+        cp_rank=0,
+        chunk_length=8,
+        device=torch.device("cpu"),
+        position_offset=torch.tensor([0, 100], dtype=torch.int64),
     )
+
+    assert ctx.seq_len_full == 16
+    assert ctx.chunk_lengths_per_req == (4, 4)
+    assert torch.equal(ctx.relative_positions, torch.tensor([0, 1, 6, 7, 8, 9, 14, 15]))
+    assert torch.equal(
+        ctx.global_positions, torch.tensor([0, 1, 6, 7, 100, 101, 106, 107])
+    )
+    assert torch.equal(
+        ctx.req_id_per_token,
+        torch.tensor([0, 0, 0, 0, 1, 1, 1, 1], dtype=torch.int32),
+    )
+    assert torch.equal(ctx.unpad_restore, torch.arange(16, dtype=torch.long))
+    assert torch.equal(ctx.local_is_real, torch.ones(8, dtype=torch.bool))
 
 
 def test_build_cp_context_moves_restore_indices_independently_when_cuda_available():
@@ -253,8 +258,6 @@ if __name__ == "__main__":
     print("PASS test_cp_all_gather_full_rejects_non_2d_and_wrong_t_local")
     test_cuda_async_cp_gather_impl_fails_fast_on_cpu()
     print("PASS test_cuda_async_cp_gather_impl_fails_fast_on_cpu")
-    test_cp_gather_default_impl_is_cuda_async()
-    print("PASS test_cp_gather_default_impl_is_cuda_async")
     test_cp_wait_gather_full_rejects_unknown_handle()
     print("PASS test_cp_wait_gather_full_rejects_unknown_handle")
     test_build_cp_context_single_stream_direct_slice_unpad_restore()
@@ -265,8 +268,10 @@ if __name__ == "__main__":
     print("PASS test_cp_restore_prefix_returns_view_without_index_select")
     test_cp_gather_2d_keeps_contiguous_input_object()
     print("PASS test_cp_gather_2d_keeps_contiguous_input_object")
-    test_build_cp_context_rejects_multi_prefill_stream()
-    print("PASS test_build_cp_context_rejects_multi_prefill_stream")
+    test_build_cp_context_supports_multi_prefill_stream()
+    print("PASS test_build_cp_context_supports_multi_prefill_stream")
     test_build_cp_context_moves_restore_indices_independently_when_cuda_available()
-    print("PASS test_build_cp_context_moves_restore_indices_independently_when_cuda_available")
+    print(
+        "PASS test_build_cp_context_moves_restore_indices_independently_when_cuda_available"
+    )
     print("ALL TESTS PASSED")

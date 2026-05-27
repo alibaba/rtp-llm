@@ -161,7 +161,9 @@ class Block(nn.Module):
 
         import torch.distributed as dist
 
-        if not (dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1):
+        if not (
+            dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1
+        ):
             return
 
         torch.cuda.synchronize()
@@ -282,10 +284,10 @@ class Block(nn.Module):
                 )
 
         # AttentionFP8 is flat-native: takes [T, dim] + per-token positions,
-        # no padding / per-request scalars. Block must skip the BF16
-        # padded-path bookkeeping or self.attn() blows up (TypeError on
-        # `sequence_lengths`, then assert on x.dim()==2).
-        if self.fp8_kv_cache:
+        # no padding / per-request scalars. The runtime kv-cache dtype flag can
+        # be false while this branch still constructs AttentionFP8, so dispatch
+        # on the module type instead of only the cache config.
+        if isinstance(self.attn, AttentionFP8):
             attn_out = self.attn(
                 x_pre,  # [T, dim]
                 positions,  # [T] int64 absolute positions

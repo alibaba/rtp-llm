@@ -717,6 +717,43 @@ class BuildSwaPrefillMetaVarlenTest(unittest.TestCase):
         )
         self.assertTrue(torch.equal(meta.topk_length_kv_full, expected))
 
+    def test_compressed_warmup_no_kv_cache_keeps_topk_length(self) -> None:
+        """CSA/HCA warmup/fallback can consume BF16 ``kv_full`` directly.
+        That path is cache-independent, so compressed layers must keep
+        ``topk_length_kv_full`` even when no SWA pool metadata exists."""
+        win = 8
+        for compress_ratio in (4, 128):
+            with self.subTest(compress_ratio=compress_ratio):
+                stub = self._build_stub(
+                    win=win,
+                    compress_ratio=compress_ratio,
+                    n_reqs=2,
+                    kv_cache_present=False,
+                )
+                meta = self._build_meta_varlen(stub, [0, 16], [3, 4])
+                self.assertIsNone(meta.slot_mapping)
+                self.assertIsNone(meta.combined_gather_lens)
+                self.assertEqual(meta.M, 0)
+                expected = torch.tensor(
+                    [1, 2, 3, 1, 2, 3, 4], dtype=torch.int32, device=self.device
+                )
+                self.assertTrue(torch.equal(meta.topk_length_kv_full, expected))
+
+    def test_compressed_legacy_keeps_topk_length(self) -> None:
+        """Legacy B==1 CSA/HCA builders also need fallback topk lengths."""
+        win, sp, S = 8, 32, 6
+        for compress_ratio in (4, 128):
+            with self.subTest(compress_ratio=compress_ratio):
+                stub = self._build_stub(win=win, compress_ratio=compress_ratio)
+                meta = self._build_meta_legacy(stub, sp=sp, S=S)
+                self.assertIsNotNone(meta.slot_mapping)
+                self.assertIsNone(meta.combined_gather_lens)
+                self.assertEqual(meta.M, 0)
+                expected = torch.tensor(
+                    [1, 2, 3, 4, 5, 6], dtype=torch.int32, device=self.device
+                )
+                self.assertTrue(torch.equal(meta.topk_length_kv_full, expected))
+
 
 # -------------------------------------------------------------------------
 # 3. _attn_fp8_swa_via_concat new-K scatter math
