@@ -152,10 +152,6 @@ protected:
     // RTP_LLM_STREAM_ASYNC=1 is exported at server start.
     bool useStreamAsync() const;
 
-    // Device-state feature gates. Defaults stay off; each consumer keeps its
-    // own runtime guard before taking an async path.
-    bool useAsyncDeviceState() const;
-
     bool useAsyncPrepare() const;
 
     // Opt-in gate to skip the broad sync at decodeStep start.

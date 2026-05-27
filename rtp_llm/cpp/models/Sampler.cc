@@ -11,7 +11,7 @@ using namespace std;
 
 namespace rtp_llm {
 
-Sampler::Sampler(const SamplerInitParams& params) {}
+Sampler::Sampler(const SamplerInitParams& params): copy_stream_(cuda_graph::graphGetStreamFromPool(false)) {}
 
 SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
@@ -43,11 +43,20 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
         torch::empty({(int64_t)inputs.batch_size}, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA));
     auto all_beam_indices =
         has_num_beams ? torch::empty({(int64_t)inputs.batch_size_out}, torch::kInt32) : torch::Tensor();
-    // Move token_ids to CUDA once so sampleGreedy writes GPU->GPU (no blocking D2H sync).
-    // Production sampler inputs are allocated as pinned host tensors by NormalSamplerInputGatherer,
-    // so non_blocking H2D is safe on ROCm and preserves the async sampling path.
-    // Callers that need CPU access should call .cpu() explicitly.
-    auto inputs_token_ids_cuda = inputs.token_ids.to(torch::kCUDA, true);
+
+    torch::Tensor inputs_token_ids_cuda;
+    {
+        auto main_stream     = cuda_graph::graphGetCurrentStream();
+        auto copy_done_event = cuda_graph::makeGraphEvent();
+        {
+            cuda_graph::GraphStreamGuard guard(copy_stream_);
+            inputs_token_ids_cuda = inputs.token_ids.to(torch::kCUDA, /*non_blocking=*/true);
+            copy_done_event.record(copy_stream_);
+        }
+        copy_done_event.block(main_stream);
+        inputs_token_ids_cuda.record_stream(main_stream);
+    }
+
     auto all_token_ids_out     = variable_num_beams ?
                                      torch::empty({(int64_t)inputs.batch_size_out, (int64_t)max_seq_len},
                                               torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA)) :
