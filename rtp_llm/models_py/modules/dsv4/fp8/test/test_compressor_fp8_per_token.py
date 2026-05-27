@@ -131,6 +131,7 @@ def _bind_pools(
         state_block_table=state_block_table,
         state_eb=state_eb,
         state_tokens_per_block=state_eb,
+        kv_tokens_per_block=kv_eb * compress_ratio,
     )
     state_pool_3d = state_view_2d.view(state_total_blocks, state_eb, hidden)
     return state_pool_3d, kv_pool_3d, state_block_table
@@ -559,7 +560,7 @@ def test_state_pool_clear_pool_context() -> None:
     )
     cmp.clear_pool_context()
     assert cmp._state_pool_3d is None
-    assert cmp._kv_pool_3d is None
+    assert cmp._kv_pool_view is None
     # Forward returns None even without pool bound (warmup gate).
     x = torch.randn(1, 4, 64, dtype=torch.bfloat16, device=DEVICE)
     out = cmp.forward(x, 0)

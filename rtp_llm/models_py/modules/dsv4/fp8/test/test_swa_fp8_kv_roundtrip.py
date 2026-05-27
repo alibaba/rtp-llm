@@ -32,6 +32,7 @@ import torch
 
 from rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton import (
     dequantize_and_gather_k_cache,
+    dequantize_and_gather_k_cache_slots,
     dequantize_packed_k_cache_flat,
     gather_k_cache_packed,
 )
@@ -93,8 +94,7 @@ class SwaFp8KvRoundtripTest(unittest.TestCase):
         k_cache = self._alloc_cache(num_blocks, block_size)
         # Production block id 0 is invalid; valid physical blocks are positive.
         slot_mapping = (
-            torch.arange(num_tokens, dtype=torch.int64, device=self.device)
-            + block_size
+            torch.arange(num_tokens, dtype=torch.int64, device=self.device) + block_size
         )
         quantize_and_insert_k_cache(compressed_kv, k_cache, slot_mapping)
 
@@ -365,6 +365,71 @@ class SwaFp8KvRoundtripTest(unittest.TestCase):
         recovered = out[0, :num_tokens]
         self._assert_nope_within_ue8m0_bound(compressed_kv, recovered)
         self._assert_rope_exact(compressed_kv, recovered)
+
+    def test_flat_slot_gather_supports_physical_rows_and_swa_ring(self):
+        """Flat-slot SWA read handles physical block-table rows with a small ring.
+
+        New DSV4 layout: block_table rows cover 16K raw tokens, while the SWA
+        pool block only has ``128 + step`` entries. The read path must consume
+        already-translated flat slots instead of deriving ``pos // ring_entries``.
+        """
+        ring_entries = 132
+        tokens_per_block = 16384
+        block_table = torch.tensor(
+            [[1, 2], [3, 4]], dtype=torch.int32, device=self.device
+        )
+        seq_lens = torch.tensor(
+            [tokens_per_block, tokens_per_block + 12],
+            dtype=torch.int32,
+            device=self.device,
+        )
+        gather_lens = torch.tensor([128, 130], dtype=torch.int32, device=self.device)
+        max_gather = int(gather_lens.max().item())
+
+        step = torch.arange(max_gather, dtype=torch.long, device=self.device)
+        seq_l = seq_lens.to(torch.long)
+        gather_l = gather_lens.to(torch.long)
+        abs_pos = (seq_l - gather_l).unsqueeze(1) + step.unsqueeze(0)
+        valid = step.unsqueeze(0) < gather_l.unsqueeze(1)
+        block_in_seq = abs_pos // tokens_per_block
+        in_block = abs_pos % ring_entries
+        req = torch.arange(2, dtype=torch.long, device=self.device).unsqueeze(1)
+        block_id = block_table.to(torch.long)[req, block_in_seq]
+        slot_mapping = torch.where(
+            valid,
+            block_id * ring_entries + in_block,
+            torch.full_like(in_block, -1),
+        )
+        # Exercise in-window -1 semantics, not only padded rows.
+        slot_mapping[0, 5] = -1
+
+        compressed_kv = torch.randn(
+            2 * max_gather, HEAD_DIM, dtype=torch.bfloat16, device=self.device
+        )
+        k_cache = self._alloc_cache(5, ring_entries)
+        quantize_and_insert_k_cache(compressed_kv, k_cache, slot_mapping.reshape(-1))
+
+        out = torch.full(
+            (2, max_gather, HEAD_DIM),
+            -3,
+            dtype=torch.bfloat16,
+            device=self.device,
+        )
+        dequantize_and_gather_k_cache_slots(
+            out=out,
+            k_cache=k_cache,
+            slot_mapping=slot_mapping,
+            gather_lens=gather_lens,
+            offset=0,
+        )
+
+        valid = valid & (slot_mapping >= 0)
+        recovered = out.reshape(-1, HEAD_DIM)[valid.reshape(-1)]
+        expected = compressed_kv[valid.reshape(-1)]
+        self._assert_nope_within_ue8m0_bound(expected, recovered)
+        self._assert_rope_exact(expected, recovered)
+        self.assertTrue(torch.all(out[0, 5] == 0))
+        self.assertTrue(torch.all(out[0, 128:] == -3))
 
 
 if __name__ == "__main__":

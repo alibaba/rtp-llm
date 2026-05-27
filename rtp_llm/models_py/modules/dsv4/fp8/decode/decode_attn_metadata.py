@@ -127,9 +127,7 @@ class DSv4DecodeAttnMetadataFP8:
 
     # ------------------------------------------------------------------
     # Paged-decode metadata (paged BlockPool read/write).
-    # All optional — when empty, decode falls back to the legacy
-    # register_buffer path. Populated by the model + impl once the
-    # framework block tables are wired.
+    # Populated by the model + impl once the framework block tables are wired.
     # ------------------------------------------------------------------
 
     # Per-attn_type framework block_table: [max_B, max_blocks_per_req] int32.
@@ -139,10 +137,16 @@ class DSv4DecodeAttnMetadataFP8:
     # model actually uses are present.
     pool_block_tables: Dict[int, torch.Tensor] = field(default_factory=dict)
 
+    # Per-attn_type raw-token coverage for one block_table row. For the
+    # seq=16384/kernel=128 layout, FULL paged pools carry 128 here while
+    # SWA_KV carries 16384. Compressed writers convert this to their
+    # compressed-index domain by dividing by the compression ratio.
+    paged_pool_tokens_per_block: Dict[int, int] = field(default_factory=dict)
+
     # Per-attn_type new-token write slot mapping: [max_T_total] int64.
-    # ``slot[t] = block_table[req(t), abs_pos(t)//E] * E + abs_pos(t)%E``
-    # where ``E`` is the pool's entries_per_block; ``-1`` = skip
-    # (boundary-only writers like CSA-K / HCA-K / INDEXER-K).
+    # ``slot[t] = block_id * entries_per_block + in_block``. Block-table row
+    # tokens and in-block ring entries may differ for SWA_KV; compressed
+    # writers map in the compressed-index domain. ``-1`` = skip.
     pool_write_slot_mappings: Dict[int, torch.Tensor] = field(default_factory=dict)
 
     # Per-attn_type compressor state-pool slot mapping: [max_T_total] int64.
@@ -260,6 +264,84 @@ def get_or_build_sched_meta(
     return sched_meta
 
 
+def _pool_compress_ratio(attn_type: int) -> int:
+    from rtp_llm.models_py.modules.dsv4.attn_type import CSA_KV, HCA_KV, INDEXER_KV
+
+    if int(attn_type) in (int(CSA_KV), int(INDEXER_KV)):
+        return 4
+    if int(attn_type) == int(HCA_KV):
+        return 128
+    return 1
+
+
+def _parse_paged_pool_specs(
+    paged_pool_specs: Optional[Dict[int, Tuple[int, int, int]]],
+) -> Tuple[Dict[int, int], Dict[int, int], Dict[int, int]]:
+    """Parse ``attn_type -> (entries, raw_tokens_per_block, max_blocks)``."""
+    entries_by_pool: Dict[int, int] = {}
+    tokens_by_pool: Dict[int, int] = {}
+    max_blocks_by_pool: Dict[int, int] = {}
+    if not paged_pool_specs:
+        return entries_by_pool, tokens_by_pool, max_blocks_by_pool
+
+    for attn_type, spec in paged_pool_specs.items():
+        values = tuple(int(v) for v in spec)
+        if len(values) != 3:
+            raise ValueError(
+                "paged_pool_specs values must be "
+                "(entries_per_block, tokens_per_block, max_blocks_per_req), "
+                f"got attn_type={attn_type}, spec={spec!r}"
+            )
+        entries_per_block, tokens_per_block, max_blocks = values
+        if entries_per_block <= 0 or tokens_per_block <= 0 or max_blocks <= 0:
+            raise ValueError(
+                "paged_pool_specs values must be positive, "
+                f"got attn_type={attn_type}, spec={spec!r}"
+            )
+        entries_by_pool[int(attn_type)] = entries_per_block
+        tokens_by_pool[int(attn_type)] = tokens_per_block
+        max_blocks_by_pool[int(attn_type)] = max_blocks
+    return entries_by_pool, tokens_by_pool, max_blocks_by_pool
+
+
+def _resolve_paged_pool_tokens_per_block(
+    entries_by_pool: Dict[int, int],
+    tokens_by_pool: Optional[Dict[int, int]],
+) -> Dict[int, int]:
+    resolved: Dict[int, int] = {}
+    if tokens_by_pool is None:
+        raise ValueError("paged_pool_tokens_per_block is required for paged pools")
+    for attn_type in entries_by_pool:
+        if attn_type not in tokens_by_pool:
+            raise ValueError(
+                "paged_pool_tokens_per_block missing attn_type=%s" % (attn_type,)
+            )
+        tokens_per_block = int(tokens_by_pool[attn_type])
+        if tokens_per_block <= 0:
+            raise ValueError(
+                "paged pool tokens_per_block must be positive, "
+                f"got attn_type={attn_type}, tokens_per_block={tokens_per_block}"
+            )
+        resolved[int(attn_type)] = tokens_per_block
+    return resolved
+
+
+def _compressed_domain_tokens_per_block(
+    attn_type: int,
+    raw_tokens_per_block: int,
+) -> int:
+    ratio = _pool_compress_ratio(attn_type)
+    if ratio <= 1:
+        return int(raw_tokens_per_block)
+    if int(raw_tokens_per_block) % ratio != 0:
+        raise ValueError(
+            "compressed pool raw tokens_per_block must be divisible by "
+            f"compress ratio, got attn_type={attn_type}, "
+            f"tokens_per_block={raw_tokens_per_block}, ratio={ratio}"
+        )
+    return int(raw_tokens_per_block) // ratio
+
+
 def _compute_state_pool_slot_mapping(
     block_table: torch.Tensor,
     positions: torch.Tensor,
@@ -273,8 +355,8 @@ def _compute_state_pool_slot_mapping(
     ``(pos // tokens_per_block) % max_blocks``.  Block id <= 0 is the
     unallocated sentinel and maps to -1.
 
-    ``tokens_per_block``: kernel block size in tokens for block_table
-    indexing (DSV4 = 256). The ring in-block offset always uses
+    ``tokens_per_block``: physical block size in tokens for block_table
+    indexing. The ring in-block offset always uses
     ``entries_per_block`` (= R).
     """
     if positions.numel() == 0:
@@ -295,7 +377,6 @@ def _update_compressor_state_slot_mappings(
     meta: "DSv4DecodeAttnMetadataFP8",
     bs: int,
     paged_pool_entries_per_block: Dict[int, int],
-    state_tokens_per_block: int,
 ) -> None:
     if not meta.compressor_state_slot_mappings:
         return
@@ -308,13 +389,14 @@ def _update_compressor_state_slot_mappings(
     for at, out in meta.compressor_state_slot_mappings.items():
         if at not in meta.pool_block_tables:
             continue
-        entries_per_block = paged_pool_entries_per_block.get(at, 1)
+        entries_per_block = paged_pool_entries_per_block[at]
+        tokens_per_block = meta.paged_pool_tokens_per_block[at]
         mapped = _compute_state_pool_slot_mapping(
             meta.pool_block_tables[at][:bs],
             positions,
             req_idx,
             entries_per_block,
-            tokens_per_block=state_tokens_per_block,
+            tokens_per_block=tokens_per_block,
         )
         out[:T].copy_(mapped)
 
@@ -567,7 +649,7 @@ def allocate_decode_metadata_fp8(
     compress_ratios: List[int],
     index_topk: int,
     device: torch.device,
-    paged_pool_specs: Optional[Dict[int, Tuple[int, int]]] = None,
+    paged_pool_specs: Optional[Dict[int, Tuple[int, int, int]]] = None,
 ) -> "DSv4DecodeAttnMetadataFP8":
     """Pre-allocate a ``DSv4DecodeAttnMetadataFP8`` sized for ``max_batch_size``.
 
@@ -633,13 +715,17 @@ def allocate_decode_metadata_fp8(
         )
 
     # Phase 2: paged pool block_table + write slot mapping buffers.
-    # paged_pool_specs maps attn_type → (entries_per_block, max_blocks_per_req).
+    # paged_pool_specs maps:
+    #   attn_type → (entries_per_block, tokens_per_block, max_blocks_per_req)
     # We never reallocate after construction, so the captured graph reads
     # from these stable addresses. When a pool is absent on a layer, the
     # corresponding entries are simply unused.
     pool_block_tables: Dict[int, torch.Tensor] = {}
     pool_write_slot_mappings: Dict[int, torch.Tensor] = {}
     compressor_state_slot_mappings: Dict[int, torch.Tensor] = {}
+    paged_entries_from_specs, paged_tokens_from_specs, paged_max_blocks = (
+        _parse_paged_pool_specs(paged_pool_specs)
+    )
     if paged_pool_specs:
         from rtp_llm.models_py.modules.dsv4.attn_type import (
             CSA_STATE,
@@ -648,7 +734,7 @@ def allocate_decode_metadata_fp8(
             SWA_KV,
         )
 
-        for attn_type, (_, max_blocks) in paged_pool_specs.items():
+        for attn_type, max_blocks in paged_max_blocks.items():
             pool_block_tables[attn_type] = torch.zeros(
                 B, max_blocks, dtype=torch.int32, device=device
             )
@@ -664,7 +750,7 @@ def allocate_decode_metadata_fp8(
                 (T_total,), sentinel, dtype=torch.int64, device=device
             )
         for attn_type in (CSA_STATE, HCA_STATE, INDEXER_STATE):
-            if attn_type in paged_pool_specs:
+            if attn_type in paged_max_blocks:
                 compressor_state_slot_mappings[attn_type] = torch.full(
                     (T_total,),
                     -1,
@@ -680,7 +766,6 @@ def allocate_decode_metadata_fp8(
         dtype=torch.int32,
         device=device,
     )
-
     # Iter3.3: pre-allocated buffers for the shared-across-layers translate
     # outputs. Under CUDA graph capture the graph bakes in the buffer
     # address, so refill MUST .copy_() into the existing storage instead of
@@ -732,6 +817,7 @@ def allocate_decode_metadata_fp8(
         compressed_offset=window_size,
         is_cuda_graph=True,
         pool_block_tables=pool_block_tables,
+        paged_pool_tokens_per_block=paged_tokens_from_specs,
         pool_write_slot_mappings=pool_write_slot_mappings,
         compressor_state_slot_mappings=compressor_state_slot_mappings,
         swa_abs_idx=swa_abs_idx,
@@ -748,10 +834,10 @@ def update_decode_metadata_in_place_fp8(
     meta: "DSv4DecodeAttnMetadataFP8",
     attention_inputs: Any,
     *,
-    state_tokens_per_block: int,
     forbid_realloc: bool = False,
     paged_block_tables: Optional[Dict[int, torch.Tensor]] = None,
     paged_pool_entries_per_block: Optional[Dict[int, int]] = None,
+    paged_pool_tokens_per_block: Optional[Dict[int, int]] = None,
 ) -> None:
     """Recompute every metadata buffer IN PLACE for new attention inputs.
 
@@ -791,6 +877,9 @@ def update_decode_metadata_in_place_fp8(
     bs = int(start_pos.shape[0])
     position_ids_2d = _build_position_ids_2d(start_pos, q_len, device)
     position_ids_flat = position_ids_2d.reshape(-1).contiguous()
+    if paged_pool_entries_per_block:
+        if paged_pool_tokens_per_block is None:
+            raise ValueError("paged_pool_tokens_per_block is required for paged pools")
 
     # snapshot pointers for the realloc-forbidden mode
     if forbid_realloc:
@@ -841,7 +930,12 @@ def update_decode_metadata_in_place_fp8(
     # ONLY on their respective compression boundaries (sentinel ``-1``
     # otherwise — the write op honors that via ``mask_negative=True``).
     # ------------------------------------------------------------------
-    if paged_block_tables is not None and paged_pool_entries_per_block is not None:
+    if paged_block_tables and paged_pool_entries_per_block:
+        paged_pool_tokens_per_block = _resolve_paged_pool_tokens_per_block(
+            paged_pool_entries_per_block,
+            paged_pool_tokens_per_block or meta.paged_pool_tokens_per_block,
+        )
+        meta.paged_pool_tokens_per_block = dict(paged_pool_tokens_per_block)
         # Snapshot block_table content into the metadata's stable buffer
         # (forbid_realloc-friendly: just `.copy_` the prefix). Skip pools
         # without a metadata buffer (e.g. SWA-only layers don't carry CSA).
@@ -863,14 +957,17 @@ def update_decode_metadata_in_place_fp8(
         )
 
         fused_phase2b_pool_slot_mapping(
-            meta, start_pos, bs, paged_pool_entries_per_block
+            meta,
+            start_pos,
+            bs,
+            paged_pool_entries_per_block,
+            paged_pool_tokens_per_block,
         )
 
         _update_compressor_state_slot_mappings(
             meta,
             bs,
             paged_pool_entries_per_block,
-            state_tokens_per_block=state_tokens_per_block,
         )
 
     # Iter3.3: precompute translate_swa / translate_hca once per step.
@@ -879,7 +976,7 @@ def update_decode_metadata_in_place_fp8(
     # the attribute, so graph replays read from fixed addresses.
     # ``req_id_per_token`` is deterministic (``arange(B)``) so it was filled
     # at allocate time and stays stable.
-    if paged_block_tables is not None and paged_pool_entries_per_block is not None:
+    if paged_block_tables and paged_pool_entries_per_block:
         from rtp_llm.models_py.modules.dsv4.attn_type import HCA_KV, SWA_KV
         from rtp_llm.models_py.modules.dsv4.fp8.decode.paged_topk_translator import (
             translate_local_to_global_slots,
@@ -896,13 +993,15 @@ def update_decode_metadata_in_place_fp8(
             and SWA_KV in meta.pool_block_tables
             and meta.swa_abs_idx is not None
         ):
-            swa_eb = paged_pool_entries_per_block.get(SWA_KV, window_size)
+            swa_eb = paged_pool_entries_per_block[SWA_KV]
+            swa_tokens_per_block = paged_pool_tokens_per_block[SWA_KV]
             swa_local = meta.swa_abs_idx[:bs].reshape(T, window_size)
             swa_global_new = translate_local_to_global_slots(
                 req_id_bs,
                 meta.pool_block_tables[SWA_KV][:bs],
                 swa_local,
-                swa_eb,
+                entries_per_block=swa_eb,
+                tokens_per_block_for_block_table=swa_tokens_per_block,
             )
             meta.swa_global_slots[:T].copy_(swa_global_new)
 
@@ -914,7 +1013,10 @@ def update_decode_metadata_in_place_fp8(
             and HCA_KV in meta.pool_block_tables
             and 128 in meta.topk_total_by_ratio
         ):
-            hca_eb = paged_pool_entries_per_block.get(HCA_KV, 1)
+            hca_eb = paged_pool_entries_per_block[HCA_KV]
+            hca_tokens_per_block = _compressed_domain_tokens_per_block(
+                HCA_KV, paged_pool_tokens_per_block[HCA_KV]
+            )
             hca_tt = meta.topk_total_by_ratio[128]
             K_h = hca_tt.shape[-1] - window_size
             hca_cmp_local = hca_tt[:bs, :, window_size:].reshape(T, K_h).contiguous()
@@ -922,7 +1024,8 @@ def update_decode_metadata_in_place_fp8(
                 req_id_bs,
                 meta.pool_block_tables[HCA_KV][:bs],
                 hca_cmp_local,
-                hca_eb,
+                entries_per_block=hca_eb,
+                tokens_per_block_for_block_table=hca_tokens_per_block,
             )
             meta.hca_cmp_global_slots[:T].copy_(hca_global_new)
 
@@ -974,10 +1077,10 @@ def build_decode_metadata_fp8(
     index_topk: int,
     device: torch.device,
     *,
-    state_tokens_per_block: int,
     dtype: torch.dtype = torch.bfloat16,  # noqa: ARG001 — reserved for future
     paged_block_tables: Optional[Dict[int, torch.Tensor]] = None,
     paged_pool_entries_per_block: Optional[Dict[int, int]] = None,
+    paged_pool_tokens_per_block: Optional[Dict[int, int]] = None,
 ) -> DSv4DecodeAttnMetadataFP8:
     """Top-level builder. Call ONCE per decode forward step.
 
@@ -1104,6 +1207,7 @@ def build_decode_metadata_fp8(
     pool_block_tables: Dict[int, torch.Tensor] = {}
     pool_write_slot_mappings: Dict[int, torch.Tensor] = {}
     compressor_state_slot_mappings: Dict[int, torch.Tensor] = {}
+    paged_pool_tokens_per_block_resolved: Dict[int, int] = {}
     req_id_per_token: Optional[torch.Tensor] = None
     req_id_per_token_long: Optional[torch.Tensor] = None
     decode_seq_start_per_req: Optional[torch.Tensor] = None
@@ -1125,13 +1229,20 @@ def build_decode_metadata_fp8(
         # the framework's tensor).
         for at, bt in paged_block_tables.items():
             pool_block_tables[at] = bt[:B].contiguous().clone()
+        paged_pool_tokens_per_block_resolved = _resolve_paged_pool_tokens_per_block(
+            paged_pool_entries_per_block,
+            paged_pool_tokens_per_block,
+        )
 
         if SWA_KV in pool_block_tables:
-            E = paged_pool_entries_per_block.get(SWA_KV, window_size)
+            E = paged_pool_entries_per_block[SWA_KV]
+            swa_tokens_per_block = paged_pool_tokens_per_block_resolved[SWA_KV]
             pool_write_slot_mappings[SWA_KV] = compute_kv_pool_slot_mapping(
                 pool_block_tables[SWA_KV],
                 position_ids_flat,
-                E,
+                pool_entries_per_block=E,
+                pool_tokens_per_block=swa_tokens_per_block,
+                ring_entries=E,
             )
 
         for ratio_key, attn_type_writers in (
@@ -1151,11 +1262,16 @@ def build_decode_metadata_fp8(
             for at in attn_type_writers:
                 if at not in pool_block_tables:
                     continue
-                E = paged_pool_entries_per_block.get(at, 1)
+                E = paged_pool_entries_per_block[at]
+                tokens_per_block = _compressed_domain_tokens_per_block(
+                    at, paged_pool_tokens_per_block_resolved[at]
+                )
                 pool_write_slot_mappings[at] = compute_kv_pool_slot_mapping(
                     pool_block_tables[at],
                     cmp_idx_with_skip,
-                    E,
+                    pool_entries_per_block=E,
+                    pool_tokens_per_block=tokens_per_block,
+                    ring_entries=E,
                 )
 
     # Phase 2B-2a: SWA absolute-position window (paged read).
@@ -1172,7 +1288,6 @@ def build_decode_metadata_fp8(
         candidate,
         torch.full_like(candidate, -1),
     )
-
     if paged_block_tables and paged_pool_entries_per_block:
         from rtp_llm.models_py.modules.dsv4.attn_type import HCA_KV, SWA_KV
         from rtp_llm.models_py.modules.dsv4.fp8.decode.paged_topk_translator import (
@@ -1200,33 +1315,39 @@ def build_decode_metadata_fp8(
         for at in (CSA_STATE, HCA_STATE, INDEXER_STATE):
             if at not in pool_block_tables:
                 continue
-            entries_per_block = paged_pool_entries_per_block.get(at, 1)
+            entries_per_block = paged_pool_entries_per_block[at]
             compressor_state_slot_mappings[at] = _compute_state_pool_slot_mapping(
                 pool_block_tables[at],
                 position_ids_long,
                 req_id_per_token_long,
                 entries_per_block,
-                state_tokens_per_block,
+                paged_pool_tokens_per_block_resolved[at],
             )
 
         if SWA_KV in pool_block_tables:
-            swa_eb = paged_pool_entries_per_block.get(SWA_KV, window_size)
+            swa_eb = paged_pool_entries_per_block[SWA_KV]
+            swa_tokens_per_block = paged_pool_tokens_per_block_resolved[SWA_KV]
             swa_global_slots = translate_local_to_global_slots(
                 req_id_per_token,
                 pool_block_tables[SWA_KV],
                 swa_abs_idx.reshape(T_total, window_size),
-                swa_eb,
+                entries_per_block=swa_eb,
+                tokens_per_block_for_block_table=swa_tokens_per_block,
             )
 
         if HCA_KV in pool_block_tables and 128 in topk_total_by_ratio:
-            hca_eb = paged_pool_entries_per_block.get(HCA_KV, 1)
+            hca_eb = paged_pool_entries_per_block[HCA_KV]
+            hca_tokens_per_block = _compressed_domain_tokens_per_block(
+                HCA_KV, paged_pool_tokens_per_block_resolved[HCA_KV]
+            )
             hca_tt = topk_total_by_ratio[128]
             K_h = hca_tt.shape[-1] - window_size
             hca_cmp_global_slots = translate_local_to_global_slots(
                 req_id_per_token,
                 pool_block_tables[HCA_KV],
                 hca_tt[:, :, window_size:].reshape(T_total, K_h).contiguous(),
-                hca_eb,
+                entries_per_block=hca_eb,
+                tokens_per_block_for_block_table=hca_tokens_per_block,
             )
 
     return DSv4DecodeAttnMetadataFP8(
@@ -1251,6 +1372,7 @@ def build_decode_metadata_fp8(
         compressed_offset=window_size,
         is_cuda_graph=False,
         pool_block_tables=pool_block_tables,
+        paged_pool_tokens_per_block=paged_pool_tokens_per_block_resolved,
         pool_write_slot_mappings=pool_write_slot_mappings,
         compressor_state_slot_mappings=compressor_state_slot_mappings,
         swa_abs_idx=swa_abs_idx,

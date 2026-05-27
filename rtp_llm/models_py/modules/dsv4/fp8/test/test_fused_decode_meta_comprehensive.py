@@ -86,6 +86,7 @@ class MockMeta:
     # Phase 2b fields
     pool_block_tables: Dict[int, torch.Tensor] = field(default_factory=dict)
     pool_write_slot_mappings: Dict[int, torch.Tensor] = field(default_factory=dict)
+    paged_pool_tokens_per_block: Dict[int, int] = field(default_factory=dict)
 
 
 def _alloc_mock(max_bs: int, q_len: int, max_seq_len: int, device) -> MockMeta:
@@ -338,20 +339,32 @@ def ref_update_pure(meta: MockMeta, start_pos: torch.Tensor) -> None:
 
 
 def ref_phase2b(
-    meta: MockMeta, start_pos: torch.Tensor, bs: int, entries_per_block: Dict[int, int]
+    meta: MockMeta,
+    start_pos: torch.Tensor,
+    bs: int,
+    entries_per_block: Dict[int, int],
+    tokens_per_block: Dict[int, int],
 ) -> None:
     """Reference for fused_phase2b_pool_slot_mapping."""
     SWA_KV, CSA_KV, HCA_KV, INDEXER_KV = 7, 1, 2, 3
     q_len = meta.q_len_per_req
     device = start_pos.device
 
+    def _raw_tokens(at: int, E: int, ratio: int) -> int:
+        del E, ratio
+        return int(tokens_per_block[at])
+
+    def _cmp_tokens(raw_tokens: int, ratio: int) -> int:
+        assert raw_tokens % ratio == 0
+        return raw_tokens // ratio
+
     offs = torch.arange(q_len, device=device, dtype=torch.int32)
     position_ids_2d = start_pos[:bs].unsqueeze(1) + offs.unsqueeze(0)
     abs_pos_flat = position_ids_2d.reshape(-1)
     abs_pos_plus_1 = position_ids_2d + 1
 
-    def _slot_mapping(bt, abs_pos_1d, E):
-        block_in_seq = abs_pos_1d // E
+    def _slot_mapping(bt, abs_pos_1d, E, row_tokens):
+        block_in_seq = abs_pos_1d // row_tokens
         in_block = abs_pos_1d % E
         max_blocks = bt.shape[1]
         safe_bis = block_in_seq.clamp(0, max_blocks - 1)
@@ -369,7 +382,12 @@ def ref_phase2b(
     # SWA
     E_swa = entries_per_block[SWA_KV]
     meta.pool_write_slot_mappings[SWA_KV][: bs * q_len].copy_(
-        _slot_mapping(meta.pool_block_tables[SWA_KV][:bs], abs_pos_flat, E_swa)
+        _slot_mapping(
+            meta.pool_block_tables[SWA_KV][:bs],
+            abs_pos_flat,
+            E_swa,
+            _raw_tokens(SWA_KV, E_swa, 1),
+        )
     )
 
     # CSA + INDEXER (ratio=4)
@@ -381,11 +399,12 @@ def ref_phase2b(
     for at in (CSA_KV, INDEXER_KV):
         E = entries_per_block[at]
         bt = meta.pool_block_tables[at][:bs]
+        row_tokens = _cmp_tokens(_raw_tokens(at, E, 4), 4)
         is_skip = cmp_4_with_skip < 0
         safe_idx = torch.where(
             is_skip, torch.zeros_like(cmp_4_with_skip), cmp_4_with_skip
         )
-        block_in_seq = safe_idx // E
+        block_in_seq = safe_idx // row_tokens
         in_block = safe_idx % E
         max_blocks = bt.shape[1]
         safe_bis = block_in_seq.clamp(0, max_blocks - 1)
@@ -410,11 +429,12 @@ def ref_phase2b(
     ).reshape(-1)
     E_hca = entries_per_block[HCA_KV]
     bt_hca = meta.pool_block_tables[HCA_KV][:bs]
+    hca_row_tokens = _cmp_tokens(_raw_tokens(HCA_KV, E_hca, 128), 128)
     is_skip = cmp_128_with_skip < 0
     safe_idx = torch.where(
         is_skip, torch.zeros_like(cmp_128_with_skip), cmp_128_with_skip
     )
-    block_in_seq = safe_idx // E_hca
+    block_in_seq = safe_idx // hca_row_tokens
     in_block = safe_idx % E_hca
     max_blocks = bt_hca.shape[1]
     safe_bis = block_in_seq.clamp(0, max_blocks - 1)
@@ -585,9 +605,7 @@ def run_correctness_tests():
                 max_seq_len = max(seqlen + q_len + 1, 256)
                 max_seq_len = ((max_seq_len + 127) // 128) * 128
                 sp_val = min(seqlen, max_seq_len - q_len - 1)
-                start_pos = torch.full(
-                    (bs,), sp_val, dtype=torch.int32, device=device
-                )
+                start_pos = torch.full((bs,), sp_val, dtype=torch.int32, device=device)
 
                 ref_m = _alloc_mock(bs, q_len, max_seq_len, device)
                 fused_m = _alloc_mock(bs, q_len, max_seq_len, device)
@@ -669,7 +687,20 @@ def run_correctness_tests():
     # Cover small seqlens (1-128) to trip HCA dense width == 0 for {128}
     # plus mid + large for general correctness.
     subset_seqlen_list = [
-        1, 2, 4, 8, 16, 64, 100, 127, 128, 129, 1024, 4096, 65535, 131072,
+        1,
+        2,
+        4,
+        8,
+        16,
+        64,
+        100,
+        127,
+        128,
+        129,
+        1024,
+        4096,
+        65535,
+        131072,
     ]
     for ratios in ((), (4,), (128,)):
         label = f"ratios={ratios or '()'}"
@@ -699,9 +730,7 @@ def run_correctness_tests():
                     err = _compare_pure(ref_m, fused_m, bs, q_len)
                     total_s += 1
                     if err:
-                        print(
-                            f"  FAIL {label} bs={bs} q={q_len} seq={seqlen}: {err}"
-                        )
+                        print(f"  FAIL {label} bs={bs} q={q_len} seq={seqlen}: {err}")
                         failed_s += 1
                         if failed_s >= 10:
                             break
@@ -727,15 +756,15 @@ def run_correctness_tests():
     failed_bnd = 0
     for bs, q_len, max_seq_len_bnd, sp_val in [
         (1, 1, 64, 5),
-        (4, 2, 64, 60),    # abs_pos hits {60..61}, still < 128
-        (8, 4, 96, 90),    # abs_pos {90..93}, still < 128
-        (32, 1, 64, 0),    # smallest viable max_seq_len
+        (4, 2, 64, 60),  # abs_pos hits {60..61}, still < 128
+        (8, 4, 96, 90),  # abs_pos {90..93}, still < 128
+        (32, 1, 64, 0),  # smallest viable max_seq_len
     ]:
         start_pos = torch.full((bs,), sp_val, dtype=torch.int32, device=device)
         m = _alloc_mock_subset(bs, q_len, max_seq_len_bnd, device, ratios=(128,))
-        assert m.topk_total_by_ratio[128].shape[-1] == _WINDOW, (
-            "Test setup invariant: HCA dense half must be empty for this case"
-        )
+        assert (
+            m.topk_total_by_ratio[128].shape[-1] == _WINDOW
+        ), "Test setup invariant: HCA dense half must be empty for this case"
         fused_update_decode_meta_pure(m, start_pos, max_seq_len_bnd)
         torch.cuda.synchronize()
 
@@ -755,7 +784,9 @@ def run_correctness_tests():
             )
             failed_bnd += 1
 
-    print(f"  Result: {passed_bnd}/{passed_bnd + failed_bnd} passed, {failed_bnd} failed")
+    print(
+        f"  Result: {passed_bnd}/{passed_bnd + failed_bnd} passed, {failed_bnd} failed"
+    )
 
     # Phase 2b tests (q_len=1 and q_len>1)
     passed2 = 0
@@ -763,6 +794,7 @@ def run_correctness_tests():
     total2 = 0
     SWA_KV, CSA_KV, HCA_KV, INDEXER_KV = 7, 1, 2, 3
     entries = {SWA_KV: 256, CSA_KV: 64, INDEXER_KV: 64, HCA_KV: 2}
+    tokens = {SWA_KV: 256, CSA_KV: 256, INDEXER_KV: 256, HCA_KV: 256}
 
     all_qlen_list = [1, 2, 4, 6]
     p2b_bs_list = [1, 2, 4, 16, 32, 64, 128]
@@ -775,23 +807,19 @@ def run_correctness_tests():
                 max_seq_len = max(seqlen + q_len + 1, 256)
                 max_seq_len = ((max_seq_len + 127) // 128) * 128
                 sp_val = min(seqlen, max_seq_len - q_len - 1)
-                start_pos = torch.full(
-                    (bs,), sp_val, dtype=torch.int32, device=device
-                )
+                start_pos = torch.full((bs,), sp_val, dtype=torch.int32, device=device)
 
                 ref_m = _alloc_mock(bs, q_len, max_seq_len, device)
                 fused_m = _alloc_mock(bs, q_len, max_seq_len, device)
                 _alloc_phase2b(ref_m, bs, device, seqlen=sp_val + q_len)
                 for at in (SWA_KV, CSA_KV, HCA_KV, INDEXER_KV):
-                    fused_m.pool_block_tables[at] = ref_m.pool_block_tables[
-                        at
-                    ].clone()
+                    fused_m.pool_block_tables[at] = ref_m.pool_block_tables[at].clone()
                     fused_m.pool_write_slot_mappings[at] = torch.full_like(
                         ref_m.pool_write_slot_mappings[at], -1
                     )
 
-                ref_phase2b(ref_m, start_pos, bs, entries)
-                fused_phase2b_pool_slot_mapping(fused_m, start_pos, bs, entries)
+                ref_phase2b(ref_m, start_pos, bs, entries, tokens)
+                fused_phase2b_pool_slot_mapping(fused_m, start_pos, bs, entries, tokens)
 
                 err = _compare_phase2b(ref_m, fused_m, bs, q_len)
                 total2 += 1
@@ -808,7 +836,52 @@ def run_correctness_tests():
             break
 
     print(f"  Result: {passed2}/{total2} passed, {failed2} failed")
-    return failed + failed_mq + failed_h + failed_s + failed_bnd + failed2
+
+    print("\nTesting fused_phase2b_pool_slot_mapping (seq=16384/kernel=128 split)...")
+    failed_split = 0
+    bs = 2
+    q_len = 3
+    max_seq_len = 32768
+    max_blocks = 130
+    start_pos = torch.tensor([0, 16382], dtype=torch.int32, device=device)
+    split_entries = {SWA_KV: 132, CSA_KV: 32, INDEXER_KV: 32, HCA_KV: 1}
+    split_tokens = {SWA_KV: 16384, CSA_KV: 128, INDEXER_KV: 128, HCA_KV: 128}
+
+    def _bt(base: int) -> torch.Tensor:
+        row0 = torch.arange(base, base + max_blocks, dtype=torch.int32, device=device)
+        row1 = torch.arange(
+            base + 1000, base + 1000 + max_blocks, dtype=torch.int32, device=device
+        )
+        return torch.stack([row0, row1], dim=0)
+
+    ref_split = _alloc_mock(bs, q_len, max_seq_len, device)
+    fused_split = _alloc_mock(bs, q_len, max_seq_len, device)
+    for at, base in ((SWA_KV, 11), (CSA_KV, 101), (INDEXER_KV, 301), (HCA_KV, 501)):
+        bt = _bt(base)
+        ref_split.pool_block_tables[at] = bt
+        fused_split.pool_block_tables[at] = bt.clone()
+        ref_split.pool_write_slot_mappings[at] = torch.full(
+            (bs * q_len,), -1, dtype=torch.int64, device=device
+        )
+        fused_split.pool_write_slot_mappings[at] = torch.full(
+            (bs * q_len,), -1, dtype=torch.int64, device=device
+        )
+    fused_split.paged_pool_tokens_per_block = split_tokens
+
+    ref_phase2b(ref_split, start_pos, bs, split_entries, split_tokens)
+    fused_phase2b_pool_slot_mapping(
+        fused_split, start_pos, bs, split_entries, split_tokens
+    )
+    err = _compare_phase2b(ref_split, fused_split, bs, q_len)
+    if err:
+        print(f"  FAIL split layout: {err}")
+        failed_split = 1
+    else:
+        print("  Result: 1/1 passed, 0 failed")
+
+    return (
+        failed + failed_mq + failed_h + failed_s + failed_bnd + failed2 + failed_split
+    )
 
 
 def _benchmark(fn, warmup=10, iters=100):
@@ -865,6 +938,7 @@ def run_benchmarks():
 
     SWA_KV, CSA_KV, HCA_KV, INDEXER_KV = 7, 1, 2, 3
     entries = {SWA_KV: 256, CSA_KV: 64, INDEXER_KV: 64, HCA_KV: 2}
+    tokens = {SWA_KV: 256, CSA_KV: 256, INDEXER_KV: 256, HCA_KV: 256}
 
     for bs, q_len, seqlen in configs:
         max_seq_len = ((seqlen + 127) // 128) * 128
@@ -880,9 +954,11 @@ def run_benchmarks():
                 ref_m.pool_write_slot_mappings[at], -1
             )
 
-        t_ref = _benchmark(lambda: ref_phase2b(ref_m, start_pos, bs, entries))
+        t_ref = _benchmark(lambda: ref_phase2b(ref_m, start_pos, bs, entries, tokens))
         t_fused = _benchmark(
-            lambda: fused_phase2b_pool_slot_mapping(fused_m, start_pos, bs, entries)
+            lambda: fused_phase2b_pool_slot_mapping(
+                fused_m, start_pos, bs, entries, tokens
+            )
         )
         speedup = t_ref / t_fused if t_fused > 0 else float("inf")
         print(

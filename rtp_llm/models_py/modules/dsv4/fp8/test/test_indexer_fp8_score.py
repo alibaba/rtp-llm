@@ -113,14 +113,15 @@ def _ref_indexer_score(Q_bf16, K_dequant_bf16, weights_fp32):
     return out
 
 
-# DeepGEMM ``get_paged_mqa_logits_metadata`` asserts ``block_kv == 64``
-# (or 32 on SM100 only — see csrc/apis/attention.hpp:216). Production
-# config uses 64 (KV cache block_size); pinning here.
-@pytest.mark.parametrize("block_size", [64])
+# DeepGEMM ``get_paged_mqa_logits_metadata`` accepts ``block_kv == 64``
+# on SM90/SM100 and ``block_kv == 32`` on SM100 only.
+@pytest.mark.parametrize("block_size", [32, 64])
 def test_fp8_paged_indexer_score_via_deepgemm(block_size):
     """rtp-llm 132B pool → DeepGEMM ``fp8_paged_mqa_logits`` ≈ bf16 reference."""
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
+    if block_size == 32 and torch.cuda.get_device_capability()[0] != 10:
+        pytest.skip("DeepGEMM block_kv=32 requires SM100")
     if not has_fp8_paged_mqa_logits():
         pytest.skip("deep_gemm.fp8_paged_mqa_logits unavailable")
 
@@ -217,5 +218,7 @@ def test_fp8_paged_indexer_score_via_deepgemm(block_size):
 
 
 if __name__ == "__main__":
+    if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] == 10:
+        test_fp8_paged_indexer_score_via_deepgemm(32)
     test_fp8_paged_indexer_score_via_deepgemm(64)
     print("OK")

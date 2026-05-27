@@ -100,12 +100,14 @@ def translate_local_to_global_slots(
     req_id_per_token: torch.Tensor,  # [T] int32
     block_table: torch.Tensor,  # [B, max_blocks_per_req] int32
     local_idx: torch.Tensor,  # [T, K] int32, -1 sentinel preserved
-    block_size: int,  # entries_per_block of the target pool
+    entries_per_block: int,
+    tokens_per_block_for_block_table: int,
 ) -> torch.Tensor:
     """[T, K] int32 global pool slot ids; -1 propagates as -1.
 
-    ``block_size`` is the *pool's* ``entries_per_block`` (e.g. 256 for
-    SWA_KV, 64 for CSA_KV / INDEXER_KV, 2 for HCA_KV).
+    ``entries_per_block`` is the pool's flat slot multiplier.
+    ``tokens_per_block_for_block_table`` is the raw-token coverage of one
+    block-table row.
 
     The Triton kernel asserts ``K % BLOCK_N == 0`` (default 128). For
     ``K`` that doesn't naturally divide 128 (e.g. SWA win=128 →
@@ -120,7 +122,8 @@ def translate_local_to_global_slots(
         req_id_per_token,
         block_table,
         local_idx.contiguous(),
-        BLOCK_SIZE=block_size,
+        ENTRIES_PER_BLOCK=int(entries_per_block),
+        TOKENS_PER_BLOCK_FOR_BLOCK_TABLE=int(tokens_per_block_for_block_table),
         NUM_TOPK_TOKENS=K,
         BLOCK_N=block_n,
     )

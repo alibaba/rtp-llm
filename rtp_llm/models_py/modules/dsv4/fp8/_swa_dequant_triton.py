@@ -57,7 +57,6 @@ def _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS: tl.constexpr) -> None:
         )
 
 
-
 @triton.jit(do_not_specialize=["offset", "max_blocks_per_seq"])
 def _dequantize_and_gather_k_kernel(
     out_ptr,
@@ -206,10 +205,7 @@ def dequantize_and_gather_k_cache(
 
     # Caller invariant — int32 contig block tables; negative physical ids are
     # rejected before launch.
-    assert (
-        block_table.dtype == torch.int32
-        and block_table.is_contiguous()
-    ), (
+    assert block_table.dtype == torch.int32 and block_table.is_contiguous(), (
         "block_table must be int32 and contiguous; "
         f"got dtype={block_table.dtype} contig={block_table.is_contiguous()} "
         f"dev={block_table.device} (k_cache dev={k_cache.device})"
@@ -256,6 +252,185 @@ def dequantize_and_gather_k_cache(
         block_stride=k_cache.stride(0),
         num_cache_blocks=int(k_cache.shape[0]),
         output_dim=HEAD_DIM,
+        fp8_max=FP8_MAX,
+        n_quant_blocks=NOPE_TILES,
+        TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
+    )
+
+
+@triton.jit(do_not_specialize=["offset", "max_gather_len"])
+def _dequantize_and_gather_k_slots_kernel(
+    out_ptr,
+    out_stride0,
+    out_stride1,
+    k_cache_ptr,
+    slot_mapping_ptr,
+    slot_mapping_stride0,
+    offset,
+    gather_lens_ptr,
+    max_gather_len,
+    fp8_dim: tl.constexpr,
+    bf16_dim: tl.constexpr,
+    scale_dim: tl.constexpr,
+    quant_block: tl.constexpr,
+    cache_block_size: tl.constexpr,
+    token_data_size: tl.constexpr,
+    block_stride: tl.constexpr,
+    num_cache_blocks: tl.constexpr,
+    fp8_max: tl.constexpr,
+    n_quant_blocks: tl.constexpr,
+    TRAP_INVALID_KV_ACCESS: tl.constexpr,
+):
+    """Gather/dequant using pre-translated flat global slot ids.
+
+    ``slot < 0`` is the sentinel used by writers and metadata builders; it
+    zero-fills the output row and never touches the cache pointer.
+    """
+    batch_idx = tl.program_id(0)
+    worker_id = tl.program_id(1)
+    num_workers = tl.num_programs(1)
+
+    if gather_lens_ptr is not None:  # noqa: SIM108
+        gather_len = tl.load(gather_lens_ptr + batch_idx)
+    else:
+        gather_len = max_gather_len
+
+    slot_row_ptr = slot_mapping_ptr + batch_idx.to(tl.int64) * slot_mapping_stride0
+
+    for i in range(worker_id, gather_len, num_workers):
+        slot = tl.load(slot_row_ptr + i).to(tl.int64)
+        output_row = offset.to(tl.int64) + i.to(tl.int64)
+        output_row_ptr = (
+            out_ptr
+            + batch_idx.to(tl.int64) * out_stride0.to(tl.int64)
+            + output_row * out_stride1.to(tl.int64)
+        )
+
+        if slot < 0:
+            for j in tl.static_range((fp8_dim + bf16_dim) // 16):
+                chunk_offsets = j * 16 + tl.arange(0, 16)
+                zero_vec = tl.zeros((16,), dtype=tl.bfloat16)
+                tl.store(output_row_ptr + chunk_offsets, zero_vec)
+        else:
+            physical_block_idx = slot // cache_block_size
+            pos_in_block = slot % cache_block_size
+
+            if physical_block_idx >= num_cache_blocks:
+                _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
+
+            cache_block_ptr = (
+                k_cache_ptr + physical_block_idx.to(tl.int64) * block_stride
+            )
+            token_data_ptr = cache_block_ptr + pos_in_block * token_data_size
+            token_scale_ptr = (
+                cache_block_ptr
+                + cache_block_size * token_data_size
+                + pos_in_block * scale_dim
+            )
+            token_fp8_ptr = token_data_ptr
+            token_bf16_ptr = token_data_ptr + fp8_dim
+
+            for qblock_idx in tl.static_range(n_quant_blocks):
+                qblock_start = qblock_idx * quant_block
+                if qblock_start < fp8_dim:
+                    offsets = qblock_start + tl.arange(0, quant_block)
+                    mask = offsets < fp8_dim
+
+                    x_uint8 = tl.load(token_fp8_ptr + offsets, mask=mask, other=0)
+                    x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
+                    x_float = x_fp8.to(tl.float32)
+
+                    encoded_scale = tl.load(token_scale_ptr + qblock_idx)
+                    exponent = encoded_scale.to(tl.float32) - 127.0
+                    scale = tl.exp2(exponent)
+
+                    x_dequant = x_float * scale
+                    tl.store(
+                        output_row_ptr + offsets, x_dequant.to(tl.bfloat16), mask=mask
+                    )
+
+            bf16_output_offset = fp8_dim
+            bf16_cache_ptr = token_bf16_ptr.to(tl.pointer_type(tl.bfloat16))
+            for j in tl.static_range(bf16_dim // 16):
+                chunk_offsets = j * 16 + tl.arange(0, 16)
+                bf16_vals = tl.load(bf16_cache_ptr + chunk_offsets)
+                tl.store(output_row_ptr + bf16_output_offset + chunk_offsets, bf16_vals)
+
+
+def dequantize_and_gather_k_cache_slots(
+    out: torch.Tensor,
+    k_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    gather_lens: Optional[torch.Tensor],
+    offset: int,
+) -> None:
+    """Dequantize + gather FP8 K cache using flat global slot ids.
+
+    ``slot_mapping`` is request-major ``[B, max_gather_len]``. Entries with
+    ``-1`` zero-fill the corresponding output row and skip all cache reads.
+    This is the SWA prefill path for layouts where block-table row coverage
+    differs from the per-block ring entry count.
+    """
+    assert out.dim() == 3 and out.shape[-1] == HEAD_DIM and out.dtype == torch.bfloat16
+    assert (
+        k_cache.dim() == 3
+        and k_cache.shape[-1] == ENTRY_BYTES
+        and k_cache.dtype == torch.uint8
+    )
+    assert k_cache.stride(2) == 1 and k_cache.stride(1) == ENTRY_BYTES, (
+        "k_cache must be packed within each token (stride[1]=584, stride[2]=1); "
+        f"got stride={k_cache.stride()}"
+    )
+    assert (
+        slot_mapping.dim() == 2
+    ), f"slot_mapping must be [num_reqs, max_gather_len], got {slot_mapping.shape}"
+    assert int(slot_mapping.shape[0]) == int(out.shape[0]), (
+        f"slot_mapping batch ({slot_mapping.shape[0]}) must match out batch "
+        f"({out.shape[0]})"
+    )
+    if gather_lens is not None:
+        assert int(gather_lens.shape[0]) == int(slot_mapping.shape[0]), (
+            f"gather_lens batch ({gather_lens.shape[0]}) must match slot_mapping "
+            f"batch ({slot_mapping.shape[0]})"
+        )
+
+    max_gather_len = int(slot_mapping.shape[1])
+    if max_gather_len == 0 or int(slot_mapping.shape[0]) == 0:
+        return
+
+    slots_i64 = slot_mapping.to(device=k_cache.device, dtype=torch.int64).contiguous()
+    validate_slot_mapping(
+        "swa.dequantize_and_gather.slot_mapping",
+        slots_i64.reshape(-1),
+        block_size=int(k_cache.shape[1]),
+        num_blocks=int(k_cache.shape[0]),
+        negative_mode="skip_any",
+    )
+    gather_lens_i32 = (
+        None
+        if gather_lens is None
+        else gather_lens.to(device=k_cache.device, dtype=torch.int32).contiguous()
+    )
+
+    NUM_WORKERS = 128
+    _dequantize_and_gather_k_slots_kernel[(slots_i64.shape[0], NUM_WORKERS)](
+        out,
+        out.stride(0),
+        out.stride(1),
+        k_cache,
+        slots_i64,
+        slots_i64.stride(0),
+        offset,
+        gather_lens_i32,
+        max_gather_len,
+        fp8_dim=NOPE_DIM,
+        bf16_dim=ROPE_DIM,
+        scale_dim=SCALE_BYTES_PER_TOKEN,
+        quant_block=TILE_SIZE,
+        cache_block_size=int(k_cache.shape[1]),
+        token_data_size=TOKEN_DATA_SIZE,
+        block_stride=k_cache.stride(0),
+        num_cache_blocks=int(k_cache.shape[0]),
         fp8_max=FP8_MAX,
         n_quant_blocks=NOPE_TILES,
         TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),

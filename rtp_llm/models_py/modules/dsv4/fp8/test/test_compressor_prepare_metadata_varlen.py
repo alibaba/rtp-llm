@@ -61,7 +61,7 @@ class _StubCompressor:
         self._kv_eb = kv_eb
         self._kv_cache_sharded = False
         self._cp_ctx = None
-        self._kv_pool_3d = None  # disable the pool-row overflow guard
+        self._kv_pool_view = None  # disable the pool-row overflow guard
 
     # Bind the unbound methods so ``_StubCompressor`` quacks correctly.
     _compute_state_slot_mapping = CompressorFP8._compute_state_slot_mapping

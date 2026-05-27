@@ -518,7 +518,7 @@ def cp_all_gather_full_varlen(
     local_flat: torch.Tensor,
     cp_ctx: CPContext,
 ) -> torch.Tensor:
-    """**Varlen B>=1 path** (default ``DSV4_VARLEN_PREFILL=1``):
+    """**Varlen B>=1 path**:
     all-gather a flat ``[chunk_length, *F]`` rank-local tensor across the
     CP (== TP) group and strip padding → ``[seq_len_full, *F]`` in
     GLOBAL per-request-concat order. No leading B dim.
@@ -653,7 +653,7 @@ def combine_topk_swa_indices_cp_varlen(
     req_id_per_token: Optional[torch.Tensor] = None,
     prefix_lengths: Optional[torch.Tensor] = None,
 ) -> "tuple[torch.Tensor, torch.Tensor]":
-    """**Varlen B>=1 path** (default ``DSV4_VARLEN_PREFILL=1``):
+    """**Varlen B>=1 path**:
     multi-request-aware vectorized replacement for
     ``_swa_ops_triton.combine_topk_swa_indices`` under CP.
 
@@ -798,7 +798,7 @@ def combine_topk_swa_indices_cp_b1(
     M: int,
     N: int,
 ) -> "tuple[torch.Tensor, torch.Tensor]":
-    """**Legacy B==1 path** (used under ``DSV4_VARLEN_PREFILL=0``):
+    """B==1 scalar helper:
     vectorized replacement for ``_swa_ops_triton.combine_topk_swa_indices``.
 
     The Triton kernel computes ``pos = start_pos + token_idx_in_query``

@@ -62,6 +62,20 @@ py_test(
 )
 
 py_test(
+    name = "test_pool_slot_mapping_split",
+    srcs = ["test_pool_slot_mapping_split.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+)
+
+py_test(
+    name = "test_flash_mla_decode_kernel_layout",
+    srcs = ["test_flash_mla_decode_kernel_layout.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["H20"],
+    exec_properties = {"gpu": "H20"},
+)
+
+py_test(
     name = "test_compressor_cp_merged_gather",
     srcs = ["test_compressor_cp_merged_gather.py"],
     deps = _DSV4_FP8_TEST_DEPS,
