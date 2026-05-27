@@ -143,6 +143,9 @@ bool LinearKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_re
     if (need_alloc_blocks > 0) {
         allocated_blocks = block_pool_->malloc(need_alloc_blocks);
         if (allocated_blocks.size() != static_cast<size_t>(need_alloc_blocks)) {
+            if (!allocated_blocks.empty()) {
+                block_pool_->requestFree(allocated_blocks);
+            }
             return false;
         }
     }
