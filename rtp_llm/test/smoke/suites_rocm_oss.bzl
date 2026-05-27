@@ -100,6 +100,12 @@ def rocm_oss_suites():
                 smoke_args="--quantization FP8_PER_CHANNEL_COMPRESSED --use_asm_pa 1 --act_type BF16 --reserver_runtime_mem_mb 51200 --tp_size 2 --world_size 2 --ep_size 1",
                 gpu_type=["MI308X-ROCM7"],
             ),
+            smoke_test(
+                name="rocm_moe_qwen35_35b_tp2",
+                task_info="data/model/qwen3_next/q_r_next_fp8_tp2.json",
+                smoke_args="--quantization FP8_PER_CHANNEL_COMPRESSED --use_asm_pa 1 --act_type BF16 --seq_size_per_block 2048 --reserver_runtime_mem_mb 51200 --tp_size 2 --world_size 2 --ep_size 1",
+                gpu_type=["MI308X-ROCM7"],
+            ),
         ],
     )
 
