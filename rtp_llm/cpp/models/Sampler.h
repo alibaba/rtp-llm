@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/models_py/bindings/core/TensorHolder.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
+#include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 
 namespace rtp_llm {
 // Sampler would split logits into appropriate groups (mostly, based on beam size)
@@ -18,7 +19,8 @@ public:
 private:
     void preprocessLogits(const SamplerInputs& inputs);
 
-    TensorHolder buffer_holder_;
+    TensorHolder            buffer_holder_;
+    cuda_graph::GraphStream copy_stream_;
 };
 
 }  // namespace rtp_llm

@@ -1978,13 +1978,6 @@ bool MtpExecutor::useStreamAsync() const {
     return enabled;
 }
 
-bool MtpExecutor::useAsyncDeviceState() const {
-    static const bool enabled = []() {
-        return readEnvFlagOnce("RTP_LLM_MTP_ASYNC_DEVICE_STATE", "async-device-state", "enabled");
-    }();
-    return enabled;
-}
-
 bool MtpExecutor::useDropBroadSync() const {
     static const bool enabled = []() {
         return readEnvFlagOnce("RTP_LLM_DROP_BROAD_SYNC", "drop-broad-sync", "enabled");
