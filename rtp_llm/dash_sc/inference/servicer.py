@@ -23,16 +23,21 @@ from typing import Any, AsyncIterator, Callable, Iterator, Optional
 import torch
 
 from rtp_llm.dash_sc.codec import (
+    FINISH_REASON_ABORT,
     FINISH_REASON_LENGTH,
+    FINISH_REASON_STOP_ENGINE_PARAM,
+    FINISH_REASON_STOP_TIMEOUT,
     OtherParams,
     SamplingParams,
     _token_ids_list_from_generate_output,
+    build_finish_reason_done_response,
     build_parameter_error_response,
     build_stream_response_from_generate_outputs,
     iter_fake_model_stream_infer,
     parse_dash_sc_grpc_request,
     prepend_to_generated_ids_tensor,
 )
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.frontend.request_id_generator import generate_request_id
 from rtp_llm.metrics import AccMetrics, kmonitor
@@ -403,8 +408,13 @@ def _apply_request_overrides(
         if hasattr(generate_config, "thinking"):
             generate_config.thinking = True
     if other.timeout_ms is not None:
-        generate_config.timeout_ms = int(other.timeout_ms)
-        generate_config.ttft_timeout_ms = int(other.timeout_ms)
+        # Subtract a margin so the engine times out BEFORE the upstream gateway
+        # sends RST_STREAM. This ensures the timeout surfaces as a normal
+        # finish_reason=STOP_TIMEOUT response (200) rather than gRPC CANCELLED (5xx).
+        margin_ms = max(2000, min(5000, int(other.timeout_ms * 0.15)))
+        engine_timeout_ms = max(5000, int(other.timeout_ms) - margin_ms)
+        generate_config.timeout_ms = engine_timeout_ms
+        generate_config.ttft_timeout_ms = engine_timeout_ms
     if other.traffic_reject_priority is not None:
         generate_config.traffic_reject_priority = int(other.traffic_reject_priority)
     if other.reasoning_effort is not None:
@@ -1055,14 +1065,36 @@ async def iter_real_model_stream_infer(
                     # content will stream as content normally.
                     phase2_pending = []
                     phase2_seen_close = True
+    except FtRuntimeException as e:
+        if e.exception_type == ExceptionType.GENERATE_TIMEOUT:
+            logging.warning("[DashScGrpc] [%s] generate timeout: %s", tag, e)
+            yield build_finish_reason_done_response(
+                str(request.id), request.model_name, FINISH_REASON_STOP_TIMEOUT,
+            )
+        elif e.exception_type in (
+            ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+            ExceptionType.NO_PROMPT_ERROR,
+            ExceptionType.EMPTY_PROMPT_ERROR,
+            ExceptionType.INVALID_PARAMS,
+        ):
+            logging.warning("[DashScGrpc] [%s] parameter error: %s", tag, e)
+            yield build_finish_reason_done_response(
+                str(request.id), request.model_name, FINISH_REASON_STOP_ENGINE_PARAM,
+            )
+        elif e.exception_type == ExceptionType.CANCELLED_ERROR:
+            logging.info("[DashScGrpc] [%s] engine cancelled: %s", tag, e)
+            yield build_finish_reason_done_response(
+                str(request.id), request.model_name, FINISH_REASON_ABORT,
+            )
+        else:
+            logging.exception("[DashScGrpc] [%s] engine error: %s", tag, e)
+            yield predict_v2_pb2.ModelStreamInferResponse(
+                error_message=f"{type(e).__name__}: {e}"
+            )
     except Exception as e:
         logging.exception("[DashScGrpc] [%s] enqueue failed: %s", tag, e)
-        # Prefix with the exception class name so the access-log interceptor's
-        # ``_classify_error_message`` can map it to a bounded ``error_code``
-        # tag (e.g. ``BACKEND_RuntimeError``). Without the prefix every
-        # backend failure collapses into a single ``BACKEND_INTERNAL`` bucket
-        # on Grafana and operators can't tell OOM from concurrency-limit from
-        # shape-mismatch without reading individual log lines.
+        # Prefix with exception class name so access-log _classify_error_message
+        # maps it to a bounded error_code tag (e.g. BACKEND_RuntimeError).
         yield predict_v2_pb2.ModelStreamInferResponse(
             error_message=f"{type(e).__name__}: {e}"
         )
