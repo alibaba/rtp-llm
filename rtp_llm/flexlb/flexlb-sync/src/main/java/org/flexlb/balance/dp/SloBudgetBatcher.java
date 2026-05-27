@@ -33,8 +33,9 @@ import java.util.function.Consumer;
  *   2. head alone &gt; budget   → fail head (SLO_EXCEEDED), loop
  *   3. FIFO + bounded backward scan: pick head + any later request that fits
  *      both batchMaxTokens and the SLO budget
- *   4. len(batch) &gt; 1 OR queue.size &gt; dpMaxScanAhead → dispatch (PACKED/SCAN_EXHAUSTED)
- *      else → park until next arrival or effectiveDeadline
+ *   4. capacity full OR queue.size &gt; dpMaxScanAhead → dispatch (PACKED/SCAN_EXHAUSTED)
+ *      else → park until next arrival or effectiveDeadline, accumulating more requests;
+ *      when deadline expires the next iteration hits step 1 (DEADLINE_FORCE)
  * </pre>
  *
  * <h3>Invariants</h3>
@@ -225,16 +226,18 @@ public class SloBudgetBatcher {
             }
 
             // 4. decide: dispatch or park
+            boolean capacityFull = sumTok >= batchMaxTokens;
             boolean queueExceedsScan = queue.size() > maxScan;
-            if (picked.size() > 1 || queueExceedsScan) {
-                DpBatchReporter.FlushReason r = picked.size() > 1
+            if (capacityFull || queueExceedsScan) {
+                DpBatchReporter.FlushReason r = capacityFull
                         ? DpBatchReporter.FlushReason.PACKED
                         : DpBatchReporter.FlushReason.SCAN_EXHAUSTED;
                 removeIndicesLocked(drainIndices);
                 return StepResult.dispatch(picked, r, cfg, batchMaxTokens);
             }
 
-            // park until earliest of: new arrival OR effectiveDeadline
+            // budget still has slack — park to accumulate more requests;
+            // when deadline expires the next iteration hits budgetMs <= 0 → DEADLINE_FORCE
             long waitNs = (effectiveDeadlineMicros - System.nanoTime() / 1000) * 1000L;
             if (waitNs > 0) {
                 arrival.awaitNanos(waitNs);
