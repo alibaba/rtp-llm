@@ -36,13 +36,35 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
                 event = std::move(event)]() mutable {
         size_t kv_block_stride_bytes = captured_cache_store.kv_block_stride_bytes;
         if (captured_kv_cache.kv_cache_base.defined() && captured_kv_cache.kv_cache_base.dim() == 2) {
-            kv_block_stride_bytes = static_cast<size_t>(captured_kv_cache.kv_cache_base.size(1))
-                                    * captured_kv_cache.kv_cache_base.element_size();
+            const size_t row_stride_bytes = static_cast<size_t>(captured_kv_cache.kv_cache_base.stride(0))
+                                            * captured_kv_cache.kv_cache_base.element_size();
+            const int layer_tokens_per_block = captured_kv_cache.seq_size_per_block;
+            RTP_LLM_CHECK_WITH_INFO(layer_tokens_per_block > 0,
+                                    "LayerKVCache.seq_size_per_block must be positive for cache-store write");
+            RTP_LLM_CHECK_WITH_INFO(captured_cache_store.tokens_per_block % static_cast<size_t>(layer_tokens_per_block)
+                                        == 0,
+                                    "cache-store tokens_per_block=%zu must be divisible by layer tokens_per_block=%d",
+                                    captured_cache_store.tokens_per_block,
+                                    layer_tokens_per_block);
+            const size_t blocks_per_store_block =
+                captured_cache_store.tokens_per_block / static_cast<size_t>(layer_tokens_per_block);
+            kv_block_stride_bytes = row_stride_bytes * blocks_per_store_block;
         }
         size_t kv_scale_stride_bytes = captured_cache_store.kv_scale_stride_bytes;
         if (captured_kv_cache.kv_scale_base.defined() && captured_kv_cache.kv_scale_base.dim() == 2) {
-            kv_scale_stride_bytes = static_cast<size_t>(captured_kv_cache.kv_scale_base.size(1))
-                                    * captured_kv_cache.kv_scale_base.element_size();
+            const size_t row_stride_bytes = static_cast<size_t>(captured_kv_cache.kv_scale_base.stride(0))
+                                            * captured_kv_cache.kv_scale_base.element_size();
+            const int layer_tokens_per_block = captured_kv_cache.seq_size_per_block;
+            RTP_LLM_CHECK_WITH_INFO(layer_tokens_per_block > 0,
+                                    "LayerKVCache.seq_size_per_block must be positive for cache-store scale write");
+            RTP_LLM_CHECK_WITH_INFO(captured_cache_store.tokens_per_block % static_cast<size_t>(layer_tokens_per_block)
+                                        == 0,
+                                    "cache-store tokens_per_block=%zu must be divisible by layer tokens_per_block=%d",
+                                    captured_cache_store.tokens_per_block,
+                                    layer_tokens_per_block);
+            const size_t blocks_per_store_block =
+                captured_cache_store.tokens_per_block / static_cast<size_t>(layer_tokens_per_block);
+            kv_scale_stride_bytes = row_stride_bytes * blocks_per_store_block;
         }
 
         CacheStoreInputs inputs{captured_input_lengths,

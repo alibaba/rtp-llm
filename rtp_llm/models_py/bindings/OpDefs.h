@@ -162,11 +162,13 @@ struct KVCache {
         }
 
         LayerKVCache layer_cache;
-        layer_cache.layer_id           = idx;
-        layer_cache.group_id           = layer_region_to_group_id.empty() ? -1 : layer_region_to_group_id[layer][attn];
-        layer_cache.region_name        = region_name;
-        layer_cache.seq_size_per_block = seq_size_per_block;
-        layer_cache.kv_cache_base      = base;
+        layer_cache.layer_id      = idx;
+        layer_cache.group_id      = layer_region_to_group_id.empty() ? -1 : layer_region_to_group_id[layer][attn];
+        layer_cache.region_name   = region_name;
+        const bool is_full_region = !rtp_llm::isDsv4FixedRegion(region_name);
+        layer_cache.seq_size_per_block =
+            is_full_region && kernel_seq_size_per_block > 0 ? kernel_seq_size_per_block : seq_size_per_block;
+        layer_cache.kv_cache_base = base;
         if (!kv_scale_base_by_layer_region.empty() && layer < kv_scale_base_by_layer_region.size()
             && attn < kv_scale_base_by_layer_region[layer].size()) {
             layer_cache.kv_scale_base = kv_scale_base_by_layer_region[layer][attn];
