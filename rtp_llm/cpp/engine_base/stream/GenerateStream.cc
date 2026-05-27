@@ -503,6 +503,10 @@ void GenerateStream::reportEventWithoutLock(StreamEvents::EventType event,
 
 void GenerateStream::reportError(ErrorCode error_code, const std::string& error_msg) {
     std::lock_guard<std::mutex> lock(*mutex_);
+    reportErrorWithoutLock(error_code, error_msg);
+}
+
+void GenerateStream::reportErrorWithoutLock(ErrorCode error_code, const std::string& error_msg) {
     generate_status_->reportEvent(StreamEvents::Error, error_code, error_msg);
 }
 

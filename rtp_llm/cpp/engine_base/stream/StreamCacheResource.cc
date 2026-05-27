@@ -608,7 +608,7 @@ void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>&
         RTP_LLM_LOG_WARNING(
             "load cache done but not success, stream: [%ld], error: %s", stream_->streamId(), error.ToString().c_str());
         if (error.hasError()) {
-            stream_->reportError(error.code(), error.ToString());
+            stream_->reportErrorWithoutLock(error.code(), error.ToString());
         }
         return;
     }
