@@ -523,25 +523,35 @@ makeFakeSPOutputBuffer(DataType data_type, size_t hidden_size, size_t vocab_size
         {1, (int64_t)hidden_size}, torch::TensorOptions().dtype(dataTypeToTorchType(data_type)).device(torch::kCUDA));
     auto fake_probs =
         torch::zeros({1, (int64_t)vocab_size}, torch::TensorOptions().dtype(torch::kFloat).device(torch::kCUDA));
+    const auto cuda_i32      = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
     sp_buffer->propose_step  = propose_step;
     sp_buffer->all_probs     = fake_probs;
     sp_buffer->tokens        = torch::zeros({1, 2}, torch::kInt32);
     sp_buffer->hidden_states = fake_hidden_states;
+    // Pre-allocate device mirrors so the hot path never triggers a pageable
+    // H2D + sync via ensureSpOutputTokenGpuMirrors().
+    sp_buffer->target_token_gpu   = torch::zeros({1}, cuda_i32);
+    sp_buffer->propose_tokens_gpu = torch::zeros({1}, cuda_i32);
 
     return sp_buffer;
 }
 
 static void ensureSpOutputTokenGpuMirrors(const SpeculativeExecutorStreamOutputPtr& sp_buffer) {
+    // Mirrors should already be device-resident from the buffer's construction
+    // site (MtpExecutor::prepareStreams + makeFakeSPOutputBuffer). Only the
+    // legacy P2P-injection path (StreamCacheResource::applyP2PSideChannel) and
+    // dispatchDecodeAsync intentionally replace them with values from a payload.
+    // This function exists as a defensive fallback for older paths; it should be
+    // a no-op in steady-state and never trigger an H2D sync.
     if (!sp_buffer || !sp_buffer->tokens.defined() || sp_buffer->tokens.numel() < 2) {
         return;
     }
     const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
-    auto       flat     = sp_buffer->tokens.reshape({-1});
     if (!sp_buffer->target_token_gpu.defined() || !sp_buffer->target_token_gpu.is_cuda()) {
-        sp_buffer->target_token_gpu = flat.narrow(0, 0, 1).to(cuda_i32);
+        sp_buffer->target_token_gpu = torch::zeros({1}, cuda_i32);
     }
     if (!sp_buffer->propose_tokens_gpu.defined() || !sp_buffer->propose_tokens_gpu.is_cuda()) {
-        sp_buffer->propose_tokens_gpu = flat.narrow(0, 1, 1).to(cuda_i32);
+        sp_buffer->propose_tokens_gpu = torch::zeros({1}, cuda_i32);
     }
 }
 
@@ -602,12 +612,10 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     warm_up_(warm_up),
     role_type_(params.pd_sep_config.role_type),
     collect_metrics_stream_(cuda_graph::graphGetStreamFromPool(true)),
-    // These runners intentionally do not inherit PyTorch profiler TLS from the
-    // engine loop. Kineto callbacks are thread-affine; propagating an active
-    // profiling state to async MTP worker threads can crash while perf timelines
-    // are being recorded.
-    target_verify_prepare_runner_(cuda_graph::graphGetStreamFromPool(true), false),
-    draft_prefill_prepare_runner_(cuda_graph::graphGetStreamFromPool(true), false),
+    // Bookkeeping worker intentionally does not inherit PyTorch profiler TLS from
+    // the engine loop. Kineto callbacks are thread-affine; propagating an active
+    // profiling state to the worker thread can crash while perf timelines are
+    // being recorded.
     spec_bookkeeping_runner_(cuda_graph::graphGetStreamFromPool(true), false) {
     data_type_        = params.model_config_.data_type;
     hidden_size_      = params.model_config_.hidden_size * params.model_config_.hc_mult;
@@ -1150,19 +1158,12 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     // release hold buffers before draft model forward
     releaseAllModelBuffers();
 
-    launchTargetVerifyPrepareAsync(model_input, batch_size);
-
     if (propose_step_ > 1) {
         model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
         RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode start");
         draftModelDecode(model_input, stream_groups, draft_probs_list, draft_token_ids_t, model_forward_us);
         RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode end");
     }
-
-    // Launch draft-prefill prepare BEFORE target verify forward so it overlaps
-    // with target verify GPU work instead of running serially after it. Sync
-    // on this prepare happens just before draft_model_forward below.
-    launchDraftPrefillPrepareAsync(model_input);
 
     {
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -1252,8 +1253,6 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_);
     broadcastPostRejectionInputs(model_input, stream_groups);
 
-    draft_prefill_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
-
     {
         int64_t start_time_us      = autil::TimeUtility::currentTimeInMicroSeconds();
         draft_prefill_model_output = runDraftPrefillForward(model_input);
@@ -1319,113 +1318,6 @@ void MtpExecutor::waitPreviousBookkeepingAndKvSwaps(const std::list<GenerateStre
     }
 }
 
-void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_input, size_t batch_size) {
-    if (!useAsyncPrepare()) {
-        return;
-    }
-    const auto& cache_cfg = cache_manager_->cacheConfig();
-    // NOTE: combo_tokens never used in prepare stage, so it is safe to use shallow copy
-    auto model_input_copy                    = model_input;
-    model_input_copy.kv_block_stride_bytes   = cache_cfg.kv_block_stride_bytes;
-    model_input_copy.kv_scale_stride_bytes   = cache_cfg.kv_scale_stride_bytes;
-    model_input_copy.kv_cache_layer_to_group = target_kv_cache_layer_to_group;
-    {
-        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_target_verify_input)");
-        const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
-        // Async prepare only needs the token count for metadata/cudagraph sizing.
-        // The actual target-verify token ids are produced by draftModelDecode below.
-        model_input_copy.combo_tokens =
-            torch::empty({static_cast<int64_t>(batch_size * (propose_step_ + 1))}, cuda_i32);
-#if USING_CUDA
-        torch::Tensor sequence_lengths_for_prepare = model_input.sequence_lengths;
-        if ((!sequence_lengths_for_prepare.defined()
-             || sequence_lengths_for_prepare.numel() < static_cast<int64_t>(batch_size))
-            && model_input.prefix_lengths.defined()) {
-            sequence_lengths_for_prepare = model_input.prefix_lengths;
-        }
-        const bool can_fuse_target_prepare =
-            sequence_lengths_for_prepare.defined() && sequence_lengths_for_prepare.is_cuda()
-            && sequence_lengths_for_prepare.scalar_type() == torch::kInt32
-            && sequence_lengths_for_prepare.is_contiguous()
-            && sequence_lengths_for_prepare.numel() >= static_cast<int64_t>(batch_size);
-        if (can_fuse_target_prepare) {
-            model_input_copy.input_lengths           = torch::empty({static_cast<int64_t>(batch_size)}, cuda_i32);
-            model_input_copy.prefix_lengths          = torch::empty({static_cast<int64_t>(batch_size)}, cuda_i32);
-            model_input_copy.sequence_lengths_plus_1 = torch::empty({static_cast<int64_t>(batch_size)}, cuda_i32);
-            model_input_copy.lm_output_indexes       = torch::empty({static_cast<int64_t>(batch_size)}, cuda_i32);
-            RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_target_verify_input_fused)");
-            invokeMtpTargetVerifyPrepare(sequence_lengths_for_prepare,
-                                         model_input_copy.input_lengths,
-                                         model_input_copy.prefix_lengths,
-                                         model_input_copy.sequence_lengths_plus_1,
-                                         model_input_copy.lm_output_indexes,
-                                         static_cast<int32_t>(propose_step_ + 1),
-                                         cuda_graph::graphGetCurrentStream().stream());
-        } else
-#endif
-        {
-            RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_target_verify_input_fallback)");
-            model_input_copy.input_lengths =
-                torch::full({static_cast<int64_t>(batch_size)}, static_cast<int64_t>(propose_step_ + 1), cuda_i32);
-            model_input_copy.lm_output_indexes = torch::arange(0,
-                                                               static_cast<int64_t>(batch_size * (propose_step_ + 1)),
-                                                               static_cast<int64_t>(propose_step_ + 1),
-                                                               cuda_i32);
-            const auto& sequence_lengths =
-                sequence_lengths_for_prepare.defined() ? sequence_lengths_for_prepare : model_input.sequence_lengths;
-            model_input_copy.prefix_lengths          = toCudaInt32WithHostHold(sequence_lengths, buffer_holder_);
-            model_input_copy.sequence_lengths_plus_1 = model_input_copy.prefix_lengths + 1;
-        }
-    }
-    model_input_copy.last_hidden_states = torch::Tensor();
-    model_input_copy.sequence_lengths =
-        torch::empty({0}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
-    model_input_copy.is_target_verify = true;
-    ensureModelInputsOnCuda(model_input_copy, "decode.target_prepare");
-
-    // Device-first inputs are produced on the main stream; the async prepare
-    // stream must wait before it materializes CPU mirrors.
-    auto input_ready_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
-    input_ready_event->record(cuda_graph::graphGetCurrentStream());
-    target_verify_prepare_runner_.launch(
-        [this, input_ready_event, model_input_copy = std::move(model_input_copy)]() mutable {
-            RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(target_verify_prepare_attention_inputs)");
-            {
-                RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(target_verify_prepare_wait_input)");
-                input_ready_event->block(cuda_graph::graphGetCurrentStream());
-            }
-            checkModelInputsOnCuda(model_input_copy, "decode.target_prepare.forwarded");
-            {
-                RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(target_verify_prepare_model_inputs)");
-                model_->prepareAttentionInputs(model_input_copy);
-            }
-        });
-}
-
-void MtpExecutor::launchDraftPrefillPrepareAsync(const GptModelInputs& model_input) {
-    if (!useAsyncPrepare()) {
-        return;
-    }
-    const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
-    // AsyncRunner value-captures model_input on its own stream/thread, so later
-    // main-stream mutations cannot affect draft prefill prepare.
-    auto* prefill_model    = sp_prefill_draft_model_ ? sp_prefill_draft_model_.get() : draft_model_.get();
-    auto  model_input_copy = model_input;
-    model_input_copy.kv_block_stride_bytes   = mtp_cache_cfg.kv_block_stride_bytes;
-    model_input_copy.kv_scale_stride_bytes   = mtp_cache_cfg.kv_scale_stride_bytes;
-    model_input_copy.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
-    ensureModelInputsOnCuda(model_input_copy, "decode.draft_prefill_prepare");
-    auto input_ready_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
-    input_ready_event->record(cuda_graph::graphGetCurrentStream());
-    draft_prefill_prepare_runner_.launch(
-        [this, prefill_model, input_ready_event, model_input_copy = std::move(model_input_copy)]() mutable {
-            RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_draft_prefill_input)");
-            input_ready_event->block(cuda_graph::graphGetCurrentStream());
-            checkModelInputsOnCuda(model_input_copy, "decode.draft_prefill_prepare.forwarded");
-            prefill_model->prepareAttentionInputs(model_input_copy);
-        });
-}
-
 GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input, const StreamGroups& stream_groups) {
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(target_model_verify)");
     maybePrintModelInput(model_input, "decode target model");
@@ -1436,7 +1328,6 @@ GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input,
         model_input.input_lengths.size(0),
         model_input.prefix_lengths.size(0),
         model_input.sequence_lengths.size(0));
-    target_verify_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
 
     // Linear-attention only: page table advances every token. Standard paged
     // attention (MHA/MLA) page table rarely changes within a propose+verify
@@ -1766,8 +1657,13 @@ void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
         // init sp output buffer if not exist
         stream->setReturnAllProbs(true);
         if (stream->getSPOutputBuffer() == nullptr) {
-            auto sp_output_buffer    = std::make_shared<SpeculativeExecutorStreamOutput>();
-            sp_output_buffer->tokens = torch::zeros({1, 2}, torch::kInt32);
+            const auto cuda_i32         = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+            auto       sp_output_buffer = std::make_shared<SpeculativeExecutorStreamOutput>();
+            sp_output_buffer->tokens    = torch::zeros({1, 2}, torch::kInt32);
+            // Pre-allocate device mirrors so ensureSpOutputTokenGpuMirrors() is a
+            // no-op in steady-state (no pageable H2D + sync per stream per step).
+            sp_output_buffer->target_token_gpu   = torch::zeros({1}, cuda_i32);
+            sp_output_buffer->propose_tokens_gpu = torch::zeros({1}, cuda_i32);
 
             stream->setSPOutputBuffer(sp_output_buffer);
         }
@@ -2063,33 +1959,6 @@ bool MtpExecutor::useAsyncDeviceState() const {
 bool MtpExecutor::useDropBroadSync() const {
     static const bool enabled = []() {
         return readEnvFlagOnce("RTP_LLM_DROP_BROAD_SYNC", "drop-broad-sync", "enabled");
-    }();
-    return enabled;
-}
-
-bool MtpExecutor::useAsyncPrepare() const {
-    static const bool enabled = []() {
-        const bool prepare = readEnvFlagOnce("RTP_LLM_MTP_ASYNC_PREPARE", "async-prepare", "enabled");
-        if (!prepare) {
-            return false;
-        }
-        // Hard exclusion vs RTP_LLM_STREAM_ASYNC. Not going through
-        // readEnvFlagOnce to avoid binding the STREAM_ASYNC env to the
-        // async-prepare log label.
-        // Why: with STREAM_ASYNC=1 the bookkeeping worker already overlaps host
-        // work with main launch; the fused prepare metadata kernel
-        // (invokeMtpTargetVerifyPrepare) is already issued on the main stream,
-        // so async-prepare only ships the trailing prepareAttentionInputs() to
-        // a worker. That adds AsyncRunner mutex/cv + a worker->main
-        // event.block barrier without a real overlap window, which is a net
-        // regression on GLM5 MTP cudagraph decode.
-        const char* stream_async_env = std::getenv("RTP_LLM_STREAM_ASYNC");
-        const bool  stream_async     = (stream_async_env != nullptr && std::string(stream_async_env) == "1");
-        if (stream_async) {
-            RTP_LLM_LOG_WARNING("[async-prepare] forced OFF because RTP_LLM_STREAM_ASYNC=1 is active");
-            return false;
-        }
-        return true;
     }();
     return enabled;
 }
