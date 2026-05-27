@@ -320,6 +320,7 @@ class OpenaiEndpoint(object):
                             message=ChatMessage(
                                 role=choice.delta.role or RoleEnum.assistant,
                                 content=choice.delta.content,
+                                reasoning_content=choice.delta.reasoning_content,
                                 function_call=choice.delta.function_call or None,
                                 tool_calls=choice.delta.tool_calls or None,
                             ),
@@ -407,7 +408,6 @@ class OpenaiEndpoint(object):
             # Track last-seen usage so we can emit a trailing chunk even
             # when usage and finish_reason arrive on different chunks.
             last_usage = None
-            usage_emitted = False
 
             async for response in choice_generator:
                 if response.usage is not None:
@@ -426,28 +426,19 @@ class OpenaiEndpoint(object):
                         for output_ids in response.extra_outputs.output_ids
                     ]
 
-                # Usage emission policy is determined by stream_options.include_usage:
-                #   - True  -> OpenAI Chat Completions streaming spec: emit the
-                #             trailing `usage` in its own chunk with choices=[],
-                #             after the chunk that carried `finish_reason`.
-                #             Spec-compliant clients (e.g. vllm bench, OpenAI
-                #             Python SDK) only inspect `usage` on choices-empty
-                #             chunks, so bundling drops the payload.
-                #   - False -> Suppress `usage` from the stream entirely
-                #             (matches OpenAI's behavior when the client does
-                #             not opt in).
-                #   - None  -> Legacy rtp-llm behavior: bundle `usage` on the
-                #             same chunk as `finish_reason`. Kept as the
-                #             default for backward compatibility with internal
-                #             consumers that predate the spec layout.
-                has_finish = (
-                    response.choices
-                    and any(c.finish_reason for c in response.choices)
-                )
+                # See StreamOptions for include_usage semantics.
                 if include_usage is True:
                     # Spec layout: suppress `usage` on every content chunk;
-                    # emit it once in a trailing choices=[] chunk after the
-                    # chunk that carried finish_reason.
+                    # emit it exactly once in a trailing choices=[] chunk
+                    # after the choice_generator is fully drained (see the
+                    # post-loop emission below). This guarantees the usage
+                    # chunk is the final chunk on the wire and reflects
+                    # final stream state -- correct for n>=2 where choices
+                    # finish on different chunks. Backend usage-only frames
+                    # (choices=[]) are captured into `last_usage` above and
+                    # not forwarded as redundant empty chunks.
+                    if not response.choices:
+                        continue
                     yield ChatCompletionStreamResponse(
                         choices=response.choices,
                         usage=None,
@@ -456,16 +447,13 @@ class OpenaiEndpoint(object):
                         extra_outputs=response.extra_outputs,
                     )
                     debug_info_responded = True
-                    if has_finish and last_usage is not None:
-                        yield ChatCompletionStreamResponse(
-                            choices=[],
-                            usage=last_usage,
-                            aux_info=None,
-                            debug_info=None,
-                            extra_outputs=None,
-                        )
-                        usage_emitted = True
                 elif include_usage is False:
+                    # Symmetric with the include_usage=True path: do not
+                    # forward backend usage-only frames (choices=[]) as
+                    # redundant empty chunks. With usage suppressed they
+                    # would carry no signal at all.
+                    if not response.choices:
+                        continue
                     yield ChatCompletionStreamResponse(
                         choices=response.choices,
                         usage=None,
@@ -485,15 +473,12 @@ class OpenaiEndpoint(object):
                     )
                     debug_info_responded = True
 
-            # Fallback: if include_usage=True and we accumulated usage but
-            # never emitted it (usage arrived on a different chunk than
-            # finish_reason, or as a standalone usage-only chunk), emit the
-            # trailing usage chunk now so it is never silently lost.
-            if include_usage is True and last_usage is not None and not usage_emitted:
-                logging.warning(
-                    "Usage was not co-located with finish_reason; "
-                    "emitting deferred trailing usage chunk."
-                )
+            # Trailing usage chunk: emitted after the stream is fully
+            # drained so it is always the final chunk on the wire and
+            # carries the last-seen usage. This is correct for n>=2 where
+            # choices finish on different chunks -- the usage emit must
+            # not happen mid-stream when only some choices have finished.
+            if include_usage is True and last_usage is not None:
                 yield ChatCompletionStreamResponse(
                     choices=[],
                     usage=last_usage,
@@ -587,9 +572,15 @@ class OpenaiEndpoint(object):
             chat_request,
         )
 
+        # stream_options only applies to streaming responses. For the
+        # non-streaming (stream=False) path the collect aggregator needs the
+        # legacy bundled `usage` to be present on the finish chunk, otherwise
+        # `include_usage=False` would silently drop usage from the final
+        # ChatCompletionResponse. Force include_usage=None (legacy bundle)
+        # whenever the client did not request a streaming response.
         include_usage = (
             chat_request.stream_options.include_usage
-            if chat_request.stream_options is not None
+            if chat_request.stream and chat_request.stream_options is not None
             else None
         )
         return self._complete_stream_response(

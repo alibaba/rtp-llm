@@ -23,8 +23,6 @@ from rtp_llm.openai.api_datatype import (
 from rtp_llm.openai.renderer_factory_register import register_renderer
 from rtp_llm.openai.renderers.basic_renderer import BasicRenderer
 from rtp_llm.openai.renderers.custom_renderer import (
-    _MIN_NEW_TOKENS_CV,
-    _bind_min_new_tokens,
     CustomChatRenderer,
     RenderedInputs,
     RendererParams,
@@ -178,24 +176,12 @@ class QwenAgentRenderer(CustomChatRenderer):
             output_str = output_str.replace(stop_word, "")
         return ProcessedOutput(output_str, output_length, finish_reason)
 
-    async def render_response_stream(
+    # Override only the body -- base class CustomChatRenderer.render_response_stream
+    # owns the min_new_tokens ContextVar bind/reset lifecycle, so subclasses do
+    # not need to import private symbols or duplicate the try/finally pattern.
+    async def _render_response_stream_body(
         self,
         output_generator: AsyncGenerator[GenerateOutputs, None],
-        request: ChatCompletionRequest,
-        generate_config: GenerateConfig,
-    ) -> AsyncGenerator[StreamResponseObject, None]:
-        _min_new_tokens_token = _bind_min_new_tokens(generate_config)
-        try:
-            async for resp in self._render_response_stream_impl(
-                output_generator, request, generate_config
-            ):
-                yield resp
-        finally:
-            _MIN_NEW_TOKENS_CV.reset(_min_new_tokens_token)
-
-    async def _render_response_stream_impl(
-        self,
-        output_generator,
         request: ChatCompletionRequest,
         generate_config: GenerateConfig,
     ) -> AsyncGenerator[StreamResponseObject, None]:
