@@ -27,7 +27,6 @@ stashed on each module via ``_cp_ctx`` before ``forward`` runs.  A
 single-rank path unchanged.
 """
 
-import os
 from dataclasses import dataclass
 from typing import Any, Optional, Tuple, Union
 
@@ -35,6 +34,9 @@ import torch
 
 from rtp_llm.models_py.distributed import collective_torch
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
+from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
+
+_DEFAULT_CP_PROFILE_NAME = "dsv4.cp.all_gather"
 
 
 @dataclass
@@ -106,6 +108,7 @@ class CPSyncGatherHandle:
     """Completed synchronous CP gather result."""
 
     full_2d: torch.Tensor
+    profile_name: str = _DEFAULT_CP_PROFILE_NAME
 
 
 @dataclass
@@ -116,7 +119,15 @@ class CPCudaAsyncGatherHandle:
     gathered: torch.Tensor
     work: Any
     stream: Any
+    completion_event: Any
     local_2d: torch.Tensor
+    # Optional caller-owned ``[seq_len_full, H]`` buffer that
+    # :meth:`CudaAsyncCPGatherImpl.wait` writes the restored (non-prefix)
+    # index_select into. Keeping the buffer alive past ``wait`` is the
+    # caller's responsibility — required to avoid PyTorch caching-allocator
+    # churn when many overlapped gathers are in flight at once.
+    restored_buf: Optional[torch.Tensor] = None
+    profile_name: str = _DEFAULT_CP_PROFILE_NAME
 
 
 class CPGatherImplBase:
@@ -127,6 +138,9 @@ class CPGatherImplBase:
         local_2d: torch.Tensor,
         cp_ctx: CPContext,
         stream: Optional[Any] = None,
+        *,
+        restored_buf: Optional[torch.Tensor] = None,
+        profile_name: Optional[str] = None,
     ) -> Any:
         raise NotImplementedError
 
@@ -142,9 +156,16 @@ class SyncCPGatherImpl(CPGatherImplBase):
         local_2d: torch.Tensor,
         cp_ctx: CPContext,
         stream: Optional[Any] = None,
+        *,
+        restored_buf: Optional[torch.Tensor] = None,
+        profile_name: Optional[str] = None,
     ) -> CPSyncGatherHandle:
-        del stream
-        return CPSyncGatherHandle(full_2d=cp_all_gather_full(local_2d, cp_ctx))
+        del stream, restored_buf  # sync path materializes immediately
+        name = profile_name or _DEFAULT_CP_PROFILE_NAME
+        return CPSyncGatherHandle(
+            full_2d=cp_all_gather_full(local_2d, cp_ctx, profile_name=name),
+            profile_name=name,
+        )
 
     def wait(self, handle: Any) -> torch.Tensor:
         if not isinstance(handle, CPSyncGatherHandle):
@@ -167,7 +188,11 @@ class CudaAsyncCPGatherImpl(CPGatherImplBase):
         local_2d: torch.Tensor,
         cp_ctx: CPContext,
         stream: Optional[Any] = None,
+        *,
+        restored_buf: Optional[torch.Tensor] = None,
+        profile_name: Optional[str] = None,
     ) -> CPCudaAsyncGatherHandle:
+        profile_name = profile_name or f"{_DEFAULT_CP_PROFILE_NAME}.async"
         local_2d = _cp_gather_2d(local_2d, cp_ctx)
         if not local_2d.is_cuda:
             raise RuntimeError("CudaAsyncCPGatherImpl requires CUDA tensor input")
@@ -183,23 +208,36 @@ class CudaAsyncCPGatherImpl(CPGatherImplBase):
                 f"CP gather world_size({world_size}) != cp_ctx.cp_size({cp_ctx.cp_size})"
             )
 
-        gathered = torch.empty(
-            (world_size * local_2d.size(0), local_2d.size(1)),
-            device=local_2d.device,
-            dtype=local_2d.dtype,
-        )
+        with record_function_range(f"{profile_name}.alloc"):
+            gathered = torch.empty(
+                (world_size * local_2d.size(0), local_2d.size(1)),
+                device=local_2d.device,
+                dtype=local_2d.dtype,
+            )
 
         current_stream = torch.cuda.current_stream(local_2d.device)
         gather_stream = stream or torch.cuda.Stream(device=local_2d.device)
         gather_stream.wait_stream(current_stream)
+        # ``gathered`` is allocated on ``current_stream`` but consumed on
+        # ``gather_stream`` for the NCCL kernel; same for ``local_2d`` (the
+        # NCCL kernel reads it). Without ``record_stream`` the PyTorch
+        # caching allocator may reuse the storage before the side-stream
+        # NCCL kernel finishes, corrupting the gather output. The wait_
+        # stream above gives NCCL a happens-after edge but NOT allocator
+        # lifetime extension — that is what record_stream does.
+        gathered.record_stream(gather_stream)
+        local_2d.record_stream(gather_stream)
         try:
             with torch.cuda.stream(gather_stream):
-                work = torch.distributed.all_gather_into_tensor(
-                    gathered,
-                    local_2d,
-                    group=process_group,
-                    async_op=True,
-                )
+                with record_function_range(f"{profile_name}.launch"):
+                    work = torch.distributed.all_gather_into_tensor(
+                        gathered,
+                        local_2d,
+                        group=process_group,
+                        async_op=True,
+                    )
+                    completion_event = torch.cuda.Event()
+                    completion_event.record(gather_stream)
         except Exception as exc:
             raise RuntimeError(
                 "failed to launch CUDA CP all_gather_into_tensor"
@@ -210,7 +248,10 @@ class CudaAsyncCPGatherImpl(CPGatherImplBase):
             gathered=gathered,
             work=work,
             stream=gather_stream,
+            completion_event=completion_event,
             local_2d=local_2d,
+            restored_buf=restored_buf,
+            profile_name=profile_name,
         )
 
     def wait(self, handle: Any) -> torch.Tensor:
@@ -218,9 +259,23 @@ class CudaAsyncCPGatherImpl(CPGatherImplBase):
             raise TypeError(
                 f"CudaAsyncCPGatherImpl.wait expected CPCudaAsyncGatherHandle, got {type(handle)!r}"
             )
-        torch.cuda.current_stream(handle.gathered.device).wait_stream(handle.stream)
-        handle.work.wait()
-        return _cp_restore_gathered_full_2d(handle.gathered, handle.cp_ctx)
+        current_stream = torch.cuda.current_stream(handle.gathered.device)
+        with record_function_range(f"{handle.profile_name}.wait_host"):
+            current_stream.wait_event(handle.completion_event)
+            handle.work.wait()
+        with record_function_range(f"{handle.profile_name}.restore"):
+            full = _cp_restore_gathered_full_2d(
+                handle.gathered, handle.cp_ctx, out=handle.restored_buf
+            )
+        # ``full`` may be a view of ``handle.gathered`` on the prefix-restore
+        # path. The gather storage was associated with the side stream; after
+        # this wait, default-stream kernels can read the returned tensor after
+        # the Python handle is dropped. Record the consumer stream explicitly so
+        # the caching allocator cannot recycle the storage before those kernels
+        # finish.
+        handle.gathered.record_stream(current_stream)
+        full.record_stream(current_stream)
+        return full
 
 
 def build_cp_context(
@@ -433,7 +488,18 @@ def _cp_gather_2d(
 def _cp_restore_gathered_full_2d(
     gathered: torch.Tensor,
     cp_ctx: CPContext,
+    *,
+    out: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
+    """Restore the per-rank gathered tensor into the unpadded full sequence.
+
+    ``out`` is the caller-owned ``[seq_len_full, H]`` destination for the
+    non-prefix ``index_select`` path. When provided, the overlap orchestrator
+    can keep the buffer alive across NCCL ⇒ default-stream consumption,
+    which avoids allocator churn that otherwise frees + reissues the row-
+    rearranged tensor each gather. The prefix-restore path takes the view
+    fast path and ignores ``out``.
+    """
     if gathered.dim() != 2:
         raise ValueError(
             f"CP gathered tensor must be 2D [T_padded, H], got shape {tuple(gathered.shape)}"
@@ -446,7 +512,27 @@ def _cp_restore_gathered_full_2d(
     if cp_ctx.unpad_restore_is_prefix:
         full = gathered[: cp_ctx.seq_len_full]  # [seq_len_full, H], view
     else:
-        full = gathered.index_select(0, cp_ctx.unpad_restore)  # [seq_len_full, H]
+        if out is not None:
+            expected_shape = (cp_ctx.seq_len_full, gathered.size(1))
+            if tuple(out.shape) != expected_shape:
+                raise ValueError(
+                    f"out buffer shape {tuple(out.shape)} != expected "
+                    f"{expected_shape}"
+                )
+            if out.dtype != gathered.dtype:
+                raise ValueError(
+                    f"out buffer dtype {out.dtype} != gathered.dtype "
+                    f"{gathered.dtype}"
+                )
+            if out.device != gathered.device:
+                raise ValueError(
+                    f"out buffer device {out.device} != gathered.device "
+                    f"{gathered.device}"
+                )
+            torch.index_select(gathered, 0, cp_ctx.unpad_restore, out=out)
+            full = out
+        else:
+            full = gathered.index_select(0, cp_ctx.unpad_restore)
     if full.size(0) != cp_ctx.seq_len_full:
         raise ValueError(
             f"CP restored rows({full.size(0)}) != cp_ctx.seq_len_full({cp_ctx.seq_len_full})"
@@ -457,6 +543,8 @@ def _cp_restore_gathered_full_2d(
 def cp_all_gather_full(
     local_2d: torch.Tensor,
     cp_ctx: CPContext,
+    *,
+    profile_name: Optional[str] = None,
 ) -> torch.Tensor:
     """Synchronously gather CP-local ``[T_local, H]`` to full ``[T_full, H]``.
 
@@ -464,24 +552,40 @@ def cp_all_gather_full(
     to the caller; passing ``[B, S, H]`` or arbitrary trailing dimensions is a
     contract violation.
     """
+    profile_name = profile_name or f"{_DEFAULT_CP_PROFILE_NAME}.sync"
     local_2d = _cp_gather_2d(local_2d, cp_ctx)
-    gathered = all_gather(local_2d, group=Group.TP)
+    with record_function_range(f"{profile_name}.launch"):
+        gathered = all_gather(local_2d, group=Group.TP)
     # gathered: [cp_size * chunk_length, H]
-    return _cp_restore_gathered_full_2d(gathered, cp_ctx)
+    with record_function_range(f"{profile_name}.restore"):
+        return _cp_restore_gathered_full_2d(gathered, cp_ctx)
 
 
 def cp_all_gather_full_async(
     local_2d: torch.Tensor,
     cp_ctx: CPContext,
     stream: Optional[Any] = None,
+    *,
+    restored_buf: Optional[torch.Tensor] = None,
+    profile_name: Optional[str] = None,
 ) -> Any:
     """Start CP gather for flattened ``[T_local, H]`` input.
 
-    Default implementation is selected by ``DSV4_CP_GATHER_IMPL``:
-    ``async`` (default) for CUDA/NCCL production, or ``sync`` for explicit
-    reference execution/tests. The async path has no implicit fallback.
+    The production implementation is CUDA/NCCL async and has no implicit
+    fallback. CPU/reference tests can instantiate ``SyncCPGatherImpl``
+    directly.
+
+    ``restored_buf`` is the caller-owned ``[seq_len_full, H]`` destination
+    forwarded to :func:`_cp_restore_gathered_full_2d` at wait time
+    (allocator-stability aid for the overlap orchestrator).
     """
-    return get_cp_gather_impl().start(local_2d, cp_ctx, stream=stream)
+    return CudaAsyncCPGatherImpl().start(
+        local_2d,
+        cp_ctx,
+        stream=stream,
+        restored_buf=restored_buf,
+        profile_name=profile_name,
+    )
 
 
 def cp_wait_gather_full(handle: Any) -> torch.Tensor:
@@ -493,30 +597,11 @@ def cp_wait_gather_full(handle: Any) -> torch.Tensor:
     raise TypeError(f"unsupported CP gather handle type: {type(handle)!r}")
 
 
-def build_cp_gather_impl(mode: Optional[str] = None) -> CPGatherImplBase:
-    mode = (mode or os.environ.get("DSV4_CP_GATHER_IMPL", "async")).strip().lower()
-    if mode == "async":
-        return CudaAsyncCPGatherImpl()
-    if mode == "sync":
-        return SyncCPGatherImpl()
-    raise ValueError(
-        f"unsupported DSV4_CP_GATHER_IMPL={mode!r}; expected 'async' or 'sync'"
-    )
-
-
-_CP_GATHER_IMPL: Optional[CPGatherImplBase] = None
-
-
-def get_cp_gather_impl() -> CPGatherImplBase:
-    global _CP_GATHER_IMPL
-    if _CP_GATHER_IMPL is None:
-        _CP_GATHER_IMPL = build_cp_gather_impl()
-    return _CP_GATHER_IMPL
-
-
 def cp_all_gather_full_varlen(
     local_flat: torch.Tensor,
     cp_ctx: CPContext,
+    *,
+    profile_name: Optional[str] = None,
 ) -> torch.Tensor:
     """**Varlen B>=1 path**:
     all-gather a flat ``[chunk_length, *F]`` rank-local tensor across the
@@ -532,14 +617,17 @@ def cp_all_gather_full_varlen(
     non-CP B>1 behaviour documented in
     ``prefill/forward.py::forward_layers``).
     """
+    profile_name = profile_name or f"{_DEFAULT_CP_PROFILE_NAME}.varlen"
     assert local_flat.dim() >= 1
     assert (
         local_flat.size(0) == cp_ctx.chunk_length
     ), f"local_flat.size(0)={local_flat.size(0)} != chunk_length={cp_ctx.chunk_length}"
     trailing = local_flat.shape[1:]
     local_2d = local_flat.reshape(cp_ctx.chunk_length, -1).contiguous()
-    gathered = all_gather(local_2d, group=Group.TP)
-    full = _cp_restore_gathered_full_2d(gathered, cp_ctx)
+    with record_function_range(f"{profile_name}.launch"):
+        gathered = all_gather(local_2d, group=Group.TP)
+    with record_function_range(f"{profile_name}.restore"):
+        full = _cp_restore_gathered_full_2d(gathered, cp_ctx)
     return full.view((cp_ctx.seq_len_full,) + trailing)
 
 
@@ -590,7 +678,8 @@ def cp_gather_last_by_request(
     # [B, H] rows is therefore equivalent to selecting the unique owner row.
     # RTP-LLM CP reuses the TP process group, matching the full hidden gather
     # path above.
-    gathered = all_gather(local_last.contiguous(), group=Group.TP)
+    with record_function_range("dsv4.cp.all_gather.last_hidden_by_request.launch"):
+        gathered = all_gather(local_last.contiguous(), group=Group.TP)
     return gathered.view(cp_ctx.cp_size, B, H).sum(dim=0).contiguous()
 
 

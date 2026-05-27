@@ -15,6 +15,13 @@ from rtp_llm.test.perf_test.dataclass import (
 from rtp_llm.utils.util import check_with_info
 
 
+def _effective_profile_steps(is_decode: bool, decode_test_length: int) -> int:
+    # Prefill has a single model-forward step; requesting more steps leaves the
+    # profiler armed and prevents trace export before the test server exits.
+    profile_steps = int(os.environ.get("PERF_PROFILE_NUM_STEPS", "3"))
+    return min(decode_test_length, profile_steps) if is_decode else 1
+
+
 def _curl_server_single_worker(
     i: int,
     base_port: int,
@@ -46,14 +53,15 @@ def _curl_server_single_worker(
     if "top_k" not in req:
         req["top_k"] = 1
 
-    # for prefill profiler step should only be 1, but for decode, we hope to get more steps for cpu analysis
-    profile_steps = int(os.environ.get("PERF_PROFILE_NUM_STEPS", "3"))
-    profile_step = min(decode_test_length, profile_steps) if is_decode else 1
+    profile_step = _effective_profile_steps(is_decode, decode_test_length)
     if profile:
         req["gen_timeline"] = True
+        req["generate_config"]["gen_timeline"] = True
         req["profile_step"] = profile_step
+        req["generate_config"]["profile_step"] = profile_step
         if profile_trace_name:
             req["profile_trace_name"] = profile_trace_name
+            req["generate_config"]["profile_trace_name"] = profile_trace_name
     try:
         response = requests.post(
             f"http://127.0.0.1:{base_port}", json=req, timeout=wait_time
@@ -170,7 +178,9 @@ class BatchPerfImpl(object):
             # PERF_PREARM_PROFILE=1.
             if os.environ.get("PERF_PREARM_PROFILE", "0") == "1":
                 try:
-                    num_steps = int(os.environ.get("PERF_PROFILE_NUM_STEPS", "3"))
+                    num_steps = _effective_profile_steps(
+                        self.is_decode, self.decode_test_length
+                    )
                     arm_sleep = float(os.environ.get("PERF_PROFILE_ARM_SLEEP", "2"))
                     r = requests.post(
                         f"http://127.0.0.1:{self.base_port}/start_profile",

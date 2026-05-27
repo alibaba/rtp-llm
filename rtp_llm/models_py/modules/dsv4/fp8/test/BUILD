@@ -47,6 +47,15 @@ _DSV4_FP8_TESTS = [
     "test_workspace_prefill_varlen",
 ]
 
+_DSV4_FP8_CPU_TESTS = [
+    "test_attention_cp_prefill_paths",
+    "test_attention_csa_overlap",
+    "test_attention_hca_overlap",
+    "test_compressor_start_finish_prefill",
+    "test_indexer_forward_with_pending_nested",
+    "test_prefill_mixed_layer_cache_store",
+]
+
 py_test(
     name = "test_decode_attn_metadata_start_pos",
     srcs = ["test_decode_attn_metadata_start_pos.py"],
@@ -90,6 +99,15 @@ py_test(
         exec_properties = {"gpu": "H20"},
     )
     for t in _DSV4_FP8_TESTS
+]
+
+[
+    py_test(
+        name = t,
+        srcs = [t + ".py"],
+        deps = _DSV4_FP8_TEST_DEPS,
+    )
+    for t in _DSV4_FP8_CPU_TESTS
 ]
 
 py_test(

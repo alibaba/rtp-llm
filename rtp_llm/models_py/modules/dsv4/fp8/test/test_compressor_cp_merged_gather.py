@@ -105,8 +105,8 @@ class CompressorFP8CPMergedGatherTest(unittest.TestCase):
         handle = object()
         launch_args = {}
 
-        def fake_start(local_2d, ctx, stream=None):
-            del stream
+        def fake_start(local_2d, ctx, stream=None, profile_name=None):
+            del stream, profile_name
             gather_inputs.append((local_2d, ctx))
             return handle
 

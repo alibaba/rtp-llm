@@ -3,6 +3,7 @@
 import importlib.util
 import sys
 import types
+from contextlib import nullcontext
 from pathlib import Path
 
 import torch
@@ -31,6 +32,11 @@ def _stub_and_import():
         ):
             if p not in sys.modules:
                 sys.modules[p] = types.ModuleType(p)
+        profiler_name = "rtp_llm.models_py.modules.dsv4._profiler"
+        if profiler_name not in sys.modules:
+            profiler = types.ModuleType(profiler_name)
+            profiler.record_function_range = lambda *args, **kwargs: nullcontext()
+            sys.modules[profiler_name] = profiler
 
     cp_name = "rtp_llm.models_py.modules.dsv4.cp"
     if cp_name not in sys.modules:
