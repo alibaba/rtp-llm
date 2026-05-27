@@ -20,14 +20,8 @@ Fixtures use the small random-weight V4 config from
   * full-model FP8 weights are 600+ GB and not available in the test
     sandbox.
 
-Driven by the ``DSV4_VARLEN_PREFILL`` env flag (defined in
-``attention.py::_use_varlen_prefill``):
-  * ``0`` — legacy B==1 scalar plumbing; B>1 fixtures are SKIPPED
-  * ``1`` — new varlen plumbing; B>1 fixtures must pass
-
-Each phase (2 SWA, 3a compressor/indexer, 3b workspace) flips one
-sub-test from xfail to pass. When all xfails clear, the migration is
-done and the env flag can be retired.
+The production path now always uses varlen metadata; this oracle keeps the
+pack/unpack comparison helpers for batched prefill fixtures.
 """
 
 from __future__ import annotations

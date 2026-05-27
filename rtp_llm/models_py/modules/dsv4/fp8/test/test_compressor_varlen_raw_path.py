@@ -121,6 +121,7 @@ def _bind_pools_for_batch(
         state_block_table=state_block_table,
         state_eb=state_eb,
         state_tokens_per_block=state_eb,
+        kv_tokens_per_block=kv_eb * compress_ratio,
     )
     return state_view_2d, kv_pool_3d
 

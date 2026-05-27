@@ -276,7 +276,7 @@ def allocate_decode_metadata(
     compress_ratios: List[int],
     index_topk: int,
     device: torch.device,
-    paged_pool_specs: Optional[Dict[int, Tuple[int, int]]] = None,
+    paged_pool_specs: Optional[Dict[int, Tuple[int, int, int]]] = None,
 ) -> "DSv4DecodeAttnMetadata":
     """Pre-allocate a ``DSv4DecodeAttnMetadata`` sized for ``max_batch_size``.
 
@@ -333,7 +333,8 @@ def allocate_decode_metadata(
         )
 
     # Phase 2: paged pool block_table + write slot mapping buffers.
-    # paged_pool_specs maps attn_type → (entries_per_block, max_blocks_per_req).
+    # paged_pool_specs maps attn_type →
+    # (entries_per_block, tokens_per_block, max_blocks_per_req).
     # We never reallocate after construction, so the captured graph reads
     # from these stable addresses. When a pool is absent on a layer, the
     # corresponding entries are simply unused.
@@ -342,7 +343,7 @@ def allocate_decode_metadata(
     if paged_pool_specs:
         from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
 
-        for attn_type, (_, max_blocks) in paged_pool_specs.items():
+        for attn_type, (_, _, max_blocks) in paged_pool_specs.items():
             pool_block_tables[attn_type] = torch.zeros(
                 B, max_blocks, dtype=torch.int32, device=device
             )

@@ -96,7 +96,7 @@ public:
 
         BlockPoolConfig config;
         config.pool_name = "group_" + std::to_string(group_id);
-        const bool      has_group_blocks =
+        const bool has_group_blocks =
             group_id < cache_config.group_block_nums.size() && cache_config.group_block_nums[group_id] > 0;
         config.block_num = has_group_blocks ? cache_config.group_block_nums[group_id] : cache_config.block_num;
         RTP_LLM_LOG_INFO("createConfigForGroup: gid=%zu block_num=%d (has_group_blocks=%d, "
@@ -125,12 +125,14 @@ public:
             group_cache_config.seq_size_per_block = cache_config.group_seq_size_per_block[group_id];
         }
 
-        // All groups (FULL paged + SWA fixed) share the global bpk so the kernel
-        // tensor view stays consistent across regions. Non-DSV4 paths default
-        // to bpk=1 → no reshape change.
         MemoryLayoutConfig layout =
             createMemoryLayoutConfig(false, layer_num, kv_stride, scale_stride, spec, group_cache_config);
-        layout.kernel_blocks_per_kv_block = cache_config.kernelBlocksPerKvBlock();
+        RTP_LLM_CHECK_WITH_INFO(group_id < cache_config.group_types.size(),
+                                "missing cache group type for group %zu (group_types.size=%zu)",
+                                group_id,
+                                cache_config.group_types.size());
+        const bool is_full_group          = cache_config.group_types[group_id] == CacheGroupType::FULL;
+        layout.kernel_blocks_per_kv_block = is_full_group ? cache_config.kernelBlocksPerKvBlock() : 1;
         layout.kv_cache_offset_bytes      = 0;
         layout.kv_scale_offset_bytes      = layout.kv_cache_offset_bytes + layout.kv_block_pool_size_bytes;
 

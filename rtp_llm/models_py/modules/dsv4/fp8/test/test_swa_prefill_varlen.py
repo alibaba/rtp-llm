@@ -4,11 +4,8 @@ Phase-2 of the dsv4 prefill varlen migration. Validates:
 
   1. ``_get_window_topk_idxs_varlen`` — flat-KV window indices for cold
      prefill across mixed (B, prefix) shapes.
-  2. ``_build_swa_prefill_meta_varlen`` / ``_build_swa_prefill_meta_legacy``
-     leaf builders (the dispatcher ``_build_swa_prefill_meta`` was inlined
-     into ``_build_shared_prefill_meta``) — per-request meta fields with
-     bit-equality to the legacy scalar branch on B==1 inputs (where the
-     formulas collapse).
+  2. ``_build_swa_prefill_meta_varlen`` leaf builder — per-request meta
+     fields with bit-equality to a local B==1 reference.
   3. ``_attn_fp8_swa_via_concat`` step-2 scatter — per-request P_b offset
      placement of the new K BF16 overlay into the [B, M, D] workspace.
   4. Coverage corners: B==2 all-continuation; warmup (kv_cache=None).
@@ -31,12 +28,21 @@ from typing import Optional
 import torch
 
 from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
+from rtp_llm.models_py.modules.dsv4.fp8 import _swa_ops_triton as _swa_ops
 from rtp_llm.models_py.modules.dsv4.fp8.attention import AttentionFP8 as Attention
 from rtp_llm.models_py.modules.dsv4.fp8.attention import (
     SwaPrefillMeta,
+    _build_suffix_pool_slot_mapping,
     _get_window_topk_idxs,
     _get_window_topk_idxs_varlen,
 )
+
+
+class _StubKvCache:
+    def __init__(self, tokens_per_block: int) -> None:
+        self.group_region_names = [SWA_KV]
+        self.seq_size_per_block = int(tokens_per_block)
+        self.kernel_seq_size_per_block = int(tokens_per_block)
 
 
 class _StubAttention:
@@ -57,11 +63,16 @@ class _StubAttention:
         block_table_swa: Optional[torch.Tensor],
         eb: int,
         kv_cache_present: bool = True,
+        kv_cache: Optional[object] = None,
     ) -> None:
         self.window_size = window_size
         self.compress_ratio = compress_ratio
         self._eb = eb
-        self._kv_cache = object() if kv_cache_present else None
+        self._kv_cache = (
+            (kv_cache if kv_cache is not None else _StubKvCache(eb))
+            if kv_cache_present
+            else None
+        )
         self._block_tables_by_type = (
             {SWA_KV: block_table_swa} if block_table_swa is not None else None
         )
@@ -71,12 +82,8 @@ class _StubAttention:
             return 0
         return self._eb
 
-    # Bind the unbound leaf builders so the stub quacks correctly. The
-    # public dispatcher was inlined into ``_build_shared_prefill_meta``
-    # (P2.5) — UTs now drive the leaves directly with explicit ``use_varlen``
-    # selection at the call site.
+    # Bind the unbound leaf builder so the stub quacks correctly.
     _build_swa_prefill_meta_varlen = Attention._build_swa_prefill_meta_varlen
-    _build_swa_prefill_meta_legacy = Attention._build_swa_prefill_meta_legacy
 
 
 def _make_block_table(n_reqs: int, blocks_per_req: int, device) -> torch.Tensor:
@@ -86,6 +93,14 @@ def _make_block_table(n_reqs: int, blocks_per_req: int, device) -> torch.Tensor:
     return torch.arange(
         1, n_reqs * blocks_per_req + 1, dtype=torch.int64, device=device
     ).view(n_reqs, blocks_per_req)
+
+
+class _FakeLargeBlockKvCache:
+    """Expose scalar C++ KVCache fields used by require_pool_tokens_per_block."""
+
+    group_region_names = [SWA_KV]
+    seq_size_per_block = 16384
+    kernel_seq_size_per_block = 128
 
 
 def _flat_positions(
@@ -283,6 +298,7 @@ class BuildSwaPrefillMetaVarlenTest(unittest.TestCase):
         blocks_per_req: int = 4,
         eb: int = 256,
         kv_cache_present: bool = True,
+        kv_cache: Optional[object] = None,
     ) -> _StubAttention:
         bt = _make_block_table(n_reqs, blocks_per_req, self.device)
         return _StubAttention(
@@ -291,14 +307,141 @@ class BuildSwaPrefillMetaVarlenTest(unittest.TestCase):
             block_table_swa=bt,
             eb=eb,
             kv_cache_present=kv_cache_present,
+            kv_cache=kv_cache,
         )
 
     def _build_meta_legacy(
         self, stub: _StubAttention, sp: int, S: int
     ) -> SwaPrefillMeta:
-        """Legacy B==1 scalar branch via the dedicated leaf builder.
-        Bit-equality oracle for the varlen path's B==1 collapse."""
-        return stub._build_swa_prefill_meta_legacy(S, sp, self.device)
+        """Local B==1 scalar reference for the varlen path's B==1 collapse."""
+        win = stub.window_size
+        is_swa_only = stub.compress_ratio == 0
+        topk_length_kv_full: Optional[torch.Tensor] = None
+        if is_swa_only or stub._kv_cache is None:
+            positions = torch.arange(S, device=self.device, dtype=torch.int32)
+            topk_length_kv_full = torch.clamp(positions + 1, max=win)
+
+        bt = (
+            stub._block_tables_by_type.get(SWA_KV)
+            if stub._block_tables_by_type is not None
+            else None
+        )
+        eb = stub._pool_entries_per_block(SWA_KV)
+        if stub._kv_cache is None or bt is None or bt.numel() == 0 or eb <= 0:
+            return SwaPrefillMeta(
+                slot_mapping=None,
+                query_start_loc=None,
+                combined_seq_lens=None,
+                topk_length_kv_full=topk_length_kv_full,
+                combined_gather_lens=None,
+                combined_gather_len_max=0,
+                M=0,
+                cache_seq_lens=None,
+                cache_gather_lens=None,
+                prefix_len_max=0,
+                combined_indices=None,
+                combined_lens=None,
+                slot_in_flat=None,
+                cache_slot_mapping=None,
+            )
+
+        seq_total = sp + S
+        query_start_loc = torch.tensor([0, S], device=self.device, dtype=torch.int32)
+        combined_seq_lens = torch.tensor(
+            [seq_total], device=self.device, dtype=torch.int32
+        )
+        bt_swa = bt[:1].to(device=self.device, dtype=torch.int32).contiguous()
+        slot_mapping = _swa_ops.compute_swa_slot_mapping(
+            block_table=bt_swa,
+            query_start_loc=query_start_loc,
+            seq_lens=combined_seq_lens,
+            num_tokens=S,
+            pool_entries_per_block=eb,
+            tokens_per_block_for_block_table=stub._kv_cache.seq_size_per_block,
+            ring_entries=eb,
+        )
+
+        if not is_swa_only:
+            return SwaPrefillMeta(
+                slot_mapping=slot_mapping,
+                query_start_loc=query_start_loc,
+                combined_seq_lens=combined_seq_lens,
+                topk_length_kv_full=None,
+                combined_gather_lens=None,
+                combined_gather_len_max=0,
+                M=0,
+                cache_seq_lens=None,
+                cache_gather_lens=None,
+                prefix_len_max=0,
+                combined_indices=None,
+                combined_lens=None,
+                slot_in_flat=None,
+                cache_slot_mapping=None,
+            )
+
+        combined_gather_lens = _swa_ops.compute_prefill_gather_lens(
+            seq_lens=combined_seq_lens,
+            query_start_loc=query_start_loc,
+            num_prefills=1,
+            num_decodes=0,
+            window_size=win,
+        )
+        combined_gather_len_max = S + min(sp, win - 1)
+        M = max(combined_gather_len_max, 1)
+
+        if sp > 0:
+            prefix_len = min(sp, win - 1)
+            cache_seq_lens = torch.tensor([sp], device=self.device, dtype=torch.int32)
+            cache_gather_lens = torch.tensor(
+                [prefix_len], device=self.device, dtype=torch.int32
+            )
+            cache_slot_mapping = _build_suffix_pool_slot_mapping(
+                block_table=bt_swa,
+                seq_lens=cache_seq_lens,
+                gather_lens=cache_gather_lens,
+                entries_per_block=eb,
+                tokens_per_block_for_block_table=stub._kv_cache.seq_size_per_block,
+                ring_entries=eb,
+            )
+            topk_indices_empty = torch.empty(
+                (S, 0), dtype=torch.int32, device=self.device
+            )
+            combined_indices, combined_lens = _swa_ops.combine_topk_swa_indices(
+                topk_indices=topk_indices_empty,
+                query_start_loc=query_start_loc,
+                seq_lens=combined_seq_lens,
+                gather_lens=combined_gather_lens,
+                window_size=win,
+                compress_ratio=1,
+                topk=0,
+                M=M,
+                N=0,
+            )
+            prefix_len_max = prefix_len
+        else:
+            cache_seq_lens = None
+            cache_gather_lens = None
+            cache_slot_mapping = None
+            combined_indices = None
+            combined_lens = None
+            prefix_len_max = 0
+
+        return SwaPrefillMeta(
+            slot_mapping=slot_mapping,
+            query_start_loc=query_start_loc,
+            combined_seq_lens=combined_seq_lens,
+            topk_length_kv_full=topk_length_kv_full,
+            combined_gather_lens=combined_gather_lens,
+            combined_gather_len_max=combined_gather_len_max,
+            M=M,
+            cache_seq_lens=cache_seq_lens,
+            cache_gather_lens=cache_gather_lens,
+            prefix_len_max=prefix_len_max,
+            combined_indices=combined_indices,
+            combined_lens=combined_lens,
+            slot_in_flat=None,
+            cache_slot_mapping=cache_slot_mapping,
+        )
 
     def _build_meta_varlen(
         self,
@@ -472,6 +615,77 @@ class BuildSwaPrefillMetaVarlenTest(unittest.TestCase):
             [5, 6, 7, 8, 8, 8, 8, 8], dtype=torch.int32, device=self.device
         )
         self.assertTrue(torch.equal(meta.combined_lens, expected_cmb))
+
+    def test_large_physical_swa_write_slot_mapping_tail_mask(self) -> None:
+        """SWA write meta must use physical row tokens and small ring entries.
+
+        With physical=16384 and ring in {128,130,132,134}, prefill writes only
+        physical block/request tails. If the builder used ``eb`` as the
+        block-table stride, this would either address out-of-range rows or
+        write every ring collision.
+        """
+        tpb = 16384
+        for ring in (128, 130, 132, 134):
+            with self.subTest(ring=ring, shape="cold_cross_boundary"):
+                stub = self._build_stub(
+                    win=128,
+                    compress_ratio=0,
+                    n_reqs=1,
+                    blocks_per_req=2,
+                    eb=ring,
+                    kv_cache=_FakeLargeBlockKvCache(),
+                )
+                meta = self._build_meta_varlen(stub, [0], [tpb + 16])
+                self.assertIsNotNone(meta.slot_mapping)
+                sm = meta.slot_mapping
+                self.assertEqual(int(sm.shape[0]), tpb + 16)
+                self.assertEqual(int(sm[0].item()), -1)
+                self.assertEqual(int(sm[tpb - ring - 1].item()), -1)
+                self.assertEqual(
+                    int(sm[tpb - ring].item()), 1 * ring + ((tpb - ring) % ring)
+                )
+                self.assertEqual(int(sm[tpb - 1].item()), 1 * ring + ((tpb - 1) % ring))
+                self.assertEqual(int(sm[tpb].item()), 2 * ring + (tpb % ring))
+                self.assertEqual(int(sm[-1].item()), 2 * ring + ((tpb + 15) % ring))
+
+            with self.subTest(ring=ring, shape="continuation_cross_boundary"):
+                stub = self._build_stub(
+                    win=128,
+                    compress_ratio=0,
+                    n_reqs=1,
+                    blocks_per_req=2,
+                    eb=ring,
+                    kv_cache=_FakeLargeBlockKvCache(),
+                )
+                sp = tpb - ring - 8
+                meta = self._build_meta_varlen(stub, [sp], [ring + 24])
+                self.assertIsNotNone(meta.slot_mapping)
+                sm = meta.slot_mapping
+                self.assertEqual(int(sm[0].item()), -1)
+                self.assertEqual(int(sm[7].item()), -1)
+                self.assertEqual(int(sm[8].item()), 1 * ring + ((tpb - ring) % ring))
+                self.assertEqual(
+                    int(sm[ring + 7].item()), 1 * ring + ((tpb - 1) % ring)
+                )
+                self.assertEqual(int(sm[ring + 8].item()), 2 * ring + (tpb % ring))
+                self.assertEqual(int(sm[-1].item()), 2 * ring + ((tpb + 15) % ring))
+
+            with self.subTest(ring=ring, shape="short_request_mid_block"):
+                stub = self._build_stub(
+                    win=128,
+                    compress_ratio=0,
+                    n_reqs=1,
+                    blocks_per_req=2,
+                    eb=ring,
+                    kv_cache=_FakeLargeBlockKvCache(),
+                )
+                sp = 4096
+                meta = self._build_meta_varlen(stub, [sp], [17])
+                self.assertIsNotNone(meta.slot_mapping)
+                sm = meta.slot_mapping
+                self.assertEqual(int((sm >= 0).sum().item()), 17)
+                self.assertEqual(int(sm[0].item()), 1 * ring + (sp % ring))
+                self.assertEqual(int(sm[-1].item()), 1 * ring + ((sp + 16) % ring))
 
     # ----- Warmup (no kv_cache) -------------------------------------------
     def test_warmup_no_kv_cache_topk_length_only(self) -> None:

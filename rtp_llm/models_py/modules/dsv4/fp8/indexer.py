@@ -46,12 +46,6 @@ from rtp_llm.models_py.modules.dsv4.fp8._indexer_score import (
 )
 from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import PoolBackedModule
 from rtp_llm.models_py.modules.dsv4.fp8.compressor import CompressorFP8, CompressorMeta
-
-
-def _use_varlen_prefill() -> bool:
-    return os.environ.get("DSV4_VARLEN_PREFILL", "1") != "0"
-
-
 from rtp_llm.models_py.modules.dsv4.qlinear import QuantizedLinear
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
@@ -214,10 +208,9 @@ class _IndexerFP8PrefillMeta(NamedTuple):
     immediately consumable by the gather / score / topk kernels.
 
     Coordinate system:
-      * **legacy B==1 / DSV4_VARLEN_PREFILL=0**: ``ks=0``, ``ke =
-        clamp((positions_d+1)//ratio, max=T)`` — request-local indices
-        directly into the single-request flat K (== global flat K when
-        B==1). Returned topk is request-local.
+      * **single-request**: ``ks=0``, ``ke = clamp((positions_d+1)//ratio,
+        max=T)`` — request-local indices directly into the single-request
+        flat K. Returned topk is request-local.
       * **varlen**: K is request-concatenated on the flat axis
         (``cu_kv_seqlens``). ``ks/ke`` are GLOBAL flat-K coords with the
         per-token request offset baked in (``ks[t] = cu_kv_seqlens[req_t]``,
@@ -361,10 +354,11 @@ class IndexerFP8(PoolBackedModule):
             self._kv_pool_view,
             self._kv_block_table,
             self._kv_eb,
-            self._state_pool_view,
+            self._state_pool_3d,
             self._state_block_table,
             self._state_eb,
-            self._state_tokens_per_block,
+            state_tokens_per_block=self._state_tokens_per_block,
+            kv_tokens_per_block=self._kv_tokens_per_block,
         )
 
     def _clear_nested_pool(self) -> None:
@@ -792,7 +786,7 @@ class IndexerFP8(PoolBackedModule):
                             compressor_meta = compressor.prepare_metadata(
                                 cp_positions,
                                 cp_b_idx,
-                                is_batched=_use_varlen_prefill(),
+                                is_batched=True,
                                 seq_start_per_req=cp_seq_start_per_req,
                                 cu_seq_per_req=cp_cu_seq_per_req,
                             )

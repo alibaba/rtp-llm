@@ -59,9 +59,10 @@ class DSv4DecodeFmhaImplConfig:
     # and ``prepare`` populates them from
     # ``attn_inputs.kv_cache_kernel_block_id_device_by_group``.
     #
-    # ``paged_pool_specs[attn_type] = (entries_per_block, max_blocks_per_req)``.
+    # ``paged_pool_specs[attn_type] =
+    # (entries_per_block, tokens_per_block, max_blocks_per_req)``.
     # If empty, the legacy register_buffer-only path is used.
-    paged_pool_specs: Dict[int, Tuple[int, int]] = field(default_factory=dict)
+    paged_pool_specs: Dict[int, Tuple[int, int, int]] = field(default_factory=dict)
 
     # Snapshot of ``kv_cache.group_region_names`` (framework-owned group
     # ordering, one attn_type per entry). Position = group id. ``prepare``

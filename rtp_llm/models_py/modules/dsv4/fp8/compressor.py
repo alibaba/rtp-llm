@@ -23,17 +23,16 @@ vLLM's ``DeepseekCompressor`` flow:
      window from the state pool, does softmax → RMSNorm → RoPE → FP8
      UE8M0 quant → KV-pool slot store.
 
-Public API kept stable so ``attention.py`` / ``indexer_fp8.py`` call
-sites do not change:
+Public API:
   * ``set_pool_context(kv_view, kv_bt, kv_eb, state_view, state_bt,
-    state_eb)`` — shared with ``PoolBackedModule``.
+    state_eb, state_tokens_per_block, kv_tokens_per_block)`` — shared with
+    ``PoolBackedModule``.
   * ``forward(x, start_pos, sequence_lengths=None)`` for prefill.
   * ``forward_decode_vectorized(x, start_pos)`` for batched decode.
 """
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
@@ -44,17 +43,6 @@ from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 _CUBLAS_GEMM_BF16_BF16_FP32 = getattr(rtp_llm_ops, "cublas_gemm_bf16_bf16_fp32", None)
-
-
-def _compressor_meta_fused_enabled() -> bool:
-    """Env-gated fused compressor prepare_metadata.
-
-    Default-on: decode now feeds metadata from buildmeta, and the remaining
-    prepare_metadata callers should use the fused integer slot builder unless
-    explicitly disabled for debugging with ``DSV4_FUSED_PREPARE=0``.
-    """
-
-    return os.environ.get("DSV4_FUSED_PREPARE", "1").strip() == "1"
 
 
 def _linear_bf16_bf16_fp32(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
@@ -99,7 +87,9 @@ from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import PoolBackedModule
 # (see rope.py), all instances see the same ``id(freqs_cis)`` → one
 # shared entry instead of 91. Saves ~22.5 GiB of persistent GPU memory
 # per rank during 1M prefill.
-_SHARED_COS_SIN_CACHE: Dict[Tuple[int, torch.device], torch.Tensor] = {}
+_SHARED_COS_SIN_CACHE: Dict[
+    Tuple[int, torch.device, Tuple[int, ...], torch.dtype], torch.Tensor
+] = {}
 
 
 @dataclass(frozen=True)
@@ -230,6 +220,9 @@ class CompressorFP8(PoolBackedModule):
         self.freqs_cis: Optional[torch.Tensor] = None
         self._cos_sin_cache: Optional[torch.Tensor] = None
         self._cos_sin_cache_device: Optional[torch.device] = None
+        self._cos_sin_cache_key: Optional[
+            Tuple[int, torch.device, Tuple[int, ...], torch.dtype]
+        ] = None
         self._state_tokens_per_block: int = 0
         self._cp_ctx: Optional[CPContext] = None
         self._cp_gather_stream: Optional[Any] = None
@@ -323,41 +316,44 @@ class CompressorFP8(PoolBackedModule):
         input_lens = (cu_seq_per_req[1:] - cu_seq_per_req[:-1]).to(torch.long)
         seq_end_per_req = seq_start_per_req.to(torch.long) + input_lens
 
-        if _compressor_meta_fused_enabled() and not self._kv_cache_sharded:
+        if not self._kv_cache_sharded:
             from rtp_llm.models_py.modules.dsv4.fp8 import _fused_compressor_meta_triton
 
-            if _fused_compressor_meta_triton._TRITON_AVAILABLE:
-                pool_rows = 0
-                if self._kv_pool_3d is not None:
-                    pool_rows = int(
-                        self._kv_pool_3d.numel() // self._kv_pool_3d.shape[-1]
-                    )
-                (
-                    state_slots,
-                    kv_slots,
-                    token_to_req,
-                ) = _fused_compressor_meta_triton.fused_compressor_slot_mapping(
-                    positions,
-                    b_idx,
-                    self._state_block_table,
-                    self._state_eb,
-                    self._kv_block_table,
-                    self._kv_eb,
-                    self.compress_ratio,
-                    seq_end_per_req,
-                    self._state_tokens_per_block,
-                    pool_rows=pool_rows,
+            if not _fused_compressor_meta_triton._TRITON_AVAILABLE:
+                raise RuntimeError(
+                    "DSV4 FP8 compressor requires fused Triton metadata preparation"
                 )
-                return CompressorMeta(
-                    positions=positions,
-                    b_idx=b_idx,
-                    state_slots=state_slots,
-                    kv_slots=kv_slots,
-                    token_to_req=token_to_req,
-                    is_batched=is_batched,
-                    seq_start_per_req=seq_start_per_req,
-                    cu_seq_per_req=cu_seq_per_req,
+            pool_rows = 0
+            if self._kv_pool_view is not None:
+                pool_rows = int(
+                    self._kv_pool_view.numel() // self._kv_pool_view.shape[-1]
                 )
+            (
+                state_slots,
+                kv_slots,
+                token_to_req,
+            ) = _fused_compressor_meta_triton.fused_compressor_slot_mapping(
+                positions,
+                b_idx,
+                self._state_block_table,
+                self._state_eb,
+                self._kv_block_table,
+                self._kv_eb,
+                self.compress_ratio,
+                seq_end_per_req,
+                self._state_tokens_per_block,
+                pool_rows=pool_rows,
+            )
+            return CompressorMeta(
+                positions=positions,
+                b_idx=b_idx,
+                state_slots=state_slots,
+                kv_slots=kv_slots,
+                token_to_req=token_to_req,
+                is_batched=is_batched,
+                seq_start_per_req=seq_start_per_req,
+                cu_seq_per_req=cu_seq_per_req,
+            )
 
         with record_function_range("dsv4.fp8.compressor.meta.state_slots"):
             state_slots = self._compute_state_slot_mapping(
@@ -382,25 +378,30 @@ class CompressorFP8(PoolBackedModule):
     # Internal helpers
     # ----------------------------------------------------------------------
     def _ensure_cos_sin_cache(self, device: torch.device) -> torch.Tensor:
-        cached = self._cos_sin_cache
-        # Compare against cached device sibling (a plain torch.device): hot
-        # path avoids the ``cached.device`` property which constructs a fresh
-        # torch.device per access (~70 ns/call on this code path).
-        if cached is not None and self._cos_sin_cache_device == device:
-            return cached
         assert (
             self.freqs_cis is not None
         ), "CompressorFP8.freqs_cis must be bound before forward"
+        key = (
+            id(self.freqs_cis),
+            device,
+            tuple(int(v) for v in self.freqs_cis.shape),
+            self.freqs_cis.dtype,
+        )
+        cached = self._cos_sin_cache
+        # Compare against a key that includes source freqs_cis identity. A
+        # reset may bind a new shared freqs tensor on the same device.
+        if cached is not None and self._cos_sin_cache_key == key:
+            return cached
         # Dedup at module level by source freqs_cis identity. After the
         # rope.py memoization, all CompressorFP8 instances binding the same
         # rope params share one freqs_cis object → one cos_sin_cache.
-        key = (id(self.freqs_cis), device)
         shared = _SHARED_COS_SIN_CACHE.get(key)
         if shared is None or shared.device != device:
             shared, _ = build_cos_sin_cache(self.freqs_cis.to(device))
             _SHARED_COS_SIN_CACHE[key] = shared
         self._cos_sin_cache = shared
         self._cos_sin_cache_device = device
+        self._cos_sin_cache_key = key
         return shared
 
     def _compute_state_slot_mapping(
@@ -411,9 +412,9 @@ class CompressorFP8(PoolBackedModule):
     ) -> torch.Tensor:
         """state_slot[t] = state_block_table[b, (pos//tpb)%max_blocks] * eb + pos%eb.
 
-        State pools are SWA-type (cyclic block table). Block-table indexing
-        uses ``_state_tokens_per_block`` (= kernel block size, 256) with modulo
-        wrapping; in-block ring offset uses ``_state_eb`` (= ring size R).
+        State pools are SWA-type ring tables. Block-table indexing uses
+        ``_state_tokens_per_block`` (physical block size) with modulo
+        wrapping; in-block ring offset uses ``_state_eb``.
         Returns -1 where the resolved block_id is negative (unallocated).
 
         Ring write mask: only the last R positions before each block boundary
@@ -447,12 +448,11 @@ class CompressorFP8(PoolBackedModule):
         """KV-pool slot for each token. -1 unless (pos+1) % ratio == 0
         (i.e. boundary token that produces a compressed entry).
 
-        Block addressing follows the framework convention: ALL DSV4 pools
-        use ``seq_size_per_block = TOKENS_PER_BLOCK = 256`` for block_table
-        indexing — i.e. the block_table is indexed in *token* space, not
-        compressed-entry space. The KV pool's per-block entry count is
-        ``kv_eb = TOKENS_PER_BLOCK / ratio``, so the in-block offset is the
-        compressed-entry offset *within that token block*.
+        Block addressing follows the framework convention for FULL paged
+        pools: the block_table is indexed in raw-token space using
+        ``_kv_tokens_per_block``. The KV pool's per-block entry count is
+        ``kv_eb = kernel_tokens_per_block / ratio``, so the in-block offset
+        is the compressed-entry offset within that raw-token block.
 
           block_in_seq = pos // TOKENS_PER_BLOCK              # token -> block
           in_block     = (pos % TOKENS_PER_BLOCK) // ratio    # compressed offset
@@ -465,11 +465,9 @@ class CompressorFP8(PoolBackedModule):
         bt = self._kv_block_table
         kv_eb = self._kv_eb
         ratio = self.compress_ratio
-        if bt is None or kv_eb <= 0:
+        tokens_per_block = self._kv_tokens_per_block
+        if bt is None or kv_eb <= 0 or tokens_per_block <= 0:
             return torch.full_like(positions, -1)
-        # Recover seq_size_per_block from the pool spec invariant
-        # (kv_eb * ratio); avoids hard-coding 256 here.
-        tokens_per_block = kv_eb * ratio
         if self._kv_cache_sharded and self._cp_ctx is not None:
             from rtp_llm.models_py.modules.dsv4.fp8._cp_slot_mapping import (
                 cp_kv_slot_mapping,
@@ -485,8 +483,10 @@ class CompressorFP8(PoolBackedModule):
                 self._cp_ctx.cp_size,
                 self._cp_ctx.cp_rank,
             )
-            if self._kv_pool_3d is not None:
-                pool_rows = int(self._kv_pool_3d.numel() // self._kv_pool_3d.shape[-1])
+            if self._kv_pool_view is not None:
+                pool_rows = int(
+                    self._kv_pool_view.numel() // self._kv_pool_view.shape[-1]
+                )
                 slot = torch.where(slot < pool_rows, slot, torch.full_like(slot, -1))
             return slot
         bt_long = bt.to(torch.long)
@@ -502,8 +502,8 @@ class CompressorFP8(PoolBackedModule):
         block_id = bt_long[b_idx, safe_block_in_seq]
         slot = block_id * kv_eb + in_block
         valid = boundary & in_capacity & (block_id >= 0)
-        if self._kv_pool_3d is not None:
-            pool_rows = int(self._kv_pool_3d.numel() // self._kv_pool_3d.shape[-1])
+        if self._kv_pool_view is not None:
+            pool_rows = int(self._kv_pool_view.numel() // self._kv_pool_view.shape[-1])
             valid = valid & (slot < pool_rows)
         return torch.where(valid, slot, torch.full_like(slot, -1))
 
@@ -532,7 +532,7 @@ class CompressorFP8(PoolBackedModule):
         """
         if (
             self._state_pool_3d is None
-            or self._kv_pool_3d is None
+            or self._kv_pool_view is None
             or self._state_block_table is None
             or self._kv_block_table is None
         ):
@@ -578,7 +578,7 @@ class CompressorFP8(PoolBackedModule):
                 self.norm.weight,
                 self.norm_eps,
                 cos_sin_cache,
-                self._kv_pool_3d,
+                self._kv_pool_view,
                 meta.kv_slots,
                 kv_flat,
                 score_flat,
@@ -631,7 +631,11 @@ class CompressorFP8(PoolBackedModule):
             else int(start_pos)
         )
         # Warmup forward (no pool bound by framework): no-op.
-        if self._state_pool_3d is None or self._kv_pool_3d is None or self._kv_eb <= 0:
+        if (
+            self._state_pool_3d is None
+            or self._kv_pool_view is None
+            or self._kv_eb <= 0
+        ):
             return None
 
         device = x.device
@@ -722,7 +726,11 @@ class CompressorFP8(PoolBackedModule):
         T = bsz * q_len
         if position_ids is None:
             assert q_len == 1, "decode q_len > 1 requires flat position_ids"
-        if self._state_pool_3d is None or self._kv_pool_3d is None or self._kv_eb <= 0:
+        if (
+            self._state_pool_3d is None
+            or self._kv_pool_view is None
+            or self._kv_eb <= 0
+        ):
             return None
 
         device = x.device
@@ -787,12 +795,10 @@ def _build_prefill_positions(
     """``positions = sp + arange(seqlen)`` flat ``[seqlen]``; ``b_idx``
     all-zeros ``[seqlen]``.
 
-    Legacy B==1 / ``DSV4_VARLEN_PREFILL=0`` helper only — varlen feeds
+    Single-request helper only — batched prefill feeds
     ``(position_ids, req_id_per_token)`` straight into
-    ``compressor.prepare_metadata`` so this builder must NEVER be reached
-    from a varlen call site (positions would collapse to a single
-    contiguous ``[sp, sp+T_total)`` range and ``b_idx`` to all-zeros,
-    silently mapping every token onto request-0's block_table).
+    ``compressor.prepare_metadata`` so this builder must not be reached
+    from a batched call site.
     """
     assert bsz == 1, (
         f"_build_prefill_positions is the legacy B==1 helper; got bsz={bsz}. "

@@ -456,8 +456,8 @@ bool KVCacheMemoryConnector::isDsv4TypedCacheLayout(const std::vector<LayerRegio
     }
     const auto seq_size    = cache_config_.seq_size_per_block;
     const auto kernel_size = cache_config_.kernel_seq_size_per_block;
-    if (kernel_size < kDsv4MinTokensPerBlock || kernel_size % kDsv4MinTokensPerBlock != 0
-        || seq_size != kernel_size) {
+    if (kernel_size < kDsv4MinTokensPerBlock || kernel_size % kDsv4MinTokensPerBlock != 0 || seq_size < kernel_size
+        || seq_size % kernel_size != 0) {
         return false;
     }
     if (cache_config_.cache_specs.size() != kDsv4PoolNum || cache_config_.group_region_names.size() != kDsv4PoolNum

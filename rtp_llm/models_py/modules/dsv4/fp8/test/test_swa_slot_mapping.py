@@ -4,11 +4,11 @@ Validates the per-token paged slot formula used by FP8 SWA
 prefill write (``_swa_prefill_ops_triton.compute_swa_slot_mapping``):
 
     global_pos    = sp[b] + i
-    block_in_seq  = global_pos // block_size
-    in_block      = global_pos % block_size
-    block_id      = block_table[b, block_in_seq]   # sparse table; <0 = skip
-    slot          = -1                       if block_id < 0
-                    block_id * eb + in_block otherwise
+    block_in_seq  = global_pos // tokens_per_block_for_block_table
+    in_block      = global_pos % ring_entries
+    block_id      = block_table[b, block_in_seq]   # sparse table; <=0 = skip
+    slot          = -1                       if block_id <= 0
+                    block_id * pool_entries_per_block + in_block otherwise
 
 Compared against a Python reference (loop-based torch). Coverage:
   * cold prefill (sp=0) within first block
@@ -38,8 +38,10 @@ def _ref_compute_swa_slot_mapping(
     block_table: torch.Tensor,  # [num_reqs, max_blocks_per_seq] int32
     query_start_loc: torch.Tensor,  # [num_reqs+1] int32
     seq_lens: torch.Tensor,  # [num_reqs] int32 — total seq len = sp + query_len
-    block_size: int,
     num_tokens: int,
+    pool_entries_per_block: int,
+    tokens_per_block_for_block_table: int,
+    ring_entries: int,
 ) -> torch.Tensor:
     """Pure-torch reference matching the Triton kernel formula."""
     out = torch.full((num_tokens,), -1, dtype=torch.long, device=block_table.device)
@@ -54,16 +56,19 @@ def _ref_compute_swa_slot_mapping(
         sp = seq_lens_l[b] - query_len
         for i in range(query_len):
             global_pos = sp + i
-            block_in_seq = global_pos // block_size
-            in_block = global_pos % block_size
+            block_in_seq = global_pos // tokens_per_block_for_block_table
+            in_block = global_pos % ring_entries
             if block_in_seq < max_blocks:
                 block_id = bt_cpu[b][block_in_seq]
             else:
                 block_id = -1
-            if block_id < 0:
+            block_end = (block_in_seq + 1) * tokens_per_block_for_block_table
+            effective_end = min(block_end, seq_lens_l[b])
+            tail_write = global_pos + ring_entries >= effective_end
+            if block_id <= 0 or not tail_write:
                 slot = -1
             else:
-                slot = block_id * block_size + in_block
+                slot = block_id * pool_entries_per_block + in_block
             out[qs + i] = slot
     return out
 
@@ -105,7 +110,9 @@ class SwaSlotMappingTest(unittest.TestCase):
         block_table,
         query_lens,
         sp_values,
-        block_size,
+        pool_entries_per_block,
+        tokens_per_block_for_block_table,
+        ring_entries,
     ):
         bt, qsl, seq_lens, num_tokens = self._make_inputs(
             block_table, query_lens, sp_values
@@ -114,10 +121,20 @@ class SwaSlotMappingTest(unittest.TestCase):
             block_table=bt,
             query_start_loc=qsl,
             seq_lens=seq_lens,
-            block_size=block_size,
             num_tokens=num_tokens,
+            pool_entries_per_block=pool_entries_per_block,
+            tokens_per_block_for_block_table=tokens_per_block_for_block_table,
+            ring_entries=ring_entries,
         )
-        ref = _ref_compute_swa_slot_mapping(bt, qsl, seq_lens, block_size, num_tokens)
+        ref = _ref_compute_swa_slot_mapping(
+            bt,
+            qsl,
+            seq_lens,
+            num_tokens,
+            pool_entries_per_block=pool_entries_per_block,
+            tokens_per_block_for_block_table=tokens_per_block_for_block_table,
+            ring_entries=ring_entries,
+        )
         self.assertEqual(got.shape, ref.shape)
         self.assertEqual(got.dtype, ref.dtype)
         diff = (got != ref).nonzero(as_tuple=False)
@@ -139,7 +156,9 @@ class SwaSlotMappingTest(unittest.TestCase):
             block_table=[[5]],  # one valid block, id=5
             query_lens=[100],
             sp_values=[0],
-            block_size=256,
+            pool_entries_per_block=256,
+            tokens_per_block_for_block_table=256,
+            ring_entries=256,
         )
 
     def test_cold_prefill_spans_two_blocks(self):
@@ -148,7 +167,9 @@ class SwaSlotMappingTest(unittest.TestCase):
             block_table=[[3, 7]],
             query_lens=[200],
             sp_values=[0],
-            block_size=128,
+            pool_entries_per_block=128,
+            tokens_per_block_for_block_table=128,
+            ring_entries=128,
         )
 
     def test_continuation_prefill_paged_tail(self):
@@ -162,7 +183,9 @@ class SwaSlotMappingTest(unittest.TestCase):
             block_table=[[-1, -1, -1, 11, 12]],
             query_lens=[100],
             sp_values=[900],  # global pos 900..999, eb=256 ⇒ seg 3,4
-            block_size=256,
+            pool_entries_per_block=256,
+            tokens_per_block_for_block_table=256,
+            ring_entries=256,
         )
 
     def test_swa_eviction_some_tokens_dropped(self):
@@ -171,7 +194,9 @@ class SwaSlotMappingTest(unittest.TestCase):
             block_table=[[-1, -1, -1, 21, 22]],
             query_lens=[1027],  # cold prefill of 1027 tokens
             sp_values=[0],
-            block_size=256,
+            pool_entries_per_block=256,
+            tokens_per_block_for_block_table=256,
+            ring_entries=256,
         )
 
     def test_sparse_valid_blocks_are_all_written(self):
@@ -185,8 +210,39 @@ class SwaSlotMappingTest(unittest.TestCase):
             block_table=[[11, -1, 13, -1, 15]],
             query_lens=[5 * 256],
             sp_values=[0],
-            block_size=256,
+            pool_entries_per_block=256,
+            tokens_per_block_for_block_table=256,
+            ring_entries=256,
         )
+
+    def test_large_physical_block_writes_only_ring_tails(self):
+        """physical rows can be much larger than SWA ring entries.
+
+        Only the final ring-sized tail before a physical boundary, plus the
+        request tail in the next physical row, should write. Earlier tokens
+        collide in the ring and must be skipped.
+        """
+        tpb = 16384
+        for ring_entries in (128, 130, 132, 134):
+            cases = (
+                ("cold_cross_boundary", 0, tpb + 16),
+                (
+                    "continuation_cross_boundary",
+                    tpb - ring_entries - 8,
+                    ring_entries + 24,
+                ),
+                ("short_request_mid_block", 4096, 17),
+            )
+            for name, sp, query_len in cases:
+                with self.subTest(name=name, ring_entries=ring_entries):
+                    self._check(
+                        block_table=[[7, 11]],
+                        query_lens=[query_len],
+                        sp_values=[sp],
+                        pool_entries_per_block=ring_entries,
+                        tokens_per_block_for_block_table=tpb,
+                        ring_entries=ring_entries,
+                    )
 
     def test_continuation_at_segment_boundary(self):
         """sp lands exactly on a block boundary — first new token goes
@@ -195,7 +251,9 @@ class SwaSlotMappingTest(unittest.TestCase):
             block_table=[[-1, -1, 8, 9]],
             query_lens=[256],
             sp_values=[512],  # global 512..767, eb=256 ⇒ seg 2
-            block_size=256,
+            pool_entries_per_block=256,
+            tokens_per_block_for_block_table=256,
+            ring_entries=256,
         )
 
     def test_multi_request_batch(self):
@@ -212,7 +270,9 @@ class SwaSlotMappingTest(unittest.TestCase):
             ],
             query_lens=[200, 100],
             sp_values=[600, 700],
-            block_size=256,
+            pool_entries_per_block=256,
+            tokens_per_block_for_block_table=256,
+            ring_entries=256,
         )
 
     def test_empty_input(self):
@@ -224,14 +284,16 @@ class SwaSlotMappingTest(unittest.TestCase):
             block_table=bt,
             query_start_loc=qsl,
             seq_lens=seq_lens,
-            block_size=256,
             num_tokens=0,
+            pool_entries_per_block=256,
+            tokens_per_block_for_block_table=256,
+            ring_entries=256,
         )
         self.assertEqual(out.shape, (0,))
         self.assertEqual(out.dtype, torch.long)
 
-    def test_block_id_zero_allowed(self):
-        """Warmup and valid physical block 0 must not be rejected."""
+    def test_block_id_zero_is_reserved(self):
+        """BlockPool reserves physical block 0; only positive ids are writable."""
         bt, qsl, seq_lens, num_tokens = self._make_inputs(
             [[0, 5]], query_lens=[200], sp_values=[0]
         )
@@ -239,12 +301,24 @@ class SwaSlotMappingTest(unittest.TestCase):
             block_table=bt,
             query_start_loc=qsl,
             seq_lens=seq_lens,
-            block_size=128,
             num_tokens=num_tokens,
+            pool_entries_per_block=128,
+            tokens_per_block_for_block_table=128,
+            ring_entries=128,
         )
-        ref = _ref_compute_swa_slot_mapping(bt, qsl, seq_lens, 128, num_tokens)
+        ref = _ref_compute_swa_slot_mapping(
+            bt,
+            qsl,
+            seq_lens,
+            num_tokens,
+            pool_entries_per_block=128,
+            tokens_per_block_for_block_table=128,
+            ring_entries=128,
+        )
         self.assertTrue(torch.equal(got, ref))
-        self.assertEqual(got[0].item(), 0)
+        self.assertEqual(got[0].item(), -1)
+        self.assertEqual(got[127].item(), -1)
+        self.assertGreater(got[128].item(), 0)
 
 
 if __name__ == "__main__":

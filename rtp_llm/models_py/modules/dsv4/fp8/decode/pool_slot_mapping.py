@@ -3,10 +3,10 @@
 Bridges ``DSv4DecodeAttnMetadataFP8``'s per-request positions (start_pos,
 compressed indices) and the framework BlockPool's flat slot space.
 
-For a multi-entry KV pool with ``entries_per_block = E``::
+For a multi-entry KV pool with ``pool_entries_per_block = E``::
 
-    block_id   = block_table[req, abs_pos // E]   # int32
-    in_block   = abs_pos %  E
+    block_id   = block_table[req, abs_pos // pool_tokens_per_block]   # int32
+    in_block   = abs_pos % ring_entries
     global_slot = block_id * E + in_block
 
 For state pools with ``E = 1`` slot per page::
@@ -21,16 +21,16 @@ CUDA-graph capture.
 
 from __future__ import annotations
 
-from typing import Optional
-
 import torch
 
 
 def compute_kv_pool_slot_mapping(
     block_table: torch.Tensor,
     abs_pos: torch.Tensor,
-    entries_per_block: int,
-    valid_mask: Optional[torch.Tensor] = None,
+    pool_entries_per_block: int,
+    pool_tokens_per_block: int,
+    ring_entries: int,
+    valid_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Per-token global pool slot for a multi-entry KV pool.
 
@@ -46,7 +46,11 @@ def compute_kv_pool_slot_mapping(
                 non-boundary tokens.
             Shape order is request-major: token i belongs to request
             ``i // q_len_per_req``.
-        entries_per_block: pool's entries-per-block (e.g. SWA 256, CSA 64).
+        pool_entries_per_block: pool's flat slot multiplier / tensor second
+            dimension ``E``.
+        pool_tokens_per_block: raw-token coverage of one block-table row.
+        ring_entries: in-block modulo domain. Pass ``pool_entries_per_block``
+            for non-ring paged pools.
         valid_mask: optional ``[B * q_len_per_req]`` bool. When provided,
             slots whose mask entry is False are forced to -1. If None,
             ``abs_pos < 0`` alone is used as the skip signal.
@@ -57,6 +61,13 @@ def compute_kv_pool_slot_mapping(
     """
     if abs_pos.numel() == 0:
         return torch.empty(0, dtype=torch.long, device=abs_pos.device)
+    pool_entries_per_block = int(pool_entries_per_block)
+    pool_tokens_per_block = int(pool_tokens_per_block)
+    ring_entries = int(ring_entries)
+    assert pool_entries_per_block > 0
+    assert pool_tokens_per_block > 0
+    assert ring_entries > 0
+
     B = block_table.shape[0]
     T_total = abs_pos.shape[0]
     assert T_total % B == 0, f"abs_pos ({T_total}) must be divisible by batch ({B})"
@@ -78,8 +89,8 @@ def compute_kv_pool_slot_mapping(
         skip = skip | (~valid_mask.to(torch.bool))
     safe_pos = torch.where(skip, torch.zeros_like(abs_pos_i64), abs_pos_i64)
 
-    block_in_seq = safe_pos // entries_per_block
-    in_block = safe_pos - block_in_seq * entries_per_block
+    block_in_seq = safe_pos // pool_tokens_per_block
+    in_block = safe_pos % ring_entries
 
     # Clamp block_in_seq to [0, max_blocks-1] to keep gather in range when
     # abs_pos overflows the request's allocation (shouldn't happen for valid
@@ -90,7 +101,7 @@ def compute_kv_pool_slot_mapping(
     # Gather block_id per token.
     flat_bt = block_table.to(torch.long)
     block_id = flat_bt[req_idx, block_in_seq]
-    global_slot = block_id * entries_per_block + in_block
+    global_slot = block_id * pool_entries_per_block + in_block
 
     # C++ BlockPool reserves block 0 and uses -1 for NULL_BLOCK_IDX.
     # Normalize every unallocated block-table entry to the single writer/

@@ -189,12 +189,12 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
 
         auto sp_output_buffer          = std::make_shared<SpeculativeExecutorStreamOutput>();
         sp_output_buffer->propose_step = payload->propose_tokens.size() > 0 ? payload->propose_tokens.size() - 1 : 0;
-        sp_output_buffer->tokens = torch::zeros({1, (int64_t)payload->propose_tokens.size()}, torch::kInt32);
+        sp_output_buffer->tokens       = torch::zeros({1, (int64_t)payload->propose_tokens.size()}, torch::kInt32);
         memcpy(sp_output_buffer->tokens.data_ptr<int>(),
                payload->propose_tokens.data(),
                payload->propose_tokens.size() * sizeof(int));
 
-        const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+        const auto cuda_i32                  = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
         sp_output_buffer->propose_tokens_gpu = sp_output_buffer->tokens.to(cuda_i32, /*non_blocking=*/true);
         if (tensorPbHasPayload(payload->propose_probs)) {
             sp_output_buffer->all_probs = TensorPbConvert::pbToTorch(payload->propose_probs).to(torch::kCUDA);
@@ -208,10 +208,9 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
         if (payload->propose_tokens.size() >= 2) {
             auto propose_tokens_gpu = sp_output_buffer->tokens.narrow(1, 1, 1).to(cuda_i32, /*non_blocking=*/true);
             auto accept_len         = torch::ones({1}, cuda_i32);
-            auto accept_tokens =
-                torch::zeros({1, static_cast<int64_t>(payload->propose_tokens.size())}, cuda_i32);
-            accept_tokens[0][0] = sp_output_buffer->tokens[0][0];
-            auto next_seq_len   = torch::full({1}, static_cast<int64_t>(stream->seqLength()), cuda_i32);
+            auto accept_tokens      = torch::zeros({1, static_cast<int64_t>(payload->propose_tokens.size())}, cuda_i32);
+            accept_tokens[0][0]     = sp_output_buffer->tokens[0][0];
+            auto next_seq_len       = torch::full({1}, static_cast<int64_t>(stream->seqLength()), cuda_i32);
 
             stream->setMtpAsyncDeviceState(GenerateStream::MtpAsyncDeviceState{
                 .epoch                  = 0,
@@ -250,15 +249,13 @@ void StreamCacheResource::init(int batch_size) {
 
     size_t kernel_blocks_per_kv_block = 1;
     if (resource_context_.cache_manager) {  // cache manager is null when warmup
-        const auto& cache_config = resource_context_.cache_manager->cacheConfig();
-        group_nums               = cache_config.groupNums();
-        layer_all_num            = static_cast<int>(cache_config.layer_all_num);
-        layer_to_group           = cache_config.layer_to_group_id;
-        group_types              = cache_config.group_types;
-        layer_region_to_group    = cache_config.layer_region_to_group_id;
-        if (cache_config.kernel_seq_size_per_block > 0 && cache_config.seq_size_per_block > 0) {
-            kernel_blocks_per_kv_block = cache_config.seq_size_per_block / cache_config.kernel_seq_size_per_block;
-        }
+        const auto& cache_config   = resource_context_.cache_manager->cacheConfig();
+        group_nums                 = cache_config.groupNums();
+        layer_all_num              = static_cast<int>(cache_config.layer_all_num);
+        layer_to_group             = cache_config.layer_to_group_id;
+        group_types                = cache_config.group_types;
+        layer_region_to_group      = cache_config.layer_region_to_group_id;
+        kernel_blocks_per_kv_block = cache_config.kernelBlocksPerKvBlock();
     }
 
     batch_kv_cache_resource_->initGroups(

@@ -7,46 +7,98 @@ from typing import Any, Optional
 import torch
 import torch.nn as nn
 
+from rtp_llm.models_py.modules.dsv4.attn_type import (
+    CSA_KV,
+    CSA_STATE,
+    HCA_KV,
+    HCA_STATE,
+    INDEXER_KV,
+    INDEXER_STATE,
+    SWA_KV,
+)
 
-def require_kernel_tokens_per_block(kv_cache: Any) -> int:
-    """Return ``kernel_seq_size_per_block`` promoted into KVCache by C++.
+_PHYSICAL_ROW_REGIONS = {
+    int(SWA_KV),
+    int(CSA_STATE),
+    int(HCA_STATE),
+    int(INDEXER_STATE),
+}
+_KERNEL_ROW_REGIONS = {
+    int(CSA_KV),
+    int(HCA_KV),
+    int(INDEXER_KV),
+}
 
-    No fallback: if the C++ side failed to populate this we want a loud
-    crash with diagnostics instead of silently writing the state ring
-    buffer with the wrong stride. Shared by Attention / model decode
-    helpers so the contract is enforced once.
+
+def _positive_int(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        ivalue = int(value)
+    except (TypeError, ValueError):
+        return None
+    return ivalue if ivalue > 0 else None
+
+
+def _region_for_group_or_region(
+    kv_cache: Any,
+    group: Optional[int] = None,
+    region: Optional[int] = None,
+) -> Optional[int]:
+    if region is not None:
+        return int(region)
+    if group is None:
+        return None
+    group_region_names = getattr(kv_cache, "group_region_names", None)
+    if not group_region_names or group < 0 or group >= len(group_region_names):
+        return None
+    return int(group_region_names[group])
+
+
+def require_pool_tokens_per_block(
+    kv_cache: Any,
+    group: Optional[int] = None,
+    region: Optional[int] = None,
+) -> int:
+    """Return block-table row raw-token coverage for a pool.
+
+    C++ exposes only scalar physical/kernel block sizes. The group-specific
+    row size is inferred from the region identity: FULL paged pools use
+    ``kernel_seq_size_per_block``; SWA_KV and state pools use
+    ``seq_size_per_block``.
     """
-    ksb = int(getattr(kv_cache, "kernel_seq_size_per_block", 0))
-    if ksb <= 0:
-        spb = int(getattr(kv_cache, "seq_size_per_block", 0))
-        grp = getattr(kv_cache, "group_region_names", None)
-        raise RuntimeError(
-            "DSV4 KVCache.kernel_seq_size_per_block is %d (expected >0). "
-            "seq_size_per_block=%d, group_region_names=%r. The C++ CacheConfig "
-            "must propagate kernel_seq_size_per_block (256 for DSV4) into "
-            "PyWrappedModel's KVCache before forward." % (ksb, spb, grp)
-        )
-    return ksb
+    region_id = _region_for_group_or_region(kv_cache, group=group, region=region)
+    if region_id in _PHYSICAL_ROW_REGIONS:
+        value = _positive_int(getattr(kv_cache, "seq_size_per_block", None))
+        if value is not None:
+            return value
+    if region_id in _KERNEL_ROW_REGIONS:
+        value = _positive_int(getattr(kv_cache, "kernel_seq_size_per_block", None))
+        if value is not None:
+            return value
+
+    raise RuntimeError(
+        "DSV4 KVCache pool tokens-per-block cannot be inferred. "
+        "group=%r, region=%r, group_region_names=%r"
+        % (group, region, getattr(kv_cache, "group_region_names", None))
+    )
 
 
 class PoolBackedModule(nn.Module):
     """Base class for modules backed by framework-managed paged pools.
 
-    The FP8 indexer reads the raw pool views via ``_kv_pool_view`` /
-    ``_state_pool_view``. The FP8 compressor reads the same context via
-    ``_kv_pool_3d`` / ``_state_pool_3d`` because its kernels expect block-major
-    tensors. Keeping both aliases here lets the two modules share the lifecycle
-    code without reintroducing the old generic bind/scatter helpers.
+    The KV pool view is expected to be the production block-major tensor.
+    State pool views may arrive flat or block-major; this helper normalizes
+    them to ``_state_pool_3d`` for compressor kernels.
     """
 
     def __init__(self) -> None:
         super().__init__()
         self._kv_pool_view: Optional[torch.Tensor] = None
-        self._kv_pool_3d: Optional[torch.Tensor] = None
         self._kv_block_table: Optional[torch.Tensor] = None
         self._kv_eb: int = 0
+        self._kv_tokens_per_block: int = 0
 
-        self._state_pool_view: Optional[torch.Tensor] = None
         self._state_pool_3d: Optional[torch.Tensor] = None
         self._state_block_table: Optional[torch.Tensor] = None
         self._state_eb: int = 0
@@ -61,6 +113,7 @@ class PoolBackedModule(nn.Module):
         state_block_table: Optional[torch.Tensor],
         state_eb: int,
         state_tokens_per_block: int,
+        kv_tokens_per_block: int,
     ) -> None:
         """Install framework pool views.
 
@@ -69,19 +122,27 @@ class PoolBackedModule(nn.Module):
         is normally flat ``[num_blocks * state_eb, hidden]`` and is reshaped to
         ``_state_pool_3d`` for compressor kernels.
 
-        ``state_tokens_per_block`` is the number of tokens per kernel block
-        for state-pool block_table indexing (DSV4 = 256, sourced from
-        CacheConfig.kernel_seq_size_per_block). It is decoupled from
-        ``state_eb`` (= ring entries per block), so the block_table is
-        indexed with ``pos // state_tokens_per_block`` while the in-block
-        offset uses ``pos % state_eb``.
+        ``kv_eb`` is the KV pool's flat entries-per-block multiplier.
+        ``kv_tokens_per_block`` is the raw-token coverage of one KV block-table
+        row.
+
+        ``state_tokens_per_block`` is the raw-token coverage of one state-pool
+        block-table row. It is decoupled from ``state_eb`` because state pools
+        are ring buffers: the state pool is indexed with
+        ``pos // state_tokens_per_block`` while the in-block offset uses
+        ``pos % state_eb``.
         """
+        if kv_pool_view is not None:
+            assert kv_eb > 0 and kv_tokens_per_block > 0, (
+                f"KV pool bound but kv_eb={kv_eb} / "
+                f"kv_tokens_per_block={kv_tokens_per_block} non-positive; "
+                "CacheConfig propagation broken (writer would index with zero stride)"
+            )
         self._kv_pool_view = kv_pool_view
-        self._kv_pool_3d = kv_pool_view
         self._kv_block_table = kv_block_table
         self._kv_eb = kv_eb
+        self._kv_tokens_per_block = kv_tokens_per_block
 
-        self._state_pool_view = state_pool_view
         if state_pool_view is not None:
             assert state_eb > 0 and state_tokens_per_block > 0, (
                 f"state pool bound but state_eb={state_eb} / "
@@ -114,11 +175,10 @@ class PoolBackedModule(nn.Module):
 
     def clear_pool_context(self) -> None:
         self._kv_pool_view = None
-        self._kv_pool_3d = None
         self._kv_block_table = None
         self._kv_eb = 0
+        self._kv_tokens_per_block = 0
 
-        self._state_pool_view = None
         self._state_pool_3d = None
         self._state_block_table = None
         self._state_eb = 0

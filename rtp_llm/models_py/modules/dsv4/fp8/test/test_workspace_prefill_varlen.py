@@ -3,8 +3,8 @@
 Phase-3b of the dsv4 prefill varlen migration. Validates that
 ``Attention._build_workspace_meta`` correctly produces:
 
-  1. **Legacy B==1 / DSV4_VARLEN_PREFILL=0** — bit-equal to the
-     pre-Phase-3 scalar implementation (sp_int + seqlen scalars).
+  1. **B==1 varlen** — bit-equal to the scalar reference
+     (sp_int + seqlen scalars).
   2. **Varlen B>=2** — N_max-padded layout with per-request
      ``swa_seq_lens`` / ``cmp_seq_lens`` / ``swa_gather_lens`` /
      ``new_k_slot_in_flat`` derived from ``prefix_lengths`` +
@@ -29,7 +29,6 @@ Run:
 
 from __future__ import annotations
 
-import os
 import unittest
 from typing import Optional
 from unittest import mock
@@ -65,7 +64,13 @@ class _StubAttention:
     ) -> None:
         self.window_size = window_size
         self.compress_ratio = compress_ratio
-        self._kv_cache = object() if kv_cache_present else None
+
+        class _StubKvCache:
+            group_region_names = [SWA_KV, CSA_KV, HCA_KV]
+            seq_size_per_block = 256
+            kernel_seq_size_per_block = 256
+
+        self._kv_cache = _StubKvCache() if kv_cache_present else None
         self._block_tables_by_type = block_tables
         self._eb_by_type = eb_by_type or {}
 
@@ -180,17 +185,8 @@ def _device() -> torch.device:
 def _build_meta_legacy(
     stub: _StubAttention, sp: int, S: int, with_dense_cmp_topk: bool
 ) -> Optional[WorkspaceMeta]:
-    """Legacy B==1 / DSV4_VARLEN_PREFILL=0 — explicit ``use_varlen=False``
-    so the dispatch falls into the scalar branch regardless of env. The
-    contract guard in ``_build_shared_prefill_meta`` is the only place the
-    env is read in production; sub-builders take ``use_varlen`` as a kwarg."""
-    return stub._build_workspace_meta(
-        seqlen=S,
-        sp_int=sp,
-        device=_device(),
-        with_dense_cmp_topk=with_dense_cmp_topk,
-        use_varlen=False,
-    )
+    """B==1 scalar reference through the production varlen path."""
+    return _build_meta_varlen(stub, [sp], [S], with_dense_cmp_topk)
 
 
 def _build_meta_varlen(
@@ -294,10 +290,9 @@ class BuildWorkspaceMetaLegacyTest(unittest.TestCase):
         self.assertEqual(m.cmp_bt_int32.shape, (1, 3))
         self.assertEqual(m.swa_bt_int32.dtype, torch.int32)
 
-    def test_b1_varlen_tensors_passed_but_batch_eq_1_takes_legacy(self) -> None:
-        """Even with DSV4_VARLEN_PREFILL=1 + all varlen tensors populated,
-        ``batch_size == 1`` MUST take the legacy branch (== bit-equal).
-        Bisect-channel guarantee."""
+    def test_b1_varlen_tensors_match_scalar_reference(self) -> None:
+        """With all varlen tensors populated, ``batch_size == 1`` must
+        collapse to the scalar reference."""
         stub = _make_stub(win=8, compress_ratio=4)
         legacy = _build_meta_legacy(stub, sp=4, S=10, with_dense_cmp_topk=False)
         varlen_b1 = _build_meta_varlen(stub, [4], [10], with_dense_cmp_topk=False)
@@ -709,11 +704,7 @@ from rtp_llm.models_py.modules.dsv4.attn_type import (  # noqa: E402
 from rtp_llm.models_py.modules.dsv4.fp8.attention import (  # noqa: E402
     AttentionFP8 as Attention,
 )
-from rtp_llm.models_py.modules.dsv4.fp8.attention import (
-    CsaPrefillMeta,
-    HcaPrefillMeta,
-    _use_varlen_prefill,
-)
+from rtp_llm.models_py.modules.dsv4.fp8.attention import CsaPrefillMeta, HcaPrefillMeta
 
 
 class _StubCompressor:
@@ -937,8 +928,8 @@ class BuildCompressorMetaTest(unittest.TestCase):
             seqlen=seqlen, sp_int=sp_int, device=self.device, use_varlen=False
         )
 
-    def test_legacy_b1_uses_build_prefill_positions(self) -> None:
-        """``use_varlen=False`` (legacy / DSV4_VARLEN_PREFILL=0 bisect path):
+    def test_use_varlen_false_uses_single_request_positions(self) -> None:
+        """``use_varlen=False`` direct helper path:
         positions = arange(sp, sp+S), b_idx = zeros(S), is_batched=False,
         seq_start/cu_seq = None."""
         stub = _make_no_bind_stub(win=8, compress_ratio=128)  # HCA host compressor
@@ -1147,22 +1138,10 @@ class BuildCsaPrefillMetaTest(unittest.TestCase):
         )
 
     def test_b1_legacy_indexer_and_compressor_args(self) -> None:
-        """``use_varlen=False`` (DSV4_VARLEN_PREFILL=0 bisect channel):
-        indexer takes legacy scalar sp/seqlen, inline compressor takes
-        the legacy ``_build_prefill_positions`` path."""
+        """``use_varlen=False`` is rejected by the FP8 prefill path."""
         stub = _make_no_bind_stub(win=8, compress_ratio=4, n_reqs=1, bind_indexer=True)
-        ret = self._call(stub, [4], [10], use_varlen=False)
-        self.assertIsInstance(ret, CsaPrefillMeta)
-        idx_call = stub.indexer.calls[0]
-        self.assertEqual(idx_call["seqlen"], 10)
-        self.assertEqual(idx_call["sp_int"], 4)
-        # Inline compressor takes legacy branch → is_batched=False.
-        cmp_call = stub.compressor.calls[0]
-        self.assertEqual(cmp_call["is_batched"], False)
-        self.assertIsNone(cmp_call["seq_start_per_req"])
-        self.assertIsNone(cmp_call["cu_seq_per_req"])
-        expected_pos = torch.arange(4, 14, dtype=torch.long, device=self.device)
-        self.assertTrue(torch.equal(cmp_call["positions"], expected_pos))
+        with self.assertRaisesRegex(RuntimeError, "requires varlen metadata"):
+            self._call(stub, [4], [10], use_varlen=False)
 
     def test_b2_varlen_threads_all_kwargs(self) -> None:
         """B==2: indexer.prepare receives every per-request tensor,
@@ -1332,22 +1311,10 @@ class BuildHcaPrefillMetaTest(unittest.TestCase):
         self.assertEqual(wm.dense_cmp_topk.shape, (128, 3))
 
     def test_b1_legacy_compressor_call(self) -> None:
-        """``use_varlen=False`` (DSV4_VARLEN_PREFILL=0 bisect channel):
-        compressor takes the legacy ``_build_prefill_positions`` path."""
+        """``use_varlen=False`` is rejected by the FP8 prefill path."""
         stub = _make_no_bind_stub(win=512, compress_ratio=128, n_reqs=1)
-        ret = self._call(stub, [256], [128], use_varlen=False)
-        self.assertIsInstance(ret, HcaPrefillMeta)
-        cmp_call = stub.compressor.calls[0]
-        self.assertEqual(cmp_call["is_batched"], False)
-        self.assertIsNone(cmp_call["seq_start_per_req"])
-        self.assertIsNone(cmp_call["cu_seq_per_req"])
-        expected_pos = torch.arange(256, 384, dtype=torch.long, device=self.device)
-        self.assertTrue(torch.equal(cmp_call["positions"], expected_pos))
-        # Workspace meta still constructed (legacy branch in _build_workspace_meta).
-        wm = ret.workspace_meta
-        self.assertIsNotNone(wm)
-        self.assertIsNotNone(wm.dense_cmp_topk)
-        self.assertEqual(wm.dense_cmp_topk.shape, (128, 3))
+        with self.assertRaisesRegex(RuntimeError, "requires varlen metadata"):
+            self._call(stub, [256], [128], use_varlen=False)
 
     def test_b2_varlen_compressor_and_workspace_dense_topk(self) -> None:
         """B==2: compressor gets is_batched=True + per-request tensors;
@@ -1395,28 +1362,6 @@ class BuildHcaPrefillMetaTest(unittest.TestCase):
         # construction path; the builder must never touch it.
         self._call(stub, [256], [128])
         self.assertIsNone(stub.indexer)
-
-
-# -------------------------------------------------------------------------
-# 8. _use_varlen_prefill — env-driven dispatch gate threaded down from
-#    Attention._build_shared_prefill_meta to every sub-builder. Pin the
-#    semantics so a future env-var rename doesn't silently change the
-#    default dispatch.
-# -------------------------------------------------------------------------
-class UseVarlenPrefillGateTest(unittest.TestCase):
-
-    def test_env_default_is_on(self) -> None:
-        with mock.patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("DSV4_VARLEN_PREFILL", None)
-            self.assertTrue(_use_varlen_prefill())
-
-    def test_env_one_enables(self) -> None:
-        with mock.patch.dict(os.environ, {"DSV4_VARLEN_PREFILL": "1"}):
-            self.assertTrue(_use_varlen_prefill())
-
-    def test_env_zero_disables(self) -> None:
-        with mock.patch.dict(os.environ, {"DSV4_VARLEN_PREFILL": "0"}):
-            self.assertFalse(_use_varlen_prefill())
 
 
 if __name__ == "__main__":

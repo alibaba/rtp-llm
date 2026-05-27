@@ -919,12 +919,6 @@ class DeepSeekV4Model(GptModelBase):
                 "DSV4 prepare_decode_metadata: self.kv_cache is None; "
                 "C++ KVCacheManager must propagate KVCache before forward."
             )
-        from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
-            require_kernel_tokens_per_block,
-        )
-
-        state_tpb = require_kernel_tokens_per_block(self.kv_cache)
-
         cfg_kwargs = dict(
             max_batch_size=batch_size,
             q_len=q_len,
@@ -938,8 +932,6 @@ class DeepSeekV4Model(GptModelBase):
             paged_pool_specs=paged_pool_specs,
             group_region_names=group_region_names_snapshot,
         )
-        if self.fp8_kv_cache:
-            cfg_kwargs["state_tokens_per_block"] = state_tpb
         cfg = _DecodeFmhaImplConfig(**cfg_kwargs)
         impl = _DecodeFmhaImpl(
             cfg,
