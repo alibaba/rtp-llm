@@ -2086,9 +2086,7 @@ bool MtpExecutor::useAsyncPrepare() const {
         const char* stream_async_env = std::getenv("RTP_LLM_STREAM_ASYNC");
         const bool  stream_async     = (stream_async_env != nullptr && std::string(stream_async_env) == "1");
         if (stream_async) {
-            RTP_LLM_LOG_WARNING("[async-prepare] forced OFF because RTP_LLM_STREAM_ASYNC=1 is active; "
-                                "stream-async already overlaps bookkeeping with main launch and async-prepare "
-                                "adds AsyncRunner mutex/cv + worker->main event.block without a real overlap window");
+            RTP_LLM_LOG_WARNING("[async-prepare] forced OFF because RTP_LLM_STREAM_ASYNC=1 is active");
             return false;
         }
         return true;

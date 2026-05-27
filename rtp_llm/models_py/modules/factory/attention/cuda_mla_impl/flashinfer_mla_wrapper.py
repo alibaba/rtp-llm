@@ -359,4 +359,18 @@ class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
         )
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
+        # FP8 decode: bypass fill_params (which does D2H syncs via
+        # toHostContiguousI32) and use the device-only CUDA kernel path.
+        if (
+            getattr(self.fmha_impl, "_fp8_kv", False)
+            and attn_inputs.sequence_lengths_plus_1_d is not None
+            and attn_inputs.kv_cache_kernel_block_id_device is not None
+        ):
+            self.fmha_params.fill_decode_cuda_graph_params(
+                attn_inputs.sequence_lengths_plus_1_d,
+                attn_inputs.kv_cache_kernel_block_id_device,
+                self.seq_size_per_block,
+            )
+            self.fmha_impl.plan_cuda_graph(attn_inputs)
+            return
         self.prepare(attn_inputs, forbid_realloc=True)
