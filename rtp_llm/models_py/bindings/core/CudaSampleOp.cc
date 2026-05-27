@@ -288,8 +288,6 @@ void chainSpeculativeSampling(const SpeculativeSamplingParams& params) {
 // Sample ops (Ascend) — stub implementations
 // ============================================================
 
-namespace rtp_llm {
-
 GreedyOutput sampleGreedy(const GreedyParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
@@ -297,8 +295,6 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
 void chainSpeculativeSampling(const SpeculativeSamplingParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
-
-}  // namespace rtp_llm
 
 #else  // !USING_CUDA — ROCm platform
 
