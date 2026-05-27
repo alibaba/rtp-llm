@@ -108,7 +108,7 @@ class BackendRPCServerVisitor:
 
         config_role_type = pd_sep_config.role_type
 
-        if config_role_type == RoleType.PREFILL and not pd_sep_config.decode_entrance:
+        if config_role_type == RoleType.PREFILL:
             role_list.append(RoleType.DECODE)
             logging.info("Added DECODE role for PREFILL type")
         elif config_role_type == RoleType.DECODE and pd_sep_config.decode_entrance:
