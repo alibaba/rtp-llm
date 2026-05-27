@@ -1516,10 +1516,8 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
     async def test_max_new_tokens_negative_rejected_before_enqueue_repro_p3(
         self,
     ) -> None:
-        """P3 repro: dash-sc forwards a request with ``max_new_tokens=-1`` to
-        the backend, which raises ``FtRuntimeException('max_new_tokens is 0')``
-        and surfaces as HTTP 500. Expected: servicer rejects at the front
-        door with a structured ``error_message`` and never reaches enqueue."""
+        """max_new_tokens=-1 must return 400 via __messages__ (DashLLM protocol),
+        not 500 via error_message."""
         visitor = _FakeVisitor(_FakeAsyncStream([]))
         servicer = DashScInferenceServicer(backend_visitor=visitor)
         req = self._valid_infer_request()
@@ -1531,7 +1529,13 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(visitor.enqueue_called, 0)
         self.assertEqual(len(responses), 1)
-        self.assertIn("max_new_tokens", responses[0].error_message)
+        self.assertFalse(responses[0].error_message)
+        payload = json.loads(
+            responses[0].infer_response.parameters["__messages__"].string_param
+        )
+        self.assertEqual(payload["header"]["status_code"], 400)
+        self.assertEqual(payload["header"]["status_name"], "InvalidParameter")
+        self.assertIn("max_new_tokens", payload["header"]["status_message"])
 
     async def test_openai_compat_max_new_tokens_negative_uses_default(
         self,

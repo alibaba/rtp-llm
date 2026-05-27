@@ -27,6 +27,7 @@ from rtp_llm.dash_sc.codec import (
     OtherParams,
     SamplingParams,
     _token_ids_list_from_generate_output,
+    build_parameter_error_response,
     build_stream_response_from_generate_outputs,
     iter_fake_model_stream_infer,
     parse_dash_sc_grpc_request,
@@ -1150,8 +1151,9 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                 partial_metadata_sent = True
 
             if sampling is not None and sampling.max_new_tokens < 0:
-                yield predict_v2_pb2.ModelStreamInferResponse(
-                    error_message=f"invalid max_new_tokens: {sampling.max_new_tokens}"
+                yield build_parameter_error_response(
+                    str(request.id),
+                    f"invalid max_new_tokens: {sampling.max_new_tokens}",
                 )
                 return
 
