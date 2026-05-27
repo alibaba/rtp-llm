@@ -120,7 +120,7 @@ class DpBatchSchedulerTest {
         });
 
         // Default gRPC client: ack accepted, capture sent batches
-        when(grpcClient.enqueue(anyString(), anyInt(), any(EngineRpcService.BatchEnqueueRequestPB.class)))
+        when(grpcClient.enqueue(anyString(), anyInt(), any(EngineRpcService.BatchEnqueueRequestPB.class), anyLong()))
                 .thenAnswer(inv -> {
                     EngineRpcService.BatchEnqueueRequestPB b = inv.getArgument(2);
                     sentBatches.add(b);
@@ -217,13 +217,13 @@ class DpBatchSchedulerTest {
             assertFalse(r.isSuccess());
             assertEquals(StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(), r.getCode());
         }
-        verify(grpcClient, never()).enqueue(anyString(), anyInt(), any());
+        verify(grpcClient, never()).enqueue(anyString(), anyInt(), any(), anyLong());
     }
 
     @Test
     void enqueue_rejection_fails_all_batched_futures() throws Exception {
         AtomicInteger callCount = new AtomicInteger();
-        when(grpcClient.enqueue(anyString(), anyInt(), any(EngineRpcService.BatchEnqueueRequestPB.class)))
+        when(grpcClient.enqueue(anyString(), anyInt(), any(EngineRpcService.BatchEnqueueRequestPB.class), anyLong()))
                 .thenAnswer(inv -> {
                     callCount.incrementAndGet();
                     EngineRpcService.BatchEnqueueRequestPB b = inv.getArgument(2);
@@ -242,7 +242,7 @@ class DpBatchSchedulerTest {
 
     @Test
     void enqueue_rpc_failure_fails_futures() throws Exception {
-        when(grpcClient.enqueue(anyString(), anyInt(), any(EngineRpcService.BatchEnqueueRequestPB.class)))
+        when(grpcClient.enqueue(anyString(), anyInt(), any(EngineRpcService.BatchEnqueueRequestPB.class), anyLong()))
                 .thenReturn(CompletableFuture.failedFuture(new RuntimeException("UNAVAILABLE")));
         List<CompletableFuture<Response>> futures = IntStream.range(0, 4)
                 .mapToObj(i -> scheduler.submit(makeCtx(i + 1, "m1")))
@@ -321,7 +321,7 @@ class DpBatchSchedulerTest {
     @Test
     void cancel_during_PENDING_ACK_then_enqueue_rejected_still_cascades_engine_cancel() throws Exception {
         CompletableFuture<EngineRpcService.BatchEnqueueResponsePB> ackFuture = new CompletableFuture<>();
-        when(grpcClient.enqueue(anyString(), anyInt(), any(EngineRpcService.BatchEnqueueRequestPB.class)))
+        when(grpcClient.enqueue(anyString(), anyInt(), any(EngineRpcService.BatchEnqueueRequestPB.class), anyLong()))
                 .thenAnswer(inv -> {
                     sentBatches.add(inv.getArgument(2));
                     return ackFuture;

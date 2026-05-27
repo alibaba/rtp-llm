@@ -257,6 +257,13 @@ public class FlexlbConfig {
     private long sloSafetyMargin = 50;
 
     /**
+     * gRPC deadline (ms) for the {@code Master.BatchEnqueue} RPC sent to prefill
+     * workers. Under heavy load a batch may take longer than the default to be
+     * acknowledged; increase this when DEADLINE_EXCEEDED errors appear in logs.
+     */
+    private long dpBatchEnqueueDeadlineMs = 5000;
+
+    /**
      * Bounded look-ahead distance for {@code SloBudgetBatcher}'s backward scan.
      * After the FIFO head is locked in, the batcher scans at most this many
      * additional requests to find smaller ones that fit the remaining budget,

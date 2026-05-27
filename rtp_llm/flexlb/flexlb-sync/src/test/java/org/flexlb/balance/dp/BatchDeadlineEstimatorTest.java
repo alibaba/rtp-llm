@@ -11,10 +11,10 @@ class BatchDeadlineEstimatorTest {
     void normal_slo_computation() {
         long now = 1_000_000L;
         // seqLen=500, cacheMatched=200 → computeLen=300
-        // estimatePrefillTimeMs(300, 0) = 300
-        // ttftEstimate = 300 + 10(avgQueue) = 310
-        // slack = 500(slo) - 310 - 50(margin) = 140
-        // interval = max(10, min(100, 140)) = 100
+        // estimatePrefillTimeMs(300, 0) = 4
+        // ttftEstimate = 4 + 10(avgQueue) = 14
+        // slack = 500(slo) - 14 - 50(margin) = 436
+        // interval = max(10, min(100, 436)) = 100
         long deadline = BatchDeadlineEstimator.computeDeadlineMicros(
                 now, 500, 200, 10, 500, 50, 10, 100);
         assertEquals(now + 100 * 1000L, deadline);
@@ -24,10 +24,10 @@ class BatchDeadlineEstimatorTest {
     void slack_exceeds_max_interval_capped() {
         long now = 1_000_000L;
         // seqLen=100, cacheMatched=80 → computeLen=20
-        // estimatePrefillTimeMs(20, 0) = 20
-        // ttftEstimate = 20 + 0 = 20
-        // slack = 500 - 20 - 50 = 430
-        // interval = max(10, min(100, 430)) = 100
+        // estimatePrefillTimeMs(20, 0) = 4
+        // ttftEstimate = 4 + 0 = 4
+        // slack = 500 - 4 - 50 = 446
+        // interval = max(10, min(100, 446)) = 100
         long deadline = BatchDeadlineEstimator.computeDeadlineMicros(
                 now, 100, 80, 0, 500, 50, 10, 100);
         assertEquals(now + 100 * 1000L, deadline);
@@ -36,13 +36,13 @@ class BatchDeadlineEstimatorTest {
     @Test
     void tight_slo_uses_min_interval() {
         long now = 1_000_000L;
-        // seqLen=1000, cacheMatched=0 → computeLen=1000
-        // estimatePrefillTimeMs(1000, 0) = 1000
-        // ttftEstimate = 1000 + 100 = 1100
-        // slack = 500 - 1100 - 50 = -650
-        // interval = max(10, min(100, -650)) = 10
+        // seqLen=200000, cacheMatched=0 → computeLen=200000
+        // estimatePrefillTimeMs(200000, 0) = 664
+        // ttftEstimate = 664 + 100 = 764
+        // slack = 500 - 764 - 50 = -314
+        // interval = max(10, min(100, -314)) = 10
         long deadline = BatchDeadlineEstimator.computeDeadlineMicros(
-                now, 1000, 0, 100, 500, 50, 10, 100);
+                now, 200000, 0, 100, 500, 50, 10, 100);
         assertEquals(now + 10 * 1000L, deadline);
     }
 
@@ -51,7 +51,7 @@ class BatchDeadlineEstimatorTest {
         long now = 5_000_000L;
         long deadline = BatchDeadlineEstimator.computeDeadlineMicros(
                 now, 0, 0, 0, 500, 50, 10, 100);
-        // computeLen=0, estimateMs=0, slack=500-0-50=450, interval=min(100,450)=100
+        // computeLen=0, estimateMs=4, slack=500-4-50=446, interval=min(100,446)=100
         assertEquals(now + 100 * 1000L, deadline);
     }
 

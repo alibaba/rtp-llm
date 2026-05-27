@@ -165,7 +165,8 @@ public class DpBatchScheduler {
         Logger.info("BatchDispatch batchId={} dpSize={} realRequests={} totalInputs={}",
                 batchId, batch.dpSize(), assignments.size(), pb.getInputsCount());
 
-        grpcClient.enqueue(batch.prefillIp(), batch.prefillGrpcPort(), pb)
+        long deadlineMs = configService.loadBalanceConfig().getDpBatchEnqueueDeadlineMs();
+        grpcClient.enqueue(batch.prefillIp(), batch.prefillGrpcPort(), pb, deadlineMs)
                 .whenComplete((ack, err) -> handleAck(batch, batchId, assignments, ack, err));
     }
 
@@ -473,7 +474,7 @@ public class DpBatchScheduler {
             return;
         }
         WorkerStatus ws = roleMap.get(ipPort);
-        if (ws == null || ws.getDpStatuses() == null) {
+        if (ws == null || ws.getDpStatuses() == null || ws.getDpStatuses().isEmpty()) {
             return;
         }
         for (DpRankStatus drs : ws.getDpStatuses()) {

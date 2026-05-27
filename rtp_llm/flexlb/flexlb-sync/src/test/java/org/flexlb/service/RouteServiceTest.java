@@ -74,6 +74,7 @@ class RouteServiceTest {
         w.setIp("10.0.0.1");
         w.setPort(8080);
         w.setDpSize(dpSize);
+        w.setAlive(true);
         m.put("10.0.0.1:8080", w);
         return m;
     }

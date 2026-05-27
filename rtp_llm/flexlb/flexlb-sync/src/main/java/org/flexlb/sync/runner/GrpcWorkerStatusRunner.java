@@ -15,6 +15,9 @@ import org.flexlb.util.IdUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
@@ -204,6 +207,8 @@ public class GrpcWorkerStatusRunner implements Runnable {
         if (finishedTaskInfo == null || finishedTaskInfo.isEmpty() || inflightRegistry == null) {
             return;
         }
+
+        Map<Long, List<TaskInfo>> batchGroups = new HashMap<>();
         for (Map.Entry<String, TaskInfo> entry : finishedTaskInfo.entrySet()) {
             long requestId;
             try {
@@ -216,9 +221,20 @@ public class GrpcWorkerStatusRunner implements Runnable {
             }
             TaskInfo task = entry.getValue();
             if (task.getPrefillTime() > 0) {
-                long predictedMs = TaskInfo.estimatePrefillTimeMs(task.getInputLength(), task.getPrefixLength());
-                engineHealthReporter.reportPrefillPredictionError(modelName, predictedMs, task.getPrefillTime());
+                batchGroups.computeIfAbsent(task.getPrefillTime(), k -> new ArrayList<>()).add(task);
             }
+        }
+
+        for (Map.Entry<Long, List<TaskInfo>> batch : batchGroups.entrySet()) {
+            long batchStepTimeUs = batch.getKey();
+            long totalInput = 0;
+            long totalPrefix = 0;
+            for (TaskInfo task : batch.getValue()) {
+                totalInput += task.getInputLength();
+                totalPrefix += task.getPrefixLength();
+            }
+            long predictedMs = TaskInfo.estimatePrefillTimeMs(totalInput, totalPrefix);
+            engineHealthReporter.reportPrefillPredictionError(modelName, predictedMs, batchStepTimeUs);
         }
     }
 

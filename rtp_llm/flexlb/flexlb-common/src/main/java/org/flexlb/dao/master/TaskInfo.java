@@ -34,7 +34,7 @@ public class TaskInfo {
     }
 
     public static long estimatePrefillTimeMs(long tokens, long hitCacheTokens) {
-        return (long) (tokens * 1.0 - hitCacheTokens * 0.7);
+        return (long) (0.0033 * (tokens - hitCacheTokens) + 4);
     }
 
     /**
