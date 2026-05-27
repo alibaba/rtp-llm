@@ -807,10 +807,26 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
         task.get();
     }
 
-    // Phase 3: now do local self-Enqueue. Because peer DPs are already queued
-    // (phase 2), DP0 entering forward in the next engine step will pair on
-    // every DeepEP collective with a peer that is at least at the same forward
-    // boundary. This is the correctness guarantee.
+    // Phase 3: local self-Enqueue with two-pass structure.
+    // For force_batch groups (dpSize=1), the old sequential Enqueue() deadlocks:
+    // each Enqueue blocks at waitStreamBeforeRun until the scheduler admits the
+    // stream, but the scheduler waits for the full group. Two passes fix this:
+    //   Pass A: prepareAllocateResource + enqueueRequest for all self-slots
+    //   Pass B: remoteLoadCacheStart + finishStream (group now complete, instant admit)
+    struct LocalSlot {
+        int                                     index;
+        std::shared_ptr<RPCContext>             rpc_context;
+        std::shared_ptr<PrefillGenerateContext> prefill_context;
+        AtomicGuardPtr                          request_guard;
+        int64_t                                 request_id;
+    };
+    std::vector<LocalSlot> local_slots;
+    local_slots.reserve(slot_num);
+
+    auto max_retry_times      = maga_init_params_.pd_sep_config.prefill_retry_times;
+    auto max_retry_timeout_ms = maga_init_params_.pd_sep_config.prefill_retry_timeout_ms;
+
+    // Phase 3a: prepare + enqueue all self-slots into scheduler
     for (int i = 0; i < slot_num; ++i) {
         const auto&   input     = request->inputs(i);
         const int32_t slot_rank = input.has_dp_rank() ? input.dp_rank().value() : self_dp_rank;
@@ -821,12 +837,111 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
             continue;
         }
 
-        EnqueueRequestPB local_req;
-        *local_req.mutable_input() = input;
-        auto local_status          = Enqueue(context, &local_req, ack);
-        if (!local_status.ok()) {
-            fill_error(ack, input.request_id(), local_status.error_code(), local_status.error_message());
+        auto req_id = input.request_id();
+        ack->set_request_id(req_id);
+
+        if (input.is_fake_query()) {
+            auto fake_stream = engine_->createMinFakeStream(/*max_new_tokens=*/1);
+            RTP_LLM_LOG_INFO("BatchEnqueue fake_query req=%ld dp_rank=%d", req_id, slot_rank);
+            if (fake_stream) {
+                engine_->enqueue(fake_stream);
+            }
+            continue;
         }
+
+        if (response_registry_.get(req_id) != nullptr) {
+            fill_error(ack, req_id, grpc::StatusCode::ALREADY_EXISTS, "already enqueued");
+            continue;
+        }
+
+        auto rpc_ctx = std::make_shared<RPCContext>(RPCContext{&input, nullptr});
+        auto pfx_ctx = std::make_shared<PrefillGenerateContext>(
+            &this->resource(), *rpc_ctx, input.generate_config().timeout_ms(),
+            /*server_context=*/nullptr, metrics_reporter_, meta_);
+        pfx_ctx->onflight_requests      = onflight_requests_;
+        pfx_ctx->loading_cache_requests = loading_cache_requests_;
+        auto guard = std::make_shared<AtomicGuard>(onflight_requests_);
+
+        // prepareAllocateResource with retry (mirrors syncPrefix logic)
+        bool alloc_ok = false;
+        {
+            int64_t begin_time_us = currentTimeUs();
+            auto    stage         = pfx_ctx->stat_info.saveStage();
+            for (int attempt = 0; attempt <= max_retry_times; ++attempt) {
+                pfx_ctx->reset();
+                pfx_ctx->stat_info.restoreStage(stage);
+                pfx_ctx->retry_times++;
+                prepareAllocateResource(*pfx_ctx);
+                if (pfx_ctx->ok()) {
+                    alloc_ok = true;
+                    break;
+                }
+                auto cost_time_us             = currentTimeUs() - begin_time_us;
+                pfx_ctx->retry_cost_time_ms   = cost_time_us / 1000;
+                if (max_retry_timeout_ms > 0 && cost_time_us >= max_retry_timeout_ms * 1000) {
+                    break;
+                }
+                usleep(1000);  // 1ms retry interval
+            }
+        }
+        if (!alloc_ok) {
+            RTP_LLM_LOG_WARNING("BatchEnqueue req=%ld prepareAllocateResource failed after %ld retries",
+                                req_id, pfx_ctx->retry_times);
+            fill_error(ack, req_id, grpc::StatusCode::INTERNAL,
+                       pfx_ctx->error_info.ToString());
+            continue;
+        }
+
+        // enqueueRequest: adds stream to FIFOScheduler's waiting_streams_ (instant)
+        pfx_ctx->stat_info.nextStage();
+        enqueueRequest(*pfx_ctx);
+        if (pfx_ctx->hasError()) {
+            fill_error(ack, req_id, grpc::StatusCode::INTERNAL,
+                       pfx_ctx->error_info.ToString());
+            continue;
+        }
+
+        local_slots.push_back({i, rpc_ctx, pfx_ctx, guard, req_id});
+    }
+
+    // Phase 3b: remoteLoadCacheStart + spawn finishStream for each successful slot.
+    // All streams are now in the scheduler — force_batch group is complete, CanRun fires.
+    for (auto& slot : local_slots) {
+        auto* ack     = response->mutable_acks(slot.index);
+        auto& pfx_ctx = slot.prefill_context;
+
+        pfx_ctx->stat_info.nextStage();
+        remoteLoadCacheStart(*pfx_ctx);
+        if (pfx_ctx->hasError()) {
+            fill_error(ack, slot.request_id, grpc::StatusCode::INTERNAL,
+                       pfx_ctx->error_info.ToString());
+            continue;
+        }
+
+        auto entry  = response_registry_.create(slot.request_id);
+        auto writer = std::make_shared<ResponseBufferWriter>(entry);
+        pfx_ctx->rpc_context.writer = writer.get();
+
+        std::thread worker(
+            [this, pfx_ctx = slot.prefill_context, rpc_ctx = slot.rpc_context,
+             writer, entry, guard = slot.request_guard, rid = slot.request_id]() mutable {
+                grpc::Status finish_status;
+                try {
+                    finish_status = finishStream(*pfx_ctx);
+                } catch (const std::exception& e) {
+                    finish_status = grpc::Status(grpc::StatusCode::INTERNAL, e.what());
+                } catch (...) {
+                    finish_status = grpc::Status(grpc::StatusCode::INTERNAL, "finishStream unknown exception");
+                }
+                if (!finish_status.ok()) {
+                    std::lock_guard<std::mutex> lock(entry->mu);
+                    entry->error_status = finish_status;
+                }
+                entry->done.store(true);
+                entry->cv.notify_all();
+                RTP_LLM_LOG_DEBUG("BatchEnqueue req=%ld finishStream done ok=%d", rid, finish_status.ok());
+            });
+        worker.detach();
     }
 
     RTP_LLM_LOG_INFO("BatchEnqueue batch=%ld self_dp=%d phase3_local_done", request->batch_id(), self_dp_rank);
