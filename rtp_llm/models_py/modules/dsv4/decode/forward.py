@@ -3,7 +3,7 @@
 Exposes qwen3-style decode primitives as free functions so the Model
 class stays thin:
 
-* ``build_paged_pool_specs`` — per-attn_type (entries_per_block, max_blocks_per_req)
+* ``build_paged_pool_specs`` — per-attn_type paged pool geometry
 * ``build_metadata_eager``   — DSv4DecodeAttnMetadata from raw attn_inputs
 * ``forward_layers``         — per-layer loop body (embed → layers → reduce + norm)
 * ``forward_decode``         — full decode arm (metadata dispatch + per-layer + packing)
@@ -58,13 +58,45 @@ def _dsv4_kernel_tokens_per_block(kv_cache: Any) -> int:
     return ksb
 
 
+def _dsv4_physical_tokens_per_block(kv_cache: Any) -> int:
+    spb = _positive_int(getattr(kv_cache, "seq_size_per_block", None))
+    if spb is None:
+        raise RuntimeError(
+            "DSV4 KVCache.seq_size_per_block is missing. "
+            "group_region_names=%r" % (getattr(kv_cache, "group_region_names", None),)
+        )
+    return spb
+
+
+def _dsv4_pool_tokens_per_block(kv_cache: Any, attn_type: int) -> int:
+    if int(attn_type) in (
+        int(SWA_KV),
+        int(CSA_STATE),
+        int(HCA_STATE),
+        int(INDEXER_STATE),
+    ):
+        return _dsv4_physical_tokens_per_block(kv_cache)
+    if int(attn_type) in (int(CSA_KV), int(HCA_KV), int(INDEXER_KV)):
+        return _dsv4_kernel_tokens_per_block(kv_cache)
+    raise RuntimeError(f"DSV4 unexpected attn_type={int(attn_type)}")
+
+
+def _positive_int(value: Any) -> Optional[int]:
+    try:
+        ivalue = int(value)
+    except (TypeError, ValueError):
+        return None
+    return ivalue if ivalue > 0 else None
+
+
 def build_paged_pool_specs(
     kv_cache: Optional[Any],
     v4: Any,
     max_seq_len: Optional[int] = None,
-) -> Dict[int, Tuple[int, int]]:
-    """Per-attn_type ``(entries_per_block, max_blocks_per_req)`` for the
-    decode-FMHA impl's metadata pre-allocation.
+) -> Dict[int, Tuple[int, int, int]]:
+    """Per-attn_type paged pool specs for metadata pre-allocation.
+
+    Returns ``(entries_per_block, tokens_per_block, max_blocks_per_req)``.
 
     ``entries_per_block`` is derived from the framework pool tensor's
     stride on layer 0 (all layers share the same allocator geometry per
@@ -106,7 +138,7 @@ def build_paged_pool_specs(
     # compressor layers (layer 0/1 are SWA-only on DSV4). Probe the first
     # layer that has the pool — per-attn_type geometry is uniform across
     # the layers that own it.
-    specs: Dict[int, Tuple[int, int]] = {}
+    specs: Dict[int, Tuple[int, int, int]] = {}
     saved_kv: Dict[int, Any] = {}
     try:
         # #50: STATE pool block tables must also flow through metadata so
@@ -129,7 +161,15 @@ def build_paged_pool_specs(
                     attn._kv_cache = kv_cache
                 entries_per_block = attn._pool_entries_per_block(attn_type)
                 if entries_per_block > 0:
-                    specs[attn_type] = (entries_per_block, max_blocks_per_req)
+                    tokens_per_block = _dsv4_pool_tokens_per_block(
+                        kv_cache,
+                        attn_type,
+                    )
+                    specs[attn_type] = (
+                        entries_per_block,
+                        tokens_per_block,
+                        max_blocks_per_req,
+                    )
                     break
         return specs
     finally:
@@ -141,7 +181,7 @@ def build_metadata_eager(
     v4_args: Any,
     attn: Any,
     device: torch.device,
-    paged_pool_specs: Dict[int, Tuple[int, int]],
+    paged_pool_specs: Dict[int, Tuple[int, int, int]],
     kv_cache: Optional[Any] = None,
     fp8_kv_cache: bool = False,
 ) -> Optional[Any]:  # DSv4DecodeAttnMetadata | None
@@ -187,6 +227,7 @@ def build_metadata_eager(
     # no forbid_realloc).
     paged_block_tables: Dict[int, Any] = {}
     paged_entries_per_block: Dict[int, int] = {}
+    paged_tokens_per_block: Dict[int, int] = {}
     if paged_pool_specs:
         by_group = getattr(attn, "kv_cache_kernel_block_id_device_by_group", None)
         group_region_names = (
@@ -205,7 +246,8 @@ def build_metadata_eager(
                 spec = paged_pool_specs.get(attn_type)
                 if spec is None:
                     continue
-                entries_per_block, _ = spec
+                entries_per_block = int(spec[0])
+                paged_tokens_per_block[attn_type] = int(spec[1])
                 group_block_table = by_group[group_id]
                 if group_block_table is None or group_block_table.numel() == 0:
                     continue
@@ -217,7 +259,6 @@ def build_metadata_eager(
             build_decode_metadata_fp8,
         )
 
-        ksb = _dsv4_kernel_tokens_per_block(kv_cache)
         return build_decode_metadata_fp8(
             attention_inputs=attn,
             q_len=q_len,
@@ -229,7 +270,7 @@ def build_metadata_eager(
             device=device,
             paged_block_tables=paged_block_tables or None,
             paged_pool_entries_per_block=paged_entries_per_block or None,
-            state_tokens_per_block=ksb,
+            paged_pool_tokens_per_block=paged_tokens_per_block or None,
         )
 
     # BF16 path: legacy ``build_decode_metadata`` takes a raw ``start_pos``

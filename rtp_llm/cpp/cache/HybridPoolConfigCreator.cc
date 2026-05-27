@@ -136,6 +136,15 @@ void populateDefaultRegionMappings(CacheConfig& config) {
     }
 }
 
+size_t kernelBlocksPerKvBlockForGroup(const CacheConfig& config, size_t group_id) {
+    RTP_LLM_CHECK_WITH_INFO(group_id < config.group_types.size(),
+                            "missing cache group type for group %zu (group_types.size=%zu)",
+                            group_id,
+                            config.group_types.size());
+    const bool is_full = config.group_types[group_id] == CacheGroupType::FULL;
+    return is_full ? config.kernelBlocksPerKvBlock() : 1;
+}
+
 void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
     config.use_independent_block_pools = true;
     const auto group_num               = static_cast<size_t>(config.groupNums());
@@ -155,11 +164,6 @@ void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
     size_t   state_scale_block_bytes = 0;
     uint32_t max_group_layers        = 0;
 
-    // All groups share the global bpk (= seq_size_per_block / kernel_seq_size).
-    // FULL paged + SWA fixed pools both view the spec's per-block bytes as
-    // kernel-block-sized; multiplying by bpk gives the BlockPool's per-physical
-    // allocation stride. Non-DSV4 paths default bpk=1 → no scaling.
-    const size_t global_bpk = config.kernelBlocksPerKvBlock();
     config.layer_to_block_stride_bytes.assign(config.layer_all_num, 0);
     for (size_t gid = 0; gid < config.cache_specs.size(); ++gid) {
         const auto& spec = config.cache_specs[gid];
@@ -167,8 +171,9 @@ void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
         const auto   layer_count                = static_cast<uint32_t>(config.global_layer_ids[gid].size());
         const size_t kernel_kv_stride           = spec->block_size_bytes();
         const auto   kernel_scale               = spec->scale_block_size_bytes();
-        const size_t kv_stride                  = kernel_kv_stride * global_bpk;
-        const size_t scale_stride               = kernel_scale * global_bpk;
+        const size_t group_bpk                  = kernelBlocksPerKvBlockForGroup(config, gid);
+        const size_t kv_stride                  = kernel_kv_stride * group_bpk;
+        const size_t scale_stride               = kernel_scale * group_bpk;
         config.group_kv_block_stride_bytes[gid] = kv_stride;
         config.group_kv_scale_stride_bytes[gid] = scale_stride;
         config.group_block_size_bytes[gid]      = static_cast<size_t>(layer_count) * (kv_stride + scale_stride);

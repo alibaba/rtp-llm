@@ -1,25 +1,20 @@
 """UT for the fused CompressorFP8.prepare_metadata slot builder.
 
 The decode/speculative path flattens request-major ``[B, S]`` metadata into
-``positions[N]`` and ``b_idx[N]``.  This test compares the default-on fused
+``positions[N]`` and ``b_idx[N]``.  This test compares the fused
 Triton path against the Python reference path for both CSA/indexer
 ``ratio=4`` and HCA ``ratio=128`` shapes.
 """
 
 from __future__ import annotations
 
-import os
 import unittest
-from contextlib import contextmanager
 from typing import Optional
 
 import torch
 
 from rtp_llm.models_py.modules.dsv4.fp8 import _fused_compressor_meta_triton
-from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
-    CompressorFP8,
-    _compressor_meta_fused_enabled,
-)
+from rtp_llm.models_py.modules.dsv4.fp8.compressor import CompressorFP8, CompressorMeta
 
 DEVICE = "cuda"
 STATE_EB = 256
@@ -27,22 +22,6 @@ requires_cuda = unittest.skipUnless(
     torch.cuda.is_available() and _fused_compressor_meta_triton._TRITON_AVAILABLE,
     "CUDA/Triton unavailable",
 )
-
-
-@contextmanager
-def _env(value: Optional[str]):
-    prev = os.environ.get("DSV4_FUSED_PREPARE")
-    if value is None:
-        os.environ.pop("DSV4_FUSED_PREPARE", None)
-    else:
-        os.environ["DSV4_FUSED_PREPARE"] = value
-    try:
-        yield
-    finally:
-        if prev is None:
-            os.environ.pop("DSV4_FUSED_PREPARE", None)
-        else:
-            os.environ["DSV4_FUSED_PREPARE"] = prev
 
 
 def _make_positions(
@@ -72,6 +51,7 @@ def _shell(
     object.__setattr__(cmp, "_state_tokens_per_block", STATE_EB)
     object.__setattr__(cmp, "_kv_block_table", kv_bt)
     object.__setattr__(cmp, "_kv_eb", kv_eb)
+    object.__setattr__(cmp, "_kv_tokens_per_block", kv_eb * ratio if kv_eb > 0 else 0)
     object.__setattr__(cmp, "_kv_cache_sharded", False)
     object.__setattr__(cmp, "_cp_ctx", None)
     if pool_rows > 0 and kv_eb > 0:
@@ -81,7 +61,7 @@ def _shell(
         )
     else:
         pool = None
-    object.__setattr__(cmp, "_kv_pool_3d", pool)
+    object.__setattr__(cmp, "_kv_pool_view", pool)
     return cmp
 
 
@@ -92,6 +72,43 @@ def _assert_meta_equal(py, fused):
     assert torch.equal(py.kv_slots, fused.kv_slots)
     assert torch.equal(py.token_to_req, fused.token_to_req)
     assert py.is_batched == fused.is_batched
+
+
+def _prepare_python_reference(
+    cmp: CompressorFP8,
+    positions: torch.Tensor,
+    b_idx: torch.Tensor,
+    *,
+    q_len: int,
+    start_pos_values: list[int],
+) -> CompressorMeta:
+    seq_start_per_req = positions.view(len(start_pos_values), q_len)[:, 0].to(
+        torch.int32
+    )
+    cu_seq_per_req = torch.arange(
+        0,
+        (len(start_pos_values) + 1) * q_len,
+        q_len,
+        dtype=torch.int32,
+        device=DEVICE,
+    )
+    seq_end_per_req = seq_start_per_req.to(torch.long) + (
+        cu_seq_per_req[1:] - cu_seq_per_req[:-1]
+    ).to(torch.long)
+    return CompressorMeta(
+        positions=positions,
+        b_idx=b_idx,
+        state_slots=cmp._compute_state_slot_mapping(
+            positions,
+            b_idx,
+            seq_end_per_req,
+        ),
+        kv_slots=cmp._compute_kv_slot_mapping(positions, b_idx),
+        token_to_req=b_idx.to(torch.int32),
+        is_batched=q_len > 1,
+        seq_start_per_req=seq_start_per_req,
+        cu_seq_per_req=cu_seq_per_req,
+    )
 
 
 def _compare_default_fused_to_python(
@@ -115,9 +132,14 @@ def _compare_default_fused_to_python(
         pool_rows=pool_rows,
     )
 
-    seq_start_per_req = positions.view(len(start_pos_values), q_len)[:, 0].to(
-        torch.int32
+    py = _prepare_python_reference(
+        cmp,
+        positions,
+        b_idx,
+        q_len=q_len,
+        start_pos_values=start_pos_values,
     )
+    seq_start_per_req = py.seq_start_per_req
     cu_seq_per_req = torch.arange(
         0,
         (len(start_pos_values) + 1) * q_len,
@@ -126,34 +148,16 @@ def _compare_default_fused_to_python(
         device=DEVICE,
     )
 
-    with _env("0"):
-        py = cmp.prepare_metadata(
-            positions,
-            b_idx,
-            is_batched=q_len > 1,
-            seq_start_per_req=seq_start_per_req,
-            cu_seq_per_req=cu_seq_per_req,
-        )
-
-    with _env(None):
-        assert _compressor_meta_fused_enabled()
-        fused = cmp.prepare_metadata(
-            positions,
-            b_idx,
-            is_batched=q_len > 1,
-            seq_start_per_req=seq_start_per_req,
-            cu_seq_per_req=cu_seq_per_req,
-        )
+    fused = cmp.prepare_metadata(
+        positions,
+        b_idx,
+        is_batched=q_len > 1,
+        seq_start_per_req=seq_start_per_req,
+        cu_seq_per_req=cu_seq_per_req,
+    )
 
     _assert_meta_equal(py, fused)
     return fused
-
-
-def test_default_enabled():
-    with _env(None):
-        assert _compressor_meta_fused_enabled()
-    with _env("0"):
-        assert not _compressor_meta_fused_enabled()
 
 
 @requires_cuda
@@ -375,7 +379,6 @@ def test_ratio128_q_len_gt_ratio():
 
 
 if __name__ == "__main__":
-    test_default_enabled()
     test_ratio4_q_len_1()
     test_ratio4_q_len_2()
     test_ratio4_batched_speculative_q_len_gt_1()

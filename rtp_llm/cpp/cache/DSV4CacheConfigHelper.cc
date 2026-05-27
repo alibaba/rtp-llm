@@ -8,10 +8,10 @@ namespace rtp_llm {
 
 namespace {
 
-// Kernel block size in tokens. DSV4 attention/compressor kernels and the
-// DSV4 typed pools use seq_size_per_block as both physical and kernel block
-// size. The default stays 256 when seq_size_per_block is not provided.
-// HCA compressed pools require the configured block size to be 128-token aligned.
+// Kernel block size in tokens. DSV4 typed pools keep one physical
+// seq_size_per_block for ownership/cache-key alignment, while FULL paged
+// pools may use a smaller kernel_seq_size_per_block for kernel block tables.
+// HCA compressed pools require the kernel block size to be 128-token aligned.
 constexpr uint32_t kDsv4KernelTokensPerBlock    = 256;
 constexpr uint32_t kDsv4MinKernelTokensPerBlock = 128;
 // BF16 pool: head_dim=512 × 2B = 1024B per KV slot, 128 × 2B = 256B per
@@ -75,6 +75,14 @@ inline uint32_t computeStateRing(int compress_ratio, int overlap, int gen_num_pe
     return static_cast<uint32_t>((raw + 1) & ~1);  // ceil to even
 }
 
+inline uint32_t computeRingEntries(int window, int gen_num_per_cycle) {
+    RTP_LLM_CHECK_WITH_INFO(window > 0, "DSV4 ring entries: window must be > 0, got %d", window);
+    RTP_LLM_CHECK_WITH_INFO(
+        gen_num_per_cycle >= 0, "DSV4 ring entries: gen_num_per_cycle must be >= 0, got %d", gen_num_per_cycle);
+    const int raw = window + gen_num_per_cycle;
+    return static_cast<uint32_t>((raw + 1) & ~1);
+}
+
 DSV4LayerSets classifyDSV4Layers(const std::vector<int>& compress_ratios) {
     DSV4LayerSets sets;
     // ``compress_ratios`` must describe exactly the layers covered by this
@@ -127,22 +135,17 @@ std::vector<DSV4PoolDesc> buildDSV4PoolDescs(const DSV4LayerSets& sets,
     const uint32_t kv_entry_bytes      = fp8_kv ? kDsv4KvEntryBytesFp8 : kDsv4KvEntryBytesBf16;
     const uint32_t indexer_entry_bytes = fp8_kv ? kDsv4IndexerEntryBytesFp8 : kDsv4IndexerEntryBytesBf16;
 
-    // Paged KV/INDEXER pools and SWA stay sized to the configured kernel block
-    // (kernel/compress_ratio for compressed paged entries; kernel for SWA
-    // per-token slots). State pools (INDEXER_STATE / CSA_STATE / HCA_STATE) are
-    // ring-buffered: ``entries_per_block`` is sized to the boundary-writer
-    // history window plus one MTP cycle's worth of in-progress draft tokens
-    // (``computeStateRing``: ``ceil_even(window + gen_num_per_cycle)``).
+    // Paged KV/INDEXER pools stay sized to the configured kernel block
+    // (kernel/compress_ratio for compressed paged entries). SWA and state pools
+    // are ring-buffered: ``entries_per_block`` is sized to the needed history
+    // window plus one MTP cycle's worth of in-progress draft tokens.
     // gen_num_per_cycle == 0 (non-MTP) still uses the same formula, giving
     // ceil_even(window) = 8 entries for CSA/INDEXER and 128 for HCA — there
     // is no "one slot per kernel-block token" layout.
-    //
-    // The framework's bpk machinery uniformly expands each physical block into
-    // contiguous kernel sub-blocks, so block_table indexing remains in kernel
-    // tokens even when entries_per_block on a state group is much smaller.
     const uint32_t csa_state_eb     = computeStateRing(kCsaCompressRatio, kCsaOverlap, gen_num_per_cycle);
     const uint32_t hca_state_eb     = computeStateRing(kHcaCompressRatio, kHcaOverlap, gen_num_per_cycle);
     const uint32_t indexer_state_eb = computeStateRing(kIndexerCompressRatio, kIndexerOverlap, gen_num_per_cycle);
+    const uint32_t swa_kv_eb        = computeRingEntries(/*window=*/128, gen_num_per_cycle);
     return {
         {KVCacheRegionName::CSA_KV,
          &sets.csa_layers,
@@ -170,12 +173,7 @@ std::vector<DSV4PoolDesc> buildDSV4PoolDescs(const DSV4LayerSets& sets,
          false},
         {KVCacheRegionName::CSA_STATE, &sets.csa_layers, csa_state_dim * 2, csa_state_eb, DataType::TYPE_FP32, false},
         {KVCacheRegionName::HCA_STATE, &sets.hca_layers, hca_state_dim * 2, hca_state_eb, DataType::TYPE_FP32, false},
-        {KVCacheRegionName::SWA_KV,
-         &sets.all_layers,
-         kv_entry_bytes,
-         kernel_tokens_per_block,
-         DataType::TYPE_UINT8,
-         false},
+        {KVCacheRegionName::SWA_KV, &sets.all_layers, kv_entry_bytes, swa_kv_eb, DataType::TYPE_UINT8, false},
     };
 }
 
@@ -183,9 +181,9 @@ KVCacheSpecPtr makeDSV4Spec(const DSV4PoolDesc& pool, uint32_t physical_tokens_p
     const auto layer_count = static_cast<uint32_t>(pool.layer_ids->size());
     // All pools use the same physical seq_size so cache_keys stay aligned across
     // groups (HybridKVCacheAllocator::reuseCache iterates a single shared keys
-    // array). FULL paged pools split each physical block into bpk kernel blocks
-    // via the framework's bpk machinery; SWA/state pools have bpk = 1 and
-    // entries_per_block scaled to physical_tokens_per_block.
+    // array). FULL paged pools split each physical block into kernel blocks via
+    // the framework's bpk machinery; SWA/state pools are indexed at physical
+    // block granularity and use ring-sized entries_per_block.
     if (pool.is_paged) {
         return std::make_shared<DSV4KVSpec>(pool.region_name,
                                             layer_count,
@@ -213,17 +211,23 @@ void DSV4CacheConfigHelper::applyConfig(CacheConfig&         config,
                      model_config.attn_config.layer_compress_ratios.size(),
                      gen_num_per_cycle);
 
-    // DSV4 uses seq_size_per_block directly as its typed-pool block size.
-    const auto user_seq_size = kv_cache_config.seq_size_per_block;
-    const auto kernel_tokens_per_block =
+    const auto user_seq_size        = kv_cache_config.seq_size_per_block;
+    const auto user_kernel_seq_size = kv_cache_config.kernel_seq_size_per_block;
+    const auto physical_tokens_per_block =
         user_seq_size > 0 ? static_cast<uint32_t>(user_seq_size) : kDsv4KernelTokensPerBlock;
+    const auto kernel_tokens_per_block =
+        user_kernel_seq_size > 0 ? static_cast<uint32_t>(user_kernel_seq_size) : physical_tokens_per_block;
     RTP_LLM_CHECK_WITH_INFO(kernel_tokens_per_block >= kDsv4MinKernelTokensPerBlock
                                 && kernel_tokens_per_block % kDsv4MinKernelTokensPerBlock == 0,
-                            "DSV4 seq_size_per_block=%u must be >= %u and a multiple of %u",
+                            "DSV4 kernel_seq_size_per_block=%u must be >= %u and a multiple of %u",
                             kernel_tokens_per_block,
                             kDsv4MinKernelTokensPerBlock,
                             kDsv4MinKernelTokensPerBlock);
-    const auto physical_tokens_per_block = kernel_tokens_per_block;
+    RTP_LLM_CHECK_WITH_INFO(physical_tokens_per_block >= kernel_tokens_per_block
+                                && physical_tokens_per_block % kernel_tokens_per_block == 0,
+                            "DSV4 seq_size_per_block=%u must be >= kernel_seq_size_per_block=%u and divisible by it",
+                            physical_tokens_per_block,
+                            kernel_tokens_per_block);
     RTP_LLM_LOG_INFO("DSV4 physical block = %u tokens, kernel block = %u tokens (bpk = %u)",
                      physical_tokens_per_block,
                      kernel_tokens_per_block,

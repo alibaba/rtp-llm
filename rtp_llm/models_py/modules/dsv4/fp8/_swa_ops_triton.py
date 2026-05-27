@@ -18,9 +18,8 @@ Two kernels vendored verbatim (signature + math) from vLLM:
   + a parallel ``[num_tokens]`` int32 ``combined_lens`` so
   ``flash_mla_sparse_fwd``'s ``topk_length`` masks the right tail.
 
-These are the only two NEW Triton kernels needed for vLLM-style FP8 SWA
-prefill — ``dequantize_and_gather_k_cache`` already lives in
-``_swa_fp8_dequant_triton.py``.
+The paged SWA write helper in this module builds flat slot ids for the current
+ring layout; SWA reads consume those flat slots in ``_swa_dequant_triton.py``.
 """
 
 from __future__ import annotations
@@ -141,7 +140,9 @@ def _compute_swa_slot_mapping_kernel(
     # Constants
     num_reqs,
     max_blocks_per_seq,
-    block_size: tl.constexpr,  # eb
+    pool_entries_per_block: tl.constexpr,
+    tokens_per_block_for_block_table: tl.constexpr,
+    ring_entries: tl.constexpr,
     BLOCK_M: tl.constexpr,  # tokens per program
 ):
     """One program per (request, BLOCK_M chunk-of-tokens).
@@ -150,16 +151,16 @@ def _compute_swa_slot_mapping_kernel(
     in flattened ``[T]`` view at ``query_start[b] + i``):
 
         global_pos    = (seq_len[b] - query_len[b]) + i
-        block_in_seq  = global_pos // block_size
-        in_block      = global_pos % block_size
+        block_in_seq  = global_pos // tokens_per_block_for_block_table
+        in_block      = global_pos % ring_entries
         block_id      = block_table[b, block_in_seq]
-        slot          = -1                       if block_id < 0
-                        block_id * eb + in_block otherwise
+        slot          = -1                       if block_id <= 0
+                        block_id * pool_entries_per_block + in_block otherwise
 
-    SWA paged-write semantics: ``block_table`` may be sparse. Any
-    non-negative physical block id is writable, and absent / unallocated
-    entries (``block_id < 0``) produce ``slot = -1`` so the FP8 insert
-    kernel skips them.
+    SWA paged-write semantics: only the final ``ring_entries`` positions before
+    each physical block boundary or request end are writable. Earlier tokens in
+    the same physical block map to ``-1`` so concurrent prefill writes do not
+    race on the small ring.
     """
     batch_idx = tl.program_id(0).to(tl.int64)
     chunk_idx = tl.program_id(1)
@@ -178,8 +179,8 @@ def _compute_swa_slot_mapping_kernel(
     valid_token = i < query_len
     global_pos = sp + i  # [BLOCK_M] absolute
 
-    block_in_seq = global_pos // block_size
-    in_block = global_pos % block_size
+    block_in_seq = global_pos // tokens_per_block_for_block_table
+    in_block = global_pos % ring_entries
 
     in_capacity = block_in_seq < max_blocks_per_seq
     safe_block_in_seq = tl.where(in_capacity, block_in_seq, 0)
@@ -187,10 +188,13 @@ def _compute_swa_slot_mapping_kernel(
     bt_row_ptr = block_table_ptr + batch_idx * max_blocks_per_seq
     block_id = tl.load(bt_row_ptr + safe_block_in_seq, mask=valid_token, other=-1)
 
-    valid = (block_id >= 0) & in_capacity & valid_token
+    block_end = (block_in_seq + 1) * tokens_per_block_for_block_table
+    effective_end = tl.minimum(block_end, seq_len)
+    tail_write = (global_pos + ring_entries) >= effective_end
+    valid = (block_id > 0) & in_capacity & valid_token & tail_write
     slot = tl.where(
         valid,
-        block_id.to(tl.int64) * block_size + in_block.to(tl.int64),
+        block_id.to(tl.int64) * pool_entries_per_block + in_block.to(tl.int64),
         tl.full((BLOCK_M,), -1, dtype=tl.int64),
     )
 
@@ -202,17 +206,23 @@ def compute_swa_slot_mapping(
     block_table: torch.Tensor,  # [num_reqs, max_blocks_per_seq] int32
     query_start_loc: torch.Tensor,  # [num_reqs+1] int32 — chunk-local cumulative
     seq_lens: torch.Tensor,  # [num_reqs] int32 — total seq len = sp + query_len
-    block_size: int,  # eb
     num_tokens: int,  # total tokens across all reqs (= query_start_loc[-1])
+    *,
+    pool_entries_per_block: int,
+    tokens_per_block_for_block_table: int,
+    ring_entries: int,
 ) -> torch.Tensor:
     """Build ``[num_tokens]`` int64 slot_mapping for SWA paged FP8 write.
 
-    Mirrors the slot formula in ``DSV4_CACHE_LAYOUT.md §6`` / what
-    ``_dequantize_and_gather_k_kernel`` expects: ``block_table[b, pos //
-    block_size] * block_size + (pos % block_size)``. Tokens whose segment
-    has ``block_id < 0`` emit ``-1`` so the FP8 insert kernel skips them.
-    This intentionally honors every non-negative block id in the table; it is
-    not limited to the final SWA tail blocks.
+    New layout parameters are intentionally split:
+      * ``pool_entries_per_block``: SWA pool tensor second dimension.
+      * ``tokens_per_block_for_block_table``: raw-token coverage of a
+        block-table row.
+      * ``ring_entries``: in-block modulo domain.
+
+    Only the final ``ring_entries`` tokens of each physical block/request tail
+    are written. This matches state-ring writes and avoids ring collisions when
+    physical blocks are much larger than the SWA ring.
     """
     assert (
         block_table.dtype == torch.int32
@@ -220,7 +230,12 @@ def compute_swa_slot_mapping(
     assert (
         query_start_loc.dtype == torch.int32 and seq_lens.dtype == torch.int32
     ), "query_start_loc and seq_lens must be int32"
-    assert block_size >= 1
+    pool_entries_per_block = int(pool_entries_per_block)
+    tokens_per_block_for_block_table = int(tokens_per_block_for_block_table)
+    ring_entries = int(ring_entries)
+    assert pool_entries_per_block >= 1
+    assert tokens_per_block_for_block_table >= 1
+    assert ring_entries >= 1
     device = block_table.device
     slot_mapping = torch.empty(num_tokens, dtype=torch.long, device=device)
     if num_tokens == 0:
@@ -238,7 +253,9 @@ def compute_swa_slot_mapping(
         seq_lens,
         num_reqs,
         max_blocks_per_seq=max_blocks_per_seq,
-        block_size=block_size,
+        pool_entries_per_block=pool_entries_per_block,
+        tokens_per_block_for_block_table=tokens_per_block_for_block_table,
+        ring_entries=ring_entries,
         BLOCK_M=BLOCK_M,
     )
     return slot_mapping

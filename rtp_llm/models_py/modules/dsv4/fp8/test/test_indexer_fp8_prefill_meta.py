@@ -64,9 +64,8 @@ def _call(
 ) -> _IndexerFP8PrefillMeta:
     # Bound-method dispatch via the unbound function — works on the stub
     # because ``prepare`` only touches the four attrs the stub exposes.
-    # ``use_varlen=False`` pins this helper to the legacy B==1 scalar
-    # branch (matches ``DSV4_VARLEN_PREFILL=0`` production); varlen tests
-    # below construct their own call site with ``use_varlen=True``.
+    # ``use_varlen=False`` pins this helper to the B==1 scalar branch;
+    # varlen tests below construct their own call site with ``use_varlen=True``.
     return IndexerFP8.prepare(
         stub,
         bsz,
@@ -484,10 +483,9 @@ class IndexerFP8PrepareVarlenTest(unittest.TestCase):
         self.assertTrue(torch.equal(meta.freqs_cis_slice, expected))
 
     def test_use_varlen_false_takes_legacy_scalar_path(self) -> None:
-        """``use_varlen=False`` (== production ``DSV4_VARLEN_PREFILL=0`` bisect
-        channel) takes the legacy B==1 scalar path even when batched kwargs
-        are passed alongside. The contract guard in
-        ``Attention._build_shared_prefill_meta`` enforces B==1 for env=0;
+        """``use_varlen=False`` takes the B==1 scalar path even when
+        batched kwargs are passed alongside. Production FP8 prefill uses
+        varlen metadata; this direct helper test pins scalar helper behavior.
         here we exercise the indexer.prepare branch directly with B==1."""
         kw = self._make_batched_kwargs(
             prefix_lengths=[0, 8],

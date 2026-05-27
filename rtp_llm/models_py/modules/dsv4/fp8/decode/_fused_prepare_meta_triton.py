@@ -21,7 +21,6 @@ from __future__ import annotations
 from typing import Any
 
 import torch
-
 import triton
 import triton.language as tl
 
@@ -200,7 +199,6 @@ def fused_update_decode_meta_pure(
     hca_dense_width = (
         meta.topk_total_by_ratio[128].shape[-1] - window_size if has_128 else 0
     )
-
     # When a ratio is absent (SWA-only MTP draft: compress_ratios=[0]),
     # the corresponding kernel pointer is None — Triton lowers it to a
     # null pointer, and the HAS_CMP_* constexpr gates eliminate any
@@ -297,12 +295,16 @@ def _fused_phase2b_pool_slot_mapping_kernel(
     Q_LEN: tl.constexpr,
     # per-pool entries_per_block (E) + block_table row stride (max_blocks_per_req)
     SWA_E: tl.constexpr,
+    SWA_TOKENS_PER_BLOCK: tl.constexpr,
     SWA_BT_STRIDE: tl.constexpr,
     CSA_E: tl.constexpr,
+    CSA_TOKENS_PER_BLOCK: tl.constexpr,
     CSA_BT_STRIDE: tl.constexpr,
     IDX_E: tl.constexpr,
+    IDX_TOKENS_PER_BLOCK: tl.constexpr,
     IDX_BT_STRIDE: tl.constexpr,
     HCA_E: tl.constexpr,
+    HCA_TOKENS_PER_BLOCK: tl.constexpr,
     HCA_BT_STRIDE: tl.constexpr,
     # pool existence flags — skip store when pool absent
     HAS_SWA: tl.constexpr,
@@ -322,8 +324,8 @@ def _fused_phase2b_pool_slot_mapping_kernel(
 
     # ---------- SWA: ratio=1, every token writes ----------
     if HAS_SWA:
-        bis_swa_raw = abs_pos // SWA_E
-        in_blk_swa = abs_pos - bis_swa_raw * SWA_E
+        bis_swa_raw = abs_pos // SWA_TOKENS_PER_BLOCK
+        in_blk_swa = abs_pos % SWA_E
         bis_swa = tl.maximum(tl.minimum(bis_swa_raw, SWA_BT_STRIDE - 1), 0)
         bid_swa = tl.load(bt_swa_ptr + r * SWA_BT_STRIDE + bis_swa).to(tl.int64)
         slot_swa = tl.where(bid_swa <= 0, -1, bid_swa * SWA_E + in_blk_swa)
@@ -337,8 +339,8 @@ def _fused_phase2b_pool_slot_mapping_kernel(
         safe_4 = tl.where(skip_4, 0, cmp_idx_4)
 
     if HAS_CSA:
-        bis_csa_raw = safe_4 // CSA_E
-        in_blk_csa = safe_4 - bis_csa_raw * CSA_E
+        bis_csa_raw = safe_4 // CSA_TOKENS_PER_BLOCK
+        in_blk_csa = safe_4 % CSA_E
         bis_csa = tl.maximum(tl.minimum(bis_csa_raw, CSA_BT_STRIDE - 1), 0)
         bid_csa = tl.load(bt_csa_ptr + r * CSA_BT_STRIDE + bis_csa).to(tl.int64)
         skip_csa = skip_4 | (bid_csa <= 0)
@@ -347,8 +349,8 @@ def _fused_phase2b_pool_slot_mapping_kernel(
 
     # ---------- INDEXER: ratio=4, shares boundary with CSA ----------
     if HAS_IDX:
-        bis_idx_raw = safe_4 // IDX_E
-        in_blk_idx = safe_4 - bis_idx_raw * IDX_E
+        bis_idx_raw = safe_4 // IDX_TOKENS_PER_BLOCK
+        in_blk_idx = safe_4 % IDX_E
         bis_idx = tl.maximum(tl.minimum(bis_idx_raw, IDX_BT_STRIDE - 1), 0)
         bid_idx = tl.load(bt_idx_ptr + r * IDX_BT_STRIDE + bis_idx).to(tl.int64)
         skip_idx = skip_4 | (bid_idx <= 0)
@@ -361,8 +363,8 @@ def _fused_phase2b_pool_slot_mapping_kernel(
         cmp_idx_128 = abs_pos_p1 // 128 - 1
         skip_128 = (on_b128 == 0) | (cmp_idx_128 < 0)
         safe_128 = tl.where(skip_128, 0, cmp_idx_128)
-        bis_hca_raw = safe_128 // HCA_E
-        in_blk_hca = safe_128 - bis_hca_raw * HCA_E
+        bis_hca_raw = safe_128 // HCA_TOKENS_PER_BLOCK
+        in_blk_hca = safe_128 % HCA_E
         bis_hca = tl.maximum(tl.minimum(bis_hca_raw, HCA_BT_STRIDE - 1), 0)
         bid_hca = tl.load(bt_hca_ptr + r * HCA_BT_STRIDE + bis_hca).to(tl.int64)
         skip_hca = skip_128 | (bid_hca <= 0)
@@ -375,6 +377,7 @@ def fused_phase2b_pool_slot_mapping(
     start_pos: torch.Tensor,
     bs: int,
     paged_pool_entries_per_block: Any,
+    paged_pool_tokens_per_block: Any,
 ) -> None:
     """Fuse paged pool write slot mapping for all pools into one Triton kernel.
 
@@ -432,14 +435,26 @@ def fused_phase2b_pool_slot_mapping(
     slot_idx = meta.pool_write_slot_mappings.get(INDEXER_KV, slot_swa)
     slot_hca = meta.pool_write_slot_mappings.get(HCA_KV, slot_swa)
 
-    swa_e = (
-        int(paged_pool_entries_per_block.get(SWA_KV, meta.window_size))
-        if has_swa
-        else 1
-    )
-    csa_e = int(paged_pool_entries_per_block.get(CSA_KV, 1)) if has_csa else 1
-    idx_e = int(paged_pool_entries_per_block.get(INDEXER_KV, 1)) if has_idx else 1
-    hca_e = int(paged_pool_entries_per_block.get(HCA_KV, 1)) if has_hca else 1
+    swa_e = int(paged_pool_entries_per_block[SWA_KV]) if has_swa else 1
+    csa_e = int(paged_pool_entries_per_block[CSA_KV]) if has_csa else 1
+    idx_e = int(paged_pool_entries_per_block[INDEXER_KV]) if has_idx else 1
+    hca_e = int(paged_pool_entries_per_block[HCA_KV]) if has_hca else 1
+
+    def _raw_tokens(attn_type: int) -> int:
+        return int(paged_pool_tokens_per_block[attn_type])
+
+    def _compressed_tokens(raw_tokens_per_block: int, ratio: int) -> int:
+        if raw_tokens_per_block % ratio != 0:
+            raise ValueError(
+                "compressed pool tokens_per_block must be divisible by "
+                f"ratio, got tokens={raw_tokens_per_block}, ratio={ratio}"
+            )
+        return raw_tokens_per_block // ratio
+
+    swa_tokens = _raw_tokens(SWA_KV) if has_swa else 1
+    csa_tokens = _compressed_tokens(_raw_tokens(CSA_KV), 4) if has_csa else 1
+    idx_tokens = _compressed_tokens(_raw_tokens(INDEXER_KV), 4) if has_idx else 1
+    hca_tokens = _compressed_tokens(_raw_tokens(HCA_KV), 128) if has_hca else 1
 
     grid = (bs, q_len)
     _fused_phase2b_pool_slot_mapping_kernel[grid](
@@ -455,12 +470,16 @@ def fused_phase2b_pool_slot_mapping(
         bs,
         Q_LEN=q_len,
         SWA_E=swa_e,
+        SWA_TOKENS_PER_BLOCK=swa_tokens,
         SWA_BT_STRIDE=bt_swa.shape[1],
         CSA_E=csa_e,
+        CSA_TOKENS_PER_BLOCK=csa_tokens,
         CSA_BT_STRIDE=bt_csa.shape[1],
         IDX_E=idx_e,
+        IDX_TOKENS_PER_BLOCK=idx_tokens,
         IDX_BT_STRIDE=bt_idx.shape[1],
         HCA_E=hca_e,
+        HCA_TOKENS_PER_BLOCK=hca_tokens,
         HCA_BT_STRIDE=bt_hca.shape[1],
         HAS_SWA=has_swa,
         HAS_CSA=has_csa,

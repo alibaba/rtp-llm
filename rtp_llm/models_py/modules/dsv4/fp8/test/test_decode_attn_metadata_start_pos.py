@@ -210,18 +210,22 @@ def _ref_compressed_kv_slots(
     *,
     ratio: int,
     kv_eb: int,
+    raw_tokens_per_block: int,
 ) -> torch.Tensor:
     pos = positions.to(torch.long)
     req = req_idx.to(torch.long)
     bt = block_table.to(torch.long)
-    tokens_per_block = kv_eb * ratio
-    block_in_seq = pos // tokens_per_block
-    in_block = (pos % tokens_per_block) // ratio
+    compressed_tokens_per_block = raw_tokens_per_block // ratio
+    on_boundary = ((pos + 1) % ratio) == 0
+    cmp_idx = (pos + 1) // ratio - 1
+    safe_idx = torch.where(on_boundary, cmp_idx, torch.zeros_like(cmp_idx))
+    block_in_seq = safe_idx // compressed_tokens_per_block
+    in_block = safe_idx % kv_eb
     in_capacity = block_in_seq < bt.shape[1]
     safe_block = block_in_seq.clamp(min=0, max=bt.shape[1] - 1)
     block_id = bt[req, safe_block]
     slot = block_id * kv_eb + in_block
-    valid = ((pos + 1) % ratio == 0) & in_capacity & (block_id > 0)
+    valid = on_boundary & in_capacity & (cmp_idx >= 0) & (block_id > 0)
     return torch.where(valid, slot, torch.full_like(slot, -1))
 
 
@@ -231,12 +235,14 @@ def _ref_kv_slots(
     req_idx: torch.Tensor,
     *,
     entries_per_block: int,
+    tokens_per_block: int,
+    ring_entries: int,
 ) -> torch.Tensor:
     pos = abs_pos.to(torch.long)
     req = req_idx.to(torch.long)
     bt = block_table.to(torch.long)
-    block_in_seq = pos // entries_per_block
-    in_block = pos % entries_per_block
+    block_in_seq = pos // tokens_per_block
+    in_block = pos % ring_entries
     in_capacity = block_in_seq < bt.shape[1]
     safe_block = block_in_seq.clamp(min=0, max=bt.shape[1] - 1)
     block_id = bt[req, safe_block]
@@ -268,9 +274,7 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
         meta = _alloc(q_len=1)
         ptrs = _ptr_snapshot(meta)
 
-        update_decode_metadata_in_place_fp8(
-            meta, _i32([0]), forbid_realloc=True, state_tokens_per_block=256
-        )
+        update_decode_metadata_in_place_fp8(meta, _i32([0]), forbid_realloc=True)
 
         self.assertEqual(meta.start_pos[:1].tolist(), [0])
         self.assertEqual(meta.position_ids[:1].tolist(), [0])
@@ -372,7 +376,6 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
             compress_ratios=[0, 4, 128],
             index_topk=16,
             device=torch.device("cpu"),
-            state_tokens_per_block=256,
         )
 
         self.assertEqual(meta.start_pos.tolist(), [14])
@@ -405,7 +408,6 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
             compress_ratios=[0, 4, 128],
             index_topk=16,
             device=device,
-            state_tokens_per_block=256,
         )
 
         self.assertEqual(meta.start_pos.tolist(), [4, 127])
@@ -434,7 +436,6 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
             compress_ratios=[0, 4, 128],
             index_topk=16,
             device=device,
-            state_tokens_per_block=256,
         )
 
         self.assertEqual(meta.start_pos.tolist(), [10, 20])
@@ -456,7 +457,6 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
             compress_ratios=[0, 4, 128],
             index_topk=512,
             device=device,
-            state_tokens_per_block=256,
         )
         eager_hca = eager.topk_total_by_ratio[128][0, 0, 128:]
         self.assertEqual(eager_hca.numel(), 8192)
@@ -519,13 +519,13 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
         device = torch.device("cuda")
         q_len = 3
         paged_specs = {
-            SWA_KV: (256, 4),
-            CSA_KV: (64, 4),
-            INDEXER_KV: (64, 4),
-            HCA_KV: (2, 4),
-            CSA_STATE: (256, 4),
-            INDEXER_STATE: (256, 4),
-            HCA_STATE: (256, 4),
+            SWA_KV: (256, 256, 4),
+            CSA_KV: (64, 256, 4),
+            INDEXER_KV: (64, 256, 4),
+            HCA_KV: (2, 256, 4),
+            CSA_STATE: (256, 256, 4),
+            INDEXER_STATE: (256, 256, 4),
+            HCA_STATE: (256, 256, 4),
         }
         meta = allocate_decode_metadata_fp8(
             max_batch_size=2,
@@ -560,6 +560,7 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
             ),
         }
         entries_per_block = {k: v[0] for k, v in paged_specs.items()}
+        tokens_per_block = {k: v[1] for k, v in paged_specs.items()}
 
         update_decode_metadata_in_place_fp8(
             meta,
@@ -567,7 +568,7 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
             forbid_realloc=True,
             paged_block_tables=paged_block_tables,
             paged_pool_entries_per_block=entries_per_block,
-            state_tokens_per_block=256,
+            paged_pool_tokens_per_block=tokens_per_block,
         )
 
         T = 2 * q_len
@@ -581,6 +582,8 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
             positions,
             req_idx,
             entries_per_block=256,
+            tokens_per_block=256,
+            ring_entries=256,
         )
         actual_swa = meta.pool_write_slot_mappings[SWA_KV][:T]
         self.assertEqual(actual_swa.tolist(), expected_swa.tolist())
@@ -596,6 +599,7 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
                 req_idx,
                 ratio=ratio,
                 kv_eb=kv_eb,
+                raw_tokens_per_block=256,
             )
             actual = meta.pool_write_slot_mappings[attn_type][:T]
             self.assertEqual(actual.tolist(), expected.tolist())
@@ -617,7 +621,8 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
             req_id,
             paged_block_tables[SWA_KV],
             meta.swa_abs_idx[:2].reshape(T, 128),
-            block_size=256,
+            entries_per_block=256,
+            tokens_per_block_for_block_table=256,
         )
         self.assertEqual(
             meta.swa_global_slots[:T].tolist(), expected_swa_global.tolist()
@@ -628,7 +633,8 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
             req_id,
             paged_block_tables[HCA_KV],
             hca_dense,
-            block_size=2,
+            entries_per_block=2,
+            tokens_per_block_for_block_table=2,
         )
         self.assertEqual(
             meta.hca_cmp_global_slots[:T].tolist(), expected_hca_global.tolist()
@@ -644,7 +650,9 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
         mapped = compute_kv_pool_slot_mapping(
             block_table,
             abs_pos,
-            entries_per_block=256,
+            pool_entries_per_block=256,
+            pool_tokens_per_block=256,
+            ring_entries=256,
         )
         self.assertEqual(mapped.tolist(), [-1, -1, 9 * 256 + 8])
 
@@ -654,9 +662,124 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
             req_id,
             block_table,
             local,
-            block_size=256,
+            entries_per_block=256,
+            tokens_per_block_for_block_table=256,
         )
         self.assertEqual(translated.tolist(), [[-1, -1, 9 * 256 + 8, -1]])
+
+    def test_paged_split_tokens_for_seq16384_kernel128_layout(self):
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA required for paged metadata translator")
+        device = torch.device("cuda")
+        q_len = 3
+        max_blocks = 130
+        paged_specs = {
+            SWA_KV: (132, 16384, max_blocks),
+            CSA_KV: (32, 128, max_blocks),
+            INDEXER_KV: (32, 128, max_blocks),
+            HCA_KV: (1, 128, max_blocks),
+        }
+        meta = allocate_decode_metadata_fp8(
+            max_batch_size=2,
+            q_len=q_len,
+            window_size=128,
+            head_dim=512,
+            max_seq_len=32768,
+            compress_ratios=[4, 128],
+            index_topk=16,
+            device=device,
+            paged_pool_specs=paged_specs,
+        )
+        attn = SimpleNamespace(
+            is_prefill=True,
+            is_target_verify=True,
+            sequence_lengths=_i32([]).to(device),
+            # req0 checks early-window invalids; req1 crosses 16383 -> 16384.
+            prefix_lengths=_i32([0, 16382]).to(device),
+        )
+
+        def _bt(base: int) -> torch.Tensor:
+            row0 = torch.arange(
+                base, base + max_blocks, dtype=torch.int32, device=device
+            )
+            row1 = torch.arange(
+                base + 1000, base + 1000 + max_blocks, dtype=torch.int32, device=device
+            )
+            return torch.stack([row0, row1], dim=0)
+
+        paged_block_tables = {
+            SWA_KV: _bt(11),
+            CSA_KV: _bt(101),
+            INDEXER_KV: _bt(301),
+            HCA_KV: _bt(501),
+        }
+        entries_per_block = {k: v[0] for k, v in paged_specs.items()}
+        tokens_per_block = {k: v[1] for k, v in paged_specs.items()}
+
+        update_decode_metadata_in_place_fp8(
+            meta,
+            attn,
+            forbid_realloc=True,
+            paged_block_tables=paged_block_tables,
+            paged_pool_entries_per_block=entries_per_block,
+            paged_pool_tokens_per_block=tokens_per_block,
+        )
+
+        T = 2 * q_len
+        positions = torch.tensor(
+            [0, 1, 2, 16382, 16383, 16384],
+            dtype=torch.long,
+            device=device,
+        )
+        req_idx = torch.tensor([0, 0, 0, 1, 1, 1], dtype=torch.long, device=device)
+
+        expected_swa = _ref_kv_slots(
+            paged_block_tables[SWA_KV],
+            positions,
+            req_idx,
+            entries_per_block=132,
+            tokens_per_block=16384,
+            ring_entries=132,
+        )
+        self.assertEqual(
+            meta.pool_write_slot_mappings[SWA_KV][:T].tolist(),
+            expected_swa.tolist(),
+        )
+        self.assertEqual(meta.paged_pool_tokens_per_block[SWA_KV], 16384)
+
+        for attn_type, ratio, kv_eb in (
+            (CSA_KV, 4, 32),
+            (INDEXER_KV, 4, 32),
+            (HCA_KV, 128, 1),
+        ):
+            expected = _ref_compressed_kv_slots(
+                paged_block_tables[attn_type],
+                positions,
+                req_idx,
+                ratio=ratio,
+                kv_eb=kv_eb,
+                raw_tokens_per_block=128,
+            )
+            self.assertEqual(
+                meta.pool_write_slot_mappings[attn_type][:T].tolist(),
+                expected.tolist(),
+            )
+
+        self.assertEqual(meta.swa_abs_idx[0, 0, :4].tolist(), [0, -1, -1, -1])
+        req1_last_abs = meta.swa_abs_idx[1, 2]
+        self.assertEqual(int(req1_last_abs[-1]), 16384)
+
+        req_id = meta.req_id_per_token[:T]
+        expected_swa_global = translate_local_to_global_slots(
+            req_id,
+            paged_block_tables[SWA_KV],
+            meta.swa_abs_idx[:2].reshape(T, 128),
+            entries_per_block=132,
+            tokens_per_block_for_block_table=16384,
+        )
+        self.assertEqual(
+            meta.swa_global_slots[:T].tolist(), expected_swa_global.tolist()
+        )
 
 
 if __name__ == "__main__":

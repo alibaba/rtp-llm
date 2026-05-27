@@ -63,7 +63,7 @@ class _StubCompressor:
         self._kv_eb = kv_eb
         self._kv_cache_sharded = False
         self._cp_ctx = None
-        self._kv_pool_3d = None
+        self._kv_pool_view = None
 
     _compute_state_slot_mapping = CompressorFP8._compute_state_slot_mapping
     _compute_kv_slot_mapping = CompressorFP8._compute_kv_slot_mapping
@@ -125,9 +125,9 @@ class RingWriteMaskTest(unittest.TestCase):
         gen_num: int,
         prefix_len: int,
         input_len: int,
+        tpb: int = 256,
     ) -> None:
         """Verify state_slots mask for a single-request prefill."""
-        tpb = 256
         eb = _compute_ring_size(ratio, overlap, gen_num)
         total_blocks = (prefix_len + input_len + tpb - 1) // tpb + 1
         stub = _make_stub(
@@ -137,6 +137,7 @@ class RingWriteMaskTest(unittest.TestCase):
             gen_num=gen_num,
             n_reqs=1,
             blocks_per_req=total_blocks,
+            tpb=tpb,
         )
 
         positions = torch.arange(
@@ -207,9 +208,9 @@ class RingWriteMaskTest(unittest.TestCase):
         gen_num: int,
         prefix_lengths: list[int],
         input_lengths: list[int],
+        tpb: int = 256,
     ) -> None:
         """Verify state_slots mask for batched prefill."""
-        tpb = 256
         eb = _compute_ring_size(ratio, overlap, gen_num)
         n_reqs = len(prefix_lengths)
         max_blocks = max(
@@ -223,6 +224,7 @@ class RingWriteMaskTest(unittest.TestCase):
             gen_num=gen_num,
             n_reqs=n_reqs,
             blocks_per_req=max_blocks,
+            tpb=tpb,
         )
 
         positions = torch.cat(
@@ -435,6 +437,34 @@ class RingWriteMaskTest(unittest.TestCase):
         self._run_single_request(
             ratio=128, overlap=0, gen_num=0, prefix_len=0, input_len=512
         )
+
+    def test_hca_seq16384_ring_entries_matrix(self) -> None:
+        """HCA physical block rows with ring sizes 128/130/132/134."""
+        for gen_num, eb in ((0, 128), (1, 130), (3, 132), (5, 134)):
+            with self.subTest(gen_num=gen_num, eb=eb):
+                self.assertEqual(_compute_ring_size(128, 0, gen_num), eb)
+                self._run_single_request(
+                    ratio=128,
+                    overlap=0,
+                    gen_num=gen_num,
+                    prefix_len=16384 - 96,
+                    input_len=256,
+                    tpb=16384,
+                )
+
+    def test_hca_seq16384_batched_ring_entries_matrix(self) -> None:
+        """Batched state ring mask around physical 16K block boundaries."""
+        for gen_num, eb in ((0, 128), (1, 130), (3, 132), (5, 134)):
+            with self.subTest(gen_num=gen_num, eb=eb):
+                self.assertEqual(_compute_ring_size(128, 0, gen_num), eb)
+                self._run_batched(
+                    ratio=128,
+                    overlap=0,
+                    gen_num=gen_num,
+                    prefix_lengths=[16384 - 64, 2 * 16384 - 160],
+                    input_lengths=[192, 256],
+                    tpb=16384,
+                )
 
     def test_csa_gen0_prefix_at_block_boundary(self) -> None:
         """CSA R=8, prefix starts at block boundary."""

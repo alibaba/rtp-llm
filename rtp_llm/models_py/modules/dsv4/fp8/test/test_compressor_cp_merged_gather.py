@@ -47,6 +47,7 @@ def _build_cpu_compressor(
         state_block_table=state_block_table,
         state_eb=state_eb,
         state_tokens_per_block=state_eb,
+        kv_tokens_per_block=compress_ratio,
     )
     return cmp
 
@@ -119,7 +120,15 @@ class CompressorFP8CPMergedGatherTest(unittest.TestCase):
             launch_args["meta"] = actual_meta
             launch_args["seq_start"] = seq_start
 
+        def fake_linear(local_2d, weight):
+            del weight
+            return torch.zeros(local_2d.shape[0], 2 * out_dim, dtype=torch.bfloat16)
+
         with (
+            patch(
+                "rtp_llm.models_py.modules.dsv4.fp8.compressor._linear_bf16_bf16_fp32",
+                side_effect=fake_linear,
+            ),
             patch(
                 "rtp_llm.models_py.modules.dsv4.fp8.compressor.cp_all_gather_full_async",
                 side_effect=fake_start,

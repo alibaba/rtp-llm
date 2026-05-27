@@ -59,9 +59,9 @@ class DSv4DecodeFmhaImplConfigFP8:
     # and ``prepare`` populates them from
     # ``attn_inputs.kv_cache_kernel_block_id_device_by_group``.
     #
-    # ``paged_pool_specs[attn_type] = (entries_per_block, max_blocks_per_req)``.
-    # If empty, the legacy register_buffer-only path is used.
-    paged_pool_specs: Dict[int, Tuple[int, int]] = field(default_factory=dict)
+    # ``paged_pool_specs[attn_type]`` is
+    # ``(entries_per_block, tokens_per_block, max_blocks_per_req)``.
+    paged_pool_specs: Dict[int, Tuple[int, int, int]] = field(default_factory=dict)
 
     # Snapshot of ``kv_cache.group_region_names`` (framework-owned group
     # ordering, one attn_type per entry). Position = group id. ``prepare``
@@ -70,19 +70,6 @@ class DSv4DecodeFmhaImplConfigFP8:
     # doesn't hand one in). Static for the allocator's lifetime, so
     # snapshot-at-construct is safe.
     group_region_names: List[int] = field(default_factory=list)
-
-    # Kernel token block size for state pool block_table indexing (DSV4 =
-    # 256). Decoupled from state_eb (ring entries) when ring sizing is active.
-    # Required — must be sourced from CacheConfig.kernel_seq_size_per_block.
-    state_tokens_per_block: Optional[int] = None
-
-    def __post_init__(self) -> None:
-        if self.state_tokens_per_block is None or self.state_tokens_per_block <= 0:
-            raise ValueError(
-                "DSv4DecodeFmhaImplConfigFP8.state_tokens_per_block must be a "
-                "positive int sourced from CacheConfig.kernel_seq_size_per_block; "
-                f"got {self.state_tokens_per_block!r}"
-            )
 
 
 class DSv4DecodeFmhaImplFP8:
@@ -114,6 +101,9 @@ class DSv4DecodeFmhaImplFP8:
         )
         self._paged_entries_per_block: Dict[int, int] = {
             at: spec[0] for at, spec in config.paged_pool_specs.items()
+        }
+        self._paged_tokens_per_block: Dict[int, int] = {
+            at: spec[1] for at, spec in config.paged_pool_specs.items()
         }
         self.prepare(attn_inputs, forbid_realloc=True)
 
@@ -157,7 +147,7 @@ class DSv4DecodeFmhaImplFP8:
             forbid_realloc=forbid_realloc,
             paged_block_tables=paged_block_tables,
             paged_pool_entries_per_block=self._paged_entries_per_block,
-            state_tokens_per_block=self.config.state_tokens_per_block,
+            paged_pool_tokens_per_block=self._paged_tokens_per_block,
         )
 
     def prepare_cuda_graph(self, attn_inputs: Any) -> None:
@@ -176,5 +166,5 @@ class DSv4DecodeFmhaImplFP8:
             forbid_realloc=True,
             paged_block_tables=paged_block_tables,
             paged_pool_entries_per_block=self._paged_entries_per_block,
-            state_tokens_per_block=self.config.state_tokens_per_block,
+            paged_pool_tokens_per_block=self._paged_tokens_per_block,
         )

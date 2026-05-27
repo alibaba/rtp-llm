@@ -46,6 +46,24 @@ bool hasDsv4FixedPoolBytes(const CacheConfig& config) {
     return config.state_block_size_bytes > 0 || config.swa_block_size_bytes > 0;
 }
 
+void validateDsv4KernelSeqSize(size_t seq_size_per_block, size_t kernel_seq_size_per_block, const char* config_name) {
+    constexpr size_t kDsv4KernelSeqSizeAlignment = 128;
+    RTP_LLM_CHECK_WITH_INFO(kernel_seq_size_per_block >= kDsv4KernelSeqSizeAlignment
+                                && kernel_seq_size_per_block % kDsv4KernelSeqSizeAlignment == 0,
+                            "%s DSV4 kernel_seq_size_per_block(%zu) must be >= %zu and a multiple of %zu",
+                            config_name,
+                            kernel_seq_size_per_block,
+                            kDsv4KernelSeqSizeAlignment,
+                            kDsv4KernelSeqSizeAlignment);
+    RTP_LLM_CHECK_WITH_INFO(seq_size_per_block >= kernel_seq_size_per_block
+                                && seq_size_per_block % kernel_seq_size_per_block == 0,
+                            "%s DSV4 seq_size_per_block(%zu) must be >= kernel_seq_size_per_block(%zu) "
+                            "and divisible by it",
+                            config_name,
+                            seq_size_per_block,
+                            kernel_seq_size_per_block);
+}
+
 }  // namespace
 
 CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model_config,
@@ -75,19 +93,16 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
 
     config.linear_step = kv_cache_config.linear_step;
     if (kv_cache_config.kernel_seq_size_per_block > 0) {
-        RTP_LLM_CHECK_WITH_INFO(kv_cache_config.seq_size_per_block % kv_cache_config.kernel_seq_size_per_block == 0,
-                                "seq_size_per_block(%d) must be divisible by kernel_seq_size_per_block(%d)",
-                                kv_cache_config.seq_size_per_block,
-                                kv_cache_config.kernel_seq_size_per_block);
+        const auto kernel_seq_size_per_block = static_cast<size_t>(kv_cache_config.kernel_seq_size_per_block);
         if (hasTypedHybridPoolLayout(model_config)) {
-            RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(kv_cache_config.kernel_seq_size_per_block)
-                                        == config.kernel_seq_size_per_block,
-                                    "DSV4 typed cache requires kernel_seq_size_per_block=%zu, "
-                                    "but kv_cache_config overrides to %d",
-                                    config.kernel_seq_size_per_block,
+            validateDsv4KernelSeqSize(config.seq_size_per_block, kernel_seq_size_per_block, "cache");
+        } else {
+            RTP_LLM_CHECK_WITH_INFO(kv_cache_config.seq_size_per_block % kv_cache_config.kernel_seq_size_per_block == 0,
+                                    "seq_size_per_block(%d) must be divisible by kernel_seq_size_per_block(%d)",
+                                    kv_cache_config.seq_size_per_block,
                                     kv_cache_config.kernel_seq_size_per_block);
         }
-        config.kernel_seq_size_per_block = static_cast<size_t>(kv_cache_config.kernel_seq_size_per_block);
+        config.kernel_seq_size_per_block = kernel_seq_size_per_block;
     } else if (config.kernel_seq_size_per_block == 0 || config.kernel_seq_size_per_block == config.seq_size_per_block) {
         // Default: kernel block size == physical block size (no split). Keep
         // any explicit value already set by createBasicConfig (e.g. DSV4 forces
@@ -97,8 +112,7 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
 
     // DSV4 fixed-pool residency toggle must be set before the pre-pass
     // finalizeBlockNums so CPU-backed STATE/SWA_KV bytes are excluded from HBM.
-    config.fixed_pool_uses_pinned_cpu =
-        kv_cache_config.dsv4_fixed_pool_use_memory && hasDsv4FixedPoolBytes(config);
+    config.fixed_pool_uses_pinned_cpu = kv_cache_config.dsv4_fixed_pool_use_memory && hasDsv4FixedPoolBytes(config);
 
     if (kv_cache_config.test_block_num > 0) {
         RTP_LLM_LOG_INFO("KVCacheConfig explicitly specified kv cache block num %d", kv_cache_config.test_block_num);
@@ -126,8 +140,8 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
                              config.fixed_pool_reserve_bytes / 1024 / 1024,
                              paged_budget / 1024 / 1024);
         }
-        const int  joint_step        = std::max(1, config.linear_step);
-        const bool dsv4_fixed_pools  = config.use_typed_cache_regions && config.dsv4_fixed_pool_blocks > 0;
+        const int  joint_step       = std::max(1, config.linear_step);
+        const bool dsv4_fixed_pools = config.use_typed_cache_regions && config.dsv4_fixed_pool_blocks > 0;
         if (dsv4_fixed_pools) {
             block_num = paged_budget / config.block_size_bytes;
         } else {
@@ -169,20 +183,22 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
 
     if (kv_cache_config.kernel_seq_size_per_block > 0) {
         const size_t kernel_seq_size_per_block = static_cast<size_t>(kv_cache_config.kernel_seq_size_per_block);
-        RTP_LLM_CHECK_WITH_INFO(score_config.seq_size_per_block % kernel_seq_size_per_block == 0,
-                                "score seq_size_per_block(%zu) must be divisible by kernel_seq_size_per_block(%zu)",
-                                score_config.seq_size_per_block,
-                                kernel_seq_size_per_block);
-        RTP_LLM_CHECK_WITH_INFO(propose_config.seq_size_per_block % kernel_seq_size_per_block == 0,
-                                "propose seq_size_per_block(%zu) must be divisible by kernel_seq_size_per_block(%zu)",
-                                propose_config.seq_size_per_block,
-                                kernel_seq_size_per_block);
         if (hasTypedHybridPoolLayout(score_model_config)) {
-            RTP_LLM_CHECK_WITH_INFO(kernel_seq_size_per_block == score_config.kernel_seq_size_per_block,
-                                    "DSV4 typed cache requires kernel_seq_size_per_block=%zu, "
-                                    "but kv_cache_config overrides to %zu",
-                                    score_config.kernel_seq_size_per_block,
+            validateDsv4KernelSeqSize(score_config.seq_size_per_block, kernel_seq_size_per_block, "score");
+        } else {
+            RTP_LLM_CHECK_WITH_INFO(score_config.seq_size_per_block % kernel_seq_size_per_block == 0,
+                                    "score seq_size_per_block(%zu) must be divisible by kernel_seq_size_per_block(%zu)",
+                                    score_config.seq_size_per_block,
                                     kernel_seq_size_per_block);
+        }
+        if (hasTypedHybridPoolLayout(propose_model_config)) {
+            validateDsv4KernelSeqSize(propose_config.seq_size_per_block, kernel_seq_size_per_block, "propose");
+        } else {
+            RTP_LLM_CHECK_WITH_INFO(
+                propose_config.seq_size_per_block % kernel_seq_size_per_block == 0,
+                "propose seq_size_per_block(%zu) must be divisible by kernel_seq_size_per_block(%zu)",
+                propose_config.seq_size_per_block,
+                kernel_seq_size_per_block);
         }
         score_config.kernel_seq_size_per_block   = kernel_seq_size_per_block;
         propose_config.kernel_seq_size_per_block = kernel_seq_size_per_block;
@@ -261,8 +277,8 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                 paged_budget / 1024 / 1024);
         }
 
-        const int joint_step = std::max(1, kv_cache_config.linear_step);
-        auto effective_size = [&](const CacheConfig& cfg) -> size_t {
+        const int joint_step     = std::max(1, kv_cache_config.linear_step);
+        auto      effective_size = [&](const CacheConfig& cfg) -> size_t {
             return effectivePagedBlockBytes(cfg, joint_step);
         };
         block_num =
