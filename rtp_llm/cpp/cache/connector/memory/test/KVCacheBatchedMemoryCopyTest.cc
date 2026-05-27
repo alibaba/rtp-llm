@@ -162,9 +162,11 @@ CacheConfig makeRealDsv4TypedMemoryCopyConfig(bool use_flash) {
     auto              mc = use_flash ? makeDsv4FlashModelConfig() : makeDsv4ProModelConfig();
     ParallelismConfig pc;
     KVCacheConfig     kv_config;
-    kv_config.dsv4_fixed_pool_blocks = 512;
-    auto              config = HybridPoolConfigCreator::createConfig(mc, pc, kv_config, false, 0);
-    config.block_num         = 512;
+    kv_config.seq_size_per_block        = 128;
+    kv_config.kernel_seq_size_per_block = 128;
+    kv_config.dsv4_fixed_pool_blocks    = 512;
+    auto config                         = HybridPoolConfigCreator::createConfig(mc, pc, kv_config, false, 0);
+    config.block_num                    = 512;
     return config;
 }
 
@@ -236,32 +238,32 @@ CacheConfig makeCompactDsv4TypedMemoryCopyConfig(bool use_flash) {
     config.use_opaque_kv_cache_store   = true;
     config.is_sparse                   = true;
 
-    constexpr size_t kDsv4PoolNum           = 7;
-    config.group_region_names               = {KVCacheRegionName::CSA_KV,
-                                               KVCacheRegionName::HCA_KV,
-                                               KVCacheRegionName::INDEXER_KV,
-                                               KVCacheRegionName::INDEXER_STATE,
-                                               KVCacheRegionName::CSA_STATE,
-                                               KVCacheRegionName::HCA_STATE,
-                                               KVCacheRegionName::SWA_KV};
-    config.group_types                      = {CacheGroupType::FULL,
-                                               CacheGroupType::FULL,
-                                               CacheGroupType::FULL,
-                                               CacheGroupType::SWA,
-                                               CacheGroupType::SWA,
-                                               CacheGroupType::SWA,
-                                               CacheGroupType::SWA};
-    config.group_kv_block_stride_bytes      = {64, 16, 32, 48, 80, 40, 96};
-    config.group_kv_scale_stride_bytes      = std::vector<size_t>(kDsv4PoolNum, 0);
-    config.group_seq_size_per_block         = std::vector<size_t>(kDsv4PoolNum, config.seq_size_per_block);
-    config.group_block_nums                 = std::vector<uint32_t>(kDsv4PoolNum, config.block_num);
-    config.dsv4_fixed_pool_blocks           = config.block_num;
-    config.layer_ids                        = std::vector<std::vector<int>>(kDsv4PoolNum);
-    config.global_layer_ids                 = std::vector<std::vector<int>>(kDsv4PoolNum);
-    config.layer_to_group_id                = std::vector<int>(config.layer_all_num, 6);
-    config.layer_to_group_ids               = std::vector<std::vector<int>>(config.layer_all_num);
-    config.layer_group_types                = std::vector<CacheGroupType>(config.layer_all_num, CacheGroupType::SWA);
-    config.layer_region_to_group_id         = std::vector<std::vector<int>>(
+    constexpr size_t kDsv4PoolNum      = 7;
+    config.group_region_names          = {KVCacheRegionName::CSA_KV,
+                                          KVCacheRegionName::HCA_KV,
+                                          KVCacheRegionName::INDEXER_KV,
+                                          KVCacheRegionName::INDEXER_STATE,
+                                          KVCacheRegionName::CSA_STATE,
+                                          KVCacheRegionName::HCA_STATE,
+                                          KVCacheRegionName::SWA_KV};
+    config.group_types                 = {CacheGroupType::FULL,
+                                          CacheGroupType::FULL,
+                                          CacheGroupType::FULL,
+                                          CacheGroupType::SWA,
+                                          CacheGroupType::SWA,
+                                          CacheGroupType::SWA,
+                                          CacheGroupType::SWA};
+    config.group_kv_block_stride_bytes = {64, 16, 32, 48, 80, 40, 96};
+    config.group_kv_scale_stride_bytes = std::vector<size_t>(kDsv4PoolNum, 0);
+    config.group_seq_size_per_block    = std::vector<size_t>(kDsv4PoolNum, config.seq_size_per_block);
+    config.group_block_nums            = std::vector<uint32_t>(kDsv4PoolNum, config.block_num);
+    config.dsv4_fixed_pool_blocks      = config.block_num;
+    config.layer_ids                   = std::vector<std::vector<int>>(kDsv4PoolNum);
+    config.global_layer_ids            = std::vector<std::vector<int>>(kDsv4PoolNum);
+    config.layer_to_group_id           = std::vector<int>(config.layer_all_num, 6);
+    config.layer_to_group_ids          = std::vector<std::vector<int>>(config.layer_all_num);
+    config.layer_group_types           = std::vector<CacheGroupType>(config.layer_all_num, CacheGroupType::SWA);
+    config.layer_region_to_group_id    = std::vector<std::vector<int>>(
         config.layer_all_num, std::vector<int>(static_cast<size_t>(KVCacheRegionName::REGION_COUNT), -1));
     config.layer_to_block_stride_bytes = std::vector<int>(config.layer_all_num, 0);
     config.cache_specs.reserve(kDsv4PoolNum);
@@ -525,12 +527,26 @@ TEST(KVCacheBatchedMemoryCopyTest, StagedCopyEligibilityRequiresDsv4TypedLayout)
         non_sparse_config, kv_config, std::shared_ptr<KVCacheAllocator>(), server_addrs);
     EXPECT_FALSE(non_sparse_connector->isDsv4TypedCacheLayout(non_sparse_connector->layerRegionSlots()));
 
-    auto wrong_tokens_config                      = makeCompactDsv4TypedMemoryCopyConfig(/*use_flash=*/true);
-    wrong_tokens_config.seq_size_per_block        = 128;
-    wrong_tokens_config.kernel_seq_size_per_block = 128;
-    auto wrong_tokens_connector                   = std::make_shared<KVCacheMemoryConnector>(
-        wrong_tokens_config, kv_config, std::shared_ptr<KVCacheAllocator>(), server_addrs);
-    EXPECT_FALSE(wrong_tokens_connector->isDsv4TypedCacheLayout(wrong_tokens_connector->layerRegionSlots()));
+    auto small_kernel_config                      = makeCompactDsv4TypedMemoryCopyConfig(/*use_flash=*/true);
+    small_kernel_config.seq_size_per_block        = 256;
+    small_kernel_config.kernel_seq_size_per_block = 64;
+    auto small_kernel_connector                   = std::make_shared<KVCacheMemoryConnector>(
+        small_kernel_config, kv_config, std::shared_ptr<KVCacheAllocator>(), server_addrs);
+    EXPECT_FALSE(small_kernel_connector->isDsv4TypedCacheLayout(small_kernel_connector->layerRegionSlots()));
+
+    auto non_divisible_config                      = makeCompactDsv4TypedMemoryCopyConfig(/*use_flash=*/true);
+    non_divisible_config.seq_size_per_block        = 16384;
+    non_divisible_config.kernel_seq_size_per_block = 384;
+    auto non_divisible_connector                   = std::make_shared<KVCacheMemoryConnector>(
+        non_divisible_config, kv_config, std::shared_ptr<KVCacheAllocator>(), server_addrs);
+    EXPECT_FALSE(non_divisible_connector->isDsv4TypedCacheLayout(non_divisible_connector->layerRegionSlots()));
+
+    auto decoupled_config                      = makeCompactDsv4TypedMemoryCopyConfig(/*use_flash=*/true);
+    decoupled_config.seq_size_per_block        = 16384;
+    decoupled_config.kernel_seq_size_per_block = 128;
+    auto decoupled_connector                   = std::make_shared<KVCacheMemoryConnector>(
+        decoupled_config, kv_config, std::shared_ptr<KVCacheAllocator>(), server_addrs);
+    EXPECT_TRUE(decoupled_connector->isDsv4TypedCacheLayout(decoupled_connector->layerRegionSlots()));
 
     auto wrong_schema_config = makeCompactDsv4TypedMemoryCopyConfig(/*use_flash=*/true);
     ASSERT_GT(wrong_schema_config.group_region_names.size(), 6u);
