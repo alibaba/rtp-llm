@@ -125,10 +125,8 @@ bool SWAKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_reuse
     }
 
     int need_alloc_blocks = 0;
-
     for (int i = current_blocks_len; i < current_blocks_len + new_blocks_len; i++) {
-        const bool should_alloc = shouldAllocateBlock(i, seq_slots, reserve_step, step, enable_reuse_cache);
-        if (should_alloc) {
+        if (shouldAllocateBlock(i, seq_slots, reserve_step, step, enable_reuse_cache)) {
             need_alloc_blocks++;
         }
     }
@@ -145,20 +143,32 @@ bool SWAKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_reuse
         }
     }
 
+    BlockIndicesType allocated_blocks;
+    if (need_alloc_blocks > 0) {
+        allocated_blocks = block_pool_->malloc(need_alloc_blocks);
+        if (allocated_blocks.size() != static_cast<size_t>(need_alloc_blocks)) {
+            if (!allocated_blocks.empty()) {
+                block_pool_->requestFree(allocated_blocks);
+            }
+            return false;
+        }
+    }
+
     BlockIndicesType new_ids;
     new_ids.reserve(static_cast<size_t>(new_blocks_len));
+    size_t allocated_idx = 0;
     for (int i = current_blocks_len; i < current_blocks_len + new_blocks_len; i++) {
-        const bool should_alloc   = shouldAllocateBlock(i, seq_slots, reserve_step, step, enable_reuse_cache);
+        const bool should_alloc = shouldAllocateBlock(i, seq_slots, reserve_step, step, enable_reuse_cache);
         if (should_alloc) {
-            auto result = block_pool_->malloc(1);
-            if (result.empty()) {
-                return false;
-            }
-            new_ids.push_back(result[0]);
+            new_ids.push_back(allocated_blocks[allocated_idx++]);
         } else {
             new_ids.push_back(NULL_BLOCK_IDX);
         }
     }
+    RTP_LLM_CHECK_WITH_INFO(allocated_idx == allocated_blocks.size(),
+                            "swa kv allocation accounting mismatch, used=%zu allocated=%zu",
+                            allocated_idx,
+                            allocated_blocks.size());
     block_ids.add(new_ids);
     checkSWATailBlockIds(block_ids, "SWAKVCacheGroup::malloc");
     return true;
