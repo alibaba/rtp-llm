@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
+from rtp_llm.config.generate_config import RoleAddr
 from rtp_llm.dash_sc.codec import OtherParams, SamplingParams
 from rtp_llm.dash_sc.inference.servicer import (
     DashScInferenceServicer,
@@ -23,6 +24,7 @@ from rtp_llm.dash_sc.inference.servicer import (
     iter_real_model_stream_infer,
 )
 from rtp_llm.dash_sc.proto import predict_v2_pb2
+from rtp_llm.ops import RoleType
 from rtp_llm.utils.base_model_datatypes import AuxInfo, GenerateOutput, GenerateOutputs
 
 
@@ -491,7 +493,21 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 )
             ]
         )
-        visitor = _MultiStreamVisitor(
+
+        class _RoutingVisitor(_MultiStreamVisitor):
+            async def enqueue(self, generate_input):
+                if self.enqueue_called == 0:
+                    generate_input.generate_config.role_addrs = [
+                        RoleAddr(
+                            role=RoleType.PREFILL,
+                            ip="127.0.0.1",
+                            http_port=8080,
+                            grpc_port=8081,
+                        )
+                    ]
+                return await super().enqueue(generate_input)
+
+        visitor = _RoutingVisitor(
             [_FakeAsyncStream([phase1]), _FakeAsyncStream([phase2])]
         )
         tok = _FakeTokenizer(
@@ -554,6 +570,10 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
             {"type": "json_object"},
         )
         self.assertFalse(visitor.generate_inputs[1].generate_config.in_think_mode)
+        self.assertEqual(
+            len(visitor.generate_inputs[0].generate_config.role_addrs), 1
+        )
+        self.assertEqual(visitor.generate_inputs[1].generate_config.role_addrs, [])
         self.assertNotIn(10, phase2_input_ids)
         self.assertNotIn(11, phase2_input_ids)
         self.assertEqual(
