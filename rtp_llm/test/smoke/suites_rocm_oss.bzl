@@ -110,7 +110,7 @@ def rocm_oss_suites():
                     "AITER_ASM_DIR=/opt/conda310/lib/python3.10/site-packages/aiter_meta/hsa/",
                     "WARM_UP=0",
                     "USE_SWIZZLEA=0",
-                    "AITER_JIT_DIR=${HIPPO_PROC_REAL_WORKDIR}/.aiter_new/jit",
+                    "AITER_JIT_DIR=$${HIPPO_PROC_REAL_WORKDIR}/.aiter_new/jit",
                     "REUSE_CACHE=1",
                     "ENABLE_CUDA_GRAPH=1",
                     "LD_LIBRARY_PATH=/opt/rh/gcc-toolset-12/root/usr/lib64:/opt/conda310/lib/:/opt/rocm/lib:/lib64:/usr/lib64:/opt/amdgpu/lib64:$LD_LIBRARY_PATH",
