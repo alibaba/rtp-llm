@@ -995,3 +995,23 @@ def iter_fake_model_stream_infer(
     _append_finished_output(infer, finished=True)
     infer.parameters["incremental_output"].int64_param = 1
     yield stream_resp
+
+
+def build_parameter_error_response(
+    request_id: str, message: str, *, status_code: int = 400
+) -> predict_v2_pb2.ModelStreamInferResponse:
+    """Build a DashLLM-protocol error via ``__messages__`` (gateway reads status_code from here)."""
+    resp = predict_v2_pb2.ModelStreamInferResponse()
+    resp.infer_response.parameters["__messages__"].string_param = json.dumps(
+        {
+            "header": {
+                "status_code": status_code,
+                "status_name": "InvalidParameter",
+                "status_message": message,
+                "finished": True,
+                "request_id": request_id,
+            },
+            "payload": {},
+        }
+    )
+    return resp
