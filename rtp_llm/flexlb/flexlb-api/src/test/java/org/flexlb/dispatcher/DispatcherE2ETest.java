@@ -1,5 +1,7 @@
 package org.flexlb.dispatcher;
 
+import static org.flexlb.dispatcher.BatchEndpointSpec.FailedItemFactory;
+
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -31,9 +33,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * End-to-end test for the assembled dispatcher: real {@link DispatchRouter} on top of real
- * {@link GenericBatchHandler}, real {@link FanoutService}, real {@link WebClientFeClient}, and a
+ * {@link GenericBatchHandler}, real {@link FanoutService}, real {@link FeClient}, and a
  * real {@link FePool} round-robin-ing across three {@link MockWebServer}s. Every batch endpoint
- * registered by {@link BatchEndpointRegistry} is exercised with one chunk induced to fail
+ * registered by {@link BatchEndpointSpec#SPECS} is exercised with one chunk induced to fail
  * (HTTP 500), and the non-batch path falls through to passthrough.
  */
 class DispatcherE2ETest {
@@ -158,7 +160,7 @@ class DispatcherE2ETest {
             assertEquals(i, item.get("index").asInt());
             JsonNode err = item.get("error");
             assertNotNull(err, "expected error object at index " + i);
-            assertEquals(DispatchProtocol.ERROR_CODE_SUB_BATCH_FAILED, err.get("code").asText());
+            assertEquals("dispatcher_sub_batch_failed", err.get("code").asText());
             assertFalse(err.get("message").asText().isBlank());
         }
         JsonNode pf = resp.get("_partial_failure");
@@ -354,22 +356,29 @@ class DispatcherE2ETest {
                                       boolean preAssignBe,
                                       List<org.flexlb.dao.loadbalance.BatchScheduleTarget> targets) {
         List<String> urls = List.of(baseUrl(fe1), baseUrl(fe2), baseUrl(fe3));
-        FePool pool = new FePool(() -> urls, url -> true);
+        FePool pool = DispatcherTestSupport.fePool(urls);
 
-        WebClientFeClient feClient = new WebClientFeClient(WebClient.builder());
+        DispatchConfig feClientCfg = new DispatchConfig();
+        feClientCfg.setBatchTimeoutMs(5000);
+        FeClient feClient = new FeClient(
+                WebClient.builder(),
+                reactor.netty.resources.ConnectionProvider.builder("e2e").build(),
+                feClientCfg);
         FanoutService fanout = new FanoutService(feClient, pool);
-        BatchScheduleClient batchScheduleClient = count ->
-                reactor.core.publisher.Mono.just(targets);
-        GenericBatchHandler batchHandler = new GenericBatchHandler(
-                fanout, mapper, new SubBatchSpec(SubBatchSpec.Mode.SIZE, subBatchSize),
-                batchScheduleClient, preAssignBe);
+        BatchScheduleClient batchScheduleClient = new BatchScheduleClient(null) {
+            @Override
+            public reactor.core.publisher.Mono<List<org.flexlb.dao.loadbalance.BatchScheduleTarget>> requestTargets(int count) {
+                return reactor.core.publisher.Mono.just(targets);
+            }
+        };
+        GenericBatchHandler batchHandler = DispatcherTestSupport.genericBatchHandler(
+                fanout, mapper, "size:" + subBatchSize, batchScheduleClient, preAssignBe);
 
-        WebClientPassthroughClient passthrough =
-                new WebClientPassthroughClient(WebClient.create(), pool);
-        DispatchHandler passthroughHandler = new DispatchHandler(passthrough);
+        PassthroughClient passthrough =
+                new PassthroughClient(WebClient.create(), pool);
 
-        List<BatchEndpointSpec> specs = new BatchEndpointRegistry().batchSpecs();
-        DispatchRouter router = new DispatchRouter(batchHandler, passthroughHandler, specs);
+        List<BatchEndpointSpec> specs = BatchEndpointSpec.SPECS;
+        DispatchRouter router = new DispatchRouter(batchHandler, passthrough, specs);
 
         // Bind to a real Reactor Netty server (rather than WebTestClient.bindToRouterFunction's
         // in-memory connector) so the passthrough's raw DataBuffer body actually traverses an HTTP

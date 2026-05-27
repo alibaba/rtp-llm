@@ -10,6 +10,8 @@ import reactor.test.StepVerifier;
 
 import java.util.List;
 
+import static org.flexlb.dispatcher.DispatcherTestSupport.fePool;
+import static org.flexlb.dispatcher.DispatcherTestSupport.feHealthChecker;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -41,7 +43,7 @@ class FeHealthCheckerTest {
     @Test
     void healthyAfterSingleSuccessfulProbe() {
         feA.enqueue(new MockResponse().setResponseCode(200).setBody("ok"));
-        FeHealthChecker checker = new FeHealthChecker(
+        FeHealthChecker checker = feHealthChecker(
                 () -> List.of(url(feA)), WebClient.create(), PROBE_PATH);
 
         StepVerifier.create(checker.probeOnce()).verifyComplete();
@@ -51,7 +53,7 @@ class FeHealthCheckerTest {
 
     @Test
     void unknownUrlAssumedAliveOptimistically() {
-        FeHealthChecker checker = new FeHealthChecker(
+        FeHealthChecker checker = feHealthChecker(
                 () -> List.of(), WebClient.create(), PROBE_PATH);
         assertTrue(checker.isAlive("http://never-probed"),
                 "URL with no probe history must default to alive — never block traffic on missing data");
@@ -60,7 +62,7 @@ class FeHealthCheckerTest {
     @Test
     void singleProbeFailureStillAliveForFlapTolerance() {
         feA.enqueue(new MockResponse().setResponseCode(500));
-        FeHealthChecker checker = new FeHealthChecker(
+        FeHealthChecker checker = feHealthChecker(
                 () -> List.of(url(feA)), WebClient.create(), PROBE_PATH);
 
         StepVerifier.create(checker.probeOnce()).verifyComplete();
@@ -73,7 +75,7 @@ class FeHealthCheckerTest {
     void twoConsecutiveFailuresMarkDead() {
         feA.enqueue(new MockResponse().setResponseCode(500));
         feA.enqueue(new MockResponse().setResponseCode(500));
-        FeHealthChecker checker = new FeHealthChecker(
+        FeHealthChecker checker = feHealthChecker(
                 () -> List.of(url(feA)), WebClient.create(), PROBE_PATH);
 
         StepVerifier.create(checker.probeOnce()).verifyComplete();
@@ -87,7 +89,7 @@ class FeHealthCheckerTest {
         feA.enqueue(new MockResponse().setResponseCode(500));
         feA.enqueue(new MockResponse().setResponseCode(500));
         feA.enqueue(new MockResponse().setResponseCode(200).setBody("ok"));
-        FeHealthChecker checker = new FeHealthChecker(
+        FeHealthChecker checker = feHealthChecker(
                 () -> List.of(url(feA)), WebClient.create(), PROBE_PATH);
 
         StepVerifier.create(checker.probeOnce()).verifyComplete();
@@ -104,7 +106,7 @@ class FeHealthCheckerTest {
         feA.enqueue(new MockResponse().setResponseCode(200).setBody("ok"));
         feB.enqueue(new MockResponse().setResponseCode(500));
         feB.enqueue(new MockResponse().setResponseCode(500));
-        FeHealthChecker checker = new FeHealthChecker(
+        FeHealthChecker checker = feHealthChecker(
                 () -> List.of(url(feA), url(feB)), WebClient.create(), PROBE_PATH);
 
         StepVerifier.create(checker.probeOnce()).verifyComplete();
@@ -120,9 +122,9 @@ class FeHealthCheckerTest {
         feA.enqueue(new MockResponse().setResponseCode(500));
         feB.enqueue(new MockResponse().setResponseCode(200).setBody("ok"));
         feB.enqueue(new MockResponse().setResponseCode(200).setBody("ok"));
-        FeHealthChecker checker = new FeHealthChecker(
+        FeHealthChecker checker = feHealthChecker(
                 () -> List.of(url(feA), url(feB)), WebClient.create(), PROBE_PATH);
-        FePool pool = new FePool(() -> List.of(url(feA), url(feB)), checker::isAlive);
+        FePool pool = fePool(() -> List.of(url(feA), url(feB)), checker::isAlive);
 
         StepVerifier.create(checker.probeOnce()).verifyComplete();
         StepVerifier.create(checker.probeOnce()).verifyComplete();
@@ -141,9 +143,9 @@ class FeHealthCheckerTest {
         feA.enqueue(new MockResponse().setResponseCode(500));
         feB.enqueue(new MockResponse().setResponseCode(500));
         feB.enqueue(new MockResponse().setResponseCode(500));
-        FeHealthChecker checker = new FeHealthChecker(
+        FeHealthChecker checker = feHealthChecker(
                 () -> List.of(url(feA), url(feB)), WebClient.create(), PROBE_PATH);
-        FePool pool = new FePool(() -> List.of(url(feA), url(feB)), checker::isAlive);
+        FePool pool = fePool(() -> List.of(url(feA), url(feB)), checker::isAlive);
 
         StepVerifier.create(checker.probeOnce()).verifyComplete();
         StepVerifier.create(checker.probeOnce()).verifyComplete();
@@ -160,7 +162,7 @@ class FeHealthCheckerTest {
     @Test
     void customProbePathHitsConfiguredEndpoint() throws Exception {
         feA.enqueue(new MockResponse().setResponseCode(200).setBody("ok"));
-        FeHealthChecker checker = new FeHealthChecker(
+        FeHealthChecker checker = feHealthChecker(
                 () -> List.of(url(feA)), WebClient.create(), "/health");
 
         StepVerifier.create(checker.probeOnce()).verifyComplete();
@@ -176,7 +178,7 @@ class FeHealthCheckerTest {
     @Test
     void blankProbePathRejectedAtConstruction() {
         try {
-            new FeHealthChecker(() -> List.of(), WebClient.create(), "");
+            feHealthChecker(() -> List.of(), WebClient.create(), "");
             org.junit.jupiter.api.Assertions.fail("blank probePath must throw");
         } catch (IllegalArgumentException expected) {
             // expected — surfaced loudly so a misconfigured DISPATCH_PROBE_PATH="" can't

@@ -1,5 +1,9 @@
 package org.flexlb.dispatcher;
 
+import static org.flexlb.dispatcher.BatchEndpointSpec.FailedItemFactory;
+
+import org.flexlb.dispatcher.FanoutService.SubBatchResult;
+
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -30,7 +34,7 @@ class PartialFailureMergerTest {
         var subs = List.of(
                 SubBatchResult.ok(body1, 2, 0),
                 SubBatchResult.ok(body2, 1, 2));
-        MergedResponse merged = PartialFailureMerger.merge(subs, batchInferSpec, m);
+        var merged = PartialFailureMerger.merge(subs, batchInferSpec, m);
 
         assertFalse(merged.allFailed());
         ArrayNode out = (ArrayNode) merged.body().get("response_batch");
@@ -48,7 +52,7 @@ class PartialFailureMergerTest {
         var subs = List.of(
                 SubBatchResult.ok(body1, 2, 0),
                 SubBatchResult.failed(2, 2, "fe_timeout"));
-        MergedResponse merged = PartialFailureMerger.merge(subs, batchInferSpec, m);
+        var merged = PartialFailureMerger.merge(subs, batchInferSpec, m);
 
         assertFalse(merged.allFailed());
         ArrayNode out = (ArrayNode) merged.body().get("response_batch");
@@ -68,7 +72,7 @@ class PartialFailureMergerTest {
         var subs = List.of(
                 SubBatchResult.failed(2, 0, "fe_down"),
                 SubBatchResult.failed(2, 2, "fe_down"));
-        MergedResponse merged = PartialFailureMerger.merge(subs, batchInferSpec, m);
+        var merged = PartialFailureMerger.merge(subs, batchInferSpec, m);
 
         assertTrue(merged.allFailed());
     }
@@ -86,7 +90,7 @@ class PartialFailureMergerTest {
         var subs = List.of(
                 SubBatchResult.ok(body1, 1, 0),
                 SubBatchResult.failed(1, 1, "fe_5xx"));
-        MergedResponse merged = PartialFailureMerger.merge(subs, spec, m);
+        var merged = PartialFailureMerger.merge(subs, spec, m);
 
         ArrayNode out = (ArrayNode) merged.body().get("responses");
         assertEquals(2, out.size());
@@ -98,7 +102,7 @@ class PartialFailureMergerTest {
     @Test
     void successWithNonObjectBodyTreatedAsFailed() {
         var subs = List.of(SubBatchResult.ok(m.createArrayNode(), 2, 0));
-        MergedResponse merged = PartialFailureMerger.merge(subs, batchInferSpec, m);
+        var merged = PartialFailureMerger.merge(subs, batchInferSpec, m);
 
         assertTrue(merged.allFailed());
         assertEquals(List.of(0, 1), merged.failedIndices());
@@ -114,7 +118,7 @@ class PartialFailureMergerTest {
         var subs = List.of(
                 SubBatchResult.ok(body1, 2, 0),
                 SubBatchResult.ok(bodyNoArr, 1, 2));
-        MergedResponse merged = PartialFailureMerger.merge(subs, batchInferSpec, m);
+        var merged = PartialFailureMerger.merge(subs, batchInferSpec, m);
 
         ArrayNode out = (ArrayNode) merged.body().get("response_batch");
         assertEquals(3, out.size());
@@ -131,7 +135,7 @@ class PartialFailureMergerTest {
         body1.putArray("response_batch").add(textNode("a0"));
 
         var subs = List.of(SubBatchResult.ok(body1, 2, 0));
-        MergedResponse merged = PartialFailureMerger.merge(subs, batchInferSpec, m);
+        var merged = PartialFailureMerger.merge(subs, batchInferSpec, m);
 
         assertTrue(merged.allFailed());
         assertEquals(List.of(0, 1), merged.failedIndices());

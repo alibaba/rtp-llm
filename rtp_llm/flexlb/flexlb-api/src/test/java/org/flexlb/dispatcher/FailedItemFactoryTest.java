@@ -1,5 +1,7 @@
 package org.flexlb.dispatcher;
 
+import static org.flexlb.dispatcher.BatchEndpointSpec.FailedItemFactory;
+
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;

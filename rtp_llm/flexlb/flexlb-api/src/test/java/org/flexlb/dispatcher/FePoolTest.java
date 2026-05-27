@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static org.flexlb.dispatcher.DispatcherTestSupport.fePool;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -14,25 +15,27 @@ class FePoolTest {
 
     @Test
     void roundRobinsAcrossAddresses() {
-        FePool pool = new FePool(() -> List.of("http://a:8088", "http://b:8088"), url -> true);
+        FePool pool = fePool(List.of("http://a:8088", "http://b:8088"));
         assertEquals("http://a:8088", pool.next());
         assertEquals("http://b:8088", pool.next());
         assertEquals("http://a:8088", pool.next());
     }
 
     @Test
-    void rejectsNullSupplier() {
-        assertThrows(IllegalArgumentException.class, () -> new FePool(null, url -> true));
+    void rejectsNullRefresher() {
+        FeHealthChecker hc = org.mockito.Mockito.mock(FeHealthChecker.class);
+        assertThrows(IllegalArgumentException.class, () -> new FePool(null, hc));
     }
 
     @Test
-    void rejectsNullPredicate() {
-        assertThrows(IllegalArgumentException.class, () -> new FePool(List::of, null));
+    void rejectsNullHealthChecker() {
+        DispatcherFePoolRefresher refresher = org.mockito.Mockito.mock(DispatcherFePoolRefresher.class);
+        assertThrows(IllegalArgumentException.class, () -> new FePool(refresher, null));
     }
 
     @Test
     void skipsDeadHostsPerPredicate() {
-        FePool pool = new FePool(
+        FePool pool = fePool(
                 () -> List.of("http://a:8088", "http://b:8088", "http://c:8088"),
                 url -> !url.contains("b:"));
         for (int i = 0; i < 6; i++) {
@@ -44,7 +47,7 @@ class FePoolTest {
 
     @Test
     void fallsBackToRoundRobinWhenAllDead() {
-        FePool pool = new FePool(
+        FePool pool = fePool(
                 () -> List.of("http://a:8088", "http://b:8088"),
                 url -> false);
         String picked = pool.next();
@@ -55,7 +58,7 @@ class FePoolTest {
     @Test
     void readsDynamicSupplierOnEveryNext() {
         AtomicReference<List<String>> source = new AtomicReference<>(List.of("http://a:8088"));
-        FePool pool = new FePool(source::get, url -> true);
+        FePool pool = fePool(source::get, url -> true);
         assertEquals("http://a:8088", pool.next());
 
         source.set(List.of("http://b:8088", "http://c:8088"));
@@ -73,7 +76,7 @@ class FePoolTest {
 
     @Test
     void emptySupplierSnapshotThrowsOnNext() {
-        FePool pool = new FePool(List::of, url -> true);
+        FePool pool = fePool(List.of());
         assertThrows(IllegalStateException.class, pool::next);
     }
 }

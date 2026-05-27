@@ -1,5 +1,7 @@
 package org.flexlb.dispatcher;
 
+import org.flexlb.dispatcher.FanoutService.SubBatchResult;
+
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -16,7 +18,7 @@ import java.util.List;
  * sub-bodies. Failed sub-batches contribute zero to {@code usage}; their pre-assigned absolute
  * indices are preserved (the unconditional renumbering writes back the same value).
  */
-public final class EmbeddingPostMerger implements PostMerger {
+public final class EmbeddingPostMerger implements BatchEndpointSpec.PostMerger {
 
     public static final EmbeddingPostMerger INSTANCE = new EmbeddingPostMerger();
 

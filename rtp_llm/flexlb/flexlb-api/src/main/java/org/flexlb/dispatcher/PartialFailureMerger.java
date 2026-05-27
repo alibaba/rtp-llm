@@ -1,5 +1,7 @@
 package org.flexlb.dispatcher;
 
+import org.flexlb.dispatcher.FanoutService.SubBatchResult;
+
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -19,6 +21,20 @@ import java.util.List;
 public final class PartialFailureMerger {
 
     private PartialFailureMerger() {
+    }
+
+    /**
+     * Merge outcome: the client-facing {@code body}, success/total counts, and the absolute item
+     * indices that failed. The handler returns 200 on any success and reserves 500 for the
+     * all-failed case.
+     */
+    public record MergedResponse(ObjectNode body,
+                                 int succeededChunks,
+                                 int totalChunks,
+                                 List<Integer> failedIndices) {
+        public boolean allFailed() {
+            return totalChunks > 0 && succeededChunks == 0;
+        }
     }
 
     public static MergedResponse merge(List<SubBatchResult> subs, BatchEndpointSpec spec, ObjectMapper mapper) {

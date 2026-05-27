@@ -18,7 +18,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-class LocalBatchScheduleClientTest {
+class BatchScheduleClientTest {
 
     @Test
     void successPathReturnsTargets() {
@@ -30,7 +30,7 @@ class LocalBatchScheduleClientTest {
                 new BatchScheduleCoordinator.Outcome(BatchScheduleResponse.success(targets),
                         BatchScheduleCoordinator.Source.LOCAL)));
 
-        LocalBatchScheduleClient client = new LocalBatchScheduleClient(coordinator);
+        BatchScheduleClient client = new BatchScheduleClient(coordinator);
 
         StepVerifier.create(client.requestTargets(2))
                 .assertNext(returned -> {
@@ -54,7 +54,7 @@ class LocalBatchScheduleClientTest {
                         BatchScheduleResponse.error(StrategyErrorType.NO_AVAILABLE_WORKER, "no BE"),
                         BatchScheduleCoordinator.Source.LOCAL)));
 
-        LocalBatchScheduleClient client = new LocalBatchScheduleClient(coordinator);
+        BatchScheduleClient client = new BatchScheduleClient(coordinator);
 
         StepVerifier.create(client.requestTargets(3))
                 .assertNext(returned -> assertEquals(0, returned.size(),
@@ -67,7 +67,7 @@ class LocalBatchScheduleClientTest {
         BatchScheduleCoordinator coordinator = mock(BatchScheduleCoordinator.class);
         when(coordinator.schedule(any())).thenReturn(Mono.error(new RuntimeException("boom")));
 
-        LocalBatchScheduleClient client = new LocalBatchScheduleClient(coordinator);
+        BatchScheduleClient client = new BatchScheduleClient(coordinator);
 
         StepVerifier.create(client.requestTargets(5))
                 .assertNext(returned -> assertEquals(0, returned.size(),
@@ -84,7 +84,7 @@ class LocalBatchScheduleClientTest {
         when(coordinator.schedule(any())).thenReturn(Mono.just(
                 new BatchScheduleCoordinator.Outcome(resp, BatchScheduleCoordinator.Source.LOCAL)));
 
-        LocalBatchScheduleClient client = new LocalBatchScheduleClient(coordinator);
+        BatchScheduleClient client = new BatchScheduleClient(coordinator);
 
         StepVerifier.create(client.requestTargets(1))
                 .assertNext(returned -> assertEquals(0, returned.size()))

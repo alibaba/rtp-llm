@@ -3,7 +3,9 @@ package org.flexlb.dispatcher;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.discovery.ServiceDiscovery;
 import org.flexlb.util.Logger;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Component;
 
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
@@ -29,20 +31,21 @@ import java.util.stream.Collectors;
  * a concurrent {@code getAndSet} is overwritten on the next event, and the URL list itself
  * is an idempotent snapshot so transient ordering does not corrupt downstream state.
  *
- * <p>Constructed only when the dispatcher is enabled (see
- * {@link DispatcherConfiguration#dispatcherFePoolRefresher}). Single-instance per service id
- * is enforced by the {@code @Bean} factory, not by {@code @Component} scanning, so disabled
- * deployments do not pay for an idle scheduler or a parked listener.
+ * <p>Constructed only when the dispatcher is enabled — Spring's {@code @ConditionalOnProperty}
+ * gates this {@code @Component} on {@code dispatch.enabled=true}, so disabled deployments do
+ * not pay for an idle scheduler or a parked listener.
  */
+@Component
+@ConditionalOnProperty(prefix = "dispatch", name = "enabled", havingValue = "true")
 public class DispatcherFePoolRefresher {
 
     private final ServiceDiscovery serviceDiscovery;
     private final String serviceId;
     private final AtomicReference<List<String>> fePoolUrls = new AtomicReference<>(List.of());
 
-    public DispatcherFePoolRefresher(ServiceDiscovery serviceDiscovery, String serviceId) {
+    public DispatcherFePoolRefresher(ServiceDiscovery serviceDiscovery, DispatchConfig cfg) {
         this.serviceDiscovery = serviceDiscovery;
-        this.serviceId = serviceId;
+        this.serviceId = cfg.getFePoolServiceId();
         // Boot seed first — guarantees source() returns the freshest available view by the
         // time downstream beans (FePool, FeHealthChecker) read it during their own init.
         applyUrls(toUrls(serviceDiscovery.getHosts(serviceId)), "boot");

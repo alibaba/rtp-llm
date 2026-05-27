@@ -1,5 +1,9 @@
 package org.flexlb.dispatcher;
 
+import static org.flexlb.dispatcher.BatchEndpointSpec.FailedItemFactory;
+
+import org.flexlb.dispatcher.FanoutService.SubBatchResult;
+
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -50,7 +54,7 @@ class FanoutServiceTest {
     @Test
     void fansOutChunksAndPreservesOrder() throws Exception {
         FeClient feClient = mock(FeClient.class);
-        FePool pool = new FePool(() -> List.of("http://a", "http://b"), url -> true);
+        FePool pool = DispatcherTestSupport.fePool(() -> List.of("http://a", "http://b"), url -> true);
         when(feClient.post(eq("http://a"), eq("/batch_infer"), any())).thenReturn(Mono.just(batchOf("r0", "r1")));
         when(feClient.post(eq("http://b"), eq("/batch_infer"), any())).thenReturn(Mono.just(batchOf("r2")));
 
@@ -76,7 +80,7 @@ class FanoutServiceTest {
     @Test
     void failedChunkBecomesFailedSubResultNotAnError() throws Exception {
         FeClient feClient = mock(FeClient.class);
-        FePool pool = new FePool(() -> List.of("http://a", "http://b"), url -> true);
+        FePool pool = DispatcherTestSupport.fePool(() -> List.of("http://a", "http://b"), url -> true);
         when(feClient.post(eq("http://a"), eq("/batch_infer"), any())).thenReturn(Mono.just(batchOf("r0", "r1")));
         when(feClient.post(eq("http://b"), eq("/batch_infer"), any())).thenReturn(Mono.error(new RuntimeException("FE down")));
 
@@ -98,7 +102,7 @@ class FanoutServiceTest {
     @Test
     void allChunksFailedReportedNotThrown() {
         FeClient feClient = mock(FeClient.class);
-        FePool pool = new FePool(() -> List.of("http://a"), url -> true);
+        FePool pool = DispatcherTestSupport.fePool(() -> List.of("http://a"), url -> true);
         when(feClient.post(anyString(), eq("/batch_infer"), any())).thenReturn(Mono.error(new RuntimeException("FE down")));
 
         FanoutService svc = new FanoutService(feClient, pool);
@@ -117,7 +121,7 @@ class FanoutServiceTest {
     @Test
     void emptyFePoolFailsChunksSoftly() {
         FeClient feClient = mock(FeClient.class);
-        FePool pool = new FePool(List::of, url -> true);
+        FePool pool = DispatcherTestSupport.fePool(List::of, url -> true);
 
         FanoutService svc = new FanoutService(feClient, pool);
 

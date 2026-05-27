@@ -56,7 +56,7 @@ class StreamingPassthroughTest {
         fe.enqueue(buildSseResponseWith6sBodyDelay());
 
         WebClient webClient = passthroughWebClientMirroringProduction();
-        WebClientPassthroughClient client = passthroughClient(webClient);
+        PassthroughClient client = passthroughClient(webClient);
 
         StepVerifier.create(forward(client))
                 .expectComplete()
@@ -78,7 +78,7 @@ class StreamingPassthroughTest {
         WebClient webClient = WebClient.builder()
                 .clientConnector(new ReactorClientHttpConnector(http))
                 .build();
-        WebClientPassthroughClient client = passthroughClient(webClient);
+        PassthroughClient client = passthroughClient(webClient);
 
         StepVerifier.create(forward(client))
                 .expectErrorMatches(ex -> hasCause(ex, ReadTimeoutException.class))
@@ -93,9 +93,9 @@ class StreamingPassthroughTest {
                 .build();
     }
 
-    private WebClientPassthroughClient passthroughClient(WebClient webClient) {
-        FePool pool = new FePool(() -> List.of("http://" + fe.getHostName() + ":" + fe.getPort()), url -> true);
-        return new WebClientPassthroughClient(webClient, pool);
+    private PassthroughClient passthroughClient(WebClient webClient) {
+        FePool pool = DispatcherTestSupport.fePool(() -> List.of("http://" + fe.getHostName() + ":" + fe.getPort()), url -> true);
+        return new PassthroughClient(webClient, pool);
     }
 
     private static MockResponse buildSseResponseWith6sBodyDelay() {
@@ -109,7 +109,7 @@ class StreamingPassthroughTest {
                 .setBodyDelay(6, TimeUnit.SECONDS);
     }
 
-    private static reactor.core.publisher.Mono<Void> forward(WebClientPassthroughClient client) {
+    private static reactor.core.publisher.Mono<Void> forward(PassthroughClient client) {
         MockServerRequest request = MockServerRequest.builder()
                 .method(HttpMethod.POST)
                 .uri(URI.create("http://x/dispatcher/v1/chat/completions"))

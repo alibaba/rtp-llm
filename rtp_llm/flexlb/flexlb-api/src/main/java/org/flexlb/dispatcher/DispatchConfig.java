@@ -3,15 +3,12 @@ package org.flexlb.dispatcher;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import lombok.Getter;
 import lombok.Setter;
-import org.flexlb.config.EnvConfigOverrides;
-import org.flexlb.util.JsonUtils;
-
-import java.util.Map;
 
 /**
- * Operator-facing tuning surface for the dispatcher. Seven fields and nothing else — every
- * timeout/safety knob that "no one actually tunes" lives as a constant inside
- * {@code DispatcherConfiguration} / {@code WebClientPassthroughClient} / {@code WebClientFeClient}
+ * Operator-facing tuning surface for the dispatcher. Pure POJO — loading and validation live in
+ * {@link DispatcherConfiguration#dispatchConfig()}, mirroring how {@code ConfigService} loads
+ * {@code FlexlbConfig}. Every timeout/safety knob that "no one actually tunes" lives as a
+ * constant inside {@code DispatcherConfiguration} / {@code PassthroughClient} / {@code FeClient}
  * (see those classes for FE_CONNECT_TIMEOUT_MS / FE_PENDING_ACQUIRE_TIMEOUT_MS /
  * STREAM_TIMEOUT_MS / MAX_RESPONSE_BYTES).
  *
@@ -33,7 +30,7 @@ public class DispatchConfig {
     /**
      * Chunk splitting DSL. {@code count:N} → exactly N chunks (default). {@code size:N} →
      * each chunk holds at most N items. Bare integer is shorthand for {@code size:N}.
-     * Parsed eagerly during {@link #validate()} so a malformed value fails fast at boot.
+     * Parsed eagerly during loading so a malformed value fails fast at boot.
      */
     private String subBatch = "count:5";
 
@@ -95,50 +92,10 @@ public class DispatchConfig {
      */
     private boolean preAssignBe = true;
 
-    /** Internal cache of the parsed sub-batch spec — populated in {@link #validate()}. */
+    /** Parsed sub-batch spec; populated by {@link DispatcherConfiguration} during loading. */
     private transient SubBatchSpec subBatchSpec;
-
-    public static DispatchConfig fromJson(String json) {
-        return fromJsonWithEnv(json, System.getenv());
-    }
-
-    /**
-     * Test seam: load with an explicit env map instead of {@link System#getenv()}.
-     */
-    public static DispatchConfig fromJsonWithEnv(String json, Map<String, String> env) {
-        DispatchConfig c = (json == null || json.isBlank())
-                ? new DispatchConfig()
-                : JsonUtils.toObject(json, DispatchConfig.class);
-        EnvConfigOverrides.apply(c, "DISPATCH_", env);
-        c.validate();
-        return c;
-    }
 
     public SubBatchSpec subBatchSpec() {
         return subBatchSpec;
-    }
-
-    private void validate() {
-        if (enabled && (fePoolServiceId == null || fePoolServiceId.isBlank())) {
-            throw new IllegalArgumentException("DISPATCH_CONFIG.enabled=true requires fePoolServiceId");
-        }
-        if (batchTimeoutMs <= 0) {
-            throw new IllegalArgumentException("batchTimeoutMs must be > 0, got " + batchTimeoutMs);
-        }
-        if (feMaxConnectionsPerHost <= 0) {
-            throw new IllegalArgumentException(
-                    "feMaxConnectionsPerHost must be > 0, got " + feMaxConnectionsPerHost);
-        }
-        if (feMaxPendingAcquirePerHost <= 0) {
-            throw new IllegalArgumentException(
-                    "feMaxPendingAcquirePerHost must be > 0, got " + feMaxPendingAcquirePerHost);
-        }
-        if (probePath == null || probePath.isBlank()) {
-            throw new IllegalArgumentException(
-                    "probePath must not be blank — set DISPATCH_PROBE_PATH=/frontend_health (rtp_llm) "
-                            + "or /health (vLLM) etc.; got '" + probePath + "'");
-        }
-        // SubBatchSpec.parse throws IllegalArgumentException with a precise message on bad DSL.
-        this.subBatchSpec = SubBatchSpec.parse(subBatch);
     }
 }

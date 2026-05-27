@@ -92,7 +92,12 @@ public final class EnvConfigOverrides {
             return Double.parseDouble(value);
         }
         if (targetType == boolean.class || targetType == Boolean.class) {
-            return Boolean.parseBoolean(value);
+            return switch (value.toLowerCase(Locale.ROOT)) {
+                case "true", "1", "yes", "on"  -> true;
+                case "false", "0", "no", "off" -> false;
+                default -> throw new IllegalArgumentException(
+                        "boolean must be one of true|false|1|0|yes|no|on|off, got: '" + value + "'");
+            };
         }
         if (targetType == String.class) {
             return value;

@@ -1,6 +1,8 @@
 package org.flexlb.dispatcher;
 
 import org.flexlb.util.Logger;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.stereotype.Component;
 
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -24,6 +26,8 @@ import java.util.function.Supplier;
  * call site accidentally regress to the pre-health-check behavior where ~1/N requests land on a
  * dead host until ops intervenes.
  */
+@Component
+@ConditionalOnProperty(prefix = "dispatch", name = "enabled", havingValue = "true")
 public class FePool {
 
     private final Supplier<List<String>> source;
@@ -36,16 +40,15 @@ public class FePool {
      */
     private final AtomicBoolean allDeadReported = new AtomicBoolean(false);
 
-    public FePool(Supplier<List<String>> source, Predicate<String> isAlive) {
-        if (source == null) {
-            throw new IllegalArgumentException("FE pool source must not be null");
+    public FePool(DispatcherFePoolRefresher refresher, FeHealthChecker healthChecker) {
+        if (refresher == null) {
+            throw new IllegalArgumentException("DispatcherFePoolRefresher must not be null");
         }
-        if (isAlive == null) {
-            throw new IllegalArgumentException(
-                    "isAlive predicate must not be null — pass url -> true for tests");
+        if (healthChecker == null) {
+            throw new IllegalArgumentException("FeHealthChecker must not be null");
         }
-        this.source = source;
-        this.isAlive = isAlive;
+        this.source = refresher.source();
+        this.isAlive = healthChecker::isAlive;
     }
 
     /**

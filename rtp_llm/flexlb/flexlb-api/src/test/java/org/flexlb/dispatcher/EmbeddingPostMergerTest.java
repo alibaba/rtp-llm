@@ -1,5 +1,9 @@
 package org.flexlb.dispatcher;
 
+import static org.flexlb.dispatcher.BatchEndpointSpec.FailedItemFactory;
+
+import org.flexlb.dispatcher.FanoutService.SubBatchResult;
+
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;

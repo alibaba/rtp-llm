@@ -1,5 +1,10 @@
 package org.flexlb.dispatcher;
 
+import static org.flexlb.dispatcher.BatchEndpointSpec.FailedItemFactory;
+import static org.flexlb.dispatcher.DispatcherTestSupport.genericBatchHandler;
+
+import org.flexlb.dispatcher.FanoutService.SubBatchResult;
+
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -50,7 +55,7 @@ class GenericBatchHandlerTest {
         when(fanout.dispatchChunks(eq("/batch_infer"), anyList(), eq(spec)))
                 .thenReturn(Mono.just(List.of(SubBatchResult.ok(feResp, 2, 0))));
 
-        GenericBatchHandler handler = new GenericBatchHandler(fanout, mapper, SubBatchSpec.parse("size:5"));
+        GenericBatchHandler handler = genericBatchHandler(fanout, mapper, "size:5");
         ObjectNode body = mapper.createObjectNode();
         body.putArray("prompt_batch").add("a").add("b");
 
@@ -85,7 +90,7 @@ class GenericBatchHandlerTest {
             return Mono.just(subs);
         });
 
-        GenericBatchHandler handler = new GenericBatchHandler(fanout, mapper, SubBatchSpec.parse("size:2"));
+        GenericBatchHandler handler = genericBatchHandler(fanout, mapper, "size:2");
         ObjectNode body = mapper.createObjectNode();
         body.putArray("prompt_batch").add("a").add("b").add("c");
 
@@ -108,7 +113,7 @@ class GenericBatchHandlerTest {
                         SubBatchResult.failed(2, 0, "fe_down"),
                         SubBatchResult.failed(2, 2, "fe_down"))));
 
-        GenericBatchHandler handler = new GenericBatchHandler(fanout, mapper, SubBatchSpec.parse("size:2"));
+        GenericBatchHandler handler = genericBatchHandler(fanout, mapper, "size:2");
         ObjectNode body = mapper.createObjectNode();
         body.putArray("prompt_batch").add("a").add("b").add("c").add("d");
 
@@ -125,7 +130,7 @@ class GenericBatchHandlerTest {
     @Test
     void emptyBatchReturnsShapedEmptyEnvelopeNotEmptyObject() {
         FanoutService fanout = mock(FanoutService.class);
-        GenericBatchHandler handler = new GenericBatchHandler(fanout, mapper, SubBatchSpec.parse("size:5"));
+        GenericBatchHandler handler = genericBatchHandler(fanout, mapper, "size:5");
         ObjectNode body = mapper.createObjectNode();
         body.putArray("prompt_batch");
 
@@ -149,7 +154,7 @@ class GenericBatchHandlerTest {
     @Test
     void nonObjectBodyReturns400() {
         FanoutService fanout = mock(FanoutService.class);
-        GenericBatchHandler handler = new GenericBatchHandler(fanout, mapper, SubBatchSpec.parse("size:2"));
+        GenericBatchHandler handler = genericBatchHandler(fanout, mapper, "size:2");
 
         JsonNode arrayBody = mapper.createArrayNode().add("a").add("b");
         MockServerRequest req = MockServerRequest.builder()
@@ -166,7 +171,7 @@ class GenericBatchHandlerTest {
     @Test
     void missingArrayFieldReturns400() {
         FanoutService fanout = mock(FanoutService.class);
-        GenericBatchHandler handler = new GenericBatchHandler(fanout, mapper, SubBatchSpec.parse("size:2"));
+        GenericBatchHandler handler = genericBatchHandler(fanout, mapper, "size:2");
 
         ObjectNode body = mapper.createObjectNode();
         body.put("unrelated", "data");
@@ -184,7 +189,7 @@ class GenericBatchHandlerTest {
     @Test
     void nonArrayRequestFieldReturns400() {
         FanoutService fanout = mock(FanoutService.class);
-        GenericBatchHandler handler = new GenericBatchHandler(fanout, mapper, SubBatchSpec.parse("size:2"));
+        GenericBatchHandler handler = genericBatchHandler(fanout, mapper, "size:2");
 
         ObjectNode body = mapper.createObjectNode();
         body.put("prompt_batch", "not-an-array");
@@ -273,7 +278,7 @@ class GenericBatchHandlerTest {
             return Mono.just(subs);
         });
 
-        GenericBatchHandler handler = new GenericBatchHandler(fanout, mapper, SubBatchSpec.parse("size:2"));
+        GenericBatchHandler handler = genericBatchHandler(fanout, mapper, "size:2");
         ObjectNode body = mapper.createObjectNode();
         body.putArray("prompt_batch").add("a").add("b").add("c").add("d").add("e");
 
@@ -328,8 +333,7 @@ class GenericBatchHandlerTest {
                         org.flexlb.dao.route.RoleType.PDFUSION));
         when(batchClient.requestTargets(3)).thenReturn(Mono.just(targets));
 
-        GenericBatchHandler handler = new GenericBatchHandler(
-                fanout, mapper, SubBatchSpec.parse("size:2"), batchClient, true);
+        GenericBatchHandler handler = genericBatchHandler(fanout, mapper, "size:2", batchClient, true);
         ObjectNode body = mapper.createObjectNode();
         body.putArray("prompt_batch").add("a").add("b").add("c").add("d").add("e");
 
@@ -394,8 +398,7 @@ class GenericBatchHandlerTest {
                 new org.flexlb.dao.loadbalance.BatchScheduleTarget("10.0.0.42", 23840, 23841,
                         org.flexlb.dao.route.RoleType.PDFUSION))));
 
-        GenericBatchHandler handler = new GenericBatchHandler(
-                fanout, mapper, SubBatchSpec.parse("size:5"), batchClient, true);
+        GenericBatchHandler handler = genericBatchHandler(fanout, mapper, "size:5", batchClient, true);
         ObjectNode body = mapper.createObjectNode();
         body.putArray("prompt_batch").add("a");
         ObjectNode userGc = body.putObject("generate_config");
@@ -450,8 +453,7 @@ class GenericBatchHandlerTest {
         // Coordinator unreachable / no BE — client collapses to empty list per its contract.
         when(batchClient.requestTargets(anyInt())).thenReturn(Mono.just(List.of()));
 
-        GenericBatchHandler handler = new GenericBatchHandler(
-                fanout, mapper, SubBatchSpec.parse("size:2"), batchClient, true);
+        GenericBatchHandler handler = genericBatchHandler(fanout, mapper, "size:2", batchClient, true);
         ObjectNode body = mapper.createObjectNode();
         body.putArray("prompt_batch").add("a").add("b").add("c");
 
@@ -495,8 +497,7 @@ class GenericBatchHandlerTest {
         });
         BatchScheduleClient batchClient = mock(BatchScheduleClient.class);
 
-        GenericBatchHandler handler = new GenericBatchHandler(
-                fanout, mapper, SubBatchSpec.parse("size:2"), batchClient, false);
+        GenericBatchHandler handler = genericBatchHandler(fanout, mapper, "size:2", batchClient, false);
         ObjectNode body = mapper.createObjectNode();
         body.putArray("prompt_batch").add("a").add("b").add("c");
 
@@ -528,7 +529,7 @@ class GenericBatchHandlerTest {
         when(fanout.dispatchChunks(any(), anyList(), eq(spec)))
                 .thenReturn(Mono.just(List.of(SubBatchResult.ok(feResp, 1, 0))));
 
-        GenericBatchHandler handler = new GenericBatchHandler(fanout, mapper, SubBatchSpec.parse("size:5"));
+        GenericBatchHandler handler = genericBatchHandler(fanout, mapper, "size:5");
         MockServerRequest req = MockServerRequest.builder()
                 .method(HttpMethod.POST)
                 .uri(URI.create("http://x/dispatcher/batch_infer"))

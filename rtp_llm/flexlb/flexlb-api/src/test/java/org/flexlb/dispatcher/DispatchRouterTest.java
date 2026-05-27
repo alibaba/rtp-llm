@@ -1,5 +1,7 @@
 package org.flexlb.dispatcher;
 
+import static org.flexlb.dispatcher.BatchEndpointSpec.FailedItemFactory;
+
 import org.junit.jupiter.api.Test;
 import org.springframework.test.web.reactive.server.WebTestClient;
 import org.springframework.web.reactive.function.server.RouterFunction;
@@ -26,7 +28,7 @@ class DispatchRouterTest {
     @Test
     void nonDispatcherPathsAreNotMatched() {
         GenericBatchHandler batch = mock(GenericBatchHandler.class);
-        DispatchHandler passthrough = mock(DispatchHandler.class);
+        PassthroughClient passthrough = mock(PassthroughClient.class);
         RouterFunction<ServerResponse> routes =
                 new DispatchRouter(batch, passthrough, List.of(BATCH_INFER)).routes();
         WebTestClient client = WebTestClient.bindToRouterFunction(routes).build();
@@ -41,8 +43,8 @@ class DispatchRouterTest {
     @Test
     void dispatcherAnyOtherPathGoesToPassthrough() {
         GenericBatchHandler batch = mock(GenericBatchHandler.class);
-        DispatchHandler passthrough = mock(DispatchHandler.class);
-        when(passthrough.handlePassthrough(any()))
+        PassthroughClient passthrough = mock(PassthroughClient.class);
+        when(passthrough.forward(any()))
                 .thenReturn(ServerResponse.ok().bodyValue("pass"));
         WebTestClient client = WebTestClient.bindToRouterFunction(
                 new DispatchRouter(batch, passthrough, List.of(BATCH_INFER)).routes()).build();
@@ -50,7 +52,7 @@ class DispatchRouterTest {
         client.get().uri("/dispatcher/v1/models").exchange()
                 .expectStatus().isOk()
                 .expectBody(String.class).isEqualTo("pass");
-        verify(passthrough).handlePassthrough(any());
+        verify(passthrough).forward(any());
         verifyNoInteractions(batch);
     }
 
@@ -61,8 +63,8 @@ class DispatchRouterTest {
                 .thenReturn(ServerResponse.ok().bodyValue(BATCH_INFER.getPath()));
         when(batch.handle(any(), eq(EMBEDDINGS)))
                 .thenReturn(ServerResponse.ok().bodyValue(EMBEDDINGS.getPath()));
-        DispatchHandler passthrough = mock(DispatchHandler.class);
-        when(passthrough.handlePassthrough(any()))
+        PassthroughClient passthrough = mock(PassthroughClient.class);
+        when(passthrough.forward(any()))
                 .thenReturn(ServerResponse.ok().bodyValue("pass"));
 
         List<BatchEndpointSpec> specs = List.of(BATCH_INFER, EMBEDDINGS);

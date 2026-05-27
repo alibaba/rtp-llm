@@ -5,7 +5,7 @@ import lombok.Data;
 /**
  * PV log entry for {@code /dispatcher/**} requests &mdash; both the batch fanout path
  * ({@link org.flexlb.dispatcher.GenericBatchHandler}) and the passthrough path
- * ({@link org.flexlb.dispatcher.WebClientPassthroughClient}) emit one record per inbound
+ * ({@link org.flexlb.dispatcher.PassthroughClient}) emit one record per inbound
  * request to {@code pvLogger}, sharing this schema so {@code pv.log} stays single-format.
  *
  * <p>Discriminated from {@link PvLogData} ({@code /schedule}) and {@link BatchPvLogData}
@@ -65,5 +65,24 @@ public class DispatchPvLogData {
         this.success = httpStatus >= 200 && httpStatus < 300;
         this.error = error;
         this.costMs = System.currentTimeMillis() - startTimeMs;
+    }
+
+    /**
+     * Serialize this PV record and write it to the given access-log channel. Success records
+     * use INFO, non-success uses ERROR. Serialization failure surfaces to the operational log
+     * (not pv.log) so ops dashboards see it; PV emission must never propagate an exception
+     * into the request path.
+     */
+    public void emit(org.slf4j.Logger pvLogger) {
+        try {
+            String json = org.flexlb.util.JsonUtils.toStringOrEmpty(this);
+            if (success) {
+                pvLogger.info(json);
+            } else {
+                pvLogger.error(json);
+            }
+        } catch (Exception ex) {
+            org.flexlb.util.Logger.error("Failed to serialize dispatcher PV log data", ex);
+        }
     }
 }

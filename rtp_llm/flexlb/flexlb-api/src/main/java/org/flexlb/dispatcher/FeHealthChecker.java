@@ -1,10 +1,15 @@
 package org.flexlb.dispatcher;
 
 import org.flexlb.util.Logger;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
+import javax.annotation.PostConstruct;
+import javax.annotation.PreDestroy;
 import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
@@ -28,6 +33,8 @@ import java.util.function.Supplier;
  * stops responding — only an application-level probe catches that. VipServer is layer 1
  * (registration), this is layer 2 (application liveness).
  */
+@Component
+@ConditionalOnProperty(prefix = "dispatch", name = "enabled", havingValue = "true")
 public class FeHealthChecker {
 
     private static final int FAIL_THRESHOLD = 2;
@@ -40,12 +47,15 @@ public class FeHealthChecker {
     private final ConcurrentMap<String, AtomicInteger> consecFails = new ConcurrentHashMap<>();
     private ScheduledExecutorService scheduler;
 
-    public FeHealthChecker(Supplier<List<String>> urlSupplier, WebClient webClient, String probePath) {
+    public FeHealthChecker(DispatcherFePoolRefresher refresher,
+                           @Qualifier("dispatcherPassthroughWebClient") WebClient webClient,
+                           DispatchConfig cfg) {
+        String probePath = cfg.getProbePath();
         if (probePath == null || probePath.isBlank()) {
             throw new IllegalArgumentException(
                     "probePath must not be blank — pass /frontend_health, /health, etc.");
         }
-        this.urlSupplier = urlSupplier;
+        this.urlSupplier = refresher.source();
         this.webClient = webClient;
         this.probePath = probePath;
     }
@@ -122,9 +132,17 @@ public class FeHealthChecker {
             t.setDaemon(true);
             return t;
         });
-        scheduler.scheduleAtFixedRate(
-                () -> probeOnce().subscribe(),
-                0, PROBE_INTERVAL_MS, TimeUnit.MILLISECONDS);
+        // Catch synchronous throws so a future urlSupplier that can throw doesn't make
+        // ScheduledExecutorService silently cancel the task — once the loop dies all hosts
+        // stay optimistically isAlive=true and dead-host filtering quietly stops working.
+        scheduler.scheduleAtFixedRate(() -> {
+            try {
+                probeOnce().subscribe();
+            } catch (Throwable t) {
+                Logger.warn("FE health probe round threw, scheduler kept alive: err={}: {}",
+                        t.getClass().getSimpleName(), t.getMessage());
+            }
+        }, 0, PROBE_INTERVAL_MS, TimeUnit.MILLISECONDS);
     }
 
     public synchronized void stop() {
@@ -132,5 +150,15 @@ public class FeHealthChecker {
             scheduler.shutdownNow();
             scheduler = null;
         }
+    }
+
+    @PostConstruct
+    void startProbes() {
+        start();
+    }
+
+    @PreDestroy
+    void stopProbes() {
+        stop();
     }
 }

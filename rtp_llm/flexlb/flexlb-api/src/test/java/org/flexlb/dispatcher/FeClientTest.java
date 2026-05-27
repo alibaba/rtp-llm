@@ -10,9 +10,10 @@ import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.web.reactive.function.client.WebClient;
+import reactor.netty.resources.ConnectionProvider;
 import reactor.test.StepVerifier;
 
-class WebClientFeClientTest {
+class FeClientTest {
 
     private MockWebServer server;
     private final ObjectMapper mapper = new ObjectMapper();
@@ -33,7 +34,10 @@ class WebClientFeClientTest {
         server.enqueue(new MockResponse()
                 .setHeader("Content-Type", "application/json")
                 .setBody("{\"response_batch\":[{\"response\":\"ok\"}]}"));
-        WebClientFeClient client = new WebClientFeClient(WebClient.builder());
+        DispatchConfig cfg = new DispatchConfig();
+        cfg.setBatchTimeoutMs(5000);
+        FeClient client = new FeClient(
+                WebClient.builder(), ConnectionProvider.builder("test").build(), cfg);
 
         ObjectNode body = mapper.createObjectNode();
         body.putArray("prompt_batch").add("hi");
