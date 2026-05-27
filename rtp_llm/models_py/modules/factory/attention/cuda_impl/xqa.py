@@ -84,6 +84,13 @@ class XQAImpl(FMHAImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
+        # XQA cubin covers sm_90 only; sm_120a (Blackwell consumer, e.g.
+        # RTX 5000 Pro) lacks a binding and triggers cudaErrorInvalidSymbol
+        # at first forward. C++ XQAAttnOp.support gate is `>= kSM_90` and
+        # passes sm_120 erroneously — short-circuit here so dispatch falls
+        # through to PyFlashinferPaged. See blockers.md R-4.
+        if torch.cuda.get_device_capability()[0] == 12:
+            return False
         fmha_impl = XQAAttnOp(attn_configs)
         return fmha_impl.support(attn_inputs)
 
@@ -144,7 +151,10 @@ class XQADecodeImpl(FMHAImplBase):
     ) -> bool:
         if attn_inputs.is_prefill:
             return False
-        if torch.cuda.get_device_capability()[0] not in [9, 10, 12]:
+        # sm_120 has no XQA cubin; see XQAImpl.support above and blockers.md R-4.
+        if torch.cuda.get_device_capability()[0] == 12:
+            return False
+        if torch.cuda.get_device_capability()[0] not in [9, 10]:
             return False
         group_size = attn_configs.head_num // attn_configs.kv_head_num
         return (
