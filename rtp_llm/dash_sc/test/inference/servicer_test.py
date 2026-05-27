@@ -1853,8 +1853,8 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(generate_config.in_think_mode)
         self.assertEqual(generate_config.max_thinking_tokens, 0)
         self.assertEqual(generate_config.end_think_token_ids, [])
-        self.assertEqual(generate_config.timeout_ms, 1_800_000)
-        self.assertEqual(generate_config.ttft_timeout_ms, 1_800_000)
+        self.assertEqual(generate_config.timeout_ms, 1_795_000)
+        self.assertEqual(generate_config.ttft_timeout_ms, 1_795_000)
         self.assertEqual(generate_config.traffic_reject_priority, 10)
         self.assertEqual(
             visitor.last_generate_input.headers,
