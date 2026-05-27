@@ -1047,9 +1047,10 @@ TEST_F(FIFOSchedulerTest, DpControllerManaged_NormalRequestsBatchTogether) {
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
 }
 
-// V1 DP-controller: FlexLB 已做跨 DP 切分,本地 group 永远不足 batchGroupSize,
-// Scheduler 不再等 — 只要是 force_batch slot 就立即放行,由 isolation 兜底。
-TEST_F(FIFOSchedulerTest, DpControllerManaged_GroupCompletenessBypassed) {
+// V1 DP-controller with batch_group_size=1 (per-rank count for dpSize>1):
+// Each local slot has batch_group_size=1 because FlexLB sets it to requestsPerRank[rank].
+// Scheduler sees group complete (1 stream, size=1) and schedules immediately.
+TEST_F(FIFOSchedulerTest, DpControllerManaged_SingleSlotPerRankSchedulesImmediately) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 11, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
     std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
     ASSERT_TRUE(cache_manager->init());
@@ -1074,9 +1075,9 @@ TEST_F(FIFOSchedulerTest, DpControllerManaged_GroupCompletenessBypassed) {
     query->input_ids                            = torch::tensor({1}, torch::kInt32);
     query->generate_config                      = make_shared<GenerateConfig>();
     query->generate_config->force_batch         = true;
-    query->generate_config->batch_group_timeout = 10000;  // timeout 远大于 schedule 延迟,排除 timeout 分支干扰
+    query->generate_config->batch_group_timeout = 10000;
     query->batch_group_id                       = 77;
-    query->batch_group_size                     = 4;  // 本地只有 1/4,legacy 会等,V1 立即调度
+    query->batch_group_size                     = 1;  // FlexLB sets per-rank count: 1 slot on this rank
     query->begin_time_us                        = autil::TimeUtility::currentTimeInMicroSeconds();
     shared_ptr<GenerateStream> stream =
         make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
@@ -1087,6 +1088,74 @@ TEST_F(FIFOSchedulerTest, DpControllerManaged_GroupCompletenessBypassed) {
     ASSERT_EQ(result.value().size(), 1u);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
     ASSERT_EQ(scheduler.runningStreamsSize(), 1);
+}
+
+// V1 DP-controller with dpSize=1: FlexLB sends batch_group_size=N (all requests local).
+// Scheduler waits until all N arrive before scheduling them together.
+TEST_F(FIFOSchedulerTest, DpControllerManaged_DpSize1_WaitsForFullGroup) {
+    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 11, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    parallelism_config.dp_size               = 1;
+    parallelism_config.tp_rank               = 0;
+    parallelism_config.dp_controller_managed = true;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    int64_t group_id   = 88;
+    int     group_size = 2;
+
+    // Enqueue first request — group incomplete, should NOT be scheduled
+    {
+        std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
+        query->input_ids                            = torch::tensor({1}, torch::kInt32);
+        query->generate_config                      = make_shared<GenerateConfig>();
+        query->generate_config->force_batch         = true;
+        query->generate_config->batch_group_timeout = 10000;
+        query->batch_group_id                       = group_id;
+        query->batch_group_size                     = group_size;
+        query->begin_time_us                        = autil::TimeUtility::currentTimeInMicroSeconds();
+        shared_ptr<GenerateStream> stream =
+            make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        ASSERT_TRUE(scheduler.enqueue(stream).ok());
+    }
+
+    auto result1 = scheduler.schedule();
+    ASSERT_TRUE(result1.ok());
+    ASSERT_EQ(result1.value().size(), 0u);
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 1);
+
+    // Enqueue second request — group complete, both scheduled together
+    {
+        std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
+        query->input_ids                            = torch::tensor({1}, torch::kInt32);
+        query->generate_config                      = make_shared<GenerateConfig>();
+        query->generate_config->force_batch         = true;
+        query->generate_config->batch_group_timeout = 10000;
+        query->batch_group_id                       = group_id;
+        query->batch_group_size                     = group_size;
+        query->begin_time_us                        = autil::TimeUtility::currentTimeInMicroSeconds();
+        shared_ptr<GenerateStream> stream =
+            make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        ASSERT_TRUE(scheduler.enqueue(stream).ok());
+    }
+
+    auto result2 = scheduler.schedule();
+    ASSERT_TRUE(result2.ok());
+    ASSERT_EQ(result2.value().size(), 2u);
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
+    ASSERT_EQ(scheduler.runningStreamsSize(), 2);
 }
 
 }  // namespace rtp_llm

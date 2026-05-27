@@ -164,6 +164,13 @@ bool FIFOScheduler::evaluateRunningBatch(const list<GenerateStreamPtr>& streams,
         return false;
     }
 
+    // force_batch group: FlexLB already budgeted tokens, skip engine-side token cap.
+    if (new_stream->forceBatch() && !streams.empty()
+        && streams.front()->forceBatch()
+        && streams.front()->batchGroupId() == new_stream->batchGroupId()) {
+        return true;
+    }
+
     int max_token_size = new_stream->contextLength();
     if (streams.empty() && max_token_size + running_streams_.size() < int(max_seq_len_)) {
         return true;
@@ -171,8 +178,6 @@ bool FIFOScheduler::evaluateRunningBatch(const list<GenerateStreamPtr>& streams,
     for (auto& stream : streams) {
         max_token_size = std::max(max_token_size, stream->contextLength());
     }
-    // 这里的判断是要求当前调度轮所有请求参与计算的 token 数之和小于 max_batch_tokens_size_，loading_cache_streams
-    // 这一轮实际不参与计算，不需要计入。
     return max_token_size * (streams.size() + 1) + running_streams_.size() < int(max_batch_tokens_size_);
 }
 
@@ -248,10 +253,7 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_stre
             // Check timeout: if expired, treat as normal stream
             if (now - info.first_arrival_time > stream->batchGroupTimeout()) {
                 force_batch = false;
-            } else if (!dp_controller_managed_ && info.count < stream->batchGroupSize()) {
-                // Group incomplete, skip this stream.
-                // 在 dp_controller_managed 下,FlexLB 已做过跨 DP 切分,每个 DP 本地队列每
-                // 个 group 只会有 1 个 slot,本地 completeness 由 FlexLB 保证 — 不再等。
+            } else if (info.count < stream->batchGroupSize()) {
                 it++;
                 continue;
             }

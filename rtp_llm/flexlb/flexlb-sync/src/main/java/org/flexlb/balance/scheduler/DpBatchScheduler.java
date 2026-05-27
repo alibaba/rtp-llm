@@ -375,6 +375,14 @@ public class DpBatchScheduler {
                 .setBatchId(batchId);
 
         int[] requestsPerRank = dpSize > 0 ? new int[dpSize] : null;
+        if (requestsPerRank != null) {
+            for (RankAssignment ra : assignments) {
+                int rank = ra.dpRank();
+                if (rank >= 0 && rank < dpSize) {
+                    requestsPerRank[rank]++;
+                }
+            }
+        }
 
         for (RankAssignment ra : assignments) {
             PendingRequest req = ra.request();
@@ -396,14 +404,19 @@ public class DpBatchScheduler {
                 ib = EngineRpcService.GenerateInputPB.newBuilder().setRequestId(req.requestId());
             }
 
+            int localGroupSize = (requestsPerRank != null && ra.dpRank() >= 0 && ra.dpRank() < dpSize)
+                    ? requestsPerRank[ra.dpRank()] : assignments.size();
+
             ib.setDpRank(com.google.protobuf.Int32Value.of(ra.dpRank()));
             ib.setBatchGroupId(com.google.protobuf.Int64Value.of(batchId));
+            ib.setBatchGroupSize(localGroupSize);
             if (reqDto != null && reqDto.getBlockCacheKeys() != null) {
                 ib.clearCacheHashKey().addAllCacheHashKey(reqDto.getBlockCacheKeys());
             }
 
             EngineRpcService.GenerateConfigPB.Builder gcb = ib.getGenerateConfigBuilder();
             gcb.setForceBatch(com.google.protobuf.Int32Value.of(1));
+            gcb.setBatchGroupTimeout(com.google.protobuf.Int32Value.of(100));
             gcb.clearRoleAddrs();
             ServerStatus prefillSs = req.prefill();
             if (prefillSs != null) {
@@ -424,10 +437,6 @@ public class DpBatchScheduler {
                         .build());
             }
             b.addInputs(ib.build());
-
-            if (requestsPerRank != null && ra.dpRank() >= 0 && ra.dpRank() < dpSize) {
-                requestsPerRank[ra.dpRank()]++;
-            }
         }
 
         if (requestsPerRank != null) {

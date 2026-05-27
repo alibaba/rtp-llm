@@ -655,6 +655,11 @@ class DpBatchSchedulerTest {
             assertTrue(in.getGenerateConfig().hasForceBatch()
                             && in.getGenerateConfig().getForceBatch().getValue() == 1,
                     "force_batch must be 1 so FIFOScheduler refuses to mix this batch with anything else");
+            assertTrue(in.getBatchGroupSize() > 0,
+                    "batch_group_size must be set so FIFOScheduler knows how many local "
+                            + "streams to wait for before scheduling the group");
+            assertTrue(in.getGenerateConfig().hasBatchGroupTimeout(),
+                    "batch_group_timeout must be set as a safety fallback");
         }
     }
 
