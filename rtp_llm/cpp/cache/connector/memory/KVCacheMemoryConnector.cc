@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <cstdlib>
 
 #include "rtp_llm/cpp/cache/BlockPool.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
@@ -78,6 +79,72 @@ static size_t alignUp(size_t value, size_t alignment) {
 
 static size_t regionIndex(KVCacheRegionName region_name) {
     return static_cast<size_t>(region_name);
+}
+
+static bool envFlagEnabled(const char* name, bool default_value) {
+    const char* value = std::getenv(name);
+    if (value == nullptr) {
+        return default_value;
+    }
+    const std::string flag(value);
+    if (flag.empty()) {
+        return default_value;
+    }
+    return flag != "0" && flag != "false" && flag != "FALSE" && flag != "off" && flag != "OFF";
+}
+
+static int envIntValue(const char* name, int default_value) {
+    const char* value = std::getenv(name);
+    if (value == nullptr || *value == '\0') {
+        return default_value;
+    }
+    bool negative = false;
+    if (*value == '+' || *value == '-') {
+        negative = *value == '-';
+        ++value;
+    }
+    if (*value < '0' || *value > '9') {
+        return default_value;
+    }
+    int parsed = 0;
+    while (*value >= '0' && *value <= '9') {
+        parsed = parsed * 10 + (*value - '0');
+        ++value;
+    }
+    return negative ? -parsed : parsed;
+}
+
+static double envDoubleValue(const char* name, double default_value) {
+    const char* value = std::getenv(name);
+    if (value == nullptr || *value == '\0') {
+        return default_value;
+    }
+    bool negative = false;
+    if (*value == '+' || *value == '-') {
+        negative = *value == '-';
+        ++value;
+    }
+    bool   parsed_any = false;
+    double parsed     = 0.0;
+    while (*value >= '0' && *value <= '9') {
+        parsed     = parsed * 10.0 + static_cast<double>(*value - '0');
+        parsed_any = true;
+        ++value;
+    }
+    if (*value == '.') {
+        ++value;
+        double scale = 0.1;
+        while (*value >= '0' && *value <= '9') {
+            parsed += static_cast<double>(*value - '0') * scale;
+            scale *= 0.1;
+            parsed_any = true;
+            ++value;
+        }
+    }
+    if (!parsed_any) {
+        return default_value;
+    }
+    return negative ? -parsed : parsed;
 }
 
 KVCacheMemoryConnector::KVCacheMemoryConnector(const CacheConfig&                       cache_config,
@@ -188,6 +255,67 @@ bool KVCacheMemoryConnector::isFullOnlySlot(const LayerRegionSlot& slot) const {
     return cache_config_.group_types[static_cast<size_t>(slot.group_id)] == CacheGroupType::FULL;
 }
 
+bool KVCacheMemoryConnector::useKvTailSplit() const {
+    return kv_tail_split_enabled_;
+}
+
+bool KVCacheMemoryConnector::isKvRole(CacheBackingRole role) const {
+    return useKvTailSplit() && role == CacheBackingRole::KV;
+}
+
+bool KVCacheMemoryConnector::isTailRole(CacheBackingRole role) const {
+    return useKvTailSplit() && role == CacheBackingRole::TAIL;
+}
+
+CacheBlockKind KVCacheMemoryConnector::poolKindForRole(CacheBackingRole role, bool is_complete) const {
+    if (isKvRole(role)) {
+        return CacheBlockKind::INCOMPLETE;
+    }
+    if (isTailRole(role)) {
+        return CacheBlockKind::COMPLETE;
+    }
+    return blockKindFromComplete(is_complete);
+}
+
+bool KVCacheMemoryConnector::copyInfoIncludesSlot(const CopyInfoPerKey& copy_info, const LayerRegionSlot& slot) const {
+    if (isKvRole(copy_info.backing_role)) {
+        return isFullOnlySlot(slot);
+    }
+    if (isTailRole(copy_info.backing_role)) {
+        return !isFullOnlySlot(slot);
+    }
+    return copy_info.is_complete || isFullOnlySlot(slot);
+}
+
+CacheBackingRole KVCacheMemoryConnector::roleFromCopyItem(const MemoryOperationRequestPB::CopyItem& item) const {
+    if (!useKvTailSplit()) {
+        return CacheBackingRole::LEGACY;
+    }
+    return item.is_complete() ? CacheBackingRole::TAIL : CacheBackingRole::KV;
+}
+
+bool KVCacheMemoryConnector::copyItemIncludesSlot(const MemoryOperationRequestPB::CopyItem& item,
+                                                  const LayerRegionSlot&                    slot) const {
+    const auto role = roleFromCopyItem(item);
+    if (isKvRole(role)) {
+        return isFullOnlySlot(slot);
+    }
+    if (isTailRole(role)) {
+        return !isFullOnlySlot(slot);
+    }
+    return item.is_complete() || isFullOnlySlot(slot);
+}
+
+bool KVCacheMemoryConnector::encodedIsCompleteForCopyInfo(const CopyInfoPerKey& copy_info) const {
+    if (isKvRole(copy_info.backing_role)) {
+        return false;
+    }
+    if (isTailRole(copy_info.backing_role)) {
+        return true;
+    }
+    return copy_info.is_complete;
+}
+
 void KVCacheMemoryConnector::initBlockPool() {
     const auto memory_cache_size_mb = kv_cache_config_.memory_cache_size_mb;
     RTP_LLM_CHECK_WITH_INFO(memory_cache_size_mb > 0,
@@ -208,6 +336,8 @@ void KVCacheMemoryConnector::initBlockPool() {
 
     const bool use_dual =
         hasTypedLayerRegionSlots(slots) && full_only_block_size > 0 && full_only_block_size < total_block_size;
+    kv_tail_split_enabled_ = use_dual && envFlagEnabled("MEMORY_CACHE_KV_TAIL_SPLIT", false);
+    kv_tail_keep_last_n_   = std::max(0, envIntValue("MEMORY_CACHE_TAIL_KEEP_LAST_N", 2));
 
     if (!use_dual) {
         block_pool_ = createBlockPool(total_block_size, memory_cache_size_mb);
@@ -215,7 +345,7 @@ void KVCacheMemoryConnector::initBlockPool() {
         return;
     }
 
-    complete_block_size_   = total_block_size;
+    complete_block_size_   = useKvTailSplit() ? (total_block_size - full_only_block_size) : total_block_size;
     incomplete_block_size_ = full_only_block_size;
 
     const int    step        = std::max(1, cache_config_.linear_step);
@@ -223,28 +353,73 @@ void KVCacheMemoryConnector::initBlockPool() {
 
     size_t complete_block_num;
     size_t incomplete_block_num;
-    if (step > 1) {
+    if (useKvTailSplit()) {
+        const size_t addition = static_cast<size_t>(kv_cache_config_.non_full_addition_kvcache_blocks);
+        const double tail_ratio = envDoubleValue("MEMORY_CACHE_TAIL_POOL_RATIO", -1.0);
+        if (tail_ratio >= 0.0 && tail_ratio <= 1.0) {
+            const size_t tail_bytes = static_cast<size_t>(static_cast<double>(total_bytes) * tail_ratio);
+            const size_t kv_bytes   = total_bytes - tail_bytes;
+            complete_block_num      = complete_block_size_ == 0 ? 0 : tail_bytes / complete_block_size_;
+            incomplete_block_num    = incomplete_block_size_ == 0 ? 0 : kv_bytes / incomplete_block_size_;
+        } else {
+            const size_t addition_bytes = addition * incomplete_block_size_;
+            RTP_LLM_CHECK_WITH_INFO(total_bytes > addition_bytes,
+                                    "memory_cache_size_mb=%ld too small: kv addition reserve=%zu bytes "
+                                    "(addition=%zu x kv_block=%zu) exceeds total=%zu",
+                                    memory_cache_size_mb,
+                                    addition_bytes,
+                                    addition,
+                                    incomplete_block_size_,
+                                    total_bytes);
+            const size_t available            = total_bytes - addition_bytes;
+            const size_t effective_block_bytes = complete_block_size_ + incomplete_block_size_ * step;
+            RTP_LLM_CHECK_WITH_INFO(effective_block_bytes > 0, "effective kv-tail block bytes is zero");
+            complete_block_num   = available / effective_block_bytes;
+            incomplete_block_num = complete_block_num * static_cast<size_t>(step) + addition;
+        }
+    } else if (step > 1) {
+        const size_t addition       = static_cast<size_t>(kv_cache_config_.non_full_addition_kvcache_blocks);
+        const size_t addition_bytes = addition * incomplete_block_size_;
+        RTP_LLM_CHECK_WITH_INFO(total_bytes > addition_bytes,
+                                "memory_cache_size_mb=%ld too small: non_full_addition reserve=%zu bytes "
+                                "(addition=%zu x incomplete_block=%zu) exceeds total=%zu",
+                                memory_cache_size_mb,
+                                addition_bytes,
+                                addition,
+                                incomplete_block_size_,
+                                total_bytes);
+        const size_t available = total_bytes - addition_bytes;
         const size_t effective_block_bytes =
             complete_block_size_ + incomplete_block_size_ * static_cast<size_t>(step - 1);
         RTP_LLM_CHECK_WITH_INFO(effective_block_bytes > 0, "effective block bytes is zero");
-        complete_block_num   = total_bytes / effective_block_bytes;
-        incomplete_block_num = complete_block_num * static_cast<size_t>(step - 1);
+        complete_block_num   = available / effective_block_bytes;
+        incomplete_block_num = complete_block_num * static_cast<size_t>(step - 1) + addition;
     } else {
         complete_block_num   = total_bytes / complete_block_size_;
         incomplete_block_num = 0;
     }
     RTP_LLM_CHECK_WITH_INFO(complete_block_num > 0,
-                            "pool_size_mb=%ld too small for complete_block_size=%zu",
+                            "pool_size_mb=%ld too small for complete/tail block size=%zu",
                             memory_cache_size_mb,
                             complete_block_size_);
+    if (useKvTailSplit()) {
+        RTP_LLM_CHECK_WITH_INFO(incomplete_block_num > 0,
+                                "pool_size_mb=%ld too small for kv block size=%zu",
+                                memory_cache_size_mb,
+                                incomplete_block_size_);
+    }
 
     RTP_LLM_LOG_INFO(
-        "dual pool init: complete_size=%zu complete_num=%zu incomplete_size=%zu incomplete_num=%zu step=%d",
+        "dual pool init: split=%d complete/tail_size=%zu complete/tail_num=%zu "
+        "incomplete/kv_size=%zu incomplete/kv_num=%zu step=%d non_full_addition=%u tail_keep_last_n=%d",
+        useKvTailSplit(),
         complete_block_size_,
         complete_block_num,
         incomplete_block_size_,
         incomplete_block_num,
-        step);
+        step,
+        kv_cache_config_.non_full_addition_kvcache_blocks,
+        kv_tail_keep_last_n_);
 
     auto make_pool = [](size_t block_size, size_t block_num) -> std::shared_ptr<BlockPool> {
         if (block_num == 0) {
@@ -325,7 +500,7 @@ void KVCacheMemoryConnector::initDiskBlockPools() {
     }
 
     const int    step                = std::max(1, cache_config_.linear_step);
-    const size_t incomplete_ratio    = static_cast<size_t>(step - 1);
+    const size_t incomplete_ratio    = static_cast<size_t>(useKvTailSplit() ? step : step - 1);
     const size_t incomplete_blk_size = incomplete_block_size_;
     RTP_LLM_CHECK_WITH_INFO(incomplete_ratio > 0 && incomplete_blk_size > 0,
                             "init disk dual pool failed, invalid incomplete config, ratio=%zu block_size=%zu",
@@ -349,8 +524,9 @@ void KVCacheMemoryConnector::initDiskBlockPools() {
 
     const size_t complete_file_bytes   = complete_slots * complete_stride;
     const size_t incomplete_file_bytes = incomplete_slots * incomplete_stride;
-    RTP_LLM_LOG_INFO("disk dual pool init: complete_size=%zu complete_slots=%zu complete_file=%zu "
-                     "incomplete_size=%zu incomplete_slots=%zu incomplete_file=%zu step=%d",
+    RTP_LLM_LOG_INFO("disk dual pool init: split=%d complete/tail_size=%zu complete/tail_slots=%zu complete_file=%zu "
+                     "incomplete/kv_size=%zu incomplete/kv_slots=%zu incomplete_file=%zu step=%d",
+                     useKvTailSplit(),
                      complete_block_size,
                      complete_slots,
                      complete_file_bytes,
@@ -581,16 +757,32 @@ std::shared_ptr<AsyncMatchContext> KVCacheMemoryConnector::asyncMatch(const std:
     for (size_t i = already_reuse_num; i < cache_keys_size; ++i) {
         const auto cache_key    = cache_keys.at(i);
         const auto match_result = block_cache_->match(static_cast<CacheKeyType>(cache_key));
-        if (match_result.backing_type == CacheBackingType::MEMORY && isNullBlockIdx(match_result.matched_index)) {
-            break;  // only continuous prefix
-        }
-        if (match_result.backing_type == CacheBackingType::DISK && match_result.disk_slot < 0) {
-            break;
-        }
-        matched_disk                    = matched_disk || match_result.backing_type == CacheBackingType::DISK;
-        const bool gpu_blocks_all_valid = gpuBlocksAllValid(layer_attn_block_ids, slots, i);
-        if (match_result.is_complete && gpu_blocks_all_valid) {
-            matched_num = i + 1;
+        if (useKvTailSplit()) {
+            if (!match_result.has_kv) {
+                break;  // only continuous prefix
+            }
+            matched_disk = matched_disk || match_result.backing_type == CacheBackingType::DISK
+                           || (match_result.has_tail && match_result.tail_backing_type == CacheBackingType::DISK);
+            // KV-only keys can preserve prefix continuity, but the final reuse boundary must land on a
+            // tail-backed key. This relies on the existing hybrid allocator invariant that non-FULL GPU
+            // blocks are only materialized at step/tail anchor positions.
+            const bool gpu_blocks_all_valid = gpuBlocksAllValid(layer_attn_block_ids, slots, i);
+            if (match_result.has_tail && gpu_blocks_all_valid) {
+                matched_num = i + 1;
+            }
+            continue;
+        } else {
+            if (match_result.backing_type == CacheBackingType::MEMORY && isNullBlockIdx(match_result.matched_index)) {
+                break;  // only continuous prefix
+            }
+            if (match_result.backing_type == CacheBackingType::DISK && match_result.disk_slot < 0) {
+                break;
+            }
+            matched_disk                    = matched_disk || match_result.backing_type == CacheBackingType::DISK;
+            const bool gpu_blocks_all_valid = gpuBlocksAllValid(layer_attn_block_ids, slots, i);
+            if (match_result.is_complete && gpu_blocks_all_valid) {
+                matched_num = i + 1;
+            }
         }
     }
 
@@ -647,6 +839,33 @@ bool KVCacheMemoryConnector::gpuBlocksAllValid(const LayerAttnBlockIds&         
         }
         const auto& blocks = layer_attn_block_ids[layer][attn]->blocks();
         if (key_index >= blocks.size() || isNullBlockIdx(blocks[key_index])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool KVCacheMemoryConnector::gpuBlocksForRoleAllValid(const LayerAttnBlockIds&            layer_attn_block_ids,
+                                                      const std::vector<LayerRegionSlot>& slots,
+                                                      size_t                              key_index,
+                                                      CacheBackingRole                    role) const {
+    for (const auto& slot : slots) {
+        if (isKvRole(role) && !isFullOnlySlot(slot)) {
+            continue;
+        }
+        if (isTailRole(role) && isFullOnlySlot(slot)) {
+            continue;
+        }
+        const auto layer = static_cast<size_t>(slot.layer_id);
+        const auto attn  = static_cast<size_t>(slot.region_name);
+        if (layer >= layer_attn_block_ids.size() || attn >= layer_attn_block_ids[layer].size()
+            || !layer_attn_block_ids[layer][attn]) {
+            return false;
+        }
+        if (key_index >= layer_attn_block_ids[layer][attn]->blocks().size()) {
+            return false;
+        }
+        if (isNullBlockIdx(layer_attn_block_ids[layer][attn]->blocks().at(key_index))) {
             return false;
         }
     }
@@ -724,8 +943,15 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::share
         if (success) {
             resource->setMemoryReuseBlockNum(read_block_num);
             for (const auto& copy_info : copy_plan->copy_infos) {
-                const auto removed_item = block_cache_->removeIfMatch(
-                    copy_info.cache_key, copy_info.backing_type, copy_info.mem_block, copy_info.disk_slot);
+                const auto removed_item =
+                    useKvTailSplit() && copy_info.backing_role != CacheBackingRole::LEGACY ?
+                        block_cache_->removeIfMatch(copy_info.cache_key,
+                                                    copy_info.backing_role,
+                                                    copy_info.backing_type,
+                                                    copy_info.mem_block,
+                                                    copy_info.disk_slot) :
+                        block_cache_->removeIfMatch(
+                            copy_info.cache_key, copy_info.backing_type, copy_info.mem_block, copy_info.disk_slot);
                 if (!removed_item.has_value()) {
                     continue;
                 }
@@ -761,6 +987,121 @@ KVCacheMemoryConnector::buildCopyPlanForRead(const CacheKeysType&               
                                              int                                 read_num) {
     std::vector<CopyInfoPerKey> copy_infos;
     bool                        success = true;
+
+    if (useKvTailSplit()) {
+        bool last_key_has_tail = false;
+        auto make_gpu_blocks   = [&](int key_index) {
+            std::vector<BlockIdxType> gpu_blocks;
+            gpu_blocks.reserve(slots.size());
+            for (const auto& slot : slots) {
+                const auto layer = static_cast<size_t>(slot.layer_id);
+                const auto attn  = static_cast<size_t>(slot.region_name);
+                gpu_blocks.push_back(layer_attn_block_ids.at(layer).at(attn)->blocks().at(key_index));
+            }
+            return gpu_blocks;
+        };
+        auto reference_for_read = [&](const CopyInfoPerKey& copy_info) {
+            if (copy_info.backing_type == CacheBackingType::MEMORY) {
+                auto source_pool = memoryPoolForRole(copy_info.backing_role, copy_info.is_complete);
+                if (!source_pool) {
+                    return false;
+                }
+                referenceBlocksInPool(source_pool, {copy_info.mem_block}, /*cache_ref=*/false);
+                return true;
+            }
+            auto disk_pool = diskPoolForRole(copy_info.backing_role, copy_info.is_complete);
+            if (!disk_pool || !disk_pool->validSlot(copy_info.disk_slot)) {
+                return false;
+            }
+            disk_pool->requestReference(copy_info.disk_slot);
+            return true;
+        };
+
+        for (int i = start_index; i < start_index + read_num; ++i) {
+            const auto cache_key = static_cast<CacheKeyType>(cache_keys.at(i));
+            const auto snapshot  = block_cache_->match(cache_key);
+            if (!snapshot.has_kv) {
+                RTP_LLM_LOG_WARNING("build split copy plan for read failed, missing kv, cache key: %ld", cache_key);
+                success = false;
+                break;
+            }
+
+            const auto gpu_blocks = make_gpu_blocks(i);
+            if (!gpuBlocksForRoleAllValid(layer_attn_block_ids, slots, i, CacheBackingRole::KV)) {
+                RTP_LLM_LOG_WARNING("build split copy plan for read failed, invalid kv gpu blocks, cache key: %ld",
+                                    cache_key);
+                success = false;
+                break;
+            }
+            auto       kv_match   = block_cache_->matchAndMarkInFlight(cache_key, CacheBackingRole::KV);
+            if (!kv_match.found) {
+                RTP_LLM_LOG_WARNING("build split copy plan for read failed, missing kv after mark, cache key: %ld",
+                                    cache_key);
+                success = false;
+                break;
+            }
+            CopyInfoPerKey kv_info;
+            kv_info.cache_key    = cache_key;
+            kv_info.backing_role = CacheBackingRole::KV;
+            kv_info.backing_type = kv_match.backing_type;
+            kv_info.mem_block    = kv_match.matched_index;
+            kv_info.disk_slot    = kv_match.disk_slot;
+            kv_info.gpu_blocks   = gpu_blocks;
+            kv_info.is_complete  = false;
+            if (!reference_for_read(kv_info)) {
+                RTP_LLM_LOG_WARNING("build split copy plan for read failed, cannot reference kv, cache key: %ld",
+                                    cache_key);
+                block_cache_->releaseInFlight(cache_key,
+                                              CacheBackingRole::KV,
+                                              kv_info.backing_type,
+                                              kv_info.mem_block,
+                                              kv_info.disk_slot);
+                success = false;
+                break;
+            }
+            copy_infos.emplace_back(std::move(kv_info));
+
+            if (snapshot.has_tail && gpuBlocksForRoleAllValid(layer_attn_block_ids, slots, i, CacheBackingRole::TAIL)) {
+                auto tail_match = block_cache_->matchAndMarkInFlight(cache_key, CacheBackingRole::TAIL);
+                if (!tail_match.found) {
+                    RTP_LLM_LOG_WARNING("build split copy plan for read failed, missing tail after mark, key: %ld",
+                                        cache_key);
+                    success = false;
+                    break;
+                }
+                CopyInfoPerKey tail_info;
+                tail_info.cache_key    = cache_key;
+                tail_info.backing_role = CacheBackingRole::TAIL;
+                tail_info.backing_type = tail_match.backing_type;
+                tail_info.mem_block    = tail_match.matched_index;
+                tail_info.disk_slot    = tail_match.disk_slot;
+                tail_info.gpu_blocks   = gpu_blocks;
+                tail_info.is_complete  = true;
+                if (!reference_for_read(tail_info)) {
+                    RTP_LLM_LOG_WARNING("build split copy plan for read failed, cannot reference tail, cache key: %ld",
+                                        cache_key);
+                    block_cache_->releaseInFlight(cache_key,
+                                                  CacheBackingRole::TAIL,
+                                                  tail_info.backing_type,
+                                                  tail_info.mem_block,
+                                                  tail_info.disk_slot);
+                    success = false;
+                    break;
+                }
+                copy_infos.emplace_back(std::move(tail_info));
+                if (i == start_index + read_num - 1) {
+                    last_key_has_tail = true;
+                }
+            }
+        }
+
+        if (success && !last_key_has_tail) {
+            RTP_LLM_LOG_WARNING("build split copy plan for read failed, last key has no tail");
+            success = false;
+        }
+        auto plan = createCopyPlan(copy_infos, CopyDirection::H2D);
+        return success ? plan : nullptr;
+    }
 
     for (int i = start_index; i < start_index + read_num; ++i) {
         const auto cache_key    = cache_keys.at(i);
@@ -852,9 +1193,11 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
     }
 
     size_t mem_matched_num = 0;
-    for (; mem_matched_num < cache_keys_size; ++mem_matched_num) {
-        if (!block_cache_->contains(static_cast<CacheKeyType>(cache_keys[mem_matched_num]))) {
-            break;
+    if (!useKvTailSplit()) {
+        for (; mem_matched_num < cache_keys_size; ++mem_matched_num) {
+            if (!block_cache_->contains(static_cast<CacheKeyType>(cache_keys[mem_matched_num]))) {
+                break;
+            }
         }
     }
     if (mem_matched_num == cache_keys_size) {
@@ -928,6 +1271,96 @@ KVCacheMemoryConnector::buildCopyPlanForWrite(const CacheKeysType&              
                                               bool&                               no_need_write) {
     std::vector<CopyInfoPerKey> copy_infos;
     copy_infos.reserve(write_num);
+
+    if (useKvTailSplit()) {
+        std::vector<int> complete_indices;
+        complete_indices.reserve(static_cast<size_t>(write_num));
+        struct Candidate {
+            CacheKeyType              cache_key{0};
+            std::vector<BlockIdxType> gpu_blocks;
+            bool                      full_valid{false};
+            bool                      tail_valid{false};
+        };
+        std::vector<Candidate> candidates;
+        candidates.reserve(static_cast<size_t>(write_num));
+
+        for (int i = start_index; i < start_index + write_num; ++i) {
+            Candidate candidate;
+            candidate.cache_key = cache_keys.at(i);
+            candidate.gpu_blocks.reserve(slots.size());
+            size_t full_null_num = 0;
+            size_t tail_null_num = 0;
+            size_t tail_slot_num = 0;
+            for (const auto& slot : slots) {
+                const auto layer         = static_cast<size_t>(slot.layer_id);
+                const auto attn          = static_cast<size_t>(slot.region_name);
+                const auto gpu_block_idx = layer_attn_block_ids.at(layer).at(attn)->blocks().at(i);
+                candidate.gpu_blocks.push_back(gpu_block_idx);
+                if (isFullOnlySlot(slot)) {
+                    if (isNullBlockIdx(gpu_block_idx)) {
+                        ++full_null_num;
+                    }
+                } else {
+                    ++tail_slot_num;
+                    if (isNullBlockIdx(gpu_block_idx)) {
+                        ++tail_null_num;
+                    }
+                }
+            }
+            candidate.full_valid = full_null_num == 0;
+            candidate.tail_valid = tail_slot_num > 0 && tail_null_num == 0;
+            if (candidate.full_valid && candidate.tail_valid) {
+                complete_indices.push_back(i);
+            }
+            candidates.emplace_back(std::move(candidate));
+        }
+
+        const int keep_tail_num = std::max(0, kv_tail_keep_last_n_);
+        std::set<int> tail_indices;
+        if (keep_tail_num > 0) {
+            const auto keep_begin =
+                complete_indices.size() > static_cast<size_t>(keep_tail_num) ?
+                    complete_indices.end() - keep_tail_num :
+                    complete_indices.begin();
+            tail_indices.insert(keep_begin, complete_indices.end());
+        }
+
+        for (int i = start_index; i < start_index + write_num; ++i) {
+            auto& candidate = candidates.at(static_cast<size_t>(i - start_index));
+            if (candidate.full_valid && !block_cache_->contains(candidate.cache_key, CacheBackingRole::KV)) {
+                CopyInfoPerKey kv_info;
+                kv_info.cache_key    = candidate.cache_key;
+                kv_info.backing_role = CacheBackingRole::KV;
+                kv_info.gpu_blocks   = candidate.gpu_blocks;
+                kv_info.is_complete  = false;
+                copy_infos.emplace_back(std::move(kv_info));
+            }
+            if (tail_indices.find(i) != tail_indices.end()
+                && !block_cache_->contains(candidate.cache_key, CacheBackingRole::TAIL)) {
+                CopyInfoPerKey tail_info;
+                tail_info.cache_key    = candidate.cache_key;
+                tail_info.backing_role = CacheBackingRole::TAIL;
+                tail_info.gpu_blocks   = std::move(candidate.gpu_blocks);
+                tail_info.is_complete  = true;
+                copy_infos.emplace_back(std::move(tail_info));
+            }
+        }
+
+        no_need_write = copy_infos.empty();
+        if (no_need_write) {
+            RTP_LLM_LOG_DEBUG("build split copy plan for write found no missing kv/tail backing, start=%d write_num=%d",
+                              start_index,
+                              write_num);
+            return nullptr;
+        }
+
+        if (!allocateBackingsForWrite(copy_infos)) {
+            RTP_LLM_LOG_WARNING("build split copy plan for write failed, allocate backing failed, need backings: %zu",
+                                copy_infos.size());
+            return nullptr;
+        }
+        return createCopyPlan(copy_infos, CopyDirection::D2H);
+    }
 
     // Hybrid-attn support:
     // We allow writing "partial" keys (incomplete KV) to keep prefix continuity,
@@ -1011,8 +1444,16 @@ KVCacheMemoryConnector::createCopyPlan(const std::vector<CopyInfoPerKey>& copy_i
                 releaseRequestBacking(copy_info);
             }
             if (plan->direction == CopyDirection::H2D) {
-                block_cache_->releaseInFlight(
-                    copy_info.cache_key, copy_info.backing_type, copy_info.mem_block, copy_info.disk_slot);
+                if (useKvTailSplit() && copy_info.backing_role != CacheBackingRole::LEGACY) {
+                    block_cache_->releaseInFlight(copy_info.cache_key,
+                                                  copy_info.backing_role,
+                                                  copy_info.backing_type,
+                                                  copy_info.mem_block,
+                                                  copy_info.disk_slot);
+                } else {
+                    block_cache_->releaseInFlight(
+                        copy_info.cache_key, copy_info.backing_type, copy_info.mem_block, copy_info.disk_slot);
+                }
             }
         }
         delete plan;
@@ -1047,7 +1488,7 @@ KVCacheMemoryConnector::sendCopyPlan(const std::shared_ptr<CopyPlan>& copy_plan)
     for (const auto& copy_info : copy_plan->copy_infos) {
         auto* item = mem_req.add_copy_items();
         item->set_mem_block(copy_info.mem_block);
-        item->set_is_complete(copy_info.is_complete);
+        item->set_is_complete(encodedIsCompleteForCopyInfo(copy_info));
         item->set_backing_type(copy_info.backing_type == CacheBackingType::MEMORY ? MemoryOperationRequestPB::MEMORY :
                                                                                     MemoryOperationRequestPB::DISK);
         if (copy_info.backing_type == CacheBackingType::DISK) {
@@ -1083,6 +1524,7 @@ void KVCacheMemoryConnector::printCopyPlan(const std::shared_ptr<CopyPlan>& copy
     for (int i = 0; i < copy_plan->copy_infos.size(); ++i) {
         const auto& copy_info = copy_plan->copy_infos.at(i);
         oss << "copy info " << i << ": cache key: " << copy_info.cache_key
+            << ", role: " << static_cast<int>(copy_info.backing_role)
             << ", backing: " << (copy_info.backing_type == CacheBackingType::MEMORY ? "MEMORY" : "DISK")
             << ", mem block: " << copy_info.mem_block << ", disk slot: " << copy_info.disk_slot
             << ", gpu layer blocks: [";
@@ -1172,7 +1614,7 @@ bool KVCacheMemoryConnector::validateCopyItemBacking(const MemoryOperationReques
             RTP_LLM_LOG_WARNING("disk copy item has invalid disk_slot");
             return false;
         }
-        auto disk_pool = diskPoolFor(blockKindFromComplete(item.is_complete()));
+        auto disk_pool = diskPoolForRole(roleFromCopyItem(item), item.is_complete());
         if (!disk_pool || !disk_pool->validSlot(item.disk_slot())) {
             RTP_LLM_LOG_WARNING(
                 "disk copy item slot is out of range, slot=%d, is_complete=%d", item.disk_slot(), item.is_complete());
@@ -1197,7 +1639,13 @@ bool KVCacheMemoryConnector::copyMemoryItemsGeneric(const MemoryOperationRequest
         const auto                      mem_block = static_cast<BlockIdxType>(item.mem_block());
         const std::vector<BlockIdxType> gpu_blocks(item.gpu_blocks().begin(), item.gpu_blocks().end());
 
-        if (!prepareCopyBuffers(mem_block, gpu_blocks, direction, item.is_complete(), dst_buffers, src_buffers)) {
+        if (!prepareCopyBuffers(mem_block,
+                                gpu_blocks,
+                                direction,
+                                item.is_complete(),
+                                roleFromCopyItem(item),
+                                dst_buffers,
+                                src_buffers)) {
             RTP_LLM_LOG_WARNING("copy cache failed, prepare memory copy buffers failed, mem_block=%d, direction=%s",
                                 mem_block,
                                 direction == CopyDirection::H2D ? "H2D" : "D2H");
@@ -1245,7 +1693,7 @@ bool KVCacheMemoryConnector::copyDiskItem(const MemoryOperationRequestPB::CopyIt
                                           CopyDirection                             direction,
                                           const std::vector<LayerRegionSlot>&       slots,
                                           void*                                     raw_buffer) {
-    auto disk_pool = diskPoolFor(blockKindFromComplete(item.is_complete()));
+    auto disk_pool = diskPoolForRole(roleFromCopyItem(item), item.is_complete());
     if (!disk_pool || item.gpu_blocks_size() != static_cast<int>(slots.size())) {
         return false;
     }
@@ -1272,12 +1720,11 @@ bool KVCacheMemoryConnector::copyDiskItem(const MemoryOperationRequestPB::CopyIt
     std::vector<torch::Tensor> dst_buffers;
     std::vector<torch::Tensor> src_buffers;
     size_t                     byte_off         = 0;
-    const bool                 item_is_complete = item.is_complete();
     for (size_t slot_idx = 0; slot_idx < slots.size(); ++slot_idx) {
         const auto& slot      = slots[slot_idx];
         const auto  gpu_block = static_cast<BlockIdxType>(item.gpu_blocks(static_cast<int>(slot_idx)));
 
-        if (!item_is_complete && !isFullOnlySlot(slot)) {
+        if (!copyItemIncludesSlot(item, slot)) {
             continue;
         }
 
@@ -1347,7 +1794,7 @@ bool KVCacheMemoryConnector::tryCopyCacheWithStagedMemoryCopy(const MemoryOperat
             return false;
         }
 
-        auto& pool_ref = isDualPool() ? (item_is_complete ? complete_pool_ : incomplete_pool_) : block_pool_;
+        auto pool_ref = memoryPoolForRole(roleFromCopyItem(item), item_is_complete);
         if (!pool_ref) {
             return false;
         }
@@ -1365,7 +1812,7 @@ bool KVCacheMemoryConnector::tryCopyCacheWithStagedMemoryCopy(const MemoryOperat
             const auto  gpu_block    = gpu_blocks.at(slot_idx);
             const auto  layer_stride = slot.stride_bytes;
 
-            if (!item_is_complete && !isFullOnlySlot(slot)) {
+            if (!copyItemIncludesSlot(item, slot)) {
                 continue;
             }
 
@@ -1485,7 +1932,7 @@ bool KVCacheMemoryConnector::tryCopyCacheWithBatchedMemoryCopy(const MemoryOpera
             return false;
         }
 
-        auto& pool_ref = isDualPool() ? (item_is_complete ? complete_pool_ : incomplete_pool_) : block_pool_;
+        auto pool_ref = memoryPoolForRole(roleFromCopyItem(item), item_is_complete);
         if (!pool_ref) {
             return false;
         }
@@ -1501,7 +1948,7 @@ bool KVCacheMemoryConnector::tryCopyCacheWithBatchedMemoryCopy(const MemoryOpera
             const auto  gpu_block    = gpu_blocks.at(slot_idx);
             const auto  layer_stride = slot.stride_bytes;
 
-            if (!item_is_complete && !isFullOnlySlot(slot)) {
+            if (!copyItemIncludesSlot(item, slot)) {
                 continue;
             }
 
@@ -1562,10 +2009,11 @@ bool KVCacheMemoryConnector::prepareCopyBuffers(BlockIdxType                    
                                                 const std::vector<BlockIdxType>& gpu_blocks,
                                                 CopyDirection                    direction,
                                                 bool                             is_complete,
+                                                CacheBackingRole                 backing_role,
                                                 std::vector<torch::Tensor>&      dst,
                                                 std::vector<torch::Tensor>&      src) {
     RTP_LLM_CHECK_WITH_INFO(mem_block != NULL_BLOCK_IDX, "mem block is null");
-    auto& pool_ref = isDualPool() ? (is_complete ? complete_pool_ : incomplete_pool_) : block_pool_;
+    auto pool_ref = memoryPoolForRole(backing_role, is_complete);
     RTP_LLM_CHECK_WITH_INFO(pool_ref != nullptr, "block pool is null");
     auto mem_buffers = pool_ref->convertIndexToBuffer(/*layer_id=*/0, mem_block);
     if (mem_buffers.empty()) {
@@ -1596,7 +2044,10 @@ bool KVCacheMemoryConnector::prepareCopyBuffers(BlockIdxType                    
         const auto  gpu_block    = gpu_blocks.at(slot_idx);
         const auto  layer_stride = slot.stride_bytes;
 
-        if (!is_complete && !isFullOnlySlot(slot)) {
+        CopyInfoPerKey copy_info;
+        copy_info.backing_role = backing_role;
+        copy_info.is_complete  = is_complete;
+        if (!copyInfoIncludesSlot(copy_info, slot)) {
             continue;
         }
 
@@ -1804,7 +2255,7 @@ bool KVCacheMemoryConnector::allocateBackingsForWrite(std::vector<CopyInfoPerKey
 }
 
 bool KVCacheMemoryConnector::allocateOneBacking(CopyInfoPerKey& copy_info) {
-    const auto   kind      = blockKindFromComplete(copy_info.is_complete);
+    const auto   kind      = poolKindForRole(copy_info.backing_role, copy_info.is_complete);
     BlockIdxType mem_block = NULL_BLOCK_IDX;
     if (tryMallocMemoryBlock(kind, mem_block)) {
         copy_info.backing_type = CacheBackingType::MEMORY;
@@ -1822,12 +2273,14 @@ bool KVCacheMemoryConnector::allocateOneBacking(CopyInfoPerKey& copy_info) {
     }
 
     while (true) {
-        auto evicted = block_cache_->popOldestEvictable(kind);
-        if (!evicted.has_value()) {
+        auto evicted_items = block_cache_->popOldestEvictableBackings(kind);
+        if (evicted_items.empty()) {
             return false;
         }
-        const auto target_backing = evicted->backing_type;
-        releaseCacheBacking(*evicted);
+        const auto target_backing = evicted_items.front().backing_type;
+        for (const auto& evicted : evicted_items) {
+            releaseCacheBacking(evicted);
+        }
         if (target_backing == CacheBackingType::MEMORY) {
             if (tryMallocMemoryBlock(kind, mem_block)) {
                 copy_info.backing_type = CacheBackingType::MEMORY;
@@ -1878,12 +2331,12 @@ bool KVCacheMemoryConnector::tryMallocDiskSlot(CacheBlockKind kind, int32_t& slo
 
 void KVCacheMemoryConnector::releaseRequestBacking(const CopyInfoPerKey& copy_info) {
     if (copy_info.backing_type == CacheBackingType::MEMORY) {
-        auto pool = memoryPoolFor(blockKindFromComplete(copy_info.is_complete));
+        auto pool = memoryPoolForRole(copy_info.backing_role, copy_info.is_complete);
         if (pool) {
             freeBlocksFromPool(pool, {copy_info.mem_block}, /*cache_free=*/false);
         }
     } else if (copy_info.backing_type == CacheBackingType::DISK) {
-        auto pool = diskPoolFor(blockKindFromComplete(copy_info.is_complete));
+        auto pool = diskPoolForRole(copy_info.backing_role, copy_info.is_complete);
         if (pool) {
             pool->requestFree(copy_info.disk_slot);
         }
@@ -1892,12 +2345,12 @@ void KVCacheMemoryConnector::releaseRequestBacking(const CopyInfoPerKey& copy_in
 
 void KVCacheMemoryConnector::releaseCacheBacking(const MemoryDiskBlockCache::CacheItem& item) {
     if (item.backing_type == CacheBackingType::MEMORY) {
-        auto pool = memoryPoolFor(blockKindFromComplete(item.is_complete));
+        auto pool = memoryPoolForRole(item.backing_role, item.is_complete);
         if (pool) {
             freeBlocksFromPool(pool, {item.block_index}, /*cache_free=*/true);
         }
     } else if (item.backing_type == CacheBackingType::DISK) {
-        auto pool = diskPoolFor(blockKindFromComplete(item.is_complete));
+        auto pool = diskPoolForRole(item.backing_role, item.is_complete);
         if (pool) {
             pool->blockCacheFree(item.disk_slot);
         }
@@ -1906,12 +2359,12 @@ void KVCacheMemoryConnector::releaseCacheBacking(const MemoryDiskBlockCache::Cac
 
 void KVCacheMemoryConnector::referenceCacheBacking(const MemoryDiskBlockCache::CacheItem& item) {
     if (item.backing_type == CacheBackingType::MEMORY) {
-        auto pool = memoryPoolFor(blockKindFromComplete(item.is_complete));
+        auto pool = memoryPoolForRole(item.backing_role, item.is_complete);
         if (pool) {
             referenceBlocksInPool(pool, {item.block_index}, /*cache_ref=*/true);
         }
     } else if (item.backing_type == CacheBackingType::DISK) {
-        auto pool = diskPoolFor(blockKindFromComplete(item.is_complete));
+        auto pool = diskPoolForRole(item.backing_role, item.is_complete);
         if (pool) {
             pool->blockCacheReference(item.disk_slot);
         }
@@ -1925,6 +2378,10 @@ std::shared_ptr<BlockPool> KVCacheMemoryConnector::memoryPoolFor(CacheBlockKind 
     return kind == CacheBlockKind::COMPLETE ? complete_pool_ : incomplete_pool_;
 }
 
+std::shared_ptr<BlockPool> KVCacheMemoryConnector::memoryPoolForRole(CacheBackingRole role, bool is_complete) const {
+    return memoryPoolFor(poolKindForRole(role, is_complete));
+}
+
 DiskBlockPoolPtr KVCacheMemoryConnector::diskPoolFor(CacheBlockKind kind) const {
     if (kind == CacheBlockKind::COMPLETE) {
         return complete_disk_pool_;
@@ -1933,6 +2390,10 @@ DiskBlockPoolPtr KVCacheMemoryConnector::diskPoolFor(CacheBlockKind kind) const 
         return complete_disk_pool_;
     }
     return incomplete_disk_pool_;
+}
+
+DiskBlockPoolPtr KVCacheMemoryConnector::diskPoolForRole(CacheBackingRole role, bool is_complete) const {
+    return diskPoolFor(poolKindForRole(role, is_complete));
 }
 
 size_t KVCacheMemoryConnector::maxDiskSlotStrideBytes() const {
@@ -1994,9 +2455,10 @@ void KVCacheMemoryConnector::putToCache(const MemoryBlockCache::CacheItem& item)
 }
 
 void KVCacheMemoryConnector::putToCache(CopyInfoPerKey& copy_info) {
-    const auto                      kind = blockKindFromComplete(copy_info.is_complete);
+    const auto                      kind = poolKindForRole(copy_info.backing_role, copy_info.is_complete);
     MemoryDiskBlockCache::CacheItem item;
     item.cache_key    = copy_info.cache_key;
+    item.backing_role = copy_info.backing_role;
     item.backing_type = copy_info.backing_type;
     item.block_index  = copy_info.mem_block;
     item.disk_slot    = copy_info.disk_slot;
@@ -2005,7 +2467,7 @@ void KVCacheMemoryConnector::putToCache(CopyInfoPerKey& copy_info) {
                               (kind == CacheBlockKind::COMPLETE ? complete_block_size_ : incomplete_block_size_) :
                               memoryCacheBlockSizeBytes();
     } else {
-        auto disk_pool = diskPoolFor(kind);
+        auto disk_pool = diskPoolForRole(copy_info.backing_role, copy_info.is_complete);
         RTP_LLM_CHECK_WITH_INFO(disk_pool != nullptr, "disk pool is null when putting disk cache item");
         item.block_size = disk_pool->blockSizeBytes();
     }

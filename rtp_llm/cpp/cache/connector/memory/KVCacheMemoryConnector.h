@@ -73,6 +73,7 @@ private:
     };
     struct CopyInfoPerKey {
         CacheKeyType              cache_key{0};
+        CacheBackingRole          backing_role{CacheBackingRole::LEGACY};
         CacheBackingType          backing_type{CacheBackingType::MEMORY};
         BlockIdxType              mem_block{NULL_BLOCK_IDX};
         int32_t                   disk_slot{-1};
@@ -111,6 +112,7 @@ private:
                                                 const std::vector<BlockIdxType>& gpu_blocks,
                                                 CopyDirection                    direction,
                                                 bool                             is_complete,
+                                                CacheBackingRole                 backing_role,
                                                 std::vector<torch::Tensor>&      dst,
                                                 std::vector<torch::Tensor>&      src);
     bool                     tryCopyCacheWithBatchedMemoryCopy(const MemoryOperationRequestPB&     request,
@@ -142,6 +144,15 @@ private:
     std::vector<LayerRegionSlot> layerRegionSlots() const;
     bool                         hasTypedLayerRegionSlots(const std::vector<LayerRegionSlot>& slots) const;
     bool                         isDsv4TypedCacheLayout(const std::vector<LayerRegionSlot>& slots) const;
+    bool                         useKvTailSplit() const;
+    bool                         isKvRole(CacheBackingRole role) const;
+    bool                         isTailRole(CacheBackingRole role) const;
+    bool                         copyInfoIncludesSlot(const CopyInfoPerKey& copy_info, const LayerRegionSlot& slot) const;
+    bool                         copyItemIncludesSlot(const MemoryOperationRequestPB::CopyItem& item,
+                                                      const LayerRegionSlot&                    slot) const;
+    CacheBackingRole             roleFromCopyItem(const MemoryOperationRequestPB::CopyItem& item) const;
+    bool                         encodedIsCompleteForCopyInfo(const CopyInfoPerKey& copy_info) const;
+    CacheBlockKind               poolKindForRole(CacheBackingRole role, bool is_complete) const;
     bool                         checkLayerBlocks(const LayerBlockIds& layer_block_ids, size_t required_len) const;
     LayerAttnBlockIds            resourceLayerRegionBlocks(const KVCacheResource&                resource,
                                                            const std::vector<LayerRegionSlot>& slots) const;
@@ -152,6 +163,10 @@ private:
     bool                         gpuBlocksAllValid(const LayerAttnBlockIds&            layer_attn_block_ids,
                                                    const std::vector<LayerRegionSlot>& slots,
                                                    size_t                              key_index) const;
+    bool                         gpuBlocksForRoleAllValid(const LayerAttnBlockIds&            layer_attn_block_ids,
+                                                          const std::vector<LayerRegionSlot>& slots,
+                                                          size_t                              key_index,
+                                                          CacheBackingRole                    role) const;
 
     bool freeBlocks(const std::vector<BlockIdxType>& blocks, bool cache_free = true);
     void referenceBlocks(const std::vector<BlockIdxType>& blocks, bool cache_ref = true);
@@ -163,7 +178,9 @@ private:
     void releaseCacheBacking(const MemoryDiskBlockCache::CacheItem& item);
     void referenceCacheBacking(const MemoryDiskBlockCache::CacheItem& item);
     std::shared_ptr<BlockPool> memoryPoolFor(CacheBlockKind kind) const;
+    std::shared_ptr<BlockPool> memoryPoolForRole(CacheBackingRole role, bool is_complete) const;
     DiskBlockPoolPtr           diskPoolFor(CacheBlockKind kind) const;
+    DiskBlockPoolPtr           diskPoolForRole(CacheBackingRole role, bool is_complete) const;
     size_t                     maxDiskSlotStrideBytes() const;
 
     bool isDualPool() const;
@@ -229,6 +246,8 @@ private:
     std::shared_ptr<BlockPool> incomplete_pool_;
     size_t                     complete_block_size_{0};
     size_t                     incomplete_block_size_{0};
+    bool                       kv_tail_split_enabled_{false};
+    int                        kv_tail_keep_last_n_{2};
 
     // metrics reporter
     kmonitor::MetricsReporterPtr metrics_reporter_;

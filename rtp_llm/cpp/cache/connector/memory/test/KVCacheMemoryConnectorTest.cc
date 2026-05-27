@@ -3,6 +3,7 @@
 #include <csignal>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <dirent.h>
 #include <execinfo.h>
 #include <string>
@@ -269,6 +270,7 @@ private:
         auto* addr = static_cast<char*>(b.addr) + byte_offset;
         if (b.is_cuda) {
             check_cuda_value(cudaMemset(addr, c, byte_len));
+            check_cuda_value(cudaDeviceSynchronize());
         } else {
             memset(addr, c, byte_len);
         }
@@ -2366,6 +2368,30 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_D2H_MultiLayer_ValidatesByteOffsets
 
 // ============================== Dual-pool tests ==============================
 
+class ScopedEnv {
+public:
+    ScopedEnv(const char* name, const char* value): name_(name) {
+        const char* old = std::getenv(name);
+        if (old != nullptr) {
+            old_value_ = old;
+            had_old_   = true;
+        }
+        setenv(name, value, 1);
+    }
+    ~ScopedEnv() {
+        if (had_old_) {
+            setenv(name_.c_str(), old_value_.c_str(), 1);
+        } else {
+            unsetenv(name_.c_str());
+        }
+    }
+
+private:
+    std::string name_;
+    std::string old_value_;
+    bool        had_old_{false};
+};
+
 class KVCacheMemoryConnectorDualPoolTest: public ::testing::Test {
 protected:
     void SetUp() override {
@@ -2567,6 +2593,67 @@ TEST_F(KVCacheMemoryConnectorDualPoolTest, Init_CreatesDualPools) {
     EXPECT_GT(conn->complete_block_size_, conn->incomplete_block_size_);
 }
 
+TEST_F(KVCacheMemoryConnectorDualPoolTest, Init_KvTailSplitCreatesCompactPools) {
+    ScopedEnv split_env("MEMORY_CACHE_KV_TAIL_SPLIT", "1");
+    auto cfg   = createHybridCacheConfig(/*layer_num=*/2, /*block_num=*/10, /*seq_size_per_block=*/8, /*linear_step=*/4);
+    allocator_ = std::make_shared<HybridTypeKVCacheAllocator>(cfg, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator_->init());
+    auto conn = createConnector(cfg);
+
+    EXPECT_TRUE(conn->isDualPool());
+    EXPECT_TRUE(conn->useKvTailSplit());
+    ASSERT_NE(conn->complete_pool_, nullptr);
+    ASSERT_NE(conn->incomplete_pool_, nullptr);
+    EXPECT_GT(conn->complete_block_size_, 0u);
+    EXPECT_GT(conn->incomplete_block_size_, 0u);
+
+    const auto tail_total = conn->complete_pool_->totalBlocksNum();
+    const auto kv_total   = conn->incomplete_pool_->totalBlocksNum();
+    EXPECT_GT(tail_total, 0u);
+    EXPECT_EQ(kv_total, (tail_total + 1) * 4 + kv_cache_config_.non_full_addition_kvcache_blocks - 1);
+}
+
+TEST_F(KVCacheMemoryConnectorDualPoolTest, BuildCopyPlanForWrite_KvTailSplitKeepsOnlyTailTwo) {
+    ScopedEnv split_env("MEMORY_CACHE_KV_TAIL_SPLIT", "1");
+    ScopedEnv keep_env("MEMORY_CACHE_TAIL_KEEP_LAST_N", "2");
+    auto cfg   = createHybridCacheConfig(/*layer_num=*/2, /*block_num=*/16, /*seq_size_per_block=*/8, /*linear_step=*/4);
+    allocator_ = std::make_shared<HybridTypeKVCacheAllocator>(cfg, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator_->init());
+    auto conn = createConnector(cfg);
+    ASSERT_TRUE(conn->useKvTailSplit());
+
+    CacheKeysType                          cache_keys{94001, 94002, 94003, 94004, 94005};
+    std::vector<std::vector<BlockIdxType>> full_blocks{{1, 1, 1, 1, 1}, {2, 2, 2, 2, 2}};
+    std::vector<std::vector<BlockIdxType>> swa_blocks{{1, 1, 1, 1, 1}, {2, 2, 2, 2, 2}};
+    auto                                   res   = makeHybridResource(cfg, cache_keys, full_blocks, swa_blocks);
+    auto                                   slots = conn->layerRegionSlots();
+
+    bool no_need_write = true;
+    auto plan          = conn->buildCopyPlanForWrite(
+        res->cacheKeys(), res->layerAttnBlocks(), slots, /*start_index=*/0, /*write_num=*/5, no_need_write);
+
+    ASSERT_NE(plan, nullptr);
+    EXPECT_FALSE(no_need_write);
+    size_t kv_items   = 0;
+    size_t tail_items = 0;
+    std::vector<CacheKeyType> tail_keys;
+    for (const auto& info : plan->copy_infos) {
+        if (info.backing_role == CacheBackingRole::KV) {
+            ++kv_items;
+            EXPECT_FALSE(info.is_complete);
+        } else if (info.backing_role == CacheBackingRole::TAIL) {
+            ++tail_items;
+            tail_keys.push_back(info.cache_key);
+            EXPECT_TRUE(info.is_complete);
+        }
+    }
+    EXPECT_EQ(kv_items, 5u);
+    EXPECT_EQ(tail_items, 2u);
+    ASSERT_EQ(tail_keys.size(), 2u);
+    EXPECT_EQ(tail_keys[0], cache_keys[3]);
+    EXPECT_EQ(tail_keys[1], cache_keys[4]);
+}
+
 TEST_F(KVCacheMemoryConnectorDualPoolTest, Init_PureFullUsesSinglePool) {
     // Pure FULL config: no typed slots, should use single pool
     CacheConfig config;
@@ -2668,6 +2755,135 @@ TEST_F(KVCacheMemoryConnectorDualPoolTest, AsyncMatch_AdvancesOnlyOnCompleteHit)
     // key2: incomplete hit → scan continues, matched_num stays 2
     // Result: matched_num = 2
     EXPECT_EQ(match_ctx->matchedBlockCount(), 2u);
+}
+
+TEST_F(KVCacheMemoryConnectorDualPoolTest, AsyncMatch_KvTailSplitAdvancesOnlyOnTailAnchor) {
+    ScopedEnv split_env("MEMORY_CACHE_KV_TAIL_SPLIT", "1");
+    auto cfg = createHybridCacheConfig(/*layer_num=*/2, /*block_num=*/10, /*seq_size_per_block=*/8, /*linear_step=*/4);
+    allocator_ = std::make_shared<HybridTypeKVCacheAllocator>(cfg, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator_->init());
+    auto conn = createConnector(cfg);
+    ASSERT_TRUE(conn->useKvTailSplit());
+
+    CacheKeysType cache_keys{95001, 95002, 95003, 95999};
+    std::vector<std::vector<BlockIdxType>> full_blocks{{1, 1, 1, 1}, {2, 2, 2, 2}};
+    std::vector<std::vector<BlockIdxType>> swa_blocks{{NULL_BLOCK_IDX, 1, NULL_BLOCK_IDX, 1},
+                                                      {NULL_BLOCK_IDX, 2, NULL_BLOCK_IDX, 2}};
+    auto                                   res = makeHybridResource(cfg, cache_keys, full_blocks, swa_blocks);
+
+    auto kv_blks = conn->incomplete_pool_->malloc(3);
+    ASSERT_EQ(kv_blks.size(), 3u);
+    for (size_t i = 0; i < 3; ++i) {
+        MemoryDiskBlockCache::CacheItem item;
+        item.cache_key    = cache_keys[i];
+        item.backing_role = CacheBackingRole::KV;
+        item.backing_type = CacheBackingType::MEMORY;
+        item.block_index  = static_cast<BlockIdxType>(kv_blks[i]);
+        item.is_complete  = false;
+        ASSERT_TRUE(conn->block_cache_->putCommitted(item).first);
+        conn->incomplete_pool_->blockCacheReference({static_cast<BlockIdxType>(kv_blks[i])});
+        conn->incomplete_pool_->requestFree({kv_blks[i]});
+    }
+
+    auto tail_blks = conn->complete_pool_->malloc(1);
+    ASSERT_EQ(tail_blks.size(), 1u);
+    MemoryDiskBlockCache::CacheItem tail;
+    tail.cache_key    = cache_keys[1];
+    tail.backing_role = CacheBackingRole::TAIL;
+    tail.backing_type = CacheBackingType::MEMORY;
+    tail.block_index  = static_cast<BlockIdxType>(tail_blks[0]);
+    tail.is_complete  = true;
+    ASSERT_TRUE(conn->block_cache_->putCommitted(tail).first);
+    conn->complete_pool_->blockCacheReference({static_cast<BlockIdxType>(tail_blks[0])});
+    conn->complete_pool_->requestFree({tail_blks[0]});
+
+    auto meta      = std::make_shared<TestReadMeta>(true);
+    auto match_ctx = conn->asyncMatch(res, meta);
+    ASSERT_NE(match_ctx, nullptr);
+    EXPECT_EQ(match_ctx->matchedBlockCount(), 2u);
+
+    auto memory_ctx = std::dynamic_pointer_cast<MemoryAsyncMatchContext>(match_ctx);
+    ASSERT_NE(memory_ctx, nullptr);
+    auto plan = std::static_pointer_cast<KVCacheMemoryConnector::CopyPlan>(memory_ctx->readCopyPlan());
+    ASSERT_NE(plan, nullptr);
+    size_t kv_items   = 0;
+    size_t tail_items = 0;
+    for (const auto& info : plan->copy_infos) {
+        if (info.backing_role == CacheBackingRole::KV) {
+            ++kv_items;
+        } else if (info.backing_role == CacheBackingRole::TAIL) {
+            ++tail_items;
+            EXPECT_EQ(info.cache_key, cache_keys[1]);
+        }
+    }
+    EXPECT_EQ(kv_items, 2u);
+    EXPECT_EQ(tail_items, 1u);
+}
+
+TEST_F(KVCacheMemoryConnectorDualPoolTest, AsyncMatch_KvTailSplitSkipsTailCopyWhenTailGpuBlocksInvalid) {
+    ScopedEnv split_env("MEMORY_CACHE_KV_TAIL_SPLIT", "1");
+    auto cfg = createHybridCacheConfig(/*layer_num=*/2, /*block_num=*/10, /*seq_size_per_block=*/8, /*linear_step=*/4);
+    allocator_ = std::make_shared<HybridTypeKVCacheAllocator>(cfg, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator_->init());
+    auto conn = createConnector(cfg);
+    ASSERT_TRUE(conn->useKvTailSplit());
+
+    CacheKeysType cache_keys{96001, 96002, 96003, 96999};
+    std::vector<std::vector<BlockIdxType>> full_blocks{{1, 1, 1, 1}, {2, 2, 2, 2}};
+    std::vector<std::vector<BlockIdxType>> swa_blocks{{NULL_BLOCK_IDX, NULL_BLOCK_IDX, 1, 1},
+                                                      {NULL_BLOCK_IDX, NULL_BLOCK_IDX, 2, 2}};
+    auto                                   res = makeHybridResource(cfg, cache_keys, full_blocks, swa_blocks);
+
+    auto kv_blks = conn->incomplete_pool_->malloc(3);
+    ASSERT_EQ(kv_blks.size(), 3u);
+    for (size_t i = 0; i < 3; ++i) {
+        MemoryDiskBlockCache::CacheItem item;
+        item.cache_key    = cache_keys[i];
+        item.backing_role = CacheBackingRole::KV;
+        item.backing_type = CacheBackingType::MEMORY;
+        item.block_index  = static_cast<BlockIdxType>(kv_blks[i]);
+        item.is_complete  = false;
+        ASSERT_TRUE(conn->block_cache_->putCommitted(item).first);
+        conn->incomplete_pool_->blockCacheReference({static_cast<BlockIdxType>(kv_blks[i])});
+        conn->incomplete_pool_->requestFree({kv_blks[i]});
+    }
+
+    auto tail_blks = conn->complete_pool_->malloc(2);
+    ASSERT_EQ(tail_blks.size(), 2u);
+    for (size_t i : {0u, 2u}) {
+        MemoryDiskBlockCache::CacheItem tail;
+        tail.cache_key    = cache_keys[i];
+        tail.backing_role = CacheBackingRole::TAIL;
+        tail.backing_type = CacheBackingType::MEMORY;
+        tail.block_index  = static_cast<BlockIdxType>(tail_blks[i == 0 ? 0 : 1]);
+        tail.is_complete  = true;
+        ASSERT_TRUE(conn->block_cache_->putCommitted(tail).first);
+        conn->complete_pool_->blockCacheReference({tail.block_index});
+        conn->complete_pool_->requestFree({static_cast<size_t>(tail.block_index)});
+    }
+
+    auto meta      = std::make_shared<TestReadMeta>(true);
+    auto match_ctx = conn->asyncMatch(res, meta);
+    ASSERT_NE(match_ctx, nullptr);
+    EXPECT_EQ(match_ctx->matchedBlockCount(), 3u);
+
+    auto memory_ctx = std::dynamic_pointer_cast<MemoryAsyncMatchContext>(match_ctx);
+    ASSERT_NE(memory_ctx, nullptr);
+    auto plan = std::static_pointer_cast<KVCacheMemoryConnector::CopyPlan>(memory_ctx->readCopyPlan());
+    ASSERT_NE(plan, nullptr);
+
+    size_t kv_items   = 0;
+    size_t tail_items = 0;
+    for (const auto& info : plan->copy_infos) {
+        if (info.backing_role == CacheBackingRole::KV) {
+            ++kv_items;
+        } else if (info.backing_role == CacheBackingRole::TAIL) {
+            ++tail_items;
+            EXPECT_EQ(info.cache_key, cache_keys[2]);
+        }
+    }
+    EXPECT_EQ(kv_items, 3u);
+    EXPECT_EQ(tail_items, 1u);
 }
 
 TEST_F(KVCacheMemoryConnectorDualPoolTest, AsyncMatch_StopsOnDoubleMiss) {
