@@ -25,11 +25,11 @@ public:
         const auto& main_spec = cache_config.cache_specs[0];
         // linear block size is same with full block block size
         MemoryLayoutConfig main_layout = createMemoryLayoutConfig(is_hybrid,
-                                                                  layer_num,
-                                                                  cache_config.kv_block_stride_bytes,
-                                                                  cache_config.kv_scale_stride_bytes,
-                                                                  main_spec,
-                                                                  cache_config);
+                                                                   layer_num,
+                                                                   cache_config.kv_block_stride_bytes,
+                                                                   cache_config.kv_scale_stride_bytes,
+                                                                   main_spec,
+                                                                   cache_config);
 
         main_layout.kv_cache_offset_bytes = 0;
         main_layout.kv_scale_offset_bytes = main_layout.kv_cache_offset_bytes + main_layout.kv_block_pool_size_bytes;
@@ -49,11 +49,14 @@ public:
             const auto mtp_layer_num = mtp_sub_config->layer_num;
 
             const auto& mtp_spec = mtp_sub_config->cache_specs[0];
-            // mtp block size is not same with main model block size
+            size_t mtp_kv_stride = cache_config.separate_kv_cache ? mtp_spec->k_block_size_bytes()
+                                                                  : mtp_spec->block_size_bytes();
+            size_t mtp_scale_stride = cache_config.separate_kv_cache ? mtp_spec->k_scale_block_size_bytes()
+                                                                     : mtp_spec->scale_block_size_bytes();
             MemoryLayoutConfig mtp_layout = createMemoryLayoutConfig(false,
                                                                      mtp_layer_num,
-                                                                     mtp_spec->block_size_bytes(),
-                                                                     mtp_spec->scale_block_size_bytes(),
+                                                                     mtp_kv_stride,
+                                                                     mtp_scale_stride,
                                                                      mtp_spec,
                                                                      cache_config);
 
@@ -72,11 +75,15 @@ public:
             config.memory_layouts.push_back(mtp_layout);
         }
 
+        if (config.separate_kv_cache) {
+            current_offset *= 2;
+        }
         config.total_size_bytes = current_offset;
 
-        RTP_LLM_LOG_INFO("BlockPoolConfig(memory_layouts=%zu): total_size=%zu bytes",
+        RTP_LLM_LOG_INFO("BlockPoolConfig(memory_layouts=%zu): total_size=%zu bytes, separate_kv_cache=%d",
                          config.memory_layouts.size(),
-                         config.total_size_bytes);
+                         config.total_size_bytes,
+                         config.separate_kv_cache);
         return config;
     }
 
@@ -115,12 +122,18 @@ private:
         MemoryLayoutConfig cfg;
         cfg.layer_num             = layer_num;
         cfg.block_num             = cache_config.block_num;
-        cfg.kv_block_stride_bytes = kv_block_stride_bytes;
         cfg.k_block_stride_bytes  = spec->k_block_size_bytes();
         cfg.v_block_stride_bytes  = spec->v_block_size_bytes();
-        cfg.kv_scale_stride_bytes = kv_scale_stride_bytes;
         cfg.k_scale_stride_bytes  = spec->k_scale_block_size_bytes();
         cfg.v_scale_stride_bytes  = spec->v_scale_block_size_bytes();
+
+        if (cache_config.separate_kv_cache) {
+            cfg.kv_block_stride_bytes = cfg.k_block_stride_bytes;
+            cfg.kv_scale_stride_bytes = cfg.k_scale_stride_bytes;
+        } else {
+            cfg.kv_block_stride_bytes = kv_block_stride_bytes;
+            cfg.kv_scale_stride_bytes = kv_scale_stride_bytes;
+        }
 
         cfg.enable_kv_scale         = cfg.kv_scale_stride_bytes > 0;
         cfg.dtype                   = cache_config.dtype;
