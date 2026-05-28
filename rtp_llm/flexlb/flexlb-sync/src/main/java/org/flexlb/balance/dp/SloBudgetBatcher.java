@@ -131,8 +131,9 @@ public class SloBudgetBatcher {
 
     private void runLoop() {
         while (!shutdown && !Thread.currentThread().isInterrupted()) {
-            long loopStartNs = System.nanoTime();
             try {
+                waitForNonEmpty();
+                long loopStartNs = System.nanoTime();
                 StepResult result = stepOnce();
                 loopsSinceLastDispatch++;
                 long durationUs = (System.nanoTime() - loopStartNs) / 1000;
@@ -153,6 +154,20 @@ public class SloBudgetBatcher {
         }
     }
 
+    private void waitForNonEmpty() throws InterruptedException {
+        lock.lock();
+        try {
+            while (queue.isEmpty()) {
+                arrival.await();
+                if (shutdown) {
+                    throw new InterruptedException("shutdown");
+                }
+            }
+        } finally {
+            lock.unlock();
+        }
+    }
+
     private static DpBatchReporter.LoopOutcome classifyOutcome(StepResult r) {
         if (r == null) {
             return DpBatchReporter.LoopOutcome.PARK;
@@ -166,11 +181,8 @@ public class SloBudgetBatcher {
     private StepResult stepOnce() throws InterruptedException {
         lock.lock();
         try {
-            while (queue.isEmpty()) {
-                arrival.await();
-                if (shutdown) {
-                    return null;
-                }
+            if (queue.isEmpty()) {
+                return null;
             }
 
             FlexlbConfig cfg = configService.loadBalanceConfig();
