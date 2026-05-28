@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/model_rpc/RpcServerRuntimeMeta.h"
 #include "rtp_llm/cpp/model_rpc/RemoteRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/PrefillGenerateContext.h"
+#include "rtp_llm/cpp/cache/writeback/PdKvWritebackManager.h"
 
 namespace rtp_llm {
 
@@ -20,6 +21,9 @@ public:
                                     grpc::ServerWriter<GenerateOutputsPB>* writer);
 
     grpc::Status RemoteFinish(grpc::ServerContext* context, const RemoteFinishRequestPB* request, EmptyPB* response);
+    grpc::Status PdKvWriteback(grpc::ServerContext*          context,
+                               const PdKvWritebackRequestPB* request,
+                               PdKvWritebackResponsePB*      response);
 
 private:
     ErrorInfo    waitStreamBeforeRun(std::shared_ptr<GenerateStream> stream);
@@ -35,7 +39,8 @@ private:
     void         pollRemoteOutput(PrefillGenerateContext& prefill_context);
 
 private:
-    std::string decode_cluster_name_;
+    std::string             decode_cluster_name_;
+    PdKvWritebackManagerPtr writeback_manager_;
 };
 
 }  // namespace rtp_llm

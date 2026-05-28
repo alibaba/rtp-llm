@@ -59,6 +59,7 @@ cc_library(
         ":rpc_error_code",
         ":tensor_pb_convert",
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
+        "//rtp_llm/cpp/cache/writeback:pd_kv_writeback_manager",
         "//rtp_llm/cpp/disaggregate/cache_store",
         "//rtp_llm/cpp/engine_base:profiler",
         "//rtp_llm/cpp/engine_base/stream:generate_types",

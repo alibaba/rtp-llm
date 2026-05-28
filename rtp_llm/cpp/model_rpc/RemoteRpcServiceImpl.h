@@ -72,6 +72,17 @@ public:
         return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, error_msg);
     }
 
+    grpc::Status PdKvWriteback(grpc::ServerContext*          context,
+                               const PdKvWritebackRequestPB* request,
+                               PdKvWritebackResponsePB*      response) override {
+        if (!prefill_server_) {
+            auto error_msg = "server not implement PdKvWriteback";
+            RTP_LLM_LOG_ERROR(error_msg);
+            return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, error_msg);
+        }
+        return prefill_server_->PdKvWriteback(context, request, response);
+    }
+
     grpc::Status
     RemoteFinishNew(grpc::ServerContext* context, const RemoteFinishRequestPB* request, EmptyPB* response) override {
         auto error_msg = "server not implement RemoteFinishNew";

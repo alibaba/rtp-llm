@@ -18,6 +18,38 @@ using grpc::ClientContext;
 
 namespace rtp_llm {
 
+namespace {
+
+PdKvWritebackCompatibility convertPdKvWritebackCompatibility(const PdKvWritebackCompatibilityPB& pb) {
+    PdKvWritebackCompatibility compatibility;
+    compatibility.seq_size_per_block = pb.seq_size_per_block();
+    compatibility.layer_count        = pb.layer_count();
+    compatibility.group_count        = pb.group_count();
+    compatibility.partition_count    = pb.partition_count();
+    compatibility.layer_to_group_id.assign(pb.layer_to_group_id().begin(), pb.layer_to_group_id().end());
+    compatibility.group_types.assign(pb.group_types().begin(), pb.group_types().end());
+    return compatibility;
+}
+
+PdKvWritebackLaunchRequest convertPdKvWritebackRequest(const PdKvWritebackRequestPB& pb) {
+    PdKvWritebackLaunchRequest request;
+    request.manifest.request_id           = pb.request_id();
+    request.manifest.request_key          = pb.request_key();
+    request.manifest.final_token_count    = pb.final_token_count();
+    request.manifest.reusable_block_count = pb.reusable_block_count();
+    request.manifest.cache_keys.assign(pb.cache_keys().begin(), pb.cache_keys().end());
+    request.manifest.group_block_ids.reserve(pb.group_block_ids_size());
+    for (const auto& group_pb : pb.group_block_ids()) {
+        request.manifest.group_block_ids.emplace_back(group_pb.block_ids().begin(), group_pb.block_ids().end());
+    }
+    request.source      = convertPdKvWritebackCompatibility(pb.source());
+    request.destination = convertPdKvWritebackCompatibility(pb.destination());
+    request.source_prefill_grpc_addrs.assign(pb.prefill_worker_addrs().begin(), pb.prefill_worker_addrs().end());
+    return request;
+}
+
+}  // namespace
+
 #define CLIENT_GRPC_RET_IF_ERROR(prefill_context, state, error_code_value)                                             \
     if (!(state)) {                                                                                                    \
         auto   new_error_code = error_code_value;                                                                      \
@@ -206,6 +238,9 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     for (auto& addrs : prefill_context.prefill_worker_cache_store_addrs) {
         alloc_request.add_peer_addrs(addrs);
     }
+    for (const auto& addr : resource_.grpc_workers) {
+        alloc_request.add_peer_grpc_addrs(addr);
+    }
 
     CLIENT_GRPC_RET_IF_ERROR(
         prefill_context, client_stream->Write(alloc_request), ErrorCode::REMOTE_ALLOCATE_RESOURCE_WRITE_FAILED);
@@ -213,6 +248,28 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     CLIENT_GRPC_RET_IF_ERROR(
         prefill_context, client_stream->Read(&allocate_response), ErrorCode::REMOTE_ALLOCATE_RESOURCE_READ_FAILED);
     RTP_LLM_LOG_DEBUG("request [%ld] remote allocate resource done", prefill_context.request_id);
+}
+
+grpc::Status PrefillRpcServer::PdKvWriteback(grpc::ServerContext*          context,
+                                             const PdKvWritebackRequestPB* request,
+                                             PdKvWritebackResponsePB*      response) {
+    (void)context;
+    if (!writeback_manager_) {
+        response->mutable_error_info()->set_error_code(ErrorCodePB::UNKNOWN_ERROR);
+        response->mutable_error_info()->set_error_message("writeback_manager is null");
+        response->set_accepted(false);
+        response->set_reason("writeback_manager is null");
+        return grpc::Status::OK;
+    }
+
+    auto launch_request       = convertPdKvWritebackRequest(*request);
+    auto destination_resource = std::make_shared<BatchKVCacheResource>();
+    auto status               = writeback_manager_->receiveOnPrefill(launch_request, destination_resource);
+    response->mutable_error_info()->set_error_code(status.ok() ? ErrorCodePB::NONE_ERROR : ErrorCodePB::UNKNOWN_ERROR);
+    response->mutable_error_info()->set_error_message(status.ok() ? "" : std::string(status.message()));
+    response->set_accepted(status.ok());
+    response->set_reason(status.ok() ? "accepted" : std::string(status.message()));
+    return grpc::Status::OK;
 }
 
 void PrefillRpcServer::enqueueRequest(PrefillGenerateContext& prefill_context) {

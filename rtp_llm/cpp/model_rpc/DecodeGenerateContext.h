@@ -65,7 +65,8 @@ public:
 
 public:
     DecodeRpcContext&        rpc_context;
-    std::vector<std::string> peer_addrs;  // prefill worker addrs
+    std::vector<std::string> peer_addrs;       // prefill worker addrs
+    std::vector<std::string> peer_grpc_addrs;  // prefill worker grpc addrs
     GenerateRequestPB        allocate_request;
     DecodeStatInfo           stat_info;
     int64_t                  loading_cache_requests = 0;

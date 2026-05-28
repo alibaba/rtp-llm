@@ -261,6 +261,40 @@ message GenerateRequestPB {
     repeated int32 position_ids = 9;
     TensorPB propose_probs = 10;
     TensorPB propose_hidden = 11;
+    repeated string peer_grpc_addrs = 12;
+}
+
+message PdKvWritebackGroupPB {
+    repeated int32 block_ids = 1;
+}
+
+message PdKvWritebackCompatibilityPB {
+    int32 seq_size_per_block = 1;
+    int32 layer_count = 2;
+    int32 group_count = 3;
+    int32 partition_count = 4;
+    repeated int32 layer_to_group_id = 5;
+    repeated int32 group_types = 6;
+}
+
+message PdKvWritebackRequestPB {
+    int64 request_id = 1;
+    string request_key = 2;
+    int64 final_token_count = 3;
+    int64 reusable_block_count = 4;
+    repeated int64 cache_keys = 5;
+    repeated PdKvWritebackGroupPB group_block_ids = 6;
+    repeated string decode_worker_addrs = 7;
+    repeated string prefill_worker_addrs = 8;
+    PdKvWritebackCompatibilityPB source = 9;
+    PdKvWritebackCompatibilityPB destination = 10;
+    int64 deadline_us = 11;
+}
+
+message PdKvWritebackResponsePB {
+    RpcErrorPB error_info = 1;
+    bool accepted = 2;
+    string reason = 3;
 }
 
 // in tp case, decode master broadcast to decode worker
@@ -623,6 +657,7 @@ service RpcService {
     rpc UpdateWeights(UpdateWeightsRequestPB) returns (EmptyPB);
     rpc RemoteGenerateNew(RemoteGenerateRequestPBNew) returns (RemoteGenerateResponsePBNew);
     rpc RemoteStore(RemoteStoreRequestPB) returns (RemoteStoreResponsePB);
+    rpc PdKvWriteback(PdKvWritebackRequestPB) returns (PdKvWritebackResponsePB);
 
     rpc ExecuteFunction(FunctionRequestPB) returns (FunctionResponsePB);
     rpc StartLoad(P2PConnectorStartLoadRequestPB) returns (P2PConnectorStartLoadResponsePB);

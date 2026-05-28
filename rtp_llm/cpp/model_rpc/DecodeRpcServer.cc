@@ -81,6 +81,9 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
     for (auto& addr : allocate_request.peer_addrs()) {
         decode_context.peer_addrs.push_back(addr);
     }
+    for (auto& addr : allocate_request.peer_grpc_addrs()) {
+        decode_context.peer_grpc_addrs.push_back(addr);
+    }
     RTP_LLM_LOG_DEBUG("request [%s] prepare generate context done", decode_context.request_key.c_str());
 }
 

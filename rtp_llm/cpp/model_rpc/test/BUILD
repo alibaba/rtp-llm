@@ -23,6 +23,11 @@ py_test (
     exec_properties = {'gpu':'H20'},
 )
 
+py_test(
+    name = "pd_kv_writeback_rpc_static_test",
+    srcs = ["pd_kv_writeback_rpc_static_test.py"],
+)
+
 test_deps = [
     "//rtp_llm/cpp/testing:device_test_utils",
     "//rtp_llm/cpp/models:models",
