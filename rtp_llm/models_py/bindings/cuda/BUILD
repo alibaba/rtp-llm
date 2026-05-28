@@ -196,6 +196,10 @@ cc_library(
         "RegisterCudaOps.cc",
     ],
     copts = copts() + ["-fno-strict-aliasing"],
+    local_defines = select({
+        "@//:using_cuda12_9_x86": ["ENABLE_FP8_SM120=1"],
+        "//conditions:default": [],
+    }),
     deps = [
         "//rtp_llm/models_py/bindings:register_ops_hdr",
         ":cuda_bindings_base",
@@ -203,6 +207,15 @@ cc_library(
     ] + select({
         "@//:using_cuda12_9": [
             "//rtp_llm/models_py/bindings/cuda/cutlass:fp4_gemm_cu",
+        ],
+        "//conditions:default": [],
+    }) + select({
+        # sm_120 consumer Blackwell (RTX 5090 / RTX PRO 5000) is x86-only;
+        # GB200 (cuda12_9_arm) is sm_10x and would trap on this kernel.
+        # local_defines above and this dependency share this same select so
+        # registration and linking cannot drift apart.
+        "@//:using_cuda12_9_x86": [
+            "//rtp_llm/models_py/bindings/cuda/cutlass:fp8_blockwise_sm120_cu",
         ],
         "//conditions:default": [],
     }),
