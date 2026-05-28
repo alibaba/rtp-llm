@@ -65,6 +65,33 @@ class ServerArgsSetTest(TestCase):
         # Note: max_seq_len is in ModelConfig, not RuntimeConfig or EngineConfig
         # It will be set when ModelConfig is created from model_args
 
+    def test_pd_kv_cache_writeback_env_set_to_py_env_configs(self):
+        """Test that PD KV writeback env var is bound to PDSepConfig."""
+        os.environ["ENABLE_PD_KV_CACHE_WRITEBACK"] = "1"
+        sys.argv = ["prog"]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        self.assertEqual(
+            py_env_configs.pd_separation_config.enable_pd_kv_cache_writeback, True
+        )
+
+    def test_pd_kv_cache_writeback_cmd_arg_set_to_py_env_configs(self):
+        """Test that PD KV writeback command arg is bound to PDSepConfig."""
+        sys.argv = ["prog", "--enable_pd_kv_cache_writeback", "1"]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        self.assertEqual(
+            py_env_configs.pd_separation_config.enable_pd_kv_cache_writeback, True
+        )
+
     def test_cmd_args_set_to_py_env_configs(self):
         """Test that command line arguments are correctly set to py_env_configs."""
         sys.argv = [

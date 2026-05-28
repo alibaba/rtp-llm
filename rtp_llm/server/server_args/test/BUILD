@@ -8,3 +8,8 @@ py_test(
     ],
     exec_properties = {'gpu':'H20'},
 )
+
+py_test(
+    name = "pd_separation_group_args_static_test",
+    srcs = ["pd_separation_group_args_static_test.py"],
+)

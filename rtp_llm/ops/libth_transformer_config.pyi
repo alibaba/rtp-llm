@@ -1068,6 +1068,7 @@ class PDSepConfig:
     cache_store_rdma_listen_port: int
     cache_store_rdma_mode: bool
     decode_entrance: bool
+    enable_pd_kv_cache_writeback: bool
     decode_polling_call_prefill_ms: int
     decode_polling_kv_cache_step_ms: int
     decode_retry_interval_ms: int

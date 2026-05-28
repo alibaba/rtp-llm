@@ -517,7 +517,8 @@ std::string PDSepConfig::to_string() const {
         << "load_cache_timeout_ms: " << load_cache_timeout_ms << "\n"
         << "max_rpc_timeout_ms: " << max_rpc_timeout_ms << "\n"
         << "worker_port_offset: " << worker_port_offset << "\n"
-        << "decode_entrance: " << decode_entrance;
+        << "decode_entrance: " << decode_entrance << "\n"
+        << "enable_pd_kv_cache_writeback: " << enable_pd_kv_cache_writeback;
     return oss.str();
 }
 

@@ -382,6 +382,7 @@ struct PDSepConfig {
     int64_t  max_rpc_timeout_ms              = 0;
     int64_t  worker_port_offset              = 0;
     bool     decode_entrance                 = false;
+    bool     enable_pd_kv_cache_writeback    = false;
 
     std::string to_string() const;
 };
