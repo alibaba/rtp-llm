@@ -1,7 +1,6 @@
 package org.flexlb.service.grace;
 
 import lombok.extern.slf4j.Slf4j;
-import org.flexlb.balance.dp.PrefillProfiler;
 import org.flexlb.service.grace.strategy.LbConsistencyHooker;
 import org.flexlb.service.grace.strategy.QueryWarmerHooker;
 import org.springframework.context.EnvironmentAware;
@@ -23,15 +22,12 @@ public class GracefulOnlineService implements EnvironmentAware {
 
     private final LbConsistencyHooker lbConsistencyHooker;
     private final QueryWarmerHooker queryWarmerHooker;
-    private final PrefillProfiler prefillProfiler;
     private Environment environment;
 
     public GracefulOnlineService(LbConsistencyHooker lbConsistencyHooker,
-                                 QueryWarmerHooker queryWarmerHooker,
-                                 PrefillProfiler prefillProfiler) {
+                                 QueryWarmerHooker queryWarmerHooker) {
         this.lbConsistencyHooker = lbConsistencyHooker;
         this.queryWarmerHooker = queryWarmerHooker;
-        this.prefillProfiler = prefillProfiler;
     }
 
     @Override
@@ -50,10 +46,7 @@ public class GracefulOnlineService implements EnvironmentAware {
         log.info("Graceful online: step 1 — register with service discovery");
         lbConsistencyHooker.afterStartUp();
 
-        log.info("Graceful online: step 2 — profile prefill latency");
-        prefillProfiler.runIfEnabled();
-
-        log.info("Graceful online: step 3 — warm up service");
+        log.info("Graceful online: step 2 — warm up service");
         queryWarmerHooker.afterStartUp();
     }
 }

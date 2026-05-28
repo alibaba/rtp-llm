@@ -12,8 +12,12 @@ import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.util.CommonUtils;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Component;
 
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Iterator;
@@ -26,6 +30,8 @@ import java.util.concurrent.TimeUnit;
 @Component
 public class PrefillProfiler {
 
+    public static volatile boolean ready = true;
+
     private final ConfigService configService;
     private final EngineWorkerStatus engineWorkerStatus;
 
@@ -34,7 +40,8 @@ public class PrefillProfiler {
         this.engineWorkerStatus = engineWorkerStatus;
     }
 
-    public void runIfEnabled() {
+    @EventListener(ApplicationReadyEvent.class)
+    public void onApplicationReady() {
         FlexlbConfig config = configService.loadBalanceConfig();
 
         String manualCoeffs = config.getPrefillCoefficients();
@@ -48,11 +55,10 @@ public class PrefillProfiler {
             return;
         }
 
-        try {
-            profile(config);
-        } catch (Exception e) {
-            log.warn("Prefill profiling failed, keeping default coefficients", e);
-        }
+        ready = false;
+        Thread profilerThread = new Thread(() -> run(config), "prefill-profiler");
+        profilerThread.setDaemon(true);
+        profilerThread.start();
     }
 
     private void applyManualCoefficients(String csv) {
@@ -68,18 +74,38 @@ public class PrefillProfiler {
         log.info("Prefill coefficients set from config: c0={}, c1={}, c2={}", c0, c1, c2);
     }
 
+    private void run(FlexlbConfig config) {
+        try {
+            profile(config);
+        } catch (Exception e) {
+            log.warn("Prefill profiling failed, keeping default coefficients", e);
+        } finally {
+            ready = true;
+        }
+    }
+
     private void profile(FlexlbConfig config) throws InterruptedException {
-        WorkerStatus worker = waitForPrefillWorker(config.getPrefillProfilingTimeoutMs());
+        long timeoutMs = config.getPrefillProfilingTimeoutMs();
+
+        WorkerStatus worker = waitForPrefillWorker(timeoutMs);
         if (worker == null) {
-            log.warn("No PREFILL worker found within {}ms, skipping profiling",
-                    config.getPrefillProfilingTimeoutMs());
+            log.warn("No PREFILL worker found within {}ms, skipping profiling", timeoutMs);
+            return;
+        }
+
+        log.info("Prefill worker found: {}:{}, waiting for worker warmup to complete",
+                worker.getIp(), worker.getPort());
+
+        if (!waitForWorkerHealthy(worker.getIp(), worker.getPort(), timeoutMs)) {
+            log.warn("Worker {}:{} did not become healthy within {}ms, skipping profiling",
+                    worker.getIp(), worker.getPort(), timeoutMs);
             return;
         }
 
         int[] tokenLengths = parseTokenLengths(config.getPrefillProfilingTokenLengths());
         int repeats = Math.max(1, config.getPrefillProfilingRepeats());
-
         int grpcPort = CommonUtils.toGrpcPort(worker.getPort());
+
         log.info("Prefill profiling: worker={}:{}, lengths={}, repeats={}",
                 worker.getIp(), grpcPort, Arrays.toString(tokenLengths), repeats);
 
@@ -102,8 +128,7 @@ public class PrefillProfiler {
             double c2 = coeffs[2];
 
             TaskInfo.updateCoefficients(c0, c1, c2);
-            log.info("Prefill profiling complete: T(n) = {} + {}*n + {}*n² (ms)",
-                    c0, c1, c2);
+            log.info("Prefill profiling complete: T(n) = {} + {}*n + {}*n² (ms)", c0, c1, c2);
 
             logResiduals(dataPoints, c0, c1, c2);
         } finally {
@@ -114,28 +139,50 @@ public class PrefillProfiler {
     private WorkerStatus waitForPrefillWorker(long timeoutMs) throws InterruptedException {
         long deadline = System.currentTimeMillis() + timeoutMs;
         while (System.currentTimeMillis() < deadline) {
-            Map<String, WorkerStatus> workers =
-                    engineWorkerStatus.selectModelWorkerStatus(RoleType.PREFILL, null);
-            if (workers != null) {
-                for (WorkerStatus w : workers.values()) {
-                    if (w != null && w.isAlive() && w.getIp() != null && w.getPort() > 0) {
-                        return w;
-                    }
-                }
-            }
+            WorkerStatus w = findAliveWorker(RoleType.PREFILL);
+            if (w != null) return w;
 
-            Map<String, WorkerStatus> pdfusionWorkers =
-                    engineWorkerStatus.selectModelWorkerStatus(RoleType.PDFUSION, null);
-            if (pdfusionWorkers != null) {
-                for (WorkerStatus w : pdfusionWorkers.values()) {
-                    if (w != null && w.isAlive() && w.getIp() != null && w.getPort() > 0) {
-                        return w;
-                    }
-                }
-            }
+            w = findAliveWorker(RoleType.PDFUSION);
+            if (w != null) return w;
+
             Thread.sleep(1000);
         }
         return null;
+    }
+
+    private WorkerStatus findAliveWorker(RoleType roleType) {
+        Map<String, WorkerStatus> workers =
+                engineWorkerStatus.selectModelWorkerStatus(roleType, null);
+        if (workers == null) return null;
+        for (WorkerStatus w : workers.values()) {
+            if (w != null && w.isAlive() && w.getIp() != null && w.getPort() > 0) {
+                return w;
+            }
+        }
+        return null;
+    }
+
+    private boolean waitForWorkerHealthy(String ip, int httpPort, long timeoutMs) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        String healthUrl = "http://" + ip + ":" + httpPort + "/health";
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                HttpURLConnection conn = (HttpURLConnection) new URL(healthUrl).openConnection();
+                conn.setConnectTimeout(2000);
+                conn.setReadTimeout(2000);
+                conn.setRequestMethod("GET");
+                int code = conn.getResponseCode();
+                conn.disconnect();
+                if (code == 200) {
+                    log.info("Worker {}:{} is healthy", ip, httpPort);
+                    return true;
+                }
+            } catch (Exception e) {
+                // worker not ready yet
+            }
+            Thread.sleep(2000);
+        }
+        return false;
     }
 
     private List<double[]> collectDataPoints(RpcServiceGrpc.RpcServiceBlockingStub stub,
@@ -212,7 +259,6 @@ public class PrefillProfiler {
             y[i] = dataPoints.get(i)[1];
         }
 
-        // A^T * A for Vandermonde [1, x, x²]
         double s0 = n;
         double s1 = 0, s2 = 0, s3 = 0, s4 = 0;
         double b0 = 0, b1 = 0, b2 = 0;
@@ -228,10 +274,6 @@ public class PrefillProfiler {
             b2 += y[i] * xi2;
         }
 
-        // Solve 3x3 system via Cramer's rule:
-        // [s0  s1  s2] [c0]   [b0]
-        // [s1  s2  s3] [c1] = [b1]
-        // [s2  s3  s4] [c2]   [b2]
         double det = det3(s0, s1, s2, s1, s2, s3, s2, s3, s4);
         if (Math.abs(det) < 1e-15) {
             return new double[]{b0 / n, 0, 0};

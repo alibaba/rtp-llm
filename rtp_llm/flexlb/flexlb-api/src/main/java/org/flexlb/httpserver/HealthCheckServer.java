@@ -2,6 +2,7 @@ package org.flexlb.httpserver;
 
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
+import org.flexlb.balance.dp.PrefillProfiler;
 import org.flexlb.service.grace.strategy.HealthCheckHooker;
 import org.flexlb.service.grace.strategy.QueryWarmerHooker;
 import org.springframework.context.annotation.Bean;
@@ -39,6 +40,10 @@ public class HealthCheckServer {
         // Return 404 if warmup not completed
         if (!QueryWarmerHooker.warmUpFinished) {
             return ServerResponse.status(404).body(Mono.just("warm not finish"), String.class);
+        }
+        // Return 404 if prefill profiling not completed
+        if (!PrefillProfiler.ready) {
+            return ServerResponse.status(404).body(Mono.just("prefill profiling not finish"), String.class);
         }
         return ServerResponse.ok().body(Mono.just("success"), String.class);
     }
