@@ -26,6 +26,9 @@ py_library(
         "inference/servicer.py",
         "proxy/__init__.py",
         "proxy/__main__.py",
+        "proxy/access_record.py",
+        "proxy/channel_pool.py",
+        "proxy/context.py",
         "proxy/servicer.py",
         "server.py",
         "think.py",
@@ -88,6 +91,15 @@ py_test(
     name = "proxy_servicer_test",
     srcs = ["test/proxy/servicer_test.py"],
     main = "test/proxy/servicer_test.py",
+    deps = ["//rtp_llm:testlib"],
+    imports = [],
+    exec_properties = {"gpu": "A10"},
+)
+
+py_test(
+    name = "proxy_access_record_test",
+    srcs = ["test/proxy/access_record_test.py"],
+    main = "test/proxy/access_record_test.py",
     deps = ["//rtp_llm:testlib"],
     imports = [],
     exec_properties = {"gpu": "A10"},

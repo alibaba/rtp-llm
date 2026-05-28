@@ -175,16 +175,13 @@ class DashScGrpcServer:
                     DASH_SC_GRPC_QUERY_LOG_FILENAME, rank_id, server_id_int
                 ),
             )
-        # ``raw_mode`` is purely a servicer-shape property: the proxy ships
-        # opaque proto frames end-to-end (needs full dumps to debug wire
-        # issues), the inference servicer ships parsed struct fields. Inferring
-        # it from ``isinstance`` keeps the two concerns coupled without
-        # reintroducing an env-var probe here.
+        # Proxy mode uses a compact forward summary record while inference
+        # mode keeps the existing parsed struct record.
         is_proxy = isinstance(servicer, DashScProxyServicer)
         interceptor = DashScGrpcAccessLogAioInterceptor(
             rank_id=rank_id,
             server_id=server_id_int,
-            raw_mode=is_proxy,
+            forward_summary_mode=is_proxy,
         )
         # Deliberately no ``maximum_concurrent_rpcs`` — under grpc.aio concurrent
         # RPCs are coroutines on one loop, not threads, so any positive value
@@ -192,14 +189,40 @@ class DashScGrpcServer:
         # are in flight). Backpressure comes from the backend visitor's own
         # concurrency instead. ``DashScGrpcConfig.max_server_workers`` is
         # retained on the C++ struct for wire compatibility but ignored here.
-        server = grpc.aio.server(
-            options=opts,
-            interceptors=[interceptor],
-        )
+        opened_servicer = False
+        server = None
+        try:
+            open_servicer = getattr(servicer, "open", None)
+            if open_servicer is not None:
+                maybe = open_servicer()
+                if asyncio.iscoroutine(maybe):
+                    await maybe
+                opened_servicer = True
 
-        predict_v2_pb2_grpc.add_GRPCInferenceServiceServicer_to_server(servicer, server)
-        server.add_insecure_port(f"0.0.0.0:{port}")
-        await server.start()
+            server = grpc.aio.server(
+                options=opts,
+                interceptors=[interceptor],
+            )
+
+            predict_v2_pb2_grpc.add_GRPCInferenceServiceServicer_to_server(
+                servicer, server
+            )
+            server.add_insecure_port(f"0.0.0.0:{port}")
+            await server.start()
+        except BaseException:
+            if opened_servicer:
+                close_servicer = getattr(servicer, "close", None)
+                if close_servicer is not None:
+                    try:
+                        maybe = close_servicer()
+                        if asyncio.iscoroutine(maybe):
+                            await maybe
+                    except Exception:
+                        logging.warning(
+                            "[DashScGrpc] servicer rollback close failed",
+                            exc_info=True,
+                        )
+            raise
         self._server = server
         self._servicer = servicer
         logging.info(
