@@ -10,8 +10,8 @@ import org.flexlb.enums.TaskStateEnum;
 public class TaskInfo {
 
     private static volatile double coeff0 = 190.0;
-    private static volatile double coeff1 = 0.0;
-    private static volatile double coeff2 = 0.0;
+    private static volatile double coeff1 = 0.0076;
+    private static volatile double coeff2 = 0.000000009;
     private static volatile boolean profiled = false;
 
     public static void updateCoefficients(double c0, double c1, double c2) {
