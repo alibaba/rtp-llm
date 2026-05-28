@@ -1,0 +1,53 @@
+{
+    "model_type": "qwen_3",
+    "model_path": "/mnt/nas1/hf/Qwen3-8B",
+    "query_result": [
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "$prompt:s2",
+                        "partial": false
+                    }
+                ],
+                "stream": true,
+                "extra_configs": {
+                    "top_k": 1,
+                    "max_new_tokens": 10,
+                    "chat_template_kwargs": {
+                        "enable_thinking": false
+                    }
+                }
+            },
+            "result": {
+                "id": "chat",
+                "object": "chat.completion.chunk",
+                "created": 1705333930,
+                "model": null,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "role": "assistant",
+                            "content": "当然可以！以下是围绕“英语听力方法”",
+                            "reasoning_content": null,
+                            "function_call": null,
+                            "tool_calls": null
+                        },
+                        "finish_reason": "length",
+                        "logprobs": null
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 20,
+                    "total_tokens": 30,
+                    "completion_tokens": 10,
+                    "completion_tokens_details": null,
+                    "prompt_tokens_details": null
+                }
+            }
+        }
+    ]
+}
