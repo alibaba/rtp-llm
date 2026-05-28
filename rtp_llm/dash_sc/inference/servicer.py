@@ -751,54 +751,51 @@ async def iter_real_model_stream_infer(
                 and term_id in generated_ids
             ):
                 generated_ids = generated_ids[: generated_ids.index(term_id)]
-                out_py.output_ids = torch.tensor(generated_ids, dtype=torch.int32)
-                out_py.finished = False
                 ids_for_accounting = generated_ids
                 if should_echo and not echoed and generated_ids:
                     ids_for_accounting = matched_echo_ids + generated_ids
                 generate_think_token_num = len(cumulative_sent_ids) + len(
                     ids_for_accounting
                 )
-                phase2_budget_exhausted = False
+                will_do_phase2 = True
                 if sampling.max_new_tokens_from_completion_alias:
-                    phase2_budget_exhausted = (
+                    will_do_phase2 = (
                         _phase2_max_new_tokens_for_completion_alias(
                             sampling, generate_think_token_num
                         )
-                        <= 0
+                        > 0
                     )
                 cumulative_sent_ids.extend(ids_for_accounting)
-                eos_go = go
-                response = build_stream_response_from_generate_outputs(
-                    dash_sc_request_id=request.id,
-                    model_name=request.model_name,
-                    go=eos_go,
-                    request_log_tag=tag,
-                    request_input_ids=input_ids_list,
-                    return_input_ids=other.return_input_ids,
-                    is_streaming=is_streaming,
-                    generate_config=generate_config,
-                    eos_token_id=eos_id,
-                    max_token_id=max_id,
-                    generate_think_token_num=generate_think_token_num,
-                    _request_shape=request_shape,
-                )
-                if should_echo and not echoed and generated_ids:
-                    if prepend_to_generated_ids_tensor(
-                        response.infer_response, matched_echo_ids
-                    ):
-                        echoed = True
+                # Yield thinking content (always intermediate)
                 if generated_ids:
-                    yield response
-                if runtime.eos_tokens:
-                    out_py.output_ids = torch.tensor(
-                        list(runtime.eos_tokens), dtype=torch.int32
+                    response = build_stream_response_from_generate_outputs(
+                        dash_sc_request_id=request.id,
+                        model_name=request.model_name,
+                        go=go,
+                        request_log_tag=tag,
+                        request_input_ids=input_ids_list,
+                        return_input_ids=other.return_input_ids,
+                        is_streaming=is_streaming,
+                        generate_config=generate_config,
+                        eos_token_id=eos_id,
+                        max_token_id=max_id,
+                        generate_think_token_num=generate_think_token_num,
+                        _request_shape=request_shape,
+                        stream_finished=False,
+                        token_ids=generated_ids,
                     )
-                    out_py.finished = True
+                    if should_echo and not echoed:
+                        if prepend_to_generated_ids_tensor(
+                            response.infer_response, matched_echo_ids
+                        ):
+                            echoed = True
+                    yield response
+                # Yield </think> close tokens
+                if runtime.eos_tokens:
                     eos_response = build_stream_response_from_generate_outputs(
                         dash_sc_request_id=request.id,
                         model_name=request.model_name,
-                        go=eos_go,
+                        go=go,
                         request_log_tag=tag,
                         request_input_ids=input_ids_list,
                         return_input_ids=other.return_input_ids,
@@ -808,12 +805,14 @@ async def iter_real_model_stream_infer(
                         max_token_id=max_id,
                         generate_think_token_num=generate_think_token_num,
                         finish_reason_override=(
-                            FINISH_REASON_LENGTH if phase2_budget_exhausted else None
+                            FINISH_REASON_LENGTH if not will_do_phase2 else None
                         ),
                         _request_shape=request_shape,
+                        stream_finished=not will_do_phase2,
+                        token_ids=list(runtime.eos_tokens),
                     )
                     yield eos_response
-                phase2_needed = not phase2_budget_exhausted
+                phase2_needed = will_do_phase2
                 break
             cumulative_sent_ids.extend(ids_for_accounting)
             finish_reason_override = None
