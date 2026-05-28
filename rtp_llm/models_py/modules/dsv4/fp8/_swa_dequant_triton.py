@@ -455,7 +455,7 @@ def dequantize_and_gather_k_cache_slots(
     if max_gather_len == 0 or int(slot_mapping.shape[0]) == 0:
         return
 
-    slots_i64 = slot_mapping.to(device=k_cache.device, dtype=torch.int64).contiguous()
+    slots_i64 = slot_mapping.to(device=out.device, dtype=torch.int64).contiguous()
     validate_slot_mapping(
         "swa.dequantize_and_gather.slot_mapping",
         slots_i64.reshape(-1),
@@ -466,7 +466,7 @@ def dequantize_and_gather_k_cache_slots(
     gather_lens_i32 = (
         None
         if gather_lens is None
-        else gather_lens.to(device=k_cache.device, dtype=torch.int32).contiguous()
+        else gather_lens.to(device=out.device, dtype=torch.int32).contiguous()
     )
 
     NUM_WORKERS = 128
