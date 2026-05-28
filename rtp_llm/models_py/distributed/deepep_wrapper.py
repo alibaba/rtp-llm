@@ -31,6 +31,7 @@ from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
+from rtp_llm.models_py.utils.arch import is_sm_100
 from rtp_llm.ops import SpeculativeType
 
 __all__ = [
@@ -53,8 +54,7 @@ def use_accl_ep() -> bool:
 
 def allow_mnnvl() -> bool:
     """Check if MNNVL is allowed based on architecture and GPU capability."""
-    is_sm_100 = torch.cuda.get_device_capability()[0] in [10]
-    return "aarch64" in platform.machine() and is_sm_100
+    return "aarch64" in platform.machine() and is_sm_100()
 
 
 class DeepEPMode(IntEnum):

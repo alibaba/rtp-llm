@@ -89,7 +89,7 @@ class XQAImpl(FMHAImplBase):
         # at first forward. C++ XQAAttnOp.support gate is `>= kSM_90` and
         # passes sm_120 erroneously — short-circuit here so dispatch falls
         # through to PyFlashinferPaged. See blockers.md R-4.
-        if torch.cuda.get_device_capability()[0] == 12:
+        if is_sm12x():
             return False
         fmha_impl = XQAAttnOp(attn_configs)
         return fmha_impl.support(attn_inputs)
