@@ -1,3 +1,4 @@
+import functools
 from typing import Tuple
 
 import torch
@@ -5,7 +6,14 @@ import torch
 from rtp_llm.device.device_type import DeviceType, get_device_type, is_cuda, is_hip
 
 
+@functools.cache
 def is_sm_100() -> bool:
+    """SM 10.x datacenter Blackwell (B200 / GB200)."""
+    return is_sm10x()
+
+
+@functools.cache
+def is_sm10x() -> bool:
     """SM 10.x datacenter Blackwell (B200 / GB200)."""
     if not is_cuda():
         return False
@@ -25,3 +33,19 @@ def get_num_device_sms() -> int:
 def get_sm(device_id: int = 0) -> Tuple[int, int]:
     major, minor = torch.cuda.get_device_capability(device_id)
     return major, minor
+
+
+@functools.cache
+def is_sm12x() -> bool:
+    """SM 12.x consumer Blackwell (RTX PRO 5000 / 6000, RTX 5090)."""
+    if not is_cuda():
+        return False
+    return get_sm()[0] == 12
+
+
+@functools.cache
+def is_blackwell() -> bool:
+    """Blackwell-class: SM 10.x datacenter (B200/GB200) or SM 12.x consumer."""
+    if not is_cuda():
+        return False
+    return get_sm()[0] in (10, 12)
