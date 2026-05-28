@@ -286,7 +286,7 @@ struct MoeConfig {
 struct ModelSpecificConfig {
     // When the Python-wrapped model (PyWrappedModel) owns execution it cannot
     // service a mixed prefill+decode batch in the same forward (see
-    // GatherBatchScheduler / FIFOScheduler guards).  Schedulers read this flag
+    // FIFOScheduler::evaluateRunningBatch).  Schedulers read this flag
     // to keep prefill streams off a non-empty running list.
     bool        load_python_model = false;
     std::string to_string() const;

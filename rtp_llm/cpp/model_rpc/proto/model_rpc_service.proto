@@ -102,8 +102,7 @@ message GenerateConfigPB {
     // 生成式推荐：组合 token 粒度去重与曝光过滤
     int32 combo_token_size = 58;
     IntMatrix banned_combo_token_ids = 59;
-    // NOTE: fields 60-63 reserved (formerly used by feat-branch grammar fields,
-    // reassigned to 64-69 below to avoid collision with main's 58/59).
+    reserved 60, 61, 62, 63;
     repeated int32 begin_think_token_ids = 64;
     google.protobuf.StringValue json_schema = 65;
     google.protobuf.StringValue regex = 66;

@@ -613,8 +613,6 @@ def _infer_cuda_graph_device(
     fallback_tensor: Optional[torch.Tensor],
 ) -> torch.device:
     candidates = [
-        getattr(attn_inputs, "input_lengths_d", None),
-        getattr(attn_inputs, "prefix_lengths_d", None),
         getattr(attn_inputs, "decode_cu_seqlens_d", None),
         getattr(attn_inputs, "sequence_lengths_plus_1_d", None),
         getattr(attn_inputs, "kv_cache_kernel_block_id_device", None),
