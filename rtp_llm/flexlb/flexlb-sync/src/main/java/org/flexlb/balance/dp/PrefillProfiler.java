@@ -11,6 +11,7 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.flexlb.sync.status.EngineWorkerStatus;
+import org.flexlb.util.CommonUtils;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -78,10 +79,11 @@ public class PrefillProfiler {
         int[] tokenLengths = parseTokenLengths(config.getPrefillProfilingTokenLengths());
         int repeats = Math.max(1, config.getPrefillProfilingRepeats());
 
+        int grpcPort = CommonUtils.toGrpcPort(worker.getPort());
         log.info("Prefill profiling: worker={}:{}, lengths={}, repeats={}",
-                worker.getIp(), worker.getPort(), Arrays.toString(tokenLengths), repeats);
+                worker.getIp(), grpcPort, Arrays.toString(tokenLengths), repeats);
 
-        ManagedChannel channel = NettyChannelBuilder.forAddress(worker.getIp(), worker.getPort())
+        ManagedChannel channel = NettyChannelBuilder.forAddress(worker.getIp(), grpcPort)
                 .usePlaintext()
                 .build();
 
