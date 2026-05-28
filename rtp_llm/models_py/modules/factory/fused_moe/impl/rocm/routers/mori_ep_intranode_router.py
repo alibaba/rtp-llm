@@ -88,7 +88,7 @@ class MoriEpIntranodeRouter(FusedMoeDataRouter):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
     ) -> ExpertForwardPayload:
-        logging.info(
+        logging.debug(
             f"[MoriEpIntranodeRouter] prepare called, tokens={a1.shape[0]}, ep_rank={self.ep_rank}"
         )
         if a1_scale is not None or a2_scale is not None:
@@ -221,7 +221,7 @@ class MoriEpIntranodeRouter(FusedMoeDataRouter):
         apply_router_weight_on_input: bool,
         extra_finalize_args: Optional[Dict[str, Any]],
     ) -> torch.Tensor:
-        logging.info(
+        logging.debug(
             f"[MoriEpIntranodeRouter] finalize called, ep_rank={self.ep_rank}, chunked={self._is_chunked}"
         )
         fused_out = payload.fused_expert_output

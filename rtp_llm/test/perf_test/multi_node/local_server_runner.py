@@ -341,7 +341,7 @@ if __name__ == "__main__":
 
     os.environ["GEN_TIMELINE_SYNC"] = "1"
     os.environ["MAX_SEQ_LEN"] = str(max_seq_len)
-    os.environ["FAKE_BALANCE_EXPERT"] = "1"
+    os.environ.setdefault("FAKE_BALANCE_EXPERT", "1")
     os.environ.setdefault("WORKER_INFO_PORT_NUM", "10")
     os.environ["USE_BATCH_DECODE_SCHEDULER"] = "1"
 
@@ -366,7 +366,9 @@ if __name__ == "__main__":
     )
     if not dist_config_str:
         dist_config_str = f"name:perf_part0,ip:127.0.0.1,port:{port}"
-        logging.info(f"no GANG_CONFIG_STRING, auto-generated for single node: {dist_config_str}")
+        logging.info(
+            f"no GANG_CONFIG_STRING, auto-generated for single node: {dist_config_str}"
+        )
     py_env_configs.distribute_config.gang_config_string = dist_config_str
     node_world_size = len(members_from_test_env(dist_config_str))
     node_rank = world_rank // local_world_size

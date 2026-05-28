@@ -1,0 +1,75 @@
+#!/bin/bash
+cd /home/admin/qinhanwen/codes/rtp-llm
+
+export PYTHONPATH=/home/admin/qinhanwen/codes/rtp-llm:$PYTHONPATH
+
+# ROCm environment
+export ROCM_PATH=/opt/rocm-7.2.0
+export HIP_PATH=/opt/rocm-7.2.0
+export HIP_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+
+# MoriEP configuration
+export USE_MORI_EP=1
+export USE_DEEPEP_MOE=0
+export USE_DEEPEP_LOW_LATENCY=0
+export USE_ALL_GATHER=0
+export LOAD_PYTHON_MODEL=1
+
+# Parallelism: DP=1, TP=8, EP=8
+export WORLD_SIZE=8
+export DP_SIZE=1
+export TP_SIZE=8
+export EP_SIZE=8
+
+# Model
+model_path=~/.cache/modelscope/hub/models/Qwen/Qwen3.5-397B-A17B/
+export TOKENIZER_PATH=$model_path
+export CHECKPOINT_PATH=$model_path
+export MODEL_TYPE=qwen35_moe
+export ACT_TYPE=bf16
+
+# Server
+export START_PORT=6655
+export FT_SERVER_TEST=1
+export CONCURRENCY_LIMIT=128
+
+# Memory
+export DEVICE_RESERVE_MEMORY_BYTES=-2048000000
+export RESERVER_RUNTIME_MEM_MB=10240
+
+# KV cache / attention
+export SEQ_SIZE_PER_BLOCK=1024
+export KERNEL_SEQ_SIZE_PER_BLOCK=16
+
+# Disable features not needed for MoriEP
+export ROCM_DISABLE_CUSTOM_AG=True
+export FT_DISABLE_CUSTOM_AR=True
+export ENABLE_CUDA_GRAPH=0
+export USE_ASM_PA=0
+export WARM_UP=0
+
+# Perf test specific
+export FAKE_BALANCE_EXPERT=0
+export GEN_TIMELINE_SYNC=1
+export USE_BATCH_DECODE_SCHEDULER=1
+export WORKER_INFO_PORT_NUM=10
+
+# Decode perf test parameters
+export IS_DECODE=1
+export DECODE_TEST_LENGTH=20
+export INPUT_LEN_LIST="[2048]"
+export BATCH_SIZE_LIST="[1,4,8,16,32,64]"
+
+# Timeout for distributed init
+export DIST_COMM_TIMEOUT=1800
+export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=1800
+export NCCL_DEBUG=WARN
+
+echo "=== Starting MoriEP Decode Perf Test ==="
+echo "MODEL: $MODEL_TYPE"
+echo "CHECKPOINT: $CHECKPOINT_PATH"
+echo "CONFIG: DP=${DP_SIZE} TP=${TP_SIZE} EP=${EP_SIZE}"
+echo "DECODE: batch_sizes=${BATCH_SIZE_LIST}, input_lens=${INPUT_LEN_LIST}, decode_len=${DECODE_TEST_LENGTH}"
+echo "========================================="
+
+exec /opt/conda310/bin/python3.10 rtp_llm/test/perf_test/multi_node/local_server_runner.py 2>&1

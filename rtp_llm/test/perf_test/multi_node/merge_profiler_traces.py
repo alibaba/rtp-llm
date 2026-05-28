@@ -20,8 +20,8 @@ from pathlib import Path
 
 
 def get_rank_of_path(p: Path) -> int:
-    """Extract world-rank from filename like profiler_wr3_ts..._1.json"""
-    m = re.search(r"profiler_wr(\d+)_", p.name)
+    """Extract world-rank from filename like profiler_ts..._wr3_1.json"""
+    m = re.search(r"_wr(\d+)_", p.name)
     if m:
         return int(m.group(1))
     raise ValueError(f"Cannot extract rank from filename: {p.name}")
@@ -70,8 +70,12 @@ def merge_traces(json_files, output_path: Path):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Merge RTP-LLM per-rank profiler JSON traces")
-    parser.add_argument("output_dir", help="Directory containing profiler_wrN_ts..._*.json files")
+    parser = argparse.ArgumentParser(
+        description="Merge RTP-LLM per-rank profiler JSON traces"
+    )
+    parser.add_argument(
+        "output_dir", help="Directory containing profiler_wrN_ts..._*.json files"
+    )
     parser.add_argument(
         "--suffix",
         default="_1.json",
@@ -89,14 +93,17 @@ def main():
         print(f"ERROR: {out_dir} is not a directory", file=sys.stderr)
         sys.exit(1)
 
-    pattern = re.compile(r"^profiler_wr\d+_ts\d+.*" + re.escape(args.suffix) + r"$")
+    pattern = re.compile(r"^profiler_ts\d+_wr\d+" + re.escape(args.suffix) + r"$")
     json_files = sorted(
         [p for p in out_dir.iterdir() if pattern.match(p.name)],
         key=get_rank_of_path,
     )
 
     if not json_files:
-        print(f"ERROR: No files matching profiler_wrN_ts*{args.suffix} in {out_dir}", file=sys.stderr)
+        print(
+            f"ERROR: No files matching profiler_wrN_ts*{args.suffix} in {out_dir}",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     print(f"Found {len(json_files)} rank file(s) with suffix '{args.suffix}':")
