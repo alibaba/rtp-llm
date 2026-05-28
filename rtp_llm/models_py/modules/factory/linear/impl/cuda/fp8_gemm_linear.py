@@ -11,6 +11,7 @@ from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear impo
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_flashinfer_linear import (
     CudaFp8FlashinferLinear,
 )
+from rtp_llm.models_py.utils.arch import is_sm12x
 from rtp_llm.ops import HWKernelConfig
 
 
@@ -32,6 +33,11 @@ class CudaFp8GEMMLinear(LinearBase):
         if weight_scales is None or quant_config is None:
             return False
         if weight.dtype not in (torch.float8_e4m3fn, torch.float8_e4m3fnuz):
+            return False
+        # sm_12x routes PER_BLOCK FP8 to CudaFp8VllmBlockwiseLinear (DeepGEMM
+        # has no sm_12x cubin and FlashInfer PB stalls there). Required for
+        # LinearFactory uniqueness — both can_handle returning True throws.
+        if is_sm12x():
             return False
         return quant_config.get_method() == "FP8_PER_BLOCK"
 
