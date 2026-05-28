@@ -5,6 +5,7 @@
 #include "absl/status/statusor.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPrompt.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/writeback/PdKvWritebackManager.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 
@@ -18,6 +19,10 @@ struct ResourceContext {
 
     RoleType role_type{RoleType::PDFUSION};
     bool     decode_entrance{false};  // PD反转模式：Decode侧作为请求入口
+    bool     enable_pd_kv_cache_writeback{false};
+    int      pd_kv_writeback_partition_count{1};
+
+    PdKvWritebackLauncherPtr pd_kv_writeback_launcher;
 
     bool    reuse_cache{false};
     bool    enable_memory_cache{false};

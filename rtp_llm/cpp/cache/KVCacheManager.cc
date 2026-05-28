@@ -463,6 +463,10 @@ bool KVCacheManager::hasP2PConnector() const {
     return coordinator_ && coordinator_->hasP2PConnector();
 }
 
+PdKvWritebackManagerPtr KVCacheManager::writebackManager() const {
+    return coordinator_ ? coordinator_->writebackManager() : nullptr;
+}
+
 // 异步连接器操作
 
 std::shared_ptr<AsyncContext>

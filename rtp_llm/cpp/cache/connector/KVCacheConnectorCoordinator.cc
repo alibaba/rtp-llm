@@ -9,11 +9,151 @@
 #include "rtp_llm/cpp/cache/connector/memory/KVCacheMemoryConnector.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnector.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverterImpl.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorWorker.h"
+#include "rtp_llm/cpp/model_rpc/RPCPool.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
 #ifdef USE_REMOTE_KV_CACHE
 #include "rtp_llm/cpp/cache/connector/remote_connector/RemoteConnector.h"
 #endif
 
 namespace rtp_llm {
+namespace {
+
+class AllocatorPdKvWritebackCacheWriter: public PdKvWritebackCacheWriter {
+public:
+    explicit AllocatorPdKvWritebackCacheWriter(std::shared_ptr<KVCacheAllocator> allocator):
+        allocator_(std::move(allocator)) {}
+
+    absl::Status mallocWritebackBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                       size_t                         block_count) override {
+        return allocator_->mallocWritebackBlocks(batch_kv_cache_resource, block_count);
+    }
+
+    void commitWritebackBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                               const CacheKeysType&           cache_keys,
+                               bool                           is_resident) override {
+        allocator_->commitWritebackBlocks(batch_kv_cache_resource, cache_keys, is_resident);
+    }
+
+    void freeWritebackBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource) override {
+        if (!batch_kv_cache_resource) {
+            return;
+        }
+        FreeInfo free_info{batch_kv_cache_resource, nullptr};
+        allocator_->free(free_info);
+    }
+
+private:
+    std::shared_ptr<KVCacheAllocator> allocator_;
+};
+
+class P2PPdKvWritebackTransferClient: public PdKvWritebackTransferClient {
+public:
+    P2PPdKvWritebackTransferClient(std::shared_ptr<P2PConnectorWorker> worker, RoleType role_type):
+        worker_(std::move(worker)), role_type_(role_type) {}
+
+    absl::Status transfer(const PdKvWritebackTransferPlan& plan) override {
+        if (!worker_) {
+            return absl::FailedPreconditionError("writeback worker is null");
+        }
+        ErrorInfo error_info = ErrorInfo::OkStatus();
+        if (role_type_ == RoleType::DECODE) {
+            error_info = worker_->sendDecodeToPrefillWriteback(plan);
+        } else if (role_type_ == RoleType::PREFILL) {
+            error_info = worker_->receiveDecodeToPrefillWriteback(plan);
+        } else {
+            return absl::FailedPreconditionError("unsupported role type for writeback transfer");
+        }
+        if (error_info.hasError()) {
+            return absl::InternalError(error_info.ToString());
+        }
+        return absl::OkStatus();
+    }
+
+private:
+    std::shared_ptr<P2PConnectorWorker> worker_;
+    RoleType                            role_type_;
+};
+
+void fillPdKvWritebackCompatibilityPB(const PdKvWritebackCompatibility& compatibility,
+                                      PdKvWritebackCompatibilityPB*     pb) {
+    pb->set_seq_size_per_block(compatibility.seq_size_per_block);
+    pb->set_layer_count(compatibility.layer_count);
+    pb->set_group_count(compatibility.group_count);
+    pb->set_partition_count(compatibility.partition_count);
+    for (const auto value : compatibility.layer_to_group_id) {
+        pb->add_layer_to_group_id(value);
+    }
+    for (const auto value : compatibility.group_types) {
+        pb->add_group_types(value);
+    }
+}
+
+PdKvWritebackRequestPB buildPdKvWritebackRequestPB(const PdKvWritebackLaunchRequest& request) {
+    PdKvWritebackRequestPB pb;
+    pb.set_request_id(request.manifest.request_id);
+    pb.set_request_key(request.manifest.request_key);
+    pb.set_final_token_count(request.manifest.final_token_count);
+    pb.set_reusable_block_count(request.manifest.reusable_block_count);
+    for (const auto key : request.manifest.cache_keys) {
+        pb.add_cache_keys(key);
+    }
+    for (const auto& group_block_ids : request.manifest.group_block_ids) {
+        auto* group_pb = pb.add_group_block_ids();
+        for (const auto block_id : group_block_ids) {
+            group_pb->add_block_ids(block_id);
+        }
+    }
+    for (const auto& addr : request.decode_worker_addrs) {
+        pb.add_decode_worker_addrs(addr);
+    }
+    for (const auto& addr : request.prefill_worker_addrs) {
+        pb.add_prefill_worker_addrs(addr);
+    }
+    fillPdKvWritebackCompatibilityPB(request.source, pb.mutable_source());
+    fillPdKvWritebackCompatibilityPB(request.destination, pb.mutable_destination());
+    pb.set_deadline_us(request.deadline_ms * 1000);
+    return pb;
+}
+
+class GrpcPdKvWritebackRpcClient: public PdKvWritebackRpcClient {
+public:
+    absl::Status requestPrefillReceive(const PdKvWritebackLaunchRequest& request) override {
+        if (request.source_prefill_grpc_addrs.empty()) {
+            return absl::InvalidArgumentError("source prefill grpc address is empty");
+        }
+        auto connection_status = rpc_pool_.getConnection(request.source_prefill_grpc_addrs.front());
+        if (!connection_status.ok()) {
+            return connection_status.status();
+        }
+
+        grpc::ClientContext client_context;
+        if (request.deadline_ms > 0) {
+            const auto timeout_ms = request.deadline_ms - currentTimeMs();
+            if (timeout_ms > 0) {
+                client_context.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(timeout_ms));
+            }
+        }
+        auto                    request_pb = buildPdKvWritebackRequestPB(request);
+        PdKvWritebackResponsePB response;
+        auto grpc_status = connection_status.value().stub->PdKvWriteback(&client_context, request_pb, &response);
+        if (!grpc_status.ok()) {
+            return absl::InternalError(grpc_status.error_message());
+        }
+        if (response.has_error_info() && response.error_info().error_code() != ErrorCodePB::NONE_ERROR) {
+            return absl::InternalError(response.error_info().error_message());
+        }
+        if (!response.accepted()) {
+            return absl::FailedPreconditionError(response.reason());
+        }
+        return absl::OkStatus();
+    }
+
+private:
+    RPCPool rpc_pool_;
+};
+
+}  // namespace
 
 KVCacheConnectorCoordinator::KVCacheConnectorCoordinator(const CacheConfig&                       cache_config,
                                                          const KVCacheConfig&                     kv_cache_config,
@@ -90,6 +230,7 @@ bool KVCacheConnectorCoordinator::init() {
     if (!initP2PConnectorInternal()) {
         RTP_LLM_LOG_WARNING("init P2P connector failed, P2P path disabled — engine continues without it");
     }
+    initPdKvWriteback();
     initUpdateThread();
     return true;
 }
@@ -218,6 +359,41 @@ std::shared_ptr<RemoteConnector> KVCacheConnectorCoordinator::initRemoteConnecto
     RTP_LLM_LOG_ERROR("not RemoteConnector");
     return nullptr;
 #endif
+}
+
+void KVCacheConnectorCoordinator::initPdKvWriteback() {
+    if (!pd_sep_config_.enable_pd_kv_cache_writeback || pd_sep_config_.decode_entrance) {
+        return;
+    }
+    if (pd_sep_config_.role_type != RoleType::PREFILL && pd_sep_config_.role_type != RoleType::DECODE) {
+        return;
+    }
+
+    const uint32_t layer_all_num         = static_cast<uint32_t>(cache_config_.layer_all_num);
+    auto           layer_block_converter = std::make_shared<LayerBlockConverterImpl>(allocator_);
+    auto           worker_config =
+        P2PConnectorWorkerConfig::create(cache_store_config_, pd_sep_config_, parallelism_config_, layer_all_num);
+    worker_config.transfer_backend_config.cache_store_rdma_mode = false;
+    if (pd_sep_config_.cache_store_listen_port > 0) {
+        worker_config.transfer_backend_config.cache_store_listen_port = pd_sep_config_.cache_store_listen_port + 1;
+    }
+    auto worker = std::make_shared<P2PConnectorWorker>(worker_config, layer_block_converter, metrics_reporter_);
+    if (!worker->init()) {
+        RTP_LLM_LOG_WARNING("init PD KV writeback worker failed, writeback disabled");
+        return;
+    }
+
+    pd_kv_writeback_worker_       = std::move(worker);
+    pd_kv_writeback_cache_writer_ = std::make_shared<AllocatorPdKvWritebackCacheWriter>(allocator_);
+    pd_kv_writeback_transfer_client_ =
+        std::make_shared<P2PPdKvWritebackTransferClient>(pd_kv_writeback_worker_, pd_sep_config_.role_type);
+    if (pd_sep_config_.role_type == RoleType::DECODE) {
+        pd_kv_writeback_rpc_client_ = std::make_shared<GrpcPdKvWritebackRpcClient>();
+    }
+    pd_kv_writeback_manager_ = std::make_shared<PdKvWritebackManager>(pd_sep_config_,
+                                                                      pd_kv_writeback_cache_writer_.get(),
+                                                                      pd_kv_writeback_transfer_client_,
+                                                                      pd_kv_writeback_rpc_client_);
 }
 
 void KVCacheConnectorCoordinator::updateOnce() {

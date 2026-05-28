@@ -1,0 +1,64 @@
+{
+    "model_type": "qwen_3",
+    "model_path": "/mnt/nas1/hf/models--Qwen--Qwen3-1.7B/snapshots/0060bc56d46589041c1048efd1a397421b1142b5",
+    "query_result": [
+        {
+            "query": {
+                "prompt": "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n请只输出从1到120的阿拉伯数字，使用英文逗号分隔，不要空格，不要解释。<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+                "generate_config": {
+                    "max_new_tokens": 160,
+                    "temperature": 0.0,
+                    "top_p": 0.1,
+                    "top_k": 1
+                }
+            },
+            "aux_info_assertions": {
+                "mode": "aux_info_only",
+                "fields": {
+                    "aux_info.pd_sep": {
+                        "eq": true
+                    },
+                    "aux_info.reuse_len": {
+                        "eq": 0
+                    },
+                    "aux_info.prefill_local_reuse_len": {
+                        "eq": 0
+                    }
+                }
+            },
+            "result": {
+                "response": "",
+                "finished": true
+            }
+        },
+        {
+            "query": {
+                "prompt": "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n请只输出从1到120的阿拉伯数字，使用英文逗号分隔，不要空格，不要解释。<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,5<|im_end|>\n<|im_start|>user\n继续输出121到130，仍然只用英文逗号分隔。<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+                "generate_config": {
+                    "max_new_tokens": 32,
+                    "temperature": 0.0,
+                    "top_p": 0.1,
+                    "top_k": 1
+                }
+            },
+            "aux_info_assertions": {
+                "mode": "aux_info_only",
+                "fields": {
+                    "aux_info.pd_sep": {
+                        "eq": true
+                    },
+                    "aux_info.reuse_len": {
+                        "ge": 64
+                    },
+                    "aux_info.prefill_local_reuse_len": {
+                        "ge": 64
+                    }
+                }
+            },
+            "result": {
+                "response": "",
+                "finished": true
+            }
+        }
+    ]
+}

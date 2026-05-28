@@ -76,7 +76,10 @@ parsePdKvWritebackTransferServers(const std::vector<std::string>& worker_addrs) 
         const auto second_colon = addr.find(':', first_colon + 1);
         const auto port_end     = second_colon == std::string::npos ? addr.size() : second_colon;
         try {
-            const auto port = std::stoul(addr.substr(first_colon + 1, port_end - first_colon - 1));
+            auto port = std::stoul(addr.substr(first_colon + 1, port_end - first_colon - 1));
+            if (second_colon != std::string::npos) {
+                ++port;
+            }
             if (port > std::numeric_limits<uint32_t>::max()) {
                 continue;
             }

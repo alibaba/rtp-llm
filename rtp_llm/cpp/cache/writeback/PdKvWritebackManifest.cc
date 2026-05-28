@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/writeback/PdKvWritebackManifest.h"
 
 #include <algorithm>
+#include <string>
 
 #include "absl/status/status.h"
 
@@ -43,8 +44,9 @@ absl::StatusOr<PdKvWritebackManifest> buildPdKvWritebackManifest(const PdKvWrite
         std::min<int64_t>(firstBlockedByMultimodal(snapshot, full_blocks), snapshot.cache_keys.size());
 
     PdKvWritebackManifest manifest;
-    manifest.request_id           = snapshot.request_id;
-    manifest.request_key          = snapshot.request_key;
+    manifest.request_id = snapshot.request_id;
+    manifest.request_key =
+        snapshot.request_key.empty() ? "pd_kv_writeback_" + std::to_string(snapshot.request_id) : snapshot.request_key;
     manifest.seq_size_per_block   = snapshot.seq_size_per_block;
     manifest.final_token_count    = snapshot.final_token_count;
     manifest.reusable_block_count = limited_blocks;

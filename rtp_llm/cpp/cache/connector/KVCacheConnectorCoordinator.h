@@ -12,6 +12,7 @@
 #include "rtp_llm/cpp/cache/connector/IKVCacheConnectorCoordinator.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/writeback/PdKvWritebackManager.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
@@ -22,6 +23,7 @@ class KVCacheAllocator;
 class KVCacheMemoryConnector;
 class RemoteConnector;
 class P2PConnector;
+class P2PConnectorWorker;
 class KVCacheConnectorReadWriteContext;
 
 class KVCacheConnectorCoordinator: public IKVCacheConnectorCoordinator {
@@ -40,8 +42,14 @@ public:
 public:
     bool init();
 
-    bool hasActiveConnectors() const override;
-    bool hasP2PConnector() const override;
+    bool                    hasActiveConnectors() const override;
+    bool                    hasP2PConnector() const override;
+    PdKvWritebackManagerPtr writebackManager() const {
+        return pd_kv_writeback_manager_;
+    }
+    size_t connectorCountForTest() const {
+        return connectors_.size();
+    }
 
     // virtual for test
     virtual std::shared_ptr<AsyncContext>
@@ -66,6 +74,7 @@ public:
 private:
     std::shared_ptr<KVCacheMemoryConnector> initMemoryConnector();
     std::shared_ptr<RemoteConnector>        initRemoteConnector();
+    void                                    initPdKvWriteback();
     bool                                    initP2PConnectorInternal();
     void                                    initUpdateThread();
     void                                    updateOnce();
@@ -90,6 +99,11 @@ private:
     std::shared_ptr<KVCacheMemoryConnector>           memory_connector_;
     std::shared_ptr<RemoteConnector>                  remote_connector_;
     std::shared_ptr<P2PConnector>                     p2p_connector_;
+    std::shared_ptr<P2PConnectorWorker>               pd_kv_writeback_worker_;
+    std::shared_ptr<PdKvWritebackCacheWriter>         pd_kv_writeback_cache_writer_;
+    std::shared_ptr<PdKvWritebackTransferClient>      pd_kv_writeback_transfer_client_;
+    std::shared_ptr<PdKvWritebackRpcClient>           pd_kv_writeback_rpc_client_;
+    PdKvWritebackManagerPtr                           pd_kv_writeback_manager_;
     mutable std::mutex                                update_mutex_;
     std::list<std::shared_ptr<FusedAsyncReadContext>> fused_async_read_context_list_;
     std::list<std::shared_ptr<FusedAsyncContext>>     fused_async_write_context_list_;

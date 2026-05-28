@@ -100,7 +100,7 @@ public:
 
     // 生成式推荐：组合 token 粒度去重与曝光过滤
     // combo_token_size 表示一个商品由多少个连续 token 组成（0 表示关闭该功能）
-    int                           combo_token_size = 0;
+    int combo_token_size = 0;
     // banned_combo_token_ids 是禁止生成的商品 token 组合列表，每项长度应等于 combo_token_size
     std::vector<std::vector<int>> banned_combo_token_ids;
 
@@ -108,7 +108,9 @@ public:
         return top_k == 1;
     }
 
-    std::vector<RoleAddr> role_addrs;
+    std::vector<RoleAddr>    role_addrs;
+    std::vector<std::string> pd_writeback_prefill_grpc_addrs;
+    std::vector<std::string> pd_writeback_prefill_worker_addrs;
 
     int maxNumBeams() {
         if (variable_num_beams.size() > 0) {
@@ -157,8 +159,8 @@ public:
                      << ", gen_timeline: " << gen_timeline << ", profile_step: " << profile_step
                      << ", reuse_cache: " << reuse_cache << ", enable_device_cache: " << enable_device_cache
                      << ", enable_memory_cache: " << enable_memory_cache
-                     << ", enable_remote_cache: " << enable_remote_cache << ", force_batch: " << force_batch << ", unique_key: " << unique_key
-                     << ", combo_token_size: " << combo_token_size
+                     << ", enable_remote_cache: " << enable_remote_cache << ", force_batch: " << force_batch
+                     << ", unique_key: " << unique_key << ", combo_token_size: " << combo_token_size
                      << ", banned_combo_token_ids_size: " << banned_combo_token_ids.size() << "}";
         return debug_string.str();
     }

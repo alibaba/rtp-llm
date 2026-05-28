@@ -119,6 +119,7 @@ grpc::Status PrefillRpcServer::init(const EngineInitParams&                     
     if (!ret.ok()) {
         return ret;
     }
+    writeback_manager_ = engine_->resourceContext().cache_manager->writebackManager();
     return grpc::Status::OK;
 }
 

@@ -67,5 +67,19 @@ TEST(PdKvWritebackManifestTest, RejectsShortGroupBlocks) {
     EXPECT_FALSE(manifest.ok());
 }
 
+TEST(PdKvWritebackManifestTest, UsesRequestIdFallbackWhenRequestKeyIsEmpty) {
+    PdKvWritebackSnapshot snapshot;
+    snapshot.request_id         = 12345;
+    snapshot.seq_size_per_block = 16;
+    snapshot.final_token_count  = 16;
+    snapshot.cache_keys         = {501};
+    snapshot.group_block_ids    = {{41}};
+
+    auto manifest = buildPdKvWritebackManifest(snapshot);
+
+    ASSERT_TRUE(manifest.ok()) << manifest.status();
+    EXPECT_EQ(manifest.value().request_key, "pd_kv_writeback_12345");
+}
+
 }  // namespace
 }  // namespace rtp_llm

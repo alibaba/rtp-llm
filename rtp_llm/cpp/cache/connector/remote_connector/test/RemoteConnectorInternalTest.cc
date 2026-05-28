@@ -44,6 +44,15 @@ public:
     void insertIntoCache(const InsertInfo& insert_info) override {
         return;
     }
+    absl::Status mallocWritebackBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                       size_t                         block_count) override {
+        return absl::OkStatus();
+    }
+    void commitWritebackBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                               const CacheKeysType&           cache_keys,
+                               bool                           is_resident) override {
+        return;
+    }
     BlockAddrInfo convertIndexToAddr(int layer_id, int block_id) const override {
         return {};
     }

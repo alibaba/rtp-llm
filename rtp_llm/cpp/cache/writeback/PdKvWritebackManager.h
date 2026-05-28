@@ -35,11 +35,18 @@ struct PdKvWritebackLaunchRequest {
     std::vector<std::string>   decode_worker_addrs;
     std::vector<std::string>   prefill_worker_addrs;
     int64_t                    deadline_ms = 0;
+    KVCacheResourcePtr         held_resource;
 };
 
 struct PdKvWritebackLaunchResult {
     PdKvWritebackLaunchStatus status = PdKvWritebackLaunchStatus::Skipped;
     std::string               reason;
+};
+
+class PdKvWritebackLauncher {
+public:
+    virtual ~PdKvWritebackLauncher()                                                                    = default;
+    virtual PdKvWritebackLaunchResult launchFromDecode(const PdKvWritebackLaunchRequest& request) const = 0;
 };
 
 class PdKvWritebackCacheWriter {
@@ -53,17 +60,27 @@ public:
     virtual void         freeWritebackBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource) = 0;
 };
 
+class PdKvWritebackRpcClient {
+public:
+    virtual ~PdKvWritebackRpcClient()                                                     = default;
+    virtual absl::Status requestPrefillReceive(const PdKvWritebackLaunchRequest& request) = 0;
+};
+
 absl::Status validatePdKvWritebackCompatibility(const PdKvWritebackCompatibility& source,
                                                 const PdKvWritebackCompatibility& destination);
 
-class PdKvWritebackManager {
+class PdKvWritebackManager: public PdKvWritebackLauncher {
 public:
     PdKvWritebackManager(const PDSepConfig& pd_config, PdKvWritebackCacheWriter* cache_writer);
     PdKvWritebackManager(const PDSepConfig&           pd_config,
                          PdKvWritebackCacheWriter*    cache_writer,
                          PdKvWritebackTransferClient* transfer_client);
+    PdKvWritebackManager(const PDSepConfig&                           pd_config,
+                         PdKvWritebackCacheWriter*                    cache_writer,
+                         std::shared_ptr<PdKvWritebackTransferClient> transfer_client,
+                         std::shared_ptr<PdKvWritebackRpcClient>      rpc_client);
 
-    PdKvWritebackLaunchResult launchFromDecode(const PdKvWritebackLaunchRequest& request) const;
+    PdKvWritebackLaunchResult launchFromDecode(const PdKvWritebackLaunchRequest& request) const override;
     absl::Status              receiveOnPrefill(const PdKvWritebackLaunchRequest& request,
                                                const BatchKVCacheResourcePtr&    destination_resource);
 
@@ -72,11 +89,15 @@ private:
                                                 const BatchKVCacheResourcePtr&    destination_resource) const;
 
 private:
-    PDSepConfig                  pd_config_;
-    PdKvWritebackCacheWriter*    cache_writer_    = nullptr;
-    PdKvWritebackTransferClient* transfer_client_ = nullptr;
+    PDSepConfig                                  pd_config_;
+    PdKvWritebackCacheWriter*                    cache_writer_    = nullptr;
+    PdKvWritebackTransferClient*                 transfer_client_ = nullptr;
+    PdKvWritebackRpcClient*                      rpc_client_      = nullptr;
+    std::shared_ptr<PdKvWritebackTransferClient> owned_transfer_client_;
+    std::shared_ptr<PdKvWritebackRpcClient>      owned_rpc_client_;
 };
 
-using PdKvWritebackManagerPtr = std::shared_ptr<PdKvWritebackManager>;
+using PdKvWritebackManagerPtr  = std::shared_ptr<PdKvWritebackManager>;
+using PdKvWritebackLauncherPtr = std::shared_ptr<PdKvWritebackLauncher>;
 
 }  // namespace rtp_llm

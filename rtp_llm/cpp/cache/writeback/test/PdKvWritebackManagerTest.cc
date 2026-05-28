@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/writeback/PdKvWritebackManager.h"
 
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -53,6 +54,23 @@ public:
 
     PdKvWritebackTransferPlan last_plan;
     absl::Status              transfer_status = absl::OkStatus();
+
+private:
+    std::vector<std::string>* events_;
+};
+
+class RecordingRpcClient: public PdKvWritebackRpcClient {
+public:
+    explicit RecordingRpcClient(std::vector<std::string>* events): events_(events) {}
+
+    absl::Status requestPrefillReceive(const PdKvWritebackLaunchRequest& request) override {
+        events_->push_back("rpc");
+        last_request = request;
+        return rpc_status;
+    }
+
+    PdKvWritebackLaunchRequest last_request;
+    absl::Status               rpc_status = absl::OkStatus();
 
 private:
     std::vector<std::string>* events_;
@@ -123,6 +141,42 @@ TEST(PdKvWritebackManagerTest, EnabledCompatibleLaunchStarts) {
     EXPECT_EQ(result.status, PdKvWritebackLaunchStatus::Started);
 }
 
+TEST(PdKvWritebackManagerTest, LaunchStartsPrefillRpcAndDecodeTransfer) {
+    PDSepConfig pd_config;
+    pd_config.enable_pd_kv_cache_writeback = true;
+    std::vector<std::string> events;
+    auto                     transfer_client = std::make_shared<RecordingTransferClient>(&events);
+    auto                     rpc_client      = std::make_shared<RecordingRpcClient>(&events);
+    PdKvWritebackManager     manager(pd_config, nullptr, transfer_client, rpc_client);
+
+    auto request                      = makeReceiveRequest();
+    request.source_prefill_grpc_addrs = {"127.0.0.1:9000"};
+
+    auto result = manager.launchFromDecode(request);
+
+    EXPECT_EQ(result.status, PdKvWritebackLaunchStatus::Started);
+    for (int i = 0; i < 100 && events.size() < 2; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_EQ(events, std::vector<std::string>({"rpc", "transfer"}));
+    EXPECT_EQ(transfer_client->last_plan.decode_group_block_ids, request.manifest.group_block_ids);
+    EXPECT_EQ(rpc_client->last_request.manifest.request_id, request.manifest.request_id);
+}
+
+TEST(PdKvWritebackTransferTest, ParsesDedicatedWritebackPortFromWorkerAddr) {
+    auto servers = parsePdKvWritebackTransferServers({"10.0.0.1:10102:10104", "bad", "10.0.0.2:10202:10204"});
+
+    ASSERT_EQ(servers.size(), 2);
+    EXPECT_EQ(servers[0].first, "10.0.0.1");
+    EXPECT_EQ(servers[0].second, 10103);
+    EXPECT_EQ(servers[1].first, "10.0.0.2");
+    EXPECT_EQ(servers[1].second, 10203);
+
+    auto explicit_servers = parsePdKvWritebackTransferServers({"127.0.0.1:12345"});
+    ASSERT_EQ(explicit_servers.size(), 1);
+    EXPECT_EQ(explicit_servers[0].second, 12345);
+}
+
 TEST(PdKvWritebackManagerTest, ReceiveCommitsOnlyAfterTransferSucceeds) {
     PDSepConfig pd_config;
     pd_config.enable_pd_kv_cache_writeback = true;
@@ -135,7 +189,7 @@ TEST(PdKvWritebackManagerTest, ReceiveCommitsOnlyAfterTransferSucceeds) {
     auto status               = manager.receiveOnPrefill(makeReceiveRequest(), destination_resource);
 
     EXPECT_TRUE(status.ok()) << status;
-    EXPECT_EQ(events, std::vector<std::string>({"malloc", "transfer", "commit"}));
+    EXPECT_EQ(events, std::vector<std::string>({"malloc", "transfer", "commit", "free"}));
     EXPECT_EQ(transfer_client.last_plan.decode_group_block_ids, std::vector<BlockIndicesType>({{4, 5}}));
     EXPECT_EQ(transfer_client.last_plan.prefill_group_block_ids, std::vector<BlockIndicesType>({{7, 8}}));
 }

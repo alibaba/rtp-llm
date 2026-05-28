@@ -33,6 +33,11 @@ cc_test(
     exec_properties = {'gpu':'H20'},
 )
 
+py_test(
+    name = "pd_kv_writeback_lifecycle_static_test",
+    srcs = ["pd_kv_writeback_lifecycle_static_test.py"],
+)
+
 cc_test(
     name = "generate_stream_test",
     srcs = [

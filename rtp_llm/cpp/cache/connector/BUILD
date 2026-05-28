@@ -17,11 +17,14 @@ cc_library(
     deps = [
         "//rtp_llm/cpp/cache:cache_core",
         "//rtp_llm/cpp/cache:cache_types",
+        "//rtp_llm/cpp/cache/writeback:pd_kv_writeback_manager",
         "//rtp_llm/cpp/cache/connector/memory:memory_connector",
         "//rtp_llm/cpp/cache/connector/p2p:connector",
         "//rtp_llm/cpp/cache/connector/p2p:layer_block_converter",
         "//rtp_llm/cpp/metrics",
+        "//rtp_llm/cpp/model_rpc:model_rpc_pool",
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "//rtp_llm/cpp/utils:time_util",
         "@havenask//aios/autil:json",
         "@havenask//aios/autil:thread",
     ] + torch_deps() + select({

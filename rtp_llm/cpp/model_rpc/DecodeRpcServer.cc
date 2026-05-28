@@ -90,9 +90,11 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
 void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%s] start to allocate resource", decode_context.request_key.c_str());
-    auto input                        = QueryConverter::transQuery(&decode_context.allocate_request.input());
-    auto generate_stream              = engine_->makeStream(input);
-    decode_context.request_timeout_ms = generate_stream->getTimeoutMs();
+    auto input = QueryConverter::transQuery(&decode_context.allocate_request.input());
+    input->generate_config->pd_writeback_prefill_worker_addrs = decode_context.peer_addrs;
+    input->generate_config->pd_writeback_prefill_grpc_addrs   = decode_context.peer_grpc_addrs;
+    auto generate_stream                                      = engine_->makeStream(input);
+    decode_context.request_timeout_ms                         = generate_stream->getTimeoutMs();
 
     // Set CanRun event so that handleWaiting() will execute initKVBlock()
     generate_stream->reportEvent(StreamEvents::CanRun);

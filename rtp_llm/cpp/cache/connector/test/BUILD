@@ -36,6 +36,12 @@ cc_test(
     exec_properties = {'gpu':'H20'},
 )
 
+py_test(
+    name = "pd_kv_writeback_coordinator_static_test",
+    srcs = ["PdKvWritebackCoordinatorStaticTest.py"],
+    main = "PdKvWritebackCoordinatorStaticTest.py",
+)
+
 cc_test(
     name = "async_context_test",
     srcs = [

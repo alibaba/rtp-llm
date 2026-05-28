@@ -203,6 +203,7 @@ cc_library(
     deps = [
         ":cache_core",
         "//rtp_llm/cpp/cache/connector",
+        "//rtp_llm/cpp/cache/writeback:pd_kv_writeback_manager",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/cpp/utils:profiling_scope",
         "@com_google_absl//absl/status",

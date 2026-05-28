@@ -2,12 +2,16 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/utils/HashUtil.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/connector/AsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorAsyncContext.h"
+#include "rtp_llm/cpp/cache/writeback/PdKvWritebackManifest.h"
+#include "rtp_llm/cpp/cache/writeback/PdKvWritebackTransfer.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
+#include <algorithm>
 #include <thread>
 #include <torch/extension.h>
 
@@ -192,6 +196,38 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
     return true;
 }
 
+PdKvWritebackCompatibility buildPdKvWritebackCompatibility(const CacheConfig& cache_config, int partition_count) {
+    PdKvWritebackCompatibility compatibility;
+    compatibility.seq_size_per_block = static_cast<int32_t>(cache_config.seq_size_per_block);
+    compatibility.layer_count        = static_cast<int32_t>(cache_config.layer_all_num);
+    compatibility.group_count        = static_cast<int32_t>(cache_config.groupNums());
+    compatibility.partition_count    = static_cast<int32_t>(std::max(1, partition_count));
+    compatibility.layer_to_group_id.assign(cache_config.layer_to_group_id.begin(),
+                                           cache_config.layer_to_group_id.end());
+    compatibility.group_types.reserve(cache_config.group_types.size());
+    for (const auto group_type : cache_config.group_types) {
+        compatibility.group_types.push_back(static_cast<int32_t>(group_type));
+    }
+    return compatibility;
+}
+
+std::vector<std::string> sourcePrefillGrpcAddrs(GenerateStream* stream) {
+    if (!stream) {
+        return {};
+    }
+
+    auto addrs = stream->generateConfig()->pd_writeback_prefill_grpc_addrs;
+    if (!addrs.empty()) {
+        return addrs;
+    }
+
+    auto [ip, port] = stream->prefillAddr();
+    if (ip.empty() || port == 0) {
+        return {};
+    }
+    return {ip + ":" + std::to_string(port)};
+}
+
 // ----------------------------- StreamCacheResource -----------------------------
 
 void StreamCacheResource::init(int batch_size) {
@@ -304,10 +340,82 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
         FreeInfo free_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr()};
         free_info.request_id = stream_->streamId();
 
+        maybeLaunchPdKvWriteback();
         resource_context_.cache_manager->free(free_info);
     }
 
     return total_blocks;
+}
+
+void StreamCacheResource::maybeLaunchPdKvWriteback() {
+    if (!resource_context_.enable_pd_kv_cache_writeback || !resource_context_.pd_kv_writeback_launcher) {
+        return;
+    }
+    if (resource_context_.role_type != RoleType::DECODE || resource_context_.decode_entrance) {
+        return;
+    }
+    if (!reuseCache() || !stream_ || stream_->hasError() || stream_->getStatus() != StreamState::FINISHED) {
+        return;
+    }
+    if (!batch_kv_cache_resource_ || batch_kv_cache_resource_->batchSize() != 1 || curBlocksNum() <= 0) {
+        return;
+    }
+
+    updateCacheKeys(batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), seqSizePerBlock());
+
+    const int64_t         cached_token_count = std::max<int64_t>(0, static_cast<int64_t>(stream_->seqLength()) - 1);
+    PdKvWritebackSnapshot snapshot;
+    snapshot.request_id          = stream_->streamId();
+    snapshot.request_key         = stream_->uniqueKey();
+    snapshot.seq_size_per_block  = seqSizePerBlock();
+    snapshot.final_token_count   = cached_token_count;
+    snapshot.prefill_token_count = stream_->inputLength();
+    snapshot.cache_keys          = batch_kv_cache_resource_->cacheKeys(0);
+    snapshot.group_block_ids     = extractPdKvWritebackGroupBlockIds(batch_kv_cache_resource_);
+    snapshot.mm_intervals        = stream_->multimodalIntervals();
+
+    auto manifest = buildPdKvWritebackManifest(snapshot);
+    if (!manifest.ok()) {
+        RTP_LLM_LOG_WARNING("PD KV writeback skipped, stream=%ld, manifest error=%s",
+                            stream_->streamId(),
+                            manifest.status().ToString().c_str());
+        return;
+    }
+    if (manifest.value().reusable_block_count == 0) {
+        return;
+    }
+    const auto& manifest_ref = manifest.value();
+    RTP_LLM_LOG_INFO("PD KV writeback launch, stream=%ld, final_tokens=%ld, reusable_blocks=%ld, cache_keys=%zu",
+                     stream_->streamId(),
+                     manifest_ref.final_token_count,
+                     manifest_ref.reusable_block_count,
+                     manifest_ref.cache_keys.size());
+
+    const auto& cache_config = resource_context_.cache_manager->cacheConfig();
+    auto        compatibility =
+        buildPdKvWritebackCompatibility(cache_config, resource_context_.pd_kv_writeback_partition_count);
+
+    auto manifest_value = std::move(manifest).value();
+    auto held_resource  = resource_context_.cache_manager->incrKVCacheRef(
+        batch_kv_cache_resource_->cacheResource(0), manifest_value.cache_keys, /*is_connector=*/true);
+    if (!held_resource) {
+        RTP_LLM_LOG_WARNING("PD KV writeback skipped, stream=%ld, hold source cache failed", stream_->streamId());
+        return;
+    }
+
+    PdKvWritebackLaunchRequest request;
+    request.manifest                  = std::move(manifest_value);
+    request.source                    = compatibility;
+    request.destination               = compatibility;
+    request.source_prefill_grpc_addrs = sourcePrefillGrpcAddrs(stream_);
+    request.prefill_worker_addrs      = stream_->generateConfig()->pd_writeback_prefill_worker_addrs;
+    request.deadline_ms               = stream_->deadlineMs();
+    request.held_resource             = std::move(held_resource);
+
+    auto result = resource_context_.pd_kv_writeback_launcher->launchFromDecode(request);
+    if (result.status != PdKvWritebackLaunchStatus::Started) {
+        RTP_LLM_LOG_DEBUG("PD KV writeback skipped, stream=%ld, reason=%s", stream_->streamId(), result.reason.c_str());
+    }
 }
 
 // TODO, 等待删除。
@@ -368,13 +476,13 @@ absl::Status StreamCacheResource::incrKVBlock(size_t reserve_step) {
     }
 
     MallocInfo malloc_info;
-    malloc_info.batch_kv_cache_resource = batch_kv_cache_resource_;
-    malloc_info.complete_token_ids      = stream_->completeTokenIdsPtr();
-    malloc_info.request_id              = stream_->streamId();
-    malloc_info.verbose                 = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
-    malloc_info.reuse_cache             = reuseCache();
-    malloc_info.enable_device_cache     = reuseCache() && enableDeviceCache();
-    malloc_info.enable_remove_skipped_blocks   = true;
+    malloc_info.batch_kv_cache_resource      = batch_kv_cache_resource_;
+    malloc_info.complete_token_ids           = stream_->completeTokenIdsPtr();
+    malloc_info.request_id                   = stream_->streamId();
+    malloc_info.verbose                      = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
+    malloc_info.reuse_cache                  = reuseCache();
+    malloc_info.enable_device_cache          = reuseCache() && enableDeviceCache();
+    malloc_info.enable_remove_skipped_blocks = true;
 
     malloc_info.complete_token_ids->setReserveStep(reserve_step);
     auto result = resource_context_.cache_manager->malloc(malloc_info);

@@ -15,6 +15,16 @@ public:
 public:
     MOCK_METHOD(void, free, (const FreeInfo&), (override));
     MOCK_METHOD(void, insertIntoCache, (const InsertInfo&), (override));
+    MOCK_METHOD(absl::Status,
+                mallocWritebackBlocks,
+                (const BatchKVCacheResourcePtr& batch_kv_cache_resource, size_t block_count),
+                (override));
+    MOCK_METHOD(void,
+                commitWritebackBlocks,
+                (const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                 const CacheKeysType&           cache_keys,
+                 bool                           is_resident),
+                (override));
     MOCK_METHOD(BlockAddrInfo, convertIndexToAddr, (int layer_id, int block_id), (const, override));
     MOCK_METHOD(std::vector<BlockInfo>, convertIndexToBuffer, (int layer_id, int block_id), (const, override));
     MOCK_METHOD(std::vector<BlockInfo>,
