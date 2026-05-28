@@ -13,7 +13,10 @@
 #endif
 #if USING_ASCEND
 #include <acl/acl.h>
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
 #include <torch_npu/csrc/core/npu/NPUStream.h>
+#pragma GCC diagnostic pop
 #include "rtp_llm/models_py/bindings/ascend/ascend_types_hdr.h"
 #endif
 
