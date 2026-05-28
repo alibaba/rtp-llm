@@ -304,6 +304,19 @@ class BackendRPCServerVisitor:
                     GaugeMetrics.MASTER_ROUTE_RT_METRIC, master_route_timer.cost_ms()
                 )
             elif not role_addrs_specified:
+                if self._dp_controller_managed:
+                    route_logger.error(
+                        "master address: %s or input token batched: %s is not valid, "
+                        "rejecting request %s (DP_CONTROLLER_MANAGED requires master)",
+                        master_addr,
+                        input_token_batched,
+                        input.request_id,
+                    )
+                    raise FtRuntimeException(
+                        ExceptionType.ROUTE_ERROR,
+                        f"request_id={input.request_id} master unavailable, "
+                        f"cannot route in DP_CONTROLLER_MANAGED mode",
+                    )
                 route_logger.warning(
                     "master address: %s or input token batched: %s is not valid, fallback to domain routing",
                     master_addr,
@@ -316,6 +329,17 @@ class BackendRPCServerVisitor:
             allow_domain_fallback = master_route_result is None or (
                 master_route_result.connection_failed
             )
+            if self._dp_controller_managed and allow_domain_fallback and need_domain_routing:
+                route_logger.error(
+                    "master route failed for request %s, "
+                    "rejecting (DP_CONTROLLER_MANAGED requires master)",
+                    input.request_id,
+                )
+                raise FtRuntimeException(
+                    ExceptionType.ROUTE_ERROR,
+                    f"request_id={input.request_id} master route failed, "
+                    f"cannot fallback to domain routing in DP_CONTROLLER_MANAGED mode",
+                )
             if (
                 not input.generate_config.role_addrs or need_domain_routing
             ) and allow_domain_fallback:
