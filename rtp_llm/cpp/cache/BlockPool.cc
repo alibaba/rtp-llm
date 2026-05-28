@@ -176,9 +176,10 @@ void BlockPool::initializeCacheBuffer() {
     RTP_LLM_CHECK_WITH_INFO(cache_base_ptr_ != nullptr, "block pool allocate cache aligned buffer is null");
     const bool is_cuda   = cache_aligned_buffer_.is_cuda();
     const bool is_pinned = !is_cuda && cache_aligned_buffer_.is_pinned();
+    static constexpr double kBytesPerMB = 1024.0 * 1024.0;
     RTP_LLM_LOG_INFO("BlockPool backing selected: pool_name=%s allocation_type=%s requested_backing=%s "
-                     "actual_backing=%s is_cuda=%d is_pinned=%d ptr=%p total_size=%zu bytes block_num=%u "
-                     "memory_layouts=%zu",
+                     "actual_backing=%s is_cuda=%d is_pinned=%d ptr=%p total_size=%zu bytes total_size_mb=%.2f "
+                     "block_num=%u memory_layouts=%zu",
                      config_.pool_name.c_str(),
                      allocationTypeName(allocation_type_),
                      requestedBackingName(allocation_type_, use_pinned_cpu_backing_, use_cuda_malloc_backing_),
@@ -187,6 +188,7 @@ void BlockPool::initializeCacheBuffer() {
                      is_pinned,
                      cache_base_ptr_,
                      config_.total_size_bytes,
+                     static_cast<double>(config_.total_size_bytes) / kBytesPerMB,
                      config_.block_num,
                      config_.memory_layouts.size());
 }
