@@ -20,6 +20,12 @@ cc_library(
     copts = test_copts,
 )
 
+py_test(
+    name = "pd_kv_writeback_p2p_static_test",
+    srcs = ["PdKvWritebackP2PStaticTest.py"],
+    main = "PdKvWritebackP2PStaticTest.py",
+)
+
 cc_library(
     name = "mock_generate_stream",
     hdrs = [

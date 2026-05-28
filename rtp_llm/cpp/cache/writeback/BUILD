@@ -1,6 +1,19 @@
 load("//:def.bzl", "copts")
 
 cc_library(
+    name = "pd_kv_writeback_transfer",
+    srcs = ["PdKvWritebackTransfer.cc"],
+    hdrs = ["PdKvWritebackTransfer.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        "//rtp_llm/cpp/cache:batch_kv_cache_resource",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+    ],
+)
+
+cc_library(
     name = "pd_kv_writeback_manifest",
     srcs = ["PdKvWritebackManifest.cc"],
     hdrs = ["PdKvWritebackManifest.h"],
@@ -21,6 +34,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":pd_kv_writeback_manifest",
+        ":pd_kv_writeback_transfer",
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
         "//rtp_llm/cpp/config:config_modules",
         "@com_google_absl//absl/status",

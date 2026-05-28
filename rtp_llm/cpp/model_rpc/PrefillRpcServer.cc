@@ -45,6 +45,9 @@ PdKvWritebackLaunchRequest convertPdKvWritebackRequest(const PdKvWritebackReques
     request.source      = convertPdKvWritebackCompatibility(pb.source());
     request.destination = convertPdKvWritebackCompatibility(pb.destination());
     request.source_prefill_grpc_addrs.assign(pb.prefill_worker_addrs().begin(), pb.prefill_worker_addrs().end());
+    request.decode_worker_addrs.assign(pb.decode_worker_addrs().begin(), pb.decode_worker_addrs().end());
+    request.prefill_worker_addrs.assign(pb.prefill_worker_addrs().begin(), pb.prefill_worker_addrs().end());
+    request.deadline_ms = pb.deadline_us() > 0 ? pb.deadline_us() / 1000 : 0;
     return request;
 }
 

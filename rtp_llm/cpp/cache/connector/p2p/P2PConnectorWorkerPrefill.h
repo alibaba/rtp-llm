@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverter.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBuffer.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/IKVCacheSender.h"
+#include "rtp_llm/cpp/cache/writeback/PdKvWritebackTransfer.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "autil/LoopThread.h"
 #include <atomic>
@@ -42,6 +43,8 @@ public:
                           const std::string&                                   unique_key,
                           int64_t                                              deadline_ms,
                           const std::vector<std::pair<std::string, uint32_t>>& decode_transfer_servers);
+
+    ErrorInfo sendDecodeToPrefillWriteback(const PdKvWritebackTransferPlan& plan);
 
     bool cancelSend(const std::string& unique_key);
 

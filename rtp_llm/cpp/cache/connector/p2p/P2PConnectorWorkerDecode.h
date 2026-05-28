@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBuffer.h"
 #include "rtp_llm/cpp/cache/connector/p2p/AsymmetricTpUtil.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/IKVCacheReceiver.h"
+#include "rtp_llm/cpp/cache/writeback/PdKvWritebackTransfer.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include <atomic>
 #include <cstdint>
@@ -31,6 +32,8 @@ public:
                    int64_t                                               deadline_ms,
                    const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers,
                    int                                                   remote_tp_size = 1);
+
+    ErrorInfo receiveDecodeToPrefillWriteback(const PdKvWritebackTransferPlan& plan);
 
     bool cancelRead(const std::string& unique_key);
 

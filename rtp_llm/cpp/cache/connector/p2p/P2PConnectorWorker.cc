@@ -75,6 +75,18 @@ ErrorInfo P2PConnectorWorker::read(int64_t                                      
     return decode_->read(request_id, unique_key, deadline_ms, layer_cache_buffers, remote_tp_size);
 }
 
+ErrorInfo P2PConnectorWorker::startDecodeToPrefillWriteback(const PdKvWritebackTransferPlan& plan) {
+    return sendDecodeToPrefillWriteback(plan);
+}
+
+ErrorInfo P2PConnectorWorker::sendDecodeToPrefillWriteback(const PdKvWritebackTransferPlan& plan) {
+    return prefill_->sendDecodeToPrefillWriteback(plan);
+}
+
+ErrorInfo P2PConnectorWorker::receiveDecodeToPrefillWriteback(const PdKvWritebackTransferPlan& plan) {
+    return decode_->receiveDecodeToPrefillWriteback(plan);
+}
+
 bool P2PConnectorWorker::cancelRead(const std::string& unique_key) {
     return decode_->cancelRead(unique_key);
 }

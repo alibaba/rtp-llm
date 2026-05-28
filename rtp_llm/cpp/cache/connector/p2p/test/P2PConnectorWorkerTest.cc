@@ -1,4 +1,5 @@
 #include <atomic>
+#include <cstdint>
 #include <thread>
 #include <gtest/gtest.h>
 #include <memory>
@@ -15,6 +16,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverter.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferErrorCode.h"
 #include "rtp_llm/cpp/cache/connector/p2p/ComputedLayerCacheBuffer.h"
+#include "rtp_llm/cpp/cache/writeback/PdKvWritebackTransfer.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
@@ -26,14 +28,42 @@ namespace test {
 // Mock LayerBlockConverter for testing
 class MockLayerBlockConverter: public LayerBlockConverter {
 public:
+    struct ConvertCall {
+        int layer_id        = 0;
+        int block_id        = 0;
+        int partition_count = 1;
+        int partition_id    = 0;
+    };
+
     std::vector<BlockInfo>
     convertIndexToBuffer(int layer_id, int block_id, int partition_count = 1, int partition_id = 0) const override {
-        return {};
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            convert_calls_.push_back({layer_id, block_id, partition_count, partition_id});
+        }
+        BlockInfo block_info;
+        block_info.addr       = reinterpret_cast<void*>(static_cast<intptr_t>(block_id + 1));
+        block_info.size_bytes = 1;
+        return {block_info};
     }
 
     std::vector<std::pair<BlockInfo, size_t>> getAllBuffers() const override {
         return {};
     }
+
+    std::vector<ConvertCall> convertCalls() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return convert_calls_;
+    }
+
+    void clearConvertCalls() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        convert_calls_.clear();
+    }
+
+private:
+    mutable std::mutex               mutex_;
+    mutable std::vector<ConvertCall> convert_calls_;
 };
 
 // Mock IKVCacheSender for testing (replaces old TransferClient mock)
@@ -342,13 +372,69 @@ protected:
 
 protected:
     P2PConnectorWorkerConfig                       worker_config_;
-    std::shared_ptr<LayerBlockConverter>           mock_layer_block_converter_;
+    std::shared_ptr<MockLayerBlockConverter>       mock_layer_block_converter_;
     std::unique_ptr<P2PConnectorWorkerPrefill>     prefill_;
     std::unique_ptr<P2PConnectorWorkerDecode>      decode_;
     std::shared_ptr<ComputedLayerCacheBufferStore> computed_buffers_;
     std::shared_ptr<MockIKVCacheSender>            mock_sender_;
     std::shared_ptr<MockIKVCacheReceiver>          mock_receiver_;
 };
+
+TEST_F(P2PConnectorWorkerTest, DecodeWritebackSendUsesDecodeBlocksAsSource) {
+    PdKvWritebackTransferPlan plan;
+    plan.request_id               = 5001;
+    plan.request_key              = "writeback_send";
+    plan.deadline_ms              = currentTimeMs() + 5000;
+    plan.layer_count              = 2;
+    plan.group_count              = 1;
+    plan.cache_keys               = {101, 102};
+    plan.decode_group_block_ids   = {{4, 5}};
+    plan.prefill_transfer_servers = {{"127.0.0.1", 12345}};
+
+    mock_sender_->setShouldSucceed(true);
+    mock_sender_->setAsyncCallback(false);
+    mock_layer_block_converter_->clearConvertCalls();
+
+    auto result = prefill_->sendDecodeToPrefillWriteback(plan);
+
+    EXPECT_TRUE(result.ok()) << result.ToString();
+    std::vector<int> converted_block_ids;
+    for (const auto& call : mock_layer_block_converter_->convertCalls()) {
+        converted_block_ids.push_back(call.block_id);
+    }
+    EXPECT_EQ(converted_block_ids, std::vector<int>({4, 5, 4, 5}));
+}
+
+TEST_F(P2PConnectorWorkerTest, DecodeWritebackReceiveUsesPrefillBlocksAsDestination) {
+    PdKvWritebackTransferPlan plan;
+    plan.request_id              = 5002;
+    plan.request_key             = "writeback_receive";
+    plan.deadline_ms             = currentTimeMs() + 5000;
+    plan.layer_count             = 2;
+    plan.group_count             = 1;
+    plan.cache_keys              = {201, 202};
+    plan.prefill_group_block_ids = {{8, 9}};
+    plan.remote_tp_size          = 1;
+
+    mock_layer_block_converter_->clearConvertCalls();
+    std::thread completion_thread([this, key = plan.request_key]() {
+        while (!mock_receiver_->hasEnoughTasks(key, 2)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        mock_receiver_->setTaskDone(key + "_0_0", true);
+        mock_receiver_->setTaskDone(key + "_1_0", true);
+    });
+
+    auto result = decode_->receiveDecodeToPrefillWriteback(plan);
+    completion_thread.join();
+
+    EXPECT_TRUE(result.ok()) << result.ToString();
+    std::vector<int> converted_block_ids;
+    for (const auto& call : mock_layer_block_converter_->convertCalls()) {
+        converted_block_ids.push_back(call.block_id);
+    }
+    EXPECT_EQ(converted_block_ids, std::vector<int>({8, 9, 8, 9}));
+}
 
 // ==================== writeByLayer 测试 (Prefill 端) ====================
 

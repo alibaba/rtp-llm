@@ -126,6 +126,7 @@ cc_library(
         ":layer_cache_buffer",
         ":metrics",
         ":p2p_connector_config",
+        "//rtp_llm/cpp/cache/writeback:pd_kv_writeback_transfer",
         "//rtp_llm/cpp/cache/connector:connector_header",
         "//rtp_llm/cpp/model_rpc:rpc_error_code",
         "//rtp_llm/cpp/utils:core_utils",

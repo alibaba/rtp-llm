@@ -216,6 +216,21 @@ ErrorInfo P2PConnectorWorkerDecode::read(int64_t                                
     return ErrorInfo::OkStatus();
 }
 
+ErrorInfo P2PConnectorWorkerDecode::receiveDecodeToPrefillWriteback(const PdKvWritebackTransferPlan& plan) {
+    auto destination_resource = buildPdKvWritebackResource(plan, PdKvWritebackBlockSide::PrefillDestination);
+    if (!destination_resource.ok()) {
+        return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
+                         std::string(destination_resource.status().message()));
+    }
+
+    auto layer_cache_buffers = LayerCacheBufferUtil::convert(**destination_resource, 0);
+    if (layer_cache_buffers.empty()) {
+        return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
+                         "writeback destination layer buffers are empty");
+    }
+    return read(plan.request_id, plan.request_key, plan.deadline_ms, layer_cache_buffers, plan.remote_tp_size);
+}
+
 P2PConnectorWorkerDecode::RecvResultInfo
 P2PConnectorWorkerDecode::aggregateRecvTaskResults(const std::shared_ptr<ReadTaskGroup>& task_group) const {
     RecvResultInfo result;

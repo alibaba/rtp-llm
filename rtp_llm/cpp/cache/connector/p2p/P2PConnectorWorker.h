@@ -43,6 +43,10 @@ public:
                    const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers,
                    int                                                   remote_tp_size = 1);
 
+    ErrorInfo startDecodeToPrefillWriteback(const PdKvWritebackTransferPlan& plan);
+    ErrorInfo sendDecodeToPrefillWriteback(const PdKvWritebackTransferPlan& plan);
+    ErrorInfo receiveDecodeToPrefillWriteback(const PdKvWritebackTransferPlan& plan);
+
     bool cancelRead(const std::string& unique_key);
     bool cancelSend(const std::string& unique_key);
 

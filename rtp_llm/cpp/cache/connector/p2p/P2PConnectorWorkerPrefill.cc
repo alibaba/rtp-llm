@@ -312,6 +312,23 @@ P2PConnectorWorkerPrefill::sendKVCache(int64_t                                  
     return ErrorInfo::OkStatus();
 }
 
+ErrorInfo P2PConnectorWorkerPrefill::sendDecodeToPrefillWriteback(const PdKvWritebackTransferPlan& plan) {
+    auto source_resource = buildPdKvWritebackResource(plan, PdKvWritebackBlockSide::DecodeSource);
+    if (!source_resource.ok()) {
+        return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
+                         std::string(source_resource.status().message()));
+    }
+    for (int layer_id = 0; layer_id < plan.layer_count; ++layer_id) {
+        auto layer_cache_buffer = LayerCacheBufferUtil::convertLayer(**source_resource, 0, layer_id, 0, -1);
+        if (!layer_cache_buffer) {
+            return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
+                             "writeback source layer buffer is empty");
+        }
+        computed_buffers_->addBuffer(plan.request_id, layer_cache_buffer, plan.deadline_ms);
+    }
+    return sendKVCache(plan.request_id, plan.request_key, plan.deadline_ms, plan.prefill_transfer_servers);
+}
+
 P2PConnectorWorkerPrefill::SendResultInfo
 P2PConnectorWorkerPrefill::determineSendResult(const std::shared_ptr<SendTransferResult>& transfer_result,
                                                const std::shared_ptr<std::atomic<bool>>&  cancel_flag,
