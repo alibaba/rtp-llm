@@ -15,7 +15,11 @@
  */
 #pragma once
 
+#if USING_ROCM
+#include <hiprand/hiprand_kernel_rocm.h>
+#else
 #include <curand_kernel.h>
+#endif
 #include "rtp_llm/cpp/utils/StringUtil.h"
 #include "common.h"
 #include "decodingCommon.h"
