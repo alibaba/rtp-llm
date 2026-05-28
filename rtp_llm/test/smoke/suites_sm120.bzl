@@ -45,12 +45,26 @@ def sm120_suites():
                 smoke_args="--act_type BF16 --warm_up 0",
                 gpu_type=["RTX_5000_PRO"],
             ),
-            # TODO(PR-4 followup): random_seed_sm120
-            #   B-5 已通过本 PR 在 trtllm_gen.py / xqa.py support() 加 sm_120
-            #   短路 fallback 到 PyFlashinferPaged 解决；理论上 top_k=100 采样
-            #   decode 现在能跑通。仍需独立 PR：(1) 在 sm_120 上跑 rewrite_smoke
-            #   录 golden  (2) 比对 L20 golden 看 random seed sampler 是否
-            #   bit-equivalent  (3) 落 case。
+            # Qwen2.5 sampler path: top_k=100 + random_seed=46. sm_120a 上采样
+            # 结果与 L20 不 bit-equivalent（不同 FMHA → 不同 softmax probs →
+            # 不同 sampled token），所以独立录 sm120 golden。
+            smoke_test(
+                name="random_seed_sm120",
+                task_info="data/model/qwen25/test_random_seed_sm120.json",
+                smoke_args="--act_type FP16 --warm_up 0",
+                gpu_type=["RTX_5000_PRO"],
+            ),
+            # Qwen2.5 OpenAI route + return_logits + select_tokens_id + logits_index.
+            # logits values are non-deterministic across GPUs (comparer 只比 shape)，
+            # response 文本在 top_k=1 greedy 下可能与 L20 byte-identical，但
+            # OpenAI chat 路径 cost_time / first_token_cost_time 字段每次不同，
+            # 独立录 sm120 golden 保险。
+            smoke_test(
+                name="logits_index_sm120",
+                task_info="data/model/qwen25/logits_index_q_r_sm120.json",
+                smoke_args="--act_type FP16 --warm_up 0",
+                gpu_type=["RTX_5000_PRO"],
+            ),
             # TODO(PR-4 followup): frontend_app_sm120
             #   blocker B-6: smoke_args dict 同时声明 frontend + pd_fusion
             #   两个 role，gpu_count=2，本机单卡 RTX 5000 Pro 起不来。
@@ -59,8 +73,23 @@ def sm120_suites():
             #   单卡 RTX 5000 Pro 跑不了；需要 2 卡环境（无 NVLink，PCIe TP）
             # TODO(PR-4 followup): embedding_qwen_gte_7b_cudagraph_sm120
             #   依赖 gte-Qwen2-7B (~14GB) 模型下载 + CUDA Graph 独立验证
-            # TODO(PR-4): qwen3_1_7b_fp16_sm120 / qwen3_1_7b_bf16_sm120
-            #   待 Qwen3-1.7B 下载到 /mnt/nas1/hf/ 后落地
+            # Qwen3-1.7B greedy (top_k=1, max_new_tokens<=10), 模型已下载到
+            #   /mnt/nas1/hf/models--Qwen--Qwen3-1.7B/snapshots/0060bc56d46589041c1048efd1a397421b1142b5
+            # task_info 是 placeholder result，第一次跑 sm120 前需 --config=rewrite_smoke
+            # 录 golden 进 source tree（与 fp16_sm120/bf16_sm120 共享 q_r_s.json 不同：
+            # Qwen3-1.7B 没有 L20 baseline，golden 由 sm120 自己生成）
+            smoke_test(
+                name="qwen3_1_7b_fp16_sm120",
+                task_info="data/model/qwen3/q_r_qwen3_1_7b_greedy.json",
+                smoke_args="--act_type FP16 --warm_up 0",
+                gpu_type=["RTX_5000_PRO"],
+            ),
+            smoke_test(
+                name="qwen3_1_7b_bf16_sm120",
+                task_info="data/model/qwen3/q_r_qwen3_1_7b_greedy.json",
+                smoke_args="--act_type BF16 --warm_up 0",
+                gpu_type=["RTX_5000_PRO"],
+            ),
         ],
     )
 
