@@ -11,11 +11,13 @@
 // Inputs:
 //   D: (M, N) bf16/fp16 row-major
 //   A: (M, K) float8_e4m3fn row-major
-//   B: (K, N) float8_e4m3fn col-major (i.e. weight stored (N, K) row-major)
+//   B: (N, K) float8_e4m3fn row-major contiguous weight.  CUTLASS sm120
+//      blockwise uses RowMajor-style packed strides for B (K-stride=1,
+//      N-stride=K) despite LayoutB=ColumnMajor in the template.
 //   A_sf: per-token-group scale, MN-major layout (output of
 //         sgl_per_token_group_quant_fp8 with column_major_scales=True,
 //         scale_tma_aligned=True)
-//   B_sf: per-block weight scale, K-major layout (shape (N, K/128) ->
+//   B_sf: per-block weight scale, K-major layout (shape (N/128, K/128) ->
 //         flattened consistently with cutlass Sm120BlockwiseScaleConfig)
 void cutlass_scaled_mm_blockwise_sm120_fp8(torch::Tensor&       D,
                                            torch::Tensor const& A,

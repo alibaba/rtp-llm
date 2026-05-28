@@ -383,8 +383,11 @@ void cutlass_scaled_mm_blockwise_sm120_fp8(torch::Tensor&       D,
 
     int M = static_cast<int>(A.size(0));
     int K = static_cast<int>(A.size(1));
-    int N = static_cast<int>(B.size(1));
-    TORCH_CHECK(B.size(0) == K, "B.size(0) (", B.size(0), ") must equal K (", K, ")");
+    // B is passed as (N, K) row-major contiguous.  CUTLASS sm120 blockwise
+    // produces RowMajor-style packed strides for StrideB (K-stride=1,
+    // N-stride=K) despite LayoutB=ColumnMajor in the template.
+    int N = static_cast<int>(B.size(0));
+    TORCH_CHECK(B.size(1) == K, "B.size(1) (", B.size(1), ") must equal K (", K, ")");
     TORCH_CHECK(
         D.size(0) == M && D.size(1) == N, "D shape (", D.size(0), ",", D.size(1), ") must be (M=", M, ", N=", N, ")");
 
