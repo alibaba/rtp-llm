@@ -18,7 +18,7 @@
                 "_prompt_source": "chat-template wrapping $prompt:l2"
             },
             "result": {
-                "response": "<think>\nHere's a thinking process that leads to the suggested revisions:\n\n1.  **An",
+                "response": "<think>\n\n</think>\n\n这是一份经过深度润色的版本，旨在提升学术性、逻辑连贯性以及",
                 "response_alternatives": null,
                 "hidden_states": null,
                 "logits": null,
@@ -42,7 +42,7 @@
                     "decode_memory_reuse_len": 0,
                     "output_len": 20,
                     "step_output_len": 19,
-                    "iter_count": 6,
+                    "iter_count": 7,
                     "cum_log_probs": [],
                     "beam_responses": [],
                     "pd_sep": true,
@@ -66,7 +66,7 @@
                 "_prompt_source": "chat-template wrapping $prompt:l2"
             },
             "result": {
-                "response": "<think>\nHere's a thinking process that leads to the suggested revisions:\n\n1.  **An",
+                "response": "<think>\n\n</think>\n\n这是一份经过深度润色的版本，旨在提升学术性、逻辑连贯性以及",
                 "response_alternatives": null,
                 "hidden_states": null,
                 "logits": null,
@@ -90,7 +90,7 @@
                     "decode_memory_reuse_len": 0,
                     "output_len": 20,
                     "step_output_len": 19,
-                    "iter_count": 6,
+                    "iter_count": 7,
                     "cum_log_probs": [],
                     "beam_responses": [],
                     "pd_sep": true,
@@ -114,7 +114,7 @@
                 "_prompt_source": "chat-template wrapping $prompt:l2"
             },
             "result": {
-                "response": "<think>\nHere's a thinking process that leads to the suggested revisions:\n\n1.  **An",
+                "response": "<think>\n\n</think>\n\n这是一份经过深度润色的版本，旨在提升学术性、逻辑连贯性以及",
                 "response_alternatives": null,
                 "hidden_states": null,
                 "logits": null,
@@ -138,7 +138,7 @@
                     "decode_memory_reuse_len": 0,
                     "output_len": 20,
                     "step_output_len": 19,
-                    "iter_count": 6,
+                    "iter_count": 7,
                     "cum_log_probs": [],
                     "beam_responses": [],
                     "pd_sep": true,
