@@ -156,14 +156,12 @@ def _try_fused_prefill_rope_hadamard_qk(
       - head_dim == 128 (kernel hardcoded for 7-stage butterfly)
       - cos_sin_cache is not None and dtype is fp32 (flashinfer convention)
       - positions is not None
-      - is_neox_style is True (kernel only implements NeOX)
       - rope_head_dim is even and > 0
     Otherwise returns None and caller falls back to the unfused 4-op chain.
 
+    Supports both NeOX (half-split) and interleaved (even/odd) RoPE styles.
     Yields ~2.35x at T=4096, up to 4.2x at T=16384 on DSV3.2 (B300, eager mode).
     """
-    if not is_neox_style:
-        return None
     if cos_sin_cache is None or positions is None:
         return None
     if cos_sin_cache.dtype != torch.float32:
@@ -180,6 +178,7 @@ def _try_fused_prefill_rope_hadamard_qk(
     )
     return fused_prefill_rope_hadamard_qk(
         q, k, positions, cos_sin_cache, rope_head_dim,
+        is_neox_style=is_neox_style,
     )
 
 
