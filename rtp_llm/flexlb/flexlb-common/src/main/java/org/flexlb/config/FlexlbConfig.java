@@ -272,6 +272,38 @@ public class FlexlbConfig {
      */
     private int dpMaxScanAhead = 64;
 
+    // ========== Prefill Profiling Configuration ==========
+
+    /**
+     * Enable startup profiling of prefill latency. FlexLB sends fake requests
+     * with varying input lengths to a prefill worker and fits a polynomial
+     * to replace the hardcoded prefill time formula.
+     */
+    private boolean prefillProfilingEnabled = true;
+
+    /**
+     * Comma-separated token lengths to probe during profiling.
+     */
+    private String prefillProfilingTokenLengths = "32,64,128,256,512,1024,2048";
+
+    /**
+     * Number of repeat measurements per token length.
+     */
+    private int prefillProfilingRepeats = 3;
+
+    /**
+     * Maximum time (ms) to wait for at least one PREFILL worker before
+     * giving up on profiling and falling back to default coefficients.
+     */
+    private long prefillProfilingTimeoutMs = 30000;
+
+    /**
+     * Manual override: comma-separated "c0,c1,c2" polynomial coefficients.
+     * If non-empty, profiling is skipped and these values are used directly
+     * for {@code T(n) = c0 + c1*n + c2*n²} (ms).
+     */
+    private String prefillCoefficients = "";
+
     /**
      * Get load balancing strategy for a role type
      * This method handles the logic of selecting the appropriate strategy based on role type and configuration

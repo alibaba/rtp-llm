@@ -8,6 +8,22 @@ import org.flexlb.enums.TaskStateEnum;
 @JsonIgnoreProperties(ignoreUnknown = true)
 @Data
 public class TaskInfo {
+
+    private static volatile double coeff0 = 69.0;
+    private static volatile double coeff1 = 0.1316;
+    private static volatile double coeff2 = 0.0;
+    private static volatile boolean profiled = false;
+
+    public static void updateCoefficients(double c0, double c1, double c2) {
+        coeff0 = c0;
+        coeff1 = c1;
+        coeff2 = c2;
+        profiled = true;
+    }
+
+    public static boolean isProfiled() {
+        return profiled;
+    }
     @JsonProperty("request_id")
     private long requestId;
     @JsonProperty("prefix_length")
@@ -34,7 +50,8 @@ public class TaskInfo {
     }
 
     public static long estimatePrefillTimeMs(long tokens, long hitCacheTokens) {
-        return (long) (0.1316 * (tokens - hitCacheTokens) + 69);
+        long compute = tokens - hitCacheTokens;
+        return (long) (coeff0 + coeff1 * compute + coeff2 * compute * compute);
     }
 
     /**
