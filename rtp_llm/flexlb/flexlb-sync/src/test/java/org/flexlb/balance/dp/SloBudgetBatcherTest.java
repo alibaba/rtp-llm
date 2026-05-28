@@ -18,7 +18,6 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -31,15 +30,9 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/**
- * Behavioural tests for {@link SloBudgetBatcher}. Pre-set predictor returns
- * deterministic estimates so we can probe each branch of {@code stepOnce}:
- * head-alone-exceeds-SLO, capacity-fit pack, deadline-force, single-head park.
- */
 class SloBudgetBatcherTest {
 
     private ConfigService configService;
@@ -60,10 +53,12 @@ class SloBudgetBatcherTest {
         predictor = mock(PrefillTimePredictor.class);
 
         cfg = new FlexlbConfig();
-        cfg.setBatchMaxTokens(8192);
         cfg.setDpTtftSloMs(2000);
         cfg.setSloSafetyMargin(50);
-        cfg.setDpMaxScanAhead(8);
+        cfg.setDpMaxScanAhead(64);
+        cfg.setBatchFillThreshold(0.7);
+        cfg.setBinarySearchMaxIter(12);
+        cfg.setBatchMaxCapacity(1_000_000);
         when(configService.loadBalanceConfig()).thenReturn(cfg);
 
         when(planner.plan(any(), any())).thenAnswer(inv -> {
@@ -78,7 +73,11 @@ class SloBudgetBatcherTest {
             return DispatchPlan.of(List.of(new PrefillBatch(PREFILL, placed, 1)));
         });
 
-        when(predictor.estimateMs(any(Long.class), any(Long.class))).thenReturn(10L);
+        // predictor: linear, 1 token = 0.1ms
+        when(predictor.estimateMs(anyLong(), anyLong())).thenAnswer(inv -> {
+            long tokens = inv.getArgument(0);
+            return tokens / 10;
+        });
 
         reporter = mock(DpBatchReporter.class);
         batcher = new SloBudgetBatcher("m1", configService, planner, dispatched::add, predictor, reporter);
@@ -89,38 +88,36 @@ class SloBudgetBatcherTest {
         batcher.shutdown();
     }
 
+    // ============== EDF ordering ==============
+
     @Test
-    void multiple_requests_batch_after_deadline_expires() throws Exception {
-        cfg.setDpTtftSloMs(80);
+    void edf_ordering_processes_most_urgent_first() throws Exception {
+        cfg.setDpTtftSloMs(5000);
         cfg.setSloSafetyMargin(0);
-        List<CompletableFuture<Response>> futures = offerN(3, 100);
+        cfg.setBatchFillThreshold(0.0);
+
+        // Offer both requests BEFORE starting the worker thread to avoid race
+        batcher.offer(QueuedRequest.of(ctx(1, 100), new CompletableFuture<>()));
+        batcher.offer(QueuedRequest.of(ctx(2, 2000), new CompletableFuture<>()));
+
+        batcher.start();
         waitUntilDispatched(1, 1000);
-        assertEquals(1, dispatched.size());
-        assertEquals(3, dispatched.get(0).size());
-        for (CompletableFuture<Response> f : futures) {
-            assertFalse(f.isDone(), "test callback doesn't complete futures; that's DpBatchScheduler's job");
-        }
+        assertTrue(dispatched.size() >= 1);
+        PrefillBatch first = dispatched.get(0);
+        long firstSeqLen = first.requests().get(0).ctx().getRequest().getSeqLen();
+        assertEquals(2000, firstSeqLen);
     }
 
-    @Test
-    void capacity_full_dispatches_immediately_as_packed() throws Exception {
-        cfg.setBatchMaxTokens(300);
-        cfg.setDpTtftSloMs(60_000);
-        // 3 requests × 100 tokens = 300 = batchMaxTokens → capacity full → immediate PACKED
-        offerN(3, 100);
-        waitUntilDispatched(1, 1000);
-        assertEquals(1, dispatched.size());
-        assertEquals(3, dispatched.get(0).size());
-    }
+    // ============== SLO_DROPPED ==============
 
     @Test
-    void head_alone_exceeds_slo_budget_fails_with_slo_exceeded() throws Exception {
-        cfg.setDpTtftSloMs(100);
+    void slo_dropped_when_deadline_already_expired() throws Exception {
+        cfg.setDpTtftSloMs(0);
         cfg.setSloSafetyMargin(0);
-        when(predictor.estimateMs(any(Long.class), any(Long.class))).thenReturn(10_000L);
 
+        batcher.start();
         CompletableFuture<Response> f = new CompletableFuture<>();
-        batcher.offer(QueuedRequest.of(ctx(1, 4096), f));
+        batcher.offer(QueuedRequest.of(ctx(1, 100), f));
 
         Response r = f.get(1, TimeUnit.SECONDS);
         assertNotNull(r);
@@ -130,70 +127,159 @@ class SloBudgetBatcherTest {
     }
 
     @Test
-    void capacity_limit_excludes_oversize_request_from_pack() throws Exception {
-        cfg.setBatchMaxTokens(1000);
-        cfg.setDpTtftSloMs(80);
+    void metrics_slo_dropped_emits_failure_cause() throws Exception {
+        cfg.setDpTtftSloMs(0);
         cfg.setSloSafetyMargin(0);
-        // head fits, second would overflow, third small one fits via backward scan
-        batcher.offer(QueuedRequest.of(ctx(1, 500), new CompletableFuture<>()));
-        batcher.offer(QueuedRequest.of(ctx(2, 900), new CompletableFuture<>()));
-        batcher.offer(QueuedRequest.of(ctx(3, 400), new CompletableFuture<>()));
 
-        // first batch: head (500) + small (400) = 900 fits; big (900) skipped
-        // second batch: big (900) dispatched alone
-        waitUntilDispatched(2, 1000);
-        assertEquals(2, dispatched.size());
-        assertEquals(2, dispatched.get(0).size());
-        assertEquals(1, dispatched.get(1).size());
+        batcher.start();
+        CompletableFuture<Response> f = new CompletableFuture<>();
+        batcher.offer(QueuedRequest.of(ctx(1, 100), f));
+        f.get(1, TimeUnit.SECONDS);
+
+        verify(reporter, atLeastOnce()).reportSloFailure("m1",
+                DpBatchReporter.FailureCause.SLO_DROPPED);
+        verify(reporter, atLeastOnce()).reportSloLoopDuration(eq("m1"),
+                eq(DpBatchReporter.LoopOutcome.FAIL), anyLong());
+    }
+
+    // ============== EDF_URGENT ==============
+
+    @Test
+    void edf_urgent_dispatches_head_alone_when_budget_below_margin() throws Exception {
+        cfg.setDpTtftSloMs(55);
+        cfg.setSloSafetyMargin(50);
+
+        batcher.start();
+        CompletableFuture<Response> f = new CompletableFuture<>();
+        batcher.offer(QueuedRequest.of(ctx(1, 100), f));
+
+        waitUntilDispatched(1, 1000);
+        assertEquals(1, dispatched.size());
+        assertEquals(1, dispatched.get(0).size());
+    }
+
+    // ============== Binary search + fill ==============
+
+    @Test
+    void batch_ready_dispatches_when_fill_ratio_met() throws Exception {
+        cfg.setDpTtftSloMs(5000);
+        cfg.setSloSafetyMargin(0);
+        cfg.setBatchFillThreshold(0.0);
+
+        // Offer all requests before starting to ensure they're batched together
+        offerN(3, 100);
+        batcher.start();
+
+        waitUntilAllRequestsDispatched(3, 1000);
+        int totalRequests = dispatched.stream().mapToInt(PrefillBatch::size).sum();
+        assertEquals(3, totalRequests);
     }
 
     @Test
+    void batch_waits_then_converges_via_budget_decay() throws Exception {
+        cfg.setDpTtftSloMs(500);
+        cfg.setSloSafetyMargin(0);
+        cfg.setBatchFillThreshold(0.7);
+
+        CompletableFuture<Response> f = new CompletableFuture<>();
+        batcher.offer(QueuedRequest.of(ctx(1, 100), f));
+        batcher.start();
+
+        // Should NOT dispatch immediately — fillRatio too low
+        Thread.sleep(50);
+        assertEquals(0, dispatched.size(), "should wait while fill ratio is low");
+
+        // Eventually dispatches as budget converges (~490ms)
+        waitUntilDispatched(1, 2000);
+        assertTrue(dispatched.size() >= 1);
+    }
+
+    @Test
+    void new_arrival_can_trigger_dispatch() throws Exception {
+        cfg.setDpTtftSloMs(500);
+        cfg.setSloSafetyMargin(0);
+        cfg.setBatchFillThreshold(0.0);
+
+        batcher.start();
+        CompletableFuture<Response> f1 = new CompletableFuture<>();
+        batcher.offer(QueuedRequest.of(ctx(1, 100), f1));
+        Thread.sleep(20);
+
+        CompletableFuture<Response> f2 = new CompletableFuture<>();
+        batcher.offer(QueuedRequest.of(ctx(2, 200), f2));
+
+        waitUntilDispatched(1, 1000);
+        assertTrue(dispatched.size() >= 1);
+    }
+
+    // ============== Large request fills budget ==============
+
+    @Test
+    void large_request_fills_budget_and_dispatches_quickly() throws Exception {
+        cfg.setDpTtftSloMs(200);
+        cfg.setSloSafetyMargin(0);
+        cfg.setBatchFillThreshold(0.7);
+
+        CompletableFuture<Response> f = new CompletableFuture<>();
+        batcher.offer(QueuedRequest.of(ctx(1, 1500), f));
+        batcher.start();
+
+        waitUntilDispatched(1, 500);
+        assertEquals(1, dispatched.size());
+        assertEquals(1, dispatched.get(0).size());
+    }
+
+    // ============== Cancel ==============
+
+    @Test
     void cancel_in_queue_removes_request_and_completes_future_exceptionally() {
-        // park the worker by making it think only one request — too few to pack
-        cfg.setDpMaxScanAhead(16);
+        cfg.setDpTtftSloMs(60_000);
         CompletableFuture<Response> f1 = new CompletableFuture<>();
         batcher.offer(QueuedRequest.of(ctx(42, 100), f1));
 
         boolean removed = batcher.cancelInQueue(42L);
-        assertTrue(removed || f1.isDone(),
-                "either the request was cancelled in queue, or it already dispatched");
+        assertTrue(removed || f1.isDone());
         if (removed) {
             assertTrue(f1.isCompletedExceptionally());
         }
     }
 
     @Test
-    void cancel_in_queue_unknown_returns_false() {
+    void cancel_unknown_returns_false() {
         assertFalse(batcher.cancelInQueue(99999L));
     }
+
+    // ============== Planner failures ==============
 
     @Test
     void planner_exception_fails_all_drained_futures() throws Exception {
         cfg.setDpTtftSloMs(80);
         cfg.setSloSafetyMargin(0);
+        cfg.setBatchFillThreshold(0.0);
         when(planner.plan(any(), any())).thenThrow(new RuntimeException("boom"));
         List<CompletableFuture<Response>> futures = offerN(3, 100);
+        batcher.start();
 
         for (CompletableFuture<Response> f : futures) {
-            // give the worker thread a moment to drain and dispatch
             try {
                 f.get(1, TimeUnit.SECONDS);
             } catch (Exception ignored) {
             }
-            assertTrue(f.isCompletedExceptionally(),
-                    "every drained request's future must be failed when the planner throws");
+            assertTrue(f.isCompletedExceptionally());
         }
     }
 
     @Test
-    void per_request_failures_from_planner_complete_futures_with_failure_response() throws Exception {
+    void per_request_failures_from_planner_complete_with_failure_response() throws Exception {
         cfg.setDpTtftSloMs(80);
         cfg.setSloSafetyMargin(0);
+        cfg.setBatchFillThreshold(0.0);
         when(planner.plan(any(), any())).thenAnswer(inv -> {
             List<QueuedRequest> drained = inv.getArgument(0);
             return DispatchPlan.allFailed(drained, StrategyErrorType.NO_DECODE_WORKER, "no decode");
         });
         List<CompletableFuture<Response>> futures = offerN(2, 100);
+        batcher.start();
 
         for (CompletableFuture<Response> f : futures) {
             Response r = f.get(1, TimeUnit.SECONDS);
@@ -203,144 +289,45 @@ class SloBudgetBatcherTest {
         }
     }
 
-    @Test
-    void deadline_force_dispatches_when_slo_budget_already_zero() throws Exception {
-        cfg.setDpTtftSloMs(0);  // budget will be <= 0 immediately
-        cfg.setSloSafetyMargin(0);
-        // predictor returns small enough so head wouldn't fail on its own
-        when(predictor.estimateMs(any(Long.class), any(Long.class))).thenReturn(0L);
-
-        CompletableFuture<Response> f = new CompletableFuture<>();
-        batcher.offer(QueuedRequest.of(ctx(1, 100), f));
-
-        waitUntilDispatched(1, 1000);
-        assertEquals(1, dispatched.size());
-        assertEquals(1, dispatched.get(0).size());
-    }
+    // ============== Metric emission ==============
 
     @Test
-    void parks_when_budget_has_slack_and_dispatches_after_deadline() throws Exception {
-        cfg.setDpTtftSloMs(200);
+    void metrics_batch_ready_emits_batch_tokens_and_dp_slot() throws Exception {
+        cfg.setDpTtftSloMs(5000);
         cfg.setSloSafetyMargin(0);
-        cfg.setBatchMaxTokens(100_000);
-
+        cfg.setBatchFillThreshold(0.0);
         offerN(3, 100);
-        // requests should NOT dispatch immediately — budget has ~200ms slack
-        Thread.sleep(30);
-        assertEquals(0, dispatched.size(), "should park while budget has slack");
-
-        // after deadline expires, all 3 should flush together
-        waitUntilDispatched(1, 1000);
-        assertEquals(1, dispatched.size());
-        assertEquals(3, dispatched.get(0).size());
-    }
-
-    @Test
-    void queue_size_method_reflects_pending_count_during_park() {
-        // long SLO + capacity is tiny so the worker will park (single head can't pack with anyone)
-        cfg.setDpTtftSloMs(60_000);
-        AtomicInteger remaining = new AtomicInteger(1);
-        when(planner.plan(any(), any())).thenAnswer(inv -> {
-            // Only allow dispatch when test signals
-            if (remaining.get() <= 0) {
-                List<QueuedRequest> drained = inv.getArgument(0);
-                List<PendingRequest> placed = new ArrayList<>();
-                for (QueuedRequest qr : drained) {
-                    placed.add(new PendingRequest(qr.ctx(), PREFILL, DECODE, qr.future(), qr.enqueuedAtMicros()));
-                }
-                return DispatchPlan.of(List.of(new PrefillBatch(PREFILL, placed, 1)));
-            }
-            return DispatchPlan.empty();
-        });
-        // Single offer — worker will park on the head waiting for a companion
-        CompletableFuture<Response> f = new CompletableFuture<>();
-        batcher.offer(QueuedRequest.of(ctx(1, 100), f));
-        // queue depth should briefly contain the head before pack/park
-        // (not asserting an exact value to avoid race; just exercise the method)
-        assertTrue(batcher.queueSize() >= 0);
-    }
-
-    // ============== metric emission ==============
-
-    @Test
-    void metrics_deadline_dispatch_emits_queue_snapshot_and_batch_tokens_and_dp_slot() throws Exception {
-        cfg.setDpTtftSloMs(80);
-        cfg.setSloSafetyMargin(0);
-        offerN(3, 100);
-        waitUntilDispatched(1, 1000);
+        batcher.start();
+        waitUntilAllRequestsDispatched(3, 1000);
 
         verify(reporter, atLeastOnce()).reportSloQueueSnapshot(eq("m1"), anyInt(), anyLong());
-        verify(reporter).reportSloBatchTokens("m1", DpBatchReporter.FlushReason.DEADLINE_FORCE, 8192L, 300L);
-        verify(reporter).reportSloBatchDpSlot(eq("m1"), eq("PREFILL"), eq("g1"),
-                eq("10.0.0.1:9080"), eq(0), eq(3), eq(300L));
+        verify(reporter, atLeastOnce()).reportSloBatchTokens(eq("m1"),
+                eq(DpBatchReporter.FlushReason.BATCH_READY), anyLong(), anyLong());
+        verify(reporter, atLeastOnce()).reportSloBatchDpSlot(eq("m1"), eq("PREFILL"), eq("g1"),
+                eq("10.0.0.1:9080"), eq(0), anyInt(), anyLong());
         verify(reporter, atLeastOnce()).reportSloLoopDuration(eq("m1"),
                 eq(DpBatchReporter.LoopOutcome.DISPATCH), anyLong());
-        verify(reporter, atLeastOnce()).reportSloLoopsPerDispatch(eq("m1"),
-                eq(DpBatchReporter.FlushReason.DEADLINE_FORCE), anyInt());
-        verify(reporter, atLeast(3)).reportSloQueueWait(eq("m1"),
-                eq(DpBatchReporter.FlushReason.DEADLINE_FORCE), anyLong());
     }
 
     @Test
-    void metrics_capacity_full_reports_PACKED_batch_tokens() throws Exception {
-        cfg.setBatchMaxTokens(300);
-        cfg.setDpTtftSloMs(60_000);
-        offerN(3, 100);
-        waitUntilDispatched(1, 1000);
-
-        verify(reporter).reportSloBatchTokens("m1", DpBatchReporter.FlushReason.PACKED, 300L, 300L);
-    }
-
-    @Test
-    void metrics_head_alone_exceeds_slo_emits_failure_cause_SLO_EXCEEDED() throws Exception {
-        cfg.setDpTtftSloMs(100);
-        cfg.setSloSafetyMargin(0);
-        when(predictor.estimateMs(any(Long.class), any(Long.class))).thenReturn(10_000L);
-
-        CompletableFuture<Response> f = new CompletableFuture<>();
-        batcher.offer(QueuedRequest.of(ctx(1, 4096), f));
-        f.get(1, TimeUnit.SECONDS);
-
-        verify(reporter, atLeastOnce()).reportSloFailure("m1",
-                DpBatchReporter.FailureCause.SLO_EXCEEDED);
-        // FAIL outcome reported via loop-duration
-        verify(reporter, atLeastOnce()).reportSloLoopDuration(eq("m1"),
-                eq(DpBatchReporter.LoopOutcome.FAIL), anyLong());
-        // failed request must NOT bump per-dispatch loops counter
-        verify(reporter, never()).reportSloLoopsPerDispatch(eq("m1"),
-                eq(DpBatchReporter.FlushReason.SLO_EXCEEDED), anyInt());
-    }
-
-    @Test
-    void metrics_planner_throws_emits_PLANNER_ERROR_cause_per_failed_request() throws Exception {
+    void metrics_planner_throws_emits_PLANNER_ERROR_per_failed_request() throws Exception {
         cfg.setDpTtftSloMs(80);
         cfg.setSloSafetyMargin(0);
+        cfg.setBatchFillThreshold(0.0);
         when(planner.plan(any(), any())).thenThrow(new RuntimeException("boom"));
-        List<CompletableFuture<Response>> futures = offerN(2, 100);
-        for (CompletableFuture<Response> f : futures) {
-            try {
-                f.get(1, TimeUnit.SECONDS);
-            } catch (Exception ignored) {
-            }
-        }
+        offerN(2, 100);
+        batcher.start();
+        Thread.sleep(500);
 
         verify(reporter, atLeast(2)).reportSloFailure("m1",
                 DpBatchReporter.FailureCause.PLANNER_ERROR);
     }
 
     @Test
-    void metrics_deadline_force_reports_DEADLINE_FORCE_batch_tokens() throws Exception {
-        cfg.setDpTtftSloMs(0);
-        cfg.setSloSafetyMargin(0);
-        when(predictor.estimateMs(any(Long.class), any(Long.class))).thenReturn(0L);
-
-        CompletableFuture<Response> f = new CompletableFuture<>();
-        batcher.offer(QueuedRequest.of(ctx(1, 100), f));
-        waitUntilDispatched(1, 1000);
-
-        // target=8192, actual=100, reason=DEADLINE_FORCE
-        verify(reporter).reportSloBatchTokens("m1", DpBatchReporter.FlushReason.DEADLINE_FORCE,
-                8192L, 100L);
+    void queue_size_reflects_pending_count() {
+        cfg.setDpTtftSloMs(60_000);
+        batcher.offer(QueuedRequest.of(ctx(1, 100), new CompletableFuture<>()));
+        assertTrue(batcher.queueSize() >= 0);
     }
 
     // ============== helpers ==============
@@ -353,6 +340,17 @@ class SloBudgetBatcherTest {
             batcher.offer(QueuedRequest.of(ctx(i + 1, seqLen), f));
         }
         return out;
+    }
+
+    private void waitUntilAllRequestsDispatched(int totalRequests, long timeoutMs) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < deadline) {
+            int sum = dispatched.stream().mapToInt(PrefillBatch::size).sum();
+            if (sum >= totalRequests) {
+                return;
+            }
+            Thread.sleep(5);
+        }
     }
 
     private void waitUntilDispatched(int target, long timeoutMs) throws InterruptedException {

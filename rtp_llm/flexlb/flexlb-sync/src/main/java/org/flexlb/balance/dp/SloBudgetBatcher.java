@@ -9,41 +9,37 @@ import org.flexlb.service.monitor.DpBatchReporter;
 import org.flexlb.util.Logger;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.Iterator;
 import java.util.List;
+import java.util.PriorityQueue;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
 
 /**
- * Single-FIFO SLO-budget driven batcher used by {@link
- * org.flexlb.balance.scheduler.DpBatchScheduler} when the target model's
- * prefill workers all report {@code dpSize == 1} (single-rank DP, no
- * cross-rank fan-out). Parallel to {@link GlobalPrefillBatcher}, which
- * handles the bucket-based multi-rank ({@code dpSize > 1}) case.
+ * EDF (Earliest-Deadline-First) SLO-budget driven batcher used by
+ * {@link org.flexlb.balance.scheduler.DpBatchScheduler} when the target
+ * model's prefill workers all report {@code dpSize == 1}.
  *
  * <h3>Algorithm</h3>
  * <pre>
+ * queue: priority queue sorted by deadline = enqueue + slo - pred_ttft(req)
+ *
  * loop:
- *   head = queue.peekBlocking()
- *   budget = head.enqueueMs + dpTtftSloMs - sloSafetyMargin - now
+ *   head = queue.peek()  (most urgent)
+ *   budget = head.deadline - now  (ms)
  *
- *   1. budget <= 0           → force-dispatch up to batchMaxTokens (DEADLINE_FORCE)
- *   2. head alone &gt; budget   → fail head (SLO_EXCEEDED), loop
- *   3. FIFO + bounded backward scan: pick head + any later request that fits
- *      both batchMaxTokens and the SLO budget
- *   4. capacity full OR queue.size &gt; dpMaxScanAhead → dispatch (PACKED/SCAN_EXHAUSTED)
- *      else → park until next arrival or effectiveDeadline, accumulating more requests;
- *      when deadline expires the next iteration hits step 1 (DEADLINE_FORCE)
+ *   1. budget &lt; 0            -> fail head (SLO_DROPPED)
+ *   2. budget &lt; margin       -> dispatch head alone (EDF_URGENT)
+ *   3. binary search [headTokens, maxCapacity] for largest batch that fits budget
+ *   4. greedy fill from queue up to computed batchMaxTokens
+ *   5. fillRatio &gt;= threshold -> dispatch (BATCH_READY)
+ *      else                   -> wait for new arrivals or deadline;
+ *      budget shrinks each iteration, batchMaxTokens converges down,
+ *      fillRatio rises naturally until dispatch or EDF_URGENT
  * </pre>
- *
- * <h3>Invariants</h3>
- * <ul>
- *   <li>Head always dispatched (FCFS, no starvation).</li>
- *   <li>SLO breach is handled immediately (force-flush or fail) — never silently delayed.</li>
- *   <li>Scan length capped at {@code dpMaxScanAhead} to bound per-iteration cost.</li>
- * </ul>
  */
 public class SloBudgetBatcher {
 
@@ -56,12 +52,12 @@ public class SloBudgetBatcher {
 
     private final ReentrantLock lock = new ReentrantLock();
     private final Condition arrival = lock.newCondition();
-    private final ArrayList<QueuedRequest> queue = new ArrayList<>();
+    private final PriorityQueue<QueuedRequest> queue =
+            new PriorityQueue<>(Comparator.comparingLong(QueuedRequest::sloDeadlineMicros));
 
     private final Thread worker;
     private volatile boolean shutdown = false;
 
-    /** Counts loop iterations since the last successful dispatch — emitted as loops-per-dispatch. */
     private int loopsSinceLastDispatch = 0;
 
     public SloBudgetBatcher(String model,
@@ -79,6 +75,9 @@ public class SloBudgetBatcher {
 
         this.worker = new Thread(this::runLoop, "slo-batcher-" + (model == null ? "default" : model));
         this.worker.setDaemon(true);
+    }
+
+    public void start() {
         this.worker.start();
     }
 
@@ -175,73 +174,78 @@ public class SloBudgetBatcher {
             }
 
             FlexlbConfig cfg = configService.loadBalanceConfig();
-            int batchMaxTokens = Math.max(1, cfg.getBatchMaxTokens());
-            long sloMs = cfg.getDpTtftSloMs();
             long marginMs = cfg.getSloSafetyMargin();
             int maxScan = Math.max(1, cfg.getDpMaxScanAhead());
+            double fillThreshold = cfg.getBatchFillThreshold();
+            int bsIter = cfg.getBinarySearchMaxIter();
+            int maxCapacity = cfg.getBatchMaxCapacity();
 
             reportQueueSnapshotLocked();
 
-            QueuedRequest head = queue.get(0);
+            QueuedRequest head = queue.peek();
             long nowMicros = System.nanoTime() / 1000;
-            long effectiveDeadlineMicros = head.enqueuedAtMicros() + (sloMs - marginMs) * 1000L;
-            long budgetMs = (effectiveDeadlineMicros - nowMicros) / 1000;
+            long budgetMs = (head.sloDeadlineMicros() - nowMicros) / 1000;
 
-            // 1. SLO already exhausted → force-dispatch up to batchMaxTokens (capacity-only)
-            if (budgetMs <= 0) {
-                List<QueuedRequest> drained = packByCapacityLocked(batchMaxTokens, maxScan);
-                return StepResult.dispatch(drained, DpBatchReporter.FlushReason.DEADLINE_FORCE, cfg, batchMaxTokens);
+            // 1. impossible to complete -> drop
+            if (budgetMs < 0) {
+                queue.poll();
+                return StepResult.fail(head, cfg);
             }
 
-            // 2. head alone exceeds SLO budget → fail head, loop again
-            long headTokens = tokensOf(head);
+            // 2. urgent — no time to batch -> send head alone
+            if (budgetMs < marginMs) {
+                queue.poll();
+                return StepResult.dispatch(List.of(head), DpBatchReporter.FlushReason.EDF_URGENT, cfg, computeTokens(head));
+            }
+
+            // 3. binary search for max batch tokens within budget
+            long headTokens = computeTokens(head);
             long headHit = hitOf(head);
-            if (predictor.estimateMs(headTokens, headHit) > budgetMs) {
-                QueuedRequest failed = queue.remove(0);
-                return StepResult.fail(failed, cfg);
+            long lo = headTokens;
+            long hi = maxCapacity;
+            for (int i = 0; i < bsIter && lo < hi; i++) {
+                long mid = lo + (hi - lo + 1) / 2;
+                if (predictor.estimateMs(mid, headHit) > budgetMs - marginMs) {
+                    hi = mid - 1;
+                } else {
+                    lo = mid;
+                }
             }
+            long batchMaxTokens = Math.max(headTokens, lo);
 
-            // 3. FIFO + bounded backward scan
-            int scanLimit = Math.min(queue.size() - 1, maxScan - 1);
-            List<Integer> drainIndices = new ArrayList<>();
+            // 4. greedy fill from queue
             List<QueuedRequest> picked = new ArrayList<>();
-            drainIndices.add(0);
             picked.add(head);
-            long sumTok = headTokens;
-            long sumHit = headHit;
+            long sumTokens = headTokens;
 
-            for (int i = 1; i <= scanLimit; i++) {
-                QueuedRequest c = queue.get(i);
-                long cTok = tokensOf(c);
-                if (sumTok + cTok > batchMaxTokens) {
+            int scanned = 0;
+            List<QueuedRequest> snapshot = new ArrayList<>(queue);
+            for (int i = 0; i < snapshot.size() && scanned < maxScan; i++) {
+                QueuedRequest c = snapshot.get(i);
+                if (c == head) {
                     continue;
                 }
-                if (predictor.estimateMs(sumTok + cTok, sumHit + hitOf(c)) > budgetMs) {
-                    continue;
+                scanned++;
+                long cTok = computeTokens(c);
+                if (sumTokens + cTok <= batchMaxTokens) {
+                    picked.add(c);
+                    sumTokens += cTok;
                 }
-                picked.add(c);
-                drainIndices.add(i);
-                sumTok += cTok;
-                sumHit += hitOf(c);
             }
 
-            // 4. decide: dispatch or park
-            boolean capacityFull = sumTok >= batchMaxTokens;
-            boolean queueExceedsScan = queue.size() > maxScan;
-            if (capacityFull || queueExceedsScan) {
-                DpBatchReporter.FlushReason r = capacityFull
-                        ? DpBatchReporter.FlushReason.PACKED
-                        : DpBatchReporter.FlushReason.SCAN_EXHAUSTED;
-                removeIndicesLocked(drainIndices);
-                return StepResult.dispatch(picked, r, cfg, batchMaxTokens);
+            // 5. dispatch or wait
+            double fillRatio = batchMaxTokens > 0 ? (double) sumTokens / batchMaxTokens : 1.0;
+            if (fillRatio >= fillThreshold) {
+                for (QueuedRequest qr : picked) {
+                    queue.remove(qr);
+                }
+                return StepResult.dispatch(picked, DpBatchReporter.FlushReason.BATCH_READY, cfg, batchMaxTokens);
             }
 
-            // budget still has slack — park to accumulate more requests;
-            // when deadline expires the next iteration hits budgetMs <= 0 → DEADLINE_FORCE
-            long waitNs = (effectiveDeadlineMicros - System.nanoTime() / 1000) * 1000L;
-            if (waitNs > 0) {
-                arrival.awaitNanos(waitNs);
-            }
+            // wait for new arrivals; budget shrinks each iteration -> converges
+            long remainingBudgetMs = budgetMs - marginMs;
+            long waitMs = Math.max(1, remainingBudgetMs / 4);
+            arrival.awaitNanos(waitMs * 1_000_000L);
             return null;
         } finally {
             lock.unlock();
@@ -250,13 +254,13 @@ public class SloBudgetBatcher {
 
     private void applyResult(StepResult result) {
         if (result.failOne != null) {
-            reportFailedRequest(result.failOne, DpBatchReporter.FlushReason.SLO_EXCEEDED);
+            reportFailedRequest(result.failOne, DpBatchReporter.FlushReason.SLO_DROPPED);
             if (dpBatchReporter != null) {
-                dpBatchReporter.reportSloFailure(model, DpBatchReporter.FailureCause.SLO_EXCEEDED);
+                dpBatchReporter.reportSloFailure(model, DpBatchReporter.FailureCause.SLO_DROPPED);
             }
             result.failOne.future().complete(failureResponse(
                     StrategyErrorType.NO_PREFILL_WORKER,
-                    "request alone exceeds TTFT SLO budget"));
+                    "request deadline expired — cannot meet TTFT SLO"));
             return;
         }
         if (result.drained != null && !result.drained.isEmpty()) {
@@ -273,51 +277,33 @@ public class SloBudgetBatcher {
         if (dpBatchReporter == null) {
             return;
         }
-        int n = queue.size();
         long tokens = 0;
-        for (int i = 0; i < n; i++) {
-            tokens += tokensOf(queue.get(i));
+        for (QueuedRequest qr : queue) {
+            tokens += computeTokens(qr);
         }
-        dpBatchReporter.reportSloQueueSnapshot(model, n, tokens);
+        dpBatchReporter.reportSloQueueSnapshot(model, queue.size(), tokens);
     }
 
     // ============== internals ==============
-
-    private List<QueuedRequest> packByCapacityLocked(int batchMaxTokens, int maxScan) {
-        int scanLimit = Math.min(queue.size(), maxScan);
-        List<Integer> idx = new ArrayList<>();
-        List<QueuedRequest> picked = new ArrayList<>();
-        long sumTok = 0;
-        for (int i = 0; i < scanLimit; i++) {
-            QueuedRequest c = queue.get(i);
-            long cTok = tokensOf(c);
-            if (i > 0 && sumTok + cTok > batchMaxTokens) {
-                continue;
-            }
-            picked.add(c);
-            idx.add(i);
-            sumTok += cTok;
-        }
-        removeIndicesLocked(idx);
-        return picked;
-    }
-
-    private void removeIndicesLocked(List<Integer> indices) {
-        for (int i = indices.size() - 1; i >= 0; i--) {
-            queue.remove((int) indices.get(i));
-        }
-    }
 
     private QueuedRequest enrichRequest(QueuedRequest raw) {
         if (raw.ctx() == null || raw.ctx().getRequest() == null) {
             return raw;
         }
+        FlexlbConfig cfg = configService.loadBalanceConfig();
         long seqLen = raw.ctx().getRequest().getSeqLen();
-        int computeTokenLength = (int) Math.max(0, seqLen - raw.ctx().getCacheMatchedTokens());
-        return QueuedRequest.of(raw.ctx(), raw.future(), computeTokenLength, Long.MAX_VALUE, 0);
+        long hit = raw.ctx().getCacheMatchedTokens();
+        int computeLen = (int) Math.max(0, seqLen - hit);
+
+        long nowMicros = System.nanoTime() / 1000;
+        long predMs = predictor.estimateMs(seqLen, hit);
+        long sloMs = cfg.getDpTtftSloMs();
+        long deadlineMicros = nowMicros + (sloMs - predMs) * 1000L;
+
+        return QueuedRequest.of(raw.ctx(), raw.future(), computeLen, deadlineMicros, 0);
     }
 
-    private static long tokensOf(QueuedRequest qr) {
+    static long computeTokens(QueuedRequest qr) {
         if (qr.ctx() == null || qr.ctx().getRequest() == null) {
             return 0;
         }
@@ -331,10 +317,10 @@ public class SloBudgetBatcher {
     private void planAndDispatch(List<QueuedRequest> drained,
                                   FlexlbConfig cfg,
                                   DpBatchReporter.FlushReason reason,
-                                  int batchMaxTokens) {
+                                  long batchMaxTokens) {
         long actualTokens = 0;
         for (QueuedRequest qr : drained) {
-            actualTokens += tokensOf(qr);
+            actualTokens += computeTokens(qr);
         }
         if (dpBatchReporter != null) {
             dpBatchReporter.reportBatchFlush(reason, drained.size());
@@ -389,11 +375,6 @@ public class SloBudgetBatcher {
         }
     }
 
-    /**
-     * dpSize=1 path: every request in this batch lands on dp_rank=0 of the chosen
-     * prefill worker. Tag with model/role/group/endpoint composite so dashboards
-     * can slice by deployment without consuming raw IPs.
-     */
     private void reportBatchDpSlots(PrefillBatch batch) {
         if (dpBatchReporter == null || batch == null || batch.requests().isEmpty()) {
             return;
@@ -442,19 +423,18 @@ public class SloBudgetBatcher {
         return r;
     }
 
-    /** Result of one main-loop iteration, applied outside the lock. */
-    private static final class StepResult {
+    static final class StepResult {
         final List<QueuedRequest> drained;
         final DpBatchReporter.FlushReason reason;
         final QueuedRequest failOne;
         final FlexlbConfig cfg;
-        final int batchMaxTokens;
+        final long batchMaxTokens;
 
         private StepResult(List<QueuedRequest> drained,
                            DpBatchReporter.FlushReason reason,
                            QueuedRequest failOne,
                            FlexlbConfig cfg,
-                           int batchMaxTokens) {
+                           long batchMaxTokens) {
             this.drained = drained;
             this.reason = reason;
             this.failOne = failOne;
@@ -465,7 +445,7 @@ public class SloBudgetBatcher {
         static StepResult dispatch(List<QueuedRequest> drained,
                                    DpBatchReporter.FlushReason reason,
                                    FlexlbConfig cfg,
-                                   int batchMaxTokens) {
+                                   long batchMaxTokens) {
             return new StepResult(drained, reason, null, cfg, batchMaxTokens);
         }
 

@@ -133,8 +133,10 @@ public class DpBatchScheduler {
     }
 
     private SloBudgetBatcher newSloBatcher(String model) {
-        return new SloBudgetBatcher(model, configService, planner,
+        SloBudgetBatcher b = new SloBudgetBatcher(model, configService, planner,
                 this::dispatchBatch, prefillTimePredictor, dpBatchReporter);
+        b.start();
+        return b;
     }
 
     // ============== Dispatch (called by GlobalPrefillBatcher) ==============

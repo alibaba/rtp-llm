@@ -242,14 +242,6 @@ public class FlexlbConfig {
     // ========== SloBudgetBatcher (dpSize=1 single-DP path) ==========
 
     /**
-     * Per-batch total compute-token cap used by {@code SloBudgetBatcher} when
-     * dpSize == 1. The batcher greedily packs requests up to this many tokens
-     * (subject to the SLO budget constraint) so a single prefill step keeps GPU
-     * occupancy high without overflowing the kernel's max-batch token budget.
-     */
-    private int batchMaxTokens = 8192;
-
-    /**
      * Safety margin (ms) shaved off the head request's TTFT deadline before
      * computing the batch budget. Guards against estimator inaccuracy + network
      * dispatch latency so batches still meet SLO under noisy predictions.
@@ -264,13 +256,32 @@ public class FlexlbConfig {
     private long dpBatchEnqueueDeadlineMs = 5000;
 
     /**
-     * Bounded look-ahead distance for {@code SloBudgetBatcher}'s backward scan.
-     * After the FIFO head is locked in, the batcher scans at most this many
-     * additional requests to find smaller ones that fit the remaining budget,
-     * bypassing head-of-line blocking from oversized requests without an
-     * unbounded O(N) walk.
+     * Bounded look-ahead distance for {@code SloBudgetBatcher}'s greedy fill scan.
+     * After the EDF head is locked in, the batcher scans at most this many
+     * additional requests to find ones that fit the remaining batch capacity.
      */
     private int dpMaxScanAhead = 64;
+
+    /**
+     * Fill-ratio threshold for dispatching a batch. The batcher dispatches when
+     * {@code sumTokens / batchMaxTokens >= threshold}. Lower values send smaller
+     * batches sooner; higher values wait longer for better GPU utilization.
+     */
+    private double batchFillThreshold = 0.7;
+
+    /**
+     * Maximum iterations for the binary search that computes the optimal batch
+     * token capacity per iteration. 12 iterations yield ~1/4096 precision over
+     * a [headTokens, batchMaxCapacity] range.
+     */
+    private int binarySearchMaxIter = 12;
+
+    /**
+     * Upper bound (in tokens) for the binary search range when computing the
+     * dynamic batch capacity. Represents the theoretical maximum tokens a
+     * single prefill step could handle.
+     */
+    private int batchMaxCapacity = 1_000_000;
 
     // ========== Prefill Profiling Configuration ==========
 

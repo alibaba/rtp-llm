@@ -57,10 +57,9 @@ public class DpBatchReporter {
         PER_REQUEST_TIMEOUT,
         DEADLINE,
         WINDOW_TIMER,
-        PACKED,
-        DEADLINE_FORCE,
-        SCAN_EXHAUSTED,
-        SLO_EXCEEDED
+        EDF_URGENT,
+        BATCH_READY,
+        SLO_DROPPED
     }
 
     /** Outcome of a single SloBudgetBatcher main-loop iteration. */
@@ -72,7 +71,7 @@ public class DpBatchReporter {
 
     /** Failure cause emitted via {@link #reportSloFailure}. */
     public enum FailureCause {
-        SLO_EXCEEDED,
+        SLO_DROPPED,
         PLANNER_ERROR,
         DISPATCH_ERROR
     }
@@ -220,8 +219,8 @@ public class DpBatchReporter {
         FlexMetricTags tags = FlexMetricTags.of("reason", reason.name());
         monitor.report(V1_DP_BATCH_FLUSH_QPS, tags, 1.0);
         monitor.report(V1_DP_BATCH_SIZE, tags, realRequestCount);
-        if (reason == FlushReason.DEADLINE || reason == FlushReason.DEADLINE_FORCE
-                || reason == FlushReason.SLO_EXCEEDED) {
+        if (reason == FlushReason.DEADLINE || reason == FlushReason.EDF_URGENT
+                || reason == FlushReason.SLO_DROPPED) {
             monitor.report(ROUTING_SLO_VIOLATION_QPS,
                     FlexMetricTags.of("source", "dp_batch_dispatch_past_deadline"), 1.0);
         }

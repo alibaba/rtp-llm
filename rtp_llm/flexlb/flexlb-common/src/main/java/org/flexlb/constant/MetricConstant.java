@@ -434,7 +434,7 @@ public class MetricConstant {
 
     /**
      * 算法状态 - SloBudgetBatcher 请求失败 QPS。
-     * 标签: model + reason (SLO_EXCEEDED / PLANNER_ERROR / DISPATCH_ERROR)。
+     * 标签: model + cause (SLO_DROPPED / PLANNER_ERROR / DISPATCH_ERROR)。
      */
     public static final String V1_DP_SLO_FAILURE_QPS = "app.v1.dp.slo.failure.qps";
 
