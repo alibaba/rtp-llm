@@ -67,9 +67,8 @@ public class FlexlbConfig {
     /**
      * Maximum retry count for failed routing attempts.
      * When exceeded, the request is completed with an error instead of being re-queued.
-     * Default 0 means unlimited retries (bounded by generateTimeout).
      */
-    private int maxRetryCount = 0;
+    private int maxRetryCount = 100;
 
     /**
      * Prefill role queuing threshold

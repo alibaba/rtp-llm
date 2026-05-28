@@ -121,7 +121,7 @@ public class RequestScheduler {
     }
 
     private void handleRoutingResult(BalanceContext ctx, Response response) {
-        int maxRetry = ctx.getConfig() != null ? ctx.getConfig().getMaxRetryCount() : 0;
+        int maxRetry = ctx.getConfig() != null ? ctx.getConfig().getMaxRetryCount() : 100;
         boolean retryAllowed = maxRetry <= 0 || ctx.getRetryCount() < maxRetry;
         if (!response.isSuccess() && shouldRetry(response) && retryAllowed) {
             ctx.incrementRetryCount();
