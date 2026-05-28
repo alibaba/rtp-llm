@@ -232,6 +232,13 @@ cc_library(
             "//rtp_llm/models_py/bindings/cuda/cutlass:fp4_gemm_cu",
         ],
         "//conditions:default": [],
+    }) + select({
+        # sm_120 consumer Blackwell (RTX 5090 / RTX PRO 5000) is x86-only;
+        # GB200 (cuda12_9_arm) is sm_10x and would trap on this kernel.
+        "@//:using_cuda12_9_x86": [
+            "//rtp_llm/models_py/bindings/cuda/cutlass:fp8_blockwise_sm120_cu",
+        ],
+        "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],
     alwayslink = 1,
