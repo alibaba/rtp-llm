@@ -234,7 +234,14 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 totalPrefix += task.getPrefixLength();
             }
             long predictedMs = TaskInfo.estimatePrefillTimeMs(totalInput, totalPrefix);
-            engineHealthReporter.reportPrefillPredictionError(modelName, predictedMs, batchStepTimeUs);
+            long actualMs = batchStepTimeUs / 1000;
+            long errorMs = predictedMs - actualMs;
+            logger.info("prefill-prediction batch: size={} totalInput={} totalPrefix={} "
+                            + "predictedMs={} actualUs={} actualMs={} errorMs={}",
+                    batch.getValue().size(), totalInput, totalPrefix,
+                    predictedMs, batchStepTimeUs, actualMs, errorMs);
+            engineHealthReporter.reportPrefillPredictionError(
+                    modelName, predictedMs, batchStepTimeUs, totalInput, batch.getValue().size());
         }
     }
 

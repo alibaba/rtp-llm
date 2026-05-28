@@ -453,4 +453,8 @@ public class MetricConstant {
     public static final String V1_DP_PREFILL_ACTUAL_TIME_US = "app.v1.dp.prefill.actual.time.us";
 
     public static final String V1_DP_PREFILL_PREDICTION_ERROR_MS = "app.v1.dp.prefill.prediction.error.ms";
+
+    public static final String V1_DP_PREFILL_BATCH_INPUT_TOKENS = "app.v1.dp.prefill.batch.input.tokens";
+
+    public static final String V1_DP_PREFILL_BATCH_SIZE = "app.v1.dp.prefill.batch.size";
 }
