@@ -262,12 +262,83 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         # ``except GeneratorExit`` (responsible for the
         # ``dropped_buffered_on_exception`` stage) would never fire. Wrapping
         # in try/finally + aclose() makes the close deterministic.
+        #
+        # The outer ``finally`` then tears down the downstream call itself.
+        # Without that, when ``_buffered_iter`` returns after detecting the
+        # finished frame the inner generators and the underlying grpc.aio.Call
+        # linger until Python's async-gen finalizer hook fires — which only
+        # happens after grpc.aio GCs this handler coroutine. The gap between
+        # ``finished=True`` and the actual downstream cancel is what lets the
+        # backend (and access logs) record a clean stream end as a late
+        # client-cancel race.
         buffered = self._buffered_iter(downstream_iter, agg)
         try:
-            async for resp in buffered:
-                yield resp
+            try:
+                async for resp in buffered:
+                    yield resp
+            finally:
+                await buffered.aclose()
         finally:
-            await buffered.aclose()
+            # Safety net. ``_close_downstream`` is also exposed as a public-ish
+            # static method so any future code path that wants to tear down
+            # the downstream stream early (e.g. on a fatal upstream signal)
+            # can call it explicitly — both aclose and cancel are idempotent,
+            # so re-invocation by this ``finally`` is a no-op.
+            await self._close_downstream(downstream_iter, upstream_iter)
+
+    @staticmethod
+    async def _close_downstream(downstream_iter, upstream_iter) -> None:
+        """Deterministically tear down the downstream stub call.
+
+        Call this when you want the proxy -> backend stream closed *now*
+        (e.g. you've observed an end-of-stream marker on a wire format the
+        proxy doesn't understand, or you're aborting forwarding for any
+        other reason). The default ``ModelStreamInfer`` flow already calls
+        this from its ``finally`` clause; this method is exposed so callers
+        that don't want to rely on the implicit finally — or that want the
+        close to happen *before* further awaits in their own code path —
+        can invoke it directly.
+
+        Closes in two layers:
+
+        - If a wrapper async generator was placed between ``upstream_iter``
+          and the buffered iterator (currently ``counting_response_iter``),
+          ``aclose()`` is awaited on it first. This injects
+          ``GeneratorExit`` into the wrapper synchronously, letting any
+          stage labels / finally hooks run.
+        - ``cancel()`` is then invoked on ``upstream_iter``. For a real
+          grpc.aio call this triggers RST_STREAM toward the backend
+          immediately; without it the call lingers until Python's async-gen
+          finalizer hook fires after grpc.aio releases the handler
+          coroutine, which is the GC-latency tail that lets backends log a
+          clean stream end as a late client-cancel race.
+
+        Both operations are idempotent — safe to call multiple times and
+        safe to call on an already-completed stream.
+        """
+        # Close any wrapping async generator first (e.g. counting wrapper).
+        if downstream_iter is not upstream_iter:
+            try:
+                aclose = getattr(downstream_iter, "aclose", None)
+                if aclose is not None:
+                    await aclose()
+            except Exception:
+                pass
+        # Cancel the underlying grpc.aio.Call. Sync, idempotent.
+        try:
+            cancel = getattr(upstream_iter, "cancel", None)
+            if cancel is not None:
+                cancel()
+        except Exception:
+            pass
+        # Tests / non-grpc fakes expose ``aclose`` on the upstream iterator
+        # (real grpc.aio calls don't); cover that path too.
+        try:
+            aclose = getattr(upstream_iter, "aclose", None)
+            if aclose is not None:
+                await aclose()
+        except Exception:
+            pass
 
     @staticmethod
     async def _buffered_iter(downstream_iter, diag_agg=None):
