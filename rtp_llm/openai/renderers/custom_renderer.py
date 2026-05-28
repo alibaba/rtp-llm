@@ -56,15 +56,7 @@ _MIN_NEW_TOKENS_CV: ContextVar[int] = ContextVar("_min_new_tokens", default=0)
 
 
 def _bind_min_new_tokens(generate_config) -> Token:
-    """Normalize and bind `min_new_tokens` into the task-scoped ContextVar.
-
-    Returns the ``contextvars.Token`` produced by ``ContextVar.set``,
-    which must be passed to ``_MIN_NEW_TOKENS_CV.reset(token)`` in a
-    ``finally`` block to undo the binding when the request completes.
-
-    GenerateConfig.min_new_tokens is ``Union[List[int], int]``; a list is
-    collapsed to its ``max`` (empty list → 0).
-    """
+    """Bind min_new_tokens into task-scoped ContextVar; returns reset token."""
     mnt = generate_config.min_new_tokens
     if isinstance(mnt, list):
         mnt = max(mnt) if mnt else 0

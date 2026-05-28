@@ -427,31 +427,11 @@ class OpenaiEndpoint(object):
                     ]
 
                 # See StreamOptions for include_usage semantics.
-                if include_usage is True:
-                    # Spec layout: suppress `usage` on every content chunk;
-                    # emit it exactly once in a trailing choices=[] chunk
-                    # after the choice_generator is fully drained (see the
-                    # post-loop emission below). This guarantees the usage
-                    # chunk is the final chunk on the wire and reflects
-                    # final stream state -- correct for n>=2 where choices
-                    # finish on different chunks. Backend usage-only frames
-                    # (choices=[]) are captured into `last_usage` above and
-                    # not forwarded as redundant empty chunks.
-                    if not response.choices:
-                        continue
-                    yield ChatCompletionStreamResponse(
-                        choices=response.choices,
-                        usage=None,
-                        aux_info=response.aux_info,
-                        debug_info=debug_info if not debug_info_responded else output,
-                        extra_outputs=response.extra_outputs,
-                    )
-                    debug_info_responded = True
-                elif include_usage is False:
-                    # Symmetric with the include_usage=True path: do not
-                    # forward backend usage-only frames (choices=[]) as
-                    # redundant empty chunks. With usage suppressed they
-                    # would carry no signal at all.
+                if include_usage is not None:
+                    # include_usage=True/False: suppress per-chunk usage
+                    # and skip backend usage-only frames (choices=[]).
+                    # When True, a trailing choices=[] usage chunk is
+                    # emitted after the loop (see below).
                     if not response.choices:
                         continue
                     yield ChatCompletionStreamResponse(
