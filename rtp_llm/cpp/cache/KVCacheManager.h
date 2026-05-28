@@ -6,6 +6,7 @@
 #include <thread>
 #include <vector>
 
+#include "absl/status/status.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/BufferTypes.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
@@ -45,6 +46,10 @@ public:
     MallocResult malloc(const MallocInfo& malloc_info);
     void         free(const FreeInfo& free_info);
     void         insertIntoCache(const InsertInfo& insert_info);
+    absl::Status mallocWritebackBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource, size_t block_count);
+    void         commitWritebackBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                       const CacheKeysType&           cache_keys,
+                                       bool                           is_resident);
 
     int
     singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource, int seq_len, int reserve_step) const;

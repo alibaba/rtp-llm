@@ -233,6 +233,38 @@ TEST_F(HybridTypeKVCacheAllocatorTest, InitAndAddressLookupSmoke) {
     EXPECT_NE(addr3.kv_addr, nullptr);
 }
 
+TEST_F(HybridTypeKVCacheAllocatorTest, WritebackCommitInsertsExactFullAndLinearBlocks) {
+    auto config    = makeTinyHybridConfig();
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+
+    CacheKeysType cache_keys{5001, 5002};
+    auto          writeback_resource = std::make_shared<BatchKVCacheResource>();
+
+    auto status = allocator->mallocWritebackBlocks(writeback_resource, cache_keys.size());
+    ASSERT_TRUE(status.ok()) << status;
+    ASSERT_EQ(writeback_resource->blocksNum(0, 0), 2);
+    ASSERT_EQ(writeback_resource->blocksNum(0, 1), 2);
+    EXPECT_TRUE(isNullBlockIdx(writeback_resource->blocks(0, 0)[0]));
+    EXPECT_FALSE(isNullBlockIdx(writeback_resource->blocks(0, 0)[1]));
+
+    allocator->commitWritebackBlocks(writeback_resource, cache_keys, false);
+    FreeInfo writeback_free_info{writeback_resource, nullptr};
+    allocator->free(writeback_free_info);
+
+    auto probe_resource = makeBatchResource(
+        /*batch_size=*/1, config.groupNums(), config.layer_num, config.layer_to_group_id, {5001, 5002, 7001});
+    auto probe_token_ids = makeCompleteTokenIds(1, 12, config.seq_size_per_block);
+
+    MallocInfo probe_info{probe_resource, probe_token_ids};
+    probe_info.enable_device_cache = true;
+    auto probe_result              = allocator->malloc(probe_info);
+
+    EXPECT_TRUE(probe_result.success);
+    EXPECT_EQ(probe_result.reuse_len, 2 * config.seq_size_per_block);
+    EXPECT_EQ(probe_resource->cacheResource(0).reuseBlockNum(), 2);
+}
+
 TEST_F(HybridTypeKVCacheAllocatorTest, ConvertToGlobalLayerIdHybridNoMtp) {
     auto config    = makeTinyHybridConfig();
     auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
@@ -632,10 +664,10 @@ TEST_F(HybridTypeKVCacheAllocatorTest, PrefillInitSkipsSparseCleanupAndPreserves
     auto token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/20, /*seq_size_per_block=*/4);
 
     MallocInfo info{batch_res, token_ids};
-    info.enable_device_cache   = true;
-    info.reuse_cache           = true;
+    info.enable_device_cache          = true;
+    info.reuse_cache                  = true;
     info.enable_remove_skipped_blocks = false;  // prefill init path
-    auto result                = allocator->malloc(info);
+    auto result                       = allocator->malloc(info);
     ASSERT_TRUE(result.success);
 
     const auto& linear_out = batch_res->blocks(0, gid_linear);
@@ -681,10 +713,10 @@ TEST_F(HybridTypeKVCacheAllocatorTest, DecodeIncrMallocAppliesSparseCleanupOnLin
     auto token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/24, /*seq_size_per_block=*/4);
 
     MallocInfo info{batch_res, token_ids};
-    info.enable_device_cache   = false;
-    info.reuse_cache           = true;
+    info.enable_device_cache          = false;
+    info.reuse_cache                  = true;
     info.enable_remove_skipped_blocks = true;  // decode path
-    auto result                = allocator->malloc(info);
+    auto result                       = allocator->malloc(info);
     ASSERT_TRUE(result.success);
 
     // For step=2 and size=6: keep pos 1, 3 (step hits) and last two (4, 5); null pos 0, 2.

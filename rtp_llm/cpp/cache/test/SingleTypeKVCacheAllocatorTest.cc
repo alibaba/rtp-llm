@@ -408,6 +408,58 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InsertIntoCacheAsResident) {
     allocator_->insertIntoCache(insert_info);
 }
 
+TEST_F(SingleTypeKVCacheAllocatorTest, WritebackCommitInsertsExactFullBlocks) {
+    auto config = createSingleTypeTestConfig();
+    allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config);
+    ASSERT_TRUE(allocator_->init());
+
+    CacheKeysType cache_keys{1001, 1002};
+    auto          writeback_resource = std::make_shared<BatchKVCacheResource>();
+
+    auto status = allocator_->mallocWritebackBlocks(writeback_resource, cache_keys.size());
+    ASSERT_TRUE(status.ok()) << status;
+    ASSERT_EQ(writeback_resource->blocksNum(0, 0), 2);
+
+    allocator_->commitWritebackBlocks(writeback_resource, cache_keys, false);
+    FreeInfo writeback_free_info{writeback_resource, nullptr};
+    allocator_->free(writeback_free_info);
+
+    auto probe_resource = createBatchKVCacheResource(1, config.layer_num);
+    probe_resource->setBatchCacheKeys(0, CacheKeysType{1001, 1002, 3001});
+    auto probe_token_ids = createCompleteTokenIds(1, 24);
+
+    MallocInfo probe_info{probe_resource, probe_token_ids};
+    probe_info.enable_device_cache = true;
+    auto probe_result              = allocator_->malloc(probe_info);
+
+    EXPECT_TRUE(probe_result.success);
+    EXPECT_EQ(probe_result.reuse_len, 2 * config.seq_size_per_block);
+    EXPECT_EQ(probe_resource->cacheResource(0).reuseBlockNum(), 2);
+}
+
+TEST_F(SingleTypeKVCacheAllocatorTest, WritebackDuplicateKeyDoesNotLeakAllocatedBlock) {
+    auto config = createSingleTypeTestConfig();
+    allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config);
+    ASSERT_TRUE(allocator_->init());
+
+    CacheKeysType cache_keys{2001};
+    auto          first = std::make_shared<BatchKVCacheResource>();
+    ASSERT_TRUE(allocator_->mallocWritebackBlocks(first, cache_keys.size()).ok());
+    allocator_->commitWritebackBlocks(first, cache_keys, false);
+    FreeInfo first_free_info{first, nullptr};
+    allocator_->free(first_free_info);
+
+    const auto free_before = allocator_->freeBlocksNum();
+
+    auto duplicate = std::make_shared<BatchKVCacheResource>();
+    ASSERT_TRUE(allocator_->mallocWritebackBlocks(duplicate, cache_keys.size()).ok());
+    allocator_->commitWritebackBlocks(duplicate, cache_keys, false);
+    FreeInfo duplicate_free_info{duplicate, nullptr};
+    allocator_->free(duplicate_free_info);
+
+    EXPECT_GE(allocator_->freeBlocksNum(), free_before);
+}
+
 // Test convert index to addr
 TEST_F(SingleTypeKVCacheAllocatorTest, ConvertIndexToAddr) {
     auto config = createSingleTypeTestConfig();

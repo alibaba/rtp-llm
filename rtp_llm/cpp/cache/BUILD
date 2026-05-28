@@ -110,6 +110,7 @@ cc_library(
     deps = [
         ":kv_cache_group",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
+        "@com_google_absl//absl/status",
     ],
 )
 
@@ -204,5 +205,6 @@ cc_library(
         "//rtp_llm/cpp/cache/connector",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/cpp/utils:profiling_scope",
+        "@com_google_absl//absl/status",
     ] + torch_deps(),
 )

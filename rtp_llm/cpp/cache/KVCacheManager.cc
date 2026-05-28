@@ -117,6 +117,19 @@ void KVCacheManager::insertIntoCache(const InsertInfo& insert_info) {
     allocator_->insertIntoCache(insert_info);
 }
 
+absl::Status KVCacheManager::mallocWritebackBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                                   size_t                         block_count) {
+    RTP_LLM_PROFILE_FUNCTION();
+    return allocator_->mallocWritebackBlocks(batch_kv_cache_resource, block_count);
+}
+
+void KVCacheManager::commitWritebackBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                           const CacheKeysType&           cache_keys,
+                                           bool                           is_resident) {
+    RTP_LLM_PROFILE_FUNCTION();
+    allocator_->commitWritebackBlocks(batch_kv_cache_resource, cache_keys, is_resident);
+}
+
 int KVCacheManager::singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                                           int                            seq_len,
                                           int                            reserve_step) const {

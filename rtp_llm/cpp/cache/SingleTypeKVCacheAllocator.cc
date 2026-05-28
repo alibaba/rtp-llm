@@ -1,8 +1,10 @@
 #include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
 
 #include <algorithm>
+#include <limits>
 #include <unordered_map>
 
+#include "absl/status/status.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
@@ -209,6 +211,58 @@ void SingleTypeKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) 
 
         full_kv_cache_group_->insertIntoCache(put_cache_keys, put_block_ids, insert_info.is_resident);
     }
+}
+
+absl::Status SingleTypeKVCacheAllocator::mallocWritebackBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                                               size_t                         block_count) {
+    if (!batch_kv_cache_resource) {
+        return absl::InvalidArgumentError("batch_kv_cache_resource is null");
+    }
+
+    batch_kv_cache_resource->resetBatchSize(1);
+    batch_kv_cache_resource->initGroups(1,
+                                        static_cast<int>(config_.layer_all_num),
+                                        config_.layer_to_group_id,
+                                        config_.kernelBlocksPerKvBlock(),
+                                        config_.group_types);
+
+    if (block_count == 0) {
+        return absl::OkStatus();
+    }
+    if (block_count > static_cast<size_t>(std::numeric_limits<int>::max() / seqSizePerBlock())) {
+        return absl::InvalidArgumentError("writeback block count is too large");
+    }
+
+    const int seq_len = static_cast<int>(block_count) * seqSizePerBlock();
+    auto&     blocks  = batch_kv_cache_resource->mutableBlockIds(0, 0);
+    if (!full_kv_cache_group_->malloc(blocks, seq_len, false, 0)) {
+        return absl::ResourceExhaustedError("not enough KV blocks for writeback");
+    }
+    if (blocks.blocksNum() != static_cast<int>(block_count)) {
+        full_kv_cache_group_->free(blocks.blocks());
+        batch_kv_cache_resource->clearBlocks();
+        return absl::InternalError("writeback allocation produced unexpected block count");
+    }
+    return absl::OkStatus();
+}
+
+void SingleTypeKVCacheAllocator::commitWritebackBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                                       const CacheKeysType&           cache_keys,
+                                                       bool                           is_resident) {
+    if (!batch_kv_cache_resource || cache_keys.empty() || batch_kv_cache_resource->batchSize() == 0
+        || batch_kv_cache_resource->groupNums() == 0) {
+        return;
+    }
+
+    const auto& blocks    = batch_kv_cache_resource->blocks(0, 0);
+    const auto  block_num = std::min(cache_keys.size(), blocks.size());
+    if (block_num == 0) {
+        return;
+    }
+
+    CacheKeysType    put_cache_keys(cache_keys.begin(), cache_keys.begin() + block_num);
+    BlockIndicesType put_block_ids(blocks.begin(), blocks.begin() + block_num);
+    full_kv_cache_group_->insertIntoCache(put_cache_keys, put_block_ids, is_resident);
 }
 
 CacheLayerLayout SingleTypeKVCacheAllocator::allLayerCacheBase() const {

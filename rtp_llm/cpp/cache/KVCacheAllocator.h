@@ -5,6 +5,7 @@
 #include <memory>
 #include <vector>
 
+#include "absl/status/status.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
@@ -29,6 +30,11 @@ public:
     bool                           init();
     virtual void                   free(const FreeInfo& free_info)                        = 0;
     virtual void                   insertIntoCache(const InsertInfo& insert_info)         = 0;
+    virtual absl::Status           mallocWritebackBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                                         size_t                         block_count)              = 0;
+    virtual void                   commitWritebackBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                                         const CacheKeysType&           cache_keys,
+                                                         bool                           is_resident)                = 0;
     virtual BlockAddrInfo          convertIndexToAddr(int layer_id, int block_id) const   = 0;
     virtual std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int block_id) const = 0;
     virtual std::vector<BlockInfo>

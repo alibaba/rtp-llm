@@ -2,10 +2,12 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <limits>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
 
+#include "absl/status/status.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
@@ -352,6 +354,63 @@ void HybridTypeKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) 
             kv_cache_groups_[static_cast<size_t>(gid)]->insertIntoCache(
                 put_cache_keys, put_blocks, insert_info.is_resident);
         }
+    }
+}
+
+absl::Status HybridTypeKVCacheAllocator::mallocWritebackBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                                               size_t                         block_count) {
+    if (!batch_kv_cache_resource) {
+        return absl::InvalidArgumentError("batch_kv_cache_resource is null");
+    }
+
+    const int group_nums = static_cast<int>(kv_cache_groups_.size());
+    batch_kv_cache_resource->resetBatchSize(1);
+    batch_kv_cache_resource->initGroups(group_nums,
+                                        static_cast<int>(config_.layer_all_num),
+                                        config_.layer_to_group_id,
+                                        config_.kernelBlocksPerKvBlock(),
+                                        config_.group_types);
+
+    if (block_count == 0) {
+        return absl::OkStatus();
+    }
+    if (block_count > static_cast<size_t>(std::numeric_limits<int>::max() / seqSizePerBlock())) {
+        return absl::InvalidArgumentError("writeback block count is too large");
+    }
+
+    const int seq_len = static_cast<int>(block_count) * seqSizePerBlock();
+    for (int gid = 0; gid < group_nums; ++gid) {
+        auto& block_ids = batch_kv_cache_resource->mutableBlockIds(0, gid);
+        if (!kv_cache_groups_[static_cast<size_t>(gid)]->malloc(block_ids, seq_len, true, 0)) {
+            for (int rollback_gid = 0; rollback_gid <= gid; ++rollback_gid) {
+                kv_cache_groups_[static_cast<size_t>(rollback_gid)]->free(
+                    batch_kv_cache_resource->blocks(0, rollback_gid));
+            }
+            batch_kv_cache_resource->clearBlocks();
+            return absl::ResourceExhaustedError("not enough KV blocks for writeback");
+        }
+    }
+    return absl::OkStatus();
+}
+
+void HybridTypeKVCacheAllocator::commitWritebackBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                                       const CacheKeysType&           cache_keys,
+                                                       bool                           is_resident) {
+    if (!batch_kv_cache_resource || cache_keys.empty() || batch_kv_cache_resource->batchSize() == 0
+        || batch_kv_cache_resource->groupNums() == 0) {
+        return;
+    }
+
+    for (int gid = 0; gid < batch_kv_cache_resource->groupNums(); ++gid) {
+        const auto& blocks    = batch_kv_cache_resource->blocks(0, gid);
+        const auto  block_num = std::min(cache_keys.size(), blocks.size());
+        if (block_num == 0) {
+            continue;
+        }
+
+        CacheKeysType    put_cache_keys(cache_keys.begin(), cache_keys.begin() + block_num);
+        BlockIndicesType put_block_ids(blocks.begin(), blocks.begin() + block_num);
+        kv_cache_groups_[static_cast<size_t>(gid)]->insertIntoCache(put_cache_keys, put_block_ids, is_resident);
     }
 }
 

@@ -59,6 +59,12 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+py_test(
+    name = "writeback_allocator_api_static_test",
+    srcs = ["WritebackAllocatorApiStaticTest.py"],
+    main = "WritebackAllocatorApiStaticTest.py",
+)
+
 cc_test(
     name = "block_cache_test",
     srcs = [
