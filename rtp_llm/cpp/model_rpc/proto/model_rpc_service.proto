@@ -137,6 +137,14 @@ message MultimodalOutputsPB {
     repeated MultimodalOutputPB multimodal_outputs = 1;
 }
 
+message RequestInfoPB {
+    string frontend_ip = 1;
+    string dash_ip = 2;
+    string trace_id = 3;
+    string request_id = 4;
+    string source_role = 5;
+}
+
 message GenerateInputPB {
     int64 request_id = 1;
     repeated int32 token_ids = 2;
@@ -146,6 +154,7 @@ message GenerateInputPB {
     int64 start_time = 6;
     int32 batch_group_size = 7;
     google.protobuf.Int64Value batch_group_id = 8;
+    RequestInfoPB request_info = 9;
 }
 
 message AuxInfoPB {

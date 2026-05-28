@@ -15,8 +15,12 @@ from rtp_llm.server.cache_key_routing import route_cache_keys_for_page_rr
 from rtp_llm.server.host_service import HostService, HostServiceArgs
 from rtp_llm.server.master_client import FlexlbResponse, MasterClient
 from rtp_llm.server.misc import format_exception
+from rtp_llm.server.request_headers import (
+    extract_correlation_request_id,
+    extract_trace_id,
+)
 from rtp_llm.server.recent_cache_key_window import RecentCacheKeyWindow
-from rtp_llm.utils.base_model_datatypes import GenerateInput, GenerateOutputs
+from rtp_llm.utils.base_model_datatypes import GenerateInput, GenerateOutputs, RequestInfo
 from rtp_llm.utils.time_util import Timer
 
 if TYPE_CHECKING:
@@ -39,6 +43,7 @@ class BackendRPCServerVisitor:
         master_config=None,
         parallelism_config=None,
         prefill_cp_config=None,
+        source_role: str = "frontend",
     ) -> None:
         """Initialize BackendRPCServerVisitor.
 
@@ -54,11 +59,14 @@ class BackendRPCServerVisitor:
             master_config: Optional MasterConfig for master client configuration
             parallelism_config: Optional ParallelismConfig for page-RR route cache keys
             prefill_cp_config: Optional PrefillCPConfig for page-RR route cache keys
+            source_role: Caller role used for request-info correlation fields.
         """
         self.max_seq_len = max_seq_len
         self.seq_size_per_block = seq_size_per_block
         self.pd_sep_config = pd_sep_config
         self.sp_config = sp_config
+        self.source_role = source_role
+        self.source_ip = str(getattr(server_config, "ip", "") or "")
         assert self.max_seq_len > 0
 
         # Get max_rpc_timeout_ms and decode_entrance from pd_sep_config
@@ -350,6 +358,38 @@ class BackendRPCServerVisitor:
                 "speculative decoding does not support return_all_probs",
             )
 
+    def fill_request_info(self, input: GenerateInput) -> None:
+        if getattr(input, "request_info", None) is None:
+            input.request_info = RequestInfo()
+
+        request_info = input.request_info
+        if not request_info.source_role:
+            request_info.source_role = self.source_role
+
+        source_role = (request_info.source_role or self.source_role).lower()
+        if source_role == "dash":
+            if not request_info.dash_ip:
+                request_info.dash_ip = self.source_ip
+        elif not request_info.frontend_ip:
+            request_info.frontend_ip = self.source_ip
+
+        trace_id = str(
+            getattr(input.generate_config, "trace_id", "")
+            or extract_trace_id(getattr(input, "headers", None))
+            or ""
+        )
+        if not request_info.trace_id:
+            request_info.trace_id = trace_id
+        if not getattr(input.generate_config, "trace_id", "") and request_info.trace_id:
+            input.generate_config.trace_id = request_info.trace_id
+
+        if not request_info.request_id:
+            request_info.request_id = (
+                extract_correlation_request_id(getattr(input, "headers", None))
+                or request_info.trace_id
+                or str(input.request_id)
+            )
+
     @torch.inference_mode()
     async def enqueue(
         self, input: GenerateInput
@@ -376,6 +416,7 @@ class BackendRPCServerVisitor:
             e.aux_info = aux_info
 
         try:
+            self.fill_request_info(input)
             input.generate_config.validate()
             if input.prompt_length <= 0:
                 raise FtRuntimeException(
@@ -430,6 +471,7 @@ class BackendRPCServerVisitor:
 def create_backend_rpc_server_visitor(
     py_env_configs: "PyEnvConfigs",
     model_config,
+    source_role: str = "frontend",
 ) -> "BackendRPCServerVisitor":
     """Build a `BackendRPCServerVisitor` from `PyEnvConfigs` + a lightweight `ModelConfig`.
 
@@ -470,4 +512,5 @@ def create_backend_rpc_server_visitor(
         master_config=py_env_configs.master_config,
         parallelism_config=engine_config.parallelism_config,
         prefill_cp_config=py_env_configs.prefill_cp_config,
+        source_role=source_role,
     )
