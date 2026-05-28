@@ -1300,6 +1300,13 @@ void MtpExecutor::waitPreviousBookkeepingAndKvSwaps(const std::list<GenerateStre
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.decode_step(wait_prev_bookkeeping,stream_count=%zu)",
                                       streams.size());
         spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
+    } else if (useStreamAsync()) {
+        // DROP_BROAD_SYNC: skip CPU wait but still ensure GPU stream ordering.
+        // The bookkeeping runner may have launched GPU kernels (D2H staging,
+        // block table updates) on its own stream; the compute stream must wait
+        // for those before reading the same buffers in forward().
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(stream_wait_prev_bookkeeping)");
+        spec_bookkeeping_runner_.streamWait(cuda_graph::graphGetCurrentStream());
     }
 
     // Linear attention may rewrite KV mappings via swapLinearBlocks; wait on

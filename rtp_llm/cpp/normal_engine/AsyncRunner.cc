@@ -50,6 +50,10 @@ void AsyncRunner::sync(const torch::Stream& wait_stream) {
     event_.block(wait_stream);
 }
 
+void AsyncRunner::streamWait(const torch::Stream& wait_stream) {
+    event_.block(wait_stream);
+}
+
 void AsyncRunner::rethrowPendingExceptionIfAny(std::unique_lock<std::mutex>& lk) {
     if (!pending_exception_) {
         return;

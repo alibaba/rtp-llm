@@ -610,10 +610,11 @@ void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs
 
     // Gate host materialization: MHA reads device fields only, while MLA/
     // SparseMLA/ROCm/CP paths still consume the singular host block table.
-    // FP8 + CUDA graph decode: plan_cuda_graph → _plan_fp8_from_device works
-    // entirely on device; skip the D2H sync that .cpu() causes.
-    const bool skip_host_kv = enable_cuda_graph_ && !py_attn_inputs.is_prefill
-                              && description_.attention_conf.kv_cache_dtype == KvCacheDataType::FP8;
+    // FP8 + CUDA graph (after warmup): prepare_cuda_graph paths work entirely
+    // on device; skip the D2H sync that .cpu() causes. During warmup (capture),
+    // fillParams still needs the host block table, so skip only post-warmup.
+    const bool skip_host_kv =
+        enable_cuda_graph_ && !inputs.warmup && description_.attention_conf.kv_cache_dtype == KvCacheDataType::FP8;
     if (description_.attention_conf.use_mla && !skip_host_kv) {
         torch::Tensor group0 = inputs.kv_cache_kernel_block_id[0];
         if (group0.device().is_cuda()) {
