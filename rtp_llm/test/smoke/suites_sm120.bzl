@@ -71,8 +71,6 @@ def sm120_suites():
             #   CI sm12x stage 是 2 卡 → 这个 case 需要去 CI 实测一次再落 case。
             # TODO(PR-4 followup): tp2_sm120 / beam_search_tp2_sm120
             #   单卡 RTX 5000 Pro 跑不了；需要 2 卡环境（无 NVLink，PCIe TP）
-            # TODO(PR-4 followup): embedding_qwen_gte_7b_cudagraph_sm120
-            #   依赖 gte-Qwen2-7B (~14GB) 模型下载 + CUDA Graph 独立验证
             # Qwen3-1.7B greedy (top_k=1, max_new_tokens<=10), 模型已下载到
             #   /mnt/nas1/hf/models--Qwen--Qwen3-1.7B/snapshots/0060bc56d46589041c1048efd1a397421b1142b5
             # Qwen3-1.7B 没有 L20 baseline，golden 由 sm120 自录。
@@ -86,6 +84,44 @@ def sm120_suites():
                 name="qwen3_1_7b_bf16_sm120",
                 task_info="data/model/qwen3/q_r_qwen3_1_7b_greedy.json",
                 smoke_args="--act_type BF16 --warm_up 0",
+                gpu_type=["RTX_5000_PRO"],
+            ),
+            # 跨系列覆盖：Qwen3-8B dense (medium)，OpenAI chat completions 路径 +
+            # max_new_tokens<=10 + top_k=1 greedy；BF16/FP16 byte-identical 共享 task_info。
+            smoke_test(
+                name="bf16_qwen3_sm120",
+                task_info="data/model/qwen3/q_r_sm120.json",
+                smoke_args="--act_type BF16 --warm_up 0",
+                gpu_type=["RTX_5000_PRO"],
+            ),
+            smoke_test(
+                name="fp16_qwen3_sm120",
+                task_info="data/model/qwen3/q_r_sm120.json",
+                smoke_args="--act_type FP16 --warm_up 0",
+                gpu_type=["RTX_5000_PRO"],
+            ),
+            # 跨系列覆盖：Qwen2 dense (0.5B)，OpenAI chat completions 路径 + greedy；
+            # 跟 Qwen2.5 同 model_type=qwen_2，但模型权重不同，覆盖 Qwen2 系列。
+            smoke_test(
+                name="bf16_qwen2_sm120",
+                task_info="data/model/qwen2/q_r_sm120.json",
+                smoke_args="--act_type BF16 --warm_up 0",
+                gpu_type=["RTX_5000_PRO"],
+            ),
+            smoke_test(
+                name="fp16_qwen2_sm120",
+                task_info="data/model/qwen2/q_r_sm120.json",
+                smoke_args="--act_type FP16 --warm_up 0",
+                gpu_type=["RTX_5000_PRO"],
+            ),
+            # gte-Qwen2-7B-instruct DENSE_EMBEDDING + CUDA Graph capture/replay。
+            # 覆盖 sm8x_basic 的 embedding_qwen_gte_7b_cudagraph 同位；CUDA Graph
+            # 是 sm_120 上的新踩点（实测一次 PASS，无新 blocker）。
+            # golden 用 sm120 自录的 gte-embedding_sm120.pt 浮点向量。
+            smoke_test(
+                name="embedding_qwen_gte_7b_cudagraph_sm120",
+                task_info="data/model/qwen2/q_r_embedding_sm120.json",
+                smoke_args="--seq_size_per_block 64 --embedding_model 1 --act_type BF16 --concurrency_limit 2 --enable_cuda_graph 1  --enable_cuda_graph_debug_mode 1 --prefill_capture_config '150,155,160,380,400' --task_type DENSE_EMBEDDING --reserver_runtime_mem_mb 3072",
                 gpu_type=["RTX_5000_PRO"],
             ),
         ],
