@@ -26,8 +26,10 @@ import java.util.function.LongSupplier;
 public class RecentCacheKeyWindow {
 
     public static final long DEFAULT_TIME_WINDOW_MS = 30L * 60L * 1000L;
+    static final int DEFAULT_MAX_ENTRIES = 100_000;
 
     private final long timeWindowMs;
+    private final int maxEntries;
     private final LongSupplier nowSupplier;
     private final Deque<WindowEntry> windowEntries = new ArrayDeque<>();
     private final Map<Long, Long> cacheKeyCounts = new HashMap<>();
@@ -36,11 +38,16 @@ public class RecentCacheKeyWindow {
 
     @Autowired
     public RecentCacheKeyWindow(ConfigService configService) {
-        this(resolveTimeWindowMs(configService), System::currentTimeMillis);
+        this(resolveTimeWindowMs(configService), DEFAULT_MAX_ENTRIES, System::currentTimeMillis);
     }
 
     RecentCacheKeyWindow(long timeWindowMs, LongSupplier nowSupplier) {
+        this(timeWindowMs, DEFAULT_MAX_ENTRIES, nowSupplier);
+    }
+
+    RecentCacheKeyWindow(long timeWindowMs, int maxEntries, LongSupplier nowSupplier) {
         this.timeWindowMs = normalizeTimeWindowMs(timeWindowMs);
+        this.maxEntries = maxEntries > 0 ? maxEntries : DEFAULT_MAX_ENTRIES;
         this.nowSupplier = nowSupplier;
     }
 
@@ -50,6 +57,7 @@ public class RecentCacheKeyWindow {
 
     synchronized Snapshot record(List<Long> cacheKeys, long nowMs) {
         evictExpired(nowMs);
+        evictOverflow();
         if (cacheKeys == null || cacheKeys.isEmpty()) {
             return snapshotUnsafe(0L, 0L);
         }
@@ -99,6 +107,13 @@ public class RecentCacheKeyWindow {
                 return;
             }
             windowEntries.removeFirst();
+            oldest.cacheKeyCounts.forEach(this::decrementCacheKeyCount);
+        }
+    }
+
+    private void evictOverflow() {
+        while (windowEntries.size() >= maxEntries) {
+            WindowEntry oldest = windowEntries.removeFirst();
             oldest.cacheKeyCounts.forEach(this::decrementCacheKeyCount);
         }
     }

@@ -76,7 +76,9 @@ public class DefaultRouter implements Router {
             return validationResponse;
         }
 
-        reportRecentCacheKeyHitMetrics(balanceContext.getRequest());
+        if (balanceContext.getRetryCount() == 0) {
+            reportRecentCacheKeyHitMetrics(balanceContext.getRequest());
+        }
 
         // 2. Get routing configuration
         long requestId = balanceContext.getRequestId();
