@@ -114,18 +114,119 @@ class TrtllmDistEnv:
         if not self._capture_handles_pending:
             return
         self._barrier()
-        handles = self.handle.get_captured_handles()
-        offsets = self.handle.get_captured_offsets()
-        for idx in range(len(handles)):
+        try:
+            handles = self.handle.get_captured_handles()
+            offsets = self.handle.get_captured_offsets()
+            local_success = True
+        except Exception as e:
+            handles = []
+            offsets = torch.tensor([], dtype=torch.int64)
+            local_success = False
+            import logging
+            logging.warning(
+                "[TrtllmAllreduce] get_captured_handles failed on rank %d: %s. "
+                "Will coordinate with other ranks to discard this capture.",
+                self.rank, e,
+            )
+
+        # All ranks must agree on success; if any rank failed, everyone must
+        # discard. This prevents used_comm_ptrs_ from diverging across ranks.
+        success_flags = [None] * self.world_size
+        dist.all_gather_object(success_flags, local_success, group=self.group)
+
+        if not all(success_flags):
+            failed_ranks = [r for r, ok in enumerate(success_flags) if not ok]
+            # Only capture_clear here — no open_captured_handles has executed
+            # yet, so there are no IPC slots to roll back.  Calling
+            # invalidate_capture() without a prior begin_capture_session()
+            # would rewind to snapshot=0 and destroy base IPC slots.
+            self.handle.capture_clear()
+            self._barrier()
+            self._capture_handles_pending = False
+            raise RuntimeError(
+                f"[TrtllmAllreduce] get_captured_handles failed on rank(s) "
+                f"{failed_ranks}. All ranks are discarding this graph capture. "
+                f"The caller should re-capture the graph."
+            )
+
+        # All ranks must agree on the number of handles before entering the
+        # per-handle loop; otherwise a rank with fewer handles exits early
+        # while others block on the next all_gather_object, causing a hang.
+        local_count = len(handles)
+        count_list = [None] * self.world_size
+        dist.all_gather_object(count_list, local_count, group=self.group)
+        if len(set(count_list)) != 1:
+            # Same reasoning: no IPC slots opened yet, only clear graph state.
+            self.handle.capture_clear()
+            self._barrier()
+            self._capture_handles_pending = False
+            raise RuntimeError(
+                f"[TrtllmAllreduce] Handle count mismatch across ranks: "
+                f"{count_list}. All ranks are discarding this graph capture. "
+                f"The caller should re-capture the graph."
+            )
+        num_handles = local_count
+
+        # Snapshot the current used_comm_ptrs_ / IPC handle watermarks so
+        # that invalidate_capture() can roll back to exactly this point
+        # if any handle registration fails mid-loop.
+        self.handle.begin_capture_session()
+
+        open_error = None
+        for idx in range(num_handles):
             handle_list = [None] * self.world_size
             offset_list = [None] * self.world_size
             dist.all_gather_object(handle_list, handles[idx], group=self.group)
             dist.all_gather_object(offset_list, int(offsets[idx].item()), group=self.group)
             self._barrier()
-            self.handle.open_captured_handles(handle_list, offset_list, idx)
+
+            # open_captured_handles may TORCH_CHECK-fail on some ranks (e.g.
+            # stale pointer).  Wrap in try so we can synchronise the failure
+            # across all ranks instead of letting the failing rank exit the
+            # loop while others block on the next collective.
+            local_open_ok = True
+            if open_error is None:
+                try:
+                    self.handle.open_captured_handles(handle_list, offset_list, idx)
+                except Exception as e:
+                    local_open_ok = False
+                    open_error = e
+            else:
+                # Already failed on a previous iteration — skip but keep
+                # participating in collectives so other ranks don't hang.
+                local_open_ok = False
+
+            open_ok_flags = [None] * self.world_size
+            dist.all_gather_object(open_ok_flags, local_open_ok, group=self.group)
+
+            if not all(open_ok_flags):
+                failed_ranks = [r for r, ok in enumerate(open_ok_flags) if not ok]
+                if open_error is None:
+                    open_error = RuntimeError(
+                        f"[TrtllmAllreduce] open_captured_handles failed on "
+                        f"rank(s) {failed_ranks} at idx={idx}."
+                    )
+                # Continue the loop so remaining iterations' collectives are
+                # not orphaned — but mark that we need to bail out afterwards.
+
         self.handle.capture_clear()
+        if open_error is not None:
+            # Roll back only this session's slots (used_comm_ptrs_, map
+            # entries, IPC handles).  Previously committed sessions are safe.
+            self.handle.invalidate_capture()
+        else:
+            # All handles registered successfully — promote pending slots to
+            # committed state so future invalidate_capture() won't touch them.
+            self.handle.commit_capture()
         self._barrier()
         self._capture_handles_pending = False
+
+        if open_error is not None:
+            raise RuntimeError(
+                f"[TrtllmAllreduce] Captured IPC handle registration failed. "
+                f"All ranks have cleaned up. The caller should discard the "
+                f"captured graph and re-capture. Original error: {open_error}"
+            )
 
     @contextmanager
     def capture(self):

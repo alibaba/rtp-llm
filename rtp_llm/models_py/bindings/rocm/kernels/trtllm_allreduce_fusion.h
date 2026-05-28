@@ -26,6 +26,12 @@ void open_ar_fusion_data_handles(fptr_t fptr, std::vector<torch::Tensor> handles
 
 void ar_fusion_capture_clear(fptr_t fptr);
 
+void ar_fusion_invalidate_capture(fptr_t fptr);
+
+void ar_fusion_commit_capture(fptr_t fptr);
+
+void ar_fusion_begin_capture_session(fptr_t fptr);
+
 std::vector<torch::Tensor> get_ar_fusion_captured_handles(fptr_t fptr);
 
 torch::Tensor get_ar_fusion_captured_offsets(fptr_t fptr);
