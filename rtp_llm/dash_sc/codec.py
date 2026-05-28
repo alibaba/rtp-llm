@@ -925,15 +925,18 @@ def build_stream_response_from_generate_outputs(
     generate_think_token_num: int | None = None,
     finish_reason_override: int | None = None,
     _request_shape: list[int] | None = None,
+    *,
+    stream_finished: bool | None = None,
+    token_ids: list[int] | None = None,
 ) -> predict_v2_pb2.ModelStreamInferResponse:
     """Build ``ModelStreamInferResponse`` from one ``GenerateOutputs`` chunk.
 
-    When ``return_input_ids`` is True, prepends ``prompt_token_ids`` (request ``input_ids``)
-    before ``generated_ids`` and ``finish_reason``. After ``finish_reason`` appends
-    ``prompt_token_num`` (``AuxInfo.input_len``) and ``prompt_cached_token_num``
-    (``AuxInfo.reuse_len``). The same usage counters are also attached as response
-    parameters for dashllm / dashscope-serving clients. Output order is stable
-    across chunks.
+    ``stream_finished``: if provided, overrides ``out_py.finished`` for the wire
+    ``finished`` / ``finish_reason`` fields. Use when the servicer knows the gRPC
+    stream is not done yet (e.g. phase-2 will follow).
+
+    ``token_ids``: if provided, overrides the generated_ids from ``out_py``.
+    Use when the servicer rewrites the token payload (e.g. injecting </think>).
     """
     del _request_shape  # reserved for future shape alignment
     if not go.generate_outputs:
@@ -946,8 +949,12 @@ def build_stream_response_from_generate_outputs(
     infer.model_name = model_name
 
     out_py = go.generate_outputs[0]
-    finished = out_py.finished
-    generated_ids = _token_ids_list_from_generate_output(out_py)
+    finished = stream_finished if stream_finished is not None else out_py.finished
+    generated_ids = (
+        token_ids
+        if token_ids is not None
+        else _token_ids_list_from_generate_output(out_py)
+    )
 
     if return_input_ids and request_input_ids is not None:
         _append_prompt_token_ids_output(infer, request_input_ids)
@@ -1017,7 +1024,9 @@ def build_finish_reason_done_response(
     infer.id = dash_sc_request_id
     infer.model_name = model_name
     _append_generated_ids_output(infer, [])
-    _append_finish_reason_output(infer, finished=True, finish_reason_override=finish_reason)
+    _append_finish_reason_output(
+        infer, finished=True, finish_reason_override=finish_reason
+    )
     _append_finished_output(infer, finished=True)
     infer.parameters["incremental_output"].int64_param = 1
     return stream_resp
