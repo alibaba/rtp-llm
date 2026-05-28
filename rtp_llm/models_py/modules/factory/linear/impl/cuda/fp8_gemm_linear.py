@@ -4,6 +4,7 @@ from typing import Optional
 
 import torch
 
+from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import has_deep_gemm
 from rtp_llm.models_py.modules.factory.linear import LinearBase
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear import (
     CudaFp8DeepGEMMLinear,
@@ -11,6 +12,7 @@ from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear impo
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_flashinfer_linear import (
     CudaFp8FlashinferLinear,
 )
+from rtp_llm.models_py.utils.arch import is_sm12x
 from rtp_llm.ops import HWKernelConfig
 
 
@@ -18,6 +20,20 @@ class CudaFp8GEMMLinear(LinearBase):
     """CUDA FP8 GEMM wrapper."""
 
     FLASHINFER_M_THRESHOLD = CudaFp8FlashinferLinear.FLASHINFER_M_THRESHOLD
+
+    @classmethod
+    def _is_fp8_per_block_candidate(
+        cls,
+        quant_config: object,
+        weight: torch.Tensor,
+        weight_scales: Optional[torch.Tensor],
+    ) -> bool:
+        return (
+            weight_scales is not None
+            and quant_config is not None
+            and weight.dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz)
+            and quant_config.get_method() == "FP8_PER_BLOCK"
+        )
 
     @classmethod
     def can_handle(
@@ -29,11 +45,9 @@ class CudaFp8GEMMLinear(LinearBase):
         weight_scale_2: Optional[torch.Tensor] = None,
         input_scale: Optional[torch.Tensor] = None,
     ) -> bool:
-        if weight_scales is None or quant_config is None:
+        if not cls._is_fp8_per_block_candidate(quant_config, weight, weight_scales):
             return False
-        if weight.dtype not in (torch.float8_e4m3fn, torch.float8_e4m3fnuz):
-            return False
-        return quant_config.get_method() == "FP8_PER_BLOCK"
+        return has_deep_gemm() and not is_sm12x()
 
     @torch.inference_mode()
     def __init__(

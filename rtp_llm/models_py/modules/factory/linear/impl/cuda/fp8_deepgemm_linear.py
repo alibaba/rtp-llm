@@ -16,6 +16,7 @@ from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     sgl_per_token_group_quant_fp8,
 )
 from rtp_llm.models_py.modules.factory.linear import LinearBase
+from rtp_llm.models_py.utils.arch import is_sm12x
 from rtp_llm.ops import HWKernelConfig
 
 logger = logging.getLogger(__name__)
@@ -45,6 +46,11 @@ class CudaFp8DeepGEMMLinear(LinearBase):
         if weight.dtype not in (torch.float8_e4m3fn, torch.float8_e4m3fnuz):
             return False
 
+        # DeepGEMM 2.1.x wheel ships only sm_90/sm_100 cubins. Let sm_12x
+        # consumer Blackwell use the CUTLASS blockwise backend instead.
+        if not has_deep_gemm() or is_sm12x():
+            return False
+
         # Check quantization method - handle all other FP8 methods
         quant_method = quant_config.get_method()
         return quant_method == "FP8_PER_BLOCK"
@@ -69,8 +75,18 @@ class CudaFp8DeepGEMMLinear(LinearBase):
         self.bias = bias
 
         # Check if DeepGEMM is available
-        if not has_deep_gemm():
-            error_msg = "DeepGEMM is not available. Please install the `deep_gemm` package to enable DeepGEMM kernels."
+        if not has_deep_gemm() or is_sm12x():
+            if not has_deep_gemm():
+                error_msg = (
+                    "DeepGEMM is not available. Please install the `deep_gemm` "
+                    "package to enable DeepGEMM kernels."
+                )
+            else:
+                error_msg = (
+                    "DeepGEMM is unavailable on the current device. The bundled "
+                    "wheel supports sm90/sm100 only; sm12x FP8_PER_BLOCK dense "
+                    "layers use the CUTLASS backend."
+                )
             logger.error(error_msg)
             raise RuntimeError(error_msg)
         # Check weight and weight scale dimensions
