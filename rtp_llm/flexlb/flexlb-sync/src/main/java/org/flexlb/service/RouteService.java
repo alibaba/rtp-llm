@@ -145,11 +145,10 @@ public class RouteService {
         int maxNewTokens = reqOk ? req.getMaxNewTokens() : -1;
         int numBeams = reqOk ? req.getNumBeams() : -1;
         boolean forceDisableSp = reqOk && req.isForceDisableSpRun();
-        boolean prefillWorkerOk = hasAlivePrefillWorker();
         boolean decision = schedulerOk && cfgOk && reqOk
-                && maxNewTokens > 1 && numBeams <= 1 && !forceDisableSp && prefillWorkerOk;
-        logger.warn("dp-batch gate decision={} scheduler={} cfgDpBalance={} req={} maxNewTokens={} numBeams={} forceDisableSp={} prefillWorker={}",
-                decision, schedulerOk, cfgOk, reqOk, maxNewTokens, numBeams, forceDisableSp, prefillWorkerOk);
+                && maxNewTokens > 1 && numBeams <= 1 && !forceDisableSp;
+        logger.warn("dp-batch gate decision={} scheduler={} cfgDpBalance={} req={} maxNewTokens={} numBeams={} forceDisableSp={}",
+                decision, schedulerOk, cfgOk, reqOk, maxNewTokens, numBeams, forceDisableSp);
         return decision;
     }
 
