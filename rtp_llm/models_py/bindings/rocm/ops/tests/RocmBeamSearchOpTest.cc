@@ -3,12 +3,12 @@
 using namespace std;
 using namespace rtp_llm;
 
-class CudaBeamSearchOpTest: public BeamSearchOpTest {};
+class RocmBeamSearchOpTest: public BeamSearchOpTest {};
 
-TEST_F(CudaBeamSearchOpTest, simpleTest) {
+TEST_F(RocmBeamSearchOpTest, simpleTest) {
     runSimpleTests();
 }
 
-TEST_F(CudaBeamSearchOpTest, variableBeamWidthTest) {
+TEST_F(RocmBeamSearchOpTest, variableBeamWidthTest) {
     runVariableBeamWidthTests();
 }
