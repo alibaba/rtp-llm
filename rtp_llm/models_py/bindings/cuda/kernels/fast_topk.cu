@@ -265,6 +265,114 @@ __device__ void fast_topk_cuda_tl(const float* __restrict__ input, int* __restri
     }
 }
 
+__global__ __launch_bounds__(kThreadsPerBlock)  // topk
+    void topk_kernel(const FastTopKParams params) {
+    const auto& [input, row_starts, indices, lengths, input_stride] = params;
+    const auto bid                                                  = static_cast<uint64_t>(blockIdx.x);
+    const auto row_start                                            = row_starts == nullptr ? 0 : row_starts[bid];
+    const auto length                                               = lengths[bid];
+    const auto indice                                               = indices + bid * TopK;
+    const auto score                                                = input + bid * input_stride;
+    if (length <= TopK) {
+        return naive_topk_cuda<TopK>(score, indice, length);
+    } else {
+        return fast_topk_cuda_tl<TopK>(score, indice, row_start, length);
+    }
+}
+
+template<int kTopK>
+__global__ __launch_bounds__(kThreadsPerBlock) void topk_variable_kernel(const FastTopKParams params) {
+    const auto& [input, row_starts, indices, lengths, input_stride] = params;
+    const auto bid                                                  = static_cast<uint64_t>(blockIdx.x);
+    const auto row_start                                            = row_starts == nullptr ? 0 : row_starts[bid];
+    const auto length                                               = lengths[bid];
+    const auto indice                                               = indices + bid * kTopK;
+    const auto score                                                = input + bid * input_stride;
+    if (length <= kTopK) {
+        return naive_topk_cuda<kTopK>(score, indice, length);
+    } else {
+        return fast_topk_cuda_tl<kTopK>(score, indice, row_start, length);
+    }
+}
+
+__global__ __launch_bounds__(kThreadsPerBlock)  // decode
+    void topk_transform_decode_kernel(const FastTopKParams params, int32_t* __restrict__ dst_page_table) {
+    const auto& [input, _1, _2, lengths, input_stride] = params;
+    const auto bid                                     = static_cast<uint64_t>(blockIdx.x);
+    const auto tid                                     = threadIdx.x;
+    const auto row_start                               = 0;
+    const auto length                                  = lengths[bid];
+    const auto dst_page_entry                          = dst_page_table + bid * TopK;
+    const auto score                                   = input + bid * input_stride;
+    if (length <= TopK) {
+        return naive_topk_transform_decode(score, length, dst_page_entry);
+    } else {
+        __shared__ int s_indices[TopK];
+        fast_topk_cuda_tl<TopK>(score, s_indices, row_start, length);
+        // copy src[s_indices] to dst, we manually unroll here
+        static_assert(TopK % kThreadsPerBlock == 0);
+        static_assert(TopK / kThreadsPerBlock == 2);
+        const auto idx_0      = tid;
+        const auto pos_0      = s_indices[idx_0];
+        dst_page_entry[idx_0] = pos_0;
+        const auto idx_1      = tid + kThreadsPerBlock;
+        const auto pos_1      = s_indices[idx_1];
+        dst_page_entry[idx_1] = pos_1;
+    }
+}
+
+__global__ __launch_bounds__(kThreadsPerBlock)  // prefill
+    void topk_transform_prefill_kernel(const FastTopKParams params,
+                                       int32_t* __restrict__ dst_page_table,
+                                       const int32_t* __restrict__ src_page_table,
+                                       const int64_t src_stride,
+                                       const int32_t* __restrict__ cu_seqlens_q,
+                                       const int64_t prefill_bs) {
+    const auto& [input, row_starts, _, lengths, input_stride] = params;
+    const auto bid                                            = static_cast<uint64_t>(blockIdx.x);
+    const auto tid                                            = threadIdx.x;
+    const auto length                                         = lengths[bid];
+    const auto row_start                                      = row_starts == nullptr ? 0 : row_starts[bid];
+    const auto dst_page_entry                                 = dst_page_table + bid * TopK;
+    const auto score                                          = input + bid * input_stride;
+
+    /// NOTE: prefill bs is usually small, we can just use a simple loop here
+    /// We ensure that last cu_seqlens is equal to number of blocks launched
+    __shared__ const int32_t* s_src_page_entry;
+    if (C10_LIKELY(prefill_bs <= kThreadsPerBlock)) {
+        if (tid < prefill_bs) {
+            if (bid >= cu_seqlens_q[tid] && bid < cu_seqlens_q[tid + 1]) {
+                s_src_page_entry = src_page_table + tid * src_stride;
+            }
+        }
+    } else {
+        for (int64_t i = tid; i < prefill_bs; i += kThreadsPerBlock) {
+            if (bid >= cu_seqlens_q[i] && bid < cu_seqlens_q[i + 1]) {
+                s_src_page_entry = src_page_table + i * src_stride;
+            }
+        }
+    }
+    __syncthreads();
+    const auto src_page_entry = s_src_page_entry;
+
+    if (length <= TopK) {
+        return naive_topk_transform(score, length, dst_page_entry, src_page_entry);
+    } else {
+        __shared__ int s_indices[TopK];
+        fast_topk_cuda_tl<TopK>(score, s_indices, row_start, length);
+        // copy src[s_indices] to dst, we manually unroll here
+        static_assert(TopK % kThreadsPerBlock == 0);
+        static_assert(TopK / kThreadsPerBlock == 2);
+        const auto idx_0      = tid;
+        const auto pos_0      = s_indices[idx_0];
+        dst_page_entry[idx_0] = src_page_entry[pos_0];
+        const auto idx_1      = tid + kThreadsPerBlock;
+        const auto pos_1      = s_indices[idx_1];
+        dst_page_entry[idx_1] = src_page_entry[pos_1];
+    }
+}
+
+
 __global__ __launch_bounds__(kThreadsPerBlock)  // prefill, ragged kv
     void topk_transform_prefill_ragged_kernel(const FastTopKParams params,
                                               int32_t* __restrict__ topk_indices_ragged,
