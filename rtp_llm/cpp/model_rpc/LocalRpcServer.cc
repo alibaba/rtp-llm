@@ -14,6 +14,30 @@ using namespace std;
 
 namespace rtp_llm {
 
+namespace {
+
+std::string formatRequestLogTag(const std::string& request_key, const RequestInfo& request_info) {
+    std::string tag = "request [" + request_key + "]";
+    if (!request_info.trace_id.empty()) {
+        tag += ", trace id [" + request_info.trace_id + "]";
+    }
+    if (!request_info.request_id.empty()) {
+        tag += ", source request id [" + request_info.request_id + "]";
+    }
+    if (!request_info.frontend_ip.empty()) {
+        tag += ", frontend ip [" + request_info.frontend_ip + "]";
+    }
+    if (!request_info.dash_ip.empty()) {
+        tag += ", dash ip [" + request_info.dash_ip + "]";
+    }
+    if (!request_info.source_role.empty()) {
+        tag += ", source role [" + request_info.source_role + "]";
+    }
+    return tag;
+}
+
+}  // namespace
+
 grpc::Status LocalRpcServer::init(const EngineInitParams&                       maga_init_params,
                                   py::object                                    mm_process_engine,
                                   std::unique_ptr<ProposeModelEngineInitParams> propose_params) {
@@ -57,9 +81,16 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
 }
 
 grpc::Status LocalRpcServer::serializeErrorMsg(const string& request_key, ErrorInfo error_info) {
+    return serializeErrorMsg(request_key, RequestInfo(), error_info);
+}
+
+grpc::Status LocalRpcServer::serializeErrorMsg(const string&      request_key,
+                                               const RequestInfo& request_info,
+                                               ErrorInfo          error_info) {
     const auto& error_msg = error_info.ToString();
-    RTP_LLM_LOG_WARNING("request [%s], error code [%s], error message [%s]",
-                        request_key.c_str(),
+    const auto  request_log_tag = formatRequestLogTag(request_key, request_info);
+    RTP_LLM_LOG_WARNING("%s, error code [%s], error message [%s]",
+                        request_log_tag.c_str(),
                         ErrorCodeToString(error_info.code()).c_str(),
                         error_msg.c_str());
     auto           grpc_error_code = transErrorCodeToGrpc(error_info.code());
@@ -70,7 +101,7 @@ grpc::Status LocalRpcServer::serializeErrorMsg(const string& request_key, ErrorI
     if (error_details.SerializeToString(&error_details_serialized)) {
         return grpc::Status(grpc_error_code, error_msg, error_details_serialized);
     } else {
-        RTP_LLM_LOG_WARNING("request [%s] error details serialize to string failed", request_key.c_str());
+        RTP_LLM_LOG_WARNING("%s error details serialize to string failed", request_log_tag.c_str());
         return grpc::Status(grpc_error_code, error_msg);
     }
 }
@@ -86,7 +117,7 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
         const auto result = stream->nextOutput();
         if (!result.ok()) {
             if (result.status().code() != ErrorCode::FINISHED) {
-                return serializeErrorMsg(request_key, result.status());
+                return serializeErrorMsg(request_key, stream->generateInput()->request_info, result.status());
             } else {
                 break;
             }
@@ -128,6 +159,7 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
     auto generate_context =
         GenerateContext(request_id, request->generate_config().timeout_ms(), context, metrics_reporter_, meta_);
     auto input = QueryConverter::transQuery(request);
+    generate_context.request_info = input->request_info;
     if (applyTimelineGate(generate_context.request_key,
                           input->generate_config->gen_timeline,
                           input->generate_config->profile_step,
@@ -140,7 +172,9 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
         RTP_LLM_PROFILE_SCOPE("rpc.mm_update_features");
         auto mm_res = mm_processor_->updateMultimodalFeatures(input);
         if (!mm_res.ok()) {
-            generate_context.error_status = serializeErrorMsg(generate_context.request_key, mm_res);
+            generate_context.error_info = mm_res;
+            generate_context.error_status =
+                serializeErrorMsg(generate_context.request_key, generate_context.request_info, mm_res);
         }
     }
     CHECK_ERROR_STATUS(generate_context);

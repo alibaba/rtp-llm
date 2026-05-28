@@ -102,12 +102,32 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     return generate_config;
 }
 
+RequestInfo QueryConverter::transRequestInfo(const RequestInfoPB& request_info_pb) {
+    RequestInfo request_info;
+    request_info.frontend_ip = request_info_pb.frontend_ip();
+    request_info.dash_ip     = request_info_pb.dash_ip();
+    request_info.trace_id    = request_info_pb.trace_id();
+    request_info.request_id  = request_info_pb.request_id();
+    request_info.source_role = request_info_pb.source_role();
+    return request_info;
+}
+
 std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB* input) {
     std::shared_ptr<GenerateInput> generate_input = std::make_shared<GenerateInput>();
     generate_input->request_id                    = input->request_id();
+    generate_input->request_info                  = transRequestInfo(input->request_info());
     generate_input->begin_time_us                 = autil::TimeUtility::currentTimeInMicroSeconds();
     if (input->has_generate_config()) {
         generate_input->generate_config = transGenerateConfig(&(input->generate_config()));
+    }
+    if (generate_input->request_info.trace_id.empty() && generate_input->generate_config) {
+        generate_input->request_info.trace_id = generate_input->generate_config->trace_id;
+    }
+    if (generate_input->request_info.request_id.empty()) {
+        generate_input->request_info.request_id = std::to_string(input->request_id());
+    }
+    if (generate_input->generate_config && generate_input->generate_config->trace_id.empty()) {
+        generate_input->generate_config->trace_id = generate_input->request_info.trace_id;
     }
     generate_input->input_ids =
         torch::from_blob(const_cast<int*>(input->token_ids().data()), {(int64_t)input->token_ids_size()}, torch::kInt32)
