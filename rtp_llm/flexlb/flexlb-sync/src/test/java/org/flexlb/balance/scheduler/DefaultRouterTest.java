@@ -142,6 +142,10 @@ class DefaultRouterTest {
     private void injectRecentCacheMetricReporter(RecentCacheKeyWindow recentCacheKeyWindow,
                                                  CacheMetricsReporter cacheMetricsReporter) {
         try {
+            Field enabledField = DefaultRouter.class.getDeclaredField("cacheAwareSchedulingEnabled");
+            enabledField.setAccessible(true);
+            enabledField.set(defaultRouter, true);
+
             Field recentCacheKeyWindowField = DefaultRouter.class.getDeclaredField("recentCacheKeyWindow");
             recentCacheKeyWindowField.setAccessible(true);
             recentCacheKeyWindowField.set(defaultRouter, recentCacheKeyWindow);

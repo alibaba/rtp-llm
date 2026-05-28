@@ -38,6 +38,7 @@ public class DefaultRouter implements Router {
 
     private final Map<RoleType, LoadBalancer> loadBalancerMap;
     private final GroupRoutingPolicy groupRoutingPolicy;
+    private final boolean cacheAwareSchedulingEnabled;
 
     @Autowired(required = false)
     private RecentCacheKeyWindow recentCacheKeyWindow;
@@ -48,6 +49,7 @@ public class DefaultRouter implements Router {
     public DefaultRouter(ConfigService configService, GroupRoutingPolicy groupRoutingPolicy) {
         this.groupRoutingPolicy = groupRoutingPolicy;
         FlexlbConfig config = configService.loadBalanceConfig();
+        this.cacheAwareSchedulingEnabled = config.isCacheAwareSchedulingEnabled();
         this.loadBalancerMap = new EnumMap<>(RoleType.class);
 
         for (RoleType roleType : RoleType.values()) {
@@ -100,7 +102,8 @@ public class DefaultRouter implements Router {
     }
 
     private void reportRecentCacheKeyHitMetrics(Request request) {
-        if (request == null || recentCacheKeyWindow == null || cacheMetricsReporter == null) {
+        if (!cacheAwareSchedulingEnabled || request == null
+                || recentCacheKeyWindow == null || cacheMetricsReporter == null) {
             return;
         }
 
