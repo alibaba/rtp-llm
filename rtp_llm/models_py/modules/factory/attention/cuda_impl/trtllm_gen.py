@@ -8,6 +8,7 @@ import triton.language as tl
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.utils import is_blackwell
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
+from rtp_llm.models_py.utils.arch import is_sm12x
 from rtp_llm.ops import AttentionConfigs, FMHAType, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCacheDecodeOp,
@@ -336,7 +337,7 @@ class FlashInferTRTLLMPrefillOp(object):
         # runner throws "Unsupported architecture" (fmhaRunner.cuh:37) on
         # forward. Fall through so dispatch picks the paged
         # PyFlashinferPagedPrefillImpl instead.
-        if is_blackwell() and torch.cuda.get_device_capability()[0] == 12:
+        if is_sm12x():
             return False
         return (
             is_blackwell()
@@ -452,7 +453,7 @@ class FlashInferTRTLLMDecodeOp(object):
         # runner throws "Unsupported architecture" (fmhaRunner.cuh:37) on
         # the first decode forward. Fall through so dispatch picks the
         # ragged PyFlashinferPaged path instead.
-        if torch.cuda.get_device_capability()[0] == 12:
+        if is_sm12x():
             return False
         # Note: this max q length is used for mtp decode verification.
         decode_kernel_max_q_len = 11

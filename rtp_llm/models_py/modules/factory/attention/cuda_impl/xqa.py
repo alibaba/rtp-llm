@@ -6,7 +6,7 @@ import torch
 
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
-from rtp_llm.models_py.utils.arch import get_num_device_sms
+from rtp_llm.models_py.utils.arch import get_num_device_sms, is_sm12x
 from rtp_llm.ops import (
     AttentionConfigs,
     FMHAConfig,
@@ -89,7 +89,7 @@ class XQAImpl(FMHAImplBase):
         # at first forward. C++ XQAAttnOp.support gate is `>= kSM_90` and
         # passes sm_120 erroneously — short-circuit here so dispatch falls
         # through to PyFlashinferPaged. See blockers.md R-4.
-        if torch.cuda.get_device_capability()[0] == 12:
+        if is_sm12x():
             return False
         fmha_impl = XQAAttnOp(attn_configs)
         return fmha_impl.support(attn_inputs)
@@ -152,6 +152,13 @@ class XQADecodeImpl(FMHAImplBase):
         if attn_inputs.is_prefill:
             return False
         if attn_configs.kv_cache_dtype == KvCacheDataType.INT8:
+            return False
+        # sm_120a consumer Blackwell: the FlashInfer xqa() build here rejects
+        # the nb_sub_seq_per_seq kwarg used in forward(), and XQA has no
+        # sm_120a binding anyway. Gate it off so decode dispatch falls through
+        # to PyFlashinferDecodeImpl (the working sm_120 path), mirroring the
+        # XQAImpl.support gate.
+        if is_sm12x():
             return False
         if torch.cuda.get_device_capability()[0] not in [9, 10, 12]:
             return False
