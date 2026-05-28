@@ -273,3 +273,4 @@ class LinearFactory:
             return False
 
         return weight.dtype == torch.uint8
+
