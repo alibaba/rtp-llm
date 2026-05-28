@@ -1,16 +1,20 @@
-"""Fused RoPE + Hadamard for DSV3.2 indexer **prefill** path.
+"""Fused RoPE + Hadamard for DSV3.2 / GLM-5 indexer **prefill** path.
 
 Replaces the 4-op chain in ``IndexerOp.apply_rope_and_rotate_q_k{,_cp}``:
     rope_q (flashinfer) + rope_k (flashinfer) + had_q (fast_hadamard) + had_k (fast_hadamard)
 
 with **2 launches**:
   1. Triton kernel ``_fused_rope_qk_had_k_kernel``
-       - In-place NeOX RoPE on Q[:, :, :rope_head_dim] (all heads)
-       - In-place NeOX RoPE on K[:, :rope_head_dim], then 128-pt Hadamard butterfly,
+       - In-place RoPE on Q[:, :, :rope_head_dim] (all heads)
+       - In-place RoPE on K[:, :rope_head_dim], then 128-pt Hadamard butterfly,
          writes K_done to a separate output buffer
   2. cuBLAS bf16 GEMM
        - ``Q.view(-1, head_dim) @ H_scaled`` where H is the Sylvester matrix scaled
          by 1/sqrt(head_dim). Produces Q_done.
+
+Supports both **NeOX** (half-split) and **interleaved** (even/odd) RoPE styles:
+  - NeOX (is_neox_style=True, DSV3.2): pairs (x[i], x[i+half])
+  - Interleaved (is_neox_style=False, GLM-5): pairs (x[2i], x[2i+1])
 
 This design avoids the 7-stage butterfly cost for Q (which has 32× more rows than K
 under TP=2) by leveraging cuBLAS tensor cores. K stays in Triton because K is small
@@ -83,9 +87,14 @@ def _fused_rope_qk_had_k_kernel(
     H: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     ROPE_HALF: tl.constexpr,
+    IS_NEOX: tl.constexpr,
 ):
     """1 program per token. Processes Q (all H heads, RoPE in-place) + K (RoPE +
-    Hadamard, write to k_out)."""
+    Hadamard, write to k_out).
+
+    IS_NEOX=True  (NeOX / half-split):   pairs (x[i], x[i+half])
+    IS_NEOX=False (interleaved / GPT-J):  pairs (x[2i], x[2i+1])
+    """
     t = tl.program_id(0).to(tl.int64)
     pos = tl.load(pos_ptr + t)
 
@@ -97,43 +106,62 @@ def _fused_rope_qk_had_k_kernel(
 
     # ===== Q RoPE in-place (all H heads) =====
     head_offs = tl.arange(0, H)
-    q_first = tl.load(
-        q_ptr + t * stride_qt + head_offs[:, None] * stride_qh + rope_idx[None, :]
-    ).to(tl.float32)
-    q_second = tl.load(
-        q_ptr + t * stride_qt + head_offs[:, None] * stride_qh + (ROPE_HALF + rope_idx)[None, :]
-    ).to(tl.float32)
-    q_first_new = q_first * cos[None, :] - q_second * sin[None, :]
-    q_second_new = q_second * cos[None, :] + q_first * sin[None, :]
-    tl.store(
-        q_ptr + t * stride_qt + head_offs[:, None] * stride_qh + rope_idx[None, :],
-        q_first_new.to(tl.bfloat16),
-    )
-    tl.store(
-        q_ptr + t * stride_qt + head_offs[:, None] * stride_qh + (ROPE_HALF + rope_idx)[None, :],
-        q_second_new.to(tl.bfloat16),
-    )
-    # Q's NoPE part (>= 2*ROPE_HALF) stays untouched.
+    if IS_NEOX:
+        q_first = tl.load(
+            q_ptr + t * stride_qt + head_offs[:, None] * stride_qh + rope_idx[None, :]
+        ).to(tl.float32)
+        q_second = tl.load(
+            q_ptr + t * stride_qt + head_offs[:, None] * stride_qh + (ROPE_HALF + rope_idx)[None, :]
+        ).to(tl.float32)
+        q_first_new = q_first * cos[None, :] - q_second * sin[None, :]
+        q_second_new = q_second * cos[None, :] + q_first * sin[None, :]
+        tl.store(
+            q_ptr + t * stride_qt + head_offs[:, None] * stride_qh + rope_idx[None, :],
+            q_first_new.to(tl.bfloat16),
+        )
+        tl.store(
+            q_ptr + t * stride_qt + head_offs[:, None] * stride_qh + (ROPE_HALF + rope_idx)[None, :],
+            q_second_new.to(tl.bfloat16),
+        )
+    else:
+        rope2_idx = tl.arange(0, 2 * ROPE_HALF)
+        q_rope = tl.load(
+            q_ptr + t * stride_qt + head_offs[:, None] * stride_qh + rope2_idx[None, :]
+        ).to(tl.float32)
+        q_pairs = q_rope.reshape(H, ROPE_HALF, 2)
+        q_even, q_odd = tl.split(q_pairs)
+        q_even_new = q_even * cos[None, :] - q_odd * sin[None, :]
+        q_odd_new = q_odd * cos[None, :] + q_even * sin[None, :]
+        q_out = tl.join(q_even_new.to(tl.bfloat16), q_odd_new.to(tl.bfloat16))
+        q_out = q_out.reshape(H, 2 * ROPE_HALF)
+        tl.store(
+            q_ptr + t * stride_qt + head_offs[:, None] * stride_qh + rope2_idx[None, :],
+            q_out,
+        )
 
     # ===== K path: RoPE + Hadamard, entirely in registers =====
-    # Load full K row + partner (k[idx XOR ROPE_HALF]) + extended cos/sin (broadcast
-    # idx % ROPE_HALF via bitwise &). All loads hit L1 due to spatial locality.
     k_full = tl.load(k_ptr + t * stride_kt + full_idx).to(tl.float32)
-    xor_idx = full_idx ^ ROPE_HALF
-    k_partner = tl.load(k_ptr + t * stride_kt + xor_idx).to(tl.float32)
-    inner_idx = full_idx & (ROPE_HALF - 1)
-    cos_ext = tl.load(cos_sin_cache_ptr + pos * stride_csc_p + inner_idx).to(tl.float32)
-    sin_ext = tl.load(cos_sin_cache_ptr + pos * stride_csc_p + ROPE_HALF + inner_idx).to(tl.float32)
-    # NeOX RoPE on rope dims, pass-through for NoPE dims (>= 2*ROPE_HALF):
-    #   For idx < ROPE_HALF:        k_rope[i] = k[i] * cos[i] - k[i + ROPE_HALF] * sin[i]
-    #   For ROPE_HALF <= i < 2*RH:  k_rope[i] = k[i] * cos[i-RH] + k[i-RH] * sin[i-RH]
-    #   For i >= 2*ROPE_HALF:       k_rope[i] = k[i]
-    sign = tl.where(full_idx < ROPE_HALF, -1.0, 1.0)
-    is_rope = full_idx < 2 * ROPE_HALF
-    k_rope = tl.where(is_rope, k_full * cos_ext + sign * k_partner * sin_ext, k_full)
-    # bf16 round-trip to match baseline numerics: baseline does flashinfer
-    # in-place RoPE (writes bf16) then re-reads as bf16. We compute in fp32 but
-    # round-trip here so the Hadamard input bit-matches baseline.
+    if IS_NEOX:
+        xor_idx = full_idx ^ ROPE_HALF
+        k_partner = tl.load(k_ptr + t * stride_kt + xor_idx).to(tl.float32)
+        inner_idx = full_idx & (ROPE_HALF - 1)
+        cos_ext = tl.load(cos_sin_cache_ptr + pos * stride_csc_p + inner_idx).to(tl.float32)
+        sin_ext = tl.load(cos_sin_cache_ptr + pos * stride_csc_p + ROPE_HALF + inner_idx).to(tl.float32)
+        sign = tl.where(full_idx < ROPE_HALF, -1.0, 1.0)
+        is_rope = full_idx < 2 * ROPE_HALF
+        k_rope = tl.where(is_rope, k_full * cos_ext + sign * k_partner * sin_ext, k_full)
+    else:
+        k_pairs = k_full.reshape(HEAD_DIM // 2, 2)
+        k_a, k_b = tl.split(k_pairs)
+        k_partner = tl.join(k_b, k_a).reshape(HEAD_DIM)
+        sign = tl.where((full_idx & 1) == 0, -1.0, 1.0)
+        inner_idx = (full_idx >> 1) & (ROPE_HALF - 1)
+        cos_ext = tl.load(cos_sin_cache_ptr + pos * stride_csc_p + inner_idx).to(tl.float32)
+        sin_ext = tl.load(cos_sin_cache_ptr + pos * stride_csc_p + ROPE_HALF + inner_idx).to(tl.float32)
+        is_rope = full_idx < 2 * ROPE_HALF
+        k_rope = tl.where(is_rope,
+                          k_full * cos_ext + sign * k_partner * sin_ext,
+                          k_full)
     k_rope = k_rope.to(tl.bfloat16).to(tl.float32)
 
     # Hadamard butterfly directly on in-register k_rope (BLOCK_M=1, no HBM round-trip)
@@ -178,10 +206,14 @@ def fused_prefill_rope_hadamard_qk(
     positions: torch.Tensor,        # [T] int32
     cos_sin_cache: torch.Tensor,    # [max_pos, rope_head_dim] fp32 (cos|sin layout)
     rope_head_dim: int,
+    is_neox_style: bool = True,
     num_warps: int = 2,
     num_stages: int = 3,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Apply NeOX RoPE + Hadamard to (Q, K) in one Triton launch + one cuBLAS GEMM.
+    """Apply RoPE + Hadamard to (Q, K) in one Triton launch + one cuBLAS GEMM.
+
+    Args:
+        is_neox_style: True for NeOX (half-split) RoPE, False for interleaved (even/odd).
 
     Returns:
         (q_done, k_done):
@@ -214,6 +246,7 @@ def fused_prefill_rope_hadamard_qk(
         cos_sin_cache.stride(0),
         H=H, HEAD_DIM=D,
         ROPE_HALF=rope_head_dim // 2,
+        IS_NEOX=is_neox_style,
         num_warps=num_warps, num_stages=num_stages,
     )
 
