@@ -428,6 +428,9 @@ public:
     }
 
     std::string traceId() const {
+        if (!generate_input_->request_info.trace_id.empty()) {
+            return generate_input_->request_info.trace_id;
+        }
         return generate_input_->generate_config->trace_id;
     }
 

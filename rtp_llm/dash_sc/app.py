@@ -291,6 +291,7 @@ class DashScApp:
                 backend_visitor = create_backend_rpc_server_visitor(
                     py_env_configs=self.py_env_configs,
                     model_config=model_config,
+                    source_role="dash",
                 )
 
                 base_tok = TokenizerFactory.create(

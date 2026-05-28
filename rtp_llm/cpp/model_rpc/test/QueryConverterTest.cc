@@ -17,6 +17,11 @@ class QueryConverterTest: public DeviceTestBase {};
 
 TEST_F(QueryConverterTest, testTransInput) {
     GenerateInputPB input;
+    input.mutable_request_info()->set_frontend_ip("10.0.0.1");
+    input.mutable_request_info()->set_dash_ip("10.0.0.2");
+    input.mutable_request_info()->set_trace_id("trace-123");
+    input.mutable_request_info()->set_request_id("source-request-123");
+    input.mutable_request_info()->set_source_role("frontend");
     input.add_token_ids(0);
     input.add_token_ids(1);
 
@@ -45,6 +50,11 @@ TEST_F(QueryConverterTest, testTransInput) {
     auto& input_ids      = generate_input->input_ids;
     ASSERT_EQ(input_ids.numel(), 2);
     ASSERT_EQ(input_ids.data_ptr<int32_t>()[0], 0);
+    ASSERT_EQ(generate_input->request_info.frontend_ip, "10.0.0.1");
+    ASSERT_EQ(generate_input->request_info.dash_ip, "10.0.0.2");
+    ASSERT_EQ(generate_input->request_info.trace_id, "trace-123");
+    ASSERT_EQ(generate_input->request_info.request_id, "source-request-123");
+    ASSERT_EQ(generate_input->request_info.source_role, "frontend");
     auto generate_config = generate_input->generate_config;
     ASSERT_EQ(generate_config->min_new_tokens, 4);
     ASSERT_EQ(generate_config->max_new_tokens, 5);
@@ -191,6 +201,13 @@ TEST_F(QueryConverterTest, TransTensorPB_UnsupportedType) {
     torch::Tensor tensor = torch::ones({1}, torch::kInt64);
     TensorPB      tensor_pb;
     EXPECT_THROW(QueryConverter::transTensorPB(&tensor_pb, tensor), std::runtime_error);
+}
+
+TEST_F(QueryConverterTest, TimeoutErrorCodeMapsToGrpcDeadline) {
+    EXPECT_EQ(transErrorCodeToGrpc(ErrorCode::GENERATE_TIMEOUT), grpc::StatusCode::DEADLINE_EXCEEDED);
+    EXPECT_EQ(transErrorCodeToGrpc(ErrorCode::DEADLINE_EXCEEDED), grpc::StatusCode::DEADLINE_EXCEEDED);
+    EXPECT_EQ(transErrorCodeToGrpc(ErrorCode::WAIT_TO_RUN_TIMEOUT), grpc::StatusCode::DEADLINE_EXCEEDED);
+    EXPECT_EQ(transErrorCodeToGrpc(ErrorCode::KEEP_ALIVE_TIMEOUT), grpc::StatusCode::DEADLINE_EXCEEDED);
 }
 
 }  // namespace rtp_llm

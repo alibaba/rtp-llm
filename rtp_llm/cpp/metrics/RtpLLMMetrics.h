@@ -2,6 +2,7 @@
 
 #include "autil/Log.h"
 #include "kmonitor/client/MetricsReporter.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 #include <chrono>
 #include <cstdint>
 #include <thread>
@@ -17,11 +18,12 @@ namespace rtp_llm {
 class RpcMetricsCollector final {
 public:
     // rpc server metrics
-    bool    qps              = false;
-    bool    cancel_qps       = false;
-    bool    error_qps        = false;
-    int64_t onflight_request = 0;
-    int64_t total_rt_us      = 0;
+    bool      qps              = false;
+    bool      cancel_qps       = false;
+    bool      error_qps        = false;
+    ErrorCode error_code       = ErrorCode::NONE_ERROR;
+    int64_t   onflight_request = 0;
+    int64_t   total_rt_us      = 0;
 
     // pd-sep prefill and decode metrics
     int     retry_times           = 0;

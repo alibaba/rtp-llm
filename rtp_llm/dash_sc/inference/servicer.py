@@ -41,8 +41,12 @@ from rtp_llm.dash_sc.codec import (
 from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.frontend.request_id_generator import generate_request_id
 from rtp_llm.metrics import AccMetrics, kmonitor
-from rtp_llm.server.request_headers import extract_request_headers
-from rtp_llm.utils.base_model_datatypes import GenerateInput
+from rtp_llm.server.request_headers import (
+    extract_correlation_request_id,
+    extract_request_headers,
+    extract_trace_id,
+)
+from rtp_llm.utils.base_model_datatypes import GenerateInput, RequestInfo
 from rtp_llm.utils.util import AtomicCounter
 
 # Phase-2 dash_sc_request_id (response infer.id) suffix; keeps client able to tell
@@ -325,12 +329,20 @@ def _make_generate_input(
 ) -> GenerateInput:
     headers = dict(request_headers or {})
     headers.update(_headers_from_invocation_metadata(invocation_metadata))
+    trace_id = str(
+        getattr(generate_config, "trace_id", "") or extract_trace_id(headers) or ""
+    )
     return GenerateInput(
         request_id=request_id,
         token_ids=torch.tensor(input_ids_list, dtype=torch.int),
         mm_inputs=[],
         generate_config=generate_config,
         headers=headers,
+        request_info=RequestInfo(
+            trace_id=trace_id,
+            request_id=extract_correlation_request_id(headers) or trace_id,
+            source_role="dash",
+        ),
     )
 
 

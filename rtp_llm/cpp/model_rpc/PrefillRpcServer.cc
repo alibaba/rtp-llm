@@ -498,7 +498,8 @@ void fillPrefillTheoryHitMetricsCollector(PrefillRecentCacheKeyMetricsCollector&
             prefill_context.getStream()->reportEvent(StreamEvents::Error, new_error_code, new_error_msg);              \
         }                                                                                                              \
         prefill_context.error_info   = ErrorInfo(new_error_code, new_error_msg);                                       \
-        prefill_context.error_status = serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);     \
+        prefill_context.error_status =                                                                                 \
+            serializeErrorMsg(prefill_context.request_key, prefill_context.request_info, prefill_context.error_info);  \
         logPrefillFailureTrace("client_grpc_error", prefill_context);                                                  \
         return;                                                                                                        \
     }
@@ -543,6 +544,7 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] trans query", prefill_context.request_id);
     auto input = QueryConverter::transQuery(prefill_context.rpc_context.request);
+    prefill_context.request_info = input->request_info;
     if (applyTimelineGate(prefill_context.request_key,
                           input->generate_config->gen_timeline,
                           input->generate_config->profile_step,
@@ -587,7 +589,8 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
     if (!host || host->ip.empty()) {
         prefill_context.error_info =
             ErrorInfo(ErrorCode::GET_HOST_FAILED, "get host for decode cluster " + decode_cluster_name_ + " failed");
-        prefill_context.error_status = serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);
+        prefill_context.error_status =
+            serializeErrorMsg(prefill_context.request_key, prefill_context.request_info, prefill_context.error_info);
         logPrefillFailureTrace("get_rpc_connection_no_decode_host", prefill_context);
         return;
     }
@@ -596,7 +599,8 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
     if (!connect_status.ok()) {
         prefill_context.error_info   = ErrorInfo(ErrorCode::GET_CONNECTION_FAILED,
                                                "get grpc connection for decode addr " + decode_addr + " failed");
-        prefill_context.error_status = serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);
+        prefill_context.error_status =
+            serializeErrorMsg(prefill_context.request_key, prefill_context.request_info, prefill_context.error_info);
         prefill_context.decode_addr  = decode_addr;
         logPrefillFailureTrace("get_rpc_connection_failed", prefill_context);
         return;
@@ -690,7 +694,8 @@ void PrefillRpcServer::remoteLoadCacheStart(PrefillGenerateContext& prefill_cont
     RTP_LLM_LOG_DEBUG("request [%ld] remote load cache", prefill_context.request_id);
     prefill_context.error_info = waitStreamBeforeRun(prefill_context.getStream());
     if (prefill_context.error_info.hasError()) {
-        prefill_context.error_status = serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);
+        prefill_context.error_status =
+            serializeErrorMsg(prefill_context.request_key, prefill_context.request_info, prefill_context.error_info);
         logPrefillFailureTrace("wait_stream_before_run_failed", prefill_context);
         return;
     }
