@@ -17,6 +17,14 @@ ErrorInfo MultimodalProcessor::getFeatureHash(int32_t* token_ids, const torch::T
     // Derive one cache-key hash per multimodal token from the content of its feature row.
     // This makes the prefix cache key reflect the actual image/video embedding, so only
     // identical content reuses cached blocks.
+    //
+    // NOTE on the GPU->CPU sync below: hashing must inspect every byte of the embedding,
+    // so we have to materialize it on the host. This is a deliberate blocking step on the
+    // prefill-prep path (NOT the decode hot path). Without it the cache key would either
+    // (a) require a GPU hash kernel — adds significant complexity for the marginal benefit
+    // of avoiding one extra prefill-time D2H, or (b) fall back to URL-based hashing, which
+    // would over-share cache blocks between requests whose URLs match but whose actual
+    // embedding bytes differ (e.g. dynamic image transforms). Keep this sync.
     if (mm_emb.dim() < 1 || mm_emb.size(0) <= 0) {
         return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "multimodal feature tensor is empty");
     }
@@ -187,7 +195,7 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
     CHECK_AND_RETURN_REF(mm_embedding_res, MultimodalEmbedding(input->multimodal_inputs.value(), ip_port));
     input->multimodal_features = std::move(mm_embedding_res.mm_features);
     input->mm_position_ids     = std::move(mm_embedding_res.mm_position_ids);
-    input->mm_deepstack_embeds = std::move(mm_embedding_res.mm_deepstack_embeds);
+    input->mm_extra_input      = std::move(mm_embedding_res.mm_extra_input);
     CHECK_AND_RETURN_REF(
         expanded_ids,
         expandTokenIds(input->multimodal_features.value(), input->input_ids, input->multimodal_inputs.value()));

@@ -117,9 +117,9 @@ public:
         return decode_streams_;
     }
 
-    bool hasMMDeepstackEmbed() const {
+    bool hasMMExtraInput() const {
         for (auto& stream : context_streams_) {
-            if (stream->hasMultimodalDeepstackEmbeds()) {
+            if (stream->hasMultimodalExtraInput()) {
                 return true;
             }
         }

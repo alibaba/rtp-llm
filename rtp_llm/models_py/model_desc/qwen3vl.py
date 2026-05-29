@@ -14,6 +14,7 @@ from rtp_llm.models_py.modules import (
     MultimodalDeepstackInjector,
     MultimodalEmbeddingInjector,
     RMSNorm,
+    reshape_extra_input_to_deepstack,
 )
 from rtp_llm.ops import ParallelismConfig
 from rtp_llm.ops.compute_ops import (
@@ -81,7 +82,13 @@ class Qwen3VLModel(GptModelBase):
         text_tokens_mask = inputs.embedding_inputs.text_tokens_mask
         mm_features = inputs.multimodal_inputs.multimodal_features
         mm_feature_locs = inputs.multimodal_inputs.mm_features_locs
-        mm_deepstack_embeds = inputs.multimodal_inputs.mm_deepstack_embeds
+        mm_extra_input = inputs.multimodal_inputs.mm_extra_input
+        # extra input arrives as flat 1-D tensors; reshape back to deepstack [layers, tokens, hidden]
+        mm_deepstack_embeds = (
+            reshape_extra_input_to_deepstack(mm_extra_input, mm_features)
+            if mm_extra_input
+            else []
+        )
 
         inputs_embeds = self.embed_tokens(
             input_ids, position_ids, token_type_ids, text_tokens_mask

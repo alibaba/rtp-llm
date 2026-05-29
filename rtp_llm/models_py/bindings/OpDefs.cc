@@ -158,7 +158,7 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite(
             "mm_features_locs", &PyMultimodalInputs::mm_features_locs, "Multimodal features locations tensor")
         .def_readwrite(
-            "mm_deepstack_embeds", &PyMultimodalInputs::mm_deepstack_embeds, "Multimodal deepstack embeds tensor")
+            "mm_extra_input", &PyMultimodalInputs::mm_extra_input, "Multimodal model-specific extra input tensor")
         .def("__repr__", [](const PyMultimodalInputs& self) { return "PyMultimodalInputs"; });
 
     pybind11::class_<PyModelInputs>(m, "PyModelInputs")

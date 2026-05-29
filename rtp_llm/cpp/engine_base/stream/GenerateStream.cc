@@ -420,9 +420,9 @@ std::vector<torch::Tensor> GenerateStream::multimodalFeatures() const {
     }
 }
 
-std::vector<torch::Tensor> GenerateStream::multimodalDeepstackEmbeds() const {
-    if (generate_input_->mm_deepstack_embeds) {
-        auto& embeds = generate_input_->mm_deepstack_embeds.value();
+std::vector<torch::Tensor> GenerateStream::multimodalExtraInput() const {
+    if (generate_input_->mm_extra_input) {
+        auto& embeds = generate_input_->mm_extra_input.value();
         if (embeds.size() > 0) {
             return std::vector<torch::Tensor>(embeds.begin() + reuse_mm_length_, embeds.end());
         }
@@ -430,9 +430,9 @@ std::vector<torch::Tensor> GenerateStream::multimodalDeepstackEmbeds() const {
     return std::vector<torch::Tensor>();
 }
 
-bool GenerateStream::hasMultimodalDeepstackEmbeds() const {
-    if (generate_input_->mm_deepstack_embeds) {
-        auto& embeds = generate_input_->mm_deepstack_embeds.value();
+bool GenerateStream::hasMultimodalExtraInput() const {
+    if (generate_input_->mm_extra_input) {
+        auto& embeds = generate_input_->mm_extra_input.value();
         return embeds.size() > reuse_mm_length_;
     }
     return false;

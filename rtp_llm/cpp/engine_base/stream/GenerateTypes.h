@@ -66,7 +66,7 @@ public:
     std::optional<torch::Tensor>                text_tokens_mask;  // text part for 1 and multimodal part for 0
     std::optional<torch::Tensor>                mm_locs;           // multimodal input locations
     std::optional<std::vector<torch::Tensor>>   mm_position_ids;
-    std::optional<std::vector<torch::Tensor>>   mm_deepstack_embeds;
+    std::optional<std::vector<torch::Tensor>>   mm_extra_input;
 
     int     prefix_length = 0;
     int64_t begin_time_us = 0;
