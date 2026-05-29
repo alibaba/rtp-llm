@@ -157,7 +157,7 @@ def sm120_suites():
             ),
             smoke_test(
                 name="dense_fp8kv_cudagraph_sm120",
-                task_info="data/model/qwen25/q_r_new_model_py_fp8_kv_cache.json",
+                task_info="data/model/qwen25/q_r_fp8_kv_cache_sm120.json",
                 envs=["LOAD_PYTHON_MODEL=1"],
                 smoke_args="--warm_up 0 --seq_size_per_block 64 --act_type BF16 --test_block_num 1000 --fp8_kv_cache 1 --enable_cuda_graph 1",
                 gpu_type=["RTX_5000_PRO"],
