@@ -25,6 +25,14 @@ std::string pdKvRoleName(RoleType role_type) {
     return "unknown";
 }
 
+std::string pdKvBackendName(const PDSepConfig& pd_config) {
+    return pd_config.cache_store_rdma_mode ? "rdma" : "tcp";
+}
+
+PdKvWritebackMetricExtraTags pdKvBackendTags(const PDSepConfig& pd_config) {
+    return {{"backend", pdKvBackendName(pd_config)}};
+}
+
 int64_t buildPdKvWritebackDeadlineMs(const PDSepConfig& pd_config) {
     static constexpr int64_t kDefaultWritebackTimeoutMs = 5000;
     const int64_t            timeout_ms =
@@ -82,7 +90,31 @@ absl::StatusOr<BatchKVCacheResourcePtr> buildLocalDecodeSourceResource(const PdK
     return source_resource;
 }
 
-PdKvWritebackTransferPlan buildDecodeTransferPlanFromRequest(const PdKvWritebackLaunchRequest& request) {
+absl::Status fillExplicitTransferTargets(PdKvWritebackTransferPlan& plan, const PdKvWritebackTopologyPlan& topology) {
+    plan.prefill_transfer_targets.clear();
+    plan.prefill_transfer_targets.reserve(topology.mappings.size());
+    for (const auto& mapping : topology.mappings) {
+        auto target = parsePdKvWritebackTransferTarget(mapping.prefill_worker_addr,
+                                                       mapping.local_partition_count,
+                                                       mapping.local_partition_id,
+                                                       mapping.remote_partition_count,
+                                                       mapping.remote_partition_id,
+                                                       mapping.decode_rank,
+                                                       mapping.prefill_rank);
+        if (!target.ok()) {
+            return target.status();
+        }
+        plan.prefill_transfer_targets.push_back(target.value());
+    }
+    if (plan.prefill_transfer_targets.empty()) {
+        return absl::FailedPreconditionError("writeback transfer targets are empty");
+    }
+    return absl::OkStatus();
+}
+
+absl::StatusOr<PdKvWritebackTransferPlan>
+buildDecodeTransferPlanFromRequest(const PdKvWritebackLaunchRequest& request,
+                                   const PdKvWritebackTopologyPlan*  topology) {
     PdKvWritebackTransferPlan plan;
     plan.request_id               = request.manifest.request_id;
     plan.request_key              = request.manifest.request_key;
@@ -94,6 +126,12 @@ PdKvWritebackTransferPlan buildDecodeTransferPlanFromRequest(const PdKvWriteback
     plan.decode_group_block_ids   = request.manifest.group_block_ids;
     plan.layer_to_group_id        = request.source.layer_to_group_id;
     plan.prefill_transfer_servers = parsePdKvWritebackTransferServers(request.prefill_worker_addrs);
+    if (topology) {
+        auto status = fillExplicitTransferTargets(plan, *topology);
+        if (!status.ok()) {
+            return status;
+        }
+    }
     return plan;
 }
 
@@ -101,7 +139,8 @@ absl::Status sendOnDecodeWithClient(const PDSepConfig&                 pd_config
                                     PdKvWritebackTransferClient*       transfer_client,
                                     const kmonitor::MetricsReporterPtr metrics_reporter,
                                     const PdKvWritebackLaunchRequest&  request,
-                                    const BatchKVCacheResourcePtr&     source_resource) {
+                                    const BatchKVCacheResourcePtr&     source_resource,
+                                    const PdKvWritebackTopologyPlan*   topology = nullptr) {
     const int64_t                 send_begin_us = currentTimeUs();
     PdKvWritebackMetricsCollector collector;
     collector.transfer_qps = true;
@@ -119,7 +158,8 @@ absl::Status sendOnDecodeWithClient(const PDSepConfig&                 pd_config
                                   reason,
                                   pdKvRoleName(pd_config.role_type),
                                   request.source.partition_count,
-                                  "tp_equal");
+                                  "tp_equal",
+                                  pdKvBackendTags(pd_config));
     };
 
     if (!pd_config.enable_pd_kv_cache_writeback) {
@@ -148,17 +188,26 @@ absl::Status sendOnDecodeWithClient(const PDSepConfig&                 pd_config
         return compatibility_status;
     }
 
-    auto plan                   = buildDecodeTransferPlanFromRequest(request);
+    auto plan_status = buildDecodeTransferPlanFromRequest(request, topology);
+    if (!plan_status.ok()) {
+        report_send("failed", "transfer_target_invalid");
+        return plan_status.status();
+    }
+    auto plan                   = std::move(plan_status).value();
     plan.decode_group_block_ids = extractPdKvWritebackGroupBlockIds(source_resource);
     if (plan.decode_group_block_ids.empty()) {
         report_send("failed", "source_blocks_empty");
         return absl::FailedPreconditionError("source blocks are empty");
     }
 
-    RTP_LLM_LOG_INFO("PD KV writeback decode send start, request_id=%ld, reusable_blocks=%ld, cache_keys=%zu",
-                     request.manifest.request_id,
-                     request.manifest.reusable_block_count,
-                     request.manifest.cache_keys.size());
+    RTP_LLM_LOG_INFO(
+        "PD KV writeback decode send start, request_id=%ld, reusable_blocks=%ld, cache_keys=%zu, backend=%s, explicit_targets=%zu, fallback_servers=%zu",
+        request.manifest.request_id,
+        request.manifest.reusable_block_count,
+        request.manifest.cache_keys.size(),
+        pdKvBackendName(pd_config).c_str(),
+        plan.prefill_transfer_targets.size(),
+        plan.prefill_transfer_servers.size());
     auto status = transfer_client->transfer(plan);
     if (!status.ok()) {
         report_send("failed", "transfer_failed");
@@ -259,7 +308,8 @@ PdKvWritebackLaunchResult PdKvWritebackManager::launchFromDecode(const PdKvWrite
                                   reason,
                                   pdKvRoleName(pd_config_.role_type),
                                   request.destination.partition_count,
-                                  "tp_equal");
+                                  "tp_equal",
+                                  pdKvBackendTags(pd_config_));
     };
 
     if (!pd_config_.enable_pd_kv_cache_writeback) {
@@ -330,12 +380,14 @@ PdKvWritebackLaunchResult PdKvWritebackManager::launchFromDecode(const PdKvWrite
                         return rpc_client->requestPrefillReceive(request_copy, topology);
                     });
                 auto source_resource = buildLocalDecodeSourceResource(request_copy);
-                auto send_status =
-                    source_resource.ok() ?
-                        sendOnDecodeWithClient(
-                            pd_config, transfer_client, metrics_reporter, request_copy, source_resource.value()) :
-                        source_resource.status();
-                auto receive_status = receive_task.get();
+                auto send_status     = source_resource.ok() ? sendOnDecodeWithClient(pd_config,
+                                                                                 transfer_client,
+                                                                                 metrics_reporter,
+                                                                                 request_copy,
+                                                                                 source_resource.value(),
+                                                                                 &topology) :
+                                                              source_resource.status();
+                auto receive_status  = receive_task.get();
                 if (!receive_status.ok()) {
                     RTP_LLM_LOG_WARNING("PD KV writeback prefill receive fanout failed, request_id=%ld, error=%s",
                                         request_copy.manifest.request_id,
@@ -405,7 +457,8 @@ absl::Status PdKvWritebackManager::receiveOnPrefill(const PdKvWritebackLaunchReq
                                   reason,
                                   pdKvRoleName(pd_config_.role_type),
                                   request.destination.partition_count,
-                                  "tp_equal");
+                                  "tp_equal",
+                                  pdKvBackendTags(pd_config_));
     };
 
     if (!pd_config_.enable_pd_kv_cache_writeback) {
@@ -434,10 +487,11 @@ absl::Status PdKvWritebackManager::receiveOnPrefill(const PdKvWritebackLaunchReq
         return compatibility_status;
     }
 
-    RTP_LLM_LOG_INFO("PD KV writeback receive start, request_id=%ld, reusable_blocks=%ld, cache_keys=%zu",
+    RTP_LLM_LOG_INFO("PD KV writeback receive start, request_id=%ld, reusable_blocks=%ld, cache_keys=%zu, backend=%s",
                      request.manifest.request_id,
                      request.manifest.reusable_block_count,
-                     request.manifest.cache_keys.size());
+                     request.manifest.cache_keys.size(),
+                     pdKvBackendName(pd_config_).c_str());
 
     const int64_t malloc_begin_us = currentTimeUs();
     auto          status          = cache_writer_->mallocWritebackBlocks(destination_resource,

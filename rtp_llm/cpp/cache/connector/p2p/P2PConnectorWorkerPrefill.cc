@@ -217,21 +217,29 @@ P2PConnectorWorkerPrefill::sendKVCache(int64_t                                  
                                        const std::string&                                   unique_key,
                                        int64_t                                              deadline_ms,
                                        const std::vector<std::pair<std::string, uint32_t>>& decode_transfer_servers) {
+    auto tp_partition_ctxs = asymmetric_tp_util_->handleAsymmetricTP(decode_transfer_servers);
+    return sendKVCacheToPartitions(request_id, unique_key, deadline_ms, tp_partition_ctxs, "asymmetric_tp");
+}
+
+ErrorInfo P2PConnectorWorkerPrefill::sendKVCacheToPartitions(int64_t                                 request_id,
+                                                             const std::string&                      unique_key,
+                                                             int64_t                                 deadline_ms,
+                                                             const std::vector<AsymmetricTPContext>& tp_partition_ctxs,
+                                                             const std::string&                      target_source) {
     // D（deadline_ms）为 RPC 语义截止；return_deadline_ms = D - return_before，与 decode recv_req.deadline_ms 对齐。
     const int64_t return_before_ms   = config_.p2p_read_return_before_deadline_ms;
     const int64_t return_deadline_ms = deadline_ms - return_before_ms;
     RTP_LLM_LOG_INFO(
-        "sendKVCache [P2P]: start request_id=%ld, unique_key=%s, deadline_ms=%ld, return_deadline_ms=%ld, decode_servers=%zu",
+        "sendKVCache [P2P]: start request_id=%ld, unique_key=%s, deadline_ms=%ld, return_deadline_ms=%ld, targets=%zu, target_source=%s",
         request_id,
         unique_key.c_str(),
         deadline_ms,
         return_deadline_ms,
-        decode_transfer_servers.size());
+        tp_partition_ctxs.size(),
+        target_source.c_str());
     const int64_t start_time_us = currentTimeUs();
     auto          collector     = std::make_shared<PrefillWorkerSendMetricsCollector>();
 
-    // 不对称TP
-    auto tp_partition_ctxs = asymmetric_tp_util_->handleAsymmetricTP(decode_transfer_servers);
     if (tp_partition_ctxs.empty()) {
         const std::string error_msg = "sendKVCache: tp_partition_ctxs is empty, unique_key: " + unique_key;
         RTP_LLM_LOG_ERROR("%s", error_msg.c_str());
@@ -325,6 +333,31 @@ ErrorInfo P2PConnectorWorkerPrefill::sendDecodeToPrefillWriteback(const PdKvWrit
                              "writeback source layer buffer is empty");
         }
         computed_buffers_->addBuffer(plan.request_id, layer_cache_buffer, plan.deadline_ms);
+    }
+    if (!plan.prefill_transfer_targets.empty()) {
+        std::vector<AsymmetricTPContext> tp_partition_ctxs;
+        tp_partition_ctxs.reserve(plan.prefill_transfer_targets.size());
+        for (const auto& target : plan.prefill_transfer_targets) {
+            RTP_LLM_LOG_INFO(
+                "PD KV writeback explicit transfer target, request_id=%ld, decode_rank=%d, prefill_rank=%d, target=%s:%u, local_partition=%d/%d, remote_partition=%d/%d",
+                plan.request_id,
+                target.decode_rank,
+                target.prefill_rank,
+                target.ip.c_str(),
+                target.port,
+                target.local_partition_id,
+                target.local_partition_count,
+                target.remote_partition_id,
+                target.remote_partition_count);
+            tp_partition_ctxs.emplace_back(target.ip,
+                                           target.port,
+                                           target.local_partition_count,
+                                           target.local_partition_id,
+                                           target.remote_partition_count,
+                                           target.remote_partition_id);
+        }
+        return sendKVCacheToPartitions(
+            plan.request_id, plan.request_key, plan.deadline_ms, tp_partition_ctxs, "writeback_topology");
     }
     return sendKVCache(plan.request_id, plan.request_key, plan.deadline_ms, plan.prefill_transfer_servers);
 }

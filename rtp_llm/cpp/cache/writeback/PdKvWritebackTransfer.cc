@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/writeback/PdKvWritebackTransfer.h"
 
 #include <limits>
+#include <utility>
 
 #include "absl/status/status.h"
 
@@ -11,6 +12,27 @@ namespace {
 const std::vector<BlockIndicesType>& selectBlockIds(const PdKvWritebackTransferPlan& plan,
                                                     PdKvWritebackBlockSide           side) {
     return side == PdKvWritebackBlockSide::DecodeSource ? plan.decode_group_block_ids : plan.prefill_group_block_ids;
+}
+
+absl::StatusOr<std::pair<std::string, uint32_t>> parsePdKvWritebackTransferServer(const std::string& worker_addr) {
+    const auto first_colon = worker_addr.find(':');
+    if (first_colon == std::string::npos || first_colon == 0) {
+        return absl::InvalidArgumentError("invalid worker addr");
+    }
+    const auto second_colon = worker_addr.find(':', first_colon + 1);
+    const auto port_end     = second_colon == std::string::npos ? worker_addr.size() : second_colon;
+    try {
+        auto port = std::stoul(worker_addr.substr(first_colon + 1, port_end - first_colon - 1));
+        if (second_colon != std::string::npos) {
+            ++port;
+        }
+        if (port > std::numeric_limits<uint32_t>::max()) {
+            return absl::InvalidArgumentError("worker addr port out of range");
+        }
+        return std::make_pair(worker_addr.substr(0, first_colon), static_cast<uint32_t>(port));
+    } catch (...) {
+        return absl::InvalidArgumentError("invalid worker addr port");
+    }
 }
 
 }  // namespace
@@ -69,26 +91,35 @@ parsePdKvWritebackTransferServers(const std::vector<std::string>& worker_addrs) 
     std::vector<std::pair<std::string, uint32_t>> servers;
     servers.reserve(worker_addrs.size());
     for (const auto& addr : worker_addrs) {
-        const auto first_colon = addr.find(':');
-        if (first_colon == std::string::npos || first_colon == 0) {
-            continue;
-        }
-        const auto second_colon = addr.find(':', first_colon + 1);
-        const auto port_end     = second_colon == std::string::npos ? addr.size() : second_colon;
-        try {
-            auto port = std::stoul(addr.substr(first_colon + 1, port_end - first_colon - 1));
-            if (second_colon != std::string::npos) {
-                ++port;
-            }
-            if (port > std::numeric_limits<uint32_t>::max()) {
-                continue;
-            }
-            servers.emplace_back(addr.substr(0, first_colon), static_cast<uint32_t>(port));
-        } catch (...) {
-            continue;
+        auto server = parsePdKvWritebackTransferServer(addr);
+        if (server.ok()) {
+            servers.push_back(server.value());
         }
     }
     return servers;
+}
+
+absl::StatusOr<PdKvWritebackTransferTarget> parsePdKvWritebackTransferTarget(const std::string& worker_addr,
+                                                                             int32_t            local_partition_count,
+                                                                             int32_t            local_partition_id,
+                                                                             int32_t            remote_partition_count,
+                                                                             int32_t            remote_partition_id,
+                                                                             int32_t            decode_rank,
+                                                                             int32_t            prefill_rank) {
+    auto server = parsePdKvWritebackTransferServer(worker_addr);
+    if (!server.ok()) {
+        return server.status();
+    }
+    PdKvWritebackTransferTarget target;
+    target.ip                     = server->first;
+    target.port                   = server->second;
+    target.local_partition_count  = local_partition_count;
+    target.local_partition_id     = local_partition_id;
+    target.remote_partition_count = remote_partition_count;
+    target.remote_partition_id    = remote_partition_id;
+    target.decode_rank            = decode_rank;
+    target.prefill_rank           = prefill_rank;
+    return target;
 }
 
 }  // namespace rtp_llm

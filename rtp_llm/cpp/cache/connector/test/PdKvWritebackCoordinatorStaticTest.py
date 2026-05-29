@@ -33,7 +33,8 @@ class PdKvWritebackCoordinatorStaticTest(unittest.TestCase):
         self.assertIn("enable_pd_kv_cache_writeback", coordinator_cc)
         self.assertIn("pd_sep_config_.decode_entrance", coordinator_cc)
         self.assertIn("cache_store_listen_port + 1", coordinator_cc)
-        self.assertIn("cache_store_rdma_mode = false", coordinator_cc)
+        self.assertNotIn("cache_store_rdma_mode = false", coordinator_cc)
+        self.assertIn('cache_store_rdma_mode ? "rdma" : "tcp"', coordinator_cc)
         self.assertNotIn(
             "connectors_.emplace_back(pd_kv_writeback_manager_", coordinator_cc
         )
@@ -103,6 +104,7 @@ class PdKvWritebackCoordinatorStaticTest(unittest.TestCase):
         self.assertIn('"target_role"', coordinator_cc)
         self.assertIn('"target_rank"', coordinator_cc)
         self.assertIn('"grpc_code"', coordinator_cc)
+        self.assertIn('"backend"', coordinator_cc)
 
 
 if __name__ == "__main__":

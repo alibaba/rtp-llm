@@ -29,8 +29,10 @@ class PdKvWritebackP2PStaticTest(unittest.TestCase):
         ).read_text()
 
         self.assertIn("struct PdKvWritebackTransferPlan", transfer_h)
+        self.assertIn("struct PdKvWritebackTransferTarget", transfer_h)
         self.assertIn("decode_group_block_ids", transfer_h)
         self.assertIn("prefill_group_block_ids", transfer_h)
+        self.assertIn("prefill_transfer_targets", transfer_h)
 
         self.assertIn("startDecodeToPrefillWriteback", worker_h)
         self.assertIn("sendDecodeToPrefillWriteback", worker_h)
@@ -40,6 +42,8 @@ class PdKvWritebackP2PStaticTest(unittest.TestCase):
 
         self.assertIn("sendDecodeToPrefillWriteback", prefill_h)
         self.assertIn("PdKvWritebackBlockSide::DecodeSource", prefill_cc)
+        self.assertIn("sendKVCacheToPartitions", prefill_cc)
+        self.assertIn("plan.prefill_transfer_targets", prefill_cc)
         self.assertIn("plan.prefill_transfer_servers", prefill_cc)
 
         self.assertIn("receiveDecodeToPrefillWriteback", decode_h)

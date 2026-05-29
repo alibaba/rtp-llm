@@ -11,6 +11,19 @@
 
 namespace rtp_llm {
 
+struct PdKvWritebackTransferTarget {
+    std::string ip;
+    uint32_t    port = 0;
+
+    int32_t local_partition_count  = 1;
+    int32_t local_partition_id     = 0;
+    int32_t remote_partition_count = 1;
+    int32_t remote_partition_id    = 0;
+
+    int32_t decode_rank  = 0;
+    int32_t prefill_rank = 0;
+};
+
 enum class PdKvWritebackBlockSide {
     DecodeSource,
     PrefillDestination,
@@ -32,6 +45,7 @@ struct PdKvWritebackTransferPlan {
     std::vector<int32_t>          layer_to_group_id;
 
     std::vector<std::pair<std::string, uint32_t>> prefill_transfer_servers;
+    std::vector<PdKvWritebackTransferTarget>      prefill_transfer_targets;
 };
 
 class PdKvWritebackTransferClient {
@@ -47,5 +61,13 @@ std::vector<BlockIndicesType> extractPdKvWritebackGroupBlockIds(const BatchKVCac
 
 std::vector<std::pair<std::string, uint32_t>>
 parsePdKvWritebackTransferServers(const std::vector<std::string>& worker_addrs);
+
+absl::StatusOr<PdKvWritebackTransferTarget> parsePdKvWritebackTransferTarget(const std::string& worker_addr,
+                                                                             int32_t            local_partition_count,
+                                                                             int32_t            local_partition_id,
+                                                                             int32_t            remote_partition_count,
+                                                                             int32_t            remote_partition_id,
+                                                                             int32_t            decode_rank,
+                                                                             int32_t            prefill_rank);
 
 }  // namespace rtp_llm

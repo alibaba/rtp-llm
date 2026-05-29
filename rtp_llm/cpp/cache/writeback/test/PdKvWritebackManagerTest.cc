@@ -262,6 +262,15 @@ TEST(PdKvWritebackManagerTest, LaunchTpEqualSendsLocalRankToPrefillAndUsesLocalD
     EXPECT_EQ(transfer_client->last_plan.request_key, request.manifest.request_key);
     EXPECT_EQ(transfer_client->last_plan.decode_group_block_ids, request.manifest.group_block_ids);
     EXPECT_EQ(transfer_client->last_plan.prefill_transfer_servers.size(), 4);
+    ASSERT_EQ(transfer_client->last_plan.prefill_transfer_targets.size(), 1);
+    EXPECT_EQ(transfer_client->last_plan.prefill_transfer_targets[0].ip, "p2");
+    EXPECT_EQ(transfer_client->last_plan.prefill_transfer_targets[0].port, 2001);
+    EXPECT_EQ(transfer_client->last_plan.prefill_transfer_targets[0].decode_rank, 2);
+    EXPECT_EQ(transfer_client->last_plan.prefill_transfer_targets[0].prefill_rank, 2);
+    EXPECT_EQ(transfer_client->last_plan.prefill_transfer_targets[0].local_partition_count, 1);
+    EXPECT_EQ(transfer_client->last_plan.prefill_transfer_targets[0].local_partition_id, 0);
+    EXPECT_EQ(transfer_client->last_plan.prefill_transfer_targets[0].remote_partition_count, 1);
+    EXPECT_EQ(transfer_client->last_plan.prefill_transfer_targets[0].remote_partition_id, 0);
     EXPECT_EQ(rpc_client->last_request.manifest.request_id, request.manifest.request_id);
     EXPECT_EQ(rpc_client->last_request.decode_worker_addrs, decode_worker_grpc_addrs);
     EXPECT_EQ(rpc_client->prefill_targets, std::vector<std::string>({"p2:1000"}));
@@ -379,6 +388,20 @@ TEST(PdKvWritebackTransferTest, ParsesDedicatedWritebackPortFromWorkerAddr) {
     EXPECT_EQ(explicit_servers[0].second, 12345);
 }
 
+TEST(PdKvWritebackTransferTest, ParsesExplicitTopologyTarget) {
+    auto target = parsePdKvWritebackTransferTarget("10.0.0.3:10302:10304", 1, 0, 1, 0, 3, 3);
+
+    ASSERT_TRUE(target.ok()) << target.status();
+    EXPECT_EQ(target->ip, "10.0.0.3");
+    EXPECT_EQ(target->port, 10303);
+    EXPECT_EQ(target->local_partition_count, 1);
+    EXPECT_EQ(target->local_partition_id, 0);
+    EXPECT_EQ(target->remote_partition_count, 1);
+    EXPECT_EQ(target->remote_partition_id, 0);
+    EXPECT_EQ(target->decode_rank, 3);
+    EXPECT_EQ(target->prefill_rank, 3);
+}
+
 TEST(PdKvWritebackManagerTest, ReceiveCommitsOnlyAfterTransferSucceeds) {
     PDSepConfig pd_config;
     pd_config.enable_pd_kv_cache_writeback = true;
@@ -450,6 +473,7 @@ TEST(PdKvWritebackManagerTest, SendOnDecodeTransfersFromHeldSourceBlocks) {
     EXPECT_EQ(transfer_client->last_plan.prefill_transfer_servers.size(), 4);
     EXPECT_EQ(transfer_client->last_plan.prefill_transfer_servers[0].first, "p0");
     EXPECT_EQ(transfer_client->last_plan.prefill_transfer_servers[0].second, 2001);
+    EXPECT_TRUE(transfer_client->last_plan.prefill_transfer_targets.empty());
 }
 
 }  // namespace

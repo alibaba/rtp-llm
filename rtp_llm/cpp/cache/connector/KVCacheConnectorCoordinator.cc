@@ -120,8 +120,8 @@ PdKvWritebackRequestPB buildPdKvWritebackRequestPB(const PdKvWritebackLaunchRequ
 
 class GrpcPdKvWritebackRpcClient: public PdKvWritebackRpcClient {
 public:
-    explicit GrpcPdKvWritebackRpcClient(kmonitor::MetricsReporterPtr metrics_reporter):
-        metrics_reporter_(std::move(metrics_reporter)) {}
+    GrpcPdKvWritebackRpcClient(kmonitor::MetricsReporterPtr metrics_reporter, bool cache_store_rdma_mode):
+        metrics_reporter_(std::move(metrics_reporter)), backend_(cache_store_rdma_mode ? "rdma" : "tcp") {}
 
     absl::Status requestPrefillReceive(const PdKvWritebackLaunchRequest& request,
                                        const PdKvWritebackTopologyPlan&  topology) override {
@@ -174,8 +174,10 @@ private:
             if (status != "success") {
                 collector.rpc_failed_qps = true;
             }
-            PdKvWritebackMetricExtraTags extra_tags{
-                {"target_role", target_role}, {"target_rank", std::to_string(target_rank)}, {"grpc_code", grpc_code}};
+            PdKvWritebackMetricExtraTags extra_tags{{"target_role", target_role},
+                                                    {"target_rank", std::to_string(target_rank)},
+                                                    {"grpc_code", grpc_code},
+                                                    {"backend", backend_}};
             reportPdKvWritebackMetric(metrics_reporter_,
                                       collector,
                                       target_decode ? "decode_send_rpc" : "prefill_receive_rpc",
@@ -222,6 +224,13 @@ private:
             return absl::InternalError(grpc_status.error_message());
         }
         if (response.has_error_info() && response.error_info().error_code() != ErrorCodePB::NONE_ERROR) {
+            RTP_LLM_LOG_WARNING(
+                "PD KV writeback RPC response error, target_role=%s, target_rank=%d, addr=%s, error_code=%d, error=%s",
+                target_role.c_str(),
+                target_rank,
+                addr.c_str(),
+                static_cast<int>(response.error_info().error_code()),
+                response.error_info().error_message().c_str());
             report_rpc("failed", "response_error", "OK");
             return absl::InternalError(response.error_info().error_message());
         }
@@ -236,6 +245,7 @@ private:
 private:
     RPCPool                      rpc_pool_;
     kmonitor::MetricsReporterPtr metrics_reporter_;
+    std::string                  backend_;
 };
 
 }  // namespace
@@ -461,10 +471,15 @@ bool KVCacheConnectorCoordinator::initPdKvWriteback() {
     auto           layer_block_converter = std::make_shared<LayerBlockConverterImpl>(allocator_);
     auto           worker_config =
         P2PConnectorWorkerConfig::create(cache_store_config_, pd_sep_config_, parallelism_config_, layer_all_num);
-    worker_config.transfer_backend_config.cache_store_rdma_mode = false;
     if (pd_sep_config_.cache_store_listen_port > 0) {
         worker_config.transfer_backend_config.cache_store_listen_port = pd_sep_config_.cache_store_listen_port + 1;
     }
+    RTP_LLM_LOG_INFO("init PD KV writeback worker, role=%d, backend=%s, listen_port=%ld, tp_rank=%ld, tp_size=%ld",
+                     static_cast<int>(pd_sep_config_.role_type),
+                     worker_config.transfer_backend_config.cache_store_rdma_mode ? "rdma" : "tcp",
+                     worker_config.transfer_backend_config.cache_store_listen_port,
+                     parallelism_config_.tp_rank,
+                     parallelism_config_.tp_size);
     auto worker = std::make_shared<P2PConnectorWorker>(worker_config, layer_block_converter, metrics_reporter_);
     if (!worker->init()) {
         RTP_LLM_LOG_ERROR("init PD KV writeback worker failed");
@@ -476,7 +491,8 @@ bool KVCacheConnectorCoordinator::initPdKvWriteback() {
     pd_kv_writeback_transfer_client_ =
         std::make_shared<P2PPdKvWritebackTransferClient>(pd_kv_writeback_worker_, pd_sep_config_.role_type);
     if (pd_sep_config_.role_type == RoleType::DECODE) {
-        pd_kv_writeback_rpc_client_ = std::make_shared<GrpcPdKvWritebackRpcClient>(metrics_reporter_);
+        pd_kv_writeback_rpc_client_ = std::make_shared<GrpcPdKvWritebackRpcClient>(
+            metrics_reporter_, worker_config.transfer_backend_config.cache_store_rdma_mode);
     }
     pd_kv_writeback_manager_ = std::make_shared<PdKvWritebackManager>(pd_sep_config_,
                                                                       pd_kv_writeback_cache_writer_.get(),

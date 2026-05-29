@@ -58,6 +58,12 @@ public:
 private:
     void loopCheckProc();
 
+    ErrorInfo sendKVCacheToPartitions(int64_t                                 request_id,
+                                      const std::string&                      unique_key,
+                                      int64_t                                 deadline_ms,
+                                      const std::vector<AsymmetricTPContext>& tp_partition_ctxs,
+                                      const std::string&                      target_source);
+
     struct SendTransferResult {
         std::atomic<int>        done_count{0};
         std::atomic<bool>       all_success{true};
