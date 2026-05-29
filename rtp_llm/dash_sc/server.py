@@ -176,11 +176,13 @@ class DashScGrpcServer:
                 ),
             )
         # ``raw_mode`` is purely a servicer-shape property: the proxy ships
-        # opaque proto frames end-to-end (needs full dumps to debug wire
-        # issues), the inference servicer ships parsed struct fields. Inferring
-        # it from ``isinstance`` keeps the two concerns coupled without
-        # reintroducing an env-var probe here.
+        # opaque proto frames end-to-end, so the access record keeps compact
+        # forward summary counters instead of frontend-only struct details.
+        # Inferring it from ``isinstance`` keeps the two concerns coupled
+        # without reintroducing an env-var probe here.
         is_proxy = isinstance(servicer, DashScProxyServicer)
+        if is_proxy:
+            await servicer.open()
         interceptor = DashScGrpcAccessLogAioInterceptor(
             rank_id=rank_id,
             server_id=server_id_int,
