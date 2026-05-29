@@ -103,12 +103,20 @@ class FusedQKRMSNorm(nn.Module):
     def forward(self, hidden_states: torch.Tensor):
         assert hidden_states.dim() == 2
         m, n = hidden_states.shape
-        qkv = hidden_states.reshape(m, (self.head_num + self.kv_head_num * 2), self.size_per_head)
-        q = qkv[:, :self.head_num, :]
-        k = qkv[:, self.head_num:self.head_num + self.kv_head_num, :]
-        flashinfer.norm.rmsnorm(q, self.q_weight, eps=self.eps, out=q, enable_pdl=self.enable_pdl)
-        flashinfer.norm.rmsnorm(k, self.k_weight, eps=self.eps, out=k, enable_pdl=self.enable_pdl)
-        return qkv.reshape(m, n)
+        # Use the project's fused_qk_rmsnorm op (same as ROCm path) instead of
+        # flashinfer.norm.rmsnorm, which is not supported on ALINPU/PPU devices.
+        rtp_llm_ops.fused_qk_rmsnorm(
+            hidden_states,
+            self.q_weight,
+            self.k_weight,
+            self.eps,
+            self.head_num,
+            self.kv_head_num,
+            m,
+            n,
+            self.size_per_head,
+        )
+        return hidden_states
 
 
 class AddBiasResLayerNorm(BaseAddBiasResLayerNorm):
