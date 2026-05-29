@@ -323,6 +323,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
         resource_context_.role_type                       = pd_sep_config.role_type;
         resource_context_.enable_pd_kv_cache_writeback    = pd_sep_config.enable_pd_kv_cache_writeback;
         resource_context_.pd_kv_writeback_partition_count = parallelism_config.tp_size;
+        resource_context_.pd_kv_writeback_tp_rank         = parallelism_config.tp_rank;
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
         }
@@ -351,6 +352,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
         resource_context_.role_type                       = pd_sep_config.role_type;
         resource_context_.enable_pd_kv_cache_writeback    = pd_sep_config.enable_pd_kv_cache_writeback;
         resource_context_.pd_kv_writeback_partition_count = parallelism_config.tp_size;
+        resource_context_.pd_kv_writeback_tp_rank         = parallelism_config.tp_rank;
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
         }

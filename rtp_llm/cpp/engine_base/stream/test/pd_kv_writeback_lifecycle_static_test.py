@@ -22,11 +22,17 @@ class PdKvWritebackLifecycleStaticTest(unittest.TestCase):
         self.assertIn("enable_pd_kv_cache_writeback", resource_context_h)
         self.assertIn("pd_kv_writeback_launcher", resource_context_h)
         self.assertIn("pd_kv_writeback_partition_count", resource_context_h)
+        self.assertIn("pd_kv_writeback_tp_rank", resource_context_h)
 
         self.assertIn("maybeLaunchPdKvWriteback", stream_h)
         self.assertIn("buildPdKvWritebackManifest", stream_cc)
         self.assertIn("launchFromDecode", stream_cc)
         self.assertIn("RoleType::DECODE", stream_cc)
+        self.assertIn(
+            "request.local_tp_rank             = resource_context_.pd_kv_writeback_tp_rank",
+            stream_cc,
+        )
+        self.assertNotIn("pd_kv_writeback_tp_rank != 0", stream_cc)
         self.assertIn("incrKVCacheRef", stream_cc)
         self.assertIn("request.held_resource", stream_cc)
         self.assertIn("rtp_llm/cpp/cache/KVCacheHashUtil.h", stream_cc)
@@ -42,6 +48,7 @@ class PdKvWritebackLifecycleStaticTest(unittest.TestCase):
 
         self.assertIn("pd_sep_config.enable_pd_kv_cache_writeback", normal_engine_cc)
         self.assertIn("parallelism_config.tp_size", normal_engine_cc)
+        self.assertIn("parallelism_config.tp_rank", normal_engine_cc)
 
 
 if __name__ == "__main__":

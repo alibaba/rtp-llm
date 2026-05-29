@@ -1,9 +1,12 @@
 #include "rtp_llm/cpp/cache/writeback/PdKvWritebackManager.h"
 
+#include <algorithm>
+#include <chrono>
 #include <future>
 #include <utility>
 
 #include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "rtp_llm/cpp/cache/writeback/PdKvWritebackMetrics.h"
 #include "rtp_llm/cpp/cache/writeback/PdKvWritebackTopology.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -22,6 +25,13 @@ std::string pdKvRoleName(RoleType role_type) {
     return "unknown";
 }
 
+int64_t buildPdKvWritebackDeadlineMs(const PDSepConfig& pd_config) {
+    static constexpr int64_t kDefaultWritebackTimeoutMs = 5000;
+    const int64_t            timeout_ms =
+        pd_config.load_cache_timeout_ms > 0 ? pd_config.load_cache_timeout_ms : kDefaultWritebackTimeoutMs;
+    return currentTimeMs() + timeout_ms;
+}
+
 PdKvWritebackTopologyInput buildTopologyInput(const PdKvWritebackLaunchRequest& request) {
     PdKvWritebackTopologyInput input;
     input.local_tp_size               = request.destination.partition_count;
@@ -31,6 +41,134 @@ PdKvWritebackTopologyInput buildTopologyInput(const PdKvWritebackLaunchRequest& 
     input.prefill_grpc_addrs          = request.source_prefill_grpc_addrs;
     input.prefill_worker_addrs        = request.prefill_worker_addrs;
     return input;
+}
+
+absl::Status keepLocalTpRankMappings(PdKvWritebackTopologyPlan& topology, int32_t local_tp_rank) {
+    if (local_tp_rank < 0) {
+        return absl::FailedPreconditionError("local tp rank must be non-negative");
+    }
+    topology.mappings.erase(std::remove_if(topology.mappings.begin(),
+                                           topology.mappings.end(),
+                                           [local_tp_rank](const PdKvWritebackRankMapping& mapping) {
+                                               return mapping.decode_rank != local_tp_rank;
+                                           }),
+                            topology.mappings.end());
+    if (topology.mappings.empty()) {
+        return absl::FailedPreconditionError("local tp rank has no writeback mapping");
+    }
+    return absl::OkStatus();
+}
+
+absl::StatusOr<BatchKVCacheResourcePtr> buildLocalDecodeSourceResource(const PdKvWritebackLaunchRequest& request) {
+    const int group_count = request.source.group_count > 0 ? request.source.group_count :
+                                                             static_cast<int>(request.manifest.group_block_ids.size());
+    if (group_count <= 0 || group_count != static_cast<int>(request.manifest.group_block_ids.size())) {
+        return absl::InvalidArgumentError("invalid writeback source group count");
+    }
+    if (request.source.layer_count <= 0) {
+        return absl::InvalidArgumentError("invalid writeback source layer count");
+    }
+
+    std::vector<int> layer_to_group_id;
+    layer_to_group_id.assign(request.source.layer_to_group_id.begin(), request.source.layer_to_group_id.end());
+
+    auto source_resource = std::make_shared<BatchKVCacheResource>();
+    source_resource->resetBatchSize(1);
+    source_resource->initBatchGroups(0, group_count, request.source.layer_count, layer_to_group_id);
+    for (int group_id = 0; group_id < group_count; ++group_id) {
+        source_resource->setBatchBlocks(0, group_id, request.manifest.group_block_ids[static_cast<size_t>(group_id)]);
+    }
+    source_resource->setBatchCacheKeys(0, request.manifest.cache_keys);
+    return source_resource;
+}
+
+PdKvWritebackTransferPlan buildDecodeTransferPlanFromRequest(const PdKvWritebackLaunchRequest& request) {
+    PdKvWritebackTransferPlan plan;
+    plan.request_id               = request.manifest.request_id;
+    plan.request_key              = request.manifest.request_key;
+    plan.deadline_ms              = request.deadline_ms;
+    plan.layer_count              = request.source.layer_count;
+    plan.group_count              = request.source.group_count;
+    plan.remote_tp_size           = request.destination.partition_count;
+    plan.cache_keys               = request.manifest.cache_keys;
+    plan.decode_group_block_ids   = request.manifest.group_block_ids;
+    plan.layer_to_group_id        = request.source.layer_to_group_id;
+    plan.prefill_transfer_servers = parsePdKvWritebackTransferServers(request.prefill_worker_addrs);
+    return plan;
+}
+
+absl::Status sendOnDecodeWithClient(const PDSepConfig&                 pd_config,
+                                    PdKvWritebackTransferClient*       transfer_client,
+                                    const kmonitor::MetricsReporterPtr metrics_reporter,
+                                    const PdKvWritebackLaunchRequest&  request,
+                                    const BatchKVCacheResourcePtr&     source_resource) {
+    const int64_t                 send_begin_us = currentTimeUs();
+    PdKvWritebackMetricsCollector collector;
+    collector.transfer_qps = true;
+    collector.block_count  = request.manifest.reusable_block_count;
+    collector.token_count  = request.manifest.final_token_count;
+    auto report_send       = [&](const std::string& status, const std::string& reason) {
+        collector.transfer_latency_us = currentTimeUs() - send_begin_us;
+        if (status == "failed") {
+            collector.transfer_failed_qps = true;
+        }
+        reportPdKvWritebackMetric(metrics_reporter,
+                                  collector,
+                                  "decode_send",
+                                  status,
+                                  reason,
+                                  pdKvRoleName(pd_config.role_type),
+                                  request.source.partition_count,
+                                  "tp_equal");
+    };
+
+    if (!pd_config.enable_pd_kv_cache_writeback) {
+        report_send("failed", "disabled");
+        return absl::FailedPreconditionError("disabled");
+    }
+    if (!transfer_client) {
+        report_send("failed", "transfer_client_null");
+        return absl::FailedPreconditionError("transfer_client is null");
+    }
+    if (!source_resource || source_resource->batchSize() != 1) {
+        report_send("failed", "source_resource_invalid");
+        return absl::FailedPreconditionError("source_resource is invalid");
+    }
+    if (request.manifest.reusable_block_count == 0) {
+        report_send("skipped", "empty_manifest");
+        return absl::OkStatus();
+    }
+    if (request.manifest.cache_keys.size() < static_cast<size_t>(request.manifest.reusable_block_count)) {
+        report_send("failed", "cache_keys_shorter_than_reusable_blocks");
+        return absl::InvalidArgumentError("cache_keys shorter than reusable_block_count");
+    }
+    auto compatibility_status = validatePdKvWritebackCompatibility(request.source, request.destination);
+    if (!compatibility_status.ok()) {
+        report_send("failed", "compatibility_mismatch");
+        return compatibility_status;
+    }
+
+    auto plan                   = buildDecodeTransferPlanFromRequest(request);
+    plan.decode_group_block_ids = extractPdKvWritebackGroupBlockIds(source_resource);
+    if (plan.decode_group_block_ids.empty()) {
+        report_send("failed", "source_blocks_empty");
+        return absl::FailedPreconditionError("source blocks are empty");
+    }
+
+    RTP_LLM_LOG_INFO("PD KV writeback decode send start, request_id=%ld, reusable_blocks=%ld, cache_keys=%zu",
+                     request.manifest.request_id,
+                     request.manifest.reusable_block_count,
+                     request.manifest.cache_keys.size());
+    auto status = transfer_client->transfer(plan);
+    if (!status.ok()) {
+        report_send("failed", "transfer_failed");
+        return status;
+    }
+    RTP_LLM_LOG_INFO("PD KV writeback decode send done, request_id=%ld, reusable_blocks=%ld",
+                     request.manifest.request_id,
+                     request.manifest.reusable_block_count);
+    report_send("success", "ok");
+    return absl::OkStatus();
 }
 
 }  // namespace
@@ -157,18 +295,46 @@ PdKvWritebackLaunchResult PdKvWritebackManager::launchFromDecode(const PdKvWrite
         return {PdKvWritebackLaunchStatus::Failed, "rpc_client_null"};
     }
 
-    auto request_copy     = std::move(request_for_topology);
-    auto topology         = std::move(topology_status).value();
-    auto rpc_client_owner = owned_rpc_client_;
+    auto request_copy         = std::move(request_for_topology);
+    request_copy.deadline_ms  = buildPdKvWritebackDeadlineMs(pd_config_);
+    auto topology             = std::move(topology_status).value();
+    auto local_mapping_status = keepLocalTpRankMappings(topology, request_copy.local_tp_rank);
+    if (!local_mapping_status.ok()) {
+        report_launch(PdKvWritebackLaunchStatus::Skipped, "topology_mismatch");
+        return {PdKvWritebackLaunchStatus::Skipped, std::string(local_mapping_status.message())};
+    }
+    auto* transfer_client = owned_transfer_client_ ? owned_transfer_client_.get() : transfer_client_;
+    if (!transfer_client) {
+        report_launch(PdKvWritebackLaunchStatus::Failed, "transfer_client_null");
+        return {PdKvWritebackLaunchStatus::Failed, "transfer_client_null"};
+    }
+    auto rpc_client_owner      = owned_rpc_client_;
+    auto transfer_client_owner = owned_transfer_client_;
+    auto pd_config             = pd_config_;
+    auto metrics_reporter      = metrics_reporter_;
     {
         std::lock_guard<std::mutex> lock(writeback_tasks_mutex_);
-        writeback_tasks_.push_back(
-            std::async(std::launch::async, [request_copy, topology, rpc_client, rpc_client_owner]() {
+        pruneCompletedWritebackTasksLocked();
+        writeback_tasks_.push_back(std::async(
+            std::launch::async,
+            [request_copy,
+             topology,
+             rpc_client,
+             rpc_client_owner,
+             transfer_client,
+             transfer_client_owner,
+             pd_config,
+             metrics_reporter]() {
                 auto receive_task =
                     std::async(std::launch::async, [request_copy, topology, rpc_client, rpc_client_owner]() {
                         return rpc_client->requestPrefillReceive(request_copy, topology);
                     });
-                auto send_status    = rpc_client->requestDecodeSend(request_copy, topology);
+                auto source_resource = buildLocalDecodeSourceResource(request_copy);
+                auto send_status =
+                    source_resource.ok() ?
+                        sendOnDecodeWithClient(
+                            pd_config, transfer_client, metrics_reporter, request_copy, source_resource.value()) :
+                        source_resource.status();
                 auto receive_status = receive_task.get();
                 if (!receive_status.ok()) {
                     RTP_LLM_LOG_WARNING("PD KV writeback prefill receive fanout failed, request_id=%ld, error=%s",
@@ -195,6 +361,29 @@ void PdKvWritebackManager::waitForWritebackTasksForTest() const {
     for (auto& task : tasks) {
         task.get();
     }
+}
+
+void PdKvWritebackManager::pruneCompletedWritebackTasksLocked() const {
+    writeback_tasks_.erase(std::remove_if(writeback_tasks_.begin(),
+                                          writeback_tasks_.end(),
+                                          [](std::future<void>& task) {
+                                              return task.valid()
+                                                     && task.wait_for(std::chrono::milliseconds(0))
+                                                            == std::future_status::ready;
+                                          }),
+                           writeback_tasks_.end());
+}
+
+size_t PdKvWritebackManager::trackedWritebackTaskCountForTest() const {
+    std::lock_guard<std::mutex> lock(writeback_tasks_mutex_);
+    return writeback_tasks_.size();
+}
+
+size_t PdKvWritebackManager::completedWritebackTaskCountForTest() const {
+    std::lock_guard<std::mutex> lock(writeback_tasks_mutex_);
+    return std::count_if(writeback_tasks_.begin(), writeback_tasks_.end(), [](std::future<void>& task) {
+        return task.valid() && task.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready;
+    });
 }
 
 absl::Status PdKvWritebackManager::receiveOnPrefill(const PdKvWritebackLaunchRequest& request,
@@ -280,75 +469,9 @@ absl::Status PdKvWritebackManager::receiveOnPrefill(const PdKvWritebackLaunchReq
 }
 
 absl::Status PdKvWritebackManager::sendOnDecode(const PdKvWritebackLaunchRequest& request,
-                                                const BatchKVCacheResourcePtr&    source_resource) {
-    const int64_t                 send_begin_us = currentTimeUs();
-    PdKvWritebackMetricsCollector collector;
-    collector.transfer_qps = true;
-    collector.block_count  = request.manifest.reusable_block_count;
-    collector.token_count  = request.manifest.final_token_count;
-    auto report_send       = [&](const std::string& status, const std::string& reason) {
-        collector.transfer_latency_us = currentTimeUs() - send_begin_us;
-        if (status == "failed") {
-            collector.transfer_failed_qps = true;
-        }
-        reportPdKvWritebackMetric(metrics_reporter_,
-                                  collector,
-                                  "decode_send",
-                                  status,
-                                  reason,
-                                  pdKvRoleName(pd_config_.role_type),
-                                  request.source.partition_count,
-                                  "tp_equal");
-    };
-
-    if (!pd_config_.enable_pd_kv_cache_writeback) {
-        report_send("failed", "disabled");
-        return absl::FailedPreconditionError("disabled");
-    }
+                                                const BatchKVCacheResourcePtr&    source_resource) const {
     auto* transfer_client = owned_transfer_client_ ? owned_transfer_client_.get() : transfer_client_;
-    if (!transfer_client) {
-        report_send("failed", "transfer_client_null");
-        return absl::FailedPreconditionError("transfer_client is null");
-    }
-    if (!source_resource || source_resource->batchSize() != 1) {
-        report_send("failed", "source_resource_invalid");
-        return absl::FailedPreconditionError("source_resource is invalid");
-    }
-    if (request.manifest.reusable_block_count == 0) {
-        report_send("skipped", "empty_manifest");
-        return absl::OkStatus();
-    }
-    if (request.manifest.cache_keys.size() < static_cast<size_t>(request.manifest.reusable_block_count)) {
-        report_send("failed", "cache_keys_shorter_than_reusable_blocks");
-        return absl::InvalidArgumentError("cache_keys shorter than reusable_block_count");
-    }
-    auto compatibility_status = validatePdKvWritebackCompatibility(request.source, request.destination);
-    if (!compatibility_status.ok()) {
-        report_send("failed", "compatibility_mismatch");
-        return compatibility_status;
-    }
-
-    auto plan                   = buildDecodeTransferPlan(request);
-    plan.decode_group_block_ids = extractPdKvWritebackGroupBlockIds(source_resource);
-    if (plan.decode_group_block_ids.empty()) {
-        report_send("failed", "source_blocks_empty");
-        return absl::FailedPreconditionError("source blocks are empty");
-    }
-
-    RTP_LLM_LOG_INFO("PD KV writeback decode send start, request_id=%ld, reusable_blocks=%ld, cache_keys=%zu",
-                     request.manifest.request_id,
-                     request.manifest.reusable_block_count,
-                     request.manifest.cache_keys.size());
-    auto status = transfer_client->transfer(plan);
-    if (!status.ok()) {
-        report_send("failed", "transfer_failed");
-        return status;
-    }
-    RTP_LLM_LOG_INFO("PD KV writeback decode send done, request_id=%ld, reusable_blocks=%ld",
-                     request.manifest.request_id,
-                     request.manifest.reusable_block_count);
-    report_send("success", "ok");
-    return absl::OkStatus();
+    return sendOnDecodeWithClient(pd_config_, transfer_client, metrics_reporter_, request, source_resource);
 }
 
 PdKvWritebackTransferPlan
@@ -365,22 +488,6 @@ PdKvWritebackManager::buildTransferPlan(const PdKvWritebackLaunchRequest& reques
     plan.decode_group_block_ids   = request.manifest.group_block_ids;
     plan.prefill_group_block_ids  = extractPdKvWritebackGroupBlockIds(destination_resource);
     plan.layer_to_group_id        = request.destination.layer_to_group_id;
-    plan.prefill_transfer_servers = parsePdKvWritebackTransferServers(request.prefill_worker_addrs);
-    return plan;
-}
-
-PdKvWritebackTransferPlan
-PdKvWritebackManager::buildDecodeTransferPlan(const PdKvWritebackLaunchRequest& request) const {
-    PdKvWritebackTransferPlan plan;
-    plan.request_id               = request.manifest.request_id;
-    plan.request_key              = request.manifest.request_key;
-    plan.deadline_ms              = request.deadline_ms;
-    plan.layer_count              = request.source.layer_count;
-    plan.group_count              = request.source.group_count;
-    plan.remote_tp_size           = request.destination.partition_count;
-    plan.cache_keys               = request.manifest.cache_keys;
-    plan.decode_group_block_ids   = request.manifest.group_block_ids;
-    plan.layer_to_group_id        = request.source.layer_to_group_id;
     plan.prefill_transfer_servers = parsePdKvWritebackTransferServers(request.prefill_worker_addrs);
     return plan;
 }

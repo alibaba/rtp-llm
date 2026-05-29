@@ -21,6 +21,7 @@ struct ResourceContext {
     bool     decode_entrance{false};  // PD反转模式：Decode侧作为请求入口
     bool     enable_pd_kv_cache_writeback{false};
     int      pd_kv_writeback_partition_count{1};
+    int      pd_kv_writeback_tp_rank{0};
 
     PdKvWritebackLauncherPtr pd_kv_writeback_launcher;
 

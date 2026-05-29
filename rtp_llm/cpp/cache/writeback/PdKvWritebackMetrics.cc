@@ -86,7 +86,8 @@ void reportPdKvWritebackMetric(const kmonitor::MetricsReporterPtr& reporter,
                                const std::string&                  reason,
                                const std::string&                  role,
                                int32_t                             tp_size,
-                               const std::string&                  topology) {
+                               const std::string&                  topology,
+                               const PdKvWritebackMetricExtraTags& extra_tags) {
     if (!reporter) {
         return;
     }
@@ -97,6 +98,9 @@ void reportPdKvWritebackMetric(const kmonitor::MetricsReporterPtr& reporter,
     tags.AddTag("role", role);
     tags.AddTag("tp_size", std::to_string(tp_size));
     tags.AddTag("topology", topology);
+    for (const auto& tag : extra_tags) {
+        tags.AddTag(tag.first, tag.second);
+    }
     reporter->report<PdKvWritebackMetrics, PdKvWritebackMetricsCollector>(&tags, &collector);
 }
 

@@ -2,6 +2,8 @@
 
 #include <cstdint>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "kmonitor/client/MetricsReporter.h"
 
@@ -62,6 +64,8 @@ private:
     kmonitor::MutableMetric* token_count_metric         = nullptr;
 };
 
+using PdKvWritebackMetricExtraTags = std::vector<std::pair<std::string, std::string>>;
+
 void reportPdKvWritebackMetric(const kmonitor::MetricsReporterPtr& reporter,
                                PdKvWritebackMetricsCollector&      collector,
                                const std::string&                  stage,
@@ -69,6 +73,7 @@ void reportPdKvWritebackMetric(const kmonitor::MetricsReporterPtr& reporter,
                                const std::string&                  reason,
                                const std::string&                  role,
                                int32_t                             tp_size,
-                               const std::string&                  topology);
+                               const std::string&                  topology,
+                               const PdKvWritebackMetricExtraTags& extra_tags = PdKvWritebackMetricExtraTags());
 
 }  // namespace rtp_llm

@@ -65,9 +65,12 @@ class PdKvWritebackCoordinatorStaticTest(unittest.TestCase):
         self.assertIn("return false;", coordinator_cc)
         self.assertNotIn("writeback disabled", coordinator_cc)
 
-    def test_writeback_rpc_client_uses_all_prefill_and_decode_workers(self):
+    def test_writeback_launch_uses_prefill_rpc_and_local_decode_transfer(self):
         coordinator_cc = (
             REPO_ROOT / "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.cc"
+        ).read_text()
+        manager_cc = (
+            REPO_ROOT / "rtp_llm/cpp/cache/writeback/PdKvWritebackManager.cc"
         ).read_text()
 
         self.assertIn(
@@ -84,6 +87,22 @@ class PdKvWritebackCoordinatorStaticTest(unittest.TestCase):
             "std::make_shared<PdKvWritebackManager>(pd_sep_config_",
             coordinator_cc,
         )
+        self.assertIn("keepLocalTpRankMappings", manager_cc)
+        self.assertIn("request_copy.local_tp_rank", manager_cc)
+        self.assertIn("sendOnDecodeWithClient(", manager_cc)
+        self.assertNotIn("rpc_client->requestDecodeSend(request_copy", manager_cc)
+
+    def test_writeback_rpc_fanout_is_parallel_and_reports_target_tags(self):
+        coordinator_cc = (
+            REPO_ROOT / "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.cc"
+        ).read_text()
+
+        self.assertIn("#include <future>", coordinator_cc)
+        self.assertIn("std::vector<std::future<absl::Status>>", coordinator_cc)
+        self.assertIn("send_tasks.emplace_back", coordinator_cc)
+        self.assertIn('"target_role"', coordinator_cc)
+        self.assertIn('"target_rank"', coordinator_cc)
+        self.assertIn('"grpc_code"', coordinator_cc)
 
 
 if __name__ == "__main__":

@@ -410,6 +410,7 @@ void StreamCacheResource::maybeLaunchPdKvWriteback() {
     request.source_prefill_grpc_addrs = sourcePrefillGrpcAddrs(stream_);
     request.prefill_worker_addrs      = stream_->generateConfig()->pd_writeback_prefill_worker_addrs;
     request.deadline_ms               = stream_->deadlineMs();
+    request.local_tp_rank             = resource_context_.pd_kv_writeback_tp_rank;
     request.held_resource             = std::move(held_resource);
 
     auto result = resource_context_.pd_kv_writeback_launcher->launchFromDecode(request);

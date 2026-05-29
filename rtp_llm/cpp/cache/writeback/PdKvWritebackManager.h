@@ -38,7 +38,8 @@ struct PdKvWritebackLaunchRequest {
     std::vector<std::string>   source_prefill_grpc_addrs;
     std::vector<std::string>   decode_worker_addrs;
     std::vector<std::string>   prefill_worker_addrs;
-    int64_t                    deadline_ms = 0;
+    int64_t                    deadline_ms   = 0;
+    int32_t                    local_tp_rank = 0;
     KVCacheResourcePtr         held_resource;
 };
 
@@ -66,11 +67,11 @@ public:
 
 class PdKvWritebackRpcClient {
 public:
-    virtual ~PdKvWritebackRpcClient() = default;
+    virtual ~PdKvWritebackRpcClient()                                                     = default;
     virtual absl::Status requestPrefillReceive(const PdKvWritebackLaunchRequest& request,
-                                               const PdKvWritebackTopologyPlan&   topology) = 0;
+                                               const PdKvWritebackTopologyPlan&  topology) = 0;
     virtual absl::Status requestDecodeSend(const PdKvWritebackLaunchRequest& request,
-                                           const PdKvWritebackTopologyPlan&   topology)     = 0;
+                                           const PdKvWritebackTopologyPlan&  topology)     = 0;
 };
 
 absl::Status validatePdKvWritebackCompatibility(const PdKvWritebackCompatibility& source,
@@ -97,13 +98,15 @@ public:
     absl::Status              receiveOnPrefill(const PdKvWritebackLaunchRequest& request,
                                                const BatchKVCacheResourcePtr&    destination_resource);
     absl::Status              sendOnDecode(const PdKvWritebackLaunchRequest& request,
-                                           const BatchKVCacheResourcePtr&    source_resource);
+                                           const BatchKVCacheResourcePtr&    source_resource) const;
     void                      waitForWritebackTasksForTest() const;
+    size_t                    trackedWritebackTaskCountForTest() const;
+    size_t                    completedWritebackTaskCountForTest() const;
 
 private:
+    void                      pruneCompletedWritebackTasksLocked() const;
     PdKvWritebackTransferPlan buildTransferPlan(const PdKvWritebackLaunchRequest& request,
                                                 const BatchKVCacheResourcePtr&    destination_resource) const;
-    PdKvWritebackTransferPlan buildDecodeTransferPlan(const PdKvWritebackLaunchRequest& request) const;
 
 private:
     PDSepConfig                                  pd_config_;

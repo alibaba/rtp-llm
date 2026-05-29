@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
 
+#include <future>
 #include <utility>
 
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
@@ -123,23 +124,34 @@ public:
         metrics_reporter_(std::move(metrics_reporter)) {}
 
     absl::Status requestPrefillReceive(const PdKvWritebackLaunchRequest& request,
-                                       const PdKvWritebackTopologyPlan&   topology) override {
+                                       const PdKvWritebackTopologyPlan&  topology) override {
         return fanoutPdKvWriteback(request, topology, false);
     }
 
     absl::Status requestDecodeSend(const PdKvWritebackLaunchRequest& request,
-                                   const PdKvWritebackTopologyPlan&   topology) override {
+                                   const PdKvWritebackTopologyPlan&  topology) override {
         return fanoutPdKvWriteback(request, topology, true);
     }
 
 private:
     absl::Status fanoutPdKvWriteback(const PdKvWritebackLaunchRequest& request,
-                                     const PdKvWritebackTopologyPlan&   topology,
+                                     const PdKvWritebackTopologyPlan&  topology,
                                      bool                              target_decode) {
-        absl::Status first_error = absl::OkStatus();
+        std::vector<std::future<absl::Status>> send_tasks;
+        send_tasks.reserve(topology.mappings.size());
+        const std::string target_role = target_decode ? "decode" : "prefill";
         for (const auto& mapping : topology.mappings) {
-            const auto& addr = target_decode ? mapping.decode_grpc_addr : mapping.prefill_grpc_addr;
-            auto        status = sendPdKvWritebackRpc(addr, request, target_decode);
+            const std::string addr        = target_decode ? mapping.decode_grpc_addr : mapping.prefill_grpc_addr;
+            const int32_t     target_rank = target_decode ? mapping.decode_rank : mapping.prefill_rank;
+            send_tasks.emplace_back(
+                std::async(std::launch::async, [this, addr, request, target_decode, target_role, target_rank]() {
+                    return sendPdKvWritebackRpc(addr, request, target_decode, target_role, target_rank);
+                }));
+        }
+
+        absl::Status first_error = absl::OkStatus();
+        for (auto& task : send_tasks) {
+            auto status = task.get();
             if (!status.ok() && first_error.ok()) {
                 first_error = status;
             }
@@ -147,18 +159,23 @@ private:
         return first_error;
     }
 
-    absl::Status
-    sendPdKvWritebackRpc(const std::string& addr, const PdKvWritebackLaunchRequest& request, bool target_decode) {
-        const auto begin_us = currentTimeUs();
+    absl::Status sendPdKvWritebackRpc(const std::string&                addr,
+                                      const PdKvWritebackLaunchRequest& request,
+                                      bool                              target_decode,
+                                      const std::string&                target_role,
+                                      int32_t                           target_rank) {
+        const auto                    begin_us = currentTimeUs();
         PdKvWritebackMetricsCollector collector;
         collector.rpc_qps     = true;
         collector.block_count = request.manifest.reusable_block_count;
         collector.token_count = request.manifest.final_token_count;
-        auto report_rpc = [&](const std::string& status, const std::string& reason) {
+        auto report_rpc = [&](const std::string& status, const std::string& reason, const std::string& grpc_code) {
             collector.rpc_latency_us = currentTimeUs() - begin_us;
             if (status != "success") {
                 collector.rpc_failed_qps = true;
             }
+            PdKvWritebackMetricExtraTags extra_tags{
+                {"target_role", target_role}, {"target_rank", std::to_string(target_rank)}, {"grpc_code", grpc_code}};
             reportPdKvWritebackMetric(metrics_reporter_,
                                       collector,
                                       target_decode ? "decode_send_rpc" : "prefill_receive_rpc",
@@ -166,12 +183,19 @@ private:
                                       reason,
                                       "decode",
                                       request.destination.partition_count,
-                                      "tp_equal");
+                                      "tp_equal",
+                                      extra_tags);
         };
 
         auto connection_status = rpc_pool_.getConnection(addr);
         if (!connection_status.ok()) {
-            report_rpc("failed", "connection_failed");
+            RTP_LLM_LOG_WARNING(
+                "PD KV writeback RPC connection failed, target_role=%s, target_rank=%d, addr=%s, error=%s",
+                target_role.c_str(),
+                target_rank,
+                addr.c_str(),
+                connection_status.status().ToString().c_str());
+            report_rpc("failed", "connection_failed", "connection_failed");
             return connection_status.status();
         }
 
@@ -186,18 +210,26 @@ private:
         PdKvWritebackResponsePB response;
         auto grpc_status = connection_status.value().stub->PdKvWriteback(&client_context, request_pb, &response);
         if (!grpc_status.ok()) {
-            report_rpc("failed", "grpc_failed");
+            const auto grpc_code = std::to_string(static_cast<int>(grpc_status.error_code()));
+            RTP_LLM_LOG_WARNING(
+                "PD KV writeback RPC failed, target_role=%s, target_rank=%d, addr=%s, grpc_code=%s, error=%s",
+                target_role.c_str(),
+                target_rank,
+                addr.c_str(),
+                grpc_code.c_str(),
+                grpc_status.error_message().c_str());
+            report_rpc("failed", "grpc_failed", grpc_code);
             return absl::InternalError(grpc_status.error_message());
         }
         if (response.has_error_info() && response.error_info().error_code() != ErrorCodePB::NONE_ERROR) {
-            report_rpc("failed", "response_error");
+            report_rpc("failed", "response_error", "OK");
             return absl::InternalError(response.error_info().error_message());
         }
         if (!response.accepted()) {
-            report_rpc("failed", "not_accepted");
+            report_rpc("failed", "not_accepted", "OK");
             return absl::FailedPreconditionError(response.reason());
         }
-        report_rpc("success", "ok");
+        report_rpc("success", "ok", "OK");
         return absl::OkStatus();
     }
 

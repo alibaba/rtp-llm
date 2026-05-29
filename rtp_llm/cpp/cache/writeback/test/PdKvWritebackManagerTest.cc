@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/writeback/PdKvWritebackManager.h"
 
 #include <algorithm>
+#include <chrono>
 #include <string>
 #include <condition_variable>
 #include <mutex>
@@ -8,6 +9,8 @@
 #include <vector>
 
 #include <gtest/gtest.h>
+
+#include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
 namespace {
@@ -111,7 +114,7 @@ public:
         std::unique_lock<std::mutex> lock(mutex_);
         prefill_started = true;
         cv_.notify_all();
-        if (!cv_.wait_for(lock, std::chrono::seconds(1), [&]() { return decode_started; })) {
+        if (!cv_.wait_for(lock, std::chrono::seconds(1), [&]() { return local_decode_started; })) {
             prefill_timed_out = true;
             return absl::DeadlineExceededError("decode send did not start while prefill receive was waiting");
         }
@@ -123,14 +126,21 @@ public:
         (void)request;
         (void)topology;
         std::lock_guard<std::mutex> lock(mutex_);
-        decode_started = true;
+        remote_decode_started = true;
         cv_.notify_all();
         return absl::OkStatus();
     }
 
-    bool prefill_started   = false;
-    bool decode_started    = false;
-    bool prefill_timed_out = false;
+    void markLocalDecodeStarted() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        local_decode_started = true;
+        cv_.notify_all();
+    }
+
+    bool prefill_started       = false;
+    bool local_decode_started  = false;
+    bool remote_decode_started = false;
+    bool prefill_timed_out     = false;
 
 private:
     std::mutex              mutex_;
@@ -175,6 +185,18 @@ PdKvWritebackLaunchRequest makeFourRankLaunchRequest() {
     return request;
 }
 
+template<typename Predicate>
+bool waitUntil(Predicate predicate, int timeout_ms = 1000) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (predicate()) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return predicate();
+}
+
 TEST(PdKvWritebackManagerTest, DisabledConfigSkipsLaunch) {
     PDSepConfig pd_config;
     pd_config.enable_pd_kv_cache_writeback = false;
@@ -216,7 +238,110 @@ TEST(PdKvWritebackManagerTest, EnabledCompatibleLaunchFailsWithoutRpcClient) {
     EXPECT_EQ(result.reason, "rpc_client_null");
 }
 
-TEST(PdKvWritebackManagerTest, LaunchTpEqualFansOutToAllPrefillAndDecodeRanks) {
+TEST(PdKvWritebackManagerTest, LaunchTpEqualSendsLocalRankToPrefillAndUsesLocalDecodeTransfer) {
+    PDSepConfig pd_config;
+    pd_config.enable_pd_kv_cache_writeback = true;
+    std::vector<std::string>       events;
+    auto                           transfer_client          = std::make_shared<RecordingTransferClient>(&events);
+    auto                           rpc_client               = std::make_shared<RecordingRpcClient>(&events);
+    const std::vector<std::string> decode_worker_grpc_addrs = {"d0:1000", "d1:1000", "d2:1000", "d3:1000"};
+    PdKvWritebackManager manager(pd_config, nullptr, transfer_client, rpc_client, decode_worker_grpc_addrs, nullptr);
+
+    auto request          = makeFourRankLaunchRequest();
+    request.local_tp_rank = 2;
+
+    auto result = manager.launchFromDecode(request);
+
+    EXPECT_EQ(result.status, PdKvWritebackLaunchStatus::Started);
+    manager.waitForWritebackTasksForTest();
+
+    ASSERT_EQ(events.size(), 2);
+    EXPECT_NE(std::find(events.begin(), events.end(), "prefill_rpc"), events.end());
+    EXPECT_NE(std::find(events.begin(), events.end(), "transfer"), events.end());
+    EXPECT_EQ(std::find(events.begin(), events.end(), "decode_rpc"), events.end());
+    EXPECT_EQ(transfer_client->last_plan.request_key, request.manifest.request_key);
+    EXPECT_EQ(transfer_client->last_plan.decode_group_block_ids, request.manifest.group_block_ids);
+    EXPECT_EQ(transfer_client->last_plan.prefill_transfer_servers.size(), 4);
+    EXPECT_EQ(rpc_client->last_request.manifest.request_id, request.manifest.request_id);
+    EXPECT_EQ(rpc_client->last_request.decode_worker_addrs, decode_worker_grpc_addrs);
+    EXPECT_EQ(rpc_client->prefill_targets, std::vector<std::string>({"p2:1000"}));
+    EXPECT_TRUE(rpc_client->decode_targets.empty());
+}
+
+TEST(PdKvWritebackManagerTest, LaunchSkipsWhenLocalTpRankHasNoMapping) {
+    PDSepConfig pd_config;
+    pd_config.enable_pd_kv_cache_writeback = true;
+    std::vector<std::string>       events;
+    auto                           rpc_client               = std::make_shared<RecordingRpcClient>(&events);
+    const std::vector<std::string> decode_worker_grpc_addrs = {"d0:1000", "d1:1000", "d2:1000", "d3:1000"};
+    PdKvWritebackManager           manager(pd_config, nullptr, nullptr, rpc_client, decode_worker_grpc_addrs, nullptr);
+
+    auto request          = makeFourRankLaunchRequest();
+    request.local_tp_rank = 4;
+
+    auto result = manager.launchFromDecode(request);
+
+    EXPECT_EQ(result.status, PdKvWritebackLaunchStatus::Skipped);
+    EXPECT_NE(result.reason.find("local tp rank"), std::string::npos);
+    EXPECT_TRUE(events.empty());
+}
+
+TEST(PdKvWritebackManagerTest, LaunchStartsDecodeSendWhilePrefillReceiveIsWaiting) {
+    PDSepConfig pd_config;
+    pd_config.enable_pd_kv_cache_writeback                  = true;
+    auto                           rpc_client               = std::make_shared<BlockingPrefillRpcClient>();
+    const std::vector<std::string> decode_worker_grpc_addrs = {"d0:1000", "d1:1000", "d2:1000", "d3:1000"};
+    class NotifyingTransferClient: public PdKvWritebackTransferClient {
+    public:
+        explicit NotifyingTransferClient(std::shared_ptr<BlockingPrefillRpcClient> rpc_client):
+            rpc_client_(std::move(rpc_client)) {}
+        absl::Status transfer(const PdKvWritebackTransferPlan& plan) override {
+            (void)plan;
+            rpc_client_->markLocalDecodeStarted();
+            return absl::OkStatus();
+        }
+
+    private:
+        std::shared_ptr<BlockingPrefillRpcClient> rpc_client_;
+    };
+    auto                 transfer_client = std::make_shared<NotifyingTransferClient>(rpc_client);
+    PdKvWritebackManager manager(pd_config, nullptr, transfer_client, rpc_client, decode_worker_grpc_addrs, nullptr);
+
+    auto request = makeFourRankLaunchRequest();
+
+    auto result = manager.launchFromDecode(request);
+    ASSERT_EQ(result.status, PdKvWritebackLaunchStatus::Started);
+    manager.waitForWritebackTasksForTest();
+
+    EXPECT_TRUE(rpc_client->prefill_started);
+    EXPECT_TRUE(rpc_client->local_decode_started);
+    EXPECT_FALSE(rpc_client->remote_decode_started);
+    EXPECT_FALSE(rpc_client->prefill_timed_out);
+}
+
+TEST(PdKvWritebackManagerTest, LaunchUsesWritebackTimeoutInsteadOfExpiredRequestDeadline) {
+    PDSepConfig pd_config;
+    pd_config.enable_pd_kv_cache_writeback = true;
+    pd_config.load_cache_timeout_ms        = 12345;
+    std::vector<std::string>       events;
+    auto                           transfer_client          = std::make_shared<RecordingTransferClient>(&events);
+    auto                           rpc_client               = std::make_shared<RecordingRpcClient>(&events);
+    const std::vector<std::string> decode_worker_grpc_addrs = {"d0:1000", "d1:1000", "d2:1000", "d3:1000"};
+    PdKvWritebackManager manager(pd_config, nullptr, transfer_client, rpc_client, decode_worker_grpc_addrs, nullptr);
+
+    auto request        = makeFourRankLaunchRequest();
+    request.deadline_ms = currentTimeMs() - 1000;
+    const auto before   = currentTimeMs();
+
+    auto result = manager.launchFromDecode(request);
+    ASSERT_EQ(result.status, PdKvWritebackLaunchStatus::Started);
+    manager.waitForWritebackTasksForTest();
+
+    EXPECT_GE(rpc_client->last_request.deadline_ms, before + pd_config.load_cache_timeout_ms);
+    EXPECT_LT(rpc_client->last_request.deadline_ms, before + pd_config.load_cache_timeout_ms + 1000);
+}
+
+TEST(PdKvWritebackManagerTest, LaunchPrunesCompletedTasksBeforeTrackingNewOne) {
     PDSepConfig pd_config;
     pd_config.enable_pd_kv_cache_writeback = true;
     std::vector<std::string>       events;
@@ -227,37 +352,17 @@ TEST(PdKvWritebackManagerTest, LaunchTpEqualFansOutToAllPrefillAndDecodeRanks) {
 
     auto request = makeFourRankLaunchRequest();
 
-    auto result = manager.launchFromDecode(request);
+    auto first_result = manager.launchFromDecode(request);
+    ASSERT_EQ(first_result.status, PdKvWritebackLaunchStatus::Started);
+    ASSERT_TRUE(waitUntil([&]() { return manager.completedWritebackTaskCountForTest() == 1; }));
+    EXPECT_EQ(manager.trackedWritebackTaskCountForTest(), 1);
 
-    EXPECT_EQ(result.status, PdKvWritebackLaunchStatus::Started);
+    auto second_result = manager.launchFromDecode(request);
+    ASSERT_EQ(second_result.status, PdKvWritebackLaunchStatus::Started);
+    EXPECT_EQ(manager.trackedWritebackTaskCountForTest(), 1);
+
     manager.waitForWritebackTasksForTest();
-
-    ASSERT_EQ(events.size(), 2);
-    EXPECT_NE(std::find(events.begin(), events.end(), "prefill_rpc"), events.end());
-    EXPECT_NE(std::find(events.begin(), events.end(), "decode_rpc"), events.end());
-    EXPECT_TRUE(transfer_client->last_plan.request_key.empty());
-    EXPECT_EQ(rpc_client->last_request.manifest.request_id, request.manifest.request_id);
-    EXPECT_EQ(rpc_client->last_request.decode_worker_addrs, decode_worker_grpc_addrs);
-    EXPECT_EQ(rpc_client->prefill_targets, request.source_prefill_grpc_addrs);
-    EXPECT_EQ(rpc_client->decode_targets, decode_worker_grpc_addrs);
-}
-
-TEST(PdKvWritebackManagerTest, LaunchStartsDecodeSendWhilePrefillReceiveIsWaiting) {
-    PDSepConfig pd_config;
-    pd_config.enable_pd_kv_cache_writeback                  = true;
-    auto                           rpc_client               = std::make_shared<BlockingPrefillRpcClient>();
-    const std::vector<std::string> decode_worker_grpc_addrs = {"d0:1000", "d1:1000", "d2:1000", "d3:1000"};
-    PdKvWritebackManager           manager(pd_config, nullptr, nullptr, rpc_client, decode_worker_grpc_addrs, nullptr);
-
-    auto request = makeFourRankLaunchRequest();
-
-    auto result = manager.launchFromDecode(request);
-    ASSERT_EQ(result.status, PdKvWritebackLaunchStatus::Started);
-    manager.waitForWritebackTasksForTest();
-
-    EXPECT_TRUE(rpc_client->prefill_started);
-    EXPECT_TRUE(rpc_client->decode_started);
-    EXPECT_FALSE(rpc_client->prefill_timed_out);
+    EXPECT_EQ(manager.trackedWritebackTaskCountForTest(), 0);
 }
 
 TEST(PdKvWritebackTransferTest, ParsesDedicatedWritebackPortFromWorkerAddr) {
