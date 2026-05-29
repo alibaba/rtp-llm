@@ -259,7 +259,7 @@ class SparseMlaFp8Op(SparseMlaOp):
     ) -> torch.Tensor:
         if self._gather is not None:
             return self._forward_gather(q, kv, topk_indices)
-        return self._forward_with_kvcache(q, kv, topk_indices)
+        return self._forward_with_kvcache(q, kv, topk_indices, layer_id)
 
     def _forward_gather(
         self,
@@ -309,9 +309,13 @@ class SparseMlaFp8Op(SparseMlaOp):
         q: torch.Tensor,
         kv: torch.Tensor,
         topk_indices: torch.Tensor,
+        layer_id: int = 0,
     ) -> torch.Tensor:
         """flash_mla_with_kvcache directly on FP8 paged cache."""
         assert self._sched_meta is not None
+        if layer_id == 0:
+            self._sched_meta.tile_scheduler_metadata = None
+            self._sched_meta.num_splits = None
         # Cache layout: (num_blocks, block_size, num_heads_k=1, dim)
         kv_cache = _as_uint8(kv)
         if kv_cache.ndim == 3:
