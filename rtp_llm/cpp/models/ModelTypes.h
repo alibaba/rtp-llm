@@ -55,7 +55,7 @@ struct GptModelInitParams {
     // When >1, the model's pre-output residual ([T, hc_mult*hidden_size])
     // is the contract between target and draft for MTP — see
     // MtpExecutor::makeFakeSPOutputBuffer and CudaGraphRunner input_hiddens.
-    int64_t                               hc_mult                 = 1;
+    int64_t hc_mult = 1;
 };
 
 enum GptModelInputIndex : size_t {
@@ -146,6 +146,12 @@ public:
     virtual GptModelOutputs forward(const GptModelInputs& inputs) = 0;
     virtual void            releaseBuffers() {}
     virtual void            prepareAttentionInputs(const GptModelInputs& inputs) {}
+    virtual bool            cudaGraphEnabled() const {
+        return false;
+    }
+    virtual bool prefillCudaGraphMode() const {
+        return false;
+    }
 
     // Refresh only kv_cache_kernel_block_id-dependent state on a previously-
     // prepared attention_inputs_ (e.g., after an MTP propose+verify re-gather).

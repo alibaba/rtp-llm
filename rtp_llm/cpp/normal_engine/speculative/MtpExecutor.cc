@@ -1627,14 +1627,30 @@ void MtpExecutor::broadcastPostRejectionInputs(GptModelInputs& model_input, cons
 }
 
 GptModelOutputs MtpExecutor::runDraftPrefillForward(GptModelInputs& model_input) {
-    RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(draft_model_forward)");
+    const bool use_sp_prefill_cuda_graph = sp_prefill_draft_model_ && !model_input.is_fake_stream;
+    RTP_LLM_PROFILE_SCOPE_DYNAMIC(
+        "executor.mtp.decode_step(draft_model_forward,use_sp=%d,sp_cg=%d,sp_prefill_cg=%d,is_fake=%d)",
+        static_cast<int>(use_sp_prefill_cuda_graph),
+        static_cast<int>(sp_prefill_draft_model_ ? sp_prefill_draft_model_->cudaGraphEnabled() : false),
+        static_cast<int>(sp_prefill_draft_model_ ? sp_prefill_draft_model_->prefillCudaGraphMode() : false),
+        static_cast<int>(model_input.is_fake_stream));
     maybePrintModelInput(model_input, "decode post draft model");
     ensureModelInputsOnCuda(model_input, "decode.draft_prefill_forward");
     logMtpDecodeModelInput("draft_prefill_forward_input", model_input);
     const bool cp_context_request = isCpContextRequest(parallelism_config_, model_input);
     // Use sp_prefill_draft_model_ if CUDA graph is enabled, otherwise use draft_model_.
-    GptModelOutputs draft_prefill_model_output;
-    const bool      use_sp_prefill_cuda_graph = sp_prefill_draft_model_ && !model_input.is_fake_stream;
+    GptModelOutputs         draft_prefill_model_output;
+    static std::atomic<int> draft_prefill_choice_log_budget{16};
+    if (draft_prefill_choice_log_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
+        RTP_LLM_LOG_INFO(
+            "[MTP decode] draft prefill model choice use_sp_prefill=%d sp_exists=%d sp_cg=%d "
+            "sp_prefill_cg=%d is_fake_stream=%d",
+            static_cast<int>(use_sp_prefill_cuda_graph),
+            static_cast<int>(sp_prefill_draft_model_ != nullptr),
+            static_cast<int>(sp_prefill_draft_model_ ? sp_prefill_draft_model_->cudaGraphEnabled() : false),
+            static_cast<int>(sp_prefill_draft_model_ ? sp_prefill_draft_model_->prefillCudaGraphMode() : false),
+            static_cast<int>(model_input.is_fake_stream));
+    }
     if (sp_prefill_draft_model_ && model_input.is_fake_stream) {
         static std::atomic<int> fake_prefill_log_budget{4};
         if (fake_prefill_log_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {

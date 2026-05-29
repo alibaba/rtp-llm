@@ -962,7 +962,10 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
 }
 
 GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
-    RTP_LLM_PROFILE_SCOPE("py_model.forward");
+    RTP_LLM_PROFILE_SCOPE_DYNAMIC("py_model.forward(cuda_graph=%d,prefill_cg=%d,model_id=%zu)",
+                                  static_cast<int>(enable_cuda_graph_),
+                                  static_cast<int>(is_prefill_cuda_graph_mode_),
+                                  model_id_);
     DevicePerfWrapper wrapper(enable_device_perf_, "py model forward");
     holdInputsHostBuffers(inputs);
 
