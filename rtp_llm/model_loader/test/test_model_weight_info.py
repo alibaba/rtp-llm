@@ -62,7 +62,7 @@ class RecordingDeployWeightInfo(ModelDeployWeightInfo):
             )
         )
 
-    def get_weight_info(self) -> ModelWeightInfo:
+    def get_weight_info(self, **kwargs) -> ModelWeightInfo:
         self.events.append(("get_weight_info", len(self.database.pretrain_file_list)))
         return self.returned_weight_info
 
