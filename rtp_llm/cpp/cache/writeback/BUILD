@@ -13,6 +13,18 @@ cc_library(
 )
 
 cc_library(
+    name = "pd_kv_writeback_metrics",
+    srcs = ["PdKvWritebackMetrics.cc"],
+    hdrs = ["PdKvWritebackMetrics.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        "//rtp_llm/cpp/utils:time_util",
+        "@havenask//aios/kmonitor:kmonitor_client_cpp",
+    ],
+)
+
+cc_library(
     name = "pd_kv_writeback_transfer",
     srcs = ["PdKvWritebackTransfer.cc"],
     hdrs = ["PdKvWritebackTransfer.h"],
