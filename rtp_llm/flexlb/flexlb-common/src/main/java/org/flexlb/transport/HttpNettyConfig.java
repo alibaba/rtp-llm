@@ -14,6 +14,7 @@ import io.netty.util.concurrent.DefaultEventExecutorGroup;
 import io.netty.util.concurrent.DefaultThreadFactory;
 import io.netty.util.concurrent.EventExecutorGroup;
 import io.netty.util.concurrent.RejectedExecutionHandlers;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.constant.CommonConstants;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -25,7 +26,11 @@ public class HttpNettyConfig {
 
     private final int responseTimeoutMs = 500;
     private final int nettyMaxChunkSize = 8192;
-    private final int eventExecuteThreads = 10 * Runtime.getRuntime().availableProcessors();
+    private final int eventExecuteThreads;
+
+    public HttpNettyConfig(FlexlbConfig flexlbConfig) {
+        this.eventExecuteThreads = flexlbConfig.getHttpClientWorkerMultiplier() * Runtime.getRuntime().availableProcessors();
+    }
 
     @Bean(name = "nettyClient")
     public HttpNettyClientHandler createNettyClientHandler() {

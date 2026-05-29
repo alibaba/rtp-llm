@@ -308,6 +308,13 @@ public class FlexlbConfig {
     private long prefillProfilingTimeoutMs = 30000;
 
     /**
+     * Per-request gRPC deadline (seconds) for each profiling probe.
+     * Cold-start requests (first inference after model load) may trigger
+     * CUDA compilation and framework init, so this must accommodate that.
+     */
+    private int prefillProfilingRequestTimeoutSeconds = 120;
+
+    /**
      * Manual override: comma-separated "c0,c1,c2" polynomial coefficients.
      * If non-empty, profiling is skipped and these values are used directly
      * for {@code T(n) = c0 + c1*n + c2*n²} (ms).

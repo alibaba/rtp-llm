@@ -8,6 +8,7 @@ import io.netty.util.concurrent.DefaultEventExecutorChooserFactory;
 import io.netty.util.concurrent.RejectedExecutionHandlers;
 import io.netty.util.internal.PlatformDependent;
 import lombok.extern.slf4j.Slf4j;
+import org.flexlb.config.FlexlbConfig;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -20,11 +21,19 @@ import java.util.concurrent.TimeUnit;
 @Slf4j
 public class ChannelConfiguration {
 
+    private final FlexlbConfig flexlbConfig;
+
+    public ChannelConfiguration(FlexlbConfig flexlbConfig) {
+        this.flexlbConfig = flexlbConfig;
+    }
+
     @Bean
     public ThreadPoolExecutor managedChannelThreadPoolExecutor() {
+        int multiplier = flexlbConfig.getGrpcEventLoopMultiplier();
+        int cpus = Runtime.getRuntime().availableProcessors();
         return new ThreadPoolExecutor(
-                Runtime.getRuntime().availableProcessors() * 4,
-                Runtime.getRuntime().availableProcessors() * 8,
+                cpus * multiplier,
+                cpus * multiplier * 2,
                 5, TimeUnit.MINUTES,
                 new SynchronousQueue<>(),
                 new NamedThreadFactory("engine-grpc-client-executor")
@@ -33,8 +42,9 @@ public class ChannelConfiguration {
 
     @Bean
     public EventLoopGroup managedChannelEventLoopGroup() {
+        int threads = Runtime.getRuntime().availableProcessors() * flexlbConfig.getGrpcEventLoopMultiplier();
         return new NioEventLoopGroup(
-                Runtime.getRuntime().availableProcessors() * 8,
+                threads,
                 null,
                 DefaultEventExecutorChooserFactory.INSTANCE,
                 SelectorProvider.provider(),

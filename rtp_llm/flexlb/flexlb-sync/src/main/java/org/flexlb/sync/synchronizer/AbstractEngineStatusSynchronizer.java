@@ -55,16 +55,6 @@ public abstract class AbstractEngineStatusSynchronizer {
         this.engineHealthReporter = engineHealthReporter;
         this.engineWorkerStatus = engineWorkerStatus;
         this.modelMetaConfig = modelMetaConfig;
-        int corePoolSize = 500;
-        int maximumPoolSize = 1000;
-
-        engineSyncExecutor = new ThreadPoolExecutor(corePoolSize, maximumPoolSize, 60L, TimeUnit.SECONDS,
-                new LinkedBlockingQueue<>(15000), new NamedThreadFactory("engine-sync-executor"),
-                new ThreadPoolExecutor.AbortPolicy());
-
-        statusCheckExecutor = new ThreadPoolExecutor(corePoolSize, maximumPoolSize, 60L, TimeUnit.SECONDS,
-                new LinkedBlockingQueue<>(15000), new NamedThreadFactory("status-checker-executor"),
-                new ThreadPoolExecutor.AbortPolicy());
 
         String masterConfigStr = System.getenv("FLEXLB_CONFIG");
         logger.warn("FLEXLB_CONFIG = {}", masterConfigStr);
@@ -75,6 +65,23 @@ public abstract class AbstractEngineStatusSynchronizer {
             masterConfig = new FlexlbConfig();
         }
         this.flexlbConfig = masterConfig;
+
+        int syncCore = flexlbConfig.getEngineSyncPoolSize();
+        int syncMax = Math.max(syncCore * 4, 200);
+        engineSyncExecutor = new ThreadPoolExecutor(syncCore, syncMax, 60L, TimeUnit.SECONDS,
+                new LinkedBlockingQueue<>(syncCore * 2), new NamedThreadFactory("engine-sync-executor"),
+                new ThreadPoolExecutor.AbortPolicy());
+        ((ThreadPoolExecutor) engineSyncExecutor).allowCoreThreadTimeOut(true);
+
+        int checkCore = flexlbConfig.getStatusCheckPoolSize();
+        int checkMax = Math.max(checkCore * 4, 200);
+        statusCheckExecutor = new ThreadPoolExecutor(checkCore, checkMax, 60L, TimeUnit.SECONDS,
+                new LinkedBlockingQueue<>(checkCore * 2), new NamedThreadFactory("status-checker-executor"),
+                new ThreadPoolExecutor.AbortPolicy());
+        ((ThreadPoolExecutor) statusCheckExecutor).allowCoreThreadTimeOut(true);
+
+        logger.warn("Thread pools initialized: engineSync core={} max={}, statusCheck core={} max={}",
+                syncCore, syncMax, checkCore, checkMax);
     }
 
     protected abstract void syncEngineStatus();
