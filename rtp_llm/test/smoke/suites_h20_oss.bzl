@@ -228,6 +228,20 @@ def h20_oss_suites():
                 gpu_type=["H20"],
             ),
             smoke_test(
+                name="dense_pd_writeback_reuse_tp4",
+                task_info="data/model/qwen3/q_r_h20_pd_writeback_reuse.json",
+                envs={
+                    "prefill": ["ENABLE_PD_KV_CACHE_WRITEBACK=1"],
+                    "decode": ["ENABLE_PD_KV_CACHE_WRITEBACK=1"],
+                },
+                smoke_args={
+                    "prefill": "--act_type BF16 --reserver_runtime_mem_mb 8192 --tp_size 4 --world_size 4 --warm_up 0 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --seq_size_per_block 64 --reuse_cache 1 --load_cache_timeout_ms 120000",
+                    "decode": "--act_type BF16 --reserver_runtime_mem_mb 8192 --tp_size 4 --world_size 4 --warm_up 0 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --seq_size_per_block 64 --reuse_cache 1 --load_cache_timeout_ms 120000",
+                },
+                sleep_time_qr=10,
+                gpu_type=["H20"],
+            ),
+            smoke_test(
                 name="dense_fp8pb_dynamic",
                 task_info="data/model/qwen3/q_r_h20.json",
                 smoke_args="--disable_flash_infer 1 --quantization FP8_PER_BLOCK --act_type BF16 --warm_up 0",
