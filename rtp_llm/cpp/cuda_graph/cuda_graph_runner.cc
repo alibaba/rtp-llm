@@ -141,6 +141,16 @@ void addD2DCopy(FusedD2DCopyParams& copies, const torch::Tensor& src, torch::Ten
     }
 }
 
+size_t rowElementCount(const torch::Tensor& tensor) {
+    if (!tensor.defined() || tensor.numel() <= 0) {
+        return 0;
+    }
+    if (tensor.dim() <= 1) {
+        return static_cast<size_t>(tensor.numel());
+    }
+    return static_cast<size_t>(tensor.numel() / tensor.size(0));
+}
+
 void addStridedD2DCopy(FusedStridedCopyParams& strided_copies,
                        FusedD2DCopyParams&     d2d_copies,
                        const torch::Tensor&    src,
@@ -165,7 +175,7 @@ void addStridedD2DCopy(FusedStridedCopyParams& strided_copies,
         return;
     }
     const size_t rows      = std::min(src.size(0), dst.size(0));
-    const size_t cols      = std::min(src.size(1), dst.size(1));
+    const size_t cols      = std::min(rowElementCount(src), rowElementCount(dst));
     const size_t row_bytes = cols * src.element_size();
     if (rows == 0 || row_bytes == 0) {
         return;
@@ -204,7 +214,7 @@ void copyStridedHost(const torch::Tensor& src, torch::Tensor& dst) {
         return;
     }
     const size_t nrows      = std::min(src.size(0), dst.size(0));
-    const size_t row_bytes  = std::min(src.size(1), dst.size(1)) * src.element_size();
+    const size_t row_bytes  = std::min(rowElementCount(src), rowElementCount(dst)) * src.element_size();
     const size_t src_stride = src.stride(0) * src.element_size();
     const size_t dst_stride = dst.stride(0) * dst.element_size();
     if (nrows == 0 || row_bytes == 0) {
@@ -263,6 +273,24 @@ void CudaGraphRunner::prepareInputData(const PyModelInputs& inputs, CudaGraphSta
         optimizedCopyAsync(inputs.input_hiddens,
                            py_model_inputs_.input_hiddens,
                            inputs.input_hiddens.numel() * inputs.input_hiddens.element_size());
+    }
+
+    if (is_prefill_cuda_graph_mode_) {
+        const auto copy_i32_prefix = [](const torch::Tensor& src, torch::Tensor& dst, int token_num) {
+            if (!src.defined() || !dst.defined() || src.numel() <= 0 || dst.numel() <= 0 || token_num <= 0) {
+                return;
+            }
+            RTP_LLM_CHECK_WITH_INFO(src.scalar_type() == torch::kInt32 && dst.scalar_type() == torch::kInt32,
+                                    "prefill cuda graph embedding metadata expects int32 tensors");
+            const int64_t copy_num = std::min<int64_t>({static_cast<int64_t>(token_num), src.numel(), dst.numel()});
+            optimizedCopyAsync(src, dst, copy_num * sizeof(int32_t));
+        };
+        copy_i32_prefix(inputs.bert_embedding_inputs.combo_position_ids,
+                        py_model_inputs_.bert_embedding_inputs.combo_position_ids,
+                        token_num);
+        copy_i32_prefix(inputs.bert_embedding_inputs.combo_tokens_type_ids,
+                        py_model_inputs_.bert_embedding_inputs.combo_tokens_type_ids,
+                        token_num);
     }
 }
 
@@ -559,6 +587,12 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
         {
             RTP_LLM_PROFILE_SCOPE("cuda_graph.forward(replayPrefill)");
             replayPrefill(state.current_real_graph_seq_len);
+            if (std::getenv("RTP_LLM_DEBUG_SYNC_CUDA_GRAPH_REPLAY") != nullptr) {
+                RTP_LLM_LOG_INFO("[CudaGraphRunner] debug sync after prefill replay key=%d seq_len=%d",
+                                 state.current_real_graph_seq_len,
+                                 state.current_seq_len);
+                cuda_graph::graphDeviceSynchronize();
+            }
         }
         outputs.hidden_states =
             graph_instances_[state.current_real_graph_seq_len].mem_hold_.decoder_layer_hidden_states_.slice(
@@ -567,6 +601,12 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
         {
             RTP_LLM_PROFILE_SCOPE("cuda_graph.forward(replayDecode)");
             replayDecode(state.current_real_graph_bs);
+            if (std::getenv("RTP_LLM_DEBUG_SYNC_CUDA_GRAPH_REPLAY") != nullptr) {
+                RTP_LLM_LOG_INFO("[CudaGraphRunner] debug sync after decode replay key=%d seq_len_sum=%d",
+                                 state.current_real_graph_bs,
+                                 state.seq_len_sum);
+                cuda_graph::graphDeviceSynchronize();
+            }
         }
         outputs.hidden_states =
             graph_instances_[state.current_real_graph_bs].mem_hold_.decoder_layer_hidden_states_.slice(
@@ -916,6 +956,16 @@ void CudaGraphRunner::initCapture() {
                 capture_mem_hold_.py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device.slice(0, 0, 1);
             inputs.attention_inputs.kv_cache_kernel_block_id_host =
                 capture_mem_hold_.py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_host.slice(0, 0, 1);
+            if (capture_mem_hold_.py_model_inputs_.attention_inputs.kv_cache_block_id_device.defined()
+                && capture_mem_hold_.py_model_inputs_.attention_inputs.kv_cache_block_id_device.numel() > 0) {
+                inputs.attention_inputs.kv_cache_block_id_device =
+                    capture_mem_hold_.py_model_inputs_.attention_inputs.kv_cache_block_id_device.slice(0, 0, 1);
+            }
+            if (capture_mem_hold_.py_model_inputs_.attention_inputs.kv_cache_block_id_host.defined()
+                && capture_mem_hold_.py_model_inputs_.attention_inputs.kv_cache_block_id_host.numel() > 0) {
+                inputs.attention_inputs.kv_cache_block_id_host =
+                    capture_mem_hold_.py_model_inputs_.attention_inputs.kv_cache_block_id_host.slice(0, 0, 1);
+            }
             try {
                 ScopedEnvFlag cuda_graph_warmup("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD", "1");
                 py_forward_method_(inputs);

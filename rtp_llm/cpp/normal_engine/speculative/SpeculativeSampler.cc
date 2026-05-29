@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include <atomic>
 #include <cstdlib>
+#include <exception>
 #include <sstream>
 #include <string>
 
@@ -233,11 +234,26 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     if (debugMtpAcceptEnabled()) {
         static std::atomic<int> log_budget{32};
         if (log_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
-            RTP_LLM_LOG_INFO("[debug-mtp-accept] batch=%d propose_step=%zu draft_token_ids=%s target_token_ids=%s "
-                             "accept_len=%s accept_tokens=%s draft_probs=%s target_probs=%s",
+            torch::Tensor target_sampled_ids_debug;
+            torch::Tensor draft_target_match_debug;
+            try {
+                const int64_t target_token_stride = target_token_ids_d_t.size(1);
+                auto          target_token_ids_3d = target_token_ids_d_t.reshape(
+                    {(int64_t)batch_size, (int64_t)(propose_step_ + 1), target_token_stride});
+                target_sampled_ids_debug = target_token_ids_3d.select(2, target_token_stride - 1).to(torch::kInt32);
+                draft_target_match_debug = draft_token_ids_d_t.to(torch::kInt32)
+                                               .eq(target_sampled_ids_debug.narrow(1, 0, (int64_t)propose_step_));
+            } catch (const std::exception& e) {
+                RTP_LLM_LOG_WARNING("[debug-mtp-accept] failed to summarize target sampled ids: %s", e.what());
+            }
+            RTP_LLM_LOG_INFO("[debug-mtp-accept] batch=%d propose_step=%zu draft_token_ids=%s "
+                             "target_sampled_ids=%s draft_target_match=%s target_token_ids=%s accept_len=%s "
+                             "accept_tokens=%s draft_probs=%s target_probs=%s",
                              batch_size,
                              propose_step_,
                              debugTensorSummary(draft_token_ids, 32).c_str(),
+                             debugTensorSummary(target_sampled_ids_debug, 32).c_str(),
+                             debugTensorSummary(draft_target_match_debug, 32).c_str(),
                              debugTensorSummary(target_token_ids, 32).c_str(),
                              debugTensorSummary(sample_output.accept_len, 32).c_str(),
                              debugTensorSummary(sample_output.accept_tokens, 32).c_str(),

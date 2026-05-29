@@ -568,6 +568,10 @@ TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {
     vector<int> expect_lm_output_indexes = {0, 1};
     EXPECT_TRUE(lm_output_indexes.is_cuda());
     EXPECT_EQ(expect_lm_output_indexes, toVec<int>(lm_output_indexes));
+
+    vector<int> expect_sequence_lengths = {2, 3};
+    EXPECT_TRUE(model_input.sequence_lengths.is_cuda());
+    EXPECT_EQ(expect_sequence_lengths, toVec<int>(model_input.sequence_lengths));
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInput) {

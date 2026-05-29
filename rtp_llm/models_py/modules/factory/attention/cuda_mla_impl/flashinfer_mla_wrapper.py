@@ -1,3 +1,5 @@
+import logging
+import os
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -18,6 +20,13 @@ from .flashinfer_mla import (
     warmup_flashinfer_python,
 )
 from .rope_emb_new import NewMlaRotaryEmbeddingOp
+
+
+def _select_mla_block_id_host(attn_inputs: PyAttentionInputs) -> torch.Tensor:
+    block_id = getattr(attn_inputs, "kv_cache_block_id_host", None)
+    if block_id is not None and block_id.numel() > 0:
+        return block_id
+    return attn_inputs.kv_cache_kernel_block_id_host
 
 
 class MlaFlashInferImplBase(MlaImplBase):
@@ -78,11 +87,12 @@ class MlaFlashInferImplBase(MlaImplBase):
             self.fmha_params is not None
         ), "fmha_params should be initialized in __init__"
         check_attention_inputs(attn_inputs)
+        block_id_host = _select_mla_block_id_host(attn_inputs)
         self.fmha_params.fill_params(
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,
             attn_inputs.input_lengths,
-            attn_inputs.kv_cache_kernel_block_id_host,
+            block_id_host,
             self.seq_size_per_block,
             forbid_realloc,
         )
@@ -129,6 +139,8 @@ class MlaFlashInferImplBase(MlaImplBase):
 
 
 class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
+    _debug_init_log_budget = 16
+
     def __init__(
         self,
         attn_configs: AttentionConfigs,
@@ -155,6 +167,8 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
                 weights,
                 quant_config,
                 attn_configs.kv_cache_dtype,
+                is_cuda_graph=is_cuda_graph,
+                max_batch_size=int(attn_inputs.input_lengths.size(0)),
             ),
             NewMlaRotaryEmbeddingOp(
                 cos_sin_cache=cos_sin_cache,
@@ -185,13 +199,44 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
             fmha_config.absorb_opt_len if fmha_config is not None else 1024
         )
         q_len = attn_inputs.input_lengths.sum().item()
+        self.cuda_graph_absorb_token_limit = self.absorb_opt_len
+        if is_cuda_graph:
+            mtp_step_tokens = (
+                int(getattr(attn_configs, "gen_num_per_cycle", 0) or 0) + 1
+            )
+            self.cuda_graph_absorb_token_limit = max(1, mtp_step_tokens)
         self.absorb_fmha: Optional[MlaFlashInferDecodeOp] = None
-        if (
+        use_absorb_fmha = (
             q_len < self.absorb_opt_len
-            and self.has_reuse_cache
+            and (self.has_reuse_cache or is_cuda_graph)
             and attn_configs.kv_cache_dtype
             in (KvCacheDataType.BASE, KvCacheDataType.FP8)
+        )
+        if (
+            is_cuda_graph
+            and os.environ.get("RTP_LLM_DEBUG_MLA_PREFILL_PLAN", "0") != "0"
+            and MlaFlashInferPrefillImpl._debug_init_log_budget > 0
         ):
+            MlaFlashInferPrefillImpl._debug_init_log_budget -= 1
+            logging.warning(
+                "[MLA-PREFILL-IMPL] is_cuda_graph=%s q_len=%s absorb_opt_len=%s "
+                "has_reuse_cache=%s kv_cache_dtype=%s use_absorb=%s input_lengths_shape=%s "
+                "prefix_lengths_shape=%s cg_absorb_limit=%s",
+                is_cuda_graph,
+                q_len,
+                self.absorb_opt_len,
+                self.has_reuse_cache,
+                attn_configs.kv_cache_dtype,
+                use_absorb_fmha,
+                tuple(attn_inputs.input_lengths.shape),
+                (
+                    tuple(attn_inputs.prefix_lengths.shape)
+                    if attn_inputs.prefix_lengths is not None
+                    else None
+                ),
+                self.cuda_graph_absorb_token_limit,
+            )
+        if use_absorb_fmha:
             max_context_len = max_seq_len
             if max_context_len <= 0 and attn_inputs.prefix_lengths is not None:
                 max_context_len = int(
@@ -211,9 +256,11 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
                 weights,
                 max_bs=int(attn_inputs.input_lengths.size(0)),
                 max_context_len=max_context_len,
+                is_cuda_graph=is_cuda_graph,
                 kv_cache_dtype=attn_configs.kv_cache_dtype,
             )
-            self.absorb_fmha.plan(self.fmha_params)
+            if (not is_cuda_graph) or q_len <= self.cuda_graph_absorb_token_limit:
+                self.absorb_fmha.plan(self.fmha_params)
 
     @classmethod
     def support(
@@ -223,8 +270,16 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
         self.prepare(attn_inputs, forbid_realloc=True)
-        if self.absorb_fmha is not None:
+        if (
+            self.absorb_fmha is not None
+            and self._current_total_q() <= self.cuda_graph_absorb_token_limit
+        ):
             self.absorb_fmha.plan_prefill_cuda_graph(self.fmha_params)
+
+    def _current_total_q(self) -> int:
+        if self.fmha_params is not None and self.fmha_params.qo_indptr_h.numel() > 0:
+            return int(self.fmha_params.qo_indptr_h[-1].item())
+        return 0
 
     def _handle_long_sequence(
         self,
@@ -262,7 +317,14 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
     ):
         """Compute prefill context with optimized cache reuse logic."""
 
-        if self.absorb_fmha is not None:
+        total_q = self._current_total_q()
+        if total_q <= 0:
+            total_q = q.shape[0]
+
+        if (
+            self.absorb_fmha is not None
+            and total_q <= self.cuda_graph_absorb_token_limit
+        ):
             return self._handle_short_sequence(q, kv_cache, layer_id)
         else:
             return self._handle_long_sequence(

@@ -156,42 +156,6 @@ torch::Tensor tryGetMtpGraphNormalizedHidden(py::object& py_model, int64_t num_t
     return result.cast<torch::Tensor>();
 }
 
-torch::Tensor tryGetMtpGraphFinalHidden(py::object& py_model, int64_t num_tokens) {
-    py::gil_scoped_acquire gil;
-    if (!py_model || !py::hasattr(py_model, "get_mtp_final_hidden_states")) {
-        return torch::Tensor();
-    }
-    py::object result = py_model.attr("get_mtp_final_hidden_states")(num_tokens);
-    if (result.is_none()) {
-        return torch::Tensor();
-    }
-    return result.cast<torch::Tensor>();
-}
-
-torch::Tensor tryGetMtpGraphFinalResidual(py::object& py_model, int64_t num_tokens) {
-    py::gil_scoped_acquire gil;
-    if (!py_model || !py::hasattr(py_model, "get_mtp_final_residual_states")) {
-        return torch::Tensor();
-    }
-    py::object result = py_model.attr("get_mtp_final_residual_states")(num_tokens);
-    if (result.is_none()) {
-        return torch::Tensor();
-    }
-    return result.cast<torch::Tensor>();
-}
-
-torch::Tensor tryApplyMtpFinalLayernorm(py::object& py_model, int64_t num_tokens) {
-    py::gil_scoped_acquire gil;
-    if (!py_model || !py::hasattr(py_model, "apply_mtp_final_layernorm_from_buffers")) {
-        return torch::Tensor();
-    }
-    py::object result = py_model.attr("apply_mtp_final_layernorm_from_buffers")(num_tokens);
-    if (result.is_none()) {
-        return torch::Tensor();
-    }
-    return result.cast<torch::Tensor>();
-}
-
 struct MtpFinalNormParams {
     torch::Tensor weight;
     double        eps{0.0};
@@ -218,20 +182,6 @@ torch::Tensor applyMtpFinalRmsNorm(const torch::Tensor& hidden, const torch::Ten
     auto variance    = hidden_fp32.pow(2).mean(-1, /*keepdim=*/true);
     auto normalized  = hidden_fp32 * torch::rsqrt(variance + eps);
     auto result      = normalized.to(hidden.scalar_type());
-    auto norm_weight = weight;
-    if (norm_weight.device() != hidden.device() || norm_weight.scalar_type() != hidden.scalar_type()) {
-        norm_weight = norm_weight.to(hidden.options());
-    }
-    return result * norm_weight;
-}
-
-torch::Tensor applyMtpFinalRmsNorm(const torch::Tensor& hidden,
-                                   const torch::Tensor& residual,
-                                   const torch::Tensor& weight,
-                                   double               eps) {
-    auto summed_fp32 = hidden.to(torch::kFloat32) + residual.to(torch::kFloat32);
-    auto variance    = summed_fp32.pow(2).mean(-1, /*keepdim=*/true);
-    auto result      = (summed_fp32 * torch::rsqrt(variance + eps)).to(hidden.scalar_type());
     auto norm_weight = weight;
     if (norm_weight.device() != hidden.device() || norm_weight.scalar_type() != hidden.scalar_type()) {
         norm_weight = norm_weight.to(hidden.options());
@@ -667,7 +617,8 @@ void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs
             }
             buffer_holder_.hold_host(physical_group0);
             py_attn_inputs.kv_cache_block_id_host   = physical_group0;
-            py_attn_inputs.kv_cache_block_id_device = tensorHoldHostAndToCuda(physical_group0);
+            const auto cuda_i32                     = torch::TensorOptions(torch::kInt32).device(torch::kCUDA);
+            py_attn_inputs.kv_cache_block_id_device = physical_group0.to(cuda_i32, /*non_blocking=*/false);
         }
     }
     if (debug_mtp_decode) {
@@ -1087,32 +1038,12 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 auto mtp_norm_params = tryGetMtpFinalNormParams(py_model_);
                 if (mtp_norm_params.weight.defined()) {
                     auto graph_pre_norm = hidden_states;
-                    auto fused_norm     = tryApplyMtpFinalLayernorm(py_model_, graph_pre_norm.size(0));
-                    if (fused_norm.defined() && fused_norm.sizes() == graph_pre_norm.sizes()) {
-                        hidden_states = fused_norm;
-                    } else {
-                        auto final_hidden   = tryGetMtpGraphFinalHidden(py_model_, graph_pre_norm.size(0));
-                        auto final_residual = tryGetMtpGraphFinalResidual(py_model_, graph_pre_norm.size(0));
-                        if (final_hidden.defined() && final_residual.defined()
-                            && final_hidden.sizes() == graph_pre_norm.sizes()
-                            && final_residual.sizes() == graph_pre_norm.sizes()) {
-                            hidden_states = applyMtpFinalRmsNorm(
-                                final_hidden, final_residual, mtp_norm_params.weight, mtp_norm_params.eps);
-                        } else {
-                            hidden_states =
-                                applyMtpFinalRmsNorm(graph_pre_norm, mtp_norm_params.weight, mtp_norm_params.eps);
-                        }
-                    }
+                    hidden_states = applyMtpFinalRmsNorm(graph_pre_norm, mtp_norm_params.weight, mtp_norm_params.eps);
                     static std::atomic<int> mtp_graph_output_norm_log_budget{4};
                     if (mtpPrefillDebugEnabled()
                         && mtp_graph_output_norm_log_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
-                        auto final_hidden   = tryGetMtpGraphFinalHidden(py_model_, graph_pre_norm.size(0));
-                        auto final_residual = tryGetMtpGraphFinalResidual(py_model_, graph_pre_norm.size(0));
                         RTP_LLM_LOG_INFO(
-                            "[PyWrappedModel] using MTP fused final RMSNorm from graph buffers for prefill CUDA graph post layers: fused_norm=%s final_hidden=%s final_residual=%s graph_pre_norm=%s normalized=%s",
-                            tensorSummary(fused_norm, 0).c_str(),
-                            tensorSummary(final_hidden, 0).c_str(),
-                            tensorSummary(final_residual, 0).c_str(),
+                            "[PyWrappedModel] using graph pre-norm hidden for MTP final RMSNorm in prefill CUDA graph post layers: graph_pre_norm=%s normalized=%s",
                             tensorSummary(graph_pre_norm, 0).c_str(),
                             tensorSummary(hidden_states, 0).c_str());
                     }
@@ -1174,6 +1105,20 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         // already used by callForwardPostLayers.
         const bool has_context_request = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
         if (device_props_.enable_prefill_cp && has_context_request) {
+            torch::Tensor mtp_hidden_states;
+            if (hidden_states.defined() && hidden_states.dim() == 2 && hidden_states.size(0) > 0) {
+                mtp_hidden_states = getMtpTargetHiddenStates(hidden_states.size(0));
+                if (mtp_hidden_states.defined() && mtp_hidden_states.numel() > 0) {
+                    RTP_LLM_CHECK_WITH_INFO(mtp_hidden_states.dim() == 2,
+                                            "CP MTP pre-norm hidden states must be 2-D, got dim=%ld",
+                                            mtp_hidden_states.dim());
+                    RTP_LLM_CHECK_WITH_INFO(mtp_hidden_states.size(0) == hidden_states.size(0),
+                                            "CP MTP pre-norm hidden row count mismatch: mtp_rows=%ld, hidden_rows=%ld",
+                                            mtp_hidden_states.size(0),
+                                            hidden_states.size(0));
+                    context_parallel_processor_->handleOutputs(mtp_hidden_states, inputs, cp_params);
+                }
+            }
             size_t num_valid_tokens = context_parallel_processor_->handleOutputs(hidden_states, inputs, cp_params);
             if (pdDebugEnabled()) {
                 static std::atomic<int> cp_output_log_budget{16};
@@ -1191,7 +1136,28 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                                      tensorSummary(cp_params.prefill_qkv_padding_mask).c_str());
                 }
             }
-            return callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens);
+            auto outputs = callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens);
+            if (mtp_hidden_states.defined() && mtp_hidden_states.numel() > 0) {
+                if (outputs.all_hidden_states.defined()
+                    && outputs.all_hidden_states.size(0) == mtp_hidden_states.size(0)) {
+                    outputs.all_hidden_states = mtp_hidden_states;
+                    static std::atomic<int> mtp_cp_hidden_log_budget{8};
+                    if (mtpDecodeDebugEnabled()
+                        && mtp_cp_hidden_log_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
+                        RTP_LLM_LOG_INFO("[debug-mtp-decode-data] restored CP MTP pre-norm hidden=%s "
+                                         "post_layer_hidden=%s num_valid_tokens=%zu",
+                                         tensorSummary(mtp_hidden_states, 0).c_str(),
+                                         tensorSummary(hidden_states, 0).c_str(),
+                                         num_valid_tokens);
+                    }
+                } else {
+                    RTP_LLM_LOG_WARNING("[PyWrappedModel] ignored restored CP MTP hidden due to output shape "
+                                        "mismatch: mtp=%s output_all_hidden=%s",
+                                        tensorSummary(mtp_hidden_states, 0).c_str(),
+                                        tensorSummary(outputs.all_hidden_states, 0).c_str());
+                }
+            }
+            return outputs;
         }
         return callForwardPostLayers(hidden_states, inputs, skip_final_layernorm);
 

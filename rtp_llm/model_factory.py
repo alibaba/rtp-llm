@@ -158,12 +158,18 @@ class ModelFactory:
             or sp_type == SpeculativeType.EAGLE
         ):
             model_type = propose_model_config.model_type
-            if model_type in ("deepseek-v3-mtp", "mixtbstars-mtp", "glm_5_mtp"):
+            if model_type in ("deepseek-v3-mtp", "mixtbstars-mtp"):
                 logging.warning(
                     f"create sp model type is {model_type}, so change the sp type to mtp"
                 )
                 engine_config.sp_config.type = SpeculativeType.MTP
                 sp_type = SpeculativeType.MTP
+            elif model_type == "glm_5_mtp":
+                logging.warning(
+                    f"create sp model type is {model_type}, so change the sp type to eagle"
+                )
+                engine_config.sp_config.type = SpeculativeType.EAGLE
+                sp_type = SpeculativeType.EAGLE
             elif model_type == "qwen_3_moe-mtp":
                 logging.warning(
                     f"create sp model type is {model_type}, so change the sp type to eagle3"

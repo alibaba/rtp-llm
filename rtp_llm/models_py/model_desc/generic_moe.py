@@ -537,18 +537,11 @@ class GenericMoeModel(GptModelBase):
         self._mtp_hidden_valid_tokens = int(T)
 
     def get_mtp_target_hidden_states(self, num_tokens: int):
-        buf = self._mtp_hidden_buffer
-        if buf is None:
-            return None
-        requested = int(num_tokens)
-        if requested < 0:
-            requested = self._mtp_hidden_valid_tokens
-            assert requested > 0, "MTP hidden buffer has no written rows"
-        assert requested <= buf.size(0), (
-            f"requested MTP hidden states exceed buffer capacity: "
-            f"requested={requested}, capacity={buf.size(0)}"
-        )
-        return buf[:requested]
+        # GLM/DeepSeek-V2 style MTP consumes the target model's final-norm
+        # hidden states on the first draft pass, matching vLLM/SGLang GLM MTP.
+        # Only the draft MTP module itself exposes pre-shared-head-norm hidden
+        # through this accessor for recurrent draft steps.
+        return None
 
 
 __all__ = [
