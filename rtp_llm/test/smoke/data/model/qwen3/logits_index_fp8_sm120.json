@@ -20,13 +20,13 @@
                 }
             },
             "result": {
-                "response": " The CAP theorem is a fundamental result in the field",
+                "response": " - 10000000",
                 "response_alternatives": null,
                 "hidden_states": null,
                 "logits": [
                     [
-                        5.465275287628174,
-                        2.522678852081299
+                        9.370532035827637,
+                        12.08557415008545
                     ]
                 ],
                 "loss": null,
@@ -95,7 +95,7 @@
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": "The CAP theorem is a fundamental result in network design"
+                            "content": "<think>\nOkay, the user is asking about the"
                         },
                         "finish_reason": "length"
                     }
@@ -109,13 +109,13 @@
                 },
                 "debug_info": null,
                 "aux_info": {
-                    "cost_time": 46.319,
+                    "cost_time": 103.008,
                     "iter_count": 10,
                     "prefix_len": 0,
                     "input_len": 25,
                     "output_len": 10,
                     "step_output_len": 1,
-                    "first_token_cost_time": 9.243,
+                    "first_token_cost_time": 14.284,
                     "wait_time": 0.0,
                     "pd_sep": false,
                     "cum_log_probs": [],
@@ -142,8 +142,8 @@
                     "loss": null,
                     "logits": [
                         [
-                            5.973734378814697,
-                            2.3883185386657715
+                            2.649372100830078,
+                            -8.993475914001465
                         ]
                     ],
                     "output_ids": null,
