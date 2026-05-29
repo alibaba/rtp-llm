@@ -39,6 +39,7 @@ from typing import Any, Dict, Optional, Tuple
 import torch
 import torch.nn as nn
 
+from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
@@ -90,6 +91,80 @@ from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import PoolBackedModule
 _SHARED_COS_SIN_CACHE: Dict[
     Tuple[int, torch.device, Tuple[int, ...], torch.dtype], torch.Tensor
 ] = {}
+
+
+def _build_cp_full_state_read_cache(
+    state_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    cp_size: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Gather CP-sliced fixed-state blocks into a compact full-ring read cache.
+
+    CP prefill stores INDEXER/CSA/HCA state as intra-block slices: each rank
+    owns ``local_eb`` rows of the full ``local_eb * cp_size`` state ring.
+    The fused compressor may still need to read prefix-cache history that
+    spans all state-ring rows.  For that read path only, gather the rows for
+    the current request block table into compact block ids while keeping the
+    write path local/sliced.
+    """
+    if cp_size <= 1:
+        return state_cache, block_table
+    if block_table is None or int(block_table.numel()) == 0:
+        return state_cache, block_table
+    if not state_cache.is_cuda:
+        raise RuntimeError("CP-sliced DSV4 state-cache read requires CUDA state pools")
+
+    bt = block_table.to(device=state_cache.device, dtype=torch.long).contiguous()
+    rows = int(bt.numel())
+    if rows == 0:
+        return state_cache, block_table
+
+    local_eb = int(state_cache.shape[1])
+    hidden = int(state_cache.shape[2])
+    flat_ids = bt.reshape(-1)
+    valid = flat_ids > 0
+    safe_ids = torch.where(valid, flat_ids, torch.zeros_like(flat_ids))
+
+    local_blocks = state_cache.index_select(0, safe_ids)
+    local_blocks = torch.where(
+        valid.view(rows, 1, 1),
+        local_blocks,
+        torch.zeros((), dtype=state_cache.dtype, device=state_cache.device),
+    )
+
+    gathered = all_gather(
+        local_blocks.reshape(rows * local_eb, hidden).contiguous(),
+        group=Group.TP,
+    )
+    full = (
+        gathered.view(cp_size, rows, local_eb, hidden)
+        .permute(1, 0, 2, 3)
+        .reshape(rows, cp_size * local_eb, hidden)
+        .contiguous()
+    )
+
+    zero = torch.zeros(
+        (1, cp_size * local_eb, hidden),
+        dtype=state_cache.dtype,
+        device=state_cache.device,
+    )
+    read_cache = torch.cat([zero, full], dim=0)
+
+    compact = torch.arange(1, rows + 1, device=bt.device, dtype=bt.dtype).view_as(bt)
+    read_bt = torch.where(bt > 0, compact, torch.zeros_like(compact))
+    return read_cache, read_bt.to(dtype=block_table.dtype)
+
+
+def _cp_sliced_state_read_needed(
+    meta: "CompressorMeta", cp_ctx: Optional[CPContext], raw_disabled: bool
+) -> bool:
+    if raw_disabled or cp_ctx is None or cp_ctx.cp_size <= 1:
+        return False
+    if not getattr(cp_ctx, "kv_cache_sharded", False):
+        return False
+    if meta.seq_start_per_req is None:
+        return False
+    return bool(torch.any(meta.seq_start_per_req > 0).item())
 
 
 @dataclass(frozen=True)
@@ -309,9 +384,9 @@ class CompressorFP8(PoolBackedModule):
 
     def set_cp_ctx(self, cp_ctx: Optional[CPContext]) -> None:
         self._cp_ctx = cp_ctx
-        # When ``kv_cache_sharded=True`` flows in via the CPContext, only the
-        # paged KV-pool writer uses CP-aware slot mapping. STATE pools are not
-        # sharded and must keep the full slot mapping on every rank.
+        # When ``kv_cache_sharded=True`` flows in via the CPContext, paged KV
+        # pools use page-RR ownership and fixed STATE pools use intra-block
+        # slices. Both writers therefore need CP-aware slot mappings.
         self._kv_cache_sharded = bool(
             cp_ctx is not None
             and getattr(cp_ctx, "kv_cache_sharded", False)
@@ -476,6 +551,21 @@ class CompressorFP8(PoolBackedModule):
         eb = self._state_eb
         tpb = self._state_tokens_per_block
         assert bt is not None and eb > 0, "state pool context unbound"
+        if self._kv_cache_sharded and self._cp_ctx is not None:
+            from rtp_llm.models_py.modules.dsv4.fp8._cp_slot_mapping import (
+                cp_state_slot_mapping,
+            )
+
+            return cp_state_slot_mapping(
+                positions,
+                bt,
+                b_idx,
+                eb,
+                tpb,
+                self._cp_ctx.cp_size,
+                self._cp_ctx.cp_rank,
+                seq_end_per_req=seq_end_per_req,
+            )
         bt_long = bt.to(torch.long)
         max_blocks = int(bt_long.shape[1])
         if max_blocks <= 0:
@@ -619,13 +709,27 @@ class CompressorFP8(PoolBackedModule):
             and meta.cu_seq_per_req is not None
         )
         raw_disabled = (seq_start is None) and not use_varlen_raw
+        state_cache_for_read = self._state_pool_3d
+        state_block_table_for_read = self._state_block_table
+        if _cp_sliced_state_read_needed(meta, self._cp_ctx, raw_disabled):
+            with record_function_range(
+                "dsv4.fp8.compressor.launch.cp_gather_state_read_cache"
+            ):
+                state_cache_for_read, state_block_table_for_read = (
+                    _build_cp_full_state_read_cache(
+                        self._state_pool_3d,
+                        self._state_block_table,
+                        int(self._cp_ctx.cp_size),
+                    )
+                )
+
         with record_function_range("dsv4.fp8.compressor.launch.compress_kv_write"):
             run_fused_compress_kv_write(
-                self._state_pool_3d,
+                state_cache_for_read,
                 meta.token_to_req,
                 meta.positions,
                 meta.state_slots,
-                self._state_block_table,
+                state_block_table_for_read,
                 self.norm.weight,
                 self.norm_eps,
                 cos_sin_cache,

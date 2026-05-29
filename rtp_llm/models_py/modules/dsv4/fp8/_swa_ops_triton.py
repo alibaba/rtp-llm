@@ -261,6 +261,123 @@ def compute_swa_slot_mapping(
     return slot_mapping
 
 
+@triton.jit(do_not_specialize=["num_reqs", "max_blocks_per_seq"])
+def _compute_swa_cp_sliced_slot_mapping_kernel(
+    slot_mapping_ptr,
+    block_table_ptr,
+    query_start_loc_ptr,
+    seq_lens_ptr,
+    num_reqs,
+    max_blocks_per_seq,
+    tokens_per_block_for_block_table: tl.constexpr,
+    local_entries_per_block: tl.constexpr,
+    full_entries_per_block: tl.constexpr,
+    cp_rank: tl.constexpr,
+    cp_size: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+):
+    batch_idx = tl.program_id(0).to(tl.int64)
+    chunk_idx = tl.program_id(1)
+
+    if batch_idx >= num_reqs:
+        return
+
+    query_start = tl.load(query_start_loc_ptr + batch_idx)
+    query_end = tl.load(query_start_loc_ptr + batch_idx + 1)
+    query_len = query_end - query_start
+    seq_len = tl.load(seq_lens_ptr + batch_idx)
+    sp = seq_len - query_len
+
+    chunk_start = chunk_idx * BLOCK_M
+    i = chunk_start + tl.arange(0, BLOCK_M)
+    valid_token = i < query_len
+    global_pos = sp + i
+
+    block_in_seq = global_pos // tokens_per_block_for_block_table
+    ring_offset = global_pos % full_entries_per_block
+    owner_rank = ring_offset // local_entries_per_block
+    local_offset = ring_offset - owner_rank * local_entries_per_block
+    owned_by_rank = owner_rank == cp_rank
+
+    in_capacity = block_in_seq < max_blocks_per_seq
+    safe_block_in_seq = tl.where(in_capacity, block_in_seq, 0)
+
+    bt_row_ptr = block_table_ptr + batch_idx * max_blocks_per_seq
+    block_id = tl.load(bt_row_ptr + safe_block_in_seq, mask=valid_token, other=-1)
+
+    block_end = (block_in_seq + 1) * tokens_per_block_for_block_table
+    effective_end = tl.minimum(block_end, seq_len)
+    tail_write = (global_pos + full_entries_per_block) >= effective_end
+    valid = (block_id > 0) & in_capacity & valid_token & owned_by_rank & tail_write
+    slot = tl.where(
+        valid,
+        block_id.to(tl.int64) * local_entries_per_block + local_offset.to(tl.int64),
+        tl.full((BLOCK_M,), -1, dtype=tl.int64),
+    )
+
+    out_ptr = slot_mapping_ptr + query_start.to(tl.int64) + i.to(tl.int64)
+    tl.store(out_ptr, slot, mask=valid_token)
+
+
+def compute_swa_cp_sliced_slot_mapping(
+    block_table: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    seq_lens: torch.Tensor,
+    num_tokens: int,
+    *,
+    tokens_per_block_for_block_table: int,
+    local_entries_per_block: int,
+    cp_rank: int,
+    cp_size: int,
+) -> torch.Tensor:
+    """Build SWA slot mapping for CP-sliced fixed/SWA blocks.
+
+    ``tokens_per_block_for_block_table`` is the logical/cache-key block size.
+    ``local_entries_per_block * cp_size`` is the full SWA ring size. These are
+    intentionally separate: logical block rows and SWA ring entries need not
+    match or divide each other.
+    """
+    assert (
+        block_table.dtype == torch.int32
+    ), f"block_table must be int32, got {block_table.dtype}"
+    assert (
+        query_start_loc.dtype == torch.int32 and seq_lens.dtype == torch.int32
+    ), "query_start_loc and seq_lens must be int32"
+    tokens_per_block_for_block_table = int(tokens_per_block_for_block_table)
+    local_entries_per_block = int(local_entries_per_block)
+    cp_rank = int(cp_rank)
+    cp_size = int(cp_size)
+    assert cp_size > 1 and 0 <= cp_rank < cp_size
+    assert tokens_per_block_for_block_table >= 1 and local_entries_per_block >= 1
+    full_entries_per_block = local_entries_per_block * cp_size
+
+    device = block_table.device
+    slot_mapping = torch.empty(num_tokens, dtype=torch.long, device=device)
+    if num_tokens == 0:
+        return slot_mapping
+
+    num_reqs = int(seq_lens.shape[0])
+    max_blocks_per_seq = int(block_table.shape[1])
+    BLOCK_M = 256
+    num_chunks = max(1, (num_tokens + BLOCK_M - 1) // BLOCK_M)
+    grid = (num_reqs, num_chunks)
+    _compute_swa_cp_sliced_slot_mapping_kernel[grid](
+        slot_mapping,
+        block_table,
+        query_start_loc,
+        seq_lens,
+        num_reqs,
+        max_blocks_per_seq=max_blocks_per_seq,
+        tokens_per_block_for_block_table=tokens_per_block_for_block_table,
+        local_entries_per_block=local_entries_per_block,
+        full_entries_per_block=full_entries_per_block,
+        cp_rank=cp_rank,
+        cp_size=cp_size,
+        BLOCK_M=BLOCK_M,
+    )
+    return slot_mapping
+
+
 # ---------------------------------------------------------------------------
 # 3) Combine compressed-attn topk + SWA window indices into one row per query
 # ---------------------------------------------------------------------------

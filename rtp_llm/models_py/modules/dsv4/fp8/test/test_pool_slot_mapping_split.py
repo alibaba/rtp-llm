@@ -4,6 +4,8 @@ import unittest
 
 import torch
 
+from rtp_llm.models_py.modules.dsv4.attn_type import HCA_KV, SWA_KV
+from rtp_llm.models_py.modules.dsv4.decode.forward import build_paged_pool_specs
 from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
     require_pool_tokens_per_block,
 )
@@ -26,6 +28,33 @@ class PoolSlotMappingSplitTest(unittest.TestCase):
         self.assertEqual(require_pool_tokens_per_block(FakeKVCache(), group=1), 16384)
         self.assertEqual(require_pool_tokens_per_block(FakeKVCache(), region=1), 128)
         self.assertEqual(require_pool_tokens_per_block(FakeKVCache(), region=7), 16384)
+
+    def test_build_paged_pool_specs_uses_dsv4_pool_tokens(self) -> None:
+        class FakeKVCache:
+            group_region_names = [int(HCA_KV), int(SWA_KV)]
+            seq_size_per_block = 128
+            kernel_seq_size_per_block = 128
+
+        class FakeAttn:
+            _kv_cache = None
+
+            def _pool_entries_per_block(self, attn_type: int) -> int:
+                if int(attn_type) == int(HCA_KV):
+                    return 1
+                if int(attn_type) == int(SWA_KV):
+                    return 32
+                return 0
+
+        class FakeLayer:
+            attn = FakeAttn()
+
+        class FakeV4:
+            layers = [FakeLayer()]
+
+        specs = build_paged_pool_specs(FakeKVCache(), FakeV4(), max_seq_len=256)
+
+        self.assertEqual(specs[int(HCA_KV)][1], 128)
+        self.assertEqual(specs[int(SWA_KV)][1], 128)
 
     def test_require_pool_tokens_per_block_rejects_unknown_region(self) -> None:
         class FakeKVCache:
