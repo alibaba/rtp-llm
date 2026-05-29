@@ -159,10 +159,13 @@ def sm120_suites():
                 smoke_args="--quantization FP8_DYNAMIC_PER_TENSOR --act_type BF16",
                 gpu_type=["RTX_5000_PRO"],
             ),
-            # TODO(B-7): dense_fp8kv_cudagraph_sm120
-            #   FlashInfer BatchDecodeWithPagedKVCacheWrapper 在 FP8 KV cache 模式下
-            #   内部调用 trtllm_batch_decode_with_kv_cache，sm_120 无对应 FMHA cubin →
-            #   decode 输出 garbage。等 FlashInfer 或 TRT-LLM 补 sm_120a FP8 paged cubin。
+            smoke_test(
+                name="dense_fp8kv_cudagraph_sm120",
+                task_info="data/model/qwen25/q_r_fp8_kv_cache_sm120.json",
+                envs=["LOAD_PYTHON_MODEL=1"],
+                smoke_args="--warm_up 0 --seq_size_per_block 64 --act_type BF16 --test_block_num 1000 --fp8_kv_cache 1 --enable_cuda_graph 1",
+                gpu_type=["RTX_5000_PRO"],
+            ),
         ],
     )
 
