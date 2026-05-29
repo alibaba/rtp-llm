@@ -39,6 +39,8 @@ struct CacheConfig {
     bool                           use_typed_cache_regions                  = false;
     bool                           use_opaque_kv_cache_store                = false;
     bool                           disable_decode_first_malloc_device_reuse = false;
+    bool                           dsv4_zero_swa_caching                    = false;
+    uint32_t                       swa_window_size                          = 0;
 
     // Model configuration
     rtp_llm::DataType dtype;
@@ -196,6 +198,8 @@ struct CacheConfig {
         OUTPUT_FIELD(use_typed_cache_regions);
         OUTPUT_FIELD(use_opaque_kv_cache_store);
         OUTPUT_FIELD(disable_decode_first_malloc_device_reuse);
+        OUTPUT_FIELD(dsv4_zero_swa_caching);
+        OUTPUT_FIELD(swa_window_size);
         os << indent1 << "group_block_nums=" << rtp_llm::vectorToString(group_block_nums) << "\n";
         os << "\n";
 
