@@ -134,8 +134,40 @@ def sm120_suites():
 
     # SM120 Dense (h20_dense 同位 — Qwen3 dense FP8)
     # 对应 PR-5: Qwen dense FP8 PER_BLOCK
-    # TODO(PR-5): dense_fp8pb_sm120 / dense_fp8pt_sm120 等
-    # 暂时占位，等 DeepGEMM 在 sm_120 上验证后再填
+    # 关键: envs=["LOAD_PYTHON_MODEL=1"] 强制走 Python LinearFactory →
+    #   FP8_PER_BLOCK 路由到 CudaFp8VllmBlockwiseLinear
+    #   (sm_120 上 DeepGEMM 无 cubin / FlashInfer PB stalls — 见 fp8_gemm_linear.py
+    #    can_handle 的 is_sm12x() gate；这条 gate 与 --disable_flash_infer 无关)
+    # 注意：sm120 不能加 --disable_flash_infer 1（PR-3 之后 FlashInfer 是 sm_120a
+    #   唯一可用的 FMHA backend；trtllm/xqa 都在 sm120 上被 gate 关了）。
+    # task_info: FP8 PER_BLOCK 量化噪声使 sm120 输出 token 与 h20 不 bit-equiv，
+    #   独立录 q_r_fp8pb_sm120.json (329 tokens vs h20 570 tokens, 语义正确但分支不同)
+    native.test_suite(
+        name = "smoke_sm120_dense",
+        tests = [
+            smoke_test(
+                name="dense_fp8pb_dynamic_sm120",
+                task_info="data/model/qwen3/q_r_fp8pb_sm120.json",
+                envs=["LOAD_PYTHON_MODEL=1"],
+                smoke_args="--quantization FP8_PER_BLOCK --act_type BF16 --warm_up 0",
+                gpu_type=["RTX_5000_PRO"],
+            ),
+            smoke_test(
+                name="dense_fp8pt_dynamic_sm120",
+                task_info="data/model/qwen3/q_r_h20_per_tensor_w13.json",
+                envs=["LOAD_PYTHON_MODEL=1"],
+                smoke_args="--quantization FP8_DYNAMIC_PER_TENSOR --act_type BF16",
+                gpu_type=["RTX_5000_PRO"],
+            ),
+            smoke_test(
+                name="dense_fp8kv_cudagraph_sm120",
+                task_info="data/model/qwen25/q_r_new_model_py_fp8_kv_cache.json",
+                envs=["LOAD_PYTHON_MODEL=1"],
+                smoke_args="--warm_up 0 --seq_size_per_block 64 --act_type BF16 --test_block_num 1000 --fp8_kv_cache 1 --enable_cuda_graph 1",
+                gpu_type=["RTX_5000_PRO"],
+            ),
+        ],
+    )
 
 
     # SM120 MoE (h20_moe + sm100_moe 同位 — Qwen3-30B MoE)
