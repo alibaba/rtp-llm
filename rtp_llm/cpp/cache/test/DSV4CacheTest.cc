@@ -885,6 +885,34 @@ TEST(HybridPoolConfigCreatorTest, MtpGenNum2RingEntriesMatch) {
     EXPECT_EQ(swa_kv->entries_per_block, 128u);
 }
 
+TEST(HybridPoolConfigCreatorTest, PrefillCp8MtpGenNum2PadsStateRingBeforeSlicing) {
+    auto              mc = makeFlashModelConfig();
+    ParallelismConfig pc;
+    pc.role_type                          = RoleType::PREFILL;
+    pc.tp_size                            = 8;
+    pc.prefill_cp_config.kv_cache_sharded = true;
+
+    auto config = HybridPoolConfigCreator::createConfig(mc, pc, makeDsv4KvCacheConfig(), false, 2);
+
+    ASSERT_EQ(config.cache_specs.size(), 7u);
+    auto* indexer_state = dynamic_cast<DSV4StateSpec*>(config.cache_specs[3].get());
+    auto* csa_state     = dynamic_cast<DSV4StateSpec*>(config.cache_specs[4].get());
+    auto* hca_state     = dynamic_cast<DSV4StateSpec*>(config.cache_specs[5].get());
+    auto* swa_kv        = dynamic_cast<DSV4StateSpec*>(config.cache_specs[6].get());
+    ASSERT_NE(indexer_state, nullptr);
+    ASSERT_NE(csa_state, nullptr);
+    ASSERT_NE(hca_state, nullptr);
+    ASSERT_NE(swa_kv, nullptr);
+
+    // gen_num_per_cycle=2 gives raw INDEXER/CSA R=10 and HCA R=130.
+    // CP sharding pads the full ring to a cp_size multiple before taking the
+    // per-rank physical slice: 10 -> 16 -> 2, 130 -> 136 -> 17.
+    EXPECT_EQ(indexer_state->entries_per_block, 2u);
+    EXPECT_EQ(csa_state->entries_per_block, 2u);
+    EXPECT_EQ(hca_state->entries_per_block, 17u);
+    EXPECT_EQ(swa_kv->entries_per_block, 16u);
+}
+
 TEST(CacheConfigTest, DSV4NonMtpSpConfigDoesNotInflateRing) {
     // SP_TYPE_NONE with default gen_num_per_cycle=1 must NOT inflate state ring.
     // Non-MTP DSV4 ring: R = ceil_even((1+overlap)*ratio + 0) = 8 for CSA.
