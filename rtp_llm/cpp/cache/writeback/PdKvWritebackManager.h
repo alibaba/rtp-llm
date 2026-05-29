@@ -1,11 +1,15 @@
 #pragma once
 
+#include <future>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
 #include "absl/status/status.h"
+#include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache/writeback/PdKvWritebackTopology.h"
 #include "rtp_llm/cpp/cache/writeback/PdKvWritebackManifest.h"
 #include "rtp_llm/cpp/cache/writeback/PdKvWritebackTransfer.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -62,8 +66,11 @@ public:
 
 class PdKvWritebackRpcClient {
 public:
-    virtual ~PdKvWritebackRpcClient()                                                     = default;
-    virtual absl::Status requestPrefillReceive(const PdKvWritebackLaunchRequest& request) = 0;
+    virtual ~PdKvWritebackRpcClient() = default;
+    virtual absl::Status requestPrefillReceive(const PdKvWritebackLaunchRequest& request,
+                                               const PdKvWritebackTopologyPlan&   topology) = 0;
+    virtual absl::Status requestDecodeSend(const PdKvWritebackLaunchRequest& request,
+                                           const PdKvWritebackTopologyPlan&   topology)     = 0;
 };
 
 absl::Status validatePdKvWritebackCompatibility(const PdKvWritebackCompatibility& source,
@@ -79,10 +86,17 @@ public:
                          PdKvWritebackCacheWriter*                    cache_writer,
                          std::shared_ptr<PdKvWritebackTransferClient> transfer_client,
                          std::shared_ptr<PdKvWritebackRpcClient>      rpc_client);
+    PdKvWritebackManager(const PDSepConfig&                           pd_config,
+                         PdKvWritebackCacheWriter*                    cache_writer,
+                         std::shared_ptr<PdKvWritebackTransferClient> transfer_client,
+                         std::shared_ptr<PdKvWritebackRpcClient>      rpc_client,
+                         std::vector<std::string>                     decode_worker_grpc_addrs,
+                         kmonitor::MetricsReporterPtr                 metrics_reporter);
 
     PdKvWritebackLaunchResult launchFromDecode(const PdKvWritebackLaunchRequest& request) const override;
     absl::Status              receiveOnPrefill(const PdKvWritebackLaunchRequest& request,
                                                const BatchKVCacheResourcePtr&    destination_resource);
+    void                      waitForWritebackTasksForTest() const;
 
 private:
     PdKvWritebackTransferPlan buildTransferPlan(const PdKvWritebackLaunchRequest& request,
@@ -95,6 +109,10 @@ private:
     PdKvWritebackRpcClient*                      rpc_client_      = nullptr;
     std::shared_ptr<PdKvWritebackTransferClient> owned_transfer_client_;
     std::shared_ptr<PdKvWritebackRpcClient>      owned_rpc_client_;
+    std::vector<std::string>                     decode_worker_grpc_addrs_;
+    kmonitor::MetricsReporterPtr                 metrics_reporter_;
+    mutable std::mutex                           writeback_tasks_mutex_;
+    mutable std::vector<std::future<void>>       writeback_tasks_;
 };
 
 using PdKvWritebackManagerPtr  = std::shared_ptr<PdKvWritebackManager>;

@@ -58,10 +58,14 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":pd_kv_writeback_manifest",
+        ":pd_kv_writeback_metrics",
+        ":pd_kv_writeback_topology",
         ":pd_kv_writeback_transfer",
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
         "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/utils:time_util",
         "@com_google_absl//absl/status",
+        "@havenask//aios/kmonitor:kmonitor_client_cpp",
     ],
 )
 
