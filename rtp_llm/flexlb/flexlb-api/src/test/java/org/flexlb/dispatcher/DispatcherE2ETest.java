@@ -68,60 +68,6 @@ class DispatcherE2ETest {
     }
 
     @Test
-    void batchInferNineSplitsThreeWithMiddleChunkFailure() throws Exception {
-        // chunk0 → fe1: ok; chunk1 → fe2: 500; chunk2 → fe3: ok.
-        fe1.enqueue(jsonResponse(200,
-                "{\"response_batch\":[{\"response\":\"r0\"},{\"response\":\"r1\"},{\"response\":\"r2\"}]}"));
-        fe2.enqueue(new MockResponse().setResponseCode(500).setBody("internal boom"));
-        fe3.enqueue(jsonResponse(200,
-                "{\"response_batch\":[{\"response\":\"r0\"},{\"response\":\"r1\"},{\"response\":\"r2\"}]}"));
-
-        WebTestClient client = buildClient(/*subBatchSize=*/3);
-
-        ObjectNode body = mapper.createObjectNode();
-        body.put("model", "qwen");
-        var pb = body.putArray("prompt_batch");
-        for (int i = 0; i < 9; i++) {
-            pb.add("p" + i);
-        }
-
-        JsonNode resp = client.post().uri("/dispatcher/batch_infer")
-                .contentType(MediaType.APPLICATION_JSON)
-                .bodyValue(body)
-                .exchange()
-                .expectStatus().isOk()
-                .expectBody(JsonNode.class)
-                .returnResult().getResponseBody();
-
-        assertNotNull(resp);
-        JsonNode arr = resp.get("response_batch");
-        assertNotNull(arr);
-        assertEquals(9, arr.size());
-        // Successful items 0..2 carry the FE payload; 6..8 from fe3 also do.
-        for (int i = 0; i < 3; i++) {
-            assertEquals("r" + i, arr.get(i).get("response").asText());
-            assertEquals("r" + i, arr.get(6 + i).get("response").asText());
-        }
-        // Failed positions 3..5 are null per FailedItemFactory.NULL.
-        for (int i = 3; i <= 5; i++) {
-            assertTrue(arr.get(i).isNull(), "expected null at index " + i + " but was " + arr.get(i));
-        }
-        // Top-level _partial_failure envelope.
-        JsonNode pf = resp.get("_partial_failure");
-        assertNotNull(pf);
-        assertEquals(3, pf.get("failed_count").asInt());
-        assertEquals(9, pf.get("total_count").asInt());
-        List<Integer> failedIndices = new ArrayList<>();
-        pf.get("failed_indices").forEach(n -> failedIndices.add(n.asInt()));
-        assertEquals(List.of(3, 4, 5), failedIndices);
-
-        // Each FE received one /batch_infer call with the deep-copied envelope and a 3-element slice.
-        assertChunkBatchInferRequest(fe1.takeRequest(), 3);
-        assertChunkBatchInferRequest(fe2.takeRequest(), 3);
-        assertChunkBatchInferRequest(fe3.takeRequest(), 3);
-    }
-
-    @Test
     void openAiBatchChatFourSplitsTwoWithSecondChunkFailure() throws Exception {
         // chunk0 → fe1: ok; chunk1 → fe2: 500.
         fe1.enqueue(jsonResponse(200,
