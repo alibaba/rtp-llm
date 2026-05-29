@@ -930,6 +930,7 @@ TEST(HybridPoolConfigCreatorTest, DecodePrefillCp8MtpGenNum2MatchesPrefillSliceT
     decode_pc.world_size                         = cp_size;
     decode_pc.prefill_cp_config.method           = CPRotateMethod::PREFILL_CP;
     decode_pc.prefill_cp_config.kv_cache_sharded = true;
+    decode_pc.prefill_cp_config.prefill_cp_size  = cp_size;
 
     auto prefill_config = HybridPoolConfigCreator::createConfig(mc, prefill_pc, makeDsv4KvCacheConfig(), false, 2);
     auto decode_config  = HybridPoolConfigCreator::createConfig(mc, decode_pc, makeDsv4KvCacheConfig(), false, 2);
