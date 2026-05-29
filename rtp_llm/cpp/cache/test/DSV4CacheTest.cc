@@ -914,6 +914,54 @@ TEST(HybridPoolConfigCreatorTest, PrefillCp8MtpGenNum2PadsStateRingBeforeSlicing
     EXPECT_EQ(swa_kv->entries_per_block, 17u);
 }
 
+TEST(HybridPoolConfigCreatorTest, DecodePrefillCp8MtpGenNum2MatchesPrefillSliceTimesCpSize) {
+    constexpr uint32_t cp_size = 8;
+    auto               mc      = makeFlashModelConfig();
+
+    ParallelismConfig prefill_pc;
+    prefill_pc.role_type                          = RoleType::PREFILL;
+    prefill_pc.tp_size                            = cp_size;
+    prefill_pc.prefill_cp_config.kv_cache_sharded = true;
+
+    ParallelismConfig decode_pc;
+    decode_pc.role_type                          = RoleType::DECODE;
+    decode_pc.tp_size                            = 1;
+    decode_pc.dp_size                            = cp_size;
+    decode_pc.world_size                         = cp_size;
+    decode_pc.prefill_cp_config.method           = CPRotateMethod::PREFILL_CP;
+    decode_pc.prefill_cp_config.kv_cache_sharded = true;
+
+    auto prefill_config = HybridPoolConfigCreator::createConfig(mc, prefill_pc, makeDsv4KvCacheConfig(), false, 2);
+    auto decode_config  = HybridPoolConfigCreator::createConfig(mc, decode_pc, makeDsv4KvCacheConfig(), false, 2);
+
+    ASSERT_EQ(prefill_config.cache_specs.size(), 7u);
+    ASSERT_EQ(decode_config.cache_specs.size(), 7u);
+
+    for (size_t gid : {3u, 4u, 5u, 6u}) {
+        auto* prefill_spec = dynamic_cast<DSV4StateSpec*>(prefill_config.cache_specs[gid].get());
+        auto* decode_spec  = dynamic_cast<DSV4StateSpec*>(decode_config.cache_specs[gid].get());
+        ASSERT_NE(prefill_spec, nullptr) << "gid=" << gid;
+        ASSERT_NE(decode_spec, nullptr) << "gid=" << gid;
+        EXPECT_EQ(decode_spec->cache_type, prefill_spec->cache_type) << "gid=" << gid;
+        EXPECT_EQ(decode_spec->entries_per_block, prefill_spec->entries_per_block * cp_size)
+            << "gid=" << gid << " region=" << static_cast<int>(decode_spec->cache_type);
+    }
+
+    auto* indexer_state = dynamic_cast<DSV4StateSpec*>(decode_config.cache_specs[3].get());
+    auto* csa_state     = dynamic_cast<DSV4StateSpec*>(decode_config.cache_specs[4].get());
+    auto* hca_state     = dynamic_cast<DSV4StateSpec*>(decode_config.cache_specs[5].get());
+    auto* swa_kv        = dynamic_cast<DSV4StateSpec*>(decode_config.cache_specs[6].get());
+    ASSERT_NE(indexer_state, nullptr);
+    ASSERT_NE(csa_state, nullptr);
+    ASSERT_NE(hca_state, nullptr);
+    ASSERT_NE(swa_kv, nullptr);
+
+    EXPECT_EQ(indexer_state->entries_per_block, 16u);
+    EXPECT_EQ(csa_state->entries_per_block, 16u);
+    EXPECT_EQ(hca_state->entries_per_block, 136u);
+    EXPECT_EQ(swa_kv->entries_per_block, 136u);
+}
+
 TEST(CacheConfigTest, DSV4NonMtpSpConfigDoesNotInflateRing) {
     // SP_TYPE_NONE with default gen_num_per_cycle=1 must NOT inflate state ring.
     // Non-MTP DSV4 ring: R = ceil_even((1+overlap)*ratio + 0) = 8 for CSA.
