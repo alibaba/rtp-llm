@@ -7,8 +7,8 @@ under ``kv_cache_sharded``:
     block id; non-owned positions get ``owned_mask=False``.
   * ``cp_kv_slot_mapping`` — boundary tokens of OWNED blocks get a real
     slot; everything else gets ``-1``.
-  * ``cp_state_slot_mapping`` — deprecated guardrail; STATE pools are not
-    CP-sharded and using it should fail fast.
+  * ``cp_state_slot_mapping`` — intra-block fixed-pool slice ownership for
+    INDEXER_STATE / CSA_STATE / HCA_STATE.
 
 Pure CPU. Hand-rolled reference in Python loops.
 """
@@ -118,19 +118,52 @@ def test_kv_slot_mapping_other_rank():
     assert torch.equal(slot, expected)
 
 
-def test_state_slot_mapping_is_rejected():
+def test_state_slot_mapping_intrablock_slice():
     cp_size, cp_rank = 2, 0
-    state_eb = 4  # tokens_per_block == state_eb
-    per_req = [10]
-    bt = _make_block_table_local(per_req, state_eb, cp_size, cp_rank)
-    positions = torch.arange(10, dtype=torch.int64)
-    b_idx = torch.zeros(10, dtype=torch.int64)
-    try:
-        M.cp_state_slot_mapping(positions, bt, b_idx, state_eb, cp_size, cp_rank)
-    except RuntimeError as exc:
-        assert "STATE pools are not CP-sharded" in str(exc)
-    else:
-        raise AssertionError("cp_state_slot_mapping should reject STATE sharding")
+    local_eb = 4
+    tokens_per_block = 16
+    bt = torch.tensor([[5, 6]], dtype=torch.int64)
+    positions = torch.arange(16, dtype=torch.int64)
+    b_idx = torch.zeros(16, dtype=torch.int64)
+    seq_end = torch.tensor([16], dtype=torch.int64)
+    slot = M.cp_state_slot_mapping(
+        positions,
+        bt,
+        b_idx,
+        local_eb,
+        tokens_per_block,
+        cp_size,
+        cp_rank,
+        seq_end,
+    )
+    expected = torch.full((16,), -1, dtype=torch.int64)
+    # full ring = 8. Rank 0 owns logical offsets 0..3 in each ring.
+    # Ring mask keeps the last full-ring positions before the block end.
+    expected[8:12] = 5 * local_eb + torch.arange(4)
+    assert torch.equal(slot, expected), f"got {slot.tolist()}, want {expected.tolist()}"
+
+
+def test_state_slot_mapping_other_rank():
+    cp_size, cp_rank = 2, 1
+    local_eb = 4
+    tokens_per_block = 16
+    bt = torch.tensor([[5, 6]], dtype=torch.int64)
+    positions = torch.arange(16, dtype=torch.int64)
+    b_idx = torch.zeros(16, dtype=torch.int64)
+    seq_end = torch.tensor([16], dtype=torch.int64)
+    slot = M.cp_state_slot_mapping(
+        positions,
+        bt,
+        b_idx,
+        local_eb,
+        tokens_per_block,
+        cp_size,
+        cp_rank,
+        seq_end,
+    )
+    expected = torch.full((16,), -1, dtype=torch.int64)
+    expected[12:16] = 5 * local_eb + torch.arange(4)
+    assert torch.equal(slot, expected)
 
 
 def test_cp_size_one_passthrough_kv():
@@ -219,12 +252,8 @@ def test_state_slot_mapping_zero_eb():
     positions = torch.arange(4, dtype=torch.int64)
     bt = torch.ones((1, 1), dtype=torch.int64)
     b_idx = torch.zeros(4, dtype=torch.int64)
-    try:
-        M.cp_state_slot_mapping(positions, bt, b_idx, 0, 2, 0)
-    except RuntimeError as exc:
-        assert "STATE pools are not CP-sharded" in str(exc)
-    else:
-        raise AssertionError("cp_state_slot_mapping should reject STATE sharding")
+    out = M.cp_state_slot_mapping(positions, bt, b_idx, 0, 4, 2, 0)
+    assert torch.equal(out, torch.full((4,), -1, dtype=torch.int64))
 
 
 if __name__ == "__main__":

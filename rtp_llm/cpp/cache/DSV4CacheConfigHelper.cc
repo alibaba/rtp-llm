@@ -8,17 +8,18 @@ namespace rtp_llm {
 
 namespace {
 
-// Kernel block size in tokens. DSV4 typed pools keep one physical
-// seq_size_per_block for ownership/cache-key alignment, while FULL paged
-// pools may use a smaller kernel_seq_size_per_block for kernel block tables.
-// HCA compressed pools require the kernel block size to be 128-token aligned.
-constexpr uint32_t kDsv4KernelTokensPerBlock    = 256;
-constexpr uint32_t kDsv4MinKernelTokensPerBlock = 128;
-// BF16 pool: head_dim=512 × 2B = 1024B per KV slot, 128 × 2B = 256B per
+// Kernel block size in tokens. DSV4 typed pools keep one logical
+// seq_size_per_block for cache-key/block-table alignment, while FULL paged
+// pools may use a larger internal physical entry count to satisfy HCA's
+// 128-token compression unit.
+constexpr uint32_t kDsv4KernelTokensPerBlock       = 256;
+constexpr uint32_t kDsv4MinKernelTokensPerBlock    = 128;
+constexpr uint32_t kDsv4SwaPhysicalEntriesPerBlock = 128;
+// BF16 pool: head_dim=512 x 2B = 1024B per KV slot, 128 x 2B = 256B per
 // indexer slot. FP8 pool packs the same logical KV into a smaller slot
 // (canonical fp8_model1_mla layout: 448B fp8 NoPE + 64B bf16 RoPE + 8B
 // UE8M0 scales = 584B; indexer is 128B fp8 + 4B fp32 scale = 132B).
-// Selected at runtime from ``attn_config.kv_cache_dtype`` — see
+// Selected at runtime from ``attn_config.kv_cache_dtype`` -- see
 // ``buildDSV4PoolDescs``.
 constexpr uint32_t kDsv4KvEntryBytesBf16      = 1024;
 constexpr uint32_t kDsv4IndexerEntryBytesBf16 = 256;
@@ -42,22 +43,6 @@ struct DSV4PoolDesc {
     bool                    is_paged;
 };
 
-// DSV4 state pool ring sizing.
-//
-// Boundary writers (CSA / HCA / INDEXER) read the
-// ``window = (1 + overlap) * compress_ratio`` history positions just below
-// the current compression boundary. The state pool only needs that window
-// in flight, plus one MTP cycle's worth of in-progress draft tokens:
-// ``window + gen_num_per_cycle``. With rejection sampling the minimum
-// accept_len is 1 (sampling.cu), so +G is sufficient; the ceil-to-even
-// step in ``computeStateRing`` keeps ``R`` aligned and makes corner
-// conditions easier to reason about.
-//
-// gen_num_per_cycle = 0 (non-MTP path) still uses the same formula —
-// ring = ceil_even(window) — e.g. 8 entries for CSA/INDEXER (cr=4,ov=1)
-// and 128 for HCA (cr=128,ov=0). Each state pool is sized to exactly its
-// boundary-writer window; there is no longer a "one slot per kernel-block
-// token" (256-entry) layout for state pools.
 constexpr int kCsaCompressRatio     = 4;
 constexpr int kHcaCompressRatio     = 128;
 constexpr int kIndexerCompressRatio = 4;
@@ -66,30 +51,37 @@ constexpr int kHcaOverlap           = 0;
 constexpr int kIndexerOverlap       = 1;
 
 inline uint32_t computeStateRing(int compress_ratio, int overlap, int gen_num_per_cycle) {
-    // gen_num_per_cycle is 0 for non-MTP and >=1 with rejection sampling under MTP;
-    // a negative value would silently shrink the ring window and corrupt state writes.
     RTP_LLM_CHECK_WITH_INFO(
         gen_num_per_cycle >= 0, "DSV4 state ring: gen_num_per_cycle must be >= 0, got %d", gen_num_per_cycle);
     const int window = (1 + overlap) * compress_ratio;
     const int raw    = window + gen_num_per_cycle;
-    return static_cast<uint32_t>((raw + 1) & ~1);  // ceil to even
+    return static_cast<uint32_t>((raw + 1) & ~1);
 }
 
-inline uint32_t computeRingEntries(int window, int gen_num_per_cycle) {
-    RTP_LLM_CHECK_WITH_INFO(window > 0, "DSV4 ring entries: window must be > 0, got %d", window);
-    RTP_LLM_CHECK_WITH_INFO(
-        gen_num_per_cycle >= 0, "DSV4 ring entries: gen_num_per_cycle must be >= 0, got %d", gen_num_per_cycle);
-    const int raw = window + gen_num_per_cycle;
-    return static_cast<uint32_t>((raw + 1) & ~1);
+bool isPrefillCpSharded(const ParallelismConfig& parallelism_config) {
+    return parallelism_config.role_type == RoleType::PREFILL && parallelism_config.prefill_cp_config.kv_cache_sharded
+           && parallelism_config.tp_size > 1;
+}
+
+uint32_t maybeSliceFixedEntriesForPrefillCp(uint32_t                 entries,
+                                            const ParallelismConfig& parallelism_config,
+                                            KVCacheRegionName        region_name) {
+    if (!isPrefillCpSharded(parallelism_config)) {
+        return entries;
+    }
+
+    const auto cp_size = static_cast<uint32_t>(parallelism_config.tp_size);
+    RTP_LLM_CHECK_WITH_INFO(entries % cp_size == 0,
+                            "DSV4 fixed/SWA CP sharding requires region %d entries %u divisible by cp_size %u",
+                            static_cast<int>(region_name),
+                            entries,
+                            cp_size);
+    return entries / cp_size;
 }
 
 DSV4LayerSets classifyDSV4Layers(const std::vector<int>& compress_ratios) {
     DSV4LayerSets sets;
-    // ``compress_ratios`` must describe exactly the layers covered by this
-    // cache config. The main DSV4 descriptor strips the trailing MTP tail,
-    // while the MTP propose descriptor uses ``[0]`` for its SWA-only draft
-    // layer. Do not strip a trailing zero here; that would erase the draft.
-    const size_t num_layers = compress_ratios.size();
+    const size_t  num_layers = compress_ratios.size();
 
     for (size_t i = 0; i < num_layers; ++i) {
         const int layer_id = static_cast<int>(i);
@@ -115,10 +107,11 @@ DSV4LayerSets classifyDSV4Layers(const std::vector<int>& compress_ratios) {
     return sets;
 }
 
-std::vector<DSV4PoolDesc> buildDSV4PoolDescs(const DSV4LayerSets& sets,
-                                             const ModelConfig&   model_config,
-                                             uint32_t             kernel_tokens_per_block,
-                                             int                  gen_num_per_cycle) {
+std::vector<DSV4PoolDesc> buildDSV4PoolDescs(const DSV4LayerSets&     sets,
+                                             const ModelConfig&       model_config,
+                                             uint32_t                 kernel_tokens_per_block,
+                                             const ParallelismConfig& parallelism_config,
+                                             int                      gen_num_per_cycle) {
     const auto& attn         = model_config.attn_config;
     const auto  head_dim     = static_cast<uint32_t>(attn.size_per_head);
     const auto  idx_head_dim = static_cast<uint32_t>(attn.indexer_head_dim);
@@ -127,25 +120,24 @@ std::vector<DSV4PoolDesc> buildDSV4PoolDescs(const DSV4LayerSets& sets,
     const uint32_t csa_state_dim = 2 * head_dim;
     const uint32_t hca_state_dim = head_dim;
 
-    // Pick KV / indexer slot byte size from the model's kv_cache_dtype.
-    // FP8 paged pools use 584B / 132B (canonical fp8_model1_mla layout
-    // shared with the Python writer in
-    // dsv4/fp8/_compressor_vllm_triton.py); BF16 stays at 1024B / 256B.
     const bool     fp8_kv              = (attn.kv_cache_dtype == KvCacheDataType::FP8);
     const uint32_t kv_entry_bytes      = fp8_kv ? kDsv4KvEntryBytesFp8 : kDsv4KvEntryBytesBf16;
     const uint32_t indexer_entry_bytes = fp8_kv ? kDsv4IndexerEntryBytesFp8 : kDsv4IndexerEntryBytesBf16;
 
-    // Paged KV/INDEXER pools stay sized to the configured kernel block
-    // (kernel/compress_ratio for compressed paged entries). SWA and state pools
-    // are ring-buffered: ``entries_per_block`` is sized to the needed history
-    // window plus one MTP cycle's worth of in-progress draft tokens.
-    // gen_num_per_cycle == 0 (non-MTP) still uses the same formula, giving
-    // ceil_even(window) = 8 entries for CSA/INDEXER and 128 for HCA — there
-    // is no "one slot per kernel-block token" layout.
-    const uint32_t csa_state_eb     = computeStateRing(kCsaCompressRatio, kCsaOverlap, gen_num_per_cycle);
-    const uint32_t hca_state_eb     = computeStateRing(kHcaCompressRatio, kHcaOverlap, gen_num_per_cycle);
-    const uint32_t indexer_state_eb = computeStateRing(kIndexerCompressRatio, kIndexerOverlap, gen_num_per_cycle);
-    const uint32_t swa_kv_eb        = computeRingEntries(/*window=*/128, gen_num_per_cycle);
+    const uint32_t csa_state_eb =
+        maybeSliceFixedEntriesForPrefillCp(computeStateRing(kCsaCompressRatio, kCsaOverlap, gen_num_per_cycle),
+                                           parallelism_config,
+                                           KVCacheRegionName::CSA_STATE);
+    const uint32_t hca_state_eb =
+        maybeSliceFixedEntriesForPrefillCp(computeStateRing(kHcaCompressRatio, kHcaOverlap, gen_num_per_cycle),
+                                           parallelism_config,
+                                           KVCacheRegionName::HCA_STATE);
+    const uint32_t indexer_state_eb =
+        maybeSliceFixedEntriesForPrefillCp(computeStateRing(kIndexerCompressRatio, kIndexerOverlap, gen_num_per_cycle),
+                                           parallelism_config,
+                                           KVCacheRegionName::INDEXER_STATE);
+    const uint32_t swa_kv_eb = maybeSliceFixedEntriesForPrefillCp(
+        kDsv4SwaPhysicalEntriesPerBlock, parallelism_config, KVCacheRegionName::SWA_KV);
     return {
         {KVCacheRegionName::CSA_KV,
          &sets.csa_layers,
@@ -179,11 +171,6 @@ std::vector<DSV4PoolDesc> buildDSV4PoolDescs(const DSV4LayerSets& sets,
 
 KVCacheSpecPtr makeDSV4Spec(const DSV4PoolDesc& pool, uint32_t physical_tokens_per_block) {
     const auto layer_count = static_cast<uint32_t>(pool.layer_ids->size());
-    // All pools use the same physical seq_size so cache_keys stay aligned across
-    // groups (HybridKVCacheAllocator::reuseCache iterates a single shared keys
-    // array). FULL paged pools split each physical block into kernel blocks via
-    // the framework's bpk machinery; SWA/state pools are indexed at physical
-    // block granularity and use ring-sized entries_per_block.
     if (pool.is_paged) {
         return std::make_shared<DSV4KVSpec>(pool.region_name,
                                             layer_count,
@@ -202,10 +189,11 @@ KVCacheSpecPtr makeDSV4Spec(const DSV4PoolDesc& pool, uint32_t physical_tokens_p
 
 }  // namespace
 
-void DSV4CacheConfigHelper::applyConfig(CacheConfig&         config,
-                                        const ModelConfig&   model_config,
-                                        const KVCacheConfig& kv_cache_config,
-                                        int                  gen_num_per_cycle) {
+void DSV4CacheConfigHelper::applyConfig(CacheConfig&             config,
+                                        const ModelConfig&       model_config,
+                                        const ParallelismConfig& parallelism_config,
+                                        const KVCacheConfig&     kv_cache_config,
+                                        int                      gen_num_per_cycle) {
     RTP_LLM_LOG_INFO("Creating DSV4 typed hybrid-pool cache config with %zu compress_ratios, "
                      "state ring slack=%d (gen_num_per_cycle)",
                      model_config.attn_config.layer_compress_ratios.size(),
@@ -228,13 +216,19 @@ void DSV4CacheConfigHelper::applyConfig(CacheConfig&         config,
                             "DSV4 seq_size_per_block=%u must be >= kernel_seq_size_per_block=%u and divisible by it",
                             physical_tokens_per_block,
                             kernel_tokens_per_block);
-    RTP_LLM_LOG_INFO("DSV4 physical block = %u tokens, kernel block = %u tokens (bpk = %u)",
+    RTP_LLM_LOG_INFO("DSV4 physical block=%u, kernel block=%u (bpk=%u), "
+                     "prefill_cp_fixed_sliced=%d (role=%d, cp_sharded=%d, tp_size=%ld)",
                      physical_tokens_per_block,
                      kernel_tokens_per_block,
-                     physical_tokens_per_block / kernel_tokens_per_block);
+                     physical_tokens_per_block / kernel_tokens_per_block,
+                     isPrefillCpSharded(parallelism_config),
+                     static_cast<int>(parallelism_config.role_type),
+                     parallelism_config.prefill_cp_config.kv_cache_sharded,
+                     parallelism_config.tp_size);
 
-    const auto sets  = classifyDSV4Layers(model_config.attn_config.layer_compress_ratios);
-    const auto pools = buildDSV4PoolDescs(sets, model_config, kernel_tokens_per_block, gen_num_per_cycle);
+    const auto sets = classifyDSV4Layers(model_config.attn_config.layer_compress_ratios);
+    const auto pools =
+        buildDSV4PoolDescs(sets, model_config, kernel_tokens_per_block, parallelism_config, gen_num_per_cycle);
     RTP_LLM_CHECK_WITH_INFO(pools.size() == kDsv4PoolNum, "DSV4 must produce %zu pools", kDsv4PoolNum);
 
     config.layer_num                                = static_cast<uint32_t>(sets.all_layers.size());
@@ -252,9 +246,6 @@ void DSV4CacheConfigHelper::applyConfig(CacheConfig&         config,
     config.layer_ids.clear();
     config.group_types.clear();
     config.group_region_names.clear();
-    // All groups share the same physical seq_size — required so the global
-    // cache_keys array (initCacheKeys uses config.seq_size_per_block) aligns
-    // with every group's match() / insertIntoCache() granularity.
     config.group_seq_size_per_block.assign(pools.size(), physical_tokens_per_block);
     config.cache_specs.reserve(pools.size());
     config.global_layer_ids.reserve(pools.size());

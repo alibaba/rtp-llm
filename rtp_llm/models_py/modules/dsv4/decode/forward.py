@@ -34,6 +34,9 @@ from rtp_llm.models_py.modules.dsv4.attn_type import (
     INDEXER_STATE,
     SWA_KV,
 )
+from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
+    require_pool_tokens_per_block,
+)
 
 
 def _dsv4_kernel_tokens_per_block(kv_cache: Any) -> int:
@@ -58,35 +61,8 @@ def _dsv4_kernel_tokens_per_block(kv_cache: Any) -> int:
     return ksb
 
 
-def _dsv4_physical_tokens_per_block(kv_cache: Any) -> int:
-    spb = _positive_int(getattr(kv_cache, "seq_size_per_block", None))
-    if spb is None:
-        raise RuntimeError(
-            "DSV4 KVCache.seq_size_per_block is missing. "
-            "group_region_names=%r" % (getattr(kv_cache, "group_region_names", None),)
-        )
-    return spb
-
-
 def _dsv4_pool_tokens_per_block(kv_cache: Any, attn_type: int) -> int:
-    if int(attn_type) in (
-        int(SWA_KV),
-        int(CSA_STATE),
-        int(HCA_STATE),
-        int(INDEXER_STATE),
-    ):
-        return _dsv4_physical_tokens_per_block(kv_cache)
-    if int(attn_type) in (int(CSA_KV), int(HCA_KV), int(INDEXER_KV)):
-        return _dsv4_kernel_tokens_per_block(kv_cache)
-    raise RuntimeError(f"DSV4 unexpected attn_type={int(attn_type)}")
-
-
-def _positive_int(value: Any) -> Optional[int]:
-    try:
-        ivalue = int(value)
-    except (TypeError, ValueError):
-        return None
-    return ivalue if ivalue > 0 else None
+    return require_pool_tokens_per_block(kv_cache, region=int(attn_type))
 
 
 def build_paged_pool_specs(
