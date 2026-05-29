@@ -26,6 +26,17 @@ py_test (
 py_test(
     name = "pd_kv_writeback_rpc_static_test",
     srcs = ["pd_kv_writeback_rpc_static_test.py"],
+    data = [
+        "//rtp_llm/cpp/model_rpc:DecodeGenerateContext.h",
+        "//rtp_llm/cpp/model_rpc:DecodeRpcServer.cc",
+        "//rtp_llm/cpp/model_rpc:DecodeRpcServer.h",
+        "//rtp_llm/cpp/model_rpc:PdKvWritebackRpcUtil.cc",
+        "//rtp_llm/cpp/model_rpc:PdKvWritebackRpcUtil.h",
+        "//rtp_llm/cpp/model_rpc:PrefillRpcServer.cc",
+        "//rtp_llm/cpp/model_rpc:PrefillRpcServer.h",
+        "//rtp_llm/cpp/model_rpc:RemoteRpcServiceImpl.h",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service.proto",
+    ],
 )
 
 test_deps = [

@@ -1,5 +1,11 @@
 load("//:def.bzl", "copts")
 
+exports_files([
+    "ResourceContext.h",
+    "StreamCacheResource.cc",
+    "StreamCacheResource.h",
+])
+
 cc_library(
     name = "generate_config",
     hdrs = [

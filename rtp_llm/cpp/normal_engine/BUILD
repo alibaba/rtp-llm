@@ -1,6 +1,8 @@
 load("//:def.bzl", "copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
 
+exports_files(["NormalEngine.cc"])
+
 cc_library(
     name = "normal_engine",
     hdrs = glob([

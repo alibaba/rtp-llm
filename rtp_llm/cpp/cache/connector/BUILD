@@ -1,6 +1,11 @@
 load("//:def.bzl", "copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
 
+exports_files([
+    "KVCacheConnectorCoordinator.cc",
+    "KVCacheConnectorCoordinator.h",
+])
+
 cc_library(
     name = "connector",
     srcs = glob([

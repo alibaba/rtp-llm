@@ -39,6 +39,14 @@ cc_test(
 py_test(
     name = "pd_kv_writeback_coordinator_static_test",
     srcs = ["PdKvWritebackCoordinatorStaticTest.py"],
+    data = [
+        "//rtp_llm/cpp/cache:KVCacheManager.cc",
+        "//rtp_llm/cpp/cache:KVCacheManager.h",
+        "//rtp_llm/cpp/cache/connector:KVCacheConnectorCoordinator.cc",
+        "//rtp_llm/cpp/cache/connector:KVCacheConnectorCoordinator.h",
+        "//rtp_llm/cpp/model_rpc:PrefillRpcServer.cc",
+        "//rtp_llm/cpp/normal_engine:NormalEngine.cc",
+    ],
     main = "PdKvWritebackCoordinatorStaticTest.py",
 )
 

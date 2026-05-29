@@ -8,6 +8,8 @@ load(
 
 package(default_visibility = ["//:__subpackages__"])
 
+exports_files(["ConfigInit.cc"])
+
 cc_library(
     name = "py_utils",
     hdrs = [

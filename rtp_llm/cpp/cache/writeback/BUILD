@@ -1,5 +1,7 @@
 load("//:def.bzl", "copts")
 
+exports_files(["PdKvWritebackTransfer.h"])
+
 cc_library(
     name = "pd_kv_writeback_topology",
     srcs = ["PdKvWritebackTopology.cc"],

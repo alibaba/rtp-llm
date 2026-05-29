@@ -36,6 +36,12 @@ cc_test(
 py_test(
     name = "pd_kv_writeback_lifecycle_static_test",
     srcs = ["pd_kv_writeback_lifecycle_static_test.py"],
+    data = [
+        "//rtp_llm/cpp/engine_base/stream:ResourceContext.h",
+        "//rtp_llm/cpp/engine_base/stream:StreamCacheResource.cc",
+        "//rtp_llm/cpp/engine_base/stream:StreamCacheResource.h",
+        "//rtp_llm/cpp/normal_engine:NormalEngine.cc",
+    ],
 )
 
 cc_test(

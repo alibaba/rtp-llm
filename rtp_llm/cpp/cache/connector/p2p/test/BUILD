@@ -23,6 +23,15 @@ cc_library(
 py_test(
     name = "pd_kv_writeback_p2p_static_test",
     srcs = ["PdKvWritebackP2PStaticTest.py"],
+    data = [
+        "//rtp_llm/cpp/cache/connector/p2p:P2PConnectorWorker.cc",
+        "//rtp_llm/cpp/cache/connector/p2p:P2PConnectorWorker.h",
+        "//rtp_llm/cpp/cache/connector/p2p:P2PConnectorWorkerDecode.cc",
+        "//rtp_llm/cpp/cache/connector/p2p:P2PConnectorWorkerDecode.h",
+        "//rtp_llm/cpp/cache/connector/p2p:P2PConnectorWorkerPrefill.cc",
+        "//rtp_llm/cpp/cache/connector/p2p:P2PConnectorWorkerPrefill.h",
+        "//rtp_llm/cpp/cache/writeback:PdKvWritebackTransfer.h",
+    ],
     main = "PdKvWritebackP2PStaticTest.py",
 )
 

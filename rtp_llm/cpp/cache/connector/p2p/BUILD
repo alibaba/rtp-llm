@@ -2,6 +2,15 @@ load("@arch_config//:arch_select.bzl", "torch_deps")
 
 package(default_visibility = ["//rtp_llm/cpp/cache/connector/p2p:__subpackages__"])
 
+exports_files([
+    "P2PConnectorWorker.cc",
+    "P2PConnectorWorker.h",
+    "P2PConnectorWorkerDecode.cc",
+    "P2PConnectorWorkerDecode.h",
+    "P2PConnectorWorkerPrefill.cc",
+    "P2PConnectorWorkerPrefill.h",
+])
+
 cc_library(
     name = "p2p_connector_config",
     hdrs = ["P2PConnectorConfig.h"],

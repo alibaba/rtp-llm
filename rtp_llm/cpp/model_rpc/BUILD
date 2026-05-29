@@ -5,6 +5,17 @@ requirement([
     "grpcio",
 ])
 
+exports_files([
+    "DecodeGenerateContext.h",
+    "DecodeRpcServer.cc",
+    "DecodeRpcServer.h",
+    "PdKvWritebackRpcUtil.cc",
+    "PdKvWritebackRpcUtil.h",
+    "PrefillRpcServer.cc",
+    "PrefillRpcServer.h",
+    "RemoteRpcServiceImpl.h",
+])
+
 embedding_arpc_deps()
 
 cc_library(

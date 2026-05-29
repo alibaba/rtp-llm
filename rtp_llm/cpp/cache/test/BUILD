@@ -62,6 +62,15 @@ cc_library(
 py_test(
     name = "writeback_allocator_api_static_test",
     srcs = ["WritebackAllocatorApiStaticTest.py"],
+    data = [
+        "//rtp_llm/cpp/cache:HybridTypeKVCacheAllocator.cc",
+        "//rtp_llm/cpp/cache:HybridTypeKVCacheAllocator.h",
+        "//rtp_llm/cpp/cache:KVCacheAllocator.h",
+        "//rtp_llm/cpp/cache:KVCacheManager.cc",
+        "//rtp_llm/cpp/cache:KVCacheManager.h",
+        "//rtp_llm/cpp/cache:SingleTypeKVCacheAllocator.cc",
+        "//rtp_llm/cpp/cache:SingleTypeKVCacheAllocator.h",
+    ],
     main = "WritebackAllocatorApiStaticTest.py",
 )
 

@@ -1,6 +1,16 @@
 load("//:def.bzl", "copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
 
+exports_files([
+    "HybridTypeKVCacheAllocator.cc",
+    "HybridTypeKVCacheAllocator.h",
+    "KVCacheAllocator.h",
+    "KVCacheManager.cc",
+    "KVCacheManager.h",
+    "SingleTypeKVCacheAllocator.cc",
+    "SingleTypeKVCacheAllocator.h",
+])
+
 cc_library(
     name = "cache_group_type",
     hdrs = [

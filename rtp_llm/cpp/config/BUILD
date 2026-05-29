@@ -3,6 +3,11 @@ load("@arch_config//:arch_select.bzl", "torch_deps")
 
 package(default_visibility = ["//:__subpackages__"])
 
+exports_files([
+    "ConfigModules.cc",
+    "ConfigModules.h",
+])
+
 cc_library(
     name = "static_config",
     hdrs = ["StaticConfig.h"],
