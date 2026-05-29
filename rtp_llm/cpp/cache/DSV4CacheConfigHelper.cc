@@ -50,6 +50,11 @@ constexpr int kCsaOverlap           = 1;
 constexpr int kHcaOverlap           = 0;
 constexpr int kIndexerOverlap       = 1;
 
+inline uint32_t alignUpToMultiple(uint32_t value, uint32_t multiple) {
+    RTP_LLM_CHECK_WITH_INFO(multiple > 0, "DSV4 align multiple must be > 0");
+    return ((value + multiple - 1) / multiple) * multiple;
+}
+
 inline uint32_t computeStateRing(int compress_ratio, int overlap, int gen_num_per_cycle) {
     RTP_LLM_CHECK_WITH_INFO(
         gen_num_per_cycle >= 0, "DSV4 state ring: gen_num_per_cycle must be >= 0, got %d", gen_num_per_cycle);
@@ -70,13 +75,16 @@ uint32_t maybeSliceFixedEntriesForPrefillCp(uint32_t                 entries,
         return entries;
     }
 
-    const auto cp_size = static_cast<uint32_t>(parallelism_config.tp_size);
-    RTP_LLM_CHECK_WITH_INFO(entries % cp_size == 0,
-                            "DSV4 fixed/SWA CP sharding requires region %d entries %u divisible by cp_size %u",
-                            static_cast<int>(region_name),
-                            entries,
-                            cp_size);
-    return entries / cp_size;
+    const auto cp_size         = static_cast<uint32_t>(parallelism_config.tp_size);
+    const auto aligned_entries = alignUpToMultiple(entries, cp_size);
+    if (aligned_entries != entries) {
+        RTP_LLM_LOG_INFO("DSV4 fixed/SWA CP sharding pads region %d entries from %u to %u for cp_size %u",
+                         static_cast<int>(region_name),
+                         entries,
+                         aligned_entries,
+                         cp_size);
+    }
+    return aligned_entries / cp_size;
 }
 
 DSV4LayerSets classifyDSV4Layers(const std::vector<int>& compress_ratios) {
