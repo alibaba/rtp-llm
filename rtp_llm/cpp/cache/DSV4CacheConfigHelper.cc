@@ -51,6 +51,30 @@ constexpr int kCsaOverlap           = 1;
 constexpr int kHcaOverlap           = 0;
 constexpr int kIndexerOverlap       = 1;
 
+const char* dsv4RegionName(KVCacheRegionName region_name) {
+    switch (region_name) {
+        case KVCacheRegionName::DEFAULT:
+            return "DEFAULT";
+        case KVCacheRegionName::CSA_KV:
+            return "CSA_KV";
+        case KVCacheRegionName::HCA_KV:
+            return "HCA_KV";
+        case KVCacheRegionName::INDEXER_KV:
+            return "INDEXER_KV";
+        case KVCacheRegionName::INDEXER_STATE:
+            return "INDEXER_STATE";
+        case KVCacheRegionName::CSA_STATE:
+            return "CSA_STATE";
+        case KVCacheRegionName::HCA_STATE:
+            return "HCA_STATE";
+        case KVCacheRegionName::SWA_KV:
+            return "SWA_KV";
+        case KVCacheRegionName::REGION_COUNT:
+            return "REGION_COUNT";
+    }
+    return "UNKNOWN";
+}
+
 inline uint32_t alignUpToMultiple(uint32_t value, uint32_t multiple) {
     RTP_LLM_CHECK_WITH_INFO(multiple > 0, "DSV4 align multiple must be > 0");
     return ((value + multiple - 1) / multiple) * multiple;
@@ -64,28 +88,47 @@ inline uint32_t computeStateRing(int compress_ratio, int overlap, int gen_num_pe
     return static_cast<uint32_t>((raw + 1) & ~1);
 }
 
-bool isPrefillCpSharded(const ParallelismConfig& parallelism_config) {
-    return parallelism_config.role_type == RoleType::PREFILL && parallelism_config.prefill_cp_config.kv_cache_sharded
-           && parallelism_config.tp_size > 1;
+uint32_t fixedRegionCpSize(const ParallelismConfig& parallelism_config) {
+    if (!parallelism_config.prefill_cp_config.kv_cache_sharded) {
+        return 1;
+    }
+    if (parallelism_config.role_type == RoleType::PREFILL && parallelism_config.tp_size > 1) {
+        return static_cast<uint32_t>(parallelism_config.tp_size);
+    }
+    if (parallelism_config.role_type == RoleType::DECODE && parallelism_config.prefill_cp_config.is_prefill_enabled()
+        && parallelism_config.world_size > 1) {
+        return static_cast<uint32_t>(parallelism_config.world_size);
+    }
+    return 1;
 }
 
-uint32_t maybeSliceFixedEntriesForPrefillCp(uint32_t                 entries,
-                                            const ParallelismConfig& parallelism_config,
-                                            KVCacheRegionName        region_name) {
-    if (!isPrefillCpSharded(parallelism_config)) {
+bool isPrefillCpSliced(const ParallelismConfig& parallelism_config) {
+    return parallelism_config.role_type == RoleType::PREFILL && fixedRegionCpSize(parallelism_config) > 1;
+}
+
+uint32_t maybeAdjustFixedEntriesForCpSharding(uint32_t                 entries,
+                                              const ParallelismConfig& parallelism_config,
+                                              KVCacheRegionName        region_name) {
+    const auto cp_size = fixedRegionCpSize(parallelism_config);
+    if (cp_size <= 1) {
         return entries;
     }
 
-    const auto cp_size         = static_cast<uint32_t>(parallelism_config.tp_size);
-    const auto aligned_entries = alignUpToMultiple(entries, cp_size);
-    if (aligned_entries != entries) {
-        RTP_LLM_LOG_INFO("DSV4 fixed/SWA CP sharding pads region %d entries from %u to %u for cp_size %u",
-                         static_cast<int>(region_name),
-                         entries,
-                         aligned_entries,
-                         cp_size);
-    }
-    return aligned_entries / cp_size;
+    const auto aligned_entries  = alignUpToMultiple(entries, cp_size);
+    const bool prefill_sliced   = isPrefillCpSliced(parallelism_config);
+    const auto physical_entries = prefill_sliced ? aligned_entries / cp_size : aligned_entries;
+    RTP_LLM_LOG_INFO("DSV4 fixed/SWA CP sharding region=%s(%d) full_entries=%u aligned_entries=%u "
+                     "physical_entries=%u cp_size=%u prefill_sliced=%d padded=%d role=%d",
+                     dsv4RegionName(region_name),
+                     static_cast<int>(region_name),
+                     entries,
+                     aligned_entries,
+                     physical_entries,
+                     cp_size,
+                     prefill_sliced,
+                     aligned_entries != entries,
+                     static_cast<int>(parallelism_config.role_type));
+    return physical_entries;
 }
 
 DSV4LayerSets classifyDSV4Layers(const std::vector<int>& compress_ratios) {
@@ -134,26 +177,27 @@ std::vector<DSV4PoolDesc> buildDSV4PoolDescs(const DSV4LayerSets&     sets,
     const uint32_t indexer_entry_bytes = fp8_kv ? kDsv4IndexerEntryBytesFp8 : kDsv4IndexerEntryBytesBf16;
 
     const uint32_t csa_state_eb =
-        maybeSliceFixedEntriesForPrefillCp(computeStateRing(kCsaCompressRatio, kCsaOverlap, gen_num_per_cycle),
-                                           parallelism_config,
-                                           KVCacheRegionName::CSA_STATE);
+        maybeAdjustFixedEntriesForCpSharding(computeStateRing(kCsaCompressRatio, kCsaOverlap, gen_num_per_cycle),
+                                             parallelism_config,
+                                             KVCacheRegionName::CSA_STATE);
     const uint32_t hca_state_eb =
-        maybeSliceFixedEntriesForPrefillCp(computeStateRing(kHcaCompressRatio, kHcaOverlap, gen_num_per_cycle),
-                                           parallelism_config,
-                                           KVCacheRegionName::HCA_STATE);
-    const uint32_t indexer_state_eb =
-        maybeSliceFixedEntriesForPrefillCp(computeStateRing(kIndexerCompressRatio, kIndexerOverlap, gen_num_per_cycle),
-                                           parallelism_config,
-                                           KVCacheRegionName::INDEXER_STATE);
+        maybeAdjustFixedEntriesForCpSharding(computeStateRing(kHcaCompressRatio, kHcaOverlap, gen_num_per_cycle),
+                                             parallelism_config,
+                                             KVCacheRegionName::HCA_STATE);
+    const uint32_t indexer_state_eb = maybeAdjustFixedEntriesForCpSharding(
+        computeStateRing(kIndexerCompressRatio, kIndexerOverlap, gen_num_per_cycle),
+        parallelism_config,
+        KVCacheRegionName::INDEXER_STATE);
     // SWA_KV ring = window + MTP draft slack, sized like the HCA state ring.
     // Without the +gen_num_per_cycle slack, a decode step's later draft writes
     // wrap onto ring slots still inside earlier tokens' SWA window -> MTP garble.
     const uint32_t swa_kv_eb =
-        maybeSliceFixedEntriesForPrefillCp(computeStateRing(/*compress_ratio=*/static_cast<int>(kDsv4SwaWindowEntries),
-                                                            /*overlap=*/0,
-                                                            gen_num_per_cycle),
-                                           parallelism_config,
-                                           KVCacheRegionName::SWA_KV);
+        maybeAdjustFixedEntriesForCpSharding(computeStateRing(
+                                                 /*compress_ratio=*/static_cast<int>(kDsv4SwaWindowEntries),
+                                                 /*overlap=*/0,
+                                                 gen_num_per_cycle),
+                                             parallelism_config,
+                                             KVCacheRegionName::SWA_KV);
     return {
         {KVCacheRegionName::CSA_KV,
          &sets.csa_layers,
@@ -237,7 +281,7 @@ void DSV4CacheConfigHelper::applyConfig(CacheConfig&             config,
                      physical_tokens_per_block,
                      kernel_tokens_per_block,
                      physical_tokens_per_block / kernel_tokens_per_block,
-                     isPrefillCpSharded(parallelism_config),
+                     isPrefillCpSliced(parallelism_config),
                      static_cast<int>(parallelism_config.role_type),
                      parallelism_config.prefill_cp_config.kv_cache_sharded,
                      parallelism_config.tp_size);
@@ -271,6 +315,18 @@ void DSV4CacheConfigHelper::applyConfig(CacheConfig&             config,
     for (size_t gid = 0; gid < pools.size(); ++gid) {
         const auto& pool = pools[gid];
         auto        spec = makeDSV4Spec(pool, physical_tokens_per_block);
+
+        RTP_LLM_LOG_INFO("DSV4 pool desc gid=%zu region=%s(%d) type=%s layer_count=%zu entry_elems=%u "
+                         "entries_per_block=%u physical_tokens_per_block=%u prefill_cp_fixed_sliced=%d",
+                         gid,
+                         dsv4RegionName(pool.region_name),
+                         static_cast<int>(pool.region_name),
+                         pool.is_paged ? "FULL" : "SWA/FIXED",
+                         pool.layer_ids->size(),
+                         pool.entry_elems,
+                         pool.entries_per_block,
+                         physical_tokens_per_block,
+                         isPrefillCpSliced(parallelism_config));
 
         config.cache_specs.push_back(spec);
         config.global_layer_ids.push_back(*pool.layer_ids);
