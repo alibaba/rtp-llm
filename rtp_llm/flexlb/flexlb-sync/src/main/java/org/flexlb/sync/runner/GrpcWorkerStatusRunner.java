@@ -216,29 +216,31 @@ public class GrpcWorkerStatusRunner implements Runnable {
             } catch (NumberFormatException e) {
                 continue;
             }
+            InflightBatchRegistry.RequestEntry re = inflightRegistry.lookupByRequest(requestId);
             if (inflightRegistry.getState(requestId) == InflightBatchRegistry.RequestState.ACTIVE) {
                 inflightRegistry.removeRequest(requestId);
             }
             TaskInfo task = entry.getValue();
-            if (task.getPrefillTime() > 0) {
-                batchGroups.computeIfAbsent(task.getPrefillTime(), k -> new ArrayList<>()).add(task);
+            if (re != null && task.getPrefillTime() > 0) {
+                batchGroups.computeIfAbsent(re.batchId(), k -> new ArrayList<>()).add(task);
             }
         }
 
         for (Map.Entry<Long, List<TaskInfo>> batch : batchGroups.entrySet()) {
-            long batchStepTimeUs = batch.getKey();
             long totalInput = 0;
             long totalPrefix = 0;
+            long batchStepTimeUs = 0;
             for (TaskInfo task : batch.getValue()) {
                 totalInput += task.getInputLength();
                 totalPrefix += task.getPrefixLength();
+                batchStepTimeUs = task.getPrefillTime();
             }
             long predictedMs = TaskInfo.estimatePrefillTimeMs(totalInput, totalPrefix);
             long actualMs = batchStepTimeUs / 1000;
             long errorMs = predictedMs - actualMs;
-            logger.info("prefill-prediction batch: size={} totalInput={} totalPrefix={} "
+            logger.info("prefill-prediction batch: batchId={} size={} totalInput={} totalPrefix={} "
                             + "predictedMs={} actualUs={} actualMs={} errorMs={}",
-                    batch.getValue().size(), totalInput, totalPrefix,
+                    batch.getKey(), batch.getValue().size(), totalInput, totalPrefix,
                     predictedMs, batchStepTimeUs, actualMs, errorMs);
             engineHealthReporter.reportPrefillResult(
                     modelName, predictedMs, batchStepTimeUs, totalInput, batch.getValue().size());
