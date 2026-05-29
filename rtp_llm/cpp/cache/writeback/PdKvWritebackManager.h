@@ -96,11 +96,14 @@ public:
     PdKvWritebackLaunchResult launchFromDecode(const PdKvWritebackLaunchRequest& request) const override;
     absl::Status              receiveOnPrefill(const PdKvWritebackLaunchRequest& request,
                                                const BatchKVCacheResourcePtr&    destination_resource);
+    absl::Status              sendOnDecode(const PdKvWritebackLaunchRequest& request,
+                                           const BatchKVCacheResourcePtr&    source_resource);
     void                      waitForWritebackTasksForTest() const;
 
 private:
     PdKvWritebackTransferPlan buildTransferPlan(const PdKvWritebackLaunchRequest& request,
                                                 const BatchKVCacheResourcePtr&    destination_resource) const;
+    PdKvWritebackTransferPlan buildDecodeTransferPlan(const PdKvWritebackLaunchRequest& request) const;
 
 private:
     PDSepConfig                                  pd_config_;

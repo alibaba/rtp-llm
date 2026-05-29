@@ -16,7 +16,14 @@ class PdKvWritebackRpcStaticTest(unittest.TestCase):
         decode_ctx_h = (
             REPO_ROOT / "rtp_llm/cpp/model_rpc/DecodeGenerateContext.h"
         ).read_text()
+        decode_h = (REPO_ROOT / "rtp_llm/cpp/model_rpc/DecodeRpcServer.h").read_text()
         decode_cc = (REPO_ROOT / "rtp_llm/cpp/model_rpc/DecodeRpcServer.cc").read_text()
+        rpc_util_h = (
+            REPO_ROOT / "rtp_llm/cpp/model_rpc/PdKvWritebackRpcUtil.h"
+        ).read_text()
+        rpc_util_cc = (
+            REPO_ROOT / "rtp_llm/cpp/model_rpc/PdKvWritebackRpcUtil.cc"
+        ).read_text()
         remote_impl_h = (
             REPO_ROOT / "rtp_llm/cpp/model_rpc/RemoteRpcServiceImpl.h"
         ).read_text()
@@ -36,9 +43,16 @@ class PdKvWritebackRpcStaticTest(unittest.TestCase):
         self.assertIn("resource_.grpc_workers", prefill_cc)
         self.assertIn("PdKvWriteback(", prefill_h)
         self.assertIn("PrefillRpcServer::PdKvWriteback", prefill_cc)
+        self.assertIn("pdKvWritebackLaunchRequestFromPB", rpc_util_h)
+        self.assertIn("pdKvWritebackLaunchRequestFromPB", rpc_util_cc)
+        self.assertIn("PdKvWritebackRpcUtil.h", prefill_cc)
 
         self.assertIn("PdKvWriteback(", remote_impl_h)
         self.assertIn("prefill_server_->PdKvWriteback", remote_impl_h)
+        self.assertIn("DecodeRpcServer::PdKvWritebackSend", decode_cc)
+        self.assertIn("sendOnDecode", decode_cc)
+        self.assertIn("PdKvWritebackSend", decode_h)
+        self.assertIn("decode_server_->PdKvWritebackSend", remote_impl_h)
 
 
 if __name__ == "__main__":

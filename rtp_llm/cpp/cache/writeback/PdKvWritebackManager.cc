@@ -197,23 +197,49 @@ void PdKvWritebackManager::waitForWritebackTasksForTest() const {
 
 absl::Status PdKvWritebackManager::receiveOnPrefill(const PdKvWritebackLaunchRequest& request,
                                                     const BatchKVCacheResourcePtr&    destination_resource) {
+    const int64_t receive_begin_us = currentTimeUs();
+    PdKvWritebackMetricsCollector collector;
+    collector.receive_qps = true;
+    collector.block_count = request.manifest.reusable_block_count;
+    collector.token_count = request.manifest.final_token_count;
+    auto report_receive   = [&](const std::string& status, const std::string& reason) {
+        collector.receive_latency_us = currentTimeUs() - receive_begin_us;
+        if (status == "failed") {
+            collector.receive_failed_qps = true;
+        }
+        reportPdKvWritebackMetric(metrics_reporter_,
+                                  collector,
+                                  "prefill_receive",
+                                  status,
+                                  reason,
+                                  pdKvRoleName(pd_config_.role_type),
+                                  request.destination.partition_count,
+                                  "tp_equal");
+    };
+
     if (!pd_config_.enable_pd_kv_cache_writeback) {
+        report_receive("failed", "disabled");
         return absl::FailedPreconditionError("disabled");
     }
     if (!cache_writer_) {
+        report_receive("failed", "cache_writer_null");
         return absl::FailedPreconditionError("cache_writer is null");
     }
     if (!transfer_client_) {
+        report_receive("failed", "transfer_client_null");
         return absl::FailedPreconditionError("transfer_client is null");
     }
     if (request.manifest.reusable_block_count == 0) {
+        report_receive("skipped", "empty_manifest");
         return absl::OkStatus();
     }
     if (request.manifest.cache_keys.size() < static_cast<size_t>(request.manifest.reusable_block_count)) {
+        report_receive("failed", "cache_keys_shorter_than_reusable_blocks");
         return absl::InvalidArgumentError("cache_keys shorter than reusable_block_count");
     }
     auto compatibility_status = validatePdKvWritebackCompatibility(request.source, request.destination);
     if (!compatibility_status.ok()) {
+        report_receive("failed", "compatibility_mismatch");
         return compatibility_status;
     }
 
@@ -222,21 +248,104 @@ absl::Status PdKvWritebackManager::receiveOnPrefill(const PdKvWritebackLaunchReq
                      request.manifest.reusable_block_count,
                      request.manifest.cache_keys.size());
 
+    const int64_t malloc_begin_us = currentTimeUs();
     auto status = cache_writer_->mallocWritebackBlocks(destination_resource,
                                                        static_cast<size_t>(request.manifest.reusable_block_count));
+    collector.malloc_latency_us = currentTimeUs() - malloc_begin_us;
     if (!status.ok()) {
+        report_receive("failed", "malloc_failed");
         return status;
     }
+    const int64_t transfer_begin_us = currentTimeUs();
+    collector.transfer_qps          = true;
     auto transfer_status = transfer_client_->transfer(buildTransferPlan(request, destination_resource));
+    collector.transfer_latency_us = currentTimeUs() - transfer_begin_us;
     if (!transfer_status.ok()) {
+        collector.transfer_failed_qps = true;
         cache_writer_->freeWritebackBlocks(destination_resource);
+        report_receive("failed", "transfer_failed");
         return transfer_status;
     }
+    const int64_t commit_begin_us = currentTimeUs();
     cache_writer_->commitWritebackBlocks(destination_resource, request.manifest.cache_keys, false);
+    collector.commit_latency_us = currentTimeUs() - commit_begin_us;
     cache_writer_->freeWritebackBlocks(destination_resource);
     RTP_LLM_LOG_INFO("PD KV writeback receive commit, request_id=%ld, reusable_blocks=%ld",
                      request.manifest.request_id,
                      request.manifest.reusable_block_count);
+    report_receive("success", "ok");
+    return absl::OkStatus();
+}
+
+absl::Status PdKvWritebackManager::sendOnDecode(const PdKvWritebackLaunchRequest& request,
+                                                const BatchKVCacheResourcePtr&    source_resource) {
+    const int64_t send_begin_us = currentTimeUs();
+    PdKvWritebackMetricsCollector collector;
+    collector.transfer_qps = true;
+    collector.block_count  = request.manifest.reusable_block_count;
+    collector.token_count  = request.manifest.final_token_count;
+    auto report_send       = [&](const std::string& status, const std::string& reason) {
+        collector.transfer_latency_us = currentTimeUs() - send_begin_us;
+        if (status == "failed") {
+            collector.transfer_failed_qps = true;
+        }
+        reportPdKvWritebackMetric(metrics_reporter_,
+                                  collector,
+                                  "decode_send",
+                                  status,
+                                  reason,
+                                  pdKvRoleName(pd_config_.role_type),
+                                  request.source.partition_count,
+                                  "tp_equal");
+    };
+
+    if (!pd_config_.enable_pd_kv_cache_writeback) {
+        report_send("failed", "disabled");
+        return absl::FailedPreconditionError("disabled");
+    }
+    auto* transfer_client = owned_transfer_client_ ? owned_transfer_client_.get() : transfer_client_;
+    if (!transfer_client) {
+        report_send("failed", "transfer_client_null");
+        return absl::FailedPreconditionError("transfer_client is null");
+    }
+    if (!source_resource || source_resource->batchSize() != 1) {
+        report_send("failed", "source_resource_invalid");
+        return absl::FailedPreconditionError("source_resource is invalid");
+    }
+    if (request.manifest.reusable_block_count == 0) {
+        report_send("skipped", "empty_manifest");
+        return absl::OkStatus();
+    }
+    if (request.manifest.cache_keys.size() < static_cast<size_t>(request.manifest.reusable_block_count)) {
+        report_send("failed", "cache_keys_shorter_than_reusable_blocks");
+        return absl::InvalidArgumentError("cache_keys shorter than reusable_block_count");
+    }
+    auto compatibility_status = validatePdKvWritebackCompatibility(request.source, request.destination);
+    if (!compatibility_status.ok()) {
+        report_send("failed", "compatibility_mismatch");
+        return compatibility_status;
+    }
+
+    auto plan                   = buildDecodeTransferPlan(request);
+    plan.decode_group_block_ids = extractPdKvWritebackGroupBlockIds(source_resource);
+    if (plan.decode_group_block_ids.empty()) {
+        report_send("failed", "source_blocks_empty");
+        return absl::FailedPreconditionError("source blocks are empty");
+    }
+
+    RTP_LLM_LOG_INFO("PD KV writeback decode send start, request_id=%ld, reusable_blocks=%ld, cache_keys=%zu",
+                     request.manifest.request_id,
+                     request.manifest.reusable_block_count,
+                     request.manifest.cache_keys.size());
+    auto status = transfer_client->transfer(plan);
+    if (!status.ok()) {
+        report_send("failed", "transfer_failed");
+        return status;
+    }
+    RTP_LLM_LOG_INFO("PD KV writeback decode send done, request_id=%ld, reusable_blocks=%ld",
+                     request.manifest.request_id,
+                     request.manifest.reusable_block_count);
+    report_send("success", "ok");
     return absl::OkStatus();
 }
 
@@ -254,6 +363,22 @@ PdKvWritebackManager::buildTransferPlan(const PdKvWritebackLaunchRequest& reques
     plan.decode_group_block_ids   = request.manifest.group_block_ids;
     plan.prefill_group_block_ids  = extractPdKvWritebackGroupBlockIds(destination_resource);
     plan.layer_to_group_id        = request.destination.layer_to_group_id;
+    plan.prefill_transfer_servers = parsePdKvWritebackTransferServers(request.prefill_worker_addrs);
+    return plan;
+}
+
+PdKvWritebackTransferPlan
+PdKvWritebackManager::buildDecodeTransferPlan(const PdKvWritebackLaunchRequest& request) const {
+    PdKvWritebackTransferPlan plan;
+    plan.request_id               = request.manifest.request_id;
+    plan.request_key              = request.manifest.request_key;
+    plan.deadline_ms              = request.deadline_ms;
+    plan.layer_count              = request.source.layer_count;
+    plan.group_count              = request.source.group_count;
+    plan.remote_tp_size           = request.destination.partition_count;
+    plan.cache_keys               = request.manifest.cache_keys;
+    plan.decode_group_block_ids   = request.manifest.group_block_ids;
+    plan.layer_to_group_id        = request.source.layer_to_group_id;
     plan.prefill_transfer_servers = parsePdKvWritebackTransferServers(request.prefill_worker_addrs);
     return plan;
 }

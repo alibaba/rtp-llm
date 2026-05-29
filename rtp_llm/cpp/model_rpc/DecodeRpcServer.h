@@ -22,6 +22,10 @@ public:
                             const BroadcastLoadRequestPB* request,
                             BroadcastLoadResponsePB*      response);
 
+    grpc::Status PdKvWritebackSend(grpc::ServerContext*          server_context,
+                                    const PdKvWritebackRequestPB* request,
+                                    PdKvWritebackResponsePB*      response);
+
     class LoadKVCacheContext {
     public:
         LoadKVCacheContext(int64_t                          request_id,

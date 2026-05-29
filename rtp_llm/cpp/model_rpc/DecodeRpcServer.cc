@@ -5,7 +5,9 @@
 #include <condition_variable>
 
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
+#include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
+#include "rtp_llm/cpp/model_rpc/PdKvWritebackRpcUtil.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
@@ -43,6 +45,66 @@ grpc::Status DecodeRpcServer::init(const EngineInitParams&                      
     if (!ret.ok()) {
         return ret;
     }
+    return grpc::Status::OK;
+}
+
+grpc::Status DecodeRpcServer::PdKvWritebackSend(grpc::ServerContext*          server_context,
+                                                 const PdKvWritebackRequestPB* request,
+                                                 PdKvWritebackResponsePB*      response) {
+    (void)server_context;
+    auto cache_manager = engine_->resourceContext().cache_manager;
+    if (!cache_manager || !cache_manager->writebackManager()) {
+        response->mutable_error_info()->set_error_code(ErrorCodePB::UNKNOWN_ERROR);
+        response->mutable_error_info()->set_error_message("writeback_manager is null");
+        response->set_accepted(false);
+        response->set_reason("writeback_manager is null");
+        return grpc::Status::OK;
+    }
+
+    auto launch_request = pdKvWritebackLaunchRequestFromPB(*request);
+    const int group_count = launch_request.source.group_count > 0 ?
+                                launch_request.source.group_count :
+                                static_cast<int>(launch_request.manifest.group_block_ids.size());
+    if (group_count <= 0 || group_count != static_cast<int>(launch_request.manifest.group_block_ids.size())) {
+        const std::string reason = "invalid writeback source group count";
+        response->mutable_error_info()->set_error_code(ErrorCodePB::UNKNOWN_ERROR);
+        response->mutable_error_info()->set_error_message(reason);
+        response->set_accepted(false);
+        response->set_reason(reason);
+        return grpc::Status::OK;
+    }
+
+    std::vector<int> layer_to_group_id;
+    layer_to_group_id.assign(launch_request.source.layer_to_group_id.begin(),
+                             launch_request.source.layer_to_group_id.end());
+
+    auto source_resource = std::make_shared<BatchKVCacheResource>();
+    source_resource->resetBatchSize(1);
+    source_resource->initBatchGroups(0, group_count, launch_request.source.layer_count, layer_to_group_id);
+    for (int group_id = 0; group_id < group_count; ++group_id) {
+        source_resource->setBatchBlocks(
+            0, group_id, launch_request.manifest.group_block_ids[static_cast<size_t>(group_id)]);
+    }
+    source_resource->setBatchCacheKeys(0, launch_request.manifest.cache_keys);
+
+    auto held_resource = cache_manager->incrKVCacheRef(source_resource->cacheResource(0),
+                                                       launch_request.manifest.cache_keys,
+                                                       true);
+    if (!held_resource) {
+        const std::string reason = "hold decode writeback source blocks failed";
+        response->mutable_error_info()->set_error_code(ErrorCodePB::UNKNOWN_ERROR);
+        response->mutable_error_info()->set_error_message(reason);
+        response->set_accepted(false);
+        response->set_reason(reason);
+        return grpc::Status::OK;
+    }
+    launch_request.held_resource = std::move(held_resource);
+
+    auto status = cache_manager->writebackManager()->sendOnDecode(launch_request, source_resource);
+    response->mutable_error_info()->set_error_code(status.ok() ? ErrorCodePB::NONE_ERROR : ErrorCodePB::UNKNOWN_ERROR);
+    response->mutable_error_info()->set_error_message(status.ok() ? "" : std::string(status.message()));
+    response->set_accepted(status.ok());
+    response->set_reason(status.ok() ? "accepted" : std::string(status.message()));
     return grpc::Status::OK;
 }
 

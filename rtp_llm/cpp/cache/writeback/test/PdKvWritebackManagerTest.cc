@@ -44,10 +44,12 @@ private:
 
 class RecordingTransferClient: public PdKvWritebackTransferClient {
 public:
-    explicit RecordingTransferClient(std::vector<std::string>* events): events_(events) {}
+    explicit RecordingTransferClient(std::vector<std::string>* events = nullptr): events_(events) {}
 
     absl::Status transfer(const PdKvWritebackTransferPlan& plan) override {
-        events_->push_back("transfer");
+        if (events_) {
+            events_->push_back("transfer");
+        }
         last_plan = plan;
         return transfer_status;
     }
@@ -243,6 +245,46 @@ TEST(PdKvWritebackManagerTest, ReceiveFreesAllocatedBlocksWhenTransferFails) {
 
     EXPECT_FALSE(status.ok());
     EXPECT_EQ(events, std::vector<std::string>({"malloc", "transfer", "free"}));
+}
+
+TEST(PdKvWritebackManagerTest, SendOnDecodeTransfersFromHeldSourceBlocks) {
+    PDSepConfig pd_config;
+    pd_config.enable_pd_kv_cache_writeback = true;
+    auto transfer_client = std::make_shared<RecordingTransferClient>();
+    PdKvWritebackManager manager(pd_config, nullptr, transfer_client, nullptr, {}, nullptr);
+
+    auto source_resource = std::make_shared<BatchKVCacheResource>();
+    source_resource->resetBatchSize(1);
+    source_resource->initBatchGroups(0, 1, 1, {0});
+    source_resource->setBatchBlocks(0, 0, {101, 102});
+    source_resource->setBatchCacheKeys(0, {11, 12});
+
+    PdKvWritebackLaunchRequest request;
+    request.manifest.request_id           = 9;
+    request.manifest.request_key          = "request_9";
+    request.manifest.final_token_count    = 130;
+    request.manifest.reusable_block_count = 2;
+    request.manifest.cache_keys           = {11, 12};
+    request.manifest.group_block_ids      = {{101, 102}};
+    request.source.seq_size_per_block     = 64;
+    request.source.layer_count            = 1;
+    request.source.group_count            = 1;
+    request.source.partition_count        = 4;
+    request.source.layer_to_group_id      = {0};
+    request.source.group_types            = {0};
+    request.destination                   = request.source;
+    request.prefill_worker_addrs          = {"p0:2000:3000", "p1:2000:3000", "p2:2000:3000", "p3:2000:3000"};
+
+    auto status = manager.sendOnDecode(request, source_resource);
+
+    EXPECT_TRUE(status.ok()) << status;
+    EXPECT_EQ(transfer_client->last_plan.request_id, 9);
+    EXPECT_EQ(transfer_client->last_plan.request_key, "request_9");
+    EXPECT_EQ(transfer_client->last_plan.decode_group_block_ids, std::vector<BlockIndicesType>({{101, 102}}));
+    EXPECT_TRUE(transfer_client->last_plan.prefill_group_block_ids.empty());
+    EXPECT_EQ(transfer_client->last_plan.prefill_transfer_servers.size(), 4);
+    EXPECT_EQ(transfer_client->last_plan.prefill_transfer_servers[0].first, "p0");
+    EXPECT_EQ(transfer_client->last_plan.prefill_transfer_servers[0].second, 2001);
 }
 
 }  // namespace

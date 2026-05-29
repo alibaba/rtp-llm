@@ -75,12 +75,17 @@ public:
     grpc::Status PdKvWriteback(grpc::ServerContext*          context,
                                const PdKvWritebackRequestPB* request,
                                PdKvWritebackResponsePB*      response) override {
-        if (!prefill_server_) {
+        if (prefill_server_) {
+            return prefill_server_->PdKvWriteback(context, request, response);
+        }
+        if (decode_server_) {
+            return decode_server_->PdKvWritebackSend(context, request, response);
+        }
+        {
             auto error_msg = "server not implement PdKvWriteback";
             RTP_LLM_LOG_ERROR(error_msg);
             return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, error_msg);
         }
-        return prefill_server_->PdKvWriteback(context, request, response);
     }
 
     grpc::Status
